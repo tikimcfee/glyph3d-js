@@ -1,0 +1,1111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GitHub 3D Repo Viewer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Monaco', 'Menlo', 'Consolas', monospace;
+            background: #0a0a0a;
+            color: #e0e0e0;
+            overflow: hidden;
+        }
+
+        #canvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        /* Header bar with input */
+        #header {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 50px;
+            background: linear-gradient(180deg, rgba(20,20,20,0.95) 0%, rgba(10,10,10,0.9) 100%);
+            border-bottom: 1px solid #333;
+            display: flex;
+            align-items: center;
+            padding: 0 20px;
+            z-index: 1000;
+            gap: 15px;
+        }
+
+        #header h1 {
+            font-size: 16px;
+            color: #00ff88;
+            white-space: nowrap;
+        }
+
+        #repo-input {
+            flex: 1;
+            max-width: 500px;
+            padding: 8px 12px;
+            background: #1a1a1a;
+            border: 1px solid #444;
+            border-radius: 4px;
+            color: #fff;
+            font-family: inherit;
+            font-size: 13px;
+        }
+
+        #repo-input:focus {
+            outline: none;
+            border-color: #00ff88;
+        }
+
+        #repo-input::placeholder {
+            color: #666;
+        }
+
+        #load-btn {
+            padding: 8px 16px;
+            background: #00ff88;
+            color: #000;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-family: inherit;
+            font-weight: bold;
+            font-size: 13px;
+        }
+
+        #load-btn:hover {
+            background: #00cc66;
+        }
+
+        #load-btn:disabled {
+            background: #444;
+            color: #888;
+            cursor: not-allowed;
+        }
+
+        /* Loading overlay */
+        #loading {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0, 0, 0, 0.95);
+            border: 2px solid #00ff88;
+            border-radius: 8px;
+            padding: 30px 40px;
+            text-align: center;
+            z-index: 2000;
+        }
+
+        #loading.hidden {
+            display: none;
+        }
+
+        #loading h2 {
+            color: #00ff88;
+            margin-bottom: 15px;
+        }
+
+        #progress-bar {
+            width: 300px;
+            height: 6px;
+            background: #333;
+            border-radius: 3px;
+            overflow: hidden;
+            margin: 15px 0;
+        }
+
+        #progress-fill {
+            height: 100%;
+            background: #00ff88;
+            width: 0%;
+            transition: width 0.2s;
+        }
+
+        #progress-text {
+            color: #888;
+            font-size: 12px;
+        }
+
+        /* Stats panel */
+        #stats {
+            position: fixed;
+            top: 60px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.8);
+            border: 1px solid #333;
+            border-radius: 4px;
+            padding: 12px;
+            font-size: 11px;
+            line-height: 1.6;
+            z-index: 100;
+            min-width: 180px;
+        }
+
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .stat-label {
+            color: #888;
+        }
+
+        .stat-value {
+            color: #00ff88;
+            font-weight: bold;
+        }
+
+        /* Controls panel */
+        #controls {
+            position: fixed;
+            top: 60px;
+            right: 10px;
+            background: rgba(0, 0, 0, 0.8);
+            border: 1px solid #333;
+            border-radius: 4px;
+            padding: 12px;
+            font-size: 11px;
+            line-height: 1.8;
+            z-index: 100;
+        }
+
+        #controls h3 {
+            color: #00ff88;
+            margin-bottom: 8px;
+            font-size: 12px;
+        }
+
+        .key {
+            display: inline-block;
+            background: #333;
+            padding: 2px 6px;
+            border-radius: 3px;
+            min-width: 20px;
+            text-align: center;
+            margin-right: 8px;
+        }
+
+        /* File tree panel */
+        #file-tree {
+            position: fixed;
+            left: 10px;
+            top: 200px;
+            bottom: 10px;
+            width: 250px;
+            background: rgba(0, 0, 0, 0.8);
+            border: 1px solid #333;
+            border-radius: 4px;
+            overflow-y: auto;
+            z-index: 100;
+        }
+
+        #file-tree.hidden {
+            display: none;
+        }
+
+        #file-tree h3 {
+            color: #00ff88;
+            padding: 10px;
+            border-bottom: 1px solid #333;
+            font-size: 12px;
+            position: sticky;
+            top: 0;
+            background: rgba(0, 0, 0, 0.95);
+        }
+
+        .tree-item {
+            padding: 6px 10px;
+            font-size: 11px;
+            cursor: pointer;
+            border-bottom: 1px solid #222;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .tree-item:hover {
+            background: #222;
+        }
+
+        .tree-item.selected {
+            background: #1a3a1a;
+            border-left: 3px solid #00ff88;
+        }
+
+        .tree-icon {
+            width: 14px;
+            opacity: 0.6;
+        }
+
+        .tree-name {
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .tree-size {
+            color: #666;
+            font-size: 10px;
+        }
+
+        /* Toast notifications */
+        #toast {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #333;
+            color: #fff;
+            padding: 12px 24px;
+            border-radius: 4px;
+            z-index: 3000;
+            transition: opacity 0.3s;
+        }
+
+        #toast.hidden {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        #toast.error {
+            background: #a33;
+            border: 1px solid #f44;
+        }
+
+        #toast.success {
+            background: #2a5;
+            border: 1px solid #4f8;
+        }
+
+        /* Settings panel */
+        #settings {
+            position: fixed;
+            top: 220px;
+            right: 10px;
+            width: 220px;
+            background: rgba(0, 0, 0, 0.9);
+            border: 1px solid #444;
+            border-radius: 4px;
+            padding: 12px;
+            font-size: 11px;
+            z-index: 100;
+        }
+
+        #settings h3 {
+            color: #ffaa00;
+            margin-bottom: 12px;
+            font-size: 12px;
+            border-bottom: 1px solid #333;
+            padding-bottom: 8px;
+        }
+
+        .setting-group {
+            margin-bottom: 14px;
+        }
+
+        .setting-label {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 4px;
+            color: #aaa;
+        }
+
+        .setting-value {
+            color: #ffaa00;
+            font-weight: bold;
+            min-width: 50px;
+            text-align: right;
+        }
+
+        .setting-slider {
+            width: 100%;
+            height: 6px;
+            -webkit-appearance: none;
+            appearance: none;
+            background: #333;
+            border-radius: 3px;
+            outline: none;
+        }
+
+        .setting-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 14px;
+            height: 14px;
+            background: #ffaa00;
+            border-radius: 50%;
+            cursor: pointer;
+        }
+
+        .setting-slider::-moz-range-thumb {
+            width: 14px;
+            height: 14px;
+            background: #ffaa00;
+            border-radius: 50%;
+            cursor: pointer;
+            border: none;
+        }
+
+        .setting-btn {
+            width: 100%;
+            padding: 6px;
+            background: #333;
+            color: #fff;
+            border: 1px solid #555;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 11px;
+            margin-top: 4px;
+        }
+
+        .setting-btn:hover {
+            background: #444;
+            border-color: #ffaa00;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+
+    <!-- Header with input -->
+    <div id="header">
+        <h1>GitHub 3D Viewer</h1>
+        <input type="text" id="repo-input"
+               placeholder="Enter GitHub URL (e.g., https://github.com/owner/repo)"
+               value="https://github.com/mrdoob/three.js">
+        <button id="load-btn">Load Repository</button>
+    </div>
+
+    <!-- Loading overlay -->
+    <div id="loading" class="hidden">
+        <h2>Loading Repository</h2>
+        <div id="progress-bar"><div id="progress-fill"></div></div>
+        <div id="progress-text">Initializing...</div>
+    </div>
+
+    <!-- Stats panel -->
+    <div id="stats">
+        <div class="stat-row">
+            <span class="stat-label">FPS</span>
+            <span class="stat-value" id="fps">--</span>
+        </div>
+        <div class="stat-row">
+            <span class="stat-label">Files</span>
+            <span class="stat-value" id="file-count">0</span>
+        </div>
+        <div class="stat-row">
+            <span class="stat-label">Grids</span>
+            <span class="stat-value" id="grid-count">0</span>
+        </div>
+        <div class="stat-row">
+            <span class="stat-label">Glyphs</span>
+            <span class="stat-value" id="glyph-count">0</span>
+        </div>
+        <div class="stat-row">
+            <span class="stat-label">Camera</span>
+            <span class="stat-value" id="camera-pos">0,0,0</span>
+        </div>
+    </div>
+
+    <!-- Controls panel -->
+    <div id="controls">
+        <h3>Controls</h3>
+        <div><span class="key">W</span>Forward</div>
+        <div><span class="key">S</span>Backward</div>
+        <div><span class="key">A</span>Left</div>
+        <div><span class="key">D</span>Right</div>
+        <div><span class="key">Space</span>Up</div>
+        <div><span class="key">Shift</span>Down</div>
+        <div><span class="key">Mouse</span>Look</div>
+        <div><span class="key">Click</span>Lock cursor</div>
+    </div>
+
+    <!-- Settings panel for dynamic scaling -->
+    <div id="settings">
+        <h3>Scale Settings</h3>
+
+        <div class="setting-group">
+            <div class="setting-label">
+                <span>All Grids Scale</span>
+                <span class="setting-value" id="grids-scale-value">1.0</span>
+            </div>
+            <input type="range" class="setting-slider" id="grids-scale"
+                   min="0.1" max="10" step="0.1" value="1.0">
+        </div>
+
+        <div class="setting-group">
+            <div class="setting-label">
+                <span>Layout Spacing</span>
+                <span class="setting-value" id="layout-spacing-value">10</span>
+            </div>
+            <input type="range" class="setting-slider" id="layout-spacing"
+                   min="0" max="500" step="10" value="10">
+        </div>
+
+        <div class="setting-group">
+            <div class="setting-label">
+                <span>Camera Speed</span>
+                <span class="setting-value" id="cam-speed-value">5.0</span>
+            </div>
+            <input type="range" class="setting-slider" id="cam-speed"
+                   min="1" max="50" step="1" value="5">
+        </div>
+
+        <div class="setting-group">
+            <button class="setting-btn" id="reset-camera">Reset Camera</button>
+            <button class="setting-btn" id="fit-all">Fit All Grids</button>
+        </div>
+    </div>
+
+    <!-- File tree (shown after load) -->
+    <div id="file-tree" class="hidden">
+        <h3>Files</h3>
+        <div id="tree-content"></div>
+    </div>
+
+    <!-- Toast notifications -->
+    <div id="toast" class="hidden"></div>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        // Import from glyph3d-js library
+        import {
+            GlyphAtlas,
+            CodeGrid,
+            GridLayoutManager,
+            HierarchicalLayoutManager
+        } from '../../src/index.js';
+
+        // Local example-specific modules
+        import { RepositoryAdapter } from './RepositoryAdapter.js';
+
+        /**
+         * Helper: Parse GitHub URL to owner/repo
+         */
+        function parseGitHubUrl(url) {
+            const patterns = [
+                /github\.com\/([^\/]+)\/([^\/]+)/,
+                /^([^\/]+)\/([^\/]+)$/
+            ];
+
+            for (const pattern of patterns) {
+                const match = url.match(pattern);
+                if (match) {
+                    return {
+                        owner: match[1],
+                        repo: match[2].replace(/\.git$/, '').split('/')[0]
+                    };
+                }
+            }
+            return null;
+        }
+
+        // ============================================================
+        // MAIN APPLICATION
+        // ============================================================
+
+        class GitHubRepoViewer {
+            constructor() {
+                this.canvas = document.getElementById('canvas');
+                this.repoInput = document.getElementById('repo-input');
+                this.loadBtn = document.getElementById('load-btn');
+                this.loadingEl = document.getElementById('loading');
+                this.progressFill = document.getElementById('progress-fill');
+                this.progressText = document.getElementById('progress-text');
+                this.fileTree = document.getElementById('file-tree');
+                this.treeContent = document.getElementById('tree-content');
+                this.toast = document.getElementById('toast');
+
+                // Stats elements
+                this.fpsEl = document.getElementById('fps');
+                this.fileCountEl = document.getElementById('file-count');
+                this.gridCountEl = document.getElementById('grid-count');
+                this.glyphCountEl = document.getElementById('glyph-count');
+                this.cameraPosEl = document.getElementById('camera-pos');
+
+                // Three.js
+                this.scene = null;
+                this.camera = null;
+                this.renderer = null;
+
+                // Components
+                this.atlas = null;
+                this.layoutManager = null;
+                this.hierarchicalManager = null;  // For directory-based layout
+                this.repoAdapter = null;
+
+                // State
+                this.grids = [];
+                this.repoPath = null;
+                this.tree = [];
+                this.isLoading = false;
+
+                // Camera controls
+                this.keys = {};
+                this.isPointerLocked = false;
+                this.cameraSpeed = 100;
+                this.lookSensitivity = 0.002;
+                this.pitch = 0;
+                this.yaw = 0;
+
+                // Animation
+                this.lastTime = performance.now();
+                this.frameCount = 0;
+                this.fpsTime = 0;
+
+                this.setupEventListeners();
+            }
+
+            setupEventListeners() {
+                this.loadBtn.addEventListener('click', () => this.loadRepository());
+                this.repoInput.addEventListener('keypress', (e) => {
+                    if (e.key === 'Enter') this.loadRepository();
+                });
+
+                // Keyboard
+                document.addEventListener('keydown', (e) => {
+                    this.keys[e.code] = true;
+                });
+                document.addEventListener('keyup', (e) => {
+                    this.keys[e.code] = false;
+                });
+
+                // Pointer lock for mouse look
+                this.canvas.addEventListener('click', () => {
+                    this.canvas.requestPointerLock();
+                });
+
+                document.addEventListener('pointerlockchange', () => {
+                    this.isPointerLocked = document.pointerLockElement === this.canvas;
+                });
+
+                document.addEventListener('mousemove', (e) => {
+                    if (this.isPointerLocked) {
+                        this.yaw -= e.movementX * this.lookSensitivity;
+                        this.pitch -= e.movementY * this.lookSensitivity;
+                        this.pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, this.pitch));
+                    }
+                });
+
+                // Window resize
+                window.addEventListener('resize', () => this.onResize());
+
+                // === Settings Panel Handlers ===
+
+                // All Grids Scale - scales all CodeGrid objects
+                const gridsScaleSlider = document.getElementById('grids-scale');
+                const gridsScaleValue = document.getElementById('grids-scale-value');
+                gridsScaleSlider.addEventListener('input', (e) => {
+                    const scale = parseFloat(e.target.value);
+                    gridsScaleValue.textContent = scale.toFixed(1);
+                    // Apply scale to all grids
+                    for (const grid of this.grids) {
+                        grid.scale.setScalar(scale);
+                    }
+                    console.log(`Grids scale: ${scale}`);
+                });
+
+                // Layout Spacing - re-layouts grids with new spacing
+                const layoutSpacingSlider = document.getElementById('layout-spacing');
+                const layoutSpacingValue = document.getElementById('layout-spacing-value');
+                layoutSpacingSlider.addEventListener('input', (e) => {
+                    const spacing = parseFloat(e.target.value);
+                    layoutSpacingValue.textContent = spacing.toFixed(0);
+                    // Update layout manager spacing
+                    if (this.layoutManager) {
+                        this.layoutManager.spacing.horizontal = spacing;
+                        this.layoutManager.spacing.vertical = spacing * 0.8;
+                        // Re-layout all grids
+                        this.relayoutGrids();
+                    }
+                    console.log(`Layout spacing: ${spacing}`);
+                });
+
+                // Camera Speed
+                const camSpeedSlider = document.getElementById('cam-speed');
+                const camSpeedValue = document.getElementById('cam-speed-value');
+                camSpeedSlider.addEventListener('input', (e) => {
+                    const speed = parseFloat(e.target.value);
+                    camSpeedValue.textContent = speed.toFixed(1);
+                    this.cameraSpeed = speed * 20; // Scale for reasonable movement
+                    console.log(`Camera speed: ${this.cameraSpeed}`);
+                });
+
+                // Reset Camera
+                document.getElementById('reset-camera').addEventListener('click', () => {
+                    this.camera.position.set(0, 0, 500);
+                    this.pitch = 0;
+                    this.yaw = 0;
+                    console.log('Camera reset');
+                });
+
+                // Fit All Grids
+                document.getElementById('fit-all').addEventListener('click', () => {
+                    this.focusOnGrids();
+                    console.log('Fitting all grids');
+                });
+            }
+
+            // Re-layout grids with current spacing
+            relayoutGrids() {
+                if (this.grids.length === 0) return;
+
+                // Use hierarchical layout if available
+                if (this.hierarchicalManager) {
+                    // Update spacing options
+                    this.hierarchicalManager.options.siblingSpacing = this.layoutManager.spacing.horizontal;
+                    this.hierarchicalManager.options.dirPadding = this.layoutManager.spacing.horizontal * 0.4;
+
+                    // Clear and re-layout
+                    this.hierarchicalManager.clear();
+                    this.hierarchicalManager.layoutHierarchy(this.grids);
+                } else {
+                    // Fall back to flat layout
+                    this.layoutManager.clear();
+                    for (const grid of this.grids) {
+                        this.layoutManager.addAuto(grid);
+                    }
+                }
+            }
+
+            async init() {
+                console.log('Initializing GitHub 3D Repo Viewer...');
+
+                // Show loading
+                this.showLoading('Generating glyph atlas...');
+
+                // Create atlas using defaults from glyphAtlas.js
+                // (48px font, 2048 atlas size for crisp rendering)
+                this.atlas = new GlyphAtlas();
+                await this.atlas.generate((current, total) => {
+                    this.updateProgress(current / total, `Generating glyphs: ${current}/${total}`);
+                });
+
+                // Setup Three.js
+                this.scene = new THREE.Scene();
+                this.scene.background = new THREE.Color(0x0a0a0a);
+
+                this.camera = new THREE.PerspectiveCamera(
+                    70,
+                    window.innerWidth / window.innerHeight,
+                    0.1,
+                    10000
+                );
+                this.camera.position.set(0, 0, 500);
+
+                this.renderer = new THREE.WebGLRenderer({
+                    canvas: this.canvas,
+                    antialias: true
+                });
+                this.renderer.setSize(window.innerWidth, window.innerHeight);
+                this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+                // Create layout manager with defaults from GridLayoutManager.js
+                this.layoutManager = new GridLayoutManager();
+
+                // Create GitHub repository adapter (real implementation!)
+                this.repoAdapter = new RepositoryAdapter();
+
+                // Add some ambient elements
+                this.addGridHelper();
+
+                // Hide loading
+                this.hideLoading();
+
+                // Start animation loop
+                this.animate();
+
+                console.log('GitHub 3D Repo Viewer ready!');
+                this.showToast('Ready! Enter a GitHub URL and click Load', 'success');
+            }
+
+            addGridHelper() {
+                const grid = new THREE.GridHelper(2000, 40, 0x222222, 0x111111);
+                grid.rotation.x = Math.PI / 2;
+                grid.position.z = -10;
+                this.scene.add(grid);
+            }
+
+            async loadRepository() {
+                const url = this.repoInput.value.trim();
+                if (!url) {
+                    this.showToast('Please enter a GitHub URL', 'error');
+                    return;
+                }
+
+                // Parse URL using helper
+                const parsed = parseGitHubUrl(url);
+                if (!parsed) {
+                    this.showToast('Invalid GitHub URL', 'error');
+                    return;
+                }
+
+                const { owner, repo } = parsed;
+                this.repoPath = `${owner}/${repo}`;
+                console.log('Loading repository:', this.repoPath);
+                this.isLoading = true;
+                this.loadBtn.disabled = true;
+
+                try {
+                    // Clear existing grids
+                    this.clearGrids();
+
+                    // Show loading
+                    this.showLoading('Fetching repository tree...');
+
+                    // Get tree using real RepositoryAdapter
+                    const treeResult = await this.repoAdapter.getRepositoryTree(owner, repo);
+                    console.log(`Found ${treeResult.tree.length} files`);
+
+                    // Filter to text files using adapter's blacklist approach
+                    // No artificial limits - let it load everything texty
+                    const sourceFiles = this.repoAdapter.filterCodeFiles(treeResult);
+
+                    this.tree = sourceFiles;
+                    this.updateProgress(0.1, `Loading ${sourceFiles.length} files...`);
+
+                    const totalStart = performance.now();
+
+                    // Phase 1: Parallel fetch all files
+                    const fetchStart = performance.now();
+                    this.updateProgress(0.1, `Fetching ${sourceFiles.length} files in parallel...`);
+
+                    const paths = sourceFiles.map(f => f.path);
+                    const fileMap = await this.repoAdapter.getMultipleFiles(owner, repo, paths);
+
+                    const fetchTime = performance.now() - fetchStart;
+                    console.log(`[1] Parallel fetch: ${sourceFiles.length} files in ${fetchTime.toFixed(0)}ms`);
+
+                    // Phase 2: Create grids using Web Workers (parallel)
+                    const gridStart = performance.now();
+                    this.updateProgress(0.5, `Creating ${fileMap.size} grids with workers...`);
+
+                    // Collect all grid creation promises
+                    const gridPromises = [];
+                    for (const file of sourceFiles) {
+                        const fileData = fileMap.get(file.path);
+                        if (fileData && fileData.content) {
+                            // Use async worker path
+                            gridPromises.push(
+                                this.createGridForFileAsync(file.path, fileData.content)
+                            );
+                        }
+                    }
+
+                    // Wait for all grids to be created in parallel (content loaded, bounds computed)
+                    const createdGrids = await Promise.all(gridPromises);
+
+                    const gridTime = performance.now() - gridStart;
+                    console.log(`[2] Grid creation (Workers): ${createdGrids.length} grids in ${gridTime.toFixed(0)}ms`);
+
+                    // Phase 2b: Hierarchical layout (uses directory structure)
+                    // All grid bounds are already computed by workers, so this is fast
+                    const layoutStart = performance.now();
+                    this.updateProgress(0.7, `Computing hierarchical layout...`);
+
+                    // Create hierarchical layout manager with current spacing settings
+                    this.hierarchicalManager = new HierarchicalLayoutManager({
+                        dirPadding: 20,
+                        siblingSpacing: this.layoutManager.spacing.horizontal,
+                        maxRowWidth: 3000,
+                        siblingDirection: 'horizontal'
+                    });
+
+                    // Compute tree structure and position all grids
+                    this.hierarchicalManager.layoutHierarchy(createdGrids);
+
+                    // Add all grids to scene (positions already set by hierarchicalManager)
+                    for (const grid of createdGrids) {
+                        this.scene.add(grid);
+                        this.grids.push(grid);
+                    }
+
+                    // Debug: print tree structure to console
+                    console.log('Directory structure:');
+                    this.hierarchicalManager.printTree();
+
+                    const layoutTime = performance.now() - layoutStart;
+                    console.log(`[2b] Hierarchical layout: ${createdGrids.length} grids in ${layoutTime.toFixed(0)}ms`);
+
+                    // Phase 3: UI updates
+                    const uiStart = performance.now();
+                    this.updateFileTree(sourceFiles);
+                    const uiTime = performance.now() - uiStart;
+                    console.log(`[3] File tree UI: ${uiTime.toFixed(0)}ms`);
+
+                    // Phase 4: Camera positioning
+                    // TODO: Re-enable after layout is stabilized
+                    // Disabled while iterating on hierarchical layout
+                    // const camStart = performance.now();
+                    // this.focusOnGrids();
+                    // const camTime = performance.now() - camStart;
+                    // console.log(`[4] Camera focus: ${camTime.toFixed(0)}ms`);
+
+                    // Phase 5: Force GPU sync to measure actual GPU work
+                    const gpuStart = performance.now();
+                    this.renderer.render(this.scene, this.camera); // Force a render
+                    const gpuTime = performance.now() - gpuStart;
+                    console.log(`[5] First render (GPU): ${gpuTime.toFixed(0)}ms`);
+
+                    const totalTime = performance.now() - totalStart;
+                    console.log(`[TOTAL] All phases: ${totalTime.toFixed(0)}ms`);
+
+                    // Schedule a check after browser has processed everything
+                    requestAnimationFrame(() => {
+                        const afterFrame = performance.now() - totalStart;
+                        console.log(`[AFTER FRAME] Real wall time: ${afterFrame.toFixed(0)}ms`);
+                    });
+
+                    this.hideLoading();
+
+                    // Show stats from adapter
+                    const stats = this.repoAdapter.getStats();
+                    console.log('Adapter stats:', stats);
+                    this.showToast(`Loaded ${this.grids.length} files from ${this.repoPath} (${stats.cacheHitRate} cache hit rate)`, 'success');
+
+                } catch (err) {
+                    console.error('Failed to load repository:', err);
+                    this.hideLoading();
+                    this.showToast(`Error: ${err.message}`, 'error');
+                } finally {
+                    this.isLoading = false;
+                    this.loadBtn.disabled = false;
+                }
+            }
+
+            createGridForFile(path, content) {
+                // Using real CodeGrid with defaults from CodeGrid.js
+                const filename = path.split('/').pop();
+                const grid = new CodeGrid(this.scene, this.atlas);
+                grid.loadFile(filename, content);
+
+                // Add to layout
+                this.layoutManager.addAuto(grid);
+
+                // Add to scene
+                this.scene.add(grid);
+                this.grids.push(grid);
+            }
+
+            async createGridForFileAsync(path, content) {
+                // Async version using Web Workers
+                // NOTE: Does NOT call layoutManager.addAuto() or add to scene!
+                // Layout must be done sequentially AFTER all grids are created
+                // to prevent concurrent addAuto() calls from causing overlaps.
+                const filename = path.split('/').pop();
+                const grid = new CodeGrid(this.scene, this.atlas);
+
+                // Use async worker path - computes buffers in worker
+                await grid.loadFileAsync(filename, content);
+
+                // Store metadata for later use
+                grid.userData.sourcePath = path;
+
+                // Return grid for sequential layout pass
+                return grid;
+            }
+
+            clearGrids() {
+                for (const grid of this.grids) {
+                    grid.dispose();
+                    this.scene.remove(grid);
+                }
+                this.grids = [];
+                this.layoutManager.clear();
+                if (this.hierarchicalManager) {
+                    this.hierarchicalManager.clear();
+                }
+            }
+
+            updateFileTree(files) {
+                this.fileTree.classList.remove('hidden');
+                this.treeContent.innerHTML = '';
+
+                files.forEach((file, idx) => {
+                    const item = document.createElement('div');
+                    item.className = 'tree-item';
+                    item.innerHTML = `
+                        <span class="tree-icon">📄</span>
+                        <span class="tree-name">${file.path}</span>
+                        <span class="tree-size">${this.formatSize(file.size)}</span>
+                    `;
+                    item.addEventListener('click', () => this.focusOnGrid(idx));
+                    this.treeContent.appendChild(item);
+                });
+            }
+
+            formatSize(bytes) {
+                if (bytes < 1024) return bytes + ' B';
+                if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+                return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+            }
+
+            focusOnGrid(index) {
+                if (index < 0 || index >= this.grids.length) return;
+
+                const grid = this.grids[index];
+                const bounds = grid.getBounds();
+                const center = new THREE.Vector3();
+                bounds.getCenter(center);
+
+                // Animate camera to focus on this grid
+                this.camera.position.set(
+                    center.x,
+                    center.y,
+                    center.z + 400
+                );
+
+                // Update selection in tree
+                document.querySelectorAll('.tree-item').forEach((item, i) => {
+                    item.classList.toggle('selected', i === index);
+                });
+            }
+
+            focusOnGrids() {
+                if (this.grids.length === 0) return;
+
+                // Use hierarchical manager bounds if available, else fall back to layout manager
+                const bounds = this.hierarchicalManager
+                    ? this.hierarchicalManager.getTotalBounds()
+                    : this.layoutManager.getTotalBounds();
+
+                const center = new THREE.Vector3();
+                bounds.getCenter(center);
+
+                const size = new THREE.Vector3();
+                bounds.getSize(size);
+
+                // Position camera at reasonable distance - close enough to see detail
+                // Use a capped distance so we don't zoom out absurdly far for large repos
+                const maxDim = Math.max(size.x, size.y);
+                const distance = Math.min(maxDim * 0.5, 800);  // Cap at 800 units
+                this.camera.position.set(center.x, center.y, center.z + distance + 100);
+                this.pitch = 0;
+                this.yaw = 0;
+            }
+
+            updateCamera(deltaTime) {
+                // Movement direction
+                const moveDir = new THREE.Vector3();
+
+                if (this.keys['KeyW']) moveDir.z -= 1;
+                if (this.keys['KeyS']) moveDir.z += 1;
+                if (this.keys['KeyA']) moveDir.x -= 1;
+                if (this.keys['KeyD']) moveDir.x += 1;
+                if (this.keys['Space']) moveDir.y += 1;
+                if (this.keys['ShiftLeft'] || this.keys['ShiftRight']) moveDir.y -= 1;
+
+                // Apply movement relative to camera orientation
+                if (moveDir.length() > 0) {
+                    moveDir.normalize();
+                    moveDir.applyQuaternion(this.camera.quaternion);
+                    moveDir.multiplyScalar(this.cameraSpeed * deltaTime);
+                    this.camera.position.add(moveDir);
+                }
+
+                // Apply look rotation
+                const quaternion = new THREE.Quaternion();
+                quaternion.setFromEuler(new THREE.Euler(this.pitch, this.yaw, 0, 'YXZ'));
+                this.camera.quaternion.copy(quaternion);
+            }
+
+            updateStats(deltaTime) {
+                // FPS
+                this.frameCount++;
+                this.fpsTime += deltaTime;
+                if (this.fpsTime >= 1) {
+                    this.fpsEl.textContent = this.frameCount;
+                    this.frameCount = 0;
+                    this.fpsTime = 0;
+                }
+
+                // Other stats
+                this.fileCountEl.textContent = this.tree.length;
+                this.gridCountEl.textContent = this.grids.length;
+
+                // Calculate total glyph count from all grids
+                let totalGlyphs = 0;
+                for (const grid of this.grids) {
+                    totalGlyphs += grid.getGlyphCount();
+                }
+                this.glyphCountEl.textContent = totalGlyphs;
+
+                // Camera position
+                const pos = this.camera.position;
+                this.cameraPosEl.textContent = `${pos.x.toFixed(0)},${pos.y.toFixed(0)},${pos.z.toFixed(0)}`;
+            }
+
+            onResize() {
+                const width = window.innerWidth;
+                const height = window.innerHeight;
+
+                this.camera.aspect = width / height;
+                this.camera.updateProjectionMatrix();
+                this.renderer.setSize(width, height);
+            }
+
+            showLoading(message) {
+                this.loadingEl.classList.remove('hidden');
+                this.progressText.textContent = message;
+            }
+
+            hideLoading() {
+                this.loadingEl.classList.add('hidden');
+            }
+
+            updateProgress(percent, message) {
+                this.progressFill.style.width = (percent * 100) + '%';
+                this.progressText.textContent = message;
+            }
+
+            showToast(message, type = '') {
+                this.toast.textContent = message;
+                this.toast.className = type;
+                setTimeout(() => {
+                    this.toast.classList.add('hidden');
+                }, 3000);
+            }
+
+            animate() {
+                requestAnimationFrame(() => this.animate());
+
+                const now = performance.now();
+                const deltaTime = (now - this.lastTime) / 1000;
+                this.lastTime = now;
+
+                // Update camera
+                this.updateCamera(deltaTime);
+
+                // Update stats
+                this.updateStats(deltaTime);
+
+                // Render
+                this.renderer.render(this.scene, this.camera);
+            }
+        }
+
+        // Start the application
+        document.addEventListener('DOMContentLoaded', async () => {
+            const viewer = new GitHubRepoViewer();
+            await viewer.init();
+        });
+    </script>
+</body>
+</html>
