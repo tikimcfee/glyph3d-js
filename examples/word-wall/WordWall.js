@@ -58,9 +58,11 @@ export class WordWall {
         // Will be created in build()
         this.renderer = null;
 
-        // Definition chain line (created in build())
-        this.chainLine = null;
-        this.chainLineMaxPoints = 200;  // Max definition words we'll connect
+        // Definition chain lines (one per meaning, created in build())
+        this.chainLines = [];           // Array of THREE.Line objects
+        this.chainLineUniforms = [];    // Array of uniform objects for each line
+        this.maxChainLines = 8;         // Max number of simultaneous meaning chains
+        this.chainLineMaxPoints = 100;  // Max points per chain
 
         // Metrics (computed from atlas)
         this._charWidth = 0;
@@ -108,6 +110,13 @@ export class WordWall {
     /**
      * Pre-compute definition word lookups for fast highlighting
      * This parses all definitions once at load time instead of on every click
+     *
+     * Handles multiple meanings separated by semicolons.
+     * Preserves word order within each meaning for chain visualization.
+     *
+     * Structure: Map<word, { meanings: Array<string[]>, allWords: Set<string> }>
+     *   - meanings: array of word arrays, one per semicolon-separated meaning
+     *   - allWords: flat Set of all definition words (for quick highlight lookup)
      */
     _buildDefinitionMap(wordSet) {
         const startTime = performance.now();
@@ -115,34 +124,52 @@ export class WordWall {
 
         let totalDefWords = 0;
         let totalLinks = 0;
+        let totalMeanings = 0;
 
         for (const [word, definition] of this.dictionary) {
-            // Parse definition into words
-            const defWords = definition
-                .toLowerCase()
-                .split(/[^a-z]+/)
-                .filter(w => w.length > 2);
+            // Split on semicolons to separate distinct meanings
+            const meaningParts = definition.split(/;/);
 
-            // Dedupe and filter to only words that exist in the wall
-            const uniqueDefWords = new Set();
-            for (const dw of defWords) {
-                if (dw !== word && wordSet.has(dw)) {
-                    uniqueDefWords.add(dw);
+            const meanings = [];
+            const allWords = new Set();
+
+            for (const part of meaningParts) {
+                // Parse this meaning into ordered words
+                const words = part
+                    .toLowerCase()
+                    .split(/[^a-z]+/)
+                    .filter(w => w.length > 2 && w !== word && wordSet.has(w));
+
+                if (words.length > 0) {
+                    // Keep order but remove consecutive duplicates
+                    const orderedWords = [];
+                    for (const w of words) {
+                        if (orderedWords.length === 0 || orderedWords[orderedWords.length - 1] !== w) {
+                            orderedWords.push(w);
+                            allWords.add(w);
+                        }
+                    }
+                    if (orderedWords.length > 0) {
+                        meanings.push(orderedWords);
+                    }
                 }
             }
 
-            if (uniqueDefWords.size > 0) {
-                this.definitionMap.set(word, uniqueDefWords);
+            if (meanings.length > 0) {
+                this.definitionMap.set(word, { meanings, allWords });
                 totalDefWords++;
-                totalLinks += uniqueDefWords.size;
+                totalLinks += allWords.size;
+                totalMeanings += meanings.length;
             }
         }
 
         const buildTime = performance.now() - startTime;
         const avgLinks = totalDefWords > 0 ? (totalLinks / totalDefWords).toFixed(1) : 0;
+        const avgMeanings = totalDefWords > 0 ? (totalMeanings / totalDefWords).toFixed(1) : 0;
         console.log(`WordWall: Built definition map in ${buildTime.toFixed(0)}ms`);
         console.log(`  - ${totalDefWords.toLocaleString()} words have definition links`);
         console.log(`  - ${totalLinks.toLocaleString()} total links (avg ${avgLinks} per word)`);
+        console.log(`  - ${totalMeanings.toLocaleString()} total meanings (avg ${avgMeanings} per word)`);
     }
 
     /**
@@ -240,8 +267,8 @@ export class WordWall {
             buildTime
         };
 
-        // Create the definition chain line
-        this._createChainLine();
+        // Create the definition chain lines (multiple, one per meaning)
+        this._createChainLines();
 
         console.log(`WordWall: Built in ${buildTime.toFixed(0)}ms`);
         console.log(`  - ${this.stats.totalWords.toLocaleString()} words`);
@@ -252,27 +279,135 @@ export class WordWall {
     }
 
     /**
-     * Create the reusable line geometry for definition chains
+     * Color palette for different meaning chains
+     * Each meaning gets a distinct color pair (start, end)
      */
-    _createChainLine() {
-        // Pre-allocate buffer for max points
-        const positions = new Float32Array(this.chainLineMaxPoints * 3);
+    _getMeaningColors(meaningIndex) {
+        const palettes = [
+            { start: 0x00ffcc, end: 0x0088ff },  // Cyan → Blue
+            { start: 0xff8800, end: 0xff0088 },  // Orange → Pink
+            { start: 0x88ff00, end: 0x00ff88 },  // Lime → Mint
+            { start: 0xff00ff, end: 0x8800ff },  // Magenta → Purple
+            { start: 0xffff00, end: 0xff8800 },  // Yellow → Orange
+            { start: 0x00ffff, end: 0x00ff00 },  // Cyan → Green
+            { start: 0xff0000, end: 0xff8888 },  // Red → Pink
+            { start: 0x8888ff, end: 0xff88ff },  // Periwinkle → Lavender
+        ];
+        return palettes[meaningIndex % palettes.length];
+    }
 
-        const geometry = new THREE.BufferGeometry();
-        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-        geometry.setDrawRange(0, 0);  // Start with nothing visible
+    /**
+     * Create multiple reusable line geometries for definition chains
+     * Uses custom shaders for animated dashes, one line per meaning
+     */
+    _createChainLines() {
+        // Clear any existing lines
+        for (const line of this.chainLines) {
+            this.group.remove(line);
+            line.geometry.dispose();
+            line.material.dispose();
+        }
+        this.chainLines = [];
+        this.chainLineUniforms = [];
 
-        // Line material with a nice gradient-like color
-        const material = new THREE.LineBasicMaterial({
-            color: 0x00ffaa,
-            linewidth: 2,  // Note: linewidth > 1 only works on some platforms
-            transparent: true,
-            opacity: 0.8
-        });
+        // Vertex shader (shared)
+        const vertexShader = `
+            attribute float distance;
+            varying float vDistance;
+            varying float vNormalizedDist;
+            uniform float totalDistance;
 
-        this.chainLine = new THREE.Line(geometry, material);
-        this.chainLine.frustumCulled = false;
-        this.group.add(this.chainLine);
+            void main() {
+                vDistance = distance;
+                vNormalizedDist = distance / max(totalDistance, 0.001);
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            }
+        `;
+
+        // Fragment shader (shared)
+        const fragmentShader = `
+            uniform float time;
+            uniform float totalDistance;
+            uniform float dashSize;
+            uniform float gapSize;
+            uniform float speed;
+            uniform vec3 colorStart;
+            uniform vec3 colorEnd;
+            uniform float glowIntensity;
+
+            varying float vDistance;
+            varying float vNormalizedDist;
+
+            void main() {
+                // Animated dash pattern - flows from start toward end
+                float cycleLength = dashSize + gapSize;
+                float phase = mod(vDistance - time * speed, cycleLength);
+
+                // Soft edges on dashes for glow effect
+                float dashEdge = dashSize * 0.15;
+                float dash = smoothstep(0.0, dashEdge, phase) *
+                             smoothstep(dashSize, dashSize - dashEdge, phase);
+
+                // Color gradient along the path
+                vec3 color = mix(colorStart, colorEnd, vNormalizedDist);
+
+                // Add subtle glow/pulse
+                float glow = 1.0 + glowIntensity * sin(vDistance * 0.5 - time * 2.0);
+                color *= glow;
+
+                // Fade out toward the end slightly
+                float endFade = 1.0 - smoothstep(0.85, 1.0, vNormalizedDist) * 0.5;
+
+                gl_FragColor = vec4(color, dash * endFade);
+            }
+        `;
+
+        // Create multiple line objects
+        for (let i = 0; i < this.maxChainLines; i++) {
+            const positions = new Float32Array(this.chainLineMaxPoints * 3);
+            const distances = new Float32Array(this.chainLineMaxPoints);
+
+            const geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            geometry.setAttribute('distance', new THREE.BufferAttribute(distances, 1));
+            geometry.setDrawRange(0, 0);
+
+            const colors = this._getMeaningColors(i);
+
+            const material = new THREE.ShaderMaterial({
+                uniforms: {
+                    time: { value: 0 },
+                    totalDistance: { value: 1 },
+                    dashSize: { value: 12.0 },
+                    gapSize: { value: 8.0 },
+                    speed: { value: 25.0 + i * 5 },  // Slightly different speeds
+                    colorStart: { value: new THREE.Color(colors.start) },
+                    colorEnd: { value: new THREE.Color(colors.end) },
+                    glowIntensity: { value: 0.5 },
+                },
+                vertexShader,
+                fragmentShader,
+                transparent: true,
+                depthWrite: false,
+                blending: THREE.AdditiveBlending
+            });
+
+            const line = new THREE.Line(geometry, material);
+            line.frustumCulled = false;
+            this.group.add(line);
+
+            this.chainLines.push(line);
+            this.chainLineUniforms.push(material.uniforms);
+        }
+    }
+
+    /**
+     * Update all chain line animations (call each frame)
+     */
+    updateChainAnimation(deltaTime) {
+        for (const uniforms of this.chainLineUniforms) {
+            uniforms.time.value += deltaTime;
+        }
     }
 
     /**
@@ -282,51 +417,84 @@ export class WordWall {
         const info = this.wordInfo.get(word);
         if (!info) return null;
 
-        // Word center: halfway through the word horizontally, vertically centered
         const wordWidth = info.displayWord.length * this._glyphAdvance;
         return {
             x: info.x + wordWidth / 2,
-            y: info.y,  // y is already the glyph center
-            z: this.config.definitionZ + 0.5  // Slightly in front of highlighted words
+            y: info.y,
+            z: this.config.definitionZ + 0.5
         };
     }
 
     /**
-     * Draw a chain line connecting a sequence of words
+     * Draw chain lines for multiple meanings
+     * @param {string} primaryWord - The word being highlighted
+     * @param {Array<string[]>} meanings - Array of word arrays, one per meaning
      */
-    drawWordChain(words) {
-        if (!this.chainLine || words.length < 2) {
-            this.clearChainLine();
-            return;
-        }
+    drawMeaningChains(primaryWord, meanings) {
+        // Clear all lines first
+        this.clearAllChainLines();
 
-        const positions = this.chainLine.geometry.attributes.position.array;
-        let pointCount = 0;
+        const primaryCenter = this.getWordCenter(primaryWord);
+        if (!primaryCenter) return;
 
-        for (const word of words) {
-            if (pointCount >= this.chainLineMaxPoints) break;
+        // Draw each meaning as a separate chain
+        for (let m = 0; m < meanings.length && m < this.maxChainLines; m++) {
+            const meaningWords = meanings[m];
+            if (meaningWords.length === 0) continue;
 
-            const center = this.getWordCenter(word);
-            if (center) {
-                const idx = pointCount * 3;
-                positions[idx] = center.x;
-                positions[idx + 1] = center.y;
-                positions[idx + 2] = center.z;
-                pointCount++;
+            const line = this.chainLines[m];
+            const uniforms = this.chainLineUniforms[m];
+            const geometry = line.geometry;
+            const positions = geometry.attributes.position.array;
+            const distances = geometry.attributes.distance.array;
+
+            let pointCount = 0;
+            let cumulativeDistance = 0;
+            let prevCenter = primaryCenter;
+
+            // Start from primary word
+            positions[0] = primaryCenter.x;
+            positions[1] = primaryCenter.y;
+            positions[2] = primaryCenter.z;
+            distances[0] = 0;
+            pointCount = 1;
+
+            // Add each word in this meaning
+            for (const word of meaningWords) {
+                if (pointCount >= this.chainLineMaxPoints) break;
+
+                const center = this.getWordCenter(word);
+                if (center) {
+                    const dx = center.x - prevCenter.x;
+                    const dy = center.y - prevCenter.y;
+                    const dz = center.z - prevCenter.z;
+                    cumulativeDistance += Math.sqrt(dx*dx + dy*dy + dz*dz);
+
+                    const idx = pointCount * 3;
+                    positions[idx] = center.x;
+                    positions[idx + 1] = center.y;
+                    positions[idx + 2] = center.z;
+                    distances[pointCount] = cumulativeDistance;
+
+                    prevCenter = center;
+                    pointCount++;
+                }
             }
-        }
 
-        // Update the geometry
-        this.chainLine.geometry.attributes.position.needsUpdate = true;
-        this.chainLine.geometry.setDrawRange(0, pointCount);
+            // Update uniforms and buffers
+            uniforms.totalDistance.value = cumulativeDistance;
+            geometry.attributes.position.needsUpdate = true;
+            geometry.attributes.distance.needsUpdate = true;
+            geometry.setDrawRange(0, pointCount);
+        }
     }
 
     /**
-     * Clear the chain line
+     * Clear all chain lines
      */
-    clearChainLine() {
-        if (this.chainLine) {
-            this.chainLine.geometry.setDrawRange(0, 0);
+    clearAllChainLines() {
+        for (const line of this.chainLines) {
+            line.geometry.setDrawRange(0, 0);
         }
     }
 
@@ -351,27 +519,29 @@ export class WordWall {
             this.highlightedWords.add(normalized);
         }
 
-        // Build ordered chain for line drawing: [primaryWord, ...definitionWords]
-        const chainWords = [normalized];
-
-        // Highlight definition words using pre-computed map (O(1) lookup!)
+        // Highlight definition words and draw meaning chains
         if (expandDefinition) {
-            const defWords = this.definitionMap.get(normalized);
-            if (defWords) {
-                for (const dw of defWords) {
+            const defData = this.definitionMap.get(normalized);
+            if (defData) {
+                // Highlight ALL definition words (from all meanings)
+                for (const dw of defData.allWords) {
                     const dwInfo = this.wordInfo.get(dw);
                     if (dwInfo && dwInfo.textId !== undefined) {
                         this._setWordHighlight(dw, this.config.definitionColor, this.config.definitionZ);
                         this.definitionWords.add(dw);
-                        chainWords.push(dw);
                     }
                 }
-            }
-        }
 
-        // Draw the definition chain line
-        if (chainWords.length > 1) {
-            this.drawWordChain(chainWords);
+                // Filter meanings to only include words that exist in the wall
+                const validMeanings = defData.meanings.map(meaning =>
+                    meaning.filter(w => this.wordInfo.has(w))
+                ).filter(meaning => meaning.length > 0);
+
+                // Draw separate chains for EACH meaning
+                if (validMeanings.length > 0) {
+                    this.drawMeaningChains(normalized, validMeanings);
+                }
+            }
         }
     }
 
@@ -388,7 +558,7 @@ export class WordWall {
 
         this.highlightedWords.clear();
         this.definitionWords.clear();
-        this.clearChainLine();
+        this.clearAllChainLines();
     }
 
     /**
@@ -416,11 +586,27 @@ export class WordWall {
     }
 
     /**
-     * Get definition words for a word (from pre-computed map)
-     * Returns a Set of words, or null if none
+     * Get definition data for a word (from pre-computed map)
+     * Returns { meanings: Array<string[]>, allWords: Set<string> } or null
      */
     getDefinitionWords(word) {
         return this.definitionMap.get(word.toLowerCase().trim()) || null;
+    }
+
+    /**
+     * Get the number of definition words for a word
+     */
+    getDefinitionWordCount(word) {
+        const data = this.definitionMap.get(word.toLowerCase().trim());
+        return data ? data.allWords.size : 0;
+    }
+
+    /**
+     * Get the number of meanings for a word
+     */
+    getMeaningCount(word) {
+        const data = this.definitionMap.get(word.toLowerCase().trim());
+        return data ? data.meanings.length : 0;
     }
 
     // ============ Spatial Queries ============

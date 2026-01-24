@@ -746,9 +746,9 @@
 
                     // Show word info (using pre-computed definition map)
                     const definition = this.wordWall.dictionary.get(word) || 'No definition';
-                    const defWordsSet = this.wordWall.definitionMap.get(word);
-                    const defWordsInWall = defWordsSet ? defWordsSet.size : 0;
-                    this.showWordInfo(word, definition, defWordsInWall);
+                    const defWordsInWall = this.wordWall.getDefinitionWordCount(word);
+                    const meaningCount = this.wordWall.getMeaningCount(word);
+                    this.showWordInfo(word, definition, defWordsInWall, meaningCount);
                     const t4 = performance.now();
 
                     console.log(`Click timing: raycast=${(t1-t0).toFixed(1)}ms, lookup=${(t2-t1).toFixed(1)}ms, highlight=${(t3-t2).toFixed(1)}ms, UI=${(t4-t3).toFixed(1)}ms, total=${(t4-t0).toFixed(1)}ms`);
@@ -791,12 +791,12 @@
                 }
             }
 
-            showWordInfo(word, definition, defWordCount) {
+            showWordInfo(word, definition, defWordCount, meaningCount = 1) {
                 document.getElementById('info-word').textContent = word;
                 document.getElementById('info-definition').textContent =
-                    definition.length > 200 ? definition.slice(0, 200) + '...' : definition;
+                    definition.length > 300 ? definition.slice(0, 300) + '...' : definition;
                 document.getElementById('info-def-count').textContent =
-                    `${defWordCount} definition words found in wall`;
+                    `${defWordCount} definition words • ${meaningCount} meaning${meaningCount !== 1 ? 's' : ''}`;
                 this.wordInfoEl.classList.remove('hidden');
             }
 
@@ -876,6 +876,12 @@
 
                 this.updateCamera(deltaTime);
                 this.updateStats(deltaTime);
+
+                // Update chain line animation
+                if (this.wordWall) {
+                    this.wordWall.updateChainAnimation(deltaTime);
+                }
+
                 this.renderer.render(this.scene, this.camera);
             }
         }
