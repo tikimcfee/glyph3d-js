@@ -1,0 +1,900 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Word Wall - Dictionary Visualization</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Monaco', 'Menlo', 'Consolas', monospace;
+            background: #0a0a0a;
+            color: #e0e0e0;
+            overflow: hidden;
+        }
+
+        #canvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        /* Header with sentence input */
+        #header {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 60px;
+            background: linear-gradient(180deg, rgba(15,15,20,0.95) 0%, rgba(10,10,15,0.9) 100%);
+            border-bottom: 1px solid #333;
+            display: flex;
+            align-items: center;
+            padding: 0 20px;
+            z-index: 1000;
+            gap: 15px;
+        }
+
+        #header h1 {
+            font-size: 18px;
+            color: #33ff88;
+            white-space: nowrap;
+        }
+
+        #sentence-input {
+            flex: 1;
+            max-width: 600px;
+            padding: 10px 15px;
+            background: #1a1a1f;
+            border: 1px solid #444;
+            border-radius: 6px;
+            color: #fff;
+            font-family: inherit;
+            font-size: 14px;
+        }
+
+        #sentence-input:focus {
+            outline: none;
+            border-color: #33ff88;
+            box-shadow: 0 0 10px rgba(51, 255, 136, 0.2);
+        }
+
+        #sentence-input::placeholder {
+            color: #666;
+        }
+
+        #play-btn {
+            padding: 10px 20px;
+            background: linear-gradient(135deg, #33ff88 0%, #22cc66 100%);
+            color: #000;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-family: inherit;
+            font-weight: bold;
+            font-size: 14px;
+            transition: all 0.2s;
+        }
+
+        #play-btn:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 15px rgba(51, 255, 136, 0.3);
+        }
+
+        #play-btn:disabled {
+            background: #444;
+            color: #888;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        #clear-btn {
+            padding: 10px 15px;
+            background: #333;
+            color: #aaa;
+            border: 1px solid #555;
+            border-radius: 6px;
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 13px;
+        }
+
+        #clear-btn:hover {
+            background: #444;
+            color: #fff;
+        }
+
+        /* Loading overlay */
+        #loading {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.95);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 2000;
+        }
+
+        #loading.hidden {
+            display: none;
+        }
+
+        #loading h2 {
+            color: #33ff88;
+            margin-bottom: 20px;
+            font-size: 24px;
+        }
+
+        #progress-bar {
+            width: 400px;
+            height: 8px;
+            background: #222;
+            border-radius: 4px;
+            overflow: hidden;
+            margin-bottom: 15px;
+        }
+
+        #progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #33ff88, #88ffcc);
+            width: 0%;
+            transition: width 0.3s ease-out;
+        }
+
+        #progress-text {
+            color: #888;
+            font-size: 14px;
+        }
+
+        /* Stats panel */
+        #stats {
+            position: fixed;
+            top: 70px;
+            left: 15px;
+            background: rgba(10, 10, 15, 0.9);
+            border: 1px solid #333;
+            border-radius: 6px;
+            padding: 15px;
+            font-size: 12px;
+            line-height: 1.8;
+            z-index: 100;
+            min-width: 200px;
+        }
+
+        #stats h3 {
+            color: #33ff88;
+            margin-bottom: 10px;
+            font-size: 13px;
+            border-bottom: 1px solid #333;
+            padding-bottom: 8px;
+        }
+
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .stat-label {
+            color: #888;
+        }
+
+        .stat-value {
+            color: #33ff88;
+            font-weight: bold;
+        }
+
+        /* Controls panel */
+        #controls {
+            position: fixed;
+            top: 70px;
+            right: 15px;
+            background: rgba(10, 10, 15, 0.9);
+            border: 1px solid #333;
+            border-radius: 6px;
+            padding: 15px;
+            font-size: 12px;
+            line-height: 2;
+            z-index: 100;
+        }
+
+        #controls h3 {
+            color: #ffaa33;
+            margin-bottom: 10px;
+            font-size: 13px;
+        }
+
+        .key {
+            display: inline-block;
+            background: #333;
+            padding: 2px 8px;
+            border-radius: 3px;
+            min-width: 24px;
+            text-align: center;
+            margin-right: 10px;
+            font-size: 11px;
+        }
+
+        /* Settings panel */
+        #settings {
+            position: fixed;
+            top: 230px;
+            right: 15px;
+            width: 220px;
+            background: rgba(10, 10, 15, 0.9);
+            border: 1px solid #333;
+            border-radius: 6px;
+            padding: 15px;
+            font-size: 12px;
+            z-index: 100;
+        }
+
+        #settings h3 {
+            color: #ffaa33;
+            margin-bottom: 12px;
+            font-size: 13px;
+            border-bottom: 1px solid #333;
+            padding-bottom: 8px;
+        }
+
+        .setting-group {
+            margin-bottom: 14px;
+        }
+
+        .setting-label {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 6px;
+            color: #aaa;
+        }
+
+        .setting-value {
+            color: #ffaa33;
+            font-weight: bold;
+        }
+
+        .setting-slider {
+            width: 100%;
+            height: 6px;
+            -webkit-appearance: none;
+            appearance: none;
+            background: #333;
+            border-radius: 3px;
+            outline: none;
+        }
+
+        .setting-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 14px;
+            height: 14px;
+            background: #ffaa33;
+            border-radius: 50%;
+            cursor: pointer;
+        }
+
+        /* Word info tooltip */
+        #word-info {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(10, 10, 15, 0.95);
+            border: 1px solid #33ff88;
+            border-radius: 8px;
+            padding: 15px 25px;
+            max-width: 600px;
+            z-index: 100;
+            text-align: center;
+        }
+
+        #word-info.hidden {
+            display: none;
+        }
+
+        #word-info .word {
+            color: #33ff88;
+            font-size: 24px;
+            font-weight: bold;
+            margin-bottom: 8px;
+        }
+
+        #word-info .definition {
+            color: #ccc;
+            font-size: 13px;
+            line-height: 1.5;
+            max-height: 100px;
+            overflow: hidden;
+        }
+
+        #word-info .def-count {
+            color: #ffaa33;
+            font-size: 11px;
+            margin-top: 8px;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+
+    <!-- Header with sentence input -->
+    <div id="header">
+        <h1>Word Wall</h1>
+        <input type="text" id="sentence-input"
+               placeholder="Type a sentence and press Play to watch it light up the wall..."
+               value="The quick brown fox jumps over the lazy dog">
+        <button id="play-btn">▶ Play</button>
+        <button id="clear-btn">Clear</button>
+    </div>
+
+    <!-- Loading overlay -->
+    <div id="loading">
+        <h2>Building Word Wall</h2>
+        <div id="progress-bar"><div id="progress-fill"></div></div>
+        <div id="progress-text">Initializing...</div>
+    </div>
+
+    <!-- Stats panel -->
+    <div id="stats">
+        <h3>Statistics</h3>
+        <div class="stat-row">
+            <span class="stat-label">FPS</span>
+            <span class="stat-value" id="fps">--</span>
+        </div>
+        <div class="stat-row">
+            <span class="stat-label">Words</span>
+            <span class="stat-value" id="word-count">0</span>
+        </div>
+        <div class="stat-row">
+            <span class="stat-label">Glyphs</span>
+            <span class="stat-value" id="glyph-count">0</span>
+        </div>
+        <div class="stat-row">
+            <span class="stat-label">Grid</span>
+            <span class="stat-value" id="grid-size">0x0</span>
+        </div>
+        <div class="stat-row">
+            <span class="stat-label">Highlighted</span>
+            <span class="stat-value" id="highlight-count">0</span>
+        </div>
+        <div class="stat-row">
+            <span class="stat-label">Camera Z</span>
+            <span class="stat-value" id="camera-z">0</span>
+        </div>
+    </div>
+
+    <!-- Controls panel -->
+    <div id="controls">
+        <h3>Interaction</h3>
+        <div><span class="key">Click</span>Select word</div>
+        <div><span class="key">DblClick</span>FPS mode</div>
+        <div><span class="key">ESC</span>Exit FPS</div>
+        <h3 style="margin-top: 12px;">Navigation</h3>
+        <div><span class="key">W</span>Forward</div>
+        <div><span class="key">S</span>Backward</div>
+        <div><span class="key">A</span>Left</div>
+        <div><span class="key">D</span>Right</div>
+        <div><span class="key">Space</span>Up</div>
+        <div><span class="key">Shift</span>Down</div>
+    </div>
+
+    <!-- Settings panel -->
+    <div id="settings">
+        <h3>Settings</h3>
+
+        <div class="setting-group">
+            <div class="setting-label">
+                <span>Playback Speed</span>
+                <span class="setting-value" id="speed-value">400ms</span>
+            </div>
+            <input type="range" class="setting-slider" id="speed-slider"
+                   min="50" max="1000" step="50" value="400">
+        </div>
+
+        <div class="setting-group">
+            <div class="setting-label">
+                <span>Camera Speed</span>
+                <span class="setting-value" id="cam-speed-value">5</span>
+            </div>
+            <input type="range" class="setting-slider" id="cam-speed-slider"
+                   min="1" max="20" step="1" value="5">
+        </div>
+
+        <div class="setting-group">
+            <div class="setting-label">
+                <span>Wall Scale</span>
+                <span class="setting-value" id="scale-value">1.0</span>
+            </div>
+            <input type="range" class="setting-slider" id="scale-slider"
+                   min="0.5" max="3" step="0.1" value="1.0">
+        </div>
+    </div>
+
+    <!-- Word info tooltip -->
+    <div id="word-info" class="hidden">
+        <div class="word" id="info-word">word</div>
+        <div class="definition" id="info-definition">definition...</div>
+        <div class="def-count" id="info-def-count">0 definition words found in wall</div>
+    </div>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { GlyphAtlas } from '../../src/index.js';
+        import WordWall from './WordWall.js';
+
+        // ============================================================
+        // MAIN APPLICATION
+        // ============================================================
+
+        class WordWallApp {
+            constructor() {
+                // DOM elements
+                this.canvas = document.getElementById('canvas');
+                this.sentenceInput = document.getElementById('sentence-input');
+                this.playBtn = document.getElementById('play-btn');
+                this.clearBtn = document.getElementById('clear-btn');
+                this.loadingEl = document.getElementById('loading');
+                this.progressFill = document.getElementById('progress-fill');
+                this.progressText = document.getElementById('progress-text');
+                this.wordInfoEl = document.getElementById('word-info');
+
+                // Stats elements
+                this.fpsEl = document.getElementById('fps');
+                this.wordCountEl = document.getElementById('word-count');
+                this.glyphCountEl = document.getElementById('glyph-count');
+                this.gridSizeEl = document.getElementById('grid-size');
+                this.highlightCountEl = document.getElementById('highlight-count');
+                this.cameraZEl = document.getElementById('camera-z');
+
+                // Three.js
+                this.scene = null;
+                this.camera = null;
+                this.renderer = null;
+
+                // Components
+                this.atlas = null;
+                this.wordWall = null;
+
+                // State
+                this.isPlaying = false;
+                this.playbackSpeed = 400;
+                this.cameraSpeed = 100;
+
+                // Camera controls
+                this.keys = {};
+                this.isPointerLocked = false;
+                this.lookSensitivity = 0.002;
+                this.pitch = 0;
+                this.yaw = 0;
+
+                // Animation
+                this.lastTime = performance.now();
+                this.frameCount = 0;
+                this.fpsTime = 0;
+
+                this.setupEventListeners();
+            }
+
+            setupEventListeners() {
+                // Play/Clear buttons
+                this.playBtn.addEventListener('click', () => this.playSentence());
+                this.clearBtn.addEventListener('click', () => this.clearHighlights());
+
+                this.sentenceInput.addEventListener('keypress', (e) => {
+                    if (e.key === 'Enter') this.playSentence();
+                });
+
+                // Keyboard
+                document.addEventListener('keydown', (e) => {
+                    this.keys[e.code] = true;
+                });
+                document.addEventListener('keyup', (e) => {
+                    this.keys[e.code] = false;
+                });
+
+                // Click to highlight word (single click)
+                this.canvas.addEventListener('click', (e) => {
+                    if (this.isPointerLocked) return;  // Don't raycast while in FPS mode
+                    this.handleWordClick(e);
+                });
+
+                // Double-click for pointer lock (FPS camera mode)
+                this.canvas.addEventListener('dblclick', () => {
+                    this.canvas.requestPointerLock();
+                });
+
+                document.addEventListener('pointerlockchange', () => {
+                    this.isPointerLocked = document.pointerLockElement === this.canvas;
+                    if (this.isPointerLocked) {
+                        console.log('FPS mode enabled (ESC to exit)');
+                    }
+                });
+
+                document.addEventListener('mousemove', (e) => {
+                    if (this.isPointerLocked) {
+                        this.yaw -= e.movementX * this.lookSensitivity;
+                        this.pitch -= e.movementY * this.lookSensitivity;
+                        this.pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, this.pitch));
+                    }
+                });
+
+                // Window resize
+                window.addEventListener('resize', () => this.onResize());
+
+                // Settings sliders
+                document.getElementById('speed-slider').addEventListener('input', (e) => {
+                    this.playbackSpeed = parseInt(e.target.value);
+                    document.getElementById('speed-value').textContent = this.playbackSpeed + 'ms';
+                });
+
+                document.getElementById('cam-speed-slider').addEventListener('input', (e) => {
+                    const speed = parseInt(e.target.value);
+                    this.cameraSpeed = speed * 20;
+                    document.getElementById('cam-speed-value').textContent = speed;
+                });
+
+                document.getElementById('scale-slider').addEventListener('input', (e) => {
+                    const scale = parseFloat(e.target.value);
+                    document.getElementById('scale-value').textContent = scale.toFixed(1);
+                    if (this.wordWall) {
+                        this.wordWall.setScale(scale);
+                    }
+                });
+            }
+
+            async init() {
+                console.log('Initializing Word Wall...');
+
+                // Setup Three.js
+                this.scene = new THREE.Scene();
+                this.scene.background = new THREE.Color(0x0a0a0f);
+
+                this.camera = new THREE.PerspectiveCamera(
+                    70,
+                    window.innerWidth / window.innerHeight,
+                    0.1,
+                    5000
+                );
+                this.camera.position.set(0, 0, 50);
+
+                this.renderer = new THREE.WebGLRenderer({
+                    canvas: this.canvas,
+                    antialias: true
+                });
+                this.renderer.setSize(window.innerWidth, window.innerHeight);
+                this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+                // Create atlas
+                this.updateProgress(0.05, 'Generating glyph atlas...');
+                this.atlas = new GlyphAtlas();
+                await this.atlas.generate((current, total) => {
+                    this.updateProgress(0.05 + (current / total) * 0.15, `Generating glyphs: ${current}/${total}`);
+                });
+
+                // Load dictionary
+                this.updateProgress(0.2, 'Loading dictionary...');
+                const dictData = await this.loadDictionary();
+
+                // Create word wall
+                this.updateProgress(0.4, 'Creating word wall...');
+                this.wordWall = new WordWall(this.scene, this.atlas, {
+                    wordsPerRow: 80,      // Wide wall
+                    wordSpacing: 0.6,
+                    lineHeight: 0.8
+                });
+
+                this.wordWall.loadDictionary(dictData);
+
+                this.updateProgress(0.5, 'Building wall layout...');
+                await this.wordWall.build();
+
+                // Position wall and camera
+                this.positionCamera();
+
+                // Add grid helper
+                this.addGridHelper();
+
+                // Hide loading, start animation
+                this.hideLoading();
+                this.animate();
+
+                // Update initial stats
+                this.updateStats(0);
+
+                console.log('Word Wall ready!');
+            }
+
+            async loadDictionary() {
+                try {
+                    const response = await fetch('./data/dictionary.json');
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}`);
+                    }
+                    return await response.json();
+                } catch (error) {
+                    console.error('Failed to load dictionary:', error);
+                    // Return a small fallback dictionary
+                    return {
+                        "hello": "A greeting",
+                        "world": "The earth and all its inhabitants",
+                        "test": "A procedure to establish quality"
+                    };
+                }
+            }
+
+            positionCamera() {
+                const bounds = this.wordWall.getBounds();
+                const charWidth = this.wordWall._charWidth;
+                console.log('WordWall bounds:', bounds);
+                console.log('WordWall charWidth:', charWidth);
+
+                if (bounds) {
+                    // Center on wall, pull back to see it
+                    const centerX = (bounds.min.x + bounds.max.x) / 2;
+                    const centerY = (bounds.min.y + bounds.max.y) / 2;
+                    const width = bounds.max.x - bounds.min.x;
+                    const height = bounds.height;
+
+                    // Position camera to see the wall - use FOV-based calculation
+                    // Start with a view that shows maybe 100 characters wide
+                    const viewChars = 100;
+                    const desiredViewWidth = charWidth * viewChars;
+                    const fovRad = 70 * Math.PI / 180;
+                    const fovBasedZ = (desiredViewWidth / 2) / Math.tan(fovRad / 2);
+
+                    // But also consider overall wall size for initial view
+                    const z = Math.max(fovBasedZ, width * 0.05, height * 0.1);
+                    this.camera.position.set(centerX, centerY, z);
+                    this.pitch = 0;
+                    this.yaw = 0;
+
+                    console.log('Camera positioned at:', { x: centerX, y: centerY, z, fovBasedZ });
+
+                    // Add a debug cube scaled to character size
+                    const cubeSize = charWidth * 5;  // 5 chars wide
+                    const debugCube = new THREE.Mesh(
+                        new THREE.BoxGeometry(cubeSize, cubeSize, cubeSize),
+                        new THREE.MeshBasicMaterial({ color: 0xff0000 })
+                    );
+                    debugCube.position.set(centerX, centerY, 0);
+                    this.scene.add(debugCube);
+                    console.log('Debug cube added at wall center, size:', cubeSize);
+                }
+            }
+
+            addGridHelper() {
+                const grid = new THREE.GridHelper(500, 50, 0x222233, 0x111122);
+                grid.rotation.x = Math.PI / 2;
+                grid.position.z = -5;
+                this.scene.add(grid);
+            }
+
+            async playSentence() {
+                if (this.isPlaying) return;
+
+                const sentence = this.sentenceInput.value.trim();
+                if (!sentence) return;
+
+                this.isPlaying = true;
+                this.playBtn.disabled = true;
+                this.playBtn.textContent = '⏸ Playing...';
+
+                try {
+                    await this.wordWall.playSentence(sentence, this.playbackSpeed);
+                } finally {
+                    this.isPlaying = false;
+                    this.playBtn.disabled = false;
+                    this.playBtn.textContent = '▶ Play';
+                }
+            }
+
+            clearHighlights() {
+                if (this.wordWall) {
+                    this.wordWall.clearHighlights();
+                    this.hideWordInfo();
+                }
+            }
+
+            /**
+             * Handle click on the word wall - raycast to find word, highlight it
+             */
+            handleWordClick(event) {
+                if (!this.wordWall) return;
+                const t0 = performance.now();
+
+                // Convert mouse position to normalized device coordinates (-1 to +1)
+                const rect = this.canvas.getBoundingClientRect();
+                const x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+                const y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+
+                // Create ray from camera through click point
+                const raycaster = new THREE.Raycaster();
+                raycaster.setFromCamera(new THREE.Vector2(x, y), this.camera);
+
+                // Get intersection with z=0 plane (where the wall lives)
+                const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+                const intersection = new THREE.Vector3();
+                raycaster.ray.intersectPlane(plane, intersection);
+                const t1 = performance.now();
+
+                if (!intersection) {
+                    console.log('No intersection with wall plane');
+                    return;
+                }
+
+                // Account for wall group transform
+                const wallGroup = this.wordWall.getGroup();
+                const localPoint = intersection.clone().sub(wallGroup.position);
+                if (wallGroup.scale.x !== 1) {
+                    localPoint.divideScalar(wallGroup.scale.x);
+                }
+
+                // Find word at this position
+                const word = this.wordWall.getWordAtPosition(localPoint.x, localPoint.y);
+                const t2 = performance.now();
+
+                if (word) {
+                    // Highlight it
+                    this.wordWall.highlightWord(word, true);
+                    const t3 = performance.now();
+
+                    // Show word info (using pre-computed definition map)
+                    const definition = this.wordWall.dictionary.get(word) || 'No definition';
+                    const defWordsSet = this.wordWall.definitionMap.get(word);
+                    const defWordsInWall = defWordsSet ? defWordsSet.size : 0;
+                    this.showWordInfo(word, definition, defWordsInWall);
+                    const t4 = performance.now();
+
+                    console.log(`Click timing: raycast=${(t1-t0).toFixed(1)}ms, lookup=${(t2-t1).toFixed(1)}ms, highlight=${(t3-t2).toFixed(1)}ms, UI=${(t4-t3).toFixed(1)}ms, total=${(t4-t0).toFixed(1)}ms`);
+
+                    // Move camera to center on this word
+                    const wordPos = this.wordWall.getWordPosition(word);
+                    if (wordPos) {
+                        // Transform to world coordinates (accounting for wall scale/position)
+                        const targetX = wordPos.x * wallGroup.scale.x + wallGroup.position.x;
+                        const targetY = wordPos.y * wallGroup.scale.x + wallGroup.position.y;
+                        this.camera.position.x = targetX;
+                        this.camera.position.y = targetY;
+
+                        // Calculate good Z distance based on character metrics
+                        // We want to see roughly 10-15 characters worth of horizontal space
+                        // charWidth from renderer is in world units, apply wall scale
+                        const charWidth = this.wordWall._charWidth * wallGroup.scale.x;
+                        const viewChars = 40;  // Show about 40 chars wide (2-3 words)
+                        const desiredViewWidth = charWidth * viewChars;
+
+                        // Use FOV to calculate Z (FOV is 70 degrees)
+                        const fovRad = 70 * Math.PI / 180;
+                        const aspect = window.innerWidth / window.innerHeight;
+                        // z = (viewWidth/2) / tan(fov/2) for horizontal, adjust for aspect
+                        const targetZ = (desiredViewWidth / 2) / Math.tan(fovRad / 2);
+
+                        // Snap to this Z if we're much farther out
+                        if (this.camera.position.z > targetZ * 2) {
+                            this.camera.position.z = targetZ;
+                        }
+
+                        console.log(`Camera snap: charWidth=${charWidth.toFixed(2)}, targetZ=${targetZ.toFixed(1)}`);
+
+                        // Reset pitch/yaw to look straight at wall
+                        this.pitch = 0;
+                        this.yaw = 0;
+                    }
+                } else {
+                    console.log(`No word at (${localPoint.x.toFixed(1)}, ${localPoint.y.toFixed(1)})`);
+                }
+            }
+
+            showWordInfo(word, definition, defWordCount) {
+                document.getElementById('info-word').textContent = word;
+                document.getElementById('info-definition').textContent =
+                    definition.length > 200 ? definition.slice(0, 200) + '...' : definition;
+                document.getElementById('info-def-count').textContent =
+                    `${defWordCount} definition words found in wall`;
+                this.wordInfoEl.classList.remove('hidden');
+            }
+
+            hideWordInfo() {
+                this.wordInfoEl.classList.add('hidden');
+            }
+
+            updateCamera(deltaTime) {
+                const moveDir = new THREE.Vector3();
+
+                if (this.keys['KeyW']) moveDir.z -= 1;
+                if (this.keys['KeyS']) moveDir.z += 1;
+                if (this.keys['KeyA']) moveDir.x -= 1;
+                if (this.keys['KeyD']) moveDir.x += 1;
+                if (this.keys['Space']) moveDir.y += 1;
+                if (this.keys['ShiftLeft'] || this.keys['ShiftRight']) moveDir.y -= 1;
+
+                if (moveDir.length() > 0) {
+                    moveDir.normalize();
+                    moveDir.applyQuaternion(this.camera.quaternion);
+                    moveDir.multiplyScalar(this.cameraSpeed * deltaTime);
+                    this.camera.position.add(moveDir);
+                }
+
+                const quaternion = new THREE.Quaternion();
+                quaternion.setFromEuler(new THREE.Euler(this.pitch, this.yaw, 0, 'YXZ'));
+                this.camera.quaternion.copy(quaternion);
+            }
+
+            updateStats(deltaTime) {
+                // FPS
+                this.frameCount++;
+                this.fpsTime += deltaTime;
+                if (this.fpsTime >= 1) {
+                    this.fpsEl.textContent = this.frameCount;
+                    this.frameCount = 0;
+                    this.fpsTime = 0;
+                }
+
+                // Wall stats
+                if (this.wordWall) {
+                    const stats = this.wordWall.getStats();
+                    this.wordCountEl.textContent = stats.totalWords.toLocaleString();
+                    this.glyphCountEl.textContent = stats.totalGlyphs.toLocaleString();
+                    this.gridSizeEl.textContent = `${stats.rows}x${stats.cols}`;
+                    this.highlightCountEl.textContent = stats.highlightedCount + stats.definitionCount;
+                }
+
+                // Camera
+                this.cameraZEl.textContent = this.camera.position.z.toFixed(0);
+            }
+
+            onResize() {
+                const width = window.innerWidth;
+                const height = window.innerHeight;
+
+                this.camera.aspect = width / height;
+                this.camera.updateProjectionMatrix();
+                this.renderer.setSize(width, height);
+            }
+
+            updateProgress(percent, message) {
+                this.progressFill.style.width = (percent * 100) + '%';
+                this.progressText.textContent = message;
+            }
+
+            hideLoading() {
+                this.loadingEl.classList.add('hidden');
+            }
+
+            animate() {
+                requestAnimationFrame(() => this.animate());
+
+                const now = performance.now();
+                const deltaTime = (now - this.lastTime) / 1000;
+                this.lastTime = now;
+
+                this.updateCamera(deltaTime);
+                this.updateStats(deltaTime);
+                this.renderer.render(this.scene, this.camera);
+            }
+        }
+
+        // Start the application
+        document.addEventListener('DOMContentLoaded', async () => {
+            const app = new WordWallApp();
+            await app.init();
+        });
+    </script>
+</body>
+</html>
