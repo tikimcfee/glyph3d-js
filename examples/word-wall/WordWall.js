@@ -58,6 +58,10 @@ export class WordWall {
         // Will be created in build()
         this.renderer = null;
 
+        // Definition chain line (created in build())
+        this.chainLine = null;
+        this.chainLineMaxPoints = 200;  // Max definition words we'll connect
+
         // Metrics (computed from atlas)
         this._charWidth = 0;
         this._charHeight = 0;
@@ -236,12 +240,94 @@ export class WordWall {
             buildTime
         };
 
+        // Create the definition chain line
+        this._createChainLine();
+
         console.log(`WordWall: Built in ${buildTime.toFixed(0)}ms`);
         console.log(`  - ${this.stats.totalWords.toLocaleString()} words`);
         console.log(`  - ${this.stats.totalGlyphs.toLocaleString()} glyphs`);
         console.log(`  - ${this.stats.rows} rows x ${this.stats.cols} cols`);
 
         return this;
+    }
+
+    /**
+     * Create the reusable line geometry for definition chains
+     */
+    _createChainLine() {
+        // Pre-allocate buffer for max points
+        const positions = new Float32Array(this.chainLineMaxPoints * 3);
+
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geometry.setDrawRange(0, 0);  // Start with nothing visible
+
+        // Line material with a nice gradient-like color
+        const material = new THREE.LineBasicMaterial({
+            color: 0x00ffaa,
+            linewidth: 2,  // Note: linewidth > 1 only works on some platforms
+            transparent: true,
+            opacity: 0.8
+        });
+
+        this.chainLine = new THREE.Line(geometry, material);
+        this.chainLine.frustumCulled = false;
+        this.group.add(this.chainLine);
+    }
+
+    /**
+     * Get the visual center of a word (for line drawing)
+     */
+    getWordCenter(word) {
+        const info = this.wordInfo.get(word);
+        if (!info) return null;
+
+        // Word center: halfway through the word horizontally, vertically centered
+        const wordWidth = info.displayWord.length * this._glyphAdvance;
+        return {
+            x: info.x + wordWidth / 2,
+            y: info.y,  // y is already the glyph center
+            z: this.config.definitionZ + 0.5  // Slightly in front of highlighted words
+        };
+    }
+
+    /**
+     * Draw a chain line connecting a sequence of words
+     */
+    drawWordChain(words) {
+        if (!this.chainLine || words.length < 2) {
+            this.clearChainLine();
+            return;
+        }
+
+        const positions = this.chainLine.geometry.attributes.position.array;
+        let pointCount = 0;
+
+        for (const word of words) {
+            if (pointCount >= this.chainLineMaxPoints) break;
+
+            const center = this.getWordCenter(word);
+            if (center) {
+                const idx = pointCount * 3;
+                positions[idx] = center.x;
+                positions[idx + 1] = center.y;
+                positions[idx + 2] = center.z;
+                pointCount++;
+            }
+        }
+
+        // Update the geometry
+        this.chainLine.geometry.attributes.position.needsUpdate = true;
+        this.chainLine.geometry.setDrawRange(0, pointCount);
+    }
+
+    /**
+     * Clear the chain line
+     */
+    clearChainLine() {
+        if (this.chainLine) {
+            this.chainLine.geometry.setDrawRange(0, 0);
+        }
     }
 
     // ============ Highlighting ============
@@ -265,6 +351,9 @@ export class WordWall {
             this.highlightedWords.add(normalized);
         }
 
+        // Build ordered chain for line drawing: [primaryWord, ...definitionWords]
+        const chainWords = [normalized];
+
         // Highlight definition words using pre-computed map (O(1) lookup!)
         if (expandDefinition) {
             const defWords = this.definitionMap.get(normalized);
@@ -274,14 +363,20 @@ export class WordWall {
                     if (dwInfo && dwInfo.textId !== undefined) {
                         this._setWordHighlight(dw, this.config.definitionColor, this.config.definitionZ);
                         this.definitionWords.add(dw);
+                        chainWords.push(dw);
                     }
                 }
             }
         }
+
+        // Draw the definition chain line
+        if (chainWords.length > 1) {
+            this.drawWordChain(chainWords);
+        }
     }
 
     /**
-     * Clear all highlights
+     * Clear all highlights and chain lines
      */
     clearHighlights() {
         for (const word of this.highlightedWords) {
@@ -293,6 +388,7 @@ export class WordWall {
 
         this.highlightedWords.clear();
         this.definitionWords.clear();
+        this.clearChainLine();
     }
 
     /**

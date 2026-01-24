@@ -665,16 +665,6 @@
                     this.yaw = 0;
 
                     console.log('Camera positioned at:', { x: centerX, y: centerY, z, fovBasedZ });
-
-                    // Add a debug cube scaled to character size
-                    const cubeSize = charWidth * 5;  // 5 chars wide
-                    const debugCube = new THREE.Mesh(
-                        new THREE.BoxGeometry(cubeSize, cubeSize, cubeSize),
-                        new THREE.MeshBasicMaterial({ color: 0xff0000 })
-                    );
-                    debugCube.position.set(centerX, centerY, 0);
-                    this.scene.add(debugCube);
-                    console.log('Debug cube added at wall center, size:', cubeSize);
                 }
             }
 
