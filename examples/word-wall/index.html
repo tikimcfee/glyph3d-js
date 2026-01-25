@@ -315,10 +315,49 @@
             box-shadow: 0 2px 10px rgba(255, 170, 51, 0.3);
         }
 
-        #apply-dims-btn:disabled {
+        #apply-dims-btn:disabled,
+        #load-dict-btn:disabled {
             background: #444;
             color: #888;
             cursor: not-allowed;
+        }
+
+        .setting-select {
+            flex: 1;
+            padding: 6px 10px;
+            background: #1a1a1f;
+            border: 1px solid #444;
+            border-radius: 4px;
+            color: #fff;
+            font-family: inherit;
+            font-size: 13px;
+        }
+
+        .setting-select:focus {
+            outline: none;
+            border-color: #ffaa33;
+        }
+
+        #load-dict-btn {
+            margin-left: 8px;
+            padding: 6px 12px;
+            background: linear-gradient(135deg, #33ff88 0%, #22cc66 100%);
+            color: #000;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-family: inherit;
+            font-weight: bold;
+            font-size: 12px;
+        }
+
+        #load-dict-btn:hover {
+            box-shadow: 0 2px 10px rgba(51, 255, 136, 0.3);
+        }
+
+        .setting-group.inline {
+            display: flex;
+            align-items: center;
         }
 
         /* Word info tooltip */
@@ -457,6 +496,16 @@
                    min="0.5" max="3" step="0.1" value="0.5">
         </div>
 
+        <h3 style="margin-top: 15px; border-top: 1px solid #333; padding-top: 12px;">Dictionary</h3>
+
+        <div class="setting-group inline">
+            <select id="dict-source" class="setting-select">
+                <option value="json">Original (JSON)</option>
+                <option value="generated" selected>Generated (LLM)</option>
+            </select>
+            <button id="load-dict-btn">Load</button>
+        </div>
+
         <h3 style="margin-top: 15px; border-top: 1px solid #333; padding-top: 12px;">Grid Dimensions</h3>
 
         <div class="setting-group">
@@ -495,6 +544,7 @@
         import * as THREE from 'three';
         import { GlyphAtlas } from '../../src/index.js';
         import WordWall from './WordWall.js';
+        import DictionaryParser from './DictionaryParser.js';
 
         // ============================================================
         // MAIN APPLICATION
@@ -619,6 +669,11 @@
                 document.getElementById('apply-dims-btn').addEventListener('click', () => {
                     this.rebuildWithDimensions();
                 });
+
+                // Load dictionary button
+                document.getElementById('load-dict-btn').addEventListener('click', () => {
+                    this.loadSelectedDictionary();
+                });
             }
 
             async init() {
@@ -650,9 +705,9 @@
                     this.updateProgress(0.05 + (current / total) * 0.15, `Generating glyphs: ${current}/${total}`);
                 });
 
-                // Load dictionary
+                // Load dictionary (default to generated LLM dictionary)
                 this.updateProgress(0.2, 'Loading dictionary...');
-                const dictData = await this.loadDictionary();
+                const dictData = await this.loadGeneratedDictionary();
 
                 // Create word wall - rectangular prism shape
                 this.updateProgress(0.4, 'Creating word wall...');
@@ -688,11 +743,8 @@
 
             async loadDictionary() {
                 try {
-                    const response = await fetch('./data/dictionary.json');
-                    if (!response.ok) {
-                        throw new Error(`HTTP ${response.status}`);
-                    }
-                    return await response.json();
+                    console.log('Loading JSON dictionary via worker...');
+                    return await this.loadDictionaryWithWorker('json');
                 } catch (error) {
                     console.error('Failed to load dictionary:', error);
                     // Return a small fallback dictionary
@@ -701,6 +753,100 @@
                         "world": "The earth and all its inhabitants",
                         "test": "A procedure to establish quality"
                     };
+                }
+            }
+
+            /**
+             * Load dictionary using a Web Worker for concurrent fetching/parsing
+             */
+            loadDictionaryWithWorker(type) {
+                return new Promise((resolve, reject) => {
+                    const worker = new Worker('./DictionaryLoaderWorker.js');
+
+                    worker.onmessage = (e) => {
+                        const { type: msgType } = e.data;
+
+                        if (msgType === 'progress') {
+                            const { loaded, total, phase } = e.data;
+                            const pct = total > 0 ? (loaded / total) : 0;
+                            this.updateProgress(0.2 + pct * 0.3, `Loading dictionary: ${loaded}/${total} (${phase})`);
+                            console.log(`Dictionary: ${loaded}/${total} files (${phase})`);
+                        } else if (msgType === 'done') {
+                            const { dictionary, stats } = e.data;
+                            console.log('Dictionary loaded via worker:', stats);
+                            worker.terminate();
+                            resolve(dictionary);
+                        } else if (msgType === 'error') {
+                            console.error('Worker error:', e.data.message);
+                            worker.terminate();
+                            reject(new Error(e.data.message));
+                        }
+                    };
+
+                    worker.onerror = (err) => {
+                        console.error('Worker error:', err);
+                        worker.terminate();
+                        reject(err);
+                    };
+
+                    if (type === 'generated') {
+                        worker.postMessage({
+                            type: 'loadGenerated',
+                            manifestUrl: './generated_dictionary/manifest.json',
+                            baseUrl: './generated_dictionary/dictgen-output/'
+                        });
+                    } else {
+                        worker.postMessage({
+                            type: 'loadJSON',
+                            url: './data/dictionary.json'
+                        });
+                    }
+                });
+            }
+
+            async loadGeneratedDictionary() {
+                console.log('Loading generated dictionary via worker...');
+                return this.loadDictionaryWithWorker('generated');
+            }
+
+            async loadSelectedDictionary() {
+                const source = document.getElementById('dict-source').value;
+                const btn = document.getElementById('load-dict-btn');
+
+                btn.disabled = true;
+                btn.textContent = 'Loading...';
+
+                try {
+                    let dictData;
+                    if (source === 'generated') {
+                        dictData = await this.loadGeneratedDictionary();
+                    } else {
+                        dictData = await this.loadDictionary();
+                    }
+
+                    // Rebuild with new dictionary
+                    const dimX = parseInt(document.getElementById('dim-x').value) || 20;
+                    const dimY = parseInt(document.getElementById('dim-y').value) || 60;
+
+                    this.wordWall.dispose();
+                    this.wordWall = new WordWall(this.scene, this.atlas, {
+                        wordsPerRow: dimX,
+                        wordsPerColumn: dimY,
+                    });
+
+                    this.wordWall.loadDictionary(dictData);
+                    await this.wordWall.build();
+
+                    // Apply current scale
+                    const scale = parseFloat(document.getElementById('scale-slider').value);
+                    this.wordWall.setScale(scale);
+
+                    this.positionCamera();
+
+                    console.log(`Loaded ${source} dictionary with ${Object.keys(dictData).length} words`);
+                } finally {
+                    btn.disabled = false;
+                    btn.textContent = 'Load';
                 }
             }
 
