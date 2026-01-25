@@ -12,21 +12,22 @@ import * as THREE from 'three';
 import GlyphRenderer from '../../src/GlyphRenderer.js';
 
 const DEFAULT_CONFIG = {
-    // Layout
-    wordsPerRow: 50,
-    wordGap: 1.5,        // Gap between words in character widths
-    lineHeight: 1.5,     // Line spacing multiplier
-    maxWordLength: 18,   // Truncate display for very long words
+    // 3D Volumetric Layout - rectangular prism (tall brick shape)
+    wordsPerRow: 20,      // X dimension (width)
+    wordsPerColumn: 60,   // Y dimension (height) - taller than wide
+    // Z dimension computed from word count: ~100k / (40*60) ≈ 42 layers
+    wordGap: 1.5,         // Gap between words in character widths
+    lineHeight: 1.5,      // Line spacing multiplier (Y)
+    layerSpacing: 3.0,    // Z spacing between layers (in character heights)
+    maxWordLength: 18,    // Truncate display for very long words
 
-    // Colors
+    // Colors - depth-based gradient
     dimColor: { r: 0.3, g: 0.3, b: 0.35 },
     highlightColor: { r: 0.2, g: 1.0, b: 0.5 },
     definitionColor: { r: 1.0, g: 0.7, b: 0.2 },
 
-    // Z offsets for highlighting
-    baseZ: 0,
-    highlightZ: 2.0,
-    definitionZ: 1.0,
+    // Highlight offsets (now relative, since Z is used for layering)
+    highlightPop: 2.0,    // How much highlighted words pop out toward camera
 };
 
 export class WordWall {
@@ -173,7 +174,7 @@ export class WordWall {
     }
 
     /**
-     * Build the visual wall using GlyphRenderer
+     * Build the volumetric 3D word cube using GlyphRenderer
      */
     async build() {
         if (this.sortedWords.length === 0) {
@@ -182,7 +183,7 @@ export class WordWall {
         }
 
         const startTime = performance.now();
-        console.log(`WordWall: Building wall with ${this.sortedWords.length} words...`);
+        console.log(`WordWall: Building 3D word cube with ${this.sortedWords.length} words...`);
 
         // Clear previous
         if (this.renderer) {
@@ -190,7 +191,13 @@ export class WordWall {
         }
         this.wordInfo.clear();
 
-        const { wordsPerRow, wordGap, lineHeight, maxWordLength, baseZ, dimColor } = this.config;
+        const { wordsPerRow, wordsPerColumn, wordGap, lineHeight, layerSpacing, maxWordLength, dimColor } = this.config;
+
+        // Calculate grid dimensions
+        const wordsPerLayer = wordsPerRow * wordsPerColumn;
+        const numLayers = Math.ceil(this.sortedWords.length / wordsPerLayer);
+
+        console.log(`WordWall: Grid dimensions: ${wordsPerRow} x ${wordsPerColumn} x ${numLayers} (${wordsPerLayer} words/layer)`);
 
         // Estimate total glyphs for buffer sizing
         let totalGlyphs = 0;
@@ -213,22 +220,48 @@ export class WordWall {
         this._letterSpacing = metrics.letterSpacing;
         this._glyphAdvance = this._charWidth + this._letterSpacing;
 
-        console.log(`WordWall: Using renderer metrics - charWidth: ${this._charWidth.toFixed(4)}, letterSpacing: ${this._letterSpacing.toFixed(4)}, glyphAdvance: ${this._glyphAdvance.toFixed(4)}`);
+        console.log(`WordWall: Using renderer metrics - charWidth: ${this._charWidth.toFixed(4)}, glyphAdvance: ${this._glyphAdvance.toFixed(4)}`);
 
-        // Cell dimensions - use glyphAdvance for accurate spacing
+        // Cell dimensions
         const cellWidth = (maxWordLength * this._glyphAdvance) + (wordGap * this._glyphAdvance);
-        const rowHeight = this._charHeight * lineHeight;
+        const cellHeight = this._charHeight * lineHeight;
+        const layerDepth = this._charHeight * layerSpacing;
 
-        // Build batch items
+        // Store for hit detection
+        this._cellWidth = cellWidth;
+        this._cellHeight = cellHeight;
+        this._layerDepth = layerDepth;
+        this._numLayers = numLayers;
+
+        // Calculate cube dimensions for centering
+        const cubeWidth = wordsPerRow * cellWidth;
+        const cubeHeight = wordsPerColumn * cellHeight;
+        const cubeDepth = numLayers * layerDepth;
+
+        // Build batch items - 3D volumetric layout
         const batchItems = [];
 
         for (let i = 0; i < this.sortedWords.length; i++) {
             const word = this.sortedWords[i];
-            const row = Math.floor(i / wordsPerRow);
-            const col = i % wordsPerRow;
 
-            const x = col * cellWidth;
-            const y = -row * rowHeight;  // Negative = downward
+            // 3D grid position
+            const layer = Math.floor(i / wordsPerLayer);
+            const indexInLayer = i % wordsPerLayer;
+            const row = Math.floor(indexInLayer / wordsPerRow);
+            const col = indexInLayer % wordsPerRow;
+
+            // World coordinates (centered around origin)
+            const x = (col * cellWidth) - cubeWidth / 2;
+            const y = -(row * cellHeight) + cubeHeight / 2;  // Negative = downward, centered
+            const z = -(layer * layerDepth);  // Layers go back into -Z
+
+            // Depth-based color fade (words further back are dimmer)
+            const depthFade = 1.0 - (layer / numLayers) * 0.4;  // 60% to 100% brightness
+            const layerColor = {
+                r: dimColor.r * depthFade,
+                g: dimColor.g * depthFade,
+                b: dimColor.b * depthFade
+            };
 
             // Truncate for display if needed
             const displayWord = word.length > maxWordLength
@@ -237,12 +270,12 @@ export class WordWall {
 
             batchItems.push({
                 text: displayWord,
-                position: { x, y, z: baseZ },
-                options: { color: dimColor, alignment: 'left' }
+                position: { x, y, z },
+                options: { color: layerColor, alignment: 'left' }
             });
 
-            // Store info (textId will be assigned after renderBatch)
-            this.wordInfo.set(word, { row, col, x, y, displayWord });
+            // Store info with 3D coordinates and original color
+            this.wordInfo.set(word, { layer, row, col, x, y, z, displayWord, originalColor: layerColor });
         }
 
         // Batch render all texts
@@ -262,18 +295,21 @@ export class WordWall {
         this.stats = {
             totalWords: this.sortedWords.length,
             totalGlyphs: this.renderer.getStats().glyphCount,
-            rows: Math.ceil(this.sortedWords.length / wordsPerRow),
+            layers: numLayers,
+            rows: wordsPerColumn,
             cols: wordsPerRow,
+            cubeSize: { width: cubeWidth, height: cubeHeight, depth: cubeDepth },
             buildTime
         };
 
         // Create the definition chain lines (multiple, one per meaning)
         this._createChainLines();
 
-        console.log(`WordWall: Built in ${buildTime.toFixed(0)}ms`);
+        console.log(`WordWall: Built 3D cube in ${buildTime.toFixed(0)}ms`);
         console.log(`  - ${this.stats.totalWords.toLocaleString()} words`);
         console.log(`  - ${this.stats.totalGlyphs.toLocaleString()} glyphs`);
-        console.log(`  - ${this.stats.rows} rows x ${this.stats.cols} cols`);
+        console.log(`  - ${numLayers} layers x ${wordsPerColumn} rows x ${wordsPerRow} cols`);
+        console.log(`  - Cube size: ${cubeWidth.toFixed(0)} x ${cubeHeight.toFixed(0)} x ${cubeDepth.toFixed(0)}`);
 
         return this;
     }
@@ -412,6 +448,7 @@ export class WordWall {
 
     /**
      * Get the visual center of a word (for line drawing)
+     * Now works in full 3D - returns the word's actual position in the cube
      */
     getWordCenter(word) {
         const info = this.wordInfo.get(word);
@@ -421,7 +458,7 @@ export class WordWall {
         return {
             x: info.x + wordWidth / 2,
             y: info.y,
-            z: this.config.definitionZ + 0.5
+            z: info.z + this.config.highlightPop  // Pop forward slightly from its layer
         };
     }
 
@@ -512,10 +549,10 @@ export class WordWall {
         // Clear previous highlights (direct buffer writes)
         this.clearHighlights();
 
-        // Highlight primary word
+        // Highlight primary word (pops forward from its layer)
         const info = this.wordInfo.get(normalized);
         if (info && info.textId !== undefined) {
-            this._setWordHighlight(normalized, this.config.highlightColor, this.config.highlightZ);
+            this._setWordHighlight(normalized, this.config.highlightColor, this.config.highlightPop);
             this.highlightedWords.add(normalized);
         }
 
@@ -524,10 +561,11 @@ export class WordWall {
             const defData = this.definitionMap.get(normalized);
             if (defData) {
                 // Highlight ALL definition words (from all meanings)
+                // Definition words pop forward slightly less than the primary
                 for (const dw of defData.allWords) {
                     const dwInfo = this.wordInfo.get(dw);
                     if (dwInfo && dwInfo.textId !== undefined) {
-                        this._setWordHighlight(dw, this.config.definitionColor, this.config.definitionZ);
+                        this._setWordHighlight(dw, this.config.definitionColor, this.config.highlightPop * 0.5);
                         this.definitionWords.add(dw);
                     }
                 }
@@ -549,11 +587,18 @@ export class WordWall {
      * Clear all highlights and chain lines
      */
     clearHighlights() {
+        // Reset words to their original positions and colors (depth-faded)
         for (const word of this.highlightedWords) {
-            this._setWordHighlight(word, this.config.dimColor, this.config.baseZ);
+            const info = this.wordInfo.get(word);
+            if (info && info.originalColor) {
+                this._setWordHighlight(word, info.originalColor, 0);
+            }
         }
         for (const word of this.definitionWords) {
-            this._setWordHighlight(word, this.config.dimColor, this.config.baseZ);
+            const info = this.wordInfo.get(word);
+            if (info && info.originalColor) {
+                this._setWordHighlight(word, info.originalColor, 0);
+            }
         }
 
         this.highlightedWords.clear();
@@ -576,13 +621,18 @@ export class WordWall {
 
     // ============ Internal ============
 
-    _setWordHighlight(word, color, z) {
+    _setWordHighlight(word, color, zOffset = 0) {
         const info = this.wordInfo.get(word);
         if (!info || info.textId === undefined || !this.renderer) return;
 
         // Use GlyphRenderer's update methods directly
+        // In 3D mode, z is the word's layer position + optional highlight pop
         this.renderer.updateColor(info.textId, color);
-        this.renderer.updatePosition(info.textId, { x: info.x, y: info.y, z });
+        this.renderer.updatePosition(info.textId, {
+            x: info.x,
+            y: info.y,
+            z: info.z + zOffset  // Add offset to word's actual Z position
+        });
     }
 
     /**
@@ -612,67 +662,73 @@ export class WordWall {
     // ============ Spatial Queries ============
 
     /**
-     * Find which word is at a given world position (x, y)
-     * Used for click detection
+     * Find which word is at a given 3D ray intersection
+     * For volumetric mode, we need to check multiple layers
      *
-     * Glyph positions (info.x, info.y) represent where the glyph quad is centered.
-     * The visual bounds of a word span from:
-     *   - Left: first glyph center - charWidth/2
-     *   - Right: last glyph center + charWidth/2
-     *   - Top: glyph center + charHeight/2
-     *   - Bottom: glyph center - charHeight/2
+     * @param {THREE.Ray} ray - The ray from camera through click point
+     * @returns {string|null} The word at this position, or null
      */
-    getWordAtPosition(x, y) {
-        const { wordsPerRow, wordGap, lineHeight, maxWordLength } = this.config;
+    getWordAtRay(ray) {
+        const { wordsPerRow, wordsPerColumn } = this.config;
+        const wordsPerLayer = wordsPerRow * wordsPerColumn;
 
-        // Cell dimensions (for grid lookup)
-        const cellWidth = (maxWordLength * this._glyphAdvance) + (wordGap * this._glyphAdvance);
-        const rowHeight = this._charHeight * lineHeight;
-
-        // Quick grid lookup to narrow down candidates
-        // Estimate which row we're in (y is negative going down)
-        const approxRow = Math.floor(-y / rowHeight);
-        const approxCol = Math.floor(x / cellWidth);
-
-        if (approxCol < 0 || approxRow < 0) return null;
-
-        // Check the candidate cell and neighbors (in case we're on a boundary)
-        const candidates = [];
-        for (let dr = -1; dr <= 1; dr++) {
-            for (let dc = -1; dc <= 1; dc++) {
-                const row = approxRow + dr;
-                const col = approxCol + dc;
-                if (row < 0 || col < 0 || col >= wordsPerRow) continue;
-
-                const wordIndex = row * wordsPerRow + col;
-                if (wordIndex >= 0 && wordIndex < this.sortedWords.length) {
-                    candidates.push(this.sortedWords[wordIndex]);
-                }
-            }
-        }
-
-        // Check each candidate's actual visual bounds
         const halfW = this._charWidth / 2;
         const halfH = this._charHeight / 2;
-        const padding = this._charWidth * 0.2;  // Small click padding
+        const padding = this._charWidth * 0.3;
 
-        for (const word of candidates) {
-            const info = this.wordInfo.get(word);
-            if (!info) continue;
+        // Check each layer from front to back (higher Z first)
+        // Return the first hit (closest to camera)
+        for (let layer = 0; layer < this._numLayers; layer++) {
+            const layerZ = -(layer * this._layerDepth);
 
-            // Visual bounds of this word
-            // First glyph is at info.x, last glyph is at info.x + (len-1) * glyphAdvance
-            const firstGlyphX = info.x;
-            const lastGlyphX = info.x + (info.displayWord.length - 1) * this._glyphAdvance;
+            // Intersect ray with this layer's Z plane
+            const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -layerZ);
+            const intersection = new THREE.Vector3();
+            if (!ray.intersectPlane(plane, intersection)) continue;
 
-            const visualLeft = firstGlyphX - halfW - padding;
-            const visualRight = lastGlyphX + halfW + padding;
-            const visualTop = info.y + halfH + padding;
-            const visualBottom = info.y - halfH - padding;
+            const x = intersection.x;
+            const y = intersection.y;
 
-            if (x >= visualLeft && x <= visualRight &&
-                y >= visualBottom && y <= visualTop) {
-                return word;
+            // Find candidate words in this layer
+            // Convert to grid coordinates (accounting for centering)
+            const cubeWidth = wordsPerRow * this._cellWidth;
+            const cubeHeight = wordsPerColumn * this._cellHeight;
+
+            const localX = x + cubeWidth / 2;
+            const localY = -y + cubeHeight / 2;
+
+            const approxCol = Math.floor(localX / this._cellWidth);
+            const approxRow = Math.floor(localY / this._cellHeight);
+
+            // Check nearby cells
+            for (let dr = -1; dr <= 1; dr++) {
+                for (let dc = -1; dc <= 1; dc++) {
+                    const row = approxRow + dr;
+                    const col = approxCol + dc;
+                    if (row < 0 || col < 0 || row >= wordsPerColumn || col >= wordsPerRow) continue;
+
+                    const indexInLayer = row * wordsPerRow + col;
+                    const wordIndex = layer * wordsPerLayer + indexInLayer;
+                    if (wordIndex >= this.sortedWords.length) continue;
+
+                    const word = this.sortedWords[wordIndex];
+                    const info = this.wordInfo.get(word);
+                    if (!info || info.layer !== layer) continue;
+
+                    // Check actual visual bounds
+                    const firstGlyphX = info.x;
+                    const lastGlyphX = info.x + (info.displayWord.length - 1) * this._glyphAdvance;
+
+                    const visualLeft = firstGlyphX - halfW - padding;
+                    const visualRight = lastGlyphX + halfW + padding;
+                    const visualTop = info.y + halfH + padding;
+                    const visualBottom = info.y - halfH - padding;
+
+                    if (x >= visualLeft && x <= visualRight &&
+                        y >= visualBottom && y <= visualTop) {
+                        return word;
+                    }
+                }
             }
         }
 
@@ -680,31 +736,56 @@ export class WordWall {
     }
 
     /**
+     * Legacy 2D position lookup (for compatibility)
+     * In 3D mode, use getWordAtRay instead
+     */
+    getWordAtPosition(x, y) {
+        // Create a simple ray pointing in -Z direction from (x, y, 100)
+        const ray = new THREE.Ray(
+            new THREE.Vector3(x, y, 100),
+            new THREE.Vector3(0, 0, -1)
+        );
+        return this.getWordAtRay(ray);
+    }
+
+    /**
      * Get the world position of a word (for camera targeting)
+     * Returns full 3D coordinates in volumetric mode
      */
     getWordPosition(word) {
         const info = this.wordInfo.get(word.toLowerCase().trim());
         if (!info) return null;
 
-        return { x: info.x, y: info.y, z: this.config.baseZ };
+        return { x: info.x, y: info.y, z: info.z };
     }
 
     // ============ Public API ============
 
+    /**
+     * Get the 3D bounding box of the word cube
+     */
     getBounds() {
         if (this.stats.totalWords === 0) return null;
 
-        const { wordsPerRow, maxWordLength, wordGap, lineHeight } = this.config;
+        const { wordsPerRow, wordsPerColumn, maxWordLength, wordGap, lineHeight, layerSpacing } = this.config;
 
         // Use same cell dimensions as build()
         const cellWidth = (maxWordLength * this._glyphAdvance) + (wordGap * this._glyphAdvance);
-        const rowHeight = this._charHeight * lineHeight;
+        const cellHeight = this._charHeight * lineHeight;
+        const layerDepth = this._charHeight * layerSpacing;
+
+        const cubeWidth = wordsPerRow * cellWidth;
+        const cubeHeight = wordsPerColumn * cellHeight;
+        const cubeDepth = (this.stats.layers || 1) * layerDepth;
 
         return {
-            min: { x: 0, y: -this.stats.rows * rowHeight, z: this.config.baseZ },
-            max: { x: wordsPerRow * cellWidth, y: 0, z: this.config.highlightZ },
-            width: wordsPerRow * cellWidth,
-            height: this.stats.rows * rowHeight
+            // Cube is centered on X/Y, extends in -Z
+            min: { x: -cubeWidth / 2, y: -cubeHeight / 2, z: -cubeDepth },
+            max: { x: cubeWidth / 2, y: cubeHeight / 2, z: 0 },
+            width: cubeWidth,
+            height: cubeHeight,
+            depth: cubeDepth,
+            center: { x: 0, y: 0, z: -cubeDepth / 2 }
         };
     }
 
