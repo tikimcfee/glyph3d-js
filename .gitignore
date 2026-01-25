@@ -30,3 +30,4 @@ coverage/
 # Data
 examples/word-wall/generated_dictionary/
 examples/word-wall/data/
+coordinates.csv

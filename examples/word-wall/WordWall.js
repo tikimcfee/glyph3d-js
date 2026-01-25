@@ -12,22 +12,25 @@ import * as THREE from 'three';
 import GlyphRenderer from '../../src/GlyphRenderer.js';
 
 const DEFAULT_CONFIG = {
-    // 3D Volumetric Layout - rectangular prism (tall brick shape)
-    wordsPerRow: 20,      // X dimension (width)
-    wordsPerColumn: 60,   // Y dimension (height) - taller than wide
-    // Z dimension computed from word count: ~100k / (40*60) ≈ 42 layers
-    wordGap: 1.5,         // Gap between words in character widths
-    lineHeight: 1.5,      // Line spacing multiplier (Y)
-    layerSpacing: 3.0,    // Z spacing between layers (in character heights)
-    maxWordLength: 18,    // Truncate display for very long words
+    // Embedding-based layout
+    useEmbeddings: true,  // If true, use embedding coordinates instead of grid
+    embeddingScale: 50,    // Scale factor for embedding coordinates
 
-    // Colors - depth-based gradient
+    // Grid-based layout (fallback when no embeddings)
+    wordsPerRow: 20,
+    wordsPerColumn: 60,
+    wordGap: 1.5,
+    lineHeight: 1.5,
+    layerSpacing: 3.0,
+    maxWordLength: 18,
+
+    // Colors
     dimColor: { r: 0.3, g: 0.3, b: 0.35 },
     highlightColor: { r: 0.2, g: 1.0, b: 0.5 },
     definitionColor: { r: 1.0, g: 0.7, b: 0.2 },
 
-    // Highlight offsets (now relative, since Z is used for layering)
-    highlightPop: 2.0,    // How much highlighted words pop out toward camera
+    // Highlight behavior
+    highlightPop: 2.0,
 };
 
 export class WordWall {
@@ -80,19 +83,33 @@ export class WordWall {
     }
 
     /**
-     * Load dictionary data
+     * Load dictionary data and optional embedding coordinates
+     * @param {Object} dictData - { word: definition, ... }
+     * @param {Object} coordinates - { word: {x, y, z}, ... } or null
      */
-    loadDictionary(dictData) {
+    loadDictionary(dictData, coordinates = null) {
         const startTime = performance.now();
 
         this.dictionary.clear();
         this.sortedWords = [];
+        this.embeddings = coordinates ? new Map() : null;
 
         for (const [word, definition] of Object.entries(dictData)) {
             const normalized = word.toLowerCase().trim();
             if (normalized.length > 0 && normalized.length <= 30) {
                 this.dictionary.set(normalized, definition);
             }
+        }
+
+        // Store embeddings if provided
+        if (coordinates) {
+            for (const [word, coords] of Object.entries(coordinates)) {
+                const normalized = word.toLowerCase().trim();
+                if (this.dictionary.has(normalized)) {
+                    this.embeddings.set(normalized, coords);
+                }
+            }
+            console.log(`WordWall: ${this.embeddings.size} words have embeddings`);
         }
 
         this.sortedWords = Array.from(this.dictionary.keys()).sort();
@@ -174,7 +191,8 @@ export class WordWall {
     }
 
     /**
-     * Build the volumetric 3D word cube using GlyphRenderer
+     * Build the 3D word visualization using GlyphRenderer
+     * Supports both embedding-based and grid-based layouts
      */
     async build() {
         if (this.sortedWords.length === 0) {
@@ -183,7 +201,9 @@ export class WordWall {
         }
 
         const startTime = performance.now();
-        console.log(`WordWall: Building 3D word cube with ${this.sortedWords.length} words...`);
+        const useEmbeddings = this.config.useEmbeddings && this.embeddings && this.embeddings.size > 0;
+
+        console.log(`WordWall: Building with ${this.sortedWords.length} words (mode: ${useEmbeddings ? 'embeddings' : 'grid'})...`);
 
         // Clear previous
         if (this.renderer) {
@@ -191,13 +211,7 @@ export class WordWall {
         }
         this.wordInfo.clear();
 
-        const { wordsPerRow, wordsPerColumn, wordGap, lineHeight, layerSpacing, maxWordLength, dimColor } = this.config;
-
-        // Calculate grid dimensions
-        const wordsPerLayer = wordsPerRow * wordsPerColumn;
-        const numLayers = Math.ceil(this.sortedWords.length / wordsPerLayer);
-
-        console.log(`WordWall: Grid dimensions: ${wordsPerRow} x ${wordsPerColumn} x ${numLayers} (${wordsPerLayer} words/layer)`);
+        const { maxWordLength, dimColor, embeddingScale } = this.config;
 
         // Estimate total glyphs for buffer sizing
         let totalGlyphs = 0;
@@ -207,20 +221,160 @@ export class WordWall {
 
         console.log(`WordWall: Estimated ${totalGlyphs} glyphs, creating renderer...`);
 
-        // Create renderer FIRST, then get its metrics to ensure consistency
+        // Create renderer
         this.renderer = new GlyphRenderer(this.group, this.atlas, {
-            maxInstances: Math.ceil(totalGlyphs * 1.1),  // 10% headroom
+            maxInstances: Math.ceil(totalGlyphs * 1.1),
             defaultColor: dimColor
         });
 
-        // Get metrics FROM the renderer - this ensures our layout matches exactly
+        // Get metrics from renderer
         const metrics = this.renderer.metrics;
         this._charWidth = metrics.charWidth;
         this._charHeight = metrics.charHeight;
         this._letterSpacing = metrics.letterSpacing;
         this._glyphAdvance = this._charWidth + this._letterSpacing;
 
-        console.log(`WordWall: Using renderer metrics - charWidth: ${this._charWidth.toFixed(4)}, glyphAdvance: ${this._glyphAdvance.toFixed(4)}`);
+        console.log(`WordWall: Renderer metrics - charWidth: ${this._charWidth.toFixed(4)}`);
+
+        // Build with appropriate layout
+        if (useEmbeddings) {
+            return this._buildWithEmbeddings(startTime);
+        } else {
+            return this._buildWithGrid(startTime);
+        }
+    }
+
+    /**
+     * Build using embedding coordinates
+     */
+    _buildWithEmbeddings(startTime) {
+        const { maxWordLength, dimColor, embeddingScale } = this.config;
+
+        // Track bounds for stats
+        let minX = Infinity, maxX = -Infinity;
+        let minY = Infinity, maxY = -Infinity;
+        let minZ = Infinity, maxZ = -Infinity;
+
+        // Track missing words
+        const missingWords = [];
+        const batchItems = [];
+        let wordIndex = 0;
+
+        for (const word of this.sortedWords) {
+            const embedding = this.embeddings.get(word);
+
+            if (!embedding) {
+                missingWords.push(word);
+                continue;
+            }
+
+            // Scale embedding coordinates
+            const x = embedding.x * embeddingScale;
+            const y = embedding.y * embeddingScale;
+            const z = embedding.z * embeddingScale;
+
+            // Track bounds
+            minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+            minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+            minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z);
+
+            // Truncate for display
+            const displayWord = word.length > maxWordLength
+                ? word.slice(0, maxWordLength - 1) + '…'
+                : word;
+
+            // Color based on position in embedding space (for visual variety)
+            const normX = (embedding.x + 10) / 20;  // Normalize roughly to 0-1
+            const normY = (embedding.y + 10) / 20;
+            const normZ = (embedding.z) / 20;
+            const wordColor = {
+                r: dimColor.r + normX * 0.15,
+                g: dimColor.g + normY * 0.15,
+                b: dimColor.b + normZ * 0.1
+            };
+
+            batchItems.push({
+                text: displayWord,
+                position: { x, y, z },
+                options: { color: wordColor, alignment: 'left' }
+            });
+
+            // Store info
+            this.wordInfo.set(word, {
+                x, y, z,
+                displayWord,
+                originalColor: wordColor,
+                wordIndex: wordIndex++
+            });
+        }
+
+        // Log and expose missing words
+        if (missingWords.length > 0) {
+            console.warn(`WordWall: ${missingWords.length} words missing embeddings`);
+            window.missingWords = missingWords;
+            console.log('Missing words exposed as window.missingWords');
+        }
+
+        // Batch render
+        console.log(`WordWall: Rendering ${batchItems.length} texts with embeddings...`);
+        const textIds = this.renderer.renderBatch(batchItems);
+
+        // Map words to renderer IDs
+        let idx = 0;
+        for (const word of this.sortedWords) {
+            const info = this.wordInfo.get(word);
+            if (info) {
+                info.textId = textIds[idx++];
+            }
+        }
+
+        // Store bounds for camera/hit detection
+        this._bounds = {
+            min: { x: minX, y: minY, z: minZ },
+            max: { x: maxX, y: maxY, z: maxZ },
+            width: maxX - minX,
+            height: maxY - minY,
+            depth: maxZ - minZ,
+            center: {
+                x: (minX + maxX) / 2,
+                y: (minY + maxY) / 2,
+                z: (minZ + maxZ) / 2
+            }
+        };
+
+        // Stats
+        const buildTime = performance.now() - startTime;
+        this.stats = {
+            totalWords: batchItems.length,
+            totalGlyphs: this.renderer.getStats().glyphCount,
+            missingWords: missingWords.length,
+            bounds: this._bounds,
+            buildTime,
+            mode: 'embeddings'
+        };
+
+        // Create chain lines
+        this._createChainLines();
+
+        console.log(`WordWall: Built embedding cloud in ${buildTime.toFixed(0)}ms`);
+        console.log(`  - ${this.stats.totalWords.toLocaleString()} words rendered`);
+        console.log(`  - ${missingWords.length} words skipped (no embedding)`);
+        console.log(`  - Bounds: X[${minX.toFixed(0)}, ${maxX.toFixed(0)}] Y[${minY.toFixed(0)}, ${maxY.toFixed(0)}] Z[${minZ.toFixed(0)}, ${maxZ.toFixed(0)}]`);
+
+        return this;
+    }
+
+    /**
+     * Build using grid layout (original volumetric cube)
+     */
+    _buildWithGrid(startTime) {
+        const { wordsPerRow, wordsPerColumn, wordGap, lineHeight, layerSpacing, maxWordLength, dimColor } = this.config;
+
+        // Calculate grid dimensions
+        const wordsPerLayer = wordsPerRow * wordsPerColumn;
+        const numLayers = Math.ceil(this.sortedWords.length / wordsPerLayer);
+
+        console.log(`WordWall: Grid dimensions: ${wordsPerRow} x ${wordsPerColumn} x ${numLayers}`);
 
         // Cell dimensions
         const cellWidth = (maxWordLength * this._glyphAdvance) + (wordGap * this._glyphAdvance);
@@ -233,37 +387,33 @@ export class WordWall {
         this._layerDepth = layerDepth;
         this._numLayers = numLayers;
 
-        // Calculate cube dimensions for centering
+        // Calculate cube dimensions
         const cubeWidth = wordsPerRow * cellWidth;
         const cubeHeight = wordsPerColumn * cellHeight;
         const cubeDepth = numLayers * layerDepth;
 
-        // Build batch items - 3D volumetric layout
+        // Build batch items
         const batchItems = [];
 
         for (let i = 0; i < this.sortedWords.length; i++) {
             const word = this.sortedWords[i];
 
-            // 3D grid position
             const layer = Math.floor(i / wordsPerLayer);
             const indexInLayer = i % wordsPerLayer;
             const row = Math.floor(indexInLayer / wordsPerRow);
             const col = indexInLayer % wordsPerRow;
 
-            // World coordinates (centered around origin)
             const x = (col * cellWidth) - cubeWidth / 2;
-            const y = -(row * cellHeight) + cubeHeight / 2;  // Negative = downward, centered
-            const z = -(layer * layerDepth);  // Layers go back into -Z
+            const y = -(row * cellHeight) + cubeHeight / 2;
+            const z = -(layer * layerDepth);
 
-            // Depth-based color fade (words further back are dimmer)
-            const depthFade = 1.0 - (layer / numLayers) * 0.4;  // 60% to 100% brightness
+            const depthFade = 1.0 - (layer / numLayers) * 0.4;
             const layerColor = {
                 r: dimColor.r * depthFade,
                 g: dimColor.g * depthFade,
                 b: dimColor.b * depthFade
             };
 
-            // Truncate for display if needed
             const displayWord = word.length > maxWordLength
                 ? word.slice(0, maxWordLength - 1) + '…'
                 : word;
@@ -274,21 +424,29 @@ export class WordWall {
                 options: { color: layerColor, alignment: 'left' }
             });
 
-            // Store info with 3D coordinates and original color
             this.wordInfo.set(word, { layer, row, col, x, y, z, displayWord, originalColor: layerColor });
         }
 
-        // Batch render all texts
+        // Batch render
         console.log(`WordWall: Rendering ${batchItems.length} texts...`);
         const textIds = this.renderer.renderBatch(batchItems);
 
-        // Map words to their renderer IDs
+        // Map words to renderer IDs
         let idx = 0;
         for (const word of this.sortedWords) {
             const info = this.wordInfo.get(word);
-            info.textId = textIds[idx];
-            idx++;
+            info.textId = textIds[idx++];
         }
+
+        // Store bounds
+        this._bounds = {
+            min: { x: -cubeWidth / 2, y: -cubeHeight / 2, z: -cubeDepth },
+            max: { x: cubeWidth / 2, y: cubeHeight / 2, z: 0 },
+            width: cubeWidth,
+            height: cubeHeight,
+            depth: cubeDepth,
+            center: { x: 0, y: 0, z: -cubeDepth / 2 }
+        };
 
         // Stats
         const buildTime = performance.now() - startTime;
@@ -299,17 +457,16 @@ export class WordWall {
             rows: wordsPerColumn,
             cols: wordsPerRow,
             cubeSize: { width: cubeWidth, height: cubeHeight, depth: cubeDepth },
-            buildTime
+            buildTime,
+            mode: 'grid'
         };
 
-        // Create the definition chain lines (multiple, one per meaning)
+        // Create chain lines
         this._createChainLines();
 
-        console.log(`WordWall: Built 3D cube in ${buildTime.toFixed(0)}ms`);
+        console.log(`WordWall: Built 3D grid in ${buildTime.toFixed(0)}ms`);
         console.log(`  - ${this.stats.totalWords.toLocaleString()} words`);
-        console.log(`  - ${this.stats.totalGlyphs.toLocaleString()} glyphs`);
         console.log(`  - ${numLayers} layers x ${wordsPerColumn} rows x ${wordsPerRow} cols`);
-        console.log(`  - Cube size: ${cubeWidth.toFixed(0)} x ${cubeHeight.toFixed(0)} x ${cubeDepth.toFixed(0)}`);
 
         return this;
     }
@@ -762,31 +919,11 @@ export class WordWall {
     // ============ Public API ============
 
     /**
-     * Get the 3D bounding box of the word cube
+     * Get the 3D bounding box of the word cloud/cube
      */
     getBounds() {
-        if (this.stats.totalWords === 0) return null;
-
-        const { wordsPerRow, wordsPerColumn, maxWordLength, wordGap, lineHeight, layerSpacing } = this.config;
-
-        // Use same cell dimensions as build()
-        const cellWidth = (maxWordLength * this._glyphAdvance) + (wordGap * this._glyphAdvance);
-        const cellHeight = this._charHeight * lineHeight;
-        const layerDepth = this._charHeight * layerSpacing;
-
-        const cubeWidth = wordsPerRow * cellWidth;
-        const cubeHeight = wordsPerColumn * cellHeight;
-        const cubeDepth = (this.stats.layers || 1) * layerDepth;
-
-        return {
-            // Cube is centered on X/Y, extends in -Z
-            min: { x: -cubeWidth / 2, y: -cubeHeight / 2, z: -cubeDepth },
-            max: { x: cubeWidth / 2, y: cubeHeight / 2, z: 0 },
-            width: cubeWidth,
-            height: cubeHeight,
-            depth: cubeDepth,
-            center: { x: 0, y: 0, z: -cubeDepth / 2 }
-        };
+        // Return pre-computed bounds from build()
+        return this._bounds || null;
     }
 
     getGroup() {

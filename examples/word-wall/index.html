@@ -311,12 +311,28 @@
             font-size: 12px;
         }
 
-        #apply-dims-btn:hover {
+        #apply-dims-btn:hover,
+        #apply-embed-btn:hover {
             box-shadow: 0 2px 10px rgba(255, 170, 51, 0.3);
         }
 
+        #apply-embed-btn {
+            width: 100%;
+            margin-top: 10px;
+            padding: 8px 12px;
+            background: linear-gradient(135deg, #ffaa33 0%, #ff8800 100%);
+            color: #000;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-family: inherit;
+            font-weight: bold;
+            font-size: 12px;
+        }
+
         #apply-dims-btn:disabled,
-        #load-dict-btn:disabled {
+        #load-dict-btn:disabled,
+        #apply-embed-btn:disabled {
             background: #444;
             color: #888;
             cursor: not-allowed;
@@ -506,23 +522,18 @@
             <button id="load-dict-btn">Load</button>
         </div>
 
-        <h3 style="margin-top: 15px; border-top: 1px solid #333; padding-top: 12px;">Grid Dimensions</h3>
+        <h3 style="margin-top: 15px; border-top: 1px solid #333; padding-top: 12px;">Embedding Scale</h3>
 
         <div class="setting-group">
             <div class="setting-label">
-                <span>Words/Row (X)</span>
+                <span>Scale</span>
+                <span class="setting-value" id="embed-scale-value">50</span>
             </div>
-            <input type="number" class="setting-number" id="dim-x" value="20" min="10" max="100">
+            <input type="range" class="setting-slider" id="embed-scale-slider"
+                   min="10" max="200" step="10" value="50">
         </div>
 
-        <div class="setting-group">
-            <div class="setting-label">
-                <span>Words/Col (Y)</span>
-            </div>
-            <input type="number" class="setting-number" id="dim-y" value="60" min="10" max="100">
-        </div>
-
-        <button id="apply-dims-btn">Apply & Rebuild</button>
+        <button id="apply-embed-btn">Apply & Rebuild</button>
     </div>
 
     <!-- Word info tooltip -->
@@ -665,9 +676,15 @@
                     }
                 });
 
-                // Apply dimensions button
-                document.getElementById('apply-dims-btn').addEventListener('click', () => {
-                    this.rebuildWithDimensions();
+                // Embedding scale slider (visual feedback)
+                document.getElementById('embed-scale-slider').addEventListener('input', (e) => {
+                    const scale = parseInt(e.target.value);
+                    document.getElementById('embed-scale-value').textContent = scale;
+                });
+
+                // Apply embedding scale button
+                document.getElementById('apply-embed-btn').addEventListener('click', () => {
+                    this.rebuildWithEmbeddingScale();
                 });
 
                 // Load dictionary button
@@ -705,19 +722,21 @@
                     this.updateProgress(0.05 + (current / total) * 0.15, `Generating glyphs: ${current}/${total}`);
                 });
 
-                // Load dictionary (default to generated LLM dictionary)
+                // Load dictionary and coordinates (default to generated LLM dictionary)
                 this.updateProgress(0.2, 'Loading dictionary...');
-                const dictData = await this.loadGeneratedDictionary();
+                const { dictionary, coordinates } = await this.loadGeneratedDictionary();
 
-                // Create word wall - rectangular prism shape
+                // Store coordinates for rebuilds
+                this.coordinates = coordinates;
+
+                // Create word wall with embedding layout
                 this.updateProgress(0.4, 'Creating word wall...');
                 this.wordWall = new WordWall(this.scene, this.atlas, {
-                    wordsPerRow: 20,       // X dimension
-                    wordsPerColumn: 60,    // Y dimension (taller)
-                    // Z computed automatically from word count
+                    embeddingScale: 50,    // Scale factor for embedding coordinates
+                    useEmbeddings: !!coordinates,
                 });
 
-                this.wordWall.loadDictionary(dictData);
+                this.wordWall.loadDictionary(dictionary, coordinates);
 
                 this.updateProgress(0.5, 'Building wall layout...');
                 await this.wordWall.build();
@@ -749,9 +768,12 @@
                     console.error('Failed to load dictionary:', error);
                     // Return a small fallback dictionary
                     return {
-                        "hello": "A greeting",
-                        "world": "The earth and all its inhabitants",
-                        "test": "A procedure to establish quality"
+                        dictionary: {
+                            "hello": "A greeting",
+                            "world": "The earth and all its inhabitants",
+                            "test": "A procedure to establish quality"
+                        },
+                        coordinates: null
                     };
                 }
             }
@@ -759,7 +781,7 @@
             /**
              * Load dictionary using a Web Worker for concurrent fetching/parsing
              */
-            loadDictionaryWithWorker(type) {
+            loadDictionaryWithWorker(type, loadCoordinates = true) {
                 return new Promise((resolve, reject) => {
                     const worker = new Worker('./DictionaryLoaderWorker.js');
 
@@ -772,10 +794,13 @@
                             this.updateProgress(0.2 + pct * 0.3, `Loading dictionary: ${loaded}/${total} (${phase})`);
                             console.log(`Dictionary: ${loaded}/${total} files (${phase})`);
                         } else if (msgType === 'done') {
-                            const { dictionary, stats } = e.data;
+                            const { dictionary, stats, coordinates } = e.data;
                             console.log('Dictionary loaded via worker:', stats);
+                            if (coordinates) {
+                                console.log(`Coordinates loaded: ${Object.keys(coordinates).length} words`);
+                            }
                             worker.terminate();
-                            resolve(dictionary);
+                            resolve({ dictionary, coordinates });
                         } else if (msgType === 'error') {
                             console.error('Worker error:', e.data.message);
                             worker.terminate();
@@ -789,16 +814,20 @@
                         reject(err);
                     };
 
+                    const coordinatesUrl = loadCoordinates ? './coordinates.csv' : null;
+
                     if (type === 'generated') {
                         worker.postMessage({
                             type: 'loadGenerated',
                             manifestUrl: './generated_dictionary/manifest.json',
-                            baseUrl: './generated_dictionary/dictgen-output/'
+                            baseUrl: './generated_dictionary/dictgen-output/',
+                            coordinatesUrl
                         });
                     } else {
                         worker.postMessage({
                             type: 'loadJSON',
-                            url: './data/dictionary.json'
+                            url: './data/dictionary.json',
+                            coordinatesUrl
                         });
                     }
                 });
@@ -806,7 +835,7 @@
 
             async loadGeneratedDictionary() {
                 console.log('Loading generated dictionary via worker...');
-                return this.loadDictionaryWithWorker('generated');
+                return await this.loadDictionaryWithWorker('generated');
             }
 
             async loadSelectedDictionary() {
@@ -817,24 +846,24 @@
                 btn.textContent = 'Loading...';
 
                 try {
-                    let dictData;
+                    let result;
                     if (source === 'generated') {
-                        dictData = await this.loadGeneratedDictionary();
+                        result = await this.loadGeneratedDictionary();
                     } else {
-                        dictData = await this.loadDictionary();
+                        result = await this.loadDictionary();
                     }
 
-                    // Rebuild with new dictionary
-                    const dimX = parseInt(document.getElementById('dim-x').value) || 20;
-                    const dimY = parseInt(document.getElementById('dim-y').value) || 60;
+                    const { dictionary, coordinates } = result;
+                    this.coordinates = coordinates;
 
+                    // Rebuild with new dictionary and embeddings
                     this.wordWall.dispose();
                     this.wordWall = new WordWall(this.scene, this.atlas, {
-                        wordsPerRow: dimX,
-                        wordsPerColumn: dimY,
+                        embeddingScale: 50,
+                        useEmbeddings: !!coordinates,
                     });
 
-                    this.wordWall.loadDictionary(dictData);
+                    this.wordWall.loadDictionary(dictionary, coordinates);
                     await this.wordWall.build();
 
                     // Apply current scale
@@ -843,7 +872,7 @@
 
                     this.positionCamera();
 
-                    console.log(`Loaded ${source} dictionary with ${Object.keys(dictData).length} words`);
+                    console.log(`Loaded ${source} dictionary with ${Object.keys(dictionary).length} words`);
                 } finally {
                     btn.disabled = false;
                     btn.textContent = 'Load';
@@ -922,6 +951,46 @@
                     this.positionCamera();
 
                     console.log(`Rebuilt with dimensions: ${dimX} x ${dimY}`);
+                } finally {
+                    btn.disabled = false;
+                    btn.textContent = 'Apply & Rebuild';
+                }
+            }
+
+            async rebuildWithEmbeddingScale() {
+                const embeddingScale = parseInt(document.getElementById('embed-scale-slider').value) || 50;
+
+                const btn = document.getElementById('apply-embed-btn');
+                btn.disabled = true;
+                btn.textContent = 'Rebuilding...';
+
+                try {
+                    // Store current dictionary data
+                    const dictData = {};
+                    for (const [word, def] of this.wordWall.dictionary) {
+                        dictData[word] = def;
+                    }
+
+                    // Dispose old wall
+                    this.wordWall.dispose();
+
+                    // Create new wall with updated embedding scale
+                    this.wordWall = new WordWall(this.scene, this.atlas, {
+                        embeddingScale,
+                        useEmbeddings: !!this.coordinates,
+                    });
+
+                    this.wordWall.loadDictionary(dictData, this.coordinates);
+                    await this.wordWall.build();
+
+                    // Apply current scale
+                    const scale = parseFloat(document.getElementById('scale-slider').value);
+                    this.wordWall.setScale(scale);
+
+                    // Reposition camera
+                    this.positionCamera();
+
+                    console.log(`Rebuilt with embedding scale: ${embeddingScale}`);
                 } finally {
                     btn.disabled = false;
                     btn.textContent = 'Apply & Rebuild';
@@ -1055,8 +1124,12 @@
                     const stats = this.wordWall.getStats();
                     this.wordCountEl.textContent = stats.totalWords.toLocaleString();
                     this.glyphCountEl.textContent = stats.totalGlyphs.toLocaleString();
-                    // Show 3D dimensions: cols × rows × layers
-                    this.gridSizeEl.textContent = `${stats.cols}×${stats.rows}×${stats.layers || 1}`;
+                    // Show mode-appropriate info
+                    if (stats.mode === 'embeddings') {
+                        this.gridSizeEl.textContent = `embed (${stats.missingWords || 0} missing)`;
+                    } else {
+                        this.gridSizeEl.textContent = `${stats.cols}×${stats.rows}×${stats.layers || 1}`;
+                    }
                     this.highlightCountEl.textContent = stats.highlightedCount + stats.definitionCount;
                 }
 

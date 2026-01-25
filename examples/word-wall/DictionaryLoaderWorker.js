@@ -196,6 +196,45 @@ async function loadJSON(url) {
     return { dictionary, stats };
 }
 
+/**
+ * Load and parse coordinates.csv for embedding positions
+ */
+async function loadCoordinates(url) {
+    const resp = await fetch(url);
+    if (!resp.ok) {
+        throw new Error(`Failed to load coordinates: ${url}`);
+    }
+
+    const text = await resp.text();
+    const lines = text.split('\n');
+    const coords = {};
+
+    // Skip header line
+    for (let i = 1; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (!line) continue;
+
+        // Parse CSV: word,x,y,z
+        const commaIdx1 = line.indexOf(',');
+        if (commaIdx1 === -1) continue;
+
+        const word = line.slice(0, commaIdx1).toLowerCase();
+        const rest = line.slice(commaIdx1 + 1).split(',');
+
+        if (rest.length >= 3) {
+            const x = parseFloat(rest[0]);
+            const y = parseFloat(rest[1]);
+            const z = parseFloat(rest[2]);
+
+            if (!isNaN(x) && !isNaN(y) && !isNaN(z)) {
+                coords[word] = { x, y, z };
+            }
+        }
+    }
+
+    return coords;
+}
+
 // Message handler
 self.onmessage = async (e) => {
     const { type } = e.data;
@@ -204,11 +243,24 @@ self.onmessage = async (e) => {
         let result;
 
         if (type === 'loadGenerated') {
-            const { manifestUrl, baseUrl } = e.data;
-            result = await loadGenerated(manifestUrl, baseUrl);
+            const { manifestUrl, baseUrl, coordinatesUrl } = e.data;
+
+            // Load dictionary and coordinates in parallel
+            const [dictResult, coordinates] = await Promise.all([
+                loadGenerated(manifestUrl, baseUrl),
+                coordinatesUrl ? loadCoordinates(coordinatesUrl) : null
+            ]);
+
+            result = { ...dictResult, coordinates };
         } else if (type === 'loadJSON') {
-            const { url } = e.data;
-            result = await loadJSON(url);
+            const { url, coordinatesUrl } = e.data;
+
+            const [dictResult, coordinates] = await Promise.all([
+                loadJSON(url),
+                coordinatesUrl ? loadCoordinates(coordinatesUrl) : null
+            ]);
+
+            result = { ...dictResult, coordinates };
         } else {
             throw new Error(`Unknown message type: ${type}`);
         }
