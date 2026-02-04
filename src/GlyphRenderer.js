@@ -296,46 +296,108 @@ class GlyphRendererV15 {
         return results;
     }
 
+    // ============ Batch Update Mode ============
+    // Use beginBatchUpdate() / endBatchUpdate() to defer rebuilds
+    // when making multiple updates (e.g., highlighting many words)
+
     /**
-     * Update text position
+     * Begin batch update mode - defers GPU buffer rebuilds
+     * Call endBatchUpdate() when done to apply all changes at once
+     */
+    beginBatchUpdate() {
+        this._batchMode = true;
+        this._batchDirty = false;
+    }
+
+    /**
+     * End batch update mode and rebuild if needed
+     */
+    endBatchUpdate() {
+        this._batchMode = false;
+        if (this._batchDirty) {
+            this._rebuildAllInstances();
+            this._batchDirty = false;
+        }
+    }
+
+    /**
+     * Internal: rebuild or mark dirty based on batch mode
+     */
+    _maybeRebuild() {
+        if (this._batchMode) {
+            this._batchDirty = true;
+        } else {
+            this._rebuildAllInstances();
+        }
+    }
+
+    /**
+     * Update text position - DIRECT BUFFER WRITE (no rebuild!)
      * @param {number} id - Text ID from render()
-     * @param {Object} newPosition - New position
+     * @param {Object} newPosition - New position {x, y, z}
      */
     updatePosition(id, newPosition) {
         const entry = this.renderedTexts.get(id);
-        if (!entry) return;
+        if (!entry || entry.bufferStartIndex === undefined) return;
 
-        // Calculate offset
+        // Calculate offset from first glyph's current position
         const offset = {
             x: newPosition.x - entry.glyphs[0].position.x,
             y: newPosition.y - entry.glyphs[0].position.y,
             z: newPosition.z - entry.glyphs[0].position.z
         };
 
-        // Update all glyph positions
-        for (const glyph of entry.glyphs) {
+        // Get the position buffer
+        const geometry = this.instanceMesh.geometry;
+        const positions = geometry.attributes.instancePosition.array;
+
+        // Update both our glyph data AND the GPU buffer directly
+        const startIdx = entry.bufferStartIndex;
+        for (let i = 0; i < entry.glyphs.length; i++) {
+            const glyph = entry.glyphs[i];
             glyph.position.x += offset.x;
             glyph.position.y += offset.y;
             glyph.position.z += offset.z;
+
+            // Direct buffer write
+            const bufIdx = (startIdx + i) * 3;
+            positions[bufIdx] = glyph.position.x;
+            positions[bufIdx + 1] = glyph.position.y;
+            positions[bufIdx + 2] = glyph.position.z;
         }
 
-        this._rebuildAllInstances();
+        // Mark only position attribute as needing GPU upload
+        geometry.attributes.instancePosition.needsUpdate = true;
     }
 
     /**
-     * Update text color
+     * Update text color - DIRECT BUFFER WRITE (no rebuild!)
      * @param {number} id - Text ID
      * @param {Object} newColor - New color {r, g, b}
      */
     updateColor(id, newColor) {
         const entry = this.renderedTexts.get(id);
-        if (!entry) return;
+        if (!entry || entry.bufferStartIndex === undefined) return;
 
-        for (const glyph of entry.glyphs) {
+        // Get the color buffer
+        const geometry = this.instanceMesh.geometry;
+        const colors = geometry.attributes.instanceColor.array;
+
+        // Update both our glyph data AND the GPU buffer directly
+        const startIdx = entry.bufferStartIndex;
+        for (let i = 0; i < entry.glyphs.length; i++) {
+            const glyph = entry.glyphs[i];
             glyph.color = newColor;
+
+            // Direct buffer write
+            const bufIdx = (startIdx + i) * 3;
+            colors[bufIdx] = newColor.r;
+            colors[bufIdx + 1] = newColor.g;
+            colors[bufIdx + 2] = newColor.b;
         }
 
-        this._rebuildAllInstances();
+        // Mark only color attribute as needing GPU upload
+        geometry.attributes.instanceColor.needsUpdate = true;
     }
 
     /**
@@ -476,10 +538,17 @@ class GlyphRendererV15 {
      * @private
      */
     _rebuildAllInstances() {
-        // Collect all glyphs
+        // Collect all glyphs AND track buffer indices for each text entry
         const allGlyphs = [];
+        let bufferIndex = 0;
+
         for (const entry of this.renderedTexts.values()) {
+            // Store where this text's glyphs start in the buffer
+            entry.bufferStartIndex = bufferIndex;
+            entry.glyphCount = entry.glyphs.length;
+
             allGlyphs.push(...entry.glyphs);
+            bufferIndex += entry.glyphs.length;
         }
 
         this._updateInstanceMesh(allGlyphs);
