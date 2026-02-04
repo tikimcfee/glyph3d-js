@@ -47,71 +47,14 @@
             white-space: nowrap;
         }
 
-        #repo-input {
-            flex: 1;
-            min-width: 0;
-            padding: 8px 10px;
-            background: #1a1a1a;
-            border: 1px solid #444;
-            border-radius: 4px;
-            color: #fff;
-            font-family: inherit;
-            font-size: 13px;
-        }
-
-        #repo-input:focus {
-            outline: none;
-            border-color: #00ff88;
-        }
-
-        #repo-input::placeholder {
-            color: #666;
-        }
-
-        #load-btn {
-            padding: 8px 14px;
-            background: #00ff88;
-            color: #000;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-            font-family: inherit;
-            font-weight: bold;
-            font-size: 13px;
-            white-space: nowrap;
-        }
-
-        #load-btn:hover {
-            background: #00cc66;
-        }
-
-        #load-btn:disabled {
-            background: #444;
-            color: #888;
-            cursor: not-allowed;
-        }
-
         @media (max-width: 600px) {
             #header {
-                flex-wrap: wrap;
                 height: auto;
                 padding: 8px 10px;
                 gap: 6px;
             }
             #header h1 {
                 font-size: 13px;
-            }
-            #repo-input {
-                order: 3;
-                flex-basis: 100%;
-                font-size: 14px;
-                padding: 10px;
-            }
-            #load-btn {
-                order: 4;
-                margin-left: auto;
-                padding: 10px 18px;
-                font-size: 14px;
             }
         }
 
@@ -461,6 +404,158 @@
             font-size: 11px;
         }
 
+        /* ===== Panel: Repo ===== */
+        .repo-section {
+            margin-bottom: 16px;
+        }
+
+        .repo-label {
+            display: block;
+            color: #aaa;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 6px;
+        }
+
+        .repo-input {
+            width: 100%;
+            padding: 10px 10px;
+            background: #1a1a1a;
+            border: 1px solid #444;
+            border-radius: 4px;
+            color: #fff;
+            font-family: inherit;
+            font-size: 13px;
+        }
+
+        .repo-input:focus {
+            outline: none;
+            border-color: #00ff88;
+        }
+
+        .repo-input::placeholder {
+            color: #666;
+        }
+
+        .branch-input-row {
+            display: flex;
+            gap: 6px;
+        }
+
+        .branch-input-row .repo-input {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .repo-btn {
+            width: 100%;
+            padding: 12px;
+            background: #00ff88;
+            color: #000;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-family: inherit;
+            font-weight: bold;
+            font-size: 14px;
+        }
+
+        .repo-btn:hover {
+            background: #00cc66;
+        }
+
+        .repo-btn:disabled {
+            background: #444;
+            color: #888;
+            cursor: not-allowed;
+        }
+
+        .repo-btn-sm {
+            padding: 8px 12px;
+            background: #333;
+            color: #00ff88;
+            border: 1px solid #555;
+            border-radius: 4px;
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 16px;
+            flex-shrink: 0;
+            line-height: 1;
+        }
+
+        .repo-btn-sm:hover {
+            background: #444;
+            border-color: #00ff88;
+        }
+
+        .repo-btn-sm:disabled {
+            color: #666;
+            cursor: not-allowed;
+        }
+
+        .branch-list {
+            margin-top: 8px;
+            max-height: 200px;
+            overflow-y: auto;
+            border: 1px solid #333;
+            border-radius: 4px;
+            background: #111;
+        }
+
+        .branch-list.hidden {
+            display: none;
+        }
+
+        .branch-item {
+            padding: 8px 10px;
+            font-size: 12px;
+            cursor: pointer;
+            border-bottom: 1px solid #222;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .branch-item:last-child {
+            border-bottom: none;
+        }
+
+        .branch-item:hover {
+            background: #1a2a1a;
+        }
+
+        .branch-item.selected {
+            background: #1a3a1a;
+            color: #00ff88;
+        }
+
+        .branch-item .branch-default-badge {
+            font-size: 9px;
+            background: #00ff88;
+            color: #000;
+            padding: 1px 5px;
+            border-radius: 3px;
+            font-weight: bold;
+        }
+
+        .branch-status {
+            font-size: 11px;
+            color: #666;
+            margin-top: 4px;
+            min-height: 16px;
+        }
+
+        #header-repo-label {
+            color: #888;
+            font-size: 12px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            flex: 1;
+            min-width: 0;
+        }
+
         /* ===== Toast ===== */
         #toast {
             position: fixed;
@@ -509,10 +604,7 @@
     <!-- Header -->
     <div id="header">
         <h1>GitHub 3D</h1>
-        <input type="text" id="repo-input"
-               placeholder="github.com/owner/repo"
-               value="https://github.com/mrdoob/three.js">
-        <button id="load-btn">Load</button>
+        <span id="header-repo-label"></span>
     </div>
 
     <!-- Loading overlay -->
@@ -536,15 +628,42 @@
         <div id="drawer-handle"></div>
 
         <div id="tab-bar">
-            <button class="tab-btn active" data-tab="files">Files</button>
+            <button class="tab-btn active" data-tab="repo">Repo</button>
+            <button class="tab-btn" data-tab="files">Files</button>
             <button class="tab-btn" data-tab="settings">Settings</button>
             <button class="tab-btn" data-tab="stats">Stats</button>
             <button class="tab-btn" data-tab="controls">Controls</button>
         </div>
 
         <div id="tab-panels">
+            <!-- Repo tab -->
+            <div class="tab-panel active" id="panel-repo">
+                <div class="repo-section">
+                    <label class="repo-label" for="repo-input">Repository URL</label>
+                    <input type="text" id="repo-input" class="repo-input"
+                           placeholder="github.com/owner/repo"
+                           value="https://github.com/tikimcfee/glyph3d-js">
+                </div>
+
+                <div class="repo-section">
+                    <label class="repo-label" for="branch-input">Branch</label>
+                    <div class="branch-input-row">
+                        <input type="text" id="branch-input" class="repo-input"
+                               placeholder="main"
+                               value="">
+                        <button id="fetch-branches-btn" class="repo-btn-sm" title="Fetch available branches">&#8635;</button>
+                    </div>
+                    <div id="branch-list" class="branch-list hidden"></div>
+                    <div id="branch-status" class="branch-status"></div>
+                </div>
+
+                <div class="repo-section">
+                    <button id="load-btn" class="repo-btn">Load Repository</button>
+                </div>
+            </div>
+
             <!-- Files tab -->
-            <div class="tab-panel active" id="panel-files">
+            <div class="tab-panel" id="panel-files">
                 <div id="tree-content">
                     <div class="tree-empty">Load a repository to see files</div>
                 </div>
@@ -657,6 +776,7 @@
 
         // Local example-specific modules
         import { RepositoryAdapter } from './RepositoryAdapter.js';
+        import { GitHubRepositorySource } from './GitHubRepositorySource.js';
 
         /**
          * Helper: Parse GitHub URL to owner/repo
@@ -832,6 +952,11 @@
             constructor() {
                 this.canvas = document.getElementById('canvas');
                 this.repoInput = document.getElementById('repo-input');
+                this.branchInput = document.getElementById('branch-input');
+                this.fetchBranchesBtn = document.getElementById('fetch-branches-btn');
+                this.branchListEl = document.getElementById('branch-list');
+                this.branchStatusEl = document.getElementById('branch-status');
+                this.headerRepoLabel = document.getElementById('header-repo-label');
                 this.loadBtn = document.getElementById('load-btn');
                 this.loadingEl = document.getElementById('loading');
                 this.progressFill = document.getElementById('progress-fill');
@@ -857,12 +982,15 @@
                 this.layoutManager = null;
                 this.hierarchicalManager = null;
                 this.repoAdapter = null;
+                this.githubSource = new GitHubRepositorySource();
 
                 // State
                 this.grids = [];
                 this.repoPath = null;
                 this.tree = [];
                 this.isLoading = false;
+                this.branches = [];
+                this.defaultBranch = null;
 
                 // Camera controls
                 this.keys = {};
@@ -887,6 +1015,21 @@
                 this.loadBtn.addEventListener('click', () => this.loadRepository());
                 this.repoInput.addEventListener('keypress', (e) => {
                     if (e.key === 'Enter') this.loadRepository();
+                });
+                this.branchInput.addEventListener('keypress', (e) => {
+                    if (e.key === 'Enter') this.loadRepository();
+                });
+
+                // Fetch branches button
+                this.fetchBranchesBtn.addEventListener('click', () => this.fetchBranches());
+
+                // Clear branch list when repo URL changes
+                this.repoInput.addEventListener('input', () => {
+                    this.branches = [];
+                    this.defaultBranch = null;
+                    this.branchListEl.classList.add('hidden');
+                    this.branchListEl.innerHTML = '';
+                    this.branchStatusEl.textContent = '';
                 });
 
                 // Keyboard
@@ -1015,7 +1158,8 @@
                 this.animate();
 
                 console.log('GitHub 3D Repo Viewer ready!');
-                this.showToast('Ready! Enter a GitHub URL and tap Load', 'success');
+                this.showToast('Ready! Open the Repo tab to load a repository', 'success');
+                this.drawer.openToTab('repo');
             }
 
             addGridHelper() {
@@ -1023,6 +1167,97 @@
                 grid.rotation.x = Math.PI / 2;
                 grid.position.z = -10;
                 this.scene.add(grid);
+            }
+
+            /**
+             * Fetch available branches for the current repo URL
+             */
+            async fetchBranches() {
+                const url = this.repoInput.value.trim();
+                if (!url) {
+                    this.showToast('Please enter a GitHub URL first', 'error');
+                    return;
+                }
+
+                const parsed = parseGitHubUrl(url);
+                if (!parsed) {
+                    this.showToast('Invalid GitHub URL', 'error');
+                    return;
+                }
+
+                const { owner, repo } = parsed;
+                this.fetchBranchesBtn.disabled = true;
+                this.branchStatusEl.textContent = 'Fetching branches...';
+
+                try {
+                    // Fetch repo info for default branch
+                    const repoInfo = await this.githubSource.getRepositoryInfo(`${owner}/${repo}`);
+                    this.defaultBranch = repoInfo?.defaultBranch || 'main';
+
+                    // Fetch branch list
+                    const branches = await this.githubSource.fetchBranches(owner, repo);
+                    this.branches = branches;
+
+                    // Mark default branch
+                    for (const branch of this.branches) {
+                        branch.isDefault = branch.name === this.defaultBranch;
+                    }
+
+                    // Sort: default first, then alphabetical
+                    this.branches.sort((a, b) => {
+                        if (a.isDefault) return -1;
+                        if (b.isDefault) return 1;
+                        return a.name.localeCompare(b.name);
+                    });
+
+                    this.renderBranchList();
+                    this.branchStatusEl.textContent = `${this.branches.length} branches found`;
+
+                    // If no branch is manually entered, set the default
+                    if (!this.branchInput.value.trim()) {
+                        this.branchInput.value = this.defaultBranch;
+                    }
+
+                } catch (err) {
+                    console.error('Failed to fetch branches:', err);
+                    this.branchStatusEl.textContent = `Error: ${err.message}`;
+                    this.branchListEl.classList.add('hidden');
+                } finally {
+                    this.fetchBranchesBtn.disabled = false;
+                }
+            }
+
+            /**
+             * Render the branch list UI
+             */
+            renderBranchList() {
+                this.branchListEl.innerHTML = '';
+                const selectedBranch = this.branchInput.value.trim();
+
+                for (const branch of this.branches) {
+                    const item = document.createElement('div');
+                    item.className = 'branch-item';
+                    if (branch.name === selectedBranch) {
+                        item.classList.add('selected');
+                    }
+
+                    let html = `<span>${branch.name}</span>`;
+                    if (branch.isDefault) {
+                        html += `<span class="branch-default-badge">default</span>`;
+                    }
+                    item.innerHTML = html;
+
+                    item.addEventListener('click', () => {
+                        this.branchInput.value = branch.name;
+                        // Update selection styling
+                        this.branchListEl.querySelectorAll('.branch-item').forEach(el => el.classList.remove('selected'));
+                        item.classList.add('selected');
+                    });
+
+                    this.branchListEl.appendChild(item);
+                }
+
+                this.branchListEl.classList.remove('hidden');
             }
 
             async loadRepository() {
@@ -1039,16 +1274,17 @@
                 }
 
                 const { owner, repo } = parsed;
+                const branch = this.branchInput.value.trim() || this.defaultBranch || 'main';
                 this.repoPath = `${owner}/${repo}`;
-                console.log('Loading repository:', this.repoPath);
+                console.log(`Loading repository: ${this.repoPath}@${branch}`);
                 this.isLoading = true;
                 this.loadBtn.disabled = true;
 
                 try {
                     this.clearGrids();
-                    this.showLoading('Fetching repository tree...');
+                    this.showLoading(`Fetching repository tree (${branch})...`);
 
-                    const treeResult = await this.repoAdapter.getRepositoryTree(owner, repo);
+                    const treeResult = await this.repoAdapter.getRepositoryTree(owner, repo, branch);
                     console.log(`Found ${treeResult.tree.length} files`);
 
                     const sourceFiles = this.repoAdapter.filterCodeFiles(treeResult);
@@ -1063,7 +1299,7 @@
                     this.updateProgress(0.1, `Fetching ${sourceFiles.length} files in parallel...`);
 
                     const paths = sourceFiles.map(f => f.path);
-                    const fileMap = await this.repoAdapter.getMultipleFiles(owner, repo, paths);
+                    const fileMap = await this.repoAdapter.getMultipleFiles(owner, repo, paths, branch);
 
                     const fetchTime = performance.now() - fetchStart;
                     console.log(`[1] Parallel fetch: ${sourceFiles.length} files in ${fetchTime.toFixed(0)}ms`);
@@ -1135,7 +1371,10 @@
 
                     const stats = this.repoAdapter.getStats();
                     console.log('Adapter stats:', stats);
-                    this.showToast(`Loaded ${this.grids.length} files from ${this.repoPath} (${stats.cacheHitRate} cache hit rate)`, 'success');
+                    this.showToast(`Loaded ${this.grids.length} files from ${this.repoPath}@${branch}`, 'success');
+
+                    // Update header label
+                    this.headerRepoLabel.textContent = `${this.repoPath}@${branch}`;
 
                     // Open files tab after load
                     this.drawer.openToTab('files');
