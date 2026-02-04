@@ -419,11 +419,28 @@ class GlyphCollection {
                         });
                     }
                 } else {
-                    // Fallback: no metadata (shouldn't happen with updated builders)
+                    // Fallback: no per-text tracking from worker.
+                    // Re-render via sync path for proper tracking.
+                    console.warn('GlyphCollection: No renderer IDs from worker, falling back to sync re-render');
+                    this._renderer.clear();
+                    const batchItems = items.map(p => ({
+                        text: p.text,
+                        position: p.position,
+                        options: p.options
+                    }));
+                    const syncIds = this._renderer.renderBatch(batchItems);
                     for (let i = 0; i < itemCount; i++) {
                         const p = items[i];
-                        p.rendererId = -1;
-                        this._committedTexts.set(p.id, p);
+                        const rendererId = syncIds[i];
+                        this._idMap.set(p.id, rendererId);
+                        this._reverseIdMap.set(rendererId, p.id);
+                        this._committedTexts.set(p.id, {
+                            id: p.id,
+                            rendererId,
+                            text: p.text,
+                            position: p.position,
+                            options: p.options
+                        });
                     }
                 }
 
