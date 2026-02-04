@@ -374,6 +374,54 @@ export class GitHubRepositorySource {
     }
 
     /**
+     * Fetch branches for a repository
+     * @param {string} owner - Repository owner
+     * @param {string} repo - Repository name
+     * @returns {Promise<Array<{name: string, isDefault: boolean}>>} - Array of branch info
+     */
+    async fetchBranches(owner, repo) {
+        if (!owner || !repo) {
+            throw new GitHubError('Owner and repo are required');
+        }
+
+        try {
+            const url = `${this.baseUrl}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/branches?per_page=100`;
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+
+            const response = await fetch(url, {
+                signal: controller.signal,
+                headers: this._getHeaders(),
+            });
+
+            clearTimeout(timeoutId);
+            this._updateRateLimit(response);
+
+            if (!response.ok) {
+                if (response.status === 404) {
+                    return [];
+                }
+                if (response.status === 403 && this.rateLimit.remaining === 0) {
+                    throw new RateLimitError(this.rateLimit.reset);
+                }
+                throw new GitHubError(`HTTP ${response.status}: ${response.statusText}`, response.status);
+            }
+
+            const data = await response.json();
+            return data.map(branch => ({
+                name: branch.name,
+                isDefault: false, // Will be set by caller if repo info is available
+            }));
+
+        } catch (error) {
+            if (error.name === 'AbortError') {
+                throw new GitHubError(`Timeout fetching branches for ${owner}/${repo}`);
+            }
+            throw error;
+        }
+    }
+
+    /**
      * Get current rate limit status
      * @returns {Object} - Rate limit info
      */
