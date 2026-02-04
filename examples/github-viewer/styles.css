@@ -671,6 +671,46 @@ body {
 #toast.error { background: #a33; border: 1px solid #f44; }
 #toast.success { background: #2a5; border: 1px solid #4f8; }
 
+/* ===== Diff Panel ===== */
+.diff-status { font-size: 11px; padding: 4px 8px; color: #aaa; }
+.diff-status.success { color: #4f8; }
+.diff-status.error { color: #f44; }
+
+.diff-summary { padding: 8px; border-bottom: 1px solid #333; }
+.diff-pr-title { font-size: 13px; font-weight: 600; color: #eee; margin-bottom: 4px; }
+.diff-pr-meta { font-size: 11px; color: #999; margin-bottom: 4px; }
+.diff-pr-author { margin-right: 8px; }
+.diff-pr-state { padding: 1px 6px; border-radius: 3px; font-size: 10px; text-transform: uppercase; }
+.diff-pr-state.open { background: #238636; color: #fff; }
+.diff-pr-state.closed { background: #da3633; color: #fff; }
+.diff-pr-state.merged { background: #8957e5; color: #fff; }
+.diff-pr-stats { font-size: 12px; display: flex; gap: 8px; }
+.diff-stat-add { color: #4f8; }
+.diff-stat-remove { color: #f44; }
+.diff-stat-files { color: #aaa; }
+
+.diff-file-list { overflow-y: auto; max-height: 400px; }
+.diff-file-item {
+    display: flex; align-items: center; gap: 6px;
+    padding: 6px 8px; cursor: pointer; font-size: 11px;
+    border-bottom: 1px solid #222;
+}
+.diff-file-item:hover { background: #2a2a2a; }
+.diff-file-item.selected { background: #1a3a1a; }
+.diff-file-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #ccc; }
+.diff-file-stats { display: flex; gap: 6px; font-size: 10px; flex-shrink: 0; }
+.diff-file-status { flex-shrink: 0; }
+
+.badge {
+    display: inline-block; width: 16px; height: 16px; line-height: 16px;
+    text-align: center; border-radius: 3px; font-size: 10px; font-weight: 700;
+    background: #444; color: #ccc;
+}
+.badge-added { background: #238636; color: #fff; }
+.badge-removed { background: #da3633; color: #fff; }
+.badge-modified { background: #d29922; color: #fff; }
+.badge-renamed { background: #8957e5; color: #fff; }
+
 /* ===== Desktop: side drawer ===== */
 @media (min-width: 769px) {
     #drawer {

@@ -17,6 +17,7 @@ import {
 
 import { RepositoryAdapter } from './RepositoryAdapter.js';
 import { GitHubRepositorySource } from './GitHubRepositorySource.js';
+import { DiffController } from './DiffController.js';
 
 import { createHeader, createLoadingOverlay, createFPSBadge, createToast } from './components/AppShell.js';
 import {
@@ -29,6 +30,7 @@ import {
 } from './components/Drawer.js';
 import { TouchController } from './components/TouchController.js';
 import { logCapturePanelHTML, initLogCapturePanel } from './components/LogCapturePanel.js';
+import { diffPanelHTML, initDiffPanel } from './components/DiffPanel.js';
 
 /**
  * Parse GitHub URL to owner/repo
@@ -79,6 +81,8 @@ export class GitHubRepoViewer {
         this.hierarchicalManager = null;
         this.repoAdapter = null;
         this.githubSource = new GitHubRepositorySource();
+        this.diffController = null;
+        this.diffPanel = null;
 
         // State
         this.grids = [];
@@ -132,6 +136,17 @@ export class GitHubRepoViewer {
         });
         initLogCapturePanel(logPanel);
 
+        // Add diff panel
+        const diffPanelEl = this.drawer.addPanel({
+            id: 'diff',
+            label: 'Diff',
+            html: diffPanelHTML()
+        });
+        this.diffPanel = initDiffPanel(diffPanelEl, {
+            onLoadPR: (input) => this.loadDiff(input),
+            onFileClick: (idx) => this.focusOnDiffFile(idx),
+        });
+
         // Toast (must come after drawer for z-order)
         this.toastUI = createToast(body);
 
@@ -170,6 +185,12 @@ export class GitHubRepoViewer {
 
         this.layoutManager = new GridLayoutManager();
         this.repoAdapter = new RepositoryAdapter();
+        this.diffController = new DiffController({
+            scene: this.scene,
+            atlas: this.atlas,
+            githubSource: this.githubSource,
+            repoAdapter: this.repoAdapter,
+        });
 
         // Touch controls
         this.touchController = new TouchController(this.canvas, this, THREE);
@@ -487,6 +508,89 @@ export class GitHubRepoViewer {
         this.grids = [];
         this.layoutManager.clear();
         if (this.hierarchicalManager) this.hierarchicalManager.clear();
+        if (this.diffController) this.diffController.clearGrids();
+    }
+
+    async loadDiff(input) {
+        const parsed = DiffController.parsePRInput(input);
+        if (!parsed) {
+            this.toastUI.show('Invalid PR input. Use owner/repo#123 or a full PR URL.', 'error');
+            return;
+        }
+
+        const { owner, repo, prNumber } = parsed;
+        this.diffPanel.setLoading(true);
+        this.diffPanel.setStatus(`Loading PR #${prNumber}...`, 'info');
+
+        try {
+            // Clear existing content
+            this.clearGrids();
+
+            const result = await this.diffController.loadPR(
+                owner, repo, prNumber,
+                (ratio, message) => {
+                    this.loading.show(message);
+                    this.loading.update(ratio, message);
+                }
+            );
+
+            // Update the grids array so stats/navigation work
+            this.grids = result.grids;
+
+            // Update diff panel UI
+            this.diffPanel.showSummary(result.prData);
+            this.diffPanel.showFileList(result.fileData);
+            this.diffPanel.setStatus(`Loaded ${result.fileData.length} changed files`, 'success');
+
+            // Update header
+            this.header.repoLabel.textContent = `${owner}/${repo} PR #${prNumber}`;
+
+            // Force first render
+            this.renderer.render(this.scene, this.camera);
+            this.loading.hide();
+
+            // Focus camera on diff grids
+            this.focusOnDiffGrids();
+
+            this.toastUI.show(
+                `PR #${prNumber}: ${result.fileData.length} files, +${result.prData.additions}/-${result.prData.deletions}`,
+                'success'
+            );
+        } catch (err) {
+            console.error('Failed to load diff:', err);
+            this.loading.hide();
+            this.diffPanel.setStatus(`Error: ${err.message}`, 'error');
+            this.toastUI.show(`Error: ${err.message}`, 'error');
+        } finally {
+            this.diffPanel.setLoading(false);
+        }
+    }
+
+    focusOnDiffFile(fileIndex) {
+        // Each file has 2 grids (left + right), so multiply by 2
+        const gridIndex = fileIndex * 2;
+        if (gridIndex >= 0 && gridIndex < this.grids.length) {
+            this.focusOnGrid(gridIndex);
+        }
+    }
+
+    focusOnDiffGrids() {
+        const THREE = this.THREE;
+        if (this.grids.length === 0) return;
+
+        const bounds = this.diffController.getTotalBounds();
+        if (!bounds) return;
+
+        const center = new THREE.Vector3();
+        bounds.getCenter(center);
+        const size = new THREE.Vector3();
+        bounds.getSize(size);
+
+        const maxDim = Math.max(size.x, size.y);
+        const distance = Math.min(maxDim * 0.5, 800);
+        this.camera.position.set(center.x, center.y, center.z + distance + 100);
+        this.pitch = 0;
+        this.yaw = 0;
     }
 
     updateFileTree(files) {
