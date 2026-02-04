@@ -42,6 +42,8 @@ export {
     ErrorTracker,
     debugConsole,
     DebugConsole,
+    logCapture,
+    LogCapture,
     initObservability
 } from './utils/index.js';
 
