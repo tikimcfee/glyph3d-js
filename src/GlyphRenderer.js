@@ -128,9 +128,10 @@ class GlyphRendererV15 {
             },
             vertexShader: this._getVertexShader(),
             fragmentShader: this._getFragmentShader(),
-            transparent: true,
+            transparent: false,
+            alphaTest: 0.01,
             side: THREE.DoubleSide,
-            depthWrite: false
+            depthWrite: true
         });
 
         // Pre-allocate instance attributes (skip for worker path - buffers provided later)
