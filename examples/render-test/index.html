@@ -213,8 +213,9 @@
         </div>
 
         <div class="btn-row">
-            <button class="primary" id="run-btn">Run All</button>
-            <button id="clear-btn">Clear</button>
+            <button class="primary" id="run-btn">Run All Tests</button>
+            <button id="clear-btn">Clear Scene</button>
+            <button id="download-logs-btn">Download Logs</button>
             <button id="toggle-panel-btn">Collapse</button>
         </div>
 
@@ -246,7 +247,11 @@
             GlyphRenderer,
             GlyphCollection,
             buildBatchBuffers,
+            logCapture,
         } from '../../src/index.js';
+
+        // Start log capture immediately so all test output is recorded
+        logCapture.start();
 
         // ============================================================
         // TEST FRAMEWORK
@@ -768,6 +773,9 @@
             clearScene();
             tests.forEach((_, i) => updateTestStatus(i, 'pending'));
             summaryEl.innerHTML = '';
+        });
+        document.getElementById('download-logs-btn').addEventListener('click', () => {
+            logCapture.download();
         });
 
         let lastTime = performance.now();
