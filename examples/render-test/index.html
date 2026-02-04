@@ -185,6 +185,7 @@
         <div class="btn-row">
             <button class="primary" id="run-btn">Run All Tests</button>
             <button id="clear-btn">Clear Scene</button>
+            <button id="download-logs-btn">Download Logs</button>
         </div>
 
         <div class="section">
@@ -214,7 +215,11 @@
             GlyphAtlas,
             GlyphRenderer,
             GlyphCollection,
+            logCapture,
         } from '../../src/index.js';
+
+        // Start log capture immediately so all test output is recorded
+        logCapture.start();
 
         // ============================================================
         // TEST FRAMEWORK
@@ -659,6 +664,9 @@
         document.getElementById('clear-btn').addEventListener('click', () => {
             clearScene();
             tests.forEach((_, i) => updateTestStatus(i, 'pending'));
+        });
+        document.getElementById('download-logs-btn').addEventListener('click', () => {
+            logCapture.download();
         });
 
         // Animation loop
