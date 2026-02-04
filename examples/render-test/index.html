@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Render Test - glyph3d-js</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -12,6 +12,7 @@
             background: #0a0a0a;
             color: #e0e0e0;
             overflow: hidden;
+            touch-action: none;
         }
 
         #canvas {
@@ -22,68 +23,87 @@
 
         #panel {
             position: fixed;
-            top: 12px;
-            left: 12px;
-            background: rgba(10, 10, 15, 0.92);
-            border: 1px solid #333;
-            border-radius: 6px;
-            padding: 16px;
+            top: 0;
+            left: 0;
+            background: rgba(10, 10, 15, 0.94);
+            border-right: 1px solid #333;
+            border-bottom: 1px solid #333;
+            border-radius: 0 0 6px 0;
+            padding: 12px 14px;
             font-size: 12px;
             z-index: 100;
-            min-width: 280px;
-            max-height: calc(100vh - 24px);
+            min-width: 260px;
+            max-width: min(360px, 85vw);
+            max-height: 100vh;
             overflow-y: auto;
+            -webkit-overflow-scrolling: touch;
+        }
+
+        @media (max-width: 600px) {
+            #panel {
+                font-size: 11px;
+                padding: 10px;
+                min-width: 0;
+                max-width: 90vw;
+            }
         }
 
         #panel h1 {
-            font-size: 16px;
+            font-size: 15px;
             color: #00ff88;
             margin-bottom: 4px;
         }
 
         #panel .subtitle {
             color: #666;
-            font-size: 11px;
-            margin-bottom: 16px;
+            font-size: 10px;
+            margin-bottom: 12px;
         }
 
         .section {
             border-top: 1px solid #222;
-            padding-top: 12px;
-            margin-top: 12px;
+            padding-top: 10px;
+            margin-top: 10px;
         }
 
         .section h2 {
-            font-size: 13px;
+            font-size: 12px;
             color: #ffaa33;
-            margin-bottom: 8px;
+            margin-bottom: 6px;
         }
 
         .test-row {
             display: flex;
             align-items: center;
             justify-content: space-between;
-            margin-bottom: 6px;
-            line-height: 1.6;
+            margin-bottom: 4px;
+            line-height: 1.5;
+            gap: 8px;
         }
 
-        .test-label { color: #aaa; }
+        .test-label {
+            color: #aaa;
+            flex: 1;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
 
         .test-status {
             font-weight: bold;
-            min-width: 50px;
-            text-align: right;
+            flex-shrink: 0;
         }
 
         .test-status.pass { color: #00ff88; }
         .test-status.fail { color: #ff4444; }
-        .test-status.pending { color: #666; }
+        .test-status.pending { color: #555; }
         .test-status.running { color: #ffaa33; }
 
         .btn-row {
             display: flex;
             gap: 8px;
-            margin-top: 12px;
+            margin-top: 10px;
             flex-wrap: wrap;
         }
 
@@ -97,18 +117,16 @@
             font-family: inherit;
             font-size: 12px;
             transition: all 0.15s;
+            -webkit-tap-highlight-color: transparent;
         }
 
-        button:hover {
+        button:hover, button:active {
             background: #333;
             border-color: #00ff88;
             color: #fff;
         }
 
-        button:disabled {
-            opacity: 0.4;
-            cursor: not-allowed;
-        }
+        button:disabled { opacity: 0.4; cursor: not-allowed; }
 
         button.primary {
             background: linear-gradient(135deg, #00ff88 0%, #00cc66 100%);
@@ -117,57 +135,68 @@
             font-weight: bold;
         }
 
-        button.primary:hover {
-            box-shadow: 0 2px 12px rgba(0, 255, 136, 0.3);
-        }
-
         #log {
-            margin-top: 12px;
+            margin-top: 10px;
             background: #111;
             border: 1px solid #222;
             border-radius: 4px;
-            padding: 8px;
-            font-size: 11px;
-            max-height: 160px;
+            padding: 6px 8px;
+            font-size: 10px;
+            max-height: 200px;
             overflow-y: auto;
             line-height: 1.5;
             color: #888;
+            word-break: break-all;
+            -webkit-overflow-scrolling: touch;
         }
 
         #log .log-ok { color: #00ff88; }
         #log .log-err { color: #ff4444; }
         #log .log-info { color: #ffaa33; }
 
-        /* Controls help */
         #controls-help {
             position: fixed;
-            bottom: 12px;
-            right: 12px;
+            bottom: 8px;
+            right: 8px;
             background: rgba(10, 10, 15, 0.9);
             border: 1px solid #333;
             border-radius: 6px;
-            padding: 12px 16px;
-            font-size: 11px;
-            line-height: 1.8;
+            padding: 8px 12px;
+            font-size: 10px;
+            line-height: 1.7;
             z-index: 100;
+        }
+
+        @media (max-width: 600px) {
+            #controls-help { display: none; }
         }
 
         #controls-help h3 {
             color: #ffaa33;
-            font-size: 12px;
-            margin-bottom: 4px;
+            font-size: 11px;
+            margin-bottom: 2px;
         }
 
         .key {
             display: inline-block;
             background: #333;
-            padding: 1px 6px;
+            padding: 1px 5px;
             border-radius: 3px;
-            min-width: 20px;
+            min-width: 18px;
             text-align: center;
-            margin-right: 6px;
-            font-size: 10px;
+            margin-right: 4px;
+            font-size: 9px;
         }
+
+        .summary {
+            margin-top: 8px;
+            padding: 6px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: bold;
+        }
+        .summary.all-pass { background: #00ff8818; color: #00ff88; }
+        .summary.has-fail { background: #ff444418; color: #ff4444; }
     </style>
 </head>
 <body>
@@ -180,14 +209,16 @@
         <div class="section">
             <h2>Tests</h2>
             <div id="test-results"></div>
+            <div id="summary"></div>
         </div>
 
         <div class="btn-row">
-            <button class="primary" id="run-btn">Run All Tests</button>
-            <button id="clear-btn">Clear Scene</button>
+            <button class="primary" id="run-btn">Run All</button>
+            <button id="clear-btn">Clear</button>
+            <button id="toggle-panel-btn">Collapse</button>
         </div>
 
-        <div class="section">
+        <div class="section" id="log-section">
             <h2>Log</h2>
             <div id="log"></div>
         </div>
@@ -197,7 +228,7 @@
         <h3>Navigation</h3>
         <div><span class="key">W</span><span class="key">A</span><span class="key">S</span><span class="key">D</span>Move</div>
         <div><span class="key">Space</span>Up <span class="key">Shift</span>Down</div>
-        <div><span class="key">DblClick</span>FPS mode <span class="key">ESC</span>Exit</div>
+        <div><span class="key">DblClick</span>FPS mode</div>
     </div>
 
     <script type="importmap">
@@ -214,6 +245,7 @@
             GlyphAtlas,
             GlyphRenderer,
             GlyphCollection,
+            buildBatchBuffers,
         } from '../../src/index.js';
 
         // ============================================================
@@ -221,10 +253,13 @@
         // ============================================================
 
         const testResults = document.getElementById('test-results');
+        const summaryEl = document.getElementById('summary');
         const logEl = document.getElementById('log');
+        const logSection = document.getElementById('log-section');
 
         const tests = [];
         let atlas = null;
+        let panelCollapsed = false;
 
         function defineTest(name, fn) {
             tests.push({ name, fn, status: 'pending' });
@@ -234,20 +269,21 @@
             testResults.innerHTML = tests.map((t, i) => `
                 <div class="test-row">
                     <span class="test-label">${t.name}</span>
-                    <span class="test-status ${t.status}" id="test-status-${i}">
-                        ${t.status === 'pass' ? 'PASS' : t.status === 'fail' ? 'FAIL' : t.status === 'running' ? '...' : '--'}
+                    <span class="test-status ${t.status}" id="ts-${i}">
+                        ${statusText(t.status)}
                     </span>
                 </div>
             `).join('');
         }
 
+        function statusText(s) {
+            return s === 'pass' ? 'PASS' : s === 'fail' ? 'FAIL' : s === 'running' ? '...' : '--';
+        }
+
         function updateTestStatus(index, status) {
             tests[index].status = status;
-            const el = document.getElementById(`test-status-${index}`);
-            if (el) {
-                el.className = `test-status ${status}`;
-                el.textContent = status === 'pass' ? 'PASS' : status === 'fail' ? 'FAIL' : status === 'running' ? '...' : '--';
-            }
+            const el = document.getElementById(`ts-${index}`);
+            if (el) { el.className = `test-status ${status}`; el.textContent = statusText(status); }
         }
 
         function log(msg, cls = '') {
@@ -259,8 +295,15 @@
         }
 
         function assert(condition, msg) {
-            if (!condition) throw new Error(`Assertion failed: ${msg}`);
+            if (!condition) throw new Error(msg);
         }
+
+        // Panel collapse toggle
+        document.getElementById('toggle-panel-btn').addEventListener('click', () => {
+            panelCollapsed = !panelCollapsed;
+            logSection.style.display = panelCollapsed ? 'none' : '';
+            document.getElementById('toggle-panel-btn').textContent = panelCollapsed ? 'Expand' : 'Collapse';
+        });
 
         // ============================================================
         // THREE.JS SETUP
@@ -277,30 +320,23 @@
         renderer.setSize(window.innerWidth, window.innerHeight);
         renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 
-        // Grid
         const grid = new THREE.GridHelper(200, 40, 0x222233, 0x111122);
         grid.rotation.x = Math.PI / 2;
         grid.position.z = -5;
         scene.add(grid);
 
-        // Objects created by tests — tracked for cleanup
         const sceneObjects = [];
-
-        function trackObject(obj) {
-            sceneObjects.push(obj);
-        }
-
+        function trackObject(obj) { sceneObjects.push(obj); }
         function clearScene() {
             for (const obj of sceneObjects) {
                 if (obj.dispose) obj.dispose();
                 else if (obj.parent) obj.parent.remove(obj);
             }
             sceneObjects.length = 0;
-            log('Scene cleared', 'info');
         }
 
         // ============================================================
-        // CAMERA CONTROLS (minimal FPS)
+        // CAMERA: keyboard + touch
         // ============================================================
 
         const keys = {};
@@ -321,6 +357,38 @@
             pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, pitch));
         });
 
+        // Touch controls: single-finger drag to orbit, two-finger to pan/zoom
+        let touchStart = null;
+        let pinchStart = 0;
+        canvas.addEventListener('touchstart', e => {
+            if (e.touches.length === 1) {
+                touchStart = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+            } else if (e.touches.length === 2) {
+                const dx = e.touches[0].clientX - e.touches[1].clientX;
+                const dy = e.touches[0].clientY - e.touches[1].clientY;
+                pinchStart = Math.hypot(dx, dy);
+            }
+        }, { passive: true });
+        canvas.addEventListener('touchmove', e => {
+            if (e.touches.length === 1 && touchStart) {
+                const dx = e.touches[0].clientX - touchStart.x;
+                const dy = e.touches[0].clientY - touchStart.y;
+                yaw -= dx * 0.004;
+                pitch -= dy * 0.004;
+                pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, pitch));
+                touchStart = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+            } else if (e.touches.length === 2 && pinchStart > 0) {
+                const dx = e.touches[0].clientX - e.touches[1].clientX;
+                const dy = e.touches[0].clientY - e.touches[1].clientY;
+                const pinchNow = Math.hypot(dx, dy);
+                const delta = (pinchNow - pinchStart) * 0.1;
+                const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+                camera.position.addScaledVector(dir, delta);
+                pinchStart = pinchNow;
+            }
+        }, { passive: true });
+        canvas.addEventListener('touchend', () => { touchStart = null; pinchStart = 0; }, { passive: true });
+
         window.addEventListener('resize', () => {
             camera.aspect = window.innerWidth / window.innerHeight;
             camera.updateProjectionMatrix();
@@ -335,12 +403,10 @@
             if (keys['KeyD']) dir.x += 1;
             if (keys['Space']) dir.y += 1;
             if (keys['ShiftLeft'] || keys['ShiftRight']) dir.y -= 1;
-
             if (dir.length() > 0) {
                 dir.normalize().applyQuaternion(camera.quaternion).multiplyScalar(80 * dt);
                 camera.position.add(dir);
             }
-
             camera.quaternion.setFromEuler(new THREE.Euler(pitch, yaw, 0, 'YXZ'));
         }
 
@@ -348,8 +414,8 @@
         // TEST DEFINITIONS
         // ============================================================
 
-        // -- Test 1: Sync single render --
-        defineTest('Sync: single render', async () => {
+        // -- 1: Sync single render --
+        defineTest('Sync: render + getText', async () => {
             const r = new GlyphRenderer(scene, atlas, { defaultColor: { r: 0, g: 1, b: 0.5 } });
             trackObject(r);
 
@@ -357,58 +423,93 @@
             const entry = r.getText(id);
 
             assert(entry !== null, 'getText returned null');
-            assert(entry.glyphs.length > 0, 'no glyphs');
             assert(entry.glyphs.length === 10, `expected 10 glyphs, got ${entry.glyphs.length}`);
 
-            log(`  Rendered ${entry.glyphs.length} glyphs, id=${id}`, 'ok');
+            log(`  id=${id}, ${entry.glyphs.length} glyphs`, 'ok');
         });
 
-        // -- Test 2: Sync batch render + updateColor --
+        // -- 2: Sync batch + updateColor --
         defineTest('Sync: batch + updateColor', async () => {
-            const r = new GlyphRenderer(scene, atlas, {
-                defaultColor: { r: 0.4, g: 0.4, b: 0.5 }
-            });
+            const r = new GlyphRenderer(scene, atlas, { defaultColor: { r: 0.4, g: 0.4, b: 0.5 } });
             trackObject(r);
 
-            const items = [
+            const ids = r.renderBatch([
                 { text: 'apple',  position: { x: -20, y: 6, z: 0 } },
                 { text: 'banana', position: { x: -10, y: 6, z: 0 } },
                 { text: 'cherry', position: { x:   0, y: 6, z: 0 } },
-            ];
-            const ids = r.renderBatch(items);
-
+            ]);
             assert(ids.length === 3, `expected 3 ids, got ${ids.length}`);
 
-            // Update middle word to bright orange
             r.updateColor(ids[1], { r: 1.0, g: 0.6, b: 0.0 });
-
-            // Verify glyph color was updated
-            const entry = r.getText(ids[1]);
-            const g0 = entry.glyphs[0];
+            const g0 = r.getText(ids[1]).glyphs[0];
             assert(g0.color.r === 1.0, `color not updated: r=${g0.color.r}`);
 
-            log(`  Batch rendered 3 words, updated color on id=${ids[1]}`, 'ok');
+            log(`  3 words, color updated on id=${ids[1]}`, 'ok');
         });
 
-        // -- Test 3: Sync updatePosition --
+        // -- 3: Sync updatePosition --
         defineTest('Sync: updatePosition', async () => {
-            const r = new GlyphRenderer(scene, atlas, {
-                defaultColor: { r: 0.8, g: 0.2, b: 0.8 }
-            });
+            const r = new GlyphRenderer(scene, atlas, { defaultColor: { r: 0.8, g: 0.2, b: 0.8 } });
             trackObject(r);
 
             const id = r.render('movable', { x: -20, y: 2, z: 0 });
             const before = r.getText(id).glyphs[0].position.x;
-
             r.updatePosition(id, { x: -10, y: 2, z: 0 });
             const after = r.getText(id).glyphs[0].position.x;
 
-            assert(after !== before, `position did not change: ${before} -> ${after}`);
-
-            log(`  Moved from x=${before.toFixed(2)} to x=${after.toFixed(2)}`, 'ok');
+            assert(after !== before, `position unchanged: ${before}`);
+            log(`  x: ${before.toFixed(2)} -> ${after.toFixed(2)}`, 'ok');
         });
 
-        // -- Test 4: Async single collection --
+        // -- 4: Main-thread buildBatchBuffers + applyPrebuiltBuffers (no workers) --
+        // This isolates the metadata flow from worker transport issues.
+        defineTest('Direct: buildBatchBuffers + apply', async () => {
+            const r = new GlyphRenderer(scene, atlas, {
+                defaultColor: { r: 0.6, g: 0.9, b: 0.3 },
+                skipPrealloc: true
+            });
+            trackObject(r);
+
+            const items = [
+                { text: 'direct-a', position: { x: -20, y: -2, z: 0 }, color: { r: 0.6, g: 0.9, b: 0.3 }, scale: 1.0 },
+                { text: 'direct-b', position: { x:  -5, y: -2, z: 0 }, color: { r: 0.6, g: 0.9, b: 0.3 }, scale: 1.0 },
+            ];
+
+            // Build buffers on main thread (same code the worker uses)
+            const uvMap = {};
+            for (const [code, uv] of atlas.uvMap) { uvMap[code] = uv; }
+            const metrics = {
+                charWidth: atlas.getCharSize().width,
+                charHeight: atlas.getCharSize().height,
+                letterSpacing: atlas.getCharSize().width * 0.05,
+                lineSpacing: atlas.getCharSize().height * 1.2,
+            };
+            const buffers = buildBatchBuffers(items, { metrics, uvMap, defaultColor: { r: 0.6, g: 0.9, b: 0.3 } });
+
+            log(`  buffers: count=${buffers.count}, hasItemMeta=${!!buffers.itemMeta}, metaLen=${buffers.itemMeta?.length}`, 'info');
+            assert(buffers.itemMeta, 'buildBatchBuffers did not return itemMeta');
+            assert(buffers.itemMeta.length === 2, `expected 2 itemMeta, got ${buffers.itemMeta.length}`);
+            assert(buffers.itemMeta[0].glyphCount > 0, `item 0 has 0 glyphs`);
+
+            // Apply to renderer with metadata
+            const rendererIds = r.applyPrebuiltBuffers(buffers, items);
+            assert(rendererIds !== null, 'applyPrebuiltBuffers returned null (no itemMeta?)');
+            assert(rendererIds.length === 2, `expected 2 renderer IDs, got ${rendererIds.length}`);
+
+            // Verify getText works
+            const entry = r.getText(rendererIds[0]);
+            assert(entry !== null, 'getText returned null after applyPrebuiltBuffers');
+            assert(entry.glyphs.length > 0, `no glyphs: ${entry.glyphs.length}`);
+
+            // Verify updateColor works
+            r.updateColor(rendererIds[0], { r: 1, g: 0, b: 0 });
+            const updated = r.getText(rendererIds[0]).glyphs[0];
+            assert(updated.color.r === 1, `color not updated: r=${updated.color.r}`);
+
+            log(`  ids=${rendererIds}, glyphs=${entry.glyphs.length}, color update OK`, 'ok');
+        });
+
+        // -- 5: Async flushAsync + getText --
         defineTest('Async: flushAsync + getText', async () => {
             const coll = new GlyphCollection(scene, atlas, {
                 defaultColor: { r: 0.2, g: 0.6, b: 1.0 },
@@ -416,21 +517,37 @@
             });
             trackObject(coll);
 
-            const id1 = coll.addText('async hello', { x: -20, y: -2, z: 0 });
-            const id2 = coll.addText('async world', { x: -5, y: -2, z: 0 });
+            const id1 = coll.addText('async hello', { x: -20, y: -6, z: 0 });
+            const id2 = coll.addText('async world', { x: -5, y: -6, z: 0 });
 
             await coll.flushAsync();
 
-            // Verify getText works after async flush
+            // Diagnostic: check internal state
+            const hasRenderer = !!coll.getRenderer();
+            const hasIdMap = coll._idMap.has(id1);
+            const committedEntry = coll._committedTexts.get(id1);
+            const rendererId = coll._idMap.get(id1);
+
+            log(`  renderer=${hasRenderer}, idMap=${hasIdMap}, rendererId=${rendererId}, committed=${!!committedEntry}`, 'info');
+
+            if (committedEntry) {
+                log(`  committed.rendererId=${committedEntry.rendererId}`, 'info');
+            }
+
+            if (hasRenderer && rendererId !== undefined) {
+                const rendererEntry = coll.getRenderer().getText(rendererId);
+                log(`  rendererEntry=${!!rendererEntry}, glyphs=${rendererEntry?.glyphs?.length ?? 'N/A'}`, 'info');
+            }
+
             const entry = coll.getText(id1);
             assert(entry !== null, 'getText returned null after flushAsync');
             assert(!entry.pending, 'entry still marked as pending');
-            assert(entry.glyphs.length > 0, `no glyphs: got ${entry.glyphs.length}`);
+            assert(entry.glyphs.length > 0, `no glyphs: got ${entry.glyphs.length} (rendererId=${rendererId}, committed.rendererId=${committedEntry?.rendererId})`);
 
-            log(`  flushAsync: id1 has ${entry.glyphs.length} glyphs`, 'ok');
+            log(`  id1 has ${entry.glyphs.length} glyphs`, 'ok');
         });
 
-        // -- Test 5: Async updateColor post-flush --
+        // -- 6: Async updateColor post-flush --
         defineTest('Async: updateColor post-flush', async () => {
             const coll = new GlyphCollection(scene, atlas, {
                 defaultColor: { r: 0.3, g: 0.3, b: 0.3 },
@@ -439,29 +556,35 @@
             trackObject(coll);
 
             const ids = coll.addTexts([
-                { text: 'red',   position: { x: -20, y: -6, z: 0 } },
-                { text: 'green', position: { x: -12, y: -6, z: 0 } },
-                { text: 'blue',  position: { x:  -4, y: -6, z: 0 } },
+                { text: 'red',   position: { x: -20, y: -10, z: 0 } },
+                { text: 'green', position: { x: -12, y: -10, z: 0 } },
+                { text: 'blue',  position: { x:  -4, y: -10, z: 0 } },
             ]);
 
             await coll.flushAsync();
 
-            // Now update colors — this is the critical test
+            // Check state before update
+            const rendererId = coll._idMap.get(ids[0]);
+            log(`  pre-update: idMap[${ids[0]}]=${rendererId}`, 'info');
+            assert(rendererId !== undefined, `no rendererId for ids[0]=${ids[0]}`);
+
+            const preEntry = coll.getRenderer().getText(rendererId);
+            assert(preEntry !== null, `renderer has no entry for rendererId=${rendererId}`);
+            assert(preEntry.glyphs.length > 0, `no glyphs for rendererId=${rendererId}`);
+
+            // Update colors
             coll.updateColor(ids[0], { r: 1, g: 0, b: 0 });
             coll.updateColor(ids[1], { r: 0, g: 1, b: 0 });
             coll.updateColor(ids[2], { r: 0, g: 0, b: 1 });
             coll.flush();
 
-            // Verify via renderer that buffer was actually written
-            const r = coll.getRenderer();
-            const rendererEntry = r.getText(coll._idMap.get(ids[0]));
-            assert(rendererEntry !== null, 'renderer has no entry for id after color update');
-            assert(rendererEntry.glyphs[0].color.r === 1, `color not updated: r=${rendererEntry.glyphs[0].color.r}`);
+            const postEntry = coll.getRenderer().getText(rendererId);
+            assert(postEntry.glyphs[0].color.r === 1, `color not updated: r=${postEntry.glyphs[0].color.r}`);
 
-            log(`  Updated 3 word colors after flushAsync`, 'ok');
+            log(`  3 colors updated after flushAsync`, 'ok');
         });
 
-        // -- Test 6: Async updatePosition post-flush --
+        // -- 7: Async updatePosition post-flush --
         defineTest('Async: updatePosition post-flush', async () => {
             const coll = new GlyphCollection(scene, atlas, {
                 defaultColor: { r: 1.0, g: 0.8, b: 0.0 },
@@ -469,25 +592,26 @@
             });
             trackObject(coll);
 
-            const id = coll.addText('shift me', { x: -20, y: -10, z: 0 });
+            const id = coll.addText('shift me', { x: -20, y: -14, z: 0 });
             await coll.flushAsync();
 
-            // Read initial position from renderer
             const rendererId = coll._idMap.get(id);
-            const beforeGlyph = coll.getRenderer().getText(rendererId).glyphs[0];
-            const beforeX = beforeGlyph.position.x;
+            assert(rendererId !== undefined, `no rendererId for id=${id}`);
 
-            // Move it
-            coll.updatePosition(id, { x: -5, y: -10, z: 0 });
+            const beforeEntry = coll.getRenderer().getText(rendererId);
+            assert(beforeEntry !== null, `renderer entry null for rendererId=${rendererId}`);
+            const beforeX = beforeEntry.glyphs[0].position.x;
+
+            coll.updatePosition(id, { x: -5, y: -14, z: 0 });
             coll.flush();
 
-            const afterGlyph = coll.getRenderer().getText(rendererId).glyphs[0];
-            assert(afterGlyph.position.x !== beforeX, `position unchanged: ${beforeX}`);
+            const afterX = coll.getRenderer().getText(rendererId).glyphs[0].position.x;
+            assert(afterX !== beforeX, `position unchanged: ${beforeX}`);
 
-            log(`  Moved async text from x=${beforeX.toFixed(2)} to x=${afterGlyph.position.x.toFixed(2)}`, 'ok');
+            log(`  x: ${beforeX.toFixed(2)} -> ${afterX.toFixed(2)}`, 'ok');
         });
 
-        // -- Test 7: Async batch with many items --
+        // -- 8: Async batch 100 items --
         defineTest('Async: batch 100 items', async () => {
             const coll = new GlyphCollection(scene, atlas, {
                 defaultColor: { r: 0.5, g: 0.5, b: 0.5 },
@@ -497,36 +621,36 @@
 
             const ids = [];
             for (let i = 0; i < 100; i++) {
-                const row = Math.floor(i / 10);
-                const col = i % 10;
-                const id = coll.addText(`w${i}`, {
-                    x: col * 4 + 10,
-                    y: -row * 1.5 + 10,
+                ids.push(coll.addText(`w${i}`, {
+                    x: (i % 10) * 4 + 10,
+                    y: -Math.floor(i / 10) * 1.5 + 10,
                     z: 0
-                });
-                ids.push(id);
+                }));
             }
 
             await coll.flushAsync();
 
-            // Verify all entries are tracked
             let tracked = 0;
+            let withGlyphs = 0;
             for (const id of ids) {
-                if (coll.getText(id) && !coll.getText(id).pending) tracked++;
+                const t = coll.getText(id);
+                if (t && !t.pending) tracked++;
+                if (t && t.glyphs && t.glyphs.length > 0) withGlyphs++;
             }
 
-            assert(tracked === 100, `only ${tracked}/100 tracked after flushAsync`);
+            assert(tracked === 100, `only ${tracked}/100 tracked`);
+            assert(withGlyphs === 100, `only ${withGlyphs}/100 have glyphs`);
 
-            // Color every 10th word
+            // Color every 10th
             for (let i = 0; i < 100; i += 10) {
                 coll.updateColor(ids[i], { r: 1, g: 0.3, b: 0.8 });
             }
             coll.flush();
 
-            log(`  Flushed 100 items, ${tracked} tracked, colored 10`, 'ok');
+            log(`  100 items: ${tracked} tracked, ${withGlyphs} with glyphs`, 'ok');
         });
 
-        // -- Test 8: getBounds after async flush --
+        // -- 9: getBounds after async --
         defineTest('Async: getBounds', async () => {
             const coll = new GlyphCollection(scene, atlas, {
                 defaultColor: { r: 0.6, g: 0.4, b: 0.8 },
@@ -534,9 +658,8 @@
             });
             trackObject(coll);
 
-            coll.addText('bounds test line one', { x: -20, y: -14, z: 0 });
-            coll.addText('bounds test line two', { x: -20, y: -15.5, z: 0 });
-
+            coll.addText('bounds test line one', { x: -20, y: -18, z: 0 });
+            coll.addText('bounds test line two', { x: -20, y: -19.5, z: 0 });
             await coll.flushAsync();
 
             const bounds = coll.getBounds();
@@ -544,66 +667,53 @@
             assert(bounds.width > 0, `invalid width: ${bounds.width}`);
             assert(bounds.height > 0, `invalid height: ${bounds.height}`);
 
-            log(`  Bounds: ${bounds.width.toFixed(1)} x ${bounds.height.toFixed(1)}`, 'ok');
+            log(`  bounds: ${bounds.width.toFixed(1)} x ${bounds.height.toFixed(1)}`, 'ok');
         });
 
-        // -- Test 9: Depth ordering (glyphs in front of background) --
+        // -- 10: Depth ordering --
         defineTest('Depth: glyph-over-background', async () => {
-            // Create a background plane
             const bgGeo = new THREE.PlaneGeometry(15, 4);
             const bgMat = new THREE.MeshBasicMaterial({
-                color: 0x1a1a3e,
-                transparent: true,
-                opacity: 0.85,
-                side: THREE.DoubleSide,
-                depthWrite: false
+                color: 0x1a1a3e, transparent: true, opacity: 0.85,
+                side: THREE.DoubleSide, depthWrite: false
             });
             const bgMesh = new THREE.Mesh(bgGeo, bgMat);
             bgMesh.renderOrder = -1;
-            bgMesh.position.set(-12, -18, -0.5);
+            bgMesh.position.set(-12, -22, -0.5);
             scene.add(bgMesh);
             trackObject({ dispose() { scene.remove(bgMesh); bgGeo.dispose(); bgMat.dispose(); } });
 
-            // Render text in front
-            const r = new GlyphRenderer(scene, atlas, {
-                defaultColor: { r: 1.0, g: 1.0, b: 1.0 }
-            });
+            const r = new GlyphRenderer(scene, atlas, { defaultColor: { r: 1, g: 1, b: 1 } });
             trackObject(r);
-            r.render('Depth OK', { x: -16, y: -18.5, z: 0 });
+            r.render('Depth OK', { x: -16, y: -22.5, z: 0 });
 
-            // Verify material settings
             const mat = r.instanceMesh.material;
-            assert(mat.depthWrite === true, `depthWrite should be true, got ${mat.depthWrite}`);
-            assert(mat.transparent === false, `transparent should be false, got ${mat.transparent}`);
+            assert(mat.depthWrite === true, `depthWrite=${mat.depthWrite}`);
+            assert(mat.transparent === false, `transparent=${mat.transparent}`);
 
-            log(`  Glyph material: depthWrite=${mat.depthWrite}, transparent=${mat.transparent}`, 'ok');
+            log(`  depthWrite=${mat.depthWrite}, transparent=${mat.transparent}`, 'ok');
         });
 
-        // -- Test 10: Mixed sync/async on same scene --
+        // -- 11: Mixed sync + async --
         defineTest('Mixed: sync + async coexist', async () => {
-            // Sync renderer
-            const syncR = new GlyphRenderer(scene, atlas, {
-                defaultColor: { r: 0.0, g: 1.0, b: 0.0 }
-            });
+            const syncR = new GlyphRenderer(scene, atlas, { defaultColor: { r: 0, g: 1, b: 0 } });
             trackObject(syncR);
-            syncR.render('SYNC', { x: 15, y: -14, z: 0 });
+            const syncId = syncR.render('SYNC', { x: 15, y: -18, z: 0 });
 
-            // Async collection
             const asyncC = new GlyphCollection(scene, atlas, {
-                defaultColor: { r: 1.0, g: 0.5, b: 0.0 },
+                defaultColor: { r: 1, g: 0.5, b: 0 },
                 worldScale: 0.025
             });
             trackObject(asyncC);
-            const id = asyncC.addText('ASYNC', { x: 15, y: -16, z: 0 });
+            const asyncId = asyncC.addText('ASYNC', { x: 15, y: -20, z: 0 });
             await asyncC.flushAsync();
 
-            // Both should be independently functional
-            syncR.updateColor(1, { r: 0, g: 1, b: 1 });
-
-            asyncC.updateColor(id, { r: 1, g: 1, b: 0 });
+            // Both should be updatable
+            syncR.updateColor(syncId, { r: 0, g: 1, b: 1 });
+            asyncC.updateColor(asyncId, { r: 1, g: 1, b: 0 });
             asyncC.flush();
 
-            log(`  Both sync and async renderers active and updatable`, 'ok');
+            log(`  sync + async both active and updatable`, 'ok');
         });
 
         // ============================================================
@@ -614,38 +724,37 @@
             const runBtn = document.getElementById('run-btn');
             runBtn.disabled = true;
             logEl.innerHTML = '';
+            summaryEl.innerHTML = '';
 
-            // Init atlas if needed
             if (!atlas) {
                 log('Generating glyph atlas...', 'info');
                 atlas = new GlyphAtlas();
                 await atlas.generate();
-                log('Atlas ready', 'ok');
+                log(`Atlas ready: ${atlas.getCharSize().width}x${atlas.getCharSize().height}px`, 'ok');
             }
 
             clearScene();
 
-            let passed = 0;
-            let failed = 0;
+            let passed = 0, failed = 0;
 
             for (let i = 0; i < tests.length; i++) {
-                const t = tests[i];
                 updateTestStatus(i, 'running');
-                log(`[${i + 1}/${tests.length}] ${t.name}`);
-
+                log(`[${i + 1}/${tests.length}] ${tests[i].name}`);
                 try {
-                    await t.fn();
+                    await tests[i].fn();
                     updateTestStatus(i, 'pass');
                     passed++;
                 } catch (err) {
                     updateTestStatus(i, 'fail');
                     log(`  FAIL: ${err.message}`, 'err');
-                    console.error(`Test "${t.name}" failed:`, err);
+                    console.error(`Test "${tests[i].name}":`, err);
                     failed++;
                 }
             }
 
-            log(`Done: ${passed} passed, ${failed} failed`, failed > 0 ? 'err' : 'ok');
+            const cls = failed > 0 ? 'has-fail' : 'all-pass';
+            summaryEl.innerHTML = `<div class="summary ${cls}">${passed} passed, ${failed} failed</div>`;
+            log(`Done: ${passed}/${tests.length}`, failed > 0 ? 'err' : 'ok');
             runBtn.disabled = false;
         }
 
@@ -654,14 +763,13 @@
         // ============================================================
 
         renderTestList();
-
         document.getElementById('run-btn').addEventListener('click', runAllTests);
         document.getElementById('clear-btn').addEventListener('click', () => {
             clearScene();
             tests.forEach((_, i) => updateTestStatus(i, 'pending'));
+            summaryEl.innerHTML = '';
         });
 
-        // Animation loop
         let lastTime = performance.now();
         function animate() {
             requestAnimationFrame(animate);
@@ -672,7 +780,7 @@
         }
         animate();
 
-        // Auto-run on load
+        // Auto-run
         runAllTests();
     </script>
 </body>
