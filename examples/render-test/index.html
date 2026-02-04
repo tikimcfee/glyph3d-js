@@ -352,9 +352,11 @@
 
         // Global error listener to catch errors from outside test scope (e.g. Three.js render loop)
         window.addEventListener('error', (evt) => {
-            const msg = `[GLOBAL ERROR] ${evt.message} at ${evt.filename}:${evt.lineno}:${evt.colno}`;
-            log(msg, 'err');
-            console.error('[GLOBAL ERROR]', evt.message, evt.filename, evt.lineno, evt.colno, evt.error);
+            log(`[GLOBAL ERROR] ${evt.message} at ${evt.filename}:${evt.lineno}:${evt.colno}`, 'err');
+            if (evt.error?.stack) {
+                const shortStack = evt.error.stack.split('\n').slice(0, 3).join('\n  ');
+                log(`  ${shortStack}`, 'err');
+            }
         });
 
         // Panel collapse toggle
@@ -802,18 +804,15 @@
                 try {
                     await tests[i].fn();
                     updateTestStatus(i, 'pass');
-                    testLog.info(`PASS: ${t.name}`);
+                    log(`  PASS: ${tests[i].name}`, 'ok');
                     passed++;
                 } catch (err) {
                     updateTestStatus(i, 'fail');
                     log(`  FAIL: ${err.message}`, 'err');
-                    // Log stack trace to help identify source of errors like "Can't find variable: t"
                     if (err.stack) {
                         const shortStack = err.stack.split('\n').slice(0, 5).join('\n  ');
                         log(`  STACK: ${shortStack}`, 'err');
                     }
-                    testLog.error(`FAIL: ${tests[i].name}`, { error: err.message, stack: err.stack });
-                    console.error(`Test "${tests[i].name}":`, err);
                     failed++;
                 }
             }
