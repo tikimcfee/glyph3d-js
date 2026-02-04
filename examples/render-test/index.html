@@ -33,6 +33,37 @@
             min-width: 280px;
             max-height: calc(100vh - 24px);
             overflow-y: auto;
+            transition: transform 0.25s ease, opacity 0.25s ease;
+        }
+
+        #panel.collapsed {
+            transform: translateX(calc(-100% - 12px));
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        #panel-toggle {
+            position: fixed;
+            top: 12px;
+            left: 12px;
+            width: 40px;
+            height: 40px;
+            border-radius: 6px;
+            background: rgba(10, 10, 15, 0.92);
+            border: 1px solid #333;
+            color: #00ff88;
+            font-size: 18px;
+            cursor: pointer;
+            z-index: 99;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: opacity 0.25s ease;
+        }
+
+        #panel-toggle.hidden {
+            opacity: 0;
+            pointer-events: none;
         }
 
         #panel h1 {
@@ -168,13 +199,29 @@
             margin-right: 6px;
             font-size: 10px;
         }
+
+        /* Mobile: panel takes less space, controls-help hidden, start collapsed */
+        @media (max-width: 600px) {
+            #panel {
+                min-width: 0;
+                max-width: calc(100vw - 60px);
+                max-height: 60vh;
+                font-size: 11px;
+            }
+            #controls-help { display: none; }
+        }
     </style>
 </head>
 <body>
     <canvas id="canvas"></canvas>
 
+    <button id="panel-toggle" class="hidden" aria-label="Show panel">&#9776;</button>
+
     <div id="panel">
-        <h1>Render Test</h1>
+        <div style="display:flex; align-items:center; justify-content:space-between;">
+            <h1>Render Test</h1>
+            <button id="panel-collapse" style="background:none; border:none; color:#666; font-size:18px; cursor:pointer; padding:0 4px;" aria-label="Collapse panel">&times;</button>
+        </div>
         <p class="subtitle">Sync &amp; async path verification</p>
 
         <div class="section">
@@ -216,10 +263,14 @@
             GlyphRenderer,
             GlyphCollection,
             logCapture,
+            createLogger,
         } from '../../src/index.js';
 
         // Start log capture immediately so all test output is recorded
         logCapture.start();
+
+        // Create a logger for test output so it flows into the capture
+        const testLog = createLogger('render-test');
 
         // ============================================================
         // TEST FRAMEWORK
@@ -261,6 +312,12 @@
             line.textContent = msg;
             logEl.appendChild(line);
             logEl.scrollTop = logEl.scrollHeight;
+
+            // Also emit through Logger so it appears in log captures
+            if (cls === 'err') testLog.error(msg);
+            else if (cls === 'info') testLog.warn(msg);
+            else if (cls === 'ok') testLog.info(msg);
+            else testLog.debug(msg);
         }
 
         function assert(condition, msg) {
@@ -641,10 +698,12 @@
                 try {
                     await t.fn();
                     updateTestStatus(i, 'pass');
+                    testLog.info(`PASS: ${t.name}`);
                     passed++;
                 } catch (err) {
                     updateTestStatus(i, 'fail');
                     log(`  FAIL: ${err.message}`, 'err');
+                    testLog.error(`FAIL: ${t.name}`, { error: err.message, stack: err.stack });
                     console.error(`Test "${t.name}" failed:`, err);
                     failed++;
                 }
@@ -659,6 +718,24 @@
         // ============================================================
 
         renderTestList();
+
+        // Panel collapse / expand
+        const panel = document.getElementById('panel');
+        const panelToggle = document.getElementById('panel-toggle');
+        const panelCollapse = document.getElementById('panel-collapse');
+
+        function setPanelCollapsed(collapsed) {
+            panel.classList.toggle('collapsed', collapsed);
+            panelToggle.classList.toggle('hidden', !collapsed);
+        }
+
+        panelCollapse.addEventListener('click', () => setPanelCollapsed(true));
+        panelToggle.addEventListener('click', () => setPanelCollapsed(false));
+
+        // Auto-collapse on small screens after tests finish
+        if (window.innerWidth <= 600) {
+            setPanelCollapsed(true);
+        }
 
         document.getElementById('run-btn').addEventListener('click', runAllTests);
         document.getElementById('clear-btn').addEventListener('click', () => {
