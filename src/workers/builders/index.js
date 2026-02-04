@@ -151,9 +151,13 @@ const Z_WRAP_CONFIG = {
 /**
  * Build buffers for multiple texts - single pass per text, direct to combined buffers
  *
+ * Returns per-item metadata (bufferStartIndex, glyphCount, bounds) alongside the
+ * combined GPU buffers. This metadata enables post-render operations (updatePosition,
+ * updateColor, getText) on individual text entries after the worker path.
+ *
  * @param {Array<{text, position, color?, scale?}>} items
  * @param {Object} shared - {metrics, uvMap, defaultColor}
- * @returns {{positions: Float32Array, sizes: Float32Array, uvs: Float32Array, colors: Float32Array, count: number, bounds: Object|null}}
+ * @returns {{positions: Float32Array, sizes: Float32Array, uvs: Float32Array, colors: Float32Array, count: number, bounds: Object|null, itemMeta: Array<{bufferStartIndex: number, glyphCount: number, bounds: Object|null}>}}
  */
 export function buildBatchBuffers(items, shared) {
     const { metrics, uvMap, defaultColor } = shared;
@@ -175,7 +179,8 @@ export function buildBatchBuffers(items, shared) {
             uvs: new Float32Array(0),
             colors: new Float32Array(0),
             count: 0,
-            bounds: null
+            bounds: null,
+            itemMeta: items.map(() => ({ bufferStartIndex: 0, glyphCount: 0, bounds: null }))
         };
     }
 
@@ -184,6 +189,9 @@ export function buildBatchBuffers(items, shared) {
     const sizes = new Float32Array(totalGlyphs * 2);
     const uvs = new Float32Array(totalGlyphs * 4);
     const colors = new Float32Array(totalGlyphs * 3);
+
+    // Per-item metadata for post-render operations
+    const itemMeta = new Array(items.length);
 
     // Track combined bounds
     let minX = Infinity, minY = Infinity, minZ = Infinity;
@@ -199,7 +207,13 @@ export function buildBatchBuffers(items, shared) {
         const color = item.color || defaultColor;
         const scale = item.scale || 1.0;
 
-        if (!text || text.length === 0) continue;
+        // Record where this item's glyphs start
+        const itemStartOffset = bufferOffset;
+
+        if (!text || text.length === 0) {
+            itemMeta[itemIdx] = { bufferStartIndex: itemStartOffset, glyphCount: 0, bounds: null };
+            continue;
+        }
 
         const scaledWidth = metrics.charWidth * scale;
         const scaledHeight = metrics.charHeight * scale;
@@ -282,6 +296,20 @@ export function buildBatchBuffers(items, shared) {
         if (x > pos.x) itemMaxX = Math.max(itemMaxX, x - metrics.letterSpacing);
         itemMaxZ = Math.max(itemMaxZ, startZ);
 
+        // Store per-item metadata
+        const itemGlyphCount = bufferOffset - itemStartOffset;
+        itemMeta[itemIdx] = {
+            bufferStartIndex: itemStartOffset,
+            glyphCount: itemGlyphCount,
+            bounds: itemGlyphCount > 0 ? {
+                min: { x: itemMinX, y: itemMinY, z: itemMinZ },
+                max: { x: itemMaxX, y: itemMaxY, z: itemMaxZ },
+                width: itemMaxX - itemMinX,
+                height: itemMaxY - itemMinY,
+                depth: itemMaxZ - itemMinZ
+            } : null
+        };
+
         // Accumulate to combined bounds
         if (itemMinX !== Infinity) {
             minX = Math.min(minX, itemMinX);
@@ -301,7 +329,7 @@ export function buildBatchBuffers(items, shared) {
         depth: maxZ - minZ
     } : null;
 
-    return { positions, sizes, uvs, colors, count: bufferOffset, bounds };
+    return { positions, sizes, uvs, colors, count: bufferOffset, bounds, itemMeta };
 }
 
 export default buildGlyphBuffers;

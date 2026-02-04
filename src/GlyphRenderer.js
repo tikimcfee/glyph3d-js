@@ -629,15 +629,22 @@ class GlyphRendererV15 {
      * Used by worker pipeline to skip main-thread computation.
      * Buffers come from WorkerBridge.buildBuffers() or buildBatchBuffers().
      *
+     * When itemMeta and items are provided, reconstructs renderedTexts entries
+     * from the buffer data so that updatePosition(), updateColor(), getText(),
+     * and other per-text operations work after the worker path.
+     *
      * @param {Object} buffers - Pre-computed buffer data
      * @param {Float32Array} buffers.positions - [x,y,z] per glyph
      * @param {Float32Array} buffers.sizes - [w,h] per glyph
      * @param {Float32Array} buffers.uvs - [u0,v1,u1,v0] per glyph (V-flipped)
      * @param {Float32Array} buffers.colors - [r,g,b] per glyph
      * @param {number} buffers.count - Number of glyphs
+     * @param {Array} [buffers.itemMeta] - Per-item metadata from buildBatchBuffers
+     * @param {Array} [items] - Original items array (text, position, options)
+     * @returns {Array<number>|null} Array of renderer IDs if itemMeta provided, null otherwise
      */
-    applyPrebuiltBuffers(buffers) {
-        const { positions, sizes, uvs, colors, count } = buffers;
+    applyPrebuiltBuffers(buffers, items) {
+        const { positions, sizes, uvs, colors, count, itemMeta } = buffers;
         const geometry = this.instanceMesh.geometry;
 
         // Swap in worker's arrays directly - no copying!
@@ -657,7 +664,59 @@ class GlyphRendererV15 {
         // Update max instances to reflect actual capacity
         this.config.maxInstances = Math.max(this.config.maxInstances, count);
 
-        logger.debug('Applied pre-built buffers (zero-copy)', { count });
+        // Reconstruct renderedTexts entries from buffer data + metadata
+        // This enables updatePosition, updateColor, getText, etc. after worker path
+        let rendererIds = null;
+        if (itemMeta && items) {
+            rendererIds = [];
+            for (let i = 0; i < itemMeta.length; i++) {
+                const meta = itemMeta[i];
+                const item = items[i];
+                const id = this.nextId++;
+
+                // Reconstruct glyph array by reading back from the buffers
+                const glyphs = new Array(meta.glyphCount);
+                for (let g = 0; g < meta.glyphCount; g++) {
+                    const bufIdx = meta.bufferStartIndex + g;
+                    glyphs[g] = {
+                        position: {
+                            x: positions[bufIdx * 3],
+                            y: positions[bufIdx * 3 + 1],
+                            z: positions[bufIdx * 3 + 2]
+                        },
+                        size: {
+                            width: sizes[bufIdx * 2],
+                            height: sizes[bufIdx * 2 + 1]
+                        },
+                        color: {
+                            r: colors[bufIdx * 3],
+                            g: colors[bufIdx * 3 + 1],
+                            b: colors[bufIdx * 3 + 2]
+                        },
+                        char: ''
+                    };
+                }
+
+                this.renderedTexts.set(id, {
+                    id,
+                    text: item.text || '',
+                    glyphs,
+                    options: item.options || {},
+                    timestamp: Date.now(),
+                    bufferStartIndex: meta.bufferStartIndex,
+                    glyphCount: meta.glyphCount
+                });
+
+                rendererIds.push(id);
+            }
+        }
+
+        logger.debug('Applied pre-built buffers (zero-copy)', {
+            count,
+            entriesRegistered: rendererIds ? rendererIds.length : 0
+        });
+
+        return rendererIds;
     }
 
     /**
