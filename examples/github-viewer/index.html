@@ -91,6 +91,20 @@
             cursor: not-allowed;
         }
 
+        .bmc-link {
+            padding: 6px 10px;
+            color: #ffdd00;
+            text-decoration: none;
+            font-size: 12px;
+            white-space: nowrap;
+            opacity: 0.7;
+            transition: opacity 0.2s;
+        }
+
+        .bmc-link:hover {
+            opacity: 1;
+        }
+
         @media (max-width: 600px) {
             #header {
                 flex-wrap: wrap;
@@ -513,6 +527,7 @@
                placeholder="github.com/owner/repo"
                value="https://github.com/mrdoob/three.js">
         <button id="load-btn">Load</button>
+        <a href="https://buymeacoffee.com/tikimcfee" target="_blank" rel="noopener" class="bmc-link">&#9749; support</a>
     </div>
 
     <!-- Loading overlay -->
