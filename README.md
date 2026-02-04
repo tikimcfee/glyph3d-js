@@ -314,6 +314,10 @@ npm run serve
 
 No build step is required. The project uses native ES modules and can be served directly.
 
+## Support
+
+If you find this project useful, you can [buy me a coffee](https://buymeacoffee.com/tikimcfee).
+
 ## License
 
 MIT
