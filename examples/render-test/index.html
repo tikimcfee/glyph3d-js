@@ -350,6 +350,15 @@
             if (!condition) throw new Error(msg);
         }
 
+        // Global error listener to catch errors from outside test scope (e.g. Three.js render loop)
+        window.addEventListener('error', (evt) => {
+            log(`[GLOBAL ERROR] ${evt.message} at ${evt.filename}:${evt.lineno}:${evt.colno}`, 'err');
+            if (evt.error?.stack) {
+                const shortStack = evt.error.stack.split('\n').slice(0, 3).join('\n  ');
+                log(`  ${shortStack}`, 'err');
+            }
+        });
+
         // Panel collapse toggle
         document.getElementById('toggle-panel-btn').addEventListener('click', () => {
             panelCollapsed = !panelCollapsed;
@@ -795,13 +804,15 @@
                 try {
                     await tests[i].fn();
                     updateTestStatus(i, 'pass');
-                    testLog.info(`PASS: ${t.name}`);
+                    log(`  PASS: ${tests[i].name}`, 'ok');
                     passed++;
                 } catch (err) {
                     updateTestStatus(i, 'fail');
                     log(`  FAIL: ${err.message}`, 'err');
-                    testLog.error(`FAIL: ${tests[i].name}`, { error: err.message, stack: err.stack });
-                    console.error(`Test "${tests[i].name}":`, err);
+                    if (err.stack) {
+                        const shortStack = err.stack.split('\n').slice(0, 5).join('\n  ');
+                        log(`  STACK: ${shortStack}`, 'err');
+                    }
                     failed++;
                 }
             }
@@ -847,12 +858,23 @@
         });
 
         let lastTime = performance.now();
+        let renderErrorLogged = false;
         function animate() {
             requestAnimationFrame(animate);
             const now = performance.now();
             updateCamera((now - lastTime) / 1000);
             lastTime = now;
-            renderer.render(scene, camera);
+            try {
+                renderer.render(scene, camera);
+            } catch (renderErr) {
+                if (!renderErrorLogged) {
+                    renderErrorLogged = true;
+                    log(`[RENDER ERROR] ${renderErr.message}`, 'err');
+                    if (renderErr.stack) {
+                        log(`  ${renderErr.stack.split('\n').slice(0, 3).join('\n  ')}`, 'err');
+                    }
+                }
+            }
         }
         animate();
 
