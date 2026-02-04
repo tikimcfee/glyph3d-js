@@ -392,6 +392,7 @@ class CodeGrid extends THREE.Object3D {
         });
 
         this._background = new THREE.Mesh(geometry, material);
+        this._background.renderOrder = -1; // Draw backgrounds before glyphs
         this._background.position.z = -1; // Slightly behind text
         this._background.visible = this.config.showBackground;
         this.add(this._background);
