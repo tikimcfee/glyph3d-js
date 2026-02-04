@@ -339,6 +339,9 @@ class GlyphCollection {
      * Uses WorkerBridge to compute glyph buffers in parallel,
      * then applies pre-built buffers directly to GPU.
      *
+     * Per-item metadata from the worker enables post-render operations
+     * (updatePosition, updateColor, getText) on individual text entries.
+     *
      * Falls back to sync flush() if workers unavailable.
      *
      * @returns {Promise<void>}
@@ -351,7 +354,7 @@ class GlyphCollection {
             return this.flush();
         }
 
-        // Process removals and updates only if renderer exists
+        // Process removals only if renderer exists
         if (this._renderer) {
             for (const rendererId of this._pendingRemovals) {
                 this._renderer.remove(rendererId);
@@ -364,7 +367,6 @@ class GlyphCollection {
             }
         }
         this._pendingRemovals = [];
-        this._pendingUpdates = [];
 
         // Process adds via worker
         if (this._pendingAdds.length > 0) {
@@ -384,7 +386,7 @@ class GlyphCollection {
             const metrics = this._getMetrics();
 
             try {
-                // Build buffers in worker
+                // Build buffers in worker — returns itemMeta with per-item tracking
                 const buffers = await bridge.buildBatchBuffers(items, { metrics, uvMap: null, defaultColor }, this.atlas);
 
                 // Create renderer AFTER worker returns, with exact size needed
@@ -392,17 +394,37 @@ class GlyphCollection {
                     this._createRendererWithSize(buffers.count);
                 }
 
-                // Apply worker's pre-built buffers directly (zero-copy)
-                this._renderer.applyPrebuiltBuffers(buffers);
+                // Apply worker's pre-built buffers and register per-text entries
+                // Pass items so renderer can reconstruct renderedTexts for updates
+                const rendererIds = this._renderer.applyPrebuiltBuffers(buffers, items);
 
                 // Use bounds from worker
                 this._workerBoundsCache = buffers.bounds;
 
-                // Track committed entries (reuse existing objects)
-                for (let i = 0; i < itemCount; i++) {
-                    const p = items[i];
-                    p.rendererId = -1;
-                    this._committedTexts.set(p.id, p);
+                // Build ID mappings between collection IDs and renderer IDs
+                if (rendererIds) {
+                    for (let i = 0; i < itemCount; i++) {
+                        const p = items[i];
+                        const rendererId = rendererIds[i];
+
+                        this._idMap.set(p.id, rendererId);
+                        this._reverseIdMap.set(rendererId, p.id);
+
+                        this._committedTexts.set(p.id, {
+                            id: p.id,
+                            rendererId,
+                            text: p.text,
+                            position: p.position,
+                            options: p.options
+                        });
+                    }
+                } else {
+                    // Fallback: no metadata (shouldn't happen with updated builders)
+                    for (let i = 0; i < itemCount; i++) {
+                        const p = items[i];
+                        p.rendererId = -1;
+                        this._committedTexts.set(p.id, p);
+                    }
                 }
 
                 this._pendingAdds = [];
@@ -413,6 +435,40 @@ class GlyphCollection {
                 return;
             }
         }
+
+        // Process pending updates now that renderer has per-text tracking
+        if (this._renderer && this._pendingUpdates.length > 0) {
+            for (const update of this._pendingUpdates) {
+                const rendererId = this._idMap.get(update.id);
+                if (rendererId === undefined) continue;
+
+                if (update.type === 'position') {
+                    this._renderer.updatePosition(rendererId, update.newPosition);
+                    const entry = this._committedTexts.get(update.id);
+                    if (entry) entry.position = update.newPosition;
+                } else if (update.type === 'color') {
+                    this._renderer.updateColor(rendererId, update.newColor);
+                    const entry = this._committedTexts.get(update.id);
+                    if (entry) entry.options.color = update.newColor;
+                } else if (update.type === 'text') {
+                    const entry = this._committedTexts.get(update.id);
+                    if (entry) {
+                        this._renderer.remove(rendererId);
+                        const newRendererId = this._renderer.render(
+                            update.newText,
+                            entry.position,
+                            entry.options
+                        );
+                        this._idMap.set(update.id, newRendererId);
+                        this._reverseIdMap.delete(rendererId);
+                        this._reverseIdMap.set(newRendererId, update.id);
+                        entry.text = update.newText;
+                        entry.rendererId = newRendererId;
+                    }
+                }
+            }
+        }
+        this._pendingUpdates = [];
 
         this._dirty = false;
     }
