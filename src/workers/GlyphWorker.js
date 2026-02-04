@@ -49,6 +49,8 @@ self.onmessage = function(event) {
 
                 const result = buildBatchBuffers(payload.items, shared);
 
+                // itemMeta is plain objects — goes through structured clone
+                // Float32Arrays are transferred zero-copy
                 self.postMessage(
                     { type: 'RESULT', jobId, buffers: result },
                     [
