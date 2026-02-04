@@ -435,6 +435,119 @@ export class GitHubRepositorySource {
     }
 
     /**
+     * Fetch pull request metadata
+     * @param {string} owner - Repository owner
+     * @param {string} repo - Repository name
+     * @param {number} prNumber - Pull request number
+     * @returns {Promise<Object>} - PR metadata (title, body, base/head refs, etc.)
+     */
+    async fetchPullRequest(owner, repo, prNumber) {
+        if (!owner || !repo || !prNumber) {
+            throw new GitHubError('Owner, repo, and PR number are required');
+        }
+
+        try {
+            const url = `${this.baseUrl}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${encodeURIComponent(prNumber)}`;
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+
+            const response = await fetch(url, {
+                signal: controller.signal,
+                headers: this._getHeaders(),
+            });
+
+            clearTimeout(timeoutId);
+            this._updateRateLimit(response);
+
+            if (!response.ok) {
+                if (response.status === 404) {
+                    throw new GitHubError(`Pull request #${prNumber} not found`, 404);
+                }
+                if (response.status === 403 && this.rateLimit.remaining === 0) {
+                    throw new RateLimitError(this.rateLimit.reset);
+                }
+                throw new GitHubError(`HTTP ${response.status}: ${response.statusText}`, response.status);
+            }
+
+            const data = await response.json();
+            return {
+                number: data.number,
+                title: data.title,
+                body: data.body,
+                state: data.state,
+                author: data.user?.login,
+                baseRef: data.base?.ref,
+                baseSha: data.base?.sha,
+                headRef: data.head?.ref,
+                headSha: data.head?.sha,
+                additions: data.additions,
+                deletions: data.deletions,
+                changedFiles: data.changed_files,
+                htmlUrl: data.html_url,
+                fetchedAt: Date.now(),
+            };
+        } catch (error) {
+            if (error.name === 'AbortError') {
+                throw new GitHubError(`Timeout fetching PR #${prNumber}`);
+            }
+            throw error;
+        }
+    }
+
+    /**
+     * Fetch pull request changed files with patches
+     * @param {string} owner - Repository owner
+     * @param {string} repo - Repository name
+     * @param {number} prNumber - Pull request number
+     * @returns {Promise<Array>} - Array of changed file objects
+     */
+    async fetchPullRequestFiles(owner, repo, prNumber) {
+        if (!owner || !repo || !prNumber) {
+            throw new GitHubError('Owner, repo, and PR number are required');
+        }
+
+        try {
+            const url = `${this.baseUrl}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${encodeURIComponent(prNumber)}/files?per_page=100`;
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+
+            const response = await fetch(url, {
+                signal: controller.signal,
+                headers: this._getHeaders(),
+            });
+
+            clearTimeout(timeoutId);
+            this._updateRateLimit(response);
+
+            if (!response.ok) {
+                if (response.status === 404) {
+                    throw new GitHubError(`Pull request #${prNumber} not found`, 404);
+                }
+                if (response.status === 403 && this.rateLimit.remaining === 0) {
+                    throw new RateLimitError(this.rateLimit.reset);
+                }
+                throw new GitHubError(`HTTP ${response.status}: ${response.statusText}`, response.status);
+            }
+
+            const data = await response.json();
+            return data.map(file => ({
+                filename: file.filename,
+                status: file.status, // 'added', 'removed', 'modified', 'renamed'
+                additions: file.additions,
+                deletions: file.deletions,
+                changes: file.changes,
+                patch: file.patch || '',
+                previousFilename: file.previous_filename || null,
+            }));
+        } catch (error) {
+            if (error.name === 'AbortError') {
+                throw new GitHubError(`Timeout fetching PR #${prNumber} files`);
+            }
+            throw error;
+        }
+    }
+
+    /**
      * Get source information
      * @returns {Object}
      */
