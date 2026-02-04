@@ -13,6 +13,7 @@ import * as LoggerModule from './Logger.js';
 import * as MetricsModule from './Metrics.js';
 import * as ErrorTrackerModule from './ErrorTracker.js';
 import * as DebugConsoleModule from './DebugConsole.js';
+import * as LogCaptureModule from './LogCapture.js';
 
 // Re-export from Logger
 export {
@@ -44,6 +45,12 @@ export {
     debugConsole,
     DebugConsole
 } from './DebugConsole.js';
+
+// Re-export from Log Capture
+export {
+    logCapture,
+    LogCapture
+} from './LogCapture.js';
 
 // Convenience function to initialize all observability
 export function initObservability(options = {}) {
@@ -77,6 +84,7 @@ export function initObservability(options = {}) {
         debugConsole: DebugConsoleModule.debugConsole,
         metrics: MetricsModule.metrics,
         errorTracker: ErrorTrackerModule.errorTracker,
+        logCapture: LogCaptureModule.logCapture,
         createLogger: LoggerModule.createLogger
     };
 }
@@ -87,5 +95,6 @@ export default {
     metrics: MetricsModule.metrics,
     errorTracker: ErrorTrackerModule.errorTracker,
     debugConsole: DebugConsoleModule.debugConsole,
+    logCapture: LogCaptureModule.logCapture,
     initObservability
 };
