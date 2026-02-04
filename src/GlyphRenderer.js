@@ -644,7 +644,8 @@ class GlyphRendererV15 {
      * @returns {Array<number>|null} Array of renderer IDs if itemMeta provided, null otherwise
      */
     applyPrebuiltBuffers(buffers, items) {
-        const { positions, sizes, uvs, colors, count, itemMeta } = buffers;
+        const { positions, sizes, uvs, colors, count } = buffers;
+        let { itemMeta } = buffers;
         const geometry = this.instanceMesh.geometry;
 
         // Swap in worker's arrays directly - no copying!
@@ -663,6 +664,28 @@ class GlyphRendererV15 {
 
         // Update max instances to reflect actual capacity
         this.config.maxInstances = Math.max(this.config.maxInstances, count);
+
+        // If itemMeta wasn't provided (e.g., old worker code, structured clone issue),
+        // compute it from items by counting renderable glyphs per text entry.
+        // This matches the counting logic in buildBatchBuffers.
+        if (!itemMeta && items && items.length > 0) {
+            itemMeta = [];
+            let offset = 0;
+            for (const item of items) {
+                const text = item.text || '';
+                let glyphCount = 0;
+                for (let c = 0; c < text.length; c++) {
+                    const ch = text.charCodeAt(c);
+                    // Skip space (32), newline (10), carriage return (13), tab (9)
+                    if (ch !== 32 && ch !== 10 && ch !== 13 && ch !== 9) glyphCount++;
+                }
+                // Clamp to remaining buffer space
+                glyphCount = Math.min(glyphCount, count - offset);
+                itemMeta.push({ bufferStartIndex: offset, glyphCount, bounds: null });
+                offset += glyphCount;
+            }
+            logger.debug('Computed itemMeta from items (fallback)', { itemCount: items.length });
+        }
 
         // Reconstruct renderedTexts entries from buffer data + metadata
         // This enables updatePosition, updateColor, getText, etc. after worker path
@@ -713,7 +736,8 @@ class GlyphRendererV15 {
 
         logger.debug('Applied pre-built buffers (zero-copy)', {
             count,
-            entriesRegistered: rendererIds ? rendererIds.length : 0
+            entriesRegistered: rendererIds ? rendererIds.length : 0,
+            metaSource: buffers.itemMeta ? 'worker' : 'computed'
         });
 
         return rendererIds;
