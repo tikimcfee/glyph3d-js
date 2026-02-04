@@ -1,0 +1,679 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Render Test - glyph3d-js</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Monaco', 'Menlo', 'Consolas', monospace;
+            background: #0a0a0a;
+            color: #e0e0e0;
+            overflow: hidden;
+        }
+
+        #canvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        #panel {
+            position: fixed;
+            top: 12px;
+            left: 12px;
+            background: rgba(10, 10, 15, 0.92);
+            border: 1px solid #333;
+            border-radius: 6px;
+            padding: 16px;
+            font-size: 12px;
+            z-index: 100;
+            min-width: 280px;
+            max-height: calc(100vh - 24px);
+            overflow-y: auto;
+        }
+
+        #panel h1 {
+            font-size: 16px;
+            color: #00ff88;
+            margin-bottom: 4px;
+        }
+
+        #panel .subtitle {
+            color: #666;
+            font-size: 11px;
+            margin-bottom: 16px;
+        }
+
+        .section {
+            border-top: 1px solid #222;
+            padding-top: 12px;
+            margin-top: 12px;
+        }
+
+        .section h2 {
+            font-size: 13px;
+            color: #ffaa33;
+            margin-bottom: 8px;
+        }
+
+        .test-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 6px;
+            line-height: 1.6;
+        }
+
+        .test-label { color: #aaa; }
+
+        .test-status {
+            font-weight: bold;
+            min-width: 50px;
+            text-align: right;
+        }
+
+        .test-status.pass { color: #00ff88; }
+        .test-status.fail { color: #ff4444; }
+        .test-status.pending { color: #666; }
+        .test-status.running { color: #ffaa33; }
+
+        .btn-row {
+            display: flex;
+            gap: 8px;
+            margin-top: 12px;
+            flex-wrap: wrap;
+        }
+
+        button {
+            padding: 8px 14px;
+            background: #222;
+            color: #ccc;
+            border: 1px solid #444;
+            border-radius: 4px;
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 12px;
+            transition: all 0.15s;
+        }
+
+        button:hover {
+            background: #333;
+            border-color: #00ff88;
+            color: #fff;
+        }
+
+        button:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+
+        button.primary {
+            background: linear-gradient(135deg, #00ff88 0%, #00cc66 100%);
+            color: #000;
+            border-color: transparent;
+            font-weight: bold;
+        }
+
+        button.primary:hover {
+            box-shadow: 0 2px 12px rgba(0, 255, 136, 0.3);
+        }
+
+        #log {
+            margin-top: 12px;
+            background: #111;
+            border: 1px solid #222;
+            border-radius: 4px;
+            padding: 8px;
+            font-size: 11px;
+            max-height: 160px;
+            overflow-y: auto;
+            line-height: 1.5;
+            color: #888;
+        }
+
+        #log .log-ok { color: #00ff88; }
+        #log .log-err { color: #ff4444; }
+        #log .log-info { color: #ffaa33; }
+
+        /* Controls help */
+        #controls-help {
+            position: fixed;
+            bottom: 12px;
+            right: 12px;
+            background: rgba(10, 10, 15, 0.9);
+            border: 1px solid #333;
+            border-radius: 6px;
+            padding: 12px 16px;
+            font-size: 11px;
+            line-height: 1.8;
+            z-index: 100;
+        }
+
+        #controls-help h3 {
+            color: #ffaa33;
+            font-size: 12px;
+            margin-bottom: 4px;
+        }
+
+        .key {
+            display: inline-block;
+            background: #333;
+            padding: 1px 6px;
+            border-radius: 3px;
+            min-width: 20px;
+            text-align: center;
+            margin-right: 6px;
+            font-size: 10px;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+
+    <div id="panel">
+        <h1>Render Test</h1>
+        <p class="subtitle">Sync &amp; async path verification</p>
+
+        <div class="section">
+            <h2>Tests</h2>
+            <div id="test-results"></div>
+        </div>
+
+        <div class="btn-row">
+            <button class="primary" id="run-btn">Run All Tests</button>
+            <button id="clear-btn">Clear Scene</button>
+        </div>
+
+        <div class="section">
+            <h2>Log</h2>
+            <div id="log"></div>
+        </div>
+    </div>
+
+    <div id="controls-help">
+        <h3>Navigation</h3>
+        <div><span class="key">W</span><span class="key">A</span><span class="key">S</span><span class="key">D</span>Move</div>
+        <div><span class="key">Space</span>Up <span class="key">Shift</span>Down</div>
+        <div><span class="key">DblClick</span>FPS mode <span class="key">ESC</span>Exit</div>
+    </div>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import {
+            GlyphAtlas,
+            GlyphRenderer,
+            GlyphCollection,
+        } from '../../src/index.js';
+
+        // ============================================================
+        // TEST FRAMEWORK
+        // ============================================================
+
+        const testResults = document.getElementById('test-results');
+        const logEl = document.getElementById('log');
+
+        const tests = [];
+        let atlas = null;
+
+        function defineTest(name, fn) {
+            tests.push({ name, fn, status: 'pending' });
+        }
+
+        function renderTestList() {
+            testResults.innerHTML = tests.map((t, i) => `
+                <div class="test-row">
+                    <span class="test-label">${t.name}</span>
+                    <span class="test-status ${t.status}" id="test-status-${i}">
+                        ${t.status === 'pass' ? 'PASS' : t.status === 'fail' ? 'FAIL' : t.status === 'running' ? '...' : '--'}
+                    </span>
+                </div>
+            `).join('');
+        }
+
+        function updateTestStatus(index, status) {
+            tests[index].status = status;
+            const el = document.getElementById(`test-status-${index}`);
+            if (el) {
+                el.className = `test-status ${status}`;
+                el.textContent = status === 'pass' ? 'PASS' : status === 'fail' ? 'FAIL' : status === 'running' ? '...' : '--';
+            }
+        }
+
+        function log(msg, cls = '') {
+            const line = document.createElement('div');
+            if (cls) line.className = `log-${cls}`;
+            line.textContent = msg;
+            logEl.appendChild(line);
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        function assert(condition, msg) {
+            if (!condition) throw new Error(`Assertion failed: ${msg}`);
+        }
+
+        // ============================================================
+        // THREE.JS SETUP
+        // ============================================================
+
+        const canvas = document.getElementById('canvas');
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x0a0a0f);
+
+        const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 2000);
+        camera.position.set(0, 0, 30);
+
+        const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+        // Grid
+        const grid = new THREE.GridHelper(200, 40, 0x222233, 0x111122);
+        grid.rotation.x = Math.PI / 2;
+        grid.position.z = -5;
+        scene.add(grid);
+
+        // Objects created by tests — tracked for cleanup
+        const sceneObjects = [];
+
+        function trackObject(obj) {
+            sceneObjects.push(obj);
+        }
+
+        function clearScene() {
+            for (const obj of sceneObjects) {
+                if (obj.dispose) obj.dispose();
+                else if (obj.parent) obj.parent.remove(obj);
+            }
+            sceneObjects.length = 0;
+            log('Scene cleared', 'info');
+        }
+
+        // ============================================================
+        // CAMERA CONTROLS (minimal FPS)
+        // ============================================================
+
+        const keys = {};
+        let isPointerLocked = false;
+        let pitch = 0, yaw = 0;
+
+        document.addEventListener('keydown', e => { keys[e.code] = true; });
+        document.addEventListener('keyup', e => { keys[e.code] = false; });
+
+        canvas.addEventListener('dblclick', () => canvas.requestPointerLock());
+        document.addEventListener('pointerlockchange', () => {
+            isPointerLocked = document.pointerLockElement === canvas;
+        });
+        document.addEventListener('mousemove', e => {
+            if (!isPointerLocked) return;
+            yaw -= e.movementX * 0.002;
+            pitch -= e.movementY * 0.002;
+            pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, pitch));
+        });
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        function updateCamera(dt) {
+            const dir = new THREE.Vector3();
+            if (keys['KeyW']) dir.z -= 1;
+            if (keys['KeyS']) dir.z += 1;
+            if (keys['KeyA']) dir.x -= 1;
+            if (keys['KeyD']) dir.x += 1;
+            if (keys['Space']) dir.y += 1;
+            if (keys['ShiftLeft'] || keys['ShiftRight']) dir.y -= 1;
+
+            if (dir.length() > 0) {
+                dir.normalize().applyQuaternion(camera.quaternion).multiplyScalar(80 * dt);
+                camera.position.add(dir);
+            }
+
+            camera.quaternion.setFromEuler(new THREE.Euler(pitch, yaw, 0, 'YXZ'));
+        }
+
+        // ============================================================
+        // TEST DEFINITIONS
+        // ============================================================
+
+        // -- Test 1: Sync single render --
+        defineTest('Sync: single render', async () => {
+            const r = new GlyphRenderer(scene, atlas, { defaultColor: { r: 0, g: 1, b: 0.5 } });
+            trackObject(r);
+
+            const id = r.render('Hello sync!', { x: -20, y: 10, z: 0 });
+            const entry = r.getText(id);
+
+            assert(entry !== null, 'getText returned null');
+            assert(entry.glyphs.length > 0, 'no glyphs');
+            assert(entry.glyphs.length === 10, `expected 10 glyphs, got ${entry.glyphs.length}`);
+
+            log(`  Rendered ${entry.glyphs.length} glyphs, id=${id}`, 'ok');
+        });
+
+        // -- Test 2: Sync batch render + updateColor --
+        defineTest('Sync: batch + updateColor', async () => {
+            const r = new GlyphRenderer(scene, atlas, {
+                defaultColor: { r: 0.4, g: 0.4, b: 0.5 }
+            });
+            trackObject(r);
+
+            const items = [
+                { text: 'apple',  position: { x: -20, y: 6, z: 0 } },
+                { text: 'banana', position: { x: -10, y: 6, z: 0 } },
+                { text: 'cherry', position: { x:   0, y: 6, z: 0 } },
+            ];
+            const ids = r.renderBatch(items);
+
+            assert(ids.length === 3, `expected 3 ids, got ${ids.length}`);
+
+            // Update middle word to bright orange
+            r.updateColor(ids[1], { r: 1.0, g: 0.6, b: 0.0 });
+
+            // Verify glyph color was updated
+            const entry = r.getText(ids[1]);
+            const g0 = entry.glyphs[0];
+            assert(g0.color.r === 1.0, `color not updated: r=${g0.color.r}`);
+
+            log(`  Batch rendered 3 words, updated color on id=${ids[1]}`, 'ok');
+        });
+
+        // -- Test 3: Sync updatePosition --
+        defineTest('Sync: updatePosition', async () => {
+            const r = new GlyphRenderer(scene, atlas, {
+                defaultColor: { r: 0.8, g: 0.2, b: 0.8 }
+            });
+            trackObject(r);
+
+            const id = r.render('movable', { x: -20, y: 2, z: 0 });
+            const before = r.getText(id).glyphs[0].position.x;
+
+            r.updatePosition(id, { x: -10, y: 2, z: 0 });
+            const after = r.getText(id).glyphs[0].position.x;
+
+            assert(after !== before, `position did not change: ${before} -> ${after}`);
+
+            log(`  Moved from x=${before.toFixed(2)} to x=${after.toFixed(2)}`, 'ok');
+        });
+
+        // -- Test 4: Async single collection --
+        defineTest('Async: flushAsync + getText', async () => {
+            const coll = new GlyphCollection(scene, atlas, {
+                defaultColor: { r: 0.2, g: 0.6, b: 1.0 },
+                worldScale: 0.025
+            });
+            trackObject(coll);
+
+            const id1 = coll.addText('async hello', { x: -20, y: -2, z: 0 });
+            const id2 = coll.addText('async world', { x: -5, y: -2, z: 0 });
+
+            await coll.flushAsync();
+
+            // Verify getText works after async flush
+            const entry = coll.getText(id1);
+            assert(entry !== null, 'getText returned null after flushAsync');
+            assert(!entry.pending, 'entry still marked as pending');
+            assert(entry.glyphs.length > 0, `no glyphs: got ${entry.glyphs.length}`);
+
+            log(`  flushAsync: id1 has ${entry.glyphs.length} glyphs`, 'ok');
+        });
+
+        // -- Test 5: Async updateColor post-flush --
+        defineTest('Async: updateColor post-flush', async () => {
+            const coll = new GlyphCollection(scene, atlas, {
+                defaultColor: { r: 0.3, g: 0.3, b: 0.3 },
+                worldScale: 0.025
+            });
+            trackObject(coll);
+
+            const ids = coll.addTexts([
+                { text: 'red',   position: { x: -20, y: -6, z: 0 } },
+                { text: 'green', position: { x: -12, y: -6, z: 0 } },
+                { text: 'blue',  position: { x:  -4, y: -6, z: 0 } },
+            ]);
+
+            await coll.flushAsync();
+
+            // Now update colors — this is the critical test
+            coll.updateColor(ids[0], { r: 1, g: 0, b: 0 });
+            coll.updateColor(ids[1], { r: 0, g: 1, b: 0 });
+            coll.updateColor(ids[2], { r: 0, g: 0, b: 1 });
+            coll.flush();
+
+            // Verify via renderer that buffer was actually written
+            const r = coll.getRenderer();
+            const rendererEntry = r.getText(coll._idMap.get(ids[0]));
+            assert(rendererEntry !== null, 'renderer has no entry for id after color update');
+            assert(rendererEntry.glyphs[0].color.r === 1, `color not updated: r=${rendererEntry.glyphs[0].color.r}`);
+
+            log(`  Updated 3 word colors after flushAsync`, 'ok');
+        });
+
+        // -- Test 6: Async updatePosition post-flush --
+        defineTest('Async: updatePosition post-flush', async () => {
+            const coll = new GlyphCollection(scene, atlas, {
+                defaultColor: { r: 1.0, g: 0.8, b: 0.0 },
+                worldScale: 0.025
+            });
+            trackObject(coll);
+
+            const id = coll.addText('shift me', { x: -20, y: -10, z: 0 });
+            await coll.flushAsync();
+
+            // Read initial position from renderer
+            const rendererId = coll._idMap.get(id);
+            const beforeGlyph = coll.getRenderer().getText(rendererId).glyphs[0];
+            const beforeX = beforeGlyph.position.x;
+
+            // Move it
+            coll.updatePosition(id, { x: -5, y: -10, z: 0 });
+            coll.flush();
+
+            const afterGlyph = coll.getRenderer().getText(rendererId).glyphs[0];
+            assert(afterGlyph.position.x !== beforeX, `position unchanged: ${beforeX}`);
+
+            log(`  Moved async text from x=${beforeX.toFixed(2)} to x=${afterGlyph.position.x.toFixed(2)}`, 'ok');
+        });
+
+        // -- Test 7: Async batch with many items --
+        defineTest('Async: batch 100 items', async () => {
+            const coll = new GlyphCollection(scene, atlas, {
+                defaultColor: { r: 0.5, g: 0.5, b: 0.5 },
+                worldScale: 0.025
+            });
+            trackObject(coll);
+
+            const ids = [];
+            for (let i = 0; i < 100; i++) {
+                const row = Math.floor(i / 10);
+                const col = i % 10;
+                const id = coll.addText(`w${i}`, {
+                    x: col * 4 + 10,
+                    y: -row * 1.5 + 10,
+                    z: 0
+                });
+                ids.push(id);
+            }
+
+            await coll.flushAsync();
+
+            // Verify all entries are tracked
+            let tracked = 0;
+            for (const id of ids) {
+                if (coll.getText(id) && !coll.getText(id).pending) tracked++;
+            }
+
+            assert(tracked === 100, `only ${tracked}/100 tracked after flushAsync`);
+
+            // Color every 10th word
+            for (let i = 0; i < 100; i += 10) {
+                coll.updateColor(ids[i], { r: 1, g: 0.3, b: 0.8 });
+            }
+            coll.flush();
+
+            log(`  Flushed 100 items, ${tracked} tracked, colored 10`, 'ok');
+        });
+
+        // -- Test 8: getBounds after async flush --
+        defineTest('Async: getBounds', async () => {
+            const coll = new GlyphCollection(scene, atlas, {
+                defaultColor: { r: 0.6, g: 0.4, b: 0.8 },
+                worldScale: 0.025
+            });
+            trackObject(coll);
+
+            coll.addText('bounds test line one', { x: -20, y: -14, z: 0 });
+            coll.addText('bounds test line two', { x: -20, y: -15.5, z: 0 });
+
+            await coll.flushAsync();
+
+            const bounds = coll.getBounds();
+            assert(bounds !== null, 'bounds is null');
+            assert(bounds.width > 0, `invalid width: ${bounds.width}`);
+            assert(bounds.height > 0, `invalid height: ${bounds.height}`);
+
+            log(`  Bounds: ${bounds.width.toFixed(1)} x ${bounds.height.toFixed(1)}`, 'ok');
+        });
+
+        // -- Test 9: Depth ordering (glyphs in front of background) --
+        defineTest('Depth: glyph-over-background', async () => {
+            // Create a background plane
+            const bgGeo = new THREE.PlaneGeometry(15, 4);
+            const bgMat = new THREE.MeshBasicMaterial({
+                color: 0x1a1a3e,
+                transparent: true,
+                opacity: 0.85,
+                side: THREE.DoubleSide,
+                depthWrite: false
+            });
+            const bgMesh = new THREE.Mesh(bgGeo, bgMat);
+            bgMesh.renderOrder = -1;
+            bgMesh.position.set(-12, -18, -0.5);
+            scene.add(bgMesh);
+            trackObject({ dispose() { scene.remove(bgMesh); bgGeo.dispose(); bgMat.dispose(); } });
+
+            // Render text in front
+            const r = new GlyphRenderer(scene, atlas, {
+                defaultColor: { r: 1.0, g: 1.0, b: 1.0 }
+            });
+            trackObject(r);
+            r.render('Depth OK', { x: -16, y: -18.5, z: 0 });
+
+            // Verify material settings
+            const mat = r.instanceMesh.material;
+            assert(mat.depthWrite === true, `depthWrite should be true, got ${mat.depthWrite}`);
+            assert(mat.transparent === false, `transparent should be false, got ${mat.transparent}`);
+
+            log(`  Glyph material: depthWrite=${mat.depthWrite}, transparent=${mat.transparent}`, 'ok');
+        });
+
+        // -- Test 10: Mixed sync/async on same scene --
+        defineTest('Mixed: sync + async coexist', async () => {
+            // Sync renderer
+            const syncR = new GlyphRenderer(scene, atlas, {
+                defaultColor: { r: 0.0, g: 1.0, b: 0.0 }
+            });
+            trackObject(syncR);
+            syncR.render('SYNC', { x: 15, y: -14, z: 0 });
+
+            // Async collection
+            const asyncC = new GlyphCollection(scene, atlas, {
+                defaultColor: { r: 1.0, g: 0.5, b: 0.0 },
+                worldScale: 0.025
+            });
+            trackObject(asyncC);
+            const id = asyncC.addText('ASYNC', { x: 15, y: -16, z: 0 });
+            await asyncC.flushAsync();
+
+            // Both should be independently functional
+            syncR.updateColor(1, { r: 0, g: 1, b: 1 });
+
+            asyncC.updateColor(id, { r: 1, g: 1, b: 0 });
+            asyncC.flush();
+
+            log(`  Both sync and async renderers active and updatable`, 'ok');
+        });
+
+        // ============================================================
+        // TEST RUNNER
+        // ============================================================
+
+        async function runAllTests() {
+            const runBtn = document.getElementById('run-btn');
+            runBtn.disabled = true;
+            logEl.innerHTML = '';
+
+            // Init atlas if needed
+            if (!atlas) {
+                log('Generating glyph atlas...', 'info');
+                atlas = new GlyphAtlas();
+                await atlas.generate();
+                log('Atlas ready', 'ok');
+            }
+
+            clearScene();
+
+            let passed = 0;
+            let failed = 0;
+
+            for (let i = 0; i < tests.length; i++) {
+                const t = tests[i];
+                updateTestStatus(i, 'running');
+                log(`[${i + 1}/${tests.length}] ${t.name}`);
+
+                try {
+                    await t.fn();
+                    updateTestStatus(i, 'pass');
+                    passed++;
+                } catch (err) {
+                    updateTestStatus(i, 'fail');
+                    log(`  FAIL: ${err.message}`, 'err');
+                    console.error(`Test "${t.name}" failed:`, err);
+                    failed++;
+                }
+            }
+
+            log(`Done: ${passed} passed, ${failed} failed`, failed > 0 ? 'err' : 'ok');
+            runBtn.disabled = false;
+        }
+
+        // ============================================================
+        // INIT
+        // ============================================================
+
+        renderTestList();
+
+        document.getElementById('run-btn').addEventListener('click', runAllTests);
+        document.getElementById('clear-btn').addEventListener('click', () => {
+            clearScene();
+            tests.forEach((_, i) => updateTestStatus(i, 'pending'));
+        });
+
+        // Animation loop
+        let lastTime = performance.now();
+        function animate() {
+            requestAnimationFrame(animate);
+            const now = performance.now();
+            updateCamera((now - lastTime) / 1000);
+            lastTime = now;
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        // Auto-run on load
+        runAllTests();
+    </script>
+</body>
+</html>
