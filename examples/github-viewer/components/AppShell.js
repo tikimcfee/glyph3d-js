@@ -16,7 +16,7 @@ export function createHeader(container) {
     header.innerHTML = `
         <h1>GitHub 3D</h1>
         <span id="header-repo-label"></span>
-        <a href="https://buymeacoffee.com/tikimcfee" target="_blank" rel="noopener" class="bmc-link">&#9749; support</a>
+        <a href="https://buymeacoffee.com/tikimcfee" target="_blank" rel="noopener" class="bmc-link">&#9749;</a>
     `;
     container.appendChild(header);
 
