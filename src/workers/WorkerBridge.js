@@ -155,6 +155,7 @@ export class WorkerBridge {
                     color: input.color,
                     scale: input.scale || 1.0,
                     alignment: input.alignment || 'left',
+                    groupId: input.groupId || 0,
                     metrics,
                     uvMap
                 }
@@ -266,6 +267,7 @@ export class WorkerBridge {
             color: input.color,
             scale: input.scale || 1.0,
             alignment: input.alignment || 'left',
+            groupId: input.groupId || 0,
             metrics,
             uvMap
         });

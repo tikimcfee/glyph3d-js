@@ -1,0 +1,992 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Code Spectrometer</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Monaco', 'Menlo', 'Consolas', monospace;
+            background: #0a0a0f;
+            color: #e0e0e0;
+            overflow: hidden;
+        }
+
+        #canvas { display: block; width: 100vw; height: 100vh; cursor: crosshair; }
+
+        /* ─── Top bar ─────────────────────────────────────────── */
+        #topbar {
+            position: fixed; top: 0; left: 0; right: 0; min-height: 40px;
+            background: rgba(10, 10, 15, 0.9);
+            border-bottom: 1px solid #222;
+            display: flex; align-items: center; flex-wrap: wrap;
+            padding: 4px 16px;
+            z-index: 1000; gap: 6px 10px; font-size: 12px;
+        }
+
+        #topbar .title { color: #88ccff; font-weight: bold; font-size: 13px; }
+        #topbar .sep { color: #333; }
+        #topbar .filename { color: #aaa; }
+        #topbar .stat { color: #555; }
+        #topbar .stat b { color: #88ccff; }
+
+        .bar-btn {
+            padding: 4px 10px; border: 1px solid #333; border-radius: 3px;
+            background: #151520; color: #888; cursor: pointer;
+            font-family: inherit; font-size: 11px;
+        }
+        .bar-btn:hover { background: #222; color: #ccc; border-color: #88ccff; }
+
+        .bar-slider-group {
+            display: flex; align-items: center; gap: 4px;
+        }
+        .bar-slider-group label {
+            color: #555; font-size: 10px; white-space: nowrap;
+        }
+        .bar-slider-group input[type="range"] {
+            width: 70px; height: 4px; -webkit-appearance: none;
+            background: #333; border-radius: 2px; outline: none;
+        }
+        .bar-slider-group input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none; width: 10px; height: 10px;
+            background: #88ccff; border-radius: 50%; cursor: pointer;
+        }
+        .bar-slider-group .slider-val {
+            color: #88ccff; font-size: 10px; min-width: 22px;
+        }
+
+        /* ─── Spectrometer HUD ────────────────────────────────── */
+        #spectrometer-hud {
+            position: fixed; top: 50px; right: 10px;
+            width: 280px; max-height: calc(100vh - 60px);
+            background: rgba(8, 8, 12, 0.92);
+            border: 1px solid #222; border-radius: 6px;
+            z-index: 100; overflow: hidden;
+            display: flex; flex-direction: column;
+        }
+
+        #hud-header {
+            padding: 8px 12px;
+            border-bottom: 1px solid #1a1a22;
+            display: flex; justify-content: space-between; align-items: center;
+        }
+        #hud-header h3 { font-size: 11px; color: #556; text-transform: uppercase; letter-spacing: 1px; }
+        #hud-context { font-size: 10px; color: #444; }
+
+        /* ─── Adapter bar ────────────────────────────────────── */
+        #adapter-bar {
+            padding: 5px 12px;
+            border-bottom: 1px solid #1a1a22;
+            display: flex; align-items: center; gap: 6px;
+            font-size: 10px;
+        }
+        .adapter-label { color: #556; text-transform: uppercase; letter-spacing: 0.5px; }
+        .adapter-name { color: #88ccff; font-weight: bold; }
+        .adapter-status {
+            margin-left: auto;
+            padding: 1px 6px; border-radius: 8px;
+            font-size: 9px;
+        }
+        .adapter-status.ok { background: rgba(50, 120, 50, 0.3); color: #88ff88; }
+        .adapter-status.off { background: rgba(60, 40, 30, 0.3); color: #887766; }
+        .adapter-status.loading { background: rgba(50, 50, 100, 0.3); color: #8888ff; }
+        .adapter-status.error { background: rgba(100, 40, 30, 0.3); color: #ff8866; }
+
+        .adapter-toggle {
+            padding: 2px 6px; border: 1px solid #333; border-radius: 3px;
+            background: #151520; color: #667; cursor: pointer;
+            font-family: inherit; font-size: 9px;
+        }
+        .adapter-toggle:hover { background: #222; color: #aaa; border-color: #556; }
+
+        /* ─── LLM config panel ───────────────────────────────── */
+        #llm-config {
+            padding: 6px 12px;
+            border-bottom: 1px solid #1a1a22;
+            font-size: 10px; color: #555;
+            display: none;
+        }
+        #llm-config.visible { display: block; }
+        #llm-config label { display: block; margin-bottom: 3px; color: #556; }
+        #llm-config select {
+            width: 100%; padding: 3px 6px; margin-bottom: 4px;
+            background: #12121a; border: 1px solid #2a2a35; border-radius: 3px;
+            color: #aaa; font-family: inherit; font-size: 10px;
+        }
+        #llm-config select:focus { outline: none; border-color: #446; }
+        #llm-stats { color: #444; font-size: 9px; margin-top: 2px; }
+
+        #hud-fingerprint {
+            padding: 6px 12px;
+            border-bottom: 1px solid #1a1a22;
+            font-size: 10px; color: #4488aa;
+            letter-spacing: 0.5px;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+            min-height: 22px;
+        }
+
+        #word-list {
+            flex: 1; overflow-y: auto; padding: 6px 8px;
+            display: flex; flex-wrap: wrap;
+            align-content: flex-start;
+            gap: 3px;
+        }
+
+        .concept-word {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 10px;
+            transition: all 0.3s ease;
+            cursor: default;
+            white-space: nowrap;
+            line-height: 1.4;
+        }
+
+        .concept-word.inactive {
+            background: rgba(30, 30, 40, 0.5);
+            color: #2a2a35;
+            font-size: 9px;
+            order: 100;
+        }
+        .concept-word.low {
+            background: rgba(40, 50, 60, 0.6);
+            color: #667788;
+            font-size: 10px;
+            order: 50;
+        }
+        .concept-word.medium {
+            background: rgba(50, 70, 90, 0.7);
+            color: #88aabb;
+            font-size: 11px;
+            font-weight: bold;
+            order: 20;
+        }
+        .concept-word.high {
+            background: rgba(60, 100, 140, 0.8);
+            color: #aaddff;
+            font-size: 13px;
+            font-weight: bold;
+            order: 5;
+        }
+        .concept-word.dominant {
+            background: rgba(80, 130, 180, 0.9);
+            color: #ffffff;
+            font-size: 15px;
+            font-weight: bold;
+            order: 1;
+            text-shadow: 0 0 8px rgba(136, 204, 255, 0.4);
+        }
+
+        /* Block color accents */
+        .concept-word[data-block="substance"].low,
+        .concept-word[data-block="substance"].medium,
+        .concept-word[data-block="substance"].high,
+        .concept-word[data-block="substance"].dominant { border-left: 2px solid rgba(100, 170, 255, 0.4); }
+
+        .concept-word[data-block="action"].low,
+        .concept-word[data-block="action"].medium,
+        .concept-word[data-block="action"].high,
+        .concept-word[data-block="action"].dominant { border-left: 2px solid rgba(255, 130, 70, 0.4); }
+
+        .concept-word[data-block="pattern"].low,
+        .concept-word[data-block="pattern"].medium,
+        .concept-word[data-block="pattern"].high,
+        .concept-word[data-block="pattern"].dominant { border-left: 2px solid rgba(150, 255, 100, 0.4); }
+
+        .concept-word[data-block="quality"].low,
+        .concept-word[data-block="quality"].medium,
+        .concept-word[data-block="quality"].high,
+        .concept-word[data-block="quality"].dominant { border-left: 2px solid rgba(255, 180, 255, 0.4); }
+
+        .concept-word[data-block="domain"].low,
+        .concept-word[data-block="domain"].medium,
+        .concept-word[data-block="domain"].high,
+        .concept-word[data-block="domain"].dominant { border-left: 2px solid rgba(255, 255, 100, 0.4); }
+
+        .concept-word .sym { font-weight: bold; margin-right: 2px; opacity: 0.7; }
+        .concept-word .count { font-size: 9px; opacity: 0.6; margin-left: 3px; }
+
+        /* ─── Code input modal ────────────────────────────────── */
+        #code-modal {
+            position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0, 0, 0, 0.85);
+            z-index: 2000; display: flex; align-items: center; justify-content: center;
+        }
+        #code-modal.hidden { display: none; }
+
+        #modal-content {
+            background: #12121a; border: 1px solid #333; border-radius: 8px;
+            width: 700px; max-height: 80vh; display: flex; flex-direction: column;
+            overflow: hidden;
+        }
+        #modal-header {
+            padding: 16px 20px; border-bottom: 1px solid #222;
+            display: flex; justify-content: space-between; align-items: center;
+        }
+        #modal-header h2 { font-size: 16px; color: #88ccff; }
+        #modal-close { background: none; border: none; color: #666; font-size: 20px; cursor: pointer; }
+        #modal-close:hover { color: #fff; }
+
+        #code-textarea {
+            flex: 1; min-height: 300px; padding: 16px;
+            background: #0a0a12; border: none; color: #b0b8c0;
+            font-family: inherit; font-size: 12px; line-height: 1.5;
+            resize: none;
+        }
+        #code-textarea:focus { outline: none; }
+        #code-textarea::placeholder { color: #333; }
+
+        #modal-actions {
+            padding: 12px 20px; border-top: 1px solid #222;
+            display: flex; gap: 8px; justify-content: flex-end;
+        }
+        .modal-btn {
+            padding: 8px 16px; border: 1px solid #333; border-radius: 4px;
+            background: #1a1a25; color: #aaa; cursor: pointer;
+            font-family: inherit; font-size: 12px;
+        }
+        .modal-btn:hover { background: #2a2a35; color: #fff; }
+        .modal-btn.go {
+            background: linear-gradient(135deg, #335588, #224466);
+            color: #88ccff; border-color: #335577;
+        }
+        .modal-btn.go:hover { background: linear-gradient(135deg, #446699, #335577); }
+
+        /* ─── Misc ───────────────────────────────────────────── */
+        #controls-hint {
+            position: fixed; bottom: 10px; left: 10px;
+            font-size: 10px; color: #333; z-index: 100;
+        }
+        #controls-hint span { color: #444; }
+
+        #loading {
+            position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0, 0, 0, 0.95);
+            display: flex; flex-direction: column;
+            align-items: center; justify-content: center; z-index: 3000;
+        }
+        #loading.hidden { display: none; }
+        #loading h2 { color: #88ccff; font-size: 18px; margin-bottom: 10px; }
+        #loading-text { color: #555; font-size: 12px; }
+
+        #line-info {
+            position: fixed; bottom: 10px; right: 10px;
+            background: rgba(8, 8, 12, 0.9);
+            border: 1px solid #222; border-radius: 4px;
+            padding: 6px 12px; font-size: 11px;
+            z-index: 100; color: #555;
+        }
+        #line-info .ln { color: #88ccff; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+
+    <!-- Top bar -->
+    <div id="topbar">
+        <span class="title">Spectrometer</span>
+        <span class="sep">|</span>
+        <span class="filename" id="file-label">no file loaded</span>
+        <span class="sep">|</span>
+        <span class="stat"><b id="line-count">0</b> lines</span>
+        <span class="stat"><b id="fps-val">--</b> fps</span>
+        <div style="flex:1"></div>
+        <button class="bar-btn" id="btn-load-self">Load Self</button>
+        <button class="bar-btn" id="btn-load-files">Load Files</button>
+        <button class="bar-btn" id="btn-paste">Paste Code</button>
+        <button class="bar-btn" id="btn-context-up" title="Increase context window">ctx +</button>
+        <button class="bar-btn" id="btn-context-dn" title="Decrease context window">ctx -</button>
+        <button class="bar-btn" id="btn-wand-toggle" title="Toggle 3D wand">Wand</button>
+        <button class="bar-btn" id="btn-field-toggle" title="Toggle vector field">Field</button>
+        <div class="bar-slider-group" id="density-group">
+            <label>density</label>
+            <input type="range" id="density-slider" min="0.2" max="3.0" step="0.1" value="1.0"
+                   title="Field fill density">
+            <span class="slider-val" id="density-val">1.0</span>
+        </div>
+        <div class="bar-slider-group" id="layer-gap-group">
+            <label>layer gap</label>
+            <input type="range" id="layer-gap-slider" min="0.5" max="30.0" step="0.5" value="10.0"
+                   title="Z-distance between field layers (group offset test)">
+            <span class="slider-val" id="layer-gap-val">10</span>
+        </div>
+    </div>
+
+    <!-- Spectrometer HUD -->
+    <div id="spectrometer-hud">
+        <div id="hud-header">
+            <h3>Spectrometer</h3>
+            <span id="hud-context">hover code to analyze</span>
+        </div>
+
+        <div id="adapter-bar">
+            <span class="adapter-label">Adapter:</span>
+            <span class="adapter-name" id="adapter-name">naive</span>
+            <button class="adapter-toggle" id="btn-adapter-toggle">use LLM</button>
+            <span class="adapter-status ok" id="adapter-status">ready</span>
+        </div>
+
+        <div id="llm-config">
+            <label>Endpoint</label>
+            <select id="llm-endpoint">
+                <option value="ollama">Ollama (localhost:11434)</option>
+                <option value="lmstudio">LM Studio (localhost:1234)</option>
+            </select>
+            <label>Model</label>
+            <select id="llm-model">
+                <option value="">connecting...</option>
+            </select>
+            <div id="llm-stats"></div>
+        </div>
+
+        <div id="hud-fingerprint"></div>
+        <div id="word-list"></div>
+    </div>
+
+    <div id="line-info">
+        <span class="ln" id="hover-line-num">-</span>
+    </div>
+
+    <div id="controls-hint">
+        <span>WASD</span> move &nbsp;
+        <span>Space/Shift</span> up/down &nbsp;
+        <span>DblClick</span> FPS mode &nbsp;
+        <span>Esc</span> exit &nbsp;
+        <span>Ctrl+Enter</span> paste
+    </div>
+
+    <div id="code-modal" class="hidden">
+        <div id="modal-content">
+            <div id="modal-header">
+                <h2>Load Source Code</h2>
+                <button id="modal-close">&times;</button>
+            </div>
+            <textarea id="code-textarea" placeholder="Paste source code here...
+
+Then hover over the rendered code to watch the spectrometer
+analyze what you're looking at in real-time."></textarea>
+            <div id="modal-actions">
+                <button class="modal-btn" id="modal-cancel">Cancel</button>
+                <button class="modal-btn go" id="modal-go">Render &amp; Analyze</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="loading">
+        <h2>Code Spectrometer</h2>
+        <div id="loading-text">Initializing...</div>
+    </div>
+
+    <input type="file" id="file-input" multiple accept=".js,.ts,.jsx,.tsx,.py,.rs,.go,.java,.c,.cpp,.h,.hpp,.cs,.rb,.swift,.kt,.html,.css,.json,.yaml,.yml,.toml,.md,.txt,.sh,.bash" style="display:none">
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { GlyphAtlas } from '../../src/index.js';
+        import { CodeView } from './CodeView.js';
+        import { ELEMENTS, BLOCKS } from './taxonomy.js';
+        import { createNaiveAnalyzer, createLLMAnalyzer } from './analyzers.js';
+        import { mergePicks, fingerprint } from './spectrometer.js';
+        import { createWand } from './Wand.js';
+        import { createWandField } from './WandField.js';
+
+        class App {
+            constructor() {
+                this.canvas = document.getElementById('canvas');
+
+                // Three.js
+                this.scene = null;
+                this.camera = null;
+                this.threeRenderer = null;
+
+                // Components
+                this.atlas = null;
+                this.codeView = null;
+
+                // ─── Words & Analyzers ────────────────────────────
+                // The word set is just data. Pass it around.
+                this.words = ELEMENTS;
+
+                // Analyzers are just objects with an analyze function
+                this.naive = createNaiveAnalyzer();
+                this.llm = createLLMAnalyzer();
+                this.analyzer = this.naive;
+
+                // Wand (3D word sphere — created after atlas ready)
+                this.wand = null;
+
+                // Field (multi-resolution probe layers — created after atlas ready)
+                this.field = null;
+
+                // Last picks (for fingerprint display)
+                this.lastPicks = [];
+
+                // LLM debounce
+                this._debounceTimer = null;
+                this._debounceMs = 400;
+                this._pendingContext = null;
+                this._requestId = 0;
+
+                // Camera
+                this.keys = {};
+                this.isPointerLocked = false;
+                this.pitch = 0;
+                this.yaw = 0;
+                this.lookSensitivity = 0.002;
+                this.cameraSpeed = 120;
+
+                // Hover
+                this.mouseNDC = new THREE.Vector2();
+                this.raycaster = new THREE.Raycaster();
+                this.lastHoverTime = 0;
+                this.hoverInterval = 50;
+                this.contextRadius = 10;
+
+                // FPS
+                this.lastTime = performance.now();
+                this.frameCount = 0;
+                this.fpsTime = 0;
+
+                // HUD elements
+                this.hudNodes = new Map(); // word.name → DOM node
+
+                this.setup();
+            }
+
+            setup() {
+                document.addEventListener('keydown', e => {
+                    this.keys[e.code] = true;
+                    if (e.code === 'Escape') document.getElementById('code-modal').classList.add('hidden');
+                });
+                document.addEventListener('keyup', e => { this.keys[e.code] = false; });
+
+                this.canvas.addEventListener('mousemove', e => {
+                    if (this.isPointerLocked) {
+                        this.yaw -= e.movementX * this.lookSensitivity;
+                        this.pitch -= e.movementY * this.lookSensitivity;
+                        this.pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, this.pitch));
+                    } else {
+                        const rect = this.canvas.getBoundingClientRect();
+                        this.mouseNDC.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+                        this.mouseNDC.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+                    }
+                });
+
+                this.canvas.addEventListener('dblclick', () => this.canvas.requestPointerLock());
+                document.addEventListener('pointerlockchange', () => {
+                    this.isPointerLocked = document.pointerLockElement === this.canvas;
+                    this.canvas.style.cursor = this.isPointerLocked ? 'none' : 'crosshair';
+                });
+
+                window.addEventListener('resize', () => this.onResize());
+
+                // Buttons
+                document.getElementById('btn-paste').addEventListener('click', () => {
+                    document.getElementById('code-modal').classList.remove('hidden');
+                    document.getElementById('code-textarea').focus();
+                });
+                document.getElementById('btn-load-self').addEventListener('click', () => this.loadSelf());
+                document.getElementById('btn-load-files').addEventListener('click', () => {
+                    document.getElementById('file-input').click();
+                });
+                document.getElementById('file-input').addEventListener('change', e => this.loadFiles(e));
+                document.getElementById('btn-context-up').addEventListener('click', () => {
+                    this.contextRadius = Math.min(50, this.contextRadius + 5);
+                    if (this.codeView) this.codeView.config.contextRadius = this.contextRadius;
+                    this.codeView?.clearHover();
+                });
+                document.getElementById('btn-context-dn').addEventListener('click', () => {
+                    this.contextRadius = Math.max(1, this.contextRadius - 5);
+                    if (this.codeView) this.codeView.config.contextRadius = this.contextRadius;
+                    this.codeView?.clearHover();
+                });
+
+                // Wand toggle
+                document.getElementById('btn-wand-toggle').addEventListener('click', () => {
+                    if (this.wand) {
+                        this.wand.setVisible(!this.wand.visible);
+                        const btn = document.getElementById('btn-wand-toggle');
+                        btn.style.borderColor = this.wand.visible ? '#88ccff' : '#333';
+                    }
+                });
+
+                // Field toggle
+                document.getElementById('btn-field-toggle').addEventListener('click', () => {
+                    if (this.field) {
+                        this.field.setVisible(!this.field.visible);
+                        const btn = document.getElementById('btn-field-toggle');
+                        btn.style.borderColor = this.field.visible ? '#88ccff' : '#333';
+                    }
+                });
+
+                // Density slider
+                document.getElementById('density-slider').addEventListener('input', (e) => {
+                    const d = parseFloat(e.target.value);
+                    document.getElementById('density-val').textContent = d.toFixed(1);
+                    if (this.field) {
+                        this.field.setDensity(d);
+                    }
+                });
+
+                // Layer gap slider — tests group offset updates via DataTexture
+                document.getElementById('layer-gap-slider').addEventListener('input', (e) => {
+                    const gap = parseFloat(e.target.value);
+                    document.getElementById('layer-gap-val').textContent = gap.toFixed(1);
+                    if (this.field) {
+                        this.field.setLayerGap(gap);
+                    }
+                });
+
+                // Adapter controls
+                document.getElementById('btn-adapter-toggle').addEventListener('click', () => this.toggleAdapter());
+                document.getElementById('llm-endpoint').addEventListener('change', e => this.switchLLMEndpoint(e.target.value));
+                document.getElementById('llm-model').addEventListener('change', e => {
+                    if (e.target.value) {
+                        this.llm.setModel(e.target.value);
+                        this.updateAdapterUI();
+                    }
+                });
+
+                // Modal
+                document.getElementById('modal-close').addEventListener('click', () => {
+                    document.getElementById('code-modal').classList.add('hidden');
+                });
+                document.getElementById('modal-cancel').addEventListener('click', () => {
+                    document.getElementById('code-modal').classList.add('hidden');
+                });
+                document.getElementById('modal-go').addEventListener('click', () => {
+                    const code = document.getElementById('code-textarea').value;
+                    if (code.trim()) {
+                        document.getElementById('code-modal').classList.add('hidden');
+                        this.renderCode(code, 'pasted');
+                    }
+                });
+                document.getElementById('code-textarea').addEventListener('keydown', e => {
+                    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                        e.preventDefault();
+                        document.getElementById('modal-go').click();
+                    }
+                });
+            }
+
+            async init() {
+                document.getElementById('loading-text').textContent = 'Setting up scene...';
+
+                this.scene = new THREE.Scene();
+                this.scene.background = new THREE.Color(0x08080c);
+
+                this.camera = new THREE.PerspectiveCamera(
+                    70, window.innerWidth / window.innerHeight, 0.1, 5000
+                );
+                this.camera.position.set(0, 0, 30);
+
+                this.threeRenderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true });
+                this.threeRenderer.setSize(window.innerWidth, window.innerHeight);
+                this.threeRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+                document.getElementById('loading-text').textContent = 'Generating glyph atlas...';
+                this.atlas = new GlyphAtlas();
+                await this.atlas.generate();
+
+                this.buildHUD(this.words);
+                this.wand = createWand(this.scene, this.atlas, this.words);
+                this.field = createWandField(this.scene, this.atlas, this.words);
+                this.updateAdapterUI();
+
+                const grid = new THREE.GridHelper(500, 50, 0x111118, 0x08080c);
+                grid.rotation.x = Math.PI / 2;
+                grid.position.z = -1;
+                this.scene.add(grid);
+
+                document.getElementById('loading').classList.add('hidden');
+                this.animate();
+                console.log('Code Spectrometer ready.');
+            }
+
+            // ─── Adapter management ─────────────────────────────────
+
+            async toggleAdapter() {
+                if (this.analyzer === this.naive) {
+                    this.setStatus('loading', 'connecting...');
+                    const ok = await this.llm.init();
+                    if (ok) {
+                        this.analyzer = this.llm;
+                        this.populateModelSelect();
+                        this.updateAdapterUI();
+                    } else {
+                        this.setStatus('error', this.llm.lastError || 'failed');
+                        setTimeout(() => this.updateAdapterUI(), 2000);
+                    }
+                } else {
+                    this.analyzer = this.naive;
+                    this.updateAdapterUI();
+                }
+            }
+
+            async switchLLMEndpoint(key) {
+                this.setStatus('loading', 'connecting...');
+                const ok = await this.llm.setEndpoint(key);
+                if (ok) this.populateModelSelect();
+                this.updateAdapterUI();
+            }
+
+            populateModelSelect() {
+                const sel = document.getElementById('llm-model');
+                sel.innerHTML = '';
+                for (const m of this.llm.availableModels) {
+                    const opt = document.createElement('option');
+                    opt.value = m;
+                    opt.textContent = m;
+                    if (m === this.llm.model) opt.selected = true;
+                    sel.appendChild(opt);
+                }
+                if (this.llm.availableModels.length === 0) {
+                    sel.innerHTML = '<option value="">no models</option>';
+                }
+            }
+
+            updateAdapterUI() {
+                const isLLM = this.analyzer === this.llm;
+                document.getElementById('adapter-name').textContent =
+                    isLLM ? `llm (${this.llm.model || '?'})` : 'naive';
+                document.getElementById('llm-config').classList.toggle('visible', isLLM);
+                document.getElementById('btn-adapter-toggle').textContent =
+                    isLLM ? 'use naive' : 'use LLM';
+                this.setStatus(
+                    isLLM ? (this.llm.connected ? 'ok' : 'error') : 'ok',
+                    isLLM ? (this.llm.connected ? 'connected' : (this.llm.lastError || 'disconnected')) : 'ready'
+                );
+            }
+
+            setStatus(state, text) {
+                const el = document.getElementById('adapter-status');
+                el.className = `adapter-status ${state}`;
+                el.textContent = text;
+            }
+
+            // ─── HUD ───────────────────────────────────────────────
+
+            /**
+             * Build the HUD from whatever word set is current.
+             * If the words change, just call this again.
+             */
+            buildHUD(words) {
+                const list = document.getElementById('word-list');
+                list.innerHTML = '';
+                this.hudNodes.clear();
+
+                for (const w of words) {
+                    const div = document.createElement('div');
+                    div.className = 'concept-word inactive';
+                    div.dataset.block = w.block;
+                    div.dataset.name = w.name;
+                    div.innerHTML = `<span class="sym">${w.symbol}</span>${w.name}`;
+                    div.title = `${w.name} (${BLOCKS[w.block]?.name || w.block})\nTriggers: ${w.triggers.slice(0, 6).join(', ')}`;
+                    list.appendChild(div);
+                    this.hudNodes.set(w.name, div);
+                }
+            }
+
+            /**
+             * Render picks into the HUD.
+             * picks + words → mergePicks → DOM update.
+             */
+            renderPicks(picks) {
+                this.lastPicks = picks;
+                const merged = mergePicks(picks, this.words);
+
+                // Update the 3D wand alongside the 2D HUD
+                if (this.wand) {
+                    this.wand.update(picks, this.words);
+                }
+
+                for (const entry of merged) {
+                    const div = this.hudNodes.get(entry.word.name);
+                    if (!div) continue;
+
+                    // Remove old count badge
+                    const old = div.querySelector('.count');
+                    if (old) old.remove();
+
+                    div.className = `concept-word ${entry.tier}`;
+
+                    if (entry.score > 0) {
+                        const badge = document.createElement('span');
+                        badge.className = 'count';
+                        badge.textContent = entry.score;
+                        div.appendChild(badge);
+                    }
+                }
+
+                // Fingerprint
+                document.getElementById('hud-fingerprint').textContent =
+                    fingerprint(picks, this.words);
+
+                // LLM stats
+                if (this.analyzer === this.llm) {
+                    const s = this.llm.stats;
+                    document.getElementById('llm-stats').textContent =
+                        `${s.requests} queries | ~${s.avgLatency}ms | ${s.cacheSize} cached`;
+                }
+            }
+
+            clearHUD() {
+                for (const [, div] of this.hudNodes) {
+                    div.className = 'concept-word inactive';
+                    const c = div.querySelector('.count');
+                    if (c) c.remove();
+                }
+                document.getElementById('hud-fingerprint').textContent = '';
+                document.getElementById('hud-context').textContent = 'hover code to analyze';
+                if (this.wand) this.wand.clear();
+            }
+
+            // ─── Code loading ──────────────────────────────────────
+
+            async renderCode(text, fileName = '') {
+                if (this.codeView) this.codeView.dispose();
+
+                this.codeView = new CodeView(this.scene, this.atlas, {
+                    contextRadius: this.contextRadius,
+                });
+                await this.codeView.loadCode(text, fileName);
+
+                const bounds = this.codeView.getBounds();
+                if (bounds) {
+                    const charW = this.codeView.getCharWidth();
+                    const fovRad = 70 * Math.PI / 180;
+                    const z = (120 * charW) / (2 * Math.tan(fovRad / 2));
+                    this.camera.position.set(bounds.width * 0.3, 0, Math.max(z, 30));
+                    this.pitch = 0;
+                    this.yaw = 0;
+                }
+
+                // Initial full-file analysis
+                try {
+                    const picks = this.analyzer.isSync
+                        ? this.analyzer.analyze(text, this.words)
+                        : await this.analyzer.analyze(text, this.words);
+                    this.renderPicks(picks);
+                } catch (err) {
+                    console.warn('Initial analysis failed, falling back to naive:', err.message);
+                    this.renderPicks(this.naive.analyze(text, this.words));
+                }
+
+                document.getElementById('file-label').textContent = fileName || 'untitled';
+                document.getElementById('line-count').textContent = this.codeView.getLineCount();
+                document.getElementById('hud-context').textContent =
+                    `full file (${this.codeView.getLineCount()} lines)`;
+
+                // Build the vector field (multi-resolution probe layers)
+                if (this.field && bounds) {
+                    try {
+                        await this.field.load({
+                            code: text,
+                            analyzer: this.analyzer,
+                            words: this.words,
+                            lineSpacing: this.codeView.getLineSpacing(),
+                            codeWidth: bounds.width,
+                            totalLines: this.codeView.getLineCount(),
+                        });
+                    } catch (err) {
+                        console.warn('Field build failed:', err.message);
+                    }
+                }
+            }
+
+            async loadSelf() {
+                const srcFiles = [
+                    '../../src/GlyphAtlas.js',
+                    '../../src/GlyphRenderer.js',
+                    '../../src/core/InstanceBuffer.js',
+                    '../../src/core/ShaderManager.js',
+                    '../../src/core/constants.js',
+                    '../../src/collections/GlyphCollection.js',
+                    '../../src/collections/CodeGrid.js',
+                    '../../src/collections/GridLayoutManager.js',
+                    '../../src/camera/CameraController.js',
+                    '../../src/camera/InputManager.js',
+                    '../../src/workers/WorkerBridge.js',
+                    '../../src/utils/Logger.js',
+                    '../../src/utils/Metrics.js',
+                    './taxonomy.js',
+                    './analyzers.js',
+                    './spectrometer.js',
+                    './CodeView.js',
+                ];
+
+                const parts = [];
+                let loaded = 0;
+                for (const url of srcFiles) {
+                    try {
+                        const resp = await fetch(url);
+                        if (resp.ok) {
+                            const name = url.split('/').pop();
+                            const content = await resp.text();
+                            parts.push(`// ═══ ${name} ${'═'.repeat(60 - name.length)}\n\n${content}`);
+                            loaded++;
+                        }
+                    } catch (e) { /* skip */ }
+                }
+
+                if (loaded > 0) {
+                    await this.renderCode(parts.join('\n\n'), `glyph3d-js (${loaded} files)`);
+                }
+            }
+
+            async loadFiles(event) {
+                const files = Array.from(event.target.files);
+                if (files.length === 0) return;
+                const parts = [];
+                for (const file of files) {
+                    try {
+                        const content = await file.text();
+                        parts.push(`// ═══ ${file.name} ${'═'.repeat(60 - file.name.length)}\n\n${content}`);
+                    } catch (e) { /* skip */ }
+                }
+                if (parts.length > 0) {
+                    const name = files.length === 1 ? files[0].name : `${files.length} files`;
+                    await this.renderCode(parts.join('\n\n'), name);
+                }
+                document.getElementById('file-input').value = '';
+            }
+
+            // ─── Hover & Analysis ──────────────────────────────────
+
+            processHover() {
+                if (!this.codeView || this.isPointerLocked) return;
+
+                const now = performance.now();
+                if (now - this.lastHoverTime < this.hoverInterval) return;
+                this.lastHoverTime = now;
+
+                this.raycaster.setFromCamera(this.mouseNDC, this.camera);
+                const group = this.codeView.getGroup();
+                const localRay = this.raycaster.ray.clone();
+                localRay.origin.sub(group.position);
+                if (group.scale.x !== 1) localRay.origin.divideScalar(group.scale.x);
+
+                const hit = this.codeView.getLineAtRay(localRay);
+                if (!hit) return;
+
+                // Move the wand toward the cursor's world position
+                if (this.wand) {
+                    this.wand.setTarget(hit.worldX, hit.worldY);
+                }
+
+                const context = this.codeView.updateHover(hit.worldY);
+                if (!context) return;
+
+                // Update line labels immediately
+                document.getElementById('hud-context').textContent =
+                    `lines ${context.contextStart + 1}–${context.contextEnd + 1} (${context.lineCount} lines)`;
+                document.getElementById('hover-line-num').textContent =
+                    `line ${context.hoveredLine + 1}`;
+
+                // ─── Dispatch to current analyzer ────────────────
+                const code = context.contextText;
+                const words = this.words;
+
+                if (this.analyzer.isSync) {
+                    // Naive: immediate
+                    this.renderPicks(this.analyzer.analyze(code, words));
+                } else {
+                    // LLM: debounce
+                    this._pendingContext = context;
+                    clearTimeout(this._debounceTimer);
+                    this.setStatus('loading', 'thinking...');
+
+                    this._debounceTimer = setTimeout(() => {
+                        this._fireLLM(code, words);
+                    }, this._debounceMs);
+                }
+            }
+
+            async _fireLLM(code, words) {
+                const id = ++this._requestId;
+                try {
+                    const picks = await this.analyzer.analyze(code, words);
+                    if (id !== this._requestId) return; // stale
+                    this.renderPicks(picks);
+                    this.setStatus('ok', 'connected');
+                } catch (err) {
+                    if (id !== this._requestId) return;
+                    this.setStatus('error', 'error');
+                    // Fallback to naive so HUD isn't blank
+                    this.renderPicks(this.naive.analyze(code, words));
+                }
+            }
+
+            // ─── Camera ────────────────────────────────────────────
+
+            updateCamera(dt) {
+                const dir = new THREE.Vector3();
+                if (this.keys['KeyW']) dir.z -= 1;
+                if (this.keys['KeyS']) dir.z += 1;
+                if (this.keys['KeyA']) dir.x -= 1;
+                if (this.keys['KeyD']) dir.x += 1;
+                if (this.keys['Space']) dir.y += 1;
+                if (this.keys['ShiftLeft'] || this.keys['ShiftRight']) dir.y -= 1;
+
+                if (dir.length() > 0) {
+                    dir.normalize().applyQuaternion(this.camera.quaternion);
+                    dir.multiplyScalar(this.cameraSpeed * dt);
+                    this.camera.position.add(dir);
+                }
+
+                const q = new THREE.Quaternion();
+                q.setFromEuler(new THREE.Euler(this.pitch, this.yaw, 0, 'YXZ'));
+                this.camera.quaternion.copy(q);
+            }
+
+            // ─── Loop ──────────────────────────────────────────────
+
+            animate() {
+                requestAnimationFrame(() => this.animate());
+
+                const now = performance.now();
+                const dt = (now - this.lastTime) / 1000;
+                this.lastTime = now;
+
+                this.updateCamera(dt);
+                this.processHover();
+                if (this.wand) this.wand.tick(dt);
+                if (this.field) this.field.tick(dt);
+
+                this.frameCount++;
+                this.fpsTime += dt;
+                if (this.fpsTime >= 1) {
+                    document.getElementById('fps-val').textContent = this.frameCount;
+                    this.frameCount = 0;
+                    this.fpsTime = 0;
+                }
+
+                this.threeRenderer.render(this.scene, this.camera);
+            }
+
+            onResize() {
+                const w = window.innerWidth;
+                const h = window.innerHeight;
+                this.camera.aspect = w / h;
+                this.camera.updateProjectionMatrix();
+                this.threeRenderer.setSize(w, h);
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', async () => {
+            const app = new App();
+            await app.init();
+        });
+    </script>
+</body>
+</html>

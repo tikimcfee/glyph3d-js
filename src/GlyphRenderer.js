@@ -64,6 +64,19 @@ class GlyphRendererV15 {
             pixelHeight: atlasCharSize.height
         };
 
+        // Group transform DataTexture (4 columns x maxGroups rows, RGBA Float)
+        // WebGL max texture dimension is typically 16384; cap with headroom
+        const MAX_GROUP_TEXTURE_DIM = 16000;
+        const requestedGroups = options.maxGroups || PERF_THRESHOLDS.defaultMaxGroups;
+        this._maxGroups = Math.min(requestedGroups, MAX_GROUP_TEXTURE_DIM);
+        if (requestedGroups > MAX_GROUP_TEXTURE_DIM) {
+            logger.warn(`maxGroups ${requestedGroups} exceeds texture limit, capped at ${MAX_GROUP_TEXTURE_DIM}`);
+        }
+        this._groupData = new Float32Array(this._maxGroups * 4 * 4);
+        this._initGroupDefaults();
+        this._groupTexture = null; // created in _createInstanceMesh
+        this._groupCount = 1; // group 0 always exists (identity)
+
         // Subsystems created lazily (only when needed for sync path)
         // Worker path uses applyPrebuiltBuffers() directly - no need for these
         this._layout = null;
@@ -108,6 +121,52 @@ class GlyphRendererV15 {
     }
 
     /**
+     * Fill group DataTexture with identity values for all groups.
+     * Layout: 4 columns per group (pos, rot, color, scale), 4 floats each.
+     * Index for group G, column C: (G * 4 + C) * 4
+     * @private
+     */
+    _initGroupDefaults() {
+        for (let g = 0; g < this._maxGroups; g++) {
+            const base = g * 4 * 4; // 4 columns × 4 floats
+            // Col 0: position offset (0,0,0) + visibility (1.0)
+            this._groupData[base + 3] = 1.0;
+            // Col 1: rotation quaternion identity (0,0,0,1)
+            this._groupData[base + 4 + 3] = 1.0;
+            // Col 2: color multiplier (1,1,1,1)
+            this._groupData[base + 8] = 1.0;
+            this._groupData[base + 8 + 1] = 1.0;
+            this._groupData[base + 8 + 2] = 1.0;
+            this._groupData[base + 8 + 3] = 1.0;
+            // Col 3: scale (1,1,1,0)
+            this._groupData[base + 12] = 1.0;
+            this._groupData[base + 12 + 1] = 1.0;
+            this._groupData[base + 12 + 2] = 1.0;
+        }
+    }
+
+    /**
+     * Create Float RGBA DataTexture for group properties.
+     * Width=4 (columns: pos, rot, color, scale), Height=maxGroups.
+     * @private
+     * @returns {THREE.DataTexture}
+     */
+    _createGroupTexture() {
+        const texture = new THREE.DataTexture(
+            this._groupData,
+            4,                    // width: 4 property columns
+            this._maxGroups,      // height: one row per group
+            THREE.RGBAFormat,
+            THREE.FloatType
+        );
+        texture.minFilter = THREE.NearestFilter;
+        texture.magFilter = THREE.NearestFilter;
+        texture.generateMipmaps = false;
+        texture.needsUpdate = true;
+        return texture;
+    }
+
+    /**
      * Create the single instance mesh used for all rendering
      * @private
      */
@@ -121,10 +180,15 @@ class GlyphRendererV15 {
         geometry.attributes.position = baseGeometry.attributes.position;
         geometry.attributes.uv = baseGeometry.attributes.uv;
 
+        // Create group offset DataTexture
+        this._groupTexture = this._createGroupTexture();
+
         // Create shader material (clean, no debug paths)
         const material = new THREE.ShaderMaterial({
             uniforms: {
-                atlasTexture: { value: this.texture }
+                atlasTexture: { value: this.texture },
+                groupTexture: { value: this._groupTexture },
+                groupTextureHeight: { value: this._maxGroups }
             },
             vertexShader: this._getVertexShader(),
             fragmentShader: this._getFragmentShader(),
@@ -145,6 +209,8 @@ class GlyphRendererV15 {
                 new THREE.InstancedBufferAttribute(new Float32Array(maxCount * 4), 4));
             geometry.setAttribute('instanceColor',
                 new THREE.InstancedBufferAttribute(new Float32Array(maxCount * 3), 3));
+            geometry.setAttribute('instanceGroupId',
+                new THREE.InstancedBufferAttribute(new Float32Array(maxCount), 1));
             geometry._maxInstanceCount = maxCount;
         }
 
@@ -174,23 +240,35 @@ class GlyphRendererV15 {
             attribute vec2 instanceSize;
             attribute vec4 instanceUV;
             attribute vec3 instanceColor;
+            attribute float instanceGroupId;
+
+            uniform sampler2D groupTexture;
+            uniform float groupTextureHeight;
 
             varying vec2 vUV;
             varying vec3 vColor;
+            varying float vGroupAlpha;
 
             void main() {
                 // Transform quad by instance size
                 vec3 scaled = position * vec3(instanceSize, 1.0);
 
-                // Position in world
-                vec3 worldPos = scaled + instancePosition;
+                // Group property lookups (4-column DataTexture)
+                float v = (instanceGroupId + 0.5) / groupTextureHeight;
+                vec4 gPos   = texture2D(groupTexture, vec2(0.125, v));  // col 0: offset + visibility
+                vec4 gColor = texture2D(groupTexture, vec2(0.625, v));  // col 2: color multiplier
+                vec4 gScale = texture2D(groupTexture, vec2(0.875, v));  // col 3: scale
+
+                // World position = scale instance position, then add group offset
+                vec3 worldPos = scaled + instancePosition * gScale.xyz + gPos.xyz;
 
                 // Standard projection
                 gl_Position = projectionMatrix * modelViewMatrix * vec4(worldPos, 1.0);
 
-                // Pass through interpolated UVs (same as v1.0)
+                // Pass through interpolated UVs
                 vUV = mix(instanceUV.xy, instanceUV.zw, uv);
-                vColor = instanceColor;
+                vColor = instanceColor * gColor.rgb;
+                vGroupAlpha = gColor.a;
             }
         `;
     }
@@ -205,14 +283,15 @@ class GlyphRendererV15 {
 
             varying vec2 vUV;
             varying vec3 vColor;
+            varying float vGroupAlpha;
 
             void main() {
                 vec4 texColor = texture2D(atlasTexture, vUV);
 
-                // Apply instance color
-                gl_FragColor = texColor * vec4(vColor, 1.0);
+                // Apply instance color and group alpha
+                gl_FragColor = texColor * vec4(vColor, vGroupAlpha);
 
-                // Alpha test for clean edges (matching v1.0)
+                // Alpha test for clean edges and group visibility
                 if (gl_FragColor.a < 0.01) discard;
             }
         `;
@@ -402,6 +481,306 @@ class GlyphRendererV15 {
     }
 
     /**
+     * Bulk update positions for multiple text entries in a single pass.
+     * Writes all changes to the position buffer, then flags needsUpdate once.
+     * @param {Array<{id: number, position: {x: number, y: number, z: number}}>} updates
+     */
+    updatePositions(updates) {
+        if (!this.instanceMesh || updates.length === 0) return;
+
+        const geometry = this.instanceMesh.geometry;
+        const positions = geometry.attributes.instancePosition.array;
+
+        for (let u = 0; u < updates.length; u++) {
+            const { id, position: newPosition } = updates[u];
+            const entry = this.renderedTexts.get(id);
+            if (!entry || entry.bufferStartIndex === undefined) continue;
+
+            const offset = {
+                x: newPosition.x - entry.glyphs[0].position.x,
+                y: newPosition.y - entry.glyphs[0].position.y,
+                z: newPosition.z - entry.glyphs[0].position.z
+            };
+
+            const startIdx = entry.bufferStartIndex;
+            for (let i = 0; i < entry.glyphs.length; i++) {
+                const glyph = entry.glyphs[i];
+                glyph.position.x += offset.x;
+                glyph.position.y += offset.y;
+                glyph.position.z += offset.z;
+
+                const bufIdx = (startIdx + i) * 3;
+                positions[bufIdx] = glyph.position.x;
+                positions[bufIdx + 1] = glyph.position.y;
+                positions[bufIdx + 2] = glyph.position.z;
+            }
+        }
+
+        geometry.attributes.instancePosition.needsUpdate = true;
+    }
+
+    /**
+     * Bulk update colors for multiple text entries in a single pass.
+     * Writes all changes to the color buffer, then flags needsUpdate once.
+     * @param {Array<{id: number, color: {r: number, g: number, b: number}}>} updates
+     */
+    updateColors(updates) {
+        if (!this.instanceMesh || updates.length === 0) return;
+
+        const geometry = this.instanceMesh.geometry;
+        const colors = geometry.attributes.instanceColor.array;
+
+        for (let u = 0; u < updates.length; u++) {
+            const { id, color: newColor } = updates[u];
+            const entry = this.renderedTexts.get(id);
+            if (!entry || entry.bufferStartIndex === undefined) continue;
+
+            const startIdx = entry.bufferStartIndex;
+            for (let i = 0; i < entry.glyphs.length; i++) {
+                entry.glyphs[i].color = newColor;
+
+                const bufIdx = (startIdx + i) * 3;
+                colors[bufIdx] = newColor.r;
+                colors[bufIdx + 1] = newColor.g;
+                colors[bufIdx + 2] = newColor.b;
+            }
+        }
+
+        geometry.attributes.instanceColor.needsUpdate = true;
+    }
+
+    /**
+     * Bulk update both positions and colors in a single pass.
+     * Most efficient for operations like layout animations that change both.
+     * @param {Array<{id: number, position?: {x: number, y: number, z: number}, color?: {r: number, g: number, b: number}}>} updates
+     */
+    updateTransforms(updates) {
+        if (!this.instanceMesh || updates.length === 0) return;
+
+        const geometry = this.instanceMesh.geometry;
+        const positions = geometry.attributes.instancePosition.array;
+        const colors = geometry.attributes.instanceColor.array;
+        let positionDirty = false;
+        let colorDirty = false;
+
+        for (let u = 0; u < updates.length; u++) {
+            const update = updates[u];
+            const entry = this.renderedTexts.get(update.id);
+            if (!entry || entry.bufferStartIndex === undefined) continue;
+
+            const startIdx = entry.bufferStartIndex;
+
+            if (update.position) {
+                const offset = {
+                    x: update.position.x - entry.glyphs[0].position.x,
+                    y: update.position.y - entry.glyphs[0].position.y,
+                    z: update.position.z - entry.glyphs[0].position.z
+                };
+
+                for (let i = 0; i < entry.glyphs.length; i++) {
+                    const glyph = entry.glyphs[i];
+                    glyph.position.x += offset.x;
+                    glyph.position.y += offset.y;
+                    glyph.position.z += offset.z;
+
+                    const bufIdx = (startIdx + i) * 3;
+                    positions[bufIdx] = glyph.position.x;
+                    positions[bufIdx + 1] = glyph.position.y;
+                    positions[bufIdx + 2] = glyph.position.z;
+                }
+                positionDirty = true;
+            }
+
+            if (update.color) {
+                for (let i = 0; i < entry.glyphs.length; i++) {
+                    entry.glyphs[i].color = update.color;
+
+                    const bufIdx = (startIdx + i) * 3;
+                    colors[bufIdx] = update.color.r;
+                    colors[bufIdx + 1] = update.color.g;
+                    colors[bufIdx + 2] = update.color.b;
+                }
+                colorDirty = true;
+            }
+        }
+
+        if (positionDirty) geometry.attributes.instancePosition.needsUpdate = true;
+        if (colorDirty) geometry.attributes.instanceColor.needsUpdate = true;
+    }
+
+    // ============ Group Transform API ============
+
+    /**
+     * Create a new group. Returns a groupId for use with addText options
+     * and setGroupOffset/setGroupColor.
+     * @returns {number} The new groupId
+     */
+    createGroup() {
+        const groupId = this._groupCount++;
+        if (groupId >= this._maxGroups) {
+            this._growGroupTexture();
+            // If growth failed (hit texture limit), fall back to group 0
+            if (groupId >= this._maxGroups) {
+                this._groupCount--;
+                return 0;
+            }
+        }
+        return groupId;
+    }
+
+    /**
+     * Set the world-space position offset for a group. O(1) GPU update.
+     * @param {number} groupId
+     * @param {{x: number, y: number, z: number}} offset
+     */
+    setGroupOffset(groupId, offset) {
+        if (groupId < 0 || groupId >= this._maxGroups) return;
+        const base = (groupId * 4 + 0) * 4; // column 0
+        this._groupData[base] = offset.x;
+        this._groupData[base + 1] = offset.y;
+        this._groupData[base + 2] = offset.z;
+        // base + 3 = visibility, preserved
+        this._groupTexture.needsUpdate = true;
+    }
+
+    /**
+     * Get the current offset for a group.
+     * @param {number} groupId
+     * @returns {{x: number, y: number, z: number}}
+     */
+    getGroupOffset(groupId) {
+        if (groupId < 0 || groupId >= this._maxGroups) return { x: 0, y: 0, z: 0 };
+        const base = (groupId * 4 + 0) * 4;
+        return {
+            x: this._groupData[base],
+            y: this._groupData[base + 1],
+            z: this._groupData[base + 2]
+        };
+    }
+
+    /**
+     * Set the color multiplier for a group. O(1) GPU update.
+     * Instance colors are multiplied by this value in the shader.
+     * Alpha controls group opacity (0 = invisible, 1 = fully visible).
+     * @param {number} groupId
+     * @param {{r: number, g: number, b: number, a?: number}} color
+     */
+    setGroupColor(groupId, color) {
+        if (groupId < 0 || groupId >= this._maxGroups) return;
+        const base = (groupId * 4 + 2) * 4; // column 2
+        this._groupData[base] = color.r;
+        this._groupData[base + 1] = color.g;
+        this._groupData[base + 2] = color.b;
+        this._groupData[base + 3] = color.a !== undefined ? color.a : 1.0;
+        this._groupTexture.needsUpdate = true;
+    }
+
+    /**
+     * Get the current color multiplier for a group.
+     * @param {number} groupId
+     * @returns {{r: number, g: number, b: number, a: number}}
+     */
+    getGroupColor(groupId) {
+        if (groupId < 0 || groupId >= this._maxGroups) return { r: 1, g: 1, b: 1, a: 1 };
+        const base = (groupId * 4 + 2) * 4;
+        return {
+            r: this._groupData[base],
+            g: this._groupData[base + 1],
+            b: this._groupData[base + 2],
+            a: this._groupData[base + 3]
+        };
+    }
+
+    /**
+     * Set group visibility. Uses color alpha channel — invisible groups
+     * have alpha 0 which triggers the fragment shader's alpha discard.
+     * @param {number} groupId
+     * @param {boolean} visible
+     */
+    setGroupVisibility(groupId, visible) {
+        if (groupId < 0 || groupId >= this._maxGroups) return;
+        const base = (groupId * 4 + 2) * 4; // column 2 (color)
+        this._groupData[base + 3] = visible ? 1.0 : 0.0;
+        this._groupTexture.needsUpdate = true;
+    }
+
+    /**
+     * Set the scale for a group. O(1) GPU update.
+     * Scales instance positions within the group (not the quad size).
+     * Default is (1,1,1) — identity.
+     * @param {number} groupId
+     * @param {{x: number, y: number, z: number}} scale
+     */
+    setGroupScale(groupId, scale) {
+        if (groupId < 0 || groupId >= this._maxGroups) return;
+        const base = (groupId * 4 + 3) * 4; // column 3
+        this._groupData[base] = scale.x;
+        this._groupData[base + 1] = scale.y;
+        this._groupData[base + 2] = scale.z;
+        this._groupTexture.needsUpdate = true;
+    }
+
+    /**
+     * Get the current scale for a group.
+     * @param {number} groupId
+     * @returns {{x: number, y: number, z: number}}
+     */
+    getGroupScale(groupId) {
+        if (groupId < 0 || groupId >= this._maxGroups) return { x: 1, y: 1, z: 1 };
+        const base = (groupId * 4 + 3) * 4;
+        return {
+            x: this._groupData[base],
+            y: this._groupData[base + 1],
+            z: this._groupData[base + 2]
+        };
+    }
+
+    /**
+     * Grow the group DataTexture when capacity is exceeded.
+     * @private
+     */
+    _growGroupTexture() {
+        const MAX_GROUP_TEXTURE_DIM = 16000;
+        const oldMax = this._maxGroups;
+        if (oldMax >= MAX_GROUP_TEXTURE_DIM) {
+            logger.warn(`Group texture at max capacity (${oldMax}), cannot grow`);
+            return;
+        }
+        this._maxGroups = Math.min(oldMax * 2, MAX_GROUP_TEXTURE_DIM);
+
+        const newData = new Float32Array(this._maxGroups * 4 * 4);
+        // Copy existing data
+        newData.set(this._groupData);
+        this._groupData = newData;
+
+        // Initialize new groups with identity defaults
+        for (let g = oldMax; g < this._maxGroups; g++) {
+            const base = g * 4 * 4;
+            this._groupData[base + 3] = 1.0;        // col 0: visibility
+            this._groupData[base + 4 + 3] = 1.0;    // col 1: quat.w
+            this._groupData[base + 8] = 1.0;         // col 2: color.r
+            this._groupData[base + 8 + 1] = 1.0;     // col 2: color.g
+            this._groupData[base + 8 + 2] = 1.0;     // col 2: color.b
+            this._groupData[base + 8 + 3] = 1.0;     // col 2: color.a
+            this._groupData[base + 12] = 1.0;         // col 3: scale.x
+            this._groupData[base + 12 + 1] = 1.0;     // col 3: scale.y
+            this._groupData[base + 12 + 2] = 1.0;     // col 3: scale.z
+        }
+
+        // Dispose old texture, create new one
+        if (this._groupTexture) {
+            this._groupTexture.dispose();
+        }
+        this._groupTexture = this._createGroupTexture();
+
+        // Update material uniforms
+        if (this.instanceMesh) {
+            this.instanceMesh.material.uniforms.groupTexture.value = this._groupTexture;
+            this.instanceMesh.material.uniforms.groupTextureHeight.value = this._maxGroups;
+        }
+    }
+
+    /**
      * Remove rendered text
      * @param {number} id - Text ID to remove
      */
@@ -483,7 +862,8 @@ class GlyphRendererV15 {
                 },
                 uv: uv,
                 color: color,
-                char: char  // Keep for debugging
+                char: char,  // Keep for debugging
+                groupId: options.groupId || 0
             });
         }
 
@@ -573,6 +953,7 @@ class GlyphRendererV15 {
         const sizes = geometry.attributes.instanceSize.array;
         const uvs = geometry.attributes.instanceUV.array;
         const colors = geometry.attributes.instanceColor.array;
+        const groupIds = geometry.attributes.instanceGroupId.array;
 
         // Fill arrays
         for (let i = 0; i < count; i++) {
@@ -603,6 +984,9 @@ class GlyphRendererV15 {
             colors[i * 3] = g.color.r;
             colors[i * 3 + 1] = g.color.g;
             colors[i * 3 + 2] = g.color.b;
+
+            // Group ID
+            groupIds[i] = g.groupId || 0;
         }
 
         // Mark attributes as needing update
@@ -610,6 +994,7 @@ class GlyphRendererV15 {
         geometry.attributes.instanceSize.needsUpdate = true;
         geometry.attributes.instanceUV.needsUpdate = true;
         geometry.attributes.instanceColor.needsUpdate = true;
+        geometry.attributes.instanceGroupId.needsUpdate = true;
 
         // Set instance count
         geometry.instanceCount = count;
@@ -644,7 +1029,7 @@ class GlyphRendererV15 {
      * @returns {Array<number>|null} Array of renderer IDs if itemMeta provided, null otherwise
      */
     applyPrebuiltBuffers(buffers, items) {
-        const { positions, sizes, uvs, colors, count } = buffers;
+        const { positions, sizes, uvs, colors, groupIds, count } = buffers;
         let { itemMeta } = buffers;
         const geometry = this.instanceMesh.geometry;
 
@@ -658,6 +1043,8 @@ class GlyphRendererV15 {
             new THREE.InstancedBufferAttribute(uvs, 4));
         geometry.setAttribute('instanceColor',
             new THREE.InstancedBufferAttribute(colors, 3));
+        geometry.setAttribute('instanceGroupId',
+            new THREE.InstancedBufferAttribute(groupIds || new Float32Array(count), 1));
 
         // Set instance count
         geometry.instanceCount = count;
@@ -716,7 +1103,8 @@ class GlyphRendererV15 {
                             g: colors[bufIdx * 3 + 1],
                             b: colors[bufIdx * 3 + 2]
                         },
-                        char: ''
+                        char: '',
+                        groupId: groupIds ? groupIds[bufIdx] : 0
                     };
                 }
 
@@ -772,8 +1160,14 @@ class GlyphRendererV15 {
             this.instanceMesh.material.dispose();
         }
 
-        // Don't dispose texture - it's shared across all renderers
+        // Don't dispose atlas texture - it's shared across all renderers
         this.texture = null;
+
+        // Dispose group DataTexture (owned by this renderer)
+        if (this._groupTexture) {
+            this._groupTexture.dispose();
+            this._groupTexture = null;
+        }
 
         logger.info('Disposed');
     }
