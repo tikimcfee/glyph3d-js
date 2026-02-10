@@ -28,7 +28,8 @@ self.onmessage = function(event) {
                         result.positions.buffer,
                         result.sizes.buffer,
                         result.uvs.buffer,
-                        result.colors.buffer
+                        result.colors.buffer,
+                        result.groupIds.buffer
                     ]
                 );
                 break;
@@ -57,7 +58,8 @@ self.onmessage = function(event) {
                         result.positions.buffer,
                         result.sizes.buffer,
                         result.uvs.buffer,
-                        result.colors.buffer
+                        result.colors.buffer,
+                        result.groupIds.buffer
                     ]
                 );
                 break;

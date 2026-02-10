@@ -18,6 +18,8 @@ import {
 import { RepositoryAdapter } from './RepositoryAdapter.js';
 import { GitHubRepositorySource } from './GitHubRepositorySource.js';
 import { DiffController } from './DiffController.js';
+import { BackdropManager } from './BackdropManager.js';
+import { NameplateManager } from './NameplateManager.js';
 
 import { createHeader, createLoadingOverlay, createFPSBadge, createToast } from './components/AppShell.js';
 import {
@@ -83,6 +85,10 @@ export class GitHubRepoViewer {
         this.githubSource = new GitHubRepositorySource();
         this.diffController = null;
         this.diffPanel = null;
+
+        // Visual overlay managers
+        this.backdropManager = null;
+        this.nameplateManager = null;
 
         // State
         this.grids = [];
@@ -296,10 +302,11 @@ export class GitHubRepoViewer {
     relayoutGrids() {
         if (this.grids.length === 0) return;
         if (this.hierarchicalManager) {
-            this.hierarchicalManager.options.siblingSpacing = this.layoutManager.spacing.horizontal;
-            this.hierarchicalManager.options.dirPadding = this.layoutManager.spacing.horizontal * 0.4;
+            this.hierarchicalManager.options.siblingSpacing = 8;
+            this.hierarchicalManager.options.dirPadding = 15;
             this.hierarchicalManager.clear();
             this.hierarchicalManager.layoutHierarchy(this.grids);
+            this._updateOverlays();
         } else {
             this.layoutManager.clear();
             for (const grid of this.grids) { this.layoutManager.addAuto(grid); }
@@ -435,9 +442,12 @@ export class GitHubRepoViewer {
 
             const HLM = HierarchicalLayoutManager;
             this.hierarchicalManager = new HLM({
-                dirPadding: 20,
-                siblingSpacing: this.layoutManager.spacing.horizontal,
-                maxRowWidth: 3000,
+                dirPadding: 15,
+                dirPaddingDecay: 0.7,       // padding shrinks at deeper nesting
+                siblingSpacing: 8,
+                maxRowWidth: 8000,           // generous cap for adaptive layout
+                targetAspectRatio: 3.0,      // aim for 3:1 wide directories
+                directoriesInZ: false,       // dirs flow horizontally with files
                 siblingDirection: 'horizontal'
             });
 
@@ -454,9 +464,16 @@ export class GitHubRepoViewer {
             const layoutTime = performance.now() - layoutStart;
             console.log(`[2b] Hierarchical layout: ${createdGrids.length} grids in ${layoutTime.toFixed(0)}ms`);
 
-            // Phase 3: UI updates
+            // Phase 2c: Create visual overlays (backdrops + nameplates)
+            const overlayStart = performance.now();
+            this.loading.update(0.8, `Creating visual overlays...`);
+            this._createOverlays();
+            const overlayTime = performance.now() - overlayStart;
+            console.log(`[2c] Visual overlays: ${overlayTime.toFixed(0)}ms`);
+
+            // Phase 3: UI updates - hierarchical file tree
             const uiStart = performance.now();
-            this.updateFileTree(sourceFiles);
+            this.updateFileTree();
             const uiTime = performance.now() - uiStart;
             console.log(`[3] File tree UI: ${uiTime.toFixed(0)}ms`);
 
@@ -507,8 +524,18 @@ export class GitHubRepoViewer {
         }
         this.grids = [];
         this.layoutManager.clear();
-        if (this.hierarchicalManager) this.hierarchicalManager.clear();
+        if (this.hierarchicalManager) this.hierarchicalManager.clearAll();
         if (this.diffController) this.diffController.clearGrids();
+
+        // Clean up overlay managers
+        if (this.backdropManager) {
+            this.backdropManager.destroy();
+            this.backdropManager = null;
+        }
+        if (this.nameplateManager) {
+            this.nameplateManager.destroy();
+            this.nameplateManager = null;
+        }
     }
 
     async loadDiff(input) {
@@ -593,19 +620,215 @@ export class GitHubRepoViewer {
         this.yaw = 0;
     }
 
-    updateFileTree(files) {
+    /**
+     * Build hierarchical file tree in the drawer panel.
+     * Walks the layout manager's tree to create an indented,
+     * collapsible directory structure.
+     */
+    updateFileTree() {
         this.treeContent.innerHTML = '';
-        files.forEach((file, idx) => {
-            const item = document.createElement('div');
-            item.className = 'tree-item';
-            item.innerHTML = `
-                <span class="tree-icon">&#128196;</span>
-                <span class="tree-name">${file.path}</span>
-                <span class="tree-size">${this.formatSize(file.size)}</span>
+
+        if (!this.hierarchicalManager || !this.hierarchicalManager.root) {
+            this.treeContent.innerHTML = '<div class="tree-empty">No files loaded</div>';
+            return;
+        }
+
+        // Build tree DOM recursively from the hierarchy root
+        this._buildTreeDOM(this.hierarchicalManager.root, this.treeContent, 0);
+    }
+
+    /**
+     * Recursively build DOM for a tree node and its children
+     * @private
+     */
+    _buildTreeDOM(node, container, depth) {
+        // Skip the virtual root node (empty path) — render its children directly
+        if (node.path === '' && node.isDirectory) {
+            for (const child of node.children) {
+                this._buildTreeDOM(child, container, depth);
+            }
+            return;
+        }
+
+        if (node.isDirectory) {
+            // Directory item
+            const isCollapsed = this.hierarchicalManager.isCollapsed(node.path);
+            const dirItem = document.createElement('div');
+            dirItem.className = 'tree-item tree-dir';
+            if (isCollapsed) dirItem.classList.add('collapsed');
+            dirItem.style.paddingLeft = `${depth * 16 + 8}px`;
+            dirItem.dataset.path = node.path;
+
+            const chevron = isCollapsed ? '\u25B6' : '\u25BC';  // ▶ or ▼
+            const childCount = this._countDescendants(node);
+
+            dirItem.innerHTML = `
+                <span class="tree-chevron">${chevron}</span>
+                <span class="tree-icon tree-icon-dir">\uD83D\uDCC1</span>
+                <span class="tree-name">${node.name}</span>
+                <span class="tree-count">${childCount}</span>
             `;
-            item.addEventListener('click', () => this.focusOnGrid(idx));
-            this.treeContent.appendChild(item);
+
+            // Click chevron to toggle collapse
+            const chevronEl = dirItem.querySelector('.tree-chevron');
+            chevronEl.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.toggleDirectoryCollapse(node.path);
+            });
+
+            // Click directory name to focus camera
+            dirItem.addEventListener('click', () => {
+                this.focusOnDirectory(node.path);
+            });
+
+            container.appendChild(dirItem);
+
+            // Children container (hidden if collapsed)
+            const childrenContainer = document.createElement('div');
+            childrenContainer.className = 'tree-children';
+            if (isCollapsed) childrenContainer.classList.add('hidden');
+            childrenContainer.dataset.parentPath = node.path;
+
+            for (const child of node.children) {
+                this._buildTreeDOM(child, childrenContainer, depth + 1);
+            }
+
+            container.appendChild(childrenContainer);
+        } else {
+            // File item
+            const fileItem = document.createElement('div');
+            fileItem.className = 'tree-item tree-file';
+            fileItem.style.paddingLeft = `${depth * 16 + 8}px`;
+            fileItem.dataset.path = node.path;
+
+            const gridIndex = node.grid ? this.grids.indexOf(node.grid) : -1;
+
+            fileItem.innerHTML = `
+                <span class="tree-icon tree-icon-file">\uD83D\uDCC4</span>
+                <span class="tree-name">${node.name}</span>
+            `;
+
+            if (gridIndex >= 0) {
+                fileItem.addEventListener('click', () => this.focusOnGrid(gridIndex));
+            }
+
+            container.appendChild(fileItem);
+        }
+    }
+
+    /**
+     * Count total file descendants of a directory node
+     * @private
+     */
+    _countDescendants(node) {
+        let count = 0;
+        for (const child of node.children) {
+            if (child.isDirectory) {
+                count += this._countDescendants(child);
+            } else {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /**
+     * Toggle collapse state for a directory — updates 3D scene + UI
+     */
+    toggleDirectoryCollapse(dirPath) {
+        if (!this.hierarchicalManager) return;
+
+        const nowCollapsed = this.hierarchicalManager.toggleCollapse(dirPath);
+
+        // Re-layout the 3D scene (recompute bounds, reposition, set visibility)
+        this.hierarchicalManager.relayout();
+
+        // Update visual overlays
+        this._updateOverlays();
+
+        // Rebuild the file tree UI to reflect new state
+        this.updateFileTree();
+    }
+
+    /**
+     * Focus camera on a directory's bounds in 3D space
+     */
+    focusOnDirectory(dirPath) {
+        const THREE = this.THREE;
+        if (!this.hierarchicalManager) return;
+
+        const bounds = this.hierarchicalManager.getDirectoryBounds(dirPath);
+        if (!bounds) return;
+
+        const center = new THREE.Vector3();
+        bounds.getCenter(center);
+        const size = new THREE.Vector3();
+        bounds.getSize(size);
+
+        // Straight-on view, zoom to fit the directory's extent
+        const distance = this._zDistanceForFit(size.x, size.y, 0.85);
+        this.camera.position.set(center.x, center.y, bounds.max.z + distance);
+        this.pitch = 0;
+        this.yaw = 0;
+    }
+
+    /**
+     * Create visual overlay managers (backdrops + nameplates)
+     * @private
+     */
+    _createOverlays() {
+        if (!this.hierarchicalManager || !this.hierarchicalManager.root) return;
+
+        // Dispose old managers if they exist
+        if (this.backdropManager) this.backdropManager.destroy();
+        if (this.nameplateManager) this.nameplateManager.destroy();
+
+        // Create backdrop manager
+        this.backdropManager = new BackdropManager(this.scene, {
+            baseOpacity: 0.12,
+            opacityDecay: 0.7,
+            showEdges: true,
+            edgeOpacity: 0.2,
         });
+        this.backdropManager.createBackdrops(
+            this.hierarchicalManager.root,
+            this.hierarchicalManager.collapsedPaths
+        );
+
+        // Create nameplate manager
+        this.nameplateManager = new NameplateManager(this.scene, this.atlas, {
+            color: { r: 0.0, g: 1.0, b: 0.53 },
+            scale: 1.5,
+            yOffset: 5,
+            zOffset: 5,
+            billboard: true,
+        });
+        this.nameplateManager.createNameplates(
+            this.hierarchicalManager.root,
+            this.hierarchicalManager.collapsedPaths
+        );
+    }
+
+    /**
+     * Update visual overlays after re-layout
+     * @private
+     */
+    _updateOverlays() {
+        if (!this.hierarchicalManager || !this.hierarchicalManager.root) return;
+
+        if (this.backdropManager) {
+            this.backdropManager.updateBackdrops(
+                this.hierarchicalManager.root,
+                this.hierarchicalManager.collapsedPaths
+            );
+        }
+
+        if (this.nameplateManager) {
+            this.nameplateManager.updateNameplates(
+                this.hierarchicalManager.root,
+                this.hierarchicalManager.collapsedPaths
+            );
+        }
     }
 
     formatSize(bytes) {
@@ -614,16 +837,78 @@ export class GitHubRepoViewer {
         return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
     }
 
+    /**
+     * Calculate the Z distance needed so that a region of `width` x `height`
+     * fills approximately `fillFraction` of the viewport.
+     * Uses the camera's vertical FOV and aspect ratio.
+     * @private
+     */
+    _zDistanceForFit(width, height, fillFraction = 0.85) {
+        const fovRad = this.camera.fov * Math.PI / 180;
+        const aspect = this.camera.aspect;
+
+        // Distance needed to fit the height
+        const dH = (height / fillFraction) / (2 * Math.tan(fovRad / 2));
+        // Distance needed to fit the width
+        const dW = (width / fillFraction) / (2 * aspect * Math.tan(fovRad / 2));
+
+        return Math.max(dH, dW);
+    }
+
+    /**
+     * Focus camera on a file for reading.
+     *
+     * Sets camera to a consistent reading distance where ~35 lines of text
+     * fill the viewport — like opening a file in an editor. The distance
+     * is derived from actual line spacing, not the file's total bounds,
+     * so text is always the same readable size regardless of file length.
+     * Short files show entirely; tall files show the top and you fly through.
+     */
     focusOnGrid(index) {
         const THREE = this.THREE;
         if (index < 0 || index >= this.grids.length) return;
 
         const grid = this.grids[index];
         const bounds = grid.getBounds();
-        const center = new THREE.Vector3();
-        bounds.getCenter(center);
+        const size = new THREE.Vector3();
+        bounds.getSize(size);
 
-        this.camera.position.set(center.x, center.y, center.z + 400);
+        // Straight-on: reset rotation so camera faces -Z (perpendicular to content)
+        this.pitch = 0;
+        this.yaw = 0;
+
+        // --- Reading distance from line metrics ---
+        // Derive line spacing from the grid's actual content and bounds.
+        // This avoids dependence on padding/background/transforms.
+        const lineCount = grid.lines ? grid.lines.length : 1;
+        const lineSpacing = size.y / Math.max(lineCount, 1);
+
+        // Show this many lines — a comfortable screenful, like an editor.
+        const READABLE_LINES = 35;
+        const visibleLines = Math.min(lineCount, READABLE_LINES);
+        const targetViewHeight = visibleLines * lineSpacing;
+
+        const fovRad = this.camera.fov * Math.PI / 180;
+        const halfTan = Math.tan(fovRad / 2);
+
+        // Primary: distance so targetViewHeight fills 85% of viewport height
+        const distForHeight = (targetViewHeight / 0.85) / (2 * halfTan);
+
+        // Secondary: back up if file is wider than viewport at reading distance
+        const distForWidth = (size.x / 0.85) / (2 * this.camera.aspect * halfTan);
+
+        const distance = Math.max(distForHeight, distForWidth, 5);
+
+        // Position at the top of the file, centered horizontally.
+        const centerX = (bounds.min.x + bounds.max.x) / 2;
+        const topY = bounds.max.y;
+
+        // Offset camera Y so file's top sits near the top of the viewport.
+        const visibleHalfH = distance * halfTan;
+        const topMargin = 0.08;
+        const cameraY = topY - visibleHalfH * (1 - 2 * topMargin);
+
+        this.camera.position.set(centerX, cameraY, bounds.max.z + distance);
 
         document.querySelectorAll('.tree-item').forEach((item, i) => {
             item.classList.toggle('selected', i === index);
@@ -643,9 +928,8 @@ export class GitHubRepoViewer {
         const size = new THREE.Vector3();
         bounds.getSize(size);
 
-        const maxDim = Math.max(size.x, size.y);
-        const distance = Math.min(maxDim * 0.5, 800);
-        this.camera.position.set(center.x, center.y, center.z + distance + 100);
+        const distance = this._zDistanceForFit(size.x, size.y, 0.85);
+        this.camera.position.set(center.x, center.y, bounds.max.z + distance);
         this.pitch = 0;
         this.yaw = 0;
     }
@@ -710,6 +994,12 @@ export class GitHubRepoViewer {
 
         this.updateCamera(deltaTime);
         this.updateStats(deltaTime);
+
+        // Update billboard-style nameplates to face camera
+        if (this.nameplateManager) {
+            this.nameplateManager.updateBillboards(this.camera);
+        }
+
         this.renderer.render(this.scene, this.camera);
     }
 }
