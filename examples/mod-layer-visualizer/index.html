@@ -2,73 +2,83 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>Mod Layer Visualizer</title>
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
     <div id="canvas-container"></div>
 
-    <div id="controls">
-        <h1>MOD LAYER VIZ</h1>
-        <p class="subtitle">
-            Stacked modular arithmetic grids. Each layer colors
-            your dataset by remainder mod N. Patterns reveal structure.
-        </p>
+    <!-- Floating toggle -->
+    <button id="drawer-toggle" aria-label="Toggle controls">&#9776;</button>
 
-        <!-- Dataset -->
-        <h2>Dataset</h2>
-        <div class="ctrl-row">
-            <label>Source</label>
-            <select id="dataset-select">
-                <option value="primes">First N Primes</option>
-                <option value="integers">Integers 1..N</option>
-                <option value="fibonacci">Fibonacci Sequence</option>
-                <option value="random">Random (0-9999)</option>
-                <option value="collatz">Collatz Sequence</option>
-                <option value="triangular">Triangular Numbers</option>
-                <option value="text">UTF-8 Text Bytes</option>
-            </select>
-        </div>
-        <div class="ctrl-row" id="n-row">
-            <label>N <span class="val" id="n-val">256</span></label>
-            <input type="range" id="n-slider" min="16" max="2048" value="256" step="1">
-        </div>
-        <div class="ctrl-row" id="text-row" style="display:none">
-            <label>Input Text</label>
-            <textarea id="text-input">The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs. How vexingly quick daft zebras jump!</textarea>
-        </div>
+    <!-- Scrim (dark overlay when drawer open) -->
+    <div id="drawer-scrim"></div>
 
-        <!-- Grid info -->
-        <h2>Grid</h2>
-        <div id="grid-info">--</div>
+    <!-- Drawer: bottom sheet on mobile, side panel on desktop -->
+    <div id="drawer">
+        <div id="drawer-handle"><div id="drawer-grip"></div></div>
+        <div id="drawer-content">
+            <h1>MOD LAYER VIZ</h1>
+            <p class="subtitle">
+                Stacked modular arithmetic grids. Each layer colors
+                your dataset by remainder mod N. Patterns reveal structure.
+            </p>
 
-        <!-- Layers -->
-        <h2>Layers</h2>
-        <div class="ctrl-row">
-            <label>Max Modulus <span class="val" id="mod-val">12</span></label>
-            <input type="range" id="mod-slider" min="3" max="48" value="12" step="1">
-        </div>
-        <div class="ctrl-row">
-            <label>Spacing <span class="val" id="spacing-val">1.00</span></label>
-            <input type="range" id="spacing-slider" min="0" max="5" value="1.0" step="0.05">
-        </div>
-        <div class="ctrl-row">
-            <label>Opacity <span class="val" id="opacity-val">0.85</span></label>
-            <input type="range" id="opacity-slider" min="0.05" max="1.0" value="0.85" step="0.01">
-        </div>
+            <!-- Dataset -->
+            <h2>Dataset</h2>
+            <div class="ctrl-row">
+                <label>Source</label>
+                <select id="dataset-select">
+                    <option value="primes">First N Primes</option>
+                    <option value="integers">Integers 1..N</option>
+                    <option value="fibonacci">Fibonacci Sequence</option>
+                    <option value="random">Random (0-9999)</option>
+                    <option value="collatz">Collatz Sequence</option>
+                    <option value="triangular">Triangular Numbers</option>
+                    <option value="text">UTF-8 Text Bytes</option>
+                </select>
+            </div>
+            <div class="ctrl-row" id="n-row">
+                <label>N <span class="val" id="n-val">256</span></label>
+                <input type="range" id="n-slider" min="16" max="2048" value="256" step="1">
+            </div>
+            <div class="ctrl-row" id="text-row" style="display:none">
+                <label>Input Text</label>
+                <textarea id="text-input">The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs. How vexingly quick daft zebras jump!</textarea>
+            </div>
 
-        <!-- Color -->
-        <h2>Color Scheme</h2>
-        <div class="ctrl-row">
-            <select id="color-scheme"></select>
+            <!-- Grid info -->
+            <h2>Grid</h2>
+            <div id="grid-info">--</div>
+
+            <!-- Layers -->
+            <h2>Layers</h2>
+            <div class="ctrl-row">
+                <label>Max Modulus <span class="val" id="mod-val">12</span></label>
+                <input type="range" id="mod-slider" min="3" max="48" value="12" step="1">
+            </div>
+            <div class="ctrl-row">
+                <label>Spacing <span class="val" id="spacing-val">1.00</span></label>
+                <input type="range" id="spacing-slider" min="0" max="5" value="1.0" step="0.05">
+            </div>
+            <div class="ctrl-row">
+                <label>Opacity <span class="val" id="opacity-val">0.85</span></label>
+                <input type="range" id="opacity-slider" min="0.05" max="1.0" value="0.85" step="0.01">
+            </div>
+
+            <!-- Color -->
+            <h2>Color Scheme</h2>
+            <div class="ctrl-row">
+                <select id="color-scheme"></select>
+            </div>
+
+            <!-- Toggles -->
+            <h2>Layer Toggles</h2>
+            <div id="layer-toggles"></div>
+
+            <button id="rebuild-btn">REBUILD</button>
         </div>
-
-        <!-- Toggles -->
-        <h2>Layer Toggles</h2>
-        <div id="layer-toggles"></div>
-
-        <button id="rebuild-btn">REBUILD</button>
     </div>
 
     <div id="info">drag to rotate &middot; scroll to zoom &middot; right-drag to pan</div>
@@ -100,6 +110,10 @@
 
         // ----- DOM refs -----
         const $ = id => document.getElementById(id);
+        const drawerToggle   = $('drawer-toggle');
+        const drawerScrim    = $('drawer-scrim');
+        const drawer         = $('drawer');
+        const drawerHandle   = $('drawer-handle');
         const datasetSelect  = $('dataset-select');
         const nSlider        = $('n-slider');
         const nVal           = $('n-val');
@@ -116,6 +130,35 @@
         const colorSelect    = $('color-scheme');
         const layerToggles   = $('layer-toggles');
         const rebuildBtn     = $('rebuild-btn');
+
+        // ----- Drawer open/close -----
+        let drawerOpen = false;
+
+        function setDrawerOpen(open) {
+            drawerOpen = open;
+            drawer.classList.toggle('open', open);
+            drawerScrim.classList.toggle('visible', open);
+            drawerToggle.classList.toggle('open', open);
+            drawerToggle.innerHTML = open ? '&#10005;' : '&#9776;';
+        }
+
+        drawerToggle.addEventListener('click', () => setDrawerOpen(!drawerOpen));
+        drawerScrim.addEventListener('click', () => setDrawerOpen(false));
+
+        // Swipe-to-dismiss on mobile handle
+        let touchStartY = 0;
+        drawerHandle.addEventListener('touchstart', e => {
+            touchStartY = e.touches[0].clientY;
+        }, { passive: true });
+        drawerHandle.addEventListener('touchend', e => {
+            if (e.changedTouches[0].clientY - touchStartY > 40) {
+                setDrawerOpen(false);
+            }
+        }, { passive: true });
+
+        // Desktop: start open. Mobile: start closed.
+        const isDesktop = window.matchMedia('(min-width: 769px)').matches;
+        setDrawerOpen(isDesktop);
 
         // ----- Populate color scheme dropdown -----
         for (const name of AVAILABLE_COLOR_SCHEMES) {
@@ -156,11 +199,9 @@
                 colorScheme: colorSelect.value,
             });
 
-            // Update grid info
             gridInfo.textContent =
                 `${cols} \u00d7 ${rows}  (${data.length} values, ${cols * rows} cells)`;
 
-            // Rebuild layer toggles
             layerToggles.innerHTML = '';
             for (const { mod, swatchColor } of layers) {
                 const row = document.createElement('label');
@@ -185,7 +226,6 @@
 
         // ----- Wire up controls -----
 
-        // Dataset selector — toggle N vs. text controls
         datasetSelect.addEventListener('change', () => {
             const isText = datasetSelect.value === 'text';
             nRow.style.display = isText ? 'none' : '';
@@ -193,39 +233,31 @@
             rebuild();
         });
 
-        // N slider — show value on drag, rebuild on release
         nSlider.addEventListener('input', () => {
             nVal.textContent = nSlider.value;
         });
         nSlider.addEventListener('change', rebuild);
 
-        // Text input — rebuild on change
         textInput.addEventListener('change', rebuild);
 
-        // Max modulus — show value on drag, rebuild on release
         modSlider.addEventListener('input', () => {
             modVal.textContent = modSlider.value;
         });
         modSlider.addEventListener('change', rebuild);
 
-        // Spacing — live adjustment, no rebuild
         spacingSlider.addEventListener('input', () => {
             const s = +spacingSlider.value;
             spacingVal.textContent = s.toFixed(2);
             viz.setSpacing(s);
         });
 
-        // Opacity — live adjustment, no rebuild
         opacitySlider.addEventListener('input', () => {
             const o = +opacitySlider.value;
             opacityVal.textContent = o.toFixed(2);
             viz.setOpacity(o);
         });
 
-        // Color scheme — rebuild to re-color all layers
         colorSelect.addEventListener('change', rebuild);
-
-        // Rebuild button — full reset
         rebuildBtn.addEventListener('click', rebuild);
 
         // ----- Initial build -----
