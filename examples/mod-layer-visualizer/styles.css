@@ -1,0 +1,204 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    background: #0a0a0f;
+    color: #ccc;
+    font-family: 'Monaco', 'Menlo', 'Consolas', monospace;
+    overflow: hidden;
+}
+
+/* ------------------------------------------------------------------ */
+/* Three.js canvas                                                     */
+/* ------------------------------------------------------------------ */
+
+#canvas-container {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Control panel                                                       */
+/* ------------------------------------------------------------------ */
+
+#controls {
+    position: fixed;
+    top: 0;
+    right: 0;
+    width: 300px;
+    height: 100vh;
+    background: rgba(10, 10, 20, 0.92);
+    border-left: 1px solid #333;
+    padding: 20px 16px;
+    overflow-y: auto;
+    z-index: 100;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+}
+
+#controls h1 {
+    font-size: 13px;
+    color: #7af;
+    letter-spacing: 2px;
+    margin-bottom: 4px;
+}
+
+#controls .subtitle {
+    font-size: 10px;
+    color: #555;
+    margin-bottom: 16px;
+    line-height: 1.5;
+}
+
+#controls h2 {
+    font-size: 10px;
+    color: #666;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    margin: 18px 0 8px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid #222;
+}
+
+/* ------------------------------------------------------------------ */
+/* Form controls                                                       */
+/* ------------------------------------------------------------------ */
+
+.ctrl-row {
+    margin-bottom: 10px;
+}
+
+.ctrl-row label {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    font-size: 11px;
+    color: #999;
+    margin-bottom: 4px;
+}
+
+.ctrl-row .val {
+    color: #7af;
+    font-size: 11px;
+    font-weight: bold;
+}
+
+.ctrl-row input[type="range"] {
+    width: 100%;
+    accent-color: #7af;
+    height: 4px;
+}
+
+.ctrl-row select,
+.ctrl-row textarea {
+    width: 100%;
+    background: #151520;
+    color: #ccc;
+    border: 1px solid #333;
+    padding: 6px 8px;
+    font-family: inherit;
+    font-size: 11px;
+    border-radius: 3px;
+    outline: none;
+}
+
+.ctrl-row select:focus,
+.ctrl-row textarea:focus {
+    border-color: #7af;
+}
+
+.ctrl-row textarea {
+    height: 64px;
+    resize: vertical;
+    line-height: 1.4;
+}
+
+#grid-info {
+    font-size: 11px;
+    color: #7af;
+    padding: 6px 8px;
+    background: #111118;
+    border-radius: 3px;
+    border: 1px solid #222;
+}
+
+/* ------------------------------------------------------------------ */
+/* Layer toggles                                                       */
+/* ------------------------------------------------------------------ */
+
+#layer-toggles {
+    max-height: 240px;
+    overflow-y: auto;
+    padding-right: 4px;
+}
+
+.layer-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 3px 0;
+    font-size: 11px;
+    color: #aaa;
+    cursor: pointer;
+    user-select: none;
+}
+
+.layer-toggle:hover {
+    color: #fff;
+}
+
+.layer-toggle input[type="checkbox"] {
+    accent-color: #7af;
+    margin: 0;
+}
+
+.layer-swatch {
+    width: 14px;
+    height: 14px;
+    border-radius: 2px;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    flex-shrink: 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Rebuild button                                                      */
+/* ------------------------------------------------------------------ */
+
+#rebuild-btn {
+    width: 100%;
+    padding: 10px;
+    margin-top: 16px;
+    background: #7af;
+    color: #0a0a0f;
+    border: none;
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: bold;
+    letter-spacing: 1.5px;
+    cursor: pointer;
+    border-radius: 3px;
+    text-transform: uppercase;
+    transition: background 0.15s;
+}
+
+#rebuild-btn:hover {
+    background: #9cf;
+}
+
+/* ------------------------------------------------------------------ */
+/* Info bar                                                            */
+/* ------------------------------------------------------------------ */
+
+#info {
+    position: fixed;
+    bottom: 10px;
+    left: 12px;
+    font-size: 10px;
+    color: #444;
+    z-index: 100;
+    pointer-events: none;
+}
