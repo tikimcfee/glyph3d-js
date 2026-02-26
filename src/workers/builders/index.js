@@ -33,7 +33,7 @@ function countGlyphs(text) {
  * @returns {{positions: Float32Array, sizes: Float32Array, uvs: Float32Array, colors: Float32Array, count: number, bounds: Object|null}}
  */
 export function buildGlyphBuffers(input) {
-    const { text, position, metrics, uvMap, color, scale = 1.0 } = input;
+    const { text, position, metrics, uvMap, color, scale = 1.0, groupId = 0 } = input;
 
     if (!text || text.length === 0) {
         return {
@@ -41,6 +41,7 @@ export function buildGlyphBuffers(input) {
             sizes: new Float32Array(0),
             uvs: new Float32Array(0),
             colors: new Float32Array(0),
+            groupIds: new Float32Array(0),
             count: 0,
             bounds: null
         };
@@ -54,6 +55,7 @@ export function buildGlyphBuffers(input) {
     const sizes = new Float32Array(glyphCount * 2);
     const uvs = new Float32Array(glyphCount * 4);
     const colors = new Float32Array(glyphCount * 3);
+    const groupIds = new Float32Array(glyphCount);
 
     // Pre-compute scaled sizes
     const scaledWidth = metrics.charWidth * scale;
@@ -120,6 +122,9 @@ export function buildGlyphBuffers(input) {
         colors[idx * 3 + 1] = color.g;
         colors[idx * 3 + 2] = color.b;
 
+        // Group ID
+        groupIds[idx] = groupId;
+
         idx++;
         x += metrics.charWidth + metrics.letterSpacing;
     }
@@ -134,7 +139,7 @@ export function buildGlyphBuffers(input) {
         height: maxY - minY
     } : null;
 
-    return { positions, sizes, uvs, colors, count: idx, bounds };
+    return { positions, sizes, uvs, colors, groupIds, count: idx, bounds };
 }
 
 /**
@@ -178,6 +183,7 @@ export function buildBatchBuffers(items, shared) {
             sizes: new Float32Array(0),
             uvs: new Float32Array(0),
             colors: new Float32Array(0),
+            groupIds: new Float32Array(0),
             count: 0,
             bounds: null,
             itemMeta: items.map(() => ({ bufferStartIndex: 0, glyphCount: 0, bounds: null }))
@@ -189,6 +195,7 @@ export function buildBatchBuffers(items, shared) {
     const sizes = new Float32Array(totalGlyphs * 2);
     const uvs = new Float32Array(totalGlyphs * 4);
     const colors = new Float32Array(totalGlyphs * 3);
+    const groupIds = new Float32Array(totalGlyphs);
 
     // Per-item metadata for post-render operations
     const itemMeta = new Array(items.length);
@@ -206,6 +213,7 @@ export function buildBatchBuffers(items, shared) {
         const pos = item.position;
         const color = item.color || defaultColor;
         const scale = item.scale || 1.0;
+        const itemGroupId = item.groupId || 0;
 
         // Record where this item's glyphs start
         const itemStartOffset = bufferOffset;
@@ -287,6 +295,8 @@ export function buildBatchBuffers(items, shared) {
             colors[idx * 3 + 1] = color.g;
             colors[idx * 3 + 2] = color.b;
 
+            groupIds[idx] = itemGroupId;
+
             bufferOffset++;
             x += metrics.charWidth + metrics.letterSpacing;
             charsOnSegment++;
@@ -329,7 +339,7 @@ export function buildBatchBuffers(items, shared) {
         depth: maxZ - minZ
     } : null;
 
-    return { positions, sizes, uvs, colors, count: bufferOffset, bounds, itemMeta };
+    return { positions, sizes, uvs, colors, groupIds, count: bufferOffset, bounds, itemMeta };
 }
 
 export default buildGlyphBuffers;

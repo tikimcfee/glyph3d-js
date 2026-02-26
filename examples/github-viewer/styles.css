@@ -244,15 +244,16 @@ body {
     display: block;
 }
 
-/* ===== Panel: Files ===== */
+/* ===== Panel: Files (Hierarchical Tree) ===== */
 .tree-item {
-    padding: 10px 8px;
+    padding: 6px 8px;
     font-size: 12px;
     cursor: pointer;
-    border-bottom: 1px solid #222;
+    border-bottom: 1px solid rgba(34, 34, 34, 0.5);
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
+    transition: background 0.1s;
 }
 
 .tree-item:hover { background: #222; }
@@ -262,8 +263,60 @@ body {
     border-left: 3px solid #00ff88;
 }
 
-.tree-icon { width: 14px; opacity: 0.6; }
+/* Directory items */
+.tree-dir {
+    color: #ccc;
+    font-weight: 500;
+}
 
+.tree-dir:hover {
+    background: #1a2030;
+}
+
+.tree-dir.collapsed {
+    opacity: 0.8;
+}
+
+/* Chevron toggle */
+.tree-chevron {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    font-size: 9px;
+    color: #888;
+    flex-shrink: 0;
+    border-radius: 3px;
+    transition: color 0.15s, background 0.15s;
+}
+
+.tree-chevron:hover {
+    color: #00ff88;
+    background: rgba(0, 255, 136, 0.1);
+}
+
+/* File items */
+.tree-file {
+    color: #aaa;
+}
+
+.tree-file:hover {
+    color: #ddd;
+}
+
+/* Icons */
+.tree-icon {
+    width: 14px;
+    flex-shrink: 0;
+    opacity: 0.6;
+    font-size: 11px;
+}
+
+.tree-icon-dir { opacity: 0.8; }
+.tree-icon-file { opacity: 0.5; }
+
+/* Name */
 .tree-name {
     flex: 1;
     overflow: hidden;
@@ -271,7 +324,25 @@ body {
     white-space: nowrap;
 }
 
+/* File/child count badge */
+.tree-count {
+    color: #555;
+    font-size: 10px;
+    flex-shrink: 0;
+    min-width: 18px;
+    text-align: right;
+}
+
 .tree-size { color: #666; font-size: 10px; }
+
+/* Children container */
+.tree-children {
+    /* no extra styling needed - indentation is per-item via paddingLeft */
+}
+
+.tree-children.hidden {
+    display: none;
+}
 
 .tree-empty {
     color: #666;

@@ -47,14 +47,22 @@ class HierarchicalLayoutManager {
      */
     constructor(options = {}) {
         this.options = {
-            dirPadding: options.dirPadding || 50,
-            siblingSpacing: options.siblingSpacing || 30,
+            dirPadding: options.dirPadding || 20,
+            dirPaddingDecay: options.dirPaddingDecay ?? 0.7, // padding shrinks per depth
+            siblingSpacing: options.siblingSpacing || 10,
             depthSpacing: options.depthSpacing || 100,
             useZForDepth: options.useZForDepth || false,
-            directoriesInZ: options.directoriesInZ !== false,  // Default true
+            directoriesInZ: options.directoriesInZ || false,  // Default false: dirs flow horizontally
             directoryZSpacing: options.directoryZSpacing || 50,
             siblingDirection: options.siblingDirection || 'horizontal',
-            maxRowWidth: options.maxRowWidth || 1500
+            maxRowWidth: options.maxRowWidth || 8000,
+            // Aspect-ratio-aware layout: target width/height ratio for directories.
+            // 0 = disabled (use fixed maxRowWidth). >0 = adaptive.
+            // 3.0 means "try to make directories 3× wider than tall"
+            targetAspectRatio: options.targetAspectRatio ?? 3.0,
+            // Collapsed directory placeholder size
+            collapsedWidth: options.collapsedWidth || 80,
+            collapsedHeight: options.collapsedHeight || 15
         };
 
         // Tree structure
@@ -63,6 +71,9 @@ class HierarchicalLayoutManager {
         // Grid lookup
         this.gridToNode = new Map();  // grid -> TreeNode
         this.pathToNode = new Map();  // path -> TreeNode
+
+        // Collapse state — set of directory paths that are collapsed
+        this.collapsedPaths = new Set();
 
         // Origin offset
         this.origin = new THREE.Vector3(
@@ -87,8 +98,8 @@ class HierarchicalLayoutManager {
         // Phase 1: Build tree from paths
         this.root = this._buildTree(grids);
 
-        // Phase 2: Compute bounds bottom-up
-        this._computeBoundsBottomUp(this.root);
+        // Phase 2: Compute bounds bottom-up (depth 0 for root)
+        this._computeBoundsBottomUp(this.root, 0);
 
         // Phase 3: Position nodes top-down
         const rootRegion = {
@@ -196,13 +207,101 @@ class HierarchicalLayoutManager {
         );
     }
 
+    // ============ Collapse API ============
+
     /**
-     * Clear the layout
+     * Toggle collapse state for a directory
+     * @param {string} dirPath - Directory path
+     * @returns {boolean} New collapse state (true = collapsed)
+     */
+    toggleCollapse(dirPath) {
+        if (this.collapsedPaths.has(dirPath)) {
+            this.collapsedPaths.delete(dirPath);
+            return false;
+        } else {
+            this.collapsedPaths.add(dirPath);
+            return true;
+        }
+    }
+
+    /**
+     * Set collapse state for a directory
+     * @param {string} dirPath - Directory path
+     * @param {boolean} collapsed - Whether to collapse
+     */
+    setCollapsed(dirPath, collapsed) {
+        if (collapsed) {
+            this.collapsedPaths.add(dirPath);
+        } else {
+            this.collapsedPaths.delete(dirPath);
+        }
+    }
+
+    /**
+     * Check if a directory is collapsed
+     * @param {string} dirPath - Directory path
+     * @returns {boolean}
+     */
+    isCollapsed(dirPath) {
+        return this.collapsedPaths.has(dirPath);
+    }
+
+    /**
+     * Check if a node is hidden by a collapsed ancestor
+     * @param {TreeNode} node
+     * @returns {boolean}
+     */
+    isHiddenByCollapse(node) {
+        let current = node.parent;
+        while (current) {
+            if (current.path !== '' && this.collapsedPaths.has(current.path)) {
+                return true;
+            }
+            current = current.parent;
+        }
+        return false;
+    }
+
+    /**
+     * Re-layout existing tree with current collapse state.
+     * Skips tree building (Phase 1) - only recomputes bounds, positions, and applies.
+     * Call this after toggling collapse state for responsive re-layout.
+     */
+    relayout() {
+        if (!this.root) return;
+
+        // Phase 2: Recompute bounds (collapse-aware)
+        this._computeBoundsBottomUp(this.root, 0);
+
+        // Phase 3: Reposition
+        const rootRegion = {
+            x: this.origin.x,
+            y: this.origin.y,
+            z: this.origin.z,
+            width: this.root.bounds.width,
+            height: this.root.bounds.height
+        };
+        this._positionNodesTopDown(this.root, rootRegion, 0);
+
+        // Phase 4: Apply (with visibility)
+        this._applyPositionsToGrids(this.root);
+    }
+
+    /**
+     * Clear the layout (preserves collapse state)
      */
     clear() {
         this.root = null;
         this.gridToNode.clear();
         this.pathToNode.clear();
+    }
+
+    /**
+     * Clear the layout including collapse state
+     */
+    clearAll() {
+        this.clear();
+        this.collapsedPaths.clear();
     }
 
     // ============ Phase 1: Build Tree ============
@@ -298,17 +397,25 @@ class HierarchicalLayoutManager {
     // ============ Phase 2: Compute Bounds Bottom-Up ============
 
     /**
+     * Compute padding for a given depth, shrinking at deeper levels
+     * @private
+     */
+    _paddingForDepth(depth) {
+        return this.options.dirPadding * Math.pow(this.options.dirPaddingDecay, depth);
+    }
+
+    /**
      * Compute bounds for all nodes, bottom-up
      * @private
      * @param {TreeNode} node
+     * @param {number} depth - Current tree depth (for depth-aware padding)
      * @returns {{width: number, height: number, depth: number}}
      */
-    _computeBoundsBottomUp(node) {
+    _computeBoundsBottomUp(node, depth) {
         if (!node.isDirectory) {
             // Leaf node: get bounds from grid (includes Z-depth from long-line wrapping)
             if (node.grid) {
                 const gridBounds = node.grid.getBounds();
-                // Z depth: max.z - min.z (min.z is negative for Z-wrapped content)
                 const zDepth = Math.abs(gridBounds.max.z - gridBounds.min.z);
                 node.bounds = {
                     width: gridBounds.max.x - gridBounds.min.x,
@@ -319,60 +426,63 @@ class HierarchicalLayoutManager {
             return node.bounds;
         }
 
+        // If this directory is collapsed, return a small placeholder size
+        if (node.path !== '' && this.collapsedPaths.has(node.path)) {
+            const nameWidth = Math.max(
+                node.name.length * 0.5 + 4,
+                this.options.collapsedWidth
+            );
+            node.bounds = {
+                width: nameWidth,
+                height: this.options.collapsedHeight,
+                depth: 0
+            };
+            return node.bounds;
+        }
+
         // Directory: compute children first
         const childBounds = [];
         let maxDepth = 0;
 
         for (const child of node.children) {
-            const bounds = this._computeBoundsBottomUp(child);
+            const bounds = this._computeBoundsBottomUp(child, depth + 1);
             childBounds.push(bounds);
             maxDepth = Math.max(maxDepth, bounds.depth);
         }
 
-        // Sum children bounds based on layout direction
-        const padding = this.options.dirPadding;
+        // Depth-aware padding: shrinks at deeper levels to avoid compounding dead space
+        const padding = this._paddingForDepth(depth);
         const spacing = this.options.siblingSpacing;
 
         if (this.options.siblingDirection === 'horizontal') {
             if (this.options.directoriesInZ) {
-                // Directories in Z: Reduce VERTICAL noise by stacking dirs purely in Z
-                // Files are horizontal at front, directories share Y but stack in Z
+                // Legacy Z-stacking mode for directories
                 const fileChildren = node.children.filter(c => !c.isDirectory);
                 const dirChildren = node.children.filter(c => c.isDirectory);
-
                 const fileBounds = fileChildren.map(c => c.bounds);
                 const dirBounds = dirChildren.map(c => c.bounds);
 
-                // Files layout horizontally (front layer)
                 const fileLayout = this._computeWrappedLayout(fileBounds);
-
-                // Files: take MAX depth (they share Z layer, so max wins)
                 let fileMaxDepth = 0;
-                for (const bounds of fileBounds) {
-                    fileMaxDepth = Math.max(fileMaxDepth, bounds.depth);
+                for (const b of fileBounds) fileMaxDepth = Math.max(fileMaxDepth, b.depth);
+
+                let dirMaxWidth = 0, dirMaxHeight = 0, dirTotalDepth = 0;
+                for (const b of dirBounds) {
+                    dirMaxWidth = Math.max(dirMaxWidth, b.width);
+                    dirMaxHeight = Math.max(dirMaxHeight, b.height);
+                    dirTotalDepth += this.options.directoryZSpacing + b.depth;
                 }
 
-                // Directories: stack in Z, so SUM their depths + spacing
-                let dirMaxWidth = 0;
-                let dirMaxHeight = 0;
-                let dirTotalDepth = 0;
-
-                for (const bounds of dirBounds) {
-                    dirMaxWidth = Math.max(dirMaxWidth, bounds.width);
-                    dirMaxHeight = Math.max(dirMaxHeight, bounds.height);
-                    dirTotalDepth += this.options.directoryZSpacing + bounds.depth;
-                }
-
-                // Combined depth: files' max depth + directories' summed depth
-                // (no double-counting - files and dirs are separate)
                 node.bounds = {
                     width: Math.max(fileLayout.width, dirMaxWidth) + padding * 2,
                     height: fileLayout.height + dirMaxHeight + (dirChildren.length > 0 ? spacing : 0) + padding * 2,
                     depth: fileMaxDepth + dirTotalDepth
                 };
             } else {
-                // Original: horizontal layout with row wrapping
+                // Horizontal flow: ALL children (files + dirs) in adaptive wrapped layout
                 const layout = this._computeWrappedLayout(childBounds);
+                // Store the computed wrap width on the node for consistent positioning
+                node._layoutWrapWidth = layout._wrapWidth;
                 node.bounds = {
                     width: layout.width + padding * 2,
                     height: layout.height + padding * 2,
@@ -383,7 +493,6 @@ class HierarchicalLayoutManager {
             // Vertical layout (stack)
             let totalHeight = 0;
             let maxWidth = 0;
-
             for (const bounds of childBounds) {
                 totalHeight += bounds.height;
                 maxWidth = Math.max(maxWidth, bounds.width);
@@ -401,15 +510,66 @@ class HierarchicalLayoutManager {
     }
 
     /**
-     * Compute layout dimensions for horizontal wrapping
+     * Compute layout dimensions for horizontal wrapping.
+     *
+     * If `targetAspectRatio` is set, dynamically computes a wrap width
+     * that produces a roughly balanced rectangle instead of using a fixed limit.
+     * For a target ratio of 3.0, directories aim to be ~3× wider than tall.
+     *
      * @private
      * @param {Array<{width, height}>} childBounds
-     * @returns {{width: number, height: number, rows: Array}}
+     * @returns {{width: number, height: number, rows: Array, _wrapWidth: number}}
      */
     _computeWrappedLayout(childBounds) {
-        const maxRowWidth = this.options.maxRowWidth;
+        if (childBounds.length === 0) {
+            return { width: 0, height: 0, rows: [], _wrapWidth: 0 };
+        }
+
         const spacing = this.options.siblingSpacing;
 
+        // Determine wrap width
+        let maxRowWidth;
+
+        if (this.options.targetAspectRatio > 0) {
+            // Adaptive: compute wrap width targeting a width:height ratio.
+            // Estimate total area including spacing.
+            let totalArea = 0;
+            let maxChildWidth = 0;
+            for (const b of childBounds) {
+                totalArea += (b.width + spacing) * (b.height + spacing);
+                maxChildWidth = Math.max(maxChildWidth, b.width);
+            }
+
+            // For target aspect R: W = sqrt(A * R)
+            const targetWidth = Math.sqrt(totalArea * this.options.targetAspectRatio);
+
+            // Don't go narrower than the widest child, and cap at maxRowWidth
+            maxRowWidth = Math.max(targetWidth, maxChildWidth + spacing);
+            maxRowWidth = Math.min(maxRowWidth, this.options.maxRowWidth);
+        } else {
+            maxRowWidth = this.options.maxRowWidth;
+        }
+
+        // Wrap items into rows
+        const rows = this._wrapIntoRows(childBounds, maxRowWidth, spacing);
+
+        // Total dimensions
+        let totalWidth = 0;
+        let totalHeight = 0;
+        for (const row of rows) {
+            totalWidth = Math.max(totalWidth, row.width);
+            totalHeight += row.height;
+        }
+        totalHeight += spacing * Math.max(0, rows.length - 1);
+
+        return { width: totalWidth, height: totalHeight, rows, _wrapWidth: maxRowWidth };
+    }
+
+    /**
+     * Wrap child bounds into rows given a max row width.
+     * @private
+     */
+    _wrapIntoRows(childBounds, maxRowWidth, spacing) {
         const rows = [];
         let currentRow = [];
         let currentRowWidth = 0;
@@ -420,7 +580,6 @@ class HierarchicalLayoutManager {
                 (currentRowWidth + spacing + bounds.width > maxRowWidth);
 
             if (wouldExceed) {
-                // Start new row
                 rows.push({ items: currentRow, width: currentRowWidth, height: currentRowHeight });
                 currentRow = [];
                 currentRowWidth = 0;
@@ -432,22 +591,11 @@ class HierarchicalLayoutManager {
             currentRowHeight = Math.max(currentRowHeight, bounds.height);
         }
 
-        // Don't forget last row
         if (currentRow.length > 0) {
             rows.push({ items: currentRow, width: currentRowWidth, height: currentRowHeight });
         }
 
-        // Total dimensions
-        let totalWidth = 0;
-        let totalHeight = 0;
-
-        for (const row of rows) {
-            totalWidth = Math.max(totalWidth, row.width);
-            totalHeight += row.height;
-        }
-        totalHeight += spacing * Math.max(0, rows.length - 1);
-
-        return { width: totalWidth, height: totalHeight, rows };
+        return rows;
     }
 
     // ============ Phase 3: Position Nodes Top-Down ============
@@ -467,7 +615,13 @@ class HierarchicalLayoutManager {
             return;
         }
 
-        const padding = this.options.dirPadding;
+        // If collapsed, don't position children (they'll be hidden)
+        if (node.path !== '' && this.collapsedPaths.has(node.path)) {
+            return;
+        }
+
+        // Depth-aware padding (matches bounds computation)
+        const padding = this._paddingForDepth(depth);
         const spacing = this.options.siblingSpacing;
 
         // Inner region for children (after padding)
@@ -479,83 +633,51 @@ class HierarchicalLayoutManager {
 
         // Position children based on layout direction
         if (this.options.siblingDirection === 'horizontal') {
-            this._positionChildrenHorizontal(node.children, innerX, innerY, innerZ, depth);
+            // Use the wrap width computed during bounds phase if available
+            const wrapWidth = node._layoutWrapWidth || this.options.maxRowWidth;
+            this._positionChildrenHorizontal(node.children, innerX, innerY, innerZ, depth, wrapWidth);
         } else {
             this._positionChildrenVertical(node.children, innerX, innerY, innerZ, depth);
         }
     }
 
     /**
-     * Position children horizontally with row wrapping
-     * If directoriesInZ is enabled, directories stack in Z while files stay horizontal
+     * Position children horizontally with row wrapping.
+     * Uses the wrap width from bounds computation for consistency.
      * @private
      */
-    _positionChildrenHorizontal(children, startX, startY, z, depth) {
-        const maxRowWidth = this.options.maxRowWidth;
+    _positionChildrenHorizontal(children, startX, startY, z, depth, maxRowWidth) {
         const spacing = this.options.siblingSpacing;
-        const directoriesInZ = this.options.directoriesInZ;
-        const directoryZSpacing = this.options.directoryZSpacing;
 
-        if (directoriesInZ) {
-            // Separate directories and files
+        if (this.options.directoriesInZ) {
+            // Legacy Z-stacking mode
             const directories = children.filter(c => c.isDirectory);
             const files = children.filter(c => !c.isDirectory);
+            const directoryZSpacing = this.options.directoryZSpacing;
 
-            // Position files horizontally first (at current Z, front layer)
-            let x = startX;
-            let y = startY;
-            let rowHeight = 0;
-            let filesMaxY = startY;  // Track lowest point of files
-
+            let x = startX, y = startY, rowHeight = 0, filesMaxY = startY;
             for (const file of files) {
                 const bounds = file.bounds;
-
-                // Check if we need to wrap
                 if (x > startX && (x - startX + bounds.width > maxRowWidth)) {
                     y -= rowHeight + spacing;
                     x = startX;
                     rowHeight = 0;
                 }
-
-                const childRegion = {
-                    x: x,
-                    y: y,
-                    z: z,
-                    width: bounds.width,
-                    height: bounds.height
-                };
-
-                this._positionNodesTopDown(file, childRegion, depth + 1);
-
+                this._positionNodesTopDown(file, { x, y, z, width: bounds.width, height: bounds.height }, depth + 1);
                 x += bounds.width + spacing;
                 rowHeight = Math.max(rowHeight, bounds.height);
                 filesMaxY = Math.min(filesMaxY, y - bounds.height);
             }
 
-            // Position directories stacked PURELY in Z (reduces vertical noise)
-            // All sibling directories share the same Y, but each is at different Z
-            const fileBottomY = files.length > 0 ? (filesMaxY - spacing) : startY;
-            const dirY = fileBottomY;  // All directories start at same Y (below files)
-            let dirZ = z - directoryZSpacing;  // Start behind files
-
+            const dirY = files.length > 0 ? (filesMaxY - spacing) : startY;
+            let dirZ = z - directoryZSpacing;
             for (const dir of directories) {
                 const bounds = dir.bounds;
-
-                const childRegion = {
-                    x: startX,
-                    y: dirY,  // Same Y for all sibling directories
-                    z: dirZ,
-                    width: bounds.width,
-                    height: bounds.height
-                };
-
-                this._positionNodesTopDown(dir, childRegion, depth + 1);
-
-                // Only advance Z (not Y) - directories stack in depth only
+                this._positionNodesTopDown(dir, { x: startX, y: dirY, z: dirZ, width: bounds.width, height: bounds.height }, depth + 1);
                 dirZ -= directoryZSpacing + bounds.depth;
             }
         } else {
-            // Original behavior: all children horizontal
+            // Flow layout: all children (files + directories) wrap horizontally
             let x = startX;
             let y = startY;
             let rowHeight = 0;
@@ -563,22 +685,13 @@ class HierarchicalLayoutManager {
             for (const child of children) {
                 const bounds = child.bounds;
 
-                // Check if we need to wrap
                 if (x > startX && (x - startX + bounds.width > maxRowWidth)) {
                     y -= rowHeight + spacing;
                     x = startX;
                     rowHeight = 0;
                 }
 
-                const childRegion = {
-                    x: x,
-                    y: y,
-                    z: z,
-                    width: bounds.width,
-                    height: bounds.height
-                };
-
-                this._positionNodesTopDown(child, childRegion, depth + 1);
+                this._positionNodesTopDown(child, { x, y, z, width: bounds.width, height: bounds.height }, depth + 1);
 
                 x += bounds.width + spacing;
                 rowHeight = Math.max(rowHeight, bounds.height);
@@ -618,15 +731,20 @@ class HierarchicalLayoutManager {
      * @private
      * @param {TreeNode} node
      */
-    _applyPositionsToGrids(node) {
+    _applyPositionsToGrids(node, hidden = false) {
         if (!node.isDirectory && node.grid) {
-            // Apply position to grid
+            // Apply position and visibility to grid
             node.grid.position.copy(node.position);
+            node.grid.visible = !hidden;
         }
+
+        // Check if this directory is collapsed (its children should be hidden)
+        const childrenHidden = hidden ||
+            (node.isDirectory && node.path !== '' && this.collapsedPaths.has(node.path));
 
         // Recurse for directories
         for (const child of node.children) {
-            this._applyPositionsToGrids(child);
+            this._applyPositionsToGrids(child, childrenHidden);
         }
     }
 
@@ -650,16 +768,21 @@ class HierarchicalLayoutManager {
      * @private
      */
     _flattenTree(node, depth, result) {
+        const isCollapsed = node.isDirectory && node.path !== '' && this.collapsedPaths.has(node.path);
+
         result.push({
             path: node.path,
             name: node.name,
             depth,
             isDirectory: node.isDirectory,
+            isCollapsed,
+            childCount: node.children.length,
             grid: node.grid,
             bounds: node.bounds,
             position: node.position.clone()
         });
 
+        // If collapsed, still include children but mark them
         for (const child of node.children) {
             this._flattenTree(child, depth + 1, result);
         }
