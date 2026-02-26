@@ -20,6 +20,11 @@ import { GitHubRepositorySource } from './GitHubRepositorySource.js';
 import { DiffController } from './DiffController.js';
 import { BackdropManager } from './BackdropManager.js';
 import { NameplateManager } from './NameplateManager.js';
+import { SceneContext } from './SceneContext.js';
+import { CameraController } from './CameraController.js';
+import { FileStateManager } from './FileStateManager.js';
+import { CodeColorManager } from './CodeColorManager.js';
+import { HeatmapProvider } from './providers/HeatmapProvider.js';
 
 import { createHeader, createLoadingOverlay, createFPSBadge, createToast } from './components/AppShell.js';
 import {
@@ -98,13 +103,12 @@ export class GitHubRepoViewer {
         this.branches = [];
         this.defaultBranch = null;
 
-        // Camera controls
-        this.keys = {};
-        this.isPointerLocked = false;
-        this.cameraSpeed = 100;
-        this.lookSensitivity = 0.002;
-        this.pitch = 0;
-        this.yaw = 0;
+        // Extracted subsystems
+        this.sceneContext = null;
+        this.cameraController = null;
+        this.fileStateManager = null;
+        this.codeColorManager = null;
+        this.heatmapProvider = null;
 
         // Animation
         this.lastTime = performance.now();
@@ -150,7 +154,7 @@ export class GitHubRepoViewer {
         });
         this.diffPanel = initDiffPanel(diffPanelEl, {
             onLoadPR: (input) => this.loadDiff(input),
-            onFileClick: (idx) => this.focusOnDiffFile(idx),
+            onFileClick: (idx) => this.cameraController.focusOnDiffFile(idx),
         });
 
         // Toast (must come after drawer for z-order)
@@ -198,8 +202,40 @@ export class GitHubRepoViewer {
             repoAdapter: this.repoAdapter,
         });
 
-        // Touch controls
-        this.touchController = new TouchController(this.canvas, this, THREE);
+        // Create shared context for subsystems
+        this.sceneContext = new SceneContext({
+            THREE,
+            scene: this.scene,
+            camera: this.camera,
+            renderer: this.renderer,
+            canvas: this.canvas,
+            atlas: this.atlas,
+            getGrids: () => this.grids,
+        });
+        this.sceneContext.layoutManager = this.layoutManager;
+
+        // Camera controller (replaces inline camera state + listeners)
+        this.cameraController = new CameraController(this.sceneContext);
+        this.cameraController.setupEventListeners();
+
+        // Touch controls (pass cameraController — it owns yaw, pitch, cameraSpeed, camera)
+        this.touchController = new TouchController(this.canvas, this.cameraController, THREE);
+
+        // File state + visualization pipeline
+        this.fileStateManager = new FileStateManager();
+        this.codeColorManager = new CodeColorManager(this.sceneContext, this.fileStateManager);
+        this.codeColorManager.registerLayer('heatmap', {
+            priority: 10,
+            colorFn: HeatmapProvider.createColorFn(),
+        });
+
+        // Listen for camera focus events to sync tree UI
+        window.addEventListener('camera-focus-changed', (e) => {
+            const { index } = e.detail;
+            document.querySelectorAll('.tree-item').forEach((item, i) => {
+                item.classList.toggle('selected', i === index);
+            });
+        });
 
         this.addGridHelper();
         this.setupEventListeners();
@@ -231,25 +267,10 @@ export class GitHubRepoViewer {
             this.branchStatusEl.textContent = '';
         });
 
-        // Keyboard
-        document.addEventListener('keydown', (e) => { this.keys[e.code] = true; });
-        document.addEventListener('keyup', (e) => { this.keys[e.code] = false; });
-
-        // Pointer lock for mouse look
-        this.canvas.addEventListener('click', () => { this.canvas.requestPointerLock(); });
-        document.addEventListener('pointerlockchange', () => {
-            this.isPointerLocked = document.pointerLockElement === this.canvas;
+        // Window resize (renderer-side only; camera-side handled by CameraController)
+        window.addEventListener('resize', () => {
+            this.renderer.setSize(window.innerWidth, window.innerHeight);
         });
-        document.addEventListener('mousemove', (e) => {
-            if (this.isPointerLocked) {
-                this.yaw -= e.movementX * this.lookSensitivity;
-                this.pitch -= e.movementY * this.lookSensitivity;
-                this.pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, this.pitch));
-            }
-        });
-
-        // Window resize
-        window.addEventListener('resize', () => this.onResize());
 
         // Settings sliders
         const gridsScaleSlider = document.getElementById('grids-scale');
@@ -272,23 +293,7 @@ export class GitHubRepoViewer {
             }
         });
 
-        const camSpeedSlider = document.getElementById('cam-speed');
-        const camSpeedValue = document.getElementById('cam-speed-value');
-        camSpeedSlider.addEventListener('input', (e) => {
-            const speed = parseFloat(e.target.value);
-            camSpeedValue.textContent = speed.toFixed(1);
-            this.cameraSpeed = speed * 20;
-        });
-
-        document.getElementById('reset-camera').addEventListener('click', () => {
-            this.camera.position.set(0, 0, 500);
-            this.pitch = 0;
-            this.yaw = 0;
-        });
-
-        document.getElementById('fit-all').addEventListener('click', () => {
-            this.focusOnGrids();
-        });
+        // cam-speed, reset-camera, fit-all listeners handled by CameraController
     }
 
     addGridHelper() {
@@ -453,6 +458,9 @@ export class GitHubRepoViewer {
 
             this.hierarchicalManager.layoutHierarchy(createdGrids);
 
+            // Update shared context with new manager
+            this.sceneContext.hierarchicalManager = this.hierarchicalManager;
+
             for (const grid of createdGrids) {
                 this.scene.add(grid);
                 this.grids.push(grid);
@@ -470,6 +478,13 @@ export class GitHubRepoViewer {
             this._createOverlays();
             const overlayTime = performance.now() - overlayStart;
             console.log(`[2c] Visual overlays: ${overlayTime.toFixed(0)}ms`);
+
+            // Phase 2d: Compute heatmap metrics → triggers CodeColorManager coloring
+            const heatStart = performance.now();
+            this.heatmapProvider = new HeatmapProvider(this.sceneContext, this.fileStateManager);
+            this.heatmapProvider.computeMetrics();
+            const heatTime = performance.now() - heatStart;
+            console.log(`[2d] Heatmap metrics: ${heatTime.toFixed(0)}ms`);
 
             // Phase 3: UI updates - hierarchical file tree
             const uiStart = performance.now();
@@ -527,6 +542,11 @@ export class GitHubRepoViewer {
         if (this.hierarchicalManager) this.hierarchicalManager.clearAll();
         if (this.diffController) this.diffController.clearGrids();
 
+        // Clean up visualization pipeline (clear data, keep managers alive)
+        if (this.fileStateManager) this.fileStateManager.clear();
+        if (this.codeColorManager) this.codeColorManager.resetAllColors();
+        this.heatmapProvider = null;
+
         // Clean up overlay managers
         if (this.backdropManager) {
             this.backdropManager.destroy();
@@ -577,7 +597,7 @@ export class GitHubRepoViewer {
             this.loading.hide();
 
             // Focus camera on diff grids
-            this.focusOnDiffGrids();
+            this.cameraController.focusOnDiffGrids(this.diffController);
 
             this.toastUI.show(
                 `PR #${prNumber}: ${result.fileData.length} files, +${result.prData.additions}/-${result.prData.deletions}`,
@@ -593,32 +613,7 @@ export class GitHubRepoViewer {
         }
     }
 
-    focusOnDiffFile(fileIndex) {
-        // Each file has 2 grids (left + right), so multiply by 2
-        const gridIndex = fileIndex * 2;
-        if (gridIndex >= 0 && gridIndex < this.grids.length) {
-            this.focusOnGrid(gridIndex);
-        }
-    }
-
-    focusOnDiffGrids() {
-        const THREE = this.THREE;
-        if (this.grids.length === 0) return;
-
-        const bounds = this.diffController.getTotalBounds();
-        if (!bounds) return;
-
-        const center = new THREE.Vector3();
-        bounds.getCenter(center);
-        const size = new THREE.Vector3();
-        bounds.getSize(size);
-
-        const maxDim = Math.max(size.x, size.y);
-        const distance = Math.min(maxDim * 0.5, 800);
-        this.camera.position.set(center.x, center.y, center.z + distance + 100);
-        this.pitch = 0;
-        this.yaw = 0;
-    }
+    // focusOnDiffFile, focusOnDiffGrids → CameraController
 
     /**
      * Build hierarchical file tree in the drawer panel.
@@ -678,7 +673,7 @@ export class GitHubRepoViewer {
 
             // Click directory name to focus camera
             dirItem.addEventListener('click', () => {
-                this.focusOnDirectory(node.path);
+                this.cameraController.focusOnDirectory(node.path);
             });
 
             container.appendChild(dirItem);
@@ -709,7 +704,7 @@ export class GitHubRepoViewer {
             `;
 
             if (gridIndex >= 0) {
-                fileItem.addEventListener('click', () => this.focusOnGrid(gridIndex));
+                fileItem.addEventListener('click', () => this.cameraController.focusOnGrid(gridIndex));
             }
 
             container.appendChild(fileItem);
@@ -750,27 +745,7 @@ export class GitHubRepoViewer {
         this.updateFileTree();
     }
 
-    /**
-     * Focus camera on a directory's bounds in 3D space
-     */
-    focusOnDirectory(dirPath) {
-        const THREE = this.THREE;
-        if (!this.hierarchicalManager) return;
-
-        const bounds = this.hierarchicalManager.getDirectoryBounds(dirPath);
-        if (!bounds) return;
-
-        const center = new THREE.Vector3();
-        bounds.getCenter(center);
-        const size = new THREE.Vector3();
-        bounds.getSize(size);
-
-        // Straight-on view, zoom to fit the directory's extent
-        const distance = this._zDistanceForFit(size.x, size.y, 0.85);
-        this.camera.position.set(center.x, center.y, bounds.max.z + distance);
-        this.pitch = 0;
-        this.yaw = 0;
-    }
+    // focusOnDirectory → CameraController
 
     /**
      * Create visual overlay managers (backdrops + nameplates)
@@ -837,125 +812,7 @@ export class GitHubRepoViewer {
         return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
     }
 
-    /**
-     * Calculate the Z distance needed so that a region of `width` x `height`
-     * fills approximately `fillFraction` of the viewport.
-     * Uses the camera's vertical FOV and aspect ratio.
-     * @private
-     */
-    _zDistanceForFit(width, height, fillFraction = 0.85) {
-        const fovRad = this.camera.fov * Math.PI / 180;
-        const aspect = this.camera.aspect;
-
-        // Distance needed to fit the height
-        const dH = (height / fillFraction) / (2 * Math.tan(fovRad / 2));
-        // Distance needed to fit the width
-        const dW = (width / fillFraction) / (2 * aspect * Math.tan(fovRad / 2));
-
-        return Math.max(dH, dW);
-    }
-
-    /**
-     * Focus camera on a file for reading.
-     *
-     * Sets camera to a consistent reading distance where ~35 lines of text
-     * fill the viewport — like opening a file in an editor. The distance
-     * is derived from actual line spacing, not the file's total bounds,
-     * so text is always the same readable size regardless of file length.
-     * Short files show entirely; tall files show the top and you fly through.
-     */
-    focusOnGrid(index) {
-        const THREE = this.THREE;
-        if (index < 0 || index >= this.grids.length) return;
-
-        const grid = this.grids[index];
-        const bounds = grid.getBounds();
-        const size = new THREE.Vector3();
-        bounds.getSize(size);
-
-        // Straight-on: reset rotation so camera faces -Z (perpendicular to content)
-        this.pitch = 0;
-        this.yaw = 0;
-
-        // --- Reading distance from line metrics ---
-        // Derive line spacing from the grid's actual content and bounds.
-        // This avoids dependence on padding/background/transforms.
-        const lineCount = grid.lines ? grid.lines.length : 1;
-        const lineSpacing = size.y / Math.max(lineCount, 1);
-
-        // Show this many lines — a comfortable screenful, like an editor.
-        const READABLE_LINES = 35;
-        const visibleLines = Math.min(lineCount, READABLE_LINES);
-        const targetViewHeight = visibleLines * lineSpacing;
-
-        const fovRad = this.camera.fov * Math.PI / 180;
-        const halfTan = Math.tan(fovRad / 2);
-
-        // Primary: distance so targetViewHeight fills 85% of viewport height
-        const distForHeight = (targetViewHeight / 0.85) / (2 * halfTan);
-
-        // Secondary: back up if file is wider than viewport at reading distance
-        const distForWidth = (size.x / 0.85) / (2 * this.camera.aspect * halfTan);
-
-        const distance = Math.max(distForHeight, distForWidth, 5);
-
-        // Position at the top of the file, centered horizontally.
-        const centerX = (bounds.min.x + bounds.max.x) / 2;
-        const topY = bounds.max.y;
-
-        // Offset camera Y so file's top sits near the top of the viewport.
-        const visibleHalfH = distance * halfTan;
-        const topMargin = 0.08;
-        const cameraY = topY - visibleHalfH * (1 - 2 * topMargin);
-
-        this.camera.position.set(centerX, cameraY, bounds.max.z + distance);
-
-        document.querySelectorAll('.tree-item').forEach((item, i) => {
-            item.classList.toggle('selected', i === index);
-        });
-    }
-
-    focusOnGrids() {
-        const THREE = this.THREE;
-        if (this.grids.length === 0) return;
-
-        const bounds = this.hierarchicalManager
-            ? this.hierarchicalManager.getTotalBounds()
-            : this.layoutManager.getTotalBounds();
-
-        const center = new THREE.Vector3();
-        bounds.getCenter(center);
-        const size = new THREE.Vector3();
-        bounds.getSize(size);
-
-        const distance = this._zDistanceForFit(size.x, size.y, 0.85);
-        this.camera.position.set(center.x, center.y, bounds.max.z + distance);
-        this.pitch = 0;
-        this.yaw = 0;
-    }
-
-    updateCamera(deltaTime) {
-        const THREE = this.THREE;
-        const moveDir = new THREE.Vector3();
-
-        if (this.keys['KeyW']) moveDir.z -= 1;
-        if (this.keys['KeyS']) moveDir.z += 1;
-        if (this.keys['KeyA']) moveDir.x -= 1;
-        if (this.keys['KeyD']) moveDir.x += 1;
-        if (this.keys['Space']) moveDir.y += 1;
-        if (this.keys['ShiftLeft'] || this.keys['ShiftRight']) moveDir.y -= 1;
-
-        if (moveDir.length() > 0) {
-            moveDir.normalize();
-            moveDir.applyQuaternion(this.camera.quaternion);
-            moveDir.multiplyScalar(this.cameraSpeed * deltaTime);
-            this.camera.position.add(moveDir);
-        }
-
-        const quaternion = new THREE.Quaternion();
-        quaternion.setFromEuler(new THREE.Euler(this.pitch, this.yaw, 0, 'YXZ'));
-        this.camera.quaternion.copy(quaternion);
-    }
+    // _zDistanceForFit, focusOnGrid, focusOnGrids, updateCamera → CameraController
 
     updateStats(deltaTime) {
         this.frameCount++;
@@ -978,13 +835,7 @@ export class GitHubRepoViewer {
         this.cameraPosEl.textContent = `${pos.x.toFixed(0)},${pos.y.toFixed(0)},${pos.z.toFixed(0)}`;
     }
 
-    onResize() {
-        const width = window.innerWidth;
-        const height = window.innerHeight;
-        this.camera.aspect = width / height;
-        this.camera.updateProjectionMatrix();
-        this.renderer.setSize(width, height);
-    }
+    // onResize → split: camera-side in CameraController, renderer-side inlined in setupEventListeners
 
     animate() {
         requestAnimationFrame(() => this.animate());
@@ -992,7 +843,7 @@ export class GitHubRepoViewer {
         const deltaTime = (now - this.lastTime) / 1000;
         this.lastTime = now;
 
-        this.updateCamera(deltaTime);
+        this.cameraController.update(deltaTime);
         this.updateStats(deltaTime);
 
         // Update billboard-style nameplates to face camera

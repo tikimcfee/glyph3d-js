@@ -359,6 +359,22 @@ class GlyphCollection {
     }
 
     /**
+     * Set the color blend mode for a group. O(1) GPU update.
+     * Controls how group color interacts with instance colors:
+     *   0.0 = multiply (default), 1.0 = replace
+     * @param {number} groupId
+     * @param {number} blend - 0.0 to 1.0
+     */
+    setGroupColorBlend(groupId, blend) {
+        if (this._renderer) {
+            this._renderer.setGroupColorBlend(groupId, blend);
+        } else {
+            if (!this._pendingGroupColorBlends) this._pendingGroupColorBlends = new Map();
+            this._pendingGroupColorBlends.set(groupId, blend);
+        }
+    }
+
+    /**
      * Get the current color multiplier for a group.
      * @param {number} groupId
      * @returns {{r: number, g: number, b: number, a: number}}
@@ -1002,6 +1018,12 @@ class GlyphCollection {
                 this._renderer.setGroupColor(gid, color);
             }
             this._pendingGroupColors = null;
+        }
+        if (this._pendingGroupColorBlends) {
+            for (const [gid, blend] of this._pendingGroupColorBlends) {
+                this._renderer.setGroupColorBlend(gid, blend);
+            }
+            this._pendingGroupColorBlends = null;
         }
     }
 
