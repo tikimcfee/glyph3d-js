@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hand Tracking — glyph3d</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+
+    <div id="hud">
+        <div id="status">Initializing...</div>
+        <div id="gesture-info">&mdash;</div>
+        <div id="controls">
+            <button id="btn-mock" class="active">Mock</button>
+            <button id="btn-webcam">Webcam</button>
+            <button id="btn-ws">WebSocket</button>
+        </div>
+        <div id="help">
+            WASD: move &nbsp; Q/E: up/down &nbsp; Click+drag: look (webcam/ws mode)
+            <br>Mock mode: mouse = hand, Space = pinch
+        </div>
+    </div>
+
+    <div id="tuning-panel">
+        <div class="panel-header">Tuning</div>
+        <label>
+            <span>Spread <span class="val" id="val-spread">0.90</span></span>
+            <input type="range" id="slider-spread" min="0.1" max="2.0" step="0.05" value="0.9">
+        </label>
+        <label>
+            <span>Depth <span class="val" id="val-depth">-0.80</span></span>
+            <input type="range" id="slider-depth" min="-3.0" max="1.0" step="0.05" value="-0.8">
+        </label>
+        <label>
+            <span>Scale <span class="val" id="val-scale">1.55</span></span>
+            <input type="range" id="slider-scale" min="0.1" max="3.0" step="0.05" value="1.55">
+        </label>
+        <label>
+            <span>Ref Span <span class="val" id="val-refspan">0.20</span></span>
+            <input type="range" id="slider-refspan" min="0.01" max="0.5" step="0.01" value="0.2">
+        </label>
+        <label>
+            <span>Depth Scale <span class="val" id="val-depthscale">7.00</span></span>
+            <input type="range" id="slider-depthscale" min="-15.0" max="15.0" step="0.1" value="7.0">
+        </label>
+        <label>
+            <span>Joint Size <span class="val" id="val-jointsize">0.01</span></span>
+            <input type="range" id="slider-jointsize" min="0.005" max="0.1" step="0.005" value="0.01">
+        </label>
+    </div>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import { HandTrackingApp } from './HandTrackingApp.js';
+
+        const canvas = document.getElementById('canvas');
+        const app = new HandTrackingApp(canvas);
+
+        // Allow source selection via URL param: ?source=mock|webcam|websocket
+        const params = new URLSearchParams(window.location.search);
+        const initialSource = params.get('source') || 'webcam';
+
+        await app.init(initialSource);
+
+        // Source switching buttons
+        const buttons = {
+            'btn-mock': 'mock',
+            'btn-webcam': 'webcam',
+            'btn-ws': 'websocket',
+        };
+
+        function setActiveButton(id) {
+            document.querySelectorAll('#controls button').forEach(b => b.classList.remove('active'));
+            document.getElementById(id).classList.add('active');
+        }
+
+        for (const [btnId, source] of Object.entries(buttons)) {
+            document.getElementById(btnId).addEventListener('click', async () => {
+                setActiveButton(btnId);
+                await app.init(source);
+            });
+        }
+
+        // Set initial active button
+        const initialBtnId = Object.entries(buttons).find(([, s]) => s === initialSource)?.[0] || 'btn-mock';
+        setActiveButton(initialBtnId);
+
+        // Tuning sliders — wire to live parameters
+        function bindSlider(id, valId, setter) {
+            const slider = document.getElementById(id);
+            const valEl = document.getElementById(valId);
+            slider.addEventListener('input', () => {
+                const v = parseFloat(slider.value);
+                valEl.textContent = v.toFixed(2);
+                setter(v);
+            });
+        }
+
+        bindSlider('slider-spread', 'val-spread', v => app.handRenderer.spread = v);
+        bindSlider('slider-depth', 'val-depth', v => app.handRenderer.depth = v);
+        bindSlider('slider-scale', 'val-scale', v => app.handRenderer.scale = v);
+        bindSlider('slider-refspan', 'val-refspan', v => {
+            if (app.source?.referenceSpan !== undefined) app.source.referenceSpan = v;
+        });
+        bindSlider('slider-depthscale', 'val-depthscale', v => {
+            if (app.source?.depthScale !== undefined) app.source.depthScale = v;
+        });
+        bindSlider('slider-jointsize', 'val-jointsize', v => {
+            app.handRenderer.hands.forEach(hand => {
+                hand.joints.material.size = v;
+            });
+        });
+    </script>
+</body>
+</html>
