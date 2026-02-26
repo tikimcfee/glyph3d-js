@@ -2,12 +2,9 @@
  * Webcam Hand Source
  *
  * Uses MediaPipe Hands (loaded from CDN) to detect hand landmarks
- * from a webcam feed. Produces HandFrame objects compatible with
- * HandRenderer and GestureDetector.
- *
- * Quality: decent for basic tracking (~30fps, 21 landmarks).
- * Depth is estimated (not measured like LiDAR), but sufficient
- * for relative positioning and gesture detection.
+ * from a webcam feed. Detection runs synchronously on the main thread
+ * with a configurable throttle. The render loop stays at 60fps by
+ * returning cached results between detections.
  */
 
 import { Joint, JOINT_COUNT } from './HandData.js';
@@ -22,6 +19,10 @@ class WebcamHandSource {
     /**
      * @param {Object} options
      * @param {number} options.numHands - Max hands to detect (default 1)
+     * @param {number} options.detectInterval - Ms between detections (default 33)
+     * @param {boolean} options.firstPerson - First-person corrections (default true)
+     * @param {number} options.referenceSpan - Palm width reference for depth estimation
+     * @param {number} options.depthScale - Depth estimation multiplier
      * @param {Function} options.onFrame - Called with array of HandFrames each detection
      * @param {Function} options.onReady - Called when initialization is complete
      * @param {Function} options.onError - Called on initialization error
@@ -46,11 +47,9 @@ class WebcamHandSource {
 
     /**
      * Initialize MediaPipe and webcam.
-     * Must be called before detect().
      */
     async init() {
         try {
-            // Dynamic import — no build step needed
             const vision = await import(VISION_BUNDLE_URL);
             const { HandLandmarker, FilesetResolver } = vision;
 
@@ -59,7 +58,8 @@ class WebcamHandSource {
             this.handLandmarker = await HandLandmarker.createFromOptions(wasmFileset, {
                 baseOptions: {
                     modelAssetPath: HAND_MODEL_URL,
-                    // CPU delegate avoids WebGL context competition with Three.js
+                    // CPU delegate — GPU delegate deadlocks with Three.js
+                    // when both share the main thread's WebGL context.
                     delegate: 'CPU',
                 },
                 numHands: this.numHands,
@@ -69,7 +69,6 @@ class WebcamHandSource {
                 minTrackingConfidence: 0.5,
             });
 
-            // Set up hidden video element for webcam feed
             this.videoElement = document.createElement('video');
             this.videoElement.setAttribute('playsinline', '');
             this.videoElement.setAttribute('autoplay', '');
@@ -91,19 +90,16 @@ class WebcamHandSource {
     }
 
     /**
-     * Process current video frame and return hand data.
-     * Throttled to ~15fps to avoid blocking the render loop.
-     * Returns cached results between detections.
+     * Detect hands in current video frame.
+     * Throttled — returns cached results between detections.
      * @returns {Array<HandFrame>|null}
      */
     detect() {
         if (!this.handLandmarker || !this.videoElement || this.videoElement.readyState < 2) {
-            return null;
+            return this.cachedFrames;
         }
 
         const now = performance.now();
-
-        // Throttle: only run detection every detectInterval ms
         if (now - this.lastDetectTime < this.detectInterval) {
             return this.cachedFrames;
         }
@@ -121,8 +117,6 @@ class WebcamHandSource {
                 const handedness = results.handednesses?.[i]?.[0]?.categoryName?.toLowerCase() || 'right';
 
                 if (!this.firstPerson) {
-                    // Mirror mode: flip X for natural mirror feel,
-                    // pass Z with slight damping. No depth estimation.
                     return {
                         handedness,
                         landmarks: landmarks.map(lm => ({
@@ -134,7 +128,6 @@ class WebcamHandSource {
                     };
                 }
 
-                // First-person mode: apply corrections
                 const indexMcp = landmarks[Joint.INDEX_MCP];
                 const pinkyMcp = landmarks[Joint.PINKY_MCP];
                 const palmWidth = Math.sqrt(
@@ -146,9 +139,9 @@ class WebcamHandSource {
                 return {
                     handedness,
                     landmarks: landmarks.map(lm => ({
-                        x: 1 - lm.x,       // flip for selfie mirror
+                        x: 1 - lm.x,
                         y: lm.y,
-                        z: depthFromPalm - lm.z,  // depth estimate + flip palm orientation
+                        z: depthFromPalm - lm.z,
                     })),
                     timestamp: now,
                 };
@@ -157,14 +150,13 @@ class WebcamHandSource {
             if (this.onFrame) this.onFrame(this.cachedFrames);
         } catch (err) {
             console.warn('[HandWebcam] Detection error:', err);
-            return this.cachedFrames;
         }
 
         return this.cachedFrames;
     }
 
     /**
-     * Cleanup webcam stream and MediaPipe resources
+     * Cleanup
      */
     dispose() {
         if (this.videoElement) {

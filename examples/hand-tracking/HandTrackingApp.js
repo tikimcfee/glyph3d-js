@@ -16,6 +16,7 @@ import GestureDetector from '../../src/hand/GestureDetector.js';
 import MockHandSource from '../../src/hand/MockHandSource.js';
 import WebcamHandSource from '../../src/hand/WebcamHandSource.js';
 import WebSocketHandSource from '../../src/hand/WebSocketHandSource.js';
+import ViewportRenderer from '../../src/hand/ViewportRenderer.js';
 import CameraController from '../../src/camera/CameraController.js';
 import InputManager from '../../src/camera/InputManager.js';
 
@@ -70,6 +71,15 @@ class HandTrackingApp {
             scale:      config.scale      ?? 1.40,
         });
         this.handRenderer.attachToCamera(this.camera);
+
+        // Viewport frustum — shows tracking volume from iPhone source.
+        // Shares spread/depth/scale so the frustum aligns with the hand.
+        this.viewportRenderer = new ViewportRenderer({
+            spread: config.spread ?? 0.45,
+            depth:  config.depth  ?? -1.85,
+            scale:  config.scale  ?? 1.40,
+        });
+        this.viewportRenderer.attachToCamera(this.camera);
 
         // Gesture detection
         this.gestureDetector = new GestureDetector({
@@ -192,6 +202,7 @@ class HandTrackingApp {
         }
         const frame = frames ? (frames[0] || null) : this._lastFrame;
         this.handRenderer.updateFromFrame(frame);
+        this.viewportRenderer.updateFromScene(frame?.scene || null);
         const gesture = this.gestureDetector.update(frame);
 
         // Visual feedback: change hand color on pinch
@@ -303,6 +314,7 @@ class HandTrackingApp {
         this.source?.dispose?.();
         this._removeCameraPreview();
         this.handRenderer.dispose();
+        this.viewportRenderer.dispose();
         this.inputManager.dispose();
         this.renderer.dispose();
     }

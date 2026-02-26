@@ -60,11 +60,15 @@ class HandRenderer {
         this.jointColor = o.jointColor;
         this.jointSize  = o.jointSize;
         this.boneRadius = o.boneRadius;
-        this.spread     = o.spread;
-        this.depth      = o.depth;
-        this.scale      = o.scale;
+
+        // Placement params — applied to the group transform, NOT per-landmark.
+        // This preserves the hand's raw proportions in all axes.
+        this._spread = o.spread;
+        this._depth  = o.depth;
+        this._scale  = o.scale;
 
         this.group = new THREE.Group();
+        this._applyGroupTransform();
         this.hands = new Map();
 
         // Add a light rig as part of the hand group so it moves with the camera.
@@ -117,7 +121,7 @@ class HandRenderer {
             // winning depth test over bones/joints at shared vertices
             polygonOffset: true,
             polygonOffsetFactor: -1,
-            polygonOffsetUnit: -1,
+            polygonOffsetUnits: -1,
         });
 
         const palmPositions = new Float32Array(PALM_JOINTS.length * 3);
@@ -163,6 +167,30 @@ class HandRenderer {
             palmMaterial,
         });
     }
+
+    /**
+     * Apply spread/depth/scale to the group transform.
+     * This positions and scales the hand as a whole without
+     * distorting the raw landmark proportions.
+     * @private
+     */
+    _applyGroupTransform() {
+        this.group.position.set(0, 0, this._depth);
+        const s = this._spread * this._scale;
+        this.group.scale.set(s, s, s);
+    }
+
+    /** @type {number} */
+    get spread() { return this._spread; }
+    set spread(v) { this._spread = v; this._applyGroupTransform(); }
+
+    /** @type {number} */
+    get depth() { return this._depth; }
+    set depth(v) { this._depth = v; this._applyGroupTransform(); }
+
+    /** @type {number} */
+    get scale() { return this._scale; }
+    set scale(v) { this._scale = v; this._applyGroupTransform(); }
 
     /**
      * Attach as a child of the camera
@@ -269,17 +297,18 @@ class HandRenderer {
     }
 
     /**
-     * Map landmarks to camera-local 3D space.
+     * Map landmarks to local hand space.
+     * Centers x/y around origin and flips y for Three.js convention.
+     * No spread/depth/scale — those are on the group transform,
+     * preserving the hand's raw proportions uniformly.
      * @param {Array<{x,y,z}>} landmarks
      * @returns {Array<{x,y,z}>}
      */
     _mapLandmarks(landmarks) {
-        const { spread, depth, scale } = this;
-
         return landmarks.map(lm => ({
-            x: (lm.x - 0.5) * spread * scale,
-            y: (0.5 - lm.y) * spread * scale,
-            z: depth - (lm.z || 0) * scale,
+            x: lm.x - 0.5,
+            y: 0.5 - lm.y,
+            z: -(lm.z || 0),
         }));
     }
 

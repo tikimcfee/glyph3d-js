@@ -85,12 +85,39 @@ export const Finger = {
 };
 
 /**
+ * @typedef {Object} Viewport
+ * @property {number} fovHorizontal - Horizontal field of view in radians
+ * @property {number} fovVertical - Vertical field of view in radians
+ * @property {number} aspectRatio - Width / height
+ * @property {number} physicalWidth - Meters visible at 1m depth
+ * @property {number} physicalHeight - Meters visible at 1m depth
+ * @property {[number, number]} depthRange - [minZ, maxZ] depth bounds in meters
+ *
+ * NOTE on depthRange:
+ * This should represent the camera's stable tracking volume, NOT the current
+ * hand position. If computed from live hand landmark Z values, it will
+ * breathe with the hand (shrink/grow as the hand moves), causing the
+ * viewport frustum to wobble.
+ *
+ * Preferred approach on the iOS side:
+ * - Use a slow-expanding high-water-mark: track the min/max Z ever observed,
+ *   only expand the range, never shrink it. This converges to the camera's
+ *   effective tracking range over a few seconds of use.
+ * - Or use a static/calibrated range based on ARKit's effective hand
+ *   tracking distance (typically ~0.2m to ~0.8m for iPhone).
+ *
+ * The JS ViewportRenderer applies a high-water-mark as a stopgap, but
+ * cleaner data from the source is preferred.
+ */
+
+/**
  * @typedef {Object} SceneContext
  * @property {{fx: number, fy: number, cx: number, cy: number}} intrinsics - Camera intrinsics
  * @property {[number, number]} imageResolution - [width, height] in pixels
  * @property {number[][]} cameraTransform - 4x4 column-major matrix (4 arrays of 4 floats)
  * @property {string} trackingState - 'normal', 'limited', 'notAvailable'
  * @property {number} lightIntensity - Ambient light estimate in lumens
+ * @property {Viewport} viewport - Camera frustum and observed depth bounds
  */
 
 /**

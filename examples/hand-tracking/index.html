@@ -73,9 +73,9 @@
 
         // Slider definitions: [configKey, label, setter]
         const sliders = [
-            ['spread',     'Spread',      v => app.handRenderer.spread = v],
-            ['depth',      'Depth',       v => app.handRenderer.depth = v],
-            ['scale',      'Scale',       v => app.handRenderer.scale = v],
+            ['spread',     'Spread',      v => { app.handRenderer.spread = v; app.viewportRenderer.spread = v; }],
+            ['depth',      'Depth',       v => { app.handRenderer.depth = v; app.viewportRenderer.depth = v; }],
+            ['scale',      'Scale',       v => { app.handRenderer.scale = v; app.viewportRenderer.scale = v; }],
             ['refSpan',    'Ref Span',    v => { if (app.source?.referenceSpan !== undefined) app.source.referenceSpan = v; }],
             ['depthScale', 'Depth Scale', v => { if (app.source?.depthScale !== undefined) app.source.depthScale = v; }],
             ['boneRadius', 'Bone Radius', v => app.handRenderer.boneRadius = v],
