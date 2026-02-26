@@ -267,7 +267,9 @@ class GlyphRendererV15 {
 
                 // Pass through interpolated UVs
                 vUV = mix(instanceUV.xy, instanceUV.zw, uv);
-                vColor = instanceColor * gColor.rgb;
+                // gScale.w = color blend factor: 0.0 = multiply (default), 1.0 = replace
+                float colorBlend = gScale.w;
+                vColor = mix(instanceColor * gColor.rgb, gColor.rgb, colorBlend);
                 vGroupAlpha = gColor.a;
             }
         `;
@@ -672,6 +674,23 @@ class GlyphRendererV15 {
         this._groupData[base + 1] = color.g;
         this._groupData[base + 2] = color.b;
         this._groupData[base + 3] = color.a !== undefined ? color.a : 1.0;
+        this._groupTexture.needsUpdate = true;
+    }
+
+    /**
+     * Set the color blend mode for a group. O(1) GPU update.
+     * Controls how group color interacts with instance colors in the shader:
+     *   0.0 = multiply (default) — group color multiplies instance color
+     *   1.0 = replace — group color fully replaces instance color
+     *   0.0..1.0 = mix between multiplied and replaced result
+     * Stored in gScale.w (column 3, w component) of the group texture.
+     * @param {number} groupId
+     * @param {number} blend - 0.0 (multiply) to 1.0 (replace)
+     */
+    setGroupColorBlend(groupId, blend) {
+        if (groupId < 0 || groupId >= this._maxGroups) return;
+        const base = (groupId * 4 + 3) * 4; // column 3 (scale)
+        this._groupData[base + 3] = blend;   // w component
         this._groupTexture.needsUpdate = true;
     }
 
