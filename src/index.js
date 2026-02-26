@@ -53,3 +53,18 @@ export { default as InputManager } from './camera/InputManager.js';
 
 // Utility
 export { default as FPSCounter } from './utils/FPSCounter.js';
+
+// Hand tracking
+export {
+    Joint,
+    JOINT_COUNT,
+    SKELETON_CONNECTIONS,
+    Finger,
+    createEmptyFrame,
+    landmarkDistance,
+    HandRenderer,
+    GestureDetector,
+    WebcamHandSource,
+    WebSocketHandSource,
+    MockHandSource,
+} from './hand/index.js';

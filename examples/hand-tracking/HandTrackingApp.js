@@ -25,6 +25,9 @@ class HandTrackingApp {
         this.config = config;
         this.source = null;
         this.sourceType = null;
+        this._animating = false;
+        this._lastFrame = null;
+        this._cameraPreview = null;
 
         // Three.js core
         this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
@@ -244,7 +247,7 @@ class HandTrackingApp {
 
     /** @private */
     _onPinchMove(pos, startPos) {
-        // Future: implement drag behavior
+        // TODO: implement drag behavior for moving objects
     }
 
     /** @private */

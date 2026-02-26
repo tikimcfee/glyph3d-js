@@ -9,6 +9,7 @@
 
 import * as THREE from 'three';
 import { Joint, SKELETON_CONNECTIONS, JOINT_COUNT } from './HandData.js';
+import { HAND_RENDERER_DEFAULTS as DEFAULTS } from './defaults.js';
 
 // Shared geometries — created once, reused across all hands
 const BONE_GEOMETRY = new THREE.CylinderGeometry(1, 1, 1, 6, 1);
@@ -54,13 +55,14 @@ class HandRenderer {
      * @param {number} options.scale - Overall scale factor
      */
     constructor(options = {}) {
-        this.lineColor = options.lineColor || 0x00ff88;
-        this.jointColor = options.jointColor || 0x00ffcc;
-        this.jointSize = options.jointSize || 0.006;
-        this.boneRadius = options.boneRadius || 0.003;
-        this.spread = options.spread || 0.4;
-        this.depth = options.depth || -0.8;
-        this.scale = options.scale || 0.5;
+        const o = { ...DEFAULTS, ...options };
+        this.lineColor  = o.lineColor;
+        this.jointColor = o.jointColor;
+        this.jointSize  = o.jointSize;
+        this.boneRadius = o.boneRadius;
+        this.spread     = o.spread;
+        this.depth      = o.depth;
+        this.scale      = o.scale;
 
         this.group = new THREE.Group();
         this.hands = new Map();

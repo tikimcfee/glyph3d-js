@@ -31,6 +31,8 @@
  * }
  */
 
+import { WEBSOCKET_SOURCE_DEFAULTS as DEFAULTS } from './defaults.js';
+
 class WebSocketHandSource {
     /**
      * @param {Object} options
@@ -43,8 +45,8 @@ class WebSocketHandSource {
      * @param {Function} options.onError - Called on WebSocket error
      */
     constructor(options = {}) {
-        this.url = options.url || 'ws://localhost:8765';
-        this.reconnectInterval = options.reconnectInterval || 3000;
+        this.url = options.url || DEFAULTS.url;
+        this.reconnectInterval = options.reconnectInterval || DEFAULTS.reconnectInterval;
 
         this.ws = null;
         this.connected = false;

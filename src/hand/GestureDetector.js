@@ -7,6 +7,7 @@
  */
 
 import { Joint, landmarkDistance } from './HandData.js';
+import { GESTURE_DEFAULTS } from './defaults.js';
 
 class GestureDetector {
     /**
@@ -19,8 +20,8 @@ class GestureDetector {
      * @param {Function} options.onGestureUpdate - Called every frame with full gesture state
      */
     constructor(options = {}) {
-        this.pinchThreshold = options.pinchThreshold || 0.06;
-        this.pinchReleaseThreshold = options.pinchReleaseThreshold || 0.08;
+        this.pinchThreshold = options.pinchThreshold || GESTURE_DEFAULTS.pinchThreshold;
+        this.pinchReleaseThreshold = options.pinchReleaseThreshold || GESTURE_DEFAULTS.pinchReleaseThreshold;
 
         // Current gesture state
         this.state = {

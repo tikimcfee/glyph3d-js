@@ -11,10 +11,7 @@
  */
 
 import { Joint, JOINT_COUNT } from './HandData.js';
-
-// Default reference hand span (wrist-to-middle-fingertip) at a comfortable distance.
-const DEFAULT_REFERENCE_SPAN = 0.2;
-const DEFAULT_DEPTH_SCALE = 7.0;
+import { WEBCAM_SOURCE_DEFAULTS as DEFAULTS } from './defaults.js';
 
 const MEDIAPIPE_CDN = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18';
 const VISION_BUNDLE_URL = `${MEDIAPIPE_CDN}/vision_bundle.mjs`;
@@ -33,13 +30,15 @@ class WebcamHandSource {
         this.videoElement = null;
         this.handLandmarker = null;
         this.lastDetectTime = 0;
-        this.detectInterval = options.detectInterval || 66; // ~15fps detection
-        this.cachedFrames = null; // reuse between detections
+        this.cachedFrames = null;
 
-        this.numHands = options.numHands || 1;
-        this.referenceSpan = options.referenceSpan || DEFAULT_REFERENCE_SPAN;
-        this.depthScale = options.depthScale || DEFAULT_DEPTH_SCALE;
-        this.firstPerson = options.firstPerson !== undefined ? options.firstPerson : true;
+        const o = { ...DEFAULTS, ...options };
+        this.detectInterval = o.detectInterval;
+        this.numHands       = o.numHands;
+        this.referenceSpan  = o.referenceSpan;
+        this.depthScale     = o.depthScale;
+        this.firstPerson    = o.firstPerson;
+
         this.onFrame = options.onFrame || null;
         this.onReady = options.onReady || null;
         this.onError = options.onError || null;
@@ -85,17 +84,12 @@ class WebcamHandSource {
 
             if (this.onReady) this.onReady();
         } catch (err) {
-            console.error('WebcamHandSource init failed:', err);
+            console.error('[HandWebcam] Init failed:', err);
             if (this.onError) this.onError(err);
             throw err;
         }
     }
 
-    /**
-     * Process current video frame and return hand data.
-     * Call this in your render loop.
-     * @returns {Array<HandFrame>|null}
-     */
     /**
      * Process current video frame and return hand data.
      * Throttled to ~15fps to avoid blocking the render loop.
@@ -162,7 +156,7 @@ class WebcamHandSource {
 
             if (this.onFrame) this.onFrame(this.cachedFrames);
         } catch (err) {
-            console.warn('MediaPipe detection error:', err);
+            console.warn('[HandWebcam] Detection error:', err);
             return this.cachedFrames;
         }
 

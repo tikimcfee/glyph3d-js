@@ -9,7 +9,8 @@
     ".": "./src/index.js",
     "./collections": "./src/collections/index.js",
     "./workers": "./src/workers/WorkerBridge.js",
-    "./utils": "./src/utils/index.js"
+    "./utils": "./src/utils/index.js",
+    "./hand": "./src/hand/index.js"
   },
   "files": [
     "src",
