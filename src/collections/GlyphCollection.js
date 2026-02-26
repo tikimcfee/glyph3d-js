@@ -222,6 +222,185 @@ class GlyphCollection {
         this._dirty = true;
     }
 
+    /**
+     * Bulk update positions for multiple texts. Committed entries go
+     * directly to the renderer in a single pass; pending entries are
+     * patched in-place. Only one GPU upload is triggered.
+     * @param {Array<{id: number, position: {x: number, y: number, z: number}}>} updates
+     */
+    updatePositions(updates) {
+        const rendererUpdates = [];
+
+        for (let i = 0; i < updates.length; i++) {
+            const { id, position } = updates[i];
+
+            const pending = this._pendingAdds.find(p => p.id === id);
+            if (pending) {
+                pending.position = { ...position };
+            } else if (this._idMap.has(id)) {
+                rendererUpdates.push({ id: this._idMap.get(id), position });
+            }
+        }
+
+        if (rendererUpdates.length > 0 && this._renderer) {
+            this._renderer.updatePositions(rendererUpdates);
+        }
+
+        this._boundsDirty = true;
+    }
+
+    /**
+     * Bulk update colors for multiple texts. Committed entries go
+     * directly to the renderer in a single pass; pending entries are
+     * patched in-place. Only one GPU upload is triggered.
+     * @param {Array<{id: number, color: {r: number, g: number, b: number}}>} updates
+     */
+    updateColors(updates) {
+        const rendererUpdates = [];
+
+        for (let i = 0; i < updates.length; i++) {
+            const { id, color } = updates[i];
+
+            const pending = this._pendingAdds.find(p => p.id === id);
+            if (pending) {
+                pending.options.color = { ...color };
+            } else if (this._idMap.has(id)) {
+                rendererUpdates.push({ id: this._idMap.get(id), color });
+            }
+        }
+
+        if (rendererUpdates.length > 0 && this._renderer) {
+            this._renderer.updateColors(rendererUpdates);
+        }
+    }
+
+    /**
+     * Bulk update positions and/or colors in a single pass.
+     * Most efficient for layout animations that change both attributes.
+     * @param {Array<{id: number, position?: {x: number, y: number, z: number}, color?: {r: number, g: number, b: number}}>} updates
+     */
+    updateTransforms(updates) {
+        const rendererUpdates = [];
+
+        for (let i = 0; i < updates.length; i++) {
+            const { id, position, color } = updates[i];
+
+            const pending = this._pendingAdds.find(p => p.id === id);
+            if (pending) {
+                if (position) pending.position = { ...position };
+                if (color) pending.options.color = { ...color };
+            } else if (this._idMap.has(id)) {
+                const entry = { id: this._idMap.get(id) };
+                if (position) entry.position = position;
+                if (color) entry.color = color;
+                rendererUpdates.push(entry);
+            }
+        }
+
+        if (rendererUpdates.length > 0 && this._renderer) {
+            this._renderer.updateTransforms(rendererUpdates);
+        }
+
+        this._boundsDirty = true;
+    }
+
+    // ============ Group Transform API ============
+
+    /**
+     * Create a new group for GPU-side transforms.
+     * Returns a groupId that can be passed via addText options.
+     * @returns {number} The new groupId
+     */
+    createGroup() {
+        if (this._renderer) {
+            return this._renderer.createGroup();
+        }
+        // Queue for deferred creation
+        if (!this._pendingGroupCount) this._pendingGroupCount = 1;
+        return this._pendingGroupCount++;
+    }
+
+    /**
+     * Set the world-space offset for a group. O(1) GPU update.
+     * @param {number} groupId
+     * @param {{x: number, y: number, z: number}} offset
+     */
+    setGroupOffset(groupId, offset) {
+        if (this._renderer) {
+            this._renderer.setGroupOffset(groupId, offset);
+        } else {
+            if (!this._pendingGroupOffsets) this._pendingGroupOffsets = new Map();
+            this._pendingGroupOffsets.set(groupId, { ...offset });
+        }
+    }
+
+    /**
+     * Get the current offset for a group.
+     * @param {number} groupId
+     * @returns {{x: number, y: number, z: number}}
+     */
+    getGroupOffset(groupId) {
+        if (!this._renderer) return { x: 0, y: 0, z: 0 };
+        return this._renderer.getGroupOffset(groupId);
+    }
+
+    /**
+     * Set the color multiplier for a group. O(1) GPU update.
+     * @param {number} groupId
+     * @param {{r: number, g: number, b: number, a?: number}} color
+     */
+    setGroupColor(groupId, color) {
+        if (this._renderer) {
+            this._renderer.setGroupColor(groupId, color);
+        } else {
+            if (!this._pendingGroupColors) this._pendingGroupColors = new Map();
+            this._pendingGroupColors.set(groupId, { ...color });
+        }
+    }
+
+    /**
+     * Set the color blend mode for a group. O(1) GPU update.
+     * Controls how group color interacts with instance colors:
+     *   0.0 = multiply (default), 1.0 = replace
+     * @param {number} groupId
+     * @param {number} blend - 0.0 to 1.0
+     */
+    setGroupColorBlend(groupId, blend) {
+        if (this._renderer) {
+            this._renderer.setGroupColorBlend(groupId, blend);
+        } else {
+            if (!this._pendingGroupColorBlends) this._pendingGroupColorBlends = new Map();
+            this._pendingGroupColorBlends.set(groupId, blend);
+        }
+    }
+
+    /**
+     * Get the current color multiplier for a group.
+     * @param {number} groupId
+     * @returns {{r: number, g: number, b: number, a: number}}
+     */
+    getGroupColor(groupId) {
+        if (!this._renderer) return { r: 1, g: 1, b: 1, a: 1 };
+        return this._renderer.getGroupColor(groupId);
+    }
+
+    /**
+     * Set group visibility. O(1) GPU update.
+     * @param {number} groupId
+     * @param {boolean} visible
+     */
+    setGroupVisibility(groupId, visible) {
+        if (this._renderer) {
+            this._renderer.setGroupVisibility(groupId, visible);
+        } else {
+            // Store as color alpha for deferred application
+            if (!this._pendingGroupColors) this._pendingGroupColors = new Map();
+            const existing = this._pendingGroupColors.get(groupId) || { r: 1, g: 1, b: 1, a: 1 };
+            existing.a = visible ? 1.0 : 0.0;
+            this._pendingGroupColors.set(groupId, existing);
+        }
+    }
+
     // ============ GPU Sync ============
 
     /**
@@ -380,6 +559,7 @@ class GlyphCollection {
                 const p = items[i];
                 if (!p.color) p.color = p.options?.color || defaultColor;
                 if (!p.scale) p.scale = p.options?.scale || 1.0;
+                if (p.groupId === undefined) p.groupId = p.options?.groupId || 0;
             }
 
             // Get metrics from atlas (no renderer needed!)
@@ -799,23 +979,52 @@ class GlyphCollection {
      */
     _createRenderer() {
         const glyphCount = this._countPendingGlyphs();
-        this._createRendererWithSize(Math.ceil(glyphCount * this.config.bufferHeadroom));
+        this._createRendererWithSize(Math.ceil(glyphCount * this.config.bufferHeadroom), false);
     }
 
     /**
-     * Create renderer with exact buffer size (for worker path)
-     * Skips pre-allocation since worker provides buffers via applyPrebuiltBuffers()
+     * Create renderer with exact buffer size
+     * @param {number} size - Buffer size for instances
+     * @param {boolean} [skipPrealloc=true] - Skip pre-allocating instance attributes.
+     *   true for worker path (buffers provided via applyPrebuiltBuffers),
+     *   false for sync path (renderBatch needs pre-allocated attributes).
      * @private
      */
-    _createRendererWithSize(size) {
+    _createRendererWithSize(size, skipPrealloc = true) {
         const bufferSize = Math.max(size, 100);
         this._bufferSize = bufferSize;
         this._renderer = new GlyphRendererV15(this.group, this.atlas, {
             maxInstances: bufferSize,
             defaultColor: this.config.defaultColor,
             worldScale: this.config.worldScale,
-            skipPrealloc: true  // Worker provides buffers - no need to pre-allocate
+            skipPrealloc
         });
+
+        // Apply any deferred group operations
+        if (this._pendingGroupCount) {
+            while (this._renderer._groupCount < this._pendingGroupCount) {
+                this._renderer.createGroup();
+            }
+            this._pendingGroupCount = 0;
+        }
+        if (this._pendingGroupOffsets) {
+            for (const [gid, offset] of this._pendingGroupOffsets) {
+                this._renderer.setGroupOffset(gid, offset);
+            }
+            this._pendingGroupOffsets = null;
+        }
+        if (this._pendingGroupColors) {
+            for (const [gid, color] of this._pendingGroupColors) {
+                this._renderer.setGroupColor(gid, color);
+            }
+            this._pendingGroupColors = null;
+        }
+        if (this._pendingGroupColorBlends) {
+            for (const [gid, blend] of this._pendingGroupColorBlends) {
+                this._renderer.setGroupColorBlend(gid, blend);
+            }
+            this._pendingGroupColorBlends = null;
+        }
     }
 
     /**

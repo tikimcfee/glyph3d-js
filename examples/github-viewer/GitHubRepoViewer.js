@@ -18,6 +18,13 @@ import {
 import { RepositoryAdapter } from './RepositoryAdapter.js';
 import { GitHubRepositorySource } from './GitHubRepositorySource.js';
 import { DiffController } from './DiffController.js';
+import { BackdropManager } from './BackdropManager.js';
+import { NameplateManager } from './NameplateManager.js';
+import { SceneContext } from './SceneContext.js';
+import { CameraController } from './CameraController.js';
+import { FileStateManager } from './FileStateManager.js';
+import { CodeColorManager } from './CodeColorManager.js';
+import { HeatmapProvider } from './providers/HeatmapProvider.js';
 
 import { createHeader, createLoadingOverlay, createFPSBadge, createToast } from './components/AppShell.js';
 import {
@@ -84,6 +91,10 @@ export class GitHubRepoViewer {
         this.diffController = null;
         this.diffPanel = null;
 
+        // Visual overlay managers
+        this.backdropManager = null;
+        this.nameplateManager = null;
+
         // State
         this.grids = [];
         this.repoPath = null;
@@ -92,13 +103,12 @@ export class GitHubRepoViewer {
         this.branches = [];
         this.defaultBranch = null;
 
-        // Camera controls
-        this.keys = {};
-        this.isPointerLocked = false;
-        this.cameraSpeed = 100;
-        this.lookSensitivity = 0.002;
-        this.pitch = 0;
-        this.yaw = 0;
+        // Extracted subsystems
+        this.sceneContext = null;
+        this.cameraController = null;
+        this.fileStateManager = null;
+        this.codeColorManager = null;
+        this.heatmapProvider = null;
 
         // Animation
         this.lastTime = performance.now();
@@ -144,7 +154,7 @@ export class GitHubRepoViewer {
         });
         this.diffPanel = initDiffPanel(diffPanelEl, {
             onLoadPR: (input) => this.loadDiff(input),
-            onFileClick: (idx) => this.focusOnDiffFile(idx),
+            onFileClick: (idx) => this.cameraController.focusOnDiffFile(idx),
         });
 
         // Toast (must come after drawer for z-order)
@@ -192,8 +202,40 @@ export class GitHubRepoViewer {
             repoAdapter: this.repoAdapter,
         });
 
-        // Touch controls
-        this.touchController = new TouchController(this.canvas, this, THREE);
+        // Create shared context for subsystems
+        this.sceneContext = new SceneContext({
+            THREE,
+            scene: this.scene,
+            camera: this.camera,
+            renderer: this.renderer,
+            canvas: this.canvas,
+            atlas: this.atlas,
+            getGrids: () => this.grids,
+        });
+        this.sceneContext.layoutManager = this.layoutManager;
+
+        // Camera controller (replaces inline camera state + listeners)
+        this.cameraController = new CameraController(this.sceneContext);
+        this.cameraController.setupEventListeners();
+
+        // Touch controls (pass cameraController — it owns yaw, pitch, cameraSpeed, camera)
+        this.touchController = new TouchController(this.canvas, this.cameraController, THREE);
+
+        // File state + visualization pipeline
+        this.fileStateManager = new FileStateManager();
+        this.codeColorManager = new CodeColorManager(this.sceneContext, this.fileStateManager);
+        this.codeColorManager.registerLayer('heatmap', {
+            priority: 10,
+            colorFn: HeatmapProvider.createColorFn(),
+        });
+
+        // Listen for camera focus events to sync tree UI
+        window.addEventListener('camera-focus-changed', (e) => {
+            const { index } = e.detail;
+            document.querySelectorAll('.tree-item').forEach((item, i) => {
+                item.classList.toggle('selected', i === index);
+            });
+        });
 
         this.addGridHelper();
         this.setupEventListeners();
@@ -225,25 +267,10 @@ export class GitHubRepoViewer {
             this.branchStatusEl.textContent = '';
         });
 
-        // Keyboard
-        document.addEventListener('keydown', (e) => { this.keys[e.code] = true; });
-        document.addEventListener('keyup', (e) => { this.keys[e.code] = false; });
-
-        // Pointer lock for mouse look
-        this.canvas.addEventListener('click', () => { this.canvas.requestPointerLock(); });
-        document.addEventListener('pointerlockchange', () => {
-            this.isPointerLocked = document.pointerLockElement === this.canvas;
+        // Window resize (renderer-side only; camera-side handled by CameraController)
+        window.addEventListener('resize', () => {
+            this.renderer.setSize(window.innerWidth, window.innerHeight);
         });
-        document.addEventListener('mousemove', (e) => {
-            if (this.isPointerLocked) {
-                this.yaw -= e.movementX * this.lookSensitivity;
-                this.pitch -= e.movementY * this.lookSensitivity;
-                this.pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, this.pitch));
-            }
-        });
-
-        // Window resize
-        window.addEventListener('resize', () => this.onResize());
 
         // Settings sliders
         const gridsScaleSlider = document.getElementById('grids-scale');
@@ -266,23 +293,7 @@ export class GitHubRepoViewer {
             }
         });
 
-        const camSpeedSlider = document.getElementById('cam-speed');
-        const camSpeedValue = document.getElementById('cam-speed-value');
-        camSpeedSlider.addEventListener('input', (e) => {
-            const speed = parseFloat(e.target.value);
-            camSpeedValue.textContent = speed.toFixed(1);
-            this.cameraSpeed = speed * 20;
-        });
-
-        document.getElementById('reset-camera').addEventListener('click', () => {
-            this.camera.position.set(0, 0, 500);
-            this.pitch = 0;
-            this.yaw = 0;
-        });
-
-        document.getElementById('fit-all').addEventListener('click', () => {
-            this.focusOnGrids();
-        });
+        // cam-speed, reset-camera, fit-all listeners handled by CameraController
     }
 
     addGridHelper() {
@@ -296,10 +307,11 @@ export class GitHubRepoViewer {
     relayoutGrids() {
         if (this.grids.length === 0) return;
         if (this.hierarchicalManager) {
-            this.hierarchicalManager.options.siblingSpacing = this.layoutManager.spacing.horizontal;
-            this.hierarchicalManager.options.dirPadding = this.layoutManager.spacing.horizontal * 0.4;
+            this.hierarchicalManager.options.siblingSpacing = 8;
+            this.hierarchicalManager.options.dirPadding = 15;
             this.hierarchicalManager.clear();
             this.hierarchicalManager.layoutHierarchy(this.grids);
+            this._updateOverlays();
         } else {
             this.layoutManager.clear();
             for (const grid of this.grids) { this.layoutManager.addAuto(grid); }
@@ -435,13 +447,19 @@ export class GitHubRepoViewer {
 
             const HLM = HierarchicalLayoutManager;
             this.hierarchicalManager = new HLM({
-                dirPadding: 20,
-                siblingSpacing: this.layoutManager.spacing.horizontal,
-                maxRowWidth: 3000,
+                dirPadding: 15,
+                dirPaddingDecay: 0.7,       // padding shrinks at deeper nesting
+                siblingSpacing: 8,
+                maxRowWidth: 8000,           // generous cap for adaptive layout
+                targetAspectRatio: 3.0,      // aim for 3:1 wide directories
+                directoriesInZ: false,       // dirs flow horizontally with files
                 siblingDirection: 'horizontal'
             });
 
             this.hierarchicalManager.layoutHierarchy(createdGrids);
+
+            // Update shared context with new manager
+            this.sceneContext.hierarchicalManager = this.hierarchicalManager;
 
             for (const grid of createdGrids) {
                 this.scene.add(grid);
@@ -454,9 +472,23 @@ export class GitHubRepoViewer {
             const layoutTime = performance.now() - layoutStart;
             console.log(`[2b] Hierarchical layout: ${createdGrids.length} grids in ${layoutTime.toFixed(0)}ms`);
 
-            // Phase 3: UI updates
+            // Phase 2c: Create visual overlays (backdrops + nameplates)
+            const overlayStart = performance.now();
+            this.loading.update(0.8, `Creating visual overlays...`);
+            this._createOverlays();
+            const overlayTime = performance.now() - overlayStart;
+            console.log(`[2c] Visual overlays: ${overlayTime.toFixed(0)}ms`);
+
+            // Phase 2d: Compute heatmap metrics → triggers CodeColorManager coloring
+            const heatStart = performance.now();
+            this.heatmapProvider = new HeatmapProvider(this.sceneContext, this.fileStateManager);
+            this.heatmapProvider.computeMetrics();
+            const heatTime = performance.now() - heatStart;
+            console.log(`[2d] Heatmap metrics: ${heatTime.toFixed(0)}ms`);
+
+            // Phase 3: UI updates - hierarchical file tree
             const uiStart = performance.now();
-            this.updateFileTree(sourceFiles);
+            this.updateFileTree();
             const uiTime = performance.now() - uiStart;
             console.log(`[3] File tree UI: ${uiTime.toFixed(0)}ms`);
 
@@ -507,8 +539,23 @@ export class GitHubRepoViewer {
         }
         this.grids = [];
         this.layoutManager.clear();
-        if (this.hierarchicalManager) this.hierarchicalManager.clear();
+        if (this.hierarchicalManager) this.hierarchicalManager.clearAll();
         if (this.diffController) this.diffController.clearGrids();
+
+        // Clean up visualization pipeline (clear data, keep managers alive)
+        if (this.fileStateManager) this.fileStateManager.clear();
+        if (this.codeColorManager) this.codeColorManager.resetAllColors();
+        this.heatmapProvider = null;
+
+        // Clean up overlay managers
+        if (this.backdropManager) {
+            this.backdropManager.destroy();
+            this.backdropManager = null;
+        }
+        if (this.nameplateManager) {
+            this.nameplateManager.destroy();
+            this.nameplateManager = null;
+        }
     }
 
     async loadDiff(input) {
@@ -550,7 +597,7 @@ export class GitHubRepoViewer {
             this.loading.hide();
 
             // Focus camera on diff grids
-            this.focusOnDiffGrids();
+            this.cameraController.focusOnDiffGrids(this.diffController);
 
             this.toastUI.show(
                 `PR #${prNumber}: ${result.fileData.length} files, +${result.prData.additions}/-${result.prData.deletions}`,
@@ -566,46 +613,197 @@ export class GitHubRepoViewer {
         }
     }
 
-    focusOnDiffFile(fileIndex) {
-        // Each file has 2 grids (left + right), so multiply by 2
-        const gridIndex = fileIndex * 2;
-        if (gridIndex >= 0 && gridIndex < this.grids.length) {
-            this.focusOnGrid(gridIndex);
+    // focusOnDiffFile, focusOnDiffGrids → CameraController
+
+    /**
+     * Build hierarchical file tree in the drawer panel.
+     * Walks the layout manager's tree to create an indented,
+     * collapsible directory structure.
+     */
+    updateFileTree() {
+        this.treeContent.innerHTML = '';
+
+        if (!this.hierarchicalManager || !this.hierarchicalManager.root) {
+            this.treeContent.innerHTML = '<div class="tree-empty">No files loaded</div>';
+            return;
+        }
+
+        // Build tree DOM recursively from the hierarchy root
+        this._buildTreeDOM(this.hierarchicalManager.root, this.treeContent, 0);
+    }
+
+    /**
+     * Recursively build DOM for a tree node and its children
+     * @private
+     */
+    _buildTreeDOM(node, container, depth) {
+        // Skip the virtual root node (empty path) — render its children directly
+        if (node.path === '' && node.isDirectory) {
+            for (const child of node.children) {
+                this._buildTreeDOM(child, container, depth);
+            }
+            return;
+        }
+
+        if (node.isDirectory) {
+            // Directory item
+            const isCollapsed = this.hierarchicalManager.isCollapsed(node.path);
+            const dirItem = document.createElement('div');
+            dirItem.className = 'tree-item tree-dir';
+            if (isCollapsed) dirItem.classList.add('collapsed');
+            dirItem.style.paddingLeft = `${depth * 16 + 8}px`;
+            dirItem.dataset.path = node.path;
+
+            const chevron = isCollapsed ? '\u25B6' : '\u25BC';  // ▶ or ▼
+            const childCount = this._countDescendants(node);
+
+            dirItem.innerHTML = `
+                <span class="tree-chevron">${chevron}</span>
+                <span class="tree-icon tree-icon-dir">\uD83D\uDCC1</span>
+                <span class="tree-name">${node.name}</span>
+                <span class="tree-count">${childCount}</span>
+            `;
+
+            // Click chevron to toggle collapse
+            const chevronEl = dirItem.querySelector('.tree-chevron');
+            chevronEl.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.toggleDirectoryCollapse(node.path);
+            });
+
+            // Click directory name to focus camera
+            dirItem.addEventListener('click', () => {
+                this.cameraController.focusOnDirectory(node.path);
+            });
+
+            container.appendChild(dirItem);
+
+            // Children container (hidden if collapsed)
+            const childrenContainer = document.createElement('div');
+            childrenContainer.className = 'tree-children';
+            if (isCollapsed) childrenContainer.classList.add('hidden');
+            childrenContainer.dataset.parentPath = node.path;
+
+            for (const child of node.children) {
+                this._buildTreeDOM(child, childrenContainer, depth + 1);
+            }
+
+            container.appendChild(childrenContainer);
+        } else {
+            // File item
+            const fileItem = document.createElement('div');
+            fileItem.className = 'tree-item tree-file';
+            fileItem.style.paddingLeft = `${depth * 16 + 8}px`;
+            fileItem.dataset.path = node.path;
+
+            const gridIndex = node.grid ? this.grids.indexOf(node.grid) : -1;
+
+            fileItem.innerHTML = `
+                <span class="tree-icon tree-icon-file">\uD83D\uDCC4</span>
+                <span class="tree-name">${node.name}</span>
+            `;
+
+            if (gridIndex >= 0) {
+                fileItem.addEventListener('click', () => this.cameraController.focusOnGrid(gridIndex));
+            }
+
+            container.appendChild(fileItem);
         }
     }
 
-    focusOnDiffGrids() {
-        const THREE = this.THREE;
-        if (this.grids.length === 0) return;
-
-        const bounds = this.diffController.getTotalBounds();
-        if (!bounds) return;
-
-        const center = new THREE.Vector3();
-        bounds.getCenter(center);
-        const size = new THREE.Vector3();
-        bounds.getSize(size);
-
-        const maxDim = Math.max(size.x, size.y);
-        const distance = Math.min(maxDim * 0.5, 800);
-        this.camera.position.set(center.x, center.y, center.z + distance + 100);
-        this.pitch = 0;
-        this.yaw = 0;
+    /**
+     * Count total file descendants of a directory node
+     * @private
+     */
+    _countDescendants(node) {
+        let count = 0;
+        for (const child of node.children) {
+            if (child.isDirectory) {
+                count += this._countDescendants(child);
+            } else {
+                count++;
+            }
+        }
+        return count;
     }
 
-    updateFileTree(files) {
-        this.treeContent.innerHTML = '';
-        files.forEach((file, idx) => {
-            const item = document.createElement('div');
-            item.className = 'tree-item';
-            item.innerHTML = `
-                <span class="tree-icon">&#128196;</span>
-                <span class="tree-name">${file.path}</span>
-                <span class="tree-size">${this.formatSize(file.size)}</span>
-            `;
-            item.addEventListener('click', () => this.focusOnGrid(idx));
-            this.treeContent.appendChild(item);
+    /**
+     * Toggle collapse state for a directory — updates 3D scene + UI
+     */
+    toggleDirectoryCollapse(dirPath) {
+        if (!this.hierarchicalManager) return;
+
+        const nowCollapsed = this.hierarchicalManager.toggleCollapse(dirPath);
+
+        // Re-layout the 3D scene (recompute bounds, reposition, set visibility)
+        this.hierarchicalManager.relayout();
+
+        // Update visual overlays
+        this._updateOverlays();
+
+        // Rebuild the file tree UI to reflect new state
+        this.updateFileTree();
+    }
+
+    // focusOnDirectory → CameraController
+
+    /**
+     * Create visual overlay managers (backdrops + nameplates)
+     * @private
+     */
+    _createOverlays() {
+        if (!this.hierarchicalManager || !this.hierarchicalManager.root) return;
+
+        // Dispose old managers if they exist
+        if (this.backdropManager) this.backdropManager.destroy();
+        if (this.nameplateManager) this.nameplateManager.destroy();
+
+        // Create backdrop manager
+        this.backdropManager = new BackdropManager(this.scene, {
+            baseOpacity: 0.12,
+            opacityDecay: 0.7,
+            showEdges: true,
+            edgeOpacity: 0.2,
         });
+        this.backdropManager.createBackdrops(
+            this.hierarchicalManager.root,
+            this.hierarchicalManager.collapsedPaths
+        );
+
+        // Create nameplate manager
+        this.nameplateManager = new NameplateManager(this.scene, this.atlas, {
+            color: { r: 0.0, g: 1.0, b: 0.53 },
+            scale: 1.5,
+            yOffset: 5,
+            zOffset: 5,
+            billboard: true,
+        });
+        this.nameplateManager.createNameplates(
+            this.hierarchicalManager.root,
+            this.hierarchicalManager.collapsedPaths
+        );
+    }
+
+    /**
+     * Update visual overlays after re-layout
+     * @private
+     */
+    _updateOverlays() {
+        if (!this.hierarchicalManager || !this.hierarchicalManager.root) return;
+
+        if (this.backdropManager) {
+            this.backdropManager.updateBackdrops(
+                this.hierarchicalManager.root,
+                this.hierarchicalManager.collapsedPaths
+            );
+        }
+
+        if (this.nameplateManager) {
+            this.nameplateManager.updateNameplates(
+                this.hierarchicalManager.root,
+                this.hierarchicalManager.collapsedPaths
+            );
+        }
     }
 
     formatSize(bytes) {
@@ -614,64 +812,7 @@ export class GitHubRepoViewer {
         return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
     }
 
-    focusOnGrid(index) {
-        const THREE = this.THREE;
-        if (index < 0 || index >= this.grids.length) return;
-
-        const grid = this.grids[index];
-        const bounds = grid.getBounds();
-        const center = new THREE.Vector3();
-        bounds.getCenter(center);
-
-        this.camera.position.set(center.x, center.y, center.z + 400);
-
-        document.querySelectorAll('.tree-item').forEach((item, i) => {
-            item.classList.toggle('selected', i === index);
-        });
-    }
-
-    focusOnGrids() {
-        const THREE = this.THREE;
-        if (this.grids.length === 0) return;
-
-        const bounds = this.hierarchicalManager
-            ? this.hierarchicalManager.getTotalBounds()
-            : this.layoutManager.getTotalBounds();
-
-        const center = new THREE.Vector3();
-        bounds.getCenter(center);
-        const size = new THREE.Vector3();
-        bounds.getSize(size);
-
-        const maxDim = Math.max(size.x, size.y);
-        const distance = Math.min(maxDim * 0.5, 800);
-        this.camera.position.set(center.x, center.y, center.z + distance + 100);
-        this.pitch = 0;
-        this.yaw = 0;
-    }
-
-    updateCamera(deltaTime) {
-        const THREE = this.THREE;
-        const moveDir = new THREE.Vector3();
-
-        if (this.keys['KeyW']) moveDir.z -= 1;
-        if (this.keys['KeyS']) moveDir.z += 1;
-        if (this.keys['KeyA']) moveDir.x -= 1;
-        if (this.keys['KeyD']) moveDir.x += 1;
-        if (this.keys['Space']) moveDir.y += 1;
-        if (this.keys['ShiftLeft'] || this.keys['ShiftRight']) moveDir.y -= 1;
-
-        if (moveDir.length() > 0) {
-            moveDir.normalize();
-            moveDir.applyQuaternion(this.camera.quaternion);
-            moveDir.multiplyScalar(this.cameraSpeed * deltaTime);
-            this.camera.position.add(moveDir);
-        }
-
-        const quaternion = new THREE.Quaternion();
-        quaternion.setFromEuler(new THREE.Euler(this.pitch, this.yaw, 0, 'YXZ'));
-        this.camera.quaternion.copy(quaternion);
-    }
+    // _zDistanceForFit, focusOnGrid, focusOnGrids, updateCamera → CameraController
 
     updateStats(deltaTime) {
         this.frameCount++;
@@ -694,13 +835,7 @@ export class GitHubRepoViewer {
         this.cameraPosEl.textContent = `${pos.x.toFixed(0)},${pos.y.toFixed(0)},${pos.z.toFixed(0)}`;
     }
 
-    onResize() {
-        const width = window.innerWidth;
-        const height = window.innerHeight;
-        this.camera.aspect = width / height;
-        this.camera.updateProjectionMatrix();
-        this.renderer.setSize(width, height);
-    }
+    // onResize → split: camera-side in CameraController, renderer-side inlined in setupEventListeners
 
     animate() {
         requestAnimationFrame(() => this.animate());
@@ -708,8 +843,14 @@ export class GitHubRepoViewer {
         const deltaTime = (now - this.lastTime) / 1000;
         this.lastTime = now;
 
-        this.updateCamera(deltaTime);
+        this.cameraController.update(deltaTime);
         this.updateStats(deltaTime);
+
+        // Update billboard-style nameplates to face camera
+        if (this.nameplateManager) {
+            this.nameplateManager.updateBillboards(this.camera);
+        }
+
         this.renderer.render(this.scene, this.camera);
     }
 }
