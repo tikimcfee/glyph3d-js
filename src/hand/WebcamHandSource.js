@@ -39,6 +39,7 @@ class WebcamHandSource {
         this.numHands = options.numHands || 1;
         this.referenceSpan = options.referenceSpan || DEFAULT_REFERENCE_SPAN;
         this.depthScale = options.depthScale || DEFAULT_DEPTH_SCALE;
+        this.firstPerson = options.firstPerson !== undefined ? options.firstPerson : true;
         this.onFrame = options.onFrame || null;
         this.onReady = options.onReady || null;
         this.onError = options.onError || null;
@@ -125,24 +126,35 @@ class WebcamHandSource {
             this.cachedFrames = results.landmarks.map((landmarks, i) => {
                 const handedness = results.handednesses?.[i]?.[0]?.categoryName?.toLowerCase() || 'right';
 
-                // Estimate hand distance from palm width (index MCP to pinky MCP).
-                // Palm width is stable across finger poses (fist, claw, open).
+                if (!this.firstPerson) {
+                    // Mirror mode: flip X for natural mirror feel,
+                    // pass Z with slight damping. No depth estimation.
+                    return {
+                        handedness,
+                        landmarks: landmarks.map(lm => ({
+                            x: 1 - lm.x,
+                            y: lm.y,
+                            z: lm.z * 0.3,
+                        })),
+                        timestamp: now,
+                    };
+                }
+
+                // First-person mode: apply corrections
                 const indexMcp = landmarks[Joint.INDEX_MCP];
                 const pinkyMcp = landmarks[Joint.PINKY_MCP];
                 const palmWidth = Math.sqrt(
                     (indexMcp.x - pinkyMcp.x) ** 2 +
                     (indexMcp.y - pinkyMcp.y) ** 2
                 );
-
-                // Larger palm in image = hand closer to camera = deeper into scene.
                 const depthFromPalm = (palmWidth - this.referenceSpan) * this.depthScale;
 
                 return {
                     handedness,
                     landmarks: landmarks.map(lm => ({
-                        x: 1 - lm.x,
+                        x: 1 - lm.x,       // flip for selfie mirror
                         y: lm.y,
-                        z: depthFromPalm + lm.z,
+                        z: depthFromPalm - lm.z,  // depth estimate + flip palm orientation
                     })),
                     timestamp: now,
                 };

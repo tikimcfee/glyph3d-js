@@ -84,6 +84,18 @@ body {
     border-color: rgba(0, 255, 136, 0.3);
 }
 
+#controls button.toggle {
+    margin-left: 8px;
+    border-style: dashed;
+}
+
+#controls button.toggle.active {
+    background: rgba(68, 136, 255, 0.15);
+    color: #4488ff;
+    border-color: rgba(68, 136, 255, 0.3);
+    border-style: solid;
+}
+
 #help {
     font-size: 11px;
     color: #555;

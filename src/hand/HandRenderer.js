@@ -1,82 +1,169 @@
 /**
  * Hand Renderer
  *
- * Renders a wireframe hand skeleton in Three.js from HandFrame data.
- * Uses LineSegments for bones and Points for joints.
+ * Renders a 3D hand skeleton in Three.js from HandFrame data.
+ * Uses shaded cylinders for bones and spheres for joints,
+ * giving depth cues through lighting and perspective.
  * Designed to be attached to a camera so the hand stays in view.
  */
 
 import * as THREE from 'three';
-import { SKELETON_CONNECTIONS, JOINT_COUNT } from './HandData.js';
+import { Joint, SKELETON_CONNECTIONS, JOINT_COUNT } from './HandData.js';
+
+// Shared geometries — created once, reused across all hands
+const BONE_GEOMETRY = new THREE.CylinderGeometry(1, 1, 1, 6, 1);
+// Shift cylinder so base is at origin, extends along +Y
+BONE_GEOMETRY.translate(0, 0.5, 0);
+
+const JOINT_GEOMETRY = new THREE.IcosahedronGeometry(1, 1);
+
+// Palm surface: 6 vertices forming the palm outline,
+// triangulated as a fan from the wrist.
+const PALM_JOINTS = [
+    Joint.WRIST,       // 0 — fan origin
+    Joint.THUMB_CMC,   // 1
+    Joint.INDEX_MCP,   // 2
+    Joint.MIDDLE_MCP,  // 3
+    Joint.RING_MCP,    // 4
+    Joint.PINKY_MCP,   // 5
+];
+
+const PALM_INDICES = new Uint16Array([
+    0, 1, 2,   // wrist → thumb CMC → index MCP
+    0, 2, 3,   // wrist → index MCP → middle MCP
+    0, 3, 4,   // wrist → middle MCP → ring MCP
+    0, 4, 5,   // wrist → ring MCP → pinky MCP
+]);
+
+// Reusable math objects to avoid per-frame allocations
+const _vecA = new THREE.Vector3();
+const _vecB = new THREE.Vector3();
+const _dir = new THREE.Vector3();
+const _up = new THREE.Vector3(0, 1, 0);
+const _quat = new THREE.Quaternion();
 
 class HandRenderer {
     /**
      * @param {Object} options
-     * @param {number} options.lineColor - Hex color for skeleton lines
-     * @param {number} options.jointColor - Hex color for joint points
-     * @param {number} options.jointSize - Point size for joints
+     * @param {number} options.lineColor - Hex color for bones
+     * @param {number} options.jointColor - Hex color for joints
+     * @param {number} options.jointSize - Radius for joint spheres
+     * @param {number} options.boneRadius - Radius for bone cylinders
      * @param {number} options.spread - How wide the hand maps in camera space
-     * @param {number} options.depth - Base distance in front of camera (negative = in front)
+     * @param {number} options.depth - Base distance in front of camera
      * @param {number} options.scale - Overall scale factor
      */
     constructor(options = {}) {
         this.lineColor = options.lineColor || 0x00ff88;
         this.jointColor = options.jointColor || 0x00ffcc;
-        this.jointSize = options.jointSize || 0.015;
+        this.jointSize = options.jointSize || 0.006;
+        this.boneRadius = options.boneRadius || 0.003;
         this.spread = options.spread || 0.4;
         this.depth = options.depth || -0.8;
         this.scale = options.scale || 0.5;
 
         this.group = new THREE.Group();
-        this.hands = new Map(); // handedness -> { group, lines, joints }
+        this.hands = new Map();
 
-        // Pre-build right hand (most common)
+        // Add a light rig as part of the hand group so it moves with the camera.
+        // Hemisphere light gives soft top/bottom differentiation.
+        const hemi = new THREE.HemisphereLight(0xffffff, 0x444466, 1.2);
+        this.group.add(hemi);
+        // Point light near the camera position for specular highlights
+        const point = new THREE.PointLight(0xffffff, 0.6, 5);
+        point.position.set(0, 0.1, 0);
+        this.group.add(point);
+
         this._buildHand('right');
     }
 
     /**
-     * Build geometry for one hand
+     * Build bone and joint meshes for one hand
      * @param {string} handedness
      */
     _buildHand(handedness) {
         const handGroup = new THREE.Group();
 
-        // Line segments for skeleton bones
-        const segmentCount = SKELETON_CONNECTIONS.length;
-        const linePositions = new Float32Array(segmentCount * 2 * 3);
-        const lineGeometry = new THREE.BufferGeometry();
-        lineGeometry.setAttribute('position', new THREE.BufferAttribute(linePositions, 3));
-
-        const lineMaterial = new THREE.LineBasicMaterial({
+        // Bone material — slightly emissive for glow, metallic for depth cues
+        const boneMaterial = new THREE.MeshStandardMaterial({
             color: this.lineColor,
-            transparent: true,
-            opacity: 0.85,
+            emissive: this.lineColor,
+            emissiveIntensity: 0.2,
+            roughness: 0.5,
+            metalness: 0.4,
         });
-        const lines = new THREE.LineSegments(lineGeometry, lineMaterial);
-        handGroup.add(lines);
 
-        // Points for joints
-        const jointPositions = new Float32Array(JOINT_COUNT * 3);
-        const jointGeometry = new THREE.BufferGeometry();
-        jointGeometry.setAttribute('position', new THREE.BufferAttribute(jointPositions, 3));
-
-        const jointMaterial = new THREE.PointsMaterial({
+        // Joint material — brighter, more emissive
+        const jointMaterial = new THREE.MeshStandardMaterial({
             color: this.jointColor,
-            size: this.jointSize,
-            sizeAttenuation: true,
+            emissive: this.jointColor,
+            emissiveIntensity: 0.3,
+            roughness: 0.3,
+            metalness: 0.5,
         });
-        const joints = new THREE.Points(jointGeometry, jointMaterial);
-        handGroup.add(joints);
+
+        // Palm surface — triangle fan from wrist through MCP joints.
+        // Renders as an occluding surface behind the finger bones.
+        const palmMaterial = new THREE.MeshStandardMaterial({
+            color: this.lineColor,
+            emissive: this.lineColor,
+            emissiveIntensity: 0.15,
+            roughness: 0.6,
+            metalness: 0.3,
+            side: THREE.DoubleSide,
+            // Polygon offset pushes palm slightly toward camera,
+            // winning depth test over bones/joints at shared vertices
+            polygonOffset: true,
+            polygonOffsetFactor: -1,
+            polygonOffsetUnit: -1,
+        });
+
+        const palmPositions = new Float32Array(PALM_JOINTS.length * 3);
+        const palmGeometry = new THREE.BufferGeometry();
+        palmGeometry.setAttribute('position', new THREE.BufferAttribute(palmPositions, 3));
+        palmGeometry.setIndex(new THREE.BufferAttribute(PALM_INDICES, 1));
+
+        const palmMesh = new THREE.Mesh(palmGeometry, palmMaterial);
+        palmMesh.visible = false;
+        handGroup.add(palmMesh);
+
+        // Create a cylinder mesh for each bone connection
+        const bones = [];
+        for (let i = 0; i < SKELETON_CONNECTIONS.length; i++) {
+            const mesh = new THREE.Mesh(BONE_GEOMETRY, boneMaterial);
+            mesh.visible = false;
+            mesh.renderOrder = 1;
+            handGroup.add(mesh);
+            bones.push(mesh);
+        }
+
+        // Create a sphere mesh for each joint
+        const joints = [];
+        for (let i = 0; i < JOINT_COUNT; i++) {
+            const mesh = new THREE.Mesh(JOINT_GEOMETRY, jointMaterial);
+            mesh.visible = false;
+            mesh.renderOrder = 2;
+            handGroup.add(mesh);
+            joints.push(mesh);
+        }
 
         handGroup.visible = false;
         this.group.add(handGroup);
 
-        this.hands.set(handedness, { group: handGroup, lines, joints });
+        this.hands.set(handedness, {
+            group: handGroup,
+            bones,
+            joints,
+            palm: palmMesh,
+            palmGeometry,
+            boneMaterial,
+            jointMaterial,
+            palmMaterial,
+        });
     }
 
     /**
-     * Attach the hand renderer as a child of the camera.
-     * This makes the hand move with the camera automatically.
+     * Attach as a child of the camera
      * @param {THREE.Camera} camera
      */
     attachToCamera(camera) {
@@ -93,8 +180,8 @@ class HandRenderer {
     }
 
     /**
-     * Update hand rendering from a HandFrame.
-     * @param {HandFrame|null} frame - Hand data, or null to hide
+     * Update hand from a HandFrame
+     * @param {HandFrame|null} frame
      */
     updateFromFrame(frame) {
         if (!frame) {
@@ -113,37 +200,74 @@ class HandRenderer {
         const landmarks = frame.landmarks;
         if (!landmarks || landmarks.length < JOINT_COUNT) return;
 
-        // Map normalized landmarks to camera-local 3D coordinates
         const mapped = this._mapLandmarks(landmarks);
 
-        // Update joint positions
-        const jointArr = hand.joints.geometry.attributes.position.array;
+        // Build validity mask — landmark at default (0,0,0) means untracked
+        const valid = new Uint8Array(JOINT_COUNT);
         for (let i = 0; i < JOINT_COUNT; i++) {
-            jointArr[i * 3] = mapped[i].x;
-            jointArr[i * 3 + 1] = mapped[i].y;
-            jointArr[i * 3 + 2] = mapped[i].z;
+            const lm = landmarks[i];
+            valid[i] = (lm.x !== 0 || lm.y !== 0 || lm.z !== 0) ? 1 : 0;
         }
-        hand.joints.geometry.attributes.position.needsUpdate = true;
 
-        // Update line segment positions
-        const lineArr = hand.lines.geometry.attributes.position.array;
+        // Update palm — only show if all palm joints are valid
+        let palmValid = true;
+        const palmArr = hand.palmGeometry.attributes.position.array;
+        for (let i = 0; i < PALM_JOINTS.length; i++) {
+            const ji = PALM_JOINTS[i];
+            if (!valid[ji]) { palmValid = false; break; }
+            palmArr[i * 3] = mapped[ji].x;
+            palmArr[i * 3 + 1] = mapped[ji].y;
+            palmArr[i * 3 + 2] = mapped[ji].z;
+        }
+        hand.palm.visible = palmValid;
+        if (palmValid) {
+            hand.palmGeometry.attributes.position.needsUpdate = true;
+            hand.palmGeometry.computeVertexNormals();
+        }
+
+        // Update joint spheres — skip untracked
+        for (let i = 0; i < JOINT_COUNT; i++) {
+            const joint = hand.joints[i];
+            if (!valid[i]) { joint.visible = false; continue; }
+            joint.visible = true;
+            joint.position.set(mapped[i].x, mapped[i].y, mapped[i].z);
+            joint.scale.setScalar(this.jointSize);
+        }
+
+        // Update bone cylinders — skip if either endpoint is untracked
         for (let i = 0; i < SKELETON_CONNECTIONS.length; i++) {
             const [a, b] = SKELETON_CONNECTIONS[i];
-            const off = i * 6;
-            lineArr[off] = mapped[a].x;
-            lineArr[off + 1] = mapped[a].y;
-            lineArr[off + 2] = mapped[a].z;
-            lineArr[off + 3] = mapped[b].x;
-            lineArr[off + 4] = mapped[b].y;
-            lineArr[off + 5] = mapped[b].z;
+            const bone = hand.bones[i];
+
+            if (!valid[a] || !valid[b]) { bone.visible = false; continue; }
+            bone.visible = true;
+
+            _vecA.set(mapped[a].x, mapped[a].y, mapped[a].z);
+            _vecB.set(mapped[b].x, mapped[b].y, mapped[b].z);
+
+            _dir.subVectors(_vecB, _vecA);
+            const length = _dir.length();
+
+            if (length < 0.0001) {
+                bone.visible = false;
+                continue;
+            }
+
+            // Position at start point (geometry is translated so base is at origin)
+            bone.position.copy(_vecA);
+
+            // Scale: radius on X/Z, length on Y
+            bone.scale.set(this.boneRadius, length, this.boneRadius);
+
+            // Orient cylinder from default Y-up to bone direction
+            _dir.normalize();
+            _quat.setFromUnitVectors(_up, _dir);
+            bone.quaternion.copy(_quat);
         }
-        hand.lines.geometry.attributes.position.needsUpdate = true;
     }
 
     /**
      * Map landmarks to camera-local 3D space.
-     * Sources provide first-person-corrected data with z > 0 meaning
-     * "reaching deeper into the scene."
      * @param {Array<{x,y,z}>} landmarks
      * @returns {Array<{x,y,z}>}
      */
@@ -153,28 +277,31 @@ class HandRenderer {
         return landmarks.map(lm => ({
             x: (lm.x - 0.5) * spread * scale,
             y: (0.5 - lm.y) * spread * scale,
-            // depth is negative (in front of camera). Subtract z to go deeper.
             z: depth - (lm.z || 0) * scale,
         }));
     }
 
     /**
-     * Set line color (e.g., change color on pinch)
-     * @param {number} color - Hex color
+     * Set bone color
+     * @param {number} color
      */
     setColor(color) {
         this.hands.forEach(hand => {
-            hand.lines.material.color.set(color);
+            hand.boneMaterial.color.set(color);
+            hand.boneMaterial.emissive.set(color);
+            hand.palmMaterial.color.set(color);
+            hand.palmMaterial.emissive.set(color);
         });
     }
 
     /**
      * Set joint color
-     * @param {number} color - Hex color
+     * @param {number} color
      */
     setJointColor(color) {
         this.hands.forEach(hand => {
-            hand.joints.material.color.set(color);
+            hand.jointMaterial.color.set(color);
+            hand.jointMaterial.emissive.set(color);
         });
     }
 
@@ -183,10 +310,10 @@ class HandRenderer {
      */
     dispose() {
         this.hands.forEach(hand => {
-            hand.lines.geometry.dispose();
-            hand.lines.material.dispose();
-            hand.joints.geometry.dispose();
-            hand.joints.material.dispose();
+            hand.boneMaterial.dispose();
+            hand.jointMaterial.dispose();
+            hand.palmMaterial.dispose();
+            hand.palmGeometry.dispose();
         });
         this.detach();
     }

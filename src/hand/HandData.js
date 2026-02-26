@@ -85,10 +85,29 @@ export const Finger = {
 };
 
 /**
+ * @typedef {Object} SceneContext
+ * @property {{fx: number, fy: number, cx: number, cy: number}} intrinsics - Camera intrinsics
+ * @property {[number, number]} imageResolution - [width, height] in pixels
+ * @property {number[][]} cameraTransform - 4x4 column-major matrix (4 arrays of 4 floats)
+ * @property {string} trackingState - 'normal', 'limited', 'notAvailable'
+ * @property {number} lightIntensity - Ambient light estimate in lumens
+ */
+
+/**
+ * @typedef {Object} CameraFrame
+ * @property {string} image - Base64-encoded JPEG
+ * @property {number} width - Image width in pixels
+ * @property {number} height - Image height in pixels
+ * @property {number} timestamp - Frame timestamp
+ * @property {string} [orientation] - Device orientation hint
+ */
+
+/**
  * @typedef {Object} HandFrame
  * @property {string} handedness - 'left' or 'right'
- * @property {Array<{x: number, y: number, z: number}>} landmarks - 21 joint positions (normalized 0-1)
+ * @property {Array<{x: number, y: number, z: number}>} landmarks - 21 joint positions
  * @property {number} timestamp - Frame timestamp in ms
+ * @property {SceneContext} [scene] - Camera/scene context if available
  */
 
 /**

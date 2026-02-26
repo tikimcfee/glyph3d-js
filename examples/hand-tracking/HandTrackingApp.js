@@ -20,8 +20,9 @@ import CameraController from '../../src/camera/CameraController.js';
 import InputManager from '../../src/camera/InputManager.js';
 
 class HandTrackingApp {
-    constructor(canvas) {
+    constructor(canvas, config = {}) {
         this.canvas = canvas;
+        this.config = config;
         this.source = null;
         this.sourceType = null;
 
@@ -57,12 +58,13 @@ class HandTrackingApp {
 
         // Hand wireframe renderer — attached as child of camera
         this.handRenderer = new HandRenderer({
-            lineColor: 0x00ff88,
-            jointColor: 0x00ffcc,
-            jointSize: 0.01,
-            spread: 0.9,
-            depth: -0.8,
-            scale: 1.55,
+            lineColor:  config.lineColor  ?? 0x00ff88,
+            jointColor: config.jointColor ?? 0x00ffcc,
+            jointSize:  config.jointSize  ?? 0.006,
+            boneRadius: config.boneRadius ?? 0.003,
+            spread:     config.spread     ?? 0.45,
+            depth:      config.depth      ?? -1.85,
+            scale:      config.scale      ?? 1.40,
         });
         this.handRenderer.attachToCamera(this.camera);
 
@@ -97,6 +99,7 @@ class HandTrackingApp {
             this.source.dispose?.();
             this.source = null;
         }
+        this._removeCameraPreview();
 
         this.sourceType = sourceType;
 
@@ -104,6 +107,9 @@ class HandTrackingApp {
             case 'webcam':
                 this._setStatus('Loading MediaPipe model...');
                 this.source = new WebcamHandSource({
+                    referenceSpan: this.config.refSpan,
+                    depthScale: this.config.depthScale,
+                    firstPerson: this.config.firstPerson ?? true,
                     onReady: () => this._setStatus('Webcam active — tracking hands'),
                     onError: (err) => {
                         this._setStatus(`Webcam failed: ${err.message} — falling back to mock`);
@@ -126,6 +132,7 @@ class HandTrackingApp {
                     url: this._getWSUrl(),
                     onConnect: () => this._setStatus('WebSocket connected — receiving hand data'),
                     onDisconnect: () => this._setStatus('WebSocket disconnected — reconnecting...'),
+                    onCameraFrame: (frame) => this._showCameraPreview(frame),
                 });
 
                 // Re-enable pointer lock for camera control
@@ -176,8 +183,11 @@ class HandTrackingApp {
             frames = this.source.detect();
         }
 
-        // Drive renderer and gesture detector with first hand
-        const frame = frames?.[0] || null;
+        // Cache last valid frame so the hand persists between updates
+        if (frames) {
+            this._lastFrame = frames[0] || null;
+        }
+        const frame = frames ? (frames[0] || null) : this._lastFrame;
         this.handRenderer.updateFromFrame(frame);
         const gesture = this.gestureDetector.update(frame);
 
@@ -256,6 +266,24 @@ class HandTrackingApp {
     }
 
     /** @private */
+    _showCameraPreview(frame) {
+        if (!this._cameraPreview) {
+            this._cameraPreview = document.createElement('img');
+            this._cameraPreview.style.cssText = 'position:fixed;top:0;right:0;width:160px;height:auto;opacity:0.4;z-index:100;pointer-events:none;border-bottom-left-radius:6px;';
+            document.body.appendChild(this._cameraPreview);
+        }
+        this._cameraPreview.src = `data:image/jpeg;base64,${frame.image}`;
+    }
+
+    /** @private */
+    _removeCameraPreview() {
+        if (this._cameraPreview) {
+            this._cameraPreview.remove();
+            this._cameraPreview = null;
+        }
+    }
+
+    /** @private */
     _onResize() {
         const w = window.innerWidth;
         const h = window.innerHeight;
@@ -270,6 +298,7 @@ class HandTrackingApp {
     dispose() {
         this._animating = false;
         this.source?.dispose?.();
+        this._removeCameraPreview();
         this.handRenderer.dispose();
         this.inputManager.dispose();
         this.renderer.dispose();

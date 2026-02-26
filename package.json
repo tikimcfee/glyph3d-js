@@ -16,7 +16,8 @@
     "examples"
   ],
   "scripts": {
-    "serve": "python3 -m http.server 8000"
+    "serve": "python3 -m http.server 8000",
+    "relay": "node relay.js"
   },
   "keywords": [
     "three.js",
@@ -41,6 +42,7 @@
     "three": ">=0.150.0"
   },
   "devDependencies": {
-    "three": "^0.169.0"
+    "three": "^0.169.0",
+    "ws": "^8.19.0"
   }
 }
