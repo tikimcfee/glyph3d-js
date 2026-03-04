@@ -246,6 +246,10 @@ class CodeGrid extends THREE.Object3D {
      * @returns {THREE.Box3} Bounding box in world coordinates
      */
     getBounds() {
+        // Force matrix update so bounds reflect current position
+        // (matrixWorld is otherwise only updated during render)
+        this.updateMatrixWorld(true);
+
         const box = new THREE.Box3();
         const padding = this.config.backgroundPadding;
 
