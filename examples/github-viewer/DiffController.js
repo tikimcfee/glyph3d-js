@@ -124,9 +124,14 @@ export class DiffController {
         for (const pair of gridPairs) {
             if (!pair) continue;
 
-            // Position right grid next to left grid
+            // Position right grid next to left grid.
+            // updateMatrixWorld after each placement so the next
+            // getBounds() call returns correct world-space bounds
+            // (no render loop has run yet to update matrices).
             this.layoutManager.addAuto(pair.left);
+            pair.left.updateMatrixWorld(true);
             this.layoutManager.addTrailing(pair.right);
+            pair.right.updateMatrixWorld(true);
 
             this.scene.add(pair.left);
             this.scene.add(pair.right);
