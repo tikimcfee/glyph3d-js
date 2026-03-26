@@ -177,6 +177,7 @@ body {
     transition: transform 0.3s ease;
     display: flex;
     flex-direction: column;
+    overflow: hidden;
 }
 
 #drawer.open {
@@ -232,6 +233,7 @@ body {
     flex: 1;
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
     min-height: 0;
 }
 
@@ -409,6 +411,44 @@ body {
     border-radius: 50%;
     cursor: pointer;
     border: none;
+}
+
+.setting-select {
+    width: 100%;
+    padding: 10px 10px;
+    background: #1a1a1a;
+    border: 1px solid #444;
+    border-radius: 4px;
+    color: #e0e0e0;
+    font-family: inherit;
+    font-size: 13px;
+    cursor: pointer;
+    -webkit-appearance: none;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23888'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    padding-right: 28px;
+}
+
+.setting-select:focus {
+    outline: none;
+    border-color: #00ff88;
+}
+
+.setting-select option {
+    background: #1a1a1a;
+    color: #e0e0e0;
+}
+
+.setting-section-header {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: #666;
+    padding-top: 12px;
+    border-top: 1px solid #2a2a2a;
+    margin-top: 4px;
 }
 
 .setting-btn {
