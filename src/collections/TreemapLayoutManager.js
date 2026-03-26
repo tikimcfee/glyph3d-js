@@ -1,13 +1,16 @@
 /**
- * TreemapLayoutManager - Squarified treemap layout for CodeGrids
+ * TreemapLayoutManager - Dense rectangle packing for CodeGrids
  *
- * Every file gets a rectangular region proportional to its line count.
- * The entire area is filled — no wasted space. Directories become
- * nested sub-regions. The result is a GrandPerspective-style dense map
- * where file weight is instantly visible from any zoom level.
+ * Packs code file grids at their actual dimensions using a skyline
+ * bin-packing algorithm. Files are sorted by height (tallest first)
+ * and packed left-to-right, bottom-up. Directory grouping is maintained
+ * by packing each directory's files together as a contiguous block.
  *
- * Z-axis: directory depth creates layered topography — deeper files
- * sit slightly behind, giving a 3D stepped look.
+ * Z-axis: directory depth. Deeper directories sit slightly behind,
+ * creating layered topography visible when zoomed out.
+ *
+ * No resizing — every file keeps its real dimensions. The layout just
+ * finds where to put them so nothing overlaps and space is used well.
  */
 
 import * as THREE from 'three';
@@ -15,22 +18,20 @@ import * as THREE from 'three';
 class TreemapLayoutManager {
     /**
      * @param {Object} options
-     * @param {number} [options.padding=3] - Gap between siblings
-     * @param {number} [options.dirPadding=6] - Inset for directory containers
-     * @param {number} [options.depthZ=5] - Z step per directory depth
-     * @param {number} [options.totalWidth=2000] - Total treemap width
-     * @param {number} [options.totalHeight=1200] - Total treemap height
+     * @param {number} [options.padding=4] - Gap between files
+     * @param {number} [options.dirGap=12] - Extra gap between directory groups
+     * @param {number} [options.depthZ=8] - Z offset per directory depth
+     * @param {number} [options.maxRowWidth=3000] - Max width before wrapping
      * @param {number} [options.originX=0]
      * @param {number} [options.originY=0]
      * @param {number} [options.originZ=0]
      */
     constructor(options = {}) {
         this.options = {
-            padding: options.padding ?? 3,
-            dirPadding: options.dirPadding ?? 6,
-            depthZ: options.depthZ ?? 5,
-            totalWidth: options.totalWidth ?? 2000,
-            totalHeight: options.totalHeight ?? 1200,
+            padding: options.padding ?? 4,
+            dirGap: options.dirGap ?? 10,
+            depthZ: options.depthZ ?? 8,
+            maxRowWidth: options.maxRowWidth ?? 600,
         };
 
         this.origin = new THREE.Vector3(
@@ -51,14 +52,12 @@ class TreemapLayoutManager {
         this.grids = grids;
         this.root = this._buildTree(grids);
 
-        const rect = {
-            x: this.origin.x,
-            y: this.origin.y,
-            w: this.options.totalWidth,
-            h: this.options.totalHeight,
-        };
+        // Collect files grouped by directory, sorted by area descending
+        const groups = this._groupByDirectory(this.root);
 
-        this._layout(this.root, rect, 0);
+        // Pack groups using skyline algorithm
+        this._packGroups(groups);
+
         return this.root;
     }
 
@@ -74,12 +73,10 @@ class TreemapLayoutManager {
 
     getDirectoryBounds(dirPath) {
         const node = this.pathToNode.get(dirPath);
-        if (!node || !node._rect) return null;
-        const r = node._rect;
-        return new THREE.Box3(
-            new THREE.Vector3(r.x, r.y - r.h, this.origin.z - (node.depth || 0) * this.options.depthZ),
-            new THREE.Vector3(r.x + r.w, r.y, this.origin.z)
-        );
+        if (!node || !node.isDir) return null;
+        const box = new THREE.Box3();
+        this._collectBounds(node, box);
+        return box.isEmpty() ? null : box;
     }
 
     clear() {
@@ -92,7 +89,7 @@ class TreemapLayoutManager {
     // ============ Build Tree ============
 
     _buildTree(grids) {
-        const root = { name: '', path: '', isDir: true, grid: null, children: [], parent: null, area: 0, depth: 0 };
+        const root = { name: '', path: '', isDir: true, grid: null, children: [], parent: null, depth: 0 };
         this.pathToNode.set('', root);
 
         for (const grid of grids) {
@@ -106,7 +103,7 @@ class TreemapLayoutManager {
                 currentPath = currentPath ? `${currentPath}/${parts[i]}` : parts[i];
                 let dirNode = this.pathToNode.get(currentPath);
                 if (!dirNode) {
-                    dirNode = { name: parts[i], path: currentPath, isDir: true, grid: null, children: [], parent: current, area: 0, depth: current.depth + 1 };
+                    dirNode = { name: parts[i], path: currentPath, isDir: true, grid: null, children: [], parent: current, depth: current.depth + 1 };
                     current.children.push(dirNode);
                     this.pathToNode.set(currentPath, dirNode);
                 }
@@ -115,171 +112,164 @@ class TreemapLayoutManager {
 
             const fileName = parts[parts.length - 1] || sourcePath;
             const filePath = currentPath ? `${currentPath}/${fileName}` : fileName;
-            const bounds = grid.getBounds();
-            const lineCount = Math.max(bounds.max.y - bounds.min.y, 1);
 
-            const fileNode = { name: fileName, path: filePath, isDir: false, grid, children: [], parent: current, area: lineCount, depth: current.depth + 1 };
+            const fileNode = { name: fileName, path: filePath, isDir: false, grid, children: [], parent: current, depth: current.depth + 1 };
             current.children.push(fileNode);
             this.pathToNode.set(filePath, fileNode);
             this.gridToNode.set(grid, fileNode);
         }
 
-        this._computeAreas(root);
-        this._sortByArea(root);
         return root;
     }
 
-    _computeAreas(node) {
-        if (!node.isDir) return node.area;
-        let sum = 0;
-        for (const child of node.children) sum += this._computeAreas(child);
-        node.area = sum;
-        return sum;
+    // ============ Group by Directory ============
+
+    /**
+     * Flatten tree into ordered groups of files.
+     * Each group = one directory's direct files.
+     * Groups ordered depth-first, directories sorted alphabetically.
+     */
+    _groupByDirectory(root) {
+        const groups = [];
+        this._collectGroups(root, groups);
+        return groups;
     }
 
-    _sortByArea(node) {
+    _collectGroups(node, groups) {
         if (!node.isDir) return;
-        node.children.sort((a, b) => b.area - a.area);
-        for (const child of node.children) this._sortByArea(child);
-    }
 
-    // ============ Layout ============
+        // Sort children: directories first (alphabetically), then files (by height descending)
+        const dirs = node.children.filter(c => c.isDir).sort((a, b) => a.name.localeCompare(b.name));
+        const files = node.children.filter(c => !c.isDir);
 
-    _layout(node, rect, depth) {
-        node._rect = { ...rect };
+        // Sort files by height descending (tallest first packs best)
+        files.sort((a, b) => {
+            const aH = a.grid.getBounds().max.y - a.grid.getBounds().min.y;
+            const bH = b.grid.getBounds().max.y - b.grid.getBounds().min.y;
+            return bH - aH;
+        });
 
-        if (!node.isDir) {
-            if (node.grid) {
-                const z = this.origin.z - depth * this.options.depthZ;
-                node.grid.position.set(rect.x, rect.y, z);
-            }
-            return;
+        if (files.length > 0) {
+            groups.push({
+                dirPath: node.path,
+                depth: node.depth,
+                files: files,
+            });
         }
 
-        if (node.children.length === 0) return;
+        for (const dir of dirs) {
+            this._collectGroups(dir, groups);
+        }
+    }
 
-        // Inset for directory padding
-        const pad = depth > 0 ? this.options.dirPadding : 0;
-        const inner = {
-            x: rect.x + pad,
-            y: rect.y - pad,
-            w: Math.max(rect.w - pad * 2, 1),
-            h: Math.max(rect.h - pad * 2, 1),
-        };
+    // ============ Skyline Packing ============
 
-        // Squarify children into this rectangle
-        this._squarify(node.children, inner, depth);
+    /**
+     * Pack all groups using a two-level shelf algorithm.
+     *
+     * Level 1: Within each directory, files flow left-to-right in rows.
+     * Level 2: Directory groups themselves flow left-to-right, wrapping
+     *          to new super-rows — creating a 2D grid of directory blocks.
+     */
+    _packGroups(groups) {
+        const { padding, dirGap, depthZ, maxRowWidth } = this.options;
+
+        // First, compute each group's bounding dimensions
+        const groupBlocks = groups.map(group => {
+            const block = this._computeGroupBlock(group, padding, maxRowWidth);
+            return { group, ...block };
+        });
+
+        // Pack group blocks in a 2D flow layout
+        // Aim for a roughly square overall shape
+        const totalBlockArea = groupBlocks.reduce((s, b) => s + b.width * b.height, 0);
+        const superMaxWidth = Math.max(Math.sqrt(totalBlockArea) * 1.5, maxRowWidth);
+        let superX = this.origin.x;
+        let superY = this.origin.y;
+        let superRowHeight = 0;
+
+        for (const block of groupBlocks) {
+            // Wrap super-row
+            if (superX > this.origin.x && (superX - this.origin.x + block.width) > superMaxWidth) {
+                superY -= superRowHeight + dirGap;
+                superX = this.origin.x;
+                superRowHeight = 0;
+            }
+
+            // Place this group's files at (superX, superY)
+            const z = this.origin.z - block.group.depth * depthZ;
+            this._placeGroupFiles(block.group, superX, superY, z, padding, maxRowWidth);
+
+            superX += block.width + dirGap;
+            superRowHeight = Math.max(superRowHeight, block.height);
+        }
     }
 
     /**
-     * Squarified treemap: slice-and-dice with aspect ratio optimization.
-     * Places children into rect, recursing for directory children.
+     * Compute the bounding box a group of files would occupy.
+     * @private
      */
-    _squarify(children, rect, depth) {
-        if (children.length === 0) return;
+    _computeGroupBlock(group, padding, maxRowWidth) {
+        let x = 0;
+        let rowHeight = 0;
+        let totalWidth = 0;
+        let totalHeight = 0;
 
-        const totalArea = children.reduce((s, c) => s + c.area, 0);
-        if (totalArea <= 0) return;
+        for (const fileNode of group.files) {
+            const bounds = fileNode.grid.getBounds();
+            const w = bounds.max.x - bounds.min.x;
+            const h = bounds.max.y - bounds.min.y;
 
-        // Working copy of the remaining rectangle
-        let rx = rect.x;
-        let ry = rect.y;
-        let rw = rect.w;
-        let rh = rect.h;
-
-        let i = 0;
-        const pad = this.options.padding;
-
-        while (i < children.length) {
-            // Determine layout direction: lay rows along the shorter side
-            const vertical = rw <= rh; // if rect is taller, lay horizontal strips
-
-            const remainingArea = children.slice(i).reduce((s, c) => s + c.area, 0);
-            const areaScale = (rw * rh) / remainingArea;
-
-            // Greedily build a row that minimizes worst aspect ratio
-            let rowEnd = i + 1;
-            let bestWorst = Infinity;
-
-            for (let end = i + 1; end <= children.length; end++) {
-                let rowArea = 0;
-                for (let k = i; k < end; k++) rowArea += children[k].area;
-
-                const rowPixels = rowArea * areaScale;
-                const sideLen = vertical ? rw : rh;
-                const rowThickness = rowPixels / sideLen;
-
-                // Compute worst aspect ratio in this row
-                let worst = 0;
-                for (let k = i; k < end; k++) {
-                    const itemPixels = children[k].area * areaScale;
-                    const itemLen = itemPixels / rowThickness;
-                    const ar = Math.max(rowThickness / Math.max(itemLen, 0.01), itemLen / Math.max(rowThickness, 0.01));
-                    worst = Math.max(worst, ar);
-                }
-
-                if (worst <= bestWorst) {
-                    bestWorst = worst;
-                    rowEnd = end;
-                } else {
-                    break;
-                }
+            if (x > 0 && x + w > maxRowWidth) {
+                totalHeight += rowHeight + padding;
+                totalWidth = Math.max(totalWidth, x - padding);
+                x = 0;
+                rowHeight = 0;
             }
 
-            // Lay out the chosen row
-            let rowArea = 0;
-            for (let k = i; k < rowEnd; k++) rowArea += children[k].area;
-
-            const rowPixels = rowArea * areaScale;
-            const sideLen = vertical ? rw : rh;
-            const rowThickness = rowPixels / sideLen;
-
-            let offset = 0;
-            for (let k = i; k < rowEnd; k++) {
-                const itemFrac = children[k].area / rowArea;
-                const itemLen = itemFrac * sideLen;
-
-                let childRect;
-                if (vertical) {
-                    // Horizontal strips stacked top to bottom
-                    childRect = {
-                        x: rx,
-                        y: ry - offset,
-                        w: rowThickness - pad,
-                        h: itemLen - pad,
-                    };
-                } else {
-                    // Vertical strips laid left to right
-                    childRect = {
-                        x: rx + offset,
-                        y: ry,
-                        w: itemLen - pad,
-                        h: rowThickness - pad,
-                    };
-                }
-
-                // Ensure non-negative dimensions
-                childRect.w = Math.max(childRect.w, 0);
-                childRect.h = Math.max(childRect.h, 0);
-
-                this._layout(children[k], childRect, depth + 1);
-                offset += itemLen;
-            }
-
-            // Shrink remaining rectangle
-            if (vertical) {
-                rx += rowThickness;
-                rw -= rowThickness;
-            } else {
-                ry -= rowThickness;
-                rh -= rowThickness;
-            }
-
-            rw = Math.max(rw, 0);
-            rh = Math.max(rh, 0);
-
-            i = rowEnd;
+            x += w + padding;
+            rowHeight = Math.max(rowHeight, h);
         }
+
+        totalHeight += rowHeight;
+        totalWidth = Math.max(totalWidth, x - padding);
+
+        return { width: totalWidth, height: totalHeight };
+    }
+
+    /**
+     * Place a group's files at a given origin.
+     * @private
+     */
+    _placeGroupFiles(group, originX, originY, z, padding, maxRowWidth) {
+        let x = originX;
+        let cursorY = originY;
+        let rowHeight = 0;
+
+        for (const fileNode of group.files) {
+            const grid = fileNode.grid;
+            const bounds = grid.getBounds();
+            const w = bounds.max.x - bounds.min.x;
+            const h = bounds.max.y - bounds.min.y;
+
+            if (x > originX && (x - originX + w) > maxRowWidth) {
+                cursorY -= rowHeight + padding;
+                x = originX;
+                rowHeight = 0;
+            }
+
+            grid.position.set(x, cursorY, z);
+
+            x += w + padding;
+            rowHeight = Math.max(rowHeight, h);
+        }
+    }
+
+    // ============ Utilities ============
+
+    _collectBounds(node, box) {
+        if (node.grid) box.union(node.grid.getBounds());
+        for (const child of node.children) this._collectBounds(child, box);
     }
 }
 

@@ -228,9 +228,9 @@ body {
 }
 
 .tab-btn {
-    flex: 1;
-    min-width: 0;
-    padding: 10px 6px;
+    flex: 0 0 auto;
+    min-width: 50px;
+    padding: 10px 10px;
     background: none;
     border: none;
     border-bottom: 2px solid transparent;
