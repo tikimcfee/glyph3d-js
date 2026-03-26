@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cross-Reference Visualization — glyph3d-js</title>
+    <link rel="stylesheet" href="styles.css">
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+        }
+    }
+    </script>
+</head>
+<body>
+
+<canvas id="canvas"></canvas>
+
+<div id="overlay">
+    <div id="title-bar">
+        <h1>Cross-Reference</h1>
+        <span class="sep">&#x2014;</span>
+        <span id="phase-label">INITIALIZING</span>
+        <div id="progress-track">
+            <div class="phase-dot" title="Round 0"></div>
+            <div class="phase-dot" title="Round 1 — Forward"></div>
+            <div class="phase-dot" title="Round 2 — Inverse"></div>
+            <div class="phase-dot" title="Convergence"></div>
+        </div>
+    </div>
+</div>
+
+<div id="info-panel">
+    MULTI-AGENT CROSS-REFERENCE MECHANISM
+    <div id="status-line">Three perspective agents online</div>
+</div>
+
+<script type="module">
+    import { CrossRefAnimation } from './CrossRefAnimation.js';
+
+    const canvas = document.getElementById('canvas');
+    const anim = new CrossRefAnimation(canvas);
+
+    anim.init().catch(err => {
+        console.error('CrossRefAnimation init failed:', err);
+    });
+</script>
+</body>
+</html>
