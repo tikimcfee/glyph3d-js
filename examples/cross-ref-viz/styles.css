@@ -57,21 +57,44 @@ body {
     margin-left: auto;
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 14px;
     pointer-events: auto;
 }
 
 .phase-dot {
-    width: 6px;
-    height: 6px;
+    position: relative;
+    width: 7px;
+    height: 7px;
     border-radius: 50%;
     background: #222;
     transition: background 0.4s, box-shadow 0.4s;
+    cursor: default;
+}
+
+.phase-dot::after {
+    content: attr(data-label);
+    position: absolute;
+    bottom: 14px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 9px;
+    letter-spacing: 0.5px;
+    color: #333;
+    white-space: nowrap;
+    transition: color 0.4s;
+}
+
+.phase-dot.active::after {
+    color: #00ff88;
+}
+
+.phase-dot.done::after {
+    color: #006633;
 }
 
 .phase-dot.active {
     background: #00ff88;
-    box-shadow: 0 0 6px #00ff88;
+    box-shadow: 0 0 8px #00ff88, 0 0 16px #00ff8844;
 }
 
 .phase-dot.done {

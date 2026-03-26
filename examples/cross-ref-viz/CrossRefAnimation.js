@@ -1,17 +1,20 @@
 /**
- * CrossRefAnimation.js
+ * CrossRefAnimation.js  (v2 — Document Cards)
  *
- * Visualizes the multi-agent cross-referencing process:
- *   Phase 0 — Three agent nodes appear (A, B, C)
- *   Phase 1 — Forward cross-reference: A reads B,C; B reads A,C; C reads A,B
- *   Phase 2 — Inverse cross-reference: A reads C,B; B reads C,A; C reads B,A
- *   Phase 3 — Convergence: all connections pulse green
- *   Loop
+ * Visualizes multi-agent cross-referencing with concrete document objects:
+ *   Phase 0 — Three agent nodes spawn with workspace glows
+ *   Phase 1 — Each agent produces an initial document (A1, B1, C1)
+ *   Phase 2 — Forward review: documents arc-travel between agents, get absorbed
+ *   Phase 3 — Inverse review: same mechanic, reversed order, blue tint
+ *   Phase 4 — Convergence: final docs slide to center and merge
+ *   Phase 5 — Fade out, loop
  *
- * Uses:
- *   - THREE.Mesh (IcosahedronGeometry) for agent nodes
- *   - THREE.Line for connection arrows
- *   - GlyphCollection for labels and output snippet text
+ * Document lifecycle:
+ *   - Created at init, set invisible
+ *   - "Emerge" from agent node (scale 0 → 1, position offset)
+ *   - "Travel" along QuadraticBezierCurve3 arc toward destination
+ *   - "Absorb" into destination node (scale 1 → 0, fade)
+ *   - "Produce" new doc at destination after absorb
  */
 
 import * as THREE from 'three';
@@ -21,18 +24,34 @@ import GlyphCollection from '../../src/collections/GlyphCollection.js';
 // ─── Palette ──────────────────────────────────────────────────────────────────
 
 const COLOR = {
-    bg:          0x0a0a0a,
-    nodeIdle:    new THREE.Color(0x1a2a20),
-    nodeActive:  new THREE.Color(0x00ff88),
-    nodeRim:     new THREE.Color(0x003322),
-    connInactive:new THREE.Color(0x1a1a1a),
-    connActive:  new THREE.Color(0x00ff88),
-    connInverse: new THREE.Color(0x88aaff),
-    labelColor:  { r: 0.7,  g: 0.9,  b: 0.75 },
-    outputColor: { r: 0.25, g: 0.55, b: 0.35 },
-    synthColor:  { r: 0.4,  g: 0.6,  b: 1.0  },
-    dimLabel:    { r: 0.18, g: 0.22, b: 0.20 },
+    bg:           0x080c0a,
+    nodeIdle:     new THREE.Color(0x0d1f17),
+    nodeActive:   new THREE.Color(0x00ff88),
+    nodeRim:      new THREE.Color(0x003322),
+    docRound0:    new THREE.Color(0x0d2218),   // initial analysis — dark green
+    docRound1:    new THREE.Color(0x0d1a2a),   // forward review — dark blue-green
+    docRound2:    new THREE.Color(0x1a1028),   // inverse review — dark blue
+    docFinal:     new THREE.Color(0x1a2010),   // synthesis — dark teal
+    docBorderR0:  new THREE.Color(0x00dd77),   // initial border — green
+    docBorderR1:  new THREE.Color(0x44aaff),   // forward border — cyan-blue
+    docBorderR2:  new THREE.Color(0x8866ff),   // inverse border — purple-blue
+    docBorderFin: new THREE.Color(0x00ff88),   // synthesis border — bright green
+    workspaceGlow:new THREE.Color(0x001a0d),
+    labelColor:   { r: 0.7,  g: 0.9,  b: 0.75 },
+    dimLabel:     { r: 0.18, g: 0.22, b: 0.20 },
+    docLabelR0:   { r: 0.0,  g: 0.85, b: 0.5  },
+    docLabelR1:   { r: 0.3,  g: 0.7,  b: 1.0  },
+    docLabelR2:   { r: 0.6,  g: 0.5,  b: 1.0  },
+    docLabelFin:  { r: 0.4,  g: 1.0,  b: 0.7  },
+    synthPulse:   new THREE.Color(0x00ff88),
 };
+
+// Agent tint colors for workspace glow & node rim
+const AGENT_COLORS = [
+    new THREE.Color(0x00dd88),   // A — green
+    new THREE.Color(0x4488ff),   // B — blue
+    new THREE.Color(0xff8844),   // C — orange
+];
 
 // ─── Agent configuration ──────────────────────────────────────────────────────
 
@@ -40,42 +59,53 @@ const AGENTS = [
     {
         id: 'A',
         label: 'Algorithm',
+        docLabels: ['A\u2081', 'A\u2082', 'A\u2083'],   // A₁ A₂ A₃
         snippets: [
-            'codepoint → UV atlas',
-            'shelf-pack layout',
-            'single draw call',
+            'codepoint\u2192UV atlas',
+            'shelf-pack\nlayout',
+            'Unified:\ninstanced\nrender',
         ],
-        synthSnippet: 'Unified: instanced\nrender + atlas pack',
     },
     {
         id: 'B',
         label: 'Interfaces',
+        docLabels: ['B\u2081', 'B\u2082', 'B\u2083'],
         snippets: [
-            'addText(text, pos)',
-            'flush() → GPU',
-            'updateColor(id)',
+            'addText()\nflush()\u2192GPU',
+            'deferred\nbatch API',
+            'Unified:\ngroup API\n+ deferred',
         ],
-        synthSnippet: 'Unified: deferred\nbatch + group API',
     },
     {
         id: 'C',
         label: 'Implementation',
+        docLabels: ['C\u2081', 'C\u2082', 'C\u2083'],
         snippets: [
-            'InstancedBuffer\nGeometry',
-            'DataTexture groups',
-            'Worker offload',
+            'Instanced\nBufferGeometry',
+            'DataTexture\ngroups O(1)',
+            'Unified:\nworkers +\nDataTexture',
         ],
-        synthSnippet: 'Unified: workers\n+ DataTexture O(1)',
     },
 ];
 
-// Triangle positions (XY plane, agent nodes)
+// Triangle positions (XY plane)
 function agentPositions(radius) {
     return [
-        new THREE.Vector3(0,             radius,    0),   // A — top
-        new THREE.Vector3(-radius * 0.866, -radius * 0.5, 0),  // B — bottom-left
-        new THREE.Vector3( radius * 0.866, -radius * 0.5, 0),  // C — bottom-right
+        new THREE.Vector3(0,              radius,      0),   // A — top
+        new THREE.Vector3(-radius * 0.866, -radius * 0.5, 0),   // B — bottom-left
+        new THREE.Vector3( radius * 0.866, -radius * 0.5, 0),   // C — bottom-right
     ];
+}
+
+// Document resting offsets from agent node (where a doc parks after emerging)
+function docRestOffset(agentIdx) {
+    // A: right, B: left, C: right — keep cards out of the triangle interior
+    const offsets = [
+        new THREE.Vector3( 2.2, 0.3, 0),    // A — right
+        new THREE.Vector3(-2.2, 0.3, 0),    // B — left
+        new THREE.Vector3( 2.2,-0.3, 0),    // C — right
+    ];
+    return offsets[agentIdx];
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -84,46 +114,113 @@ function lerp(a, b, t) { return a + (b - a) * t; }
 function clamp01(t) { return Math.max(0, Math.min(1, t)); }
 function easeInOut(t) { return t < 0.5 ? 2*t*t : -1+(4-2*t)*t; }
 function easeOut(t) { return 1 - Math.pow(1 - t, 3); }
+function easeIn(t) { return t * t * t; }
 
 /**
- * Build a dashed-line geometry from srcPos to dstPos.
- * Returns a THREE.Line positioned in world space.
+ * Sample a QuadraticBezierCurve3 at t, writing into `out`.
+ * P0 = start, P1 = control, P2 = end.
  */
-function buildArrow(srcPos, dstPos, color, dashRatio = 0.5, segments = 24) {
-    const dir = new THREE.Vector3().subVectors(dstPos, srcPos);
-    const len = dir.length();
-    const dashLen = len / segments;
+function quadBezier(P0, P1, P2, t, out) {
+    const mt = 1 - t;
+    out.x = mt*mt*P0.x + 2*mt*t*P1.x + t*t*P2.x;
+    out.y = mt*mt*P0.y + 2*mt*t*P1.y + t*t*P2.y;
+    out.z = mt*mt*P0.z + 2*mt*t*P1.z + t*t*P2.z;
+}
 
+/**
+ * Compute a bezier control point that arcs outward (perpendicular to midpoint).
+ * @param {THREE.Vector3} from
+ * @param {THREE.Vector3} to
+ * @param {number} arcHeight - how far perpendicular to lift
+ * @param {boolean} clockwise - which side to arc toward
+ */
+function bezierControl(from, to, arcHeight, clockwise) {
+    const mid = new THREE.Vector3().addVectors(from, to).multiplyScalar(0.5);
+    const dir = new THREE.Vector3().subVectors(to, from).normalize();
+    // Perpendicular in XY plane
+    const perp = clockwise
+        ? new THREE.Vector3(-dir.y,  dir.x, 0)
+        : new THREE.Vector3( dir.y, -dir.x, 0);
+    mid.addScaledVector(perp, arcHeight);
+    mid.z = 1.5;   // arc lifts slightly in Z for 3D feel
+    return mid;
+}
+
+/**
+ * Build a document card mesh — thin box with an edge border.
+ * Returns { group, bodyMesh, bodyMat, borderMesh, borderMat }
+ */
+function buildDocCard(bodyColor, borderColor) {
+    const W = 1.6, H = 1.0, D = 0.06;
+    const group = new THREE.Group();
+
+    // Body
+    const bodyGeo = new THREE.BoxGeometry(W, H, D);
+    const bodyMat = new THREE.MeshStandardMaterial({
+        color: bodyColor.clone(),
+        emissive: bodyColor.clone().multiplyScalar(0.3),
+        roughness: 0.6,
+        metalness: 0.3,
+        transparent: true,
+        opacity: 0,
+    });
+    const bodyMesh = new THREE.Mesh(bodyGeo, bodyMat);
+    group.add(bodyMesh);
+
+    // Border (edges of front face only — approximate with EdgesGeometry on a plane)
+    const borderGeo = new THREE.EdgesGeometry(new THREE.PlaneGeometry(W, H));
+    const borderMat = new THREE.LineBasicMaterial({
+        color: borderColor.clone(),
+        transparent: true,
+        opacity: 0,
+        linewidth: 1,
+    });
+    const borderMesh = new THREE.LineSegments(borderGeo, borderMat);
+    borderMesh.position.z = D / 2 + 0.001;
+    group.add(borderMesh);
+
+    group.visible = false;
+    return { group, bodyMesh, bodyMat, borderMesh, borderMat };
+}
+
+/**
+ * Build a faint arc trail line along a bezier curve.
+ * Returns the THREE.Line (invisible by default).
+ */
+function buildArcTrail(P0, P1, P2, color) {
+    const segments = 32;
     const positions = [];
-    for (let i = 0; i < segments; i++) {
-        const t0 = i / segments;
-        const t1 = t0 + dashRatio / segments;
-        const p0 = new THREE.Vector3().lerpVectors(srcPos, dstPos, t0);
-        const p1 = new THREE.Vector3().lerpVectors(srcPos, dstPos, Math.min(t1, 1));
-        positions.push(p0.x, p0.y, p0.z, p1.x, p1.y, p1.z);
+    const tmp = new THREE.Vector3();
+    for (let i = 0; i <= segments; i++) {
+        quadBezier(P0, P1, P2, i / segments, tmp);
+        positions.push(tmp.x, tmp.y, tmp.z);
     }
-
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-
     const mat = new THREE.LineBasicMaterial({
         color,
         transparent: true,
         opacity: 0,
-        linewidth: 1,
         depthWrite: false,
     });
-
-    return new THREE.LineSegments(geo, mat);
+    return new THREE.Line(geo, mat);
 }
 
 /**
- * Build a small glowing sphere for a context packet.
+ * Build a flat circle glow on the ground (XY plane) for workspace.
  */
-function buildPacket(color) {
-    const geo = new THREE.SphereGeometry(0.08, 8, 8);
-    const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0 });
-    return new THREE.Mesh(geo, mat);
+function buildWorkspaceGlow(pos, agentColor) {
+    const geo = new THREE.CircleGeometry(1.6, 48);
+    const mat = new THREE.MeshBasicMaterial({
+        color: agentColor.clone().multiplyScalar(0.15),
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.set(pos.x, pos.y, -0.1);
+    return { mesh, mat };
 }
 
 // ─── Main class ───────────────────────────────────────────────────────────────
@@ -144,59 +241,59 @@ export class CrossRefAnimation {
 
         this.scene = new THREE.Scene();
 
-        // Camera — orthographic-ish perspective, centered on the triangle
         const aspect = window.innerWidth / window.innerHeight;
         this.camera = new THREE.PerspectiveCamera(42, aspect, 0.1, 1000);
         this.camera.position.set(0, 0, 22);
         this.camera.lookAt(0, 0, 0);
 
-        // Ambient light (nodes are MeshStandardMaterial)
-        const ambLight = new THREE.AmbientLight(0xffffff, 0.3);
+        const ambLight = new THREE.AmbientLight(0xffffff, 0.25);
         this.scene.add(ambLight);
-        const pointLight = new THREE.PointLight(0x00ff88, 1.5, 40);
-        pointLight.position.set(0, 5, 10);
+        const pointLight = new THREE.PointLight(0x00ff88, 1.5, 60);
+        pointLight.position.set(0, 4, 10);
         this.scene.add(pointLight);
         this._pointLight = pointLight;
 
-        // Glyph atlas (shared)
+        // Glyph atlas
         this.atlas = null;
         this.glyphCollection = null;
 
-        // Scene objects
-        this._nodeRadius = 6;
+        // Layout
+        this._nodeRadius = 5.8;
         this._positions = agentPositions(this._nodeRadius);
-        this._nodes = [];         // { mesh, rimMesh, labelId, outputIds[], synthId }
-        this._arrows = [];        // { line, src, dst, packets[] }
-        this._outputPanels = [];  // { mesh, material } one per agent per round
-        this._packets = [];       // all active packet meshes
 
-        // Phase state machine
-        this._phase = -1;         // current phase index
-        this._phaseT = 0;         // 0→1 progress within the phase
-        this._phaseStart = 0;     // performance.now() when phase began
-        this._totalT = 0;         // cumulative time (seconds)
+        // Scene object collections
+        this._nodes = [];          // { mesh, rimMesh, mat, rimMat, labelId, nameId, pos, workspace }
+        this._docs = [];           // 3 agents × 3 rounds = 9 doc objects
+                                   // docs[agentIdx][roundIdx] = { group, bodyMat, borderMat, labelTextId, ... }
+        this._arcTrails = [];      // arc trail lines for each travel move, indexed [src][dst]
+        this._synthMesh = null;    // center synthesis object
 
-        // Per-phase timing (seconds)
+        // Animation state — sequence of "moves" to execute
+        this._phase = -1;
+        this._phaseT = 0;
+        this._phaseStart = 0;
+        this._totalT = 0;
+        this._lastTimestamp = null;
+
+        // Per-phase durations (seconds)
         this._phaseDurations = [
-            2.5,   // 0 — spawn
-            3.5,   // 1 — round 0 initial outputs
-            6.0,   // 2 — round 1 forward
-            6.0,   // 3 — round 2 inverse
-            2.5,   // 4 — convergence
-            1.5,   // 5 — fade out
+            2.5,   // 0 — spawn nodes
+            3.0,   // 1 — initial output docs emerge (A1 B1 C1)
+            9.0,   // 2 — forward review (green arcs, A reads B,C; etc.)
+            9.0,   // 3 — inverse review (blue arcs, reversed order)
+            3.5,   // 4 — convergence
+            2.0,   // 5 — fade out
         ];
 
-        // Callbacks to drive phase-specific visuals
-        this._phaseCallbacks = {};
-
-        // Output text IDs per agent (to update color in later rounds)
-        this._outputTextIds = [[], [], []];  // [agentIdx][roundIdx] = textId
+        // Track which docs are "resting" at each agent (for travel pickup)
+        // _docState[agentIdx] = array of { docRef, round }
+        this._docState = [[], [], []];
 
         // Resize
         this._onResize = this._handleResize.bind(this);
         window.addEventListener('resize', this._onResize);
 
-        // Phase label element
+        // UI refs
         this._phaseLabelEl = document.getElementById('phase-label');
         this._phaseDots = Array.from(document.querySelectorAll('.phase-dot'));
         this._statusEl = document.getElementById('status-line');
@@ -205,7 +302,7 @@ export class CrossRefAnimation {
     // ─── Initialization ──────────────────────────────────────────────────────
 
     async init() {
-        this.atlas = new GlyphAtlas('Monaco, Menlo, Consolas, monospace', 32, 1024);
+        this.atlas = new GlyphAtlas('Monaco, Menlo, Consolas, monospace', 28, 1024);
         await this.atlas.generate();
 
         this.glyphCollection = new GlyphCollection(this.scene, this.atlas, {
@@ -214,13 +311,13 @@ export class CrossRefAnimation {
         });
 
         this._buildNodes();
-        this._buildConnections();
-        this._buildOutputPanels();
+        this._buildDocuments();
+        this._buildArcTrails();
+        this._buildSynthObject();
 
-        // Start at phase 0
+        this.glyphCollection.flush();
+
         this._startPhase(0);
-
-        // Kick off the loop
         this._rafId = requestAnimationFrame(t => this._tick(t));
     }
 
@@ -230,14 +327,15 @@ export class CrossRefAnimation {
         for (let i = 0; i < 3; i++) {
             const agent = AGENTS[i];
             const pos = this._positions[i];
+            const agentColor = AGENT_COLORS[i];
 
             // Core sphere
-            const geo = new THREE.IcosahedronGeometry(0.72, 2);
+            const geo = new THREE.IcosahedronGeometry(0.68, 2);
             const mat = new THREE.MeshStandardMaterial({
                 color: COLOR.nodeIdle.clone(),
                 emissive: new THREE.Color(0x000000),
-                roughness: 0.3,
-                metalness: 0.6,
+                roughness: 0.35,
+                metalness: 0.55,
                 transparent: true,
                 opacity: 0,
             });
@@ -245,10 +343,10 @@ export class CrossRefAnimation {
             mesh.position.copy(pos);
             this.scene.add(mesh);
 
-            // Rim glow (slightly larger wireframe shell)
-            const rimGeo = new THREE.IcosahedronGeometry(0.86, 2);
+            // Rim glow
+            const rimGeo = new THREE.IcosahedronGeometry(0.84, 2);
             const rimMat = new THREE.MeshBasicMaterial({
-                color: COLOR.nodeRim.clone(),
+                color: agentColor.clone().multiplyScalar(0.3),
                 wireframe: true,
                 transparent: true,
                 opacity: 0,
@@ -257,126 +355,151 @@ export class CrossRefAnimation {
             rimMesh.position.copy(pos);
             this.scene.add(rimMesh);
 
-            // Agent ID label (large) — placed in front of sphere; starts invisible
+            // Workspace glow circle
+            const workspace = buildWorkspaceGlow(pos, agentColor);
+            this.scene.add(workspace.mesh);
+
+            // Agent ID label
             const labelId = this.glyphCollection.addText(
                 agent.id,
                 { x: pos.x - 0.18, y: pos.y - 0.18, z: 1.0 },
                 { color: { r: 0.001, g: 0.001, b: 0.001 }, scale: 2.2 }
             );
 
-            // Agent name label (small, below sphere); starts invisible
+            // Agent name label
             const nameId = this.glyphCollection.addText(
                 agent.label,
-                { x: pos.x - agent.label.length * 0.15, y: pos.y - 1.4, z: 0.0 },
-                { color: { r: 0.001, g: 0.001, b: 0.001 }, scale: 1.0 }
+                { x: pos.x - agent.label.length * 0.14, y: pos.y - 1.35, z: 0.0 },
+                { color: { r: 0.001, g: 0.001, b: 0.001 }, scale: 0.95 }
             );
 
-            this._nodes.push({ mesh, rimMesh, mat, rimMat, labelId, nameId, outputIds: [], synthId: null, pos });
+            this._nodes.push({ mesh, rimMesh, mat, rimMat, labelId, nameId, pos, workspace, agentColor });
         }
-
-        this.glyphCollection.flush();
     }
 
-    // ─── Connection arrows ───────────────────────────────────────────────────
+    // ─── Document card construction ───────────────────────────────────────────
 
-    _buildConnections() {
-        // We need directed arrows between every pair (6 total, bidirectional)
-        // Stored as [src, dst] index pairs for easy lookup
+    _buildDocuments() {
+        // 3 agents × 3 rounds
+        // docs[agentIdx][roundIdx]
+        const bodyColors = [COLOR.docRound0, COLOR.docRound1, COLOR.docRound2];
+        const borderColors = [COLOR.docBorderR0, COLOR.docBorderR1, COLOR.docBorderR2];
+
+        for (let a = 0; a < 3; a++) {
+            this._docs.push([]);
+            const agent = AGENTS[a];
+            const pos = this._positions[a];
+            const restOffset = docRestOffset(a);
+
+            for (let r = 0; r < 3; r++) {
+                const doc = buildDocCard(bodyColors[r], borderColors[r]);
+                const restPos = pos.clone().add(restOffset);
+                // Stack docs vertically by round
+                restPos.y += (1 - r) * 0.2;
+                restPos.z = 0.05 * (r + 1);
+                doc.group.position.copy(restPos);
+                doc.group.scale.setScalar(0);
+                this.scene.add(doc.group);
+
+                // Tiny label on the doc ("A₁", "B₂", etc.)
+                const labelText = agent.docLabels[r];
+                // Position relative to doc rest position
+                const labelPos = {
+                    x: restPos.x - 0.32,
+                    y: restPos.y + 0.18,
+                    z: restPos.z + 0.1,
+                };
+                const labelColors = [COLOR.docLabelR0, COLOR.docLabelR1, COLOR.docLabelR2];
+                const labelId = this.glyphCollection.addText(
+                    labelText,
+                    labelPos,
+                    { color: { r: 0.001, g: 0.001, b: 0.001 }, scale: 1.1 }
+                );
+
+                // Content text (snippet) on the doc
+                const snippetPos = {
+                    x: restPos.x - 0.72,
+                    y: restPos.y + 0.02,
+                    z: restPos.z + 0.1,
+                };
+                const snippetId = this.glyphCollection.addText(
+                    agent.snippets[r],
+                    snippetPos,
+                    { color: { r: 0.001, g: 0.001, b: 0.001 }, scale: 0.62 }
+                );
+
+                doc.labelId = labelId;
+                doc.snippetId = snippetId;
+                doc.labelColor = labelColors[r];
+                doc.restPos = restPos.clone();
+                doc.agentIdx = a;
+                doc.roundIdx = r;
+                doc.currentPos = restPos.clone();
+                doc.visible = false;
+                doc.traveling = false;
+                doc.absorbed = false;
+
+                this._docs[a].push(doc);
+            }
+        }
+    }
+
+    // ─── Arc trail lines ──────────────────────────────────────────────────────
+
+    _buildArcTrails() {
+        // One arc trail per directed pair [src][dst], round 1 (green) and round 2 (blue)
+        // We'll build them all but only show the relevant one when a doc travels
+        this._arcTrails = {};
         const pairs = [
-            [0, 1], [0, 2],
-            [1, 0], [1, 2],
-            [2, 0], [2, 1],
+            [0,1],[0,2],[1,0],[1,2],[2,0],[2,1],
         ];
-
         for (const [src, dst] of pairs) {
-            const srcPos = this._positions[src].clone();
-            const dstPos = this._positions[dst].clone();
+            const from = this._positions[src].clone();
+            const to = this._positions[dst].clone();
+            const ctrl_green = bezierControl(from, to, 1.8, (src + dst) % 2 === 0);
+            const ctrl_blue  = bezierControl(from, to, 2.2, (src + dst) % 2 !== 0);
 
-            // Shorten endpoints slightly so they don't overlap spheres
-            const dir = new THREE.Vector3().subVectors(dstPos, srcPos).normalize();
-            srcPos.addScaledVector(dir, 1.1);
-            dstPos.addScaledVector(dir, -1.1);
+            const trailGreen = buildArcTrail(from, ctrl_green, to, 0x00ff88);
+            const trailBlue  = buildArcTrail(from, ctrl_blue,  to, 0x4488ff);
+            this.scene.add(trailGreen);
+            this.scene.add(trailBlue);
 
-            // Slight lateral offset for bidirectional pairs to avoid z-fighting
-            const perp = new THREE.Vector3(-dir.y, dir.x, 0).multiplyScalar(0.12);
-            srcPos.add(perp);
-            dstPos.add(perp);
-
-            const line = buildArrow(srcPos, dstPos, COLOR.connInactive, 0.4, 18);
-            this.scene.add(line);
-
-            // Build a few context packets along this arrow
-            const packets = [];
-            for (let p = 0; p < 3; p++) {
-                const pkt = buildPacket(COLOR.connActive);
-                this.scene.add(pkt);
-                packets.push({ mesh: pkt, srcPos: srcPos.clone(), dstPos: dstPos.clone(), phase: p / 3 });
-            }
-
-            this._arrows.push({ line, mat: line.material, src, dst, srcPos: srcPos.clone(), dstPos: dstPos.clone(), packets });
+            const key = `${src}_${dst}`;
+            this._arcTrails[key] = { green: trailGreen, blue: trailBlue, ctrl_green, ctrl_blue };
         }
     }
 
-    // ─── Output panels (small text boxes near each node) ─────────────────────
+    // ─── Center synthesis object ──────────────────────────────────────────────
 
-    _buildOutputPanels() {
-        // Panels are plain THREE.Mesh rectangles that appear beside each node
-        for (let i = 0; i < 3; i++) {
-            const pos = this._positions[i];
-
-            // Position to the right of each node (with adjustment for top node)
-            let panelOffset;
-            if (i === 0) {
-                panelOffset = new THREE.Vector3(1.8, 0, -0.05);
-            } else if (i === 1) {
-                panelOffset = new THREE.Vector3(-3.8, 0.4, -0.05);
-            } else {
-                panelOffset = new THREE.Vector3(1.8, 0.4, -0.05);
-            }
-
-            // Round 0 panel
-            const p0 = this._makePanelMesh(pos.clone().add(panelOffset), 0);
-            this._outputPanels.push(p0);
-
-            // Round 1 panel (slightly offset in Z)
-            const r1Offset = panelOffset.clone().add(new THREE.Vector3(0, -1.2, 0.02));
-            const p1 = this._makePanelMesh(pos.clone().add(r1Offset), 0);
-            this._outputPanels.push(p1);
-
-            // Round 2 synthesis panel
-            const r2Offset = panelOffset.clone().add(new THREE.Vector3(0, -2.4, 0.04));
-            const p2 = this._makePanelMesh(pos.clone().add(r2Offset), 0);
-            this._outputPanels.push(p2);
-        }
-    }
-
-    _makePanelMesh(center, opacity) {
-        const geo = new THREE.PlaneGeometry(2.8, 0.85);
-        const mat = new THREE.MeshBasicMaterial({
-            color: 0x0d1a12,
-            transparent: true,
-            opacity,
-            depthWrite: false,
-        });
-        const mesh = new THREE.Mesh(geo, mat);
-        mesh.position.copy(center);
-        this.scene.add(mesh);
-
-        // Border line
-        const borderGeo = new THREE.EdgesGeometry(geo);
-        const borderMat = new THREE.LineBasicMaterial({
-            color: 0x002211,
+    _buildSynthObject() {
+        const geo = new THREE.OctahedronGeometry(0.9, 1);
+        const mat = new THREE.MeshStandardMaterial({
+            color: new THREE.Color(0x003322),
+            emissive: new THREE.Color(0x001a0d),
+            roughness: 0.3,
+            metalness: 0.5,
             transparent: true,
             opacity: 0,
         });
-        const border = new THREE.LineSegments(borderGeo, borderMat);
-        border.position.copy(center);
-        this.scene.add(border);
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.position.set(0, 0, 0);
+        this.scene.add(mesh);
 
-        return { mesh, mat, border, borderMat, center: center.clone() };
+        const rimGeo = new THREE.OctahedronGeometry(1.1, 1);
+        const rimMat = new THREE.MeshBasicMaterial({
+            color: 0x00ff88,
+            wireframe: true,
+            transparent: true,
+            opacity: 0,
+        });
+        const rimMesh = new THREE.Mesh(rimGeo, rimMat);
+        rimMesh.position.set(0, 0, 0);
+        this.scene.add(rimMesh);
+
+        this._synthMesh = { mesh, mat, rimMesh, rimMat };
     }
 
-    // ─── Phase state machine ─────────────────────────────────────────────────
+    // ─── Phase state machine ──────────────────────────────────────────────────
 
     _startPhase(phase) {
         this._phase = phase;
@@ -388,18 +511,18 @@ export class CrossRefAnimation {
     _updateUI(phase) {
         const labels = [
             'INITIALIZING',
-            'ROUND 0 — INITIAL OUTPUTS',
-            'ROUND 1 — FORWARD CROSS-REFERENCE',
-            'ROUND 2 — INVERSE CROSS-REFERENCE',
-            'CONVERGENCE',
+            'INITIAL ANALYSIS',
+            'FORWARD REVIEW',
+            'INVERSE REVIEW',
+            'SYNTHESIS',
             'RESETTING',
         ];
         const statusLines = [
-            'Three perspective agents online',
-            'Each agent produces an initial analysis',
-            'A reads B,C — B reads A,C — C reads A,B',
-            'A reads C,B — B reads C,A — C reads B,A (with Round 1 context)',
-            'All agents converge on shared understanding',
+            'Three perspective agents coming online',
+            'Each agent produces an initial output document',
+            'Forward pass — A reads B,C  \u2219  B reads A,C  \u2219  C reads A,B',
+            'Inverse pass — A reads C,B  \u2219  B reads C,A  \u2219  C reads B,A',
+            'All final documents converge at the center',
             '',
         ];
 
@@ -407,7 +530,6 @@ export class CrossRefAnimation {
             this._phaseLabelEl.textContent = labels[phase] || '';
             this._phaseLabelEl.classList.toggle('active', phase > 0 && phase < 5);
         }
-
         if (this._statusEl) {
             this._statusEl.textContent = statusLines[phase] || '';
         }
@@ -419,7 +541,7 @@ export class CrossRefAnimation {
         });
     }
 
-    // ─── Main render tick ────────────────────────────────────────────────────
+    // ─── Main render tick ─────────────────────────────────────────────────────
 
     _tick(timestampMs) {
         if (this._disposed) return;
@@ -432,109 +554,132 @@ export class CrossRefAnimation {
         const phaseDur = this._phaseDurations[this._phase] || 2;
         this._phaseT = clamp01((this._totalT - this._phaseStart) / phaseDur);
 
-        // Dispatch to per-phase update
         this._updatePhase(this._phase, this._phaseT, dt);
 
-        // Flush any pending glyph collection updates (color/position animations)
         if (this.glyphCollection && this.glyphCollection.isDirty()) {
             this.glyphCollection.flush();
         }
 
-        // Advance phase
         if (this._phaseT >= 1.0) {
             const nextPhase = (this._phase + 1) % this._phaseDurations.length;
             if (nextPhase === 0) {
-                // Full loop restart
                 this._resetVisualization();
             }
             this._startPhase(nextPhase);
         }
 
         // Gentle camera drift
-        const drift = this._totalT * 0.07;
-        this.camera.position.x = Math.sin(drift) * 1.2;
-        this.camera.position.y = Math.cos(drift * 0.7) * 0.8;
+        const drift = this._totalT * 0.065;
+        this.camera.position.x = Math.sin(drift) * 1.0;
+        this.camera.position.y = Math.cos(drift * 0.6) * 0.7;
         this.camera.lookAt(0, 0, 0);
+
+        // Gentle rotation of synth object
+        if (this._synthMesh && this._synthMesh.mat.opacity > 0.01) {
+            this._synthMesh.mesh.rotation.y += dt * 0.6;
+            this._synthMesh.rimMesh.rotation.y -= dt * 0.4;
+        }
 
         this.renderer.render(this.scene, this.camera);
     }
 
-    // ─── Phase-specific updates ──────────────────────────────────────────────
+    // ─── Phase dispatch ───────────────────────────────────────────────────────
 
     _updatePhase(phase, t, dt) {
         switch (phase) {
-            case 0: this._updatePhase0Spawn(t); break;
-            case 1: this._updatePhase1Round0(t); break;
-            case 2: this._updatePhase1Forward(t, dt); break;
-            case 3: this._updatePhase2Inverse(t, dt); break;
-            case 4: this._updatePhase3Convergence(t); break;
-            case 5: this._updatePhaseFadeOut(t); break;
+            case 0: this._updateSpawn(t); break;
+            case 1: this._updateInitialDocs(t); break;
+            case 2: this._updateForwardReview(t); break;
+            case 3: this._updateInverseReview(t); break;
+            case 4: this._updateConvergence(t); break;
+            case 5: this._updateFadeOut(t); break;
         }
     }
 
-    // Phase 0: Nodes fade in
-    _updatePhase0Spawn(t) {
-        const opacity = easeOut(t);
+    // ─── Phase 0: Spawn nodes ─────────────────────────────────────────────────
 
-        for (const node of this._nodes) {
-            node.mat.opacity = opacity;
-            node.rimMat.opacity = opacity * 0.4;
-        }
-
-        // Fade in labels
-        const c = opacity;
-        for (const node of this._nodes) {
-            // Big agent ID label
-            this.glyphCollection.updateColor(node.labelId, {
-                r: 0.0 * c,
-                g: 0.9 * c,
-                b: 0.55 * c,
-            });
-            // Name label fades in dim
-            this.glyphCollection.updateColor(node.nameId, {
-                r: COLOR.dimLabel.r * c,
-                g: COLOR.dimLabel.g * c,
-                b: COLOR.dimLabel.b * c,
-            });
-        }
-    }
-
-    // Phase 1: Round 0 — each node pulses and an output box appears
-    _updatePhase1Round0(t) {
+    _updateSpawn(t) {
         for (let i = 0; i < 3; i++) {
             const node = this._nodes[i];
-            // Stagger: agent i starts at t = i/4
-            const stagger = i / 4;
+            const stagger = clamp01((t - i * 0.2) / 0.5);
+            const nodeOp = easeOut(stagger);
+
+            node.mat.opacity = nodeOp;
+            node.rimMat.opacity = nodeOp * 0.35;
+            node.workspace.mat.opacity = nodeOp * 0.6;
+
+            const agentC = node.agentColor;
+            node.rimMat.color.copy(agentC).multiplyScalar(nodeOp * 0.5);
+
+            // Fade in labels
+            this.glyphCollection.updateColor(node.labelId, {
+                r: 0.0,
+                g: 0.9 * nodeOp,
+                b: 0.55 * nodeOp,
+            });
+            this.glyphCollection.updateColor(node.nameId, {
+                r: COLOR.dimLabel.r * nodeOp,
+                g: COLOR.dimLabel.g * nodeOp,
+                b: COLOR.dimLabel.b * nodeOp,
+            });
+        }
+    }
+
+    // ─── Phase 1: Initial docs emerge from each agent ─────────────────────────
+
+    _updateInitialDocs(t) {
+        for (let i = 0; i < 3; i++) {
+            const node = this._nodes[i];
+            // Stagger: agent 0 starts first
+            const stagger = i * 0.28;
             const localT = clamp01((t - stagger) / 0.6);
-            const pulse = easeOut(localT);
+            const emerge = easeOut(localT);
 
-            // Node glow
-            const glow = pulse * 0.6;
-            node.mat.emissive.setRGB(0, glow * 0.4, glow * 0.2);
-            node.rimMat.color.setRGB(0, glow * 0.9, glow * 0.5);
-            node.rimMat.opacity = 0.3 + pulse * 0.35;
+            // Node glows as it "thinks"
+            const glow = Math.sin(localT * Math.PI) * 0.5;
+            node.mat.emissive.setRGB(0, glow * 0.35, glow * 0.18);
+            const agentC = AGENT_COLORS[i];
+            node.rimMat.color.copy(agentC).multiplyScalar(0.3 + glow * 0.6);
+            node.rimMat.opacity = 0.3 + glow * 0.4;
+            node.workspace.mat.opacity = 0.5 + glow * 0.3;
 
-            // Show output panel for round 0
-            const panelIdx = i * 3;  // first panel per agent
-            const panel = this._outputPanels[panelIdx];
-            panel.mat.opacity = pulse * 0.85;
-            panel.borderMat.opacity = pulse * 0.5;
+            // Emerge the round-0 doc
+            const doc = this._docs[i][0];
+            if (localT > 0.05) {
+                doc.group.visible = true;
+                doc.visible = true;
+                const s = easeOut(clamp01((localT - 0.05) / 0.5));
+                doc.group.scale.setScalar(s);
+                doc.bodyMat.opacity = s * 0.88;
+                doc.borderMat.opacity = s * 0.7;
 
-            // Add output text once it's sufficiently visible (localT > 0.4)
-            if (localT > 0.4 && node.outputIds.length === 0) {
-                this._spawnOutputText(i, 0);
+                // Show doc label text
+                this.glyphCollection.updateColor(doc.labelId, {
+                    r: doc.labelColor.r * s,
+                    g: doc.labelColor.g * s,
+                    b: doc.labelColor.b * s,
+                });
+                this.glyphCollection.updateColor(doc.snippetId, {
+                    r: doc.labelColor.r * s * 0.7,
+                    g: doc.labelColor.g * s * 0.7,
+                    b: doc.labelColor.b * s * 0.7,
+                });
             }
         }
     }
 
-    // Phase 2: Round 1 — forward cross-reference arrows
-    _updatePhase1Forward(t, dt) {
-        // Forward review order per agent:
-        //   A(0) reads B(1) then C(2)  → arrows: 1→0, 2→0 (reading into A)
-        //   B(1) reads A(0) then C(2)  → arrows: 0→1, 2→1
-        //   C(2) reads A(0) then B(1)  → arrows: 0→2, 1→2
-        //
-        // Stagger agent groups 0.2s apart
+    // ─── Phase 2: Forward review (green) ─────────────────────────────────────
+    //
+    // Order: A reads B,C → B reads A,C → C reads A,B
+    // Each agent's "turn" is staggered. Within a turn, first doc travels then second.
+    // After absorb, new doc (round 1) emerges.
+
+    _updateForwardReview(t) {
+        // 3 agents, each takes ~0.3 of the total phase, staggered by 0.28
+        // Within each agent slot:
+        //   0.00–0.35 : first source doc travels & absorbs
+        //   0.30–0.65 : second source doc travels & absorbs
+        //   0.60–0.90 : new doc emerges from receiver
 
         const forwardGroups = [
             { agent: 0, srcs: [1, 2] },
@@ -544,30 +689,42 @@ export class CrossRefAnimation {
 
         for (let gi = 0; gi < 3; gi++) {
             const { agent, srcs } = forwardGroups[gi];
-            const groupT = clamp01((t - gi * 0.22) / 0.65);
+            const slotStart = gi * 0.30;
+            const slotDur = 0.65;
+            const slotT = clamp01((t - slotStart) / slotDur);
 
-            for (let si = 0; si < srcs.length; si++) {
-                const src = srcs[si];
-                const arrowT = clamp01((groupT - si * 0.15) / 0.55);
-                this._activateArrow(src, agent, arrowT, COLOR.connActive);
-            }
+            // Travel first source
+            const trav0 = clamp01(slotT / 0.45);
+            this._animateDocTravel(this._docs[srcs[0]][0], agent, trav0, 'green');
 
-            // Node pulse for the reading agent
+            // Travel second source (starts when first is ~60% done)
+            const trav1Start = 0.3;
+            const trav1 = clamp01((slotT - trav1Start) / 0.45);
+            this._animateDocTravel(this._docs[srcs[1]][0], agent, trav1, 'green');
+
+            // Node "digesting" pulse while absorbing
+            const digestT = clamp01((slotT - 0.2) / 0.5);
+            const pulse = Math.sin(digestT * Math.PI * 2) * 0.5;
             const node = this._nodes[agent];
-            const pulse = Math.sin(groupT * Math.PI) * 0.5;
-            node.mat.emissive.setRGB(0, pulse * 0.6, pulse * 0.3);
-            node.rimMat.opacity = 0.25 + pulse * 0.4;
+            node.mat.emissive.setRGB(0, (0.3 + pulse) * 0.5, (0.3 + pulse) * 0.25);
+            node.rimMat.color.set(0x00ff88);
+            node.rimMat.opacity = 0.25 + Math.abs(pulse) * 0.55;
+            node.workspace.mat.opacity = 0.5 + Math.abs(pulse) * 0.35;
 
-            // Spawn round 1 output text
-            if (groupT > 0.7 && node.outputIds.length <= 1) {
-                this._spawnOutputText(agent, 1);
+            // Emerge round-1 doc once both docs are mostly absorbed
+            if (slotT > 0.62) {
+                const emergeT = clamp01((slotT - 0.62) / 0.35);
+                this._emergeDoc(this._docs[agent][1], emergeT);
             }
         }
     }
 
-    // Phase 3: Round 2 — inverse cross-reference
-    _updatePhase2Inverse(t, dt) {
-        // Inverse order: A reads C then B, B reads C then A, C reads B then A
+    // ─── Phase 3: Inverse review (blue) ──────────────────────────────────────
+    //
+    // Uses round-1 docs as source, reversed reading order.
+    // A reads C first then B, B reads C first then A, C reads B first then A.
+
+    _updateInverseReview(t) {
         const inverseGroups = [
             { agent: 0, srcs: [2, 1] },
             { agent: 1, srcs: [2, 0] },
@@ -576,188 +733,312 @@ export class CrossRefAnimation {
 
         for (let gi = 0; gi < 3; gi++) {
             const { agent, srcs } = inverseGroups[gi];
-            const groupT = clamp01((t - gi * 0.22) / 0.65);
+            const slotStart = gi * 0.30;
+            const slotDur = 0.65;
+            const slotT = clamp01((t - slotStart) / slotDur);
 
-            for (let si = 0; si < srcs.length; si++) {
-                const src = srcs[si];
-                const arrowT = clamp01((groupT - si * 0.15) / 0.55);
-                this._activateArrow(src, agent, arrowT, COLOR.connInverse);
-            }
+            // Use round-1 docs (already at rest positions after forward phase)
+            const trav0 = clamp01(slotT / 0.45);
+            this._animateDocTravel(this._docs[srcs[0]][1], agent, trav0, 'blue');
 
-            // Also show all round-1 outputs flowing in (extra packets with blue tint)
-            // Done by brief flicker on the round-1 output panel
+            const trav1Start = 0.3;
+            const trav1 = clamp01((slotT - trav1Start) / 0.45);
+            this._animateDocTravel(this._docs[srcs[1]][1], agent, trav1, 'blue');
+
+            // Node "digesting" with blue tint
+            const digestT = clamp01((slotT - 0.2) / 0.5);
+            const pulse = Math.sin(digestT * Math.PI * 2) * 0.5;
             const node = this._nodes[agent];
-            const pulse = Math.sin(groupT * Math.PI) * 0.6;
-            node.mat.emissive.setRGB(pulse * 0.15, pulse * 0.3, pulse * 0.6);
-            node.rimMat.color.setRGB(pulse * 0.3, pulse * 0.5, 1.0);
-            node.rimMat.opacity = 0.25 + pulse * 0.5;
+            node.mat.emissive.setRGB(pulse * 0.1, pulse * 0.2, pulse * 0.55);
+            node.rimMat.color.set(0x4488ff);
+            node.rimMat.opacity = 0.25 + Math.abs(pulse) * 0.55;
+            node.workspace.mat.opacity = 0.45 + Math.abs(pulse) * 0.3;
 
-            // Spawn synthesis text
-            if (groupT > 0.75 && node.outputIds.length <= 2) {
-                this._spawnOutputText(agent, 2);
+            // Emerge round-2 (final) doc
+            if (slotT > 0.62) {
+                const emergeT = clamp01((slotT - 0.62) / 0.35);
+                this._emergeDoc(this._docs[agent][2], emergeT);
             }
         }
     }
 
-    // Phase 4: Convergence — all connections pulse green simultaneously
-    _updatePhase3Convergence(t) {
-        const pulse = Math.sin(t * Math.PI * 3) * 0.5 + 0.5;
-        const intensity = easeOut(t) * pulse;
+    // ─── Phase 4: Convergence ─────────────────────────────────────────────────
 
-        for (const arrow of this._arrows) {
-            const { line, mat } = arrow;
-            mat.color.copy(COLOR.connActive);
-            mat.opacity = 0.15 + intensity * 0.6;
-            for (const pkt of arrow.packets) {
-                // Convergence packets orbit randomly
-                pkt.mesh.material.opacity = 0;
-            }
+    _updateConvergence(t) {
+        const center = new THREE.Vector3(0, 0, 0);
+        const pulse = Math.sin(t * Math.PI * 4) * 0.5 + 0.5;
+        const intensity = easeOut(t);
+
+        // Slide final (round-2) docs toward center
+        for (let i = 0; i < 3; i++) {
+            const doc = this._docs[i][2];
+            if (!doc.visible) continue;
+
+            const slideT = easeInOut(t);
+            doc.group.position.lerpVectors(doc.restPos, center, slideT);
+            // Scale down as they merge (last 30% of the phase)
+            const mergeT = clamp01((t - 0.7) / 0.3);
+            const s = 1 - easeIn(mergeT) * 0.7;
+            doc.group.scale.setScalar(s);
+            doc.bodyMat.opacity = (1 - mergeT) * 0.88;
+            doc.borderMat.opacity = (1 - mergeT) * 0.7;
+
+            // Labels fade
+            const fc = 1 - mergeT;
+            this.glyphCollection.updateColor(doc.labelId, {
+                r: doc.labelColor.r * fc,
+                g: doc.labelColor.g * fc,
+                b: doc.labelColor.b * fc,
+            });
+            this.glyphCollection.updateColor(doc.snippetId, {
+                r: doc.labelColor.r * fc * 0.7,
+                g: doc.labelColor.g * fc * 0.7,
+                b: doc.labelColor.b * fc * 0.7,
+            });
         }
 
+        // Synth object grows from center as docs merge
+        const synthAppear = easeOut(clamp01((t - 0.35) / 0.6));
+        this._synthMesh.mat.opacity = synthAppear * 0.9;
+        this._synthMesh.rimMat.opacity = synthAppear * (0.3 + pulse * 0.5);
+        this._synthMesh.mat.emissive.setRGB(0, synthAppear * 0.4, synthAppear * 0.2);
+        this._synthMesh.rimMat.color.copy(COLOR.synthPulse);
+        const synthScale = easeOut(synthAppear) * (1 + pulse * 0.15);
+        this._synthMesh.mesh.scale.setScalar(synthScale);
+        this._synthMesh.rimMesh.scale.setScalar(synthScale * 1.1);
+
+        // Node rims glow green toward convergence
         for (const node of this._nodes) {
-            const glow = intensity;
-            node.mat.color.copy(COLOR.nodeIdle).lerp(COLOR.nodeActive, glow * 0.4);
-            node.mat.emissive.setRGB(0, glow * 0.5, glow * 0.25);
-            node.rimMat.color.copy(COLOR.connActive);
-            node.rimMat.opacity = 0.2 + glow * 0.55;
+            node.mat.emissive.setRGB(0, intensity * 0.35, intensity * 0.18);
+            node.rimMat.color.set(0x00ff88);
+            node.rimMat.opacity = 0.25 + pulse * intensity * 0.4;
         }
 
-        // Light pulsing
-        this._pointLight.intensity = 1.5 + pulse * 2.5;
+        // Point light pulses green
+        this._pointLight.intensity = 1.5 + pulse * intensity * 3.0;
         this._pointLight.color.setRGB(0, 1, 0.53);
     }
 
-    // Phase 5: Fade everything out before loop restart
-    _updatePhaseFadeOut(t) {
-        const opacity = 1 - easeInOut(t);
+    // ─── Phase 5: Fade out ────────────────────────────────────────────────────
+
+    _updateFadeOut(t) {
+        const op = 1 - easeInOut(t);
 
         for (const node of this._nodes) {
-            node.mat.opacity = opacity;
-            node.rimMat.opacity = opacity * 0.4;
-        }
-
-        for (const arrow of this._arrows) {
-            arrow.mat.opacity *= 0.92;
-        }
-
-        for (const panel of this._outputPanels) {
-            panel.mat.opacity *= 0.92;
-            panel.borderMat.opacity *= 0.92;
-        }
-
-        // Fade all labels toward transparent
-        for (const node of this._nodes) {
-            const c = opacity;
+            node.mat.opacity = op;
+            node.rimMat.opacity = op * 0.35;
+            node.workspace.mat.opacity = op * 0.5;
             this.glyphCollection.updateColor(node.labelId, {
-                r: 0.0,
-                g: 0.9 * c,
-                b: 0.55 * c,
+                r: 0.0, g: 0.9 * op, b: 0.55 * op,
             });
             this.glyphCollection.updateColor(node.nameId, {
-                r: COLOR.dimLabel.r * c,
-                g: COLOR.dimLabel.g * c,
-                b: COLOR.dimLabel.b * c,
+                r: COLOR.dimLabel.r * op,
+                g: COLOR.dimLabel.g * op,
+                b: COLOR.dimLabel.b * op,
             });
         }
 
-        this._pointLight.intensity = lerp(1.5, 0.5, t);
-        this._pointLight.color.setRGB(0, 1, 0.53);
+        // Fade all visible docs
+        for (let a = 0; a < 3; a++) {
+            for (let r = 0; r < 3; r++) {
+                const doc = this._docs[a][r];
+                if (!doc.visible) continue;
+                doc.bodyMat.opacity = op * 0.88;
+                doc.borderMat.opacity = op * 0.7;
+                this.glyphCollection.updateColor(doc.labelId, {
+                    r: doc.labelColor.r * op,
+                    g: doc.labelColor.g * op,
+                    b: doc.labelColor.b * op,
+                });
+                this.glyphCollection.updateColor(doc.snippetId, {
+                    r: doc.labelColor.r * op * 0.7,
+                    g: doc.labelColor.g * op * 0.7,
+                    b: doc.labelColor.b * op * 0.7,
+                });
+            }
+        }
+
+        // Hide all arc trails
+        for (const key in this._arcTrails) {
+            const trail = this._arcTrails[key];
+            trail.green.material.opacity *= 0.88;
+            trail.blue.material.opacity  *= 0.88;
+        }
+
+        // Fade synth
+        this._synthMesh.mat.opacity *= 0.88;
+        this._synthMesh.rimMat.opacity *= 0.88;
+
+        this._pointLight.intensity = lerp(1.5, 0.3, t);
     }
 
-    // ─── Arrow activation ─────────────────────────────────────────────────────
+    // ─── Doc animation helpers ────────────────────────────────────────────────
 
     /**
-     * Activate (fade in + animate packets) the arrow from src to dst.
-     * @param {number} src - agent index
-     * @param {number} dst - agent index
-     * @param {number} t   - local 0→1 progress
-     * @param {THREE.Color} color
+     * Animate a document traveling from its current agent toward `dstAgent`.
+     * Stages:
+     *   0.0–0.1  : lift up (scale stays 1, moves slightly Z+)
+     *   0.1–0.75 : arc travel along bezier
+     *   0.75–1.0 : absorb into destination (scale 1→0, fade)
+     *
+     * @param {Object} doc - document object
+     * @param {number} dstAgent - destination agent index
+     * @param {number} t - 0→1 animation progress
+     * @param {string} colorMode - 'green' or 'blue'
      */
-    _activateArrow(src, dst, t, color) {
-        const arrow = this._arrows.find(a => a.src === src && a.dst === dst);
-        if (!arrow) return;
+    _animateDocTravel(doc, dstAgent, t, colorMode) {
+        if (t <= 0) return;
+        if (doc.absorbed) return;
 
-        // Fade in the line
-        arrow.mat.color.copy(color);
-        arrow.mat.opacity = easeOut(t) * 0.55;
+        doc.group.visible = true;
+        doc.traveling = true;
 
-        // Animate packets along the arrow
-        for (let p = 0; p < arrow.packets.length; p++) {
-            const pkt = arrow.packets[p];
-            const pktPhase = (pkt.phase + t * 1.2) % 1.0;
-            if (pktPhase < 0.85) {
-                pkt.mesh.position.lerpVectors(arrow.srcPos, arrow.dstPos, pktPhase);
-                pkt.mesh.material.color.copy(color);
-                pkt.mesh.material.opacity = easeOut(t) * 0.9 * Math.sin(pktPhase * Math.PI);
+        const srcPos = doc.restPos.clone();
+        const dstPos = this._positions[dstAgent].clone();
+        const key = `${doc.agentIdx}_${dstAgent}`;
+        const trailInfo = this._arcTrails[key];
+
+        let ctrl;
+        if (trailInfo) {
+            ctrl = colorMode === 'green' ? trailInfo.ctrl_green : trailInfo.ctrl_blue;
+        } else {
+            ctrl = bezierControl(srcPos, dstPos, 2.0, true);
+        }
+
+        // Show arc trail briefly during travel
+        if (trailInfo) {
+            const trail = colorMode === 'green' ? trailInfo.green : trailInfo.blue;
+            // Fade trail in, hold, then fade out
+            if (t < 0.1) {
+                trail.material.opacity = easeOut(t / 0.1) * 0.25;
+            } else if (t < 0.75) {
+                trail.material.opacity = 0.18;
             } else {
-                pkt.mesh.material.opacity = 0;
+                trail.material.opacity = (1 - (t - 0.75) / 0.25) * 0.18;
+            }
+        }
+
+        const tmp = new THREE.Vector3();
+
+        if (t < 0.1) {
+            // Lift phase
+            const liftT = t / 0.1;
+            doc.group.position.copy(srcPos);
+            doc.group.position.z += easeOut(liftT) * 0.8;
+            doc.group.scale.setScalar(1);
+            doc.bodyMat.opacity = 0.88;
+            doc.borderMat.opacity = 0.7;
+        } else if (t < 0.78) {
+            // Arc travel
+            const travelT = (t - 0.1) / 0.68;
+            // Tiny lift at src, arc above, approach dst
+            const liftedSrc = srcPos.clone();
+            liftedSrc.z += 0.8;
+            quadBezier(liftedSrc, ctrl, dstPos, easeInOut(travelT), tmp);
+            doc.group.position.copy(tmp);
+            // Scale stays 1 during flight
+            doc.group.scale.setScalar(1);
+            doc.bodyMat.opacity = 0.88;
+            doc.borderMat.opacity = 0.7;
+
+            // Show doc label during flight
+            this.glyphCollection.updateColor(doc.labelId, {
+                r: doc.labelColor.r,
+                g: doc.labelColor.g,
+                b: doc.labelColor.b,
+            });
+            this.glyphCollection.updateColor(doc.snippetId, {
+                r: doc.labelColor.r * 0.7,
+                g: doc.labelColor.g * 0.7,
+                b: doc.labelColor.b * 0.7,
+            });
+        } else {
+            // Absorb into destination node
+            const absorbT = (t - 0.78) / 0.22;
+            const s = 1 - easeIn(absorbT);
+            doc.group.position.copy(dstPos);
+            doc.group.scale.setScalar(s);
+            doc.bodyMat.opacity = s * 0.88;
+            doc.borderMat.opacity = s * 0.7;
+
+            const fc = s;
+            this.glyphCollection.updateColor(doc.labelId, {
+                r: doc.labelColor.r * fc,
+                g: doc.labelColor.g * fc,
+                b: doc.labelColor.b * fc,
+            });
+            this.glyphCollection.updateColor(doc.snippetId, {
+                r: doc.labelColor.r * fc * 0.7,
+                g: doc.labelColor.g * fc * 0.7,
+                b: doc.labelColor.b * fc * 0.7,
+            });
+
+            if (absorbT >= 0.99) {
+                doc.group.visible = false;
+                doc.visible = false;
+                doc.absorbed = true;
+                // Hide trail
+                if (trailInfo) {
+                    const trail = colorMode === 'green' ? trailInfo.green : trailInfo.blue;
+                    trail.material.opacity = 0;
+                }
             }
         }
     }
 
-    // ─── Output text spawning ─────────────────────────────────────────────────
-
     /**
-     * Spawn a glyph text entry for agent[agentIdx]'s output at round[roundIdx].
+     * Emerge a new document at its resting position.
+     * @param {Object} doc
+     * @param {number} t - 0→1 emerge progress
      */
-    _spawnOutputText(agentIdx, roundIdx) {
-        const agent = AGENTS[agentIdx];
-        const node = this._nodes[agentIdx];
-        const panel = this._outputPanels[agentIdx * 3 + roundIdx];
+    _emergeDoc(doc, t) {
+        if (doc.absorbed) return;
+        const emerge = easeOut(t);
+        doc.group.visible = true;
+        doc.visible = true;
+        doc.group.position.copy(doc.restPos);
+        doc.group.scale.setScalar(emerge);
+        doc.bodyMat.opacity = emerge * 0.88;
+        doc.borderMat.opacity = emerge * 0.7;
 
-        let text, color;
-        if (roundIdx === 0) {
-            text = agent.snippets[0];
-            color = COLOR.outputColor;
-        } else if (roundIdx === 1) {
-            text = agent.snippets[1];
-            color = { r: 0.3, g: 0.65, b: 0.45 };
-        } else {
-            text = agent.synthSnippet;
-            color = COLOR.synthColor;
-        }
-
-        // Place text slightly in front of the panel
-        const textPos = {
-            x: panel.center.x - 1.2,
-            y: panel.center.y + 0.18,
-            z: panel.center.z + 0.01,
-        };
-
-        const textId = this.glyphCollection.addText(text, textPos, {
-            color,
-            scale: 0.75,
+        this.glyphCollection.updateColor(doc.labelId, {
+            r: doc.labelColor.r * emerge,
+            g: doc.labelColor.g * emerge,
+            b: doc.labelColor.b * emerge,
         });
-
-        this.glyphCollection.flush();
-        node.outputIds.push(textId);
+        this.glyphCollection.updateColor(doc.snippetId, {
+            r: doc.labelColor.r * emerge * 0.7,
+            g: doc.labelColor.g * emerge * 0.7,
+            b: doc.labelColor.b * emerge * 0.7,
+        });
     }
 
     // ─── Reset for loop ───────────────────────────────────────────────────────
 
     _resetVisualization() {
-        // Remove spawned output texts
-        for (const node of this._nodes) {
-            for (const id of node.outputIds) {
-                this.glyphCollection.removeText(id);
-            }
-            node.outputIds = [];
-        }
-        this.glyphCollection.flush();
+        // Reset all docs
+        for (let a = 0; a < 3; a++) {
+            for (let r = 0; r < 3; r++) {
+                const doc = this._docs[a][r];
+                doc.group.visible = false;
+                doc.group.position.copy(doc.restPos);
+                doc.group.scale.setScalar(0);
+                doc.bodyMat.opacity = 0;
+                doc.borderMat.opacity = 0;
+                doc.visible = false;
+                doc.traveling = false;
+                doc.absorbed = false;
 
-        // Reset arrow opacities
-        for (const arrow of this._arrows) {
-            arrow.mat.opacity = 0;
-            arrow.mat.color.set(COLOR.connInactive);
-            for (const pkt of arrow.packets) {
-                pkt.mesh.material.opacity = 0;
+                this.glyphCollection.updateColor(doc.labelId,   { r: 0.001, g: 0.001, b: 0.001 });
+                this.glyphCollection.updateColor(doc.snippetId, { r: 0.001, g: 0.001, b: 0.001 });
             }
         }
 
-        // Reset panels
-        for (const panel of this._outputPanels) {
-            panel.mat.opacity = 0;
-            panel.borderMat.opacity = 0;
+        // Reset arc trails
+        for (const key in this._arcTrails) {
+            const t = this._arcTrails[key];
+            t.green.material.opacity = 0;
+            t.blue.material.opacity  = 0;
         }
 
         // Reset nodes
@@ -766,11 +1047,19 @@ export class CrossRefAnimation {
             node.mat.emissive.setRGB(0, 0, 0);
             node.mat.color.copy(COLOR.nodeIdle);
             node.rimMat.opacity = 0;
+            node.workspace.mat.opacity = 0;
 
-            // Reset labels to near-invisible so phase 0 can fade them in
             this.glyphCollection.updateColor(node.labelId, { r: 0.001, g: 0.001, b: 0.001 });
-            this.glyphCollection.updateColor(node.nameId, { r: 0.001, g: 0.001, b: 0.001 });
+            this.glyphCollection.updateColor(node.nameId,  { r: 0.001, g: 0.001, b: 0.001 });
         }
+
+        // Reset synth
+        this._synthMesh.mat.opacity = 0;
+        this._synthMesh.rimMat.opacity = 0;
+        this._synthMesh.mesh.scale.setScalar(1);
+        this._synthMesh.rimMesh.scale.setScalar(1);
+        this._synthMesh.mesh.rotation.set(0, 0, 0);
+        this._synthMesh.rimMesh.rotation.set(0, 0, 0);
 
         // Reset light
         this._pointLight.intensity = 1.5;
@@ -793,7 +1082,6 @@ export class CrossRefAnimation {
         this._disposed = true;
         cancelAnimationFrame(this._rafId);
         window.removeEventListener('resize', this._onResize);
-
         if (this.glyphCollection) this.glyphCollection.dispose();
         this.renderer.dispose();
     }
