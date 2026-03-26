@@ -168,14 +168,19 @@ function bezierControl(from, to, arcHeight, clockwise) {
 }
 
 /**
- * Build a document card mesh — thin box with an edge border.
- * Returns { group, bodyMesh, bodyMat, borderMesh, borderMat }
+ * Build a document card — box sized to fit its content.
+ * @param {number} contentW - measured width of text content
+ * @param {number} contentH - measured height of text content
+ * @param {THREE.Color} bodyColor
+ * @param {THREE.Color} borderColor
  */
-function buildDocCard(bodyColor, borderColor) {
-    const W = 1.6, H = 1.0, D = 0.06;
+function buildDocCard(contentW, contentH, bodyColor, borderColor) {
+    const pad = 0.15;
+    const W = contentW + pad * 2;
+    const H = contentH + pad * 2;
+    const D = 0.06;
     const group = new THREE.Group();
 
-    // Body
     const bodyGeo = new THREE.BoxGeometry(W, H, D);
     const bodyMat = new THREE.MeshStandardMaterial({
         color: bodyColor.clone(),
@@ -188,7 +193,6 @@ function buildDocCard(bodyColor, borderColor) {
     const bodyMesh = new THREE.Mesh(bodyGeo, bodyMat);
     group.add(bodyMesh);
 
-    // Border (edges of front face only — approximate with EdgesGeometry on a plane)
     const borderGeo = new THREE.EdgesGeometry(new THREE.PlaneGeometry(W, H));
     const borderMat = new THREE.LineBasicMaterial({
         color: borderColor.clone(),
@@ -434,51 +438,98 @@ export class CrossRefAnimation {
         const borderColors = [COLOR.docBorderR0, COLOR.docBorderR1, COLOR.docBorderR2];
         const labelColors = [COLOR.docLabelR0, COLOR.docLabelR1, COLOR.docLabelR2];
 
+        // Step 1: Add all text to GlyphCollection (labels + snippets)
+        // We need to flush to get measured bounds before building card meshes.
+        const textEntries = []; // { agentIdx, roundIdx, labelId, snippetId }
+        for (let a = 0; a < 3; a++) {
+            const agent = AGENTS[a];
+            for (let r = 0; r < 3; r++) {
+                // Place at origin temporarily — will reposition after measuring
+                const labelId = this.glyphCollection.addText(
+                    agent.docLabels[r],
+                    { x: 0, y: 0, z: 0 },
+                    { color: { r: 0.001, g: 0.001, b: 0.001 }, scale: 1.1 }
+                );
+                const snippetId = this.glyphCollection.addText(
+                    agent.snippets[r],
+                    { x: 0, y: -1.2, z: 0 }, // below the label
+                    { color: { r: 0.001, g: 0.001, b: 0.001 }, scale: 0.62 }
+                );
+                textEntries.push({ agentIdx: a, roundIdx: r, labelId, snippetId });
+            }
+        }
+
+        // Step 2: Flush so text bounds are computed
+        this.glyphCollection.flush();
+
+        // Step 3: Measure each text pair, build sized cards, stack per agent
         for (let a = 0; a < 3; a++) {
             this._docs.push([]);
-            const agent = AGENTS[a];
             const pos = this._positions[a];
-            const agentDocs = [];
+            const agentCards = [];
 
-            // Step 1: Build card meshes
             for (let r = 0; r < 3; r++) {
-                const doc = buildDocCard(bodyColors[r], borderColors[r]);
+                const entry = textEntries[a * 3 + r];
+                const labelInfo = this.glyphCollection.getText(entry.labelId);
+                const snippetInfo = this.glyphCollection.getText(entry.snippetId);
+
+                // Measure text bounds
+                const labelBounds = labelInfo?.getBounds?.() || { min: {x:0,y:0}, max: {x:1.5,y:0.5} };
+                const snippetBounds = snippetInfo?.getBounds?.() || { min: {x:0,y:0}, max: {x:1.5,y:0.3} };
+
+                const labelW = (labelBounds.max?.x || 1.5) - (labelBounds.min?.x || 0);
+                const labelH = (labelBounds.max?.y || 0.5) - (labelBounds.min?.y || 0);
+                const snippetW = (snippetBounds.max?.x || 1.5) - (snippetBounds.min?.x || 0);
+                const snippetH = (snippetBounds.max?.y || 0.3) - (snippetBounds.min?.y || 0);
+
+                const contentW = Math.max(labelW, snippetW);
+                const contentH = labelH + snippetH + 0.1; // small gap between label and snippet
+
+                // Build card sized to content
+                const doc = buildDocCard(contentW, contentH, bodyColors[r], borderColors[r]);
                 this.scene.add(doc.group);
-                agentDocs.push(doc);
+
+                doc.labelId = entry.labelId;
+                doc.snippetId = entry.snippetId;
+                doc.labelColor = labelColors[r];
                 doc.agentIdx = a;
                 doc.roundIdx = r;
                 doc.visible = false;
                 doc.traveling = false;
                 doc.absorbed = false;
-                doc.labelColor = labelColors[r];
+                doc.contentW = contentW;
+                doc.contentH = contentH;
+
                 this._docs[a].push(doc);
+                agentCards.push(doc);
             }
 
-            // Step 2: Stack using measured bounds — sets doc.restPos
-            stackCards(agentDocs, pos);
+            // Stack cards using their measured sizes
+            stackCards(agentCards, pos);
 
-            // Step 3: Add text labels at the measured positions
+            // Reposition text to match card rest positions
             for (let r = 0; r < 3; r++) {
                 const doc = this._docs[a][r];
-                const restPos = doc.restPos;
+                const rp = doc.restPos;
+                const halfH = doc.contentH / 2;
 
-                const labelId = this.glyphCollection.addText(
-                    agent.docLabels[r],
-                    { x: restPos.x - 0.32, y: restPos.y + 0.18, z: restPos.z + 0.1 },
-                    { color: { r: 0.001, g: 0.001, b: 0.001 }, scale: 1.1 }
-                );
-
-                const snippetId = this.glyphCollection.addText(
-                    agent.snippets[r],
-                    { x: restPos.x - 0.72, y: restPos.y + 0.02, z: restPos.z + 0.1 },
-                    { color: { r: 0.001, g: 0.001, b: 0.001 }, scale: 0.62 }
-                );
-
-                doc.labelId = labelId;
-                doc.snippetId = snippetId;
-                doc.currentPos = restPos.clone();
+                // Label at top of card, snippet below
+                this.glyphCollection.updatePosition(doc.labelId, {
+                    x: rp.x - doc.contentW / 2,
+                    y: rp.y + halfH - 0.1,
+                    z: rp.z + 0.1
+                });
+                this.glyphCollection.updatePosition(doc.snippetId, {
+                    x: rp.x - doc.contentW / 2,
+                    y: rp.y - halfH + 0.3,
+                    z: rp.z + 0.1
+                });
+                doc.currentPos = rp.clone();
             }
         }
+
+        // Final flush to apply repositioned text
+        this.glyphCollection.flush();
     }
 
     // ─── Arc trail lines ──────────────────────────────────────────────────────
