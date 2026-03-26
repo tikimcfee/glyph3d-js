@@ -218,6 +218,7 @@ export function settingsPanelHTML() {
             <input type="range" class="setting-slider" id="layout-spacing"
                    min="0" max="500" step="10" value="10">
         </div>
+        <div class="setting-group setting-section-header">Navigation</div>
         <div class="setting-group">
             <div class="setting-label">
                 <span>Camera Speed</span>
@@ -225,6 +226,22 @@ export function settingsPanelHTML() {
             </div>
             <input type="range" class="setting-slider" id="cam-speed"
                    min="1" max="50" step="1" value="5">
+        </div>
+        <div class="setting-group">
+            <div class="setting-label">
+                <span>Drag Sensitivity</span>
+                <span class="setting-value" id="drag-sensitivity-value">1.0</span>
+            </div>
+            <input type="range" class="setting-slider" id="drag-sensitivity"
+                   min="0.1" max="5" step="0.1" value="1.0">
+        </div>
+        <div class="setting-group">
+            <div class="setting-label">
+                <span>Scroll Sensitivity</span>
+                <span class="setting-value" id="scroll-sensitivity-value">1.0</span>
+            </div>
+            <input type="range" class="setting-slider" id="scroll-sensitivity"
+                   min="0.1" max="5" step="0.1" value="1.0">
         </div>
         <div class="setting-group">
             <button class="setting-btn" id="reset-camera">Reset Camera</button>
@@ -272,11 +289,11 @@ export function controlsPanelHTML() {
             <div class="control-row"><span class="key">Shift</span>Down</div>
 
             <h4>Mouse</h4>
-            <div class="control-row"><span class="key">Click</span>Lock cursor</div>
-            <div class="control-row"><span class="key">Move</span>Look around</div>
+            <div class="control-row"><span class="key">Drag</span>Pan (translate)</div>
+            <div class="control-row"><span class="key">Scroll</span>Zoom in/out</div>
 
             <h4>Touch</h4>
-            <div class="control-row"><span class="key">1 finger</span>Drag to look</div>
+            <div class="control-row"><span class="key">1 finger</span>Drag to pan</div>
             <div class="control-row"><span class="key">2 finger</span>Drag to pan</div>
             <div class="control-row"><span class="key">Pinch</span>Zoom in/out</div>
         </div>
