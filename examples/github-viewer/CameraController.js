@@ -142,12 +142,13 @@ export class CameraController {
         document.addEventListener('mouseup', this._onMouseUp);
         document.addEventListener('mousemove', this._onMouseMove);
 
-        // --- Scroll: pan by default, zoom with Alt/Option held ---
+        // --- Scroll: pan by default, zoom with Alt/Option or pinch (ctrlKey) ---
         this._onWheel = (e) => {
             if (e.target === canvas || canvas.contains(e.target)) {
                 e.preventDefault();
-                if (e.altKey) {
+                if (e.altKey || e.ctrlKey) {
                     // Alt/Option + scroll = zoom
+                    // ctrlKey = trackpad pinch-to-zoom (browsers set ctrlKey for pinch)
                     const delta = this.settings.invertScroll ? e.deltaY : -e.deltaY;
                     const zoomAmount = delta * this.settings.scrollSensitivity * 0.5;
                     const forward = new this.THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
@@ -341,8 +342,8 @@ export class CameraController {
         if (this.keys['KeyS']) moveDir.z += 1;
         if (this.keys['KeyA']) moveDir.x -= 1;
         if (this.keys['KeyD']) moveDir.x += 1;
-        if (this.keys['Space']) moveDir.y += 1;
-        if (this.keys['ShiftLeft'] || this.keys['ShiftRight']) moveDir.y -= 1;
+        if (this.keys['Space'] || this.keys['KeyQ']) moveDir.y += 1;
+        if (this.keys['KeyE']) moveDir.y -= 1;
 
         if (moveDir.length() > 0) {
             moveDir.normalize();

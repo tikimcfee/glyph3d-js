@@ -343,8 +343,8 @@ export function controlsPanelHTML() {
             <div class="control-row"><span class="key">S</span>Backward</div>
             <div class="control-row"><span class="key">A</span>Left</div>
             <div class="control-row"><span class="key">D</span>Right</div>
-            <div class="control-row"><span class="key">Space</span>Up</div>
-            <div class="control-row"><span class="key">Shift</span>Down</div>
+            <div class="control-row"><span class="key">Q / Space</span>Up</div>
+            <div class="control-row"><span class="key">E</span>Down</div>
 
             <h4>Selection</h4>
             <div class="control-row"><span class="key">Click</span>Select file</div>
