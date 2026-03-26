@@ -97,15 +97,25 @@ function agentPositions(radius) {
     ];
 }
 
-// Document resting offsets from agent node (where a doc parks after emerging)
-function docRestOffset(agentIdx) {
-    // A: right, B: left, C: right — keep cards out of the triangle interior
-    const offsets = [
-        new THREE.Vector3( 2.2, 0.3, 0),    // A — right
-        new THREE.Vector3(-2.2, 0.3, 0),    // B — left
-        new THREE.Vector3( 2.2,-0.3, 0),    // C — right
-    ];
-    return offsets[agentIdx];
+/**
+ * Compute the rest position for a specific document card in a radial stack.
+ * Each agent stacks documents radially outward from the triangle center,
+ * with consistent slot spacing so cards never overlap.
+ *
+ * @param {THREE.Vector3} agentPos - world position of the agent node
+ * @param {number} slotIndex - stack slot (0 = innermost, grows outward)
+ * @returns {THREE.Vector3}
+ */
+function docStackPosition(agentPos, slotIndex) {
+    // Radial unit vector: direction from center (0,0,0) to agent
+    const radial = agentPos.clone().normalize();
+    // Base offset distance from agent center, then spacing per slot
+    const baseOffset = 2.0;
+    const slotSpacing = 1.2;
+    const dist = baseOffset + slotIndex * slotSpacing;
+    // Small Z per slot to prevent z-fighting
+    const zOffset = 0.1 * (slotIndex + 1);
+    return agentPos.clone().addScaledVector(radial, dist).setZ(zOffset);
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -276,11 +286,33 @@ export class CrossRefAnimation {
         this._lastTimestamp = null;
 
         // Per-phase durations (seconds)
+        //
+        // Forward review parallel waves:
+        //   Wave 1 (3 arcs):  0.0 – 2.0 s
+        //   Gap:              2.0 – 2.5 s
+        //   Wave 2 (3 arcs):  2.5 – 4.5 s
+        //   Gap:              4.5 – 5.0 s
+        //   Digest (all):     5.0 – 6.0 s
+        //   Emerge (all):     6.0 – 7.5 s
+        // Total forward: 7.5 s
+        //
+        // Inverse review parallel waves:
+        //   Wave 1: 0.0 – 2.0 s
+        //   Gap:    2.0 – 2.5 s
+        //   Wave 2: 2.5 – 4.5 s
+        //   Gap:    4.5 – 5.0 s
+        //   Wave 3: 5.0 – 7.0 s
+        //   Gap:    7.0 – 7.5 s
+        //   Wave 4: 7.5 – 9.5 s
+        //   Gap:    9.5 – 10.0 s
+        //   Digest: 10.0 – 11.0 s
+        //   Emerge: 11.0 – 12.5 s
+        // Total inverse: 12.5 s
         this._phaseDurations = [
             2.5,    // 0 — spawn nodes
             3.0,    // 1 — initial output docs emerge (A1 B1 C1)
-            14.0,   // 2 — forward review  (3 agents × 2 docs each, sequential)
-            20.0,   // 3 — inverse review  (3 agents × 4 docs each, sequential)
+            7.5,    // 2 — forward review (2 parallel waves + digest + emerge)
+            12.5,   // 3 — inverse review (4 parallel waves + digest + emerge)
             3.5,    // 4 — convergence
             2.0,    // 5 — fade out
         ];
@@ -386,41 +418,38 @@ export class CrossRefAnimation {
     _buildDocuments() {
         // 3 agents × 3 rounds
         // docs[agentIdx][roundIdx]
+        // Round index maps directly to stack slot so cards never overlap.
         const bodyColors = [COLOR.docRound0, COLOR.docRound1, COLOR.docRound2];
         const borderColors = [COLOR.docBorderR0, COLOR.docBorderR1, COLOR.docBorderR2];
+        const labelColors = [COLOR.docLabelR0, COLOR.docLabelR1, COLOR.docLabelR2];
 
         for (let a = 0; a < 3; a++) {
             this._docs.push([]);
             const agent = AGENTS[a];
             const pos = this._positions[a];
-            const restOffset = docRestOffset(a);
 
             for (let r = 0; r < 3; r++) {
                 const doc = buildDocCard(bodyColors[r], borderColors[r]);
-                const restPos = pos.clone().add(restOffset);
-                // Stack docs vertically by round
-                restPos.y += (1 - r) * 0.2;
-                restPos.z = 0.05 * (r + 1);
+                // Each round occupies its own radial stack slot — no overlap
+                const restPos = docStackPosition(pos, r);
                 doc.group.position.copy(restPos);
                 doc.group.scale.setScalar(0);
                 this.scene.add(doc.group);
 
-                // Tiny label on the doc ("A₁", "B₂", etc.)
+                // Label ("A₁", "B₂", etc.) sits on the card face at a small Z offset
                 const labelText = agent.docLabels[r];
-                // Position relative to doc rest position
                 const labelPos = {
                     x: restPos.x - 0.32,
                     y: restPos.y + 0.18,
                     z: restPos.z + 0.1,
                 };
-                const labelColors = [COLOR.docLabelR0, COLOR.docLabelR1, COLOR.docLabelR2];
                 const labelId = this.glyphCollection.addText(
                     labelText,
                     labelPos,
                     { color: { r: 0.001, g: 0.001, b: 0.001 }, scale: 1.1 }
                 );
 
-                // Content text (snippet) on the doc
+                // Content snippet also sits on the card face
                 const snippetPos = {
                     x: restPos.x - 0.72,
                     y: restPos.y + 0.02,
@@ -695,131 +724,136 @@ export class CrossRefAnimation {
 
     // ─── Phase 2: Forward review (green) ─────────────────────────────────────
     //
-    // Exact sequence:
-    //   Agent A turn: B₁→A, C₁→A, A digests, A₂ emerges
-    //   Agent B turn: A₁→B, C₁→B, B digests, B₂ emerges
-    //   Agent C turn: A₁→C, B₁→C, C digests, C₂ emerges
+    // ALL agents act in parallel — each wave fires 3 arcs simultaneously:
     //
-    // Documents are COPIES — originals stay at their rest positions.
-    // Each agent turn is fully sequential before the next starts.
-    // Timeline uses absolute seconds so timing is easy to follow.
-    //
-    // Per-agent slot (seconds within the phase):
-    //   A: 0.0 – 4.0   (travelDoc0: 0.0–1.5, travelDoc1: 1.0–2.5, digest: 2.0–3.0, emerge: 2.8–4.0)
-    //   B: 3.8 – 7.8
-    //   C: 7.6 – 11.6
-    // Total phase duration: 14.0 s
+    //   Wave 1 (0.0–2.0 s):  B₁→A,  A₁→B,  A₁→C   (first read for each agent)
+    //   Wave 2 (2.5–4.5 s):  C₁→A,  C₁→B,  B₁→C   (second read for each agent)
+    //   Digest (5.0–6.0 s):  all three agents pulse simultaneously
+    //   Emerge (6.0–7.5 s):  A₂, B₂, C₂ emerge simultaneously
 
     _updateForwardReview(t) {
-        const phaseSec = t * this._phaseDurations[2];   // current second within phase
+        const phaseSec = t * this._phaseDurations[2];
 
-        // Forward order: A reads [B,C], B reads [A,C], C reads [A,B]
-        const forwardSlots = [
-            { agent: 0, srcs: [1, 2], startSec: 0.0 },
-            { agent: 1, srcs: [0, 2], startSec: 3.8 },
-            { agent: 2, srcs: [0, 1], startSec: 7.6 },
-        ];
+        // Wave 1: each agent receives their first document simultaneously
+        //   A receives B₁  (src=1, round=0, dst=0)
+        //   B receives A₁  (src=0, round=0, dst=1)
+        //   C receives A₁  (src=0, round=0, dst=2)
+        const WAVE1_START = 0.0, WAVE1_DUR = 2.0;
+        if (phaseSec >= WAVE1_START) {
+            const w = clamp01((phaseSec - WAVE1_START) / WAVE1_DUR);
+            this._animateCopyTravel('fwd_w1_0', 1, 0, 0, w, 'green');  // B₁→A
+            this._animateCopyTravel('fwd_w1_1', 0, 0, 1, w, 'green');  // A₁→B
+            this._animateCopyTravel('fwd_w1_2', 0, 0, 2, w, 'green');  // A₁→C
+        }
 
-        for (const slot of forwardSlots) {
-            const { agent, srcs, startSec } = slot;
-            const localSec = phaseSec - startSec;
+        // Wave 2: each agent receives their second document simultaneously
+        //   A receives C₁  (src=2, round=0, dst=0)
+        //   B receives C₁  (src=2, round=0, dst=1)
+        //   C receives B₁  (src=1, round=0, dst=2)
+        const WAVE2_START = 2.5, WAVE2_DUR = 2.0;
+        if (phaseSec >= WAVE2_START) {
+            const w = clamp01((phaseSec - WAVE2_START) / WAVE2_DUR);
+            this._animateCopyTravel('fwd_w2_0', 2, 0, 0, w, 'green');  // C₁→A
+            this._animateCopyTravel('fwd_w2_1', 2, 0, 1, w, 'green');  // C₁→B
+            this._animateCopyTravel('fwd_w2_2', 1, 0, 2, w, 'green');  // B₁→C
+        }
 
-            // Travel copy 0: 0.0 – 1.5 s within slot
-            if (localSec >= 0) {
-                const trav0 = clamp01(localSec / 1.5);
-                this._animateCopyTravel(`fwd_${agent}_0`, srcs[0], 0, agent, trav0, 'green');
-            }
-
-            // Travel copy 1: 1.0 – 2.5 s within slot
-            if (localSec >= 1.0) {
-                const trav1 = clamp01((localSec - 1.0) / 1.5);
-                this._animateCopyTravel(`fwd_${agent}_1`, srcs[1], 0, agent, trav1, 'green');
-            }
-
-            // Node digesting pulse: 2.0 – 3.5 s within slot
-            const node = this._nodes[agent];
-            if (localSec >= 2.0 && localSec < 3.5) {
-                const digestT = clamp01((localSec - 2.0) / 1.5);
-                const pulse = Math.sin(digestT * Math.PI * 2) * 0.5;
+        // All agents digest simultaneously: 5.0–6.0 s
+        const DIGEST_START = 5.0, DIGEST_DUR = 1.0;
+        if (phaseSec >= DIGEST_START && phaseSec < DIGEST_START + DIGEST_DUR + 0.1) {
+            const digestT = clamp01((phaseSec - DIGEST_START) / DIGEST_DUR);
+            const pulse = Math.sin(digestT * Math.PI * 2) * 0.5;
+            for (let i = 0; i < 3; i++) {
+                const node = this._nodes[i];
                 node.mat.emissive.setRGB(0, (0.3 + pulse) * 0.5, (0.3 + pulse) * 0.25);
                 node.rimMat.color.set(0x00ff88);
                 node.rimMat.opacity = 0.25 + Math.abs(pulse) * 0.55;
                 node.workspace.mat.opacity = 0.5 + Math.abs(pulse) * 0.35;
             }
+        }
 
-            // Emerge round-1 doc: 2.8 – 4.0 s within slot
-            if (localSec >= 2.8) {
-                const emergeT = clamp01((localSec - 2.8) / 1.2);
-                this._emergeDoc(this._docs[agent][1], emergeT);
+        // All agents produce round-1 docs simultaneously: 6.0–7.5 s
+        const EMERGE_START = 6.0, EMERGE_DUR = 1.5;
+        if (phaseSec >= EMERGE_START) {
+            const emergeT = clamp01((phaseSec - EMERGE_START) / EMERGE_DUR);
+            for (let i = 0; i < 3; i++) {
+                this._emergeDoc(this._docs[i][1], emergeT);
             }
         }
     }
 
     // ─── Phase 3: Inverse review (blue) ──────────────────────────────────────
     //
-    // Exact sequence (REVERSE of forward order, PLUS round-0 originals again):
-    //   Agent A turn: C₁→A, B₁→A, B₂→A, C₂→A, A digests, A₃ emerges
-    //   Agent B turn: C₁→B, A₁→B, A₂→B, C₂→B, B digests, B₃ emerges
-    //   Agent C turn: B₁→C, A₁→C, A₂→C, B₂→C, C digests, C₃ emerges
+    // ALL agents act in parallel — each wave fires 3 arcs simultaneously:
     //
-    // Per-agent slot (seconds):
-    //   A: 0.0 – 6.0   (4 docs, 1.2s apart, last starts at 3.6; digest 4.5–6.0; emerge 5.2–6.5)
-    //   B: 6.0 – 12.5
-    //   C: 12.5 – 19.0
-    // Total phase duration: 20.0 s
+    //   Wave 1 (0.0–2.0 s):   C₁→A,  C₁→B,  B₁→C    (first round-0 reads)
+    //   Wave 2 (2.5–4.5 s):   B₁→A,  A₁→B,  A₁→C    (second round-0 reads)
+    //   Wave 3 (5.0–7.0 s):   B₂→A,  A₂→B,  A₂→C    (first round-1 reads)
+    //   Wave 4 (7.5–9.5 s):   C₂→A,  C₂→B,  B₂→C    (second round-1 reads)
+    //   Digest (10.0–11.0 s): all three agents pulse simultaneously
+    //   Emerge (11.0–12.5 s): A₃, B₃, C₃ emerge simultaneously
 
     _updateInverseReview(t) {
         const phaseSec = t * this._phaseDurations[3];
 
-        // Inverse order: A reads [C,B]+[B₂,C₂], B reads [C,A]+[A₂,C₂], C reads [B,A]+[A₂,B₂]
-        // Each entry: { agent, docs: [ {src, round}, ... ] }
-        const inverseSlots = [
-            {
-                agent: 0,
-                docs: [ {src:2,round:0}, {src:1,round:0}, {src:1,round:1}, {src:2,round:1} ],
-                startSec: 0.0,
-            },
-            {
-                agent: 1,
-                docs: [ {src:2,round:0}, {src:0,round:0}, {src:0,round:1}, {src:2,round:1} ],
-                startSec: 6.5,
-            },
-            {
-                agent: 2,
-                docs: [ {src:1,round:0}, {src:0,round:0}, {src:0,round:1}, {src:1,round:1} ],
-                startSec: 13.0,
-            },
-        ];
+        const WAVE_DUR = 2.0;
 
-        for (const slot of inverseSlots) {
-            const { agent, docs, startSec } = slot;
-            const localSec = phaseSec - startSec;
+        // Wave 1: first round-0 inverse reads (C₁→A, C₁→B, B₁→C)
+        const W1 = 0.0;
+        if (phaseSec >= W1) {
+            const w = clamp01((phaseSec - W1) / WAVE_DUR);
+            this._animateCopyTravel('inv_w1_0', 2, 0, 0, w, 'blue');  // C₁→A
+            this._animateCopyTravel('inv_w1_1', 2, 0, 1, w, 'blue');  // C₁→B
+            this._animateCopyTravel('inv_w1_2', 1, 0, 2, w, 'blue');  // B₁→C
+        }
 
-            // 4 docs, staggered 1.3 s apart, each travel lasts 1.5 s
-            for (let di = 0; di < docs.length; di++) {
-                const docStart = di * 1.3;
-                if (localSec >= docStart) {
-                    const trav = clamp01((localSec - docStart) / 1.5);
-                    const { src, round } = docs[di];
-                    this._animateCopyTravel(`inv_${agent}_${di}`, src, round, agent, trav, 'blue');
-                }
-            }
+        // Wave 2: second round-0 inverse reads (B₁→A, A₁→B, A₁→C)
+        const W2 = 2.5;
+        if (phaseSec >= W2) {
+            const w = clamp01((phaseSec - W2) / WAVE_DUR);
+            this._animateCopyTravel('inv_w2_0', 1, 0, 0, w, 'blue');  // B₁→A
+            this._animateCopyTravel('inv_w2_1', 0, 0, 1, w, 'blue');  // A₁→B
+            this._animateCopyTravel('inv_w2_2', 0, 0, 2, w, 'blue');  // A₁→C
+        }
 
-            // Node digesting: after last doc starts (3 * 1.3 = 3.9 s) + 1.0s
-            const node = this._nodes[agent];
-            if (localSec >= 4.9 && localSec < 6.4) {
-                const digestT = clamp01((localSec - 4.9) / 1.5);
-                const pulse = Math.sin(digestT * Math.PI * 2) * 0.5;
+        // Wave 3: first round-1 reads (B₂→A, A₂→B, A₂→C)
+        const W3 = 5.0;
+        if (phaseSec >= W3) {
+            const w = clamp01((phaseSec - W3) / WAVE_DUR);
+            this._animateCopyTravel('inv_w3_0', 1, 1, 0, w, 'blue');  // B₂→A
+            this._animateCopyTravel('inv_w3_1', 0, 1, 1, w, 'blue');  // A₂→B
+            this._animateCopyTravel('inv_w3_2', 0, 1, 2, w, 'blue');  // A₂→C
+        }
+
+        // Wave 4: second round-1 reads (C₂→A, C₂→B, B₂→C)
+        const W4 = 7.5;
+        if (phaseSec >= W4) {
+            const w = clamp01((phaseSec - W4) / WAVE_DUR);
+            this._animateCopyTravel('inv_w4_0', 2, 1, 0, w, 'blue');  // C₂→A
+            this._animateCopyTravel('inv_w4_1', 2, 1, 1, w, 'blue');  // C₂→B
+            this._animateCopyTravel('inv_w4_2', 1, 1, 2, w, 'blue');  // B₂→C
+        }
+
+        // All agents digest simultaneously: 10.0–11.0 s
+        const DIGEST_START = 10.0, DIGEST_DUR = 1.0;
+        if (phaseSec >= DIGEST_START && phaseSec < DIGEST_START + DIGEST_DUR + 0.1) {
+            const digestT = clamp01((phaseSec - DIGEST_START) / DIGEST_DUR);
+            const pulse = Math.sin(digestT * Math.PI * 2) * 0.5;
+            for (let i = 0; i < 3; i++) {
+                const node = this._nodes[i];
                 node.mat.emissive.setRGB(pulse * 0.1, pulse * 0.2, pulse * 0.55);
                 node.rimMat.color.set(0x4488ff);
                 node.rimMat.opacity = 0.25 + Math.abs(pulse) * 0.55;
                 node.workspace.mat.opacity = 0.45 + Math.abs(pulse) * 0.3;
             }
+        }
 
-            // Emerge round-2 doc: 5.2 – 6.5 s within slot
-            if (localSec >= 5.2) {
-                const emergeT = clamp01((localSec - 5.2) / 1.3);
-                this._emergeDoc(this._docs[agent][2], emergeT);
+        // All agents produce round-2 docs simultaneously: 11.0–12.5 s
+        const EMERGE_START = 11.0, EMERGE_DUR = 1.5;
+        if (phaseSec >= EMERGE_START) {
+            const emergeT = clamp01((phaseSec - EMERGE_START) / EMERGE_DUR);
+            for (let i = 0; i < 3; i++) {
+                this._emergeDoc(this._docs[i][2], emergeT);
             }
         }
     }
