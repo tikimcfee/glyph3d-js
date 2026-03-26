@@ -285,6 +285,26 @@ export function settingsPanelHTML() {
             <button class="setting-btn" id="reset-camera">Reset Camera</button>
             <button class="setting-btn" id="fit-all">Fit All Grids</button>
         </div>
+        <div class="setting-group setting-section-header">Hand Tracking</div>
+        <div class="setting-group">
+            <div class="setting-label">
+                <span>Enable Hand Tracking</span>
+                <label class="setting-toggle">
+                    <input type="checkbox" id="hand-tracking-enabled">
+                    <span class="setting-toggle-track"></span>
+                </label>
+            </div>
+            <div class="setting-hint" id="hand-tracking-hint">
+                Mock source: move mouse to position hand, Space to pinch
+            </div>
+        </div>
+        <div class="setting-group" id="hand-tracking-source-group" style="display:none">
+            <div class="setting-label"><span>Source</span></div>
+            <select class="setting-select" id="hand-tracking-source">
+                <option value="mock">Mock (mouse)</option>
+                <option value="websocket">WebSocket</option>
+            </select>
+        </div>
     `;
 }
 

@@ -492,6 +492,48 @@ body {
 .setting-btn:hover { background: #333; border-color: #ffaa00; }
 .setting-btn:active { background: #444; }
 
+/* Toggle switch (hand tracking) */
+.setting-toggle {
+    position: relative;
+    display: inline-block;
+    width: 40px;
+    height: 22px;
+    flex-shrink: 0;
+}
+.setting-toggle input { opacity: 0; width: 0; height: 0; }
+.setting-toggle-track {
+    position: absolute;
+    inset: 0;
+    background: #333;
+    border-radius: 11px;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+.setting-toggle-track::before {
+    content: '';
+    position: absolute;
+    left: 3px;
+    top: 3px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: #888;
+    transition: transform 0.2s, background 0.2s;
+}
+.setting-toggle input:checked + .setting-toggle-track { background: #00ff88; }
+.setting-toggle input:checked + .setting-toggle-track::before {
+    background: #000;
+    transform: translateX(18px);
+}
+
+/* Small descriptive hint below a setting */
+.setting-hint {
+    font-size: 11px;
+    color: #555;
+    margin-top: 4px;
+    line-height: 1.4;
+}
+
 /* ===== Panel: Stats ===== */
 .stat-row {
     display: flex;

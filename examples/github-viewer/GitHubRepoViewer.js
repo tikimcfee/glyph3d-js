@@ -45,6 +45,7 @@ import { TouchController } from './components/TouchController.js';
 import { logCapturePanelHTML, initLogCapturePanel } from './components/LogCapturePanel.js';
 import { diffPanelHTML, initDiffPanel } from './components/DiffPanel.js';
 import { StatePersistence, resetAllAndReload } from './StatePersistence.js';
+import { HandGestureAdapter } from './HandGestureAdapter.js';
 
 /**
  * Parse GitHub URL to owner/repo
@@ -126,6 +127,9 @@ export class GitHubRepoViewer {
         // Overlay components
         this.minimapOverlay = null;
         this.treemapLabelManager = null;
+
+        // Hand tracking adapter (optional, toggled via Settings panel)
+        this.handGestureAdapter = null;
 
         // Tab traversal index (tracks which file is "focused" via Tab key)
         this._tabIndex = -1;
@@ -319,8 +323,20 @@ export class GitHubRepoViewer {
             },
         });
 
+        // Hand gesture adapter — created now so the camera already exists.
+        // The adapter attaches HandRenderer as a child of this.camera.
+        // It is disabled until the user toggles the setting on.
+        this.handGestureAdapter = new HandGestureAdapter({
+            camera:           this.camera,
+            canvas:           this.canvas,
+            cameraController: this.cameraController,
+        });
+        // The camera must be in the scene graph for hand meshes (camera children) to render.
+        this.scene.add(this.camera);
+
         this.addGridHelper();
         this.setupEventListeners();
+        this._setupHandTrackingToggle();
 
         this.loading.hide();
         this.animate();
@@ -362,6 +378,53 @@ export class GitHubRepoViewer {
                 resetAllAndReload();
             }
         });
+    }
+
+    /**
+     * Wire the hand-tracking enable checkbox and source selector in the Settings panel.
+     * The DOM elements are created by settingsPanelHTML() in Drawer.js.
+     * @private
+     */
+    _setupHandTrackingToggle() {
+        const checkbox    = document.getElementById('hand-tracking-enabled');
+        const sourceGroup = document.getElementById('hand-tracking-source-group');
+        const sourceSelect = document.getElementById('hand-tracking-source');
+        const hint        = document.getElementById('hand-tracking-hint');
+
+        if (!checkbox) return; // Settings panel not yet in DOM — skip
+
+        const updateHint = (sourceType) => {
+            if (!hint) return;
+            if (sourceType === 'mock') {
+                hint.textContent = 'Mock source: move mouse to position hand, Space to pinch';
+            } else if (sourceType === 'websocket') {
+                hint.textContent = 'WebSocket source: connect ws://localhost:8765 (iPhone / external)';
+            }
+        };
+
+        checkbox.addEventListener('change', () => {
+            if (checkbox.checked) {
+                const src = sourceSelect ? sourceSelect.value : 'mock';
+                this.handGestureAdapter.enable(src);
+                if (sourceGroup) sourceGroup.style.display = '';
+                updateHint(src);
+                this.toastUI?.show('Hand tracking enabled (mock source)', 'success');
+            } else {
+                this.handGestureAdapter.disable();
+                if (sourceGroup) sourceGroup.style.display = 'none';
+                this.toastUI?.show('Hand tracking disabled', 'success');
+            }
+        });
+
+        if (sourceSelect) {
+            sourceSelect.addEventListener('change', () => {
+                updateHint(sourceSelect.value);
+                if (checkbox.checked) {
+                    // Re-enable with new source
+                    this.handGestureAdapter.enable(sourceSelect.value);
+                }
+            });
+        }
     }
 
     setupEventListeners() {
@@ -1257,6 +1320,11 @@ export class GitHubRepoViewer {
         this.cameraController.update(deltaTime);
         if (this.statePersistence) this.statePersistence.markCameraDirty();
         this.updateStats(deltaTime);
+
+        // Hand gesture adapter — no-op when disabled
+        if (this.handGestureAdapter) {
+            this.handGestureAdapter.update(deltaTime);
+        }
 
         // Update billboard-style nameplates to face camera
         if (this.nameplateManager) {
