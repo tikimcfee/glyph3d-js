@@ -45,12 +45,16 @@ export class CodeColorManager {
      * @param {number} opts.priority - Higher priority layers override lower ones
      * @param {Function} opts.colorFn - (sourcePath, fileProps) => {r,g,b} | null
      *                                  Return null to pass through to lower layers
+     * @param {string[]} [opts.watchProperties=[]] - FileStateManager property names that
+     *   should trigger color re-resolution for the affected file. When a watched property
+     *   changes, _handlePropertyChanged re-resolves and applies the color immediately
+     *   without waiting for a full updateAllColors() call.
      */
-    registerLayer(name, { priority, colorFn }) {
+    registerLayer(name, { priority, colorFn, watchProperties = [] }) {
         // Remove existing layer with same name
         this._layers = this._layers.filter(l => l.name !== name);
 
-        this._layers.push({ name, priority, colorFn, enabled: true });
+        this._layers.push({ name, priority, colorFn, enabled: true, watchProperties });
         // Keep sorted by priority descending (highest first)
         this._layers.sort((a, b) => b.priority - a.priority);
     }
@@ -119,12 +123,19 @@ export class CodeColorManager {
     // ============ Private ============
 
     /**
-     * Called when a file property changes. Recomputes color for that file.
+     * Called when a file property changes. Recomputes color for that file
+     * if any enabled layer watches the changed property.
      * @private
      */
     _handlePropertyChanged(sourcePath, propName, newValue, oldValue) {
-        // Only react to heatMetric changes (skip intermediate props like lineCount)
-        if (propName !== 'heatMetric') return;
+        // Only react to property changes that at least one enabled layer cares about.
+        // Layers declare their watched properties via watchProperties in registerLayer().
+        // Layers with an empty watchProperties array are skipped for reactive updates
+        // (they still participate in updateAllColors() calls).
+        const anyLayerWatches = this._layers.some(
+            l => l.enabled && l.watchProperties && l.watchProperties.includes(propName)
+        );
+        if (!anyLayerWatches) return;
 
         const grids = this.ctx.getGrids();
         const grid = grids.find(g => g.userData?.sourcePath === sourcePath);

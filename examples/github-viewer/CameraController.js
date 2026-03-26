@@ -1,12 +1,40 @@
 /**
  * CameraController — extracted camera subsystem
  *
- * Owns: WASD movement, mouse look, pointer lock, focus methods,
- * speed slider, reset button, window resize (camera-side only).
+ * Translation-first navigation: click-drag pans, scroll zooms,
+ * WASD translates in camera-relative directions.
+ *
+ * All user-adjustable settings are persisted to localStorage under
+ * the 'glyph3d-camera-settings' key.
  *
  * Receives a SceneContext for shared references (camera, canvas, etc.).
  * Emits 'camera-focus-changed' window events for tree UI sync.
  */
+
+const STORAGE_KEY = 'glyph3d-camera-settings';
+
+const DEFAULTS = {
+    cameraSpeed: 100,
+    dragSensitivity: 1.0,
+    scrollSensitivity: 1.0,
+    invertDragX: false,
+    invertDragY: false,
+    invertScroll: false,
+};
+
+function loadSettings() {
+    try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (raw) return { ...DEFAULTS, ...JSON.parse(raw) };
+    } catch { /* ignore */ }
+    return { ...DEFAULTS };
+}
+
+function saveSettings(settings) {
+    try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+    } catch { /* ignore */ }
+}
 
 export class CameraController {
     /**
@@ -16,26 +44,38 @@ export class CameraController {
         this.ctx = ctx;
         this.THREE = ctx.THREE;
 
+        // Load persisted settings
+        this.settings = loadSettings();
+
         // Movement state
         this.keys = {};
-        this.cameraSpeed = 100;
-        this.lookSensitivity = 0.002;
+        this.cameraSpeed = this.settings.cameraSpeed;
 
-        // Rotation state
+        // Drag state (translation, not rotation)
+        this.isDragging = false;
+        this._dragPrevX = 0;
+        this._dragPrevY = 0;
+
+        // Click disambiguation: track mousedown position to distinguish
+        // click (displacement < 5px) from drag (displacement >= 5px)
+        this._mouseDownX = 0;
+        this._mouseDownY = 0;
+
+        // Rotation state (only set programmatically via focus methods)
         this.pitch = 0;
         this.yaw = 0;
-
-        // Pointer lock
-        this.isPointerLocked = false;
 
         // Bound listener refs for cleanup
         this._onKeyDown = null;
         this._onKeyUp = null;
-        this._onCanvasClick = null;
-        this._onPointerLockChange = null;
+        this._onMouseDown = null;
+        this._onMouseUp = null;
         this._onMouseMove = null;
+        this._onWheel = null;
         this._onResize = null;
         this._onSpeedChange = null;
+        this._onDragSensChange = null;
+        this._onScrollSensChange = null;
         this._onReset = null;
         this._onFitAll = null;
     }
@@ -53,24 +93,75 @@ export class CameraController {
         document.addEventListener('keydown', this._onKeyDown);
         document.addEventListener('keyup', this._onKeyUp);
 
-        // --- Pointer lock for mouse look ---
-        this._onCanvasClick = () => { canvas.requestPointerLock(); };
-        canvas.addEventListener('click', this._onCanvasClick);
-
-        this._onPointerLockChange = () => {
-            this.isPointerLocked = document.pointerLockElement === canvas;
-            canvas.style.cursor = this.isPointerLocked ? 'none' : '';
-        };
-        document.addEventListener('pointerlockchange', this._onPointerLockChange);
-
-        this._onMouseMove = (e) => {
-            if (this.isPointerLocked) {
-                this.yaw -= e.movementX * this.lookSensitivity;
-                this.pitch -= e.movementY * this.lookSensitivity;
-                this.pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, this.pitch));
+        // --- Click-drag to pan (translation) ---
+        this._onMouseDown = (e) => {
+            if (e.target === canvas || canvas.contains(e.target)) {
+                this.isDragging = true;
+                this._dragPrevX = e.clientX;
+                this._dragPrevY = e.clientY;
+                this._mouseDownX = e.clientX;
+                this._mouseDownY = e.clientY;
+                canvas.style.cursor = 'grabbing';
             }
         };
+        this._onMouseUp = (e) => {
+            if (this.isDragging) {
+                const dx = e.clientX - this._mouseDownX;
+                const dy = e.clientY - this._mouseDownY;
+                const displacement = Math.sqrt(dx * dx + dy * dy);
+
+                // Displacement under threshold → treat as a click, not a drag
+                if (displacement < 5) {
+                    canvas.dispatchEvent(new CustomEvent('canvas-click', {
+                        detail: {
+                            clientX: e.clientX,
+                            clientY: e.clientY,
+                            shiftKey: e.shiftKey,
+                            ctrlKey: e.ctrlKey,
+                            metaKey: e.metaKey
+                        },
+                        bubbles: true
+                    }));
+                }
+            }
+            this.isDragging = false;
+            canvas.style.cursor = 'grab';
+        };
+        this._onMouseMove = (e) => {
+            if (!this.isDragging) return;
+
+            const dx = e.clientX - this._dragPrevX;
+            const dy = e.clientY - this._dragPrevY;
+            this._dragPrevX = e.clientX;
+            this._dragPrevY = e.clientY;
+
+            this._applyDragTranslation(dx, dy);
+        };
+
+        canvas.addEventListener('mousedown', this._onMouseDown);
+        document.addEventListener('mouseup', this._onMouseUp);
         document.addEventListener('mousemove', this._onMouseMove);
+
+        // --- Scroll: pan by default, zoom with Alt/Option held ---
+        this._onWheel = (e) => {
+            if (e.target === canvas || canvas.contains(e.target)) {
+                e.preventDefault();
+                if (e.altKey) {
+                    // Alt/Option + scroll = zoom
+                    const delta = this.settings.invertScroll ? e.deltaY : -e.deltaY;
+                    const zoomAmount = delta * this.settings.scrollSensitivity * 0.5;
+                    const forward = new this.THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+                    camera.position.addScaledVector(forward, zoomAmount);
+                } else {
+                    // Scroll = pan (translate)
+                    this._applyDragTranslation(-e.deltaX, -e.deltaY);
+                }
+            }
+        };
+        canvas.addEventListener('wheel', this._onWheel, { passive: false });
+
+        // Set default cursor
+        canvas.style.cursor = 'grab';
 
         // --- Window resize (camera-side: aspect ratio + projection) ---
         this._onResize = () => {
@@ -80,17 +171,21 @@ export class CameraController {
         window.addEventListener('resize', this._onResize);
 
         // --- Speed slider ---
-        const slider = document.getElementById('cam-speed');
-        const valueLabel = document.getElementById('cam-speed-value');
-        if (slider) {
-            this._onSpeedChange = (e) => {
-                const speed = parseFloat(e.target.value);
-                if (valueLabel) valueLabel.textContent = speed.toFixed(1);
-                this.setSpeed(speed);
-            };
-            slider.addEventListener('input', this._onSpeedChange);
-            this._speedSlider = slider;
-        }
+        this._bindSlider('cam-speed', 'cam-speed-value', (val) => {
+            this.setSpeed(val);
+        });
+
+        // --- Drag sensitivity slider ---
+        this._bindSlider('drag-sensitivity', 'drag-sensitivity-value', (val) => {
+            this.settings.dragSensitivity = val;
+            this._persistSettings();
+        });
+
+        // --- Scroll sensitivity slider ---
+        this._bindSlider('scroll-sensitivity', 'scroll-sensitivity-value', (val) => {
+            this.settings.scrollSensitivity = val;
+            this._persistSettings();
+        });
 
         // --- Reset button ---
         const resetBtn = document.getElementById('reset-camera');
@@ -107,6 +202,92 @@ export class CameraController {
             fitAllBtn.addEventListener('click', this._onFitAll);
             this._fitAllBtn = fitAllBtn;
         }
+
+        // Restore slider UI from persisted settings
+        this._restoreUI();
+    }
+
+    /**
+     * Apply drag translation: maps screen-pixel deltas to camera-relative
+     * world-space panning. Scale factor accounts for camera distance so
+     * dragging feels proportional at any zoom level.
+     * @param {number} dx - screen pixels horizontal
+     * @param {number} dy - screen pixels vertical
+     */
+    _applyDragTranslation(dx, dy) {
+        const THREE = this.THREE;
+        const camera = this.ctx.camera;
+        const sens = this.settings.dragSensitivity;
+
+        // Scale panning by distance from origin for consistent feel across zoom levels
+        const dist = camera.position.length() || 1;
+        const fovFactor = 2 * Math.tan((camera.fov * Math.PI / 180) / 2);
+        const pixelScale = (dist * fovFactor) / window.innerHeight;
+
+        const moveX = (this.settings.invertDragX ? dx : -dx) * pixelScale * sens;
+        const moveY = (this.settings.invertDragY ? -dy : dy) * pixelScale * sens;
+
+        const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+        const up = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
+
+        camera.position.addScaledVector(right, moveX);
+        camera.position.addScaledVector(up, moveY);
+    }
+
+    /**
+     * Bind a slider element to a callback, with value label sync.
+     * @private
+     */
+    _bindSlider(sliderId, labelId, onChange) {
+        const slider = document.getElementById(sliderId);
+        const label = document.getElementById(labelId);
+        if (!slider) return;
+        const handler = (e) => {
+            const val = parseFloat(e.target.value);
+            if (label) label.textContent = val.toFixed(1);
+            onChange(val);
+        };
+        slider.addEventListener('input', handler);
+        this['_slider_' + sliderId] = { slider, handler };
+    }
+
+    /**
+     * Restore UI elements from persisted settings.
+     * @private
+     */
+    _restoreUI() {
+        const s = this.settings;
+
+        // Speed slider: stored value is raw cameraSpeed, slider is speed/20
+        const speedSlider = document.getElementById('cam-speed');
+        const speedLabel = document.getElementById('cam-speed-value');
+        if (speedSlider) {
+            const sliderVal = s.cameraSpeed / 20;
+            speedSlider.value = sliderVal;
+            if (speedLabel) speedLabel.textContent = sliderVal.toFixed(1);
+        }
+
+        const dragSlider = document.getElementById('drag-sensitivity');
+        const dragLabel = document.getElementById('drag-sensitivity-value');
+        if (dragSlider) {
+            dragSlider.value = s.dragSensitivity;
+            if (dragLabel) dragLabel.textContent = s.dragSensitivity.toFixed(1);
+        }
+
+        const scrollSlider = document.getElementById('scroll-sensitivity');
+        const scrollLabel = document.getElementById('scroll-sensitivity-value');
+        if (scrollSlider) {
+            scrollSlider.value = s.scrollSensitivity;
+            if (scrollLabel) scrollLabel.textContent = s.scrollSensitivity.toFixed(1);
+        }
+    }
+
+    /**
+     * Save current settings to localStorage.
+     * @private
+     */
+    _persistSettings() {
+        saveSettings(this.settings);
     }
 
     /**
@@ -117,15 +298,20 @@ export class CameraController {
         document.removeEventListener('keyup', this._onKeyUp);
 
         if (this.ctx.canvas) {
-            this.ctx.canvas.removeEventListener('click', this._onCanvasClick);
+            this.ctx.canvas.removeEventListener('mousedown', this._onMouseDown);
+            this.ctx.canvas.removeEventListener('wheel', this._onWheel);
         }
-        document.removeEventListener('pointerlockchange', this._onPointerLockChange);
+        document.removeEventListener('mouseup', this._onMouseUp);
         document.removeEventListener('mousemove', this._onMouseMove);
         window.removeEventListener('resize', this._onResize);
 
-        if (this._speedSlider && this._onSpeedChange) {
-            this._speedSlider.removeEventListener('input', this._onSpeedChange);
+        // Cleanup bound sliders
+        for (const key of Object.keys(this)) {
+            if (key.startsWith('_slider_') && this[key]) {
+                this[key].slider.removeEventListener('input', this[key].handler);
+            }
         }
+
         if (this._resetBtn && this._onReset) {
             this._resetBtn.removeEventListener('click', this._onReset);
         }
@@ -133,10 +319,6 @@ export class CameraController {
             this._fitAllBtn.removeEventListener('click', this._onFitAll);
         }
 
-        // Exit pointer lock if active
-        if (this.isPointerLocked) {
-            document.exitPointerLock();
-        }
         // Restore cursor
         if (this.ctx.canvas) {
             this.ctx.canvas.style.cursor = '';
@@ -242,9 +424,13 @@ export class CameraController {
         const grids = this.ctx.getGrids();
         if (grids.length === 0) return;
 
-        const bounds = this.ctx.hierarchicalManager
-            ? this.ctx.hierarchicalManager.getTotalBounds()
-            : this.ctx.layoutManager.getTotalBounds();
+        const bounds = this.ctx.treemapManager
+            ? this.ctx.treemapManager.getTotalBounds()
+            : this.ctx.spiralManager
+                ? this.ctx.spiralManager.getTotalBounds()
+                : this.ctx.hierarchicalManager
+                    ? this.ctx.hierarchicalManager.getTotalBounds()
+                    : this.ctx.layoutManager.getTotalBounds();
 
         const center = new THREE.Vector3();
         bounds.getCenter(center);
@@ -324,6 +510,8 @@ export class CameraController {
      */
     setSpeed(speed) {
         this.cameraSpeed = speed * 20;
+        this.settings.cameraSpeed = this.cameraSpeed;
+        this._persistSettings();
     }
 
     /**
@@ -333,6 +521,16 @@ export class CameraController {
         this.ctx.camera.position.set(0, 0, 500);
         this.pitch = 0;
         this.yaw = 0;
+    }
+
+    /**
+     * Reset all settings to defaults and update UI.
+     */
+    resetSettings() {
+        this.settings = { ...DEFAULTS };
+        this.cameraSpeed = this.settings.cameraSpeed;
+        this._persistSettings();
+        this._restoreUI();
     }
 
     // ============ Helpers ============

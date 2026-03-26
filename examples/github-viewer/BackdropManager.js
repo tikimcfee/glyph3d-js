@@ -71,7 +71,6 @@ export class BackdropManager {
      * @param {Set<string>} [collapsedPaths] - Set of collapsed directory paths
      */
     updateBackdrops(root, collapsedPaths = new Set()) {
-        // Rebuild from scratch (simple, reliable)
         this.dispose();
         this._buildBackdrops(root, 0, collapsedPaths);
     }

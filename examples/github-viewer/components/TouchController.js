@@ -2,14 +2,17 @@
  * TouchController Component
  *
  * Handles touch input on the canvas for mobile/tablet:
- * - Single finger: camera look (yaw/pitch)
+ * - Single finger: pan (translate camera)
  * - Two fingers: pinch zoom + pan
+ *
+ * Uses the CameraController's _applyDragTranslation for consistent
+ * panning behavior across mouse and touch.
  */
 
 export class TouchController {
     /**
      * @param {HTMLCanvasElement} canvas - The Three.js canvas
-     * @param {CameraController} cameraController - Owns yaw, pitch, cameraSpeed, ctx.camera
+     * @param {CameraController} cameraController - Owns settings, ctx.camera, _applyDragTranslation
      * @param {THREE} THREE - Three.js module reference
      */
     constructor(canvas, cameraController, THREE) {
@@ -48,15 +51,13 @@ export class TouchController {
         const touches = e.changedTouches;
 
         if (this.activeTouches.size === 1 && touches.length === 1) {
-            // Single finger: look
+            // Single finger: pan (translate)
             const t = touches[0];
             const prev = this.activeTouches.get(t.identifier);
             if (prev) {
                 const dx = t.clientX - prev.x;
                 const dy = t.clientY - prev.y;
-                this.cam.yaw -= dx * 0.003;
-                this.cam.pitch -= dy * 0.003;
-                this.cam.pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, this.cam.pitch));
+                this.cam._applyDragTranslation(dx, dy);
                 this.activeTouches.set(t.identifier, { x: t.clientX, y: t.clientY });
             }
         } else if (this.activeTouches.size === 2) {
@@ -74,18 +75,16 @@ export class TouchController {
             // Pinch zoom
             if (this.lastPinchDist > 0) {
                 const delta = dist - this.lastPinchDist;
+                const scrollSens = this.cam.settings.scrollSensitivity;
                 const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
-                this.camera.position.addScaledVector(forward, delta * this.cam.cameraSpeed * 0.01);
+                this.camera.position.addScaledVector(forward, delta * scrollSens * 0.5);
             }
 
             // Two-finger pan
             if (this.lastTwoCenter) {
                 const dx = center.x - this.lastTwoCenter.x;
                 const dy = center.y - this.lastTwoCenter.y;
-                const right = new THREE.Vector3(1, 0, 0).applyQuaternion(this.camera.quaternion);
-                const up = new THREE.Vector3(0, 1, 0).applyQuaternion(this.camera.quaternion);
-                this.camera.position.addScaledVector(right, -dx * this.cam.cameraSpeed * 0.005);
-                this.camera.position.addScaledVector(up, dy * this.cam.cameraSpeed * 0.005);
+                this.cam._applyDragTranslation(dx, dy);
             }
 
             this.lastPinchDist = dist;

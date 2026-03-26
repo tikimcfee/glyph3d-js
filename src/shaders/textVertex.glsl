@@ -1,9 +1,17 @@
+// REFERENCE ONLY — this file is NOT loaded at runtime.
+// The canonical vertex shader is the template literal returned by
+// GlyphRenderer._getVertexShader() in src/GlyphRenderer.js.
+//
+// This file exists for IDE syntax highlighting and GLSL tooling only.
+// Keep it in sync with the inline version manually. The varying names
+// MUST match: both files use vUV (uppercase V), not vUv.
+
 precision highp float;
 
 // Per-instance attributes
 attribute vec3 instancePosition;
 attribute vec2 instanceSize;
-attribute vec4 instanceUV;  // (u0, v0, u1, v1)
+attribute float instanceCodepoint;
 attribute vec3 instanceColor;
 attribute float instanceGroupId;
 
@@ -11,13 +19,19 @@ attribute float instanceGroupId;
 uniform sampler2D groupTexture;
 uniform float groupTextureHeight;
 
+// Atlas map texture: codepoint -> (u0, v0_webgl, u1, v1_webgl)
+// Layout: atlasMapWidth texels wide x atlasMapHeight rows tall
+uniform sampler2D atlasMapTexture;
+uniform float atlasMapWidth;
+uniform float atlasMapHeight;
+
 // Varying
-varying vec2 vUv;
+varying vec2 vUV;
 varying vec3 vColor;
 varying float vGroupAlpha;
 
 void main() {
-    // Scale quad by instance size
+    // Transform quad by instance size
     vec3 scaled = position * vec3(instanceSize, 1.0);
 
     // Group property lookups (4-column DataTexture)
@@ -29,11 +43,29 @@ void main() {
     // World position = scale instance position, then add group offset
     vec3 worldPos = scaled + instancePosition * gScale.xyz + gPos.xyz;
 
-    // Apply camera transform
+    // Standard projection
     gl_Position = projectionMatrix * modelViewMatrix * vec4(worldPos, 1.0);
 
-    // Map UVs from base geometry (0-1) to instance atlas UVs
-    vUv = mix(instanceUV.xy, instanceUV.zw, uv);
-    vColor = instanceColor * gColor.rgb;
+    // -------------------------------------------------------------------------
+    // GPU codepoint → UV lookup  [GPU-Lookup path]
+    //
+    // instanceCodepoint holds the raw Unicode codepoint. atlasMapTexture
+    // is a 1024-wide RGBA Float DataTexture where texel[cp] stores the
+    // pre-flipped (u0, v0_webgl, u1, v1_webgl) for that glyph.
+    // mix() maps the unit quad's uv onto the glyph's atlas sub-rect.
+    // No CPU-side UV array is used — see GlyphAtlas.getAtlasMapTexture().
+    // -------------------------------------------------------------------------
+    float cp = instanceCodepoint;
+    float mapCol = mod(cp, atlasMapWidth);
+    float mapRow = floor(cp / atlasMapWidth);
+    float tx = (mapCol + 0.5) / atlasMapWidth;
+    float ty = (mapRow + 0.5) / atlasMapHeight;
+    vec4 uvRect = texture2D(atlasMapTexture, vec2(tx, ty));
+    // uvRect = (u0, v0_webgl, u1, v1_webgl) — pre-flipped in GlyphAtlas
+    vUV = mix(uvRect.xy, uvRect.zw, uv);
+
+    // gScale.w = color blend factor: 0.0 = multiply (default), 1.0 = replace
+    float colorBlend = gScale.w;
+    vColor = mix(instanceColor * gColor.rgb, gColor.rgb, colorBlend);
     vGroupAlpha = gColor.a;
 }
