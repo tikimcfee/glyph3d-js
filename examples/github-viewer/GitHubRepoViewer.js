@@ -46,6 +46,7 @@ import { logCapturePanelHTML, initLogCapturePanel } from './components/LogCaptur
 import { diffPanelHTML, initDiffPanel } from './components/DiffPanel.js';
 import { StatePersistence, resetAllAndReload } from './StatePersistence.js';
 import { HandGestureAdapter } from './HandGestureAdapter.js';
+import { initCommandCenter } from './websocket/index.js';
 
 /**
  * Parse GitHub URL to owner/repo
@@ -333,6 +334,17 @@ export class GitHubRepoViewer {
         });
         // The camera must be in the scene graph for hand meshes (camera children) to render.
         this.scene.add(this.camera);
+
+        // ---- WebSocket Command Center ----
+        // Wires CommandRouter, WebSocketBridge, and ViewerAPI (window.viewer)
+        const { router, bridge, api } = initCommandCenter(this, {
+            port: 8765,
+            autoConnect: true,
+            showStatus: true,
+        });
+        this._commandRouter = router;
+        this._wsBridge = bridge;
+        this._viewerAPI = api;
 
         this.addGridHelper();
         this.setupEventListeners();

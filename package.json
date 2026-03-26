@@ -18,7 +18,9 @@
   ],
   "scripts": {
     "serve": "python3 -m http.server 8000",
-    "relay": "node relay.js"
+    "ws": "node examples/github-viewer/ws-relay.mjs",
+    "ws:py": "python3 examples/github-viewer/ws-relay.py",
+    "relay": "node examples/github-viewer/ws-relay.mjs"
   },
   "keywords": [
     "three.js",
