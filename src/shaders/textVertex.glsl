@@ -38,7 +38,22 @@ void main() {
     // Apply camera transform
     gl_Position = projectionMatrix * modelViewMatrix * vec4(worldPos, 1.0);
 
-    // GPU codepoint -> UV lookup via atlas map texture
+    // -------------------------------------------------------------------------
+    // GPU codepoint → UV lookup  [GPU-Lookup path]
+    //
+    // Each glyph instance stores only its Unicode codepoint in instanceCodepoint.
+    // The atlas map DataTexture (atlasMapTexture) is a 1024-wide × N-row RGBA
+    // Float texture where texel[codepoint] = (u0, v0_webgl, u1, v1_webgl).
+    //
+    // V coordinates are pre-flipped in GlyphAtlas.getAtlasMapTexture() so this
+    // shader needs no canvas→WebGL conversion.
+    //
+    // The base quad's built-in `uv` attribute runs (0,0)→(1,1); mix() maps
+    // that onto the glyph's specific sub-rect in the atlas.
+    //
+    // To verify this path is active: look for "[GPU-Lookup]" log lines in the
+    // console from GlyphAtlas, GlyphRenderer, and GlyphWorker at startup.
+    // -------------------------------------------------------------------------
     float cp = instanceCodepoint;
     float mapCol = mod(cp, atlasMapWidth);
     float mapRow = floor(cp / atlasMapWidth);

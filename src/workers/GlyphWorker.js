@@ -4,6 +4,11 @@
  * Handles messages from main thread, processes glyph data,
  * and transfers results back with zero-copy Transferable arrays.
  *
+ * GPU codepoint → UV path: builders emit a `codepoints` Float32Array (raw
+ * Unicode codepoints) instead of UV coordinates. The vertex shader resolves
+ * codepoints to UV rects via atlasMapTexture at draw time. The uvMap is still
+ * sent to the worker for glyph-existence validation only.
+ *
  * Caches UV map to avoid repeated serialization.
  */
 
@@ -22,6 +27,9 @@ self.onmessage = function(event) {
         switch (type) {
             case 'BUILD': {
                 const result = buildGlyphBuffers(payload);
+                // [GPU-Lookup] Transfer codepoints buffer (not UVs) — main thread
+                // renderer will bind it as instanceCodepoint; shader resolves UV.
+                console.debug(`[GPU-Lookup] GlyphWorker BUILD: transferring codepoints (${result.count} glyphs)`);
                 self.postMessage(
                     { type: 'RESULT', jobId, buffers: result },
                     [
@@ -50,8 +58,10 @@ self.onmessage = function(event) {
 
                 const result = buildBatchBuffers(payload.items, shared);
 
-                // itemMeta is plain objects — goes through structured clone
-                // Float32Arrays are transferred zero-copy
+                // [GPU-Lookup] Transfer codepoints buffer (not UVs) — main thread
+                // renderer will bind it as instanceCodepoint; shader resolves UV.
+                // itemMeta goes through structured clone; Float32Arrays are zero-copy.
+                console.debug(`[GPU-Lookup] GlyphWorker BUILD_BATCH: transferring codepoints (${result.count} glyphs, ${payload.items.length} items)`);
                 self.postMessage(
                     { type: 'RESULT', jobId, buffers: result },
                     [

@@ -303,20 +303,29 @@ class GlyphAtlas {
     }
 
     /**
-     * Build a DataTexture that maps codepoint → atlas UV rect.
+     * Build the GPU-lookup DataTexture that maps a Unicode codepoint directly
+     * to its atlas UV rect. This is the heart of the GPU codepoint → UV path:
+     * instead of the CPU pre-computing UV coordinates per glyph, each glyph
+     * instance only stores its raw codepoint (`instanceCodepoint`), and the
+     * vertex shader performs a single `texture2D` fetch here to resolve the UV.
      *
      * Layout: 1024 texels wide × ceil(maxCodepoint / 1024) rows tall, RGBA Float.
      * Each texel stores (u0, v0_webgl, u1, v1_webgl) for that codepoint.
      * Codepoints not in the atlas have all-zero texels (treated as missing).
      *
-     * The V coordinates are pre-flipped here (1.0 - v) so the shader does no
-     * canvas→WebGL coordinate conversion at runtime.
+     * V coordinates are pre-flipped here (1.0 - v) so the shader incurs no
+     * canvas→WebGL coordinate conversion at draw time.
      *
-     * Lookup in shader:
-     *   int cp = int(instanceCodepoint);
-     *   float tx = (float(cp % 1024) + 0.5) / 1024.0;
-     *   float ty = (float(cp / 1024) + 0.5) / float(atlasMapHeight);
+     * Vertex shader lookup (see textVertex.glsl):
+     *   float mapCol = mod(cp, atlasMapWidth);
+     *   float mapRow = floor(cp / atlasMapWidth);
+     *   float tx = (mapCol + 0.5) / atlasMapWidth;
+     *   float ty = (mapRow + 0.5) / atlasMapHeight;
      *   vec4 uvRect = texture2D(atlasMapTexture, vec2(tx, ty));
+     *   vUv = mix(uvRect.xy, uvRect.zw, uv);  // bilinear interp across quad
+     *
+     * Texture is created once and cached. Call this before constructing any
+     * GlyphRenderer so the uniforms can be populated at mesh creation time.
      *
      * @param {THREE} THREE - Three.js module reference
      * @returns {THREE.DataTexture} Atlas map texture (shared, created once)
@@ -369,14 +378,23 @@ class GlyphAtlas {
         this._atlasMapTextureWidth = ATLAS_MAP_WIDTH;
         this._atlasMapTextureHeight = height;
 
-        console.log(`Atlas map texture: ${ATLAS_MAP_WIDTH}x${height}, maxCodepoint=${maxCode}, glyphs=${this.uvMap.size}`);
+        console.log(`[GPU-Lookup] Atlas map DataTexture built: ${ATLAS_MAP_WIDTH}x${height} RGBA Float, maxCodepoint=${maxCode}, glyphs=${this.uvMap.size}. Vertex shader will look up UV rects from this texture at draw time.`);
 
         return texture;
     }
 
     /**
-     * Get the dimensions of the atlas map texture (must call getAtlasMapTexture first)
-     * @returns {{width: number, height: number}}
+     * Get the dimensions of the atlas map DataTexture.
+     *
+     * Must call {@link getAtlasMapTexture} at least once before using this,
+     * otherwise returns the default fallback dimensions (1024 x 1).
+     *
+     * The dimensions are passed to the vertex shader as `atlasMapWidth` and
+     * `atlasMapHeight` uniforms so it can correctly convert a flat codepoint
+     * index into a (tx, ty) texel coordinate.
+     *
+     * @returns {{width: number, height: number}} Width is always 1024; height is
+     *   ceil((maxCodepoint + 1) / 1024).
      */
     getAtlasMapDimensions() {
         return {

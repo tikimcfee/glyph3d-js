@@ -3,6 +3,19 @@
  *
  * Single-pass text → Float32Array conversion.
  * No intermediate objects, no spread operators.
+ *
+ * GPU codepoint → UV path
+ * -----------------------
+ * These builders emit a `codepoints` Float32Array instead of a `uvs` array.
+ * Each element is the raw Unicode codepoint of the glyph. The vertex shader
+ * resolves codepoints to atlas UV rects at draw time via a DataTexture lookup
+ * (atlasMapTexture, built by GlyphAtlas.getAtlasMapTexture()).
+ *
+ * The `uvMap` argument is still required for glyph existence validation
+ * (i.e. deciding whether to fall back to '?'), but UV coordinates are never
+ * written into the output buffers.
+ *
+ * Worker context: this file must not import DOM APIs or Three.js.
  */
 
 /**
@@ -27,10 +40,13 @@ function countGlyphs(text) {
  * @param {string} input.text
  * @param {{x,y,z}} input.position
  * @param {Object} input.metrics
- * @param {Object} input.uvMap - charCode → {u0,v0,u1,v1} (used only to validate glyph exists)
+ * @param {Object} input.uvMap - charCode → {u0,v0,u1,v1}. Used only to validate that a glyph
+ *   exists in the atlas (falls back to '?' codepoint 63 if missing). UV coordinates are NOT
+ *   written to the output; the vertex shader resolves them via atlasMapTexture at draw time.
  * @param {{r,g,b}} input.color
  * @param {number} [input.scale=1.0]
- * @returns {{positions: Float32Array, sizes: Float32Array, codepoints: Float32Array, colors: Float32Array, count: number, bounds: Object|null}}
+ * @returns {{positions: Float32Array, sizes: Float32Array, codepoints: Float32Array, colors: Float32Array, groupIds: Float32Array, count: number, bounds: Object|null}}
+ *   `codepoints` contains one raw Unicode codepoint per glyph for GPU-side UV lookup.
  */
 export function buildGlyphBuffers(input) {
     const { text, position, metrics, uvMap, color, scale = 1.0, groupId = 0 } = input;
@@ -111,7 +127,7 @@ export function buildGlyphBuffers(input) {
         sizes[idx * 2] = scaledWidth;
         sizes[idx * 2 + 1] = scaledHeight;
 
-        // Codepoint — GPU resolves to UV via atlasMapTexture
+        // [GPU-Lookup] Store raw codepoint; vertex shader resolves to UV via atlasMapTexture
         codepoints[idx] = resolvedCode;
 
         // Color [r, g, b]
@@ -283,7 +299,7 @@ export function buildBatchBuffers(items, shared) {
             sizes[idx * 2] = scaledWidth;
             sizes[idx * 2 + 1] = scaledHeight;
 
-            // Codepoint — GPU resolves to UV via atlasMapTexture
+            // [GPU-Lookup] Store raw codepoint; vertex shader resolves to UV via atlasMapTexture
             codepoints[idx] = resolvedCode;
 
             colors[idx * 3] = color.r;

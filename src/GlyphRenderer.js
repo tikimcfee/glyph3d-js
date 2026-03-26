@@ -186,6 +186,10 @@ class GlyphRendererV15 {
         // Build atlas map texture for GPU-side codepoint → UV lookup
         const atlasMapTexture = this.atlas.getAtlasMapTexture(THREE);
         const atlasMapDims = this.atlas.getAtlasMapDimensions();
+        logger.info('[GPU-Lookup] Shader uses instanceCodepoint attribute + atlasMapTexture DataTexture for UV resolution. instanceUV is not used.', {
+            atlasMapDims,
+            glyphsInMap: this.atlas.uvMap.size
+        });
 
         // Create shader material (clean, no debug paths)
         const material = new THREE.ShaderMaterial({
@@ -278,7 +282,15 @@ class GlyphRendererV15 {
                 // Standard projection
                 gl_Position = projectionMatrix * modelViewMatrix * vec4(worldPos, 1.0);
 
-                // GPU codepoint → UV lookup via atlas map texture
+                // -----------------------------------------------------------------
+                // GPU codepoint → UV lookup  [GPU-Lookup path]
+                //
+                // instanceCodepoint holds the raw Unicode codepoint. atlasMapTexture
+                // is a 1024-wide RGBA Float DataTexture where texel[cp] stores the
+                // pre-flipped (u0, v0_webgl, u1, v1_webgl) for that glyph.
+                // mix() maps the unit quad's uv onto the glyph's atlas sub-rect.
+                // No CPU-side UV array is used — see GlyphAtlas.getAtlasMapTexture().
+                // -----------------------------------------------------------------
                 float cp = instanceCodepoint;
                 float mapCol = mod(cp, atlasMapWidth);
                 float mapRow = floor(cp / atlasMapWidth);
@@ -1031,10 +1043,10 @@ class GlyphRendererV15 {
         geometry.instanceCount = count;
 
         if (shouldDebugLog('firstInstance') && count > 0) {
-            logger.debug('First instance sample', {
+            logger.debug('[GPU-Lookup] First instance sample (UV resolved on GPU via atlasMapTexture)', {
                 position: `(${glyphs[0].position.x.toFixed(2)}, ${glyphs[0].position.y.toFixed(2)})`,
                 char: glyphs[0].char,
-                uv: `${glyphs[0].uv.u0.toFixed(3)},${glyphs[0].uv.v0.toFixed(3)}`
+                codepoint: glyphs[0].charCode
             });
         }
     }
@@ -1052,7 +1064,9 @@ class GlyphRendererV15 {
      * @param {Object} buffers - Pre-computed buffer data
      * @param {Float32Array} buffers.positions - [x,y,z] per glyph
      * @param {Float32Array} buffers.sizes - [w,h] per glyph
-     * @param {Float32Array} buffers.codepoints - Unicode codepoints per glyph (GPU resolves to UV)
+     * @param {Float32Array} buffers.codepoints - Unicode codepoint per glyph. The vertex shader
+     *   resolves each codepoint to its atlas UV rect via the atlasMapTexture DataTexture lookup
+     *   (GPU codepoint→UV path). No CPU-side UV coordinates are needed.
      * @param {Float32Array} buffers.colors - [r,g,b] per glyph
      * @param {number} buffers.count - Number of glyphs
      * @param {Array} [buffers.itemMeta] - Per-item metadata from buildBatchBuffers
@@ -1154,8 +1168,9 @@ class GlyphRendererV15 {
             }
         }
 
-        logger.debug('Applied pre-built buffers (zero-copy)', {
+        logger.info('[GPU-Lookup] Applied pre-built buffers (zero-copy worker path). Codepoints buffer active — UV lookup will happen in vertex shader.', {
             count,
+            hasCodepoints: !!codepoints && codepoints.length > 0,
             entriesRegistered: rendererIds ? rendererIds.length : 0,
             metaSource: buffers.itemMeta ? 'worker' : 'computed'
         });
