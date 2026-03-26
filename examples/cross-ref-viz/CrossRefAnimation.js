@@ -97,29 +97,36 @@ function agentPositions(radius) {
     ];
 }
 
-// Card dimensions from buildDocCard() — used for stacking math
-const CARD_W = 1.6;
-const CARD_H = 1.0;
-const CARD_GAP = 0.3; // padding between cards
-
 /**
- * Compute the rest position for a specific document card.
- * Uses actual card dimensions to guarantee no overlap.
- * Cards stack radially outward from the agent, each card's height + gap apart.
- *
- * @param {THREE.Vector3} agentPos - world position of the agent node
- * @param {number} slotIndex - stack slot (0, 1, 2 for rounds 0, 1, 2)
- * @returns {THREE.Vector3}
+ * Stack cards radially outward from an agent.
+ * Measures each card's bounds, lays them out with no overlap.
  */
-function docStackPosition(agentPos, slotIndex) {
-    const radial = agentPos.clone().normalize();
-    // Start beyond the agent node (clear the sphere + label)
-    const nodeRadius = 1.8; // icosahedron ~0.7 + halo + label clearance
-    const slotStep = CARD_H + CARD_GAP;
-    const dist = nodeRadius + slotIndex * slotStep + CARD_H / 2;
-    const pos = agentPos.clone().addScaledVector(radial, dist);
-    pos.z = 0.1 * (slotIndex + 1);
-    return pos;
+function stackCards(cards, agentPos) {
+    const dir = agentPos.clone().normalize();
+    const gap = 0.4;
+
+    // Start past the agent node
+    let dist = 2.0;
+
+    for (let i = 0; i < cards.length; i++) {
+        const card = cards[i];
+        // Measure at scale 1
+        card.group.scale.setScalar(1);
+        const box = new THREE.Box3().setFromObject(card.group);
+        const size = new THREE.Vector3();
+        box.getSize(size);
+        const h = size.y || 1;
+
+        dist += h / 2;
+        const pos = agentPos.clone().addScaledVector(dir, dist);
+        pos.z = 0.1 * (i + 1);
+
+        card.restPos = pos.clone();
+        card.group.position.copy(pos);
+        card.group.scale.setScalar(0); // start hidden
+
+        dist += h / 2 + gap;
+    }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -431,52 +438,45 @@ export class CrossRefAnimation {
             this._docs.push([]);
             const agent = AGENTS[a];
             const pos = this._positions[a];
+            const agentDocs = [];
 
+            // Step 1: Build card meshes
             for (let r = 0; r < 3; r++) {
                 const doc = buildDocCard(bodyColors[r], borderColors[r]);
-                // Each round occupies its own radial stack slot — no overlap
-                const restPos = docStackPosition(pos, r);
-                doc.group.position.copy(restPos);
-                doc.group.scale.setScalar(0);
                 this.scene.add(doc.group);
+                agentDocs.push(doc);
+                doc.agentIdx = a;
+                doc.roundIdx = r;
+                doc.visible = false;
+                doc.traveling = false;
+                doc.absorbed = false;
+                doc.labelColor = labelColors[r];
+                this._docs[a].push(doc);
+            }
 
-                // Label ("A₁", "B₂", etc.) sits on the card face at a small Z offset
-                const labelText = agent.docLabels[r];
-                const labelPos = {
-                    x: restPos.x - 0.32,
-                    y: restPos.y + 0.18,
-                    z: restPos.z + 0.1,
-                };
+            // Step 2: Stack using measured bounds — sets doc.restPos
+            stackCards(agentDocs, pos);
+
+            // Step 3: Add text labels at the measured positions
+            for (let r = 0; r < 3; r++) {
+                const doc = this._docs[a][r];
+                const restPos = doc.restPos;
+
                 const labelId = this.glyphCollection.addText(
-                    labelText,
-                    labelPos,
+                    agent.docLabels[r],
+                    { x: restPos.x - 0.32, y: restPos.y + 0.18, z: restPos.z + 0.1 },
                     { color: { r: 0.001, g: 0.001, b: 0.001 }, scale: 1.1 }
                 );
 
-                // Content snippet also sits on the card face
-                const snippetPos = {
-                    x: restPos.x - 0.72,
-                    y: restPos.y + 0.02,
-                    z: restPos.z + 0.1,
-                };
                 const snippetId = this.glyphCollection.addText(
                     agent.snippets[r],
-                    snippetPos,
+                    { x: restPos.x - 0.72, y: restPos.y + 0.02, z: restPos.z + 0.1 },
                     { color: { r: 0.001, g: 0.001, b: 0.001 }, scale: 0.62 }
                 );
 
                 doc.labelId = labelId;
                 doc.snippetId = snippetId;
-                doc.labelColor = labelColors[r];
-                doc.restPos = restPos.clone();
-                doc.agentIdx = a;
-                doc.roundIdx = r;
                 doc.currentPos = restPos.clone();
-                doc.visible = false;
-                doc.traveling = false;
-                doc.absorbed = false;
-
-                this._docs[a].push(doc);
             }
         }
     }
