@@ -100,10 +100,47 @@ export class MinimapOverlay {
 
     /**
      * Draw one frame. Call from the main animation loop.
-     * Fast-exits if not visible or no layout data.
+     * Rebuilds grid rects from live positions every frame — simple, always correct.
      */
     update() {
-        if (!this._visible || !this._worldBounds) return;
+        if (!this._visible) return;
+
+        // Rebuild from live grid positions every frame (cheap — just reading positions)
+        const grids = this._getGrids();
+        if (!grids || grids.length === 0) return;
+
+        this._gridRects = [];
+        const worldMin = { x: Infinity, y: Infinity };
+        const worldMax = { x: -Infinity, y: -Infinity };
+
+        for (let i = 0; i < grids.length; i++) {
+            const grid = grids[i];
+            if (!grid.visible) continue;
+            const pos = grid.position;
+            const gb = grid.getBounds();
+            if (gb.isEmpty()) continue;
+
+            const x = gb.min.x;
+            const y = gb.min.y;
+            const w = gb.max.x - gb.min.x;
+            const h = gb.max.y - gb.min.y;
+
+            worldMin.x = Math.min(worldMin.x, x);
+            worldMin.y = Math.min(worldMin.y, y);
+            worldMax.x = Math.max(worldMax.x, x + w);
+            worldMax.y = Math.max(worldMax.y, y + h);
+
+            const hue = (i / grids.length) * 360;
+            this._gridRects.push({ x, y, w, h, color: `hsl(${hue.toFixed(0)},70%,50%)` });
+        }
+
+        if (this._gridRects.length === 0) return;
+
+        // Update world bounds from live data
+        this._worldBounds = new this._THREE.Box3(
+            new this._THREE.Vector3(worldMin.x, worldMin.y, 0),
+            new this._THREE.Vector3(worldMax.x, worldMax.y, 0)
+        );
 
         const ctx = this._ctx;
         const cw = MINIMAP_WIDTH;
@@ -115,15 +152,13 @@ export class MinimapOverlay {
         ctx.fillStyle = 'rgba(10,10,20,0.88)';
         ctx.fillRect(0, 0, cw, ch);
 
-        if (this._gridRects.length === 0) return;
-
         // Compute world → minimap transform
         const { scaleX, scaleY, offsetX, offsetY } = this._computeTransform();
 
         // Draw file rectangles
         for (const rect of this._gridRects) {
             const px = offsetX + rect.x * scaleX;
-            const py = offsetY - rect.y * scaleY;    // Y is inverted (world +Y = screen -Y)
+            const py = offsetY - rect.y * scaleY;
             const pw = Math.max(rect.w * scaleX, 1);
             const ph = Math.max(rect.h * scaleY, 1);
 
