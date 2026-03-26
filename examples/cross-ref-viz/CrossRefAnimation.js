@@ -277,13 +277,17 @@ export class CrossRefAnimation {
 
         // Per-phase durations (seconds)
         this._phaseDurations = [
-            2.5,   // 0 — spawn nodes
-            3.0,   // 1 — initial output docs emerge (A1 B1 C1)
-            9.0,   // 2 — forward review (green arcs, A reads B,C; etc.)
-            9.0,   // 3 — inverse review (blue arcs, reversed order)
-            3.5,   // 4 — convergence
-            2.0,   // 5 — fade out
+            2.5,    // 0 — spawn nodes
+            3.0,    // 1 — initial output docs emerge (A1 B1 C1)
+            14.0,   // 2 — forward review  (3 agents × 2 docs each, sequential)
+            20.0,   // 3 — inverse review  (3 agents × 4 docs each, sequential)
+            3.5,    // 4 — convergence
+            2.0,    // 5 — fade out
         ];
+
+        // Flying copies: temporary doc-card groups created at travel time
+        // Each entry: { group, bodyMat, borderMat, labelMesh, t, srcAgent, dstAgent, colorMode }
+        this._flyingCopies = [];
 
         // Track which docs are "resting" at each agent (for travel pickup)
         // _docState[agentIdx] = array of { docRef, round }
@@ -506,6 +510,27 @@ export class CrossRefAnimation {
         this._phaseT = 0;
         this._phaseStart = this._totalT;
         this._updateUI(phase);
+
+        // Clean up flying copies from previous phase (they are transient)
+        if (this._flyingCopies) {
+            for (const copy of this._flyingCopies) {
+                this.scene.remove(copy.group);
+                copy.group.traverse(obj => {
+                    if (obj.geometry) obj.geometry.dispose();
+                    if (obj.material) obj.material.dispose();
+                });
+            }
+            this._flyingCopies = [];
+        }
+
+        // Reset arc trail opacities at phase boundary
+        if (this._arcTrails) {
+            for (const key in this._arcTrails) {
+                const trail = this._arcTrails[key];
+                trail.green.material.opacity = 0;
+                trail.blue.material.opacity  = 0;
+            }
+        }
     }
 
     _updateUI(phase) {
@@ -670,50 +695,61 @@ export class CrossRefAnimation {
 
     // ─── Phase 2: Forward review (green) ─────────────────────────────────────
     //
-    // Order: A reads B,C → B reads A,C → C reads A,B
-    // Each agent's "turn" is staggered. Within a turn, first doc travels then second.
-    // After absorb, new doc (round 1) emerges.
+    // Exact sequence:
+    //   Agent A turn: B₁→A, C₁→A, A digests, A₂ emerges
+    //   Agent B turn: A₁→B, C₁→B, B digests, B₂ emerges
+    //   Agent C turn: A₁→C, B₁→C, C digests, C₂ emerges
+    //
+    // Documents are COPIES — originals stay at their rest positions.
+    // Each agent turn is fully sequential before the next starts.
+    // Timeline uses absolute seconds so timing is easy to follow.
+    //
+    // Per-agent slot (seconds within the phase):
+    //   A: 0.0 – 4.0   (travelDoc0: 0.0–1.5, travelDoc1: 1.0–2.5, digest: 2.0–3.0, emerge: 2.8–4.0)
+    //   B: 3.8 – 7.8
+    //   C: 7.6 – 11.6
+    // Total phase duration: 14.0 s
 
     _updateForwardReview(t) {
-        // 3 agents, each takes ~0.3 of the total phase, staggered by 0.28
-        // Within each agent slot:
-        //   0.00–0.35 : first source doc travels & absorbs
-        //   0.30–0.65 : second source doc travels & absorbs
-        //   0.60–0.90 : new doc emerges from receiver
+        const phaseSec = t * this._phaseDurations[2];   // current second within phase
 
-        const forwardGroups = [
-            { agent: 0, srcs: [1, 2] },
-            { agent: 1, srcs: [0, 2] },
-            { agent: 2, srcs: [0, 1] },
+        // Forward order: A reads [B,C], B reads [A,C], C reads [A,B]
+        const forwardSlots = [
+            { agent: 0, srcs: [1, 2], startSec: 0.0 },
+            { agent: 1, srcs: [0, 2], startSec: 3.8 },
+            { agent: 2, srcs: [0, 1], startSec: 7.6 },
         ];
 
-        for (let gi = 0; gi < 3; gi++) {
-            const { agent, srcs } = forwardGroups[gi];
-            const slotStart = gi * 0.30;
-            const slotDur = 0.65;
-            const slotT = clamp01((t - slotStart) / slotDur);
+        for (const slot of forwardSlots) {
+            const { agent, srcs, startSec } = slot;
+            const localSec = phaseSec - startSec;
 
-            // Travel first source
-            const trav0 = clamp01(slotT / 0.45);
-            this._animateDocTravel(this._docs[srcs[0]][0], agent, trav0, 'green');
+            // Travel copy 0: 0.0 – 1.5 s within slot
+            if (localSec >= 0) {
+                const trav0 = clamp01(localSec / 1.5);
+                this._animateCopyTravel(`fwd_${agent}_0`, srcs[0], 0, agent, trav0, 'green');
+            }
 
-            // Travel second source (starts when first is ~60% done)
-            const trav1Start = 0.3;
-            const trav1 = clamp01((slotT - trav1Start) / 0.45);
-            this._animateDocTravel(this._docs[srcs[1]][0], agent, trav1, 'green');
+            // Travel copy 1: 1.0 – 2.5 s within slot
+            if (localSec >= 1.0) {
+                const trav1 = clamp01((localSec - 1.0) / 1.5);
+                this._animateCopyTravel(`fwd_${agent}_1`, srcs[1], 0, agent, trav1, 'green');
+            }
 
-            // Node "digesting" pulse while absorbing
-            const digestT = clamp01((slotT - 0.2) / 0.5);
-            const pulse = Math.sin(digestT * Math.PI * 2) * 0.5;
+            // Node digesting pulse: 2.0 – 3.5 s within slot
             const node = this._nodes[agent];
-            node.mat.emissive.setRGB(0, (0.3 + pulse) * 0.5, (0.3 + pulse) * 0.25);
-            node.rimMat.color.set(0x00ff88);
-            node.rimMat.opacity = 0.25 + Math.abs(pulse) * 0.55;
-            node.workspace.mat.opacity = 0.5 + Math.abs(pulse) * 0.35;
+            if (localSec >= 2.0 && localSec < 3.5) {
+                const digestT = clamp01((localSec - 2.0) / 1.5);
+                const pulse = Math.sin(digestT * Math.PI * 2) * 0.5;
+                node.mat.emissive.setRGB(0, (0.3 + pulse) * 0.5, (0.3 + pulse) * 0.25);
+                node.rimMat.color.set(0x00ff88);
+                node.rimMat.opacity = 0.25 + Math.abs(pulse) * 0.55;
+                node.workspace.mat.opacity = 0.5 + Math.abs(pulse) * 0.35;
+            }
 
-            // Emerge round-1 doc once both docs are mostly absorbed
-            if (slotT > 0.62) {
-                const emergeT = clamp01((slotT - 0.62) / 0.35);
+            // Emerge round-1 doc: 2.8 – 4.0 s within slot
+            if (localSec >= 2.8) {
+                const emergeT = clamp01((localSec - 2.8) / 1.2);
                 this._emergeDoc(this._docs[agent][1], emergeT);
             }
         }
@@ -721,42 +757,68 @@ export class CrossRefAnimation {
 
     // ─── Phase 3: Inverse review (blue) ──────────────────────────────────────
     //
-    // Uses round-1 docs as source, reversed reading order.
-    // A reads C first then B, B reads C first then A, C reads B first then A.
+    // Exact sequence (REVERSE of forward order, PLUS round-0 originals again):
+    //   Agent A turn: C₁→A, B₁→A, B₂→A, C₂→A, A digests, A₃ emerges
+    //   Agent B turn: C₁→B, A₁→B, A₂→B, C₂→B, B digests, B₃ emerges
+    //   Agent C turn: B₁→C, A₁→C, A₂→C, B₂→C, C digests, C₃ emerges
+    //
+    // Per-agent slot (seconds):
+    //   A: 0.0 – 6.0   (4 docs, 1.2s apart, last starts at 3.6; digest 4.5–6.0; emerge 5.2–6.5)
+    //   B: 6.0 – 12.5
+    //   C: 12.5 – 19.0
+    // Total phase duration: 20.0 s
 
     _updateInverseReview(t) {
-        const inverseGroups = [
-            { agent: 0, srcs: [2, 1] },
-            { agent: 1, srcs: [2, 0] },
-            { agent: 2, srcs: [1, 0] },
+        const phaseSec = t * this._phaseDurations[3];
+
+        // Inverse order: A reads [C,B]+[B₂,C₂], B reads [C,A]+[A₂,C₂], C reads [B,A]+[A₂,B₂]
+        // Each entry: { agent, docs: [ {src, round}, ... ] }
+        const inverseSlots = [
+            {
+                agent: 0,
+                docs: [ {src:2,round:0}, {src:1,round:0}, {src:1,round:1}, {src:2,round:1} ],
+                startSec: 0.0,
+            },
+            {
+                agent: 1,
+                docs: [ {src:2,round:0}, {src:0,round:0}, {src:0,round:1}, {src:2,round:1} ],
+                startSec: 6.5,
+            },
+            {
+                agent: 2,
+                docs: [ {src:1,round:0}, {src:0,round:0}, {src:0,round:1}, {src:1,round:1} ],
+                startSec: 13.0,
+            },
         ];
 
-        for (let gi = 0; gi < 3; gi++) {
-            const { agent, srcs } = inverseGroups[gi];
-            const slotStart = gi * 0.30;
-            const slotDur = 0.65;
-            const slotT = clamp01((t - slotStart) / slotDur);
+        for (const slot of inverseSlots) {
+            const { agent, docs, startSec } = slot;
+            const localSec = phaseSec - startSec;
 
-            // Use round-1 docs (already at rest positions after forward phase)
-            const trav0 = clamp01(slotT / 0.45);
-            this._animateDocTravel(this._docs[srcs[0]][1], agent, trav0, 'blue');
+            // 4 docs, staggered 1.3 s apart, each travel lasts 1.5 s
+            for (let di = 0; di < docs.length; di++) {
+                const docStart = di * 1.3;
+                if (localSec >= docStart) {
+                    const trav = clamp01((localSec - docStart) / 1.5);
+                    const { src, round } = docs[di];
+                    this._animateCopyTravel(`inv_${agent}_${di}`, src, round, agent, trav, 'blue');
+                }
+            }
 
-            const trav1Start = 0.3;
-            const trav1 = clamp01((slotT - trav1Start) / 0.45);
-            this._animateDocTravel(this._docs[srcs[1]][1], agent, trav1, 'blue');
-
-            // Node "digesting" with blue tint
-            const digestT = clamp01((slotT - 0.2) / 0.5);
-            const pulse = Math.sin(digestT * Math.PI * 2) * 0.5;
+            // Node digesting: after last doc starts (3 * 1.3 = 3.9 s) + 1.0s
             const node = this._nodes[agent];
-            node.mat.emissive.setRGB(pulse * 0.1, pulse * 0.2, pulse * 0.55);
-            node.rimMat.color.set(0x4488ff);
-            node.rimMat.opacity = 0.25 + Math.abs(pulse) * 0.55;
-            node.workspace.mat.opacity = 0.45 + Math.abs(pulse) * 0.3;
+            if (localSec >= 4.9 && localSec < 6.4) {
+                const digestT = clamp01((localSec - 4.9) / 1.5);
+                const pulse = Math.sin(digestT * Math.PI * 2) * 0.5;
+                node.mat.emissive.setRGB(pulse * 0.1, pulse * 0.2, pulse * 0.55);
+                node.rimMat.color.set(0x4488ff);
+                node.rimMat.opacity = 0.25 + Math.abs(pulse) * 0.55;
+                node.workspace.mat.opacity = 0.45 + Math.abs(pulse) * 0.3;
+            }
 
-            // Emerge round-2 (final) doc
-            if (slotT > 0.62) {
-                const emergeT = clamp01((slotT - 0.62) / 0.35);
+            // Emerge round-2 doc: 5.2 – 6.5 s within slot
+            if (localSec >= 5.2) {
+                const emergeT = clamp01((localSec - 5.2) / 1.3);
                 this._emergeDoc(this._docs[agent][2], emergeT);
             }
         }
@@ -873,6 +935,116 @@ export class CrossRefAnimation {
     }
 
     // ─── Doc animation helpers ────────────────────────────────────────────────
+
+    /**
+     * Animate a COPY of a source document traveling to a destination agent.
+     * The original document stays at its rest position.
+     * Creates the copy on first call (keyed by `id`), reuses on subsequent frames.
+     *
+     * @param {string} id - unique key for this copy (e.g. 'fwd_0_1')
+     * @param {number} srcAgent - index of source agent who owns the document
+     * @param {number} srcRound - round index of the source document (0=R0, 1=R1)
+     * @param {number} dstAgent - destination agent index
+     * @param {number} t - 0→1 animation progress
+     * @param {string} colorMode - 'green' or 'blue'
+     */
+    _animateCopyTravel(id, srcAgent, srcRound, dstAgent, t, colorMode) {
+        if (t <= 0) return;
+
+        // Find or create the flying copy
+        let copy = this._flyingCopies.find(c => c.id === id);
+        if (!copy) {
+            const srcDoc = this._docs[srcAgent][srcRound];
+            const bodyColors = [COLOR.docRound0, COLOR.docRound1, COLOR.docRound2];
+            const borderColors = [COLOR.docBorderR0, COLOR.docBorderR1, COLOR.docBorderR2];
+            const { group, bodyMat, borderMat } = buildDocCard(
+                bodyColors[srcRound],
+                borderColors[srcRound]
+            );
+            group.position.copy(srcDoc.restPos);
+            group.scale.setScalar(1);
+            this.scene.add(group);
+            copy = {
+                id,
+                group,
+                bodyMat,
+                borderMat,
+                srcDoc,
+                srcAgent,
+                dstAgent,
+                colorMode,
+                done: false,
+            };
+            this._flyingCopies.push(copy);
+        }
+
+        if (copy.done) return;
+
+        const srcDoc = copy.srcDoc;
+        const srcPos = srcDoc.restPos.clone();
+        const dstPos = this._positions[dstAgent].clone();
+        const key = `${srcAgent}_${dstAgent}`;
+        const trailInfo = this._arcTrails[key];
+
+        let ctrl;
+        if (trailInfo) {
+            ctrl = colorMode === 'green' ? trailInfo.ctrl_green : trailInfo.ctrl_blue;
+        } else {
+            ctrl = bezierControl(srcPos, dstPos, 2.0, true);
+        }
+
+        // Show arc trail during travel
+        if (trailInfo) {
+            const trail = colorMode === 'green' ? trailInfo.green : trailInfo.blue;
+            if (t < 0.1) {
+                trail.material.opacity = Math.max(trail.material.opacity, easeOut(t / 0.1) * 0.25);
+            } else if (t < 0.75) {
+                trail.material.opacity = Math.max(trail.material.opacity, 0.18);
+            } else {
+                const fade = (1 - (t - 0.75) / 0.25) * 0.18;
+                trail.material.opacity = Math.max(trail.material.opacity, fade);
+            }
+        }
+
+        const tmp = new THREE.Vector3();
+        copy.group.visible = true;
+
+        if (t < 0.1) {
+            // Lift phase
+            copy.group.position.copy(srcPos);
+            copy.group.position.z += easeOut(t / 0.1) * 0.8;
+            copy.group.scale.setScalar(1);
+            copy.bodyMat.opacity = 0.88;
+            copy.borderMat.opacity = 0.7;
+        } else if (t < 0.78) {
+            // Arc travel
+            const travelT = (t - 0.1) / 0.68;
+            const liftedSrc = srcPos.clone();
+            liftedSrc.z += 0.8;
+            quadBezier(liftedSrc, ctrl, dstPos, easeInOut(travelT), tmp);
+            copy.group.position.copy(tmp);
+            copy.group.scale.setScalar(1);
+            copy.bodyMat.opacity = 0.88;
+            copy.borderMat.opacity = 0.7;
+        } else {
+            // Absorb into destination node
+            const absorbT = (t - 0.78) / 0.22;
+            const s = 1 - easeIn(absorbT);
+            copy.group.position.copy(dstPos);
+            copy.group.scale.setScalar(s);
+            copy.bodyMat.opacity = s * 0.88;
+            copy.borderMat.opacity = s * 0.7;
+
+            if (absorbT >= 0.99) {
+                copy.group.visible = false;
+                copy.done = true;
+                if (trailInfo) {
+                    const trail = colorMode === 'green' ? trailInfo.green : trailInfo.blue;
+                    trail.material.opacity = 0;
+                }
+            }
+        }
+    }
 
     /**
      * Animate a document traveling from its current agent toward `dstAgent`.
@@ -1033,6 +1205,16 @@ export class CrossRefAnimation {
                 this.glyphCollection.updateColor(doc.snippetId, { r: 0.001, g: 0.001, b: 0.001 });
             }
         }
+
+        // Destroy flying copies
+        for (const copy of this._flyingCopies) {
+            this.scene.remove(copy.group);
+            copy.group.traverse(obj => {
+                if (obj.geometry) obj.geometry.dispose();
+                if (obj.material) obj.material.dispose();
+            });
+        }
+        this._flyingCopies = [];
 
         // Reset arc trails
         for (const key in this._arcTrails) {
