@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>glyph3d IDE</title>
+    <!-- CSS lives in github-viewer, shared via relative path -->
+    <link rel="stylesheet" href="../github-viewer/ide.css">
+</head>
+<body>
+    <!-- ====== IDE Shell (CSS Grid root) ====== -->
+    <div id="ide-shell">
+
+        <!-- Row 1: Title Bar -->
+        <header id="titlebar">
+            <span class="titlebar-title">glyph3d</span>
+            <span id="titlebar-repo-label" class="titlebar-info"></span>
+            <span class="titlebar-spacer"></span>
+        </header>
+
+        <!-- Activity Bar: thin vertical icon strip -->
+        <nav id="activity-bar">
+            <button class="activity-btn active" data-panel="explorer" title="Explorer (files)">
+                <span class="activity-icon">&#128193;</span>
+            </button>
+            <button class="activity-btn" data-panel="search" title="Search">
+                <span class="activity-icon">&#128269;</span>
+            </button>
+            <button class="activity-btn" data-panel="repo" title="Repository">
+                <span class="activity-icon">&#9881;</span>
+            </button>
+            <button class="activity-btn" data-panel="settings" title="Settings">
+                <span class="activity-icon">&#9881;</span>
+            </button>
+            <div class="activity-spacer"></div>
+            <button class="activity-btn" data-panel="hand-tracking" title="Hand Tracking">
+                <span class="activity-icon">&#9995;</span>
+            </button>
+        </nav>
+
+        <!-- Sidebar -->
+        <aside id="sidebar">
+            <div id="sidebar-header">
+                <span id="sidebar-title">EXPLORER</span>
+                <button id="sidebar-collapse-btn" title="Collapse sidebar">&lsaquo;</button>
+            </div>
+            <div id="sidebar-content"></div>
+        </aside>
+
+        <!-- Resize handle between sidebar and editor -->
+        <div id="resize-handle"></div>
+
+        <!-- Editor Column -->
+        <div id="editor-column">
+
+            <!-- Tab Bar -->
+            <div id="tab-bar-ide">
+                <div id="tab-list"></div>
+            </div>
+
+            <!-- Breadcrumb -->
+            <div id="breadcrumb-bar">
+                <span id="breadcrumb-path"></span>
+            </div>
+
+            <!-- Editor Area (3D Canvas + overlays) -->
+            <div id="editor-area">
+                <canvas id="canvas"></canvas>
+                <!-- Minimap overlay -->
+                <div id="minimap-container">
+                    <canvas id="minimap-canvas"></canvas>
+                </div>
+                <!-- Command palette overlay -->
+                <div id="command-palette" class="hidden">
+                    <input type="text" id="palette-input" class="palette-input"
+                           placeholder="Type a file name to open...">
+                    <ul id="palette-results" class="palette-results"></ul>
+                </div>
+            </div>
+
+            <!-- Panel resize handle -->
+            <div id="panel-resize-handle"></div>
+
+            <!-- Bottom Panel -->
+            <div id="bottom-panel">
+                <div id="bottom-panel-tabs">
+                    <button class="bp-tab active" data-bp="output">OUTPUT</button>
+                    <button class="bp-tab" data-bp="console">CONSOLE</button>
+                    <button class="bp-tab" data-bp="websocket">WEBSOCKET</button>
+                    <span class="bp-spacer"></span>
+                    <button id="bp-close" class="bp-close" title="Close panel">&times;</button>
+                </div>
+                <div id="bottom-panel-content">
+                    <div class="bp-pane active" data-bp="output" id="bp-output"></div>
+                    <div class="bp-pane" data-bp="console" id="bp-console"></div>
+                    <div class="bp-pane" data-bp="websocket" id="bp-websocket"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Status Bar -->
+        <footer id="statusbar">
+            <span id="sb-branch" class="sb-item">&#9733; main</span>
+            <span id="sb-layout" class="sb-item">hierarchical</span>
+            <span id="sb-file" class="sb-item sb-grow"></span>
+            <span id="sb-glyphs" class="sb-item"></span>
+            <span id="sb-grids" class="sb-item"></span>
+            <span id="sb-camera" class="sb-item"></span>
+            <span id="sb-fps" class="sb-item">60 fps</span>
+            <span id="sb-ws" class="sb-item">WS: disconnected</span>
+        </footer>
+
+    </div>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+        }
+    }
+    </script>
+    <script type="module">
+        import * as THREE from 'three';
+        // Import from github-viewer via relative path — the IDE is a skin over it
+        import { GitHubRepoViewer } from '../github-viewer/GitHubRepoViewer.js';
+        import { DrawerController } from '../github-viewer/components/Drawer.js';
+        import { IDEShell } from '../github-viewer/IDEShell.js';
+
+        document.addEventListener('DOMContentLoaded', async () => {
+            const canvas = document.getElementById('canvas');
+
+            const ide = new IDEShell();
+            ide.injectPanelContent();
+
+            const viewer = new GitHubRepoViewer(canvas, THREE);
+            ide.attachViewer(viewer);
+
+            const origInit = viewer.init.bind(viewer);
+            viewer.init = async function() {
+                await origInit();
+                viewer.drawer = ide.asDrawer();
+            };
+
+            const origUpdateStats = viewer.updateStats.bind(viewer);
+            viewer.updateStats = function(deltaTime) {
+                origUpdateStats(deltaTime);
+                ide.updateStatusBar(deltaTime);
+            };
+
+            await viewer.init();
+
+            window.addEventListener('resize', () => {
+                ide._onEditorResize();
+            });
+
+            ide._onEditorResize();
+            ide.start();
+        });
+    </script>
+</body>
+</html>
