@@ -56,6 +56,11 @@ export class CameraController {
         this._dragPrevX = 0;
         this._dragPrevY = 0;
 
+        // Click disambiguation: track mousedown position to distinguish
+        // click (displacement < 5px) from drag (displacement >= 5px)
+        this._mouseDownX = 0;
+        this._mouseDownY = 0;
+
         // Rotation state (only set programmatically via focus methods)
         this.pitch = 0;
         this.yaw = 0;
@@ -94,10 +99,31 @@ export class CameraController {
                 this.isDragging = true;
                 this._dragPrevX = e.clientX;
                 this._dragPrevY = e.clientY;
+                this._mouseDownX = e.clientX;
+                this._mouseDownY = e.clientY;
                 canvas.style.cursor = 'grabbing';
             }
         };
-        this._onMouseUp = () => {
+        this._onMouseUp = (e) => {
+            if (this.isDragging) {
+                const dx = e.clientX - this._mouseDownX;
+                const dy = e.clientY - this._mouseDownY;
+                const displacement = Math.sqrt(dx * dx + dy * dy);
+
+                // Displacement under threshold → treat as a click, not a drag
+                if (displacement < 5) {
+                    canvas.dispatchEvent(new CustomEvent('canvas-click', {
+                        detail: {
+                            clientX: e.clientX,
+                            clientY: e.clientY,
+                            shiftKey: e.shiftKey,
+                            ctrlKey: e.ctrlKey,
+                            metaKey: e.metaKey
+                        },
+                        bubbles: true
+                    }));
+                }
+            }
             this.isDragging = false;
             canvas.style.cursor = 'grab';
         };
@@ -116,14 +142,20 @@ export class CameraController {
         document.addEventListener('mouseup', this._onMouseUp);
         document.addEventListener('mousemove', this._onMouseMove);
 
-        // --- Scroll to zoom ---
+        // --- Scroll: pan by default, zoom with Shift held ---
         this._onWheel = (e) => {
             if (e.target === canvas || canvas.contains(e.target)) {
                 e.preventDefault();
-                const delta = this.settings.invertScroll ? e.deltaY : -e.deltaY;
-                const zoomAmount = delta * this.settings.scrollSensitivity * 0.5;
-                const forward = new this.THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-                camera.position.addScaledVector(forward, zoomAmount);
+                if (e.shiftKey) {
+                    // Shift + scroll = zoom
+                    const delta = this.settings.invertScroll ? e.deltaY : -e.deltaY;
+                    const zoomAmount = delta * this.settings.scrollSensitivity * 0.5;
+                    const forward = new this.THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+                    camera.position.addScaledVector(forward, zoomAmount);
+                } else {
+                    // Scroll = pan (translate)
+                    this._applyDragTranslation(-e.deltaX, -e.deltaY);
+                }
             }
         };
         canvas.addEventListener('wheel', this._onWheel, { passive: false });

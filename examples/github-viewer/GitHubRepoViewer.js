@@ -17,6 +17,7 @@ import {
     TreemapLayoutManager
 } from '../../src/index.js';
 
+import { SelectionManager } from './SelectionManager.js';
 import { RepositoryAdapter } from './RepositoryAdapter.js';
 import { GitHubRepositorySource } from './GitHubRepositorySource.js';
 import { DiffController } from './DiffController.js';
@@ -116,6 +117,7 @@ export class GitHubRepoViewer {
         this.codeColorManager = null;
         this.heatmapProvider = null;
         this.statePersistence = null;
+        this.selectionManager = null;
 
         // Animation
         this.lastTime = performance.now();
@@ -233,7 +235,23 @@ export class GitHubRepoViewer {
         this.codeColorManager = new CodeColorManager(this.sceneContext, this.fileStateManager);
         this.codeColorManager.registerLayer('heatmap', {
             priority: 10,
+            watchProperties: ['heatMetric'],
             colorFn: HeatmapProvider.createColorFn(),
+        });
+
+        // Selection manager — owns selection state, raycasting, Z-pop
+        this.selectionManager = new SelectionManager(THREE, this.fileStateManager);
+
+        // Selection color layer (priority 15 — above heatmap, below future search at 30)
+        // A deep teal tint distinguishes selected files from heatmap coloring.
+        this.codeColorManager.registerLayer('selection', {
+            priority: 15,
+            watchProperties: ['selected'],
+            colorFn: (sourcePath, fileProps) => {
+                if (!fileProps?.selected) return null;
+                // Teal selection tint: overrides heatmap color for selected files
+                return { r: 0.2, g: 0.9, b: 0.6 };
+            },
         });
 
         // Listen for camera focus events to sync tree UI
@@ -241,6 +259,36 @@ export class GitHubRepoViewer {
             const { index } = e.detail;
             document.querySelectorAll('.tree-item').forEach((item, i) => {
                 item.classList.toggle('selected', i === index);
+            });
+        });
+
+        // Listen for canvas clicks — forward to selection manager
+        this.canvas.addEventListener('canvas-click', (e) => {
+            const { clientX, clientY, ctrlKey, metaKey } = e.detail;
+            const additive = ctrlKey || metaKey;
+            this.selectionManager.handleClick(
+                clientX, clientY,
+                this.canvas,
+                this.camera,
+                this.grids,
+                additive
+            );
+        });
+
+        // Escape key deselects all
+        document.addEventListener('keydown', (e) => {
+            if (e.code === 'Escape') {
+                this.selectionManager.clear(this.grids);
+            }
+        });
+
+        // file-selected event: sync tree panel .selected class by sourcePath
+        window.addEventListener('file-selected', (e) => {
+            const { selected } = e.detail;
+            const selectedSet = new Set(selected);
+            document.querySelectorAll('.tree-item.tree-file').forEach((item) => {
+                const path = item.dataset?.path;
+                item.classList.toggle('selected', path ? selectedSet.has(path) : false);
             });
         });
 
@@ -654,6 +702,7 @@ export class GitHubRepoViewer {
         // Clean up visualization pipeline (clear data, keep managers alive)
         if (this.fileStateManager) this.fileStateManager.clear();
         if (this.codeColorManager) this.codeColorManager.resetAllColors();
+        if (this.selectionManager) this.selectionManager.dispose();
         this.heatmapProvider = null;
 
         // Clean up overlay managers
@@ -813,7 +862,13 @@ export class GitHubRepoViewer {
             `;
 
             if (gridIndex >= 0) {
-                fileItem.addEventListener('click', () => this.cameraController.focusOnGrid(gridIndex));
+                fileItem.addEventListener('click', () => {
+                    this.cameraController.focusOnGrid(gridIndex);
+                    // Also set selection state so visual tint and tree sync apply
+                    if (this.selectionManager && node.path) {
+                        this.selectionManager.select(node.path, { grids: this.grids });
+                    }
+                });
             }
 
             container.appendChild(fileItem);
