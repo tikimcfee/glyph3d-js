@@ -1047,6 +1047,8 @@ export class CrossRefAnimation {
             const bodyColors = [COLOR.docRound0, COLOR.docRound1, COLOR.docRound2];
             const borderColors = [COLOR.docBorderR0, COLOR.docBorderR1, COLOR.docBorderR2];
             const { group, bodyMat, borderMat } = buildDocCard(
+                srcDoc.contentW || 1.5,
+                srcDoc.contentH || 0.8,
                 bodyColors[srcRound],
                 borderColors[srcRound]
             );
