@@ -18,6 +18,9 @@ import {
 } from '../../src/index.js';
 
 import { SelectionManager } from './SelectionManager.js';
+import { ShortcutManager } from './ShortcutManager.js';
+import { TreemapLabelManager } from './TreemapLabelManager.js';
+import { MinimapOverlay } from './components/MinimapOverlay.js';
 import { RepositoryAdapter } from './RepositoryAdapter.js';
 import { GitHubRepositorySource } from './GitHubRepositorySource.js';
 import { DiffController } from './DiffController.js';
@@ -118,6 +121,14 @@ export class GitHubRepoViewer {
         this.heatmapProvider = null;
         this.statePersistence = null;
         this.selectionManager = null;
+        this.shortcutManager = null;
+
+        // Overlay components
+        this.minimapOverlay = null;
+        this.treemapLabelManager = null;
+
+        // Tab traversal index (tracks which file is "focused" via Tab key)
+        this._tabIndex = -1;
 
         // Animation
         this.lastTime = performance.now();
@@ -275,13 +286,6 @@ export class GitHubRepoViewer {
             );
         });
 
-        // Escape key deselects all
-        document.addEventListener('keydown', (e) => {
-            if (e.code === 'Escape') {
-                this.selectionManager.clear(this.grids);
-            }
-        });
-
         // file-selected event: sync tree panel .selected class by sourcePath
         window.addEventListener('file-selected', (e) => {
             const { selected } = e.detail;
@@ -290,6 +294,29 @@ export class GitHubRepoViewer {
                 const path = item.dataset?.path;
                 item.classList.toggle('selected', path ? selectedSet.has(path) : false);
             });
+        });
+
+        // ---- Phase 2: Keyboard Shortcuts ----
+        this.shortcutManager = new ShortcutManager();
+        this._registerShortcuts();
+        this.shortcutManager.attach();
+
+        // ---- Phase 3: Minimap Overlay ----
+        this.minimapOverlay = new MinimapOverlay({
+            THREE,
+            camera: this.camera,
+            getGrids: () => this.grids,
+            getLayoutBounds: () => {
+                if (this.treemapManager) return this.treemapManager.getTotalBounds();
+                if (this.spiralManager)  return this.spiralManager.getTotalBounds();
+                if (this.hierarchicalManager) return this.hierarchicalManager.getTotalBounds();
+                return null;
+            },
+            onNavigate: ({ x, y }) => {
+                // Jump camera to that world XY while keeping current Z
+                this.camera.position.x = x;
+                this.camera.position.y = y;
+            },
         });
 
         this.addGridHelper();
@@ -398,6 +425,114 @@ export class GitHubRepoViewer {
         // cam-speed, reset-camera, fit-all listeners handled by CameraController
     }
 
+    /**
+     * Register all keyboard shortcuts.
+     * Called once during init, after ShortcutManager is created.
+     * @private
+     */
+    _registerShortcuts() {
+        const sm = this.shortcutManager;
+
+        // Escape — deselect all
+        sm.register('escape', () => {
+            if (this.selectionManager) this.selectionManager.clear(this.grids);
+        }, { description: 'Deselect all' });
+
+        // Tab — select next file
+        sm.register('tab', () => {
+            this._tabTraverse(1);
+        }, { description: 'Select next file' });
+
+        // Shift+Tab — select previous file
+        sm.register('shift+tab', () => {
+            this._tabTraverse(-1);
+        }, { description: 'Select previous file' });
+
+        // Enter — focus camera on selected file
+        sm.register('enter', () => {
+            if (this.selectionManager?.primary) {
+                const idx = this.grids.findIndex(
+                    g => g.userData?.sourcePath === this.selectionManager.primary
+                );
+                if (idx >= 0) this.cameraController.focusOnGrid(idx);
+            } else if (this._tabIndex >= 0 && this._tabIndex < this.grids.length) {
+                this.cameraController.focusOnGrid(this._tabIndex);
+            }
+        }, { description: 'Focus camera on selected file' });
+
+        // F — fit all grids in view
+        sm.register('f', () => {
+            this.cameraController.focusOnGrids();
+        }, { description: 'Fit all grids in view' });
+
+        // M — toggle minimap
+        sm.register('m', () => {
+            if (this.minimapOverlay) {
+                const isNow = this.minimapOverlay.toggle();
+                this.toastUI?.show(`Minimap ${isNow ? 'shown' : 'hidden'}`, 'success');
+            }
+        }, { description: 'Toggle minimap' });
+
+        // 1 — hierarchical layout
+        sm.register('1', () => {
+            this._switchLayout('hierarchical');
+        }, { description: 'Switch to hierarchical layout' });
+
+        // 2 — spiral layout
+        sm.register('2', () => {
+            this._switchLayout('spiral');
+        }, { description: 'Switch to spiral layout' });
+
+        // 3 — treemap layout
+        sm.register('3', () => {
+            this._switchLayout('treemap');
+        }, { description: 'Switch to treemap layout' });
+    }
+
+    /**
+     * Switch layout programmatically and update the UI select element.
+     * @private
+     * @param {string} mode - 'hierarchical'|'spiral'|'treemap'
+     */
+    _switchLayout(mode) {
+        this._activeLayout = mode;
+        this.relayoutGrids();
+        this.cameraController.focusOnGrids();
+        if (this.statePersistence) this.statePersistence.onLayoutChanged(mode);
+
+        // Sync the settings panel select element
+        const layoutSelect = document.getElementById('layout-mode');
+        if (layoutSelect) layoutSelect.value = mode;
+    }
+
+    /**
+     * Traverse files by Tab key — select next/prev file.
+     * Tab order follows the grids array (matches file-load order / hierarchical).
+     * @private
+     * @param {number} delta - +1 for next, -1 for prev
+     */
+    _tabTraverse(delta) {
+        if (this.grids.length === 0) return;
+
+        // Start from current selection if possible
+        if (this._tabIndex < 0 && this.selectionManager?.primary) {
+            const idx = this.grids.findIndex(
+                g => g.userData?.sourcePath === this.selectionManager.primary
+            );
+            if (idx >= 0) this._tabIndex = idx;
+        }
+
+        this._tabIndex = (this._tabIndex + delta + this.grids.length) % this.grids.length;
+
+        const grid = this.grids[this._tabIndex];
+        if (!grid) return;
+
+        const sourcePath = grid.userData?.sourcePath;
+        if (sourcePath && this.selectionManager) {
+            this.selectionManager.select(sourcePath, { grids: this.grids });
+        }
+    }
+
     addGridHelper() {
         const THREE = this.THREE;
         const grid = new THREE.GridHelper(2000, 40, 0x222222, 0x111111);
@@ -408,6 +543,12 @@ export class GitHubRepoViewer {
 
     relayoutGrids() {
         if (this.grids.length === 0) return;
+
+        // Destroy treemap label manager before switching layouts
+        if (this.treemapLabelManager) {
+            this.treemapLabelManager.destroy();
+            this.treemapLabelManager = null;
+        }
 
         // Always run hierarchical first (needed for tree UI + overlays)
         if (this.hierarchicalManager) {
@@ -430,6 +571,17 @@ export class GitHubRepoViewer {
             this.treemapManager.layoutTreemap(this.grids);
             this.sceneContext.treemapManager = this.treemapManager;
             this.sceneContext.spiralManager = null;
+
+            // Phase 4: rebuild treemap label manager after re-layout
+            this.treemapLabelManager = new TreemapLabelManager(
+                this.scene,
+                this.atlas,
+                this.treemapManager,
+                this.camera
+            );
+            this.treemapLabelManager.build().catch(err => {
+                console.warn('[TreemapLabelManager] build error:', err);
+            });
         } else {
             this.sceneContext.spiralManager = null;
             this.sceneContext.treemapManager = null;
@@ -714,6 +866,18 @@ export class GitHubRepoViewer {
             this.nameplateManager.destroy();
             this.nameplateManager = null;
         }
+        if (this.treemapLabelManager) {
+            this.treemapLabelManager.destroy();
+            this.treemapLabelManager = null;
+        }
+
+        // Reset tab traversal index
+        this._tabIndex = -1;
+
+        // Reset minimap layout data
+        if (this.minimapOverlay) {
+            this.minimapOverlay.rebuildLayout();
+        }
     }
 
     async loadDiff(input) {
@@ -915,7 +1079,7 @@ export class GitHubRepoViewer {
     // focusOnDirectory → CameraController
 
     /**
-     * Create visual overlay managers (backdrops + nameplates)
+     * Create visual overlay managers (backdrops + nameplates + treemap labels)
      * @private
      */
     _createOverlays() {
@@ -924,6 +1088,12 @@ export class GitHubRepoViewer {
         // Dispose old managers if they exist
         if (this.backdropManager) this.backdropManager.destroy();
         if (this.nameplateManager) this.nameplateManager.destroy();
+
+        // Dispose previous treemap label manager
+        if (this.treemapLabelManager) {
+            this.treemapLabelManager.destroy();
+            this.treemapLabelManager = null;
+        }
 
         // Non-hierarchical modes: no backdrops, no nameplates
         if (this._activeLayout === 'spiral' || this._activeLayout === 'treemap') {
@@ -939,6 +1109,26 @@ export class GitHubRepoViewer {
                 this._spiralGuide = this.spiralManager.createSpiralGuide(this.THREE);
                 this.scene.add(this._spiralGuide);
             }
+
+            // Phase 4: treemap labels
+            if (this._activeLayout === 'treemap' && this.treemapManager) {
+                this.treemapLabelManager = new TreemapLabelManager(
+                    this.scene,
+                    this.atlas,
+                    this.treemapManager,
+                    this.camera
+                );
+                // Build asynchronously (flushAsync uses workers)
+                this.treemapLabelManager.build().catch(err => {
+                    console.warn('[TreemapLabelManager] build error:', err);
+                });
+            }
+
+            // Rebuild minimap layout data after switching to non-hierarchical mode
+            if (this.minimapOverlay) {
+                this.minimapOverlay.rebuildLayout();
+            }
+
             return;
         }
 
@@ -966,6 +1156,11 @@ export class GitHubRepoViewer {
             this.hierarchicalManager.root,
             this.hierarchicalManager.collapsedPaths
         );
+
+        // Rebuild minimap layout data for hierarchical mode
+        if (this.minimapOverlay) {
+            this.minimapOverlay.rebuildLayout();
+        }
     }
 
     /**
@@ -1015,6 +1210,11 @@ export class GitHubRepoViewer {
                 );
             }
         }
+
+        // Minimap: rebuild after any layout change
+        if (this.minimapOverlay) {
+            this.minimapOverlay.rebuildLayout();
+        }
     }
 
     formatSize(bytes) {
@@ -1061,6 +1261,16 @@ export class GitHubRepoViewer {
         // Update billboard-style nameplates to face camera
         if (this.nameplateManager) {
             this.nameplateManager.updateBillboards(this.camera);
+        }
+
+        // Phase 3: minimap — update viewport rectangle each frame
+        if (this.minimapOverlay) {
+            this.minimapOverlay.update();
+        }
+
+        // Phase 4: treemap labels LOD update
+        if (this.treemapLabelManager) {
+            this.treemapLabelManager.update();
         }
 
         this.renderer.render(this.scene, this.camera);

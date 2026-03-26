@@ -846,6 +846,29 @@ body {
 .badge-modified { background: #d29922; color: #fff; }
 .badge-renamed { background: #8957e5; color: #fff; }
 
+/* ===== Minimap ===== */
+#minimap-container {
+    position: fixed;
+    bottom: 70px;
+    left: 8px;
+    z-index: 200;
+    border-radius: 4px;
+    overflow: hidden;
+    cursor: crosshair;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+}
+
+#minimap-canvas {
+    display: block;
+}
+
+@media (max-width: 600px) {
+    #minimap-container {
+        bottom: 80px;
+        left: 4px;
+    }
+}
+
 /* ===== Desktop: side drawer ===== */
 @media (min-width: 769px) {
     #drawer {
