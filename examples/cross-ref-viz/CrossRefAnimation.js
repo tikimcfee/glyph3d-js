@@ -172,7 +172,7 @@ function bezierControl(from, to, arcHeight, clockwise) {
  * Returns { group, bodyMesh, bodyMat, borderMesh, borderMat }
  */
 function buildDocCard(bodyColor, borderColor) {
-    const W = CARD_W, H = CARD_H, D = 0.06;
+    const W = 1.6, H = 1.0, D = 0.06;
     const group = new THREE.Group();
 
     // Body
