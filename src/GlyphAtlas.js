@@ -302,6 +302,89 @@ class GlyphAtlas {
         return this._sharedThreeTexture;
     }
 
+    /**
+     * Build a DataTexture that maps codepoint → atlas UV rect.
+     *
+     * Layout: 1024 texels wide × ceil(maxCodepoint / 1024) rows tall, RGBA Float.
+     * Each texel stores (u0, v0_webgl, u1, v1_webgl) for that codepoint.
+     * Codepoints not in the atlas have all-zero texels (treated as missing).
+     *
+     * The V coordinates are pre-flipped here (1.0 - v) so the shader does no
+     * canvas→WebGL coordinate conversion at runtime.
+     *
+     * Lookup in shader:
+     *   int cp = int(instanceCodepoint);
+     *   float tx = (float(cp % 1024) + 0.5) / 1024.0;
+     *   float ty = (float(cp / 1024) + 0.5) / float(atlasMapHeight);
+     *   vec4 uvRect = texture2D(atlasMapTexture, vec2(tx, ty));
+     *
+     * @param {THREE} THREE - Three.js module reference
+     * @returns {THREE.DataTexture} Atlas map texture (shared, created once)
+     */
+    getAtlasMapTexture(THREE) {
+        if (this._atlasMapTexture) {
+            return this._atlasMapTexture;
+        }
+
+        // Find the maximum codepoint in the atlas
+        let maxCode = 0;
+        for (const code of this.uvMap.keys()) {
+            if (code > maxCode) maxCode = code;
+        }
+
+        const ATLAS_MAP_WIDTH = 1024;
+        const rows = Math.ceil((maxCode + 1) / ATLAS_MAP_WIDTH);
+        const height = Math.max(rows, 1);
+        const totalTexels = ATLAS_MAP_WIDTH * height;
+
+        // RGBA float: 4 floats per texel
+        const data = new Float32Array(totalTexels * 4);
+
+        for (const [code, uv] of this.uvMap) {
+            const texelIdx = code; // direct codepoint index
+            if (texelIdx >= totalTexels) continue;
+            const base = texelIdx * 4;
+            data[base]     = uv.u0;
+            data[base + 1] = 1.0 - uv.v1; // pre-flip V: bottom edge in WebGL
+            data[base + 2] = uv.u1;
+            data[base + 3] = 1.0 - uv.v0; // pre-flip V: top edge in WebGL
+        }
+
+        const texture = new THREE.DataTexture(
+            data,
+            ATLAS_MAP_WIDTH,
+            height,
+            THREE.RGBAFormat,
+            THREE.FloatType
+        );
+        texture.minFilter = THREE.NearestFilter;
+        texture.magFilter = THREE.NearestFilter;
+        texture.generateMipmaps = false;
+        texture.needsUpdate = true;
+
+        // Store metadata on the texture for shader use
+        texture.userData = { width: ATLAS_MAP_WIDTH, height };
+
+        this._atlasMapTexture = texture;
+        this._atlasMapTextureWidth = ATLAS_MAP_WIDTH;
+        this._atlasMapTextureHeight = height;
+
+        console.log(`Atlas map texture: ${ATLAS_MAP_WIDTH}x${height}, maxCodepoint=${maxCode}, glyphs=${this.uvMap.size}`);
+
+        return texture;
+    }
+
+    /**
+     * Get the dimensions of the atlas map texture (must call getAtlasMapTexture first)
+     * @returns {{width: number, height: number}}
+     */
+    getAtlasMapDimensions() {
+        return {
+            width: this._atlasMapTextureWidth || 1024,
+            height: this._atlasMapTextureHeight || 1
+        };
+    }
+
     // For debugging
     saveDebug() {
         const link = document.createElement('a');

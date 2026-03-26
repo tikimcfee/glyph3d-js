@@ -3,13 +3,19 @@ precision highp float;
 // Per-instance attributes
 attribute vec3 instancePosition;
 attribute vec2 instanceSize;
-attribute vec4 instanceUV;  // (u0, v0, u1, v1)
+attribute float instanceCodepoint;
 attribute vec3 instanceColor;
 attribute float instanceGroupId;
 
 // Group property DataTexture (4 columns x N rows, RGBA Float)
 uniform sampler2D groupTexture;
 uniform float groupTextureHeight;
+
+// Atlas map texture: codepoint -> (u0, v0_webgl, u1, v1_webgl)
+// Layout: atlasMapWidth texels wide x atlasMapHeight rows tall
+uniform sampler2D atlasMapTexture;
+uniform float atlasMapWidth;
+uniform float atlasMapHeight;
 
 // Varying
 varying vec2 vUv;
@@ -32,8 +38,18 @@ void main() {
     // Apply camera transform
     gl_Position = projectionMatrix * modelViewMatrix * vec4(worldPos, 1.0);
 
-    // Map UVs from base geometry (0-1) to instance atlas UVs
-    vUv = mix(instanceUV.xy, instanceUV.zw, uv);
-    vColor = instanceColor * gColor.rgb;
+    // GPU codepoint -> UV lookup via atlas map texture
+    float cp = instanceCodepoint;
+    float mapCol = mod(cp, atlasMapWidth);
+    float mapRow = floor(cp / atlasMapWidth);
+    float tx = (mapCol + 0.5) / atlasMapWidth;
+    float ty = (mapRow + 0.5) / atlasMapHeight;
+    vec4 uvRect = texture2D(atlasMapTexture, vec2(tx, ty));
+    // uvRect = (u0, v0_webgl, u1, v1_webgl) — pre-flipped in GlyphAtlas
+    vUv = mix(uvRect.xy, uvRect.zw, uv);
+
+    // gScale.w = color blend factor: 0.0 = multiply (default), 1.0 = replace
+    float colorBlend = gScale.w;
+    vColor = mix(instanceColor * gColor.rgb, gColor.rgb, colorBlend);
     vGroupAlpha = gColor.a;
 }

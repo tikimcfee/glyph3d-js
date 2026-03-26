@@ -183,12 +183,19 @@ class GlyphRendererV15 {
         // Create group offset DataTexture
         this._groupTexture = this._createGroupTexture();
 
+        // Build atlas map texture for GPU-side codepoint → UV lookup
+        const atlasMapTexture = this.atlas.getAtlasMapTexture(THREE);
+        const atlasMapDims = this.atlas.getAtlasMapDimensions();
+
         // Create shader material (clean, no debug paths)
         const material = new THREE.ShaderMaterial({
             uniforms: {
                 atlasTexture: { value: this.texture },
                 groupTexture: { value: this._groupTexture },
-                groupTextureHeight: { value: this._maxGroups }
+                groupTextureHeight: { value: this._maxGroups },
+                atlasMapTexture: { value: atlasMapTexture },
+                atlasMapWidth: { value: atlasMapDims.width },
+                atlasMapHeight: { value: atlasMapDims.height }
             },
             vertexShader: this._getVertexShader(),
             fragmentShader: this._getFragmentShader(),
@@ -205,8 +212,8 @@ class GlyphRendererV15 {
                 new THREE.InstancedBufferAttribute(new Float32Array(maxCount * 3), 3));
             geometry.setAttribute('instanceSize',
                 new THREE.InstancedBufferAttribute(new Float32Array(maxCount * 2), 2));
-            geometry.setAttribute('instanceUV',
-                new THREE.InstancedBufferAttribute(new Float32Array(maxCount * 4), 4));
+            geometry.setAttribute('instanceCodepoint',
+                new THREE.InstancedBufferAttribute(new Float32Array(maxCount), 1));
             geometry.setAttribute('instanceColor',
                 new THREE.InstancedBufferAttribute(new Float32Array(maxCount * 3), 3));
             geometry.setAttribute('instanceGroupId',
@@ -231,19 +238,25 @@ class GlyphRendererV15 {
     }
 
     /**
-     * Get optimized vertex shader
+     * Get optimized vertex shader (GPU codepoint → UV lookup path)
      * @private
      */
     _getVertexShader() {
         return `
             attribute vec3 instancePosition;
             attribute vec2 instanceSize;
-            attribute vec4 instanceUV;
+            attribute float instanceCodepoint;
             attribute vec3 instanceColor;
             attribute float instanceGroupId;
 
             uniform sampler2D groupTexture;
             uniform float groupTextureHeight;
+
+            // Atlas map texture: codepoint -> (u0, v0_webgl, u1, v1_webgl)
+            // Layout: atlasMapWidth texels wide x atlasMapHeight rows tall
+            uniform sampler2D atlasMapTexture;
+            uniform float atlasMapWidth;
+            uniform float atlasMapHeight;
 
             varying vec2 vUV;
             varying vec3 vColor;
@@ -265,8 +278,16 @@ class GlyphRendererV15 {
                 // Standard projection
                 gl_Position = projectionMatrix * modelViewMatrix * vec4(worldPos, 1.0);
 
-                // Pass through interpolated UVs
-                vUV = mix(instanceUV.xy, instanceUV.zw, uv);
+                // GPU codepoint → UV lookup via atlas map texture
+                float cp = instanceCodepoint;
+                float mapCol = mod(cp, atlasMapWidth);
+                float mapRow = floor(cp / atlasMapWidth);
+                float tx = (mapCol + 0.5) / atlasMapWidth;
+                float ty = (mapRow + 0.5) / atlasMapHeight;
+                vec4 uvRect = texture2D(atlasMapTexture, vec2(tx, ty));
+                // uvRect = (u0, v0_webgl, u1, v1_webgl) — pre-flipped in GlyphAtlas
+                vUV = mix(uvRect.xy, uvRect.zw, uv);
+
                 // gScale.w = color blend factor: 0.0 = multiply (default), 1.0 = replace
                 float colorBlend = gScale.w;
                 vColor = mix(instanceColor * gColor.rgb, gColor.rgb, colorBlend);
@@ -870,8 +891,8 @@ class GlyphRendererV15 {
             const pos = positions[posIndex++];
             if (!pos) continue; // Safety check
 
-            const uv = this.atlas.getUV(char.charCodeAt(0));
-            if (!uv) continue; // Skip unsupported chars
+            const charCode = char.charCodeAt(0);
+            if (!this.atlas.hasGlyph(charCode)) continue; // Skip unsupported chars
 
             glyphs.push({
                 position: pos,
@@ -879,7 +900,7 @@ class GlyphRendererV15 {
                     width: this.metrics.charWidth * scale,
                     height: this.metrics.charHeight * scale
                 },
-                uv: uv,
+                charCode: charCode,
                 color: color,
                 char: char,  // Keep for debugging
                 groupId: options.groupId || 0
@@ -970,7 +991,7 @@ class GlyphRendererV15 {
         const geometry = this.instanceMesh.geometry;
         const positions = geometry.attributes.instancePosition.array;
         const sizes = geometry.attributes.instanceSize.array;
-        const uvs = geometry.attributes.instanceUV.array;
+        const codepoints = geometry.attributes.instanceCodepoint.array;
         const colors = geometry.attributes.instanceColor.array;
         const groupIds = geometry.attributes.instanceGroupId.array;
 
@@ -987,17 +1008,8 @@ class GlyphRendererV15 {
             sizes[i * 2] = g.size.width;
             sizes[i * 2 + 1] = g.size.height;
 
-            // UV coordinates (with V flip for canvas texture - CRITICAL!)
-            // Canvas uses top-left origin, WebGL uses bottom-left
-            const u0 = g.uv.u0;
-            const v0 = 1.0 - g.uv.v0;  // Flip V coordinate
-            const u1 = g.uv.u1;
-            const v1 = 1.0 - g.uv.v1;  // Flip V coordinate
-
-            uvs[i * 4] = u0;
-            uvs[i * 4 + 1] = v1;     // Bottom-left (note: v1, not v0)
-            uvs[i * 4 + 2] = u1;
-            uvs[i * 4 + 3] = v0;     // Top-right (note: v0, not v1)
+            // Codepoint — GPU resolves to UV via atlasMapTexture
+            codepoints[i] = g.charCode || 63; // fallback to '?'
 
             // Color
             colors[i * 3] = g.color.r;
@@ -1011,7 +1023,7 @@ class GlyphRendererV15 {
         // Mark attributes as needing update
         geometry.attributes.instancePosition.needsUpdate = true;
         geometry.attributes.instanceSize.needsUpdate = true;
-        geometry.attributes.instanceUV.needsUpdate = true;
+        geometry.attributes.instanceCodepoint.needsUpdate = true;
         geometry.attributes.instanceColor.needsUpdate = true;
         geometry.attributes.instanceGroupId.needsUpdate = true;
 
@@ -1040,7 +1052,7 @@ class GlyphRendererV15 {
      * @param {Object} buffers - Pre-computed buffer data
      * @param {Float32Array} buffers.positions - [x,y,z] per glyph
      * @param {Float32Array} buffers.sizes - [w,h] per glyph
-     * @param {Float32Array} buffers.uvs - [u0,v1,u1,v0] per glyph (V-flipped)
+     * @param {Float32Array} buffers.codepoints - Unicode codepoints per glyph (GPU resolves to UV)
      * @param {Float32Array} buffers.colors - [r,g,b] per glyph
      * @param {number} buffers.count - Number of glyphs
      * @param {Array} [buffers.itemMeta] - Per-item metadata from buildBatchBuffers
@@ -1048,7 +1060,7 @@ class GlyphRendererV15 {
      * @returns {Array<number>|null} Array of renderer IDs if itemMeta provided, null otherwise
      */
     applyPrebuiltBuffers(buffers, items) {
-        const { positions, sizes, uvs, colors, groupIds, count } = buffers;
+        const { positions, sizes, codepoints, colors, groupIds, count } = buffers;
         let { itemMeta } = buffers;
         const geometry = this.instanceMesh.geometry;
 
@@ -1058,8 +1070,8 @@ class GlyphRendererV15 {
             new THREE.InstancedBufferAttribute(positions, 3));
         geometry.setAttribute('instanceSize',
             new THREE.InstancedBufferAttribute(sizes, 2));
-        geometry.setAttribute('instanceUV',
-            new THREE.InstancedBufferAttribute(uvs, 4));
+        geometry.setAttribute('instanceCodepoint',
+            new THREE.InstancedBufferAttribute(codepoints || new Float32Array(count), 1));
         geometry.setAttribute('instanceColor',
             new THREE.InstancedBufferAttribute(colors, 3));
         geometry.setAttribute('instanceGroupId',
@@ -1122,6 +1134,7 @@ class GlyphRendererV15 {
                             g: colors[bufIdx * 3 + 1],
                             b: colors[bufIdx * 3 + 2]
                         },
+                        charCode: codepoints ? codepoints[bufIdx] : 63,
                         char: '',
                         groupId: groupIds ? groupIds[bufIdx] : 0
                     };

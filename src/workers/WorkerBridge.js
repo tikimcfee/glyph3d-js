@@ -129,7 +129,7 @@ export class WorkerBridge {
      * @param {string} [input.alignment]
      * @param {Object} metrics - Font metrics
      * @param {GlyphAtlas} atlas - For UV map
-     * @returns {Promise<{positions, sizes, uvs, colors, count}>}
+     * @returns {Promise<{positions, sizes, codepoints, colors, count}>}
      */
     async buildBuffers(input, metrics, atlas) {
         this._ensureInitialized();
@@ -171,7 +171,7 @@ export class WorkerBridge {
      * @param {Object} shared.metrics - Font metrics
      * @param {{r,g,b}} shared.defaultColor - Default color
      * @param {GlyphAtlas} atlas - For UV map
-     * @returns {Promise<{positions, sizes, uvs, colors, count}>}
+     * @returns {Promise<{positions, sizes, codepoints, colors, count}>}
      */
     async buildBatchBuffers(items, shared, atlas) {
         this._ensureInitialized();

@@ -27,10 +27,10 @@ function countGlyphs(text) {
  * @param {string} input.text
  * @param {{x,y,z}} input.position
  * @param {Object} input.metrics
- * @param {Object} input.uvMap
+ * @param {Object} input.uvMap - charCode → {u0,v0,u1,v1} (used only to validate glyph exists)
  * @param {{r,g,b}} input.color
  * @param {number} [input.scale=1.0]
- * @returns {{positions: Float32Array, sizes: Float32Array, uvs: Float32Array, colors: Float32Array, count: number, bounds: Object|null}}
+ * @returns {{positions: Float32Array, sizes: Float32Array, codepoints: Float32Array, colors: Float32Array, count: number, bounds: Object|null}}
  */
 export function buildGlyphBuffers(input) {
     const { text, position, metrics, uvMap, color, scale = 1.0, groupId = 0 } = input;
@@ -39,7 +39,7 @@ export function buildGlyphBuffers(input) {
         return {
             positions: new Float32Array(0),
             sizes: new Float32Array(0),
-            uvs: new Float32Array(0),
+            codepoints: new Float32Array(0),
             colors: new Float32Array(0),
             groupIds: new Float32Array(0),
             count: 0,
@@ -53,7 +53,7 @@ export function buildGlyphBuffers(input) {
     // Allocate buffers
     const positions = new Float32Array(glyphCount * 3);
     const sizes = new Float32Array(glyphCount * 2);
-    const uvs = new Float32Array(glyphCount * 4);
+    const codepoints = new Float32Array(glyphCount);
     const colors = new Float32Array(glyphCount * 3);
     const groupIds = new Float32Array(glyphCount);
 
@@ -95,9 +95,9 @@ export function buildGlyphBuffers(input) {
         // Track minX
         if (minX === Infinity) minX = x;
 
-        // Get UV (fallback to '?' = 63)
-        const uv = uvMap[charCode] || uvMap[63];
-        if (!uv) {
+        // Validate glyph exists in atlas (fallback to '?' = 63)
+        const resolvedCode = uvMap[charCode] ? charCode : (uvMap[63] ? 63 : 0);
+        if (!resolvedCode) {
             x += metrics.charWidth + metrics.letterSpacing;
             continue;
         }
@@ -111,11 +111,8 @@ export function buildGlyphBuffers(input) {
         sizes[idx * 2] = scaledWidth;
         sizes[idx * 2 + 1] = scaledHeight;
 
-        // UV with V-flip [u0, v1, u1, v0]
-        uvs[idx * 4] = uv.u0;
-        uvs[idx * 4 + 1] = 1.0 - uv.v1;
-        uvs[idx * 4 + 2] = uv.u1;
-        uvs[idx * 4 + 3] = 1.0 - uv.v0;
+        // Codepoint — GPU resolves to UV via atlasMapTexture
+        codepoints[idx] = resolvedCode;
 
         // Color [r, g, b]
         colors[idx * 3] = color.r;
@@ -139,7 +136,7 @@ export function buildGlyphBuffers(input) {
         height: maxY - minY
     } : null;
 
-    return { positions, sizes, uvs, colors, groupIds, count: idx, bounds };
+    return { positions, sizes, codepoints, colors, groupIds, count: idx, bounds };
 }
 
 /**
@@ -162,7 +159,7 @@ const Z_WRAP_CONFIG = {
  *
  * @param {Array<{text, position, color?, scale?}>} items
  * @param {Object} shared - {metrics, uvMap, defaultColor}
- * @returns {{positions: Float32Array, sizes: Float32Array, uvs: Float32Array, colors: Float32Array, count: number, bounds: Object|null, itemMeta: Array<{bufferStartIndex: number, glyphCount: number, bounds: Object|null}>}}
+ * @returns {{positions: Float32Array, sizes: Float32Array, codepoints: Float32Array, colors: Float32Array, count: number, bounds: Object|null, itemMeta: Array<{bufferStartIndex: number, glyphCount: number, bounds: Object|null}>}}
  */
 export function buildBatchBuffers(items, shared) {
     const { metrics, uvMap, defaultColor } = shared;
@@ -181,7 +178,7 @@ export function buildBatchBuffers(items, shared) {
         return {
             positions: new Float32Array(0),
             sizes: new Float32Array(0),
-            uvs: new Float32Array(0),
+            codepoints: new Float32Array(0),
             colors: new Float32Array(0),
             groupIds: new Float32Array(0),
             count: 0,
@@ -193,7 +190,7 @@ export function buildBatchBuffers(items, shared) {
     // Allocate combined buffers
     const positions = new Float32Array(totalGlyphs * 3);
     const sizes = new Float32Array(totalGlyphs * 2);
-    const uvs = new Float32Array(totalGlyphs * 4);
+    const codepoints = new Float32Array(totalGlyphs);
     const colors = new Float32Array(totalGlyphs * 3);
     const groupIds = new Float32Array(totalGlyphs);
 
@@ -270,8 +267,8 @@ export function buildBatchBuffers(items, shared) {
 
             if (itemMinX === Infinity) itemMinX = x;
 
-            const uv = uvMap[charCode] || uvMap[63];
-            if (!uv) {
+            const resolvedCode = uvMap[charCode] ? charCode : (uvMap[63] ? 63 : 0);
+            if (!resolvedCode) {
                 x += metrics.charWidth + metrics.letterSpacing;
                 charsOnSegment++;
                 continue;
@@ -286,10 +283,8 @@ export function buildBatchBuffers(items, shared) {
             sizes[idx * 2] = scaledWidth;
             sizes[idx * 2 + 1] = scaledHeight;
 
-            uvs[idx * 4] = uv.u0;
-            uvs[idx * 4 + 1] = 1.0 - uv.v1;
-            uvs[idx * 4 + 2] = uv.u1;
-            uvs[idx * 4 + 3] = 1.0 - uv.v0;
+            // Codepoint — GPU resolves to UV via atlasMapTexture
+            codepoints[idx] = resolvedCode;
 
             colors[idx * 3] = color.r;
             colors[idx * 3 + 1] = color.g;
@@ -339,7 +334,7 @@ export function buildBatchBuffers(items, shared) {
         depth: maxZ - minZ
     } : null;
 
-    return { positions, sizes, uvs, colors, groupIds, count: bufferOffset, bounds, itemMeta };
+    return { positions, sizes, codepoints, colors, groupIds, count: bufferOffset, bounds, itemMeta };
 }
 
 export default buildGlyphBuffers;

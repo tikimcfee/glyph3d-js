@@ -27,7 +27,7 @@ self.onmessage = function(event) {
                     [
                         result.positions.buffer,
                         result.sizes.buffer,
-                        result.uvs.buffer,
+                        result.codepoints.buffer,
                         result.colors.buffer,
                         result.groupIds.buffer
                     ]
@@ -57,7 +57,7 @@ self.onmessage = function(event) {
                     [
                         result.positions.buffer,
                         result.sizes.buffer,
-                        result.uvs.buffer,
+                        result.codepoints.buffer,
                         result.colors.buffer,
                         result.groupIds.buffer
                     ]
