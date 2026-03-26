@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>glyph3d-js Examples</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Monaco', 'Menlo', 'Consolas', monospace;
+            background: #0a0a0a;
+            color: #e0e0e0;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 60px 20px;
+        }
+
+        h1 {
+            font-size: 28px;
+            color: #00ff88;
+            margin-bottom: 8px;
+            letter-spacing: 1px;
+        }
+
+        .subtitle {
+            font-size: 13px;
+            color: #888;
+            margin-bottom: 48px;
+        }
+
+        .examples-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+            gap: 20px;
+            max-width: 1000px;
+            width: 100%;
+        }
+
+        .example-card {
+            background: linear-gradient(135deg, rgba(20, 20, 25, 0.95), rgba(15, 15, 20, 0.9));
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 24px;
+            text-decoration: none;
+            color: inherit;
+            transition: border-color 0.2s, transform 0.2s, box-shadow 0.2s;
+        }
+
+        .example-card:hover {
+            border-color: #00ff88;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 20px rgba(0, 255, 136, 0.1);
+        }
+
+        .example-card h2 {
+            font-size: 16px;
+            color: #00ff88;
+            margin-bottom: 8px;
+        }
+
+        .example-card p {
+            font-size: 12px;
+            color: #999;
+            line-height: 1.6;
+        }
+
+        .example-card .tag {
+            display: inline-block;
+            font-size: 10px;
+            color: #666;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid #333;
+            border-radius: 3px;
+            padding: 2px 6px;
+            margin-top: 12px;
+            margin-right: 4px;
+        }
+
+        footer {
+            margin-top: 60px;
+            font-size: 11px;
+            color: #555;
+        }
+
+        footer a {
+            color: #00ff88;
+            text-decoration: none;
+        }
+
+        footer a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <h1>glyph3d-js</h1>
+    <p class="subtitle">GPU-instanced 3D text rendering for Three.js</p>
+
+    <div class="examples-grid">
+        <a href="github-viewer/" class="example-card">
+            <h2>GitHub Repo Viewer</h2>
+            <p>
+                Load and visualize GitHub repositories in 3D space.
+                Treemap layout, file selection, diff viewer, keyboard shortcuts,
+                and session persistence.
+            </p>
+            <span class="tag">treemap</span>
+            <span class="tag">async</span>
+            <span class="tag">camera</span>
+        </a>
+
+        <a href="code-spectrometer/" class="example-card">
+            <h2>Code Spectrometer</h2>
+            <p>
+                Analyze source code structure with a wand-based spectral interface.
+                Hover over code to reveal taxonomy breakdowns and color-coded
+                structural patterns.
+            </p>
+            <span class="tag">analysis</span>
+            <span class="tag">wand</span>
+            <span class="tag">color</span>
+        </a>
+
+        <a href="word-wall/" class="example-card">
+            <h2>Word Wall</h2>
+            <p>
+                Dictionary visualization. Renders thousands of words in a 3D grid,
+                type a sentence to highlight matching words and see definitions
+                with connected definition-word chains.
+            </p>
+            <span class="tag">dictionary</span>
+            <span class="tag">search</span>
+            <span class="tag">highlight</span>
+        </a>
+
+        <a href="mod-layer-visualizer/" class="example-card">
+            <h2>Mod Layer Visualizer</h2>
+            <p>
+                Stacked modular arithmetic grids. Each layer colors a dataset
+                by remainder mod N, revealing hidden structure in primes,
+                Fibonacci numbers, and more.
+            </p>
+            <span class="tag">math</span>
+            <span class="tag">layers</span>
+            <span class="tag">interactive</span>
+        </a>
+
+        <a href="hand-tracking/" class="example-card">
+            <h2>Hand Tracking</h2>
+            <p>
+                Hand pose estimation with three input sources: mock (mouse),
+                webcam (MediaPipe), and WebSocket (ARKit). Features WASD camera,
+                pinch gestures, and tuning sliders.
+            </p>
+            <span class="tag">hands</span>
+            <span class="tag">webcam</span>
+            <span class="tag">gestures</span>
+        </a>
+
+        <a href="render-test/" class="example-card">
+            <h2>Render Test</h2>
+            <p>
+                Comprehensive test suite for the glyph rendering pipeline.
+                Validates GlyphRenderer, GlyphCollection, atlas generation,
+                text operations, and async worker builds.
+            </p>
+            <span class="tag">test</span>
+            <span class="tag">validation</span>
+            <span class="tag">debug</span>
+        </a>
+    </div>
+
+    <footer>
+        <a href="https://github.com/tikimcfee/glyph3d-js">glyph3d-js on GitHub</a>
+        &mdash; serve with <code>npm run serve</code> then visit
+        <code>localhost:8000/examples/</code>
+    </footer>
+</body>
+</html>
