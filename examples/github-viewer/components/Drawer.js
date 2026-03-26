@@ -218,6 +218,15 @@ export function settingsPanelHTML() {
             <input type="range" class="setting-slider" id="layout-spacing"
                    min="0" max="500" step="10" value="10">
         </div>
+        <div class="setting-group">
+            <div class="setting-label">
+                <span>Layout</span>
+            </div>
+            <select class="setting-select" id="layout-mode">
+                <option value="hierarchical">Hierarchical</option>
+                <option value="spiral">Spiral</option>
+            </select>
+        </div>
         <div class="setting-group setting-section-header">Navigation</div>
         <div class="setting-group">
             <div class="setting-label">

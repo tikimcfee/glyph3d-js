@@ -16,6 +16,7 @@ export { default as GlyphCollection } from './collections/GlyphCollection.js';
 export { default as CodeGrid } from './collections/CodeGrid.js';
 export { default as GridLayoutManager } from './collections/GridLayoutManager.js';
 export { default as HierarchicalLayoutManager } from './collections/HierarchicalLayoutManager.js';
+export { default as SpiralLayoutManager } from './collections/SpiralLayoutManager.js';
 
 // Worker system
 export { WorkerBridge, getWorkerBridge, isWorkersSupported } from './workers/WorkerBridge.js';

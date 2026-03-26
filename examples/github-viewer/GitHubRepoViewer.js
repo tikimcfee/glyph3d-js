@@ -12,7 +12,8 @@ import {
     GlyphAtlas,
     CodeGrid,
     GridLayoutManager,
-    HierarchicalLayoutManager
+    HierarchicalLayoutManager,
+    SpiralLayoutManager
 } from '../../src/index.js';
 
 import { RepositoryAdapter } from './RepositoryAdapter.js';
@@ -86,6 +87,8 @@ export class GitHubRepoViewer {
         this.atlas = null;
         this.layoutManager = null;
         this.hierarchicalManager = null;
+        this.spiralManager = null;
+        this._activeLayout = 'hierarchical';
         this.repoAdapter = null;
         this.githubSource = new GitHubRepositorySource();
         this.diffController = null;
@@ -293,6 +296,16 @@ export class GitHubRepoViewer {
             }
         });
 
+        // Layout mode selector
+        const layoutSelect = document.getElementById('layout-mode');
+        if (layoutSelect) {
+            layoutSelect.addEventListener('change', (e) => {
+                this._activeLayout = e.target.value;
+                this.relayoutGrids();
+                this.cameraController.focusOnGrids();
+            });
+        }
+
         // cam-speed, reset-camera, fit-all listeners handled by CameraController
     }
 
@@ -306,16 +319,28 @@ export class GitHubRepoViewer {
 
     relayoutGrids() {
         if (this.grids.length === 0) return;
+
+        // Always run hierarchical first (needed for tree UI + overlays)
         if (this.hierarchicalManager) {
             this.hierarchicalManager.options.siblingSpacing = 8;
             this.hierarchicalManager.options.dirPadding = 15;
             this.hierarchicalManager.clear();
             this.hierarchicalManager.layoutHierarchy(this.grids);
-            this._updateOverlays();
-        } else {
-            this.layoutManager.clear();
-            for (const grid of this.grids) { this.layoutManager.addAuto(grid); }
         }
+
+        // If spiral is active, reposition grids on top of hierarchical
+        if (this._activeLayout === 'spiral') {
+            if (!this.spiralManager) {
+                this.spiralManager = new SpiralLayoutManager();
+            }
+            this.spiralManager.clear();
+            this.spiralManager.layoutSpiral(this.grids);
+            this.sceneContext.spiralManager = this.spiralManager;
+        } else {
+            this.sceneContext.spiralManager = null;
+        }
+
+        this._updateOverlays();
     }
 
     async fetchBranches() {
@@ -441,29 +466,39 @@ export class GitHubRepoViewer {
             const gridTime = performance.now() - gridStart;
             console.log(`[2] Grid creation (Workers): ${createdGrids.length} grids in ${gridTime.toFixed(0)}ms`);
 
-            // Phase 2b: Hierarchical layout
+            // Phase 2b: Layout
             const layoutStart = performance.now();
-            this.loading.update(0.7, `Computing hierarchical layout...`);
+            this.loading.update(0.7, `Computing layout...`);
 
+            // Always create hierarchical manager (needed for tree UI)
             const HLM = HierarchicalLayoutManager;
             this.hierarchicalManager = new HLM({
                 dirPadding: 15,
-                dirPaddingDecay: 0.7,       // padding shrinks at deeper nesting
+                dirPaddingDecay: 0.7,
                 siblingSpacing: 8,
-                maxRowWidth: 8000,           // generous cap for adaptive layout
-                targetAspectRatio: 3.0,      // aim for 3:1 wide directories
-                directoriesInZ: false,       // dirs flow horizontally with files
+                maxRowWidth: 8000,
+                targetAspectRatio: 3.0,
+                directoriesInZ: false,
                 siblingDirection: 'horizontal'
             });
-
-            this.hierarchicalManager.layoutHierarchy(createdGrids);
-
-            // Update shared context with new manager
             this.sceneContext.hierarchicalManager = this.hierarchicalManager;
 
+            // Add grids to scene + tracking before layout
             for (const grid of createdGrids) {
                 this.scene.add(grid);
                 this.grids.push(grid);
+            }
+
+            // Always run hierarchical layout (builds tree for UI + positions grids)
+            this.hierarchicalManager.layoutHierarchy(createdGrids);
+
+            // If spiral is active, re-position grids with spiral layout on top
+            if (this._activeLayout === 'spiral') {
+                this.spiralManager = new SpiralLayoutManager();
+                this.spiralManager.layoutSpiral(createdGrids);
+                this.sceneContext.spiralManager = this.spiralManager;
+            } else {
+                this.sceneContext.spiralManager = null;
             }
 
             console.log('Directory structure:');
@@ -476,6 +511,10 @@ export class GitHubRepoViewer {
             const overlayStart = performance.now();
             this.loading.update(0.8, `Creating visual overlays...`);
             this._createOverlays();
+            // If spiral, immediately apply spiral overlay state (hide backdrops, show guide)
+            if (this._activeLayout === 'spiral') {
+                this._updateOverlays();
+            }
             const overlayTime = performance.now() - overlayStart;
             console.log(`[2c] Visual overlays: ${overlayTime.toFixed(0)}ms`);
 
@@ -758,6 +797,23 @@ export class GitHubRepoViewer {
         if (this.backdropManager) this.backdropManager.destroy();
         if (this.nameplateManager) this.nameplateManager.destroy();
 
+        // Spiral mode: no backdrops, no nameplates — the shape is the structure
+        if (this._activeLayout === 'spiral') {
+            this.backdropManager = null;
+            this.nameplateManager = null;
+            // Add spiral guide line
+            if (this._spiralGuide) {
+                this.scene.remove(this._spiralGuide);
+                this._spiralGuide.geometry.dispose();
+                this._spiralGuide.material.dispose();
+            }
+            if (this.spiralManager) {
+                this._spiralGuide = this.spiralManager.createSpiralGuide(this.THREE);
+                this.scene.add(this._spiralGuide);
+            }
+            return;
+        }
+
         // Create backdrop manager
         this.backdropManager = new BackdropManager(this.scene, {
             baseOpacity: 0.12,
@@ -791,18 +847,45 @@ export class GitHubRepoViewer {
     _updateOverlays() {
         if (!this.hierarchicalManager || !this.hierarchicalManager.root) return;
 
-        if (this.backdropManager) {
-            this.backdropManager.updateBackdrops(
-                this.hierarchicalManager.root,
-                this.hierarchicalManager.collapsedPaths
-            );
-        }
+        if (this._activeLayout === 'spiral') {
+            // Spiral mode: hide hierarchical backdrops/nameplates, show spiral guide
+            if (this.backdropManager) this.backdropManager.setVisible(false);
+            if (this.nameplateManager) this.nameplateManager.setVisible(false);
 
-        if (this.nameplateManager) {
-            this.nameplateManager.updateNameplates(
-                this.hierarchicalManager.root,
-                this.hierarchicalManager.collapsedPaths
-            );
+            // Add or update spiral guide line
+            if (this._spiralGuide) {
+                this.scene.remove(this._spiralGuide);
+                this._spiralGuide.geometry.dispose();
+                this._spiralGuide.material.dispose();
+            }
+            if (this.spiralManager) {
+                this._spiralGuide = this.spiralManager.createSpiralGuide(this.THREE);
+                this.scene.add(this._spiralGuide);
+            }
+        } else {
+            // Hierarchical mode: show backdrops/nameplates, remove spiral guide
+            if (this._spiralGuide) {
+                this.scene.remove(this._spiralGuide);
+                this._spiralGuide.geometry.dispose();
+                this._spiralGuide.material.dispose();
+                this._spiralGuide = null;
+            }
+
+            if (this.backdropManager) {
+                this.backdropManager.setVisible(true);
+                this.backdropManager.updateBackdrops(
+                    this.hierarchicalManager.root,
+                    this.hierarchicalManager.collapsedPaths
+                );
+            }
+
+            if (this.nameplateManager) {
+                this.nameplateManager.setVisible(true);
+                this.nameplateManager.updateNameplates(
+                    this.hierarchicalManager.root,
+                    this.hierarchicalManager.collapsedPaths
+                );
+            }
         }
     }
 

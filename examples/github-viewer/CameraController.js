@@ -392,9 +392,11 @@ export class CameraController {
         const grids = this.ctx.getGrids();
         if (grids.length === 0) return;
 
-        const bounds = this.ctx.hierarchicalManager
-            ? this.ctx.hierarchicalManager.getTotalBounds()
-            : this.ctx.layoutManager.getTotalBounds();
+        const bounds = this.ctx.spiralManager
+            ? this.ctx.spiralManager.getTotalBounds()
+            : this.ctx.hierarchicalManager
+                ? this.ctx.hierarchicalManager.getTotalBounds()
+                : this.ctx.layoutManager.getTotalBounds();
 
         const center = new THREE.Vector3();
         bounds.getCenter(center);
