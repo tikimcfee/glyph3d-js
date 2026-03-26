@@ -175,7 +175,8 @@ const Z_WRAP_CONFIG = {
  *
  * @param {Array<{text, position, color?, scale?}>} items
  * @param {Object} shared - {metrics, uvMap, defaultColor}
- * @returns {{positions: Float32Array, sizes: Float32Array, codepoints: Float32Array, colors: Float32Array, count: number, bounds: Object|null, itemMeta: Array<{bufferStartIndex: number, glyphCount: number, bounds: Object|null}>}}
+ * @returns {{positions: Float32Array, sizes: Float32Array, codepoints: Float32Array, colors: Float32Array, groupIds: Float32Array, count: number, bounds: Object|null, itemMeta: Array<{bufferStartIndex: number, glyphCount: number, bounds: Object|null}>}}
+ *   `codepoints` contains one raw Unicode codepoint per glyph for GPU-side UV lookup via atlasMapTexture.
  */
 export function buildBatchBuffers(items, shared) {
     const { metrics, uvMap, defaultColor } = shared;

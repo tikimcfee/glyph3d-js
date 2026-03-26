@@ -452,6 +452,10 @@ class GlyphAtlas {
             // Mark texture as needing update
             this.textureNeedsUpdate = true;
 
+            // Invalidate atlas map DataTexture cache — must be rebuilt on next
+            // getAtlasMapTexture() call to include this newly-packed glyph.
+            this._atlasMapTexture = null;
+
             // Invalidate serialized cache since UV map changed
             this.invalidateSerializedCache();
 
@@ -493,6 +497,11 @@ class GlyphAtlas {
 
         if (added > 0) {
             this.textureNeedsUpdate = true;
+
+            // Invalidate atlas map DataTexture cache — must be rebuilt on next
+            // getAtlasMapTexture() call to include newly-packed glyphs.
+            this._atlasMapTexture = null;
+
             // Invalidate serialized cache since UV map changed
             this.invalidateSerializedCache();
             console.log(`Dynamic glyphs batch added: ${added} new glyphs`);
