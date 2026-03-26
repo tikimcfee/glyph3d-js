@@ -142,12 +142,12 @@ export class CameraController {
         document.addEventListener('mouseup', this._onMouseUp);
         document.addEventListener('mousemove', this._onMouseMove);
 
-        // --- Scroll: pan by default, zoom with Shift held ---
+        // --- Scroll: pan by default, zoom with Alt/Option held ---
         this._onWheel = (e) => {
             if (e.target === canvas || canvas.contains(e.target)) {
                 e.preventDefault();
-                if (e.shiftKey) {
-                    // Shift + scroll = zoom
+                if (e.altKey) {
+                    // Alt/Option + scroll = zoom
                     const delta = this.settings.invertScroll ? e.deltaY : -e.deltaY;
                     const zoomAmount = delta * this.settings.scrollSensitivity * 0.5;
                     const forward = new this.THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);

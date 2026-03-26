@@ -864,9 +864,12 @@ export class GitHubRepoViewer {
             if (gridIndex >= 0) {
                 fileItem.addEventListener('click', () => {
                     this.cameraController.focusOnGrid(gridIndex);
-                    // Also set selection state so visual tint and tree sync apply
                     if (this.selectionManager && node.path) {
                         this.selectionManager.select(node.path, { grids: this.grids });
+                    }
+                    // Close drawer after a beat so user sees the 3D view
+                    if (this.drawerController) {
+                        setTimeout(() => this.drawerController.setOpen(false), 150);
                     }
                 });
             }
