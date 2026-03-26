@@ -186,10 +186,13 @@ class GlyphRendererV15 {
         // Build atlas map texture for GPU-side codepoint → UV lookup
         const atlasMapTexture = this.atlas.getAtlasMapTexture(THREE);
         const atlasMapDims = this.atlas.getAtlasMapDimensions();
-        logger.info('[GPU-Lookup] Shader uses instanceCodepoint attribute + atlasMapTexture DataTexture for UV resolution. instanceUV is not used.', {
-            atlasMapDims,
-            glyphsInMap: this.atlas.uvMap.size
-        });
+        if (!GlyphRendererV15._gpuLookupLogged) {
+            GlyphRendererV15._gpuLookupLogged = true;
+            logger.info('[GPU-Lookup] Pipeline active: instanceCodepoint attribute + atlasMapTexture DataTexture for UV resolution.', {
+                atlasMapDims,
+                glyphsInMap: this.atlas.uvMap.size
+            });
+        }
 
         // Create shader material (clean, no debug paths)
         const material = new THREE.ShaderMaterial({
@@ -1168,11 +1171,10 @@ class GlyphRendererV15 {
             }
         }
 
-        logger.info('[GPU-Lookup] Applied pre-built buffers (zero-copy worker path). Codepoints buffer active — UV lookup will happen in vertex shader.', {
+        logger.debug('[GPU-Lookup] Applied pre-built buffers', {
             count,
             hasCodepoints: !!codepoints && codepoints.length > 0,
-            entriesRegistered: rendererIds ? rendererIds.length : 0,
-            metaSource: buffers.itemMeta ? 'worker' : 'computed'
+            entries: rendererIds ? rendererIds.length : 0,
         });
 
         return rendererIds;
