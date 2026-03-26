@@ -10,7 +10,7 @@ precision highp float;
 
 uniform sampler2D atlasTexture;
 
-varying vec2 vUV;
+varying highp vec2 vUV;
 varying vec3 vColor;
 varying float vGroupAlpha;
 

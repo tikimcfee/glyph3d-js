@@ -250,6 +250,8 @@ class GlyphRendererV15 {
      */
     _getVertexShader() {
         return `
+            precision highp float;
+
             attribute vec3 instancePosition;
             attribute vec2 instanceSize;
             attribute float instanceCodepoint;
@@ -265,7 +267,7 @@ class GlyphRendererV15 {
             uniform float atlasMapWidth;
             uniform float atlasMapHeight;
 
-            varying vec2 vUV;
+            varying highp vec2 vUV;
             varying vec3 vColor;
             varying float vGroupAlpha;
 
@@ -317,9 +319,11 @@ class GlyphRendererV15 {
      */
     _getFragmentShader() {
         return `
+            precision highp float;
+
             uniform sampler2D atlasTexture;
 
-            varying vec2 vUV;
+            varying highp vec2 vUV;
             varying vec3 vColor;
             varying float vGroupAlpha;
 

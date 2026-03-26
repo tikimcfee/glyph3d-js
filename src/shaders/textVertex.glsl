@@ -26,7 +26,7 @@ uniform float atlasMapWidth;
 uniform float atlasMapHeight;
 
 // Varying
-varying vec2 vUV;
+varying highp vec2 vUV;
 varying vec3 vColor;
 varying float vGroupAlpha;
 
