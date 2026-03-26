@@ -13,7 +13,8 @@ import {
     CodeGrid,
     GridLayoutManager,
     HierarchicalLayoutManager,
-    SpiralLayoutManager
+    SpiralLayoutManager,
+    TreemapLayoutManager
 } from '../../src/index.js';
 
 import { RepositoryAdapter } from './RepositoryAdapter.js';
@@ -39,6 +40,7 @@ import {
 import { TouchController } from './components/TouchController.js';
 import { logCapturePanelHTML, initLogCapturePanel } from './components/LogCapturePanel.js';
 import { diffPanelHTML, initDiffPanel } from './components/DiffPanel.js';
+import { StatePersistence, resetAllAndReload } from './StatePersistence.js';
 
 /**
  * Parse GitHub URL to owner/repo
@@ -88,6 +90,7 @@ export class GitHubRepoViewer {
         this.layoutManager = null;
         this.hierarchicalManager = null;
         this.spiralManager = null;
+        this.treemapManager = null;
         this._activeLayout = 'hierarchical';
         this.repoAdapter = null;
         this.githubSource = new GitHubRepositorySource();
@@ -112,6 +115,7 @@ export class GitHubRepoViewer {
         this.fileStateManager = null;
         this.codeColorManager = null;
         this.heatmapProvider = null;
+        this.statePersistence = null;
 
         // Animation
         this.lastTime = performance.now();
@@ -246,9 +250,43 @@ export class GitHubRepoViewer {
         this.loading.hide();
         this.animate();
 
+        // Create reset button next to the drawer toggle
+        this._createResetButton();
+
+        // State persistence: restore UI, start camera saving, auto-load
+        this.statePersistence = new StatePersistence(this);
+        const shouldAutoLoad = this.statePersistence.restoreUI();
+        this.statePersistence.startCameraSaving();
+
         console.log('GitHub 3D Repo Viewer ready!');
-        this.toastUI.show('Ready! Open the Repo tab to load a repository', 'success');
-        this.drawer.openToTab('repo');
+
+        if (shouldAutoLoad) {
+            // Auto-load the last repo; restore camera after grids load
+            this.toastUI.show('Restoring previous session...', 'success');
+            this.loadRepository({ restoreCamera: true });
+        } else {
+            this.toastUI.show('Ready! Open the Repo tab to load a repository', 'success');
+            this.drawer.openToTab('repo');
+        }
+    }
+
+    /**
+     * Create a small reset button next to the drawer toggle (hamburger).
+     * Clears all localStorage and reloads the page.
+     * @private
+     */
+    _createResetButton() {
+        const btn = document.createElement('button');
+        btn.id = 'state-reset-btn';
+        btn.setAttribute('aria-label', 'Reset all settings');
+        btn.innerHTML = '&#8634;';  // ↺
+        btn.title = 'Reset all settings & reload';
+        document.body.appendChild(btn);
+        btn.addEventListener('click', () => {
+            if (confirm('Clear all saved state and reload?')) {
+                resetAllAndReload();
+            }
+        });
     }
 
     setupEventListeners() {
@@ -282,6 +320,7 @@ export class GitHubRepoViewer {
             const scale = parseFloat(e.target.value);
             gridsScaleValue.textContent = scale.toFixed(1);
             for (const grid of this.grids) { grid.scale.setScalar(scale); }
+            if (this.statePersistence) this.statePersistence.onGridsScaleChanged(scale);
         });
 
         const layoutSpacingSlider = document.getElementById('layout-spacing');
@@ -294,6 +333,7 @@ export class GitHubRepoViewer {
                 this.layoutManager.spacing.vertical = spacing * 0.8;
                 this.relayoutGrids();
             }
+            if (this.statePersistence) this.statePersistence.onLayoutSpacingChanged(spacing);
         });
 
         // Layout mode selector
@@ -303,6 +343,7 @@ export class GitHubRepoViewer {
                 this._activeLayout = e.target.value;
                 this.relayoutGrids();
                 this.cameraController.focusOnGrids();
+                if (this.statePersistence) this.statePersistence.onLayoutChanged(e.target.value);
             });
         }
 
@@ -328,16 +369,22 @@ export class GitHubRepoViewer {
             this.hierarchicalManager.layoutHierarchy(this.grids);
         }
 
-        // If spiral is active, reposition grids on top of hierarchical
+        // Alternate layouts reposition grids on top of hierarchical
         if (this._activeLayout === 'spiral') {
-            if (!this.spiralManager) {
-                this.spiralManager = new SpiralLayoutManager();
-            }
+            if (!this.spiralManager) this.spiralManager = new SpiralLayoutManager();
             this.spiralManager.clear();
             this.spiralManager.layoutSpiral(this.grids);
             this.sceneContext.spiralManager = this.spiralManager;
+            this.sceneContext.treemapManager = null;
+        } else if (this._activeLayout === 'treemap') {
+            if (!this.treemapManager) this.treemapManager = new TreemapLayoutManager();
+            this.treemapManager.clear();
+            this.treemapManager.layoutTreemap(this.grids);
+            this.sceneContext.treemapManager = this.treemapManager;
+            this.sceneContext.spiralManager = null;
         } else {
             this.sceneContext.spiralManager = null;
+            this.sceneContext.treemapManager = null;
         }
 
         this._updateOverlays();
@@ -413,7 +460,7 @@ export class GitHubRepoViewer {
         this.branchListEl.classList.remove('hidden');
     }
 
-    async loadRepository() {
+    async loadRepository(options = {}) {
         const url = this.repoInput.value.trim();
         if (!url) { this.toastUI.show('Please enter a GitHub URL', 'error'); return; }
 
@@ -492,13 +539,18 @@ export class GitHubRepoViewer {
             // Always run hierarchical layout (builds tree for UI + positions grids)
             this.hierarchicalManager.layoutHierarchy(createdGrids);
 
-            // If spiral is active, re-position grids with spiral layout on top
+            // Alternate layouts reposition on top of hierarchical
             if (this._activeLayout === 'spiral') {
                 this.spiralManager = new SpiralLayoutManager();
                 this.spiralManager.layoutSpiral(createdGrids);
                 this.sceneContext.spiralManager = this.spiralManager;
+            } else if (this._activeLayout === 'treemap') {
+                this.treemapManager = new TreemapLayoutManager();
+                this.treemapManager.layoutTreemap(createdGrids);
+                this.sceneContext.treemapManager = this.treemapManager;
             } else {
                 this.sceneContext.spiralManager = null;
+                this.sceneContext.treemapManager = null;
             }
 
             console.log('Directory structure:');
@@ -511,8 +563,8 @@ export class GitHubRepoViewer {
             const overlayStart = performance.now();
             this.loading.update(0.8, `Creating visual overlays...`);
             this._createOverlays();
-            // If spiral, immediately apply spiral overlay state (hide backdrops, show guide)
-            if (this._activeLayout === 'spiral') {
+            // Non-hierarchical: hide backdrops immediately
+            if (this._activeLayout !== 'hierarchical') {
                 this._updateOverlays();
             }
             const overlayTime = performance.now() - overlayStart;
@@ -552,6 +604,24 @@ export class GitHubRepoViewer {
             this.toastUI.show(`Loaded ${this.grids.length} files from ${this.repoPath}@${branch}`, 'success');
             this.header.repoLabel.textContent = `${this.repoPath}@${branch}`;
             this.drawer.openToTab('files');
+
+            // Persist successful load
+            if (this.statePersistence) {
+                this.statePersistence.onRepoLoaded(url, branch);
+
+                // Restore camera position if this was an auto-load from persistence
+                if (options.restoreCamera) {
+                    this.statePersistence.restoreCamera();
+                }
+            }
+
+            // Apply persisted grids scale to newly loaded grids
+            if (this.statePersistence) {
+                const scale = this.statePersistence.state.gridsScale;
+                if (scale != null && scale !== 1.0) {
+                    for (const grid of this.grids) { grid.scale.setScalar(scale); }
+                }
+            }
 
         } catch (err) {
             console.error('Failed to load repository:', err);
@@ -797,8 +867,8 @@ export class GitHubRepoViewer {
         if (this.backdropManager) this.backdropManager.destroy();
         if (this.nameplateManager) this.nameplateManager.destroy();
 
-        // Spiral mode: no backdrops, no nameplates — the shape is the structure
-        if (this._activeLayout === 'spiral') {
+        // Non-hierarchical modes: no backdrops, no nameplates
+        if (this._activeLayout === 'spiral' || this._activeLayout === 'treemap') {
             this.backdropManager = null;
             this.nameplateManager = null;
             // Add spiral guide line
@@ -847,8 +917,8 @@ export class GitHubRepoViewer {
     _updateOverlays() {
         if (!this.hierarchicalManager || !this.hierarchicalManager.root) return;
 
-        if (this._activeLayout === 'spiral') {
-            // Spiral mode: hide hierarchical backdrops/nameplates, show spiral guide
+        if (this._activeLayout === 'spiral' || this._activeLayout === 'treemap') {
+            // Non-hierarchical mode: hide backdrops/nameplates
             if (this.backdropManager) this.backdropManager.setVisible(false);
             if (this.nameplateManager) this.nameplateManager.setVisible(false);
 
@@ -927,6 +997,7 @@ export class GitHubRepoViewer {
         this.lastTime = now;
 
         this.cameraController.update(deltaTime);
+        if (this.statePersistence) this.statePersistence.markCameraDirty();
         this.updateStats(deltaTime);
 
         // Update billboard-style nameplates to face camera

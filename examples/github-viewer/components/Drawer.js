@@ -225,6 +225,7 @@ export function settingsPanelHTML() {
             <select class="setting-select" id="layout-mode">
                 <option value="hierarchical">Hierarchical</option>
                 <option value="spiral">Spiral</option>
+                <option value="treemap">Treemap</option>
             </select>
         </div>
         <div class="setting-group setting-section-header">Navigation</div>

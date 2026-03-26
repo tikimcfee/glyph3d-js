@@ -148,6 +148,30 @@ body {
     box-shadow: none;
 }
 
+#state-reset-btn {
+    position: fixed;
+    bottom: 12px;
+    right: 68px;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: #333;
+    color: #aaa;
+    border: 1px solid #555;
+    font-size: 18px;
+    cursor: pointer;
+    z-index: 1100;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.2s, color 0.2s;
+}
+#state-reset-btn:hover {
+    background: #c00;
+    color: #fff;
+    border-color: #c00;
+}
+
 #drawer-scrim {
     position: fixed;
     inset: 0;
