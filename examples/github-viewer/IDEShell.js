@@ -714,7 +714,9 @@ export class IDEShell {
 
         if (width <= 0 || height <= 0) return;
 
+        const dpr = Math.min(window.devicePixelRatio, 2);
         this._viewer.renderer.setSize(width, height);
+        this._viewer.renderer.setPixelRatio(dpr);
 
         if (this._viewer.camera) {
             this._viewer.camera.aspect = width / height;
