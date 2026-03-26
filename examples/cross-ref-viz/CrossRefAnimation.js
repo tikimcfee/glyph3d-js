@@ -97,25 +97,29 @@ function agentPositions(radius) {
     ];
 }
 
+// Card dimensions from buildDocCard() — used for stacking math
+const CARD_W = 1.6;
+const CARD_H = 1.0;
+const CARD_GAP = 0.3; // padding between cards
+
 /**
- * Compute the rest position for a specific document card in a radial stack.
- * Each agent stacks documents radially outward from the triangle center,
- * with consistent slot spacing so cards never overlap.
+ * Compute the rest position for a specific document card.
+ * Uses actual card dimensions to guarantee no overlap.
+ * Cards stack radially outward from the agent, each card's height + gap apart.
  *
  * @param {THREE.Vector3} agentPos - world position of the agent node
- * @param {number} slotIndex - stack slot (0 = innermost, grows outward)
+ * @param {number} slotIndex - stack slot (0, 1, 2 for rounds 0, 1, 2)
  * @returns {THREE.Vector3}
  */
 function docStackPosition(agentPos, slotIndex) {
-    // Radial unit vector: direction from center (0,0,0) to agent
     const radial = agentPos.clone().normalize();
-    // Base offset distance from agent center, then spacing per slot
-    const baseOffset = 2.0;
-    const slotSpacing = 1.2;
-    const dist = baseOffset + slotIndex * slotSpacing;
-    // Small Z per slot to prevent z-fighting
-    const zOffset = 0.1 * (slotIndex + 1);
-    return agentPos.clone().addScaledVector(radial, dist).setZ(zOffset);
+    // Start beyond the agent node (clear the sphere + label)
+    const nodeRadius = 1.8; // icosahedron ~0.7 + halo + label clearance
+    const slotStep = CARD_H + CARD_GAP;
+    const dist = nodeRadius + slotIndex * slotStep + CARD_H / 2;
+    const pos = agentPos.clone().addScaledVector(radial, dist);
+    pos.z = 0.1 * (slotIndex + 1);
+    return pos;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -161,7 +165,7 @@ function bezierControl(from, to, arcHeight, clockwise) {
  * Returns { group, bodyMesh, bodyMat, borderMesh, borderMat }
  */
 function buildDocCard(bodyColor, borderColor) {
-    const W = 1.6, H = 1.0, D = 0.06;
+    const W = CARD_W, H = CARD_H, D = 0.06;
     const group = new THREE.Group();
 
     // Body
