@@ -195,15 +195,22 @@ export class MinimapOverlay {
 
     /** @private */
     _buildCanvas() {
-        this._container = document.createElement('div');
-        this._container.id = 'minimap-container';
-        document.body.appendChild(this._container);
+        // Reuse existing DOM elements if present (e.g., IDE shell pre-creates them)
+        this._container = document.getElementById('minimap-container');
+        if (!this._container) {
+            this._container = document.createElement('div');
+            this._container.id = 'minimap-container';
+            document.body.appendChild(this._container);
+        }
 
-        this._canvas = document.createElement('canvas');
+        this._canvas = document.getElementById('minimap-canvas');
+        if (!this._canvas) {
+            this._canvas = document.createElement('canvas');
+            this._canvas.id = 'minimap-canvas';
+            this._container.appendChild(this._canvas);
+        }
         this._canvas.width  = MINIMAP_WIDTH;
         this._canvas.height = MINIMAP_HEIGHT;
-        this._canvas.id = 'minimap-canvas';
-        this._container.appendChild(this._canvas);
 
         this._ctx = this._canvas.getContext('2d');
     }
