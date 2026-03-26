@@ -73,7 +73,35 @@ export class DrawerController {
      */
     _wireEvents() {
         this.toggleBtn.addEventListener('click', () => this.setOpen(!this.isOpen));
-        this.scrim.addEventListener('click', () => this.setOpen(false));
+
+        // Close on scrim click only when the scrim itself is directly clicked (not
+        // a click that originated on the 3D canvas beneath it). The scrim uses
+        // pointer-events:auto and sits above the canvas in z-order, so every canvas
+        // mousedown reaches the scrim. We prevent this by checking: if the click
+        // position is NOT within the drawer's own bounds, close only if it's NOT
+        // within the canvas element's bounds.
+        this.scrim.addEventListener('click', (e) => {
+            const drawerRect = this.drawer.getBoundingClientRect();
+            const overDrawer = (
+                e.clientX >= drawerRect.left && e.clientX <= drawerRect.right &&
+                e.clientY >= drawerRect.top  && e.clientY <= drawerRect.bottom
+            );
+            if (overDrawer) return;
+
+            // If clicking in the 3D canvas area, do NOT close the drawer.
+            // Let the user interact with the 3D view while the drawer stays open.
+            const canvas = document.getElementById('canvas');
+            if (canvas) {
+                const canvasRect = canvas.getBoundingClientRect();
+                const overCanvas = (
+                    e.clientX >= canvasRect.left && e.clientX <= canvasRect.right &&
+                    e.clientY >= canvasRect.top  && e.clientY <= canvasRect.bottom
+                );
+                if (overCanvas) return;
+            }
+
+            this.setOpen(false);
+        });
 
         this.tabBtns.forEach(btn => {
             btn.addEventListener('click', () => this.switchTab(btn.dataset.tab));
@@ -290,7 +318,7 @@ export function statsPanelHTML() {
 export function controlsPanelHTML() {
     return `
         <div class="controls-section">
-            <h4>Keyboard</h4>
+            <h4>Navigation</h4>
             <div class="control-row"><span class="key">W</span>Forward</div>
             <div class="control-row"><span class="key">S</span>Backward</div>
             <div class="control-row"><span class="key">A</span>Left</div>
@@ -298,9 +326,25 @@ export function controlsPanelHTML() {
             <div class="control-row"><span class="key">Space</span>Up</div>
             <div class="control-row"><span class="key">Shift</span>Down</div>
 
+            <h4>Selection</h4>
+            <div class="control-row"><span class="key">Click</span>Select file</div>
+            <div class="control-row"><span class="key">Ctrl+Click</span>Add to selection</div>
+            <div class="control-row"><span class="key">Tab</span>Next file</div>
+            <div class="control-row"><span class="key">Shift+Tab</span>Prev file</div>
+            <div class="control-row"><span class="key">Enter</span>Focus on selection</div>
+            <div class="control-row"><span class="key">Esc</span>Deselect all</div>
+
+            <h4>View</h4>
+            <div class="control-row"><span class="key">F</span>Fit all grids</div>
+            <div class="control-row"><span class="key">M</span>Toggle minimap</div>
+            <div class="control-row"><span class="key">1</span>Hierarchical layout</div>
+            <div class="control-row"><span class="key">2</span>Spiral layout</div>
+            <div class="control-row"><span class="key">3</span>Treemap layout</div>
+
             <h4>Mouse</h4>
             <div class="control-row"><span class="key">Drag</span>Pan (translate)</div>
             <div class="control-row"><span class="key">Scroll</span>Zoom in/out</div>
+            <div class="control-row"><span class="key">Alt+Scroll</span>Zoom</div>
 
             <h4>Touch</h4>
             <div class="control-row"><span class="key">1 finger</span>Drag to pan</div>
