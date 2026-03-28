@@ -1,64 +1,65 @@
 /**
  * Grid commands: grid.list, grid.info, grid.color, grid.visibility
- * Migrated from stale WebSocket branch to use context bag.
+ * All grid resolution goes through the registry via resolveGridByIdOrIndex.
  */
 
 import { box, table, kvLines } from '../TUIFormatter.js';
 import CodeGrid from '../../../../src/collections/CodeGrid.js';
+import { resolveGridByIdOrIndex } from './spatialHelpers.js';
 
 /**
  * @param {import('../CommandRouter.js').default} router
  */
 export default function registerGridCommands(router) {
     router.register('grid.list', (args, ctx) => {
-        const grids = ctx.getGrids();
-        if (grids.length === 0) {
+        const entries = ctx.registry.findByType('grid');
+        if (entries.length === 0) {
             return {
                 text: box('GRIDS', ['(no grids loaded)'], 50) + '\nOK: 0 grids',
                 data: { grids: [], count: 0 }
             };
         }
 
-        const headers = ['#', 'filename', 'glyphs', 'lines', 'position'];
-        const rows = grids.map((g, i) => {
+        const headers = ['#', 'id', 'filename', 'glyphs', 'lines'];
+        const rows = entries.map((e, i) => {
+            const g = e.grid;
             const name = g.getFilename() || g.getSourcePath() || '(unnamed)';
-            const pos = g.position;
             return [
                 String(i),
-                name.length > 30 ? '\u2026' + name.slice(-29) : name,
+                e.id.length > 35 ? '\u2026' + e.id.slice(-34) : e.id,
+                name.length > 25 ? '\u2026' + name.slice(-24) : name,
                 String(g.getGlyphCount()),
                 String(g.getLineCount()),
-                `${pos.x.toFixed(0)},${pos.y.toFixed(0)},${pos.z.toFixed(0)}`
             ];
         });
 
-        const gridData = grids.map((g, i) => ({
+        const gridData = entries.map((e, i) => ({
             index: i,
-            filename: g.getFilename(),
-            sourcePath: g.getSourcePath(),
-            glyphs: g.getGlyphCount(),
-            lines: g.getLineCount(),
+            id: e.id,
+            filename: e.grid.getFilename(),
+            sourcePath: e.grid.getSourcePath(),
+            glyphs: e.grid.getGlyphCount(),
+            lines: e.grid.getLineCount(),
         }));
 
         return {
-            text: table(headers, rows) + `\nOK: ${grids.length} grids`,
-            data: { grids: gridData, count: grids.length }
+            text: table(headers, rows) + `\nOK: ${entries.length} grids`,
+            data: { grids: gridData, count: entries.length }
         };
     }, { description: 'List all loaded grids' });
 
     router.register('grid.info', (args, ctx) => {
-        const grids = ctx.getGrids();
-        if (args.length < 1) return { text: 'ERR: usage: grid.info <index>', data: null };
-        const idx = parseInt(args[0]);
-        if (isNaN(idx) || idx < 0 || idx >= grids.length) {
-            return { text: `ERR: invalid grid index ${args[0]} (0-${grids.length - 1})`, data: null };
-        }
+        if (args.length < 1) return { text: 'ERR: usage: grid.info <id|index>', data: null };
 
-        const g = grids[idx];
+        const resolved = resolveGridByIdOrIndex(ctx, args[0]);
+        if (resolved.error) return { text: resolved.error, data: null };
+
+        const g = resolved.grid;
         const pos = g.position;
 
         const data = {
-            'index': String(idx),
+            'index': String(resolved.idx),
+            'registryId': resolved.registryId || '(none)',
             'filename': g.getFilename() || '(none)',
             'sourcePath': g.getSourcePath() || '(none)',
             'glyphs': String(g.getGlyphCount()),
@@ -69,9 +70,10 @@ export default function registerGridCommands(router) {
         };
 
         return {
-            text: box(`GRID #${idx}`, kvLines(data), 50) + '\nOK: grid info',
+            text: box(`GRID #${resolved.idx}`, kvLines(data), 50) + '\nOK: grid info',
             data: {
-                index: idx,
+                index: resolved.idx,
+                registryId: resolved.registryId,
                 filename: g.getFilename(),
                 sourcePath: g.getSourcePath(),
                 glyphs: g.getGlyphCount(),
@@ -80,43 +82,41 @@ export default function registerGridCommands(router) {
                 visible: g.visible,
             }
         };
-    }, { description: 'Show grid details', usage: '<index>' });
+    }, { description: 'Show grid details', usage: '<id|index>' });
 
     router.register('grid.color', (args, ctx) => {
-        const grids = ctx.getGrids();
-        if (args.length < 4) return { text: 'ERR: usage: grid.color <index> <r> <g> <b> (0-1 floats)', data: null };
-        const idx = parseInt(args[0]);
-        if (isNaN(idx) || idx < 0 || idx >= grids.length) {
-            return { text: `ERR: invalid grid index ${args[0]}`, data: null };
-        }
+        if (args.length < 4) return { text: 'ERR: usage: grid.color <id|index> <r> <g> <b> (0-1 floats)', data: null };
+
+        const resolved = resolveGridByIdOrIndex(ctx, args[0]);
+        if (resolved.error) return { text: resolved.error, data: null };
+
         const [r, g, b] = args.slice(1, 4).map(Number);
         if ([r, g, b].some(isNaN)) return { text: 'ERR: r, g, b must be numbers (0-1)', data: null };
 
-        const grid = grids[idx];
+        const grid = resolved.grid;
         const collection = grid.getCollection();
         if (collection && collection.setGroupColor) {
             collection.setGroupColor(0, { r, g, b });
         }
         return {
-            text: `OK: grid ${idx} color set to (${r}, ${g}, ${b})`,
-            data: { index: idx, color: { r, g, b } }
+            text: `OK: grid ${resolved.idx} color set to (${r}, ${g}, ${b})`,
+            data: { index: resolved.idx, color: { r, g, b } }
         };
-    }, { description: 'Set grid text color', usage: '<index> <r> <g> <b>' });
+    }, { description: 'Set grid text color', usage: '<id|index> <r> <g> <b>' });
 
     router.register('grid.visibility', (args, ctx) => {
-        const grids = ctx.getGrids();
-        if (args.length < 2) return { text: 'ERR: usage: grid.visibility <index> <true|false>', data: null };
-        const idx = parseInt(args[0]);
-        if (isNaN(idx) || idx < 0 || idx >= grids.length) {
-            return { text: `ERR: invalid grid index ${args[0]}`, data: null };
-        }
+        if (args.length < 2) return { text: 'ERR: usage: grid.visibility <id|index> <true|false>', data: null };
+
+        const resolved = resolveGridByIdOrIndex(ctx, args[0]);
+        if (resolved.error) return { text: resolved.error, data: null };
+
         const visible = args[1].toLowerCase() === 'true' || args[1] === '1';
-        grids[idx].visible = visible;
+        resolved.grid.visible = visible;
         return {
-            text: `OK: grid ${idx} visibility = ${visible}`,
-            data: { index: idx, visible }
+            text: `OK: grid ${resolved.idx} visibility = ${visible}`,
+            data: { index: resolved.idx, visible }
         };
-    }, { description: 'Show/hide a grid', usage: '<index> <true|false>' });
+    }, { description: 'Show/hide a grid', usage: '<id|index> <true|false>' });
 
     // ============ Grid CRUD ============
 
@@ -140,11 +140,8 @@ export default function registerGridCommands(router) {
         }
         grid.loadText(text);
 
-        // Register in registry before addGrid (which auto-registers with generated ID)
-        const registryId = name || grid.name;
-        ctx.registry.register(registryId, grid, { type: 'grid', name });
-
-        ctx.addGrid(grid);
+        // Single registration via addGrid -- no double-register
+        const registryId = ctx.addGrid(grid, { id: name || undefined });
 
         const idx = ctx.getGrids().length - 1;
         return {
@@ -154,68 +151,63 @@ export default function registerGridCommands(router) {
     }, { description: 'Create a grid with text content', usage: '<text> [name]' });
 
     router.register('grid.remove', (args, ctx) => {
-        const grids = ctx.getGrids();
-        if (args.length < 1) return { text: 'ERR: usage: grid.remove <index>', data: null };
-        const idx = parseInt(args[0]);
-        if (isNaN(idx) || idx < 0 || idx >= grids.length) {
-            return { text: `ERR: invalid grid index ${args[0]} (0-${grids.length - 1})`, data: null };
-        }
+        if (args.length < 1) return { text: 'ERR: usage: grid.remove <id|index>', data: null };
 
-        const grid = grids[idx];
-        const name = grid.getFilename() || grid.name || '(unnamed)';
-        ctx.removeGrid(idx);
+        const resolved = resolveGridByIdOrIndex(ctx, args[0]);
+        if (resolved.error) return { text: resolved.error, data: null };
+
+        const name = resolved.grid.getFilename?.() || resolved.registryId || '(unnamed)';
+        const removedEntry = ctx.removeGrid(resolved.registryId || resolved.idx);
+        if (!removedEntry) return { text: 'ERR: removal failed', data: null };
 
         return {
-            text: `OK: removed grid #${idx} "${name}"`,
-            data: { removedIndex: idx, name, remaining: grids.length }
+            text: `OK: removed "${name}" (was #${resolved.idx})`,
+            data: { removedId: resolved.registryId, removedIndex: resolved.idx, name }
         };
-    }, { description: 'Remove a grid from the scene', usage: '<index>' });
+    }, { description: 'Remove a grid from the scene', usage: '<id|index>' });
 
     router.register('grid.text', (args, ctx) => {
-        const grids = ctx.getGrids();
-        if (args.length < 2) return { text: 'ERR: usage: grid.text <index> <base64-text>', data: null };
-        const idx = parseInt(args[0]);
-        if (isNaN(idx) || idx < 0 || idx >= grids.length) {
-            return { text: `ERR: invalid grid index ${args[0]}`, data: null };
-        }
+        if (args.length < 2) return { text: 'ERR: usage: grid.text <id|index> <base64-text>', data: null };
+
+        const resolved = resolveGridByIdOrIndex(ctx, args[0]);
+        if (resolved.error) return { text: resolved.error, data: null };
+
         let text;
         try { text = atob(args[1]); } catch { return { text: 'ERR: invalid base64 content', data: null }; }
-        grids[idx].loadText(text);
+        resolved.grid.loadText(text);
         return {
-            text: `OK: grid #${idx} text updated (${grids[idx].getGlyphCount()} glyphs, ${grids[idx].getLineCount()} lines)`,
-            data: { index: idx, glyphs: grids[idx].getGlyphCount(), lines: grids[idx].getLineCount() }
+            text: `OK: grid #${resolved.idx} text updated (${resolved.grid.getGlyphCount()} glyphs, ${resolved.grid.getLineCount()} lines)`,
+            data: { index: resolved.idx, glyphs: resolved.grid.getGlyphCount(), lines: resolved.grid.getLineCount() }
         };
-    }, { description: 'Replace grid text content', usage: '<index> <text>' });
+    }, { description: 'Replace grid text content', usage: '<id|index> <text>' });
 
     router.register('grid.position', (args, ctx) => {
-        const grids = ctx.getGrids();
-        if (args.length < 4) return { text: 'ERR: usage: grid.position <index> <x> <y> <z>', data: null };
-        const idx = parseInt(args[0]);
-        if (isNaN(idx) || idx < 0 || idx >= grids.length) {
-            return { text: `ERR: invalid grid index ${args[0]}`, data: null };
-        }
+        if (args.length < 4) return { text: 'ERR: usage: grid.position <id|index> <x> <y> <z>', data: null };
+
+        const resolved = resolveGridByIdOrIndex(ctx, args[0]);
+        if (resolved.error) return { text: resolved.error, data: null };
+
         const [x, y, z] = args.slice(1, 4).map(Number);
         if ([x, y, z].some(isNaN)) return { text: 'ERR: x, y, z must be numbers', data: null };
-        grids[idx].position.set(x, y, z);
+        resolved.grid.position.set(x, y, z);
         return {
-            text: `OK: grid #${idx} position = (${x}, ${y}, ${z})`,
-            data: { index: idx, position: { x, y, z } }
+            text: `OK: grid #${resolved.idx} position = (${x}, ${y}, ${z})`,
+            data: { index: resolved.idx, position: { x, y, z } }
         };
-    }, { description: 'Set grid world position', usage: '<index> <x> <y> <z>' });
+    }, { description: 'Set grid world position', usage: '<id|index> <x> <y> <z>' });
 
     router.register('grid.scale', (args, ctx) => {
-        const grids = ctx.getGrids();
-        if (args.length < 2) return { text: 'ERR: usage: grid.scale <index> <factor>', data: null };
-        const idx = parseInt(args[0]);
-        if (isNaN(idx) || idx < 0 || idx >= grids.length) {
-            return { text: `ERR: invalid grid index ${args[0]}`, data: null };
-        }
+        if (args.length < 2) return { text: 'ERR: usage: grid.scale <id|index> <factor>', data: null };
+
+        const resolved = resolveGridByIdOrIndex(ctx, args[0]);
+        if (resolved.error) return { text: resolved.error, data: null };
+
         const scale = parseFloat(args[1]);
         if (isNaN(scale)) return { text: 'ERR: scale must be a number', data: null };
-        grids[idx].scale.setScalar(scale);
+        resolved.grid.scale.setScalar(scale);
         return {
-            text: `OK: grid #${idx} scale = ${scale}`,
-            data: { index: idx, scale }
+            text: `OK: grid #${resolved.idx} scale = ${scale}`,
+            data: { index: resolved.idx, scale }
         };
-    }, { description: 'Set grid uniform scale', usage: '<index> <factor>' });
+    }, { description: 'Set grid uniform scale', usage: '<id|index> <factor>' });
 }

@@ -13,7 +13,7 @@ import { box, table } from '../TUIFormatter.js';
 import CodeGrid from '../../../../src/collections/CodeGrid.js';
 import { COLORS } from './colorConstants.js';
 import {
-    resolveGrid, getWorldBounds, unionBounds,
+    resolveGridByIdOrIndex, getWorldBounds, unionBounds,
     resolveAnchor, zDistanceForFit, fmtVec,
     frameBounds, animateCamera,
 } from './spatialHelpers.js';
@@ -144,8 +144,8 @@ export default function registerNavigationCommands(router) {
                 i++;
                 continue;
             }
-            // Validate each index through resolveGrid
-            const resolved = resolveGrid(grids, args[i]);
+            // Validate each index through resolveGridByIdOrIndex
+            const resolved = resolveGridByIdOrIndex(ctx, args[i]);
             if (resolved.error) return { text: resolved.error, data: null };
             indices.push(resolved.idx);
         }
@@ -305,8 +305,7 @@ export default function registerNavigationCommands(router) {
             return { text: `ERR: tour "${tourName}" not found. Create it first with tour.create.`, data: null };
         }
 
-        const grids = ctx.getGrids();
-        const resolved = resolveGrid(grids, args[1], 'grid');
+        const resolved = resolveGridByIdOrIndex(ctx, args[1], 'grid');
         if (resolved.error) return { text: resolved.error, data: null };
 
         let annotation = null;
@@ -325,7 +324,13 @@ export default function registerNavigationCommands(router) {
         }
 
         const stopIndex = tour.stops.length;
-        tour.stops.push({ gridIndex: resolved.idx, annotation, duration, annotationId: null });
+        tour.stops.push({
+            gridIndex: resolved.idx,
+            registryId: resolved.registryId,
+            annotation,
+            duration,
+            annotationId: null,
+        });
 
         const gridName = resolved.grid.getFilename?.() || `#${resolved.idx}`;
 
@@ -372,7 +377,6 @@ export default function registerNavigationCommands(router) {
             return { text: `ERR: tour "${tourName}" has no stops`, data: null };
         }
 
-        const grids = ctx.getGrids();
         const totalStops = tour.stops.length;
 
         // Reset pitch/yaw once at the start
@@ -386,8 +390,9 @@ export default function registerNavigationCommands(router) {
         for (let i = 0; i < tour.stops.length; i++) {
             const stop = tour.stops[i];
 
-            // Validate grid index is still valid
-            const resolved = resolveGrid(grids, String(stop.gridIndex));
+            // Resolve via registryId first, fall back to gridIndex
+            const stopRef = stop.registryId || String(stop.gridIndex);
+            const resolved = resolveGridByIdOrIndex(ctx, stopRef);
             if (resolved.error) continue;
 
             // Remove previous stop's annotation
@@ -397,7 +402,9 @@ export default function registerNavigationCommands(router) {
             }
 
             // Compute frame target using shared unionBounds (handles matrix update + isEmpty)
-            const result = unionBounds(grids, [stop.gridIndex]);
+            const grids = ctx.getGrids();
+            const stopIdx = resolved.idx >= 0 ? resolved.idx : grids.indexOf(resolved.grid);
+            const result = unionBounds(grids, [stopIdx]);
             if (result.error) continue;
 
             const { bounds } = result;
@@ -423,7 +430,7 @@ export default function registerNavigationCommands(router) {
 
             // Show annotation after camera arrives
             if (stop.annotation) {
-                const annotId = createTourAnnotation(ctx, stop.gridIndex, stop.annotation);
+                const annotId = createTourAnnotation(ctx, stopIdx, stop.annotation);
                 if (annotId) {
                     stop.annotationId = annotId;
                     previousAnnotationId = annotId;

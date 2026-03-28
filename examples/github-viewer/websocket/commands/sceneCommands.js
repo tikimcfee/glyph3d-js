@@ -1,6 +1,6 @@
 /**
  * Scene commands: scene.info, scene.clear_windows
- * Migrated from stale WebSocket branch to use context bag.
+ * Uses registry as source of truth for scene object counts.
  */
 
 import { box, kvLines } from '../TUIFormatter.js';
@@ -10,16 +10,18 @@ import { box, kvLines } from '../TUIFormatter.js';
  */
 export default function registerSceneCommands(router) {
     router.register('scene.info', (args, ctx) => {
-        const grids = ctx.getGrids();
+        const gridEntries = ctx.registry.findByType('grid');
         let totalGlyphs = 0;
-        for (const g of grids) totalGlyphs += g.getGlyphCount();
+        for (const e of gridEntries) totalGlyphs += e.grid.getGlyphCount();
 
+        const counts = ctx.registry.typeCounts();
         const winCount = ctx.windowManager ? ctx.windowManager.count : 0;
 
         const data = {
-            'grids': String(grids.length),
+            'grids': String(gridEntries.length),
             'glyphs': totalGlyphs.toLocaleString(),
             'windows': String(winCount),
+            'registry total': String(ctx.registry.size),
             'scene children': String(ctx.scene.children.length),
         };
 
@@ -33,9 +35,10 @@ export default function registerSceneCommands(router) {
         return {
             text: box('SCENE', kvLines(data), 50) + '\nOK: scene info',
             data: {
-                gridCount: grids.length,
+                gridCount: gridEntries.length,
                 glyphCount: totalGlyphs,
                 windowCount: winCount,
+                registryTotal: ctx.registry.size,
                 sceneChildren: ctx.scene.children.length,
             }
         };

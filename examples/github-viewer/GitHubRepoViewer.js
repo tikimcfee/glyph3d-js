@@ -48,6 +48,7 @@ import { diffPanelHTML, initDiffPanel } from './components/DiffPanel.js';
 import { StatePersistence, resetAllAndReload } from './StatePersistence.js';
 import { HandGestureAdapter } from './HandGestureAdapter.js';
 import { initCommandCenter } from './websocket/index.js';
+import SceneRegistry from './websocket/SceneRegistry.js';
 
 /**
  * Parse GitHub URL to owner/repo
@@ -109,8 +110,9 @@ export class GitHubRepoViewer {
         this.backdropManager = null;
         this.nameplateManager = null;
 
-        // State
-        this.grids = [];
+        // State -- registry is the single source of truth for scene objects.
+        // `this.grids` is a getter that returns a frozen cached array from the registry.
+        this.registry = new SceneRegistry();
         this.repoPath = null;
         this.tree = [];
         this.isLoading = false;
@@ -141,6 +143,16 @@ export class GitHubRepoViewer {
         this.lastTime = performance.now();
         this.frameCount = 0;
         this.fpsTime = 0;
+    }
+
+    /** @returns {Object[]} frozen array of CodeGrid instances from registry */
+    get grids() {
+        return this.registry.toArray('grid');
+    }
+
+    /** Setter trap -- catches stale `this.grids = ...` assignments */
+    set grids(_) {
+        throw new Error('Cannot assign to grids -- use registry.register() / registry.unregister()');
     }
 
     async init() {
@@ -882,10 +894,17 @@ export class GitHubRepoViewer {
             });
             this.sceneContext.hierarchicalManager = this.hierarchicalManager;
 
-            // Add grids to scene + tracking before layout
+            // Register grids in registry (sorted by source path for deterministic order)
+            createdGrids.sort((a, b) =>
+                (a.userData.sourcePath || '').localeCompare(b.userData.sourcePath || '')
+            );
             for (const grid of createdGrids) {
                 this.scene.add(grid);
-                this.grids.push(grid);
+                const sp = grid.userData.sourcePath || grid.name;
+                this.registry.register(sp, grid, {
+                    type: 'grid',
+                    sourcePath: grid.userData.sourcePath,
+                });
             }
 
             // Always run hierarchical layout (builds tree for UI + positions grids)
@@ -1000,11 +1019,11 @@ export class GitHubRepoViewer {
     }
 
     clearGrids() {
-        for (const grid of this.grids) {
-            grid.dispose();
-            this.scene.remove(grid);
+        const removed = this.registry.unregisterByType('grid');
+        for (const entry of removed) {
+            entry.grid.dispose();
+            this.scene.remove(entry.grid);
         }
-        this.grids = [];
         this.layoutManager.clear();
         if (this.hierarchicalManager) this.hierarchicalManager.clearAll();
         if (this.diffController) this.diffController.clearGrids();
@@ -1061,8 +1080,17 @@ export class GitHubRepoViewer {
                 }
             );
 
-            // Update the grids array so stats/navigation work
-            this.grids = result.grids;
+            // Register diff grids in registry (sorted by source path)
+            const diffGrids = result.grids.slice().sort((a, b) =>
+                (a.userData?.sourcePath || '').localeCompare(b.userData?.sourcePath || '')
+            );
+            for (const grid of diffGrids) {
+                const sp = grid.userData?.sourcePath || `diff:${diffGrids.indexOf(grid)}`;
+                this.registry.register(sp, grid, {
+                    type: 'grid',
+                    sourcePath: sp,
+                });
+            }
 
             // Update diff panel UI
             this.diffPanel.showSummary(result.prData);

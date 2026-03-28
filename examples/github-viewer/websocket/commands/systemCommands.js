@@ -45,17 +45,18 @@ export default function registerSystemCommands(router) {
 
     router.register('status', (args, ctx) => {
         const cam = ctx.camera.position;
-        const grids = ctx.getGrids();
+        const gridEntries = ctx.registry.findByType('grid');
         let totalGlyphs = 0;
-        for (const g of grids) totalGlyphs += g.getGlyphCount();
+        for (const e of gridEntries) totalGlyphs += e.grid.getGlyphCount();
 
         const winCount = ctx.windowManager ? ctx.windowManager.count : 0;
         const wsConnected = ctx.wsbridge ? ctx.wsbridge.connected : false;
 
         const data = {
-            'grids': String(grids.length),
+            'grids': String(gridEntries.length),
             'glyphs': totalGlyphs.toLocaleString(),
             'windows': String(winCount),
+            'registry': String(ctx.registry.size),
             'camera': `${cam.x.toFixed(0)}, ${cam.y.toFixed(0)}, ${cam.z.toFixed(0)}`,
             'websocket': wsConnected ? 'connected' : 'disconnected',
         };
@@ -64,9 +65,10 @@ export default function registerSystemCommands(router) {
         return {
             text: box('STATUS', lines, 40) + '\nOK: status',
             data: {
-                gridCount: grids.length,
+                gridCount: gridEntries.length,
                 glyphCount: totalGlyphs,
                 windowCount: winCount,
+                registryTotal: ctx.registry.size,
                 camera: { x: cam.x, y: cam.y, z: cam.z },
                 websocket: wsConnected,
             }

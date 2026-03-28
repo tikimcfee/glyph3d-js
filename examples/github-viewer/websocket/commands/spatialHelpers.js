@@ -32,8 +32,11 @@ export function resolveGrid(grids, arg, label = 'grid') {
 
 /**
  * Resolve a grid by registry ID or array index.
- * Tries registry lookup first (by string ID), falls back to numeric index.
- * Enables commands to accept either `grid.bounds my-window` or `grid.bounds 73`.
+ *
+ * Integer-first rule: if arg is a pure digit string (/^\d+$/), treat as
+ * numeric index first. Registry lookup only for args containing non-digit chars
+ * (or when the integer index is out of range). This prevents ID "42" from
+ * shadowing array index 42.
  *
  * @param {Object} ctx - command context bag (must have .registry and .getGrids)
  * @param {string} arg - registry ID or numeric index string
@@ -42,25 +45,33 @@ export function resolveGrid(grids, arg, label = 'grid') {
  */
 export function resolveGridByIdOrIndex(ctx, arg, label = 'grid') {
     const grids = ctx.getGrids();
+    const isPureInteger = /^\d+$/.test(arg);
 
-    // 1. Try registry lookup by ID
+    // 1. Pure integer -> numeric index first
+    if (isPureInteger) {
+        const idx = parseInt(arg);
+        if (idx >= 0 && idx < grids.length) {
+            const registryId = ctx.registry ? ctx.registry.getIdByGrid(grids[idx]) : null;
+            return { grid: grids[idx], idx, registryId };
+        }
+        // Integer but out of range -- fall through to registry as last resort
+        // (handles case where someone deliberately used a numeric registry ID)
+    }
+
+    // 2. Non-integer string (or out-of-range integer) -> registry lookup
     if (ctx.registry) {
         const entry = ctx.registry.get(arg);
         if (entry) {
             const idx = grids.indexOf(entry.grid);
-            // Grid might be in registry but not in the grids array (e.g. annotations)
             return { grid: entry.grid, idx, registryId: entry.id };
         }
     }
 
-    // 2. Fall back to numeric index
-    const idx = parseInt(arg);
-    if (isNaN(idx) || idx < 0 || idx >= grids.length) {
-        return { error: `ERR: no ${label} found for "${arg}" (not a registry ID or valid index 0-${grids.length - 1})` };
+    // 3. Nothing found
+    if (isPureInteger) {
+        return { error: `ERR: invalid ${label} index ${arg} (0-${grids.length - 1})` };
     }
-
-    const registryId = ctx.registry ? ctx.registry.getIdByGrid(grids[idx]) : null;
-    return { grid: grids[idx], idx, registryId };
+    return { error: `ERR: no ${label} found for "${arg}" (not a registry ID or valid index 0-${grids.length - 1})` };
 }
 
 // ──────────────────────────────────────────────────────────────

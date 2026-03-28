@@ -8,7 +8,7 @@
 
 import { box as tuiBox, kvLines } from '../TUIFormatter.js';
 import {
-    resolveGrid, getWorldBounds, getWorldBox3, unionBounds,
+    resolveGridByIdOrIndex, getWorldBounds, getWorldBox3, unionBounds,
     resolveAnchor, ANCHOR_NAMES, fmtVec,
 } from './spatialHelpers.js';
 
@@ -22,10 +22,9 @@ export default function registerSpatialCommands(router) {
     // ---- grid.bounds <index> ----
     // Merged version: includes size, center, AND all 9 anchor points in TUI output.
     router.register('grid.bounds', (args, ctx) => {
-        const grids = ctx.getGrids();
-        if (args.length < 1) return { text: 'ERR: usage: grid.bounds <index>', data: null };
+        if (args.length < 1) return { text: 'ERR: usage: grid.bounds <id|index>', data: null };
 
-        const resolved = resolveGrid(grids, args[0]);
+        const resolved = resolveGridByIdOrIndex(ctx, args[0]);
         if (resolved.error) return { text: resolved.error, data: null };
 
         const aabb = getWorldBounds(resolved.grid);
@@ -60,15 +59,15 @@ export default function registerSpatialCommands(router) {
 
     // ---- grid.bounds.union <index1> <index2> [index3...] ----
     router.register('grid.bounds.union', (args, ctx) => {
-        const grids = ctx.getGrids();
         if (args.length < 2) {
-            return { text: 'ERR: usage: grid.bounds.union <index1> <index2> [index3...]', data: null };
+            return { text: 'ERR: usage: grid.bounds.union <id|index1> <id|index2> [...]', data: null };
         }
 
         // Parse all indices first
+        const grids = ctx.getGrids();
         const indices = [];
         for (const arg of args) {
-            const resolved = resolveGrid(grids, arg);
+            const resolved = resolveGridByIdOrIndex(ctx, arg);
             if (resolved.error) return { text: resolved.error, data: null };
             indices.push(resolved.idx);
         }
@@ -100,12 +99,11 @@ export default function registerSpatialCommands(router) {
 
     // ---- grid.anchor <index> <anchor-name> ----
     router.register('grid.anchor', (args, ctx) => {
-        const grids = ctx.getGrids();
         if (args.length < 2) {
-            return { text: `ERR: usage: grid.anchor <index> <name>\n  anchors: ${ANCHOR_NAMES.join(', ')}`, data: null };
+            return { text: `ERR: usage: grid.anchor <id|index> <name>\n  anchors: ${ANCHOR_NAMES.join(', ')}`, data: null };
         }
 
-        const resolved = resolveGrid(grids, args[0]);
+        const resolved = resolveGridByIdOrIndex(ctx, args[0]);
         if (resolved.error) return { text: resolved.error, data: null };
 
         const anchorName = args[1].toLowerCase();
@@ -131,12 +129,11 @@ export default function registerSpatialCommands(router) {
 
     // ---- grid.distance <index1> <index2> ----
     router.register('grid.distance', (args, ctx) => {
-        const grids = ctx.getGrids();
-        if (args.length < 2) return { text: 'ERR: usage: grid.distance <index1> <index2>', data: null };
+        if (args.length < 2) return { text: 'ERR: usage: grid.distance <id|index1> <id|index2>', data: null };
 
-        const r1 = resolveGrid(grids, args[0]);
+        const r1 = resolveGridByIdOrIndex(ctx, args[0]);
         if (r1.error) return { text: r1.error, data: null };
-        const r2 = resolveGrid(grids, args[1]);
+        const r2 = resolveGridByIdOrIndex(ctx, args[1]);
         if (r2.error) return { text: r2.error, data: null };
 
         const aabb1 = getWorldBounds(r1.grid);
@@ -168,12 +165,11 @@ export default function registerSpatialCommands(router) {
 
     // ---- grid.overlap <index1> <index2> ----
     router.register('grid.overlap', (args, ctx) => {
-        const grids = ctx.getGrids();
-        if (args.length < 2) return { text: 'ERR: usage: grid.overlap <index1> <index2>', data: null };
+        if (args.length < 2) return { text: 'ERR: usage: grid.overlap <id|index1> <id|index2>', data: null };
 
-        const r1 = resolveGrid(grids, args[0]);
+        const r1 = resolveGridByIdOrIndex(ctx, args[0]);
         if (r1.error) return { text: r1.error, data: null };
-        const r2 = resolveGrid(grids, args[1]);
+        const r2 = resolveGridByIdOrIndex(ctx, args[1]);
         if (r2.error) return { text: r2.error, data: null };
 
         const box1 = getWorldBox3(r1.grid);

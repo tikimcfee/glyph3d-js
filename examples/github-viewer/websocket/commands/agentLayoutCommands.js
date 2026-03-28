@@ -29,46 +29,24 @@ const AGENT_SPACING = {
 
 /**
  * Find all grids that are agent windows.
- * Uses the scene registry if available (type 'agent' or 'window'),
- * falls back to name-based scanning for backward compat.
+ * Uses the scene registry (type 'agent' or 'window').
  * @param {Object} ctx - command context bag
- * @returns {Array<{grid: Object, label: string, index: number}>}
+ * @returns {Array<{grid: Object, label: string, registryId: string}>}
  */
 function findAgentGrids(ctx) {
-    const grids = typeof ctx === 'function' ? ctx() : ctx.getGrids();
-    const registry = typeof ctx === 'function' ? null : ctx.registry;
+    const registry = ctx.registry;
+    if (!registry) return [];
 
-    // If registry is available, use it (combines 'agent' and 'window' types)
-    if (registry) {
-        const agents = [];
-        const entries = [
-            ...registry.findByType('agent'),
-            ...registry.findByType('window'),
-        ];
-        for (const entry of entries) {
-            const idx = grids.indexOf(entry.grid);
-            if (idx !== -1) {
-                const label = entry.meta.label || entry.meta.windowId || entry.id;
-                agents.push({ grid: entry.grid, label, index: idx });
-            }
-        }
-        if (agents.length > 0) return agents;
-    }
+    const entries = [
+        ...registry.findByType('agent'),
+        ...registry.findByType('window'),
+    ];
 
-    // Fallback: name-based scanning (backward compat for unregistered grids)
-    const agents = [];
-    for (let i = 0; i < grids.length; i++) {
-        const g = grids[i];
-        const name = g.getFilename?.() || g.name || '';
-        const label = g.userData?.agentLabel || null;
-
-        if (label) {
-            agents.push({ grid: g, label, index: i });
-        } else if (name.startsWith('agent:')) {
-            agents.push({ grid: g, label: name.slice(6), index: i });
-        }
-    }
-    return agents;
+    return entries.map(entry => ({
+        grid: entry.grid,
+        label: entry.meta.label || entry.meta.windowId || entry.id,
+        registryId: entry.id,
+    }));
 }
 
 /**
@@ -229,7 +207,7 @@ export default function registerAgentLayoutCommands(router) {
                 count: agents.length,
                 agents: agents.map((a, i) => ({
                     label: a.label,
-                    index: a.index,
+                    registryId: a.registryId,
                     position: positions[i]
                 }))
             }
@@ -289,14 +267,15 @@ export default function registerAgentLayoutCommands(router) {
 
         // Move camera to focus on target
         if (ctx.cameraController) {
-            ctx.cameraController.focusOnGrid(target.index);
+            const focusIdx = ctx.getGrids().indexOf(target.grid);
+            if (focusIdx >= 0) ctx.cameraController.focusOnGrid(focusIdx);
         }
 
         return {
-            text: `OK: focused on agent '${target.label}' (grid #${target.index})`,
+            text: `OK: focused on agent '${target.label}' (${target.registryId})`,
             data: {
                 focused: target.label,
-                index: target.index,
+                registryId: target.registryId,
                 dimmed: agents
                     .filter(a => a.label !== target.label)
                     .map(a => a.label)
@@ -400,13 +379,13 @@ export default function registerAgentLayoutCommands(router) {
             return { text: 'No agent windows found.', data: { agents: [] } };
         }
 
-        const headers = ['#', 'label', 'grid#', 'glyphs', 'position'];
+        const headers = ['#', 'label', 'registryId', 'glyphs', 'position'];
         const rows = agents.map((a, i) => {
             const pos = a.grid.position;
             return [
                 String(i),
                 a.label,
-                String(a.index),
+                a.registryId.length > 20 ? '\u2026' + a.registryId.slice(-19) : a.registryId,
                 String(a.grid.getGlyphCount()),
                 `${pos.x.toFixed(0)},${pos.y.toFixed(0)},${pos.z.toFixed(0)}`
             ];
@@ -417,7 +396,7 @@ export default function registerAgentLayoutCommands(router) {
             data: {
                 agents: agents.map(a => ({
                     label: a.label,
-                    gridIndex: a.index,
+                    registryId: a.registryId,
                     glyphs: a.grid.getGlyphCount()
                 }))
             }

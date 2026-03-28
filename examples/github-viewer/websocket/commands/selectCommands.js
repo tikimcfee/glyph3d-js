@@ -1,6 +1,6 @@
 /**
  * Selection commands: select, select.add, select.clear, select.list, select.info
- * New command module for IDE integration.
+ * Uses registry entries for path matching.
  */
 
 import { box, kvLines } from '../TUIFormatter.js';
@@ -14,15 +14,16 @@ export default function registerSelectCommands(router) {
         if (args.length < 1) return { text: 'ERR: usage: select <path>', data: null };
 
         const path = args.join(' ');
-        const grids = ctx.getGrids();
-        const grid = grids.find(g => {
-            const sp = g.getSourcePath() || '';
+        const entries = ctx.registry.findByType('grid');
+        const entry = entries.find(e => {
+            const sp = e.grid.getSourcePath() || '';
             return sp === path || sp.endsWith(path);
         });
 
-        if (!grid) return { text: `ERR: file not found: ${path}`, data: null };
+        if (!entry) return { text: `ERR: file not found: ${path}`, data: null };
 
-        const sourcePath = grid.getSourcePath();
+        const grids = ctx.getGrids();
+        const sourcePath = entry.grid.getSourcePath();
         ctx.selectionManager.select(sourcePath, { grids });
 
         return {
@@ -39,15 +40,16 @@ export default function registerSelectCommands(router) {
         if (args.length < 1) return { text: 'ERR: usage: select.add <path>', data: null };
 
         const path = args.join(' ');
-        const grids = ctx.getGrids();
-        const grid = grids.find(g => {
-            const sp = g.getSourcePath() || '';
+        const entries = ctx.registry.findByType('grid');
+        const entry = entries.find(e => {
+            const sp = e.grid.getSourcePath() || '';
             return sp === path || sp.endsWith(path);
         });
 
-        if (!grid) return { text: `ERR: file not found: ${path}`, data: null };
+        if (!entry) return { text: `ERR: file not found: ${path}`, data: null };
 
-        const sourcePath = grid.getSourcePath();
+        const grids = ctx.getGrids();
+        const sourcePath = entry.grid.getSourcePath();
         ctx.selectionManager.select(sourcePath, { additive: true, grids });
 
         return {

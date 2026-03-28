@@ -10,7 +10,7 @@
  */
 
 import {
-    resolveGrid, getWorldBounds, resolveAnchor, ANCHOR_NAMES, fmtVec,
+    resolveGridByIdOrIndex, getWorldBounds, resolveAnchor, ANCHOR_NAMES, fmtVec,
 } from './spatialHelpers.js';
 
 // ──────────────────────────────────────────────────────────────
@@ -114,18 +114,17 @@ export default function registerCompositionCommands(router) {
     // ================================================================
 
     router.register('grid.align', (args, ctx) => {
-        const grids = ctx.getGrids();
         if (args.length < 4) {
             return {
-                text: 'ERR: usage: grid.align <source-index> <target-index> <source-anchor> <target-anchor> [gap]\n' +
+                text: 'ERR: usage: grid.align <source> <target> <source-anchor> <target-anchor> [gap]\n' +
                       '  Anchors: ' + ANCHOR_NAMES.join(', '),
                 data: null
             };
         }
 
-        const srcRes = resolveGrid(grids, args[0], 'source');
+        const srcRes = resolveGridByIdOrIndex(ctx, args[0], 'source');
         if (srcRes.error) return { text: srcRes.error, data: null };
-        const tgtRes = resolveGrid(grids, args[1], 'target');
+        const tgtRes = resolveGridByIdOrIndex(ctx, args[1], 'target');
         if (tgtRes.error) return { text: tgtRes.error, data: null };
 
         if (srcRes.idx === tgtRes.idx) {
@@ -201,18 +200,17 @@ export default function registerCompositionCommands(router) {
     // ================================================================
 
     router.register('grid.attach', (args, ctx) => {
-        const grids = ctx.getGrids();
         if (args.length < 3) {
             return {
-                text: 'ERR: usage: grid.attach <source-index> <target-index> <position> [gap]\n' +
+                text: 'ERR: usage: grid.attach <source> <target> <position> [gap]\n' +
                       '  Positions: ' + [...ATTACH_POSITIONS].join(', '),
                 data: null
             };
         }
 
-        const srcRes = resolveGrid(grids, args[0], 'source');
+        const srcRes = resolveGridByIdOrIndex(ctx, args[0], 'source');
         if (srcRes.error) return { text: srcRes.error, data: null };
-        const tgtRes = resolveGrid(grids, args[1], 'target');
+        const tgtRes = resolveGridByIdOrIndex(ctx, args[1], 'target');
         if (tgtRes.error) return { text: tgtRes.error, data: null };
 
         if (srcRes.idx === tgtRes.idx) {
@@ -290,8 +288,6 @@ export default function registerCompositionCommands(router) {
     // ================================================================
 
     router.register('grid.stack', (args, ctx) => {
-        const grids = ctx.getGrids();
-
         if (args.length < 3) {
             return {
                 text: 'ERR: usage: grid.stack <idx1> <idx2> [idx3...] <direction> [gap]\n' +
@@ -330,7 +326,7 @@ export default function registerCompositionCommands(router) {
         // Resolve all grid indices
         const resolved = [];
         for (const raw of indexArgs) {
-            const res = resolveGrid(grids, raw, 'grid');
+            const res = resolveGridByIdOrIndex(ctx, raw, 'grid');
             if (res.error) return { text: res.error, data: null };
             resolved.push(res);
         }

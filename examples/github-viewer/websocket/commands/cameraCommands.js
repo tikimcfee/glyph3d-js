@@ -1,9 +1,10 @@
 /**
  * Camera commands: camera.move, camera.lookat, camera.focus, camera.reset, camera.speed, camera.info
- * Migrated from stale WebSocket branch to use context bag.
+ * camera.focus uses resolveGridByIdOrIndex + filename substring fallback.
  */
 
 import { box, kvLines } from '../TUIFormatter.js';
+import { resolveGridByIdOrIndex } from './spatialHelpers.js';
 
 /**
  * @param {import('../CommandRouter.js').default} router
@@ -32,21 +33,23 @@ export default function registerCameraCommands(router) {
     }, { description: 'Point camera at position', usage: '<x> <y> <z>' });
 
     router.register('camera.focus', (args, ctx) => {
-        if (args.length < 1) return { text: 'ERR: usage: camera.focus <index|name>', data: null };
+        if (args.length < 1) return { text: 'ERR: usage: camera.focus <index|id|name>', data: null };
         const target = args.join(' ');
         const grids = ctx.getGrids();
 
-        // Try as index first
-        const idx = parseInt(target);
-        if (!isNaN(idx) && idx >= 0 && idx < grids.length) {
-            ctx.cameraController.focusOnGrid(idx);
+        // Steps 1-2: try numeric index, then registry ID (via resolveGridByIdOrIndex)
+        const resolved = resolveGridByIdOrIndex(ctx, target);
+        if (!resolved.error) {
+            const regIdx = resolved.idx >= 0 ? resolved.idx : grids.indexOf(resolved.grid);
+            if (regIdx >= 0) ctx.cameraController.focusOnGrid(regIdx);
+            const label = resolved.registryId || `#${regIdx}`;
             return {
-                text: `OK: focusing on grid ${idx}`,
-                data: { index: idx }
+                text: `OK: focusing on "${label}"`,
+                data: { index: regIdx, registryId: resolved.registryId }
             };
         }
 
-        // Try as filename substring
+        // Step 3: filename substring fallback
         const matchIdx = grids.findIndex(g => {
             const name = g.getFilename() || g.getSourcePath() || '';
             return name.toLowerCase().includes(target.toLowerCase());
@@ -61,7 +64,7 @@ export default function registerCameraCommands(router) {
         }
 
         return { text: `ERR: no grid matching '${target}'`, data: null };
-    }, { description: 'Focus camera on grid by index or name', usage: '<index|name>' });
+    }, { description: 'Focus camera on grid by index, registry ID, or name', usage: '<index|id|name>' });
 
     router.register('camera.reset', (args, ctx) => {
         ctx.cameraController.reset();

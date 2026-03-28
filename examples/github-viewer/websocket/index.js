@@ -10,17 +10,21 @@
 import CommandRouter from './CommandRouter.js';
 import WebSocketBridge from './WebSocketBridge.js';
 import ViewerAPI from './ViewerAPI.js';
-import SceneRegistry from './SceneRegistry.js';
 import { registerAllCommands } from './commands/index.js';
 
 /**
  * Build the command context bag from a GitHubRepoViewer instance.
  * This is the interface that command handlers receive.
+ *
+ * The registry is owned by the viewer (viewer.registry). The context bag
+ * references it -- it does not create its own. This eliminates dual-registry
+ * drift and the seed loop.
+ *
  * @param {Object} viewer - GitHubRepoViewer instance
  * @returns {Object}
  */
 function buildContext(viewer) {
-    const registry = new SceneRegistry();
+    const registry = viewer.registry;
 
     return {
         // Core Three.js
@@ -29,41 +33,57 @@ function buildContext(viewer) {
         renderer: viewer.renderer,
         atlas: viewer.atlas,
 
-        // Scene object registry (stable IDs for all scene objects)
+        // Scene object registry (THE source of truth)
         registry,
 
-        // Data accessors
-        getGrids: () => viewer.grids,
+        // Data accessor -- cached frozen view derived from registry
+        getGrids: () => registry.toArray('grid'),
 
-        // Grid mutation
-        addGrid(grid) {
-            viewer.grids.push(grid);
-            viewer.scene.add(grid);
+        // Grid mutation -- all creation/removal through registry
+        addGrid(grid, opts = {}) {
+            // Determine ID
+            const sourcePath = grid.getSourcePath?.() || null;
+            const filename = grid.getFilename?.() || grid.name || null;
+            const id = opts.id || sourcePath || filename
+                || `grid-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
-            // Auto-register content grids that aren't already registered
+            // Register (skip if already registered by this grid ref)
             if (!registry.getIdByGrid(grid)) {
-                const sourcePath = grid.getSourcePath?.() || null;
-                const filename = grid.getFilename?.() || grid.name || null;
-                const id = sourcePath || filename || `grid-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
                 registry.register(id, grid, {
-                    type: 'grid',
+                    type: opts.type || 'grid',
                     sourcePath,
                     filename,
+                    ...opts.meta,
                 });
             }
+
+            // Add to scene
+            if (!grid.parent) {
+                viewer.scene.add(grid);
+            }
+
+            return id;
         },
-        removeGrid(index) {
-            const grid = viewer.grids[index];
-            if (!grid) return null;
 
-            // Unregister from registry
-            const regId = registry.getIdByGrid(grid);
-            if (regId) registry.unregister(regId);
-
-            grid.dispose();
-            viewer.scene.remove(grid);
-            viewer.grids.splice(index, 1);
-            return grid;
+        removeGrid(idOrIndex) {
+            let entry;
+            if (typeof idOrIndex === 'number' || /^\d+$/.test(idOrIndex)) {
+                // Numeric index into toArray('grid')
+                const idx = typeof idOrIndex === 'number' ? idOrIndex : parseInt(idOrIndex);
+                const grids = registry.toArray('grid');
+                if (idx < 0 || idx >= grids.length) return null;
+                const grid = grids[idx];
+                const regId = registry.getIdByGrid(grid);
+                if (!regId) return null;
+                entry = registry.unregister(regId);
+            } else {
+                // String ID
+                entry = registry.unregister(idOrIndex);
+            }
+            if (!entry) return null;
+            entry.grid.dispose();
+            viewer.scene.remove(entry.grid);
+            return entry;
         },
 
         // Subsystems

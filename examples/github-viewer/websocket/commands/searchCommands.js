@@ -1,6 +1,6 @@
 /**
  * Search commands: search, search.results
- * Basic text search across loaded grids.
+ * Searches across registry entries by filename/path.
  */
 
 import { box, table } from '../TUIFormatter.js';
@@ -12,15 +12,15 @@ export default function registerSearchCommands(router) {
     router.register('search', (args, ctx) => {
         if (args.length < 1) return { text: 'ERR: usage: search <query>', data: null };
         const query = args.join(' ').toLowerCase();
-        const grids = ctx.getGrids();
+        const entries = ctx.registry.findByType('grid');
 
         const results = [];
-        for (const g of grids) {
-            const path = g.getSourcePath() || g.getFilename() || '(unnamed)';
+        for (const e of entries) {
+            const path = e.grid.getSourcePath() || e.grid.getFilename() || e.id;
 
-            // Search in filename
+            // Search in filename/path
             if (path.toLowerCase().includes(query)) {
-                results.push({ path, type: 'filename', line: null });
+                results.push({ id: e.id, path, type: 'filename', line: null });
             }
         }
 
