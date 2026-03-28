@@ -282,6 +282,45 @@
 
             // Post-init: start IDE shell (search wiring, log capture, etc.)
             ide.start();
+
+            // ---- URL-driven auto-load ----
+            // Supports:  /ide/owner/repo            → main branch
+            //            /ide/owner/repo/branch/name → specific branch
+            //            ?repo=owner/repo&branch=x   → query params
+            {
+                const params = new URLSearchParams(window.location.search);
+                let owner, repo, branch;
+
+                // Try query params first
+                const repoParam = params.get('repo');
+                if (repoParam) {
+                    const parts = repoParam.split('/');
+                    owner = parts[0];
+                    repo = parts[1];
+                    branch = params.get('branch') || '';
+                }
+
+                // Then try path: /ide/owner/repo[/branch/parts...]
+                if (!owner) {
+                    const path = window.location.pathname;
+                    const ideMatch = path.match(/\/ide\/([^\/]+)\/([^\/]+)(?:\/(.+))?/);
+                    if (ideMatch) {
+                        owner = ideMatch[1];
+                        repo = ideMatch[2];
+                        branch = ideMatch[3] || '';
+                    }
+                }
+
+                if (owner && repo) {
+                    // Set the input fields and auto-load
+                    const repoInput = document.getElementById('repo-input');
+                    const branchInput = document.getElementById('branch-input');
+                    if (repoInput) repoInput.value = `${owner}/${repo}`;
+                    if (branchInput && branch) branchInput.value = branch;
+                    // Small delay to let the IDE shell finish wiring
+                    setTimeout(() => viewer.loadRepository(), 300);
+                }
+            }
         });
     </script>
 </body>
