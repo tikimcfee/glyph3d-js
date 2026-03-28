@@ -3,10 +3,11 @@
  * window.clear, window.close, window.list, window.resize, window.move,
  * window.scroll
  *
- * Content args use base64 encoding (atob) matching the grid.* pattern.
+ * Content args use base64 encoding (decodeBase64) matching the grid.* pattern.
  */
 
 import TUIWindowManager from '../TUIWindowManager.js';
+import { decodeBase64 } from './encoding.js';
 
 /**
  * Ensure ctx.windowManager exists, lazily creating it.
@@ -27,20 +28,33 @@ export default function registerWindowCommands(router) {
 
     router.register('window.create', (args, ctx) => {
         if (args.length < 1) {
-            return { text: 'ERR: usage: window.create <id> [cols] [rows] [title]', data: null };
+            return { text: 'ERR: usage: window.create <id> [cols] [rows] [title] [--scale N]', data: null };
         }
         const mgr = getOrCreateManager(ctx);
-        const id = args[0];
-        const cols = args[1] ? parseInt(args[1]) : 80;
-        const rows = args[2] ? parseInt(args[2]) : 24;
-        const title = args[3] || id;
+
+        // Parse flags from args
+        let scale = 2.0;  // Default: 2x scale (bigger than code grids for readability)
+        const cleanArgs = [];
+        for (let i = 0; i < args.length; i++) {
+            if (args[i] === '--scale' && args[i + 1]) {
+                scale = parseFloat(args[++i]);
+                if (isNaN(scale)) scale = 2.0;
+            } else {
+                cleanArgs.push(args[i]);
+            }
+        }
+
+        const id = cleanArgs[0];
+        const cols = cleanArgs[1] ? parseInt(cleanArgs[1]) : 80;
+        const rows = cleanArgs[2] ? parseInt(cleanArgs[2]) : 24;
+        const title = cleanArgs[3] || id;
 
         if (mgr.windows.has(id)) {
             return { text: `ERR: window '${id}' already exists`, data: null };
         }
 
         try {
-            const win = mgr.create(id, { cols, rows, title });
+            const win = mgr.create(id, { cols, rows, title, scale });
             const pos = win.getPosition();
 
             // Register the window's grid in the scene registry
@@ -70,7 +84,7 @@ export default function registerWindowCommands(router) {
         if (!win) return { text: `ERR: no window '${args[0]}'`, data: null };
 
         let text;
-        try { text = atob(args[1]); } catch { return { text: 'ERR: invalid base64', data: null }; }
+        try { text = decodeBase64(args[1]); } catch { return { text: 'ERR: invalid base64', data: null }; }
 
         win.write(text);
         return {
@@ -88,7 +102,7 @@ export default function registerWindowCommands(router) {
         if (!win) return { text: `ERR: no window '${args[0]}'`, data: null };
 
         let text;
-        try { text = atob(args[1]); } catch { return { text: 'ERR: invalid base64', data: null }; }
+        try { text = decodeBase64(args[1]); } catch { return { text: 'ERR: invalid base64', data: null }; }
 
         win.appendLine(text);
         return {
@@ -196,4 +210,20 @@ export default function registerWindowCommands(router) {
             data: { id: args[0], scrollOffset: win.scrollOffset },
         };
     }, { description: 'Scroll window content', usage: '<id> <up|down|bottom> [n]' });
+
+    router.register('window.scale', (args, ctx) => {
+        if (args.length < 2) {
+            return { text: 'ERR: usage: window.scale <id> <factor>', data: null };
+        }
+        const mgr = getOrCreateManager(ctx);
+        const win = mgr.get(args[0]);
+        if (!win) return { text: `ERR: no window '${args[0]}'`, data: null };
+        const scale = parseFloat(args[1]);
+        if (isNaN(scale) || scale <= 0) return { text: 'ERR: scale must be a positive number', data: null };
+        win.setScale(scale);
+        return {
+            text: `OK: window '${args[0]}' scale = ${scale}`,
+            data: { id: args[0], scale },
+        };
+    }, { description: 'Set window scale (larger = bigger)', usage: '<id> <factor>' });
 }

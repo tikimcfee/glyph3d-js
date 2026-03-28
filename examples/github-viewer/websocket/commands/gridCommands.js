@@ -6,6 +6,7 @@
 import { box, table, kvLines } from '../TUIFormatter.js';
 import CodeGrid from '../../../../src/collections/CodeGrid.js';
 import { resolveGridByIdOrIndex } from './spatialHelpers.js';
+import { decodeBase64 } from './encoding.js';
 
 /**
  * @param {import('../CommandRouter.js').default} router
@@ -126,7 +127,7 @@ export default function registerGridCommands(router) {
         }
 
         let text;
-        try { text = atob(args[0]); } catch { return { text: 'ERR: invalid base64 content', data: null }; }
+        try { text = decodeBase64(args[0]); } catch { return { text: 'ERR: invalid base64 content', data: null }; }
         const name = args[1] || null;
 
         const grid = new CodeGrid(ctx.scene, ctx.atlas, {
@@ -173,7 +174,7 @@ export default function registerGridCommands(router) {
         if (resolved.error) return { text: resolved.error, data: null };
 
         let text;
-        try { text = atob(args[1]); } catch { return { text: 'ERR: invalid base64 content', data: null }; }
+        try { text = decodeBase64(args[1]); } catch { return { text: 'ERR: invalid base64 content', data: null }; }
         resolved.grid.loadText(text);
         return {
             text: `OK: grid #${resolved.idx} text updated (${resolved.grid.getGlyphCount()} glyphs, ${resolved.grid.getLineCount()} lines)`,

@@ -12,7 +12,8 @@ import { box, table } from '../TUIFormatter.js';
 import CodeGrid from '../../../../src/collections/CodeGrid.js';
 import { COLORS } from './colorConstants.js';
 import { saveGridState, restoreGridState, restoreAllGridStates } from './gridVisualState.js';
-import { animateCamera, getWorldBounds } from './spatialHelpers.js';
+import { animateCamera, getWorldBounds, resolveGridByIdOrIndex } from './spatialHelpers.js';
+import { decodeBase64 } from './encoding.js';
 
 /**
  * @param {import('../CommandRouter.js').default} router
@@ -29,7 +30,7 @@ export default function registerAnnotationCommands(router) {
         }
 
         let text;
-        try { text = atob(args[0]); } catch {
+        try { text = decodeBase64(args[0]); } catch {
             return { text: 'ERR: invalid base64 content', data: null };
         }
 
@@ -156,15 +157,13 @@ export default function registerAnnotationCommands(router) {
     // ================================================================
 
     router.register('highlight.grid', (args, ctx) => {
-        const grids = ctx.getGrids();
         if (args.length < 1) {
-            return { text: 'ERR: usage: highlight.grid <index> [r g b]', data: null };
+            return { text: 'ERR: usage: highlight.grid <id|index> [r g b]', data: null };
         }
 
-        const idx = parseInt(args[0]);
-        if (isNaN(idx) || idx < 0 || idx >= grids.length) {
-            return { text: `ERR: invalid grid index ${args[0]} (0-${grids.length - 1})`, data: null };
-        }
+        const resolved = resolveGridByIdOrIndex(ctx, args[0]);
+        if (resolved.error) return { text: resolved.error, data: null };
+        const idx = resolved.idx;
 
         // Default highlight color: bright cyan
         let color = { ...COLORS.HIGHLIGHT };
@@ -175,7 +174,7 @@ export default function registerAnnotationCommands(router) {
             }
         }
 
-        const grid = grids[idx];
+        const grid = resolved.grid;
 
         // Save original state (first-writer-wins via gridVisualState)
         saveGridState(ctx, idx);
@@ -273,19 +272,16 @@ export default function registerAnnotationCommands(router) {
 
     router.register('camera.lookat.grid', (args, ctx) => {
         if (args.length < 1) {
-            return { text: 'ERR: usage: camera.lookat.grid <index>', data: null };
+            return { text: 'ERR: usage: camera.lookat.grid <id|index>', data: null };
         }
 
         // Cancel any in-flight animation
         ctx._cancelCameraAnimation?.();
 
-        const grids = ctx.getGrids();
-        const idx = parseInt(args[0]);
-        if (isNaN(idx) || idx < 0 || idx >= grids.length) {
-            return { text: `ERR: invalid grid index ${args[0]} (0-${grids.length - 1})`, data: null };
-        }
-
-        const grid = grids[idx];
+        const resolved = resolveGridByIdOrIndex(ctx, args[0]);
+        if (resolved.error) return { text: resolved.error, data: null };
+        const idx = resolved.idx;
+        const grid = resolved.grid;
         const bounds = grid.getBounds();
 
         // Compute center of the grid's bounding box
@@ -323,7 +319,7 @@ export default function registerAnnotationCommands(router) {
         }
 
         let text;
-        try { text = atob(args[0]); } catch {
+        try { text = decodeBase64(args[0]); } catch {
             return { text: 'ERR: invalid base64 content', data: null };
         }
 
@@ -426,31 +422,12 @@ export default function registerAnnotationCommands(router) {
         // 4. Optionally remove agent/window grids (emergency only)
         let agentCount = 0;
         if (args.includes('--windows')) {
-            const grids = ctx.getGrids();
-            // Use registry to find windows and agents, fall back to name scan
-            const windowEntries = [
-                ...ctx.registry.findByType('agent'),
-                ...ctx.registry.findByType('window'),
-            ];
-
-            if (windowEntries.length > 0) {
-                // Registry-based removal: collect indices, remove in reverse order
-                const indices = windowEntries
-                    .map(e => grids.indexOf(e.grid))
-                    .filter(i => i >= 0)
-                    .sort((a, b) => b - a);
-                for (const i of indices) {
-                    ctx.removeGrid(i);
+            for (const type of ['agent', 'window']) {
+                for (const entry of ctx.registry.findByType(type)) {
+                    entry.grid.dispose();
+                    ctx.scene.remove(entry.grid);
+                    ctx.registry.unregister(entry.id);
                     agentCount++;
-                }
-            } else {
-                // Fallback: name-based scan for unregistered grids
-                for (let i = grids.length - 1; i >= 0; i--) {
-                    const name = grids[i].getFilename?.() || grids[i].name || '';
-                    if (name.startsWith('agent:')) {
-                        ctx.removeGrid(i);
-                        agentCount++;
-                    }
                 }
             }
         }

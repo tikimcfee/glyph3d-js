@@ -22,6 +22,7 @@ export default class TUIWindow {
      * @param {Object} [options]
      * @param {number} [options.cols=80]
      * @param {number} [options.rows=24]
+     * @param {number} [options.scale=1.0] - grid scale (larger = bigger text/window)
      * @param {Object} [options.position]
      * @param {Object} [options.color]
      * @param {string} [options.title]
@@ -50,6 +51,7 @@ export default class TUIWindow {
         this._rafPending = false;
 
         // -- CodeGrid
+        this.gridScale = options.scale || 1.0;
         this.grid = new CodeGrid(scene, atlas, {
             name: `tui-${id}`,
             showFilename: true,
@@ -57,6 +59,7 @@ export default class TUIWindow {
             textColor: options.color || { r: 0, g: 1, b: 0 },
             backgroundColor: 0x0a0a1e,
             backgroundOpacity: 0.92,
+            gridScale: this.gridScale,
         });
 
         if (options.position) {
@@ -156,6 +159,20 @@ export default class TUIWindow {
     getPosition() {
         const p = this.grid.position;
         return { x: p.x, y: p.y, z: p.z };
+    }
+
+    /**
+     * Set uniform scale (larger = bigger text and window).
+     * @param {number} scale
+     */
+    setScale(scale) {
+        this.gridScale = scale;
+        this.grid.scale.setScalar(scale);
+    }
+
+    /** @returns {number} */
+    getScale() {
+        return this.gridScale;
     }
 
     /** Set title (re-renders). */

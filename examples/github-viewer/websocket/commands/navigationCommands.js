@@ -17,6 +17,7 @@ import {
     resolveAnchor, zDistanceForFit, fmtVec,
     frameBounds, animateCamera,
 } from './spatialHelpers.js';
+import { decodeBase64 } from './encoding.js';
 
 /** @type {Map<string, TourDefinition>} */
 const tours = new Map();
@@ -264,7 +265,7 @@ export default function registerNavigationCommands(router) {
         }
 
         let name;
-        try { name = atob(args[0]); } catch {
+        try { name = decodeBase64(args[0]); } catch {
             return { text: 'ERR: invalid base64 name', data: null };
         }
 
@@ -296,7 +297,7 @@ export default function registerNavigationCommands(router) {
         }
 
         let tourName;
-        try { tourName = atob(args[0]); } catch {
+        try { tourName = decodeBase64(args[0]); } catch {
             return { text: 'ERR: invalid base64 tour name', data: null };
         }
 
@@ -310,7 +311,7 @@ export default function registerNavigationCommands(router) {
 
         let annotation = null;
         if (args.length >= 3 && args[2] !== '-') {
-            try { annotation = atob(args[2]); } catch {
+            try { annotation = decodeBase64(args[2]); } catch {
                 return { text: 'ERR: invalid base64 annotation', data: null };
             }
         }
@@ -364,7 +365,7 @@ export default function registerNavigationCommands(router) {
         }
 
         let tourName;
-        try { tourName = atob(args[0]); } catch {
+        try { tourName = decodeBase64(args[0]); } catch {
             return { text: 'ERR: invalid base64 tour name', data: null };
         }
 
