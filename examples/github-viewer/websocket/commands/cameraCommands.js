@@ -103,6 +103,8 @@ export default function registerCameraCommands(router) {
     }, { description: 'Show camera details' });
 
     router.register('camera.fitall', (args, ctx) => {
+        // Cancel any in-flight camera animation
+        ctx._cancelCameraAnimation?.();
         ctx.cameraController.focusOnGrids();
         return { text: 'OK: fitting all grids in view', data: null };
     }, { description: 'Fit all grids in camera view' });

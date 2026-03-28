@@ -100,15 +100,40 @@ A unified recommendation incorporating all perspectives. This is the agent's bes
 Any position this agent holds that others don't, and why it matters. Silence here means full agreement.
 ```
 
-### Phase 3 — Summary
+### Phase 3 — Convergence Round (parallel, after Round 2 completes)
 
-After both rounds complete, produce a brief summary for the user:
+Launch N agents simultaneously. Each agent reads ALL Round 2 outputs and produces a final convergence analysis. The agents collectively decide which ONE of them should implement the result.
+
+Each agent writes to `{output-dir}/round3-{agent-label}-convergence.md` with these headings:
+
+```markdown
+# Round 3: {agent-label} convergence
+
+## Settled
+All points now fully resolved. Numbered list with brief rationale.
+
+## Implementation Plan
+Concrete file-by-file plan: what to create, what to modify, what to delete. Code sketches for non-obvious parts.
+
+## Implementer Vote
+Which agent (including self) should implement, and why. Consider: whose perspective best matches the implementation work? Whose Phase 0 code sketches were closest to the converged plan?
+```
+
+After all Round 3 agents complete, tally the implementer votes. The winning agent is launched as **Phase 4 — Implementation** with the full converged plan and access to all prior outputs. If tied, the agent whose perspective most directly maps to the implementation work wins.
+
+### Phase 4 — Implementation
+
+Launch the voted implementer agent. It reads the Round 3 convergence outputs, then writes actual working code. It has full tool access (read, write, edit, bash) and should produce a runnable result, not a plan.
+
+Output: the actual code changes, committed or staged. The implementer writes a brief summary to `{output-dir}/implementation-summary.md`.
+
+### Phase 5 — Summary
+
+After implementation completes, produce a brief summary for the user:
 - Total agreement points (things all agents converged on)
-- Key tensions resolved in Round 2 (things that were contentious in Round 1 but settled)
-- Remaining open questions (genuine trade-offs with no clear winner)
-- Recommended next actions (concrete steps, not vague suggestions)
-
-Do NOT auto-synthesize into a single "final answer" — present the perspectives and let the user decide.
+- Key tensions resolved across rounds
+- What was implemented
+- What was deferred and why
 
 ## Output Directory
 

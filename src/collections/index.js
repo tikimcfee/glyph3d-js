@@ -8,3 +8,4 @@ export { default as GridLayoutManager } from './GridLayoutManager.js';
 export { default as HierarchicalLayoutManager } from './HierarchicalLayoutManager.js';
 export { default as SpiralLayoutManager } from './SpiralLayoutManager.js';
 export { default as TreemapLayoutManager } from './TreemapLayoutManager.js';
+export { default as StackLayoutManager } from './StackLayoutManager.js';

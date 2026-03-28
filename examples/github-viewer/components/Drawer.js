@@ -254,6 +254,7 @@ export function settingsPanelHTML() {
                 <option value="hierarchical">Hierarchical</option>
                 <option value="spiral">Spiral</option>
                 <option value="treemap">Treemap</option>
+                <option value="stack">Stack</option>
             </select>
         </div>
         <div class="setting-group setting-section-header">Navigation</div>

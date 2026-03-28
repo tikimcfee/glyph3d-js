@@ -108,6 +108,40 @@ function encodeContentArgs(cmd) {
         return `grid.text ${idx} ${b64}`;
     }
 
+    // Handle label.create and scene.annotate:
+    // label.create <text> <x> <y> <z> [r g b]
+    // scene.annotate <text> <x> <y> <z> [r g b]
+    // First arg is text content (possibly quoted), rest are numeric coordinates/color.
+    const matchAnnotation = cmd.match(/^(label\.create|scene\.annotate)\s+(.+)$/);
+    if (matchAnnotation) {
+        const cmdName = matchAnnotation[1];
+        const rest = matchAnnotation[2];
+        let text, remaining;
+
+        if (rest.startsWith('"')) {
+            const endQuote = rest.indexOf('"', 1);
+            if (endQuote > 0) {
+                text = rest.slice(1, endQuote);
+                remaining = rest.slice(endQuote + 1).trim();
+            } else {
+                text = rest.slice(1);
+                remaining = '';
+            }
+        } else {
+            const spaceIdx = rest.indexOf(' ');
+            if (spaceIdx > 0) {
+                text = rest.slice(0, spaceIdx);
+                remaining = rest.slice(spaceIdx + 1).trim();
+            } else {
+                text = rest;
+                remaining = '';
+            }
+        }
+
+        const b64 = Buffer.from(text).toString('base64');
+        return remaining ? `${cmdName} ${b64} ${remaining}` : `${cmdName} ${b64}`;
+    }
+
     return cmd;
 }
 

@@ -63,6 +63,15 @@ function buildContext(viewer) {
 
         // WebSocket bridge (populated after creation)
         wsbridge: null,
+
+        // Annotation system: labels and scene annotations created via CLI
+        annotations: new Map(),
+
+        // Shared visual state tracker for highlight/dim save/restore
+        gridVisualState: new Map(),
+
+        // Camera animation cancellation function (set by camera.animate)
+        _cancelCameraAnimation: null,
     };
 }
 

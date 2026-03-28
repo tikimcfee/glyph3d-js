@@ -18,6 +18,7 @@ export { default as GridLayoutManager } from './collections/GridLayoutManager.js
 export { default as HierarchicalLayoutManager } from './collections/HierarchicalLayoutManager.js';
 export { default as SpiralLayoutManager } from './collections/SpiralLayoutManager.js';
 export { default as TreemapLayoutManager } from './collections/TreemapLayoutManager.js';
+export { default as StackLayoutManager } from './collections/StackLayoutManager.js';
 
 // Worker system
 export { WorkerBridge, getWorkerBridge, isWorkersSupported } from './workers/WorkerBridge.js';

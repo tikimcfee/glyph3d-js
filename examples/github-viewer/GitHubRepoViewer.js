@@ -14,7 +14,8 @@ import {
     GridLayoutManager,
     HierarchicalLayoutManager,
     SpiralLayoutManager,
-    TreemapLayoutManager
+    TreemapLayoutManager,
+    StackLayoutManager
 } from '../../src/index.js';
 
 import { SelectionManager } from './SelectionManager.js';
@@ -97,6 +98,7 @@ export class GitHubRepoViewer {
         this.hierarchicalManager = null;
         this.spiralManager = null;
         this.treemapManager = null;
+        this.stackManager = null;
         this._activeLayout = 'hierarchical';
         this.repoAdapter = null;
         this.githubSource = new GitHubRepositorySource();
@@ -312,6 +314,7 @@ export class GitHubRepoViewer {
             camera: this.camera,
             getGrids: () => this.grids,
             getLayoutBounds: () => {
+                if (this.stackManager && this._activeLayout === 'stack') return this.stackManager.getTotalBounds();
                 if (this.treemapManager) return this.treemapManager.getTotalBounds();
                 if (this.spiralManager)  return this.spiralManager.getTotalBounds();
                 if (this.hierarchicalManager) return this.hierarchicalManager.getTotalBounds();
@@ -608,6 +611,18 @@ export class GitHubRepoViewer {
         sm.register('3', () => {
             this._switchLayout('treemap');
         }, { description: 'Switch to treemap layout' });
+
+        // 4 — stack layout
+        sm.register('4', () => {
+            this._switchLayout('stack');
+        }, { description: 'Switch to stack layout' });
+
+        // R — return all files from stack workspace
+        sm.register('r', () => {
+            if (this.stackManager && this._activeLayout === 'stack') {
+                this.stackManager.returnAll();
+            }
+        }, { description: 'Return all files from stack workspace' });
     }
 
     /**
@@ -671,6 +686,11 @@ export class GitHubRepoViewer {
             this.treemapLabelManager = null;
         }
 
+        // Tear down stack interaction if leaving stack layout
+        if (this._activeLayout !== 'stack') {
+            this._teardownStackInteraction();
+        }
+
         // Always run hierarchical first (needed for tree UI + overlays)
         if (this.hierarchicalManager) {
             this.hierarchicalManager.options.siblingSpacing = 8;
@@ -686,12 +706,14 @@ export class GitHubRepoViewer {
             this.spiralManager.layoutSpiral(this.grids);
             this.sceneContext.spiralManager = this.spiralManager;
             this.sceneContext.treemapManager = null;
+            this.sceneContext.stackManager = null;
         } else if (this._activeLayout === 'treemap') {
             if (!this.treemapManager) this.treemapManager = new TreemapLayoutManager();
             this.treemapManager.clear();
             this.treemapManager.layoutTreemap(this.grids);
             this.sceneContext.treemapManager = this.treemapManager;
             this.sceneContext.spiralManager = null;
+            this.sceneContext.stackManager = null;
 
             // Phase 4: rebuild treemap label manager after re-layout
             this.treemapLabelManager = new TreemapLabelManager(
@@ -703,9 +725,18 @@ export class GitHubRepoViewer {
             this.treemapLabelManager.build().catch(err => {
                 console.warn('[TreemapLabelManager] build error:', err);
             });
+        } else if (this._activeLayout === 'stack') {
+            if (!this.stackManager) this.stackManager = new StackLayoutManager();
+            this.stackManager.clear();
+            this.stackManager.layout(this.grids);
+            this.sceneContext.stackManager = this.stackManager;
+            this.sceneContext.spiralManager = null;
+            this.sceneContext.treemapManager = null;
+            this._initStackInteraction();
         } else {
             this.sceneContext.spiralManager = null;
             this.sceneContext.treemapManager = null;
+            this.sceneContext.stackManager = null;
         }
 
         this._updateOverlays();
@@ -869,9 +900,15 @@ export class GitHubRepoViewer {
                 this.treemapManager = new TreemapLayoutManager();
                 this.treemapManager.layoutTreemap(createdGrids);
                 this.sceneContext.treemapManager = this.treemapManager;
+            } else if (this._activeLayout === 'stack') {
+                this.stackManager = new StackLayoutManager();
+                this.stackManager.layout(createdGrids);
+                this.sceneContext.stackManager = this.stackManager;
+                this._initStackInteraction();
             } else {
                 this.sceneContext.spiralManager = null;
                 this.sceneContext.treemapManager = null;
+                this.sceneContext.stackManager = null;
             }
 
             console.log('Directory structure:');
@@ -1203,6 +1240,112 @@ export class GitHubRepoViewer {
      * Create visual overlay managers (backdrops + nameplates + treemap labels)
      * @private
      */
+    // ============ Stack Layout Interaction ============
+
+    /**
+     * Set up hover (fan-out) and click (pull-to-workspace) for stack layout.
+     * Attaches mousemove + click listeners on the canvas.
+     * @private
+     */
+    _initStackInteraction() {
+        // Tear down any previous stack interaction listeners
+        this._teardownStackInteraction();
+
+        const THREE = this.THREE;
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+
+        /** @type {string|null} Currently hovered directory path */
+        let hoveredDir = null;
+
+        const getMouseNDC = (e) => {
+            const rect = this.canvas.getBoundingClientRect();
+            mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+            mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+        };
+
+        /**
+         * Find which stack/grid the mouse is over by raycasting background meshes.
+         * @returns {{ grid: CodeGrid|null, dirPath: string|null }}
+         */
+        const raycastStacks = (e) => {
+            getMouseNDC(e);
+            raycaster.setFromCamera(mouse, this.camera);
+
+            const bgMeshes = [];
+            for (const grid of this.grids) {
+                if (grid._background && grid._background.visible) {
+                    bgMeshes.push(grid._background);
+                }
+            }
+
+            const hits = raycaster.intersectObjects(bgMeshes, false);
+            if (hits.length === 0) return { grid: null, dirPath: null };
+
+            const hitMesh = hits[0].object;
+            const hitGrid = this.grids.find(g => g._background === hitMesh);
+            if (!hitGrid) return { grid: null, dirPath: null };
+
+            const dirPath = this.stackManager.getDirectoryForGrid(hitGrid);
+            return { grid: hitGrid, dirPath };
+        };
+
+        // --- Mousemove: fan-out on hover ---
+        this._stackMousemoveHandler = (e) => {
+            if (!this.stackManager || this._activeLayout !== 'stack') return;
+
+            const { dirPath } = raycastStacks(e);
+
+            if (dirPath !== hoveredDir) {
+                // Collapse old
+                if (hoveredDir !== null) {
+                    this.stackManager.collapse(hoveredDir);
+                }
+                // Fan new
+                if (dirPath !== null) {
+                    this.stackManager.fanOut(dirPath);
+                }
+                hoveredDir = dirPath;
+            }
+        };
+
+        // --- Click: pull file to workspace or return ---
+        this._stackClickHandler = (e) => {
+            if (!this.stackManager || this._activeLayout !== 'stack') return;
+
+            const { grid } = raycastStacks(e);
+            if (!grid) return;
+
+            if (this.stackManager.isPulled(grid)) {
+                // Clicking a pulled file returns it
+                this.stackManager.returnToStack(grid);
+                this.toastUI?.show(`Returned ${grid.filename || 'file'} to stack`, 'info');
+            } else {
+                // Pull file to workspace
+                this.stackManager.pullToWorkspace(grid);
+                this.toastUI?.show(`Pulled ${grid.filename || 'file'} to workspace`, 'success');
+            }
+        };
+
+        this.canvas.addEventListener('mousemove', this._stackMousemoveHandler);
+        this.canvas.addEventListener('click', this._stackClickHandler);
+    }
+
+    /**
+     * Remove stack interaction listeners.
+     * @private
+     */
+    _teardownStackInteraction() {
+        if (this._stackMousemoveHandler) {
+            this.canvas.removeEventListener('mousemove', this._stackMousemoveHandler);
+            this._stackMousemoveHandler = null;
+        }
+        if (this._stackClickHandler) {
+            this.canvas.removeEventListener('click', this._stackClickHandler);
+            this._stackClickHandler = null;
+        }
+    }
+
     _createOverlays() {
         if (!this.hierarchicalManager || !this.hierarchicalManager.root) return;
 
@@ -1217,7 +1360,7 @@ export class GitHubRepoViewer {
         }
 
         // Non-hierarchical modes: no backdrops, no nameplates
-        if (this._activeLayout === 'spiral' || this._activeLayout === 'treemap') {
+        if (this._activeLayout === 'spiral' || this._activeLayout === 'treemap' || this._activeLayout === 'stack') {
             this.backdropManager = null;
             this.nameplateManager = null;
             // Add spiral guide line
@@ -1291,7 +1434,7 @@ export class GitHubRepoViewer {
     _updateOverlays() {
         if (!this.hierarchicalManager || !this.hierarchicalManager.root) return;
 
-        if (this._activeLayout === 'spiral' || this._activeLayout === 'treemap') {
+        if (this._activeLayout === 'spiral' || this._activeLayout === 'treemap' || this._activeLayout === 'stack') {
             // Non-hierarchical mode: hide backdrops/nameplates
             if (this.backdropManager) this.backdropManager.setVisible(false);
             if (this.nameplateManager) this.nameplateManager.setVisible(false);
