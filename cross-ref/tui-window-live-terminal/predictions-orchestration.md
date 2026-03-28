@@ -1,0 +1,9 @@
+# Predictions: orchestration
+
+## What I expect "display" concluded
+
+The display agent likely focused on modernizing TUIWindow's text buffer model — replacing the current approach of full-text rewrites with a line-based ring buffer or scrollback buffer that supports incremental appends and ANSI escape code parsing for color. They probably proposed refactoring TUIWindowManager to use the deferred flush pattern from GlyphCollection rather than immediate per-character updates, and recommended new commands like `window.setTitle`, `window.resize`, and `window.scroll` registered on the CommandRouter. They almost certainly identified that the current TUIWindow lacks a proper internal text model (it likely just stores raw strings and re-renders everything) and proposed a structured buffer that maps lines to glyph instances for efficient partial updates.
+
+## What I expect "interaction" concluded
+
+The interaction agent likely designed a click-to-focus system where raycasting against TUIWindow bounding boxes determines which window receives keyboard input, with a visual focus indicator (border highlight or glow). They probably proposed a cursor model with a blinking caret rendered as a special glyph instance or a small mesh, positioned by row/column within the focused window's text grid. For keystroke routing, they likely designed a priority chain: focused TUIWindow captures keystrokes first (forwarding them over WebSocket as stdin to the backing process), with unfocused windows passing input through to the existing CameraController/InputManager. They probably also addressed how this integrates with the IDE shell's existing panel system — the TUIWindow focus state needs to coordinate with the IDE shell's concept of active panel so that keyboard shortcuts (Ctrl+`, Ctrl+P, etc.) still work at the IDE level rather than being swallowed by a focused terminal window.

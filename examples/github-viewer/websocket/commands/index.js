@@ -15,6 +15,8 @@ import registerAnnotationCommands from './annotationCommands.js';
 import registerSpatialCommands from './spatialCommands.js';
 import registerCompositionCommands from './compositionCommands.js';
 import registerNavigationCommands from './navigationCommands.js';
+import registerWindowCommands from './windowCommands.js';
+import registerOrchestrationCommands from './orchestrationCommands.js';
 
 /**
  * Register all built-in commands on a router.
@@ -33,4 +35,6 @@ export function registerAllCommands(router) {
     registerSpatialCommands(router);
     registerCompositionCommands(router);
     registerNavigationCommands(router);
+    registerWindowCommands(router);
+    registerOrchestrationCommands(router);
 }
