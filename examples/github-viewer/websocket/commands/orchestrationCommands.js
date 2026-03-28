@@ -58,17 +58,13 @@ export default function registerOrchestrationCommands(router) {
             return { text: `ERR: invalid grid index ${args[1]} (0-${grids.length - 1})`, data: null };
         }
 
-        // Find the window grid by naming convention:
-        //   agent:<id>, tui-<id>, [<id>] (TUIWindow title), or exact match
-        const agentGridIdx = grids.findIndex(g => {
-            const fname = g.filename || '';
-            const gname = g.name || '';
-            return fname === `agent:${windowId}` || gname === `tui-${windowId}`
-                || fname === `[${windowId}]` || fname === windowId || gname === windowId;
-        });
+        // Look up the window grid via the scene registry (replaces 5-pattern name matching)
+        const registryEntry = ctx.registry.get(windowId);
+        const agentGrid = registryEntry ? registryEntry.grid : null;
+        const agentGridIdx = agentGrid ? grids.indexOf(agentGrid) : -1;
 
-        if (agentGridIdx === -1) {
-            return { text: `ERR: no agent grid for '${windowId}'`, data: null };
+        if (!agentGrid || agentGridIdx === -1) {
+            return { text: `ERR: no registered scene object for '${windowId}'`, data: null };
         }
 
         // Clear previous tracking for this window if any
@@ -77,7 +73,6 @@ export default function registerOrchestrationCommands(router) {
             tracking.delete(windowId);
         }
 
-        const agentGrid = grids[agentGridIdx];
         const targetGrid = grids[gridIdx];
 
         // Get target grid bounds for positioning

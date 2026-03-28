@@ -83,6 +83,14 @@ function createTourAnnotation(ctx, gridIndex, text) {
         color: { ...COLORS.ANNOTATION },
     });
 
+    // Register in scene registry
+    ctx.registry.register(id, annotGrid, {
+        type: 'tour-annotation',
+        text,
+        position: { x, y, z },
+        gridIndex,
+    });
+
     return id;
 }
 
@@ -97,6 +105,7 @@ function removeTourAnnotation(ctx, id) {
     entry.grid.dispose();
     ctx.scene.remove(entry.grid);
     ctx.annotations.delete(id);
+    ctx.registry.unregister(id);
 }
 
 

@@ -63,8 +63,16 @@ export default function registerAnnotationCommands(router) {
         // Add to scene directly (not to ctx grids -- these are annotations, not content)
         ctx.scene.add(grid);
 
-        // Track in annotations registry
+        // Track in annotations map (detail store)
         ctx.annotations.set(id, { type: 'label', grid, text, position: { x, y, z }, color });
+
+        // Register in scene registry (discovery layer)
+        ctx.registry.register(id, grid, {
+            type: 'label',
+            text,
+            position: { x, y, z },
+            color,
+        });
 
         return {
             text: `OK: label "${id}" created at (${x}, ${y}, ${z})`,
@@ -94,6 +102,9 @@ export default function registerAnnotationCommands(router) {
         entry.grid.dispose();
         ctx.scene.remove(entry.grid);
         ctx.annotations.delete(id);
+
+        // Unregister from scene registry
+        ctx.registry.unregister(id);
 
         return {
             text: `OK: removed label "${id}"`,
@@ -349,6 +360,14 @@ export default function registerAnnotationCommands(router) {
         ctx.scene.add(grid);
         ctx.annotations.set(id, { type: 'annotation', grid, text, position: { x, y, z }, color });
 
+        // Register in scene registry
+        ctx.registry.register(id, grid, {
+            type: 'annotation',
+            text,
+            position: { x, y, z },
+            color,
+        });
+
         return {
             text: `OK: annotation "${id}" created at (${x}, ${y}, ${z})`,
             data: { id, position: { x, y, z }, color, text }
@@ -367,6 +386,7 @@ export default function registerAnnotationCommands(router) {
         for (const [id, entry] of ctx.annotations) {
             entry.grid.dispose();
             ctx.scene.remove(entry.grid);
+            ctx.registry.unregister(id);
             count++;
         }
         ctx.annotations.clear();
@@ -391,6 +411,7 @@ export default function registerAnnotationCommands(router) {
         for (const [id, entry] of ctx.annotations) {
             entry.grid.dispose();
             ctx.scene.remove(entry.grid);
+            ctx.registry.unregister(id);
             annotCount++;
         }
         ctx.annotations.clear();
@@ -402,16 +423,34 @@ export default function registerAnnotationCommands(router) {
         // 3. Cancel camera animation
         ctx._cancelCameraAnimation?.();
 
-        // 4. Optionally remove agent windows (emergency only)
+        // 4. Optionally remove agent/window grids (emergency only)
         let agentCount = 0;
         if (args.includes('--windows')) {
             const grids = ctx.getGrids();
-            // Remove in reverse order to avoid index shifting
-            for (let i = grids.length - 1; i >= 0; i--) {
-                const name = grids[i].getFilename?.() || grids[i].name || '';
-                if (name.startsWith('agent:')) {
+            // Use registry to find windows and agents, fall back to name scan
+            const windowEntries = [
+                ...ctx.registry.findByType('agent'),
+                ...ctx.registry.findByType('window'),
+            ];
+
+            if (windowEntries.length > 0) {
+                // Registry-based removal: collect indices, remove in reverse order
+                const indices = windowEntries
+                    .map(e => grids.indexOf(e.grid))
+                    .filter(i => i >= 0)
+                    .sort((a, b) => b - a);
+                for (const i of indices) {
                     ctx.removeGrid(i);
                     agentCount++;
+                }
+            } else {
+                // Fallback: name-based scan for unregistered grids
+                for (let i = grids.length - 1; i >= 0; i--) {
+                    const name = grids[i].getFilename?.() || grids[i].name || '';
+                    if (name.startsWith('agent:')) {
+                        ctx.removeGrid(i);
+                        agentCount++;
+                    }
                 }
             }
         }

@@ -30,6 +30,39 @@ export function resolveGrid(grids, arg, label = 'grid') {
     return { grid: grids[idx], idx };
 }
 
+/**
+ * Resolve a grid by registry ID or array index.
+ * Tries registry lookup first (by string ID), falls back to numeric index.
+ * Enables commands to accept either `grid.bounds my-window` or `grid.bounds 73`.
+ *
+ * @param {Object} ctx - command context bag (must have .registry and .getGrids)
+ * @param {string} arg - registry ID or numeric index string
+ * @param {string} [label='grid'] - label for error messages
+ * @returns {{ grid: Object, idx: number, registryId: string|null } | { error: string }}
+ */
+export function resolveGridByIdOrIndex(ctx, arg, label = 'grid') {
+    const grids = ctx.getGrids();
+
+    // 1. Try registry lookup by ID
+    if (ctx.registry) {
+        const entry = ctx.registry.get(arg);
+        if (entry) {
+            const idx = grids.indexOf(entry.grid);
+            // Grid might be in registry but not in the grids array (e.g. annotations)
+            return { grid: entry.grid, idx, registryId: entry.id };
+        }
+    }
+
+    // 2. Fall back to numeric index
+    const idx = parseInt(arg);
+    if (isNaN(idx) || idx < 0 || idx >= grids.length) {
+        return { error: `ERR: no ${label} found for "${arg}" (not a registry ID or valid index 0-${grids.length - 1})` };
+    }
+
+    const registryId = ctx.registry ? ctx.registry.getIdByGrid(grids[idx]) : null;
+    return { grid: grids[idx], idx, registryId };
+}
+
 // ──────────────────────────────────────────────────────────────
 //  World-Space Bounds
 // ──────────────────────────────────────────────────────────────

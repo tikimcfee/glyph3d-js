@@ -140,12 +140,16 @@ export default function registerGridCommands(router) {
         }
         grid.loadText(text);
 
+        // Register in registry before addGrid (which auto-registers with generated ID)
+        const registryId = name || grid.name;
+        ctx.registry.register(registryId, grid, { type: 'grid', name });
+
         ctx.addGrid(grid);
 
         const idx = ctx.getGrids().length - 1;
         return {
-            text: `OK: created grid #${idx} (${grid.getGlyphCount()} glyphs, ${grid.getLineCount()} lines)`,
-            data: { index: idx, name: name || grid.name, glyphs: grid.getGlyphCount(), lines: grid.getLineCount() }
+            text: `OK: created grid #${idx} "${registryId}" (${grid.getGlyphCount()} glyphs, ${grid.getLineCount()} lines)`,
+            data: { index: idx, registryId, name: name || grid.name, glyphs: grid.getGlyphCount(), lines: grid.getLineCount() }
         };
     }, { description: 'Create a grid with text content', usage: '<text> [name]' });
 

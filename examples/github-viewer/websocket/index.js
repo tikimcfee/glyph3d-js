@@ -10,6 +10,7 @@
 import CommandRouter from './CommandRouter.js';
 import WebSocketBridge from './WebSocketBridge.js';
 import ViewerAPI from './ViewerAPI.js';
+import SceneRegistry from './SceneRegistry.js';
 import { registerAllCommands } from './commands/index.js';
 
 /**
@@ -19,12 +20,17 @@ import { registerAllCommands } from './commands/index.js';
  * @returns {Object}
  */
 function buildContext(viewer) {
+    const registry = new SceneRegistry();
+
     return {
         // Core Three.js
         scene: viewer.scene,
         camera: viewer.camera,
         renderer: viewer.renderer,
         atlas: viewer.atlas,
+
+        // Scene object registry (stable IDs for all scene objects)
+        registry,
 
         // Data accessors
         getGrids: () => viewer.grids,
@@ -33,10 +39,27 @@ function buildContext(viewer) {
         addGrid(grid) {
             viewer.grids.push(grid);
             viewer.scene.add(grid);
+
+            // Auto-register content grids that aren't already registered
+            if (!registry.getIdByGrid(grid)) {
+                const sourcePath = grid.getSourcePath?.() || null;
+                const filename = grid.getFilename?.() || grid.name || null;
+                const id = sourcePath || filename || `grid-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+                registry.register(id, grid, {
+                    type: 'grid',
+                    sourcePath,
+                    filename,
+                });
+            }
         },
         removeGrid(index) {
             const grid = viewer.grids[index];
             if (!grid) return null;
+
+            // Unregister from registry
+            const regId = registry.getIdByGrid(grid);
+            if (regId) registry.unregister(regId);
+
             grid.dispose();
             viewer.scene.remove(grid);
             viewer.grids.splice(index, 1);

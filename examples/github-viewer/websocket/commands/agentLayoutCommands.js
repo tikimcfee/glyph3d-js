@@ -29,12 +29,33 @@ const AGENT_SPACING = {
 
 /**
  * Find all grids that are agent windows.
- * Convention: grid name or filename starts with "agent:" or has userData.agentLabel.
- * @param {Function} getGrids - ctx.getGrids()
+ * Uses the scene registry if available (type 'agent' or 'window'),
+ * falls back to name-based scanning for backward compat.
+ * @param {Object} ctx - command context bag
  * @returns {Array<{grid: Object, label: string, index: number}>}
  */
-function findAgentGrids(getGrids) {
-    const grids = getGrids();
+function findAgentGrids(ctx) {
+    const grids = typeof ctx === 'function' ? ctx() : ctx.getGrids();
+    const registry = typeof ctx === 'function' ? null : ctx.registry;
+
+    // If registry is available, use it (combines 'agent' and 'window' types)
+    if (registry) {
+        const agents = [];
+        const entries = [
+            ...registry.findByType('agent'),
+            ...registry.findByType('window'),
+        ];
+        for (const entry of entries) {
+            const idx = grids.indexOf(entry.grid);
+            if (idx !== -1) {
+                const label = entry.meta.label || entry.meta.windowId || entry.id;
+                agents.push({ grid: entry.grid, label, index: idx });
+            }
+        }
+        if (agents.length > 0) return agents;
+    }
+
+    // Fallback: name-based scanning (backward compat for unregistered grids)
     const agents = [];
     for (let i = 0; i < grids.length; i++) {
         const g = grids[i];
@@ -164,7 +185,7 @@ export default function registerAgentLayoutCommands(router) {
             };
         }
 
-        const agents = findAgentGrids(ctx.getGrids);
+        const agents = findAgentGrids(ctx);
         if (agents.length === 0) {
             return {
                 text: 'ERR: no agent windows found. Create grids with name "agent:<label>".',
@@ -228,7 +249,7 @@ export default function registerAgentLayoutCommands(router) {
         ctx._cancelCameraAnimation?.();
 
         const targetLabel = args.join(' ').toLowerCase();
-        const agents = findAgentGrids(ctx.getGrids);
+        const agents = findAgentGrids(ctx);
 
         if (agents.length === 0) {
             return { text: 'ERR: no agent windows found', data: null };
@@ -296,7 +317,7 @@ export default function registerAgentLayoutCommands(router) {
         ctx._cancelCameraAnimation?.();
 
         const [label1, label2] = args.map(a => a.toLowerCase());
-        const agents = findAgentGrids(ctx.getGrids);
+        const agents = findAgentGrids(ctx);
 
         const agent1 = agents.find(a => a.label.toLowerCase() === label1) ||
                         agents.find(a => a.label.toLowerCase().includes(label1));
@@ -374,7 +395,7 @@ export default function registerAgentLayoutCommands(router) {
 
     // --- layout.agents.list ---
     router.register('layout.agents.list', (args, ctx) => {
-        const agents = findAgentGrids(ctx.getGrids);
+        const agents = findAgentGrids(ctx);
         if (agents.length === 0) {
             return { text: 'No agent windows found.', data: { agents: [] } };
         }

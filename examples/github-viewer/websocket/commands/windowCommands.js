@@ -42,6 +42,16 @@ export default function registerWindowCommands(router) {
         try {
             const win = mgr.create(id, { cols, rows, title });
             const pos = win.getPosition();
+
+            // Register the window's grid in the scene registry
+            ctx.registry.register(id, win.grid, {
+                type: 'window',
+                windowId: id,
+                title,
+                cols,
+                rows,
+            });
+
             return {
                 text: `OK: window '${id}' created (${cols}x${rows}) at (${pos.x},${pos.y},${pos.z})`,
                 data: { id, cols, rows, title, position: pos },
@@ -101,6 +111,10 @@ export default function registerWindowCommands(router) {
         const mgr = getOrCreateManager(ctx);
         const removed = mgr.remove(args[0]);
         if (!removed) return { text: `ERR: no window '${args[0]}'`, data: null };
+
+        // Unregister from scene registry
+        ctx.registry.unregister(args[0]);
+
         return { text: `OK: window '${args[0]}' closed`, data: { id: args[0] } };
     }, { description: 'Close and dispose a window', usage: '<id>' });
 
