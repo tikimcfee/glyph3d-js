@@ -39,7 +39,7 @@ export function layoutText(text, startPosition, metrics, alignment = 'left', lay
 
     // Z-depth wrapping options
     const maxLineWidth = layoutOptions.maxLineWidth || 0;  // 0 = no limit
-    const zWrapSpacing = layoutOptions.zWrapSpacing || (metrics.charHeight * 2);
+    const zWrapSpacing = layoutOptions.zWrapSpacing || (metrics.charHeight * 0.15);
 
     // Track bounds during iteration (now including Z)
     let minX = Infinity;

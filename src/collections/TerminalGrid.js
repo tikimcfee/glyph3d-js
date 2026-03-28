@@ -506,7 +506,7 @@ export default class TerminalGrid extends THREE.Object3D {
         this._background.position.set(
             (this.cols * strideX) / 2 - m.charWidth / 2,
             -(this.rows * strideY) / 2 + strideY / 2,
-            -0.5  // slightly behind text
+            -0.1  // just behind text — minimal float
         );
     }
 }

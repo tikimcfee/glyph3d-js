@@ -163,26 +163,25 @@ export function buildGlyphBuffers(input) {
  */
 const Z_WRAP_CONFIG = {
     maxLineWidth: 200,    // Characters before wrap (0 = disabled)
-    zWrapSpacing: 3.0     // Z spacing multiplier (relative to charHeight)
+    zWrapSpacing: 0.15    // Z spacing multiplier (relative to charHeight) — tight, matches background gap
 };
 
 /**
  * Page-break pagination configuration
- * When a text block exceeds pageHeight visual lines, break into pages:
- * pages fan out horizontally (up to pagesWide), then stack in Z-depth.
- * Ported from Metal calculatePageOffsets() algorithm.
+ * When a text block exceeds pageHeight visual lines, break into pages.
+ * Pages extend right first (up to pagesWide), then wrap downward (Y-stack).
+ * Creates a length-wrap flow: right → down, like newspaper columns.
  */
 const PAGE_CONFIG = {
     pageHeight: 150,       // Visual lines per page before page break
-    pagesWide: 5,          // Horizontal pages before Z-stack row
+    pagesWide: 5,          // Horizontal pages before wrapping down
     pageGapX: 10,          // Char-width gap between horizontal pages
-    zPerPageRow: 32.0,     // Z offset per stacked page row
+    pageGapY: 10,          // Line-height gap between page rows (vertical)
 };
 
 /**
  * Apply page-break pagination to glyph positions in-place.
- * Transforms a tall column of text into a book-like layout:
- * pages fan horizontally, then stack in Z-depth.
+ * Pages fan right, then wrap down — extend right first, then extend down.
  *
  * @param {Float32Array} positions - Position buffer (mutated in place)
  * @param {number} startIdx - First glyph index for this item
@@ -195,6 +194,7 @@ function applyPagination(positions, startIdx, endIdx, origin, metrics) {
     const charAdvance = metrics.charWidth + metrics.letterSpacing;
     const pageWidthWorld = Z_WRAP_CONFIG.maxLineWidth * charAdvance;
     const gapXWorld = PAGE_CONFIG.pageGapX * charAdvance;
+    const gapYWorld = PAGE_CONFIG.pageGapY * metrics.lineSpacing;
 
     for (let i = startIdx; i < endIdx; i++) {
         const relY = origin.y - positions[i * 3 + 1];  // distance below origin
@@ -204,16 +204,14 @@ function applyPagination(positions, startIdx, endIdx, origin, metrics) {
         const vPage = Math.floor(relY / pageHeightWorld);
         const rowOffsetInPage = relY - vPage * pageHeightWorld;
         const hSlot = vPage % PAGE_CONFIG.pagesWide;
-        const zRow = Math.floor(vPage / PAGE_CONFIG.pagesWide);
+        const yRow = Math.floor(vPage / PAGE_CONFIG.pagesWide);
 
-        // Remap Y back up to within-page position
-        positions[i * 3 + 1] = origin.y - rowOffsetInPage;
+        // Remap Y: position within page + shift down for page row
+        positions[i * 3 + 1] = origin.y - rowOffsetInPage
+            - yRow * (pageHeightWorld + gapYWorld);
 
         // Fan pages horizontally
         positions[i * 3] += hSlot * (pageWidthWorld + gapXWorld);
-
-        // Stack page rows in Z-depth
-        positions[i * 3 + 2] -= zRow * PAGE_CONFIG.zPerPageRow;
     }
 }
 
