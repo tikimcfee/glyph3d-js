@@ -65,6 +65,11 @@ try {
     process.exit(2);
 }
 
+/** Interpret \n, \t escape sequences in a string (shell doesn't do this for us) */
+function interpretEscapes(s) {
+    return s.replace(/\\n/g, '\n').replace(/\\t/g, '\t');
+}
+
 /**
  * Encode text content to base64 for commands that take content args.
  * grid.create <text> [name] → grid.create <b64> [name]
@@ -95,7 +100,7 @@ function encodeContentArgs(cmd) {
                 name = null;
             }
         }
-        const b64 = Buffer.from(text).toString('base64');
+        const b64 = Buffer.from(interpretEscapes(text)).toString('base64');
         return name ? `grid.create ${b64} ${name}` : `grid.create ${b64}`;
     }
 
@@ -104,7 +109,7 @@ function encodeContentArgs(cmd) {
         const idx = matchText[2];
         let text = matchText[3];
         if (text.startsWith('"') && text.endsWith('"')) text = text.slice(1, -1);
-        const b64 = Buffer.from(text).toString('base64');
+        const b64 = Buffer.from(interpretEscapes(text)).toString('base64');
         return `grid.text ${idx} ${b64}`;
     }
 
@@ -138,7 +143,7 @@ function encodeContentArgs(cmd) {
             }
         }
 
-        const b64 = Buffer.from(text).toString('base64');
+        const b64 = Buffer.from(interpretEscapes(text)).toString('base64');
         return remaining ? `${cmdName} ${b64} ${remaining}` : `${cmdName} ${b64}`;
     }
 
