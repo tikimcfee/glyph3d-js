@@ -15,6 +15,7 @@ import { COLORS } from './colorConstants.js';
 import {
     resolveGrid, getWorldBounds, unionBounds,
     resolveAnchor, zDistanceForFit, fmtVec,
+    frameBounds, animateCamera,
 } from './spatialHelpers.js';
 
 /** @type {Map<string, TourDefinition>} */
@@ -33,96 +34,6 @@ const tours = new Map();
  * @property {string} name
  * @property {TourStop[]} stops
  */
-
-// ────────────────────────────────────────────────────────────────
-//  Camera helpers
-// ────────────────────────────────────────────────────────────────
-
-/**
- * Frame the camera on an AABB. Sets position, resets pitch/yaw.
- * @param {Object} ctx - command context bag
- * @param {{ min: {x,y,z}, max: {x,y,z}, center: {x,y,z}, size: {x,y,z} }} bounds
- * @param {number} padding - extra world units added to each edge
- */
-function frameBounds(ctx, bounds, padding) {
-    ctx._cancelCameraAnimation?.();
-
-    const w = bounds.size.x + padding * 2;
-    const h = bounds.size.y + padding * 2;
-    const dist = zDistanceForFit(ctx.camera, w, h, 0.85);
-
-    ctx.camera.position.set(
-        bounds.center.x,
-        bounds.center.y,
-        bounds.max.z + dist
-    );
-
-    // Reset rotation to face -Z (perpendicular to content)
-    if (ctx.cameraController) {
-        ctx.cameraController.pitch = 0;
-        ctx.cameraController.yaw = 0;
-    }
-}
-
-/**
- * Smoothly animate camera to a position over `duration` ms.
- * Returns a Promise that resolves when animation completes.
- * @param {Object} ctx
- * @param {number} x
- * @param {number} y
- * @param {number} z
- * @param {number} duration
- * @returns {Promise<void>}
- */
-function animateCamera(ctx, x, y, z, duration) {
-    return new Promise((resolve) => {
-        const camera = ctx.camera;
-        const startX = camera.position.x;
-        const startY = camera.position.y;
-        const startZ = camera.position.z;
-        const startTime = performance.now();
-
-        ctx._cancelCameraAnimation?.();
-
-        function easeInOutCubic(t) {
-            return t < 0.5
-                ? 4 * t * t * t
-                : 1 - Math.pow(-2 * t + 2, 3) / 2;
-        }
-
-        let animId = null;
-
-        function tick() {
-            const elapsed = performance.now() - startTime;
-            const t = Math.min(elapsed / duration, 1.0);
-            const e = easeInOutCubic(t);
-
-            camera.position.set(
-                startX + (x - startX) * e,
-                startY + (y - startY) * e,
-                startZ + (z - startZ) * e,
-            );
-
-            if (t < 1.0) {
-                animId = requestAnimationFrame(tick);
-            } else {
-                ctx._cancelCameraAnimation = null;
-                resolve();
-            }
-        }
-
-        animId = requestAnimationFrame(tick);
-
-        ctx._cancelCameraAnimation = () => {
-            if (animId != null) {
-                cancelAnimationFrame(animId);
-                animId = null;
-            }
-            ctx._cancelCameraAnimation = null;
-            resolve();  // resolve immediately on cancel so tour can continue
-        };
-    });
-}
 
 /**
  * Create an annotation grid positioned above a target grid.

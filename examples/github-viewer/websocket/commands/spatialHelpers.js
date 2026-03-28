@@ -170,6 +170,86 @@ export function zDistanceForFit(camera, width, height, fillFraction = 0.85) {
 }
 
 // ──────────────────────────────────────────────────────────────
+//  Camera Helpers
+// ──────────────────────────────────────────────────────────────
+
+/** @param {number} t - 0..1 @returns {number} */
+function easeInOutCubic(t) {
+    return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
+
+/**
+ * Frame the camera on an AABB. Sets position, resets pitch/yaw.
+ * Cancels any in-flight animation.
+ * @param {Object} ctx - command context bag
+ * @param {{ center: {x,y,z}, max: {x,y,z}, size: {x,y,z} }} bounds
+ * @param {number} padding - extra world units per edge
+ */
+export function frameBounds(ctx, bounds, padding) {
+    ctx._cancelCameraAnimation?.();
+    const w = bounds.size.x + padding * 2;
+    const h = bounds.size.y + padding * 2;
+    const dist = zDistanceForFit(ctx.camera, w, h, 0.85);
+    ctx.camera.position.set(bounds.center.x, bounds.center.y, bounds.max.z + dist);
+    if (ctx.cameraController) {
+        ctx.cameraController.pitch = 0;
+        ctx.cameraController.yaw = 0;
+    }
+}
+
+/**
+ * Smoothly animate camera to a position over `duration` ms.
+ * Returns a Promise that resolves on completion or cancellation.
+ * @param {Object} ctx - command context bag
+ * @param {number} x
+ * @param {number} y
+ * @param {number} z
+ * @param {number} duration - ms
+ * @returns {Promise<void>}
+ */
+export function animateCamera(ctx, x, y, z, duration) {
+    return new Promise((resolve) => {
+        const camera = ctx.camera;
+        const startX = camera.position.x;
+        const startY = camera.position.y;
+        const startZ = camera.position.z;
+        const startTime = performance.now();
+
+        ctx._cancelCameraAnimation?.();
+
+        let animId = null;
+
+        function tick() {
+            const elapsed = performance.now() - startTime;
+            const t = Math.min(elapsed / duration, 1.0);
+            const e = easeInOutCubic(t);
+            camera.position.set(
+                startX + (x - startX) * e,
+                startY + (y - startY) * e,
+                startZ + (z - startZ) * e,
+            );
+            if (t < 1.0) {
+                animId = requestAnimationFrame(tick);
+            } else {
+                ctx._cancelCameraAnimation = null;
+                resolve();
+            }
+        }
+
+        animId = requestAnimationFrame(tick);
+
+        ctx._cancelCameraAnimation = () => {
+            if (animId != null) {
+                cancelAnimationFrame(animId);
+                animId = null;
+            }
+            ctx._cancelCameraAnimation = null;
+            resolve();
+        };
+    });
+}
+
+// ──────────────────────────────────────────────────────────────
 //  Formatting
 // ──────────────────────────────────────────────────────────────
 

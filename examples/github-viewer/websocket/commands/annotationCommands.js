@@ -12,6 +12,7 @@ import { box, table } from '../TUIFormatter.js';
 import CodeGrid from '../../../../src/collections/CodeGrid.js';
 import { COLORS } from './colorConstants.js';
 import { saveGridState, restoreGridState, restoreAllGridStates } from './gridVisualState.js';
+import { animateCamera, getWorldBounds } from './spatialHelpers.js';
 
 /**
  * @param {import('../CommandRouter.js').default} router
@@ -243,49 +244,8 @@ export default function registerAnnotationCommands(router) {
             return { text: 'ERR: duration must be between 1 and 30000 ms', data: null };
         }
 
-        const camera = ctx.camera;
-        const startPos = camera.position.clone();
-        const startTime = performance.now();
-
-        // Cancel any existing animation
-        ctx._cancelCameraAnimation?.();
-
-        function easeInOutCubic(t) {
-            return t < 0.5
-                ? 4 * t * t * t
-                : 1 - Math.pow(-2 * t + 2, 3) / 2;
-        }
-
-        let animId = null;
-
-        function tick() {
-            const elapsed = performance.now() - startTime;
-            const t = Math.min(elapsed / duration, 1.0);
-            const eased = easeInOutCubic(t);
-
-            camera.position.set(
-                startPos.x + (x - startPos.x) * eased,
-                startPos.y + (y - startPos.y) * eased,
-                startPos.z + (z - startPos.z) * eased
-            );
-
-            if (t < 1.0) {
-                animId = requestAnimationFrame(tick);
-            } else {
-                ctx._cancelCameraAnimation = null;
-            }
-        }
-
-        animId = requestAnimationFrame(tick);
-
-        // Store cancellation function on ctx
-        ctx._cancelCameraAnimation = () => {
-            if (animId != null) {
-                cancelAnimationFrame(animId);
-                animId = null;
-            }
-            ctx._cancelCameraAnimation = null;
-        };
+        // Fire-and-forget: start animation, return immediately
+        animateCamera(ctx, x, y, z, duration);
 
         return {
             text: `OK: animating camera to (${x}, ${y}, ${z}) over ${duration}ms`,

@@ -163,11 +163,46 @@ When launching each cross-reference agent, include in its prompt:
 5. **Output path**: The exact file path to write the analysis to.
 6. **Concreteness mandate**: "Be specific — reference code, line numbers, function names, file paths, and concrete details. This is a technical review, not a summary. If you identify a problem, show where it is. If you recommend a change, show what the change looks like."
 
+## Orchestrator Principles
+
+The orchestrator (the agent running this skill) is not a scheduler — it is a mechanism designer. It adapts the process between phases based on what outputs reveal.
+
+### Routing Authority
+
+The orchestrator may skip, repeat, or reorder phases based on what the outputs reveal. State the reason when deviating from the default flow. Examples:
+- Skip Round 2 if Round 1 shows clear convergence with no substantive tensions
+- Re-run Phase 0 with refined prompts if outputs reveal the original framing was ambiguous
+- Jump straight to implementation if Phase 0 outputs are already production-quality code
+
+### Prompt Refinement Between Phases
+
+Between phases, the orchestrator reviews outputs for conceptual divergence caused by ambiguous framing. If found, refine the prompts for the next phase — but frame refinements as **constraints** (pointing at source code, establishing scope) rather than **conclusions** (stating design decisions).
+
+Example — **constraint** (good): "The relay at ws-relay.mjs lines 96-111 handles message wrapping. Ground your wire protocol model in that code."
+
+Example — **conclusion** (avoid): "Controllers send raw strings, the relay wraps them."
+
+Constraints narrow the search space without closing the solution space. Agents retain the authority to challenge any assumption — including the orchestrator's refinements — if their private context warrants it.
+
+### Respecting Agent Private Information
+
+Each agent accumulates context from source file reads, their perspective lens, and their reasoning chain that the orchestrator cannot fully see. An agent may hold back an insight until a later round where it becomes relevant. The process must preserve space for this:
+- Don't disambiguate so aggressively that agents can't surface contradictory evidence
+- When an agent dissents, treat it as signal, not noise
+- If an agent says "I found something that contradicts the established framing," that's the highest-value output in the entire run
+
+### Vote Outcomes
+
+After Round 3, tally implementer votes:
+- **Clear winner** (2+ votes for one agent) → that agent implements
+- **Split vote** (no majority) → two options:
+  - **Escalate**: surface the tie to the user with a focused question about where the implementation's center of gravity should be
+  - **Partition**: each agent implements the files closest to their domain in parallel, followed by an integration pass (which can itself be a mini cross-ref with the partition outputs as inputs)
+
 ## Notes
 
 - All agents in a given phase run in parallel for speed.
-- Round 2 MUST wait for Round 1 to complete (it depends on Round 1 outputs).
 - Each agent should be launched with `run_in_background: true` for parallel execution.
-- The value of this process comes from the **ordering effect** — seeing B before C produces different insights than seeing C before B. The two rounds together cover both orderings for every pair.
-- Agent count sweet spot is 3. More than 5 produces diminishing returns and exponential file count (N agents × 2 rounds = 2N files + N phase-0 files).
+- The value of cross-referencing comes from **redundant independent analysis** — multiple agents reading the same code and drawing different conclusions catches errors that single-agent approaches miss.
+- Agent count sweet spot is 3. More than 5 produces diminishing returns and exponential file count.
 - Choose agent types appropriate to the topic — use specialized subagent types when the work matches their domain, general-purpose otherwise.
