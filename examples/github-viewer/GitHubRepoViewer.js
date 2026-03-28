@@ -336,10 +336,12 @@ export class GitHubRepoViewer {
         this.scene.add(this.camera);
 
         // ---- WebSocket Command Center ----
-        // Wires CommandRouter, WebSocketBridge, and ViewerAPI (window.viewer)
+        // Wires CommandRouter, ViewerAPI (window.viewer), and WebSocketBridge (off by default).
+        // Start the relay with `npm run ws`, then call `window.viewer.connect()` or
+        // enable via settings to connect.
         const { router, bridge, api } = initCommandCenter(this, {
             port: 8765,
-            autoConnect: true,
+            autoConnect: false,
             showStatus: true,
         });
         this._commandRouter = router;

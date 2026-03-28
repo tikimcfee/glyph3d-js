@@ -224,4 +224,18 @@ export default class ViewerAPI {
         }
         return null;
     }
+
+    /** Connect the WebSocket bridge to the relay server. */
+    connect() {
+        if (this._context && this._context.wsbridge) {
+            this._context.wsbridge.connect();
+        }
+    }
+
+    /** Disconnect the WebSocket bridge. */
+    disconnect() {
+        if (this._context && this._context.wsbridge) {
+            this._context.wsbridge.disconnect();
+        }
+    }
 }
