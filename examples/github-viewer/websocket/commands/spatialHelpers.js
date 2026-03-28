@@ -1,0 +1,184 @@
+/**
+ * Shared spatial math helpers for geometry, composition, and navigation commands.
+ * Pure functions -- no command router, no DOM, no side effects.
+ *
+ * Dependency graph:
+ *   spatialHelpers.js          (this file, pure math)
+ *       ^       ^       ^
+ *       |       |       |
+ *   spatialCommands  compositionCommands  navigationCommands
+ */
+
+import * as THREE from 'three';
+
+// ──────────────────────────────────────────────────────────────
+//  Grid Resolution
+// ──────────────────────────────────────────────────────────────
+
+/**
+ * Validate a grid index from a raw string argument.
+ * @param {Array} grids - array of CodeGrid instances
+ * @param {string} arg - raw string index from command args
+ * @param {string} [label='grid'] - label for error messages (e.g. 'source', 'target')
+ * @returns {{ grid: Object, idx: number } | { error: string }}
+ */
+export function resolveGrid(grids, arg, label = 'grid') {
+    const idx = parseInt(arg);
+    if (isNaN(idx) || idx < 0 || idx >= grids.length) {
+        return { error: `ERR: invalid ${label} index ${arg} (0-${grids.length - 1})` };
+    }
+    return { grid: grids[idx], idx };
+}
+
+// ──────────────────────────────────────────────────────────────
+//  World-Space Bounds
+// ──────────────────────────────────────────────────────────────
+
+/**
+ * Get world-space AABB for a grid as a canonical serializable object.
+ * Forces matrix update before reading bounds -- handles just-repositioned grids.
+ *
+ * @param {Object} grid - CodeGrid instance
+ * @returns {{ min: {x,y,z}, max: {x,y,z}, size: {x,y,z}, center: {x,y,z} } | null}
+ */
+export function getWorldBounds(grid) {
+    grid.updateWorldMatrix(true, true);
+    const box3 = grid.getBounds();
+    if (!box3 || box3.isEmpty()) return null;
+    return box3ToAABB(box3);
+}
+
+/**
+ * Get raw THREE.Box3 for a grid in world space.
+ * Forces matrix update. Returns null if empty.
+ *
+ * @param {Object} grid - CodeGrid instance
+ * @returns {THREE.Box3 | null}
+ */
+export function getWorldBox3(grid) {
+    grid.updateWorldMatrix(true, true);
+    const box3 = grid.getBounds();
+    if (!box3 || box3.isEmpty()) return null;
+    return box3;
+}
+
+/**
+ * Convert a THREE.Box3 to the canonical AABB plain object.
+ * @param {THREE.Box3} box3
+ * @returns {{ min: {x,y,z}, max: {x,y,z}, size: {x,y,z}, center: {x,y,z} }}
+ */
+export function box3ToAABB(box3) {
+    const size = new THREE.Vector3();
+    const center = new THREE.Vector3();
+    box3.getSize(size);
+    box3.getCenter(center);
+    return {
+        min: { x: box3.min.x, y: box3.min.y, z: box3.min.z },
+        max: { x: box3.max.x, y: box3.max.y, z: box3.max.z },
+        size: { x: size.x, y: size.y, z: size.z },
+        center: { x: center.x, y: center.y, z: center.z },
+    };
+}
+
+/**
+ * Compute the union AABB of multiple grids by index.
+ * Fails on invalid indices and empty grids -- never silently skips.
+ *
+ * @param {Array} grids - array of CodeGrid instances
+ * @param {number[]} indices - grid indices to union
+ * @returns {{ bounds: {min,max,size,center}, indices: number[] } | { error: string }}
+ */
+export function unionBounds(grids, indices) {
+    const unionBox = new THREE.Box3();
+    const validIndices = [];
+
+    for (const idx of indices) {
+        if (idx < 0 || idx >= grids.length) {
+            return { error: `ERR: invalid grid index ${idx} (0-${grids.length - 1})` };
+        }
+        const box3 = getWorldBox3(grids[idx]);
+        if (!box3) {
+            return { error: `ERR: grid ${idx} has no content bounds` };
+        }
+        unionBox.union(box3);
+        validIndices.push(idx);
+    }
+
+    if (validIndices.length === 0) {
+        return { error: 'ERR: no valid grids provided' };
+    }
+
+    return { bounds: box3ToAABB(unionBox), indices: validIndices };
+}
+
+// ──────────────────────────────────────────────────────────────
+//  Anchor Resolution
+// ──────────────────────────────────────────────────────────────
+
+/** @type {Record<string, (aabb: {min:{x,y,z}, max:{x,y,z}}) => {x:number,y:number,z:number}>} */
+const ANCHORS = {
+    'top-left':     (b) => ({ x: b.min.x, y: b.max.y, z: (b.min.z + b.max.z) / 2 }),
+    'top':          (b) => ({ x: (b.min.x + b.max.x) / 2, y: b.max.y, z: (b.min.z + b.max.z) / 2 }),
+    'top-right':    (b) => ({ x: b.max.x, y: b.max.y, z: (b.min.z + b.max.z) / 2 }),
+    'leading':      (b) => ({ x: b.min.x, y: (b.min.y + b.max.y) / 2, z: (b.min.z + b.max.z) / 2 }),
+    'center':       (b) => ({ x: (b.min.x + b.max.x) / 2, y: (b.min.y + b.max.y) / 2, z: (b.min.z + b.max.z) / 2 }),
+    'trailing':     (b) => ({ x: b.max.x, y: (b.min.y + b.max.y) / 2, z: (b.min.z + b.max.z) / 2 }),
+    'bottom-left':  (b) => ({ x: b.min.x, y: b.min.y, z: (b.min.z + b.max.z) / 2 }),
+    'bottom':       (b) => ({ x: (b.min.x + b.max.x) / 2, y: b.min.y, z: (b.min.z + b.max.z) / 2 }),
+    'bottom-right': (b) => ({ x: b.max.x, y: b.min.y, z: (b.min.z + b.max.z) / 2 }),
+};
+
+/** All valid anchor names. */
+export const ANCHOR_NAMES = Object.keys(ANCHORS);
+
+/**
+ * Resolve a named anchor point on an AABB.
+ * Accepts either canonical AABB ({min, max}) or THREE.Box3 (both have .min/.max).
+ *
+ * @param {Object} bounds - { min: {x,y,z}, max: {x,y,z} }
+ * @param {string} name - anchor name (case-insensitive)
+ * @returns {{ x: number, y: number, z: number } | null} null if name is invalid
+ */
+export function resolveAnchor(bounds, name) {
+    const fn = ANCHORS[name.toLowerCase()];
+    return fn ? fn(bounds) : null;
+}
+
+// ──────────────────────────────────────────────────────────────
+//  Camera Math
+// ──────────────────────────────────────────────────────────────
+
+/**
+ * Calculate the Z distance to fit a region of width x height in the viewport.
+ * Uses camera FOV and aspect ratio. fillFraction < 1.0 adds margin.
+ *
+ * @param {Object} camera - THREE.PerspectiveCamera
+ * @param {number} width
+ * @param {number} height
+ * @param {number} [fillFraction=0.85]
+ * @returns {number}
+ */
+export function zDistanceForFit(camera, width, height, fillFraction = 0.85) {
+    const fovRad = camera.fov * Math.PI / 180;
+    const halfTan = Math.tan(fovRad / 2);
+    const aspect = camera.aspect;
+
+    const dH = (height / fillFraction) / (2 * halfTan);
+    const dW = (width / fillFraction) / (2 * aspect * halfTan);
+
+    return Math.max(dH, dW);
+}
+
+// ──────────────────────────────────────────────────────────────
+//  Formatting
+// ──────────────────────────────────────────────────────────────
+
+/**
+ * Format a vec3 for TUI display.
+ * @param {{ x: number, y: number, z: number }} v
+ * @param {number} [decimals=2]
+ * @returns {string}
+ */
+export function fmtVec(v, decimals = 2) {
+    return `${v.x.toFixed(decimals)}, ${v.y.toFixed(decimals)}, ${v.z.toFixed(decimals)}`;
+}

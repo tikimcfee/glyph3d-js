@@ -12,6 +12,9 @@ import registerLayoutCommands from './layoutCommands.js';
 import registerSearchCommands from './searchCommands.js';
 import registerAgentLayoutCommands from './agentLayoutCommands.js';
 import registerAnnotationCommands from './annotationCommands.js';
+import registerSpatialCommands from './spatialCommands.js';
+import registerCompositionCommands from './compositionCommands.js';
+import registerNavigationCommands from './navigationCommands.js';
 
 /**
  * Register all built-in commands on a router.
@@ -27,4 +30,7 @@ export function registerAllCommands(router) {
     registerSearchCommands(router);
     registerAgentLayoutCommands(router);
     registerAnnotationCommands(router);
+    registerSpatialCommands(router);
+    registerCompositionCommands(router);
+    registerNavigationCommands(router);
 }

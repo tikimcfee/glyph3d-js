@@ -32,6 +32,8 @@ Before cross-referencing, you need existing agent outputs to cross-reference. Th
 - **Named labels** (e.g., "protocol", "usability"): The label IS the lens. The agent focuses on that aspect of the topic. For example, an agent labeled "protocol" analyzes the wire format, message structure, and handshake semantics; an agent labeled "usability" analyzes developer ergonomics, discoverability, and error messages.
 - **Generic labels** (A, B, C): Each agent independently analyzes the full topic. The value comes from cognitive diversity — different agents naturally emphasize different aspects even with the same prompt.
 
+Each agent MUST read the 3-5 source files most relevant to their perspective before writing. Factual grounding in actual code prevents errors that consume review cycles to correct. Cap Phase 0 output at ~300 lines — lead with decisions and code, not exhaustive rationale.
+
 Each agent writes its output to `{output-dir}/phase0-{agent-label}.md`. Wait for all to complete before Phase 1.
 
 **Mode B — Existing outputs**: If prior agent outputs already exist (from earlier in the conversation, from files on disk, or provided by the user), use those directly. Map outputs to agents by filename or order — if the mapping is ambiguous (e.g., 4 files but user said 3 agents), ask the user. If clear, proceed without asking.
@@ -52,25 +54,29 @@ Each agent writes a markdown file with these headings:
 ```markdown
 # Round 1: {agent-label} reviews {reviewed-labels}
 
-## Alignment
-Where the reviewed agents agree with this agent's perspective. Cite specific sections.
+## Errors Found
+Factual mistakes, wrong assumptions, or code that won't work. Cite file paths and line numbers. This is the highest-value section.
 
 ## Gaps
-What this agent covered that others missed, and what others covered that this agent missed.
+What this agent covered that others missed, and vice versa. Keep brief — bullet points, not paragraphs.
 
 ## Tensions
-Contradictions between the reviewed works, or between them and this agent's work. Include file paths, line numbers, or code references where applicable.
+Contradictions between the reviewed works. Include code references. State which position is correct and why.
 
 ## Recommendations
-Concrete changes: what should be modified, added, or removed. What's correct as-is and should be preserved.
+Concrete changes: what to modify, add, or remove. Max 10 items. Each must be actionable.
 
 ## Key Insight
-The single most important observation from this cross-reference — one paragraph.
+One paragraph. The single most important observation.
 ```
 
-### Phase 2 — Inverse Cross-Reference (parallel, after Round 1 completes)
+Cap Round 1 output at ~200 lines. Lead with errors, not agreement.
 
-Launch N agents simultaneously again. Each agent now reviews the others in **reverse declaration order**, and has access to **all Round 1 outputs**:
+### Phase 2 — Inverse Cross-Reference (conditional, parallel)
+
+**Before launching Round 2**, check Round 1 outputs for unresolved tensions. If all Round 1 reviews agree on all points (no Tensions or Errors remain open), skip directly to Phase 3. Round 2's value is resolving disagreements — if there are none, it's redundant.
+
+If tensions exist, launch N agents simultaneously. Each agent now reviews the others in **reverse declaration order**, and has access to **all Round 1 outputs**:
 
 **Same example (protocol, transport, usability):**
 - Agent "protocol" reviews usability, then transport (reversed) + reads all Round 1 files → writes `round2-protocol-reviews-usability-transport.md`
@@ -116,7 +122,7 @@ All points now fully resolved. Numbered list with brief rationale.
 Concrete file-by-file plan: what to create, what to modify, what to delete. Code sketches for non-obvious parts.
 
 ## Implementer Vote
-Which agent (including self) should implement, and why. Consider: whose perspective best matches the implementation work? Whose Phase 0 code sketches were closest to the converged plan?
+Which OTHER agent should implement (you may NOT vote for yourself). Consider: whose Phase 0 code is closest to the converged plan? Whose perspective best matches the implementation work?
 ```
 
 After all Round 3 agents complete, tally the implementer votes. The winning agent is launched as **Phase 4 — Implementation** with the full converged plan and access to all prior outputs. If tied, the agent whose perspective most directly maps to the implementation work wins.
