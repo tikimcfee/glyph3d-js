@@ -48,26 +48,35 @@ class GlyphAtlas {
             chars.push(i);
         }
 
-        // Box drawing characters (common in tmux)
-        const boxDrawing = [
-            0x2500, // ─
-            0x2502, // │
-            0x250C, // ┌
-            0x2510, // ┐
-            0x2514, // └
-            0x2518, // ┘
-            0x251C, // ├
-            0x2524, // ┤
-            0x252C, // ┬
-            0x2534, // ┴
-            0x253C, // ┼
-        ];
-        chars.push(...boxDrawing);
-
-        // Block elements
-        for (let i = 0x2580; i <= 0x258F; i++) {
+        // Box drawing characters — full range (thin, heavy, double, rounded)
+        for (let i = 0x2500; i <= 0x257F; i++) {
             chars.push(i);
         }
+
+        // Block elements
+        for (let i = 0x2580; i <= 0x259F; i++) {
+            chars.push(i);
+        }
+
+        // Arrows
+        for (let i = 0x2190; i <= 0x21FF; i++) {
+            chars.push(i);
+        }
+
+        // Common symbols: check marks, bullets, stars, geometric shapes
+        const symbols = [
+            0x2713, 0x2714, // ✓ ✔
+            0x2717, 0x2718, // ✗ ✘
+            0x2022, 0x2023, // • ‣
+            0x25A0, 0x25A1, // ■ □
+            0x25B2, 0x25B6, 0x25BC, 0x25C0, // ▲ ▶ ▼ ◀
+            0x25C6, 0x25CB, 0x25CF, // ◆ ○ ●
+            0x2605, 0x2606, // ★ ☆
+            0x2026, // …
+            0x2014, 0x2013, // — –
+            0x201C, 0x201D, 0x2018, 0x2019, // " " ' '
+        ];
+        chars.push(...symbols);
 
         // Extended ASCII / Latin-1
         for (let i = 160; i < 256; i++) {
