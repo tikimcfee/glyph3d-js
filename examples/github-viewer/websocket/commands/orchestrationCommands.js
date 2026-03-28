@@ -58,14 +58,16 @@ export default function registerOrchestrationCommands(router) {
             return { text: `ERR: invalid grid index ${args[1]} (0-${grids.length - 1})`, data: null };
         }
 
-        // Look up the window grid via the scene registry (replaces 5-pattern name matching)
+        // Look up the window grid via the scene registry
         const registryEntry = ctx.registry.get(windowId);
         const agentGrid = registryEntry ? registryEntry.grid : null;
-        const agentGridIdx = agentGrid ? grids.indexOf(agentGrid) : -1;
 
-        if (!agentGrid || agentGridIdx === -1) {
+        if (!agentGrid) {
             return { text: `ERR: no registered scene object for '${windowId}'`, data: null };
         }
+
+        // Grid may not be in the content grids array (TUI windows aren't)
+        const agentGridIdx = grids.indexOf(agentGrid);
 
         // Clear previous tracking for this window if any
         if (tracking.has(windowId)) {
