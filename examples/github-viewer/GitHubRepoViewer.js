@@ -472,7 +472,26 @@ export class GitHubRepoViewer {
             statusEl.style.color = this._wsBridge.connected ? '#00ff88' : '#888';
         };
 
+        // Restore saved state
+        const savedWsEnabled = localStorage.getItem('glyph3d-ws-enabled');
+        if (savedWsEnabled === 'true') {
+            checkbox.checked = true;
+            if (portGroup) portGroup.style.display = '';
+            if (statusGroup) statusGroup.style.display = '';
+            const port = portInput ? parseInt(portInput.value, 10) : 8765;
+            if (this._wsBridge) {
+                this._wsBridge.port = port;
+                this._wsBridge.connect();
+            }
+            const poll = setInterval(() => {
+                updateStatus();
+                if (this._wsBridge?.connected) clearInterval(poll);
+            }, 500);
+            setTimeout(() => clearInterval(poll), 10000);
+        }
+
         checkbox.addEventListener('change', () => {
+            localStorage.setItem('glyph3d-ws-enabled', checkbox.checked ? 'true' : 'false');
             if (checkbox.checked) {
                 if (portGroup) portGroup.style.display = '';
                 if (statusGroup) statusGroup.style.display = '';
