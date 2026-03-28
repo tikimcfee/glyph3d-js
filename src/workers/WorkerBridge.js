@@ -41,6 +41,9 @@ export class WorkerBridge {
         // UV map cache (avoid re-serializing on every call)
         this._uvMapCache = null;
         this._uvMapAtlas = null;
+        // Tracks the atlas._uvMapVersion at time of last serialization.
+        // Initialized to -1 so the first call always serializes fresh.
+        this._uvMapVersion = -1;
 
         // Lazy initialization flag
         this._initialized = false;
@@ -80,24 +83,36 @@ export class WorkerBridge {
     }
 
     /**
-     * Get serialized UV map from atlas (cached)
+     * Get serialized UV map from atlas (version-aware cache).
+     *
+     * Caches on atlas identity AND atlas._uvMapVersion. When either changes
+     * (new atlas or ensureCodepoints() added new glyphs), the cache is busted,
+     * all workers have their _hasUVMap flag cleared (forcing re-send of the
+     * fresh UV map on their next dispatch), and the new serialized map is stored.
+     *
      * @param {GlyphAtlas} atlas
      * @returns {Object} Plain object map: charCode → {u0, v0, u1, v1}
      */
     getSerializedUVMap(atlas) {
-        // Return cached if same atlas
-        if (this._uvMapAtlas === atlas && this._uvMapCache) {
+        const version = atlas._uvMapVersion || 0;
+
+        // Return cached if same atlas and UV map has not changed
+        if (this._uvMapAtlas === atlas && this._uvMapVersion === version && this._uvMapCache) {
             return this._uvMapCache;
         }
 
-        // Serialize UV map from atlas
-        const map = {};
+        // Atlas changed or version advanced — bust cache and reset per-worker warm
+        // flags so each worker receives the fresh UV map on its next job dispatch.
+        for (const worker of this.workers) {
+            worker._hasUVMap = false;
+        }
 
-        // Try getSerializableUVMap if available (we'll add this method)
+        // Serialize UV map from atlas
         if (typeof atlas.getSerializableUVMap === 'function') {
             this._uvMapCache = atlas.getSerializableUVMap();
         } else {
             // Fallback: iterate over uvMap
+            const map = {};
             if (atlas.uvMap) {
                 for (const [charCode, uv] of atlas.uvMap) {
                     map[charCode] = uv;
@@ -107,6 +122,7 @@ export class WorkerBridge {
         }
 
         this._uvMapAtlas = atlas;
+        this._uvMapVersion = version;
         return this._uvMapCache;
     }
 

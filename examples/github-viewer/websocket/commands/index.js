@@ -18,6 +18,7 @@ import registerNavigationCommands from './navigationCommands.js';
 import registerWindowCommands from './windowCommands.js';
 import registerOrchestrationCommands from './orchestrationCommands.js';
 import registerRegistryCommands from './registryCommands.js';
+import registerTerminalCommands from './terminalCommands.js';
 
 /**
  * Register all built-in commands on a router.
@@ -39,4 +40,5 @@ export function registerAllCommands(router) {
     registerWindowCommands(router);
     registerOrchestrationCommands(router);
     registerRegistryCommands(router);
+    registerTerminalCommands(router);
 }

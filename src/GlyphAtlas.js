@@ -36,8 +36,13 @@ class GlyphAtlas {
         // Canvas context preserved for dynamic additions
         this.ctx = null;
 
-        // Track texture update state (for Three.js integration)
+        // Track canvas texture update state (for deferred Three.js re-upload via checkAndClearTextureUpdate)
         this.textureNeedsUpdate = false;
+
+        // UV map version counter — incremented on every ensureCodepoints() call that
+        // adds new glyphs. WorkerBridge uses this to detect stale serialized UV maps
+        // and reset per-worker _hasUVMap flags so fresh maps are re-sent to workers.
+        this._uvMapVersion = 0;
     }
 
     _buildCharset() {
@@ -147,12 +152,24 @@ class GlyphAtlas {
                 break;
             }
 
+            // If the atlas map DataTexture was created before generate() was called
+            // (e.g., under shared-renderer architecture), update it in-place now.
+            if (this._atlasMapTexture) {
+                this._updateAtlasMapEntry(charCode, uv);
+            }
+
             // Progress callback - update every 10 glyphs AND on last iteration
             if (progressCallback && (i % 10 === 0 || i === this.charset.length - 1)) {
                 progressCallback(i + 1, this.charset.length);
                 // Yield to browser to keep UI responsive
                 await new Promise(resolve => setTimeout(resolve, 0));
             }
+        }
+
+        // If a shared CanvasTexture exists (same latent pre-construction case),
+        // mark it for re-upload on the next render pass.
+        if (this._sharedThreeTexture) {
+            this._sharedThreeTexture.needsUpdate = true;
         }
 
         console.log('✅ Atlas generated successfully');
@@ -344,24 +361,20 @@ class GlyphAtlas {
             return this._atlasMapTexture;
         }
 
-        // Find the maximum codepoint in the atlas
-        let maxCode = 0;
-        for (const code of this.uvMap.keys()) {
-            if (code > maxCode) maxCode = code;
-        }
-
+        // Pre-allocate for full Unicode range (U+0000–U+10FFFF): 1024 wide × 1088 rows.
+        // Math.ceil(0x110000 / 1024) = 1088 rows; 1024 * 1088 = 1,114,112 texels.
+        // ~17.8 MB of Float32 data. Allocated once; never needs to grow, so every
+        // GlyphRenderer's uniform reference stays valid for the lifetime of the atlas.
         const ATLAS_MAP_WIDTH = 1024;
-        const rows = Math.ceil((maxCode + 1) / ATLAS_MAP_WIDTH);
-        const height = Math.max(rows, 1);
-        const totalTexels = ATLAS_MAP_WIDTH * height;
+        const ATLAS_MAP_HEIGHT = Math.ceil(0x110000 / 1024); // 1088 — full Unicode
+        const totalTexels = ATLAS_MAP_WIDTH * ATLAS_MAP_HEIGHT;
 
-        // RGBA float: 4 floats per texel
         const data = new Float32Array(totalTexels * 4);
 
+        // Fill in current UV mappings
         for (const [code, uv] of this.uvMap) {
-            const texelIdx = code; // direct codepoint index
-            if (texelIdx >= totalTexels) continue;
-            const base = texelIdx * 4;
+            if (code >= totalTexels) continue;
+            const base = code * 4;
             data[base]     = uv.u0;
             data[base + 1] = 1.0 - uv.v1; // pre-flip V: bottom edge in WebGL
             data[base + 2] = uv.u1;
@@ -371,7 +384,7 @@ class GlyphAtlas {
         const texture = new THREE.DataTexture(
             data,
             ATLAS_MAP_WIDTH,
-            height,
+            ATLAS_MAP_HEIGHT,
             THREE.RGBAFormat,
             THREE.FloatType
         );
@@ -381,13 +394,13 @@ class GlyphAtlas {
         texture.needsUpdate = true;
 
         // Store metadata on the texture for shader use
-        texture.userData = { width: ATLAS_MAP_WIDTH, height };
+        texture.userData = { width: ATLAS_MAP_WIDTH, height: ATLAS_MAP_HEIGHT };
 
         this._atlasMapTexture = texture;
         this._atlasMapTextureWidth = ATLAS_MAP_WIDTH;
-        this._atlasMapTextureHeight = height;
+        this._atlasMapTextureHeight = ATLAS_MAP_HEIGHT;
 
-        console.log(`[GPU-Lookup] Atlas map DataTexture built: ${ATLAS_MAP_WIDTH}x${height} RGBA Float, maxCodepoint=${maxCode}, glyphs=${this.uvMap.size}. Vertex shader will look up UV rects from this texture at draw time.`);
+        console.log(`[GPU-Lookup] Atlas map DataTexture built: ${ATLAS_MAP_WIDTH}x${ATLAS_MAP_HEIGHT} RGBA Float (pre-allocated full Unicode U+0000–U+10FFFF, ~17.8 MB), glyphs=${this.uvMap.size}. Shared by all renderers.`);
 
         return texture;
     }
@@ -434,89 +447,122 @@ class GlyphAtlas {
     }
 
     /**
-     * Add a glyph to the atlas if it doesn't exist
-     * Uses shelf packing to find placement
-     * @param {number} charCode - Unicode code point
-     * @returns {Object|null} UV coordinates {u0, v0, u1, v1} or null if atlas is full
+     * Unified entry point for ensuring codepoints are present in the atlas.
+     *
+     * Atomically handles all side effects of adding new glyphs:
+     * 1. Packs each missing codepoint via _packGlyph() (canvas 2D draw)
+     * 2. Updates the GPU atlas map DataTexture in-place via _updateAtlasMapEntry()
+     *    (if the DataTexture exists)
+     * 3. Sets textureNeedsUpdate = true so GlyphRenderer picks up the CanvasTexture
+     *    re-upload flag at draw time via checkAndClearTextureUpdate()
+     * 4. Sets _atlasMapTexture.needsUpdate = true immediately — the DataTexture is
+     *    shared by reference across all renderers, so one flag covers all
+     * 5. Invalidates the serialized UV map cache used by WorkerBridge
+     * 6. Increments _uvMapVersion so WorkerBridge detects the change and resets
+     *    per-worker _hasUVMap flags on its next getSerializedUVMap() call
+     *
+     * Safe to call on the main thread immediately before worker dispatch.
+     * Workers cannot access DOM or Three.js canvas — all atlas mutations must
+     * happen here before the UV map snapshot is serialized for worker transfer.
+     *
+     * @param {number[]} codepoints - Array of Unicode code points to ensure
+     * @returns {number} Count of newly-added glyphs
      */
-    addGlyphIfMissing(charCode) {
-        // Already have it?
-        if (this.uvMap.has(charCode)) {
-            return this.uvMap.get(charCode);
-        }
-
-        // Atlas not initialized?
+    ensureCodepoints(codepoints) {
         if (!this.ctx) {
-            console.warn('GlyphAtlas: Cannot add glyph - atlas not initialized. Call generate() first.');
-            return null;
+            console.warn('GlyphAtlas.ensureCodepoints: atlas not initialized. Call generate() first.');
+            return 0;
         }
-
-        // Ensure font settings are correct (in case context was modified externally)
-        this._setupContextFont();
-
-        // Pack the glyph
-        const uv = this._packGlyph(charCode);
-
-        if (uv) {
-            // Mark texture as needing update
-            this.textureNeedsUpdate = true;
-
-            // Invalidate atlas map DataTexture cache — must be rebuilt on next
-            // getAtlasMapTexture() call to include this newly-packed glyph.
-            this._atlasMapTexture = null;
-
-            // Invalidate serialized cache since UV map changed
-            this.invalidateSerializedCache();
-
-            console.log(`Dynamic glyph added: ${charCode} (${String.fromCodePoint(charCode)})`);
-        }
-
-        return uv;
-    }
-
-    /**
-     * Add multiple glyphs at once (more efficient than individual calls)
-     * @param {number[]} charCodes - Array of Unicode code points
-     * @returns {Map<number, Object|null>} Map of charCode to UV coordinates
-     */
-    addGlyphsIfMissing(charCodes) {
-        const results = new Map();
-
-        if (!this.ctx) {
-            console.warn('GlyphAtlas: Cannot add glyphs - atlas not initialized. Call generate() first.');
-            for (const code of charCodes) {
-                results.set(code, null);
-            }
-            return results;
-        }
-
-        // Ensure font settings are correct
         this._setupContextFont();
 
         let added = 0;
-        for (const charCode of charCodes) {
-            if (this.uvMap.has(charCode)) {
-                results.set(charCode, this.uvMap.get(charCode));
+        for (const code of codepoints) {
+            if (this.uvMap.has(code)) continue;
+            const uv = this._packGlyph(code);
+            if (uv) {
+                added++;
+                if (this._atlasMapTexture) {
+                    this._updateAtlasMapEntry(code, uv);
+                }
             } else {
-                const uv = this._packGlyph(charCode);
-                results.set(charCode, uv);
-                if (uv) added++;
+                console.warn(`GlyphAtlas: atlas full, cannot pack codepoint ${code} (${String.fromCodePoint(code)})`);
             }
         }
 
         if (added > 0) {
+            // CanvasTexture: set flag for deferred renderer-poll at draw time.
+            // GlyphRenderer calls checkAndClearTextureUpdate() at render entry and
+            // sets this.texture.needsUpdate = true only then, batching multiple
+            // same-frame ensureCodepoints() calls into a single GPU re-upload.
             this.textureNeedsUpdate = true;
 
-            // Invalidate atlas map DataTexture cache — must be rebuilt on next
-            // getAtlasMapTexture() call to include newly-packed glyphs.
-            this._atlasMapTexture = null;
+            // DataTexture: mark for re-upload immediately. The DataTexture is shared
+            // by reference across all renderers — one needsUpdate = true here covers
+            // all of them. Three.js defers the actual GPU transfer to next draw call.
+            if (this._atlasMapTexture) {
+                this._atlasMapTexture.needsUpdate = true;
+            }
 
-            // Invalidate serialized cache since UV map changed
             this.invalidateSerializedCache();
-            console.log(`Dynamic glyphs batch added: ${added} new glyphs`);
+            this._uvMapVersion++;
+            console.log(`GlyphAtlas.ensureCodepoints: added ${added} new glyphs`);
         }
 
+        return added;
+    }
+
+    /**
+     * Add a glyph to the atlas if it doesn't exist.
+     * Thin wrapper around ensureCodepoints() — preserves original return-value contract.
+     * @param {number} charCode - Unicode code point
+     * @returns {Object|null} UV coordinates {u0, v0, u1, v1} or null if atlas is full
+     */
+    addGlyphIfMissing(charCode) {
+        if (this.uvMap.has(charCode)) {
+            return this.uvMap.get(charCode);
+        }
+        this.ensureCodepoints([charCode]);
+        return this.uvMap.get(charCode) || null;
+    }
+
+    /**
+     * Add multiple glyphs at once.
+     * Thin wrapper around ensureCodepoints() — preserves original return-value contract.
+     * @param {number[]} charCodes - Array of Unicode code points
+     * @returns {Map<number, Object|null>} Map of charCode to UV coordinates
+     */
+    addGlyphsIfMissing(charCodes) {
+        const newCodes = charCodes.filter(c => !this.uvMap.has(c));
+        if (newCodes.length > 0) {
+            this.ensureCodepoints(newCodes);
+        }
+        const results = new Map();
+        for (const c of charCodes) {
+            results.set(c, this.uvMap.get(c) || null);
+        }
         return results;
+    }
+
+    /**
+     * Write a single glyph's UV rect into the shared atlas map DataTexture.
+     * No-op if the texture hasn't been created yet (pre-generate() calls).
+     * @param {number} charCode - Unicode codepoint
+     * @param {Object} uv - {u0, v0, u1, v1}
+     */
+    _updateAtlasMapEntry(charCode, uv) {
+        const tex = this._atlasMapTexture;
+        if (!tex) return; // texture not yet created — will be filled on first getAtlasMapTexture()
+
+        const totalTexels = this._atlasMapTextureWidth * this._atlasMapTextureHeight;
+        if (charCode >= totalTexels) return; // outside pre-allocated Unicode range
+
+        const data = tex.image.data;
+        const base = charCode * 4;
+        data[base]     = uv.u0;
+        data[base + 1] = 1.0 - uv.v1;
+        data[base + 2] = uv.u1;
+        data[base + 3] = 1.0 - uv.v0;
+        tex.needsUpdate = true;
     }
 
     /**
@@ -587,6 +633,16 @@ class GlyphAtlas {
      */
     get glyphCount() {
         return this.uvMap.size;
+    }
+
+    /**
+     * Current UV map version. Incremented each time ensureCodepoints() adds new glyphs.
+     * WorkerBridge uses this to detect when the serialized UV map cache is stale
+     * and to reset per-worker _hasUVMap flags so workers receive the updated map.
+     * @returns {number}
+     */
+    get uvMapVersion() {
+        return this._uvMapVersion;
     }
 }
 

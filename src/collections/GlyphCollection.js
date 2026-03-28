@@ -565,6 +565,32 @@ class GlyphCollection {
             // Get metrics from atlas (no renderer needed!)
             const metrics = this._getMetrics();
 
+            // Ensure all codepoints in the pending items exist in the atlas BEFORE
+            // dispatching to workers. Workers cannot access DOM or Three.js canvas and
+            // cannot call ensureCodepoints() themselves — they silently fall back to '?'
+            // for any codepoint not in the serialized UV map. This is the single
+            // authoritative ensure point for the async path.
+            // The version counter in ensureCodepoints() will cause WorkerBridge to
+            // re-serialize the UV map and clear per-worker _hasUVMap flags, so workers
+            // that were previously warmed with an older UV map will receive the fresh
+            // one on this dispatch.
+            {
+                const missingCodes = new Set();
+                for (let i = 0; i < itemCount; i++) {
+                    const text = items[i].text;
+                    if (!text) continue;
+                    for (let j = 0; j < text.length; j++) {
+                        const code = text.charCodeAt(j);
+                        if (code > 32 && !this.atlas.uvMap.has(code)) {
+                            missingCodes.add(code);
+                        }
+                    }
+                }
+                if (missingCodes.size > 0) {
+                    this.atlas.ensureCodepoints(Array.from(missingCodes));
+                }
+            }
+
             try {
                 // Build buffers in worker — returns itemMeta with per-item tracking
                 const buffers = await bridge.buildBatchBuffers(items, { metrics, uvMap: null, defaultColor }, this.atlas);

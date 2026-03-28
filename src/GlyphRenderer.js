@@ -349,6 +349,11 @@ class GlyphRendererV15 {
      * @returns {number} ID for this text
      */
     render(text, position = {x: 0, y: 0, z: 0}, options = {}) {
+        // Apply deferred CanvasTexture re-upload: batch all ensureCodepoints() calls
+        // in this frame into one GPU re-upload at draw time, avoiding a stall per-call.
+        if (this.atlas && this.atlas.checkAndClearTextureUpdate()) {
+            if (this.texture) this.texture.needsUpdate = true;
+        }
         this._ensureGlyphsInAtlas([{ text }]);
         const glyphs = this._textToGlyphs(text, position, options);
         const id = this._registerText(text, glyphs, options);
@@ -362,6 +367,11 @@ class GlyphRendererV15 {
      * @returns {Array} IDs for the rendered texts
      */
     renderBatch(items) {
+        // Apply deferred CanvasTexture re-upload: batch all ensureCodepoints() calls
+        // in this frame into one GPU re-upload at draw time, avoiding a stall per-call.
+        if (this.atlas && this.atlas.checkAndClearTextureUpdate()) {
+            if (this.texture) this.texture.needsUpdate = true;
+        }
         this._ensureGlyphsInAtlas(items);
         const ids = [];
 
@@ -895,18 +905,11 @@ class GlyphRendererV15 {
             }
         }
         if (missing.length > 0) {
-            this.atlas.addGlyphsIfMissing(missing);
-            // Atlas map texture cache is invalidated inside addGlyphsIfMissing
-            // (sets this.atlas._atlasMapTexture = null)
-            // Re-upload the atlas map texture to the GPU
-            const mat = this.instanceMesh?.material;
-            if (mat && mat.uniforms?.atlasMapTexture) {
-                mat.uniforms.atlasMapTexture.value = this.atlas.getAtlasMapTexture(THREE);
-                const dims = this.atlas.getAtlasMapDimensions();
-                mat.uniforms.atlasMapWidth.value = dims.width;
-                mat.uniforms.atlasMapHeight.value = dims.height;
-                mat.uniformsNeedUpdate = true;
-            }
+            // Delegate to the unified entry point: handles canvas pack, DataTexture
+            // update, textureNeedsUpdate flag, serialized cache invalidation, and
+            // _uvMapVersion increment. All renderers share the same atlas object so
+            // the DataTexture needsUpdate propagates automatically.
+            this.atlas.ensureCodepoints(missing);
         }
     }
 
