@@ -38,6 +38,20 @@ Each agent writes its output to `{output-dir}/phase0-{agent-label}.md`. Wait for
 
 **Mode B — Existing outputs**: If prior agent outputs already exist (from earlier in the conversation, from files on disk, or provided by the user), use those directly. Map outputs to agents by filename or order — if the mapping is ambiguous (e.g., 4 files but user said 3 agents), ask the user. If clear, proceed without asking.
 
+### Phase 0.5 — Predictions (parallel, before reading others' work)
+
+Before Round 1, each agent writes a brief prediction of what the OTHER agents concluded — without reading their outputs. This creates a calibration layer: the gap between what an agent *expected* others to find and what they *actually* found reveals blind spots and assumption divergence.
+
+Each agent writes to `{output-dir}/predictions-{agent-label}.md`:
+
+```markdown
+# Predictions: {agent-label}
+
+For each other agent, write 2-3 sentences predicting their main conclusions, key concerns, and likely design choices. Be specific — "I expect agent X concluded Y because Z."
+```
+
+These predictions are NOT shared with other agents. The orchestrator reads them after Round 1 to identify high-signal review targets: items where predictions diverged from reality are where assumptions were wrong, and wrong assumptions are where bugs hide.
+
 ### Phase 1 — Forward Cross-Reference (parallel)
 
 Launch N agents simultaneously. Each agent reviews the other agents' work in **declaration order** — the order the agents were listed or created:
@@ -89,6 +103,9 @@ Each agent writes a markdown file with these headings:
 
 ```markdown
 # Round 2: {agent-label} reviews {reviewed-labels} (inverse)
+
+## Reaffirm or Retract
+For each position you held in Phase 0 that was challenged in Round 1: explicitly state whether you still hold it or are changing your mind. If retracting, explain what changed your thinking. If reaffirming, explain why the challenges didn't convince you. A retraction is not a failure — an unjustified retraction under social pressure is. This section is the anti-conformity mechanism.
 
 ## Evolved Understanding
 What changed after seeing Round 1 cross-references. What assumptions were confirmed or broken.
@@ -183,6 +200,15 @@ Example — **constraint** (good): "The relay at ws-relay.mjs lines 96-111 handl
 Example — **conclusion** (avoid): "Controllers send raw strings, the relay wraps them."
 
 Constraints narrow the search space without closing the solution space. Agents retain the authority to challenge any assumption — including the orchestrator's refinements — if their private context warrants it.
+
+### Commitment Tracking
+
+The orchestrator should notice when an agent's position shifts between phases. An agent that held position X in Phase 0, was challenged in Round 1, and quietly dropped X in Round 2 may have been conformity-pressured rather than genuinely convinced. Look for:
+- Retractions without supporting evidence (just "I agree with the others now")
+- Positions that disappear between rounds without being addressed
+- Agents that flip to match the majority without explaining what changed
+
+These aren't necessarily wrong — sometimes the majority is right. But the *quality of the mind-change* matters. "I re-read the source and my assumption was wrong" is healthy. "Both other agents disagree so I'll defer" is a conformity signal worth noting.
 
 ### Respecting Agent Private Information
 
