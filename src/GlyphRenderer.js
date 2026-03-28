@@ -899,11 +899,13 @@ class GlyphRendererV15 {
             // Atlas map texture cache is invalidated inside addGlyphsIfMissing
             // (sets this.atlas._atlasMapTexture = null)
             // Re-upload the atlas map texture to the GPU
-            if (this.material && this.material.uniforms.atlasMapTexture) {
-                this.material.uniforms.atlasMapTexture.value = this.atlas.getAtlasMapTexture(THREE);
+            const mat = this.instanceMesh?.material;
+            if (mat && mat.uniforms?.atlasMapTexture) {
+                mat.uniforms.atlasMapTexture.value = this.atlas.getAtlasMapTexture(THREE);
                 const dims = this.atlas.getAtlasMapDimensions();
-                this.material.uniforms.atlasMapWidth.value = dims.width;
-                this.material.uniforms.atlasMapHeight.value = dims.height;
+                mat.uniforms.atlasMapWidth.value = dims.width;
+                mat.uniforms.atlasMapHeight.value = dims.height;
+                mat.uniformsNeedUpdate = true;
             }
         }
     }
