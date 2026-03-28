@@ -351,6 +351,7 @@ export class GitHubRepoViewer {
         this.addGridHelper();
         this.setupEventListeners();
         this._setupHandTrackingToggle();
+        this._setupWebSocketToggle();
 
         this.loading.hide();
         this.animate();
@@ -439,6 +440,49 @@ export class GitHubRepoViewer {
                 }
             });
         }
+    }
+
+    _setupWebSocketToggle() {
+        const checkbox = document.getElementById('ws-enabled');
+        const portGroup = document.getElementById('ws-port-group');
+        const statusGroup = document.getElementById('ws-status-group');
+        const portInput = document.getElementById('ws-port');
+        const statusEl = document.getElementById('ws-connection-status');
+
+        if (!checkbox) return;
+
+        const updateStatus = () => {
+            if (!statusEl || !this._wsBridge) return;
+            statusEl.textContent = this._wsBridge.connected ? 'Connected' : 'Disconnected';
+            statusEl.style.color = this._wsBridge.connected ? '#00ff88' : '#888';
+        };
+
+        checkbox.addEventListener('change', () => {
+            if (checkbox.checked) {
+                if (portGroup) portGroup.style.display = '';
+                if (statusGroup) statusGroup.style.display = '';
+                const port = portInput ? parseInt(portInput.value, 10) : 8765;
+                if (this._wsBridge) {
+                    this._wsBridge.port = port;
+                    this._wsBridge.connect();
+                }
+                this.toastUI?.show(`Connecting to ws://localhost:${port}...`, 'success');
+                // Poll status briefly
+                const poll = setInterval(() => {
+                    updateStatus();
+                    if (this._wsBridge?.connected) clearInterval(poll);
+                }, 500);
+                setTimeout(() => clearInterval(poll), 10000);
+            } else {
+                if (this._wsBridge) {
+                    this._wsBridge.disconnect();
+                }
+                if (portGroup) portGroup.style.display = 'none';
+                if (statusGroup) statusGroup.style.display = 'none';
+                updateStatus();
+                this.toastUI?.show('WebSocket disconnected', 'success');
+            }
+        });
     }
 
     setupEventListeners() {

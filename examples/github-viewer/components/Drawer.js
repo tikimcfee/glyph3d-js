@@ -305,6 +305,27 @@ export function settingsPanelHTML() {
                 <option value="websocket">WebSocket</option>
             </select>
         </div>
+        <div class="setting-group setting-section-header">WebSocket</div>
+        <div class="setting-group">
+            <div class="setting-label">
+                <span>Enable Remote Control</span>
+                <label class="setting-toggle">
+                    <input type="checkbox" id="ws-enabled">
+                    <span class="setting-toggle-track"></span>
+                </label>
+            </div>
+            <div class="setting-hint" id="ws-hint">
+                Start relay: <code>npm run ws</code> &mdash; then connect from any device on LAN
+            </div>
+        </div>
+        <div class="setting-group" id="ws-port-group" style="display:none">
+            <div class="setting-label"><span>Port</span></div>
+            <input type="number" class="setting-select" id="ws-port" value="8765" min="1024" max="65535" style="width:80px">
+        </div>
+        <div class="setting-group" id="ws-status-group" style="display:none">
+            <div class="setting-label"><span>Status</span></div>
+            <span class="setting-value" id="ws-connection-status">Disconnected</span>
+        </div>
     `;
 }
 
