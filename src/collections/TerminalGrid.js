@@ -48,6 +48,7 @@ export default class TerminalGrid extends THREE.Object3D {
         this.name = options.title ?? 'TerminalGrid';
 
         const worldScale = options.worldScale ?? 0.025;
+        this._gridScale = options.gridScale ?? 1.0;
 
         // One dedicated renderer per terminal (phase 1).
         // Phase 2: shared renderer via segment allocation.
@@ -90,6 +91,24 @@ export default class TerminalGrid extends THREE.Object3D {
         // After this call, geometry.attributes.* point directly at our arrays, so
         // _writeToInstanceBuffer() can write in place without allocation.
         this._applyToRenderer();
+
+        // Background plane — dark panel behind the terminal for readability.
+        this._background = null;
+        this._bgColor = options.backgroundColor ?? 0x0a0a1e;
+        this._bgOpacity = options.backgroundOpacity ?? 0.92;
+        this._bgPadding = options.backgroundPadding ?? 0.3;
+        this._initBackground();
+
+        // Add the renderer's mesh as a child so transforms propagate.
+        this.add(this._renderer.instanceMesh);
+
+        // Apply gridScale (larger = bigger terminal in world space).
+        if (this._gridScale !== 1.0) {
+            this.scale.setScalar(this._gridScale);
+        }
+
+        // Add this Object3D to the scene.
+        scene.add(this);
 
         // Apply initial world position if provided.
         if (options.position) {
@@ -188,7 +207,6 @@ export default class TerminalGrid extends THREE.Object3D {
      * @param {{ x: number, y: number, z: number }} pos
      */
     setWorldPosition(pos) {
-        this._renderer.setGroupOffset(this._groupId, pos);
         this.position.set(pos.x, pos.y, pos.z);
     }
 
@@ -209,7 +227,8 @@ export default class TerminalGrid extends THREE.Object3D {
      * @param {number} factor
      */
     setScale(factor) {
-        this._renderer.setGroupScale(this._groupId, { x: factor, y: factor, z: 1 });
+        this._gridScale = factor;
+        this.scale.setScalar(factor);
     }
 
     /**
@@ -247,6 +266,7 @@ export default class TerminalGrid extends THREE.Object3D {
 
         // Full re-apply: swaps in freshly-sized attribute arrays.
         this._applyToRenderer();
+        this._updateBackground();
     }
 
     /**
@@ -255,11 +275,16 @@ export default class TerminalGrid extends THREE.Object3D {
      */
     dispose() {
         if (this._renderer) {
-            this.scene.remove(this._renderer.instanceMesh);
             this._renderer.instanceMesh.geometry.dispose();
             this._renderer.instanceMesh.material.dispose();
             this._renderer = null;
         }
+        if (this._background) {
+            this._background.geometry.dispose();
+            this._background.material.dispose();
+            this._background = null;
+        }
+        this.scene.remove(this);
     }
 
     // ================================================================
@@ -427,5 +452,53 @@ export default class TerminalGrid extends THREE.Object3D {
                 this._renderer.texture.needsUpdate = true;
             }
         }
+    }
+
+    // ================================================================
+    // Private: Background
+    // ================================================================
+
+    /**
+     * Create a dark background plane behind the terminal for readability.
+     * Sized to fit cols×rows with padding. Updated on resize.
+     * @private
+     */
+    _initBackground() {
+        const geometry = new THREE.PlaneGeometry(1, 1);
+        const material = new THREE.MeshBasicMaterial({
+            color: this._bgColor,
+            transparent: true,
+            opacity: this._bgOpacity,
+            side: THREE.DoubleSide,
+            depthWrite: false,
+        });
+
+        this._background = new THREE.Mesh(geometry, material);
+        this._background.renderOrder = -1;
+        this.add(this._background);
+        this._updateBackground();
+    }
+
+    /**
+     * Resize and reposition the background plane to fit the current grid.
+     * @private
+     */
+    _updateBackground() {
+        if (!this._background) return;
+
+        const m = this._metrics;
+        const strideX = m.charWidth + m.letterSpacing;
+        const strideY = m.lineSpacing;
+        const pad = this._bgPadding;
+
+        const width  = this.cols * strideX + pad * 2;
+        const height = this.rows * strideY + pad * 2;
+
+        this._background.scale.set(width, height, 1);
+        this._background.position.set(
+            (this.cols * strideX) / 2 - m.charWidth / 2,
+            -(this.rows * strideY) / 2 + strideY / 2,
+            -0.5  // slightly behind text
+        );
     }
 }

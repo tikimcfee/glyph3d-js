@@ -96,4 +96,18 @@ export default function registerSystemCommands(router) {
             data: { results, succeeded, failed }
         };
     }, { description: 'Execute multiple commands in one round-trip', usage: '<json-array>' });
+
+    router.register('reload', (args, ctx) => {
+        // Schedule the reload after sending the response, so the caller gets the OK.
+        setTimeout(() => window.location.reload(), 200);
+        return { text: 'OK: reloading page in 200ms', data: null };
+    }, { description: 'Reload the browser page (picks up code changes)' });
+
+    router.register('console.log', (args, ctx) => {
+        // Capture and return recent console output — useful for remote debugging.
+        // For now, return a confirmation. Future: hook console and buffer recent entries.
+        const msg = args.join(' ');
+        console.log(`[remote] ${msg}`);
+        return { text: `OK: logged "${msg}"`, data: null };
+    }, { description: 'Log a message to the browser console', usage: '<message>' });
 }

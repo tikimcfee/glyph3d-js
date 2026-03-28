@@ -49,13 +49,13 @@ export default function registerTerminalCommands(router) {
             return { text: 'ERR: usage: terminal.create <id> [cols] [rows] [--scale N]', data: null };
         }
 
-        // Parse --scale flag
-        let scale = 0.025;
+        // Parse --scale flag (gridScale: overall size multiplier, default 2x for readability)
+        let gridScale = 2.0;
         const cleanArgs = [];
         for (let i = 0; i < args.length; i++) {
             if (args[i] === '--scale' && args[i + 1]) {
                 const s = parseFloat(args[++i]);
-                if (!isNaN(s) && s > 0) scale = s;
+                if (!isNaN(s) && s > 0) gridScale = s;
             } else {
                 cleanArgs.push(args[i]);
             }
@@ -78,7 +78,7 @@ export default function registerTerminalCommands(router) {
             const grid = new TerminalGrid(ctx.scene, ctx.atlas, {
                 cols,
                 rows,
-                worldScale: scale,
+                gridScale,
                 title: id,
             });
 
@@ -94,8 +94,8 @@ export default function registerTerminalCommands(router) {
 
             const pos = grid.position;
             return {
-                text: `OK: terminal '${id}' created (${cols}x${rows}) worldScale=${scale}`,
-                data: { id, cols, rows, worldScale: scale, position: { x: pos.x, y: pos.y, z: pos.z } },
+                text: `OK: terminal '${id}' created (${cols}x${rows}) scale=${gridScale}`,
+                data: { id, cols, rows, gridScale, position: { x: pos.x, y: pos.y, z: pos.z } },
             };
         } catch (e) {
             return { text: `ERR: ${e.message}`, data: null };
