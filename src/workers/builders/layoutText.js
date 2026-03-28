@@ -71,14 +71,15 @@ export function layoutText(text, startPosition, metrics, alignment = 'left', lay
             continue;
         }
 
-        // Check for Z-depth wrap (if maxLineWidth is set)
+        // Z-depth + Y-drop wrap: go behind AND down so text is readable head-on
         if (maxLineWidth > 0 && charsOnCurrentSegment >= maxLineWidth) {
-            // Wrap to next Z layer instead of Y
             if (x > startPosition.x) {
                 maxX = Math.max(maxX, x - metrics.letterSpacing);
             }
             x = startPosition.x;
-            z -= zWrapSpacing;  // Go "behind" (negative Z = further from camera)
+            y -= metrics.lineSpacing;   // Drop Y — visible when viewed head-on
+            z -= zWrapSpacing;           // Go behind — depth layering
+            minY = y;
             minZ = Math.min(minZ, z);
             charsOnCurrentSegment = 0;
         }

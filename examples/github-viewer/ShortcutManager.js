@@ -20,6 +20,8 @@
  *   sm.detach();  // on cleanup
  */
 
+import { isMac } from './platform.js';
+
 export class ShortcutManager {
     constructor() {
         /**
@@ -123,8 +125,9 @@ export class ShortcutManager {
      */
     _eventKey(e) {
         const parts = [];
-        if (e.ctrlKey)  parts.push('ctrl');
-        if (e.metaKey)  parts.push('meta');
+        // Normalize platform modifiers: on Mac, meta is primary; elsewhere ctrl is.
+        // Map both to 'mod' so registered shortcuts work cross-platform.
+        if (isMac ? e.metaKey : e.ctrlKey) parts.push('mod');
         if (e.altKey)   parts.push('alt');
         if (e.shiftKey && e.key !== 'Shift') parts.push('shift');
         // Use e.key for letter/symbol keys, lower-cased for consistency
@@ -140,7 +143,10 @@ export class ShortcutManager {
      * @returns {string}
      */
     _normalize(key) {
-        return key.toLowerCase().replace(/\s+/g, '');
+        // Collapse whitespace first, then map ctrl/meta → mod so registrations
+        // like "ctrl+p" or "meta+p" resolve to the same canonical "mod+p".
+        return key.toLowerCase().replace(/\s+/g, '')
+            .replace(/\b(ctrl|meta)\b/, 'mod');
     }
 }
 

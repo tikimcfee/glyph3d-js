@@ -11,6 +11,8 @@
  * Emits 'camera-focus-changed' window events for tree UI sync.
  */
 
+import { primaryMod, secondaryMod } from './platform.js';
+
 const STORAGE_KEY = 'glyph3d-camera-settings';
 
 const DEFAULTS = {
@@ -146,8 +148,8 @@ export class CameraController {
         this._onWheel = (e) => {
             if (e.target === canvas || canvas.contains(e.target)) {
                 e.preventDefault();
-                if (e.altKey || e.ctrlKey) {
-                    // Alt/Option + scroll = zoom
+                if (secondaryMod(e) || e.ctrlKey) {
+                    // Secondary mod + scroll = zoom (Alt on Mac, Shift on Linux/Win)
                     // ctrlKey = trackpad pinch-to-zoom (browsers set ctrlKey for pinch)
                     const delta = this.settings.invertScroll ? e.deltaY : -e.deltaY;
                     const zoomAmount = delta * this.settings.scrollSensitivity * 0.5;

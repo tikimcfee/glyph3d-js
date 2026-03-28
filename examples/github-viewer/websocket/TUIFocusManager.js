@@ -12,6 +12,7 @@
  * All buffer edits go through TUIWindow's public editing API:
  *   win.insertChar(), win.deleteChar(), win.splitLine(), win.getLine(), win.setLine()
  */
+import { primaryMod } from '../platform.js';
 
 import { CHAR_DIMENSIONS } from '../../../src/core/constants.js';
 
@@ -281,7 +282,7 @@ export default class TUIFocusManager {
         if (!this._focusedId) return;  // No focused window -- let event propagate
 
         // Let modifier combos through (Cmd+B, Cmd+J, Ctrl+C, etc.)
-        if (e.metaKey || e.ctrlKey) return;
+        if (primaryMod(e)) return;
 
         if (e.key === 'Escape') {
             this.blur();

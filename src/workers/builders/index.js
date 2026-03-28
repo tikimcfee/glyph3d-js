@@ -158,13 +158,64 @@ export function buildGlyphBuffers(input) {
 /**
  * Z-depth wrapping configuration
  * When a line exceeds maxLineWidth characters without a newline,
- * wrap in Z-depth (behind) instead of Y (down).
- * This keeps files with extremely long lines more compact.
+ * wrap in Z-depth (behind) AND Y (down) so the continuation is
+ * readable when viewed head-on — a stepped staircase going down-and-back.
  */
 const Z_WRAP_CONFIG = {
-    maxLineWidth: 200,    // Characters before Z-wrap (0 = disabled)
+    maxLineWidth: 200,    // Characters before wrap (0 = disabled)
     zWrapSpacing: 3.0     // Z spacing multiplier (relative to charHeight)
 };
+
+/**
+ * Page-break pagination configuration
+ * When a text block exceeds pageHeight visual lines, break into pages:
+ * pages fan out horizontally (up to pagesWide), then stack in Z-depth.
+ * Ported from Metal calculatePageOffsets() algorithm.
+ */
+const PAGE_CONFIG = {
+    pageHeight: 150,       // Visual lines per page before page break
+    pagesWide: 5,          // Horizontal pages before Z-stack row
+    pageGapX: 10,          // Char-width gap between horizontal pages
+    zPerPageRow: 32.0,     // Z offset per stacked page row
+};
+
+/**
+ * Apply page-break pagination to glyph positions in-place.
+ * Transforms a tall column of text into a book-like layout:
+ * pages fan horizontally, then stack in Z-depth.
+ *
+ * @param {Float32Array} positions - Position buffer (mutated in place)
+ * @param {number} startIdx - First glyph index for this item
+ * @param {number} endIdx - One past last glyph index
+ * @param {{x,y,z}} origin - Item's starting position
+ * @param {Object} metrics - {charWidth, charHeight, letterSpacing, lineSpacing}
+ */
+function applyPagination(positions, startIdx, endIdx, origin, metrics) {
+    const pageHeightWorld = PAGE_CONFIG.pageHeight * metrics.lineSpacing;
+    const charAdvance = metrics.charWidth + metrics.letterSpacing;
+    const pageWidthWorld = Z_WRAP_CONFIG.maxLineWidth * charAdvance;
+    const gapXWorld = PAGE_CONFIG.pageGapX * charAdvance;
+
+    for (let i = startIdx; i < endIdx; i++) {
+        const relY = origin.y - positions[i * 3 + 1];  // distance below origin
+
+        if (relY < pageHeightWorld) continue;  // first page — no transform
+
+        const vPage = Math.floor(relY / pageHeightWorld);
+        const rowOffsetInPage = relY - vPage * pageHeightWorld;
+        const hSlot = vPage % PAGE_CONFIG.pagesWide;
+        const zRow = Math.floor(vPage / PAGE_CONFIG.pagesWide);
+
+        // Remap Y back up to within-page position
+        positions[i * 3 + 1] = origin.y - rowOffsetInPage;
+
+        // Fan pages horizontally
+        positions[i * 3] += hSlot * (pageWidthWorld + gapXWorld);
+
+        // Stack page rows in Z-depth
+        positions[i * 3 + 2] -= zRow * PAGE_CONFIG.zPerPageRow;
+    }
+}
 
 /**
  * Build buffers for multiple texts - single pass per text, direct to combined buffers
@@ -265,11 +316,13 @@ export function buildBatchBuffers(items, shared) {
                 continue;
             }
 
-            // Z-depth wrap check (before rendering char)
+            // Z-depth + Y-drop wrap: go behind AND down so text is readable head-on
             if (maxLineWidth > 0 && charsOnSegment >= maxLineWidth) {
                 if (x > pos.x) itemMaxX = Math.max(itemMaxX, x - metrics.letterSpacing);
                 x = pos.x;
-                z -= zWrapSpacing;  // Go "behind" (negative Z)
+                y -= metrics.lineSpacing;   // Drop Y — visible when viewed head-on
+                z -= zWrapSpacing;           // Go behind — depth layering
+                itemMinY = y;
                 itemMinZ = Math.min(itemMinZ, z);
                 charsOnSegment = 0;
             }
@@ -318,8 +371,36 @@ export function buildBatchBuffers(items, shared) {
         if (x > pos.x) itemMaxX = Math.max(itemMaxX, x - metrics.letterSpacing);
         itemMaxZ = Math.max(itemMaxZ, startZ);
 
-        // Store per-item metadata
+        // Apply page-break pagination if item spans more than one page
         const itemGlyphCount = bufferOffset - itemStartOffset;
+        if (itemGlyphCount > 0) {
+            const totalYSpan = pos.y - itemMinY;
+            const pageHeightWorld = PAGE_CONFIG.pageHeight * metrics.lineSpacing;
+
+            if (totalYSpan > pageHeightWorld) {
+                applyPagination(positions, itemStartOffset, bufferOffset, pos, metrics);
+
+                // Recompute bounds — pagination rearranged positions
+                itemMinX = Infinity; itemMaxX = -Infinity;
+                itemMinY = Infinity; itemMaxY = -Infinity;
+                itemMinZ = Infinity; itemMaxZ = -Infinity;
+                for (let i = itemStartOffset; i < bufferOffset; i++) {
+                    const px = positions[i * 3];
+                    const py = positions[i * 3 + 1];
+                    const pz = positions[i * 3 + 2];
+                    if (px < itemMinX) itemMinX = px;
+                    if (px > itemMaxX) itemMaxX = px;
+                    if (py < itemMinY) itemMinY = py;
+                    if (py > itemMaxY) itemMaxY = py;
+                    if (pz < itemMinZ) itemMinZ = pz;
+                    if (pz > itemMaxZ) itemMaxZ = pz;
+                }
+                itemMaxX += metrics.charWidth;
+                itemMaxY += metrics.charHeight;
+            }
+        }
+
+        // Store per-item metadata
         itemMeta[itemIdx] = {
             bufferStartIndex: itemStartOffset,
             glyphCount: itemGlyphCount,

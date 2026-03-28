@@ -26,6 +26,7 @@ import {
 } from './components/Drawer.js';
 import { logCapturePanelHTML } from './components/LogCapturePanel.js';
 import { diffPanelHTML } from './components/DiffPanel.js';
+import { primaryMod } from './platform.js';
 
 // Panel title labels keyed by data-panel attribute
 const PANEL_TITLES = {
@@ -533,8 +534,8 @@ export class IDEShell {
     /** @private */
     _wireKeyboardShortcuts() {
         document.addEventListener('keydown', (e) => {
-            // Cmd+B / Ctrl+B -- toggle sidebar
-            if ((e.metaKey || e.ctrlKey) && e.key === 'b') {
+            // Primary mod + B -- toggle sidebar (⌘ on Mac, Ctrl on Linux/Win)
+            if (primaryMod(e) && e.key === 'b') {
                 e.preventDefault();
                 if (this._sidebarVisible) {
                     this._collapseSidebar();
@@ -544,15 +545,15 @@ export class IDEShell {
                 return;
             }
 
-            // Cmd+J / Ctrl+J -- toggle bottom panel
-            if ((e.metaKey || e.ctrlKey) && e.key === 'j') {
+            // Primary mod + J -- toggle bottom panel
+            if (primaryMod(e) && e.key === 'j') {
                 e.preventDefault();
                 this._toggleBottomPanel();
                 return;
             }
 
-            // Cmd+P / Ctrl+P -- command palette
-            if ((e.metaKey || e.ctrlKey) && e.key === 'p') {
+            // Primary mod + P -- command palette
+            if (primaryMod(e) && e.key === 'p') {
                 e.preventDefault();
                 this._toggleCommandPalette();
                 return;

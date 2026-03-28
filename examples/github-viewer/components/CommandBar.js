@@ -13,6 +13,7 @@
  *
  * Works even when WebSocket is disconnected -- local commands execute directly.
  */
+import { primaryMod } from '../platform.js';
 
 import { encodeBase64 } from '../websocket/commands/encoding.js';
 
@@ -286,7 +287,7 @@ export default class CommandBar {
 
     /** Global shortcut: Ctrl+` or Cmd+` to toggle focus */
     _handleGlobalKeyDown(e) {
-        if ((e.ctrlKey || e.metaKey) && e.key === '`') {
+        if (primaryMod(e) && e.key === '`') {
             e.preventDefault();
             if (this._active) {
                 this._input.blur();
