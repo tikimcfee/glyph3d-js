@@ -349,6 +349,7 @@ class GlyphRendererV15 {
      * @returns {number} ID for this text
      */
     render(text, position = {x: 0, y: 0, z: 0}, options = {}) {
+        this._ensureGlyphsInAtlas([{ text }]);
         const glyphs = this._textToGlyphs(text, position, options);
         const id = this._registerText(text, glyphs, options);
         this._rebuildAllInstances();
@@ -361,6 +362,7 @@ class GlyphRendererV15 {
      * @returns {Array} IDs for the rendered texts
      */
     renderBatch(items) {
+        this._ensureGlyphsInAtlas(items);
         const ids = [];
 
         // Collect all glyphs first
@@ -874,6 +876,37 @@ class GlyphRendererV15 {
     }
 
     // ============ Internal Methods ============
+
+    /**
+     * Ensure all codepoints in the given text items exist in the atlas.
+     * Dynamically adds missing glyphs and invalidates the atlas map texture cache.
+     * @param {Array<{text: string}>} items
+     * @private
+     */
+    _ensureGlyphsInAtlas(items) {
+        const missing = [];
+        for (const item of items) {
+            if (!item.text) continue;
+            for (let i = 0; i < item.text.length; i++) {
+                const code = item.text.charCodeAt(i);
+                if (code > 32 && !this.atlas.uvMap.has(code)) {
+                    missing.push(code);
+                }
+            }
+        }
+        if (missing.length > 0) {
+            this.atlas.addGlyphsIfMissing(missing);
+            // Atlas map texture cache is invalidated inside addGlyphsIfMissing
+            // (sets this.atlas._atlasMapTexture = null)
+            // Re-upload the atlas map texture to the GPU
+            if (this.material && this.material.uniforms.atlasMapTexture) {
+                this.material.uniforms.atlasMapTexture.value = this.atlas.getAtlasMapTexture(THREE);
+                const dims = this.atlas.getAtlasMapDimensions();
+                this.material.uniforms.atlasMapWidth.value = dims.width;
+                this.material.uniforms.atlasMapHeight.value = dims.height;
+            }
+        }
+    }
 
     /**
      * Convert text to glyph instances
