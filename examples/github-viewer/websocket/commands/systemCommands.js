@@ -99,9 +99,14 @@ export default function registerSystemCommands(router) {
 
     router.register('reload', (args, ctx) => {
         // Schedule the reload after sending the response, so the caller gets the OK.
-        setTimeout(() => window.location.reload(), 200);
-        return { text: 'OK: reloading page in 200ms', data: null };
-    }, { description: 'Reload the browser page (picks up code changes)' });
+        // Cache-busting: append a timestamp query param to force fresh fetch of all modules.
+        setTimeout(() => {
+            const url = new URL(window.location.href);
+            url.searchParams.set('_reload', Date.now());
+            window.location.href = url.toString();
+        }, 200);
+        return { text: 'OK: reloading page in 200ms (cache-busting)', data: null };
+    }, { description: 'Reload the browser page (cache-busting, picks up code changes)' });
 
     router.register('console.log', (args, ctx) => {
         // Capture and return recent console output — useful for remote debugging.

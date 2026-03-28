@@ -107,7 +107,14 @@ export default class CommandRouter {
      * @param {string|string[]} input - raw command string or pre-parsed [name, ...args]
      * @returns {Promise<{text: string, data: any}>}
      */
-    async execute(input) {
+    /**
+     * Execute a command.
+     * @param {string|string[]} input - raw command string or pre-parsed [name, ...args]
+     * @param {Object} [options]
+     * @param {string} [options.sender] - identity of the caller (controller ID, 'local', etc.)
+     * @returns {Promise<{text: string, data: any}>}
+     */
+    async execute(input, options = {}) {
         let name, args;
 
         if (Array.isArray(input)) {
@@ -126,7 +133,7 @@ export default class CommandRouter {
             // Try partial-match autocomplete
             const matches = [...this.commands.keys()].filter(k => k.startsWith(name));
             if (matches.length === 1) {
-                return this._run(matches[0], args);
+                return this._run(matches[0], args, options);
             }
             if (matches.length > 1) {
                 return {
@@ -140,7 +147,7 @@ export default class CommandRouter {
             };
         }
 
-        return this._run(name, args);
+        return this._run(name, args, options);
     }
 
     /**
@@ -182,7 +189,14 @@ export default class CommandRouter {
      * Run a resolved command with middleware.
      * @private
      */
-    async _run(name, args) {
+    /**
+     * Run a resolved command with middleware.
+     * @param {string} name
+     * @param {string[]} args
+     * @param {Object} [options]
+     * @private
+     */
+    async _run(name, args, options = {}) {
         const cmd = this.commands.get(name);
 
         // Run middleware
@@ -190,8 +204,15 @@ export default class CommandRouter {
             try { mw(name, args, this.context); } catch (e) { /* ignore middleware errors */ }
         }
 
+        // Attach sender to the shared context for this call.
+        // We set it directly (not a shallow copy) so that command handlers
+        // that mutate ctx (e.g., lazy-initializing ctx.terminals) persist
+        // their changes across calls. Sender is overwritten on each call.
+        const ctx = this.context;
+        ctx.sender = options.sender || null;
+
         try {
-            const result = await cmd.handler(args, this.context);
+            const result = await cmd.handler(args, ctx);
             // Normalize: if handler returned a plain string, wrap it
             if (typeof result === 'string') {
                 return { text: result, data: null };

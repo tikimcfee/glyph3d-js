@@ -22,7 +22,7 @@
  */
 
 import TerminalGrid from '../../../../src/collections/TerminalGrid.js';
-import { decodeBase64 } from './encoding.js';
+import { decodeBase64, encodeBase64 } from './encoding.js';
 
 /**
  * Lazily initialise the terminal registry map on ctx.
@@ -84,12 +84,26 @@ export default function registerTerminalCommands(router) {
 
             terminals.set(id, grid);
 
+            // Wire onInput callback for remote owners (agent controllers).
+            // If a sender (controller ID) exists and the bridge is available,
+            // route input back to the owning controller via push().
+            const owner = ctx.sender || null;
+            if (owner && ctx.wsbridge && ctx.wsbridge.connected) {
+                grid.onInput = (text, termId) => {
+                    ctx.wsbridge.push(owner, {
+                        event: 'terminal.input',
+                        data: { terminalId: termId, text },
+                    });
+                };
+            }
+
             // Register in the scene registry so spatial commands, highlight, etc. work.
             ctx.registry.register(id, grid, {
                 type: 'terminal',
                 terminalId: id,
                 cols,
                 rows,
+                owner,
             });
 
             const pos = grid.position;
@@ -270,4 +284,39 @@ export default function registerTerminalCommands(router) {
             data: { id, scale: factor },
         };
     }, { description: 'Set the scale of a terminal grid', usage: '<id> <factor>' });
+
+    // ------------------------------------------------------------------
+    // terminal.input <id> <base64-text>
+    // ------------------------------------------------------------------
+    router.register('terminal.input', (args, ctx) => {
+        if (args.length < 2) {
+            return { text: 'ERR: usage: terminal.input <id> <base64-text>', data: null };
+        }
+
+        const id = args[0];
+        const grid = getTerminals(ctx).get(id);
+        if (!grid) {
+            return { text: `ERR: no terminal '${id}'`, data: null };
+        }
+
+        let text;
+        try {
+            text = decodeBase64(args[1]);
+        } catch {
+            return { text: 'ERR: invalid base64 payload', data: null };
+        }
+
+        if (typeof grid.onInput === 'function') {
+            grid.onInput(text, id);
+            return {
+                text: `OK: sent ${text.length} chars to '${id}'`,
+                data: { id, length: text.length },
+            };
+        }
+
+        return {
+            text: `WARN: terminal '${id}' has no input handler`,
+            data: { id, dropped: true },
+        };
+    }, { description: 'Send input to a terminal (base64-encoded)', usage: '<id> <base64-text>' });
 }

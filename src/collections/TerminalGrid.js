@@ -47,6 +47,14 @@ export default class TerminalGrid extends THREE.Object3D {
         this.rows = options.rows ?? 24;
         this.name = options.title ?? 'TerminalGrid';
 
+        /**
+         * Input callback -- set by the owning agent or process.
+         * When set, `terminal.input` routes decoded plaintext through this callback.
+         * Signature: (text: string, terminalId: string) => void
+         * @type {Function|null}
+         */
+        this.onInput = null;
+
         const worldScale = options.worldScale ?? 0.025;
         this._gridScale = options.gridScale ?? 1.0;
 

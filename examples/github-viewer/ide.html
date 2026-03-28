@@ -177,6 +177,7 @@
         import { GitHubRepoViewer } from './GitHubRepoViewer.js';
         import { DrawerController } from './components/Drawer.js';
         import { IDEShell } from './IDEShell.js';
+        import CommandBar from './components/CommandBar.js';
 
         document.addEventListener('DOMContentLoaded', async () => {
             const canvas = document.getElementById('canvas');
@@ -219,6 +220,54 @@
             };
 
             await viewer.init();
+
+            // ---- Command Bar: unified input surface ----
+            // The router and context are available after init().
+            const router = viewer._commandRouter;
+            const commandBar = new CommandBar({
+                router,
+                cameraController: viewer.cameraController,
+                context: router.context,
+            });
+            commandBar.mount(document.getElementById('editor-column'));
+
+            // Click-to-target: raycast against TerminalGrid backgrounds.
+            // When a terminal's background mesh is clicked, auto-target the bar.
+            // Click on empty space clears the target.
+            {
+                const raycaster = new THREE.Raycaster();
+                const mouse = new THREE.Vector2();
+                const canvas = viewer.renderer.domElement;
+
+                canvas.addEventListener('click', (e) => {
+                    const rect = canvas.getBoundingClientRect();
+                    mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+                    mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+                    raycaster.setFromCamera(mouse, viewer.camera);
+
+                    // Collect all terminal background meshes with their IDs
+                    const terminals = router.context.terminals;
+                    if (!terminals || terminals.size === 0) return;
+
+                    const bgMeshes = [];
+                    for (const [id, grid] of terminals) {
+                        if (grid._background) {
+                            grid._background._terminalId = id;
+                            bgMeshes.push(grid._background);
+                        }
+                    }
+
+                    const hits = raycaster.intersectObjects(bgMeshes, false);
+                    if (hits.length > 0) {
+                        const termId = hits[0].object._terminalId;
+                        commandBar.setTarget(termId);
+                        commandBar.focus();
+                    } else {
+                        // Clicked empty space — clear target if in terminal mode
+                        commandBar.clearTarget();
+                    }
+                });
+            }
 
             // After init: the viewer set window.addEventListener('resize') which
             // calls renderer.setSize(window.innerWidth, window.innerHeight).

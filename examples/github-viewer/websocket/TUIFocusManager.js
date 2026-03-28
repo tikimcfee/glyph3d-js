@@ -38,6 +38,7 @@ export default class TUIFocusManager {
         this._wsBridge = wsBridge;
 
         this._raycaster = new THREE.Raycaster();
+        this._mouseVec = new THREE.Vector2();  // reused per click
 
         // Focus state
         this._focusedId = null;       // window ID or null
@@ -182,12 +183,12 @@ export default class TUIFocusManager {
     /** @private */
     _handleCanvasClick(e) {
         const rect = this._canvas.getBoundingClientRect();
-        const mouse = new this._THREE.Vector2(
+        this._mouseVec.set(
             ((e.clientX - rect.left) / rect.width) * 2 - 1,
             -((e.clientY - rect.top) / rect.height) * 2 + 1
         );
 
-        this._raycaster.setFromCamera(mouse, this._camera);
+        this._raycaster.setFromCamera(this._mouseVec, this._camera);
 
         // Collect all TUI window background meshes
         const backgrounds = [];

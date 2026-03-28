@@ -113,6 +113,17 @@ export default class WebSocketBridge {
         }
     }
 
+    /**
+     * Push an event to a specific controller client.
+     * Used to forward terminal input, notifications, etc. to the owning agent.
+     * @param {string} clientId - target controller
+     * @param {Object} payload - { event, data }
+     */
+    push(clientId, payload) {
+        if (!this.connected || !this.ws) return;
+        this.ws.send(JSON.stringify({ to: clientId, ...payload }));
+    }
+
     // ============ LAN Detection ============
 
     /**
@@ -330,6 +341,16 @@ export default class WebSocketBridge {
         }
         if (envelope.event === 'client_disconnected') {
             this._connectedClients.delete(envelope.clientId);
+            // Null out onInput for terminals owned by this client
+            const registry = this.router.context?.registry;
+            if (registry) {
+                const owned = registry.findByMeta('owner', envelope.clientId) || [];
+                for (const entry of owned) {
+                    if (entry.grid && typeof entry.grid.onInput === 'function') {
+                        entry.grid.onInput = null;
+                    }
+                }
+            }
             console.log(`[ws-bridge] controller disconnected: ${envelope.clientId}`);
             return;
         }
@@ -337,7 +358,7 @@ export default class WebSocketBridge {
         // Command from a controller
         if (envelope.from && envelope.cmd) {
             this._commandsReceived++;
-            const result = await this.router.execute(envelope.cmd);
+            const result = await this.router.execute(envelope.cmd, { sender: envelope.from });
 
             // Send response back to the originating controller
             const response = {

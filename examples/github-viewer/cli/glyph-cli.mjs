@@ -160,6 +160,18 @@ function encodeContentArgs(cmd) {
         return remaining ? `${cmdName} ${b64} ${remaining}` : `${cmdName} ${b64}`;
     }
 
+    // Handle terminal.input:
+    // terminal.input <id> <text> → terminal.input <id> <b64>
+    const matchTermInput = cmd.match(/^(terminal\.input)\s+(\S+)\s+(.+)$/);
+    if (matchTermInput) {
+        const cmdName = matchTermInput[1];
+        const termId = matchTermInput[2];
+        let text = matchTermInput[3];
+        if (text.startsWith('"') && text.endsWith('"')) text = text.slice(1, -1);
+        const b64 = Buffer.from(interpretEscapes(text)).toString('base64');
+        return `${cmdName} ${termId} ${b64}`;
+    }
+
     return cmd;
 }
 
