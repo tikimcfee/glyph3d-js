@@ -20,7 +20,8 @@
     "serve": "python3 -m http.server 8000",
     "ws": "node examples/github-viewer/ws-relay.mjs",
     "ws:py": "python3 examples/github-viewer/ws-relay.py",
-    "relay": "node examples/github-viewer/ws-relay.mjs"
+    "relay": "node examples/github-viewer/ws-relay.mjs",
+    "cli": "node examples/github-viewer/cli/glyph-cli.mjs"
   },
   "keywords": [
     "three.js",

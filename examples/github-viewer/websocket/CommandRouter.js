@@ -75,7 +75,9 @@ export default class CommandRouter {
 
         for (const ch of input) {
             if (escaped) {
-                current += ch;
+                if (ch === 'n') current += '\n';
+                else if (ch === 't') current += '\t';
+                else current += ch;
                 escaped = false;
                 continue;
             }

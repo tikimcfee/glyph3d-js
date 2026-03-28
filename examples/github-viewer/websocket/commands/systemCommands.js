@@ -72,4 +72,26 @@ export default function registerSystemCommands(router) {
             }
         };
     }, { description: 'Show scene status' });
+
+    router.register('batch', async (args, ctx) => {
+        if (args.length < 1) return { text: 'ERR: usage: batch <json-array-of-commands>', data: null };
+        let commands;
+        try {
+            commands = JSON.parse(args.join(' '));
+        } catch {
+            return { text: 'ERR: batch argument must be a JSON array of command strings', data: null };
+        }
+        if (!Array.isArray(commands)) {
+            return { text: 'ERR: batch argument must be a JSON array', data: null };
+        }
+
+        const results = await router.executeBatch(commands);
+        const failed = results.filter(r => r.text.startsWith('ERR:')).length;
+        const succeeded = results.length - failed;
+
+        return {
+            text: `OK: batch completed (${succeeded}/${results.length} succeeded${failed ? `, ${failed} failed` : ''})`,
+            data: { results, succeeded, failed }
+        };
+    }, { description: 'Execute multiple commands in one round-trip', usage: '<json-array>' });
 }

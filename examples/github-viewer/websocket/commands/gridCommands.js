@@ -4,6 +4,7 @@
  */
 
 import { box, table, kvLines } from '../TUIFormatter.js';
+import CodeGrid from '../../../../src/collections/CodeGrid.js';
 
 /**
  * @param {import('../CommandRouter.js').default} router
@@ -116,4 +117,101 @@ export default function registerGridCommands(router) {
             data: { index: idx, visible }
         };
     }, { description: 'Show/hide a grid', usage: '<index> <true|false>' });
+
+    // ============ Grid CRUD ============
+
+    router.register('grid.create', (args, ctx) => {
+        if (args.length < 1) {
+            return { text: 'ERR: usage: grid.create <base64-text> [name]', data: null };
+        }
+
+        let text;
+        try { text = atob(args[0]); } catch { return { text: 'ERR: invalid base64 content', data: null }; }
+        const name = args[1] || null;
+
+        const grid = new CodeGrid(ctx.scene, ctx.atlas, {
+            name: name || `cli-grid-${Date.now()}`,
+            showBackground: true,
+            showFilename: !!name,
+        });
+
+        if (name) {
+            grid.filename = name;
+        }
+        grid.loadText(text);
+
+        ctx.addGrid(grid);
+
+        const idx = ctx.getGrids().length - 1;
+        return {
+            text: `OK: created grid #${idx} (${grid.getGlyphCount()} glyphs, ${grid.getLineCount()} lines)`,
+            data: { index: idx, name: name || grid.name, glyphs: grid.getGlyphCount(), lines: grid.getLineCount() }
+        };
+    }, { description: 'Create a grid with text content', usage: '<text> [name]' });
+
+    router.register('grid.remove', (args, ctx) => {
+        const grids = ctx.getGrids();
+        if (args.length < 1) return { text: 'ERR: usage: grid.remove <index>', data: null };
+        const idx = parseInt(args[0]);
+        if (isNaN(idx) || idx < 0 || idx >= grids.length) {
+            return { text: `ERR: invalid grid index ${args[0]} (0-${grids.length - 1})`, data: null };
+        }
+
+        const grid = grids[idx];
+        const name = grid.getFilename() || grid.name || '(unnamed)';
+        ctx.removeGrid(idx);
+
+        return {
+            text: `OK: removed grid #${idx} "${name}"`,
+            data: { removedIndex: idx, name, remaining: grids.length }
+        };
+    }, { description: 'Remove a grid from the scene', usage: '<index>' });
+
+    router.register('grid.text', (args, ctx) => {
+        const grids = ctx.getGrids();
+        if (args.length < 2) return { text: 'ERR: usage: grid.text <index> <base64-text>', data: null };
+        const idx = parseInt(args[0]);
+        if (isNaN(idx) || idx < 0 || idx >= grids.length) {
+            return { text: `ERR: invalid grid index ${args[0]}`, data: null };
+        }
+        let text;
+        try { text = atob(args[1]); } catch { return { text: 'ERR: invalid base64 content', data: null }; }
+        grids[idx].loadText(text);
+        return {
+            text: `OK: grid #${idx} text updated (${grids[idx].getGlyphCount()} glyphs, ${grids[idx].getLineCount()} lines)`,
+            data: { index: idx, glyphs: grids[idx].getGlyphCount(), lines: grids[idx].getLineCount() }
+        };
+    }, { description: 'Replace grid text content', usage: '<index> <text>' });
+
+    router.register('grid.position', (args, ctx) => {
+        const grids = ctx.getGrids();
+        if (args.length < 4) return { text: 'ERR: usage: grid.position <index> <x> <y> <z>', data: null };
+        const idx = parseInt(args[0]);
+        if (isNaN(idx) || idx < 0 || idx >= grids.length) {
+            return { text: `ERR: invalid grid index ${args[0]}`, data: null };
+        }
+        const [x, y, z] = args.slice(1, 4).map(Number);
+        if ([x, y, z].some(isNaN)) return { text: 'ERR: x, y, z must be numbers', data: null };
+        grids[idx].position.set(x, y, z);
+        return {
+            text: `OK: grid #${idx} position = (${x}, ${y}, ${z})`,
+            data: { index: idx, position: { x, y, z } }
+        };
+    }, { description: 'Set grid world position', usage: '<index> <x> <y> <z>' });
+
+    router.register('grid.scale', (args, ctx) => {
+        const grids = ctx.getGrids();
+        if (args.length < 2) return { text: 'ERR: usage: grid.scale <index> <factor>', data: null };
+        const idx = parseInt(args[0]);
+        if (isNaN(idx) || idx < 0 || idx >= grids.length) {
+            return { text: `ERR: invalid grid index ${args[0]}`, data: null };
+        }
+        const scale = parseFloat(args[1]);
+        if (isNaN(scale)) return { text: 'ERR: scale must be a number', data: null };
+        grids[idx].scale.setScalar(scale);
+        return {
+            text: `OK: grid #${idx} scale = ${scale}`,
+            data: { index: idx, scale }
+        };
+    }, { description: 'Set grid uniform scale', usage: '<index> <factor>' });
 }

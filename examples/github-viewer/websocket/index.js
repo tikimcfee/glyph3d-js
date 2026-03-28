@@ -29,6 +29,20 @@ function buildContext(viewer) {
         // Data accessors
         getGrids: () => viewer.grids,
 
+        // Grid mutation
+        addGrid(grid) {
+            viewer.grids.push(grid);
+            viewer.scene.add(grid);
+        },
+        removeGrid(index) {
+            const grid = viewer.grids[index];
+            if (!grid) return null;
+            grid.dispose();
+            viewer.scene.remove(grid);
+            viewer.grids.splice(index, 1);
+            return grid;
+        },
+
         // Subsystems
         cameraController: viewer.cameraController,
         selectionManager: viewer.selectionManager || null,
