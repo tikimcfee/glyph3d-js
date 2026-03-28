@@ -58,10 +58,10 @@ export default function registerOrchestrationCommands(router) {
             return { text: `ERR: invalid grid index ${args[1]} (0-${grids.length - 1})`, data: null };
         }
 
-        // Find the agent window grid by naming convention "agent:<windowId>"
+        // Find the window grid by naming convention: agent:<id>, tui-<id>, or exact match
         const agentGridIdx = grids.findIndex(g => {
             const name = g.filename || g.name || '';
-            return name === `agent:${windowId}` || name === windowId;
+            return name === `agent:${windowId}` || name === `tui-${windowId}` || name === windowId;
         });
 
         if (agentGridIdx === -1) {

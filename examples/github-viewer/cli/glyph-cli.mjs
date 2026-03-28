@@ -113,6 +113,19 @@ function encodeContentArgs(cmd) {
         return `grid.text ${idx} ${b64}`;
     }
 
+    // Handle window.write and window.append:
+    // window.write <id> <text>  → window.write <id> <b64>
+    // window.append <id> <text> → window.append <id> <b64>
+    const matchWindow = cmd.match(/^(window\.write|window\.append)\s+(\S+)\s+(.+)$/);
+    if (matchWindow) {
+        const cmdName = matchWindow[1];
+        const winId = matchWindow[2];
+        let text = matchWindow[3];
+        if (text.startsWith('"') && text.endsWith('"')) text = text.slice(1, -1);
+        const b64 = Buffer.from(interpretEscapes(text)).toString('base64');
+        return `${cmdName} ${winId} ${b64}`;
+    }
+
     // Handle label.create and scene.annotate:
     // label.create <text> <x> <y> <z> [r g b]
     // scene.annotate <text> <x> <y> <z> [r g b]
