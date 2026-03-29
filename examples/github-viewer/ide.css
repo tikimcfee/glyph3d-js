@@ -975,6 +975,9 @@ html, body {
     /* ---- Grid: single column, activity bar at bottom ---- */
     #ide-shell,
     #ide-shell.sidebar-collapsed {
+        width: 100%;
+        height: 100vh;
+        height: 100dvh;    /* dynamic viewport height — accounts for mobile browser chrome */
         grid-template-columns: 1fr;
         grid-template-rows:
             var(--titlebar-height)
@@ -986,6 +989,35 @@ html, body {
             "editor"
             "statusbar"
             "activity";
+        overflow: hidden;
+    }
+
+    /* ---- Editor column: constrain to grid cell ---- */
+    #editor-column {
+        min-width: 0;
+        max-width: 100%;
+        overflow: hidden;
+    }
+
+    /* ---- Editor area + canvas: fill available space ---- */
+    #editor-area {
+        min-width: 0;
+        min-height: 0;
+    }
+
+    #editor-area #canvas {
+        position: absolute;
+        inset: 0;
+        width: 100% !important;
+        height: 100% !important;
+    }
+
+    /* ---- Minimap: tighter positioning, smaller on narrow screens ---- */
+    #editor-area #minimap-container {
+        bottom: 4px;
+        right: 4px;
+        transform: scale(0.7);
+        transform-origin: bottom right;
     }
 
     /* ---- Activity bar → horizontal bottom toolbar ---- */
