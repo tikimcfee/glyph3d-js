@@ -1056,9 +1056,20 @@ html, body {
         display: block;
     }
 
-    /* ---- Tab bar: better touch targets ---- */
+    /* ---- Tab bar: momentum scroll + compact tabs ---- */
+    #editor-tab-bar {
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;           /* hide scrollbar, swipe to scroll */
+    }
+
+    #editor-tab-bar::-webkit-scrollbar { display: none; }
+
     .editor-tab {
-        min-width: 90px;
+        flex-shrink: 0;                  /* don't compress — overflow and scroll */
+        min-width: 70px;
+        max-width: 140px;
+        padding: 0 8px;
+        gap: 4px;
     }
 
     .editor-tab .tab-close {
