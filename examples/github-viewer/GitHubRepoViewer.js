@@ -577,6 +577,17 @@ export class GitHubRepoViewer {
             });
         }
 
+        // Minimap size slider (drives CSS custom property for mobile layout)
+        const minimapSizeSlider = document.getElementById('minimap-size');
+        const minimapSizeValue = document.getElementById('minimap-size-value');
+        if (minimapSizeSlider) {
+            minimapSizeSlider.addEventListener('input', (e) => {
+                const pct = parseInt(e.target.value, 10);
+                minimapSizeValue.textContent = `${pct}%`;
+                document.documentElement.style.setProperty('--minimap-size', pct);
+            });
+        }
+
         // cam-speed, reset-camera, fit-all listeners handled by CameraController
     }
 

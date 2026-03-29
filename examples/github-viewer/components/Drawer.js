@@ -283,6 +283,14 @@ export function settingsPanelHTML() {
                    min="0.1" max="5" step="0.1" value="1.0">
         </div>
         <div class="setting-group">
+            <div class="setting-label">
+                <span>Minimap Size</span>
+                <span class="setting-value" id="minimap-size-value">30%</span>
+            </div>
+            <input type="range" class="setting-slider" id="minimap-size"
+                   min="10" max="80" step="5" value="30">
+        </div>
+        <div class="setting-group">
             <button class="setting-btn" id="reset-camera">Reset Camera</button>
             <button class="setting-btn" id="fit-all">Fit All Grids</button>
         </div>
