@@ -654,6 +654,12 @@ export class GitHubRepoViewer {
                 this.stackManager.returnAll();
             }
         }, { description: 'Return all files from stack workspace' });
+
+        // V — toggle dynamic speed (pan/zoom scales with camera distance)
+        sm.register('v', () => {
+            const on = this.cameraController.toggleDynamicSpeed();
+            this.toastUI?.show(`Dynamic speed ${on ? 'ON' : 'OFF'}`, 'success');
+        }, { description: 'Toggle dynamic camera speed' });
     }
 
     /**

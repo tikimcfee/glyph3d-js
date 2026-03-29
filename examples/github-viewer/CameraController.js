@@ -22,6 +22,7 @@ const DEFAULTS = {
     invertDragX: false,
     invertDragY: false,
     invertScroll: false,
+    dynamicSpeed: true,  // scale pan/WASD/zoom by camera distance
 };
 
 function loadSettings() {
@@ -152,7 +153,10 @@ export class CameraController {
                     // Secondary mod + scroll = zoom (Alt on Mac, Shift on Linux/Win)
                     // ctrlKey = trackpad pinch-to-zoom (browsers set ctrlKey for pinch)
                     const delta = this.settings.invertScroll ? e.deltaY : -e.deltaY;
-                    const zoomAmount = delta * this.settings.scrollSensitivity * 0.5;
+                    const zoomScale = this.settings.dynamicSpeed
+                        ? this._getViewDistance() / 200
+                        : 1;
+                    const zoomAmount = delta * this.settings.scrollSensitivity * 0.5 * zoomScale;
                     const forward = new this.THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
                     camera.position.addScaledVector(forward, zoomAmount);
                 } else {
@@ -211,9 +215,20 @@ export class CameraController {
     }
 
     /**
+     * Get the effective view distance for speed scaling.
+     * Uses camera Z (distance to content plane) rather than distance from
+     * world origin, so pan/zoom feel consistent regardless of X/Y offset.
+     * @returns {number}
+     */
+    _getViewDistance() {
+        // Camera faces -Z; content lives near Z=0. Camera Z ≈ view distance.
+        return Math.max(Math.abs(this.ctx.camera.position.z), 1);
+    }
+
+    /**
      * Apply drag translation: maps screen-pixel deltas to camera-relative
-     * world-space panning. Scale factor accounts for camera distance so
-     * dragging feels proportional at any zoom level.
+     * world-space panning. When dynamicSpeed is on, the scale factor tracks
+     * the camera's Z distance so dragging feels proportional at any zoom.
      * @param {number} dx - screen pixels horizontal
      * @param {number} dy - screen pixels vertical
      */
@@ -222,8 +237,7 @@ export class CameraController {
         const camera = this.ctx.camera;
         const sens = this.settings.dragSensitivity;
 
-        // Scale panning by distance from origin for consistent feel across zoom levels
-        const dist = camera.position.length() || 1;
+        const dist = this.settings.dynamicSpeed ? this._getViewDistance() : 200;
         const fovFactor = 2 * Math.tan((camera.fov * Math.PI / 180) / 2);
         const pixelScale = (dist * fovFactor) / window.innerHeight;
 
@@ -350,7 +364,11 @@ export class CameraController {
         if (moveDir.length() > 0) {
             moveDir.normalize();
             moveDir.applyQuaternion(camera.quaternion);
-            moveDir.multiplyScalar(this.cameraSpeed * deltaTime);
+            // Scale WASD speed by view distance so movement feels consistent
+            const speedScale = this.settings.dynamicSpeed
+                ? this._getViewDistance() / 200   // 200 = baseline distance
+                : 1;
+            moveDir.multiplyScalar(this.cameraSpeed * deltaTime * speedScale);
             camera.position.add(moveDir);
         }
 
@@ -517,6 +535,16 @@ export class CameraController {
         this.cameraSpeed = speed * 20;
         this.settings.cameraSpeed = this.cameraSpeed;
         this._persistSettings();
+    }
+
+    /**
+     * Toggle dynamic speed scaling (pan/WASD/zoom scale with camera distance).
+     * @returns {boolean} New state
+     */
+    toggleDynamicSpeed() {
+        this.settings.dynamicSpeed = !this.settings.dynamicSpeed;
+        this._persistSettings();
+        return this.settings.dynamicSpeed;
     }
 
     /**
