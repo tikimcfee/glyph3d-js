@@ -259,6 +259,9 @@ html, body {
     background: rgba(0, 255, 136, 0.05);
 }
 
+/* Sidebar backdrop -- only visible on mobile via media query */
+#sidebar-backdrop { display: none; }
+
 /* ---- Sidebar Resize Handle ---- */
 #sidebar-resize {
     grid-area: resize-s;
@@ -965,14 +968,112 @@ html, body {
 .log-capture-preview .log-line.METRIC { color: #4af; }
 
 /* ============================================================
-   Responsive: collapse sidebar on narrow screens
+   Responsive: mobile layout for narrow screens
+   Activity bar → bottom toolbar, sidebar → overlay modal
    ============================================================ */
 @media (max-width: 768px) {
-    #ide-shell {
-        grid-template-columns: var(--activitybar-width) 0px 0px 1fr;
+    /* ---- Grid: single column, activity bar at bottom ---- */
+    #ide-shell,
+    #ide-shell.sidebar-collapsed {
+        grid-template-columns: 1fr;
+        grid-template-rows:
+            var(--titlebar-height)
+            1fr
+            var(--statusbar-height)
+            48px;
+        grid-template-areas:
+            "titlebar"
+            "editor"
+            "statusbar"
+            "activity";
     }
-    #sidebar,
-    #sidebar-resize {
+
+    /* ---- Activity bar → horizontal bottom toolbar ---- */
+    #activity-bar {
+        flex-direction: row;
+        justify-content: space-around;
+        padding: 0;
+        border-right: none;
+        border-top: 1px solid var(--border-color);
+    }
+
+    .activity-btn {
+        border-left: none;
+        border-top: 2px solid transparent;
+        flex: 0 0 auto;
+    }
+
+    .activity-btn.active {
+        border-left-color: transparent;
+        border-top-color: var(--accent);
+    }
+
+    .activity-spacer { display: none; }
+
+    /* ---- Sidebar → slide-in overlay ---- */
+    #sidebar {
+        grid-area: unset;
+        position: fixed;
+        top: 0;
+        left: 0;
+        bottom: 48px;
+        width: 85vw;
+        max-width: 360px;
+        z-index: 310;
+        transform: translateX(-100%);
+        transition: transform 0.25s ease;
+        display: flex;
+        box-shadow: 4px 0 16px rgba(0, 0, 0, 0.5);
+    }
+
+    /* Override desktop collapsed display:none — controlled by transform instead */
+    #ide-shell.sidebar-collapsed #sidebar {
+        display: flex;
+        transform: translateX(-100%);
+    }
+
+    #ide-shell:not(.sidebar-collapsed) #sidebar {
+        display: flex;
+        transform: translateX(0);
+    }
+
+    #sidebar-resize { display: none; }
+
+    /* ---- Sidebar backdrop (tap to dismiss) ---- */
+    #sidebar-backdrop {
         display: none;
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 48px;
+        background: rgba(0, 0, 0, 0.5);
+        z-index: 300;
+        -webkit-tap-highlight-color: transparent;
+    }
+
+    #ide-shell:not(.sidebar-collapsed) #sidebar-backdrop {
+        display: block;
+    }
+
+    /* ---- Tab bar: better touch targets ---- */
+    .editor-tab {
+        min-width: 90px;
+    }
+
+    .editor-tab .tab-close {
+        visibility: visible;
+        padding: 6px;
+        font-size: 16px;
+    }
+
+    /* ---- Bottom panel: cap height on small screens ---- */
+    #bottom-panel {
+        max-height: 40vh;
+    }
+
+    /* ---- Breadcrumb: smaller on mobile ---- */
+    #breadcrumb-bar {
+        padding: 0 8px;
     }
 }

@@ -87,13 +87,31 @@ export class IDEShell {
         this._lastFps = 0;
         this._running = false;
 
+        // Mobile detection
+        this._mobileQuery = window.matchMedia('(max-width: 768px)');
+        this._isMobile = this._mobileQuery.matches;
+        this._mobileQuery.addEventListener('change', (e) => {
+            this._isMobile = e.matches;
+            if (this._isMobile && this._sidebarVisible) {
+                this._collapseSidebar();
+            }
+        });
+
         // Wire events
         this._wireActivityBar();
         this._wireSidebar();
+        this._wireSidebarBackdrop();
         this._wireBottomPanel();
         this._wireKeyboardShortcuts();
         this._wireResizeObserver();
         this._wireSidebarResize();
+
+        // On mobile: start with sidebar and bottom panel collapsed
+        if (this._isMobile) {
+            this._collapseSidebar();
+            this._shell.classList.add('panel-collapsed');
+            this._bottomPanelVisible = false;
+        }
     }
 
     // ================================================================
@@ -275,6 +293,16 @@ export class IDEShell {
         });
     }
 
+    /** @private Wire the backdrop element to dismiss sidebar on tap (mobile) */
+    _wireSidebarBackdrop() {
+        const backdrop = document.getElementById('sidebar-backdrop');
+        if (backdrop) {
+            backdrop.addEventListener('click', () => {
+                this._collapseSidebar();
+            });
+        }
+    }
+
     /** @private */
     _collapseSidebar() {
         this._sidebarVisible = false;
@@ -424,6 +452,11 @@ export class IDEShell {
         // Update breadcrumb
         this._breadcrumbPath.textContent = this._activeTabPath || '';
         this._statusFilePath.textContent = this._activeTabPath || '';
+
+        // On mobile, auto-dismiss sidebar overlay after file selection
+        if (this._isMobile && this._sidebarVisible) {
+            this._collapseSidebar();
+        }
     }
 
     /** @private */
