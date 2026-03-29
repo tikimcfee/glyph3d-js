@@ -1088,10 +1088,22 @@ html, body {
         display: block;
     }
 
+    /* ---- Activity bar: scrollable when buttons overflow ---- */
+    #activity-bar {
+        overflow-x: auto;
+        overflow-y: hidden;
+        scrollbar-width: none;
+        -webkit-overflow-scrolling: touch;
+        touch-action: pan-x;            /* override body touch-action: none */
+    }
+
+    #activity-bar::-webkit-scrollbar { display: none; }
+
     /* ---- Tab bar: momentum scroll + compact tabs ---- */
     #editor-tab-bar {
         -webkit-overflow-scrolling: touch;
-        scrollbar-width: none;           /* hide scrollbar, swipe to scroll */
+        scrollbar-width: none;
+        touch-action: pan-x;            /* override body touch-action: none */
     }
 
     #editor-tab-bar::-webkit-scrollbar { display: none; }
