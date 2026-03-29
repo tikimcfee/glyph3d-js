@@ -17,8 +17,9 @@
  *   to preserve spatial relationships.
  */
 
-const MINIMAP_WIDTH  = 180;
-const MINIMAP_HEIGHT = 120;
+const DEFAULT_WIDTH  = 180;
+const DEFAULT_HEIGHT = 120;
+const ASPECT_RATIO   = DEFAULT_WIDTH / DEFAULT_HEIGHT;  // 1.5
 const PADDING        = 8;  // inner padding inside the canvas
 
 export class MinimapOverlay {
@@ -44,8 +45,13 @@ export class MinimapOverlay {
         this._gridRects = [];    // [{ x, y, w, h, color }] in world space
         this._worldBounds = null; // THREE.Box3 of total layout
 
+        // Canvas dimensions (updated dynamically on mobile via resize)
+        this._width = DEFAULT_WIDTH;
+        this._height = DEFAULT_HEIGHT;
+
         this._buildCanvas();
         this._wireEvents();
+        this._wireResize();
     }
 
     // ============ Public API ============
@@ -143,8 +149,8 @@ export class MinimapOverlay {
         );
 
         const ctx = this._ctx;
-        const cw = MINIMAP_WIDTH;
-        const ch = MINIMAP_HEIGHT;
+        const cw = this._width;
+        const ch = this._height;
 
         ctx.clearRect(0, 0, cw, ch);
 
@@ -186,6 +192,9 @@ export class MinimapOverlay {
         this._canvas.removeEventListener('mousemove', this._onMouseMove);
         this._canvas.removeEventListener('mouseup',   this._onMouseUp);
         this._canvas.removeEventListener('mouseleave',this._onMouseLeave);
+        if (this._resizeObserver) {
+            this._resizeObserver.disconnect();
+        }
         if (this._container.parentNode) {
             this._container.parentNode.removeChild(this._container);
         }
@@ -209,10 +218,23 @@ export class MinimapOverlay {
             this._canvas.id = 'minimap-canvas';
             this._container.appendChild(this._canvas);
         }
-        this._canvas.width  = MINIMAP_WIDTH;
-        this._canvas.height = MINIMAP_HEIGHT;
+        this._canvas.width  = this._width;
+        this._canvas.height = this._height;
 
         this._ctx = this._canvas.getContext('2d');
+    }
+
+    /** @private Observe container size changes to resize canvas on mobile */
+    _wireResize() {
+        this._resizeObserver = new ResizeObserver(() => {
+            const cw = this._container.clientWidth;
+            if (cw <= 0 || cw === this._width) return;
+            this._width = cw;
+            this._height = Math.round(cw / ASPECT_RATIO);
+            this._canvas.width = this._width;
+            this._canvas.height = this._height;
+        });
+        this._resizeObserver.observe(this._container);
     }
 
     /** @private */
@@ -271,8 +293,8 @@ export class MinimapOverlay {
         const ww  = b.max.x - b.min.x;
         const wh  = b.max.y - b.min.y;
 
-        const availW = MINIMAP_WIDTH  - 2 * PADDING;
-        const availH = MINIMAP_HEIGHT - 2 * PADDING;
+        const availW = this._width  - 2 * PADDING;
+        const availH = this._height - 2 * PADDING;
 
         // Uniform scale: fit the taller/wider dimension
         const scale  = Math.min(availW / Math.max(ww, 1), availH / Math.max(wh, 1));
@@ -281,7 +303,7 @@ export class MinimapOverlay {
 
         // Center within canvas
         const offsetX = PADDING + (availW - ww * scaleX) / 2 - b.min.x * scaleX;
-        const offsetY = MINIMAP_HEIGHT - PADDING - (availH - wh * scaleY) / 2 + b.min.y * scaleY;
+        const offsetY = this._height - PADDING - (availH - wh * scaleY) / 2 + b.min.y * scaleY;
 
         return { scaleX, scaleY, offsetX, offsetY };
     }

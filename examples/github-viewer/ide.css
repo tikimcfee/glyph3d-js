@@ -1012,12 +1012,22 @@ html, body {
         height: 100% !important;
     }
 
-    /* ---- Minimap: tighter positioning, smaller on narrow screens ---- */
+    /* ---- Minimap: centered responsive strip on mobile ---- */
     #editor-area #minimap-container {
-        bottom: 4px;
-        right: 4px;
-        transform: scale(0.7);
-        transform-origin: bottom right;
+        position: absolute;
+        bottom: 8px;
+        left: 12px;
+        right: 12px;
+        transform: none;
+        border-radius: 6px;
+        border: 1px solid var(--border-color);
+        background: rgba(10, 10, 10, 0.85);
+    }
+
+    #editor-area #minimap-container #minimap-canvas {
+        display: block;
+        width: 100%;
+        height: auto;
     }
 
     /* ---- Activity bar → horizontal bottom toolbar ---- */
