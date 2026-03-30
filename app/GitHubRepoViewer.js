@@ -553,12 +553,34 @@ export class GitHubRepoViewer {
             this.pickingSystem?.onResize();
         });
 
-        // Picking system mouse wiring
-        this.canvas.addEventListener('mousemove', (e) => {
+        // Picking system mouse wiring — use document-level listener so
+        // pointer lock and UI overlays don't block canvas mousemove
+        this._pickingMouseCount = 0;
+        document.addEventListener('mousemove', (e) => {
             if (!this.pickingSystem) return;
+            this._pickingMouseCount++;
             const rect = this.canvas.getBoundingClientRect();
-            this.pickingSystem.setMousePosition(e.clientX - rect.left, e.clientY - rect.top);
+            const cssX = e.clientX - rect.left;
+            const cssY = e.clientY - rect.top;
+            // Only pick when mouse is over the canvas area
+            if (cssX >= 0 && cssY >= 0 && cssX <= rect.width && cssY <= rect.height) {
+                this.pickingSystem.setMousePosition(cssX, cssY);
+            }
         });
+        // DEBUG: verify picking system state after first repo load
+        window._pickingDebug = () => {
+            const ps = this.pickingSystem;
+            console.log('[Picking Debug]', {
+                registry: ps._registry.length,
+                needsPick: ps._needsPick,
+                mousePixel: { ...ps._mousePixel },
+                targetSize: `${ps._target?.width}x${ps._target?.height}`,
+                lastPickedId: ps._lastPickedId,
+                grids: this.grids?.length,
+                mouseMoveCount: this._pickingMouseCount,
+                canvasRect: this.canvas.getBoundingClientRect(),
+            });
+        };
 
         // Settings sliders
         const gridsScaleSlider = document.getElementById('grids-scale');
@@ -1630,7 +1652,7 @@ export class GitHubRepoViewer {
 
         // GPU picking pass (only runs when mouse has moved)
         if (this.pickingSystem) {
-            const pickId = this.pickingSystem.renderAndRead(this.camera);
+            const pickId = this.pickingSystem.renderAndRead(this.camera, this.scene);
             const hit = this.pickingSystem.resolve(pickId);
 
             // Clear previous highlight (guard against disposed renderer)
