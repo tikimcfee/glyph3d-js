@@ -9,7 +9,6 @@
  */
 
 import * as THREE from 'three';
-import { CHAR_DIMENSIONS } from '../core/constants.js';
 import GlyphCollection from './GlyphCollection.js';
 
 class CodeGrid extends THREE.Object3D {
@@ -42,15 +41,6 @@ class CodeGrid extends THREE.Object3D {
             worldScale: options.worldScale || 0.025
         };
 
-        // Metrics will be derived from atlas after collection is created
-        // Placeholder until we have the renderer's metrics
-        this.metrics = {
-            charWidth: CHAR_DIMENSIONS.width,
-            charHeight: CHAR_DIMENSIONS.height,
-            lineHeight: CHAR_DIMENSIONS.height * 1.2,
-            spacing: CHAR_DIMENSIONS.spacing * 0.05
-        };
-
         // Content state
         this.filename = '';
         this.sourcePath = null;
@@ -64,16 +54,14 @@ class CodeGrid extends THREE.Object3D {
             worldScale: this.config.worldScale
         });
 
-        // Update metrics from the actual renderer (dynamic, based on atlas)
-        const renderer = this._collection.getRenderer();
-        if (renderer && renderer.metrics) {
-            this.metrics = {
-                charWidth: renderer.metrics.charWidth,
-                charHeight: renderer.metrics.charHeight,
-                lineHeight: renderer.metrics.lineSpacing,
-                spacing: renderer.metrics.letterSpacing
-            };
-        }
+        // Derive metrics from atlas via GlyphCollection (no renderer needed)
+        const collectionMetrics = this._collection._getMetrics();
+        this.metrics = {
+            charWidth: collectionMetrics.charWidth,
+            charHeight: collectionMetrics.charHeight,
+            lineHeight: collectionMetrics.lineSpacing,
+            spacing: collectionMetrics.letterSpacing
+        };
 
         // Track text IDs for content management
         this._filenameTextId = null;
