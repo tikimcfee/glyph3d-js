@@ -225,6 +225,10 @@ class GlyphRendererV15 {
                 new THREE.InstancedBufferAttribute(new Float32Array(maxCount * 3), 3));
             geometry.setAttribute('instanceGroupId',
                 new THREE.InstancedBufferAttribute(new Float32Array(maxCount), 1));
+            geometry.setAttribute('instanceAddedColor',
+                new THREE.InstancedBufferAttribute(new Float32Array(maxCount * 3), 3));
+            geometry.setAttribute('instancePickingId',
+                new THREE.InstancedBufferAttribute(new Float32Array(maxCount), 1));
             geometry._maxInstanceCount = maxCount;
         }
 
@@ -257,6 +261,8 @@ class GlyphRendererV15 {
             attribute float instanceCodepoint;
             attribute vec3 instanceColor;
             attribute float instanceGroupId;
+            attribute vec3 instanceAddedColor;
+            attribute float instancePickingId;
 
             uniform sampler2D groupTexture;
             uniform float groupTextureHeight;
@@ -270,6 +276,7 @@ class GlyphRendererV15 {
             varying highp vec2 vUV;
             varying vec3 vColor;
             varying float vGroupAlpha;
+            varying vec3 vAddedColor;
 
             void main() {
                 // Transform quad by instance size
@@ -309,6 +316,7 @@ class GlyphRendererV15 {
                 float colorBlend = gScale.w;
                 vColor = mix(instanceColor * gColor.rgb, gColor.rgb, colorBlend);
                 vGroupAlpha = gColor.a;
+                vAddedColor = instanceAddedColor;
             }
         `;
     }
@@ -326,12 +334,14 @@ class GlyphRendererV15 {
             varying highp vec2 vUV;
             varying vec3 vColor;
             varying float vGroupAlpha;
+            varying vec3 vAddedColor;
 
             void main() {
                 vec4 texColor = texture2D(atlasTexture, vUV);
 
-                // Apply instance color and group alpha
-                gl_FragColor = texColor * vec4(vColor, vGroupAlpha);
+                // Apply instance color and group alpha, then additive highlight
+                vec4 base = texColor * vec4(vColor, vGroupAlpha);
+                gl_FragColor = vec4(clamp(base.rgb + vAddedColor, 0.0, 1.0), base.a);
 
                 // Alpha test for clean edges and group visibility
                 if (gl_FragColor.a < 0.01) discard;
@@ -532,6 +542,66 @@ class GlyphRendererV15 {
 
         // Mark only color attribute as needing GPU upload
         geometry.attributes.instanceColor.needsUpdate = true;
+    }
+
+    /**
+     * Update additive color highlight for all glyphs of a text entry.
+     * Direct buffer write — no rebuild triggered.
+     * @param {number} id - Renderer-internal text ID
+     * @param {{r: number, g: number, b: number}|null} addedColor - null or omitted clears highlight
+     */
+    updateAddedColor(id, addedColor) {
+        const entry = this.renderedTexts.get(id);
+        if (!entry || entry.bufferStartIndex === undefined) return;
+        const attr = this.instanceMesh.geometry.attributes.instanceAddedColor;
+        if (!attr) return;
+        const arr = attr.array;
+        const startIdx = entry.bufferStartIndex;
+        const r = addedColor?.r ?? 0;
+        const g = addedColor?.g ?? 0;
+        const b = addedColor?.b ?? 0;
+        for (let i = 0; i < entry.glyphs.length; i++) {
+            const bufIdx = (startIdx + i) * 3;
+            arr[bufIdx]     = r;
+            arr[bufIdx + 1] = g;
+            arr[bufIdx + 2] = b;
+        }
+        attr.needsUpdate = true;
+    }
+
+    /**
+     * Set additive highlight color on a single glyph by absolute buffer slot index.
+     * Used for token-level highlighting within a text entry.
+     * @param {number} bufferSlotIndex - Absolute index into instanceAddedColor array
+     * @param {{r: number, g: number, b: number}|null} color - null clears
+     */
+    setGlyphHighlight(bufferSlotIndex, color) {
+        const attr = this.instanceMesh.geometry.attributes.instanceAddedColor;
+        if (!attr) return;
+        const i = bufferSlotIndex * 3;
+        attr.array[i]     = color?.r ?? 0;
+        attr.array[i + 1] = color?.g ?? 0;
+        attr.array[i + 2] = color?.b ?? 0;
+        attr.needsUpdate = true;
+    }
+
+    /**
+     * Write contiguous picking IDs for one text entry.
+     * Primary path is PickingSystem.registerRenderer() which writes the full buffer;
+     * this method is available for per-entry assignment if needed.
+     * @param {number} textId - Renderer-internal text ID
+     * @param {number} baseId - First glyph gets baseId, subsequent glyphs baseId+1, etc.
+     */
+    assignPickingIds(textId, baseId) {
+        const entry = this.renderedTexts.get(textId);
+        if (!entry || entry.bufferStartIndex === undefined) return;
+        const attr = this.instanceMesh.geometry.attributes.instancePickingId;
+        if (!attr) return;
+        const start = entry.bufferStartIndex;
+        for (let i = 0; i < entry.glyphs.length; i++) {
+            attr.array[start + i] = baseId + i;
+        }
+        attr.needsUpdate = true;
     }
 
     /**
@@ -1051,6 +1121,7 @@ class GlyphRendererV15 {
         const codepoints = geometry.attributes.instanceCodepoint.array;
         const colors = geometry.attributes.instanceColor.array;
         const groupIds = geometry.attributes.instanceGroupId.array;
+        const addedColors = geometry.attributes.instanceAddedColor?.array;
 
         // Fill arrays
         for (let i = 0; i < count; i++) {
@@ -1075,6 +1146,14 @@ class GlyphRendererV15 {
 
             // Group ID
             groupIds[i] = g.groupId || 0;
+
+            // Added color (highlight) — default 0,0,0 (no additive change)
+            if (addedColors) {
+                const ac = g.addedColor;
+                addedColors[i * 3]     = ac ? ac.r : 0;
+                addedColors[i * 3 + 1] = ac ? ac.g : 0;
+                addedColors[i * 3 + 2] = ac ? ac.b : 0;
+            }
         }
 
         // Mark attributes as needing update
@@ -1083,6 +1162,10 @@ class GlyphRendererV15 {
         geometry.attributes.instanceCodepoint.needsUpdate = true;
         geometry.attributes.instanceColor.needsUpdate = true;
         geometry.attributes.instanceGroupId.needsUpdate = true;
+        if (geometry.attributes.instanceAddedColor) {
+            geometry.attributes.instanceAddedColor.needsUpdate = true;
+        }
+        // instancePickingId.needsUpdate is set by PickingSystem.registerRenderer(), not here
 
         // Set instance count
         geometry.instanceCount = count;
@@ -1119,7 +1202,9 @@ class GlyphRendererV15 {
      * @returns {Array<number>|null} Array of renderer IDs if itemMeta provided, null otherwise
      */
     applyPrebuiltBuffers(buffers, items) {
-        const { positions, sizes, codepoints, colors, groupIds, count } = buffers;
+        const { positions, sizes, codepoints, colors, groupIds, addedColors, count } = buffers;
+        // pickingIds intentionally NOT destructured — not emitted by builders;
+        // PickingSystem.registerRenderer() writes instancePickingId after flush
         let { itemMeta } = buffers;
         const geometry = this.instanceMesh.geometry;
 
@@ -1135,6 +1220,12 @@ class GlyphRendererV15 {
             new THREE.InstancedBufferAttribute(colors, 3));
         geometry.setAttribute('instanceGroupId',
             new THREE.InstancedBufferAttribute(groupIds || new Float32Array(count), 1));
+        geometry.setAttribute('instanceAddedColor',
+            new THREE.InstancedBufferAttribute(
+                addedColors || new Float32Array(count * 3), 3));
+        // instancePickingId: always zeros here — PickingSystem overwrites post-flush
+        geometry.setAttribute('instancePickingId',
+            new THREE.InstancedBufferAttribute(new Float32Array(count), 1));
 
         // Set instance count
         geometry.instanceCount = count;

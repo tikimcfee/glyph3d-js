@@ -61,6 +61,9 @@ class GlyphCollection {
         this._renderer = null;
         this._bufferSize = 0;  // Track allocated buffer size
 
+        // Optional picking system — wired via setPickingSystem()
+        this._pickingSystem = null;
+
         // Pending operations (batched until flush)
         this._pendingAdds = [];      // {text, position, options}
         this._pendingRemovals = [];  // renderer IDs to remove
@@ -84,6 +87,19 @@ class GlyphCollection {
 
         // Cached metrics (computed from atlas, avoids creating renderer just for metrics)
         this._metricsCache = null;
+    }
+
+    /**
+     * Wire a PickingSystem so flush() and flushAsync() automatically re-register
+     * this collection's renderer after every buffer rebuild.
+     * @param {import('../picking/PickingSystem.js').PickingSystem} pickingSystem
+     */
+    setPickingSystem(pickingSystem) {
+        this._pickingSystem = pickingSystem;
+        // If renderer already exists (post-flush), register immediately
+        if (this._renderer && pickingSystem) {
+            pickingSystem.registerRenderer(this._renderer);
+        }
     }
 
     /**
@@ -501,6 +517,12 @@ class GlyphCollection {
             this._pendingAdds = [];
         }
 
+        // Notify picking system that geometry may have been rebuilt
+        // Must re-register after every flush to keep picking IDs in sync
+        if (this._renderer && this._pickingSystem) {
+            this._pickingSystem.registerRenderer(this._renderer);
+        }
+
         this._dirty = false;
     }
 
@@ -692,6 +714,11 @@ class GlyphCollection {
             }
         }
         this._pendingUpdates = [];
+
+        // Notify picking system that geometry may have been rebuilt (async path)
+        if (this._renderer && this._pickingSystem) {
+            this._pickingSystem.registerRenderer(this._renderer);
+        }
 
         this._dirty = false;
     }

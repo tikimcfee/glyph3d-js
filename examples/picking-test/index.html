@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>glyph3d — Picking System Test</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0a0a0a; color: #d0ffd0; font-family: monospace; overflow: hidden; }
+        canvas { display: block; }
+        #overlay {
+            position: fixed;
+            top: 10px; left: 10px;
+            background: rgba(0,0,0,0.75);
+            border: 1px solid #333;
+            padding: 10px 14px;
+            font-size: 12px;
+            line-height: 1.6;
+            max-width: 420px;
+            z-index: 10;
+        }
+        #overlay h2 { color: #7aff7a; margin-bottom: 6px; font-size: 13px; }
+        #overlay .key { color: #ffda7a; }
+        #results {
+            position: fixed;
+            bottom: 10px; left: 10px;
+            background: rgba(0,0,0,0.82);
+            border: 1px solid #333;
+            padding: 10px 14px;
+            font-size: 11px;
+            line-height: 1.5;
+            max-width: 600px;
+            max-height: 220px;
+            overflow-y: auto;
+            z-index: 10;
+        }
+        #hover-info {
+            position: fixed;
+            top: 10px; right: 10px;
+            background: rgba(0,0,0,0.75);
+            border: 1px solid #444;
+            padding: 8px 12px;
+            font-size: 11px;
+            line-height: 1.6;
+            z-index: 10;
+            min-width: 240px;
+        }
+    </style>
+</head>
+<body>
+    <div id="overlay">
+        <h2>Picking System Test</h2>
+        <div><span class="key">1</span> — Test: instancePickingId sequential validation</div>
+        <div><span class="key">2</span> — Test: hover readback (move mouse over text)</div>
+        <div><span class="key">3</span> — Test: additive color sweep (all glyphs flash)</div>
+        <div><span class="key">P</span> — Toggle picking texture debug view</div>
+        <div><span class="key">R</span> — Clear all highlights</div>
+        <div style="margin-top:6px;color:#888">Mouse over glyphs to pick them</div>
+    </div>
+    <div id="results"><em>Press 1–3 to run self-tests.</em></div>
+    <div id="hover-info">Hover: <em>none</em></div>
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+        }
+    }
+    </script>
+    <script type="module" src="./main.js"></script>
+</body>
+</html>

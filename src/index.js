@@ -52,6 +52,13 @@ export {
     initObservability
 } from './utils/index.js';
 
+// Glyph picking (GPU-based hover/click detection)
+export { PickingSystem } from './picking/PickingSystem.js';
+
+// Semantic annotation and event bus
+export { SemanticInfo, SemanticInfoMap } from './semantic/SemanticInfoMap.js';
+export { GlyphEventType, GlyphEventBus } from './semantic/GlyphEvents.js';
+
 // Camera controls (optional)
 export { default as CameraController } from './camera/CameraController.js';
 export { default as InputManager } from './camera/InputManager.js';
