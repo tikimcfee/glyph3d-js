@@ -236,7 +236,9 @@ export class GitHubRepoViewer {
         this.layoutManager = new GridLayoutManager();
 
         // GPU picking system — character-level hit testing
-        this.pickingSystem = new PickingSystem(this.renderer, { resolutionScale: 0.5 });
+        // Full resolution needed: at distant camera positions, glyphs are small
+        // and sub-pixel at reduced resolution
+        this.pickingSystem = new PickingSystem(this.renderer, { resolutionScale: 1.0 });
         this._lastPickHit = null;
         this._lastPickSlot = -1;
 
