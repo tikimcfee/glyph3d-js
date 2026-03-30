@@ -570,15 +570,18 @@ export class GitHubRepoViewer {
         // DEBUG: verify picking system state after first repo load
         window._pickingDebug = () => {
             const ps = this.pickingSystem;
+            const rect = this.canvas.getBoundingClientRect();
+            const v2 = new this.THREE.Vector2();
+            const rendererSize = this.renderer.getSize(v2);
             console.log('[Picking Debug]', {
                 registry: ps._registry.length,
-                needsPick: ps._needsPick,
                 mousePixel: { ...ps._mousePixel },
                 targetSize: `${ps._target?.width}x${ps._target?.height}`,
+                rendererSize: `${rendererSize.x}x${rendererSize.y}`,
+                canvasCSS: `${rect.width}x${rect.height}`,
+                canvasOffset: `left=${rect.left} top=${rect.top}`,
                 lastPickedId: ps._lastPickedId,
-                grids: this.grids?.length,
-                mouseMoveCount: this._pickingMouseCount,
-                canvasRect: this.canvas.getBoundingClientRect(),
+                dpr: window.devicePixelRatio,
             });
         };
 

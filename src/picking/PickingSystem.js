@@ -107,6 +107,7 @@ export class PickingSystem {
         // Picking target and readback buffer
         this._target = null;
         this._readBuffer = new Uint8Array(4);
+        this._sizeVec = new THREE.Vector2(); // reusable for getSize()
 
         // Mouse position in target-pixel coordinates
         this._mousePixel = { x: -1, y: -1 };
@@ -238,6 +239,14 @@ export class PickingSystem {
     renderAndRead(camera, scene) {
         if (!this._needsPick) return this._lastPickedId;
         this._needsPick = false;
+
+        // Auto-resize target if renderer size changed (e.g. IDE ResizeObserver)
+        const size = this._renderer.getSize(this._sizeVec);
+        const tw = Math.max(1, Math.floor(size.x * this._scale));
+        const th = Math.max(1, Math.floor(size.y * this._scale));
+        if (!this._target || this._target.width !== tw || this._target.height !== th) {
+            this._createTarget();
+        }
 
         const t0 = performance.now();
 
