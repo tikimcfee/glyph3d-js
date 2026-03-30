@@ -279,6 +279,8 @@ export class PickingSystem {
      * @returns {number} Picking ID (0 = no hit)
      */
     renderAndRead(camera) {
+        const t0 = performance.now();
+
         // Save and restore clear color so we don't affect the main scene
         const prevClearColor = new THREE.Color();
         let prevClearAlpha;
@@ -289,6 +291,8 @@ export class PickingSystem {
         this._renderer.setClearColor(0x000000, 1);
         this._renderer.clear();
         this._renderer.render(this._pickingScene, camera);
+
+        const tRender = performance.now();
 
         const { x, y } = this._mousePixel;
         let id = 0;
@@ -301,8 +305,16 @@ export class PickingSystem {
             id = (r << 16) | (g << 8) | b;
         }
 
+        const tRead = performance.now();
+
         this._renderer.setRenderTarget(null);
         this._renderer.setClearColor(prevClearColor, prevClearAlpha);
+
+        // Track timing (rolling averages)
+        this._lastRenderMs = tRender - t0;
+        this._lastReadMs = tRead - tRender;
+        this._lastTotalMs = tRead - t0;
+
         return id;
     }
 
@@ -407,6 +419,38 @@ export class PickingSystem {
      */
     get renderTarget() {
         return this._target;
+    }
+
+    /**
+     * Get performance and memory statistics.
+     * @returns {Object} Stats object with memory sizes, timing, and counts
+     */
+    getStats() {
+        const target = this._target;
+        const targetBytes = target ? target.width * target.height * 4 : 0;
+
+        let totalInstances = 0;
+        let totalPickingIdBytes = 0;
+        for (const entry of this._registry) {
+            const count = entry.endId - entry.startId;
+            totalInstances += count;
+            totalPickingIdBytes += count * 4; // Float32
+        }
+
+        return {
+            rendererCount: this._registry.length,
+            totalInstances,
+            targetWidth: target?.width ?? 0,
+            targetHeight: target?.height ?? 0,
+            targetBytes,
+            pickingIdBytes: totalPickingIdBytes,
+            totalBytes: targetBytes + totalPickingIdBytes,
+            nextPickingId: this._nextPickingId,
+            resolutionScale: this._scale,
+            lastRenderMs: this._lastRenderMs ?? 0,
+            lastReadMs: this._lastReadMs ?? 0,
+            lastTotalMs: this._lastTotalMs ?? 0,
+        };
     }
 
     /**

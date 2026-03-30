@@ -732,6 +732,49 @@ class GlyphRendererV15 {
         if (colorDirty) geometry.attributes.instanceColor.needsUpdate = true;
     }
 
+    // ============ Stats ============
+
+    /**
+     * Get memory and instance statistics for this renderer.
+     * @returns {Object}
+     */
+    getMemoryStats() {
+        const geom = this.instanceMesh?.geometry;
+        const instanceCount = geom?.instanceCount ?? 0;
+        const maxInstances = geom?._maxInstanceCount ?? this.config.maxInstances;
+
+        // Sum actual GPU buffer bytes from all instance attributes
+        let allocatedBytes = 0;
+        let usedBytes = 0;
+        const attributes = {};
+        if (geom) {
+            for (const name of Object.keys(geom.attributes)) {
+                if (!name.startsWith('instance')) continue;
+                const attr = geom.attributes[name];
+                const totalBytes = attr.array.byteLength;
+                const activeBytes = instanceCount * attr.itemSize * 4;
+                allocatedBytes += totalBytes;
+                usedBytes += activeBytes;
+                attributes[name] = { itemSize: attr.itemSize, totalBytes, activeBytes };
+            }
+        }
+
+        // Group DataTexture
+        const groupBytes = this._groupData?.byteLength ?? 0;
+
+        return {
+            instanceCount,
+            maxInstances,
+            allocatedBytes,
+            usedBytes,
+            wasteBytes: allocatedBytes - usedBytes,
+            groupTextureBytes: groupBytes * 2, // CPU + GPU
+            totalBytes: allocatedBytes + groupBytes * 2,
+            attributes,
+            textEntryCount: this.renderedTexts.size,
+        };
+    }
+
     // ============ Group Transform API ============
 
     /**

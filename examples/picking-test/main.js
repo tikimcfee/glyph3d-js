@@ -55,6 +55,7 @@ helloWorld(obj.getValue().toString());
 // ---------------------------------------------------------------------------
 const resultsEl = document.getElementById('results');
 const hoverEl   = document.getElementById('hover-info');
+const statsEl   = document.getElementById('stats');
 
 function logResult(msg, isError = false) {
     const line = document.createElement('div');
@@ -149,6 +150,47 @@ const debugScene = new THREE.Scene();
 debugScene.add(debugQuad);
 
 // ---------------------------------------------------------------------------
+// Stats formatting
+// ---------------------------------------------------------------------------
+function fmtBytes(b) {
+    if (b < 1024) return b + ' B';
+    if (b < 1024 * 1024) return (b / 1024).toFixed(1) + ' KB';
+    return (b / (1024 * 1024)).toFixed(2) + ' MB';
+}
+
+let statsFrame = 0;
+function updateStats() {
+    if (++statsFrame % 30 !== 0) return; // Update every 30 frames
+
+    const ps = pickingSystem.getStats();
+    const rs = glyphRenderer?.getMemoryStats();
+    if (!rs) return;
+
+    const lines = [
+        `── Renderer ──`,
+        `Instances: ${rs.instanceCount} / ${rs.maxInstances}`,
+        `Buffer alloc: ${fmtBytes(rs.allocatedBytes)}`,
+        `Buffer used:  ${fmtBytes(rs.usedBytes)}`,
+        `Buffer waste: ${fmtBytes(rs.wasteBytes)}`,
+        `Group tex:    ${fmtBytes(rs.groupTextureBytes)}`,
+        `Text entries: ${rs.textEntryCount}`,
+        ``,
+        `── Picking ──`,
+        `Renderers: ${ps.rendererCount}`,
+        `Instances: ${ps.totalInstances}`,
+        `Target:    ${ps.targetWidth}×${ps.targetHeight} (${fmtBytes(ps.targetBytes)})`,
+        `Pick IDs:  ${fmtBytes(ps.pickingIdBytes)}`,
+        `Render:    ${ps.lastRenderMs.toFixed(2)} ms`,
+        `ReadPixels:${ps.lastReadMs.toFixed(2)} ms`,
+        `Total:     ${ps.lastTotalMs.toFixed(2)} ms`,
+        ``,
+        `── Total ──`,
+        `GPU buffers: ${fmtBytes(rs.allocatedBytes + ps.totalBytes)}`,
+    ];
+    statsEl.textContent = lines.join('\n');
+}
+
+// ---------------------------------------------------------------------------
 // Render loop
 // ---------------------------------------------------------------------------
 function animate() {
@@ -192,6 +234,8 @@ function animate() {
         renderer.render(debugScene, debugCamera);
         renderer.autoClear = true;
     }
+
+    updateStats();
 }
 
 animate();
