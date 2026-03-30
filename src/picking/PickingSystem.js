@@ -135,6 +135,10 @@ export class PickingSystem {
         // Last-set mouse position in target-pixel coordinates
         this._mousePixel = { x: -1, y: -1 };
 
+        // Dirty flag — only render+read when the mouse has moved
+        this._needsPick = false;
+        this._lastPickedId = 0;
+
         this._createTarget();
     }
 
@@ -181,10 +185,12 @@ export class PickingSystem {
     setMousePosition(cssX, cssY) {
         // Target is sized from renderer.getSize() (CSS pixels) × scale.
         // Mouse input is CSS-relative. Just scale to match target coords.
-        this._mousePixel = {
-            x: Math.floor(cssX * this._scale),
-            y: Math.floor(cssY * this._scale)
-        };
+        const newX = Math.floor(cssX * this._scale);
+        const newY = Math.floor(cssY * this._scale);
+        if (newX !== this._mousePixel.x || newY !== this._mousePixel.y) {
+            this._mousePixel = { x: newX, y: newY };
+            this._needsPick = true;
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -279,6 +285,10 @@ export class PickingSystem {
      * @returns {number} Picking ID (0 = no hit)
      */
     renderAndRead(camera) {
+        // Skip entirely if mouse hasn't moved since last pick
+        if (!this._needsPick) return this._lastPickedId;
+        this._needsPick = false;
+
         const t0 = performance.now();
 
         // Save and restore clear color so we don't affect the main scene
@@ -310,10 +320,11 @@ export class PickingSystem {
         this._renderer.setRenderTarget(null);
         this._renderer.setClearColor(prevClearColor, prevClearAlpha);
 
-        // Track timing (rolling averages)
+        // Track timing
         this._lastRenderMs = tRender - t0;
         this._lastReadMs = tRead - tRender;
         this._lastTotalMs = tRead - t0;
+        this._lastPickedId = id;
 
         return id;
     }
