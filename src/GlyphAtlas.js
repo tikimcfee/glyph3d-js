@@ -357,12 +357,14 @@ class GlyphAtlas {
             return this._atlasMapTexture;
         }
 
-        // Pre-allocate for full Unicode range (U+0000–U+10FFFF): 1024 wide × 1088 rows.
-        // Math.ceil(0x110000 / 1024) = 1088 rows; 1024 * 1088 = 1,114,112 texels.
-        // ~17.8 MB of Float32 data. Allocated once; never needs to grow, so every
-        // GlyphRenderer's uniform reference stays valid for the lifetime of the atlas.
+        // Size the atlas map to cover only the codepoints actually in the charset,
+        // not the full Unicode range. The initial charset tops out around U+2606;
+        // at width 1024 that's ~10 rows = 160 KB vs the old 17.8 MB full-Unicode map.
+        // If ensureCodepoints() later adds higher codepoints (e.g. CJK), the map
+        // is regrown dynamically via _regrowAtlasMap().
         const ATLAS_MAP_WIDTH = 1024;
-        const ATLAS_MAP_HEIGHT = Math.ceil(0x110000 / 1024); // 1088 — full Unicode
+        const maxCp = this.uvMap.size > 0 ? Math.max(...this.uvMap.keys()) + 1 : 128;
+        const ATLAS_MAP_HEIGHT = Math.ceil(maxCp / ATLAS_MAP_WIDTH) || 1;
         const totalTexels = ATLAS_MAP_WIDTH * ATLAS_MAP_HEIGHT;
 
         const data = new Float32Array(totalTexels * 4);
@@ -550,7 +552,9 @@ class GlyphAtlas {
         if (!tex) return; // texture not yet created — will be filled on first getAtlasMapTexture()
 
         const totalTexels = this._atlasMapTextureWidth * this._atlasMapTextureHeight;
-        if (charCode >= totalTexels) return; // outside pre-allocated Unicode range
+        if (charCode >= totalTexels) {
+            this._regrowAtlasMap(charCode);
+        }
 
         const data = tex.image.data;
         const base = charCode * 4;
@@ -558,6 +562,34 @@ class GlyphAtlas {
         data[base + 1] = 1.0 - uv.v1;
         data[base + 2] = uv.u1;
         data[base + 3] = 1.0 - uv.v0;
+        tex.needsUpdate = true;
+    }
+
+    /**
+     * Grow the atlas map DataTexture to accommodate a codepoint beyond the current range.
+     * Copies existing data into a larger Float32Array and updates the texture in-place
+     * so all existing uniform references remain valid.
+     * @param {number} charCode - The codepoint that triggered the regrow
+     */
+    _regrowAtlasMap(charCode) {
+        const tex = this._atlasMapTexture;
+        const width = this._atlasMapTextureWidth;
+        const newHeight = Math.ceil((charCode + 1) / width);
+        const newData = new Float32Array(width * newHeight * 4);
+
+        // Copy existing data
+        newData.set(tex.image.data);
+
+        // Update texture in place — same object, new backing data
+        tex.image = { data: newData, width, height: newHeight };
+        tex.userData.width = width;
+        tex.userData.height = newHeight;
+
+        this._atlasMapTextureHeight = newHeight;
+        this._atlasMapTextureDirty = true;
+
+        console.debug(`[GlyphAtlas] Atlas map regrown: ${width}x${newHeight} for codepoint U+${charCode.toString(16).toUpperCase()}`);
+
         tex.needsUpdate = true;
     }
 

@@ -364,6 +364,8 @@ class GlyphRendererV15 {
         if (this.atlas && this.atlas.checkAndClearTextureUpdate()) {
             if (this.texture) this.texture.needsUpdate = true;
         }
+        // Sync atlas map dimensions if the map was regrown for new codepoints
+        this._syncAtlasMapDimensions();
         this._ensureGlyphsInAtlas([{ text }]);
         const glyphs = this._textToGlyphs(text, position, options);
         const id = this._registerText(text, glyphs, options);
@@ -382,6 +384,7 @@ class GlyphRendererV15 {
         if (this.atlas && this.atlas.checkAndClearTextureUpdate()) {
             if (this.texture) this.texture.needsUpdate = true;
         }
+        this._syncAtlasMapDimensions();
         this._ensureGlyphsInAtlas(items);
         const ids = [];
 
@@ -999,6 +1002,24 @@ class GlyphRendererV15 {
     }
 
     // ============ Internal Methods ============
+
+    /**
+     * Sync atlas map uniforms if the atlas map DataTexture was regrown.
+     * Called before render/renderBatch to pick up dimension changes from
+     * ensureCodepoints() adding codepoints beyond the initial charset range.
+     * @private
+     */
+    _syncAtlasMapDimensions() {
+        if (!this.atlas || !this.atlas._atlasMapTextureDirty || !this.instanceMesh) return;
+        const dims = this.atlas.getAtlasMapDimensions();
+        const uniforms = this.instanceMesh.material.uniforms;
+        if (uniforms.atlasMapHeight.value !== dims.height) {
+            uniforms.atlasMapHeight.value = dims.height;
+            uniforms.atlasMapWidth.value = dims.width;
+        }
+        // Clear dirty flag only once per atlas (shared across renderers)
+        this.atlas._atlasMapTextureDirty = false;
+    }
 
     /**
      * Ensure all codepoints in the given text items exist in the atlas.

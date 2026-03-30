@@ -479,7 +479,7 @@ class GlyphCollection {
                     this._idMap.set(update.id, newRendererId);
                     this._reverseIdMap.delete(rendererId);
                     this._reverseIdMap.set(newRendererId, update.id);
-                    entry.text = update.newText;
+                    entry.textLength = update.newText.length;
                     entry.rendererId = newRendererId;
                 }
             }
@@ -504,11 +504,12 @@ class GlyphCollection {
                 this._idMap.set(ourId, rendererId);
                 this._reverseIdMap.set(rendererId, ourId);
 
-                // Store committed entry
+                // Store committed entry (text content NOT retained — saves ~75 MB
+                // heap at 1500-file scale. Use textLength for diagnostics.)
                 this._committedTexts.set(ourId, {
                     id: ourId,
                     rendererId,
-                    text: this._pendingAdds[i].text,
+                    textLength: this._pendingAdds[i].text.length,
                     position: this._pendingAdds[i].position,
                     options: this._pendingAdds[i].options
                 });
@@ -641,7 +642,7 @@ class GlyphCollection {
                         this._committedTexts.set(p.id, {
                             id: p.id,
                             rendererId,
-                            text: p.text,
+                            textLength: p.text.length,
                             position: p.position,
                             options: p.options
                         });
@@ -665,7 +666,7 @@ class GlyphCollection {
                         this._committedTexts.set(p.id, {
                             id: p.id,
                             rendererId,
-                            text: p.text,
+                            textLength: p.text.length,
                             position: p.position,
                             options: p.options
                         });
@@ -707,7 +708,7 @@ class GlyphCollection {
                         this._idMap.set(update.id, newRendererId);
                         this._reverseIdMap.delete(rendererId);
                         this._reverseIdMap.set(newRendererId, update.id);
-                        entry.text = update.newText;
+                        entry.textLength = update.newText.length;
                         entry.rendererId = newRendererId;
                     }
                 }
@@ -916,7 +917,7 @@ class GlyphCollection {
             const rendererText = this._renderer?.getText(entry.rendererId);
             return {
                 id: entry.id,
-                text: entry.text,
+                textLength: entry.textLength,
                 position: entry.position,
                 options: entry.options,
                 glyphs: rendererText?.glyphs || [],
