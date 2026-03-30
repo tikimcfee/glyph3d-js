@@ -23,10 +23,10 @@ import {
     settingsPanelHTML,
     statsPanelHTML,
     controlsPanelHTML,
-} from './components/Drawer.js';
-import { logCapturePanelHTML } from './components/LogCapturePanel.js';
-import { diffPanelHTML } from './components/DiffPanel.js';
-import { primaryMod } from './platform.js';
+} from '../github-viewer/components/Drawer.js';
+import { logCapturePanelHTML } from '../github-viewer/components/LogCapturePanel.js';
+import { diffPanelHTML } from '../github-viewer/components/DiffPanel.js';
+import { primaryMod } from '../github-viewer/platform.js';
 
 // Panel title labels keyed by data-panel attribute
 const PANEL_TITLES = {

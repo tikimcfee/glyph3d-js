@@ -13,9 +13,9 @@
  *
  * Works even when WebSocket is disconnected -- local commands execute directly.
  */
-import { primaryMod } from '../platform.js';
+import { primaryMod } from '../../github-viewer/platform.js';
 
-import { encodeBase64 } from '../websocket/commands/encoding.js';
+import { encodeBase64 } from '../../github-viewer/websocket/commands/encoding.js';
 
 const MODES = { COMMAND: 'command', TERMINAL: 'terminal' };
 
