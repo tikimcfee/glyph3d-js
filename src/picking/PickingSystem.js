@@ -24,19 +24,13 @@ precision highp float;
 
 attribute vec3 instancePosition;
 attribute vec2 instanceSize;
-attribute float instanceCodepoint;
 attribute float instanceGroupId;
 attribute float instancePickingId;
 
 uniform sampler2D groupTexture;
 uniform float groupTextureHeight;
 
-uniform sampler2D atlasMapTexture;
-uniform float atlasMapWidth;
-uniform float atlasMapHeight;
-
 varying float vPickingId;
-varying highp vec2 vUV;
 
 void main() {
     vec3 scaled = position * vec3(instanceSize, 1.0);
@@ -55,29 +49,17 @@ void main() {
     vec3 worldPos = scaled + instancePosition * gScale.xyz + gPos.xyz;
     gl_Position = projectionMatrix * modelViewMatrix * vec4(worldPos, 1.0);
     vPickingId = instancePickingId;
-
-    float cp = instanceCodepoint;
-    float mapCol = mod(cp, atlasMapWidth);
-    float mapRow = floor(cp / atlasMapWidth);
-    float tx = (mapCol + 0.5) / atlasMapWidth;
-    float ty = (mapRow + 0.5) / atlasMapHeight;
-    vec4 uvRect = texture2D(atlasMapTexture, vec2(tx, ty));
-    vUV = mix(uvRect.xy, uvRect.zw, uv);
 }
 `;
 
 // ---------------------------------------------------------------------------
-// Picking fragment shader — 24-bit ID as RGB, alpha-tested against atlas.
+// Picking fragment shader — solid quad, 24-bit ID as RGB.
+// No atlas sampling — the full glyph cell is pickable, not just the stroke.
 // ---------------------------------------------------------------------------
 const PICKING_FRAGMENT_SHADER = `
 precision highp float;
-uniform sampler2D atlasTexture;
 varying float vPickingId;
-varying highp vec2 vUV;
 void main() {
-    float alpha = texture2D(atlasTexture, vUV).a;
-    if (alpha < 0.01) discard;
-
     float id = vPickingId;
     float r = floor(id / 65536.0);
     float g = floor(mod(id, 65536.0) / 256.0);
@@ -188,16 +170,12 @@ export class PickingSystem {
         mesh.geometry.setAttribute('instancePickingId',
             new THREE.InstancedBufferAttribute(ids, 1));
 
-        // Create picking material — used during material-swap render pass
-        const mainUniforms = mesh.material.uniforms;
+        // Create picking material — used during material-swap render pass.
+        // No atlas uniforms needed: the picking shader renders solid quads.
         const pickingMaterial = new THREE.ShaderMaterial({
             uniforms: {
                 groupTexture:       { value: glyphRenderer._groupTexture },
                 groupTextureHeight: { value: glyphRenderer._maxGroups },
-                atlasTexture:       mainUniforms.atlasTexture,
-                atlasMapTexture:    mainUniforms.atlasMapTexture,
-                atlasMapWidth:      mainUniforms.atlasMapWidth,
-                atlasMapHeight:     mainUniforms.atlasMapHeight,
             },
             vertexShader:   PICKING_VERTEX_SHADER,
             fragmentShader: PICKING_FRAGMENT_SHADER,
