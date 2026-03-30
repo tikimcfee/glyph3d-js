@@ -6,7 +6,7 @@
  * Uses the `ws` package (already a devDependency).
  *
  * Usage:
- *   node examples/github-viewer/ws-relay.mjs [--port 8765] [--host 0.0.0.0]
+ *   node app/ws-relay.mjs [--port 8765] [--host 0.0.0.0]
  *   npm run ws
  *
  * Protocol: same as ws-relay.py — see that file for full docs.

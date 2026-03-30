@@ -10,7 +10,7 @@ Connection modes:
   - LAN:       ws://192.168.x.x:PORT      (phone/tablet on same network)
 
 Usage:
-    python3 examples/github-viewer/ws-relay.py [--port 8765] [--host 0.0.0.0]
+    python3 app/ws-relay.py [--port 8765] [--host 0.0.0.0]
 
     --host 0.0.0.0    Listen on all interfaces (LAN accessible)
     --host localhost   Listen only on localhost (default)

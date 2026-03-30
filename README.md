@@ -253,20 +253,25 @@ function hello() {
 `, { filename: 'hello.js' });
 ```
 
-### GitHub Repository Viewer
+### IDE / GitHub Repository Viewer
 
-See `examples/github-viewer/` for a complete demo that loads and displays GitHub repositories in 3D space. Includes GitHub API integration, file tree navigation, and content caching.
+The production app lives at `app/`. Load repos in navigable 3D space with an IDE shell (activity bar, sidebar, tab bar, command bar, status bar).
+
+```bash
+npm run serve
+# Open http://localhost:8000/app/ide.html
+# Open http://localhost:8000/app/viewer.html  (standalone viewer)
+```
 
 ### Word Wall
 
 See `examples/word-wall/` for a dictionary word visualization demo with interactive 3D word exploration.
 
-### Running Examples
+### Other Examples
 
 ```bash
-npm run serve
-# Open http://localhost:8000/examples/github-viewer/
 # Open http://localhost:8000/examples/word-wall/
+# Open http://localhost:8000/examples/code-spectrometer/
 ```
 
 ## Performance
@@ -307,9 +312,9 @@ cd glyph3d-js
 # Install dependencies
 npm install
 
-# Serve examples locally
+# Start dev server
 npm run serve
-# Open http://localhost:8000/examples/github-viewer/
+# Open http://localhost:8000/app/ide.html
 ```
 
 No build step is required. The project uses native ES modules and can be served directly.
