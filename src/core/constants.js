@@ -1,20 +1,10 @@
 /**
- * Shared Rendering Constants
+ * Shared Constants — debug settings, performance thresholds, terminal layout.
  *
- * Single source of truth for rendering dimensions and debug settings.
- * This prevents size inconsistencies between different rendering components.
- *
- * CRITICAL: All rendering components should use these values, not local definitions!
+ * Character dimensions are NOT defined here — they are derived from GlyphAtlas
+ * metrics at runtime. All layout code should use atlas-derived metrics via
+ * GlyphCollection._getMetrics() or CodeGrid.metrics.
  */
-
-// Character dimensions in world units (FALLBACK VALUES)
-// NOTE: GlyphRendererV15 now derives dimensions dynamically from atlas metrics.
-// These are only used as fallback when atlas metrics aren't available.
-export const CHAR_DIMENSIONS = {
-    width: 0.6,    // Fallback character width
-    height: 1.0,   // Fallback character height
-    spacing: 1.0   // Character spacing multiplier
-};
 
 // Terminal layout
 export const TERMINAL_LAYOUT = {
@@ -48,18 +38,6 @@ export const PERF_THRESHOLDS = {
 };
 
 /**
- * Helper to get consistent character size
- * @param {number} scale - Optional scale factor
- * @returns {Object} {width, height}
- */
-export function getCharSize(scale = 1.0) {
-    return {
-        width: CHAR_DIMENSIONS.width * scale,
-        height: CHAR_DIMENSIONS.height * scale
-    };
-}
-
-/**
  * Helper to check if debug logging is enabled
  * @param {string} category - Debug category (e.g., 'instancing', 'performance')
  * @returns {boolean}
@@ -77,10 +55,8 @@ export function shouldDebugLog(category) {
 
 // Export as default object for easy importing
 export default {
-    CHAR_DIMENSIONS,
     TERMINAL_LAYOUT,
     DEBUG_SETTINGS,
     PERF_THRESHOLDS,
-    getCharSize,
     shouldDebugLog
 };

@@ -79,14 +79,14 @@ document.body.appendChild(renderer.domElement);
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0a0a0a);
 
-const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 2000);
-camera.position.set(5, -3, 15);
-camera.lookAt(5, -3, 0);
+const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 10000);
+camera.position.set(3, -2, 6);
+camera.lookAt(3, -2, 0);
 
 // ---------------------------------------------------------------------------
 // Atlas + Collection
 // ---------------------------------------------------------------------------
-const atlas = new GlyphAtlas({ fontSize: 24 });
+const atlas = new GlyphAtlas();
 await atlas.generate();
 
 const grid = new CodeGrid(scene, atlas, {

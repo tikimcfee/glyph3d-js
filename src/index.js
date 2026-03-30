@@ -32,7 +32,7 @@ export { default as GlyphBatcher } from './layout/GlyphBatcher.js';
 export { default as GlyphInstancePool } from './layout/GlyphInstancePool.js';
 
 // Core utilities
-export { CHAR_DIMENSIONS, PERF_THRESHOLDS, shouldDebugLog } from './core/constants.js';
+export { PERF_THRESHOLDS, shouldDebugLog } from './core/constants.js';
 export { default as InstanceBuffer } from './core/InstanceBuffer.js';
 export { default as ShaderManager } from './core/ShaderManager.js';
 

@@ -14,7 +14,6 @@
  */
 import { primaryMod } from '../services/utils/platform.js';
 
-import { CHAR_DIMENSIONS } from '../core/constants.js';
 
 const Z_FOCUS_POP = 2;           // Z lift for focused window
 const CURSOR_BLINK_MS = 530;     // Standard terminal blink rate
@@ -253,8 +252,8 @@ export default class TUIFocusManager {
         // Transform world point into grid's local coordinate system
         const localPoint = win.grid.worldToLocal(worldPoint.clone());
 
-        const cw = win.grid.metrics?.charWidth || CHAR_DIMENSIONS.width;
-        const lh = win.grid.metrics?.lineHeight || CHAR_DIMENSIONS.height * 1.2;
+        const cw = win.grid.metrics.charWidth;
+        const lh = win.grid.metrics.lineHeight;
 
         // Filename header offset: if showFilename, content starts 1 line down
         const headerOffset = win.grid.config.showFilename ? 1 : 0;
@@ -439,8 +438,8 @@ export default class TUIFocusManager {
         if (!this._cursorMesh) return;
 
         const cursor = win.getCursor();
-        const cw = win.grid.metrics?.charWidth || CHAR_DIMENSIONS.width;
-        const lh = win.grid.metrics?.lineHeight || CHAR_DIMENSIONS.height * 1.2;
+        const cw = win.grid.metrics.charWidth;
+        const lh = win.grid.metrics.lineHeight;
         const headerOffset = win.grid.config.showFilename ? 1 : 0;
 
         // Local-space position within the grid

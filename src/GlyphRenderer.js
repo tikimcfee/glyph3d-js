@@ -13,7 +13,7 @@
  */
 
 import * as THREE from 'three';
-import { CHAR_DIMENSIONS, PERF_THRESHOLDS, shouldDebugLog } from './core/constants.js';
+import { PERF_THRESHOLDS, shouldDebugLog } from './core/constants.js';
 import GlyphLayout from './layout/GlyphLayout.js';
 import { createLogger, LogLevel } from './utils/index.js';
 
