@@ -98,8 +98,12 @@ export class PickingSystem {
         this._renderer = threeRenderer;
         this._scale = options.resolutionScale ?? 1.0;
 
-        // Registry: [{ renderer, pickingMaterial, savedMaterial, startId, endId }]
+        // Registry: [{ renderer, pickingMaterial, startId, endId }]
         this._registry = [];
+
+        // Empty scene used to initialize Three.js render state before
+        // renderBufferDirect calls (which require an active render state)
+        this._emptyScene = new THREE.Scene();
 
         // Persist counter across hot-reload
         this._nextPickingId = (window.__glyph3dPickingIdCounter || 1);
@@ -249,9 +253,11 @@ export class PickingSystem {
         this._renderer.setClearColor(0x000000, 1);
         this._renderer.clear();
 
-        // Update camera matrices (may already be current from main render,
-        // but ensure they're fresh for the picking pass)
+        // Initialize Three.js render state (required by renderBufferDirect)
+        // Rendering an empty scene is the cheapest way to set up the internal
+        // currentRenderState, program caches, and uniform bindings.
         camera.updateMatrixWorld();
+        this._renderer.render(this._emptyScene, camera);
 
         // Direct-draw each registered mesh with its picking material.
         // renderBufferDirect uses the mesh's matrixWorld as-is — no scene
