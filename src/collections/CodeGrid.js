@@ -443,6 +443,9 @@ class CodeGrid extends THREE.Object3D {
 
         // Flush all additions to GPU
         this._collection.flush();
+
+        // Build line→slot index after flush
+        this._buildLineSlotBase();
     }
 
     /**
@@ -476,6 +479,148 @@ class CodeGrid extends THREE.Object3D {
 
         // Flush using worker pipeline
         await this._collection.flushAsync();
+
+        // Build line→slot index after flush
+        this._buildLineSlotBase();
+    }
+
+    // ============ Line → Buffer Slot Mapping ============
+
+    /**
+     * Build _lineSlotBase: maps each line index to the buffer slot index
+     * of its first visible character. Mirrors the builder's skip logic
+     * (newlines, spaces, CR, tabs are not emitted as glyph slots).
+     *
+     * Must be called after every flush that rebuilds geometry.
+     * @private
+     */
+    _buildLineSlotBase() {
+        const content = this.content;
+        if (!content) {
+            this._lineSlotBase = null;
+            return;
+        }
+
+        // Find the base buffer slot for content text entries.
+        // Async path: single text entry for all content.
+        // Sync path: one text entry per non-empty line.
+        const renderer = this._collection.getRenderer();
+        if (!renderer) {
+            this._lineSlotBase = null;
+            return;
+        }
+
+        // Get the buffer start index for the first content text entry
+        let baseSlot = 0;
+        if (this._contentTextIds.length > 0) {
+            const firstCollId = this._contentTextIds[0];
+            const rendId = this._collection._idMap?.get(firstCollId);
+            if (rendId !== undefined) {
+                const entry = renderer.renderedTexts.get(rendId);
+                if (entry) baseSlot = entry.bufferStartIndex ?? 0;
+            }
+        }
+
+        // Walk content, mirror the builder's skip logic to count visible glyphs
+        const lines = this.lines.length > 0 ? this.lines : content.split('\n');
+        const lineSlotBase = new Int32Array(lines.length);
+        let slotOffset = 0;
+
+        for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+            lineSlotBase[lineIdx] = baseSlot + slotOffset;
+
+            const line = lines[lineIdx];
+            for (let c = 0; c < line.length; c++) {
+                const code = line.charCodeAt(c);
+                // Mirror builder skip logic: newline(10), space(32), CR(13), tab(9) don't get slots
+                if (code === 10 || code === 32 || code === 13 || code === 9) continue;
+                slotOffset++;
+            }
+            // The newline between lines is also skipped by the builder (charCode 10)
+            // — no slot increment needed
+        }
+
+        this._lineSlotBase = lineSlotBase;
+    }
+
+    /**
+     * Get the buffer slot index for a character at (line, col).
+     * Col counts visible characters only (spaces are skipped in the buffer).
+     * @param {number} line - 0-based line index
+     * @param {number} col - 0-based visible-character index within the line
+     * @returns {number} Buffer slot index, or -1 if out of range
+     */
+    getSlotForChar(line, col) {
+        if (!this._lineSlotBase || line < 0 || line >= this._lineSlotBase.length) return -1;
+        return this._lineSlotBase[line] + col;
+    }
+
+    /**
+     * Get the number of visible (buffer-slotted) characters on a line.
+     * @param {number} line - 0-based line index
+     * @returns {number}
+     */
+    getVisibleCharCount(line) {
+        if (!this.lines || line < 0 || line >= this.lines.length) return 0;
+        let count = 0;
+        const text = this.lines[line];
+        for (let i = 0; i < text.length; i++) {
+            const code = text.charCodeAt(i);
+            if (code !== 10 && code !== 32 && code !== 13 && code !== 9) count++;
+        }
+        return count;
+    }
+
+    // ============ Glyph Highlighting ============
+
+    /**
+     * Highlight a range of characters with additive color.
+     * @param {number} startLine - 0-based inclusive
+     * @param {number} startCol - 0-based inclusive (visible char index)
+     * @param {number} endLine - 0-based inclusive
+     * @param {number} endCol - 0-based exclusive (visible char index)
+     * @param {{r:number, g:number, b:number}} color
+     */
+    highlightRange(startLine, startCol, endLine, endCol, color) {
+        const renderer = this._collection?.getRenderer();
+        if (!renderer || !this._lineSlotBase) return;
+
+        for (let line = startLine; line <= endLine; line++) {
+            const cStart = (line === startLine) ? startCol : 0;
+            const cEnd = (line === endLine) ? endCol : this.getVisibleCharCount(line);
+            const lineBase = this._lineSlotBase[line];
+            if (lineBase === undefined) continue;
+
+            for (let col = cStart; col < cEnd; col++) {
+                renderer.setGlyphHighlight(lineBase + col, color);
+            }
+        }
+    }
+
+    /**
+     * Clear highlights on a specific line.
+     * @param {number} line - 0-based line index
+     */
+    clearLineHighlight(line) {
+        const renderer = this._collection?.getRenderer();
+        if (!renderer || !this._lineSlotBase) return;
+        const count = this.getVisibleCharCount(line);
+        const base = this._lineSlotBase[line];
+        for (let i = 0; i < count; i++) {
+            renderer.setGlyphHighlight(base + i, null);
+        }
+    }
+
+    /**
+     * Clear all glyph highlights on this grid.
+     */
+    clearAllHighlights() {
+        const renderer = this._collection?.getRenderer();
+        if (!renderer?.instanceMesh) return;
+        const attr = renderer.instanceMesh.geometry.attributes.instanceAddedColor;
+        if (!attr) return;
+        attr.array.fill(0);
+        attr.needsUpdate = true;
     }
 
     /**
