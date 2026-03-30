@@ -1340,7 +1340,8 @@ class GlyphRendererV15 {
                     options: item.options || {},
                     timestamp: Date.now(),
                     bufferStartIndex: meta.bufferStartIndex,
-                    glyphCount: meta.glyphCount
+                    glyphCount: meta.glyphCount,
+                    lineSlotOffsets: meta.lineSlotOffsets || null,
                 });
 
                 rendererIds.push(id);

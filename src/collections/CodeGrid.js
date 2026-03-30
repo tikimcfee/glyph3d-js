@@ -480,8 +480,29 @@ class CodeGrid extends THREE.Object3D {
         // Flush using worker pipeline
         await this._collection.flushAsync();
 
-        // Build line→slot index after flush
-        this._buildLineSlotBase();
+        // Build line→slot index from builder's authoritative line offsets.
+        // The content is the second item in the batch (after filename, if present).
+        // _contentTextIds[0] maps to the content item's metadata.
+        const contentItemMeta = this._getContentItemMeta();
+        this._buildLineSlotBase(contentItemMeta?.lineSlotOffsets);
+    }
+
+    /**
+     * Get the renderer's itemMeta for the content text entry.
+     * @private
+     * @returns {Object|null} itemMeta with lineSlotOffsets if available
+     */
+    _getContentItemMeta() {
+        if (this._contentTextIds.length === 0) return null;
+        const renderer = this._collection?.getRenderer();
+        if (!renderer) return null;
+
+        const collId = this._contentTextIds[0];
+        const rendId = this._collection._idMap?.get(collId);
+        if (rendId === undefined) return null;
+
+        const entry = renderer.renderedTexts.get(rendId);
+        return entry ?? null;
     }
 
     // ============ Line → Buffer Slot Mapping ============
@@ -494,50 +515,45 @@ class CodeGrid extends THREE.Object3D {
      * Must be called after every flush that rebuilds geometry.
      * @private
      */
-    _buildLineSlotBase() {
+    _buildLineSlotBase(builderLineSlotOffsets) {
         const content = this.content;
         if (!content) {
             this._lineSlotBase = null;
             return;
         }
 
-        // Find the base buffer slot for content text entries.
-        // Async path: single text entry for all content.
-        // Sync path: one text entry per non-empty line.
+        // Ensure this.lines is populated (async path doesn't split upfront)
+        if (this.lines.length === 0 && content.length > 0) {
+            this.lines = content.split('\n');
+        }
+
+        // If the builder provided line→slot offsets, use those directly.
+        // These are authoritative — computed in the same pass that built the buffers.
+        if (builderLineSlotOffsets) {
+            this._lineSlotBase = new Int32Array(builderLineSlotOffsets);
+            return;
+        }
+
+        // Fallback for sync path: derive from renderer's renderedTexts
         const renderer = this._collection.getRenderer();
         if (!renderer) {
             this._lineSlotBase = null;
             return;
         }
 
-        // Get the buffer start index for the first content text entry
-        let baseSlot = 0;
-        if (this._contentTextIds.length > 0) {
-            const firstCollId = this._contentTextIds[0];
-            const rendId = this._collection._idMap?.get(firstCollId);
-            if (rendId !== undefined) {
-                const entry = renderer.renderedTexts.get(rendId);
-                if (entry) baseSlot = entry.bufferStartIndex ?? 0;
+        // Sync path: one text entry per non-empty line
+        const lineSlotBase = new Int32Array(this.lines.length);
+        let textIdCursor = 0;
+        for (let i = 0; i < this.lines.length; i++) {
+            if (this.lines[i].length === 0 || textIdCursor >= this._contentTextIds.length) {
+                // Empty line or past entries — use previous line's end
+                lineSlotBase[i] = i > 0 ? lineSlotBase[i - 1] : 0;
+                continue;
             }
-        }
-
-        // Walk content, mirror the builder's skip logic to count visible glyphs
-        const lines = this.lines.length > 0 ? this.lines : content.split('\n');
-        const lineSlotBase = new Int32Array(lines.length);
-        let slotOffset = 0;
-
-        for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
-            lineSlotBase[lineIdx] = baseSlot + slotOffset;
-
-            const line = lines[lineIdx];
-            for (let c = 0; c < line.length; c++) {
-                const code = line.charCodeAt(c);
-                // Mirror builder skip logic: newline(10), space(32), CR(13), tab(9) don't get slots
-                if (code === 10 || code === 32 || code === 13 || code === 9) continue;
-                slotOffset++;
-            }
-            // The newline between lines is also skipped by the builder (charCode 10)
-            // — no slot increment needed
+            const collId = this._contentTextIds[textIdCursor++];
+            const rendId = this._collection._idMap?.get(collId);
+            const entry = rendId !== undefined ? renderer.renderedTexts.get(rendId) : null;
+            lineSlotBase[i] = entry ? (entry.bufferStartIndex ?? 0) : 0;
         }
 
         this._lineSlotBase = lineSlotBase;

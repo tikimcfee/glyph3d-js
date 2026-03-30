@@ -86,17 +86,21 @@ export function buildGlyphBuffers(input) {
     let y = position.y;
     const z = position.z;
 
+    // Track line→slot mapping: lineSlotOffsets[lineIdx] = buffer slot of first glyph on that line
+    const lineSlotOffsets = [0]; // line 0 starts at slot 0
+
     // Fill buffers in single pass
     let idx = 0;
     for (let i = 0; i < text.length; i++) {
         const charCode = text.charCodeAt(i);
 
-        // Newline - reset x, advance y
+        // Newline - reset x, advance y, record line boundary
         if (charCode === 10) {
             if (x > position.x) maxX = Math.max(maxX, x - metrics.letterSpacing);
             x = position.x;
             y -= metrics.lineSpacing;
             minY = y;
+            lineSlotOffsets.push(idx); // next line starts at current slot index
             continue;
         }
 
@@ -152,7 +156,7 @@ export function buildGlyphBuffers(input) {
         height: maxY - minY
     } : null;
 
-    return { positions, sizes, codepoints, colors, groupIds, count: idx, bounds };
+    return { positions, sizes, codepoints, colors, groupIds, count: idx, bounds, lineSlotOffsets };
 }
 
 /**
@@ -295,6 +299,9 @@ export function buildBatchBuffers(items, shared) {
         const startZ = pos.z;
         let charsOnSegment = 0;  // Track chars since last wrap/newline
 
+        // Track line→slot mapping within this item
+        const itemLineSlotOffsets = [bufferOffset]; // line 0 starts at current offset
+
         // Track per-item bounds for combined bounds
         let itemMinX = Infinity, itemMaxX = -Infinity;
         let itemMinY = y, itemMaxY = y + metrics.charHeight;
@@ -311,6 +318,7 @@ export function buildBatchBuffers(items, shared) {
                 z = startZ;  // Reset Z for new logical line
                 itemMinY = y;
                 charsOnSegment = 0;
+                itemLineSlotOffsets.push(bufferOffset); // next line starts here
                 continue;
             }
 
@@ -402,6 +410,7 @@ export function buildBatchBuffers(items, shared) {
         itemMeta[itemIdx] = {
             bufferStartIndex: itemStartOffset,
             glyphCount: itemGlyphCount,
+            lineSlotOffsets: itemLineSlotOffsets,
             bounds: itemGlyphCount > 0 ? {
                 min: { x: itemMinX, y: itemMinY, z: itemMinZ },
                 max: { x: itemMaxX, y: itemMaxY, z: itemMaxZ },
