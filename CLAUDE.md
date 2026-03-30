@@ -33,6 +33,14 @@ src/
 │   ├── GridLayoutManager.js   # Row/column/plane spatial positioning
 │   ├── HierarchicalLayoutManager.js  # Directory-tree layout mapping
 │   └── index.js
+├── tui/                       # 3D terminal window components
+│   ├── index.js               # Barrel export
+│   ├── TUIWindow.js           # Terminal pane backed by CodeGrid
+│   ├── TUIWindowManager.js    # Window lifecycle manager
+│   ├── TUIFocusManager.js     # Click-to-focus & keystroke routing
+│   └── TUIFormatter.js        # Box-drawing, tables, padding utilities
+├── components/
+│   └── MinimapOverlay.js      # 2D canvas minimap overlay
 ├── workers/
 │   ├── WorkerBridge.js        # Worker pool (round-robin, auto-fallback)
 │   ├── GlyphWorker.js         # Worker thread entry point
@@ -51,15 +59,46 @@ src/
 │   └── Camera.js
 └── utils/
     ├── index.js
+    ├── encoding.js            # UTF-8-safe base64 encode/decode
     ├── Logger.js              # Structured logging (DEBUG/INFO/WARN/ERROR)
     ├── Metrics.js             # Performance metric tracking
     ├── ErrorTracker.js        # Error aggregation & reporting
     ├── DebugConsole.js        # In-browser debug UI overlay
     └── FPSCounter.js          # Frame rate monitoring
 
+app/                           # IDE application (ivanlugo.dev/ide)
+├── ide.html                   # IDE shell entry point
+├── ide.css
+├── viewer.html                # GitHub 3D viewer entry point
+├── viewer.css
+├── IDEShell.js                # IDE chrome orchestrator
+├── GitHubRepoViewer.js        # Main viewer application
+├── StatePersistence.js        # localStorage state save/restore
+├── ws-relay.mjs               # Node.js WebSocket relay server
+├── ws-relay.py                # Python WebSocket relay server
+├── components/                # App-level UI components
+│   ├── AppShell.js
+│   ├── CommandBar.js
+│   ├── DiffPanel.js
+│   ├── Drawer.js
+│   ├── LogCapturePanel.js
+│   └── TouchController.js
+├── commands/                  # Command system (WebSocket + local)
+│   ├── index.js               # Command center bootstrapper
+│   └── handlers/              # Individual command modules
+│       ├── index.js
+│       └── ...Commands.js     # ~16 command handler files
+└── cli/                       # Node.js CLI client
+    ├── glyph-cli.mjs
+    └── ...
+
 examples/
-├── github-viewer/             # Load & visualize GitHub repos in 3D
-└── word-wall/                 # Dictionary word visualization
+├── word-wall/                 # Dictionary word visualization
+├── code-spectrometer/         # Periodic table of software concepts
+├── mod-layer-visualizer/      # Modular arithmetic grid visualizer
+├── hand-tracking/             # Hand pose visualization
+├── cross-ref-viz/             # Multi-agent cross-ref animation
+└── render-test/               # Automated rendering tests
 ```
 
 ## Key Architecture Concepts
@@ -95,8 +134,9 @@ npm install          # Install dependencies (pulls three.js as devDependency)
 npm run serve        # Start python3 HTTP server on port 8000
 ```
 
-Then open examples:
-- `http://localhost:8000/examples/github-viewer/`
+Then open:
+- `http://localhost:8000/app/ide.html`
+- `http://localhost:8000/app/viewer.html`
 - `http://localhost:8000/examples/word-wall/`
 
 There is no build step, test runner, or linter configured. Source files are served as-is.
@@ -118,7 +158,8 @@ There is no build step, test runner, or linter configured. Source files are serv
 import { ... } from 'glyph3d-js';             // Everything
 import { ... } from 'glyph3d-js/collections';  // GlyphCollection, CodeGrid, layout managers
 import { ... } from 'glyph3d-js/workers';      // WorkerBridge
-import { ... } from 'glyph3d-js/utils';        // Logger, Metrics, ErrorTracker, DebugConsole
+import { ... } from 'glyph3d-js/utils';        // Logger, Metrics, ErrorTracker, DebugConsole, encoding
+import { ... } from 'glyph3d-js/tui';          // TUIWindow, TUIWindowManager, TUIFocusManager, TUIFormatter
 ```
 
 ## Common Tasks

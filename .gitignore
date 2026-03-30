@@ -30,4 +30,5 @@ coverage/
 # Data
 examples/word-wall/generated_dictionary/
 examples/word-wall/data/
-coordinates.csv__pycache__/
+coordinates.csv
+__pycache__/

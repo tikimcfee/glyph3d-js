@@ -18,18 +18,20 @@
     "./services/interaction": "./src/services/interaction/index.js",
     "./services/camera": "./src/services/camera/index.js",
     "./services/data": "./src/services/data/index.js",
-    "./services/orchestration": "./src/services/orchestration/index.js"
+    "./services/orchestration": "./src/services/orchestration/index.js",
+    "./tui": "./src/tui/index.js"
   },
   "files": [
     "src",
+    "app",
     "examples"
   ],
   "scripts": {
     "serve": "python3 -m http.server 8000",
-    "ws": "node examples/github-viewer/ws-relay.mjs",
-    "ws:py": "python3 examples/github-viewer/ws-relay.py",
-    "relay": "node examples/github-viewer/ws-relay.mjs",
-    "cli": "node examples/github-viewer/cli/glyph-cli.mjs"
+    "ws": "node app/ws-relay.mjs",
+    "ws:py": "python3 app/ws-relay.py",
+    "relay": "node app/ws-relay.mjs",
+    "cli": "node app/cli/glyph-cli.mjs"
   },
   "keywords": [
     "three.js",

@@ -89,6 +89,9 @@ export function initObservability(options = {}) {
     };
 }
 
+// Re-export from encoding
+export { encodeBase64, decodeBase64 } from './encoding.js';
+
 // Default export
 export default {
     createLogger: LoggerModule.createLogger,
