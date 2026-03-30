@@ -18,6 +18,7 @@ import {
     StackLayoutManager
 } from '../src/index.js';
 
+import { PickingSystem } from '../src/picking/PickingSystem.js';
 import { SelectionManager } from '../src/services/interaction/SelectionManager.js';
 import { ShortcutManager } from '../src/services/interaction/ShortcutManager.js';
 import { TreemapLabelManager } from '../src/services/visual/TreemapLabelManager.js';
@@ -233,6 +234,12 @@ export class GitHubRepoViewer {
         this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 
         this.layoutManager = new GridLayoutManager();
+
+        // GPU picking system — character-level hit testing
+        this.pickingSystem = new PickingSystem(this.renderer, { resolutionScale: 0.5 });
+        this._lastPickHit = null;
+        this._lastPickSlot = -1;
+
         this.repoAdapter = new RepositoryAdapter();
         this.diffController = new DiffController({
             scene: this.scene,
@@ -541,6 +548,14 @@ export class GitHubRepoViewer {
         // Window resize (renderer-side only; camera-side handled by CameraController)
         window.addEventListener('resize', () => {
             this.renderer.setSize(window.innerWidth, window.innerHeight);
+            this.pickingSystem?.onResize();
+        });
+
+        // Picking system mouse wiring
+        this.canvas.addEventListener('mousemove', (e) => {
+            if (!this.pickingSystem) return;
+            const rect = this.canvas.getBoundingClientRect();
+            this.pickingSystem.setMousePosition(e.clientX - rect.left, e.clientY - rect.top);
         });
 
         // Settings sliders
@@ -1045,6 +1060,10 @@ export class GitHubRepoViewer {
     async createGridForFileAsync(path, content) {
         const filename = path.split('/').pop();
         const grid = new CodeGrid(this.scene, this.atlas);
+        // Wire picking before load so flush auto-registers
+        if (this.pickingSystem) {
+            grid.getCollection().setPickingSystem(this.pickingSystem);
+        }
         await grid.loadFileAsync(filename, content);
         grid.userData.sourcePath = path;
         return grid;
@@ -1600,6 +1619,26 @@ export class GitHubRepoViewer {
         // Phase 4: treemap labels LOD update
         if (this.treemapLabelManager) {
             this.treemapLabelManager.update();
+        }
+
+        // GPU picking pass (only runs when mouse has moved)
+        if (this.pickingSystem) {
+            const pickId = this.pickingSystem.renderAndRead(this.camera);
+            const hit = this.pickingSystem.resolve(pickId);
+
+            // Clear previous highlight
+            if (this._lastPickHit && this._lastPickSlot >= 0) {
+                this._lastPickHit.renderer.setGlyphHighlight(this._lastPickSlot, null);
+            }
+
+            if (hit) {
+                hit.renderer.setGlyphHighlight(hit.slotIndex, { r: 0.3, g: 0.3, b: 0.0 });
+                this._lastPickHit = hit;
+                this._lastPickSlot = hit.slotIndex;
+            } else {
+                this._lastPickHit = null;
+                this._lastPickSlot = -1;
+            }
         }
 
         this.renderer.render(this.scene, this.camera);
