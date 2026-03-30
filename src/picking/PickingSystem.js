@@ -16,10 +16,13 @@
 import * as THREE from 'three';
 
 // ---------------------------------------------------------------------------
-// Picking vertex shader — mirrors GlyphRenderer._getVertexShader() exactly
-// for positioning, plus atlas UV lookup for alpha testing.
+// Picking shaders — two modes:
+//   'cell'  (default) — solid quad, entire glyph cell is pickable
+//   'glyph'           — alpha-tested against atlas, only rendered strokes pick
 // ---------------------------------------------------------------------------
-const PICKING_VERTEX_SHADER = `
+
+// Shared vertex core — position + group visibility
+const PICKING_VERTEX_CORE = `
 precision highp float;
 
 attribute vec3 instancePosition;
@@ -29,7 +32,10 @@ attribute float instancePickingId;
 
 uniform sampler2D groupTexture;
 uniform float groupTextureHeight;
+`;
 
+// Cell mode: solid quads, no atlas sampling
+const PICKING_VERTEX_CELL = PICKING_VERTEX_CORE + `
 varying float vPickingId;
 
 void main() {
@@ -41,10 +47,7 @@ void main() {
     vec4 gScale = texture2D(groupTexture, vec2(0.875, v));
 
     float visible = step(0.01, gColor.a);
-    if (visible < 0.5) {
-        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
-        return;
-    }
+    if (visible < 0.5) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
 
     vec3 worldPos = scaled + instancePosition * gScale.xyz + gPos.xyz;
     gl_Position = projectionMatrix * modelViewMatrix * vec4(worldPos, 1.0);
@@ -52,14 +55,62 @@ void main() {
 }
 `;
 
-// ---------------------------------------------------------------------------
-// Picking fragment shader — solid quad, 24-bit ID as RGB.
-// No atlas sampling — the full glyph cell is pickable, not just the stroke.
-// ---------------------------------------------------------------------------
-const PICKING_FRAGMENT_SHADER = `
+const PICKING_FRAGMENT_CELL = `
 precision highp float;
 varying float vPickingId;
 void main() {
+    float id = vPickingId;
+    float r = floor(id / 65536.0);
+    float g = floor(mod(id, 65536.0) / 256.0);
+    float b = mod(id, 256.0);
+    gl_FragColor = vec4(r / 255.0, g / 255.0, b / 255.0, 1.0);
+}
+`;
+
+// Glyph mode: alpha-tested against atlas texture — only rendered strokes pick
+const PICKING_VERTEX_GLYPH = PICKING_VERTEX_CORE + `
+attribute float instanceCodepoint;
+
+uniform sampler2D atlasMapTexture;
+uniform float atlasMapWidth;
+uniform float atlasMapHeight;
+
+varying float vPickingId;
+varying highp vec2 vUV;
+
+void main() {
+    vec3 scaled = position * vec3(instanceSize, 1.0);
+
+    float v = (instanceGroupId + 0.5) / groupTextureHeight;
+    vec4 gPos   = texture2D(groupTexture, vec2(0.125, v));
+    vec4 gColor = texture2D(groupTexture, vec2(0.625, v));
+    vec4 gScale = texture2D(groupTexture, vec2(0.875, v));
+
+    float visible = step(0.01, gColor.a);
+    if (visible < 0.5) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
+
+    vec3 worldPos = scaled + instancePosition * gScale.xyz + gPos.xyz;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(worldPos, 1.0);
+    vPickingId = instancePickingId;
+
+    float cp = instanceCodepoint;
+    float mapCol = mod(cp, atlasMapWidth);
+    float mapRow = floor(cp / atlasMapWidth);
+    float tx = (mapCol + 0.5) / atlasMapWidth;
+    float ty = (mapRow + 0.5) / atlasMapHeight;
+    vec4 uvRect = texture2D(atlasMapTexture, vec2(tx, ty));
+    vUV = mix(uvRect.xy, uvRect.zw, uv);
+}
+`;
+
+const PICKING_FRAGMENT_GLYPH = `
+precision highp float;
+uniform sampler2D atlasTexture;
+varying float vPickingId;
+varying highp vec2 vUV;
+void main() {
+    float alpha = texture2D(atlasTexture, vUV).a;
+    if (alpha < 0.01) discard;
     float id = vPickingId;
     float r = floor(id / 65536.0);
     float g = floor(mod(id, 65536.0) / 256.0);
@@ -76,9 +127,17 @@ export class PickingSystem {
      * @param {Object} [options]
      * @param {number} [options.resolutionScale=1.0]
      */
+    /**
+     * @param {THREE.WebGLRenderer} threeRenderer
+     * @param {Object} [options]
+     * @param {number} [options.resolutionScale=1.0]
+     * @param {'cell'|'glyph'} [options.mode='cell'] - 'cell' picks the full glyph quad,
+     *   'glyph' alpha-tests against the atlas so only rendered strokes pick.
+     */
     constructor(threeRenderer, options = {}) {
         this._renderer = threeRenderer;
         this._scale = options.resolutionScale ?? 1.0;
+        this._mode = options.mode ?? 'cell';
 
         // Registry: [{ renderer, pickingMaterial, startId, endId }]
         this._registry = [];
@@ -170,15 +229,32 @@ export class PickingSystem {
         mesh.geometry.setAttribute('instancePickingId',
             new THREE.InstancedBufferAttribute(ids, 1));
 
-        // Create picking material — used during material-swap render pass.
-        // No atlas uniforms needed: the picking shader renders solid quads.
+        // Create picking material based on mode
+        const uniforms = {
+            groupTexture:       { value: glyphRenderer._groupTexture },
+            groupTextureHeight: { value: glyphRenderer._maxGroups },
+        };
+
+        let vertShader, fragShader;
+        if (this._mode === 'glyph') {
+            // Glyph mode: alpha-test against atlas — only strokes pick
+            const mainUniforms = mesh.material.uniforms;
+            uniforms.atlasTexture    = mainUniforms.atlasTexture;
+            uniforms.atlasMapTexture = mainUniforms.atlasMapTexture;
+            uniforms.atlasMapWidth   = mainUniforms.atlasMapWidth;
+            uniforms.atlasMapHeight  = mainUniforms.atlasMapHeight;
+            vertShader = PICKING_VERTEX_GLYPH;
+            fragShader = PICKING_FRAGMENT_GLYPH;
+        } else {
+            // Cell mode (default): solid quads — full cell is pickable
+            vertShader = PICKING_VERTEX_CELL;
+            fragShader = PICKING_FRAGMENT_CELL;
+        }
+
         const pickingMaterial = new THREE.ShaderMaterial({
-            uniforms: {
-                groupTexture:       { value: glyphRenderer._groupTexture },
-                groupTextureHeight: { value: glyphRenderer._maxGroups },
-            },
-            vertexShader:   PICKING_VERTEX_SHADER,
-            fragmentShader: PICKING_FRAGMENT_SHADER,
+            uniforms,
+            vertexShader: vertShader,
+            fragmentShader: fragShader,
             side: THREE.DoubleSide
         });
 
