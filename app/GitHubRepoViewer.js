@@ -1652,7 +1652,7 @@ export class GitHubRepoViewer {
 
         // GPU picking pass (only runs when mouse has moved)
         if (this.pickingSystem) {
-            const pickId = this.pickingSystem.renderAndRead(this.camera, this.scene);
+            const pickId = this.pickingSystem.renderAndRead(this.camera);
             const hit = this.pickingSystem.resolve(pickId);
 
             // Clear previous highlight (guard against disposed renderer)

@@ -220,30 +220,25 @@ export class PickingSystem {
     }
 
     // -------------------------------------------------------------------------
-    // Render pass — material-swap approach
+    // Render pass — direct draw with picking materials
     // -------------------------------------------------------------------------
 
     /**
-     * Render the main scene with picking materials swapped onto glyph meshes,
-     * read the pixel under the cursor, and return the decoded picking ID.
+     * Render each registered glyph mesh directly to the picking target using
+     * its picking material and its current world matrix from the main scene.
+     * No scene traversal, no material swap, no state mutation on the meshes.
+     *
+     * This mirrors the Metal approach: same geometry, same transforms, different
+     * shader — submitted as a second render pass without touching the scene graph.
      *
      * @param {THREE.Camera} camera
-     * @param {THREE.Scene} scene - The main scene (same one used for normal rendering)
      * @returns {number} Picking ID (0 = no hit)
      */
-    renderAndRead(camera, scene) {
+    renderAndRead(camera) {
         if (!this._needsPick) return this._lastPickedId;
         this._needsPick = false;
 
         const t0 = performance.now();
-
-        // Swap materials: main → picking
-        for (const entry of this._registry) {
-            const mesh = entry.renderer.instanceMesh;
-            if (!mesh) continue;
-            entry.savedMaterial = mesh.material;
-            mesh.material = entry.pickingMaterial;
-        }
 
         // Save and restore clear color
         const prevClearColor = new THREE.Color();
@@ -253,7 +248,27 @@ export class PickingSystem {
         this._renderer.setRenderTarget(this._target);
         this._renderer.setClearColor(0x000000, 1);
         this._renderer.clear();
-        this._renderer.render(scene, camera);
+
+        // Update camera matrices (may already be current from main render,
+        // but ensure they're fresh for the picking pass)
+        camera.updateMatrixWorld();
+
+        // Direct-draw each registered mesh with its picking material.
+        // renderBufferDirect uses the mesh's matrixWorld as-is — no scene
+        // graph traversal, no material mutation on the original mesh.
+        for (const entry of this._registry) {
+            const mesh = entry.renderer.instanceMesh;
+            if (!mesh) continue;
+            mesh.updateMatrixWorld(true);
+            this._renderer.renderBufferDirect(
+                camera,
+                null,              // no scene (no fog/env)
+                mesh.geometry,
+                entry.pickingMaterial,
+                mesh,              // object — provides matrixWorld
+                null               // group (draw the whole geometry)
+            );
+        }
 
         const tRender = performance.now();
 
@@ -272,14 +287,6 @@ export class PickingSystem {
 
         this._renderer.setRenderTarget(null);
         this._renderer.setClearColor(prevClearColor, prevClearAlpha);
-
-        // Swap materials back: picking → main
-        for (const entry of this._registry) {
-            const mesh = entry.renderer.instanceMesh;
-            if (!mesh || !entry.savedMaterial) continue;
-            mesh.material = entry.savedMaterial;
-            entry.savedMaterial = null;
-        }
 
         // Track timing
         this._lastRenderMs = tRender - t0;
