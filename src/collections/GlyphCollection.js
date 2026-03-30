@@ -968,6 +968,13 @@ class GlyphCollection {
     dispose() {
         this.clear();
 
+        // Unregister from picking system before disposing renderer
+        // (removes picking mesh from scene + registry entry)
+        if (this._renderer && this._pickingSystem) {
+            this._pickingSystem.unregisterRenderer(this._renderer);
+        }
+        this._pickingSystem = null;
+
         if (this._renderer) {
             this._renderer.dispose();
             this._renderer = null;

@@ -1079,6 +1079,11 @@ export class GitHubRepoViewer {
         if (this.hierarchicalManager) this.hierarchicalManager.clearAll();
         if (this.diffController) this.diffController.clearGrids();
 
+        // Clear picking state (grid.dispose() unregisters from PickingSystem,
+        // but the animate loop's cached hit must also be cleared)
+        this._lastPickHit = null;
+        this._lastPickSlot = -1;
+
         // Clean up visualization pipeline (clear data, keep managers alive)
         if (this.fileStateManager) this.fileStateManager.clear();
         if (this.codeColorManager) this.codeColorManager.resetAllColors();
@@ -1626,8 +1631,8 @@ export class GitHubRepoViewer {
             const pickId = this.pickingSystem.renderAndRead(this.camera);
             const hit = this.pickingSystem.resolve(pickId);
 
-            // Clear previous highlight
-            if (this._lastPickHit && this._lastPickSlot >= 0) {
+            // Clear previous highlight (guard against disposed renderer)
+            if (this._lastPickHit?.renderer?.instanceMesh && this._lastPickSlot >= 0) {
                 this._lastPickHit.renderer.setGlyphHighlight(this._lastPickSlot, null);
             }
 

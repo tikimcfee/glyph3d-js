@@ -1383,6 +1383,7 @@ class GlyphRendererV15 {
             this.scene.remove(this.instanceMesh);
             this.instanceMesh.geometry.dispose();
             this.instanceMesh.material.dispose();
+            this.instanceMesh = null;
         }
 
         // Don't dispose atlas texture - it's shared across all renderers
