@@ -21,7 +21,7 @@ src/
 ├── GlyphAtlas.js               # Font texture atlas (shelf-packing, Canvas 2D)
 ├── GlyphRenderer.js            # Core GPU-instanced renderer (v1.5)
 ├── core/
-│   ├── constants.js            # Shared constants (CHAR_DIMENSIONS, PERF_THRESHOLDS, DEBUG_SETTINGS)
+│   ├── constants.js            # Shared constants (PERF_THRESHOLDS, DEBUG_SETTINGS)
 │   ├── ShaderManager.js        # GLSL shader loading & caching
 │   └── InstanceBuffer.js       # Instance attribute array building
 ├── shaders/
@@ -39,6 +39,13 @@ src/
 │   ├── TUIWindowManager.js    # Window lifecycle manager
 │   ├── TUIFocusManager.js     # Click-to-focus & keystroke routing
 │   └── TUIFormatter.js        # Box-drawing, tables, padding utilities
+├── picking/
+│   ├── PickingSystem.js       # GPU picking via material-swap second render pass
+│   └── index.js
+├── semantic/
+│   ├── SemanticInfoMap.js     # Token-to-glyph mapping (pure data structure)
+│   ├── GlyphEvents.js         # Event types + bus for hover/click
+│   └── index.js
 ├── components/
 │   └── MinimapOverlay.js      # 2D canvas minimap overlay
 ├── workers/
@@ -87,12 +94,14 @@ app/                           # IDE application (ivanlugo.dev/ide)
 │   ├── index.js               # Command center bootstrapper
 │   └── handlers/              # Individual command modules
 │       ├── index.js
-│       └── ...Commands.js     # ~16 command handler files
+│       ├── highlightCommands.js  # Glyph-level highlight (char, range, line, token)
+│       └── ...Commands.js     # ~17 command handler files
 └── cli/                       # Node.js CLI client
     ├── glyph-cli.mjs
     └── ...
 
 examples/
+├── picking-test/              # GPU picking + highlight system test page
 ├── word-wall/                 # Dictionary word visualization
 ├── code-spectrometer/         # Periodic table of software concepts
 ├── mod-layer-visualizer/      # Modular arithmetic grid visualizer
@@ -108,8 +117,27 @@ examples/
 2. **GlyphCollection** (or **GlyphRenderer**) batches text operations with deferred updates
 3. **WorkerBridge** optionally offloads buffer computation to Web Workers
 4. **Buffer Builders** do single-pass text → Float32Array conversion (zero-allocation hot paths)
-5. **ShaderManager** loads GLSL shaders; the vertex/fragment shaders handle per-instance rendering
+5. Shaders are inline strings in GlyphRenderer.js (vertex + fragment); handle per-instance rendering
 6. Everything renders as a single Three.js instanced draw call
+
+### Instance Attributes (14 floats = 56 bytes/glyph)
+- `instancePosition` vec3, `instanceSize` vec2, `instanceCodepoint` float
+- `instanceColor` vec3, `instanceGroupId` float
+- `instanceAddedColor` vec3 (additive highlight), `instancePickingId` float (GPU picking)
+
+### GPU Picking System (src/picking/PickingSystem.js)
+- Material-swap second render pass: swaps picking shaders onto glyph meshes, renders same scene to offscreen RGBA8 target, reads 1 pixel, swaps back
+- 24-bit picking ID encoded as RGB per glyph quad (16M unique IDs)
+- Only runs when mouse has moved (`needsPick` dirty flag)
+- Auto-resizes render target to match canvas
+- `resolve(pickingId)` → `{ renderer, slotIndex }`, `resolveGlyph()` → `{ textId, charIndex }`
+- Two modes: `'cell'` (full quad, default) or `'glyph'` (alpha-tested against atlas strokes)
+
+### Glyph Highlighting
+- `CodeGrid._lineSlotBase`: Int32Array mapping line→buffer slot, built by the buffer builder in the same render pass (lineSlotOffsets in itemMeta)
+- `CodeGrid.highlightRange(startLine, startCol, endLine, endCol, color)` — additive color
+- `GlyphRenderer.setGlyphHighlight(bufferSlotIndex, color)` — single-glyph direct buffer write
+- All metrics derived from GlyphAtlas at runtime — no hardcoded character dimensions
 
 ### Deferred Pattern
 Operations like `addText()` are queued. Nothing hits the GPU until `flush()` is called. This allows batching and right-sizing buffers.
@@ -122,10 +150,10 @@ Operations like `addText()` are queued. Nothing hits the GPU until `flush()` is 
 - UV map caching to avoid redundant transfers
 
 ### Key Constants (src/core/constants.js)
-- `CHAR_DIMENSIONS`: Fallback glyph size (0.6 x 1.0 world units)
 - `PERF_THRESHOLDS.maxInstancesPerMesh`: 10,000 (auto-splits beyond)
 - `PERF_THRESHOLDS.targetFPS`: 60
 - `DEBUG_SETTINGS`: Controlled via `process.env.DEBUG_RENDERING`
+- Character dimensions are NOT constants — derived from GlyphAtlas at runtime
 
 ## Development Commands
 
@@ -160,6 +188,8 @@ import { ... } from 'glyph3d-js/collections';  // GlyphCollection, CodeGrid, lay
 import { ... } from 'glyph3d-js/workers';      // WorkerBridge
 import { ... } from 'glyph3d-js/utils';        // Logger, Metrics, ErrorTracker, DebugConsole, encoding
 import { ... } from 'glyph3d-js/tui';          // TUIWindow, TUIWindowManager, TUIFocusManager, TUIFormatter
+import { PickingSystem } from 'glyph3d-js/picking';  // GPU glyph picking
+import { SemanticInfoMap, GlyphEventBus } from 'glyph3d-js/semantic';  // Token mapping, events
 ```
 
 ## Common Tasks
@@ -183,3 +213,14 @@ Add functions in `src/workers/builders/`. These must be pure functions with no D
 - The max instances per mesh is 10,000; exceeding this auto-splits into multiple meshes
 - Long lines wrap in Z-depth to keep content spatially compact
 - GlyphCollection uses dirty tracking to avoid redundant GPU uploads
+- Per-glyph cost: 56 bytes (14 floats across 7 instance attributes)
+- Picking pass only runs on mousemove (zero cost when pointer is stationary)
+- Atlas map DataTexture covers full Unicode range (17 MB) — optimization target
+- At 200 files × 4K glyphs: ~48 MB total GPU (buffers + atlas + picking target)
+
+## Deployment
+
+- Production: `ivanlugo.dev/ide` served by Caddy from `/srv/www/g3d/app/`
+- Server: the host `your-server` (0.0.0.0), SSH via `ssh your-server`
+- Caddy config: `/etc/caddy/Caddyfile`
+- Deploy: `git pull` on server, Caddy serves static files
