@@ -20,7 +20,7 @@
  *   sm.detach();  // on cleanup
  */
 
-import { isMac } from './platform.js';
+import { isMac } from '../utils/platform.js';
 
 export class ShortcutManager {
     constructor() {

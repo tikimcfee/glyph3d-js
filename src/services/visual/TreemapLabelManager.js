@@ -24,7 +24,7 @@
  * Do NOT import from src/workers/builders/ here — this runs in browser context.
  */
 
-import { GlyphCollection } from '../../src/index.js';
+import { GlyphCollection } from '../../index.js';
 
 // Camera Z thresholds for LOD switching
 const DIR_VISIBLE_MIN_Z   = 100;    // directory labels visible above this Z

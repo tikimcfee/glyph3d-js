@@ -9,7 +9,7 @@
  */
 
 import * as THREE from 'three';
-import { CodeGrid } from '../../src/index.js';
+import { CodeGrid } from '../../index.js';
 
 /**
  * @typedef {Object} NameplateOptions

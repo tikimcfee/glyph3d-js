@@ -34,10 +34,10 @@
  *   Callers only need to call `update(frames, deltaTime)` each frame.
  */
 
-import HandRenderer from '../../src/hand/HandRenderer.js';
-import GestureDetector from '../../src/hand/GestureDetector.js';
-import MockHandSource from '../../src/hand/MockHandSource.js';
-import { Joint, landmarkDistance } from '../../src/hand/HandData.js';
+import HandRenderer from '../../hand/HandRenderer.js';
+import GestureDetector from '../../hand/GestureDetector.js';
+import MockHandSource from '../../hand/MockHandSource.js';
+import { Joint, landmarkDistance } from '../../hand/HandData.js';
 
 // ── Tuning constants ──────────────────────────────────────────────────────────
 
@@ -144,7 +144,7 @@ class HandGestureAdapter {
             this._source = new MockHandSource({ canvas: this._canvas, ...sourceOptions });
         } else if (sourceType === 'websocket') {
             // Dynamic import to avoid hard dependency when not used
-            import('../../src/hand/WebSocketHandSource.js').then(({ default: WebSocketHandSource }) => {
+            import('../../hand/WebSocketHandSource.js').then(({ default: WebSocketHandSource }) => {
                 this._source = new WebSocketHandSource({
                     url: sourceOptions.url || 'ws://localhost:8765',
                     ...sourceOptions,

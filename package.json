@@ -10,7 +10,15 @@
     "./collections": "./src/collections/index.js",
     "./workers": "./src/workers/WorkerBridge.js",
     "./utils": "./src/utils/index.js",
-    "./hand": "./src/hand/index.js"
+    "./hand": "./src/hand/index.js",
+    "./services": "./src/services/index.js",
+    "./services/utils": "./src/services/utils/index.js",
+    "./services/state": "./src/services/state/index.js",
+    "./services/visual": "./src/services/visual/index.js",
+    "./services/interaction": "./src/services/interaction/index.js",
+    "./services/camera": "./src/services/camera/index.js",
+    "./services/data": "./src/services/data/index.js",
+    "./services/orchestration": "./src/services/orchestration/index.js"
   },
   "files": [
     "src",

@@ -9,8 +9,8 @@
  * 5. Layout grid pairs in 3D space
  */
 
-import { CodeGrid, GridLayoutManager } from '../../src/index.js';
-import { buildAlignedDiff, parsePatchAligned, getDiffColor } from './DiffParser.js';
+import { CodeGrid, GridLayoutManager } from '../../index.js';
+import { buildAlignedDiff, parsePatchAligned, getDiffColor } from '../state/DiffParser.js';
 
 /**
  * Color constants for diff grid backgrounds

@@ -1,5 +1,5 @@
 /**
- * CameraController — extracted camera subsystem
+ * ViewerCameraController — extracted camera subsystem
  *
  * Translation-first navigation: click-drag pans, scroll zooms,
  * WASD translates in camera-relative directions.
@@ -11,7 +11,7 @@
  * Emits 'camera-focus-changed' window events for tree UI sync.
  */
 
-import { primaryMod, secondaryMod } from './platform.js';
+import { primaryMod, secondaryMod } from '../utils/platform.js';
 
 const STORAGE_KEY = 'glyph3d-camera-settings';
 
@@ -39,7 +39,7 @@ function saveSettings(settings) {
     } catch { /* ignore */ }
 }
 
-export class CameraController {
+export class ViewerCameraController {
     /**
      * @param {SceneContext} ctx
      */
@@ -594,4 +594,4 @@ export class CameraController {
     }
 }
 
-export default CameraController;
+export default ViewerCameraController;
