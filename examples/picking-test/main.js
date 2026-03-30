@@ -197,7 +197,7 @@ function animate() {
     requestAnimationFrame(animate);
 
     // Run picking pass and read result
-    const hoverId = pickingSystem.renderAndRead(camera);
+    const hoverId = pickingSystem.renderAndRead(camera, scene);
 
     // Update hover info
     if (hoverId !== lastHoverId) {
@@ -284,7 +284,7 @@ function testPhase2() {
     const prev = renderer.domElement.onmousemove;
     let testCount = 0;
     const logHover = () => {
-        const id = pickingSystem.renderAndRead(camera);
+        const id = pickingSystem.renderAndRead(camera, scene);
         if (id !== 0 && testCount < 5) {
             const hit = pickingSystem.resolve(id);
             const glyph = hit ? pickingSystem.resolveGlyph(hit.renderer, hit.slotIndex) : null;

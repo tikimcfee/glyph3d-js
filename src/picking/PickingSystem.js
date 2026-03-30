@@ -101,10 +101,6 @@ export class PickingSystem {
         // Registry: [{ renderer, pickingMaterial, startId, endId }]
         this._registry = [];
 
-        // Empty scene used to initialize Three.js render state before
-        // renderBufferDirect calls (which require an active render state)
-        this._emptyScene = new THREE.Scene();
-
         // Persist counter across hot-reload
         this._nextPickingId = (window.__glyph3dPickingIdCounter || 1);
 
@@ -224,25 +220,34 @@ export class PickingSystem {
     }
 
     // -------------------------------------------------------------------------
-    // Render pass — direct draw with picking materials
+    // Render pass — material swap on the main scene
     // -------------------------------------------------------------------------
 
     /**
-     * Render each registered glyph mesh directly to the picking target using
-     * its picking material and its current world matrix from the main scene.
-     * No scene traversal, no material swap, no state mutation on the meshes.
+     * Swap picking materials onto registered glyph meshes, render the main
+     * scene to the picking target, read the pixel under the cursor, swap back.
      *
-     * This mirrors the Metal approach: same geometry, same transforms, different
-     * shader — submitted as a second render pass without touching the scene graph.
+     * The meshes stay in the main scene graph with their real transforms —
+     * the picking texture is a pixel-perfect spatial mirror of the visible
+     * render. The swap is just JS property assignments (no GPU work).
      *
      * @param {THREE.Camera} camera
+     * @param {THREE.Scene} scene - The main scene
      * @returns {number} Picking ID (0 = no hit)
      */
-    renderAndRead(camera) {
+    renderAndRead(camera, scene) {
         if (!this._needsPick) return this._lastPickedId;
         this._needsPick = false;
 
         const t0 = performance.now();
+
+        // Swap materials: main → picking
+        for (const entry of this._registry) {
+            const mesh = entry.renderer.instanceMesh;
+            if (!mesh) continue;
+            entry._savedMaterial = mesh.material;
+            mesh.material = entry.pickingMaterial;
+        }
 
         // Save and restore clear color
         const prevClearColor = new THREE.Color();
@@ -252,29 +257,7 @@ export class PickingSystem {
         this._renderer.setRenderTarget(this._target);
         this._renderer.setClearColor(0x000000, 1);
         this._renderer.clear();
-
-        // Initialize Three.js render state (required by renderBufferDirect)
-        // Rendering an empty scene is the cheapest way to set up the internal
-        // currentRenderState, program caches, and uniform bindings.
-        camera.updateMatrixWorld();
-        this._renderer.render(this._emptyScene, camera);
-
-        // Direct-draw each registered mesh with its picking material.
-        // renderBufferDirect uses the mesh's matrixWorld as-is — no scene
-        // graph traversal, no material mutation on the original mesh.
-        for (const entry of this._registry) {
-            const mesh = entry.renderer.instanceMesh;
-            if (!mesh) continue;
-            mesh.updateMatrixWorld(true);
-            this._renderer.renderBufferDirect(
-                camera,
-                null,              // no scene (no fog/env)
-                mesh.geometry,
-                entry.pickingMaterial,
-                mesh,              // object — provides matrixWorld
-                null               // group (draw the whole geometry)
-            );
-        }
+        this._renderer.render(scene, camera);
 
         const tRender = performance.now();
 
@@ -293,6 +276,14 @@ export class PickingSystem {
 
         this._renderer.setRenderTarget(null);
         this._renderer.setClearColor(prevClearColor, prevClearAlpha);
+
+        // Swap materials back: picking → main
+        for (const entry of this._registry) {
+            const mesh = entry.renderer.instanceMesh;
+            if (!mesh || !entry._savedMaterial) continue;
+            mesh.material = entry._savedMaterial;
+            entry._savedMaterial = null;
+        }
 
         // Track timing
         this._lastRenderMs = tRender - t0;
