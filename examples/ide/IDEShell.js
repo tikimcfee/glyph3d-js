@@ -26,7 +26,7 @@ import {
 } from '../github-viewer/components/Drawer.js';
 import { logCapturePanelHTML } from '../github-viewer/components/LogCapturePanel.js';
 import { diffPanelHTML } from '../github-viewer/components/DiffPanel.js';
-import { primaryMod } from '../github-viewer/platform.js';
+import { primaryMod } from '../../src/services/utils/platform.js';
 
 // Panel title labels keyed by data-panel attribute
 const PANEL_TITLES = {
@@ -869,7 +869,7 @@ export class IDEShell {
         // The log capture panel was injected into pv-console.
         // initLogCapturePanel expects the panel element.
         // We import it dynamically to avoid circular deps.
-        import('./components/LogCapturePanel.js').then(({ initLogCapturePanel }) => {
+        import('../github-viewer/components/LogCapturePanel.js').then(({ initLogCapturePanel }) => {
             const consoleView = document.getElementById('pv-console');
             if (consoleView) {
                 initLogCapturePanel(consoleView);

@@ -7,9 +7,9 @@
  * Exposes `window.viewer` for devtools/agent access.
  */
 
-import CommandRouter from './CommandRouter.js';
-import WebSocketBridge from './WebSocketBridge.js';
-import ViewerAPI from './ViewerAPI.js';
+import CommandRouter from '../../../src/services/orchestration/CommandRouter.js';
+import WebSocketBridge from '../../../src/services/orchestration/WebSocketBridge.js';
+import ViewerAPI from '../../../src/services/orchestration/ViewerAPI.js';
 import { registerAllCommands } from './commands/index.js';
 
 /**

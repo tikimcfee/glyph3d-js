@@ -12,7 +12,7 @@
  * All buffer edits go through TUIWindow's public editing API:
  *   win.insertChar(), win.deleteChar(), win.splitLine(), win.getLine(), win.setLine()
  */
-import { primaryMod } from '../platform.js';
+import { primaryMod } from '../../../src/services/utils/platform.js';
 
 import { CHAR_DIMENSIONS } from '../../../src/core/constants.js';
 

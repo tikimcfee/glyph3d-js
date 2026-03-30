@@ -13,7 +13,7 @@
  *
  * Works even when WebSocket is disconnected -- local commands execute directly.
  */
-import { primaryMod } from '../../github-viewer/platform.js';
+import { primaryMod } from '../../../src/services/utils/platform.js';
 
 import { encodeBase64 } from '../../github-viewer/websocket/commands/encoding.js';
 

@@ -18,20 +18,20 @@ import {
     StackLayoutManager
 } from '../../src/index.js';
 
-import { SelectionManager } from './SelectionManager.js';
-import { ShortcutManager } from './ShortcutManager.js';
-import { TreemapLabelManager } from './TreemapLabelManager.js';
+import { SelectionManager } from '../../src/services/interaction/SelectionManager.js';
+import { ShortcutManager } from '../../src/services/interaction/ShortcutManager.js';
+import { TreemapLabelManager } from '../../src/services/visual/TreemapLabelManager.js';
 import { MinimapOverlay } from './components/MinimapOverlay.js';
-import { RepositoryAdapter } from './RepositoryAdapter.js';
-import { GitHubRepositorySource } from './GitHubRepositorySource.js';
-import { DiffController } from './DiffController.js';
-import { BackdropManager } from './BackdropManager.js';
-import { NameplateManager } from './NameplateManager.js';
-import { SceneContext } from './SceneContext.js';
-import { CameraController } from './CameraController.js';
-import { FileStateManager } from './FileStateManager.js';
-import { CodeColorManager } from './CodeColorManager.js';
-import { HeatmapProvider } from './providers/HeatmapProvider.js';
+import { RepositoryAdapter } from '../../src/services/data/RepositoryAdapter.js';
+import { GitHubRepositorySource } from '../../src/services/data/GitHubRepositorySource.js';
+import { DiffController } from '../../src/services/orchestration/DiffController.js';
+import { BackdropManager } from '../../src/services/visual/BackdropManager.js';
+import { NameplateManager } from '../../src/services/visual/NameplateManager.js';
+import { SceneContext } from '../../src/services/SceneContext.js';
+import { ViewerCameraController } from '../../src/services/camera/ViewerCameraController.js';
+import { FileStateManager } from '../../src/services/state/FileStateManager.js';
+import { CodeColorManager } from '../../src/services/interaction/CodeColorManager.js';
+import { HeatmapProvider } from '../../src/services/data/HeatmapProvider.js';
 
 import { createHeader, createLoadingOverlay, createFPSBadge, createToast } from './components/AppShell.js';
 import {
@@ -46,9 +46,9 @@ import { TouchController } from './components/TouchController.js';
 import { logCapturePanelHTML, initLogCapturePanel } from './components/LogCapturePanel.js';
 import { diffPanelHTML, initDiffPanel } from './components/DiffPanel.js';
 import { StatePersistence, resetAllAndReload } from './StatePersistence.js';
-import { HandGestureAdapter } from './HandGestureAdapter.js';
+import { HandGestureAdapter } from '../../src/services/orchestration/HandGestureAdapter.js';
 import { initCommandCenter } from './websocket/index.js';
-import SceneRegistry from './websocket/SceneRegistry.js';
+import SceneRegistry from '../../src/services/SceneRegistry.js';
 
 /**
  * Parse GitHub URL to owner/repo
@@ -254,7 +254,7 @@ export class GitHubRepoViewer {
         this.sceneContext.layoutManager = this.layoutManager;
 
         // Camera controller (replaces inline camera state + listeners)
-        this.cameraController = new CameraController(this.sceneContext);
+        this.cameraController = new ViewerCameraController(this.sceneContext);
         this.cameraController.setupEventListeners();
 
         // Touch controls (pass cameraController — it owns yaw, pitch, cameraSpeed, camera)
