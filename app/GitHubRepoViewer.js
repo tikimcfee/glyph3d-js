@@ -553,37 +553,17 @@ export class GitHubRepoViewer {
             this.pickingSystem?.onResize();
         });
 
-        // Picking system mouse wiring — use document-level listener so
-        // pointer lock and UI overlays don't block canvas mousemove
-        this._pickingMouseCount = 0;
+        // Picking system mouse wiring — document-level so pointer lock
+        // and UI overlays don't block canvas mousemove
         document.addEventListener('mousemove', (e) => {
             if (!this.pickingSystem) return;
-            this._pickingMouseCount++;
             const rect = this.canvas.getBoundingClientRect();
             const cssX = e.clientX - rect.left;
             const cssY = e.clientY - rect.top;
-            // Only pick when mouse is over the canvas area
             if (cssX >= 0 && cssY >= 0 && cssX <= rect.width && cssY <= rect.height) {
                 this.pickingSystem.setMousePosition(cssX, cssY);
             }
         });
-        // DEBUG: verify picking system state after first repo load
-        window._pickingDebug = () => {
-            const ps = this.pickingSystem;
-            const rect = this.canvas.getBoundingClientRect();
-            const v2 = new this.THREE.Vector2();
-            const rendererSize = this.renderer.getSize(v2);
-            console.log('[Picking Debug]', {
-                registry: ps._registry.length,
-                mousePixel: { ...ps._mousePixel },
-                targetSize: `${ps._target?.width}x${ps._target?.height}`,
-                rendererSize: `${rendererSize.x}x${rendererSize.y}`,
-                canvasCSS: `${rect.width}x${rect.height}`,
-                canvasOffset: `left=${rect.left} top=${rect.top}`,
-                lastPickedId: ps._lastPickedId,
-                dpr: window.devicePixelRatio,
-            });
-        };
 
         // Settings sliders
         const gridsScaleSlider = document.getElementById('grids-scale');
