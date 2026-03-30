@@ -29,7 +29,7 @@ self.onmessage = function(event) {
                 const result = buildGlyphBuffers(payload);
                 // [GPU-Lookup] Transfer codepoints buffer (not UVs) — main thread
                 // renderer will bind it as instanceCodepoint; shader resolves UV.
-                console.debug(`[GPU-Lookup] GlyphWorker BUILD: transferring codepoints (${result.count} glyphs)`);
+                // console.debug(`[GlyphWorker] BUILD: ${result.count} glyphs`);
                 self.postMessage(
                     { type: 'RESULT', jobId, buffers: result },
                     [
@@ -61,7 +61,7 @@ self.onmessage = function(event) {
                 // [GPU-Lookup] Transfer codepoints buffer (not UVs) — main thread
                 // renderer will bind it as instanceCodepoint; shader resolves UV.
                 // itemMeta goes through structured clone; Float32Arrays are zero-copy.
-                console.debug(`[GPU-Lookup] GlyphWorker BUILD_BATCH: transferring codepoints (${result.count} glyphs, ${payload.items.length} items)`);
+                // console.debug(`[GlyphWorker] BUILD_BATCH: ${result.count} glyphs, ${payload.items.length} items`);
                 self.postMessage(
                     { type: 'RESULT', jobId, buffers: result },
                     [

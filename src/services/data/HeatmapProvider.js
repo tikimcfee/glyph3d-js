@@ -115,7 +115,7 @@ export class HeatmapProvider {
 
         // Phase 4: Batch write to FileStateManager
         const metrics = [...updates.values()].map(u => u.heatMetric);
-        console.log(`[HeatmapProvider] ${updates.size} files, heat range: ${Math.min(...metrics).toFixed(3)}..${Math.max(...metrics).toFixed(3)}`);
+        console.debug(`[HeatmapProvider] ${updates.size} files, heat range: ${Math.min(...metrics).toFixed(3)}..${Math.max(...metrics).toFixed(3)}`);
         this.fileStateManager.batchSetProperties(updates);
     }
 

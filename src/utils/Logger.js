@@ -6,19 +6,21 @@
  */
 
 const LogLevel = {
-    DEBUG: 0,
-    INFO: 1,
-    WARN: 2,
-    ERROR: 3,
-    METRIC: 4
+    TRACE: 0,
+    DEBUG: 1,
+    INFO: 2,
+    WARN: 3,
+    ERROR: 4,
+    METRIC: 5
 };
 
 const LogLevelNames = {
-    0: 'DEBUG',
-    1: 'INFO',
-    2: 'WARN',
-    3: 'ERROR',
-    4: 'METRIC'
+    0: 'TRACE',
+    1: 'DEBUG',
+    2: 'INFO',
+    3: 'WARN',
+    4: 'ERROR',
+    5: 'METRIC'
 };
 
 class Logger {
@@ -28,7 +30,7 @@ class Logger {
      * @param {Logger} parent - Parent logger (for hierarchical naming)
      * @param {number} minLevel - Minimum log level to display (default: DEBUG)
      */
-    constructor(name, parent = null, minLevel = LogLevel.DEBUG) {
+    constructor(name, parent = null, minLevel = LogLevel.INFO) {
         this.name = name;
         this.parent = parent;
         this.minLevel = minLevel;
@@ -116,6 +118,13 @@ class Logger {
         const hasContext = Object.keys(context).length > 0;
 
         switch (level) {
+            case LogLevel.TRACE:
+                if (hasContext) {
+                    console.debug(prefix, message, context);
+                } else {
+                    console.debug(prefix, message);
+                }
+                break;
             case LogLevel.DEBUG:
                 if (hasContext) {
                     console.debug(prefix, message, context);
@@ -155,7 +164,16 @@ class Logger {
     }
 
     /**
-     * Log debug message (verbose, development-only details)
+     * Log trace message (per-object, per-frame, per-batch details)
+     * @param {string} message - Log message
+     * @param {Object} context - Additional context data
+     */
+    trace(message, context = {}) {
+        this._log(LogLevel.TRACE, message, context);
+    }
+
+    /**
+     * Log debug message (subsystem lifecycle, phase timing)
      * @param {string} message - Log message
      * @param {Object} context - Additional context data
      */
@@ -256,7 +274,7 @@ const loggers = new Map();
  * @param {number} minLevel - Minimum log level (optional)
  * @returns {Logger} Logger instance
  */
-export function createLogger(name, minLevel = LogLevel.DEBUG) {
+export function createLogger(name, minLevel = LogLevel.INFO) {
     if (!loggers.has(name)) {
         loggers.set(name, new Logger(name, null, minLevel));
     }

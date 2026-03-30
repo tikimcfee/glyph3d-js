@@ -100,7 +100,7 @@ export class DiffController {
         // Phase 2: Fetch changed files list with patches
         onProgress(0.1, `Fetching changed files...`);
         this.fileData = await this.githubSource.fetchPullRequestFiles(owner, repo, prNumber);
-        console.log(`[Diff] ${this.fileData.length} changed files fetched`);
+        console.debug(`[Diff] ${this.fileData.length} changed files fetched`);
 
         // Phase 3: Fetch full file contents for base and head versions (parallel)
         onProgress(0.15, `Fetching file contents (${this.fileData.length} files)...`);
@@ -139,7 +139,7 @@ export class DiffController {
         }
 
         onProgress(1.0, 'Done');
-        console.log(`[Diff] Created ${this.grids.length} grids (${gridPairs.length} pairs)`);
+        console.debug(`[Diff] Created ${this.grids.length} grids (${gridPairs.length} pairs)`);
 
         return {
             grids: this.grids,

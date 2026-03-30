@@ -93,7 +93,7 @@ class GlyphRendererV15 {
         this.textsByMesh = new WeakMap();    // mesh -> Set<id>
         this.nextId = 1;
 
-        logger.info('Initialized', {
+        logger.trace('Initialized', {
             atlas: `${this.atlas.getAtlasTexture().width}x${this.atlas.getAtlasTexture().height}`,
             fontPixels: `${this.metrics.pixelWidth}x${this.metrics.pixelHeight}px`,
             worldUnits: `${this.metrics.charWidth.toFixed(3)}x${this.metrics.charHeight.toFixed(3)}`,
@@ -188,7 +188,7 @@ class GlyphRendererV15 {
         const atlasMapDims = this.atlas.getAtlasMapDimensions();
         if (!GlyphRendererV15._gpuLookupLogged) {
             GlyphRendererV15._gpuLookupLogged = true;
-            logger.info('[GPU-Lookup] Pipeline active: instanceCodepoint attribute + atlasMapTexture DataTexture for UV resolution.', {
+            logger.debug('[GPU-Lookup] Pipeline active: instanceCodepoint + atlasMapTexture', {
                 atlasMapDims,
                 glyphsInMap: this.atlas.uvMap.size
             });
@@ -1260,7 +1260,7 @@ class GlyphRendererV15 {
             this._groupTexture = null;
         }
 
-        logger.info('Disposed');
+        logger.trace('Disposed');
     }
 }
 

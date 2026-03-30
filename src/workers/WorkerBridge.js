@@ -78,7 +78,7 @@ export class WorkerBridge {
             }
         }
 
-        console.log(`[GPU-Lookup] WorkerBridge: Initialized ${this.workers.length} workers. Workers will build codepoints buffers (not UV buffers) for GPU-side atlas lookup.`);
+        console.debug(`[WorkerBridge] Initialized ${this.workers.length} workers`);
         this._initialized = true;
     }
 

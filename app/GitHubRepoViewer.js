@@ -879,7 +879,7 @@ export class GitHubRepoViewer {
             this.loading.show(`Fetching repository tree (${branch})...`);
 
             const treeResult = await this.repoAdapter.getRepositoryTree(owner, repo, branch);
-            console.log(`Found ${treeResult.tree.length} files`);
+            console.debug(`Found ${treeResult.tree.length} files`);
 
             const sourceFiles = this.repoAdapter.filterCodeFiles(treeResult);
             this.tree = sourceFiles;
@@ -895,7 +895,7 @@ export class GitHubRepoViewer {
             const fileMap = await this.repoAdapter.getMultipleFiles(owner, repo, paths, branch);
 
             const fetchTime = performance.now() - fetchStart;
-            console.log(`[1] Parallel fetch: ${sourceFiles.length} files in ${fetchTime.toFixed(0)}ms`);
+            console.debug(`[1] Parallel fetch: ${sourceFiles.length} files in ${fetchTime.toFixed(0)}ms`);
 
             // Phase 2: Create grids using Web Workers
             const gridStart = performance.now();
@@ -911,7 +911,7 @@ export class GitHubRepoViewer {
 
             const createdGrids = await Promise.all(gridPromises);
             const gridTime = performance.now() - gridStart;
-            console.log(`[2] Grid creation (Workers): ${createdGrids.length} grids in ${gridTime.toFixed(0)}ms`);
+            console.debug(`[2] Grid creation: ${createdGrids.length} grids in ${gridTime.toFixed(0)}ms`);
 
             // Phase 2b: Layout
             const layoutStart = performance.now();
@@ -966,11 +966,8 @@ export class GitHubRepoViewer {
                 this.sceneContext.stackManager = null;
             }
 
-            console.log('Directory structure:');
-            this.hierarchicalManager.printTree();
-
             const layoutTime = performance.now() - layoutStart;
-            console.log(`[2b] Hierarchical layout: ${createdGrids.length} grids in ${layoutTime.toFixed(0)}ms`);
+            console.debug(`[2b] Layout: ${createdGrids.length} grids in ${layoutTime.toFixed(0)}ms`);
 
             // Phase 2c: Create visual overlays (backdrops + nameplates)
             const overlayStart = performance.now();
@@ -981,39 +978,38 @@ export class GitHubRepoViewer {
                 this._updateOverlays();
             }
             const overlayTime = performance.now() - overlayStart;
-            console.log(`[2c] Visual overlays: ${overlayTime.toFixed(0)}ms`);
+            console.debug(`[2c] Overlays: ${overlayTime.toFixed(0)}ms`);
 
             // Phase 2d: Compute heatmap metrics → triggers CodeColorManager coloring
             const heatStart = performance.now();
             this.heatmapProvider = new HeatmapProvider(this.sceneContext, this.fileStateManager);
             this.heatmapProvider.computeMetrics();
             const heatTime = performance.now() - heatStart;
-            console.log(`[2d] Heatmap metrics: ${heatTime.toFixed(0)}ms`);
+            console.debug(`[2d] Heatmap: ${heatTime.toFixed(0)}ms`);
 
             // Phase 3: UI updates - hierarchical file tree
             const uiStart = performance.now();
             this.updateFileTree();
             const uiTime = performance.now() - uiStart;
-            console.log(`[3] File tree UI: ${uiTime.toFixed(0)}ms`);
+            console.debug(`[3] File tree UI: ${uiTime.toFixed(0)}ms`);
 
             // Phase 5: Force GPU sync
             const gpuStart = performance.now();
             this.renderer.render(this.scene, this.camera);
             const gpuTime = performance.now() - gpuStart;
-            console.log(`[5] First render (GPU): ${gpuTime.toFixed(0)}ms`);
+            console.debug(`[5] First render (GPU): ${gpuTime.toFixed(0)}ms`);
 
             const totalTime = performance.now() - totalStart;
-            console.log(`[TOTAL] All phases: ${totalTime.toFixed(0)}ms`);
+            console.debug(`[TOTAL] All phases: ${totalTime.toFixed(0)}ms`);
 
             requestAnimationFrame(() => {
                 const afterFrame = performance.now() - totalStart;
-                console.log(`[AFTER FRAME] Real wall time: ${afterFrame.toFixed(0)}ms`);
+                console.debug(`[AFTER FRAME] Wall time: ${afterFrame.toFixed(0)}ms`);
             });
 
             this.loading.hide();
 
-            const stats = this.repoAdapter.getStats();
-            console.log('Adapter stats:', stats);
+            console.debug('Adapter stats:', this.repoAdapter.getStats());
             this.toastUI.show(`Loaded ${this.grids.length} files from ${this.repoPath}@${branch}`, 'success');
             this.header.repoLabel.textContent = `${this.repoPath}@${branch}`;
             this.drawer.openToTab('files');

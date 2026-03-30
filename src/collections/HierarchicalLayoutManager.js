@@ -874,7 +874,7 @@ class HierarchicalLayoutManager {
         const icon = node.isDirectory ? '📁' : '📄';
         const bounds = `${node.bounds.width.toFixed(0)}x${node.bounds.height.toFixed(0)}`;
         const pos = `(${node.position.x.toFixed(0)}, ${node.position.y.toFixed(0)})`;
-        console.log(`${indent}${icon} ${node.name || '(root)'} [${bounds}] @ ${pos}`);
+        console.debug(`${indent}${icon} ${node.name || '(root)'} [${bounds}] @ ${pos}`);
 
         for (const child of node.children) {
             this._printNode(child, depth + 1);

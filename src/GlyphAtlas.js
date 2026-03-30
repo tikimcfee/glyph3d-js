@@ -92,9 +92,7 @@ class GlyphAtlas {
     }
 
     async generate(progressCallback) {
-        console.log(`Generating glyph atlas: ${this.charset.length} glyphs`);
-        console.log(`  Font: ${this.fontFamily} ${this.fontSize}px`);
-        console.log(`  Atlas size: ${this.atlasSize}x${this.atlasSize}`);
+        console.debug(`[GlyphAtlas] Generating: ${this.charset.length} glyphs, ${this.fontFamily} ${this.fontSize}px, ${this.atlasSize}x${this.atlasSize}`);
 
         // Create canvas for atlas
         this.atlasCanvas = document.createElement('canvas');
@@ -138,7 +136,7 @@ class GlyphAtlas {
             glyphsAdded: 0
         };
 
-        console.log(`  Cell size: ${this.standardCellWidth}x${this.standardCellHeight}`);
+        console.debug(`[GlyphAtlas] Cell size: ${this.standardCellWidth}x${this.standardCellHeight}`);
 
         // Render each glyph using shelf packing
         for (let i = 0; i < this.charset.length; i++) {
@@ -172,9 +170,7 @@ class GlyphAtlas {
             this._sharedThreeTexture.needsUpdate = true;
         }
 
-        console.log('✅ Atlas generated successfully');
-        console.log(`  ${this.packingState.glyphsAdded} glyphs in ${this.atlasCanvas.width}x${this.atlasCanvas.height} atlas`);
-        console.log(`  Packing stats:`, this.getPackingStats());
+        console.debug(`[GlyphAtlas] Generated: ${this.packingState.glyphsAdded} glyphs in ${this.atlasCanvas.width}x${this.atlasCanvas.height}`);
 
         return this.atlasCanvas;
     }
@@ -400,7 +396,7 @@ class GlyphAtlas {
         this._atlasMapTextureWidth = ATLAS_MAP_WIDTH;
         this._atlasMapTextureHeight = ATLAS_MAP_HEIGHT;
 
-        console.log(`[GPU-Lookup] Atlas map DataTexture built: ${ATLAS_MAP_WIDTH}x${ATLAS_MAP_HEIGHT} RGBA Float (pre-allocated full Unicode U+0000–U+10FFFF, ~17.8 MB), glyphs=${this.uvMap.size}. Shared by all renderers.`);
+        console.debug(`[GlyphAtlas] Atlas map DataTexture: ${ATLAS_MAP_WIDTH}x${ATLAS_MAP_HEIGHT}, glyphs=${this.uvMap.size}`);
 
         return texture;
     }
@@ -505,7 +501,7 @@ class GlyphAtlas {
 
             this.invalidateSerializedCache();
             this._uvMapVersion++;
-            console.log(`GlyphAtlas.ensureCodepoints: added ${added} new glyphs`);
+            console.debug(`[GlyphAtlas] ensureCodepoints: +${added} glyphs`);
         }
 
         return added;
