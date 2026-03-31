@@ -52,6 +52,11 @@ export default class WebSocketBridge {
         this._commandsSent = 0;
         this._connectedClients = new Set();
 
+        // Command I/O log (ring buffer, max 200 entries)
+        this._log = [];
+        this._logMax = 200;
+        this._logListeners = [];
+
         if (options.autoConnect !== false) {
             this.connect();
         }
@@ -358,6 +363,7 @@ export default class WebSocketBridge {
         // Command from a controller
         if (envelope.from && envelope.cmd) {
             this._commandsReceived++;
+            this._addLog('in', envelope.from, envelope.cmd);
             const result = await this.router.execute(envelope.cmd, { sender: envelope.from });
 
             // Send response back to the originating controller
@@ -371,11 +377,43 @@ export default class WebSocketBridge {
                 response.data = result.data;
             }
 
+            this._addLog('out', envelope.from, result.text);
             this.ws.send(JSON.stringify(response));
             return;
         }
 
         console.log('[ws-bridge] unhandled message:', envelope);
+    }
+
+    // ============ Command Log ============
+
+    /** @private */
+    _addLog(direction, clientId, text) {
+        const entry = {
+            time: new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+            dir: direction,    // 'in' or 'out'
+            client: clientId,
+            text: text.length > 200 ? text.slice(0, 197) + '...' : text,
+        };
+        this._log.push(entry);
+        if (this._log.length > this._logMax) this._log.shift();
+        for (const fn of this._logListeners) fn(entry);
+    }
+
+    /**
+     * Get all log entries.
+     * @returns {Array<{time: string, dir: string, client: string, text: string}>}
+     */
+    getLog() { return this._log; }
+
+    /**
+     * Register a callback for new log entries.
+     * @param {Function} fn - (entry) => void
+     * @returns {Function} unsubscribe
+     */
+    onLog(fn) {
+        this._logListeners.push(fn);
+        return () => { this._logListeners = this._logListeners.filter(f => f !== fn); };
     }
 
     /**

@@ -162,7 +162,8 @@
                 <span class="status-item" id="status-grid-count" title="Grid count">0 grids</span>
                 <span class="status-item" id="status-camera" title="Camera position">0, 0, 500</span>
                 <span class="status-item status-fps" id="status-fps" title="FPS">-- fps</span>
-                <span class="status-item status-ws" id="status-ws" title="WebSocket">WS: --</span>
+                <span class="status-item status-ws" id="status-ws" title="WebSocket — click to toggle log" style="cursor:pointer">WS: --</span>
+                <span class="status-item" id="status-panel-toggle" title="Toggle panel (Ctrl+J)" style="cursor:pointer; user-select:none">&#9881;</span>
             </div>
         </footer>
 
@@ -223,6 +224,11 @@
             };
 
             await viewer.init();
+
+            // Wire WebSocket log panel to bridge
+            if (viewer._wsBridge) {
+                ide.initWsLog(viewer._wsBridge);
+            }
 
             // ---- Command Bar: unified input surface ----
             // The router and context are available after init().

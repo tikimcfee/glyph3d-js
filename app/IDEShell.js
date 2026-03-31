@@ -105,6 +105,7 @@ export class IDEShell {
         this._wireKeyboardShortcuts();
         this._wireResizeObserver();
         this._wireSidebarResize();
+        this._wireStatusBarClicks();
 
         // On mobile: start with sidebar and bottom panel collapsed
         if (this._isMobile) {
@@ -399,6 +400,22 @@ export class IDEShell {
             document.addEventListener('mousemove', onMouseMove);
             document.addEventListener('mouseup', onMouseUp);
         });
+    }
+
+    /** @private */
+    _wireStatusBarClicks() {
+        // WS status → open WebSocket log tab
+        if (this._statusWs) {
+            this._statusWs.addEventListener('click', () => {
+                this._switchPanelTab('ws-log');
+                if (!this._bottomPanelVisible) this._toggleBottomPanel();
+            });
+        }
+        // Panel toggle icon → toggle bottom panel
+        const toggleBtn = document.getElementById('status-panel-toggle');
+        if (toggleBtn) {
+            toggleBtn.addEventListener('click', () => this._toggleBottomPanel());
+        }
     }
 
     /** @private */
@@ -875,6 +892,50 @@ export class IDEShell {
                 initLogCapturePanel(consoleView);
             }
         });
+    }
+
+    // ================================================================
+    // WebSocket log panel wiring
+    // ================================================================
+
+    /**
+     * Wire the WebSocket tab to show command I/O from the WebSocketBridge.
+     * Call after the command center is initialized.
+     * @param {import('../src/services/orchestration/WebSocketBridge.js').default} bridge
+     */
+    initWsLog(bridge) {
+        const panel = document.getElementById('pv-ws-log');
+        if (!panel || !bridge) return;
+
+        panel.innerHTML = '';
+        panel.style.cssText = 'overflow-y: auto; font-family: var(--font-mono, monospace); font-size: 12px; padding: 4px 8px;';
+
+        // Render existing log entries
+        for (const entry of bridge.getLog()) {
+            panel.appendChild(this._makeLogLine(entry));
+        }
+
+        // Stream new entries
+        bridge.onLog((entry) => {
+            panel.appendChild(this._makeLogLine(entry));
+            // Auto-scroll to bottom
+            panel.scrollTop = panel.scrollHeight;
+        });
+    }
+
+    /** @private */
+    _makeLogLine(entry) {
+        const line = document.createElement('div');
+        line.style.cssText = 'white-space: pre; padding: 1px 0; border-bottom: 1px solid var(--border, #ffffff10);';
+        const arrow = entry.dir === 'in' ? '→' : '←';
+        const color = entry.dir === 'in' ? '#6ca8f7' : '#7cc87c';
+        line.innerHTML = `<span style="color:var(--text-secondary)">${entry.time}</span> <span style="color:${color}">${arrow} ${entry.client}</span> ${this._escapeHtml(entry.text)}`;
+        return line;
+    }
+
+    /** @private */
+    _escapeHtml(s) {
+        return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
 
     // ================================================================
