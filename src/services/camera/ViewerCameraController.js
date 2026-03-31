@@ -12,6 +12,7 @@
  */
 
 import { primaryMod, secondaryMod } from '../utils/platform.js';
+import { getCanvasViewportSize } from '../../core/canvasSize.js';
 
 const STORAGE_KEY = 'glyph3d-camera-settings';
 
@@ -172,7 +173,8 @@ export class ViewerCameraController {
 
         // --- Window resize (camera-side: aspect ratio + projection) ---
         this._onResize = () => {
-            camera.aspect = window.innerWidth / window.innerHeight;
+            const { width, height } = getCanvasViewportSize(canvas);
+            camera.aspect = width / height;
             camera.updateProjectionMatrix();
         };
         window.addEventListener('resize', this._onResize);

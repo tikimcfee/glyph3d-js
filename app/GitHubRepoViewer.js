@@ -19,6 +19,8 @@ import {
 } from '../src/index.js';
 
 import { PickingSystem } from '../src/picking/PickingSystem.js';
+import GridVirtualizer from '../src/collections/GridVirtualizer.js';
+import { getCanvasViewportSize } from '../src/core/canvasSize.js';
 import { SelectionManager } from '../src/services/interaction/SelectionManager.js';
 import { ShortcutManager } from '../src/services/interaction/ShortcutManager.js';
 import { TreemapLabelManager } from '../src/services/visual/TreemapLabelManager.js';
@@ -224,13 +226,13 @@ export class GitHubRepoViewer {
         this.scene = new THREE.Scene();
         this.scene.background = new THREE.Color(0x0a0a0a);
 
-        this.camera = new THREE.PerspectiveCamera(
-            70, window.innerWidth / window.innerHeight, 0.1, 10000
-        );
+        const { width: initW, height: initH } = getCanvasViewportSize(this.canvas);
+
+        this.camera = new THREE.PerspectiveCamera(70, initW / initH, 0.1, 10000);
         this.camera.position.set(0, 0, 500);
 
         this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true });
-        this.renderer.setSize(window.innerWidth, window.innerHeight);
+        this.renderer.setSize(initW, initH);
         this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 
         this.layoutManager = new GridLayoutManager();
@@ -241,6 +243,9 @@ export class GitHubRepoViewer {
         this.pickingSystem = new PickingSystem(this.renderer, { resolutionScale: 1.0 });
         this._lastPickHit = null;
         this._lastPickSlot = -1;
+
+        // Frustum-based grid virtualization — only render visible grids
+        this.gridVirtualizer = new GridVirtualizer(this.scene, this.camera);
 
         this.repoAdapter = new RepositoryAdapter();
         this.diffController = new DiffController({
@@ -547,9 +552,14 @@ export class GitHubRepoViewer {
             this.branchStatusEl.textContent = '';
         });
 
-        // Window resize (renderer-side only; camera-side handled by CameraController)
+        // Window resize — use canvas container size, not window size.
+        // In IDE mode, IDEShell._onEditorResize() handles sizing from the editor area.
+        // This handler covers standalone (viewer.html) and as a fallback.
         window.addEventListener('resize', () => {
-            this.renderer.setSize(window.innerWidth, window.innerHeight);
+            const { width: w, height: h } = getCanvasViewportSize(this.canvas);
+            this.renderer.setSize(w, h);
+            this.camera.aspect = w / h;
+            this.camera.updateProjectionMatrix();
             this.pickingSystem?.onResize();
         });
 
@@ -810,6 +820,11 @@ export class GitHubRepoViewer {
         }
 
         this._updateOverlays();
+
+        // Refresh virtualizer bounds after layout change
+        if (this.gridVirtualizer) {
+            this.gridVirtualizer.refreshAllBounds();
+        }
     }
 
     async fetchBranches() {
@@ -1015,11 +1030,20 @@ export class GitHubRepoViewer {
             const uiTime = performance.now() - uiStart;
             console.debug(`[3] File tree UI: ${uiTime.toFixed(0)}ms`);
 
-            // Phase 5: Force GPU sync
+            // Phase 5: Force GPU sync (also computes matrixWorld for all grids)
             const gpuStart = performance.now();
             this.renderer.render(this.scene, this.camera);
             const gpuTime = performance.now() - gpuStart;
             console.debug(`[5] First render (GPU): ${gpuTime.toFixed(0)}ms`);
+
+            // Phase 5b: Register grids with virtualizer (bounds are valid after first render)
+            if (this.gridVirtualizer) {
+                console.debug(`[5b] Registering ${createdGrids.length} grids with virtualizer...`);
+                this.gridVirtualizer.registerAll(createdGrids);
+                this.gridVirtualizer.update(); // immediately cull invisible grids
+                const vs = this.gridVirtualizer.getStats();
+                console.debug(`[5b] GridVirtualizer: ${vs.active}/${vs.total} grids active`);
+            }
 
             const totalTime = performance.now() - totalStart;
             console.debug(`[TOTAL] All phases: ${totalTime.toFixed(0)}ms`);
@@ -1079,6 +1103,7 @@ export class GitHubRepoViewer {
     clearGrids() {
         const removed = this.registry.unregisterByType('grid');
         for (const entry of removed) {
+            if (this.gridVirtualizer) this.gridVirtualizer.unregister(entry.grid);
             entry.grid.dispose();
             this.scene.remove(entry.grid);
         }
@@ -1631,6 +1656,11 @@ export class GitHubRepoViewer {
         // Phase 4: treemap labels LOD update
         if (this.treemapLabelManager) {
             this.treemapLabelManager.update();
+        }
+
+        // Frustum-based grid virtualization — add/remove grids from scene
+        if (this.gridVirtualizer) {
+            this.gridVirtualizer.update();
         }
 
         // GPU picking pass (only runs when mouse has moved)
