@@ -22,6 +22,7 @@ src/
 ├── GlyphRenderer.js            # Core GPU-instanced renderer (v1.5)
 ├── core/
 │   ├── constants.js            # Shared constants (PERF_THRESHOLDS, DEBUG_SETTINGS)
+│   ├── canvasSize.js           # getCanvasViewportSize() — container-aware sizing
 │   ├── ShaderManager.js        # GLSL shader loading & caching
 │   └── InstanceBuffer.js       # Instance attribute array building
 ├── shaders/
@@ -30,6 +31,7 @@ src/
 ├── collections/
 │   ├── GlyphCollection.js     # Batched deferred text rendering
 │   ├── CodeGrid.js            # Single source file as 3D object (extends Object3D)
+│   ├── GridVirtualizer.js     # Frustum-based scene graph culling
 │   ├── GridLayoutManager.js   # Row/column/plane spatial positioning
 │   ├── HierarchicalLayoutManager.js  # Directory-tree layout mapping
 │   └── index.js
@@ -117,13 +119,15 @@ examples/
 2. **GlyphCollection** (or **GlyphRenderer**) batches text operations with deferred updates
 3. **WorkerBridge** optionally offloads buffer computation to Web Workers
 4. **Buffer Builders** do single-pass text → Float32Array conversion (zero-allocation hot paths)
-5. Shaders are inline strings in GlyphRenderer.js (vertex + fragment); handle per-instance rendering
+5. Shaders are GLSL ES 3.00 (`THREE.GLSL3`) inline strings in GlyphRenderer.js (vertex + fragment)
 6. Everything renders as a single Three.js instanced draw call
+7. **GridVirtualizer** frustum-culls CodeGrids — only visible grids are in the scene graph
 
-### Instance Attributes (14 floats = 56 bytes/glyph)
-- `instancePosition` vec3, `instanceSize` vec2, `instanceCodepoint` float
+### Instance Attributes (10 floats = 40 bytes/glyph)
+- `instancePosition` vec3, `instanceSize` vec2 (per-glyph from atlas metrics), `instanceCodepoint` float
 - `instanceColor` vec3, `instanceGroupId` float
-- `instanceAddedColor` vec3 (additive highlight), `instancePickingId` float (GPU picking)
+- Highlight: RGBA8 DataTexture (1024-wide, 2D wrap), sampled via `texelFetch` + `gl_InstanceID`
+- Picking ID: derived as `uBasePickingId + gl_InstanceID` uniform in picking shader (no attribute)
 
 ### GPU Picking System (src/picking/PickingSystem.js)
 - Material-swap second render pass: swaps picking shaders onto glyph meshes, renders same scene to offscreen RGBA8 target, reads 1 pixel, swaps back
@@ -136,8 +140,16 @@ examples/
 ### Glyph Highlighting
 - `CodeGrid._lineSlotBase`: Int32Array mapping line→buffer slot, built by the buffer builder in the same render pass (lineSlotOffsets in itemMeta)
 - `CodeGrid.highlightRange(startLine, startCol, endLine, endCol, color)` — additive color
-- `GlyphRenderer.setGlyphHighlight(bufferSlotIndex, color)` — single-glyph direct buffer write
+- `GlyphRenderer.setGlyphHighlight(bufferSlotIndex, color)` — writes RGBA8 texel to highlight DataTexture
 - All metrics derived from GlyphAtlas at runtime — no hardcoded character dimensions
+- Per-glyph widths: builders use `glyphWidths[charCode] * worldScale` from atlas metrics, not a fixed charWidth
+
+### Frustum Culling (src/collections/GridVirtualizer.js)
+- Adds/removes CodeGrids from the scene based on camera frustum intersection
+- At 1500 files, only ~10-50 visible grids get draw calls instead of all 1500
+- Hysteresis (50 world units) prevents popping during small camera movements
+- Dirty flag forces re-evaluation after registration; camera-movement throttle skips static frames
+- Canvas viewport sizing via `getCanvasViewportSize()` (src/core/canvasSize.js) — uses container dimensions, not window.innerWidth/Height
 
 ### Deferred Pattern
 Operations like `addText()` are queued. Nothing hits the GPU until `flush()` is called. This allows batching and right-sizing buffers.
@@ -201,7 +213,7 @@ Modify `GlyphAtlas.js` — add character ranges in the `generate()` method along
 Create a new class in `src/collections/` following the pattern of `GridLayoutManager.js`. It should accept CodeGrid instances and set their `.position` properties.
 
 ### Modifying the shader
-Edit `src/shaders/textVertex.glsl` and `textFragment.glsl`. The ShaderManager loads these via fetch at runtime.
+Edit inline GLSL in `GlyphRenderer._getVertexShader()`/`_getFragmentShader()` (canonical) and the reference copies in `src/shaders/`. All shaders use GLSL ES 3.00 syntax (`in`/`out`, `texture()`, `texelFetch`, `gl_InstanceID`). Picking shaders are inline in `PickingSystem.js`.
 
 ### Adding new builder logic for workers
 Add functions in `src/workers/builders/`. These must be pure functions with no DOM or Three.js imports (they run in Web Worker context).
@@ -213,10 +225,15 @@ Add functions in `src/workers/builders/`. These must be pure functions with no D
 - The max instances per mesh is 10,000; exceeding this auto-splits into multiple meshes
 - Long lines wrap in Z-depth to keep content spatially compact
 - GlyphCollection uses dirty tracking to avoid redundant GPU uploads
-- Per-glyph cost: 56 bytes (14 floats across 7 instance attributes)
+- Per-glyph cost: 40 bytes (10 floats across 5 instance attributes) + 4 bytes RGBA8 highlight texture
 - Picking pass only runs on mousemove (zero cost when pointer is stationary)
-- Atlas map DataTexture covers full Unicode range (17 MB) — optimization target
-- At 200 files × 4K glyphs: ~48 MB total GPU (buffers + atlas + picking target)
+- Picking ID derived from `uBasePickingId + gl_InstanceID` — no per-glyph attribute
+- Atlas map DataTexture sized to actual charset (~160 KB), auto-regrows for new codepoints
+- Highlight DataTexture: RGBA8, 1024-wide 2D wrap, per-glyph additive color (4th byte reserved for blend mode)
+- GridVirtualizer: frustum culling eliminates ~97% of draw calls at 1500-file scale
+- `addUpdateRange()` for partial GPU uploads — only changed buffer regions are uploaded
+- `getCanvasViewportSize()` ensures camera/renderer match actual canvas container, not window
+- Workers receive per-glyph widths from atlas metrics for proportional text layout
 
 ## Deployment
 
