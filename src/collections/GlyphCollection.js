@@ -117,6 +117,7 @@ class GlyphCollection {
             charHeight: atlasCharSize.height * scale,
             letterSpacing: atlasCharSize.width * scale * 0.05,
             lineSpacing: atlasCharSize.height * scale * 1.2,
+            worldScale: scale, // pixel→world conversion factor for per-glyph widths
             atlasSize: this.atlas.getAtlasTexture().width,
             pixelWidth: atlasCharSize.width,
             pixelHeight: atlasCharSize.height

@@ -14,8 +14,9 @@
 
 import { buildGlyphBuffers, buildBatchBuffers } from './builders/index.js';
 
-// Cached UV map (sent once, reused)
+// Cached UV map and per-glyph widths (sent once, reused)
 let cachedUVMap = null;
+let cachedGlyphWidths = null;
 
 /**
  * Handle incoming messages
@@ -44,16 +45,20 @@ self.onmessage = function(event) {
             }
 
             case 'BUILD_BATCH': {
-                // Cache UV map if provided
+                // Cache UV map and glyph widths if provided
                 if (payload.shared.uvMap) {
                     cachedUVMap = payload.shared.uvMap;
                 }
+                if (payload.shared.glyphWidths) {
+                    cachedGlyphWidths = payload.shared.glyphWidths;
+                }
 
-                // Use cached UV map
+                // Use cached UV map and glyph widths
                 const shared = {
                     metrics: payload.shared.metrics,
                     defaultColor: payload.shared.defaultColor,
-                    uvMap: cachedUVMap
+                    uvMap: cachedUVMap,
+                    glyphWidths: cachedGlyphWidths
                 };
 
                 const result = buildBatchBuffers(payload.items, shared);

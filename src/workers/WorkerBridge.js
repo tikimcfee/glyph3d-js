@@ -123,7 +123,28 @@ export class WorkerBridge {
 
         this._uvMapAtlas = atlas;
         this._uvMapVersion = version;
+
+        // Serialize per-glyph widths alongside UV map (same cache lifecycle).
+        // Stored in canvas pixels — the builder multiplies by worldScale
+        // (sent via metrics) to get world-space widths.
+        const widths = {};
+        if (atlas.metrics) {
+            for (const [charCode, m] of atlas.metrics) {
+                widths[charCode] = m.width;
+            }
+        }
+        this._glyphWidthsCache = widths;
+
         return this._uvMapCache;
+    }
+
+    /**
+     * Get cached per-glyph widths (serialized from atlas.metrics).
+     * Must call getSerializedUVMap() first to populate the cache.
+     * @returns {Object} Plain object map: charCode → width (number)
+     */
+    getSerializedGlyphWidths() {
+        return this._glyphWidthsCache || {};
     }
 
     /**
@@ -156,6 +177,7 @@ export class WorkerBridge {
         }
 
         const uvMap = this.getSerializedUVMap(atlas);
+        const glyphWidths = this.getSerializedGlyphWidths();
         const jobId = String(this.nextJobId++);
 
         return new Promise((resolve, reject) => {
@@ -173,7 +195,8 @@ export class WorkerBridge {
                     alignment: input.alignment || 'left',
                     groupId: input.groupId || 0,
                     metrics,
-                    uvMap
+                    uvMap,
+                    glyphWidths
                 }
             });
         });
@@ -207,6 +230,7 @@ export class WorkerBridge {
         return new Promise((resolve, reject) => {
             this.pendingRequests.set(jobId, { resolve, reject });
 
+            const glyphWidths = needsUVMap ? this.getSerializedGlyphWidths() : null;
             worker.postMessage({
                 type: 'BUILD_BATCH',
                 jobId,
@@ -215,7 +239,8 @@ export class WorkerBridge {
                     shared: {
                         metrics: shared.metrics,
                         defaultColor: shared.defaultColor,
-                        uvMap: needsUVMap ? uvMap : null
+                        uvMap: needsUVMap ? uvMap : null,
+                        glyphWidths
                     }
                 }
             });

@@ -49,7 +49,7 @@ function countGlyphs(text) {
  *   `codepoints` contains one raw Unicode codepoint per glyph for GPU-side UV lookup.
  */
 export function buildGlyphBuffers(input) {
-    const { text, position, metrics, uvMap, color, scale = 1.0, groupId = 0 } = input;
+    const { text, position, metrics, uvMap, glyphWidths, color, scale = 1.0, groupId = 0 } = input;
 
     if (!text || text.length === 0) {
         return {
@@ -73,8 +73,10 @@ export function buildGlyphBuffers(input) {
     const colors = new Float32Array(glyphCount * 3);
     const groupIds = new Float32Array(glyphCount);
 
-    // Pre-compute scaled sizes
-    const scaledWidth = metrics.charWidth * scale;
+    // Per-glyph width: glyphWidths stores pixel widths from the atlas.
+    // Multiply by worldScale to convert to world units (same space as metrics.charWidth).
+    const ws = metrics.worldScale || (metrics.charWidth / 30); // worldScale, fallback for compat
+    const defaultWidth = metrics.charWidth; // world units, for glyphs not in the map
     const scaledHeight = metrics.charHeight * scale;
 
     // Track bounds
@@ -104,10 +106,13 @@ export function buildGlyphBuffers(input) {
             continue;
         }
 
+        // Per-glyph width in world units (pixel width × worldScale, fallback to charWidth)
+        const glyphWidth = (glyphWidths && glyphWidths[charCode]) ? glyphWidths[charCode] * ws : defaultWidth;
+
         // Skip other whitespace but advance cursor for spaces
         if (charCode === 32) {
             if (minX === Infinity) minX = x;
-            x += metrics.charWidth + metrics.letterSpacing;
+            x += glyphWidth * scale + metrics.letterSpacing;
             continue;
         }
         if (charCode === 13 || charCode === 9) continue;
@@ -118,17 +123,20 @@ export function buildGlyphBuffers(input) {
         // Validate glyph exists in atlas (fallback to '?' = 63)
         const resolvedCode = uvMap[charCode] ? charCode : (uvMap[63] ? 63 : 0);
         if (!resolvedCode) {
-            x += metrics.charWidth + metrics.letterSpacing;
+            x += glyphWidth * scale + metrics.letterSpacing;
             continue;
         }
+
+        // Use the resolved glyph's width for sizing (may differ from original if fallback)
+        const resolvedWidth = (glyphWidths && glyphWidths[resolvedCode]) ? glyphWidths[resolvedCode] * ws : defaultWidth;
 
         // Position [x, y, z]
         positions[idx * 3] = x;
         positions[idx * 3 + 1] = y;
         positions[idx * 3 + 2] = z;
 
-        // Size [width, height]
-        sizes[idx * 2] = scaledWidth;
+        // Size [width, height] — per-glyph from atlas metrics
+        sizes[idx * 2] = resolvedWidth * scale;
         sizes[idx * 2 + 1] = scaledHeight;
 
         // [GPU-Lookup] Store raw codepoint; vertex shader resolves to UV via atlasMapTexture
@@ -143,7 +151,7 @@ export function buildGlyphBuffers(input) {
         groupIds[idx] = groupId;
 
         idx++;
-        x += metrics.charWidth + metrics.letterSpacing;
+        x += glyphWidth * scale + metrics.letterSpacing;
     }
 
     // Final line maxX
@@ -232,7 +240,10 @@ function applyPagination(positions, startIdx, endIdx, origin, metrics) {
  *   `codepoints` contains one raw Unicode codepoint per glyph for GPU-side UV lookup via atlasMapTexture.
  */
 export function buildBatchBuffers(items, shared) {
-    const { metrics, uvMap, defaultColor } = shared;
+    const { metrics, uvMap, glyphWidths, defaultColor } = shared;
+
+    // Pixel→world scale for per-glyph widths
+    const ws = metrics.worldScale || (metrics.charWidth / 30);
 
     // Z-depth wrapping settings
     const maxLineWidth = Z_WRAP_CONFIG.maxLineWidth;
@@ -290,7 +301,7 @@ export function buildBatchBuffers(items, shared) {
             continue;
         }
 
-        const scaledWidth = metrics.charWidth * scale;
+        const defaultWidth = metrics.charWidth;
         const scaledHeight = metrics.charHeight * scale;
 
         let x = pos.x;
@@ -322,6 +333,9 @@ export function buildBatchBuffers(items, shared) {
                 continue;
             }
 
+            // Per-glyph width in world units (pixel width × worldScale, fallback to charWidth)
+            const glyphWidth = (glyphWidths && glyphWidths[charCode]) ? glyphWidths[charCode] * ws : defaultWidth;
+
             // Z-depth + Y-drop wrap: go behind AND down so text is readable head-on
             if (maxLineWidth > 0 && charsOnSegment >= maxLineWidth) {
                 if (x > pos.x) itemMaxX = Math.max(itemMaxX, x - metrics.letterSpacing);
@@ -335,7 +349,7 @@ export function buildBatchBuffers(items, shared) {
 
             if (charCode === 32) {
                 if (itemMinX === Infinity) itemMinX = x;
-                x += metrics.charWidth + metrics.letterSpacing;
+                x += glyphWidth * scale + metrics.letterSpacing;
                 charsOnSegment++;
                 continue;
             }
@@ -345,18 +359,20 @@ export function buildBatchBuffers(items, shared) {
 
             const resolvedCode = uvMap[charCode] ? charCode : (uvMap[63] ? 63 : 0);
             if (!resolvedCode) {
-                x += metrics.charWidth + metrics.letterSpacing;
+                x += glyphWidth * scale + metrics.letterSpacing;
                 charsOnSegment++;
                 continue;
             }
 
+            // Use the resolved glyph's width for sizing
+            const resolvedWidth = (glyphWidths && glyphWidths[resolvedCode]) ? glyphWidths[resolvedCode] * ws : defaultWidth;
             const idx = bufferOffset;
 
             positions[idx * 3] = x;
             positions[idx * 3 + 1] = y;
             positions[idx * 3 + 2] = z;
 
-            sizes[idx * 2] = scaledWidth;
+            sizes[idx * 2] = resolvedWidth * scale;
             sizes[idx * 2 + 1] = scaledHeight;
 
             // [GPU-Lookup] Store raw codepoint; vertex shader resolves to UV via atlasMapTexture
@@ -369,7 +385,7 @@ export function buildBatchBuffers(items, shared) {
             groupIds[idx] = itemGroupId;
 
             bufferOffset++;
-            x += metrics.charWidth + metrics.letterSpacing;
+            x += glyphWidth * scale + metrics.letterSpacing;
             charsOnSegment++;
         }
 
