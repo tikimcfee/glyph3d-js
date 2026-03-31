@@ -108,6 +108,22 @@ export default function registerSystemCommands(router) {
         return { text: 'OK: reloading page in 200ms (cache-busting)', data: null };
     }, { description: 'Reload the browser page (cache-busting, picks up code changes)' });
 
+    router.register('screenshot', (args, ctx) => {
+        const canvas = ctx.renderer?.domElement;
+        if (!canvas) {
+            return { text: 'ERR: no renderer available', data: null };
+        }
+        // Force a render to ensure the buffer has current content
+        ctx.renderer.render(ctx.scene, ctx.camera);
+        const dataUrl = canvas.toDataURL('image/png');
+        // Strip the data:image/png;base64, prefix — caller gets raw base64
+        const base64 = dataUrl.split(',')[1];
+        return {
+            text: `OK: screenshot ${canvas.width}x${canvas.height}`,
+            data: { width: canvas.width, height: canvas.height, image: base64 },
+        };
+    }, { description: 'Capture the 3D canvas as a PNG screenshot' });
+
     router.register('console.log', (args, ctx) => {
         // Capture and return recent console output — useful for remote debugging.
         // For now, return a confirmation. Future: hook console and buffer recent entries.

@@ -231,7 +231,7 @@ export class GitHubRepoViewer {
         this.camera = new THREE.PerspectiveCamera(70, initW / initH, 0.1, 10000);
         this.camera.position.set(0, 0, 500);
 
-        this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true });
+        this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true, preserveDrawingBuffer: true });
         this.renderer.setSize(initW, initH);
         this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 

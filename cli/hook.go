@@ -16,15 +16,15 @@ import (
 
 // HookEvent is the JSON structure Claude Code sends on stdin.
 type HookEvent struct {
-	SessionID     string          `json:"session_id"`
-	CWD           string          `json:"cwd"`
-	EventName     string          `json:"hook_event_name"`
-	ToolName      string          `json:"tool_name"`
-	ToolInput     json.RawMessage `json:"tool_input"`
-	ToolResponse  json.RawMessage `json:"tool_response"`
-	ToolUseID     string          `json:"tool_use_id"`
-	AgentID       string          `json:"agent_id"`
-	AgentType     string          `json:"agent_type"`
+	SessionID    string          `json:"session_id"`
+	CWD          string          `json:"cwd"`
+	EventName    string          `json:"hook_event_name"`
+	ToolName     string          `json:"tool_name"`
+	ToolInput    json.RawMessage `json:"tool_input"`
+	ToolResponse json.RawMessage `json:"tool_response"`
+	ToolUseID    string          `json:"tool_use_id"`
+	AgentID      string          `json:"agent_id"`
+	AgentType    string          `json:"agent_type"`
 }
 
 // Tool input shapes we care about
@@ -61,18 +61,30 @@ type GlobInput struct {
 
 const agentWindowID = "claude"
 
+var debug bool
+
+func dbg(format string, args ...any) {
+	if debug {
+		log.Printf("[hook] "+format, args...)
+	}
+}
+
 // hookCmd reads a Claude Code hook event from stdin and sends viewer commands.
 func hookCmd() {
 	// Read stdin
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil || len(data) == 0 {
-		os.Exit(0) // No input, nothing to do
+		dbg("no stdin data (err=%v, len=%d)", err, len(data))
+		os.Exit(0)
 	}
+	dbg("stdin: %s", string(data))
 
 	var event HookEvent
 	if err := json.Unmarshal(data, &event); err != nil {
-		os.Exit(0) // Can't parse, don't block Claude
+		dbg("json parse error: %v", err)
+		os.Exit(0)
 	}
+	dbg("event: %s tool=%s", event.EventName, event.ToolName)
 
 	url := os.Getenv("GLYPH_WS_URL")
 	if url == "" {
@@ -80,12 +92,14 @@ func hookCmd() {
 	}
 
 	// Connect to relay (quick timeout — don't block Claude)
+	dbg("connecting to %s", url)
 	conn, err := hookConnect(url)
 	if err != nil {
-		// Relay not running — silently exit, don't block Claude
+		dbg("connect failed: %v", err)
 		os.Exit(0)
 	}
 	defer conn.Close()
+	dbg("connected")
 
 	// Process the event
 	switch event.EventName {
@@ -95,9 +109,11 @@ func hookCmd() {
 		handlePreToolUse(conn, &event)
 	case "Stop":
 		handleStop(conn, &event)
+	default:
+		dbg("unhandled event: %s", event.EventName)
 	}
 
-	// Always exit 0 — never block Claude
+	dbg("done")
 	os.Exit(0)
 }
 
@@ -113,8 +129,10 @@ func hookConnect(url string) (*websocket.Conn, error) {
 	// Quick handshake
 	conn.WriteMessage(websocket.TextMessage, []byte("ping"))
 	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	conn.ReadMessage() // ack
-	conn.ReadMessage() // pong
+	_, ack, _ := conn.ReadMessage()
+	dbg("handshake ack: %s", string(ack))
+	_, pong, _ := conn.ReadMessage()
+	dbg("handshake pong: %s", string(pong))
 	conn.SetReadDeadline(time.Time{})
 
 	return conn, nil
@@ -132,7 +150,6 @@ func handlePostToolUse(conn *websocket.Conn, event *HookEvent) {
 		}
 		relPath := relativize(input.FilePath, event.CWD)
 
-		// Highlight the file in the viewer
 		lines := fmt.Sprintf("lines %d-%d", input.Offset, input.Offset+input.Limit)
 		if input.Offset == 0 && input.Limit == 0 {
 			lines = "full file"
@@ -140,7 +157,6 @@ func handlePostToolUse(conn *websocket.Conn, event *HookEvent) {
 		msg := fmt.Sprintf("📖 Read %s (%s)", relPath, lines)
 		sendWindowAppend(conn, msg)
 
-		// Try to highlight the file in the 3D scene
 		if input.Offset > 0 || input.Limit > 0 {
 			end := input.Offset + input.Limit
 			if input.Limit == 0 {
@@ -178,13 +194,10 @@ func handlePostToolUse(conn *websocket.Conn, event *HookEvent) {
 		if len(cmd) > 80 {
 			cmd = cmd[:77] + "..."
 		}
-		desc := input.Description
-		if desc != "" {
-			msg := fmt.Sprintf("⚡ %s", desc)
-			sendWindowAppend(conn, msg)
+		if input.Description != "" {
+			sendWindowAppend(conn, fmt.Sprintf("⚡ %s", input.Description))
 		} else {
-			msg := fmt.Sprintf("⚡ $ %s", cmd)
-			sendWindowAppend(conn, msg)
+			sendWindowAppend(conn, fmt.Sprintf("⚡ $ %s", cmd))
 		}
 
 	case "Grep":
@@ -199,8 +212,7 @@ func handlePostToolUse(conn *websocket.Conn, event *HookEvent) {
 	case "Glob":
 		var input GlobInput
 		json.Unmarshal(event.ToolInput, &input)
-		msg := fmt.Sprintf("📂 Glob %s", input.Pattern)
-		sendWindowAppend(conn, msg)
+		sendWindowAppend(conn, fmt.Sprintf("📂 Glob %s", input.Pattern))
 
 	case "Agent":
 		msg := "🤖 Launched subagent"
@@ -210,14 +222,12 @@ func handlePostToolUse(conn *websocket.Conn, event *HookEvent) {
 		sendWindowAppend(conn, msg)
 
 	default:
-		msg := fmt.Sprintf("🔧 %s", event.ToolName)
-		sendWindowAppend(conn, msg)
+		sendWindowAppend(conn, fmt.Sprintf("🔧 %s", event.ToolName))
 	}
 }
 
 func handlePreToolUse(conn *websocket.Conn, event *HookEvent) {
-	// Pre-tool: we could show "about to..." messages, but keep it quiet for now.
-	// The PostToolUse handler covers the important stuff.
+	// Quiet for now — PostToolUse covers everything
 }
 
 func handleStop(conn *websocket.Conn, event *HookEvent) {
@@ -227,7 +237,6 @@ func handleStop(conn *websocket.Conn, event *HookEvent) {
 // --- Viewer Commands ---
 
 func sendWindowAppend(conn *websocket.Conn, text string) {
-	// Ensure window exists, then append
 	ensureCmd := fmt.Sprintf("window.create %s 100 40 claude-activity", agentWindowID)
 	sendCmd(conn, ensureCmd)
 
@@ -242,12 +251,20 @@ func sendHighlight(conn *websocket.Conn, filePath string, startLine, endLine int
 }
 
 func sendCmd(conn *websocket.Conn, cmd string) {
+	dbg("send: %s", cmd)
 	conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
-	conn.WriteMessage(websocket.TextMessage, []byte(cmd))
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(cmd)); err != nil {
+		dbg("write error: %v", err)
+		return
+	}
 
-	// Read response (don't block long)
 	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	conn.ReadMessage()
+	_, resp, err := conn.ReadMessage()
+	if err != nil {
+		dbg("read error: %v", err)
+	} else {
+		dbg("recv: %s", string(resp))
+	}
 	conn.SetReadDeadline(time.Time{})
 }
 
@@ -264,9 +281,36 @@ func relativize(absPath, cwd string) string {
 	return rel
 }
 
+const hookLogPath = "/tmp/glyph-hook.log"
+
 // hookCmdEntry is the entry point called from main.
 func hookCmdEntry() {
-	// Suppress log output — don't pollute Claude's stderr
-	log.SetOutput(io.Discard)
+	// Check for --debug flag (also logs to stderr)
+	for _, arg := range os.Args[2:] {
+		if arg == "--debug" || arg == "-d" {
+			debug = true
+		}
+	}
+
+	// Always log to file so Claude can read it for diagnostics.
+	// With --debug, also copy to stderr for live terminal viewing.
+	logFile, err := os.OpenFile(hookLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		// Can't open log — still run, just no file logging
+		if !debug {
+			log.SetOutput(io.Discard)
+		}
+	} else {
+		defer logFile.Close()
+		if debug {
+			log.SetOutput(io.MultiWriter(os.Stderr, logFile))
+		} else {
+			log.SetOutput(logFile)
+		}
+		// Always enable debug logging when writing to file
+		debug = true
+	}
+
+	log.SetFlags(log.Ltime | log.Lmicroseconds)
 	hookCmd()
 }

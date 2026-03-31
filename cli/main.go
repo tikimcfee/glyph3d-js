@@ -56,6 +56,9 @@ func main() {
 		case "hook":
 			hookCmdEntry()
 			return
+		case "screenshot":
+			screenshotCmd()
+			return
 		}
 	}
 
@@ -252,6 +255,57 @@ func repl(conn *websocket.Conn) {
 		}
 		printResponse(resp)
 	}
+}
+
+// screenshotCmd captures the 3D canvas and saves to a PNG file.
+func screenshotCmd() {
+	fs := flag.NewFlagSet("screenshot", flag.ExitOnError)
+	out := fs.String("o", "/tmp/glyph-screenshot.png", "Output PNG file path")
+	wsURL := fs.String("host", "ws://localhost:8765", "WebSocket relay URL")
+	p := fs.Int("port", 0, "Shorthand port")
+	fs.Parse(os.Args[2:])
+
+	url := *wsURL
+	if *p > 0 {
+		url = fmt.Sprintf("ws://localhost:%d", *p)
+	}
+
+	conn, err := connect(url)
+	if err != nil {
+		log.Fatalf("connect: %v", err)
+	}
+	defer conn.Close()
+
+	resp, err := sendCommand(conn, "screenshot")
+	if err != nil {
+		log.Fatalf("screenshot: %v", err)
+	}
+
+	if strings.HasPrefix(resp.Text, "ERR:") {
+		fmt.Fprintln(os.Stderr, resp.Text)
+		os.Exit(1)
+	}
+
+	// Extract base64 image from response data
+	var data struct {
+		Width  int    `json:"width"`
+		Height int    `json:"height"`
+		Image  string `json:"image"`
+	}
+	if err := json.Unmarshal(resp.Data, &data); err != nil {
+		log.Fatalf("parse response: %v", err)
+	}
+
+	imgBytes, err := base64.StdEncoding.DecodeString(data.Image)
+	if err != nil {
+		log.Fatalf("decode image: %v", err)
+	}
+
+	if err := os.WriteFile(*out, imgBytes, 0644); err != nil {
+		log.Fatalf("write file: %v", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "Saved %dx%d screenshot to %s (%d bytes)\n", data.Width, data.Height, *out, len(imgBytes))
 }
 
 func isInteractive() bool {
