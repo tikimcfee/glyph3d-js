@@ -3,7 +3,7 @@
  * Searches across registry entries by filename/path.
  */
 
-import { box, table } from '../../../src/tui/TUIFormatter.js';
+import { box, table } from '../formatResponse.js';
 
 /**
  * @param {import('../CommandRouter.js').default} router

@@ -6,7 +6,7 @@
  * All coordinates are in world space. All helpers imported from spatialHelpers.js.
  */
 
-import { box as tuiBox, kvLines } from '../../../src/tui/TUIFormatter.js';
+import { box as tuiBox, kvLines } from '../formatResponse.js';
 import {
     resolveGridByIdOrIndex, getWorldBounds, getWorldBox3, unionBounds,
     resolveAnchor, ANCHOR_NAMES, fmtVec,

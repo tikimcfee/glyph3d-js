@@ -3,7 +3,7 @@
  * Uses registry as source of truth for scene object counts.
  */
 
-import { box, kvLines } from '../../../src/tui/TUIFormatter.js';
+import { box, kvLines } from '../formatResponse.js';
 
 /**
  * @param {import('../CommandRouter.js').default} router
@@ -15,7 +15,7 @@ export default function registerSceneCommands(router) {
         for (const e of gridEntries) totalGlyphs += e.grid.getGlyphCount();
 
         const counts = ctx.registry.typeCounts();
-        const winCount = ctx.windowManager ? ctx.windowManager.count : 0;
+        const winCount = ctx._agentGrids ? ctx._agentGrids.size : 0;
 
         const data = {
             'grids': String(gridEntries.length),
@@ -45,12 +45,17 @@ export default function registerSceneCommands(router) {
     }, { description: 'Show scene details' });
 
     router.register('scene.clear_windows', (args, ctx) => {
-        if (!ctx.windowManager) return { text: 'ERR: no window manager', data: null };
-        const count = ctx.windowManager.count;
-        ctx.windowManager.clearAll();
+        const windows = ctx._agentGrids;
+        if (!windows || windows.size === 0) return { text: 'OK: no windows to clear', data: { cleared: 0 } };
+        const count = windows.size;
+        for (const [id, ag] of windows) {
+            ag.dispose();
+            ctx.registry.unregister(id);
+        }
+        windows.clear();
         return {
             text: `OK: cleared ${count} windows`,
             data: { cleared: count }
         };
-    }, { description: 'Remove all TUI windows' });
+    }, { description: 'Remove all agent windows' });
 }

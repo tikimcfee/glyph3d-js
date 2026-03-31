@@ -19,7 +19,6 @@
     "./services/camera": "./src/services/camera/index.js",
     "./services/data": "./src/services/data/index.js",
     "./services/orchestration": "./src/services/orchestration/index.js",
-    "./tui": "./src/tui/index.js",
     "./annotations": "./src/annotations/index.js",
     "./parsing": "./src/parsing/index.js"
   },

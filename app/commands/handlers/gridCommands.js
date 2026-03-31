@@ -3,7 +3,7 @@
  * All grid resolution goes through the registry via resolveGridByIdOrIndex.
  */
 
-import { box, table, kvLines } from '../../../src/tui/TUIFormatter.js';
+import { box, table, kvLines } from '../formatResponse.js';
 import CodeGrid from '../../../src/collections/CodeGrid.js';
 import { resolveGridByIdOrIndex } from './spatialHelpers.js';
 import { decodeBase64 } from '../../../src/utils/encoding.js';

@@ -3,7 +3,7 @@
  * Uses registry entries for path matching.
  */
 
-import { box, kvLines } from '../../../src/tui/TUIFormatter.js';
+import { box, kvLines } from '../formatResponse.js';
 
 /**
  * @param {import('../CommandRouter.js').default} router

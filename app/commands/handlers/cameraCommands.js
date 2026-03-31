@@ -3,7 +3,7 @@
  * camera.focus uses resolveGridByIdOrIndex + filename substring fallback.
  */
 
-import { box, kvLines } from '../../../src/tui/TUIFormatter.js';
+import { box, kvLines } from '../formatResponse.js';
 import { resolveGridByIdOrIndex } from './spatialHelpers.js';
 
 /**

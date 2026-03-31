@@ -35,12 +35,6 @@ src/
 │   ├── GridLayoutManager.js   # Row/column/plane spatial positioning
 │   ├── HierarchicalLayoutManager.js  # Directory-tree layout mapping
 │   └── index.js
-├── tui/                       # 3D terminal window components
-│   ├── index.js               # Barrel export
-│   ├── TUIWindow.js           # Terminal pane backed by CodeGrid
-│   ├── TUIWindowManager.js    # Window lifecycle manager
-│   ├── TUIFocusManager.js     # Click-to-focus & keystroke routing
-│   └── TUIFormatter.js        # Box-drawing, tables, padding utilities
 ├── picking/
 │   ├── PickingSystem.js       # GPU picking via material-swap second render pass
 │   └── index.js

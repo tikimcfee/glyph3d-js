@@ -5,7 +5,7 @@
  * tab UI know what objects are in the scene without scanning by name.
  */
 
-import { box, table, kvLines } from '../../../src/tui/TUIFormatter.js';
+import { box, table, kvLines } from '../formatResponse.js';
 
 /**
  * @param {import('../CommandRouter.js').default} router

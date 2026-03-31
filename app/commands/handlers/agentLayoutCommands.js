@@ -9,7 +9,7 @@
  * commands do not conflict.
  */
 
-import { box, kvLines, table } from '../../../src/tui/TUIFormatter.js';
+import { box, kvLines, table } from '../formatResponse.js';
 import { COLORS } from './colorConstants.js';
 import { saveGridState, restoreGridState, restoreAllGridStates } from './gridVisualState.js';
 

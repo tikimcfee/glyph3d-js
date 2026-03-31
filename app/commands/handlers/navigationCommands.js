@@ -9,7 +9,7 @@
  *             ctx.scene, ctx.atlas, ctx._cancelCameraAnimation
  */
 
-import { box, table } from '../../../src/tui/TUIFormatter.js';
+import { box, table } from '../formatResponse.js';
 import CodeGrid from '../../../src/collections/CodeGrid.js';
 import { COLORS } from './colorConstants.js';
 import {

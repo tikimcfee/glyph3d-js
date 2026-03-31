@@ -3,7 +3,7 @@
  * Migrated from stale WebSocket branch to use context bag instead of raw viewer.
  */
 
-import { box, kvLines } from '../../../src/tui/TUIFormatter.js';
+import { box, kvLines } from '../formatResponse.js';
 
 /**
  * @param {import('../CommandRouter.js').default} router
@@ -49,7 +49,7 @@ export default function registerSystemCommands(router) {
         let totalGlyphs = 0;
         for (const e of gridEntries) totalGlyphs += e.grid.getGlyphCount();
 
-        const winCount = ctx.windowManager ? ctx.windowManager.count : 0;
+        const winCount = ctx._agentGrids ? ctx._agentGrids.size : 0;
         const wsConnected = ctx.wsbridge ? ctx.wsbridge.connected : false;
 
         const data = {
