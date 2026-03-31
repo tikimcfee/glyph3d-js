@@ -315,13 +315,25 @@
                 }
 
                 if (owner && repo) {
-                    // Set the input fields and auto-load
+                    // Check crash detection — if the previous load OOM'd, don't
+                    // auto-load from URL either. The user can hit Load manually.
+                    const crashGuard = viewer.statePersistence?.state?.loadingInProgress;
+                    if (crashGuard) {
+                        console.warn('[ide] Skipping URL auto-load — previous load crashed (OOM?)');
+                        viewer.statePersistence.state.loadingInProgress = false;
+                        viewer.statePersistence._save();
+                    }
+
+                    // Set the input fields so the user can see/edit the repo
                     const repoInput = document.getElementById('repo-input');
                     const branchInput = document.getElementById('branch-input');
                     if (repoInput) repoInput.value = `${owner}/${repo}`;
                     if (branchInput && branch) branchInput.value = branch;
-                    // Small delay to let the IDE shell finish wiring
-                    setTimeout(() => viewer.loadRepository(), 300);
+
+                    if (!crashGuard) {
+                        // Small delay to let the IDE shell finish wiring
+                        setTimeout(() => viewer.loadRepository(), 300);
+                    }
                 }
             }
         });
