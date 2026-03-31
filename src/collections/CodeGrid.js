@@ -10,6 +10,7 @@
 
 import * as THREE from 'three';
 import GlyphCollection from './GlyphCollection.js';
+import { iterGraphemes } from '../utils/grapheme.js';
 
 class CodeGrid extends THREE.Object3D {
     /**
@@ -572,7 +573,8 @@ class CodeGrid extends THREE.Object3D {
     }
 
     /**
-     * Get the number of visible (buffer-slotted) characters on a line.
+     * Get the number of visible (buffer-slotted) grapheme clusters on a line.
+     * A grapheme is visible if its first codepoint is > 32 (not a control char or space).
      * @param {number} line - 0-based line index
      * @returns {number}
      */
@@ -580,9 +582,8 @@ class CodeGrid extends THREE.Object3D {
         if (!this.lines || line < 0 || line >= this.lines.length) return 0;
         let count = 0;
         const text = this.lines[line];
-        for (let i = 0; i < text.length; i++) {
-            const code = text.charCodeAt(i);
-            if (code !== 10 && code !== 32 && code !== 13 && code !== 9) count++;
+        for (const grapheme of iterGraphemes(text)) {
+            if (grapheme.codePointAt(0) > 32) count++;
         }
         return count;
     }

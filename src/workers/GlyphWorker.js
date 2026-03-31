@@ -4,10 +4,10 @@
  * Handles messages from main thread, processes glyph data,
  * and transfers results back with zero-copy Transferable arrays.
  *
- * GPU codepoint → UV path: builders emit a `codepoints` Float32Array (raw
- * Unicode codepoints) instead of UV coordinates. The vertex shader resolves
- * codepoints to UV rects via atlasMapTexture at draw time. The uvMap is still
- * sent to the worker for glyph-existence validation only.
+ * GPU grapheme → UV path: builders emit a `codepoints` Float32Array of
+ * numeric DataTexture IDs (one per grapheme cluster). The vertex shader
+ * resolves IDs to UV rects via atlasMapTexture at draw time. The uvMap is
+ * keyed by grapheme cluster string and carries the numericId per entry.
  *
  * Caches UV map to avoid repeated serialization.
  */
@@ -28,8 +28,8 @@ self.onmessage = function(event) {
         switch (type) {
             case 'BUILD': {
                 const result = buildGlyphBuffers(payload);
-                // [GPU-Lookup] Transfer codepoints buffer (not UVs) — main thread
-                // renderer will bind it as instanceCodepoint; shader resolves UV.
+                // [GPU-Lookup] Transfer codepoints buffer (numeric DataTexture IDs) — main thread
+                // renderer binds it as instanceCodepoint; shader resolves UV via atlasMapTexture.
                 // console.debug(`[GlyphWorker] BUILD: ${result.count} glyphs`);
                 self.postMessage(
                     { type: 'RESULT', jobId, buffers: result },
@@ -63,8 +63,8 @@ self.onmessage = function(event) {
 
                 const result = buildBatchBuffers(payload.items, shared);
 
-                // [GPU-Lookup] Transfer codepoints buffer (not UVs) — main thread
-                // renderer will bind it as instanceCodepoint; shader resolves UV.
+                // [GPU-Lookup] Transfer codepoints buffer (numeric DataTexture IDs) — main thread
+                // renderer binds it as instanceCodepoint; shader resolves UV via atlasMapTexture.
                 // itemMeta goes through structured clone; Float32Arrays are zero-copy.
                 // console.debug(`[GlyphWorker] BUILD_BATCH: ${result.count} glyphs, ${payload.items.length} items`);
                 self.postMessage(

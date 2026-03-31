@@ -19,6 +19,7 @@ type Relay struct {
 	controllers map[string]*websocket.Conn
 	nextID      atomic.Int64
 	upgrader    websocket.Upgrader
+	fs          *FSHandler // nil if --root not provided
 }
 
 func NewRelay() *Relay {
@@ -125,6 +126,29 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 			d.WriteMessage(websocket.TextMessage, envelope)
 
 		} else if role == "display" {
+			// JSON-RPC 2.0 detection: route FS requests to FSHandler
+			var probe struct {
+				JSONRPC string `json:"jsonrpc"`
+			}
+			if json.Unmarshal(msg, &probe) == nil && probe.JSONRPC == "2.0" {
+				if r.fs != nil {
+					var rpc rpcRequest
+					if err := json.Unmarshal(msg, &rpc); err == nil {
+						r.fs.Handle(rpc.Method, rpc.ID, rpc.Params, ws)
+					} else {
+						log.Printf("[relay] malformed JSON-RPC from display: %.100s", raw)
+					}
+				} else {
+					// No FSHandler — return JSON-RPC error
+					var rpc struct {
+						ID json.RawMessage `json:"id"`
+					}
+					json.Unmarshal(msg, &rpc)
+					sendRPCError(ws, rpc.ID, -32003, "filesystem not enabled (start relay with --root)", nil)
+				}
+				continue
+			}
+
 			var envelope struct {
 				To       string          `json:"to"`
 				Response string          `json:"response"`
@@ -186,8 +210,10 @@ func (r *Relay) notifyDisplay(event, clientID string) {
 }
 
 // RunRelay starts the relay server. Blocks until error.
-func RunRelay(host string, port int) error {
+// fsHandler may be nil if --root was not provided.
+func RunRelay(host string, port int, fsHandler *FSHandler) error {
 	relay := NewRelay()
+	relay.fs = fsHandler
 
 	addr := fmt.Sprintf("%s:%d", host, port)
 	mux := http.NewServeMux()

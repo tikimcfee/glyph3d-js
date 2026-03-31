@@ -3,6 +3,28 @@
  *
  * Generates a texture atlas of font glyphs using Canvas 2D API.
  * This is the browser equivalent of our Python Cairo/Pango implementation.
+ *
+ * ### Grapheme-cluster aware (Phase A fix)
+ *
+ * The atlas is now keyed by grapheme cluster string rather than Unicode
+ * codepoint number. This correctly handles:
+ *   - Supplementary plane characters (emoji, CJK Extension B) that JS splits
+ *     into two UTF-16 surrogates — each is a single grapheme string.
+ *   - ZWJ sequences (family emoji, skin-tone modifiers) — the full sequence
+ *     is one grapheme string; Canvas fillText renders it as one glyph.
+ *
+ * Key maps:
+ *   uvMap          Map<string, UV>    grapheme string → atlas UV rect
+ *   metrics        Map<string, Metrics> grapheme string → pixel metrics
+ *   _graphemeIds   Map<string, number>  grapheme string → numeric DataTexture ID
+ *   _nextSyntheticId  number           dense counter for multi-codepoint graphemes
+ *
+ * Numeric IDs:
+ *   - Single-codepoint graphemes: ID = the codepoint (backward compatible with
+ *     the existing DataTexture layout and shader codepoint lookup).
+ *   - Multi-codepoint graphemes: ID = _nextSyntheticId++ (dense, starting
+ *     above the highest codepoint in the initial charset). Hard cap: 4096
+ *     synthetic IDs. This keeps the DataTexture compact (~10-15 rows).
  */
 
 class GlyphAtlas {
@@ -12,17 +34,30 @@ class GlyphAtlas {
         this.atlasSize = atlasSize;
         this.glyphPadding = 6;  // Increased padding for larger glyphs
 
-        // UV coordinate mapping: charCode → {u0, v0, u1, v1}
+        // UV coordinate mapping: grapheme string → {u0, v0, u1, v1}
         this.uvMap = new Map();
 
-        // Glyph metrics: charCode → {width, height, advance}
+        // Glyph metrics: grapheme string → {width, height, advance}
         this.metrics = new Map();
+
+        // Grapheme string → numeric DataTexture ID
+        // Single-codepoint graphemes: ID = codepoint (backward compat with shader)
+        // Multi-codepoint graphemes: ID = dense synthetic counter
+        this._graphemeIds = new Map();
+
+        // Dense numeric ID counter for multi-codepoint graphemes.
+        // Starts above the highest codepoint in the initial charset to avoid
+        // colliding with any single-codepoint glyph. Set during generate().
+        this._nextSyntheticId = 0x3000; // safe floor; updated after charset scan
+
+        // Hard cap on synthetic entries (keeps DataTexture compact)
+        this._maxSyntheticIds = 4096;
 
         // The actual atlas texture
         this.atlasTexture = null;
         this.atlasCanvas = null;
 
-        // Character set to render
+        // Character set to render (numeric codepoints — initial ASCII + symbol ranges)
         this.charset = this._buildCharset();
 
         // Shelf packing state for dynamic glyph addition
@@ -39,7 +74,7 @@ class GlyphAtlas {
         // Track canvas texture update state (for deferred Three.js re-upload via checkAndClearTextureUpdate)
         this.textureNeedsUpdate = false;
 
-        // UV map version counter — incremented on every ensureCodepoints() call that
+        // UV map version counter — incremented on every ensureGraphemes() call that
         // adds new glyphs. WorkerBridge uses this to detect stale serialized UV maps
         // and reset per-worker _hasUVMap flags so fresh maps are re-sent to workers.
         this._uvMapVersion = 0;
@@ -136,14 +171,24 @@ class GlyphAtlas {
             glyphsAdded: 0
         };
 
-        console.debug(`[GlyphAtlas] Cell size: ${this.standardCellWidth}x${this.standardCellHeight}`);
+        // Set _nextSyntheticId above the highest codepoint in the initial charset
+        // so dense IDs for multi-codepoint graphemes never collide with codepoints.
+        const maxCharsetCp = this.charset.length > 0
+            ? Math.max(...this.charset) + 1
+            : 0x3000;
+        this._nextSyntheticId = Math.max(maxCharsetCp, 0x3000);
+        // Record base so ensureGraphemes() can compute how many synthetic IDs have been allocated
+        this._syntheticIdBase = this._nextSyntheticId;
+
+        console.debug(`[GlyphAtlas] Cell size: ${this.standardCellWidth}x${this.standardCellHeight}, syntheticIdBase: 0x${this._nextSyntheticId.toString(16)}`);
 
         // Render each glyph using shelf packing
         for (let i = 0; i < this.charset.length; i++) {
             const charCode = this.charset[i];
 
-            // Use shelf packing to place glyph
-            const uv = this._packGlyph(charCode);
+            // Convert numeric codepoint to grapheme string for packing
+            const grapheme = String.fromCodePoint(charCode);
+            const uv = this._packGrapheme(grapheme, charCode);
 
             if (!uv) {
                 console.warn(`Atlas full at glyph ${i}/${this.charset.length}`);
@@ -187,16 +232,18 @@ class GlyphAtlas {
     }
 
     /**
-     * Pack a single glyph into the atlas using shelf packing algorithm
+     * Pack a single grapheme cluster into the atlas using shelf packing.
+     *
      * @private
-     * @param {number} charCode - Unicode code point
-     * @returns {Object|null} UV coordinates or null if atlas is full
+     * @param {string} grapheme - Grapheme cluster string (1+ Unicode codepoints)
+     * @param {number} [numericId] - Explicit numeric ID for the DataTexture index.
+     *   For single-codepoint graphemes this is the codepoint itself.
+     *   For multi-codepoint graphemes caller should pass undefined to auto-allocate.
+     * @returns {Object|null} UV coordinates {u0, v0, u1, v1} or null if atlas is full
      */
-    _packGlyph(charCode) {
-        const char = String.fromCodePoint(charCode);
-
-        // Measure glyph width
-        const glyphMetrics = this.ctx.measureText(char);
+    _packGrapheme(grapheme, numericId) {
+        // Measure glyph width using the full grapheme string (handles ZWJ, etc.)
+        const glyphMetrics = this.ctx.measureText(grapheme);
         const glyphWidth = Math.ceil(glyphMetrics.width);
 
         // Calculate cell dimensions with padding
@@ -213,7 +260,7 @@ class GlyphAtlas {
 
         // Check if we've run out of vertical space
         if (this.packingState.currentY + cellHeight > this.atlasSize) {
-            console.warn(`Atlas overflow: cannot fit charCode ${charCode} (${char})`);
+            console.warn(`Atlas overflow: cannot fit grapheme "${grapheme}"`);
             return null;
         }
 
@@ -221,11 +268,19 @@ class GlyphAtlas {
         const x = this.packingState.currentX + this.glyphPadding;
         const y = this.packingState.currentY + this.glyphPadding;
 
-        // Render glyph
-        this.ctx.fillText(char, x, y + this.baselineOffset);
+        // Render glyph (Canvas fillText handles multi-codepoint graphemes natively)
+        this.ctx.fillText(grapheme, x, y + this.baselineOffset);
 
-        // Store metrics
-        this.metrics.set(charCode, {
+        // numericId must always be passed by the caller (generate() or ensureGraphemes()).
+        // Single-codepoint graphemes: caller passes the codepoint.
+        // Multi-codepoint graphemes: caller allocates a synthetic ID from _nextSyntheticId.
+        if (numericId === undefined) {
+            console.error(`GlyphAtlas._packGrapheme: numericId not provided for "${grapheme}" — skipping`);
+            return null;
+        }
+
+        // Store metrics keyed by grapheme string
+        this.metrics.set(grapheme, {
             width: glyphWidth,
             height: this.glyphHeight,
             advance: glyphWidth
@@ -238,7 +293,10 @@ class GlyphAtlas {
         const v1 = (y + this.baselineOffset + this.glyphHeight - this.uvInsets.bottom) / this.atlasSize;
 
         const uv = { u0, v0, u1, v1 };
-        this.uvMap.set(charCode, uv);
+
+        // Store by grapheme string
+        this.uvMap.set(grapheme, uv);
+        this._graphemeIds.set(grapheme, numericId);
 
         // Advance cursor (shelf packing)
         this.packingState.currentX += cellWidth;
@@ -251,53 +309,102 @@ class GlyphAtlas {
         return uv;
     }
 
-    getUV(charCode) {
-        // Return UV if found, otherwise return '?' as fallback
-        return this.uvMap.get(charCode) || this.uvMap.get(63) || { u0: 0, v0: 0, u1: 0, v1: 0 };
+    /**
+     * Get UV rect for a grapheme string.
+     * @param {string} grapheme - Grapheme cluster string
+     * @returns {{u0,v0,u1,v1}}
+     */
+    getUV(grapheme) {
+        return this.uvMap.get(grapheme) || this.uvMap.get('?') || { u0: 0, v0: 0, u1: 0, v1: 0 };
     }
 
-    getMetrics(charCode) {
-        return this.metrics.get(charCode);
+    /**
+     * Get pixel metrics for a grapheme string.
+     * @param {string} grapheme
+     * @returns {{width,height,advance}|undefined}
+     */
+    getMetrics(grapheme) {
+        return this.metrics.get(grapheme);
     }
 
     getCharSize() {
         // Use 'M' as reference
-        const metrics = this.metrics.get(77); // 'M'
-        return metrics ? { width: metrics.width, height: metrics.height } : { width: this.fontSize, height: this.fontSize };
+        const m = this.metrics.get('M');
+        return m ? { width: m.width, height: m.height } : { width: this.fontSize, height: this.fontSize };
     }
 
     /**
-     * Get UV map as a serializable plain object (cached)
+     * Check if a grapheme exists in the atlas.
+     * @param {string} grapheme - Grapheme cluster string
+     * @returns {boolean}
+     */
+    hasGrapheme(grapheme) {
+        return this.uvMap.has(grapheme);
+    }
+
+    /**
+     * Get the numeric DataTexture ID for a grapheme string.
+     * Returns undefined if the grapheme is not in the atlas.
+     * @param {string} grapheme
+     * @returns {number|undefined}
+     */
+    getGraphemeId(grapheme) {
+        return this._graphemeIds.get(grapheme);
+    }
+
+    /**
+     * Get UV map as a serializable plain object (cached).
      * Used by Web Workers which can't access Map objects directly.
      *
-     * @returns {Object} Plain object: charCode (as string key) → {u0, v0, u1, v1}
+     * Keys are grapheme cluster strings (e.g. "A", "😀", "👨‍👩‍👧").
+     * Values also include the numeric DataTexture ID as `numericId` so the
+     * worker can populate the `codepoints` Float32Array without a second lookup.
+     *
+     * @returns {Object} Plain object: graphemeString → {u0, v0, u1, v1, numericId}
      */
     getSerializableUVMap() {
-        // Return cached version if available
         if (this._serializedUVMapCache) {
             return this._serializedUVMapCache;
         }
 
-        // Build and cache
         const map = {};
-        for (const [charCode, uv] of this.uvMap) {
-            map[charCode] = uv;
+        for (const [grapheme, uv] of this.uvMap) {
+            map[grapheme] = { ...uv, numericId: this._graphemeIds.get(grapheme) };
         }
         this._serializedUVMapCache = map;
         return map;
     }
 
     /**
-     * Invalidate the serialized UV map cache
-     * Call this if glyphs are added dynamically
+     * Get glyph pixel widths as a serializable plain object (cached).
+     * Keys are grapheme cluster strings. Values are pixel widths.
+     * @returns {Object} graphemeString → pixelWidth (number)
      */
-    invalidateSerializedCache() {
-        this._serializedUVMapCache = null;
+    getSerializableGlyphWidths() {
+        if (this._serializedWidthsCache) {
+            return this._serializedWidthsCache;
+        }
+
+        const widths = {};
+        for (const [grapheme, m] of this.metrics) {
+            widths[grapheme] = m.width;
+        }
+        this._serializedWidthsCache = widths;
+        return widths;
     }
 
     /**
-     * Get all glyph char codes in the atlas
-     * @returns {Array<number>}
+     * Invalidate the serialized UV map and widths caches.
+     * Call this when glyphs are added dynamically.
+     */
+    invalidateSerializedCache() {
+        this._serializedUVMapCache = null;
+        this._serializedWidthsCache = null;
+    }
+
+    /**
+     * Get all grapheme strings in the atlas.
+     * @returns {string[]}
      */
     getGlyphCodes() {
         return Array.from(this.uvMap.keys());
@@ -357,22 +464,25 @@ class GlyphAtlas {
             return this._atlasMapTexture;
         }
 
-        // Size the atlas map to cover only the codepoints actually in the charset,
-        // not the full Unicode range. The initial charset tops out around U+2606;
-        // at width 1024 that's ~10 rows = 160 KB vs the old 17.8 MB full-Unicode map.
-        // If ensureCodepoints() later adds higher codepoints (e.g. CJK), the map
-        // is regrown dynamically via _regrowAtlasMap().
+        // Size the atlas map to cover all numeric IDs currently assigned.
+        // Single-codepoint glyphs use their codepoint as ID (max ~U+2606 for
+        // the initial charset, ~10 rows at width 1024).
+        // Multi-codepoint graphemes get dense synthetic IDs above the charset max.
         const ATLAS_MAP_WIDTH = 1024;
-        const maxCp = this.uvMap.size > 0 ? Math.max(...this.uvMap.keys()) + 1 : 128;
-        const ATLAS_MAP_HEIGHT = Math.ceil(maxCp / ATLAS_MAP_WIDTH) || 1;
+        const maxId = this._graphemeIds.size > 0
+            ? Math.max(...this._graphemeIds.values()) + 1
+            : 128;
+        const ATLAS_MAP_HEIGHT = Math.ceil(maxId / ATLAS_MAP_WIDTH) || 1;
         const totalTexels = ATLAS_MAP_WIDTH * ATLAS_MAP_HEIGHT;
 
         const data = new Float32Array(totalTexels * 4);
 
-        // Fill in current UV mappings
-        for (const [code, uv] of this.uvMap) {
-            if (code >= totalTexels) continue;
-            const base = code * 4;
+        // Fill in current UV mappings using numeric IDs as DataTexture indices
+        for (const [grapheme, numericId] of this._graphemeIds) {
+            if (numericId >= totalTexels) continue;
+            const uv = this.uvMap.get(grapheme);
+            if (!uv) continue;
+            const base = numericId * 4;
             data[base]     = uv.u0;
             data[base + 1] = 1.0 - uv.v1; // pre-flip V: bottom edge in WebGL
             data[base + 2] = uv.u1;
@@ -437,106 +547,118 @@ class GlyphAtlas {
 
     /**
      * Check if a glyph is already in the atlas
-     * @param {number} charCode - Unicode code point
+     * @param {string} grapheme - Grapheme cluster string
      * @returns {boolean} True if glyph exists in atlas
      */
-    hasGlyph(charCode) {
-        return this.uvMap.has(charCode);
+    hasGlyph(grapheme) {
+        return this.uvMap.has(grapheme);
     }
 
     /**
-     * Unified entry point for ensuring codepoints are present in the atlas.
+     * Ensure a set of grapheme cluster strings are present in the atlas.
      *
-     * Atomically handles all side effects of adding new glyphs:
-     * 1. Packs each missing codepoint via _packGlyph() (canvas 2D draw)
+     * This is the primary dynamic-addition entry point. Handles all side effects:
+     * 1. Packs each missing grapheme via _packGrapheme() (canvas 2D draw)
      * 2. Updates the GPU atlas map DataTexture in-place via _updateAtlasMapEntry()
-     *    (if the DataTexture exists)
-     * 3. Sets textureNeedsUpdate = true so GlyphRenderer picks up the CanvasTexture
-     *    re-upload flag at draw time via checkAndClearTextureUpdate()
-     * 4. Sets _atlasMapTexture.needsUpdate = true immediately — the DataTexture is
-     *    shared by reference across all renderers, so one flag covers all
-     * 5. Invalidates the serialized UV map cache used by WorkerBridge
-     * 6. Increments _uvMapVersion so WorkerBridge detects the change and resets
-     *    per-worker _hasUVMap flags on its next getSerializedUVMap() call
+     * 3. Sets textureNeedsUpdate = true for deferred CanvasTexture re-upload
+     * 4. Sets _atlasMapTexture.needsUpdate = true (shared DataTexture)
+     * 5. Invalidates serialized UV map and widths caches used by WorkerBridge
+     * 6. Increments _uvMapVersion so WorkerBridge detects stale worker caches
      *
-     * Safe to call on the main thread immediately before worker dispatch.
-     * Workers cannot access DOM or Three.js canvas — all atlas mutations must
-     * happen here before the UV map snapshot is serialized for worker transfer.
-     *
-     * @param {number[]} codepoints - Array of Unicode code points to ensure
+     * @param {string[]} graphemes - Array of grapheme cluster strings to ensure
      * @returns {number} Count of newly-added glyphs
      */
-    ensureCodepoints(codepoints) {
+    ensureGraphemes(graphemes) {
         if (!this.ctx) {
-            console.warn('GlyphAtlas.ensureCodepoints: atlas not initialized. Call generate() first.');
+            console.warn('GlyphAtlas.ensureGraphemes: atlas not initialized. Call generate() first.');
             return 0;
         }
         this._setupContextFont();
 
         let added = 0;
-        for (const code of codepoints) {
-            if (this.uvMap.has(code)) continue;
-            const uv = this._packGlyph(code);
+        for (const grapheme of graphemes) {
+            if (this.uvMap.has(grapheme)) continue;
+
+            // Determine numeric ID: single-codepoint grapheme → use codepoint
+            let numericId;
+            const cp = grapheme.codePointAt(0);
+            const isSingleCodepoint = (cp > 0xFFFF ? 2 : 1) === grapheme.length;
+            if (isSingleCodepoint) {
+                numericId = cp;
+            } else {
+                // Multi-codepoint ZWJ sequence: allocate dense synthetic ID
+                // _syntheticIdBase is set once in generate() to the initial _nextSyntheticId value.
+                const syntheticCount = this._nextSyntheticId - (this._syntheticIdBase || this._nextSyntheticId);
+                if (syntheticCount >= this._maxSyntheticIds) {
+                    console.warn(`GlyphAtlas: synthetic ID cap (${this._maxSyntheticIds}) reached, cannot pack grapheme "${grapheme}"`);
+                    continue;
+                }
+                numericId = this._nextSyntheticId++;
+            }
+
+            const uv = this._packGrapheme(grapheme, numericId);
             if (uv) {
                 added++;
                 if (this._atlasMapTexture) {
-                    this._updateAtlasMapEntry(code, uv);
+                    this._updateAtlasMapEntry(numericId, uv);
                 }
             } else {
-                console.warn(`GlyphAtlas: atlas full, cannot pack codepoint ${code} (${String.fromCodePoint(code)})`);
+                console.warn(`GlyphAtlas: atlas full, cannot pack grapheme "${grapheme}"`);
             }
         }
 
         if (added > 0) {
-            // CanvasTexture: set flag for deferred renderer-poll at draw time.
-            // GlyphRenderer calls checkAndClearTextureUpdate() at render entry and
-            // sets this.texture.needsUpdate = true only then, batching multiple
-            // same-frame ensureCodepoints() calls into a single GPU re-upload.
             this.textureNeedsUpdate = true;
-
-            // DataTexture: mark for re-upload immediately. The DataTexture is shared
-            // by reference across all renderers — one needsUpdate = true here covers
-            // all of them. Three.js defers the actual GPU transfer to next draw call.
             if (this._atlasMapTexture) {
                 this._atlasMapTexture.needsUpdate = true;
             }
-
             this.invalidateSerializedCache();
             this._uvMapVersion++;
-            console.debug(`[GlyphAtlas] ensureCodepoints: +${added} glyphs`);
+            console.debug(`[GlyphAtlas] ensureGraphemes: +${added} glyphs`);
         }
 
         return added;
     }
 
     /**
-     * Add a glyph to the atlas if it doesn't exist.
-     * Thin wrapper around ensureCodepoints() — preserves original return-value contract.
-     * @param {number} charCode - Unicode code point
-     * @returns {Object|null} UV coordinates {u0, v0, u1, v1} or null if atlas is full
+     * Ensure a set of Unicode codepoints (numbers) are in the atlas.
+     * Converts each to a grapheme string and delegates to ensureGraphemes().
+     * Preserved for backward compatibility with callers that have numeric codepoints.
+     *
+     * @param {number[]} codepoints - Array of Unicode code points to ensure
+     * @returns {number} Count of newly-added glyphs
      */
-    addGlyphIfMissing(charCode) {
-        if (this.uvMap.has(charCode)) {
-            return this.uvMap.get(charCode);
-        }
-        this.ensureCodepoints([charCode]);
-        return this.uvMap.get(charCode) || null;
+    ensureCodepoints(codepoints) {
+        const graphemes = codepoints.map(cp => String.fromCodePoint(cp));
+        return this.ensureGraphemes(graphemes);
     }
 
     /**
-     * Add multiple glyphs at once.
-     * Thin wrapper around ensureCodepoints() — preserves original return-value contract.
-     * @param {number[]} charCodes - Array of Unicode code points
-     * @returns {Map<number, Object|null>} Map of charCode to UV coordinates
+     * Add a grapheme to the atlas if it doesn't exist.
+     * @param {string} grapheme - Grapheme cluster string
+     * @returns {Object|null} UV coordinates {u0, v0, u1, v1} or null if atlas is full
      */
-    addGlyphsIfMissing(charCodes) {
-        const newCodes = charCodes.filter(c => !this.uvMap.has(c));
-        if (newCodes.length > 0) {
-            this.ensureCodepoints(newCodes);
+    addGlyphIfMissing(grapheme) {
+        if (this.uvMap.has(grapheme)) {
+            return this.uvMap.get(grapheme);
+        }
+        this.ensureGraphemes([grapheme]);
+        return this.uvMap.get(grapheme) || null;
+    }
+
+    /**
+     * Add multiple graphemes at once.
+     * @param {string[]} graphemes - Array of grapheme cluster strings
+     * @returns {Map<string, Object|null>} Map of grapheme to UV coordinates
+     */
+    addGlyphsIfMissing(graphemes) {
+        const missing = graphemes.filter(g => !this.uvMap.has(g));
+        if (missing.length > 0) {
+            this.ensureGraphemes(missing);
         }
         const results = new Map();
-        for (const c of charCodes) {
-            results.set(c, this.uvMap.get(c) || null);
+        for (const g of graphemes) {
+            results.set(g, this.uvMap.get(g) || null);
         }
         return results;
     }
@@ -544,20 +666,20 @@ class GlyphAtlas {
     /**
      * Write a single glyph's UV rect into the shared atlas map DataTexture.
      * No-op if the texture hasn't been created yet (pre-generate() calls).
-     * @param {number} charCode - Unicode codepoint
+     * @param {number} numericId - The DataTexture index for this glyph
      * @param {Object} uv - {u0, v0, u1, v1}
      */
-    _updateAtlasMapEntry(charCode, uv) {
+    _updateAtlasMapEntry(numericId, uv) {
         const tex = this._atlasMapTexture;
         if (!tex) return; // texture not yet created — will be filled on first getAtlasMapTexture()
 
         const totalTexels = this._atlasMapTextureWidth * this._atlasMapTextureHeight;
-        if (charCode >= totalTexels) {
-            this._regrowAtlasMap(charCode);
+        if (numericId >= totalTexels) {
+            this._regrowAtlasMap(numericId);
         }
 
         const data = tex.image.data;
-        const base = charCode * 4;
+        const base = numericId * 4;
         data[base]     = uv.u0;
         data[base + 1] = 1.0 - uv.v1;
         data[base + 2] = uv.u1;
@@ -566,15 +688,15 @@ class GlyphAtlas {
     }
 
     /**
-     * Grow the atlas map DataTexture to accommodate a codepoint beyond the current range.
+     * Grow the atlas map DataTexture to accommodate a numeric ID beyond the current range.
      * Copies existing data into a larger Float32Array and updates the texture in-place
      * so all existing uniform references remain valid.
-     * @param {number} charCode - The codepoint that triggered the regrow
+     * @param {number} numericId - The ID that triggered the regrow
      */
-    _regrowAtlasMap(charCode) {
+    _regrowAtlasMap(numericId) {
         const tex = this._atlasMapTexture;
         const width = this._atlasMapTextureWidth;
-        const newHeight = Math.ceil((charCode + 1) / width);
+        const newHeight = Math.ceil((numericId + 1) / width);
         const newData = new Float32Array(width * newHeight * 4);
 
         // Copy existing data
@@ -588,7 +710,7 @@ class GlyphAtlas {
         this._atlasMapTextureHeight = newHeight;
         this._atlasMapTextureDirty = true;
 
-        console.debug(`[GlyphAtlas] Atlas map regrown: ${width}x${newHeight} for codepoint U+${charCode.toString(16).toUpperCase()}`);
+        console.debug(`[GlyphAtlas] Atlas map regrown: ${width}x${newHeight} for numeric ID 0x${numericId.toString(16).toUpperCase()}`);
 
         tex.needsUpdate = true;
     }
@@ -645,14 +767,6 @@ class GlyphAtlas {
         const needsUpdate = this.textureNeedsUpdate;
         this.textureNeedsUpdate = false;
         return needsUpdate;
-    }
-
-    /**
-     * Get all glyphs currently in the atlas
-     * @returns {number[]} Array of character codes
-     */
-    getGlyphCodes() {
-        return Array.from(this.uvMap.keys());
     }
 
     /**

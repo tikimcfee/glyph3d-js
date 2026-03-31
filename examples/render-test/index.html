@@ -537,8 +537,8 @@
             ];
 
             // Build buffers on main thread (same code the worker uses)
-            const uvMap = {};
-            for (const [code, uv] of atlas.uvMap) { uvMap[code] = uv; }
+            // uvMap must include numericId per entry for the builder's DataTexture ID lookup
+            const uvMap = atlas.getSerializableUVMap();
             const metrics = {
                 charWidth: atlas.getCharSize().width,
                 charHeight: atlas.getCharSize().height,

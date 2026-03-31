@@ -4,31 +4,39 @@
  * Single-pass text → Float32Array conversion.
  * No intermediate objects, no spread operators.
  *
- * GPU codepoint → UV path
- * -----------------------
+ * GPU grapheme → UV path
+ * ----------------------
  * These builders emit a `codepoints` Float32Array instead of a `uvs` array.
- * Each element is the raw Unicode codepoint of the glyph. The vertex shader
- * resolves codepoints to atlas UV rects at draw time via a DataTexture lookup
+ * Each element is the numeric DataTexture ID for the glyph. The vertex shader
+ * resolves IDs to atlas UV rects at draw time via a DataTexture lookup
  * (atlasMapTexture, built by GlyphAtlas.getAtlasMapTexture()).
  *
- * The `uvMap` argument is still required for glyph existence validation
- * (i.e. deciding whether to fall back to '?'), but UV coordinates are never
- * written into the output buffers.
+ * For single-codepoint graphemes the numeric ID equals the Unicode codepoint.
+ * For multi-codepoint graphemes (ZWJ sequences) it is a dense synthetic ID
+ * assigned by GlyphAtlas above the highest charset codepoint.
+ *
+ * The `uvMap` argument maps grapheme string → {u0,v0,u1,v1,numericId}. It is
+ * used both for existence validation (fallback to '?' if missing) and to obtain
+ * the numeric DataTexture ID written into the `codepoints` buffer.
  *
  * Worker context: this file must not import DOM APIs or Three.js.
+ * Grapheme iteration uses Intl.Segmenter (Baseline 2024) with a codePointAt
+ * fallback — both work on DedicatedWorkerGlobalScope.
  */
 
+import { iterGraphemes } from '../../utils/grapheme.js';
+
 /**
- * Count renderable glyphs in text (excludes spaces and newlines)
+ * Count renderable grapheme clusters in text (excludes control characters).
+ * A grapheme cluster with codepoint <= 32 is a control/whitespace character.
+ * @param {string} text
+ * @returns {number}
  */
 function countGlyphs(text) {
     let count = 0;
-    for (let i = 0; i < text.length; i++) {
-        const c = text.charCodeAt(i);
-        // Skip space (32), newline (10), carriage return (13), tab (9)
-        if (c !== 32 && c !== 10 && c !== 13 && c !== 9) {
-            count++;
-        }
+    for (const g of iterGraphemes(text)) {
+        const cp = g.codePointAt(0);
+        if (cp > 32) count++;
     }
     return count;
 }
@@ -40,13 +48,16 @@ function countGlyphs(text) {
  * @param {string} input.text
  * @param {{x,y,z}} input.position
  * @param {Object} input.metrics
- * @param {Object} input.uvMap - charCode → {u0,v0,u1,v1}. Used only to validate that a glyph
- *   exists in the atlas (falls back to '?' codepoint 63 if missing). UV coordinates are NOT
- *   written to the output; the vertex shader resolves them via atlasMapTexture at draw time.
+ * @param {Object} input.uvMap - graphemeString → {u0,v0,u1,v1,numericId}. Used to validate
+ *   that a glyph exists in the atlas (falls back to '?' numericId 63 if missing).
+ *   UV coordinates are NOT written to the output; the vertex shader resolves them via
+ *   atlasMapTexture at draw time using the numeric ID stored in `codepoints`.
+ * @param {Object} input.glyphWidths - graphemeString → pixelWidth
  * @param {{r,g,b}} input.color
  * @param {number} [input.scale=1.0]
- * @returns {{positions: Float32Array, sizes: Float32Array, codepoints: Float32Array, colors: Float32Array, groupIds: Float32Array, count: number, bounds: Object|null}}
- *   `codepoints` contains one raw Unicode codepoint per glyph for GPU-side UV lookup.
+ * @param {number} [input.groupId=0]
+ * @returns {{positions: Float32Array, sizes: Float32Array, codepoints: Float32Array, colors: Float32Array, groupIds: Float32Array, count: number, bounds: Object|null, lineSlotOffsets: number[]}}
+ *   `codepoints` contains one numeric DataTexture ID per glyph for GPU-side UV lookup.
  */
 export function buildGlyphBuffers(input) {
     const { text, position, metrics, uvMap, glyphWidths, color, scale = 1.0, groupId = 0 } = input;
@@ -91,13 +102,16 @@ export function buildGlyphBuffers(input) {
     // Track line→slot mapping: lineSlotOffsets[lineIdx] = buffer slot of first glyph on that line
     const lineSlotOffsets = [0]; // line 0 starts at slot 0
 
+    // '?' fallback entry
+    const fallbackEntry = uvMap['?'];
+
     // Fill buffers in single pass
     let idx = 0;
-    for (let i = 0; i < text.length; i++) {
-        const charCode = text.charCodeAt(i);
+    for (const grapheme of iterGraphemes(text)) {
+        const cp = grapheme.codePointAt(0);
 
-        // Newline - reset x, advance y, record line boundary
-        if (charCode === 10) {
+        // Newline (U+000A) - reset x, advance y, record line boundary
+        if (cp === 10) {
             if (x > position.x) maxX = Math.max(maxX, x - metrics.letterSpacing);
             x = position.x;
             y -= metrics.lineSpacing;
@@ -107,28 +121,35 @@ export function buildGlyphBuffers(input) {
         }
 
         // Per-glyph width in world units (pixel width × worldScale, fallback to charWidth)
-        const glyphWidth = (glyphWidths && glyphWidths[charCode]) ? glyphWidths[charCode] * ws : defaultWidth;
+        const glyphWidth = glyphWidths && glyphWidths[grapheme]
+            ? glyphWidths[grapheme] * ws
+            : defaultWidth;
 
-        // Skip other whitespace but advance cursor for spaces
-        if (charCode === 32) {
+        // Space (U+0020): advance cursor but don't render
+        if (cp === 32) {
             if (minX === Infinity) minX = x;
             x += glyphWidth * scale + metrics.letterSpacing;
             continue;
         }
-        if (charCode === 13 || charCode === 9) continue;
+        // CR (U+000D) and tab (U+0009): skip entirely
+        if (cp === 13 || cp === 9) continue;
 
         // Track minX
         if (minX === Infinity) minX = x;
 
-        // Validate glyph exists in atlas (fallback to '?' = 63)
-        const resolvedCode = uvMap[charCode] ? charCode : (uvMap[63] ? 63 : 0);
-        if (!resolvedCode) {
+        // Validate glyph exists in atlas — fall back to '?'
+        const entry = uvMap[grapheme];
+        const resolvedEntry = entry || (fallbackEntry ? fallbackEntry : null);
+        if (!resolvedEntry) {
             x += glyphWidth * scale + metrics.letterSpacing;
             continue;
         }
 
-        // Use the resolved glyph's width for sizing (may differ from original if fallback)
-        const resolvedWidth = (glyphWidths && glyphWidths[resolvedCode]) ? glyphWidths[resolvedCode] * ws : defaultWidth;
+        const numericId = resolvedEntry.numericId;
+        const resolvedGrapheme = entry ? grapheme : '?';
+        const resolvedWidth = glyphWidths && glyphWidths[resolvedGrapheme]
+            ? glyphWidths[resolvedGrapheme] * ws
+            : defaultWidth;
 
         // Position [x, y, z]
         positions[idx * 3] = x;
@@ -139,8 +160,8 @@ export function buildGlyphBuffers(input) {
         sizes[idx * 2] = resolvedWidth * scale;
         sizes[idx * 2 + 1] = scaledHeight;
 
-        // [GPU-Lookup] Store raw codepoint; vertex shader resolves to UV via atlasMapTexture
-        codepoints[idx] = resolvedCode;
+        // [GPU-Lookup] Store numeric DataTexture ID; vertex shader resolves to UV via atlasMapTexture
+        codepoints[idx] = numericId;
 
         // Color [r, g, b]
         colors[idx * 3] = color.r;
@@ -235,9 +256,9 @@ function applyPagination(positions, startIdx, endIdx, origin, metrics) {
  * updateColor, getText) on individual text entries after the worker path.
  *
  * @param {Array<{text, position, color?, scale?}>} items
- * @param {Object} shared - {metrics, uvMap, defaultColor}
+ * @param {Object} shared - {metrics, uvMap, glyphWidths, defaultColor}
  * @returns {{positions: Float32Array, sizes: Float32Array, codepoints: Float32Array, colors: Float32Array, groupIds: Float32Array, count: number, bounds: Object|null, itemMeta: Array<{bufferStartIndex: number, glyphCount: number, bounds: Object|null}>}}
- *   `codepoints` contains one raw Unicode codepoint per glyph for GPU-side UV lookup via atlasMapTexture.
+ *   `codepoints` contains one numeric DataTexture ID per glyph for GPU-side UV lookup via atlasMapTexture.
  */
 export function buildBatchBuffers(items, shared) {
     const { metrics, uvMap, glyphWidths, defaultColor } = shared;
@@ -248,6 +269,9 @@ export function buildBatchBuffers(items, shared) {
     // Z-depth wrapping settings
     const maxLineWidth = Z_WRAP_CONFIG.maxLineWidth;
     const zWrapSpacing = metrics.charHeight * Z_WRAP_CONFIG.zWrapSpacing;
+
+    // '?' fallback entry
+    const fallbackEntry = uvMap['?'];
 
     // First pass: count total glyphs
     let totalGlyphs = 0;
@@ -308,7 +332,7 @@ export function buildBatchBuffers(items, shared) {
         let y = pos.y;
         let z = pos.z;
         const startZ = pos.z;
-        let charsOnSegment = 0;  // Track chars since last wrap/newline
+        let glyphsOnSegment = 0;  // Track graphemes since last wrap/newline
 
         // Track line→slot mapping within this item
         const itemLineSlotOffsets = [bufferOffset]; // line 0 starts at current offset
@@ -318,54 +342,62 @@ export function buildBatchBuffers(items, shared) {
         let itemMinY = y, itemMaxY = y + metrics.charHeight;
         let itemMinZ = z, itemMaxZ = z;
 
-        for (let i = 0; i < text.length; i++) {
-            const charCode = text.charCodeAt(i);
+        for (const grapheme of iterGraphemes(text)) {
+            const cp = grapheme.codePointAt(0);
 
-            if (charCode === 10) {
+            if (cp === 10) {
                 // Newline: reset x, advance y, reset z
                 if (x > pos.x) itemMaxX = Math.max(itemMaxX, x - metrics.letterSpacing);
                 x = pos.x;
                 y -= metrics.lineSpacing;
                 z = startZ;  // Reset Z for new logical line
                 itemMinY = y;
-                charsOnSegment = 0;
+                glyphsOnSegment = 0;
                 itemLineSlotOffsets.push(bufferOffset); // next line starts here
                 continue;
             }
 
-            // Per-glyph width in world units (pixel width × worldScale, fallback to charWidth)
-            const glyphWidth = (glyphWidths && glyphWidths[charCode]) ? glyphWidths[charCode] * ws : defaultWidth;
+            // Per-glyph width in world units
+            const glyphWidth = glyphWidths && glyphWidths[grapheme]
+                ? glyphWidths[grapheme] * ws
+                : defaultWidth;
 
             // Z-depth + Y-drop wrap: go behind AND down so text is readable head-on
-            if (maxLineWidth > 0 && charsOnSegment >= maxLineWidth) {
+            if (maxLineWidth > 0 && glyphsOnSegment >= maxLineWidth) {
                 if (x > pos.x) itemMaxX = Math.max(itemMaxX, x - metrics.letterSpacing);
                 x = pos.x;
                 y -= metrics.lineSpacing;   // Drop Y — visible when viewed head-on
                 z -= zWrapSpacing;           // Go behind — depth layering
                 itemMinY = y;
                 itemMinZ = Math.min(itemMinZ, z);
-                charsOnSegment = 0;
+                glyphsOnSegment = 0;
             }
 
-            if (charCode === 32) {
+            if (cp === 32) {
+                // Space: advance cursor, no glyph slot
                 if (itemMinX === Infinity) itemMinX = x;
                 x += glyphWidth * scale + metrics.letterSpacing;
-                charsOnSegment++;
+                glyphsOnSegment++;
                 continue;
             }
-            if (charCode === 13 || charCode === 9) continue;
+            if (cp === 13 || cp === 9) continue;
 
             if (itemMinX === Infinity) itemMinX = x;
 
-            const resolvedCode = uvMap[charCode] ? charCode : (uvMap[63] ? 63 : 0);
-            if (!resolvedCode) {
+            // Validate glyph exists in atlas — fall back to '?'
+            const entry = uvMap[grapheme];
+            const resolvedEntry = entry || (fallbackEntry ? fallbackEntry : null);
+            if (!resolvedEntry) {
                 x += glyphWidth * scale + metrics.letterSpacing;
-                charsOnSegment++;
+                glyphsOnSegment++;
                 continue;
             }
 
-            // Use the resolved glyph's width for sizing
-            const resolvedWidth = (glyphWidths && glyphWidths[resolvedCode]) ? glyphWidths[resolvedCode] * ws : defaultWidth;
+            const numericId = resolvedEntry.numericId;
+            const resolvedGrapheme = entry ? grapheme : '?';
+            const resolvedWidth = glyphWidths && glyphWidths[resolvedGrapheme]
+                ? glyphWidths[resolvedGrapheme] * ws
+                : defaultWidth;
             const idx = bufferOffset;
 
             positions[idx * 3] = x;
@@ -375,8 +407,8 @@ export function buildBatchBuffers(items, shared) {
             sizes[idx * 2] = resolvedWidth * scale;
             sizes[idx * 2 + 1] = scaledHeight;
 
-            // [GPU-Lookup] Store raw codepoint; vertex shader resolves to UV via atlasMapTexture
-            codepoints[idx] = resolvedCode;
+            // [GPU-Lookup] Store numeric DataTexture ID; vertex shader resolves to UV via atlasMapTexture
+            codepoints[idx] = numericId;
 
             colors[idx * 3] = color.r;
             colors[idx * 3 + 1] = color.g;
@@ -386,7 +418,7 @@ export function buildBatchBuffers(items, shared) {
 
             bufferOffset++;
             x += glyphWidth * scale + metrics.letterSpacing;
-            charsOnSegment++;
+            glyphsOnSegment++;
         }
 
         // Final line

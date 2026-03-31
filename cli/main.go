@@ -317,14 +317,25 @@ func isInteractive() bool {
 }
 
 // serveCmd runs the WebSocket relay server.
-// Usage: glyph3d-cli serve [--port 8765] [--listen 0.0.0.0]
+// Usage: glyph3d-cli serve [--port 8765] [--listen 0.0.0.0] [--root /path/to/project]
 func serveCmd() {
-	fs := flag.NewFlagSet("serve", flag.ExitOnError)
-	p := fs.Int("port", 8765, "Port to listen on")
-	listen := fs.String("listen", "0.0.0.0", "Address to listen on")
-	fs.Parse(os.Args[2:])
+	flagSet := flag.NewFlagSet("serve", flag.ExitOnError)
+	p := flagSet.Int("port", 8765, "Port to listen on")
+	listen := flagSet.String("listen", "0.0.0.0", "Address to listen on")
+	root := flagSet.String("root", "", "Root directory for filesystem access (enables fs/* methods)")
+	flagSet.Parse(os.Args[2:])
 
-	if err := RunRelay(*listen, *p); err != nil {
+	var fsHandler *FSHandler
+	if *root != "" {
+		var err error
+		fsHandler, err = NewFSHandler(*root)
+		if err != nil {
+			log.Fatalf("[relay] --root: %v", err)
+		}
+		log.Printf("[relay] filesystem root: %s", fsHandler.root)
+	}
+
+	if err := RunRelay(*listen, *p, fsHandler); err != nil {
 		log.Fatalf("[relay] %v", err)
 	}
 }

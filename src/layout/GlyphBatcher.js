@@ -76,8 +76,8 @@ class GlyphBatcher {
                 continue;
             }
 
-            // Get UV coordinates
-            const uv = this.atlas.getUV(char.charCodeAt(0));
+            // Get UV coordinates (atlas is now keyed by grapheme string)
+            const uv = this.atlas.getUV(char);
             if (!uv) {
                 // Skip unsupported characters
                 x += (this.metrics.charWidth + letterSpacing) * scale;

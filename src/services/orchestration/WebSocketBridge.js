@@ -47,6 +47,11 @@ export default class WebSocketBridge {
             this._createStatusBar();
         }
 
+        // JSON-RPC 2.0 support
+        this._rpcId = 0;
+        this._rpcPending = new Map();  // id -> { resolve, reject, timer }
+        this._rpcNotificationHandler = null;
+
         // Stats
         this._commandsReceived = 0;
         this._commandsSent = 0;
@@ -127,6 +132,50 @@ export default class WebSocketBridge {
     push(clientId, payload) {
         if (!this.connected || !this.ws) return;
         this.ws.send(JSON.stringify({ to: clientId, ...payload }));
+    }
+
+    // ============ JSON-RPC 2.0 ============
+
+    /**
+     * Send a JSON-RPC 2.0 request and await the response.
+     * @param {string} method - e.g. "fs/readFile"
+     * @param {Object} params
+     * @param {number} [timeoutMs=10000]
+     * @returns {Promise<any>} - result field from JSON-RPC response
+     * @throws on JSON-RPC error response or timeout
+     */
+    rpcRequest(method, params, timeoutMs = 10000) {
+        return new Promise((resolve, reject) => {
+            if (!this.ws || !this.connected) {
+                reject(new Error('WebSocket not connected'));
+                return;
+            }
+
+            const id = ++this._rpcId;
+            const timer = setTimeout(() => {
+                this._rpcPending.delete(id);
+                reject(new Error(`RPC timeout: ${method} (id=${id})`));
+            }, timeoutMs);
+
+            this._rpcPending.set(id, { resolve, reject, timer });
+
+            const msg = JSON.stringify({
+                jsonrpc: '2.0',
+                id,
+                method,
+                params,
+            });
+            this.ws.send(msg);
+        });
+    }
+
+    /**
+     * Register a handler for JSON-RPC notifications (messages with method but no id).
+     * Used for fs/didChange push notifications from the relay.
+     * @param {Function} fn - (method, params) => void
+     */
+    setRpcNotificationHandler(fn) {
+        this._rpcNotificationHandler = fn;
     }
 
     // ============ LAN Detection ============
@@ -332,6 +381,32 @@ export default class WebSocketBridge {
             return;
         }
 
+        // JSON-RPC 2.0 response or notification — route before command handling
+        if (envelope.jsonrpc === '2.0') {
+            if (envelope.id != null) {
+                // Response to a pending rpcRequest
+                const pending = this._rpcPending.get(envelope.id);
+                if (pending) {
+                    this._rpcPending.delete(envelope.id);
+                    clearTimeout(pending.timer);
+                    if (envelope.error) {
+                        const err = new Error(envelope.error.message || 'RPC error');
+                        err.code = envelope.error.code;
+                        err.data = envelope.error.data;
+                        pending.reject(err);
+                    } else {
+                        pending.resolve(envelope.result);
+                    }
+                }
+            } else if (envelope.method) {
+                // Notification (no id) — e.g. fs/didChange
+                if (this._rpcNotificationHandler) {
+                    this._rpcNotificationHandler(envelope.method, envelope.params);
+                }
+            }
+            return;
+        }
+
         // Registration ack from relay
         if (envelope.ok !== undefined) {
             console.log('[ws-bridge] registered as display');
@@ -420,6 +495,13 @@ export default class WebSocketBridge {
      * Dispose: disconnect and remove UI elements.
      */
     dispose() {
+        // Reject all pending RPC requests
+        for (const [id, pending] of this._rpcPending) {
+            clearTimeout(pending.timer);
+            pending.reject(new Error('WebSocketBridge disposed'));
+        }
+        this._rpcPending.clear();
+
         this.disconnect();
         if (this._statusEl && this._statusEl.parentNode) {
             this._statusEl.parentNode.removeChild(this._statusEl);

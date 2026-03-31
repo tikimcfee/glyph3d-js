@@ -60,8 +60,8 @@ class InstanceBuffer {
         // Build instance data for each character
         for (let i = 0; i < count; i++) {
             const char = text[i];
-            const charCode = char.charCodeAt(0);
-            const uv = atlas.getUV(charCode);
+            // atlas.getUV now accepts a grapheme string
+            const uv = atlas.getUV(char);
 
             // Position (world space)
             positions[i * 3 + 0] = position.x + startX + i * charWidth;

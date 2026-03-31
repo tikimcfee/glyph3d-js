@@ -16,6 +16,7 @@ import * as THREE from 'three';
 import { PERF_THRESHOLDS, shouldDebugLog } from './core/constants.js';
 import GlyphLayout from './layout/GlyphLayout.js';
 import { createLogger, LogLevel } from './utils/index.js';
+import { iterGraphemes } from './utils/grapheme.js';
 
 // Create logger for v1.5
 const logger = createLogger('GlyphRendererV15');
@@ -1087,7 +1088,7 @@ class GlyphRendererV15 {
     }
 
     /**
-     * Ensure all codepoints in the given text items exist in the atlas.
+     * Ensure all grapheme clusters in the given text items exist in the atlas.
      * Dynamically adds missing glyphs and invalidates the atlas map texture cache.
      * @param {Array<{text: string}>} items
      * @private
@@ -1096,10 +1097,10 @@ class GlyphRendererV15 {
         const missing = [];
         for (const item of items) {
             if (!item.text) continue;
-            for (let i = 0; i < item.text.length; i++) {
-                const code = item.text.charCodeAt(i);
-                if (code > 32 && !this.atlas.uvMap.has(code)) {
-                    missing.push(code);
+            for (const grapheme of iterGraphemes(item.text)) {
+                const cp = grapheme.codePointAt(0);
+                if (cp > 32 && !this.atlas.uvMap.has(grapheme)) {
+                    missing.push(grapheme);
                 }
             }
         }
@@ -1108,7 +1109,7 @@ class GlyphRendererV15 {
             // update, textureNeedsUpdate flag, serialized cache invalidation, and
             // _uvMapVersion increment. All renderers share the same atlas object so
             // the DataTexture needsUpdate propagates automatically.
-            this.atlas.ensureCodepoints(missing);
+            this.atlas.ensureGraphemes(missing);
         }
     }
 
@@ -1132,14 +1133,14 @@ class GlyphRendererV15 {
         // Use separate index for positions array since it skips newlines
         const glyphs = [];
         let posIndex = 0;
-        for (let i = 0; i < text.length; i++) {
-            const char = text[i];
+        for (const grapheme of iterGraphemes(text)) {
+            const cp = grapheme.codePointAt(0);
 
             // Newlines are not in positions array - skip without incrementing posIndex
-            if (char === '\n') continue;
+            if (cp === 10) continue;
 
             // Spaces are in positions array but we don't render them
-            if (char === ' ') {
+            if (cp === 32) {
                 posIndex++;
                 continue;
             }
@@ -1147,8 +1148,9 @@ class GlyphRendererV15 {
             const pos = positions[posIndex++];
             if (!pos) continue; // Safety check
 
-            const charCode = char.charCodeAt(0);
-            if (!this.atlas.hasGlyph(charCode)) continue; // Skip unsupported chars
+            if (!this.atlas.hasGlyph(grapheme)) continue; // Skip unsupported graphemes
+
+            const numericId = this.atlas.getGraphemeId(grapheme) ?? 63;
 
             glyphs.push({
                 position: pos,
@@ -1156,9 +1158,9 @@ class GlyphRendererV15 {
                     width: this.metrics.charWidth * scale,
                     height: this.metrics.charHeight * scale
                 },
-                charCode: charCode,
+                charCode: numericId,    // numeric DataTexture ID (shader uses this as codepoint)
                 color: color,
-                char: char,  // Keep for debugging
+                char: grapheme,         // Keep for debugging
                 groupId: options.groupId || 0
             });
         }
@@ -1356,10 +1358,10 @@ class GlyphRendererV15 {
             for (const item of items) {
                 const text = item.text || '';
                 let glyphCount = 0;
-                for (let c = 0; c < text.length; c++) {
-                    const ch = text.charCodeAt(c);
-                    // Skip space (32), newline (10), carriage return (13), tab (9)
-                    if (ch !== 32 && ch !== 10 && ch !== 13 && ch !== 9) glyphCount++;
+                for (const grapheme of iterGraphemes(text)) {
+                    const cp = grapheme.codePointAt(0);
+                    // Skip control characters (codepoint <= 32)
+                    if (cp > 32) glyphCount++;
                 }
                 // Clamp to remaining buffer space
                 glyphCount = Math.min(glyphCount, count - offset);

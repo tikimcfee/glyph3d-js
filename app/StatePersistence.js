@@ -136,6 +136,15 @@ export class StatePersistence {
             }
         }
 
+        // Don't auto-load if the saved source type doesn't match the current URL param.
+        // Prevents trying to load "local:./foo" as a GitHub URL or vice versa.
+        const params = new URLSearchParams(window.location.search);
+        const currentSource = params.get('source') || 'github';
+        const savedSource = state.repoUrl?.startsWith('local:') ? 'local' : 'github';
+        if (currentSource !== savedSource) {
+            return false;
+        }
+
         return state.wasLoaded && !!state.repoUrl;
     }
 

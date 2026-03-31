@@ -18,6 +18,7 @@
 import * as THREE from 'three';
 import GlyphRendererV15 from '../GlyphRenderer.js';
 import { getWorkerBridge, isWorkersSupported } from '../workers/WorkerBridge.js';
+import { iterGraphemes } from '../utils/grapheme.js';
 
 /**
  * @typedef {Object} TextEntry
@@ -599,19 +600,19 @@ class GlyphCollection {
             // that were previously warmed with an older UV map will receive the fresh
             // one on this dispatch.
             {
-                const missingCodes = new Set();
+                const missingGraphemes = new Set();
                 for (let i = 0; i < itemCount; i++) {
                     const text = items[i].text;
                     if (!text) continue;
-                    for (let j = 0; j < text.length; j++) {
-                        const code = text.charCodeAt(j);
-                        if (code > 32 && !this.atlas.uvMap.has(code)) {
-                            missingCodes.add(code);
+                    for (const grapheme of iterGraphemes(text)) {
+                        const cp = grapheme.codePointAt(0);
+                        if (cp > 32 && !this.atlas.uvMap.has(grapheme)) {
+                            missingGraphemes.add(grapheme);
                         }
                     }
                 }
-                if (missingCodes.size > 0) {
-                    this.atlas.ensureCodepoints(Array.from(missingCodes));
+                if (missingGraphemes.size > 0) {
+                    this.atlas.ensureGraphemes(Array.from(missingGraphemes));
                 }
             }
 

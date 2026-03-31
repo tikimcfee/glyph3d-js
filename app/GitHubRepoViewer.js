@@ -27,6 +27,7 @@ import { TreemapLabelManager } from '../src/services/visual/TreemapLabelManager.
 import { MinimapOverlay } from '../src/components/MinimapOverlay.js';
 import { RepositoryAdapter } from '../src/services/data/RepositoryAdapter.js';
 import { GitHubRepositorySource } from '../src/services/data/GitHubRepositorySource.js';
+import { RemoteFileSystemProvider } from '../src/services/data/RemoteFileSystemProvider.js';
 import { DiffController } from '../src/services/orchestration/DiffController.js';
 import { BackdropManager } from '../src/services/visual/BackdropManager.js';
 import { NameplateManager } from '../src/services/visual/NameplateManager.js';
@@ -139,6 +140,11 @@ export class GitHubRepoViewer {
         // Hand tracking adapter (optional, toggled via Settings panel)
         this.handGestureAdapter = null;
 
+        // Source mode: 'local' (Go relay FS) or 'github' (default)
+        const params = new URLSearchParams(window.location.search);
+        this._sourceMode = params.get('source') === 'local' ? 'local' : 'github';
+        this._localRoot = params.get('root') || '.';
+
         // Tab traversal index (tracks which file is "focused" via Tab key)
         this._tabIndex = -1;
 
@@ -247,7 +253,9 @@ export class GitHubRepoViewer {
         // Frustum-based grid virtualization — only render visible grids
         this.gridVirtualizer = new GridVirtualizer(this.scene, this.camera);
 
-        this.repoAdapter = new RepositoryAdapter();
+        // repoAdapter is set after the WebSocket bridge is created (below)
+        // so local mode can use it as transport.
+        this.repoAdapter = null;
         this.diffController = new DiffController({
             scene: this.scene,
             atlas: this.atlas,
@@ -377,6 +385,18 @@ export class GitHubRepoViewer {
         this._wsBridge = bridge;
         this._viewerAPI = api;
 
+        // Wire data provider — must come after bridge creation so local mode
+        // can use the WebSocket as transport.
+        if (this._sourceMode === 'local') {
+            this.repoAdapter = new RemoteFileSystemProvider(bridge, {
+                root: this._localRoot,
+            });
+        } else {
+            this.repoAdapter = new RepositoryAdapter();
+        }
+        // Backfill repoAdapter into diffController
+        this.diffController.repoAdapter = this.repoAdapter;
+
         this.addGridHelper();
         this.setupEventListeners();
         this._setupHandTrackingToggle();
@@ -395,7 +415,11 @@ export class GitHubRepoViewer {
 
         console.log('GitHub 3D Repo Viewer ready!');
 
-        if (shouldAutoLoad) {
+        if (this._sourceMode === 'local') {
+            // Local mode: connect WebSocket, wait for it, then load from disk
+            this.toastUI.show(`Connecting to relay for local files...`, 'success');
+            this._connectAndLoadLocal(bridge, { restoreCamera: true });
+        } else if (shouldAutoLoad) {
             // Auto-load the last repo; restore camera after grids load
             this.toastUI.show('Restoring previous session...', 'success');
             this.loadRepository({ restoreCamera: true });
@@ -898,6 +922,10 @@ export class GitHubRepoViewer {
     }
 
     async loadRepository(options = {}) {
+        if (this._sourceMode === 'local') {
+            return this._loadLocalRepository(options);
+        }
+
         const url = this.repoInput.value.trim();
         if (!url) { this.toastUI.show('Please enter a GitHub URL', 'error'); return; }
 
@@ -1087,6 +1115,199 @@ export class GitHubRepoViewer {
             this.loading.hide();
             this.toastUI.show(`Error: ${err.message}`, 'error');
             // Clear loading flag so a caught error doesn't trigger crash detection
+            if (this.statePersistence) {
+                this.statePersistence.state.loadingInProgress = false;
+                this.statePersistence._save();
+            }
+        } finally {
+            this.isLoading = false;
+            this.loadBtn.disabled = false;
+        }
+    }
+
+    /**
+     * Connect the WebSocket bridge and load the local repository once connected.
+     * @param {Object} bridge - WebSocketBridge instance
+     * @param {Object} [options] - passed to loadRepository
+     * @private
+     */
+    async _connectAndLoadLocal(bridge, options = {}) {
+        if (!bridge.connected) {
+            bridge.connect();
+            // Wait for the WebSocket to open (poll with short intervals)
+            const deadline = Date.now() + 10000;
+            while (!bridge.connected && Date.now() < deadline) {
+                await new Promise(r => setTimeout(r, 100));
+            }
+            if (!bridge.connected) {
+                this.toastUI.show('Failed to connect to relay. Start it with: glyph3d-cli serve --root <path>', 'error');
+                return;
+            }
+        }
+        this.toastUI.show(`Loading local files from ${this._localRoot}...`, 'success');
+        this.loadRepository(options);
+    }
+
+    /**
+     * Load files from the local filesystem via the Go relay.
+     * Mirrors loadRepository() but uses RemoteFileSystemProvider instead
+     * of GitHub API calls. Grid creation and layout are identical.
+     * @param {Object} [options]
+     */
+    async _loadLocalRepository(options = {}) {
+        this.repoPath = `local:${this._localRoot}`;
+        console.log(`Loading local repository: ${this._localRoot}`);
+        this.isLoading = true;
+        this.loadBtn.disabled = true;
+
+        if (this.statePersistence) this.statePersistence.onRepoLoadStarted();
+
+        try {
+            this.clearGrids();
+            this.loading.show('Fetching local file tree...');
+
+            const treeResult = await this.repoAdapter.getRepositoryTree();
+            console.debug(`Found ${treeResult.tree.length} entries`);
+
+            const sourceFiles = this.repoAdapter.filterCodeFiles(treeResult);
+            this.tree = sourceFiles;
+            this.loading.update(0.1, `Loading ${sourceFiles.length} local files...`);
+
+            const totalStart = performance.now();
+
+            // Phase 1: Parallel fetch all files via relay
+            const fetchStart = performance.now();
+            this.loading.update(0.1, `Reading ${sourceFiles.length} files from disk...`);
+
+            const paths = sourceFiles.map(f => f.path);
+            const fileMap = await this.repoAdapter.getMultipleFiles(null, null, paths);
+
+            const fetchTime = performance.now() - fetchStart;
+            console.debug(`[1] Local fetch: ${sourceFiles.length} files in ${fetchTime.toFixed(0)}ms`);
+
+            // Phase 2: Create grids using Web Workers
+            const gridStart = performance.now();
+            this.loading.update(0.5, `Creating ${fileMap.size} grids with workers...`);
+
+            const gridPromises = [];
+            for (const file of sourceFiles) {
+                const fileData = fileMap.get(file.path);
+                if (fileData && fileData.content) {
+                    gridPromises.push(this.createGridForFileAsync(file.path, fileData.content));
+                }
+            }
+
+            const createdGrids = await Promise.all(gridPromises);
+            const gridTime = performance.now() - gridStart;
+            console.debug(`[2] Grid creation: ${createdGrids.length} grids in ${gridTime.toFixed(0)}ms`);
+
+            // Phase 2b: Layout — identical to GitHub path
+            const layoutStart = performance.now();
+            this.loading.update(0.7, 'Computing layout...');
+
+            const HLM = HierarchicalLayoutManager;
+            this.hierarchicalManager = new HLM({
+                dirPadding: 15,
+                dirPaddingDecay: 0.7,
+                siblingSpacing: 8,
+                maxRowWidth: 8000,
+                targetAspectRatio: 3.0,
+                directoriesInZ: false,
+                siblingDirection: 'horizontal'
+            });
+            this.sceneContext.hierarchicalManager = this.hierarchicalManager;
+
+            createdGrids.sort((a, b) =>
+                (a.userData.sourcePath || '').localeCompare(b.userData.sourcePath || '')
+            );
+            for (const grid of createdGrids) {
+                this.scene.add(grid);
+                const sp = grid.userData.sourcePath || grid.name;
+                this.registry.register(sp, grid, {
+                    type: 'grid',
+                    sourcePath: grid.userData.sourcePath,
+                });
+            }
+
+            this.hierarchicalManager.layoutHierarchy(createdGrids);
+
+            if (this._activeLayout === 'spiral') {
+                this.spiralManager = new SpiralLayoutManager();
+                this.spiralManager.layoutSpiral(createdGrids);
+                this.sceneContext.spiralManager = this.spiralManager;
+            } else if (this._activeLayout === 'treemap') {
+                this.treemapManager = new TreemapLayoutManager();
+                this.treemapManager.layoutTreemap(createdGrids);
+                this.sceneContext.treemapManager = this.treemapManager;
+            } else if (this._activeLayout === 'stack') {
+                this.stackManager = new StackLayoutManager();
+                this.stackManager.layout(createdGrids);
+                this.sceneContext.stackManager = this.stackManager;
+                this._initStackInteraction();
+            } else {
+                this.sceneContext.spiralManager = null;
+                this.sceneContext.treemapManager = null;
+                this.sceneContext.stackManager = null;
+            }
+
+            const layoutTime = performance.now() - layoutStart;
+            console.debug(`[2b] Layout: ${createdGrids.length} grids in ${layoutTime.toFixed(0)}ms`);
+
+            // Phase 2c: Visual overlays
+            const overlayStart = performance.now();
+            this.loading.update(0.8, 'Creating visual overlays...');
+            this._createOverlays();
+            if (this._activeLayout !== 'hierarchical') {
+                this._updateOverlays();
+            }
+            console.debug(`[2c] Overlays: ${(performance.now() - overlayStart).toFixed(0)}ms`);
+
+            // Phase 2d: Heatmap
+            const heatStart = performance.now();
+            this.heatmapProvider = new HeatmapProvider(this.sceneContext, this.fileStateManager);
+            this.heatmapProvider.computeMetrics();
+            console.debug(`[2d] Heatmap: ${(performance.now() - heatStart).toFixed(0)}ms`);
+
+            // Phase 3: UI
+            this.updateFileTree();
+
+            // Phase 5: First render
+            this.renderer.render(this.scene, this.camera);
+
+            // Phase 5b: Virtualizer
+            if (this.gridVirtualizer) {
+                this.gridVirtualizer.registerAll(createdGrids);
+                this.gridVirtualizer.update();
+                const vs = this.gridVirtualizer.getStats();
+                console.debug(`[5b] GridVirtualizer: ${vs.active}/${vs.total} grids active`);
+            }
+
+            const totalTime = performance.now() - totalStart;
+            console.debug(`[TOTAL] All phases: ${totalTime.toFixed(0)}ms`);
+
+            this.loading.hide();
+            this.toastUI.show(`Loaded ${this.grids.length} files from ${this._localRoot}`, 'success');
+            this.header.repoLabel.textContent = `local:${this._localRoot}`;
+            this.drawer.openToTab('files');
+
+            if (this.statePersistence) {
+                this.statePersistence.onRepoLoaded(`local:${this._localRoot}`, 'disk');
+                if (options.restoreCamera) {
+                    this.statePersistence.restoreCamera();
+                }
+            }
+
+            if (this.statePersistence) {
+                const scale = this.statePersistence.state.gridsScale;
+                if (scale != null && scale !== 1.0) {
+                    for (const grid of this.grids) { grid.scale.setScalar(scale); }
+                }
+            }
+
+        } catch (err) {
+            console.error('Failed to load local repository:', err);
+            this.loading.hide();
+            this.toastUI.show(`Error: ${err.message}`, 'error');
             if (this.statePersistence) {
                 this.statePersistence.state.loadingInProgress = false;
                 this.statePersistence._save();

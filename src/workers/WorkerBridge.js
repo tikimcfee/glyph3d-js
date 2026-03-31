@@ -111,11 +111,12 @@ export class WorkerBridge {
         if (typeof atlas.getSerializableUVMap === 'function') {
             this._uvMapCache = atlas.getSerializableUVMap();
         } else {
-            // Fallback: iterate over uvMap
+            // Fallback: iterate over uvMap (grapheme string → UV) and _graphemeIds for numericId
             const map = {};
             if (atlas.uvMap) {
-                for (const [charCode, uv] of atlas.uvMap) {
-                    map[charCode] = uv;
+                for (const [grapheme, uv] of atlas.uvMap) {
+                    const numericId = atlas._graphemeIds ? atlas._graphemeIds.get(grapheme) : undefined;
+                    map[grapheme] = numericId !== undefined ? { ...uv, numericId } : uv;
                 }
             }
             this._uvMapCache = map;
@@ -127,13 +128,19 @@ export class WorkerBridge {
         // Serialize per-glyph widths alongside UV map (same cache lifecycle).
         // Stored in canvas pixels — the builder multiplies by worldScale
         // (sent via metrics) to get world-space widths.
-        const widths = {};
-        if (atlas.metrics) {
-            for (const [charCode, m] of atlas.metrics) {
-                widths[charCode] = m.width;
+        // Keys are grapheme cluster strings (matching the new string-keyed uvMap).
+        if (typeof atlas.getSerializableGlyphWidths === 'function') {
+            this._glyphWidthsCache = atlas.getSerializableGlyphWidths();
+        } else {
+            // Fallback for atlas instances that haven't been updated yet
+            const widths = {};
+            if (atlas.metrics) {
+                for (const [key, m] of atlas.metrics) {
+                    widths[key] = m.width;
+                }
             }
+            this._glyphWidthsCache = widths;
         }
-        this._glyphWidthsCache = widths;
 
         return this._uvMapCache;
     }
@@ -301,6 +308,7 @@ export class WorkerBridge {
      */
     _buildBuffersSync(input, metrics, atlas) {
         const uvMap = this.getSerializedUVMap(atlas);
+        const glyphWidths = this.getSerializedGlyphWidths();
 
         return buildGlyphBuffers({
             text: input.text,
@@ -310,7 +318,8 @@ export class WorkerBridge {
             alignment: input.alignment || 'left',
             groupId: input.groupId || 0,
             metrics,
-            uvMap
+            uvMap,
+            glyphWidths
         });
     }
 
@@ -320,11 +329,13 @@ export class WorkerBridge {
      */
     _buildBatchBuffersSync(items, shared, atlas) {
         const uvMap = this.getSerializedUVMap(atlas);
+        const glyphWidths = this.getSerializedGlyphWidths();
 
         return buildBatchBuffers(items, {
             metrics: shared.metrics,
             defaultColor: shared.defaultColor,
-            uvMap
+            uvMap,
+            glyphWidths
         });
     }
 
