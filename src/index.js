@@ -67,6 +67,12 @@ export { default as InputManager } from './camera/InputManager.js';
 // Utility
 export { default as FPSCounter } from './utils/FPSCounter.js';
 
+// Annotations (connection lines, tour overlays)
+export { ConnectionRenderer } from './annotations/index.js';
+
+// Parsing (file refs, stack traces, log lines)
+export { parseFileRef, parseStackTrace, parseLogLine, parseAuto } from './parsing/index.js';
+
 // Hand tracking
 export {
     Joint,

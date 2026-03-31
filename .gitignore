@@ -32,3 +32,7 @@ examples/word-wall/generated_dictionary/
 examples/word-wall/data/
 coordinates.csv
 __pycache__/
+
+# Go CLI build output + dependencies
+cli/glyph3d-cli
+cli/go.sum

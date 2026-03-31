@@ -1672,6 +1672,11 @@ export class GitHubRepoViewer {
             this.gridVirtualizer.update();
         }
 
+        // Hide/show connection lines when endpoint grids enter/leave frustum
+        if (this._commandRouter?.context?.connectionRenderer) {
+            this._commandRouter.context.connectionRenderer.refreshVisibility();
+        }
+
         // GPU picking pass (only runs when mouse has moved)
         if (this.pickingSystem) {
             const pickId = this.pickingSystem.renderAndRead(this.camera, this.scene);

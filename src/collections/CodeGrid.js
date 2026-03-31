@@ -629,14 +629,14 @@ class CodeGrid extends THREE.Object3D {
 
     /**
      * Clear all glyph highlights on this grid.
+     * Delegates to clearLineHighlight() for each line — uses the RGBA8 DataTexture path.
      */
     clearAllHighlights() {
-        const renderer = this._collection?.getRenderer();
-        if (!renderer?.instanceMesh) return;
-        const attr = renderer.instanceMesh.geometry.attributes.instanceAddedColor;
-        if (!attr) return;
-        attr.array.fill(0);
-        attr.needsUpdate = true;
+        if (!this._lineSlotBase) return;
+        const lineCount = this.getLineCount();
+        for (let line = 0; line < lineCount; line++) {
+            this.clearLineHighlight(line);
+        }
     }
 
     /**
