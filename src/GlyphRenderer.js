@@ -513,8 +513,10 @@ class GlyphRendererV15 {
             positions[bufIdx + 2] = glyph.position.z;
         }
 
-        // Mark only position attribute as needing GPU upload
-        geometry.attributes.instancePosition.needsUpdate = true;
+        // Partial GPU upload — only the changed range, not the full 120 KB array
+        const posAttr = geometry.attributes.instancePosition;
+        posAttr.addUpdateRange(startIdx * 3, entry.glyphs.length * 3);
+        posAttr.needsUpdate = true;
     }
 
     /**
@@ -543,8 +545,9 @@ class GlyphRendererV15 {
             colors[bufIdx + 2] = newColor.b;
         }
 
-        // Mark only color attribute as needing GPU upload
-        geometry.attributes.instanceColor.needsUpdate = true;
+        const colorAttr = geometry.attributes.instanceColor;
+        colorAttr.addUpdateRange(startIdx * 3, entry.glyphs.length * 3);
+        colorAttr.needsUpdate = true;
     }
 
     /**
@@ -569,6 +572,7 @@ class GlyphRendererV15 {
             arr[bufIdx + 1] = g;
             arr[bufIdx + 2] = b;
         }
+        attr.addUpdateRange(startIdx * 3, entry.glyphs.length * 3);
         attr.needsUpdate = true;
     }
 
@@ -585,6 +589,7 @@ class GlyphRendererV15 {
         attr.array[i]     = color?.r ?? 0;
         attr.array[i + 1] = color?.g ?? 0;
         attr.array[i + 2] = color?.b ?? 0;
+        attr.addUpdateRange(i, 3);
         attr.needsUpdate = true;
     }
 
@@ -604,6 +609,7 @@ class GlyphRendererV15 {
         for (let i = 0; i < entry.glyphs.length; i++) {
             attr.array[start + i] = baseId + i;
         }
+        attr.addUpdateRange(start, entry.glyphs.length);
         attr.needsUpdate = true;
     }
 
@@ -617,6 +623,7 @@ class GlyphRendererV15 {
 
         const geometry = this.instanceMesh.geometry;
         const positions = geometry.attributes.instancePosition.array;
+        let rangeMin = Infinity, rangeMax = 0;
 
         for (let u = 0; u < updates.length; u++) {
             const { id, position: newPosition } = updates[u];
@@ -630,6 +637,10 @@ class GlyphRendererV15 {
             };
 
             const startIdx = entry.bufferStartIndex;
+            const endIdx = startIdx + entry.glyphs.length;
+            rangeMin = Math.min(rangeMin, startIdx);
+            rangeMax = Math.max(rangeMax, endIdx);
+
             for (let i = 0; i < entry.glyphs.length; i++) {
                 const glyph = entry.glyphs[i];
                 glyph.position.x += offset.x;
@@ -643,7 +654,10 @@ class GlyphRendererV15 {
             }
         }
 
-        geometry.attributes.instancePosition.needsUpdate = true;
+        if (rangeMin === Infinity) return;
+        const posAttr = geometry.attributes.instancePosition;
+        posAttr.addUpdateRange(rangeMin * 3, (rangeMax - rangeMin) * 3);
+        posAttr.needsUpdate = true;
     }
 
     /**
@@ -656,6 +670,7 @@ class GlyphRendererV15 {
 
         const geometry = this.instanceMesh.geometry;
         const colors = geometry.attributes.instanceColor.array;
+        let rangeMin = Infinity, rangeMax = 0;
 
         for (let u = 0; u < updates.length; u++) {
             const { id, color: newColor } = updates[u];
@@ -663,6 +678,10 @@ class GlyphRendererV15 {
             if (!entry || entry.bufferStartIndex === undefined) continue;
 
             const startIdx = entry.bufferStartIndex;
+            const endIdx = startIdx + entry.glyphs.length;
+            rangeMin = Math.min(rangeMin, startIdx);
+            rangeMax = Math.max(rangeMax, endIdx);
+
             for (let i = 0; i < entry.glyphs.length; i++) {
                 entry.glyphs[i].color = newColor;
 
@@ -673,7 +692,10 @@ class GlyphRendererV15 {
             }
         }
 
-        geometry.attributes.instanceColor.needsUpdate = true;
+        if (rangeMin === Infinity) return;
+        const colorAttr = geometry.attributes.instanceColor;
+        colorAttr.addUpdateRange(rangeMin * 3, (rangeMax - rangeMin) * 3);
+        colorAttr.needsUpdate = true;
     }
 
     /**
@@ -687,8 +709,8 @@ class GlyphRendererV15 {
         const geometry = this.instanceMesh.geometry;
         const positions = geometry.attributes.instancePosition.array;
         const colors = geometry.attributes.instanceColor.array;
-        let positionDirty = false;
-        let colorDirty = false;
+        let posRangeMin = Infinity, posRangeMax = 0;
+        let colRangeMin = Infinity, colRangeMax = 0;
 
         for (let u = 0; u < updates.length; u++) {
             const update = updates[u];
@@ -696,8 +718,12 @@ class GlyphRendererV15 {
             if (!entry || entry.bufferStartIndex === undefined) continue;
 
             const startIdx = entry.bufferStartIndex;
+            const endIdx = startIdx + entry.glyphs.length;
 
             if (update.position) {
+                posRangeMin = Math.min(posRangeMin, startIdx);
+                posRangeMax = Math.max(posRangeMax, endIdx);
+
                 const offset = {
                     x: update.position.x - entry.glyphs[0].position.x,
                     y: update.position.y - entry.glyphs[0].position.y,
@@ -715,10 +741,12 @@ class GlyphRendererV15 {
                     positions[bufIdx + 1] = glyph.position.y;
                     positions[bufIdx + 2] = glyph.position.z;
                 }
-                positionDirty = true;
             }
 
             if (update.color) {
+                colRangeMin = Math.min(colRangeMin, startIdx);
+                colRangeMax = Math.max(colRangeMax, endIdx);
+
                 for (let i = 0; i < entry.glyphs.length; i++) {
                     entry.glyphs[i].color = update.color;
 
@@ -727,12 +755,19 @@ class GlyphRendererV15 {
                     colors[bufIdx + 1] = update.color.g;
                     colors[bufIdx + 2] = update.color.b;
                 }
-                colorDirty = true;
             }
         }
 
-        if (positionDirty) geometry.attributes.instancePosition.needsUpdate = true;
-        if (colorDirty) geometry.attributes.instanceColor.needsUpdate = true;
+        if (posRangeMin !== Infinity) {
+            const posAttr = geometry.attributes.instancePosition;
+            posAttr.addUpdateRange(posRangeMin * 3, (posRangeMax - posRangeMin) * 3);
+            posAttr.needsUpdate = true;
+        }
+        if (colRangeMin !== Infinity) {
+            const colAttr = geometry.attributes.instanceColor;
+            colAttr.addUpdateRange(colRangeMin * 3, (colRangeMax - colRangeMin) * 3);
+            colAttr.needsUpdate = true;
+        }
     }
 
     // ============ Stats ============
