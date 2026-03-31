@@ -25,10 +25,10 @@ import * as THREE from 'three';
 const PICKING_VERTEX_CORE = `
 precision highp float;
 
-attribute vec3 instancePosition;
-attribute vec2 instanceSize;
-attribute float instanceGroupId;
-attribute float instancePickingId;
+in vec3 instancePosition;
+in vec2 instanceSize;
+in float instanceGroupId;
+in float instancePickingId;
 
 uniform sampler2D groupTexture;
 uniform float groupTextureHeight;
@@ -36,15 +36,15 @@ uniform float groupTextureHeight;
 
 // Cell mode: solid quads, no atlas sampling
 const PICKING_VERTEX_CELL = PICKING_VERTEX_CORE + `
-varying float vPickingId;
+out float vPickingId;
 
 void main() {
     vec3 scaled = position * vec3(instanceSize, 1.0);
 
     float v = (instanceGroupId + 0.5) / groupTextureHeight;
-    vec4 gPos   = texture2D(groupTexture, vec2(0.125, v));
-    vec4 gColor = texture2D(groupTexture, vec2(0.625, v));
-    vec4 gScale = texture2D(groupTexture, vec2(0.875, v));
+    vec4 gPos   = texture(groupTexture, vec2(0.125, v));
+    vec4 gColor = texture(groupTexture, vec2(0.625, v));
+    vec4 gScale = texture(groupTexture, vec2(0.875, v));
 
     float visible = step(0.01, gColor.a);
     if (visible < 0.5) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
@@ -57,34 +57,35 @@ void main() {
 
 const PICKING_FRAGMENT_CELL = `
 precision highp float;
-varying float vPickingId;
+in float vPickingId;
+out vec4 fragColor;
 void main() {
     float id = vPickingId;
     float r = floor(id / 65536.0);
     float g = floor(mod(id, 65536.0) / 256.0);
     float b = mod(id, 256.0);
-    gl_FragColor = vec4(r / 255.0, g / 255.0, b / 255.0, 1.0);
+    fragColor = vec4(r / 255.0, g / 255.0, b / 255.0, 1.0);
 }
 `;
 
 // Glyph mode: alpha-tested against atlas texture — only rendered strokes pick
 const PICKING_VERTEX_GLYPH = PICKING_VERTEX_CORE + `
-attribute float instanceCodepoint;
+in float instanceCodepoint;
 
 uniform sampler2D atlasMapTexture;
 uniform float atlasMapWidth;
 uniform float atlasMapHeight;
 
-varying float vPickingId;
-varying highp vec2 vUV;
+out float vPickingId;
+out highp vec2 vUV;
 
 void main() {
     vec3 scaled = position * vec3(instanceSize, 1.0);
 
     float v = (instanceGroupId + 0.5) / groupTextureHeight;
-    vec4 gPos   = texture2D(groupTexture, vec2(0.125, v));
-    vec4 gColor = texture2D(groupTexture, vec2(0.625, v));
-    vec4 gScale = texture2D(groupTexture, vec2(0.875, v));
+    vec4 gPos   = texture(groupTexture, vec2(0.125, v));
+    vec4 gColor = texture(groupTexture, vec2(0.625, v));
+    vec4 gScale = texture(groupTexture, vec2(0.875, v));
 
     float visible = step(0.01, gColor.a);
     if (visible < 0.5) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
@@ -98,7 +99,7 @@ void main() {
     float mapRow = floor(cp / atlasMapWidth);
     float tx = (mapCol + 0.5) / atlasMapWidth;
     float ty = (mapRow + 0.5) / atlasMapHeight;
-    vec4 uvRect = texture2D(atlasMapTexture, vec2(tx, ty));
+    vec4 uvRect = texture(atlasMapTexture, vec2(tx, ty));
     vUV = mix(uvRect.xy, uvRect.zw, uv);
 }
 `;
@@ -106,16 +107,17 @@ void main() {
 const PICKING_FRAGMENT_GLYPH = `
 precision highp float;
 uniform sampler2D atlasTexture;
-varying float vPickingId;
-varying highp vec2 vUV;
+in float vPickingId;
+in highp vec2 vUV;
+out vec4 fragColor;
 void main() {
-    float alpha = texture2D(atlasTexture, vUV).a;
+    float alpha = texture(atlasTexture, vUV).a;
     if (alpha < 0.01) discard;
     float id = vPickingId;
     float r = floor(id / 65536.0);
     float g = floor(mod(id, 65536.0) / 256.0);
     float b = mod(id, 256.0);
-    gl_FragColor = vec4(r / 255.0, g / 255.0, b / 255.0, 1.0);
+    fragColor = vec4(r / 255.0, g / 255.0, b / 255.0, 1.0);
 }
 `;
 
@@ -252,6 +254,7 @@ export class PickingSystem {
         }
 
         const pickingMaterial = new THREE.ShaderMaterial({
+            glslVersion: THREE.GLSL3,
             uniforms,
             vertexShader: vertShader,
             fragmentShader: fragShader,

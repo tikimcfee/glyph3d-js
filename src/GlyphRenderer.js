@@ -196,6 +196,7 @@ class GlyphRendererV15 {
 
         // Create shader material (clean, no debug paths)
         const material = new THREE.ShaderMaterial({
+            glslVersion: THREE.GLSL3,
             uniforms: {
                 atlasTexture: { value: this.texture },
                 groupTexture: { value: this._groupTexture },
@@ -256,13 +257,13 @@ class GlyphRendererV15 {
         return `
             precision highp float;
 
-            attribute vec3 instancePosition;
-            attribute vec2 instanceSize;
-            attribute float instanceCodepoint;
-            attribute vec3 instanceColor;
-            attribute float instanceGroupId;
-            attribute vec3 instanceAddedColor;
-            attribute float instancePickingId;
+            in vec3 instancePosition;
+            in vec2 instanceSize;
+            in float instanceCodepoint;
+            in vec3 instanceColor;
+            in float instanceGroupId;
+            in vec3 instanceAddedColor;
+            in float instancePickingId;
 
             uniform sampler2D groupTexture;
             uniform float groupTextureHeight;
@@ -273,10 +274,10 @@ class GlyphRendererV15 {
             uniform float atlasMapWidth;
             uniform float atlasMapHeight;
 
-            varying highp vec2 vUV;
-            varying vec3 vColor;
-            varying float vGroupAlpha;
-            varying vec3 vAddedColor;
+            out highp vec2 vUV;
+            out vec3 vColor;
+            out float vGroupAlpha;
+            out vec3 vAddedColor;
 
             void main() {
                 // Transform quad by instance size
@@ -284,9 +285,9 @@ class GlyphRendererV15 {
 
                 // Group property lookups (4-column DataTexture)
                 float v = (instanceGroupId + 0.5) / groupTextureHeight;
-                vec4 gPos   = texture2D(groupTexture, vec2(0.125, v));  // col 0: offset + visibility
-                vec4 gColor = texture2D(groupTexture, vec2(0.625, v));  // col 2: color multiplier
-                vec4 gScale = texture2D(groupTexture, vec2(0.875, v));  // col 3: scale
+                vec4 gPos   = texture(groupTexture, vec2(0.125, v));  // col 0: offset + visibility
+                vec4 gColor = texture(groupTexture, vec2(0.625, v));  // col 2: color multiplier
+                vec4 gScale = texture(groupTexture, vec2(0.875, v));  // col 3: scale
 
                 // World position = scale instance position, then add group offset
                 vec3 worldPos = scaled + instancePosition * gScale.xyz + gPos.xyz;
@@ -308,7 +309,7 @@ class GlyphRendererV15 {
                 float mapRow = floor(cp / atlasMapWidth);
                 float tx = (mapCol + 0.5) / atlasMapWidth;
                 float ty = (mapRow + 0.5) / atlasMapHeight;
-                vec4 uvRect = texture2D(atlasMapTexture, vec2(tx, ty));
+                vec4 uvRect = texture(atlasMapTexture, vec2(tx, ty));
                 // uvRect = (u0, v0_webgl, u1, v1_webgl) — pre-flipped in GlyphAtlas
                 vUV = mix(uvRect.xy, uvRect.zw, uv);
 
@@ -331,20 +332,22 @@ class GlyphRendererV15 {
 
             uniform sampler2D atlasTexture;
 
-            varying highp vec2 vUV;
-            varying vec3 vColor;
-            varying float vGroupAlpha;
-            varying vec3 vAddedColor;
+            in highp vec2 vUV;
+            in vec3 vColor;
+            in float vGroupAlpha;
+            in vec3 vAddedColor;
+
+            out vec4 fragColor;
 
             void main() {
-                vec4 texColor = texture2D(atlasTexture, vUV);
+                vec4 texColor = texture(atlasTexture, vUV);
 
                 // Apply instance color and group alpha, then additive highlight
                 vec4 base = texColor * vec4(vColor, vGroupAlpha);
-                gl_FragColor = vec4(clamp(base.rgb + vAddedColor, 0.0, 1.0), base.a);
+                fragColor = vec4(clamp(base.rgb + vAddedColor, 0.0, 1.0), base.a);
 
                 // Alpha test for clean edges and group visibility
-                if (gl_FragColor.a < 0.01) discard;
+                if (fragColor.a < 0.01) discard;
             }
         `;
     }
