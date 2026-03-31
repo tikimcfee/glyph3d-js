@@ -88,6 +88,16 @@ export class StatePersistence {
     restoreUI() {
         const { state, viewer } = this;
 
+        // Crash detection: if loadingInProgress is still set, the previous load
+        // caused an OOM/crash before onRepoLoaded() could clear it. Don't auto-load
+        // the same repo — it will just crash again in a loop.
+        if (state.loadingInProgress) {
+            console.warn('[StatePersistence] Previous load crashed (OOM?). Clearing saved repo to break reload loop.');
+            state.wasLoaded = false;
+            state.loadingInProgress = false;
+            this._save();
+        }
+
         // Repo URL
         if (state.repoUrl && viewer.repoInput) {
             viewer.repoInput.value = state.repoUrl;
@@ -140,7 +150,17 @@ export class StatePersistence {
     }
 
     /**
-     * Record a successful repo load.
+     * Record that a repo load is starting. If the page crashes/reloads before
+     * onRepoLoaded() clears this flag, the next session will detect the crash
+     * and skip auto-loading the same repo.
+     */
+    onRepoLoadStarted() {
+        this.state.loadingInProgress = true;
+        this._save();
+    }
+
+    /**
+     * Record a successful repo load. Clears the crash-detection flag.
      * @param {string} repoUrl
      * @param {string} branch
      */
@@ -148,6 +168,7 @@ export class StatePersistence {
         this.state.repoUrl = repoUrl;
         this.state.branch = branch;
         this.state.wasLoaded = true;
+        this.state.loadingInProgress = false;
         this._save();
     }
 

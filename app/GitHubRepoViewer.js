@@ -911,6 +911,10 @@ export class GitHubRepoViewer {
         this.isLoading = true;
         this.loadBtn.disabled = true;
 
+        // Mark load in progress — if the page OOMs before onRepoLoaded(),
+        // the next session detects the crash and skips auto-loading this repo
+        if (this.statePersistence) this.statePersistence.onRepoLoadStarted();
+
         try {
             this.clearGrids();
             this.loading.show(`Fetching repository tree (${branch})...`);
@@ -1082,6 +1086,11 @@ export class GitHubRepoViewer {
             console.error('Failed to load repository:', err);
             this.loading.hide();
             this.toastUI.show(`Error: ${err.message}`, 'error');
+            // Clear loading flag so a caught error doesn't trigger crash detection
+            if (this.statePersistence) {
+                this.statePersistence.state.loadingInProgress = false;
+                this.statePersistence._save();
+            }
         } finally {
             this.isLoading = false;
             this.loadBtn.disabled = false;
