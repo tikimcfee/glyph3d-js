@@ -330,8 +330,12 @@ class GlyphRendererV15 {
                 vec4 gColor = texture(groupTexture, vec2(0.625, v));  // col 2: color multiplier
                 vec4 gScale = texture(groupTexture, vec2(0.875, v));  // col 3: scale
 
-                // World position = scale instance position, then add group offset
-                vec3 worldPos = scaled + instancePosition * gScale.xyz + gPos.xyz;
+                // Left-align quad: PlaneGeometry is centered (-0.5 to 0.5) but
+                // instancePosition is the left edge. Shift right by half width.
+                vec3 alignOffset = vec3(instanceSize.x * 0.5, 0.0, 0.0);
+
+                // World position = aligned quad + scaled instance position + group offset
+                vec3 worldPos = scaled + alignOffset + instancePosition * gScale.xyz + gPos.xyz;
 
                 // Standard projection
                 gl_Position = projectionMatrix * modelViewMatrix * vec4(worldPos, 1.0);

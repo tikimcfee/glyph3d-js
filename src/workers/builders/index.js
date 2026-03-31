@@ -146,18 +146,16 @@ export function buildGlyphBuffers(input) {
         }
 
         const numericId = resolvedEntry.numericId;
-        const resolvedGrapheme = entry ? grapheme : '?';
-        const resolvedWidth = glyphWidths && glyphWidths[resolvedGrapheme]
-            ? glyphWidths[resolvedGrapheme] * ws
-            : defaultWidth;
 
         // Position [x, y, z]
         positions[idx * 3] = x;
         positions[idx * 3 + 1] = y;
         positions[idx * 3 + 2] = z;
 
-        // Size [width, height] — per-glyph from atlas metrics
-        sizes[idx * 2] = resolvedWidth * scale;
+        // Size [width, height] — must match the X advance (glyphWidth) so
+        // picking quads align with layout. Using a different width for the
+        // rendered quad vs the advance causes hover gaps/overlaps.
+        sizes[idx * 2] = glyphWidth * scale;
         sizes[idx * 2 + 1] = scaledHeight;
 
         // [GPU-Lookup] Store numeric DataTexture ID; vertex shader resolves to UV via atlasMapTexture
@@ -394,17 +392,13 @@ export function buildBatchBuffers(items, shared) {
             }
 
             const numericId = resolvedEntry.numericId;
-            const resolvedGrapheme = entry ? grapheme : '?';
-            const resolvedWidth = glyphWidths && glyphWidths[resolvedGrapheme]
-                ? glyphWidths[resolvedGrapheme] * ws
-                : defaultWidth;
             const idx = bufferOffset;
 
             positions[idx * 3] = x;
             positions[idx * 3 + 1] = y;
             positions[idx * 3 + 2] = z;
 
-            sizes[idx * 2] = resolvedWidth * scale;
+            sizes[idx * 2] = glyphWidth * scale;
             sizes[idx * 2 + 1] = scaledHeight;
 
             // [GPU-Lookup] Store numeric DataTexture ID; vertex shader resolves to UV via atlasMapTexture

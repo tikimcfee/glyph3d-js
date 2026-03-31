@@ -8,7 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // JSON-RPC error codes (mirrored in src/services/data/types.js)
@@ -17,6 +19,7 @@ const (
 	errPermissionDenied = -32002
 	errIsDirectory      = -32003
 	errFileTooLarge     = -32004
+	errNotText          = -32005
 )
 
 const (
@@ -25,7 +28,7 @@ const (
 	rpcTimeout     = 10 * time.Second
 )
 
-// Directories and extensions to skip during tree walk.
+// Directories to skip during tree walk.
 var skipDirs = map[string]bool{
 	".git":         true,
 	"node_modules": true,
@@ -35,21 +38,160 @@ var skipDirs = map[string]bool{
 	"vendor":       true,
 	"dist":         true,
 	"build":        true,
+	".build":       true,
+	".swiftpm":     true,
+	"Pods":         true,
+	"DerivedData":  true,
+	"target":       true,
 }
 
-var binaryExts = map[string]bool{
-	".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".bmp": true,
-	".ico": true, ".webp": true, ".tiff": true, ".psd": true,
-	".mp3": true, ".mp4": true, ".wav": true, ".ogg": true, ".flac": true,
-	".avi": true, ".mov": true, ".mkv": true, ".webm": true,
-	".zip": true, ".tar": true, ".gz": true, ".bz2": true, ".xz": true,
-	".7z": true, ".rar": true,
-	".exe": true, ".dll": true, ".so": true, ".dylib": true, ".o": true,
-	".a": true, ".bin": true, ".wasm": true,
-	".pyc": true, ".class": true, ".jar": true,
-	".ttf": true, ".otf": true, ".woff": true, ".woff2": true,
-	".pdf": true, ".doc": true, ".docx": true, ".xls": true, ".xlsx": true,
-	".db": true, ".sqlite": true, ".sqlite3": true,
+// Whitelist of known source-code / text file extensions.
+// Files without a matching extension are excluded from listTree results.
+// Extensionless files with known names (Makefile, Dockerfile, etc.) are
+// handled separately in isTextFile().
+var textExts = map[string]bool{
+	// Systems / native
+	".c": true, ".h": true, ".cpp": true, ".cc": true, ".cxx": true,
+	".hpp": true, ".hh": true, ".hxx": true,
+	".m": true, ".mm": true,
+	".swift": true, ".metal": true,
+	".cs": true, ".fs": true, ".fsx": true,
+	".rs": true, ".go": true, ".zig": true, ".nim": true,
+	".java": true, ".kt": true, ".kts": true, ".scala": true, ".groovy": true, ".gradle": true,
+	".d": true, ".v": true, ".vhdl": true, ".sv": true,
+
+	// Scripting
+	".py": true, ".pyi": true, ".pyw": true,
+	".rb": true, ".erb": true, ".rake": true,
+	".pl": true, ".pm": true,
+	".lua": true,
+	".php": true, ".phtml": true,
+	".r": true, ".R": true,
+	".jl": true,
+	".tcl": true,
+
+	// Shell
+	".sh": true, ".bash": true, ".zsh": true, ".fish": true,
+	".bat": true, ".cmd": true, ".ps1": true, ".psm1": true,
+
+	// Web
+	".js": true, ".mjs": true, ".cjs": true,
+	".ts": true, ".tsx": true, ".jsx": true,
+	".html": true, ".htm": true, ".xhtml": true,
+	".css": true, ".scss": true, ".sass": true, ".less": true, ".styl": true,
+	".vue": true, ".svelte": true, ".astro": true,
+
+	// Functional / ML
+	".hs": true, ".lhs": true,
+	".ml": true, ".mli": true, ".mll": true, ".mly": true,
+	".ex": true, ".exs": true, ".erl": true, ".hrl": true,
+	".clj": true, ".cljs": true, ".cljc": true, ".edn": true,
+	".lisp": true, ".cl": true, ".el": true, ".scm": true, ".rkt": true,
+
+	// Data / config
+	".json": true, ".jsonc": true, ".json5": true,
+	".yaml": true, ".yml": true,
+	".toml": true, ".ini": true, ".cfg": true, ".conf": true,
+	".xml": true, ".xsl": true, ".xsd": true, ".dtd": true,
+	".plist": true, ".xcscheme": true, ".xcworkspacedata": true,
+	".pbxproj": true, ".storyboard": true, ".xib": true,
+	".properties": true, ".env": true, ".editorconfig": true,
+	".csv": true, ".tsv": true,
+
+	// Markup / docs
+	".md": true, ".markdown": true, ".rst": true, ".adoc": true,
+	".txt": true, ".text": true, ".rtf": true,
+	".tex": true, ".bib": true,
+	".org": true,
+
+	// Build / CI
+	".cmake": true, ".make": true, ".mk": true,
+	".dockerfile": true,
+	".tf": true, ".hcl": true,
+	".nix": true,
+	".bazel": true, ".bzl": true,
+
+	// Package manifests / lock files
+	".lock": true, ".resolved": true,
+
+	// Misc
+	".sql": true, ".graphql": true, ".gql": true, ".proto": true,
+	".glsl": true, ".vert": true, ".frag": true, ".wgsl": true, ".hlsl": true,
+	".diff": true, ".patch": true,
+	".gitignore": true, ".gitattributes": true, ".gitmodules": true,
+	".dockerignore": true, ".npmignore": true, ".eslintignore": true,
+	".cursorrules": true,
+}
+
+// Extensionless files that are known text.
+var textNames = map[string]bool{
+	"Makefile":     true,
+	"makefile":     true,
+	"GNUmakefile":  true,
+	"Dockerfile":   true,
+	"Containerfile": true,
+	"Rakefile":     true,
+	"Gemfile":      true,
+	"Podfile":      true,
+	"Vagrantfile":  true,
+	"Procfile":     true,
+	"Justfile":     true,
+	"CMakeLists.txt": true,
+	"CLAUDE.md":    true,
+	"LICENSE":      true,
+	"COPYING":      true,
+	"README":       true,
+	"CHANGELOG":    true,
+	"AUTHORS":      true,
+	"CONTRIBUTORS": true,
+	".gitignore":   true,
+	".gitattributes": true,
+	".editorconfig": true,
+	".clang-format": true,
+	".clang-tidy":  true,
+	".eslintrc":    true,
+	".prettierrc":  true,
+	".babelrc":     true,
+}
+
+// fileFilter holds a thread-safe, runtime-replaceable copy of the whitelist.
+// The read path (isTextFile, called per file during WalkDir) takes RLock.
+// The write path (fs/setFilter RPC) takes full Lock and swaps the maps.
+type fileFilter struct {
+	mu    sync.RWMutex
+	exts  map[string]bool
+	names map[string]bool
+}
+
+var globalFilter = &fileFilter{
+	exts:  textExts,
+	names: textNames,
+}
+
+// isTextFile returns true if the file should be included in tree results.
+func isTextFile(name string) bool {
+	globalFilter.mu.RLock()
+	defer globalFilter.mu.RUnlock()
+	ext := strings.ToLower(filepath.Ext(name))
+	if ext != "" {
+		return globalFilter.exts[ext]
+	}
+	return globalFilter.names[name]
+}
+
+func (f *fileFilter) setFilter(exts []string, names []string) {
+	newExts := make(map[string]bool, len(exts))
+	for _, e := range exts {
+		newExts[strings.ToLower(e)] = true
+	}
+	newNames := make(map[string]bool, len(names))
+	for _, n := range names {
+		newNames[n] = true
+	}
+	f.mu.Lock()
+	f.exts = newExts
+	f.names = newNames
+	f.mu.Unlock()
 }
 
 // ---- Types matching the JS side ----
@@ -86,6 +228,11 @@ type readFileParams struct {
 
 type listTreeParams struct {
 	URI string `json:"uri"`
+}
+
+type setFilterParams struct {
+	Exts  []string `json:"exts"`
+	Names []string `json:"names"`
 }
 
 type statParams struct {
@@ -138,6 +285,8 @@ func (h *FSHandler) Handle(method string, rawID json.RawMessage, params json.Raw
 				h.handleListTree(write, rawID, params)
 			case "fs/stat":
 				h.handleStat(write, rawID, params)
+			case "fs/setFilter":
+				h.handleSetFilter(write, rawID, params)
 			default:
 				h.sendRPCError(write, rawID, -32601, "method not found: "+method, nil)
 			}
@@ -186,6 +335,12 @@ func (h *FSHandler) handleReadFile(write writeFn, id json.RawMessage, raw json.R
 		return
 	}
 
+	// Reject non-UTF-8 content (binary files that slipped past extension filters)
+	if !utf8.Valid(data) {
+		h.sendRPCError(write, id, errNotText, "file is not valid UTF-8 text: "+p.URI, map[string]string{"uri": p.URI})
+		return
+	}
+
 	result := fileContent{
 		URI:     p.URI,
 		Content: string(data),
@@ -226,9 +381,8 @@ func (h *FSHandler) handleListTree(write writeFn, id json.RawMessage, raw json.R
 			}
 		}
 
-		// Skip binary files
-		ext := strings.ToLower(filepath.Ext(d.Name()))
-		if !d.IsDir() && binaryExts[ext] {
+		// Whitelist: only include known text files
+		if !d.IsDir() && !isTextFile(d.Name()) {
 			return nil
 		}
 
@@ -300,6 +454,17 @@ func (h *FSHandler) handleStat(write writeFn, id json.RawMessage, raw json.RawMe
 		Mtime: info.ModTime().UnixMilli(),
 	}
 	h.sendRPCResult(write, id, result)
+}
+
+func (h *FSHandler) handleSetFilter(write writeFn, id json.RawMessage, raw json.RawMessage) {
+	var p setFilterParams
+	if err := json.Unmarshal(raw, &p); err != nil {
+		h.sendRPCError(write, id, -32602, "invalid params", nil)
+		return
+	}
+	globalFilter.setFilter(p.Exts, p.Names)
+	log.Printf("[fs] filter updated: %d extensions, %d names", len(p.Exts), len(p.Names))
+	h.sendRPCResult(write, id, map[string]any{"ok": true})
 }
 
 // ---- Path Security ----

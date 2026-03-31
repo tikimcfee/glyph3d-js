@@ -9,6 +9,8 @@
  * visibilitychange to avoid per-frame writes.
  */
 
+import { setTextExts, setTextNames } from '../src/services/data/textFileFilter.js';
+
 const STORAGE_KEY = 'glyph3d-viewer-state';
 const CAMERA_STORAGE_KEY = 'glyph3d-camera-settings';
 const SAVE_INTERVAL_MS = 5000;
@@ -32,6 +34,9 @@ const DEFAULTS = {
     gridsScale: 1.0,
     layoutSpacing: 10,
     cameraPosition: null,
+    sourceMode: 'github',
+    localRoot: '.',
+    customFileTypes: null,
 };
 
 /**
@@ -98,6 +103,27 @@ export class StatePersistence {
             this._save();
         }
 
+        // Source mode & local root
+        const sourceSelect = document.getElementById('source-select');
+        const githubFields = document.getElementById('github-fields');
+        const localFields = document.getElementById('local-fields');
+        const localRootInput = document.getElementById('local-root-input');
+
+        // URL param overrides saved state (allows ?source=local bookmarks)
+        const params = new URLSearchParams(window.location.search);
+        const urlSource = params.get('source');
+        const effectiveMode = urlSource || state.sourceMode || 'github';
+
+        if (sourceSelect) sourceSelect.value = effectiveMode;
+        if (githubFields) githubFields.style.display = effectiveMode === 'github' ? '' : 'none';
+        if (localFields) localFields.style.display = effectiveMode === 'local' ? '' : 'none';
+        viewer._sourceMode = effectiveMode;
+
+        if (state.localRoot && localRootInput) {
+            localRootInput.value = state.localRoot;
+            viewer._localRoot = state.localRoot;
+        }
+
         // Repo URL
         if (state.repoUrl && viewer.repoInput) {
             viewer.repoInput.value = state.repoUrl;
@@ -136,12 +162,17 @@ export class StatePersistence {
             }
         }
 
-        // Don't auto-load if the saved source type doesn't match the current URL param.
-        // Prevents trying to load "local:./foo" as a GitHub URL or vice versa.
-        const params = new URLSearchParams(window.location.search);
-        const currentSource = params.get('source') || 'github';
+        // Restore custom file types
+        if (state.customFileTypes != null) {
+            const exts = state.customFileTypes.filter(e => e.startsWith('.'));
+            const names = state.customFileTypes.filter(e => !e.startsWith('.'));
+            setTextExts(exts);
+            setTextNames(names);
+        }
+
+        // Don't auto-load if the saved repo type doesn't match the active source mode.
         const savedSource = state.repoUrl?.startsWith('local:') ? 'local' : 'github';
-        if (currentSource !== savedSource) {
+        if (effectiveMode !== savedSource) {
             return false;
         }
 
@@ -178,6 +209,26 @@ export class StatePersistence {
         this.state.branch = branch;
         this.state.wasLoaded = true;
         this.state.loadingInProgress = false;
+        this._save();
+    }
+
+    /**
+     * Record a source mode change.
+     * @param {'github'|'local'} mode
+     * @param {string} [localRoot]
+     */
+    onSourceModeChanged(mode, localRoot) {
+        this.state.sourceMode = mode;
+        if (localRoot != null) this.state.localRoot = localRoot;
+        this._save();
+    }
+
+    /**
+     * Record a file type filter change.
+     * @param {string[]|null} entries — combined list, or null to clear (use defaults)
+     */
+    onFileTypesChanged(entries) {
+        this.state.customFileTypes = entries;
         this._save();
     }
 

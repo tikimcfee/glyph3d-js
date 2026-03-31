@@ -49,7 +49,8 @@ import {
 import { TouchController } from './components/TouchController.js';
 import { logCapturePanelHTML, initLogCapturePanel } from './components/LogCapturePanel.js';
 import { diffPanelHTML, initDiffPanel } from './components/DiffPanel.js';
-import { StatePersistence, resetAllAndReload } from './StatePersistence.js';
+import { StatePersistence, loadState, resetAllAndReload } from './StatePersistence.js';
+import { getTextExts, getTextNames, setTextExts, setTextNames, getDefaults, resetToDefaults } from '../src/services/data/textFileFilter.js';
 import { HandGestureAdapter } from '../src/services/orchestration/HandGestureAdapter.js';
 import { initCommandCenter } from './commands/index.js';
 import SceneRegistry from '../src/services/SceneRegistry.js';
@@ -141,10 +142,12 @@ export class GitHubRepoViewer {
         this.handGestureAdapter = null;
 
         // Source mode: 'local' (Go relay FS) or 'github' (default)
-        // Driven by UI selector (#source-select), with URL param as initial override
+        // URL param takes priority, then saved state, then default 'github'.
         const params = new URLSearchParams(window.location.search);
-        this._sourceMode = params.get('source') === 'local' ? 'local' : 'github';
-        this._localRoot = '.';
+        const saved = loadState();
+        const urlSource = params.get('source');
+        this._sourceMode = urlSource || saved.sourceMode || 'github';
+        this._localRoot = saved.localRoot || '.';
 
         // Tab traversal index (tracks which file is "focused" via Tab key)
         this._tabIndex = -1;
@@ -665,6 +668,32 @@ export class GitHubRepoViewer {
         }
 
         // cam-speed, reset-camera, fit-all listeners handled by CameraController
+
+        // ---- File type whitelist ----
+        const extTextarea = document.getElementById('ext-whitelist');
+        const extApplyBtn = document.getElementById('ext-apply');
+        const extResetBtn = document.getElementById('ext-reset');
+
+        if (extTextarea) {
+            extTextarea.value = [...getTextExts(), ...getTextNames()].join(', ');
+        }
+
+        if (extApplyBtn) {
+            extApplyBtn.addEventListener('click', () => {
+                this._applyFileTypeWhitelist(extTextarea.value);
+            });
+        }
+
+        if (extResetBtn) {
+            extResetBtn.addEventListener('click', () => {
+                resetToDefaults();
+                const { exts, names } = getDefaults();
+                if (extTextarea) extTextarea.value = [...exts, ...names].join(', ');
+                this._pushFilterToRelay();
+                this.statePersistence?.onFileTypesChanged(null);
+                this.toastUI.show('File types reset to defaults', 'success');
+            });
+        }
     }
 
     /**
@@ -958,6 +987,38 @@ export class GitHubRepoViewer {
             this.repoAdapter = new RepositoryAdapter();
         }
         this.diffController.repoAdapter = this.repoAdapter;
+        this.statePersistence?.onSourceModeChanged(mode, this._localRoot);
+    }
+
+    /**
+     * Parse a comma-separated string of extensions/names and apply as the active filter.
+     * @param {string} raw
+     */
+    _applyFileTypeWhitelist(raw) {
+        const entries = raw.split(',').map(s => s.trim()).filter(Boolean);
+        const exts = entries.filter(e => e.startsWith('.'));
+        const names = entries.filter(e => !e.startsWith('.'));
+        setTextExts(exts);
+        setTextNames(names);
+        this._pushFilterToRelay();
+        this.statePersistence?.onFileTypesChanged(entries);
+        this.toastUI.show(`File types updated (${exts.length} extensions, ${names.length} names)`, 'success');
+    }
+
+    /**
+     * Push current JS-side filter to the Go relay via RPC.
+     * No-op if WebSocket is not connected.
+     */
+    async _pushFilterToRelay() {
+        if (!this._wsBridge?.connected) return;
+        try {
+            await this._wsBridge.rpcRequest('fs/setFilter', {
+                exts: getTextExts(),
+                names: getTextNames(),
+            });
+        } catch (err) {
+            console.warn('[viewer] failed to push filter to relay:', err.message);
+        }
     }
 
     async loadRepository(options = {}) {
@@ -1185,6 +1246,8 @@ export class GitHubRepoViewer {
                 return;
             }
         }
+        // Sync file type filter to relay before loading
+        await this._pushFilterToRelay();
         this.toastUI.show(`Loading local files from ${this._localRoot}...`, 'success');
         this.loadRepository(options);
     }

@@ -5,6 +5,8 @@
  * API: https://docs.github.com/en/rest
  */
 
+import { filterTree } from './textFileFilter.js';
+
 /**
  * GitHubError - Base error for GitHub API issues
  */
@@ -610,16 +612,18 @@ export class GitHubRepositorySource {
             return null;
         }
 
+        const mapped = data.tree.map(item => ({
+            path: item.path,
+            type: item.type, // 'blob' or 'tree'
+            size: item.size || 0,
+            sha: item.sha,
+            mode: item.mode,
+        }));
+
         return {
             sha: data.sha,
             truncated: data.truncated || false,
-            tree: data.tree.map(item => ({
-                path: item.path,
-                type: item.type, // 'blob' or 'tree'
-                size: item.size || 0,
-                sha: item.sha,
-                mode: item.mode,
-            })),
+            tree: filterTree(mapped),
             fetchedAt: Date.now(),
         };
     }

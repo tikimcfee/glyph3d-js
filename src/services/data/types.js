@@ -43,6 +43,7 @@ const FS_ERROR_CODES = {
     PermissionDenied: -32002,
     IsDirectory:      -32003,
     FileTooLarge:     -32004,
+    NotText:          -32005,
 };
 
 /**

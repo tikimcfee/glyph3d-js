@@ -796,6 +796,16 @@ html, body {
 .setting-select:focus { outline: none; border-color: var(--accent); }
 .setting-select option { background: var(--bg-input); color: #e0e0e0; }
 
+.setting-textarea {
+    width: 100%; padding: 10px;
+    background: var(--bg-input); border: 1px solid var(--border-color);
+    border-radius: 4px; color: #e0e0e0;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 11px; resize: vertical; line-height: 1.5;
+    box-sizing: border-box;
+}
+.setting-textarea:focus { outline: none; border-color: var(--accent); }
+
 .setting-section-header {
     font-size: 10px; text-transform: uppercase;
     letter-spacing: 0.8px; color: #666;

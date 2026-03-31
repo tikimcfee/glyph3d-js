@@ -64,6 +64,7 @@ export class IDEShell {
         this._panelContent = document.getElementById('panel-content');
 
         // Status bar elements
+        this._statusSource = document.getElementById('status-source');
         this._statusBranch = document.getElementById('status-branch');
         this._statusLayout = document.getElementById('status-layout');
         this._statusFilePath = document.getElementById('status-file-path');
@@ -809,6 +810,11 @@ export class IDEShell {
         if (this._viewer.camera) {
             const pos = this._viewer.camera.position;
             this._statusCamera.textContent = `${pos.x.toFixed(0)}, ${pos.y.toFixed(0)}, ${pos.z.toFixed(0)}`;
+        }
+
+        // Source provider
+        if (this._statusSource) {
+            this._statusSource.textContent = this._viewer._sourceMode === 'local' ? 'Local' : 'GitHub';
         }
 
         // Layout mode

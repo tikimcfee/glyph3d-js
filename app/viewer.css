@@ -466,6 +466,24 @@ body {
     color: #e0e0e0;
 }
 
+.setting-textarea {
+    width: 100%;
+    padding: 10px;
+    background: #1a1a1a;
+    border: 1px solid #444;
+    border-radius: 4px;
+    color: #e0e0e0;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 11px;
+    resize: vertical;
+    line-height: 1.5;
+    box-sizing: border-box;
+}
+.setting-textarea:focus {
+    outline: none;
+    border-color: #00ff88;
+}
+
 .setting-section-header {
     font-size: 10px;
     text-transform: uppercase;

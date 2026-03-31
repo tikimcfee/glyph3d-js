@@ -354,6 +354,20 @@ export function settingsPanelHTML() {
             <div class="setting-label"><span>Status</span></div>
             <span class="setting-value" id="ws-connection-status">Disconnected</span>
         </div>
+        <div class="setting-group setting-section-header">File Types</div>
+        <div class="setting-group">
+            <div class="setting-label"><span>Allowed Extensions</span></div>
+            <textarea class="setting-textarea" id="ext-whitelist" rows="6"
+                      placeholder=".js, .ts, .py, .go, Makefile, ..."></textarea>
+            <div class="setting-hint">
+                Comma-separated. Dotted = extension (.js), plain = exact filename (Makefile).
+                Changes apply on next repo load.
+            </div>
+        </div>
+        <div class="setting-group" style="display:flex; gap:8px">
+            <button class="setting-btn" id="ext-apply" style="flex:1">Apply</button>
+            <button class="setting-btn" id="ext-reset" style="flex:1">Reset Defaults</button>
+        </div>
     `;
 }
 

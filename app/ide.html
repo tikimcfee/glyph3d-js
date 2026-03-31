@@ -149,6 +149,9 @@
         <!-- Status Bar -->
         <footer id="status-bar">
             <div class="status-left">
+                <span class="status-item" id="status-source" title="Source provider">
+                    GitHub
+                </span>
                 <span class="status-item" id="status-branch" title="Branch">
                     <span class="status-icon">&#9733;</span> main
                 </span>
@@ -197,6 +200,7 @@
 
             // Create the viewer (renders into #editor-area canvas)
             const viewer = new GitHubRepoViewer(canvas, THREE);
+            window._viewer = viewer; // debug access
 
             // Tell the IDE shell about the viewer so it can wire status updates.
             // This also hides old Drawer/header/FPS badge elements.

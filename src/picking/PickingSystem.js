@@ -40,6 +40,7 @@ out float vPickingId;
 
 void main() {
     vec3 scaled = position * vec3(instanceSize, 1.0);
+    vec3 alignOffset = vec3(instanceSize.x * 0.5, 0.0, 0.0);
 
     float v = (instanceGroupId + 0.5) / groupTextureHeight;
     vec4 gPos   = texture(groupTexture, vec2(0.125, v));
@@ -49,7 +50,7 @@ void main() {
     float visible = step(0.01, gColor.a);
     if (visible < 0.5) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
 
-    vec3 worldPos = scaled + instancePosition * gScale.xyz + gPos.xyz;
+    vec3 worldPos = scaled + alignOffset + instancePosition * gScale.xyz + gPos.xyz;
     gl_Position = projectionMatrix * modelViewMatrix * vec4(worldPos, 1.0);
     vPickingId = uBasePickingId + float(gl_InstanceID);
 }
@@ -81,6 +82,7 @@ out highp vec2 vUV;
 
 void main() {
     vec3 scaled = position * vec3(instanceSize, 1.0);
+    vec3 alignOffset = vec3(instanceSize.x * 0.5, 0.0, 0.0);
 
     float v = (instanceGroupId + 0.5) / groupTextureHeight;
     vec4 gPos   = texture(groupTexture, vec2(0.125, v));
@@ -90,7 +92,7 @@ void main() {
     float visible = step(0.01, gColor.a);
     if (visible < 0.5) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
 
-    vec3 worldPos = scaled + instancePosition * gScale.xyz + gPos.xyz;
+    vec3 worldPos = scaled + alignOffset + instancePosition * gScale.xyz + gPos.xyz;
     gl_Position = projectionMatrix * modelViewMatrix * vec4(worldPos, 1.0);
     vPickingId = uBasePickingId + float(gl_InstanceID);
 
@@ -168,9 +170,14 @@ export class PickingSystem {
 
     /** @private */
     _createTarget() {
+        // Match the main canvas drawing buffer dimensions (CSS size × DPR)
+        // so the picking pass renders at the exact same resolution as the
+        // visible scene. With fractional DPR, rendering at CSS-only size
+        // causes sub-pixel misalignment that shifts picks by characters.
         const size = this._renderer.getSize(new THREE.Vector2());
-        const w = Math.max(1, Math.floor(size.x * this._scale));
-        const h = Math.max(1, Math.floor(size.y * this._scale));
+        const dpr = this._renderer.getPixelRatio();
+        const w = Math.max(1, Math.floor(size.x * dpr * this._scale));
+        const h = Math.max(1, Math.floor(size.y * dpr * this._scale));
         if (this._target) this._target.dispose();
         this._target = new THREE.WebGLRenderTarget(w, h, {
             minFilter: THREE.NearestFilter,
@@ -188,11 +195,17 @@ export class PickingSystem {
     // -------------------------------------------------------------------------
 
     setMousePosition(cssX, cssY) {
-        const newX = Math.floor(cssX * this._scale);
-        const newY = Math.floor(cssY * this._scale);
+        // Scale CSS coordinates to match the DPR-sized picking target.
+        const dpr = this._renderer.getPixelRatio();
+        const newX = Math.floor(cssX * dpr * this._scale);
+        const newY = Math.floor(cssY * dpr * this._scale);
         if (newX !== this._mousePixel.x || newY !== this._mousePixel.y) {
             this._mousePixel = { x: newX, y: newY };
             this._needsPick = true;
+        }
+        if (this._debug) {
+            const size = this._renderer.getSize(this._sizeVec);
+            console.log(`[pick] css=(${cssX.toFixed(1)}, ${cssY.toFixed(1)}) → pixel=(${newX}, ${newY})  target=${this._target?.width}×${this._target?.height}  renderer=${size.x}×${size.y}  dpr=${dpr}  scale=${this._scale}`);
         }
     }
 
@@ -294,8 +307,9 @@ export class PickingSystem {
 
         // Auto-resize target if renderer size changed (e.g. IDE ResizeObserver)
         const size = this._renderer.getSize(this._sizeVec);
-        const tw = Math.max(1, Math.floor(size.x * this._scale));
-        const th = Math.max(1, Math.floor(size.y * this._scale));
+        const dpr = this._renderer.getPixelRatio();
+        const tw = Math.max(1, Math.floor(size.x * dpr * this._scale));
+        const th = Math.max(1, Math.floor(size.y * dpr * this._scale));
         if (!this._target || this._target.width !== tw || this._target.height !== th) {
             this._createTarget();
         }
@@ -322,13 +336,15 @@ export class PickingSystem {
 
         const tRender = performance.now();
 
-        // Read pixel at mouse position
+        // Read pixel at mouse position.
+        // Use Three.js readRenderTargetPixels instead of raw gl.readPixels
+        // to ensure the correct framebuffer is bound after render().
         const { x, y } = this._mousePixel;
         let id = 0;
         if (x >= 0 && y >= 0 && x < this._target.width && y < this._target.height) {
-            const gl = this._renderer.getContext();
-            gl.readPixels(x, this._target.height - 1 - y, 1, 1,
-                gl.RGBA, gl.UNSIGNED_BYTE, this._readBuffer);
+            this._renderer.readRenderTargetPixels(
+                this._target, x, this._target.height - 1 - y, 1, 1, this._readBuffer
+            );
             const [r, g, b] = this._readBuffer;
             id = (r << 16) | (g << 8) | b;
         }
