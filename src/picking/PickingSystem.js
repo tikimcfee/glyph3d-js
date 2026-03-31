@@ -28,10 +28,10 @@ precision highp float;
 in vec3 instancePosition;
 in vec2 instanceSize;
 in float instanceGroupId;
-in float instancePickingId;
 
 uniform sampler2D groupTexture;
 uniform float groupTextureHeight;
+uniform float uBasePickingId;
 `;
 
 // Cell mode: solid quads, no atlas sampling
@@ -51,7 +51,7 @@ void main() {
 
     vec3 worldPos = scaled + instancePosition * gScale.xyz + gPos.xyz;
     gl_Position = projectionMatrix * modelViewMatrix * vec4(worldPos, 1.0);
-    vPickingId = instancePickingId;
+    vPickingId = uBasePickingId + float(gl_InstanceID);
 }
 `;
 
@@ -92,7 +92,7 @@ void main() {
 
     vec3 worldPos = scaled + instancePosition * gScale.xyz + gPos.xyz;
     gl_Position = projectionMatrix * modelViewMatrix * vec4(worldPos, 1.0);
-    vPickingId = instancePickingId;
+    vPickingId = uBasePickingId + float(gl_InstanceID);
 
     float cp = instanceCodepoint;
     float mapCol = mod(cp, atlasMapWidth);
@@ -202,9 +202,9 @@ export class PickingSystem {
 
     /**
      * Register a GlyphRenderer with this picking system.
-     * Claims a contiguous block of picking IDs and writes them to the
-     * instancePickingId attribute. Creates a picking ShaderMaterial that
-     * will be swapped onto the mesh during the picking render pass.
+     * Claims a contiguous block of picking IDs and creates a picking
+     * ShaderMaterial with uBasePickingId uniform. The picking shader
+     * derives per-glyph IDs as uBasePickingId + gl_InstanceID.
      *
      * Must be called after every flush that rebuilds geometry.
      *
@@ -225,16 +225,11 @@ export class PickingSystem {
         this._nextPickingId = endId;
         window.__glyph3dPickingIdCounter = this._nextPickingId;
 
-        // Write instancePickingId buffer
-        const ids = new Float32Array(count);
-        for (let i = 0; i < count; i++) ids[i] = startId + i;
-        mesh.geometry.setAttribute('instancePickingId',
-            new THREE.InstancedBufferAttribute(ids, 1));
-
         // Create picking material based on mode
         const uniforms = {
             groupTexture:       { value: glyphRenderer._groupTexture },
             groupTextureHeight: { value: glyphRenderer._maxGroups },
+            uBasePickingId:     { value: startId },
         };
 
         let vertShader, fragShader;

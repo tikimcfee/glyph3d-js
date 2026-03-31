@@ -16,7 +16,7 @@ in vec2 instanceSize;
 in float instanceCodepoint;
 in vec3 instanceColor;
 in float instanceGroupId;
-in float instancePickingId;
+// instancePickingId removed — derived as uBasePickingId + gl_InstanceID in picking shader
 
 // Group property DataTexture (4 columns x N rows, RGBA Float)
 uniform sampler2D groupTexture;

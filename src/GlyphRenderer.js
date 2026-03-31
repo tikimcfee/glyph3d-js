@@ -177,26 +177,30 @@ class GlyphRendererV15 {
     _ensureHighlightTexture(instanceCount) {
         if (this._highlightTexture && this._highlightSize >= instanceCount) return;
 
-        const width = Math.max(instanceCount, 1);
-        const data = new Uint8Array(width * 4); // RGBA8, zero-filled
+        // Wrap into a 2D texture to stay within GPU max texture width (typically 16384).
+        // Layout: texel at (gl_InstanceID % width, gl_InstanceID / width).
+        const HIGHLIGHT_TEX_WIDTH = 1024;
+        const count = Math.max(instanceCount, 1);
+        const height = Math.ceil(count / HIGHLIGHT_TEX_WIDTH);
+        const totalTexels = HIGHLIGHT_TEX_WIDTH * height;
+        const data = new Uint8Array(totalTexels * 4); // RGBA8, zero-filled
 
         if (this._highlightTexture) {
-            // Copy existing highlight state into the new larger buffer
             const oldData = this._highlightTexture.image.data;
             data.set(oldData.subarray(0, Math.min(oldData.length, data.length)));
             this._highlightTexture.dispose();
         }
 
-        const tex = new THREE.DataTexture(data, width, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
+        const tex = new THREE.DataTexture(data, HIGHLIGHT_TEX_WIDTH, height, THREE.RGBAFormat, THREE.UnsignedByteType);
         tex.minFilter = THREE.NearestFilter;
         tex.magFilter = THREE.NearestFilter;
         tex.generateMipmaps = false;
         tex.needsUpdate = true;
 
         this._highlightTexture = tex;
-        this._highlightSize = width;
+        this._highlightSize = count;
+        this._highlightTexWidth = HIGHLIGHT_TEX_WIDTH;
 
-        // Update the material uniform
         if (this.instanceMesh) {
             this.instanceMesh.material.uniforms.highlightTexture.value = tex;
         }
@@ -264,8 +268,7 @@ class GlyphRendererV15 {
             geometry.setAttribute('instanceGroupId',
                 new THREE.InstancedBufferAttribute(new Float32Array(maxCount), 1));
             // instanceAddedColor removed — highlight is now via highlightTexture (RGBA8 DataTexture)
-            geometry.setAttribute('instancePickingId',
-                new THREE.InstancedBufferAttribute(new Float32Array(maxCount), 1));
+            // instancePickingId removed — derived as uBasePickingId + gl_InstanceID in picking shader
             geometry._maxInstanceCount = maxCount;
         }
 
@@ -298,7 +301,6 @@ class GlyphRendererV15 {
             in float instanceCodepoint;
             in vec3 instanceColor;
             in float instanceGroupId;
-            in float instancePickingId;
 
             uniform sampler2D groupTexture;
             uniform float groupTextureHeight;
@@ -356,8 +358,10 @@ class GlyphRendererV15 {
                 vColor = mix(instanceColor * gColor.rgb, gColor.rgb, colorBlend);
                 vGroupAlpha = gColor.a;
 
-                // Per-glyph highlight from RGBA8 DataTexture (uint8 → float via /255.0)
-                vec4 highlight = texelFetch(highlightTexture, ivec2(gl_InstanceID, 0), 0);
+                // Per-glyph highlight from RGBA8 DataTexture (2D: 1024 wide, wrapped)
+                int hx = gl_InstanceID % 1024;
+                int hy = gl_InstanceID / 1024;
+                vec4 highlight = texelFetch(highlightTexture, ivec2(hx, hy), 0);
                 vAddedColor = highlight.rgb;
             }
         `;
@@ -609,8 +613,10 @@ class GlyphRendererV15 {
         const r = addedColor ? (addedColor.r * 255 + 0.5) | 0 : 0;
         const g = addedColor ? (addedColor.g * 255 + 0.5) | 0 : 0;
         const b = addedColor ? (addedColor.b * 255 + 0.5) | 0 : 0;
+        const w = this._highlightTexWidth;
         for (let i = 0; i < entry.glyphs.length; i++) {
-            const bufIdx = (startIdx + i) * 4;
+            const slot = startIdx + i;
+            const bufIdx = slot * 4; // flat index into RGBA8 data (row-major, width=w)
             data[bufIdx]     = r;
             data[bufIdx + 1] = g;
             data[bufIdx + 2] = b;
@@ -628,32 +634,12 @@ class GlyphRendererV15 {
     setGlyphHighlight(bufferSlotIndex, color) {
         if (!this._highlightTexture) return;
         const data = this._highlightTexture.image.data;
-        const i = bufferSlotIndex * 4;
+        const i = bufferSlotIndex * 4; // flat index — row-major 2D is sequential
         data[i]     = color ? (color.r * 255 + 0.5) | 0 : 0;
         data[i + 1] = color ? (color.g * 255 + 0.5) | 0 : 0;
         data[i + 2] = color ? (color.b * 255 + 0.5) | 0 : 0;
         data[i + 3] = 0; // reserved (blend mode / opacity)
         this._highlightTexture.needsUpdate = true;
-    }
-
-    /**
-     * Write contiguous picking IDs for one text entry.
-     * Primary path is PickingSystem.registerRenderer() which writes the full buffer;
-     * this method is available for per-entry assignment if needed.
-     * @param {number} textId - Renderer-internal text ID
-     * @param {number} baseId - First glyph gets baseId, subsequent glyphs baseId+1, etc.
-     */
-    assignPickingIds(textId, baseId) {
-        const entry = this.renderedTexts.get(textId);
-        if (!entry || entry.bufferStartIndex === undefined) return;
-        const attr = this.instanceMesh.geometry.attributes.instancePickingId;
-        if (!attr) return;
-        const start = entry.bufferStartIndex;
-        for (let i = 0; i < entry.glyphs.length; i++) {
-            attr.array[start + i] = baseId + i;
-        }
-        attr.addUpdateRange(start, entry.glyphs.length);
-        attr.needsUpdate = true;
     }
 
     /**
@@ -1296,7 +1282,6 @@ class GlyphRendererV15 {
         geometry.attributes.instanceCodepoint.needsUpdate = true;
         geometry.attributes.instanceColor.needsUpdate = true;
         geometry.attributes.instanceGroupId.needsUpdate = true;
-        // instancePickingId.needsUpdate is set by PickingSystem.registerRenderer(), not here
 
         // Ensure highlight texture is sized for this instance count
         this._ensureHighlightTexture(count);
@@ -1337,8 +1322,6 @@ class GlyphRendererV15 {
      */
     applyPrebuiltBuffers(buffers, items) {
         const { positions, sizes, codepoints, colors, groupIds, count } = buffers;
-        // pickingIds intentionally NOT destructured — not emitted by builders;
-        // PickingSystem.registerRenderer() writes instancePickingId after flush
         let { itemMeta } = buffers;
         const geometry = this.instanceMesh.geometry;
 
@@ -1356,9 +1339,7 @@ class GlyphRendererV15 {
             new THREE.InstancedBufferAttribute(groupIds || new Float32Array(count), 1));
         // Highlight via RGBA8 DataTexture (replaces instanceAddedColor attribute)
         this._ensureHighlightTexture(count);
-        // instancePickingId: always zeros here — PickingSystem overwrites post-flush
-        geometry.setAttribute('instancePickingId',
-            new THREE.InstancedBufferAttribute(new Float32Array(count), 1));
+        // instancePickingId removed — derived as uBasePickingId + gl_InstanceID in picking shader
 
         // Set instance count
         geometry.instanceCount = count;
