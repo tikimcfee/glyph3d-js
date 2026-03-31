@@ -320,6 +320,11 @@ export default class WebSocketBridge {
 
     /** @private */
     _doConnect() {
+        // Close any existing socket before creating a new one
+        if (this.ws) {
+            try { this.ws.onopen = null; this.ws.onclose = null; this.ws.onerror = null; this.ws.close(); } catch (e) {}
+        }
+
         try {
             this.ws = new WebSocket(this.url);
         } catch (err) {
@@ -328,20 +333,26 @@ export default class WebSocketBridge {
             return;
         }
 
-        this.ws.onopen = () => {
+        // Capture socket reference — if _doConnect is called again before
+        // this socket opens, the closure must use the socket it was bound to.
+        const socket = this.ws;
+
+        socket.onopen = () => {
+            if (this.ws !== socket) return; // stale socket, ignore
             console.log(`[ws-bridge] connected to ${this.url}`);
             this.connected = true;
             this._currentDelay = this._reconnectDelay;
             // Register as display client
-            this.ws.send('DISPLAY');
+            socket.send('DISPLAY');
             this._updateStatus();
         };
 
-        this.ws.onmessage = (event) => {
+        socket.onmessage = (event) => {
             this._handleMessage(event.data);
         };
 
-        this.ws.onclose = () => {
+        socket.onclose = () => {
+            if (this.ws !== socket) return; // stale socket, ignore
             this.connected = false;
             this._updateStatus();
             if (!this._intentionalClose) {

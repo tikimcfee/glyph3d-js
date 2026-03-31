@@ -141,9 +141,10 @@ export class GitHubRepoViewer {
         this.handGestureAdapter = null;
 
         // Source mode: 'local' (Go relay FS) or 'github' (default)
+        // Driven by UI selector (#source-select), with URL param as initial override
         const params = new URLSearchParams(window.location.search);
         this._sourceMode = params.get('source') === 'local' ? 'local' : 'github';
-        this._localRoot = params.get('root') || '.';
+        this._localRoot = '.';
 
         // Tab traversal index (tracks which file is "focused" via Tab key)
         this._tabIndex = -1;
@@ -568,6 +569,25 @@ export class GitHubRepoViewer {
 
         this.fetchBranchesBtn.addEventListener('click', () => this.fetchBranches());
 
+        // Source selector — toggle between GitHub and Local fields
+        const sourceSelect = document.getElementById('source-select');
+        const githubFields = document.getElementById('github-fields');
+        const localFields = document.getElementById('local-fields');
+        if (sourceSelect) {
+            // Set initial state from _sourceMode
+            sourceSelect.value = this._sourceMode;
+            if (this._sourceMode === 'local') {
+                if (githubFields) githubFields.style.display = 'none';
+                if (localFields) localFields.style.display = '';
+            }
+            sourceSelect.addEventListener('change', () => {
+                const mode = sourceSelect.value;
+                this._switchSourceMode(mode);
+                if (githubFields) githubFields.style.display = mode === 'github' ? '' : 'none';
+                if (localFields) localFields.style.display = mode === 'local' ? '' : 'none';
+            });
+        }
+
         this.repoInput.addEventListener('input', () => {
             this.branches = [];
             this.defaultBranch = null;
@@ -921,8 +941,29 @@ export class GitHubRepoViewer {
         this.branchListEl.classList.remove('hidden');
     }
 
+    /**
+     * Switch source mode and re-create the data provider.
+     * @param {'github'|'local'} mode
+     */
+    _switchSourceMode(mode) {
+        if (mode === this._sourceMode) return;
+        this._sourceMode = mode;
+        if (mode === 'local') {
+            const rootInput = document.getElementById('local-root-input');
+            this._localRoot = rootInput?.value?.trim() || '.';
+            this.repoAdapter = new RemoteFileSystemProvider(this._wsBridge, {
+                root: this._localRoot,
+            });
+        } else {
+            this.repoAdapter = new RepositoryAdapter();
+        }
+        this.diffController.repoAdapter = this.repoAdapter;
+    }
+
     async loadRepository(options = {}) {
         if (this._sourceMode === 'local') {
+            const rootInput = document.getElementById('local-root-input');
+            this._localRoot = rootInput?.value?.trim() || '.';
             return this._loadLocalRepository(options);
         }
 

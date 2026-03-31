@@ -9,8 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
 // JSON-RPC error codes (mirrored in src/services/data/types.js)
@@ -96,6 +94,9 @@ type statParams struct {
 
 // ---- FSHandler ----
 
+// writeFn sends a serialized message to the display. Set by the Relay.
+type writeFn func(data []byte)
+
 // FSHandler serves filesystem requests over JSON-RPC 2.0.
 type FSHandler struct {
 	root string // absolute path, symlinks resolved
@@ -124,64 +125,64 @@ func NewFSHandler(root string) (*FSHandler, error) {
 
 // Handle dispatches a JSON-RPC request to the appropriate method.
 // Runs the handler in a goroutine with a timeout so it never blocks
-// the WebSocket read loop.
-func (h *FSHandler) Handle(method string, rawID json.RawMessage, params json.RawMessage, ws *websocket.Conn) {
+// the WebSocket read loop. Writes go through the provided writeFn.
+func (h *FSHandler) Handle(method string, rawID json.RawMessage, params json.RawMessage, write writeFn) {
 	go func() {
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
 			switch method {
 			case "fs/readFile":
-				h.handleReadFile(ws, rawID, params)
+				h.handleReadFile(write, rawID, params)
 			case "fs/listTree":
-				h.handleListTree(ws, rawID, params)
+				h.handleListTree(write, rawID, params)
 			case "fs/stat":
-				h.handleStat(ws, rawID, params)
+				h.handleStat(write, rawID, params)
 			default:
-				sendRPCError(ws, rawID, -32601, "method not found: "+method, nil)
+				h.sendRPCError(write, rawID, -32601, "method not found: "+method, nil)
 			}
 		}()
 
 		select {
 		case <-done:
 		case <-time.After(rpcTimeout):
-			sendRPCError(ws, rawID, -32000, "request timed out", nil)
+			h.sendRPCError(write, rawID, -32000, "request timed out", nil)
 		}
 	}()
 }
 
 // ---- Method Handlers ----
 
-func (h *FSHandler) handleReadFile(ws *websocket.Conn, id json.RawMessage, raw json.RawMessage) {
+func (h *FSHandler) handleReadFile(write writeFn, id json.RawMessage, raw json.RawMessage) {
 	var p readFileParams
 	if err := json.Unmarshal(raw, &p); err != nil {
-		sendRPCError(ws, id, -32602, "invalid params", nil)
+		h.sendRPCError(write, id, -32602, "invalid params", nil)
 		return
 	}
 
 	resolved, err := h.resolvePath(p.URI)
 	if err != nil {
-		sendRPCError(ws, id, errPermissionDenied, err.Error(), map[string]string{"uri": p.URI})
+		h.sendRPCError(write, id, errPermissionDenied, err.Error(), map[string]string{"uri": p.URI})
 		return
 	}
 
 	info, err := os.Stat(resolved)
 	if err != nil {
-		sendRPCError(ws, id, errFileNotFound, "file not found: "+p.URI, map[string]string{"uri": p.URI})
+		h.sendRPCError(write, id, errFileNotFound, "file not found: "+p.URI, map[string]string{"uri": p.URI})
 		return
 	}
 	if info.IsDir() {
-		sendRPCError(ws, id, errIsDirectory, "is a directory: "+p.URI, map[string]string{"uri": p.URI})
+		h.sendRPCError(write, id, errIsDirectory, "is a directory: "+p.URI, map[string]string{"uri": p.URI})
 		return
 	}
 	if info.Size() > maxFileSize {
-		sendRPCError(ws, id, errFileTooLarge, fmt.Sprintf("file too large (%d bytes, max %d): %s", info.Size(), maxFileSize, p.URI), map[string]string{"uri": p.URI})
+		h.sendRPCError(write, id, errFileTooLarge, fmt.Sprintf("file too large (%d bytes, max %d): %s", info.Size(), maxFileSize, p.URI), map[string]string{"uri": p.URI})
 		return
 	}
 
 	data, err := os.ReadFile(resolved)
 	if err != nil {
-		sendRPCError(ws, id, errFileNotFound, "read error: "+err.Error(), map[string]string{"uri": p.URI})
+		h.sendRPCError(write, id, errFileNotFound, "read error: "+err.Error(), map[string]string{"uri": p.URI})
 		return
 	}
 
@@ -194,13 +195,13 @@ func (h *FSHandler) handleReadFile(ws *websocket.Conn, id json.RawMessage, raw j
 			Mtime: info.ModTime().UnixMilli(),
 		},
 	}
-	sendRPCResult(ws, id, result)
+	h.sendRPCResult(write, id, result)
 }
 
-func (h *FSHandler) handleListTree(ws *websocket.Conn, id json.RawMessage, raw json.RawMessage) {
+func (h *FSHandler) handleListTree(write writeFn, id json.RawMessage, raw json.RawMessage) {
 	var p listTreeParams
 	if err := json.Unmarshal(raw, &p); err != nil {
-		sendRPCError(ws, id, -32602, "invalid params", nil)
+		h.sendRPCError(write, id, -32602, "invalid params", nil)
 		return
 	}
 
@@ -264,25 +265,25 @@ func (h *FSHandler) handleListTree(ws *websocket.Conn, id json.RawMessage, raw j
 		log.Printf("[fs] listTree walk error: %v", err)
 	}
 
-	sendRPCResult(ws, id, entries)
+	h.sendRPCResult(write, id, entries)
 }
 
-func (h *FSHandler) handleStat(ws *websocket.Conn, id json.RawMessage, raw json.RawMessage) {
+func (h *FSHandler) handleStat(write writeFn, id json.RawMessage, raw json.RawMessage) {
 	var p statParams
 	if err := json.Unmarshal(raw, &p); err != nil {
-		sendRPCError(ws, id, -32602, "invalid params", nil)
+		h.sendRPCError(write, id, -32602, "invalid params", nil)
 		return
 	}
 
 	resolved, err := h.resolvePath(p.URI)
 	if err != nil {
-		sendRPCError(ws, id, errPermissionDenied, err.Error(), map[string]string{"uri": p.URI})
+		h.sendRPCError(write, id, errPermissionDenied, err.Error(), map[string]string{"uri": p.URI})
 		return
 	}
 
 	info, err := os.Stat(resolved)
 	if err != nil {
-		sendRPCError(ws, id, errFileNotFound, "not found: "+p.URI, map[string]string{"uri": p.URI})
+		h.sendRPCError(write, id, errFileNotFound, "not found: "+p.URI, map[string]string{"uri": p.URI})
 		return
 	}
 
@@ -298,7 +299,7 @@ func (h *FSHandler) handleStat(ws *websocket.Conn, id json.RawMessage, raw json.
 		Size:  info.Size(),
 		Mtime: info.ModTime().UnixMilli(),
 	}
-	sendRPCResult(ws, id, result)
+	h.sendRPCResult(write, id, result)
 }
 
 // ---- Path Security ----
@@ -340,7 +341,7 @@ func (h *FSHandler) resolvePath(uri string) (string, error) {
 
 // ---- JSON-RPC Response Helpers ----
 
-func sendRPCResult(ws *websocket.Conn, id json.RawMessage, result any) {
+func (h *FSHandler) sendRPCResult(write writeFn, id json.RawMessage, result any) {
 	resp := map[string]any{
 		"jsonrpc": "2.0",
 		"id":      json.RawMessage(id),
@@ -351,10 +352,10 @@ func sendRPCResult(ws *websocket.Conn, id json.RawMessage, result any) {
 		log.Printf("[fs] marshal result error: %v", err)
 		return
 	}
-	ws.WriteMessage(websocket.TextMessage, data)
+	write(data)
 }
 
-func sendRPCError(ws *websocket.Conn, id json.RawMessage, code int, message string, errorData any) {
+func (h *FSHandler) sendRPCError(write writeFn, id json.RawMessage, code int, message string, errorData any) {
 	errObj := map[string]any{
 		"code":    code,
 		"message": message,
@@ -372,5 +373,5 @@ func sendRPCError(ws *websocket.Conn, id json.RawMessage, code int, message stri
 		log.Printf("[fs] marshal error response error: %v", err)
 		return
 	}
-	ws.WriteMessage(websocket.TextMessage, data)
+	write(data)
 }

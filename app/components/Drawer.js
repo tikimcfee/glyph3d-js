@@ -193,24 +193,43 @@ export class DrawerController {
 // Panel HTML Builders
 // ============================================================
 
-/** Repo panel: URL input, branch selection, load button */
+/** Repo panel: source selector, URL input, branch selection, load button */
 export function repoPanelHTML() {
     return `
         <div class="repo-section">
-            <label class="repo-label" for="repo-input">Repository URL</label>
-            <input type="text" id="repo-input" class="repo-input"
-                   placeholder="github.com/owner/repo"
-                   value="https://github.com/tikimcfee/glyph3d-js">
+            <label class="repo-label" for="source-select">Source</label>
+            <select class="repo-input" id="source-select">
+                <option value="github">GitHub</option>
+                <option value="local">Local (relay server)</option>
+            </select>
         </div>
-        <div class="repo-section">
-            <label class="repo-label" for="branch-input">Branch</label>
-            <div class="branch-input-row">
-                <input type="text" id="branch-input" class="repo-input"
-                       placeholder="main" value="">
-                <button id="fetch-branches-btn" class="repo-btn-sm" title="Fetch available branches">&#8635;</button>
+        <div id="github-fields">
+            <div class="repo-section">
+                <label class="repo-label" for="repo-input">Repository URL</label>
+                <input type="text" id="repo-input" class="repo-input"
+                       placeholder="github.com/owner/repo"
+                       value="https://github.com/tikimcfee/glyph3d-js">
             </div>
-            <div id="branch-list" class="branch-list hidden"></div>
-            <div id="branch-status" class="branch-status"></div>
+            <div class="repo-section">
+                <label class="repo-label" for="branch-input">Branch</label>
+                <div class="branch-input-row">
+                    <input type="text" id="branch-input" class="repo-input"
+                           placeholder="main" value="">
+                    <button id="fetch-branches-btn" class="repo-btn-sm" title="Fetch available branches">&#8635;</button>
+                </div>
+                <div id="branch-list" class="branch-list hidden"></div>
+                <div id="branch-status" class="branch-status"></div>
+            </div>
+        </div>
+        <div id="local-fields" style="display:none">
+            <div class="repo-section">
+                <label class="repo-label" for="local-root-input">Project Root</label>
+                <input type="text" id="local-root-input" class="repo-input"
+                       placeholder="." value=".">
+                <div class="branch-status" style="margin-top:4px;font-size:11px;color:var(--text-secondary)">
+                    Relative to relay --root flag
+                </div>
+            </div>
         </div>
         <div class="repo-section">
             <button id="load-btn" class="repo-btn">Load Repository</button>

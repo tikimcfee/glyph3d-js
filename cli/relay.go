@@ -14,12 +14,13 @@ import (
 
 // Relay routes WebSocket messages between one display (browser) and N controllers (CLIs).
 type Relay struct {
-	mu          sync.RWMutex
-	display     *websocket.Conn
-	controllers map[string]*websocket.Conn
-	nextID      atomic.Int64
-	upgrader    websocket.Upgrader
-	fs          *FSHandler // nil if --root not provided
+	mu           sync.RWMutex
+	display      *websocket.Conn
+	displayWrite chan []byte // serialized write queue for display WebSocket
+	controllers  map[string]*websocket.Conn
+	nextID       atomic.Int64
+	upgrader     websocket.Upgrader
+	fs           *FSHandler // nil if --root not provided
 }
 
 func NewRelay() *Relay {
@@ -29,6 +30,34 @@ func NewRelay() *Relay {
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
 	}
+}
+
+// sendToDisplay enqueues a message for the display WebSocket writer goroutine.
+// Safe to call from any goroutine. Non-blocking if channel has capacity.
+func (r *Relay) sendToDisplay(data []byte) {
+	r.mu.RLock()
+	ch := r.displayWrite
+	r.mu.RUnlock()
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- data:
+	default:
+		log.Printf("[relay] display write queue full, dropping message")
+	}
+}
+
+// startDisplayWriter drains the write channel, serializing all writes to the display WebSocket.
+func (r *Relay) startDisplayWriter(ws *websocket.Conn, ch chan []byte) {
+	go func() {
+		for data := range ch {
+			if err := ws.WriteMessage(websocket.TextMessage, data); err != nil {
+				log.Printf("[relay] display write error: %v", err)
+				return
+			}
+		}
+	}()
 }
 
 func (r *Relay) ServeHTTP(w http.ResponseWriter, req *http.Request) {
@@ -63,6 +92,8 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 					return
 				}
 				r.display = ws
+				ch := make(chan []byte, 64)
+				r.displayWrite = ch
 				role = "display"
 
 				// Collect controller IDs
@@ -72,12 +103,17 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 				}
 				r.mu.Unlock()
 
+				// Start the single writer goroutine for this display connection
+				r.startDisplayWriter(ws, ch)
+
 				log.Printf("[relay] display connected from %s", ws.RemoteAddr())
-				ws.WriteJSON(map[string]any{
+				// Initial ack goes through the channel
+				ack, _ := json.Marshal(map[string]any{
 					"ok":          true,
 					"role":        "display",
 					"controllers": ids,
 				})
+				r.sendToDisplay(ack)
 				continue
 			} else {
 				id := r.nextID.Add(1) - 1
@@ -123,7 +159,7 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 			}
 
 			envelope, _ := json.Marshal(map[string]string{"from": clientID, "cmd": raw})
-			d.WriteMessage(websocket.TextMessage, envelope)
+			r.sendToDisplay(envelope)
 
 		} else if role == "display" {
 			// JSON-RPC 2.0 detection: route FS requests to FSHandler
@@ -134,17 +170,22 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 				if r.fs != nil {
 					var rpc rpcRequest
 					if err := json.Unmarshal(msg, &rpc); err == nil {
-						r.fs.Handle(rpc.Method, rpc.ID, rpc.Params, ws)
+						r.fs.Handle(rpc.Method, rpc.ID, rpc.Params, r.sendToDisplay)
 					} else {
 						log.Printf("[relay] malformed JSON-RPC from display: %.100s", raw)
 					}
 				} else {
-					// No FSHandler — return JSON-RPC error
+					// No FSHandler — return JSON-RPC error inline
 					var rpc struct {
 						ID json.RawMessage `json:"id"`
 					}
 					json.Unmarshal(msg, &rpc)
-					sendRPCError(ws, rpc.ID, -32003, "filesystem not enabled (start relay with --root)", nil)
+					errResp, _ := json.Marshal(map[string]any{
+						"jsonrpc": "2.0",
+						"id":      json.RawMessage(rpc.ID),
+						"error":   map[string]any{"code": -32003, "message": "filesystem not enabled (start relay with --root)"},
+					})
+					r.sendToDisplay(errResp)
 				}
 				continue
 			}
@@ -187,7 +228,12 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 	if role == "display" {
 		r.mu.Lock()
 		r.display = nil
+		ch := r.displayWrite
+		r.displayWrite = nil
 		r.mu.Unlock()
+		if ch != nil {
+			close(ch)
+		}
 		log.Printf("[relay] display disconnected")
 	} else if role == "controller" && clientID != "" {
 		r.mu.Lock()
@@ -199,14 +245,8 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 }
 
 func (r *Relay) notifyDisplay(event, clientID string) {
-	r.mu.RLock()
-	d := r.display
-	r.mu.RUnlock()
-	if d == nil {
-		return
-	}
 	msg, _ := json.Marshal(map[string]string{"event": event, "clientId": clientID})
-	d.WriteMessage(websocket.TextMessage, msg)
+	r.sendToDisplay(msg)
 }
 
 // RunRelay starts the relay server. Blocks until error.
