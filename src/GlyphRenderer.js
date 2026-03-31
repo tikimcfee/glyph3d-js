@@ -76,6 +76,8 @@ class GlyphRendererV15 {
         this._initGroupDefaults();
         this._groupTexture = null; // created in _createInstanceMesh
         this._groupCount = 1; // group 0 always exists (identity)
+        this._highlightTexture = null; // RGBA8 DataTexture, created on first flush
+        this._highlightSize = 0;       // current texture width (= instance capacity)
 
         // Subsystems created lazily (only when needed for sync path)
         // Worker path uses applyPrebuiltBuffers() directly - no need for these
@@ -167,6 +169,40 @@ class GlyphRendererV15 {
     }
 
     /**
+     * Ensure the RGBA8 highlight DataTexture exists and is sized for the given instance count.
+     * Creates or resizes as needed. Zero-filled (no highlight = black = additive identity).
+     * @private
+     * @param {number} instanceCount
+     */
+    _ensureHighlightTexture(instanceCount) {
+        if (this._highlightTexture && this._highlightSize >= instanceCount) return;
+
+        const width = Math.max(instanceCount, 1);
+        const data = new Uint8Array(width * 4); // RGBA8, zero-filled
+
+        if (this._highlightTexture) {
+            // Copy existing highlight state into the new larger buffer
+            const oldData = this._highlightTexture.image.data;
+            data.set(oldData.subarray(0, Math.min(oldData.length, data.length)));
+            this._highlightTexture.dispose();
+        }
+
+        const tex = new THREE.DataTexture(data, width, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
+        tex.minFilter = THREE.NearestFilter;
+        tex.magFilter = THREE.NearestFilter;
+        tex.generateMipmaps = false;
+        tex.needsUpdate = true;
+
+        this._highlightTexture = tex;
+        this._highlightSize = width;
+
+        // Update the material uniform
+        if (this.instanceMesh) {
+            this.instanceMesh.material.uniforms.highlightTexture.value = tex;
+        }
+    }
+
+    /**
      * Create the single instance mesh used for all rendering
      * @private
      */
@@ -203,7 +239,8 @@ class GlyphRendererV15 {
                 groupTextureHeight: { value: this._maxGroups },
                 atlasMapTexture: { value: atlasMapTexture },
                 atlasMapWidth: { value: atlasMapDims.width },
-                atlasMapHeight: { value: atlasMapDims.height }
+                atlasMapHeight: { value: atlasMapDims.height },
+                highlightTexture: { value: null } // set after first flush sizes the texture
             },
             vertexShader: this._getVertexShader(),
             fragmentShader: this._getFragmentShader(),
@@ -226,8 +263,7 @@ class GlyphRendererV15 {
                 new THREE.InstancedBufferAttribute(new Float32Array(maxCount * 3), 3));
             geometry.setAttribute('instanceGroupId',
                 new THREE.InstancedBufferAttribute(new Float32Array(maxCount), 1));
-            geometry.setAttribute('instanceAddedColor',
-                new THREE.InstancedBufferAttribute(new Float32Array(maxCount * 3), 3));
+            // instanceAddedColor removed — highlight is now via highlightTexture (RGBA8 DataTexture)
             geometry.setAttribute('instancePickingId',
                 new THREE.InstancedBufferAttribute(new Float32Array(maxCount), 1));
             geometry._maxInstanceCount = maxCount;
@@ -262,7 +298,6 @@ class GlyphRendererV15 {
             in float instanceCodepoint;
             in vec3 instanceColor;
             in float instanceGroupId;
-            in vec3 instanceAddedColor;
             in float instancePickingId;
 
             uniform sampler2D groupTexture;
@@ -273,6 +308,9 @@ class GlyphRendererV15 {
             uniform sampler2D atlasMapTexture;
             uniform float atlasMapWidth;
             uniform float atlasMapHeight;
+
+            // Per-glyph highlight: RGBA8 DataTexture, width=instanceCount, height=1
+            uniform sampler2D highlightTexture;
 
             out highp vec2 vUV;
             out vec3 vColor;
@@ -317,7 +355,10 @@ class GlyphRendererV15 {
                 float colorBlend = gScale.w;
                 vColor = mix(instanceColor * gColor.rgb, gColor.rgb, colorBlend);
                 vGroupAlpha = gColor.a;
-                vAddedColor = instanceAddedColor;
+
+                // Per-glyph highlight from RGBA8 DataTexture (uint8 → float via /255.0)
+                vec4 highlight = texelFetch(highlightTexture, ivec2(gl_InstanceID, 0), 0);
+                vAddedColor = highlight.rgb;
             }
         `;
     }
@@ -562,38 +603,37 @@ class GlyphRendererV15 {
     updateAddedColor(id, addedColor) {
         const entry = this.renderedTexts.get(id);
         if (!entry || entry.bufferStartIndex === undefined) return;
-        const attr = this.instanceMesh.geometry.attributes.instanceAddedColor;
-        if (!attr) return;
-        const arr = attr.array;
+        if (!this._highlightTexture) return;
+        const data = this._highlightTexture.image.data;
         const startIdx = entry.bufferStartIndex;
-        const r = addedColor?.r ?? 0;
-        const g = addedColor?.g ?? 0;
-        const b = addedColor?.b ?? 0;
+        const r = addedColor ? (addedColor.r * 255 + 0.5) | 0 : 0;
+        const g = addedColor ? (addedColor.g * 255 + 0.5) | 0 : 0;
+        const b = addedColor ? (addedColor.b * 255 + 0.5) | 0 : 0;
         for (let i = 0; i < entry.glyphs.length; i++) {
-            const bufIdx = (startIdx + i) * 3;
-            arr[bufIdx]     = r;
-            arr[bufIdx + 1] = g;
-            arr[bufIdx + 2] = b;
+            const bufIdx = (startIdx + i) * 4;
+            data[bufIdx]     = r;
+            data[bufIdx + 1] = g;
+            data[bufIdx + 2] = b;
+            data[bufIdx + 3] = 0;
         }
-        attr.addUpdateRange(startIdx * 3, entry.glyphs.length * 3);
-        attr.needsUpdate = true;
+        this._highlightTexture.needsUpdate = true;
     }
 
     /**
      * Set additive highlight color on a single glyph by absolute buffer slot index.
      * Used for token-level highlighting within a text entry.
-     * @param {number} bufferSlotIndex - Absolute index into instanceAddedColor array
+     * @param {number} bufferSlotIndex - Absolute glyph index into highlight texture
      * @param {{r: number, g: number, b: number}|null} color - null clears
      */
     setGlyphHighlight(bufferSlotIndex, color) {
-        const attr = this.instanceMesh.geometry.attributes.instanceAddedColor;
-        if (!attr) return;
-        const i = bufferSlotIndex * 3;
-        attr.array[i]     = color?.r ?? 0;
-        attr.array[i + 1] = color?.g ?? 0;
-        attr.array[i + 2] = color?.b ?? 0;
-        attr.addUpdateRange(i, 3);
-        attr.needsUpdate = true;
+        if (!this._highlightTexture) return;
+        const data = this._highlightTexture.image.data;
+        const i = bufferSlotIndex * 4;
+        data[i]     = color ? (color.r * 255 + 0.5) | 0 : 0;
+        data[i + 1] = color ? (color.g * 255 + 0.5) | 0 : 0;
+        data[i + 2] = color ? (color.b * 255 + 0.5) | 0 : 0;
+        data[i + 3] = 0; // reserved (blend mode / opacity)
+        this._highlightTexture.needsUpdate = true;
     }
 
     /**
@@ -810,7 +850,8 @@ class GlyphRendererV15 {
             usedBytes,
             wasteBytes: allocatedBytes - usedBytes,
             groupTextureBytes: groupBytes * 2, // CPU + GPU
-            totalBytes: allocatedBytes + groupBytes * 2,
+            highlightTextureBytes: this._highlightSize * 4, // RGBA8
+            totalBytes: allocatedBytes + groupBytes * 2 + this._highlightSize * 4,
             attributes,
             textEntryCount: this.renderedTexts.size,
         };
@@ -1223,7 +1264,6 @@ class GlyphRendererV15 {
         const codepoints = geometry.attributes.instanceCodepoint.array;
         const colors = geometry.attributes.instanceColor.array;
         const groupIds = geometry.attributes.instanceGroupId.array;
-        const addedColors = geometry.attributes.instanceAddedColor?.array;
 
         // Fill arrays
         for (let i = 0; i < count; i++) {
@@ -1248,14 +1288,6 @@ class GlyphRendererV15 {
 
             // Group ID
             groupIds[i] = g.groupId || 0;
-
-            // Added color (highlight) — default 0,0,0 (no additive change)
-            if (addedColors) {
-                const ac = g.addedColor;
-                addedColors[i * 3]     = ac ? ac.r : 0;
-                addedColors[i * 3 + 1] = ac ? ac.g : 0;
-                addedColors[i * 3 + 2] = ac ? ac.b : 0;
-            }
         }
 
         // Mark attributes as needing update
@@ -1264,10 +1296,10 @@ class GlyphRendererV15 {
         geometry.attributes.instanceCodepoint.needsUpdate = true;
         geometry.attributes.instanceColor.needsUpdate = true;
         geometry.attributes.instanceGroupId.needsUpdate = true;
-        if (geometry.attributes.instanceAddedColor) {
-            geometry.attributes.instanceAddedColor.needsUpdate = true;
-        }
         // instancePickingId.needsUpdate is set by PickingSystem.registerRenderer(), not here
+
+        // Ensure highlight texture is sized for this instance count
+        this._ensureHighlightTexture(count);
 
         // Set instance count
         geometry.instanceCount = count;
@@ -1304,7 +1336,7 @@ class GlyphRendererV15 {
      * @returns {Array<number>|null} Array of renderer IDs if itemMeta provided, null otherwise
      */
     applyPrebuiltBuffers(buffers, items) {
-        const { positions, sizes, codepoints, colors, groupIds, addedColors, count } = buffers;
+        const { positions, sizes, codepoints, colors, groupIds, count } = buffers;
         // pickingIds intentionally NOT destructured — not emitted by builders;
         // PickingSystem.registerRenderer() writes instancePickingId after flush
         let { itemMeta } = buffers;
@@ -1322,9 +1354,8 @@ class GlyphRendererV15 {
             new THREE.InstancedBufferAttribute(colors, 3));
         geometry.setAttribute('instanceGroupId',
             new THREE.InstancedBufferAttribute(groupIds || new Float32Array(count), 1));
-        geometry.setAttribute('instanceAddedColor',
-            new THREE.InstancedBufferAttribute(
-                addedColors || new Float32Array(count * 3), 3));
+        // Highlight via RGBA8 DataTexture (replaces instanceAddedColor attribute)
+        this._ensureHighlightTexture(count);
         // instancePickingId: always zeros here — PickingSystem overwrites post-flush
         geometry.setAttribute('instancePickingId',
             new THREE.InstancedBufferAttribute(new Float32Array(count), 1));
@@ -1453,6 +1484,13 @@ class GlyphRendererV15 {
         if (this._groupTexture) {
             this._groupTexture.dispose();
             this._groupTexture = null;
+        }
+
+        // Dispose highlight DataTexture
+        if (this._highlightTexture) {
+            this._highlightTexture.dispose();
+            this._highlightTexture = null;
+            this._highlightSize = 0;
         }
 
         logger.trace('Disposed');

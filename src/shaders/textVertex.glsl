@@ -16,7 +16,6 @@ in vec2 instanceSize;
 in float instanceCodepoint;
 in vec3 instanceColor;
 in float instanceGroupId;
-in vec3 instanceAddedColor;
 in float instancePickingId;
 
 // Group property DataTexture (4 columns x N rows, RGBA Float)
@@ -28,6 +27,9 @@ uniform float groupTextureHeight;
 uniform sampler2D atlasMapTexture;
 uniform float atlasMapWidth;
 uniform float atlasMapHeight;
+
+// Per-glyph highlight: RGBA8 DataTexture, width=instanceCount, height=1
+uniform sampler2D highlightTexture;
 
 // Outputs to fragment shader
 out highp vec2 vUV;
@@ -53,12 +55,6 @@ void main() {
 
     // -------------------------------------------------------------------------
     // GPU codepoint → UV lookup  [GPU-Lookup path]
-    //
-    // instanceCodepoint holds the raw Unicode codepoint. atlasMapTexture
-    // is a 1024-wide RGBA Float DataTexture where texel[cp] stores the
-    // pre-flipped (u0, v0_webgl, u1, v1_webgl) for that glyph.
-    // mix() maps the unit quad's uv onto the glyph's atlas sub-rect.
-    // No CPU-side UV array is used — see GlyphAtlas.getAtlasMapTexture().
     // -------------------------------------------------------------------------
     float cp = instanceCodepoint;
     float mapCol = mod(cp, atlasMapWidth);
@@ -66,12 +62,14 @@ void main() {
     float tx = (mapCol + 0.5) / atlasMapWidth;
     float ty = (mapRow + 0.5) / atlasMapHeight;
     vec4 uvRect = texture(atlasMapTexture, vec2(tx, ty));
-    // uvRect = (u0, v0_webgl, u1, v1_webgl) — pre-flipped in GlyphAtlas
     vUV = mix(uvRect.xy, uvRect.zw, uv);
 
     // gScale.w = color blend factor: 0.0 = multiply (default), 1.0 = replace
     float colorBlend = gScale.w;
     vColor = mix(instanceColor * gColor.rgb, gColor.rgb, colorBlend);
     vGroupAlpha = gColor.a;
-    vAddedColor = instanceAddedColor;
+
+    // Per-glyph highlight from RGBA8 DataTexture (uint8 → float via /255.0)
+    vec4 highlight = texelFetch(highlightTexture, ivec2(gl_InstanceID, 0), 0);
+    vAddedColor = highlight.rgb;
 }
