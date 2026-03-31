@@ -270,4 +270,60 @@ export default function registerTourCommands(router) {
             },
         };
     }, { description: 'Show current tour state' });
+
+    // ================================================================
+    //  tour.show <base64-text>
+    //  One-shot: parse → resolve → highlight all → connect → frame camera.
+    //  No steps, no sequencing. Just illuminate and let the user explore.
+    // ================================================================
+
+    router.register('tour.show', async (args, ctx) => {
+        if (args.length < 1) {
+            return { text: 'ERR: usage: tour.show <base64-text-or-json>', data: null };
+        }
+
+        let decoded;
+        try { decoded = decodeBase64(args[0]); } catch {
+            return { text: 'ERR: invalid base64 input', data: null };
+        }
+
+        // Parse: auto-detect format
+        const parseResult = parseAuto(decoded);
+        const fileRefs = parseResult.refs.filter(pr => pr.ref.filePath);
+        if (fileRefs.length === 0) {
+            return { text: 'ERR: no file references found in text', data: null };
+        }
+
+        // Wrap as single-step tour, load, and immediately activate
+        const data = {
+            id: 'show',
+            title: 'show',
+            steps: [{
+                title: 'show',
+                refs: fileRefs,
+            }],
+        };
+
+        const seq = getSequencer(ctx);
+        const result = seq.load(data);
+        const step = await seq.goto(0);
+
+        const resolved = step.refs.filter(r => r.grid).length;
+        const warns = result.unresolved.length > 0
+            ? ` (unresolved: ${result.unresolved.join(', ')})`
+            : '';
+
+        return {
+            text: `OK: showing ${resolved}/${fileRefs.length} refs, ${step.connections.length} connections${warns}`,
+            data: {
+                totalRefs: fileRefs.length,
+                resolved,
+                connections: step.connections.length,
+                unresolved: result.unresolved,
+            },
+        };
+    }, {
+        description: 'Parse text, highlight all referenced files, draw connections, frame camera',
+        usage: '<base64-text>',
+    });
 }

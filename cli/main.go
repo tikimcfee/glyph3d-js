@@ -47,10 +47,16 @@ var b64Commands = map[string]bool{
 }
 
 func main() {
-	// Check for "serve" subcommand before flag parsing
-	if len(os.Args) > 1 && os.Args[1] == "serve" {
-		serveCmd()
-		return
+	// Check for subcommands before flag parsing
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "serve":
+			serveCmd()
+			return
+		case "hook":
+			hookCmdEntry()
+			return
+		}
 	}
 
 	flag.Parse()
