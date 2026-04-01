@@ -32,7 +32,9 @@ class GlyphAtlas {
         this.fontFamily = fontFamily;
         this.fontSize = fontSize;  // Default 48px for crisp rendering (was 16px - too small)
         this.atlasSize = atlasSize;
-        this.glyphPadding = 6;  // Increased padding for larger glyphs
+        // Pixel gap between glyph cells in the atlas — scales with font size
+        // to prevent Canvas 2D anti-aliasing from bleeding into neighbors.
+        this.glyphPadding = Math.max(6, Math.ceil(fontSize / 6));
 
         // UV coordinate mapping: grapheme string → {u0, v0, u1, v1}
         this.uvMap = new Map();
@@ -158,11 +160,14 @@ class GlyphAtlas {
         // Conservative glyph height to avoid bleeding
         this.glyphHeight = this.fontSize * 1.15;
 
-        // UV insets for edge bleeding prevention
+        // UV insets — shrink the sampled rectangle inward so bilinear
+        // filtering and mipmapping don't sample neighboring glyph pixels.
+        // Scale with font size: larger glyphs have wider anti-aliased edges.
+        const insetScale = this.fontSize / 48;
         this.uvInsets = {
-            horizontal: 0.25,
-            top: 1.0,
-            bottom: 0.5
+            horizontal: 1.0 * insetScale,
+            top: 2.0 * insetScale,
+            bottom: 1.5 * insetScale,
         };
 
         // Reset packing state

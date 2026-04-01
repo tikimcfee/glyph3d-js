@@ -1,11 +1,15 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -81,6 +85,15 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 			break
 		}
 		raw := string(msg)
+
+		// Check for relay-direct messages (from any client, any role)
+		var relayProbe struct {
+			Relay string `json:"relay"`
+		}
+		if json.Unmarshal(msg, &relayProbe) == nil && relayProbe.Relay != "" {
+			r.handleRelayMessage(ws, msg)
+			continue
+		}
 
 		// First message determines role
 		if role == "" {
@@ -241,6 +254,95 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 		r.mu.Unlock()
 		log.Printf("[relay] controller '%s' disconnected", clientID)
 		r.notifyDisplay("client_disconnected", clientID)
+	}
+}
+
+// atlasCacheDir returns ~/.glyph3d/cache/, creating it on demand for writes.
+func atlasCacheDir() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".glyph3d", "cache")
+}
+
+// atlasCacheKey builds a slug from font + size, e.g. "atlas-menlo-2048".
+func atlasCacheKey(font string, size float64) string {
+	slug := strings.ToLower(font)
+	slug = strings.ReplaceAll(slug, " ", "-")
+	slug = strings.ReplaceAll(slug, ",", "")
+	return fmt.Sprintf("atlas-%s-%d", slug, int(size))
+}
+
+func (r *Relay) handleRelayMessage(ws *websocket.Conn, msg []byte) {
+	var m struct {
+		Relay      string          `json:"relay"`
+		Font       string          `json:"font"`
+		Size       float64         `json:"size"`
+		PNG        string          `json:"png"`
+		Descriptor json.RawMessage `json:"descriptor"`
+	}
+	if err := json.Unmarshal(msg, &m); err != nil {
+		ws.WriteJSON(map[string]any{"error": "invalid relay message"})
+		return
+	}
+
+	dir := atlasCacheDir()
+	key := atlasCacheKey(m.Font, m.Size)
+	pngPath := filepath.Join(dir, key+".png")
+	jsonPath := filepath.Join(dir, key+".json")
+
+	switch m.Relay {
+	case "atlas.get":
+		pngData, pngErr := os.ReadFile(pngPath)
+		jsonData, jsonErr := os.ReadFile(jsonPath)
+		if pngErr == nil && jsonErr == nil {
+			log.Printf("[relay] atlas cache hit: %s", key)
+			var descriptor json.RawMessage
+			json.Unmarshal(jsonData, &descriptor)
+			ws.WriteJSON(map[string]any{
+				"event":      "atlas.result",
+				"hit":        true,
+				"png":        base64.StdEncoding.EncodeToString(pngData),
+				"descriptor": descriptor,
+			})
+		} else {
+			log.Printf("[relay] atlas cache miss: %s", key)
+			ws.WriteJSON(map[string]any{
+				"event": "atlas.result",
+				"hit":   false,
+			})
+		}
+
+	case "atlas.cache":
+		os.MkdirAll(dir, 0755)
+		pngBytes, err := base64.StdEncoding.DecodeString(m.PNG)
+		if err != nil {
+			ws.WriteJSON(map[string]any{"error": "invalid base64 png data"})
+			return
+		}
+		os.WriteFile(pngPath, pngBytes, 0644)
+		os.WriteFile(jsonPath, m.Descriptor, 0644)
+		log.Printf("[relay] atlas cached: %s", jsonPath)
+		ws.WriteJSON(map[string]any{
+			"event": "atlas.cached",
+			"path":  jsonPath,
+		})
+
+	case "atlas.clear":
+		removed := 0
+		if os.Remove(pngPath) == nil {
+			removed++
+		}
+		if os.Remove(jsonPath) == nil {
+			removed++
+		}
+		log.Printf("[relay] atlas cache cleared: %s (%d files)", key, removed)
+		ws.WriteJSON(map[string]any{
+			"event":   "atlas.cleared",
+			"key":     key,
+			"removed": removed,
+		})
+
+	default:
+		ws.WriteJSON(map[string]any{"error": fmt.Sprintf("unknown relay command: %s", m.Relay)})
 	}
 }
 

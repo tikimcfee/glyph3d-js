@@ -24,6 +24,9 @@ export const STATE_DEFAULTS = {
     'ui.gridsScale':         1.0,
     'ui.layoutSpacing':      10,
     'ui.wsEnabled':          false,
+    'atlas.font':            'Monaco, Menlo, Courier New, monospace',
+    'atlas.fontSize':        48,
+    'atlas.size':            2048,
     'camera.position':       null,
     'groups':                null,
 };

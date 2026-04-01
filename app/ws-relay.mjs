@@ -13,7 +13,59 @@
  */
 
 import { WebSocketServer } from 'ws';
-import { networkInterfaces } from 'os';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from 'fs';
+import { homedir, networkInterfaces } from 'os';
+import { join } from 'path';
+
+// ---- Atlas cache ----
+const CACHE_DIR = join(homedir(), '.glyph3d', 'cache');
+
+function atlasCacheKey(font, size) {
+    const slug = String(font).toLowerCase().replace(/\s+/g, '-');
+    return `atlas-${slug}-${size}`;
+}
+
+function handleRelayMessage(ws, msg) {
+    if (msg.relay === 'atlas.get') {
+        const key = atlasCacheKey(msg.font, msg.size);
+        const pngPath = join(CACHE_DIR, `${key}.png`);
+        const jsonPath = join(CACHE_DIR, `${key}.json`);
+
+        if (existsSync(pngPath) && existsSync(jsonPath)) {
+            const png = readFileSync(pngPath).toString('base64');
+            const descriptor = JSON.parse(readFileSync(jsonPath, 'utf8'));
+            console.log(`[relay] atlas cache hit: ${key}`);
+            sendJSON(ws, { event: 'atlas.result', hit: true, png, descriptor });
+        } else {
+            console.log(`[relay] atlas cache miss: ${key}`);
+            sendJSON(ws, { event: 'atlas.result', hit: false });
+        }
+
+    } else if (msg.relay === 'atlas.cache') {
+        mkdirSync(CACHE_DIR, { recursive: true });
+        const key = atlasCacheKey(msg.font, msg.size);
+        const pngPath = join(CACHE_DIR, `${key}.png`);
+        const jsonPath = join(CACHE_DIR, `${key}.json`);
+
+        writeFileSync(pngPath, Buffer.from(msg.png, 'base64'));
+        writeFileSync(jsonPath, JSON.stringify(msg.descriptor, null, 2));
+        console.log(`[relay] atlas cached: ${jsonPath}`);
+        sendJSON(ws, { event: 'atlas.cached', path: jsonPath });
+
+    } else if (msg.relay === 'atlas.clear') {
+        const key = atlasCacheKey(msg.font, msg.size);
+        const pngPath = join(CACHE_DIR, `${key}.png`);
+        const jsonPath = join(CACHE_DIR, `${key}.json`);
+        let removed = 0;
+        try { if (existsSync(pngPath)) { unlinkSync(pngPath); removed++; } } catch (_e) { /* */ }
+        try { if (existsSync(jsonPath)) { unlinkSync(jsonPath); removed++; } } catch (_e) { /* */ }
+        console.log(`[relay] atlas cache cleared: ${key} (${removed} files)`);
+        sendJSON(ws, { event: 'atlas.cleared', key, removed });
+
+    } else {
+        sendJSON(ws, { error: `unknown relay command: ${msg.relay}` });
+    }
+}
 
 // ---- Config ----
 let host = '0.0.0.0';
@@ -64,6 +116,17 @@ wss.on('connection', (ws, req) => {
 
     ws.on('message', async (rawBuf) => {
         const raw = rawBuf.toString();
+
+        // Check for relay-direct messages (from any client, any role)
+        try {
+            const parsed = JSON.parse(raw);
+            if (parsed.relay) {
+                handleRelayMessage(ws, parsed);
+                return;
+            }
+        } catch (e) {
+            // Not JSON — continue to normal handling
+        }
 
         // First message determines role
         if (role === null) {

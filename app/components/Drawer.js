@@ -276,6 +276,38 @@ export function settingsPanelHTML() {
                 <option value="stack">Stack</option>
             </select>
         </div>
+        <div class="setting-group setting-section-header">Atlas</div>
+        <div class="setting-group">
+            <div class="setting-label"><span>Font Family</span></div>
+            <input type="text" class="setting-select" id="atlas-font"
+                   value="Monaco, Menlo, Courier New, monospace" style="width:100%">
+        </div>
+        <div class="setting-group">
+            <div class="setting-label">
+                <span>Font Size</span>
+                <span class="setting-value" id="atlas-fontsize-value">48</span>
+            </div>
+            <input type="range" class="setting-slider" id="atlas-fontsize"
+                   min="16" max="128" step="4" value="48">
+        </div>
+        <div class="setting-group">
+            <div class="setting-label"><span>Atlas Size</span></div>
+            <select class="setting-select" id="atlas-size">
+                <option value="512">512</option>
+                <option value="1024">1024</option>
+                <option value="2048" selected>2048</option>
+                <option value="4096">4096</option>
+                <option value="8192">8192</option>
+            </select>
+        </div>
+        <div class="setting-group">
+            <div class="setting-hint">
+                Changes take effect on next load. Use the
+                <a href="/tools/bake-atlas.html" target="_blank" style="color:#7ec8e3">Bake Tool</a>
+                for extended charsets.
+            </div>
+            <button class="setting-btn" id="atlas-clear-cache">Clear Atlas Cache</button>
+        </div>
         <div class="setting-group setting-section-header">Navigation</div>
         <div class="setting-group">
             <div class="setting-label">

@@ -26,15 +26,19 @@ Protocol:
 """
 
 import asyncio
+import base64
 import json
 import socket
 import sys
+from pathlib import Path
 
 try:
     import websockets
 except ImportError:
     print("Missing 'websockets' package. Install with: pip install websockets")
     sys.exit(1)
+
+CACHE_DIR = Path.home() / '.glyph3d' / 'cache'
 
 display = None
 controllers = {}  # id -> websocket
@@ -81,6 +85,67 @@ async def notify_display(event, data=None):
         pass
 
 
+def atlas_cache_key(font, size):
+    """Build a cache key slug from font name and size."""
+    slug = str(font).lower().replace(' ', '-')
+    return f"atlas-{slug}-{size}"
+
+
+async def handle_relay_message(ws, msg):
+    """Handle relay-direct messages (atlas cache get/store)."""
+    relay = msg.get("relay")
+
+    if relay == "atlas.get":
+        key = atlas_cache_key(msg.get("font", ""), msg.get("size", 0))
+        png_path = CACHE_DIR / f"{key}.png"
+        json_path = CACHE_DIR / f"{key}.json"
+
+        if png_path.exists() and json_path.exists():
+            png_b64 = base64.b64encode(png_path.read_bytes()).decode("ascii")
+            descriptor = json.loads(json_path.read_text())
+            print(f"[relay] atlas cache hit: {key}")
+            await ws.send(json.dumps({
+                "event": "atlas.result", "hit": True,
+                "png": png_b64, "descriptor": descriptor
+            }))
+        else:
+            print(f"[relay] atlas cache miss: {key}")
+            await ws.send(json.dumps({"event": "atlas.result", "hit": False}))
+
+    elif relay == "atlas.cache":
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        key = atlas_cache_key(msg.get("font", ""), msg.get("size", 0))
+        png_path = CACHE_DIR / f"{key}.png"
+        json_path = CACHE_DIR / f"{key}.json"
+
+        png_path.write_bytes(base64.b64decode(msg.get("png", "")))
+        json_path.write_text(json.dumps(msg.get("descriptor", {}), indent=2))
+        print(f"[relay] atlas cached: {json_path}")
+        await ws.send(json.dumps({
+            "event": "atlas.cached", "path": str(json_path)
+        }))
+
+    elif relay == "atlas.clear":
+        key = atlas_cache_key(msg.get("font", ""), msg.get("size", 0))
+        png_path = CACHE_DIR / f"{key}.png"
+        json_path = CACHE_DIR / f"{key}.json"
+        removed = 0
+        for p in (png_path, json_path):
+            try:
+                if p.exists():
+                    p.unlink()
+                    removed += 1
+            except OSError:
+                pass
+        print(f"[relay] atlas cache cleared: {key} ({removed} files)")
+        await ws.send(json.dumps({
+            "event": "atlas.cleared", "key": key, "removed": removed
+        }))
+
+    else:
+        await ws.send(json.dumps({"error": f"unknown relay command: {relay}"}))
+
+
 async def handler(ws):
     global display, next_id
 
@@ -89,6 +154,15 @@ async def handler(ws):
 
     try:
         async for raw in ws:
+            # Check for relay-direct messages (from any client, any role)
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict) and 'relay' in parsed:
+                    await handle_relay_message(ws, parsed)
+                    continue
+            except (json.JSONDecodeError, TypeError):
+                pass
+
             # First message determines role
             if role is None:
                 if raw.strip() == "DISPLAY":

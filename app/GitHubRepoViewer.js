@@ -229,11 +229,36 @@ export class GitHubRepoViewer {
         this.glyphCountEl = document.getElementById('glyph-count');
         this.cameraPosEl = document.getElementById('camera-pos');
 
-        // Generate atlas
-        this.atlas = new GlyphAtlas();
-        await this.atlas.generate((current, total) => {
-            this.loading.update(current / total, `Generating glyphs: ${current}/${total}`);
-        });
+        // Atlas config from persisted settings
+        this._atlasFont = stateController.get('atlas.font', 'Monaco, Menlo, Courier New, monospace');
+        this._atlasFontSize = stateController.get('atlas.fontSize', 48);
+        this._atlasSize = stateController.get('atlas.size', 2048);
+
+        // Atlas: try relay cache, then static pre-baked asset, then generate
+        this.loading.show('Loading glyph atlas...');
+
+        // 1. Try WebSocket relay cache (local dev)
+        let _cachedAtlas = await this._tryLoadCachedAtlas();
+        if (_cachedAtlas) {
+            console.log('[atlas] Loaded from relay cache');
+            this.atlas = _cachedAtlas;
+        } else {
+            // 2. Try static pre-baked asset (remote deployment)
+            _cachedAtlas = await this._tryLoadStaticAtlas();
+            if (_cachedAtlas) {
+                console.log('[atlas] Loaded from static asset');
+                this.atlas = _cachedAtlas;
+            } else {
+                // 3. Generate at runtime (first run)
+                console.log(`[atlas] Generating ${this._atlasSize}x${this._atlasSize} (${this._atlasFont} ${this._atlasFontSize}px)...`);
+                this.atlas = new GlyphAtlas(this._atlasFont, this._atlasFontSize, this._atlasSize);
+                await this.atlas.generate((current, total) => {
+                    this.loading.update(current / total, `Generating glyphs: ${current}/${total}`);
+                });
+                // Cache for next time (fire-and-forget)
+                this._cacheAtlasToRelay();
+            }
+        }
 
         // Three.js setup
         this.scene = new THREE.Scene();
@@ -461,6 +486,127 @@ export class GitHubRepoViewer {
         } else {
             this.toastUI.show('Ready! Open the Repo tab to load a repository', 'success');
             this.drawer.openToTab('repo');
+        }
+    }
+
+    /**
+     * Try to load a pre-baked atlas from the WebSocket relay cache.
+     * Opens a temporary WebSocket connection, sends atlas.get, waits for the
+     * response, then closes cleanly. Does NOT send "DISPLAY" so it does not
+     * compete with the main CommandCenter connection.
+     *
+     * @param {number} [wsPort=8765] - Relay WebSocket port
+     * @param {number} [timeoutMs=2000] - Milliseconds before giving up
+     * @returns {Promise<GlyphAtlas|null>}
+     * @private
+     */
+    async _tryLoadCachedAtlas(wsPort = 8765, timeoutMs = 2000) {
+        return new Promise((resolve) => {
+            try {
+                const ws = new WebSocket(`ws://localhost:${wsPort}`);
+                const timer = setTimeout(() => { ws.close(); resolve(null); }, timeoutMs);
+
+                ws.onopen = () => {
+                    ws.send(JSON.stringify({
+                        relay: 'atlas.get',
+                        font: this._atlasFont,
+                        size: this._atlasSize,
+                    }));
+                };
+
+                ws.onmessage = async (e) => {
+                    clearTimeout(timer);
+                    try {
+                        const msg = JSON.parse(e.data);
+                        if (msg.event === 'atlas.result' && msg.hit) {
+                            const img = await new Promise((res, rej) => {
+                                const image = new Image();
+                                image.onload = () => res(image);
+                                image.onerror = rej;
+                                image.src = `data:image/png;base64,${msg.png}`;
+                            });
+                            const atlas = GlyphAtlas.fromPrebuilt(msg.descriptor, img);
+                            ws.close();
+                            resolve(atlas);
+                        } else {
+                            ws.close();
+                            resolve(null);
+                        }
+                    } catch (_err) {
+                        ws.close();
+                        resolve(null);
+                    }
+                };
+
+                ws.onerror = () => { clearTimeout(timer); resolve(null); };
+            } catch (_e) {
+                resolve(null);
+            }
+        });
+    }
+
+    /**
+     * Try to load a pre-baked atlas from static HTTP assets shipped with the
+     * deployment. Expects `/assets/atlas-prebaked.png` and
+     * `/assets/atlas-prebaked.json` to be present with HTTP 200.
+     *
+     * @returns {Promise<GlyphAtlas|null>}
+     * @private
+     */
+    async _tryLoadStaticAtlas() {
+        try {
+            const [pngRes, jsonRes] = await Promise.all([
+                fetch('/assets/atlas-prebaked.png'),
+                fetch('/assets/atlas-prebaked.json'),
+            ]);
+            if (!pngRes.ok || !jsonRes.ok) return null;
+
+            const [blob, descriptor] = await Promise.all([
+                pngRes.blob(),
+                jsonRes.json(),
+            ]);
+
+            const img = await new Promise((res, rej) => {
+                const image = new Image();
+                image.onload = () => res(image);
+                image.onerror = rej;
+                image.src = URL.createObjectURL(blob);
+            });
+
+            return GlyphAtlas.fromPrebuilt(descriptor, img);
+        } catch (_e) {
+            return null;
+        }
+    }
+
+    /**
+     * Fire-and-forget: send the freshly generated atlas to the relay so it can
+     * be served on the next startup. Opens a temporary WebSocket, sends
+     * atlas.cache, then closes after a short delay. Errors are swallowed —
+     * the relay may not be running in all environments.
+     *
+     * @param {number} [wsPort=8765] - Relay WebSocket port
+     * @private
+     */
+    _cacheAtlasToRelay(wsPort = 8765) {
+        try {
+            const { image: dataUrl, descriptor } = this.atlas.exportAtlas();
+            const png = dataUrl.replace(/^data:image\/png;base64,/, '');
+
+            const ws = new WebSocket(`ws://localhost:${wsPort}`);
+            ws.onopen = () => {
+                ws.send(JSON.stringify({
+                    relay: 'atlas.cache',
+                    font: descriptor.fontFamily || 'Monaco, Menlo, Courier New, monospace',
+                    size: descriptor.textureWidth || 2048,
+                    png,
+                    descriptor,
+                }));
+                setTimeout(() => ws.close(), 500);
+            };
+            ws.onerror = () => {}; // Relay may not be running — silently ignore
+        } catch (_e) {
+            // Atlas caching is optional — do not propagate errors
         }
     }
 
@@ -699,6 +845,53 @@ export class GitHubRepoViewer {
         }
 
         // cam-speed, reset-camera, fit-all listeners handled by CameraController
+
+        // ---- Atlas settings ----
+        const atlasFontInput = document.getElementById('atlas-font');
+        const atlasFontSizeSlider = document.getElementById('atlas-fontsize');
+        const atlasFontSizeValue = document.getElementById('atlas-fontsize-value');
+        const atlasSizeSelect = document.getElementById('atlas-size');
+        const atlasClearCacheBtn = document.getElementById('atlas-clear-cache');
+
+        if (atlasFontInput) {
+            atlasFontInput.value = this._atlasFont;
+            atlasFontInput.addEventListener('change', (e) => {
+                stateController.set('atlas.font', e.target.value);
+            });
+        }
+        if (atlasFontSizeSlider) {
+            atlasFontSizeSlider.value = this._atlasFontSize;
+            atlasFontSizeValue.textContent = this._atlasFontSize;
+            atlasFontSizeSlider.addEventListener('input', (e) => {
+                const v = parseInt(e.target.value, 10);
+                atlasFontSizeValue.textContent = v;
+                stateController.set('atlas.fontSize', v);
+            });
+        }
+        if (atlasSizeSelect) {
+            atlasSizeSelect.value = this._atlasSize;
+            atlasSizeSelect.addEventListener('change', (e) => {
+                stateController.set('atlas.size', parseInt(e.target.value, 10));
+            });
+        }
+        if (atlasClearCacheBtn) {
+            atlasClearCacheBtn.addEventListener('click', () => {
+                // Tell relay to delete the cached atlas for current settings
+                try {
+                    const ws = new WebSocket(`ws://localhost:8765`);
+                    ws.onopen = () => {
+                        ws.send(JSON.stringify({
+                            relay: 'atlas.clear',
+                            font: stateController.get('atlas.font', this._atlasFont),
+                            size: stateController.get('atlas.size', this._atlasSize),
+                        }));
+                        setTimeout(() => ws.close(), 300);
+                    };
+                    ws.onerror = () => {};
+                } catch (_e) { /* relay may not be running */ }
+                console.log('[atlas] Cache cleared — reload to regenerate');
+            });
+        }
 
         // ---- File type whitelist ----
         const extTextarea = document.getElementById('ext-whitelist');
