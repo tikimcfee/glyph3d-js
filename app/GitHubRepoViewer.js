@@ -259,6 +259,9 @@ export class GitHubRepoViewer {
                 this._cacheAtlasToRelay();
             }
         }
+        // Track atlas version at load time — if ensureGraphemes adds glyphs
+        // during file loading, we'll re-cache the expanded atlas afterward.
+        this._atlasVersionAtLoad = this.atlas.uvMapVersion;
 
         // Three.js setup
         this.scene = new THREE.Scene();
@@ -1451,6 +1454,14 @@ export class GitHubRepoViewer {
                 console.debug(`[AFTER FRAME] Wall time: ${afterFrame.toFixed(0)}ms`);
             });
 
+            // Re-cache atlas if ensureGraphemes added glyphs during file loading.
+            if (this.atlas.uvMapVersion !== this._atlasVersionAtLoad) {
+                const added = this.atlas.uvMapVersion - this._atlasVersionAtLoad;
+                console.log(`[atlas] Re-caching: ${added} new grapheme batches discovered during load`);
+                this._cacheAtlasToRelay();
+                this._atlasVersionAtLoad = this.atlas.uvMapVersion;
+            }
+
             this.loading.hide();
 
             console.debug('Adapter stats:', this.repoAdapter.getStats());
@@ -1651,6 +1662,15 @@ export class GitHubRepoViewer {
 
             const totalTime = performance.now() - totalStart;
             console.debug(`[TOTAL] All phases: ${totalTime.toFixed(0)}ms`);
+
+            // Re-cache atlas if ensureGraphemes added glyphs during file loading.
+            // Next startup will load the full charset without any runtime packing.
+            if (this.atlas.uvMapVersion !== this._atlasVersionAtLoad) {
+                const added = this.atlas.uvMapVersion - this._atlasVersionAtLoad;
+                console.log(`[atlas] Re-caching: ${added} new grapheme batches discovered during load`);
+                this._cacheAtlasToRelay();
+                this._atlasVersionAtLoad = this.atlas.uvMapVersion;
+            }
 
             this.loading.hide();
             this.toastUI.show(`Loaded ${this.grids.length} files from ${this._localRoot}`, 'success');

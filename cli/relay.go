@@ -376,6 +376,44 @@ func RunRelay(host string, port int, fsHandler *FSHandler) error {
 	return http.ListenAndServe(addr, mux)
 }
 
+// startHTTPServer serves static files from root on the given port.
+// Replaces `python3 -m http.server`. Sets correct MIME types for ES modules.
+func startHTTPServer(host string, port int, root string) {
+	mux := http.NewServeMux()
+
+	fileServer := http.FileServer(http.Dir(root))
+
+	// Wrap to set correct Content-Type for .mjs and .js files (ES modules need application/javascript)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		switch {
+		case strings.HasSuffix(path, ".js"), strings.HasSuffix(path, ".mjs"):
+			w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		case strings.HasSuffix(path, ".css"):
+			w.Header().Set("Content-Type", "text/css; charset=utf-8")
+		case strings.HasSuffix(path, ".json"):
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		case strings.HasSuffix(path, ".wasm"):
+			w.Header().Set("Content-Type", "application/wasm")
+		case strings.HasSuffix(path, ".glsl"):
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		}
+		fileServer.ServeHTTP(w, r)
+	})
+
+	addr := fmt.Sprintf("%s:%d", host, port)
+	log.Printf("[http] Serving %s on http://localhost:%d", root, port)
+	if host == "0.0.0.0" {
+		for _, a := range getLANAddresses() {
+			log.Printf("[http]   http://%s:%d", a, port)
+		}
+	}
+
+	if err := http.ListenAndServe(addr, mux); err != nil {
+		log.Printf("[http] WARNING: %v (static file serving disabled, WebSocket relay still running)", err)
+	}
+}
+
 func getLANAddresses() []string {
 	var addrs []string
 	ifaces, err := net.Interfaces()
