@@ -9,9 +9,9 @@ glyph3d-js is a GPU-instanced 3D text rendering library for Three.js. It renders
 - **Language**: JavaScript (ES Modules, `"type": "module"`)
 - **Runtime**: Browser (WebGL 2, Web Workers, Canvas 2D)
 - **Framework**: Three.js (peer dependency, >=0.150.0)
-- **Build**: None — native ES modules served directly
-- **Server**: `python3 -m http.server 8000` via `npm run serve`
-- **Package Manager**: npm
+- **Build**: None for JS — native ES modules served directly. Go binary: `make build`
+- **Server**: `glyph3d-cli serve` — single Go binary (HTTP + WebSocket + embedded assets)
+- **Package Manager**: npm (dev only — no runtime npm dependencies)
 
 ## Project Structure
 
@@ -77,8 +77,6 @@ app/                           # IDE application (ivanlugo.dev/ide)
 ├── IDEShell.js                # IDE chrome orchestrator
 ├── GitHubRepoViewer.js        # Main viewer application
 ├── StatePersistence.js        # localStorage state save/restore
-├── ws-relay.mjs               # Node.js WebSocket relay server
-├── ws-relay.py                # Python WebSocket relay server
 ├── components/                # App-level UI components
 │   ├── AppShell.js
 │   ├── CommandBar.js
@@ -92,9 +90,19 @@ app/                           # IDE application (ivanlugo.dev/ide)
 │       ├── index.js
 │       ├── highlightCommands.js  # Glyph-level highlight (char, range, line, token)
 │       └── ...Commands.js     # ~17 command handler files
-└── cli/                       # Node.js CLI client
-    ├── glyph-cli.mjs
-    └── ...
+└── cli/
+    └── CodeTour.mjs           # Standalone tour library
+
+cli/                           # Go single-binary server + CLI
+├── main.go                    # Entry point: serve, hook, screenshot, REPL, one-shot
+├── relay.go                   # WebSocket relay + unified HTTP server (RunServer)
+├── fs.go                      # Sandboxed filesystem JSON-RPC handler
+├── hook.go                    # Claude Code hook integration
+├── embed.go                   # go:embed directive — bakes web assets into binary
+├── go.mod
+└── .gitignore                 # Ignores web/ staging dir
+
+Makefile                       # Build system: make, make all, make deploy, make clean
 
 examples/
 ├── picking-test/              # GPU picking + highlight system test page
@@ -107,6 +115,16 @@ examples/
 ```
 
 ## Key Architecture Concepts
+
+### Single-Binary Server (cli/)
+- `glyph3d-cli serve` runs a unified HTTP + WebSocket server on one port
+- All static assets (src/, app/, examples/) are embedded via Go `//go:embed` at build time
+- `make build` copies assets into `cli/web/`, Go bakes them in, binary is self-contained (~8MB)
+- WebSocket upgrade requests route to the relay; regular HTTP serves embedded (or disk) files
+- Filesystem JSON-RPC (`fs/readFile`, `fs/listTree`, etc.) is always on, sandboxed to the project path
+- `--local` flag swaps embedded assets for disk serving (IDE development only)
+- Cross-compilation via `make all` produces static binaries for 5 platform targets
+- `WebSocketBridge` auto-detects the server port from `window.location` (no hardcoded port)
 
 ### Rendering Pipeline
 1. **GlyphAtlas** generates a font texture atlas using Canvas 2D with shelf-packing
@@ -163,17 +181,45 @@ Operations like `addText()` are queued. Nothing hits the GPU until `flush()` is 
 
 ## Development Commands
 
+### Single-binary build (Go CLI)
+
 ```bash
-npm install          # Install dependencies (pulls three.js as devDependency)
-npm run serve        # Start python3 HTTP server on port 8000
+make                 # Build glyph3d-cli for current platform (~8MB)
+make all             # Cross-compile: Linux/macOS/Windows × amd64/arm64
+make deploy          # Build linux-amd64 + show scp command for your-server
+make clean           # Remove build artifacts
 ```
 
-Then open:
-- `http://localhost:8000/app/ide.html`
-- `http://localhost:8000/app/viewer.html`
-- `http://localhost:8000/examples/word-wall/`
+### Running the server
 
-There is no build step, test runner, or linter configured. Source files are served as-is.
+```bash
+./glyph3d-cli serve                    # Browse cwd, embedded IDE app, port 8080
+./glyph3d-cli serve ~/some-project     # Browse a specific project
+./glyph3d-cli serve --local            # IDE dev: serve app from disk (live-edit JS)
+./glyph3d-cli serve --port 3000        # Custom port
+./glyph3d-cli serve --relay-only       # WebSocket relay only (legacy)
+```
+
+Then open: `http://localhost:8080/app/ide.html`
+
+### Other CLI modes
+
+```bash
+./glyph3d-cli grid.list                # One-shot command
+./glyph3d-cli                          # Interactive REPL
+echo "grid.list" | ./glyph3d-cli      # Pipe mode
+./glyph3d-cli hook                     # Claude Code hook (called by settings.json)
+./glyph3d-cli screenshot -o snap.png   # Capture 3D canvas
+```
+
+### JS development (no Go build needed)
+
+```bash
+npm install          # Install three.js devDependency
+./glyph3d-cli serve --local            # Serve from disk — edits show on refresh
+```
+
+There is no JS build step, test runner, or linter configured. Source files are served as-is.
 
 ## Code Conventions
 
@@ -231,7 +277,8 @@ Add functions in `src/workers/builders/`. These must be pure functions with no D
 
 ## Deployment
 
-- Production: `ivanlugo.dev/ide` served by Caddy from `/srv/www/g3d/app/`
+- Production: `ivanlugo.dev/ide`
 - Server: the host `your-server` (0.0.0.0), SSH via `ssh your-server`
-- Caddy config: `/etc/caddy/Caddyfile`
-- Deploy: `git pull` on server, Caddy serves static files
+- Single-binary deploy: `make deploy` → `scp dist/glyph3d-cli-linux-amd64 your-server:/usr/local/bin/glyph3d-cli`
+- Run: `glyph3d-cli serve` — serves embedded IDE app + WebSocket relay, no external dependencies
+- Caddy reverse-proxies to the binary (config: `/etc/caddy/Caddyfile`)
