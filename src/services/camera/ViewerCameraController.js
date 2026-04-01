@@ -5,7 +5,7 @@
  * WASD translates in camera-relative directions.
  *
  * All user-adjustable settings are persisted to localStorage under
- * the 'glyph3d-camera-settings' key.
+ * namespaced g3d.camera.* keys via StateController.
  *
  * Receives a SceneContext for shared references (camera, canvas, etc.).
  * Emits 'camera-focus-changed' window events for tree UI sync.
@@ -13,32 +13,17 @@
 
 import { primaryMod, secondaryMod } from '../utils/platform.js';
 import { getCanvasViewportSize } from '../../core/canvasSize.js';
+import { stateController } from '../state/StateController.js';
 
-const STORAGE_KEY = 'glyph3d-camera-settings';
-
-const DEFAULTS = {
+const CAMERA_DEFAULTS = {
     cameraSpeed: 100,
     dragSensitivity: 1.0,
     scrollSensitivity: 1.0,
     invertDragX: false,
     invertDragY: false,
     invertScroll: false,
-    dynamicSpeed: true,  // scale pan/WASD/zoom by camera distance
+    dynamicSpeed: true,
 };
-
-function loadSettings() {
-    try {
-        const raw = localStorage.getItem(STORAGE_KEY);
-        if (raw) return { ...DEFAULTS, ...JSON.parse(raw) };
-    } catch { /* ignore */ }
-    return { ...DEFAULTS };
-}
-
-function saveSettings(settings) {
-    try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
-    } catch { /* ignore */ }
-}
 
 export class ViewerCameraController {
     /**
@@ -48,8 +33,16 @@ export class ViewerCameraController {
         this.ctx = ctx;
         this.THREE = ctx.THREE;
 
-        // Load persisted settings
-        this.settings = loadSettings();
+        // Load persisted settings (per-field from StateController)
+        this.settings = {
+            cameraSpeed:       stateController.get('camera.speed', CAMERA_DEFAULTS.cameraSpeed),
+            dragSensitivity:   stateController.get('camera.dragSensitivity', CAMERA_DEFAULTS.dragSensitivity),
+            scrollSensitivity: stateController.get('camera.scrollSensitivity', CAMERA_DEFAULTS.scrollSensitivity),
+            invertDragX:       stateController.get('camera.invertDragX', CAMERA_DEFAULTS.invertDragX),
+            invertDragY:       stateController.get('camera.invertDragY', CAMERA_DEFAULTS.invertDragY),
+            invertScroll:      stateController.get('camera.invertScroll', CAMERA_DEFAULTS.invertScroll),
+            dynamicSpeed:      stateController.get('camera.dynamicSpeed', CAMERA_DEFAULTS.dynamicSpeed),
+        };
 
         // Movement state
         this.keys = {};
@@ -303,11 +296,18 @@ export class ViewerCameraController {
     }
 
     /**
-     * Save current settings to localStorage.
+     * Save current settings to localStorage (per-field).
      * @private
      */
     _persistSettings() {
-        saveSettings(this.settings);
+        const s = this.settings;
+        stateController.set('camera.speed', s.cameraSpeed);
+        stateController.set('camera.dragSensitivity', s.dragSensitivity);
+        stateController.set('camera.scrollSensitivity', s.scrollSensitivity);
+        stateController.set('camera.invertDragX', s.invertDragX);
+        stateController.set('camera.invertDragY', s.invertDragY);
+        stateController.set('camera.invertScroll', s.invertScroll);
+        stateController.set('camera.dynamicSpeed', s.dynamicSpeed);
     }
 
     /**
@@ -563,7 +563,7 @@ export class ViewerCameraController {
      * Reset all settings to defaults and update UI.
      */
     resetSettings() {
-        this.settings = { ...DEFAULTS };
+        this.settings = { ...CAMERA_DEFAULTS };
         this.cameraSpeed = this.settings.cameraSpeed;
         this._persistSettings();
         this._restoreUI();

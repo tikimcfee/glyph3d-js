@@ -22,6 +22,8 @@
  * Worker context: this file must not import DOM APIs or Three.js.
  * Grapheme iteration uses Intl.Segmenter (Baseline 2024) with a codePointAt
  * fallback — both work on DedicatedWorkerGlobalScope.
+ *
+ * Buffer contract type reference: ../../core/types.js (GlyphBufferSet, GlyphBufferItemMeta)
  */
 
 import { iterGraphemes } from '../../utils/grapheme.js';
@@ -56,7 +58,10 @@ function countGlyphs(text) {
  * @param {{r,g,b}} input.color
  * @param {number} [input.scale=1.0]
  * @param {number} [input.groupId=0]
- * @returns {{positions: Float32Array, sizes: Float32Array, codepoints: Float32Array, colors: Float32Array, groupIds: Float32Array, count: number, bounds: Object|null, lineSlotOffsets: number[]}}
+ * @returns {import('../../core/types.js').GlyphBufferSet & {lineSlotOffsets: number[]}}
+ *   A GlyphBufferSet with an additional top-level `lineSlotOffsets` (line index → first buffer slot
+ *   on that line) and `count` for the number of populated glyph slots. The `itemMeta` field is absent
+ *   from the single-item builder; use buildBatchBuffers() when per-item metadata is needed.
  *   `codepoints` contains one numeric DataTexture ID per glyph for GPU-side UV lookup.
  */
 export function buildGlyphBuffers(input) {
@@ -255,8 +260,10 @@ function applyPagination(positions, startIdx, endIdx, origin, metrics) {
  *
  * @param {Array<{text, position, color?, scale?}>} items
  * @param {Object} shared - {metrics, uvMap, glyphWidths, defaultColor}
- * @returns {{positions: Float32Array, sizes: Float32Array, codepoints: Float32Array, colors: Float32Array, groupIds: Float32Array, count: number, bounds: Object|null, itemMeta: Array<{bufferStartIndex: number, glyphCount: number, bounds: Object|null}>}}
+ * @returns {import('../../core/types.js').GlyphBufferSet}
  *   `codepoints` contains one numeric DataTexture ID per glyph for GPU-side UV lookup via atlasMapTexture.
+ *   Each entry in `itemMeta` is a GlyphBufferItemMeta with bufferStartIndex, glyphCount, bounds, and
+ *   lineSlotOffsets (plain number[], one entry per logical line within that item).
  */
 export function buildBatchBuffers(items, shared) {
     const { metrics, uvMap, glyphWidths, defaultColor } = shared;

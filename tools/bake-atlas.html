@@ -1,0 +1,721 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Bake Glyph Atlas</title>
+<style>
+    body { font-family: system-ui; max-width: 800px; margin: 2rem auto; background: #1a1a2e; color: #e0e0e0; }
+    h1 { font-size: 1.4rem; }
+    h2 { font-size: 1.1rem; margin: 1.2rem 0 0.4rem; color: #ccc; }
+    label { display: block; margin: 0.5rem 0 0.2rem; font-size: 0.9rem; color: #aaa; }
+    input, select { background: #16213e; color: #e0e0e0; border: 1px solid #333; padding: 0.4rem; border-radius: 4px; }
+    select { width: 320px; }
+    button { background: #0f3460; color: #e0e0e0; border: none; padding: 0.6rem 1.2rem; border-radius: 4px; cursor: pointer; margin-top: 1rem; font-size: 1rem; }
+    button:hover { background: #1a5276; }
+    button:disabled { opacity: 0.4; cursor: default; }
+    #status { margin-top: 1rem; font-size: 0.9rem; white-space: pre-wrap; color: #7ec8e3; }
+    #preview { margin-top: 1rem; max-width: 100%; border: 1px solid #333; image-rendering: pixelated; }
+    .row { display: flex; gap: 1rem; align-items: end; flex-wrap: wrap; }
+    .font-preview { font-size: 14px; color: #888; margin-top: 0.2rem; }
+    #fontSample { display: inline-block; margin-left: 0.5rem; color: #e0e0e0; }
+
+    /* Charset groups */
+    .charset-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; margin: 0.5rem 0; }
+    .charset-group { background: #16213e; border: 1px solid #333; border-radius: 6px; padding: 0.6rem 0.8rem; }
+    .charset-group label { display: flex; align-items: center; gap: 0.5rem; margin: 0; cursor: pointer; font-size: 0.9rem; color: #e0e0e0; }
+    .charset-group input[type="checkbox"] { width: 16px; height: 16px; accent-color: #0f3460; }
+    .charset-count { font-size: 0.75rem; color: #666; margin-left: auto; }
+    .charset-preview { font-size: 0.8rem; color: #7ec8e3; margin-top: 0.3rem; word-break: break-all; line-height: 1.4; max-height: 2.4em; overflow: hidden; }
+    .charset-group.edge-case { border-color: #5a3; }
+    .charset-group.edge-case .charset-preview { color: #8d8; }
+    #totalCount { font-size: 0.85rem; color: #aaa; margin-top: 0.3rem; }
+</style>
+</head>
+<body>
+<h1>Bake Glyph Atlas</h1>
+<p>Generates a pre-baked atlas PNG + JSON descriptor. No build tools required.</p>
+
+<div class="row">
+    <div>
+        <label for="size">Atlas size (px) <span id="gpuLimit" style="font-size:0.75rem;color:#666"></span></label>
+        <select id="size"></select>
+    </div>
+    <div>
+        <label for="fontSize">Font size (px)</label>
+        <input id="fontSize" type="number" value="48" min="8" max="128" style="width:80px">
+    </div>
+</div>
+
+<div style="margin-top: 0.5rem">
+    <label for="font">Font</label>
+    <select id="font" style="width:420px"></select>
+    <div class="font-preview">
+        Sample: <span id="fontSample">AaBbCc 0123 {}[]() => // #include</span>
+    </div>
+</div>
+
+<h2>Character Sets</h2>
+<div style="margin-bottom: 0.3rem; font-size: 0.85rem; color: #888;">
+    Base charset (ASCII, Latin-1, box drawing, arrows, common symbols) is always included.
+    <span id="totalCount"></span>
+</div>
+<div class="charset-grid" id="charsetGrid"></div>
+
+<button id="bake">Bake Atlas</button>
+<div id="status"></div>
+<canvas id="preview" style="display:none"></canvas>
+
+<script type="module">
+import GlyphAtlas from '../src/GlyphAtlas.js';
+
+const statusEl = document.getElementById('status');
+const previewEl = document.getElementById('preview');
+const bakeBtn = document.getElementById('bake');
+const fontSelect = document.getElementById('font');
+const fontSample = document.getElementById('fontSample');
+const charsetGrid = document.getElementById('charsetGrid');
+const totalCountEl = document.getElementById('totalCount');
+
+function log(msg) { statusEl.textContent += msg + '\n'; }
+
+// ---- GPU max texture size detection ----
+const sizeSelect = document.getElementById('size');
+const gpuLimitEl = document.getElementById('gpuLimit');
+
+{
+    const gl = document.createElement('canvas').getContext('webgl2')
+        || document.createElement('canvas').getContext('webgl');
+    const maxSize = gl ? gl.getParameter(gl.MAX_TEXTURE_SIZE) : 4096;
+    const renderer = gl?.getExtension('WEBGL_debug_renderer_info');
+    const gpu = renderer ? gl.getParameter(renderer.UNMASKED_RENDERER_WEBGL) : 'unknown';
+    gpuLimitEl.textContent = `(GPU max: ${maxSize}, ${gpu})`;
+
+    const sizes = [512, 1024, 2048, 4096, 8192, 16384];
+    for (const s of sizes) {
+        if (s > maxSize) break;
+        const opt = document.createElement('option');
+        opt.value = s;
+        opt.textContent = s;
+        if (s === 2048) opt.selected = true;
+        sizeSelect.appendChild(opt);
+    }
+}
+
+// ---- Charset group definitions ----
+// Each group has: id, label, description, and either a codepoint range or explicit grapheme list.
+// Groups with `graphemes` use ensureGraphemes() (multi-codepoint support).
+// Groups with `ranges` get appended to the charset before generate().
+
+function range(start, end) {
+    const out = [];
+    for (let i = start; i <= end; i++) out.push(i);
+    return out;
+}
+
+const CHARSET_GROUPS = [
+    // ---- Scripts ----
+    {
+        id: 'greek', label: 'Greek', checked: true,
+        ranges: [range(0x0391, 0x03C9)], // Α-ω (uppercase + lowercase, skips gaps)
+        preview: 'ΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩαβγδεζηθικλμνξοπρστυφχψω',
+    },
+    {
+        id: 'cyrillic', label: 'Cyrillic',
+        ranges: [range(0x0410, 0x044F)], // А-я
+        preview: 'АБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдежзийклмнопрстуфхцчшщъыьэюя',
+    },
+    {
+        id: 'cjk', label: 'CJK Common (top 100)',
+        ranges: [
+            [0x4E00, 0x4E8C, 0x4E09, 0x56DB, 0x4E94, 0x516D, 0x4E03, 0x516B, 0x4E5D, 0x5341, // 一二三四五六七八九十
+             0x767E, 0x5343, 0x4E07, 0x4EBF, 0x5927, 0x5C0F, 0x591A, 0x5C11, 0x4E0A, 0x4E0B, // 百千万亿大小多少上下
+             0x5DE6, 0x53F3, 0x524D, 0x540E, 0x4E2D, 0x5916, 0x5185, 0x65B0, 0x65E7, 0x597D, // 左右前后中外内新旧好
+             0x4EBA, 0x5973, 0x7537, 0x5B50, 0x5BB6, 0x56FD, 0x5E74, 0x6708, 0x65E5, 0x65F6, // 人女男子家国年月日时
+             0x5929, 0x5730, 0x6C34, 0x706B, 0x6728, 0x91D1, 0x571F, 0x98CE, 0x96E8, 0x96EA, // 天地水火木金土风雨雪
+             0x5C71, 0x6CB3, 0x6D77, 0x8DEF, 0x8F66, 0x95E8, 0x4E66, 0x8BED, 0x5B57, 0x753B, // 山河海路车门书语字画
+             0x98DF, 0x996E, 0x8336, 0x9152, 0x7C73, 0x9762, 0x8089, 0x9C7C, 0x83DC, 0x679C, // 食饮茶酒米面肉鱼菜果
+             0x7231, 0x5FC3, 0x624B, 0x773C, 0x8033, 0x53E3, 0x5934, 0x8EAB, 0x8DB3, 0x9053, // 爱心手眼耳口头身足道
+             0x767D, 0x9ED1, 0x7EA2, 0x84DD, 0x7EFF, 0x9EC4, 0x5149, 0x6697, 0x660E, 0x6B7B, // 白黑红蓝绿黄光暗明死
+             0x751F, 0x957F, 0x77ED, 0x9AD8, 0x4F4E, 0x8FDC, 0x8FD1, 0x5FEB, 0x6162, 0x529B, // 生长短高低远近快慢力
+            ],
+        ],
+        preview: '一二三四五六七八九十百千万人天地水火木金',
+    },
+
+    // ---- Symbols & Operators ----
+    {
+        id: 'math', label: 'Mathematical Operators', checked: true,
+        ranges: [range(0x2200, 0x22FF)],
+        preview: '∀∁∂∃∄∅∆∇∈∉∊∋∌∍∎∏∐∑−∓∔∕∖∗∘∙√∛∜∝∞∟≈≠≡≤≥',
+    },
+    {
+        id: 'misc-math', label: 'Supplemental Math',
+        ranges: [range(0x2A00, 0x2AFF)],
+        preview: '⨀⨁⨂⨃⨄⨅⨆⨇⨈⨉⨊⨋⨌⨍⨎⨏⨐⨑',
+    },
+    {
+        id: 'currency', label: 'Currency Symbols', checked: true,
+        ranges: [range(0x20A0, 0x20CF)],
+        preview: '₠₡₢₣₤₥₦₧₨₩₪₫€₭₮₯₰₱₲₳₴₵₶₷₸₹₺₻₼₽₾₿',
+    },
+    {
+        id: 'letterlike', label: 'Letterlike Symbols', checked: true,
+        ranges: [range(0x2100, 0x214F)],
+        preview: '℀℁ℂ℃℄℅℆ℇ℈℉ℊℋℌℍℎℏℐℑℒℓ℔ℕ№℗℘ℙℚℛℜℝ℞℟℠℡™℣ℤ',
+    },
+    {
+        id: 'number-forms', label: 'Number Forms', checked: true,
+        ranges: [range(0x2150, 0x218F)],
+        preview: '⅐⅑⅒⅓⅔⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞⅟ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫⅬⅭⅮⅯⅰⅱⅲⅳⅴⅵⅶⅷⅸⅹ',
+    },
+    {
+        id: 'misc-technical', label: 'Misc Technical', checked: true,
+        ranges: [range(0x2300, 0x23FF)],
+        preview: '⌀⌁⌂⌃⌄⌅⌆⌇⌈⌉⌊⌋⌘⌥⌦⌧⌨⌫⌬⏎⏏⏐⏑⏒⏓⏔⏕⏚⏛⏜⏝',
+    },
+    {
+        id: 'control-pictures', label: 'Control Pictures',
+        ranges: [range(0x2400, 0x2426)],
+        preview: '␀␁␂␃␄␅␆␇␈␉␊␋␌␍␎␏␐␑␒␓␔␕␖␗␘␙␚␛␜␝␞␟␠␡␢␣␤␥␦',
+    },
+    {
+        id: 'geometric', label: 'Geometric Shapes Extended',
+        ranges: [range(0x25A0, 0x25FF), range(0x2B00, 0x2B73)],
+        preview: '■□▢▣▤▥▦▧▨▩▪▫▬▭▮▯▰▱▲△▴▵▶▷▸▹►▻▼▽▾▿◀◁◂◃◄◅◆◇◈◉◊○◌◍◎●',
+    },
+    {
+        id: 'misc-symbols', label: 'Misc Symbols', checked: true,
+        ranges: [range(0x2600, 0x26FF)],
+        preview: '☀☁☂☃☄★☆☇☈☉☊☋☌☍☎☏☐☑☒☓☔☕☖☗☘☙☚☛☜☝☞☟☠☡☢☣☤☥☦☮☯♠♣♥♦♩♪♫♬♭♮♯',
+    },
+    {
+        id: 'dingbats', label: 'Dingbats', checked: true,
+        ranges: [range(0x2700, 0x27BF)],
+        preview: '✁✂✃✄✅✆✇✈✉✊✋✌✍✎✏✐✑✒✓✔✕✖✗✘✙✚✛✜✝✞✟✠✡✢✣✤✥✦✧✨✩✪✫✬✭✮✯❤❥❦❧❶❷❸❹❺',
+    },
+    {
+        id: 'braille', label: 'Braille Patterns',
+        ranges: [range(0x2800, 0x28FF)],
+        preview: '⠀⠁⠂⠃⠄⠅⠆⠇⠈⠉⠊⠋⠌⠍⠎⠏⠐⠑⠒⠓⠔⠕⠖⠗⠘⠙⠚⠛⠜⠝⠞⠟⠠⠡⠢⠣⠤⠥⠦⠧⠨⠩⠪⠫⠬⠭⠮⠯',
+    },
+    {
+        id: 'superscript', label: 'Super/Subscripts',
+        ranges: [range(0x2070, 0x209F)],
+        preview: '⁰ⁱ⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿ₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₐₑₒₓₔ',
+    },
+
+    // ---- Emoji (single codepoint — render as bitmap in the font) ----
+    {
+        id: 'emoji-common', label: 'Common Emoji',
+        graphemes: [
+            '😀','😃','😄','😁','😆','😅','🤣','😂','🙂','🙃','😉','😊','😇','🥰','😍','🤩',
+            '😘','😗','😚','😙','🥲','😋','😛','😜','🤪','😝','🤑','🤗','🤭','🤫','🤔','🫡',
+            '🤐','🤨','😐','😑','😶','🫥','😏','😒','🙄','😬','🤥','😌','😔','😪','🤤','😴',
+            '😷','🤒','🤕','🤢','🤮','🥵','🥶','🥴','😵','🤯','🤠','🥳','🥸','😎','🤓','🧐',
+            '😕','🫤','😟','🙁','😮','😯','😲','😳','🥺','🥹','😦','😧','😨','😰','😥','😢',
+            '😭','😱','😖','😣','😞','😓','😩','😫','🥱','😤','😡','😠','🤬','👋','👍','👎',
+            '👏','🙌','🤝','🙏','💪','🦾','🫶','❤️','🧡','💛','💚','💙','💜','🖤','🤍','🤎',
+            '💔','❣️','💕','💞','💓','💗','💖','💘','💝','💟',
+            '🔥','💡','⭐','🌟','✨','⚡','💥','💫','🎉','🎊',
+            '🎯','🎪','🎭','🎨','🎬','🎤','🎧','🎵','🎶','🎹',
+            '🚀','🛸','🌍','🌎','🌏','🌙','☀️','⛅','🌈','🌊',
+            '🍎','🍊','🍋','🍇','🍉','🍓','🫐','🍑','🥝','🍌',
+            '🐶','🐱','🐭','🐹','🐰','🦊','🐻','🐼','🐨','🐯',
+            '💻','🖥️','⌨️','🖱️','📱','📲','💾','💿','📀','🔧',
+            '📁','📂','📄','📝','📎','📌','📍','🔍','🔎','🔒',
+            '✅','❌','⚠️','🚫','♻️','💯','🆗','🆕','🔴','🟢',
+            '🟡','🔵','⚪','⚫','🟤','🟠','🟣','🟥','🟧','🟨',
+        ],
+        preview: '😀😎🔥💡🚀❤️✨🎉💻📁✅❌⚠️🟢🔴',
+    },
+
+    {
+        id: 'emoji-claude', label: 'Claude & Code', checked: true,
+        graphemes: [
+            // Thinking & reasoning
+            '🤔','💭','🧠','💡','✨','🔮','🪄','🫧','💬','🗯️',
+            '🧩','🎯','🔬','🔭','🧪','⚗️','🧫','🧬','📐','📏',
+            // Reading & writing
+            '📖','📚','📝','✏️','🖊️','📜','📃','🗒️','📋','🏷️',
+            // Code & terminal
+            '💻','🖥️','⌨️','🖱️','💾','📟','🔌','🧮','⚙️','🔩',
+            '🛠️','🔧','🪛','🔨','⛏️','🪚',
+            // Data & search
+            '🔍','🔎','📊','📈','📉','🗂️','🗃️','🗄️','💿','📀',
+            // Network & communication
+            '🌐','📡','🔗','🔀','🔁','🔂','📤','📥','📨','📩',
+            // Status & progress
+            '✅','❌','⚠️','🚫','🔴','🟡','🟢','🔵','⏳','⏱️',
+            '🏁','🚧','🚦','🎚️','📶','🔋',
+            // Security & access
+            '🔒','🔓','🔑','🗝️','🛡️','🔐',
+            // Nature of the work
+            '🌱','🌿','🪴','🌳','🌲','🍃','🌊','🏔️','🌅','🌄',
+            // Celebration & appreciation
+            '🎉','🎊','🥳','🎆','🎇','🏆','🥇','🎖️','🌟','💫',
+            '🫶','🤝','👏','🙏','💪','🦾',
+            // Abstract & meta
+            '♾️','🔄','⚡','🌀','🕳️','🪞','🔲','🔳','◻️','◼️',
+            '▪️','▫️','🏴','🏳️',
+            // Animals (because why not)
+            '🦉','🐙','🦑','🐝','🦋','🐛','🕷️','🦎','🐢','🦈',
+            '🐋','🦜','🦚','🦩','🦔','🐾',
+        ],
+        preview: '🤔💭🧠💡✨🔮📖💻⚙️🔍✅🌱🎉♾️🦉🐙',
+    },
+
+    // ---- Edge cases: things that trip up rendering pipelines ----
+    {
+        id: 'zwj-emoji', label: 'ZWJ Sequences', edgeCase: true,
+        graphemes: [
+            '👨‍💻','👩‍💻','🧑‍💻',    // technologist
+            '👨‍🔬','👩‍🔬','🧑‍🔬',    // scientist
+            '👨‍🎨','👩‍🎨','🧑‍🎨',    // artist
+            '👨‍🚀','👩‍🚀','🧑‍🚀',    // astronaut
+            '👨‍👩‍👧‍👦',              // family
+            '👨‍👩‍👦',                // family
+            '👩‍👩‍👧',                // family
+            '🏳️‍🌈',                  // rainbow flag
+            '🏴‍☠️',                   // pirate flag
+            '👁️‍🗨️',                  // eye in speech bubble
+            '❤️‍🔥',                   // heart on fire
+            '❤️‍🩹',                   // mending heart
+            '🐻‍❄️',                   // polar bear
+            '😮‍💨',                   // face exhaling
+            '😵‍💫',                   // face with spiral eyes
+        ],
+        preview: '👨‍💻👩‍💻🧑‍🔬👨‍👩‍👧‍👦🏳️‍🌈❤️‍🔥🐻‍❄️',
+    },
+    {
+        id: 'skin-tone', label: 'Skin Tone Modifiers', edgeCase: true,
+        graphemes: [
+            '👋🏻','👋🏼','👋🏽','👋🏾','👋🏿',
+            '👍🏻','👍🏼','👍🏽','👍🏾','👍🏿',
+            '🙏🏻','🙏🏼','🙏🏽','🙏🏾','🙏🏿',
+            '💪🏻','💪🏼','💪🏽','💪🏾','💪🏿',
+            '🧑🏻','🧑🏼','🧑🏽','🧑🏾','🧑🏿',
+        ],
+        preview: '👋🏻👋🏼👋🏽👋🏾👋🏿 👍🏻👍🏼👍🏽👍🏾👍🏿',
+    },
+    {
+        id: 'flags', label: 'Flag Sequences', edgeCase: true,
+        graphemes: [
+            '🇺🇸','🇬🇧','🇫🇷','🇩🇪','🇯🇵','🇰🇷','🇨🇳','🇮🇳','🇧🇷','🇲🇽',
+            '🇨🇦','🇦🇺','🇮🇹','🇪🇸','🇷🇺','🇳🇱','🇸🇪','🇳🇴','🇩🇰','🇫🇮',
+            '🇵🇱','🇺🇦','🇹🇷','🇿🇦','🇳🇬','🇪🇬','🇰🇪','🇦🇷','🇨🇱','🇨🇴',
+        ],
+        preview: '🇺🇸🇬🇧🇫🇷🇩🇪🇯🇵🇰🇷🇨🇳🇮🇳🇧🇷🇲🇽🇨🇦🇦🇺',
+    },
+    {
+        id: 'combining', label: 'Combining Diacritics', edgeCase: true,
+        graphemes: [
+            // Pre-composed vs decomposed — both should render identically
+            'é','è','ê','ë',     // e + acute/grave/circumflex/diaeresis
+            'ñ','ü','ö','ä','ï', // common accented
+            'ç','ß','ø','å','æ', // special Latin
+            'ő','ű','ă','ş','ț', // Eastern European
+            'ā','ē','ī','ō','ū', // macron
+            // Decomposed forms (base + combining mark) — grapheme segmenter should handle
+            'e\u0301',  // é decomposed
+            'n\u0303',  // ñ decomposed
+            'u\u0308',  // ü decomposed
+            'o\u030B',  // ő decomposed (double acute)
+            // Stacked combining marks (stress test)
+            'a\u0300\u0301',     // a + grave + acute
+            'e\u0302\u0308',     // e + circumflex + diaeresis
+            'Z\u0335\u0321',     // Z + short stroke + horn (Zalgo-lite)
+            'o\u0361\u0308',     // o + combining double inverted breve + diaeresis
+        ],
+        preview: 'é è ê ë ñ ü ö ä ç ß ø å æ ő ű | e\u0301 n\u0303 u\u0308 | a\u0300\u0301 Z\u0335\u0321',
+    },
+    {
+        id: 'variation', label: 'Variation Selectors', edgeCase: true,
+        graphemes: [
+            // VS15 (text) vs VS16 (emoji) presentation
+            '❤︎', '❤️',          // text heart vs emoji heart
+            '☀︎', '☀️',          // text sun vs emoji sun
+            '⚡︎', '⚡️',
+            '☁︎', '☁️',
+            '✨︎', '✨',
+            '♻︎', '♻️',
+            '⭐︎', '⭐',
+            '☎︎', '☎️',
+            '✏︎', '✏️',
+            '✂︎', '✂️',
+        ],
+        preview: '❤︎ vs ❤️ | ☀︎ vs ☀️ | ⚡︎ vs ⚡️ | text vs emoji presentation',
+    },
+    {
+        id: 'rtl', label: 'RTL Samples (Arabic/Hebrew)', edgeCase: true,
+        graphemes: [
+            // Arabic
+            'ا','ب','ت','ث','ج','ح','خ','د','ذ','ر','ز','س','ش','ص','ض','ط','ظ','ع','غ','ف','ق','ك','ل','م','ن','ه','و','ي',
+            // Hebrew
+            'א','ב','ג','ד','ה','ו','ז','ח','ט','י','כ','ל','מ','נ','ס','ע','פ','צ','ק','ר','ש','ת',
+        ],
+        preview: 'اب ت ث ج ح خ | א ב ג ד ה ו ז ח',
+    },
+    {
+        id: 'confusables', label: 'Confusables', edgeCase: true,
+        graphemes: [
+            // Characters that look similar but are different codepoints.
+            // If the atlas treats them as identical, picking/selection breaks.
+            'A', '\u0410',        // Latin A vs Cyrillic А
+            'B', '\u0412',        // Latin B vs Cyrillic В
+            'E', '\u0415',        // Latin E vs Cyrillic Е
+            'K', '\u041A',        // Latin K vs Cyrillic К
+            'M', '\u041C',        // Latin M vs Cyrillic М
+            'O', '\u041E',        // Latin O vs Cyrillic О
+            'P', '\u0420',        // Latin P vs Cyrillic Р (looks like P)
+            'T', '\u0422',        // Latin T vs Cyrillic Т
+            'X', '\u0425',        // Latin X vs Cyrillic Х
+            'o', '\u03BF',        // Latin o vs Greek ο
+            '0', '\u041E',        // digit 0 vs Cyrillic О
+            '-', '\u2010', '\u2011', '\u2012', '\u2013', '\u2014', '\u2015', '\u2212', '\uFE58', '\uFF0D', // many dashes
+            ' ', '\u00A0', '\u2000', '\u2001', '\u2002', '\u2003', '\u2004', '\u2005', '\u2006', '\u2007', '\u2008', '\u2009', '\u200A', // many spaces
+        ],
+        preview: 'A/А B/В E/Е O/О P/Р | -‐‑‒–—―−﹘－ | visible-space variants',
+    },
+    {
+        id: 'wide-narrow', label: 'Width Extremes', edgeCase: true,
+        graphemes: [
+            // Full-width forms (double-wide)
+            '０','１','２','Ａ','Ｂ','Ｃ','ａ','ｂ','ｃ',
+            '＋','－','＝','（','）','［','］','｛','｝',
+            // Half-width katakana (narrow)
+            'ｱ','ｲ','ｳ','ｴ','ｵ','ｶ','ｷ','ｸ','ｹ','ｺ',
+            // Zero-width characters (should not emit buffer slots)
+            '\u200B',   // zero-width space
+            '\u200C',   // zero-width non-joiner
+            '\u200D',   // zero-width joiner
+            '\uFEFF',   // BOM / zero-width no-break space
+        ],
+        preview: '０１２ＡＢＣ（full-width） | ｱｲｳ（half-width） | ZWS/ZWNJ/ZWJ',
+    },
+    {
+        id: 'keycaps', label: 'Keycap Sequences', edgeCase: true,
+        graphemes: [
+            '#️⃣', '*️⃣',
+            '0️⃣','1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣',
+            '🔟',
+        ],
+        preview: '#️⃣ *️⃣ 0️⃣ 1️⃣ 2️⃣ 3️⃣ 4️⃣ 5️⃣ 6️⃣ 7️⃣ 8️⃣ 9️⃣',
+    },
+];
+
+// ---- Build charset UI ----
+
+function buildCharsetUI() {
+    charsetGrid.innerHTML = '';
+    for (const group of CHARSET_GROUPS) {
+        const div = document.createElement('div');
+        div.className = 'charset-group' + (group.edgeCase ? ' edge-case' : '');
+        const count = group.graphemes
+            ? group.graphemes.length
+            : group.ranges.reduce((sum, r) => sum + (Array.isArray(r) && typeof r[0] === 'number' && r.length > 2 ? r.length : (r[r.length-1] ?? r) - (r[0] ?? r) + 1), 0);
+        div.innerHTML = `
+            <label>
+                <input type="checkbox" data-group="${group.id}" ${group.checked ? 'checked' : ''}>
+                ${group.label}
+                <span class="charset-count">${count}</span>
+            </label>
+            <div class="charset-preview">${group.preview}</div>
+        `;
+        charsetGrid.appendChild(div);
+    }
+    updateTotalCount();
+}
+
+function getGroupGlyphCount(group) {
+    if (group.graphemes) return group.graphemes.length;
+    let count = 0;
+    for (const r of group.ranges) {
+        if (Array.isArray(r) && r.length > 2) {
+            count += r.length; // explicit list of codepoints
+        } else if (Array.isArray(r)) {
+            count += r.length; // range() output
+        }
+    }
+    return count;
+}
+
+function updateTotalCount() {
+    // Base charset is ~483
+    let total = 483;
+    for (const group of CHARSET_GROUPS) {
+        const cb = charsetGrid.querySelector(`[data-group="${group.id}"]`);
+        if (cb?.checked) total += getGroupGlyphCount(group);
+    }
+    totalCountEl.textContent = `Estimated total: ~${total} glyphs`;
+}
+
+charsetGrid.addEventListener('change', updateTotalCount);
+buildCharsetUI();
+
+// ---- Collect selected extra characters ----
+
+function getSelectedExtras() {
+    const extraCodepoints = [];
+    const extraGraphemes = [];
+
+    for (const group of CHARSET_GROUPS) {
+        const cb = charsetGrid.querySelector(`[data-group="${group.id}"]`);
+        if (!cb?.checked) continue;
+
+        if (group.graphemes) {
+            extraGraphemes.push(...group.graphemes);
+        } else {
+            for (const r of group.ranges) {
+                if (Array.isArray(r)) {
+                    extraCodepoints.push(...r);
+                }
+            }
+        }
+    }
+
+    return { extraCodepoints, extraGraphemes };
+}
+
+
+// ---- Font enumeration ----
+
+async function enumerateFonts() {
+    const fonts = [];
+
+    if ('queryLocalFonts' in window) {
+        try {
+            const localFonts = await window.queryLocalFonts();
+            const families = new Set();
+            for (const font of localFonts) {
+                families.add(font.family);
+            }
+            for (const family of [...families].sort()) {
+                fonts.push({ family, source: 'local', monospace: isMonospace(family) });
+            }
+            return fonts;
+        } catch (e) {
+            // Permission denied or API unavailable — fall through to probing
+        }
+    }
+
+    const candidates = [
+        'Monaco', 'Menlo', 'Consolas', 'Courier New', 'Courier',
+        'SF Mono', 'Fira Code', 'Fira Mono', 'JetBrains Mono',
+        'Source Code Pro', 'IBM Plex Mono', 'Roboto Mono',
+        'Ubuntu Mono', 'Hack', 'Inconsolata', 'Cascadia Code',
+        'Cascadia Mono', 'DejaVu Sans Mono', 'Liberation Mono',
+        'Droid Sans Mono', 'Anonymous Pro', 'PT Mono',
+        'Noto Sans Mono', 'Input Mono', 'Iosevka', 'Victor Mono',
+        'Berkeley Mono', 'Geist Mono', 'Monaspace Neon',
+        'Monaspace Argon', 'Monaspace Xenon', 'Monaspace Radon',
+        'Monaspace Krypton', 'Commit Mono', 'Intel One Mono',
+        'Arial', 'Helvetica', 'Helvetica Neue', 'Verdana', 'Georgia',
+        'Times New Roman', 'Trebuchet MS', 'Tahoma', 'Segoe UI',
+        'San Francisco', 'SF Pro', 'Inter', 'Roboto', 'Noto Sans',
+        'Open Sans', 'Lato', 'Ubuntu', 'System UI',
+    ];
+
+    for (const family of candidates) {
+        if (isFontAvailable(family)) {
+            fonts.push({ family, source: 'probe', monospace: isMonospace(family) });
+        }
+    }
+
+    return fonts;
+}
+
+function isFontAvailable(family) {
+    const testStr = 'mmmmmmmmmmlli|W@#';
+    const size = 72;
+    const c = document.createElement('canvas');
+    c.width = 600; c.height = 100;
+    const ctx = c.getContext('2d');
+
+    function measure(font) {
+        ctx.font = `${size}px ${font}`;
+        return ctx.measureText(testStr).width;
+    }
+
+    const serifW = measure('serif');
+    const sansW = measure('sans-serif');
+    const testW = measure(`"${family}", serif`);
+    const testW2 = measure(`"${family}", sans-serif`);
+
+    return testW !== serifW || testW2 !== sansW;
+}
+
+function isMonospace(family) {
+    const c = document.createElement('canvas');
+    c.width = 200; c.height = 50;
+    const ctx = c.getContext('2d');
+    ctx.font = `48px "${family}", serif`;
+    const iW = ctx.measureText('i').width;
+    const mW = ctx.measureText('m').width;
+    return Math.abs(iW - mW) < 1;
+}
+
+async function populateFontSelect() {
+    fontSelect.innerHTML = '<option value="">Loading fonts...</option>';
+    const fonts = await enumerateFonts();
+
+    fontSelect.innerHTML = '';
+
+    const monoFonts = fonts.filter(f => f.monospace);
+    const otherFonts = fonts.filter(f => !f.monospace);
+
+    if (monoFonts.length > 0) {
+        const group = document.createElement('optgroup');
+        group.label = `Monospace (${monoFonts.length})`;
+        for (const f of monoFonts) {
+            const opt = document.createElement('option');
+            opt.value = f.family;
+            opt.textContent = f.family;
+            opt.style.fontFamily = `"${f.family}", monospace`;
+            group.appendChild(opt);
+        }
+        fontSelect.appendChild(group);
+    }
+
+    if (otherFonts.length > 0) {
+        const group = document.createElement('optgroup');
+        group.label = `Other (${otherFonts.length})`;
+        for (const f of otherFonts) {
+            const opt = document.createElement('option');
+            opt.value = f.family;
+            opt.textContent = f.family;
+            opt.style.fontFamily = `"${f.family}", sans-serif`;
+            group.appendChild(opt);
+        }
+        fontSelect.appendChild(group);
+    }
+
+    if (monoFonts.length > 0) {
+        fontSelect.value = monoFonts[0].family;
+    }
+    updateFontPreview();
+}
+
+function updateFontPreview() {
+    const family = fontSelect.value;
+    fontSample.style.fontFamily = `"${family}", monospace`;
+}
+
+fontSelect.addEventListener('change', updateFontPreview);
+populateFontSelect();
+
+// ---- Bake ----
+
+bakeBtn.addEventListener('click', async () => {
+    bakeBtn.disabled = true;
+    statusEl.textContent = '';
+    previewEl.style.display = 'none';
+
+    const size = parseInt(document.getElementById('size').value);
+    const fontSize = parseInt(document.getElementById('fontSize').value);
+    const fontFamily = fontSelect.value;
+
+    if (!fontFamily) {
+        log('ERROR: No font selected');
+        bakeBtn.disabled = false;
+        return;
+    }
+
+    const fontSlug = fontFamily.toLowerCase().replace(/\s+/g, '-');
+    const prefix = `atlas-${fontSlug}-${size}`;
+
+    const { extraCodepoints, extraGraphemes } = getSelectedExtras();
+
+    log(`Font: ${fontFamily}`);
+    log(`Extras: ${extraCodepoints.length} codepoints + ${extraGraphemes.length} graphemes from ${
+        CHARSET_GROUPS.filter(g => charsetGrid.querySelector(`[data-group="${g.id}"]`)?.checked).map(g => g.label).join(', ') || 'none'
+    }`);
+    log(`Generating ${size}x${size} atlas (${fontSize}px)...`);
+
+    try {
+        const atlas = new GlyphAtlas(fontFamily, fontSize, size);
+
+        // Inject extra single-codepoint characters into the charset before generate()
+        if (extraCodepoints.length > 0) {
+            const existing = new Set(atlas.charset);
+            for (const cp of extraCodepoints) {
+                if (!existing.has(cp)) {
+                    atlas.charset.push(cp);
+                    existing.add(cp);
+                }
+            }
+            log(`Charset expanded to ${atlas.charset.length} codepoints`);
+        }
+
+        const t0 = performance.now();
+        await atlas.generate((done, total) => {
+            const pct = Math.floor((done / total) * 100);
+            statusEl.textContent = statusEl.textContent.replace(/(Generating|Expanding).*/,
+                `Generating... ${pct}% (${done}/${total})`);
+        });
+
+        // Add multi-codepoint graphemes via ensureGraphemes() (ZWJ, flags, combining, etc.)
+        if (extraGraphemes.length > 0) {
+            statusEl.textContent = statusEl.textContent.replace(/(Generating|Expanding).*/,
+                `Expanding with ${extraGraphemes.length} graphemes...`);
+            const added = atlas.ensureGraphemes(extraGraphemes);
+            log(`ensureGraphemes: ${added} new glyphs added`);
+        }
+
+        const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
+        const stats = atlas.getPackingStats();
+        log(`Done in ${elapsed}s: ${stats.glyphCount} glyphs, ${stats.usedPercent}% atlas used`);
+
+        if (parseFloat(stats.usedPercent) > 90) {
+            log(`WARNING: Atlas is ${stats.usedPercent}% full. Consider a larger size.`);
+        }
+
+        log('Exporting...');
+        const { image: dataUrl, descriptor } = atlas.exportAtlas();
+
+        descriptor.resolvedFont = fontFamily;
+        descriptor.charsetGroups = CHARSET_GROUPS
+            .filter(g => charsetGrid.querySelector(`[data-group="${g.id}"]`)?.checked)
+            .map(g => g.id);
+
+        // Show preview
+        const img = new Image();
+        img.onload = () => {
+            previewEl.width = Math.min(size, 512);
+            previewEl.height = Math.min(size, 512);
+            const ctx = previewEl.getContext('2d');
+            ctx.drawImage(img, 0, 0, previewEl.width, previewEl.height);
+            previewEl.style.display = 'block';
+        };
+        img.src = dataUrl;
+
+        // Download PNG
+        const pngBlob = await (await fetch(dataUrl)).blob();
+        downloadBlob(pngBlob, `${prefix}.png`);
+        log(`${prefix}.png (${(pngBlob.size / 1024).toFixed(1)} KB)`);
+
+        // Download JSON
+        const jsonStr = JSON.stringify(descriptor, null, 2);
+        const jsonBlob = new Blob([jsonStr], { type: 'application/json' });
+        downloadBlob(jsonBlob, `${prefix}.json`);
+        log(`${prefix}.json (${(jsonBlob.size / 1024).toFixed(1)} KB)`);
+
+        log(`\nFiles downloaded. Load with:`);
+        log(`  loadPrebakedAtlas('/assets/${prefix}.png', '/assets/${prefix}.json')`);
+
+    } catch (e) {
+        log(`ERROR: ${e.message}\n${e.stack}`);
+    } finally {
+        bakeBtn.disabled = false;
+    }
+});
+
+function downloadBlob(blob, filename) {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(a.href);
+}
+</script>
+</body>
+</html>

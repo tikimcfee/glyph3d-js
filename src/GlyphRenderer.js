@@ -96,6 +96,14 @@ class GlyphRendererV15 {
         this.textsByMesh = new WeakMap();    // mesh -> Set<id>
         this.nextId = 1;
 
+        // WebGL context loss / restore handling.
+        // Attach handlers if the caller passed a canvas (typically renderer.domElement).
+        // This is optional — callers can also invoke _setupContextLossHandlers() directly.
+        this._contextLost = false;
+        if (options.canvas) {
+            this._setupContextLossHandlers(options.canvas);
+        }
+
         logger.trace('Initialized', {
             atlas: `${this.atlas.getAtlasTexture().width}x${this.atlas.getAtlasTexture().height}`,
             fontPixels: `${this.metrics.pixelWidth}x${this.metrics.pixelHeight}px`,
@@ -412,6 +420,7 @@ class GlyphRendererV15 {
      * @returns {number} ID for this text
      */
     render(text, position = {x: 0, y: 0, z: 0}, options = {}) {
+        if (this._contextLost) return -1;
         // Apply deferred CanvasTexture re-upload: batch all ensureCodepoints() calls
         // in this frame into one GPU re-upload at draw time, avoiding a stall per-call.
         if (this.atlas && this.atlas.checkAndClearTextureUpdate()) {
@@ -432,6 +441,7 @@ class GlyphRendererV15 {
      * @returns {Array} IDs for the rendered texts
      */
     renderBatch(items) {
+        if (this._contextLost) return [];
         // Apply deferred CanvasTexture re-upload: batch all ensureCodepoints() calls
         // in this frame into one GPU re-upload at draw time, avoiding a stall per-call.
         if (this.atlas && this.atlas.checkAndClearTextureUpdate()) {
@@ -1305,26 +1315,21 @@ class GlyphRendererV15 {
     }
 
     /**
-     * Apply pre-built buffers directly to GPU
+     * Apply pre-built buffers directly to GPU.
      *
-     * Used by worker pipeline to skip main-thread computation.
+     * Used by the worker pipeline to skip main-thread computation.
      * Buffers come from WorkerBridge.buildBuffers() or buildBatchBuffers().
      *
      * When itemMeta and items are provided, reconstructs renderedTexts entries
      * from the buffer data so that updatePosition(), updateColor(), getText(),
      * and other per-text operations work after the worker path.
      *
-     * @param {Object} buffers - Pre-computed buffer data
-     * @param {Float32Array} buffers.positions - [x,y,z] per glyph
-     * @param {Float32Array} buffers.sizes - [w,h] per glyph
-     * @param {Float32Array} buffers.codepoints - Unicode codepoint per glyph. The vertex shader
-     *   resolves each codepoint to its atlas UV rect via the atlasMapTexture DataTexture lookup
-     *   (GPU codepoint→UV path). No CPU-side UV coordinates are needed.
-     * @param {Float32Array} buffers.colors - [r,g,b] per glyph
-     * @param {number} buffers.count - Number of glyphs
-     * @param {Array} [buffers.itemMeta] - Per-item metadata from buildBatchBuffers
-     * @param {Array} [items] - Original items array (text, position, options)
-     * @returns {Array<number>|null} Array of renderer IDs if itemMeta provided, null otherwise
+     * @param {import('./core/types.js').GlyphBufferSet} buffers - Pre-computed buffer data from
+     *   buildBatchBuffers(). The arrays are swapped in directly — no copying occurs.
+     * @param {Array} [items] - Original items array (text, position, options), parallel to
+     *   buffers.itemMeta. Required for renderedTexts reconstruction.
+     * @returns {Array<number>|null} Array of renderer IDs (one per item) if itemMeta provided,
+     *   null otherwise.
      */
     applyPrebuiltBuffers(buffers, items) {
         const { positions, sizes, codepoints, colors, groupIds, count } = buffers;
@@ -1432,6 +1437,76 @@ class GlyphRendererV15 {
         });
 
         return rendererIds;
+    }
+
+    // ============ WebGL Context Loss ============
+
+    /**
+     * Attach webglcontextlost / webglcontextrestored handlers to the given canvas.
+     *
+     * Call this once during application setup, passing the Three.js renderer's
+     * domElement (i.e. the WebGL canvas). When the context is lost, rendering
+     * is suspended; when it is restored, all GPU-side resources are re-uploaded
+     * from the in-memory typed arrays and canvases that survive context loss.
+     *
+     * Alternatively, pass `options.canvas` to the constructor and this is called
+     * automatically.
+     *
+     * @param {HTMLCanvasElement} canvas - The WebGL canvas element
+     */
+    _setupContextLossHandlers(canvas) {
+        canvas.addEventListener('webglcontextlost', (e) => {
+            e.preventDefault(); // signal the browser to allow context restoration
+            this._contextLost = true;
+            logger.warn('WebGL context lost — rendering suspended');
+        });
+
+        canvas.addEventListener('webglcontextrestored', () => {
+            this._contextLost = false;
+            logger.info('WebGL context restored — re-uploading GPU resources');
+            this._rebuildGPUState();
+        });
+    }
+
+    /**
+     * Re-upload all GPU-side resources after a WebGL context restore.
+     *
+     * All typed arrays, the atlas canvas, and the highlight data survive context
+     * loss in CPU memory. This method sets `needsUpdate = true` on every resource
+     * so Three.js re-uploads them to the new GL context on the next render frame.
+     * Nothing is recomputed — this is a pure re-upload pass.
+     *
+     * @private
+     */
+    _rebuildGPUState() {
+        // Re-upload the shared atlas CanvasTexture
+        if (this.texture) {
+            this.texture.needsUpdate = true;
+        }
+
+        // Re-upload the atlas map DataTexture and sync its dimension uniforms
+        if (this.atlas && this.instanceMesh) {
+            const atlasMapTex = this.atlas.getAtlasMapTexture(THREE);
+            this.instanceMesh.material.uniforms.atlasMapTexture.value = atlasMapTex;
+        }
+
+        // Re-upload the group DataTexture (owned by this renderer, backed by this._groupData)
+        if (this._groupTexture) {
+            this._groupTexture.needsUpdate = true;
+        }
+
+        // Re-upload the highlight DataTexture (backed by Uint8Array that survived context loss)
+        if (this._highlightTexture) {
+            this._highlightTexture.needsUpdate = true;
+        }
+
+        // Mark all instance buffer attributes for full re-upload
+        if (this.instanceMesh) {
+            const geom = this.instanceMesh.geometry;
+            for (const name of Object.keys(geom.attributes)) {
+                geom.attributes[name].needsUpdate = true;
+            }
+        }
     }
 
     /**

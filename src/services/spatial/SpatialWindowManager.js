@@ -12,6 +12,10 @@
 
 import { WindowGroup } from './WindowGroup.js';
 import { Z_POP_AMOUNT } from '../interaction/SelectionManager.js';
+import { createLogger } from '../../utils/Logger.js';
+import { stateController } from '../state/StateController.js';
+
+const log = createLogger('spatial', 0); // TRACE level — capture everything
 
 // 8-color low-saturation palette for group tints
 const GROUP_PALETTE = [
@@ -66,10 +70,16 @@ export class SpatialWindowManager {
         /** @type {Map<string, number>} registryId -> saved Z before group Z-pop */
         this._groupOriginalZ = new Map();
 
-        // -- Wire into SceneRegistry for member reconciliation --
+        // -- Wire into SceneRegistry for member reconciliation (debounced) --
+        this._reconcileTimer = null;
         this._registryListener = (type) => {
             if (type === 'grid' || type === 'agent') {
-                this._reconcileMembers();
+                if (!this._reconcileTimer) {
+                    this._reconcileTimer = setTimeout(() => {
+                        this._reconcileTimer = null;
+                        this._reconcileMembers();
+                    }, 200);
+                }
             }
         };
         this._registry.addChangeListener(this._registryListener);
@@ -119,36 +129,61 @@ export class SpatialWindowManager {
      * @param {string} registryId
      */
     addToGroup(groupName, registryId) {
-        const group = this._groups.get(groupName);
-        if (!group) {
-            console.warn(`[SpatialWindowManager] group "${groupName}" not found`);
+        if (this._inAddToGroup) {
+            log.warn(`addToGroup REENTRANT — skipping "${groupName}" <- ${registryId}`);
             return;
         }
+        this._inAddToGroup = true;
+        try {
+            log.debug(`addToGroup: "${groupName}" <- ${registryId}`);
+            const group = this._groups.get(groupName);
+            if (!group) {
+                log.warn(`addToGroup: group "${groupName}" not found`);
+                return;
+            }
 
-        // Remove from any existing group first
-        const existingGroup = this._gridToGroup.get(registryId);
-        if (existingGroup && existingGroup !== groupName) {
-            this.removeFromGroup(existingGroup, registryId);
+            // Remove from any existing group first
+            const existingGroup = this._gridToGroup.get(registryId);
+            if (existingGroup && existingGroup !== groupName) {
+                log.debug(`addToGroup: removing ${registryId} from existing group "${existingGroup}"`);
+                this.removeFromGroup(existingGroup, registryId);
+            }
+
+            // (a) Add to WindowGroup.memberIds
+            group.add(registryId);
+
+            // (b) Update reverse index
+            this._gridToGroup.set(registryId, groupName);
+
+            // (c) Set userData._windowGroup on the grid Object3D
+            const entry = this._registry.get(registryId);
+            if (entry?.grid) {
+                if (!entry.grid.userData) entry.grid.userData = {};
+                entry.grid.userData._windowGroup = groupName;
+            }
+
+            // (d) Write groupId to FileStateManager (skip during bulk deserialize)
+            if (!this._deserializing) {
+                const sourcePath = entry?.meta?.sourcePath || entry?.grid?.userData?.sourcePath;
+                if (sourcePath && this._fileStateManager) {
+                    this._fileStateManager.setProperty(sourcePath, 'groupId', groupName);
+                }
+            }
+
+            // (e) Auto-apply group layout if not in free mode (skip during deserialize)
+            if (group.mode !== 'free' && !this._deserializing) {
+                log.debug(`addToGroup: auto-layout "${groupName}" mode=${group.mode} members=${group.memberIds.length}`);
+                group.computeLayout(
+                    (id) => this._registry.get(id)?.grid || null,
+                    {},
+                    0.3,
+                    { preserveAnchor: true }
+                );
+            }
+        } finally {
+            this._inAddToGroup = false;
         }
-
-        // (a) Add to WindowGroup.memberIds
-        group.add(registryId);
-
-        // (b) Update reverse index
-        this._gridToGroup.set(registryId, groupName);
-
-        // (c) Set userData._windowGroup on the grid Object3D
-        const entry = this._registry.get(registryId);
-        if (entry?.grid) {
-            if (!entry.grid.userData) entry.grid.userData = {};
-            entry.grid.userData._windowGroup = groupName;
-        }
-
-        // (d) Write groupId to FileStateManager
-        const sourcePath = entry?.meta?.sourcePath || entry?.grid?.userData?.sourcePath;
-        if (sourcePath && this._fileStateManager) {
-            this._fileStateManager.setProperty(sourcePath, 'groupId', groupName);
-        }
+        this._persistGroups();
     }
 
     /**
@@ -203,6 +238,7 @@ export class SpatialWindowManager {
 
         this._groups.delete(name);
         this._groupColors.delete(name);
+        this._persistGroups();
     }
 
     // ============ Group Queries ============
@@ -252,6 +288,7 @@ export class SpatialWindowManager {
      * @param {number} [duration=0.3] - animation duration
      */
     setLayout(groupName, mode, config = {}, duration = 0.3) {
+        log.info(`setLayout: "${groupName}" -> ${mode}`, config);
         const group = this._groups.get(groupName);
         if (!group) return;
 
@@ -261,6 +298,7 @@ export class SpatialWindowManager {
             config,
             duration
         );
+        this._persistGroups();
     }
 
     /**
@@ -368,31 +406,38 @@ export class SpatialWindowManager {
     deserialize(data) {
         if (!data || !Array.isArray(data)) return;
 
-        for (const groupData of data) {
-            const { name, layout, memberPaths } = groupData;
-            if (!name || !memberPaths?.length) continue;
+        // Suppress cascading side effects during bulk restore
+        this._deserializing = true;
+        try {
+            for (const groupData of data) {
+                const { name, layout, memberPaths } = groupData;
+                if (!name || !memberPaths?.length) continue;
 
-            this.createGroup(name);
+                this.createGroup(name);
 
-            for (const sourcePath of memberPaths) {
-                // Find registry entry by sourcePath
-                const entries = this._registry.findByMeta('sourcePath', sourcePath);
-                if (entries.length > 0) {
-                    this.addToGroup(name, entries[0].id);
+                for (const sourcePath of memberPaths) {
+                    const entries = this._registry.findByMeta('sourcePath', sourcePath);
+                    if (entries.length > 0) {
+                        this.addToGroup(name, entries[0].id);
+                    }
+                }
+
+                // Set layout mode (no animation on restore)
+                const group = this._groups.get(name);
+                if (group && layout && layout !== 'free') {
+                    group.mode = layout;
+                    group.computeLayout(
+                        (id) => this._registry.get(id)?.grid || null,
+                        {},
+                        0  // instant on restore
+                    );
                 }
             }
-
-            // Set layout mode (no animation on restore)
-            const group = this._groups.get(name);
-            if (group && layout && layout !== 'free') {
-                group.mode = layout;
-                group.computeLayout(
-                    (id) => this._registry.get(id)?.grid || null,
-                    {},
-                    0  // instant on restore
-                );
-            }
+        } finally {
+            this._deserializing = false;
         }
+
+        log.info(`deserialized ${data.length} group(s)`);
     }
 
     // ============ Lifecycle ============
@@ -418,23 +463,41 @@ export class SpatialWindowManager {
 
     // ============ Private ============
 
+    /** Persist current group state to localStorage. Debounced to avoid spam. */
+    _persistGroups() {
+        if (this._persistTimer) return;
+        this._persistTimer = setTimeout(() => {
+            this._persistTimer = null;
+            stateController.set('groups', this.serialize());
+        }, 300);
+    }
+
     /**
      * Reconcile group members against registry.
      * Removes stale IDs, auto-dissolves empty groups.
      * @private
      */
     _reconcileMembers() {
+        if (this._inReconcile) return;
+        this._inReconcile = true;
+        let removed = 0;
         for (const [name, group] of this._groups) {
             const stale = group.memberIds.filter(id => !this._registry.has(id));
             for (const id of stale) {
                 this._gridToGroup.delete(id);
                 group.remove(id);
+                removed++;
             }
             if (group.size === 0) {
+                log.debug(`reconcile: dissolving empty group "${name}"`);
                 this._groups.delete(name);
                 this._groupColors.delete(name);
             }
         }
+        if (removed > 0) {
+            log.debug(`reconcile: removed ${removed} stale member(s)`);
+        }
+        this._inReconcile = false;
     }
 
     /**
@@ -446,6 +509,7 @@ export class SpatialWindowManager {
      * @private
      */
     _onSelectionChange(eventType, sourcePath, state) {
+        log.debug(`selection: ${eventType} path=${sourcePath || '(none)'}`);
         if (eventType === 'select') {
             this._applyGroupZPop(sourcePath);
         } else if (eventType === 'deselect') {

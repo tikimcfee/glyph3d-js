@@ -93,6 +93,9 @@ class CodeGrid extends THREE.Object3D {
         this.content = text;
         this.lines = text.split('\n');
 
+        // If content was evicted, reconstruct the collection before clearing/loading
+        this._ensureCollection();
+
         // Clear previous content
         this._clearContent();
 
@@ -125,6 +128,9 @@ class CodeGrid extends THREE.Object3D {
         this.content = text;
         // Note: lines array populated lazily only if needed (getLineCount, getMaxLineWidth)
 
+        // If content was evicted, reconstruct the collection before clearing/loading
+        this._ensureCollection();
+
         // Clear previous content
         this._clearContent();
 
@@ -156,7 +162,7 @@ class CodeGrid extends THREE.Object3D {
         this.lines = [];
         this.filename = '';
 
-        this._collection.clear();
+        if (this._collection) this._collection.clear();
         this._filenameTextId = null;
         this._contentTextIds = [];
 
@@ -238,8 +244,8 @@ class CodeGrid extends THREE.Object3D {
         const box = new THREE.Box3();
         const padding = this.config.backgroundPadding;
 
-        // Get content bounds from collection
-        const contentBounds = this._collection.getBounds();
+        // Get content bounds from collection (null when content is unloaded)
+        const contentBounds = this._collection ? this._collection.getBounds() : null;
 
         if (contentBounds) {
             box.min.set(
@@ -261,15 +267,15 @@ class CodeGrid extends THREE.Object3D {
 
     /**
      * Get local content bounds
-     * @returns {Object|null} Bounds object from collection
+     * @returns {Object|null} Bounds object from collection, or null if content is unloaded
      */
     getContentBounds() {
-        return this._collection.getBounds();
+        return this._collection ? this._collection.getBounds() : null;
     }
 
     /**
-     * Get the underlying GlyphCollection
-     * @returns {GlyphCollection} The collection
+     * Get the underlying GlyphCollection, or null if content is unloaded.
+     * @returns {GlyphCollection|null} The collection
      */
     getCollection() {
         return this._collection;
@@ -277,10 +283,10 @@ class CodeGrid extends THREE.Object3D {
 
     /**
      * Get glyph count
-     * @returns {number} Number of glyphs
+     * @returns {number} Number of glyphs (0 if content is unloaded)
      */
     getGlyphCount() {
-        return this._collection.getGlyphCount();
+        return this._collection ? this._collection.getGlyphCount() : 0;
     }
 
     /**
@@ -342,11 +348,92 @@ class CodeGrid extends THREE.Object3D {
     }
 
     /**
+     * Release GPU buffers while preserving source reference for reload.
+     * Called by GridVirtualizer when a grid exits the eviction threshold.
+     * Preserves: position, metadata, bounding box, source text, config.
+     * Releases: GlyphCollection (InstancedBufferGeometry, highlight texture,
+     *   group DataTexture, all instance attribute buffers).
+     *
+     * After this call `isContentLoaded` returns false. The grid remains in
+     * whatever scene-graph state the caller left it; the virtualizer keeps
+     * its cached bounds so re-entry detection still works.
+     */
+    unloadContent() {
+        if (!this._collection) return; // already unloaded or fully disposed
+
+        // Remove the collection's group from our Object3D children before
+        // dispose() runs, so the scene.remove() inside dispose() is benign.
+        if (this._collection.group) {
+            this.remove(this._collection.group);
+        }
+
+        this._collection.dispose();
+        this._collection = null;
+
+        // Clear derived state that references the now-dead renderer/buffers
+        this._filenameTextId = null;
+        this._contentTextIds = [];
+        this._lineSlotBase = null;
+
+        // Mark as unloaded — reloadContent() checks this flag
+        this._contentUnloaded = true;
+    }
+
+    /**
+     * Whether GPU content is currently loaded.
+     * @returns {boolean}
+     */
+    get isContentLoaded() {
+        return !this._contentUnloaded;
+    }
+
+    /**
+     * Reload content from the stored source text and filename.
+     * Called by GridVirtualizer when an evicted grid re-enters the frustum.
+     * Uses the async worker path (flushAsync) since this is non-urgent and
+     * may involve large files. The grid renders on the next frame after the
+     * worker completes — one blank frame is acceptable.
+     *
+     * No-op if content is already loaded or there is no source text to restore.
+     *
+     * @param {GlyphAtlas} atlas - The atlas instance (may differ from construction
+     *   time if the atlas was regenerated; pass the current live atlas).
+     * @returns {Promise<void>}
+     */
+    async reloadContent(atlas) {
+        if (!this._contentUnloaded) return;
+        if (!this.content) {
+            // Nothing to restore — mark loaded so we don't retry on every frame
+            this._contentUnloaded = false;
+            return;
+        }
+
+        // If caller provides a fresh atlas (e.g. after regeneration), swap it in
+        // before _ensureCollection() reads this.atlas.
+        if (atlas && atlas !== this.atlas) {
+            this.atlas = atlas;
+        }
+
+        // Reconstruct the collection (also marks _contentUnloaded = false)
+        this._ensureCollection();
+
+        // Re-run the full layout pipeline using the worker path
+        await this._layoutContentAsync();
+
+        // Re-fit the background to the rebuilt content bounds
+        this._updateBackground();
+    }
+
+    /**
      * Dispose of all resources
      */
     dispose() {
         // Dispose collection
         if (this._collection) {
+            // Remove group from our children before dispose() tries scene.remove()
+            if (this._collection.group) {
+                this.remove(this._collection.group);
+            }
             this._collection.dispose();
             this._collection = null;
         }
@@ -362,9 +449,39 @@ class CodeGrid extends THREE.Object3D {
         this.content = '';
         this.lines = [];
         this._contentTextIds = [];
+        this._contentUnloaded = false;
     }
 
     // ============ Private Methods ============
+
+    /**
+     * Ensure the GlyphCollection exists, reconstructing it from the stored atlas
+     * if content was previously evicted. Called at the top of loadText() and
+     * loadTextAsync() so those methods are safe to use on evicted grids.
+     * @private
+     */
+    _ensureCollection() {
+        if (this._collection) return; // already present
+
+        this._collection = new GlyphCollection(this.scene, this.atlas, {
+            maxInstances: this.config.maxChars,
+            defaultColor: this.config.textColor,
+            worldScale: this.config.worldScale
+        });
+
+        this.add(this._collection.group);
+
+        // Re-derive metrics in case atlas changed
+        const collectionMetrics = this._collection._getMetrics();
+        this.metrics = {
+            charWidth: collectionMetrics.charWidth,
+            charHeight: collectionMetrics.charHeight,
+            lineHeight: collectionMetrics.lineSpacing,
+            spacing: collectionMetrics.letterSpacing
+        };
+
+        this._contentUnloaded = false;
+    }
 
     /**
      * Initialize background plane
@@ -652,7 +769,7 @@ class CodeGrid extends THREE.Object3D {
             return;
         }
 
-        const bounds = this._collection.getBounds();
+        const bounds = this._collection ? this._collection.getBounds() : null;
         if (!bounds) {
             this._background.visible = false;
             return;

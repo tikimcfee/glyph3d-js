@@ -193,36 +193,45 @@ function updateStats() {
 // ---------------------------------------------------------------------------
 // Render loop
 // ---------------------------------------------------------------------------
+let _pickPending = false;
+
 function animate() {
     requestAnimationFrame(animate);
 
-    // Run picking pass and read result
-    const hoverId = pickingSystem.renderAndRead(camera, scene);
+    // Run picking pass with async readback. A pending-result guard prevents
+    // overlapping async frames — if a pick is already in flight we skip it
+    // and rely on _needsPick being re-set on the next mousemove.
+    if (!_pickPending) {
+        _pickPending = true;
+        pickingSystem.renderAndReadAsync(camera, scene).then(hoverId => {
+            _pickPending = false;
 
-    // Update hover info
-    if (hoverId !== lastHoverId) {
-        // Clear previous highlight
-        if (lastHoverSlot >= 0 && glyphRenderer) {
-            glyphRenderer.setGlyphHighlight(lastHoverSlot, null);
-        }
+            // Update hover info
+            if (hoverId !== lastHoverId) {
+                // Clear previous highlight
+                if (lastHoverSlot >= 0 && glyphRenderer) {
+                    glyphRenderer.setGlyphHighlight(lastHoverSlot, null);
+                }
 
-        lastHoverId = hoverId;
+                lastHoverId = hoverId;
 
-        if (hoverId !== 0) {
-            const hit = pickingSystem.resolve(hoverId);
-            if (hit) {
-                lastHoverSlot = hit.slotIndex;
-                const glyph = pickingSystem.resolveGlyph(hit.renderer, hit.slotIndex);
-                hoverEl.innerHTML = `Hover ID: <b>${hoverId}</b><br>` +
-                    `Slot: <b>${hit.slotIndex}</b><br>` +
-                    (glyph ? `textId: <b>${glyph.textId}</b>  char[${glyph.charIndex}]` : 'unresolved');
-                // Highlight hovered glyph
-                hit.renderer.setGlyphHighlight(hit.slotIndex, { r: 0.4, g: 0.4, b: 0.0 });
+                if (hoverId !== 0) {
+                    const hit = pickingSystem.resolve(hoverId);
+                    if (hit) {
+                        lastHoverSlot = hit.slotIndex;
+                        const glyph = pickingSystem.resolveGlyph(hit.renderer, hit.slotIndex);
+                        hoverEl.innerHTML = `Hover ID: <b>${hoverId}</b><br>` +
+                            `Slot: <b>${hit.slotIndex}</b><br>` +
+                            (glyph ? `textId: <b>${glyph.textId}</b>  char[${glyph.charIndex}]` : 'unresolved');
+                        // Highlight hovered glyph
+                        hit.renderer.setGlyphHighlight(hit.slotIndex, { r: 0.4, g: 0.4, b: 0.0 });
+                    }
+                } else {
+                    lastHoverSlot = -1;
+                    hoverEl.innerHTML = 'Hover: <em>none</em>';
+                }
             }
-        } else {
-            lastHoverSlot = -1;
-            hoverEl.innerHTML = 'Hover: <em>none</em>';
-        }
+        });
     }
 
     // Render main scene
@@ -283,8 +292,8 @@ function testPhase2() {
 
     const prev = renderer.domElement.onmousemove;
     let testCount = 0;
-    const logHover = () => {
-        const id = pickingSystem.renderAndRead(camera, scene);
+    const logHover = async () => {
+        const id = await pickingSystem.renderAndReadAsync(camera, scene);
         if (id !== 0 && testCount < 5) {
             const hit = pickingSystem.resolve(id);
             const glyph = hit ? pickingSystem.resolveGlyph(hit.renderer, hit.slotIndex) : null;

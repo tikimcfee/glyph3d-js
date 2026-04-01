@@ -50,8 +50,10 @@ class GlyphAtlas {
         // colliding with any single-codepoint glyph. Set during generate().
         this._nextSyntheticId = 0x3000; // safe floor; updated after charset scan
 
-        // Hard cap on synthetic entries (keeps DataTexture compact)
-        this._maxSyntheticIds = 4096;
+        // Cap on synthetic entries — scales with atlas area.
+        // A 2048x2048 atlas at 48px font fits ~1700 glyphs, 4096x4096 fits ~6800,
+        // 8192x8192 fits ~27000. Set cap generously above what the bitmap can hold.
+        this._maxSyntheticIds = 16384;
 
         // The actual atlas texture
         this.atlasTexture = null;
@@ -713,6 +715,151 @@ class GlyphAtlas {
         console.debug(`[GlyphAtlas] Atlas map regrown: ${width}x${newHeight} for numeric ID 0x${numericId.toString(16).toUpperCase()}`);
 
         tex.needsUpdate = true;
+    }
+
+    // ========================================
+    // Pre-bake Export / Import API
+    // ========================================
+
+    /**
+     * Serialize atlas state for pre-baking. Run once at build time.
+     *
+     * The returned `descriptor` contains all glyph metrics, UV coordinates,
+     * DataTexture IDs, packing cursor state, and rendering constants needed to
+     * fully reconstruct the atlas via {@link GlyphAtlas.fromPrebuilt} without
+     * calling generate(). The `image` field is a data URL (PNG) of the atlas
+     * canvas, suitable for embedding or writing to disk.
+     *
+     * @returns {{image: string, descriptor: Object}}
+     */
+    exportAtlas() {
+        if (!this.atlasCanvas || !this.ctx) {
+            throw new Error('GlyphAtlas.exportAtlas: atlas not generated yet. Call generate() first.');
+        }
+
+        const glyphs = {};
+        for (const [grapheme, uv] of this.uvMap) {
+            const m = this.metrics.get(grapheme);
+            glyphs[grapheme] = {
+                numericId: this._graphemeIds.get(grapheme),
+                u0: uv.u0,
+                v0: uv.v0,
+                u1: uv.u1,
+                v1: uv.v1,
+                width: m ? m.width : 0,
+                height: m ? m.height : 0,
+                advance: m ? m.advance : 0,
+            };
+        }
+
+        const descriptor = {
+            // Canvas / font configuration
+            textureWidth: this.atlasCanvas.width,
+            textureHeight: this.atlasCanvas.height,
+            fontSize: this.fontSize,
+            fontFamily: this.fontFamily,
+            glyphPadding: this.glyphPadding,
+
+            // Derived rendering constants (computed once in generate())
+            standardCellWidth: this.standardCellWidth,
+            standardCellHeight: this.standardCellHeight,
+            baselineOffset: this.baselineOffset,
+            glyphHeight: this.glyphHeight,
+            uvInsets: { ...this.uvInsets },
+
+            // Packing cursor — so ensureGraphemes() can continue without overwriting
+            packingState: { ...this.packingState },
+
+            // Synthetic ID allocation state
+            nextSyntheticId: this._nextSyntheticId,
+            syntheticIdBase: this._syntheticIdBase ?? this._nextSyntheticId,
+            maxSyntheticIds: this._maxSyntheticIds,
+
+            // All glyphs: metrics + UVs + numeric DataTexture IDs
+            glyphs,
+        };
+
+        return {
+            image: this.atlasCanvas.toDataURL('image/png'),
+            descriptor,
+        };
+    }
+
+    /**
+     * Create a GlyphAtlas from pre-baked data without runtime Canvas 2D rasterization.
+     *
+     * Reconstructs all internal state (uvMap, metrics, _graphemeIds, packing cursor,
+     * rendering constants, Three.js textures) so that:
+     *   - getSharedThreeTexture() returns a valid CanvasTexture backed by the loaded image
+     *   - getAtlasMapTexture() returns the correct DataTexture for GPU codepoint lookup
+     *   - ensureGraphemes() can still add new glyphs not covered by the pre-baked set
+     *
+     * @param {Object} descriptor - JSON descriptor from exportAtlas()
+     * @param {HTMLImageElement|ImageBitmap} image - Loaded atlas PNG
+     * @returns {GlyphAtlas}
+     */
+    static fromPrebuilt(descriptor, image) {
+        const atlas = new GlyphAtlas(
+            descriptor.fontFamily,
+            descriptor.fontSize,
+            descriptor.textureWidth  // atlasSize
+        );
+
+        // ---- Canvas reconstruction ----
+        // Create a canvas of the correct dimensions and draw the pre-baked image onto it.
+        // This gives getSharedThreeTexture() and getAtlasTexture() a real canvas to wrap.
+        atlas.atlasCanvas = document.createElement('canvas');
+        atlas.atlasCanvas.width = descriptor.textureWidth;
+        atlas.atlasCanvas.height = descriptor.textureHeight;
+        atlas.ctx = atlas.atlasCanvas.getContext('2d', { willReadFrequently: true });
+
+        // Draw pre-baked PNG — this is the pixel data, do not clear first
+        atlas.ctx.drawImage(image, 0, 0);
+
+        // ---- Rendering constants ----
+        atlas.glyphPadding    = descriptor.glyphPadding;
+        atlas.standardCellWidth  = descriptor.standardCellWidth;
+        atlas.standardCellHeight = descriptor.standardCellHeight;
+        atlas.baselineOffset     = descriptor.baselineOffset;
+        atlas.glyphHeight        = descriptor.glyphHeight;
+        atlas.uvInsets           = { ...descriptor.uvInsets };
+
+        // ---- Packing cursor ----
+        // Set to the state after all pre-baked glyphs were placed.
+        // ensureGraphemes() will continue from here, appending new glyphs
+        // without overwriting anything already in the image.
+        atlas.packingState = { ...descriptor.packingState };
+
+        // ---- Synthetic ID allocation ----
+        atlas._nextSyntheticId  = descriptor.nextSyntheticId;
+        atlas._syntheticIdBase  = descriptor.syntheticIdBase;
+        atlas._maxSyntheticIds  = descriptor.maxSyntheticIds;
+
+        // ---- Glyph maps ----
+        for (const [grapheme, entry] of Object.entries(descriptor.glyphs)) {
+            atlas.uvMap.set(grapheme, {
+                u0: entry.u0,
+                v0: entry.v0,
+                u1: entry.u1,
+                v1: entry.v1,
+            });
+            atlas.metrics.set(grapheme, {
+                width:   entry.width,
+                height:  entry.height,
+                advance: entry.advance,
+            });
+            atlas._graphemeIds.set(grapheme, entry.numericId);
+        }
+
+        // ---- Context font setup ----
+        // Prime the context so ensureGraphemes() can call _setupContextFont() and measure.
+        atlas._setupContextFont();
+
+        // Serialized caches are intentionally null — they'll be built lazily.
+        atlas._serializedUVMapCache = null;
+        atlas._serializedWidthsCache = null;
+
+        return atlas;
     }
 
     /**

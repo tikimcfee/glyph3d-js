@@ -19,6 +19,15 @@
 
 import * as THREE from 'three';
 
+// Distance factor beyond which an inactive grid is eligible for GPU eviction.
+// A grid must be at least (hysteresis * EVICTION_DISTANCE_FACTOR) world units
+// from the camera before eviction is considered.
+const EVICTION_DISTANCE_FACTOR = 10.0;
+
+// How long (ms) a grid must continuously sit beyond the eviction distance before
+// its GPU buffers are released. Prevents thrashing at the boundary.
+const EVICTION_DELAY_MS = 5000;
+
 export default class GridVirtualizer {
     /**
      * @param {THREE.Scene} scene
@@ -27,14 +36,24 @@ export default class GridVirtualizer {
      * @param {number} [options.budget=500] - Max simultaneously visible grids
      * @param {number} [options.hysteresis=50] - World-unit margin before removing a grid
      *   that just left the frustum. Prevents popping during small camera movements.
+     * @param {GlyphAtlas|null} [options.atlas=null] - Atlas passed to reloadContent().
+     *   Required if memory reclamation (GPU eviction) is desired.
+     * @param {boolean} [options.enableEviction=false] - Enable GPU buffer eviction for
+     *   far-away grids. When true, grids beyond (hysteresis * EVICTION_DISTANCE_FACTOR)
+     *   for EVICTION_DELAY_MS milliseconds will have unloadContent() called on them,
+     *   and reloadContent() called when they re-enter the frustum.
      */
-    constructor(scene, camera, { budget = Infinity, hysteresis = 50 } = {}) {
+    constructor(scene, camera, { budget = Infinity, hysteresis = 50, atlas = null, enableEviction = false } = {}) {
         this.scene = scene;
         this.camera = camera;
         this.budget = budget;
         this.hysteresis = hysteresis;
 
-        /** @type {Map<CodeGrid, {bounds: THREE.Box3, active: boolean, distance: number}>} */
+        // Memory reclamation
+        this._atlas = atlas;
+        this._enableEviction = enableEviction;
+
+        /** @type {Map<CodeGrid, {bounds: THREE.Box3, active: boolean, distance: number, evicted: boolean, _evictionTimer: number|null}>} */
         this._entries = new Map();
 
         /** @type {Set<CodeGrid>} grids currently in the scene */
@@ -74,7 +93,13 @@ export default class GridVirtualizer {
         // must be tracked as active, otherwise the virtualizer never removes them.
         const alreadyInScene = grid.parent != null;
         if (alreadyInScene) this._active.add(grid);
-        this._entries.set(grid, { bounds, active: alreadyInScene, distance: Infinity });
+        this._entries.set(grid, {
+            bounds,
+            active: alreadyInScene,
+            distance: Infinity,
+            evicted: false,
+            _evictionTimer: null
+        });
         this._dirty = true; // force next update() to run fully (bypass movement check)
     }
 
@@ -239,6 +264,48 @@ export default class GridVirtualizer {
             }
         }
 
+        // Memory reclamation: evict GPU buffers for grids far from the camera
+        if (this._enableEviction) {
+            const evictionDistance = this.hysteresis * EVICTION_DISTANCE_FACTOR;
+            const now = performance.now();
+
+            for (const [grid, entry] of this._entries) {
+                if (entry.active) {
+                    // Grid is visible — cancel any pending eviction timer and reload
+                    // if it had previously been evicted.
+                    entry._evictionTimer = null;
+
+                    if (entry.evicted) {
+                        // Re-entering visibility: restore GPU buffers asynchronously.
+                        // Grid renders empty for at most one worker round-trip, which is
+                        // acceptable. The reload is fire-and-forget; errors are logged by
+                        // the collection internals.
+                        entry.evicted = false;
+                        grid.reloadContent(this._atlas).catch(() => {
+                            // If reload fails, mark as not evicted so we don't retry
+                            // every frame (the grid will just stay blank until the next
+                            // visibility transition).
+                        });
+                    }
+                } else if (!entry.evicted && entry.distance > evictionDistance) {
+                    // Inactive and far: start or continue the eviction countdown
+                    if (entry._evictionTimer === null) {
+                        entry._evictionTimer = now;
+                    } else if (now - entry._evictionTimer >= EVICTION_DELAY_MS) {
+                        // Sustained absence — release GPU buffers
+                        grid.unloadContent();
+                        entry.evicted = true;
+                        entry._evictionTimer = null;
+                    }
+                } else {
+                    // Inactive but close enough, or already evicted — reset timer
+                    if (!entry.evicted) {
+                        entry._evictionTimer = null;
+                    }
+                }
+            }
+        }
+
         this._stats.active = this._active.size;
         this._stats.total = this._entries.size;
         this._stats.lastUpdateMs = performance.now() - t0;
@@ -258,10 +325,37 @@ export default class GridVirtualizer {
     }
 
     /**
-     * @returns {{ active: number, total: number, lastUpdateMs: number }}
+     * Update the atlas reference used by reloadContent().
+     * Call this if the GlyphAtlas is regenerated after virtualizer construction.
+     * @param {GlyphAtlas} atlas
+     */
+    setAtlas(atlas) {
+        this._atlas = atlas;
+    }
+
+    /**
+     * Enable or disable GPU buffer eviction at runtime.
+     * @param {boolean} enabled
+     */
+    setEvictionEnabled(enabled) {
+        this._enableEviction = enabled;
+        if (!enabled) {
+            // Cancel all pending timers so disabled state is clean
+            for (const entry of this._entries.values()) {
+                entry._evictionTimer = null;
+            }
+        }
+    }
+
+    /**
+     * @returns {{ active: number, total: number, evicted: number, lastUpdateMs: number }}
      */
     getStats() {
-        return { ...this._stats };
+        let evicted = 0;
+        for (const entry of this._entries.values()) {
+            if (entry.evicted) evicted++;
+        }
+        return { ...this._stats, evicted };
     }
 
     /**

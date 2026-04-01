@@ -10,6 +10,7 @@
 // Core rendering
 export { default as GlyphAtlas } from './GlyphAtlas.js';
 export { default as GlyphRenderer } from './GlyphRenderer.js';
+export { loadPrebakedAtlas } from './GlyphAtlasLoader.js';
 
 // Collections - batched text abstractions
 export { default as GlyphCollection } from './collections/GlyphCollection.js';

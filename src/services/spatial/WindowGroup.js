@@ -53,9 +53,9 @@ function boundsFromBox3(box) {
  * @returns {TargetPosition[]}
  */
 function stackLayout(members, anchor, config = {}) {
-    const zStep = config.zStep ?? 2;
-    const peekX = config.peekX ?? 3;
-    const peekY = config.peekY ?? -3;
+    const zStep = config.zStep ?? 1.5;
+    const peekX = config.peekX ?? 1.5;
+    const peekY = config.peekY ?? -1.5;
 
     return members.map((m, i) => ({
         id: m.id,
@@ -94,6 +94,62 @@ function splayLayout(members, anchor, config = {}) {
 }
 
 /**
+ * Horizontal layout: grids side-by-side in a row, spaced by actual widths.
+ *
+ * @param {MemberInfo[]} members
+ * @param {{ x: number, y: number, z: number }} anchor
+ * @param {Object} [config]
+ * @param {number} [config.gap=10] - gap between grids
+ * @returns {TargetPosition[]}
+ */
+function horizontalLayout(members, anchor, config = {}) {
+    const gap = config.gap ?? 10;
+    const targets = [];
+    let cursorX = anchor.x;
+
+    for (const m of members) {
+        targets.push({
+            id: m.id,
+            position: { x: cursorX, y: anchor.y, z: anchor.z },
+        });
+        if (m.bounds && !m.bounds.isEmpty()) {
+            cursorX += boundsFromBox3(m.bounds).width + gap;
+        } else {
+            cursorX += 50 + gap;
+        }
+    }
+    return targets;
+}
+
+/**
+ * Vertical layout: grids top-to-bottom, spaced by actual heights.
+ *
+ * @param {MemberInfo[]} members
+ * @param {{ x: number, y: number, z: number }} anchor
+ * @param {Object} [config]
+ * @param {number} [config.gap=8] - gap between grids
+ * @returns {TargetPosition[]}
+ */
+function verticalLayout(members, anchor, config = {}) {
+    const gap = config.gap ?? 8;
+    const targets = [];
+    let cursorY = anchor.y;
+
+    for (const m of members) {
+        targets.push({
+            id: m.id,
+            position: { x: anchor.x, y: cursorY, z: anchor.z },
+        });
+        if (m.bounds && !m.bounds.isEmpty()) {
+            cursorY -= boundsFromBox3(m.bounds).height + gap;
+        } else {
+            cursorY -= 30 + gap;
+        }
+    }
+    return targets;
+}
+
+/**
  * Free layout: no position changes -- each window stays where it is.
  *
  * @param {MemberInfo[]} members
@@ -111,9 +167,11 @@ function freeLayout(members) {
 }
 
 const LAYOUT_FNS = {
-    stack: stackLayout,
-    splay: splayLayout,
-    free:  freeLayout,
+    stack:      stackLayout,
+    splay:      splayLayout,
+    horizontal: horizontalLayout,
+    vertical:   verticalLayout,
+    free:       freeLayout,
 };
 
 // ──────────────────────────────────────────────────────────────
@@ -132,7 +190,7 @@ export class WindowGroup {
         /** @type {string[]} ordered registry IDs */
         this.memberIds = [];
 
-        /** @type {'stack'|'splay'|'free'} */
+        /** @type {'stack'|'splay'|'free'|'horizontal'|'vertical'} */
         this.mode = 'free';
 
         /** @type {{ x: number, y: number, z: number }} */
@@ -183,12 +241,13 @@ export class WindowGroup {
      * @param {number} [duration=0.3] - animation duration in seconds
      * @returns {TargetPosition[]}
      */
-    computeLayout(gridLookup, config = {}, duration = 0.3) {
+    computeLayout(gridLookup, config = {}, duration = 0.3, { preserveAnchor = false } = {}) {
         const memberInfos = this._resolveMemberInfos(gridLookup);
         if (memberInfos.length === 0) return [];
 
-        // Update anchor to the centroid of current member positions
-        if (this.mode !== 'free') {
+        // Update anchor to the centroid — skip when a new member is joining
+        // so existing members stay in place and the newcomer flows in.
+        if (this.mode !== 'free' && !preserveAnchor) {
             this._updateAnchor(memberInfos);
         }
 

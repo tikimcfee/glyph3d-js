@@ -150,6 +150,36 @@ export default function registerGroupCommands(router) {
         return { text: `Group "${name}" layout: splay${spacing ? ` (spacing: ${spacing})` : ''}` };
     });
 
+    // ── group.horizontal <group> [gap] ────────────────────────
+    router.register('group.horizontal', (args, ctx) => {
+        const sm = ctx.spatialManager;
+        if (!sm) return { text: 'ERR: spatial manager not available' };
+
+        const name = args[0];
+        if (!name) return { text: 'Usage: group.horizontal <group> [gap]' };
+        if (!sm.getGroup(name)) return { text: `ERR: group "${name}" not found` };
+
+        const gap = args[1] ? parseFloat(args[1]) : undefined;
+        const config = gap ? { gap } : {};
+        sm.setLayout(name, 'horizontal', config);
+        return { text: `Group "${name}" layout: horizontal${gap ? ` (gap: ${gap})` : ''}` };
+    }, { description: 'Arrange group members side-by-side', usage: '<group> [gap]' });
+
+    // ── group.vertical <group> [gap] ────────────────────────
+    router.register('group.vertical', (args, ctx) => {
+        const sm = ctx.spatialManager;
+        if (!sm) return { text: 'ERR: spatial manager not available' };
+
+        const name = args[0];
+        if (!name) return { text: 'Usage: group.vertical <group> [gap]' };
+        if (!sm.getGroup(name)) return { text: `ERR: group "${name}" not found` };
+
+        const gap = args[1] ? parseFloat(args[1]) : undefined;
+        const config = gap ? { gap } : {};
+        sm.setLayout(name, 'vertical', config);
+        return { text: `Group "${name}" layout: vertical${gap ? ` (gap: ${gap})` : ''}` };
+    }, { description: 'Arrange group members top-to-bottom', usage: '<group> [gap]' });
+
     // ── group.free <group> ───────────────────────────────────
     router.register('group.free', (args, ctx) => {
         const sm = ctx.spatialManager;

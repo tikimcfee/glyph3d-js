@@ -49,7 +49,8 @@ import {
 import { TouchController } from './components/TouchController.js';
 import { logCapturePanelHTML, initLogCapturePanel } from './components/LogCapturePanel.js';
 import { diffPanelHTML, initDiffPanel } from './components/DiffPanel.js';
-import { StatePersistence, loadState, resetAllAndReload } from './StatePersistence.js';
+import { StatePersistence, resetAllAndReload } from './StatePersistence.js';
+import { stateController } from '../src/services/state/StateController.js';
 import { getTextExts, getTextNames, setTextExts, setTextNames, getDefaults, resetToDefaults } from '../src/services/data/textFileFilter.js';
 import { HandGestureAdapter } from '../src/services/orchestration/HandGestureAdapter.js';
 import { initCommandCenter } from './commands/index.js';
@@ -147,10 +148,9 @@ export class GitHubRepoViewer {
         // Source mode: 'local' (Go relay FS) or 'github' (default)
         // URL param takes priority, then saved state, then default 'github'.
         const params = new URLSearchParams(window.location.search);
-        const saved = loadState();
         const urlSource = params.get('source');
-        this._sourceMode = urlSource || saved.sourceMode || 'github';
-        this._localRoot = saved.localRoot || '.';
+        this._sourceMode = urlSource || stateController.get('source.mode', 'github');
+        this._localRoot = stateController.get('source.localRoot', '.');
 
         // Tab traversal index (tracks which file is "focused" via Tab key)
         this._tabIndex = -1;
@@ -256,6 +256,11 @@ export class GitHubRepoViewer {
         this.pickingSystem = new PickingSystem(this.renderer, { resolutionScale: 1.0 });
         this._lastPickHit = null;
         this._lastPickSlot = -1;
+
+        // Wire WebGL context restore to picking system render target recreation
+        this.renderer.domElement.addEventListener('webglcontextrestored', () => {
+            this.pickingSystem?.onContextRestored();
+        });
 
         // Frustum-based grid virtualization — only render visible grids
         this.gridVirtualizer = new GridVirtualizer(this.scene, this.camera);
@@ -541,8 +546,8 @@ export class GitHubRepoViewer {
         };
 
         // Restore saved state
-        const savedWsEnabled = localStorage.getItem('glyph3d-ws-enabled');
-        if (savedWsEnabled === 'true') {
+        const savedWsEnabled = stateController.get('ui.wsEnabled', false);
+        if (savedWsEnabled) {
             checkbox.checked = true;
             if (portGroup) portGroup.style.display = '';
             if (statusGroup) statusGroup.style.display = '';
@@ -559,7 +564,7 @@ export class GitHubRepoViewer {
         }
 
         checkbox.addEventListener('change', () => {
-            localStorage.setItem('glyph3d-ws-enabled', checkbox.checked ? 'true' : 'false');
+            stateController.set('ui.wsEnabled', checkbox.checked);
             if (checkbox.checked) {
                 if (portGroup) portGroup.style.display = '';
                 if (statusGroup) statusGroup.style.display = '';
@@ -1272,7 +1277,7 @@ export class GitHubRepoViewer {
 
             // Apply persisted grids scale to newly loaded grids
             if (this.statePersistence) {
-                const scale = this.statePersistence.state.gridsScale;
+                const scale = stateController.get('ui.gridsScale', 1.0);
                 if (scale != null && scale !== 1.0) {
                     for (const grid of this.grids) { grid.scale.setScalar(scale); }
                 }
@@ -1284,8 +1289,7 @@ export class GitHubRepoViewer {
             this.toastUI.show(`Error: ${err.message}`, 'error');
             // Clear loading flag so a caught error doesn't trigger crash detection
             if (this.statePersistence) {
-                this.statePersistence.state.loadingInProgress = false;
-                this.statePersistence._save();
+                this.statePersistence.clearLoadingFlag();
             }
         } finally {
             this.isLoading = false;
@@ -1468,7 +1472,7 @@ export class GitHubRepoViewer {
             }
 
             if (this.statePersistence) {
-                const scale = this.statePersistence.state.gridsScale;
+                const scale = stateController.get('ui.gridsScale', 1.0);
                 if (scale != null && scale !== 1.0) {
                     for (const grid of this.grids) { grid.scale.setScalar(scale); }
                 }
@@ -1479,8 +1483,7 @@ export class GitHubRepoViewer {
             this.loading.hide();
             this.toastUI.show(`Error: ${err.message}`, 'error');
             if (this.statePersistence) {
-                this.statePersistence.state.loadingInProgress = false;
-                this.statePersistence._save();
+                this.statePersistence.clearLoadingFlag();
             }
         } finally {
             this.isLoading = false;
@@ -2070,24 +2073,32 @@ export class GitHubRepoViewer {
             this._commandRouter.context.connectionRenderer.refreshVisibility();
         }
 
-        // GPU picking pass (only runs when mouse has moved)
-        if (this.pickingSystem) {
-            const pickId = this.pickingSystem.renderAndRead(this.camera, this.scene);
-            const hit = this.pickingSystem.resolve(pickId);
+        // GPU picking pass (only runs when mouse has moved).
+        // renderAndReadAsync wraps the sync WebGL2 readback in a Promise so
+        // callers are forward-compatible with a future WebGPU async path.
+        // A pending-result guard prevents overlapping async frames: if a pick
+        // is already in flight we skip the new one and rely on the dirty flag
+        // (_needsPick) being re-set on the next mousemove.
+        if (this.pickingSystem && !this._pickPending) {
+            this._pickPending = true;
+            this.pickingSystem.renderAndReadAsync(this.camera, this.scene).then(pickId => {
+                this._pickPending = false;
+                const hit = this.pickingSystem?.resolve(pickId);
 
-            // Clear previous highlight (guard against disposed renderer)
-            if (this._lastPickHit?.renderer?.instanceMesh && this._lastPickSlot >= 0) {
-                this._lastPickHit.renderer.setGlyphHighlight(this._lastPickSlot, null);
-            }
+                // Clear previous highlight (guard against disposed renderer)
+                if (this._lastPickHit?.renderer?.instanceMesh && this._lastPickSlot >= 0) {
+                    this._lastPickHit.renderer.setGlyphHighlight(this._lastPickSlot, null);
+                }
 
-            if (hit) {
-                hit.renderer.setGlyphHighlight(hit.slotIndex, { r: 0.3, g: 0.3, b: 0.0 });
-                this._lastPickHit = hit;
-                this._lastPickSlot = hit.slotIndex;
-            } else {
-                this._lastPickHit = null;
-                this._lastPickSlot = -1;
-            }
+                if (hit) {
+                    hit.renderer.setGlyphHighlight(hit.slotIndex, { r: 0.3, g: 0.3, b: 0.0 });
+                    this._lastPickHit = hit;
+                    this._lastPickSlot = hit.slotIndex;
+                } else {
+                    this._lastPickHit = null;
+                    this._lastPickSlot = -1;
+                }
+            });
         }
 
         this.renderer.render(this.scene, this.camera);

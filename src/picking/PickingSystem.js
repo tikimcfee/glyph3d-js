@@ -31,12 +31,12 @@ in float instanceGroupId;
 
 uniform sampler2D groupTexture;
 uniform float groupTextureHeight;
-uniform float uBasePickingId;
+uniform int uBasePickingId;
 `;
 
 // Cell mode: solid quads, no atlas sampling
 const PICKING_VERTEX_CELL = PICKING_VERTEX_CORE + `
-out float vPickingId;
+flat out int vPickingId;
 
 void main() {
     vec3 scaled = position * vec3(instanceSize, 1.0);
@@ -52,20 +52,20 @@ void main() {
 
     vec3 worldPos = scaled + alignOffset + instancePosition * gScale.xyz + gPos.xyz;
     gl_Position = projectionMatrix * modelViewMatrix * vec4(worldPos, 1.0);
-    vPickingId = uBasePickingId + float(gl_InstanceID);
+    vPickingId = uBasePickingId + gl_InstanceID;
 }
 `;
 
 const PICKING_FRAGMENT_CELL = `
 precision highp float;
-in float vPickingId;
+flat in int vPickingId;
 out vec4 fragColor;
 void main() {
-    float id = vPickingId;
-    float r = floor(id / 65536.0);
-    float g = floor(mod(id, 65536.0) / 256.0);
-    float b = mod(id, 256.0);
-    fragColor = vec4(r / 255.0, g / 255.0, b / 255.0, 1.0);
+    int id = vPickingId;
+    int r = (id >> 16) & 0xFF;
+    int g = (id >> 8) & 0xFF;
+    int b = id & 0xFF;
+    fragColor = vec4(float(r) / 255.0, float(g) / 255.0, float(b) / 255.0, 1.0);
 }
 `;
 
@@ -77,7 +77,7 @@ uniform sampler2D atlasMapTexture;
 uniform float atlasMapWidth;
 uniform float atlasMapHeight;
 
-out float vPickingId;
+flat out int vPickingId;
 out highp vec2 vUV;
 
 void main() {
@@ -94,7 +94,7 @@ void main() {
 
     vec3 worldPos = scaled + alignOffset + instancePosition * gScale.xyz + gPos.xyz;
     gl_Position = projectionMatrix * modelViewMatrix * vec4(worldPos, 1.0);
-    vPickingId = uBasePickingId + float(gl_InstanceID);
+    vPickingId = uBasePickingId + gl_InstanceID;
 
     float cp = instanceCodepoint;
     float mapCol = mod(cp, atlasMapWidth);
@@ -109,17 +109,17 @@ void main() {
 const PICKING_FRAGMENT_GLYPH = `
 precision highp float;
 uniform sampler2D atlasTexture;
-in float vPickingId;
+flat in int vPickingId;
 in highp vec2 vUV;
 out vec4 fragColor;
 void main() {
     float alpha = texture(atlasTexture, vUV).a;
     if (alpha < 0.01) discard;
-    float id = vPickingId;
-    float r = floor(id / 65536.0);
-    float g = floor(mod(id, 65536.0) / 256.0);
-    float b = mod(id, 256.0);
-    fragColor = vec4(r / 255.0, g / 255.0, b / 255.0, 1.0);
+    int id = vPickingId;
+    int r = (id >> 16) & 0xFF;
+    int g = (id >> 8) & 0xFF;
+    int b = id & 0xFF;
+    fragColor = vec4(float(r) / 255.0, float(g) / 255.0, float(b) / 255.0, 1.0);
 }
 `;
 
@@ -167,6 +167,21 @@ export class PickingSystem {
     // -------------------------------------------------------------------------
     // Target management
     // -------------------------------------------------------------------------
+
+    /**
+     * Recreate the offscreen render target after a WebGL context restore.
+     * Call this from the renderer's contextrestored handler.
+     */
+    onContextRestored() {
+        if (this._target) {
+            this._target.dispose();
+            this._target = null;
+        }
+        this._createTarget();
+        // Invalidate last pick so the next frame forces a fresh read.
+        this._needsPick = true;
+        this._lastPickedId = 0;
+    }
 
     /** @private */
     _createTarget() {
@@ -290,21 +305,15 @@ export class PickingSystem {
     // -------------------------------------------------------------------------
 
     /**
-     * Swap picking materials onto registered glyph meshes, render the main
-     * scene to the picking target, read the pixel under the cursor, swap back.
+     * Render the picking pass to the offscreen target and restore state.
+     * Does not read the pixel — call readPixelAsync() after this.
      *
-     * The meshes stay in the main scene graph with their real transforms —
-     * the picking texture is a pixel-perfect spatial mirror of the visible
-     * render. The swap is just JS property assignments (no GPU work).
-     *
+     * @private
      * @param {THREE.Camera} camera
-     * @param {THREE.Scene} scene - The main scene
-     * @returns {number} Picking ID (0 = no hit)
+     * @param {THREE.Scene} scene
+     * @returns {number} t0 timestamp (performance.now() before render)
      */
-    renderAndRead(camera, scene) {
-        if (!this._needsPick) return this._lastPickedId;
-        this._needsPick = false;
-
+    _renderPickingPass(camera, scene) {
         // Auto-resize target if renderer size changed (e.g. IDE ResizeObserver)
         const size = this._renderer.getSize(this._sizeVec);
         const dpr = this._renderer.getPixelRatio();
@@ -335,22 +344,9 @@ export class PickingSystem {
         this._renderer.render(scene, camera);
 
         const tRender = performance.now();
+        this._lastRenderMs = tRender - t0;
 
-        // Read pixel at mouse position.
-        // Use Three.js readRenderTargetPixels instead of raw gl.readPixels
-        // to ensure the correct framebuffer is bound after render().
-        const { x, y } = this._mousePixel;
-        let id = 0;
-        if (x >= 0 && y >= 0 && x < this._target.width && y < this._target.height) {
-            this._renderer.readRenderTargetPixels(
-                this._target, x, this._target.height - 1 - y, 1, 1, this._readBuffer
-            );
-            const [r, g, b] = this._readBuffer;
-            id = (r << 16) | (g << 8) | b;
-        }
-
-        const tRead = performance.now();
-
+        // Restore render target and clear color before pixel read.
         this._renderer.setRenderTarget(null);
         this._renderer.setClearColor(prevClearColor, prevClearAlpha);
 
@@ -362,12 +358,94 @@ export class PickingSystem {
             entry._savedMaterial = null;
         }
 
-        // Track timing
-        this._lastRenderMs = tRender - t0;
-        this._lastReadMs = tRead - tRender;
+        return t0;
+    }
+
+    /**
+     * Read the pixel at the current mouse position from the picking target.
+     *
+     * Returns a Promise that resolves to a Uint8Array(4) containing the RGBA
+     * bytes of the sampled pixel. On WebGL2 the read is synchronous under the
+     * hood; the Promise wrapper exists so callers do not bake in sync
+     * assumptions before a WebGPU async readback path is introduced.
+     *
+     * Must be called after _renderPickingPass() while the picking target still
+     * contains the most-recent render.
+     *
+     * @param {number} [t0] - Start timestamp from _renderPickingPass, for timing.
+     * @returns {Promise<Uint8Array>} Four-byte RGBA pixel, or all-zeros if out of bounds.
+     */
+    async readPixelAsync(t0) {
+        const { x, y } = this._mousePixel;
+        const pixel = new Uint8Array(4);
+        if (this._target && x >= 0 && y >= 0 && x < this._target.width && y < this._target.height) {
+            this._renderer.readRenderTargetPixels(
+                this._target, x, this._target.height - 1 - y, 1, 1, this._readBuffer
+            );
+            pixel.set(this._readBuffer);
+        }
+        if (t0 !== undefined) {
+            const tRead = performance.now();
+            this._lastReadMs = tRead - (t0 + (this._lastRenderMs ?? 0));
+            this._lastTotalMs = tRead - t0;
+        }
+        return pixel;
+    }
+
+    /**
+     * Swap picking materials onto registered glyph meshes, render the main
+     * scene to the picking target, read the pixel under the cursor, swap back.
+     *
+     * The meshes stay in the main scene graph with their real transforms —
+     * the picking texture is a pixel-perfect spatial mirror of the visible
+     * render. The swap is just JS property assignments (no GPU work).
+     *
+     * @param {THREE.Camera} camera
+     * @param {THREE.Scene} scene - The main scene
+     * @returns {number} Picking ID (0 = no hit)
+     */
+    renderAndRead(camera, scene) {
+        if (!this._needsPick) return this._lastPickedId;
+        this._needsPick = false;
+
+        const t0 = this._renderPickingPass(camera, scene);
+
+        // Read pixel synchronously — same GPU call as before, just factored out.
+        const { x, y } = this._mousePixel;
+        let id = 0;
+        if (this._target && x >= 0 && y >= 0 && x < this._target.width && y < this._target.height) {
+            this._renderer.readRenderTargetPixels(
+                this._target, x, this._target.height - 1 - y, 1, 1, this._readBuffer
+            );
+            const [r, g, b] = this._readBuffer;
+            id = (r << 16) | (g << 8) | b;
+        }
+
+        const tRead = performance.now();
+        this._lastReadMs = tRead - (t0 + this._lastRenderMs);
         this._lastTotalMs = tRead - t0;
         this._lastPickedId = id;
 
+        return id;
+    }
+
+    /**
+     * Async variant of renderAndRead. Use this when the caller can await —
+     * the pixel read is wrapped in Promise.resolve() so the call site is
+     * forward-compatible with a future WebGPU async readback implementation.
+     *
+     * @param {THREE.Camera} camera
+     * @param {THREE.Scene} scene - The main scene
+     * @returns {Promise<number>} Picking ID (0 = no hit)
+     */
+    async renderAndReadAsync(camera, scene) {
+        if (!this._needsPick) return this._lastPickedId;
+        this._needsPick = false;
+
+        const t0 = this._renderPickingPass(camera, scene);
+        const pixel = await this.readPixelAsync(t0);
+        const id = (pixel[0] << 16) | (pixel[1] << 8) | pixel[2];
+        this._lastPickedId = id;
         return id;
     }
 

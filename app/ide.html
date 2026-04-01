@@ -37,6 +37,9 @@
             <button class="activity-btn" data-panel="groups" title="Window Groups">
                 <span class="activity-icon">&#9638;</span>
             </button>
+            <button class="activity-btn" data-panel="state" title="State Inspector">
+                <span class="activity-icon">&#128190;</span>
+            </button>
             <div class="activity-spacer"></div>
             <!-- Bottom-pinned items -->
             <button class="activity-btn" data-panel="hand-tracking" title="Hand Tracking">
@@ -81,6 +84,9 @@
 
                 <!-- Window groups panel -->
                 <div class="sidebar-panel" id="sp-groups"></div>
+
+                <!-- State inspector panel -->
+                <div class="sidebar-panel" id="sp-state"></div>
 
                 <!-- Hand tracking panel -->
                 <div class="sidebar-panel" id="sp-hand-tracking"></div>
@@ -191,6 +197,7 @@
         import { DrawerController } from './components/Drawer.js';
         import { IDEShell } from './IDEShell.js';
         import CommandBar from './components/CommandBar.js';
+        import { stateController } from '../src/services/state/StateController.js';
 
         document.addEventListener('DOMContentLoaded', async () => {
             const canvas = document.getElementById('canvas');
@@ -244,6 +251,8 @@
                     initGroupsPanel(gpEl, {
                         spatialManager: viewer.spatialManager,
                         registry: viewer.registry,
+                        animator: viewer.spatialAnimator,
+                        camera: viewer.camera,
                     });
                 }
             }
@@ -251,6 +260,16 @@
             // Wire WebSocket log panel to bridge
             if (viewer._wsBridge) {
                 ide.initWsLog(viewer._wsBridge);
+            }
+
+            // Wire State Inspector panel
+            {
+                const { statePanelHTML, initStatePanel } = await import('./components/StatePanel.js');
+                const spEl = document.getElementById('sp-state');
+                if (spEl) {
+                    spEl.innerHTML = statePanelHTML();
+                    initStatePanel(spEl);
+                }
             }
 
             // ---- Command Bar: unified input surface ----
@@ -346,11 +365,10 @@
                 if (owner && repo) {
                     // Check crash detection — if the previous load OOM'd, don't
                     // auto-load from URL either. The user can hit Load manually.
-                    const crashGuard = viewer.statePersistence?.state?.loadingInProgress;
+                    const crashGuard = stateController.get('repo.loadingInProgress', false);
                     if (crashGuard) {
                         console.warn('[ide] Skipping URL auto-load — previous load crashed (OOM?)');
-                        viewer.statePersistence.state.loadingInProgress = false;
-                        viewer.statePersistence._save();
+                        stateController.set('repo.loadingInProgress', false);
                     }
 
                     // Set the input fields so the user can see/edit the repo

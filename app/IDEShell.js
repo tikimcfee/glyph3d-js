@@ -36,6 +36,7 @@ const PANEL_TITLES = {
     'diff':          'SOURCE CONTROL',
     'settings':      'SETTINGS',
     'groups':        'WINDOW GROUPS',
+    'state':         'STATE INSPECTOR',
     'hand-tracking': 'HAND TRACKING',
     'controls':      'KEYBOARD SHORTCUTS',
 };

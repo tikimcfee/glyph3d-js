@@ -13,7 +13,9 @@
 
 import * as THREE from 'three';
 import { screenToWorldDelta } from '../spatial/spatialMath.js';
+import { createLogger } from '../../utils/Logger.js';
 
+const log = createLogger('hitDispatch', 0);
 const CLICK_THRESHOLD_PX = 5;
 const DROP_OVERLAP_THRESHOLD = 0.30;
 
@@ -78,6 +80,8 @@ export class HitDispatcher {
     _handleMouseDown(e) {
         const hit = this._raycastDraggable(e.clientX, e.clientY);
         if (!hit) return; // Miss: let event bubble to VCC for camera drag
+
+        log.debug(`mousedown HIT: ${hit.registryId}`);
 
         // Hit: suppress camera drag
         e.stopPropagation();
@@ -159,6 +163,7 @@ export class HitDispatcher {
         }
 
         if (!this._hasMoved) {
+            log.debug(`mouseup: click (no drag) on ${this._dragTarget.registryId}`);
             // Displacement under threshold -> re-emit as canvas-click
             this.canvas.dispatchEvent(new CustomEvent('canvas-click', {
                 detail: {
