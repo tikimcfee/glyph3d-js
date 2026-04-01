@@ -241,7 +241,8 @@ export class ViewerCameraController {
 
         const dist = this.settings.dynamicSpeed ? this._getViewDistance() : 200;
         const fovFactor = 2 * Math.tan((camera.fov * Math.PI / 180) / 2);
-        const pixelScale = (dist * fovFactor) / window.innerHeight;
+        const { height: vpHeight } = getCanvasViewportSize(this.ctx.canvas);
+        const pixelScale = (dist * fovFactor) / vpHeight;
 
         const moveX = (this.settings.invertDragX ? dx : -dx) * pixelScale * sens;
         const moveY = (this.settings.invertDragY ? -dy : dy) * pixelScale * sens;

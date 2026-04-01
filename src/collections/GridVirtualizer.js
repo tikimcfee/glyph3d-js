@@ -166,6 +166,26 @@ export default class GridVirtualizer {
         // Score each grid
         const visible = [];
         for (const [grid, entry] of this._entries) {
+            // User-hidden grids (minimized, group.hide) must not be added to scene
+            if (grid.userData?._userHidden) {
+                if (entry.active) {
+                    this.scene.remove(grid);
+                    entry.active = false;
+                    this._active.delete(grid);
+                }
+                continue;
+            }
+
+            // Drag-pinned grids stay in scene regardless of frustum
+            if (grid.userData?._dragPinned) {
+                if (!entry.active) {
+                    this.scene.add(grid);
+                    entry.active = true;
+                    this._active.add(grid);
+                }
+                continue;
+            }
+
             const inFrustum = this._frustum.intersectsBox(entry.bounds);
 
             if (inFrustum) {

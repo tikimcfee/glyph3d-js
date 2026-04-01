@@ -34,6 +34,9 @@
             <button class="activity-btn" data-panel="settings" title="Settings">
                 <span class="activity-icon">&#9776;</span>
             </button>
+            <button class="activity-btn" data-panel="groups" title="Window Groups">
+                <span class="activity-icon">&#9638;</span>
+            </button>
             <div class="activity-spacer"></div>
             <!-- Bottom-pinned items -->
             <button class="activity-btn" data-panel="hand-tracking" title="Hand Tracking">
@@ -75,6 +78,9 @@
 
                 <!-- Settings panel -->
                 <div class="sidebar-panel" id="sp-settings"></div>
+
+                <!-- Window groups panel -->
+                <div class="sidebar-panel" id="sp-groups"></div>
 
                 <!-- Hand tracking panel -->
                 <div class="sidebar-panel" id="sp-hand-tracking"></div>
@@ -228,6 +234,19 @@
             };
 
             await viewer.init();
+
+            // Wire groups panel directly to the IDE sidebar element
+            if (viewer.spatialManager) {
+                const { groupsPanelHTML, initGroupsPanel } = await import('./components/GroupsPanel.js');
+                const gpEl = document.getElementById('sp-groups');
+                if (gpEl) {
+                    gpEl.innerHTML = groupsPanelHTML();
+                    initGroupsPanel(gpEl, {
+                        spatialManager: viewer.spatialManager,
+                        registry: viewer.registry,
+                    });
+                }
+            }
 
             // Wire WebSocket log panel to bridge
             if (viewer._wsBridge) {

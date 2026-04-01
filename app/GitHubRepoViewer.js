@@ -54,6 +54,9 @@ import { getTextExts, getTextNames, setTextExts, setTextNames, getDefaults, rese
 import { HandGestureAdapter } from '../src/services/orchestration/HandGestureAdapter.js';
 import { initCommandCenter } from './commands/index.js';
 import SceneRegistry from '../src/services/SceneRegistry.js';
+import { SpatialAnimator } from '../src/services/spatial/SpatialAnimator.js';
+import { SpatialWindowManager } from '../src/services/spatial/SpatialWindowManager.js';
+import { HitDispatcher } from '../src/services/interaction/HitDispatcher.js';
 
 /**
  * Parse GitHub URL to owner/repo
@@ -309,6 +312,29 @@ export class GitHubRepoViewer {
                 return { r: 0.2, g: 0.9, b: 0.6 };
             },
         });
+
+        // Spatial animation engine (update() called from animate loop)
+        this.spatialAnimator = new SpatialAnimator();
+
+        // Spatial window manager — group membership, color layers, lifecycle
+        this.spatialManager = new SpatialWindowManager({
+            registry: this.registry,
+            selectionManager: this.selectionManager,
+            fileStateManager: this.fileStateManager,
+            codeColorManager: this.codeColorManager,
+            animator: this.spatialAnimator,
+        });
+
+        // Hit dispatcher — intercepts mousedown on windows before camera drag
+        this.hitDispatcher = new HitDispatcher({
+            canvas: this.canvas,
+            camera: this.camera,
+            scene: this.scene,
+            registry: this.registry,
+            spatialManager: this.spatialManager,
+            virtualizer: this.gridVirtualizer,
+        });
+        this.hitDispatcher.attach();
 
         // Listen for camera focus events to sync tree UI
         window.addEventListener('camera-focus-changed', (e) => {
@@ -776,6 +802,46 @@ export class GitHubRepoViewer {
             const on = this.cameraController.toggleDynamicSpeed();
             this.toastUI?.show(`Dynamic speed ${on ? 'ON' : 'OFF'}`, 'success');
         }, { description: 'Toggle dynamic camera speed' });
+
+        // G — group selected files
+        sm.register('g', () => {
+            if (!this.spatialManager || !this.selectionManager) return;
+            const selected = [...this.selectionManager.getSelected()];
+            if (selected.length < 2) {
+                this.toastUI?.show('Select 2+ files to group', 'warn');
+                return;
+            }
+            const name = `group-${Date.now().toString(36)}`;
+            this.spatialManager.createGroup(name);
+            let added = 0;
+            for (const path of selected) {
+                const entries = this.registry.findByMeta('sourcePath', path);
+                if (entries.length > 0) {
+                    this.spatialManager.addToGroup(name, entries[0].id);
+                    added++;
+                }
+            }
+            this.toastUI?.show(`Grouped ${added} files as "${name}"`, 'success');
+        }, { description: 'Group selected files' });
+
+        // U — ungroup: dissolve the group of the primary selected file
+        sm.register('u', () => {
+            if (!this.spatialManager || !this.selectionManager) return;
+            const primary = this.selectionManager.primary;
+            if (!primary) {
+                this.toastUI?.show('Select a grouped file first', 'warn');
+                return;
+            }
+            const entries = this.registry.findByMeta('sourcePath', primary);
+            if (entries.length === 0) return;
+            const groupName = this.spatialManager.getGroupForGrid(entries[0].id);
+            if (!groupName) {
+                this.toastUI?.show('Selected file is not in a group', 'warn');
+                return;
+            }
+            this.spatialManager.dissolveGroup(groupName);
+            this.toastUI?.show(`Dissolved group "${groupName}"`, 'success');
+        }, { description: 'Dissolve group of selected file' });
     }
 
     /**
@@ -1454,6 +1520,7 @@ export class GitHubRepoViewer {
         if (this.fileStateManager) this.fileStateManager.clear();
         if (this.codeColorManager) this.codeColorManager.resetAllColors();
         if (this.selectionManager) this.selectionManager.dispose();
+        if (this.spatialManager) this.spatialManager.clear();
         this.heatmapProvider = null;
 
         // Clean up overlay managers
@@ -1969,6 +2036,7 @@ export class GitHubRepoViewer {
         this.lastTime = now;
 
         this.cameraController.update(deltaTime);
+        if (this.spatialAnimator) this.spatialAnimator.update(deltaTime);
         if (this.statePersistence) this.statePersistence.markCameraDirty();
         this.updateStats(deltaTime);
 

@@ -28,6 +28,7 @@ export default class AgentGrid {
 
         this._lines = [];
         this._dirty = false;
+        this._rendering = false;
         this._lastRenderedContent = '';
 
         this.grid = new CodeGrid(scene, atlas, {
@@ -79,6 +80,12 @@ export default class AgentGrid {
         return { x: p.x, y: p.y, z: p.z };
     }
 
+    /** Proxy for raycasting -- HitDispatcher accesses entry.grid._background */
+    get _background() { return this.grid?._background ?? null; }
+
+    /** Proxy for bounds queries -- overlap detection, layout, etc. */
+    getBounds() { return this.grid?.getBounds() ?? null; }
+
     setScale(s) { this.grid.scale.setScalar(s); }
 
     // -- Lifecycle --
@@ -99,11 +106,21 @@ export default class AgentGrid {
     }
 
     /** @private */
-    _render() {
+    async _render() {
         this._dirty = false;
+        if (this._rendering) return; // previous loadFileAsync still in flight
         const content = this._lines.join('\n');
         if (content === this._lastRenderedContent) return;
         this._lastRenderedContent = content;
-        this.grid.loadFile(`[${this.title}]`, content);
+        this._rendering = true;
+        try {
+            await this.grid.loadFileAsync(`[${this.title}]`, content);
+        } finally {
+            this._rendering = false;
+            // If new content arrived while we were rendering, schedule another pass
+            if (this._lines.join('\n') !== this._lastRenderedContent) {
+                this._markDirty();
+            }
+        }
     }
 }

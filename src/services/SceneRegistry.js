@@ -26,8 +26,8 @@ export default class SceneRegistry {
         /** @type {Map<string, Object[]>} type -> cached frozen array of grid objects */
         this._typeCache = new Map();
 
-        /** @type {Function|null} external change listener */
-        this._onChange = null;
+        /** @type {Set<Function>} change listeners */
+        this._changeListeners = new Set();
     }
 
     // -- Mutation -------------------------------------------------------
@@ -230,6 +230,22 @@ export default class SceneRegistry {
         return this._entries.size;
     }
 
+    /**
+     * Subscribe to change notifications.
+     * @param {Function} fn - called with (type: string)
+     */
+    addChangeListener(fn) {
+        this._changeListeners.add(fn);
+    }
+
+    /**
+     * Unsubscribe from change notifications.
+     * @param {Function} fn
+     */
+    removeChangeListener(fn) {
+        this._changeListeners.delete(fn);
+    }
+
     // -- Internal -------------------------------------------------------
 
     /**
@@ -239,8 +255,8 @@ export default class SceneRegistry {
      */
     _invalidateCache(type) {
         this._typeCache.delete(type);
-        if (this._onChange) {
-            try { this._onChange(type); } catch (e) {
+        for (const cb of this._changeListeners) {
+            try { cb(type); } catch (e) {
                 console.error('[registry] onChange error:', e);
             }
         }

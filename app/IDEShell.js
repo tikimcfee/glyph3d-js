@@ -35,6 +35,7 @@ const PANEL_TITLES = {
     'repo':          'REPOSITORY',
     'diff':          'SOURCE CONTROL',
     'settings':      'SETTINGS',
+    'groups':        'WINDOW GROUPS',
     'hand-tracking': 'HAND TRACKING',
     'controls':      'KEYBOARD SHORTCUTS',
 };

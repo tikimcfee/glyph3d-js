@@ -18,7 +18,7 @@
  * - Zero additional draw calls, no shader changes
  */
 
-const Z_POP_AMOUNT = 3;
+export const Z_POP_AMOUNT = 3;
 
 export class SelectionManager {
     /**
@@ -248,6 +248,9 @@ export class SelectionManager {
      * @param {THREE.Object3D} grid
      */
     _applyZPop(sourcePath, grid) {
+        // Grouped grids: SpatialWindowManager owns their Z positioning
+        if (grid.userData?._windowGroup) return;
+
         if (!this._originalZ.has(sourcePath)) {
             this._originalZ.set(sourcePath, grid.position.z);
         }

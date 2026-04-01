@@ -1159,3 +1159,31 @@ html, body {
         padding: 0 8px;
     }
 }
+
+/* ── Groups Panel ─────────────────────────────────────── */
+
+.groups-panel { display: flex; flex-direction: column; gap: 8px; }
+.groups-panel-header { display: flex; align-items: center; gap: 8px; }
+.groups-panel-title { font-size: 13px; font-weight: 600; color: var(--text-primary, #e0e0e0); }
+.groups-badge { font-size: 10px; background: var(--surface-2, #333); color: #aaa; padding: 2px 6px; border-radius: 8px; min-width: 18px; text-align: center; }
+.groups-hint { font-size: 11px; color: #666; line-height: 1.5; padding-bottom: 6px; border-bottom: 1px solid var(--border, #2a2a2a); }
+.groups-list { display: flex; flex-direction: column; gap: 6px; max-height: 400px; overflow-y: auto; }
+.groups-empty { font-size: 12px; color: #555; text-align: center; padding: 20px 0; }
+.group-card { background: var(--surface-1, #1a1a1a); border: 1px solid var(--border, #333); border-radius: 6px; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+.group-card-header { display: flex; align-items: center; gap: 6px; }
+.group-color-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+.group-name { font-size: 12px; font-weight: 500; color: var(--text-primary, #e0e0e0); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group-member-count { font-size: 10px; color: #888; background: var(--surface-2, #2a2a2a); padding: 1px 5px; border-radius: 6px; }
+.group-mode-bar { display: flex; gap: 4px; }
+.group-mode-btn { flex: 1; padding: 4px 0; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; background: var(--surface-2, #222); color: #888; border: 1px solid var(--border, #333); border-radius: 4px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+.group-mode-btn:hover { background: #2a2a2a; color: #ccc; }
+.group-mode-btn.active { background: #1a2a1a; color: var(--accent, #00ff88); border-color: var(--accent, #00ff88); }
+.group-members { display: flex; flex-direction: column; gap: 2px; max-height: 100px; overflow-y: auto; }
+.group-member { font-size: 11px; color: #999; padding: 2px 6px; background: var(--surface-0, #111); border-radius: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group-card-actions { display: flex; gap: 4px; padding-top: 4px; border-top: 1px solid var(--border, #2a2a2a); }
+.group-action-btn { flex: 1; padding: 4px 0; font-size: 10px; background: var(--surface-2, #222); color: #aaa; border: 1px solid var(--border, #333); border-radius: 4px; cursor: pointer; font-family: inherit; }
+.group-action-btn:hover { background: #2a2a2a; color: #fff; }
+.group-btn-danger-sm { color: #ff6666; border-color: #442222; }
+.group-btn-danger-sm:hover { background: #2a1a1a; border-color: #ff6666; }
+.groups-btn-danger { color: #ff6666 !important; border-color: #442222 !important; }
+.groups-btn-danger:hover { background: #2a1a1a !important; border-color: #ff6666 !important; }

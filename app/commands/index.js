@@ -91,6 +91,7 @@ function buildContext(viewer) {
         selectionManager: viewer.selectionManager || null,
         fileStateManager: viewer.fileStateManager || null,
         codeColorManager: viewer.codeColorManager || null,
+        spatialManager: viewer.spatialManager || null,
 
         // Layout
         getActiveLayout: () => viewer._activeLayout,

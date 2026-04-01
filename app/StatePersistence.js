@@ -37,6 +37,7 @@ const DEFAULTS = {
     sourceMode: 'github',
     localRoot: '.',
     customFileTypes: null,
+    groups: null,
 };
 
 /**
@@ -180,12 +181,16 @@ export class StatePersistence {
     }
 
     /**
-     * Restore camera position. Call after grids are loaded.
+     * Restore camera position and window groups. Call after grids are loaded.
      */
     restoreCamera() {
         const pos = this.state.cameraPosition;
         if (pos && this.viewer.camera) {
             this.viewer.camera.position.set(pos.x, pos.y, pos.z);
+        }
+        // Restore window groups (must run after grids are registered)
+        if (this.state.groups && this.viewer.spatialManager) {
+            this.viewer.spatialManager.deserialize(this.state.groups);
         }
     }
 
@@ -306,6 +311,8 @@ export class StatePersistence {
         const pos = this.viewer.camera?.position;
         if (pos) {
             this.state.cameraPosition = { x: pos.x, y: pos.y, z: pos.z };
+            // Persist window groups alongside camera state
+            this.state.groups = this.viewer.spatialManager?.serialize() ?? null;
             this._save();
         }
     }
