@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -351,40 +352,32 @@ func (r *Relay) notifyDisplay(event, clientID string) {
 	r.sendToDisplay(msg)
 }
 
-// RunRelay starts the relay server. Blocks until error.
-// fsHandler may be nil if --root was not provided.
-func RunRelay(host string, port int, fsHandler *FSHandler) error {
-	relay := NewRelay()
-	relay.fs = fsHandler
-
-	addr := fmt.Sprintf("%s:%d", host, port)
-	mux := http.NewServeMux()
-	mux.Handle("/", relay)
-
-	// Print connection info
-	log.Printf("[relay] glyph3d WebSocket relay")
-	log.Printf("[relay] Listening on %s", addr)
-	log.Printf("[relay]   ws://localhost:%d", port)
-	if host == "0.0.0.0" {
-		if addrs := getLANAddresses(); len(addrs) > 0 {
-			for _, a := range addrs {
-				log.Printf("[relay]   ws://%s:%d", a, port)
-			}
-		}
-	}
-
-	return http.ListenAndServe(addr, mux)
+// ServerConfig holds all options for the unified server.
+type ServerConfig struct {
+	Host      string     // Listen address (default "0.0.0.0")
+	Port      int        // Listen port (default 8080)
+	FSHandler *FSHandler // Filesystem JSON-RPC handler (nil if no --root)
+	StaticFS  fs.FS      // Static file source: embedded FS or os.DirFS
+	StaticTag string     // Label for logs: "embedded" or the disk path
 }
 
-// startHTTPServer serves static files from root on the given port.
-// Replaces `python3 -m http.server`. Sets correct MIME types for ES modules.
-func startHTTPServer(host string, port int, root string) {
+// RunServer starts a unified HTTP + WebSocket server on a single port.
+// WebSocket upgrade requests go to the relay; everything else serves static files.
+func RunServer(cfg ServerConfig) error {
+	relay := NewRelay()
+	relay.fs = cfg.FSHandler
+
+	fileServer := http.FileServer(http.FS(cfg.StaticFS))
+
 	mux := http.NewServeMux()
-
-	fileServer := http.FileServer(http.Dir(root))
-
-	// Wrap to set correct Content-Type for .mjs and .js files (ES modules need application/javascript)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// WebSocket upgrade → relay
+		if isWebSocketUpgrade(r) {
+			relay.ServeHTTP(w, r)
+			return
+		}
+
+		// Static files — set correct MIME types for ES modules
 		path := r.URL.Path
 		switch {
 		case strings.HasSuffix(path, ".js"), strings.HasSuffix(path, ".mjs"):
@@ -401,17 +394,48 @@ func startHTTPServer(host string, port int, root string) {
 		fileServer.ServeHTTP(w, r)
 	})
 
-	addr := fmt.Sprintf("%s:%d", host, port)
-	log.Printf("[http] Serving %s on http://localhost:%d", root, port)
-	if host == "0.0.0.0" {
+	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
+
+	// Startup banner
+	log.Printf("[glyph3d] ══════════════════════════════════════")
+	log.Printf("[glyph3d] glyph3d-cli — single-binary server")
+	log.Printf("[glyph3d] Static files: %s", cfg.StaticTag)
+	if cfg.FSHandler != nil {
+		log.Printf("[glyph3d] Filesystem:   %s", cfg.FSHandler.root)
+	}
+	log.Printf("[glyph3d] ──────────────────────────────────────")
+	log.Printf("[glyph3d]   http://localhost:%d/app/ide.html", cfg.Port)
+	log.Printf("[glyph3d]   ws://localhost:%d  (relay)", cfg.Port)
+	if cfg.Host == "0.0.0.0" {
 		for _, a := range getLANAddresses() {
-			log.Printf("[http]   http://%s:%d", a, port)
+			log.Printf("[glyph3d]   http://%s:%d/app/ide.html", a, cfg.Port)
 		}
 	}
+	log.Printf("[glyph3d] ══════════════════════════════════════")
 
-	if err := http.ListenAndServe(addr, mux); err != nil {
-		log.Printf("[http] WARNING: %v (static file serving disabled, WebSocket relay still running)", err)
+	return http.ListenAndServe(addr, mux)
+}
+
+func isWebSocketUpgrade(r *http.Request) bool {
+	for _, v := range r.Header["Upgrade"] {
+		if strings.EqualFold(v, "websocket") {
+			return true
+		}
 	}
+	return false
+}
+
+// RunRelay starts the relay-only server (no static files).
+func RunRelay(host string, port int, fsHandler *FSHandler) error {
+	relay := NewRelay()
+	relay.fs = fsHandler
+
+	addr := fmt.Sprintf("%s:%d", host, port)
+	mux := http.NewServeMux()
+	mux.Handle("/", relay)
+
+	log.Printf("[relay] glyph3d WebSocket relay on %s", addr)
+	return http.ListenAndServe(addr, mux)
 }
 
 func getLANAddresses() []string {

@@ -38,3 +38,7 @@ __pycache__/
 cli/glyph3d-cli
 cli/go.sum
 cli/.claude/scheduled_tasks.lock
+cli/web/
+
+# Single-binary build
+glyph3d-cli

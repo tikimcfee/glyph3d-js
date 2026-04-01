@@ -76,7 +76,14 @@ export default class WebSocketBridge {
     connect(url) {
         if (url) this.url = url;
         if (!this.url) {
-            this.url = `ws://localhost:${this.port}`;
+            // Auto-detect: if served from glyph3d-cli (unified server),
+            // connect WebSocket to the same host:port as the page origin.
+            const loc = typeof window !== 'undefined' && window.location;
+            if (loc && loc.port && loc.protocol === 'http:') {
+                this.url = `ws://${loc.hostname}:${loc.port}`;
+            } else {
+                this.url = `ws://localhost:${this.port}`;
+            }
         }
         this._intentionalClose = false;
         this._doConnect();
