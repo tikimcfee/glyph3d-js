@@ -277,8 +277,12 @@ Add functions in `src/workers/builders/`. These must be pure functions with no D
 
 ## Deployment
 
-- Production: `ivanlugo.dev/ide`
+### Public site (ivanlugo.dev/ide)
+- Caddy serves static files — each browser tab is self-contained (client-side rendering, no server state)
 - Server: the host `your-server` (0.0.0.0), SSH via `ssh your-server`
-- Single-binary deploy: `make deploy` → `scp dist/glyph3d-cli-linux-amd64 your-server:/usr/local/bin/glyph3d-cli`
-- Run: `glyph3d-cli serve` — serves embedded IDE app + WebSocket relay, no external dependencies
-- Caddy reverse-proxies to the binary (config: `/etc/caddy/Caddyfile`)
+- Caddy config: `/etc/caddy/Caddyfile`
+
+### Single binary (personal / dev use)
+- `make deploy` → `scp dist/glyph3d-cli-linux-amd64 your-server:/usr/local/bin/glyph3d-cli`
+- `glyph3d-cli serve ~/project` — embedded IDE + relay + filesystem, single-user
+- Single display connection, shared relay state, no auth — designed for one operator
