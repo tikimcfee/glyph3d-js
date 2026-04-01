@@ -29,11 +29,7 @@
     "examples"
   ],
   "scripts": {
-    "serve": "python3 -m http.server 8000",
-    "ws": "node app/ws-relay.mjs",
-    "ws:py": "python3 app/ws-relay.py",
-    "relay": "node app/ws-relay.mjs",
-    "cli": "node app/cli/glyph-cli.mjs"
+    "serve": "cd cli && ./glyph3d-cli serve --root .. --http 8000"
   },
   "keywords": [
     "three.js",
@@ -58,7 +54,6 @@
     "three": ">=0.150.0"
   },
   "devDependencies": {
-    "three": "^0.169.0",
-    "ws": "^8.19.0"
+    "three": "^0.169.0"
   }
 }

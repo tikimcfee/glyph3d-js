@@ -375,7 +375,7 @@ export function settingsPanelHTML() {
                 </label>
             </div>
             <div class="setting-hint" id="ws-hint">
-                Start relay: <code>npm run ws</code> &mdash; then connect from any device on LAN
+                Start relay: <code>glyph3d-cli serve</code> &mdash; then connect from any device on LAN
             </div>
         </div>
         <div class="setting-group" id="ws-port-group" style="display:none">

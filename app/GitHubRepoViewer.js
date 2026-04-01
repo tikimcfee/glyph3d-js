@@ -437,7 +437,7 @@ export class GitHubRepoViewer {
 
         // ---- WebSocket Command Center ----
         // Wires CommandRouter, ViewerAPI (window.viewer), and WebSocketBridge (off by default).
-        // Start the relay with `npm run ws`, then call `window.viewer.connect()` or
+        // Start the relay with `glyph3d-cli serve`, then call `window.viewer.connect()` or
         // enable via settings to connect.
         const { router, bridge, api } = initCommandCenter(this, {
             port: 8765,
