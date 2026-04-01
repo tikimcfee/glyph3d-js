@@ -26,6 +26,7 @@ coverage/
 # Temporary files
 *.tmp
 *.temp
+.claude/worktrees/
 
 # Data
 examples/word-wall/generated_dictionary/
@@ -36,3 +37,4 @@ __pycache__/
 # Go CLI build output + dependencies
 cli/glyph3d-cli
 cli/go.sum
+cli/.claude/scheduled_tasks.lock
