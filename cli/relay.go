@@ -399,9 +399,9 @@ func RunServer(cfg ServerConfig) error {
 	// Startup banner
 	log.Printf("[glyph3d] ══════════════════════════════════════")
 	log.Printf("[glyph3d] glyph3d-cli — single-binary server")
-	log.Printf("[glyph3d] Static files: %s", cfg.StaticTag)
+	log.Printf("[glyph3d] App:     %s", cfg.StaticTag)
 	if cfg.FSHandler != nil {
-		log.Printf("[glyph3d] Filesystem:   %s", cfg.FSHandler.root)
+		log.Printf("[glyph3d] Project: %s", cfg.FSHandler.root)
 	}
 	log.Printf("[glyph3d] ──────────────────────────────────────")
 	log.Printf("[glyph3d]   http://localhost:%d/app/ide.html", cfg.Port)

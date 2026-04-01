@@ -1,10 +1,15 @@
 # glyph3d-cli — single-binary build
 #
-# Usage:
+# Build:
 #   make              Build for current platform
 #   make all          Build for Linux, macOS, Windows (amd64 + arm64)
-#   make cosmo        Attempt Cosmopolitan APE build
+#   make deploy       Build linux-amd64 + show scp command
 #   make clean        Remove build artifacts
+#
+# Run:
+#   ./glyph3d-cli serve                    Browse current directory
+#   ./glyph3d-cli serve ~/project          Browse a project
+#   ./glyph3d-cli serve --local            IDE dev (app from disk)
 
 BINARY   := glyph3d-cli
 CLI_DIR  := cli

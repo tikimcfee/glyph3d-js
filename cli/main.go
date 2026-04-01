@@ -318,33 +318,35 @@ func isInteractive() bool {
 
 // serveCmd runs the unified HTTP + WebSocket server.
 //
-// Default: serves embedded assets + WebSocket relay on port 8080.
-// With --root: serves from disk instead (dev mode), enables fs/* JSON-RPC methods.
-// With --relay-only: WebSocket relay only, no static files (legacy mode).
+// The positional argument is the project directory to browse (default: cwd).
+// The IDE app is always served from embedded assets unless --local is set.
 //
 // Usage:
 //
-//	glyph3d-cli serve                           Embedded mode, port 8080
-//	glyph3d-cli serve --root .                  Dev mode, serve from disk
-//	glyph3d-cli serve --port 3000               Custom port
-//	glyph3d-cli serve --relay-only --port 8765  Legacy relay-only mode
+//	glyph3d-cli serve                    Browse current directory
+//	glyph3d-cli serve ~/some-project     Browse that project
+//	glyph3d-cli serve --port 3000        Custom port
+//	glyph3d-cli serve --local            IDE dev: serve app from disk instead of embedded
+//	glyph3d-cli serve --relay-only       WebSocket relay only, no static files
 func serveCmd() {
 	flagSet := flag.NewFlagSet("serve", flag.ExitOnError)
 	p := flagSet.Int("port", 8080, "Port to listen on")
 	listen := flagSet.String("listen", "0.0.0.0", "Address to listen on")
-	root := flagSet.String("root", "", "Serve from disk + enable fs/* methods (dev mode)")
+	local := flagSet.Bool("local", false, "Serve IDE app from disk instead of embedded (dev mode)")
 	relayOnly := flagSet.Bool("relay-only", false, "WebSocket relay only, no static files")
 	flagSet.Parse(os.Args[2:])
 
+	// Project path: positional arg or cwd
+	projectPath := "."
+	if flagSet.NArg() > 0 {
+		projectPath = flagSet.Arg(0)
+	}
+
 	// Legacy relay-only mode
 	if *relayOnly {
-		var fsHandler *FSHandler
-		if *root != "" {
-			var err error
-			fsHandler, err = NewFSHandler(*root)
-			if err != nil {
-				log.Fatalf("[relay] --root: %v", err)
-			}
+		fsHandler, err := NewFSHandler(projectPath)
+		if err != nil {
+			log.Fatalf("[relay] project path: %v", err)
 		}
 		if err := RunRelay(*listen, *p, fsHandler); err != nil {
 			log.Fatalf("[relay] %v", err)
@@ -352,23 +354,24 @@ func serveCmd() {
 		return
 	}
 
-	// Unified server mode
-	cfg := ServerConfig{
-		Host: *listen,
-		Port: *p,
+	// Filesystem access: always on, rooted at the project path
+	fsHandler, err := NewFSHandler(projectPath)
+	if err != nil {
+		log.Fatalf("[serve] project path: %v", err)
 	}
 
-	if *root != "" {
-		// Dev mode: serve from disk, enable filesystem access
-		var err error
-		cfg.FSHandler, err = NewFSHandler(*root)
-		if err != nil {
-			log.Fatalf("[serve] --root: %v", err)
-		}
-		cfg.StaticFS = os.DirFS(*root)
-		cfg.StaticTag = cfg.FSHandler.root
+	cfg := ServerConfig{
+		Host:      *listen,
+		Port:      *p,
+		FSHandler: fsHandler,
+	}
+
+	if *local {
+		// Dev mode: serve IDE app from disk (for hacking on glyph3d itself)
+		cfg.StaticFS = os.DirFS(projectPath)
+		cfg.StaticTag = fsHandler.root + " (local)"
 	} else {
-		// Embedded mode: serve baked-in assets
+		// Normal mode: embedded IDE app
 		webRoot, err := WebRoot()
 		if err != nil {
 			log.Fatalf("[serve] embedded FS: %v", err)
