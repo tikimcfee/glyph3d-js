@@ -1213,3 +1213,72 @@ html, body {
 .state-row-btn:hover { color: #fff; }
 .state-row-btn-danger:hover { color: #ff6666; }
 @keyframes state-pulse { to { color: #ff6666; } }
+
+/* ---- Installer Panel ---- */
+.installer-panel { padding: 4px 0; }
+.installer-detected { font-size: 12px; color: var(--text-primary); padding: 4px 0; }
+.installer-detected strong { color: var(--accent); }
+
+.installer-cmd-wrap {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    overflow: hidden;
+    background: var(--bg-input);
+}
+.installer-cmd {
+    flex: 1;
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    font-size: 11px;
+    color: var(--text-primary);
+    padding: 8px 10px;
+    white-space: pre-wrap;
+    word-break: break-all;
+    line-height: 1.4;
+    user-select: all;
+}
+.installer-copy-btn {
+    background: var(--bg-sidebar);
+    border: none;
+    border-left: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    font-size: 14px;
+    padding: 4px 10px;
+    cursor: pointer;
+    transition: color 0.15s, background 0.15s;
+    display: flex;
+    align-items: center;
+}
+.installer-copy-btn:hover { color: var(--accent); background: rgba(0,255,136,0.05); }
+
+.installer-downloads {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.installer-dl-link {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    font-size: 12px;
+    color: var(--text-primary);
+    text-decoration: none;
+    border-radius: 4px;
+    transition: background 0.15s;
+}
+.installer-dl-link:hover { background: rgba(255,255,255,0.04); }
+.installer-dl-link.current { background: rgba(0,255,136,0.06); border: 1px solid rgba(0,255,136,0.15); }
+.installer-dl-icon { font-size: 16px; width: 22px; text-align: center; }
+.installer-dl-label { flex: 1; }
+.installer-dl-badge {
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--accent);
+    background: rgba(0,255,136,0.1);
+    padding: 2px 6px;
+    border-radius: 3px;
+}

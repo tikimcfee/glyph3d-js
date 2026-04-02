@@ -27,6 +27,13 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// Build-time version info (set via -ldflags)
+var (
+	Version   = "dev"
+	BuildDate = "unknown"
+	Platform  = "unknown"
+)
+
 var (
 	host     = flag.String("host", "ws://localhost:8765", "WebSocket relay URL")
 	port     = flag.Int("port", 0, "Shorthand: ws://localhost:<port>")
@@ -58,6 +65,9 @@ func main() {
 			return
 		case "screenshot":
 			screenshotCmd()
+			return
+		case "version":
+			versionCmd()
 			return
 		}
 	}
@@ -306,6 +316,12 @@ func screenshotCmd() {
 	}
 
 	fmt.Fprintf(os.Stderr, "Saved %dx%d screenshot to %s (%d bytes)\n", data.Width, data.Height, *out, len(imgBytes))
+}
+
+func versionCmd() {
+	fmt.Printf("glyph3d-cli %s\n", Version)
+	fmt.Printf("  built:    %s\n", BuildDate)
+	fmt.Printf("  platform: %s\n", Platform)
 }
 
 func isInteractive() bool {

@@ -26,6 +26,7 @@ import {
 } from './components/Drawer.js';
 import { logCapturePanelHTML } from './components/LogCapturePanel.js';
 import { diffPanelHTML } from './components/DiffPanel.js';
+import { installerPanelHTML, initInstallerPanel } from './components/InstallerPanel.js';
 import { primaryMod } from '../src/services/utils/platform.js';
 
 // Panel title labels keyed by data-panel attribute
@@ -38,6 +39,7 @@ const PANEL_TITLES = {
     'groups':        'WINDOW GROUPS',
     'state':         'STATE INSPECTOR',
     'hand-tracking': 'HAND TRACKING',
+    'installer':     'INSTALL CLI',
     'controls':      'KEYBOARD SHORTCUTS',
 };
 
@@ -167,6 +169,13 @@ export class IDEShell {
                     </select>
                 </div>
             `;
+        }
+
+        // Installer panel
+        const installerPanel = document.getElementById('sp-installer');
+        if (installerPanel) {
+            installerPanel.innerHTML = installerPanelHTML();
+            initInstallerPanel(installerPanel);
         }
 
         // Output panel (stats) in bottom panel

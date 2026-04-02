@@ -4,6 +4,7 @@
 #   make              Build for current platform
 #   make all          Build for Linux, macOS, Windows (amd64 + arm64)
 #   make deploy       Build linux-amd64 + show scp command
+#   make release      Build all + create GitHub release
 #   make clean        Remove build artifacts
 #
 # Run:
@@ -19,16 +20,27 @@ OUT_DIR  := dist
 # Assets to embed
 ASSETS := src app examples index.html package.json
 
-# Go build flags — static, stripped
-GOFLAGS := -trimpath -ldflags='-s -w'
+# Version info — override with: make VERSION=v1.2.3
+VERSION    ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+BUILD_DATE := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
-.PHONY: all build clean prep deploy linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64
+# Platform for default build (current machine)
+HOST_PLATFORM := $(shell go env GOOS)-$(shell go env GOARCH)
+
+# Go build flags — static, stripped, version-stamped
+LDFLAGS := -s -w \
+	-X main.Version=$(VERSION) \
+	-X main.BuildDate=$(BUILD_DATE) \
+	-X main.Platform=$(HOST_PLATFORM)
+GOFLAGS := -trimpath -ldflags='$(LDFLAGS)'
+
+.PHONY: all build clean prep deploy release linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64
 
 # --- Default: build for current platform ---
 
 build: prep
 	cd $(CLI_DIR) && go build $(GOFLAGS) -o ../$(BINARY) .
-	@echo "Built ./$(BINARY) ($$(du -h $(BINARY) | cut -f1))"
+	@echo "Built ./$(BINARY) ($$(du -h $(BINARY) | cut -f1)) — $(VERSION)"
 
 # --- Prep: copy assets into cli/web/ for go:embed ---
 
@@ -43,34 +55,66 @@ prep:
 	@echo "Prepared $(WEB_DIR)/ for embedding"
 
 # --- Cross-compilation ---
+# Each target sets Platform via LDFLAGS override.
 
 all: linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64
-	@echo "All platforms built in $(OUT_DIR)/"
+	@echo "All platforms built in $(OUT_DIR)/ — $(VERSION)"
 
 linux-amd64: prep
 	@mkdir -p $(OUT_DIR)
-	cd $(CLI_DIR) && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build $(GOFLAGS) -o ../$(OUT_DIR)/$(BINARY)-linux-amd64 .
+	cd $(CLI_DIR) && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+		-ldflags='-s -w -X main.Version=$(VERSION) -X main.BuildDate=$(BUILD_DATE) -X main.Platform=linux-amd64' \
+		-o ../$(OUT_DIR)/$(BINARY)-linux-amd64 .
 	@echo "  → $(OUT_DIR)/$(BINARY)-linux-amd64"
 
 linux-arm64: prep
 	@mkdir -p $(OUT_DIR)
-	cd $(CLI_DIR) && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build $(GOFLAGS) -o ../$(OUT_DIR)/$(BINARY)-linux-arm64 .
+	cd $(CLI_DIR) && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath \
+		-ldflags='-s -w -X main.Version=$(VERSION) -X main.BuildDate=$(BUILD_DATE) -X main.Platform=linux-arm64' \
+		-o ../$(OUT_DIR)/$(BINARY)-linux-arm64 .
 	@echo "  → $(OUT_DIR)/$(BINARY)-linux-arm64"
 
 darwin-amd64: prep
 	@mkdir -p $(OUT_DIR)
-	cd $(CLI_DIR) && CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build $(GOFLAGS) -o ../$(OUT_DIR)/$(BINARY)-darwin-amd64 .
+	cd $(CLI_DIR) && CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath \
+		-ldflags='-s -w -X main.Version=$(VERSION) -X main.BuildDate=$(BUILD_DATE) -X main.Platform=darwin-amd64' \
+		-o ../$(OUT_DIR)/$(BINARY)-darwin-amd64 .
 	@echo "  → $(OUT_DIR)/$(BINARY)-darwin-amd64"
 
 darwin-arm64: prep
 	@mkdir -p $(OUT_DIR)
-	cd $(CLI_DIR) && CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build $(GOFLAGS) -o ../$(OUT_DIR)/$(BINARY)-darwin-arm64 .
+	cd $(CLI_DIR) && CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath \
+		-ldflags='-s -w -X main.Version=$(VERSION) -X main.BuildDate=$(BUILD_DATE) -X main.Platform=darwin-arm64' \
+		-o ../$(OUT_DIR)/$(BINARY)-darwin-arm64 .
 	@echo "  → $(OUT_DIR)/$(BINARY)-darwin-arm64"
 
 windows-amd64: prep
 	@mkdir -p $(OUT_DIR)
-	cd $(CLI_DIR) && CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build $(GOFLAGS) -o ../$(OUT_DIR)/$(BINARY)-windows-amd64.exe .
+	cd $(CLI_DIR) && CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath \
+		-ldflags='-s -w -X main.Version=$(VERSION) -X main.BuildDate=$(BUILD_DATE) -X main.Platform=windows-amd64' \
+		-o ../$(OUT_DIR)/$(BINARY)-windows-amd64.exe .
 	@echo "  → $(OUT_DIR)/$(BINARY)-windows-amd64.exe"
+
+# --- GitHub Release ---
+# Build all platforms and create a GitHub release.
+#
+# Usage:
+#   make release VERSION=v0.1.0
+#   make release              # uses git describe
+
+release: all
+	@echo ""
+	@echo "Creating GitHub release $(VERSION)..."
+	gh release create $(VERSION) \
+		$(OUT_DIR)/$(BINARY)-linux-amd64 \
+		$(OUT_DIR)/$(BINARY)-linux-arm64 \
+		$(OUT_DIR)/$(BINARY)-darwin-amd64 \
+		$(OUT_DIR)/$(BINARY)-darwin-arm64 \
+		$(OUT_DIR)/$(BINARY)-windows-amd64.exe \
+		--title "$(BINARY) $(VERSION)" \
+		--notes "Single-binary server for glyph3d-js IDE. Download the binary for your platform, make it executable, and run: glyph3d-cli serve"
+	@echo ""
+	@echo "Release created: https://github.com/$$(gh repo view --json nameWithOwner -q .nameWithOwner)/releases/tag/$(VERSION)"
 
 # --- Deploy helper ---
 # Build for production target and show deploy command.
