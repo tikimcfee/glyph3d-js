@@ -572,6 +572,7 @@ html, body {
     display: flex;
     align-items: center;
     gap: 2px;
+    overflow: hidden;
 }
 
 .status-item {
@@ -1043,19 +1044,26 @@ html, body {
         height: auto;
     }
 
-    /* ---- Activity bar → horizontal bottom toolbar ---- */
+    /* ---- Activity bar → horizontal bottom toolbar (scrollable) ---- */
     #activity-bar {
         flex-direction: row;
-        justify-content: space-around;
+        justify-content: flex-start;
         padding: 0;
         border-right: none;
         border-top: 1px solid var(--border-color);
+        overflow-x: auto;
+        overflow-y: hidden;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;    /* Firefox */
     }
+
+    #activity-bar::-webkit-scrollbar { display: none; }
 
     .activity-btn {
         border-left: none;
         border-top: 2px solid transparent;
         flex: 0 0 auto;
+        min-width: 44px;
     }
 
     .activity-btn.active {
@@ -1281,4 +1289,14 @@ html, body {
     background: rgba(0,255,136,0.1);
     padding: 2px 6px;
     border-radius: 3px;
+}
+
+/* ---- Phone: hide low-priority status bar items ---- */
+@media (max-width: 480px) {
+    #status-camera,
+    #status-glyph-count,
+    #status-grid-count,
+    #status-layout {
+        display: none;
+    }
 }
