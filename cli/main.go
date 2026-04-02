@@ -2,7 +2,7 @@
 //
 // Modes:
 //
-//	Relay:     glyph3d-cli serve [--port 8765] [--listen 0.0.0.0]
+//	Relay:     glyph3d-cli serve [--port 8080] [--listen 0.0.0.0]
 //	One-shot:  glyph3d-cli [--host url] <command...>
 //	REPL:      glyph3d-cli [--host url]
 //	Pipe:      echo "grid.list" | glyph3d-cli
@@ -35,7 +35,7 @@ var (
 )
 
 var (
-	host     = flag.String("host", "ws://localhost:8765", "WebSocket relay URL")
+	host     = flag.String("host", "ws://localhost:8080", "WebSocket relay URL")
 	port     = flag.Int("port", 0, "Shorthand: ws://localhost:<port>")
 	jsonMode = flag.Bool("json", false, "Output raw JSON data")
 	timeout  = flag.Duration("timeout", 5*time.Second, "Command response timeout")
@@ -271,7 +271,7 @@ func repl(conn *websocket.Conn) {
 func screenshotCmd() {
 	fs := flag.NewFlagSet("screenshot", flag.ExitOnError)
 	out := fs.String("o", "/tmp/glyph-screenshot.png", "Output PNG file path")
-	wsURL := fs.String("host", "ws://localhost:8765", "WebSocket relay URL")
+	wsURL := fs.String("host", "ws://localhost:8080", "WebSocket relay URL")
 	p := fs.Int("port", 0, "Shorthand port")
 	fs.Parse(os.Args[2:])
 

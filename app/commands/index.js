@@ -124,12 +124,16 @@ function buildContext(viewer) {
  *
  * @param {Object} viewer - GitHubRepoViewer instance
  * @param {Object} [options]
- * @param {number} [options.port=8765] - WebSocket relay port
+ * @param {number} [options.port] - WebSocket relay port (default: page port or 8080)
  * @param {boolean} [options.autoConnect=true] - auto-connect WebSocket
  * @param {boolean} [options.showStatus=true] - show status bar
  * @returns {{ router: CommandRouter, bridge: WebSocketBridge, api: ViewerAPI }}
  */
 export function initCommandCenter(viewer, options = {}) {
+    const defaultPort = (typeof window !== 'undefined' && window.location.port)
+        ? parseInt(window.location.port, 10) : 8080;
+    const port = options.port || defaultPort;
+
     // 1. Build command context
     const context = buildContext(viewer);
 
@@ -144,7 +148,7 @@ export function initCommandCenter(viewer, options = {}) {
 
     // 4. Create WebSocket bridge
     const bridge = new WebSocketBridge(router, {
-        port: options.port || 8765,
+        port,
         autoConnect: options.autoConnect !== false,
         showStatus: options.showStatus !== false,
     });
@@ -157,7 +161,7 @@ export function initCommandCenter(viewer, options = {}) {
     window.viewer = api;
 
     console.log('[command-center] initialized. Use window.viewer or ws://localhost:' +
-        (options.port || 8765) + ' to control the viewer.');
+        port + ' to control the viewer.');
 
     return { router, bridge, api };
 }

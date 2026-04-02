@@ -36,7 +36,7 @@ import { WEBSOCKET_SOURCE_DEFAULTS as DEFAULTS } from './defaults.js';
 class WebSocketHandSource {
     /**
      * @param {Object} options
-     * @param {string} options.url - WebSocket server URL (default ws://localhost:8765)
+     * @param {string} options.url - WebSocket server URL (default ws://localhost:8080)
      * @param {number} options.reconnectInterval - Ms between reconnect attempts (default 3000)
      * @param {Function} options.onFrame - Called with array of HandFrames on each hand message
      * @param {Function} options.onCameraFrame - Called with CameraFrame on each camera snapshot

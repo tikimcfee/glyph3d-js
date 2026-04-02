@@ -440,7 +440,7 @@ export class GitHubRepoViewer {
         // Start the relay with `glyph3d-cli serve`, then call `window.viewer.connect()` or
         // enable via settings to connect.
         const { router, bridge, api } = initCommandCenter(this, {
-            port: 8765,
+            port: this._wsPort(),
             autoConnect: false,
             showStatus: true,
         });
@@ -493,20 +493,44 @@ export class GitHubRepoViewer {
     }
 
     /**
+     * Derive the WebSocket port from the page origin (unified server),
+     * falling back to 8080 (glyph3d-cli default).
+     * @returns {number}
+     * @private
+     */
+    _wsPort() {
+        const loc = typeof window !== 'undefined' && window.location;
+        if (loc && loc.port) return parseInt(loc.port, 10);
+        return 8080;
+    }
+
+    /**
+     * Build a WebSocket URL for the relay on the current server.
+     * @returns {string}
+     * @private
+     */
+    _wsUrl() {
+        const loc = typeof window !== 'undefined' && window.location;
+        if (loc && loc.hostname && loc.port) {
+            return `ws://${loc.hostname}:${loc.port}`;
+        }
+        return `ws://localhost:${this._wsPort()}`;
+    }
+
+    /**
      * Try to load a pre-baked atlas from the WebSocket relay cache.
      * Opens a temporary WebSocket connection, sends atlas.get, waits for the
      * response, then closes cleanly. Does NOT send "DISPLAY" so it does not
      * compete with the main CommandCenter connection.
      *
-     * @param {number} [wsPort=8765] - Relay WebSocket port
      * @param {number} [timeoutMs=2000] - Milliseconds before giving up
      * @returns {Promise<GlyphAtlas|null>}
      * @private
      */
-    async _tryLoadCachedAtlas(wsPort = 8765, timeoutMs = 2000) {
+    async _tryLoadCachedAtlas(timeoutMs = 2000) {
         return new Promise((resolve) => {
             try {
-                const ws = new WebSocket(`ws://localhost:${wsPort}`);
+                const ws = new WebSocket(this._wsUrl());
                 const timer = setTimeout(() => { ws.close(); resolve(null); }, timeoutMs);
 
                 ws.onopen = () => {
@@ -588,15 +612,14 @@ export class GitHubRepoViewer {
      * atlas.cache, then closes after a short delay. Errors are swallowed —
      * the relay may not be running in all environments.
      *
-     * @param {number} [wsPort=8765] - Relay WebSocket port
      * @private
      */
-    _cacheAtlasToRelay(wsPort = 8765) {
+    _cacheAtlasToRelay() {
         try {
             const { image: dataUrl, descriptor } = this.atlas.exportAtlas();
             const png = dataUrl.replace(/^data:image\/png;base64,/, '');
 
-            const ws = new WebSocket(`ws://localhost:${wsPort}`);
+            const ws = new WebSocket(this._wsUrl());
             ws.onopen = () => {
                 ws.send(JSON.stringify({
                     relay: 'atlas.cache',
@@ -650,7 +673,7 @@ export class GitHubRepoViewer {
             if (sourceType === 'mock') {
                 hint.textContent = 'Mock source: move mouse to position hand, Space to pinch';
             } else if (sourceType === 'websocket') {
-                hint.textContent = 'WebSocket source: connect ws://localhost:8765 (iPhone / external)';
+                hint.textContent = `WebSocket source: connect ${this._wsUrl()} (iPhone / external)`;
             }
         };
 
@@ -700,7 +723,7 @@ export class GitHubRepoViewer {
             checkbox.checked = true;
             if (portGroup) portGroup.style.display = '';
             if (statusGroup) statusGroup.style.display = '';
-            const port = portInput ? parseInt(portInput.value, 10) : 8765;
+            const port = portInput ? parseInt(portInput.value, 10) : this._wsPort();
             if (this._wsBridge) {
                 this._wsBridge.port = port;
                 this._wsBridge.connect();
@@ -717,7 +740,7 @@ export class GitHubRepoViewer {
             if (checkbox.checked) {
                 if (portGroup) portGroup.style.display = '';
                 if (statusGroup) statusGroup.style.display = '';
-                const port = portInput ? parseInt(portInput.value, 10) : 8765;
+                const port = portInput ? parseInt(portInput.value, 10) : this._wsPort();
                 if (this._wsBridge) {
                     this._wsBridge.port = port;
                     this._wsBridge.connect();
@@ -881,7 +904,7 @@ export class GitHubRepoViewer {
             atlasClearCacheBtn.addEventListener('click', () => {
                 // Tell relay to delete the cached atlas for current settings
                 try {
-                    const ws = new WebSocket(`ws://localhost:8765`);
+                    const ws = new WebSocket(this._wsUrl());
                     ws.onopen = () => {
                         ws.send(JSON.stringify({
                             relay: 'atlas.clear',

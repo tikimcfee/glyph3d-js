@@ -17,13 +17,13 @@ export default class WebSocketBridge {
      * @param {import('./CommandRouter.js').default} router
      * @param {Object} [options]
      * @param {string} [options.url] - override relay URL (default auto-detect)
-     * @param {number} [options.port=8765] - relay server port
+     * @param {number} [options.port=8080] - relay server port
      * @param {boolean} [options.autoConnect=true] - connect on construction
      * @param {boolean} [options.showStatus=true] - show status bar element
      */
     constructor(router, options = {}) {
         this.router = router;
-        this.port = options.port || 8765;
+        this.port = options.port || 8080;
         this.url = options.url || null;
 
         this.ws = null;

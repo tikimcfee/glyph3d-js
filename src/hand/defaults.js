@@ -31,6 +31,6 @@ export const GESTURE_DEFAULTS = {
 };
 
 export const WEBSOCKET_SOURCE_DEFAULTS = {
-    url:               'ws://localhost:8765',
+    url:               'ws://localhost:8080',
     reconnectInterval: 3000,
 };

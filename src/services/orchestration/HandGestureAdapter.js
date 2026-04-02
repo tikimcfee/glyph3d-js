@@ -146,7 +146,7 @@ class HandGestureAdapter {
             // Dynamic import to avoid hard dependency when not used
             import('../../hand/WebSocketHandSource.js').then(({ default: WebSocketHandSource }) => {
                 this._source = new WebSocketHandSource({
-                    url: sourceOptions.url || 'ws://localhost:8765',
+                    url: sourceOptions.url || `ws://localhost:${(typeof window !== 'undefined' && window.location.port) || 8080}`,
                     ...sourceOptions,
                 });
                 this._source.connect();

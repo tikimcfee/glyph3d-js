@@ -88,7 +88,7 @@ func hookCmd() {
 
 	url := os.Getenv("GLYPH_WS_URL")
 	if url == "" {
-		url = "ws://localhost:8765"
+		url = "ws://localhost:8080"
 	}
 
 	// Connect to relay (quick timeout — don't block Claude)

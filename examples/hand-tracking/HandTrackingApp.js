@@ -176,7 +176,7 @@ class HandTrackingApp {
     /** @private */
     _getWSUrl() {
         const params = new URLSearchParams(window.location.search);
-        return params.get('ws') || 'ws://localhost:8765';
+        return params.get('ws') || `ws://localhost:${window.location.port || 8080}`;
     }
 
     /** @private */
