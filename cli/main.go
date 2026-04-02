@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -383,9 +384,24 @@ func serveCmd() {
 	}
 
 	if *local {
-		// Dev mode: serve IDE app from disk (for hacking on glyph3d itself)
-		cfg.StaticFS = os.DirFS(projectPath)
-		cfg.StaticTag = fsHandler.root + " (local)"
+		// Dev mode: serve IDE app from disk (for hacking on glyph3d itself).
+		// The static root must be the repo root (where app/, src/, examples/ live),
+		// NOT the project path (which is for filesystem browsing).
+		// Find the repo root by looking for app/ide.html relative to the binary
+		// or cwd, then fall back to projectPath.
+		staticRoot := projectPath
+		// If projectPath doesn't contain app/ide.html, try the binary's directory
+		if _, err := os.Stat(filepath.Join(staticRoot, "app", "ide.html")); err != nil {
+			// Try the executable's directory (binary is usually at repo root)
+			if exe, exeErr := os.Executable(); exeErr == nil {
+				candidate := filepath.Dir(exe)
+				if _, err2 := os.Stat(filepath.Join(candidate, "app", "ide.html")); err2 == nil {
+					staticRoot = candidate
+				}
+			}
+		}
+		cfg.StaticFS = os.DirFS(staticRoot)
+		cfg.StaticTag = staticRoot + " (local)"
 	} else {
 		// Normal mode: embedded IDE app
 		webRoot, err := WebRoot()
