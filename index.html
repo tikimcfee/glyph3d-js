@@ -3,173 +3,65 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>glyph3d-js</title>
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
-        body {
-            font-family: 'Monaco', 'Menlo', 'Consolas', monospace;
-            background: #0a0a0a;
-            color: #e0e0e0;
-            min-height: 100vh;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            padding: 40px 20px;
-        }
-
-        h1 {
-            font-size: 32px;
-            color: #00ff88;
-            margin-bottom: 8px;
-        }
-
-        .subtitle {
-            font-size: 14px;
-            color: #888;
-            margin-bottom: 48px;
-        }
-
-        .examples {
-            display: flex;
-            gap: 24px;
-            flex-wrap: wrap;
-            justify-content: center;
-            max-width: 800px;
-        }
-
-        .card {
-            background: linear-gradient(135deg, rgba(30,30,30,0.95) 0%, rgba(20,20,20,0.95) 100%);
-            border: 1px solid #333;
-            border-radius: 8px;
-            padding: 32px;
-            width: 360px;
-            text-decoration: none;
-            color: inherit;
-            transition: border-color 0.2s, transform 0.2s;
-        }
-
-        .card:hover {
-            border-color: #00ff88;
-            transform: translateY(-2px);
-        }
-
-        .card h2 {
-            font-size: 18px;
-            color: #fff;
-            margin-bottom: 12px;
-        }
-
-        .card p {
-            font-size: 13px;
-            color: #999;
-            line-height: 1.6;
-        }
-
-        .tag {
-            display: inline-block;
-            font-size: 11px;
-            color: #00ff88;
-            border: 1px solid #00ff8844;
-            border-radius: 4px;
-            padding: 2px 8px;
-            margin-top: 16px;
-            margin-right: 4px;
-        }
-
-        footer {
-            margin-top: 60px;
-            font-size: 12px;
-            color: #555;
-        }
-
-        footer a {
-            color: #00ff88;
-            text-decoration: none;
-        }
-
-        footer a:hover {
-            text-decoration: underline;
-        }
-    </style>
+    <title>Ivan Lugo</title>
+    <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-    <h1>glyph3d-js</h1>
-    <p class="subtitle">High-performance 3D text rendering for Three.js</p>
+    <nav>
+        <a href="/" class="active">home</a>
+        <a href="/projects/">projects</a>
+        <a href="/writing/">writing</a>
+        <a href="https://github.com/tikimcfee">github</a>
+    </nav>
 
-    <div class="examples">
-        <a class="card" href="app/ide.html">
-            <h2>glyph3d IDE</h2>
-            <p>VS Code-like IDE shell with a 3D canvas as the editor. Activity bar, resizable sidebar, tab bar, minimap, command palette, keyboard shortcuts, WebSocket remote control, and hand gesture input.</p>
-            <span class="tag">WebGL 2</span>
-            <span class="tag">IDE Shell</span>
-            <span class="tag">WebSocket</span>
+    <main>
+        <h1>hello there<span class="accent">.</span></h1>
+
+        <p>I'm Ivan. I build tools for understanding code &mdash; mostly by rendering
+        it in 3D and seeing what patterns fall out. GPU-instanced text, spatial
+        layouts, gesture input, the whole stack from shader to shell.</p>
+
+        <p>This site is a few static files on a box in Falkenstein.
+        The interesting stuff is in the projects.</p>
+
+        <a class="cta" href="/ide">open the IDE</a>
+
+        <h2>featured</h2>
+
+        <a class="featured" href="/projects/">
+            <h3>glyph3d IDE</h3>
+            <p>A 3D code visualization environment. Load any GitHub repo or local project
+            and explore its source as GPU-rendered text in navigable space. Single Go
+            binary, WebSocket relay, ~8MB.</p>
+            <div class="tags">
+                <span class="tag">WebGL 2</span>
+                <span class="tag">Three.js</span>
+                <span class="tag">Go</span>
+                <span class="tag">WebSocket</span>
+            </div>
         </a>
 
-        <a class="card" href="app/viewer.html">
-            <h2>GitHub 3D Repo Viewer</h2>
-            <p>Load any GitHub repository and visualize its source code in 3D space. Navigate file trees, explore hierarchical layouts, and read code rendered as GPU-instanced glyphs.</p>
-            <span class="tag">WebGL 2</span>
-            <span class="tag">GitHub API</span>
-            <span class="tag">Web Workers</span>
-        </a>
+        <h2>recent</h2>
 
-        <a class="card" href="examples/word-wall/">
-            <h2>Word Wall</h2>
-            <p>Dictionary visualization that renders words in 3D with embedding coordinates. Click words to see definitions, play sentences with word highlighting, and fly through the wall.</p>
-            <span class="tag">WebGL 2</span>
-            <span class="tag">Embeddings</span>
-            <span class="tag">Interactive</span>
-        </a>
-
-        <a class="card" href="examples/code-spectrometer/">
-            <h2>Code Spectrometer</h2>
-            <p>A periodic table of software engineering concepts. Feed in source code and watch the table light up — each element's intensity shows how much of that concept appears in the code.</p>
-            <span class="tag">WebGL 2</span>
-            <span class="tag">Code Analysis</span>
-            <span class="tag">Periodic Table</span>
-        </a>
-
-        <a class="card" href="examples/mod-layer-visualizer/">
-            <h2>Mod Layer Visualizer</h2>
-            <p>Stack modular arithmetic grids in 3D space. Color datasets by their remainder under each modulus and look for structural patterns across layers — primes, Fibonacci, Collatz, text bytes, and more.</p>
-            <span class="tag">WebGL 2</span>
-            <span class="tag">Number Theory</span>
-            <span class="tag">Interactive</span>
-        </a>
-
-        <a class="card" href="examples/hand-tracking/">
-            <h2>Hand Tracking</h2>
-            <p>3D hand pose visualization with three swappable sources: mouse-driven mock, browser webcam via MediaPipe, or external WebSocket (iPhone ARKit + LiDAR). Features wireframe hand rendering with pinch gesture detection.</p>
-            <span class="tag">WebGL 2</span>
-            <span class="tag">MediaPipe</span>
-            <span class="tag">WebSocket</span>
-        </a>
-
-        <a class="card" href="examples/cross-ref-viz/">
-            <h2>Cross-Reference Visualizer</h2>
-            <p>Animated visualization of the multi-agent cross-referencing process. Watch context packets flow between agent nodes as they review each other's work in forward and inverse order, converging on shared understanding.</p>
-            <span class="tag">WebGL 2</span>
-            <span class="tag">Animation</span>
-            <span class="tag">Multi-Agent</span>
-        </a>
-
-        <a class="card" href="examples/render-test/">
-            <h2>Render Test</h2>
-            <p>Automated test bed for sync and async rendering paths. Verifies glyph IDs, buffer tracking, updatePosition/updateColor, depth ordering, and worker pipeline metadata.</p>
-            <span class="tag">Testing</span>
-            <span class="tag">Sync + Async</span>
-            <span class="tag">Workers</span>
-        </a>
-    </div>
+        <ul class="compact-list">
+            <li>
+                <a href="/ide">glyph3d-cli installer</a>
+                <span class="desc">&mdash; platform-detecting install for agents and humans</span>
+            </li>
+            <li>
+                <a href="/tools/bake-atlas.html">atlas bake tool</a>
+                <span class="desc">&mdash; pre-generate font atlases with extended charsets</span>
+            </li>
+            <li>
+                <a href="/examples/cross-ref-viz/">cross-ref visualizer</a>
+                <span class="desc">&mdash; animated multi-agent analysis</span>
+            </li>
+        </ul>
+    </main>
 
     <footer>
-        <a href="https://github.com/tikimcfee/glyph3d-js">Source on GitHub</a>
+        <a href="https://github.com/tikimcfee">github</a> &middot;
+        built with plain html and stubbornness
     </footer>
 </body>
 </html>
