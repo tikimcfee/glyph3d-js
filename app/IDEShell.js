@@ -81,6 +81,7 @@ export class IDEShell {
         // State
         this._activePanel = 'explorer';
         this._sidebarVisible = true;
+        this._lastSidebarWidth = 280;
         this._bottomPanelVisible = true;
         this._activePanelTab = 'output';
         this._openTabs = [];        // [{path, name}]
@@ -93,7 +94,9 @@ export class IDEShell {
         this._running = false;
 
         // Mobile detection
-        this._mobileQuery = window.matchMedia('(max-width: 768px)');
+        this._mobileQuery = window.matchMedia(
+            '(max-width: 768px), ((min-width: 769px) and (max-width: 1024px) and (orientation: portrait))'
+        );
         this._isMobile = this._mobileQuery.matches;
         this._mobileQuery.addEventListener('change', (e) => {
             this._isMobile = e.matches;
@@ -106,6 +109,7 @@ export class IDEShell {
         this._wireActivityBar();
         this._wireSidebar();
         this._wireSidebarBackdrop();
+        this._wireSidebarSwipeDismiss();
         this._wireBottomPanel();
         this._wireKeyboardShortcuts();
         this._wireResizeObserver();
@@ -316,9 +320,39 @@ export class IDEShell {
         }
     }
 
+    /** @private Wire horizontal swipe on sidebar to dismiss (mobile) */
+    _wireSidebarSwipeDismiss() {
+        let startX = 0;
+        let startY = 0;
+        let tracking = false;
+
+        this._sidebar.addEventListener('touchstart', (e) => {
+            if (e.touches.length !== 1) return;
+            startX = e.touches[0].clientX;
+            startY = e.touches[0].clientY;
+            tracking = true;
+        }, { passive: true });
+
+        this._sidebar.addEventListener('touchmove', (e) => {
+            if (!tracking || !this._sidebarVisible) return;
+            const dx = startX - e.touches[0].clientX;
+            const dy = Math.abs(e.touches[0].clientY - startY);
+            // Only dismiss on a clear leftward horizontal swipe
+            if (dx > 60 && dx > dy * 2) {
+                tracking = false;
+                this._collapseSidebar();
+            }
+        }, { passive: true });
+
+        this._sidebar.addEventListener('touchend', () => {
+            tracking = false;
+        }, { passive: true });
+    }
+
     /** @private */
     _collapseSidebar() {
         this._sidebarVisible = false;
+        document.documentElement.style.setProperty('--sidebar-width', '0px');
         this._shell.classList.add('sidebar-collapsed');
         this._activityBtns.forEach(btn => btn.classList.remove('active'));
         this._onEditorResize();
@@ -327,6 +361,7 @@ export class IDEShell {
     /** @private */
     _expandSidebar() {
         this._sidebarVisible = true;
+        document.documentElement.style.setProperty('--sidebar-width', `${this._lastSidebarWidth || 280}px`);
         this._shell.classList.remove('sidebar-collapsed');
         this._onEditorResize();
     }
@@ -342,8 +377,10 @@ export class IDEShell {
 
         const onMouseMove = (e) => {
             const delta = e.clientX - startX;
-            const newWidth = Math.max(150, Math.min(600, startWidth + delta));
+            const maxWidth = Math.min(600, window.innerWidth - 300);
+            const newWidth = Math.max(150, Math.min(maxWidth, startWidth + delta));
             document.documentElement.style.setProperty('--sidebar-width', `${newWidth}px`);
+            this._lastSidebarWidth = newWidth;
         };
 
         const onMouseUp = () => {
@@ -361,6 +398,35 @@ export class IDEShell {
             document.addEventListener('mousemove', onMouseMove);
             document.addEventListener('mouseup', onMouseUp);
         });
+
+        // Touch events for resize handle
+        this._sidebarResize.addEventListener('touchstart', (e) => {
+            if (e.touches.length !== 1) return;
+            e.preventDefault();
+            const touch = e.touches[0];
+            startX = touch.clientX;
+            startWidth = this._sidebar.getBoundingClientRect().width;
+            this._sidebarResize.classList.add('dragging');
+
+            const onTouchMove = (e) => {
+                const t = e.touches[0];
+                const delta = t.clientX - startX;
+                const maxWidth = Math.min(600, window.innerWidth - 300);
+                const newWidth = Math.max(150, Math.min(maxWidth, startWidth + delta));
+                document.documentElement.style.setProperty('--sidebar-width', `${newWidth}px`);
+                this._lastSidebarWidth = newWidth;
+            };
+
+            const onTouchEnd = () => {
+                this._sidebarResize.classList.remove('dragging');
+                document.removeEventListener('touchmove', onTouchMove);
+                document.removeEventListener('touchend', onTouchEnd);
+                this._onEditorResize();
+            };
+
+            document.addEventListener('touchmove', onTouchMove, { passive: false });
+            document.addEventListener('touchend', onTouchEnd);
+        }, { passive: false });
     }
 
     // ================================================================
@@ -393,7 +459,8 @@ export class IDEShell {
 
         const onMouseMove = (e) => {
             const delta = startY - e.clientY;
-            const newHeight = Math.max(80, Math.min(600, startHeight + delta));
+            const maxHeight = Math.min(600, window.innerHeight - 300);
+            const newHeight = Math.max(80, Math.min(maxHeight, startHeight + delta));
             document.documentElement.style.setProperty('--panel-height', `${newHeight}px`);
         };
 
@@ -412,6 +479,34 @@ export class IDEShell {
             document.addEventListener('mousemove', onMouseMove);
             document.addEventListener('mouseup', onMouseUp);
         });
+
+        // Touch events for panel resize handle
+        this._panelResize.addEventListener('touchstart', (e) => {
+            if (e.touches.length !== 1) return;
+            e.preventDefault();
+            const touch = e.touches[0];
+            startY = touch.clientY;
+            startHeight = this._bottomPanel.getBoundingClientRect().height;
+            this._panelResize.classList.add('dragging');
+
+            const onTouchMove = (e) => {
+                const t = e.touches[0];
+                const delta = startY - t.clientY;
+                const maxHeight = Math.min(600, window.innerHeight - 300);
+                const newHeight = Math.max(80, Math.min(maxHeight, startHeight + delta));
+                document.documentElement.style.setProperty('--panel-height', `${newHeight}px`);
+            };
+
+            const onTouchEnd = () => {
+                this._panelResize.classList.remove('dragging');
+                document.removeEventListener('touchmove', onTouchMove);
+                document.removeEventListener('touchend', onTouchEnd);
+                this._onEditorResize();
+            };
+
+            document.addEventListener('touchmove', onTouchMove, { passive: false });
+            document.addEventListener('touchend', onTouchEnd);
+        }, { passive: false });
     }
 
     /** @private */
@@ -761,8 +856,15 @@ export class IDEShell {
 
     /** @private */
     _wireResizeObserver() {
+        this._resizePending = false;
         this._resizeObserver = new ResizeObserver(() => {
-            this._onEditorResize();
+            if (!this._resizePending) {
+                this._resizePending = true;
+                requestAnimationFrame(() => {
+                    this._resizePending = false;
+                    this._onEditorResize();
+                });
+            }
         });
         this._resizeObserver.observe(this._editorArea);
     }

@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>glyph3d IDE</title>
     <link rel="stylesheet" href="ide.css">
 </head>
@@ -100,10 +100,9 @@
                 <!-- Controls / keyboard shortcuts panel -->
                 <div class="sidebar-panel" id="sp-controls"></div>
             </div>
+            <!-- Sidebar resize handle (absolutely positioned inside sidebar) -->
+            <div id="sidebar-resize"></div>
         </aside>
-
-        <!-- Sidebar resize handle -->
-        <div id="sidebar-resize"></div>
 
         <!-- Sidebar backdrop (mobile: tap to dismiss overlay) -->
         <div id="sidebar-backdrop"></div>
@@ -325,14 +324,6 @@
                     }
                 });
             }
-
-            // After init: the viewer set window.addEventListener('resize') which
-            // calls renderer.setSize(window.innerWidth, window.innerHeight).
-            // In IDE mode the canvas is sized by ResizeObserver on #editor-area.
-            // Add a resize listener that forces the IDE shell sizing path.
-            window.addEventListener('resize', () => {
-                ide._onEditorResize();
-            });
 
             // Force initial resize to match editor-area (not window) dimensions
             ide._onEditorResize();

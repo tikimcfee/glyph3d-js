@@ -53,12 +53,12 @@ html, body {
     font-size: var(--font-size-base);
     color: var(--text-primary);
     background: var(--bg-editor);
-    touch-action: none;
+    touch-action: manipulation;
 }
 
 /* ============================================================
-   Outer Grid: 4 columns x 3 rows
-   Columns: activitybar | sidebar | resize-handle | editor-column
+   Outer Grid: 3 columns x 3 rows
+   Columns: activitybar | sidebar | editor-column
    Rows:    titlebar | main-content | statusbar
    ============================================================ */
 
@@ -66,33 +66,25 @@ html, body {
     display: grid;
     width: 100vw;
     height: 100vh;
+    height: 100dvh;
     grid-template-columns:
         var(--activitybar-width)
         var(--sidebar-width)
-        var(--resize-handle)
         1fr;
     grid-template-rows:
         var(--titlebar-height)
         1fr
         var(--statusbar-height);
     grid-template-areas:
-        "titlebar   titlebar   titlebar   titlebar"
-        "activity   sidebar    resize-s   editor"
-        "statusbar  statusbar  statusbar  statusbar";
+        "titlebar  titlebar  titlebar"
+        "activity  sidebar   editor"
+        "statusbar statusbar statusbar";
 }
 
-/* Collapsed sidebar state */
-#ide-shell.sidebar-collapsed {
-    grid-template-columns:
-        var(--activitybar-width)
-        0px
-        0px
-        1fr;
-}
-
-#ide-shell.sidebar-collapsed #sidebar,
-#ide-shell.sidebar-collapsed #sidebar-resize {
-    display: none;
+/* Collapsed sidebar state -- driven by --sidebar-width: 0px set in JS */
+#ide-shell.sidebar-collapsed #sidebar {
+    overflow: hidden;
+    border-right: none;
 }
 
 /* Collapsed bottom panel state */
@@ -178,6 +170,7 @@ html, body {
 /* ---- Sidebar ---- */
 #sidebar {
     grid-area: sidebar;
+    position: relative;
     background: var(--bg-sidebar);
     display: flex;
     flex-direction: column;
@@ -207,6 +200,7 @@ html, body {
 
 #sidebar-content {
     flex: 1;
+    min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
     overscroll-behavior: contain;
@@ -263,12 +257,16 @@ html, body {
 /* Sidebar backdrop -- only visible on mobile via media query */
 #sidebar-backdrop { display: none; }
 
-/* ---- Sidebar Resize Handle ---- */
+/* ---- Sidebar Resize Handle (absolutely positioned inside #sidebar) ---- */
 #sidebar-resize {
-    grid-area: resize-s;
+    position: absolute;
+    top: 0;
+    right: -2px;
+    width: 4px;
+    height: 100%;
     cursor: col-resize;
+    z-index: 5;
     background: transparent;
-    transition: background 0.15s;
 }
 
 #sidebar-resize:hover,
@@ -983,7 +981,8 @@ html, body {
    Responsive: mobile layout for narrow screens
    Activity bar → bottom toolbar, sidebar → overlay modal
    ============================================================ */
-@media (max-width: 768px) {
+@media (max-width: 768px),
+       ((min-width: 769px) and (max-width: 1024px) and (orientation: portrait)) {
     /* ---- Grid: single column, activity bar at bottom ---- */
     #ide-shell,
     #ide-shell.sidebar-collapsed {
@@ -1009,11 +1008,6 @@ html, body {
         min-width: 0;
         max-width: 100%;
         overflow: hidden;
-    }
-
-    /* ---- Fix touch-action: allow scroll on UI, block only on canvas ---- */
-    html, body {
-        touch-action: auto;
     }
 
     /* ---- Editor area + canvas: fill available space ---- */
@@ -1077,7 +1071,7 @@ html, body {
         position: fixed;
         top: 0;
         left: 0;
-        bottom: 48px;
+        bottom: calc(var(--activitybar-width, 48px) + var(--statusbar-height, 22px));
         width: 85vw;
         max-width: 360px;
         z-index: 310;
@@ -1087,14 +1081,11 @@ html, body {
         box-shadow: 4px 0 16px rgba(0, 0, 0, 0.5);
     }
 
-    /* Override desktop collapsed display:none — controlled by transform instead */
     #ide-shell.sidebar-collapsed #sidebar {
-        display: flex;
         transform: translateX(-100%);
     }
 
     #ide-shell:not(.sidebar-collapsed) #sidebar {
-        display: flex;
         transform: translateX(0);
     }
 
@@ -1107,7 +1098,7 @@ html, body {
         top: 0;
         left: 0;
         right: 0;
-        bottom: 48px;
+        bottom: calc(var(--activitybar-width, 48px) + var(--statusbar-height, 22px));
         background: rgba(0, 0, 0, 0.5);
         z-index: 300;
         -webkit-tap-highlight-color: transparent;
@@ -1157,6 +1148,15 @@ html, body {
     /* ---- Breadcrumb: smaller on mobile ---- */
     #breadcrumb-bar {
         padding: 0 8px;
+    }
+
+    /* ---- Safe-area insets for notched devices ---- */
+    #activity-bar {
+        padding-bottom: env(safe-area-inset-bottom, 0px);
+    }
+
+    #status-bar {
+        padding-bottom: env(safe-area-inset-bottom, 0px);
     }
 }
 
