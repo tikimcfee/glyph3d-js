@@ -388,6 +388,8 @@ func RunServer(cfg ServerConfig) error {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		case strings.HasSuffix(path, ".wasm"):
 			w.Header().Set("Content-Type", "application/wasm")
+		case strings.HasSuffix(path, ".ttf"):
+			w.Header().Set("Content-Type", "font/sfnt")
 		case strings.HasSuffix(path, ".glsl"):
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		}

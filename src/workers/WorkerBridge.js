@@ -47,6 +47,9 @@ export class WorkerBridge {
 
         // Lazy initialization flag
         this._initialized = false;
+
+        // HarfBuzz font readiness flag
+        this._fontReady = false;
     }
 
     /**
@@ -81,6 +84,68 @@ export class WorkerBridge {
         console.debug(`[WorkerBridge] Initialized ${this.workers.length} workers`);
         this._initialized = true;
     }
+
+    /**
+     * Initialize all workers with HarfBuzz font data.
+     *
+     * Sends the font buffer and WASM URL to each worker via structured clone
+     * (not Transferable — ~100KB for Cousine, clone is fast and simpler).
+     * Each worker creates its own HarfBuzzShaper instance with its own WASM
+     * instantiation (per-thread requirement in browsers).
+     *
+     * Must be called before any build operations that rely on HarfBuzz shaping.
+     *
+     * @param {ArrayBuffer} fontBuffer - Raw .ttf font file bytes
+     * @returns {Promise<void>}
+     */
+    async initFont(fontBuffer) {
+        this._ensureInitialized();
+
+        if (this.workers.length === 0) {
+            // No workers — main-thread-only mode. Mark as ready.
+            this._fontReady = true;
+            return;
+        }
+
+        const initStart = performance.now();
+
+        // Compute absolute WASM URL from our module location
+        const wasmUrl = new URL(
+            '../shaping/vendor/hb.wasm',
+            import.meta.url
+        ).href;
+
+        const readyPromises = this.workers.map((worker, i) => {
+            return new Promise((resolve, reject) => {
+                const jobId = `init-font-${i}`;
+                this.pendingRequests.set(jobId, {
+                    resolve: () => {
+                        console.log(`[HarfBuzz] Worker ${i} ready`);
+                        resolve();
+                    },
+                    reject
+                });
+                // Structured clone: each worker gets a copy of fontBuffer.
+                // No Transferable — keeps main thread's reference intact.
+                worker.postMessage({
+                    type: 'INIT_FONT',
+                    jobId,
+                    payload: { fontBuffer, wasmUrl }
+                });
+            });
+        });
+
+        await Promise.all(readyPromises);
+        this._fontReady = true;
+
+        const totalMs = (performance.now() - initStart).toFixed(1);
+        console.log(
+            `[WorkerBridge] All ${this.workers.length} workers initialized (${totalMs}ms)`
+        );
+    }
+
+    /** @returns {boolean} Whether all workers have HarfBuzz ready */
+    get fontReady() { return this._fontReady; }
 
     /**
      * Get serialized UV map from atlas (version-aware cache).
@@ -287,6 +352,10 @@ export class WorkerBridge {
             pending.reject(new Error(error));
         } else if (type === 'PONG') {
             pending.resolve({ pong: true });
+        } else if (type === 'FONT_READY') {
+            pending.resolve();
+        } else if (type === 'CLEANUP_DONE') {
+            pending.resolve();
         }
     }
 
@@ -347,12 +416,15 @@ export class WorkerBridge {
             workerCount: this.workers.length,
             pendingRequests: this.pendingRequests.size,
             initialized: this._initialized,
+            fontReady: this._fontReady,
             uvMapCached: !!this._uvMapCache
         };
     }
 
     /**
-     * Dispose all workers
+     * Dispose all workers.
+     * Workers are terminated, which implicitly destroys their HarfBuzz
+     * instances (WASM memory is freed when the worker thread exits).
      */
     dispose() {
         for (const worker of this.workers) {
@@ -363,6 +435,7 @@ export class WorkerBridge {
         this._uvMapCache = null;
         this._uvMapAtlas = null;
         this._initialized = false;
+        this._fontReady = false;
     }
 }
 

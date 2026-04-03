@@ -10,22 +10,50 @@
  * keyed by grapheme cluster string and carries the numericId per entry.
  *
  * Caches UV map to avoid repeated serialization.
+ *
+ * HarfBuzz integration: INIT_FONT message initializes a per-worker
+ * HarfBuzzShaper instance with the font buffer and WASM URL sent from
+ * the main thread. CLEANUP destroys the shaper to free WASM memory.
  */
 
 import { buildGlyphBuffers, buildBatchBuffers } from './builders/index.js';
+import HarfBuzzShaper from '../shaping/HarfBuzzShaper.js';
 
 // Cached UV map and per-glyph widths (sent once, reused)
 let cachedUVMap = null;
 let cachedGlyphWidths = null;
 
+// HarfBuzz shaper instance (initialized via INIT_FONT message)
+let shaper = null;
+
 /**
  * Handle incoming messages
  */
-self.onmessage = function(event) {
+self.onmessage = async function(event) {
     const { type, jobId, payload } = event.data;
 
     try {
         switch (type) {
+            case 'INIT_FONT': {
+                // Initialize HarfBuzz WASM + load font in this worker.
+                // Main thread sends fontBuffer (structured clone) and the
+                // absolute wasmUrl so we can locate hb.wasm.
+                shaper = new HarfBuzzShaper();
+                await shaper.init(payload.fontBuffer, payload.wasmUrl);
+                self.postMessage({ type: 'FONT_READY', jobId });
+                break;
+            }
+
+            case 'CLEANUP': {
+                // Destroy HarfBuzz objects to free WASM memory
+                if (shaper) {
+                    shaper.destroy();
+                    shaper = null;
+                }
+                self.postMessage({ type: 'CLEANUP_DONE', jobId });
+                break;
+            }
+
             case 'BUILD': {
                 const result = buildGlyphBuffers(payload);
                 // [GPU-Lookup] Transfer codepoints buffer (numeric DataTexture IDs) — main thread

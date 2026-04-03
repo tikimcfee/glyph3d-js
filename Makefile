@@ -34,7 +34,7 @@ LDFLAGS := -s -w \
 	-X main.Platform=$(HOST_PLATFORM)
 GOFLAGS := -trimpath -ldflags='$(LDFLAGS)'
 
-.PHONY: all build clean prep deploy release linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64
+.PHONY: all build clean prep prep-wasm deploy release linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64
 
 # --- Default: build for current platform ---
 
@@ -53,6 +53,20 @@ prep:
 		fi; \
 	done
 	@echo "Prepared $(WEB_DIR)/ for embedding"
+
+# --- Vendor HarfBuzz WASM from node_modules ---
+# Run after npm install to refresh vendored harfbuzzjs files.
+# The vendored files in src/shaping/vendor/ are checked into git,
+# so this only needs to run when upgrading harfbuzzjs.
+
+prep-wasm:
+	@echo "Vendoring harfbuzzjs files..."
+	@cp node_modules/harfbuzzjs/hb.wasm src/shaping/vendor/hb.wasm
+	@cp node_modules/harfbuzzjs/hb.js src/shaping/vendor/hb.js
+	@echo 'export default createHarfBuzz;' >> src/shaping/vendor/hb.js
+	@cp node_modules/harfbuzzjs/hbjs.js src/shaping/vendor/hbjs.js
+	@echo 'export default hbjs;' >> src/shaping/vendor/hbjs.js
+	@echo "Vendored hb.wasm ($$(du -h src/shaping/vendor/hb.wasm | cut -f1)), hb.js, hbjs.js → src/shaping/vendor/"
 
 # --- Cross-compilation ---
 # Each target sets Platform via LDFLAGS override.
