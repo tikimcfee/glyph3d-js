@@ -1,11 +1,13 @@
 /**
- * Shaping module - HarfBuzz text shaping + outline extraction.
+ * Shaping module - HarfBuzz text shaping + outline extraction + Slug encoding.
  *
  * Phase 1: HarfBuzzShaper wraps harfbuzzjs WASM for text shaping and
  * glyph outline extraction. shapeText provides line-by-line shaping.
  *
- * Phase 2 will add SlugEncoder here for curve/band/glyphMap textures.
+ * Phase 2: SlugEncoder converts glyph outlines into GPU-ready DataTextures
+ * (curveTexture, bandTexture, glyphMapTexture) for vector text rendering.
  */
 
 export { default as HarfBuzzShaper } from './HarfBuzzShaper.js';
 export { shapeText, collectUniqueGlyphIds } from './shapeText.js';
+export { default as SlugEncoder } from './SlugEncoder.js';
