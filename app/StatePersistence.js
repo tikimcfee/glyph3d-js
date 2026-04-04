@@ -29,6 +29,10 @@ export const STATE_DEFAULTS = {
     'atlas.size':            2048,
     'camera.position':       null,
     'groups':                null,
+    'ui.sidebarVisible':     true,
+    'ui.activePanel':        'explorer',
+    'ui.bottomPanelVisible': true,
+    'ui.activePanelTab':     'output',
 };
 
 /**

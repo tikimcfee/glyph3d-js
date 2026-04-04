@@ -28,6 +28,7 @@ import { logCapturePanelHTML } from './components/LogCapturePanel.js';
 import { diffPanelHTML } from './components/DiffPanel.js';
 import { installerPanelHTML, initInstallerPanel } from './components/InstallerPanel.js';
 import { primaryMod } from '../src/services/utils/platform.js';
+import { stateController } from '../src/services/state/StateController.js';
 
 // Panel title labels keyed by data-panel attribute
 const PANEL_TITLES = {
@@ -78,12 +79,12 @@ export class IDEShell {
         this._statusFps = document.getElementById('status-fps');
         this._statusWs = document.getElementById('status-ws');
 
-        // State
-        this._activePanel = 'explorer';
-        this._sidebarVisible = true;
+        // State — restore from persistence, fall back to defaults
+        this._activePanel = stateController.get('ui.activePanel', 'explorer');
+        this._sidebarVisible = stateController.get('ui.sidebarVisible', true);
         this._lastSidebarWidth = 280;
-        this._bottomPanelVisible = true;
-        this._activePanelTab = 'output';
+        this._bottomPanelVisible = stateController.get('ui.bottomPanelVisible', true);
+        this._activePanelTab = stateController.get('ui.activePanelTab', 'output');
         this._openTabs = [];        // [{path, name}]
         this._activeTabPath = null;
 
@@ -115,6 +116,21 @@ export class IDEShell {
         this._wireResizeObserver();
         this._wireSidebarResize();
         this._wireStatusBarClicks();
+
+        // Apply restored panel state to the DOM
+        if (!this._sidebarVisible) {
+            this._shell.classList.add('sidebar-collapsed');
+            document.documentElement.style.setProperty('--sidebar-width', '0px');
+            this._activityBtns.forEach(btn => btn.classList.remove('active'));
+        } else {
+            this._showSidebarPanel(this._activePanel);
+        }
+        if (!this._bottomPanelVisible) {
+            this._shell.classList.add('panel-collapsed');
+        }
+        if (this._activePanelTab !== 'output') {
+            this._switchPanelTab(this._activePanelTab);
+        }
 
         // On mobile: start with sidebar and bottom panel collapsed
         if (this._isMobile) {
@@ -278,6 +294,7 @@ export class IDEShell {
     /** @private */
     _showSidebarPanel(panelId) {
         this._activePanel = panelId;
+        stateController.set('ui.activePanel', panelId);
 
         // Update activity bar active state
         this._activityBtns.forEach(btn => {
@@ -355,6 +372,7 @@ export class IDEShell {
         document.documentElement.style.setProperty('--sidebar-width', '0px');
         this._shell.classList.add('sidebar-collapsed');
         this._activityBtns.forEach(btn => btn.classList.remove('active'));
+        stateController.set('ui.sidebarVisible', false);
         this._onEditorResize();
     }
 
@@ -363,6 +381,7 @@ export class IDEShell {
         this._sidebarVisible = true;
         document.documentElement.style.setProperty('--sidebar-width', `${this._lastSidebarWidth || 280}px`);
         this._shell.classList.remove('sidebar-collapsed');
+        stateController.set('ui.sidebarVisible', true);
         this._onEditorResize();
     }
 
@@ -529,12 +548,14 @@ export class IDEShell {
     _toggleBottomPanel() {
         this._bottomPanelVisible = !this._bottomPanelVisible;
         this._shell.classList.toggle('panel-collapsed', !this._bottomPanelVisible);
+        stateController.set('ui.bottomPanelVisible', this._bottomPanelVisible);
         this._onEditorResize();
     }
 
     /** @private */
     _switchPanelTab(panelId) {
         this._activePanelTab = panelId;
+        stateController.set('ui.activePanelTab', panelId);
         this._panelTabs.forEach(t => {
             t.classList.toggle('active', t.dataset.panel === panelId);
         });
