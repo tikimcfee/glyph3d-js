@@ -15,7 +15,10 @@ import {
     HierarchicalLayoutManager,
     SpiralLayoutManager,
     TreemapLayoutManager,
-    StackLayoutManager
+    StackLayoutManager,
+    HarfBuzzShaper,
+    SlugEncoder,
+    collectUniqueGlyphIds,
 } from '../src/index.js';
 
 import { PickingSystem } from '../src/picking/PickingSystem.js';
@@ -262,6 +265,49 @@ export class GitHubRepoViewer {
         // Track atlas version at load time — if ensureGraphemes adds glyphs
         // during file loading, we'll re-cache the expanded atlas afterward.
         this._atlasVersionAtLoad = this.atlas.uvMapVersion;
+
+        // HarfBuzz + Slug vector rendering initialization
+        // Load font, shape all glyphs, encode into GPU textures.
+        // This replaces the atlas bitmap with resolution-independent vector curves.
+        this._shaper = null;
+        this._slugData = null;
+        try {
+            this.loading.update(0.5, 'Loading HarfBuzz WASM...');
+            const fontUrl = new URL('../src/fonts/Cousine-Regular.ttf', import.meta.url).href;
+            const fontResp = await fetch(fontUrl);
+            const fontBuffer = await fontResp.arrayBuffer();
+
+            this._shaper = new HarfBuzzShaper();
+            await this._shaper.init(fontBuffer);
+
+            // Initialize workers with font for shaped buffer building
+            const { getWorkerBridge } = await import('../src/workers/WorkerBridge.js');
+            const workerBridge = getWorkerBridge();
+            await workerBridge.initFont(fontBuffer);
+
+            // Shape a representative set of ASCII + common chars to collect glyph IDs
+            this.loading.update(0.6, 'Encoding glyph curves...');
+            const probeText = Array.from({ length: 95 }, (_, i) => String.fromCharCode(32 + i)).join('');
+            const { shapeText: shapeTextFn } = await import('../src/shaping/shapeText.js');
+            const shaped = shapeTextFn(this._shaper, probeText);
+            const glyphIds = collectUniqueGlyphIds(shaped.lines);
+
+            // Encode glyph outlines into Slug GPU textures
+            const encoder = new SlugEncoder(this._shaper);
+            const slugResult = encoder.encode(glyphIds);
+            this._slugData = slugResult;
+
+            // Store on atlas so all CodeGrid/GlyphCollection instances auto-discover it
+            this.atlas._slugData = this._slugData;
+            this.atlas._shaper = this._shaper;
+
+            this.loading.update(0.7, 'Slug rendering ready');
+            console.log('[Slug] Vector rendering initialized');
+        } catch (err) {
+            console.warn('[Slug] Failed to initialize HarfBuzz/Slug, falling back to atlas:', err);
+            this._shaper = null;
+            this._slugData = null;
+        }
 
         // Three.js setup
         this.scene = new THREE.Scene();
@@ -1729,7 +1775,10 @@ export class GitHubRepoViewer {
 
     async createGridForFileAsync(path, content) {
         const filename = path.split('/').pop();
-        const grid = new CodeGrid(this.scene, this.atlas);
+        const grid = new CodeGrid(this.scene, this.atlas, {
+            slugData: this._slugData || null,
+            shaper: this._shaper || null,
+        });
         // Wire picking before load so flush auto-registers
         if (this.pickingSystem) {
             grid.getCollection().setPickingSystem(this.pickingSystem);

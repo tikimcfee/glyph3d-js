@@ -39,7 +39,11 @@ class CodeGrid extends THREE.Object3D {
             // Overall grid scale - scales the entire code view
             gridScale: options.gridScale || 1.0,
             // World scale passed to renderer (pixels to world units)
-            worldScale: options.worldScale || 0.025
+            worldScale: options.worldScale || 0.025,
+            // Slug vector rendering data (passed through to GlyphCollection → GlyphRenderer)
+            // Check options first, then atlas (shared across all renderers)
+            slugData: options.slugData || (atlas && atlas._slugData) || null,
+            shaper: options.shaper || (atlas && atlas._shaper) || null,
         };
 
         // Content state
@@ -52,7 +56,9 @@ class CodeGrid extends THREE.Object3D {
         this._collection = new GlyphCollection(scene, atlas, {
             maxInstances: this.config.maxChars,
             defaultColor: this.config.textColor,
-            worldScale: this.config.worldScale
+            worldScale: this.config.worldScale,
+            slugData: options.slugData || null,
+            shaper: options.shaper || null,
         });
 
         // Derive metrics from atlas via GlyphCollection (no renderer needed)
@@ -78,6 +84,19 @@ class CodeGrid extends THREE.Object3D {
         // Apply overall grid scale
         if (this.config.gridScale !== 1.0) {
             this.scale.setScalar(this.config.gridScale);
+        }
+    }
+
+    /**
+     * Set Slug texture data on this grid's collection.
+     * @param {Object} slugData - { curveTexture, bandTexture, glyphMapTexture }
+     * @param {import('../shaping/HarfBuzzShaper.js').default} [shaper] - Main-thread shaper
+     */
+    setSlugData(slugData, shaper) {
+        this.config.slugData = slugData;
+        if (shaper) this.config.shaper = shaper;
+        if (this._collection) {
+            this._collection.setSlugData(slugData, shaper);
         }
     }
 
@@ -466,7 +485,9 @@ class CodeGrid extends THREE.Object3D {
         this._collection = new GlyphCollection(this.scene, this.atlas, {
             maxInstances: this.config.maxChars,
             defaultColor: this.config.textColor,
-            worldScale: this.config.worldScale
+            worldScale: this.config.worldScale,
+            slugData: this.config.slugData || null,
+            shaper: this.config.shaper || null,
         });
 
         this.add(this._collection.group);

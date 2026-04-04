@@ -380,7 +380,7 @@ export default class TerminalGrid extends THREE.Object3D {
      */
     _writeToInstanceBuffer() {
         const geom = this._renderer.instanceMesh.geometry;
-        const cpAttr    = geom.attributes.instanceCodepoint;
+        const cpAttr    = geom.attributes.instanceGlyphId;
         const colorAttr = geom.attributes.instanceColor;
 
         if (!cpAttr || !colorAttr) {

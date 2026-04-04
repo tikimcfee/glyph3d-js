@@ -1,0 +1,25 @@
+# Review: edit-pipeline reviews buffer-internals, api-stability
+
+## Errors or Conflicts
+
+1. **TextBuffer API shape divergence.** My analysis defines `applyEdits(TextEdit[])` returning `{ newContent, inverses, treeSitterDescs }` -- a batch operation using LSP-style range positions. Buffer-internals defines `applyEdit(startOffset, endOffset, newText)` returning `{ startOffset, endOffset, deletedText }` -- a single-edit operation using byte offsets. These are incompatible signatures for the same abstraction. The offset-based API forces callers to compute `positionToOffset` externally, which defeats the purpose of hiding the buffer. The range-based `TextEdit[]` batch API is the correct choice because it matches what every upstream producer (input manager, commands, provider) already emits. The offset conversion must live inside the buffer, not outside it.
+
+2. **Inverse computation ownership.** My analysis places inverse computation firmly inside `TextBuffer.applyEdits()` -- the buffer captures replaced text before mutation and returns inverses alongside results. Buffer-internals' `applyEdit()` returns `deletedText` as a raw string, leaving the caller to reconstruct the inverse TextEdit. This is a weaker contract. If the buffer is later swapped to a piece table, the caller would need to understand piece-table internals to build a correct inverse. The buffer must own the full inverse, not just the deleted text.
+
+3. **`TextBuffer` visibility.** Buffer-internals says "NOT exported, NOT visible to consumers -- CodeGrid owns one." My analysis has `TextBuffer` as a standalone class in `app/editing/TextBuffer.js` that EditorInputManager interacts with directly (the edit pipeline calls `buffer.applyEdits()` before updating the grid). These two positions are in tension. If TextBuffer is hidden behind CodeGrid, then CodeGrid itself must expose `applyEdits(TextEdit[])` and coordinate the full pipeline (buffer mutation, inverse return, re-render scheduling, provider notification). If TextBuffer is standalone, CodeGrid just receives updated content. The buffer-internals approach is cleaner for encapsulation but means CodeGrid becomes the edit coordinator, which is a larger responsibility than it currently has.
+
+4. **`grid.lines` Proxy.** Buffer-internals proposes a `Proxy` object to shim `grid.lines` backward compatibility. API-stability notes this is unnecessary -- a simple getter returning `this._buffer.getLines()` (materializing a string[]) works and is far simpler. The Proxy avoids allocating N substrings, but the consumers (highlightCommands, TourAnnotator) iterate every line anyway, so the Proxy's lazy evaluation gains nothing in practice. Both agents identify `highlightToken()` as the real fix. The Proxy is premature optimization that adds debugging complexity for no measurable benefit.
+
+## Convergence (what all three agree on)
+
+- **`TextEdit[]` is the pipeline-level currency.** All three analyses agree that LSP-style `{ range, newText }` edits are the lingua franca. No agent proposes a custom edit format.
+- **The worker boundary forces string serialization.** All three recognize that whatever buffer backs the text, a flat string must cross the worker boundary. The builder needs `charCodeAt` and nothing else.
+- **`grid.content` and `grid.lines` must become getters.** All three converge on backward-compatible accessor properties wrapping an internal buffer, with a migration path to explicit methods (`getContent()`, `getLine(n)`, `getLineCount()`).
+- **The provider layer is already buffer-agnostic.** No changes needed on the provider side to support a buffer swap.
+- **Picking is already buffer-agnostic.** Slot-based resolution does not depend on text storage internals.
+- **Phase 1 is a flat-string wrapper with zero performance cost.** All agree the initial implementation literally wraps what exists today.
+- **`highlightToken()` should become a CodeGrid method.** API-stability identifies the duplicated pattern in highlightCommands and TourAnnotator; my analysis leaves those consumers unchanged; buffer-internals implicitly agrees by keeping line iteration internal. Consolidating into a first-class method is the right call.
+
+## Key Recommendation
+
+The single most important Tier 1 decision is where `applyEdits(TextEdit[])` lives and what it returns. It must be a batch method on CodeGrid (not on a hidden TextBuffer, not on EditorInputManager) that accepts pre-document-position `TextEdit[]`, delegates to the internal buffer for mutation and inverse computation, returns `{ newContent, inverses }` synchronously, and internally triggers re-render scheduling. This makes CodeGrid the edit coordinator -- the one place that knows about buffer state, slot mapping, and render invalidation. The alternative (exposing TextBuffer directly) splits coordination across two objects and forces every future buffer swap to also update the external wiring. By making `grid.applyEdits(edits)` the single entry point, the buffer implementation becomes a private detail that can evolve from flat string to piece table to CRDT without any consumer ever knowing.

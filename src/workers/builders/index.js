@@ -4,29 +4,28 @@
  * Single-pass text → Float32Array conversion.
  * No intermediate objects, no spread operators.
  *
- * GPU grapheme → UV path
- * ----------------------
- * These builders emit a `codepoints` Float32Array instead of a `uvs` array.
- * Each element is the numeric DataTexture ID for the glyph. The vertex shader
- * resolves IDs to atlas UV rects at draw time via a DataTexture lookup
- * (atlasMapTexture, built by GlyphAtlas.getAtlasMapTexture()).
+ * Two builder paths:
  *
- * For single-codepoint graphemes the numeric ID equals the Unicode codepoint.
- * For multi-codepoint graphemes (ZWJ sequences) it is a dense synthetic ID
- * assigned by GlyphAtlas above the highest charset codepoint.
+ * 1. **HarfBuzz-shaped path** (`buildShapedBatchBuffers`):
+ *    Uses HarfBuzzShaper.shape() per line. Outputs HarfBuzz glyph IDs that
+ *    index directly into SlugEncoder's glyphMapTexture for Slug vector rendering.
+ *    Variable-width advances from HarfBuzz. This is the primary path.
  *
- * The `uvMap` argument maps grapheme string → {u0,v0,u1,v1,numericId}. It is
- * used both for existence validation (fallback to '?' if missing) and to obtain
- * the numeric DataTexture ID written into the `codepoints` buffer.
+ * 2. **Legacy grapheme path** (`buildGlyphBuffers`, `buildBatchBuffers`):
+ *    Iterates grapheme clusters, looks up numeric IDs from a UV map.
+ *    Still used as fallback when HarfBuzz is not initialized on a worker.
+ *    The `uvMap` argument maps grapheme string → {u0,v0,u1,v1,numericId}.
+ *
+ * Both paths emit a `glyphIds` Float32Array (with `codepoints` alias for compat).
+ * The vertex shader uses glyphId to index into glyphMapTexture via texelFetch.
  *
  * Worker context: this file must not import DOM APIs or Three.js.
- * Grapheme iteration uses Intl.Segmenter (Baseline 2024) with a codePointAt
- * fallback — both work on DedicatedWorkerGlobalScope.
  *
  * Buffer contract type reference: ../../core/types.js (GlyphBufferSet, GlyphBufferItemMeta)
  */
 
 import { iterGraphemes } from '../../utils/grapheme.js';
+import { shapeText } from '../../shaping/shapeText.js';
 
 /**
  * Count renderable grapheme clusters in text (excludes control characters).
@@ -62,18 +61,21 @@ function countGlyphs(text) {
  *   A GlyphBufferSet with an additional top-level `lineSlotOffsets` (line index → first buffer slot
  *   on that line) and `count` for the number of populated glyph slots. The `itemMeta` field is absent
  *   from the single-item builder; use buildBatchBuffers() when per-item metadata is needed.
- *   `codepoints` contains one numeric DataTexture ID per glyph for GPU-side UV lookup.
+ *   `glyphIds` contains one HarfBuzz glyph ID per glyph for Slug texture lookup.
+ *   `codepoints` is kept as an alias for backward compatibility.
  */
 export function buildGlyphBuffers(input) {
     const { text, position, metrics, uvMap, glyphWidths, color, scale = 1.0, groupId = 0 } = input;
 
     if (!text || text.length === 0) {
+        const empty = new Float32Array(0);
         return {
-            positions: new Float32Array(0),
-            sizes: new Float32Array(0),
-            codepoints: new Float32Array(0),
-            colors: new Float32Array(0),
-            groupIds: new Float32Array(0),
+            positions: empty,
+            sizes: empty,
+            glyphIds: empty,
+            codepoints: empty,
+            colors: empty,
+            groupIds: empty,
             count: 0,
             bounds: null
         };
@@ -85,7 +87,7 @@ export function buildGlyphBuffers(input) {
     // Allocate buffers
     const positions = new Float32Array(glyphCount * 3);
     const sizes = new Float32Array(glyphCount * 2);
-    const codepoints = new Float32Array(glyphCount);
+    const glyphIdsArr = new Float32Array(glyphCount);
     const colors = new Float32Array(glyphCount * 3);
     const groupIds = new Float32Array(glyphCount);
 
@@ -163,8 +165,8 @@ export function buildGlyphBuffers(input) {
         sizes[idx * 2] = glyphWidth * scale;
         sizes[idx * 2 + 1] = scaledHeight;
 
-        // [GPU-Lookup] Store numeric DataTexture ID; vertex shader resolves to UV via atlasMapTexture
-        codepoints[idx] = numericId;
+        // Store numeric glyph ID for Slug glyphMapTexture lookup
+        glyphIdsArr[idx] = numericId;
 
         // Color [r, g, b]
         colors[idx * 3] = color.r;
@@ -188,7 +190,7 @@ export function buildGlyphBuffers(input) {
         height: maxY - minY
     } : null;
 
-    return { positions, sizes, codepoints, colors, groupIds, count: idx, bounds, lineSlotOffsets };
+    return { positions, sizes, glyphIds: glyphIdsArr, codepoints: glyphIdsArr, colors, groupIds, count: idx, bounds, lineSlotOffsets };
 }
 
 /**
@@ -261,7 +263,8 @@ function applyPagination(positions, startIdx, endIdx, origin, metrics) {
  * @param {Array<{text, position, color?, scale?}>} items
  * @param {Object} shared - {metrics, uvMap, glyphWidths, defaultColor}
  * @returns {import('../../core/types.js').GlyphBufferSet}
- *   `codepoints` contains one numeric DataTexture ID per glyph for GPU-side UV lookup via atlasMapTexture.
+ *   `glyphIds` contains one numeric glyph ID per glyph for Slug glyphMapTexture lookup.
+ *   `codepoints` is kept as an alias for backward compatibility.
  *   Each entry in `itemMeta` is a GlyphBufferItemMeta with bufferStartIndex, glyphCount, bounds, and
  *   lineSlotOffsets (plain number[], one entry per logical line within that item).
  */
@@ -276,7 +279,7 @@ export function buildBatchBuffers(items, shared) {
     const zWrapSpacing = metrics.charHeight * Z_WRAP_CONFIG.zWrapSpacing;
 
     // '?' fallback entry
-    const fallbackEntry = uvMap['?'];
+    const fallbackEntry = uvMap ? uvMap['?'] : null;
 
     // First pass: count total glyphs
     let totalGlyphs = 0;
@@ -288,6 +291,7 @@ export function buildBatchBuffers(items, shared) {
         return {
             positions: new Float32Array(0),
             sizes: new Float32Array(0),
+            glyphIds: new Float32Array(0),
             codepoints: new Float32Array(0),
             colors: new Float32Array(0),
             groupIds: new Float32Array(0),
@@ -300,7 +304,7 @@ export function buildBatchBuffers(items, shared) {
     // Allocate combined buffers
     const positions = new Float32Array(totalGlyphs * 3);
     const sizes = new Float32Array(totalGlyphs * 2);
-    const codepoints = new Float32Array(totalGlyphs);
+    const glyphIdsArr = new Float32Array(totalGlyphs);
     const colors = new Float32Array(totalGlyphs * 3);
     const groupIds = new Float32Array(totalGlyphs);
 
@@ -408,8 +412,8 @@ export function buildBatchBuffers(items, shared) {
             sizes[idx * 2] = glyphWidth * scale;
             sizes[idx * 2 + 1] = scaledHeight;
 
-            // [GPU-Lookup] Store numeric DataTexture ID; vertex shader resolves to UV via atlasMapTexture
-            codepoints[idx] = numericId;
+            // Store numeric glyph ID for Slug glyphMapTexture lookup
+            glyphIdsArr[idx] = numericId;
 
             colors[idx * 3] = color.r;
             colors[idx * 3 + 1] = color.g;
@@ -488,7 +492,236 @@ export function buildBatchBuffers(items, shared) {
         depth: maxZ - minZ
     } : null;
 
-    return { positions, sizes, codepoints, colors, groupIds, count: bufferOffset, bounds, itemMeta };
+    return { positions, sizes, glyphIds: glyphIdsArr, codepoints: glyphIdsArr, colors, groupIds, count: bufferOffset, bounds, itemMeta };
+}
+
+/**
+ * Build buffers for multiple texts using HarfBuzz shaping.
+ *
+ * Replaces grapheme-based iteration with HarfBuzz shape() per line.
+ * Outputs HarfBuzz glyph IDs that index directly into SlugEncoder's glyphMapTexture.
+ * Space glyphs (0 curves in SlugEncoder) are skipped — advance cursor only.
+ *
+ * @param {Array<{text, position, color?, scale?, groupId?}>} items
+ * @param {Object} shared - {metrics, defaultColor}
+ * @param {import('../../shaping/HarfBuzzShaper.js').default} shaper - Initialized HarfBuzzShaper
+ * @param {Set<number>} [emptyGlyphs] - Set of glyph IDs with 0 curves (spaces, .notdef)
+ * @returns {import('../../core/types.js').GlyphBufferSet}
+ */
+export function buildShapedBatchBuffers(items, shared, shaper, emptyGlyphs) {
+    const { metrics, defaultColor } = shared;
+    const upem = shaper.upem;
+    const ws = metrics.worldScale || (metrics.charWidth / 30);
+
+    // Z-depth wrapping settings
+    const maxLineWidth = Z_WRAP_CONFIG.maxLineWidth;
+    const zWrapSpacing = metrics.charHeight * Z_WRAP_CONFIG.zWrapSpacing;
+
+    // Empty glyph cache — glyph IDs that produce 0 curves (space, .notdef)
+    const _emptyGlyphs = emptyGlyphs || new Set();
+
+    // First pass: shape all text to count total glyphs (worst-case)
+    const shapedItems = [];
+    let totalGlyphs = 0;
+
+    for (let i = 0; i < items.length; i++) {
+        const text = items[i].text || '';
+        const shaped = shapeText(shaper, text);
+        shapedItems.push(shaped);
+        totalGlyphs += shaped.totalGlyphs;
+    }
+
+    if (totalGlyphs === 0) {
+        return {
+            positions: new Float32Array(0),
+            sizes: new Float32Array(0),
+            glyphIds: new Float32Array(0),
+            codepoints: new Float32Array(0),
+            colors: new Float32Array(0),
+            groupIds: new Float32Array(0),
+            count: 0,
+            bounds: null,
+            itemMeta: items.map(() => ({ bufferStartIndex: 0, glyphCount: 0, bounds: null }))
+        };
+    }
+
+    // Allocate combined buffers (worst-case — may truncate if empty glyphs are skipped)
+    const positions = new Float32Array(totalGlyphs * 3);
+    const sizes = new Float32Array(totalGlyphs * 2);
+    const glyphIdsArr = new Float32Array(totalGlyphs);
+    const colors = new Float32Array(totalGlyphs * 3);
+    const groupIds = new Float32Array(totalGlyphs);
+    const itemMeta = new Array(items.length);
+
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+
+    let bufferOffset = 0;
+
+    for (let itemIdx = 0; itemIdx < items.length; itemIdx++) {
+        const item = items[itemIdx];
+        const pos = item.position;
+        const color = item.color || defaultColor;
+        const scale = item.scale || 1.0;
+        const itemGroupId = item.groupId || 0;
+        const shaped = shapedItems[itemIdx];
+
+        const itemStartOffset = bufferOffset;
+        const itemLineSlotOffsets = [bufferOffset];
+
+        let x = pos.x;
+        let y = pos.y;
+        let z = pos.z;
+        const startZ = pos.z;
+        let glyphsOnSegment = 0;
+
+        let itemMinX = Infinity, itemMaxX = -Infinity;
+        let itemMinY = y, itemMaxY = y + metrics.charHeight;
+        let itemMinZ = z, itemMaxZ = z;
+
+        for (let lineIdx = 0; lineIdx < shaped.lines.length; lineIdx++) {
+            if (lineIdx > 0) {
+                // Newline
+                if (x > pos.x) itemMaxX = Math.max(itemMaxX, x);
+                x = pos.x;
+                y -= metrics.lineSpacing;
+                z = startZ;
+                itemMinY = y;
+                glyphsOnSegment = 0;
+                itemLineSlotOffsets.push(bufferOffset);
+            }
+
+            const line = shaped.lines[lineIdx];
+            for (const sg of line.shaped) {
+                const glyphId = sg.g;
+                const advance = sg.ax / upem * ws * scale;
+                const charHeight = metrics.charHeight * scale;
+                const dx = sg.dx / upem * ws * scale;
+                const dy = sg.dy / upem * ws * scale;
+
+                // Z-depth + Y-drop wrap
+                if (maxLineWidth > 0 && glyphsOnSegment >= maxLineWidth) {
+                    if (x > pos.x) itemMaxX = Math.max(itemMaxX, x);
+                    x = pos.x;
+                    y -= metrics.lineSpacing;
+                    z -= zWrapSpacing;
+                    itemMinY = y;
+                    itemMinZ = Math.min(itemMinZ, z);
+                    glyphsOnSegment = 0;
+                }
+
+                // Skip empty glyphs (space, .notdef) — advance cursor only
+                if (_emptyGlyphs.has(glyphId)) {
+                    if (itemMinX === Infinity) itemMinX = x;
+                    x += advance;
+                    glyphsOnSegment++;
+                    continue;
+                }
+
+                if (itemMinX === Infinity) itemMinX = x;
+                const idx = bufferOffset;
+
+                positions[idx * 3] = x + dx;
+                positions[idx * 3 + 1] = y + dy;
+                positions[idx * 3 + 2] = z;
+
+                sizes[idx * 2] = advance;
+                sizes[idx * 2 + 1] = charHeight;
+
+                glyphIdsArr[idx] = glyphId;
+
+                colors[idx * 3] = color.r;
+                colors[idx * 3 + 1] = color.g;
+                colors[idx * 3 + 2] = color.b;
+
+                groupIds[idx] = itemGroupId;
+
+                bufferOffset++;
+                x += advance;
+                glyphsOnSegment++;
+            }
+        }
+
+        if (x > pos.x) itemMaxX = Math.max(itemMaxX, x);
+        itemMaxZ = Math.max(itemMaxZ, startZ);
+
+        const itemGlyphCount = bufferOffset - itemStartOffset;
+
+        // Apply page-break pagination if needed
+        if (itemGlyphCount > 0) {
+            const totalYSpan = pos.y - itemMinY;
+            const pageHeightWorld = PAGE_CONFIG.pageHeight * metrics.lineSpacing;
+            if (totalYSpan > pageHeightWorld) {
+                applyPagination(positions, itemStartOffset, bufferOffset, pos, metrics);
+                // Recompute bounds
+                itemMinX = Infinity; itemMaxX = -Infinity;
+                itemMinY = Infinity; itemMaxY = -Infinity;
+                itemMinZ = Infinity; itemMaxZ = -Infinity;
+                for (let i = itemStartOffset; i < bufferOffset; i++) {
+                    const px = positions[i * 3];
+                    const py = positions[i * 3 + 1];
+                    const pz = positions[i * 3 + 2];
+                    if (px < itemMinX) itemMinX = px;
+                    if (px > itemMaxX) itemMaxX = px;
+                    if (py < itemMinY) itemMinY = py;
+                    if (py > itemMaxY) itemMaxY = py;
+                    if (pz < itemMinZ) itemMinZ = pz;
+                    if (pz > itemMaxZ) itemMaxZ = pz;
+                }
+                itemMaxX += metrics.charWidth;
+                itemMaxY += metrics.charHeight;
+            }
+        }
+
+        itemMeta[itemIdx] = {
+            bufferStartIndex: itemStartOffset,
+            glyphCount: itemGlyphCount,
+            lineSlotOffsets: itemLineSlotOffsets,
+            bounds: itemGlyphCount > 0 ? {
+                min: { x: itemMinX, y: itemMinY, z: itemMinZ },
+                max: { x: itemMaxX, y: itemMaxY, z: itemMaxZ },
+                width: itemMaxX - itemMinX,
+                height: itemMaxY - itemMinY,
+                depth: itemMaxZ - itemMinZ
+            } : null
+        };
+
+        if (itemMinX !== Infinity) {
+            minX = Math.min(minX, itemMinX);
+            maxX = Math.max(maxX, itemMaxX);
+            minY = Math.min(minY, itemMinY);
+            maxY = Math.max(maxY, itemMaxY);
+            minZ = Math.min(minZ, itemMinZ);
+            maxZ = Math.max(maxZ, itemMaxZ);
+        }
+    }
+
+    const bounds = bufferOffset > 0 ? {
+        min: { x: minX, y: minY, z: minZ },
+        max: { x: maxX, y: maxY, z: maxZ },
+        width: maxX - minX,
+        height: maxY - minY,
+        depth: maxZ - minZ
+    } : null;
+
+    // Truncate to actual count (some glyphs may have been skipped)
+    const finalPositions = bufferOffset < totalGlyphs ? positions.subarray(0, bufferOffset * 3) : positions;
+    const finalSizes = bufferOffset < totalGlyphs ? sizes.subarray(0, bufferOffset * 2) : sizes;
+    const finalGlyphIds = bufferOffset < totalGlyphs ? glyphIdsArr.subarray(0, bufferOffset) : glyphIdsArr;
+    const finalColors = bufferOffset < totalGlyphs ? colors.subarray(0, bufferOffset * 3) : colors;
+    const finalGroupIds = bufferOffset < totalGlyphs ? groupIds.subarray(0, bufferOffset) : groupIds;
+
+    return {
+        positions: finalPositions,
+        sizes: finalSizes,
+        glyphIds: finalGlyphIds,
+        codepoints: finalGlyphIds,
+        colors: finalColors,
+        groupIds: finalGroupIds,
+        count: bufferOffset,
+        bounds,
+        itemMeta
+    };
 }
 
 export default buildGlyphBuffers;

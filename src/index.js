@@ -74,8 +74,11 @@ export { ConnectionRenderer } from './annotations/index.js';
 // Parsing (file refs, stack traces, log lines)
 export { parseFileRef, parseStackTrace, parseLogLine, parseAuto } from './parsing/index.js';
 
-// Text shaping (HarfBuzz WASM)
-export { HarfBuzzShaper, shapeText, collectUniqueGlyphIds } from './shaping/index.js';
+// Text shaping (HarfBuzz WASM) + Slug vector encoding
+export { HarfBuzzShaper, shapeText, collectUniqueGlyphIds, SlugEncoder } from './shaping/index.js';
+
+// Shaped buffer builders
+export { buildShapedBatchBuffers } from './workers/builders/index.js';
 
 // Hand tracking
 export {

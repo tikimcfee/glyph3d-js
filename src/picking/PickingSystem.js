@@ -18,7 +18,7 @@ import * as THREE from 'three';
 // ---------------------------------------------------------------------------
 // Picking shaders — two modes:
 //   'cell'  (default) — solid quad, entire glyph cell is pickable
-//   'glyph'           — alpha-tested against atlas, only rendered strokes pick
+//   'glyph'           — Slug winding number coverage, only rendered strokes pick
 // ---------------------------------------------------------------------------
 
 // Shared vertex core — position + group visibility
@@ -69,16 +69,20 @@ void main() {
 }
 `;
 
-// Glyph mode: alpha-tested against atlas texture — only rendered strokes pick
+// Glyph mode: Slug vector coverage test — only rendered strokes pick
 const PICKING_VERTEX_GLYPH = PICKING_VERTEX_CORE + `
-in float instanceCodepoint;
+in float instanceGlyphId;
 
-uniform sampler2D atlasMapTexture;
-uniform float atlasMapWidth;
-uniform float atlasMapHeight;
+uniform highp usampler2D glyphMapTexture;
+uniform float glyphMapWidth;
+uniform float glyphMapHeight;
 
 flat out int vPickingId;
-out highp vec2 vUV;
+flat out int vCurveStart;
+flat out int vCurveCount;
+flat out int vBandHeaderStart;
+flat out int vBandCount;
+out vec2 vGlyphUV;
 
 void main() {
     vec3 scaled = position * vec3(instanceSize, 1.0);
@@ -96,25 +100,97 @@ void main() {
     gl_Position = projectionMatrix * modelViewMatrix * vec4(worldPos, 1.0);
     vPickingId = uBasePickingId + gl_InstanceID;
 
-    float cp = instanceCodepoint;
-    float mapCol = mod(cp, atlasMapWidth);
-    float mapRow = floor(cp / atlasMapWidth);
-    float tx = (mapCol + 0.5) / atlasMapWidth;
-    float ty = (mapRow + 0.5) / atlasMapHeight;
-    vec4 uvRect = texture(atlasMapTexture, vec2(tx, ty));
-    vUV = mix(uvRect.xy, uvRect.zw, uv);
+    int gid = int(instanceGlyphId);
+    int mapCol = gid % int(glyphMapWidth);
+    int mapRow = gid / int(glyphMapWidth);
+    uvec4 glyphInfo = texelFetch(glyphMapTexture, ivec2(mapCol, mapRow), 0);
+    vCurveStart      = int(glyphInfo.x);
+    vCurveCount      = int(glyphInfo.y);
+    vBandHeaderStart = int(glyphInfo.z);
+    vBandCount       = int(glyphInfo.w);
+    vGlyphUV = uv;
 }
 `;
 
 const PICKING_FRAGMENT_GLYPH = `
 precision highp float;
-uniform sampler2D atlasTexture;
+precision highp int;
+
+#define MAX_BANDS 16
+#define MAX_CURVES_PER_BAND 64
+
+uniform highp usampler2D curveTexture;
+uniform highp usampler2D bandTexture;
+
 flat in int vPickingId;
-in highp vec2 vUV;
+flat in int vCurveStart;
+flat in int vCurveCount;
+flat in int vBandHeaderStart;
+flat in int vBandCount;
+in vec2 vGlyphUV;
+
 out vec4 fragColor;
+
+float unpackCoord(uint bits) { return float(bits) / 65535.0; }
+
+int windingContrib(vec2 p, vec2 p0, vec2 p1, vec2 p2) {
+    vec2 a = p0 - p, b = p1 - p, c = p2 - p;
+    float A = a.y - 2.0 * b.y + c.y;
+    float B = a.y - b.y;
+    float C = a.y;
+    int w = 0;
+    if (abs(A) < 1e-7) {
+        if (abs(B) < 1e-7) return 0;
+        float t = C / (2.0 * B);
+        if (t < 0.0 || t > 1.0) return 0;
+        float x = (1.0-t)*(1.0-t)*a.x + 2.0*t*(1.0-t)*b.x + t*t*c.x;
+        if (x < 0.0) return 0;
+        float dy = 2.0*((b.y-a.y)*(1.0-t) + (c.y-b.y)*t);
+        return (dy > 0.0) ? 1 : -1;
+    }
+    float disc = B*B - A*C;
+    if (disc < 0.0) return 0;
+    float sqrtDisc = sqrt(disc);
+    for (int k = 0; k < 2; k++) {
+        float t = (k == 0) ? (B - sqrtDisc)/A : (B + sqrtDisc)/A;
+        if (t < 0.0 || t > 1.0) continue;
+        float x = (1.0-t)*(1.0-t)*a.x + 2.0*t*(1.0-t)*b.x + t*t*c.x;
+        if (x < 0.0) continue;
+        float dy = 2.0*((b.y-a.y)*(1.0-t) + (c.y-b.y)*t);
+        w += (dy > 0.0) ? 1 : -1;
+    }
+    return w;
+}
+
 void main() {
-    float alpha = texture(atlasTexture, vUV).a;
-    if (alpha < 0.01) discard;
+    if (vCurveCount == 0 || vBandCount == 0) discard;
+
+    vec2 p = vGlyphUV;
+    int bandIdx = clamp(int(p.y * float(vBandCount)), 0, vBandCount - 1);
+    int hdrTexel = vBandHeaderStart + bandIdx;
+    uvec4 hdr = texelFetch(bandTexture, ivec2(hdrTexel % 1024, hdrTexel / 1024), 0);
+    int entryStart = int(hdr.x);
+    int entryCount = int(hdr.y);
+    int winding = 0;
+
+    for (int i = 0; i < MAX_CURVES_PER_BAND; i++) {
+        if (i >= entryCount) break;
+        int entryTexel = entryStart + i;
+        uvec4 entry = texelFetch(bandTexture, ivec2(entryTexel % 1024, entryTexel / 1024), 0);
+        int localCurveIdx = int(entry.x);
+        int ci = (vCurveStart + localCurveIdx) * 2;
+        uvec4 t0 = texelFetch(curveTexture, ivec2(ci % 1024, ci / 1024), 0);
+        uvec4 t1 = texelFetch(curveTexture, ivec2((ci+1) % 1024, (ci+1) / 1024), 0);
+        vec2 cp0 = vec2(unpackCoord(t0.x), unpackCoord(t0.y));
+        vec2 cp1 = vec2(unpackCoord(t0.z), unpackCoord(t0.w));
+        vec2 cp2 = vec2(unpackCoord(t1.x), unpackCoord(t1.y));
+        float minX = min(cp0.x, min(cp1.x, cp2.x));
+        if (minX > p.x) break;
+        winding += windingContrib(p, cp0, cp1, cp2);
+    }
+
+    if (winding == 0) discard;
+
     int id = vPickingId;
     int r = (id >> 16) & 0xFF;
     int g = (id >> 8) & 0xFF;
@@ -262,12 +338,13 @@ export class PickingSystem {
 
         let vertShader, fragShader;
         if (this._mode === 'glyph') {
-            // Glyph mode: alpha-test against atlas — only strokes pick
+            // Glyph mode: Slug winding number coverage — only strokes pick
             const mainUniforms = mesh.material.uniforms;
-            uniforms.atlasTexture    = mainUniforms.atlasTexture;
-            uniforms.atlasMapTexture = mainUniforms.atlasMapTexture;
-            uniforms.atlasMapWidth   = mainUniforms.atlasMapWidth;
-            uniforms.atlasMapHeight  = mainUniforms.atlasMapHeight;
+            uniforms.curveTexture    = mainUniforms.curveTexture;
+            uniforms.bandTexture     = mainUniforms.bandTexture;
+            uniforms.glyphMapTexture = mainUniforms.glyphMapTexture;
+            uniforms.glyphMapWidth   = mainUniforms.glyphMapWidth;
+            uniforms.glyphMapHeight  = mainUniforms.glyphMapHeight;
             vertShader = PICKING_VERTEX_GLYPH;
             fragShader = PICKING_FRAGMENT_GLYPH;
         } else {

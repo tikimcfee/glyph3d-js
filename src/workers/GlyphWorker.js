@@ -4,19 +4,19 @@
  * Handles messages from main thread, processes glyph data,
  * and transfers results back with zero-copy Transferable arrays.
  *
- * GPU grapheme → UV path: builders emit a `codepoints` Float32Array of
- * numeric DataTexture IDs (one per grapheme cluster). The vertex shader
- * resolves IDs to UV rects via atlasMapTexture at draw time. The uvMap is
- * keyed by grapheme cluster string and carries the numericId per entry.
+ * Two builder paths:
+ * - HarfBuzz-shaped: when shaper is initialized (INIT_FONT), uses
+ *   buildShapedBatchBuffers() which emits HarfBuzz glyph IDs for Slug rendering.
+ * - Legacy fallback: grapheme-based buildBatchBuffers() with atlas UV map.
  *
- * Caches UV map to avoid repeated serialization.
+ * Caches UV map to avoid repeated serialization (legacy path).
  *
  * HarfBuzz integration: INIT_FONT message initializes a per-worker
  * HarfBuzzShaper instance with the font buffer and WASM URL sent from
  * the main thread. CLEANUP destroys the shaper to free WASM memory.
  */
 
-import { buildGlyphBuffers, buildBatchBuffers } from './builders/index.js';
+import { buildGlyphBuffers, buildBatchBuffers, buildShapedBatchBuffers } from './builders/index.js';
 import HarfBuzzShaper from '../shaping/HarfBuzzShaper.js';
 
 // Cached UV map and per-glyph widths (sent once, reused)
@@ -25,6 +25,9 @@ let cachedGlyphWidths = null;
 
 // HarfBuzz shaper instance (initialized via INIT_FONT message)
 let shaper = null;
+
+// Set of glyph IDs known to have 0 curves (space, .notdef) — avoids redundant checks
+let emptyGlyphCache = null;
 
 /**
  * Handle incoming messages
@@ -56,15 +59,13 @@ self.onmessage = async function(event) {
 
             case 'BUILD': {
                 const result = buildGlyphBuffers(payload);
-                // [GPU-Lookup] Transfer codepoints buffer (numeric DataTexture IDs) — main thread
-                // renderer binds it as instanceCodepoint; shader resolves UV via atlasMapTexture.
-                // console.debug(`[GlyphWorker] BUILD: ${result.count} glyphs`);
+                const glyphIdsBuf = result.glyphIds || result.codepoints;
                 self.postMessage(
                     { type: 'RESULT', jobId, buffers: result },
                     [
                         result.positions.buffer,
                         result.sizes.buffer,
-                        result.codepoints.buffer,
+                        glyphIdsBuf.buffer,
                         result.colors.buffer,
                         result.groupIds.buffer
                     ]
@@ -73,34 +74,44 @@ self.onmessage = async function(event) {
             }
 
             case 'BUILD_BATCH': {
-                // Cache UV map and glyph widths if provided
-                if (payload.shared.uvMap) {
-                    cachedUVMap = payload.shared.uvMap;
+                let result;
+
+                if (shaper && shaper.ready) {
+                    // HarfBuzz-shaped path — emit glyph IDs for Slug rendering
+                    const shared = {
+                        metrics: payload.shared.metrics,
+                        defaultColor: payload.shared.defaultColor,
+                    };
+                    // Lazy-build empty glyph cache from emptyGlyphs in payload
+                    if (!emptyGlyphCache && payload.shared.emptyGlyphs) {
+                        emptyGlyphCache = new Set(payload.shared.emptyGlyphs);
+                    }
+                    result = buildShapedBatchBuffers(payload.items, shared, shaper, emptyGlyphCache);
+                } else {
+                    // Fallback: grapheme-based builder (atlas path)
+                    if (payload.shared.uvMap) {
+                        cachedUVMap = payload.shared.uvMap;
+                    }
+                    if (payload.shared.glyphWidths) {
+                        cachedGlyphWidths = payload.shared.glyphWidths;
+                    }
+                    const shared = {
+                        metrics: payload.shared.metrics,
+                        defaultColor: payload.shared.defaultColor,
+                        uvMap: cachedUVMap,
+                        glyphWidths: cachedGlyphWidths
+                    };
+                    result = buildBatchBuffers(payload.items, shared);
                 }
-                if (payload.shared.glyphWidths) {
-                    cachedGlyphWidths = payload.shared.glyphWidths;
-                }
 
-                // Use cached UV map and glyph widths
-                const shared = {
-                    metrics: payload.shared.metrics,
-                    defaultColor: payload.shared.defaultColor,
-                    uvMap: cachedUVMap,
-                    glyphWidths: cachedGlyphWidths
-                };
-
-                const result = buildBatchBuffers(payload.items, shared);
-
-                // [GPU-Lookup] Transfer codepoints buffer (numeric DataTexture IDs) — main thread
-                // renderer binds it as instanceCodepoint; shader resolves UV via atlasMapTexture.
-                // itemMeta goes through structured clone; Float32Arrays are zero-copy.
-                // console.debug(`[GlyphWorker] BUILD_BATCH: ${result.count} glyphs, ${payload.items.length} items`);
+                // Transfer buffers — glyphIds/codepoints alias the same array
+                const glyphIdsBuf = result.glyphIds || result.codepoints;
                 self.postMessage(
                     { type: 'RESULT', jobId, buffers: result },
                     [
                         result.positions.buffer,
                         result.sizes.buffer,
-                        result.codepoints.buffer,
+                        glyphIdsBuf.buffer,
                         result.colors.buffer,
                         result.groupIds.buffer
                     ]

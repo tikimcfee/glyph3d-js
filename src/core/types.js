@@ -86,17 +86,18 @@
  * - 5 instance attributes:
  *     instancePosition  vec3  (x, y, z world position)
  *     instanceSize      vec2  (width, height of the quad)
- *     instanceCodepoint float (numeric atlas map key)
+ *     instanceGlyphId   float (HarfBuzz glyph ID, indexes glyphMapTexture)
  *     instanceColor     vec3  (r, g, b, 0-1)
  *     instanceGroupId   float (row index into group DataTexture)
- * - 4 texture bindings:
- *     atlasTexture     RGBA8  mipmapped  — font bitmap
- *     atlasMapTexture  RGBA32F nearest   — codepoint → (u0,v0,u1,v1)
- *     groupTexture     RGBA32F nearest   — per-group offset/color/scale
- *     highlightTexture RGBA8  nearest    — per-glyph additive highlight color
+ * - 5 texture bindings:
+ *     curveTexture     RGBA16UI nearest  — quadratic bezier control points (2 texels/curve)
+ *     bandTexture      RGBA16UI nearest  — horizontal band headers + curve entries
+ *     glyphMapTexture  RGBA16UI nearest  — glyph ID → curve/band offsets
+ *     groupTexture     RGBA32F  nearest  — per-group offset/color/scale
+ *     highlightTexture RGBA8    nearest  — per-glyph additive highlight color
  * - RGBA32F textures with NearestFilter only (no OES_texture_float_linear dependency)
  * - Offscreen RGBA8 render target for the picking pass
- * - texelFetch in vertex shader (for atlasMapTexture and highlightTexture lookups)
+ * - texelFetch in vertex+fragment shaders (usampler2D for Slug textures)
  * - Minimum 2048x2048 texture dimension support
  * - Partial buffer upload (addUpdateRange equivalent) for direct-write position/color paths
  * - Picking ID derivation as (uBasePickingId + instanceIndex) — no per-glyph picking attribute

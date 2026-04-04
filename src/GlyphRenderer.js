@@ -1,14 +1,17 @@
 /**
- * GlyphRendererV15 - Clean Architecture 3D Text Rendering
+ * GlyphRendererV15 - Slug Vector Text Rendering
  *
- * A streamlined glyph rendering system using existing abstractions
- * with optimized batch handling and instance management.
+ * GPU-instanced glyph rendering using the Slug algorithm: quadratic bezier
+ * curves evaluated per-pixel in the fragment shader via winding number.
+ * No bitmap atlas — all glyph shapes stored as compact curve data in
+ * three RGBA16UI DataTextures (curve, band, glyphMap).
  *
  * Key Features:
- * - Uses standardized dimensions from RenderingConstants
- * - Leverages improved UV handling from GlyphAtlas
- * - Natural batch rendering as primary path
- * - Efficient glyph referencing with WeakMap
+ * - Resolution-independent vector text (no atlas bitmap)
+ * - HarfBuzz-shaped glyph IDs (variable-width advances)
+ * - Per-pixel winding number coverage evaluation
+ * - Band-based early-exit for O(sqrt(N)) curve tests per pixel
+ * - Group transforms, highlight texture, picking — all preserved
  * - Zero allocation hot paths
  */
 
@@ -17,6 +20,7 @@ import { PERF_THRESHOLDS, shouldDebugLog } from './core/constants.js';
 import GlyphLayout from './layout/GlyphLayout.js';
 import { createLogger, LogLevel } from './utils/index.js';
 import { iterGraphemes } from './utils/grapheme.js';
+import { TEXTURE_WIDTH } from './shaping/slug-constants.js';
 
 // Create logger for v1.5
 const logger = createLogger('GlyphRendererV15');
@@ -24,14 +28,22 @@ logger.setLevel(shouldDebugLog('instancing') ? LogLevel.DEBUG : LogLevel.INFO);
 
 class GlyphRendererV15 {
     /**
-     * Create a clean glyph renderer
+     * Create a Slug vector glyph renderer.
+     *
      * @param {THREE.Scene} scene - Three.js scene
-     * @param {GlyphAtlas} atlas - Glyph atlas with font metrics
+     * @param {Object} atlas - GlyphAtlas (used only for metrics in Phase 3 transition)
      * @param {Object} options - Configuration options
+     * @param {Object} [options.slugData] - SlugEncoder output: { curveTexture, bandTexture, glyphMapTexture }
      */
     constructor(scene, atlas, options = {}) {
         this.scene = scene;
         this.atlas = atlas;
+
+        // Slug textures (required for rendering — provided via options, atlas, or setSlugData)
+        this._slugData = options.slugData || (atlas && atlas._slugData) || null;
+
+        // HarfBuzz shaper for sync rendering path (optional — main thread only)
+        this._shaper = options.shaper || (atlas && atlas._shaper) || null;
 
         // Configuration with sensible defaults
         this.config = {
@@ -57,9 +69,6 @@ class GlyphRendererV15 {
             letterSpacing: atlasCharSize.width * scale * 0.05,  // 5% spacing
             lineSpacing: atlasCharSize.height * scale * 1.2,    // 120% line height
 
-            // Atlas info for UV calculations
-            atlasSize: atlas.getAtlasTexture().width,
-
             // Keep original pixel size for reference
             pixelWidth: atlasCharSize.width,
             pixelHeight: atlasCharSize.height
@@ -84,9 +93,6 @@ class GlyphRendererV15 {
         // Worker path uses applyPrebuiltBuffers() directly - no need for these
         this._layout = null;
 
-        // Use shared atlas texture (one texture for all renderers)
-        this.texture = atlas.getSharedThreeTexture(THREE);
-
         // Pre-create instance mesh
         this.instanceMesh = this._createInstanceMesh();
         this.scene.add(this.instanceMesh);
@@ -104,31 +110,44 @@ class GlyphRendererV15 {
             this._setupContextLossHandlers(options.canvas);
         }
 
+        if (this._slugData) {
+            const ct = this._slugData.curveTexture;
+            const bt = this._slugData.bandTexture;
+            const gm = this._slugData.glyphMapTexture;
+            logger.info(`[GlyphRenderer] Slug textures bound: curves=${ct.image.width}x${ct.image.height}, bands=${bt.image.width}x${bt.image.height}, glyphMap=${gm.image.width}x${gm.image.height}`);
+            logger.info('[GlyphRenderer] Slug rendering active — atlas removed');
+        }
+
         logger.trace('Initialized', {
-            atlas: `${this.atlas.getAtlasTexture().width}x${this.atlas.getAtlasTexture().height}`,
-            fontPixels: `${this.metrics.pixelWidth}x${this.metrics.pixelHeight}px`,
             worldUnits: `${this.metrics.charWidth.toFixed(3)}x${this.metrics.charHeight.toFixed(3)}`,
             worldScale: this.config.worldScale,
-            maxInstances: this.config.maxInstances
+            maxInstances: this.config.maxInstances,
+            slugActive: !!this._slugData,
         });
     }
 
     /**
-     * Create optimized atlas texture using v1.0 settings
-     * @private
+     * Set or update the Slug texture data after construction.
+     * Used when SlugEncoder output becomes available after the renderer is created.
+     * @param {Object} slugData - { curveTexture, bandTexture, glyphMapTexture }
+     * @param {import('./shaping/HarfBuzzShaper.js').default} [shaper] - Main-thread shaper for sync path
      */
-    _createAtlasTexture() {
-        const canvas = this.atlas.getAtlasTexture();
-        const texture = new THREE.CanvasTexture(canvas);
-
-        // Use quality settings from v1.0
-        texture.minFilter = THREE.LinearMipmapLinearFilter;
-        texture.magFilter = THREE.LinearFilter;
-        texture.generateMipmaps = true;
-        texture.anisotropy = 4;  // Better quality at angles
-        texture.needsUpdate = true;
-
-        return texture;
+    setSlugData(slugData, shaper) {
+        if (shaper) this._shaper = shaper;
+        this._slugData = slugData;
+        if (this.instanceMesh) {
+            const u = this.instanceMesh.material.uniforms;
+            u.curveTexture.value = slugData.curveTexture;
+            u.bandTexture.value = slugData.bandTexture;
+            u.glyphMapTexture.value = slugData.glyphMapTexture;
+            u.glyphMapWidth.value = slugData.glyphMapTexture.image.width;
+            u.glyphMapHeight.value = slugData.glyphMapTexture.image.height;
+        }
+        const ct = slugData.curveTexture;
+        const bt = slugData.bandTexture;
+        const gm = slugData.glyphMapTexture;
+        logger.info(`[GlyphRenderer] Slug textures bound: curves=${ct.image.width}x${ct.image.height}, bands=${bt.image.width}x${bt.image.height}, glyphMap=${gm.image.width}x${gm.image.height}`);
+        logger.info('[GlyphRenderer] Slug rendering active — atlas removed');
     }
 
     /**
@@ -216,7 +235,9 @@ class GlyphRendererV15 {
     }
 
     /**
-     * Create the single instance mesh used for all rendering
+     * Create the single instance mesh used for all rendering.
+     * Uses Slug vector textures (curveTexture, bandTexture, glyphMapTexture)
+     * instead of a bitmap atlas.
      * @private
      */
     _createInstanceMesh() {
@@ -232,33 +253,27 @@ class GlyphRendererV15 {
         // Create group offset DataTexture
         this._groupTexture = this._createGroupTexture();
 
-        // Build atlas map texture for GPU-side codepoint → UV lookup
-        const atlasMapTexture = this.atlas.getAtlasMapTexture(THREE);
-        const atlasMapDims = this.atlas.getAtlasMapDimensions();
-        if (!GlyphRendererV15._gpuLookupLogged) {
-            GlyphRendererV15._gpuLookupLogged = true;
-            logger.debug('[GPU-Lookup] Pipeline active: instanceCodepoint + atlasMapTexture', {
-                atlasMapDims,
-                glyphsInMap: this.atlas.uvMap.size
-            });
-        }
+        // Slug texture uniforms — populated from SlugEncoder output.
+        // If slugData is not available yet, use null placeholders
+        // (setSlugData() will populate them later).
+        const sd = this._slugData;
 
-        // Create shader material (clean, no debug paths)
+        // Create shader material — Slug vector rendering
         const material = new THREE.ShaderMaterial({
             glslVersion: THREE.GLSL3,
             uniforms: {
-                atlasTexture: { value: this.texture },
-                groupTexture: { value: this._groupTexture },
+                curveTexture:       { value: sd ? sd.curveTexture : null },
+                bandTexture:        { value: sd ? sd.bandTexture : null },
+                glyphMapTexture:    { value: sd ? sd.glyphMapTexture : null },
+                glyphMapWidth:      { value: sd ? sd.glyphMapTexture.image.width : TEXTURE_WIDTH },
+                glyphMapHeight:     { value: sd ? sd.glyphMapTexture.image.height : 1 },
+                groupTexture:       { value: this._groupTexture },
                 groupTextureHeight: { value: this._maxGroups },
-                atlasMapTexture: { value: atlasMapTexture },
-                atlasMapWidth: { value: atlasMapDims.width },
-                atlasMapHeight: { value: atlasMapDims.height },
-                highlightTexture: { value: null } // set after first flush sizes the texture
+                highlightTexture:   { value: null } // set after first flush sizes the texture
             },
             vertexShader: this._getVertexShader(),
             fragmentShader: this._getFragmentShader(),
             transparent: false,
-            alphaTest: 0.01,
             side: THREE.DoubleSide,
             depthWrite: true
         });
@@ -270,7 +285,7 @@ class GlyphRendererV15 {
                 new THREE.InstancedBufferAttribute(new Float32Array(maxCount * 3), 3));
             geometry.setAttribute('instanceSize',
                 new THREE.InstancedBufferAttribute(new Float32Array(maxCount * 2), 2));
-            geometry.setAttribute('instanceCodepoint',
+            geometry.setAttribute('instanceGlyphId',
                 new THREE.InstancedBufferAttribute(new Float32Array(maxCount), 1));
             geometry.setAttribute('instanceColor',
                 new THREE.InstancedBufferAttribute(new Float32Array(maxCount * 3), 3));
@@ -289,8 +304,8 @@ class GlyphRendererV15 {
 
         if (shouldDebugLog('instancing')) {
             logger.debug('Instance mesh created', {
-                maxInstances: maxCount,
-                geometryType: 'InstancedBufferGeometry'
+                geometryType: 'InstancedBufferGeometry',
+                slugActive: !!sd,
             });
         }
 
@@ -298,32 +313,39 @@ class GlyphRendererV15 {
     }
 
     /**
-     * Get optimized vertex shader (GPU codepoint → UV lookup path)
+     * Get Slug vertex shader.
+     *
+     * Reads glyphMapTexture via texelFetch to pass curve/band offsets as
+     * flat int varyings. Outputs vGlyphUV for fragment shader position in
+     * the glyph's [0,1]^2 coordinate space.
      * @private
      */
     _getVertexShader() {
         return `
             precision highp float;
+            precision highp int;
 
             in vec3 instancePosition;
             in vec2 instanceSize;
-            in float instanceCodepoint;
+            in float instanceGlyphId;
             in vec3 instanceColor;
             in float instanceGroupId;
+
+            uniform highp usampler2D glyphMapTexture;
+            uniform float glyphMapWidth;
+            uniform float glyphMapHeight;
 
             uniform sampler2D groupTexture;
             uniform float groupTextureHeight;
 
-            // Atlas map texture: codepoint -> (u0, v0_webgl, u1, v1_webgl)
-            // Layout: atlasMapWidth texels wide x atlasMapHeight rows tall
-            uniform sampler2D atlasMapTexture;
-            uniform float atlasMapWidth;
-            uniform float atlasMapHeight;
-
-            // Per-glyph highlight: RGBA8 DataTexture, width=instanceCount, height=1
+            // Per-glyph highlight: RGBA8 DataTexture, 1024 wide, wrapped
             uniform sampler2D highlightTexture;
 
-            out highp vec2 vUV;
+            flat out int vCurveStart;
+            flat out int vCurveCount;
+            flat out int vBandHeaderStart;
+            flat out int vBandCount;
+            out vec2 vGlyphUV;
             out vec3 vColor;
             out float vGroupAlpha;
             out vec3 vAddedColor;
@@ -348,23 +370,19 @@ class GlyphRendererV15 {
                 // Standard projection
                 gl_Position = projectionMatrix * modelViewMatrix * vec4(worldPos, 1.0);
 
-                // -----------------------------------------------------------------
-                // GPU codepoint → UV lookup  [GPU-Lookup path]
-                //
-                // instanceCodepoint holds the raw Unicode codepoint. atlasMapTexture
-                // is a 1024-wide RGBA Float DataTexture where texel[cp] stores the
-                // pre-flipped (u0, v0_webgl, u1, v1_webgl) for that glyph.
-                // mix() maps the unit quad's uv onto the glyph's atlas sub-rect.
-                // No CPU-side UV array is used — see GlyphAtlas.getAtlasMapTexture().
-                // -----------------------------------------------------------------
-                float cp = instanceCodepoint;
-                float mapCol = mod(cp, atlasMapWidth);
-                float mapRow = floor(cp / atlasMapWidth);
-                float tx = (mapCol + 0.5) / atlasMapWidth;
-                float ty = (mapRow + 0.5) / atlasMapHeight;
-                vec4 uvRect = texture(atlasMapTexture, vec2(tx, ty));
-                // uvRect = (u0, v0_webgl, u1, v1_webgl) — pre-flipped in GlyphAtlas
-                vUV = mix(uvRect.xy, uvRect.zw, uv);
+                // Glyph map lookup: glyphId -> curve/band offsets (RGBA16UI)
+                int gid = int(instanceGlyphId);
+                int mapCol = gid % int(glyphMapWidth);
+                int mapRow = gid / int(glyphMapWidth);
+                uvec4 glyphInfo = texelFetch(glyphMapTexture, ivec2(mapCol, mapRow), 0);
+                vCurveStart      = int(glyphInfo.x);
+                vCurveCount      = int(glyphInfo.y);
+                vBandHeaderStart = int(glyphInfo.z);
+                vBandCount       = int(glyphInfo.w);
+
+                // Glyph-local UV: PlaneGeometry's uv attribute goes [0,1] across the quad.
+                // Maps directly to glyph-space [0,1]^2 for band/curve evaluation.
+                vGlyphUV = uv;
 
                 // gScale.w = color blend factor: 0.0 = multiply (default), 1.0 = replace
                 float colorBlend = gScale.w;
@@ -381,30 +399,130 @@ class GlyphRendererV15 {
     }
 
     /**
-     * Get optimized fragment shader
+     * Get Slug fragment shader — evaluates quadratic bezier curves via
+     * winding number with band-based early exit.
      * @private
      */
     _getFragmentShader() {
         return `
             precision highp float;
+            precision highp int;
 
-            uniform sampler2D atlasTexture;
+            #define MAX_BANDS 16
+            #define MAX_CURVES_PER_BAND 64
 
-            in highp vec2 vUV;
+            uniform highp usampler2D curveTexture;
+            uniform highp usampler2D bandTexture;
+
+            flat in int vCurveStart;
+            flat in int vCurveCount;
+            flat in int vBandHeaderStart;
+            flat in int vBandCount;
+            in vec2 vGlyphUV;
             in vec3 vColor;
             in float vGroupAlpha;
             in vec3 vAddedColor;
 
             out vec4 fragColor;
 
+            // Unpack uint16 to [0,1] normalized float
+            float unpackCoord(uint bits) {
+                return float(bits) / 65535.0;
+            }
+
+            // Returns the winding number contribution of one quadratic Bezier
+            // against a horizontal ray cast from p in the +X direction.
+            // p is in [0,1]^2 glyph space. Curve endpoints in same space.
+            int windingContrib(vec2 p, vec2 p0, vec2 p1, vec2 p2) {
+                // Translate to p-relative coords
+                vec2 a = p0 - p, b = p1 - p, c = p2 - p;
+                // Parametric: Q(t) = (1-t)^2*a + 2t(1-t)*b + t^2*c
+                // Find t where Q.y == 0 (ray y == 0)
+                // Equation: At^2 - 2Bt + C = 0
+                float A = a.y - 2.0 * b.y + c.y;
+                float B = a.y - b.y;
+                float C = a.y;
+                int winding = 0;
+
+                if (abs(A) < 1e-7) {
+                    // Degenerate quadratic = line segment (L segments, Z closings)
+                    if (abs(B) < 1e-7) return 0; // horizontal — no crossing
+                    float t = C / (2.0 * B);
+                    if (t < 0.0 || t > 1.0) return 0;
+                    float x = (1.0 - t) * (1.0 - t) * a.x + 2.0 * t * (1.0 - t) * b.x + t * t * c.x;
+                    if (x < 0.0) return 0;
+                    float dy = 2.0 * ((b.y - a.y) * (1.0 - t) + (c.y - b.y) * t);
+                    return (dy > 0.0) ? 1 : -1;
+                }
+
+                float disc = B * B - A * C;
+                if (disc < 0.0) return 0;
+                float sqrtDisc = sqrt(disc);
+
+                for (int k = 0; k < 2; k++) {
+                    float t = (k == 0) ? (B - sqrtDisc) / A : (B + sqrtDisc) / A;
+                    if (t < 0.0 || t > 1.0) continue;
+                    float x = (1.0 - t) * (1.0 - t) * a.x + 2.0 * t * (1.0 - t) * b.x + t * t * c.x;
+                    if (x < 0.0) continue;
+                    float dy = 2.0 * ((b.y - a.y) * (1.0 - t) + (c.y - b.y) * t);
+                    winding += (dy > 0.0) ? 1 : -1;
+                }
+                return winding;
+            }
+
             void main() {
-                vec4 texColor = texture(atlasTexture, vUV);
+                // Empty glyph shortcut: 0 curves = space/notdef, discard immediately
+                if (vCurveCount == 0 || vBandCount == 0) discard;
 
-                // Apply instance color and group alpha, then additive highlight
-                vec4 base = texColor * vec4(vColor, vGroupAlpha);
-                fragColor = vec4(clamp(base.rgb + vAddedColor, 0.0, 1.0), base.a);
+                vec2 p = vGlyphUV;
 
-                // Alpha test for clean edges and group visibility
+                // Find which horizontal band this pixel is in
+                int bandIdx = clamp(int(p.y * float(vBandCount)), 0, vBandCount - 1);
+                int hdrTexel = vBandHeaderStart + bandIdx;
+
+                // Fetch band header: [entryStart, entryCount, _, _]
+                uvec4 hdr = texelFetch(bandTexture, ivec2(hdrTexel % 1024, hdrTexel / 1024), 0);
+                int entryStart = int(hdr.x);
+                int entryCount = int(hdr.y);
+
+                int winding = 0;
+
+                for (int i = 0; i < MAX_CURVES_PER_BAND; i++) {
+                    if (i >= entryCount) break;
+
+                    // Fetch entry: [curveIndex, _, _, _] — glyph-local curve index
+                    int entryTexel = entryStart + i;
+                    uvec4 entry = texelFetch(bandTexture, ivec2(entryTexel % 1024, entryTexel / 1024), 0);
+                    int localCurveIdx = int(entry.x);
+
+                    // Absolute texel index into curveTexture: 2 texels per curve
+                    int ci = (vCurveStart + localCurveIdx) * 2;
+                    uvec4 t0 = texelFetch(curveTexture, ivec2(ci % 1024, ci / 1024), 0);
+                    uvec4 t1 = texelFetch(curveTexture, ivec2((ci + 1) % 1024, (ci + 1) / 1024), 0);
+
+                    vec2 cp0 = vec2(unpackCoord(t0.x), unpackCoord(t0.y));
+                    vec2 cp1 = vec2(unpackCoord(t0.z), unpackCoord(t0.w));
+                    vec2 cp2 = vec2(unpackCoord(t1.x), unpackCoord(t1.y));
+
+                    // Early exit: curves sorted ascending by minX within band.
+                    // If minX > p.x, all remaining curves are further right — no crossing.
+                    float minX = min(cp0.x, min(cp1.x, cp2.x));
+                    if (minX > p.x) break;
+
+                    winding += windingContrib(p, cp0, cp1, cp2);
+                }
+
+                // Binary coverage: inside (winding != 0) or outside
+                float coverage = (winding != 0) ? 1.0 : 0.0;
+
+                // Phase 4: fwidth-based AA would go here
+                // float fw = fwidth(float(winding));
+                // coverage = smoothstep(-fw, fw, float(abs(winding)));
+
+                if (coverage < 0.01) discard;
+
+                vec3 finalColor = clamp(vColor * coverage + vAddedColor, 0.0, 1.0);
+                fragColor = vec4(finalColor, coverage * vGroupAlpha);
                 if (fragColor.a < 0.01) discard;
             }
         `;
@@ -421,14 +539,6 @@ class GlyphRendererV15 {
      */
     render(text, position = {x: 0, y: 0, z: 0}, options = {}) {
         if (this._contextLost) return -1;
-        // Apply deferred CanvasTexture re-upload: batch all ensureCodepoints() calls
-        // in this frame into one GPU re-upload at draw time, avoiding a stall per-call.
-        if (this.atlas && this.atlas.checkAndClearTextureUpdate()) {
-            if (this.texture) this.texture.needsUpdate = true;
-        }
-        // Sync atlas map dimensions if the map was regrown for new codepoints
-        this._syncAtlasMapDimensions();
-        this._ensureGlyphsInAtlas([{ text }]);
         const glyphs = this._textToGlyphs(text, position, options);
         const id = this._registerText(text, glyphs, options);
         this._rebuildAllInstances();
@@ -442,13 +552,6 @@ class GlyphRendererV15 {
      */
     renderBatch(items) {
         if (this._contextLost) return [];
-        // Apply deferred CanvasTexture re-upload: batch all ensureCodepoints() calls
-        // in this frame into one GPU re-upload at draw time, avoiding a stall per-call.
-        if (this.atlas && this.atlas.checkAndClearTextureUpdate()) {
-            if (this.texture) this.texture.needsUpdate = true;
-        }
-        this._syncAtlasMapDimensions();
-        this._ensureGlyphsInAtlas(items);
         const ids = [];
 
         // Collect all glyphs first
@@ -1083,102 +1186,93 @@ class GlyphRendererV15 {
 
     // ============ Internal Methods ============
 
-    /**
-     * Sync atlas map uniforms if the atlas map DataTexture was regrown.
-     * Called before render/renderBatch to pick up dimension changes from
-     * ensureCodepoints() adding codepoints beyond the initial charset range.
-     * @private
-     */
-    _syncAtlasMapDimensions() {
-        if (!this.atlas || !this.atlas._atlasMapTextureDirty || !this.instanceMesh) return;
-        const dims = this.atlas.getAtlasMapDimensions();
-        const uniforms = this.instanceMesh.material.uniforms;
-        if (uniforms.atlasMapHeight.value !== dims.height) {
-            uniforms.atlasMapHeight.value = dims.height;
-            uniforms.atlasMapWidth.value = dims.width;
-        }
-        // Clear dirty flag only once per atlas (shared across renderers)
-        this.atlas._atlasMapTextureDirty = false;
-    }
+    // _syncAtlasMapDimensions — removed (Slug textures are static after build)
+    // _ensureGlyphsInAtlas — removed (HarfBuzz shaping handles all glyph IDs)
 
     /**
-     * Ensure all grapheme clusters in the given text items exist in the atlas.
-     * Dynamically adds missing glyphs and invalidates the atlas map texture cache.
-     * @param {Array<{text: string}>} items
-     * @private
-     */
-    _ensureGlyphsInAtlas(items) {
-        const missing = [];
-        for (const item of items) {
-            if (!item.text) continue;
-            for (const grapheme of iterGraphemes(item.text)) {
-                const cp = grapheme.codePointAt(0);
-                if (cp > 32 && !this.atlas.uvMap.has(grapheme)) {
-                    missing.push(grapheme);
-                }
-            }
-        }
-        if (missing.length > 0) {
-            // Delegate to the unified entry point: handles canvas pack, DataTexture
-            // update, textureNeedsUpdate flag, serialized cache invalidation, and
-            // _uvMapVersion increment. All renderers share the same atlas object so
-            // the DataTexture needsUpdate propagates automatically.
-            this.atlas.ensureGraphemes(missing);
-        }
-    }
-
-    /**
-     * Convert text to glyph instances
+     * Convert text to glyph instances.
+     *
+     * Uses HarfBuzz shaping when a shaper is available (preferred path).
+     * Falls back to atlas-based grapheme iteration for compatibility.
      * @private
      */
     _textToGlyphs(text, position, options) {
         const color = options.color || this.config.defaultColor;
         const scale = options.scale || 1.0;
 
-        // Get layout positions for each character
-        // NOTE: layoutText skips newlines in the positions array
-        // Lazy-create layout only when sync path is used
+        if (this._shaper && this._shaper.ready) {
+            return this._textToGlyphsShaped(text, position, color, scale, options);
+        }
+
+        // Fallback: atlas-based grapheme iteration (legacy sync path)
         if (!this._layout) {
             this._layout = new GlyphLayout(this.metrics);
         }
         const positions = this._layout.layoutText(text, position, options.alignment);
 
-        // Build glyph data
-        // Use separate index for positions array since it skips newlines
         const glyphs = [];
         let posIndex = 0;
         for (const grapheme of iterGraphemes(text)) {
             const cp = grapheme.codePointAt(0);
-
-            // Newlines are not in positions array - skip without incrementing posIndex
             if (cp === 10) continue;
-
-            // Spaces are in positions array but we don't render them
-            if (cp === 32) {
-                posIndex++;
-                continue;
-            }
+            if (cp === 32) { posIndex++; continue; }
 
             const pos = positions[posIndex++];
-            if (!pos) continue; // Safety check
+            if (!pos) continue;
+            if (!this.atlas.hasGlyph(grapheme)) continue;
 
-            if (!this.atlas.hasGlyph(grapheme)) continue; // Skip unsupported graphemes
-
-            const numericId = this.atlas.getGraphemeId(grapheme) ?? 63;
-
+            const numericId = this.atlas.getGraphemeId(grapheme) ?? 0;
             glyphs.push({
                 position: pos,
-                size: {
-                    width: this.metrics.charWidth * scale,
-                    height: this.metrics.charHeight * scale
-                },
-                charCode: numericId,    // numeric DataTexture ID (shader uses this as codepoint)
-                color: color,
-                char: grapheme,         // Keep for debugging
+                size: { width: this.metrics.charWidth * scale, height: this.metrics.charHeight * scale },
+                charCode: numericId,
+                color,
+                char: grapheme,
                 groupId: options.groupId || 0
             });
         }
+        return glyphs;
+    }
 
+    /**
+     * Convert text to glyph instances using HarfBuzz shaping.
+     * @private
+     */
+    _textToGlyphsShaped(text, position, color, scale, options) {
+        const glyphs = [];
+        const ws = this.config.worldScale;
+        const upem = this._shaper.upem;
+        const fontExt = this._shaper.fontExtents();
+        const lineHeight = (fontExt.ascender - fontExt.descender + fontExt.lineGap) / upem * ws * scale;
+
+        let x = position.x;
+        let y = position.y;
+        const z = position.z;
+
+        const lines = text.split('\n');
+        for (const lineText of lines) {
+            if (lineText.length > 0) {
+                const shaped = this._shaper.shape(lineText);
+                for (const sg of shaped) {
+                    // Skip space glyphs (0 curves = discard in shader anyway)
+                    const advance = sg.ax / upem * ws * scale;
+                    const charHeight = this.metrics.charHeight * scale;
+
+                    glyphs.push({
+                        position: { x: x + (sg.dx / upem * ws * scale), y: y + (sg.dy / upem * ws * scale), z },
+                        size: { width: advance, height: charHeight },
+                        charCode: sg.g,
+                        color,
+                        char: '',
+                        groupId: options.groupId || 0
+                    });
+                    x += advance;
+                }
+            }
+            // Newline: reset x, advance y
+            x = position.x;
+            y -= lineHeight;
+        }
         return glyphs;
     }
 
@@ -1263,7 +1357,7 @@ class GlyphRendererV15 {
         const geometry = this.instanceMesh.geometry;
         const positions = geometry.attributes.instancePosition.array;
         const sizes = geometry.attributes.instanceSize.array;
-        const codepoints = geometry.attributes.instanceCodepoint.array;
+        const glyphIds = geometry.attributes.instanceGlyphId.array;
         const colors = geometry.attributes.instanceColor.array;
         const groupIds = geometry.attributes.instanceGroupId.array;
 
@@ -1280,8 +1374,8 @@ class GlyphRendererV15 {
             sizes[i * 2] = g.size.width;
             sizes[i * 2 + 1] = g.size.height;
 
-            // Codepoint — GPU resolves to UV via atlasMapTexture
-            codepoints[i] = g.charCode || 63; // fallback to '?'
+            // GlyphId — indexes into glyphMapTexture for Slug curve data
+            glyphIds[i] = g.charCode || 0;
 
             // Color
             colors[i * 3] = g.color.r;
@@ -1295,7 +1389,7 @@ class GlyphRendererV15 {
         // Mark attributes as needing update
         geometry.attributes.instancePosition.needsUpdate = true;
         geometry.attributes.instanceSize.needsUpdate = true;
-        geometry.attributes.instanceCodepoint.needsUpdate = true;
+        geometry.attributes.instanceGlyphId.needsUpdate = true;
         geometry.attributes.instanceColor.needsUpdate = true;
         geometry.attributes.instanceGroupId.needsUpdate = true;
 
@@ -1306,10 +1400,10 @@ class GlyphRendererV15 {
         geometry.instanceCount = count;
 
         if (shouldDebugLog('firstInstance') && count > 0) {
-            logger.debug('[GPU-Lookup] First instance sample (UV resolved on GPU via atlasMapTexture)', {
+            logger.debug('[Slug] First instance sample', {
                 position: `(${glyphs[0].position.x.toFixed(2)}, ${glyphs[0].position.y.toFixed(2)})`,
                 char: glyphs[0].char,
-                codepoint: glyphs[0].charCode
+                glyphId: glyphs[0].charCode
             });
         }
     }
@@ -1332,7 +1426,9 @@ class GlyphRendererV15 {
      *   null otherwise.
      */
     applyPrebuiltBuffers(buffers, items) {
-        const { positions, sizes, codepoints, colors, groupIds, count } = buffers;
+        const { positions, sizes, colors, groupIds, count } = buffers;
+        // Accept both 'glyphIds' (new) and 'codepoints' (legacy) field names
+        const glyphIds = buffers.glyphIds || buffers.codepoints;
         let { itemMeta } = buffers;
         const geometry = this.instanceMesh.geometry;
 
@@ -1342,8 +1438,8 @@ class GlyphRendererV15 {
             new THREE.InstancedBufferAttribute(positions, 3));
         geometry.setAttribute('instanceSize',
             new THREE.InstancedBufferAttribute(sizes, 2));
-        geometry.setAttribute('instanceCodepoint',
-            new THREE.InstancedBufferAttribute(codepoints || new Float32Array(count), 1));
+        geometry.setAttribute('instanceGlyphId',
+            new THREE.InstancedBufferAttribute(glyphIds || new Float32Array(count), 1));
         geometry.setAttribute('instanceColor',
             new THREE.InstancedBufferAttribute(colors, 3));
         geometry.setAttribute('instanceGroupId',
@@ -1360,16 +1456,15 @@ class GlyphRendererV15 {
 
         // If itemMeta wasn't provided (e.g., old worker code, structured clone issue),
         // compute it from items by counting renderable glyphs per text entry.
-        // This matches the counting logic in buildBatchBuffers.
+        // This is a rough fallback — counts non-whitespace characters.
         if (!itemMeta && items && items.length > 0) {
             itemMeta = [];
             let offset = 0;
             for (const item of items) {
                 const text = item.text || '';
                 let glyphCount = 0;
-                for (const grapheme of iterGraphemes(text)) {
-                    const cp = grapheme.codePointAt(0);
-                    // Skip control characters (codepoint <= 32)
+                for (let j = 0; j < text.length; j++) {
+                    const cp = text.charCodeAt(j);
                     if (cp > 32) glyphCount++;
                 }
                 // Clamp to remaining buffer space
@@ -1409,7 +1504,7 @@ class GlyphRendererV15 {
                             g: colors[bufIdx * 3 + 1],
                             b: colors[bufIdx * 3 + 2]
                         },
-                        charCode: codepoints ? codepoints[bufIdx] : 63,
+                        charCode: glyphIds ? glyphIds[bufIdx] : 0,
                         char: '',
                         groupId: groupIds ? groupIds[bufIdx] : 0
                     };
@@ -1430,9 +1525,9 @@ class GlyphRendererV15 {
             }
         }
 
-        logger.debug('[GPU-Lookup] Applied pre-built buffers', {
+        logger.debug('[Slug] Applied pre-built buffers', {
             count,
-            hasCodepoints: !!codepoints && codepoints.length > 0,
+            hasGlyphIds: !!glyphIds && glyphIds.length > 0,
             entries: rendererIds ? rendererIds.length : 0,
         });
 
@@ -1479,15 +1574,12 @@ class GlyphRendererV15 {
      * @private
      */
     _rebuildGPUState() {
-        // Re-upload the shared atlas CanvasTexture
-        if (this.texture) {
-            this.texture.needsUpdate = true;
-        }
-
-        // Re-upload the atlas map DataTexture and sync its dimension uniforms
-        if (this.atlas && this.instanceMesh) {
-            const atlasMapTex = this.atlas.getAtlasMapTexture(THREE);
-            this.instanceMesh.material.uniforms.atlasMapTexture.value = atlasMapTex;
+        // Re-upload Slug textures (static DataTextures that survived context loss in CPU memory)
+        if (this._slugData && this.instanceMesh) {
+            const u = this.instanceMesh.material.uniforms;
+            if (u.curveTexture.value) u.curveTexture.value.needsUpdate = true;
+            if (u.bandTexture.value) u.bandTexture.value.needsUpdate = true;
+            if (u.glyphMapTexture.value) u.glyphMapTexture.value.needsUpdate = true;
         }
 
         // Re-upload the group DataTexture (owned by this renderer, backed by this._groupData)
@@ -1539,8 +1631,8 @@ class GlyphRendererV15 {
             this.instanceMesh = null;
         }
 
-        // Don't dispose atlas texture - it's shared across all renderers
-        this.texture = null;
+        // Don't dispose Slug textures — they're shared across all renderers
+        this._slugData = null;
 
         // Dispose group DataTexture (owned by this renderer)
         if (this._groupTexture) {

@@ -43,7 +43,10 @@ class GlyphCollection {
             maxInstances: options.maxInstances,  // Optional override
             defaultColor: options.defaultColor || { r: 1.0, g: 1.0, b: 1.0 },
             worldScale: options.worldScale,  // Pass through to renderer
-            bufferHeadroom: options.bufferHeadroom || 1.1  // 10% extra by default
+            bufferHeadroom: options.bufferHeadroom || 1.1,  // 10% extra by default
+            // Slug data: check options first, then atlas (shared across all renderers)
+            slugData: options.slugData || (atlas && atlas._slugData) || null,
+            shaper: options.shaper || (atlas && atlas._shaper) || null,
         };
 
         // Collection-level transform via Group
@@ -100,6 +103,20 @@ class GlyphCollection {
         // If renderer already exists (post-flush), register immediately
         if (this._renderer && pickingSystem) {
             pickingSystem.registerRenderer(this._renderer);
+        }
+    }
+
+    /**
+     * Set Slug texture data on this collection and its renderer (if created).
+     * Call this after SlugEncoder.encode() completes.
+     * @param {Object} slugData - { curveTexture, bandTexture, glyphMapTexture }
+     * @param {import('../shaping/HarfBuzzShaper.js').default} [shaper] - Main-thread shaper
+     */
+    setSlugData(slugData, shaper) {
+        this.config.slugData = slugData;
+        if (shaper) this.config.shaper = shaper;
+        if (this._renderer) {
+            this._renderer.setSlugData(slugData, shaper);
         }
     }
 
@@ -1060,7 +1077,9 @@ class GlyphCollection {
             maxInstances: bufferSize,
             defaultColor: this.config.defaultColor,
             worldScale: this.config.worldScale,
-            skipPrealloc
+            skipPrealloc,
+            slugData: this.config.slugData,
+            shaper: this.config.shaper,
         });
 
         // Apply any deferred group operations
