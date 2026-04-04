@@ -449,7 +449,7 @@ class GlyphRendererV15 {
                     float x = (1.0 - t) * (1.0 - t) * a.x + 2.0 * t * (1.0 - t) * b.x + t * t * c.x;
                     if (x < 0.0) return 0;
                     float dy = 2.0 * ((b.y - a.y) * (1.0 - t) + (c.y - b.y) * t);
-                    return (dy > 0.0) ? -1 : 1;
+                    return (dy > 0.0) ? 1 : -1;
                 }
 
                 float disc = B * B - A * C;
@@ -462,7 +462,7 @@ class GlyphRendererV15 {
                     float x = (1.0 - t) * (1.0 - t) * a.x + 2.0 * t * (1.0 - t) * b.x + t * t * c.x;
                     if (x < 0.0) continue;
                     float dy = 2.0 * ((b.y - a.y) * (1.0 - t) + (c.y - b.y) * t);
-                    winding += (dy > 0.0) ? -1 : 1;
+                    winding += (dy > 0.0) ? 1 : -1;
                 }
                 return winding;
             }
@@ -500,11 +500,6 @@ class GlyphRendererV15 {
                     vec2 cp0 = vec2(unpackCoord(t0.x), unpackCoord(t0.y));
                     vec2 cp1 = vec2(unpackCoord(t0.z), unpackCoord(t0.w));
                     vec2 cp2 = vec2(unpackCoord(t1.x), unpackCoord(t1.y));
-
-                    // Early exit: curves sorted ascending by minX within band.
-                    // If minX > p.x, all remaining curves are further right — no crossing.
-                    float minX = min(cp0.x, min(cp1.x, cp2.x));
-                    if (minX > p.x) break;
 
                     winding += windingContrib(p, cp0, cp1, cp2);
                 }
