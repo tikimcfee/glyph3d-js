@@ -96,6 +96,9 @@ class GlyphRendererV15 {
         this.textsByMesh = new WeakMap();    // mesh -> Set<id>
         this.nextId = 1;
 
+        // Cached glyph count — maintained incrementally to avoid O(n) scan in getStats()
+        this._cachedGlyphCount = 0;
+
         // WebGL context loss / restore handling.
         // Attach handlers if the caller passed a canvas (typically renderer.domElement).
         // This is optional — callers can also invoke _setupContextLossHandlers() directly.
@@ -1205,7 +1208,10 @@ class GlyphRendererV15 {
      * @param {number} id - Text ID to remove
      */
     remove(id) {
-        if (this.renderedTexts.delete(id)) {
+        const entry = this.renderedTexts.get(id);
+        if (entry) {
+            this._cachedGlyphCount -= entry.glyphCount;
+            this.renderedTexts.delete(id);
             this._rebuildAllInstances();
         }
     }
@@ -1217,7 +1223,10 @@ class GlyphRendererV15 {
     removeBatch(ids) {
         let removed = false;
         for (const id of ids) {
-            if (this.renderedTexts.delete(id)) {
+            const entry = this.renderedTexts.get(id);
+            if (entry) {
+                this._cachedGlyphCount -= entry.glyphCount;
+                this.renderedTexts.delete(id);
                 removed = true;
             }
         }
@@ -1231,6 +1240,7 @@ class GlyphRendererV15 {
      */
     clear() {
         this.renderedTexts.clear();
+        this._cachedGlyphCount = 0;
         this.instanceMesh.geometry.instanceCount = 0;
     }
 
@@ -1309,6 +1319,7 @@ class GlyphRendererV15 {
             glyphs,      // stripped by _rebuildAllInstances after GPU write
             glyphCount: glyphs.length,
         });
+        this._cachedGlyphCount += glyphs.length;
         return id;
     }
 
@@ -1573,6 +1584,10 @@ class GlyphRendererV15 {
 
         // Store lightweight metadata entries — no per-glyph JS objects.
         // All update/query methods read position/color/size directly from typed arrays.
+        // Reset cached count — applyPrebuiltBuffers replaces all content.
+        this.renderedTexts.clear();
+        this._cachedGlyphCount = 0;
+
         let rendererIds = null;
         if (itemMeta && items) {
             rendererIds = [];
@@ -1587,6 +1602,7 @@ class GlyphRendererV15 {
                     lineSlotOffsets: meta.lineSlotOffsets || null,
                 });
 
+                this._cachedGlyphCount += meta.glyphCount;
                 rendererIds.push(id);
             }
         }
@@ -1668,14 +1684,20 @@ class GlyphRendererV15 {
     }
 
     /**
-     * Get renderer statistics
+     * Get total glyph count. O(1) — uses a cached counter maintained by all
+     * add/remove/clear/applyPrebuiltBuffers paths.
+     * @returns {number}
+     */
+    getGlyphCount() {
+        return this._cachedGlyphCount;
+    }
+
+    /**
+     * Get renderer statistics. Glyph count is O(1) via cached counter.
+     * @returns {Object}
      */
     getStats() {
-        let totalGlyphs = 0;
-        for (const entry of this.renderedTexts.values()) {
-            totalGlyphs += entry.glyphCount || 0;
-        }
-
+        const totalGlyphs = this._cachedGlyphCount;
         return {
             textCount: this.renderedTexts.size,
             glyphCount: totalGlyphs,

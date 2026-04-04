@@ -616,7 +616,13 @@ class GlyphCollection {
             // re-serialize the UV map and clear per-worker _hasUVMap flags, so workers
             // that were previously warmed with an older UV map will receive the fresh
             // one on this dispatch.
-            {
+            //
+            // PERF: Skip this block entirely when a HarfBuzz shaper is configured.
+            // The Slug/HarfBuzz rendering path never uses atlas.uvMap — workers receive
+            // pre-shaped glyph ID arrays and index into SlugEncoder's glyphMapTexture.
+            // Iterating every character via Intl.Segmenter here was 6.2% of total load
+            // time and is dead work in the shaped path.
+            if (!this.config.shaper) {
                 const missingGraphemes = new Set();
                 for (let i = 0; i < itemCount; i++) {
                     const text = items[i].text;
@@ -884,8 +890,8 @@ class GlyphCollection {
         if (!this._renderer) {
             return this._countPendingGlyphs();
         }
-        const stats = this._renderer.getStats();
-        return stats.glyphCount;
+        // O(1) cached counter — avoids the O(n) getStats() iteration
+        return this._renderer.getGlyphCount();
     }
 
     /**
@@ -1020,13 +1026,15 @@ class GlyphCollection {
      */
     getStats() {
         if (this._renderer) {
-            const rendererStats = this._renderer.getStats();
+            // Use O(1) cached glyph count — avoids O(n) getStats() iteration
+            const glyphCount = this._renderer.getGlyphCount();
+            const maxInstances = this.config.maxInstances || this._renderer.config.maxInstances;
             return {
                 textCount: this.getTextCount(),
-                glyphCount: rendererStats.glyphCount,
-                maxInstances: rendererStats.maxInstances,
+                glyphCount,
+                maxInstances,
                 bufferSize: this._bufferSize,
-                utilization: rendererStats.utilization,
+                utilization: (glyphCount / maxInstances * 100).toFixed(1) + '%',
                 pendingAdds: this._pendingAdds.length,
                 pendingRemovals: this._pendingRemovals.length,
                 pendingUpdates: this._pendingUpdates.length,

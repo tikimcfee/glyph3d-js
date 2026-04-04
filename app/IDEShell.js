@@ -94,6 +94,9 @@ export class IDEShell {
         this._lastFps = 0;
         this._running = false;
 
+        // Throttle DOM writes: status bar updates at most every 500ms
+        this._statusBarThrottleTime = 0;
+
         // Mobile detection
         this._mobileQuery = window.matchMedia(
             '(max-width: 768px), ((min-width: 769px) and (max-width: 1024px) and (orientation: portrait))'
@@ -921,12 +924,22 @@ export class IDEShell {
     updateStatusBar(deltaTime) {
         if (!this._viewer) return;
 
-        // FPS
+        // Accumulate frames for FPS — no DOM write yet
         this._frameCount++;
         this._fpsTime += deltaTime;
-        if (this._fpsTime >= 1) {
-            this._lastFps = this._frameCount;
-            this._statusFps.textContent = `${this._frameCount} fps`;
+
+        // Throttle all DOM writes to ~2 Hz (every 500ms).
+        // The glyph-count loop and every textContent assignment carry real cost
+        // at 60 Hz; the status bar does not need sub-second precision.
+        this._statusBarThrottleTime += deltaTime;
+        if (this._statusBarThrottleTime < 0.5) return;
+        this._statusBarThrottleTime = 0;
+
+        // FPS: normalise over the accumulated window so the displayed value is
+        // accurate regardless of how many throttle intervals have elapsed.
+        if (this._fpsTime > 0) {
+            this._lastFps = Math.round(this._frameCount / this._fpsTime);
+            this._statusFps.textContent = `${this._lastFps} fps`;
             this._frameCount = 0;
             this._fpsTime = 0;
         }

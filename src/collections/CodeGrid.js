@@ -10,7 +10,6 @@
 
 import * as THREE from 'three';
 import GlyphCollection from './GlyphCollection.js';
-import { iterGraphemes } from '../utils/grapheme.js';
 
 class CodeGrid extends THREE.Object3D {
     /**
@@ -85,6 +84,12 @@ class CodeGrid extends THREE.Object3D {
         if (this.config.gridScale !== 1.0) {
             this.scale.setScalar(this.config.gridScale);
         }
+
+        // Cached world-space bounds — avoids allocating a new Box3 and recomputing
+        // applyMatrix4 on every getBounds() call. Dirtied on content change and
+        // on matrixWorld updates (position/rotation/scale changes).
+        this._boundsCache = null;
+        this._boundsCacheDirty = true;
     }
 
     /**
@@ -256,15 +261,46 @@ class CodeGrid extends THREE.Object3D {
     // ============ Spatial Queries ============
 
     /**
+     * Override updateMatrixWorld to dirty the bounds cache whenever this
+     * object's world transform changes (position, rotation, or scale).
+     * @override
+     */
+    updateMatrixWorld(force) {
+        // Read the dirty flag before super clears it, and snapshot tx for change detection.
+        const needsUpdate = this.matrixWorldNeedsUpdate || force;
+        const prevTx = this.matrixWorld.elements[12]; // translation x as cheap change probe
+        super.updateMatrixWorld(force);
+        if (needsUpdate || this.matrixWorld.elements[12] !== prevTx) {
+            this._boundsCacheDirty = true;
+        }
+    }
+
+    /**
      * Get bounding box of this grid
+     * Returns a cached THREE.Box3 in world coordinates. The cache is invalidated
+     * whenever the transform changes (via updateMatrixWorld) or content is updated
+     * (via _markBoundsDirty). Callers must NOT mutate the returned object.
      * @returns {THREE.Box3} Bounding box in world coordinates
      */
     getBounds() {
-        const box = new THREE.Box3();
+        // Check if the collection's own content-bounds are still valid
+        if (this._collection && this._collection._boundsDirty) {
+            this._boundsCacheDirty = true;
+        }
+
+        if (!this._boundsCacheDirty && this._boundsCache) {
+            return this._boundsCache;
+        }
+
         const padding = this.config.backgroundPadding;
 
         // Get content bounds from collection (null when content is unloaded)
         const contentBounds = this._collection ? this._collection.getBounds() : null;
+
+        if (!this._boundsCache) {
+            this._boundsCache = new THREE.Box3();
+        }
+        const box = this._boundsCache;
 
         if (contentBounds) {
             box.min.set(
@@ -277,11 +313,22 @@ class CodeGrid extends THREE.Object3D {
                 contentBounds.max.y + padding,
                 contentBounds.max.z
             );
+        } else {
+            box.makeEmpty();
         }
 
         // Transform to world coordinates
         box.applyMatrix4(this.matrixWorld);
+        this._boundsCacheDirty = false;
         return box;
+    }
+
+    /**
+     * Mark the world-space bounds cache dirty. Call after content changes or
+     * manual position adjustments that bypass updateMatrixWorld.
+     */
+    _markBoundsDirty() {
+        this._boundsCacheDirty = true;
     }
 
     /**
@@ -712,16 +759,25 @@ class CodeGrid extends THREE.Object3D {
 
     /**
      * Get the number of visible (buffer-slotted) grapheme clusters on a line.
-     * A grapheme is visible if its first codepoint is > 32 (not a control char or space).
+     * A glyph slot is visible if its codepoint is > 32 (not a control char or space).
+     *
+     * PERF: Uses direct codePointAt() iteration instead of Intl.Segmenter. Source code
+     * lines are ASCII/Latin-1 in the vast majority of cases — no multi-codepoint grapheme
+     * clusters (ZWJ sequences) appear. The builder also iterates by codepoint (not
+     * grapheme cluster) when counting buffer slots, so matching that behavior here ensures
+     * the slot counts stay aligned.
      * @param {number} line - 0-based line index
      * @returns {number}
      */
     getVisibleCharCount(line) {
         if (!this.lines || line < 0 || line >= this.lines.length) return 0;
-        let count = 0;
         const text = this.lines[line];
-        for (const grapheme of iterGraphemes(text)) {
-            if (grapheme.codePointAt(0) > 32) count++;
+        const len = text.length;
+        let count = 0;
+        for (let i = 0; i < len; ) {
+            const cp = text.codePointAt(i);
+            if (cp > 32) count++;
+            i += cp > 0xFFFF ? 2 : 1;
         }
         return count;
     }
@@ -783,6 +839,9 @@ class CodeGrid extends THREE.Object3D {
      * @private
      */
     _updateBackground() {
+        // Content changed — dirty the world-space bounds cache
+        this._boundsCacheDirty = true;
+
         if (!this._background || !this.config.showBackground) {
             if (this._background) {
                 this._background.visible = false;

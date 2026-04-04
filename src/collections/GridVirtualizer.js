@@ -22,11 +22,20 @@ import * as THREE from 'three';
 // Distance factor beyond which an inactive grid is eligible for GPU eviction.
 // A grid must be at least (hysteresis * EVICTION_DISTANCE_FACTOR) world units
 // from the camera before eviction is considered.
-const EVICTION_DISTANCE_FACTOR = 10.0;
+// Raised from 10 to 15 to give a larger safe zone between the frustum edge
+// (hysteresis band) and the eviction boundary. This reduces the probability
+// of a grid oscillating across the eviction threshold.
+const EVICTION_DISTANCE_FACTOR = 15.0;
 
 // How long (ms) a grid must continuously sit beyond the eviction distance before
 // its GPU buffers are released. Prevents thrashing at the boundary.
 const EVICTION_DELAY_MS = 5000;
+
+// After a reload completes, how many milliseconds before the grid is eligible
+// for eviction again. Prevents a rapid frustum-edge oscillation from spawning
+// back-to-back reload + evict cycles. 8 seconds gives enough time for the user
+// to confirm intent before the grid is evicted again.
+const RELOAD_COOLDOWN_MS = 8000;
 
 export default class GridVirtualizer {
     /**
@@ -53,7 +62,7 @@ export default class GridVirtualizer {
         this._atlas = atlas;
         this._enableEviction = enableEviction;
 
-        /** @type {Map<CodeGrid, {bounds: THREE.Box3, active: boolean, distance: number, evicted: boolean, _evictionTimer: number|null}>} */
+        /** @type {Map<CodeGrid, {bounds: THREE.Box3, active: boolean, distance: number, evicted: boolean, _evictionTimer: number|null, _reloadCooldownUntil: number, _reloadInFlight: boolean}>} */
         this._entries = new Map();
 
         /** @type {Set<CodeGrid>} grids currently in the scene */
@@ -98,7 +107,14 @@ export default class GridVirtualizer {
             active: alreadyInScene,
             distance: Infinity,
             evicted: false,
-            _evictionTimer: null
+            _evictionTimer: null,
+            // Timestamp (performance.now()) after which eviction is allowed again.
+            // Set to 0 on first registration so newly-registered grids can evict
+            // normally after EVICTION_DELAY_MS without waiting for a full cooldown.
+            _reloadCooldownUntil: 0,
+            // True while an async reloadContent() Promise is outstanding. Guards
+            // against starting a second reload before the first one completes.
+            _reloadInFlight: false,
         });
         this._dirty = true; // force next update() to run fully (bypass movement check)
     }
@@ -271,24 +287,43 @@ export default class GridVirtualizer {
 
             for (const [grid, entry] of this._entries) {
                 if (entry.active) {
-                    // Grid is visible — cancel any pending eviction timer and reload
-                    // if it had previously been evicted.
+                    // Grid is visible — cancel any pending eviction timer.
                     entry._evictionTimer = null;
 
-                    if (entry.evicted) {
+                    if (entry.evicted && !entry._reloadInFlight) {
                         // Re-entering visibility: restore GPU buffers asynchronously.
                         // Grid renders empty for at most one worker round-trip, which is
-                        // acceptable. The reload is fire-and-forget; errors are logged by
-                        // the collection internals.
+                        // acceptable. Guard with _reloadInFlight so a rapid frustum
+                        // oscillation cannot queue multiple overlapping reloads.
                         entry.evicted = false;
-                        grid.reloadContent(this._atlas).catch(() => {
-                            // If reload fails, mark as not evicted so we don't retry
-                            // every frame (the grid will just stay blank until the next
-                            // visibility transition).
-                        });
+                        entry._reloadInFlight = true;
+                        grid.reloadContent(this._atlas)
+                            .then(() => {
+                                entry._reloadInFlight = false;
+                                // Arm the cooldown: the grid cannot be evicted again
+                                // until RELOAD_COOLDOWN_MS have elapsed. This prevents
+                                // a frustum-edge grid from immediately churning back
+                                // through evict → reload → evict.
+                                entry._reloadCooldownUntil = performance.now() + RELOAD_COOLDOWN_MS;
+                            })
+                            .catch(() => {
+                                entry._reloadInFlight = false;
+                                // If reload fails, mark as not evicted so we don't retry
+                                // every frame (the grid will just stay blank until the
+                                // next visibility transition).
+                            });
                     }
                 } else if (!entry.evicted && entry.distance > evictionDistance) {
-                    // Inactive and far: start or continue the eviction countdown
+                    // Inactive and far: only proceed if past the post-reload cooldown.
+                    // A grid that was just reloaded (camera briefly panned across it)
+                    // is protected from immediate re-eviction for RELOAD_COOLDOWN_MS.
+                    if (now < entry._reloadCooldownUntil) {
+                        // Still in cooldown — reset timer but don't evict yet
+                        entry._evictionTimer = null;
+                        continue;
+                    }
+
+                    // Start or continue the eviction countdown
                     if (entry._evictionTimer === null) {
                         entry._evictionTimer = now;
                     } else if (now - entry._evictionTimer >= EVICTION_DELAY_MS) {

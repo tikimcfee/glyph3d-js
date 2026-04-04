@@ -162,6 +162,9 @@ export class GitHubRepoViewer {
         this.lastTime = performance.now();
         this.frameCount = 0;
         this.fpsTime = 0;
+
+        // Status bar throttle: DOM writes happen at most every 500ms
+        this._statsThrottleTime = 0;
     }
 
     /** @returns {Object[]} frozen array of CodeGrid instances from registry */
@@ -2154,11 +2157,24 @@ export class GitHubRepoViewer {
     // _zDistanceForFit, focusOnGrid, focusOnGrids, updateCamera → CameraController
 
     updateStats(deltaTime) {
+        // Accumulate frames for FPS — no DOM write yet
         this.frameCount++;
         this.fpsTime += deltaTime;
-        if (this.fpsTime >= 1) {
-            this.fpsBadge.fpsSpan.textContent = this.frameCount;
-            this.statFpsEl.textContent = this.frameCount;
+
+        // Throttle all DOM writes to ~2 Hz (every 500ms).
+        // The glyph-count loop over potentially thousands of grids and the
+        // textContent assignments are the dominant cost here; they do not need
+        // to run at 60 Hz.
+        this._statsThrottleTime += deltaTime;
+        if (this._statsThrottleTime < 0.5) return;
+        this._statsThrottleTime = 0;
+
+        // FPS: use accumulated frames over the elapsed window (fpsTime may span
+        // multiple throttle intervals, so normalise to per-second).
+        if (this.fpsTime > 0) {
+            const fps = Math.round(this.frameCount / this.fpsTime);
+            this.fpsBadge.fpsSpan.textContent = fps;
+            this.statFpsEl.textContent = fps;
             this.frameCount = 0;
             this.fpsTime = 0;
         }
