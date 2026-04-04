@@ -9,5 +9,6 @@
  */
 
 export { default as HarfBuzzShaper } from './HarfBuzzShaper.js';
+export { default as MonospaceShapeCache } from './MonospaceShapeCache.js';
 export { shapeText, collectUniqueGlyphIds } from './shapeText.js';
 export { default as SlugEncoder } from './SlugEncoder.js';

@@ -253,18 +253,40 @@ export class GitHubRepoViewer {
         this._shaper = new HarfBuzzShaper();
         await this._shaper.init(fontBuffer);
 
-        // Register shaper with the worker bridge.
-        // Workers no longer run WASM — text is shaped here on the main thread
-        // (single instance) and pre-shaped arrays are sent to workers for buffer packing.
+        // Build and prime the per-codepoint shape cache before registering with
+        // the worker bridge. One HarfBuzz call covers the full probe set; all
+        // subsequent per-file shaping becomes O(1) Map lookups with no WASM calls.
+        //
+        // Probe coverage:
+        //   0x20-0x7E  — printable ASCII (source code dominant range)
+        //   0xA0-0xFF  — Latin-1 supplement (comments, docs)
+        //   0x2500-0x257F — box-drawing characters (tree views, TUI)
+        const { default: MonospaceShapeCache } = await import('../src/shaping/MonospaceShapeCache.js');
+        let cacheProbe = '';
+        for (let cp = 0x20; cp <= 0x7E; cp++) cacheProbe += String.fromCodePoint(cp);
+        for (let cp = 0xA0; cp <= 0xFF; cp++) cacheProbe += String.fromCodePoint(cp);
+        for (let cp = 0x2500; cp <= 0x257F; cp++) cacheProbe += String.fromCodePoint(cp);
+
+        this._shapeCache = new MonospaceShapeCache(this._shaper);
+        this._shapeCache.prime(cacheProbe);
+        console.log(
+            `[MonospaceShapeCache] Primed ${this._shapeCache.size} codepoints ` +
+            `(~${Math.round(this._shapeCache.size * 50 / 1024)}KB)`
+        );
+
+        // Register shaper + cache with the worker bridge.
+        // Workers no longer run WASM — text is shaped here on the main thread via the
+        // cache (single WASM instance) and pre-shaped arrays are sent to workers.
         const { getWorkerBridge } = await import('../src/workers/WorkerBridge.js');
         const workerBridge = getWorkerBridge();
-        workerBridge.setShaper(this._shaper);
+        workerBridge.setShaper(this._shaper, this._shapeCache);
 
-        // Shape a representative set of ASCII + common chars to collect glyph IDs
+        // Shape a representative set of ASCII + common chars to collect glyph IDs.
+        // Use the cache for this probe pass so SlugEncoder benefits from the fast path.
         this.loading.update(0.6, 'Encoding glyph curves...');
         const probeText = Array.from({ length: 95 }, (_, i) => String.fromCharCode(32 + i)).join('');
         const { shapeText: shapeTextFn } = await import('../src/shaping/shapeText.js');
-        const shaped = shapeTextFn(this._shaper, probeText);
+        const shaped = shapeTextFn(this._shapeCache, probeText);
         const glyphIds = collectUniqueGlyphIds(shaped.lines);
 
         // Encode glyph outlines into Slug GPU textures

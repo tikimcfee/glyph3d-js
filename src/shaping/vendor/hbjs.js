@@ -1311,6 +1311,40 @@ function hbjs(Module) {
         return json;
       },
       /**
+       * Read shaped glyph data directly from WASM HEAP memory.
+       *
+       * Replaces json() for all hot-path shaping calls. Avoids hb_buffer_serialize,
+       * JSON.parse, and the delete-glyph.fl deopt that forces glyph objects into
+       * V8 dictionary mode. Returns the same field names as json() except flags
+       * (which no consumer reads).
+       *
+       * @returns {Array<{g: number, cl: number, ax: number, ay: number, dx: number, dy: number}>}
+       */
+      shapeDirect: function () {
+        var len = exports.hb_buffer_get_length(ptr);
+        if (len === 0) return [];
+        // hb_glyph_info_t layout: {codepoint, mask, cluster, var1, var2} — 5 x uint32
+        var iPtr = exports.hb_buffer_get_glyph_infos(ptr, 0) / 4;
+        // hb_glyph_position_t layout: {x_advance, y_advance, x_offset, y_offset, var} — 5 x int32
+        var pPtr = exports.hb_buffer_get_glyph_positions(ptr, 0) / 4;
+        var HU = Module.HEAPU32;
+        var HI = Module.HEAP32;
+        var out = new Array(len);
+        for (var i = 0; i < len; i++) {
+          var ib = iPtr + i * 5;
+          var pb = pPtr + i * 5;
+          out[i] = {
+            g:  HU[ib],       // glyph ID (after shaping, not original codepoint)
+            cl: HU[ib + 2],   // cluster index (UTF-16 code unit offset in source text)
+            ax: HI[pb],       // x_advance (font units)
+            ay: HI[pb + 1],   // y_advance (font units)
+            dx: HI[pb + 2],   // x_offset (font units)
+            dy: HI[pb + 3],   // y_offset (font units)
+          };
+        }
+        return out;
+      },
+      /**
       * Free the object.
       */
       destroy: function () { exports.hb_buffer_destroy(ptr); }

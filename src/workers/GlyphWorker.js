@@ -7,12 +7,22 @@
  * Text is shaped on the main thread (single HarfBuzz WASM instance) and the
  * pre-shaped arrays are attached to each item before posting. Workers contain
  * no WASM — they only do buffer math.
+ *
+ * GLYPH_MAP: The main thread transfers a per-codepoint glyph map once at init
+ * (when MonospaceShapeCache is used). Workers store it for future worker-side
+ * reconstruction (Tier 3 optimization), where workers will shape from raw text
+ * + glyph map locally, eliminating shaped data from postMessage entirely.
  */
 
 import { buildBatchBuffers } from './builders/index.js';
 
 // Set of glyph IDs known to have 0 curves (space, .notdef) — avoids redundant checks
 let emptyGlyphCache = null;
+
+// Per-codepoint glyph map transferred from main thread. Populated by GLYPH_MAP message.
+// Layout: Map<codepoint, {g: glyphId, ax: xAdvance}> rebuilt from a flat Uint32Array.
+// Used in future Tier 3 optimization for worker-side text reconstruction.
+let glyphMap = null;
 
 /**
  * Handle incoming messages
@@ -46,6 +56,18 @@ self.onmessage = function(event) {
                         result.groupIds.buffer
                     ]
                 );
+                break;
+            }
+
+            case 'GLYPH_MAP': {
+                // Receive the per-codepoint glyph map from the main thread.
+                // Sent once after MonospaceShapeCache priming. Layout: [cp, g, ax, ...]
+                const arr = event.data.glyphMap;
+                glyphMap = new Map();
+                for (let i = 0; i < arr.length; i += 3) {
+                    glyphMap.set(arr[i], { g: arr[i + 1], ax: arr[i + 2] });
+                }
+                console.debug(`[GlyphWorker] Glyph map received: ${glyphMap.size} entries`);
                 break;
             }
 

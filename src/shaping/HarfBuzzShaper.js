@@ -90,7 +90,7 @@ export default class HarfBuzzShaper {
             buffer.addText(text);
             buffer.guessSegmentProperties();
             this._hb.shape(this._font, buffer, features);
-            const result = buffer.json();
+            const result = buffer.shapeDirect();
 
             // Log only the first shape call
             if (!this._firstShapeLogged) {
