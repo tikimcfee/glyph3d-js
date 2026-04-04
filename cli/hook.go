@@ -60,6 +60,7 @@ type GlobInput struct {
 }
 
 const agentWindowID = "claude"
+const trackingGroupID = "claude-reads"
 
 var debug bool
 
@@ -157,6 +158,13 @@ func handlePostToolUse(conn *websocket.Conn, event *HookEvent) {
 		msg := fmt.Sprintf("📖 Read %s (%s)", relPath, lines)
 		sendWindowAppend(conn, msg)
 
+		// Track the file in the claude-reads group (idempotent — re-adding is a no-op)
+		sendCmd(conn, fmt.Sprintf("group.create %s", trackingGroupID))
+		sendCmd(conn, fmt.Sprintf("group.add %s %s", trackingGroupID, relPath))
+
+		// Focus camera on the file being read
+		sendCmd(conn, fmt.Sprintf("camera.focus %s", relPath))
+
 		if input.Offset > 0 || input.Limit > 0 {
 			end := input.Offset + input.Limit
 			if input.Limit == 0 {
@@ -177,6 +185,11 @@ func handlePostToolUse(conn *websocket.Conn, event *HookEvent) {
 		msg := fmt.Sprintf("✏️  Edit %s (%d→%d lines)", relPath, oldLines, newLines)
 		sendWindowAppend(conn, msg)
 
+		// Track edited files too
+		sendCmd(conn, fmt.Sprintf("group.create %s", trackingGroupID))
+		sendCmd(conn, fmt.Sprintf("group.add %s %s", trackingGroupID, relPath))
+		sendCmd(conn, fmt.Sprintf("camera.focus %s", relPath))
+
 	case "Write":
 		var input WriteInput
 		json.Unmarshal(event.ToolInput, &input)
@@ -186,6 +199,11 @@ func handlePostToolUse(conn *websocket.Conn, event *HookEvent) {
 		relPath := relativize(input.FilePath, event.CWD)
 		msg := fmt.Sprintf("📝 Write %s", relPath)
 		sendWindowAppend(conn, msg)
+
+		// Track written files
+		sendCmd(conn, fmt.Sprintf("group.create %s", trackingGroupID))
+		sendCmd(conn, fmt.Sprintf("group.add %s %s", trackingGroupID, relPath))
+		sendCmd(conn, fmt.Sprintf("camera.focus %s", relPath))
 
 	case "Bash":
 		var input BashInput
