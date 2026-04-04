@@ -5,26 +5,19 @@
  * and transfers results back with zero-copy Transferable arrays.
  *
  * Two builder paths:
- * - HarfBuzz-shaped: when shaper is initialized (INIT_FONT), uses
- *   buildShapedBatchBuffers() which emits HarfBuzz glyph IDs for Slug rendering.
+ * - HarfBuzz-shaped: when items carry item.shaped (pre-shaped by the main thread),
+ *   uses buildShapedBatchBuffers() which emits HarfBuzz glyph IDs for Slug rendering.
+ *   No WASM in the worker — shaping happens once on the main thread.
  * - Legacy fallback: grapheme-based buildBatchBuffers() with atlas UV map.
  *
  * Caches UV map to avoid repeated serialization (legacy path).
- *
- * HarfBuzz integration: INIT_FONT message initializes a per-worker
- * HarfBuzzShaper instance with the font buffer and WASM URL sent from
- * the main thread. CLEANUP destroys the shaper to free WASM memory.
  */
 
 import { buildGlyphBuffers, buildBatchBuffers, buildShapedBatchBuffers } from './builders/index.js';
-import HarfBuzzShaper from '../shaping/HarfBuzzShaper.js';
 
 // Cached UV map and per-glyph widths (sent once, reused)
 let cachedUVMap = null;
 let cachedGlyphWidths = null;
-
-// HarfBuzz shaper instance (initialized via INIT_FONT message)
-let shaper = null;
 
 // Set of glyph IDs known to have 0 curves (space, .notdef) — avoids redundant checks
 let emptyGlyphCache = null;
@@ -32,31 +25,11 @@ let emptyGlyphCache = null;
 /**
  * Handle incoming messages
  */
-self.onmessage = async function(event) {
+self.onmessage = function(event) {
     const { type, jobId, payload } = event.data;
 
     try {
         switch (type) {
-            case 'INIT_FONT': {
-                // Initialize HarfBuzz WASM + load font in this worker.
-                // Main thread sends fontBuffer (structured clone) and the
-                // absolute wasmUrl so we can locate hb.wasm.
-                shaper = new HarfBuzzShaper();
-                await shaper.init(payload.fontBuffer, payload.wasmUrl);
-                self.postMessage({ type: 'FONT_READY', jobId });
-                break;
-            }
-
-            case 'CLEANUP': {
-                // Destroy HarfBuzz objects to free WASM memory
-                if (shaper) {
-                    shaper.destroy();
-                    shaper = null;
-                }
-                self.postMessage({ type: 'CLEANUP_DONE', jobId });
-                break;
-            }
-
             case 'BUILD': {
                 const result = buildGlyphBuffers(payload);
                 const glyphIdsBuf = result.glyphIds || result.codepoints;
@@ -76,17 +49,22 @@ self.onmessage = async function(event) {
             case 'BUILD_BATCH': {
                 let result;
 
-                if (shaper && shaper.ready) {
-                    // HarfBuzz-shaped path — emit glyph IDs for Slug rendering
+                // Check if items carry pre-shaped data from the main thread
+                const hasPreShaped = payload.items.length > 0 && payload.items[0].shaped != null;
+
+                if (hasPreShaped) {
+                    // HarfBuzz-shaped path — items already have .shaped from main thread.
+                    // No WASM in this worker. Just pack the buffers.
                     const shared = {
                         metrics: payload.shared.metrics,
                         defaultColor: payload.shared.defaultColor,
+                        upem: payload.shared.upem,
                     };
                     // Lazy-build empty glyph cache from emptyGlyphs in payload
                     if (!emptyGlyphCache && payload.shared.emptyGlyphs) {
                         emptyGlyphCache = new Set(payload.shared.emptyGlyphs);
                     }
-                    result = buildShapedBatchBuffers(payload.items, shared, shaper, emptyGlyphCache);
+                    result = buildShapedBatchBuffers(payload.items, shared, emptyGlyphCache);
                 } else {
                     // Fallback: grapheme-based builder (atlas path)
                     if (payload.shared.uvMap) {

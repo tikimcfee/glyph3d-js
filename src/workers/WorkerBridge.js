@@ -10,7 +10,8 @@
  */
 
 // Import builders for sync fallback (tree-shaken if unused)
-import { buildGlyphBuffers, buildBatchBuffers } from './builders/index.js';
+import { buildGlyphBuffers, buildBatchBuffers, buildShapedBatchBuffers } from './builders/index.js';
+import { shapeText } from '../shaping/shapeText.js';
 
 /**
  * Check if Web Workers are supported
@@ -48,8 +49,9 @@ export class WorkerBridge {
         // Lazy initialization flag
         this._initialized = false;
 
-        // HarfBuzz font readiness flag
-        this._fontReady = false;
+        // Main-thread HarfBuzz shaper (set via setShaper())
+        this._shaper = null;
+        this._upem = 0;
     }
 
     /**
@@ -86,66 +88,23 @@ export class WorkerBridge {
     }
 
     /**
-     * Initialize all workers with HarfBuzz font data.
+     * Register the main-thread HarfBuzz shaper.
      *
-     * Sends the font buffer and WASM URL to each worker via structured clone
-     * (not Transferable — ~100KB for Cousine, clone is fast and simpler).
-     * Each worker creates its own HarfBuzzShaper instance with its own WASM
-     * instantiation (per-thread requirement in browsers).
+     * Workers no longer run WASM. Text is shaped here on the main thread and
+     * the pre-shaped glyph arrays are attached to each item before posting.
+     * This eliminates N×16MB WASM heaps (one per worker) and prevents OOM
+     * when loading large repositories.
      *
-     * Must be called before any build operations that rely on HarfBuzz shaping.
-     *
-     * @param {ArrayBuffer} fontBuffer - Raw .ttf font file bytes
-     * @returns {Promise<void>}
+     * @param {import('../shaping/HarfBuzzShaper.js').default} shaper - Initialized HarfBuzzShaper
      */
-    async initFont(fontBuffer) {
-        this._ensureInitialized();
-
-        if (this.workers.length === 0) {
-            // No workers — main-thread-only mode. Mark as ready.
-            this._fontReady = true;
-            return;
-        }
-
-        const initStart = performance.now();
-
-        // Compute absolute WASM URL from our module location
-        const wasmUrl = new URL(
-            '../shaping/vendor/hb.wasm',
-            import.meta.url
-        ).href;
-
-        const readyPromises = this.workers.map((worker, i) => {
-            return new Promise((resolve, reject) => {
-                const jobId = `init-font-${i}`;
-                this.pendingRequests.set(jobId, {
-                    resolve: () => {
-                        console.log(`[HarfBuzz] Worker ${i} ready`);
-                        resolve();
-                    },
-                    reject
-                });
-                // Structured clone: each worker gets a copy of fontBuffer.
-                // No Transferable — keeps main thread's reference intact.
-                worker.postMessage({
-                    type: 'INIT_FONT',
-                    jobId,
-                    payload: { fontBuffer, wasmUrl }
-                });
-            });
-        });
-
-        await Promise.all(readyPromises);
-        this._fontReady = true;
-
-        const totalMs = (performance.now() - initStart).toFixed(1);
-        console.log(
-            `[WorkerBridge] All ${this.workers.length} workers initialized (${totalMs}ms)`
-        );
+    setShaper(shaper) {
+        this._shaper = shaper;
+        this._upem = shaper ? shaper.upem : 0;
+        console.debug(`[WorkerBridge] Main-thread shaper registered (upem=${this._upem})`);
     }
 
-    /** @returns {boolean} Whether all workers have HarfBuzz ready */
-    get fontReady() { return this._fontReady; }
+    /** @returns {boolean} Whether the main-thread shaper is ready */
+    get fontReady() { return this._shaper != null && this._shaper.ready; }
 
     /**
      * Get serialized UV map from atlas (version-aware cache).
@@ -277,11 +236,18 @@ export class WorkerBridge {
     /**
      * Build buffers for multiple texts (batch)
      *
+     * When a main-thread shaper is available (set via setShaper()), each item's
+     * text is shaped here before being posted to a worker. The worker receives
+     * item.shaped = {lines, totalGlyphs} and calls buildShapedBatchBuffers()
+     * without any WASM involvement.
+     *
+     * Falls back to the grapheme/UV-map path when no shaper is registered.
+     *
      * @param {Array<{text, position, color?, scale?, alignment?}>} items
      * @param {Object} shared
      * @param {Object} shared.metrics - Font metrics
      * @param {{r,g,b}} shared.defaultColor - Default color
-     * @param {GlyphAtlas} atlas - For UV map
+     * @param {GlyphAtlas} atlas - For UV map (legacy fallback path)
      * @returns {Promise<{positions, sizes, codepoints, colors, count}>}
      */
     async buildBatchBuffers(items, shared, atlas) {
@@ -292,11 +258,38 @@ export class WorkerBridge {
             return this._buildBatchBuffersSync(items, shared, atlas);
         }
 
-        const uvMap = this.getSerializedUVMap(atlas);
+        const worker = this._getNextWorker();
         const jobId = String(this.nextJobId++);
 
-        // Send UV map only if workers don't have it yet
-        const worker = this._getNextWorker();
+        if (this._shaper && this._shaper.ready) {
+            // Shape all items on the main thread — single WASM instance, no per-worker copies.
+            // shapeText() is fast (< 1ms per average file). The shaped result is plain JSON
+            // (arrays of {g, cl, ax, ay, dx, dy}) and transfers cleanly via structured clone.
+            const shapedItems = items.map(item => {
+                const shapedResult = shapeText(this._shaper, item.text || '');
+                return { ...item, shaped: shapedResult };
+            });
+
+            return new Promise((resolve, reject) => {
+                this.pendingRequests.set(jobId, { resolve, reject });
+                worker.postMessage({
+                    type: 'BUILD_BATCH',
+                    jobId,
+                    payload: {
+                        items: shapedItems,
+                        shared: {
+                            metrics: shared.metrics,
+                            defaultColor: shared.defaultColor,
+                            upem: this._upem,
+                            emptyGlyphs: shared.emptyGlyphs || null,
+                        }
+                    }
+                });
+            });
+        }
+
+        // Legacy path: send UV map for grapheme-based building
+        const uvMap = this.getSerializedUVMap(atlas);
         const needsUVMap = !worker._hasUVMap;
 
         return new Promise((resolve, reject) => {
@@ -352,10 +345,6 @@ export class WorkerBridge {
             pending.reject(new Error(error));
         } else if (type === 'PONG') {
             pending.resolve({ pong: true });
-        } else if (type === 'FONT_READY') {
-            pending.resolve();
-        } else if (type === 'CLEANUP_DONE') {
-            pending.resolve();
         }
     }
 
@@ -397,6 +386,20 @@ export class WorkerBridge {
      * @private
      */
     _buildBatchBuffersSync(items, shared, atlas) {
+        if (this._shaper && this._shaper.ready) {
+            // Shaped path — single WASM instance on main thread
+            const shapedItems = items.map(item => ({
+                ...item,
+                shaped: shapeText(this._shaper, item.text || '')
+            }));
+            return buildShapedBatchBuffers(shapedItems, {
+                metrics: shared.metrics,
+                defaultColor: shared.defaultColor,
+                upem: this._upem,
+                emptyGlyphs: shared.emptyGlyphs || null,
+            }, shared.emptyGlyphs ? new Set(shared.emptyGlyphs) : undefined);
+        }
+
         const uvMap = this.getSerializedUVMap(atlas);
         const glyphWidths = this.getSerializedGlyphWidths();
 
@@ -416,15 +419,13 @@ export class WorkerBridge {
             workerCount: this.workers.length,
             pendingRequests: this.pendingRequests.size,
             initialized: this._initialized,
-            fontReady: this._fontReady,
+            shaperReady: this.fontReady,
             uvMapCached: !!this._uvMapCache
         };
     }
 
     /**
      * Dispose all workers.
-     * Workers are terminated, which implicitly destroys their HarfBuzz
-     * instances (WASM memory is freed when the worker thread exits).
      */
     dispose() {
         for (const worker of this.workers) {
@@ -434,8 +435,9 @@ export class WorkerBridge {
         this.pendingRequests.clear();
         this._uvMapCache = null;
         this._uvMapAtlas = null;
+        this._shaper = null;
+        this._upem = 0;
         this._initialized = false;
-        this._fontReady = false;
     }
 }
 

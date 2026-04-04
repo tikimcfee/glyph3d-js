@@ -7,13 +7,14 @@
  * Two builder paths:
  *
  * 1. **HarfBuzz-shaped path** (`buildShapedBatchBuffers`):
- *    Uses HarfBuzzShaper.shape() per line. Outputs HarfBuzz glyph IDs that
- *    index directly into SlugEncoder's glyphMapTexture for Slug vector rendering.
- *    Variable-width advances from HarfBuzz. This is the primary path.
+ *    Reads pre-shaped glyph arrays from item.shaped (shaped on the main thread).
+ *    Outputs HarfBuzz glyph IDs that index directly into SlugEncoder's
+ *    glyphMapTexture for Slug vector rendering. Variable-width advances from
+ *    HarfBuzz. This is the primary path.
  *
  * 2. **Legacy grapheme path** (`buildGlyphBuffers`, `buildBatchBuffers`):
  *    Iterates grapheme clusters, looks up numeric IDs from a UV map.
- *    Still used as fallback when HarfBuzz is not initialized on a worker.
+ *    Still used as fallback when no shaped data is provided.
  *    The `uvMap` argument maps grapheme string → {u0,v0,u1,v1,numericId}.
  *
  * Both paths emit a `glyphIds` Float32Array (with `codepoints` alias for compat).
@@ -25,7 +26,6 @@
  */
 
 import { iterGraphemes } from '../../utils/grapheme.js';
-import { shapeText } from '../../shaping/shapeText.js';
 
 /**
  * Count renderable grapheme clusters in text (excludes control characters).
@@ -496,22 +496,36 @@ export function buildBatchBuffers(items, shared) {
 }
 
 /**
- * Build buffers for multiple texts using HarfBuzz shaping.
+ * Build buffers for multiple texts using pre-shaped HarfBuzz glyph data.
  *
- * Replaces grapheme-based iteration with HarfBuzz shape() per line.
+ * Each item must have item.shaped set by the main thread before being posted
+ * to a worker. This eliminates per-worker WASM instances — shaping runs once
+ * on the main thread, workers only do buffer math.
+ *
  * Outputs HarfBuzz glyph IDs that index directly into SlugEncoder's glyphMapTexture.
  * Space glyphs (0 curves in SlugEncoder) are skipped — advance cursor only.
  *
- * @param {Array<{text, position, color?, scale?, groupId?}>} items
- * @param {Object} shared - {metrics, defaultColor}
- * @param {import('../../shaping/HarfBuzzShaper.js').default} shaper - Initialized HarfBuzzShaper
+ * @param {Array<{text, position, color?, scale?, groupId?, shaped: {lines, totalGlyphs}}>} items
+ * @param {Object} shared - {metrics, defaultColor, upem}
  * @param {Set<number>} [emptyGlyphs] - Set of glyph IDs with 0 curves (spaces, .notdef)
  * @returns {import('../../core/types.js').GlyphBufferSet}
  */
-export function buildShapedBatchBuffers(items, shared, shaper, emptyGlyphs) {
-    const { metrics, defaultColor } = shared;
-    const upem = shaper.upem;
-    const ws = metrics.worldScale || (metrics.charWidth / 30);
+export function buildShapedBatchBuffers(items, shared, emptyGlyphs) {
+    const { metrics, defaultColor, upem } = shared;
+
+    // Convert HarfBuzz font units to world units.
+    //
+    // worldScale is a pixel→world factor (e.g. 0.025 means 1 atlas-pixel = 0.025 world units).
+    // HarfBuzz advances are in font units where upem units = 1 em = pixelHeight pixels on canvas.
+    // So: font_units → pixels = font_units * (pixelHeight / upem)
+    //     pixels → world     = pixels * worldScale
+    // Combined: font_units → world = font_units * (worldScale * pixelHeight / upem)
+    //
+    // Using ws = worldScale alone (without the pixelHeight factor) shrinks the advance by
+    // ~pixelHeight× (e.g. factor of 48), producing hair-thin quads.
+    const worldScale = metrics.worldScale || (metrics.charWidth / metrics.pixelWidth) || 0.025;
+    const pixelHeight = metrics.pixelHeight || metrics.charHeight / worldScale;
+    const ws = worldScale * pixelHeight;
 
     // Z-depth wrapping settings
     const maxLineWidth = Z_WRAP_CONFIG.maxLineWidth;
@@ -520,15 +534,12 @@ export function buildShapedBatchBuffers(items, shared, shaper, emptyGlyphs) {
     // Empty glyph cache — glyph IDs that produce 0 curves (space, .notdef)
     const _emptyGlyphs = emptyGlyphs || new Set();
 
-    // First pass: shape all text to count total glyphs (worst-case)
-    const shapedItems = [];
+    // First pass: read pre-shaped data from items to count total glyphs (worst-case)
     let totalGlyphs = 0;
 
     for (let i = 0; i < items.length; i++) {
-        const text = items[i].text || '';
-        const shaped = shapeText(shaper, text);
-        shapedItems.push(shaped);
-        totalGlyphs += shaped.totalGlyphs;
+        const shaped = items[i].shaped;
+        if (shaped) totalGlyphs += shaped.totalGlyphs;
     }
 
     if (totalGlyphs === 0) {
@@ -564,9 +575,15 @@ export function buildShapedBatchBuffers(items, shared, shaper, emptyGlyphs) {
         const color = item.color || defaultColor;
         const scale = item.scale || 1.0;
         const itemGroupId = item.groupId || 0;
-        const shaped = shapedItems[itemIdx];
+        const shaped = item.shaped;
 
         const itemStartOffset = bufferOffset;
+
+        if (!shaped || shaped.totalGlyphs === 0) {
+            itemMeta[itemIdx] = { bufferStartIndex: itemStartOffset, glyphCount: 0, bounds: null, lineSlotOffsets: [itemStartOffset] };
+            continue;
+        }
+
         const itemLineSlotOffsets = [bufferOffset];
 
         let x = pos.x;

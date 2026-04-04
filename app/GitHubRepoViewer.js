@@ -280,10 +280,12 @@ export class GitHubRepoViewer {
             this._shaper = new HarfBuzzShaper();
             await this._shaper.init(fontBuffer);
 
-            // Initialize workers with font for shaped buffer building
+            // Register shaper with the worker bridge.
+            // Workers no longer run WASM — text is shaped here on the main thread
+            // (single instance) and pre-shaped arrays are sent to workers for buffer packing.
             const { getWorkerBridge } = await import('../src/workers/WorkerBridge.js');
             const workerBridge = getWorkerBridge();
-            await workerBridge.initFont(fontBuffer);
+            workerBridge.setShaper(this._shaper);
 
             // Shape a representative set of ASCII + common chars to collect glyph IDs
             this.loading.update(0.6, 'Encoding glyph curves...');

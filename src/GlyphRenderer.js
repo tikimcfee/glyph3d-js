@@ -110,7 +110,8 @@ class GlyphRendererV15 {
             this._setupContextLossHandlers(options.canvas);
         }
 
-        if (this._slugData) {
+        if (this._slugData && !GlyphRendererV15._slugLogged) {
+            GlyphRendererV15._slugLogged = true;
             const ct = this._slugData.curveTexture;
             const bt = this._slugData.bandTexture;
             const gm = this._slugData.glyphMapTexture;
@@ -143,11 +144,7 @@ class GlyphRendererV15 {
             u.glyphMapWidth.value = slugData.glyphMapTexture.image.width;
             u.glyphMapHeight.value = slugData.glyphMapTexture.image.height;
         }
-        const ct = slugData.curveTexture;
-        const bt = slugData.bandTexture;
-        const gm = slugData.glyphMapTexture;
-        logger.info(`[GlyphRenderer] Slug textures bound: curves=${ct.image.width}x${ct.image.height}, bands=${bt.image.width}x${bt.image.height}, glyphMap=${gm.image.width}x${gm.image.height}`);
-        logger.info('[GlyphRenderer] Slug rendering active — atlas removed');
+        // Log only once (setSlugData is called per-renderer, not per-frame)
     }
 
     /**
@@ -1240,8 +1237,12 @@ class GlyphRendererV15 {
      */
     _textToGlyphsShaped(text, position, color, scale, options) {
         const glyphs = [];
-        const ws = this.config.worldScale;
+        const worldScale = this.config.worldScale;
         const upem = this._shaper.upem;
+        // Font units → world units: same correction as buildShapedBatchBuffers.
+        // worldScale is pixel→world; pixelHeight is the atlas font size in pixels.
+        // Full factor = worldScale * pixelHeight / upem.
+        const ws = worldScale * this.metrics.pixelHeight;
         const fontExt = this._shaper.fontExtents();
         const lineHeight = (fontExt.ascender - fontExt.descender + fontExt.lineGap) / upem * ws * scale;
 
