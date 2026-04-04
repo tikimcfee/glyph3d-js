@@ -50,13 +50,17 @@ export class TouchController {
         const THREE = this.THREE;
         const touches = e.changedTouches;
 
+        // Mobile touch needs higher sensitivity — no scroll wheel or
+        // mouse precision, so amplify to make panning/zooming feel responsive.
+        const TOUCH_SPEED = 5.0;
+
         if (this.activeTouches.size === 1 && touches.length === 1) {
             // Single finger: pan (translate)
             const t = touches[0];
             const prev = this.activeTouches.get(t.identifier);
             if (prev) {
-                const dx = t.clientX - prev.x;
-                const dy = t.clientY - prev.y;
+                const dx = (t.clientX - prev.x) * TOUCH_SPEED;
+                const dy = (t.clientY - prev.y) * TOUCH_SPEED;
                 this.cam._applyDragTranslation(dx, dy);
                 this.activeTouches.set(t.identifier, { x: t.clientX, y: t.clientY });
             }
@@ -77,13 +81,13 @@ export class TouchController {
                 const delta = dist - this.lastPinchDist;
                 const scrollSens = this.cam.settings.scrollSensitivity;
                 const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
-                this.camera.position.addScaledVector(forward, delta * scrollSens * 0.5);
+                this.camera.position.addScaledVector(forward, delta * scrollSens * TOUCH_SPEED * 0.5);
             }
 
             // Two-finger pan
             if (this.lastTwoCenter) {
-                const dx = center.x - this.lastTwoCenter.x;
-                const dy = center.y - this.lastTwoCenter.y;
+                const dx = (center.x - this.lastTwoCenter.x) * TOUCH_SPEED;
+                const dy = (center.y - this.lastTwoCenter.y) * TOUCH_SPEED;
                 this.cam._applyDragTranslation(dx, dy);
             }
 

@@ -259,12 +259,42 @@ export class MinimapOverlay {
         this._canvas.addEventListener('mousemove',  this._onMouseMove);
         this._canvas.addEventListener('mouseup',    this._onMouseUp);
         this._canvas.addEventListener('mouseleave', this._onMouseLeave);
+
+        // Touch events — preventDefault stops text selection and enables drag
+        this._onTouchStart = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            this._isDragging = true;
+            this._handleMinimapTouch(e);
+        };
+        this._onTouchMove = (e) => {
+            if (!this._isDragging) return;
+            e.preventDefault();
+            e.stopPropagation();
+            this._handleMinimapTouch(e);
+        };
+        this._onTouchEnd = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            this._isDragging = false;
+        };
+        this._canvas.addEventListener('touchstart', this._onTouchStart, { passive: false });
+        this._canvas.addEventListener('touchmove',  this._onTouchMove,  { passive: false });
+        this._canvas.addEventListener('touchend',   this._onTouchEnd,   { passive: false });
+        this._canvas.addEventListener('touchcancel', this._onTouchEnd,  { passive: false });
     }
 
     /**
      * Convert a minimap click to world XY and fire onNavigate.
      * @private
      */
+    /** @private */
+    _handleMinimapTouch(e) {
+        if (!e.touches || e.touches.length === 0) return;
+        const touch = e.touches[0];
+        this._handleMinimapClick({ clientX: touch.clientX, clientY: touch.clientY });
+    }
+
     _handleMinimapClick(e) {
         if (!this._worldBounds) return;
 
