@@ -1384,7 +1384,6 @@ export class GitHubRepoViewer {
             console.debug('Adapter stats:', this.repoAdapter.getStats());
             this.toastUI.show(`Loaded ${this.grids.length} files from ${this.repoPath}@${branch}`, 'success');
             this.header.repoLabel.textContent = `${this.repoPath}@${branch}`;
-            this.drawer.openToTab('files');
 
             // Persist successful load
             if (this.statePersistence) {
@@ -1583,7 +1582,6 @@ export class GitHubRepoViewer {
             this.loading.hide();
             this.toastUI.show(`Loaded ${this.grids.length} files from ${this._localRoot}`, 'success');
             this.header.repoLabel.textContent = `local:${this._localRoot}`;
-            this.drawer.openToTab('files');
 
             if (this.statePersistence) {
                 this.statePersistence.onRepoLoaded(`local:${this._localRoot}`, 'disk');
