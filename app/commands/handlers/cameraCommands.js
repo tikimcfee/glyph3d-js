@@ -41,7 +41,10 @@ export default function registerCameraCommands(router) {
         const resolved = resolveGridByIdOrIndex(ctx, target);
         if (!resolved.error) {
             const regIdx = resolved.idx >= 0 ? resolved.idx : grids.indexOf(resolved.grid);
-            if (regIdx >= 0) ctx.cameraController.focusOnGrid(regIdx);
+            if (regIdx >= 0) {
+                ctx.cameraController.focusOnGrid(regIdx);
+                if (ctx.spatialNav) ctx.spatialNav.focusGrid(regIdx, false);
+            }
             const label = resolved.registryId || `#${regIdx}`;
             return {
                 text: `OK: focusing on "${label}"`,
@@ -56,6 +59,7 @@ export default function registerCameraCommands(router) {
         });
         if (matchIdx >= 0) {
             ctx.cameraController.focusOnGrid(matchIdx);
+            if (ctx.spatialNav) ctx.spatialNav.focusGrid(matchIdx, false);
             const name = grids[matchIdx].getFilename();
             return {
                 text: `OK: focusing on grid ${matchIdx} (${name})`,

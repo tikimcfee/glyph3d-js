@@ -402,6 +402,7 @@ func serveCmd() {
 		}
 		cfg.StaticFS = os.DirFS(staticRoot)
 		cfg.StaticTag = staticRoot + " (local)"
+		cfg.WatchRoot = staticRoot
 	} else {
 		// Normal mode: embedded IDE app
 		webRoot, err := WebRoot()

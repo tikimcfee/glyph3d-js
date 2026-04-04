@@ -176,6 +176,22 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 			r.sendToDisplay(envelope)
 
 		} else if role == "display" {
+			// Browser log forwarding: { event: "browser.log", level, text }
+			// Print to stdout so CLI users see browser console output.
+			var logProbe struct {
+				Event string `json:"event"`
+				Level string `json:"level"`
+				Text  string `json:"text"`
+			}
+			if json.Unmarshal(msg, &logProbe) == nil && logProbe.Event == "browser.log" {
+				level := logProbe.Level
+				if level == "" {
+					level = "log"
+				}
+				log.Printf("[browser:%s] %s", level, logProbe.Text)
+				continue
+			}
+
 			// JSON-RPC 2.0 detection: route FS requests to FSHandler
 			var probe struct {
 				JSONRPC string `json:"jsonrpc"`
@@ -352,6 +368,17 @@ func (r *Relay) notifyDisplay(event, clientID string) {
 	r.sendToDisplay(msg)
 }
 
+// NotifyDisplayRPC sends a JSON-RPC 2.0 notification (no id) to the display.
+// Used for server-initiated push events like live reload.
+func (r *Relay) NotifyDisplayRPC(method string, params any) {
+	msg, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"method":  method,
+		"params":  params,
+	})
+	r.sendToDisplay(msg)
+}
+
 // ServerConfig holds all options for the unified server.
 type ServerConfig struct {
 	Host      string     // Listen address (default "0.0.0.0")
@@ -359,6 +386,7 @@ type ServerConfig struct {
 	FSHandler *FSHandler // Filesystem JSON-RPC handler (nil if no --root)
 	StaticFS  fs.FS      // Static file source: embedded FS or os.DirFS
 	StaticTag string     // Label for logs: "embedded" or the disk path
+	WatchRoot string     // Live reload: watch this directory for source changes (empty = disabled)
 }
 
 // RunServer starts a unified HTTP + WebSocket server on a single port.
@@ -366,6 +394,27 @@ type ServerConfig struct {
 func RunServer(cfg ServerConfig) error {
 	relay := NewRelay()
 	relay.fs = cfg.FSHandler
+
+	// Live reload: watch source directories and push notifications to the browser
+	if cfg.WatchRoot != "" {
+		lr, err := NewLiveReloader(func(path string) {
+			rel, _ := filepath.Rel(cfg.WatchRoot, path)
+			log.Printf("[livereload] %s changed → notifying browser", rel)
+			relay.NotifyDisplayRPC("fs/didChange", map[string]string{
+				"path":  rel,
+				"event": "change",
+			})
+		})
+		if err != nil {
+			log.Printf("[livereload] failed to start watcher: %v", err)
+		} else {
+			lr.Watch(
+				filepath.Join(cfg.WatchRoot, "src"),
+				filepath.Join(cfg.WatchRoot, "app"),
+			)
+			log.Printf("[livereload] watching src/, app/ for changes")
+		}
+	}
 
 	fileServer := http.FileServer(http.FS(cfg.StaticFS))
 
@@ -375,6 +424,12 @@ func RunServer(cfg ServerConfig) error {
 		if isWebSocketUpgrade(r) {
 			relay.ServeHTTP(w, r)
 			return
+		}
+
+		// In local/dev mode, prevent browser caching so live reload
+		// always picks up the latest source files.
+		if cfg.WatchRoot != "" {
+			w.Header().Set("Cache-Control", "no-store")
 		}
 
 		// Static files — set correct MIME types for ES modules

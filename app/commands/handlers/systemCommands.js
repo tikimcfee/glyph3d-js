@@ -99,14 +99,11 @@ export default function registerSystemCommands(router) {
 
     router.register('reload', (args, ctx) => {
         // Schedule the reload after sending the response, so the caller gets the OK.
-        // Cache-busting: append a timestamp query param to force fresh fetch of all modules.
-        setTimeout(() => {
-            const url = new URL(window.location.href);
-            url.searchParams.set('_reload', Date.now());
-            window.location.href = url.toString();
-        }, 200);
-        return { text: 'OK: reloading page in 200ms (cache-busting)', data: null };
-    }, { description: 'Reload the browser page (cache-busting, picks up code changes)' });
+        // In --local mode the server sets Cache-Control: no-store, so a plain
+        // reload always fetches fresh files — no query-param hack needed.
+        setTimeout(() => location.reload(), 200);
+        return { text: 'OK: reloading page in 200ms', data: null };
+    }, { description: 'Reload the browser page (picks up code changes in --local mode)' });
 
     router.register('screenshot', (args, ctx) => {
         const canvas = ctx.renderer?.domElement;

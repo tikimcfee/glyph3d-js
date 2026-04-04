@@ -287,6 +287,16 @@
             });
             commandBar.mount(document.getElementById('editor-column'));
 
+            // ---- Spatial Navigator: vim-like grid navigation ----
+            const { default: SpatialNavigator } = await import('./components/SpatialNavigator.js');
+            const spatialNav = new SpatialNavigator({
+                getGrids: () => viewer.grids || [],
+                cameraController: viewer.cameraController,
+                statusEl: document.getElementById('status-file-path'),
+            });
+            window._spatialNav = spatialNav; // debug access
+            router.context.spatialNav = spatialNav; // available to nav.status command
+
             // Click-to-target: raycast against TerminalGrid backgrounds.
             // When a terminal's background mesh is clicked, auto-target the bar.
             // Click on empty space clears the target.
