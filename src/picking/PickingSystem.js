@@ -558,7 +558,7 @@ export class PickingSystem {
         for (const [textId, entry] of renderer.renderedTexts) {
             const start = entry.bufferStartIndex;
             if (start === undefined) continue;
-            const end = start + entry.glyphs.length;
+            const end = start + (entry.glyphCount || 0);
             if (slotIndex >= start && slotIndex < end) {
                 return { textId, charIndex: slotIndex - start };
             }

@@ -903,13 +903,21 @@ class GlyphCollection {
      */
     findGlyphs(predicate) {
         if (!this._renderer) return [];
+        // Use getText() which provides the lazy glyphs proxy backed by typed arrays
         return this._renderer.findTexts(entry => {
-            // Check each glyph in the entry
-            for (const glyph of entry.glyphs) {
+            const textObj = this._renderer.getText(entry.id);
+            if (!textObj) return false;
+            for (const glyph of textObj.glyphs) {
                 if (predicate(glyph)) return true;
             }
             return false;
-        }).flatMap(textObj => textObj.glyphs.filter(predicate));
+        }).flatMap(textObj => {
+            const results = [];
+            for (const glyph of textObj.glyphs) {
+                if (predicate(glyph)) results.push(glyph);
+            }
+            return results;
+        });
     }
 
     /**

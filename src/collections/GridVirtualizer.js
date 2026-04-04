@@ -43,7 +43,7 @@ export default class GridVirtualizer {
      *   for EVICTION_DELAY_MS milliseconds will have unloadContent() called on them,
      *   and reloadContent() called when they re-enter the frustum.
      */
-    constructor(scene, camera, { budget = Infinity, hysteresis = 50, atlas = null, enableEviction = false } = {}) {
+    constructor(scene, camera, { budget = Infinity, hysteresis = 50, atlas = null, enableEviction = true } = {}) {
         this.scene = scene;
         this.camera = camera;
         this.budget = budget;

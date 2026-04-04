@@ -232,84 +232,52 @@ export class GitHubRepoViewer {
         this.glyphCountEl = document.getElementById('glyph-count');
         this.cameraPosEl = document.getElementById('camera-pos');
 
-        // Atlas config from persisted settings
-        this._atlasFont = stateController.get('atlas.font', 'Monaco, Menlo, Courier New, monospace');
-        this._atlasFontSize = stateController.get('atlas.fontSize', 48);
-        this._atlasSize = stateController.get('atlas.size', 2048);
-
-        // Atlas: try relay cache, then static pre-baked asset, then generate
+        // Generate atlas for metrics (canvas is freed after generate() completes)
         this.loading.show('Loading glyph atlas...');
+        const atlasFont = stateController.get('atlas.font', 'Monaco, Menlo, Courier New, monospace');
+        const atlasFontSize = stateController.get('atlas.fontSize', 48);
+        const atlasSize = stateController.get('atlas.size', 2048);
+        this.atlas = new GlyphAtlas(atlasFont, atlasFontSize, atlasSize);
+        await this.atlas.generate((current, total) => {
+            this.loading.update(current / total, `Generating glyphs: ${current}/${total}`);
+        });
 
-        // 1. Try WebSocket relay cache (local dev)
-        let _cachedAtlas = await this._tryLoadCachedAtlas();
-        if (_cachedAtlas) {
-            console.log('[atlas] Loaded from relay cache');
-            this.atlas = _cachedAtlas;
-        } else {
-            // 2. Try static pre-baked asset (remote deployment)
-            _cachedAtlas = await this._tryLoadStaticAtlas();
-            if (_cachedAtlas) {
-                console.log('[atlas] Loaded from static asset');
-                this.atlas = _cachedAtlas;
-            } else {
-                // 3. Generate at runtime (first run)
-                console.log(`[atlas] Generating ${this._atlasSize}x${this._atlasSize} (${this._atlasFont} ${this._atlasFontSize}px)...`);
-                this.atlas = new GlyphAtlas(this._atlasFont, this._atlasFontSize, this._atlasSize);
-                await this.atlas.generate((current, total) => {
-                    this.loading.update(current / total, `Generating glyphs: ${current}/${total}`);
-                });
-                // Cache for next time (fire-and-forget)
-                this._cacheAtlasToRelay();
-            }
-        }
-        // Track atlas version at load time — if ensureGraphemes adds glyphs
-        // during file loading, we'll re-cache the expanded atlas afterward.
-        this._atlasVersionAtLoad = this.atlas.uvMapVersion;
-
-        // HarfBuzz + Slug vector rendering initialization
+        // HarfBuzz + Slug vector rendering initialization.
         // Load font, shape all glyphs, encode into GPU textures.
-        // This replaces the atlas bitmap with resolution-independent vector curves.
-        this._shaper = null;
-        this._slugData = null;
-        try {
-            this.loading.update(0.5, 'Loading HarfBuzz WASM...');
-            const fontUrl = new URL('../src/fonts/Cousine-Regular.ttf', import.meta.url).href;
-            const fontResp = await fetch(fontUrl);
-            const fontBuffer = await fontResp.arrayBuffer();
+        // Hard-fail: if HarfBuzz/Slug cannot initialize, the app cannot render.
+        this.loading.update(0.5, 'Loading HarfBuzz WASM...');
+        const fontUrl = new URL('../src/fonts/Cousine-Regular.ttf', import.meta.url).href;
+        const fontResp = await fetch(fontUrl);
+        const fontBuffer = await fontResp.arrayBuffer();
 
-            this._shaper = new HarfBuzzShaper();
-            await this._shaper.init(fontBuffer);
+        this._shaper = new HarfBuzzShaper();
+        await this._shaper.init(fontBuffer);
 
-            // Register shaper with the worker bridge.
-            // Workers no longer run WASM — text is shaped here on the main thread
-            // (single instance) and pre-shaped arrays are sent to workers for buffer packing.
-            const { getWorkerBridge } = await import('../src/workers/WorkerBridge.js');
-            const workerBridge = getWorkerBridge();
-            workerBridge.setShaper(this._shaper);
+        // Register shaper with the worker bridge.
+        // Workers no longer run WASM — text is shaped here on the main thread
+        // (single instance) and pre-shaped arrays are sent to workers for buffer packing.
+        const { getWorkerBridge } = await import('../src/workers/WorkerBridge.js');
+        const workerBridge = getWorkerBridge();
+        workerBridge.setShaper(this._shaper);
 
-            // Shape a representative set of ASCII + common chars to collect glyph IDs
-            this.loading.update(0.6, 'Encoding glyph curves...');
-            const probeText = Array.from({ length: 95 }, (_, i) => String.fromCharCode(32 + i)).join('');
-            const { shapeText: shapeTextFn } = await import('../src/shaping/shapeText.js');
-            const shaped = shapeTextFn(this._shaper, probeText);
-            const glyphIds = collectUniqueGlyphIds(shaped.lines);
+        // Shape a representative set of ASCII + common chars to collect glyph IDs
+        this.loading.update(0.6, 'Encoding glyph curves...');
+        const probeText = Array.from({ length: 95 }, (_, i) => String.fromCharCode(32 + i)).join('');
+        const { shapeText: shapeTextFn } = await import('../src/shaping/shapeText.js');
+        const shaped = shapeTextFn(this._shaper, probeText);
+        const glyphIds = collectUniqueGlyphIds(shaped.lines);
 
-            // Encode glyph outlines into Slug GPU textures
-            const encoder = new SlugEncoder(this._shaper);
-            const slugResult = encoder.encode(glyphIds);
-            this._slugData = slugResult;
+        // Encode glyph outlines into Slug GPU textures
+        const encoder = new SlugEncoder(this._shaper);
+        const slugResult = encoder.encode(glyphIds);
+        this._slugData = slugResult;
 
-            // Store on atlas so all CodeGrid/GlyphCollection instances auto-discover it
-            this.atlas._slugData = this._slugData;
-            this.atlas._shaper = this._shaper;
+        // Store on atlas so all CodeGrid/GlyphCollection instances auto-discover it
+        this.atlas._slugData = this._slugData;
+        this.atlas._shaper = this._shaper;
 
-            this.loading.update(0.7, 'Slug rendering ready');
-            console.log('[Slug] Vector rendering initialized');
-        } catch (err) {
-            console.warn('[Slug] Failed to initialize HarfBuzz/Slug, falling back to atlas:', err);
-            this._shaper = null;
-            this._slugData = null;
-        }
+        this.loading.update(0.7, 'Slug rendering ready');
+        console.log('[Slug] Vector rendering initialized');
 
         // Three.js setup
         this.scene = new THREE.Scene();
@@ -338,8 +306,13 @@ export class GitHubRepoViewer {
             this.pickingSystem?.onContextRestored();
         });
 
-        // Frustum-based grid virtualization — only render visible grids
-        this.gridVirtualizer = new GridVirtualizer(this.scene, this.camera);
+        // Frustum-based grid virtualization — only render visible grids.
+        // Eviction enabled: off-screen grids have GPU buffers released after
+        // EVICTION_DELAY_MS and reloaded on re-entry. atlas is passed for reload.
+        this.gridVirtualizer = new GridVirtualizer(this.scene, this.camera, {
+            atlas: this.atlas,
+            enableEviction: true
+        });
 
         // repoAdapter is set after the WebSocket bridge is created (below)
         // so local mode can use it as transport.
@@ -563,125 +536,6 @@ export class GitHubRepoViewer {
             return `ws://${loc.hostname}:${loc.port}`;
         }
         return `ws://localhost:${this._wsPort()}`;
-    }
-
-    /**
-     * Try to load a pre-baked atlas from the WebSocket relay cache.
-     * Opens a temporary WebSocket connection, sends atlas.get, waits for the
-     * response, then closes cleanly. Does NOT send "DISPLAY" so it does not
-     * compete with the main CommandCenter connection.
-     *
-     * @param {number} [timeoutMs=2000] - Milliseconds before giving up
-     * @returns {Promise<GlyphAtlas|null>}
-     * @private
-     */
-    async _tryLoadCachedAtlas(timeoutMs = 2000) {
-        return new Promise((resolve) => {
-            try {
-                const ws = new WebSocket(this._wsUrl());
-                const timer = setTimeout(() => { ws.close(); resolve(null); }, timeoutMs);
-
-                ws.onopen = () => {
-                    ws.send(JSON.stringify({
-                        relay: 'atlas.get',
-                        font: this._atlasFont,
-                        size: this._atlasSize,
-                    }));
-                };
-
-                ws.onmessage = async (e) => {
-                    clearTimeout(timer);
-                    try {
-                        const msg = JSON.parse(e.data);
-                        if (msg.event === 'atlas.result' && msg.hit) {
-                            const img = await new Promise((res, rej) => {
-                                const image = new Image();
-                                image.onload = () => res(image);
-                                image.onerror = rej;
-                                image.src = `data:image/png;base64,${msg.png}`;
-                            });
-                            const atlas = GlyphAtlas.fromPrebuilt(msg.descriptor, img);
-                            ws.close();
-                            resolve(atlas);
-                        } else {
-                            ws.close();
-                            resolve(null);
-                        }
-                    } catch (_err) {
-                        ws.close();
-                        resolve(null);
-                    }
-                };
-
-                ws.onerror = () => { clearTimeout(timer); resolve(null); };
-            } catch (_e) {
-                resolve(null);
-            }
-        });
-    }
-
-    /**
-     * Try to load a pre-baked atlas from static HTTP assets shipped with the
-     * deployment. Expects `/assets/atlas-prebaked.png` and
-     * `/assets/atlas-prebaked.json` to be present with HTTP 200.
-     *
-     * @returns {Promise<GlyphAtlas|null>}
-     * @private
-     */
-    async _tryLoadStaticAtlas() {
-        try {
-            const [pngRes, jsonRes] = await Promise.all([
-                fetch('/assets/atlas-prebaked.png'),
-                fetch('/assets/atlas-prebaked.json'),
-            ]);
-            if (!pngRes.ok || !jsonRes.ok) return null;
-
-            const [blob, descriptor] = await Promise.all([
-                pngRes.blob(),
-                jsonRes.json(),
-            ]);
-
-            const img = await new Promise((res, rej) => {
-                const image = new Image();
-                image.onload = () => res(image);
-                image.onerror = rej;
-                image.src = URL.createObjectURL(blob);
-            });
-
-            return GlyphAtlas.fromPrebuilt(descriptor, img);
-        } catch (_e) {
-            return null;
-        }
-    }
-
-    /**
-     * Fire-and-forget: send the freshly generated atlas to the relay so it can
-     * be served on the next startup. Opens a temporary WebSocket, sends
-     * atlas.cache, then closes after a short delay. Errors are swallowed —
-     * the relay may not be running in all environments.
-     *
-     * @private
-     */
-    _cacheAtlasToRelay() {
-        try {
-            const { image: dataUrl, descriptor } = this.atlas.exportAtlas();
-            const png = dataUrl.replace(/^data:image\/png;base64,/, '');
-
-            const ws = new WebSocket(this._wsUrl());
-            ws.onopen = () => {
-                ws.send(JSON.stringify({
-                    relay: 'atlas.cache',
-                    font: descriptor.fontFamily || 'Monaco, Menlo, Courier New, monospace',
-                    size: descriptor.textureWidth || 2048,
-                    png,
-                    descriptor,
-                }));
-                setTimeout(() => ws.close(), 500);
-            };
-            ws.onerror = () => {}; // Relay may not be running — silently ignore
-        } catch (_e) {
-            // Atlas caching is optional — do not propagate errors
-        }
     }
 
     /**
@@ -1525,14 +1379,6 @@ export class GitHubRepoViewer {
                 console.debug(`[AFTER FRAME] Wall time: ${afterFrame.toFixed(0)}ms`);
             });
 
-            // Re-cache atlas if ensureGraphemes added glyphs during file loading.
-            if (this.atlas.uvMapVersion !== this._atlasVersionAtLoad) {
-                const added = this.atlas.uvMapVersion - this._atlasVersionAtLoad;
-                console.log(`[atlas] Re-caching: ${added} new grapheme batches discovered during load`);
-                this._cacheAtlasToRelay();
-                this._atlasVersionAtLoad = this.atlas.uvMapVersion;
-            }
-
             this.loading.hide();
 
             console.debug('Adapter stats:', this.repoAdapter.getStats());
@@ -1733,15 +1579,6 @@ export class GitHubRepoViewer {
 
             const totalTime = performance.now() - totalStart;
             console.debug(`[TOTAL] All phases: ${totalTime.toFixed(0)}ms`);
-
-            // Re-cache atlas if ensureGraphemes added glyphs during file loading.
-            // Next startup will load the full charset without any runtime packing.
-            if (this.atlas.uvMapVersion !== this._atlasVersionAtLoad) {
-                const added = this.atlas.uvMapVersion - this._atlasVersionAtLoad;
-                console.log(`[atlas] Re-caching: ${added} new grapheme batches discovered during load`);
-                this._cacheAtlasToRelay();
-                this._atlasVersionAtLoad = this.atlas.uvMapVersion;
-            }
 
             this.loading.hide();
             this.toastUI.show(`Loaded ${this.grids.length} files from ${this._localRoot}`, 'success');

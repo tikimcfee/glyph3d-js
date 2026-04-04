@@ -224,7 +224,18 @@ class GlyphAtlas {
 
         console.debug(`[GlyphAtlas] Generated: ${this.packingState.glyphsAdded} glyphs in ${this.atlasCanvas.width}x${this.atlasCanvas.height}`);
 
-        return this.atlasCanvas;
+        // Cache charSize and atlas dimensions eagerly so the canvas can be freed.
+        this._charSize = this.getCharSize();
+        this._atlasSize = this.atlasCanvas.width;
+
+        // Free the 16 MB canvas bitmap — no longer needed after Slug takes over rendering.
+        // Keep metrics Map for getCharSize() and ensureGraphemes().
+        const returnCanvas = this.atlasCanvas;
+        this.atlasCanvas = null;
+        this.ctx = null;
+        this._sharedThreeTexture = null;
+
+        return returnCanvas;
     }
 
     /**
@@ -335,7 +346,9 @@ class GlyphAtlas {
     }
 
     getCharSize() {
-        // Use 'M' as reference
+        // Return eagerly-cached value set at end of generate() when available.
+        if (this._charSize) return this._charSize;
+        // Fallback: compute from metrics Map (used during generate() before caching).
         const m = this.metrics.get('M');
         return m ? { width: m.width, height: m.height } : { width: this.fontSize, height: this.fontSize };
     }
@@ -418,6 +431,11 @@ class GlyphAtlas {
     }
 
     getAtlasTexture() {
+        // Canvas may be nulled after generate() to free 16 MB bitmap.
+        // Return a stub with cached dimensions for callers that only need .width/.height.
+        if (!this.atlasCanvas && this._atlasSize) {
+            return { width: this._atlasSize, height: this._atlasSize };
+        }
         return this.atlasCanvas;
     }
 

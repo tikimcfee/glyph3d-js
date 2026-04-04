@@ -17,9 +17,7 @@
 
 import * as THREE from 'three';
 import { PERF_THRESHOLDS, shouldDebugLog } from './core/constants.js';
-import GlyphLayout from './layout/GlyphLayout.js';
 import { createLogger, LogLevel } from './utils/index.js';
-import { iterGraphemes } from './utils/grapheme.js';
 import { TEXTURE_WIDTH } from './shaping/slug-constants.js';
 
 // Create logger for v1.5
@@ -88,10 +86,6 @@ class GlyphRendererV15 {
         this._groupCount = 1; // group 0 always exists (identity)
         this._highlightTexture = null; // RGBA8 DataTexture, created on first flush
         this._highlightSize = 0;       // current texture width (= instance capacity)
-
-        // Subsystems created lazily (only when needed for sync path)
-        // Worker path uses applyPrebuiltBuffers() directly - no need for these
-        this._layout = null;
 
         // Pre-create instance mesh
         this.instanceMesh = this._createInstanceMesh();
@@ -573,19 +567,84 @@ class GlyphRendererV15 {
         const entry = this.renderedTexts.get(id);
         if (!entry) return null;
 
-        // Return a proxy object with manipulation methods
+        const renderer = this;
         return {
-            id: id,
-            text: entry.text,
-            glyphs: entry.glyphs,
-            options: entry.options,
-
-            // Methods for this text
-            updatePosition: (newPos) => this.updatePosition(id, newPos),
-            updateColor: (newColor) => this.updateColor(id, newColor),
-            remove: () => this.remove(id),
-            getBounds: () => this._getTextBounds(entry.glyphs)
+            id,
+            glyphCount: entry.glyphCount,
+            bufferStartIndex: entry.bufferStartIndex,
+            // Lazy accessor: reads glyph data from typed arrays on demand.
+            // Returns an array-like with .length, indexed access [i], and Symbol.iterator.
+            // Avoids allocating per-glyph objects unless explicitly accessed.
+            get glyphs() { return renderer._lazyGlyphs(entry); },
+            getGlyphAt: (i) => ({
+                position: renderer._readGlyphPosition(entry.bufferStartIndex + i),
+                size: renderer._readGlyphSize(entry.bufferStartIndex + i),
+            }),
+            updatePosition: (newPos) => renderer.updatePosition(id, newPos),
+            updateColor: (newColor) => renderer.updateColor(id, newColor),
+            remove: () => renderer.remove(id),
+            getBounds: () => renderer._getTextBounds(entry)
         };
+    }
+
+    /**
+     * Lazy glyph accessor backed by typed arrays. Returns an array-like with
+     * .length and index access that reads from GPU buffers on demand.
+     * Avoids allocating 6.1M per-glyph objects up front.
+     * @private
+     * @param {Object} entry - renderedTexts entry with bufferStartIndex and glyphCount
+     * @returns {Proxy} Array-like object
+     */
+    _lazyGlyphs(entry) {
+        const geom = this.instanceMesh.geometry;
+        const positions = geom.attributes.instancePosition.array;
+        const sizes = geom.attributes.instanceSize.array;
+        const colors = geom.attributes.instanceColor.array;
+        const glyphIds = geom.attributes.instanceGlyphId.array;
+        const groupIds = geom.attributes.instanceGroupId.array;
+        const start = entry.bufferStartIndex;
+        const count = entry.glyphCount;
+
+        function readGlyph(i) {
+            const buf = start + i;
+            return {
+                position: {
+                    x: positions[buf * 3],
+                    y: positions[buf * 3 + 1],
+                    z: positions[buf * 3 + 2]
+                },
+                size: {
+                    width: sizes[buf * 2],
+                    height: sizes[buf * 2 + 1]
+                },
+                color: {
+                    r: colors[buf * 3],
+                    g: colors[buf * 3 + 1],
+                    b: colors[buf * 3 + 2]
+                },
+                charCode: glyphIds ? glyphIds[buf] : 0,
+                char: '',
+                groupId: groupIds ? groupIds[buf] : 0
+            };
+        }
+
+        return new Proxy([], {
+            get(target, prop) {
+                if (prop === 'length') return count;
+                if (prop === Symbol.iterator) {
+                    return function* () {
+                        for (let i = 0; i < count; i++) {
+                            yield readGlyph(i);
+                        }
+                    };
+                }
+                const idx = Number(prop);
+                if (Number.isInteger(idx) && idx >= 0 && idx < count) {
+                    return readGlyph(idx);
+                }
+                return Array.prototype[prop];
+            }
+        });
     }
 
     /**
@@ -628,6 +687,30 @@ class GlyphRendererV15 {
     }
 
     /**
+     * Read the position of the glyph at an absolute buffer index from the typed array.
+     * @private
+     * @param {number} bufferIndex - Absolute glyph slot index
+     * @returns {{x: number, y: number, z: number}}
+     */
+    _readGlyphPosition(bufferIndex) {
+        const positions = this.instanceMesh.geometry.attributes.instancePosition.array;
+        const i = bufferIndex * 3;
+        return { x: positions[i], y: positions[i + 1], z: positions[i + 2] };
+    }
+
+    /**
+     * Read the size of the glyph at an absolute buffer index from the typed array.
+     * @private
+     * @param {number} bufferIndex - Absolute glyph slot index
+     * @returns {{width: number, height: number}}
+     */
+    _readGlyphSize(bufferIndex) {
+        const sizes = this.instanceMesh.geometry.attributes.instanceSize.array;
+        const i = bufferIndex * 2;
+        return { width: sizes[i], height: sizes[i + 1] };
+    }
+
+    /**
      * Internal: rebuild or mark dirty based on batch mode
      */
     _maybeRebuild() {
@@ -647,35 +730,27 @@ class GlyphRendererV15 {
         const entry = this.renderedTexts.get(id);
         if (!entry || entry.bufferStartIndex === undefined) return;
 
-        // Calculate offset from first glyph's current position
-        const offset = {
-            x: newPosition.x - entry.glyphs[0].position.x,
-            y: newPosition.y - entry.glyphs[0].position.y,
-            z: newPosition.z - entry.glyphs[0].position.z
-        };
-
-        // Get the position buffer
         const geometry = this.instanceMesh.geometry;
         const positions = geometry.attributes.instancePosition.array;
-
-        // Update both our glyph data AND the GPU buffer directly
         const startIdx = entry.bufferStartIndex;
-        for (let i = 0; i < entry.glyphs.length; i++) {
-            const glyph = entry.glyphs[i];
-            glyph.position.x += offset.x;
-            glyph.position.y += offset.y;
-            glyph.position.z += offset.z;
 
-            // Direct buffer write
+        // Read first glyph's current position from typed array to compute delta
+        const base = startIdx * 3;
+        const dx = newPosition.x - positions[base];
+        const dy = newPosition.y - positions[base + 1];
+        const dz = newPosition.z - positions[base + 2];
+
+        // Apply delta directly to the typed array — no JS object mutations
+        for (let i = 0; i < entry.glyphCount; i++) {
             const bufIdx = (startIdx + i) * 3;
-            positions[bufIdx] = glyph.position.x;
-            positions[bufIdx + 1] = glyph.position.y;
-            positions[bufIdx + 2] = glyph.position.z;
+            positions[bufIdx]     += dx;
+            positions[bufIdx + 1] += dy;
+            positions[bufIdx + 2] += dz;
         }
 
-        // Partial GPU upload — only the changed range, not the full 120 KB array
+        // Partial GPU upload — only the changed range
         const posAttr = geometry.attributes.instancePosition;
-        posAttr.addUpdateRange(startIdx * 3, entry.glyphs.length * 3);
+        posAttr.addUpdateRange(startIdx * 3, entry.glyphCount * 3);
         posAttr.needsUpdate = true;
     }
 
@@ -688,25 +763,20 @@ class GlyphRendererV15 {
         const entry = this.renderedTexts.get(id);
         if (!entry || entry.bufferStartIndex === undefined) return;
 
-        // Get the color buffer
         const geometry = this.instanceMesh.geometry;
         const colors = geometry.attributes.instanceColor.array;
-
-        // Update both our glyph data AND the GPU buffer directly
         const startIdx = entry.bufferStartIndex;
-        for (let i = 0; i < entry.glyphs.length; i++) {
-            const glyph = entry.glyphs[i];
-            glyph.color = newColor;
 
-            // Direct buffer write
+        // Write directly to the typed array — no JS object mutations
+        for (let i = 0; i < entry.glyphCount; i++) {
             const bufIdx = (startIdx + i) * 3;
-            colors[bufIdx] = newColor.r;
+            colors[bufIdx]     = newColor.r;
             colors[bufIdx + 1] = newColor.g;
             colors[bufIdx + 2] = newColor.b;
         }
 
         const colorAttr = geometry.attributes.instanceColor;
-        colorAttr.addUpdateRange(startIdx * 3, entry.glyphs.length * 3);
+        colorAttr.addUpdateRange(startIdx * 3, entry.glyphCount * 3);
         colorAttr.needsUpdate = true;
     }
 
@@ -726,7 +796,7 @@ class GlyphRendererV15 {
         const g = addedColor ? (addedColor.g * 255 + 0.5) | 0 : 0;
         const b = addedColor ? (addedColor.b * 255 + 0.5) | 0 : 0;
         const w = this._highlightTexWidth;
-        for (let i = 0; i < entry.glyphs.length; i++) {
+        for (let i = 0; i < entry.glyphCount; i++) {
             const slot = startIdx + i;
             const bufIdx = slot * 4; // flat index into RGBA8 data (row-major, width=w)
             data[bufIdx]     = r;
@@ -771,27 +841,22 @@ class GlyphRendererV15 {
             const entry = this.renderedTexts.get(id);
             if (!entry || entry.bufferStartIndex === undefined) continue;
 
-            const offset = {
-                x: newPosition.x - entry.glyphs[0].position.x,
-                y: newPosition.y - entry.glyphs[0].position.y,
-                z: newPosition.z - entry.glyphs[0].position.z
-            };
-
             const startIdx = entry.bufferStartIndex;
-            const endIdx = startIdx + entry.glyphs.length;
+            const endIdx = startIdx + entry.glyphCount;
             rangeMin = Math.min(rangeMin, startIdx);
             rangeMax = Math.max(rangeMax, endIdx);
 
-            for (let i = 0; i < entry.glyphs.length; i++) {
-                const glyph = entry.glyphs[i];
-                glyph.position.x += offset.x;
-                glyph.position.y += offset.y;
-                glyph.position.z += offset.z;
+            // Read current first-glyph position from typed array for delta
+            const base = startIdx * 3;
+            const dx = newPosition.x - positions[base];
+            const dy = newPosition.y - positions[base + 1];
+            const dz = newPosition.z - positions[base + 2];
 
+            for (let i = 0; i < entry.glyphCount; i++) {
                 const bufIdx = (startIdx + i) * 3;
-                positions[bufIdx] = glyph.position.x;
-                positions[bufIdx + 1] = glyph.position.y;
-                positions[bufIdx + 2] = glyph.position.z;
+                positions[bufIdx]     += dx;
+                positions[bufIdx + 1] += dy;
+                positions[bufIdx + 2] += dz;
             }
         }
 
@@ -819,15 +884,13 @@ class GlyphRendererV15 {
             if (!entry || entry.bufferStartIndex === undefined) continue;
 
             const startIdx = entry.bufferStartIndex;
-            const endIdx = startIdx + entry.glyphs.length;
+            const endIdx = startIdx + entry.glyphCount;
             rangeMin = Math.min(rangeMin, startIdx);
             rangeMax = Math.max(rangeMax, endIdx);
 
-            for (let i = 0; i < entry.glyphs.length; i++) {
-                entry.glyphs[i].color = newColor;
-
+            for (let i = 0; i < entry.glyphCount; i++) {
                 const bufIdx = (startIdx + i) * 3;
-                colors[bufIdx] = newColor.r;
+                colors[bufIdx]     = newColor.r;
                 colors[bufIdx + 1] = newColor.g;
                 colors[bufIdx + 2] = newColor.b;
             }
@@ -859,28 +922,23 @@ class GlyphRendererV15 {
             if (!entry || entry.bufferStartIndex === undefined) continue;
 
             const startIdx = entry.bufferStartIndex;
-            const endIdx = startIdx + entry.glyphs.length;
+            const endIdx = startIdx + entry.glyphCount;
 
             if (update.position) {
                 posRangeMin = Math.min(posRangeMin, startIdx);
                 posRangeMax = Math.max(posRangeMax, endIdx);
 
-                const offset = {
-                    x: update.position.x - entry.glyphs[0].position.x,
-                    y: update.position.y - entry.glyphs[0].position.y,
-                    z: update.position.z - entry.glyphs[0].position.z
-                };
+                // Read current first-glyph position from typed array for delta
+                const base = startIdx * 3;
+                const dx = update.position.x - positions[base];
+                const dy = update.position.y - positions[base + 1];
+                const dz = update.position.z - positions[base + 2];
 
-                for (let i = 0; i < entry.glyphs.length; i++) {
-                    const glyph = entry.glyphs[i];
-                    glyph.position.x += offset.x;
-                    glyph.position.y += offset.y;
-                    glyph.position.z += offset.z;
-
+                for (let i = 0; i < entry.glyphCount; i++) {
                     const bufIdx = (startIdx + i) * 3;
-                    positions[bufIdx] = glyph.position.x;
-                    positions[bufIdx + 1] = glyph.position.y;
-                    positions[bufIdx + 2] = glyph.position.z;
+                    positions[bufIdx]     += dx;
+                    positions[bufIdx + 1] += dy;
+                    positions[bufIdx + 2] += dz;
                 }
             }
 
@@ -888,11 +946,9 @@ class GlyphRendererV15 {
                 colRangeMin = Math.min(colRangeMin, startIdx);
                 colRangeMax = Math.max(colRangeMax, endIdx);
 
-                for (let i = 0; i < entry.glyphs.length; i++) {
-                    entry.glyphs[i].color = update.color;
-
+                for (let i = 0; i < entry.glyphCount; i++) {
                     const bufIdx = (startIdx + i) * 3;
-                    colors[bufIdx] = update.color.r;
+                    colors[bufIdx]     = update.color.r;
                     colors[bufIdx + 1] = update.color.g;
                     colors[bufIdx + 2] = update.color.b;
                 }
@@ -1184,48 +1240,14 @@ class GlyphRendererV15 {
     // _ensureGlyphsInAtlas — removed (HarfBuzz shaping handles all glyph IDs)
 
     /**
-     * Convert text to glyph instances.
-     *
-     * Uses HarfBuzz shaping when a shaper is available (preferred path).
-     * Falls back to atlas-based grapheme iteration for compatibility.
+     * Convert text to glyph instances using HarfBuzz shaping.
+     * Requires this._shaper to be initialized and ready.
      * @private
      */
     _textToGlyphs(text, position, options) {
         const color = options.color || this.config.defaultColor;
         const scale = options.scale || 1.0;
-
-        if (this._shaper && this._shaper.ready) {
-            return this._textToGlyphsShaped(text, position, color, scale, options);
-        }
-
-        // Fallback: atlas-based grapheme iteration (legacy sync path)
-        if (!this._layout) {
-            this._layout = new GlyphLayout(this.metrics);
-        }
-        const positions = this._layout.layoutText(text, position, options.alignment);
-
-        const glyphs = [];
-        let posIndex = 0;
-        for (const grapheme of iterGraphemes(text)) {
-            const cp = grapheme.codePointAt(0);
-            if (cp === 10) continue;
-            if (cp === 32) { posIndex++; continue; }
-
-            const pos = positions[posIndex++];
-            if (!pos) continue;
-            if (!this.atlas.hasGlyph(grapheme)) continue;
-
-            const numericId = this.atlas.getGraphemeId(grapheme) ?? 0;
-            glyphs.push({
-                position: pos,
-                size: { width: this.metrics.charWidth * scale, height: this.metrics.charHeight * scale },
-                charCode: numericId,
-                color,
-                char: grapheme,
-                groupId: options.groupId || 0
-            });
-        }
-        return glyphs;
+        return this._textToGlyphsShaped(text, position, color, scale, options);
     }
 
     /**
@@ -1280,12 +1302,12 @@ class GlyphRendererV15 {
      */
     _registerText(text, glyphs, options) {
         const id = this.nextId++;
+        // Store glyphs array temporarily — _rebuildAllInstances() will write
+        // them to GPU and then strip the array, leaving only bufferStartIndex + glyphCount.
         this.renderedTexts.set(id, {
-            id: id,
-            text: text,
-            glyphs: glyphs,
-            options: options || {},
-            timestamp: Date.now()
+            id,
+            glyphs,      // stripped by _rebuildAllInstances after GPU write
+            glyphCount: glyphs.length,
         });
         return id;
     }
@@ -1294,19 +1316,37 @@ class GlyphRendererV15 {
      * Get bounds of text glyphs
      * @private
      */
-    _getTextBounds(glyphs) {
-        if (glyphs.length === 0) return null;
+    /**
+     * Compute the world-space bounds for a text entry by reading from the typed arrays.
+     * @private
+     * @param {Object} entry - renderedTexts entry with bufferStartIndex and glyphCount
+     * @returns {Object|null} {min, max, width, height, depth} or null if empty
+     */
+    _getTextBounds(entry) {
+        if (!entry || entry.glyphCount === 0 || !this.instanceMesh) return null;
+
+        const geom = this.instanceMesh.geometry;
+        const positions = geom.attributes.instancePosition.array;
+        const sizes = geom.attributes.instanceSize.array;
+        const start = entry.bufferStartIndex;
 
         let minX = Infinity, minY = Infinity, minZ = Infinity;
         let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
 
-        for (const g of glyphs) {
-            minX = Math.min(minX, g.position.x);
-            minY = Math.min(minY, g.position.y);
-            minZ = Math.min(minZ, g.position.z);
-            maxX = Math.max(maxX, g.position.x + g.size.width);
-            maxY = Math.max(maxY, g.position.y + g.size.height);
-            maxZ = Math.max(maxZ, g.position.z);
+        for (let i = 0; i < entry.glyphCount; i++) {
+            const buf = start + i;
+            const px = positions[buf * 3];
+            const py = positions[buf * 3 + 1];
+            const pz = positions[buf * 3 + 2];
+            const sw = sizes[buf * 2];
+            const sh = sizes[buf * 2 + 1];
+
+            if (px < minX) minX = px;
+            if (py < minY) minY = py;
+            if (pz < minZ) minZ = pz;
+            if (px + sw > maxX) maxX = px + sw;
+            if (py + sh > maxY) maxY = py + sh;
+            if (pz > maxZ) maxZ = pz;
         }
 
         return {
@@ -1323,20 +1363,78 @@ class GlyphRendererV15 {
      * @private
      */
     _rebuildAllInstances() {
-        // Collect all glyphs AND track buffer indices for each text entry
-        const allGlyphs = [];
-        let bufferIndex = 0;
-
+        // Check if any entries still have the legacy glyphs array (sync path).
+        // If so, use the old _updateInstanceMesh path to write them to the GPU,
+        // then strip the arrays and record bufferStartIndex / glyphCount.
+        let hasLegacyGlyphs = false;
         for (const entry of this.renderedTexts.values()) {
-            // Store where this text's glyphs start in the buffer
-            entry.bufferStartIndex = bufferIndex;
-            entry.glyphCount = entry.glyphs.length;
-
-            allGlyphs.push(...entry.glyphs);
-            bufferIndex += entry.glyphs.length;
+            if (entry.glyphs) { hasLegacyGlyphs = true; break; }
         }
 
-        this._updateInstanceMesh(allGlyphs);
+        if (hasLegacyGlyphs) {
+            // Legacy sync path: collect glyph objects, write to GPU, then strip arrays.
+            const allGlyphs = [];
+            let bufferIndex = 0;
+
+            for (const entry of this.renderedTexts.values()) {
+                entry.bufferStartIndex = bufferIndex;
+                if (entry.glyphs) {
+                    entry.glyphCount = entry.glyphs.length;
+                    allGlyphs.push(...entry.glyphs);
+                    bufferIndex += entry.glyphs.length;
+                } else {
+                    bufferIndex += entry.glyphCount;
+                }
+            }
+
+            this._updateInstanceMesh(allGlyphs);
+
+            // Strip glyphs arrays — typed arrays are now the source of truth
+            for (const entry of this.renderedTexts.values()) {
+                entry.glyphs = null;
+            }
+            return;
+        }
+
+        // Typed-array compaction path (worker path, or after first legacy rebuild).
+        // Shifts surviving entries forward to fill gaps left by remove() calls.
+        // writeIdx <= readIdx always because deletions only create forward gaps.
+        const geom = this.instanceMesh.geometry;
+        const oldPos = geom.attributes.instancePosition.array;
+        const oldSiz = geom.attributes.instanceSize.array;
+        const oldGid = geom.attributes.instanceGlyphId.array;
+        const oldCol = geom.attributes.instanceColor.array;
+        const oldGrp = geom.attributes.instanceGroupId.array;
+
+        let total = 0;
+        for (const entry of this.renderedTexts.values()) {
+            total += entry.glyphCount;
+        }
+
+        let writeIdx = 0;
+        for (const entry of this.renderedTexts.values()) {
+            const readIdx = entry.bufferStartIndex;
+            const count = entry.glyphCount;
+            entry.bufferStartIndex = writeIdx;
+
+            if (readIdx !== writeIdx && count > 0) {
+                // Shift data forward in-place (source and dest may overlap;
+                // copyWithin handles overlapping regions correctly)
+                oldPos.copyWithin(writeIdx * 3, readIdx * 3, (readIdx + count) * 3);
+                oldSiz.copyWithin(writeIdx * 2, readIdx * 2, (readIdx + count) * 2);
+                oldGid.copyWithin(writeIdx,     readIdx,     readIdx + count);
+                oldCol.copyWithin(writeIdx * 3, readIdx * 3, (readIdx + count) * 3);
+                oldGrp.copyWithin(writeIdx,     readIdx,     readIdx + count);
+            }
+            writeIdx += count;
+        }
+
+        // Mark all attributes dirty and update instance count
+        for (const name of Object.keys(geom.attributes)) {
+            geom.attributes[name].needsUpdate = true;
+        }
+        this._ensureHighlightTexture(total);
+        geom.instanceCount = total;
     }
 
     /**
@@ -1473,47 +1571,17 @@ class GlyphRendererV15 {
             logger.debug('Computed itemMeta from items (fallback)', { itemCount: items.length });
         }
 
-        // Reconstruct renderedTexts entries from buffer data + metadata
-        // This enables updatePosition, updateColor, getText, etc. after worker path
+        // Store lightweight metadata entries — no per-glyph JS objects.
+        // All update/query methods read position/color/size directly from typed arrays.
         let rendererIds = null;
         if (itemMeta && items) {
             rendererIds = [];
             for (let i = 0; i < itemMeta.length; i++) {
                 const meta = itemMeta[i];
-                const item = items[i];
                 const id = this.nextId++;
-
-                // Reconstruct glyph array by reading back from the buffers
-                const glyphs = new Array(meta.glyphCount);
-                for (let g = 0; g < meta.glyphCount; g++) {
-                    const bufIdx = meta.bufferStartIndex + g;
-                    glyphs[g] = {
-                        position: {
-                            x: positions[bufIdx * 3],
-                            y: positions[bufIdx * 3 + 1],
-                            z: positions[bufIdx * 3 + 2]
-                        },
-                        size: {
-                            width: sizes[bufIdx * 2],
-                            height: sizes[bufIdx * 2 + 1]
-                        },
-                        color: {
-                            r: colors[bufIdx * 3],
-                            g: colors[bufIdx * 3 + 1],
-                            b: colors[bufIdx * 3 + 2]
-                        },
-                        charCode: glyphIds ? glyphIds[bufIdx] : 0,
-                        char: '',
-                        groupId: groupIds ? groupIds[bufIdx] : 0
-                    };
-                }
 
                 this.renderedTexts.set(id, {
                     id,
-                    text: item.text || '',
-                    glyphs,
-                    options: item.options || {},
-                    timestamp: Date.now(),
                     bufferStartIndex: meta.bufferStartIndex,
                     glyphCount: meta.glyphCount,
                     lineSlotOffsets: meta.lineSlotOffsets || null,
@@ -1605,7 +1673,7 @@ class GlyphRendererV15 {
     getStats() {
         let totalGlyphs = 0;
         for (const entry of this.renderedTexts.values()) {
-            totalGlyphs += entry.glyphs.length;
+            totalGlyphs += entry.glyphCount || 0;
         }
 
         return {

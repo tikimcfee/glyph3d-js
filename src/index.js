@@ -26,17 +26,9 @@ export { parseCapturePaneAnsi, parseCapturePanePlain } from './collections/Termi
 
 // Worker system
 export { WorkerBridge, getWorkerBridge, isWorkersSupported } from './workers/WorkerBridge.js';
-export { buildGlyphBuffers, buildBatchBuffers } from './workers/builders/index.js';
-
-// Layout subsystem
-export { default as GlyphLayout } from './layout/GlyphLayout.js';
-export { default as GlyphBatcher } from './layout/GlyphBatcher.js';
-export { default as GlyphInstancePool } from './layout/GlyphInstancePool.js';
 
 // Core utilities
 export { PERF_THRESHOLDS, shouldDebugLog } from './core/constants.js';
-export { default as InstanceBuffer } from './core/InstanceBuffer.js';
-export { default as ShaderManager } from './core/ShaderManager.js';
 
 // Observability
 export {
@@ -77,8 +69,8 @@ export { parseFileRef, parseStackTrace, parseLogLine, parseAuto } from './parsin
 // Text shaping (HarfBuzz WASM) + Slug vector encoding
 export { HarfBuzzShaper, shapeText, collectUniqueGlyphIds, SlugEncoder } from './shaping/index.js';
 
-// Shaped buffer builders
-export { buildShapedBatchBuffers } from './workers/builders/index.js';
+// Buffer builders (HarfBuzz-shaped path only)
+export { buildBatchBuffers, buildShapedBatchBuffers } from './workers/builders/index.js';
 
 // Hand tracking
 export {

@@ -4,13 +4,15 @@
  * Features:
  * - Worker pool management (scales with hardware concurrency)
  * - Promise-based async API
- * - UV map serialization with caching
  * - Round-robin job distribution
  * - Automatic worker lifecycle management
+ *
+ * Text shaping runs once on the main thread (single HarfBuzz WASM instance).
+ * Workers receive pre-shaped arrays and do only buffer math — no WASM in workers.
  */
 
-// Import builders for sync fallback (tree-shaken if unused)
-import { buildGlyphBuffers, buildBatchBuffers, buildShapedBatchBuffers } from './builders/index.js';
+// Import builder for sync fallback (tree-shaken if unused)
+import { buildBatchBuffers } from './builders/index.js';
 import { shapeText } from '../shaping/shapeText.js';
 
 /**
@@ -38,13 +40,6 @@ export class WorkerBridge {
         this.pendingRequests = new Map(); // jobId → {resolve, reject}
         this.nextJobId = 1;
         this.roundRobinIndex = 0;
-
-        // UV map cache (avoid re-serializing on every call)
-        this._uvMapCache = null;
-        this._uvMapAtlas = null;
-        // Tracks the atlas._uvMapVersion at time of last serialization.
-        // Initialized to -1 so the first call always serializes fresh.
-        this._uvMapVersion = -1;
 
         // Lazy initialization flag
         this._initialized = false;
@@ -107,147 +102,17 @@ export class WorkerBridge {
     get fontReady() { return this._shaper != null && this._shaper.ready; }
 
     /**
-     * Get serialized UV map from atlas (version-aware cache).
+     * Build buffers for multiple texts (batch).
      *
-     * Caches on atlas identity AND atlas._uvMapVersion. When either changes
-     * (new atlas or ensureCodepoints() added new glyphs), the cache is busted,
-     * all workers have their _hasUVMap flag cleared (forcing re-send of the
-     * fresh UV map on their next dispatch), and the new serialized map is stored.
-     *
-     * @param {GlyphAtlas} atlas
-     * @returns {Object} Plain object map: charCode → {u0, v0, u1, v1}
-     */
-    getSerializedUVMap(atlas) {
-        const version = atlas._uvMapVersion || 0;
-
-        // Return cached if same atlas and UV map has not changed
-        if (this._uvMapAtlas === atlas && this._uvMapVersion === version && this._uvMapCache) {
-            return this._uvMapCache;
-        }
-
-        // Atlas changed or version advanced — bust cache and reset per-worker warm
-        // flags so each worker receives the fresh UV map on its next job dispatch.
-        for (const worker of this.workers) {
-            worker._hasUVMap = false;
-        }
-
-        // Serialize UV map from atlas
-        if (typeof atlas.getSerializableUVMap === 'function') {
-            this._uvMapCache = atlas.getSerializableUVMap();
-        } else {
-            // Fallback: iterate over uvMap (grapheme string → UV) and _graphemeIds for numericId
-            const map = {};
-            if (atlas.uvMap) {
-                for (const [grapheme, uv] of atlas.uvMap) {
-                    const numericId = atlas._graphemeIds ? atlas._graphemeIds.get(grapheme) : undefined;
-                    map[grapheme] = numericId !== undefined ? { ...uv, numericId } : uv;
-                }
-            }
-            this._uvMapCache = map;
-        }
-
-        this._uvMapAtlas = atlas;
-        this._uvMapVersion = version;
-
-        // Serialize per-glyph widths alongside UV map (same cache lifecycle).
-        // Stored in canvas pixels — the builder multiplies by worldScale
-        // (sent via metrics) to get world-space widths.
-        // Keys are grapheme cluster strings (matching the new string-keyed uvMap).
-        if (typeof atlas.getSerializableGlyphWidths === 'function') {
-            this._glyphWidthsCache = atlas.getSerializableGlyphWidths();
-        } else {
-            // Fallback for atlas instances that haven't been updated yet
-            const widths = {};
-            if (atlas.metrics) {
-                for (const [key, m] of atlas.metrics) {
-                    widths[key] = m.width;
-                }
-            }
-            this._glyphWidthsCache = widths;
-        }
-
-        return this._uvMapCache;
-    }
-
-    /**
-     * Get cached per-glyph widths (serialized from atlas.metrics).
-     * Must call getSerializedUVMap() first to populate the cache.
-     * @returns {Object} Plain object map: charCode → width (number)
-     */
-    getSerializedGlyphWidths() {
-        return this._glyphWidthsCache || {};
-    }
-
-    /**
-     * Invalidate UV map cache (call if atlas changes)
-     */
-    invalidateUVCache() {
-        this._uvMapCache = null;
-        this._uvMapAtlas = null;
-    }
-
-    /**
-     * Build buffers for a single text
-     *
-     * @param {Object} input
-     * @param {string} input.text
-     * @param {{x,y,z}} input.position
-     * @param {{r,g,b}} input.color
-     * @param {number} [input.scale]
-     * @param {string} [input.alignment]
-     * @param {Object} metrics - Font metrics
-     * @param {GlyphAtlas} atlas - For UV map
-     * @returns {Promise<{positions, sizes, codepoints, colors, count}>}
-     */
-    async buildBuffers(input, metrics, atlas) {
-        this._ensureInitialized();
-
-        // Fallback if no workers
-        if (this.workers.length === 0) {
-            return this._buildBuffersSync(input, metrics, atlas);
-        }
-
-        const uvMap = this.getSerializedUVMap(atlas);
-        const glyphWidths = this.getSerializedGlyphWidths();
-        const jobId = String(this.nextJobId++);
-
-        return new Promise((resolve, reject) => {
-            this.pendingRequests.set(jobId, { resolve, reject });
-
-            const worker = this._getNextWorker();
-            worker.postMessage({
-                type: 'BUILD',
-                jobId,
-                payload: {
-                    text: input.text,
-                    position: input.position,
-                    color: input.color,
-                    scale: input.scale || 1.0,
-                    alignment: input.alignment || 'left',
-                    groupId: input.groupId || 0,
-                    metrics,
-                    uvMap,
-                    glyphWidths
-                }
-            });
-        });
-    }
-
-    /**
-     * Build buffers for multiple texts (batch)
-     *
-     * When a main-thread shaper is available (set via setShaper()), each item's
-     * text is shaped here before being posted to a worker. The worker receives
-     * item.shaped = {lines, totalGlyphs} and calls buildShapedBatchBuffers()
-     * without any WASM involvement.
-     *
-     * Falls back to the grapheme/UV-map path when no shaper is registered.
+     * Text is shaped here on the main thread — single WASM instance, no per-worker copies.
+     * The pre-shaped result is plain JSON (arrays of {g, cl, ax, ay, dx, dy}) and transfers
+     * cleanly via structured clone.
      *
      * @param {Array<{text, position, color?, scale?, alignment?}>} items
      * @param {Object} shared
      * @param {Object} shared.metrics - Font metrics
      * @param {{r,g,b}} shared.defaultColor - Default color
-     * @param {GlyphAtlas} atlas - For UV map (legacy fallback path)
+     * @param {GlyphAtlas} [atlas] - Unused (kept for call-site compatibility)
      * @returns {Promise<{positions, sizes, codepoints, colors, count}>}
      */
     async buildBatchBuffers(items, shared, atlas) {
@@ -255,62 +120,35 @@ export class WorkerBridge {
 
         // Fallback if no workers
         if (this.workers.length === 0) {
-            return this._buildBatchBuffersSync(items, shared, atlas);
+            return this._buildBatchBuffersSync(items, shared);
         }
 
         const worker = this._getNextWorker();
         const jobId = String(this.nextJobId++);
 
-        if (this._shaper && this._shaper.ready) {
-            // Shape all items on the main thread — single WASM instance, no per-worker copies.
-            // shapeText() is fast (< 1ms per average file). The shaped result is plain JSON
-            // (arrays of {g, cl, ax, ay, dx, dy}) and transfers cleanly via structured clone.
-            const shapedItems = items.map(item => {
-                const shapedResult = shapeText(this._shaper, item.text || '');
-                return { ...item, shaped: shapedResult };
-            });
-
-            return new Promise((resolve, reject) => {
-                this.pendingRequests.set(jobId, { resolve, reject });
-                worker.postMessage({
-                    type: 'BUILD_BATCH',
-                    jobId,
-                    payload: {
-                        items: shapedItems,
-                        shared: {
-                            metrics: shared.metrics,
-                            defaultColor: shared.defaultColor,
-                            upem: this._upem,
-                            emptyGlyphs: shared.emptyGlyphs || null,
-                        }
-                    }
-                });
-            });
-        }
-
-        // Legacy path: send UV map for grapheme-based building
-        const uvMap = this.getSerializedUVMap(atlas);
-        const needsUVMap = !worker._hasUVMap;
+        // Shape all items on the main thread — single WASM instance, no per-worker copies.
+        // shapeText() is fast (< 1ms per average file). The shaped result is plain JSON
+        // (arrays of {g, cl, ax, ay, dx, dy}) and transfers cleanly via structured clone.
+        const shapedItems = items.map(item => {
+            const shapedResult = shapeText(this._shaper, item.text || '');
+            return { ...item, shaped: shapedResult };
+        });
 
         return new Promise((resolve, reject) => {
             this.pendingRequests.set(jobId, { resolve, reject });
-
-            const glyphWidths = needsUVMap ? this.getSerializedGlyphWidths() : null;
             worker.postMessage({
                 type: 'BUILD_BATCH',
                 jobId,
                 payload: {
-                    items,
+                    items: shapedItems,
                     shared: {
                         metrics: shared.metrics,
                         defaultColor: shared.defaultColor,
-                        uvMap: needsUVMap ? uvMap : null,
-                        glyphWidths
+                        upem: this._upem,
+                        emptyGlyphs: shared.emptyGlyphs || null,
                     }
                 }
             });
-
-            if (needsUVMap) worker._hasUVMap = true;
         });
     }
 
@@ -361,54 +199,21 @@ export class WorkerBridge {
     }
 
     /**
-     * Synchronous fallback when workers unavailable
+     * Synchronous fallback for batch when workers unavailable.
      * @private
      */
-    _buildBuffersSync(input, metrics, atlas) {
-        const uvMap = this.getSerializedUVMap(atlas);
-        const glyphWidths = this.getSerializedGlyphWidths();
-
-        return buildGlyphBuffers({
-            text: input.text,
-            position: input.position,
-            color: input.color,
-            scale: input.scale || 1.0,
-            alignment: input.alignment || 'left',
-            groupId: input.groupId || 0,
-            metrics,
-            uvMap,
-            glyphWidths
-        });
-    }
-
-    /**
-     * Synchronous fallback for batch
-     * @private
-     */
-    _buildBatchBuffersSync(items, shared, atlas) {
-        if (this._shaper && this._shaper.ready) {
-            // Shaped path — single WASM instance on main thread
-            const shapedItems = items.map(item => ({
-                ...item,
-                shaped: shapeText(this._shaper, item.text || '')
-            }));
-            return buildShapedBatchBuffers(shapedItems, {
-                metrics: shared.metrics,
-                defaultColor: shared.defaultColor,
-                upem: this._upem,
-                emptyGlyphs: shared.emptyGlyphs || null,
-            }, shared.emptyGlyphs ? new Set(shared.emptyGlyphs) : undefined);
-        }
-
-        const uvMap = this.getSerializedUVMap(atlas);
-        const glyphWidths = this.getSerializedGlyphWidths();
-
-        return buildBatchBuffers(items, {
+    _buildBatchBuffersSync(items, shared) {
+        // Shaped path — single WASM instance on main thread
+        const shapedItems = items.map(item => ({
+            ...item,
+            shaped: shapeText(this._shaper, item.text || '')
+        }));
+        return buildBatchBuffers(shapedItems, {
             metrics: shared.metrics,
             defaultColor: shared.defaultColor,
-            uvMap,
-            glyphWidths
-        });
+            upem: this._upem,
+            emptyGlyphs: shared.emptyGlyphs || null,
+        }, shared.emptyGlyphs ? new Set(shared.emptyGlyphs) : undefined);
     }
 
     /**
@@ -420,7 +225,6 @@ export class WorkerBridge {
             pendingRequests: this.pendingRequests.size,
             initialized: this._initialized,
             shaperReady: this.fontReady,
-            uvMapCached: !!this._uvMapCache
         };
     }
 
@@ -433,8 +237,6 @@ export class WorkerBridge {
         }
         this.workers = [];
         this.pendingRequests.clear();
-        this._uvMapCache = null;
-        this._uvMapAtlas = null;
         this._shaper = null;
         this._upem = 0;
         this._initialized = false;

@@ -34,7 +34,7 @@ export const PERF_THRESHOLDS = {
     maxInstancesPerMesh: 10000,  // Split if more instances needed
     targetFPS: 60,
     warnRenderTime: 16.67,  // ms (1 frame at 60fps)
-    defaultMaxGroups: 64    // Initial group DataTexture height
+    defaultMaxGroups: 4    // Initial group DataTexture height (grows on demand)
 };
 
 /**
