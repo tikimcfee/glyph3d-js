@@ -449,7 +449,7 @@ class GlyphRendererV15 {
                     float x = (1.0 - t) * (1.0 - t) * a.x + 2.0 * t * (1.0 - t) * b.x + t * t * c.x;
                     if (x < 0.0) return 0;
                     float dy = 2.0 * ((b.y - a.y) * (1.0 - t) + (c.y - b.y) * t);
-                    return (dy > 0.0) ? 1 : -1;
+                    return (dy > 0.0) ? -1 : 1;
                 }
 
                 float disc = B * B - A * C;
@@ -462,7 +462,7 @@ class GlyphRendererV15 {
                     float x = (1.0 - t) * (1.0 - t) * a.x + 2.0 * t * (1.0 - t) * b.x + t * t * c.x;
                     if (x < 0.0) continue;
                     float dy = 2.0 * ((b.y - a.y) * (1.0 - t) + (c.y - b.y) * t);
-                    winding += (dy > 0.0) ? 1 : -1;
+                    winding += (dy > 0.0) ? -1 : 1;
                 }
                 return winding;
             }
@@ -509,8 +509,10 @@ class GlyphRendererV15 {
                     winding += windingContrib(p, cp0, cp1, cp2);
                 }
 
-                // Binary coverage: inside (winding != 0) or outside
-                float coverage = (winding != 0) ? 1.0 : 0.0;
+                // Coverage: non-zero winding rule.
+                // Negate because TrueType CW outer contours produce negative
+                // winding with our +X ray convention after Y normalization.
+                float coverage = (winding == 0) ? 0.0 : 1.0;
 
                 // Phase 4: fwidth-based AA would go here
                 // float fw = fwidth(float(winding));
