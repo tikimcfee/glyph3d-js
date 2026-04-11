@@ -21,8 +21,9 @@
  */
 
 import * as THREE from 'three';
-import {
-    MeshBasicNodeMaterial,
+import { MeshBasicNodeMaterial, TSL } from 'three/webgpu';
+
+const {
     Fn,
     attribute,
     uniform,
@@ -42,7 +43,7 @@ import {
     ivec2,
     If,
     Return,
-} from 'three/webgpu';
+} = TSL;
 
 import { PERF_THRESHOLDS } from './core/constants.js';
 

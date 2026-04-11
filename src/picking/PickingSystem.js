@@ -28,21 +28,23 @@ async function _loadTSL() {
     if (_tslLoaded) return;
     const m = await import('three/webgpu');
     _MeshBasicNodeMaterial    = m.MeshBasicNodeMaterial;
-    _Fn                       = m.Fn;
-    _attribute                = m.attribute;
-    _uniform                  = m.uniform;
-    _texture                  = m.texture;
-    _vec2                     = m.vec2;
-    _vec3                     = m.vec3;
-    _vec4                     = m.vec4;
-    _float                    = m.float;
-    _int                      = m.int;
-    _instanceIndex            = m.instanceIndex;
-    _modelViewMatrix          = m.modelViewMatrix;
-    _cameraProjectionMatrix   = m.cameraProjectionMatrix;
-    _positionLocal            = m.positionLocal;
-    _If                       = m.If;
-    _Return                   = m.Return;
+    // TSL symbols live on m.TSL, not directly on the module
+    const tsl                 = m.TSL;
+    _Fn                       = tsl.Fn;
+    _attribute                = tsl.attribute;
+    _uniform                  = tsl.uniform;
+    _texture                  = tsl.texture;
+    _vec2                     = tsl.vec2;
+    _vec3                     = tsl.vec3;
+    _vec4                     = tsl.vec4;
+    _float                    = tsl.float;
+    _int                      = tsl.int;
+    _instanceIndex            = tsl.instanceIndex;
+    _modelViewMatrix          = tsl.modelViewMatrix;
+    _cameraProjectionMatrix   = tsl.cameraProjectionMatrix;
+    _positionLocal            = tsl.positionLocal;
+    _If                       = tsl.If;
+    _Return                   = tsl.Return;
     _tslLoaded = true;
 }
 
