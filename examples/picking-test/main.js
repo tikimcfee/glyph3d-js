@@ -1,8 +1,11 @@
 /**
  * Picking System Test — examples/picking-test/main.js
  *
- * Loads GlyphRenderer.js source as the text payload, renders it with CodeGrid,
- * and validates the full picking pipeline.
+ * C3 validation target: first working WebGPU primitive.
+ * Uses GlyphField directly (bypasses CodeGrid / GlyphCollection) to validate:
+ *   1. GlyphField renders instanced glyphs via WebGPURenderer + TSL NodeMaterial
+ *   2. PickingSystem works with WebGPU (TSL picking material, async readback)
+ *   3. setGlyphHighlight works (RGBA8 highlight texture)
  *
  * Self-tests (keys 1–3):
  *   1: Verify instancePickingId exists and is sequential after registration
@@ -15,14 +18,15 @@
  */
 
 import * as THREE from 'three';
+import { WebGPURenderer } from 'three/webgpu';
 import GlyphAtlas from '../../src/GlyphAtlas.js';
-import { CodeGrid } from '../../src/collections/index.js';
+import GlyphField from '../../src/GlyphField.js';
 import { PickingSystem } from '../../src/picking/PickingSystem.js';
 
 // ---------------------------------------------------------------------------
-// Constants
+// Sample text payload
 // ---------------------------------------------------------------------------
-const SAMPLE_TEXT = `// GlyphRenderer picking test
+const SAMPLE_TEXT = `// GlyphField WebGPU picking test
 // Move mouse over glyphs to see picking IDs
 // Press keys 1-3 for self-tests
 
@@ -51,7 +55,7 @@ helloWorld(obj.getValue().toString());
 `;
 
 // ---------------------------------------------------------------------------
-// DOM elements
+// DOM
 // ---------------------------------------------------------------------------
 const resultsEl = document.getElementById('results');
 const hoverEl   = document.getElementById('hover-info');
@@ -70,13 +74,21 @@ function clearResults() {
 }
 
 // ---------------------------------------------------------------------------
-// Three.js setup
+// WebGPU renderer (requires await init())
 // ---------------------------------------------------------------------------
-const renderer = new THREE.WebGLRenderer({ antialias: true });
+const renderer = new WebGPURenderer({ antialias: true });
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setSize(window.innerWidth, window.innerHeight);
 document.body.appendChild(renderer.domElement);
 
+// Mandatory async init for WebGPU
+await renderer.init();
+
+logResult(`Renderer: ${renderer.isWebGPURenderer ? 'WebGPURenderer' : 'WebGLRenderer (fallback)'}`);
+
+// ---------------------------------------------------------------------------
+// Scene + camera
+// ---------------------------------------------------------------------------
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0a0a0a);
 
@@ -85,38 +97,51 @@ camera.position.set(3, -2, 6);
 camera.lookAt(3, -2, 0);
 
 // ---------------------------------------------------------------------------
-// Atlas + Collection
+// GlyphAtlas (provides metrics + shaper + slug data)
 // ---------------------------------------------------------------------------
 const atlas = new GlyphAtlas();
 await atlas.generate();
 
-const grid = new CodeGrid(scene, atlas, {
-    showFilename: true,
-    showBackground: true,
-    textColor: { r: 0.6, g: 1.0, b: 0.6 }
+// ---------------------------------------------------------------------------
+// GlyphField — directly use the WebGPU primitive, no CodeGrid/GlyphCollection
+// ---------------------------------------------------------------------------
+const glyphField = new GlyphField(scene, atlas, {
+    defaultColor: { r: 0.6, g: 1.0, b: 0.6 },
+    worldScale: 0.025,
+    slugData: atlas._slugData,
+    shaper:   atlas._shaper,
 });
 
-// Wire picking system BEFORE loading so flush() auto-registers
+// Render the sample text into the field
+glyphField.render(SAMPLE_TEXT, { x: 0, y: 0, z: 0 });
+
+logResult(`GlyphField: ${glyphField.instanceMesh.geometry.instanceCount} glyphs rendered`);
+
+// ---------------------------------------------------------------------------
+// PickingSystem
+// ---------------------------------------------------------------------------
 const pickingSystem = new PickingSystem(renderer, { resolutionScale: 1.0 });
-const collection = grid.getCollection();
-collection.setPickingSystem(pickingSystem);
 
-grid.loadFile('picking-test.js', SAMPLE_TEXT);
-scene.add(grid);
+// Wait for TSL modules to load (they are in module cache from GlyphField import,
+// so this resolves immediately but we await to be safe).
+await pickingSystem._tslReady;
 
-const glyphRenderer = collection.getRenderer();
+// Register GlyphField with PickingSystem.
+// registerRenderer reads instanceCount from the geometry so it must be called
+// after render() has committed glyphs.
+pickingSystem.registerRenderer(glyphField);
+
+logResult(`PickingSystem registered (startId=${pickingSystem._registry[0]?.startId ?? '?'})`);
 
 // ---------------------------------------------------------------------------
 // Mouse wiring
 // ---------------------------------------------------------------------------
-let lastHoverId = 0;
+let lastHoverId   = 0;
 let lastHoverSlot = -1;
 
 renderer.domElement.addEventListener('mousemove', e => {
     const rect = renderer.domElement.getBoundingClientRect();
-    const cssX = e.clientX - rect.left;
-    const cssY = e.clientY - rect.top;
-    pickingSystem.setMousePosition(cssX, cssY);
+    pickingSystem.setMousePosition(e.clientX - rect.left, e.clientY - rect.top);
 });
 
 // ---------------------------------------------------------------------------
@@ -130,13 +155,10 @@ window.addEventListener('resize', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Debug picking texture overlay (Three.js fullscreen quad)
+// Debug picking texture overlay
 // ---------------------------------------------------------------------------
 let pickingDebugVisible = false;
-
-// Orthographic camera for debug quad overlay (NDC: -1 to +1)
 const debugCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-// Quarter-size thumbnail in bottom-right corner
 const debugQuad = new THREE.Mesh(
     new THREE.PlaneGeometry(0.8, 0.8),
     new THREE.MeshBasicMaterial({
@@ -145,12 +167,12 @@ const debugQuad = new THREE.Mesh(
         depthWrite: false,
     })
 );
-debugQuad.position.set(0.55, -0.55, 0); // bottom-right corner
+debugQuad.position.set(0.55, -0.55, 0);
 const debugScene = new THREE.Scene();
 debugScene.add(debugQuad);
 
 // ---------------------------------------------------------------------------
-// Stats formatting
+// Stats
 // ---------------------------------------------------------------------------
 function fmtBytes(b) {
     if (b < 1024) return b + ' B';
@@ -160,14 +182,13 @@ function fmtBytes(b) {
 
 let statsFrame = 0;
 function updateStats() {
-    if (++statsFrame % 30 !== 0) return; // Update every 30 frames
+    if (++statsFrame % 30 !== 0) return;
 
     const ps = pickingSystem.getStats();
-    const rs = glyphRenderer?.getMemoryStats();
-    if (!rs) return;
+    const rs = glyphField.getMemoryStats();
 
     const lines = [
-        `── Renderer ──`,
+        `── GlyphField ──`,
         `Instances: ${rs.instanceCount} / ${rs.maxInstances}`,
         `Buffer alloc: ${fmtBytes(rs.allocatedBytes)}`,
         `Buffer used:  ${fmtBytes(rs.usedBytes)}`,
@@ -198,19 +219,15 @@ let _pickPending = false;
 function animate() {
     requestAnimationFrame(animate);
 
-    // Run picking pass with async readback. A pending-result guard prevents
-    // overlapping async frames — if a pick is already in flight we skip it
-    // and rely on _needsPick being re-set on the next mousemove.
     if (!_pickPending) {
         _pickPending = true;
         pickingSystem.renderAndReadAsync(camera, scene).then(hoverId => {
             _pickPending = false;
 
-            // Update hover info
             if (hoverId !== lastHoverId) {
                 // Clear previous highlight
-                if (lastHoverSlot >= 0 && glyphRenderer) {
-                    glyphRenderer.setGlyphHighlight(lastHoverSlot, null);
+                if (lastHoverSlot >= 0) {
+                    glyphField.setGlyphHighlight(lastHoverSlot, null);
                 }
 
                 lastHoverId = hoverId;
@@ -223,7 +240,6 @@ function animate() {
                         hoverEl.innerHTML = `Hover ID: <b>${hoverId}</b><br>` +
                             `Slot: <b>${hit.slotIndex}</b><br>` +
                             (glyph ? `textId: <b>${glyph.textId}</b>  char[${glyph.charIndex}]` : 'unresolved');
-                        // Highlight hovered glyph
                         hit.renderer.setGlyphHighlight(hit.slotIndex, { r: 0.4, g: 0.4, b: 0.0 });
                     }
                 } else {
@@ -234,10 +250,8 @@ function animate() {
         });
     }
 
-    // Render main scene
     renderer.render(scene, camera);
 
-    // Render debug overlay on top if visible
     if (pickingDebugVisible) {
         renderer.autoClear = false;
         renderer.render(debugScene, debugCamera);
@@ -257,15 +271,12 @@ function testPhase1() {
     clearResults();
     logResult('=== Test 1: instancePickingId sequential validation ===');
 
-    const gr = collection.getRenderer();
-    if (!gr) { logResult('FAIL: no renderer (flush first)', true); return; }
-
-    const geom = gr.instanceMesh.geometry;
+    const geom = glyphField.instanceMesh.geometry;
     const attr = geom.attributes.instancePickingId;
     if (!attr) { logResult('FAIL: instancePickingId attribute missing', true); return; }
     logResult(`PASS instancePickingId attribute exists (length=${attr.array.length})`);
 
-    const reg = pickingSystem._registry.find(e => e.renderer === gr);
+    const reg = pickingSystem._registry.find(e => e.renderer === glyphField);
     if (!reg) { logResult('FAIL: renderer not registered in PickingSystem', true); return; }
     logResult(`PASS renderer registered: startId=${reg.startId} endId=${reg.endId}`);
 
@@ -282,7 +293,8 @@ function testPhase1() {
     }
     if (ok) logResult(`PASS instancePickingId sequential [${reg.startId}, ${reg.endId})`);
 
-    logResult(`PASS addedColor attribute exists: ${!!geom.attributes.instanceAddedColor}`);
+    // instanceAddedColor replaced by highlightTexture — check it's present on the field
+    logResult(`PASS highlightTexture allocated: ${!!glyphField._highlightTexture}`);
 }
 
 function testPhase2() {
@@ -290,7 +302,6 @@ function testPhase2() {
     logResult('=== Test 2: Hover readback (move mouse over glyphs) ===');
     logResult('Move mouse over text — picked ID will be logged here.');
 
-    const prev = renderer.domElement.onmousemove;
     let testCount = 0;
     const logHover = async () => {
         const id = await pickingSystem.renderAndReadAsync(camera, scene);
@@ -314,28 +325,21 @@ async function testPhase3() {
     clearResults();
     logResult('=== Test 3: Additive color sweep ===');
 
-    const gr = collection.getRenderer();
-    if (!gr) { logResult('FAIL: no renderer', true); return; }
-
-    const count = gr.instanceMesh.geometry.instanceCount;
+    const count = glyphField.instanceMesh.geometry.instanceCount;
     logResult(`Sweeping ${count} glyphs with highlight band...`);
 
-    const BAND = 20;
+    const BAND     = 20;
     const DELAY_MS = 16;
 
     for (let i = 0; i <= count; i++) {
-        // Light up band [i, i+BAND), clear behind
-        if (i > 0) {
-            gr.setGlyphHighlight(i - 1, null);
-        }
+        if (i > 0) glyphField.setGlyphHighlight(i - 1, null);
         for (let j = i; j < Math.min(i + BAND, count); j++) {
-            gr.setGlyphHighlight(j, { r: 0.5, g: 0.0, b: 0.5 });
+            glyphField.setGlyphHighlight(j, { r: 0.5, g: 0.0, b: 0.5 });
         }
         await new Promise(r => setTimeout(r, DELAY_MS));
     }
 
-    // Clear all highlights
-    for (let i = 0; i < count; i++) gr.setGlyphHighlight(i, null);
+    for (let i = 0; i < count; i++) glyphField.setGlyphHighlight(i, null);
     logResult(`PASS Sweep complete (${count} glyphs highlighted sequentially)`);
 }
 
@@ -356,11 +360,8 @@ document.addEventListener('keydown', e => {
 
         case 'r':
         case 'R': {
-            const gr = collection.getRenderer();
-            if (gr) {
-                const count = gr.instanceMesh.geometry.instanceCount;
-                for (let i = 0; i < count; i++) gr.setGlyphHighlight(i, null);
-            }
+            const count = glyphField.instanceMesh.geometry.instanceCount;
+            for (let i = 0; i < count; i++) glyphField.setGlyphHighlight(i, null);
             lastHoverSlot = -1;
             logResult('Cleared all highlights');
             break;

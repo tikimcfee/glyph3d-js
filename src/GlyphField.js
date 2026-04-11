@@ -1,0 +1,842 @@
+/**
+ * GlyphField — WebGPU-native instanced glyph renderer.
+ *
+ * Drop-in primitive replacement for GlyphRendererV15 that uses
+ * THREE.WebGPURenderer + TSL (Three Shading Language) NodeMaterial
+ * instead of ShaderMaterial / GLSL.
+ *
+ * C3 scope (picking-test validation):
+ * - Material: MeshBasicNodeMaterial with TSL vertexNode + outputNode
+ * - Fragment: solid quads with per-instance color + group visibility + highlight
+ *   (Slug winding-number coverage added post-C3 once pipeline is proven)
+ * - Picking: compatible with PickingSystem (instanceMesh, _groupTexture, _maxGroups,
+ *   renderedTexts, instancePickingId attribute)
+ *
+ * Public surface is API-compatible with GlyphRendererV15 for all methods
+ * exercised by picking-test:
+ *   render(), setGlyphHighlight(), getMemoryStats(), beginBatchUpdate(),
+ *   endBatchUpdate(), instanceMesh, renderedTexts, _groupTexture, _maxGroups
+ *
+ * instancePickingId is populated by PickingSystem.registerRenderer() after render().
+ */
+
+import * as THREE from 'three';
+import {
+    MeshBasicNodeMaterial,
+    Fn,
+    attribute,
+    uniform,
+    texture,
+    textureLoad,
+    varying,
+    positionLocal,
+    uv,
+    vec2,
+    vec3,
+    vec4,
+    float,
+    int,
+    instanceIndex,
+    modelViewMatrix,
+    cameraProjectionMatrix,
+    ivec2,
+    If,
+    Return,
+} from 'three/webgpu';
+
+import { PERF_THRESHOLDS } from './core/constants.js';
+
+const MAX_GROUPS_DEFAULT = PERF_THRESHOLDS.defaultMaxGroups ?? 64;
+const MAX_GROUPS_DIM     = 16000;
+
+// ─── TSL vertex node ─────────────────────────────────────────────────────────
+
+/**
+ * Build TSL vertex node for instanced glyph rendering.
+ * Replicates GlyphRenderer vertex shader logic in TSL.
+ *
+ * @param {Object} uniforms - { groupTex, groupTexHeight, highlightTex }
+ * @returns {Object} { vertexFn, vColor, vGroupAlpha, vAddedColor }
+ */
+function _buildVertexNode(uniforms) {
+    // Per-instance buffer attributes
+    const iPos   = attribute('instancePosition', 'vec3');
+    const iSize  = attribute('instanceSize',     'vec2');
+    const iColor = attribute('instanceColor',    'vec3');
+    const iGroup = attribute('instanceGroupId',  'float');
+
+    // Varyings passed to fragment
+    const vColor      = varying(vec3(0),   'vColor');
+    const vGroupAlpha = varying(float(1),  'vGroupAlpha');
+    const vAddedColor = varying(vec3(0),   'vAddedColor');
+
+    const { groupTex, groupTexHeight, highlightTex } = uniforms;
+
+    const vertexFn = Fn(() => {
+        // Scale base quad by per-instance size
+        const scaled = positionLocal.mul(vec3(iSize, float(1)));
+
+        // Left-align: PlaneGeometry center-anchored → shift right by half width
+        const alignOffset = vec3(iSize.x.mul(0.5), float(0), float(0));
+
+        // Group DataTexture lookup (4 columns × maxGroups rows, RGBA32F)
+        const gv     = iGroup.add(0.5).div(groupTexHeight);
+        const gPos   = texture(groupTex, vec2(float(0.125), gv));
+        const gColor = texture(groupTex, vec2(float(0.625), gv));
+        const gScale = texture(groupTex, vec2(float(0.875), gv));
+
+        // World position = aligned quad + (instancePos * groupScale) + groupOffset
+        const worldPos = scaled.add(alignOffset).add(iPos.mul(gScale.xyz)).add(gPos.xyz);
+
+        // Standard MVP projection
+        const clipPos = cameraProjectionMatrix.mul(modelViewMatrix.mul(vec4(worldPos, float(1))));
+
+        // Color: mix instanceColor * groupColor with pure groupColor by colorBlend factor
+        const colorBlend = gScale.w;
+        vColor.assign(iColor.mul(gColor.rgb).mix(gColor.rgb, colorBlend));
+        vGroupAlpha.assign(gColor.a);
+
+        // Per-glyph highlight from RGBA8 DataTexture (1024 wide, 2D wrapped)
+        const hx = int(instanceIndex).mod(int(1024));
+        const hy = int(instanceIndex).div(int(1024));
+        const highlight = textureLoad(highlightTex, ivec2(hx, hy), int(0));
+        vAddedColor.assign(highlight.rgb);
+
+        return clipPos;
+    });
+
+    return { vertexFn, vColor, vGroupAlpha, vAddedColor };
+}
+
+/**
+ * Build TSL fragment (output) node.
+ * C3: solid quad with color + additive highlight. Alpha from group visibility.
+ * Slug winding-number coverage is deferred to post-C3.
+ *
+ * @param {Object} varyings - { vColor, vGroupAlpha, vAddedColor }
+ */
+function _buildOutputNode(varyings) {
+    const { vColor, vGroupAlpha, vAddedColor } = varyings;
+
+    return Fn(() => {
+        // Group invisible: full alpha-discard
+        If(vGroupAlpha.lessThan(0.01), () => {
+            Return(vec4(0, 0, 0, 0));
+        });
+
+        // Final color = (instanceColor * groupColor + addedHighlight), clamped
+        const finalColor = vColor.add(vAddedColor).clamp(float(0), float(1));
+        return vec4(finalColor, vGroupAlpha);
+    })();
+}
+
+// ─── GlyphField ───────────────────────────────────────────────────────────────
+
+export default class GlyphField {
+    /**
+     * Create a WebGPU glyph field.
+     *
+     * @param {THREE.Scene} scene
+     * @param {Object} atlas - GlyphAtlas (for metrics; must have getCharSize())
+     * @param {Object} [options]
+     * @param {Object} [options.slugData] - Slug texture data (reserved for post-C3 Slug fragment)
+     * @param {Object} [options.shaper]   - HarfBuzz shaper for sync text layout
+     * @param {number} [options.maxInstances]
+     * @param {Object} [options.defaultColor] - { r, g, b }
+     * @param {number} [options.worldScale]
+     * @param {number} [options.maxGroups]
+     */
+    constructor(scene, atlas, options = {}) {
+        this.scene  = scene;
+        this.atlas  = atlas;
+
+        this._slugData = options.slugData || (atlas && atlas._slugData) || null;
+        this._shaper   = options.shaper   || (atlas && atlas._shaper)   || null;
+
+        const atlasCharSize = atlas.getCharSize();
+        const scale = options.worldScale || 0.025;
+
+        this.metrics = {
+            charWidth:     atlasCharSize.width  * scale,
+            charHeight:    atlasCharSize.height * scale,
+            letterSpacing: atlasCharSize.width  * scale * 0.05,
+            lineSpacing:   atlasCharSize.height * scale * 1.2,
+            pixelWidth:    atlasCharSize.width,
+            pixelHeight:   atlasCharSize.height,
+        };
+
+        this.config = {
+            maxInstances: options.maxInstances || PERF_THRESHOLDS.maxInstancesPerMesh,
+            defaultColor: options.defaultColor || { r: 0.0, g: 1.0, b: 0.0 },
+            worldScale: scale,
+        };
+
+        // Group DataTexture (identical layout to GlyphRenderer)
+        const requestedGroups = options.maxGroups || MAX_GROUPS_DEFAULT;
+        this._maxGroups  = Math.min(requestedGroups, MAX_GROUPS_DIM);
+        this._groupData  = new Float32Array(this._maxGroups * 4 * 4);
+        this._groupCount = 1; // group 0 = identity
+        this._initGroupDefaults();
+        this._groupTexture = null; // created in _createInstanceMesh
+
+        // Highlight texture
+        this._highlightTexture  = null;
+        this._highlightSize     = 0;
+        this._highlightTexWidth = 1024;
+
+        // Text registry (same shape as GlyphRenderer for PickingSystem.resolveGlyph)
+        this.renderedTexts     = new Map();
+        this.nextId            = 1;
+        this._cachedGlyphCount = 0;
+
+        // Batch mode
+        this._batchMode  = false;
+        this._batchDirty = false;
+
+        // TSL uniform nodes — stored for hot-swap (setGroupOffset, _ensureHighlightTexture, etc.)
+        this._groupTexUniform    = null;
+        this._groupTexHUniform   = null;
+        this._highlightUniform   = null;
+
+        // Build instance mesh
+        this.instanceMesh = this._createInstanceMesh();
+        this.scene.add(this.instanceMesh);
+    }
+
+    // ── Group DataTexture ─────────────────────────────────────────────────────
+
+    /** @private */
+    _initGroupDefaults() {
+        for (let g = 0; g < this._maxGroups; g++) {
+            const base = g * 4 * 4;
+            this._groupData[base + 3]      = 1.0; // col 0 w: visibility
+            this._groupData[base + 4 + 3]  = 1.0; // col 1 w: quat.w
+            this._groupData[base + 8]      = 1.0; // col 2 r: color.r
+            this._groupData[base + 8 + 1]  = 1.0; // col 2 g: color.g
+            this._groupData[base + 8 + 2]  = 1.0; // col 2 b: color.b
+            this._groupData[base + 8 + 3]  = 1.0; // col 2 a: color.a
+            this._groupData[base + 12]     = 1.0; // col 3 x: scale.x
+            this._groupData[base + 12 + 1] = 1.0; // col 3 y: scale.y
+            this._groupData[base + 12 + 2] = 1.0; // col 3 z: scale.z
+        }
+    }
+
+    /** @private */
+    _createGroupTexture() {
+        const tex = new THREE.DataTexture(
+            this._groupData, 4, this._maxGroups,
+            THREE.RGBAFormat, THREE.FloatType
+        );
+        tex.minFilter = THREE.NearestFilter;
+        tex.magFilter = THREE.NearestFilter;
+        tex.generateMipmaps = false;
+        tex.needsUpdate = true;
+        return tex;
+    }
+
+    // ── Highlight texture ─────────────────────────────────────────────────────
+
+    /** @private */
+    _ensureHighlightTexture(instanceCount) {
+        if (this._highlightTexture && this._highlightSize >= instanceCount) return;
+
+        const W = this._highlightTexWidth;
+        const count  = Math.max(instanceCount, 1);
+        const height = Math.ceil(count / W);
+        const data   = new Uint8Array(W * height * 4); // zero = no highlight
+
+        if (this._highlightTexture) {
+            const old = this._highlightTexture.image.data;
+            data.set(old.subarray(0, Math.min(old.length, data.length)));
+            this._highlightTexture.dispose();
+        }
+
+        const tex = new THREE.DataTexture(data, W, height, THREE.RGBAFormat, THREE.UnsignedByteType);
+        tex.minFilter = THREE.NearestFilter;
+        tex.magFilter = THREE.NearestFilter;
+        tex.generateMipmaps = false;
+        tex.needsUpdate = true;
+
+        this._highlightTexture = tex;
+        this._highlightSize    = count;
+
+        // Update TSL uniform node value so the shader sees the new texture
+        if (this._highlightUniform) {
+            this._highlightUniform.value = tex;
+        }
+    }
+
+    // ── Instance mesh ─────────────────────────────────────────────────────────
+
+    /** @private */
+    _createInstanceMesh() {
+        const geometry = new THREE.InstancedBufferGeometry();
+        const base = new THREE.PlaneGeometry(1, 1);
+        geometry.index = base.index;
+        geometry.attributes.position = base.attributes.position;
+        geometry.attributes.uv       = base.attributes.uv;
+
+        this._groupTexture = this._createGroupTexture();
+        // Ensure a minimal (1-slot) highlight texture at construction
+        this._ensureHighlightTexture(1);
+
+        const maxCount = this.config.maxInstances;
+
+        // Pre-allocate per-instance attributes
+        geometry.setAttribute('instancePosition',
+            new THREE.InstancedBufferAttribute(new Float32Array(maxCount * 3), 3));
+        geometry.setAttribute('instanceSize',
+            new THREE.InstancedBufferAttribute(new Float32Array(maxCount * 2), 2));
+        geometry.setAttribute('instanceGlyphId',
+            new THREE.InstancedBufferAttribute(new Float32Array(maxCount), 1));
+        geometry.setAttribute('instanceColor',
+            new THREE.InstancedBufferAttribute(new Float32Array(maxCount * 3), 3));
+        geometry.setAttribute('instanceGroupId',
+            new THREE.InstancedBufferAttribute(new Float32Array(maxCount), 1));
+        // instancePickingId — written by PickingSystem.registerRenderer() after flush
+        geometry.setAttribute('instancePickingId',
+            new THREE.InstancedBufferAttribute(new Float32Array(maxCount), 1));
+
+        geometry._maxInstanceCount = maxCount;
+        geometry.instanceCount = 0;
+
+        // ── Build TSL NodeMaterial ────────────────────────────────────────────
+        const groupTexNode    = uniform(this._groupTexture);
+        const groupTexHNode   = uniform(float(this._maxGroups));
+        const highlightTexNode = uniform(this._highlightTexture);
+
+        // Store for hot-swap
+        this._groupTexUniform  = groupTexNode;
+        this._groupTexHUniform = groupTexHNode;
+        this._highlightUniform = highlightTexNode;
+
+        const { vertexFn, vColor, vGroupAlpha, vAddedColor } = _buildVertexNode({
+            groupTex:       groupTexNode,
+            groupTexHeight: groupTexHNode,
+            highlightTex:   highlightTexNode,
+        });
+
+        const outputNode = _buildOutputNode({ vColor, vGroupAlpha, vAddedColor });
+
+        const material = new MeshBasicNodeMaterial();
+        material.vertexNode = vertexFn();
+        material.outputNode  = outputNode;
+        material.transparent = true;
+        material.side        = THREE.DoubleSide;
+        material.depthWrite  = true;
+
+        this._material = material;
+
+        const mesh = new THREE.Mesh(geometry, material);
+        mesh.frustumCulled = false;
+        return mesh;
+    }
+
+    // ── Slug data (reserved for post-C3 Slug fragment) ────────────────────────
+
+    /**
+     * Set or update Slug texture data. Data is stored for future use when the
+     * Slug winding-number fragment shader is activated in a later commit.
+     * @param {Object} slugData - { curveTexture, bandTexture, glyphMapTexture }
+     * @param {Object} [shaper]
+     */
+    setSlugData(slugData, shaper) {
+        if (shaper) this._shaper = shaper;
+        this._slugData = slugData;
+        // Slug fragment activation deferred to post-C3
+    }
+
+    // ── Public rendering API ──────────────────────────────────────────────────
+
+    /**
+     * Render text at a position.
+     * @param {string} text
+     * @param {{x,y,z}} [position]
+     * @param {Object} [options]
+     * @returns {number} textId
+     */
+    render(text, position = { x: 0, y: 0, z: 0 }, options = {}) {
+        const glyphs = this._textToGlyphs(text, position, options);
+        const id = this._registerText(text, glyphs, options);
+        this._maybeRebuild();
+        return id;
+    }
+
+    /**
+     * Render multiple texts in one GPU rebuild.
+     * @param {Array<{text, position, options}>} items
+     * @returns {number[]} textIds
+     */
+    renderBatch(items) {
+        const ids = [];
+        for (const item of items) {
+            const glyphs = this._textToGlyphs(
+                item.text,
+                item.position || { x: 0, y: 0, z: 0 },
+                item.options || {}
+            );
+            ids.push(this._registerText(item.text, glyphs, item.options || {}));
+        }
+        this._rebuildAllInstances();
+        return ids;
+    }
+
+    /**
+     * Update all glyph positions for a text entry (direct buffer write).
+     * @param {number} id
+     * @param {{x,y,z}} newPosition
+     */
+    updatePosition(id, newPosition) {
+        const entry = this.renderedTexts.get(id);
+        if (!entry || entry.bufferStartIndex === undefined) return;
+        const geom = this.instanceMesh.geometry;
+        const arr  = geom.attributes.instancePosition.array;
+        const base = entry.bufferStartIndex;
+        const dx = newPosition.x - arr[base * 3];
+        const dy = newPosition.y - arr[base * 3 + 1];
+        const dz = newPosition.z - arr[base * 3 + 2];
+        for (let i = 0; i < entry.glyphCount; i++) {
+            const b = (base + i) * 3;
+            arr[b] += dx; arr[b + 1] += dy; arr[b + 2] += dz;
+        }
+        const attr = geom.attributes.instancePosition;
+        attr.addUpdateRange(base * 3, entry.glyphCount * 3);
+        attr.needsUpdate = true;
+    }
+
+    /**
+     * Update all glyph colors for a text entry (direct buffer write).
+     * @param {number} id
+     * @param {{r,g,b}} newColor
+     */
+    updateColor(id, newColor) {
+        const entry = this.renderedTexts.get(id);
+        if (!entry || entry.bufferStartIndex === undefined) return;
+        const geom = this.instanceMesh.geometry;
+        const arr  = geom.attributes.instanceColor.array;
+        const base = entry.bufferStartIndex;
+        for (let i = 0; i < entry.glyphCount; i++) {
+            const b = (base + i) * 3;
+            arr[b] = newColor.r; arr[b + 1] = newColor.g; arr[b + 2] = newColor.b;
+        }
+        const attr = geom.attributes.instanceColor;
+        attr.addUpdateRange(base * 3, entry.glyphCount * 3);
+        attr.needsUpdate = true;
+    }
+
+    /**
+     * Set per-glyph highlight (additive) by absolute buffer slot index.
+     * @param {number} absoluteSlot
+     * @param {{r,g,b}|null} color - null clears
+     */
+    setGlyphHighlight(absoluteSlot, color) {
+        if (!this._highlightTexture) return;
+        const data = this._highlightTexture.image.data;
+        const i = absoluteSlot * 4;
+        data[i]     = color ? ((color.r * 255 + 0.5) | 0) : 0;
+        data[i + 1] = color ? ((color.g * 255 + 0.5) | 0) : 0;
+        data[i + 2] = color ? ((color.b * 255 + 0.5) | 0) : 0;
+        data[i + 3] = 0;
+        this._highlightTexture.needsUpdate = true;
+    }
+
+    // ── Batch mode ────────────────────────────────────────────────────────────
+
+    beginBatchUpdate() {
+        this._batchMode  = true;
+        this._batchDirty = false;
+    }
+
+    endBatchUpdate() {
+        this._batchMode = false;
+        if (this._batchDirty) {
+            this._rebuildAllInstances();
+            this._batchDirty = false;
+        }
+    }
+
+    // ── Stats ─────────────────────────────────────────────────────────────────
+
+    /**
+     * Memory / instance statistics (same shape as GlyphRenderer.getMemoryStats()).
+     */
+    getMemoryStats() {
+        const geom = this.instanceMesh?.geometry;
+        const instanceCount = geom?.instanceCount ?? 0;
+        const maxInstances  = geom?._maxInstanceCount ?? this.config.maxInstances;
+
+        let allocatedBytes = 0, usedBytes = 0;
+        if (geom) {
+            for (const name of Object.keys(geom.attributes)) {
+                if (!name.startsWith('instance')) continue;
+                const attr = geom.attributes[name];
+                allocatedBytes += attr.array.byteLength;
+                usedBytes      += instanceCount * attr.itemSize * 4;
+            }
+        }
+        const groupBytes = this._groupData?.byteLength ?? 0;
+        return {
+            instanceCount,
+            maxInstances,
+            allocatedBytes,
+            usedBytes,
+            wasteBytes:            allocatedBytes - usedBytes,
+            groupTextureBytes:     groupBytes * 2,
+            highlightTextureBytes: this._highlightSize * 4,
+            totalBytes:            allocatedBytes + groupBytes * 2 + this._highlightSize * 4,
+            textEntryCount:        this.renderedTexts.size,
+        };
+    }
+
+    // ── Group transform API ───────────────────────────────────────────────────
+
+    createGroup() {
+        const id = this._groupCount++;
+        if (id >= this._maxGroups) this._growGroupTexture();
+        return id < this._maxGroups ? id : 0;
+    }
+
+    setGroupOffset(groupId, offset) {
+        if (groupId < 0 || groupId >= this._maxGroups) return;
+        const base = (groupId * 4 + 0) * 4;
+        this._groupData[base]     = offset.x;
+        this._groupData[base + 1] = offset.y;
+        this._groupData[base + 2] = offset.z;
+        this._syncGroupTexture();
+    }
+
+    getGroupOffset(groupId) {
+        if (groupId < 0 || groupId >= this._maxGroups) return { x: 0, y: 0, z: 0 };
+        const base = (groupId * 4 + 0) * 4;
+        return { x: this._groupData[base], y: this._groupData[base + 1], z: this._groupData[base + 2] };
+    }
+
+    setGroupColor(groupId, color) {
+        if (groupId < 0 || groupId >= this._maxGroups) return;
+        const base = (groupId * 4 + 2) * 4;
+        this._groupData[base]     = color.r;
+        this._groupData[base + 1] = color.g;
+        this._groupData[base + 2] = color.b;
+        this._groupData[base + 3] = color.a !== undefined ? color.a : 1.0;
+        this._syncGroupTexture();
+    }
+
+    getGroupColor(groupId) {
+        if (groupId < 0 || groupId >= this._maxGroups) return { r: 1, g: 1, b: 1, a: 1 };
+        const base = (groupId * 4 + 2) * 4;
+        return { r: this._groupData[base], g: this._groupData[base + 1], b: this._groupData[base + 2], a: this._groupData[base + 3] };
+    }
+
+    setGroupVisibility(groupId, visible) {
+        if (groupId < 0 || groupId >= this._maxGroups) return;
+        const base = (groupId * 4 + 2) * 4;
+        this._groupData[base + 3] = visible ? 1.0 : 0.0;
+        this._syncGroupTexture();
+    }
+
+    setGroupScale(groupId, scale) {
+        if (groupId < 0 || groupId >= this._maxGroups) return;
+        const base = (groupId * 4 + 3) * 4;
+        this._groupData[base]     = scale.x;
+        this._groupData[base + 1] = scale.y;
+        this._groupData[base + 2] = scale.z;
+        this._syncGroupTexture();
+    }
+
+    getGroupScale(groupId) {
+        if (groupId < 0 || groupId >= this._maxGroups) return { x: 1, y: 1, z: 1 };
+        const base = (groupId * 4 + 3) * 4;
+        return { x: this._groupData[base], y: this._groupData[base + 1], z: this._groupData[base + 2] };
+    }
+
+    setGroupColorBlend(groupId, blend) {
+        if (groupId < 0 || groupId >= this._maxGroups) return;
+        const base = (groupId * 4 + 3) * 4;
+        this._groupData[base + 3] = blend;
+        this._syncGroupTexture();
+    }
+
+    /** @private — mark group DataTexture dirty and update the TSL uniform node */
+    _syncGroupTexture() {
+        this._groupTexture.needsUpdate = true;
+        if (this._groupTexUniform) this._groupTexUniform.value = this._groupTexture;
+    }
+
+    /** @private */
+    _growGroupTexture() {
+        const oldMax = this._maxGroups;
+        if (oldMax >= MAX_GROUPS_DIM) return;
+        this._maxGroups = Math.min(oldMax * 2, MAX_GROUPS_DIM);
+        const newData = new Float32Array(this._maxGroups * 4 * 4);
+        newData.set(this._groupData);
+        this._groupData = newData;
+        for (let g = oldMax; g < this._maxGroups; g++) {
+            const base = g * 4 * 4;
+            this._groupData[base + 3]      = 1.0;
+            this._groupData[base + 4 + 3]  = 1.0;
+            this._groupData[base + 8]      = 1.0;
+            this._groupData[base + 8 + 1]  = 1.0;
+            this._groupData[base + 8 + 2]  = 1.0;
+            this._groupData[base + 8 + 3]  = 1.0;
+            this._groupData[base + 12]     = 1.0;
+            this._groupData[base + 12 + 1] = 1.0;
+            this._groupData[base + 12 + 2] = 1.0;
+        }
+        if (this._groupTexture) this._groupTexture.dispose();
+        this._groupTexture = this._createGroupTexture();
+        if (this._groupTexUniform)  this._groupTexUniform.value  = this._groupTexture;
+        if (this._groupTexHUniform) this._groupTexHUniform.value = float(this._maxGroups);
+    }
+
+    // ── Picking seam ──────────────────────────────────────────────────────────
+
+    /**
+     * Descriptor for PickingSystem.registerRenderer() — exposes the same
+     * properties that GlyphRenderer exposes for backward compatibility.
+     */
+    getPickingDescriptor() {
+        return {
+            instanceMesh:  this.instanceMesh,
+            _groupTexture: this._groupTexture,
+            _maxGroups:    this._maxGroups,
+            renderedTexts: this.renderedTexts,
+        };
+    }
+
+    // ── Lifecycle ─────────────────────────────────────────────────────────────
+
+    clear() {
+        this.renderedTexts.clear();
+        this._cachedGlyphCount = 0;
+        if (this.instanceMesh) this.instanceMesh.geometry.instanceCount = 0;
+    }
+
+    dispose() {
+        if (this.instanceMesh) {
+            this.scene.remove(this.instanceMesh);
+            this.instanceMesh.geometry.dispose();
+            this.instanceMesh.material.dispose();
+        }
+        if (this._groupTexture)    this._groupTexture.dispose();
+        if (this._highlightTexture) this._highlightTexture.dispose();
+        this.renderedTexts.clear();
+    }
+
+    // ── Internal ──────────────────────────────────────────────────────────────
+
+    /** @private */
+    _textToGlyphs(text, position, options) {
+        const color   = options.color   || this.config.defaultColor;
+        const scale   = options.scale   || 1.0;
+        const groupId = options.groupId || 0;
+        const ws      = this.config.worldScale;
+
+        if (this._shaper) {
+            return this._textToGlyphsShaped(text, position, color, scale, groupId, ws);
+        }
+        return this._textToGlyphsMono(text, position, color, scale, groupId, ws);
+    }
+
+    /** @private — HarfBuzz-shaped layout */
+    _textToGlyphsShaped(text, position, color, scale, groupId, worldScale) {
+        const glyphs   = [];
+        const upem     = this._shaper.upem;
+        const ws       = worldScale * this.metrics.pixelHeight;
+        const fontExt  = this._shaper.fontExtents();
+        const lineH    = (fontExt.ascender - fontExt.descender + fontExt.lineGap) / upem * ws * scale;
+
+        let x = position.x, y = position.y;
+        const z = position.z;
+
+        for (const lineText of text.split('\n')) {
+            if (lineText.length > 0) {
+                const shaped = this._shaper.shape(lineText);
+                for (const sg of shaped) {
+                    const advance    = sg.ax / upem * ws * scale;
+                    const charHeight = this.metrics.charHeight * scale;
+                    glyphs.push({
+                        position: { x: x + (sg.dx / upem * ws * scale), y: y + (sg.dy / upem * ws * scale), z },
+                        size: { width: advance, height: charHeight },
+                        charCode: sg.g,
+                        color,
+                        groupId,
+                    });
+                    x += advance;
+                }
+            }
+            x = position.x;
+            y -= lineH;
+        }
+        return glyphs;
+    }
+
+    /** @private — monospace fallback (no shaper) */
+    _textToGlyphsMono(text, position, color, scale, groupId, worldScale) {
+        const glyphs = [];
+        const cw = this.metrics.charWidth  * scale;
+        const ch = this.metrics.charHeight * scale;
+        const ls = this.metrics.letterSpacing * scale;
+        const lh = this.metrics.lineSpacing   * scale;
+        let x = position.x, y = position.y;
+        const z = position.z;
+        for (const c of text) {
+            if (c === '\n') { x = position.x; y -= lh; continue; }
+            if (c === ' ')  { x += cw + ls; continue; }
+            glyphs.push({ position: { x, y, z }, size: { width: cw, height: ch }, charCode: 0, color, groupId });
+            x += cw + ls;
+        }
+        return glyphs;
+    }
+
+    /** @private */
+    _registerText(text, glyphs, options) {
+        const id = this.nextId++;
+        this.renderedTexts.set(id, { id, text, glyphs, glyphCount: glyphs.length });
+        this._cachedGlyphCount += glyphs.length;
+        return id;
+    }
+
+    /** @private */
+    _maybeRebuild() {
+        if (this._batchMode) {
+            this._batchDirty = true;
+        } else {
+            this._rebuildAllInstances();
+        }
+    }
+
+    /** @private */
+    _rebuildAllInstances() {
+        let hasLegacy = false;
+        for (const entry of this.renderedTexts.values()) {
+            if (entry.glyphs) { hasLegacy = true; break; }
+        }
+
+        if (hasLegacy) {
+            const allGlyphs = [];
+            let idx = 0;
+            for (const entry of this.renderedTexts.values()) {
+                entry.bufferStartIndex = idx;
+                if (entry.glyphs) {
+                    entry.glyphCount = entry.glyphs.length;
+                    allGlyphs.push(...entry.glyphs);
+                    idx += entry.glyphs.length;
+                } else {
+                    idx += entry.glyphCount;
+                }
+            }
+            this._writeGlyphsToGeometry(allGlyphs);
+            for (const entry of this.renderedTexts.values()) { entry.glyphs = null; }
+            return;
+        }
+
+        // Compaction path
+        const geom = this.instanceMesh.geometry;
+        const oldPos = geom.attributes.instancePosition.array;
+        const oldSiz = geom.attributes.instanceSize.array;
+        const oldGid = geom.attributes.instanceGlyphId.array;
+        const oldCol = geom.attributes.instanceColor.array;
+        const oldGrp = geom.attributes.instanceGroupId.array;
+
+        let total = 0;
+        for (const e of this.renderedTexts.values()) total += e.glyphCount;
+
+        let w = 0;
+        for (const entry of this.renderedTexts.values()) {
+            const r = entry.bufferStartIndex, n = entry.glyphCount;
+            entry.bufferStartIndex = w;
+            if (r !== w && n > 0) {
+                oldPos.copyWithin(w * 3, r * 3, (r + n) * 3);
+                oldSiz.copyWithin(w * 2, r * 2, (r + n) * 2);
+                oldGid.copyWithin(w,     r,     r + n);
+                oldCol.copyWithin(w * 3, r * 3, (r + n) * 3);
+                oldGrp.copyWithin(w,     r,     r + n);
+            }
+            w += n;
+        }
+
+        for (const name of Object.keys(geom.attributes)) {
+            geom.attributes[name].needsUpdate = true;
+        }
+        this._ensureHighlightTexture(total);
+        geom.instanceCount = total;
+    }
+
+    /** @private */
+    _writeGlyphsToGeometry(glyphs) {
+        const count = Math.min(glyphs.length, this.config.maxInstances);
+        const geom  = this.instanceMesh.geometry;
+        const pos   = geom.attributes.instancePosition.array;
+        const siz   = geom.attributes.instanceSize.array;
+        const gids  = geom.attributes.instanceGlyphId.array;
+        const col   = geom.attributes.instanceColor.array;
+        const grp   = geom.attributes.instanceGroupId.array;
+
+        for (let i = 0; i < count; i++) {
+            const g = glyphs[i];
+            pos[i * 3]     = g.position.x;
+            pos[i * 3 + 1] = g.position.y;
+            pos[i * 3 + 2] = g.position.z;
+            siz[i * 2]     = g.size.width;
+            siz[i * 2 + 1] = g.size.height;
+            gids[i]        = g.charCode || 0;
+            col[i * 3]     = g.color.r;
+            col[i * 3 + 1] = g.color.g;
+            col[i * 3 + 2] = g.color.b;
+            grp[i]         = g.groupId || 0;
+        }
+
+        geom.attributes.instancePosition.needsUpdate = true;
+        geom.attributes.instanceSize.needsUpdate     = true;
+        geom.attributes.instanceGlyphId.needsUpdate  = true;
+        geom.attributes.instanceColor.needsUpdate    = true;
+        geom.attributes.instanceGroupId.needsUpdate  = true;
+
+        this._ensureHighlightTexture(count);
+        geom.instanceCount = count;
+    }
+
+    /**
+     * Apply worker-prebuilt buffers (same interface as GlyphRenderer).
+     */
+    applyPrebuiltBuffers(buffers, items) {
+        const { positions, sizes, colors, groupIds, count } = buffers;
+        const glyphIds = buffers.glyphIds || buffers.codepoints;
+        let { itemMeta } = buffers;
+        const geom = this.instanceMesh.geometry;
+
+        geom.setAttribute('instancePosition', new THREE.InstancedBufferAttribute(positions, 3));
+        geom.setAttribute('instanceSize',     new THREE.InstancedBufferAttribute(sizes, 2));
+        geom.setAttribute('instanceGlyphId',  new THREE.InstancedBufferAttribute(glyphIds || new Float32Array(count), 1));
+        geom.setAttribute('instanceColor',    new THREE.InstancedBufferAttribute(colors, 3));
+        geom.setAttribute('instanceGroupId',  new THREE.InstancedBufferAttribute(groupIds || new Float32Array(count), 1));
+        if (!geom.attributes.instancePickingId || geom.attributes.instancePickingId.array.length < count) {
+            geom.setAttribute('instancePickingId', new THREE.InstancedBufferAttribute(new Float32Array(count), 1));
+        }
+
+        this._ensureHighlightTexture(count);
+        geom.instanceCount = count;
+        this.config.maxInstances = Math.max(this.config.maxInstances, count);
+
+        this.renderedTexts.clear();
+        this._cachedGlyphCount = 0;
+        let rendererIds = null;
+
+        if (itemMeta && items) {
+            rendererIds = [];
+            for (let i = 0; i < itemMeta.length; i++) {
+                const meta = itemMeta[i];
+                const id = this.nextId++;
+                this.renderedTexts.set(id, {
+                    id,
+                    bufferStartIndex:  meta.bufferStartIndex,
+                    glyphCount:        meta.glyphCount,
+                    lineSlotOffsets:   meta.lineSlotOffsets || null,
+                });
+                this._cachedGlyphCount += meta.glyphCount;
+                rendererIds.push(id);
+            }
+        }
+        return rendererIds;
+    }
+}

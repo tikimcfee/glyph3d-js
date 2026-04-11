@@ -15,6 +15,37 @@
 
 import * as THREE from 'three';
 
+// TSL imports for WebGPU picking material — loaded lazily so PickingSystem
+// works with both WebGLRenderer (no TSL needed) and WebGPURenderer.
+// We import directly from three/webgpu because the importmap maps 'three' to
+// the webgpu build at runtime; this bare specifier works in browser ES modules.
+let _tslLoaded = false;
+let _MeshBasicNodeMaterial, _Fn, _attribute, _uniform, _texture,
+    _vec2, _vec3, _vec4, _float, _int, _instanceIndex,
+    _modelViewMatrix, _cameraProjectionMatrix, _positionLocal, _If, _Return;
+
+async function _loadTSL() {
+    if (_tslLoaded) return;
+    const m = await import('three/webgpu');
+    _MeshBasicNodeMaterial    = m.MeshBasicNodeMaterial;
+    _Fn                       = m.Fn;
+    _attribute                = m.attribute;
+    _uniform                  = m.uniform;
+    _texture                  = m.texture;
+    _vec2                     = m.vec2;
+    _vec3                     = m.vec3;
+    _vec4                     = m.vec4;
+    _float                    = m.float;
+    _int                      = m.int;
+    _instanceIndex            = m.instanceIndex;
+    _modelViewMatrix          = m.modelViewMatrix;
+    _cameraProjectionMatrix   = m.cameraProjectionMatrix;
+    _positionLocal            = m.positionLocal;
+    _If                       = m.If;
+    _Return                   = m.Return;
+    _tslLoaded = true;
+}
+
 // ---------------------------------------------------------------------------
 // Picking shaders — two modes:
 //   'cell'  (default) — solid quad, entire glyph cell is pickable
@@ -219,6 +250,13 @@ export class PickingSystem {
         this._scale = options.resolutionScale ?? 1.0;
         this._mode = options.mode ?? 'cell';
 
+        // Detect WebGPU renderer — ShaderMaterial doesn't work there.
+        this._isWebGPU = threeRenderer.isWebGPURenderer === true;
+
+        // Eagerly start loading TSL if on WebGPU (async, resolves from module
+        // cache when GlyphField has already been imported by the caller).
+        this._tslReady = this._isWebGPU ? _loadTSL() : Promise.resolve();
+
         // Registry: [{ renderer, pickingMaterial, startId, endId }]
         this._registry = [];
 
@@ -270,6 +308,8 @@ export class PickingSystem {
         const w = Math.max(1, Math.floor(size.x * dpr * this._scale));
         const h = Math.max(1, Math.floor(size.y * dpr * this._scale));
         if (this._target) this._target.dispose();
+        // THREE.RenderTarget works for both WebGL and WebGPU (WebGLRenderTarget
+        // is a subclass alias that also works with WebGPURenderer in r183).
         this._target = new THREE.WebGLRenderTarget(w, h, {
             minFilter: THREE.NearestFilter,
             magFilter: THREE.NearestFilter,
@@ -304,6 +344,74 @@ export class PickingSystem {
     // Registration
     // -------------------------------------------------------------------------
 
+    // -------------------------------------------------------------------------
+    // TSL picking material (WebGPU path)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Create a TSL-based NodeMaterial for the picking pass.
+     * Used when the renderer is a WebGPURenderer (ShaderMaterial unsupported).
+     *
+     * Vertex: applies group offset / visibility from DataTexture, projects to clip.
+     * Fragment: outputs picking ID (baseId + instanceIndex) encoded as RGB.
+     *
+     * @private
+     * @param {Object} glyphRenderer - GlyphField or GlyphRenderer instance
+     * @param {number} startId - Base picking ID for this renderer
+     * @returns {THREE.Material}
+     */
+    _createTSLPickingMaterial(glyphRenderer, startId) {
+        const iPos   = _attribute('instancePosition', 'vec3');
+        const iSize  = _attribute('instanceSize',     'vec2');
+        const iGroup = _attribute('instanceGroupId',  'float');
+
+        const groupTex       = _uniform(glyphRenderer._groupTexture);
+        const groupTexHeight = _uniform(glyphRenderer._maxGroups);
+        const baseId         = _uniform(startId);
+
+        const vertexFn = _Fn(() => {
+            const scaled      = _positionLocal.mul(_vec3(iSize, _float(1)));
+            const alignOffset = _vec3(iSize.x.mul(0.5), _float(0), _float(0));
+
+            const gv     = iGroup.add(0.5).div(groupTexHeight);
+            const gPos   = _texture(groupTex,   _vec2(_float(0.125), gv));
+            const gColor = _texture(groupTex,   _vec2(_float(0.625), gv));
+            const gScale = _texture(groupTex,   _vec2(_float(0.875), gv));
+
+            const visible = gColor.a.greaterThan(0.01);
+            _If(visible.not(), () => {
+                // Clip to degenerate position (off-screen)
+                _Return(_vec4(2, 2, 2, 1));
+            });
+
+            const worldPos = scaled.add(alignOffset).add(iPos.mul(gScale.xyz)).add(gPos.xyz);
+            return _cameraProjectionMatrix.mul(_modelViewMatrix.mul(_vec4(worldPos, 1)));
+        });
+
+        const fragmentFn = _Fn(() => {
+            const id = baseId.add(_int(_instanceIndex));
+            const r  = id.shiftRight(16).bitAnd(0xFF);
+            const g  = id.shiftRight(8).bitAnd(0xFF);
+            const b  = id.bitAnd(0xFF);
+            return _vec4(
+                _float(r).div(255.0),
+                _float(g).div(255.0),
+                _float(b).div(255.0),
+                _float(1)
+            );
+        });
+
+        const mat = new _MeshBasicNodeMaterial();
+        mat.vertexNode = vertexFn();
+        mat.outputNode = fragmentFn();
+        mat.side = THREE.DoubleSide;
+        mat.depthWrite = false;
+        // Store references for _growGroupTexture hot-swap
+        mat._groupTexUniform      = groupTex;
+        mat._groupTexHUniform     = groupTexHeight;
+        return mat;
+    }
+
     /**
      * Register a GlyphRenderer with this picking system.
      * Claims a contiguous block of picking IDs and creates a picking
@@ -329,37 +437,60 @@ export class PickingSystem {
         this._nextPickingId = endId;
         window.__glyph3dPickingIdCounter = this._nextPickingId;
 
-        // Create picking material based on mode
-        const uniforms = {
-            groupTexture:       { value: glyphRenderer._groupTexture },
-            groupTextureHeight: { value: glyphRenderer._maxGroups },
-            uBasePickingId:     { value: startId },
-        };
-
-        let vertShader, fragShader;
-        if (this._mode === 'glyph') {
-            // Glyph mode: Slug winding number coverage — only strokes pick
-            const mainUniforms = mesh.material.uniforms;
-            uniforms.curveTexture    = mainUniforms.curveTexture;
-            uniforms.bandTexture     = mainUniforms.bandTexture;
-            uniforms.glyphMapTexture = mainUniforms.glyphMapTexture;
-            uniforms.glyphMapWidth   = mainUniforms.glyphMapWidth;
-            uniforms.glyphMapHeight  = mainUniforms.glyphMapHeight;
-            vertShader = PICKING_VERTEX_GLYPH;
-            fragShader = PICKING_FRAGMENT_GLYPH;
-        } else {
-            // Cell mode (default): solid quads — full cell is pickable
-            vertShader = PICKING_VERTEX_CELL;
-            fragShader = PICKING_FRAGMENT_CELL;
+        // Write instancePickingId attribute so testPhase1 can validate sequential IDs.
+        // This is a Float32Array attribute on the geometry; values = startId + i.
+        const pickIdAttr = mesh.geometry.attributes.instancePickingId;
+        if (pickIdAttr) {
+            for (let i = 0; i < count; i++) {
+                pickIdAttr.array[i] = startId + i;
+            }
+            pickIdAttr.needsUpdate = true;
         }
 
-        const pickingMaterial = new THREE.ShaderMaterial({
-            glslVersion: THREE.GLSL3,
-            uniforms,
-            vertexShader: vertShader,
-            fragmentShader: fragShader,
-            side: THREE.DoubleSide
-        });
+        let pickingMaterial;
+
+        if (this._isWebGPU) {
+            // WebGPU path: TSL NodeMaterial (ShaderMaterial not supported).
+            // TSL modules are resolved from cache (GlyphField imported them first).
+            if (!_tslLoaded) {
+                throw new Error(
+                    '[PickingSystem] TSL not loaded. Await pickingSystem._tslReady before calling registerRenderer() on WebGPU.'
+                );
+            }
+            // Currently only cell mode is implemented for WebGPU.
+            // Glyph mode (Slug winding test) can be added in a later commit.
+            pickingMaterial = this._createTSLPickingMaterial(glyphRenderer, startId);
+        } else {
+            // WebGL path: classic ShaderMaterial
+            const uniforms = {
+                groupTexture:       { value: glyphRenderer._groupTexture },
+                groupTextureHeight: { value: glyphRenderer._maxGroups },
+                uBasePickingId:     { value: startId },
+            };
+
+            let vertShader, fragShader;
+            if (this._mode === 'glyph') {
+                const mainUniforms = mesh.material.uniforms;
+                uniforms.curveTexture    = mainUniforms.curveTexture;
+                uniforms.bandTexture     = mainUniforms.bandTexture;
+                uniforms.glyphMapTexture = mainUniforms.glyphMapTexture;
+                uniforms.glyphMapWidth   = mainUniforms.glyphMapWidth;
+                uniforms.glyphMapHeight  = mainUniforms.glyphMapHeight;
+                vertShader = PICKING_VERTEX_GLYPH;
+                fragShader = PICKING_FRAGMENT_GLYPH;
+            } else {
+                vertShader = PICKING_VERTEX_CELL;
+                fragShader = PICKING_FRAGMENT_CELL;
+            }
+
+            pickingMaterial = new THREE.ShaderMaterial({
+                glslVersion: THREE.GLSL3,
+                uniforms,
+                vertexShader: vertShader,
+                fragmentShader: fragShader,
+                side: THREE.DoubleSide
+            });
+        }
 
         this._registry.push({ renderer: glyphRenderer, pickingMaterial, startId, endId });
         return startId;
@@ -456,10 +587,22 @@ export class PickingSystem {
         const { x, y } = this._mousePixel;
         const pixel = new Uint8Array(4);
         if (this._target && x >= 0 && y >= 0 && x < this._target.width && y < this._target.height) {
-            this._renderer.readRenderTargetPixels(
-                this._target, x, this._target.height - 1 - y, 1, 1, this._readBuffer
-            );
-            pixel.set(this._readBuffer);
+            if (this._isWebGPU && this._renderer.readRenderTargetPixelsAsync) {
+                // WebGPU path: async readback (no sync readRenderTargetPixels on WebGPU)
+                const yFlipped = this._target.height - 1 - y;
+                const buf = await this._renderer.readRenderTargetPixelsAsync(
+                    this._target, x, yFlipped, 1, 1
+                );
+                // buf is a Uint8Array or ArrayBuffer — normalise to Uint8Array
+                const view = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+                pixel.set(view.subarray(0, 4));
+            } else {
+                // WebGL path: synchronous readback
+                this._renderer.readRenderTargetPixels(
+                    this._target, x, this._target.height - 1 - y, 1, 1, this._readBuffer
+                );
+                pixel.set(this._readBuffer);
+            }
         }
         if (t0 !== undefined) {
             const tRead = performance.now();
