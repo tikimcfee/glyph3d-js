@@ -14,7 +14,6 @@ export { default as GlyphField } from './GlyphField.js';
 export { loadPrebakedAtlas } from './GlyphAtlasLoader.js';
 
 // Collections - batched text abstractions
-export { default as GlyphCollection } from './collections/GlyphCollection.js';
 export { default as CodeGrid } from './collections/CodeGrid.js';
 export { default as GridLayoutManager } from './collections/GridLayoutManager.js';
 export { default as HierarchicalLayoutManager } from './collections/HierarchicalLayoutManager.js';

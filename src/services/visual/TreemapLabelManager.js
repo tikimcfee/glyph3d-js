@@ -1,13 +1,13 @@
 /**
  * TreemapLabelManager — LOD-aware labels for treemap mode
  *
- * All label text shares a single GlyphCollection (one draw call for all labels).
- * Two tiers:
+ * All label text shares a single GlyphRendererV15 instance (one draw call for
+ * all labels). Two tiers:
  *
  *   Directory labels  — shown when camera Z > DIR_THRESHOLD
  *   File labels       — shown when camera Z < FILE_THRESHOLD
  *
- * On layout: each directory and file gets a GlyphCollection text entry.
+ * On layout: each directory and file gets a renderer text entry.
  * Per frame: camera Z is compared to thresholds; group visibility is toggled
  * via setGroupVisibility() (O(1) DataTexture write, no buffer rebuild).
  *
@@ -16,15 +16,17 @@
  *   File label       → centered horizontally above the file's background plane
  *
  * Performance:
- * - Layout: O(n) GlyphCollection addText() calls, one flush()
+ * - Layout: O(n) queued items, one applyPrebuiltBuffers() via worker (or sync renderBatch)
  * - Per frame: O(d+f) visibility checks + DataTexture writes (d=dirs, f=files)
- * - Draw: 1 draw call (all labels in one GlyphCollection)
+ * - Draw: 1 draw call (all labels in one renderer)
  *
- * Worker-compatible paths: uses flushAsync() during construction.
+ * Worker-compatible paths: uses WorkerBridge during construction.
  * Do NOT import from src/workers/builders/ here — this runs in browser context.
  */
 
-import { GlyphCollection } from '../../index.js';
+import GlyphRendererV15 from '../../GlyphRenderer.js';
+import { getWorkerBridge, isWorkersSupported } from '../../workers/WorkerBridge.js';
+import { iterGraphemes } from '../../utils/grapheme.js';
 
 // Camera Z thresholds for LOD switching
 const DIR_VISIBLE_MIN_Z   = 100;    // directory labels visible above this Z
@@ -36,7 +38,7 @@ const DIR_LABEL_Z_OFFSET  = 2;      // in front of backdrops
 const FILE_LABEL_Y_OFFSET = 2;      // above the file grid's top edge
 const FILE_LABEL_Z_OFFSET = 1;
 
-// GlyphCollection world scale for each tier
+// Renderer world scale for each tier
 const DIR_LABEL_SCALE     = 1.8;
 const FILE_LABEL_SCALE    = 0.9;
 
@@ -53,17 +55,8 @@ export class TreemapLabelManager {
         this._treemapManager = treemapManager;
         this._camera         = camera;
 
-        /** @type {GlyphCollection|null} Single collection for all labels */
-        this._collection = null;
-
-        /**
-         * Per-label record: { id, type: 'dir'|'file', groupId }
-         * id   = GlyphCollection text ID
-         * type = which LOD tier this label belongs to
-         * groupId = GlyphCollection group used for visibility toggling
-         * @type {Array<{ id: string, type: string, groupId: number }>}
-         */
-        this._labels = [];
+        /** @type {GlyphRendererV15|null} Single renderer for all labels */
+        this._renderer = null;
 
         this._dirGroupIds  = [];   // group IDs used by directory labels
         this._fileGroupIds = [];   // group IDs used by file labels
@@ -83,22 +76,46 @@ export class TreemapLabelManager {
 
         if (!this._treemapManager || !this._treemapManager.root) return;
 
-        // One GlyphCollection for all labels combined
-        this._collection = new GlyphCollection(this._scene, this._atlas);
-
-        // Walk the treemap tree and build label entries
-        this._labels = [];
         this._dirGroupIds  = [];
         this._fileGroupIds = [];
 
-        this._walkTree(this._treemapManager.root);
+        // Collect all items first. Group IDs are pre-assigned as sequential integers
+        // starting at 1 (group 0 = identity). This lets us know groupId before the
+        // renderer exists, without needing a placeholder renderer for allocation.
+        const pendingItems = [];   // { text, position, options, color, scale, groupId }
+        let nextGroupId = 1;       // mirrors renderer._groupCount starting at 1
 
-        // Flush to GPU (worker path for large label sets)
-        if (this._labels.length > 0) {
-            await this._collection.flushAsync();
+        this._walkTree(this._treemapManager.root, pendingItems, () => nextGroupId++);
+
+        if (pendingItems.length === 0) return;
+
+        // Create the renderer sized to the collected content
+        const glyphCount = pendingItems.reduce((s, p) => s + p.text.length, 0);
+        this._renderer = new GlyphRendererV15(this._scene, this._atlas, {
+            maxInstances: Math.max(glyphCount, 100),
+            defaultColor: { r: 1, g: 1, b: 1 },
+            worldScale:   0.025,
+        });
+
+        // Initialise groups in the renderer to match the pre-assigned IDs.
+        // createGroup() increments _groupCount; call it once per pre-assigned ID.
+        const totalGroups = nextGroupId - 1; // IDs 1..nextGroupId-1 were assigned
+        for (let i = 0; i < totalGroups; i++) {
+            this._renderer.createGroup();
         }
 
-        // Set initial visibility based on current camera Z
+        // Set initial group visibilities (all on)
+        for (const gid of this._dirGroupIds)  this._renderer.setGroupVisibility(gid, true);
+        for (const gid of this._fileGroupIds) this._renderer.setGroupVisibility(gid, true);
+
+        // Flush to GPU
+        if (isWorkersSupported()) {
+            await this._buildAsync(pendingItems);
+        } else {
+            this._buildSync(pendingItems);
+        }
+
+        // Set initial LOD visibility based on current camera Z
         this._applyLOD();
     }
 
@@ -107,7 +124,7 @@ export class TreemapLabelManager {
      * Updates LOD visibility from camera Z.
      */
     update() {
-        if (!this._visible || !this._collection) return;
+        if (!this._visible || !this._renderer) return;
         this._applyLOD();
     }
 
@@ -117,11 +134,8 @@ export class TreemapLabelManager {
      */
     setVisible(visible) {
         this._visible = visible;
-        if (this._collection) {
-            // Toggle the Three.js group that contains all label meshes
-            if (this._collection.group) {
-                this._collection.group.visible = visible;
-            }
+        if (this._renderer && this._renderer.instanceMesh) {
+            this._renderer.instanceMesh.visible = visible;
         }
     }
 
@@ -135,15 +149,16 @@ export class TreemapLabelManager {
     // ============ Private ============
 
     /**
-     * Walk the treemap tree, queuing label text for directories and files.
+     * Walk the treemap tree, collecting label text items.
      * @private
      * @param {Object} node - TreemapLayoutManager tree node
+     * @param {Array} pendingItems - Output array to push items into
+     * @param {Function} allocGroupId - Callable that returns the next group ID
      */
-    _walkTree(node) {
+    _walkTree(node, pendingItems, allocGroupId) {
         if (!node) return;
 
         if (node.isDir && node.path !== '') {
-            // Directory label
             const bounds = this._treemapManager.getDirectoryBounds(node.path);
             if (bounds && !bounds.isEmpty()) {
                 const labelText = this._dirLabel(node);
@@ -151,54 +166,107 @@ export class TreemapLabelManager {
                 const y = bounds.max.y + DIR_LABEL_Y_OFFSET;
                 const z = (bounds.max.z || 0) + DIR_LABEL_Z_OFFSET;
 
-                // Each directory gets its own group for O(1) visibility toggle
-                const groupId = this._collection.createGroup();
-                this._collection.setGroupVisibility(groupId, true);
+                const groupId = allocGroupId();
+                this._dirGroupIds.push(groupId);
 
-                const id = this._collection.addText(labelText, { x, y, z }, {
-                    worldScale: DIR_LABEL_SCALE,
-                    color: { r: 0.0, g: 1.0, b: 0.53 },  // accent green
+                pendingItems.push({
+                    text:     labelText,
+                    position: { x, y, z },
+                    options:  { color: { r: 0.0, g: 1.0, b: 0.53 }, groupId },
+                    color:    { r: 0.0, g: 1.0, b: 0.53 },
+                    scale:    DIR_LABEL_SCALE,
                     groupId,
                 });
-
-                this._labels.push({ id, type: 'dir', groupId });
-                this._dirGroupIds.push(groupId);
             }
         }
 
         if (!node.isDir && node.grid) {
-            // File label
             const gb = node.grid.getBounds();
             if (!gb.isEmpty()) {
                 const centerX = (gb.min.x + gb.max.x) / 2;
                 const y = gb.max.y + FILE_LABEL_Y_OFFSET;
                 const z = (gb.max.z || 0) + FILE_LABEL_Z_OFFSET;
 
-                const groupId = this._collection.createGroup();
-                this._collection.setGroupVisibility(groupId, true);
+                const groupId = allocGroupId();
+                this._fileGroupIds.push(groupId);
 
-                const id = this._collection.addText(node.name, { x: centerX, y, z }, {
-                    worldScale: FILE_LABEL_SCALE,
-                    color: { r: 0.8, g: 0.8, b: 0.8 },
+                pendingItems.push({
+                    text:     node.name,
+                    position: { x: centerX, y, z },
+                    options:  { color: { r: 0.8, g: 0.8, b: 0.8 }, groupId },
+                    color:    { r: 0.8, g: 0.8, b: 0.8 },
+                    scale:    FILE_LABEL_SCALE,
                     groupId,
                 });
-
-                this._labels.push({ id, type: 'file', groupId });
-                this._fileGroupIds.push(groupId);
             }
         }
 
-        // Recurse
         if (node.children) {
             for (const child of node.children) {
-                this._walkTree(child);
+                this._walkTree(child, pendingItems, allocGroupId);
             }
         }
     }
 
     /**
+     * Flush items via worker (async path).
+     * @private
+     */
+    async _buildAsync(pendingItems) {
+        const bridge       = getWorkerBridge();
+        const defaultColor = { r: 1, g: 1, b: 1 };
+        const atlas        = this._atlas;
+
+        // Ensure all codepoints exist in atlas before dispatching
+        const missingGraphemes = new Set();
+        for (const item of pendingItems) {
+            if (!item.text) continue;
+            for (const grapheme of iterGraphemes(item.text)) {
+                const cp = grapheme.codePointAt(0);
+                if (cp > 32 && !atlas.uvMap.has(grapheme)) {
+                    missingGraphemes.add(grapheme);
+                }
+            }
+        }
+        if (missingGraphemes.size > 0) atlas.ensureGraphemes(Array.from(missingGraphemes));
+
+        const atlasCharSize = atlas.getCharSize();
+        const scale = 0.025;
+        const metrics = {
+            charWidth:     atlasCharSize.width  * scale,
+            charHeight:    atlasCharSize.height * scale,
+            letterSpacing: atlasCharSize.width  * scale * 0.05,
+            lineSpacing:   atlasCharSize.height * scale * 1.2,
+            worldScale:    scale,
+            atlasSize:     atlas.getAtlasTexture().width,
+            pixelWidth:    atlasCharSize.width,
+            pixelHeight:   atlasCharSize.height,
+        };
+
+        try {
+            const buffers = await bridge.buildBatchBuffers(pendingItems, { metrics, uvMap: null, defaultColor }, atlas);
+            this._renderer.applyPrebuiltBuffers(buffers, pendingItems);
+        } catch (err) {
+            console.warn('TreemapLabelManager: Worker path failed, falling back to sync:', err);
+            this._buildSync(pendingItems);
+        }
+    }
+
+    /**
+     * Flush items synchronously.
+     * @private
+     */
+    _buildSync(pendingItems) {
+        const batchItems = pendingItems.map(p => ({
+            text:     p.text,
+            position: p.position,
+            options:  p.options,
+        }));
+        this._renderer.renderBatch(batchItems);
+    }
+
+    /**
      * Build the display text for a directory node.
-     * Format: "dirname (N)" where N is the count of direct + indirect files.
      * @private
      */
     _dirLabel(node) {
@@ -226,33 +294,30 @@ export class TreemapLabelManager {
      * @private
      */
     _applyLOD() {
-        if (!this._collection) return;
+        if (!this._renderer) return;
 
         const cz = this._camera.position.z;
 
-        // Directory labels: visible when zoomed out enough to see directory structure
         const showDirs  = cz > DIR_VISIBLE_MIN_Z;
-        // File labels: visible when zoomed in enough to read individual filenames
         const showFiles = cz < FILE_VISIBLE_MAX_Z;
 
         for (const groupId of this._dirGroupIds) {
-            this._collection.setGroupVisibility(groupId, showDirs);
+            this._renderer.setGroupVisibility(groupId, showDirs);
         }
         for (const groupId of this._fileGroupIds) {
-            this._collection.setGroupVisibility(groupId, showFiles);
+            this._renderer.setGroupVisibility(groupId, showFiles);
         }
     }
 
     /**
-     * Destroy the collection and clean up scene objects.
+     * Destroy the renderer and clean up scene objects.
      * @private
      */
     _destroy() {
-        if (this._collection) {
-            this._collection.dispose();
-            this._collection = null;
+        if (this._renderer) {
+            this._renderer.dispose();
+            this._renderer = null;
         }
-        this._labels = [];
         this._dirGroupIds  = [];
         this._fileGroupIds = [];
     }

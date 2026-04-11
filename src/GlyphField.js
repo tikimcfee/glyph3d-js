@@ -604,6 +604,60 @@ export default class GlyphField {
         };
     }
 
+    // ── Bounds query ─────────────────────────────────────────────────────────
+
+    /**
+     * Compute the axis-aligned bounding box for all glyphs belonging to a
+     * given textId. Walks instancePosition + instanceSize for the contiguous
+     * buffer range recorded in renderedTexts.
+     *
+     * Returns an empty Box3 (isEmpty() === true) when the textId is unknown,
+     * has no glyphs, or the geometry is not yet built.
+     *
+     * @param {number} textId - ID returned by render() or applyPrebuiltBuffers()
+     * @returns {THREE.Box3}
+     */
+    getTextBounds(textId) {
+        const box = new THREE.Box3();
+        const entry = this.renderedTexts.get(textId);
+        if (!entry || !entry.glyphCount || entry.bufferStartIndex === undefined) return box;
+
+        const geom  = this.instanceMesh?.geometry;
+        if (!geom) return box;
+
+        const positions = geom.attributes.instancePosition?.array;
+        const sizes     = geom.attributes.instanceSize?.array;
+        if (!positions || !sizes) return box;
+
+        const start = entry.bufferStartIndex;
+        const count = entry.glyphCount;
+
+        let minX = Infinity, minY = Infinity, minZ = Infinity;
+        let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+
+        for (let i = 0; i < count; i++) {
+            const buf = start + i;
+            const px  = positions[buf * 3];
+            const py  = positions[buf * 3 + 1];
+            const pz  = positions[buf * 3 + 2];
+            const sw  = sizes[buf * 2];
+            const sh  = sizes[buf * 2 + 1];
+            if (px      < minX) minX = px;
+            if (py      < minY) minY = py;
+            if (pz      < minZ) minZ = pz;
+            if (px + sw > maxX) maxX = px + sw;
+            if (py + sh > maxY) maxY = py + sh;
+            if (pz      > maxZ) maxZ = pz;
+        }
+
+        if (minX === Infinity) return box; // zero-glyph entry
+        box.set(
+            new THREE.Vector3(minX, minY, minZ),
+            new THREE.Vector3(maxX, maxY, maxZ)
+        );
+        return box;
+    }
+
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
     clear() {

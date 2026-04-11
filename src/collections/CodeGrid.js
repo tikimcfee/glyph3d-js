@@ -1,15 +1,27 @@
 /**
  * CodeGrid - Single source file representation in 3D space
  *
- * Wraps a GlyphCollection to represent a single source file with visual
- * elements like background panel and filename label.
+ * Directly manages a GlyphRenderer (WebGL path, GlyphRendererV15) for all
+ * deferred batching, flush, and GPU updates. The intermediate GlyphCollection
+ * wrapper was deleted in C4; its deferred-add / flush / worker-flush logic now
+ * lives here.
+ *
+ * Dual-backend note (C4):
+ *   The IDE and all existing examples use THREE.WebGLRenderer + three.module.js.
+ *   GlyphField (WebGPU + TSL NodeMaterial) requires THREE.WebGPURenderer and
+ *   three/webgpu imports — it is NOT compatible with raw WebGLRenderer.
+ *   Until the IDE switches to WebGPURenderer, CodeGrid continues to create a
+ *   GlyphRendererV15 (WebGL). The GlyphField path will be wired in a later
+ *   commit once the renderer detection hook is in place.
  *
  * Part of the layered rendering architecture:
- * - GlyphAtlas -> GlyphCollection -> CodeGrid -> GridLayoutManager
+ * - GlyphAtlas -> CodeGrid -> GridLayoutManager
  */
 
 import * as THREE from 'three';
-import GlyphCollection from './GlyphCollection.js';
+import GlyphRendererV15 from '../GlyphRenderer.js';
+import { getWorkerBridge, isWorkersSupported } from '../workers/WorkerBridge.js';
+import { iterGraphemes } from '../utils/grapheme.js';
 
 class CodeGrid extends THREE.Object3D {
     /**
@@ -39,7 +51,7 @@ class CodeGrid extends THREE.Object3D {
             gridScale: options.gridScale || 1.0,
             // World scale passed to renderer (pixels to world units)
             worldScale: options.worldScale || 0.025,
-            // Slug vector rendering data (passed through to GlyphCollection → GlyphRenderer)
+            // Slug vector rendering data (passed through to GlyphRenderer)
             // Check options first, then atlas (shared across all renderers)
             slugData: options.slugData || (atlas && atlas._slugData) || null,
             shaper: options.shaper || (atlas && atlas._shaper) || null,
@@ -51,34 +63,43 @@ class CodeGrid extends THREE.Object3D {
         this.content = '';
         this.lines = [];
 
-        // Use GlyphCollection for rendering (not our own implementation!)
-        this._collection = new GlyphCollection(scene, atlas, {
-            maxInstances: this.config.maxChars,
-            defaultColor: this.config.textColor,
-            worldScale: this.config.worldScale,
-            slugData: options.slugData || null,
-            shaper: options.shaper || null,
-        });
+        // ── Deferred-batch state (was GlyphCollection._pendingAdds etc.) ────────
+        this._pendingAdds    = [];  // { id, text, position, options }
+        this._pendingRemovals = []; // renderer IDs to remove
+        this._pendingUpdates = [];  // { type, id, ... }
+        this._idMap          = new Map(); // our ID → renderer ID
+        this._reverseIdMap   = new Map(); // renderer ID → our ID
+        this._committedTexts = new Map(); // our ID → { id, rendererId, textLength, position, options }
+        this._nextLocalId    = 1;
+        this._dirty          = false;
+        this._bufferHeadroom = 1.1; // 10% extra
+        this._bufferSize     = 0;
+        // ─────────────────────────────────────────────────────────────────────────
 
-        // Derive metrics from atlas via GlyphCollection (no renderer needed)
-        const collectionMetrics = this._collection._getMetrics();
-        this.metrics = {
-            charWidth: collectionMetrics.charWidth,
-            charHeight: collectionMetrics.charHeight,
-            lineHeight: collectionMetrics.lineSpacing,
-            spacing: collectionMetrics.letterSpacing
-        };
+        // Optional picking system — wired via setPickingSystem()
+        this._pickingSystem = null;
+
+        // Group — the renderer's instanceMesh will be added to the scene through
+        // a THREE.Group child so CodeGrid's own Object3D transform is honoured.
+        this._rendererGroup = new THREE.Group();
+        this.scene.add(this._rendererGroup);
+
+        // Lazy GPU renderer — created on first flush() with right-sized buffer
+        this._renderer = null;
+
+        // Derive metrics from atlas directly (no renderer needed)
+        this.metrics = this._computeMetrics();
 
         // Track text IDs for content management
         this._filenameTextId = null;
         this._contentTextIds = [];
 
-        // Background element (separate from collection)
+        // Background element (separate from renderer)
         this._background = null;
         this._initBackground();
 
-        // Add collection's group as our child for proper transforms
-        this.add(this._collection.group);
+        // Add renderer group as our child for proper transforms
+        this.add(this._rendererGroup);
 
         // Apply overall grid scale
         if (this.config.gridScale !== 1.0) {
@@ -90,18 +111,25 @@ class CodeGrid extends THREE.Object3D {
         // on matrixWorld updates (position/rotation/scale changes).
         this._boundsCache = null;
         this._boundsCacheDirty = true;
+        // Bounds from the worker path (raw plain-object bounds from buffer builder)
+        this._workerBoundsCache = null;
+        // Whether the renderer-side content bounds should be recomputed
+        this._contentBoundsDirty = true;
+        this._contentBoundsCache = null;
     }
 
+    // ============ Slug data ============
+
     /**
-     * Set Slug texture data on this grid's collection.
+     * Set Slug texture data on this grid's renderer.
      * @param {Object} slugData - { curveTexture, bandTexture, glyphMapTexture }
      * @param {import('../shaping/HarfBuzzShaper.js').default} [shaper] - Main-thread shaper
      */
     setSlugData(slugData, shaper) {
         this.config.slugData = slugData;
         if (shaper) this.config.shaper = shaper;
-        if (this._collection) {
-            this._collection.setSlugData(slugData, shaper);
+        if (this._renderer) {
+            this._renderer.setSlugData(slugData, shaper);
         }
     }
 
@@ -117,13 +145,13 @@ class CodeGrid extends THREE.Object3D {
         this.content = text;
         this.lines = text.split('\n');
 
-        // If content was evicted, reconstruct the collection before clearing/loading
-        this._ensureCollection();
+        // If content was evicted, reconstruct the renderer before clearing/loading
+        this._ensureRenderer();
 
         // Clear previous content
         this._clearContent();
 
-        // Layout text using collection
+        // Layout text using renderer
         this._layoutContent();
 
         // Update background
@@ -152,13 +180,13 @@ class CodeGrid extends THREE.Object3D {
         this.content = text;
         // Note: lines array populated lazily only if needed (getLineCount, getMaxLineWidth)
 
-        // If content was evicted, reconstruct the collection before clearing/loading
-        this._ensureCollection();
+        // If content was evicted, reconstruct the renderer before clearing/loading
+        this._ensureRenderer();
 
         // Clear previous content
         this._clearContent();
 
-        // Layout text using collection (async worker path)
+        // Layout text using renderer (async worker path)
         await this._layoutContentAsync();
 
         // Update background
@@ -186,7 +214,8 @@ class CodeGrid extends THREE.Object3D {
         this.lines = [];
         this.filename = '';
 
-        if (this._collection) this._collection.clear();
+        if (this._renderer) this._renderer.clear();
+        this._resetBatchState();
         this._filenameTextId = null;
         this._contentTextIds = [];
 
@@ -276,15 +305,14 @@ class CodeGrid extends THREE.Object3D {
     }
 
     /**
-     * Get bounding box of this grid
+     * Get bounding box of this grid.
      * Returns a cached THREE.Box3 in world coordinates. The cache is invalidated
      * whenever the transform changes (via updateMatrixWorld) or content is updated
      * (via _markBoundsDirty). Callers must NOT mutate the returned object.
      * @returns {THREE.Box3} Bounding box in world coordinates
      */
     getBounds() {
-        // Check if the collection's own content-bounds are still valid
-        if (this._collection && this._collection._boundsDirty) {
+        if (this._contentBoundsDirty) {
             this._boundsCacheDirty = true;
         }
 
@@ -294,8 +322,8 @@ class CodeGrid extends THREE.Object3D {
 
         const padding = this.config.backgroundPadding;
 
-        // Get content bounds from collection (null when content is unloaded)
-        const contentBounds = this._collection ? this._collection.getBounds() : null;
+        // Get content bounds (null when content is unloaded)
+        const contentBounds = this._getContentBounds();
 
         if (!this._boundsCache) {
             this._boundsCache = new THREE.Box3();
@@ -332,19 +360,70 @@ class CodeGrid extends THREE.Object3D {
     }
 
     /**
-     * Get local content bounds
-     * @returns {Object|null} Bounds object from collection, or null if content is unloaded
+     * Get local content bounds (plain-object form, not a THREE.Box3).
+     * @returns {Object|null} { min, max, width, height, depth } or null
      */
     getContentBounds() {
-        return this._collection ? this._collection.getBounds() : null;
+        return this._getContentBounds();
     }
 
     /**
-     * Get the underlying GlyphCollection, or null if content is unloaded.
-     * @returns {GlyphCollection|null} The collection
+     * Get the underlying GlyphRenderer, or null if not yet created.
+     * Used by PickingSystem, highlight commands, and external callers.
+     * @returns {GlyphRendererV15|null}
+     */
+    getRenderer() {
+        return this._renderer;
+    }
+
+    /**
+     * Compatibility shim — returns the underlying GlyphRenderer so that
+     * callers that used the old GlyphCollection API (setGroupColor, setGroupOffset,
+     * etc.) continue to work against GlyphRendererV15's equivalent methods.
+     *
+     * This method will be removed in C5 when all callers are updated to use
+     * getRenderer() directly.
+     *
+     * @returns {GlyphRendererV15|null}
      */
     getCollection() {
-        return this._collection;
+        return this._renderer;
+    }
+
+    /**
+     * Wire a PickingSystem so flush paths automatically re-register this
+     * grid's renderer after every buffer rebuild.
+     * @param {import('../picking/PickingSystem.js').PickingSystem} pickingSystem
+     */
+    setPickingSystem(pickingSystem) {
+        this._pickingSystem = pickingSystem;
+        if (this._renderer && pickingSystem) {
+            pickingSystem.registerRenderer(this._renderer);
+        }
+    }
+
+    /**
+     * Add text (deferred until flush / flushAsync).
+     * Public entry point for callers like DiffController that bypass the normal
+     * loadText() flow in order to supply per-text color options.
+     *
+     * @param {string} text
+     * @param {{x,y,z}} [position]
+     * @param {Object} [options] - { color, scale, groupId }
+     * @returns {number} local text ID (for future updateColor / removeText calls)
+     */
+    addText(text, position = { x: 0, y: 0, z: 0 }, options = {}) {
+        this._ensureRenderer();
+        return this._addText(text, position, options);
+    }
+
+    /**
+     * Flush pending text additions to the GPU via Web Workers (async).
+     * Falls back to synchronous flush if workers are unavailable.
+     * @returns {Promise<void>}
+     */
+    async flushAsync() {
+        return this._flushAsync();
     }
 
     /**
@@ -352,7 +431,7 @@ class CodeGrid extends THREE.Object3D {
      * @returns {number} Number of glyphs (0 if content is unloaded)
      */
     getGlyphCount() {
-        return this._collection ? this._collection.getGlyphCount() : 0;
+        return this._renderer ? this._renderer.getGlyphCount() : 0;
     }
 
     /**
@@ -417,7 +496,7 @@ class CodeGrid extends THREE.Object3D {
      * Release GPU buffers while preserving source reference for reload.
      * Called by GridVirtualizer when a grid exits the eviction threshold.
      * Preserves: position, metadata, bounding box, source text, config.
-     * Releases: GlyphCollection (InstancedBufferGeometry, highlight texture,
+     * Releases: GlyphRendererV15 (InstancedBufferGeometry, highlight texture,
      *   group DataTexture, all instance attribute buffers).
      *
      * After this call `isContentLoaded` returns false. The grid remains in
@@ -425,18 +504,19 @@ class CodeGrid extends THREE.Object3D {
      * its cached bounds so re-entry detection still works.
      */
     unloadContent() {
-        if (!this._collection) return; // already unloaded or fully disposed
+        if (!this._renderer) return; // already unloaded or fully disposed
 
-        // Remove the collection's group from our Object3D children before
-        // dispose() runs, so the scene.remove() inside dispose() is benign.
-        if (this._collection.group) {
-            this.remove(this._collection.group);
+        this._renderer.dispose();
+        this._renderer = null;
+
+        // Remove renderer group children (the instanceMesh was in the scene directly,
+        // added via this._rendererGroup when the renderer was created)
+        while (this._rendererGroup.children.length > 0) {
+            this._rendererGroup.remove(this._rendererGroup.children[0]);
         }
 
-        this._collection.dispose();
-        this._collection = null;
-
         // Clear derived state that references the now-dead renderer/buffers
+        this._resetBatchState();
         this._filenameTextId = null;
         this._contentTextIds = [];
         this._lineSlotBase = null;
@@ -475,13 +555,13 @@ class CodeGrid extends THREE.Object3D {
         }
 
         // If caller provides a fresh atlas (e.g. after regeneration), swap it in
-        // before _ensureCollection() reads this.atlas.
+        // before _ensureRenderer() reads this.atlas.
         if (atlas && atlas !== this.atlas) {
             this.atlas = atlas;
         }
 
-        // Reconstruct the collection (also marks _contentUnloaded = false)
-        this._ensureCollection();
+        // Reconstruct the renderer (also marks _contentUnloaded = false)
+        this._ensureRenderer();
 
         // Re-run the full layout pipeline using the worker path
         await this._layoutContentAsync();
@@ -494,14 +574,18 @@ class CodeGrid extends THREE.Object3D {
      * Dispose of all resources
      */
     dispose() {
-        // Dispose collection
-        if (this._collection) {
-            // Remove group from our children before dispose() tries scene.remove()
-            if (this._collection.group) {
-                this.remove(this._collection.group);
+        // Dispose renderer
+        if (this._renderer) {
+            this._renderer.dispose();
+            this._renderer = null;
+        }
+
+        // Remove renderer group from scene
+        if (this._rendererGroup) {
+            this.scene.remove(this._rendererGroup);
+            while (this._rendererGroup.children.length > 0) {
+                this._rendererGroup.remove(this._rendererGroup.children[0]);
             }
-            this._collection.dispose();
-            this._collection = null;
         }
 
         // Dispose background
@@ -512,6 +596,7 @@ class CodeGrid extends THREE.Object3D {
             this._background = null;
         }
 
+        this._resetBatchState();
         this.content = '';
         this.lines = [];
         this._contentTextIds = [];
@@ -521,34 +606,353 @@ class CodeGrid extends THREE.Object3D {
     // ============ Private Methods ============
 
     /**
-     * Ensure the GlyphCollection exists, reconstructing it from the stored atlas
+     * Compute atlas-derived metrics. Called at construction and after atlas swap.
+     * @private
+     * @returns {Object} { charWidth, charHeight, lineHeight, spacing }
+     */
+    _computeMetrics() {
+        const atlasCharSize = this.atlas.getCharSize();
+        const scale = this.config.worldScale;
+        return {
+            charWidth:  atlasCharSize.width  * scale,
+            charHeight: atlasCharSize.height * scale,
+            lineHeight: atlasCharSize.height * scale * 1.2,
+            spacing:    atlasCharSize.width  * scale * 0.05,
+        };
+    }
+
+    /**
+     * Ensure the GlyphRenderer exists, reconstructing it from the stored atlas
      * if content was previously evicted. Called at the top of loadText() and
      * loadTextAsync() so those methods are safe to use on evicted grids.
      * @private
      */
-    _ensureCollection() {
-        if (this._collection) return; // already present
+    _ensureRenderer() {
+        if (this._renderer) return; // already present
 
-        this._collection = new GlyphCollection(this.scene, this.atlas, {
-            maxInstances: this.config.maxChars,
-            defaultColor: this.config.textColor,
-            worldScale: this.config.worldScale,
-            slugData: this.config.slugData || null,
-            shaper: this.config.shaper || null,
-        });
-
-        this.add(this._collection.group);
+        // Create a right-sized renderer. Exact size is unknown pre-flush, so use
+        // maxChars as the ceiling — will be right-sized in the async path.
+        this._createRendererWithSize(this.config.maxChars, false);
 
         // Re-derive metrics in case atlas changed
-        const collectionMetrics = this._collection._getMetrics();
-        this.metrics = {
-            charWidth: collectionMetrics.charWidth,
-            charHeight: collectionMetrics.charHeight,
-            lineHeight: collectionMetrics.lineSpacing,
-            spacing: collectionMetrics.letterSpacing
-        };
+        this.metrics = this._computeMetrics();
 
         this._contentUnloaded = false;
+    }
+
+    /**
+     * Create a GlyphRendererV15 with a specific buffer size and wire it up.
+     * @private
+     * @param {number} size - Max instance count for the renderer
+     * @param {boolean} [skipPrealloc=false]
+     */
+    _createRendererWithSize(size, skipPrealloc = false) {
+        const bufferSize = Math.max(size, 100);
+        this._bufferSize = bufferSize;
+
+        this._renderer = new GlyphRendererV15(this._rendererGroup, this.atlas, {
+            maxInstances:  bufferSize,
+            defaultColor:  this.config.textColor,
+            worldScale:    this.config.worldScale,
+            skipPrealloc,
+            slugData:      this.config.slugData,
+            shaper:        this.config.shaper,
+        });
+
+        if (this._pickingSystem) {
+            this._pickingSystem.registerRenderer(this._renderer);
+        }
+    }
+
+    /**
+     * Reset all deferred-batch state without touching the renderer.
+     * @private
+     */
+    _resetBatchState() {
+        this._pendingAdds     = [];
+        this._pendingRemovals = [];
+        this._pendingUpdates  = [];
+        this._idMap.clear();
+        this._reverseIdMap.clear();
+        this._committedTexts.clear();
+        this._dirty = false;
+        this._contentBoundsDirty = true;
+        this._contentBoundsCache = null;
+        this._workerBoundsCache  = null;
+    }
+
+    /**
+     * Enqueue a text add (deferred until flush / flushAsync).
+     * @private
+     * @returns {number} local ID
+     */
+    _addText(text, position = { x: 0, y: 0, z: 0 }, options = {}) {
+        const id = this._nextLocalId++;
+        this._pendingAdds.push({ id, text, position: { ...position }, options: { ...options } });
+        this._dirty = true;
+        this._contentBoundsDirty = true;
+        return id;
+    }
+
+    /**
+     * Enqueue a text removal (deferred until flush).
+     * @private
+     */
+    _removeText(id) {
+        const pendingIdx = this._pendingAdds.findIndex(p => p.id === id);
+        if (pendingIdx !== -1) {
+            this._pendingAdds.splice(pendingIdx, 1);
+        } else if (this._idMap.has(id)) {
+            this._pendingRemovals.push(this._idMap.get(id));
+        }
+        this._dirty = true;
+        this._contentBoundsDirty = true;
+    }
+
+    /**
+     * Flush pending changes synchronously to GlyphRendererV15.
+     * @private
+     */
+    _flush() {
+        if (!this._dirty) return;
+
+        if (!this._renderer && this._pendingAdds.length > 0) {
+            const glyphCount = this._pendingAdds.reduce((s, p) => s + p.text.length, 0);
+            this._createRendererWithSize(Math.ceil(glyphCount * this._bufferHeadroom), false);
+        }
+
+        if (!this._renderer) { this._dirty = false; return; }
+
+        // Process removals
+        for (const rendererId of this._pendingRemovals) {
+            this._renderer.remove(rendererId);
+            const ourId = this._reverseIdMap.get(rendererId);
+            if (ourId !== undefined) {
+                this._idMap.delete(ourId);
+                this._reverseIdMap.delete(rendererId);
+                this._committedTexts.delete(ourId);
+            }
+        }
+        this._pendingRemovals = [];
+
+        // Process updates
+        for (const update of this._pendingUpdates) {
+            const rendererId = this._idMap.get(update.id);
+            if (rendererId === undefined) continue;
+            if (update.type === 'position') {
+                this._renderer.updatePosition(rendererId, update.newPosition);
+                const entry = this._committedTexts.get(update.id);
+                if (entry) entry.position = update.newPosition;
+            } else if (update.type === 'color') {
+                this._renderer.updateColor(rendererId, update.newColor);
+                const entry = this._committedTexts.get(update.id);
+                if (entry) entry.options.color = update.newColor;
+            } else if (update.type === 'text') {
+                const entry = this._committedTexts.get(update.id);
+                if (entry) {
+                    this._renderer.remove(rendererId);
+                    const newRid = this._renderer.render(update.newText, entry.position, entry.options);
+                    this._idMap.set(update.id, newRid);
+                    this._reverseIdMap.delete(rendererId);
+                    this._reverseIdMap.set(newRid, update.id);
+                    entry.rendererId  = newRid;
+                    entry.textLength  = update.newText.length;
+                }
+            }
+        }
+        this._pendingUpdates = [];
+
+        // Process adds via renderBatch
+        if (this._pendingAdds.length > 0) {
+            const batchItems  = this._pendingAdds.map(p => ({ text: p.text, position: p.position, options: p.options }));
+            const rendererIds = this._renderer.renderBatch(batchItems);
+
+            for (let i = 0; i < this._pendingAdds.length; i++) {
+                const ourId     = this._pendingAdds[i].id;
+                const rendererId = rendererIds[i];
+                this._idMap.set(ourId, rendererId);
+                this._reverseIdMap.set(rendererId, ourId);
+                this._committedTexts.set(ourId, {
+                    id: ourId,
+                    rendererId,
+                    textLength: this._pendingAdds[i].text.length,
+                    position:   this._pendingAdds[i].position,
+                    options:    this._pendingAdds[i].options,
+                });
+            }
+            this._pendingAdds = [];
+        }
+
+        if (this._renderer && this._pickingSystem) {
+            this._pickingSystem.registerRenderer(this._renderer);
+        }
+
+        this._dirty = false;
+        this._contentBoundsDirty = true;
+    }
+
+    /**
+     * Flush pending changes via Web Workers (async).
+     * Falls back to sync _flush() if workers unavailable.
+     * @private
+     * @returns {Promise<void>}
+     */
+    async _flushAsync() {
+        if (!this._dirty) return;
+
+        if (!isWorkersSupported() || this._pendingAdds.length === 0) {
+            return this._flush();
+        }
+
+        // Process removals if renderer exists
+        if (this._renderer) {
+            for (const rendererId of this._pendingRemovals) {
+                this._renderer.remove(rendererId);
+                const ourId = this._reverseIdMap.get(rendererId);
+                if (ourId !== undefined) {
+                    this._idMap.delete(ourId);
+                    this._reverseIdMap.delete(rendererId);
+                    this._committedTexts.delete(ourId);
+                }
+            }
+        }
+        this._pendingRemovals = [];
+
+        if (this._pendingAdds.length > 0) {
+            const bridge       = getWorkerBridge();
+            const defaultColor = this.config.textColor;
+            const items        = this._pendingAdds;
+            const itemCount    = items.length;
+
+            // Normalize items for worker
+            for (let i = 0; i < itemCount; i++) {
+                const p = items[i];
+                if (!p.color)                p.color   = p.options?.color   || defaultColor;
+                if (!p.scale)                p.scale   = p.options?.scale   || 1.0;
+                if (p.groupId === undefined) p.groupId = p.options?.groupId || 0;
+            }
+
+            const atlasCharSize = this.atlas.getCharSize();
+            const scale = this.config.worldScale;
+            const metrics = {
+                charWidth:     atlasCharSize.width  * scale,
+                charHeight:    atlasCharSize.height * scale,
+                letterSpacing: atlasCharSize.width  * scale * 0.05,
+                lineSpacing:   atlasCharSize.height * scale * 1.2,
+                worldScale:    scale,
+                atlasSize:     this.atlas.getAtlasTexture().width,
+                pixelWidth:    atlasCharSize.width,
+                pixelHeight:   atlasCharSize.height,
+            };
+
+            // Ensure codepoints exist in atlas before dispatching (workers can't call ensureCodepoints)
+            if (!this.config.shaper) {
+                const missingGraphemes = new Set();
+                for (let i = 0; i < itemCount; i++) {
+                    const text = items[i].text;
+                    if (!text) continue;
+                    for (const grapheme of iterGraphemes(text)) {
+                        const cp = grapheme.codePointAt(0);
+                        if (cp > 32 && !this.atlas.uvMap.has(grapheme)) {
+                            missingGraphemes.add(grapheme);
+                        }
+                    }
+                }
+                if (missingGraphemes.size > 0) {
+                    this.atlas.ensureGraphemes(Array.from(missingGraphemes));
+                }
+            }
+
+            try {
+                const buffers = await bridge.buildBatchBuffers(items, { metrics, uvMap: null, defaultColor }, this.atlas);
+
+                // Create renderer AFTER worker returns, sized to actual content
+                if (!this._renderer) {
+                    this._createRendererWithSize(buffers.count, true);
+                }
+
+                const rendererIds = this._renderer.applyPrebuiltBuffers(buffers, items);
+
+                this._workerBoundsCache  = buffers.bounds;
+                this._contentBoundsDirty = false;
+
+                if (rendererIds) {
+                    for (let i = 0; i < itemCount; i++) {
+                        const p          = items[i];
+                        const rendererId = rendererIds[i];
+                        this._idMap.set(p.id, rendererId);
+                        this._reverseIdMap.set(rendererId, p.id);
+                        this._committedTexts.set(p.id, {
+                            id: p.id,
+                            rendererId,
+                            textLength: p.text.length,
+                            position:   p.position,
+                            options:    p.options,
+                        });
+                    }
+                } else {
+                    // Worker path produced no per-text metadata — fall back to sync re-render
+                    console.warn('CodeGrid: No renderer IDs from worker, falling back to sync re-render');
+                    this._renderer.clear();
+                    const batchItems = items.map(p => ({ text: p.text, position: p.position, options: p.options }));
+                    const syncIds    = this._renderer.renderBatch(batchItems);
+                    for (let i = 0; i < itemCount; i++) {
+                        const p          = items[i];
+                        const rendererId = syncIds[i];
+                        this._idMap.set(p.id, rendererId);
+                        this._reverseIdMap.set(rendererId, p.id);
+                        this._committedTexts.set(p.id, {
+                            id: p.id,
+                            rendererId,
+                            textLength: p.text.length,
+                            position:   p.position,
+                            options:    p.options,
+                        });
+                    }
+                }
+
+                this._pendingAdds = [];
+            } catch (error) {
+                console.warn('CodeGrid: Worker flush failed, falling back to sync:', error);
+                this._flush();
+                return;
+            }
+        }
+
+        // Process pending updates that arrived after the worker dispatch
+        if (this._renderer && this._pendingUpdates.length > 0) {
+            for (const update of this._pendingUpdates) {
+                const rendererId = this._idMap.get(update.id);
+                if (rendererId === undefined) continue;
+                if (update.type === 'position') {
+                    this._renderer.updatePosition(rendererId, update.newPosition);
+                    const entry = this._committedTexts.get(update.id);
+                    if (entry) entry.position = update.newPosition;
+                } else if (update.type === 'color') {
+                    this._renderer.updateColor(rendererId, update.newColor);
+                    const entry = this._committedTexts.get(update.id);
+                    if (entry) entry.options.color = update.newColor;
+                } else if (update.type === 'text') {
+                    const entry = this._committedTexts.get(update.id);
+                    if (entry) {
+                        this._renderer.remove(rendererId);
+                        const newRid = this._renderer.render(update.newText, entry.position, entry.options);
+                        this._idMap.set(update.id, newRid);
+                        this._reverseIdMap.delete(rendererId);
+                        this._reverseIdMap.set(newRid, update.id);
+                        entry.rendererId = newRid;
+                        entry.textLength = update.newText.length;
+                    }
+                }
+            }
+        }
+        this._pendingUpdates = [];
+
+        if (this._renderer && this._pickingSystem) {
+            this._pickingSystem.registerRenderer(this._renderer);
+        }
+
+        this._dirty = false;
     }
 
     /**
@@ -573,28 +977,28 @@ class CodeGrid extends THREE.Object3D {
     }
 
     /**
-     * Clear content from collection
+     * Clear content from renderer
      * @private
      */
     _clearContent() {
         // Remove filename text if exists
         if (this._filenameTextId !== null) {
-            this._collection.removeText(this._filenameTextId);
+            this._removeText(this._filenameTextId);
             this._filenameTextId = null;
         }
 
         // Remove all content texts
         for (const id of this._contentTextIds) {
-            this._collection.removeText(id);
+            this._removeText(id);
         }
         this._contentTextIds = [];
 
         // Flush removals
-        this._collection.flush();
+        this._flush();
     }
 
     /**
-     * Layout content using GlyphCollection
+     * Layout content synchronously using GlyphRendererV15
      * @private
      */
     _layoutContent() {
@@ -602,7 +1006,7 @@ class CodeGrid extends THREE.Object3D {
 
         // Add filename if enabled
         if (this.config.showFilename && this.filename) {
-            this._filenameTextId = this._collection.addText(
+            this._filenameTextId = this._addText(
                 this.filename,
                 { x: 0, y: currentY, z: 0 },
                 { color: this.config.filenameColor }
@@ -616,7 +1020,7 @@ class CodeGrid extends THREE.Object3D {
 
             // Skip empty lines but still advance Y
             if (line.length > 0) {
-                const id = this._collection.addText(
+                const id = this._addText(
                     line,
                     { x: 0, y: currentY, z: 0 },
                     { color: this.config.textColor }
@@ -628,15 +1032,15 @@ class CodeGrid extends THREE.Object3D {
         }
 
         // Flush all additions to GPU
-        this._collection.flush();
+        this._flush();
 
         // Build line→slot index after flush
         this._buildLineSlotBase();
     }
 
     /**
-     * Layout content using GlyphCollection (async worker path)
-     * Optimized: sends entire content as ONE text item (worker handles newlines)
+     * Layout content using Web Workers (async path).
+     * Sends entire content as ONE text item (worker handles newlines).
      * @private
      */
     async _layoutContentAsync() {
@@ -644,7 +1048,7 @@ class CodeGrid extends THREE.Object3D {
 
         // Add filename if enabled
         if (this.config.showFilename && this.filename) {
-            this._filenameTextId = this._collection.addText(
+            this._filenameTextId = this._addText(
                 this.filename,
                 { x: 0, y: currentY, z: 0 },
                 { color: this.config.filenameColor }
@@ -653,9 +1057,8 @@ class CodeGrid extends THREE.Object3D {
         }
 
         // Add ENTIRE content as single text item (worker handles newlines)
-        // This reduces serialization from N items to 1
         if (this.content.length > 0) {
-            const id = this._collection.addText(
+            const id = this._addText(
                 this.content,
                 { x: 0, y: currentY, z: 0 },
                 { color: this.config.textColor }
@@ -664,11 +1067,9 @@ class CodeGrid extends THREE.Object3D {
         }
 
         // Flush using worker pipeline
-        await this._collection.flushAsync();
+        await this._flushAsync();
 
         // Build line→slot index from builder's authoritative line offsets.
-        // The content is the second item in the batch (after filename, if present).
-        // _contentTextIds[0] maps to the content item's metadata.
         const contentItemMeta = this._getContentItemMeta();
         this._buildLineSlotBase(contentItemMeta?.lineSlotOffsets);
     }
@@ -680,15 +1081,67 @@ class CodeGrid extends THREE.Object3D {
      */
     _getContentItemMeta() {
         if (this._contentTextIds.length === 0) return null;
-        const renderer = this._collection?.getRenderer();
-        if (!renderer) return null;
+        if (!this._renderer) return null;
 
-        const collId = this._contentTextIds[0];
-        const rendId = this._collection._idMap?.get(collId);
+        const collId   = this._contentTextIds[0];
+        const rendId   = this._idMap.get(collId);
         if (rendId === undefined) return null;
 
-        const entry = renderer.renderedTexts.get(rendId);
+        const entry = this._renderer.renderedTexts.get(rendId);
         return entry ?? null;
+    }
+
+    /**
+     * Compute the plain-object content bounds over all committed renderer entries.
+     * Returns { min, max, width, height, depth } or null.
+     * @private
+     */
+    _getContentBounds() {
+        // Fast path: worker precomputed bounds are still valid
+        if (!this._contentBoundsDirty && this._workerBoundsCache) {
+            return this._workerBoundsCache;
+        }
+        if (!this._contentBoundsDirty && this._contentBoundsCache) {
+            return this._contentBoundsCache;
+        }
+
+        if (!this._renderer) {
+            this._contentBoundsCache = null;
+            return null;
+        }
+
+        // Walk all committed renderedTexts entries and union their bounds
+        let minX = Infinity, minY = Infinity, minZ = Infinity;
+        let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+        let found = false;
+
+        for (const [, entry] of this._renderer.renderedTexts) {
+            const b = this._renderer._getTextBounds(entry);
+            if (!b) continue;
+            found = true;
+            if (b.min.x < minX) minX = b.min.x;
+            if (b.min.y < minY) minY = b.min.y;
+            if (b.min.z < minZ) minZ = b.min.z;
+            if (b.max.x > maxX) maxX = b.max.x;
+            if (b.max.y > maxY) maxY = b.max.y;
+            if (b.max.z > maxZ) maxZ = b.max.z;
+        }
+
+        if (!found) {
+            this._contentBoundsCache = null;
+            this._contentBoundsDirty = false;
+            return null;
+        }
+
+        this._contentBoundsCache = {
+            min: { x: minX, y: minY, z: minZ },
+            max: { x: maxX, y: maxY, z: maxZ },
+            width:  maxX - minX,
+            height: maxY - minY,
+            depth:  maxZ - minZ,
+        };
+        this._contentBoundsDirty = false;
+        return this._contentBoundsCache;
     }
 
     // ============ Line → Buffer Slot Mapping ============
@@ -721,8 +1174,7 @@ class CodeGrid extends THREE.Object3D {
         }
 
         // Fallback for sync path: derive from renderer's renderedTexts
-        const renderer = this._collection.getRenderer();
-        if (!renderer) {
+        if (!this._renderer) {
             this._lineSlotBase = null;
             return;
         }
@@ -737,8 +1189,8 @@ class CodeGrid extends THREE.Object3D {
                 continue;
             }
             const collId = this._contentTextIds[textIdCursor++];
-            const rendId = this._collection._idMap?.get(collId);
-            const entry = rendId !== undefined ? renderer.renderedTexts.get(rendId) : null;
+            const rendId = this._idMap.get(collId);
+            const entry  = rendId !== undefined ? this._renderer.renderedTexts.get(rendId) : null;
             lineSlotBase[i] = entry ? (entry.bufferStartIndex ?? 0) : 0;
         }
 
@@ -793,17 +1245,16 @@ class CodeGrid extends THREE.Object3D {
      * @param {{r:number, g:number, b:number}} color
      */
     highlightRange(startLine, startCol, endLine, endCol, color) {
-        const renderer = this._collection?.getRenderer();
-        if (!renderer || !this._lineSlotBase) return;
+        if (!this._renderer || !this._lineSlotBase) return;
 
         for (let line = startLine; line <= endLine; line++) {
             const cStart = (line === startLine) ? startCol : 0;
-            const cEnd = (line === endLine) ? endCol : this.getVisibleCharCount(line);
+            const cEnd   = (line === endLine)   ? endCol   : this.getVisibleCharCount(line);
             const lineBase = this._lineSlotBase[line];
             if (lineBase === undefined) continue;
 
             for (let col = cStart; col < cEnd; col++) {
-                renderer.setGlyphHighlight(lineBase + col, color);
+                this._renderer.setGlyphHighlight(lineBase + col, color);
             }
         }
     }
@@ -813,12 +1264,11 @@ class CodeGrid extends THREE.Object3D {
      * @param {number} line - 0-based line index
      */
     clearLineHighlight(line) {
-        const renderer = this._collection?.getRenderer();
-        if (!renderer || !this._lineSlotBase) return;
+        if (!this._renderer || !this._lineSlotBase) return;
         const count = this.getVisibleCharCount(line);
-        const base = this._lineSlotBase[line];
+        const base  = this._lineSlotBase[line];
         for (let i = 0; i < count; i++) {
-            renderer.setGlyphHighlight(base + i, null);
+            this._renderer.setGlyphHighlight(base + i, null);
         }
     }
 
@@ -849,7 +1299,7 @@ class CodeGrid extends THREE.Object3D {
             return;
         }
 
-        const bounds = this._collection ? this._collection.getBounds() : null;
+        const bounds = this._getContentBounds();
         if (!bounds) {
             this._background.visible = false;
             return;
@@ -858,7 +1308,7 @@ class CodeGrid extends THREE.Object3D {
         const padding = this.config.backgroundPadding;
 
         // Size background to content
-        const width = bounds.width + padding * 2;
+        const width  = bounds.width  + padding * 2;
         const height = bounds.height + padding * 2;
 
         if (width > 0 && height > 0) {
@@ -870,7 +1320,7 @@ class CodeGrid extends THREE.Object3D {
             const backgroundZ = zMin - 0.5;  // Slightly behind the furthest text
 
             this._background.position.set(
-                bounds.min.x + bounds.width / 2,
+                bounds.min.x + bounds.width  / 2,
                 bounds.min.y + bounds.height / 2,
                 backgroundZ
             );

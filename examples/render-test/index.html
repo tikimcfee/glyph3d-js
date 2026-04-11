@@ -282,7 +282,6 @@
         import {
             GlyphAtlas,
             GlyphRenderer,
-            GlyphCollection,
             buildBatchBuffers,
             logCapture,
             createLogger,
@@ -570,168 +569,7 @@
             log(`  ids=${rendererIds}, glyphs=${entry.glyphs.length}, color update OK`, 'ok');
         });
 
-        // -- 5: Async flushAsync + getText --
-        defineTest('Async: flushAsync + getText', async () => {
-            const coll = new GlyphCollection(scene, atlas, {
-                defaultColor: { r: 0.2, g: 0.6, b: 1.0 },
-                worldScale: 0.025
-            });
-            trackObject(coll);
-
-            const id1 = coll.addText('async hello', { x: -20, y: -6, z: 0 });
-            const id2 = coll.addText('async world', { x: -5, y: -6, z: 0 });
-
-            await coll.flushAsync();
-
-            // Diagnostic: check internal state
-            const hasRenderer = !!coll.getRenderer();
-            const hasIdMap = coll._idMap.has(id1);
-            const committedEntry = coll._committedTexts.get(id1);
-            const rendererId = coll._idMap.get(id1);
-
-            log(`  renderer=${hasRenderer}, idMap=${hasIdMap}, rendererId=${rendererId}, committed=${!!committedEntry}`, 'info');
-
-            if (committedEntry) {
-                log(`  committed.rendererId=${committedEntry.rendererId}`, 'info');
-            }
-
-            if (hasRenderer && rendererId !== undefined) {
-                const rendererEntry = coll.getRenderer().getText(rendererId);
-                log(`  rendererEntry=${!!rendererEntry}, glyphs=${rendererEntry?.glyphs?.length ?? 'N/A'}`, 'info');
-            }
-
-            const entry = coll.getText(id1);
-            assert(entry !== null, 'getText returned null after flushAsync');
-            assert(!entry.pending, 'entry still marked as pending');
-            assert(entry.glyphs.length > 0, `no glyphs: got ${entry.glyphs.length} (rendererId=${rendererId}, committed.rendererId=${committedEntry?.rendererId})`);
-
-            log(`  id1 has ${entry.glyphs.length} glyphs`, 'ok');
-        });
-
-        // -- 6: Async updateColor post-flush --
-        defineTest('Async: updateColor post-flush', async () => {
-            const coll = new GlyphCollection(scene, atlas, {
-                defaultColor: { r: 0.3, g: 0.3, b: 0.3 },
-                worldScale: 0.025
-            });
-            trackObject(coll);
-
-            const ids = coll.addTexts([
-                { text: 'red',   position: { x: -20, y: -10, z: 0 } },
-                { text: 'green', position: { x: -12, y: -10, z: 0 } },
-                { text: 'blue',  position: { x:  -4, y: -10, z: 0 } },
-            ]);
-
-            await coll.flushAsync();
-
-            // Check state before update
-            const rendererId = coll._idMap.get(ids[0]);
-            log(`  pre-update: idMap[${ids[0]}]=${rendererId}`, 'info');
-            assert(rendererId !== undefined, `no rendererId for ids[0]=${ids[0]}`);
-
-            const preEntry = coll.getRenderer().getText(rendererId);
-            assert(preEntry !== null, `renderer has no entry for rendererId=${rendererId}`);
-            assert(preEntry.glyphs.length > 0, `no glyphs for rendererId=${rendererId}`);
-
-            // Update colors
-            coll.updateColor(ids[0], { r: 1, g: 0, b: 0 });
-            coll.updateColor(ids[1], { r: 0, g: 1, b: 0 });
-            coll.updateColor(ids[2], { r: 0, g: 0, b: 1 });
-            coll.flush();
-
-            const postEntry = coll.getRenderer().getText(rendererId);
-            assert(postEntry.glyphs[0].color.r === 1, `color not updated: r=${postEntry.glyphs[0].color.r}`);
-
-            log(`  3 colors updated after flushAsync`, 'ok');
-        });
-
-        // -- 7: Async updatePosition post-flush --
-        defineTest('Async: updatePosition post-flush', async () => {
-            const coll = new GlyphCollection(scene, atlas, {
-                defaultColor: { r: 1.0, g: 0.8, b: 0.0 },
-                worldScale: 0.025
-            });
-            trackObject(coll);
-
-            const id = coll.addText('shift me', { x: -20, y: -14, z: 0 });
-            await coll.flushAsync();
-
-            const rendererId = coll._idMap.get(id);
-            assert(rendererId !== undefined, `no rendererId for id=${id}`);
-
-            const beforeEntry = coll.getRenderer().getText(rendererId);
-            assert(beforeEntry !== null, `renderer entry null for rendererId=${rendererId}`);
-            const beforeX = beforeEntry.glyphs[0].position.x;
-
-            coll.updatePosition(id, { x: -5, y: -14, z: 0 });
-            coll.flush();
-
-            const afterX = coll.getRenderer().getText(rendererId).glyphs[0].position.x;
-            assert(afterX !== beforeX, `position unchanged: ${beforeX}`);
-
-            log(`  x: ${beforeX.toFixed(2)} -> ${afterX.toFixed(2)}`, 'ok');
-        });
-
-        // -- 8: Async batch 100 items --
-        defineTest('Async: batch 100 items', async () => {
-            const coll = new GlyphCollection(scene, atlas, {
-                defaultColor: { r: 0.5, g: 0.5, b: 0.5 },
-                worldScale: 0.025
-            });
-            trackObject(coll);
-
-            const ids = [];
-            for (let i = 0; i < 100; i++) {
-                ids.push(coll.addText(`w${i}`, {
-                    x: (i % 10) * 4 + 10,
-                    y: -Math.floor(i / 10) * 1.5 + 10,
-                    z: 0
-                }));
-            }
-
-            await coll.flushAsync();
-
-            let tracked = 0;
-            let withGlyphs = 0;
-            for (const id of ids) {
-                const t = coll.getText(id);
-                if (t && !t.pending) tracked++;
-                if (t && t.glyphs && t.glyphs.length > 0) withGlyphs++;
-            }
-
-            assert(tracked === 100, `only ${tracked}/100 tracked`);
-            assert(withGlyphs === 100, `only ${withGlyphs}/100 have glyphs`);
-
-            // Color every 10th
-            for (let i = 0; i < 100; i += 10) {
-                coll.updateColor(ids[i], { r: 1, g: 0.3, b: 0.8 });
-            }
-            coll.flush();
-
-            log(`  100 items: ${tracked} tracked, ${withGlyphs} with glyphs`, 'ok');
-        });
-
-        // -- 9: getBounds after async --
-        defineTest('Async: getBounds', async () => {
-            const coll = new GlyphCollection(scene, atlas, {
-                defaultColor: { r: 0.6, g: 0.4, b: 0.8 },
-                worldScale: 0.025
-            });
-            trackObject(coll);
-
-            coll.addText('bounds test line one', { x: -20, y: -18, z: 0 });
-            coll.addText('bounds test line two', { x: -20, y: -19.5, z: 0 });
-            await coll.flushAsync();
-
-            const bounds = coll.getBounds();
-            assert(bounds !== null, 'bounds is null');
-            assert(bounds.width > 0, `invalid width: ${bounds.width}`);
-            assert(bounds.height > 0, `invalid height: ${bounds.height}`);
-
-            log(`  bounds: ${bounds.width.toFixed(1)} x ${bounds.height.toFixed(1)}`, 'ok');
-        });
-
-        // -- 10: Depth ordering --
+        // -- 5: Depth ordering --
         defineTest('Depth: glyph-over-background', async () => {
             const bgGeo = new THREE.PlaneGeometry(15, 4);
             const bgMat = new THREE.MeshBasicMaterial({
@@ -755,26 +593,26 @@
             log(`  depthWrite=${mat.depthWrite}, transparent=${mat.transparent}`, 'ok');
         });
 
-        // -- 11: Mixed sync + async --
-        defineTest('Mixed: sync + async coexist', async () => {
-            const syncR = new GlyphRenderer(scene, atlas, { defaultColor: { r: 0, g: 1, b: 0 } });
-            trackObject(syncR);
-            const syncId = syncR.render('SYNC', { x: 15, y: -18, z: 0 });
+        // -- 6: Multiple renderers coexist --
+        defineTest('Multi: two GlyphRenderers coexist', async () => {
+            const r1 = new GlyphRenderer(scene, atlas, { defaultColor: { r: 0, g: 1, b: 0 } });
+            trackObject(r1);
+            const id1 = r1.render('RENDERER-1', { x: 15, y: -18, z: 0 });
 
-            const asyncC = new GlyphCollection(scene, atlas, {
-                defaultColor: { r: 1, g: 0.5, b: 0 },
-                worldScale: 0.025
-            });
-            trackObject(asyncC);
-            const asyncId = asyncC.addText('ASYNC', { x: 15, y: -20, z: 0 });
-            await asyncC.flushAsync();
+            const r2 = new GlyphRenderer(scene, atlas, { defaultColor: { r: 1, g: 0.5, b: 0 } });
+            trackObject(r2);
+            const id2 = r2.render('RENDERER-2', { x: 15, y: -20, z: 0 });
 
-            // Both should be updatable
-            syncR.updateColor(syncId, { r: 0, g: 1, b: 1 });
-            asyncC.updateColor(asyncId, { r: 1, g: 1, b: 0 });
-            asyncC.flush();
+            // Both should be updatable independently
+            r1.updateColor(id1, { r: 0, g: 1, b: 1 });
+            r2.updateColor(id2, { r: 1, g: 1, b: 0 });
 
-            log(`  sync + async both active and updatable`, 'ok');
+            const e1 = r1.getText(id1);
+            const e2 = r2.getText(id2);
+            assert(e1 !== null, 'r1.getText returned null');
+            assert(e2 !== null, 'r2.getText returned null');
+
+            log(`  two renderers both active and updatable`, 'ok');
         });
 
         // ============================================================

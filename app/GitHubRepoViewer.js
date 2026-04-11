@@ -1643,7 +1643,7 @@ export class GitHubRepoViewer {
         });
         // Wire picking before load so flush auto-registers
         if (this.pickingSystem) {
-            grid.getCollection().setPickingSystem(this.pickingSystem);
+            grid.setPickingSystem(this.pickingSystem);
         }
         await grid.loadFileAsync(filename, content);
         grid.userData.sourcePath = path;

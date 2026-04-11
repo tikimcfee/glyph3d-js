@@ -279,28 +279,27 @@ export class DiffController {
         });
 
         // Bypass CodeGrid's normal loadFile flow — we need per-line color control.
-        // Access the underlying GlyphCollection directly.
-        const collection = grid.getCollection();
-        const metrics = collection._getMetrics();
+        // CodeGrid now exposes addText() / flushAsync() directly (no GlyphCollection wrapper).
+        const metrics = grid.metrics;
         let currentY = 0;
 
         // Add filename label
-        collection.addText(label, { x: 0, y: currentY, z: 0 }, {
+        grid.addText(label, { x: 0, y: currentY, z: 0 }, {
             color: options.filenameColor || { r: 0.6, g: 0.8, b: 1.0 }
         });
-        currentY -= metrics.lineSpacing * 1.5;
+        currentY -= metrics.lineHeight * 1.5;
 
         // Add each line with its diff color
         for (const line of lines) {
             const color = getDiffColor(line.type);
             const displayText = line.text || ' '; // space for spacer lines to maintain vertical rhythm
 
-            collection.addText(displayText, { x: 0, y: currentY, z: 0 }, { color });
-            currentY -= metrics.lineSpacing;
+            grid.addText(displayText, { x: 0, y: currentY, z: 0 }, { color });
+            currentY -= metrics.lineHeight;
         }
 
         // Flush to GPU via worker pipeline
-        await collection.flushAsync();
+        await grid.flushAsync();
 
         // Update the background to fit content
         grid._updateBackground();
