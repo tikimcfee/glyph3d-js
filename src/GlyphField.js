@@ -43,6 +43,7 @@ const {
     ivec2,
     If,
     Return,
+    Discard,
 } = TSL;
 
 import { PERF_THRESHOLDS } from './core/constants.js';
@@ -120,10 +121,8 @@ function _buildOutputNode(varyings) {
     const { vColor, vGroupAlpha, vAddedColor } = varyings;
 
     return Fn(() => {
-        // Group invisible: full alpha-discard
-        If(vGroupAlpha.lessThan(0.01), () => {
-            Return(vec4(0, 0, 0, 0));
-        });
+        // Group invisible: discard fragment
+        Discard(vGroupAlpha.lessThan(0.01));
 
         // Final color = (instanceColor * groupColor + addedHighlight), clamped
         const finalColor = vColor.add(vAddedColor).clamp(float(0), float(1));

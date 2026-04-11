@@ -22,7 +22,7 @@ import * as THREE from 'three';
 let _tslLoaded = false;
 let _MeshBasicNodeMaterial, _Fn, _attribute, _uniform, _texture,
     _vec2, _vec3, _vec4, _float, _int, _instanceIndex,
-    _modelViewMatrix, _cameraProjectionMatrix, _positionLocal, _If, _Return;
+    _modelViewMatrix, _cameraProjectionMatrix, _positionLocal, _If, _Return, _select;
 
 async function _loadTSL() {
     if (_tslLoaded) return;
@@ -45,6 +45,7 @@ async function _loadTSL() {
     _positionLocal            = tsl.positionLocal;
     _If                       = tsl.If;
     _Return                   = tsl.Return;
+    _select                   = tsl.select;
     _tslLoaded = true;
 }
 
@@ -380,14 +381,14 @@ export class PickingSystem {
             const gColor = groupTex.sample(_vec2(_float(0.625), gv));
             const gScale = groupTex.sample(_vec2(_float(0.875), gv));
 
-            const visible = gColor.a.greaterThan(0.01);
-            _If(visible.not(), () => {
-                // Clip to degenerate position (off-screen)
-                _Return(_vec4(2, 2, 2, 1));
-            });
-
+            // Compute normal position
             const worldPos = scaled.add(alignOffset).add(iPos.mul(gScale.xyz)).add(gPos.xyz);
-            return _cameraProjectionMatrix.mul(_modelViewMatrix.mul(_vec4(worldPos, 1)));
+            const normalClip = _cameraProjectionMatrix.mul(_modelViewMatrix.mul(_vec4(worldPos, 1)));
+
+            // If invisible, send off-screen; otherwise use normal position
+            // (Can't use Return or Discard in vertex — use select/mix instead)
+            const visible = gColor.a.greaterThan(0.01);
+            return _select(visible, normalClip, _vec4(2, 2, 2, 1));
         });
 
         const fragmentFn = _Fn(() => {

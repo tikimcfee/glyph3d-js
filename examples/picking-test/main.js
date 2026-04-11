@@ -84,6 +84,19 @@ document.body.appendChild(renderer.domElement);
 // Mandatory async init for WebGPU
 await renderer.init();
 
+// Intercept WGSL shader creation to dump source on errors
+const _origCreateShaderModule = renderer.backend?.device?.createShaderModule?.bind(renderer.backend.device);
+if (_origCreateShaderModule) {
+    renderer.backend.device.createShaderModule = (descriptor) => {
+        console.group(`WGSL [${descriptor.label}]`);
+        console.log(descriptor.code);
+        console.groupEnd();
+        return _origCreateShaderModule(descriptor);
+    };
+} else {
+    console.warn('Could not hook createShaderModule — device not yet available');
+}
+
 logResult(`Renderer: ${renderer.isWebGPURenderer ? 'WebGPURenderer' : 'WebGLRenderer (fallback)'}`);
 
 // ---------------------------------------------------------------------------
