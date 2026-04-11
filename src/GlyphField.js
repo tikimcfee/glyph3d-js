@@ -82,9 +82,9 @@ function _buildVertexNode(uniforms) {
 
         // Group DataTexture lookup (4 columns × maxGroups rows, RGBA32F)
         const gv     = iGroup.add(0.5).div(groupTexHeight);
-        const gPos   = texture(groupTex, vec2(float(0.125), gv));
-        const gColor = texture(groupTex, vec2(float(0.625), gv));
-        const gScale = texture(groupTex, vec2(float(0.875), gv));
+        const gPos   = groupTex.uv(vec2(float(0.125), gv));
+        const gColor = groupTex.uv(vec2(float(0.625), gv));
+        const gScale = groupTex.uv(vec2(float(0.875), gv));
 
         // World position = aligned quad + (instancePos * groupScale) + groupOffset
         const worldPos = scaled.add(alignOffset).add(iPos.mul(gScale.xyz)).add(gPos.xyz);
@@ -100,7 +100,7 @@ function _buildVertexNode(uniforms) {
         // Per-glyph highlight from RGBA8 DataTexture (1024 wide, 2D wrapped)
         const hx = int(instanceIndex).mod(int(1024));
         const hy = int(instanceIndex).div(int(1024));
-        const highlight = textureLoad(highlightTex, ivec2(hx, hy), int(0));
+        const highlight = highlightTex.uv(ivec2(hx, hy)).setSampler(false);
         vAddedColor.assign(highlight.rgb);
 
         return clipPos;
@@ -302,11 +302,12 @@ export default class GlyphField {
         geometry.instanceCount = 0;
 
         // ── Build TSL NodeMaterial ────────────────────────────────────────────
-        const groupTexNode    = uniform(this._groupTexture);
-        const groupTexHNode   = uniform(float(this._maxGroups));
-        const highlightTexNode = uniform(this._highlightTexture);
+        // texture() creates a TextureNode — use .value for hot-swap, NOT uniform()
+        const groupTexNode     = texture(this._groupTexture);
+        const groupTexHNode    = uniform(float(this._maxGroups));
+        const highlightTexNode = texture(this._highlightTexture);
 
-        // Store for hot-swap
+        // Store for hot-swap (.value = newTexture)
         this._groupTexUniform  = groupTexNode;
         this._groupTexHUniform = groupTexHNode;
         this._highlightUniform = highlightTexNode;

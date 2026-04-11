@@ -367,7 +367,7 @@ export class PickingSystem {
         const iSize  = _attribute('instanceSize',     'vec2');
         const iGroup = _attribute('instanceGroupId',  'float');
 
-        const groupTex       = _uniform(glyphRenderer._groupTexture);
+        const groupTex       = _texture(glyphRenderer._groupTexture);
         const groupTexHeight = _uniform(glyphRenderer._maxGroups);
         const baseId         = _uniform(startId);
 
@@ -376,9 +376,9 @@ export class PickingSystem {
             const alignOffset = _vec3(iSize.x.mul(0.5), _float(0), _float(0));
 
             const gv     = iGroup.add(0.5).div(groupTexHeight);
-            const gPos   = _texture(groupTex,   _vec2(_float(0.125), gv));
-            const gColor = _texture(groupTex,   _vec2(_float(0.625), gv));
-            const gScale = _texture(groupTex,   _vec2(_float(0.875), gv));
+            const gPos   = groupTex.uv(_vec2(_float(0.125), gv));
+            const gColor = groupTex.uv(_vec2(_float(0.625), gv));
+            const gScale = groupTex.uv(_vec2(_float(0.875), gv));
 
             const visible = gColor.a.greaterThan(0.01);
             _If(visible.not(), () => {
