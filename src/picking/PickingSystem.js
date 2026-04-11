@@ -591,10 +591,9 @@ export class PickingSystem {
         const pixel = new Uint8Array(4);
         if (this._target && x >= 0 && y >= 0 && x < this._target.width && y < this._target.height) {
             if (this._isWebGPU && this._renderer.readRenderTargetPixelsAsync) {
-                // WebGPU path: async readback (no sync readRenderTargetPixels on WebGPU)
-                const yFlipped = this._target.height - 1 - y;
+                // WebGPU path: async readback — Y=0 is top (same as CSS), no flip needed
                 const buf = await this._renderer.readRenderTargetPixelsAsync(
-                    this._target, x, yFlipped, 1, 1
+                    this._target, x, y, 1, 1
                 );
                 // buf is a Uint8Array or ArrayBuffer — normalise to Uint8Array
                 const view = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
