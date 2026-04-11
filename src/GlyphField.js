@@ -82,9 +82,9 @@ function _buildVertexNode(uniforms) {
 
         // Group DataTexture lookup (4 columns × maxGroups rows, RGBA32F)
         const gv     = iGroup.add(0.5).div(groupTexHeight);
-        const gPos   = groupTex.uv(vec2(float(0.125), gv));
-        const gColor = groupTex.uv(vec2(float(0.625), gv));
-        const gScale = groupTex.uv(vec2(float(0.875), gv));
+        const gPos   = groupTex.sample(vec2(float(0.125), gv));
+        const gColor = groupTex.sample(vec2(float(0.625), gv));
+        const gScale = groupTex.sample(vec2(float(0.875), gv));
 
         // World position = aligned quad + (instancePos * groupScale) + groupOffset
         const worldPos = scaled.add(alignOffset).add(iPos.mul(gScale.xyz)).add(gPos.xyz);
@@ -100,7 +100,7 @@ function _buildVertexNode(uniforms) {
         // Per-glyph highlight from RGBA8 DataTexture (1024 wide, 2D wrapped)
         const hx = int(instanceIndex).mod(int(1024));
         const hy = int(instanceIndex).div(int(1024));
-        const highlight = highlightTex.uv(ivec2(hx, hy)).setSampler(false);
+        const highlight = highlightTex.sample(ivec2(hx, hy)).setSampler(false);
         vAddedColor.assign(highlight.rgb);
 
         return clipPos;

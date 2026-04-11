@@ -376,9 +376,9 @@ export class PickingSystem {
             const alignOffset = _vec3(iSize.x.mul(0.5), _float(0), _float(0));
 
             const gv     = iGroup.add(0.5).div(groupTexHeight);
-            const gPos   = groupTex.uv(_vec2(_float(0.125), gv));
-            const gColor = groupTex.uv(_vec2(_float(0.625), gv));
-            const gScale = groupTex.uv(_vec2(_float(0.875), gv));
+            const gPos   = groupTex.sample(_vec2(_float(0.125), gv));
+            const gColor = groupTex.sample(_vec2(_float(0.625), gv));
+            const gScale = groupTex.sample(_vec2(_float(0.875), gv));
 
             const visible = gColor.a.greaterThan(0.01);
             _If(visible.not(), () => {
