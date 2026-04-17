@@ -27,7 +27,7 @@ export default class AgentGrid {
         this.title = options.title || id;
 
         this._lines = [];
-        this._dirty = false;
+        this._scheduled = false;
         this._rendering = false;
         this._lastRenderedContent = '';
 
@@ -100,27 +100,36 @@ export default class AgentGrid {
 
     /** @private */
     _markDirty() {
-        if (this._dirty) return;
-        this._dirty = true;
-        requestAnimationFrame(() => this._render());
+        if (this._scheduled) return;
+        this._scheduled = true;
+        // setTimeout instead of requestAnimationFrame: RAF throttles hard on
+        // backgrounded/obscured tabs and appends pile up in _lines while the
+        // mesh never re-renders. setTimeout keeps the render loop alive.
+        setTimeout(() => {
+            this._scheduled = false;
+            this._render();
+        }, 0);
     }
 
     /** @private */
     async _render() {
-        this._dirty = false;
-        if (this._rendering) return; // previous loadFileAsync still in flight
-        const content = this._lines.join('\n');
-        if (content === this._lastRenderedContent) return;
-        this._lastRenderedContent = content;
+        if (this._rendering) return; // serialize; concurrent call will see updated _lines below
         this._rendering = true;
         try {
-            await this.grid.loadFileAsync(`[${this.title}]`, content);
+            // Loop until no more content to render. Each iteration snapshots
+            // current content, awaits the async mesh rebuild, then re-checks.
+            // Guarantees catching up to the latest _lines state even under
+            // rapid append pressure.
+            while (true) {
+                const content = this._lines.join('\n');
+                if (content === this._lastRenderedContent) break;
+                await this.grid.loadFileAsync(`[${this.title}]`, content);
+                // Only mark rendered after the await resolves successfully —
+                // a throw would leave _lastRenderedContent stale so we retry.
+                this._lastRenderedContent = content;
+            }
         } finally {
             this._rendering = false;
-            // If new content arrived while we were rendering, schedule another pass
-            if (this._lines.join('\n') !== this._lastRenderedContent) {
-                this._markDirty();
-            }
         }
     }
 }
