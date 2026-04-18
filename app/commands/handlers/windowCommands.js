@@ -249,19 +249,22 @@ export function updateWindowBillboards(ctx, camera) {
         }
         const target = ag._billboardTarget;
 
-        // Cache local content center so we don't call getContentBounds each
-        // frame. Re-fetches lazily if bounds were null at window-create time
-        // (content still loading).
-        if (!ag._contentCenterCache && typeof grid.getContentBounds === 'function') {
+        // Recompute local content center every frame. getContentBounds is
+        // O(cached) — CodeGrid dirties its own cache on add/remove/change, so
+        // this is a cheap lookup unless content actually changed. A stale
+        // cache here (e.g. window grew from 0 → 500 rows over a tmux stream)
+        // puts the pivot at an old center, and yaw rotation swings the grid
+        // around a phantom corner — visible as severe oblique shear.
+        let cc = null;
+        if (typeof grid.getContentBounds === 'function') {
             const b = grid.getContentBounds();
             if (b && b.min && b.max) {
-                ag._contentCenterCache = {
+                cc = {
                     x: (b.min.x + b.max.x) / 2,
                     y: (b.min.y + b.max.y) / 2,
                 };
             }
         }
-        const cc = ag._contentCenterCache;
 
         const dx = camX - target.x;
         const dz = camZ - target.z;

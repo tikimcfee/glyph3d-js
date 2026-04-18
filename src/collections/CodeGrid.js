@@ -804,18 +804,12 @@ class CodeGrid extends THREE.Object3D {
             return this._flush();
         }
 
-        // Process removals if renderer exists
-        if (this._renderer) {
-            for (const rendererId of this._pendingRemovals) {
-                this._renderer.remove(rendererId);
-                const ourId = this._reverseIdMap.get(rendererId);
-                if (ourId !== undefined) {
-                    this._idMap.delete(ourId);
-                    this._reverseIdMap.delete(rendererId);
-                    this._committedTexts.delete(ourId);
-                }
-            }
-        }
+        // Defer removals until the worker returns. Applying them now would
+        // empty the GPU buffer while we wait ~5-20ms for the new content to
+        // build, flashing the grid. Snapshot and apply atomically below,
+        // after the new buffer is ready, so the swap happens inside a single
+        // synchronous block with no intermediate paint.
+        const deferredRemovals = this._pendingRemovals;
         this._pendingRemovals = [];
 
         if (this._pendingAdds.length > 0) {
@@ -871,6 +865,19 @@ class CodeGrid extends THREE.Object3D {
                     this._createRendererWithSize(buffers.count, true);
                 }
 
+                // Apply deferred removals here, in the same synchronous block
+                // as the buffer swap below. No paint happens between these
+                // two operations, so the grid transitions old→new atomically.
+                for (const rendererId of deferredRemovals) {
+                    this._renderer.remove(rendererId);
+                    const ourId = this._reverseIdMap.get(rendererId);
+                    if (ourId !== undefined) {
+                        this._idMap.delete(ourId);
+                        this._reverseIdMap.delete(rendererId);
+                        this._committedTexts.delete(ourId);
+                    }
+                }
+
                 const rendererIds = this._renderer.applyPrebuiltBuffers(buffers, items);
 
                 this._workerBoundsCache  = buffers.bounds;
@@ -914,6 +921,8 @@ class CodeGrid extends THREE.Object3D {
                 this._pendingAdds = [];
             } catch (error) {
                 console.warn('CodeGrid: Worker flush failed, falling back to sync:', error);
+                // Put the deferred removals back so _flush() applies them.
+                this._pendingRemovals = deferredRemovals.concat(this._pendingRemovals);
                 this._flush();
                 return;
             }
@@ -993,8 +1002,9 @@ class CodeGrid extends THREE.Object3D {
         }
         this._contentTextIds = [];
 
-        // Flush removals
-        this._flush();
+        // Removals stay pending. Callers (loadText → _layoutContent,
+        // loadTextAsync → _layoutContentAsync) flush afterwards — doing it
+        // here would push an empty GPU frame and flash the grid.
     }
 
     /**

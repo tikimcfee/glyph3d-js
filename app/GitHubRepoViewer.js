@@ -415,6 +415,9 @@ export class GitHubRepoViewer {
             virtualizer: this.gridVirtualizer,
         });
         this.hitDispatcher.attach();
+        // Expose to camera controller for focus-pivot raycasting (step 2 of
+        // the focus system — pivot follows whatever window is under the cursor).
+        this.sceneContext.hitDispatcher = this.hitDispatcher;
 
         // Listen for camera focus events to sync tree UI
         window.addEventListener('camera-focus-changed', (e) => {

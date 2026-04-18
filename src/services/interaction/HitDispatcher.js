@@ -191,11 +191,19 @@ export class HitDispatcher {
      * Raycast against grid and agent background meshes.
      * Uses registry.findByType() (NOT registry.list()).
      *
-     * @private
+     * Public alias for external callers (camera focus-pivot, etc.). The
+     * private name `_raycastDraggable` describes its internal use for drag
+     * targeting; the public `raycastAtClient` describes what it does.
+     *
      * @param {number} clientX
      * @param {number} clientY
      * @returns {{ grid: Object, registryId: string, entry: Object }|null}
      */
+    raycastAtClient(clientX, clientY) {
+        return this._raycastDraggable(clientX, clientY);
+    }
+
+    /** @private */
     _raycastDraggable(clientX, clientY) {
         const rect = this.canvas.getBoundingClientRect();
         const mouse = new THREE.Vector2(
@@ -233,6 +241,7 @@ export class HitDispatcher {
             grid: entry.grid,
             registryId: entry.id,
             entry,
+            point: intersects[0].point,   // world-space hit location
         };
     }
 

@@ -90,9 +90,11 @@ export class ViewerCameraController {
         document.addEventListener('keydown', this._onKeyDown);
         document.addEventListener('keyup', this._onKeyUp);
 
-        // Orbit pivot — point the camera rotates *around* in Shift+drag mode.
-        // Defaults to world origin; focus commands could update this later.
-        this._orbitPivot = new this.THREE.Vector3(0, 0, 0);
+        // Focus pivot — the one point that zoom dollies toward and orbit
+        // rotates around. Defaults to world origin; focus sources (implicit
+        // raycast under cursor, explicit window.focus command) update it so
+        // "zoom in" always means "zoom in on the thing I'm looking at".
+        this._focusPivot = new this.THREE.Vector3(0, 0, 0);
 
         // --- Click-drag to pan (translation); Shift+drag = orbit (rotation) ---
         this._onMouseDown = (e) => {
@@ -130,7 +132,14 @@ export class ViewerCameraController {
             canvas.style.cursor = 'grab';
         };
         this._onMouseMove = (e) => {
-            if (!this.isDragging) return;
+            // Focus-pivot probe: while NOT dragging, throttle-raycast under the
+            // cursor so `_focusPivot` tracks whatever window the user is
+            // pointing at. Explicit focus (later step) will set a lock flag
+            // that suppresses this update.
+            if (!this.isDragging) {
+                this._updateFocusPivotFromCursor(e.clientX, e.clientY);
+                return;
+            }
 
             const dx = e.clientX - this._dragPrevX;
             const dy = e.clientY - this._dragPrevY;
@@ -155,13 +164,28 @@ export class ViewerCameraController {
                 if (secondaryMod(e) || e.ctrlKey) {
                     // Secondary mod + scroll = zoom (Alt on Mac, Shift on Linux/Win)
                     // ctrlKey = trackpad pinch-to-zoom (browsers set ctrlKey for pinch)
+                    //
+                    // Zoom dollies the camera *toward the focus pivot*, not
+                    // along its own forward axis. That way "zoom in" always
+                    // converges on the thing you're focused on — the window
+                    // you're reading stays centered and grows in the view,
+                    // instead of sliding sideways as the camera moves along
+                    // an abstract axis.
                     const delta = this.settings.invertScroll ? e.deltaY : -e.deltaY;
-                    const zoomScale = this.settings.dynamicSpeed
-                        ? this._getViewDistance() / 200
-                        : 1;
-                    const zoomAmount = delta * this.settings.scrollSensitivity * 0.5 * zoomScale;
-                    const forward = new this.THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-                    camera.position.addScaledVector(forward, zoomAmount);
+                    const toPivot = this._focusPivot.clone().sub(camera.position);
+                    const dist = toPivot.length();
+                    if (dist > 0.01) {
+                        const zoomScale = this.settings.dynamicSpeed
+                            ? dist / 200
+                            : 1;
+                        let zoomAmount = delta * this.settings.scrollSensitivity * 0.5 * zoomScale;
+                        // Clamp so we never dolly past the pivot; leave a
+                        // small buffer so we can still orbit close-up.
+                        const maxIn = dist - 1;
+                        if (zoomAmount > maxIn) zoomAmount = maxIn;
+                        const dir = toPivot.divideScalar(dist);
+                        camera.position.addScaledVector(dir, zoomAmount);
+                    }
                 } else {
                     // Scroll = pan (translate)
                     this._applyDragTranslation(-e.deltaX, -e.deltaY);
@@ -221,16 +245,41 @@ export class ViewerCameraController {
     /**
      * Get the effective view distance for speed scaling.
      * Uses camera Z (distance to content plane) rather than distance from
-     * ORBIT rotation. Shift+drag rotates the camera *around* `_orbitPivot`,
+     * ORBIT rotation. Shift+drag rotates the camera *around* `_focusPivot`,
      * keeping it at the same distance from the pivot but swinging its
      * position along a sphere. Syncs yaw/pitch afterward so WASD keeps
      * working in the new orientation.
      *
      * @private
      */
+    /**
+     * Throttled raycast under the cursor. When the cursor hovers a window,
+     * update `_focusPivot` to that window's world-space center so subsequent
+     * zoom/orbit operations treat it as the anchor. When the cursor is over
+     * empty space, leave the pivot alone — we don't want it flicking back to
+     * origin every time the user moves to the canvas edge.
+     *
+     * @private
+     */
+    _updateFocusPivotFromCursor(clientX, clientY) {
+        if (this._focusLocked) return;   // explicit focus (step 3) overrides
+        const now = performance.now();
+        if (now - (this._lastFocusProbe || 0) < 60) return;
+        this._lastFocusProbe = now;
+
+        const hd = this.ctx?.hitDispatcher;
+        if (!hd || typeof hd.raycastAtClient !== 'function') return;
+        const hit = hd.raycastAtClient(clientX, clientY);
+        if (!hit || !hit.point) return;
+
+        // Use the exact world-space intersection point — zoom lands on the
+        // precise line/glyph the cursor is over, not just the window center.
+        this._focusPivot.copy(hit.point);
+    }
+
     _applyDragRotation(dx, dy) {
         const camera = this.ctx.camera;
-        const pivot = this._orbitPivot;
+        const pivot = this._focusPivot;
         const offset = camera.position.clone().sub(pivot);
         const radius = offset.length();
         if (radius < 0.001) return;
