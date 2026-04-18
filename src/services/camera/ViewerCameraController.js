@@ -4,6 +4,18 @@
  * Translation-first navigation: click-drag pans, scroll zooms,
  * WASD translates in camera-relative directions.
  *
+ * Architecture: single-drain input state machine.
+ *
+ *   - Event handlers are pure state updaters. They record what the user is
+ *     doing into `this.input` and never touch the camera directly.
+ *   - `applyCamera(dt)`, called once per frame from the animate loop,
+ *     reduces `this.input` into a single camera transform. All position
+ *     and rotation writes live here.
+ *
+ * This is the only place the camera is mutated. New modes (focus-lock,
+ * fly-cam, trackball) are added as branches inside `applyCamera`, not as
+ * new event listeners fighting over the camera matrix.
+ *
  * All user-adjustable settings are persisted to localStorage under
  * namespaced g3d.camera.* keys via StateController.
  *
@@ -25,6 +37,9 @@ const CAMERA_DEFAULTS = {
     dynamicSpeed: true,
 };
 
+const CLICK_THRESHOLD_PX = 5;
+const FOCUS_PROBE_INTERVAL_MS = 60;
+
 export class ViewerCameraController {
     /**
      * @param {SceneContext} ctx
@@ -33,7 +48,6 @@ export class ViewerCameraController {
         this.ctx = ctx;
         this.THREE = ctx.THREE;
 
-        // Load persisted settings (per-field from StateController)
         this.settings = {
             cameraSpeed:       stateController.get('camera.speed', CAMERA_DEFAULTS.cameraSpeed),
             dragSensitivity:   stateController.get('camera.dragSensitivity', CAMERA_DEFAULTS.dragSensitivity),
@@ -44,247 +58,344 @@ export class ViewerCameraController {
             dynamicSpeed:      stateController.get('camera.dynamicSpeed', CAMERA_DEFAULTS.dynamicSpeed),
         };
 
-        // Movement state
-        this.keys = {};
-        this.cameraSpeed = this.settings.cameraSpeed;
-
-        // Drag state (translation, not rotation)
-        this.isDragging = false;
-        this._dragPrevX = 0;
-        this._dragPrevY = 0;
-
-        // Click disambiguation: track mousedown position to distinguish
-        // click (displacement < 5px) from drag (displacement >= 5px)
-        this._mouseDownX = 0;
-        this._mouseDownY = 0;
-
-        // Rotation state (only set programmatically via focus methods)
+        // Publicly-readable rotation state. `applyCamera` writes these into
+        // the camera quaternion each frame using YXZ Euler order.
         this.pitch = 0;
         this.yaw = 0;
 
-        // Bound listener refs for cleanup
-        this._onKeyDown = null;
-        this._onKeyUp = null;
-        this._onMouseDown = null;
-        this._onMouseUp = null;
-        this._onMouseMove = null;
-        this._onWheel = null;
-        this._onResize = null;
-        this._onSpeedChange = null;
-        this._onDragSensChange = null;
-        this._onScrollSensChange = null;
-        this._onReset = null;
-        this._onFitAll = null;
+        // cameraSpeed is exposed as a settable property because the speed
+        // slider writes directly to it. Keeping a top-level reference also
+        // matches the TouchController's expectations.
+        this.cameraSpeed = this.settings.cameraSpeed;
+
+        // Input state — single source of truth for what the user is doing.
+        // Event handlers update this; applyCamera() reads it.
+        this.input = this._makeInputState();
+
+        // Backwards-compat alias. Other code and helpers in this file still
+        // reference `_focusPivot` directly; point both at the same Vector3.
+        this._focusPivot = this.input.focus.pivot;
+
+        // Listener registry for clean teardown.
+        this._listeners = [];
+    }
+
+    _makeInputState() {
+        const THREE = this.THREE;
+        return {
+            // Event-shaped modifier snapshot — passed directly to
+            // primaryMod / secondaryMod without needing a conversion.
+            modifiers: { shiftKey: false, altKey: false, ctrlKey: false, metaKey: false },
+            buttons:   { left: false, middle: false, right: false },
+            cursor:    { x: 0, y: 0, inCanvas: false },
+            keys:      new Set(),
+            drag: {
+                active: false,
+                mode:   null,             // 'pan' | 'orbit'
+                startX: 0, startY: 0,
+                prevX:  0, prevY:  0,
+                dx:     0, dy:     0,     // accumulated since last drain
+            },
+            wheel: {
+                dx: 0, dy: 0,             // accumulated since last drain
+                clientX: 0, clientY: 0,
+                mods: null,               // snapshot at event time
+            },
+            focus: {
+                pivot:       new THREE.Vector3(0, 0, 0),
+                locked:      false,       // explicit window.focus suppresses probe
+                lastProbeMs: 0,
+            },
+        };
     }
 
     /**
      * Bind all event listeners. Call once after construction.
+     *
+     * Handlers here are intentionally thin — they update `this.input` and
+     * nothing else. Anything that touches the camera lives in applyCamera.
      */
     setupEventListeners() {
-        const camera = this.ctx.camera;
         const canvas = this.ctx.canvas;
+        const input = this.input;
+
+        const track = (target, event, handler, opts) => {
+            target.addEventListener(event, handler, opts);
+            this._listeners.push({ target, event, handler, opts });
+        };
+
+        const snapshotModifiers = (e) => {
+            input.modifiers.shiftKey = !!e.shiftKey;
+            input.modifiers.altKey   = !!e.altKey;
+            input.modifiers.ctrlKey  = !!e.ctrlKey;
+            input.modifiers.metaKey  = !!e.metaKey;
+        };
 
         // --- Keyboard ---
-        this._onKeyDown = (e) => { this.keys[e.code] = true; };
-        this._onKeyUp = (e) => { this.keys[e.code] = false; };
-        document.addEventListener('keydown', this._onKeyDown);
-        document.addEventListener('keyup', this._onKeyUp);
 
-        // Focus pivot — the one point that zoom dollies toward and orbit
-        // rotates around. Defaults to world origin; focus sources (implicit
-        // raycast under cursor, explicit window.focus command) update it so
-        // "zoom in" always means "zoom in on the thing I'm looking at".
-        this._focusPivot = new this.THREE.Vector3(0, 0, 0);
+        track(document, 'keydown', (e) => {
+            snapshotModifiers(e);
+            input.keys.add(e.code);
+        });
+        track(document, 'keyup', (e) => {
+            snapshotModifiers(e);
+            input.keys.delete(e.code);
+        });
 
-        // --- Click-drag to pan (translation); Shift+drag = orbit (rotation) ---
-        this._onMouseDown = (e) => {
-            if (e.target === canvas || canvas.contains(e.target)) {
-                this.isDragging = true;
-                this.dragMode = e.shiftKey ? 'orbit' : 'pan';
-                this._dragPrevX = e.clientX;
-                this._dragPrevY = e.clientY;
-                this._mouseDownX = e.clientX;
-                this._mouseDownY = e.clientY;
-                canvas.style.cursor = this.dragMode === 'orbit' ? 'move' : 'grabbing';
-            }
-        };
-        this._onMouseUp = (e) => {
-            if (this.isDragging) {
-                const dx = e.clientX - this._mouseDownX;
-                const dy = e.clientY - this._mouseDownY;
-                const displacement = Math.sqrt(dx * dx + dy * dy);
+        // --- Mouse: drag state + click disambiguation ---
 
-                // Displacement under threshold → treat as a click, not a drag
-                if (displacement < 5) {
+        track(canvas, 'mousedown', (e) => {
+            if (!(e.target === canvas || canvas.contains(e.target))) return;
+            snapshotModifiers(e);
+            if (e.button === 0) input.buttons.left = true;
+            if (e.button === 1) input.buttons.middle = true;
+            if (e.button === 2) input.buttons.right = true;
+
+            input.drag.active = true;
+            input.drag.mode   = e.shiftKey ? 'orbit' : 'pan';
+            input.drag.startX = e.clientX;
+            input.drag.startY = e.clientY;
+            input.drag.prevX  = e.clientX;
+            input.drag.prevY  = e.clientY;
+            input.drag.dx     = 0;
+            input.drag.dy     = 0;
+
+            canvas.style.cursor = input.drag.mode === 'orbit' ? 'move' : 'grabbing';
+        });
+
+        track(document, 'mouseup', (e) => {
+            snapshotModifiers(e);
+            if (e.button === 0) input.buttons.left = false;
+            if (e.button === 1) input.buttons.middle = false;
+            if (e.button === 2) input.buttons.right = false;
+
+            if (input.drag.active) {
+                const dx = e.clientX - input.drag.startX;
+                const dy = e.clientY - input.drag.startY;
+                if (Math.sqrt(dx * dx + dy * dy) < CLICK_THRESHOLD_PX) {
                     canvas.dispatchEvent(new CustomEvent('canvas-click', {
                         detail: {
                             clientX: e.clientX,
                             clientY: e.clientY,
                             shiftKey: e.shiftKey,
                             ctrlKey: e.ctrlKey,
-                            metaKey: e.metaKey
+                            metaKey: e.metaKey,
                         },
-                        bubbles: true
+                        bubbles: true,
                     }));
                 }
             }
-            this.isDragging = false;
+            input.drag.active = false;
+            input.drag.mode   = null;
             canvas.style.cursor = 'grab';
-        };
-        this._onMouseMove = (e) => {
-            // Focus-pivot probe: while NOT dragging, throttle-raycast under the
-            // cursor so `_focusPivot` tracks whatever window the user is
-            // pointing at. Explicit focus (later step) will set a lock flag
-            // that suppresses this update.
-            if (!this.isDragging) {
-                this._updateFocusPivotFromCursor(e.clientX, e.clientY);
-                return;
-            }
-
-            const dx = e.clientX - this._dragPrevX;
-            const dy = e.clientY - this._dragPrevY;
-            this._dragPrevX = e.clientX;
-            this._dragPrevY = e.clientY;
-
-            if (this.dragMode === 'orbit') {
-                this._applyDragRotation(dx, dy);
-            } else {
-                this._applyDragTranslation(dx, dy);
-            }
-        };
-
-        canvas.addEventListener('mousedown', this._onMouseDown);
-        document.addEventListener('mouseup', this._onMouseUp);
-        document.addEventListener('mousemove', this._onMouseMove);
-
-        // --- Scroll: pan by default, zoom with Alt/Option or pinch (ctrlKey) ---
-        this._onWheel = (e) => {
-            if (e.target === canvas || canvas.contains(e.target)) {
-                e.preventDefault();
-                if (secondaryMod(e) || e.ctrlKey) {
-                    // Secondary mod + scroll = zoom (Alt on Mac, Shift on Linux/Win)
-                    // ctrlKey = trackpad pinch-to-zoom (browsers set ctrlKey for pinch)
-                    //
-                    // Zoom dollies the camera *toward the focus pivot*, not
-                    // along its own forward axis. That way "zoom in" always
-                    // converges on the thing you're focused on — the window
-                    // you're reading stays centered and grows in the view,
-                    // instead of sliding sideways as the camera moves along
-                    // an abstract axis.
-                    const delta = this.settings.invertScroll ? e.deltaY : -e.deltaY;
-                    const toPivot = this._focusPivot.clone().sub(camera.position);
-                    const dist = toPivot.length();
-                    if (dist > 0.01) {
-                        const zoomScale = this.settings.dynamicSpeed
-                            ? dist / 200
-                            : 1;
-                        let zoomAmount = delta * this.settings.scrollSensitivity * 0.5 * zoomScale;
-                        // Clamp so we never dolly past the pivot; leave a
-                        // small buffer so we can still orbit close-up.
-                        const maxIn = dist - 1;
-                        if (zoomAmount > maxIn) zoomAmount = maxIn;
-                        const dir = toPivot.divideScalar(dist);
-                        camera.position.addScaledVector(dir, zoomAmount);
-                    }
-                } else {
-                    // Scroll = pan (translate)
-                    this._applyDragTranslation(-e.deltaX, -e.deltaY);
-                }
-            }
-        };
-        canvas.addEventListener('wheel', this._onWheel, { passive: false });
-
-        // Set default cursor
-        canvas.style.cursor = 'grab';
-
-        // --- Window resize (camera-side: aspect ratio + projection) ---
-        this._onResize = () => {
-            const { width, height } = getCanvasViewportSize(canvas);
-            camera.aspect = width / height;
-            camera.updateProjectionMatrix();
-        };
-        window.addEventListener('resize', this._onResize);
-
-        // --- Speed slider ---
-        this._bindSlider('cam-speed', 'cam-speed-value', (val) => {
-            this.setSpeed(val);
         });
 
-        // --- Drag sensitivity slider ---
+        track(document, 'mousemove', (e) => {
+            snapshotModifiers(e);
+            input.cursor.x = e.clientX;
+            input.cursor.y = e.clientY;
+            input.cursor.inCanvas = (e.target === canvas || canvas.contains(e.target));
+
+            if (input.drag.active) {
+                // Accumulate drag delta; applyCamera drains it each frame.
+                input.drag.dx += e.clientX - input.drag.prevX;
+                input.drag.dy += e.clientY - input.drag.prevY;
+                input.drag.prevX = e.clientX;
+                input.drag.prevY = e.clientY;
+            } else {
+                // Idle hover — probe the focus pivot so zoom/orbit anchor on
+                // whatever the cursor is pointing at.
+                this._probeFocusPivot(e.clientX, e.clientY);
+            }
+        });
+
+        // --- Scroll: pan by default, zoom with secondary mod or pinch ---
+
+        track(canvas, 'wheel', (e) => {
+            if (!(e.target === canvas || canvas.contains(e.target))) return;
+            e.preventDefault();
+            snapshotModifiers(e);
+            input.wheel.dx += e.deltaX;
+            input.wheel.dy += e.deltaY;
+            input.wheel.clientX = e.clientX;
+            input.wheel.clientY = e.clientY;
+            // Snapshot modifiers at event time — the user may have released a
+            // modifier by the time we drain in applyCamera, but their intent
+            // for this scroll tick was set when the event fired.
+            input.wheel.mods = {
+                shiftKey: e.shiftKey,
+                altKey:   e.altKey,
+                ctrlKey:  e.ctrlKey,
+                metaKey:  e.metaKey,
+            };
+        }, { passive: false });
+
+        // --- Window resize ---
+
+        track(window, 'resize', () => {
+            const { width, height } = getCanvasViewportSize(canvas);
+            this.ctx.camera.aspect = width / height;
+            this.ctx.camera.updateProjectionMatrix();
+        });
+
+        canvas.style.cursor = 'grab';
+
+        // --- Settings UI (sliders, buttons) ---
+
+        this._bindSlider('cam-speed', 'cam-speed-value', (val) => this.setSpeed(val));
         this._bindSlider('drag-sensitivity', 'drag-sensitivity-value', (val) => {
             this.settings.dragSensitivity = val;
             this._persistSettings();
         });
-
-        // --- Scroll sensitivity slider ---
         this._bindSlider('scroll-sensitivity', 'scroll-sensitivity-value', (val) => {
             this.settings.scrollSensitivity = val;
             this._persistSettings();
         });
 
-        // --- Reset button ---
         const resetBtn = document.getElementById('reset-camera');
         if (resetBtn) {
-            this._onReset = () => this.reset();
-            resetBtn.addEventListener('click', this._onReset);
-            this._resetBtn = resetBtn;
+            const handler = () => this.reset();
+            resetBtn.addEventListener('click', handler);
+            this._listeners.push({ target: resetBtn, event: 'click', handler });
         }
-
-        // --- Fit all button ---
         const fitAllBtn = document.getElementById('fit-all');
         if (fitAllBtn) {
-            this._onFitAll = () => this.focusOnGrids();
-            fitAllBtn.addEventListener('click', this._onFitAll);
-            this._fitAllBtn = fitAllBtn;
+            const handler = () => this.focusOnGrids();
+            fitAllBtn.addEventListener('click', handler);
+            this._listeners.push({ target: fitAllBtn, event: 'click', handler });
         }
 
-        // Restore slider UI from persisted settings
         this._restoreUI();
     }
 
     /**
-     * Get the effective view distance for speed scaling.
-     * Uses camera Z (distance to content plane) rather than distance from
-     * ORBIT rotation. Shift+drag rotates the camera *around* `_focusPivot`,
-     * keeping it at the same distance from the pivot but swinging its
-     * position along a sphere. Syncs yaw/pitch afterward so WASD keeps
-     * working in the new orientation.
+     * Throttled raycast under the cursor; updates `focus.pivot` to the
+     * exact world-space hit point. Left alone when no window is hit so the
+     * pivot doesn't flick back to origin between windows.
      *
      * @private
      */
-    /**
-     * Throttled raycast under the cursor. When the cursor hovers a window,
-     * update `_focusPivot` to that window's world-space center so subsequent
-     * zoom/orbit operations treat it as the anchor. When the cursor is over
-     * empty space, leave the pivot alone — we don't want it flicking back to
-     * origin every time the user moves to the canvas edge.
-     *
-     * @private
-     */
-    _updateFocusPivotFromCursor(clientX, clientY) {
-        if (this._focusLocked) return;   // explicit focus (step 3) overrides
+    _probeFocusPivot(clientX, clientY) {
+        const focus = this.input.focus;
+        if (focus.locked) return;
         const now = performance.now();
-        if (now - (this._lastFocusProbe || 0) < 60) return;
-        this._lastFocusProbe = now;
+        if (now - focus.lastProbeMs < FOCUS_PROBE_INTERVAL_MS) return;
+        focus.lastProbeMs = now;
 
         const hd = this.ctx?.hitDispatcher;
         if (!hd || typeof hd.raycastAtClient !== 'function') return;
         const hit = hd.raycastAtClient(clientX, clientY);
         if (!hit || !hit.point) return;
-
-        // Use the exact world-space intersection point — zoom lands on the
-        // precise line/glyph the cursor is over, not just the window center.
-        this._focusPivot.copy(hit.point);
+        focus.pivot.copy(hit.point);
     }
 
-    _applyDragRotation(dx, dy) {
+    // ============ Per-frame drain ============
+
+    /**
+     * Update the camera from accumulated input state. Called once per frame
+     * from the animation loop.
+     *
+     * Ordering matters: drag first (it may move the camera), then wheel
+     * (which may zoom into a new spot), then keyboard (WASD flight),
+     * finally rotation (from pitch/yaw). Anything that wants to be
+     * additive in a single frame composes here.
+     *
+     * @param {number} deltaTime - seconds since last frame
+     */
+    update(deltaTime) {
+        this.applyCamera(deltaTime);
+    }
+
+    /**
+     * Internal name that the new architecture uses; `update()` is kept as
+     * the external entry point because the animate loop already calls it.
+     */
+    applyCamera(deltaTime) {
+        this._applyDrag();
+        this._applyWheel();
+        this._applyKeyboardMotion(deltaTime);
+        this._applyRotation();
+    }
+
+    /** @private */
+    _applyDrag() {
+        const drag = this.input.drag;
+        if (!drag.active) return;
+        if (drag.dx === 0 && drag.dy === 0) return;
+        if (drag.mode === 'orbit') {
+            this._orbitBy(drag.dx, drag.dy);
+        } else {
+            this._panBy(drag.dx, drag.dy);
+        }
+        drag.dx = 0;
+        drag.dy = 0;
+    }
+
+    /** @private */
+    _applyWheel() {
+        const wheel = this.input.wheel;
+        if (wheel.dx === 0 && wheel.dy === 0) return;
+
+        const mods = wheel.mods || this.input.modifiers;
+        if (secondaryMod(mods) || mods.ctrlKey) {
+            // Alt/Shift + wheel, or pinch — zoom.
+            this._zoomBy(wheel.dy);
+        } else {
+            // Default scroll — pan.
+            this._panBy(-wheel.dx, -wheel.dy);
+        }
+        wheel.dx = 0;
+        wheel.dy = 0;
+    }
+
+    /** @private */
+    _applyKeyboardMotion(dt) {
+        const THREE = this.THREE;
         const camera = this.ctx.camera;
-        const pivot = this._focusPivot;
+        const keys = this.input.keys;
+        const moveDir = new THREE.Vector3();
+
+        if (keys.has('KeyW')) moveDir.z -= 1;
+        if (keys.has('KeyS')) moveDir.z += 1;
+        if (keys.has('KeyA')) moveDir.x -= 1;
+        if (keys.has('KeyD')) moveDir.x += 1;
+        if (keys.has('Space') || keys.has('KeyQ')) moveDir.y += 1;
+        if (keys.has('KeyE')) moveDir.y -= 1;
+        if (moveDir.lengthSq() === 0) return;
+
+        moveDir.normalize();
+        moveDir.applyQuaternion(camera.quaternion);
+        const speedScale = this.settings.dynamicSpeed
+            ? this._getViewDistance() / 200
+            : 1;
+        moveDir.multiplyScalar(this.cameraSpeed * dt * speedScale);
+        camera.position.add(moveDir);
+    }
+
+    /** @private */
+    _applyRotation() {
+        const THREE = this.THREE;
+        const q = new THREE.Quaternion();
+        q.setFromEuler(new THREE.Euler(this.pitch, this.yaw, 0, 'YXZ'));
+        this.ctx.camera.quaternion.copy(q);
+    }
+
+    // ============ Camera math (called from applyCamera only) ============
+
+    /**
+     * Orbit around the focus pivot. Screen-pixel deltas → spherical
+     * rotation; pitch/yaw are re-derived from the resulting quaternion
+     * (YXZ order) so _applyRotation doesn't stomp our orbit next frame.
+     * @private
+     */
+    _orbitBy(dx, dy) {
+        const THREE = this.THREE;
+        const camera = this.ctx.camera;
+        const pivot = this.input.focus.pivot;
         const offset = camera.position.clone().sub(pivot);
         const radius = offset.length();
         if (radius < 0.001) return;
 
-        // Camera → pivot vector in spherical coords.
         let theta = Math.atan2(offset.x, offset.z);
         let phi   = Math.acos(Math.max(-1, Math.min(1, offset.y / radius)));
 
@@ -302,34 +413,23 @@ export class ViewerCameraController {
         camera.position.copy(pivot).add(offset);
         camera.lookAt(pivot);
 
-        // lookAt wrote a fresh quaternion. The per-frame update() loop will
-        // re-derive the camera's quaternion from this.pitch/this.yaw using
-        // a 'YXZ' Euler, so we must extract our new pitch/yaw from the
-        // quaternion in that same order — otherwise the next frame resets
-        // the rotation and the orbit appears to do nothing.
-        const euler = new this.THREE.Euler(0, 0, 0, 'YXZ');
+        // Sync pitch/yaw from the quaternion lookAt just wrote, using the
+        // same YXZ order that _applyRotation will use on the next frame.
+        // Otherwise the orbit would appear to do nothing.
+        const euler = new THREE.Euler(0, 0, 0, 'YXZ');
         euler.setFromQuaternion(camera.quaternion);
         this.pitch = euler.x;
-        this.yaw = euler.y;
+        this.yaw   = euler.y;
     }
 
     /**
-     * world origin, so pan/zoom feel consistent regardless of X/Y offset.
-     * @returns {number}
+     * Pan: translate the camera in its own right/up plane. Pixel deltas
+     * are scaled to world units via FOV + viewport height; when
+     * dynamicSpeed is on, view distance also factors in so drag feels
+     * proportional at any zoom.
+     * @private
      */
-    _getViewDistance() {
-        // Camera faces -Z; content lives near Z=0. Camera Z ≈ view distance.
-        return Math.max(Math.abs(this.ctx.camera.position.z), 1);
-    }
-
-    /**
-     * Apply drag translation: maps screen-pixel deltas to camera-relative
-     * world-space panning. When dynamicSpeed is on, the scale factor tracks
-     * the camera's Z distance so dragging feels proportional at any zoom.
-     * @param {number} dx - screen pixels horizontal
-     * @param {number} dy - screen pixels vertical
-     */
-    _applyDragTranslation(dx, dy) {
+    _panBy(dx, dy) {
         const THREE = this.THREE;
         const camera = this.ctx.camera;
         const sens = this.settings.dragSensitivity;
@@ -343,16 +443,51 @@ export class ViewerCameraController {
         const moveY = (this.settings.invertDragY ? -dy : dy) * pixelScale * sens;
 
         const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
-        const up = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
+        const up    = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
 
         camera.position.addScaledVector(right, moveX);
         camera.position.addScaledVector(up, moveY);
     }
 
     /**
-     * Bind a slider element to a callback, with value label sync.
+     * Zoom: dolly the camera toward the focus pivot. Clamped so it never
+     * passes through the pivot.
      * @private
      */
+    _zoomBy(deltaY) {
+        const camera = this.ctx.camera;
+        const pivot = this.input.focus.pivot;
+
+        const delta = this.settings.invertScroll ? deltaY : -deltaY;
+        const toPivot = pivot.clone().sub(camera.position);
+        const dist = toPivot.length();
+        if (dist < 0.01) return;
+
+        const zoomScale = this.settings.dynamicSpeed ? dist / 200 : 1;
+        let amount = delta * this.settings.scrollSensitivity * 0.5 * zoomScale;
+        const maxIn = dist - 1;
+        if (amount > maxIn) amount = maxIn;
+
+        const dir = toPivot.divideScalar(dist);
+        camera.position.addScaledVector(dir, amount);
+    }
+
+    /**
+     * Public pan entry point preserved for TouchController, which doesn't
+     * go through the InputState pipeline. Routes to the same math.
+     */
+    _applyDragTranslation(dx, dy) {
+        this._panBy(dx, dy);
+    }
+
+    /** @private */
+    _getViewDistance() {
+        return Math.max(Math.abs(this.ctx.camera.position.z), 1);
+    }
+
+    // ============ UI glue ============
+
+    /** @private */
     _bindSlider(sliderId, labelId, onChange) {
         const slider = document.getElementById(sliderId);
         const label = document.getElementById(labelId);
@@ -363,17 +498,13 @@ export class ViewerCameraController {
             onChange(val);
         };
         slider.addEventListener('input', handler);
-        this['_slider_' + sliderId] = { slider, handler };
+        this._listeners.push({ target: slider, event: 'input', handler });
     }
 
-    /**
-     * Restore UI elements from persisted settings.
-     * @private
-     */
+    /** @private */
     _restoreUI() {
         const s = this.settings;
 
-        // Speed slider: stored value is raw cameraSpeed, slider is speed/20
         const speedSlider = document.getElementById('cam-speed');
         const speedLabel = document.getElementById('cam-speed-value');
         if (speedSlider) {
@@ -397,10 +528,7 @@ export class ViewerCameraController {
         }
     }
 
-    /**
-     * Save current settings to localStorage (per-field).
-     * @private
-     */
+    /** @private */
     _persistSettings() {
         const s = this.settings;
         stateController.set('camera.speed', s.cameraSpeed);
@@ -412,91 +540,18 @@ export class ViewerCameraController {
         stateController.set('camera.dynamicSpeed', s.dynamicSpeed);
     }
 
-    /**
-     * Remove all event listeners. Called by dispose().
-     */
     teardownEventListeners() {
-        document.removeEventListener('keydown', this._onKeyDown);
-        document.removeEventListener('keyup', this._onKeyUp);
-
-        if (this.ctx.canvas) {
-            this.ctx.canvas.removeEventListener('mousedown', this._onMouseDown);
-            this.ctx.canvas.removeEventListener('wheel', this._onWheel);
+        for (const { target, event, handler, opts } of this._listeners) {
+            try { target.removeEventListener(event, handler, opts); } catch {}
         }
-        document.removeEventListener('mouseup', this._onMouseUp);
-        document.removeEventListener('mousemove', this._onMouseMove);
-        window.removeEventListener('resize', this._onResize);
-
-        // Cleanup bound sliders
-        for (const key of Object.keys(this)) {
-            if (key.startsWith('_slider_') && this[key]) {
-                this[key].slider.removeEventListener('input', this[key].handler);
-            }
-        }
-
-        if (this._resetBtn && this._onReset) {
-            this._resetBtn.removeEventListener('click', this._onReset);
-        }
-        if (this._fitAllBtn && this._onFitAll) {
-            this._fitAllBtn.removeEventListener('click', this._onFitAll);
-        }
-
-        // Restore cursor
+        this._listeners = [];
         if (this.ctx.canvas) {
             this.ctx.canvas.style.cursor = '';
         }
     }
 
-    // ============ Per-frame update ============
+    // ============ Focus methods (public API) ============
 
-    /**
-     * Update camera position from WASD + rotation from pitch/yaw.
-     * Call this once per frame from the animation loop.
-     * @param {number} deltaTime - seconds since last frame
-     */
-    update(deltaTime) {
-        const THREE = this.THREE;
-        const camera = this.ctx.camera;
-        const moveDir = new THREE.Vector3();
-
-        if (this.keys['KeyW']) moveDir.z -= 1;
-        if (this.keys['KeyS']) moveDir.z += 1;
-        if (this.keys['KeyA']) moveDir.x -= 1;
-        if (this.keys['KeyD']) moveDir.x += 1;
-        if (this.keys['Space'] || this.keys['KeyQ']) moveDir.y += 1;
-        if (this.keys['KeyE']) moveDir.y -= 1;
-
-        if (moveDir.length() > 0) {
-            moveDir.normalize();
-            moveDir.applyQuaternion(camera.quaternion);
-            // Scale WASD speed by view distance so movement feels consistent
-            const speedScale = this.settings.dynamicSpeed
-                ? this._getViewDistance() / 200   // 200 = baseline distance
-                : 1;
-            moveDir.multiplyScalar(this.cameraSpeed * deltaTime * speedScale);
-            camera.position.add(moveDir);
-        }
-
-        const quaternion = new THREE.Quaternion();
-        quaternion.setFromEuler(new THREE.Euler(this.pitch, this.yaw, 0, 'YXZ'));
-        camera.quaternion.copy(quaternion);
-    }
-
-    // ============ Focus methods ============
-
-    /**
-     * Focus camera on a file for reading.
-     *
-     * Sets camera to a consistent reading distance where ~35 lines of text
-     * fill the viewport — like opening a file in an editor. The distance
-     * is derived from actual line spacing, not the file's total bounds,
-     * so text is always the same readable size regardless of file length.
-     * Short files show entirely; tall files show the top and you fly through.
-     *
-     * Emits 'camera-focus-changed' with { detail: { index } } for tree UI sync.
-     *
-     * @param {number} index - grid index
-     */
     focusOnGrid(index) {
         const THREE = this.THREE;
         const grids = this.ctx.getGrids();
@@ -507,11 +562,9 @@ export class ViewerCameraController {
         const size = new THREE.Vector3();
         bounds.getSize(size);
 
-        // Straight-on: reset rotation so camera faces -Z (perpendicular to content)
         this.pitch = 0;
         this.yaw = 0;
 
-        // --- Reading distance from line metrics ---
         const lineCount = grid.lines ? grid.lines.length : 1;
         const lineSpacing = size.y / Math.max(lineCount, 1);
 
@@ -526,7 +579,6 @@ export class ViewerCameraController {
         const distForWidth = (size.x / 0.85) / (2 * this.ctx.camera.aspect * halfTan);
         const distance = Math.max(distForHeight, distForWidth, 5);
 
-        // Position at the top of the file, centered horizontally
         const centerX = (bounds.min.x + bounds.max.x) / 2;
         const topY = bounds.max.y;
 
@@ -536,15 +588,11 @@ export class ViewerCameraController {
 
         this.ctx.camera.position.set(centerX, cameraY, bounds.max.z + distance);
 
-        // Emit event for tree UI sync (replaces inline DOM manipulation)
         window.dispatchEvent(new CustomEvent('camera-focus-changed', {
             detail: { index }
         }));
     }
 
-    /**
-     * Focus camera to fit all grids in view.
-     */
     focusOnGrids() {
         const THREE = this.THREE;
         const grids = this.ctx.getGrids();
@@ -571,10 +619,6 @@ export class ViewerCameraController {
         this.yaw = 0;
     }
 
-    /**
-     * Focus camera on a directory's bounds in 3D space.
-     * @param {string} dirPath
-     */
     focusOnDirectory(dirPath) {
         const THREE = this.THREE;
         if (!this.ctx.hierarchicalManager) return;
@@ -593,10 +637,6 @@ export class ViewerCameraController {
         this.yaw = 0;
     }
 
-    /**
-     * Focus camera on diff grids (when viewing a PR).
-     * @param {Object} diffController - DiffController instance
-     */
     focusOnDiffGrids(diffController) {
         const THREE = this.THREE;
         const grids = this.ctx.getGrids();
@@ -617,11 +657,6 @@ export class ViewerCameraController {
         this.yaw = 0;
     }
 
-    /**
-     * Focus camera on a diff file by file index.
-     * Each file has 2 grids (left + right), so multiply by 2.
-     * @param {number} fileIndex
-     */
     focusOnDiffFile(fileIndex) {
         const gridIndex = fileIndex * 2;
         const grids = this.ctx.getGrids();
@@ -632,38 +667,24 @@ export class ViewerCameraController {
 
     // ============ Controls ============
 
-    /**
-     * Set camera movement speed from slider value.
-     * @param {number} speed - raw slider value (multiplied by 20 internally)
-     */
     setSpeed(speed) {
         this.cameraSpeed = speed * 20;
         this.settings.cameraSpeed = this.cameraSpeed;
         this._persistSettings();
     }
 
-    /**
-     * Toggle dynamic speed scaling (pan/WASD/zoom scale with camera distance).
-     * @returns {boolean} New state
-     */
     toggleDynamicSpeed() {
         this.settings.dynamicSpeed = !this.settings.dynamicSpeed;
         this._persistSettings();
         return this.settings.dynamicSpeed;
     }
 
-    /**
-     * Reset camera to default position and rotation.
-     */
     reset() {
         this.ctx.camera.position.set(0, 0, 500);
         this.pitch = 0;
         this.yaw = 0;
     }
 
-    /**
-     * Reset all settings to defaults and update UI.
-     */
     resetSettings() {
         this.settings = { ...CAMERA_DEFAULTS };
         this.cameraSpeed = this.settings.cameraSpeed;
@@ -674,9 +695,8 @@ export class ViewerCameraController {
     // ============ Helpers ============
 
     /**
-     * Calculate the Z distance needed so that a region of `width` x `height`
-     * fills approximately `fillFraction` of the viewport.
-     * Uses the camera's vertical FOV and aspect ratio.
+     * Z-distance needed for a `width`x`height` region to fill `fillFraction`
+     * of the viewport. Accounts for FOV and aspect ratio.
      * @private
      */
     _zDistanceForFit(width, height, fillFraction = 0.85) {
@@ -689,11 +709,6 @@ export class ViewerCameraController {
         return Math.max(dH, dW);
     }
 
-    // ============ Lifecycle ============
-
-    /**
-     * Full cleanup — remove all listeners, exit pointer lock.
-     */
     dispose() {
         this.teardownEventListeners();
     }
