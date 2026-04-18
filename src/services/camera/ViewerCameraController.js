@@ -228,6 +228,18 @@ export class ViewerCameraController {
                 ctrlKey:  e.ctrlKey,
                 metaKey:  e.metaKey,
             };
+            // Fresh raycast at the cursor so the focus pivot reflects EXACTLY
+            // where the user is pointing when they started scrolling. The
+            // mousemove probe is throttled to 60ms; without this, a zoom
+            // initiated right after the cursor moved to a new spot would use
+            // the previous hit point and "roll off" onto the old target.
+            if (!input.focus.locked && (secondaryMod(e) || e.ctrlKey)) {
+                const hd = this.ctx?.hitDispatcher;
+                if (hd && typeof hd.raycastAtClient === 'function') {
+                    const hit = hd.raycastAtClient(e.clientX, e.clientY);
+                    if (hit && hit.point) input.focus.pivot.copy(hit.point);
+                }
+            }
         }, { passive: false });
 
         // --- Window resize ---
@@ -450,8 +462,16 @@ export class ViewerCameraController {
     }
 
     /**
-     * Zoom: dolly the camera toward the focus pivot. Clamped so it never
-     * passes through the pivot.
+     * Zoom: dolly the camera toward the focus pivot using a multiplicative
+     * (geometric) step. Each unit of wheel delta multiplies the camera's
+     * distance from the pivot by a constant ratio — so consecutive scroll
+     * ticks feel consistent whether you're far from the pivot or close to
+     * it, instead of asymptotically braking as dist → 0 (the old linear
+     * step did that and felt like rolling a skateboard over a cylinder).
+     *
+     * Because the camera translates along the camera→pivot axis, the pivot
+     * stays pinned to its screen-space position — so if the pivot was set
+     * from a cursor raycast, zoom visibly converges on the cursor.
      * @private
      */
     _zoomBy(deltaY) {
@@ -459,17 +479,17 @@ export class ViewerCameraController {
         const pivot = this.input.focus.pivot;
 
         const delta = this.settings.invertScroll ? deltaY : -deltaY;
-        const toPivot = pivot.clone().sub(camera.position);
-        const dist = toPivot.length();
+        const offset = camera.position.clone().sub(pivot);
+        const dist = offset.length();
         if (dist < 0.01) return;
 
-        const zoomScale = this.settings.dynamicSpeed ? dist / 200 : 1;
-        let amount = delta * this.settings.scrollSensitivity * 0.5 * zoomScale;
-        const maxIn = dist - 1;
-        if (amount > maxIn) amount = maxIn;
-
-        const dir = toPivot.divideScalar(dist);
-        camera.position.addScaledVector(dir, amount);
+        // k controls perceived speed: e.g. 0.002 ≈ 4% per typical wheel tick.
+        const K = 0.002;
+        const factor = Math.exp(-delta * K * this.settings.scrollSensitivity);
+        const MIN_DIST = 1;
+        const newDist = Math.max(MIN_DIST, dist * factor);
+        offset.multiplyScalar(newDist / dist);
+        camera.position.copy(pivot).add(offset);
     }
 
     /**
