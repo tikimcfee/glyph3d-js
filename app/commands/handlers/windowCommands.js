@@ -168,6 +168,9 @@ export default function registerWindowCommands(router) {
         const [x, y, z] = args.slice(1, 4).map(Number);
         if ([x, y, z].some(isNaN)) return { text: 'ERR: x,y,z must be numbers', data: null };
         ag.setPosition(x, y, z);
+        // Keep the billboard target in sync so rotation pivots around the
+        // intended point, not the raw Object3D origin.
+        setAgentTarget(ag, x, y, z);
         return {
             text: `OK: window '${args[0]}' moved to (${x},${y},${z})`,
             data: { id: args[0], position: { x, y, z } },
@@ -189,4 +192,105 @@ export default function registerWindowCommands(router) {
             data: { id: args[0], scale },
         };
     }, { description: 'Set window scale', usage: '<id> <factor>' });
+
+    router.register('window.billboard', (args, ctx) => {
+        if (args.length < 1) {
+            return { text: 'ERR: usage: window.billboard <id> [true|false]', data: null };
+        }
+        const windows = getOrCreateWindows(ctx);
+        const ag = windows.get(args[0]);
+        if (!ag) return { text: `ERR: no window '${args[0]}'`, data: null };
+        // Default to true when flag is omitted; accept 'true'/'1'/'on'.
+        const raw = (args[1] ?? 'true').toString().toLowerCase();
+        const on = raw === 'true' || raw === '1' || raw === 'on' || raw === 'yes';
+        ag.billboard = on;
+        return {
+            text: `OK: window '${args[0]}' billboard = ${on}`,
+            data: { id: args[0], billboard: on },
+        };
+    }, { description: 'Mark a window to face the camera each frame (Y-axis)', usage: '<id> [true|false]' });
+}
+
+/**
+ * Per-frame updater: for every window with `.billboard = true`, rotate it
+ * around its local Y so its visible content faces the camera — and shift
+ * its position so the rotation pivot aligns with the *visible center*
+ * rather than the CodeGrid's origin (which is at a content corner).
+ *
+ * Without the position compensation, spinning the yaw swings the rectangle
+ * around a corner, so a window "in front of" the camera ends up showing its
+ * face at an angle instead of straight-on. We:
+ *   1. Treat `_billboardTarget` (world pos the user wanted the center at) as
+ *      the logical anchor. window.create / window.move write this alongside
+ *      setting `grid.position`.
+ *   2. Compute yaw to aim the face from target → camera (XZ plane only, to
+ *      keep text upright).
+ *   3. Back out `grid.position = target − R(yaw) · contentCenterLocal`, so
+ *      the visible center lands exactly at target after rotation.
+ *
+ * Mirrors the pattern NameplateManager uses, with the pivot correction.
+ *
+ * @param {import('../CommandRouter.js').CommandContext} ctx
+ * @param {THREE.Camera} camera
+ */
+export function updateWindowBillboards(ctx, camera) {
+    if (!ctx._agentGrids) return;
+    const camX = camera.position.x;
+    const camZ = camera.position.z;
+    for (const ag of ctx._agentGrids.values()) {
+        if (!ag.billboard || !ag.grid) continue;
+        const grid = ag.grid;
+
+        // Lazy-initialize target from current position the first time we see
+        // this window in billboard mode — so untouched grids just rotate in
+        // place around where they already are.
+        if (!ag._billboardTarget) {
+            ag._billboardTarget = grid.position.clone();
+        }
+        const target = ag._billboardTarget;
+
+        // Cache local content center so we don't call getContentBounds each
+        // frame. Re-fetches lazily if bounds were null at window-create time
+        // (content still loading).
+        if (!ag._contentCenterCache && typeof grid.getContentBounds === 'function') {
+            const b = grid.getContentBounds();
+            if (b && b.min && b.max) {
+                ag._contentCenterCache = {
+                    x: (b.min.x + b.max.x) / 2,
+                    y: (b.min.y + b.max.y) / 2,
+                };
+            }
+        }
+        const cc = ag._contentCenterCache;
+
+        const dx = camX - target.x;
+        const dz = camZ - target.z;
+        const yaw = Math.atan2(dx, dz);
+        grid.rotation.y = yaw;
+
+        if (cc) {
+            // Rotate the local content-center offset into world space and
+            // back out the position so it cancels. (Local Y is unaffected by
+            // rotation around Y.)
+            const cos = Math.cos(yaw), sin = Math.sin(yaw);
+            grid.position.x = target.x - (cc.x * cos);
+            grid.position.y = target.y - cc.y;
+            grid.position.z = target.z - (-cc.x * sin);
+        } else {
+            // Bounds not yet available; fall back to un-compensated target.
+            grid.position.copy(target);
+        }
+    }
+}
+
+/** Helper: set/update the billboard target alongside a position change. */
+function setAgentTarget(ag, x, y, z) {
+    if (!ag) return;
+    if (!ag._billboardTarget) {
+        // Use the same THREE.Vector3 class the grid uses (avoid an import).
+        ag._billboardTarget = ag.grid.position.clone();
+    }
+    ag._billboardTarget.set(x, y, z);
+    // Also set raw position so non-billboard paths still work immediately.
+    ag.grid.position.set(x, y, z);
 }

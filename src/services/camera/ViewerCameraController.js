@@ -90,15 +90,20 @@ export class ViewerCameraController {
         document.addEventListener('keydown', this._onKeyDown);
         document.addEventListener('keyup', this._onKeyUp);
 
-        // --- Click-drag to pan (translation) ---
+        // Orbit pivot — point the camera rotates *around* in Shift+drag mode.
+        // Defaults to world origin; focus commands could update this later.
+        this._orbitPivot = new this.THREE.Vector3(0, 0, 0);
+
+        // --- Click-drag to pan (translation); Shift+drag = orbit (rotation) ---
         this._onMouseDown = (e) => {
             if (e.target === canvas || canvas.contains(e.target)) {
                 this.isDragging = true;
+                this.dragMode = e.shiftKey ? 'orbit' : 'pan';
                 this._dragPrevX = e.clientX;
                 this._dragPrevY = e.clientY;
                 this._mouseDownX = e.clientX;
                 this._mouseDownY = e.clientY;
-                canvas.style.cursor = 'grabbing';
+                canvas.style.cursor = this.dragMode === 'orbit' ? 'move' : 'grabbing';
             }
         };
         this._onMouseUp = (e) => {
@@ -132,7 +137,11 @@ export class ViewerCameraController {
             this._dragPrevX = e.clientX;
             this._dragPrevY = e.clientY;
 
-            this._applyDragTranslation(dx, dy);
+            if (this.dragMode === 'orbit') {
+                this._applyDragRotation(dx, dy);
+            } else {
+                this._applyDragTranslation(dx, dy);
+            }
         };
 
         canvas.addEventListener('mousedown', this._onMouseDown);
@@ -212,6 +221,50 @@ export class ViewerCameraController {
     /**
      * Get the effective view distance for speed scaling.
      * Uses camera Z (distance to content plane) rather than distance from
+     * ORBIT rotation. Shift+drag rotates the camera *around* `_orbitPivot`,
+     * keeping it at the same distance from the pivot but swinging its
+     * position along a sphere. Syncs yaw/pitch afterward so WASD keeps
+     * working in the new orientation.
+     *
+     * @private
+     */
+    _applyDragRotation(dx, dy) {
+        const camera = this.ctx.camera;
+        const pivot = this._orbitPivot;
+        const offset = camera.position.clone().sub(pivot);
+        const radius = offset.length();
+        if (radius < 0.001) return;
+
+        // Camera → pivot vector in spherical coords.
+        let theta = Math.atan2(offset.x, offset.z);
+        let phi   = Math.acos(Math.max(-1, Math.min(1, offset.y / radius)));
+
+        const sens = this.settings?.rotateSensitivity ?? 0.005;
+        theta -= dx * sens;
+        phi   -= dy * sens;
+
+        const eps = 0.02;
+        phi = Math.max(eps, Math.min(Math.PI - eps, phi));
+
+        offset.x = radius * Math.sin(phi) * Math.sin(theta);
+        offset.y = radius * Math.cos(phi);
+        offset.z = radius * Math.sin(phi) * Math.cos(theta);
+
+        camera.position.copy(pivot).add(offset);
+        camera.lookAt(pivot);
+
+        // lookAt wrote a fresh quaternion. The per-frame update() loop will
+        // re-derive the camera's quaternion from this.pitch/this.yaw using
+        // a 'YXZ' Euler, so we must extract our new pitch/yaw from the
+        // quaternion in that same order — otherwise the next frame resets
+        // the rotation and the orbit appears to do nothing.
+        const euler = new this.THREE.Euler(0, 0, 0, 'YXZ');
+        euler.setFromQuaternion(camera.quaternion);
+        this.pitch = euler.x;
+        this.yaw = euler.y;
+    }
+
+    /**
      * world origin, so pan/zoom feel consistent regardless of X/Y offset.
      * @returns {number}
      */

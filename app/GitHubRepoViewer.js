@@ -57,6 +57,7 @@ import { stateController } from '../src/services/state/StateController.js';
 import { getTextExts, getTextNames, setTextExts, setTextNames, getDefaults, resetToDefaults } from '../src/services/data/textFileFilter.js';
 import { HandGestureAdapter } from '../src/services/orchestration/HandGestureAdapter.js';
 import { initCommandCenter } from './commands/index.js';
+import { updateWindowBillboards } from './commands/handlers/windowCommands.js';
 import SceneRegistry from '../src/services/SceneRegistry.js';
 import { SpatialAnimator } from '../src/services/spatial/SpatialAnimator.js';
 import { SpatialWindowManager } from '../src/services/spatial/SpatialWindowManager.js';
@@ -485,7 +486,7 @@ export class GitHubRepoViewer {
         // Wires CommandRouter, ViewerAPI (window.viewer), and WebSocketBridge (off by default).
         // Start the relay with `glyph3d-cli serve`, then call `window.viewer.connect()` or
         // enable via settings to connect.
-        const { router, bridge, api } = initCommandCenter(this, {
+        const { router, bridge, api, context } = initCommandCenter(this, {
             port: this._wsPort(),
             autoConnect: false,
             showStatus: true,
@@ -493,6 +494,7 @@ export class GitHubRepoViewer {
         this._commandRouter = router;
         this._wsBridge = bridge;
         this._viewerAPI = api;
+        this._commandContext = context;
 
         // Wire data provider — must come after bridge creation so local mode
         // can use the WebSocket as transport.
@@ -2211,6 +2213,11 @@ export class GitHubRepoViewer {
         // Update billboard-style nameplates to face camera
         if (this.nameplateManager) {
             this.nameplateManager.updateBillboards(this.camera);
+        }
+
+        // Update billboarded agent windows (opt-in via window.billboard <id>).
+        if (this._commandContext) {
+            updateWindowBillboards(this._commandContext, this.camera);
         }
 
         // Phase 3: minimap — update viewport rectangle each frame

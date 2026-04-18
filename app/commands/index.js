@@ -221,7 +221,7 @@ export function initCommandCenter(viewer, options = {}) {
     console.log('[command-center] initialized. Use window.viewer or ws://localhost:' +
         port + ' to control the viewer.');
 
-    return { router, bridge, api };
+    return { router, bridge, api, context };
 }
 
 export { CommandRouter, WebSocketBridge, ViewerAPI };

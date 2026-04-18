@@ -197,6 +197,21 @@ export default function registerGridCommands(router) {
         };
     }, { description: 'Set grid world position', usage: '<id|index> <x> <y> <z>' });
 
+    router.register('grid.rotation', (args, ctx) => {
+        if (args.length < 4) return { text: 'ERR: usage: grid.rotation <id|index> <rx> <ry> <rz> (radians)', data: null };
+
+        const resolved = resolveGridByIdOrIndex(ctx, args[0]);
+        if (resolved.error) return { text: resolved.error, data: null };
+
+        const [rx, ry, rz] = args.slice(1, 4).map(Number);
+        if ([rx, ry, rz].some(isNaN)) return { text: 'ERR: rx, ry, rz must be numbers (radians)', data: null };
+        resolved.grid.rotation.set(rx, ry, rz);
+        return {
+            text: `OK: grid #${resolved.idx} rotation = (${rx}, ${ry}, ${rz})`,
+            data: { index: resolved.idx, rotation: { x: rx, y: ry, z: rz } }
+        };
+    }, { description: 'Set grid rotation (radians, Euler XYZ)', usage: '<id|index> <rx> <ry> <rz>' });
+
     router.register('grid.scale', (args, ctx) => {
         if (args.length < 2) return { text: 'ERR: usage: grid.scale <id|index> <factor>', data: null };
 
