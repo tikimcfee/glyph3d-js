@@ -316,9 +316,23 @@
                     if (!r || typeof r.raycastAtClient !== 'function') return;
                     const hit = r.raycastAtClient(e.clientX, e.clientY);
                     if (hit && hit.registryId) {
+                        // Clicking an entity sets primary (CommandBar +
+                        // billboard consumers react). For a terminal, also
+                        // set the key slot so raw typing on the page is
+                        // delivered to the terminal's onInput (routed by
+                        // _installTerminalKeystrokeDelivery).
                         router.execute(['attention.set', 'primary', hit.registryId]);
+                        if (hit.entry?.type === 'terminal') {
+                            router.execute(['attention.set', 'key', hit.registryId]);
+                        } else {
+                            router.execute(['attention.clear', 'key']);
+                        }
                     } else {
+                        // Click on empty space clears both slots so the
+                        // bar goes back to :CMD and typing goes back to
+                        // the camera drain.
                         router.execute(['attention.clear', 'primary']);
+                        router.execute(['attention.clear', 'key']);
                     }
                 });
             }

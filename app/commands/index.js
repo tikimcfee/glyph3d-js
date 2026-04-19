@@ -182,6 +182,130 @@ function _installConsoleForwarder(bridge) {
 }
 
 /**
+ * Install the terminal-input keystroke delivery path.
+ *
+ * When ctx.attention.key is a terminal entity, a document-level keydown
+ * listener (capture phase, bubble VCC already skips via its own gate)
+ * forwards the character to the terminal's onInput callback — which was
+ * wired at terminal.create time (terminalCommands.js:90-98) to push back
+ * through wsbridge.push() to the owning controller.
+ *
+ * Key translation: printable keys pass through as e.key; control keys
+ * get mapped to their ANSI equivalents (Enter -> \r, Backspace -> \x7f,
+ * Tab -> \t, arrow keys -> CSI escape sequences). This matches what a
+ * real TTY would receive. Meta/Ctrl combinations are NOT mapped
+ * exhaustively — Ctrl+C sends 0x03, Ctrl+D sends 0x04, Ctrl+L sends
+ * 0x0C, which covers the common interactive cases. Everything else
+ * falls through unchanged.
+ *
+ * Visual affordance: a subtle accent color is applied to the focused
+ * terminal's _background mesh so the user can see which terminal is
+ * receiving keystrokes. Stored as `_keyFocusTint` (non-enumerable) so
+ * the original color restores on key-focus clear.
+ *
+ * @private
+ * @param {Object} ctx - command context
+ */
+function _installTerminalKeystrokeDelivery(ctx) {
+    const am = ctx?.attentionManager;
+    if (!am || typeof document === 'undefined') return;
+
+    const KEY_FOCUS_TINT = 0x3a5f88; // muted blue; L2 will centralize color palette
+
+    const applyTint = (grid) => {
+        const bg = grid?._background;
+        if (!bg?.material) return;
+        if (bg._keyFocusTint !== undefined) return;
+        bg._keyFocusTint = {
+            color:   bg.material.color.getHex(),
+            opacity: bg.material.opacity,
+        };
+        bg.material.color.setHex(KEY_FOCUS_TINT);
+        bg.material.opacity = Math.max(bg.material.opacity, 0.85);
+    };
+
+    const removeTint = (grid) => {
+        const bg = grid?._background;
+        if (!bg?.material || bg._keyFocusTint === undefined) return;
+        bg.material.color.setHex(bg._keyFocusTint.color);
+        bg.material.opacity = bg._keyFocusTint.opacity;
+        delete bg._keyFocusTint;
+    };
+
+    am.on('change:key', (value, prev) => {
+        if (prev?.entity?.grid) removeTint(prev.entity.grid);
+        if (value?.entity?.grid) applyTint(value.entity.grid);
+    });
+
+    // Key-to-bytes translation for a terminal consumer. Returns the string
+    // to send, or null if the key should be ignored (purely modifier events,
+    // etc.).
+    const keyToBytes = (e) => {
+        // Pure modifier keydowns — nothing to send.
+        if (e.key === 'Shift' || e.key === 'Control' || e.key === 'Alt' || e.key === 'Meta') return null;
+
+        // Ctrl+letter -> control byte (A=0x01 ... Z=0x1a). Handle the
+        // common interactive cases first.
+        if (e.ctrlKey && !e.altKey && !e.metaKey && e.key.length === 1) {
+            const c = e.key.toLowerCase().charCodeAt(0);
+            if (c >= 97 && c <= 122) return String.fromCharCode(c - 96);
+        }
+
+        switch (e.key) {
+            case 'Enter':     return '\r';
+            case 'Tab':       return '\t';
+            case 'Backspace': return '\x7f';
+            case 'Delete':    return '\x1b[3~';
+            case 'Escape':    return null;   // handled by LIFO shortcut
+            case 'ArrowUp':    return '\x1b[A';
+            case 'ArrowDown':  return '\x1b[B';
+            case 'ArrowRight': return '\x1b[C';
+            case 'ArrowLeft':  return '\x1b[D';
+            case 'Home':       return '\x1b[H';
+            case 'End':        return '\x1b[F';
+            case 'PageUp':     return '\x1b[5~';
+            case 'PageDown':   return '\x1b[6~';
+        }
+
+        // Printable single character.
+        if (e.key.length === 1) return e.key;
+
+        // Unknown; ignore.
+        return null;
+    };
+
+    document.addEventListener('keydown', (e) => {
+        const slot = am.get('key');
+        if (!slot) return;
+        const entity = slot.entity;
+        if (!entity || entity.type !== 'terminal') return;
+        const grid = entity.grid;
+        if (!grid || typeof grid.onInput !== 'function') return;
+
+        // Guard against DOM input elements — if the user is typing in the
+        // CommandBar's <input>, we should NOT also forward keystrokes to
+        // the terminal. ShortcutManager has the same guard.
+        const tag = document.activeElement?.tagName?.toLowerCase();
+        if (tag === 'input' || tag === 'select' || tag === 'textarea') return;
+
+        const bytes = keyToBytes(e);
+        if (bytes == null) return;
+
+        // Suppress the browser default for non-printable keys (Tab would
+        // otherwise move focus, Backspace might navigate, arrows might
+        // scroll the page).
+        e.preventDefault();
+        e.stopPropagation();
+
+        try {
+            grid.onInput(bytes, slot.id);
+        } catch (err) {
+            console.error('[terminal-keystroke] onInput threw:', err);
+        }
+    }, { capture: true });
+}
+
+/**
  * Initialize the full command center.
  *
  * @param {Object} viewer - GitHubRepoViewer instance
@@ -210,6 +334,19 @@ export function initCommandCenter(viewer, options = {}) {
     // 2. Create router and register all commands
     const router = new CommandRouter(context);
     registerAllCommands(router);
+
+    // 2a. Wire terminal keystroke delivery. Keys land here only when
+    // attention.key points at a terminal entity (VCC's keydown gate
+    // swallows the camera path when any key slot is held — see
+    // ViewerCameraController.js keydown). The delivery closes the loop
+    // the convergence docs called "local keystroke path":
+    //   scene click -> attention.set primary -> CommandBar enters
+    //   terminal-mode, but raw typing without going through the bar
+    //   requires attention.key specifically, which a future slice wires
+    //   via click-with-modifier or an explicit verb.
+    // For now, if attention.key is held to a terminal, its onInput
+    // callback (terminalCommands.js:90-98) receives the character.
+    _installTerminalKeystrokeDelivery(context);
 
     // 3. Add logging middleware (logs all commands to console in debug)
     router.use((name, args) => {
