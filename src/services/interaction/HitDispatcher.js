@@ -216,9 +216,13 @@ export class HitDispatcher {
 
         this._raycaster.setFromCamera(mouse, this.camera);
 
-        // Collect background meshes from grid + agent entries
+        // Collect background meshes from grid + agent + terminal entries.
+        // Terminals join the drag/hover-raycast set as of editable-3d-ide L0;
+        // their registry entries (terminalCommands.js:101-107 register with
+        // type:'terminal') now participate in the same hit pipeline the
+        // other grid-like entities use.
         const meshToEntry = new Map();
-        const types = ['grid', 'agent'];
+        const types = ['grid', 'agent', 'terminal'];
 
         for (const type of types) {
             const entries = this.registry.findByType(type);
@@ -274,7 +278,12 @@ export class HitDispatcher {
         let bestTarget = null;
         let bestOverlapRatio = 0;
 
-        const types = ['grid', 'agent'];
+        // Terminals join the drop-target candidate set as of L0; future
+        // `pin.*` namespace will constrain which pairings are valid (a
+        // terminal dropped on a grid probably shouldn't auto-group today
+        // — getBounds may return null on entities that don't implement it,
+        // which the existing `if (!targetBounds || ...)` guard handles).
+        const types = ['grid', 'agent', 'terminal'];
         for (const type of types) {
             const entries = this.registry.findByType(type);
             for (const entry of entries) {

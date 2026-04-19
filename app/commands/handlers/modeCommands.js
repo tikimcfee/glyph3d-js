@@ -72,8 +72,12 @@ function enterReader(ctx, grid, regIdx, registryId, { animate = true } = {}) {
     ctx.mode.readerGridId = registryId || null;
 
     if (ctx.readerCompass) {
+        // Reader compass considers grid/agent/terminal entries. L0 widened
+        // this filter; once L2 lands `dock.*`, camera-docked terminals should
+        // be excluded here (compass arrow pointing at something glued to the
+        // camera is incoherent).
         const entries = ctx.registry
-            ? ctx.registry.list().filter(e => e.type === 'grid' || e.type === 'agent')
+            ? ctx.registry.list().filter(e => e.type === 'grid' || e.type === 'agent' || e.type === 'terminal')
             : [];
         ctx.readerCompass.update({ currentId: ctx.mode.readerGridId, entries });
         ctx.readerCompass.setVisible(true);
@@ -108,7 +112,7 @@ export function resolveAdjacencies(ctx, currentId) {
     const empty = { up: null, down: null, left: null, right: null };
     if (!ctx.registry) return empty;
     const entries = ctx.registry.list().filter(
-        e => e.type === 'grid' || e.type === 'agent'
+        e => e.type === 'grid' || e.type === 'agent' || e.type === 'terminal'
     );
     const currentEntry = entries.find(e => e.id === currentId);
     if (!currentEntry) return empty;
@@ -223,9 +227,9 @@ export default function registerModeCommands(router) {
         if (ctx.mode.state !== 'reader') {
             return { text: 'ERR: mode.next/prev only valid in reader mode', data: null };
         }
-        // Walk both file-grids and agent windows — reader mode frames either.
+        // Walk file-grids, agent windows, and terminals — reader mode frames any.
         const entries = ctx.registry
-            ? ctx.registry.list().filter(e => e.type === 'grid' || e.type === 'agent')
+            ? ctx.registry.list().filter(e => e.type === 'grid' || e.type === 'agent' || e.type === 'terminal')
             : [];
         if (entries.length === 0) return { text: 'ERR: no readable entries', data: null };
         const currentId = ctx.mode.readerGridId;
