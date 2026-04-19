@@ -30,17 +30,19 @@ const EDGE_INSET = 0.80;             // center fraction of NDC extents
 const MIN_ANGULAR_GAP = 0.50;        // ~29° between markers
 const REPULSION_PASSES = 5;
 
-// Fixed-size card layout. Canvas pixels.
-const CANVAS_W       = 352;
-const CANVAS_H       = 100;
-const PAD            = 8;
-const ICON_W         = 152;
-const ICON_H         = CANVAS_H - 2 * PAD;
-const ICON_X         = CANVAS_W - PAD - ICON_W;     // right-aligned
-const ICON_Y         = PAD;
-const NAME_X0        = 42;                          // right of the arrow badge
-const NAME_X1        = ICON_X - PAD;                // name text ends before icon
-const HEADER_FONT_PX = 19;
+// Fixed-size card layout. Canvas pixels. The card is *stacked* — name
+// on top, icon below — so the filename reads clean and the icon keeps
+// its constrained footprint regardless of content.
+const CANVAS_W       = 208;
+const HEADER_H       = 34;
+const ICON_W         = CANVAS_W - 16;               // icon fills the body, 8px margin each side
+const ICON_H         = 120;
+const CANVAS_H       = HEADER_H + ICON_H + 16;      // 8 top pad, 8 bot pad, 34 header, 120 icon
+const ICON_X         = (CANVAS_W - ICON_W) / 2;
+const ICON_Y         = HEADER_H + 8;
+const NAME_X0        = 40;                          // right of the arrow badge
+const NAME_X1        = CANVAS_W - 8;
+const HEADER_FONT_PX = 17;
 const ARROW_FONT_PX  = 22;
 
 // Icon preview render tuning.
@@ -51,7 +53,7 @@ const ICON_LINE_RATIO = 1.15;        // line height / font size
 const ICON_MAX_LINES = 800;          // subsample above this to keep fillText cheap
 
 // Plane size is fixed; marker shape no longer tells you the file size.
-const PLANE_WORLD_W = 1.8;
+const PLANE_WORLD_W = 1.25;
 const PLANE_WORLD_H = PLANE_WORLD_W * (CANVAS_H / CANVAS_W);
 
 export class ReaderCompass {
@@ -265,12 +267,20 @@ export class ReaderCompass {
         ctx.lineWidth   = 2;
         ctx.strokeRect(1, 1, w - 2, h - 2);
 
-        // Left column: arrow (rotating) + filename.
+        // Header row: arrow (rotating) + filename, stacked above the icon.
         // Base glyph "→" points +X in canvas space; canvas Y grows
         // downward, so rotate by -angle to match world-CCW angles.
-        const leftCy = h / 2;
+        const headerCy = HEADER_H / 2;
+        ctx.fillStyle = 'rgba(120, 240, 168, 0.10)';
+        ctx.fillRect(1, 1, w - 2, HEADER_H);
+        ctx.strokeStyle = 'rgba(90, 180, 140, 0.35)';
+        ctx.beginPath();
+        ctx.moveTo(1, HEADER_H);
+        ctx.lineTo(w - 1, HEADER_H);
+        ctx.stroke();
+
         ctx.save();
-        ctx.translate(22, leftCy);
+        ctx.translate(20, headerCy);
         ctx.rotate(-angle);
         ctx.fillStyle    = '#78f0a8';
         ctx.font         = `bold ${ARROW_FONT_PX}px "JetBrains Mono", monospace`;
@@ -284,13 +294,13 @@ export class ReaderCompass {
         ctx.textAlign    = 'left';
         ctx.textBaseline = 'middle';
         ctx.font         = `600 ${HEADER_FONT_PX}px "JetBrains Mono", monospace`;
-        const nameText = this._fitText(ctx,
+        const nameText = this._fitTextTailPriority(ctx,
             this._labelFor(entry), NAME_X1 - NAME_X0);
-        ctx.fillText(nameText, NAME_X0, leftCy);
+        ctx.fillText(nameText, NAME_X0, headerCy);
 
-        // Right column: the icon. Fill a subtle frame and render the full
-        // file scaled-to-fit. Short files → big text; long files → tiny
-        // lines that read as patterns.
+        // Icon body: fixed-dimension rectangle below the header, full file
+        // rendered fit-to-scale so short files read as text and huge files
+        // compress into silhouette patterns.
         ctx.fillStyle   = 'rgba(30, 44, 60, 0.65)';
         ctx.fillRect(ICON_X, ICON_Y, ICON_W, ICON_H);
         ctx.strokeStyle = 'rgba(90, 180, 140, 0.35)';
@@ -299,6 +309,25 @@ export class ReaderCompass {
         this._paintIcon(ctx, entry);
 
         texture.needsUpdate = true;
+    }
+
+    /**
+     * Ellipsize a path-like string by preserving the *tail* (filename)
+     * instead of the head. Falls back to leading-head ellipsis for names
+     * without a separator so short strings still degrade gracefully.
+     */
+    _fitTextTailPriority(ctx, text, maxWidth) {
+        text = String(text);
+        if (ctx.measureText(text).width <= maxWidth) return text;
+        const ell = '\u2026';
+        // Try trimming from the front until it fits; the tail is the file.
+        let lo = 0, hi = text.length;
+        while (lo < hi) {
+            const mid = (lo + hi) >> 1;
+            if (ctx.measureText(ell + text.slice(mid)).width <= maxWidth) hi = mid;
+            else lo = mid + 1;
+        }
+        return ell + text.slice(lo);
     }
 
     /**
