@@ -27,6 +27,38 @@ import { primaryMod, secondaryMod } from '../utils/platform.js';
 import { getCanvasViewportSize } from '../../core/canvasSize.js';
 import { stateController } from '../state/StateController.js';
 
+/**
+ * Distinguish a trackpad two-finger swipe from a discrete mouse-wheel
+ * tick. Wheel events carry no "source" field in browsers, so we infer
+ * from delta characteristics and latch the result once any definitive
+ * signal fires.
+ *
+ * Definitive trackpad signals (any one latches the detection):
+ *   - non-zero deltaX — vertical mouse wheels don't produce it
+ *   - fractional deltaY — most mouse wheels emit exact integers
+ *     (100, 120, ...), trackpads produce fine-grained floats
+ *   - |deltaY| < 40 px — real wheel ticks are ≥100 per event
+ *
+ * Definitive mouse signals:
+ *   - deltaMode 1 (line) or 2 (page) — trackpads always emit pixel mode
+ *
+ * Ambiguous cases (integer deltaY ≥ 40 in pixel mode with no dx) fall
+ * back to the latched state. Once we've seen the trackpad fingerprint
+ * once in the session, we assume it holds — a fast vertical swipe that
+ * produces a 150 px integer-rounded delta is still a trackpad gesture.
+ *
+ * If we never see a trackpad signal, we stay in "mouse wheel" mode by
+ * default — the correct behaviour for desktop/mouse users.
+ */
+let _trackpadLatched = false;
+function wheelLooksLikeTrackpad(e) {
+    if (e.deltaMode !== 0) return false;
+    if (Math.abs(e.deltaX) > 0.01)            { _trackpadLatched = true; return true; }
+    if (e.deltaY !== Math.trunc(e.deltaY))    { _trackpadLatched = true; return true; }
+    if (Math.abs(e.deltaY) < 40)              { _trackpadLatched = true; return true; }
+    return _trackpadLatched;
+}
+
 const CAMERA_DEFAULTS = {
     cameraSpeed: 100,
     dragSensitivity: 1.0,
@@ -223,21 +255,35 @@ export class ViewerCameraController {
             input.wheel.dy += e.deltaY;
             input.wheel.clientX = e.clientX;
             input.wheel.clientY = e.clientY;
-            // Snapshot modifiers at event time — the user may have released a
-            // modifier by the time we drain in applyCamera, but their intent
-            // for this scroll tick was set when the event fired.
             input.wheel.mods = {
                 shiftKey: e.shiftKey,
                 altKey:   e.altKey,
                 ctrlKey:  e.ctrlKey,
                 metaKey:  e.metaKey,
             };
-            // Fresh raycast at the cursor so the focus pivot reflects EXACTLY
-            // where the user is pointing when they started scrolling. The
-            // mousemove probe is throttled to 60ms; without this, a zoom
-            // initiated right after the cursor moved to a new spot would use
-            // the previous hit point and "roll off" onto the old target.
-            if (!input.focus.locked && (secondaryMod(e) || e.ctrlKey)) {
+
+            // Device heuristic: trackpad two-finger swipes produce small,
+            // smooth pixel deltas (often with a non-zero dx axis). Mouse
+            // wheels fire larger discrete ticks on the dy axis only. This
+            // flips the default action so a wheel-user gets zoom-to-cursor
+            // while a trackpad-user gets the natural two-finger pan.
+            //
+            // Synthetic ctrlKey — set by browsers during trackpad pinch —
+            // is treated as a modifier, which pairs with the trackpad
+            // default (modifier → zoom) so pinch-to-zoom does what you
+            // expect.
+            const isTrackpad = wheelLooksLikeTrackpad(e);
+            const modHeld    = secondaryMod(e) || e.ctrlKey;
+            const willZoom   = isTrackpad ? modHeld : !modHeld;
+            input.wheel.isTrackpad = isTrackpad;
+            input.wheel.willZoom   = willZoom;
+
+            // Fresh raycast at the cursor so the focus pivot reflects
+            // exactly where the user is pointing. The mousemove probe
+            // throttles to 60ms, so without a fresh hit a zoom initiated
+            // right after a cursor jump uses the previous target and
+            // "rolls off" onto the old hit point.
+            if (!input.focus.locked && willZoom) {
                 const hd = this.ctx?.hitDispatcher;
                 if (hd && typeof hd.raycastAtClient === 'function') {
                     const hit = hd.raycastAtClient(e.clientX, e.clientY);
@@ -362,12 +408,13 @@ export class ViewerCameraController {
         const wheel = this.input.wheel;
         if (wheel.dx === 0 && wheel.dy === 0) return;
 
-        const mods = wheel.mods || this.input.modifiers;
-        if (secondaryMod(mods) || mods.ctrlKey) {
-            // Alt/Shift + wheel, or pinch — zoom.
+        // willZoom was resolved at event time against the device heuristic
+        // + modifier state (see wheel listener). Fall back to mouse-wheel
+        // semantics if the field is missing (e.g. code injected a delta).
+        const willZoom = wheel.willZoom ?? true;
+        if (willZoom) {
             this._zoomBy(wheel.dy);
         } else {
-            // Default scroll — pan.
             this._panBy(-wheel.dx, -wheel.dy);
         }
         wheel.dx = 0;
