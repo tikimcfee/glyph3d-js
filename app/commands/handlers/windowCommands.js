@@ -6,8 +6,34 @@
  * Content args use base64 encoding (decodeBase64) matching the grid.* pattern.
  */
 
+import * as THREE from 'three';
 import AgentGrid from '../../../src/collections/AgentGrid.js';
 import { decodeBase64 } from '../../../src/utils/encoding.js';
+
+// Tunable: seconds to reach ~63% of target weight (1 - 1/e). Smaller =
+// snappier attention response, larger = calmer/more inertial.
+const ATTENTION_TAU = 0.25;
+
+/**
+ * Framerate-independent exponential easing. Returns the new eased value.
+ * Same shape as MRTK's Solver.SmoothTo for scalars.
+ */
+function easeTo(current, target, dt, tau) {
+    if (tau <= 0) return target;
+    const a = 1 - Math.exp(-dt / tau);
+    return current + (target - current) * a;
+}
+
+// Scratch objects reused across billboard updates to avoid per-frame GC.
+const _scratchQuatYaw = new THREE.Quaternion();
+const _scratchQuatCam = new THREE.Quaternion();
+const _scratchEulerYaw = new THREE.Euler(0, 0, 0, 'YXZ');
+const _scratchOffset = new THREE.Vector3();
+const _scratchDir = new THREE.Vector3();
+const _scratchRight = new THREE.Vector3();
+const _scratchUp = new THREE.Vector3();
+const _scratchBasis = new THREE.Matrix4();
+const _WORLD_UP = new THREE.Vector3(0, 1, 0);
 
 // Agent grid registry: Map<string, AgentGrid>
 // Lazily created on ctx so it persists across command calls.
@@ -135,6 +161,32 @@ export default function registerWindowCommands(router) {
         return { text: `OK: window '${args[0]}' closed`, data: { id: args[0] } };
     }, { description: 'Close and dispose a window', usage: '<id>' });
 
+    router.register('window.debug', (args, ctx) => {
+        if (args.length < 1) return { text: 'ERR: usage: window.debug <id>', data: null };
+        const windows = getOrCreateWindows(ctx);
+        const ag = windows.get(args[0]);
+        if (!ag) return { text: `ERR: no window '${args[0]}'`, data: null };
+        const g = ag.grid;
+        const q = g.quaternion;
+        const b = typeof g.getContentBounds === 'function' ? g.getContentBounds() : null;
+        return {
+            text: `OK: ${args[0]} debug`,
+            data: {
+                pos: { x: g.position.x, y: g.position.y, z: g.position.z },
+                quat: { x: q.x, y: q.y, z: q.z, w: q.w },
+                eulerXYZ: { x: g.rotation.x, y: g.rotation.y, z: g.rotation.z },
+                billboardTarget: ag._billboardTarget
+                    ? { x: ag._billboardTarget.x, y: ag._billboardTarget.y, z: ag._billboardTarget.z }
+                    : null,
+                attentionWeight: ag._attentionWeight,
+                bounds: b && b.min && b.max ? {
+                    min: { x: b.min.x, y: b.min.y, z: b.min.z },
+                    max: { x: b.max.x, y: b.max.y, z: b.max.z },
+                } : null,
+            },
+        };
+    }, { description: 'Dump AgentGrid diagnostic state', usage: '<id>' });
+
     router.register('window.list', (args, ctx) => {
         const windows = getOrCreateWindows(ctx);
         if (windows.size === 0) {
@@ -233,54 +285,80 @@ export default function registerWindowCommands(router) {
  * @param {import('../CommandRouter.js').CommandContext} ctx
  * @param {THREE.Camera} camera
  */
-export function updateWindowBillboards(ctx, camera) {
+export function updateWindowBillboards(ctx, camera, deltaTime = 1 / 60) {
     if (!ctx._agentGrids) return;
-    const camX = camera.position.x;
-    const camZ = camera.position.z;
+    const attendedId = ctx.cameraController?.input?.focus?.attendedId ?? null;
+
     for (const ag of ctx._agentGrids.values()) {
         if (!ag.billboard || !ag.grid) continue;
         const grid = ag.grid;
 
-        // Lazy-initialize target from current position the first time we see
-        // this window in billboard mode — so untouched grids just rotate in
-        // place around where they already are.
         if (!ag._billboardTarget) {
             ag._billboardTarget = grid.position.clone();
         }
         const target = ag._billboardTarget;
 
-        // Recompute local content center every frame. getContentBounds is
-        // O(cached) — CodeGrid dirties its own cache on add/remove/change, so
-        // this is a cheap lookup unless content actually changed. A stale
-        // cache here (e.g. window grew from 0 → 500 rows over a tmux stream)
-        // puts the pivot at an old center, and yaw rotation swings the grid
-        // around a phantom corner — visible as severe oblique shear.
+        // Attention weight: 1.0 when this grid is the focus target (cursor
+        // over it), 0.0 otherwise. Eased toward that with framerate-indep
+        // damping so look-at-me / look-away transitions are smooth rather
+        // than snap. Zero = world-anchored + yaw-only. One = full facing.
+        if (ag._attentionWeight === undefined) ag._attentionWeight = 0;
+        const targetK = (attendedId && attendedId === ag.id) ? 1 : 0;
+        ag._attentionWeight = easeTo(ag._attentionWeight, targetK, deltaTime, ATTENTION_TAU);
+        const k = ag._attentionWeight;
+
+        // Content center in local space. Cheap — getContentBounds is cached
+        // on the CodeGrid side and only recomputes when content changes.
         let cc = null;
         if (typeof grid.getContentBounds === 'function') {
             const b = grid.getContentBounds();
             if (b && b.min && b.max) {
-                cc = {
-                    x: (b.min.x + b.max.x) / 2,
-                    y: (b.min.y + b.max.y) / 2,
-                };
+                cc = { x: (b.min.x + b.max.x) / 2, y: (b.min.y + b.max.y) / 2 };
             }
         }
 
-        const dx = camX - target.x;
-        const dz = camZ - target.z;
-        const yaw = Math.atan2(dx, dz);
-        grid.rotation.y = yaw;
+        // q_yaw: current yaw-only billboard — face camera on XZ plane only,
+        // text stays upright regardless of camera pitch.
+        const yaw = Math.atan2(camera.position.x - target.x, camera.position.z - target.z);
+        _scratchEulerYaw.set(0, yaw, 0, 'YXZ');
+        _scratchQuatYaw.setFromEuler(_scratchEulerYaw);
+
+        // q_cam: align the grid's +Z face with target→camera while keeping
+        // +Y aligned with world up so text stays level in the camera's eye.
+        // Building the orthonormal basis explicitly (right/up/forward) and
+        // feeding it to setFromRotationMatrix avoids the roll-ambiguity of
+        // setFromUnitVectors, which only constrains the forward vector.
+        _scratchDir.subVectors(camera.position, target).normalize();     // +Z
+        _scratchRight.crossVectors(_WORLD_UP, _scratchDir).normalize();  // +X
+        // Degenerate case: looking straight up/down, world-up is parallel
+        // to forward. Fall back to the cheap alignment in that sliver so
+        // the grid at least doesn't disappear.
+        if (_scratchRight.lengthSq() < 1e-8) {
+            _scratchQuatCam.setFromUnitVectors(
+                new THREE.Vector3(0, 0, 1),
+                _scratchDir
+            );
+        } else {
+            _scratchUp.crossVectors(_scratchDir, _scratchRight);         // +Y
+            _scratchBasis.makeBasis(_scratchRight, _scratchUp, _scratchDir);
+            _scratchQuatCam.setFromRotationMatrix(_scratchBasis);
+        }
+
+        // Blend: 0 → yaw-only, 1 → full facing. Slerp keeps the rotation
+        // smooth across the blend range (vs. Euler interpolation which
+        // gimbal-locks near ±π/2).
+        grid.quaternion.slerpQuaternions(_scratchQuatYaw, _scratchQuatCam, k);
 
         if (cc) {
-            // Rotate the local content-center offset into world space and
-            // back out the position so it cancels. (Local Y is unaffected by
-            // rotation around Y.)
-            const cos = Math.cos(yaw), sin = Math.sin(yaw);
-            grid.position.x = target.x - (cc.x * cos);
-            grid.position.y = target.y - cc.y;
-            grid.position.z = target.z - (-cc.x * sin);
+            // Position compensation generalizes for any rotation: rotate the
+            // local content-center offset by the final quaternion, then back
+            // it out of the grid's position so the content-center lands at
+            // `target` in world space after rotation.
+            _scratchOffset.set(cc.x, cc.y, 0).applyQuaternion(grid.quaternion);
+            grid.position.x = target.x - _scratchOffset.x;
+            grid.position.y = target.y - _scratchOffset.y;
+            grid.position.z = target.z - _scratchOffset.z;
         } else {
-            // Bounds not yet available; fall back to un-compensated target.
             grid.position.copy(target);
         }
     }

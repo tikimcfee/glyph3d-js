@@ -105,6 +105,10 @@ export class ViewerCameraController {
                 pivot:       new THREE.Vector3(0, 0, 0),
                 locked:      false,       // explicit window.focus suppresses probe
                 lastProbeMs: 0,
+                // The registry id of whatever grid is currently under the
+                // cursor. Billboard updaters use this to drive per-grid
+                // attention weights (tilt-toward-camera when attended).
+                attendedId:  null,
             },
         };
     }
@@ -237,7 +241,10 @@ export class ViewerCameraController {
                 const hd = this.ctx?.hitDispatcher;
                 if (hd && typeof hd.raycastAtClient === 'function') {
                     const hit = hd.raycastAtClient(e.clientX, e.clientY);
-                    if (hit && hit.point) input.focus.pivot.copy(hit.point);
+                    if (hit && hit.point) {
+                        input.focus.pivot.copy(hit.point);
+                        input.focus.attendedId = hit.registryId || null;
+                    }
                 }
             }
         }, { passive: false });
@@ -297,8 +304,15 @@ export class ViewerCameraController {
         const hd = this.ctx?.hitDispatcher;
         if (!hd || typeof hd.raycastAtClient !== 'function') return;
         const hit = hd.raycastAtClient(clientX, clientY);
-        if (!hit || !hit.point) return;
-        focus.pivot.copy(hit.point);
+        if (!hit) {
+            // Cursor over empty space — keep the pivot where it was (avoid
+            // flicking back to origin) but clear the attended id so the
+            // previously-attended grid starts easing back to its default.
+            focus.attendedId = null;
+            return;
+        }
+        if (hit.point) focus.pivot.copy(hit.point);
+        focus.attendedId = hit.registryId || null;
     }
 
     // ============ Per-frame drain ============

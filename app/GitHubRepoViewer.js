@@ -2220,7 +2220,7 @@ export class GitHubRepoViewer {
 
         // Update billboarded agent windows (opt-in via window.billboard <id>).
         if (this._commandContext) {
-            updateWindowBillboards(this._commandContext, this.camera);
+            updateWindowBillboards(this._commandContext, this.camera, deltaTime);
         }
 
         // Phase 3: minimap — update viewport rectangle each frame

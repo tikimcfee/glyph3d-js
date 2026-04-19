@@ -3,6 +3,7 @@
  * camera.focus uses resolveGridByIdOrIndex + filename substring fallback.
  */
 
+import * as THREE from 'three';
 import { box, kvLines } from '../formatResponse.js';
 import { resolveGridByIdOrIndex } from './spatialHelpers.js';
 
@@ -119,6 +120,35 @@ export default function registerCameraCommands(router) {
     // ---- Debug/test: drive the camera through the same internal functions
     // the real input pipeline uses, from the WebSocket. Used by llm-exp's
     // camera-sim loop for iterating on zoom/orbit feel.
+
+    router.register('camera.aim', (args, ctx) => {
+        if (args.length < 3) return { text: 'ERR: usage: camera.aim <x> <y> <z>', data: null };
+        const [tx, ty, tz] = args.map(Number);
+        if ([tx, ty, tz].some(isNaN)) return { text: 'ERR: x, y, z must be numbers', data: null };
+        const cc = ctx.cameraController;
+        const cam = ctx.camera;
+        if (!cc) return { text: 'ERR: no camera controller', data: null };
+        // lookAt writes a quaternion; extract pitch/yaw in YXZ order so the
+        // controller's per-frame _applyRotation doesn't stomp our aim.
+        cam.lookAt(tx, ty, tz);
+        const euler = new THREE.Euler(0, 0, 0, 'YXZ');
+        euler.setFromQuaternion(cam.quaternion);
+        cc.pitch = euler.x;
+        cc.yaw = euler.y;
+        return { text: `OK: aimed at ${tx}, ${ty}, ${tz}`, data: { pitch: cc.pitch, yaw: cc.yaw } };
+    }, { description: 'Aim camera at a world point (persists: syncs pitch/yaw)', usage: '<x> <y> <z>' });
+
+    router.register('camera.attend', (args, ctx) => {
+        if (args.length < 1) return { text: 'ERR: usage: camera.attend <id|none>', data: null };
+        const cc = ctx.cameraController;
+        if (!cc?.input?.focus) return { text: 'ERR: no focus state on controller', data: null };
+        const id = args[0] === 'none' ? null : args[0];
+        cc.input.focus.attendedId = id;
+        // Lock so the mousemove raycast probe doesn't immediately overwrite
+        // the manual override. camera.attend none unlocks and clears.
+        cc.input.focus.locked = id !== null;
+        return { text: `OK: attended = ${id ?? 'none'} (locked=${cc.input.focus.locked})`, data: { attendedId: id, locked: cc.input.focus.locked } };
+    }, { description: 'Manually set the attended window id (drives billboard attention blend)', usage: '<id|none>' });
 
     router.register('camera.pivot', (args, ctx) => {
         if (args.length < 3) return { text: 'ERR: usage: camera.pivot <x> <y> <z>', data: null };
