@@ -141,6 +141,13 @@ export class ViewerCameraController {
                 // cursor. Billboard updaters use this to drive per-grid
                 // attention weights (tilt-toward-camera when attended).
                 attendedId:  null,
+                // Client-space position of the current gesture's "anchor":
+                // cursor for mouse, pinch centroid for touch. The zoom
+                // pipeline itself is dolly-forward (doesn't use these),
+                // but the focus probe + future anchor-aware handlers need
+                // a common place to read where the gesture is happening.
+                clientX:     0,
+                clientY:     0,
             },
         };
     }
@@ -535,22 +542,39 @@ export class ViewerCameraController {
      * from a cursor raycast, zoom visibly converges on the cursor.
      * @private
      */
+    /**
+     * Dolly along the camera's current forward direction — no pivot, no
+     * raycast, no anchor point. Each call moves the camera by a step
+     * proportional to the current view distance, so the perceived zoom
+     * rate stays consistent whether you're close to or far from the scene.
+     *
+     * Positive deltaY = "scroll away" = zoom out (camera retreats).
+     * Negative deltaY = "scroll toward" = zoom in (camera advances).
+     *
+     * Shared with TouchController: pinch-delta becomes a wheel-equivalent
+     * deltaY (sign flipped because fingers-spreading = zoom in) and lands
+     * here so the math lives in exactly one place.
+     */
     _zoomBy(deltaY) {
+        const THREE = this.THREE;
         const camera = this.ctx.camera;
-        const pivot = this.input.focus.pivot;
+        const delta = this.settings.invertScroll ? -deltaY : deltaY;
 
-        const delta = this.settings.invertScroll ? deltaY : -deltaY;
-        const offset = camera.position.clone().sub(pivot);
-        const dist = offset.length();
-        if (dist < 0.01) return;
-
-        // k controls perceived speed: e.g. 0.002 ≈ 4% per typical wheel tick.
+        // k controls perceived speed: each unit of deltaY multiplies view
+        // distance by exp(k · delta), so a typical wheel tick (≈100) is
+        // ≈22% of current distance. Exponential keeps near and far zoom
+        // feeling the same instead of asymptotically braking.
         const K = 0.002;
-        const factor = Math.exp(-delta * K * this.settings.scrollSensitivity);
-        const MIN_DIST = 1;
-        const newDist = Math.max(MIN_DIST, dist * factor);
-        offset.multiplyScalar(newDist / dist);
-        camera.position.copy(pivot).add(offset);
+        const factor = Math.exp(delta * K * this.settings.scrollSensitivity);
+
+        const viewDist = this._getViewDistance();
+        const newDist = Math.max(1, viewDist * factor);
+        const step = newDist - viewDist; // + when zooming out, − zooming in
+
+        // camera-local −Z is "forward" (what the camera faces). Zooming
+        // out moves backward (+step in the −forward direction).
+        const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+        camera.position.addScaledVector(forward, -step);
     }
 
     /**

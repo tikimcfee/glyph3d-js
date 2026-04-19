@@ -76,15 +76,26 @@ export class TouchController {
                 y: (pts[0].y + pts[1].y) / 2
             };
 
-            // Pinch zoom
-            if (this.lastPinchDist > 0) {
-                const delta = dist - this.lastPinchDist;
-                const scrollSens = this.cam.settings.scrollSensitivity;
-                const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
-                this.camera.position.addScaledVector(forward, delta * scrollSens * TOUCH_SPEED * 0.5);
+            // Publish the pinch centroid into the camera controller's
+            // input state so the rest of the pipeline (focus probe,
+            // zoom-to-cursor parity) can reference where the gesture is
+            // happening — same role the mouse cursor plays for wheel.
+            const focus = this.cam.input?.focus;
+            if (focus) {
+                focus.clientX = center.x;
+                focus.clientY = center.y;
             }
 
-            // Two-finger pan
+            // Pinch dolly: fingers spreading = zoom in (negative wheel
+            // deltaY equivalent). Scale translates pinch-pixels into
+            // wheel-pixels so one shared _zoomBy handles both inputs.
+            if (this.lastPinchDist > 0) {
+                const pinchDelta = dist - this.lastPinchDist;
+                const PINCH_TO_WHEEL = 3.0; // empirical — feels close to one wheel tick per ~33px pinch
+                this.cam._zoomBy(-pinchDelta * PINCH_TO_WHEEL);
+            }
+
+            // Two-finger pan — centroid drift translates into drag pixels.
             if (this.lastTwoCenter) {
                 const dx = (center.x - this.lastTwoCenter.x) * TOUCH_SPEED;
                 const dy = (center.y - this.lastTwoCenter.y) * TOUCH_SPEED;
