@@ -26,6 +26,7 @@ import GridVirtualizer from '../src/collections/GridVirtualizer.js';
 import { getCanvasViewportSize } from '../src/core/canvasSize.js';
 import { SelectionManager } from '../src/services/interaction/SelectionManager.js';
 import { ShortcutManager } from '../src/services/interaction/ShortcutManager.js';
+import { ReaderCompass } from '../src/services/interaction/ReaderCompass.js';
 import { TreemapLabelManager } from '../src/services/visual/TreemapLabelManager.js';
 import { MinimapOverlay } from '../src/components/MinimapOverlay.js';
 import { RepositoryAdapter } from '../src/services/data/RepositoryAdapter.js';
@@ -455,6 +456,10 @@ export class GitHubRepoViewer {
         this._registerShortcuts();
         this.shortcutManager.attach();
 
+        // Reader-mode HUD: camera-attached arrows showing N/S/E/W neighbors.
+        // Hidden until reader mode turns it on; wired into ctx below.
+        this.readerCompass = new ReaderCompass({ THREE, camera: this.camera });
+
         // ---- Phase 3: Minimap Overlay ----
         this.minimapOverlay = new MinimapOverlay({
             THREE,
@@ -498,6 +503,10 @@ export class GitHubRepoViewer {
         this._wsBridge = bridge;
         this._viewerAPI = api;
         this._commandContext = context;
+
+        // Wire the compass into ctx so mode commands can show/hide it when
+        // the reader toggles on and off.
+        context.readerCompass = this.readerCompass;
 
         // Wire data provider — must come after bridge creation so local mode
         // can use the WebSocket as transport.
@@ -743,6 +752,7 @@ export class GitHubRepoViewer {
             this.camera.aspect = w / h;
             this.camera.updateProjectionMatrix();
             this.pickingSystem?.onResize();
+            this.readerCompass?.relayout();
         });
 
         // Picking system mouse wiring — document-level so pointer lock
@@ -886,10 +896,16 @@ export class GitHubRepoViewer {
     _registerShortcuts() {
         const sm = this.shortcutManager;
 
-        // Escape — deselect all
+        // Escape — in reader mode, back out to explorer. Otherwise deselect.
+        // Routed through mode.explorer so the WebSocket path and the keybind
+        // don't drift.
         sm.register('escape', () => {
+            if (this._commandContext?.mode?.state === 'reader') {
+                this._commandRouter.execute('mode.explorer');
+                return;
+            }
             if (this.selectionManager) this.selectionManager.clear(this.grids);
-        }, { description: 'Deselect all' });
+        }, { description: 'Reader → explorer, else deselect all' });
 
         // Tab — select next file
         sm.register('tab', () => {
@@ -901,17 +917,55 @@ export class GitHubRepoViewer {
             this._tabTraverse(-1);
         }, { description: 'Select previous file' });
 
-        // Enter — focus camera on selected file
+        // Enter — enter reader mode on the selected / tab-selected / attended grid.
+        // Picks a target, then routes through mode.reader so the reader-mode
+        // attention lock + camera snap fire together.
         sm.register('enter', () => {
+            let idx = -1;
             if (this.selectionManager?.primary) {
-                const idx = this.grids.findIndex(
+                idx = this.grids.findIndex(
                     g => g.userData?.sourcePath === this.selectionManager.primary
                 );
-                if (idx >= 0) this.cameraController.focusOnGrid(idx);
-            } else if (this._tabIndex >= 0 && this._tabIndex < this.grids.length) {
-                this.cameraController.focusOnGrid(this._tabIndex);
             }
-        }, { description: 'Focus camera on selected file' });
+            if (idx < 0 && this._tabIndex >= 0 && this._tabIndex < this.grids.length) {
+                idx = this._tabIndex;
+            }
+            if (idx < 0) {
+                // Fall back to whatever the focus-pivot probe is currently
+                // attending to (hovered grid under the cursor).
+                const attendedId = this.cameraController?.input?.focus?.attendedId;
+                if (attendedId) {
+                    this._commandRouter.execute(['mode.reader', attendedId]);
+                    return;
+                }
+                this.toastUI?.show('Select or hover a file first', 'warn');
+                return;
+            }
+            const grid = this.grids[idx];
+            const regId = this.registry?.getIdByGrid(grid);
+            this._commandRouter.execute(['mode.reader', regId || String(idx)]);
+        }, { description: 'Enter reader mode on selected/hovered file' });
+
+        // [ / ] — prev / next grid in reader mode (no-op in explorer)
+        sm.register(']', () => {
+            if (this._commandContext?.mode?.state !== 'reader') return;
+            this._commandRouter.execute('mode.next');
+        }, { description: 'Reader: next grid' });
+        sm.register('[', () => {
+            if (this._commandContext?.mode?.state !== 'reader') return;
+            this._commandRouter.execute('mode.prev');
+        }, { description: 'Reader: previous grid' });
+
+        // Arrow keys — in reader mode, jump to the neighbor shown on the
+        // compass. In explorer they fall through to camera nudge handling.
+        const jump = (dir) => () => {
+            if (this._commandContext?.mode?.state !== 'reader') return;
+            this._commandRouter.execute(['mode.jump', dir]);
+        };
+        sm.register('arrowup',    jump('up'),    { description: 'Reader: jump up' });
+        sm.register('arrowdown',  jump('down'),  { description: 'Reader: jump down' });
+        sm.register('arrowleft',  jump('left'),  { description: 'Reader: jump left' });
+        sm.register('arrowright', jump('right'), { description: 'Reader: jump right' });
 
         // F — fit all grids in view
         sm.register('f', () => {

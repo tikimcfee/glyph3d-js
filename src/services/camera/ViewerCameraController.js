@@ -586,18 +586,25 @@ export class ViewerCameraController {
 
     // ============ Focus methods (public API) ============
 
-    focusOnGrid(index) {
+    /**
+     * Compute the world-space target position the camera should fly to when
+     * focusing on a grid. Pure — does not mutate the camera.
+     *
+     * Exposed so reader-mode can animate toward the target instead of
+     * snapping instantly.
+     *
+     * @param {number} index - grid index in ctx.getGrids()
+     * @returns {{x:number,y:number,z:number}|null} target or null if invalid
+     */
+    computeGridFocus(index) {
         const THREE = this.THREE;
         const grids = this.ctx.getGrids();
-        if (index < 0 || index >= grids.length) return;
+        if (index < 0 || index >= grids.length) return null;
 
         const grid = grids[index];
         const bounds = grid.getBounds();
         const size = new THREE.Vector3();
         bounds.getSize(size);
-
-        this.pitch = 0;
-        this.yaw = 0;
 
         const lineCount = grid.lines ? grid.lines.length : 1;
         const lineSpacing = size.y / Math.max(lineCount, 1);
@@ -620,8 +627,15 @@ export class ViewerCameraController {
         const topMargin = 0.08;
         const cameraY = topY - visibleHalfH * (1 - 2 * topMargin);
 
-        this.ctx.camera.position.set(centerX, cameraY, bounds.max.z + distance);
+        return { x: centerX, y: cameraY, z: bounds.max.z + distance };
+    }
 
+    focusOnGrid(index) {
+        const target = this.computeGridFocus(index);
+        if (!target) return;
+        this.pitch = 0;
+        this.yaw = 0;
+        this.ctx.camera.position.set(target.x, target.y, target.z);
         window.dispatchEvent(new CustomEvent('camera-focus-changed', {
             detail: { index }
         }));

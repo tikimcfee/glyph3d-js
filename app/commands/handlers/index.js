@@ -23,6 +23,7 @@ import registerHighlightCommands from './highlightCommands.js';
 import registerTourCommands from './tourCommands.js';
 import registerGroupCommands from './groupCommands.js';
 import registerSimulateCommands from './simulateCommands.js';
+import registerModeCommands from './modeCommands.js';
 
 /**
  * Register all built-in commands on a router.
@@ -49,4 +50,5 @@ export function registerAllCommands(router) {
     registerTourCommands(router);
     registerGroupCommands(router);
     registerSimulateCommands(router);
+    registerModeCommands(router);
 }

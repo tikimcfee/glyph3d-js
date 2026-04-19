@@ -223,6 +223,22 @@ export function easeInOutCubic(t) {
 }
 
 /**
+ * Compute the target camera position to frame an AABB head-on.
+ * Pure — does not mutate the camera.
+ *
+ * @param {Object} camera - THREE.PerspectiveCamera
+ * @param {{ center: {x,y,z}, max: {x,y,z}, size: {x,y,z} }} bounds
+ * @param {number} padding - extra world units per edge
+ * @returns {{x:number,y:number,z:number}}
+ */
+export function computeBoundsFocus(camera, bounds, padding) {
+    const w = bounds.size.x + padding * 2;
+    const h = bounds.size.y + padding * 2;
+    const dist = zDistanceForFit(camera, w, h, 0.85);
+    return { x: bounds.center.x, y: bounds.center.y, z: bounds.max.z + dist };
+}
+
+/**
  * Frame the camera on an AABB. Sets position, resets pitch/yaw.
  * Cancels any in-flight animation.
  * @param {Object} ctx - command context bag
@@ -231,10 +247,8 @@ export function easeInOutCubic(t) {
  */
 export function frameBounds(ctx, bounds, padding) {
     ctx._cancelCameraAnimation?.();
-    const w = bounds.size.x + padding * 2;
-    const h = bounds.size.y + padding * 2;
-    const dist = zDistanceForFit(ctx.camera, w, h, 0.85);
-    ctx.camera.position.set(bounds.center.x, bounds.center.y, bounds.max.z + dist);
+    const target = computeBoundsFocus(ctx.camera, bounds, padding);
+    ctx.camera.position.set(target.x, target.y, target.z);
     if (ctx.cameraController) {
         ctx.cameraController.pitch = 0;
         ctx.cameraController.yaw = 0;

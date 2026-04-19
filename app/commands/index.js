@@ -119,6 +119,14 @@ function buildContext(viewer) {
 
         // SpatialNavigator — wired in after construction (set by ide.html)
         spatialNav: null,
+
+        // Interaction mode (explorer default; reader on focused grid).
+        // Shared by mode.* commands and keyboard shortcuts so the two paths
+        // can't disagree on what the current mode is.
+        mode: {
+            state: 'explorer',
+            readerGridId: null,
+        },
     };
 }
 
