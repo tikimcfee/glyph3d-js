@@ -7,6 +7,7 @@
  */
 
 import * as THREE from 'three';
+import { RENDER_ORDER } from '../../core/renderOrder.js';
 
 /**
  * @typedef {Object} BackdropOptions
@@ -178,7 +179,7 @@ export class BackdropManager {
             node.position.y - bounds.height / 2,
             zPos
         );
-        plane.renderOrder = -10 + depth;  // Draw deeper backdrops first
+        plane.renderOrder = RENDER_ORDER.BACKDROP_BASE + depth;  // Draw deeper backdrops first
         plane.name = `backdrop:${node.path}`;
         this.group.add(plane);
 

@@ -10,6 +10,7 @@
 import * as THREE from 'three';
 import { Joint, SKELETON_CONNECTIONS, JOINT_COUNT } from './HandData.js';
 import { HAND_RENDERER_DEFAULTS as DEFAULTS } from './defaults.js';
+import { RENDER_ORDER } from '../core/renderOrder.js';
 
 // Shared geometries — created once, reused across all hands
 const BONE_GEOMETRY = new THREE.CylinderGeometry(1, 1, 1, 6, 1);
@@ -138,7 +139,7 @@ class HandRenderer {
         for (let i = 0; i < SKELETON_CONNECTIONS.length; i++) {
             const mesh = new THREE.Mesh(BONE_GEOMETRY, boneMaterial);
             mesh.visible = false;
-            mesh.renderOrder = 1;
+            mesh.renderOrder = RENDER_ORDER.HAND_BONE;
             handGroup.add(mesh);
             bones.push(mesh);
         }
@@ -148,7 +149,7 @@ class HandRenderer {
         for (let i = 0; i < JOINT_COUNT; i++) {
             const mesh = new THREE.Mesh(JOINT_GEOMETRY, jointMaterial);
             mesh.visible = false;
-            mesh.renderOrder = 2;
+            mesh.renderOrder = RENDER_ORDER.HAND_JOINT;
             handGroup.add(mesh);
             joints.push(mesh);
         }

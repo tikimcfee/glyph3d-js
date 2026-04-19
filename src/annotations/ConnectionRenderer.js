@@ -1,6 +1,7 @@
 // src/annotations/ConnectionRenderer.js
 
 import * as THREE from 'three';
+import { RENDER_ORDER } from '../core/renderOrder.js';
 
 const MAX_CONNECTIONS = 256;
 const VERTS_PER_CONNECTION = 6; // shaft(2) + arrowL(2) + arrowR(2)
@@ -67,7 +68,7 @@ export default class ConnectionRenderer {
 
         this._mesh = new THREE.LineSegments(this._geo, this._mat);
         this._mesh.frustumCulled = false; // connections span arbitrary world space
-        this._mesh.renderOrder = 1;       // draw on top of grid quads
+        this._mesh.renderOrder = RENDER_ORDER.CONNECTION;       // draw on top of grid quads
         scene.add(this._mesh);
     }
 

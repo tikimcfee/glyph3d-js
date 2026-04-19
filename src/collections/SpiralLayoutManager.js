@@ -15,6 +15,7 @@
  */
 
 import * as THREE from 'three';
+import { RENDER_ORDER } from '../core/renderOrder.js';
 
 class SpiralLayoutManager {
     /**
@@ -161,7 +162,7 @@ class SpiralLayoutManager {
 
         const line = new T.Line(geometry, material);
         line.name = 'SpiralGuide';
-        line.renderOrder = -20;
+        line.renderOrder = RENDER_ORDER.SPIRAL_LINE;
         return line;
     }
 

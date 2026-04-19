@@ -24,6 +24,8 @@
  * or null.
  */
 
+import { RENDER_ORDER } from '../../core/renderOrder.js';
+
 const MAX_MARKERS = 5;               // top-K by world distance
 const HUD_DISTANCE = 5.0;            // camera-local -Z
 const EDGE_INSET = 0.80;             // center fraction of NDC extents
@@ -62,7 +64,7 @@ export class ReaderCompass {
         this.camera = camera;
         this.root = new THREE.Group();
         this.root.name = 'ReaderCompass';
-        this.root.renderOrder = 999;
+        this.root.renderOrder = RENDER_ORDER.COMPASS_ROOT;
         this.root.visible = false;
         this.camera.add(this.root);
 
@@ -204,7 +206,7 @@ export class ReaderCompass {
         const geometry = new THREE.PlaneGeometry(PLANE_WORLD_W, PLANE_WORLD_H);
         const mesh = new THREE.Mesh(geometry, material);
         mesh.visible = false;
-        mesh.renderOrder = 1000 + i;
+        mesh.renderOrder = RENDER_ORDER.COMPASS_MARKER_BASE + i;
         mesh.name = `ReaderCompass:marker-${i}`;
         return { mesh, canvas, texture, ctx: ctx2d, entry: null };
     }

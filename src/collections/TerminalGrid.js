@@ -25,6 +25,7 @@
 import * as THREE from 'three';
 import GlyphRendererV15 from '../GlyphRenderer.js';
 import { parseCapturePaneAnsi } from './TerminalCapture.js';
+import { RENDER_ORDER } from '../core/renderOrder.js';
 
 export default class TerminalGrid extends THREE.Object3D {
     /**
@@ -482,7 +483,7 @@ export default class TerminalGrid extends THREE.Object3D {
         });
 
         this._background = new THREE.Mesh(geometry, material);
-        this._background.renderOrder = -1;
+        this._background.renderOrder = RENDER_ORDER.GRID_BACKGROUND;
         this.add(this._background);
         this._updateBackground();
     }
