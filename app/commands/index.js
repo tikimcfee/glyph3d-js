@@ -10,6 +10,7 @@
 import CommandRouter from '../../src/services/orchestration/CommandRouter.js';
 import WebSocketBridge from '../../src/services/orchestration/WebSocketBridge.js';
 import ViewerAPI from '../../src/services/orchestration/ViewerAPI.js';
+import AttentionManager from '../../src/services/interaction/AttentionManager.js';
 import { registerAllCommands } from './handlers/index.js';
 
 /**
@@ -127,6 +128,15 @@ function buildContext(viewer) {
             state: 'explorer',
             readerGridId: null,
         },
+
+        // Attention state — three slots (hover, primary, key) written by
+        // AttentionManager. Editable-3d-ide L1. During the migration window,
+        // AttentionManager also mirrors writes into the legacy fields
+        // (focus.attendedId, focus.locked, mode.readerGridId) so existing
+        // readers keep working; the shim peels off as readers migrate to
+        // `ctx.attention.{hover,primary,key}?.id`.
+        attentionManager: new AttentionManager(),
+        get attention() { return this.attentionManager.state; },
     };
 }
 
