@@ -62,7 +62,7 @@ import { updateWindowBillboards } from './commands/handlers/windowCommands.js';
 import SceneRegistry from '../src/services/SceneRegistry.js';
 import { SpatialAnimator } from '../src/services/spatial/SpatialAnimator.js';
 import { SpatialWindowManager } from '../src/services/spatial/SpatialWindowManager.js';
-import { HitDispatcher } from '../src/services/interaction/HitDispatcher.js';
+import { EntityInputRouter } from '../src/services/interaction/EntityInputRouter.js';
 
 /**
  * Parse GitHub URL to owner/repo
@@ -406,12 +406,12 @@ export class GitHubRepoViewer {
             animator: this.spatialAnimator,
         });
 
-        // Reader-mode compass — built here, *before* HitDispatcher attaches,
-        // so the capture-phase compass mousedown listener fires ahead of
-        // HitDispatcher's. Without this ordering, HitDispatcher would hit
-        // the underlying grid first, start a drag, and re-emit canvas-click
-        // on mouseup, causing mode.reader to run twice: once for the
-        // compass target, then once for the grid under the marker.
+        // Reader-mode compass — built here, *before* EntityInputRouter
+        // attaches, so the capture-phase compass mousedown listener fires
+        // ahead of the router's. Without this ordering, EntityInputRouter
+        // would hit the underlying grid first, start a drag, and re-emit
+        // canvas-click on mouseup, causing mode.reader to run twice: once
+        // for the compass target, then once for the grid under the marker.
         this.readerCompass = new ReaderCompass({ THREE, camera: this.camera });
         this.canvas.addEventListener('mousedown', (e) => {
             if (this._commandContext?.mode?.state !== 'reader') return;
@@ -424,16 +424,22 @@ export class GitHubRepoViewer {
             );
             if (!hit) return;
             // stopImmediatePropagation (not just stopPropagation) — both this
-            // handler and HitDispatcher attach to the *same* canvas in the
-            // *same* capture phase, and plain stopPropagation only prevents
-            // propagation to other DOM levels, not sibling listeners here.
+            // handler and EntityInputRouter attach to the *same* canvas in
+            // the *same* capture phase, and plain stopPropagation only
+            // prevents propagation to other DOM levels, not sibling
+            // listeners here.
             e.stopImmediatePropagation();
             e.preventDefault();
             this._commandRouter.execute(['mode.reader', hit.id]);
         }, { capture: true });
 
-        // Hit dispatcher — intercepts mousedown on windows before camera drag
-        this.hitDispatcher = new HitDispatcher({
+        // Entity input router — intercepts mousedown on registered entity
+        // types (grid/agent/terminal by default) before camera drag.
+        // Also exposes raycastAtClient for the camera focus probe and the
+        // attention-click handler in ide.html. Per-type handlers can be
+        // registered later (e.g. camera-docked types get non-translating
+        // drag in L2).
+        this.entityInputRouter = new EntityInputRouter({
             canvas: this.canvas,
             camera: this.camera,
             scene: this.scene,
@@ -441,10 +447,10 @@ export class GitHubRepoViewer {
             spatialManager: this.spatialManager,
             virtualizer: this.gridVirtualizer,
         });
-        this.hitDispatcher.attach();
-        // Expose to camera controller for focus-pivot raycasting (step 2 of
-        // the focus system — pivot follows whatever window is under the cursor).
-        this.sceneContext.hitDispatcher = this.hitDispatcher;
+        this.entityInputRouter.attach();
+        // Expose to camera controller for focus-pivot raycasting and to
+        // ide.html's click-to-attention handler.
+        this.sceneContext.entityInputRouter = this.entityInputRouter;
 
         // Listen for camera focus events to sync tree UI
         window.addEventListener('camera-focus-changed', (e) => {
@@ -487,8 +493,8 @@ export class GitHubRepoViewer {
         this._registerShortcuts();
         this.shortcutManager.attach();
 
-        // Reader-mode compass was created earlier (before HitDispatcher) so
-        // its capture-phase click interceptor runs ahead of the drag start.
+        // Reader-mode compass was created earlier (before EntityInputRouter)
+        // so its capture-phase click interceptor runs ahead of the drag start.
 
         // ---- Phase 3: Minimap Overlay ----
         this.minimapOverlay = new MinimapOverlay({

@@ -301,9 +301,9 @@ export class ViewerCameraController {
             const am = this.ctx?.attentionManager;
             const primaryHeld = !!am?.get?.('primary');
             if (!primaryHeld && willZoom) {
-                const hd = this.ctx?.hitDispatcher;
-                if (hd && typeof hd.raycastAtClient === 'function') {
-                    const hit = hd.raycastAtClient(e.clientX, e.clientY);
+                const router = this.ctx?.entityInputRouter;
+                if (router && typeof router.raycastAtClient === 'function') {
+                    const hit = router.raycastAtClient(e.clientX, e.clientY);
                     if (hit && hit.point) {
                         input.focus.pivot.copy(hit.point);
                         // Wheel-zoom's fresh hit is a stronger signal than
@@ -376,9 +376,9 @@ export class ViewerCameraController {
         if (now - focus.lastProbeMs < FOCUS_PROBE_INTERVAL_MS) return;
         focus.lastProbeMs = now;
 
-        const hd = this.ctx?.hitDispatcher;
-        if (!hd || typeof hd.raycastAtClient !== 'function') return;
-        const hit = hd.raycastAtClient(clientX, clientY);
+        const router = this.ctx?.entityInputRouter;
+        if (!router || typeof router.raycastAtClient !== 'function') return;
+        const hit = router.raycastAtClient(clientX, clientY);
         if (!hit) {
             // Cursor over empty space — keep the pivot where it was (avoid
             // flicking back to origin) but clear hover attention so the

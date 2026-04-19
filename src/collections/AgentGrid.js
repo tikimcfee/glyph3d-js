@@ -80,7 +80,7 @@ export default class AgentGrid {
         return { x: p.x, y: p.y, z: p.z };
     }
 
-    /** Proxy for raycasting -- HitDispatcher accesses entry.grid._background */
+    /** Proxy for raycasting — EntityInputRouter reads entry.grid._background */
     get _background() { return this.grid?._background ?? null; }
 
     /** Proxy for bounds queries -- overlap detection, layout, etc. */

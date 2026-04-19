@@ -297,30 +297,24 @@
             window._spatialNav = spatialNav; // debug access
             router.context.spatialNav = spatialNav; // available to nav.status command
 
-            // Click-to-target: reuse HitDispatcher's raycast (single hit
-            // pipeline across the app) to resolve canvas clicks to a
-            // registry id, then route through the router:
+            // Click-to-attention: reuse EntityInputRouter's raycast so a
+            // canvas click resolves to a registry id, then route through
+            // the command surface:
             //   router.execute('attention.set primary <id>')
             // CommandBar subscribes to change:primary and flips itself
-            // into terminal-input mode when the primary is a terminal.
+            // into terminal-input mode when the primary entity is a
+            // terminal.
             //
             // L1-A sweep: this replaces the parallel raycaster that used
             // to stamp `_background._terminalId` and call
             // `commandBar.setTarget(termId)` directly.
-            //
-            // NOTE: HitDispatcher today matches grid/agent/terminal (L0
-            // type-filter widening). When slice 5 renames it to
-            // EntityInputRouter with per-type click handlers, the call
-            // here becomes `entityRouter.onClick(e)` and the attention
-            // write moves into the per-type handler.
             {
                 const canvas = viewer.renderer.domElement;
                 canvas.addEventListener('click', (e) => {
-                    const hd = router.context?.hitDispatcher
-                        || viewer.sceneContext?.hitDispatcher
-                        || viewer.hitDispatcher;
-                    if (!hd || typeof hd.raycastAtClient !== 'function') return;
-                    const hit = hd.raycastAtClient(e.clientX, e.clientY);
+                    const r = viewer.sceneContext?.entityInputRouter
+                        || viewer.entityInputRouter;
+                    if (!r || typeof r.raycastAtClient !== 'function') return;
+                    const hit = r.raycastAtClient(e.clientX, e.clientY);
                     if (hit && hit.registryId) {
                         router.execute(['attention.set', 'primary', hit.registryId]);
                     } else {

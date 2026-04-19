@@ -472,8 +472,8 @@ export default class TerminalGrid extends THREE.Object3D {
      * Sized to fit cols×rows with padding. Updated on resize.
      *
      * L0 invariant (editable-3d-ide cross-ref): this mesh is also the
-     * raycast hit-target for the terminal entity. `HitDispatcher._raycastDraggable`
-     * (src/services/interaction/HitDispatcher.js:210-249) iterates
+     * raycast hit-target for the terminal entity. EntityInputRouter's
+     * _raycast (src/services/interaction/EntityInputRouter.js) walks
      * `registry.findByType('terminal')`, pulls `entry.grid?._background`,
      * and intersects. So:
      *   - The mesh must exist and have `visible = true` (THREE.Mesh default).
