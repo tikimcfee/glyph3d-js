@@ -72,7 +72,10 @@ function enterReader(ctx, grid, regIdx, registryId, { animate = true } = {}) {
     ctx.mode.readerGridId = registryId || null;
 
     if (ctx.readerCompass) {
-        ctx.readerCompass.update(resolveAdjacencies(ctx, ctx.mode.readerGridId));
+        const entries = ctx.registry
+            ? ctx.registry.list().filter(e => e.type === 'grid' || e.type === 'agent')
+            : [];
+        ctx.readerCompass.update({ currentId: ctx.mode.readerGridId, entries });
         ctx.readerCompass.setVisible(true);
     }
     return true;

@@ -428,6 +428,24 @@ export class GitHubRepoViewer {
             });
         });
 
+        // Compass click interception — tap a reader-mode compass marker
+        // to jump to that file. Capture phase runs before HitDispatcher's
+        // drag/click pipeline so a stolen click never starts a drag.
+        this.canvas.addEventListener('mousedown', (e) => {
+            if (this._commandContext?.mode?.state !== 'reader') return;
+            if (!this.readerCompass) return;
+            const rect = this.canvas.getBoundingClientRect();
+            const hit = this.readerCompass.hitTest(
+                e.clientX - rect.left,
+                e.clientY - rect.top,
+                { width: rect.width, height: rect.height },
+            );
+            if (!hit) return;
+            e.stopPropagation();
+            e.preventDefault();
+            this._commandRouter.execute(['mode.reader', hit.id]);
+        }, { capture: true });
+
         // Listen for canvas clicks — forward to selection manager
         this.canvas.addEventListener('canvas-click', (e) => {
             const { clientX, clientY, ctrlKey, metaKey } = e.detail;
