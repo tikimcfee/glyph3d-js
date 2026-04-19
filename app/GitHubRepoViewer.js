@@ -406,6 +406,32 @@ export class GitHubRepoViewer {
             animator: this.spatialAnimator,
         });
 
+        // Reader-mode compass — built here, *before* HitDispatcher attaches,
+        // so the capture-phase compass mousedown listener fires ahead of
+        // HitDispatcher's. Without this ordering, HitDispatcher would hit
+        // the underlying grid first, start a drag, and re-emit canvas-click
+        // on mouseup, causing mode.reader to run twice: once for the
+        // compass target, then once for the grid under the marker.
+        this.readerCompass = new ReaderCompass({ THREE, camera: this.camera });
+        this.canvas.addEventListener('mousedown', (e) => {
+            if (this._commandContext?.mode?.state !== 'reader') return;
+            if (!this.readerCompass) return;
+            const rect = this.canvas.getBoundingClientRect();
+            const hit = this.readerCompass.hitTest(
+                e.clientX - rect.left,
+                e.clientY - rect.top,
+                { width: rect.width, height: rect.height },
+            );
+            if (!hit) return;
+            // stopImmediatePropagation (not just stopPropagation) — both this
+            // handler and HitDispatcher attach to the *same* canvas in the
+            // *same* capture phase, and plain stopPropagation only prevents
+            // propagation to other DOM levels, not sibling listeners here.
+            e.stopImmediatePropagation();
+            e.preventDefault();
+            this._commandRouter.execute(['mode.reader', hit.id]);
+        }, { capture: true });
+
         // Hit dispatcher — intercepts mousedown on windows before camera drag
         this.hitDispatcher = new HitDispatcher({
             canvas: this.canvas,
@@ -428,27 +454,11 @@ export class GitHubRepoViewer {
             });
         });
 
-        // Compass click interception — tap a reader-mode compass marker
-        // to jump to that file. Capture phase runs before HitDispatcher's
-        // drag/click pipeline so a stolen click never starts a drag.
-        this.canvas.addEventListener('mousedown', (e) => {
-            if (this._commandContext?.mode?.state !== 'reader') return;
-            if (!this.readerCompass) return;
-            const rect = this.canvas.getBoundingClientRect();
-            const hit = this.readerCompass.hitTest(
-                e.clientX - rect.left,
-                e.clientY - rect.top,
-                { width: rect.width, height: rect.height },
-            );
-            if (!hit) return;
-            e.stopPropagation();
-            e.preventDefault();
-            this._commandRouter.execute(['mode.reader', hit.id]);
-        }, { capture: true });
-
-        // Listen for canvas clicks — forward to selection manager
+        // Listen for canvas clicks — forward to selection manager, and in
+        // reader mode additionally retarget the reader to the clicked grid
+        // so compass + camera snap onto it.
         this.canvas.addEventListener('canvas-click', (e) => {
-            const { clientX, clientY, ctrlKey, metaKey } = e.detail;
+            const { clientX, clientY, ctrlKey, metaKey, gridId } = e.detail;
             const additive = ctrlKey || metaKey;
             this.selectionManager.handleClick(
                 clientX, clientY,
@@ -457,6 +467,9 @@ export class GitHubRepoViewer {
                 this.grids,
                 additive
             );
+            if (gridId && this._commandContext?.mode?.state === 'reader') {
+                this._commandRouter.execute(['mode.reader', gridId]);
+            }
         });
 
         // file-selected event: sync tree panel .selected class by sourcePath
@@ -474,9 +487,8 @@ export class GitHubRepoViewer {
         this._registerShortcuts();
         this.shortcutManager.attach();
 
-        // Reader-mode HUD: camera-attached arrows showing N/S/E/W neighbors.
-        // Hidden until reader mode turns it on; wired into ctx below.
-        this.readerCompass = new ReaderCompass({ THREE, camera: this.camera });
+        // Reader-mode compass was created earlier (before HitDispatcher) so
+        // its capture-phase click interceptor runs ahead of the drag start.
 
         // ---- Phase 3: Minimap Overlay ----
         this.minimapOverlay = new MinimapOverlay({

@@ -164,7 +164,9 @@ export class HitDispatcher {
 
         if (!this._hasMoved) {
             log.debug(`mouseup: click (no drag) on ${this._dragTarget.registryId}`);
-            // Displacement under threshold -> re-emit as canvas-click
+            // Displacement under threshold -> re-emit as canvas-click.
+            // Include registryId so listeners don't have to re-raycast to
+            // know which grid was hit.
             this.canvas.dispatchEvent(new CustomEvent('canvas-click', {
                 detail: {
                     clientX: e.clientX,
@@ -172,6 +174,7 @@ export class HitDispatcher {
                     shiftKey: e.shiftKey,
                     ctrlKey: e.ctrlKey,
                     metaKey: e.metaKey,
+                    gridId: this._dragTarget.registryId || null,
                 },
                 bubbles: true,
             }));
