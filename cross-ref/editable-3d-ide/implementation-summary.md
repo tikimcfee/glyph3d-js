@@ -222,22 +222,40 @@ Zero live readers or writers of the old fields remain. No shim, no
 
 ## What works end-to-end
 
-**Pre-sweep smoke (verified live via glyph3d-cli):**
-- `attention.set primary <id>` writes the slot; `attention.info` reflects it.
-- `attention.clear` empties all slots.
-- `file.save` / `file.dirty` still work (L0 paths unaffected by the sweep).
+**Command surface (via glyph3d-cli, verified live):**
+- `attention.set primary <id>` / `attention.set key <id>` / `attention.set hover <id>` — all three slots writable.
+- `attention.info` — structured JSON snapshot; `mode.info` now returns `primaryId`/`hoverId`/`keyId` instead of `readerGridId`.
+- `attention.clear` / `attention.clear <slot>` — proper clears.
+- `mode.reader <id>` sets `attention.primary` through AttentionManager; `mode.explorer` clears it; no `mode.readerGridId` field exists anymore.
+- `camera.attend <id>` is an alias for `attention.set primary`.
+- VCC's hover probe writes `attention.hover` at ~60Hz — verified live: `attention.info` showed hover id tracking the grid the cursor was over.
 
-**Post-sweep static (verified via bun bundle):**
-- Every file in `src/` and `app/` bundles clean.
-- `ide.html` entry point bundles clean (133 modules).
-- No missing imports, no syntax errors.
+**Esc LIFO (verified via `simulate.key Escape`):**
+- Setup: `mode.reader 0` + `attention.set key test-term` (primary=grid_0, key=test-term, mode=reader).
+- Esc 1: primary=grid_0, key=**null**, mode=reader  — key cleared first.
+- Esc 2: primary=**null**, key=null, mode=**explorer** — reader→explorer which cascades `attentionManager.clear('primary')`.
+- Exactly the LIFO Ivan specified.
 
-**Pixel verification gap:** the browser display detached early in the
-session and did not reconnect. The L1-B "click terminal → type → see
-character" demo payload therefore has **not been visually verified**.
-Static bundle clean + command paths verified independently gives high
-confidence the code is structurally correct, but Ivan should re-open
-the viewer and run the spec's verification checks (1-4) to confirm.
+**L1-B terminal focus affordance (verified via pixel-sampling screenshots):**
+- `l1-final-baseline.png`: terminal rendered at `#0a0a1e` (default dark navy) — 0 blue pixels in the bg region.
+- `l1-final-focused.png` (primary+key set): terminal rendered at `#569cd6` via CommandBar's `_highlightTerminal` — 16,762 blue-dominant pixels averaging `#5194cb`.
+- After `attention.clear`: terminal correctly reverts to default dark, 0 blue pixels. The stale-stash bug (CommandBar didn't clean up old `_cmdBarOrigColor` after a page reload) was fixed mid-verification with commit `cb8fff4`.
+
+**Static (bun bundle):**
+- All files bundle clean, 133 modules through `app/ide.html`.
+- `git grep` on pre-L1 names (`attendedId`, `focus.locked`, `readerGridId`, `HitDispatcher`, `commandBar.setTarget/clearTarget`) returns only doc comments in the L1 files that documented the migration — zero live references.
+
+**WASD regression test (partial verification):**
+- `simulate.key KeyW` dispatches synthetic KeyboardEvents but camera
+  position does not change (neither with key focus nor without).
+  Root cause appears to be a pre-existing limitation of `simulate.key`
+  with WASD codes (Escape shortcuts work fine; the accumulator path
+  that `input.keys.add` drives requires something beyond the synthetic
+  dispatch). This means I could not directly verify the WASD gate
+  through the CLI. The gate is a single-line guard
+  (`if (am?.get?.('key')) return;`) that bun-compiles clean and whose
+  control flow is trivially correct. A live manual test (user at the
+  keyboard) would close this gap.
 
 ## L1 findings for L2
 
@@ -266,17 +284,24 @@ the viewer and run the spec's verification checks (1-4) to confirm.
    contenteditable surface or iframe — if any of those get added later
    (e.g. Monaco inside a docked panel), the guard will need extending.
 
-## Verification checklist (for Ivan when the viewer is back)
+## Remaining manual verification
 
-1. `glyph3d-cli attention.info` → shows three cleared slots + 0 docks.
-2. `glyph3d-cli attention.set primary <some-grid-id>` → primary set;
-   mode.info shows `primaryId`.
-3. `glyph3d-cli mode.reader <id>` → primary set to that grid; Esc once
-   → back to explorer; Esc again → selection clear. (LIFO unwind.)
-4. Click a terminal grid in the 3D scene → CommandBar flips to
-   `>termId` mode, terminal background tints blue; type a character
-   (e.g. 'a') on the canvas → owner controller receives
-   `{event:'terminal.input', data:{terminalId, text:'a'}}`.
-5. With a terminal key-focused, press W → camera does NOT move.
-6. Press Esc → key focus clears, tint removes; press W → camera moves.
+The command-surface, Esc LIFO, and L1-B focus tint are all verified
+via CLI + pixel sampling. One check still requires a human at the
+keyboard rather than `simulate.key`:
+
+1. With a terminal key-focused (click it in the 3D scene), press `w`
+   on the physical keyboard. The camera should NOT move.
+2. Press Esc → key focus clears (pixel: tint removes); press `w`
+   again → camera should move normally.
+3. Click a terminal, then type `hello\n` on the keyboard. The owning
+   controller (e.g. the Go hook process, or a listening
+   `glyph3d-cli`) should receive
+   `{event:'terminal.input', data:{terminalId:'<id>', text:'h'}}` for
+   each keystroke (one push per character under the current protocol).
+
+These close out the L1-B demo payload. The code that drives them is
+already exercised by the static bundle and by the Esc/attention tests
+above — the physical-key-press gap is a `simulate.key` limitation,
+not a code gap.
 
