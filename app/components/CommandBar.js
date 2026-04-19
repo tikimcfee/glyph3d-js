@@ -68,13 +68,19 @@ export default class CommandBar {
         this._attentionUnsub = null;
         const am = this._ctx?.attentionManager;
         if (am) {
-            this._attentionUnsub = am.on('change:primary', (value /*, prev */) => {
+            const applyFromPrimary = (value) => {
                 if (value && value.entity?.type === 'terminal') {
                     this._applyTerminalTarget(value.id);
                 } else {
                     this._applyCommandMode();
                 }
-            });
+            };
+            // Initial sync — if attention.primary is already set at
+            // construction (e.g. the page reloaded while a terminal was
+            // primary), reflect that in the bar's UI. Otherwise the
+            // next change event catches us up.
+            applyFromPrimary(am.get('primary'));
+            this._attentionUnsub = am.on('change:primary', applyFromPrimary);
         }
     }
 
@@ -274,6 +280,17 @@ export default class CommandBar {
     _applyCommandMode() {
         if (this._targetTerminalId) {
             this._unhighlightTerminal(this._targetTerminalId);
+        }
+        // Also scrub any stale stashes left by a previous CommandBar
+        // instance (page reload while a terminal was highlighted). Walk
+        // all terminals and un-highlight any that still carry our stash.
+        const terminals = this._ctx?.terminals;
+        if (terminals) {
+            for (const [id, grid] of terminals) {
+                if (grid?._background?._cmdBarOrigColor !== undefined) {
+                    this._unhighlightTerminal(id);
+                }
+            }
         }
         this._mode = MODES.COMMAND;
         this._targetTerminalId = null;

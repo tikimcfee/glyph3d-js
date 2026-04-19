@@ -198,10 +198,17 @@ function _installConsoleForwarder(bridge) {
  * 0x0C, which covers the common interactive cases. Everything else
  * falls through unchanged.
  *
- * Visual affordance: a subtle accent color is applied to the focused
- * terminal's _background mesh so the user can see which terminal is
- * receiving keystrokes. Stored as `_keyFocusTint` (non-enumerable) so
- * the original color restores on key-focus clear.
+ * Visual affordance: in the normal user flow a canvas click sets
+ * primary AND key together (ide.html click handler), so CommandBar's
+ * _highlightTerminal already tints the background. L1-B does NOT add a
+ * second tint layer — a second stash on the same mesh would fight
+ * CommandBar's stash (both call material.color.setHex + snapshot the
+ * "original" on overwrite). The CommandBar badge showing `>termId`
+ * plus the highlighted background IS the focus affordance.
+ *
+ * If a future slice needs a distinct "key-focused but not primary"
+ * affordance (e.g. a ring outline), it should go through a dedicated
+ * visual-state-stack service rather than fighting CommandBar's stash.
  *
  * @private
  * @param {Object} ctx - command context
@@ -209,33 +216,6 @@ function _installConsoleForwarder(bridge) {
 function _installTerminalKeystrokeDelivery(ctx) {
     const am = ctx?.attentionManager;
     if (!am || typeof document === 'undefined') return;
-
-    const KEY_FOCUS_TINT = 0x3a5f88; // muted blue; L2 will centralize color palette
-
-    const applyTint = (grid) => {
-        const bg = grid?._background;
-        if (!bg?.material) return;
-        if (bg._keyFocusTint !== undefined) return;
-        bg._keyFocusTint = {
-            color:   bg.material.color.getHex(),
-            opacity: bg.material.opacity,
-        };
-        bg.material.color.setHex(KEY_FOCUS_TINT);
-        bg.material.opacity = Math.max(bg.material.opacity, 0.85);
-    };
-
-    const removeTint = (grid) => {
-        const bg = grid?._background;
-        if (!bg?.material || bg._keyFocusTint === undefined) return;
-        bg.material.color.setHex(bg._keyFocusTint.color);
-        bg.material.opacity = bg._keyFocusTint.opacity;
-        delete bg._keyFocusTint;
-    };
-
-    am.on('change:key', (value, prev) => {
-        if (prev?.entity?.grid) removeTint(prev.entity.grid);
-        if (value?.entity?.grid) applyTint(value.entity.grid);
-    });
 
     // Key-to-bytes translation for a terminal consumer. Returns the string
     // to send, or null if the key should be ignored (purely modifier events,
