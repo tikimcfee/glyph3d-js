@@ -63,13 +63,14 @@ function enterReader(ctx, grid, regIdx, registryId, { animate = true } = {}) {
         if (aabb) frameBounds(ctx, aabb, 1.0);
     }
 
-    const focus = cc?.input?.focus;
-    if (focus) {
-        focus.attendedId = registryId || null;
-        focus.locked = true;
-    }
+    // Attention: write primary through AttentionManager (single writer).
+    // The "sticky" semantics of reader mode — suppress hover-probe updates
+    // while reader is active — fall out of having attention.primary set,
+    // which is what the probe gate at ViewerCameraController._probeFocusPivot
+    // now checks.
+    ctx.attentionManager.set('primary', registryId || null,
+        { entity: ctx.registry?.get?.(registryId) || null });
     ctx.mode.state = 'reader';
-    ctx.mode.readerGridId = registryId || null;
 
     if (ctx.readerCompass) {
         // Reader compass considers grid/agent/terminal entries. L0 widened
@@ -79,7 +80,7 @@ function enterReader(ctx, grid, regIdx, registryId, { animate = true } = {}) {
         const entries = ctx.registry
             ? ctx.registry.list().filter(e => e.type === 'grid' || e.type === 'agent' || e.type === 'terminal')
             : [];
-        ctx.readerCompass.update({ currentId: ctx.mode.readerGridId, entries });
+        ctx.readerCompass.update({ currentId: ctx.attention.primary?.id ?? null, entries });
         ctx.readerCompass.setVisible(true);
     }
     return true;
@@ -87,13 +88,8 @@ function enterReader(ctx, grid, regIdx, registryId, { animate = true } = {}) {
 
 /** Drop reader lock and attention override. */
 function enterExplorer(ctx) {
-    const focus = ctx.cameraController?.input?.focus;
-    if (focus) {
-        focus.attendedId = null;
-        focus.locked = false;
-    }
+    ctx.attentionManager.clear('primary');
     ctx.mode.state = 'explorer';
-    ctx.mode.readerGridId = null;
     if (ctx.readerCompass) ctx.readerCompass.setVisible(false);
 }
 
@@ -175,7 +171,7 @@ export default function registerModeCommands(router) {
         }
         return {
             text: `OK: reader "${resolved.registryId || `#${resolved.idx}`}"`,
-            data: { mode: 'reader', readerGridId: ctx.mode.readerGridId, index: resolved.idx },
+            data: { mode: 'reader', primaryId: ctx.attention.primary?.id ?? null, index: resolved.idx },
         };
     }, { description: 'Enter reader mode on a grid', usage: '<index|id|name>' });
 
@@ -183,14 +179,14 @@ export default function registerModeCommands(router) {
         enterExplorer(ctx);
         return {
             text: 'OK: explorer',
-            data: { mode: 'explorer', readerGridId: null },
+            data: { mode: 'explorer', primaryId: null },
         };
     }, { description: 'Leave reader and return to free-camera explorer' });
 
     router.register('mode.toggle', (args, ctx) => {
         if (ctx.mode.state === 'reader') {
             enterExplorer(ctx);
-            return { text: 'OK: explorer', data: { mode: 'explorer' } };
+            return { text: 'OK: explorer', data: { mode: 'explorer', primaryId: null } };
         }
         // explorer → reader requires a target
         if (args.length < 1) return { text: 'ERR: usage: mode.toggle <index|id|name> (when entering reader)', data: null };
@@ -202,23 +198,22 @@ export default function registerModeCommands(router) {
         }
         return {
             text: `OK: reader "${resolved.registryId || `#${resolved.idx}`}"`,
-            data: { mode: 'reader', readerGridId: ctx.mode.readerGridId, index: resolved.idx },
+            data: { mode: 'reader', primaryId: ctx.attention.primary?.id ?? null, index: resolved.idx },
         };
     }, { description: 'Toggle reader ↔ explorer (reader needs a target arg)' });
 
     router.register('mode.info', (args, ctx) => {
-        const focus = ctx.cameraController?.input?.focus;
+        const a = ctx.attention;
         return {
-            text: `OK: mode=${ctx.mode.state} readerGridId=${ctx.mode.readerGridId ?? 'null'}`,
+            text: `OK: mode=${ctx.mode.state} primary=${a.primary?.id ?? 'null'} hover=${a.hover?.id ?? 'null'} key=${a.key?.id ?? 'null'}`,
             data: {
                 mode: ctx.mode.state,
-                readerGridId: ctx.mode.readerGridId,
-                focus: focus
-                    ? { attendedId: focus.attendedId, locked: focus.locked }
-                    : null,
+                primaryId: a.primary?.id ?? null,
+                hoverId:   a.hover?.id ?? null,
+                keyId:     a.key?.id ?? null,
             },
         };
-    }, { description: 'Show current interaction mode' });
+    }, { description: 'Show current interaction mode and attention snapshot' });
 
     // Reader-only navigation: step to prev/next grid in registry order.
     // In explorer mode these return an error so keybindings can safely fall
@@ -232,7 +227,7 @@ export default function registerModeCommands(router) {
             ? ctx.registry.list().filter(e => e.type === 'grid' || e.type === 'agent' || e.type === 'terminal')
             : [];
         if (entries.length === 0) return { text: 'ERR: no readable entries', data: null };
-        const currentId = ctx.mode.readerGridId;
+        const currentId = ctx.attention.primary?.id ?? null;
         let currentIdx = entries.findIndex(e => e.id === currentId);
         if (currentIdx < 0) currentIdx = 0;
         const nextIdx = ((currentIdx + delta) % entries.length + entries.length) % entries.length;
@@ -242,7 +237,7 @@ export default function registerModeCommands(router) {
         enterReader(ctx, nextEntry.grid, gridIdx, nextEntry.id);
         return {
             text: `OK: reader "${nextEntry.id}" (${currentIdx}→${nextIdx})`,
-            data: { mode: 'reader', readerGridId: nextEntry.id, index: nextIdx },
+            data: { mode: 'reader', primaryId: nextEntry.id, index: nextIdx },
         };
     };
     router.register('mode.next', (args, ctx) => step(ctx, +1),
@@ -259,7 +254,7 @@ export default function registerModeCommands(router) {
         if (!['up', 'down', 'left', 'right'].includes(dir)) {
             return { text: `ERR: invalid direction '${dir}' (up|down|left|right)`, data: null };
         }
-        const adj = resolveAdjacencies(ctx, ctx.mode.readerGridId);
+        const adj = resolveAdjacencies(ctx, ctx.attention.primary?.id ?? null);
         const entry = adj[dir];
         if (!entry) {
             return { text: `OK: no grid ${dir} of current`, data: { direction: dir, target: null } };
@@ -269,15 +264,16 @@ export default function registerModeCommands(router) {
         enterReader(ctx, entry.grid, gridIdx, entry.id);
         return {
             text: `OK: reader "${entry.id}" (${dir})`,
-            data: { mode: 'reader', readerGridId: entry.id, direction: dir },
+            data: { mode: 'reader', primaryId: entry.id, direction: dir },
         };
     }, { description: 'Reader mode: jump to adjacent grid', usage: '<up|down|left|right>' });
 
     router.register('mode.adjacencies', (args, ctx) => {
-        if (!ctx.mode.readerGridId) {
+        const primaryId = ctx.attention.primary?.id ?? null;
+        if (!primaryId) {
             return { text: 'OK: no current reader target', data: { adjacencies: {} } };
         }
-        const adj = resolveAdjacencies(ctx, ctx.mode.readerGridId);
+        const adj = resolveAdjacencies(ctx, primaryId);
         const summary = {};
         for (const dir of ['up', 'down', 'left', 'right']) {
             summary[dir] = adj[dir] ? adj[dir].id : null;

@@ -961,11 +961,12 @@ export class GitHubRepoViewer {
                 idx = this._tabIndex;
             }
             if (idx < 0) {
-                // Fall back to whatever the focus-pivot probe is currently
-                // attending to (hovered grid under the cursor).
-                const attendedId = this.cameraController?.input?.focus?.attendedId;
-                if (attendedId) {
-                    this._commandRouter.execute(['mode.reader', attendedId]);
+                // Fall back to whatever the hover probe is currently
+                // pointing at (attention.hover is written by the probe at
+                // ViewerCameraController._probeFocusPivot).
+                const hoverId = this._commandContext?.attention?.hover?.id || null;
+                if (hoverId) {
+                    this._commandRouter.execute(['mode.reader', hoverId]);
                     return;
                 }
                 this.toastUI?.show('Select or hover a file first', 'warn');

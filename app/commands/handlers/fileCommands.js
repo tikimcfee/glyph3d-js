@@ -21,9 +21,9 @@
  *                              against the last-saved snapshot. Returns
  *                              { id, dirty: bool }. Does NOT hit disk.
  *
- * With no arg both commands fall through to the current reader-mode target
- * (ctx.mode.readerGridId), matching the ergonomics of mode.* verbs so a
- * user in reader mode can just type `file.save` with no arguments.
+ * With no arg both commands fall through to the current primary attention
+ * target (ctx.attention.primary?.id), matching the ergonomics of mode.* verbs
+ * so a user in reader mode can just type `file.save` with no arguments.
  *
  * The "last-saved snapshot" lives on the grid itself as a non-enumerable
  * `_savedTextHash` property, updated on successful save. The first save
@@ -54,13 +54,13 @@ function contentHash(text) {
 
 /**
  * Resolve the grid argument: explicit registry id / index, or fall back to
- * ctx.mode.readerGridId when empty. Returns the same shape as
- * resolveGridByIdOrIndex plus a `uri` string pulled from sourcePath.
+ * the current primary attention target when empty. Returns the same shape
+ * as resolveGridByIdOrIndex plus a `uri` string pulled from sourcePath.
  */
 function resolveSaveTarget(ctx, args) {
-    const target = args[0] ?? ctx.mode?.readerGridId ?? null;
+    const target = args[0] ?? ctx.attention?.primary?.id ?? null;
     if (!target) {
-        return { error: 'ERR: no grid specified and no current reader target' };
+        return { error: 'ERR: no grid specified and no current primary attention target' };
     }
     const resolved = resolveGridByIdOrIndex(ctx, String(target));
     if (resolved.error) return resolved;
@@ -159,9 +159,9 @@ export default function registerFileCommands(router) {
     });
 
     router.register('file.dirty', (args, ctx) => {
-        const target = args[0] ?? ctx.mode?.readerGridId ?? null;
+        const target = args[0] ?? ctx.attention?.primary?.id ?? null;
         if (!target) {
-            return { text: 'ERR: no grid specified and no current reader target', data: null };
+            return { text: 'ERR: no grid specified and no current primary attention target', data: null };
         }
         const resolved = resolveGridByIdOrIndex(ctx, String(target));
         if (resolved.error) return { text: resolved.error, data: null };

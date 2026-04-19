@@ -3,8 +3,8 @@
  *
  * Editable-3d-ide L1-A: prior to this service, scene attention was spread
  * across at least three uncoordinated fields
- *   - ViewerCameraController.input.focus.attendedId (hover)
- *   - ctx.mode.readerGridId                         (sticky reader target)
+ *   - ViewerCameraController.input.focus.attendedId (hover)  [removed]
+ *   - ctx.mode.readerGridId                         (reader target) [removed]
  *   - commandBar.target (via app/ide.html:303-336 parallel raycaster)
  * each with its own writers and no shared vocabulary. L1 collapses them
  * into one record with one writer per slot:
@@ -30,13 +30,15 @@
  *     convergence docs called it 'keyFocus'; migration writes synonymize
  *     them when convenient but the external verb surface is `key`.
  *
- * Reader sites are not migrated in one sweep — AttentionManager mirrors
- * its primary + hover writes into the legacy fields (`focus.attendedId`,
- * `focus.locked`, `ctx.mode.readerGridId`) so long-standing readers
- * (updateWindowBillboards at windowCommands.js:290, _probeFocusPivot gate
- * at ViewerCameraController.js:352) keep working with zero changes. Later
- * phases can delete the shims as readers are migrated to
- * `ctx.attention.primary?.id` / `.hover?.id` / `.key?.id`.
+ * No back-compat layer. Every writer and every reader was migrated to
+ * ctx.attention.{hover,primary,key}?.id in a single sweep:
+ *   - updateWindowBillboards (windowCommands.js) reads ctx.attention
+ *   - VCC probe/wheel gates read attentionManager.get('primary')
+ *   - mode.* commands read/write attention.primary
+ *   - camera.attend is now a thin alias for attention.set primary
+ *   - the parallel raycaster at app/ide.html:303-336 went away
+ * If you see `focus.attendedId` or `ctx.mode.readerGridId` anywhere
+ * it is a bug and a regression — they are removed.
  *
  * Event listeners:
  *   on('change', (slot, value, prev) => ...)  // any slot write

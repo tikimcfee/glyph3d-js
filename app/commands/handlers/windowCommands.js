@@ -287,7 +287,14 @@ export default function registerWindowCommands(router) {
  */
 export function updateWindowBillboards(ctx, camera, deltaTime = 1 / 60) {
     if (!ctx._agentGrids) return;
-    const attendedId = ctx.cameraController?.input?.focus?.attendedId ?? null;
+    // "Attended" for billboards = the active attention target. Primary
+    // takes precedence (reader mode, camera.attend, scripted sets);
+    // hover fills in otherwise. Reflecting both slots here means a
+    // docked/pinned entity keeps its billboard full even when the cursor
+    // is elsewhere, while free cursor movement still animates billboards
+    // for whatever the user is pointing at.
+    const a = ctx.attention;
+    const attentionTarget = a?.primary?.id ?? a?.hover?.id ?? null;
 
     for (const ag of ctx._agentGrids.values()) {
         if (!ag.billboard || !ag.grid) continue;
@@ -299,11 +306,12 @@ export function updateWindowBillboards(ctx, camera, deltaTime = 1 / 60) {
         const target = ag._billboardTarget;
 
         // Attention weight: 1.0 when this grid is the focus target (cursor
-        // over it), 0.0 otherwise. Eased toward that with framerate-indep
-        // damping so look-at-me / look-away transitions are smooth rather
-        // than snap. Zero = world-anchored + yaw-only. One = full facing.
+        // over it, or primary), 0.0 otherwise. Eased toward that with
+        // framerate-indep damping so look-at-me / look-away transitions are
+        // smooth rather than snap. Zero = world-anchored + yaw-only.
+        // One = full facing.
         if (ag._attentionWeight === undefined) ag._attentionWeight = 0;
-        const targetK = (attendedId && attendedId === ag.id) ? 1 : 0;
+        const targetK = (attentionTarget && attentionTarget === ag.id) ? 1 : 0;
         ag._attentionWeight = easeTo(ag._attentionWeight, targetK, deltaTime, ATTENTION_TAU);
         const k = ag._attentionWeight;
 

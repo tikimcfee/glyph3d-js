@@ -297,40 +297,34 @@
             window._spatialNav = spatialNav; // debug access
             router.context.spatialNav = spatialNav; // available to nav.status command
 
-            // Click-to-target: raycast against TerminalGrid backgrounds.
-            // When a terminal's background mesh is clicked, auto-target the bar.
-            // Click on empty space clears the target.
+            // Click-to-target: reuse HitDispatcher's raycast (single hit
+            // pipeline across the app) to resolve canvas clicks to a
+            // registry id, then route through the router:
+            //   router.execute('attention.set primary <id>')
+            // CommandBar subscribes to change:primary and flips itself
+            // into terminal-input mode when the primary is a terminal.
+            //
+            // L1-A sweep: this replaces the parallel raycaster that used
+            // to stamp `_background._terminalId` and call
+            // `commandBar.setTarget(termId)` directly.
+            //
+            // NOTE: HitDispatcher today matches grid/agent/terminal (L0
+            // type-filter widening). When slice 5 renames it to
+            // EntityInputRouter with per-type click handlers, the call
+            // here becomes `entityRouter.onClick(e)` and the attention
+            // write moves into the per-type handler.
             {
-                const raycaster = new THREE.Raycaster();
-                const mouse = new THREE.Vector2();
                 const canvas = viewer.renderer.domElement;
-
                 canvas.addEventListener('click', (e) => {
-                    const rect = canvas.getBoundingClientRect();
-                    mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-                    mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-                    raycaster.setFromCamera(mouse, viewer.camera);
-
-                    // Collect all terminal background meshes with their IDs
-                    const terminals = router.context.terminals;
-                    if (!terminals || terminals.size === 0) return;
-
-                    const bgMeshes = [];
-                    for (const [id, grid] of terminals) {
-                        if (grid._background) {
-                            grid._background._terminalId = id;
-                            bgMeshes.push(grid._background);
-                        }
-                    }
-
-                    const hits = raycaster.intersectObjects(bgMeshes, false);
-                    if (hits.length > 0) {
-                        const termId = hits[0].object._terminalId;
-                        commandBar.setTarget(termId);
-                        commandBar.focus();
+                    const hd = router.context?.hitDispatcher
+                        || viewer.sceneContext?.hitDispatcher
+                        || viewer.hitDispatcher;
+                    if (!hd || typeof hd.raycastAtClient !== 'function') return;
+                    const hit = hd.raycastAtClient(e.clientX, e.clientY);
+                    if (hit && hit.registryId) {
+                        router.execute(['attention.set', 'primary', hit.registryId]);
                     } else {
-                        // Clicked empty space — clear target if in terminal mode
-                        commandBar.clearTarget();
+                        router.execute(['attention.clear', 'primary']);
                     }
                 });
             }

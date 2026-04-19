@@ -140,15 +140,19 @@ export default function registerCameraCommands(router) {
 
     router.register('camera.attend', (args, ctx) => {
         if (args.length < 1) return { text: 'ERR: usage: camera.attend <id|none>', data: null };
-        const cc = ctx.cameraController;
-        if (!cc?.input?.focus) return { text: 'ERR: no focus state on controller', data: null };
         const id = args[0] === 'none' ? null : args[0];
-        cc.input.focus.attendedId = id;
-        // Lock so the mousemove raycast probe doesn't immediately overwrite
-        // the manual override. camera.attend none unlocks and clears.
-        cc.input.focus.locked = id !== null;
-        return { text: `OK: attended = ${id ?? 'none'} (locked=${cc.input.focus.locked})`, data: { attendedId: id, locked: cc.input.focus.locked } };
-    }, { description: 'Manually set the attended window id (drives billboard attention blend)', usage: '<id|none>' });
+
+        // Routes through AttentionManager — the single writer for the
+        // primary slot. Equivalent to `attention.set primary <id>`; the
+        // verb name is kept because it's the historical handle.
+        ctx.attentionManager.set('primary', id,
+            { entity: id ? ctx.registry?.get?.(id) || null : null });
+
+        return {
+            text: `OK: attended = ${id ?? 'none'}`,
+            data: { primaryId: id },
+        };
+    }, { description: 'Manually set the primary attention target (drives billboard attention blend)', usage: '<id|none>' });
 
     router.register('camera.pivot', (args, ctx) => {
         if (args.length < 3) return { text: 'ERR: usage: camera.pivot <x> <y> <z>', data: null };

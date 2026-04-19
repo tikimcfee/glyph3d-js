@@ -59,6 +59,23 @@ export default class CommandBar {
         this._input.addEventListener('focus', this._onInputFocus);
         this._input.addEventListener('blur', this._onInputBlur);
         document.addEventListener('keydown', this._onGlobalKeyDown);
+
+        // L1-A: CommandBar is a *consumer* of attention.primary. When
+        // something — a canvas click, a scripted `attention.set primary`,
+        // a compass click entering reader mode — sets primary to a
+        // terminal entity, we flip into terminal-input mode. Any other
+        // primary (grid, agent, null) goes back to :CMD.
+        this._attentionUnsub = null;
+        const am = this._ctx?.attentionManager;
+        if (am) {
+            this._attentionUnsub = am.on('change:primary', (value /*, prev */) => {
+                if (value && value.entity?.type === 'terminal') {
+                    this._applyTerminalTarget(value.id);
+                } else {
+                    this._applyCommandMode();
+                }
+            });
+        }
     }
 
     // ================================================================
@@ -225,12 +242,15 @@ export default class CommandBar {
     // ================================================================
 
     /**
-     * Switch to terminal target mode.
-     * Called by TUIFocusManager integration or Shift+Click.
+     * Apply terminal-input mode UI state. Called only from the
+     * attention.primary subscription — never directly from external code.
+     * External callers that want to target a terminal should:
+     *   router.execute(['attention.set', 'primary', terminalId])
+     * The subscription will route here.
+     * @private
      * @param {string} terminalId
      */
-    setTarget(terminalId) {
-        // Unhighlight previous target
+    _applyTerminalTarget(terminalId) {
         if (this._targetTerminalId && this._targetTerminalId !== terminalId) {
             this._unhighlightTerminal(this._targetTerminalId);
         }
@@ -246,9 +266,12 @@ export default class CommandBar {
     }
 
     /**
-     * Clear terminal target, return to CMD mode.
+     * Apply command-mode UI state (the default). Called from the
+     * attention.primary subscription when primary is null or points at
+     * a non-terminal entity.
+     * @private
      */
-    clearTarget() {
+    _applyCommandMode() {
         if (this._targetTerminalId) {
             this._unhighlightTerminal(this._targetTerminalId);
         }
@@ -306,8 +329,12 @@ export default class CommandBar {
         if (e.key === 'Escape') {
             e.preventDefault();
             if (this._mode === MODES.TERMINAL) {
-                // Stage 1: terminal mode -> command mode
-                this.clearTarget();
+                // Stage 1: terminal-input mode -> command mode. Route
+                // through the attention.clear verb so the state
+                // transition is the same whether initiated by Esc here,
+                // by an external script, or by a canvas click on empty
+                // space. The subscription callback will flip the UI.
+                this._router.execute(['attention.clear', 'primary']);
             } else {
                 // Stage 2: command mode -> blur (dismiss output too)
                 this._hideOutput();
@@ -389,7 +416,8 @@ export default class CommandBar {
         const grid = this._ctx.terminals?.get(id);
         if (!grid) {
             this._showOutput(`ERR: terminal '${id}' no longer exists`);
-            this.clearTarget();
+            // Route the cleanup through the attention system too.
+            this._router.execute(['attention.clear', 'primary']);
             return;
         }
 

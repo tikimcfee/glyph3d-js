@@ -134,13 +134,16 @@ export class ViewerCameraController {
                 mods: null,               // snapshot at event time
             },
             focus: {
+                // Geometric state only: the pivot point (where zoom/orbit
+                // anchor) and the gesture-anchor client coords. Attention
+                // semantics (who is "attended", whether the probe should
+                // suppress) moved to ctx.attentionManager in L1-A:
+                //   attention.primary !== null  = probe suppressed
+                //                                 (replaces focus.locked)
+                //   attention.hover.id          = hovered entity
+                //                                 (replaces focus.attendedId)
                 pivot:       new THREE.Vector3(0, 0, 0),
-                locked:      false,       // explicit window.focus suppresses probe
                 lastProbeMs: 0,
-                // The registry id of whatever grid is currently under the
-                // cursor. Billboard updaters use this to drive per-grid
-                // attention weights (tilt-toward-camera when attended).
-                attendedId:  null,
                 // Client-space position of the current gesture's "anchor":
                 // cursor for mouse, pinch centroid for touch. The zoom
                 // pipeline itself is dolly-forward (doesn't use these),
@@ -290,13 +293,27 @@ export class ViewerCameraController {
             // throttles to 60ms, so without a fresh hit a zoom initiated
             // right after a cursor jump uses the previous target and
             // "rolls off" onto the old hit point.
-            if (!input.focus.locked && willZoom) {
+            // Probe gate: when the primary attention is sticky-set (reader
+            // mode, camera.attend) we don't want the wheel-zoom to steal
+            // hover attention back to whatever happens to be under the
+            // cursor. Previously this was `!input.focus.locked`; L1-A
+            // replaces that gate with a direct AttentionManager check.
+            const am = this.ctx?.attentionManager;
+            const primaryHeld = !!am?.get?.('primary');
+            if (!primaryHeld && willZoom) {
                 const hd = this.ctx?.hitDispatcher;
                 if (hd && typeof hd.raycastAtClient === 'function') {
                     const hit = hd.raycastAtClient(e.clientX, e.clientY);
                     if (hit && hit.point) {
                         input.focus.pivot.copy(hit.point);
-                        input.focus.attendedId = hit.registryId || null;
+                        // Wheel-zoom's fresh hit is a stronger signal than
+                        // the throttled mousemove probe, so update the
+                        // hover slot directly (single writer: AttentionManager).
+                        if (hit.registryId) {
+                            am?.set?.('hover', hit.registryId, { entity: hit.entry || null });
+                        } else {
+                            am?.clear?.('hover');
+                        }
                     }
                 }
             }
@@ -348,8 +365,13 @@ export class ViewerCameraController {
      * @private
      */
     _probeFocusPivot(clientX, clientY) {
+        // Probe gate: when primary is sticky-set, don't let the free-roaming
+        // hover probe overwrite the attended entity. (Pre-L1 this was
+        // `focus.locked`; AttentionManager.primary is the single source.)
+        const am = this.ctx?.attentionManager;
+        if (am?.get?.('primary')) return;
+
         const focus = this.input.focus;
-        if (focus.locked) return;
         const now = performance.now();
         if (now - focus.lastProbeMs < FOCUS_PROBE_INTERVAL_MS) return;
         focus.lastProbeMs = now;
@@ -359,13 +381,17 @@ export class ViewerCameraController {
         const hit = hd.raycastAtClient(clientX, clientY);
         if (!hit) {
             // Cursor over empty space — keep the pivot where it was (avoid
-            // flicking back to origin) but clear the attended id so the
-            // previously-attended grid starts easing back to its default.
-            focus.attendedId = null;
+            // flicking back to origin) but clear hover attention so the
+            // previously-hovered grid starts easing back to its default.
+            am?.clear?.('hover');
             return;
         }
         if (hit.point) focus.pivot.copy(hit.point);
-        focus.attendedId = hit.registryId || null;
+        if (hit.registryId) {
+            am?.set?.('hover', hit.registryId, { entity: hit.entry || null });
+        } else {
+            am?.clear?.('hover');
+        }
     }
 
     // ============ Per-frame drain ============

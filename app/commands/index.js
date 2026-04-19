@@ -121,20 +121,20 @@ function buildContext(viewer) {
         // SpatialNavigator — wired in after construction (set by ide.html)
         spatialNav: null,
 
-        // Interaction mode (explorer default; reader on focused grid).
-        // Shared by mode.* commands and keyboard shortcuts so the two paths
-        // can't disagree on what the current mode is.
+        // Interaction mode — camera-framing axis only. 'reader' frames a
+        // single grid; 'explorer' is free camera. The *which* grid is
+        // reader-mode's target lives on ctx.attention.primary (single
+        // source of truth). L1 swept ctx.mode.readerGridId out.
         mode: {
             state: 'explorer',
-            readerGridId: null,
         },
 
-        // Attention state — three slots (hover, primary, key) written by
-        // AttentionManager. Editable-3d-ide L1. During the migration window,
-        // AttentionManager also mirrors writes into the legacy fields
-        // (focus.attendedId, focus.locked, mode.readerGridId) so existing
-        // readers keep working; the shim peels off as readers migrate to
-        // `ctx.attention.{hover,primary,key}?.id`.
+        // Attention state — three slots (hover, primary, key) written
+        // exclusively by AttentionManager. Editable-3d-ide L1. Readers
+        // use ctx.attention.{hover,primary,key}?.id directly; there is
+        // no shim, no legacy mirror. If you want to know whether a grid
+        // is the sticky focus, read ctx.attention.primary?.id — do not
+        // read focus.attendedId / ctx.mode.readerGridId (both removed).
         attentionManager: new AttentionManager(),
         get attention() { return this.attentionManager.state; },
     };
@@ -198,6 +198,14 @@ export function initCommandCenter(viewer, options = {}) {
 
     // 1. Build command context
     const context = buildContext(viewer);
+
+    // 1a. Wire the AttentionManager onto viewer.sceneContext so VCC's hot-
+    // loop probe can reach it. VCC's `this.ctx` is the sceneContext, not
+    // the command ctx — this is the bridge. No back-compat mirror: every
+    // writer/reader was migrated to AttentionManager in the same pass.
+    if (viewer?.sceneContext) {
+        viewer.sceneContext.attentionManager = context.attentionManager;
+    }
 
     // 2. Create router and register all commands
     const router = new CommandRouter(context);
