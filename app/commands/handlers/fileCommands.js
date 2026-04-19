@@ -7,10 +7,15 @@
  * any edit to that in-memory copy was ephemeral: a grid.text mutation
  * vanished on reload and there was no way to get it back to disk.
  *
- * file.save <grid-id|index>  — persist the grid's current line buffer to the
- *                              URI in grid.sourcePath via the fs/writeFile
- *                              JSON-RPC verb (handled server-side in cli/fs.go).
- *                              Returns { uri, bytesWritten }.
+ * file.save <grid-id|index> [uri]
+ *                            — persist the grid's current line buffer to the
+ *                              URI in grid.userData.sourcePath (or grid.sourcePath,
+ *                              whichever is set), via the fs/writeFile JSON-RPC
+ *                              verb handled server-side in cli/fs.go. An
+ *                              explicit second arg overrides the lookup —
+ *                              useful for grids created via `grid.create` that
+ *                              don't have userData.sourcePath wired yet.
+ *                              Returns { uri, bytesWritten, mtime }.
  *
  * file.dirty <grid-id|index> — cheap dirty-check: SHA-free content-hash compare
  *                              against the last-saved snapshot. Returns
@@ -61,10 +66,19 @@ function resolveSaveTarget(ctx, args) {
     if (resolved.error) return resolved;
 
     const grid = resolved.grid;
-    const uri = grid.getSourcePath?.() || null;
+    // Real file-backed grids (loaded via GitHubRepoViewer.js:1738) set
+    // grid.userData.sourcePath, not grid.sourcePath. CodeGrid.getSourcePath()
+    // reads the latter, so we check both. Command-created grids have
+    // neither today (grid.create doesn't wire sourcePath) — callers can
+    // pass an explicit path as the second arg.
+    const explicit = args[1] || null;
+    const uri = explicit
+        || grid.getSourcePath?.()
+        || grid.userData?.sourcePath
+        || null;
     if (!uri) {
         return {
-            error: `ERR: grid "${resolved.registryId || target}" has no sourcePath (created in-memory?). file.save needs a URI to write to.`,
+            error: `ERR: grid "${resolved.registryId || target}" has no sourcePath. Usage: file.save <id> [uri-to-write-to] — or load the grid from the tree panel so userData.sourcePath gets set.`,
         };
     }
     return { ...resolved, uri };
@@ -140,7 +154,7 @@ export default function registerFileCommands(router) {
         };
     }, {
         description: 'Persist a grid\'s current text to disk via fs/writeFile',
-        usage: '[grid-id|index]',
+        usage: '[grid-id|index] [uri]',
         returns: '{ uri, bytesWritten, mtime, registryId, index }',
     });
 
