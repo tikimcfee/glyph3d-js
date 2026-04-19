@@ -470,6 +470,21 @@ export default class TerminalGrid extends THREE.Object3D {
     /**
      * Create a dark background plane behind the terminal for readability.
      * Sized to fit cols×rows with padding. Updated on resize.
+     *
+     * L0 invariant (editable-3d-ide cross-ref): this mesh is also the
+     * raycast hit-target for the terminal entity. `HitDispatcher._raycastDraggable`
+     * (src/services/interaction/HitDispatcher.js:210-249) iterates
+     * `registry.findByType('terminal')`, pulls `entry.grid?._background`,
+     * and intersects. So:
+     *   - The mesh must exist and have `visible = true` (THREE.Mesh default).
+     *   - It must be `DoubleSide` so a camera approaching from either side
+     *     can hit it (the grid is typically drawn at z=0 with the camera
+     *     anywhere in world space).
+     *   - The padded size (cols*strideX + 2*pad × rows*strideY + 2*pad, see
+     *     _updateBackground) is effectively full-bleed over the cell grid,
+     *     giving clicks a generous target even at the edge of the last row.
+     * Do not remove, shrink below the cell extent, or set `visible = false`
+     * without replacing the raycast target with another mesh.
      * @private
      */
     _initBackground() {
@@ -484,6 +499,11 @@ export default class TerminalGrid extends THREE.Object3D {
 
         this._background = new THREE.Mesh(geometry, material);
         this._background.renderOrder = RENDER_ORDER.GRID_BACKGROUND;
+        // Tagged so gesture dispatch can resolve background → terminal id
+        // without a reverse-lookup through the registry. Matches the pattern
+        // the app/ide.html parallel raycaster used (it stamped
+        // `_background._terminalId` onto each mesh at hit time).
+        this._background.userData.entityType = 'terminal';
         this.add(this._background);
         this._updateBackground();
     }
