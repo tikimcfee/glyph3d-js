@@ -395,6 +395,13 @@ func RunServer(cfg ServerConfig) error {
 	relay := NewRelay()
 	relay.fs = cfg.FSHandler
 
+	// Wire the fs/writeFile notify hook so successful writes echo an
+	// fs/didChange to the display. Editable-3d-ide L0: lets the browser
+	// round-trip-confirm a save and reload the affected grid.
+	if cfg.FSHandler != nil {
+		cfg.FSHandler.SetNotifyHook(relay.NotifyDisplayRPC)
+	}
+
 	// Live reload: watch source directories and push notifications to the browser
 	if cfg.WatchRoot != "" {
 		lr, err := NewLiveReloader(func(path string) {
@@ -486,6 +493,9 @@ func isWebSocketUpgrade(r *http.Request) bool {
 func RunRelay(host string, port int, fsHandler *FSHandler) error {
 	relay := NewRelay()
 	relay.fs = fsHandler
+	if fsHandler != nil {
+		fsHandler.SetNotifyHook(relay.NotifyDisplayRPC)
+	}
 
 	addr := fmt.Sprintf("%s:%d", host, port)
 	mux := http.NewServeMux()

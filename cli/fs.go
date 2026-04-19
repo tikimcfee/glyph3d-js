@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -20,6 +21,8 @@ const (
 	errIsDirectory      = -32003
 	errFileTooLarge     = -32004
 	errNotText          = -32005
+	errWriteFailed      = -32006
+	errInvalidEncoding  = -32007
 )
 
 const (
@@ -239,6 +242,22 @@ type statParams struct {
 	URI string `json:"uri"`
 }
 
+// writeFileParams is the body of the fs/writeFile JSON-RPC request.
+// Encoding defaults to "utf8" when omitted; "base64" lets clients send
+// binary payloads though today's viewer only emits UTF-8 text from grids.
+type writeFileParams struct {
+	URI      string `json:"uri"`
+	Content  string `json:"content"`
+	Encoding string `json:"encoding"`
+}
+
+// writeFileResult is returned on successful fs/writeFile.
+type writeFileResult struct {
+	URI          string `json:"uri"`
+	BytesWritten int64  `json:"bytesWritten"`
+	Mtime        int64  `json:"mtime"`
+}
+
 // ---- FSHandler ----
 
 // writeFn sends a serialized message to the display. Set by the Relay.
@@ -247,6 +266,20 @@ type writeFn func(data []byte)
 // FSHandler serves filesystem requests over JSON-RPC 2.0.
 type FSHandler struct {
 	root string // absolute path, symlinks resolved
+
+	// notify, if non-nil, is called on successful fs/writeFile to push an
+	// fs/didChange JSON-RPC notification to the display. Wired by RunServer
+	// / RunRelay to relay.NotifyDisplayRPC. When the server is running with
+	// --local (LiveReloader watching app/ + src/), the watcher may ALSO
+	// fire for the same path — the browser-side handler is idempotent
+	// (it just reloads), so the dupe is harmless.
+	notify func(method string, params any)
+}
+
+// SetNotifyHook wires the FSHandler to the relay's display push channel.
+// Safe to call at most once during server construction.
+func (h *FSHandler) SetNotifyHook(fn func(method string, params any)) {
+	h.notify = fn
 }
 
 // NewFSHandler creates a handler rooted at the given directory.
@@ -287,6 +320,8 @@ func (h *FSHandler) Handle(method string, rawID json.RawMessage, params json.Raw
 				h.handleStat(write, rawID, params)
 			case "fs/setFilter":
 				h.handleSetFilter(write, rawID, params)
+			case "fs/writeFile":
+				h.handleWriteFile(write, rawID, params)
 			default:
 				h.sendRPCError(write, rawID, -32601, "method not found: "+method, nil)
 			}
@@ -465,6 +500,121 @@ func (h *FSHandler) handleSetFilter(write writeFn, id json.RawMessage, raw json.
 	globalFilter.setFilter(p.Exts, p.Names)
 	log.Printf("[fs] filter updated: %d extensions, %d names", len(p.Exts), len(p.Names))
 	h.sendRPCResult(write, id, map[string]any{"ok": true})
+}
+
+// handleWriteFile persists a UTF-8 or base64 payload to a resolved path.
+//
+// Shape:   { uri, content, encoding? }  ->  { uri, bytesWritten, mtime }
+// Safety:  resolvePath enforces the project-root boundary (same as read).
+//          Refuses directories, refuses payloads over maxFileSize, and
+//          refuses utf-8 payloads that don't actually decode cleanly.
+// Atomicity: writes to "<target>.glyph3d.tmp" then os.Rename over the
+//          final path — on Linux this is atomic for same-filesystem
+//          replacement. If the rename fails the tmp is cleaned up.
+// Notification: on success, if a notify hook is wired, emits an
+//          fs/didChange RPC to the display so any open editor can
+//          round-trip-confirm the write (editable-3d-ide L0).
+func (h *FSHandler) handleWriteFile(write writeFn, id json.RawMessage, raw json.RawMessage) {
+	var p writeFileParams
+	if err := json.Unmarshal(raw, &p); err != nil {
+		h.sendRPCError(write, id, -32602, "invalid params", nil)
+		return
+	}
+
+	// Decode payload into a []byte. Default encoding is utf8.
+	var data []byte
+	switch p.Encoding {
+	case "", "utf8", "utf-8", "UTF-8":
+		// Validate the string is genuine UTF-8 — the JSON layer only
+		// guarantees valid JSON escaping, not that the resulting Go
+		// string is a useful UTF-8 payload. Reject binary sneaking in.
+		if !utf8.ValidString(p.Content) {
+			h.sendRPCError(write, id, errNotText, "content is not valid UTF-8", map[string]string{"uri": p.URI})
+			return
+		}
+		data = []byte(p.Content)
+	case "base64":
+		decoded, err := base64.StdEncoding.DecodeString(p.Content)
+		if err != nil {
+			h.sendRPCError(write, id, errInvalidEncoding, "base64 decode failed: "+err.Error(), map[string]string{"uri": p.URI})
+			return
+		}
+		data = decoded
+	default:
+		h.sendRPCError(write, id, errInvalidEncoding, "unsupported encoding: "+p.Encoding, map[string]string{"uri": p.URI, "encoding": p.Encoding})
+		return
+	}
+
+	if int64(len(data)) > maxFileSize {
+		h.sendRPCError(write, id, errFileTooLarge, fmt.Sprintf("content too large (%d bytes, max %d)", len(data), maxFileSize), map[string]string{"uri": p.URI})
+		return
+	}
+
+	resolved, err := h.resolvePath(p.URI)
+	if err != nil {
+		h.sendRPCError(write, id, errPermissionDenied, err.Error(), map[string]string{"uri": p.URI})
+		return
+	}
+
+	// If the target already exists, refuse if it's a directory. If it
+	// doesn't exist, that's fine — writeFile creates new files. We do
+	// NOT auto-mkdir parent directories yet (adds surface area; can be a
+	// flag in a later phase if a real need appears).
+	if info, err := os.Stat(resolved); err == nil && info.IsDir() {
+		h.sendRPCError(write, id, errIsDirectory, "is a directory: "+p.URI, map[string]string{"uri": p.URI})
+		return
+	}
+
+	tmp := resolved + ".glyph3d.tmp"
+
+	// Write the full payload to tmp, then rename. 0644 matches the
+	// permissions os.ReadFile/os.WriteFile typically produce; if the
+	// destination already existed with different perms, os.Rename
+	// preserves the original inode's metadata only on some OSes —
+	// acceptable for L0; can be tightened with a stat+chmod pass later.
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		h.sendRPCError(write, id, errWriteFailed, "tmp write failed: "+err.Error(), map[string]string{"uri": p.URI, "tmp": tmp})
+		return
+	}
+	if err := os.Rename(tmp, resolved); err != nil {
+		// Clean up the orphaned tmp. Deliberately ignore the remove
+		// error — we're already in a failure path, the rename error is
+		// the one the caller needs.
+		_ = os.Remove(tmp)
+		h.sendRPCError(write, id, errWriteFailed, "rename failed: "+err.Error(), map[string]string{"uri": p.URI})
+		return
+	}
+
+	// Stat the result so we can return mtime — some clients use it as
+	// a freshness token for the in-memory grid.
+	info, statErr := os.Stat(resolved)
+	var mtime int64
+	if statErr == nil {
+		mtime = info.ModTime().UnixMilli()
+	}
+
+	result := writeFileResult{
+		URI:          p.URI,
+		BytesWritten: int64(len(data)),
+		Mtime:        mtime,
+	}
+	h.sendRPCResult(write, id, result)
+
+	// Echo back as an fs/didChange notification so the browser can
+	// decide whether to reload the grid that owns this URI. Only fires
+	// when the server wired a notify hook (relay.NotifyDisplayRPC).
+	if h.notify != nil {
+		rel := p.URI
+		if strings.HasPrefix(rel, "file://") {
+			rel = strings.TrimPrefix(rel, "file://")
+		}
+		h.notify("fs/didChange", map[string]string{
+			"path":  rel,
+			"event": "write",
+		})
+	}
+
+	log.Printf("[fs] wrote %d bytes to %s", len(data), p.URI)
 }
 
 // ---- Path Security ----
