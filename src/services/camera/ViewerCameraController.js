@@ -181,10 +181,23 @@ export class ViewerCameraController {
 
         track(document, 'keydown', (e) => {
             snapshotModifiers(e);
+            // L1-A WASD gate: when an entity holds the key-focus slot
+            // (attention.key.id set to e.g. a terminal), the camera
+            // drain stops consuming keys. Without this, typing in a
+            // focused terminal flies the camera. The ShortcutManager
+            // continues to fire for unambiguous shortcuts (Esc etc.);
+            // it has its own per-binding logic.
+            const am = this.ctx?.attentionManager;
+            if (am?.get?.('key')) return;
             input.keys.add(e.code);
         });
         track(document, 'keyup', (e) => {
             snapshotModifiers(e);
+            // Symmetric: if key-focus is active, keyup for that same
+            // focused period should also not reach the camera. The
+            // input.keys set is ignored in that mode; nothing to clear.
+            const am = this.ctx?.attentionManager;
+            if (am?.get?.('key')) return;
             input.keys.delete(e.code);
         });
 

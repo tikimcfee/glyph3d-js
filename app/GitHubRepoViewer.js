@@ -932,16 +932,24 @@ export class GitHubRepoViewer {
     _registerShortcuts() {
         const sm = this.shortcutManager;
 
-        // Escape — in reader mode, back out to explorer. Otherwise deselect.
-        // Routed through mode.explorer so the WebSocket path and the keybind
-        // don't drift.
+        // Escape — LIFO unwind of interaction state:
+        //   1. attention.key set        → clear key-focus
+        //   2. else reader mode active  → back out to explorer
+        //   3. else selection exists    → deselect all
+        // Each stage routes through the command surface so WebSocket
+        // scripts and the keybind always take the same path.
         sm.register('escape', () => {
+            const am = this._commandContext?.attentionManager;
+            if (am?.get?.('key')) {
+                this._commandRouter.execute(['attention.clear', 'key']);
+                return;
+            }
             if (this._commandContext?.mode?.state === 'reader') {
                 this._commandRouter.execute('mode.explorer');
                 return;
             }
             if (this.selectionManager) this.selectionManager.clear(this.grids);
-        }, { description: 'Reader → explorer, else deselect all' });
+        }, { description: 'Clear key focus → reader → selection (LIFO)' });
 
         // Tab — select next file
         sm.register('tab', () => {
