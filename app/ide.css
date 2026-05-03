@@ -403,6 +403,29 @@ html, body {
     cursor: default;
 }
 
+/* ---- Graph view (embedded nodegraph iframe) ----
+   The iframe is in the DOM at all times so its document state and SSE
+   connection survive activity-tab switches. .view-graph on #editor-area
+   flips visibility instead of unmounting — instant return when the user
+   toggles back. The Three.js canvas is left running by default (it owns
+   its own resize loop); muting it visually here is enough for the
+   integration. */
+.graph-frame {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    border: 0;
+    background: var(--bg-editor);
+}
+#editor-area.view-graph #canvas,
+#editor-area.view-graph #minimap-container {
+    visibility: hidden;
+}
+#editor-area.view-graph .graph-frame {
+    display: block !important;
+}
+
 /* ---- Minimap (inside editor-area) ---- */
 #editor-area #minimap-container {
     position: absolute;

@@ -39,10 +39,17 @@ const PANEL_TITLES = {
     'settings':      'SETTINGS',
     'groups':        'WINDOW GROUPS',
     'state':         'STATE INSPECTOR',
+    'graph':         'NODE GRAPH',
     'hand-tracking': 'HAND TRACKING',
     'installer':     'INSTALL CLI',
     'controls':      'KEYBOARD SHORTCUTS',
 };
+
+// Activity tabs that own a non-canvas view in #editor-area. When one of
+// these is active, IDEShell adds a `view-<id>` class to #editor-area so
+// the matching CSS reveals the view (e.g. `view-graph` shows the iframe).
+// Other activity tabs leave the canvas visible.
+const EDITOR_VIEW_PANELS = new Set(['graph']);
 
 export class IDEShell {
     constructor() {
@@ -81,6 +88,16 @@ export class IDEShell {
 
         // State — restore from persistence, fall back to defaults
         this._activePanel = stateController.get('ui.activePanel', 'explorer');
+        // URL deep link (?panel=<id>) overrides restored state. Bookmark-
+        // friendly entry into a non-default view; honored synchronously
+        // here so the right panel is active by first paint, before any
+        // awaits in the surrounding bootstrap (viewer.init() etc).
+        try {
+            const urlPanel = new URLSearchParams(window.location.search).get('panel');
+            if (urlPanel && document.querySelector(`#activity-bar [data-panel="${urlPanel}"]`)) {
+                this._activePanel = urlPanel;
+            }
+        } catch (_) { /* SSR / bad URL — ignore, fall back to restored state */ }
         this._sidebarVisible = stateController.get('ui.sidebarVisible', true);
         this._lastSidebarWidth = 280;
         this._bottomPanelVisible = stateController.get('ui.bottomPanelVisible', true);
@@ -271,6 +288,11 @@ export class IDEShell {
         // Initialize search panel wiring
         this._wireSearch();
 
+        // Wire the Graph panel (substrate iframe + status-bar item +
+        // postMessage relay). Idempotent — safe even if the panel
+        // doesn't end up being activated this session.
+        this._wireGraphPanel();
+
         // Force initial resize
         this._onEditorResize();
     }
@@ -313,10 +335,99 @@ export class IDEShell {
             p.classList.toggle('active', p.id === `sp-${panelId}`);
         });
 
+        // Editor-area view swap. Activity tabs in EDITOR_VIEW_PANELS own
+        // a non-canvas surface inside #editor-area (e.g. the nodegraph
+        // iframe). Adding `view-<id>` reveals it via CSS; removing all
+        // such classes restores the canvas as the visible surface.
+        if (this._editorArea) {
+            for (const id of EDITOR_VIEW_PANELS) {
+                this._editorArea.classList.toggle(`view-${id}`, panelId === id);
+            }
+            // First activation of the graph view: lazily set the iframe
+            // src so we don't fetch the substrate page until requested.
+            if (panelId === 'graph') this._mountGraphFrame();
+        }
+
         // Ensure sidebar is visible
         if (!this._sidebarVisible) {
             this._expandSidebar();
         }
+    }
+
+    /** @private
+     * Lazy-mount the graph iframe. Called from _showSidebarPanel on the
+     * first time `graph` is activated; subsequent activations are no-ops
+     * (the iframe stays in the DOM with its document state intact).
+     */
+    _mountGraphFrame() {
+        const frame = document.getElementById('graph-frame');
+        if (!frame || frame.dataset.mounted === '1') return;
+        const urlInput = document.getElementById('graph-url');
+        const base = (urlInput && urlInput.value.trim()) || 'http://localhost:8082';
+        // ?embedded=glyph3d switches the nodegraph page into a host-
+        // friendly chrome (drops its title/conn-pill/hint and shifts
+        // the palette to glyph3d-js tokens). The nodegraph forwards
+        // SSE state via postMessage; see _wireGraphPanel.
+        frame.src = base.replace(/\/$/, '') + '/?embedded=glyph3d';
+        frame.style.display = 'block';
+        frame.dataset.mounted = '1';
+    }
+
+    /** @private
+     * Wire sidebar controls + status-bar item + cross-frame message
+     * relay. Called from start() so DOM is fully present.
+     */
+    _wireGraphPanel() {
+        const reload = document.getElementById('graph-reload-btn');
+        const urlInput = document.getElementById('graph-url');
+        const frame = document.getElementById('graph-frame');
+        if (reload && frame) {
+            reload.addEventListener('click', () => {
+                const base = (urlInput && urlInput.value.trim()) || 'http://localhost:8082';
+                frame.src = base.replace(/\/$/, '') + '/?embedded=glyph3d';
+                frame.dataset.mounted = '1';
+            });
+        }
+
+        // Status-bar item — clicking it activates the Graph view (mirrors
+        // the WS status item's pattern of being a quick-jump affordance).
+        const statusGraph = document.getElementById('status-graph');
+        if (statusGraph) {
+            statusGraph.addEventListener('click', () => this._showSidebarPanel('graph'));
+        }
+
+        // Cross-frame status hand-off. The nodegraph posts {type, ...}
+        // payloads tagged with source:'nodegraph'; we render conn state
+        // + counts in the status bar and the sidebar panel. Origin is
+        // not asserted because the substrate may bind to LAN addresses
+        // or alternate ports — payload shape is the only contract.
+        const statusLine = document.getElementById('graph-status-line');
+        window.addEventListener('message', (ev) => {
+            const msg = ev.data;
+            if (!msg || msg.source !== 'nodegraph') return;
+            if (statusGraph) statusGraph.style.display = '';
+            if (msg.type === 'conn') {
+                if (statusGraph) statusGraph.textContent = `Graph: ${msg.label}`;
+                if (statusLine) statusLine.textContent = `Connection: ${msg.label}`;
+            } else if (msg.type === 'nodes') {
+                this._graphNodeCount = msg.count;
+                this._refreshGraphStatusLine(statusLine);
+            } else if (msg.type === 'events') {
+                this._graphEventCount = msg.count;
+                this._refreshGraphStatusLine(statusLine);
+            }
+        });
+    }
+
+    /** @private */
+    _refreshGraphStatusLine(line) {
+        if (!line) return;
+        const parts = [];
+        if (this._graphNodeCount != null) {
+            parts.push(`${this._graphNodeCount} node${this._graphNodeCount === 1 ? '' : 's'}`);
+        }
+        if (this._graphEventCount != null) parts.push(`${this._graphEventCount} events`);
+        if (parts.length) line.textContent = parts.join(' · ');
     }
 
     // ================================================================

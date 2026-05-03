@@ -40,6 +40,12 @@
             <button class="activity-btn" data-panel="state" title="State Inspector">
                 <span class="activity-icon">&#128190;</span>
             </button>
+            <!-- Graph: nodegraph substrate (llm-experiments). Special activity:
+                 selecting it swaps the editor area to an iframe instead of
+                 just changing sidebar contents. See IDEShell._showSidebarPanel. -->
+            <button class="activity-btn" data-panel="graph" title="Node Graph (substrate)">
+                <span class="activity-icon">&#9883;</span>
+            </button>
             <div class="activity-spacer"></div>
             <!-- Bottom-pinned items -->
             <button class="activity-btn" data-panel="hand-tracking" title="Hand Tracking">
@@ -91,6 +97,37 @@
                 <!-- State inspector panel -->
                 <div class="sidebar-panel" id="sp-state"></div>
 
+                <!-- Graph panel: status + lightweight controls for the
+                     embedded nodegraph view. Wired in IDEShell._initGraphPanel. -->
+                <div class="sidebar-panel" id="sp-graph">
+                    <div class="setting-group">
+                        <div class="setting-label"><span>Substrate URL</span></div>
+                        <input type="text" id="graph-url" class="sidebar-input"
+                               value="http://localhost:8082" spellcheck="false">
+                        <div class="setting-hint">
+                            llm-experiments nodegraph server (Go). Embedded
+                            view loads <code>?embedded=glyph3d</code> for
+                            shared theme + status hand-off.
+                        </div>
+                    </div>
+                    <div class="setting-group">
+                        <div class="setting-label"><span>Status</span></div>
+                        <div id="graph-status-line" style="font-size:11px;color:var(--text-secondary)">
+                            Activate the Graph view to connect.
+                        </div>
+                    </div>
+                    <div class="setting-group">
+                        <button id="graph-reload-btn" class="sidebar-input"
+                                style="cursor:pointer;text-align:center">
+                            Reload graph view
+                        </button>
+                        <div class="setting-hint">
+                            Re-mounts the iframe (useful after restarting the
+                            substrate server).
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Hand tracking panel -->
                 <div class="sidebar-panel" id="sp-hand-tracking"></div>
 
@@ -123,6 +160,17 @@
             <!-- 3D Canvas: THE editor area -->
             <div id="editor-area">
                 <canvas id="canvas"></canvas>
+                <!-- Graph view: lazy-mounted iframe pointing at the
+                     llm-experiments nodegraph. Hidden by default; the
+                     "graph" activity tab toggles #editor-area.view-graph
+                     which flips visibility (canvas ↔ iframe). Iframe src
+                     is set in IDEShell on first activation so we don't
+                     fetch the substrate page until the user asks for it. -->
+                <iframe id="graph-frame" class="graph-frame"
+                        title="nodegraph (substrate)"
+                        loading="lazy"
+                        style="display:none;">
+                </iframe>
                 <!-- Minimap overlay -->
                 <div id="minimap-container">
                     <canvas id="minimap-canvas"></canvas>
@@ -183,6 +231,7 @@
                 <span class="status-item" id="status-camera" title="Camera position">0, 0, 500</span>
                 <span class="status-item status-fps" id="status-fps" title="FPS">-- fps</span>
                 <span class="status-item status-ws" id="status-ws" title="WebSocket — click to toggle log" style="cursor:pointer">WS: --</span>
+                <span class="status-item" id="status-graph" title="Nodegraph substrate — click to open Graph view" style="cursor:pointer; display:none">Graph: --</span>
                 <span class="status-item" id="status-panel-toggle" title="Toggle panel (Ctrl+J)" style="cursor:pointer; user-select:none">&#9881;</span>
             </div>
         </footer>
