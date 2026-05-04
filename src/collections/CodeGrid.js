@@ -1554,12 +1554,37 @@ class CodeGrid extends THREE.Object3D {
         if (haveSampleSlot) {
             yCenter = this._renderer._readGlyphPosition(base).y;
         } else {
-            // Empty line / no slot map: derive line center from metrics.
-            // Line origin in the worker is the glyph center (not the top),
-            // so no -lineHeight/2 offset is needed.
-            yCenter = 0;
-            if (this.config.showFilename && this.filename) yCenter -= m.lineHeight * 1.5;
-            yCenter -= line * m.lineHeight;
+            // No glyph on this line (empty / whitespace-only). Walk up
+            // (then down) to the nearest line that DOES have a sampled
+            // glyph and offset by lineHeight per row stepped. The anchor's
+            // sampled y already includes any z-wrap y-drops accumulated
+            // above it — stepping uniformly from there matches the worker's
+            // per-row step (which is metrics.lineSpacing == metrics.lineHeight
+            // here). Pure metrics math from line index alone misses z-wrap
+            // entirely and lands the caret tens of lines too high in any
+            // file with long wrapped lines.
+            let anchorY = null;
+            let anchorLine = line;
+            for (let off = 1; off < this.lines.length; off++) {
+                const tryLine = (off & 1) ? line - ((off + 1) >> 1) : line + (off >> 1);
+                if (tryLine < 0 || tryLine >= this.lines.length) continue;
+                const ab = this._lineSlotBase?.[tryLine];
+                if (ab === undefined) continue;
+                if (this.getVisibleCharCount(tryLine) <= 0) continue;
+                anchorY    = this._renderer._readGlyphPosition(ab).y;
+                anchorLine = tryLine;
+                break;
+            }
+            if (anchorY != null) {
+                yCenter = anchorY - (line - anchorLine) * m.lineHeight;
+            } else {
+                // Whole grid has no visible glyphs anywhere — fall back to
+                // pure metrics (matches what the worker would do if the
+                // entire content were whitespace).
+                yCenter = 0;
+                if (this.config.showFilename && this.filename) yCenter -= m.lineHeight * 1.5;
+                yCenter -= line * m.lineHeight;
+            }
         }
 
         // Plane is centered on its origin; shift right by half-width so the
