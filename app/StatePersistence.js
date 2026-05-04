@@ -164,8 +164,13 @@ export class StatePersistence {
      */
     restoreCamera() {
         const pos = stateController.get('camera.position', null);
-        if (pos && this.viewer.camera) {
+        if (pos && this.viewer.camera
+            && Number.isFinite(pos.x) && Number.isFinite(pos.y) && Number.isFinite(pos.z)) {
             this.viewer.camera.position.set(pos.x, pos.y, pos.z);
+        } else if (pos) {
+            // Stale/poisoned value from a prior session — drop it so the
+            // next valid save can replace it without corrupting the HUD.
+            stateController.delete('camera.position');
         }
         // Restore window groups (must run after grids are registered)
         const groups = stateController.get('groups', null);
@@ -300,6 +305,9 @@ export class StatePersistence {
 
         const pos = this.viewer.camera?.position;
         if (!pos) return;
+        // Reject non-finite components — saving null/NaN here poisons future
+        // restoreCamera calls (Vector3.set assigns whatever it's given).
+        if (!Number.isFinite(pos.x) || !Number.isFinite(pos.y) || !Number.isFinite(pos.z)) return;
 
         // Real dirty check: compare to last saved position
         const newPos = { x: pos.x, y: pos.y, z: pos.z };
