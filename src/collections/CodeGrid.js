@@ -1295,6 +1295,239 @@ class CodeGrid extends THREE.Object3D {
         }
     }
 
+    // ============ In-grid Editing ============
+    //
+    // The grid is the editor: edit ops mutate `this.lines` then trigger a
+    // synchronous loadText() rebuild. _clearContent / _layoutContent are
+    // already designed for no-flash (clears stay pending until layout
+    // flushes — see _clearContent comment), so a per-keystroke rebuild is
+    // visually atomic for v0.
+    //
+    // Cursor lives on the grid (`this._cursor = {line, col}`) so each grid
+    // remembers its own edit/focus location. `null` means "not editing"; no
+    // caret is rendered until enterEdit() is called.
+    //
+    // v0 caret: highlightRange of one slot at the cursor position. End-of-
+    // line and empty-line positions render nothing visible (slot doesn't
+    // exist past last char) — known gap, slated for an overlay-quad fix in
+    // a follow-up. Mid-line typing remains visible because the new char
+    // shifts the caret forward and the next render lands on a real slot.
+    //
+    // Highlight textures persist across loadText (the RGBA8 texture is
+    // owned by the renderer, not the per-text instance pool). We clear all
+    // highlights on each relayout to avoid stale texels on slots that get
+    // reassigned to different glyphs.
+
+    static CARET_COLOR = { r: 1.0, g: 0.85, b: 0.2 };
+
+    /**
+     * Begin edit mode. Initializes cursor at the end of content if not
+     * already set, then paints the caret. Idempotent.
+     */
+    enterEdit() {
+        if (!this._cursor) {
+            const lastLine = Math.max(0, this.lines.length - 1);
+            const lastCol  = this.lines[lastLine]?.length ?? 0;
+            this._cursor = { line: lastLine, col: lastCol };
+        }
+        this._paintCaret();
+    }
+
+    /**
+     * Exit edit mode. Clears the caret highlight and forgets the cursor.
+     * Other highlights set by highlightCommands are preserved.
+     */
+    exitEdit() {
+        this._clearCaret();
+        this._cursor = null;
+    }
+
+    /** @returns {{line:number, col:number}|null} */
+    getCursor() {
+        return this._cursor ? { line: this._cursor.line, col: this._cursor.col } : null;
+    }
+
+    /**
+     * Move the cursor to (line, col), clamping to valid bounds. Repaints
+     * the caret. No-op if not in edit mode.
+     */
+    setCursor(line, col) {
+        if (!this._cursor) return;
+        this._clearCaret();
+        const ln = Math.max(0, Math.min(line, this.lines.length - 1));
+        const cl = Math.max(0, Math.min(col, this.lines[ln]?.length ?? 0));
+        this._cursor = { line: ln, col: cl };
+        this._paintCaret();
+    }
+
+    /** Insert a string at the cursor. Splits on `\n` to span multiple lines. */
+    editInsert(str) {
+        if (!this._cursor || !str) return;
+        const parts = String(str).split('\n');
+        const { line, col } = this._cursor;
+        const cur = this.lines[line] ?? '';
+        const before = cur.slice(0, col);
+        const after  = cur.slice(col);
+
+        if (parts.length === 1) {
+            this.lines[line] = before + parts[0] + after;
+            this._cursor.col = col + parts[0].length;
+        } else {
+            const tail = parts[parts.length - 1];
+            const newLines = [
+                before + parts[0],
+                ...parts.slice(1, -1),
+                tail + after,
+            ];
+            this.lines.splice(line, 1, ...newLines);
+            this._cursor.line = line + parts.length - 1;
+            this._cursor.col  = tail.length;
+        }
+        this._relayoutPreservingCursor();
+    }
+
+    /** Backspace: delete char before cursor; if at col 0, join with previous line. */
+    editDeleteBackward() {
+        if (!this._cursor) return;
+        const { line, col } = this._cursor;
+        if (col > 0) {
+            const cur = this.lines[line] ?? '';
+            this.lines[line] = cur.slice(0, col - 1) + cur.slice(col);
+            this._cursor.col = col - 1;
+        } else if (line > 0) {
+            const prev = this.lines[line - 1] ?? '';
+            const cur  = this.lines[line] ?? '';
+            this._cursor.line = line - 1;
+            this._cursor.col  = prev.length;
+            this.lines[line - 1] = prev + cur;
+            this.lines.splice(line, 1);
+        } else {
+            return;  // nothing to delete
+        }
+        this._relayoutPreservingCursor();
+    }
+
+    /** Delete: delete char at cursor; if at end of line, join next line in. */
+    editDeleteForward() {
+        if (!this._cursor) return;
+        const { line, col } = this._cursor;
+        const cur = this.lines[line] ?? '';
+        if (col < cur.length) {
+            this.lines[line] = cur.slice(0, col) + cur.slice(col + 1);
+        } else if (line < this.lines.length - 1) {
+            this.lines[line] = cur + (this.lines[line + 1] ?? '');
+            this.lines.splice(line + 1, 1);
+        } else {
+            return;
+        }
+        this._relayoutPreservingCursor();
+    }
+
+    /** Enter: split current line at cursor; cursor moves to start of new line. */
+    editSplitLine() {
+        if (!this._cursor) return;
+        const { line, col } = this._cursor;
+        const cur = this.lines[line] ?? '';
+        this.lines.splice(line, 1, cur.slice(0, col), cur.slice(col));
+        this._cursor.line = line + 1;
+        this._cursor.col  = 0;
+        this._relayoutPreservingCursor();
+    }
+
+    /**
+     * Move cursor by relative offsets. Negative wraps line boundaries
+     * naturally (left at col 0 → end of previous line; right at end of
+     * line → start of next line).
+     */
+    editMoveCursor(dx, dy) {
+        if (!this._cursor) return;
+        let { line, col } = this._cursor;
+        const lineCount = this.lines.length;
+
+        // Vertical first
+        if (dy) {
+            line = Math.max(0, Math.min(line + dy, lineCount - 1));
+            col  = Math.min(col, this.lines[line]?.length ?? 0);
+        }
+
+        // Then horizontal, wrapping line boundaries
+        while (dx > 0) {
+            const len = this.lines[line]?.length ?? 0;
+            if (col < len) { col++; dx--; continue; }
+            if (line < lineCount - 1) { line++; col = 0; dx--; continue; }
+            break;
+        }
+        while (dx < 0) {
+            if (col > 0) { col--; dx++; continue; }
+            if (line > 0) { line--; col = this.lines[line]?.length ?? 0; dx++; continue; }
+            break;
+        }
+
+        this.setCursor(line, col);
+    }
+
+    /** Home: jump to col 0 on the current line. */
+    editHome() {
+        if (!this._cursor) return;
+        this.setCursor(this._cursor.line, 0);
+    }
+
+    /** End: jump to end of current line. */
+    editEnd() {
+        if (!this._cursor) return;
+        const len = this.lines[this._cursor.line]?.length ?? 0;
+        this.setCursor(this._cursor.line, len);
+    }
+
+    /**
+     * Rebuild glyphs after a content mutation, clearing stale highlights and
+     * re-painting the caret. The renderer's RGBA8 highlight texture persists
+     * across loadText, so we proactively zero it to avoid leftover texels on
+     * slots that get reassigned to different chars.
+     * @private
+     */
+    _relayoutPreservingCursor() {
+        this.clearAllHighlights();
+        this.loadText(this.lines.join('\n'));
+        // Clamp cursor to new bounds (lines may have shrunk).
+        if (this._cursor) {
+            const ln = Math.min(this._cursor.line, this.lines.length - 1);
+            const cl = Math.min(this._cursor.col,  this.lines[ln]?.length ?? 0);
+            this._cursor.line = Math.max(0, ln);
+            this._cursor.col  = Math.max(0, cl);
+            this._paintCaret();
+        }
+    }
+
+    /**
+     * Paint the caret highlight at the current cursor. v0: single-slot
+     * highlightRange. End-of-line / empty-line positions are silently
+     * skipped (no slot exists past the last char).
+     * @private
+     */
+    _paintCaret() {
+        if (!this._cursor) return;
+        const { line, col } = this._cursor;
+        const visible = this.getVisibleCharCount(line);
+        if (col >= visible) return;  // end-of-line; nothing to highlight in v0
+        this.highlightRange(line, col, line, col + 1, CodeGrid.CARET_COLOR);
+    }
+
+    /**
+     * Clear the caret highlight at the current cursor. Conservative: clears
+     * one slot. Does not touch other highlights.
+     * @private
+     */
+    _clearCaret() {
+        if (!this._cursor || !this._renderer || !this._lineSlotBase) return;
+        const { line, col } = this._cursor;
+        const visible = this.getVisibleCharCount(line);
+        if (col >= visible) return;
+        const base = this._lineSlotBase[line];
+        if (base === undefined) return;
+        this._renderer.setGlyphHighlight(base + col, null);
+    }
+
     /**
      * Update background to match content size
      * @private
