@@ -12,6 +12,7 @@ import WebSocketBridge from '../../src/services/orchestration/WebSocketBridge.js
 import ViewerAPI from '../../src/services/orchestration/ViewerAPI.js';
 import AttentionManager from '../../src/services/interaction/AttentionManager.js';
 import { registerAllCommands } from './handlers/index.js';
+import { contentHash } from './handlers/fileCommands.js';
 
 /**
  * Build the command context bag from a GitHubRepoViewer instance.
@@ -286,6 +287,53 @@ function _installTerminalKeystrokeDelivery(ctx) {
 }
 
 /**
+ * Refetch a path via fs/readFile and reload any matching grid in place.
+ *
+ * Called from the fs/didChange handler on `event: 'write'`. The echo of the
+ * caller's own file.save will arrive here too — we hash the fetched content
+ * and skip the reload when it matches the grid's _savedTextHash, so the
+ * common case (round-trip confirmation) is silent. External writes (another
+ * tool overwriting the file on disk) hash-differ and trigger an in-place
+ * loadText that preserves camera state.
+ *
+ * @param {Object} context - command context (provides registry)
+ * @param {import('../../src/services/orchestration/WebSocketBridge.js').default} bridge
+ * @param {string} path - relative path (no scheme), e.g. "cross-ref/.../smoke.txt"
+ */
+async function _refreshGridForPath(context, bridge, path) {
+    if (!path || !context?.registry) return;
+    const entries = context.registry.findByMeta('sourcePath', path);
+    if (!entries || entries.length === 0) return;  // file not displayed; nothing to refresh
+
+    const uri = path.startsWith('file://') ? path : `file:///${path.replace(/^\/+/, '')}`;
+    let result;
+    try {
+        result = await bridge.rpcRequest('fs/readFile', { uri });
+    } catch (err) {
+        console.warn(`[fs/didChange] failed to refetch ${path}: ${err?.message || err}`);
+        return;
+    }
+    const content = result?.content ?? '';
+    const newHash = contentHash(content);
+
+    for (const entry of entries) {
+        const grid = entry.grid;
+        if (!grid || typeof grid.loadText !== 'function') continue;
+        if (grid._savedTextHash === newHash) continue;  // echo of our own save
+
+        grid.loadText(content);
+        try {
+            Object.defineProperty(grid, '_savedTextHash', {
+                value: newHash, writable: true, configurable: true, enumerable: false,
+            });
+        } catch {
+            grid._savedTextHash = newHash;
+        }
+        console.log(`[fs/didChange] refreshed grid "${entry.id}" (${content.length} chars)`);
+    }
+}
+
+/**
  * Initialize the full command center.
  *
  * @param {Object} viewer - GitHubRepoViewer instance
@@ -343,13 +391,26 @@ export function initCommandCenter(viewer, options = {}) {
     // Wire bridge reference into context
     context.wsbridge = bridge;
 
-    // Live reload: when the server detects source file changes (--local mode),
-    // automatically reload the page to pick up the new code.
+    // fs/didChange notifications carry an `event` discriminator:
+    //   - 'change' — livereload (fsnotify on src/app/...): JS source edits
+    //                require a full page reload to pick up the new code.
+    //   - 'write'  — fs/writeFile echo: a user-data file was written. Refresh
+    //                only the affected grid in place; never lose camera state
+    //                or re-download the whole repo.
+    // Anything else gets logged so we notice if the protocol grows another arm.
     bridge.setRpcNotificationHandler((method, params) => {
-        if (method === 'fs/didChange') {
+        if (method !== 'fs/didChange') return;
+        const event = params?.event;
+        if (event === 'change') {
             console.log(`[livereload] ${params.path} changed, reloading...`);
             router.execute('reload');
+            return;
         }
+        if (event === 'write') {
+            _refreshGridForPath(context, bridge, params?.path);
+            return;
+        }
+        console.warn(`[fs/didChange] unknown event "${event}" for ${params?.path}`);
     });
 
     // Console log forwarding — patch console.log/warn/error to send the first
