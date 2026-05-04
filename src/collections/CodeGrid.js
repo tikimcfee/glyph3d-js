@@ -597,6 +597,14 @@ class CodeGrid extends THREE.Object3D {
             this._background = null;
         }
 
+        // Dispose caret overlay (lazy-created in enterEdit)
+        if (this._caretMesh) {
+            this._caretMesh.geometry.dispose();
+            this._caretMesh.material.dispose();
+            this.remove(this._caretMesh);
+            this._caretMesh = null;
+        }
+
         this._resetBatchState();
         this.content = '';
         this.lines = [];
@@ -1297,32 +1305,25 @@ class CodeGrid extends THREE.Object3D {
 
     // ============ In-grid Editing ============
     //
-    // The grid is the editor: edit ops mutate `this.lines` then trigger a
-    // synchronous loadText() rebuild. _clearContent / _layoutContent are
-    // already designed for no-flash (clears stay pending until layout
-    // flushes — see _clearContent comment), so a per-keystroke rebuild is
-    // visually atomic for v0.
+    // The grid is the editor: edit ops mutate `this.lines` then trigger an
+    // async loadTextAsync rebuild via _relayoutPreservingCursor (the worker
+    // pipeline right-sizes the GPU buffers; the sync path doesn't grow on
+    // overflow). Concurrent flushes are coalesced.
     //
     // Cursor lives on the grid (`this._cursor = {line, col}`) so each grid
-    // remembers its own edit/focus location. `null` means "not editing"; no
-    // caret is rendered until enterEdit() is called.
+    // remembers its own edit/focus location. `null` means "not editing".
     //
-    // v0 caret: highlightRange of one slot at the cursor position. End-of-
-    // line and empty-line positions render nothing visible (slot doesn't
-    // exist past last char) — known gap, slated for an overlay-quad fix in
-    // a follow-up. Mid-line typing remains visible because the new char
-    // shifts the caret forward and the next render lands on a real slot.
-    //
-    // Highlight textures persist across loadText (the RGBA8 texture is
-    // owned by the renderer, not the per-text instance pool). We clear all
-    // highlights on each relayout to avoid stale texels on slots that get
-    // reassigned to different glyphs.
+    // Caret is a thin vertical overlay quad child of the grid, positioned
+    // from this.metrics — works at any cursor position including end-of-
+    // line and empty lines (where no glyph slot exists). Renders just
+    // above the glyph plane (renderOrder = 5).
 
     static CARET_COLOR = { r: 1.0, g: 0.85, b: 0.2 };
+    static CARET_RENDER_ORDER = 5;  // above glyphs (0), below HUD (999+)
 
     /**
      * Begin edit mode. Initializes cursor at the end of content if not
-     * already set, then paints the caret. Idempotent.
+     * already set, then shows the caret. Idempotent.
      */
     enterEdit() {
         if (!this._cursor) {
@@ -1330,15 +1331,15 @@ class CodeGrid extends THREE.Object3D {
             const lastCol  = this.lines[lastLine]?.length ?? 0;
             this._cursor = { line: lastLine, col: lastCol };
         }
-        this._paintCaret();
+        this._initCaretMesh();
+        this._updateCaretMesh();
     }
 
     /**
-     * Exit edit mode. Clears the caret highlight and forgets the cursor.
-     * Other highlights set by highlightCommands are preserved.
+     * Exit edit mode. Hides the caret and forgets the cursor.
      */
     exitEdit() {
-        this._clearCaret();
+        if (this._caretMesh) this._caretMesh.visible = false;
         this._cursor = null;
     }
 
@@ -1353,11 +1354,10 @@ class CodeGrid extends THREE.Object3D {
      */
     setCursor(line, col) {
         if (!this._cursor) return;
-        this._clearCaret();
         const ln = Math.max(0, Math.min(line, this.lines.length - 1));
         const cl = Math.max(0, Math.min(col, this.lines[ln]?.length ?? 0));
         this._cursor = { line: ln, col: cl };
-        this._paintCaret();
+        this._updateCaretMesh();
     }
 
     /** Insert a string at the cursor. Splits on `\n` to span multiple lines. */
@@ -1480,6 +1480,61 @@ class CodeGrid extends THREE.Object3D {
     }
 
     /**
+     * Lazy-create the caret mesh on first enterEdit. A thin vertical bar
+     * sized to the line height; positioned per cursor by _updateCaretMesh.
+     * @private
+     */
+    _initCaretMesh() {
+        if (this._caretMesh) return;
+        const c = CodeGrid.CARET_COLOR;
+        const geo = new THREE.PlaneGeometry(1, 1);
+        const mat = new THREE.MeshBasicMaterial({
+            color: new THREE.Color(c.r, c.g, c.b),
+            transparent: true,
+            opacity: 0.85,
+            side: THREE.DoubleSide,
+            depthWrite: false,
+        });
+        this._caretMesh = new THREE.Mesh(geo, mat);
+        this._caretMesh.renderOrder = CodeGrid.CARET_RENDER_ORDER;
+        this._caretMesh.frustumCulled = false;  // grid-local; let parent do culling
+        this.add(this._caretMesh);
+    }
+
+    /**
+     * Position the caret mesh at the current cursor. Caret is a thin
+     * vertical bar (~10% of charWidth) spanning one lineHeight. Position
+     * uses the same anchor convention as _layoutContent: line 0 starts at
+     * y=0 (or y=-1.5*lineHeight if the filename label is shown), and each
+     * column advances by charWidth + spacing — matching the metrics passed
+     * to the worker layout pipeline.
+     * @private
+     */
+    _updateCaretMesh() {
+        if (!this._caretMesh || !this._cursor) return;
+        const m = this.metrics;
+        if (!m) return;
+        const { line, col } = this._cursor;
+
+        const advance   = m.charWidth + (m.spacing || 0);
+        const barWidth  = Math.max(m.charWidth * 0.1, 0.5);
+        const barHeight = m.lineHeight;
+
+        let yTop = 0;
+        if (this.config.showFilename && this.filename) {
+            yTop = -m.lineHeight * 1.5;
+        }
+        yTop -= line * m.lineHeight;
+
+        const x = col * advance;
+        // Plane is centered on its origin; offset by half-extents so the
+        // bar's top-left sits at (x, yTop).
+        this._caretMesh.scale.set(barWidth, barHeight, 1);
+        this._caretMesh.position.set(x + barWidth / 2, yTop - barHeight / 2, 0.05);
+        this._caretMesh.visible = true;
+    }
+
+    /**
      * Rebuild glyphs after a content mutation, clearing stale highlights and
      * re-painting the caret.
      *
@@ -1506,48 +1561,18 @@ class CodeGrid extends THREE.Object3D {
         try {
             do {
                 this._relayoutQueued = false;
-                this.clearAllHighlights();
                 await this.loadTextAsync(this.lines.join('\n'));
                 if (this._cursor) {
                     const ln = Math.min(this._cursor.line, this.lines.length - 1);
                     const cl = Math.min(this._cursor.col,  this.lines[ln]?.length ?? 0);
                     this._cursor.line = Math.max(0, ln);
                     this._cursor.col  = Math.max(0, cl);
-                    this._paintCaret();
+                    this._updateCaretMesh();
                 }
             } while (this._relayoutQueued);
         } finally {
             this._relayoutInFlight = false;
         }
-    }
-
-    /**
-     * Paint the caret highlight at the current cursor. v0: single-slot
-     * highlightRange. End-of-line / empty-line positions are silently
-     * skipped (no slot exists past the last char).
-     * @private
-     */
-    _paintCaret() {
-        if (!this._cursor) return;
-        const { line, col } = this._cursor;
-        const visible = this.getVisibleCharCount(line);
-        if (col >= visible) return;  // end-of-line; nothing to highlight in v0
-        this.highlightRange(line, col, line, col + 1, CodeGrid.CARET_COLOR);
-    }
-
-    /**
-     * Clear the caret highlight at the current cursor. Conservative: clears
-     * one slot. Does not touch other highlights.
-     * @private
-     */
-    _clearCaret() {
-        if (!this._cursor || !this._renderer || !this._lineSlotBase) return;
-        const { line, col } = this._cursor;
-        const visible = this.getVisibleCharCount(line);
-        if (col >= visible) return;
-        const base = this._lineSlotBase[line];
-        if (base === undefined) return;
-        this._renderer.setGlyphHighlight(base + col, null);
     }
 
     /**
