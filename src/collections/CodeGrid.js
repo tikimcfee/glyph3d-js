@@ -1502,21 +1502,30 @@ class CodeGrid extends THREE.Object3D {
     }
 
     /**
-     * Position the caret mesh at the current cursor. Samples the actual
-     * glyph instance positions/sizes from the renderer for correctness
-     * (handles proportional widths, kerning, any layout quirks):
+     * Position the caret mesh at the current cursor.
      *
-     *   - Mid-line (col < visibleCount): caret at left edge of the glyph
-     *     in that column, vertically centered on its instance y.
-     *   - End-of-line (col == visibleCount, line non-empty): caret at the
-     *     right edge of the last glyph (pos.x + size.width).
-     *   - Empty line / no slot map yet: fall back to metrics-derived
-     *     position (col 0, line baseline computed from showFilename +
-     *     line index * lineHeight).
+     * x is computed uniformly as `col * advance` from the line's local
+     * origin (worker writes content lines at x=0). This sidesteps two
+     * traps the slot-based math hit:
+     *   - Whitespace chars don't get glyph slots (the worker's
+     *     _emptyGlyphs path skips them) so the model's string-col and the
+     *     slot index disagree on any line containing spaces.
+     *   - Cursor positions past the last visible glyph (trailing spaces,
+     *     end-of-empty-line, end-of-file with newline) have no slot to
+     *     read at all.
+     * `advance` is sampled from any visible glyph's actual width for
+     * accuracy across worldScale config; falls back to metrics.charWidth.
+     * Assumes monospace — fine for the default Cousine/Monaco stack.
      *
-     * Bar width is fixed at ~10% of charWidth (visual consistency); height
-     * is metrics.lineHeight so the bar stays uniform across descender-heavy
-     * vs simple glyphs.
+     * y is sampled from any visible glyph on the line (its instance y is
+     * the line's vertical center, since PlaneGeometry is origin-centered
+     * and the shader applies no Y align offset). Falls back to a
+     * metrics-derived line center when the line has no visible glyphs.
+     * The worker treats the line origin as the *center*, not the top, so
+     * the metrics formula is `yLineCenter = -line * lineHeight` (with
+     * filename label offset added).
+     *
+     * Bar is metric-sized: ~10% of charWidth wide, full lineHeight tall.
      *
      * @private
      */
@@ -1529,40 +1538,32 @@ class CodeGrid extends THREE.Object3D {
         const barWidth  = Math.max(m.charWidth * 0.1, 0.5);
         const barHeight = m.lineHeight;
 
-        let xLeft, yCenter;
         const base    = this._lineSlotBase?.[line];
         const visible = (this._lineSlotBase && base !== undefined)
             ? this.getVisibleCharCount(line)
             : 0;
+        const haveSampleSlot = this._renderer && base !== undefined && visible > 0;
 
-        if (this._renderer && base !== undefined && visible > 0 && col <= visible) {
-            if (col < visible) {
-                const slot = base + col;
-                const pos  = this._renderer._readGlyphPosition(slot);
-                xLeft   = pos.x;
-                yCenter = pos.y;
-            } else {
-                // End-of-line: caret hugs the right edge of the last glyph.
-                const slot = base + visible - 1;
-                const pos  = this._renderer._readGlyphPosition(slot);
-                const size = this._renderer._readGlyphSize(slot);
-                xLeft   = pos.x + size.width;
-                yCenter = pos.y;
-            }
+        const advance = haveSampleSlot
+            ? this._renderer._readGlyphSize(base).width
+            : m.charWidth;
+
+        const xLeft = col * advance;
+
+        let yCenter;
+        if (haveSampleSlot) {
+            yCenter = this._renderer._readGlyphPosition(base).y;
         } else {
-            // Empty line, slot map not yet built, or col past visible —
-            // fall back to metrics layout.
-            let yTop = 0;
-            if (this.config.showFilename && this.filename) {
-                yTop = -m.lineHeight * 1.5;
-            }
-            yTop -= line * m.lineHeight;
-            xLeft   = 0;
-            yCenter = yTop - m.lineHeight / 2;
+            // Empty line / no slot map: derive line center from metrics.
+            // Line origin in the worker is the glyph center (not the top),
+            // so no -lineHeight/2 offset is needed.
+            yCenter = 0;
+            if (this.config.showFilename && this.filename) yCenter -= m.lineHeight * 1.5;
+            yCenter -= line * m.lineHeight;
         }
 
-        // Plane is centered on its origin; offset by half-width so the bar's
-        // left edge sits at xLeft.
+        // Plane is centered on its origin; shift right by half-width so the
+        // bar's left edge sits at xLeft.
         this._caretMesh.scale.set(barWidth, barHeight, 1);
         this._caretMesh.position.set(xLeft + barWidth / 2, yCenter, 0.05);
         this._caretMesh.visible = true;
