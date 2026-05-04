@@ -42,7 +42,7 @@ import { resolveGridByIdOrIndex } from './spatialHelpers.js';
  * when it isn't" which is only possible if two texts genuinely collide — a
  * 1-in-4B event and the worst outcome is an unnecessary save prompt).
  */
-function contentHash(text) {
+export function contentHash(text) {
     let h = 0x811c9dc5;
     for (let i = 0; i < text.length; i++) {
         h ^= text.charCodeAt(i);
@@ -66,16 +66,8 @@ function resolveSaveTarget(ctx, args) {
     if (resolved.error) return resolved;
 
     const grid = resolved.grid;
-    // Real file-backed grids (loaded via GitHubRepoViewer.js:1738) set
-    // grid.userData.sourcePath, not grid.sourcePath. CodeGrid.getSourcePath()
-    // reads the latter, so we check both. Command-created grids have
-    // neither today (grid.create doesn't wire sourcePath) — callers can
-    // pass an explicit path as the second arg.
     const explicit = args[1] || null;
-    const uri = explicit
-        || grid.getSourcePath?.()
-        || grid.userData?.sourcePath
-        || null;
+    const uri = explicit || grid.getSourcePath?.() || null;
     if (!uri) {
         return {
             error: `ERR: grid "${resolved.registryId || target}" has no sourcePath. Usage: file.save <id> [uri-to-write-to] — or load the grid from the tree panel so userData.sourcePath gets set.`,

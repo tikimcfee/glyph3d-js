@@ -472,7 +472,7 @@ class CodeGrid extends THREE.Object3D {
      * @returns {string|null} Source file path
      */
     getSourcePath() {
-        return this.sourcePath;
+        return this.sourcePath || this.userData?.sourcePath || null;
     }
 
     /**
