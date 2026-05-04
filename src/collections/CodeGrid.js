@@ -1502,12 +1502,22 @@ class CodeGrid extends THREE.Object3D {
     }
 
     /**
-     * Position the caret mesh at the current cursor. Caret is a thin
-     * vertical bar (~10% of charWidth) spanning one lineHeight. Position
-     * uses the same anchor convention as _layoutContent: line 0 starts at
-     * y=0 (or y=-1.5*lineHeight if the filename label is shown), and each
-     * column advances by charWidth + spacing — matching the metrics passed
-     * to the worker layout pipeline.
+     * Position the caret mesh at the current cursor. Samples the actual
+     * glyph instance positions/sizes from the renderer for correctness
+     * (handles proportional widths, kerning, any layout quirks):
+     *
+     *   - Mid-line (col < visibleCount): caret at left edge of the glyph
+     *     in that column, vertically centered on its instance y.
+     *   - End-of-line (col == visibleCount, line non-empty): caret at the
+     *     right edge of the last glyph (pos.x + size.width).
+     *   - Empty line / no slot map yet: fall back to metrics-derived
+     *     position (col 0, line baseline computed from showFilename +
+     *     line index * lineHeight).
+     *
+     * Bar width is fixed at ~10% of charWidth (visual consistency); height
+     * is metrics.lineHeight so the bar stays uniform across descender-heavy
+     * vs simple glyphs.
+     *
      * @private
      */
     _updateCaretMesh() {
@@ -1516,21 +1526,45 @@ class CodeGrid extends THREE.Object3D {
         if (!m) return;
         const { line, col } = this._cursor;
 
-        const advance   = m.charWidth + (m.spacing || 0);
         const barWidth  = Math.max(m.charWidth * 0.1, 0.5);
         const barHeight = m.lineHeight;
 
-        let yTop = 0;
-        if (this.config.showFilename && this.filename) {
-            yTop = -m.lineHeight * 1.5;
-        }
-        yTop -= line * m.lineHeight;
+        let xLeft, yCenter;
+        const base    = this._lineSlotBase?.[line];
+        const visible = (this._lineSlotBase && base !== undefined)
+            ? this.getVisibleCharCount(line)
+            : 0;
 
-        const x = col * advance;
-        // Plane is centered on its origin; offset by half-extents so the
-        // bar's top-left sits at (x, yTop).
+        if (this._renderer && base !== undefined && visible > 0 && col <= visible) {
+            if (col < visible) {
+                const slot = base + col;
+                const pos  = this._renderer._readGlyphPosition(slot);
+                xLeft   = pos.x;
+                yCenter = pos.y;
+            } else {
+                // End-of-line: caret hugs the right edge of the last glyph.
+                const slot = base + visible - 1;
+                const pos  = this._renderer._readGlyphPosition(slot);
+                const size = this._renderer._readGlyphSize(slot);
+                xLeft   = pos.x + size.width;
+                yCenter = pos.y;
+            }
+        } else {
+            // Empty line, slot map not yet built, or col past visible —
+            // fall back to metrics layout.
+            let yTop = 0;
+            if (this.config.showFilename && this.filename) {
+                yTop = -m.lineHeight * 1.5;
+            }
+            yTop -= line * m.lineHeight;
+            xLeft   = 0;
+            yCenter = yTop - m.lineHeight / 2;
+        }
+
+        // Plane is centered on its origin; offset by half-width so the bar's
+        // left edge sits at xLeft.
         this._caretMesh.scale.set(barWidth, barHeight, 1);
-        this._caretMesh.position.set(x + barWidth / 2, yTop - barHeight / 2, 0.05);
+        this._caretMesh.position.set(xLeft + barWidth / 2, yCenter, 0.05);
         this._caretMesh.visible = true;
     }
 
