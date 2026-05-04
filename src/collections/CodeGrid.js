@@ -1481,21 +1481,43 @@ class CodeGrid extends THREE.Object3D {
 
     /**
      * Rebuild glyphs after a content mutation, clearing stale highlights and
-     * re-painting the caret. The renderer's RGBA8 highlight texture persists
-     * across loadText, so we proactively zero it to avoid leftover texels on
-     * slots that get reassigned to different chars.
+     * re-painting the caret.
+     *
+     * Routes through loadTextAsync (the worker pipeline) because that path
+     * calls applyPrebuiltBuffers which swaps in fresh, exactly-sized
+     * InstancedBufferAttributes. The sync loadText path reuses the existing
+     * renderer with its original maxInstances cap and overflows the moment
+     * an edit grows the content past the initial buffer (WebGL warns about
+     * "instance fetch requires N, attribs only supply M" and rendering
+     * silently breaks).
+     *
+     * Edit ops fire-and-forget the returned promise. Rapid keystrokes are
+     * coalesced via _relayoutInFlight + _relayoutQueued so concurrent
+     * flushes don't trample _pendingAdds / _pendingRemovals.
+     *
      * @private
      */
-    _relayoutPreservingCursor() {
-        this.clearAllHighlights();
-        this.loadText(this.lines.join('\n'));
-        // Clamp cursor to new bounds (lines may have shrunk).
-        if (this._cursor) {
-            const ln = Math.min(this._cursor.line, this.lines.length - 1);
-            const cl = Math.min(this._cursor.col,  this.lines[ln]?.length ?? 0);
-            this._cursor.line = Math.max(0, ln);
-            this._cursor.col  = Math.max(0, cl);
-            this._paintCaret();
+    async _relayoutPreservingCursor() {
+        if (this._relayoutInFlight) {
+            this._relayoutQueued = true;
+            return;
+        }
+        this._relayoutInFlight = true;
+        try {
+            do {
+                this._relayoutQueued = false;
+                this.clearAllHighlights();
+                await this.loadTextAsync(this.lines.join('\n'));
+                if (this._cursor) {
+                    const ln = Math.min(this._cursor.line, this.lines.length - 1);
+                    const cl = Math.min(this._cursor.col,  this.lines[ln]?.length ?? 0);
+                    this._cursor.line = Math.max(0, ln);
+                    this._cursor.col  = Math.max(0, cl);
+                    this._paintCaret();
+                }
+            } while (this._relayoutQueued);
+        } finally {
+            this._relayoutInFlight = false;
         }
     }
 
