@@ -23,13 +23,22 @@
 import { isMac } from '../utils/platform.js';
 
 export class ShortcutManager {
-    constructor() {
+    /**
+     * @param {Object} [opts]
+     * @param {() => (import('./AttentionManager.js').default | null)} [opts.getAttentionManager]
+     *   Lazy getter — resolved at keydown time so callers can construct
+     *   the ShortcutManager before the AttentionManager exists. When the
+     *   getter returns an AM and attention.key points at a grid editor,
+     *   shortcuts defer (matches the existing input/textarea guard).
+     */
+    constructor({ getAttentionManager = null } = {}) {
         /**
          * Map from normalized key string → handler object
          * Key format: optional modifiers + key name, e.g. "ctrl+p", "shift+tab", "f"
          * @type {Map<string, { action: Function, description: string }>}
          */
         this._handlers = new Map();
+        this._getAttentionManager = getAttentionManager;
 
         this._onKeyDown = this._handleKeyDown.bind(this);
         this._attached = false;
@@ -98,6 +107,11 @@ export class ShortcutManager {
         // Never fire when input elements are focused
         const tag = document.activeElement?.tagName?.toLowerCase();
         if (tag === 'input' || tag === 'select' || tag === 'textarea') return;
+
+        // Never fire while an in-grid editor has key focus — Tab, Enter,
+        // and friends are typing keys at that point, not shortcuts.
+        const am = this._getAttentionManager?.();
+        if (am?.get?.('key')?.entity?.type === 'grid') return;
 
         // Never fire during IME composition
         if (e.isComposing) return;

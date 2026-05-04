@@ -489,7 +489,12 @@ export class GitHubRepoViewer {
         });
 
         // ---- Phase 2: Keyboard Shortcuts ----
-        this.shortcutManager = new ShortcutManager();
+        // Lazy getter — _commandContext is wired further down in init,
+        // after the ShortcutManager is constructed. Resolution at keydown
+        // time means shortcuts can defer to grid-editor focus.
+        this.shortcutManager = new ShortcutManager({
+            getAttentionManager: () => this._commandContext?.attentionManager,
+        });
         this._registerShortcuts();
         this.shortcutManager.attach();
 

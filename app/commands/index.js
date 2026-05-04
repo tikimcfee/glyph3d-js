@@ -247,9 +247,12 @@ function _installEntityKeystrokeDelivery(ctx) {
         }
         if (consumed) {
             // Suppress the browser default — Tab would move focus, Backspace
-            // would navigate, arrows would scroll the page.
+            // would navigate, arrows would scroll the page. stopImmediate
+            // also blocks any same-target sibling listener from firing,
+            // which is the belt-and-suspenders pair to ShortcutManager's
+            // "defer when key=grid" guard.
             e.preventDefault();
-            e.stopPropagation();
+            e.stopImmediatePropagation();
         }
     }, { capture: true });
 
