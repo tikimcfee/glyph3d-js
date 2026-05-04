@@ -149,6 +149,11 @@ export default function registerGridCommands(router) {
         // Single registration via addGrid -- no double-register
         const registryId = ctx.addGrid(grid, { id: name || undefined });
 
+        // Make the new grid the primary attention target so subsequent
+        // no-arg verbs (file.save, mode.reader, etc.) target what the
+        // user just made. Matches canvas-click semantics.
+        ctx.attentionManager?.set('primary', registryId, { registry: ctx.registry });
+
         const idx = ctx.getGrids().length - 1;
         return {
             text: `OK: created grid #${idx} "${registryId}" (${grid.getGlyphCount()} glyphs, ${grid.getLineCount()} lines)`,
