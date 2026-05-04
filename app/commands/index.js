@@ -183,107 +183,172 @@ function _installConsoleForwarder(bridge) {
 }
 
 /**
- * Install the terminal-input keystroke delivery path.
+ * Install the per-entity keystroke delivery path.
  *
- * When ctx.attention.key is a terminal entity, a document-level keydown
- * listener (capture phase, bubble VCC already skips via its own gate)
- * forwards the character to the terminal's onInput callback — which was
- * wired at terminal.create time (terminalCommands.js:90-98) to push back
- * through wsbridge.push() to the owning controller.
+ * One document-level keydown listener (capture phase) reads
+ * ctx.attention.key, looks up a per-type handler by entity.type, and
+ * delegates. Two types are registered today:
  *
- * Key translation: printable keys pass through as e.key; control keys
- * get mapped to their ANSI equivalents (Enter -> \r, Backspace -> \x7f,
- * Tab -> \t, arrow keys -> CSI escape sequences). This matches what a
- * real TTY would receive. Meta/Ctrl combinations are NOT mapped
- * exhaustively — Ctrl+C sends 0x03, Ctrl+D sends 0x04, Ctrl+L sends
- * 0x0C, which covers the common interactive cases. Everything else
- * falls through unchanged.
+ *   - terminal — translates the event to ANSI bytes (Enter→\r,
+ *     Backspace→\x7f, arrows→CSI sequences, Ctrl+letter→0x01..0x1a)
+ *     and forwards via grid.onInput (wired at terminal.create time in
+ *     terminalCommands.js:90-98 to push back through wsbridge to the
+ *     owning controller).
  *
- * Visual affordance: in the normal user flow a canvas click sets
- * primary AND key together (ide.html click handler), so CommandBar's
- * _highlightTerminal already tints the background. L1-B does NOT add a
- * second tint layer — a second stash on the same mesh would fight
- * CommandBar's stash (both call material.color.setHex + snapshot the
- * "original" on overwrite). The CommandBar badge showing `>termId`
- * plus the highlighted background IS the focus affordance.
+ *   - grid — maps editing keys (printable, Backspace, Delete, Enter,
+ *     arrows, Home/End, Tab) to the L2 M1 edit ops on CodeGrid. Entry/
+ *     exit goes through edit.start / edit.stop (or the Esc-LIFO path,
+ *     which clears attention.key and triggers exitEdit via the
+ *     change:key listener below).
  *
- * If a future slice needs a distinct "key-focused but not primary"
- * affordance (e.g. a ring outline), it should go through a dedicated
- * visual-state-stack service rather than fighting CommandBar's stash.
+ * Visual affordance for terminals: the canvas click handler sets primary
+ * AND key together, so CommandBar's _highlightTerminal already tints the
+ * background — that's the focus affordance, no second tint layer.
+ * Grids in edit mode are signaled by the in-grid caret (L2 M1).
+ *
+ * Modifier policy: handlers receive the raw event and decide. Terminal
+ * passes Ctrl+letter through; grid bails on Ctrl/Alt/Meta combos so
+ * app-level shortcuts (Ctrl+S etc.) keep working untouched.
  *
  * @private
  * @param {Object} ctx - command context
  */
-function _installTerminalKeystrokeDelivery(ctx) {
+function _installEntityKeystrokeDelivery(ctx) {
     const am = ctx?.attentionManager;
     if (!am || typeof document === 'undefined') return;
 
-    // Key-to-bytes translation for a terminal consumer. Returns the string
-    // to send, or null if the key should be ignored (purely modifier events,
-    // etc.).
-    const keyToBytes = (e) => {
-        // Pure modifier keydowns — nothing to send.
-        if (e.key === 'Shift' || e.key === 'Control' || e.key === 'Alt' || e.key === 'Meta') return null;
-
-        // Ctrl+letter -> control byte (A=0x01 ... Z=0x1a). Handle the
-        // common interactive cases first.
-        if (e.ctrlKey && !e.altKey && !e.metaKey && e.key.length === 1) {
-            const c = e.key.toLowerCase().charCodeAt(0);
-            if (c >= 97 && c <= 122) return String.fromCharCode(c - 96);
-        }
-
-        switch (e.key) {
-            case 'Enter':     return '\r';
-            case 'Tab':       return '\t';
-            case 'Backspace': return '\x7f';
-            case 'Delete':    return '\x1b[3~';
-            case 'Escape':    return null;   // handled by LIFO shortcut
-            case 'ArrowUp':    return '\x1b[A';
-            case 'ArrowDown':  return '\x1b[B';
-            case 'ArrowRight': return '\x1b[C';
-            case 'ArrowLeft':  return '\x1b[D';
-            case 'Home':       return '\x1b[H';
-            case 'End':        return '\x1b[F';
-            case 'PageUp':     return '\x1b[5~';
-            case 'PageDown':   return '\x1b[6~';
-        }
-
-        // Printable single character.
-        if (e.key.length === 1) return e.key;
-
-        // Unknown; ignore.
-        return null;
+    // Per-entity-type handlers. Each returns `true` if the event was
+    // consumed (we then preventDefault/stopPropagation), `false` if it
+    // should pass through (e.g. modifier-combos we don't handle yet).
+    const handlers = {
+        terminal: _terminalKeyHandler,
+        grid:     _gridKeyHandler,
     };
 
     document.addEventListener('keydown', (e) => {
         const slot = am.get('key');
         if (!slot) return;
         const entity = slot.entity;
-        if (!entity || entity.type !== 'terminal') return;
-        const grid = entity.grid;
-        if (!grid || typeof grid.onInput !== 'function') return;
+        if (!entity) return;
+        const handler = handlers[entity.type];
+        if (!handler) return;
 
-        // Guard against DOM input elements — if the user is typing in the
-        // CommandBar's <input>, we should NOT also forward keystrokes to
-        // the terminal. ShortcutManager has the same guard.
+        // Guard against DOM input elements — if the user is typing in
+        // the CommandBar's <input>, never also forward to the entity.
         const tag = document.activeElement?.tagName?.toLowerCase();
         if (tag === 'input' || tag === 'select' || tag === 'textarea') return;
 
-        const bytes = keyToBytes(e);
-        if (bytes == null) return;
-
-        // Suppress the browser default for non-printable keys (Tab would
-        // otherwise move focus, Backspace might navigate, arrows might
-        // scroll the page).
-        e.preventDefault();
-        e.stopPropagation();
-
+        let consumed;
         try {
-            grid.onInput(bytes, slot.id);
+            consumed = handler(e, entity, slot, ctx);
         } catch (err) {
-            console.error('[terminal-keystroke] onInput threw:', err);
+            console.error(`[entity-keystroke] ${entity.type} handler threw:`, err);
+            consumed = false;
+        }
+        if (consumed) {
+            // Suppress the browser default — Tab would move focus, Backspace
+            // would navigate, arrows would scroll the page.
+            e.preventDefault();
+            e.stopPropagation();
         }
     }, { capture: true });
+
+    // When the key slot leaves a grid (Esc-LIFO clear, edit.stop, or
+    // attention being moved elsewhere), tell the prior grid to exit edit
+    // mode so the caret hides and the cursor model is forgotten.
+    am.on('change:key', (newSlot, prevSlot) => {
+        const prev = prevSlot?.entity;
+        if (!prev || prev.type !== 'grid') return;
+        if (newSlot?.entity?.grid === prev.grid) return;  // same grid; no-op
+        const prevGrid = prev.grid;
+        if (prevGrid && typeof prevGrid.exitEdit === 'function') {
+            prevGrid.exitEdit();
+        }
+    });
+}
+
+/**
+ * Translate a KeyboardEvent into the byte sequence a terminal expects
+ * (single chars, ANSI escape sequences for arrows / function keys,
+ * control bytes for Ctrl+letter). Returns null when the key should be
+ * ignored entirely.
+ * @private
+ */
+function _keyToTerminalBytes(e) {
+    if (e.key === 'Shift' || e.key === 'Control' || e.key === 'Alt' || e.key === 'Meta') return null;
+
+    if (e.ctrlKey && !e.altKey && !e.metaKey && e.key.length === 1) {
+        const c = e.key.toLowerCase().charCodeAt(0);
+        if (c >= 97 && c <= 122) return String.fromCharCode(c - 96);
+    }
+
+    switch (e.key) {
+        case 'Enter':     return '\r';
+        case 'Tab':       return '\t';
+        case 'Backspace': return '\x7f';
+        case 'Delete':    return '\x1b[3~';
+        case 'Escape':    return null;
+        case 'ArrowUp':    return '\x1b[A';
+        case 'ArrowDown':  return '\x1b[B';
+        case 'ArrowRight': return '\x1b[C';
+        case 'ArrowLeft':  return '\x1b[D';
+        case 'Home':       return '\x1b[H';
+        case 'End':        return '\x1b[F';
+        case 'PageUp':     return '\x1b[5~';
+        case 'PageDown':   return '\x1b[6~';
+    }
+
+    if (e.key.length === 1) return e.key;
+    return null;
+}
+
+/**
+ * Terminal-entity key handler. Forwards via grid.onInput (the terminal
+ * controller hook). @private
+ */
+function _terminalKeyHandler(e, entity, slot /*, ctx */) {
+    const grid = entity.grid;
+    if (!grid || typeof grid.onInput !== 'function') return false;
+    const bytes = _keyToTerminalBytes(e);
+    if (bytes == null) return false;
+    grid.onInput(bytes, slot.id);
+    return true;
+}
+
+/**
+ * Grid-entity key handler. Maps printable / navigation / editing keys to
+ * the CodeGrid edit ops set up in L2 M1. Bails on Ctrl/Alt/Meta combos
+ * (reserved for app-level shortcuts and future copy/paste/undo). Ignores
+ * Escape so the GitHubRepoViewer Esc-LIFO can clear attention.key first
+ * and the change:key listener will then call exitEdit. @private
+ */
+function _gridKeyHandler(e, entity /*, slot, ctx */) {
+    const grid = entity.grid;
+    if (!grid || typeof grid.editInsert !== 'function') return false;
+    if (!grid._cursor) return false;  // not in edit mode (defensive)
+
+    if (e.key === 'Shift' || e.key === 'Control' || e.key === 'Alt' || e.key === 'Meta') return false;
+    if (e.ctrlKey || e.altKey || e.metaKey) return false;  // reserved combos
+    if (e.key === 'Escape') return false;
+
+    switch (e.key) {
+        case 'ArrowLeft':  grid.editMoveCursor(-1, 0); return true;
+        case 'ArrowRight': grid.editMoveCursor( 1, 0); return true;
+        case 'ArrowUp':    grid.editMoveCursor( 0, -1); return true;
+        case 'ArrowDown':  grid.editMoveCursor( 0,  1); return true;
+        case 'Home':       grid.editHome(); return true;
+        case 'End':        grid.editEnd(); return true;
+        case 'Enter':      grid.editSplitLine(); return true;
+        case 'Backspace':  grid.editDeleteBackward(); return true;
+        case 'Delete':     grid.editDeleteForward(); return true;
+        case 'Tab':        grid.editInsert('\t'); return true;
+    }
+
+    if (e.key.length === 1) {
+        grid.editInsert(e.key);
+        return true;
+    }
+    return false;
 }
 
 /**
@@ -363,18 +428,17 @@ export function initCommandCenter(viewer, options = {}) {
     const router = new CommandRouter(context);
     registerAllCommands(router);
 
-    // 2a. Wire terminal keystroke delivery. Keys land here only when
-    // attention.key points at a terminal entity (VCC's keydown gate
-    // swallows the camera path when any key slot is held — see
-    // ViewerCameraController.js keydown). The delivery closes the loop
-    // the convergence docs called "local keystroke path":
-    //   scene click -> attention.set primary -> CommandBar enters
-    //   terminal-mode, but raw typing without going through the bar
-    //   requires attention.key specifically, which a future slice wires
-    //   via click-with-modifier or an explicit verb.
-    // For now, if attention.key is held to a terminal, its onInput
-    // callback (terminalCommands.js:90-98) receives the character.
-    _installTerminalKeystrokeDelivery(context);
+    // 2a. Wire per-entity keystroke delivery. VCC's keydown gate swallows
+    // the camera path whenever any key slot is held, so editing/terminal
+    // input never fights camera nav. Two entity types are handled today:
+    //   - terminal — translates to ANSI bytes and forwards via grid.onInput
+    //   - grid     — maps to the L2 M1 edit ops on CodeGrid
+    // Entry points:
+    //   - terminals: scene click sets primary AND key (ide.html click
+    //     handler) so typing on a clicked terminal Just Works.
+    //   - grids:     edit.start [id] sets key explicitly and calls
+    //     enterEdit; the deliberate-action gate Ivan asked for.
+    _installEntityKeystrokeDelivery(context);
 
     // 3. Add logging middleware (logs all commands to console in debug)
     router.use((name, args) => {
