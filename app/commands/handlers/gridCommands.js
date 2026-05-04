@@ -138,6 +138,11 @@ export default function registerGridCommands(router) {
 
         if (name) {
             grid.filename = name;
+            // Path-shaped names double as the sourcePath so file.save and
+            // the registry's sourcePath meta resolve without an explicit URI.
+            if (name.includes('/')) {
+                grid.userData.sourcePath = name;
+            }
         }
         grid.loadText(text);
 
