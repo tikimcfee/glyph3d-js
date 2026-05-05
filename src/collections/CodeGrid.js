@@ -1310,17 +1310,20 @@ class CodeGrid extends THREE.Object3D {
 
         // Pre-pagination position.
         let x = originX + (c - segmentStartCol) * advance;
-        let y = originY - visualRow * m.lineSpacing;
+        // CodeGrid's metrics call this lineHeight; the worker's metrics call
+        // the same value lineSpacing — both = atlasCharSize.height * scale * 1.2.
+        const lineSpacing = m.lineHeight;
+        let y = originY - visualRow * lineSpacing;
 
         // Apply pagination — same formula buildBatchBuffers / applyPagination
         // use, so the caret aligns with glyphs that were similarly shifted.
-        const pageHeightWorld = PAGE_CONFIG.pageHeight * m.lineSpacing;
+        const pageHeightWorld = PAGE_CONFIG.pageHeight * lineSpacing;
         const relY = originY - y;
         if (relY >= pageHeightWorld) {
             const charAdvance   = m.charWidth + (m.spacing || 0);
             const pageWidthWorld = Z_WRAP_CONFIG.maxLineWidth * charAdvance;
             const gapXWorld     = PAGE_CONFIG.pageGapX * charAdvance;
-            const gapYWorld     = PAGE_CONFIG.pageGapY * m.lineSpacing;
+            const gapYWorld     = PAGE_CONFIG.pageGapY * lineSpacing;
 
             const vPage           = Math.floor(relY / pageHeightWorld);
             const rowOffsetInPage = relY - vPage * pageHeightWorld;
