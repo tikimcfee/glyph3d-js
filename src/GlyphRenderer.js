@@ -1600,6 +1600,7 @@ class GlyphRendererV15 {
                     bufferStartIndex: meta.bufferStartIndex,
                     glyphCount: meta.glyphCount,
                     lineSlotOffsets: meta.lineSlotOffsets || null,
+                    wrapColsPerLine:  meta.wrapColsPerLine  || null,
                 });
 
                 this._cachedGlyphCount += meta.glyphCount;
