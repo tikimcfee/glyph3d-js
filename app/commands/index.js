@@ -165,11 +165,17 @@ function _installConsoleForwarder(bridge) {
         console[level] = (...args) => {
             original(...args);
             if (!bridge.connected) return;
-            // Serialize args to a single string, capped at MAX_LEN
+            // Serialize args to a single string, capped at MAX_LEN.
+            // Error instances need special handling — their enumerable
+            // own-props are empty, so JSON.stringify(err) === "{}" and
+            // the relay log loses the actual failure.
             let text;
             try {
                 text = args.map(a => {
                     if (typeof a === 'string') return a;
+                    if (a instanceof Error) {
+                        return a.stack ? `${a.message}\n${a.stack}` : a.message || String(a);
+                    }
                     try { return JSON.stringify(a); } catch { return String(a); }
                 }).join(' ');
             } catch {
