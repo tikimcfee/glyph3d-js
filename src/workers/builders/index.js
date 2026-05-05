@@ -162,17 +162,25 @@ export function buildBatchBuffers(items, shared, emptyGlyphs) {
         const itemStartOffset = bufferOffset;
 
         if (!shaped || shaped.totalGlyphs === 0) {
-            itemMeta[itemIdx] = { bufferStartIndex: itemStartOffset, glyphCount: 0, bounds: null, lineSlotOffsets: [itemStartOffset] };
+            itemMeta[itemIdx] = {
+                bufferStartIndex: itemStartOffset,
+                glyphCount: 0,
+                bounds: null,
+                lineSlotOffsets: [itemStartOffset],
+                wrapColsPerLine: [[]],
+            };
             continue;
         }
 
         const itemLineSlotOffsets = [bufferOffset];
 
-        let x = pos.x;
-        let y = pos.y;
-        let z = pos.z;
-        const startZ = pos.z;
-        let glyphsOnSegment = 0;
+        // Per-line wrap cols: for each source line, the source-col indices
+        // where the worker wrapped to a new visual row. Empty for lines
+        // that fit. Consumed downstream by CodeGrid's cursor positioning
+        // (the "wrap ruler" pattern: enough info to derive any cursor's
+        // visual row + x without storing per-char data).
+        const itemWrapColsPerLine = [[]];
+        let lineColIdx = 0;  // source col within current line (advances per sg)
 
         let itemMinX = Infinity, itemMaxX = -Infinity;
         let itemMinY = y, itemMaxY = y + metrics.charHeight;
@@ -188,9 +196,12 @@ export function buildBatchBuffers(items, shared, emptyGlyphs) {
                 itemMinY = y;
                 glyphsOnSegment = 0;
                 itemLineSlotOffsets.push(bufferOffset);
+                itemWrapColsPerLine.push([]);
+                lineColIdx = 0;
             }
 
             const line = shaped.lines[lineIdx];
+            const currentLineWraps = itemWrapColsPerLine[itemWrapColsPerLine.length - 1];
             for (const sg of line.shaped) {
                 const glyphId = sg.g;
                 const advance = sg.ax / upem * ws * scale;
@@ -207,6 +218,9 @@ export function buildBatchBuffers(items, shared, emptyGlyphs) {
                     itemMinY = y;
                     itemMinZ = Math.min(itemMinZ, z);
                     glyphsOnSegment = 0;
+                    // Affinity=right at wrap: this char (and cursors at
+                    // its source-col) belong on the new visual row.
+                    currentLineWraps.push(lineColIdx);
                 }
 
                 // Skip empty glyphs (space, .notdef) — advance cursor only
@@ -214,6 +228,7 @@ export function buildBatchBuffers(items, shared, emptyGlyphs) {
                     if (itemMinX === Infinity) itemMinX = x;
                     x += advance;
                     glyphsOnSegment++;
+                    lineColIdx++;
                     continue;
                 }
 
@@ -238,6 +253,7 @@ export function buildBatchBuffers(items, shared, emptyGlyphs) {
                 bufferOffset++;
                 x += advance;
                 glyphsOnSegment++;
+                lineColIdx++;
             }
         }
 
@@ -276,6 +292,7 @@ export function buildBatchBuffers(items, shared, emptyGlyphs) {
             bufferStartIndex: itemStartOffset,
             glyphCount: itemGlyphCount,
             lineSlotOffsets: itemLineSlotOffsets,
+            wrapColsPerLine: itemWrapColsPerLine,  // [line][i] = wrap col i within that source line
             bounds: itemGlyphCount > 0 ? {
                 min: { x: itemMinX, y: itemMinY, z: itemMinZ },
                 max: { x: itemMaxX, y: itemMaxY, z: itemMaxZ },

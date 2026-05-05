@@ -23,6 +23,11 @@ import GlyphRendererV15 from '../GlyphRenderer.js';
 import { getWorkerBridge, isWorkersSupported } from '../workers/WorkerBridge.js';
 import { iterGraphemes } from '../utils/grapheme.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
+import { PAGE_CONFIG, Z_WRAP_CONFIG } from '../workers/builders/index.js';
+
+// Reused for lines without wraps — most lines, in the common case.
+// Frozen so accidental mutation surfaces immediately.
+const EMPTY_WRAPS = Object.freeze([]);
 
 class CodeGrid extends THREE.Object3D {
     /**
@@ -1088,9 +1093,16 @@ class CodeGrid extends THREE.Object3D {
         // Flush using worker pipeline
         await this._flushAsync();
 
-        // Build line→slot index from builder's authoritative line offsets.
+        // Build line→slot index from builder's authoritative line offsets,
+        // and harvest the per-line wrap data needed for cursor positioning.
         const contentItemMeta = this._getContentItemMeta();
         this._buildLineSlotBase(contentItemMeta?.lineSlotOffsets);
+        this._buildLayoutWrapIndex(contentItemMeta?.wrapColsPerLine);
+        // Record the layout origin (where the worker anchored the content
+        // text). Caret math derives y from origin.y - visualRow * lineSpacing.
+        this._layoutOriginY = (this.config.showFilename && this.filename)
+            ? -this.metrics.lineHeight * 1.5
+            : 0;
     }
 
     /**
@@ -1217,6 +1229,112 @@ class CodeGrid extends THREE.Object3D {
     }
 
     /**
+     * Build the per-line wrap index that backs cursor positioning.
+     *
+     * Stores:
+     *   _lineWrapCols    — Array<number[]>, parallel to this.lines.
+     *                      Each entry is the sorted source-col indices where
+     *                      the worker wrapped this line into a new visual
+     *                      row. Empty for lines that fit (the common case).
+     *   _lineStartRow    — Int32Array, length = this.lines.length.
+     *                      Cumulative visual-row index where each line
+     *                      starts. lineStartRow[N] = sum of (1 + wrapCols[i].length)
+     *                      for i in [0, N). O(1) lookup of "first row of line N".
+     *
+     * Together with metrics + paginate config, these give caret y/x
+     * deterministically — no slot reads, no neighbor walks.
+     *
+     * For sync paths (loadText), the worker emits one item per source line,
+     * so wrapColsPerLine is just [[]] per item — no wrap. The fallback
+     * builds an all-empty wrap table.
+     *
+     * @private
+     * @param {number[][]|undefined} wrapColsPerLine - per-line wrap col arrays from worker meta
+     */
+    _buildLayoutWrapIndex(wrapColsPerLine) {
+        const lineCount = this.lines.length;
+        const wraps = new Array(lineCount);
+        const lineStartRow = new Int32Array(lineCount);
+
+        let cumulativeRows = 0;
+        for (let i = 0; i < lineCount; i++) {
+            const w = wrapColsPerLine?.[i];
+            wraps[i] = (w && w.length > 0) ? w.slice() : EMPTY_WRAPS;
+            lineStartRow[i] = cumulativeRows;
+            cumulativeRows += 1 + (w?.length || 0);
+        }
+
+        this._lineWrapCols = wraps;
+        this._lineStartRow = lineStartRow;
+    }
+
+    /**
+     * Resolve the world-space caret position for a logical (line, col).
+     *
+     * Pure deterministic math from layout invariants the worker also
+     * obeyed: visual row from wrap data, x from intra-segment col,
+     * y from origin + row * lineSpacing, then pagination applied
+     * identically to how the worker shifts glyphs. No buffer reads.
+     *
+     * Returns { x, y } in grid-local coords, or null when the layout
+     * isn't ready (pre-flush, evicted content).
+     *
+     * @param {number} line
+     * @param {number} col
+     * @returns {{x: number, y: number} | null}
+     */
+    _resolveCaretWorldPosition(line, col) {
+        if (!this._lineWrapCols || !this._lineStartRow) return null;
+        if (line < 0 || line >= this._lineStartRow.length) return null;
+        const m = this.metrics;
+        if (!m) return null;
+
+        // Clamp col to source-line length so cursors past EOL still resolve.
+        const lineLen = this.lines[line]?.length ?? 0;
+        const c = Math.max(0, Math.min(col, lineLen));
+
+        // Find which wrap segment this col is on (affinity=right at boundaries).
+        const wraps = this._lineWrapCols[line];
+        let segmentRow = 0;
+        let segmentStartCol = 0;
+        for (let i = 0; i < wraps.length; i++) {
+            if (wraps[i] > c) break;
+            segmentRow = i + 1;
+            segmentStartCol = wraps[i];
+        }
+
+        const visualRow  = this._lineStartRow[line] + segmentRow;
+        const advance    = m.charWidth + (m.spacing || 0);
+        const originY    = this._layoutOriginY ?? 0;
+        const originX    = 0;
+
+        // Pre-pagination position.
+        let x = originX + (c - segmentStartCol) * advance;
+        let y = originY - visualRow * m.lineSpacing;
+
+        // Apply pagination — same formula buildBatchBuffers / applyPagination
+        // use, so the caret aligns with glyphs that were similarly shifted.
+        const pageHeightWorld = PAGE_CONFIG.pageHeight * m.lineSpacing;
+        const relY = originY - y;
+        if (relY >= pageHeightWorld) {
+            const charAdvance   = m.charWidth + (m.spacing || 0);
+            const pageWidthWorld = Z_WRAP_CONFIG.maxLineWidth * charAdvance;
+            const gapXWorld     = PAGE_CONFIG.pageGapX * charAdvance;
+            const gapYWorld     = PAGE_CONFIG.pageGapY * m.lineSpacing;
+
+            const vPage           = Math.floor(relY / pageHeightWorld);
+            const rowOffsetInPage = relY - vPage * pageHeightWorld;
+            const hSlot           = vPage % PAGE_CONFIG.pagesWide;
+            const yRow            = Math.floor(vPage / PAGE_CONFIG.pagesWide);
+
+            y = originY - rowOffsetInPage - yRow * (pageHeightWorld + gapYWorld);
+            x = x + hSlot * (pageWidthWorld + gapXWorld);
+        }
+
+        return { x, y };
+    }
+
+    /**
      * Get the buffer slot index for a character at (line, col).
      * Col counts visible characters only (spaces are skipped in the buffer).
      * @param {number} line - 0-based line index
@@ -1313,10 +1431,13 @@ class CodeGrid extends THREE.Object3D {
     // Cursor lives on the grid (`this._cursor = {line, col}`) so each grid
     // remembers its own edit/focus location. `null` means "not editing".
     //
-    // Caret is a thin vertical overlay quad child of the grid, positioned
-    // from this.metrics — works at any cursor position including end-of-
-    // line and empty lines (where no glyph slot exists). Renders just
-    // above the glyph plane (renderOrder = 5).
+    // Caret position is derived deterministically from the worker's layout
+    // summary (per-line wrap cols + cumulative visual-row prefix) plus the
+    // same pagination formula the worker applied to glyphs. No slot reads,
+    // no neighbor walks. The caret obeys the same layout invariants the
+    // glyphs do, so it aligns even on empty lines, post-wrap segments, and
+    // beyond pagination breaks. The overlay quad child renders just above
+    // the glyph plane (renderOrder = 5).
 
     static CARET_COLOR = { r: 1.0, g: 0.85, b: 0.2 };
     static CARET_RENDER_ORDER = 5;  // above glyphs (0), below HUD (999+)
@@ -1504,28 +1625,12 @@ class CodeGrid extends THREE.Object3D {
     /**
      * Position the caret mesh at the current cursor.
      *
-     * x is computed uniformly as `col * advance` from the line's local
-     * origin (worker writes content lines at x=0). This sidesteps two
-     * traps the slot-based math hit:
-     *   - Whitespace chars don't get glyph slots (the worker's
-     *     _emptyGlyphs path skips them) so the model's string-col and the
-     *     slot index disagree on any line containing spaces.
-     *   - Cursor positions past the last visible glyph (trailing spaces,
-     *     end-of-empty-line, end-of-file with newline) have no slot to
-     *     read at all.
-     * `advance` is sampled from any visible glyph's actual width for
-     * accuracy across worldScale config; falls back to metrics.charWidth.
-     * Assumes monospace — fine for the default Cousine/Monaco stack.
-     *
-     * y is sampled from any visible glyph on the line (its instance y is
-     * the line's vertical center, since PlaneGeometry is origin-centered
-     * and the shader applies no Y align offset). Falls back to a
-     * metrics-derived line center when the line has no visible glyphs.
-     * The worker treats the line origin as the *center*, not the top, so
-     * the metrics formula is `yLineCenter = -line * lineHeight` (with
-     * filename label offset added).
-     *
-     * Bar is metric-sized: ~10% of charWidth wide, full lineHeight tall.
+     * Pure layout-derived math via _resolveCaretWorldPosition: visual row
+     * from the per-line wrap ruler, x from intra-segment col, y from
+     * origin + row * lineSpacing, then pagination. No slot reads, no
+     * neighbor sampling. Same layout invariants the worker obeyed when
+     * placing glyphs, so the caret aligns naturally — even on empty
+     * lines, post-wrap segments, and post-pagination pages.
      *
      * @private
      */
@@ -1533,64 +1638,20 @@ class CodeGrid extends THREE.Object3D {
         if (!this._caretMesh || !this._cursor) return;
         const m = this.metrics;
         if (!m) return;
-        const { line, col } = this._cursor;
+
+        const pos = this._resolveCaretWorldPosition(this._cursor.line, this._cursor.col);
+        if (!pos) {
+            this._caretMesh.visible = false;
+            return;
+        }
 
         const barWidth  = Math.max(m.charWidth * 0.1, 0.5);
         const barHeight = m.lineHeight;
 
-        const base    = this._lineSlotBase?.[line];
-        const visible = (this._lineSlotBase && base !== undefined)
-            ? this.getVisibleCharCount(line)
-            : 0;
-        const haveSampleSlot = this._renderer && base !== undefined && visible > 0;
-
-        const advance = haveSampleSlot
-            ? this._renderer._readGlyphSize(base).width
-            : m.charWidth;
-
-        const xLeft = col * advance;
-
-        let yCenter;
-        if (haveSampleSlot) {
-            yCenter = this._renderer._readGlyphPosition(base).y;
-        } else {
-            // No glyph on this line (empty / whitespace-only). Walk up
-            // (then down) to the nearest line that DOES have a sampled
-            // glyph and offset by lineHeight per row stepped. The anchor's
-            // sampled y already includes any z-wrap y-drops accumulated
-            // above it — stepping uniformly from there matches the worker's
-            // per-row step (which is metrics.lineSpacing == metrics.lineHeight
-            // here). Pure metrics math from line index alone misses z-wrap
-            // entirely and lands the caret tens of lines too high in any
-            // file with long wrapped lines.
-            let anchorY = null;
-            let anchorLine = line;
-            for (let off = 1; off < this.lines.length; off++) {
-                const tryLine = (off & 1) ? line - ((off + 1) >> 1) : line + (off >> 1);
-                if (tryLine < 0 || tryLine >= this.lines.length) continue;
-                const ab = this._lineSlotBase?.[tryLine];
-                if (ab === undefined) continue;
-                if (this.getVisibleCharCount(tryLine) <= 0) continue;
-                anchorY    = this._renderer._readGlyphPosition(ab).y;
-                anchorLine = tryLine;
-                break;
-            }
-            if (anchorY != null) {
-                yCenter = anchorY - (line - anchorLine) * m.lineHeight;
-            } else {
-                // Whole grid has no visible glyphs anywhere — fall back to
-                // pure metrics (matches what the worker would do if the
-                // entire content were whitespace).
-                yCenter = 0;
-                if (this.config.showFilename && this.filename) yCenter -= m.lineHeight * 1.5;
-                yCenter -= line * m.lineHeight;
-            }
-        }
-
         // Plane is centered on its origin; shift right by half-width so the
-        // bar's left edge sits at xLeft.
+        // bar's left edge sits at the resolved x.
         this._caretMesh.scale.set(barWidth, barHeight, 1);
-        this._caretMesh.position.set(xLeft + barWidth / 2, yCenter, 0.05);
+        this._caretMesh.position.set(pos.x + barWidth / 2, pos.y, 0.05);
         this._caretMesh.visible = true;
     }
 
