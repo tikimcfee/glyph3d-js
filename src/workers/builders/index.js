@@ -182,6 +182,12 @@ export function buildBatchBuffers(items, shared, emptyGlyphs) {
         const itemWrapColsPerLine = [[]];
         let lineColIdx = 0;  // source col within current line (advances per sg)
 
+        let x = pos.x;
+        let y = pos.y;
+        let z = pos.z;
+        const startZ = pos.z;
+        let glyphsOnSegment = 0;
+
         let itemMinX = Infinity, itemMaxX = -Infinity;
         let itemMinY = y, itemMaxY = y + metrics.charHeight;
         let itemMinZ = z, itemMaxZ = z;
