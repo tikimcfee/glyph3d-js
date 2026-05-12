@@ -1,9 +1,0 @@
-# Predictions: interaction
-
-## What I expect "display" concluded
-
-Display likely focused on modernizing TUIWindow to use a proper character-cell buffer model (2D array of {char, fg, bg} cells rather than plain string lines), with a `_render()` method that diffs the buffer against the previous state and issues targeted `updateColor()`/`updateText()` calls on the underlying CodeGrid/GlyphCollection rather than full re-renders. They probably proposed registering TUIWindow as a command target in CommandRouter with `window.write`, `window.clear`, and `window.setCursor` commands, and concluded that ANSI escape sequence parsing should be handled in a lightweight parser layer that translates escape codes into buffer cell attribute changes. They likely recommended keeping the existing GlyphRenderer pipeline (codepoint-based instancing, group DataTexture) as-is, treating each TUIWindow as a single group whose content gets flushed on buffer change, rather than inventing a new rendering path.
-
-## What I expect "orchestration" concluded
-
-Orchestration likely designed a TUIWindowManager class that maintains a registry (Map of id to TUIWindow instances), handles creation/destruction lifecycle, and exposes methods like `create(id, config)`, `destroy(id)`, and `get(id)` that the CommandRouter delegates to. They probably concluded that spatial layout should use fixed docking positions relative to the camera or scene (bottom-panel terminal, side panels) with named slots, and that focus state should be tracked as a simple `activeWindowId` property on the manager that other systems (camera, selection) can query. They likely proposed integration hooks where the manager emits events on window create/destroy/focus-change so the IDE shell layout can respond, and that the WebSocket bridge routes incoming `window.*` commands through CommandRouter to the manager rather than windows handling messages directly.
