@@ -374,6 +374,27 @@ class CodeGrid extends THREE.Object3D {
     }
 
     /**
+     * Local-space AABB suitable for composable layout containers.
+     *
+     * Why a dedicated method instead of relying on THREE.Box3.setFromObject?
+     * The renderer is an InstancedMesh whose base geometry is a unit quad;
+     * setFromObject reads the base geometry's bounding box and ignores the
+     * spread of per-instance positions, so it reports the cluster as a
+     * ~1×1 box and stack/grid layouts collapse all clusters onto each other.
+     * The layout kit's measure.js calls this method when present.
+     *
+     * @returns {THREE.Box3}  Local-space bounds (no world transform applied)
+     */
+    layoutBounds() {
+        const cb = this._getContentBounds();
+        if (!cb) return new THREE.Box3();
+        return new THREE.Box3(
+            new THREE.Vector3(cb.min.x, cb.min.y, cb.min.z),
+            new THREE.Vector3(cb.max.x, cb.max.y, cb.max.z),
+        );
+    }
+
+    /**
      * Get the underlying GlyphRenderer, or null if not yet created.
      * Used by PickingSystem, highlight commands, and external callers.
      * @returns {GlyphRendererV15|null}
