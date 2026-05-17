@@ -31,7 +31,10 @@ import TryThisCluster from './home/TryThisCluster.js';
 import HomeCommandBar from './home/HomeCommandBar.js';
 import { runDemo, DEMO_SCRIPTS } from './home/DemoRunner.js';
 import ReferenceSpace from './home/ReferenceSpace.js';
-import { Center, HStack, Spacer, Anchor } from './home/layout/index.js';
+import { Center, HStack, Spacer, Anchor, frameNodes } from './home/layout/index.js';
+import { registerDemos } from './home/demos/index.js';
+import { SceneContext } from '../src/services/SceneContext.js';
+import { ViewerCameraController } from '../src/services/camera/ViewerCameraController.js';
 
 const ATLAS_FONT      = 'Cousine, Monaco, Menlo, Courier New, monospace';
 const ATLAS_FONT_SIZE = 48;
@@ -60,6 +63,8 @@ export class HomeShell {
         this.bar = null;
         this.referenceSpace = null;
         this.layoutRoot = null;
+        this.sceneContext = null;
+        this.cameraController = null;
 
         this._rafId = null;
         this._resizeObs = null;
@@ -70,7 +75,6 @@ export class HomeShell {
         await this._initThree();
         await this._initGlyphEngine();
         this._initRouter();
-        this._registerHomeCommands();
 
         // Reference space first — it's the room the content lives in.
         // Adding it before the layout root keeps depth-sorting predictable
@@ -93,18 +97,41 @@ export class HomeShell {
             ]),
         );
         this.scene.add(this.layoutRoot);
-        // Lift the composition above the floor's horizon line. Camera at
-        // y=0 looking forward puts the horizon at screen center; without
-        // this offset the reference grid's vanishing line falls right
-        // behind the cluster pair and competes for the eye.
-        this.layoutRoot.position.y = 40;
         this.layoutRoot.layout();
+
+        // Frame the camera to fit whatever the layout produced. This
+        // replaces the hard-coded camera.position.set(0,0,200) — any
+        // composition of any size is centered + scaled to fit. Padding
+        // gives a bit of margin so glyphs don't crowd the frame edges.
+        this._reframe();
+
+        // Camera controls: reuse the IDE's ViewerCameraController so the
+        // home page has the SAME translation-first navigation feel
+        // (click-drag pans, scroll zooms, WASD translates) and the SAME
+        // trackpad/wheel detection + tuned sensitivities that took the
+        // IDE serious effort to get right. SceneContext gives it the
+        // refs it expects.
+        this.sceneContext = new SceneContext({
+            THREE,
+            scene:    this.scene,
+            camera:   this.camera,
+            renderer: this.renderer,
+            canvas:   this.canvas,
+            atlas:    this.atlas,
+            getGrids: () => [],   // no registry-backed grids on home; demos manage their own
+        });
+        this.cameraController = new ViewerCameraController(this.sceneContext);
+        this.cameraController.setupEventListeners();
 
         // Command bar last — it overlays the canvas as a DOM surface.
         this.bar = new HomeCommandBar({ router: this.router });
         this.bar.mount(document.body);
         this.bar.appendOutput(
             'glyph engine ready. type a command, or try one to the side.',
+            'info'
+        );
+        this.bar.appendOutput(
+            '   drag to pan · scroll to zoom · WASD to fly',
             'info'
         );
         // Don't auto-focus — let the visitor look at the cluster first.
@@ -137,6 +164,11 @@ export class HomeShell {
                 location.reload();
             }
         });
+
+        // Home-specific commands need bridge + clusters + bar to exist,
+        // so they register LAST. tour/ping use bar for step narration;
+        // demos snapshot bridge + scene/atlas/camera at registration time.
+        this._registerHomeCommands();
 
         // Boot marker — delayed so the WebSocketBridge has time to register
         // as display (the log forwarder no-ops until bridge.connected).
@@ -354,6 +386,22 @@ export class HomeShell {
             try { await this._activeDemo.done; } finally { this._activeDemo = null; }
             return { text: 'pong.' };
         }, { description: 'Health check — runs the smallest demo script.' });
+
+        // Engine-showcase demos — each is a self-contained answer to
+        // "what does the engine actually do?" Visitors pick by name; the
+        // runner cancels any in-flight demo when a new one starts.
+        this.demoRunner = registerDemos(this.router, {
+            welcome:          this.welcome,
+            tryThis:          this.tryThis,
+            layoutRoot:       this.layoutRoot,
+            scene:            this.scene,
+            atlas:            this.atlas,
+            camera:           this.camera,
+            bridge:           this.bridge,
+            cameraController: this.cameraController,
+            bar:              this.bar,
+            reframe:          () => this._reframe(),
+        });
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -369,9 +417,17 @@ export class HomeShell {
         // the compositor always serves fresh pixels. Invisible to humans,
         // ~free in cost.
         let n = 0;
+        let lastT = performance.now();
         const root = document.documentElement;
         const tick = () => {
             this._rafId = requestAnimationFrame(tick);
+            const now = performance.now();
+            const dt = (now - lastT) / 1000;
+            lastT = now;
+            // Camera controller drives position/rotation from accumulated
+            // input state; must run BEFORE render so this frame reflects
+            // the latest pan/zoom.
+            this.cameraController?.update(dt);
             this.renderer.render(this.scene, this.camera);
             root.style.setProperty('--frame-tick', String(n++));
         };
@@ -384,13 +440,33 @@ export class HomeShell {
             this.renderer.setSize(w, h, false);
             this.camera.aspect = w / h;
             this.camera.updateProjectionMatrix();
-            // Re-layout in case the kit later grows viewport-aware
-            // containers (Fill, Pin-to-edge, etc.). Cheap today;
-            // future-proof against the change.
             this.layoutRoot?.layout();
+            this._reframe();
         };
         window.addEventListener('resize', handler);
         this._resizeHandler = handler;
+    }
+
+    /**
+     * Re-frame the camera to fit whatever's currently in the layout root.
+     * Called on init, on resize, and after any demo that mutates layout.
+     *
+     * `bottomReserve: 0.45` tells frameBox to pretend the box is 45%
+     * taller than it really is, then aim below center — so the actual
+     * content occupies the upper portion of the canvas and the bottom
+     * (which is overlaid by the DOM command bar) reads as floor/sky.
+     */
+    _reframe() {
+        if (!this.camera || !this.layoutRoot) return;
+        const result = frameNodes(this.camera, [this.layoutRoot], {
+            padding: 1.20,
+            bottomReserve: 0.85,
+        });
+        // Aim the controller's focus pivot at the framed center so
+        // zoom/orbit anchors on real content instead of a stale point.
+        if (result && this.cameraController?.input?.focus?.pivot) {
+            this.cameraController.input.focus.pivot.copy(result.target);
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────
