@@ -182,14 +182,38 @@ export default class WelcomeCluster {
         // caller composes this.grid into a layout tree (HStack, VStack,
         // Center, etc.) which sets position and adds the root to scene.
 
-        // Walk the rows and apply per-category value highlights.
+        // Stash the per-value highlight plan so it can be re-applied after
+        // demos (which may clear all highlights as part of their effect).
         const headerOffset = header.length;
+        this._highlightPlan = [];
         for (let i = 0; i < rows.length; i++) {
             const r = rows[i];
             if (!r) continue;
-            const lineIdx = headerOffset + i;
-            this.grid.highlightRange(lineIdx, r.valueStart, lineIdx, r.valueEnd, r.color);
+            this._highlightPlan.push({
+                line: headerOffset + i,
+                start: r.valueStart,
+                end: r.valueEnd,
+                color: r.color,
+            });
         }
+        this.applyHighlights();
+    }
+
+    /**
+     * Re-apply this cluster's per-value highlights. Call after anything
+     * that touches the underlying grid's highlight texture (e.g. a demo
+     * that clears highlights during cleanup).
+     */
+    applyHighlights() {
+        for (const h of this._highlightPlan) {
+            this.grid.highlightRange(h.line, h.start, h.line, h.end, h.color);
+        }
+    }
+
+    /** Clear-then-re-apply, for a clean redraw after external mutation. */
+    redraw() {
+        this.grid.clearAllHighlights?.();
+        this.applyHighlights();
     }
 
     dispose() {

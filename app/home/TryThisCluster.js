@@ -30,15 +30,16 @@ import CodeGrid from '../../src/collections/CodeGrid.js';
  * Order is the read order — most-evocative first.
  */
 export const DEFAULT_INVITATIONS = [
-    { cmd: 'tour',   label: 'tour',   note: 'camera sweep' },
-    { cmd: 'help',   label: 'help',   note: 'all commands' },
-    { cmd: 'status', label: 'status', note: 'system state' },
+    { cmd: 'tour',             label: 'tour',             note: 'camera sweep' },
+    { cmd: 'demo.layoutmorph', label: 'demo.layoutmorph', note: 'layout in motion' },
+    { cmd: 'demo.repo',        label: 'demo.repo',        note: 'load this repo, live' },
+    { cmd: 'help',             label: 'help',             note: 'all commands' },
 ];
 
 const ACCENT      = { r: 0.30, g: 0.85, b: 1.00 };  // keyword color — same cyan as browser/os in welcome
 const HEADER_COLOR = { r: 1.00, g: 0.80, b: 0.35 };  // amber — calls attention to the header
 
-const KEY_COL = 14;   // where the description column starts
+const KEY_COL = 22;   // where the description column starts (fits demo.layoutmorph + space)
 
 function row(label, note) {
     const padded = '  ' + label.padEnd(KEY_COL - 2, ' ');
@@ -83,16 +84,34 @@ export default class TryThisCluster {
         this.grid.loadText(lines.join('\n'));
         // Layout + scene attach: caller's job (see layout/ kit).
 
-        // Header line — amber accent on the whole '→ try this' line.
-        this.grid.highlightRange(0, 0, 0, headerLines[0].length, HEADER_COLOR);
-
-        // Each invitation's keyword in accent color.
+        // Stash a re-applicable highlight plan — header amber + per-row
+        // keyword accents — so demos that wipe the grid's highlight
+        // texture can request a redraw afterward.
         const headerOffset = headerLines.length;
+        this._highlightPlan = [
+            { line: 0, start: 0, end: headerLines[0].length, color: HEADER_COLOR },
+        ];
         for (let i = 0; i < rows.length; i++) {
             const r = rows[i];
-            const li = headerOffset + i;
-            this.grid.highlightRange(li, r.keyStart, li, r.keyEnd, ACCENT);
+            this._highlightPlan.push({
+                line: headerOffset + i,
+                start: r.keyStart,
+                end: r.keyEnd,
+                color: ACCENT,
+            });
         }
+        this.applyHighlights();
+    }
+
+    applyHighlights() {
+        for (const h of this._highlightPlan) {
+            this.grid.highlightRange(h.line, h.start, h.line, h.end, h.color);
+        }
+    }
+
+    redraw() {
+        this.grid.clearAllHighlights?.();
+        this.applyHighlights();
     }
 
     dispose() {
