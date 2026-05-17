@@ -67,6 +67,9 @@ func main() {
 		case "screenshot":
 			screenshotCmd()
 			return
+		case "fullsnapshot":
+			fullsnapshotCmd()
+			return
 		case "version":
 			versionCmd()
 			return
