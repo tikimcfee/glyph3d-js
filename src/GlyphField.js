@@ -105,9 +105,13 @@ function _buildVertexNode(uniforms) {
         // Standard MVP projection
         const clipPos = cameraProjectionMatrix.mul(modelViewMatrix.mul(vec4(worldPos, float(1))));
 
-        // Color: mix instanceColor * groupColor with pure groupColor by colorBlend factor
+        // Blend instanceColor*groupColor (multiply, colorBlend=0) toward pure
+        // groupColor (replace, colorBlend=1). Explicit lerp a+(b-a)*t — TSL's
+        // .mix() method returned the wrong operand at t=0 here (handed back the
+        // group color instead of the multiplied base), washing text to white.
         const colorBlend = gScale.w;
-        vColor.assign(iColor.mul(gColor.rgb).mix(gColor.rgb, colorBlend));
+        const baseColor  = iColor.mul(gColor.rgb);
+        vColor.assign(baseColor.add(gColor.rgb.sub(baseColor).mul(colorBlend)));
         vGroupAlpha.assign(gColor.a);
 
         // Per-glyph highlight from RGBA8 DataTexture (1024 wide, 2D wrapped)
@@ -178,10 +182,10 @@ function _buildOutputNode(varyings, uniforms) {
         const cov = coverage.mul(0.5).clamp(0, 1).toVar();
         Discard(cov.lessThan(0.01));
 
-        const finalColor = vColor.mul(cov).add(vAddedColor).clamp(0, 1);
         const outAlpha   = cov.mul(vGroupAlpha);
         Discard(outAlpha.lessThan(0.01));
 
+        const finalColor = vColor.mul(cov).add(vAddedColor).clamp(0, 1);
         return vec4(finalColor, outAlpha);
     })();
 }
