@@ -24,7 +24,7 @@
  * Do NOT import from src/workers/builders/ here — this runs in browser context.
  */
 
-import GlyphRendererV15 from '../../GlyphRenderer.js';
+import GlyphField from '../../GlyphField.js';
 import { getWorkerBridge, isWorkersSupported } from '../../workers/WorkerBridge.js';
 import { iterGraphemes } from '../../utils/grapheme.js';
 
@@ -91,7 +91,7 @@ export class TreemapLabelManager {
 
         // Create the renderer sized to the collected content
         const glyphCount = pendingItems.reduce((s, p) => s + p.text.length, 0);
-        this._renderer = new GlyphRendererV15(this._scene, this._atlas, {
+        this._renderer = new GlyphField(this._scene, this._atlas, {
             maxInstances: Math.max(glyphCount, 100),
             defaultColor: { r: 1, g: 1, b: 1 },
             worldScale:   0.025,

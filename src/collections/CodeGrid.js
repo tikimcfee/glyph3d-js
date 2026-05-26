@@ -19,7 +19,7 @@
  */
 
 import * as THREE from 'three';
-import GlyphRendererV15 from '../GlyphRenderer.js';
+import GlyphField from '../GlyphField.js';
 import { getWorkerBridge, isWorkersSupported } from '../workers/WorkerBridge.js';
 import { iterGraphemes } from '../utils/grapheme.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
@@ -671,11 +671,10 @@ class CodeGrid extends THREE.Object3D {
         const bufferSize = Math.max(size, 100);
         this._bufferSize = bufferSize;
 
-        this._renderer = new GlyphRendererV15(this._rendererGroup, this.atlas, {
+        this._renderer = new GlyphField(this._rendererGroup, this.atlas, {
             maxInstances:  bufferSize,
             defaultColor:  this.config.textColor,
             worldScale:    this.config.worldScale,
-            skipPrealloc,
             slugData:      this.config.slugData,
             shaper:        this.config.shaper,
         });

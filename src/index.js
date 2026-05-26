@@ -7,14 +7,9 @@
  * @license MIT
  */
 
-// Core rendering
+// Core rendering — GlyphField is the WebGPU/TSL renderer (the one renderer).
 export { default as GlyphAtlas } from './GlyphAtlas.js';
-export { default as GlyphRenderer } from './GlyphRenderer.js';
-// GlyphField is NOT re-exported here — it imports from 'three/webgpu' which
-// pulls in 2MB of TSL/NodeMaterial code and breaks importmaps that only map
-// 'three'. Consumers that want GlyphField import it directly:
-//   import GlyphField from 'glyph3d-js/src/GlyphField.js';
-// The IDE uses GlyphRenderer (WebGL); picking-test uses GlyphField (WebGPU).
+export { default as GlyphField } from './GlyphField.js';
 export { loadPrebakedAtlas } from './GlyphAtlasLoader.js';
 
 // Collections - batched text abstractions

@@ -23,7 +23,7 @@
  */
 
 import * as THREE from 'three';
-import GlyphRendererV15 from '../GlyphRenderer.js';
+import GlyphField from '../GlyphField.js';
 import { parseCapturePaneAnsi } from './TerminalCapture.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 
@@ -61,7 +61,7 @@ export default class TerminalGrid extends THREE.Object3D {
 
         // One dedicated renderer per terminal (phase 1).
         // Phase 2: shared renderer via segment allocation.
-        this._renderer = new GlyphRendererV15(scene, atlas, {
+        this._renderer = new GlyphField(scene, atlas, {
             maxInstances: this.cols * this.rows,
             worldScale,
             defaultColor: { r: 0.0, g: 1.0, b: 0.0 },

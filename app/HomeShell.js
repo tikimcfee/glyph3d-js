@@ -250,15 +250,13 @@ export class HomeShell {
         // not lost in negative space.
         this.camera.position.set(0, 0, 200);
 
-        this.renderer = new THREE.WebGLRenderer({
+        this.renderer = new THREE.WebGPURenderer({
             canvas: this.canvas,
             antialias: true,
-            // preserveDrawingBuffer: true is required for `screenshot` to
-            // capture non-empty pixels via canvas.toDataURL(). Without it,
-            // the GL spec lets the browser clear the buffer between frames
-            // and the readback comes out black. Costs a second framebuffer.
-            preserveDrawingBuffer: true,
         });
+        // WebGPU device acquisition is async — must complete before the first
+        // render. _initThree is awaited during boot, so this is the natural place.
+        await this.renderer.init();
         this.renderer.setSize(w, h, false);
         this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     }

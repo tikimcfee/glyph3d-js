@@ -408,7 +408,7 @@ export class PickingSystem {
      *
      * Must be called after every flush that rebuilds geometry.
      *
-     * @param {import('../GlyphRenderer.js').default} glyphRenderer
+     * @param {import('../GlyphField.js').default} glyphRenderer
      * @returns {number} The startId assigned (0 if empty)
      */
     registerRenderer(glyphRenderer) {
@@ -485,7 +485,7 @@ export class PickingSystem {
 
     /**
      * Remove a renderer from the registry.
-     * @param {import('../GlyphRenderer.js').default} glyphRenderer
+     * @param {import('../GlyphField.js').default} glyphRenderer
      */
     unregisterRenderer(glyphRenderer) {
         const idx = this._registry.findIndex(e => e.renderer === glyphRenderer);
