@@ -42,9 +42,14 @@ const {
     cameraProjectionMatrix,
     ivec2,
     If,
-    Return,
+    Loop,
+    Break,
+    fwidth,
     Discard,
 } = TSL;
+
+/** Upper bound on quadratic beziers per glyph (TSL loop cap). */
+const MAX_CURVES = 256;
 
 import { PERF_THRESHOLDS } from './core/constants.js';
 
@@ -62,17 +67,21 @@ const MAX_GROUPS_DIM     = 16000;
  */
 function _buildVertexNode(uniforms) {
     // Per-instance buffer attributes
-    const iPos   = attribute('instancePosition', 'vec3');
-    const iSize  = attribute('instanceSize',     'vec2');
-    const iColor = attribute('instanceColor',    'vec3');
-    const iGroup = attribute('instanceGroupId',  'float');
+    const iPos     = attribute('instancePosition', 'vec3');
+    const iSize    = attribute('instanceSize',     'vec2');
+    const iGlyphId = attribute('instanceGlyphId',  'float');
+    const iColor   = attribute('instanceColor',    'vec3');
+    const iGroup   = attribute('instanceGroupId',  'float');
 
     // Varyings passed to fragment
-    const vColor      = varying(vec3(0),   'vColor');
-    const vGroupAlpha = varying(float(1),  'vGroupAlpha');
-    const vAddedColor = varying(vec3(0),   'vAddedColor');
+    const vColor      = varying(vec3(0),  'vColor');
+    const vGroupAlpha = varying(float(1), 'vGroupAlpha');
+    const vAddedColor = varying(vec3(0),  'vAddedColor');
+    const vGlyphUV    = varying(vec2(0),  'vGlyphUV');
+    const vCurveStart = varying(int(0),   'vCurveStart');
+    const vCurveCount = varying(int(0),   'vCurveCount');
 
-    const { groupTex, groupTexHeight, highlightTex } = uniforms;
+    const { groupTex, groupTexHeight, highlightTex, glyphMapTex, glyphMapWidth } = uniforms;
 
     const vertexFn = Fn(() => {
         // Scale base quad by per-instance size
@@ -104,30 +113,153 @@ function _buildVertexNode(uniforms) {
         const highlight = highlightTex.sample(ivec2(hx, hy)).setSampler(false);
         vAddedColor.assign(highlight.rgb);
 
+        // Glyph-map lookup: glyphId → curve range (RGBA16UI, 1 texel/glyph)
+        const gid       = int(iGlyphId);
+        const mapW      = int(glyphMapWidth);
+        const glyphInfo = textureLoad(glyphMapTex, ivec2(gid.mod(mapW), gid.div(mapW)));
+        vCurveStart.assign(int(glyphInfo.x));
+        vCurveCount.assign(int(glyphInfo.y));
+
+        // PlaneGeometry's uv attribute is [0,1] across the quad → glyph-space [0,1]².
+        vGlyphUV.assign(uv());
+
         return clipPos;
     });
 
-    return { vertexFn, vColor, vGroupAlpha, vAddedColor };
+    return { vertexFn, vColor, vGroupAlpha, vAddedColor, vGlyphUV, vCurveStart, vCurveCount };
 }
 
 /**
- * Build TSL fragment (output) node.
- * C3: solid quad with color + additive highlight. Alpha from group visibility.
- * Slug winding-number coverage is deferred to post-C3.
+ * Build TSL fragment (output) node — Slug analytic coverage.
  *
- * @param {Object} varyings - { vColor, vGroupAlpha, vAddedColor }
+ * Port of GlyphRenderer's GLSL fragment shader: accumulate fractional winding
+ * over every quadratic bezier in the glyph along an X ray and a Y ray
+ * (2D anti-aliasing), scaled by the per-pixel footprint (fwidth). Single
+ * sample, no supersampling, no band acceleration structure.
+ *
+ * @param {Object} varyings - { vColor, vGroupAlpha, vAddedColor, vGlyphUV, vCurveStart, vCurveCount }
+ * @param {Object} uniforms - { curveTex }
  */
-function _buildOutputNode(varyings) {
-    const { vColor, vGroupAlpha, vAddedColor } = varyings;
+function _buildOutputNode(varyings, uniforms) {
+    const { vColor, vGroupAlpha, vAddedColor, vGlyphUV, vCurveStart, vCurveCount } = varyings;
+    const { curveTex } = uniforms;
 
     return Fn(() => {
-        // Group invisible: discard fragment
+        // Invisible group, or empty glyph (space / .notdef = 0 curves): nothing to draw.
         Discard(vGroupAlpha.lessThan(0.01));
+        Discard(vCurveCount.equal(int(0)));
 
-        // Final color = (instanceColor * groupColor + addedHighlight), clamped
-        const finalColor = vColor.add(vAddedColor).clamp(float(0), float(1));
-        return vec4(finalColor, vGroupAlpha);
+        // Inverse pixel footprint in glyph-UV space, per axis. fwidth is the
+        // screen-space derivative magnitude, so AA is resolution-independent.
+        const invDiameter = vec2(1).div(fwidth(vGlyphUV));
+
+        const coverage = float(0).toVar();
+        Loop(MAX_CURVES, ({ i }) => {
+            If(i.greaterThanEqual(vCurveCount), () => { Break(); });
+
+            // 2 texels per curve: [P0.xy, P1.xy] then [P2.xy, _, _].
+            const ci = vCurveStart.add(i).mul(2);
+            const t0 = textureLoad(curveTex, ivec2(ci.mod(1024), ci.div(1024)));
+            const t1 = textureLoad(curveTex, ivec2(ci.add(1).mod(1024), ci.add(1).div(1024)));
+
+            // Unpack uint16 → [0,1], translate so the sample point is the origin.
+            const p0 = vec2(float(t0.x), float(t0.y)).div(65535).sub(vGlyphUV);
+            const p1 = vec2(float(t0.z), float(t0.w)).div(65535).sub(vGlyphUV);
+            const p2 = vec2(float(t1.x), float(t1.y)).div(65535).sub(vGlyphUV);
+
+            coverage.addAssign(computeCoverage(invDiameter.x, p0, p1, p2));
+            coverage.addAssign(computeCoverage(invDiameter.y, rot90(p0), rot90(p1), rot90(p2)));
+        });
+
+        // Average the two rays; fills accumulate positive under y-up normalization.
+        const cov = coverage.mul(0.5).clamp(0, 1).toVar();
+        Discard(cov.lessThan(0.01));
+
+        const finalColor = vColor.mul(cov).add(vAddedColor).clamp(0, 1);
+        const outAlpha   = cov.mul(vGroupAlpha);
+        Discard(outAlpha.lessThan(0.01));
+
+        return vec4(finalColor, outAlpha);
     })();
+}
+
+// Rotate 90° so the +X ray becomes a +Y ray in the rotated frame.
+const rot90 = Fn(([v]) => vec2(v.y, v.x.negate()));
+
+/**
+ * Analytic coverage of one quadratic bezier for a +X ray through the origin
+ * (endpoints pre-translated by the sample point). invDiameter = 1 / pixel
+ * footprint along the ray axis; fractional crossings give sub-pixel coverage.
+ * (Dobbie / Lengyel "Slug".) Restructured from the GLSL early-returns into
+ * guarded accumulation for clean TSL codegen.
+ */
+const computeCoverage = Fn(([invDiameter, p0, p1, p2]) => {
+    const result = float(0).toVar();
+
+    // Cheap reject: curve entirely on one side of the ray (y == 0).
+    const allAbove = p0.y.greaterThan(0).and(p1.y.greaterThan(0)).and(p2.y.greaterThan(0));
+    const allBelow = p0.y.lessThan(0).and(p1.y.lessThan(0)).and(p2.y.lessThan(0));
+
+    If(allAbove.or(allBelow).not(), () => {
+        // Q(t).y = 0 → a.y·t² − 2·b.y·t + c.y = 0 (factor of −2 baked into b).
+        const a = p0.sub(p1.mul(2)).add(p2);
+        const b = p0.sub(p1);
+        const c = p0;
+
+        const t0 = float(-1).toVar();
+        const t1 = float(-1).toVar();
+        const solvable = float(1).toVar();
+
+        If(a.y.abs().greaterThanEqual(1e-5), () => {
+            // Quadratic: two roots — t0 always exits, t1 always enters.
+            const radicand = b.y.mul(b.y).sub(a.y.mul(c.y));
+            If(radicand.greaterThan(0), () => {
+                const s = radicand.sqrt();
+                t0.assign(b.y.sub(s).div(a.y));
+                t1.assign(b.y.add(s).div(a.y));
+            }).Else(() => {
+                solvable.assign(0); // radicand ≤ 0 → no crossing
+            });
+        }).Else(() => {
+            // Degenerate quadratic = line segment; one root, assigned by direction.
+            const t = p0.y.div(p0.y.sub(p2.y));
+            If(p0.y.lessThan(p2.y), () => {
+                t0.assign(-1); t1.assign(t);
+            }).Else(() => {
+                t0.assign(t); t1.assign(-1);
+            });
+        });
+
+        If(solvable.greaterThan(0.5), () => {
+            If(t0.greaterThanEqual(0).and(t0.lessThan(1)), () => {
+                const x = a.x.mul(t0).sub(b.x.mul(2)).mul(t0).add(c.x);
+                result.addAssign(x.mul(invDiameter).add(0.5).clamp(0, 1));
+            });
+            If(t1.greaterThanEqual(0).and(t1.lessThan(1)), () => {
+                const x = a.x.mul(t1).sub(b.x.mul(2)).mul(t1).add(c.x);
+                result.subAssign(x.mul(invDiameter).add(0.5).clamp(0, 1));
+            });
+        });
+    });
+
+    return result;
+});
+
+/**
+ * 1×1 RGBA16UI placeholder so the NodeMaterial compiles before slug data lands.
+ * @returns {THREE.DataTexture}
+ */
+function _makePlaceholderUintTexture() {
+    const tex = new THREE.DataTexture(
+        new Uint16Array(4), 1, 1,
+        THREE.RGBAIntegerFormat, THREE.UnsignedShortType
+    );
+    tex.internalFormat   = 'RGBA16UI';
+    tex.minFilter        = THREE.NearestFilter;
+    tex.magFilter        = THREE.NearestFilter;
+    tex.generateMipmaps  = false;
+    tex.needsUpdate      = true;
+    return tex;
 }
 
 // ─── GlyphField ───────────────────────────────────────────────────────────────
@@ -197,6 +329,14 @@ export default class GlyphField {
         this._groupTexUniform    = null;
         this._groupTexHUniform   = null;
         this._highlightUniform   = null;
+        this._curveTexUniform    = null;
+        this._glyphMapTexUniform = null;
+        this._glyphMapWUniform   = null;
+
+        // Slug curve + glyph-map textures (resolved in _ensureSlugTextures)
+        this._curveTexture    = null;
+        this._glyphMapTexture = null;
+        this._glyphMapWidth   = 1;
 
         // Build instance mesh
         this.instanceMesh = this._createInstanceMesh();
@@ -306,18 +446,34 @@ export default class GlyphField {
         const groupTexHNode    = uniform(float(this._maxGroups));
         const highlightTexNode = texture(this._highlightTexture);
 
+        // Slug curve + glyph-map textures (real data or 1×1 placeholders until
+        // setSlugData arrives). texelFetch'd via textureLoad in the shader.
+        this._ensureSlugTextures();
+        const curveTexNode    = texture(this._curveTexture);
+        const glyphMapTexNode = texture(this._glyphMapTexture);
+        const glyphMapWNode   = uniform(float(this._glyphMapWidth));
+
         // Store for hot-swap (.value = newTexture)
-        this._groupTexUniform  = groupTexNode;
-        this._groupTexHUniform = groupTexHNode;
-        this._highlightUniform = highlightTexNode;
+        this._groupTexUniform     = groupTexNode;
+        this._groupTexHUniform    = groupTexHNode;
+        this._highlightUniform    = highlightTexNode;
+        this._curveTexUniform     = curveTexNode;
+        this._glyphMapTexUniform  = glyphMapTexNode;
+        this._glyphMapWUniform    = glyphMapWNode;
 
-        const { vertexFn, vColor, vGroupAlpha, vAddedColor } = _buildVertexNode({
-            groupTex:       groupTexNode,
-            groupTexHeight: groupTexHNode,
-            highlightTex:   highlightTexNode,
-        });
+        const { vertexFn, vColor, vGroupAlpha, vAddedColor, vGlyphUV, vCurveStart, vCurveCount } =
+            _buildVertexNode({
+                groupTex:       groupTexNode,
+                groupTexHeight: groupTexHNode,
+                highlightTex:   highlightTexNode,
+                glyphMapTex:    glyphMapTexNode,
+                glyphMapWidth:  glyphMapWNode,
+            });
 
-        const outputNode = _buildOutputNode({ vColor, vGroupAlpha, vAddedColor });
+        const outputNode = _buildOutputNode(
+            { vColor, vGroupAlpha, vAddedColor, vGlyphUV, vCurveStart, vCurveCount },
+            { curveTex: curveTexNode }
+        );
 
         const material = new MeshBasicNodeMaterial();
         material.vertexNode = vertexFn();
@@ -344,7 +500,31 @@ export default class GlyphField {
     setSlugData(slugData, shaper) {
         if (shaper) this._shaper = shaper;
         this._slugData = slugData;
-        // Slug fragment activation deferred to post-C3
+        this._ensureSlugTextures();
+        // Hot-swap the live shader texture nodes to the real curve/glyph-map data.
+        if (this._curveTexUniform)    this._curveTexUniform.value    = this._curveTexture;
+        if (this._glyphMapTexUniform) this._glyphMapTexUniform.value = this._glyphMapTexture;
+        if (this._glyphMapWUniform)   this._glyphMapWUniform.value   = this._glyphMapWidth;
+    }
+
+    /**
+     * Resolve the curve + glyph-map textures from slug data, falling back to
+     * 1×1 placeholders so the NodeMaterial can compile before data arrives.
+     * @private
+     */
+    _ensureSlugTextures() {
+        const sd = this._slugData;
+        if (sd && sd.curveTexture && sd.glyphMapTexture) {
+            this._curveTexture    = sd.curveTexture;
+            this._glyphMapTexture = sd.glyphMapTexture;
+            this._glyphMapWidth   = sd.glyphMapTexture.image.width;
+            return;
+        }
+        if (!this._curveTexture) {
+            this._curveTexture    = _makePlaceholderUintTexture();
+            this._glyphMapTexture = _makePlaceholderUintTexture();
+            this._glyphMapWidth   = 1;
+        }
     }
 
     // ── Public rendering API ──────────────────────────────────────────────────
