@@ -1,5 +1,28 @@
 # CLAUDE.md - Project Guide for AI Assistants
 
+## ⚠️ Active architectural overhaul (started 2026-05-26)
+
+This repo is mid-overhaul. **Several sections below describe the PRE-overhaul
+architecture; where they conflict with this block, this block wins.** Full living
+context is in agent memory (`project_architecture_overhaul`,
+`reference_r3f_webgpu_integration`) and the repo-root planning docs
+(`AUDIT.md`, `AUDIT_DREAM.md`, `REFACTOR_PLAN.md`). Current truth:
+
+- **Renderer is WebGPU.** `GlyphField` (WebGPU / TSL NodeMaterial) is the one
+  renderer; the WebGL `GlyphRenderer` was deleted. Shaders are **TSL, not GLSL**.
+  Pages use `THREE.WebGPURenderer` and import three from `three/webgpu`.
+- **Moving to a monorepo + a build step.** `packages/glyph3d-r3f` (react-three-
+  fiber bindings) is the first new package; the repo root is still the core
+  library `glyph3d-js` (to be relocated to `packages/glyph3d-core` later — a
+  deferred chunk that touches the Go `//go:embed`, app/ imports, importmaps).
+  **bun workspaces**; new apps/packages build with **Vite**. The "no build step"
+  ethos is being reversed (Vite HMR replaces edit-and-refresh).
+- **Dev loop:** the `/webgpu-dev-loop` skill. TL;DR: `cd keystone && bun run dev`
+  (Vite, :5173), open via `tools/dev-firefox.sh <url>` (NVIDIA-pinned WebGPU
+  Firefox), read the browser console from `keystone/console.log`.
+- **Cleanup in flight:** core-survivor dedups (`zDistanceForFit`,
+  `resolveGridByIdOrIndex` done) — running checklist in memory.
+
 ## Project Overview
 
 glyph3d-js is a GPU-instanced 3D text rendering library for Three.js. It renders thousands of text glyphs at 60fps using a single draw call via `InstancedBufferGeometry`. The primary use case is code visualization — displaying source files, directory trees, and text content in navigable 3D space.
