@@ -1199,9 +1199,10 @@ class CodeGrid extends THREE.Object3D {
     // ============ Line → Buffer Slot Mapping ============
 
     /**
-     * Build _lineSlotBase: maps each line index to the buffer slot index
-     * of its first visible character. Mirrors the builder's skip logic
-     * (newlines, spaces, CR, tabs are not emitted as glyph slots).
+     * Build _lineSlotBase: maps each line index to the buffer slot index of
+     * its first codepoint. The builder emits one slot per codepoint (spaces
+     * and other invisible glyphs included), so within a line the slot offset
+     * equals the codepoint index — getSlotForChar just adds col to the base.
      *
      * Must be called after every flush that rebuilds geometry.
      * @private
@@ -1360,9 +1361,13 @@ class CodeGrid extends THREE.Object3D {
 
     /**
      * Get the buffer slot index for a character at (line, col).
-     * Col counts visible characters only (spaces are skipped in the buffer).
+     *
+     * `col` is a raw codepoint index within the line. The builder emits one
+     * buffer slot per codepoint — spaces, tabs and other invisible glyphs
+     * included (they render to nothing via 0-curve fragment discard). So the
+     * slot offset within a line equals the codepoint index: col == slot.
      * @param {number} line - 0-based line index
-     * @param {number} col - 0-based visible-character index within the line
+     * @param {number} col - 0-based codepoint index within the line
      * @returns {number} Buffer slot index, or -1 if out of range
      */
     getSlotForChar(line, col) {
@@ -1371,25 +1376,23 @@ class CodeGrid extends THREE.Object3D {
     }
 
     /**
-     * Get the number of visible (buffer-slotted) grapheme clusters on a line.
-     * A glyph slot is visible if its codepoint is > 32 (not a control char or space).
+     * Number of buffer slots on a line — i.e. its codepoint count, since the
+     * builder slots every codepoint (see getSlotForChar). Used as the
+     * exclusive end column for "highlight to end of line".
      *
-     * PERF: Uses direct codePointAt() iteration instead of Intl.Segmenter. Source code
-     * lines are ASCII/Latin-1 in the vast majority of cases — no multi-codepoint grapheme
-     * clusters (ZWJ sequences) appear. The builder also iterates by codepoint (not
-     * grapheme cluster) when counting buffer slots, so matching that behavior here ensures
-     * the slot counts stay aligned.
+     * Iterates by codepoint (not UTF-16 unit, not grapheme cluster) to match
+     * exactly how the shaper/builder walk the line.
      * @param {number} line - 0-based line index
      * @returns {number}
      */
-    getVisibleCharCount(line) {
+    getLineSlotCount(line) {
         if (!this.lines || line < 0 || line >= this.lines.length) return 0;
         const text = this.lines[line];
         const len = text.length;
         let count = 0;
         for (let i = 0; i < len; ) {
             const cp = text.codePointAt(i);
-            if (cp > 32) count++;
+            count++;
             i += cp > 0xFFFF ? 2 : 1;
         }
         return count;
@@ -1400,9 +1403,9 @@ class CodeGrid extends THREE.Object3D {
     /**
      * Highlight a range of characters with additive color.
      * @param {number} startLine - 0-based inclusive
-     * @param {number} startCol - 0-based inclusive (visible char index)
+     * @param {number} startCol - 0-based inclusive (codepoint index)
      * @param {number} endLine - 0-based inclusive
-     * @param {number} endCol - 0-based exclusive (visible char index)
+     * @param {number} endCol - 0-based exclusive (codepoint index)
      * @param {{r:number, g:number, b:number}} color
      */
     highlightRange(startLine, startCol, endLine, endCol, color) {
@@ -1410,7 +1413,7 @@ class CodeGrid extends THREE.Object3D {
 
         for (let line = startLine; line <= endLine; line++) {
             const cStart = (line === startLine) ? startCol : 0;
-            const cEnd   = (line === endLine)   ? endCol   : this.getVisibleCharCount(line);
+            const cEnd   = (line === endLine)   ? endCol   : this.getLineSlotCount(line);
             const lineBase = this._lineSlotBase[line];
             if (lineBase === undefined) continue;
 
@@ -1426,7 +1429,7 @@ class CodeGrid extends THREE.Object3D {
      */
     clearLineHighlight(line) {
         if (!this._renderer || !this._lineSlotBase) return;
-        const count = this.getVisibleCharCount(line);
+        const count = this.getLineSlotCount(line);
         const base  = this._lineSlotBase[line];
         for (let i = 0; i < count; i++) {
             this._renderer.setGlyphHighlight(base + i, null);

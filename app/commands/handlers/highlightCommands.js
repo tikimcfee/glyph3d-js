@@ -176,9 +176,9 @@ export default function registerHighlightCommands(router) {
 
         // Highlight full lines
         for (let line = startLine; line <= endLine; line++) {
-            const charCount = grid.getVisibleCharCount(line);
-            if (charCount > 0) {
-                grid.highlightRange(line, 0, line, charCount, color);
+            const slotCount = grid.getLineSlotCount(line);
+            if (slotCount > 0) {
+                grid.highlightRange(line, 0, line, slotCount, color);
             }
         }
 
@@ -221,23 +221,15 @@ export default function registerHighlightCommands(router) {
                 const pos = lineText.indexOf(pattern, searchStart);
                 if (pos === -1) break;
 
-                // Convert string position to visible-char col by counting
-                // non-skipped characters before pos
-                let visCol = 0;
-                for (let i = 0; i < pos; i++) {
-                    const code = lineText.charCodeAt(i);
-                    if (code !== 10 && code !== 32 && code !== 13 && code !== 9) visCol++;
-                }
-                // Count visible chars in the match
-                let visLen = 0;
-                for (let i = pos; i < pos + pattern.length; i++) {
-                    const code = lineText.charCodeAt(i);
-                    if (code !== 10 && code !== 32 && code !== 13 && code !== 9) visLen++;
-                }
+                // The buffer slots every codepoint, so the highlight column is
+                // simply the codepoint index — count codepoints before the match
+                // (spreading by codepoint handles surrogate pairs correctly).
+                const col = [...lineText.slice(0, pos)].length;
+                const len = [...pattern].length;
 
-                if (visLen > 0) {
-                    grid.highlightRange(lineIdx, visCol, lineIdx, visCol + visLen, color);
-                    matches.push({ line: lineIdx, col: visCol, len: visLen });
+                if (len > 0) {
+                    grid.highlightRange(lineIdx, col, lineIdx, col + len, color);
+                    matches.push({ line: lineIdx, col, len });
                 }
 
                 searchStart = pos + pattern.length;

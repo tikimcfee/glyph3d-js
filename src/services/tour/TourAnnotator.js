@@ -50,7 +50,7 @@ export default class TourAnnotator {
                 const endLine   = resolved.endLine0 ?? startLine;
                 const startCol  = resolved.col0 ?? 0;
                 const endCol    = resolved.endCol0 ??
-                    (resolved.grid.getVisibleCharCount?.(endLine) || 80);
+                    (resolved.grid.getLineSlotCount?.(endLine) || 80);
 
                 resolved.grid.highlightRange(startLine, startCol, endLine, endCol, color);
                 highlights.push({ grid: resolved.grid, startLine, endLine });
@@ -148,21 +148,14 @@ export default class TourAnnotator {
                 const pos = lineText.indexOf(token, searchStart);
                 if (pos === -1) break;
 
-                // Convert raw string position to visible-char column
-                // (buffer slots skip whitespace: space, tab, newline, CR)
-                let visCol = 0;
-                for (let i = 0; i < pos; i++) {
-                    const code = lineText.charCodeAt(i);
-                    if (code !== 10 && code !== 32 && code !== 13 && code !== 9) visCol++;
-                }
-                let visLen = 0;
-                for (let i = pos; i < pos + token.length; i++) {
-                    const code = lineText.charCodeAt(i);
-                    if (code !== 10 && code !== 32 && code !== 13 && code !== 9) visLen++;
-                }
+                // The buffer slots every codepoint, so the highlight column is
+                // the codepoint index — count codepoints before the match
+                // (spreading by codepoint handles surrogate pairs correctly).
+                const col = [...lineText.slice(0, pos)].length;
+                const len = [...token].length;
 
-                if (visLen > 0) {
-                    grid.highlightRange(lineIdx, visCol, lineIdx, visCol + visLen, color);
+                if (len > 0) {
+                    grid.highlightRange(lineIdx, col, lineIdx, col + len, color);
                     affected.push({ grid, startLine: lineIdx, endLine: lineIdx });
                 }
                 searchStart = pos + token.length;

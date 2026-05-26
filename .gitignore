@@ -42,3 +42,6 @@ cli/web/
 
 # Single-binary build
 glyph3d-cli
+
+# Playwright harness lockfile (project tracks no lockfiles)
+bun.lock
