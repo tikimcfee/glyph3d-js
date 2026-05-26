@@ -66,7 +66,6 @@ export class HomeShell {
         this.sceneContext = null;
         this.cameraController = null;
 
-        this._rafId = null;
         this._resizeObs = null;
         this._activeDemo = null;
     }
@@ -407,29 +406,20 @@ export class HomeShell {
     // ─────────────────────────────────────────────────────────────────
 
     _startRenderLoop() {
-        // Compositor refresh trick: Firefox throttles rAF on unfocused
-        // tabs AND caches frames when DOM hasn't visibly changed — which
-        // breaks BiDi captureScreenshot during live dev (every snapshot
-        // returns the same cached frame). Bumping a CSS custom property
-        // each tick is the cheapest way to mark the page as "dirty" so
-        // the compositor always serves fresh pixels. Invisible to humans,
-        // ~free in cost.
-        let n = 0;
         let lastT = performance.now();
-        const root = document.documentElement;
         const tick = () => {
-            this._rafId = requestAnimationFrame(tick);
             const now = performance.now();
             const dt = (now - lastT) / 1000;
             lastT = now;
-            // Camera controller drives position/rotation from accumulated
-            // input state; must run BEFORE render so this frame reflects
-            // the latest pan/zoom.
+            // Camera controller drives position/rotation from accumulated input
+            // state; must run BEFORE render so this frame reflects the latest pan/zoom.
             this.cameraController?.update(dt);
             this.renderer.render(this.scene, this.camera);
-            root.style.setProperty('--frame-tick', String(n++));
         };
-        this._rafId = requestAnimationFrame(tick);
+        // WebGPU: drive the loop through the renderer so frame submission and
+        // present are paced with the device. Manual requestAnimationFrame + sync
+        // render() desyncs from the async present → stalls and frame jitter.
+        this.renderer.setAnimationLoop(tick);
     }
 
     _wireResize() {
@@ -472,7 +462,7 @@ export class HomeShell {
     // ─────────────────────────────────────────────────────────────────
 
     dispose() {
-        if (this._rafId) cancelAnimationFrame(this._rafId);
+        this.renderer?.setAnimationLoop(null);
         if (this._resizeHandler) window.removeEventListener('resize', this._resizeHandler);
         this._activeDemo?.cancel();
         this.bar?.dispose();
