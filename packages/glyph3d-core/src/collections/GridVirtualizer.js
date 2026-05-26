@@ -37,6 +37,14 @@ const EVICTION_DELAY_MS = 5000;
 // to confirm intent before the grid is evicted again.
 const RELOAD_COOLDOWN_MS = 8000;
 
+// Max grids whose GPU buffers are reloaded per update(). reloadContent() does
+// ~1.5ms of synchronous main-thread work (renderer reconstruction + shaping
+// prefix) before it yields, so firing all newly-visible grids' reloads in one
+// frame stalls the main thread (a wide camera pan re-entering N grids ≈ N×1.5ms).
+// Budgeting spreads the cost: the closest few reload now, the rest over the next
+// frames (they render empty meanwhile, same as the existing one-round-trip gap).
+const RELOAD_BUDGET_PER_FRAME = 6;
+
 export default class GridVirtualizer {
     /**
      * @param {THREE.Scene} scene
@@ -285,33 +293,19 @@ export default class GridVirtualizer {
             const evictionDistance = this.hysteresis * EVICTION_DISTANCE_FACTOR;
             const now = performance.now();
 
+            // Re-entering grids needing a reload are collected here, then only the
+            // closest RELOAD_BUDGET_PER_FRAME are reloaded this frame. Deferred ones
+            // stay evicted+active and get re-collected next frame, so the whole set
+            // fills in over a few frames instead of stalling on one (see constant).
+            const reloadCandidates = [];
+
             for (const [grid, entry] of this._entries) {
                 if (entry.active) {
                     // Grid is visible — cancel any pending eviction timer.
                     entry._evictionTimer = null;
 
                     if (entry.evicted && !entry._reloadInFlight) {
-                        // Re-entering visibility: restore GPU buffers asynchronously.
-                        // Grid renders empty for at most one worker round-trip, which is
-                        // acceptable. Guard with _reloadInFlight so a rapid frustum
-                        // oscillation cannot queue multiple overlapping reloads.
-                        entry.evicted = false;
-                        entry._reloadInFlight = true;
-                        grid.reloadContent(this._atlas)
-                            .then(() => {
-                                entry._reloadInFlight = false;
-                                // Arm the cooldown: the grid cannot be evicted again
-                                // until RELOAD_COOLDOWN_MS have elapsed. This prevents
-                                // a frustum-edge grid from immediately churning back
-                                // through evict → reload → evict.
-                                entry._reloadCooldownUntil = performance.now() + RELOAD_COOLDOWN_MS;
-                            })
-                            .catch(() => {
-                                entry._reloadInFlight = false;
-                                // If reload fails, mark as not evicted so we don't retry
-                                // every frame (the grid will just stay blank until the
-                                // next visibility transition).
-                            });
+                        reloadCandidates.push({ grid, entry });
                     }
                 } else if (!entry.evicted && entry.distance > evictionDistance) {
                     // Inactive and far: only proceed if past the post-reload cooldown.
@@ -338,6 +332,34 @@ export default class GridVirtualizer {
                         entry._evictionTimer = null;
                     }
                 }
+            }
+
+            // Reload only the closest few re-entering grids this frame; the rest
+            // stay evicted+active and are re-collected next frame. Bounds the
+            // synchronous reload cost per frame regardless of how many grids the
+            // camera just swept back into view.
+            if (reloadCandidates.length > RELOAD_BUDGET_PER_FRAME) {
+                reloadCandidates.sort((a, b) => a.entry.distance - b.entry.distance);
+            }
+            const reloadLimit = Math.min(reloadCandidates.length, RELOAD_BUDGET_PER_FRAME);
+            for (let i = 0; i < reloadLimit; i++) {
+                const { grid, entry } = reloadCandidates[i];
+                // Restore GPU buffers asynchronously. _reloadInFlight guards against
+                // a rapid frustum oscillation queueing overlapping reloads.
+                entry.evicted = false;
+                entry._reloadInFlight = true;
+                grid.reloadContent(this._atlas)
+                    .then(() => {
+                        entry._reloadInFlight = false;
+                        // Cooldown: cannot be evicted again for RELOAD_COOLDOWN_MS,
+                        // preventing evict → reload → evict churn at the frustum edge.
+                        entry._reloadCooldownUntil = performance.now() + RELOAD_COOLDOWN_MS;
+                    })
+                    .catch(() => {
+                        // On failure, leave not-evicted so we don't retry every frame
+                        // (grid stays blank until the next visibility transition).
+                        entry._reloadInFlight = false;
+                    });
             }
         }
 
