@@ -1,0 +1,21 @@
+{
+  "name": "glyph3d-keystone",
+  "private": true,
+  "type": "module",
+  "description": "Dev harness for glyph3d-r3f: react-three-fiber hosting the WebGPU GlyphField + CodeGrid + ViewerCameraController. Validates the bindings via reload + console-capture loop.",
+  "scripts": {
+    "dev": "vite"
+  },
+  "dependencies": {
+    "glyph3d-js": "file:..",
+    "glyph3d-r3f": "workspace:*",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "@react-three/fiber": "^9.0.0",
+    "three": "^0.183.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^5.4.11"
+  }
+}

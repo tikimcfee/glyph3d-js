@@ -1,0 +1,21 @@
+{
+  "name": "glyph3d-r3f",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "react-three-fiber bindings for the glyph3d WebGPU rendering stack",
+  "main": "src/index.js",
+  "module": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "dependencies": {
+    "glyph3d-js": "file:../.."
+  },
+  "peerDependencies": {
+    "react": ">=19",
+    "react-dom": ">=19",
+    "@react-three/fiber": ">=9",
+    "three": ">=0.183"
+  }
+}
