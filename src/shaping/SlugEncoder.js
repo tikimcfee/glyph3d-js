@@ -79,10 +79,10 @@ export default class SlugEncoder {
     }
 
     /**
-     * Create a RGBA16UI DataTexture for Slug rendering.
+     * Create a RGBA32Uint DataTexture for Slug rendering.
      *
      * @private
-     * @param {Uint16Array} data - Texture data
+     * @param {Uint32Array} data - Texture data
      * @param {number} width
      * @param {number} height
      * @returns {THREE.DataTexture}
@@ -93,9 +93,11 @@ export default class SlugEncoder {
             width,
             height,
             THREE.RGBAIntegerFormat,
-            THREE.UnsignedShortType
+            THREE.UnsignedIntType
         );
-        texture.internalFormat = 'RGBA16UI';
+        // No internalFormat string: that's a WebGL2 hint, and the WebGPU backend
+        // passes it through verbatim as a GPUTextureFormat (invalid). Let three
+        // derive RGBA32Uint from RGBAIntegerFormat + UnsignedIntType.
         texture.minFilter = THREE.NearestFilter;
         texture.magFilter = THREE.NearestFilter;
         texture.generateMipmaps = false;

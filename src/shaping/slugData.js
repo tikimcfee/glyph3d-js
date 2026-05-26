@@ -66,12 +66,14 @@ export function buildSlugBuffers(shaper, glyphIds) {
     const totalCurveTexels = totalCurves * CURVE_TEXELS_PER_CURVE;
     const curveTexHeight = Math.max(1, Math.ceil(totalCurveTexels / TEXTURE_WIDTH));
     const curveTexSize = TEXTURE_WIDTH * curveTexHeight * 4; // 4 channels (RGBA)
-    const curveData = new Uint16Array(curveTexSize);
+    // Uint32 (RGBA32Uint): three's WebGPU backend has no 16-bit integer texture
+    // path — RGBAIntegerFormat only maps Int/UnsignedInt. Values stay 0..65535.
+    const curveData = new Uint32Array(curveTexSize);
 
     // GlyphMap texture: 1 texel per glyph slot
     const glyphMapTexHeight = Math.max(1, Math.ceil(glyphMapEntries / TEXTURE_WIDTH));
     const glyphMapTexSize = TEXTURE_WIDTH * glyphMapTexHeight * 4;
-    const glyphMapData = new Uint16Array(glyphMapTexSize);
+    const glyphMapData = new Uint32Array(glyphMapTexSize);
 
     // Phase 3: Pack data into texture arrays
     let curveTexelOffset = 0; // current texel write position in curveTexture

@@ -246,15 +246,14 @@ const computeCoverage = Fn(([invDiameter, p0, p1, p2]) => {
 });
 
 /**
- * 1×1 RGBA16UI placeholder so the NodeMaterial compiles before slug data lands.
+ * 1×1 RGBA32Uint placeholder so the NodeMaterial compiles before slug data lands.
  * @returns {THREE.DataTexture}
  */
 function _makePlaceholderUintTexture() {
     const tex = new THREE.DataTexture(
-        new Uint16Array(4), 1, 1,
-        THREE.RGBAIntegerFormat, THREE.UnsignedShortType
+        new Uint32Array(4), 1, 1,
+        THREE.RGBAIntegerFormat, THREE.UnsignedIntType
     );
-    tex.internalFormat   = 'RGBA16UI';
     tex.minFilter        = THREE.NearestFilter;
     tex.magFilter        = THREE.NearestFilter;
     tex.generateMipmaps  = false;
