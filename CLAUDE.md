@@ -23,11 +23,8 @@ src/
 ├── core/
 │   ├── constants.js            # Shared constants (PERF_THRESHOLDS, DEBUG_SETTINGS)
 │   ├── canvasSize.js           # getCanvasViewportSize() — container-aware sizing
-│   ├── ShaderManager.js        # GLSL shader loading & caching
-│   └── InstanceBuffer.js       # Instance attribute array building
-├── shaders/
-│   ├── textVertex.glsl         # Vertex shader (per-instance position, size, UV, color)
-│   └── textFragment.glsl      # Fragment shader (atlas sampling, color tint, alpha discard)
+│   ├── renderOrder.js          # Centralized renderOrder bands
+│   └── types.js                # Shared JSDoc typedefs
 ├── collections/
 │   ├── GlyphCollection.js     # Batched deferred text rendering
 │   ├── CodeGrid.js            # Single source file as 3D object (extends Object3D)
@@ -253,7 +250,7 @@ Modify `GlyphAtlas.js` — add character ranges in the `generate()` method along
 Create a new class in `src/collections/` following the pattern of `GridLayoutManager.js`. It should accept CodeGrid instances and set their `.position` properties.
 
 ### Modifying the shader
-Edit inline GLSL in `GlyphRenderer._getVertexShader()`/`_getFragmentShader()` (canonical) and the reference copies in `src/shaders/`. All shaders use GLSL ES 3.00 syntax (`in`/`out`, `texture()`, `texelFetch`, `gl_InstanceID`). Picking shaders are inline in `PickingSystem.js`.
+Edit inline GLSL in `GlyphRenderer._getVertexShader()`/`_getFragmentShader()` — these are the canonical and only copies. All shaders use GLSL ES 3.00 syntax (`in`/`out`, `texture()`, `texelFetch`, `gl_InstanceID`). Picking shaders are inline in `PickingSystem.js`.
 
 ### Adding new builder logic for workers
 Add functions in `src/workers/builders/`. These must be pure functions with no DOM or Three.js imports (they run in Web Worker context).

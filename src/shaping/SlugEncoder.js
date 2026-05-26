@@ -5,14 +5,12 @@
  * then wraps the returned Uint16Arrays in THREE.DataTexture instances for the
  * existing WebGL render path.
  *
- * Three output textures:
+ * Two output textures:
  *   curveTexture    — 2 texels per curve: [P0.x, P0.y, P1.x, P1.y] [P2.x, P2.y, _, _]
- *   bandTexture     — flat layout: band headers [curveTexelOffset, curveCount, _, _]
- *                     followed by curve entries [curveIndex, _, _, _] per band
- *   glyphMapTexture — 1 texel per glyph: [curveStart, curveCount, bandHeaderStart, bandCount]
+ *   glyphMapTexture — 1 texel per glyph: [curveStart, curveCount, _, _]
  *
  * All coordinates normalized to [0,1] then packed as uint16 (0-65535).
- * All textures use RGBA16UI / usampler2D / texelFetch.
+ * Both textures use RGBA16UI / usampler2D / texelFetch.
  *
  * Runs on the main thread, once per font load, before any rendering begins.
  * Workers never touch SlugEncoder — they only do shaping + buffer packing.
@@ -31,19 +29,16 @@ export default class SlugEncoder {
     }
 
     /**
-     * Encode a set of glyph IDs into three GPU-ready DataTextures.
+     * Encode a set of glyph IDs into two GPU-ready DataTextures.
      *
      * @param {Set<number>|Array<number>} glyphIds - Glyph IDs to encode
      * @returns {{
      *   curveTexture: THREE.DataTexture,
-     *   bandTexture: THREE.DataTexture,
      *   glyphMapTexture: THREE.DataTexture,
      *   stats: {
      *     glyphCount: number,
      *     totalCurves: number,
-     *     totalBandEntries: number,
      *     curveTextureSizeKB: number,
-     *     bandTextureSizeKB: number,
      *     glyphMapTextureSizeKB: number
      *   }
      * }}
@@ -54,12 +49,9 @@ export default class SlugEncoder {
         // Phases 1-3: pure typed-array computation, no THREE dependency
         const {
             curveData,
-            bandData,
             glyphMapData,
             curveTexWidth,
             curveTexHeight,
-            bandTexWidth,
-            bandTexHeight,
             glyphMapTexWidth,
             glyphMapTexHeight,
             stats,
@@ -67,23 +59,20 @@ export default class SlugEncoder {
 
         // Phase 4: wrap typed arrays in THREE.DataTexture for the WebGL path
         const curveTexture    = this._createSlugTexture(curveData,    curveTexWidth,    curveTexHeight);
-        const bandTexture     = this._createSlugTexture(bandData,     bandTexWidth,     bandTexHeight);
         const glyphMapTexture = this._createSlugTexture(glyphMapData, glyphMapTexWidth, glyphMapTexHeight);
 
-        const totalKB = +(stats.curveTextureSizeKB + stats.bandTextureSizeKB + stats.glyphMapTextureSizeKB).toFixed(2);
+        const totalKB = +(stats.curveTextureSizeKB + stats.glyphMapTextureSizeKB).toFixed(2);
         const elapsed = (performance.now() - startTime).toFixed(1);
 
         console.log(
             `[SlugEncoder] Textures built: ` +
             `curves=${stats.totalCurves * 2} texels (${stats.curveTextureSizeKB}KB), ` +
-            `bands=${stats.totalBandEntries} entries (${stats.bandTextureSizeKB}KB), ` +
             `glyphMap=${glyphMapTexHeight * glyphMapTexWidth} entries (${stats.glyphMapTextureSizeKB}KB)`
         );
         console.log(`[SlugEncoder] Total: ${totalKB}KB (${elapsed}ms)`);
 
         return {
             curveTexture,
-            bandTexture,
             glyphMapTexture,
             stats,
         };

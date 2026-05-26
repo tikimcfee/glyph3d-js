@@ -1,15 +1,9 @@
 /**
  * Slug rendering constants — shared between SlugEncoder (CPU) and shaders (GPU).
  *
- * All three Slug textures use RGBA16UI with usampler2D + texelFetch.
+ * Both Slug textures use RGBA16UI with usampler2D + texelFetch.
  * Coordinates are normalized to [0,1] per-glyph cell and packed as uint16 (0-65535).
  */
-
-/** Maximum horizontal/vertical bands per glyph axis */
-export const MAX_BANDS = 16;
-
-/** Maximum curves that can be referenced by a single band */
-export const MAX_CURVES_PER_BAND = 64;
 
 /** Number of texels consumed per quadratic bezier curve in curveTexture */
 export const CURVE_TEXELS_PER_CURVE = 2;
@@ -18,7 +12,7 @@ export const CURVE_TEXELS_PER_CURVE = 2;
 export const TEXTURE_WIDTH = 1024;
 
 /**
- * Texture format specifications for all three Slug textures.
+ * Texture format specifications for both Slug textures.
  *
  * All use RGBA16UI:
  *   - internalFormat: 'RGBA16UI'
@@ -29,8 +23,7 @@ export const TEXTURE_WIDTH = 1024;
  *   - NearestFilter, no mipmaps
  *
  * curveTexture:    2 texels/curve  [P0.x, P0.y, P1.x, P1.y] [P2.x, P2.y, _, _]
- * bandTexture:     flat layout — band headers + curve entries interleaved per glyph
- * glyphMapTexture: 1 texel/glyph  [curveStart, curveCount, bandHeaderStart, bandCount]
+ * glyphMapTexture: 1 texel/glyph  [curveStart, curveCount, _, _]
  */
 export const SLUG_TEXTURE_FORMAT = {
     internalFormat: 'RGBA16UI',

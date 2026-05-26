@@ -8,14 +8,13 @@
  * 1. Encodes all unique glyphs from "Hello, World!"
  * 2. Logs texture sizes, glyph count, curve counts
  * 3. Verifies round-trip: packed uint16 -> unpacked float matches originals within tolerance
- * 4. Verifies band organization correctness
- * 5. Verifies glyphMap entries point to valid texture offsets
+ * 4. Verifies glyphMap entries point to valid texture offsets
  */
 
 import HarfBuzzShaper from './HarfBuzzShaper.js';
 import { shapeText, collectUniqueGlyphIds } from './shapeText.js';
 import SlugEncoder from './SlugEncoder.js';
-import { packUint16, unpackUint16, CURVE_TEXELS_PER_CURVE, TEXTURE_WIDTH } from './slug-constants.js';
+import { packUint16, unpackUint16, CURVE_TEXELS_PER_CURVE } from './slug-constants.js';
 
 /**
  * Run the full SlugEncoder validation suite.
@@ -49,7 +48,7 @@ export async function validateSlugEncoder(fontUrl = '/src/fonts/Cousine-Regular.
     // 3. Encode glyphs
     const encoder = new SlugEncoder(shaper);
     const result = encoder.encode(uniqueIds);
-    const { curveTexture, bandTexture, glyphMapTexture, stats } = result;
+    const { curveTexture, glyphMapTexture, stats } = result;
 
     console.log(`[validate-slug] Stats:`, stats);
 
@@ -68,7 +67,6 @@ export async function validateSlugEncoder(fontUrl = '/src/fonts/Cousine-Regular.
     };
 
     allPassed &= isDataTexture(curveTexture, 'curveTexture');
-    allPassed &= isDataTexture(bandTexture, 'bandTexture');
     allPassed &= isDataTexture(glyphMapTexture, 'glyphMapTexture');
 
     // 5. Round-trip test: pack -> unpack precision
@@ -91,14 +89,11 @@ export async function validateSlugEncoder(fontUrl = '/src/fonts/Cousine-Regular.
     console.log(`[validate-slug] Verifying glyphMap entries...`);
     const gmData = glyphMapTexture.image.data;
     const curveData = curveTexture.image.data;
-    const bandDataArr = bandTexture.image.data;
 
     for (const glyphId of uniqueIds) {
         const gmIdx = glyphId * 4;
         const curveStart = gmData[gmIdx + 0];
         const curveCount = gmData[gmIdx + 1];
-        const bandHeaderStart = gmData[gmIdx + 2];
-        const bandCount = gmData[gmIdx + 3];
 
         const name = shaper.glyphName(glyphId) || '?';
 
@@ -114,30 +109,6 @@ export async function validateSlugEncoder(fontUrl = '/src/fonts/Cousine-Regular.
             );
             allPassed = false;
             continue;
-        }
-
-        // Verify band data is within texture bounds
-        if (bandCount > 0) {
-            // Check band headers and entries are accessible
-            const bandTexSize = bandTexture.image.width * bandTexture.image.height;
-
-            for (let b = 0; b < bandCount; b++) {
-                const hdrTexel = bandHeaderStart + b;
-
-                // Walk the flat layout: header at hdrTexel, entries follow
-                // But in flat layout, bands are not contiguous across glyphs.
-                // We need to walk the actual band structure.
-                // The header is at the position tracked during encoding.
-                // For validation, we just check the texel is in bounds.
-                if (hdrTexel >= bandTexSize) {
-                    console.error(
-                        `[validate-slug] FAIL: glyph ${glyphId} ("${name}") band header ` +
-                        `texel ${hdrTexel} exceeds bandTexture size ${bandTexSize}`
-                    );
-                    allPassed = false;
-                    break;
-                }
-            }
         }
 
         // Spot check: verify packed coordinates are in valid uint16 range (0-65535)
@@ -159,63 +130,7 @@ export async function validateSlugEncoder(fontUrl = '/src/fonts/Cousine-Regular.
     }
     console.log(`[validate-slug] PASS: all glyphMap entries reference valid texture ranges`);
 
-    // 7. Verify band structure integrity
-    console.log(`[validate-slug] Verifying band sort order (ascending minX)...`);
-    let bandSortOk = true;
-    for (const glyphId of uniqueIds) {
-        const gmIdx = glyphId * 4;
-        const curveStart = gmData[gmIdx + 0];
-        const curveCount = gmData[gmIdx + 1];
-        const bandHeaderStart = gmData[gmIdx + 2];
-        const bandCount = gmData[gmIdx + 3];
-
-        if (bandCount === 0 || curveCount === 0) continue;
-
-        // Walk each band and verify entries are sorted by minX.
-        // Band headers are contiguous at bandHeaderStart + 0..bandCount-1.
-        // Each header's entryStart points to the entry region.
-        // Entry texels store glyph-local curve index in .x.
-        // Curve texel offset = (curveStart + localCurveIndex) * CURVE_TEXELS_PER_CURVE.
-        for (let b = 0; b < bandCount; b++) {
-            const hdrTexel = bandHeaderStart + b;
-            const hdrIdx = hdrTexel * 4;
-            const entryStart = bandDataArr[hdrIdx + 0];
-            const entryCount = bandDataArr[hdrIdx + 1];
-
-            let prevMinX = -Infinity;
-            for (let e = 0; e < entryCount; e++) {
-                const entIdx = (entryStart + e) * 4;
-                const localCurveIdx = bandDataArr[entIdx + 0];
-
-                // Compute absolute curve texel offset (same as shader)
-                const absCurveTexel = (curveStart + localCurveIdx) * CURVE_TEXELS_PER_CURVE;
-
-                // Read the curve's P0.x, P1.x, P2.x and find minX
-                const cIdx = absCurveTexel * 4;
-                const p0x = unpackUint16(curveData[cIdx + 0]);
-                const p1x = unpackUint16(curveData[cIdx + 2]);
-                const cIdx2 = (absCurveTexel + 1) * 4;
-                const p2x = unpackUint16(curveData[cIdx2 + 0]);
-                const minX = Math.min(p0x, p1x, p2x);
-
-                if (minX < prevMinX - 1e-10) {
-                    const name = shaper.glyphName(glyphId) || '?';
-                    console.error(
-                        `[validate-slug] FAIL: glyph ${glyphId} ("${name}") band ${b} ` +
-                        `entry ${e} minX=${minX.toFixed(4)} < prev=${prevMinX.toFixed(4)}`
-                    );
-                    bandSortOk = false;
-                    allPassed = false;
-                }
-                prevMinX = minX;
-            }
-        }
-    }
-    if (bandSortOk) {
-        console.log(`[validate-slug] PASS: all bands sorted ascending by minX`);
-    }
-
-    // 8. Extended test: encode a broader character set
+    // 7. Extended test: encode a broader character set
     console.log(`[validate-slug] Extended test: encoding printable ASCII...`);
     const asciiText = Array.from({ length: 95 }, (_, i) => String.fromCharCode(32 + i)).join('');
     const asciiShaped = shapeText(shaper, asciiText);
@@ -224,7 +139,7 @@ export async function validateSlugEncoder(fontUrl = '/src/fonts/Cousine-Regular.
     console.log(
         `[validate-slug] ASCII: ${asciiResult.stats.glyphCount} glyphs, ` +
         `${asciiResult.stats.totalCurves} curves, ` +
-        `${(asciiResult.stats.curveTextureSizeKB + asciiResult.stats.bandTextureSizeKB + asciiResult.stats.glyphMapTextureSizeKB).toFixed(2)}KB total`
+        `${(asciiResult.stats.curveTextureSizeKB + asciiResult.stats.glyphMapTextureSizeKB).toFixed(2)}KB total`
     );
 
     // Summary

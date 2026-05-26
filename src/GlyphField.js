@@ -338,7 +338,7 @@ export default class GlyphField {
     /**
      * Set or update Slug texture data. Data is stored for future use when the
      * Slug winding-number fragment shader is activated in a later commit.
-     * @param {Object} slugData - { curveTexture, bandTexture, glyphMapTexture }
+     * @param {Object} slugData - { curveTexture, glyphMapTexture }
      * @param {Object} [shaper]
      */
     setSlugData(slugData, shaper) {

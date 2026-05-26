@@ -56,7 +56,7 @@ export function shapeText(shaperOrCache, text, features) {
  * Collect unique glyph IDs from shaped results.
  *
  * Useful for Phase 2's SlugEncoder, which needs to process each unique glyph
- * exactly once to build curve/band/glyphMap textures.
+ * exactly once to build curve/glyphMap textures.
  *
  * @param {Array<{shaped: Array<{g: number}>}>} shapedLines - Output from shapeText().lines
  * @returns {Set<number>} Set of unique glyph IDs

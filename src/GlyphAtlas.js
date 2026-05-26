@@ -470,7 +470,7 @@ class GlyphAtlas {
      * V coordinates are pre-flipped here (1.0 - v) so the shader incurs no
      * canvas→WebGL coordinate conversion at draw time.
      *
-     * Vertex shader lookup (see textVertex.glsl):
+     * Vertex shader lookup (atlas-map path):
      *   float mapCol = mod(cp, atlasMapWidth);
      *   float mapRow = floor(cp / atlasMapWidth);
      *   float tx = (mapCol + 0.5) / atlasMapWidth;

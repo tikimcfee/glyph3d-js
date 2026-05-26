@@ -128,7 +128,7 @@ class CodeGrid extends THREE.Object3D {
 
     /**
      * Set Slug texture data on this grid's renderer.
-     * @param {Object} slugData - { curveTexture, bandTexture, glyphMapTexture }
+     * @param {Object} slugData - { curveTexture, glyphMapTexture }
      * @param {import('../shaping/HarfBuzzShaper.js').default} [shaper] - Main-thread shaper
      */
     setSlugData(slugData, shaper) {

@@ -89,10 +89,9 @@
  *     instanceGlyphId   float (HarfBuzz glyph ID, indexes glyphMapTexture)
  *     instanceColor     vec3  (r, g, b, 0-1)
  *     instanceGroupId   float (row index into group DataTexture)
- * - 5 texture bindings:
+ * - 4 texture bindings:
  *     curveTexture     RGBA16UI nearest  — quadratic bezier control points (2 texels/curve)
- *     bandTexture      RGBA16UI nearest  — horizontal band headers + curve entries
- *     glyphMapTexture  RGBA16UI nearest  — glyph ID → curve/band offsets
+ *     glyphMapTexture  RGBA16UI nearest  — glyph ID → curve range (start, count)
  *     groupTexture     RGBA32F  nearest  — per-group offset/color/scale
  *     highlightTexture RGBA8    nearest  — per-glyph additive highlight color
  * - RGBA32F textures with NearestFilter only (no OES_texture_float_linear dependency)

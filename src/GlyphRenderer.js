@@ -2,15 +2,14 @@
  * GlyphRendererV15 - Slug Vector Text Rendering
  *
  * GPU-instanced glyph rendering using the Slug algorithm: quadratic bezier
- * curves evaluated per-pixel in the fragment shader via winding number.
- * No bitmap atlas — all glyph shapes stored as compact curve data in
- * three RGBA16UI DataTextures (curve, band, glyphMap).
+ * curves evaluated per-pixel in the fragment shader via analytic winding
+ * coverage. No bitmap atlas — all glyph shapes stored as compact curve data
+ * in two RGBA16UI DataTextures (curve, glyphMap).
  *
  * Key Features:
  * - Resolution-independent vector text (no atlas bitmap)
  * - HarfBuzz-shaped glyph IDs (variable-width advances)
- * - Per-pixel winding number coverage evaluation
- * - Band-based early-exit for O(sqrt(N)) curve tests per pixel
+ * - Analytic per-pixel coverage with 2D anti-aliasing (no supersampling)
  * - Group transforms, highlight texture, picking — all preserved
  * - Zero allocation hot paths
  */
@@ -31,7 +30,7 @@ class GlyphRendererV15 {
      * @param {THREE.Scene} scene - Three.js scene
      * @param {Object} atlas - GlyphAtlas (used only for metrics in Phase 3 transition)
      * @param {Object} options - Configuration options
-     * @param {Object} [options.slugData] - SlugEncoder output: { curveTexture, bandTexture, glyphMapTexture }
+     * @param {Object} [options.slugData] - SlugEncoder output: { curveTexture, glyphMapTexture }
      */
     constructor(scene, atlas, options = {}) {
         this.scene = scene;
@@ -110,9 +109,8 @@ class GlyphRendererV15 {
         if (this._slugData && !GlyphRendererV15._slugLogged) {
             GlyphRendererV15._slugLogged = true;
             const ct = this._slugData.curveTexture;
-            const bt = this._slugData.bandTexture;
             const gm = this._slugData.glyphMapTexture;
-            logger.info(`[GlyphRenderer] Slug textures bound: curves=${ct.image.width}x${ct.image.height}, bands=${bt.image.width}x${bt.image.height}, glyphMap=${gm.image.width}x${gm.image.height}`);
+            logger.info(`[GlyphRenderer] Slug textures bound: curves=${ct.image.width}x${ct.image.height}, glyphMap=${gm.image.width}x${gm.image.height}`);
             logger.info('[GlyphRenderer] Slug rendering active — atlas removed');
         }
 
@@ -127,7 +125,7 @@ class GlyphRendererV15 {
     /**
      * Set or update the Slug texture data after construction.
      * Used when SlugEncoder output becomes available after the renderer is created.
-     * @param {Object} slugData - { curveTexture, bandTexture, glyphMapTexture }
+     * @param {Object} slugData - { curveTexture, glyphMapTexture }
      * @param {import('./shaping/HarfBuzzShaper.js').default} [shaper] - Main-thread shaper for sync path
      */
     setSlugData(slugData, shaper) {
@@ -136,7 +134,6 @@ class GlyphRendererV15 {
         if (this.instanceMesh) {
             const u = this.instanceMesh.material.uniforms;
             u.curveTexture.value = slugData.curveTexture;
-            u.bandTexture.value = slugData.bandTexture;
             u.glyphMapTexture.value = slugData.glyphMapTexture;
             u.glyphMapWidth.value = slugData.glyphMapTexture.image.width;
             u.glyphMapHeight.value = slugData.glyphMapTexture.image.height;
@@ -230,8 +227,8 @@ class GlyphRendererV15 {
 
     /**
      * Create the single instance mesh used for all rendering.
-     * Uses Slug vector textures (curveTexture, bandTexture, glyphMapTexture)
-     * instead of a bitmap atlas.
+     * Uses Slug vector textures (curveTexture, glyphMapTexture) instead of a
+     * bitmap atlas.
      * @private
      */
     _createInstanceMesh() {
@@ -257,7 +254,6 @@ class GlyphRendererV15 {
             glslVersion: THREE.GLSL3,
             uniforms: {
                 curveTexture:       { value: sd ? sd.curveTexture : null },
-                bandTexture:        { value: sd ? sd.bandTexture : null },
                 glyphMapTexture:    { value: sd ? sd.glyphMapTexture : null },
                 glyphMapWidth:      { value: sd ? sd.glyphMapTexture.image.width : TEXTURE_WIDTH },
                 glyphMapHeight:     { value: sd ? sd.glyphMapTexture.image.height : 1 },
@@ -309,9 +305,9 @@ class GlyphRendererV15 {
     /**
      * Get Slug vertex shader.
      *
-     * Reads glyphMapTexture via texelFetch to pass curve/band offsets as
-     * flat int varyings. Outputs vGlyphUV for fragment shader position in
-     * the glyph's [0,1]^2 coordinate space.
+     * Reads glyphMapTexture via texelFetch to pass each glyph's curve range
+     * (start, count) as flat int varyings. Outputs vGlyphUV for fragment
+     * shader position in the glyph's [0,1]^2 coordinate space.
      * @private
      */
     _getVertexShader() {
@@ -337,8 +333,6 @@ class GlyphRendererV15 {
 
             flat out int vCurveStart;
             flat out int vCurveCount;
-            flat out int vBandHeaderStart;
-            flat out int vBandCount;
             out vec2 vGlyphUV;
             out vec3 vColor;
             out float vGroupAlpha;
@@ -364,18 +358,16 @@ class GlyphRendererV15 {
                 // Standard projection
                 gl_Position = projectionMatrix * modelViewMatrix * vec4(worldPos, 1.0);
 
-                // Glyph map lookup: glyphId -> curve/band offsets (RGBA16UI)
+                // Glyph map lookup: glyphId -> curve range (RGBA16UI)
                 int gid = int(instanceGlyphId);
                 int mapCol = gid % int(glyphMapWidth);
                 int mapRow = gid / int(glyphMapWidth);
                 uvec4 glyphInfo = texelFetch(glyphMapTexture, ivec2(mapCol, mapRow), 0);
                 vCurveStart      = int(glyphInfo.x);
                 vCurveCount      = int(glyphInfo.y);
-                vBandHeaderStart = int(glyphInfo.z);
-                vBandCount       = int(glyphInfo.w);
 
                 // Glyph-local UV: PlaneGeometry's uv attribute goes [0,1] across the quad.
-                // Maps directly to glyph-space [0,1]^2 for band/curve evaluation.
+                // Maps directly to glyph-space [0,1]^2 for curve evaluation.
                 vGlyphUV = uv;
 
                 // gScale.w = color blend factor: 0.0 = multiply (default), 1.0 = replace
@@ -393,8 +385,11 @@ class GlyphRendererV15 {
     }
 
     /**
-     * Get Slug fragment shader — evaluates quadratic bezier curves via
-     * winding number with band-based early exit.
+     * Get Slug fragment shader — computes analytic coverage per quadratic
+     * bezier (Dobbie / Lengyel). Each curve-ray crossing contributes
+     * fractional winding scaled by the pixel footprint, summed over X and Y
+     * rays, so glyphs antialias on edges and don't moire when minified — all
+     * in a single sample with no supersampling.
      * @private
      */
     _getFragmentShader() {
@@ -402,16 +397,13 @@ class GlyphRendererV15 {
             precision highp float;
             precision highp int;
 
-            #define MAX_BANDS 16
-            #define MAX_CURVES_PER_BAND 64
+            // Upper bound on quadratic beziers per glyph (loop cap).
+            #define MAX_CURVES 256
 
             uniform highp usampler2D curveTexture;
-            uniform highp usampler2D bandTexture;
 
             flat in int vCurveStart;
             flat in int vCurveCount;
-            flat in int vBandHeaderStart;
-            flat in int vBandCount;
             in vec2 vGlyphUV;
             in vec3 vColor;
             in float vGroupAlpha;
@@ -424,91 +416,86 @@ class GlyphRendererV15 {
                 return float(bits) / 65535.0;
             }
 
-            // Returns the winding number contribution of one quadratic Bezier
-            // against a horizontal ray cast from p in the +X direction.
-            // p is in [0,1]^2 glyph space. Curve endpoints in same space.
-            int windingContrib(vec2 p, vec2 p0, vec2 p1, vec2 p2) {
-                // Translate to p-relative coords
-                vec2 a = p0 - p, b = p1 - p, c = p2 - p;
-                // Parametric: Q(t) = (1-t)^2*a + 2t(1-t)*b + t^2*c
-                // Find t where Q.y == 0 (ray y == 0)
-                // Equation: At^2 - 2Bt + C = 0
-                float A = a.y - 2.0 * b.y + c.y;
-                float B = a.y - b.y;
-                float C = a.y;
-                int winding = 0;
+            // Analytic coverage contribution of one quadratic Bezier for a ray
+            // cast in the +X direction. Endpoints are pre-translated so the
+            // sample point sits at the origin (i.e. curve.p - samplePoint), so
+            // the ray is the line y == 0. invDiameter = 1 / (pixel footprint in
+            // glyph-UV units along the ray axis) — fractional crossings inside
+            // that footprint give sub-pixel coverage. (Dobbie / Lengyel "Slug".)
+            float computeCoverage(float invDiameter, vec2 p0, vec2 p1, vec2 p2) {
+                // Cheap reject: curve entirely on one side of the ray.
+                if (p0.y > 0.0 && p1.y > 0.0 && p2.y > 0.0) return 0.0;
+                if (p0.y < 0.0 && p1.y < 0.0 && p2.y < 0.0) return 0.0;
 
-                if (abs(A) < 1e-7) {
-                    // Degenerate quadratic = line segment (L segments, Z closings)
-                    if (abs(B) < 1e-7) return 0; // horizontal — no crossing
-                    float t = C / (2.0 * B);
-                    if (t < 0.0 || t > 1.0) return 0;
-                    float x = (1.0 - t) * (1.0 - t) * a.x + 2.0 * t * (1.0 - t) * b.x + t * t * c.x;
-                    if (x < 0.0) return 0;
-                    float dy = 2.0 * ((b.y - a.y) * (1.0 - t) + (c.y - b.y) * t);
-                    return (dy > 0.0) ? 1 : -1;
+                // Q(t).y = 0 → a.y t^2 - 2 b.y t + c.y = 0 (factor of -2 in b).
+                vec2 a = p0 - 2.0 * p1 + p2;
+                vec2 b = p0 - p1;
+                vec2 c = p0;
+
+                float t0, t1;
+                if (abs(a.y) >= 1e-5) {
+                    // Quadratic: two roots — t0 always exits, t1 always enters.
+                    float radicand = b.y * b.y - a.y * c.y;
+                    if (radicand <= 0.0) return 0.0;
+                    float s = sqrt(radicand);
+                    t0 = (b.y - s) / a.y;
+                    t1 = (b.y + s) / a.y;
+                } else {
+                    // Degenerate quadratic = line segment; one root. Assign it to
+                    // exit (t0) or entry (t1) by segment direction.
+                    float t = p0.y / (p0.y - p2.y);
+                    if (p0.y < p2.y) { t0 = -1.0; t1 = t; }
+                    else             { t0 = t;    t1 = -1.0; }
                 }
 
-                float disc = B * B - A * C;
-                if (disc < 0.0) return 0;
-                float sqrtDisc = sqrt(disc);
-
-                for (int k = 0; k < 2; k++) {
-                    float t = (k == 0) ? (B - sqrtDisc) / A : (B + sqrtDisc) / A;
-                    if (t < 0.0 || t > 1.0) continue;
-                    float x = (1.0 - t) * (1.0 - t) * a.x + 2.0 * t * (1.0 - t) * b.x + t * t * c.x;
-                    if (x < 0.0) continue;
-                    float dy = 2.0 * ((b.y - a.y) * (1.0 - t) + (c.y - b.y) * t);
-                    winding += (dy > 0.0) ? 1 : -1;
+                float alpha = 0.0;
+                if (t0 >= 0.0 && t0 < 1.0) {
+                    float x = (a.x * t0 - 2.0 * b.x) * t0 + c.x;
+                    alpha += clamp(x * invDiameter + 0.5, 0.0, 1.0);
                 }
-                return winding;
+                if (t1 >= 0.0 && t1 < 1.0) {
+                    float x = (a.x * t1 - 2.0 * b.x) * t1 + c.x;
+                    alpha -= clamp(x * invDiameter + 0.5, 0.0, 1.0);
+                }
+                return alpha;
             }
+
+            // Rotate 90° so the +X ray becomes a +Y ray in the rotated frame.
+            vec2 rot90(vec2 v) { return vec2(v.y, -v.x); }
 
             void main() {
                 // Empty glyph shortcut: 0 curves = space/notdef, discard immediately
-                if (vCurveCount == 0 || vBandCount == 0) discard;
+                if (vCurveCount == 0) discard;
 
-                vec2 p = vGlyphUV;
+                // Inverse pixel footprint in glyph-UV space (per axis). fwidth is
+                // the screen-space derivative magnitude, so this is automatically
+                // resolution-independent: tight when magnified, wide when minified.
+                vec2 invDiameter = 1.0 / fwidth(vGlyphUV);
 
-                // Find which horizontal band this pixel is in
-                int bandIdx = clamp(int(p.y * float(vBandCount)), 0, vBandCount - 1);
-                int hdrTexel = vBandHeaderStart + bandIdx;
+                // Accumulate fractional winding over every curve in the glyph,
+                // along an X ray and a Y ray (2D anti-aliasing). The per-curve
+                // y-reject above makes iterating all curves cheap, so no band
+                // acceleration structure is needed.
+                float coverage = 0.0;
+                for (int i = 0; i < MAX_CURVES; i++) {
+                    if (i >= vCurveCount) break;
 
-                // Fetch band header: [entryStart, entryCount, _, _]
-                uvec4 hdr = texelFetch(bandTexture, ivec2(hdrTexel % 1024, hdrTexel / 1024), 0);
-                int entryStart = int(hdr.x);
-                int entryCount = int(hdr.y);
-
-                int winding = 0;
-
-                for (int i = 0; i < MAX_CURVES_PER_BAND; i++) {
-                    if (i >= entryCount) break;
-
-                    // Fetch entry: [curveIndex, _, _, _] — glyph-local curve index
-                    int entryTexel = entryStart + i;
-                    uvec4 entry = texelFetch(bandTexture, ivec2(entryTexel % 1024, entryTexel / 1024), 0);
-                    int localCurveIdx = int(entry.x);
-
-                    // Absolute texel index into curveTexture: 2 texels per curve
-                    int ci = (vCurveStart + localCurveIdx) * 2;
+                    // 2 texels per curve: [P0.xy, P1.xy] then [P2.xy, _, _].
+                    int ci = (vCurveStart + i) * 2;
                     uvec4 t0 = texelFetch(curveTexture, ivec2(ci % 1024, ci / 1024), 0);
                     uvec4 t1 = texelFetch(curveTexture, ivec2((ci + 1) % 1024, (ci + 1) / 1024), 0);
 
-                    vec2 cp0 = vec2(unpackCoord(t0.x), unpackCoord(t0.y));
-                    vec2 cp1 = vec2(unpackCoord(t0.z), unpackCoord(t0.w));
-                    vec2 cp2 = vec2(unpackCoord(t1.x), unpackCoord(t1.y));
+                    vec2 p0 = vec2(unpackCoord(t0.x), unpackCoord(t0.y)) - vGlyphUV;
+                    vec2 p1 = vec2(unpackCoord(t0.z), unpackCoord(t0.w)) - vGlyphUV;
+                    vec2 p2 = vec2(unpackCoord(t1.x), unpackCoord(t1.y)) - vGlyphUV;
 
-                    winding += windingContrib(p, cp0, cp1, cp2);
+                    coverage += computeCoverage(invDiameter.x, p0, p1, p2);
+                    coverage += computeCoverage(invDiameter.y, rot90(p0), rot90(p1), rot90(p2));
                 }
 
-                // Coverage: non-zero winding rule.
-                // Negate because TrueType CW outer contours produce negative
-                // winding with our +X ray convention after Y normalization.
-                float coverage = (winding == 0) ? 0.0 : 1.0;
-
-                // Phase 4: fwidth-based AA would go here
-                // float fw = fwidth(float(winding));
-                // coverage = smoothstep(-fw, fw, float(abs(winding)));
+                // Average the two rays. Fills accumulate positive coverage under
+                // our y-up normalization (t0=exit/t1=entry convention).
+                coverage = clamp(coverage * 0.5, 0.0, 1.0);
 
                 if (coverage < 0.01) discard;
 
@@ -1661,7 +1648,6 @@ class GlyphRendererV15 {
         if (this._slugData && this.instanceMesh) {
             const u = this.instanceMesh.material.uniforms;
             if (u.curveTexture.value) u.curveTexture.value.needsUpdate = true;
-            if (u.bandTexture.value) u.bandTexture.value.needsUpdate = true;
             if (u.glyphMapTexture.value) u.glyphMapTexture.value.needsUpdate = true;
         }
 

@@ -9,44 +9,37 @@
  * Entry point: buildSlugBuffers(shaper, glyphIds)
  *
  * Internal helpers mirror the private methods that previously lived on
- * SlugEncoder: _encodeGlyph, _parseSegments, _computeBBox,
- * _computeBandCount, _organizeBands.
+ * SlugEncoder: _encodeGlyph, _parseSegments, _computeBBox.
  */
 
 import {
-    MAX_BANDS,
     CURVE_TEXELS_PER_CURVE,
     TEXTURE_WIDTH,
     packUint16,
 } from './slug-constants.js';
 
 /**
- * Build the three raw Uint16Arrays that back the Slug DataTextures.
+ * Build the two raw Uint16Arrays that back the Slug DataTextures.
  *
  * Phases 1-3 of the Slug encoding pipeline (phase 4 — wrapping in
  * THREE.DataTexture — lives in SlugEncoder.js):
  *   1. Extract each glyph's outline and convert to quadratic beziers
  *   2. Compute global texture dimensions
- *   3. Pack curves, bands, and the glyph map into Uint16Arrays
+ *   3. Pack curves and the glyph map into Uint16Arrays
  *
  * @param {import('./HarfBuzzShaper.js').default} shaper - Initialized shaper
  * @param {Set<number>|Array<number>} glyphIds - Glyph IDs to encode
  * @returns {{
  *   curveData: Uint16Array,
- *   bandData: Uint16Array,
  *   glyphMapData: Uint16Array,
  *   curveTexWidth: number,
  *   curveTexHeight: number,
- *   bandTexWidth: number,
- *   bandTexHeight: number,
  *   glyphMapTexWidth: number,
  *   glyphMapTexHeight: number,
  *   stats: {
  *     glyphCount: number,
  *     totalCurves: number,
- *     totalBandEntries: number,
  *     curveTextureSizeKB: number,
- *     bandTextureSizeKB: number,
  *     glyphMapTextureSizeKB: number
  *   }
  * }}
@@ -75,19 +68,6 @@ export function buildSlugBuffers(shaper, glyphIds) {
     const curveTexSize = TEXTURE_WIDTH * curveTexHeight * 4; // 4 channels (RGBA)
     const curveData = new Uint16Array(curveTexSize);
 
-    // Band texture: first pass to count total band texels needed
-    let totalBandTexels = 0;
-    for (const [, data] of glyphDataMap) {
-        for (const band of data.bands) {
-            totalBandTexels += 1;                    // header texel
-            totalBandTexels += band.curveIndices.length; // entry texels
-        }
-    }
-
-    const bandTexHeight = Math.max(1, Math.ceil(totalBandTexels / TEXTURE_WIDTH));
-    const bandTexSize = TEXTURE_WIDTH * bandTexHeight * 4;
-    const bandData = new Uint16Array(bandTexSize);
-
     // GlyphMap texture: 1 texel per glyph slot
     const glyphMapTexHeight = Math.max(1, Math.ceil(glyphMapEntries / TEXTURE_WIDTH));
     const glyphMapTexSize = TEXTURE_WIDTH * glyphMapTexHeight * 4;
@@ -96,13 +76,11 @@ export function buildSlugBuffers(shaper, glyphIds) {
     // Phase 3: Pack data into texture arrays
     let curveTexelOffset = 0; // current texel write position in curveTexture
     let curveIndex = 0;       // current curve index (= curveTexelOffset / 2)
-    let bandTexelOffset = 0;
     let loggedCount = 0;
 
     for (const glyphId of ids) {
         const data = glyphDataMap.get(glyphId);
         const curveStart = curveIndex;         // curve index, not texel offset
-        const bandHeaderStart = bandTexelOffset;
 
         // Pack curves into curveData
         for (const curve of data.curves) {
@@ -124,84 +102,40 @@ export function buildSlugBuffers(shaper, glyphIds) {
             curveIndex += 1;
         }
 
-        // Pack bands into bandData.
-        //
-        // Layout per glyph: all band headers first (contiguous), then all
-        // band entries. Headers must be at consecutive texels because the
-        // shader addresses them as bandHeaderStart + bandIdx. Each header's
-        // entryStart points past the header block into the entries region.
-        //
-        // Header texel: [entryStart, entryCount, _, _]
-        // Entry texel:  [curveIndex, _, _, _]
-        //   where curveIndex is the glyph-local curve index (shader computes
-        //   absolute texel as (vCurveStart + curveIndex) * 2)
-
-        const bandCount = data.bands.length;
-        const headerBase = bandTexelOffset;
-        let entryBase = headerBase + bandCount;
-
-        for (let b = 0; b < bandCount; b++) {
-            const band = data.bands[b];
-            const entryCount = band.curveIndices.length;
-
-            // Write header at headerBase + b
-            const hdrIdx = (headerBase + b) * 4;
-            bandData[hdrIdx + 0] = entryBase;  // entryStart
-            bandData[hdrIdx + 1] = entryCount; // entryCount
-            bandData[hdrIdx + 2] = 0;
-            bandData[hdrIdx + 3] = 0;
-
-            // Write entries for this band
-            for (const localCurveIdx of band.curveIndices) {
-                const entIdx = entryBase * 4;
-                bandData[entIdx + 0] = localCurveIdx; // glyph-local curve index
-                bandData[entIdx + 1] = 0;
-                bandData[entIdx + 2] = 0;
-                bandData[entIdx + 3] = 0;
-                entryBase += 1;
-            }
-        }
-        bandTexelOffset = entryBase;
-
-        // Pack glyphMap entry: [curveStart, curveCount, bandHeaderStart, bandCount]
-        // curveStart = curve index (not texel offset); shader computes texel as curveStart * 2
+        // Pack glyphMap entry: [curveStart, curveCount, _, _]
+        // curveStart = curve index (not texel offset); shader computes texel as curveStart * 2.
+        // The fragment shader iterates all of a glyph's curves directly, so no
+        // acceleration structure is stored — the per-curve y-reject is enough.
         const gmIdx = glyphId * 4;
         glyphMapData[gmIdx + 0] = curveStart;
         glyphMapData[gmIdx + 1] = data.curves.length;
-        glyphMapData[gmIdx + 2] = bandHeaderStart;
-        glyphMapData[gmIdx + 3] = data.bands.length;
+        glyphMapData[gmIdx + 2] = 0;
+        glyphMapData[gmIdx + 3] = 0;
 
         // Log first 3 glyphs
         if (loggedCount < 3) {
             const name = shaper.glyphName(glyphId) || '?';
             console.log(
-                `[SlugEncoder] Glyph ${glyphId} ("${name}"): ` +
-                `${data.curves.length} curves, ${data.bands.length} bands`
+                `[SlugEncoder] Glyph ${glyphId} ("${name}"): ${data.curves.length} curves`
             );
             loggedCount++;
         }
     }
 
     const curveTextureSizeKB = +(curveData.byteLength / 1024).toFixed(2);
-    const bandTextureSizeKB = +(bandData.byteLength / 1024).toFixed(2);
     const glyphMapTextureSizeKB = +(glyphMapData.byteLength / 1024).toFixed(2);
 
     return {
         curveData,
-        bandData,
         glyphMapData,
         curveTexWidth: TEXTURE_WIDTH,
         curveTexHeight,
-        bandTexWidth: TEXTURE_WIDTH,
-        bandTexHeight,
         glyphMapTexWidth: TEXTURE_WIDTH,
         glyphMapTexHeight,
         stats: {
             glyphCount: ids.length,
             totalCurves,
-            totalBandEntries: totalBandTexels,
             curveTextureSizeKB,
-            bandTextureSizeKB,
             glyphMapTextureSizeKB,
         },
     };
@@ -213,14 +147,12 @@ export function buildSlugBuffers(shaper, glyphIds) {
 
 /**
  * Encode a single glyph: extract outline, convert to quadratic beziers,
- * normalize to [0,1] within the advance-width cell, organize into
- * horizontal bands.
+ * normalize to [0,1] within the advance-width cell.
  *
  * @param {import('./HarfBuzzShaper.js').default} shaper
  * @param {number} glyphId
  * @returns {{
- *   curves: Array<{p0x: number, p0y: number, p1x: number, p1y: number, p2x: number, p2y: number}>,
- *   bands: Array<{curveIndices: number[]}>
+ *   curves: Array<{p0x: number, p0y: number, p1x: number, p1y: number, p2x: number, p2y: number}>
  * }}
  */
 function _encodeGlyph(shaper, glyphId) {
@@ -228,14 +160,14 @@ function _encodeGlyph(shaper, glyphId) {
 
     // Empty glyph (space, .notdef, etc.)
     if (!segments || segments.length === 0) {
-        return { curves: [], bands: [] };
+        return { curves: [] };
     }
 
     // Step 1: Parse segments into quadratic beziers (in font units)
     const rawCurves = _parseSegments(glyphId, segments);
 
     if (rawCurves.length === 0) {
-        return { curves: [], bands: [] };
+        return { curves: [] };
     }
 
     // Step 2: Get advance width and font extents for normalization
@@ -277,11 +209,7 @@ function _encodeGlyph(shaper, glyphId) {
         p2y: (c.p2y - descender) * yScale,
     }));
 
-    // Step 5: Organize into horizontal bands
-    const bandCount = _computeBandCount(normalized.length);
-    const bands = _organizeBands(normalized, bandCount);
-
-    return { curves: normalized, bands };
+    return { curves: normalized };
 }
 
 /**
@@ -380,58 +308,4 @@ function _computeBBox(curves) {
     }
 
     return { xMin, yMin, xMax, yMax };
-}
-
-/**
- * Determine band count from curve count.
- * Heuristic: ceil(sqrt(curveCount)), clamped to [2, MAX_BANDS].
- *
- * @param {number} curveCount
- * @returns {number}
- */
-function _computeBandCount(curveCount) {
-    if (curveCount <= 0) return 0;
-    return Math.min(MAX_BANDS, Math.max(2, Math.ceil(Math.sqrt(curveCount))));
-}
-
-/**
- * Organize normalized curves into horizontal bands.
- *
- * Partitions the [0,1] Y range into equal strips. A curve is assigned to
- * every band whose Y range overlaps the curve's Y bbox. Within each band,
- * curves are sorted ascending by minX for early-exit in the fragment
- * shader's +X ray test.
- *
- * @param {Array<{p0x: number, p0y: number, p1x: number, p1y: number, p2x: number, p2y: number}>} curves - Normalized [0,1]
- * @param {number} bandCount
- * @returns {Array<{curveIndices: number[]}>}
- */
-function _organizeBands(curves, bandCount) {
-    if (bandCount <= 0) return [];
-
-    const bands = Array.from({ length: bandCount }, () => []);
-    const bandSize = 1.0 / bandCount;
-
-    for (let ci = 0; ci < curves.length; ci++) {
-        const c = curves[ci];
-        const yMin = Math.min(c.p0y, c.p1y, c.p2y);
-        const yMax = Math.max(c.p0y, c.p1y, c.p2y);
-        const xMin = Math.min(c.p0x, c.p1x, c.p2x);
-
-        const bStart = Math.max(0, Math.floor(yMin / bandSize));
-        const bEnd = Math.min(bandCount - 1, Math.floor(Math.min(yMax, 0.9999) / bandSize));
-
-        for (let b = bStart; b <= bEnd; b++) {
-            bands[b].push({ curveIndex: ci, minX: xMin });
-        }
-    }
-
-    // Sort each band ascending by minX (early-exit key for +X ray)
-    for (const band of bands) {
-        band.sort((a, b) => a.minX - b.minX);
-    }
-
-    return bands.map(band => ({
-        curveIndices: band.map(entry => entry.curveIndex),
-    }));
 }

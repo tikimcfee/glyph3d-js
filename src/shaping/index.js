@@ -5,7 +5,7 @@
  * glyph outline extraction. shapeText provides line-by-line shaping.
  *
  * Phase 2: SlugEncoder converts glyph outlines into GPU-ready DataTextures
- * (curveTexture, bandTexture, glyphMapTexture) for vector text rendering.
+ * (curveTexture, glyphMapTexture) for vector text rendering.
  */
 
 export { default as HarfBuzzShaper } from './HarfBuzzShaper.js';

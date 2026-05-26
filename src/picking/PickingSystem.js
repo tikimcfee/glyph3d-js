@@ -114,8 +114,6 @@ uniform float glyphMapHeight;
 flat out int vPickingId;
 flat out int vCurveStart;
 flat out int vCurveCount;
-flat out int vBandHeaderStart;
-flat out int vBandCount;
 out vec2 vGlyphUV;
 
 void main() {
@@ -140,8 +138,6 @@ void main() {
     uvec4 glyphInfo = texelFetch(glyphMapTexture, ivec2(mapCol, mapRow), 0);
     vCurveStart      = int(glyphInfo.x);
     vCurveCount      = int(glyphInfo.y);
-    vBandHeaderStart = int(glyphInfo.z);
-    vBandCount       = int(glyphInfo.w);
     vGlyphUV = uv;
 }
 `;
@@ -150,23 +146,20 @@ const PICKING_FRAGMENT_GLYPH = `
 precision highp float;
 precision highp int;
 
-#define MAX_BANDS 16
-#define MAX_CURVES_PER_BAND 64
+#define MAX_CURVES 256
 
 uniform highp usampler2D curveTexture;
-uniform highp usampler2D bandTexture;
 
 flat in int vPickingId;
 flat in int vCurveStart;
 flat in int vCurveCount;
-flat in int vBandHeaderStart;
-flat in int vBandCount;
 in vec2 vGlyphUV;
 
 out vec4 fragColor;
 
 float unpackCoord(uint bits) { return float(bits) / 65535.0; }
 
+// Binary winding contribution of one quadratic Bezier against a +X ray from p.
 int windingContrib(vec2 p, vec2 p0, vec2 p1, vec2 p2) {
     vec2 a = p0 - p, b = p1 - p, c = p2 - p;
     float A = a.y - 2.0 * b.y + c.y;
@@ -197,29 +190,21 @@ int windingContrib(vec2 p, vec2 p0, vec2 p1, vec2 p2) {
 }
 
 void main() {
-    if (vCurveCount == 0 || vBandCount == 0) discard;
+    if (vCurveCount == 0) discard;
 
+    // Hit test: non-zero winding rule over all of the glyph's curves.
+    // Binary (no anti-aliasing) is correct for a per-pixel pick — matches
+    // the main shader's direct curve iteration, no band structure.
     vec2 p = vGlyphUV;
-    int bandIdx = clamp(int(p.y * float(vBandCount)), 0, vBandCount - 1);
-    int hdrTexel = vBandHeaderStart + bandIdx;
-    uvec4 hdr = texelFetch(bandTexture, ivec2(hdrTexel % 1024, hdrTexel / 1024), 0);
-    int entryStart = int(hdr.x);
-    int entryCount = int(hdr.y);
     int winding = 0;
-
-    for (int i = 0; i < MAX_CURVES_PER_BAND; i++) {
-        if (i >= entryCount) break;
-        int entryTexel = entryStart + i;
-        uvec4 entry = texelFetch(bandTexture, ivec2(entryTexel % 1024, entryTexel / 1024), 0);
-        int localCurveIdx = int(entry.x);
-        int ci = (vCurveStart + localCurveIdx) * 2;
+    for (int i = 0; i < MAX_CURVES; i++) {
+        if (i >= vCurveCount) break;
+        int ci = (vCurveStart + i) * 2;
         uvec4 t0 = texelFetch(curveTexture, ivec2(ci % 1024, ci / 1024), 0);
         uvec4 t1 = texelFetch(curveTexture, ivec2((ci+1) % 1024, (ci+1) / 1024), 0);
         vec2 cp0 = vec2(unpackCoord(t0.x), unpackCoord(t0.y));
         vec2 cp1 = vec2(unpackCoord(t0.z), unpackCoord(t0.w));
         vec2 cp2 = vec2(unpackCoord(t1.x), unpackCoord(t1.y));
-        float minX = min(cp0.x, min(cp1.x, cp2.x));
-        if (minX > p.x) break;
         winding += windingContrib(p, cp0, cp1, cp2);
     }
 
@@ -475,7 +460,6 @@ export class PickingSystem {
             if (this._mode === 'glyph') {
                 const mainUniforms = mesh.material.uniforms;
                 uniforms.curveTexture    = mainUniforms.curveTexture;
-                uniforms.bandTexture     = mainUniforms.bandTexture;
                 uniforms.glyphMapTexture = mainUniforms.glyphMapTexture;
                 uniforms.glyphMapWidth   = mainUniforms.glyphMapWidth;
                 uniforms.glyphMapHeight  = mainUniforms.glyphMapHeight;
