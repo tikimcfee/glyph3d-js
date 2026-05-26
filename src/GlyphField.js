@@ -186,7 +186,11 @@ function _buildOutputNode(varyings, uniforms) {
         Discard(outAlpha.lessThan(0.01));
 
         const finalColor = vColor.mul(cov).add(vAddedColor).clamp(0, 1);
-        return vec4(finalColor, outAlpha);
+        // Glyph colors are authored as display (sRGB) values; decode to linear so
+        // the renderer's default sRGB output-encode returns them to the authored
+        // value — consistent with the THREE.Color-managed rest of the scene
+        // (which needs sRGB output and goes dark if output encoding is disabled).
+        return vec4(finalColor.pow(vec3(2.2)), outAlpha);
     })();
 }
 
