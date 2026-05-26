@@ -282,13 +282,16 @@ takes. The map may reorder them or introduce others.
 - **Server:** `./glyph3d-cli serve --local --port 9876` running in
   background. Log at `/tmp/home-serve.log`. PID at
   `/tmp/home-serve.pid`.
-- **Firefox dev profile:** `/tmp/glyph-dev-profile` with `user.js`
-  enabling BiDi (`remote.enabled=true`, `remote.active-protocols=3`).
-  Launch:
+- **Firefox launch (WebGPU):** use `tools/dev-firefox.sh` — do NOT launch
+  Firefox plain. The app renders via `THREE.WebGPURenderer` (GlyphField),
+  and on this dual-GPU box (NVIDIA dGPU + AMD iGPU) a plain launch crashes
+  Firefox's WebRender compositor (SIGSEGV on `WRRenderBackend`). The helper
+  pins the process to the NVIDIA GPU (`VK_ICD_FILENAMES` + `__NV_*`) and
+  forces the WebGPU prefs via a dedicated profile's `user.js` (BiDi on
+  `9222` included).
   ```
-  firefox --no-remote --profile /tmp/glyph-dev-profile \
-    --remote-debugging-port=9222 \
-    http://localhost:9876/app/home.html &
+  tools/dev-firefox.sh                 # home.html on :9876
+  tools/dev-firefox.sh app/ide.html    # a different page
   ```
 - **Send commands:** `echo "<cmd>" | ./glyph3d-cli --port 9876`
 - **Snapshot the live page (DOM + canvas):**
