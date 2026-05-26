@@ -26,6 +26,7 @@
 import { primaryMod, secondaryMod } from '../utils/platform.js';
 import { getCanvasViewportSize } from '../../core/canvasSize.js';
 import { stateController } from '../state/StateController.js';
+import { zDistanceForFit } from '../spatial/spatialMath.js';
 
 /**
  * Distinguish a trackpad two-finger swipe from a discrete mouse-wheel
@@ -723,13 +724,10 @@ export class ViewerCameraController {
         const visibleLines = Math.min(lineCount, READABLE_LINES);
         const targetViewHeight = visibleLines * lineSpacing;
 
-        const fovRad = this.ctx.camera.fov * Math.PI / 180;
-        const halfTan = Math.tan(fovRad / 2);
+        // Fit width + the readable-lines-capped height; floor at 5.
+        const distance = Math.max(zDistanceForFit(this.ctx.camera, size.x, targetViewHeight, 0.85), 5);
 
-        const distForHeight = (targetViewHeight / 0.85) / (2 * halfTan);
-        const distForWidth = (size.x / 0.85) / (2 * this.ctx.camera.aspect * halfTan);
-        const distance = Math.max(distForHeight, distForWidth, 5);
-
+        const halfTan = Math.tan((this.ctx.camera.fov * Math.PI / 180) / 2);
         const centerX = (bounds.min.x + bounds.max.x) / 2;
         const topY = bounds.max.y;
 
@@ -771,7 +769,7 @@ export class ViewerCameraController {
         const size = new THREE.Vector3();
         bounds.getSize(size);
 
-        const distance = this._zDistanceForFit(size.x, size.y, 0.85);
+        const distance = zDistanceForFit(this.ctx.camera, size.x, size.y, 0.85);
         this.ctx.camera.position.set(center.x, center.y, bounds.max.z + distance);
         this.pitch = 0;
         this.yaw = 0;
@@ -789,7 +787,7 @@ export class ViewerCameraController {
         const size = new THREE.Vector3();
         bounds.getSize(size);
 
-        const distance = this._zDistanceForFit(size.x, size.y, 0.85);
+        const distance = zDistanceForFit(this.ctx.camera, size.x, size.y, 0.85);
         this.ctx.camera.position.set(center.x, center.y, bounds.max.z + distance);
         this.pitch = 0;
         this.yaw = 0;
@@ -851,21 +849,6 @@ export class ViewerCameraController {
     }
 
     // ============ Helpers ============
-
-    /**
-     * Z-distance needed for a `width`x`height` region to fill `fillFraction`
-     * of the viewport. Accounts for FOV and aspect ratio.
-     * @private
-     */
-    _zDistanceForFit(width, height, fillFraction = 0.85) {
-        const fovRad = this.ctx.camera.fov * Math.PI / 180;
-        const aspect = this.ctx.camera.aspect;
-
-        const dH = (height / fillFraction) / (2 * Math.tan(fovRad / 2));
-        const dW = (width / fillFraction) / (2 * aspect * Math.tan(fovRad / 2));
-
-        return Math.max(dH, dW);
-    }
 
     dispose() {
         this.teardownEventListeners();

@@ -33,3 +33,22 @@ export function screenToWorldDelta(dx, dy, objectZ, camera, canvas) {
         y:  dx * pixelScale * right.y + (-dy) * pixelScale * up.y,
     };
 }
+
+/**
+ * Z distance at which a `width`×`height` world-space region fills `fillFraction`
+ * of the viewport, accounting for FOV and aspect. The single source of truth for
+ * "how far back to sit to frame this box" — VCC focus helpers, command-handler
+ * framing, and the groups panel all use this (no per-call-site FOV math).
+ *
+ * @param {THREE.PerspectiveCamera} camera
+ * @param {number} width
+ * @param {number} height
+ * @param {number} [fillFraction=0.85] - <1 leaves margin around the region.
+ * @returns {number}
+ */
+export function zDistanceForFit(camera, width, height, fillFraction = 0.85) {
+    const halfTan = Math.tan((camera.fov * Math.PI / 180) / 2);
+    const dH = (height / fillFraction) / (2 * halfTan);
+    const dW = (width / fillFraction) / (2 * camera.aspect * halfTan);
+    return Math.max(dH, dW);
+}

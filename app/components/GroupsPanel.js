@@ -6,6 +6,8 @@
  * Auto-refreshes via 500ms polling.
  */
 
+import { zDistanceForFit } from '../../src/services/spatial/spatialMath.js';
+
 /**
  * Build the initial panel HTML.
  * @returns {string}
@@ -188,13 +190,11 @@ export function initGroupsPanel(panelEl, { spatialManager, registry, animator, c
                                 x: bounds.max.x - bounds.min.x,
                                 y: bounds.max.y - bounds.min.y,
                             };
-                            const fovRad = camera.fov * Math.PI / 180;
-                            const dH = (bSize.y / 0.85) / (2 * Math.tan(fovRad / 2));
-                            const dW = (bSize.x / 0.85) / (2 * camera.aspect * Math.tan(fovRad / 2));
+                            const dist = Math.max(zDistanceForFit(camera, bSize.x, bSize.y), 10);
                             animator.animateTo(camera, 'position', {
                                 x: bCenter.x,
                                 y: bCenter.y,
-                                z: bounds.max.z + Math.max(dH, dW, 10),
+                                z: bounds.max.z + dist,
                             }, { duration: 0.3 });
                         }
                     }
@@ -306,13 +306,8 @@ function focusOnGroup(groupName, spatialManager, registry, animator, camera) {
     size.x = bounds.max.x - bounds.min.x;
     size.y = bounds.max.y - bounds.min.y;
 
-    // Compute Z distance to fit the group (same math as VCC._zDistanceForFit)
-    const fovRad = camera.fov * Math.PI / 180;
-    const aspect = camera.aspect;
-    const fill = 0.85;
-    const dH = (size.y / fill) / (2 * Math.tan(fovRad / 2));
-    const dW = (size.x / fill) / (2 * aspect * Math.tan(fovRad / 2));
-    const distance = Math.max(dH, dW, 10);
+    // Fit the group head-on; floor at 10 so tiny groups don't slam the camera in.
+    const distance = Math.max(zDistanceForFit(camera, size.x, size.y), 10);
 
     animator.animateTo(camera, 'position', {
         x: center.x,

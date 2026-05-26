@@ -14,9 +14,10 @@ import CodeGrid from '../../../src/collections/CodeGrid.js';
 import { COLORS } from './colorConstants.js';
 import {
     resolveGridByIdOrIndex, getWorldBounds, unionBounds,
-    resolveAnchor, zDistanceForFit, fmtVec,
+    resolveAnchor, fmtVec,
     frameBounds, animateCamera,
 } from './spatialHelpers.js';
+import { zDistanceForFit } from '../../../src/services/spatial/spatialMath.js';
 import { decodeBase64 } from '../../../src/utils/encoding.js';
 
 /** @type {Map<string, TourDefinition>} */

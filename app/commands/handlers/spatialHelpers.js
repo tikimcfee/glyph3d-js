@@ -10,6 +10,7 @@
  */
 
 import * as THREE from 'three';
+import { zDistanceForFit } from '../../../src/services/spatial/spatialMath.js';
 
 // ──────────────────────────────────────────────────────────────
 //  Grid Resolution
@@ -190,29 +191,6 @@ export function resolveAnchor(bounds, name) {
 
 // ──────────────────────────────────────────────────────────────
 //  Camera Math
-// ──────────────────────────────────────────────────────────────
-
-/**
- * Calculate the Z distance to fit a region of width x height in the viewport.
- * Uses camera FOV and aspect ratio. fillFraction < 1.0 adds margin.
- *
- * @param {Object} camera - THREE.PerspectiveCamera
- * @param {number} width
- * @param {number} height
- * @param {number} [fillFraction=0.85]
- * @returns {number}
- */
-export function zDistanceForFit(camera, width, height, fillFraction = 0.85) {
-    const fovRad = camera.fov * Math.PI / 180;
-    const halfTan = Math.tan(fovRad / 2);
-    const aspect = camera.aspect;
-
-    const dH = (height / fillFraction) / (2 * halfTan);
-    const dW = (width / fillFraction) / (2 * aspect * halfTan);
-
-    return Math.max(dH, dW);
-}
-
 // ──────────────────────────────────────────────────────────────
 //  Camera Helpers
 // ──────────────────────────────────────────────────────────────
