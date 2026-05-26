@@ -11,12 +11,17 @@ context is in agent memory (`project_architecture_overhaul`,
 - **Renderer is WebGPU.** `GlyphField` (WebGPU / TSL NodeMaterial) is the one
   renderer; the WebGL `GlyphRenderer` was deleted. Shaders are **TSL, not GLSL**.
   Pages use `THREE.WebGPURenderer` and import three from `three/webgpu`.
-- **Moving to a monorepo + a build step.** `packages/glyph3d-r3f` (react-three-
-  fiber bindings) is the first new package; the repo root is still the core
-  library `glyph3d-js` (to be relocated to `packages/glyph3d-core` later — a
-  deferred chunk that touches the Go `//go:embed`, app/ imports, importmaps).
-  **bun workspaces**; new apps/packages build with **Vite**. The "no build step"
-  ethos is being reversed (Vite HMR replaces edit-and-refresh).
+- **Monorepo + build step, in progress.** The core library now lives in
+  `packages/glyph3d-core/` as **`@glyph3d/core`** (moved out of repo root, commit
+  `b0116f0`). `packages/glyph3d-r3f` holds the react-three-fiber bindings. The
+  repo root is a **private bun-workspace umbrella** (name `glyph3d`, no exports);
+  consumers depend on `"@glyph3d/core": "workspace:*"`. The browser-served app
+  (ide/home/viewer, served by the Go binary) resolves core via an importmap prefix
+  `"@glyph3d/core/": "/packages/glyph3d-core/src/"`; `new URL(...)` font loads +
+  JSDoc type-imports stay relative (importmaps don't touch those). New
+  apps/packages build with **Vite**; the "no build step" ethos is being reversed
+  (Vite HMR replaces edit-and-refresh). **NB:** the Project Structure section
+  below still draws `src/` at root — read it as `packages/glyph3d-core/src/`.
 - **Dev loop:** the `/webgpu-dev-loop` skill. TL;DR: `cd keystone && bun run dev`
   (Vite, :5173), open via `tools/dev-firefox.sh <url>` (NVIDIA-pinned WebGPU
   Firefox), read the browser console from `keystone/console.log`.
