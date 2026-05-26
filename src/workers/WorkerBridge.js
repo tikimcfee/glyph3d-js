@@ -142,7 +142,7 @@ export class WorkerBridge {
      * @param {GlyphAtlas} [atlas] - Unused (kept for call-site compatibility)
      * @returns {Promise<{positions, sizes, codepoints, colors, count}>}
      */
-    async buildBatchBuffers(items, shared, atlas) {
+    async buildBatchBuffers(items, shared) {
         this._ensureInitialized();
 
         // Fallback if no workers
@@ -182,7 +182,6 @@ export class WorkerBridge {
                         metrics: shared.metrics,
                         defaultColor: shared.defaultColor,
                         upem: this._upem,
-                        emptyGlyphs: shared.emptyGlyphs || null,
                     }
                 }
             });
@@ -253,8 +252,7 @@ export class WorkerBridge {
             metrics: shared.metrics,
             defaultColor: shared.defaultColor,
             upem: this._upem,
-            emptyGlyphs: shared.emptyGlyphs || null,
-        }, shared.emptyGlyphs ? new Set(shared.emptyGlyphs) : undefined);
+        });
     }
 
     /**

@@ -8,9 +8,9 @@
   body { font-family: 'Cousine', 'Consolas', monospace; background: #07080a; color: #cfd2d6; overflow: hidden; }
   #canvas { display: block; width: 100vw; height: 100vh; }
   #report {
-    position: fixed; top: 0; right: 0; width: 560px; max-height: 100vh; overflow-y: auto;
+    position: fixed; top: 0; right: 0; width: 400px; max-height: 100vh; overflow-y: auto;
     background: rgba(8,9,12,0.92); border-left: 1px solid #222; padding: 10px 12px;
-    font-size: 11px; line-height: 1.45; z-index: 10; white-space: pre;
+    font-size: 10px; line-height: 1.4; z-index: 10; white-space: pre;
   }
   #report h1 { font-size: 13px; color: #6cf; margin-bottom: 6px; }
   .raw  { color: #6f6; }
@@ -42,7 +42,7 @@ const ATLAS_SIZE = 1024;
 //                                      highlight.token compute and feed in)
 // On indented lines the magenta slides LEFT by the indent depth.
 const SOURCE = '/src/collections/CodeGrid.js';
-const WINDOW = 26;          // lines to display
+const WINDOW = 20;          // lines to display
 const HL_RAW = { r: 0.1, g: 1.0, b: 0.2 };
 const HL_VIS = { r: 1.0, g: 0.0, b: 0.9 };
 
@@ -146,18 +146,33 @@ async function boot() {
   });
   const allOk = checks.every(c => c.ok);
 
-  // Frame the whole window left of the panel.
-  const lineSpan = WINDOW;
-  grid.position.set(-46, lineSpan * 0.95, 0);
-  camera.position.set(-18, 0, lineSpan * 7.0);
-  camera.lookAt(-18, 0, 0);
+  // Frame the whole block into the LEFT portion of the canvas (the report
+  // panel covers the right ~40%). Fit by bounding box so it works at any
+  // worldScale / line count, and pan the camera so the block lands on the left.
+  const LEFT_FRAC = 0.70;   // block occupies this fraction of the width, from the left
+  const MARGIN = 1.10;
+  // grid.getBounds() returns real world-space content bounds — setFromObject
+  // can't see our custom instancePosition attribute (it'd measure one quad).
+  const box = grid.getBounds();
+  const size = new THREE.Vector3(); box.getSize(size);
+  const center = new THREE.Vector3(); box.getCenter(center);
+  const tan = Math.tan((camera.fov * Math.PI / 180) / 2);
+  const dV = (size.y * MARGIN) / (2 * tan);                                  // fit height
+  const dH = (size.x * MARGIN) / (2 * tan * camera.aspect * LEFT_FRAC);      // fit width into left frac
+  const d = Math.max(dV, dH);
+  const viewW = 2 * d * tan * camera.aspect;
+  const viewH = 2 * d * tan;
+  const camX = center.x - (LEFT_FRAC - 1) * (viewW / 2);   // shift block left
+  const camY = box.max.y - viewH / 2 + 0.05 * viewH;       // top-align with a small margin
+  camera.position.set(camX, camY, center.z + d);
+  camera.lookAt(camX, camY, center.z);
   renderer.render(scene, camera);
 
-  log('<h1>real-file token highlight — after fix</h1>');
-  log(`<span class="dim">${SOURCE} lines ${bestStart}-${bestStart + WINDOW - 1}</span>`);
-  log(`<span class="vis">MAGENTA = highlight.token "${TOKEN}" via the fixed (codepoint) ruler</span>`);
-  log(`every wash should sit exactly on "${TOKEN}". hits: ${hits.length}  ` +
-      (allOk ? '<span class="raw">ALL LAND CORRECTLY</span>' : '<span class="bad">MISMATCH</span>') + '\n');
+  log('<h1>token highlight — after fix</h1>');
+  log(`<span class="dim">${SOURCE.split('/').pop()} L${bestStart}-${bestStart + WINDOW - 1}</span>`);
+  log(`<span class="vis">magenta = highlight.token "${TOKEN}"</span>`);
+  log(`hits: ${hits.length}  ` +
+      (allOk ? '<span class="raw">all land correctly</span>' : '<span class="bad">MISMATCH</span>') + '\n');
   for (const h of hits) {
     const arr = [...lines[h.line]];
     const at = arr.slice(h.col, h.col + TOKEN.length).join('');
@@ -165,7 +180,8 @@ async function boot() {
     log(`L${String(h.line).padStart(2)} col ${String(h.col).padStart(2)}  -> "${at}" ${mark}`);
   }
 
-  window.__HARNESS = { ready: true, source: SOURCE, windowStart: bestStart, token: TOKEN, hits: hits.length, allOk, checks };
+  window.__HARNESS = { ready: true, source: SOURCE, windowStart: bestStart, token: TOKEN, hits: hits.length, allOk, checks,
+    frame: { size: size.toArray().map(n=>+n.toFixed(2)), center: center.toArray().map(n=>+n.toFixed(2)), d: +d.toFixed(2), bind: dH>dV?'width':'height' } };
   console.log('[harness]', JSON.stringify(window.__HARNESS, null, 2));
 }
 

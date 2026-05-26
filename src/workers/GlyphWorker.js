@@ -16,9 +16,6 @@
 
 import { buildBatchBuffers } from './builders/index.js';
 
-// Set of glyph IDs known to have 0 curves (space, .notdef) — avoids redundant checks
-let emptyGlyphCache = null;
-
 // Per-codepoint glyph map transferred from main thread. Populated by GLYPH_MAP message.
 // Layout: Map<codepoint, {g: glyphId, ax: xAdvance}> rebuilt from a flat Uint32Array.
 // Used in future Tier 3 optimization for worker-side text reconstruction.
@@ -38,11 +35,7 @@ self.onmessage = function(event) {
                     defaultColor: payload.shared.defaultColor,
                     upem: payload.shared.upem,
                 };
-                // Lazy-build empty glyph cache from emptyGlyphs in payload
-                if (!emptyGlyphCache && payload.shared.emptyGlyphs) {
-                    emptyGlyphCache = new Set(payload.shared.emptyGlyphs);
-                }
-                const result = buildBatchBuffers(payload.items, shared, emptyGlyphCache);
+                const result = buildBatchBuffers(payload.items, shared);
 
                 // Transfer buffers — glyphIds/codepoints alias the same array
                 const glyphIdsBuf = result.glyphIds || result.codepoints;

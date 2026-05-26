@@ -85,14 +85,15 @@ export function applyPagination(positions, startIdx, endIdx, origin, metrics) {
  * on the main thread, workers only do buffer math.
  *
  * Outputs HarfBuzz glyph IDs that index directly into SlugEncoder's glyphMapTexture.
- * Space glyphs (0 curves in SlugEncoder) are skipped — advance cursor only.
+ * One slot per codepoint — invisible glyphs (space, tab, .notdef) get a slot
+ * too and render to nothing via 0-curve fragment discard, so the slot offset
+ * within a line equals the codepoint index.
  *
  * @param {Array<{text, position, color?, scale?, groupId?, shaped: {lines, totalGlyphs}}>} items
  * @param {Object} shared - {metrics, defaultColor, upem}
- * @param {Set<number>} [emptyGlyphs] - Set of glyph IDs with 0 curves (spaces, .notdef)
  * @returns {import('../../core/types.js').GlyphBufferSet}
  */
-export function buildBatchBuffers(items, shared, emptyGlyphs) {
+export function buildBatchBuffers(items, shared) {
     const { metrics, defaultColor, upem } = shared;
 
     // Convert HarfBuzz font units to world units.
@@ -112,9 +113,6 @@ export function buildBatchBuffers(items, shared, emptyGlyphs) {
     // Z-depth wrapping settings
     const maxLineWidth = Z_WRAP_CONFIG.maxLineWidth;
     const zWrapSpacing = metrics.charHeight * Z_WRAP_CONFIG.zWrapSpacing;
-
-    // Empty glyph cache — glyph IDs that produce 0 curves (space, .notdef)
-    const _emptyGlyphs = emptyGlyphs || new Set();
 
     // First pass: read pre-shaped data from items to count total glyphs (worst-case)
     let totalGlyphs = 0;
@@ -138,7 +136,7 @@ export function buildBatchBuffers(items, shared, emptyGlyphs) {
         };
     }
 
-    // Allocate combined buffers (worst-case — may truncate if empty glyphs are skipped)
+    // Allocate combined buffers — one slot per codepoint, exact (no skipping)
     const positions = new Float32Array(totalGlyphs * 3);
     const sizes = new Float32Array(totalGlyphs * 2);
     const glyphIdsArr = new Float32Array(totalGlyphs);
@@ -229,15 +227,10 @@ export function buildBatchBuffers(items, shared, emptyGlyphs) {
                     currentLineWraps.push(lineColIdx);
                 }
 
-                // Skip empty glyphs (space, .notdef) — advance cursor only
-                if (_emptyGlyphs.has(glyphId)) {
-                    if (itemMinX === Infinity) itemMinX = x;
-                    x += advance;
-                    glyphsOnSegment++;
-                    lineColIdx++;
-                    continue;
-                }
-
+                // One slot per codepoint — invisible glyphs (space, tab,
+                // .notdef) get a slot too and render to nothing via 0-curve
+                // fragment discard. This makes the column→slot mapping a plain
+                // identity: slot offset within a line == codepoint index.
                 if (itemMinX === Infinity) itemMinX = x;
                 const idx = bufferOffset;
 

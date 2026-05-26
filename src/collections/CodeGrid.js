@@ -893,7 +893,7 @@ class CodeGrid extends THREE.Object3D {
             }
 
             try {
-                const buffers = await bridge.buildBatchBuffers(items, { metrics, uvMap: null, defaultColor }, this.atlas);
+                const buffers = await bridge.buildBatchBuffers(items, { metrics, defaultColor });
 
                 // Create renderer AFTER worker returns, sized to actual content
                 if (!this._renderer) {

@@ -244,7 +244,7 @@ export class TreemapLabelManager {
         };
 
         try {
-            const buffers = await bridge.buildBatchBuffers(pendingItems, { metrics, uvMap: null, defaultColor }, atlas);
+            const buffers = await bridge.buildBatchBuffers(pendingItems, { metrics, defaultColor });
             this._renderer.applyPrebuiltBuffers(buffers, pendingItems);
         } catch (err) {
             console.warn('TreemapLabelManager: Worker path failed, falling back to sync:', err);
