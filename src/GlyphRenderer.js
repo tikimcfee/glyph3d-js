@@ -509,46 +509,6 @@ class GlyphRendererV15 {
     // ============ Public API with Better Structure ============
 
     /**
-     * Render text at a position
-     * @param {string} text - Text to render
-     * @param {Object} position - Position {x, y, z}
-     * @param {Object} options - Optional overrides
-     * @returns {number} ID for this text
-     */
-    render(text, position = {x: 0, y: 0, z: 0}, options = {}) {
-        if (this._contextLost) return -1;
-        const glyphs = this._textToGlyphs(text, position, options);
-        const id = this._registerText(text, glyphs, options);
-        this._rebuildAllInstances();
-        return id;
-    }
-
-    /**
-     * Batch render multiple texts efficiently
-     * @param {Array} items - Array of {text, position, options}
-     * @returns {Array} IDs for the rendered texts
-     */
-    renderBatch(items) {
-        if (this._contextLost) return [];
-        const ids = [];
-
-        // Collect all glyphs first
-        for (const item of items) {
-            const glyphs = this._textToGlyphs(
-                item.text,
-                item.position || {x: 0, y: 0, z: 0},
-                item.options || {}
-            );
-            const id = this._registerText(item.text, glyphs, item.options);
-            ids.push(id);
-        }
-
-        // Single rebuild for all
-        this._rebuildAllInstances();
-        return ids;
-    }
-
-    /**
      * Get text object by ID for manipulation
      * @param {number} id - Text ID
      * @returns {Object|null} Text entry with methods
@@ -1237,84 +1197,6 @@ class GlyphRendererV15 {
     // _ensureGlyphsInAtlas — removed (HarfBuzz shaping handles all glyph IDs)
 
     /**
-     * Convert text to glyph instances using HarfBuzz shaping.
-     * Requires this._shaper to be initialized and ready.
-     * @private
-     */
-    _textToGlyphs(text, position, options) {
-        const color = options.color || this.config.defaultColor;
-        const scale = options.scale || 1.0;
-        return this._textToGlyphsShaped(text, position, color, scale, options);
-    }
-
-    /**
-     * Convert text to glyph instances using HarfBuzz shaping.
-     * @private
-     */
-    _textToGlyphsShaped(text, position, color, scale, options) {
-        const glyphs = [];
-        const worldScale = this.config.worldScale;
-        const upem = this._shaper.upem;
-        // Font units → world units: same correction as buildShapedBatchBuffers.
-        // worldScale is pixel→world; pixelHeight is the atlas font size in pixels.
-        // Full factor = worldScale * pixelHeight / upem.
-        const ws = worldScale * this.metrics.pixelHeight;
-        const fontExt = this._shaper.fontExtents();
-        const lineHeight = (fontExt.ascender - fontExt.descender + fontExt.lineGap) / upem * ws * scale;
-
-        let x = position.x;
-        let y = position.y;
-        const z = position.z;
-
-        const lines = text.split('\n');
-        for (const lineText of lines) {
-            if (lineText.length > 0) {
-                const shaped = this._shaper.shape(lineText);
-                for (const sg of shaped) {
-                    // Skip space glyphs (0 curves = discard in shader anyway)
-                    const advance = sg.ax / upem * ws * scale;
-                    const charHeight = this.metrics.charHeight * scale;
-
-                    glyphs.push({
-                        position: { x: x + (sg.dx / upem * ws * scale), y: y + (sg.dy / upem * ws * scale), z },
-                        size: { width: advance, height: charHeight },
-                        charCode: sg.g,
-                        color,
-                        char: '',
-                        groupId: options.groupId || 0
-                    });
-                    x += advance;
-                }
-            }
-            // Newline: reset x, advance y
-            x = position.x;
-            y -= lineHeight;
-        }
-        return glyphs;
-    }
-
-    /**
-     * Register text and return ID
-     * @private
-     */
-    _registerText(text, glyphs, options) {
-        const id = this.nextId++;
-        // Store glyphs array temporarily — _rebuildAllInstances() will write
-        // them to GPU and then strip the array, leaving only bufferStartIndex + glyphCount.
-        this.renderedTexts.set(id, {
-            id,
-            glyphs,      // stripped by _rebuildAllInstances after GPU write
-            glyphCount: glyphs.length,
-        });
-        this._cachedGlyphCount += glyphs.length;
-        return id;
-    }
-
-    /**
-     * Get bounds of text glyphs
-     * @private
-     */
-    /**
      * Compute the world-space bounds for a text entry by reading from the typed arrays.
      * @private
      * @param {Object} entry - renderedTexts entry with bufferStartIndex and glyphCount
@@ -1357,46 +1239,13 @@ class GlyphRendererV15 {
     }
 
     /**
-     * Rebuild all instance data
+     * Compact instance data after removals: shift surviving entries forward to
+     * fill the gaps left by remove(). Content is built once via the one builder
+     * (applyPrebuiltBuffers); this only ever rearranges existing typed-array
+     * data. writeIdx <= readIdx always because deletions only create forward gaps.
      * @private
      */
     _rebuildAllInstances() {
-        // Check if any entries still have the legacy glyphs array (sync path).
-        // If so, use the old _updateInstanceMesh path to write them to the GPU,
-        // then strip the arrays and record bufferStartIndex / glyphCount.
-        let hasLegacyGlyphs = false;
-        for (const entry of this.renderedTexts.values()) {
-            if (entry.glyphs) { hasLegacyGlyphs = true; break; }
-        }
-
-        if (hasLegacyGlyphs) {
-            // Legacy sync path: collect glyph objects, write to GPU, then strip arrays.
-            const allGlyphs = [];
-            let bufferIndex = 0;
-
-            for (const entry of this.renderedTexts.values()) {
-                entry.bufferStartIndex = bufferIndex;
-                if (entry.glyphs) {
-                    entry.glyphCount = entry.glyphs.length;
-                    allGlyphs.push(...entry.glyphs);
-                    bufferIndex += entry.glyphs.length;
-                } else {
-                    bufferIndex += entry.glyphCount;
-                }
-            }
-
-            this._updateInstanceMesh(allGlyphs);
-
-            // Strip glyphs arrays — typed arrays are now the source of truth
-            for (const entry of this.renderedTexts.values()) {
-                entry.glyphs = null;
-            }
-            return;
-        }
-
-        // Typed-array compaction path (worker path, or after first legacy rebuild).
-        // Shifts surviving entries forward to fill gaps left by remove() calls.
-        // writeIdx <= readIdx always because deletions only create forward gaps.
         const geom = this.instanceMesh.geometry;
         const oldPos = geom.attributes.instancePosition.array;
         const oldSiz = geom.attributes.instanceSize.array;
@@ -1436,73 +1285,6 @@ class GlyphRendererV15 {
     }
 
     /**
-     * Update instance mesh with glyph data
-     * @private
-     */
-    _updateInstanceMesh(glyphs) {
-        const count = Math.min(glyphs.length, this.config.maxInstances);
-
-        if (count === 0) {
-            this.instanceMesh.geometry.instanceCount = 0;
-            return;
-        }
-
-        // Get attribute arrays
-        const geometry = this.instanceMesh.geometry;
-        const positions = geometry.attributes.instancePosition.array;
-        const sizes = geometry.attributes.instanceSize.array;
-        const glyphIds = geometry.attributes.instanceGlyphId.array;
-        const colors = geometry.attributes.instanceColor.array;
-        const groupIds = geometry.attributes.instanceGroupId.array;
-
-        // Fill arrays
-        for (let i = 0; i < count; i++) {
-            const g = glyphs[i];
-
-            // Position
-            positions[i * 3] = g.position.x;
-            positions[i * 3 + 1] = g.position.y;
-            positions[i * 3 + 2] = g.position.z;
-
-            // Size
-            sizes[i * 2] = g.size.width;
-            sizes[i * 2 + 1] = g.size.height;
-
-            // GlyphId — indexes into glyphMapTexture for Slug curve data
-            glyphIds[i] = g.charCode || 0;
-
-            // Color
-            colors[i * 3] = g.color.r;
-            colors[i * 3 + 1] = g.color.g;
-            colors[i * 3 + 2] = g.color.b;
-
-            // Group ID
-            groupIds[i] = g.groupId || 0;
-        }
-
-        // Mark attributes as needing update
-        geometry.attributes.instancePosition.needsUpdate = true;
-        geometry.attributes.instanceSize.needsUpdate = true;
-        geometry.attributes.instanceGlyphId.needsUpdate = true;
-        geometry.attributes.instanceColor.needsUpdate = true;
-        geometry.attributes.instanceGroupId.needsUpdate = true;
-
-        // Ensure highlight texture is sized for this instance count
-        this._ensureHighlightTexture(count);
-
-        // Set instance count
-        geometry.instanceCount = count;
-
-        if (shouldDebugLog('firstInstance') && count > 0) {
-            logger.debug('[Slug] First instance sample', {
-                position: `(${glyphs[0].position.x.toFixed(2)}, ${glyphs[0].position.y.toFixed(2)})`,
-                char: glyphs[0].char,
-                glyphId: glyphs[0].charCode
-            });
-        }
-    }
-
-    /**
      * Apply pre-built buffers directly to GPU.
      *
      * Used by the worker pipeline to skip main-thread computation.
@@ -1523,7 +1305,7 @@ class GlyphRendererV15 {
         const { positions, sizes, colors, groupIds, count } = buffers;
         // Accept both 'glyphIds' (new) and 'codepoints' (legacy) field names
         const glyphIds = buffers.glyphIds || buffers.codepoints;
-        let { itemMeta } = buffers;
+        const { itemMeta } = buffers;
         const geometry = this.instanceMesh.geometry;
 
         // Swap in worker's arrays directly - no copying!
@@ -1547,27 +1329,6 @@ class GlyphRendererV15 {
 
         // Update max instances to reflect actual capacity
         this.config.maxInstances = Math.max(this.config.maxInstances, count);
-
-        // If itemMeta wasn't provided (e.g., old worker code, structured clone issue),
-        // compute it from items by counting renderable glyphs per text entry.
-        // This is a rough fallback — counts non-whitespace characters.
-        if (!itemMeta && items && items.length > 0) {
-            itemMeta = [];
-            let offset = 0;
-            for (const item of items) {
-                const text = item.text || '';
-                let glyphCount = 0;
-                for (let j = 0; j < text.length; j++) {
-                    const cp = text.charCodeAt(j);
-                    if (cp > 32) glyphCount++;
-                }
-                // Clamp to remaining buffer space
-                glyphCount = Math.min(glyphCount, count - offset);
-                itemMeta.push({ bufferStartIndex: offset, glyphCount, bounds: null });
-                offset += glyphCount;
-            }
-            logger.debug('Computed itemMeta from items (fallback)', { itemCount: items.length });
-        }
 
         // Store lightweight metadata entries — no per-glyph JS objects.
         // All update/query methods read position/color/size directly from typed arrays.

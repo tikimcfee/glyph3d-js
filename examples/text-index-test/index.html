@@ -135,14 +135,13 @@ async function boot() {
   // Run the FIXED token highlighter. Every hit should land on the token.
   const hits = highlightTokenFixed(grid, lines, TOKEN, HL_VIS);
 
-  // Independent oracle: where SHOULD each hit be? The codepoint index of the
-  // token in the line. Compare to where the fix put it (must match exactly).
+  // Independent oracle: the codepoints the highlight actually covers must equal
+  // the token. Handles multiple occurrences per line (each hit checked on its own).
+  const tokLen = [...TOKEN].length;
   const checks = hits.map(h => {
-    const lineText = lines[h.line];
-    // first codepoint index of TOKEN at/after the recorded col, recomputed independently
-    const utf16 = lineText.indexOf(TOKEN);
-    const expectCol = [...lineText.slice(0, utf16)].length;
-    return { line: h.line, col: h.col, expectCol, ok: h.col === expectCol };
+    const arr = [...lines[h.line]];
+    const at = arr.slice(h.col, h.col + tokLen).join('');
+    return { line: h.line, col: h.col, at, ok: at === TOKEN };
   });
   const allOk = checks.every(c => c.ok);
 

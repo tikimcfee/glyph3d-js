@@ -745,22 +745,109 @@ class CodeGrid extends THREE.Object3D {
     }
 
     /**
-     * Flush pending changes synchronously to GlyphRendererV15.
+     * Normalize pending adds and compute the shared build inputs (metrics,
+     * default color) used by both the sync and worker builder paths. Also
+     * ensures any missing graphemes are in the atlas (legacy non-shaper path).
+     * @private
+     * @returns {{items: Array, metrics: Object, defaultColor: Object}}
+     */
+    _prepareAddsForBuild() {
+        const defaultColor = this.config.textColor;
+        const items = this._pendingAdds;
+
+        for (const p of items) {
+            if (!p.color)                p.color   = p.options?.color   || defaultColor;
+            if (!p.scale)                p.scale   = p.options?.scale   || 1.0;
+            if (p.groupId === undefined) p.groupId = p.options?.groupId || 0;
+        }
+
+        const atlasCharSize = this.atlas.getCharSize();
+        const scale = this.config.worldScale;
+        const metrics = {
+            charWidth:     atlasCharSize.width  * scale,
+            charHeight:    atlasCharSize.height * scale,
+            letterSpacing: atlasCharSize.width  * scale * 0.05,
+            lineSpacing:   atlasCharSize.height * scale * 1.2,
+            worldScale:    scale,
+            atlasSize:     this.atlas.getAtlasTexture().width,
+            pixelWidth:    atlasCharSize.width,
+            pixelHeight:   atlasCharSize.height,
+        };
+
+        // Ensure codepoints exist in atlas before building (legacy non-shaper path)
+        if (!this.config.shaper) {
+            const missing = new Set();
+            for (const it of items) {
+                if (!it.text) continue;
+                for (const grapheme of iterGraphemes(it.text)) {
+                    const cp = grapheme.codePointAt(0);
+                    if (cp > 32 && !this.atlas.uvMap.has(grapheme)) missing.add(grapheme);
+                }
+            }
+            if (missing.size > 0) this.atlas.ensureGraphemes(Array.from(missing));
+        }
+
+        return { items, metrics, defaultColor };
+    }
+
+    /**
+     * Commit builder output to the GPU: create/size the renderer, apply any
+     * deferred removals in the same synchronous block as the buffer swap (so
+     * old→new is atomic with no intermediate paint), swap in the prebuilt
+     * buffers, and record the id maps + bounds. Shared by both flush paths.
+     * @private
+     * @param {Object} buffers - output of buildBatchBuffers
+     * @param {Array} items - the items that produced `buffers`
+     * @param {number[]} [deferredRemovals] - renderer IDs to remove atomically
+     */
+    _commitBuiltBuffers(buffers, items, deferredRemovals = []) {
+        if (!this._renderer) {
+            this._createRendererWithSize(buffers.count, true);
+        }
+
+        for (const rendererId of deferredRemovals) {
+            this._renderer.remove(rendererId);
+            const ourId = this._reverseIdMap.get(rendererId);
+            if (ourId !== undefined) {
+                this._idMap.delete(ourId);
+                this._reverseIdMap.delete(rendererId);
+                this._committedTexts.delete(ourId);
+            }
+        }
+
+        const rendererIds = this._renderer.applyPrebuiltBuffers(buffers, items);
+        this._workerBoundsCache  = buffers.bounds;
+        this._contentBoundsDirty = false;
+
+        for (let i = 0; i < items.length; i++) {
+            const p          = items[i];
+            const rendererId = rendererIds[i];
+            this._idMap.set(p.id, rendererId);
+            this._reverseIdMap.set(rendererId, p.id);
+            this._committedTexts.set(p.id, {
+                id: p.id,
+                rendererId,
+                textLength: p.text.length,
+                position:   p.position,
+                options:    p.options,
+            });
+        }
+        this._pendingAdds = [];
+    }
+
+    /**
+     * Flush pending changes synchronously — same builder as the worker path,
+     * run on the main thread (no postMessage). loadText needs this: highlights
+     * are applied immediately after, so the buffers + line→slot table must
+     * exist by the time _flush() returns.
      * @private
      */
     _flush() {
         if (!this._dirty) return;
 
-        if (!this._renderer && this._pendingAdds.length > 0) {
-            const glyphCount = this._pendingAdds.reduce((s, p) => s + p.text.length, 0);
-            this._createRendererWithSize(Math.ceil(glyphCount * this._bufferHeadroom), false);
-        }
-
-        if (!this._renderer) { this._dirty = false; return; }
-
         // Process removals
         for (const rendererId of this._pendingRemovals) {
-            this._renderer.remove(rendererId);
+            this._renderer?.remove(rendererId);
             const ourId = this._reverseIdMap.get(rendererId);
             if (ourId !== undefined) {
                 this._idMap.delete(ourId);
@@ -770,52 +857,11 @@ class CodeGrid extends THREE.Object3D {
         }
         this._pendingRemovals = [];
 
-        // Process updates
-        for (const update of this._pendingUpdates) {
-            const rendererId = this._idMap.get(update.id);
-            if (rendererId === undefined) continue;
-            if (update.type === 'position') {
-                this._renderer.updatePosition(rendererId, update.newPosition);
-                const entry = this._committedTexts.get(update.id);
-                if (entry) entry.position = update.newPosition;
-            } else if (update.type === 'color') {
-                this._renderer.updateColor(rendererId, update.newColor);
-                const entry = this._committedTexts.get(update.id);
-                if (entry) entry.options.color = update.newColor;
-            } else if (update.type === 'text') {
-                const entry = this._committedTexts.get(update.id);
-                if (entry) {
-                    this._renderer.remove(rendererId);
-                    const newRid = this._renderer.render(update.newText, entry.position, entry.options);
-                    this._idMap.set(update.id, newRid);
-                    this._reverseIdMap.delete(rendererId);
-                    this._reverseIdMap.set(newRid, update.id);
-                    entry.rendererId  = newRid;
-                    entry.textLength  = update.newText.length;
-                }
-            }
-        }
-        this._pendingUpdates = [];
-
-        // Process adds via renderBatch
+        // Process adds via the builder (synchronous main-thread build)
         if (this._pendingAdds.length > 0) {
-            const batchItems  = this._pendingAdds.map(p => ({ text: p.text, position: p.position, options: p.options }));
-            const rendererIds = this._renderer.renderBatch(batchItems);
-
-            for (let i = 0; i < this._pendingAdds.length; i++) {
-                const ourId     = this._pendingAdds[i].id;
-                const rendererId = rendererIds[i];
-                this._idMap.set(ourId, rendererId);
-                this._reverseIdMap.set(rendererId, ourId);
-                this._committedTexts.set(ourId, {
-                    id: ourId,
-                    rendererId,
-                    textLength: this._pendingAdds[i].text.length,
-                    position:   this._pendingAdds[i].position,
-                    options:    this._pendingAdds[i].options,
-                });
-            }
-            this._pendingAdds = [];
+            const { items, metrics, defaultColor } = this._prepareAddsForBuild();
+            const buffers = getWorkerBridge().buildBatchBuffersSync(items, { metrics, defaultColor });
+            this._commitBuiltBuffers(buffers, items);
         }
 
         if (this._renderer && this._pickingSystem) {
@@ -841,119 +887,16 @@ class CodeGrid extends THREE.Object3D {
 
         // Defer removals until the worker returns. Applying them now would
         // empty the GPU buffer while we wait ~5-20ms for the new content to
-        // build, flashing the grid. Snapshot and apply atomically below,
-        // after the new buffer is ready, so the swap happens inside a single
-        // synchronous block with no intermediate paint.
+        // build, flashing the grid. _commitBuiltBuffers applies them in the
+        // same synchronous block as the buffer swap, so old→new is atomic.
         const deferredRemovals = this._pendingRemovals;
         this._pendingRemovals = [];
 
         if (this._pendingAdds.length > 0) {
-            const bridge       = getWorkerBridge();
-            const defaultColor = this.config.textColor;
-            const items        = this._pendingAdds;
-            const itemCount    = items.length;
-
-            // Normalize items for worker
-            for (let i = 0; i < itemCount; i++) {
-                const p = items[i];
-                if (!p.color)                p.color   = p.options?.color   || defaultColor;
-                if (!p.scale)                p.scale   = p.options?.scale   || 1.0;
-                if (p.groupId === undefined) p.groupId = p.options?.groupId || 0;
-            }
-
-            const atlasCharSize = this.atlas.getCharSize();
-            const scale = this.config.worldScale;
-            const metrics = {
-                charWidth:     atlasCharSize.width  * scale,
-                charHeight:    atlasCharSize.height * scale,
-                letterSpacing: atlasCharSize.width  * scale * 0.05,
-                lineSpacing:   atlasCharSize.height * scale * 1.2,
-                worldScale:    scale,
-                atlasSize:     this.atlas.getAtlasTexture().width,
-                pixelWidth:    atlasCharSize.width,
-                pixelHeight:   atlasCharSize.height,
-            };
-
-            // Ensure codepoints exist in atlas before dispatching (workers can't call ensureCodepoints)
-            if (!this.config.shaper) {
-                const missingGraphemes = new Set();
-                for (let i = 0; i < itemCount; i++) {
-                    const text = items[i].text;
-                    if (!text) continue;
-                    for (const grapheme of iterGraphemes(text)) {
-                        const cp = grapheme.codePointAt(0);
-                        if (cp > 32 && !this.atlas.uvMap.has(grapheme)) {
-                            missingGraphemes.add(grapheme);
-                        }
-                    }
-                }
-                if (missingGraphemes.size > 0) {
-                    this.atlas.ensureGraphemes(Array.from(missingGraphemes));
-                }
-            }
-
+            const { items, metrics, defaultColor } = this._prepareAddsForBuild();
             try {
-                const buffers = await bridge.buildBatchBuffers(items, { metrics, defaultColor });
-
-                // Create renderer AFTER worker returns, sized to actual content
-                if (!this._renderer) {
-                    this._createRendererWithSize(buffers.count, true);
-                }
-
-                // Apply deferred removals here, in the same synchronous block
-                // as the buffer swap below. No paint happens between these
-                // two operations, so the grid transitions old→new atomically.
-                for (const rendererId of deferredRemovals) {
-                    this._renderer.remove(rendererId);
-                    const ourId = this._reverseIdMap.get(rendererId);
-                    if (ourId !== undefined) {
-                        this._idMap.delete(ourId);
-                        this._reverseIdMap.delete(rendererId);
-                        this._committedTexts.delete(ourId);
-                    }
-                }
-
-                const rendererIds = this._renderer.applyPrebuiltBuffers(buffers, items);
-
-                this._workerBoundsCache  = buffers.bounds;
-                this._contentBoundsDirty = false;
-
-                if (rendererIds) {
-                    for (let i = 0; i < itemCount; i++) {
-                        const p          = items[i];
-                        const rendererId = rendererIds[i];
-                        this._idMap.set(p.id, rendererId);
-                        this._reverseIdMap.set(rendererId, p.id);
-                        this._committedTexts.set(p.id, {
-                            id: p.id,
-                            rendererId,
-                            textLength: p.text.length,
-                            position:   p.position,
-                            options:    p.options,
-                        });
-                    }
-                } else {
-                    // Worker path produced no per-text metadata — fall back to sync re-render
-                    console.warn('CodeGrid: No renderer IDs from worker, falling back to sync re-render');
-                    this._renderer.clear();
-                    const batchItems = items.map(p => ({ text: p.text, position: p.position, options: p.options }));
-                    const syncIds    = this._renderer.renderBatch(batchItems);
-                    for (let i = 0; i < itemCount; i++) {
-                        const p          = items[i];
-                        const rendererId = syncIds[i];
-                        this._idMap.set(p.id, rendererId);
-                        this._reverseIdMap.set(rendererId, p.id);
-                        this._committedTexts.set(p.id, {
-                            id: p.id,
-                            rendererId,
-                            textLength: p.text.length,
-                            position:   p.position,
-                            options:    p.options,
-                        });
-                    }
-                }
-
-                this._pendingAdds = [];
+                const buffers = await getWorkerBridge().buildBatchBuffers(items, { metrics, defaultColor });
+                this._commitBuiltBuffers(buffers, items, deferredRemovals);
             } catch (error) {
                 console.warn('CodeGrid: Worker flush failed, falling back to sync:', error);
                 // Put the deferred removals back so _flush() applies them.
@@ -962,35 +905,6 @@ class CodeGrid extends THREE.Object3D {
                 return;
             }
         }
-
-        // Process pending updates that arrived after the worker dispatch
-        if (this._renderer && this._pendingUpdates.length > 0) {
-            for (const update of this._pendingUpdates) {
-                const rendererId = this._idMap.get(update.id);
-                if (rendererId === undefined) continue;
-                if (update.type === 'position') {
-                    this._renderer.updatePosition(rendererId, update.newPosition);
-                    const entry = this._committedTexts.get(update.id);
-                    if (entry) entry.position = update.newPosition;
-                } else if (update.type === 'color') {
-                    this._renderer.updateColor(rendererId, update.newColor);
-                    const entry = this._committedTexts.get(update.id);
-                    if (entry) entry.options.color = update.newColor;
-                } else if (update.type === 'text') {
-                    const entry = this._committedTexts.get(update.id);
-                    if (entry) {
-                        this._renderer.remove(rendererId);
-                        const newRid = this._renderer.render(update.newText, entry.position, entry.options);
-                        this._idMap.set(update.id, newRid);
-                        this._reverseIdMap.delete(rendererId);
-                        this._reverseIdMap.set(newRid, update.id);
-                        entry.rendererId = newRid;
-                        entry.textLength = update.newText.length;
-                    }
-                }
-            }
-        }
-        this._pendingUpdates = [];
 
         if (this._renderer && this._pickingSystem) {
             this._pickingSystem.registerRenderer(this._renderer);
@@ -1043,7 +957,10 @@ class CodeGrid extends THREE.Object3D {
     }
 
     /**
-     * Layout content synchronously using GlyphRendererV15
+     * Layout content synchronously. Identical to _layoutContentAsync except
+     * it builds on the main thread (loadText must finish before the caller
+     * applies highlights). Adds the whole content as ONE item — the builder
+     * lays out the lines and emits the authoritative line→slot offsets.
      * @private
      */
     _layoutContent() {
@@ -1056,31 +973,29 @@ class CodeGrid extends THREE.Object3D {
                 { x: 0, y: currentY, z: 0 },
                 { color: this.config.filenameColor }
             );
-            currentY -= this.metrics.lineHeight * 1.5; // Extra space after filename
+            currentY -= this.metrics.lineHeight * 1.5;
         }
 
-        // Add content lines
-        for (let i = 0; i < this.lines.length; i++) {
-            const line = this.lines[i];
-
-            // Skip empty lines but still advance Y
-            if (line.length > 0) {
-                const id = this._addText(
-                    line,
-                    { x: 0, y: currentY, z: 0 },
-                    { color: this.config.textColor }
-                );
-                this._contentTextIds.push(id);
-            }
-
-            currentY -= this.metrics.lineHeight;
+        // Add ENTIRE content as a single text item (builder handles newlines)
+        if (this.content.length > 0) {
+            const id = this._addText(
+                this.content,
+                { x: 0, y: currentY, z: 0 },
+                { color: this.config.textColor }
+            );
+            this._contentTextIds.push(id);
         }
 
-        // Flush all additions to GPU
         this._flush();
 
-        // Build line→slot index after flush
-        this._buildLineSlotBase();
+        // Build line→slot index from the builder's authoritative line offsets,
+        // plus the per-line wrap data + layout origin used by cursor math.
+        const contentItemMeta = this._getContentItemMeta();
+        this._buildLineSlotBase(contentItemMeta?.lineSlotOffsets);
+        this._buildLayoutWrapIndex(contentItemMeta?.wrapColsPerLine);
+        this._layoutOriginY = (this.config.showFilename && this.filename)
+            ? -this.metrics.lineHeight * 1.5
+            : 0;
     }
 
     /**

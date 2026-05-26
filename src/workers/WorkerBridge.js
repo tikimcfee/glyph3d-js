@@ -147,7 +147,7 @@ export class WorkerBridge {
 
         // Fallback if no workers
         if (this.workers.length === 0) {
-            return this._buildBatchBuffersSync(items, shared);
+            return this.buildBatchBuffersSync(items, shared);
         }
 
         const worker = this._getNextWorker();
@@ -235,11 +235,12 @@ export class WorkerBridge {
     }
 
     /**
-     * Synchronous fallback for batch when workers unavailable.
-     * Uses cache if available; strips dead fields from items.
-     * @private
+     * Synchronous batch build on the main thread — same builder as the worker
+     * path, just without the postMessage round-trip. Used when no workers are
+     * available and by callers that must build synchronously (e.g. CodeGrid's
+     * loadText, where highlights are applied immediately after).
      */
-    _buildBatchBuffersSync(items, shared) {
+    buildBatchBuffersSync(items, shared) {
         const shaperOrCache = this._shapeCache || this._shaper;
         const shapedItems = items.map(item => ({
             position: item.position,

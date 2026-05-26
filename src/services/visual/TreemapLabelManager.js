@@ -253,16 +253,27 @@ export class TreemapLabelManager {
     }
 
     /**
-     * Flush items synchronously.
+     * Flush items synchronously — same builder as _buildAsync, run on the
+     * main thread (no worker round-trip).
      * @private
      */
     _buildSync(pendingItems) {
-        const batchItems = pendingItems.map(p => ({
-            text:     p.text,
-            position: p.position,
-            options:  p.options,
-        }));
-        this._renderer.renderBatch(batchItems);
+        const atlas = this._atlas;
+        const defaultColor = { r: 1, g: 1, b: 1 };
+        const atlasCharSize = atlas.getCharSize();
+        const scale = 0.025;
+        const metrics = {
+            charWidth:     atlasCharSize.width  * scale,
+            charHeight:    atlasCharSize.height * scale,
+            letterSpacing: atlasCharSize.width  * scale * 0.05,
+            lineSpacing:   atlasCharSize.height * scale * 1.2,
+            worldScale:    scale,
+            atlasSize:     atlas.getAtlasTexture().width,
+            pixelWidth:    atlasCharSize.width,
+            pixelHeight:   atlasCharSize.height,
+        };
+        const buffers = getWorkerBridge().buildBatchBuffersSync(pendingItems, { metrics, defaultColor });
+        this._renderer.applyPrebuiltBuffers(buffers, pendingItems);
     }
 
     /**
