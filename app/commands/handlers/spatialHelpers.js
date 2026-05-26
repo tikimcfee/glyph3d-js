@@ -39,12 +39,21 @@ export function resolveGrid(grids, arg, label = 'grid') {
  * (or when the integer index is out of range). This prevents ID "42" from
  * shadowing array index 42.
  *
+ * The single grid resolver. Declared fallback chain:
+ *   1. pure-integer string  -> array index
+ *   2. registry ID
+ *   3. (opt-in `byName`)     -> filename/sourcePath suffix, then case-insensitive
+ *                               substring. Subsumes the old highlight `findGrid`
+ *                               (sourcePath.endsWith) and camera.focus (filename
+ *                               substring) wrappers — one matcher, not three.
+ *
  * @param {Object} ctx - command context bag (must have .registry and .getGrids)
- * @param {string} arg - registry ID or numeric index string
+ * @param {string} arg - registry ID, numeric index, or (with byName) name/path
  * @param {string} [label='grid'] - label for error messages
+ * @param {{ byName?: boolean }} [opts] - enable the name/path fallback (step 3)
  * @returns {{ grid: Object, idx: number, registryId: string|null } | { error: string }}
  */
-export function resolveGridByIdOrIndex(ctx, arg, label = 'grid') {
+export function resolveGridByIdOrIndex(ctx, arg, label = 'grid', { byName = false } = {}) {
     const grids = ctx.getGrids();
     const isPureInteger = /^\d+$/.test(arg);
 
@@ -68,11 +77,29 @@ export function resolveGridByIdOrIndex(ctx, arg, label = 'grid') {
         }
     }
 
-    // 3. Nothing found
+    // 3. Opt-in name/path fallback: suffix match first (so "src/foo.js" pins an
+    // exact tail), then loose case-insensitive substring across filename + path.
+    if (byName) {
+        const nameOf = (g) => g.getFilename?.() || '';
+        const pathOf = (g) => g.getSourcePath?.() || '';
+        let idx = grids.findIndex((g) => pathOf(g).endsWith(arg) || nameOf(g).endsWith(arg));
+        if (idx < 0) {
+            const needle = String(arg).toLowerCase();
+            idx = grids.findIndex((g) =>
+                pathOf(g).toLowerCase().includes(needle) || nameOf(g).toLowerCase().includes(needle));
+        }
+        if (idx >= 0) {
+            const registryId = ctx.registry ? ctx.registry.getIdByGrid(grids[idx]) : null;
+            return { grid: grids[idx], idx, registryId };
+        }
+    }
+
+    // 4. Nothing found
     if (isPureInteger) {
         return { error: `ERR: invalid ${label} index ${arg} (0-${grids.length - 1})` };
     }
-    return { error: `ERR: no ${label} found for "${arg}" (not a registry ID or valid index 0-${grids.length - 1})` };
+    const how = byName ? 'registry ID, name, or valid index' : 'registry ID or valid index';
+    return { error: `ERR: no ${label} found for "${arg}" (not a ${how} 0-${grids.length - 1})` };
 }
 
 // ──────────────────────────────────────────────────────────────

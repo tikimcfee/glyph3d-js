@@ -47,26 +47,6 @@ function parseColor(args, startIdx) {
 }
 
 /**
- * Resolve a grid from args[0] — by index, registry ID, or sourcePath substring.
- */
-function findGrid(ctx, arg) {
-    // Try standard resolution first (index or registry ID)
-    const result = resolveGridByIdOrIndex(ctx, arg);
-    if (!result.error) return result;
-
-    // Fallback: match by sourcePath suffix
-    const grids = ctx.getGrids();
-    for (let i = 0; i < grids.length; i++) {
-        const sp = grids[i].userData?.sourcePath;
-        if (sp && sp.endsWith(arg)) {
-            return { grid: grids[i], idx: i };
-        }
-    }
-
-    return result; // return original error
-}
-
-/**
  * @param {import('../CommandRouter.js').default} router
  */
 export default function registerHighlightCommands(router) {
@@ -80,7 +60,7 @@ export default function registerHighlightCommands(router) {
             return { text: 'ERR: usage: highlight.glyph <grid> <line> <col> [color]', data: null };
         }
 
-        const resolved = findGrid(ctx, args[0]);
+        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { byName: true });
         if (resolved.error) return { text: resolved.error, data: null };
 
         const line = parseInt(args[1]);
@@ -117,7 +97,7 @@ export default function registerHighlightCommands(router) {
             return { text: 'ERR: usage: highlight.range <grid> <line> <colStart> <colEnd> [color]', data: null };
         }
 
-        const resolved = findGrid(ctx, args[0]);
+        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { byName: true });
         if (resolved.error) return { text: resolved.error, data: null };
 
         const line = parseInt(args[1]);
@@ -151,7 +131,7 @@ export default function registerHighlightCommands(router) {
             return { text: 'ERR: usage: highlight.lines <grid> <startLine> [endLine] [color]', data: null };
         }
 
-        const resolved = findGrid(ctx, args[0]);
+        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { byName: true });
         if (resolved.error) return { text: resolved.error, data: null };
 
         const startLine = parseInt(args[1]);
@@ -201,7 +181,7 @@ export default function registerHighlightCommands(router) {
             return { text: 'ERR: usage: highlight.token <grid> <text> [color]', data: null };
         }
 
-        const resolved = findGrid(ctx, args[0]);
+        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { byName: true });
         if (resolved.error) return { text: resolved.error, data: null };
 
         const pattern = args[1];
@@ -267,7 +247,7 @@ export default function registerHighlightCommands(router) {
         }
 
         // One arg: clear all highlights on one grid
-        const resolved = findGrid(ctx, args[0]);
+        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { byName: true });
         if (resolved.error) return { text: resolved.error, data: null };
         const { grid } = resolved;
 

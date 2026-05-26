@@ -38,37 +38,20 @@ export default function registerCameraCommands(router) {
         const target = args.join(' ');
         const grids = ctx.getGrids();
 
-        // Steps 1-2: try numeric index, then registry ID (via resolveGridByIdOrIndex)
-        const resolved = resolveGridByIdOrIndex(ctx, target);
-        if (!resolved.error) {
-            const regIdx = resolved.idx >= 0 ? resolved.idx : grids.indexOf(resolved.grid);
-            if (regIdx >= 0) {
-                ctx.cameraController.focusOnGrid(regIdx);
-                if (ctx.spatialNav) ctx.spatialNav.focusGrid(regIdx, false);
-            }
-            const label = resolved.registryId || `#${regIdx}`;
-            return {
-                text: `OK: focusing on "${label}"`,
-                data: { index: regIdx, registryId: resolved.registryId }
-            };
-        }
+        // Index, registry ID, or name/path — one resolver, declared fallback chain.
+        const resolved = resolveGridByIdOrIndex(ctx, target, 'grid', { byName: true });
+        if (resolved.error) return { text: `ERR: no grid matching '${target}'`, data: null };
 
-        // Step 3: filename substring fallback
-        const matchIdx = grids.findIndex(g => {
-            const name = g.getFilename() || g.getSourcePath() || '';
-            return name.toLowerCase().includes(target.toLowerCase());
-        });
-        if (matchIdx >= 0) {
-            ctx.cameraController.focusOnGrid(matchIdx);
-            if (ctx.spatialNav) ctx.spatialNav.focusGrid(matchIdx, false);
-            const name = grids[matchIdx].getFilename();
-            return {
-                text: `OK: focusing on grid ${matchIdx} (${name})`,
-                data: { index: matchIdx, name }
-            };
+        const idx = resolved.idx >= 0 ? resolved.idx : grids.indexOf(resolved.grid);
+        if (idx >= 0) {
+            ctx.cameraController.focusOnGrid(idx);
+            if (ctx.spatialNav) ctx.spatialNav.focusGrid(idx, false);
         }
-
-        return { text: `ERR: no grid matching '${target}'`, data: null };
+        const label = resolved.registryId || grids[idx]?.getFilename?.() || `#${idx}`;
+        return {
+            text: `OK: focusing on "${label}"`,
+            data: { index: idx, registryId: resolved.registryId }
+        };
     }, { description: 'Focus camera on grid by index, registry ID, or name', usage: '<index|id|name>' });
 
     router.register('camera.reset', (args, ctx) => {
