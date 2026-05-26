@@ -23,6 +23,7 @@ import { GlyphAtlas, HarfBuzzShaper, SlugEncoder, collectUniqueGlyphIds } from '
 import SceneRegistry from '../src/services/SceneRegistry.js';
 import CommandRouter from '../src/services/orchestration/CommandRouter.js';
 import WebSocketBridge from '../src/services/orchestration/WebSocketBridge.js';
+import { installConsoleForwarder } from '../src/services/orchestration/consoleForwarder.js';
 import { registerAllCommands } from './commands/handlers/index.js';
 
 import { gatherVisitorFacts } from './home/VisitorIntrospect.js';
@@ -141,7 +142,6 @@ export class HomeShell {
         //     and they execute through the same CommandRouter the bar uses.
         //   - console.log/warn/error + uncaught errors are forwarded so the
         //     server log shows what the browser sees, in real time.
-        this._installLogForwarders();
 
         // Tell the bootstrap livereload watcher in home.html to release
         // the DISPLAY slot — the relay only allows one. Then connect.
@@ -152,6 +152,10 @@ export class HomeShell {
             showStatus: false,  // home page is its own visual; no status badge
         });
         this.context.wsbridge = this.bridge;
+
+        // Forward console + uncaught errors to the relay (no-ops until the
+        // bridge connects). The one canonical forwarder, shared with the IDE.
+        installConsoleForwarder(this.bridge);
 
         // Livereload: when glyph3d-cli's watcher sees a file change in src/
         // or app/, the relay sends an fs/didChange notification. Without
@@ -177,61 +181,6 @@ export class HomeShell {
 
         this._startRenderLoop();
         this._wireResize();
-    }
-
-    /**
-     * Patch console + uncaught-error handlers to forward to the relay via
-     * WebSocketBridge once it connects. Cribbed from the equivalent in
-     * app/commands/index.js, with two additions:
-     *   - window.onerror (uncaught synchronous errors)
-     *   - unhandledrejection (uncaught promise rejections)
-     * Both are common-case failure surfaces for live dev that plain
-     * console.* doesn't catch on its own.
-     *
-     * Forwarders are no-ops until `this.bridge.connected` flips true, then
-     * fire-and-forget. Original console output is preserved either way.
-     * @private
-     */
-    _installLogForwarders() {
-        if (HomeShell._forwardersInstalled) return;  // module-level guard
-        HomeShell._forwardersInstalled = true;
-        const MAX_LEN = 400;
-        const send = (level, text) => {
-            const b = this.bridge;
-            if (!b || !b.connected || typeof b.ws?.send !== 'function') return;
-            if (text.length > MAX_LEN) text = text.slice(0, MAX_LEN) + '…';
-            try {
-                b.ws.send(JSON.stringify({ event: 'browser.log', level, text }));
-            } catch {}
-        };
-        for (const level of ['log', 'warn', 'error']) {
-            const orig = console[level].bind(console);
-            console[level] = (...args) => {
-                orig(...args);
-                let text;
-                try {
-                    text = args.map(a => {
-                        if (typeof a === 'string') return a;
-                        if (a instanceof Error) {
-                            return a.stack ? `${a.message}\n${a.stack}` : a.message || String(a);
-                        }
-                        try { return JSON.stringify(a); } catch { return String(a); }
-                    }).join(' ');
-                } catch {
-                    text = String(args[0] ?? '');
-                }
-                send(level, text);
-            };
-        }
-        window.addEventListener('error', (e) => {
-            const msg = e.error?.stack || e.message || String(e);
-            send('error', `[uncaught] ${msg}`);
-        });
-        window.addEventListener('unhandledrejection', (e) => {
-            const r = e.reason;
-            const msg = r?.stack || r?.message || String(r);
-            send('error', `[unhandled-rejection] ${msg}`);
-        });
     }
 
     // ─────────────────────────────────────────────────────────────────

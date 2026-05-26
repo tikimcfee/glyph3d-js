@@ -9,6 +9,7 @@
 
 import CommandRouter from '../../src/services/orchestration/CommandRouter.js';
 import WebSocketBridge from '../../src/services/orchestration/WebSocketBridge.js';
+import { installConsoleForwarder } from '../../src/services/orchestration/consoleForwarder.js';
 import ViewerAPI from '../../src/services/orchestration/ViewerAPI.js';
 import AttentionManager from '../../src/services/interaction/AttentionManager.js';
 import { registerAllCommands } from './handlers/index.js';
@@ -139,53 +140,6 @@ function buildContext(viewer) {
         attentionManager: new AttentionManager(),
         get attention() { return this.attentionManager.state; },
     };
-}
-
-/**
- * Patch console.log/warn/error to forward messages to the relay via WebSocket.
- * Each forwarded message is a JSON event: { event: 'browser.log', level, text }.
- * The relay prints these to stdout so CLI users see browser output in real time.
- *
- * The patch is installed once; subsequent calls are no-ops.
- * Only the first 200 characters of the serialized message are forwarded to keep
- * the channel lightweight.
- *
- * @param {WebSocketBridge} bridge
- */
-let _consoleForwarderInstalled = false;
-function _installConsoleForwarder(bridge) {
-    if (_consoleForwarderInstalled) return;
-    _consoleForwarderInstalled = true;
-
-    const LEVELS = ['log', 'warn', 'error'];
-    const MAX_LEN = 200;
-
-    for (const level of LEVELS) {
-        const original = console[level].bind(console);
-        console[level] = (...args) => {
-            original(...args);
-            if (!bridge.connected) return;
-            // Serialize args to a single string, capped at MAX_LEN.
-            // Error instances need special handling — their enumerable
-            // own-props are empty, so JSON.stringify(err) === "{}" and
-            // the relay log loses the actual failure.
-            let text;
-            try {
-                text = args.map(a => {
-                    if (typeof a === 'string') return a;
-                    if (a instanceof Error) {
-                        return a.stack ? `${a.message}\n${a.stack}` : a.message || String(a);
-                    }
-                    try { return JSON.stringify(a); } catch { return String(a); }
-                }).join(' ');
-            } catch {
-                text = String(args[0] ?? '');
-            }
-            if (text.length > MAX_LEN) text = text.slice(0, MAX_LEN) + '...';
-            const msg = JSON.stringify({ event: 'browser.log', level, text });
-            bridge.send(msg);
-        };
-    }
 }
 
 /**
@@ -486,10 +440,10 @@ export function initCommandCenter(viewer, options = {}) {
         console.warn(`[fs/didChange] unknown event "${event}" for ${params?.path}`);
     });
 
-    // Console log forwarding — patch console.log/warn/error to send the first
-    // 200 chars of each message to the relay so the CLI user sees browser output.
-    // Only forwards when the WebSocket is connected; no-ops otherwise.
-    _installConsoleForwarder(bridge);
+    // Console log forwarding — patch console.* (and uncaught window errors) to
+    // send each message to the relay so the CLI user sees browser output. Only
+    // forwards when the WebSocket is connected; no-ops otherwise.
+    installConsoleForwarder(bridge);
 
     // 5. Create the ViewerAPI facade and expose globally
     const api = new ViewerAPI(router, context);
