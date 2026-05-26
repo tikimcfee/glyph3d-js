@@ -838,7 +838,69 @@ export default class GlyphField {
         return box;
     }
 
+    /**
+     * Total glyph count. O(1) — cached counter maintained by every
+     * add/remove/clear/applyPrebuiltBuffers path.
+     * @returns {number}
+     */
+    getGlyphCount() {
+        return this._cachedGlyphCount;
+    }
+
+    /**
+     * World-space bounds for a renderedTexts entry, read from the typed arrays.
+     * @param {Object} entry - renderedTexts value with bufferStartIndex + glyphCount
+     * @returns {{min,max,width,height,depth}|null}
+     */
+    _getTextBounds(entry) {
+        if (!entry || entry.glyphCount === 0 || !this.instanceMesh) return null;
+
+        const geom      = this.instanceMesh.geometry;
+        const positions = geom.attributes.instancePosition.array;
+        const sizes     = geom.attributes.instanceSize.array;
+        const start     = entry.bufferStartIndex;
+
+        let minX = Infinity, minY = Infinity, minZ = Infinity;
+        let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+
+        for (let i = 0; i < entry.glyphCount; i++) {
+            const buf = start + i;
+            const px = positions[buf * 3];
+            const py = positions[buf * 3 + 1];
+            const pz = positions[buf * 3 + 2];
+            const sw = sizes[buf * 2];
+            const sh = sizes[buf * 2 + 1];
+            if (px      < minX) minX = px;
+            if (py      < minY) minY = py;
+            if (pz      < minZ) minZ = pz;
+            if (px + sw > maxX) maxX = px + sw;
+            if (py + sh > maxY) maxY = py + sh;
+            if (pz      > maxZ) maxZ = pz;
+        }
+        if (minX === Infinity) return null;
+
+        return {
+            min: { x: minX, y: minY, z: minZ },
+            max: { x: maxX, y: maxY, z: maxZ },
+            width:  maxX - minX,
+            height: maxY - minY,
+            depth:  maxZ - minZ,
+        };
+    }
+
     // ── Lifecycle ─────────────────────────────────────────────────────────────
+
+    /**
+     * Remove a single text entry and compact the surviving instances.
+     * @param {number} id
+     */
+    remove(id) {
+        const entry = this.renderedTexts.get(id);
+        if (!entry) return;
+        this._cachedGlyphCount -= entry.glyphCount;
+        this.renderedTexts.delete(id);
+        this._rebuildAllInstances();
+    }
 
     clear() {
         this.renderedTexts.clear();
