@@ -180,9 +180,9 @@ export default function registerAnnotationCommands(router) {
         saveGridState(ctx, idx);
 
         // Apply highlight: color tint via group color
-        const collection = grid.getCollection?.() || grid.collection || grid.glyphCollection;
-        if (collection?.setGroupColor) {
-            collection.setGroupColor(0, color);
+        const renderer = grid.getRenderer?.();
+        if (renderer?.setGroupColor) {
+            renderer.setGroupColor(0, color);
         }
 
         // Z-pop: bring grid forward

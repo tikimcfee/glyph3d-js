@@ -46,7 +46,7 @@ export function restoreGridState(ctx, gridIndex) {
     }
     grid.position.z = saved.originalZ;
     grid.scale.setScalar(saved.originalScale);
-    const coll = grid.getCollection?.() || grid.collection || grid.glyphCollection;
+    const coll = grid.getRenderer?.();
     if (coll?.setGroupColor) {
         coll.setGroupColor(0, saved.originalColor);
     }

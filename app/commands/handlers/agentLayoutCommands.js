@@ -192,7 +192,7 @@ export default function registerAgentLayoutCommands(router) {
 
         // Reset colors to identity (white) and scale to 1
         for (const { grid } of agents) {
-            const coll = grid.getCollection?.() || grid.collection || grid.glyphCollection;
+            const coll = grid.getRenderer?.();
             if (coll?.setGroupColor) {
                 coll.setGroupColor(0, { ...COLORS.IDENTITY });
             }
@@ -248,7 +248,7 @@ export default function registerAgentLayoutCommands(router) {
         // Save state and apply dim/focus for each agent
         for (const { grid, label, index } of agents) {
             saveGridState(ctx, index);
-            const coll = grid.getCollection?.() || grid.collection || grid.glyphCollection;
+            const coll = grid.getRenderer?.();
 
             if (label === target.label) {
                 // Highlight: full brightness (identity), pull forward in Z
@@ -328,7 +328,7 @@ export default function registerAgentLayoutCommands(router) {
         // Highlight the correlated pair, dim everything else
         const pairColor = { ...COLORS.HIGHLIGHT };
         for (const { grid, label } of agents) {
-            const coll = grid.getCollection?.() || grid.collection || grid.glyphCollection;
+            const coll = grid.getRenderer?.();
             if (label === agent1.label || label === agent2.label) {
                 if (coll?.setGroupColor) {
                     coll.setGroupColor(0, pairColor);

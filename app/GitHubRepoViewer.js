@@ -64,28 +64,6 @@ import { SpatialAnimator } from '../src/services/spatial/SpatialAnimator.js';
 import { SpatialWindowManager } from '../src/services/spatial/SpatialWindowManager.js';
 import { EntityInputRouter } from '../src/services/interaction/EntityInputRouter.js';
 
-/**
- * Parse GitHub URL to owner/repo
- * @param {string} url
- * @returns {{ owner: string, repo: string } | null}
- */
-function parseGitHubUrl(url) {
-    const patterns = [
-        /github\.com\/([^\/]+)\/([^\/]+)/,
-        /^([^\/]+)\/([^\/]+)$/
-    ];
-    for (const pattern of patterns) {
-        const match = url.match(pattern);
-        if (match) {
-            return {
-                owner: match[1],
-                repo: match[2].replace(/\.git$/, '').split('/')[0]
-            };
-        }
-    }
-    return null;
-}
-
 export class GitHubRepoViewer {
     /**
      * @param {HTMLCanvasElement} canvas
@@ -1230,7 +1208,7 @@ export class GitHubRepoViewer {
         const url = this.repoInput.value.trim();
         if (!url) { this.toastUI.show('Please enter a GitHub URL first', 'error'); return; }
 
-        const parsed = parseGitHubUrl(url);
+        const parsed = GitHubRepositorySource.parseGitHubUrl(url);
         if (!parsed) { this.toastUI.show('Invalid GitHub URL', 'error'); return; }
 
         const { owner, repo } = parsed;
@@ -1357,7 +1335,7 @@ export class GitHubRepoViewer {
         const url = this.repoInput.value.trim();
         if (!url) { this.toastUI.show('Please enter a GitHub URL', 'error'); return; }
 
-        const parsed = parseGitHubUrl(url);
+        const parsed = GitHubRepositorySource.parseGitHubUrl(url);
         if (!parsed) { this.toastUI.show('Invalid GitHub URL', 'error'); return; }
 
         const { owner, repo } = parsed;

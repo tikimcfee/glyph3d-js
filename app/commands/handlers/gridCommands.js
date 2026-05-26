@@ -95,9 +95,9 @@ export default function registerGridCommands(router) {
         if ([r, g, b].some(isNaN)) return { text: 'ERR: r, g, b must be numbers (0-1)', data: null };
 
         const grid = resolved.grid;
-        const collection = grid.getCollection();
-        if (collection && collection.setGroupColor) {
-            collection.setGroupColor(0, { r, g, b });
+        const renderer = grid.getRenderer();
+        if (renderer && renderer.setGroupColor) {
+            renderer.setGroupColor(0, { r, g, b });
         }
         return {
             text: `OK: grid ${resolved.idx} color set to (${r}, ${g}, ${b})`,

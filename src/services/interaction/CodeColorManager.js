@@ -6,7 +6,7 @@
  * active layers (heatmap, search highlight, focus accent) resolve to
  * one final color per file.
  *
- * Uses group-level coloring: grid.getCollection().setGroupColor(0, color)
+ * Uses group-level coloring: grid.getRenderer().setGroupColor(0, color)
  * which is O(1) per file via the GPU DataTexture group color system.
  * The async glyph loading path produces ONE text ID per file, so
  * group 0 is always the correct target for file-level coloring.
@@ -179,11 +179,11 @@ export class CodeColorManager {
      * @param {boolean} useReplaceMode - true to use replace blend, false for multiply
      */
     _applyColorToGrid(grid, color, useReplaceMode) {
-        const collection = grid.getCollection();
-        if (!collection) return;
+        const renderer = grid.getRenderer();
+        if (!renderer) return;
 
-        collection.setGroupColor(0, color);
-        collection.setGroupColorBlend(0, useReplaceMode ? 1.0 : 0.0);
+        renderer.setGroupColor(0, color);
+        renderer.setGroupColorBlend(0, useReplaceMode ? 1.0 : 0.0);
     }
 }
 

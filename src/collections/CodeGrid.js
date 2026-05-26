@@ -404,20 +404,6 @@ class CodeGrid extends THREE.Object3D {
     }
 
     /**
-     * Compatibility shim — returns the underlying GlyphRenderer so that
-     * callers that used the old GlyphCollection API (setGroupColor, setGroupOffset,
-     * etc.) continue to work against GlyphRendererV15's equivalent methods.
-     *
-     * This method will be removed in C5 when all callers are updated to use
-     * getRenderer() directly.
-     *
-     * @returns {GlyphRendererV15|null}
-     */
-    getCollection() {
-        return this._renderer;
-    }
-
-    /**
      * Wire a PickingSystem so flush paths automatically re-register this
      * grid's renderer after every buffer rebuild.
      * @param {import('../picking/PickingSystem.js').PickingSystem} pickingSystem
