@@ -90,11 +90,14 @@ function _buildVertexNode(uniforms) {
         // Left-align: PlaneGeometry center-anchored → shift right by half width
         const alignOffset = vec3(iSize.x.mul(0.5), float(0), float(0));
 
-        // Group DataTexture lookup (4 columns × maxGroups rows, RGBA32F)
-        const gv     = iGroup.add(0.5).div(groupTexHeight);
-        const gPos   = groupTex.sample(vec2(float(0.125), gv));
-        const gColor = groupTex.sample(vec2(float(0.625), gv));
-        const gScale = groupTex.sample(vec2(float(0.875), gv));
+        // Group DataTexture lookup (4 columns × maxGroups rows, RGBA32F).
+        // textureLoad with exact integer texel coords — NOT normalized .sample():
+        // rgba32float is not filterable under WebGPU, and a half-texel rounding on
+        // the column UV silently picks the wrong column (washing color to white).
+        const grow   = int(iGroup);
+        const gPos   = textureLoad(groupTex, ivec2(int(0), grow)); // col 0: offset + visibility
+        const gColor = textureLoad(groupTex, ivec2(int(2), grow)); // col 2: color multiplier
+        const gScale = textureLoad(groupTex, ivec2(int(3), grow)); // col 3: scale + colorBlend (w)
 
         // World position = aligned quad + (instancePos * groupScale) + groupOffset
         const worldPos = scaled.add(alignOffset).add(iPos.mul(gScale.xyz)).add(gPos.xyz);
@@ -110,7 +113,7 @@ function _buildVertexNode(uniforms) {
         // Per-glyph highlight from RGBA8 DataTexture (1024 wide, 2D wrapped)
         const hx = int(instanceIndex).mod(int(1024));
         const hy = int(instanceIndex).div(int(1024));
-        const highlight = highlightTex.sample(ivec2(hx, hy)).setSampler(false);
+        const highlight = textureLoad(highlightTex, ivec2(hx, hy));
         vAddedColor.assign(highlight.rgb);
 
         // Glyph-map lookup: glyphId → curve range (RGBA16UI, 1 texel/glyph)
