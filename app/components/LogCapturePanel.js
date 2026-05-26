@@ -5,7 +5,7 @@
  * Integrates with the LogCapture utility from glyph3d-js observability.
  */
 
-import { logCapture } from '../../src/utils/LogCapture.js';
+import { logCapture } from '@glyph3d/core/utils/LogCapture.js';
 
 /** Panel HTML for the drawer registration */
 export function logCapturePanelHTML() {

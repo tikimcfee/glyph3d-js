@@ -13,16 +13,16 @@
  *
  * Works even when WebSocket is disconnected -- local commands execute directly.
  */
-import { primaryMod } from '../../src/services/utils/platform.js';
+import { primaryMod } from '@glyph3d/core/services/utils/platform.js';
 
-import { encodeBase64 } from '../../src/utils/encoding.js';
+import { encodeBase64 } from '@glyph3d/core/utils/encoding.js';
 
 const MODES = { COMMAND: 'command', TERMINAL: 'terminal' };
 
 export default class CommandBar {
     /**
      * @param {Object} deps
-     * @param {import('../../src/services/orchestration/CommandRouter.js').default} deps.router
+     * @param {import('../../packages/glyph3d-core/src/services/orchestration/CommandRouter.js').default} deps.router
      * @param {Object} [deps.cameraController] - disabled when bar is focused
      * @param {Object} [deps.context] - command context bag (has .terminals, .registry)
      */

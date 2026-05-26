@@ -11,14 +11,14 @@
  */
 
 import * as THREE from 'three';
-import HandRenderer from '../../src/hand/HandRenderer.js';
-import GestureDetector from '../../src/hand/GestureDetector.js';
-import MockHandSource from '../../src/hand/MockHandSource.js';
-import WebcamHandSource from '../../src/hand/WebcamHandSource.js';
-import WebSocketHandSource from '../../src/hand/WebSocketHandSource.js';
-import ViewportRenderer from '../../src/hand/ViewportRenderer.js';
-import CameraController from '../../src/camera/CameraController.js';
-import InputManager from '../../src/camera/InputManager.js';
+import HandRenderer from '@glyph3d/core/hand/HandRenderer.js';
+import GestureDetector from '@glyph3d/core/hand/GestureDetector.js';
+import MockHandSource from '@glyph3d/core/hand/MockHandSource.js';
+import WebcamHandSource from '@glyph3d/core/hand/WebcamHandSource.js';
+import WebSocketHandSource from '@glyph3d/core/hand/WebSocketHandSource.js';
+import ViewportRenderer from '@glyph3d/core/hand/ViewportRenderer.js';
+import CameraController from '@glyph3d/core/camera/CameraController.js';
+import InputManager from '@glyph3d/core/camera/InputManager.js';
 
 class HandTrackingApp {
     constructor(canvas, config = {}) {

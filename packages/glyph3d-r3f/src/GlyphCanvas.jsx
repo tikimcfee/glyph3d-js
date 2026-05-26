@@ -19,7 +19,7 @@ import { GlyphProvider } from './context.jsx';
  *        knowingly).
  * @param {(renderer, props) => void} [props.onRenderer] - Hook to tweak the
  *        renderer after init() (e.g. clear color, pixel ratio policy).
- * @param {import('glyph3d-js').GlyphAtlas} props.atlas - Ready atlas from
+ * @param {import('@glyph3d/core').GlyphAtlas} props.atlas - Ready atlas from
  *        bootGlyphEngine (carries shaper + slug data). Provided to children.
  * @param {object} [props.canvasProps] - Extra props spread onto r3f <Canvas>
  *        (camera, dpr, onCreated, style, children, etc.).

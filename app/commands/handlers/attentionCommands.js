@@ -21,7 +21,7 @@
 const VALID_SLOTS = ['hover', 'primary', 'key'];
 
 /**
- * @param {import('../../../src/services/orchestration/CommandRouter.js').default} router
+ * @param {import('../../../packages/glyph3d-core/src/services/orchestration/CommandRouter.js').default} router
  */
 export default function registerAttentionCommands(router) {
 

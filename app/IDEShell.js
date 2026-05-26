@@ -27,8 +27,8 @@ import {
 import { logCapturePanelHTML } from './components/LogCapturePanel.js';
 import { diffPanelHTML } from './components/DiffPanel.js';
 import { installerPanelHTML, initInstallerPanel } from './components/InstallerPanel.js';
-import { primaryMod } from '../src/services/utils/platform.js';
-import { stateController } from '../src/services/state/StateController.js';
+import { primaryMod } from '@glyph3d/core/services/utils/platform.js';
+import { stateController } from '@glyph3d/core/services/state/StateController.js';
 
 // Panel title labels keyed by data-panel attribute
 const PANEL_TITLES = {
@@ -1165,7 +1165,7 @@ export class IDEShell {
     /**
      * Wire the WebSocket tab to show command I/O from the WebSocketBridge.
      * Call after the command center is initialized.
-     * @param {import('../src/services/orchestration/WebSocketBridge.js').default} bridge
+     * @param {import('../packages/glyph3d-core/src/services/orchestration/WebSocketBridge.js').default} bridge
      */
     initWsLog(bridge) {
         const panel = document.getElementById('pv-ws-log');

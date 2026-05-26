@@ -4,7 +4,7 @@ import * as THREE from 'three/webgpu';
 import { useGlyphEngine, GlyphCanvas, CodeGrid, ViewerCamera } from 'glyph3d-r3f';
 // The consumer owns the font choice — the engine doesn't bake a path. Resolved
 // via the core's "./fonts/*" export, not a reach into src/.
-import fontUrl from 'glyph3d-js/fonts/Cousine-Regular.ttf?url';
+import fontUrl from '@glyph3d/core/fonts/Cousine-Regular.ttf?url';
 
 const SAMPLE = `// glyph3d-r3f bindings — keystone harness
 function fib(n) {

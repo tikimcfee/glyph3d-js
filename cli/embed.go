@@ -6,8 +6,9 @@ import (
 )
 
 // webFS holds all static assets copied into web/ by the build script.
-// The build step (Makefile) copies src/, app/, examples/, index.html, etc.
-// into cli/web/ before compilation, then cleans up after.
+// The build step (Makefile) copies packages/glyph3d-core/src/, app/,
+// examples/, index.html, etc. into cli/web/ (paths preserved via
+// cp --parents) before compilation, then cleans up after.
 //
 //go:embed all:web
 var webFS embed.FS

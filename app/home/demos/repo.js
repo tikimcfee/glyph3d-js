@@ -13,8 +13,8 @@
  */
 
 import * as THREE from 'three';
-import { RemoteFileSystemProvider } from '../../../src/services/data/RemoteFileSystemProvider.js';
-import CodeGrid from '../../../src/collections/CodeGrid.js';
+import { RemoteFileSystemProvider } from '@glyph3d/core/services/data/RemoteFileSystemProvider.js';
+import CodeGrid from '@glyph3d/core/collections/CodeGrid.js';
 import { VStack, HStack, Spacer, Anchor, frameNodes } from '../layout/index.js';
 import { sleep } from './helpers.js';
 

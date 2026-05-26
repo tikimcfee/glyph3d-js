@@ -19,7 +19,7 @@
  *   cluster.dispose()             → tear down
  */
 
-import CodeGrid from '../../src/collections/CodeGrid.js';
+import CodeGrid from '@glyph3d/core/collections/CodeGrid.js';
 
 // Palette — values get categorical color tints; labels stay neutral.
 // Additive highlights mean these read as a wash over the base text

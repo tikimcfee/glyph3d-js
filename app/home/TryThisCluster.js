@@ -19,7 +19,7 @@
  *   cluster.dispose()
  */
 
-import CodeGrid from '../../src/collections/CodeGrid.js';
+import CodeGrid from '@glyph3d/core/collections/CodeGrid.js';
 
 /**
  * Default invitations. Picked to play to current strengths:

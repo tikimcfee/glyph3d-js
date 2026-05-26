@@ -19,11 +19,11 @@
  */
 
 import * as THREE from 'three';
-import { GlyphAtlas, HarfBuzzShaper, SlugEncoder, collectUniqueGlyphIds } from '../src/index.js';
-import SceneRegistry from '../src/services/SceneRegistry.js';
-import CommandRouter from '../src/services/orchestration/CommandRouter.js';
-import WebSocketBridge from '../src/services/orchestration/WebSocketBridge.js';
-import { installConsoleForwarder } from '../src/services/orchestration/consoleForwarder.js';
+import { GlyphAtlas, HarfBuzzShaper, SlugEncoder, collectUniqueGlyphIds } from '@glyph3d/core/index.js';
+import SceneRegistry from '@glyph3d/core/services/SceneRegistry.js';
+import CommandRouter from '@glyph3d/core/services/orchestration/CommandRouter.js';
+import WebSocketBridge from '@glyph3d/core/services/orchestration/WebSocketBridge.js';
+import { installConsoleForwarder } from '@glyph3d/core/services/orchestration/consoleForwarder.js';
 import { registerAllCommands } from './commands/handlers/index.js';
 
 import { gatherVisitorFacts } from './home/VisitorIntrospect.js';
@@ -34,8 +34,8 @@ import { runDemo, DEMO_SCRIPTS } from './home/DemoRunner.js';
 import ReferenceSpace from './home/ReferenceSpace.js';
 import { Center, HStack, Spacer, Anchor, frameNodes } from './home/layout/index.js';
 import { registerDemos } from './home/demos/index.js';
-import { SceneContext } from '../src/services/SceneContext.js';
-import { ViewerCameraController } from '../src/services/camera/ViewerCameraController.js';
+import { SceneContext } from '@glyph3d/core/services/SceneContext.js';
+import { ViewerCameraController } from '@glyph3d/core/services/camera/ViewerCameraController.js';
 
 const ATLAS_FONT      = 'Cousine, Monaco, Menlo, Courier New, monospace';
 const ATLAS_FONT_SIZE = 48;
@@ -227,7 +227,7 @@ export class HomeShell {
         await this.atlas.generate();
 
         // Load font, init HarfBuzz, prime shape cache.
-        const fontUrl = new URL('../src/fonts/Cousine-Regular.ttf', import.meta.url).href;
+        const fontUrl = new URL('../packages/glyph3d-core/src/fonts/Cousine-Regular.ttf', import.meta.url).href;
         const fontResp = await fetch(fontUrl);
         const fontBuffer = await fontResp.arrayBuffer();
 
@@ -235,7 +235,7 @@ export class HomeShell {
         await this.shaper.init(fontBuffer);
 
         const { default: MonospaceShapeCache } =
-            await import('../src/shaping/MonospaceShapeCache.js');
+            await import('@glyph3d/core/shaping/MonospaceShapeCache.js');
 
         let cacheProbe = '';
         for (let cp = 0x20; cp <= 0x7E; cp++) cacheProbe += String.fromCodePoint(cp);
@@ -246,14 +246,14 @@ export class HomeShell {
         shapeCache.prime(cacheProbe);
 
         // Workers need the shaper + cache too.
-        const { getWorkerBridge } = await import('../src/workers/WorkerBridge.js');
+        const { getWorkerBridge } = await import('@glyph3d/core/workers/WorkerBridge.js');
         getWorkerBridge().setShaper(this.shaper, shapeCache);
 
         // Encode glyph outlines → GPU textures.
         const probeText = Array.from({ length: 95 }, (_, i) =>
             String.fromCharCode(32 + i)).join('');
         const { shapeText: shapeTextFn } =
-            await import('../src/shaping/shapeText.js');
+            await import('@glyph3d/core/shaping/shapeText.js');
         const shaped = shapeTextFn(shapeCache, probeText);
         const glyphIds = collectUniqueGlyphIds(shaped.lines);
 

@@ -17,7 +17,7 @@ const require = createRequire(import.meta.url);
 // node so it works wherever three is hoisted (workspace root, not hardcoded).
 const threeWebGPU = require.resolve('three/webgpu');
 
-// Everything else (react, react-dom, @react-three/fiber, glyph3d-js, glyph3d-r3f)
+// Everything else (react, react-dom, @react-three/fiber, @glyph3d/core, glyph3d-r3f)
 // resolves natively through the bun workspace's node_modules symlinks + each
 // package's exports map. No alias reinvention of module resolution.
 export default defineConfig({

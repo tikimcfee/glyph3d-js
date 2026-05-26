@@ -7,8 +7,8 @@
  */
 
 import * as THREE from 'three';
-import AgentGrid from '../../../src/collections/AgentGrid.js';
-import { decodeBase64 } from '../../../src/utils/encoding.js';
+import AgentGrid from '@glyph3d/core/collections/AgentGrid.js';
+import { decodeBase64 } from '@glyph3d/core/utils/encoding.js';
 
 // Tunable: seconds to reach ~63% of target weight (1 - 1/e). Smaller =
 // snappier attention response, larger = calmer/more inertial.

@@ -242,7 +242,8 @@
     {
         "imports": {
             "three": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.webgpu.js",
-            "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.webgpu.js"
+            "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.webgpu.js",
+            "@glyph3d/core/": "/packages/glyph3d-core/src/"
         }
     }
     </script>
@@ -251,7 +252,7 @@
         import { GitHubRepoViewer } from './GitHubRepoViewer.js';
         import { IDEShell } from './IDEShell.js';
         import CommandBar from './components/CommandBar.js';
-        import { stateController } from '../src/services/state/StateController.js';
+        import { stateController } from '@glyph3d/core/services/state/StateController.js';
 
         document.addEventListener('DOMContentLoaded', async () => {
             const canvas = document.getElementById('canvas');

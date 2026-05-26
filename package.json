@@ -1,63 +1,20 @@
 {
-  "name": "glyph3d-js",
+  "name": "glyph3d",
   "version": "0.1.0",
-  "description": "High-performance 3D text rendering for Three.js using GPU-instanced glyphs",
+  "description": "glyph3d monorepo — @glyph3d/core library, r3f bindings, IDE app, and Go single-binary server",
   "type": "module",
-  "main": "src/index.js",
-  "module": "src/index.js",
-  "exports": {
-    ".": "./src/index.js",
-    "./atlas-loader": "./src/GlyphAtlasLoader.js",
-    "./collections": "./src/collections/index.js",
-    "./workers": "./src/workers/WorkerBridge.js",
-    "./utils": "./src/utils/index.js",
-    "./hand": "./src/hand/index.js",
-    "./services": "./src/services/index.js",
-    "./services/utils": "./src/services/utils/index.js",
-    "./services/state": "./src/services/state/index.js",
-    "./services/visual": "./src/services/visual/index.js",
-    "./services/interaction": "./src/services/interaction/index.js",
-    "./services/camera": "./src/services/camera/index.js",
-    "./services/data": "./src/services/data/index.js",
-    "./services/orchestration": "./src/services/orchestration/index.js",
-    "./shaping": "./src/shaping/index.js",
-    "./annotations": "./src/annotations/index.js",
-    "./parsing": "./src/parsing/index.js",
-    "./fonts/*": "./src/fonts/*"
-  },
+  "private": true,
   "workspaces": [
     "packages/*",
     "keystone"
   ],
-  "files": [
-    "src",
-    "app",
-    "examples"
-  ],
   "scripts": {
     "serve": "cd cli && ./glyph3d-cli serve --root .. --http 8000"
   },
-  "keywords": [
-    "three.js",
-    "threejs",
-    "webgl",
-    "text",
-    "3d",
-    "glyph",
-    "instancing",
-    "gpu",
-    "rendering",
-    "font",
-    "atlas"
-  ],
-  "author": "",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/yourusername/glyph3d-js.git"
-  },
-  "peerDependencies": {
-    "three": ">=0.150.0"
   },
   "devDependencies": {
     "harfbuzzjs": "^0.4.8",

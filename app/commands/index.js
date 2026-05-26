@@ -7,11 +7,11 @@
  * Exposes `window.viewer` for devtools/agent access.
  */
 
-import CommandRouter from '../../src/services/orchestration/CommandRouter.js';
-import WebSocketBridge from '../../src/services/orchestration/WebSocketBridge.js';
-import { installConsoleForwarder } from '../../src/services/orchestration/consoleForwarder.js';
-import ViewerAPI from '../../src/services/orchestration/ViewerAPI.js';
-import AttentionManager from '../../src/services/interaction/AttentionManager.js';
+import CommandRouter from '@glyph3d/core/services/orchestration/CommandRouter.js';
+import WebSocketBridge from '@glyph3d/core/services/orchestration/WebSocketBridge.js';
+import { installConsoleForwarder } from '@glyph3d/core/services/orchestration/consoleForwarder.js';
+import ViewerAPI from '@glyph3d/core/services/orchestration/ViewerAPI.js';
+import AttentionManager from '@glyph3d/core/services/interaction/AttentionManager.js';
 import { registerAllCommands } from './handlers/index.js';
 import { contentHash } from './handlers/fileCommands.js';
 
@@ -325,7 +325,7 @@ function _gridKeyHandler(e, entity /*, slot, ctx */) {
  * loadText that preserves camera state.
  *
  * @param {Object} context - command context (provides registry)
- * @param {import('../../src/services/orchestration/WebSocketBridge.js').default} bridge
+ * @param {import('../../packages/glyph3d-core/src/services/orchestration/WebSocketBridge.js').default} bridge
  * @param {string} path - relative path (no scheme), e.g. "cross-ref/.../smoke.txt"
  */
 async function _refreshGridForPath(context, bridge, path) {

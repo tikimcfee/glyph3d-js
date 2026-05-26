@@ -1,8 +1,8 @@
 import React, { useEffect, useRef, forwardRef } from 'react';
 import { useThree, useFrame } from '@react-three/fiber';
 import * as THREE from 'three/webgpu';
-import { SceneContext } from 'glyph3d-js/services';
-import { ViewerCameraController } from 'glyph3d-js/services/camera';
+import { SceneContext } from '@glyph3d/core/services';
+import { ViewerCameraController } from '@glyph3d/core/services/camera';
 import { useGlyphAtlas, useGridRegistry } from './context.jsx';
 
 const assignRef = (ref, value) => {

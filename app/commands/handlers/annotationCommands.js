@@ -9,11 +9,11 @@
  */
 
 import { box, table } from '../formatResponse.js';
-import CodeGrid from '../../../src/collections/CodeGrid.js';
+import CodeGrid from '@glyph3d/core/collections/CodeGrid.js';
 import { COLORS } from './colorConstants.js';
 import { saveGridState, restoreGridState, restoreAllGridStates } from './gridVisualState.js';
 import { animateCamera, getWorldBounds, resolveGridByIdOrIndex } from './spatialHelpers.js';
-import { decodeBase64 } from '../../../src/utils/encoding.js';
+import { decodeBase64 } from '@glyph3d/core/utils/encoding.js';
 
 /**
  * @param {import('../CommandRouter.js').default} router

@@ -52,3 +52,12 @@ export function zDistanceForFit(camera, width, height, fillFraction = 0.85) {
     const dW = (width / fillFraction) / (2 * camera.aspect * halfTan);
     return Math.max(dH, dW);
 }
+
+/**
+ * Cubic ease-in-out over a normalized parameter.
+ * @param {number} t - 0..1
+ * @returns {number} eased 0..1
+ */
+export function easeInOutCubic(t) {
+    return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}

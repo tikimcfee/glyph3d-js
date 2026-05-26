@@ -16,10 +16,10 @@
  *   tour.status                    Show current tour state
  */
 
-import ConnectionRenderer from '../../../src/annotations/ConnectionRenderer.js';
-import { parseAuto } from '../../../src/parsing/index.js';
-import TourSequencer from '../../../src/services/tour/TourSequencer.js';
-import { decodeBase64 } from '../../../src/utils/encoding.js';
+import ConnectionRenderer from '@glyph3d/core/annotations/ConnectionRenderer.js';
+import { parseAuto } from '@glyph3d/core/parsing/index.js';
+import TourSequencer from '@glyph3d/core/services/tour/TourSequencer.js';
+import { decodeBase64 } from '@glyph3d/core/utils/encoding.js';
 import { getWorldBounds, resolveAnchor, animateCamera, frameBounds } from './spatialHelpers.js';
 
 /**

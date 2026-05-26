@@ -6,7 +6,7 @@
  * Auto-refreshes via 500ms polling.
  */
 
-import { zDistanceForFit } from '../../src/services/spatial/spatialMath.js';
+import { zDistanceForFit } from '@glyph3d/core/services/spatial/spatialMath.js';
 
 /**
  * Build the initial panel HTML.

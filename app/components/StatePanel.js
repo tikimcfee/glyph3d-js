@@ -6,7 +6,7 @@
  * Event-driven refresh — no polling.
  */
 
-import { stateController } from '../../src/services/state/StateController.js';
+import { stateController } from '@glyph3d/core/services/state/StateController.js';
 import { STATE_DEFAULTS } from '../StatePersistence.js';
 
 const PREFIX = 'g3d.';

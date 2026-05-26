@@ -6,8 +6,8 @@
  * No in-memory blob. No ghost-state. Camera dirty-check compares positions.
  */
 
-import { setTextExts, setTextNames } from '../src/services/data/textFileFilter.js';
-import { stateController } from '../src/services/state/StateController.js';
+import { setTextExts, setTextNames } from '@glyph3d/core/services/data/textFileFilter.js';
+import { stateController } from '@glyph3d/core/services/state/StateController.js';
 
 const SAVE_INTERVAL_MS = 5000;
 

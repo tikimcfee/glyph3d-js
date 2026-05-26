@@ -9,9 +9,9 @@
 // independent: GlyphAtlas is Canvas2D, the shaper is WASM, SlugEncoder is data —
 // so it can run before any WebGPU device exists.
 
-import { GlyphAtlas, HarfBuzzShaper, SlugEncoder, collectUniqueGlyphIds } from 'glyph3d-js';
-import { MonospaceShapeCache, shapeText } from 'glyph3d-js/shaping';
-import { getWorkerBridge } from 'glyph3d-js/workers';
+import { GlyphAtlas, HarfBuzzShaper, SlugEncoder, collectUniqueGlyphIds } from '@glyph3d/core';
+import { MonospaceShapeCache, shapeText } from '@glyph3d/core/shaping';
+import { getWorkerBridge } from '@glyph3d/core/workers';
 
 /**
  * @typedef {Object} GlyphEngineOptions

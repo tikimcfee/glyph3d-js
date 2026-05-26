@@ -34,7 +34,7 @@ function resolveToRegistryId(ctx, arg) {
 
 /**
  * Register all group.* commands.
- * @param {import('../../../src/services/orchestration/CommandRouter.js').default} router
+ * @param {import('../../../packages/glyph3d-core/src/services/orchestration/CommandRouter.js').default} router
  */
 export default function registerGroupCommands(router) {
 

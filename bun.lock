@@ -9,15 +9,12 @@
         "playwright": "^1.60.0",
         "three": "^0.183.0",
       },
-      "peerDependencies": {
-        "three": ">=0.150.0",
-      },
     },
     "keystone": {
       "name": "glyph3d-keystone",
       "dependencies": {
+        "@glyph3d/core": "workspace:*",
         "@react-three/fiber": "^9.0.0",
-        "glyph3d-js": "file:..",
         "glyph3d-r3f": "workspace:*",
         "react": "^19.0.0",
         "react-dom": "^19.0.0",
@@ -28,11 +25,18 @@
         "vite": "^5.4.11",
       },
     },
+    "packages/glyph3d-core": {
+      "name": "@glyph3d/core",
+      "version": "0.1.0",
+      "peerDependencies": {
+        "three": ">=0.150.0",
+      },
+    },
     "packages/glyph3d-r3f": {
       "name": "glyph3d-r3f",
       "version": "0.0.0",
       "dependencies": {
-        "glyph3d-js": "file:../..",
+        "@glyph3d/core": "workspace:*",
       },
       "peerDependencies": {
         "@react-three/fiber": ">=9",
@@ -128,6 +132,8 @@
     "@esbuild/win32-ia32": ["@esbuild/win32-ia32@0.21.5", "", { "os": "win32", "cpu": "ia32" }, "sha512-SWXFF1CL2RVNMaVs+BBClwtfZSvDgtL//G/smwAc5oVK/UPu2Gu9tIaRgFmYFFKrmg3SyAjSrElf0TiJ1v8fYA=="],
 
     "@esbuild/win32-x64": ["@esbuild/win32-x64@0.21.5", "", { "os": "win32", "cpu": "x64" }, "sha512-tQd/1efJuzPC6rCFwEvLtci/xNFcTZknmXs98FYDfGE4wP9ClFV98nyKrzJKVPMhdDnjzLhdUyMX4PsQAPjwIw=="],
+
+    "@glyph3d/core": ["@glyph3d/core@workspace:packages/glyph3d-core"],
 
     "@jridgewell/gen-mapping": ["@jridgewell/gen-mapping@0.3.13", "", { "dependencies": { "@jridgewell/sourcemap-codec": "^1.5.0", "@jridgewell/trace-mapping": "^0.3.24" } }, "sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA=="],
 
@@ -236,8 +242,6 @@
     "fsevents": ["fsevents@2.3.2", "", { "os": "darwin" }, "sha512-xiqMQR4xAeHTuB9uWm+fFRcIOgKBMiOBP+eXiyT7jsgVCq1bkVygt00oASowB7EdtpOHaaPgKt812P9ab+DDKA=="],
 
     "gensync": ["gensync@1.0.0-beta.2", "", {}, "sha512-3hN7NaskYvMDLQY55gnW3NQ+mesEAepTqlg+VEbj7zzqEMBVNhzcGYYeqFo/TlYz6eQiFcp1HcsCZO+nGgS8zg=="],
-
-    "glyph3d-js": ["glyph3d-js@root:", {}],
 
     "glyph3d-keystone": ["glyph3d-keystone@workspace:keystone"],
 

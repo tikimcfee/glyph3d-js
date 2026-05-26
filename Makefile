@@ -17,8 +17,10 @@ CLI_DIR  := cli
 WEB_DIR  := $(CLI_DIR)/web
 OUT_DIR  := dist
 
-# Assets to embed
-ASSETS := src app examples index.html package.json
+# Assets to embed. Paths are preserved under web/ via `cp --parents`, so the
+# served URL tree matches: /packages/glyph3d-core/src/... is what the app
+# importmaps ("@glyph3d/core/") resolve to.
+ASSETS := packages/glyph3d-core/src app examples index.html package.json
 
 # Version info — override with: make VERSION=v1.2.3
 VERSION    ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -49,7 +51,7 @@ prep:
 	@mkdir -p $(WEB_DIR)
 	@for asset in $(ASSETS); do \
 		if [ -e "$$asset" ]; then \
-			cp -r "$$asset" $(WEB_DIR)/; \
+			cp -r --parents "$$asset" $(WEB_DIR)/; \
 		fi; \
 	done
 	@echo "Prepared $(WEB_DIR)/ for embedding"
@@ -59,14 +61,15 @@ prep:
 # The vendored files in src/shaping/vendor/ are checked into git,
 # so this only needs to run when upgrading harfbuzzjs.
 
+VENDOR := packages/glyph3d-core/src/shaping/vendor
 prep-wasm:
 	@echo "Vendoring harfbuzzjs files..."
-	@cp node_modules/harfbuzzjs/hb.wasm src/shaping/vendor/hb.wasm
-	@cp node_modules/harfbuzzjs/hb.js src/shaping/vendor/hb.js
-	@echo 'export default createHarfBuzz;' >> src/shaping/vendor/hb.js
-	@cp node_modules/harfbuzzjs/hbjs.js src/shaping/vendor/hbjs.js
-	@echo 'export default hbjs;' >> src/shaping/vendor/hbjs.js
-	@echo "Vendored hb.wasm ($$(du -h src/shaping/vendor/hb.wasm | cut -f1)), hb.js, hbjs.js → src/shaping/vendor/"
+	@cp node_modules/harfbuzzjs/hb.wasm $(VENDOR)/hb.wasm
+	@cp node_modules/harfbuzzjs/hb.js $(VENDOR)/hb.js
+	@echo 'export default createHarfBuzz;' >> $(VENDOR)/hb.js
+	@cp node_modules/harfbuzzjs/hbjs.js $(VENDOR)/hbjs.js
+	@echo 'export default hbjs;' >> $(VENDOR)/hbjs.js
+	@echo "Vendored hb.wasm ($$(du -h $(VENDOR)/hb.wasm | cut -f1)), hb.js, hbjs.js → $(VENDOR)/"
 
 # --- Cross-compilation ---
 # Each target sets Platform via LDFLAGS override.

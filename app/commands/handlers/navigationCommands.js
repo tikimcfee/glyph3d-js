@@ -10,15 +10,15 @@
  */
 
 import { box, table } from '../formatResponse.js';
-import CodeGrid from '../../../src/collections/CodeGrid.js';
+import CodeGrid from '@glyph3d/core/collections/CodeGrid.js';
 import { COLORS } from './colorConstants.js';
 import {
     resolveGridByIdOrIndex, getWorldBounds, unionBounds,
     resolveAnchor, fmtVec,
     frameBounds, animateCamera,
 } from './spatialHelpers.js';
-import { zDistanceForFit } from '../../../src/services/spatial/spatialMath.js';
-import { decodeBase64 } from '../../../src/utils/encoding.js';
+import { zDistanceForFit } from '@glyph3d/core/services/spatial/spatialMath.js';
+import { decodeBase64 } from '@glyph3d/core/utils/encoding.js';
 
 /** @type {Map<string, TourDefinition>} */
 const tours = new Map();

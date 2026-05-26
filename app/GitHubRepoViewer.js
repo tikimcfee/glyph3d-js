@@ -19,27 +19,27 @@ import {
     HarfBuzzShaper,
     SlugEncoder,
     collectUniqueGlyphIds,
-} from '../src/index.js';
+} from '@glyph3d/core/index.js';
 
-import { PickingSystem } from '../src/picking/PickingSystem.js';
-import GridVirtualizer from '../src/collections/GridVirtualizer.js';
-import { getCanvasViewportSize } from '../src/core/canvasSize.js';
-import { SelectionManager } from '../src/services/interaction/SelectionManager.js';
-import { ShortcutManager } from '../src/services/interaction/ShortcutManager.js';
-import { ReaderCompass } from '../src/services/interaction/ReaderCompass.js';
-import { TreemapLabelManager } from '../src/services/visual/TreemapLabelManager.js';
-import { MinimapOverlay } from '../src/components/MinimapOverlay.js';
-import { RepositoryAdapter } from '../src/services/data/RepositoryAdapter.js';
-import { GitHubRepositorySource } from '../src/services/data/GitHubRepositorySource.js';
-import { RemoteFileSystemProvider } from '../src/services/data/RemoteFileSystemProvider.js';
-import { DiffController } from '../src/services/orchestration/DiffController.js';
-import { BackdropManager } from '../src/services/visual/BackdropManager.js';
-import { NameplateManager } from '../src/services/visual/NameplateManager.js';
-import { SceneContext } from '../src/services/SceneContext.js';
-import { ViewerCameraController } from '../src/services/camera/ViewerCameraController.js';
-import { FileStateManager } from '../src/services/state/FileStateManager.js';
-import { CodeColorManager } from '../src/services/interaction/CodeColorManager.js';
-import { HeatmapProvider } from '../src/services/data/HeatmapProvider.js';
+import { PickingSystem } from '@glyph3d/core/picking/PickingSystem.js';
+import GridVirtualizer from '@glyph3d/core/collections/GridVirtualizer.js';
+import { getCanvasViewportSize } from '@glyph3d/core/core/canvasSize.js';
+import { SelectionManager } from '@glyph3d/core/services/interaction/SelectionManager.js';
+import { ShortcutManager } from '@glyph3d/core/services/interaction/ShortcutManager.js';
+import { ReaderCompass } from '@glyph3d/core/services/interaction/ReaderCompass.js';
+import { TreemapLabelManager } from '@glyph3d/core/services/visual/TreemapLabelManager.js';
+import { MinimapOverlay } from '@glyph3d/core/components/MinimapOverlay.js';
+import { RepositoryAdapter } from '@glyph3d/core/services/data/RepositoryAdapter.js';
+import { GitHubRepositorySource } from '@glyph3d/core/services/data/GitHubRepositorySource.js';
+import { RemoteFileSystemProvider } from '@glyph3d/core/services/data/RemoteFileSystemProvider.js';
+import { DiffController } from '@glyph3d/core/services/orchestration/DiffController.js';
+import { BackdropManager } from '@glyph3d/core/services/visual/BackdropManager.js';
+import { NameplateManager } from '@glyph3d/core/services/visual/NameplateManager.js';
+import { SceneContext } from '@glyph3d/core/services/SceneContext.js';
+import { ViewerCameraController } from '@glyph3d/core/services/camera/ViewerCameraController.js';
+import { FileStateManager } from '@glyph3d/core/services/state/FileStateManager.js';
+import { CodeColorManager } from '@glyph3d/core/services/interaction/CodeColorManager.js';
+import { HeatmapProvider } from '@glyph3d/core/services/data/HeatmapProvider.js';
 
 import { createHeader, createLoadingOverlay, createFPSBadge, createToast } from './components/AppShell.js';
 import {
@@ -54,15 +54,15 @@ import { TouchController } from './components/TouchController.js';
 import { logCapturePanelHTML, initLogCapturePanel } from './components/LogCapturePanel.js';
 import { diffPanelHTML, initDiffPanel } from './components/DiffPanel.js';
 import { StatePersistence, resetAllAndReload } from './StatePersistence.js';
-import { stateController } from '../src/services/state/StateController.js';
-import { getTextExts, getTextNames, setTextExts, setTextNames, getDefaults, resetToDefaults } from '../src/services/data/textFileFilter.js';
-import { HandGestureAdapter } from '../src/services/orchestration/HandGestureAdapter.js';
+import { stateController } from '@glyph3d/core/services/state/StateController.js';
+import { getTextExts, getTextNames, setTextExts, setTextNames, getDefaults, resetToDefaults } from '@glyph3d/core/services/data/textFileFilter.js';
+import { HandGestureAdapter } from '@glyph3d/core/services/orchestration/HandGestureAdapter.js';
 import { initCommandCenter } from './commands/index.js';
 import { updateWindowBillboards } from './commands/handlers/windowCommands.js';
-import SceneRegistry from '../src/services/SceneRegistry.js';
-import { SpatialAnimator } from '../src/services/spatial/SpatialAnimator.js';
-import { SpatialWindowManager } from '../src/services/spatial/SpatialWindowManager.js';
-import { EntityInputRouter } from '../src/services/interaction/EntityInputRouter.js';
+import SceneRegistry from '@glyph3d/core/services/SceneRegistry.js';
+import { SpatialAnimator } from '@glyph3d/core/services/spatial/SpatialAnimator.js';
+import { SpatialWindowManager } from '@glyph3d/core/services/spatial/SpatialWindowManager.js';
+import { EntityInputRouter } from '@glyph3d/core/services/interaction/EntityInputRouter.js';
 
 export class GitHubRepoViewer {
     /**
@@ -229,7 +229,7 @@ export class GitHubRepoViewer {
         // Load font, shape all glyphs, encode into GPU textures.
         // Hard-fail: if HarfBuzz/Slug cannot initialize, the app cannot render.
         this.loading.update(0.5, 'Loading HarfBuzz WASM...');
-        const fontUrl = new URL('../src/fonts/Cousine-Regular.ttf', import.meta.url).href;
+        const fontUrl = new URL('../packages/glyph3d-core/src/fonts/Cousine-Regular.ttf', import.meta.url).href;
         const fontResp = await fetch(fontUrl);
         const fontBuffer = await fontResp.arrayBuffer();
 
@@ -244,7 +244,7 @@ export class GitHubRepoViewer {
         //   0x20-0x7E  — printable ASCII (source code dominant range)
         //   0xA0-0xFF  — Latin-1 supplement (comments, docs)
         //   0x2500-0x257F — box-drawing characters (tree views, TUI)
-        const { default: MonospaceShapeCache } = await import('../src/shaping/MonospaceShapeCache.js');
+        const { default: MonospaceShapeCache } = await import('@glyph3d/core/shaping/MonospaceShapeCache.js');
         let cacheProbe = '';
         for (let cp = 0x20; cp <= 0x7E; cp++) cacheProbe += String.fromCodePoint(cp);
         for (let cp = 0xA0; cp <= 0xFF; cp++) cacheProbe += String.fromCodePoint(cp);
@@ -260,7 +260,7 @@ export class GitHubRepoViewer {
         // Register shaper + cache with the worker bridge.
         // Workers no longer run WASM — text is shaped here on the main thread via the
         // cache (single WASM instance) and pre-shaped arrays are sent to workers.
-        const { getWorkerBridge } = await import('../src/workers/WorkerBridge.js');
+        const { getWorkerBridge } = await import('@glyph3d/core/workers/WorkerBridge.js');
         const workerBridge = getWorkerBridge();
         workerBridge.setShaper(this._shaper, this._shapeCache);
 
@@ -268,7 +268,7 @@ export class GitHubRepoViewer {
         // Use the cache for this probe pass so SlugEncoder benefits from the fast path.
         this.loading.update(0.6, 'Encoding glyph curves...');
         const probeText = Array.from({ length: 95 }, (_, i) => String.fromCharCode(32 + i)).join('');
-        const { shapeText: shapeTextFn } = await import('../src/shaping/shapeText.js');
+        const { shapeText: shapeTextFn } = await import('@glyph3d/core/shaping/shapeText.js');
         const shaped = shapeTextFn(this._shapeCache, probeText);
         const glyphIds = collectUniqueGlyphIds(shaped.lines);
 

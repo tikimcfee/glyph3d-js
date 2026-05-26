@@ -10,7 +10,7 @@
  */
 
 import * as THREE from 'three';
-import { zDistanceForFit } from '../../../src/services/spatial/spatialMath.js';
+import { zDistanceForFit, easeInOutCubic } from '@glyph3d/core/services/spatial/spatialMath.js';
 
 // ──────────────────────────────────────────────────────────────
 //  Grid Resolution
@@ -221,11 +221,6 @@ export function resolveAnchor(bounds, name) {
 // ──────────────────────────────────────────────────────────────
 //  Camera Helpers
 // ──────────────────────────────────────────────────────────────
-
-/** @param {number} t - 0..1 @returns {number} */
-export function easeInOutCubic(t) {
-    return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
-}
 
 /**
  * Compute the target camera position to frame an AABB head-on.

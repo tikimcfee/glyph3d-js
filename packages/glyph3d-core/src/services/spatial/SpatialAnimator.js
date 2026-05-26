@@ -11,7 +11,7 @@
  *   - 'opacity'  -- float lerp on object._background.material.opacity
  */
 
-import { easeInOutCubic } from '../../../app/commands/handlers/spatialHelpers.js';
+import { easeInOutCubic } from './spatialMath.js';
 
 /**
  * @typedef {Object} Animation

@@ -21,8 +21,8 @@
  * TerminalGrid.write() handles both transparently via parseCapturePaneAnsi().
  */
 
-import TerminalGrid from '../../../src/collections/TerminalGrid.js';
-import { decodeBase64, encodeBase64 } from '../../../src/utils/encoding.js';
+import TerminalGrid from '@glyph3d/core/collections/TerminalGrid.js';
+import { decodeBase64, encodeBase64 } from '@glyph3d/core/utils/encoding.js';
 
 /**
  * Lazily initialise the terminal registry map on ctx.

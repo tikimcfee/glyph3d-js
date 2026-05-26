@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, forwardRef } from 'react';
 import { useThree } from '@react-three/fiber';
-import { CodeGrid as CodeGridCore } from 'glyph3d-js/collections';
+import { CodeGrid as CodeGridCore } from '@glyph3d/core/collections';
 import { useGlyphAtlas, useGridRegistry } from './context.jsx';
 
 const toXYZ = (p) => (Array.isArray(p) ? p : [p?.x ?? 0, p?.y ?? 0, p?.z ?? 0]);

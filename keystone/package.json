@@ -7,7 +7,7 @@
     "dev": "vite"
   },
   "dependencies": {
-    "glyph3d-js": "file:..",
+    "@glyph3d/core": "workspace:*",
     "glyph3d-r3f": "workspace:*",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

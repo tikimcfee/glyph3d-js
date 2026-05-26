@@ -1,0 +1,49 @@
+{
+  "name": "@glyph3d/core",
+  "version": "0.1.0",
+  "description": "High-performance 3D text rendering for Three.js using GPU-instanced glyphs",
+  "type": "module",
+  "main": "src/index.js",
+  "module": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./atlas-loader": "./src/GlyphAtlasLoader.js",
+    "./collections": "./src/collections/index.js",
+    "./workers": "./src/workers/WorkerBridge.js",
+    "./utils": "./src/utils/index.js",
+    "./hand": "./src/hand/index.js",
+    "./services": "./src/services/index.js",
+    "./services/utils": "./src/services/utils/index.js",
+    "./services/state": "./src/services/state/index.js",
+    "./services/visual": "./src/services/visual/index.js",
+    "./services/interaction": "./src/services/interaction/index.js",
+    "./services/camera": "./src/services/camera/index.js",
+    "./services/data": "./src/services/data/index.js",
+    "./services/orchestration": "./src/services/orchestration/index.js",
+    "./shaping": "./src/shaping/index.js",
+    "./annotations": "./src/annotations/index.js",
+    "./parsing": "./src/parsing/index.js",
+    "./fonts/*": "./src/fonts/*"
+  },
+  "files": [
+    "src"
+  ],
+  "keywords": [
+    "three.js",
+    "threejs",
+    "webgl",
+    "webgpu",
+    "text",
+    "3d",
+    "glyph",
+    "instancing",
+    "gpu",
+    "rendering",
+    "font",
+    "atlas"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "three": ">=0.150.0"
+  }
+}
