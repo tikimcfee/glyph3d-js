@@ -35,8 +35,24 @@
  */
 
 import { resolveGridByIdOrIndex } from './spatialHelpers.js';
-import { flowLayout, clearTreeMarkers } from './layoutCommands.js';
+import { flowLayout, clearTreeMarkers, applyTreeLayout } from './layoutCommands.js';
 import CodeGrid from '@glyph3d/core/collections/CodeGrid.js';
+
+const DIR_OPEN_CAP = 64; // safety bound on bulk directory opens (full-content grids)
+
+/**
+ * Build a CodeGrid from file content and register it. The shared core of
+ * file.open and file.openDir — no positioning (the caller lays out). Returns the
+ * registry id, or null if the file is already open.
+ */
+function addFileGrid(ctx, path, content) {
+    const uri = `file:///${String(path).replace(/^\/+/, '')}`;
+    if ((ctx.registry.findByMeta?.('sourcePath', uri) || []).length) return null;
+    const grid = new CodeGrid(ctx.scene, ctx.atlas, { name: path, worldScale: 0.025 });
+    grid.setSourcePath(uri); // so file.save / fs/didChange refresh can find it
+    grid.loadFile(path, content);
+    return ctx.addGrid(grid, { id: path, type: 'grid' }); // registers + scene.adds
+}
 
 /**
  * Fast non-crypto content hash. FNV-1a 32-bit over the full string. Collision
@@ -126,9 +142,8 @@ export default function registerFileCommands(router) {
             return { text: `ERR: read failed for ${path}: ${err?.message || err}`, data: null };
         }
 
-        const grid = new CodeGrid(ctx.scene, ctx.atlas, { name: path, worldScale: 0.025 });
-        grid.setSourcePath(uri);   // so file.save / fs/didChange refresh can find it
-        grid.loadFile(path, content);
+        const id = addFileGrid(ctx, path, content);
+        const grid = ctx.registry.get(id)?.grid;
 
         // Explicit coords place precisely (tour scripts position by hand);
         // otherwise the grid joins the shelf via flowLayout after registration.
@@ -136,16 +151,14 @@ export default function registerFileCommands(router) {
         const explicit = Number.isFinite(x);
         if (explicit) {
             grid.position.set(x, Number.isFinite(y) ? y : 0, Number.isFinite(z) ? z : 0);
+            grid.updateMatrixWorld(true);
+            grid._markBoundsDirty?.();
+        } else {
+            // Reflow the shelf so the new file lands cleanly beside the others —
+            // never stacked. Opening reverts to the flat shelf, so drop volumes.
+            clearTreeMarkers(ctx);
+            flowLayout(ctx.getGrids());
         }
-
-        // addGrid reads sourcePath/filename off the grid and registers it; it
-        // also scene.adds (the core ctor's scene.add is dead).
-        const id = ctx.addGrid(grid, { id: path, type: 'grid' });
-
-        // Reflow the shelf so the new file lands cleanly beside the others —
-        // bounds + margins, never stacked (skip when positioned explicitly).
-        // Opening reverts to the flat shelf, so drop any directory volumes.
-        if (!explicit) { clearTreeMarkers(ctx); flowLayout(ctx.getGrids()); }
 
         return {
             text: `OK: opened ${path} (${grid.getLineCount()} lines, ${grid.getGlyphCount?.() ?? '?'} glyphs)`,
@@ -155,6 +168,64 @@ export default function registerFileCommands(router) {
         description: 'Load a file from the relay filesystem into a new grid',
         usage: '<path> [x y z]',
         returns: '{ id, path, uri, lines }',
+    });
+
+    // file.openDir <dir-path>
+    //
+    // Open every code file under a directory and lay the result out as a 3D tree
+    // (directory volumes + labels + depth). The directory-row button in the file
+    // tree runs this — "pop this folder out into space". Capped for safety
+    // (full-content grids are heavy); fetch is concurrent.
+    router.register('file.openDir', async (args, ctx) => {
+        const dir = String(args[0] || '').replace(/^\/+|\/+$/g, '');
+        if (!ctx.fileProvider) {
+            return { text: 'ERR: no fileProvider — relay bridge not connected', data: null };
+        }
+
+        let entries;
+        try {
+            entries = await ctx.fileProvider.listTree('file:///');
+        } catch (err) {
+            return { text: `ERR: listTree failed: ${err?.message || err}`, data: null };
+        }
+        const code = ctx.fileProvider.filterCodeFiles({ tree: entries });
+        const prefix = dir ? dir + '/' : '';
+        const under = code.filter((f) => dir === '' || f.path === dir || f.path.startsWith(prefix));
+        if (under.length === 0) {
+            return { text: `OK: no code files under "${dir || '/'}"`, data: { dir, opened: 0 } };
+        }
+
+        // Skip already-open files; cap the remainder.
+        const want = under
+            .map((f) => f.path)
+            .filter((p) => !(ctx.registry.findByMeta?.('sourcePath', `file:///${p}`) || []).length);
+        const capped = want.slice(0, DIR_OPEN_CAP);
+        const skipped = want.length - capped.length;
+
+        let contentMap;
+        try {
+            contentMap = await ctx.fileProvider.getMultipleFiles(null, null, capped);
+        } catch (err) {
+            return { text: `ERR: fetch failed: ${err?.message || err}`, data: null };
+        }
+
+        let opened = 0;
+        for (const p of capped) {
+            const c = contentMap.get(p);
+            if (c == null) continue;
+            if (addFileGrid(ctx, p, c.content) != null) opened++;
+        }
+
+        // Lay everything currently loaded out as the directory tree, with depth.
+        const layout = applyTreeLayout(ctx, { zStep: 40 });
+
+        let text = `OK: opened ${opened} file(s) under "${dir || '/'}" → tree (${layout.dirs} dirs, ${layout.volumes} volumes)`;
+        if (skipped) text += `; ${skipped} skipped (cap ${DIR_OPEN_CAP})`;
+        return { text, data: { dir, opened, skipped, ...layout } };
+    }, {
+        description: 'Open all code files under a directory and lay them out as a 3D tree',
+        usage: '<dir-path>',
+        returns: '{ dir, opened, skipped, placed, dirs, depth, volumes }',
     });
 
     router.register('file.save', async (args, ctx) => {

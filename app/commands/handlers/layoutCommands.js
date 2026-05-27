@@ -228,6 +228,19 @@ export function clearTreeMarkers(ctx) {
     ctx._treeMarkers = [];
 }
 
+/**
+ * Clear old markers, tree-lay the loaded grids, and draw fresh directory volumes
+ * + labels. The reusable core behind the layout.tree command AND file.openDir.
+ * @returns {{placed:number, dirs:number, depth:number, volumes:number}}
+ */
+export function applyTreeLayout(ctx, { margin = 24, zStep = 0 } = {}) {
+    clearTreeMarkers(ctx);
+    const r = treeLayout(ctx.getGrids(), { margin, zStep });
+    if (r.placed === 0) return { placed: 0, dirs: 0, depth: 0, volumes: 0 };
+    const volumes = buildTreeMarkers(ctx, r.root, { margin });
+    return { placed: r.placed, dirs: r.dirs, depth: r.depth, volumes };
+}
+
 /** Build a volume + label for every directory node (skips the path-less root). */
 function buildTreeMarkers(ctx, root, { margin }) {
     const markers = [];
@@ -268,13 +281,11 @@ export default function registerLayoutCommands(router) {
     router.register('layout.tree', (args, ctx) => {
         const margin = args[0] != null ? parseFloat(args[0]) : undefined;
         const zStep = args[1] != null ? parseFloat(args[1]) : undefined;
-        clearTreeMarkers(ctx);
-        const r = treeLayout(ctx.getGrids(), { margin, zStep });
+        const r = applyTreeLayout(ctx, { margin, zStep });
         if (r.placed === 0) return { text: 'OK: nothing to lay out', data: r };
-        const volumes = buildTreeMarkers(ctx, r.root, { margin: margin ?? 24 });
         return {
-            text: `OK: tree-laid ${r.placed} file(s) across ${r.dirs} dir(s) (depth ${r.depth}), ${volumes} volume(s)`,
-            data: { placed: r.placed, dirs: r.dirs, depth: r.depth, volumes },
+            text: `OK: tree-laid ${r.placed} file(s) across ${r.dirs} dir(s) (depth ${r.depth}), ${r.volumes} volume(s)`,
+            data: r,
         };
     }, {
         description: 'Arrange loaded grids by directory hierarchy (recursive flow clusters)',

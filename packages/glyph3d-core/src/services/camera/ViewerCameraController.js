@@ -754,15 +754,21 @@ export class ViewerCameraController {
         const grids = this.ctx.getGrids();
         if (grids.length === 0) return;
 
-        const bounds = this.ctx.stackManager
-            ? this.ctx.stackManager.getTotalBounds()
-            : this.ctx.treemapManager
-                ? this.ctx.treemapManager.getTotalBounds()
-                : this.ctx.spiralManager
-                    ? this.ctx.spiralManager.getTotalBounds()
-                    : this.ctx.hierarchicalManager
-                        ? this.ctx.hierarchicalManager.getTotalBounds()
-                        : this.ctx.layoutManager.getTotalBounds();
+        // Prefer a layout manager's cached total bounds; otherwise (e.g. the r3f
+        // client, which has no managers) union the grids' own world bounds.
+        const mgr = this.ctx.stackManager || this.ctx.treemapManager
+            || this.ctx.spiralManager || this.ctx.hierarchicalManager || this.ctx.layoutManager;
+        let bounds;
+        if (mgr && typeof mgr.getTotalBounds === 'function') {
+            bounds = mgr.getTotalBounds();
+        } else {
+            bounds = new THREE.Box3();
+            for (const g of grids) {
+                const b = g.getBounds?.();
+                if (b && !b.isEmpty()) bounds.union(b);
+            }
+        }
+        if (!bounds || bounds.isEmpty()) return;
 
         const center = new THREE.Vector3();
         bounds.getCenter(center);

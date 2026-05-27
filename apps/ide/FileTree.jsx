@@ -28,8 +28,15 @@ const styles = {
   row: {
     cursor: 'pointer', whiteSpace: 'nowrap', overflow: 'hidden',
     textOverflow: 'ellipsis', userSelect: 'none', paddingRight: 8,
+    display: 'flex', alignItems: 'center',
   },
-  caret: { display: 'inline-block', width: 12, color: '#5c6675', opacity: 0.8 },
+  caret: { display: 'inline-block', width: 12, color: '#5c6675', opacity: 0.8, flex: '0 0 auto' },
+  name: { flex: '1 1 auto', overflow: 'hidden', textOverflow: 'ellipsis' },
+  treeBtn: (lit) => ({
+    flex: '0 0 auto', marginLeft: 6, padding: '0 5px', borderRadius: 3,
+    color: lit ? '#7ad7a0' : '#39414f', cursor: 'pointer',
+    title: 'lay this folder out in 3D',
+  }),
   dir: { color: '#9aa3b2' },
   fileOpen: { color: '#7ad7a0' },
   msg: { padding: '12px', color: '#7c8596' },
@@ -65,7 +72,7 @@ function buildTree(paths) {
   return root;
 }
 
-function TreeRow({ node, depth, expanded, toggle, open, openFile, hover, setHover }) {
+function TreeRow({ node, depth, expanded, toggle, open, openFile, openDir, hover, setHover }) {
   const pad = 8 + depth * 12;
   const hovered = hover === node.path;
   const bg = hovered ? 'rgba(255,255,255,0.05)' : 'transparent';
@@ -80,12 +87,18 @@ function TreeRow({ node, depth, expanded, toggle, open, openFile, hover, setHove
           onMouseLeave={() => setHover((h) => (h === node.path ? null : h))}
           style={{ ...styles.row, ...styles.dir, paddingLeft: pad, background: bg }}
         >
-          <span style={styles.caret}>{isExp ? '▾' : '▸'}</span>{node.name}
+          <span style={styles.caret}>{isExp ? '▾' : '▸'}</span>
+          <span style={styles.name}>{node.name}</span>
+          <span
+            title="lay this folder out in 3D"
+            onClick={(e) => { e.stopPropagation(); openDir(node.path); }}
+            style={styles.treeBtn(hovered)}
+          >⊞</span>
         </div>
         {isExp && node.children.map((c) => (
           <TreeRow key={c.path} node={c} depth={depth + 1}
             expanded={expanded} toggle={toggle} open={open}
-            openFile={openFile} hover={hover} setHover={setHover} />
+            openFile={openFile} openDir={openDir} hover={hover} setHover={setHover} />
         ))}
       </>
     );
@@ -102,7 +115,7 @@ function TreeRow({ node, depth, expanded, toggle, open, openFile, hover, setHove
         ...(open.has(node.path) ? styles.fileOpen : null),
       }}
     >
-      {node.name}
+      <span style={styles.name}>{node.name}</span>
     </div>
   );
 }
@@ -164,6 +177,14 @@ export default function FileTree({ client }) {
     client.router.execute(`camera.focus ${path}`);
   }, [client]);
 
+  // Pop a whole directory out into 3D: open its files + tree-layout, then frame
+  // the lot. The ⊞ button on directory rows.
+  const openDir = useCallback(async (path) => {
+    if (!client) return;
+    await client.router.execute(`file.openDir ${path}`);
+    client.router.execute('camera.fitall');
+  }, [client]);
+
   let body;
   if (!client) body = <div style={styles.msg}>starting…</div>;
   else if (!connected) body = <div style={styles.msg}>connecting to relay…</div>;
@@ -175,7 +196,7 @@ export default function FileTree({ client }) {
       {tree.children.map((c) => (
         <TreeRow key={c.path} node={c} depth={0}
           expanded={expanded} toggle={toggle} open={open}
-          openFile={openFile} hover={hover} setHover={setHover} />
+          openFile={openFile} openDir={openDir} hover={hover} setHover={setHover} />
       ))}
     </div>
   );
