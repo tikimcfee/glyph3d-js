@@ -124,7 +124,7 @@ export class ViewerCameraController {
             keys:      new Set(),
             drag: {
                 active: false,
-                mode:   null,             // 'pan' | 'orbit'
+                mode:   null,             // 'pan' | 'look'
                 startX: 0, startY: 0,
                 prevX:  0, prevY:  0,
                 dx:     0, dy:     0,     // accumulated since last drain
@@ -212,7 +212,7 @@ export class ViewerCameraController {
             if (e.button === 2) input.buttons.right = true;
 
             input.drag.active = true;
-            input.drag.mode   = e.shiftKey ? 'orbit' : 'pan';
+            input.drag.mode   = e.shiftKey ? 'look' : 'pan';
             input.drag.startX = e.clientX;
             input.drag.startY = e.clientY;
             input.drag.prevX  = e.clientX;
@@ -220,7 +220,7 @@ export class ViewerCameraController {
             input.drag.dx     = 0;
             input.drag.dy     = 0;
 
-            canvas.style.cursor = input.drag.mode === 'orbit' ? 'move' : 'grabbing';
+            canvas.style.cursor = input.drag.mode === 'look' ? 'move' : 'grabbing';
         });
 
         track(document, 'mouseup', (e) => {
@@ -296,10 +296,10 @@ export class ViewerCameraController {
             // is treated as a modifier, which pairs with the trackpad
             // default (modifier → zoom) so pinch-to-zoom does what you
             // expect.
-            const isTrackpad = wheelLooksLikeTrackpad(e);
-            const modHeld    = secondaryMod(e) || e.ctrlKey;
-            const willZoom   = isTrackpad ? modHeld : !modHeld;
-            input.wheel.isTrackpad = isTrackpad;
+            // First-person scheme: plain scroll pans vertically (Y), shift+scroll
+            // dollies forward/back. Explicit + predictable — no device heuristic.
+            const willZoom = e.shiftKey;
+            input.wheel.isTrackpad = wheelLooksLikeTrackpad(e);
             input.wheel.willZoom   = willZoom;
 
             // Fresh raycast at the cursor so the focus pivot reflects
@@ -441,8 +441,8 @@ export class ViewerCameraController {
         const drag = this.input.drag;
         if (!drag.active) return;
         if (drag.dx === 0 && drag.dy === 0) return;
-        if (drag.mode === 'orbit') {
-            this._orbitBy(drag.dx, drag.dy);
+        if (drag.mode === 'look') {
+            this._lookBy(drag.dx, drag.dy);
         } else {
             this._panBy(drag.dx, drag.dy);
         }
@@ -503,43 +503,17 @@ export class ViewerCameraController {
     // ============ Camera math (called from applyCamera only) ============
 
     /**
-     * Orbit around the focus pivot. Screen-pixel deltas → spherical
-     * rotation; pitch/yaw are re-derived from the resulting quaternion
-     * (YXZ order) so _applyRotation doesn't stomp our orbit next frame.
+     * First-person mouselook: drag yaws/pitches the camera IN PLACE — no pivot,
+     * no orbit — so you keep your position and only change where you're looking.
+     * pitch/yaw feed _applyRotation (YXZ), which sets the quaternion each frame.
      * @private
      */
-    _orbitBy(dx, dy) {
-        const THREE = this.THREE;
-        const camera = this.ctx.camera;
-        const pivot = this.input.focus.pivot;
-        const offset = camera.position.clone().sub(pivot);
-        const radius = offset.length();
-        if (radius < 0.001) return;
-
-        let theta = Math.atan2(offset.x, offset.z);
-        let phi   = Math.acos(Math.max(-1, Math.min(1, offset.y / radius)));
-
+    _lookBy(dx, dy) {
         const sens = this.settings?.rotateSensitivity ?? 0.005;
-        theta -= dx * sens;
-        phi   -= dy * sens;
-
-        const eps = 0.02;
-        phi = Math.max(eps, Math.min(Math.PI - eps, phi));
-
-        offset.x = radius * Math.sin(phi) * Math.sin(theta);
-        offset.y = radius * Math.cos(phi);
-        offset.z = radius * Math.sin(phi) * Math.cos(theta);
-
-        camera.position.copy(pivot).add(offset);
-        camera.lookAt(pivot);
-
-        // Sync pitch/yaw from the quaternion lookAt just wrote, using the
-        // same YXZ order that _applyRotation will use on the next frame.
-        // Otherwise the orbit would appear to do nothing.
-        const euler = new THREE.Euler(0, 0, 0, 'YXZ');
-        euler.setFromQuaternion(camera.quaternion);
-        this.pitch = euler.x;
-        this.yaw   = euler.y;
+        this.yaw   -= dx * sens;
+        this.pitch -= dy * sens;
+        const lim = Math.PI / 2 - 0.02;   // stop just short of looking straight up/down
+        this.pitch = Math.max(-lim, Math.min(lim, this.pitch));
     }
 
     /**
@@ -627,7 +601,17 @@ export class ViewerCameraController {
 
     /** @private */
     _getViewDistance() {
-        return Math.max(Math.abs(this.ctx.camera.position.z), 1);
+        // Distance from the camera to the scene's content centroid — a stable
+        // first-person speed reference, independent of world-origin Z. (The old
+        // |camera.z| broke once content lived at negative Z, e.g. the walk-tree:
+        // zoom braked to nothing at the z=0 plane and felt like a microscope.)
+        const grids = this.ctx.getGrids?.() || [];
+        if (grids.length === 0) return 200;
+        let cx = 0, cy = 0, cz = 0;
+        for (const g of grids) { cx += g.position.x; cy += g.position.y; cz += g.position.z; }
+        const n = grids.length;
+        const cam = this.ctx.camera.position;
+        return Math.max(Math.hypot(cx / n - cam.x, cy / n - cam.y, cz / n - cam.z), 1);
     }
 
     // ============ UI glue ============
