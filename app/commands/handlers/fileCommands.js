@@ -38,7 +38,7 @@ import { resolveGridByIdOrIndex } from './spatialHelpers.js';
 import { flowLayout, clearTreeMarkers, applyTreeLayout } from './layoutCommands.js';
 import CodeGrid from '@glyph3d/core/collections/CodeGrid.js';
 
-const DIR_OPEN_CAP = 64; // safety bound on bulk directory opens (full-content grids)
+const DIR_OPEN_CAP = 250; // default safety bound on bulk opens; override per-call
 
 /**
  * Build a CodeGrid from file content and register it. The shared core of
@@ -178,6 +178,7 @@ export default function registerFileCommands(router) {
     // (full-content grids are heavy); fetch is concurrent.
     router.register('file.openDir', async (args, ctx) => {
         const dir = String(args[0] || '').replace(/^\/+|\/+$/g, '');
+        const cap = args[1] != null ? Math.max(1, parseInt(args[1], 10)) : DIR_OPEN_CAP;
         if (!ctx.fileProvider) {
             return { text: 'ERR: no fileProvider — relay bridge not connected', data: null };
         }
@@ -199,7 +200,7 @@ export default function registerFileCommands(router) {
         const want = under
             .map((f) => f.path)
             .filter((p) => !(ctx.registry.findByMeta?.('sourcePath', `file:///${p}`) || []).length);
-        const capped = want.slice(0, DIR_OPEN_CAP);
+        const capped = want.slice(0, cap);
         const skipped = want.length - capped.length;
 
         let contentMap;
@@ -220,12 +221,12 @@ export default function registerFileCommands(router) {
         const layout = applyTreeLayout(ctx, { zStep: 40 });
 
         let text = `OK: opened ${opened} file(s) under "${dir || '/'}" → tree (${layout.dirs} dirs, ${layout.volumes} volumes)`;
-        if (skipped) text += `; ${skipped} skipped (cap ${DIR_OPEN_CAP})`;
-        return { text, data: { dir, opened, skipped, ...layout } };
+        if (skipped) text += `; ${skipped} skipped (cap ${cap})`;
+        return { text, data: { dir, opened, skipped, cap, ...layout } };
     }, {
-        description: 'Open all code files under a directory and lay them out as a 3D tree',
-        usage: '<dir-path>',
-        returns: '{ dir, opened, skipped, placed, dirs, depth, volumes }',
+        description: 'Open all code files under a directory (recursive) and lay them out as a 3D tree',
+        usage: '<dir-path> [cap]   (empty path = whole project)',
+        returns: '{ dir, opened, skipped, cap, placed, dirs, depth, volumes }',
     });
 
     router.register('file.save', async (args, ctx) => {

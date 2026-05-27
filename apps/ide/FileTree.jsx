@@ -125,7 +125,7 @@ export default function FileTree({ client }) {
   const [files, setFiles] = useState(null);
   const [error, setError] = useState(null);
   const [open, setOpen] = useState(() => new Set());
-  const [expanded, setExpanded] = useState(() => new Set());
+  const [expanded, setExpanded] = useState(() => new Set([''])); // root expanded
   const [hover, setHover] = useState(null);
 
   // Live socket state via the bridge listener (fires true immediately if already
@@ -158,7 +158,12 @@ export default function FileTree({ client }) {
     return () => { cancelled = true; };
   }, [client, connected]);
 
-  const tree = useMemo(() => (files ? buildTree(files) : null), [files]);
+  const tree = useMemo(() => {
+    if (!files) return null;
+    const t = buildTree(files);
+    t.name = '/'; // the repo root — same ⊞ as any dir; its empty path opens it all
+    return t;
+  }, [files]);
 
   const toggle = useCallback((path) => {
     setExpanded((prev) => {
@@ -177,11 +182,11 @@ export default function FileTree({ client }) {
     client.router.execute(`camera.focus ${path}`);
   }, [client]);
 
-  // Pop a whole directory out into 3D: open its files + tree-layout, then frame
-  // the lot. The ⊞ button on directory rows.
+  // The ⊞ button: recursively open a directory's files + tree-layout, then frame
+  // the lot. Empty path == repo root == the whole project (root is just a dir).
   const openDir = useCallback(async (path) => {
     if (!client) return;
-    await client.router.execute(`file.openDir ${path}`);
+    await client.router.execute(`file.openDir ${path}`.trimEnd());
     client.router.execute('camera.fitall');
   }, [client]);
 
@@ -193,11 +198,10 @@ export default function FileTree({ client }) {
   else if (tree.children.length === 0) body = <div style={styles.msg}>(no code files found)</div>;
   else body = (
     <div style={styles.list}>
-      {tree.children.map((c) => (
-        <TreeRow key={c.path} node={c} depth={0}
-          expanded={expanded} toggle={toggle} open={open}
-          openFile={openFile} openDir={openDir} hover={hover} setHover={setHover} />
-      ))}
+      {/* The root is just a directory row: its ⊞ opens the whole project. */}
+      <TreeRow node={tree} depth={0}
+        expanded={expanded} toggle={toggle} open={open}
+        openFile={openFile} openDir={openDir} hover={hover} setHover={setHover} />
     </div>
   );
 
