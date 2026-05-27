@@ -83,6 +83,10 @@ export class WorkerBridge {
 
         console.debug(`[WorkerBridge] Initialized ${this.workers.length} workers`);
         this._initialized = true;
+
+        // If a shape cache was registered before the pool existed, deliver it now
+        // so these workers can shape locally on their first BUILD_BATCH.
+        this._sendGlyphMapToWorkers();
     }
 
     /**
@@ -109,20 +113,30 @@ export class WorkerBridge {
             `[WorkerBridge] Main-thread shaper registered (upem=${this._upem}, cached=${!!shapeCache})`
         );
 
-        // Transfer the glyph map to each worker once. Workers store it for future
-        // worker-side reconstruction (Tier 3). Each worker needs its own copy because
-        // Transferable transfer neuters the source buffer.
-        if (shapeCache && this.workers.length > 0) {
-            const glyphMapArr = shapeCache.toTransferArray();
-            for (const w of this.workers) {
-                const copy = new Uint32Array(glyphMapArr);
-                w.postMessage({ type: 'GLYPH_MAP', glyphMap: copy }, [copy.buffer]);
-            }
-            console.debug(
-                `[WorkerBridge] Glyph map transferred to ${this.workers.length} workers ` +
-                `(${glyphMapArr.byteLength} bytes each)`
-            );
+        // Push the shape cache to any workers that already exist. Workers created
+        // later get it in _ensureInitialized — between the two, every worker is
+        // guaranteed to have the cache before its first BUILD_BATCH.
+        this._sendGlyphMapToWorkers();
+    }
+
+    /**
+     * Transfer the monospace shape cache to every worker so they shape raw text
+     * locally (keeping bulky pre-shaped arrays out of postMessage). Each worker
+     * needs its own copy — Transferable transfer neuters the source buffer.
+     * No-op without a cache or workers; safe to call repeatedly.
+     * @private
+     */
+    _sendGlyphMapToWorkers() {
+        if (!this._shapeCache || this.workers.length === 0) return;
+        const glyphMapArr = this._shapeCache.toTransferArray();
+        for (const w of this.workers) {
+            const copy = new Uint32Array(glyphMapArr);
+            w.postMessage({ type: 'GLYPH_MAP', glyphMap: copy }, [copy.buffer]);
         }
+        console.debug(
+            `[WorkerBridge] Shape cache → ${this.workers.length} workers ` +
+            `(${glyphMapArr.byteLength} bytes each)`
+        );
     }
 
     /** @returns {boolean} Whether the main-thread shaper is ready */
@@ -162,14 +176,27 @@ export class WorkerBridge {
         //   text  — ~12KB per file, never read by the builder
         //   id    — string key, never read by the builder
         //   options — object, never read by the builder
-        const shaperOrCache = this._shapeCache || this._shaper;
-        const shapedItems = items.map(item => ({
-            position: item.position,
-            color: item.color,
-            scale: item.scale,
-            groupId: item.groupId,
-            shaped: shapeText(shaperOrCache, item.text || ''),
-        }));
+        // With a monospace cache, the worker shapes raw text locally — ship the
+        // small text string instead of cloning the bulky pre-shaped {g,ax,dx,dy}
+        // arrays (that structured clone was the dominant main-thread reload cost).
+        // _ensureInitialized() above guarantees the worker has the cache before
+        // this BUILD_BATCH (postMessage is FIFO per worker). Without a cache
+        // (raw HarfBuzz shaper only, no WASM in workers) we still shape here.
+        const workerItems = this._shapeCache
+            ? items.map(item => ({
+                position: item.position,
+                color: item.color,
+                scale: item.scale,
+                groupId: item.groupId,
+                text: item.text || '',
+            }))
+            : items.map(item => ({
+                position: item.position,
+                color: item.color,
+                scale: item.scale,
+                groupId: item.groupId,
+                shaped: shapeText(this._shaper, item.text || ''),
+            }));
 
         return new Promise((resolve, reject) => {
             this.pendingRequests.set(jobId, { resolve, reject });
@@ -177,7 +204,7 @@ export class WorkerBridge {
                 type: 'BUILD_BATCH',
                 jobId,
                 payload: {
-                    items: shapedItems,
+                    items: workerItems,
                     shared: {
                         metrics: shared.metrics,
                         defaultColor: shared.defaultColor,

@@ -24,11 +24,13 @@ export default class MonospaceShapeCache {
     /**
      * @param {import('./HarfBuzzShaper.js').default} shaper - Initialized HarfBuzzShaper
      */
-    constructor(shaper) {
+    constructor(shaper = null) {
         /** @private @type {Map<number, {g: number, ax: number}>} codepoint → {glyphId, xAdvance} */
         this._map = new Map();
-        /** @private */
+        /** @private — null in worker-side instances (no WASM available there) */
         this._shaper = shaper;
+        /** @private — miss fallback advance when there's no shaper (worker side) */
+        this._defaultAdvance = 0;
     }
 
     /** @returns {number} Number of cached codepoints */
@@ -69,12 +71,20 @@ export default class MonospaceShapeCache {
         let entry = this._map.get(codepoint);
         if (entry !== undefined) return entry;
 
-        // Cache miss: shape the single character, cache result.
-        const ch = String.fromCodePoint(codepoint);
-        const shaped = this._shaper.shape(ch);
-        entry = shaped.length > 0
-            ? { g: shaped[0].g, ax: shaped[0].ax }
-            : { g: 0, ax: 0 };
+        if (this._shaper) {
+            // Main-thread miss: resolve the single character via HarfBuzz, cache it.
+            const ch = String.fromCodePoint(codepoint);
+            const shaped = this._shaper.shape(ch);
+            entry = shaped.length > 0
+                ? { g: shaped[0].g, ax: shaped[0].ax }
+                : { g: 0, ax: 0 };
+        } else {
+            // Worker-side miss: no WASM here. An unprimed codepoint has no Slug
+            // curve encoded at boot, so it could not render as a real glyph on the
+            // main-thread path either — fall back to a blank cell of the monospace
+            // width (g:0) so columns stay aligned. Cached so the miss is one-time.
+            entry = { g: 0, ax: this._defaultAdvance };
+        }
         this._map.set(codepoint, entry);
         return entry;
     }
@@ -131,18 +141,23 @@ export default class MonospaceShapeCache {
     }
 
     /**
-     * Rebuild a Map from a transferred Uint32Array (worker-side).
-     * Inverse of toTransferArray().
+     * Rebuild a shaper-less cache instance from a transferred Uint32Array
+     * (worker-side). Inverse of toTransferArray(). The returned instance has a
+     * working shapeLine()/lookup() with no WASM — misses fall back to a blank
+     * cell of the monospace width (see lookup()).
      *
      * @param {Uint32Array} arr - Flat array from toTransferArray()
-     * @returns {Map<number, {g: number, ax: number}>}
+     * @returns {MonospaceShapeCache} worker-side cache (no shaper)
      */
     static fromTransferArray(arr) {
-        const map = new Map();
+        const cache = new MonospaceShapeCache(null);
         for (let i = 0; i < arr.length; i += 3) {
-            map.set(arr[i], { g: arr[i + 1], ax: arr[i + 2] });
+            cache._map.set(arr[i], { g: arr[i + 1], ax: arr[i + 2] });
         }
-        return map;
+        // Monospace: every advance is equal, so the first entry's advance is the
+        // correct fallback width for any unprimed codepoint.
+        cache._defaultAdvance = arr.length >= 3 ? arr[2] : 0;
+        return cache;
     }
 
     /**

@@ -8,18 +8,20 @@
  * pre-shaped arrays are attached to each item before posting. Workers contain
  * no WASM — they only do buffer math.
  *
- * GLYPH_MAP: The main thread transfers a per-codepoint glyph map once at init
- * (when MonospaceShapeCache is used). Workers store it for future worker-side
- * reconstruction (Tier 3 optimization), where workers will shape from raw text
- * + glyph map locally, eliminating shaped data from postMessage entirely.
+ * GLYPH_MAP: The main thread transfers the per-codepoint monospace shape cache
+ * once at init. Workers rebuild it into a shaper-less MonospaceShapeCache and
+ * shape raw text locally (BUILD_BATCH carries `text`, not pre-shaped arrays) —
+ * this keeps the bulky shaped {g,ax,dx,dy} arrays out of postMessage, whose
+ * structured-clone was the dominant main-thread cost of a reload.
  */
 
 import { buildBatchBuffers } from './builders/index.js';
+import { shapeText } from '../shaping/shapeText.js';
+import MonospaceShapeCache from '../shaping/MonospaceShapeCache.js';
 
-// Per-codepoint glyph map transferred from main thread. Populated by GLYPH_MAP message.
-// Layout: Map<codepoint, {g: glyphId, ax: xAdvance}> rebuilt from a flat Uint32Array.
-// Used in future Tier 3 optimization for worker-side text reconstruction.
-let glyphMap = null;
+// Worker-side monospace shape cache, rebuilt from the GLYPH_MAP message. Has a
+// working shapeLine() with no WASM (misses fall back to a blank monospace cell).
+let workerCache = null;
 
 /**
  * Handle incoming messages
@@ -35,7 +37,19 @@ self.onmessage = function(event) {
                     defaultColor: payload.shared.defaultColor,
                     upem: payload.shared.upem,
                 };
-                const result = buildBatchBuffers(payload.items, shared);
+                // Shape raw text → glyph arrays here, off the main thread. The
+                // builder reads item.shaped, so attach it before building. (Items
+                // arrive with `text`; the cache must have been delivered first via
+                // GLYPH_MAP, which the bridge guarantees before any BUILD_BATCH.)
+                const items = payload.items;
+                if (workerCache) {
+                    for (let i = 0; i < items.length; i++) {
+                        if (items[i].shaped === undefined) {
+                            items[i].shaped = shapeText(workerCache, items[i].text || '');
+                        }
+                    }
+                }
+                const result = buildBatchBuffers(items, shared);
 
                 // Transfer buffers — glyphIds/codepoints alias the same array
                 const glyphIdsBuf = result.glyphIds || result.codepoints;
@@ -53,14 +67,12 @@ self.onmessage = function(event) {
             }
 
             case 'GLYPH_MAP': {
-                // Receive the per-codepoint glyph map from the main thread.
-                // Sent once after MonospaceShapeCache priming. Layout: [cp, g, ax, ...]
+                // Receive the per-codepoint shape cache from the main thread and
+                // rebuild a shaper-less MonospaceShapeCache for local shaping.
+                // Sent once after priming (and again to late-created workers).
                 const arr = event.data.glyphMap;
-                glyphMap = new Map();
-                for (let i = 0; i < arr.length; i += 3) {
-                    glyphMap.set(arr[i], { g: arr[i + 1], ax: arr[i + 2] });
-                }
-                console.debug(`[GlyphWorker] Glyph map received: ${glyphMap.size} entries`);
+                workerCache = MonospaceShapeCache.fromTransferArray(arr);
+                console.debug(`[GlyphWorker] Shape cache received: ${workerCache.size} entries`);
                 break;
             }
 
