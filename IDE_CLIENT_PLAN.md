@@ -99,7 +99,16 @@ exercises the full vertical slice:
    (`registerAllCommands`), wire `CommandRouter` + `WebSocketBridge`, connect to
    the relay, then **round-trip `glyph3d-cli grid.list`** CLI → browser. `grid.list`
    needs only `ctx.registry`, so it's the first to light up; richer commands light
-   up as the context grows — no handler edits. Proves the spine end-to-end.
+   up as the context grows — no handler edits. Proves the spine end-to-end. ✅
+   **DONE `6b7563a`:** `keystone/CommandCenter.jsx` (the provider) + `keystone/main.jsx`
+   (`<TrackedCodeGrid>` registers grids into the core `SceneRegistry`). Verified:
+   `grid.list`/`grid.info 0`/`registry.types`/`help` all round-trip; the Claude
+   Code hook registers its `claude-activity` window through the same registry
+   (independent confirmation). One enabling change: `@glyph3d/core` exports gained
+   `"./*": "./src/*"` so Vite resolves deep subpaths like the browser importmap
+   prefix does — the app's handlers reach paths the curated barrels don't cover.
+   NB the relay is the Go server on :8080; keystone is served by Vite on :5173, so
+   `CommandCenter` targets :8080 explicitly (`?relay=PORT` overrides).
 3. **Substrate consolidation:** fold `/home` onto `glyph3d-r3f` (remove its boot
    reimplementation), confirming the bindings are a real app substrate.
 4. **Scaffold `apps/ide`** as the new client on the bindings.
