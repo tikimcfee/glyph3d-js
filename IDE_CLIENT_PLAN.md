@@ -62,7 +62,12 @@ exercises the full vertical slice:
 - **Port as-is (~42%, the spine):** all of `app/commands/` — the ~28 handlers +
   `CommandRouter`/`WebSocketBridge`/`ViewerAPI` (already in core, DOM-free). Zero
   viewer coupling (one benign stray `ctx._agentGrids`). The thing we value most
-  (RPC into the browser) is the most portable piece.
+  (RPC into the browser) is the most portable piece. **The handlers are finished —
+  we do NOT rewrite or update them.** `registerAllCommands(router)` registers all
+  of them verbatim in one call. The *only* iterative work is on the **context-bag
+  provider**: a command runs the moment its context deps are satisfied, errors
+  before that — so a failing command means "the provider hasn't supplied field X
+  yet," never "the handler is broken." Build the socket (context), not the plugs.
 - **Rebuild as React (~23%, chrome):** the DOM panels — file tree, editable
   fields, configuration, state UI, command bar, drawer/layout shell. These only
   *issue commands and read state*; rebuild them as components.
@@ -90,13 +95,18 @@ exercises the full vertical slice:
 1. **Capture** (this doc + memory). ✅
 2. **Linchpin:** an **app-context provider** in the r3f client that supplies what
    `buildContext()` needs (scene/camera/renderer via `useThree`; registry +
-   managers instantiated in the provider), then **round-trip one command**
-   (`glyph3d-cli grid.list`) CLI → browser. Proves the spine end-to-end; every
-   handler lights up once the context is provided.
+   managers instantiated in the provider). Register ALL handlers as-is
+   (`registerAllCommands`), wire `CommandRouter` + `WebSocketBridge`, connect to
+   the relay, then **round-trip `glyph3d-cli grid.list`** CLI → browser. `grid.list`
+   needs only `ctx.registry`, so it's the first to light up; richer commands light
+   up as the context grows — no handler edits. Proves the spine end-to-end.
 3. **Substrate consolidation:** fold `/home` onto `glyph3d-r3f` (remove its boot
    reimplementation), confirming the bindings are a real app substrate.
 4. **Scaffold `apps/ide`** as the new client on the bindings.
-5. **Port the spine** (commands) and wire the load path; hit the v1 tour slice.
+5. **Grow the context + wire the load path** until the v1 tour slice works
+   (handlers are already registered; this is populating context fields —
+   cameraController, layoutManagers, etc. — so load/layout/highlight/camera light
+   up). Not "porting commands"; they're already ported.
 6. **Rebuild chrome** panel-by-panel from the blueprint (file tree, command bar,
    config, state, editable fields).
 7. **Sharpen the hard edges** (editing hook, activity/dim state, state persistence).
