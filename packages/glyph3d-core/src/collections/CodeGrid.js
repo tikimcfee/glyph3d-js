@@ -651,9 +651,15 @@ class CodeGrid extends THREE.Object3D {
     _ensureRenderer() {
         if (this._renderer) return; // already present
 
-        // Create a right-sized renderer. Exact size is unknown pre-flush, so use
-        // maxChars as the ceiling — will be right-sized in the async path.
-        this._createRendererWithSize(this.config.maxChars, false);
+        // Size the initial buffers to the actual content, not the maxChars ceiling
+        // (default 50,000). Every load/reload ends in applyPrebuiltBuffers, which
+        // REPLACES these attributes at the exact glyph count — so a maxChars prealloc
+        // was ~2.2MB of allocate-then-discard per reload (e.g. a 50-line file got
+        // 50k-instance buffers). content.length is a safe upper bound on glyph count
+        // (≤, since multi-byte codepoints collapse); _createRendererWithSize floors
+        // it at 100. Big files still get the capacity they need.
+        const sizeHint = Math.min(this.content ? this.content.length : 0, this.config.maxChars);
+        this._createRendererWithSize(sizeHint, false);
 
         // Re-derive metrics in case atlas changed
         this.metrics = this._computeMetrics();
