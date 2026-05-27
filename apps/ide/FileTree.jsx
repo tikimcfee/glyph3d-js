@@ -159,6 +159,9 @@ export default function FileTree({ client }) {
     if (!client) return;
     await client.router.execute(`file.open ${path}`);
     setOpen((prev) => new Set(prev).add(path));
+    // Tightest feedback loop: frame the file you just opened so it doesn't load
+    // off-screen. Same camera.focus command the CLI/Claude uses (id == path).
+    client.router.execute(`camera.focus ${path}`);
   }, [client]);
 
   let body;
