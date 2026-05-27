@@ -35,6 +35,7 @@
  */
 
 import { resolveGridByIdOrIndex } from './spatialHelpers.js';
+import { flowLayout } from './layoutCommands.js';
 import CodeGrid from '@glyph3d/core/collections/CodeGrid.js';
 
 /**
@@ -129,17 +130,21 @@ export default function registerFileCommands(router) {
         grid.setSourcePath(uri);   // so file.save / fs/didChange refresh can find it
         grid.loadFile(path, content);
 
-        // Position: explicit x y z, else stagger to the right of what's loaded.
+        // Explicit coords place precisely (tour scripts position by hand);
+        // otherwise the grid joins the shelf via flowLayout after registration.
         const x = parseFloat(args[1]), y = parseFloat(args[2]), z = parseFloat(args[3]);
-        if (Number.isFinite(x)) {
+        const explicit = Number.isFinite(x);
+        if (explicit) {
             grid.position.set(x, Number.isFinite(y) ? y : 0, Number.isFinite(z) ? z : 0);
-        } else {
-            grid.position.set(ctx.getGrids().length * 90, 0, 0);
         }
 
         // addGrid reads sourcePath/filename off the grid and registers it; it
         // also scene.adds (the core ctor's scene.add is dead).
         const id = ctx.addGrid(grid, { id: path, type: 'grid' });
+
+        // Reflow the shelf so the new file lands cleanly beside the others —
+        // bounds + margins, never stacked (skip when positioned explicitly).
+        if (!explicit) flowLayout(ctx.getGrids());
 
         return {
             text: `OK: opened ${path} (${grid.getLineCount()} lines, ${grid.getGlyphCount?.() ?? '?'} glyphs)`,

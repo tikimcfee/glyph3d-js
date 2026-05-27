@@ -1,5 +1,5 @@
-import { useEffect } from 'react';
-import { useThree } from '@react-three/fiber';
+import { useEffect, useRef } from 'react';
+import { useThree, useFrame } from '@react-three/fiber';
 import * as THREE from 'three/webgpu';
 import { useAppCommands } from '../../app/client/CommandProvider.jsx';
 
@@ -90,12 +90,15 @@ export function CanvasPicker() {
 
 /**
  * Selection feedback — wireframe boxes around the primary (selected) and hover
- * grids, driven by attentionManager change events (not a per-frame probe). Reads
- * the same state whether selection came from a canvas click or a CLI command.
+ * grids. WHICH grid each box tracks comes from attentionManager change events
+ * (not a per-frame scan of all grids); the box GEOMETRY is re-synced each frame
+ * from that one grid's bounds, so the outline follows when layout.flow moves it.
+ * Reads the same state whether selection came from a canvas click or a command.
  */
 export function SelectionIndicator() {
   const { scene } = useThree();
   const client = useAppCommands();
+  const tracked = useRef({ primaryGrid: null, hoverGrid: null, primaryBox: null, hoverBox: null });
 
   useEffect(() => {
     if (!client) return;
@@ -110,33 +113,41 @@ export function SelectionIndicator() {
       scene.add(b);
       return b;
     };
-    const primaryBox = mkBox(0x7ad7a0); // green — selected
-    const hoverBox = mkBox(0x4a7f9a);   // muted blue — hover
+    const t = tracked.current;
+    t.primaryBox = mkBox(0x7ad7a0); // green — selected
+    t.hoverBox = mkBox(0x4a7f9a);   // muted blue — hover
 
-    const apply = (box, slotVal, { hideIfPrimary } = {}) => {
-      const id = slotVal?.id;
-      // Don't double-draw a box when hover == primary.
-      if (hideIfPrimary && id && id === am.get('primary')?.id) { box.visible = false; return; }
-      const grid = id ? registry.get(id)?.grid : null;
-      const bounds = grid?.getBounds?.();
-      if (bounds && !bounds.isEmpty()) { box.box.copy(bounds); box.visible = true; }
-      else box.visible = false;
+    const gridFor = (slot) => {
+      const id = am.get(slot)?.id;
+      return id ? (registry.get(id)?.grid ?? null) : null;
     };
-
-    const refreshPrimary = () => apply(primaryBox, am.get('primary'));
-    const refreshHover = () => { apply(hoverBox, am.get('hover'), { hideIfPrimary: true }); };
-
-    refreshPrimary();
-    refreshHover();
-    const offP = am.on('change:primary', () => { refreshPrimary(); refreshHover(); });
-    const offH = am.on('change:hover', refreshHover);
+    const sync = () => { t.primaryGrid = gridFor('primary'); t.hoverGrid = gridFor('hover'); };
+    sync();
+    const offP = am.on('change:primary', sync);
+    const offH = am.on('change:hover', sync);
 
     return () => {
       offP?.(); offH?.();
-      scene.remove(primaryBox); scene.remove(hoverBox);
-      primaryBox.geometry?.dispose?.(); hoverBox.geometry?.dispose?.();
+      scene.remove(t.primaryBox); scene.remove(t.hoverBox);
+      t.primaryBox.geometry?.dispose?.(); t.hoverBox.geometry?.dispose?.();
+      t.primaryBox = t.hoverBox = t.primaryGrid = t.hoverGrid = null;
     };
   }, [client, scene]);
+
+  // Re-sync box geometry from the tracked grids' bounds each frame (2 boxes —
+  // cheap, and getBounds is cached unless the grid actually moved).
+  useFrame(() => {
+    const t = tracked.current;
+    const fit = (box, grid) => {
+      if (!box) return;
+      const b = grid?.getBounds?.();
+      if (b && !b.isEmpty()) { box.box.copy(b); box.visible = true; }
+      else box.visible = false;
+    };
+    fit(t.primaryBox, t.primaryGrid);
+    // Don't double-draw a box when hovering the selected grid.
+    fit(t.hoverBox, t.hoverGrid && t.hoverGrid !== t.primaryGrid ? t.hoverGrid : null);
+  });
 
   return null;
 }
