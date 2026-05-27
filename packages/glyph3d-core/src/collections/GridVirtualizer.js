@@ -46,8 +46,8 @@ const RELOAD_COOLDOWN_MS = 8000;
 // so this admits dozens per frame instead of a hand-tuned constant). A hard cap
 // keeps a pathological frame bounded. Deferred grids stay evicted+active and are
 // re-collected next frame, filling in over a few frames.
-const RELOAD_MS_BUDGET = 6;        // ms of synchronous reload kickoff per update()
-const RELOAD_MAX_PER_FRAME = 64;   // hard ceiling regardless of the time budget
+const RELOAD_MS_BUDGET = 2;        // ms of synchronous reload kickoff per update()
+const RELOAD_MAX_PER_FRAME = 24;   // hard ceiling regardless of the time budget
 
 export default class GridVirtualizer {
     /**
