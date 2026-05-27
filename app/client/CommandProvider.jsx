@@ -6,9 +6,10 @@ import CommandRouter from '@glyph3d/core/services/orchestration/CommandRouter.js
 import WebSocketBridge from '@glyph3d/core/services/orchestration/WebSocketBridge.js';
 import { installConsoleForwarder } from '@glyph3d/core/services/orchestration/consoleForwarder.js';
 import AttentionManager from '@glyph3d/core/services/interaction/AttentionManager.js';
+import RemoteFileSystemProvider from '@glyph3d/core/services/data/RemoteFileSystemProvider.js';
 // The spine, ported verbatim — handlers register lazily; nothing here knows the
 // shell. Their only deps are @glyph3d/core, three, and sibling helpers.
-import { registerAllCommands } from '../../app/commands/handlers/index.js';
+import { registerAllCommands } from '../commands/handlers/index.js';
 
 // ---------------------------------------------------------------------------
 // The app-context provider (the linchpin).
@@ -80,6 +81,11 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     windowManager: null,
     wsbridge: null,
 
+    // Read-only local filesystem over the relay (fs/* RPC). Set once the bridge
+    // exists; commands like file.open read files through it. Swap for the GitHub
+    // adapter (RepositoryAdapter) here later — same surface, no command changes.
+    fileProvider: null,
+
     annotations: new Map(),
     gridVisualState: new Map(),
     _cancelCameraAnimation: null,
@@ -99,15 +105,21 @@ export function useAppCommands() {
 }
 
 /**
- * CommandCenter — wires the command spine inside an r3f Canvas.
+ * CommandProvider — wires the command spine inside an r3f Canvas.
  *
  * Must be rendered inside <GlyphCanvas> (it reads scene/camera/renderer via
  * useThree). Builds the context bag once, registers all handlers, and connects
  * a WebSocketBridge to the relay so `glyph3d-cli <cmd>` round-trips into the
- * browser. Children render inside its context provider so they can register
- * grids via useAppCommands().ctx.addGrid.
+ * browser. Children render inside its context provider (useAppCommands).
+ *
+ * DOM chrome lives OUTSIDE the Canvas and can't read that in-canvas context, so
+ * `onReady(client)` hands the wired client up to the app once the bridge connects
+ * — the app then prop-drills it to panels (file tree, command bar, …).
+ *
+ * Shared by apps/home and apps/ide — it sits next to the spine (app/commands) it
+ * wires, so there's exactly one of it.
  */
-export default function CommandCenter({ atlas, port = 8080, cameraControllerRef, children }) {
+export default function CommandProvider({ atlas, port = 8080, cameraControllerRef, onReady, children }) {
   const { scene, camera, gl } = useThree();
   const registryBundle = useGridRegistry();
   const stateRef = useRef(null);
@@ -133,6 +145,7 @@ export default function CommandCenter({ atlas, port = 8080, cameraControllerRef,
       showStatus: false,
     });
     state.ctx.wsbridge = bridge;
+    state.ctx.fileProvider = new RemoteFileSystemProvider(bridge);
     state.bridge = bridge;
     bridge.connect(url);
     installConsoleForwarder(bridge);
@@ -140,6 +153,9 @@ export default function CommandCenter({ atlas, port = 8080, cameraControllerRef,
     // Devtools/agent handle, mirroring the vanilla IDE's window.viewer.
     window.__glyphClient = state;
     console.log(`[command-center] r3f client wired — relay ${url}, ${state.router.commands.size} handlers`);
+
+    // Hand the wired client to the app (for DOM chrome outside the Canvas).
+    onReady?.(state);
 
     return () => bridge.disconnect();
   }, [port]);

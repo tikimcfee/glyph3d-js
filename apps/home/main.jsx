@@ -2,7 +2,7 @@ import React, { useEffect, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import * as THREE from 'three/webgpu';
 import { useGlyphEngine, GlyphCanvas, CodeGrid, ViewerCamera } from 'glyph3d-r3f';
-import CommandCenter from './CommandCenter.jsx';
+import CommandProvider from '../../app/client/CommandProvider.jsx';
 // The consumer owns the font choice — the engine doesn't bake a path. Resolved
 // via the core's "./fonts/*" export, not a reach into src/.
 import fontUrl from '@glyph3d/core/fonts/Cousine-Regular.ttf?url';
@@ -59,13 +59,13 @@ function App() {
           server (glyph3d-cli serve) on :8080. Override with ?relay=PORT.
           <CodeGrid> self-registers into the shared registry, so the command
           layer sees it with no wrapper. */}
-      <CommandCenter
+      <CommandProvider
         atlas={atlas}
         port={Number(new URLSearchParams(location.search).get('relay')) || 8080}
         cameraControllerRef={cameraRef}
       >
         <CodeGrid ref={onGrid} filename="home.js" text={SAMPLE} worldScale={0.025} />
-      </CommandCenter>
+      </CommandProvider>
     </GlyphCanvas>
   );
 }

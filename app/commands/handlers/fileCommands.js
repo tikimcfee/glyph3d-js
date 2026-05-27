@@ -35,6 +35,7 @@
  */
 
 import { resolveGridByIdOrIndex } from './spatialHelpers.js';
+import CodeGrid from '@glyph3d/core/collections/CodeGrid.js';
 
 /**
  * Fast non-crypto content hash. FNV-1a 32-bit over the full string. Collision
@@ -91,6 +92,65 @@ function gridToText(grid) {
  * @param {import('../../../packages/glyph3d-core/src/services/orchestration/CommandRouter.js').default} router
  */
 export default function registerFileCommands(router) {
+    // file.open <path> [x y z]
+    //
+    // Load a file from the relay filesystem (ctx.fileProvider) into a new grid.
+    // The one load primitive the IDE file tree AND the CLI both call — so
+    // "click a file" and "glyph3d-cli file.open <path>" travel the same path.
+    // The god-class did this inline in loadRepository(); here it's a command,
+    // which is what makes "Claude, open these files" work over the bus.
+    router.register('file.open', async (args, ctx) => {
+        const path = args[0];
+        if (!path) return { text: 'ERR: usage: file.open <path> [x y z]', data: null };
+
+        const uri = `file:///${String(path).replace(/^\/+/, '')}`;
+
+        // Don't duplicate an already-open file — report the existing grid.
+        const existing = ctx.registry.findByMeta?.('sourcePath', uri) || [];
+        if (existing.length) {
+            return {
+                text: `OK: ${path} already open as "${existing[0].id}"`,
+                data: { id: existing[0].id, path, alreadyOpen: true },
+            };
+        }
+
+        if (!ctx.fileProvider) {
+            return { text: 'ERR: no fileProvider — relay bridge not connected', data: null };
+        }
+
+        let content;
+        try {
+            content = await ctx.fileProvider.getFile(path);
+        } catch (err) {
+            return { text: `ERR: read failed for ${path}: ${err?.message || err}`, data: null };
+        }
+
+        const grid = new CodeGrid(ctx.scene, ctx.atlas, { name: path, worldScale: 0.025 });
+        grid.setSourcePath(uri);   // so file.save / fs/didChange refresh can find it
+        grid.loadFile(path, content);
+
+        // Position: explicit x y z, else stagger to the right of what's loaded.
+        const x = parseFloat(args[1]), y = parseFloat(args[2]), z = parseFloat(args[3]);
+        if (Number.isFinite(x)) {
+            grid.position.set(x, Number.isFinite(y) ? y : 0, Number.isFinite(z) ? z : 0);
+        } else {
+            grid.position.set(ctx.getGrids().length * 90, 0, 0);
+        }
+
+        // addGrid reads sourcePath/filename off the grid and registers it; it
+        // also scene.adds (the core ctor's scene.add is dead).
+        const id = ctx.addGrid(grid, { id: path, type: 'grid' });
+
+        return {
+            text: `OK: opened ${path} (${grid.getLineCount()} lines, ${grid.getGlyphCount?.() ?? '?'} glyphs)`,
+            data: { id, path, uri, lines: grid.getLineCount() },
+        };
+    }, {
+        description: 'Load a file from the relay filesystem into a new grid',
+        usage: '<path> [x y z]',
+        returns: '{ id, path, uri, lines }',
+    });
+
     router.register('file.save', async (args, ctx) => {
         const r = resolveSaveTarget(ctx, args);
         if (r.error) return { text: r.error, data: null };

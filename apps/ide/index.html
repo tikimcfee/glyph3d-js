@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>glyph3d — IDE</title>
+    <style>
+      html, body, #root { margin: 0; height: 100%; background: #050608; overflow: hidden; }
+      #status {
+        position: fixed; top: 8px; right: 12px; z-index: 20;
+        font: 11px/1.4 ui-monospace, Menlo, monospace; color: #6cf;
+        white-space: pre; pointer-events: none; text-shadow: 0 0 4px #000;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="status">booting…</div>
+    <div id="root"></div>
+    <script type="module" src="/main.jsx"></script>
+  </body>
+</html>

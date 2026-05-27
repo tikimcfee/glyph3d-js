@@ -1,0 +1,21 @@
+{
+  "name": "glyph3d-ide",
+  "private": true,
+  "type": "module",
+  "description": "glyph3d IDE — react-three-fiber client on @glyph3d/core + glyph3d-r3f. File tree + 3D code grids, driven by the command bus (UI clicks and CLI/RPC hit the same handlers).",
+  "scripts": {
+    "dev": "vite"
+  },
+  "dependencies": {
+    "@glyph3d/core": "workspace:*",
+    "glyph3d-r3f": "workspace:*",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "@react-three/fiber": "^9.0.0",
+    "three": "^0.183.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^5.4.11"
+  }
+}

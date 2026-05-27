@@ -25,6 +25,21 @@
         "vite": "^5.4.11",
       },
     },
+    "apps/ide": {
+      "name": "glyph3d-ide",
+      "dependencies": {
+        "@glyph3d/core": "workspace:*",
+        "@react-three/fiber": "^9.0.0",
+        "glyph3d-r3f": "workspace:*",
+        "react": "^19.0.0",
+        "react-dom": "^19.0.0",
+        "three": "^0.183.0",
+      },
+      "devDependencies": {
+        "@vitejs/plugin-react": "^4.3.4",
+        "vite": "^5.4.11",
+      },
+    },
     "packages/glyph3d-core": {
       "name": "@glyph3d/core",
       "version": "0.1.0",
@@ -244,6 +259,8 @@
     "gensync": ["gensync@1.0.0-beta.2", "", {}, "sha512-3hN7NaskYvMDLQY55gnW3NQ+mesEAepTqlg+VEbj7zzqEMBVNhzcGYYeqFo/TlYz6eQiFcp1HcsCZO+nGgS8zg=="],
 
     "glyph3d-home": ["glyph3d-home@workspace:apps/home"],
+
+    "glyph3d-ide": ["glyph3d-ide@workspace:apps/ide"],
 
     "glyph3d-r3f": ["glyph3d-r3f@workspace:packages/glyph3d-r3f"],
 
