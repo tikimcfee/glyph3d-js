@@ -25,7 +25,7 @@ const assignRef = (ref, value) => {
 const ViewerCamera = forwardRef(function ViewerCamera(_props, ref) {
   const { scene, camera, gl } = useThree();
   const atlas = useGlyphAtlas();
-  const registry = useGridRegistry();
+  const { getGrids } = useGridRegistry();
   const ctrlRef = useRef(null);
 
   useEffect(() => {
@@ -36,7 +36,7 @@ const ViewerCamera = forwardRef(function ViewerCamera(_props, ref) {
       renderer: gl,
       canvas: gl.domElement,
       atlas,
-      getGrids: () => registry.getGrids(),
+      getGrids: () => getGrids(),
     });
     const controller = new ViewerCameraController(ctx);
     controller.setupEventListeners(); // ctor builds state only; this binds input
@@ -48,7 +48,7 @@ const ViewerCamera = forwardRef(function ViewerCamera(_props, ref) {
       ctrlRef.current = null;
       assignRef(ref, null);
     };
-  }, [scene, camera, gl, atlas, registry]);
+  }, [scene, camera, gl, atlas, getGrids]);
 
   useFrame((_state, delta) => {
     ctrlRef.current?.update(delta);

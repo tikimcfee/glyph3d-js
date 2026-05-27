@@ -45,7 +45,7 @@ const CodeGrid = forwardRef(function CodeGrid({
 }, ref) {
   const scene = useThree((s) => s.scene);
   const atlas = useGlyphAtlas();
-  const registry = useGridRegistry();
+  const { addGrid, removeGrid } = useGridRegistry();
   const gridRef = useRef(null);
 
   // Mount: build the core, attach, register. Teardown: unregister, remove, dispose.
@@ -60,19 +60,19 @@ const CodeGrid = forwardRef(function CodeGrid({
       ...(maxChars ? { maxChars } : {}),
     });
     scene.add(grid); // required — see contract note above
-    registry.add(grid);
+    addGrid(grid, { id: filename || name, type: 'grid' });
     gridRef.current = grid;
     assignRef(ref, grid);
 
     return () => {
-      registry.remove(grid);
+      removeGrid(grid);
       scene.remove(grid);
       grid.dispose?.();
       gridRef.current = null;
       assignRef(ref, null);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scene, atlas, registry]);
+  }, [scene, atlas, addGrid, removeGrid]);
 
   // Reactive content load.
   useEffect(() => {

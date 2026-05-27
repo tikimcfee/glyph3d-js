@@ -1,10 +1,10 @@
 import React, { createContext, useContext, useEffect, useRef } from 'react';
 import { useThree } from '@react-three/fiber';
+import { useGridRegistry } from 'glyph3d-r3f';
 
 import CommandRouter from '@glyph3d/core/services/orchestration/CommandRouter.js';
 import WebSocketBridge from '@glyph3d/core/services/orchestration/WebSocketBridge.js';
 import { installConsoleForwarder } from '@glyph3d/core/services/orchestration/consoleForwarder.js';
-import SceneRegistry from '@glyph3d/core/services/SceneRegistry.js';
 import AttentionManager from '@glyph3d/core/services/interaction/AttentionManager.js';
 // The spine, ported verbatim — handlers register lazily; nothing here knows the
 // shell. Their only deps are @glyph3d/core, three, and sibling helpers.
@@ -20,7 +20,12 @@ import { registerAllCommands } from '../app/commands/handlers/index.js';
 // supplied yet," not "the handler is broken." Fields start null and light up as
 // the client grows toward the v1 tour slice.
 // ---------------------------------------------------------------------------
-function buildClientContext({ scene, camera, renderer, atlas, registry }) {
+function buildClientContext({ scene, camera, renderer, atlas, registryBundle, cameraControllerRef }) {
+  // The registry is the ONE core SceneRegistry, provided by GlyphCanvas and
+  // shared with the binding components (<CodeGrid> self-registers into it,
+  // <ViewerCamera> frames it). No second registry, no drift.
+  const { registry, addGrid, removeGrid, getGrids } = registryBundle;
+
   return {
     // Core Three.js — straight from r3f
     scene,
@@ -28,26 +33,13 @@ function buildClientContext({ scene, camera, renderer, atlas, registry }) {
     renderer,
     atlas,
 
-    // Scene object registry — the real core SceneRegistry (THE source of truth),
-    // not the tiny Set-wrapper glyph3d-r3f keeps for its own mount tracking.
     registry,
+    getGrids,
 
-    getGrids: () => registry.toArray('grid'),
-
+    // For grids created imperatively by a command (not via <CodeGrid>): register
+    // in the shared registry AND scene.add (React grids do their own scene.add).
     addGrid(grid, opts = {}) {
-      const sourcePath = grid.getSourcePath?.() || null;
-      const filename = grid.getFilename?.() || grid.name || null;
-      const id = opts.id || sourcePath || filename
-        || `grid-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-
-      if (!registry.getIdByGrid(grid)) {
-        registry.register(id, grid, {
-          type: opts.type || 'grid',
-          sourcePath,
-          filename,
-          ...opts.meta,
-        });
-      }
+      const id = addGrid(grid, opts);
       if (!grid.parent) scene.add(grid);
       return id;
     },
@@ -70,9 +62,13 @@ function buildClientContext({ scene, camera, renderer, atlas, registry }) {
       return entry;
     },
 
-    // Subsystems — not yet supplied by the r3f client. Commands that need these
+    // Camera controller — supplied by <ViewerCamera> via a ref the app threads
+    // in. A live getter (not a snapshot) so handlers see it regardless of which
+    // sibling effect mounted first.
+    get cameraController() { return cameraControllerRef?.current ?? null; },
+
+    // Subsystems not yet supplied by the r3f client. Commands that need these
     // will error until the corresponding field is wired (the iterative work).
-    cameraController: null,
     selectionManager: null,
     fileStateManager: null,
     codeColorManager: null,
@@ -111,18 +107,21 @@ export function useAppCommands() {
  * browser. Children render inside its context provider so they can register
  * grids via useAppCommands().ctx.addGrid.
  */
-export default function CommandCenter({ atlas, port = 8080, children }) {
+export default function CommandCenter({ atlas, port = 8080, cameraControllerRef, children }) {
   const { scene, camera, gl } = useThree();
+  const registryBundle = useGridRegistry();
   const stateRef = useRef(null);
 
-  // Build router + context once. useThree's scene/camera/gl are stable refs.
+  // Build router + context once. useThree's scene/camera/gl are stable refs;
+  // the registry bundle is memoized in GlyphProvider.
   if (!stateRef.current) {
-    const registry = new SceneRegistry();
-    const ctx = buildClientContext({ scene, camera, renderer: gl, atlas, registry });
+    const ctx = buildClientContext({
+      scene, camera, renderer: gl, atlas, registryBundle, cameraControllerRef,
+    });
     const router = new CommandRouter(ctx);
     registerAllCommands(router);
     router.use((name, args) => console.debug(`[cmd] ${name}`, args.length ? args : ''));
-    stateRef.current = { ctx, router, registry, bridge: null };
+    stateRef.current = { ctx, router, registry: ctx.registry, bridge: null };
   }
 
   useEffect(() => {
