@@ -6,7 +6,9 @@ This repo is mid-overhaul. **Several sections below describe the PRE-overhaul
 architecture; where they conflict with this block, this block wins.** Full living
 context is in agent memory (`project_architecture_overhaul`,
 `reference_r3f_webgpu_integration`) and the repo-root planning docs
-(`AUDIT.md`, `AUDIT_DREAM.md`, `REFACTOR_PLAN.md`). Current truth:
+(`AUDIT.md`, `AUDIT_DREAM.md`, `REFACTOR_PLAN.md`, and **`IDE_CLIENT_PLAN.md`** —
+the active plan: rebuild the IDE as an r3f client on the core, command-bus-first).
+Current truth:
 
 - **Renderer is WebGPU.** `GlyphField` (WebGPU / TSL NodeMaterial) is the one
   renderer; the WebGL `GlyphRenderer` was deleted. Shaders are **TSL, not GLSL**.
