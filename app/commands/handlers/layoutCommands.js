@@ -111,43 +111,61 @@ function buildPathTree(grids) {
 // spirit: measure each subtree's X width bottom-up, then place children centered
 // under the parent so subtrees never collide.
 
-/** Bottom-up: pack a node's own files into a cluster, sum children's X widths. */
+// Wrap width that makes the packed footprint roughly square IN WORLD UNITS — not
+// in box count. Code files are much wider than tall, so a sqrt(n)-column grid
+// comes out very wide; aspect-correcting (cols ∝ sqrt(n·avgH/avgW)) uses fewer
+// columns for wide items → more rows → the Y we want instead of endless X.
+function squareWrap(sizes, gap) {
+    const n = sizes.length;
+    if (n <= 1) return Infinity; // single box (or none): no wrap
+    const maxW = Math.max(...sizes.map((s) => s.w));
+    const avgW = sizes.reduce((a, s) => a + s.w, 0) / n;
+    const avgH = sizes.reduce((a, s) => a + s.h, 0) / n;
+    const cols = Math.max(1, Math.round(Math.sqrt(n * (avgH / Math.max(avgW, 1)))));
+    return cols * (maxW + gap);
+}
+
+/** Bottom-up: pack a node's own files into a section, and its child subtrees into
+ *  a 2D grid (X AND Y) — so siblings wrap into rows instead of marching out
+ *  along X forever. Returns the subtree's 2D footprint. */
 function measureWalk(node, opts) {
     const fileItems = node.files
         .slice().sort((a, b) => (a.getFilename?.() || '').localeCompare(b.getFilename?.() || ''))
         .map(measureGrid).filter(Boolean);
-    const sizes = fileItems.map((m) => ({ w: m.w, h: m.h }));
-    const maxW = sizes.length ? Math.max(...sizes.map((s) => s.w)) : 0;
-    const cols = Math.max(1, Math.ceil(Math.sqrt(sizes.length)));
+    const fSizes = fileItems.map((m) => ({ w: m.w, h: m.h }));
     node._fileItems = fileItems;
-    node._fileFlow = flowBoxes(sizes, { margin: opts.margin, wrapWidth: cols * (maxW + opts.margin) });
+    node._fileFlow = flowBoxes(fSizes, { margin: opts.margin, wrapWidth: squareWrap(fSizes, opts.margin) });
 
+    // Children: pack their 2D footprints into a world-square grid (the Y win).
     node._children = [...node.dirs.values()].sort((a, b) => a.name.localeCompare(b.name));
-    node._childW = node._children.map((c) => measureWalk(c, opts));
-    const childrenW = node._childW.reduce((a, b) => a + b, 0)
-        + opts.gap * Math.max(0, node._children.length - 1);
-    node._subtreeW = Math.max(node._fileFlow.width, childrenW, opts.minW);
-    return node._subtreeW;
+    node._childSizes = node._children.map((c) => measureWalk(c, opts));
+    node._childPack = flowBoxes(node._childSizes, { margin: opts.gap, wrapWidth: squareWrap(node._childSizes, opts.gap) });
+
+    node._w = Math.max(node._fileFlow.width, node._childPack.width, opts.minW);
+    node._h = Math.max(node._fileFlow.height, node._childPack.height, opts.minH);
+    return { w: node._w, h: node._h };
 }
 
-/** Top-down: place a node's files at (centerX, topY, depth·Z), then its children
- *  centered under it one Z-layer deeper, spread along X by subtree width. */
-function placeWalk(node, centerX, topY, depth, opts) {
+/** Top-down: place a node's files centered at (cx, cy, depth·Z), then its child
+ *  subtrees one Z-layer deeper, packed in a 2D grid centered behind it. */
+function placeWalk(node, cx, cy, depth, opts) {
     const z = -depth * opts.zStep;
-    const filesLeft = centerX - node._fileFlow.width / 2;
+    const fLeft = cx - node._fileFlow.width / 2;
+    const fTop = cy + node._fileFlow.height / 2;
     node._fileItems.forEach((m, i) => {
         const s = node._fileFlow.slots[i];
-        placeGrid(m, filesLeft + s.x, topY + s.y, z);
+        placeGrid(m, fLeft + s.x, fTop + s.y, z);
     });
-    node._anchor = new THREE.Vector3(centerX, topY, z); // section top-center
+    node._anchor = new THREE.Vector3(cx, cy, z); // section center
 
-    const totalW = node._childW.reduce((a, b) => a + b, 0)
-        + opts.gap * Math.max(0, node._children.length - 1);
-    let start = centerX - totalW / 2;
-    for (let i = 0; i < node._children.length; i++) {
-        placeWalk(node._children[i], start + node._childW[i] / 2, topY, depth + 1, opts);
-        start += node._childW[i] + opts.gap;
-    }
+    const cp = node._childPack;
+    const pLeft = cx - cp.width / 2;
+    const pTop = cy + cp.height / 2;
+    node._children.forEach((child, i) => {
+        const s = cp.slots[i];                 // top-left of this child's footprint
+        const cw = node._childSizes[i].w, ch = node._childSizes[i].h;
+        placeWalk(child, pLeft + s.x + cw / 2, pTop + s.y - ch / 2, depth + 1, opts);
+    });
 }
 
 /**
@@ -162,7 +180,7 @@ function placeWalk(node, centerX, topY, depth, opts) {
 export function treeLayout(grids, { margin = 16, zStep = 170, gap = 60 } = {}) {
     if (!grids.length) return { placed: 0, dirs: 0, depth: 0 };
     const root = buildPathTree(grids);
-    const opts = { margin, zStep, gap, minW: 50 };
+    const opts = { margin, zStep, gap, minW: 50, minH: 30 };
     measureWalk(root, opts);
     placeWalk(root, 0, 0, 0, opts);
 
@@ -273,9 +291,11 @@ function buildWalkMarkers(ctx, root, { margin }) {
                 ctx.scene.add(v);
                 markers.push(v);
             }
-            // Label above the section's top-left (or at the anchor if file-less).
-            const lx = node._fileFlow.width ? node._anchor.x - node._fileFlow.width / 2 : node._anchor.x;
-            markers.push(makeLabelAt(ctx, node.name, depth, lx, node._anchor.y + 12, node._anchor.z + 2));
+            // Label above the section's top-left (anchor is the section center).
+            const fw = node._fileFlow.width, fh = node._fileFlow.height;
+            const lx = node._anchor.x - fw / 2;
+            const ly = node._anchor.y + fh / 2 + 14;
+            markers.push(makeLabelAt(ctx, node.name, depth, lx, ly, node._anchor.z + 2));
         }
         for (const c of node._children) {
             const a = node._anchor, ca = c._anchor;
