@@ -62,6 +62,11 @@ export default class WebSocketBridge {
         this._logMax = 200;
         this._logListeners = [];
 
+        // Connection-state listeners — notified (true) on open, (false) on close.
+        // Lets DOM chrome fetch-on-connect and refetch-on-reconnect instead of
+        // racing a not-yet-open socket (the relay restarts often in dev).
+        this._connectionListeners = new Set();
+
         if (options.autoConnect !== false) {
             this.connect();
         }
@@ -174,6 +179,29 @@ export default class WebSocketBridge {
             });
             this.ws.send(msg);
         });
+    }
+
+    /**
+     * Subscribe to connection-state changes. The callback fires with `true` when
+     * the socket opens (including reconnects) and `false` when it closes. If
+     * already connected, fires `true` immediately so subscribers needn't special-
+     * case the "subscribed after connect" race.
+     * @param {(connected: boolean) => void} fn
+     * @returns {() => void} unsubscribe
+     */
+    onConnectionChange(fn) {
+        this._connectionListeners.add(fn);
+        if (this.connected) {
+            try { fn(true); } catch (e) { console.error('[ws-bridge] connection listener threw:', e); }
+        }
+        return () => this._connectionListeners.delete(fn);
+    }
+
+    /** @private */
+    _emitConnection(state) {
+        for (const fn of this._connectionListeners) {
+            try { fn(state); } catch (e) { console.error('[ws-bridge] connection listener threw:', e); }
+        }
     }
 
     /**
@@ -352,6 +380,7 @@ export default class WebSocketBridge {
             // Register as display client
             socket.send('DISPLAY');
             this._updateStatus();
+            this._emitConnection(true);
         };
 
         socket.onmessage = (event) => {
@@ -362,6 +391,7 @@ export default class WebSocketBridge {
             if (this.ws !== socket) return; // stale socket, ignore
             this.connected = false;
             this._updateStatus();
+            this._emitConnection(false);
             if (!this._intentionalClose) {
                 console.log('[ws-bridge] disconnected, will retry...');
                 this._scheduleReconnect();
