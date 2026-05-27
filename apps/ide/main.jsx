@@ -4,6 +4,7 @@ import * as THREE from 'three/webgpu';
 import { useGlyphEngine, GlyphCanvas, ViewerCamera } from 'glyph3d-r3f';
 import CommandProvider from '../../app/client/CommandProvider.jsx';
 import FileTree from './FileTree.jsx';
+import { CanvasPicker, SelectionIndicator } from './CanvasInteraction.jsx';
 import fontUrl from '@glyph3d/core/fonts/Cousine-Regular.ttf?url';
 
 const setStatus = (t) => { const el = document.getElementById('status'); if (el) el.textContent = t; };
@@ -43,7 +44,10 @@ function App() {
             port={relayPort}
             cameraControllerRef={cameraRef}
             onReady={setClient}
-          />
+          >
+            <CanvasPicker />
+            <SelectionIndicator />
+          </CommandProvider>
         </GlyphCanvas>
       )}
       <FileTree client={client} />
