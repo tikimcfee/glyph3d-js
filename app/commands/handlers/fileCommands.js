@@ -35,7 +35,7 @@
  */
 
 import { resolveGridByIdOrIndex } from './spatialHelpers.js';
-import { flowLayout } from './layoutCommands.js';
+import { flowLayout, clearTreeMarkers } from './layoutCommands.js';
 import CodeGrid from '@glyph3d/core/collections/CodeGrid.js';
 
 /**
@@ -144,7 +144,8 @@ export default function registerFileCommands(router) {
 
         // Reflow the shelf so the new file lands cleanly beside the others —
         // bounds + margins, never stacked (skip when positioned explicitly).
-        if (!explicit) flowLayout(ctx.getGrids());
+        // Opening reverts to the flat shelf, so drop any directory volumes.
+        if (!explicit) { clearTreeMarkers(ctx); flowLayout(ctx.getGrids()); }
 
         return {
             text: `OK: opened ${path} (${grid.getLineCount()} lines, ${grid.getGlyphCount?.() ?? '?'} glyphs)`,
