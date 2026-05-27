@@ -104,55 +104,67 @@ function buildPathTree(grids) {
     return root;
 }
 
-/**
- * Bottom-up measure: each directory's children (sub-dir clusters first, then
- * leaf files) become sized boxes, flowed into a roughly-square cluster. Stashes
- * the item list + slots on the node for the place pass; returns the cluster size.
- */
-function measureNode(node, opts) {
-    const items = [];
-    for (const d of [...node.dirs.values()].sort((a, b) => a.name.localeCompare(b.name))) {
-        const sz = measureNode(d, opts);
-        items.push({ kind: 'dir', dir: d, w: sz.w, h: sz.h });
-    }
-    for (const g of node.files.slice().sort((a, b) => (a.getFilename?.() || '').localeCompare(b.getFilename?.() || ''))) {
-        const m = measureGrid(g);
-        if (m) items.push({ kind: 'file', ...m });
-    }
-    node._items = items;
+// The walk-tree: a library is a cubic tree. Each directory is a "section" (its
+// own files, packed into a small cluster) sitting at a depth (Z); sibling
+// sections spread along X; the parent→child structure is drawn as branch edges —
+// the walkway you follow, flying forward (−Z) to go deeper. Reingold-Tilford in
+// spirit: measure each subtree's X width bottom-up, then place children centered
+// under the parent so subtrees never collide.
 
-    const sizes = items.map((it) => ({ w: it.w, h: it.h }));
-    // Roughly-square cluster: ~sqrt(n) columns, sized to fit the widest child.
+/** Bottom-up: pack a node's own files into a cluster, sum children's X widths. */
+function measureWalk(node, opts) {
+    const fileItems = node.files
+        .slice().sort((a, b) => (a.getFilename?.() || '').localeCompare(b.getFilename?.() || ''))
+        .map(measureGrid).filter(Boolean);
+    const sizes = fileItems.map((m) => ({ w: m.w, h: m.h }));
     const maxW = sizes.length ? Math.max(...sizes.map((s) => s.w)) : 0;
     const cols = Math.max(1, Math.ceil(Math.sqrt(sizes.length)));
-    node._flow = flowBoxes(sizes, { margin: opts.margin, wrapWidth: cols * (maxW + opts.margin) });
-    return { w: node._flow.width, h: node._flow.height };
+    node._fileItems = fileItems;
+    node._fileFlow = flowBoxes(sizes, { margin: opts.margin, wrapWidth: cols * (maxW + opts.margin) });
+
+    node._children = [...node.dirs.values()].sort((a, b) => a.name.localeCompare(b.name));
+    node._childW = node._children.map((c) => measureWalk(c, opts));
+    const childrenW = node._childW.reduce((a, b) => a + b, 0)
+        + opts.gap * Math.max(0, node._children.length - 1);
+    node._subtreeW = Math.max(node._fileFlow.width, childrenW, opts.minW);
+    return node._subtreeW;
 }
 
-/** Top-down place: each item at parent origin + its slot; recurse into dirs. */
-function placeNode(node, ox, oy, depth, opts) {
-    node._items.forEach((it, i) => {
-        const s = node._flow.slots[i];
-        const x = ox + s.x, y = oy + s.y; // item top-left
-        if (it.kind === 'file') placeGrid(it, x, y, -depth * opts.zStep);
-        else placeNode(it.dir, x, y, depth + 1, opts);
+/** Top-down: place a node's files at (centerX, topY, depth·Z), then its children
+ *  centered under it one Z-layer deeper, spread along X by subtree width. */
+function placeWalk(node, centerX, topY, depth, opts) {
+    const z = -depth * opts.zStep;
+    const filesLeft = centerX - node._fileFlow.width / 2;
+    node._fileItems.forEach((m, i) => {
+        const s = node._fileFlow.slots[i];
+        placeGrid(m, filesLeft + s.x, topY + s.y, z);
     });
+    node._anchor = new THREE.Vector3(centerX, topY, z); // section top-center
+
+    const totalW = node._childW.reduce((a, b) => a + b, 0)
+        + opts.gap * Math.max(0, node._children.length - 1);
+    let start = centerX - totalW / 2;
+    for (let i = 0; i < node._children.length; i++) {
+        placeWalk(node._children[i], start + node._childW[i] / 2, topY, depth + 1, opts);
+        start += node._childW[i] + opts.gap;
+    }
 }
 
 /**
- * Arrange loaded grids by directory hierarchy: recursive flow clusters. Files in
- * a directory group together; sub-directories nest as sub-clusters; depth can be
- * pushed into Z (zStep) to "fly into the tree".
+ * Lay grids out as a walk-tree: directory sections spread in X, deeper in Z,
+ * connected by branch edges. Files in a directory cluster at that directory's
+ * section.
  *
  * @param {Array} grids
- * @param {{margin?:number, zStep?:number}} [opts]
- * @returns {{placed:number, dirs:number, depth:number}}
+ * @param {{margin?:number, zStep?:number, gap?:number}} [opts]
+ * @returns {{placed:number, dirs:number, depth:number, root:Object}}
  */
-export function treeLayout(grids, { margin = 24, zStep = 0 } = {}) {
+export function treeLayout(grids, { margin = 16, zStep = 170, gap = 60 } = {}) {
     if (!grids.length) return { placed: 0, dirs: 0, depth: 0 };
     const root = buildPathTree(grids);
-    measureNode(root, { margin });
-    placeNode(root, 0, 0, 0, { margin, zStep });
+    const opts = { margin, zStep, gap, minW: 50 };
+    measureWalk(root, opts);
+    placeWalk(root, 0, 0, 0, opts);
 
     let dirs = 0, depth = 0, placed = 0;
     const walk = (n, d) => {
@@ -164,15 +176,19 @@ export function treeLayout(grids, { margin = 24, zStep = 0 } = {}) {
     return { placed, dirs, depth, root };
 }
 
-// ── directory markers: translucent volumes + name labels ────────────────────
+// ── walk-tree markers: section volumes + labels + branch edges ──────────────
 
-/** Union the world bounds of every grid under a node into `box`. */
-function unionNodeBounds(node, box) {
-    for (const it of node._items || []) {
-        if (it.kind === 'file') { it.grid._markBoundsDirty?.(); box.union(it.grid.getBounds()); }
-        else unionNodeBounds(it.dir, box);
-    }
-    return box;
+/** One LineSegments holding all parent→child branch edges (the walkway). */
+function makeEdges(points) {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(points, 3));
+    const edges = new THREE.LineSegments(
+        geo,
+        new THREE.LineBasicMaterial({ color: 0x4a7f9a, transparent: true, opacity: 0.45, depthWrite: false }),
+    );
+    edges.renderOrder = -50;
+    edges.userData.treeMarker = 'edges';
+    return edges;
 }
 
 /** A translucent volume + edge outline sized to a cluster's bounds, hued by depth. */
@@ -195,20 +211,18 @@ function makeVolume(b, depth) {
     return fill;
 }
 
-/** A directory-name label (a tiny CodeGrid) anchored at the cluster's top-left. */
-function makeLabel(ctx, b, name, depth) {
+/** A directory-name label (a tiny CodeGrid) with its top-left at (x, y, z). */
+function makeLabelAt(ctx, name, depth, x, y, z) {
     const label = new CodeGrid(ctx.scene, ctx.atlas, {
-        name: `dir:${name}`, worldScale: 0.05, showBackground: false,
+        name: `dir:${name}`, worldScale: 0.06, showBackground: false,
     });
     label.loadFile(name, name);
     label.userData.treeMarker = 'label';
     ctx.scene.add(label);
     label.updateMatrixWorld(true);
     const lb = label.getBounds();
-    const lh = lb.max.y - lb.min.y;
     const lLeft = lb.min.x - label.position.x, lTop = lb.max.y - label.position.y;
-    // sit just above the cluster's top-left, nudged forward in z
-    label.position.set(b.min.x - lLeft, b.max.y + lh * 0.6 - lTop, b.max.z + 1);
+    label.position.set(x - lLeft, y - lTop, z);
     label.updateMatrixWorld(true);
     label._markBoundsDirty?.();
     return label;
@@ -233,30 +247,48 @@ export function clearTreeMarkers(ctx) {
  * + labels. The reusable core behind the layout.tree command AND file.openDir.
  * @returns {{placed:number, dirs:number, depth:number, volumes:number}}
  */
-export function applyTreeLayout(ctx, { margin = 24, zStep = 0 } = {}) {
+export function applyTreeLayout(ctx, { margin, zStep, gap } = {}) {
     clearTreeMarkers(ctx);
-    const r = treeLayout(ctx.getGrids(), { margin, zStep });
+    const r = treeLayout(ctx.getGrids(), { margin, zStep, gap });
     if (r.placed === 0) return { placed: 0, dirs: 0, depth: 0, volumes: 0 };
-    const volumes = buildTreeMarkers(ctx, r.root, { margin });
+    const volumes = buildWalkMarkers(ctx, r.root, { margin: margin ?? 16 });
     return { placed: r.placed, dirs: r.dirs, depth: r.depth, volumes };
 }
 
-/** Build a volume + label for every directory node (skips the path-less root). */
-function buildTreeMarkers(ctx, root, { margin }) {
+/**
+ * Per directory: a translucent volume around its OWN files (its "section" — a
+ * place with corners), a name label above it, and branch edges to its children.
+ * The volumes are the rooms; the edges are the walkway between them.
+ */
+function buildWalkMarkers(ctx, root, { margin }) {
     const markers = [];
+    const edgePts = [];
     const visit = (node, depth) => {
         if (node.path) {
-            const b = unionNodeBounds(node, new THREE.Box3());
+            const b = new THREE.Box3();
+            for (const m of node._fileItems) { m.grid._markBoundsDirty?.(); b.union(m.grid.getBounds()); }
             if (!b.isEmpty()) {
-                b.expandByScalar(margin * 0.4 + depth * 2); // outer dirs breathe a bit more
-                markers.push(makeVolume(b, depth));
-                ctx.scene.add(markers[markers.length - 1]);
-                markers.push(makeLabel(ctx, b, node.name, depth));
+                b.expandByScalar(margin * 0.6);
+                const v = makeVolume(b, depth);
+                ctx.scene.add(v);
+                markers.push(v);
             }
+            // Label above the section's top-left (or at the anchor if file-less).
+            const lx = node._fileFlow.width ? node._anchor.x - node._fileFlow.width / 2 : node._anchor.x;
+            markers.push(makeLabelAt(ctx, node.name, depth, lx, node._anchor.y + 12, node._anchor.z + 2));
         }
-        for (const it of node._items || []) if (it.kind === 'dir') visit(it.dir, depth + 1);
+        for (const c of node._children) {
+            const a = node._anchor, ca = c._anchor;
+            edgePts.push(a.x, a.y, a.z, ca.x, ca.y, ca.z);
+            visit(c, depth + 1);
+        }
     };
     visit(root, 0);
+    if (edgePts.length) {
+        const e = makeEdges(edgePts);
+        ctx.scene.add(e);
+        markers.push(e);
+    }
     ctx._treeMarkers = markers;
     return markers.filter((m) => m.userData?.treeMarker === 'volume').length;
 }

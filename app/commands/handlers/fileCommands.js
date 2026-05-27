@@ -217,8 +217,9 @@ export default function registerFileCommands(router) {
             if (addFileGrid(ctx, p, c.content) != null) opened++;
         }
 
-        // Lay everything currently loaded out as the directory tree, with depth.
-        const layout = applyTreeLayout(ctx, { zStep: 40 });
+        // Lay everything currently loaded out as the walk-tree (sections in X,
+        // depth in Z, branch edges) — default depth/gap.
+        const layout = applyTreeLayout(ctx);
 
         let text = `OK: opened ${opened} file(s) under "${dir || '/'}" → tree (${layout.dirs} dirs, ${layout.volumes} volumes)`;
         if (skipped) text += `; ${skipped} skipped (cap ${cap})`;
