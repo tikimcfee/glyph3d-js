@@ -7,21 +7,21 @@ import CommandCenter from './CommandCenter.jsx';
 // via the core's "./fonts/*" export, not a reach into src/.
 import fontUrl from '@glyph3d/core/fonts/Cousine-Regular.ttf?url';
 
-const SAMPLE = `// glyph3d-r3f bindings — keystone harness
-function fib(n) {
-  if (n < 2) return n;
-  return fib(n - 1) + fib(n - 2);
-}
-
-const canvas = "<GlyphCanvas> owns the WebGPU renderer";
-const grid   = "<CodeGrid> is this file, as a 3D body";
-const camera = "<ViewerCamera> drives pan / orbit / zoom";
-
-// Drag to orbit/pan, wheel to zoom. If this reads crisply and moves,
-// the bindings hold and the keystone is now a real package.
-for (let i = 0; i < 8; i++) {
-  console.log(\`box ─ │ ┌ ┐ └ ┘ ├ ┤ ┬ ┴ ┼  line \${i}\`);
-}
+// Placeholder landing content — a single grid so the app has something to read
+// while the real home surface (free-floating glyphs, parsed repositories) gets
+// built on top. The whole point is that this is now driven by the command bus:
+// ask Claude to take you somewhere, or type at it yourself.
+const SAMPLE = `// glyph3d — home
+//
+// a place to read code and text in space.
+//
+//   drag   → orbit / pan
+//   wheel  → zoom
+//   the command bus drives everything else:
+//     grid.list · camera.focus 0 · camera.move x y z
+//
+// this single grid is the seed. parsed repositories and
+// free-floating glyphs grow from here.
 `;
 
 const setStatus = (t) => { const el = document.getElementById('status'); if (el) el.textContent = t; };
@@ -42,7 +42,7 @@ function App() {
     if (!grid) return;
     requestAnimationFrame(() => {
       const n = gridRef.current?.getGlyphCount?.() ?? '?';
-      console.log(`[keystone] CodeGrid mounted via glyph3d-r3f — glyphs=${n}`);
+      console.log(`[home] CodeGrid mounted via glyph3d-r3f — glyphs=${n}`);
       setStatus(`glyphs: ${n}   drag = orbit/pan · wheel = zoom`);
     });
   };
@@ -64,7 +64,7 @@ function App() {
         port={Number(new URLSearchParams(location.search).get('relay')) || 8080}
         cameraControllerRef={cameraRef}
       >
-        <CodeGrid ref={onGrid} filename="keystone.js" text={SAMPLE} worldScale={0.025} />
+        <CodeGrid ref={onGrid} filename="home.js" text={SAMPLE} worldScale={0.025} />
       </CommandCenter>
     </GlyphCanvas>
   );

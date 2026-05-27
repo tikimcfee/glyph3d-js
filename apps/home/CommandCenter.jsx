@@ -8,7 +8,7 @@ import { installConsoleForwarder } from '@glyph3d/core/services/orchestration/co
 import AttentionManager from '@glyph3d/core/services/interaction/AttentionManager.js';
 // The spine, ported verbatim — handlers register lazily; nothing here knows the
 // shell. Their only deps are @glyph3d/core, three, and sibling helpers.
-import { registerAllCommands } from '../app/commands/handlers/index.js';
+import { registerAllCommands } from '../../app/commands/handlers/index.js';
 
 // ---------------------------------------------------------------------------
 // The app-context provider (the linchpin).

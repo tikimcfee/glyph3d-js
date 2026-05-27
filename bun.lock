@@ -10,8 +10,8 @@
         "three": "^0.183.0",
       },
     },
-    "keystone": {
-      "name": "glyph3d-keystone",
+    "apps/home": {
+      "name": "glyph3d-home",
       "dependencies": {
         "@glyph3d/core": "workspace:*",
         "@react-three/fiber": "^9.0.0",
@@ -243,7 +243,7 @@
 
     "gensync": ["gensync@1.0.0-beta.2", "", {}, "sha512-3hN7NaskYvMDLQY55gnW3NQ+mesEAepTqlg+VEbj7zzqEMBVNhzcGYYeqFo/TlYz6eQiFcp1HcsCZO+nGgS8zg=="],
 
-    "glyph3d-keystone": ["glyph3d-keystone@workspace:keystone"],
+    "glyph3d-home": ["glyph3d-home@workspace:apps/home"],
 
     "glyph3d-r3f": ["glyph3d-r3f@workspace:packages/glyph3d-r3f"],
 
