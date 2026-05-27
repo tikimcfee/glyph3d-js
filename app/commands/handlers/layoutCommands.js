@@ -142,29 +142,34 @@ function measureWalk(node, opts) {
     node._childPack = flowBoxes(node._childSizes, { margin: opts.gap, wrapWidth: squareWrap(node._childSizes, opts.gap) });
 
     node._w = Math.max(node._fileFlow.width, node._childPack.width, opts.minW);
-    node._h = Math.max(node._fileFlow.height, node._childPack.height, opts.minH);
+    // Children stack BELOW the files (the stairway), so total height is additive,
+    // not the max — the parent must reserve room for the whole cascade.
+    const stackedH = node._fileFlow.height
+        + (node._childPack.height > 0 ? opts.yStep + node._childPack.height : 0);
+    node._h = Math.max(stackedH, opts.minH);
     return { w: node._w, h: node._h };
 }
 
-/** Top-down: place a node's files centered at (cx, cy, depth·Z), then its child
- *  subtrees one Z-layer deeper, packed in a 2D grid centered behind it. */
-function placeWalk(node, cx, cy, depth, opts) {
+/** Top-down: place a node's files with their TOP at (cx, topY, depth·Z), then its
+ *  child subtrees one Z-layer deeper AND below the files — a stairway descending
+ *  down (Y) and back (Z) as nesting deepens. */
+function placeWalk(node, cx, topY, depth, opts) {
     const z = -depth * opts.zStep;
     const fLeft = cx - node._fileFlow.width / 2;
-    const fTop = cy + node._fileFlow.height / 2;
     node._fileItems.forEach((m, i) => {
         const s = node._fileFlow.slots[i];
-        placeGrid(m, fLeft + s.x, fTop + s.y, z);
+        placeGrid(m, fLeft + s.x, topY + s.y, z); // slot.y ≤ 0 → descends from top
     });
-    node._anchor = new THREE.Vector3(cx, cy, z); // section center
+    node._anchor = new THREE.Vector3(cx, topY - node._fileFlow.height / 2, z); // section center
 
     const cp = node._childPack;
+    if (cp.slots.length === 0) return;
     const pLeft = cx - cp.width / 2;
-    const pTop = cy + cp.height / 2;
+    const pTop = topY - node._fileFlow.height - opts.yStep; // below the files
     node._children.forEach((child, i) => {
-        const s = cp.slots[i];                 // top-left of this child's footprint
-        const cw = node._childSizes[i].w, ch = node._childSizes[i].h;
-        placeWalk(child, pLeft + s.x + cw / 2, pTop + s.y - ch / 2, depth + 1, opts);
+        const s = cp.slots[i];               // top-left of this child's footprint
+        const cw = node._childSizes[i].w;
+        placeWalk(child, pLeft + s.x + cw / 2, pTop + s.y, depth + 1, opts);
     });
 }
 
@@ -180,7 +185,7 @@ function placeWalk(node, cx, cy, depth, opts) {
 export function treeLayout(grids, { margin = 16, zStep = 170, gap = 60 } = {}) {
     if (!grids.length) return { placed: 0, dirs: 0, depth: 0 };
     const root = buildPathTree(grids);
-    const opts = { margin, zStep, gap, minW: 50, minH: 30 };
+    const opts = { margin, zStep, gap, yStep: 70, minW: 50, minH: 30 };
     measureWalk(root, opts);
     placeWalk(root, 0, 0, 0, opts);
 
