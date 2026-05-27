@@ -23,7 +23,8 @@
     "./shaping": "./src/shaping/index.js",
     "./annotations": "./src/annotations/index.js",
     "./parsing": "./src/parsing/index.js",
-    "./fonts/*": "./src/fonts/*"
+    "./fonts/*": "./src/fonts/*",
+    "./*": "./src/*"
   },
   "files": [
     "src"

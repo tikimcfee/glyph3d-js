@@ -2,6 +2,7 @@ import React, { useEffect, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import * as THREE from 'three/webgpu';
 import { useGlyphEngine, GlyphCanvas, CodeGrid, ViewerCamera } from 'glyph3d-r3f';
+import CommandCenter, { useAppCommands } from './CommandCenter.jsx';
 // The consumer owns the font choice — the engine doesn't bake a path. Resolved
 // via the core's "./fonts/*" export, not a reach into src/.
 import fontUrl from '@glyph3d/core/fonts/Cousine-Regular.ttf?url';
@@ -53,9 +54,26 @@ function App() {
       onCreated={({ scene }) => { scene.background = new THREE.Color(0x050608); }}
     >
       <ViewerCamera />
-      <CodeGrid ref={onGrid} filename="keystone.js" text={SAMPLE} worldScale={0.025} />
+      {/* The page is served by Vite (:5173); the command relay is the Go
+          server (glyph3d-cli serve) on :8080. Override with ?relay=PORT. */}
+      <CommandCenter atlas={atlas} port={Number(new URLSearchParams(location.search).get('relay')) || 8080}>
+        <TrackedCodeGrid ref={onGrid} filename="keystone.js" text={SAMPLE} worldScale={0.025} />
+      </CommandCenter>
     </GlyphCanvas>
   );
 }
+
+// A CodeGrid that registers itself in the command-context registry on mount, so
+// registry/grid commands (grid.list, registry.list) see it. The vanilla IDE did
+// this through ctx.addGrid in its load path; here it's a thin r3f wrapper.
+const TrackedCodeGrid = React.forwardRef(function TrackedCodeGrid(props, ref) {
+  const client = useAppCommands();
+  const setGrid = (grid) => {
+    if (grid && client) client.ctx.addGrid(grid, { id: props.filename });
+    if (typeof ref === 'function') ref(grid);
+    else if (ref) ref.current = grid;
+  };
+  return <CodeGrid ref={setGrid} {...props} />;
+});
 
 createRoot(document.getElementById('root')).render(<App />);
