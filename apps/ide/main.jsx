@@ -17,41 +17,46 @@ function App() {
   // onReady so the DOM sidebar — which can't read the in-canvas context — can use
   // it. One source of truth, prop-drilled to the chrome.
   const [client, setClient] = useState(null);
+  const [collapsed, setCollapsed] = useState(false);
 
   useEffect(() => {
     setStatus(
       error ? `boot failed: ${error.message}`
-      : client ? 'ready · drag = orbit/pan · wheel = zoom · click a file'
+      : client ? 'shift-drag = look · drag = pan · scroll = up/down · shift-scroll = dolly · WASD = move'
       : `engine: ${stage}`
     );
   }, [stage, error, client]);
 
+  // Sidebar is a flex SIBLING of the canvas (not an overlay), so collapsing it
+  // hands the width back to the 3D view. r3f's <Canvas> auto-resizes to its
+  // container, so the camera/viewport follow the flex change for free.
   return (
-    <>
-      {atlas && !error && (
-        <GlyphCanvas
-          atlas={atlas}
-          camera={{ position: [0, 0, 300], fov: 70, near: 0.1, far: 20000 }}
-          onCreated={({ scene }) => { scene.background = new THREE.Color(0x050608); }}
-          style={{ position: 'absolute', inset: 0 }}
-        >
-          <ViewerCamera ref={cameraRef} />
-          {/* No children to load up front — the IDE starts empty; files arrive via
-              file.open (sidebar click or CLI). The page is served by Vite (:5173);
-              the command relay is the Go server on :8080 (?relay=PORT overrides). */}
-          <CommandProvider
+    <div style={{ display: 'flex', width: '100%', height: '100%' }}>
+      <FileTree client={client} collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)} />
+      <div style={{ flex: '1 1 auto', position: 'relative', minWidth: 0 }}>
+        {atlas && !error && (
+          <GlyphCanvas
             atlas={atlas}
-            port={relayPort}
-            cameraControllerRef={cameraRef}
-            onReady={setClient}
+            camera={{ position: [0, 0, 300], fov: 70, near: 0.1, far: 20000 }}
+            onCreated={({ scene }) => { scene.background = new THREE.Color(0x050608); }}
+            style={{ position: 'absolute', inset: 0 }}
           >
-            <CanvasPicker />
-            <SelectionIndicator />
-          </CommandProvider>
-        </GlyphCanvas>
-      )}
-      <FileTree client={client} />
-    </>
+            <ViewerCamera ref={cameraRef} />
+            {/* IDE starts empty; files arrive via file.open (sidebar click or CLI).
+                Page served by Vite (:5173); relay is the Go server :8080. */}
+            <CommandProvider
+              atlas={atlas}
+              port={relayPort}
+              cameraControllerRef={cameraRef}
+              onReady={setClient}
+            >
+              <CanvasPicker />
+              <SelectionIndicator />
+            </CommandProvider>
+          </GlyphCanvas>
+        )}
+      </div>
+    </div>
   );
 }
 

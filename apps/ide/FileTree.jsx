@@ -12,17 +12,20 @@ import React, { useEffect, useMemo, useState, useCallback } from 'react';
 // re-list on every reconnect — never against a not-yet-open socket.
 
 const styles = {
-  panel: {
-    position: 'absolute', top: 0, left: 0, bottom: 0, width: 280, zIndex: 10,
-    background: 'rgba(8,10,14,0.82)', borderRight: '1px solid #1b1f29',
-    backdropFilter: 'blur(6px)', display: 'flex', flexDirection: 'column',
+  // A flex sibling of the canvas (not an overlay): collapsing hands width back.
+  panel: (collapsed) => ({
+    flex: '0 0 auto', width: collapsed ? 30 : 280, height: '100%',
+    background: 'rgba(8,10,14,0.92)', borderRight: '1px solid #1b1f29',
+    display: 'flex', flexDirection: 'column', overflow: 'hidden',
+    transition: 'width 0.15s ease',
     font: '12px/1.55 ui-monospace, "JetBrains Mono", Menlo, monospace', color: '#c8ccd6',
-  },
+  }),
   header: {
-    padding: '10px 12px', borderBottom: '1px solid #1b1f29',
+    padding: '10px 8px', borderBottom: '1px solid #1b1f29',
     color: '#7c8596', letterSpacing: '0.04em', flex: '0 0 auto',
-    display: 'flex', justifyContent: 'space-between', gap: 8,
+    display: 'flex', alignItems: 'center', gap: 8,
   },
+  toggle: { cursor: 'pointer', color: '#7c8596', padding: '0 2px', flex: '0 0 auto', userSelect: 'none' },
   dot: (ok) => ({ color: ok ? '#7ad7a0' : '#caa14a' }),
   list: { overflowY: 'auto', flex: '1 1 auto', padding: '4px 0' },
   row: {
@@ -35,7 +38,6 @@ const styles = {
   treeBtn: (lit) => ({
     flex: '0 0 auto', marginLeft: 6, padding: '0 5px', borderRadius: 3,
     color: lit ? '#7ad7a0' : '#39414f', cursor: 'pointer',
-    title: 'lay this folder out in 3D',
   }),
   dir: { color: '#9aa3b2' },
   fileOpen: { color: '#7ad7a0' },
@@ -120,7 +122,7 @@ function TreeRow({ node, depth, expanded, toggle, open, openFile, openDir, hover
   );
 }
 
-export default function FileTree({ client }) {
+export default function FileTree({ client, collapsed = false, onToggle }) {
   const [connected, setConnected] = useState(false);
   const [files, setFiles] = useState(null);
   const [error, setError] = useState(null);
@@ -206,12 +208,21 @@ export default function FileTree({ client }) {
   );
 
   return (
-    <aside style={styles.panel}>
+    <aside style={styles.panel(collapsed)}>
       <div style={styles.header}>
-        <span>files{files ? ` · ${files.length}` : ''}{open.size ? ` · ${open.size} open` : ''}</span>
-        <span style={styles.dot(connected)} title={connected ? 'relay connected' : 'relay disconnected'}>●</span>
+        <span onClick={onToggle} title={collapsed ? 'expand files' : 'collapse files'} style={styles.toggle}>
+          {collapsed ? '▶' : '◀'}
+        </span>
+        {!collapsed && (
+          <>
+            <span style={{ flex: '1 1 auto', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              files{files ? ` · ${files.length}` : ''}{open.size ? ` · ${open.size} open` : ''}
+            </span>
+            <span style={styles.dot(connected)} title={connected ? 'relay connected' : 'relay disconnected'}>●</span>
+          </>
+        )}
       </div>
-      {body}
+      {!collapsed && body}
     </aside>
   );
 }
