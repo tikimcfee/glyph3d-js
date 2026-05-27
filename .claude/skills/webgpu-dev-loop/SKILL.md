@@ -1,6 +1,6 @@
 ---
 name: webgpu-dev-loop
-description: The repeatable in-browser experiment loop for glyph3d's WebGPU rendering — run a Vite dev harness, launch a correctly-configured browser, and read the browser console from a file so you can iterate WITHOUT being able to see the screen yourself. Use whenever you're changing renderer/shader/r3f/binding code and need to verify it actually renders, or debugging "it loads but nothing shows."
+description: The repeatable in-browser experiment loop for glyph3d's WebGPU rendering AND for profiling runtime behavior/perf you can't see from the sandbox — run a dev harness (Vite, or the Go --local server), drive the live instance, and read the browser console from a file so you iterate WITHOUT seeing the screen. Use when changing renderer/shader/r3f/binding code and verifying it renders, debugging "it loads but nothing shows," OR chasing a main-thread hang / load-unload stall / "feels slow when I do X."
 argument-hint: "[page-url-or-path]"
 user-invocable: true
 effort: medium
@@ -44,6 +44,35 @@ reload and a one-line "what do you see."
 5. **For visuals** (does it actually render? right colors? interactivity?), ask
    the human for a one-line report. Pixels are ground truth, not logs — see the
    `display-ground-truth` skill.
+
+## Measure, don't theorize (profiling a runtime hang / perf issue)
+
+The same "read the browser from a file" loop profiles behavior you can't see —
+main-thread hangs, load/unload stalls, "feels slow when I move around." The trap
+is reasoning about where the time goes; a confident wrong mechanism sends you on
+a wrong rewrite. **Instrument the real thing, drive it, read the numbers.** This
+loop found a 400ms camera-move stall in one session (commit `3b88399`):
+
+1. **Instrument the suspected hot path** with `performance.now()` and a
+   **gated** `console.log` — log ONLY on events that did real work or ran long
+   (e.g. `if (didWork || ms > 2)`), never every frame, or the relay log drowns.
+   Mark every temp line with a removable tag: `// [PERF-PROBE temp — remove after X]`.
+2. **Drive the live instance from the CLI** — no human needed for input:
+   `glyph3d-cli camera.fitall`, `camera.sim orbit|zoom|pan <args>`,
+   `console.log "<marker>"`, any registered command. To exercise evict/reload,
+   move away, `sleep` past the timer, move back.
+3. **Read the timing** from the Go relay log: browser `console.*` is forwarded as
+   `[browser:log] …`. Run the server as YOUR background task (a user-launched one
+   hides stdout); grep your probe marker. One line often tells the whole story —
+   here `[virt] update=421ms reload=242` was the entire diagnosis.
+4. **Measure before AND after** the fix with the same probe + same drive sequence.
+   Quote both numbers in the commit (400ms → ~20ms), then **strip the probe**
+   (grep your tag to be sure none survive) and commit the fix clean.
+5. **Distrust mechanism claims — verify the cheap way.** A sub-agent here blamed a
+   "GPU readback fence stall"; the hot loop actually read `geometry.attributes.*.array`
+   (a CPU-side typed array in RAM — no GPU sync). Reading the actual line refuted
+   it in seconds. CPU stampede, not GPU stall → six-line fix, not a rewrite. See
+   `feedback_crossref_verify_premises`.
 
 ## Sharp edges (learned the hard way)
 
