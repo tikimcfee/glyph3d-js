@@ -24,9 +24,11 @@ Current truth:
   apps/packages build with **Vite**; the "no build step" ethos is being reversed
   (Vite HMR replaces edit-and-refresh). **NB:** the Project Structure section
   below still draws `src/` at root — read it as `packages/glyph3d-core/src/`.
-- **Dev loop:** the `/webgpu-dev-loop` skill. TL;DR: `cd keystone && bun run dev`
+- **Dev loop:** the `/webgpu-dev-loop` skill. TL;DR: `cd apps/home && bun run dev`
   (Vite, :5173), open via `tools/dev-firefox.sh <url>` (NVIDIA-pinned WebGPU
-  Firefox), read the browser console from `keystone/console.log`.
+  Firefox), read the browser console from `apps/home/console.log`. (`apps/home` is
+  the promoted keystone — the r3f client + command center; the old vanilla /home
+  was deleted. The Go relay still serves :8080 for the command bus.)
 - **Cleanup in flight:** core-survivor dedups (`zDistanceForFit`,
   `resolveGridByIdOrIndex` done) — running checklist in memory.
 

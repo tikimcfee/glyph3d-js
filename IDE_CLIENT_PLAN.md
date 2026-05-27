@@ -110,7 +110,19 @@ exercises the full vertical slice:
    NB the relay is the Go server on :8080; keystone is served by Vite on :5173, so
    `CommandCenter` targets :8080 explicitly (`?relay=PORT` overrides).
 3. **Substrate consolidation:** fold `/home` onto `glyph3d-r3f` (remove its boot
-   reimplementation), confirming the bindings are a real app substrate.
+   reimplementation), confirming the bindings are a real app substrate. ✅
+   **DONE `19efdfe` + `a6f34bd`:** decided with Ivan to **promote the keystone**
+   (it had crystallized the bindings + command center) rather than scaffold a
+   third app — `git mv keystone → apps/home`, renamed `glyph3d-home`. Cleared the
+   old `/home` sketches (HomeShell + `app/home/*`: clusters, demos, command bar,
+   layout kit, introspect, reference space — all self-contained, no external
+   importers; git history holds the layout kit). Hardened the substrate first:
+   **one registry** (GlyphProvider provides the core SceneRegistry; `<CodeGrid>`
+   self-registers, `<ViewerCamera>` frames it, CommandCenter consumes it — no more
+   dual-registry drift, TrackedCodeGrid gone) and **wired `ctx.cameraController`**
+   from the `<ViewerCamera>` ref as a live getter (camera.* verified driving the
+   VCC). Rewired workspaces (keystone → `apps/*`), repoRoot, spine import. The one
+   good way holds: `@glyph3d/core → glyph3d-r3f → apps/home`.
 4. **Scaffold `apps/ide`** as the new client on the bindings.
 5. **Grow the context + wire the load path** until the v1 tour slice works
    (handlers are already registered; this is populating context fields —

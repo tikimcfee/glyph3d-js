@@ -21,11 +21,12 @@ reload and a one-line "what do you see."
 
 ## The pieces (in this repo)
 
-- **`keystone/`** — a Vite + bun dev harness that mounts the real `src/` /
-  `packages/glyph3d-r3f` code. `cd keystone && bun run dev` → Vite on `:5173`.
-- **`keystone/console-capture.js`** — a Vite plugin that injects a client shim
+- **`apps/home/`** — the Vite + bun r3f client (the promoted keystone; mounts the
+  real `packages/glyph3d-core` / `packages/glyph3d-r3f` code + the command center).
+  `cd apps/home && bun run dev` → Vite on `:5173`.
+- **`apps/home/console-capture.js`** — a Vite plugin that injects a client shim
   forwarding `console.*` + `window.onerror` + unhandledrejection to
-  `POST /__log`, appended to **`keystone/console.log`**. Truncated on each server
+  `POST /__log`, appended to **`apps/home/console.log`**. Truncated on each server
   start. **You read this file** to see what happened in-browser.
 - **`tools/dev-firefox.sh <url>`** — launches Firefox correctly for WebGPU on the
   dual-GPU box (NVIDIA Vulkan pin + `dom.webgpu.enabled` + frame-rate pin). A
@@ -35,12 +36,12 @@ reload and a one-line "what do you see."
 
 ## The loop
 
-1. **Serve:** `cd keystone && bun run dev` (background). Confirm `:5173` responds.
+1. **Serve:** `cd apps/home && bun run dev` (background). Confirm `:5173` responds.
 2. **Open:** ask the human to run `tools/dev-firefox.sh http://localhost:5173/`
    (or your target page). You can't launch their browser.
 3. **Edit** source. Vite HMR auto-reloads for component/source edits.
-4. **Read** `keystone/console.log` — your eyes. Grep for your own
-   `[keystone] …` markers + `[error]`/`[uncaught]`.
+4. **Read** `apps/home/console.log` — your eyes. Grep for your own
+   `[home] …` / `[command-center] …` markers + `[error]`/`[uncaught]`.
 5. **For visuals** (does it actually render? right colors? interactivity?), ask
    the human for a one-line report. Pixels are ground truth, not logs — see the
    `display-ground-truth` skill.
@@ -91,13 +92,13 @@ loop found a 400ms camera-move stall in one session (commit `3b88399`):
 ## Syntax-check without node
 
 `bun` is the only JS runtime here. To parse/transpile-check a file (esp. app
-files not in the keystone graph) without running it:
+files not in the apps/home Vite graph) without running it:
 
 ```
 bun -e 'new Bun.Transpiler({loader:"jsx"}).transformSync(await Bun.file(process.argv[1]).text()); console.log("ok")' <file>
 ```
 
-Core files (`src/…`) are validated for free through the keystone Vite graph
+Core files (`packages/glyph3d-core/src/…`) are validated for free through the apps/home Vite graph
 (curl them via `http://localhost:5173/@fs<abs-path>` and check for 200 + no
 error string). App/command-handler files are NOT in that graph → syntax-check
 with bun, and behavior-verify with an IDE smoke (`glyph3d-cli serve --local` +
