@@ -9,7 +9,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,8 +26,10 @@ type Relay struct {
 	displayWrite chan []byte // serialized write queue for display WebSocket
 	controllers  map[string]*websocket.Conn
 	nextID       atomic.Int64
+	termSeq      atomic.Int64 // monotonic id source for relay-spawned terminal adapters
 	upgrader     websocket.Upgrader
 	fs           *FSHandler // nil if --root not provided
+	port         int        // port this relay serves on (spawned adapters connect back here)
 }
 
 func NewRelay() *Relay {
@@ -314,6 +318,8 @@ func (r *Relay) handleRelayMessage(ws *websocket.Conn, msg []byte) {
 		Size       float64         `json:"size"`
 		PNG        string          `json:"png"`
 		Descriptor json.RawMessage `json:"descriptor"`
+		Cols       int             `json:"cols"`
+		Rows       int             `json:"rows"`
 	}
 	if err := json.Unmarshal(msg, &m); err != nil {
 		ws.WriteJSON(map[string]any{"error": "invalid relay message"})
@@ -377,9 +383,42 @@ func (r *Relay) handleRelayMessage(ws *websocket.Conn, msg []byte) {
 			"removed": removed,
 		})
 
+	case "terminal.spawn":
+		r.spawnTerminalAdapter(ws, m.Cols, m.Rows)
+
 	default:
 		ws.WriteJSON(map[string]any{"error": fmt.Sprintf("unknown relay command: %s", m.Relay)})
 	}
+}
+
+// spawnTerminalAdapter forks `glyph3d-cli attach <id> --port <port>` as a child
+// process. The adapter connects back to this relay as a controller, creates a
+// TerminalGrid in the display, and pumps a real shell (tmux) into it. The browser
+// can't spawn a host process itself, so the relay does it on request (this is the
+// "+ terminal" button's backend). Single-user tool: as trusted as the command bus.
+func (r *Relay) spawnTerminalAdapter(ws *websocket.Conn, cols, rows int) {
+	exePath, err := os.Executable()
+	if err != nil {
+		ws.WriteJSON(map[string]any{"error": "cannot locate glyph3d-cli binary: " + err.Error()})
+		return
+	}
+	id := fmt.Sprintf("term-%d", r.termSeq.Add(1))
+	args := []string{"attach", id, "--port", strconv.Itoa(r.port)}
+	if cols > 0 {
+		args = append(args, "--cols", strconv.Itoa(cols))
+	}
+	if rows > 0 {
+		args = append(args, "--rows", strconv.Itoa(rows))
+	}
+	cmd := exec.Command(exePath, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		ws.WriteJSON(map[string]any{"error": "spawn failed: " + err.Error()})
+		return
+	}
+	log.Printf("[relay] spawned terminal adapter '%s' (pid %d) → ws://localhost:%d", id, cmd.Process.Pid, r.port)
+	ws.WriteJSON(map[string]any{"event": "terminal.spawning", "id": id})
 }
 
 func (r *Relay) notifyDisplay(event, clientID string) {
@@ -413,6 +452,7 @@ type ServerConfig struct {
 func RunServer(cfg ServerConfig) error {
 	relay := NewRelay()
 	relay.fs = cfg.FSHandler
+	relay.port = cfg.Port
 
 	// Wire the fs/writeFile notify hook so successful writes echo an
 	// fs/didChange to the display. Editable-3d-ide L0: lets the browser
@@ -512,6 +552,7 @@ func isWebSocketUpgrade(r *http.Request) bool {
 func RunRelay(host string, port int, fsHandler *FSHandler) error {
 	relay := NewRelay()
 	relay.fs = fsHandler
+	relay.port = port
 	if fsHandler != nil {
 		fsHandler.SetNotifyHook(relay.NotifyDisplayRPC)
 	}

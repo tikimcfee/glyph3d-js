@@ -42,6 +42,31 @@ function getTerminals(ctx) {
 export default function registerTerminalCommands(router) {
 
     // ------------------------------------------------------------------
+    // terminal.spawn [cols] [rows]
+    //   Ask the relay (Go server) to fork a `glyph3d-cli attach` adapter — a REAL
+    //   shell (tmux) wired into a fresh TerminalGrid. The browser can't spawn a
+    //   host process, so this sends a {relay:"terminal.spawn"} message the relay
+    //   handles server-side; the terminal appears once the forked adapter connects
+    //   and runs terminal.create + frames. (This is the "+ terminal" button's verb.)
+    // ------------------------------------------------------------------
+    router.register('terminal.spawn', (args, ctx) => {
+        const bridge = ctx.wsbridge;
+        if (!bridge || !bridge.connected || typeof bridge.send !== 'function') {
+            return { text: 'ERR: not connected to the relay — terminal.spawn needs the Go server to fork an adapter', data: null };
+        }
+        const msg = { relay: 'terminal.spawn' };
+        const cols = parseInt(args[0], 10);
+        const rows = parseInt(args[1], 10);
+        if (!isNaN(cols) && cols > 0) msg.cols = cols;
+        if (!isNaN(rows) && rows > 0) msg.rows = rows;
+        bridge.send(JSON.stringify(msg));
+        return {
+            text: 'OK: requested terminal spawn (relay is forking an adapter)',
+            data: { requested: true, cols: msg.cols ?? null, rows: msg.rows ?? null },
+        };
+    }, { description: 'Ask the relay to fork a terminal adapter — a real shell in the canvas', usage: '[cols] [rows]' });
+
+    // ------------------------------------------------------------------
     // terminal.create <id> [cols] [rows] [--scale N]
     // ------------------------------------------------------------------
     router.register('terminal.create', (args, ctx) => {
