@@ -3,6 +3,7 @@ import { DockviewReact } from 'dockview';
 import 'dockview/dist/styles/dockview.css';
 import './ide-dock.css';
 import FileTree from './FileTree.jsx';
+import TerminalsPanel from './TerminalsPanel.jsx';
 
 // IdeDock — the panel layer. A dockview surface that hosts the IDE's DOM panels
 // (the file tree today; terminals-list / search / inspector later) with tabs,
@@ -20,8 +21,9 @@ import FileTree from './FileTree.jsx';
 
 const components = {
   // Each panel component receives { params, api, containerApi }. We thread the
-  // command client through params — the same client FileTree always took.
+  // command client through params — the same client the panels always took.
   files: (props) => <FileTree client={props.params.client} />,
+  terminals: (props) => <TerminalsPanel client={props.params.client} />,
 };
 
 export default function IdeDock({ client }) {
@@ -36,6 +38,16 @@ export default function IdeDock({ client }) {
         component: 'files',
         title: 'Files',
         params: { client },
+      });
+    }
+    // Terminals as a tab in the same group as Files — drag it out to split.
+    if (!event.api.getPanel('terminals')) {
+      event.api.addPanel({
+        id: 'terminals',
+        component: 'terminals',
+        title: 'Terminals',
+        params: { client },
+        position: { referencePanel: 'files', direction: 'within' },
       });
     }
   }, [client]);

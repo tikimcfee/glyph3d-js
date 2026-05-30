@@ -27,6 +27,10 @@ const styles = {
     padding: '3px 9px',
     cursor: enabled ? 'pointer' : 'default',
   }),
+  sep: {
+    width: 1, alignSelf: 'stretch', margin: '2px 4px',
+    background: '#1b1f29', flex: '0 0 auto',
+  },
 };
 
 /** A single text button that runs a command and surfaces hover. */
@@ -51,6 +55,12 @@ export default function ButtonBar({ client }) {
   return (
     <div style={styles.bar}>
       <Btn label="+ terminal" title="spawn a shell in the canvas" cmd="terminal.spawn" client={client} />
+      <span style={styles.sep} />
+      <Btn label="fit" title="frame all grids in view" cmd="camera.fitall" client={client} />
+      <Btn label="reset" title="reset the camera to its home view" cmd="camera.reset" client={client} />
+      <Btn label="relayout" title="re-pack the open grids into a flow layout" cmd="layout.flow" client={client} />
+      <span style={styles.sep} />
+      <Btn label="clear" title="remove all open code grids (terminals stay)" cmd="scene.clear_grids" client={client} />
     </div>
   );
 }

@@ -173,7 +173,7 @@ func attachCmd() {
 				shutdown()
 				return
 			}
-			handleInbound(msg, id, session)
+			handleInbound(msg, id, session, shutdown)
 		}
 	}()
 
@@ -226,10 +226,13 @@ func capturePane(session string) (string, error) {
 }
 
 // handleInbound dispatches a message the relay forwarded to this controller.
-// The keystroke-return channel arrives as {event:"terminal.input", data:{terminalId,text}}
-// (browser keydown → grid.onInput → wsbridge.push → relay passthrough → here);
-// we inject the bytes into the tmux session via send-keys, closing the loop.
-func handleInbound(msg []byte, termID, session string) {
+// Two event kinds arrive on this channel (browser → grid.onInput / terminal.kill
+// → wsbridge.push → relay passthrough → here):
+//   - terminal.input: keystroke bytes → tmux send-keys, closing the input loop.
+//   - terminal.shutdown: the display (panel × via terminal.kill) asking us to
+//     close. We trigger the same graceful teardown as a SIGTERM — the frame pump
+//     stops and the deferred terminal.close + tmux kill-session run on exit.
+func handleInbound(msg []byte, termID, session string, shutdown func()) {
 	var ev struct {
 		Event string `json:"event"`
 		Data  struct {
@@ -238,14 +241,18 @@ func handleInbound(msg []byte, termID, session string) {
 		} `json:"data"`
 	}
 	if json.Unmarshal(msg, &ev) == nil && ev.Event != "" {
-		if ev.Event == "terminal.input" {
-			// Ignore input addressed to a different terminal (one adapter, one id).
-			if ev.Data.TerminalID != "" && ev.Data.TerminalID != termID {
-				return
-			}
+		// An event addressed to a different terminal is never ours (one adapter, one id).
+		if ev.Data.TerminalID != "" && ev.Data.TerminalID != termID {
+			return
+		}
+		switch ev.Event {
+		case "terminal.input":
 			if err := sendKeysToTmux(session, ev.Data.Text); err != nil {
 				log.Printf("[attach] send-keys: %v", err)
 			}
+		case "terminal.shutdown":
+			fmt.Fprintln(os.Stderr, "[attach] shutdown requested by display")
+			shutdown()
 		}
 		return
 	}

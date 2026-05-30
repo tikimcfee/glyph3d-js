@@ -1,19 +1,24 @@
 /**
- * Terminal commands: terminal.create, terminal.frame, terminal.resize,
- * terminal.close, terminal.list, terminal.move, terminal.scale
+ * Terminal commands: terminal.spawn, terminal.create, terminal.frame,
+ * terminal.resize, terminal.close, terminal.kill, terminal.focus,
+ * terminal.list, terminal.move, terminal.scale, terminal.input
  *
  * These commands render fixed-size terminal cell grids via TerminalGrid,
  * which bypasses the GlyphCollection deferred queue and writes directly
  * to GPU attribute arrays.
  *
  * Wire protocol:
+ *   terminal.spawn  [cols] [rows]            (ask relay to fork an adapter)
  *   terminal.create <id> [cols] [rows] [--scale N]
  *   terminal.frame  <id> <base64-content>
  *   terminal.resize <id> <cols> <rows>
- *   terminal.close  <id>
+ *   terminal.close  <id>                     (dispose display grid only)
+ *   terminal.kill   <id>                     (full teardown: shell + tmux + grid)
+ *   terminal.focus  <id>                     (attention primary + key)
  *   terminal.list
  *   terminal.move   <id> <x> <y> <z>
  *   terminal.scale  <id> <factor>
+ *   terminal.input  <id> <base64-text>
  *
  * Content in terminal.frame is base64-encoded raw terminal output.
  * For Tier 1 bridges (capture-pane -p): plain text.
@@ -344,4 +349,76 @@ export default function registerTerminalCommands(router) {
             data: { id, dropped: true },
         };
     }, { description: 'Send input to a terminal (base64-encoded)', usage: '<id> <base64-text>' });
+
+    // ------------------------------------------------------------------
+    // terminal.kill <id>
+    //   FULL teardown — the panel × button's verb. terminal.close only disposes
+    //   the display grid; on its own it orphans the adapter process AND its tmux
+    //   session (they become zombies). terminal.kill instead signals the owning
+    //   adapter (recorded at create time) to shut down: the adapter kills its tmux
+    //   session, exits, and sends its OWN terminal.close — the single dispose path.
+    //   If there's no live owner to signal (drift: the adapter already died), we
+    //   dispose locally so the canvas still clears.
+    // ------------------------------------------------------------------
+    router.register('terminal.kill', (args, ctx) => {
+        if (args.length < 1) {
+            return { text: 'ERR: usage: terminal.kill <id>', data: null };
+        }
+
+        const id = args[0];
+        const terminals = getTerminals(ctx);
+        const grid = terminals.get(id);
+        if (!grid) return { text: `ERR: no terminal '${id}'`, data: null };
+
+        const owner = ctx.registry.get(id)?.meta?.owner || null;
+        const bridge = ctx.wsbridge;
+        const canSignal = owner && bridge && bridge.connected && typeof bridge.push === 'function';
+
+        if (canSignal) {
+            // Adapter is alive — let it tear down tmux + itself, then dispose the
+            // grid via its trailing terminal.close. One dispose path, no leaks.
+            bridge.push(owner, { event: 'terminal.shutdown', data: { terminalId: id } });
+            return {
+                text: `OK: signaled adapter '${owner}' to shut down terminal '${id}'`,
+                data: { id, owner, signaled: true },
+            };
+        }
+
+        // No live owner — dispose locally (same path as terminal.close).
+        grid.dispose();
+        terminals.delete(id);
+        ctx.registry.unregister(id);
+        return {
+            text: `OK: terminal '${id}' closed locally (no live adapter to signal)`,
+            data: { id, signaled: false },
+        };
+    }, { description: 'Fully tear down a terminal: signal its adapter to kill the shell + tmux session', usage: '<id>' });
+
+    // ------------------------------------------------------------------
+    // terminal.focus <id>
+    //   Make a terminal the focused entity: primary (sticky/UI focus) AND key
+    //   (keystroke target) in one verb — the two slots a canvas click sets
+    //   together. Framing the camera is a separate concern (camera.focus <id>).
+    // ------------------------------------------------------------------
+    router.register('terminal.focus', (args, ctx) => {
+        if (args.length < 1) {
+            return { text: 'ERR: usage: terminal.focus <id>', data: null };
+        }
+        const id = args[0];
+        if (!getTerminals(ctx).has(id)) {
+            return { text: `ERR: no terminal '${id}'`, data: null };
+        }
+        if (!ctx.attentionManager) {
+            return { text: 'ERR: AttentionManager not wired into ctx', data: null };
+        }
+        // Pass the resolved registry entry as the entity so keystroke routing
+        // (EntityKeystrokeRouter, keyed on entity.type) has a usable reference.
+        const entity = ctx.registry?.get(id) || null;
+        ctx.attentionManager.set('primary', id, { entity });
+        ctx.attentionManager.set('key', id, { entity });
+        return {
+            text: `OK: focused terminal '${id}' (primary + key)`,
+            data: { id, entityType: entity?.type ?? null },
+        };
+    }, { description: 'Focus a terminal: set attention primary + key (keystroke target)', usage: '<id>' });
 }

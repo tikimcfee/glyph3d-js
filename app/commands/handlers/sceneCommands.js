@@ -1,5 +1,5 @@
 /**
- * Scene commands: scene.info, scene.clear_windows
+ * Scene commands: scene.info, scene.clear_windows, scene.clear_grids
  * Uses registry as source of truth for scene object counts.
  */
 
@@ -58,4 +58,23 @@ export default function registerSceneCommands(router) {
             data: { cleared: count }
         };
     }, { description: 'Remove all agent windows' });
+
+    // Clear all CONTENT grids (the open code files). Leaves terminals and agent
+    // windows alone — those are live/owned and torn down explicitly (terminal.kill,
+    // scene.clear_windows). Reuses ctx.removeGrid (the canonical dispose path used
+    // by grid.remove): geometry freed, removed from scene, unregistered.
+    router.register('scene.clear_grids', (args, ctx) => {
+        const grids = ctx.registry.findByType('grid');
+        if (grids.length === 0) return { text: 'OK: no grids to clear', data: { cleared: 0 } };
+        // Snapshot ids first — removeGrid mutates the registry as we iterate.
+        const ids = grids.map(e => e.id);
+        let cleared = 0;
+        for (const id of ids) {
+            if (ctx.removeGrid(id)) cleared++;
+        }
+        return {
+            text: `OK: cleared ${cleared} grid(s)`,
+            data: { cleared }
+        };
+    }, { description: 'Remove all code grids (open files); leaves terminals + windows' });
 }

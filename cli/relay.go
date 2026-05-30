@@ -417,8 +417,18 @@ func (r *Relay) spawnTerminalAdapter(ws *websocket.Conn, cols, rows int) {
 		ws.WriteJSON(map[string]any{"error": "spawn failed: " + err.Error()})
 		return
 	}
-	log.Printf("[relay] spawned terminal adapter '%s' (pid %d) → ws://localhost:%d", id, cmd.Process.Pid, r.port)
+	pid := cmd.Process.Pid
+	log.Printf("[relay] spawned terminal adapter '%s' (pid %d) → ws://localhost:%d", id, pid, r.port)
 	ws.WriteJSON(map[string]any{"event": "terminal.spawning", "id": id})
+
+	// Reap the child when it exits. The adapter's lifecycle is owned by tmux + the
+	// display (terminal.kill → terminal.shutdown → graceful exit), not the relay —
+	// we only Wait() to clear the process-table entry so closed terminals don't
+	// pile up as <defunct> zombies, and to log the exit.
+	go func() {
+		err := cmd.Wait()
+		log.Printf("[relay] terminal adapter '%s' (pid %d) exited: %v", id, pid, err)
+	}()
 }
 
 func (r *Relay) notifyDisplay(event, clientID string) {
