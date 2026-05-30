@@ -67,6 +67,9 @@ func main() {
 		case "screenshot":
 			screenshotCmd()
 			return
+		case "attach":
+			attachCmd()
+			return
 		case "fullsnapshot":
 			fullsnapshotCmd()
 			return
