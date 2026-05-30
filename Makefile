@@ -36,7 +36,7 @@ LDFLAGS := -s -w \
 	-X main.Platform=$(HOST_PLATFORM)
 GOFLAGS := -trimpath -ldflags='$(LDFLAGS)'
 
-.PHONY: all build clean prep prep-wasm deploy release linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64
+.PHONY: all build clean prep prep-wasm deploy release linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64 dev dev-vite dev-relay dev-status dev-stop
 
 # --- Default: build for current platform ---
 
@@ -147,3 +147,19 @@ deploy: linux-amd64
 clean:
 	rm -rf $(WEB_DIR) $(OUT_DIR) $(BINARY)
 	@echo "Cleaned build artifacts"
+
+# --- Dev loop: thin aliases over tools/dev.sh (manages Vite :5173 + relay :8080) ---
+# `make dev` = rebuild relay + clear Vite cache + restart both, then hard-reload
+# the browser. `make dev-vite` is the common one: clears the stale-cache trap that
+# bites CommandProvider / handler / router edits.
+
+dev:
+	@tools/dev.sh refresh
+dev-vite:
+	@tools/dev.sh vite
+dev-relay:
+	@tools/dev.sh relay
+dev-status:
+	@tools/dev.sh status
+dev-stop:
+	@tools/dev.sh stop
