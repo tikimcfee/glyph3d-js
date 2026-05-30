@@ -1,0 +1,32 @@
+/* Tune dockview's built-in dark theme to the glyph3d chrome aesthetic:
+ * the same near-black panel bg, #1b1f29 hairline borders, and monospace type
+ * FileTree/ButtonBar use. Scoped to .glyph-dock so it only touches our dock.
+ * Anything not overridden falls back to dockview-theme-dark (graceful). */
+.glyph-dock {
+  --dv-background-color: rgba(8, 10, 14, 0.92);
+  --dv-group-view-background-color: rgba(8, 10, 14, 0.92);
+  --dv-tabs-and-actions-container-background-color: #0c0e14;
+  --dv-activegroup-visiblepanel-tab-background-color: rgba(8, 10, 14, 0.92);
+  --dv-inactivegroup-visiblepanel-tab-background-color: #0c0e14;
+  --dv-activegroup-hiddenpanel-tab-background-color: #0c0e14;
+  --dv-inactivegroup-hiddenpanel-tab-background-color: #0c0e14;
+  --dv-activegroup-visiblepanel-tab-color: #c8ccd6;
+  --dv-inactivegroup-visiblepanel-tab-color: #7c8596;
+  --dv-activegroup-hiddenpanel-tab-color: #7c8596;
+  --dv-inactivegroup-hiddenpanel-tab-color: #5c6675;
+  --dv-tab-divider-color: #1b1f29;
+  --dv-separator-border: #1b1f29;
+  --dv-paneview-header-border-color: #1b1f29;
+  --dv-icon-hover-background-color: rgba(255, 255, 255, 0.07);
+  --dv-active-sash-color: #4a7f9a;
+
+  font-family: ui-monospace, "JetBrains Mono", Menlo, monospace;
+  font-size: 12px;
+}
+
+/* dockview tabs default to a comfortable height + letterspacing; tighten to
+ * match the compact chrome. */
+.glyph-dock .dv-tab {
+  font-size: 12px;
+  letter-spacing: 0.02em;
+}

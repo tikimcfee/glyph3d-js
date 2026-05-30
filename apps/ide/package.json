@@ -8,10 +8,11 @@
   },
   "dependencies": {
     "@glyph3d/core": "workspace:*",
+    "@react-three/fiber": "^9.0.0",
+    "dockview": "^6.6.1",
     "glyph3d-r3f": "workspace:*",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "@react-three/fiber": "^9.0.0",
     "three": "^0.183.0"
   },
   "devDependencies": {
