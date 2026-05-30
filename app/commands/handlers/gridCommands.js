@@ -7,6 +7,7 @@ import { box, table, kvLines } from '../formatResponse.js';
 import CodeGrid from '@glyph3d/core/collections/CodeGrid.js';
 import { resolveGridByIdOrIndex } from './spatialHelpers.js';
 import { decodeBase64 } from '@glyph3d/core/utils/encoding.js';
+import { flowLayout } from './layoutCommands.js';
 
 /**
  * @param {import('../CommandRouter.js').default} router
@@ -236,4 +237,32 @@ export default function registerGridCommands(router) {
             data: { index: resolved.idx, scale }
         };
     }, { description: 'Set grid uniform scale', usage: '<id|index> <factor>' });
+
+    // grid.window <id|index> <cols> <rows> — turn a code grid into a fixed
+    // cols×rows scrollable viewport over its file (opt-in; whole-file is the
+    // baseline), then re-flow neighbors around the new footprint. The await
+    // ensures the rebuilt bounds are fresh before flowLayout measures them.
+    router.register('grid.window', async (args, ctx) => {
+        if (args.length < 3) return { text: 'ERR: usage: grid.window <id|index> <cols> <rows>', data: null };
+
+        const resolved = resolveGridByIdOrIndex(ctx, args[0]);
+        if (resolved.error) return { text: resolved.error, data: null };
+        if (!(resolved.grid instanceof CodeGrid) || typeof resolved.grid.setWindow !== 'function') {
+            return { text: 'ERR: grid.window applies only to code grids', data: null };
+        }
+
+        const cols = parseInt(args[1], 10);
+        const rows = parseInt(args[2], 10);
+        if (isNaN(cols) || isNaN(rows) || cols < 1 || rows < 1) {
+            return { text: 'ERR: cols and rows must be positive integers', data: null };
+        }
+
+        await resolved.grid.setWindow(cols, rows);
+        flowLayout(ctx.getGrids());
+
+        return {
+            text: `OK: grid #${resolved.idx} windowed to ${cols}x${rows}`,
+            data: { index: resolved.idx, cols, rows },
+        };
+    }, { description: 'Window a code grid to a scrollable cols×rows viewport and re-flow', usage: '<id|index> <cols> <rows>' });
 }

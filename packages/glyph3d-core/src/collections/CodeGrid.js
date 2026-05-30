@@ -122,6 +122,18 @@ class CodeGrid extends THREE.Object3D {
         // Whether the renderer-side content bounds should be recomputed
         this._contentBoundsDirty = true;
         this._contentBoundsCache = null;
+
+        // ── Windowing (opt-in scrollable viewport over the full source) ──────
+        // Off by default → the grid renders the whole file. setWindow() switches
+        // it to a fixed cols×visibleRows slice (each line truncated to cols) fed
+        // through the normal async load path; _sourceLines keeps the canonical
+        // full file, so window state is pure view-state and scrolling/resizing
+        // never loses content.
+        this._windowed = false;
+        this._winCols = 0;
+        this._winRows = 0;
+        this._winFirstLine = 0;
+        this._sourceLines = null;
     }
 
     // ============ Slug data ============
@@ -198,6 +210,76 @@ class CodeGrid extends THREE.Object3D {
         // Update background
         this._updateBackground();
 
+        return this;
+    }
+
+    // ============ Windowing (scrollable viewport) ============
+
+    /**
+     * Switch this grid into a windowed view: render only a cols×visibleRows
+     * slice of the file (each line truncated to `cols` chars), scrollable via
+     * scrollLines(). The full source is preserved in _sourceLines, so window
+     * state is pure view-state — resizing/scrolling never loses content. Opt-in:
+     * until called, the grid renders the whole file exactly as before.
+     * @param {number} cols - visible columns (chars per line)
+     * @param {number} rows - visible rows (lines)
+     * @returns {Promise<this>}
+     */
+    async setWindow(cols, rows) {
+        cols = Math.max(1, Math.floor(cols));
+        rows = Math.max(1, Math.floor(rows));
+        // Capture the canonical full source the first time we window — at this
+        // point this.content is still the whole file (afterwards it holds the
+        // rendered slice, while _sourceLines stays the full file).
+        if (!this._windowed) {
+            this._sourceLines = (this.content || '').split('\n');
+        }
+        this._windowed = true;
+        this._winCols = cols;
+        this._winRows = rows;
+        this._clampWindow();
+        await this._renderWindow();
+        return this;
+    }
+
+    /**
+     * Scroll the window by deltaLines (positive scrolls down the file). No-op
+     * unless windowed.
+     * @param {number} deltaLines
+     * @returns {Promise<this>}
+     */
+    async scrollLines(deltaLines) {
+        if (!this._windowed) return this;
+        this._winFirstLine += Math.round(deltaLines);
+        this._clampWindow();
+        await this._renderWindow();
+        return this;
+    }
+
+    /** @returns {boolean} whether this grid is in windowed mode */
+    isWindowed() {
+        return this._windowed;
+    }
+
+    /** @private Clamp _winFirstLine to [0, lineCount - visibleRows]. */
+    _clampWindow() {
+        const total = this._sourceLines ? this._sourceLines.length : 0;
+        const max = Math.max(0, total - this._winRows);
+        this._winFirstLine = Math.max(0, Math.min(this._winFirstLine, max));
+    }
+
+    /**
+     * @private Render the current window slice through the normal async load
+     * path (the full source lives in _sourceLines; this only re-feeds the slice).
+     */
+    async _renderWindow() {
+        const src = this._sourceLines || [];
+        const first = this._winFirstLine;
+        const slice = src
+            .slice(first, first + this._winRows)
+            .map((line) => line.slice(0, this._winCols))
+            .join('\n');
+        await this.loadTextAsync(slice);
         return this;
     }
 
