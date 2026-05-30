@@ -8,6 +8,7 @@ import { installConsoleForwarder } from '@glyph3d/core/services/orchestration/co
 import AttentionManager from '@glyph3d/core/services/interaction/AttentionManager.js';
 import EntityKeystrokeRouter from '@glyph3d/core/services/interaction/EntityKeystrokeRouter.js';
 import RemoteFileSystemProvider from '@glyph3d/core/services/data/RemoteFileSystemProvider.js';
+import SessionStore from './SessionStore.js';
 // The spine, ported verbatim — handlers register lazily; nothing here knows the
 // shell. Their only deps are @glyph3d/core, three, and sibling helpers.
 import { registerAllCommands } from '../commands/handlers/index.js';
@@ -168,10 +169,19 @@ export default function CommandProvider({ atlas, port = 8080, cameraControllerRe
     const cc = cameraControllerRef?.current;
     if (cc?.ctx) cc.ctx.attentionManager = state.ctx.attentionManager;
 
+    // Saved-state system: the server-side session store. Restore (open files +
+    // camera + dock layout) runs once, on the first connect after this page
+    // load; autosave arms after. IdeDock registers its dock bridge onto it.
+    const session = new SessionStore({ ctx: state.ctx, router: state.router, bridge });
+    state.session = session;
+    const offConn = bridge.onConnectionChange((connected) => { if (connected) session.startOnConnect(); });
+
     // Hand the wired client to the app (for DOM chrome outside the Canvas).
     onReady?.(state);
 
     return () => {
+      offConn?.();
+      session.dispose();
       keystrokes.dispose();
       bridge.disconnect();
     };

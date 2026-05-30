@@ -1,4 +1,4 @@
-import React, { useCallback, useRef } from 'react';
+import React, { useCallback, useMemo, useRef } from 'react';
 import { DockviewReact } from 'dockview';
 import 'dockview/dist/styles/dockview.css';
 import './ide-dock.css';
@@ -6,54 +6,65 @@ import FileTree from './FileTree.jsx';
 import TerminalsPanel from './TerminalsPanel.jsx';
 
 // IdeDock — the panel layer. A dockview surface that hosts the IDE's DOM panels
-// (the file tree today; terminals-list / search / inspector later) with tabs,
-// splits, drag-rearrange, float and layout persistence for free. Panels render
-// our own React components, so going custom stays open.
+// (file tree, terminals; inspector/search later) with tabs, splits, float and
+// layout persistence for free. Panels render our own React components, so going
+// custom stays open.
 //
 // Canvas coexistence: this dock lives as a flex SIBLING of the WebGPU canvas
-// (see main.jsx) — NOT as an overlay and NOT hosting the canvas as a panel — so
-// the GPU context is never unmounted by a docking op and no canvas clicks are
-// stolen. All-sides / float-over-canvas docking is a deliberate later evolution.
+// (see main.jsx) — NOT an overlay, NOT hosting the canvas as a panel — so the
+// GPU context is never unmounted by a docking op and no canvas clicks are stolen.
 //
-// `client` is the wired command client (CommandProvider → main.jsx). IdeDock is
-// only mounted once client is ready, so panels get it via addPanel params (no
-// context-across-portal dance, no null flash).
-
-const components = {
-  // Each panel component receives { params, api, containerApi }. We thread the
-  // command client through params — the same client the panels always took.
-  files: (props) => <FileTree client={props.params.client} />,
-  terminals: (props) => <TerminalsPanel client={props.params.client} />,
-};
+// Layout persistence: the dockview layout is part of the saved session. We hand
+// SessionStore a thin bridge (toJSON/fromJSON + the known component names) and
+// save on every layout change. Panels read the command `client` from a REF — not
+// from serialized panel params — because dockview's toJSON turns a live object
+// into `undefined`; the ref keeps both default and restored panels wired.
 
 export default function IdeDock({ client }) {
   const apiRef = useRef(null);
+  // Live client, read by the component factory below. Survives fromJSON restore
+  // (where serialized params.client would be undefined).
+  const clientRef = useRef(client);
+  clientRef.current = client;
+
+  // Stable component map (dockview keys panels by these). Each reads the live
+  // client from the ref, so a restored panel is wired exactly like a fresh one.
+  const components = useMemo(() => ({
+    files: () => <FileTree client={clientRef.current} />,
+    terminals: () => <TerminalsPanel client={clientRef.current} />,
+  }), []);
 
   const onReady = useCallback((event) => {
-    apiRef.current = event.api;
-    // Idempotent: don't double-add if dockview ever re-fires onReady.
-    if (!event.api.getPanel('files')) {
-      event.api.addPanel({
-        id: 'files',
-        component: 'files',
-        title: 'Files',
-        params: { client },
-      });
+    const api = event.api;
+    apiRef.current = api;
+
+    // Give SessionStore a handle to serialize/restore this layout. If a saved
+    // layout already loaded, this triggers the restore (fromJSON) immediately.
+    client?.session?.setDockBridge({
+      toJSON: () => api.toJSON(),
+      fromJSON: (layout) => api.fromJSON(layout),
+      components: Object.keys(components),
+    });
+
+    // Default panels — always built so the dock is never empty. A saved layout
+    // (if any) replaces these via SessionStore's fromJSON.
+    if (!api.getPanel('files')) {
+      api.addPanel({ id: 'files', component: 'files', title: 'Files' });
     }
-    // Terminals as a tab in the same group as Files — drag it out to split.
-    if (!event.api.getPanel('terminals')) {
-      event.api.addPanel({
+    if (!api.getPanel('terminals')) {
+      api.addPanel({
         id: 'terminals',
         component: 'terminals',
         title: 'Terminals',
-        params: { client },
         position: { referencePanel: 'files', direction: 'within' },
       });
     }
-  }, [client]);
 
-  // dockview fills its parent — give it an explicitly-sized box so it doesn't
-  // collapse to 0 height/width inside the flex sidebar.
+    // Persist on any layout change (add/remove/move/resize). The store debounces
+    // and no-ops until restore has finished, so this never clobbers saved state.
+    api.onDidLayoutChange(() => clientRef.current?.session?.scheduleSave());
+  }, [client, components]);
+
   return (
     <div style={{ width: '100%', height: '100%' }}>
       <DockviewReact
