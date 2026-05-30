@@ -164,8 +164,8 @@ func attachCmd() {
 		shutdown()
 	}()
 
-	// Reader: drain everything the relay sends. For now we only log; this is the
-	// channel that will carry {event:"terminal.input"} keystrokes in a later commit.
+	// Reader: drain everything the relay sends. Carries {event:"terminal.input"}
+	// keystroke pushes (→ tmux send-keys) plus command responses.
 	go func() {
 		for {
 			_, msg, err := conn.ReadMessage()
@@ -173,7 +173,7 @@ func attachCmd() {
 				shutdown()
 				return
 			}
-			handleInbound(msg)
+			handleInbound(msg, id, session)
 		}
 	}()
 
@@ -226,17 +226,27 @@ func capturePane(session string) (string, error) {
 }
 
 // handleInbound dispatches a message the relay forwarded to this controller.
-// Today the relay only sends command responses ({response,data}) back to us;
-// keystroke events ({event:"terminal.input"}) arrive once the relay passthrough
-// and the browser keystroke forwarder land (later commits).
-func handleInbound(msg []byte) {
+// The keystroke-return channel arrives as {event:"terminal.input", data:{terminalId,text}}
+// (browser keydown → grid.onInput → wsbridge.push → relay passthrough → here);
+// we inject the bytes into the tmux session via send-keys, closing the loop.
+func handleInbound(msg []byte, termID, session string) {
 	var ev struct {
-		Event string          `json:"event"`
-		Data  json.RawMessage `json:"data"`
+		Event string `json:"event"`
+		Data  struct {
+			TerminalID string `json:"terminalId"`
+			Text       string `json:"text"`
+		} `json:"data"`
 	}
 	if json.Unmarshal(msg, &ev) == nil && ev.Event != "" {
-		// Placeholder for terminal.input — wired in the keystroke-loop commit.
-		log.Printf("[attach] event %s: %s", ev.Event, string(ev.Data))
+		if ev.Event == "terminal.input" {
+			// Ignore input addressed to a different terminal (one adapter, one id).
+			if ev.Data.TerminalID != "" && ev.Data.TerminalID != termID {
+				return
+			}
+			if err := sendKeysToTmux(session, ev.Data.Text); err != nil {
+				log.Printf("[attach] send-keys: %v", err)
+			}
+		}
 		return
 	}
 	// Otherwise a command response or plain text; only surface errors.
@@ -244,6 +254,22 @@ func handleInbound(msg []byte) {
 	if strings.HasPrefix(text, "ERR:") {
 		log.Printf("[attach] %s", text)
 	}
+}
+
+// sendKeysToTmux injects raw bytes into the tmux session. Uses `send-keys -H`
+// (hex) so control bytes, escape sequences (arrows/Home/End), and UTF-8 all go
+// through verbatim without shell/keyname quoting ambiguity. Each byte of the
+// (already UTF-8) string becomes one space-separated hex token.
+func sendKeysToTmux(session, text string) error {
+	if text == "" {
+		return nil
+	}
+	args := make([]string, 0, 3+len(text))
+	args = append(args, "send-keys", "-t", session, "-H")
+	for i := 0; i < len(text); i++ {
+		args = append(args, fmt.Sprintf("%02x", text[i]))
+	}
+	return exec.Command("tmux", args...).Run()
 }
 
 // decodeRelayText extracts human-readable text from a relay message that may be

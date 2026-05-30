@@ -222,6 +222,7 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 
 			var envelope struct {
 				To       string          `json:"to"`
+				Event    string          `json:"event"`
 				Response string          `json:"response"`
 				Data     json.RawMessage `json:"data"`
 			}
@@ -242,6 +243,24 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 				continue
 			}
 
+			// Display→controller PUSH (e.g. terminal.input keystrokes): forward the
+			// event verbatim so the owning controller's read loop can act on it.
+			// Without this branch the `event` field is dropped and the controller
+			// receives an empty response — this is the keystroke-return channel.
+			if envelope.Event != "" {
+				data := envelope.Data
+				if len(data) == 0 {
+					data = json.RawMessage("null")
+				}
+				fwd, _ := json.Marshal(map[string]any{
+					"event": envelope.Event,
+					"data":  data,
+				})
+				ctrl.WriteMessage(websocket.TextMessage, fwd)
+				continue
+			}
+
+			// Command-response path (controller-initiated command → display reply).
 			if len(envelope.Data) > 0 && string(envelope.Data) != "null" {
 				resp, _ := json.Marshal(map[string]any{
 					"response": envelope.Response,
