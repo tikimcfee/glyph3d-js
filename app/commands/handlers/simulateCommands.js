@@ -83,12 +83,18 @@ export default function registerSimulateCommands(router) {
             shiftKey: modifiers.includes('shift'),
         };
 
-        const event = new KeyboardEvent('keydown', init);
-        document.dispatchEvent(event);
+        document.dispatchEvent(new KeyboardEvent('keydown', init));
+        // Pair an immediate keyup. The keydown is delivered synchronously (the
+        // entity keystroke router / shortcut handlers act on it now), but without
+        // a matching keyup a camera-movement key (WASD/arrows) that isn't gated
+        // by an entity key-focus gets latched by ViewerCameraController with no
+        // release and scrolls the camera forever. Added+removed within one tick
+        // (before the next useFrame), so it never registers as held.
+        document.dispatchEvent(new KeyboardEvent('keyup', init));
 
         const modStr = modifiers.length > 0 ? ` [${modifiers.join('+')}]` : '';
         return {
-            text: `OK: dispatched keydown "${key}"${modStr}`,
+            text: `OK: dispatched keydown+keyup "${key}"${modStr}`,
             data: {
                 key,
                 code: init.code,
