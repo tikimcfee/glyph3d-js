@@ -3,6 +3,8 @@ import { useThree, useFrame } from '@react-three/fiber';
 import * as THREE from 'three/webgpu';
 import { useAppCommands } from '../../app/client/CommandProvider.jsx';
 
+const round = (n) => Math.round(n * 100) / 100;
+
 // Canvas interaction — clicking/hovering grids in the 3D scene.
 //
 // The grids are imperative Object3Ds (not r3f <mesh> JSX), so r3f's own event
@@ -96,6 +98,101 @@ export function CanvasPicker() {
       dom.removeEventListener('pointerdown', onDown);
       dom.removeEventListener('pointerup', onUp);
       dom.removeEventListener('pointermove', onMove);
+    };
+  }, [client, gl, camera]);
+
+  return null;
+}
+
+/**
+ * Object dragging — Ctrl/Cmd + drag MOVES the grid/terminal under the cursor
+ * instead of panning the camera (the camera controller yields Ctrl-drag to us,
+ * see ViewerCameraController mousedown). Default drag still pans, so you can get
+ * right up to a file without nudging it; hold Ctrl when you actually want to move
+ * it. The drag is direct (60fps position writes); on release we persist the final
+ * spot through the same move verb the CLI uses, then nudge a session save.
+ */
+export function ObjectDragger() {
+  const { gl, camera } = useThree();
+  const client = useAppCommands();
+
+  useEffect(() => {
+    if (!client) return;
+    const { ctx, router } = client;
+    const dom = gl.domElement;
+    const raycaster = new THREE.Raycaster();
+    const ndc = new THREE.Vector2();
+    let drag = null; // { grid, id, type, lastX, lastY }
+
+    const pickAt = (e) => {
+      const r = dom.getBoundingClientRect();
+      ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+      raycaster.setFromCamera(ndc, camera);
+      return pickEntity(ctx, raycaster);
+    };
+
+    const onDown = (e) => {
+      if (e.button !== 0 || !(e.ctrlKey || e.metaKey)) return; // Ctrl/Cmd + LMB only
+      const entry = pickAt(e);
+      if (!entry) return;
+      drag = { grid: entry.grid, id: entry.id, type: entry.type, lastX: e.clientX, lastY: e.clientY };
+      router.execute(`attention.set primary ${entry.id}`); // highlight what you're moving
+      dom.style.cursor = 'grabbing';
+      dom.setPointerCapture?.(e.pointerId);
+      e.preventDefault();
+    };
+
+    const onMove = (e) => {
+      if (!drag) return;
+      const dx = e.clientX - drag.lastX;
+      const dy = e.clientY - drag.lastY;
+      drag.lastX = e.clientX; drag.lastY = e.clientY;
+      const p = drag.grid.position;
+
+      // FPS "held object" grab: move in the camera's VIEW PLANE at the object's
+      // own view-axis depth, using the FULL 3D right/up vectors — so it hangs off
+      // the cursor at any camera angle. (The old helper flattened to world X/Y,
+      // dropping the camera-right Z component, which locked moves to one axis the
+      // moment you rotated the view.)
+      const q = camera.quaternion;
+      const fwd   = new THREE.Vector3(0, 0, -1).applyQuaternion(q);
+      const right = new THREE.Vector3(1, 0, 0).applyQuaternion(q);
+      const up    = new THREE.Vector3(0, 1, 0).applyQuaternion(q);
+      const depth = Math.max(1, new THREE.Vector3().copy(p).sub(camera.position).dot(fwd));
+      const pixelScale = (2 * depth * Math.tan((camera.fov * Math.PI / 180) / 2)) / dom.clientHeight;
+      const delta = right.multiplyScalar(dx * pixelScale).add(up.multiplyScalar(-dy * pixelScale));
+
+      const nx = p.x + delta.x, ny = p.y + delta.y, nz = p.z + delta.z;
+      // Terminals must go through setWorldPosition (mirrors the group DataTexture);
+      // code grids move via the Object3D transform.
+      if (typeof drag.grid.setWorldPosition === 'function') {
+        drag.grid.setWorldPosition({ x: nx, y: ny, z: nz });
+      } else {
+        drag.grid.position.set(nx, ny, nz);
+      }
+    };
+
+    const onUp = (e) => {
+      if (!drag) return;
+      const { id, type, grid } = drag;
+      const p = grid.position;
+      drag = null;
+      dom.style.cursor = 'default';
+      dom.releasePointerCapture?.(e.pointerId);
+      // Persist through the bus (CLI/session parity), then let the session store
+      // capture the new layout.
+      const verb = type === 'terminal' ? 'terminal.move' : 'grid.move';
+      router.execute(`${verb} ${id} ${round(p.x)} ${round(p.y)} ${round(p.z)}`);
+      client.session?.scheduleSave?.();
+    };
+
+    dom.addEventListener('pointerdown', onDown);
+    dom.addEventListener('pointermove', onMove);
+    dom.addEventListener('pointerup', onUp);
+    return () => {
+      dom.removeEventListener('pointerdown', onDown);
+      dom.removeEventListener('pointermove', onMove);
+      dom.removeEventListener('pointerup', onUp);
     };
   }, [client, gl, camera]);
 

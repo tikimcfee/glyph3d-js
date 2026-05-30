@@ -5,7 +5,7 @@ import { useGlyphEngine, GlyphCanvas, ViewerCamera } from 'glyph3d-r3f';
 import CommandProvider from '../../app/client/CommandProvider.jsx';
 import ButtonBar from './ButtonBar.jsx';
 import IdeDock from './IdeDock.jsx';
-import { CanvasPicker, SelectionIndicator } from './CanvasInteraction.jsx';
+import { CanvasPicker, ObjectDragger, SelectionIndicator } from './CanvasInteraction.jsx';
 import fontUrl from '@glyph3d/core/fonts/Cousine-Regular.ttf?url';
 
 const setStatus = (t) => { const el = document.getElementById('status'); if (el) el.textContent = t; };
@@ -58,6 +58,7 @@ function App() {
                 onReady={setClient}
               >
                 <CanvasPicker />
+                <ObjectDragger />
                 <SelectionIndicator />
               </CommandProvider>
             </GlyphCanvas>

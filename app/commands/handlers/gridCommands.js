@@ -178,6 +178,26 @@ export default function registerGridCommands(router) {
         };
     }, { description: 'Remove a grid from the scene', usage: '<id|index>' });
 
+    router.register('grid.move', (args, ctx) => {
+        if (args.length < 4) return { text: 'ERR: usage: grid.move <id|index> <x> <y> <z>', data: null };
+
+        const resolved = resolveGridByIdOrIndex(ctx, args[0]);
+        if (resolved.error) return { text: resolved.error, data: null };
+
+        const [x, y, z] = args.slice(1, 4).map(Number);
+        if ([x, y, z].some(isNaN)) return { text: 'ERR: x, y, z must be numbers', data: null };
+
+        // Terminals (if ever resolved here) mirror to their group texture; code
+        // grids move via the Object3D transform.
+        if (typeof resolved.grid.setWorldPosition === 'function') resolved.grid.setWorldPosition({ x, y, z });
+        else resolved.grid.position.set(x, y, z);
+
+        return {
+            text: `OK: moved grid #${resolved.idx} to (${x}, ${y}, ${z})`,
+            data: { id: resolved.registryId, index: resolved.idx, position: { x, y, z } }
+        };
+    }, { description: 'Move a grid in 3D space', usage: '<id|index> <x> <y> <z>' });
+
     router.register('grid.text', (args, ctx) => {
         if (args.length < 2) return { text: 'ERR: usage: grid.text <id|index> <base64-text>', data: null };
 

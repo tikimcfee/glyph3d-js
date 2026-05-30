@@ -128,6 +128,7 @@ export class ViewerCameraController {
                 startX: 0, startY: 0,
                 prevX:  0, prevY:  0,
                 dx:     0, dy:     0,     // accumulated since last drain
+                grabDepth: null,         // view-axis depth of the point grabbed at pan-start (1:1 pan)
             },
             wheel: {
                 dx: 0, dy: 0,             // accumulated since last drain
@@ -211,6 +212,14 @@ export class ViewerCameraController {
             if (e.button === 1) input.buttons.middle = true;
             if (e.button === 2) input.buttons.right = true;
 
+            // Ctrl/Cmd + left-drag is reserved for MOVING the object under the
+            // cursor (the r3f ObjectDragger owns it). Don't drive the camera, or
+            // the view would slide out from under the thing you're dragging.
+            if (e.button === 0 && (e.ctrlKey || e.metaKey)) {
+                input.drag.active = false;
+                return;
+            }
+
             input.drag.active = true;
             input.drag.mode   = e.shiftKey ? 'look' : 'pan';
             input.drag.startX = e.clientX;
@@ -219,6 +228,13 @@ export class ViewerCameraController {
             input.drag.prevY  = e.clientY;
             input.drag.dx     = 0;
             input.drag.dy     = 0;
+            // True 1:1 pan: lock the pan to the depth of whatever's under the
+            // cursor at grab time, so the grabbed point tracks the pointer
+            // exactly (was scaled by the scene-centroid distance — felt off,
+            // especially with the depth-varied walk-tree layout).
+            input.drag.grabDepth = input.drag.mode === 'pan'
+                ? this._grabDepthAt(e.clientX, e.clientY)
+                : null;
 
             canvas.style.cursor = input.drag.mode === 'look' ? 'move' : 'grabbing';
         });
@@ -444,7 +460,7 @@ export class ViewerCameraController {
         if (drag.mode === 'look') {
             this._lookBy(drag.dx, drag.dy);
         } else {
-            this._panBy(drag.dx, drag.dy);
+            this._panBy(drag.dx, drag.dy, drag.grabDepth);
         }
         drag.dx = 0;
         drag.dy = 0;
@@ -523,12 +539,17 @@ export class ViewerCameraController {
      * proportional at any zoom.
      * @private
      */
-    _panBy(dx, dy) {
+    _panBy(dx, dy, depthOverride = null) {
         const THREE = this.THREE;
         const camera = this.ctx.camera;
         const sens = this.settings.dragSensitivity;
 
-        const dist = this.settings.dynamicSpeed ? this._getViewDistance() : 200;
+        // depthOverride (the grabbed point's view-axis depth) gives true 1:1
+        // drag-pan. Wheel-pan / touch pass nothing and keep the distance-scaled
+        // feel via the content-centroid view distance.
+        const dist = depthOverride != null
+            ? depthOverride
+            : (this.settings.dynamicSpeed ? this._getViewDistance() : 200);
         const fovFactor = 2 * Math.tan((camera.fov * Math.PI / 180) / 2);
         const { height: vpHeight } = getCanvasViewportSize(this.ctx.canvas);
         const pixelScale = (dist * fovFactor) / vpHeight;
@@ -612,6 +633,50 @@ export class ViewerCameraController {
         const n = grids.length;
         const cam = this.ctx.camera.position;
         return Math.max(Math.hypot(cx / n - cam.x, cy / n - cam.y, cz / n - cam.z), 1);
+    }
+
+    /**
+     * View-axis depth of the grid under the cursor — the basis for true 1:1
+     * panning. Casts a ray through the pointer, intersects grid world-bounds,
+     * and returns the forward-projected distance to the nearest hit. Falls back
+     * to the content-centroid view distance when the cursor isn't over a grid.
+     * (We raycast here rather than reusing focus.pivot because the r3f client has
+     * no entityInputRouter, so the hover probe never sets the pivot.)
+     * @private
+     */
+    _grabDepthAt(clientX, clientY) {
+        const THREE = this.THREE;
+        const camera = this.ctx.camera;
+        const fallback = this.settings.dynamicSpeed ? this._getViewDistance() : 200;
+        const canvas = this.ctx.canvas;
+        if (!canvas) return fallback;
+
+        const rect = canvas.getBoundingClientRect();
+        const ndc = new THREE.Vector2(
+            ((clientX - rect.left) / rect.width) * 2 - 1,
+            -((clientY - rect.top) / rect.height) * 2 + 1,
+        );
+        const ray = new THREE.Raycaster();
+        ray.setFromCamera(ndc, camera);
+
+        const grids = this.ctx.getGrids?.() || [];
+        const hit = new THREE.Vector3();
+        let best = null, bestDistSq = Infinity;
+        for (const g of grids) {
+            const box = g.getBounds?.();
+            if (!box || box.isEmpty?.()) continue;
+            if (ray.ray.intersectBox(box, hit)) {
+                const dSq = ray.ray.origin.distanceToSquared(hit);
+                if (dSq < bestDistSq) { bestDistSq = dSq; best = hit.clone(); }
+            }
+        }
+        if (!best) return fallback;
+
+        // Project onto the view axis: pixelScale wants depth along forward, not
+        // the raw distance to the (possibly off-axis) hit point.
+        const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+        const depth = best.sub(camera.position).dot(forward);
+        return depth > 1 ? depth : fallback;
     }
 
     // ============ UI glue ============
