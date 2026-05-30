@@ -26,6 +26,7 @@ import * as THREE from 'three';
 import GlyphField from '../GlyphField.js';
 import { parseCapturePaneAnsi } from './TerminalCapture.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
+import MonospaceShapeCache from '../shaping/MonospaceShapeCache.js';
 
 export default class TerminalGrid extends THREE.Object3D {
     /**
@@ -43,6 +44,15 @@ export default class TerminalGrid extends THREE.Object3D {
 
         this.scene = scene;
         this.atlas = atlas;
+
+        // The GPU attribute is `instanceGlyphId` (a font glyph index used to index
+        // the Slug glyphMapTexture), NOT a Unicode codepoint. The normal render
+        // path shapes text through HarfBuzz to get glyph IDs; we bypass shaping, so
+        // we map each codepoint → glyphId through the atlas's primed shape cache
+        // (its IDs are exactly the ones the glyphMapTexture is keyed by). Reuse the
+        // shared cache when present; otherwise build one from the shaper.
+        this._shapeCache = atlas?._shapeCache
+            || (atlas?._shaper ? new MonospaceShapeCache(atlas._shaper) : null);
 
         this.cols = options.cols ?? 80;
         this.rows = options.rows ?? 24;
@@ -356,7 +366,10 @@ export default class TerminalGrid extends THREE.Object3D {
         this._renderer.applyPrebuiltBuffers({
             positions:  this._positions.slice(0, count * 3),
             sizes:      this._sizes.slice(0, count * 2),
-            codepoints: this._codepoints.slice(0, count),
+            // `codepoints` is the renderer's name for the glyphId attribute (the
+            // builder emits it as a codepoints-aliased glyphIds array); feed real
+            // glyph IDs, not raw codepoints.
+            codepoints: this._buildGlyphIdArray(),
             colors,
             groupIds:   this._groupIds.slice(0, count),
             count,
@@ -395,7 +408,7 @@ export default class TerminalGrid extends THREE.Object3D {
         const count    = this._cellCount;
 
         for (let i = 0; i < count; i++) {
-            cpArr[i] = this._codepoints[i];
+            cpArr[i] = this._glyphId(this._codepoints[i]);
 
             const c = i * 3;
             colorArr[c]     = this._cellR[i];
@@ -426,6 +439,38 @@ export default class TerminalGrid extends THREE.Object3D {
             arr[i * 3]     = this._cellR[i];
             arr[i * 3 + 1] = this._cellG[i];
             arr[i * 3 + 2] = this._cellB[i];
+        }
+        return arr;
+    }
+
+    /**
+     * Map a Unicode codepoint to a font glyph ID for the instanceGlyphId attribute.
+     * Uses the primed shape cache (O(1), HarfBuzz fallback on miss). Without a
+     * shaper (e.g. degraded boot), falls back to the codepoint so output is at
+     * least stable rather than crashing.
+     * @private
+     * @param {number} codepoint
+     * @returns {number}
+     */
+    _glyphId(codepoint) {
+        if (this._shapeCache) {
+            const entry = this._shapeCache.lookup(codepoint);
+            if (entry) return entry.g;
+        }
+        return codepoint;
+    }
+
+    /**
+     * Build a Float32Array of glyph IDs (the GPU projection of _codepoints) for the
+     * full-apply path. Per-frame updates write glyph IDs in place via _glyphId().
+     * @private
+     * @returns {Float32Array}
+     */
+    _buildGlyphIdArray() {
+        const count = this._cellCount;
+        const arr = new Float32Array(count);
+        for (let i = 0; i < count; i++) {
+            arr[i] = this._glyphId(this._codepoints[i]);
         }
         return arr;
     }

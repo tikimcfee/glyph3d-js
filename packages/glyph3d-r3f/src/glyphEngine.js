@@ -79,6 +79,9 @@ export async function bootGlyphEngine(options) {
   // CodeGrid (and GlyphField) auto-discover these off the atlas.
   atlas._shaper = shaper;
   atlas._slugData = slugData;
+  // TerminalGrid maps codepoint→glyphId through this primed cache (its glyph IDs
+  // are the same ones the Slug glyphMapTexture is keyed by).
+  atlas._shapeCache = shapeCache;
 
   stage('ready');
   return atlas;
