@@ -101,7 +101,10 @@ export default function registerTerminalCommands(router) {
 
         const terminals = getTerminals(ctx);
         if (terminals.has(id)) {
-            return { text: `ERR: terminal '${id}' already exists`, data: null };
+            // Idempotent: re-adoption re-sends terminal.create (an adapter whose
+            // display reloaded and forgot it). The live grid is already here, so
+            // treat this as success rather than erroring the adapter's retry.
+            return { text: `OK: terminal '${id}' already present`, data: { id, existed: true } };
         }
 
         try {

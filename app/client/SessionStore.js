@@ -63,7 +63,7 @@ export default class SessionStore {
     this._periodic = null;
     this._disposed = false;
 
-    this._onRegistryChange = () => this.scheduleSave();
+    this._onRegistryChange = () => { this._placePendingTerminals(); this.scheduleSave(); };
     this._onVisibility = () => { if (typeof document !== 'undefined' && document.visibilityState === 'hidden') this.saveNow(); };
   }
 
@@ -197,6 +197,24 @@ export default class SessionStore {
   async _fileExists(path) {
     try { await this.ctx.fileProvider.stat('file:///' + path); return true; }
     catch { return false; }
+  }
+
+  // Terminals re-adopt themselves on reload (the adapter re-creates its grid when
+  // the reloaded display has forgotten it). We don't reconstruct them — we just
+  // nudge each back to its saved position once it reappears in the registry.
+  // Fired from the registry change listener; entries linger in pendingTerminals
+  // until their terminal shows up (or forever if that shell died — harmless).
+  _placePendingTerminals() {
+    if (!this.pendingTerminals.length) return;
+    const remaining = [];
+    for (const t of this.pendingTerminals) {
+      if (t?.id && isFinitePos(t) && this.ctx.registry.has(t.id)) {
+        this.router.execute(`terminal.move ${t.id} ${t.x} ${t.y} ${t.z}`);
+      } else {
+        remaining.push(t);
+      }
+    }
+    this.pendingTerminals = remaining;
   }
 
   _restoreCamera(cam) {

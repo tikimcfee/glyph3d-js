@@ -164,8 +164,26 @@ func attachCmd() {
 		shutdown()
 	}()
 
+	// Re-adoption: a display reload wipes its terminal registry, so our frames
+	// start bouncing back as "ERR: no terminal <id>". Re-issue terminal.create so
+	// the fresh display rebuilds the grid (owner = us, so keystrokes still route);
+	// the frame pump then resumes into it. Cooldown so we don't spam create while
+	// the first one propagates. Only ever touched from the single reader goroutine.
+	var lastRecreate time.Time
+	recreate := func() {
+		if time.Since(lastRecreate) < 2*time.Second {
+			return
+		}
+		lastRecreate = time.Now()
+		fmt.Fprintln(os.Stderr, "[attach] display lost the terminal — re-creating")
+		if err := send(createCmd); err != nil {
+			log.Printf("[attach] re-create send failed: %v", err)
+		}
+	}
+
 	// Reader: drain everything the relay sends. Carries {event:"terminal.input"}
-	// keystroke pushes (→ tmux send-keys) plus command responses.
+	// keystroke pushes (→ tmux send-keys), shutdown signals, and command responses
+	// (including the "no terminal" miss that triggers re-adoption).
 	go func() {
 		for {
 			_, msg, err := conn.ReadMessage()
@@ -173,15 +191,22 @@ func attachCmd() {
 				shutdown()
 				return
 			}
-			handleInbound(msg, id, session, shutdown)
+			handleInbound(msg, id, session, shutdown, recreate)
 		}
 	}()
 
-	// Frame pump: capture-pane on a fixed cadence, send only on change.
+	// Frame pump: capture-pane on a fixed cadence, send on change OR every
+	// `keepalive` even when unchanged. The keepalive is what makes re-adoption
+	// work for an IDLE terminal: a reloaded display only learns it forgot us when
+	// a frame bounces back "ERR: no terminal", and a silent (unchanging) shell
+	// would otherwise never send one. ~2s costs a negligible redundant render and
+	// bounds re-adoption latency; it doubles as a liveness signal.
 	go func() {
 		ticker := time.NewTicker(time.Duration(float64(time.Second) / *fps))
 		defer ticker.Stop()
+		const keepalive = 2 * time.Second
 		var last string
+		var lastSent time.Time
 		for {
 			select {
 			case <-done:
@@ -194,10 +219,11 @@ func attachCmd() {
 					shutdown()
 					return
 				}
-				if out == last {
+				if out == last && time.Since(lastSent) < keepalive {
 					continue
 				}
 				last = out
+				lastSent = time.Now()
 				b64 := base64.StdEncoding.EncodeToString([]byte(out))
 				if err := send("terminal.frame " + id + " " + b64); err != nil {
 					shutdown()
@@ -232,7 +258,9 @@ func capturePane(session string) (string, error) {
 //   - terminal.shutdown: the display (panel × via terminal.kill) asking us to
 //     close. We trigger the same graceful teardown as a SIGTERM — the frame pump
 //     stops and the deferred terminal.close + tmux kill-session run on exit.
-func handleInbound(msg []byte, termID, session string, shutdown func()) {
+// Command responses also land here; an "ERR: no terminal <id>" reply means the
+// display reloaded and forgot us, so we re-adopt via recreate().
+func handleInbound(msg []byte, termID, session string, shutdown func(), recreate func()) {
 	var ev struct {
 		Event string `json:"event"`
 		Data  struct {
@@ -256,9 +284,14 @@ func handleInbound(msg []byte, termID, session string, shutdown func()) {
 		}
 		return
 	}
-	// Otherwise a command response or plain text; only surface errors.
+	// Otherwise a command response or plain text. "no terminal" means the display
+	// forgot us (it reloaded) → re-adopt; other errors are just surfaced.
 	text := decodeRelayText(msg)
 	if strings.HasPrefix(text, "ERR:") {
+		if recreate != nil && strings.Contains(text, "no terminal") {
+			recreate()
+			return
+		}
 		log.Printf("[attach] %s", text)
 	}
 }
