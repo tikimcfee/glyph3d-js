@@ -12,6 +12,7 @@ import WebSocketBridge from '@glyph3d/core/services/orchestration/WebSocketBridg
 import { installConsoleForwarder } from '@glyph3d/core/services/orchestration/consoleForwarder.js';
 import ViewerAPI from '@glyph3d/core/services/orchestration/ViewerAPI.js';
 import AttentionManager from '@glyph3d/core/services/interaction/AttentionManager.js';
+import EntityKeystrokeRouter from '@glyph3d/core/services/interaction/EntityKeystrokeRouter.js';
 import { registerAllCommands } from './handlers/index.js';
 import { contentHash } from './handlers/fileCommands.js';
 
@@ -175,143 +176,10 @@ function buildContext(viewer) {
  */
 function _installEntityKeystrokeDelivery(ctx) {
     const am = ctx?.attentionManager;
-    if (!am || typeof document === 'undefined') return;
-
-    // Per-entity-type handlers. Each returns `true` if the event was
-    // consumed (we then preventDefault/stopPropagation), `false` if it
-    // should pass through (e.g. modifier-combos we don't handle yet).
-    const handlers = {
-        terminal: _terminalKeyHandler,
-        grid:     _gridKeyHandler,
-    };
-
-    document.addEventListener('keydown', (e) => {
-        const slot = am.get('key');
-        if (!slot) return;
-        const entity = slot.entity;
-        if (!entity) return;
-        const handler = handlers[entity.type];
-        if (!handler) return;
-
-        // Guard against DOM input elements — if the user is typing in
-        // the CommandBar's <input>, never also forward to the entity.
-        const tag = document.activeElement?.tagName?.toLowerCase();
-        if (tag === 'input' || tag === 'select' || tag === 'textarea') return;
-
-        let consumed;
-        try {
-            consumed = handler(e, entity, slot, ctx);
-        } catch (err) {
-            console.error(`[entity-keystroke] ${entity.type} handler threw:`, err);
-            consumed = false;
-        }
-        if (consumed) {
-            // Suppress the browser default — Tab would move focus, Backspace
-            // would navigate, arrows would scroll the page. stopImmediate
-            // also blocks any same-target sibling listener from firing,
-            // which is the belt-and-suspenders pair to ShortcutManager's
-            // "defer when key=grid" guard.
-            e.preventDefault();
-            e.stopImmediatePropagation();
-        }
-    }, { capture: true });
-
-    // When the key slot leaves a grid (Esc-LIFO clear, edit.stop, or
-    // attention being moved elsewhere), tell the prior grid to exit edit
-    // mode so the caret hides and the cursor model is forgotten.
-    am.on('change:key', (newSlot, prevSlot) => {
-        const prev = prevSlot?.entity;
-        if (!prev || prev.type !== 'grid') return;
-        if (newSlot?.entity?.grid === prev.grid) return;  // same grid; no-op
-        const prevGrid = prev.grid;
-        if (prevGrid && typeof prevGrid.exitEdit === 'function') {
-            prevGrid.exitEdit();
-        }
-    });
-}
-
-/**
- * Translate a KeyboardEvent into the byte sequence a terminal expects
- * (single chars, ANSI escape sequences for arrows / function keys,
- * control bytes for Ctrl+letter). Returns null when the key should be
- * ignored entirely.
- * @private
- */
-function _keyToTerminalBytes(e) {
-    if (e.key === 'Shift' || e.key === 'Control' || e.key === 'Alt' || e.key === 'Meta') return null;
-
-    if (e.ctrlKey && !e.altKey && !e.metaKey && e.key.length === 1) {
-        const c = e.key.toLowerCase().charCodeAt(0);
-        if (c >= 97 && c <= 122) return String.fromCharCode(c - 96);
-    }
-
-    switch (e.key) {
-        case 'Enter':     return '\r';
-        case 'Tab':       return '\t';
-        case 'Backspace': return '\x7f';
-        case 'Delete':    return '\x1b[3~';
-        case 'Escape':    return null;
-        case 'ArrowUp':    return '\x1b[A';
-        case 'ArrowDown':  return '\x1b[B';
-        case 'ArrowRight': return '\x1b[C';
-        case 'ArrowLeft':  return '\x1b[D';
-        case 'Home':       return '\x1b[H';
-        case 'End':        return '\x1b[F';
-        case 'PageUp':     return '\x1b[5~';
-        case 'PageDown':   return '\x1b[6~';
-    }
-
-    if (e.key.length === 1) return e.key;
-    return null;
-}
-
-/**
- * Terminal-entity key handler. Forwards via grid.onInput (the terminal
- * controller hook). @private
- */
-function _terminalKeyHandler(e, entity, slot /*, ctx */) {
-    const grid = entity.grid;
-    if (!grid || typeof grid.onInput !== 'function') return false;
-    const bytes = _keyToTerminalBytes(e);
-    if (bytes == null) return false;
-    grid.onInput(bytes, slot.id);
-    return true;
-}
-
-/**
- * Grid-entity key handler. Maps printable / navigation / editing keys to
- * the CodeGrid edit ops set up in L2 M1. Bails on Ctrl/Alt/Meta combos
- * (reserved for app-level shortcuts and future copy/paste/undo). Ignores
- * Escape so the GitHubRepoViewer Esc-LIFO can clear attention.key first
- * and the change:key listener will then call exitEdit. @private
- */
-function _gridKeyHandler(e, entity /*, slot, ctx */) {
-    const grid = entity.grid;
-    if (!grid || typeof grid.editInsert !== 'function') return false;
-    if (!grid._cursor) return false;  // not in edit mode (defensive)
-
-    if (e.key === 'Shift' || e.key === 'Control' || e.key === 'Alt' || e.key === 'Meta') return false;
-    if (e.ctrlKey || e.altKey || e.metaKey) return false;  // reserved combos
-    if (e.key === 'Escape') return false;
-
-    switch (e.key) {
-        case 'ArrowLeft':  grid.editMoveCursor(-1, 0); return true;
-        case 'ArrowRight': grid.editMoveCursor( 1, 0); return true;
-        case 'ArrowUp':    grid.editMoveCursor( 0, -1); return true;
-        case 'ArrowDown':  grid.editMoveCursor( 0,  1); return true;
-        case 'Home':       grid.editHome(); return true;
-        case 'End':        grid.editEnd(); return true;
-        case 'Enter':      grid.editSplitLine(); return true;
-        case 'Backspace':  grid.editDeleteBackward(); return true;
-        case 'Delete':     grid.editDeleteForward(); return true;
-        case 'Tab':        grid.editInsert('\t'); return true;
-    }
-
-    if (e.key.length === 1) {
-        grid.editInsert(e.key);
-        return true;
-    }
-    return false;
+    if (!am) return;
+    // The keystroke router (terminal bytes + grid edit ops, the change:key exit
+    // hook) lives in core now — one implementation shared with the r3f client.
+    ctx._keystrokeRouter = new EntityKeystrokeRouter(am).start();
 }
 
 /**

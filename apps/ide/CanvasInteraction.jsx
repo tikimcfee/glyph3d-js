@@ -16,23 +16,25 @@ import { useAppCommands } from '../../app/client/CommandProvider.jsx';
 const DRAG_PX = 5; // pointer travel above this = a drag (orbit/pan), not a click
 
 /**
- * Raycast the registered grids by world bounds; return the nearest grid's
- * registry id, or null. Bounds-only — no per-instance glyph raycast.
+ * Raycast every registered entity that exposes world bounds (code grids AND
+ * terminals); return the nearest entry ({ id, type, grid, ... }) or null.
+ * Bounds-only — no per-instance glyph raycast. We iterate registry.list()
+ * rather than getGrids() (which is grids-only) so terminals are pickable too.
  */
-function pickGridId(ctx, raycaster) {
+function pickEntity(ctx, raycaster) {
   const ray = raycaster.ray;
   const hit = new THREE.Vector3();
-  let bestId = null;
+  let best = null;
   let bestDist = Infinity;
-  for (const grid of ctx.getGrids()) {
-    const box = grid.getBounds?.();
+  for (const entry of ctx.registry.list()) {
+    const box = entry.grid?.getBounds?.();
     if (!box || box.isEmpty()) continue;
     if (ray.intersectBox(box, hit)) {
       const d = ray.origin.distanceToSquared(hit);
-      if (d < bestDist) { bestDist = d; bestId = ctx.registry.getIdByGrid(grid); }
+      if (d < bestDist) { bestDist = d; best = entry; }
     }
   }
-  return bestId;
+  return best;
 }
 
 /** Pointer → raycast → attention + camera, all via the command router. */
@@ -48,11 +50,11 @@ export function CanvasPicker() {
     const ndc = new THREE.Vector2();
     let downX = 0, downY = 0, hoverId = null;
 
-    const toNdc = (e) => {
+    const pickAt = (e) => {
       const r = dom.getBoundingClientRect();
       ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
       raycaster.setFromCamera(ndc, camera);
-      return pickGridId(ctx, raycaster);
+      return pickEntity(ctx, raycaster);
     };
 
     const onDown = (e) => { downX = e.clientX; downY = e.clientY; };
@@ -60,14 +62,26 @@ export function CanvasPicker() {
     const onUp = (e) => {
       // Only a click if the pointer barely moved (else it was an orbit/pan).
       if (Math.hypot(e.clientX - downX, e.clientY - downY) > DRAG_PX) return;
-      const id = toNdc(e);
-      if (!id) return;
-      router.execute(`attention.set primary ${id}`);
-      router.execute(`camera.focus ${id}`);
+      const entry = pickAt(e);
+      if (!entry) {
+        // Click on empty space releases keyboard focus so a terminal you clicked
+        // away from stops receiving keystrokes.
+        router.execute('attention.set key none');
+        return;
+      }
+      router.execute(`attention.set primary ${entry.id}`);
+      router.execute(`camera.focus ${entry.id}`);
+      // Terminals take keyboard focus on click (type immediately); clicking any
+      // other entity releases the key slot.
+      if (entry.type === 'terminal') {
+        router.execute(`attention.set key ${entry.id}`);
+      } else {
+        router.execute('attention.set key none');
+      }
     };
 
     const onMove = (e) => {
-      const id = toNdc(e);
+      const id = pickAt(e)?.id ?? null;
       if (id !== hoverId) {
         hoverId = id;
         router.execute(`attention.set hover ${id || 'none'}`);

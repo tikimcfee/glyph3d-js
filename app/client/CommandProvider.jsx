@@ -6,6 +6,7 @@ import CommandRouter from '@glyph3d/core/services/orchestration/CommandRouter.js
 import WebSocketBridge from '@glyph3d/core/services/orchestration/WebSocketBridge.js';
 import { installConsoleForwarder } from '@glyph3d/core/services/orchestration/consoleForwarder.js';
 import AttentionManager from '@glyph3d/core/services/interaction/AttentionManager.js';
+import EntityKeystrokeRouter from '@glyph3d/core/services/interaction/EntityKeystrokeRouter.js';
 import RemoteFileSystemProvider from '@glyph3d/core/services/data/RemoteFileSystemProvider.js';
 // The spine, ported verbatim — handlers register lazily; nothing here knows the
 // shell. Their only deps are @glyph3d/core, three, and sibling helpers.
@@ -154,10 +155,26 @@ export default function CommandProvider({ atlas, port = 8080, cameraControllerRe
     window.__glyphClient = state;
     console.log(`[command-center] r3f client wired — relay ${url}, ${state.router.commands.size} handlers`);
 
+    // Keyboard delivery to the focused entity (terminal → ANSI bytes via
+    // grid.onInput; grid → edit ops). One capture-phase listener, sharing the
+    // SAME AttentionManager that attention.set writes to.
+    const keystrokes = new EntityKeystrokeRouter(state.ctx.attentionManager).start();
+    state.keystrokes = keystrokes;
+
+    // Share that AttentionManager onto the camera controller's ctx so VCC's
+    // keydown gate bails while an entity holds key focus — otherwise typing 'w'
+    // into a terminal would also fly the camera. Analog of the vanilla
+    // initCommandCenter wiring (viewer.sceneContext.attentionManager = ...).
+    const cc = cameraControllerRef?.current;
+    if (cc?.ctx) cc.ctx.attentionManager = state.ctx.attentionManager;
+
     // Hand the wired client to the app (for DOM chrome outside the Canvas).
     onReady?.(state);
 
-    return () => bridge.disconnect();
+    return () => {
+      keystrokes.dispose();
+      bridge.disconnect();
+    };
   }, [port]);
 
   return (

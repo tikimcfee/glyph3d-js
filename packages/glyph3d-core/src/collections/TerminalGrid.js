@@ -80,6 +80,13 @@ export default class TerminalGrid extends THREE.Object3D {
         // Derive world-unit metrics from the renderer so glyph sizes match the atlas.
         this._metrics = this._renderer.metrics;
 
+        // World-space bounds cache (for picking + camera framing). The local box
+        // depends only on cols/rows/metrics (dirtied on resize); the world box is
+        // re-derived per call by applying the current world matrix.
+        this._localBounds = null;
+        this._worldBounds = null;
+        this._localBoundsDirty = true;
+
         // Acquire a group in the DataTexture for O(1) positioning.
         this._groupId = this._renderer.createGroup();
 
@@ -251,6 +258,39 @@ export default class TerminalGrid extends THREE.Object3D {
     }
 
     /**
+     * World-space axis-aligned bounds of the terminal (the padded cell panel),
+     * for canvas picking and camera framing. Mirrors CodeGrid.getBounds()'s
+     * contract: a THREE.Box3 in world space. The local extent is cached and only
+     * rebuilt on resize; the world box is re-derived each call from the current
+     * world matrix (8-corner transform — cheap).
+     * @returns {THREE.Box3}
+     */
+    getBounds() {
+        this.updateWorldMatrix(true, false);
+
+        if (!this._localBounds || this._localBoundsDirty) {
+            const m = this._metrics;
+            const strideX = m.charWidth + m.letterSpacing;
+            const strideY = m.lineSpacing;
+            const pad = this._bgPadding;
+            const width  = this.cols * strideX + pad * 2;
+            const height = this.rows * strideY + pad * 2;
+            const cx = (this.cols * strideX) / 2 - m.charWidth / 2;
+            const cy = -(this.rows * strideY) / 2 + strideY / 2;
+            // Small Z thickness so an edge-on ray still intersects the flat panel.
+            this._localBounds = new THREE.Box3(
+                new THREE.Vector3(cx - width / 2, cy - height / 2, -1),
+                new THREE.Vector3(cx + width / 2, cy + height / 2, 1),
+            );
+            this._localBoundsDirty = false;
+        }
+
+        if (!this._worldBounds) this._worldBounds = new THREE.Box3();
+        this._worldBounds.copy(this._localBounds).applyMatrix4(this.matrixWorld);
+        return this._worldBounds;
+    }
+
+    /**
      * Resize the terminal. Rebuilds parallel arrays and positions.
      * After resize, the next write() / applyScreen() provides the new content.
      *
@@ -262,6 +302,7 @@ export default class TerminalGrid extends THREE.Object3D {
         this.cols = cols;
         this.rows = rows;
         this._cellCount = newCount;
+        this._localBoundsDirty = true;
 
         // Grow typed arrays if the new size exceeds current capacity.
         if (newCount > this._codepoints.length) {
