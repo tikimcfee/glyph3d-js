@@ -30,6 +30,18 @@ export default defineConfig({
     // Single instance of these even if a transitive dep pulls its own copy.
     dedupe: ['three', 'react', 'react-dom', '@react-three/fiber'],
   },
+  // The dep optimizer is the source of the "clear .vite + restart" tax. Two rules
+  // keep its shape right:
+  //   exclude — @glyph3d/core / glyph3d-r3f are SOURCE (symlinked workspace pkgs),
+  //     not frozen deps; never pre-bundle them, so edits hot-reload instead of being
+  //     served stale from .vite/deps.
+  //   include — pre-declare the real npm deps those source pkgs pull in (the
+  //     @xterm/headless deep ESM import) so adding one doesn't trigger a mid-session
+  //     re-optimize + surprise full reload (the dance we kept hitting).
+  optimizeDeps: {
+    exclude: ['@glyph3d/core', 'glyph3d-r3f'],
+    include: ['@xterm/headless/lib-headless/xterm-headless.mjs'],
+  },
   server: {
     // Workspace packages + the core's font asset resolve to real paths under the
     // repo root (via node_modules symlinks); allow Vite to serve them.

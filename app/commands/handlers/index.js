@@ -58,3 +58,12 @@ export function registerAllCommands(router) {
     registerAttentionCommands(router);
     registerEditCommands(router);
 }
+
+// Dev ergonomics: handlers register imperatively ONCE per page load (CommandProvider's
+// effect), so a hot-swapped handler module leaves the LIVE router holding the old
+// handlers — the edit silently doesn't take. Force a full page reload on any
+// handler-graph change instead; the reload re-runs registerAllCommands fresh. (Source
+// edits want a reload, not the .vite cache-wipe — that's only for dependency changes.)
+if (import.meta.hot) {
+    import.meta.hot.accept(() => window.location.reload());
+}
