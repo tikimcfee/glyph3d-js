@@ -173,6 +173,42 @@ first; CodeGrid windowing and the graphics backend come later.
   tracks a grid" pattern), registered into the `handle` channel — `entityInputRouter`
   is **null** in the r3f client, so GPU picking is the only hit-test there.
 
+### Resize — build state (picked up post-compaction 2026-06-01)
+
+**FOUNDATION DONE** (commit `9881e18`): `handle` channel is live in `DEFAULT_CHANNELS`
+(`{ layer: 9, kind: 'flat' }`, PickingSystem.js). Each `TerminalGrid` has a green
+SE-corner grip mesh (`_initHandle`/`_positionHandle` — a child Object3D, visible
+affordance AND pick target), registered into `handle` with token `{ grid, edge:'se' }`
+in `setPickingSystem`, re-positioned + re-registered in `resize()`, disposed in
+`dispose()`. `TerminalGrid.cellStride` → `{x,y}` world-units/cell (gridScale included).
+Verified: the grip renders on a live terminal.
+
+**ResizeDragger — DESIGN (next to build; ~1 line VCC + ~70 in CanvasInteraction):**
+- **Camera-yield seam (the non-obvious bit):** VCC `mousedown` yields Ctrl-drag via
+  `if (e.button===0 && (e.ctrlKey||e.metaKey)) return;` (`ViewerCameraController.js` ~218).
+  Add `|| this.ctx?.handleHover` so the camera also yields the pan when the press lands on
+  a grip (resize is plain-LMB, which otherwise pans). `ctx.handleHover` is a shared flag
+  set by the hover loop, read like `ctrlKey`.
+- **Hover (extend `CanvasPicker`, the ONE pick owner — no shared-target race):** on a
+  pick frame, after the `grid` hover pick, `markDirty()` then `pickAsync('handle')` →
+  `ctx.handleHover = hit?.token ?? null` + cursor `nwse-resize`. (2 passes only on
+  move-frames.) The shared `_needsPick` flag is why the `markDirty()` between picks is
+  mandatory.
+- **Drag:** plain-LMB down while `ctx.handleHover` set → capture `{ grid, startCols,
+  startRows, startBounds: grid.getBounds().clone(), startX, startY }` + pointer capture.
+  Move → `pixelScale = (2*depth*tan(fov/2))/clientHeight` (depth = (gridPos−camPos)·fwd,
+  copy ObjectDragger); `Δcols = round(dx*pixelScale / cellStride.x)`,
+  `Δrows = round(dy*pixelScale / cellStride.y)`; clamp `newCols = max(MIN, startCols+Δcols)`.
+  Ghost = `startBounds` with SE pushed out (`max.x += Δcols*cellStride.x`,
+  `min.y -= Δrows*cellStride.y`) → a `Box3Helper` (depthTest off, high renderOrder). NO
+  re-gridding mid-drag.
+- **Release:** commit ONCE — `router.execute('terminal.resize <id> <newCols> <newRows>')`
+  (already drives grid.resize + emulator.resize + the PTY SIGWINCH push). Hide ghost,
+  clear state, release capture. CanvasPicker's click-select `onUp` must skip when a
+  resize was active.
+- Dev loop is smooth (core edits auto-reload via Vite→main.jsx page-reload); build-and-watch
+  via `apps/ide/console.log` + `/tmp/glyph3d/relay.log`. `:5173` = `apps/ide`.
+
 ## Transport (load-bearing) — DECIDED: binary lane, data/control plane split
 
 After a pattern audit (control mode vs raw-attach; ttyd/AttachAddon conventions),
