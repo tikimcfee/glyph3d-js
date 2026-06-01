@@ -147,14 +147,21 @@ first; CodeGrid windowing and the graphics backend come later.
 
 ## Interaction (#7 wheel-gate, #8 resize control)
 
-- **#7 wheel-route gate — in the drain, not the listener.** VCC's wheel *listener*
-  (`ViewerCameraController.js:290-350`) only `preventDefault()`s + accumulates
-  `input.wheel.dx/dy` + resolves `willZoom`; motion happens in the per-frame drain
-  `_applyWheel()` (469-485). Gate at the top of `_applyWheel()`: if
-  `attentionManager.get('key')` is a terminal entity, consume `wheel.dy` as a scroll
-  command (one/frame) and `return` before the zoom/pan path (the listener keeps
-  `preventDefault` so the page never scrolls). Mirrors the existing WASD focus gate.
-  (Focus slot: `key` for terminals; `primary` for code-grid windows later.)
+- **#7 wheel-route gate — BUILT (commit `a1f171c`), verified end-to-end.** Gate at the
+  top of `_applyWheel()`: `if (this.ctx?.tryScrollFocusedTerminal?.(wheel.dy)) { reset;
+  return; }` before the zoom/pan path. The hook (defined on the client ctx, forwarded
+  onto VCC's separate ctx by CommandProvider beside `isGripPress` — see
+  [[two-scenecontext-topology]]) checks `attentionManager.get('key')` is a terminal,
+  maps `dy`→lines (~30px/line, min 1, wheel-up = +back), and dispatches `terminal.scroll
+  <id> <lines>`. A focused terminal eats the wheel AND keys (consistent); click empty
+  space to release. Scrollback is tmux-owned: the adapter drives `copy-mode` +
+  `send-keys -X scroll-up/-down`, repaint streams back on the byte lane (no client scroll
+  state). **Two copy-mode traps fixed adapter-side** (the copy-mode keytable is unbound,
+  so the user can't escape it and typing into it is swallowed): scroll-down doesn't
+  auto-exit at the bottom → leave copy-mode at `scroll_position 0`; and a keystroke while
+  scrolled snaps to live (`exitScroll` before the PTY write). Verified via tmux:
+  back / partial-forward-stays / bottom-exits / no-op-when-live / type-to-exit. The one
+  hands-on-only link is the wheel *event* → gate (can't generate a real wheel headlessly).
 - **#8 resize control — a new `handle` pick channel.** Add small corner/edge
   sub-meshes per viewport on a new `flat` channel (next free layer ≥9) of the
   multi-channel `PickingSystem` (`defineChannel`/`register` — same pattern the

@@ -110,6 +110,30 @@ export default function registerSimulateCommands(router) {
     });
 
     // ================================================================
+    //  simulate.wheel <deltaY> [deltaX]
+    //
+    //  Dispatches a WheelEvent on the canvas — drives the camera/terminal wheel
+    //  path headlessly (ViewerCameraController's wheel listener + per-frame drain).
+    //  deltaY > 0 = wheel down (toward live), < 0 = up (back into history).
+    // ================================================================
+    router.register('simulate.wheel', (args, ctx) => {
+        const dy = parseFloat(args[0]);
+        const dx = args[1] != null ? parseFloat(args[1]) : 0;
+        if (isNaN(dy)) return { text: 'ERR: usage: simulate.wheel <deltaY> [deltaX]', data: null };
+
+        const canvas = ctx.renderer?.domElement || ctx.canvas || document.querySelector('canvas');
+        if (!canvas) return { text: 'ERR: no canvas in context', data: null };
+        const rect = canvas.getBoundingClientRect?.() || { left: 0, top: 0, width: 800, height: 600 };
+        canvas.dispatchEvent(new WheelEvent('wheel', {
+            deltaY: dy, deltaX: dx, deltaMode: 0,
+            bubbles: true, cancelable: true,
+            clientX: rect.left + rect.width / 2,
+            clientY: rect.top + rect.height / 2,
+        }));
+        return { text: `OK: dispatched wheel deltaY=${dy} deltaX=${dx}`, data: { deltaY: dy, deltaX: dx } };
+    }, { description: 'Dispatch a WheelEvent on the canvas (drives camera/terminal scroll)', usage: '<deltaY> [deltaX]' });
+
+    // ================================================================
     //  nav.status
     //
     //  Reports SpatialNavigator state: focus index, grid name, mode,
