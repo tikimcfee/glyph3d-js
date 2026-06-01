@@ -1,0 +1,249 @@
+# Terminal Viewport Plan — headless emulator + our GPU renderer
+
+**Status:** decided 2026-06-01, **hardened against the code + tmux/xterm reality**
+(adversarial review folded in). Active plan for the resizable-viewport work; the
+CodeGrid file-windowing half (#6 coordinate seam) is deferred to Phase 3.
+
+## The decision
+
+Render terminals by feeding a shell's output through a **headless VT emulator**
+and rendering the resulting **cell grid with our GPU glyph stack**. We do not write
+a VT emulator, and we retire the tmux `capture-pane` snapshot model.
+
+**Committed engine: `@xterm/headless`** — verified DOM-free, runs headless (VS Code
+uses it server-side), exposes `term.write(bytes)` and a `buffer.active` read API
+(`getLine(y).getCell(x)` → `getChars()`, `getCode()`, `getWidth()`, color/attrs).
+
+**`ghostty-web` is a *candidate*, not a settled swap.** It's real and active
+(v0.4.0, Dec 2025), aims for xterm.js API compatibility and ships Ghostty's VT100
+parser in WASM — but its documented path requires `term.open(canvasParent)` and
+bundles its own `CanvasRenderer`; **headless/buffer-only is "theoretically
+possible," not a supported mode**, and its read-side cell shape
+(`GhosttyCell{codepoint,fg,bg,flags}`) differs from xterm's `IBufferCell`. So the
+"zero-rewrite swap" is conditional on those verifying. Build against the xterm.js
+buffer API; treat ghostty-web as a later experiment, not a guarantee.
+
+This turns the earlier "stateless snapshot vs. write-our-own-emulator" fork into
+"embed a proven emulator, keep our renderer as the differentiator" — text in 3D.
+
+## Why (what the current terminal stack can't do — from the subsystem map)
+
+- `terminal.resize` resizes only the canvas grid; the shell is never told
+  (`attach.go` spawns tmux at fixed `-x/-y`, no resize handler).
+- **No scrollback** — `capture-pane` grabs only the visible pane (no `-S`).
+- `parseCapturePaneAnsi` is a *snapshot* parser; it clips overflow and races resize.
+  A real VT emulator correctly handles the *streaming* redraw protocol (cursor
+  addressing, scroll regions, erase) that tmux emits — which snapshot parsing can't.
+
+## The server model (tmux-backed, byte-streaming)
+
+The enterprise pattern: a **session multiplexer** holds the persistent shell;
+clients attach/detach. tmux stays — but mind exactly how a tmux *client* behaves.
+
+```
+shell ── tmux session on a dedicated socket (tmux -L glyphd)   ← persistence
+              │  PTY (raw bytes both ways; creack/pty in the adapter)
+         relay adapter (cli/attach.go, rewritten: byte pump, not snapshot pump)
+              │  WS: terminal.bytes <id> <base64>  (coalesced; reuses roster/routing)
+         browser: @xterm/headless  ── parses tmux's redraw stream into a cell grid
+              │  buffer.active cells → translation adapter → ScreenBuffer
+         TerminalGrid → GlyphField  ── our GPU 3D render
+```
+
+**The emulator behind tmux is a *screen mirror*, not an independent VT.** A `tmux
+attach` client receives tmux's own internal-grid redraws sized to the client — not
+the application's raw output stream. tmux owns the grid: it does **not** forward
+alt-screen transitions (`?1049h/l`), so `less`/`vim` arrive as ordinary cell
+redraws; `buffer.active` stays on `buffer.normal`, `buffer.alternate` is never
+populated, and **the emulator accumulates no scrollback of its own** — it mirrors
+whatever tmux paints. (The emulator still earns its place: it correctly parses
+tmux's *streaming* redraw protocol into a cell grid, which the snapshot parser
+can't.) True emulator-owned scrollback/alt-screen requires bypassing the tmux
+client (raw shell PTY) — that's the Phase 3 fork, deliberately not Phase 1.
+
+**Session lifecycle:**
+- **Dedicated socket** `tmux -L glyphd` — isolates our sessions and lets us
+  neutralize keymaps without touching the operator's own tmux.
+- **Create-or-adopt is two steps, NOT `tmux new -A -d`** (that errors `rc=1 "open
+  terminal failed: not a terminal"` on an existing session, because `-A` turns it
+  into attach + `-d` supplies no TTY). Guard: `tmux -L glyphd has-session -t
+  glyph-<id>` → if absent, `tmux -L glyphd new-session -d -s glyph-<id> -x C -y R
+  <shell>`. Then `set -t … status off` (clean pane) and **neutralize the client
+  keymap** so the PTY is a transparent byte-pipe: `set -t … prefix None; set -t …
+  prefix2 None`, and on the socket clear the binding tables the client would
+  otherwise intercept (`unbind -a -T prefix; -T root; -T copy-mode; -T
+  copy-mode-vi` — plain `unbind -a` clears only the prefix table; root-table mouse
+  + copy-mode bindings survive without the `-T` sweeps).
+- **The adapter holds a real PTY** (`creack/pty`, a NEW Go dep — see Risks) running
+  `tmux -L glyphd attach -t glyph-<id>` and streams the master both ways.
+
+**I/O:**
+- **Output:** PTY master → coalesce (~16 ms) → `terminal.bytes <id> <b64>` → browser
+  → `term.write(decoded)`.
+- **Input:** browser key → bytes → `terminal.bytes` → relay → PTY master write.
+  Ordinary terminal input — *no `send-keys`* (today's hex `send-keys` translation
+  retires). Verified on tmux 3.6b: echo+CR, arrows (`\x1b[A`), Ctrl-C (`\x03`),
+  paste all flow verbatim. **Caveat:** with the prefix neutralized (above) the
+  client is transparent; if the prefix were left live, `C-b` would be eaten by the
+  client (writing `C-b d` *detaches*) and never reach the program. Neutralizing is
+  mandatory, and it's why scroll is driven by tmux *commands*, not prefix keys
+  (below).
+- **Resize: SIGWINCH only — do NOT call `tmux resize-window`.** `terminal.resize` →
+  `pty.Setsize` (TIOCSWINSZ → SIGWINCH to the client). With `window-size latest`
+  (tmux's default, ≥2.9) the single attached client's SIGWINCH drives the window
+  automatically. `tmux resize-window` flips `window-size` to `manual`, after which
+  client SIGWINCH is *ignored* and the window pins — actively harmful. (Pin
+  `window-size latest` at create as insurance against inherited user config.) The
+  emulator also `term.resize(c,r)`.
+
+**Scrollback — tmux-owned, driven by commands (not the prefix):** the emulator
+mirrors the visible pane; "scroll back" is the adapter issuing tmux commands
+directly — `copy-mode -t …` then `send-keys -X -t … scroll-up/scroll-down/page-up`
+— which tmux repaints to the client and the emulator renders. This works *with the
+prefix neutralized* (we don't route copy-mode through `C-b`). "Resize big" already
+gives lots of live canvas immediately.
+> Decision: tmux-owned scrollback to start. Emulator-owned smooth scrollback (raw
+> shell PTY + server-side history ring + replay) is **Phase 3**, only if copy-mode
+> UX proves insufficient.
+
+**Persistence / re-adopt — needs a NEW trigger.** The tmux session survives a
+browser reload, and a fresh `attach` repaints the current screen into a fresh
+emulator. BUT today's self-heal fires only when the periodic `terminal.frame`
+keepalive bounces `ERR: no terminal` (`attach.go:204-234, 289-293`) — and that
+keepalive *is* the snapshot pump we're retiring. With a raw byte stream an **idle
+shell emits nothing**, so nothing bounces and re-adoption never fires. Phase 1 must
+add a **liveness ping decoupled from output** (a cheap periodic adapter→relay probe
+whose `ERR: no terminal` reply triggers re-adopt + a tmux redraw), independent of
+shell activity.
+
+## Renderer integration
+
+- **Cell-source swap + a translation adapter (not a bare swap).** TerminalGrid
+  sources cells from `term.buffer.active` instead of `parseCapturePaneAnsi` (which
+  retires for terminals). But `applyScreen` consumes `{codepoint:number,
+  fg:{r,g,b 0..1}, bold}`, and xterm `IBufferCell` does **not** give `fg:{r,g,b}` —
+  `getFgColor()` is mode-dependent (default / 0-255 palette / `0xRRGGBB` RGB),
+  disambiguated by `isFgDefault()/isFgPalette()/isFgRGB()`; `getChars()` is a
+  *string* (wide/combining), `getWidth()` is 1/2/0. So add an
+  `emulatorScreen → ScreenBuffer` adapter that branches on color mode (palette →
+  `ansi256toRGB`/`ansi16toRGB`, RGB → `/255`, default → reset), maps `!!isBold()`,
+  and handles wide-cell trailing slots. **Lift the palette tables (`ANSI_16`,
+  `ansi16toRGB`, `ansi256toRGB`, `RESET_FG`) out of `TerminalCapture.js` into a
+  shared module** — the SGR snapshot parser retires, the palette doesn't.
+- **Cheap steady-state.** Reuse TerminalGrid's in-place `_writeToInstanceBuffer`
+  (cols×rows scalar writes, two `needsUpdate` flags, no realloc) for content frames.
+  `TerminalGrid.resize()` is the expensive path (full `applyPrebuiltBuffers`
+  realloc + background rebuild + `glyph` pick-channel re-register) — fire it only on
+  an actual cols×rows change, committed once (see Interaction).
+
+## The shared viewport abstraction
+
+A *viewport* = a cols×rows cell window with a resize handle, screen anchor, and
+wheel-routed scroll. The **interaction shell is shared**; the **content backend is
+polymorphic** — emulator buffer (terminals) vs. file slice (code-grid windows).
+Terminals adopt it first; CodeGrid windowing joins in Phase 3.
+
+## Interaction (#7 wheel-gate, #8 resize control)
+
+- **#7 wheel-route gate — in the drain, not the listener.** VCC's wheel *listener*
+  (`ViewerCameraController.js:290-350`) only `preventDefault()`s + accumulates
+  `input.wheel.dx/dy` + resolves `willZoom`; motion happens in the per-frame drain
+  `_applyWheel()` (469-485). Gate at the top of `_applyWheel()`: if
+  `attentionManager.get('key')` is a terminal entity, consume `wheel.dy` as a scroll
+  command (one/frame) and `return` before the zoom/pan path (the listener keeps
+  `preventDefault` so the page never scrolls). Mirrors the existing WASD focus gate.
+  (Focus slot: `key` for terminals; `primary` for code-grid windows in Phase 3.)
+- **#8 resize control — a new `handle` pick channel.** Add small corner/edge
+  sub-meshes per viewport on a new `flat` channel (next free layer ≥9) of the
+  multi-channel `PickingSystem` (`defineChannel`/`register` — same pattern the
+  `grid` channel uses for `_background`). Resolves distinctly from the whole-panel
+  `grid` channel. Manage its lifecycle alongside the per-resize `glyph`-channel
+  re-register. Drag math clones `ObjectDragger` (pointer-capture + view-plane
+  delta) but maps Δscreen → **Δcols/Δrows snapped to cell stride** — add a helper
+  exposing stride (`GlyphField.metrics`: `charWidth+letterSpacing`, `lineSpacing`,
+  already world-scaled; today recomputed inline in ≥4 TerminalGrid spots).
+- **Live-preview cheap; commit once on release.** During drag, only stretch the
+  background panel mesh + draw a ghost outline at the snapped Δcols/Δrows — do NOT
+  re-grid cells. The real `TerminalGrid.resize()` (expensive: realloc + pick
+  re-register) fires exactly **once on pointerup** via the `terminal.resize` verb
+  (which also drives `pty.Setsize` + `term.resize`). CLI↔canvas parity preserved.
+- **Anchor & hit-test.** Lean in-scene mesh (the `SelectionIndicator` "Box3Helper
+  tracks a grid" pattern), registered into the `handle` channel — `entityInputRouter`
+  is **null** in the r3f client, so GPU picking is the only hit-test there.
+
+## Transport (load-bearing)
+
+The relay is a **text-only JSON-envelope router** (`relay.go` writes only
+`websocket.TextMessage`; `WebSocketBridge` does `JSON.parse` and drops non-JSON).
+**Reuse the roster / owner-routing / re-adoption machinery unchanged** — only the
+payload semantics change (append-bytes chunks replace full-screen snapshots),
+carried as `terminal.bytes <id> <base64>` inside the existing envelope (today's
+`terminal.frame <id> <b64>` already base64s a snapshot — same shape).
+
+But: `sendToDisplay` uses `make(chan []byte, 64)` and **drops on a full queue**.
+That was safe for snapshots (a dropped frame self-corrects next frame); it is **not
+safe for a VT byte stream** — a dropped mid-stream chunk desyncs the parser and
+corrupts the screen with no guaranteed near-term repaint. Required: **(a) coalesce
+PTY output into ~16 ms batches** to bound message rate, and **(b) make the terminal
+byte path lossless** (block/backpressure rather than drop, or a dedicated binary WS
+channel). Do not ship the byte stream over the drop-on-full path as-is.
+
+## Migration order
+
+**Phase 1 — relay byte-pipe + emulator (the use case):**
+1. `attach.go`: add `creack/pty`; replace the `capture-pane` pump with a PTY running
+   `tmux -L glyphd attach`; create-or-adopt guard + status-off + keymap-neutralize;
+   coalesced `terminal.bytes` out, raw bytes in; `terminal.resize` → `pty.Setsize`
+   (SIGWINCH only); add the decoupled liveness ping.
+2. Relay: make the terminal byte path lossless (coalesce + no-drop / binary channel).
+3. Browser: wire `@xterm/headless`; `terminal.bytes` → `term.write`; the
+   `emulatorScreen → ScreenBuffer` adapter (color-mode/width/bold) feeding
+   `TerminalGrid.applyScreen`; route keystrokes → `terminal.bytes`.
+4. **Acceptance: spawn a terminal, resize it large, run a program that fills it,
+   type in it — all correct end-to-end; reload re-adopts.**
+
+**Phase 2 — interaction:**
+5. #7 wheel-gate in `_applyWheel` → scroll the focused terminal (tmux copy-mode cmds).
+6. #8 resize handle: `handle` pick channel + cell-stride helper + drag→snap + ghost
+   preview + commit-once-on-release; persist viewport size in SessionStore.
+
+**Phase 3 — extend / polish (by need):**
+7. Emulator-owned smooth scrollback (raw shell PTY + server history ring + replay).
+8. `ghostty-web` evaluation (only if headless + cell-API verify).
+9. Share the viewport shell with **CodeGrid windowing** (#6): the source↔visible
+   coordinate seam, edit-in-window, the LayoutDescription question.
+
+## What changes / retires
+
+- `cli/attach.go`: snapshot frame pump → PTY byte pump + SIGWINCH resize + liveness ping.
+- `terminal.frame` snapshot payload → `terminal.bytes` append chunks (envelope reused).
+- `parseCapturePaneAnsi`/`parseCapturePanePlain`: **public `@glyph3d/core` exports**
+  (`src/index.js`, `collections/index.js`) — retiring is a public-API removal. Only
+  caller is `TerminalGrid.write()`. **Lift the palette tables out first**, then retire.
+- `terminal.resize`: now resizes shell (SIGWINCH) + emulator + grid in lockstep.
+- Input: today's `terminal.input` text + `send-keys -H` → raw bytes to the PTY.
+- New dep: `@xterm/headless` (browser) + `creack/pty` (Go).
+
+## Open decisions / risks (verify during build)
+
+- **Two live frontends share the handler spine.** The Go binary embeds + serves the
+  **legacy vanilla app** at `/app/ide.html`; the **r3f client** (`apps/ide`) runs
+  only under Vite dev. `terminalCommands.js` / relay / `attach.go` are shared. The
+  byte-pipe + `terminal.bytes` change affects BOTH — decide: gate the new path to
+  the r3f client, or accept the legacy app's terminals break (it's the removal-wave
+  branch; the old IDE is slated for retirement anyway). Do not assume only `apps/ide`.
+- **Windows build.** `creack/pty`'s POSIX path is CGO-free, but the binary
+  cross-compiles `windows-amd64` with `CGO_ENABLED=0` and `attachCmd` is registered
+  unconditionally (`main.go`). Guard the PTY path behind build tags / a runtime
+  capability check, or terminals become a non-Windows feature.
+- **Resize race.** Order of relay `pty.Setsize` vs. browser `term.resize` matters;
+  a mis-ordered frame parses new-size redraws against an old-size buffer. Name a
+  single source of truth (the adapter's size) and tolerate a 1-frame reflow.
+- **`@xterm/headless` per-frame read cost** at large cols×rows; and its bundle size.
+- **Scrollback ownership** — re-evaluate tmux-copy-mode vs emulator-owned after Phase 1.
+
+## Out of scope (for this plan)
+
+CodeGrid windowing coordinate seam + edit-in-window (#6) until Phase 3; the
+LayoutDescription/layout-substrate refactor; `ghostty-web` until its headless +
+cell-API viability is verified.
