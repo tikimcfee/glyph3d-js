@@ -100,15 +100,14 @@ export class AttentionManager {
                 ? opts.registry.get(id) || null
                 : null);
 
-        // If the slot already holds this exact id, only update ts (no event).
-        // Callers can still observe the bump via `get()`.ts but we don't spam
-        // change listeners for repeated writes of the same id — most hover
-        // probes are idempotent frame-to-frame.
-        if (prev && prev.id === id && prev.entity === entity) {
-            prev.ts = performance.now();
-            return prev;
-        }
-
+        // Every write emits change:<slot> — INCLUDING re-affirming the same id.
+        // Re-selecting/re-clicking a grid is a deliberate signal that dependent
+        // consumers (selection box, panels, camera) should re-arm. The old dedup
+        // (same id+entity → bump ts, no event) was there to absorb per-frame hover
+        // probes that wrote the same id every frame; those callers are gone (the
+        // canvas hover loop now dedups upstream via its own last-id guard). The
+        // dedup's only remaining effect was swallowing explicit re-selections —
+        // "re-clicking the same grid does nothing until you touch another one".
         const value = { id, entity: entity || null, ts: performance.now() };
         this.state[slot] = value;
         this._emit(slot, value, prev);

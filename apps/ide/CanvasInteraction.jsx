@@ -20,6 +20,10 @@ const round = (n) => Math.round(n * 100) / 100;
 // indistinguishable downstream.
 
 const DRAG_PX = 5; // pointer travel above this = a drag (orbit/pan), not a click
+// Hover outline is inflated by this many world units so that when you hover the
+// already-selected grid it reads as a light halo just OUTSIDE the steady selection
+// box, instead of the two line-boxes merging into one.
+const HOVER_INFLATE = 3;
 
 // Map a grid object (the token a 'grid'-channel pick resolves to) back to its
 // registry entry { id, type, grid }.
@@ -291,55 +295,62 @@ export function ObjectDragger() {
 export function SelectionIndicator() {
   const { scene } = useThree();
   const client = useAppCommands();
-  const tracked = useRef({ primaryGrid: null, hoverGrid: null, primaryBox: null, hoverBox: null });
+  const tracked = useRef({ primaryBox: null, hoverBox: null, am: null, registry: null });
 
   useEffect(() => {
     if (!client) return;
-    const am = client.ctx.attentionManager;
-    const registry = client.ctx.registry;
-
-    const mkBox = (color) => {
+    const mkBox = (color, renderOrder) => {
       const b = new THREE.Box3Helper(new THREE.Box3(), new THREE.Color(color));
       b.visible = false;
-      b.renderOrder = 9999;            // draw the outline over the glyphs
+      b.renderOrder = renderOrder;     // draw the outline over the glyphs
       if (b.material) b.material.depthTest = false;
       scene.add(b);
       return b;
     };
     const t = tracked.current;
-    t.primaryBox = mkBox(0x7ad7a0); // green — selected
-    t.hoverBox = mkBox(0x4a7f9a);   // muted blue — hover
-
-    const gridFor = (slot) => {
-      const id = am.get(slot)?.id;
-      return id ? (registry.get(id)?.grid ?? null) : null;
-    };
-    const sync = () => { t.primaryGrid = gridFor('primary'); t.hoverGrid = gridFor('hover'); };
-    sync();
-    const offP = am.on('change:primary', sync);
-    const offH = am.on('change:hover', sync);
+    t.am = client.ctx.attentionManager;
+    t.registry = client.ctx.registry;
+    // Distinct styles: a steady green box for the SELECTED grid, a lighter blue
+    // box for HOVER drawn on top (higher renderOrder). They read as different
+    // things even when both land on the same grid.
+    t.primaryBox = mkBox(0x6ee7a0, 9999);  // green — the selected / active grid
+    t.hoverBox = mkBox(0x9fd2ff, 10000);   // light blue — hover (follows the cursor)
 
     return () => {
-      offP?.(); offH?.();
       scene.remove(t.primaryBox); scene.remove(t.hoverBox);
       t.primaryBox.geometry?.dispose?.(); t.hoverBox.geometry?.dispose?.();
-      t.primaryBox = t.hoverBox = t.primaryGrid = t.hoverGrid = null;
+      t.primaryBox = t.hoverBox = t.am = t.registry = null;
     };
   }, [client, scene]);
 
-  // Re-sync box geometry from the tracked grids' bounds each frame (2 boxes —
-  // cheap: getBounds is an 8-corner transform of cached local content bounds).
+  // Resolve the tracked grids LIVE each frame straight from attention + registry
+  // — no cached grid objects, no dependence on change events. This self-heals two
+  // ways: a grid id re-pointed to a NEW object (virtualizer reload / session
+  // restore) is picked up immediately, and a same-id re-selection that fires no
+  // change event still tracks correctly. (2 boxes/frame: a Map get + an 8-corner
+  // getBounds transform each — negligible.)
   useFrame(() => {
     const t = tracked.current;
-    const fit = (box, grid) => {
+    if (!t.am || !t.registry) return;
+    const gridFor = (slot) => {
+      const id = t.am.get(slot)?.id;
+      return id ? (t.registry.get(id)?.grid ?? null) : null;
+    };
+    const fit = (box, grid, inflate) => {
       if (!box) return;
       const b = grid?.getBounds?.();
-      if (b && !b.isEmpty()) { box.box.copy(b); box.visible = true; }
-      else box.visible = false;
+      if (b && !b.isEmpty()) {
+        box.box.copy(b);
+        if (inflate) box.box.expandByScalar(inflate);
+        box.visible = true;
+      } else box.visible = false;
     };
-    fit(t.primaryBox, t.primaryGrid);
-    // Don't double-draw a box when hovering the selected grid.
-    fit(t.hoverBox, t.hoverGrid && t.hoverGrid !== t.primaryGrid ? t.hoverGrid : null);
+    // Selection: exact bounds, steady. Hover: ALWAYS shown on the cursor grid —
+    // including the selected one — inflated into a light halo just outside the
+    // selection box. No suppression special-case: selection and hover are two
+    // distinct, independently-tracked things.
+    fit(t.primaryBox, gridFor('primary'), 0);
+    fit(t.hoverBox, gridFor('hover'), HOVER_INFLATE);
   });
 
   return null;

@@ -660,13 +660,6 @@ export class PickingSystem {
         const prevClearAlpha = this._renderer.getClearAlpha();
         this._renderer.getClearColor(prevClearColor);
         const savedLayerMask = camera.layers.mask;
-        // The scene background is a fullscreen fill (not subject to camera.layers),
-        // so it would paint empty pick pixels with its color. On a plain
-        // UnsignedByte target with no sRGB encode that writes the LINEAR color
-        // raw — e.g. background 0x050608 → bytes (0,0,1) → decodes to id 1, a false
-        // hit on the first grid. Null it for the pass so empty == our black clear
-        // == id 0 == no hit.
-        const savedBackground = scene.background;
 
         for (const entry of channel.entries) {
             const mesh = entry.mesh;
@@ -676,8 +669,11 @@ export class PickingSystem {
         }
 
         try {
+            // Isolate to the channel's layer and clear to black. The app keeps
+            // scene.background null (the backdrop is the renderer's clear color),
+            // so empty pixels stay at our black clear == id 0 == no hit — no scene
+            // mutation needed here.
             camera.layers.set(channel.layer);
-            scene.background = null;
             this._renderer.setRenderTarget(this._target);
             this._renderer.setClearColor(0x000000, 1);
             this._renderer.clear();
@@ -685,7 +681,6 @@ export class PickingSystem {
             this._lastRenderMs = performance.now() - t0;
         } finally {
             camera.layers.mask = savedLayerMask;
-            scene.background = savedBackground;
             this._renderer.setRenderTarget(null);
             this._renderer.setClearColor(prevClearColor, prevClearAlpha);
             for (const entry of channel.entries) {
@@ -749,7 +744,6 @@ export class PickingSystem {
         const t0 = this._renderChannelPass(ch, camera, scene);
         const pixel = await this.readPixelAsync(t0);
         const id = (pixel[0] << 16) | (pixel[1] << 8) | pixel[2];
-        this._lastRawId = id; // last decoded RGB→id, for stats/debug
         const hit = this.resolve(channelName, id);
         this._lastResult.set(channelName, hit);
         return hit;

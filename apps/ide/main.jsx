@@ -45,7 +45,11 @@ function App() {
             <GlyphCanvas
               atlas={atlas}
               camera={{ position: [0, 0, 300], fov: 70, near: 0.1, far: 20000 }}
-              onCreated={({ scene }) => { scene.background = new THREE.Color(0x050608); }}
+              // Backdrop is the renderer's clear color, NOT scene.background —
+              // a null scene.background means the GPU pick pass never has to
+              // touch scene state to keep its ID buffer clean (a set background
+              // would bleed into the pick target as a stray low id).
+              onCreated={({ gl }) => { gl.setClearColor(new THREE.Color(0x050608), 1); }}
               style={{ position: 'absolute', inset: 0 }}
             >
               <ViewerCamera ref={cameraRef} />
