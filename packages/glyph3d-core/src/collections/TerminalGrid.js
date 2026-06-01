@@ -130,6 +130,10 @@ export default class TerminalGrid extends THREE.Object3D {
         this._bgPadding = options.backgroundPadding ?? 0.3;
         this._initBackground();
 
+        // SE-corner resize grip — a visible affordance AND the 'handle' pick target.
+        this._handle = null;
+        this._initHandle();
+
         // Add the renderer's mesh as a child so transforms propagate.
         this.add(this._renderer.instanceMesh);
 
@@ -306,11 +310,11 @@ export default class TerminalGrid extends THREE.Object3D {
     }
 
     /**
-     * Wire a PickingSystem. Registers two channels (mirrors CodeGrid):
-     *   - 'glyph' (token = renderer) — per-cell picks; resize() re-registers it
-     *     (cols*rows changes the instance count).
-     *   - 'grid'  (token = this terminal) — the background panel, the whole-panel
-     *     grid-level pickable; stable, registered once here.
+     * Wire a PickingSystem. Registers three channels (mirrors CodeGrid + the grip):
+     *   - 'glyph'  (token = renderer) — per-cell picks; resize() re-registers it.
+     *   - 'grid'   (token = this terminal) — the whole-panel background pickable.
+     *   - 'handle' (token = { grid, edge }) — the SE resize grip; resize()
+     *     re-registers it (it moves with the panel).
      * @param {import('../picking/PickingSystem.js').PickingSystem} pickingSystem
      */
     setPickingSystem(pickingSystem) {
@@ -318,6 +322,7 @@ export default class TerminalGrid extends THREE.Object3D {
         if (!pickingSystem) return;
         if (this._renderer)   pickingSystem.register('glyph', this._renderer, this._renderer);
         if (this._background) pickingSystem.register('grid', this._background, this);
+        if (this._handle)     pickingSystem.register('handle', this._handle, { grid: this, edge: 'se' });
     }
 
     /**
@@ -365,6 +370,13 @@ export default class TerminalGrid extends THREE.Object3D {
             this._pickingSystem.register('glyph', this._renderer, this._renderer);
         }
 
+        // Move the grip to the new SE corner + re-register (its world extent moved
+        // with the panel; the 'handle' channel id-block is keyed per mesh).
+        this._positionHandle();
+        if (this._pickingSystem && this._handle) {
+            this._pickingSystem.register('handle', this._handle, { grid: this, edge: 'se' });
+        }
+
         // Keep the byte→screen emulator in lockstep — its next screen reflects the
         // new dimensions. (Pairs with the adapter's pty.Setsize for full agreement.)
         this._emulator?.resize(cols, rows);
@@ -386,6 +398,7 @@ export default class TerminalGrid extends THREE.Object3D {
         if (this._pickingSystem) {
             if (this._renderer)   this._pickingSystem.unregister('glyph', this._renderer);
             if (this._background) this._pickingSystem.unregister('grid', this._background);
+            if (this._handle)     this._pickingSystem.unregister('handle', this._handle);
         }
         if (this._renderer) {
             this._renderer.instanceMesh.geometry.dispose();
@@ -396,6 +409,11 @@ export default class TerminalGrid extends THREE.Object3D {
             this._background.geometry.dispose();
             this._background.material.dispose();
             this._background = null;
+        }
+        if (this._handle) {
+            this._handle.geometry.dispose();
+            this._handle.material.dispose();
+            this._handle = null;
         }
         this.scene.remove(this);
     }
@@ -439,6 +457,57 @@ export default class TerminalGrid extends THREE.Object3D {
             this._sizes[i * 2]     = w;
             this._sizes[i * 2 + 1] = h;
         }
+    }
+
+    /**
+     * World-unit cell stride (one column right, one row down), gridScale included.
+     * The resize dragger maps Δworld → Δcols/Δrows through this.
+     * @returns {{ x: number, y: number }}
+     */
+    get cellStride() {
+        const m = this._metrics;
+        return {
+            x: (m.charWidth + m.letterSpacing) * this._gridScale,
+            y: m.lineSpacing * this._gridScale,
+        };
+    }
+
+    /**
+     * Create the SE-corner resize grip: a small visible quad that is both the user's
+     * grab affordance AND the 'handle' pick target. A child of this Object3D, so it
+     * inherits gridScale + world position; placed by _positionHandle().
+     * @private
+     */
+    _initHandle() {
+        const m = this._metrics;
+        const w = (m.charWidth + m.letterSpacing) * 2; // ~2 cells — comfortably grabbable
+        const h = m.lineSpacing * 2;
+        const geo = new THREE.PlaneGeometry(w, h);
+        const mat = new THREE.MeshBasicMaterial({
+            color: 0x6ee7a0, transparent: true, opacity: 0.5, depthTest: false,
+        });
+        this._handle = new THREE.Mesh(geo, mat);
+        this._handle.renderOrder = 10001; // above the selection / hover outlines
+        this.add(this._handle);
+        this._positionHandle();
+    }
+
+    /**
+     * Place the grip at the panel's bottom-right (SE) corner in local coords — same
+     * extent math as getBounds(). Called on construction and after resize.
+     * @private
+     */
+    _positionHandle() {
+        if (!this._handle) return;
+        const m = this._metrics;
+        const strideX = m.charWidth + m.letterSpacing;
+        const strideY = m.lineSpacing;
+        const pad = this._bgPadding;
+        const width  = this.cols * strideX + pad * 2;
+        const height = this.rows * strideY + pad * 2;
+        const cx = (this.cols * strideX) / 2 - m.charWidth / 2;
+        const cy = -(this.rows * strideY) / 2 + strideY / 2;
+        this._handle.position.set(cx + width / 2, cy - height / 2, 0.5);
     }
 
     // ================================================================

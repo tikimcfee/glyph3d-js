@@ -13,6 +13,8 @@
  *     instanceIndex, resolves to { token: renderer, slotIndex } → char-level.
  *   - 'grid'  (layer 8, kind 'flat')  — one solid quad per grid (the background
  *     panel), ID = base, resolves to { token: grid } → whole-panel grid-level.
+ *   - 'handle' (layer 9, kind 'flat') — small per-viewport control meshes (terminal
+ *     resize grips), ID = base, resolves to { token } → e.g. { grid, edge }.
  *
  * Add more (buttons, control surfaces, …) with defineChannel(name,{layer,kind}).
  * Hit-test a channel with pickAsync(name, camera, scene); they're independent, so
@@ -70,8 +72,9 @@ async function _loadTSL() {
 // on layer 0 too, so the main render pass is unaffected. New channels claim the
 // next free layer (8 used by 'grid', so buttons would take 9, etc.).
 const DEFAULT_CHANNELS = {
-    glyph: { layer: 7, kind: 'glyph' },
-    grid:  { layer: 8, kind: 'flat'  },
+    glyph:  { layer: 7, kind: 'glyph' },
+    grid:   { layer: 8, kind: 'flat'  },
+    handle: { layer: 9, kind: 'flat'  }, // resize grips / control surfaces — one constant id per mesh
 };
 
 // ---------------------------------------------------------------------------
