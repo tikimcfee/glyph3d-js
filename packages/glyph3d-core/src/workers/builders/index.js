@@ -42,38 +42,66 @@ export const PAGE_CONFIG = {
 };
 
 /**
- * Apply page-break pagination to glyph positions in-place.
- * Pages fan right, then wrap down — extend right first, then extend down.
+ * Page geometry in world units, derived from metrics + the ACTUAL content width
+ * (the widest laid-out line's extent). pageWidthWorld is the column spacing; using
+ * the real extent — not `maxLineWidth * charAdvance` — is what keeps fanned columns
+ * from overlapping: the char-count guess drifts against summed HarfBuzz advances and
+ * the error accumulates over a column's width. See LAYOUT_PLAN.md.
+ *
+ * @param {Object} metrics - {charWidth, charHeight, letterSpacing, lineSpacing}
+ * @param {number} contentWidth - widest line's world extent (itemMaxX - origin.x)
+ */
+export function paginationGeometry(metrics, contentWidth) {
+    const charAdvance = metrics.charWidth + metrics.letterSpacing;
+    return {
+        pageHeightWorld: PAGE_CONFIG.pageHeight * metrics.lineSpacing,
+        pageWidthWorld: contentWidth > 0 ? contentWidth : Z_WRAP_CONFIG.maxLineWidth * charAdvance,
+        gapXWorld: PAGE_CONFIG.pageGapX * charAdvance,
+        gapYWorld: PAGE_CONFIG.pageGapY * metrics.lineSpacing,
+        pagesWide: PAGE_CONFIG.pagesWide,
+    };
+}
+
+/**
+ * THE single source of pagination math: given a glyph's distance below the item
+ * origin (relY) and the page geometry, return how to remap it. newY = origin.y -
+ * mappedRelY; newX = x + shiftX. Shared by the buffer fill (applyPagination) and —
+ * in Step 2 — the caret/selection queries, so the two can never diverge.
+ *
+ * @param {number} relY - origin.y - glyphY (distance below origin, ≥ 0)
+ * @param {{pageHeightWorld,pageWidthWorld,gapXWorld,gapYWorld,pagesWide}} geom
+ * @returns {{shiftX:number, mappedRelY:number}}
+ */
+export function paginationShift(relY, geom) {
+    if (relY < geom.pageHeightWorld) return { shiftX: 0, mappedRelY: relY };
+    const vPage = Math.floor(relY / geom.pageHeightWorld);
+    const rowOffsetInPage = relY - vPage * geom.pageHeightWorld;
+    const hSlot = vPage % geom.pagesWide;
+    const yRow = Math.floor(vPage / geom.pagesWide);
+    return {
+        shiftX: hSlot * (geom.pageWidthWorld + geom.gapXWorld),
+        mappedRelY: rowOffsetInPage + yRow * (geom.pageHeightWorld + geom.gapYWorld),
+    };
+}
+
+/**
+ * Apply page-break pagination to glyph positions in-place. Pages fan right, then
+ * wrap down. Pure transform via paginationShift — see paginationGeometry for why the
+ * width is the real content extent, not a char-count guess.
  *
  * @param {Float32Array} positions - Position buffer (mutated in place)
  * @param {number} startIdx - First glyph index for this item
  * @param {number} endIdx - One past last glyph index
  * @param {{x,y,z}} origin - Item's starting position
- * @param {Object} metrics - {charWidth, charHeight, letterSpacing, lineSpacing}
+ * @param {ReturnType<typeof paginationGeometry>} geom - page geometry
  */
-export function applyPagination(positions, startIdx, endIdx, origin, metrics) {
-    const pageHeightWorld = PAGE_CONFIG.pageHeight * metrics.lineSpacing;
-    const charAdvance = metrics.charWidth + metrics.letterSpacing;
-    const pageWidthWorld = Z_WRAP_CONFIG.maxLineWidth * charAdvance;
-    const gapXWorld = PAGE_CONFIG.pageGapX * charAdvance;
-    const gapYWorld = PAGE_CONFIG.pageGapY * metrics.lineSpacing;
-
+export function applyPagination(positions, startIdx, endIdx, origin, geom) {
     for (let i = startIdx; i < endIdx; i++) {
         const relY = origin.y - positions[i * 3 + 1];  // distance below origin
-
-        if (relY < pageHeightWorld) continue;  // first page — no transform
-
-        const vPage = Math.floor(relY / pageHeightWorld);
-        const rowOffsetInPage = relY - vPage * pageHeightWorld;
-        const hSlot = vPage % PAGE_CONFIG.pagesWide;
-        const yRow = Math.floor(vPage / PAGE_CONFIG.pagesWide);
-
-        // Remap Y: position within page + shift down for page row
-        positions[i * 3 + 1] = origin.y - rowOffsetInPage
-            - yRow * (pageHeightWorld + gapYWorld);
-
-        // Fan pages horizontally
-        positions[i * 3] += hSlot * (pageWidthWorld + gapXWorld);
+        if (relY < geom.pageHeightWorld) continue;      // first page — no transform
+        const { shiftX, mappedRelY } = paginationShift(relY, geom);
+        positions[i * 3 + 1] = origin.y - mappedRelY;
+        positions[i * 3] += shiftX;
     }
 }
 
@@ -266,7 +294,11 @@ export function buildBatchBuffers(items, shared) {
             const totalYSpan = pos.y - itemMinY;
             const pageHeightWorld = PAGE_CONFIG.pageHeight * metrics.lineSpacing;
             if (totalYSpan > pageHeightWorld) {
-                applyPagination(positions, itemStartOffset, bufferOffset, pos, metrics);
+                // Column spacing = the ACTUAL widest-line extent (itemMaxX is still the
+                // pre-pagination max here, before the recompute below overwrites it), not
+                // maxLineWidth*charAdvance — fixes the fanned-column edge overlap.
+                const contentWidth = itemMaxX > pos.x ? itemMaxX - pos.x : 0;
+                applyPagination(positions, itemStartOffset, bufferOffset, pos, paginationGeometry(metrics, contentWidth));
                 // Recompute bounds
                 itemMinX = Infinity; itemMaxX = -Infinity;
                 itemMinY = Infinity; itemMaxY = -Infinity;
