@@ -23,7 +23,9 @@ import (
 type Relay struct {
 	mu           sync.RWMutex
 	display      *websocket.Conn
-	displayWrite chan []byte // serialized write queue for display WebSocket
+	displayWrite chan []byte    // control/JSON write queue (non-blocking, drop-OK — self-correcting)
+	displayBytes chan []byte    // terminal OUTPUT binary frames (blocking send = lossless backpressure)
+	displayDone  chan struct{}  // closed on display teardown — unblocks writer + blocked byte senders
 	controllers  map[string]*websocket.Conn
 	nextID       atomic.Int64
 	termSeq      atomic.Int64 // monotonic id source for relay-spawned terminal adapters
@@ -57,12 +59,59 @@ func (r *Relay) sendToDisplay(data []byte) {
 	}
 }
 
-// startDisplayWriter drains the write channel, serializing all writes to the display WebSocket.
-func (r *Relay) startDisplayWriter(ws *websocket.Conn, ch chan []byte) {
+// sendBytesToDisplay forwards a terminal OUTPUT binary frame to the display. Unlike
+// sendToDisplay this is a BLOCKING send — the byte stream must be lossless (a dropped
+// mid-stream chunk desyncs the parser and corrupts the screen). When the queue is
+// full the calling controller's read goroutine blocks here, which TCP-backpressures
+// that adapter → its PTY read pauses → the kernel buffer backpressures tmux. The
+// `done` select makes the block cancellable so display teardown can't deadlock a
+// controller (and so we never close displayBytes out from under a blocked sender).
+func (r *Relay) sendBytesToDisplay(data []byte) {
+	r.mu.RLock()
+	ch := r.displayBytes
+	done := r.displayDone
+	r.mu.RUnlock()
+	if ch == nil {
+		return // no display — drop (a controller shouldn't stream output without one)
+	}
+	select {
+	case ch <- data:
+	case <-done:
+	}
+}
+
+// startDisplayWriter serializes all writes to the one display WebSocket, draining two
+// queues with CONTROL PRIORITY: control/JSON (responses, FS-RPC, notifications) is
+// always flushed before bulk terminal bytes, so a flood of output never head-of-line
+// blocks interactive control traffic. Exits when the display tears down (`done`) or a
+// write fails. The data channels are never closed (abandoned to GC) so a controller
+// blocked in sendBytesToDisplay can't hit a send-on-closed panic.
+func (r *Relay) startDisplayWriter(ws *websocket.Conn, control, bytesCh chan []byte, done chan struct{}) {
 	go func() {
-		for data := range ch {
-			if err := ws.WriteMessage(websocket.TextMessage, data); err != nil {
-				log.Printf("[relay] display write error: %v", err)
+		for {
+			// Priority pass: drain all available control messages first.
+			select {
+			case data := <-control:
+				if err := ws.WriteMessage(websocket.TextMessage, data); err != nil {
+					log.Printf("[relay] display write error: %v", err)
+					return
+				}
+				continue
+			default:
+			}
+			// Nothing pending on control — block until either queue or teardown.
+			select {
+			case data := <-control:
+				if err := ws.WriteMessage(websocket.TextMessage, data); err != nil {
+					log.Printf("[relay] display write error: %v", err)
+					return
+				}
+			case data := <-bytesCh:
+				if err := ws.WriteMessage(websocket.BinaryMessage, data); err != nil {
+					log.Printf("[relay] display byte-write error: %v", err)
+					return
+				}
+			case <-done:
 				return
 			}
 		}
@@ -85,9 +134,18 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 	var clientID string
 
 	for {
-		_, msg, err := ws.ReadMessage()
+		msgType, msg, err := ws.ReadMessage()
 		if err != nil {
 			break
+		}
+		// Binary frames are the terminal OUTPUT data plane (adapter → display).
+		// Forward verbatim and losslessly; the frame self-describes its terminal id.
+		// Everything else is text/JSON control, handled below.
+		if msgType == websocket.BinaryMessage {
+			if role == "controller" {
+				r.sendBytesToDisplay(msg)
+			}
+			continue
 		}
 		raw := string(msg)
 
@@ -110,8 +168,12 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 					return
 				}
 				r.display = ws
-				ch := make(chan []byte, 64)
+				ch := make(chan []byte, 64)        // control/JSON
+				bytesCh := make(chan []byte, 256)  // terminal OUTPUT (deeper: ~16ms coalesced frames)
+				done := make(chan struct{})
 				r.displayWrite = ch
+				r.displayBytes = bytesCh
+				r.displayDone = done
 				role = "display"
 
 				// Collect controller IDs
@@ -122,7 +184,7 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 				r.mu.Unlock()
 
 				// Start the single writer goroutine for this display connection
-				r.startDisplayWriter(ws, ch)
+				r.startDisplayWriter(ws, ch, bytesCh, done)
 
 				log.Printf("[relay] display connected from %s", ws.RemoteAddr())
 				// Initial ack goes through the channel
@@ -281,11 +343,16 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 	if role == "display" {
 		r.mu.Lock()
 		r.display = nil
-		ch := r.displayWrite
+		done := r.displayDone
 		r.displayWrite = nil
+		r.displayBytes = nil
+		r.displayDone = nil
 		r.mu.Unlock()
-		if ch != nil {
-			close(ch)
+		// Close `done` (never sent on) to stop the writer and unblock any controller
+		// parked in sendBytesToDisplay. The data channels are left for GC, not closed,
+		// so a blocked sender can't panic on a closed channel.
+		if done != nil {
+			close(done)
 		}
 		log.Printf("[relay] display disconnected")
 	} else if role == "controller" && clientID != "" {

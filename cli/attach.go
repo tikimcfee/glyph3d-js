@@ -1,44 +1,38 @@
 package main
 
-// attach — live terminal adapter. Drives a tmux session and streams its
-// rendered screen into a glyph3d display as a 3D TerminalGrid.
+// attach — live terminal adapter. Drives a tmux session over a PTY and streams its
+// raw byte output into a glyph3d display as a 3D TerminalGrid (rendered browser-side
+// by a headless VT emulator). Input flows back as raw bytes to the PTY master.
 //
 //	glyph3d-cli attach [flags] <id> [-- <cmd...>]
 //
-// The adapter connects to the relay as a controller (reusing the standard
-// ping/OK/pong handshake), issues `terminal.create <id> <cols> <rows>` so the
-// browser display spawns a TerminalGrid (and records THIS controller as the
-// terminal's owner), then spawns the command inside a detached tmux session and
-// pumps `tmux capture-pane -p -e` snapshots back as `terminal.frame` commands at
-// a fixed rate.
-//
-// Why tmux: the renderer's parser (parseCapturePaneAnsi) is a STATELESS
-// full-screen snapshot consumer — it understands SGR color but discards all
-// cursor-motion / scroll / alt-screen sequences. A raw PTY byte stream would
-// render as garbage. tmux IS the terminal emulator; capture-pane -e gives us
-// exactly the final-screen-plus-SGR snapshot the parser was built for, and we
-// get session persistence and reconnect for free.
-//
-// This commit is display-only: it renders a live session on the canvas with NO
-// browser changes. Keystroke return (canvas → tmux send-keys) is a later commit.
+// The adapter connects to the relay as a controller (standard ping/OK/pong
+// handshake), issues `terminal.create <id> <cols> <rows>` so the browser spawns a
+// TerminalGrid (recording THIS controller as the terminal's owner), then attaches a
+// PTY to a tmux session and pumps its byte stream both ways. OUTPUT rides a binary
+// data-plane frame; INPUT rides the existing JSON push. The PTY + tmux work is
+// unix-only (attach_unix.go); attach_windows.go stubs it so the CGO_ENABLED=0
+// windows cross-compile stays green (terminals are a non-Windows feature).
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
 	"os"
-	"os/exec"
-	"os/signal"
-	"strconv"
 	"strings"
-	"sync"
-	"syscall"
-	"time"
-
-	"github.com/gorilla/websocket"
 )
+
+// terminalConfig is the parsed invocation, handed to the platform-specific
+// runTerminal (attach_unix.go / attach_windows.go).
+type terminalConfig struct {
+	url     string
+	id      string
+	session string
+	cols    int
+	rows    int
+	scale   float64
+	cmdArgs []string
+}
 
 // attachCmd is the entry point for `glyph3d-cli attach`.
 func attachCmd() {
@@ -47,19 +41,18 @@ func attachCmd() {
 	p := fs.Int("port", 0, "Shorthand: ws://localhost:<port>")
 	cols := fs.Int("cols", 80, "Terminal columns")
 	rows := fs.Int("rows", 24, "Terminal rows")
-	fps := fs.Float64("fps", 15, "Frame capture rate (Hz)")
 	scale := fs.Float64("scale", 2.0, "TerminalGrid size multiplier")
 
 	usage := func() {
 		fmt.Fprintln(os.Stderr, "usage: glyph3d-cli attach <id> [flags] [-- <cmd...>]")
-		fmt.Fprintln(os.Stderr, "  flags: --host --port --cols --rows --fps --scale")
+		fmt.Fprintln(os.Stderr, "  flags: --host --port --cols --rows --scale")
 		fmt.Fprintln(os.Stderr, "  e.g.:  glyph3d-cli attach t1 --cols 100 --rows 30 -- ssh host")
 	}
 
-	// Grammar: <id> [flags...] [-- <cmd...>]. The id comes first; flags may follow
-	// it; an explicit command goes after a bare "--" (or as trailing positionals).
-	// We pull the id out by hand and parse flags AFTER it — a plain
-	// flag.Parse(os.Args[2:]) would stop dead at <id> and silently drop every flag.
+	// Grammar: <id> [flags...] [-- <cmd...>]. The id comes first; flags may follow it;
+	// an explicit command goes after a bare "--" (or as trailing positionals). We pull
+	// the id out by hand and parse flags AFTER it — a plain flag.Parse(os.Args[2:])
+	// would stop dead at <id> and silently drop every flag.
 	raw := os.Args[2:]
 	if len(raw) < 1 || strings.HasPrefix(raw[0], "-") {
 		usage()
@@ -91,10 +84,8 @@ func attachCmd() {
 	}
 
 	if *cols < 1 || *rows < 1 {
-		log.Fatalf("attach: cols and rows must be positive")
-	}
-	if *fps <= 0 {
-		log.Fatalf("attach: fps must be positive")
+		fmt.Fprintln(os.Stderr, "attach: cols and rows must be positive")
+		os.Exit(2)
 	}
 
 	url := *wsURL
@@ -102,214 +93,15 @@ func attachCmd() {
 		url = fmt.Sprintf("ws://localhost:%d", *p)
 	}
 
-	// tmux session name, namespaced to us and sanitized (tmux dislikes . and :).
-	session := "glyph-" + sanitizeSession(id)
-
-	// --- Connect as a controller (handshake consumed inside connect) ---
-	conn, err := connect(url)
-	if err != nil {
-		log.Fatalf("attach: connect: %v", err)
-	}
-	defer conn.Close()
-
-	// One write goroutine's worth of safety: all sends go through this mutex so a
-	// future inbound-event handler can also write without racing the frame pump.
-	var sendMu sync.Mutex
-	send := func(cmd string) error {
-		sendMu.Lock()
-		defer sendMu.Unlock()
-		return conn.WriteMessage(websocket.TextMessage, []byte(cmd))
-	}
-
-	// --- Create the TerminalGrid in the display, synchronously confirm ---
-	createCmd := fmt.Sprintf("terminal.create %s %d %d --scale %g", id, *cols, *rows, *scale)
-	if err := send(createCmd); err != nil {
-		log.Fatalf("attach: send create: %v", err)
-	}
-	conn.SetReadDeadline(time.Now().Add(*timeout))
-	_, ackMsg, err := conn.ReadMessage()
-	conn.SetReadDeadline(time.Time{})
-	if err != nil {
-		log.Fatalf("attach: awaiting create ack: %v", err)
-	}
-	ack := decodeRelayText(ackMsg)
-	if strings.HasPrefix(ack, "ERR:") {
-		// Most common: no browser display connected yet. Fail loud and helpful.
-		log.Fatalf("attach: terminal.create failed: %s\n  (open the viewer in a browser first so there is a display to render into)", ack)
-	}
-	fmt.Fprintf(os.Stderr, "[attach] %s\n", ack)
-
-	// --- Spawn the command inside a fresh detached, sized tmux session ---
-	// Kill any stale session of the same (namespaced) name first — ignore errors.
-	exec.Command("tmux", "kill-session", "-t", session).Run()
-	newArgs := []string{"new-session", "-d", "-s", session, "-x", strconv.Itoa(*cols), "-y", strconv.Itoa(*rows)}
-	newArgs = append(newArgs, cmdArgs...)
-	newSess := exec.Command("tmux", newArgs...)
-	newSess.Stderr = os.Stderr
-	if err := newSess.Run(); err != nil {
-		log.Fatalf("attach: tmux new-session: %v", err)
-	}
-	fmt.Fprintf(os.Stderr, "[attach] tmux session '%s' running: %s\n", session, strings.Join(cmdArgs, " "))
-
-	// --- Lifecycle: signals, reader, frame pump all converge on `done` ---
-	done := make(chan struct{})
-	var closeOnce sync.Once
-	shutdown := func() { closeOnce.Do(func() { close(done) }) }
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sigCh
-		fmt.Fprintln(os.Stderr, "\n[attach] shutting down")
-		shutdown()
-	}()
-
-	// Re-adoption: a display reload wipes its terminal registry, so our frames
-	// start bouncing back as "ERR: no terminal <id>". Re-issue terminal.create so
-	// the fresh display rebuilds the grid (owner = us, so keystrokes still route);
-	// the frame pump then resumes into it. Cooldown so we don't spam create while
-	// the first one propagates. Only ever touched from the single reader goroutine.
-	var lastRecreate time.Time
-	recreate := func() {
-		if time.Since(lastRecreate) < 2*time.Second {
-			return
-		}
-		lastRecreate = time.Now()
-		fmt.Fprintln(os.Stderr, "[attach] display lost the terminal — re-creating")
-		if err := send(createCmd); err != nil {
-			log.Printf("[attach] re-create send failed: %v", err)
-		}
-	}
-
-	// Reader: drain everything the relay sends. Carries {event:"terminal.input"}
-	// keystroke pushes (→ tmux send-keys), shutdown signals, and command responses
-	// (including the "no terminal" miss that triggers re-adoption).
-	go func() {
-		for {
-			_, msg, err := conn.ReadMessage()
-			if err != nil {
-				shutdown()
-				return
-			}
-			handleInbound(msg, id, session, shutdown, recreate)
-		}
-	}()
-
-	// Frame pump: capture-pane on a fixed cadence, send on change OR every
-	// `keepalive` even when unchanged. The keepalive is what makes re-adoption
-	// work for an IDLE terminal: a reloaded display only learns it forgot us when
-	// a frame bounces back "ERR: no terminal", and a silent (unchanging) shell
-	// would otherwise never send one. ~2s costs a negligible redundant render and
-	// bounds re-adoption latency; it doubles as a liveness signal.
-	go func() {
-		ticker := time.NewTicker(time.Duration(float64(time.Second) / *fps))
-		defer ticker.Stop()
-		const keepalive = 2 * time.Second
-		var last string
-		var lastSent time.Time
-		for {
-			select {
-			case <-done:
-				return
-			case <-ticker.C:
-				out, err := capturePane(session)
-				if err != nil {
-					// Session gone (shell exited / killed) → end the adapter.
-					fmt.Fprintf(os.Stderr, "[attach] session ended: %v\n", err)
-					shutdown()
-					return
-				}
-				if out == last && time.Since(lastSent) < keepalive {
-					continue
-				}
-				last = out
-				lastSent = time.Now()
-				b64 := base64.StdEncoding.EncodeToString([]byte(out))
-				if err := send("terminal.frame " + id + " " + b64); err != nil {
-					shutdown()
-					return
-				}
-			}
-		}
-	}()
-
-	<-done
-
-	// Best-effort teardown: remove the grid from the display, kill the session.
-	conn.SetWriteDeadline(time.Now().Add(time.Second))
-	send("terminal.close " + id)
-	exec.Command("tmux", "kill-session", "-t", session).Run()
-}
-
-// capturePane returns the rendered screen of the tmux session as text with SGR
-// color escapes (-e) printed to stdout (-p). Errors when the session is gone.
-func capturePane(session string) (string, error) {
-	out, err := exec.Command("tmux", "capture-pane", "-p", "-e", "-t", session).Output()
-	if err != nil {
-		return "", err
-	}
-	return string(out), nil
-}
-
-// handleInbound dispatches a message the relay forwarded to this controller.
-// Two event kinds arrive on this channel (browser → grid.onInput / terminal.kill
-// → wsbridge.push → relay passthrough → here):
-//   - terminal.input: keystroke bytes → tmux send-keys, closing the input loop.
-//   - terminal.shutdown: the display (panel × via terminal.kill) asking us to
-//     close. We trigger the same graceful teardown as a SIGTERM — the frame pump
-//     stops and the deferred terminal.close + tmux kill-session run on exit.
-// Command responses also land here; an "ERR: no terminal <id>" reply means the
-// display reloaded and forgot us, so we re-adopt via recreate().
-func handleInbound(msg []byte, termID, session string, shutdown func(), recreate func()) {
-	var ev struct {
-		Event string `json:"event"`
-		Data  struct {
-			TerminalID string `json:"terminalId"`
-			Text       string `json:"text"`
-		} `json:"data"`
-	}
-	if json.Unmarshal(msg, &ev) == nil && ev.Event != "" {
-		// An event addressed to a different terminal is never ours (one adapter, one id).
-		if ev.Data.TerminalID != "" && ev.Data.TerminalID != termID {
-			return
-		}
-		switch ev.Event {
-		case "terminal.input":
-			if err := sendKeysToTmux(session, ev.Data.Text); err != nil {
-				log.Printf("[attach] send-keys: %v", err)
-			}
-		case "terminal.shutdown":
-			fmt.Fprintln(os.Stderr, "[attach] shutdown requested by display")
-			shutdown()
-		}
-		return
-	}
-	// Otherwise a command response or plain text. "no terminal" means the display
-	// forgot us (it reloaded) → re-adopt; other errors are just surfaced.
-	text := decodeRelayText(msg)
-	if strings.HasPrefix(text, "ERR:") {
-		if recreate != nil && strings.Contains(text, "no terminal") {
-			recreate()
-			return
-		}
-		log.Printf("[attach] %s", text)
-	}
-}
-
-// sendKeysToTmux injects raw bytes into the tmux session. Uses `send-keys -H`
-// (hex) so control bytes, escape sequences (arrows/Home/End), and UTF-8 all go
-// through verbatim without shell/keyname quoting ambiguity. Each byte of the
-// (already UTF-8) string becomes one space-separated hex token.
-func sendKeysToTmux(session, text string) error {
-	if text == "" {
-		return nil
-	}
-	args := make([]string, 0, 3+len(text))
-	args = append(args, "send-keys", "-t", session, "-H")
-	for i := 0; i < len(text); i++ {
-		args = append(args, fmt.Sprintf("%02x", text[i]))
-	}
-	return exec.Command("tmux", args...).Run()
+	runTerminal(terminalConfig{
+		url:     url,
+		id:      id,
+		session: "glyph-" + sanitizeSession(id),
+		cols:    *cols,
+		rows:    *rows,
+		scale:   *scale,
+		cmdArgs: cmdArgs,
+	})
 }
 
 // decodeRelayText extracts human-readable text from a relay message that may be
