@@ -140,8 +140,10 @@ shell activity.
 
 A *viewport* = a cols×rows cell window with a resize handle, screen anchor, and
 wheel-routed scroll. The **interaction shell is shared**; the **content backend is
-polymorphic** — emulator buffer (terminals) vs. file slice (code-grid windows).
-Terminals adopt it first; CodeGrid windowing joins in Phase 3.
+polymorphic** — emulator buffer (terminals), file slice (code-grid windows), or a
+**graphics surface** (a GUI app as cells via `chafa`/term.everything now,
+Kitty-Graphics-Protocol pixels later — Phase 3 #10). Terminals adopt it first;
+CodeGrid windowing and the graphics backend join in Phase 3.
 
 ## Interaction (#7 wheel-gate, #8 resize control)
 
@@ -212,6 +214,23 @@ channel). Do not ship the byte stream over the drop-on-full path as-is.
 8. `ghostty-web` evaluation (only if headless + cell-API verify).
 9. Share the viewport shell with **CodeGrid windowing** (#6): the source↔visible
    coordinate seam, edit-in-window, the LayoutDescription question.
+10. **Graphics-surface content backend** — the "terminal all the things" direction,
+    a new viewport backend kind in two tiers:
+    - *Free, Phase-1-compatible:* `mmulet/term.everything` is a Wayland/X11
+      compositor that converts any GUI app's window to ANSI cells via `chafa` — a
+      *producer* of the exact colored-cell stream our renderer already consumes. So
+      `term.everything <app>` inside a `glyphd` terminal renders that app as a live
+      3D glyph mosaic with **zero new protocol**. Caveats: constrain `chafa
+      --symbols` to glyphs the font actually shapes (verify U+2580–259F block-element
+      coverage); GUI mouse rides the SGR-mouse-reporting input path.
+    - *Full-res, needs work:* the **Kitty Graphics Protocol** — image at grid points,
+      composited as a texture over the cell rect in 3D. Conflicts with the tmux
+      mirror (tmux doesn't forward graphics APC; `@xterm/headless` doesn't parse it),
+      so it rides the raw-shell-PTY fork (#7) + a protocol-ingest pass +
+      per-cell-rect texture compositing. Reference: **`orhun/ratty`** (GPU terminal,
+      inline 3D + KGP). Underlying tech: `hpjansson/chafa`, `kovidgoyal/kitty`.
+    North Star: terminals + windows + command bus → **the local OS in 3D, commands
+    surfaced around the whole thing.**
 
 ## What changes / retires
 
