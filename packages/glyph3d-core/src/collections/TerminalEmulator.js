@@ -40,7 +40,9 @@ export default class TerminalEmulator {
 
         // scrollback 0: behind a tmux client we mirror the visible pane only (tmux owns
         // scrollback and repaints the full screen), so the active buffer == the viewport.
-        this._term = new Terminal({ cols, rows, scrollback: 0 });
+        // allowProposedApi: the buffer cell-reading API (getCode/getFgColor/isFgRGB/…)
+        // is gated behind it in xterm — our ScreenBuffer adapter lives on that API.
+        this._term = new Terminal({ cols, rows, scrollback: 0, allowProposedApi: true });
     }
 
     /**
