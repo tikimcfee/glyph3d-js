@@ -25,6 +25,11 @@ const DRAG_PX = 5; // pointer travel above this = a drag (orbit/pan), not a clic
 // box, instead of the two line-boxes merging into one.
 const HOVER_INFLATE = 3;
 
+// Resize floors — a terminal smaller than this is useless (and a SIGWINCH to 0
+// rows confuses the shell). Drags clamp the prospective size to these.
+const MIN_COLS = 8;
+const MIN_ROWS = 3;
+
 // Map a grid object (the token a 'grid'-channel pick resolves to) back to its
 // registry entry { id, type, grid }.
 function entryForGrid(registry, grid) {
@@ -87,12 +92,27 @@ export function CanvasPicker() {
     const { router } = client;
     const dom = gl.domElement;
 
+    // The one authority for "is this press on a resize grip?" — consulted by BOTH
+    // ResizeDragger.onDown and ViewerCameraController.mousedown (CommandProvider
+    // forwards it onto VCC's separate ctx) so the resize-vs-pan decision is identical
+    // on both sides. It gates the async-resolved handleHover on FRESHNESS: the cursor
+    // must still be within DRAG_PX of where the grip pick sampled, so a press never
+    // acts on a stale grip the cursor has already left.
+    const isGripPress = (clientX, clientY) => {
+      const hh = client.ctx.handleHover, at = client.ctx.handleHoverAt;
+      return !!(hh && at && Math.hypot(clientX - at.x, clientY - at.y) <= DRAG_PX);
+    };
+    client.ctx.isGripPress = isGripPress;
+
     const onMove = (e) => { s.x = e.clientX; s.y = e.clientY; s.in = true; };
     const onEnter = () => { s.in = true; };
     const onLeave = () => { s.in = false; };
     const onDown = (e) => { s.downX = e.clientX; s.downY = e.clientY; };
 
     const onUp = (e) => {
+      // A resize drag (ResizeDragger) owns this release — never treat its tiny
+      // sub-DRAG_PX nudges as a click that would re-select / refocus.
+      if (client.ctx.resizing) return;
       // Only a click if the pointer barely moved (else it was an orbit/pan/drag).
       if (Math.hypot(e.clientX - s.downX, e.clientY - s.downY) > DRAG_PX) return;
       // Act on exactly what's highlighted (the grid-channel hover result). The
@@ -121,6 +141,7 @@ export function CanvasPicker() {
       dom.removeEventListener('pointerleave', onLeave);
       dom.removeEventListener('pointerdown', onDown);
       dom.removeEventListener('pointerup', onUp);
+      if (client.ctx.isGripPress === isGripPress) client.ctx.isGripPress = null;
     };
   }, [client, gl, s]);
 
@@ -131,6 +152,10 @@ export function CanvasPicker() {
   // mis-hovered cascaded grids, and with no dead zones between glyphs.
   useFrame(() => {
     if (!client) return;
+    // A resize drag is in progress (ResizeDragger): it owns the cursor + the
+    // captured grip; pause hover picking so the two don't fight over the cursor
+    // and we don't pick against a panel that's about to change size.
+    if (client.ctx.resizing) return;
     const c = camera;
     const dom = gl.domElement;
 
@@ -143,6 +168,19 @@ export function CanvasPicker() {
       s.hoverId = id;
       client.router.execute(`attention.set hover ${id || 'none'}`);
       dom.style.cursor = id ? 'pointer' : 'default';
+    };
+
+    // Resolve the resize-grip pick into the shared ctx.handleHover flag + the
+    // pixel it was SAMPLED at (handleHoverAt). The cursor cue is set here; the
+    // press DECISION (resize vs. pan) is gated by ctx.isGripPress(), which checks
+    // freshness against that sample pixel. The pick is async (a GPU readback that
+    // lands a frame+ later), so the press must NOT trust a stale token — both the
+    // ResizeDragger and ViewerCameraController go through isGripPress. atX/atY are
+    // the cursor at pick-sample time (threaded in), not at resolve time.
+    const applyHandleHover = (token, atX, atY) => {
+      client.ctx.handleHover = token ?? null;
+      client.ctx.handleHoverAt = token ? { x: atX, y: atY } : null;
+      if (token) dom.style.cursor = 'nwse-resize';
     };
 
     const cursorMoved = s.x !== s.lx || s.y !== s.ly || s.in !== s.lin;
@@ -164,12 +202,12 @@ export function CanvasPicker() {
       // event fires then). One pick in flight at a time. useFrame runs before r3f's
       // main render, so the offscreen ID pass is safe here.
       const rect = dom.getBoundingClientRect();
-      ps.setMousePosition(s.x - rect.left, s.y - rect.top);
+      const sx = s.x, sy = s.y; // the pixel THIS pick samples — stamped onto handleHoverAt
+      ps.setMousePosition(sx - rect.left, sy - rect.top);
       if (camMoved) ps.markDirty();
       if (!s.pickPending && ps._needsPick) {
         s.pickPending = true;
         ps.pickAsync('grid', c, scene).then((hit) => {
-          s.pickPending = false;
           // Guard on s.in: a pick resolving AFTER the cursor left must clear hover.
           const entry = (s.in && hit) ? entryForGrid(client.ctx.registry, hit.token) : null;
           if (entry && !s.gpuOk) {
@@ -177,6 +215,18 @@ export function CanvasPicker() {
             console.log(`[CanvasPicker] grid picking confirmed → ${entry.id}`);
           }
           applyHover(entry);
+          // Second channel, SAME frame: the resize grips. markDirty() is
+          // MANDATORY — both passes share one _needsPick latch, so without it the
+          // handle pass no-ops and hands back the prior frame's hit. The grip
+          // stage swallows its own error so a handle-pass hiccup never clears a
+          // good grid hover (the outer catch is for grid-pass failures only).
+          ps.markDirty();
+          return ps.pickAsync('handle', c, scene).then(
+            (h) => applyHandleHover(s.in ? (h?.token ?? null) : null, sx, sy),
+            () => applyHandleHover(null),
+          );
+        }).then(() => {
+          s.pickPending = false;
         }).catch((err) => {
           s.pickPending = false;
           if (!s.gpuWarned) {
@@ -184,13 +234,15 @@ export function CanvasPicker() {
             console.warn('[CanvasPicker] grid pick failed', err);
           }
           applyHover(null);
+          applyHandleHover(null);
         });
       }
       return;
     }
 
-    // No picking system yet, or cursor outside the canvas → clear hover.
+    // No picking system yet, or cursor outside the canvas → clear hover + grip flag.
     applyHover(null);
+    applyHandleHover(null);
   });
 
   return null;
@@ -281,6 +333,143 @@ export function ObjectDragger() {
       dom.removeEventListener('pointerup', onUp);
     };
   }, [client, gl, camera]);
+
+  return null;
+}
+
+/**
+ * Terminal resize — a plain left-drag on a terminal's SE-corner grip RESIZES it.
+ * The grip is a pick target in the 'handle' channel; CanvasPicker's hover loop
+ * sets ctx.handleHover (+ the sampled pixel) while the cursor is over it and shows
+ * the nwse-resize cursor. The press DECISION (resize vs. pan) goes through the
+ * shared, freshness-gated ctx.isGripPress() that BOTH this and ViewerCameraController
+ * consult — so a grip press resizes (and the camera yields its pan) while a stale,
+ * async-lagged token never starts a resize on a grip the cursor has left.
+ *
+ * The drag is preview-only — a ghost Box3 shows the prospective size at integer
+ * cell steps and we never re-grid (rebuild buffers) per frame. On release we commit
+ * ONCE through terminal.resize, which moves grid + emulator + the adapter's PTY
+ * (pty.Setsize → SIGWINCH) in lockstep — identical to the CLI verb.
+ *
+ * The grip renders depthTest-off (an always-on-top overlay), so "the grip you see
+ * is the grip you grab" even when it sits over another terminal's panel.
+ */
+export function ResizeDragger() {
+  const { gl, camera, scene } = useThree();
+  const client = useAppCommands();
+
+  useEffect(() => {
+    if (!client) return;
+    const { ctx, router } = client;
+    const dom = gl.domElement;
+
+    // Preview box, mounted once. depthTest off + high renderOrder so it reads over
+    // the panel/glyphs and the selection outline — a live size hint.
+    const ghost = new THREE.Box3Helper(new THREE.Box3(), new THREE.Color(0x6ee7a0));
+    ghost.visible = false;
+    ghost.renderOrder = 10002;
+    if (ghost.material) ghost.material.depthTest = false;
+    scene.add(ghost);
+
+    let drag = null; // { grid, id, startCols, startRows, startBounds, startX, startY, newCols, newRows }
+
+    // Single teardown for EVERY way a drag can end. commit=true only on a clean
+    // pointerup; pointercancel / lostpointercapture end WITHOUT committing. Either
+    // way the shared flags reset, so an interrupted drag can never wedge the canvas
+    // (a stuck ctx.resizing kills hover picking + click-select until reload).
+    const endDrag = (e, commit) => {
+      if (!drag) return; // lostpointercapture also echoes after a normal up — ignore it
+      const { id, startCols, startRows, newCols, newRows } = drag;
+      drag = null;
+      ghost.visible = false;
+      dom.style.cursor = 'default';
+      ctx.handleHover = null;   // drop the cached grip; next press must re-establish via a fresh pick
+      ctx.handleHoverAt = null;
+      if (e?.pointerId != null) dom.releasePointerCapture?.(e.pointerId);
+      // Hold ctx.resizing across THIS event dispatch so CanvasPicker's onUp (same
+      // tick, listener-order-independent) skips its click-select; clear once drained.
+      queueMicrotask(() => { ctx.resizing = false; });
+      if (commit && (newCols !== startCols || newRows !== startRows)) {
+        router.execute(`terminal.resize ${id} ${newCols} ${newRows}`);
+        client.session?.scheduleSave?.();
+      }
+    };
+
+    const onDown = (e) => {
+      // Plain LMB on a grip. Ctrl/Cmd is the MOVE gesture (ObjectDragger owns it),
+      // so a modifier here is not a resize — bail and let that path run. The press
+      // authority is isGripPress() (freshness-gated), NOT the raw async hover flag.
+      if (e.button !== 0 || e.ctrlKey || e.metaKey) return;
+      if (!ctx.isGripPress?.(e.clientX, e.clientY)) return;
+      const grid = ctx.handleHover?.grid; // token = { grid, edge }; isGripPress ⇒ non-null
+      if (!grid) return;
+      const id = ctx.registry.getIdByGrid(grid);
+      if (!id) return;
+      drag = {
+        grid, id,
+        startCols: grid.cols, startRows: grid.rows,
+        startBounds: grid.getBounds().clone(),
+        startX: e.clientX, startY: e.clientY,
+        newCols: grid.cols, newRows: grid.rows,
+      };
+      ctx.resizing = true; // CanvasPicker pauses hover + skips click-select while set
+      dom.style.cursor = 'nwse-resize';
+      dom.setPointerCapture?.(e.pointerId);
+      e.preventDefault();
+    };
+
+    const onMove = (e) => {
+      if (!drag) return;
+      const dx = e.clientX - drag.startX;
+      const dy = e.clientY - drag.startY;
+      // Map the screen delta into the panel's fixed world axes through the camera's
+      // right/up basis (mirrors ObjectDragger) — so cols grow east / rows grow south
+      // correctly from ANY camera angle, not just head-on (the first-person mouselook
+      // can view a panel rotated; raw dx→cols/dy→rows would map to the wrong axis).
+      // Depth is probed at the panel CENTER (startBounds), not grid.position (the
+      // NW-ish cell origin), so a pixel of travel maps to the right cell count for
+      // large / close panels. cellStride is world-units/cell, gridScale included.
+      const q = camera.quaternion;
+      const fwd   = new THREE.Vector3(0, 0, -1).applyQuaternion(q);
+      const right = new THREE.Vector3(1, 0, 0).applyQuaternion(q);
+      const up    = new THREE.Vector3(0, 1, 0).applyQuaternion(q);
+      const center = drag.startBounds.getCenter(new THREE.Vector3());
+      const depth = Math.max(1, center.sub(camera.position).dot(fwd));
+      const pixelScale = (2 * depth * Math.tan((camera.fov * Math.PI / 180) / 2)) / dom.clientHeight;
+      const world = right.multiplyScalar(dx * pixelScale).add(up.multiplyScalar(-dy * pixelScale));
+      const stride = drag.grid.cellStride;
+      const newCols = Math.max(MIN_COLS, drag.startCols + Math.round(world.x / stride.x));
+      const newRows = Math.max(MIN_ROWS, drag.startRows + Math.round(-world.y / stride.y));
+      drag.newCols = newCols; drag.newRows = newRows;
+
+      // Ghost = the start panel with its SE corner pushed out, NW pinned — matches
+      // resize()'s own anchor (NW ~fixed, grows east/south), so no jump on commit.
+      const b = ghost.box.copy(drag.startBounds);
+      b.max.x = drag.startBounds.max.x + (newCols - drag.startCols) * stride.x;
+      b.min.y = drag.startBounds.min.y - (newRows - drag.startRows) * stride.y;
+      ghost.visible = true;
+    };
+
+    const onUp     = (e) => endDrag(e, true);  // clean release → commit the new size
+    const onCancel = (e) => endDrag(e, false); // gesture interrupted → reset, no commit
+
+    dom.addEventListener('pointerdown', onDown);
+    dom.addEventListener('pointermove', onMove);
+    dom.addEventListener('pointerup', onUp);
+    dom.addEventListener('pointercancel', onCancel);
+    dom.addEventListener('lostpointercapture', onCancel);
+    return () => {
+      dom.removeEventListener('pointerdown', onDown);
+      dom.removeEventListener('pointermove', onMove);
+      dom.removeEventListener('pointerup', onUp);
+      dom.removeEventListener('pointercancel', onCancel);
+      dom.removeEventListener('lostpointercapture', onCancel);
+      scene.remove(ghost);
+      ghost.geometry?.dispose?.();
+      ghost.material?.dispose?.();
+      if (drag) ctx.resizing = false; // unmounted mid-drag → never leave the shared flag stuck
+    };
+  }, [client, gl, camera, scene]);
 
   return null;
 }

@@ -5,7 +5,7 @@ import { useGlyphEngine, GlyphCanvas, ViewerCamera } from 'glyph3d-r3f';
 import CommandProvider from '../../app/client/CommandProvider.jsx';
 import ButtonBar from './ButtonBar.jsx';
 import IdeDock from './IdeDock.jsx';
-import { CanvasPicker, ObjectDragger, SelectionIndicator } from './CanvasInteraction.jsx';
+import { CanvasPicker, ObjectDragger, ResizeDragger, SelectionIndicator } from './CanvasInteraction.jsx';
 import fontUrl from '@glyph3d/core/fonts/Cousine-Regular.ttf?url';
 
 const setStatus = (t) => { const el = document.getElementById('status'); if (el) el.textContent = t; };
@@ -61,8 +61,12 @@ function App() {
                 cameraControllerRef={cameraRef}
                 onReady={setClient}
               >
+                {/* Imperative-scene interaction (the grids are Object3Ds, not r3f
+                    JSX): GPU-pick hover/click, Ctrl-drag move, grip-drag resize,
+                    selection outlines. See CanvasInteraction.jsx. */}
                 <CanvasPicker />
                 <ObjectDragger />
+                <ResizeDragger />
                 <SelectionIndicator />
               </CommandProvider>
             </GlyphCanvas>

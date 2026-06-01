@@ -183,31 +183,47 @@ in `setPickingSystem`, re-positioned + re-registered in `resize()`, disposed in
 `dispose()`. `TerminalGrid.cellStride` → `{x,y}` world-units/cell (gridScale included).
 Verified: the grip renders on a live terminal.
 
-**ResizeDragger — DESIGN (next to build; ~1 line VCC + ~70 in CanvasInteraction):**
-- **Camera-yield seam (the non-obvious bit):** VCC `mousedown` yields Ctrl-drag via
-  `if (e.button===0 && (e.ctrlKey||e.metaKey)) return;` (`ViewerCameraController.js` ~218).
-  Add `|| this.ctx?.handleHover` so the camera also yields the pan when the press lands on
-  a grip (resize is plain-LMB, which otherwise pans). `ctx.handleHover` is a shared flag
-  set by the hover loop, read like `ctrlKey`.
-- **Hover (extend `CanvasPicker`, the ONE pick owner — no shared-target race):** on a
-  pick frame, after the `grid` hover pick, `markDirty()` then `pickAsync('handle')` →
-  `ctx.handleHover = hit?.token ?? null` + cursor `nwse-resize`. (2 passes only on
-  move-frames.) The shared `_needsPick` flag is why the `markDirty()` between picks is
-  mandatory.
-- **Drag:** plain-LMB down while `ctx.handleHover` set → capture `{ grid, startCols,
-  startRows, startBounds: grid.getBounds().clone(), startX, startY }` + pointer capture.
-  Move → `pixelScale = (2*depth*tan(fov/2))/clientHeight` (depth = (gridPos−camPos)·fwd,
-  copy ObjectDragger); `Δcols = round(dx*pixelScale / cellStride.x)`,
-  `Δrows = round(dy*pixelScale / cellStride.y)`; clamp `newCols = max(MIN, startCols+Δcols)`.
-  Ghost = `startBounds` with SE pushed out (`max.x += Δcols*cellStride.x`,
-  `min.y -= Δrows*cellStride.y`) → a `Box3Helper` (depthTest off, high renderOrder). NO
-  re-gridding mid-drag.
-- **Release:** commit ONCE — `router.execute('terminal.resize <id> <newCols> <newRows>')`
-  (already drives grid.resize + emulator.resize + the PTY SIGWINCH push). Hide ghost,
-  clear state, release capture. CanvasPicker's click-select `onUp` must skip when a
-  resize was active.
-- Dev loop is smooth (core edits auto-reload via Vite→main.jsx page-reload); build-and-watch
-  via `apps/ide/console.log` + `/tmp/glyph3d/relay.log`. `:5173` = `apps/ide`.
+**ResizeDragger — BUILT** (`apps/ide/CanvasInteraction.jsx` `ResizeDragger` + `CanvasPicker`
+hover loop; `ViewerCameraController.js` mousedown; `app/client/CommandProvider.jsx` forward).
+Loads clean live; the grip-drag gesture itself awaits a hands-on pass. Shape:
+- **Hover (in `CanvasPicker`, the ONE pick owner):** after the `grid` hover pick,
+  `markDirty()` then `pickAsync('handle')` → `applyHandleHover(token, sampleX, sampleY)`
+  sets `ctx.handleHover` (+ `ctx.handleHoverAt` = the SAMPLED pixel) + the `nwse-resize`
+  cursor. `markDirty()` between the two picks is MANDATORY (one shared `_needsPick` latch).
+- **Press authority = `ctx.isGripPress(x,y)`** (NOT the raw async flag). It gates
+  `handleHover` on FRESHNESS — cursor still within `DRAG_PX` of `handleHoverAt` — so a
+  press never resizes a grip the cursor has already left. ONE predicate, consulted by
+  both `ResizeDragger.onDown` AND VCC mousedown.
+- **Drag:** plain-LMB while `isGripPress` → capture `{grid,id,startCols,startRows,
+  startBounds,startX,startY}` + pointer capture + `ctx.resizing=true`. Move maps the
+  screen delta through the camera right/up basis (NOT raw dx/dy — first-person camera can
+  view a panel rotated), depth probed at `startBounds` CENTER; `Δcols/Δrows` via
+  `cellStride`, clamped to `MIN_COLS/ROWS`. Ghost `Box3Helper` (NW pinned, SE pushed,
+  depthTest off); NO re-grid mid-drag.
+- **`endDrag(e, commit)`** is the single teardown for pointerup (commit) AND
+  pointercancel/lostpointercapture (no commit) AND unmount — resets `resizing`/
+  `handleHover`, so an interrupted drag can't wedge the canvas. Commit = ONE
+  `terminal.resize <id> <cols> <rows>` (drives grid + emulator + PTY SIGWINCH).
+  `CanvasPicker.onUp` + its hover useFrame both early-return while `ctx.resizing`.
+
+**Two gotchas this build surfaced (both load-bearing):**
+1. **VCC runs on its OWN `SceneContext`** (built in `ViewerCamera.jsx`), NOT the client
+   `ctx` the hover loop writes — only `attentionManager` was otherwise bridged across.
+   So a flag the picker sets on `client.ctx` is invisible to VCC. Fix: `CommandProvider`
+   forwards `isGripPress` onto the camera-controller ctx via a live getter
+   (`Object.defineProperty(cc.ctx, 'isGripPress', {get:()=>state.ctx.isGripPress})`),
+   next to the existing `attentionManager` share. The original "shared `handleHover` flag"
+   design was wrong on this point — verify cross-ctx assumptions.
+2. **Async pick vs sync gesture:** GPU pick is a fenced WebGPU readback (≥1 frame), the
+   press is synchronous. `isGripPress` freshness-gating closes every *wrong-target* case;
+   the residual is a blind fast-grab (press before the pick resolves) falling through to a
+   pan — the documented contract is "settle on the grip (the cursor confirms), then drag."
+   If that feel ever bites, the upgrade is a synchronous raycast against the grip meshes
+   (deliberately NOT done — collides with this repo's "GPU pick is the one hit-test" rule).
+- **Occlusion is by-design, not a bug:** the grip renders depthTest-off (always-on-top
+  overlay), so "the grip you see is the grip you grab" even over another terminal's panel.
+- Adversarial review (3 lenses × verify) drove the fixes above: stuck-`resizing`, the
+  async race + stale flag, camera-orientation math, center-depth. 4 findings were refuted.
 
 ## Transport (load-bearing) — DECIDED: binary lane, data/control plane split
 

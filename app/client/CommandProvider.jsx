@@ -188,7 +188,17 @@ export default function CommandProvider({ atlas, port = 8080, cameraControllerRe
     // into a terminal would also fly the camera. Analog of the vanilla
     // initCommandCenter wiring (viewer.sceneContext.attentionManager = ...).
     const cc = cameraControllerRef?.current;
-    if (cc?.ctx) cc.ctx.attentionManager = state.ctx.attentionManager;
+    if (cc?.ctx) {
+      cc.ctx.attentionManager = state.ctx.attentionManager;
+      // VCC runs on its OWN SceneContext (ViewerCamera.jsx), so the grip-press
+      // authority the canvas picker writes to the client ctx isn't visible to it
+      // by default. Forward it live (getter, not a copy) so VCC's mousedown yields
+      // a plain left-press on a resize grip — same verdict ResizeDragger uses.
+      Object.defineProperty(cc.ctx, 'isGripPress', {
+        configurable: true,
+        get: () => state.ctx.isGripPress ?? null,
+      });
+    }
 
     // Saved-state system: the server-side session store. Restore (open files +
     // camera + dock layout) runs once, on the first connect after this page

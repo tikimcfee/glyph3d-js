@@ -212,10 +212,15 @@ export class ViewerCameraController {
             if (e.button === 1) input.buttons.middle = true;
             if (e.button === 2) input.buttons.right = true;
 
-            // Ctrl/Cmd + left-drag is reserved for MOVING the object under the
-            // cursor (the r3f ObjectDragger owns it). Don't drive the camera, or
-            // the view would slide out from under the thing you're dragging.
-            if (e.button === 0 && (e.ctrlKey || e.metaKey)) {
+            // The camera yields a left-press to a direct-manipulation gesture, so
+            // the view never slides out from under what you're dragging:
+            //   • Ctrl/Cmd + left-drag MOVES the object under the cursor (ObjectDragger).
+            //   • A plain left-press on a resize grip RESIZES it (ResizeDragger).
+            // isGripPress() is the shared, freshness-gated authority both this and
+            // ResizeDragger consult (assigned onto this controller's ctx by the
+            // canvas picker — see CanvasInteraction.jsx), so the resize-vs-pan
+            // verdict is identical on both sides and never trusts a stale pick.
+            if (e.button === 0 && (e.ctrlKey || e.metaKey || this.ctx?.isGripPress?.(e.clientX, e.clientY))) {
                 input.drag.active = false;
                 return;
             }
