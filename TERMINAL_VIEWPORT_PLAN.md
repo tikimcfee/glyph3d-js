@@ -142,8 +142,8 @@ A *viewport* = a cols×rows cell window with a resize handle, screen anchor, and
 wheel-routed scroll. The **interaction shell is shared**; the **content backend is
 polymorphic** — emulator buffer (terminals), file slice (code-grid windows), or a
 **graphics surface** (a GUI app as cells via `chafa`/term.everything now,
-Kitty-Graphics-Protocol pixels later — Phase 3 #10). Terminals adopt it first;
-CodeGrid windowing and the graphics backend join in Phase 3.
+Kitty-Graphics-Protocol pixels later — see the Later kit). Terminals adopt it
+first; CodeGrid windowing and the graphics backend come later.
 
 ## Interaction (#7 wheel-gate, #8 resize control)
 
@@ -154,7 +154,7 @@ CodeGrid windowing and the graphics backend join in Phase 3.
   `attentionManager.get('key')` is a terminal entity, consume `wheel.dy` as a scroll
   command (one/frame) and `return` before the zoom/pan path (the listener keeps
   `preventDefault` so the page never scrolls). Mirrors the existing WASD focus gate.
-  (Focus slot: `key` for terminals; `primary` for code-grid windows in Phase 3.)
+  (Focus slot: `key` for terminals; `primary` for code-grid windows later.)
 - **#8 resize control — a new `handle` pick channel.** Add small corner/edge
   sub-meshes per viewport on a new `flat` channel (next free layer ≥9) of the
   multi-channel `PickingSystem` (`defineChannel`/`register` — same pattern the
@@ -173,43 +173,92 @@ CodeGrid windowing and the graphics backend join in Phase 3.
   tracks a grid" pattern), registered into the `handle` channel — `entityInputRouter`
   is **null** in the r3f client, so GPU picking is the only hit-test there.
 
-## Transport (load-bearing)
+## Transport (load-bearing) — DECIDED: binary lane, data/control plane split
 
-The relay is a **text-only JSON-envelope router** (`relay.go` writes only
-`websocket.TextMessage`; `WebSocketBridge` does `JSON.parse` and drops non-JSON).
-**Reuse the roster / owner-routing / re-adoption machinery unchanged** — only the
-payload semantics change (append-bytes chunks replace full-screen snapshots),
-carried as `terminal.bytes <id> <base64>` inside the existing envelope (today's
-`terminal.frame <id> <b64>` already base64s a snapshot — same shape).
+After a pattern audit (control mode vs raw-attach; ttyd/AttachAddon conventions),
+the transport is **a binary WS lane**, not base64-in-text — base64 is a ~33% tax on
+the hottest path and the de-facto tools (ttyd, xterm.js AttachAddon) send raw bytes.
+"One and best way": a clean **data-plane / control-plane split**, no compat path.
 
-But: `sendToDisplay` uses `make(chan []byte, 64)` and **drops on a full queue**.
-That was safe for snapshots (a dropped frame self-corrects next frame); it is **not
-safe for a VT byte stream** — a dropped mid-stream chunk desyncs the parser and
-corrupts the screen with no guaranteed near-term repaint. Required: **(a) coalesce
-PTY output into ~16 ms batches** to bound message rate, and **(b) make the terminal
-byte path lossless** (block/backpressure rather than drop, or a dedicated binary WS
-channel). Do not ship the byte stream over the drop-on-full path as-is.
+**Control plane — JSON commands through the router (mechanism unchanged):**
+`terminal.spawn/create/close/kill/focus/list/move/scale`, and `terminal.resize`
+(low-rate; reuses the existing display→controller `push` path). These manipulate
+grid lifecycle + scene, not byte streams.
 
-## Migration order
+**Data plane — the bytes:**
+- **OUTPUT (adapter→display, the hot stream): binary frame.**
+  `[type:u8=OUTPUT][idLen:u8][id:utf8][raw VT bytes]`. Coalesced ~16 ms in the
+  adapter. The relay forwards controller→display binary frames verbatim (the frame
+  self-describes via `id`; the display is singular so no routing lookup).
+- **INPUT (display→adapter, sparse keystrokes): existing JSON `push`.**
+  `push(owner, {event:'terminal.bytes', data:{terminalId, b64}})` → adapter decodes
+  → writes PTY master. Base64 tax is nil on keystrokes, and it reuses owner-routing
+  that already works — binary here would buy nothing. (Retires `terminal.input`'s
+  `data.text` + the `send-keys -H` hex path.) Binary where it pays, the existing
+  path where it doesn't — *not* two ways to do one thing.
 
-**Phase 1 — relay byte-pipe + emulator (the use case):**
-1. `attach.go`: add `creack/pty`; replace the `capture-pane` pump with a PTY running
-   `tmux -L glyphd attach`; create-or-adopt guard + status-off + keymap-neutralize;
-   coalesced `terminal.bytes` out, raw bytes in; `terminal.resize` → `pty.Setsize`
-   (SIGWINCH only); add the decoupled liveness ping.
-2. Relay: make the terminal byte path lossless (coalesce + no-drop / binary channel).
-3. Browser: wire `@xterm/headless`; `terminal.bytes` → `term.write`; the
-   `emulatorScreen → ScreenBuffer` adapter (color-mode/width/bold) feeding
-   `TerminalGrid.applyScreen`; route keystrokes → `terminal.bytes`.
+**Losslessness + backpressure (the subtle part).** `sendToDisplay` today uses
+`make(chan []byte, 64)` and **drops on full** — safe for self-correcting snapshots,
+fatal for a VT stream (one dropped chunk desyncs the parser). And the channel is
+**shared** (FS-RPC, livereload, command responses), so blocking it head-of-line
+stalls *everything*. Therefore:
+- Split the display writer into **two channels**: the existing `displayWrite`
+  (control/JSON, non-blocking drop-OK — self-correcting, rare) and a new
+  **`displayBytes`** (binary OUTPUT frames). One writer goroutine drains both with
+  **control-priority** (a priority `select`: control first, else either).
+- `displayBytes` forwarding is a **blocking send** → lossless. When full, the
+  *controller's own goroutine* blocks → TCP backpressure to that adapter → adapter's
+  output goroutine blocks → its PTY read pauses → kernel PTY buffer backpressures
+  tmux/shell. Control traffic is never blocked (separate channel). No drop, no HOL.
+- **Adapter MUST use separate output and input goroutines** — else a blocked
+  output-write would also stall input processing (deadlock). Output goroutine:
+  PTY→coalesce→WS binary. Input goroutine: WS→PTY master.
+- Per-terminal byte channels (so a flooding terminal A doesn't throttle B) and
+  explicit ttyd/tmux-style **PAUSE/RESUME** verbs (proactive, vs relying on TCP
+  buffer) are **later refinements** — blocking-send + TCP backpressure is lossless
+  on its own for the typical one-active-terminal case.
+
+**Browser receive:** `socket.binaryType='arraybuffer'`; `_handleMessage` branches on
+`ArrayBuffer` → parse the OUTPUT frame → `emulator.write(payload)`. JSON path
+unchanged for everything else.
+
+## Build — one coherent push, dependency-ordered (not gated phases)
+
+The whole terminal viewport is one piece of work; the only real ordering is
+*dependency* — the interaction can't drive a byte-pipe that doesn't exist yet, so the
+pipe lands first. It is not a sequence of gated phases with acceptance ceremonies.
+
+**The pipe (steps 1–2 DONE — commit `ed9d866`; step 3 in progress):**
+1. **Relay binary lane** (`relay.go`): add the `displayBytes` channel + control-
+   priority two-channel writer; forward controller→display binary frames (blocking
+   send = lossless). Capture `ReadMessage` type; `BinaryMessage` from a controller →
+   `displayBytes`. Control/JSON path unchanged.
+2. **`attach.go` rewrite** (+ `attach_unix.go`/`attach_windows.go` build-tag split;
+   `go get creack/pty`): create-or-adopt guard (`has-session` → `new-session -d`, NOT
+   `new -A -d`, NOT kill-first) + `status off` + `window-size latest` + keymap-
+   neutralize (`prefix None` + `unbind -a -T {prefix,root,copy-mode,copy-mode-vi}`,
+   `// PHASE 3: tmux -CC deletes this`); `pty.Start(tmux -L glyphd attach)` with
+   `TERM=xterm-256color`. **Two goroutines**: output (PTY→coalesce ~16 ms→WS binary
+   OUTPUT frame), input (WS `terminal.bytes` event→PTY master). `terminal.resize`
+   event → `pty.Setsize` (SIGWINCH only). Decoupled liveness ping (`terminal.ping`)
+   so idle-shell re-adopt fires. Windows stub errors (keeps `CGO_ENABLED=0` green).
+3. **Browser** (`bun add @xterm/headless` in `apps/ide`): `WebSocketBridge`
+   `binaryType='arraybuffer'` + OUTPUT-frame parse → `emulator.write`. `terminal.create`
+   spins up the `@xterm/headless` Terminal + a throttled `buffer.active → ScreenBuffer`
+   pump (the color-mode/width/bold adapter) → `TerminalGrid.applyScreen`. Keystrokes:
+   `onInput(bytes)` → `push(owner, {event:'terminal.bytes', data:{terminalId, b64}})`.
+   Lift palette tables to a shared module; retire `terminal.frame`/`terminal.input`/
+   `parseCapturePaneAnsi`/`parseCapturePanePlain`/`grid.write`.
 4. **Acceptance: spawn a terminal, resize it large, run a program that fills it,
    type in it — all correct end-to-end; reload re-adopts.**
 
-**Phase 2 — interaction:**
+**The interaction it rides (same push, once the pipe works):**
 5. #7 wheel-gate in `_applyWheel` → scroll the focused terminal (tmux copy-mode cmds).
 6. #8 resize handle: `handle` pick channel + cell-stride helper + drag→snap + ghost
    preview + commit-once-on-release; persist viewport size in SessionStore.
 
-**Phase 3 — extend / polish (by need):**
+## Later — pull from this only when a need actually shows up (a kit, not a roadmap)
+
 7. Emulator-owned smooth scrollback (raw shell PTY + server history ring + replay).
 8. `ghostty-web` evaluation (only if headless + cell-API verify).
 9. Share the viewport shell with **CodeGrid windowing** (#6): the source↔visible
@@ -231,6 +280,16 @@ channel). Do not ship the byte stream over the drop-on-full path as-is.
       inline 3D + KGP). Underlying tech: `hpjansson/chafa`, `kovidgoyal/kitty`.
     North Star: terminals + windows + command bus → **the local OS in 3D, commands
     surfaced around the whole thing.**
+11. **tmux control mode (`tmux -CC`)** — the multiplexing graduation (pattern audit,
+    2026-06-01). It does NOT fix alt-screen/scrollback (tmux still owns the grid; you
+    still need the emulator to interpret `%output`) and adds a `%begin/%end/%output`-
+    unescape parser + pane/layout bookkeeping — wrong for Phase 1. But it **deletes
+    the keymap-neutralization hack entirely** (a control client has no keymap to
+    lobotomize) and is the correct substrate once we want **multiple panes/splits per
+    session**. When the `prefix None`/`unbind -a -T` workaround gets flaky or
+    multi-pane is needed, graduate: PTY runs `tmux -L glyphd -CC attach`, `id` becomes
+    pane-scoped, the OUTPUT frame carries unescaped `%output` per pane. Ref:
+    `atomicstack/gotmuxcc` (read its parser; likely write our own ~150 lines).
 
 ## What changes / retires
 
