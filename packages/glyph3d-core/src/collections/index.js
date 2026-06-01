@@ -10,4 +10,4 @@ export { default as TreemapLayoutManager } from './TreemapLayoutManager.js';
 export { default as StackLayoutManager } from './StackLayoutManager.js';
 export { default as GridVirtualizer } from './GridVirtualizer.js';
 export { default as TerminalGrid } from './TerminalGrid.js';
-export { parseCapturePaneAnsi, parseCapturePanePlain } from './TerminalCapture.js';
+export { default as TerminalEmulator } from './TerminalEmulator.js';

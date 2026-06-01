@@ -1,33 +1,25 @@
 /**
- * Terminal commands: terminal.spawn, terminal.create, terminal.frame,
- * terminal.resize, terminal.close, terminal.kill, terminal.focus,
- * terminal.list, terminal.move, terminal.scale, terminal.input
+ * Terminal commands — the CONTROL plane for terminal viewports. The byte DATA plane
+ * is separate: OUTPUT arrives as binary frames (WebSocketBridge.onBinaryFrame →
+ * grid.writeBytes → the headless VT emulator); INPUT leaves via grid.onInput → a
+ * terminal.bytes push to the owning adapter. These verbs manage lifecycle + layout.
  *
- * These commands render fixed-size terminal cell grids via TerminalGrid,
- * which bypasses the GlyphCollection deferred queue and writes directly
- * to GPU attribute arrays.
- *
- * Wire protocol:
+ * Control verbs:
  *   terminal.spawn  [cols] [rows]            (ask relay to fork an adapter)
  *   terminal.create <id> [cols] [rows] [--scale N]
- *   terminal.frame  <id> <base64-content>
- *   terminal.resize <id> <cols> <rows>
+ *   terminal.resize <id> <cols> <rows>       (grid + emulator + adapter PTY in lockstep)
+ *   terminal.ping   <id>                     (liveness probe → re-adopt trigger)
  *   terminal.close  <id>                     (dispose display grid only)
  *   terminal.kill   <id>                     (full teardown: shell + tmux + grid)
  *   terminal.focus  <id>                     (attention primary + key)
- *   terminal.list
- *   terminal.move   <id> <x> <y> <z>
- *   terminal.scale  <id> <factor>
- *   terminal.input  <id> <base64-text>
+ *   terminal.list · terminal.move <id> <x> <y> <z> · terminal.scale <id> <factor>
  *
- * Content in terminal.frame is base64-encoded raw terminal output.
- * For Tier 1 bridges (capture-pane -p): plain text.
- * For Tier 2 bridges (capture-pane -p -e): text with ANSI SGR sequences.
- * TerminalGrid.write() handles both transparently via parseCapturePaneAnsi().
+ * Grids render fixed-size cell grids via TerminalGrid, writing directly to GPU
+ * attribute arrays (no GlyphCollection deferred queue).
  */
 
 import TerminalGrid from '@glyph3d/core/collections/TerminalGrid.js';
-import { decodeBase64, encodeBase64 } from '@glyph3d/core/utils/encoding.js';
+import { encodeBase64 } from '@glyph3d/core/utils/encoding.js';
 
 /**
  * Lazily initialise the terminal registry map on ctx.
@@ -122,10 +114,13 @@ export default function registerTerminalCommands(router) {
             // route input back to the owning controller via push().
             const owner = ctx.sender || null;
             if (owner && ctx.wsbridge && ctx.wsbridge.connected) {
-                grid.onInput = (text, termId) => {
+                // INPUT data plane: raw ANSI bytes (from EntityKeystrokeRouter) → the
+                // owning adapter's PTY. base64 in a JSON push — keystrokes are sparse,
+                // so the binary lane is reserved for the high-volume OUTPUT direction.
+                grid.onInput = (bytes, termId) => {
                     ctx.wsbridge.push(owner, {
-                        event: 'terminal.input',
-                        data: { terminalId: termId, text },
+                        event: 'terminal.bytes',
+                        data: { terminalId: termId, b64: encodeBase64(bytes) },
                     });
                 };
             }
@@ -150,39 +145,22 @@ export default function registerTerminalCommands(router) {
     }, { description: 'Create a terminal grid', usage: '<id> [cols] [rows] [--scale N]' });
 
     // ------------------------------------------------------------------
-    // terminal.frame <id> <base64-content>
+    // terminal.ping <id>
+    //   Liveness probe, DECOUPLED from output. The adapter pings periodically; an
+    //   "ERR: no terminal" reply (after a display reload wiped the registry) is what
+    //   triggers the adapter to re-create the grid. Output can't be the re-adopt
+    //   trigger — an idle shell emits no OUTPUT frames at all.
     // ------------------------------------------------------------------
-    router.register('terminal.frame', (args, ctx) => {
-        if (args.length < 2) {
-            return { text: 'ERR: usage: terminal.frame <id> <base64-content>', data: null };
-        }
-
+    router.register('terminal.ping', (args, ctx) => {
         const id = args[0];
-        const terminals = getTerminals(ctx);
-        const grid = terminals.get(id);
-        if (!grid) {
+        if (!id) {
+            return { text: 'ERR: usage: terminal.ping <id>', data: null };
+        }
+        if (!getTerminals(ctx).has(id)) {
             return { text: `ERR: no terminal '${id}'`, data: null };
         }
-
-        let text;
-        try {
-            text = decodeBase64(args[1]);
-        } catch {
-            return { text: 'ERR: invalid base64', data: null };
-        }
-
-        try {
-            // write() calls parseCapturePaneAnsi() then applyScreen() internally.
-            // Handles both plain text (Tier 1) and ANSI-colored text (Tier 2).
-            grid.write(text);
-            return {
-                text: `OK: terminal '${id}' frame applied (${grid.cols}x${grid.rows})`,
-                data: { id, cols: grid.cols, rows: grid.rows },
-            };
-        } catch (e) {
-            return { text: `ERR: ${e.message}`, data: null };
-        }
-    }, { description: 'Send a terminal frame (base64-encoded output)', usage: '<id> <base64-content>' });
+        return { text: 'OK', data: { id, alive: true } };
+    }, { description: 'Liveness probe — OK if the terminal grid exists', usage: '<id>' });
 
     // ------------------------------------------------------------------
     // terminal.resize <id> <cols> <rows>
@@ -210,6 +188,14 @@ export default function registerTerminalCommands(router) {
         if (info) {
             info.cols = cols;
             info.rows = rows;
+        }
+
+        // Tell the owning adapter so it resizes the REAL PTY (pty.Setsize → SIGWINCH →
+        // tmux). Without this the shell keeps its old winsize and reflow breaks — the
+        // grid/emulator would be the only things that resized.
+        const owner = info?.meta?.owner;
+        if (owner && ctx.wsbridge?.connected) {
+            ctx.wsbridge.push(owner, { event: 'terminal.resize', data: { terminalId: id, cols, rows } });
         }
 
         return {
@@ -317,41 +303,6 @@ export default function registerTerminalCommands(router) {
             data: { id, scale: factor },
         };
     }, { description: 'Set the scale of a terminal grid', usage: '<id> <factor>' });
-
-    // ------------------------------------------------------------------
-    // terminal.input <id> <base64-text>
-    // ------------------------------------------------------------------
-    router.register('terminal.input', (args, ctx) => {
-        if (args.length < 2) {
-            return { text: 'ERR: usage: terminal.input <id> <base64-text>', data: null };
-        }
-
-        const id = args[0];
-        const grid = getTerminals(ctx).get(id);
-        if (!grid) {
-            return { text: `ERR: no terminal '${id}'`, data: null };
-        }
-
-        let text;
-        try {
-            text = decodeBase64(args[1]);
-        } catch {
-            return { text: 'ERR: invalid base64 payload', data: null };
-        }
-
-        if (typeof grid.onInput === 'function') {
-            grid.onInput(text, id);
-            return {
-                text: `OK: sent ${text.length} chars to '${id}'`,
-                data: { id, length: text.length },
-            };
-        }
-
-        return {
-            text: `WARN: terminal '${id}' has no input handler`,
-            data: { id, dropped: true },
-        };
-    }, { description: 'Send input to a terminal (base64-encoded)', usage: '<id> <base64-text>' });
 
     // ------------------------------------------------------------------
     // terminal.kill <id>

@@ -67,6 +67,10 @@ export default class WebSocketBridge {
         // racing a not-yet-open socket (the relay restarts often in dev).
         this._connectionListeners = new Set();
 
+        // Binary data-plane frame demux: type byte → handler(id, payload). The bridge
+        // is transport-only — byte/terminal semantics register here (terminal OUTPUT).
+        this._binaryHandlers = new Map();
+
         if (options.autoConnect !== false) {
             this.connect();
         }
@@ -211,6 +215,32 @@ export default class WebSocketBridge {
      */
     setRpcNotificationHandler(fn) {
         this._rpcNotificationHandler = fn;
+    }
+
+    /**
+     * Register a handler for binary data-plane frames of a given type byte. Wire
+     * frame: [type:u8][idLen:u8][id:utf8][payload]; the handler receives
+     * (id, payload:Uint8Array). Used for the terminal OUTPUT byte stream.
+     * @param {number} type
+     * @param {(id: string, payload: Uint8Array) => void} fn
+     * @returns {() => void} unsubscribe
+     */
+    onBinaryFrame(type, fn) {
+        this._binaryHandlers.set(type, fn);
+        return () => this._binaryHandlers.delete(type);
+    }
+
+    /** @private — parse a binary frame and dispatch to its type handler. */
+    _handleBinary(buf) {
+        const view = new Uint8Array(buf);
+        if (view.length < 2) return;
+        const type = view[0];
+        const idLen = view[1];
+        if (view.length < 2 + idLen) return;
+        const id = new TextDecoder().decode(view.subarray(2, 2 + idLen));
+        const payload = view.subarray(2 + idLen);
+        const handler = this._binaryHandlers.get(type);
+        if (handler) handler(id, payload);
     }
 
     // ============ LAN Detection ============
@@ -362,6 +392,7 @@ export default class WebSocketBridge {
 
         try {
             this.ws = new WebSocket(this.url);
+            this.ws.binaryType = 'arraybuffer'; // terminal OUTPUT frames arrive as ArrayBuffer
         } catch (err) {
             console.warn(`[ws-bridge] failed to create WebSocket: ${err.message}`);
             this._scheduleReconnect();
@@ -421,6 +452,12 @@ export default class WebSocketBridge {
      * @private
      */
     async _handleMessage(raw) {
+        // Binary frames are the terminal OUTPUT data plane — demux by type byte and
+        // return before the JSON path (JSON.parse on an ArrayBuffer would throw).
+        if (raw instanceof ArrayBuffer) {
+            this._handleBinary(raw);
+            return;
+        }
         let envelope;
         try {
             envelope = JSON.parse(raw);

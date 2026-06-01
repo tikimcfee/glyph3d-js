@@ -46,5 +46,8 @@
   "license": "MIT",
   "peerDependencies": {
     "three": ">=0.150.0"
+  },
+  "dependencies": {
+    "@xterm/headless": "^6.0.0"
   }
 }

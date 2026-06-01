@@ -24,7 +24,7 @@
 
 import * as THREE from 'three';
 import GlyphField from '../GlyphField.js';
-import { parseCapturePaneAnsi } from './TerminalCapture.js';
+import TerminalEmulator from './TerminalEmulator.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import MonospaceShapeCache from '../shaping/MonospaceShapeCache.js';
 
@@ -145,6 +145,11 @@ export default class TerminalGrid extends THREE.Object3D {
         if (options.position) {
             this.setWorldPosition(options.position);
         }
+
+        // Byte→screen source: a headless VT emulator parses the terminal byte stream
+        // and drives applyScreen. TerminalGrid stays a pure cell renderer; the
+        // emulator is one source feeding it (file-slice / graphics are others, later).
+        this._emulator = new TerminalEmulator(this.cols, this.rows, (screen) => this.applyScreen(screen));
     }
 
     // ================================================================
@@ -154,7 +159,7 @@ export default class TerminalGrid extends THREE.Object3D {
     /**
      * Accept a ScreenBuffer and update the GPU instance arrays.
      *
-     * ScreenBuffer contract (from TerminalCapture.js):
+     * ScreenBuffer contract (produced by TerminalEmulator's cell adapter):
      *   { cols: number, rows: number,
      *     cells: Array<Array<{ codepoint: number, fg: {r,g,b}, bold: boolean }>> }
      *
@@ -195,7 +200,7 @@ export default class TerminalGrid extends THREE.Object3D {
                     continue;
                 }
 
-                // TerminalCapture cells use .codepoint (number) directly.
+                // Emulator/source cells carry .codepoint (number) directly.
                 cp[idx] = cell.codepoint ?? 32;
 
                 const fg = cell.fg ?? { r: 0.8, g: 0.8, b: 0.8 };
@@ -217,18 +222,14 @@ export default class TerminalGrid extends THREE.Object3D {
     }
 
     /**
-     * Convenience method: decode raw terminal text (optionally with ANSI SGR sequences),
-     * build a ScreenBuffer, and call applyScreen().
+     * Feed raw VT bytes from the terminal byte stream. The internal headless VT
+     * emulator parses them (cursor motion, scroll regions, erase, SGR, …) and drives
+     * applyScreen on the next frame. Replaces the retired snapshot write(text).
      *
-     * This is the primary path for terminal.frame command handlers.
-     * Internally calls parseCapturePaneAnsi(), which handles both plain text
-     * and text with embedded \x1b[...m sequences.
-     *
-     * @param {string} text - Raw terminal output (may contain ANSI SGR sequences)
+     * @param {Uint8Array|string} payload - raw terminal output bytes
      */
-    write(text) {
-        const screen = parseCapturePaneAnsi(text, this.cols, this.rows);
-        this.applyScreen(screen);
+    writeBytes(payload) {
+        this._emulator.write(payload);
     }
 
     /**
@@ -363,6 +364,10 @@ export default class TerminalGrid extends THREE.Object3D {
         if (this._pickingSystem) {
             this._pickingSystem.register('glyph', this._renderer, this._renderer);
         }
+
+        // Keep the byte→screen emulator in lockstep — its next screen reflects the
+        // new dimensions. (Pairs with the adapter's pty.Setsize for full agreement.)
+        this._emulator?.resize(cols, rows);
     }
 
     /**
@@ -370,6 +375,12 @@ export default class TerminalGrid extends THREE.Object3D {
      * Call this when the terminal is permanently closed.
      */
     dispose() {
+        // Tear down the emulator first (cancels its pending rAF read so it can't
+        // call applyScreen on a half-disposed renderer).
+        if (this._emulator) {
+            this._emulator.dispose();
+            this._emulator = null;
+        }
         // Leave both picking channels cleanly before tearing down the renderer +
         // panel, or the passes would swap materials onto a disposed mesh.
         if (this._pickingSystem) {

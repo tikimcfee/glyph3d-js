@@ -21,7 +21,7 @@ export { default as TreemapLayoutManager } from './collections/TreemapLayoutMana
 export { default as StackLayoutManager } from './collections/StackLayoutManager.js';
 export { default as GridVirtualizer } from './collections/GridVirtualizer.js';
 export { default as TerminalGrid } from './collections/TerminalGrid.js';
-export { parseCapturePaneAnsi, parseCapturePanePlain } from './collections/TerminalCapture.js';
+export { default as TerminalEmulator } from './collections/TerminalEmulator.js';
 
 // Worker system
 export { WorkerBridge, getWorkerBridge, isWorkersSupported } from './workers/WorkerBridge.js';

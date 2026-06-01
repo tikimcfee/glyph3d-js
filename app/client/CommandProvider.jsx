@@ -160,6 +160,14 @@ export default function CommandProvider({ atlas, port = 8080, cameraControllerRe
       showStatus: false,
     });
     state.ctx.wsbridge = bridge;
+
+    // Terminal OUTPUT data plane: binary frames (type 1) carry raw VT bytes → the
+    // terminal's emulator (grid.writeBytes). The bridge demuxes by type byte; terminal
+    // semantics live here, keyed by the id the adapter stamped into the frame.
+    bridge.onBinaryFrame(1, (id, bytes) => {
+      state.ctx.terminals?.get(id)?.writeBytes?.(bytes);
+    });
+
     state.ctx.fileProvider = new RemoteFileSystemProvider(bridge);
     state.bridge = bridge;
     bridge.connect(url);
