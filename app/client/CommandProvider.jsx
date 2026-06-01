@@ -187,16 +187,37 @@ export default function CommandProvider({ atlas, port = 8080, cameraControllerRe
     // keydown gate bails while an entity holds key focus — otherwise typing 'w'
     // into a terminal would also fly the camera. Analog of the vanilla
     // initCommandCenter wiring (viewer.sceneContext.attentionManager = ...).
+    // Wheel-gate: when a terminal holds key focus, the mouse wheel scrolls ITS
+    // (tmux-owned) scrollback instead of moving the camera. VCC calls this in its
+    // per-frame wheel drain; it returns true when it consumed the wheel. ~30px ≈ one
+    // line, min one line in the wheel direction. wheel up (dy<0) → +lines = back into
+    // history; the adapter drives tmux copy-mode and the repaint streams back.
+    state.ctx.tryScrollFocusedTerminal = (dy) => {
+      if (!dy) return false;
+      const key = state.ctx.attentionManager?.get('key');
+      const entry = key?.id ? state.registry.get(key.id) : null;
+      if (entry?.type !== 'terminal') return false;
+      let lines = -Math.round(dy / 30);
+      if (lines === 0) lines = dy > 0 ? -1 : 1;
+      state.router.execute(`terminal.scroll ${entry.id} ${lines}`);
+      return true;
+    };
+
     const cc = cameraControllerRef?.current;
     if (cc?.ctx) {
       cc.ctx.attentionManager = state.ctx.attentionManager;
-      // VCC runs on its OWN SceneContext (ViewerCamera.jsx), so the grip-press
-      // authority the canvas picker writes to the client ctx isn't visible to it
-      // by default. Forward it live (getter, not a copy) so VCC's mousedown yields
-      // a plain left-press on a resize grip — same verdict ResizeDragger uses.
+      // VCC runs on its OWN SceneContext (ViewerCamera.jsx), so client-side input
+      // authorities aren't visible to it by default. Forward them LIVE (getters, not
+      // copies) so VCC's handlers consult the same verdict the draggers do:
+      //   • isGripPress — a plain left-press on a resize grip yields the camera pan.
+      //   • tryScrollFocusedTerminal — the wheel scrolls a key-focused terminal.
       Object.defineProperty(cc.ctx, 'isGripPress', {
         configurable: true,
         get: () => state.ctx.isGripPress ?? null,
+      });
+      Object.defineProperty(cc.ctx, 'tryScrollFocusedTerminal', {
+        configurable: true,
+        get: () => state.ctx.tryScrollFocusedTerminal ?? null,
       });
     }
 

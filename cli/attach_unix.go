@@ -42,6 +42,18 @@ func tmuxCmd(args ...string) *exec.Cmd {
 	return exec.Command("tmux", append([]string{"-L", glyphdSocket}, args...)...)
 }
 
+// paneScrollPosition returns how many lines the pane is scrolled BACK from live
+// (0 = at the bottom / live). `#{scroll_position}` is empty when not in copy-mode,
+// which parses to 0 — exactly the "at live" answer we want.
+func paneScrollPosition(session string) int {
+	out, err := tmuxCmd("display-message", "-p", "-t", session, "#{scroll_position}").Output()
+	if err != nil {
+		return 0
+	}
+	n, _ := strconv.Atoi(strings.TrimSpace(string(out)))
+	return n
+}
+
 // runTerminal connects to the relay, creates the display grid, attaches a PTY to a
 // tmux session, and runs the bidirectional byte pump until shutdown.
 func runTerminal(cfg terminalConfig) {
@@ -125,6 +137,51 @@ func runTerminal(cfg terminalConfig) {
 		tmuxCmd("refresh-client").Run() // repaint the current screen into the fresh emulator
 	}
 
+	// Scrollback is tmux-owned: wheel-gated scroll from the focused terminal arrives as
+	// terminal.scroll (+lines = back into history, −lines = forward to live). scroll-up
+	// enters copy-mode (it's a copy-mode-only command); scroll-down walks back toward
+	// live. The resulting repaint streams back through the normal output lane.
+	//
+	// Two traps this handles (both because we unbound the copy-mode keytable, so the
+	// user can't escape it the normal way and typing into copy-mode does NOTHING):
+	//   1. scroll-down does NOT auto-exit at the bottom — it clamps at scroll_position 0
+	//      and stays in copy-mode. So after a forward scroll we leave copy-mode once at
+	//      the bottom, returning the pane to live + typeable.
+	//   2. typing while scrolled would be swallowed → exitScroll() snaps back to live
+	//      before any keystroke is written (called from the terminal.bytes path).
+	// scrolledBack is touched only from the single INPUT goroutine (scroll + exitScroll
+	// both run there), so no lock is needed.
+	scrolledBack := false
+	cancelCopyMode := func() {
+		tmuxCmd("send-keys", "-t", cfg.session, "-X", "cancel").Run()
+		scrolledBack = false
+	}
+	scroll := func(lines int) {
+		if lines == 0 {
+			return
+		}
+		if lines > 0 {
+			tmuxCmd("copy-mode", "-t", cfg.session).Run()
+			tmuxCmd("send-keys", "-t", cfg.session, "-X", "-N", strconv.Itoa(lines), "scroll-up").Run()
+			scrolledBack = true
+			return
+		}
+		if !scrolledBack {
+			return // already live — a forward scroll is a no-op (don't enter copy-mode)
+		}
+		tmuxCmd("send-keys", "-t", cfg.session, "-X", "-N", strconv.Itoa(-lines), "scroll-down").Run()
+		if paneScrollPosition(cfg.session) <= 0 {
+			cancelCopyMode() // reached live — leave copy-mode so the shell is typeable again
+		}
+	}
+	// Snap back to live before delivering a keystroke — otherwise the byte lands in
+	// copy-mode (whose keytable we unbound) and silently vanishes.
+	exitScroll := func() {
+		if scrolledBack {
+			cancelCopyMode()
+		}
+	}
+
 	// INPUT goroutine: drain the relay. Carries terminal.bytes (→ PTY), resize,
 	// shutdown, and the ping bounce that triggers re-adoption. Kept separate from the
 	// output pump so a blocked output write can never stall input (deadlock).
@@ -135,7 +192,7 @@ func runTerminal(cfg terminalConfig) {
 				shutdown()
 				return
 			}
-			handleInbound(msg, cfg.id, ptmx, shutdown, recreate)
+			handleInbound(msg, cfg.id, ptmx, shutdown, recreate, scroll, exitScroll)
 		}
 	}()
 
@@ -285,7 +342,7 @@ func encodeOutputFrame(id string, payload []byte) []byte {
 // controller push): terminal.bytes (input → PTY), terminal.resize (→ SIGWINCH),
 // terminal.shutdown (graceful teardown). Command responses also land here; an
 // "ERR: no terminal" reply (to our liveness ping) means the display reloaded → re-adopt.
-func handleInbound(msg []byte, termID string, ptmx *os.File, shutdown func(), recreate func()) {
+func handleInbound(msg []byte, termID string, ptmx *os.File, shutdown func(), recreate func(), scroll func(int), exitScroll func()) {
 	var ev struct {
 		Event string `json:"event"`
 		Data  struct {
@@ -293,6 +350,7 @@ func handleInbound(msg []byte, termID string, ptmx *os.File, shutdown func(), re
 			B64        string `json:"b64"`
 			Cols       int    `json:"cols"`
 			Rows       int    `json:"rows"`
+			Lines      int    `json:"lines"`
 		} `json:"data"`
 	}
 	if json.Unmarshal(msg, &ev) == nil && ev.Event != "" {
@@ -302,6 +360,9 @@ func handleInbound(msg []byte, termID string, ptmx *os.File, shutdown func(), re
 		switch ev.Event {
 		case "terminal.bytes": // INPUT: raw bytes → PTY master
 			if b, derr := base64.StdEncoding.DecodeString(ev.Data.B64); derr == nil {
+				if exitScroll != nil {
+					exitScroll() // a keystroke snaps a scrolled-back pane to live (else it's swallowed)
+				}
 				if _, werr := ptmx.Write(b); werr != nil {
 					log.Printf("[attach] pty write: %v", werr)
 				}
@@ -309,6 +370,10 @@ func handleInbound(msg []byte, termID string, ptmx *os.File, shutdown func(), re
 		case "terminal.resize":
 			if ev.Data.Cols > 0 && ev.Data.Rows > 0 {
 				pty.Setsize(ptmx, &pty.Winsize{Cols: uint16(ev.Data.Cols), Rows: uint16(ev.Data.Rows)})
+			}
+		case "terminal.scroll": // wheel-gated tmux copy-mode scroll (+back / -forward)
+			if scroll != nil {
+				scroll(ev.Data.Lines)
 			}
 		case "terminal.shutdown":
 			fmt.Fprintln(os.Stderr, "[attach] shutdown requested by display")

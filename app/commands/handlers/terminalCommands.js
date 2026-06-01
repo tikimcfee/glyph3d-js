@@ -205,6 +205,31 @@ export default function registerTerminalCommands(router) {
     }, { description: 'Resize a terminal grid', usage: '<id> <cols> <rows>' });
 
     // ------------------------------------------------------------------
+    // terminal.scroll <id> <lines>   (+ = back into history, − = forward to live)
+    // ------------------------------------------------------------------
+    router.register('terminal.scroll', (args, ctx) => {
+        if (args.length < 2) {
+            return { text: 'ERR: usage: terminal.scroll <id> <lines> (+back/-forward)', data: null };
+        }
+        const id = args[0];
+        const lines = parseInt(args[1], 10);
+        if (isNaN(lines)) return { text: 'ERR: lines must be an integer', data: null };
+
+        const info = ctx.registry.get(id);
+        if (!info) return { text: `ERR: no terminal '${id}'`, data: null };
+
+        // Scrollback is tmux-owned: the adapter drives copy-mode (copy-mode + scroll-up /
+        // scroll-down) and the resulting repaint streams back through the byte lane — the
+        // grid/emulator just mirror it (no client-side scroll state). A pure control push,
+        // like terminal.resize.
+        const owner = info?.meta?.owner;
+        if (owner && ctx.wsbridge?.connected) {
+            ctx.wsbridge.push(owner, { event: 'terminal.scroll', data: { terminalId: id, lines } });
+        }
+        return { text: `OK: terminal '${id}' scroll ${lines}`, data: { id, lines } };
+    }, { description: "Scroll a terminal's tmux scrollback (+ back / - forward)", usage: '<id> <lines>' });
+
+    // ------------------------------------------------------------------
     // terminal.close <id>
     // ------------------------------------------------------------------
     router.register('terminal.close', (args, ctx) => {
