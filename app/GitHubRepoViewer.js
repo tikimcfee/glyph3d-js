@@ -2328,16 +2328,16 @@ export class GitHubRepoViewer {
         }
 
         // GPU picking pass (only runs when mouse has moved).
-        // renderAndReadAsync wraps the sync WebGL2 readback in a Promise so
-        // callers are forward-compatible with a future WebGPU async path.
+        // pickAsync('glyph', …) renders the glyph channel's ID pass and reads the
+        // pixel under the cursor, resolving to { token: renderer, slotIndex }.
         // A pending-result guard prevents overlapping async frames: if a pick
         // is already in flight we skip the new one and rely on the dirty flag
         // (_needsPick) being re-set on the next mousemove.
         if (this.pickingSystem && !this._pickPending) {
             this._pickPending = true;
-            this.pickingSystem.renderAndReadAsync(this.camera, this.scene).then(pickId => {
+            // Char-level hover via the 'glyph' channel → { token: renderer, slotIndex }.
+            this.pickingSystem.pickAsync('glyph', this.camera, this.scene).then(hit => {
                 this._pickPending = false;
-                const hit = this.pickingSystem?.resolve(pickId);
 
                 // Clear previous highlight (guard against disposed renderer)
                 if (this._lastPickHit?.renderer?.instanceMesh && this._lastPickSlot >= 0) {
@@ -2345,8 +2345,8 @@ export class GitHubRepoViewer {
                 }
 
                 if (hit) {
-                    hit.renderer.setGlyphHighlight(hit.slotIndex, { r: 0.3, g: 0.3, b: 0.0 });
-                    this._lastPickHit = hit;
+                    hit.token.setGlyphHighlight(hit.slotIndex, { r: 0.3, g: 0.3, b: 0.0 });
+                    this._lastPickHit = { renderer: hit.token };
                     this._lastPickSlot = hit.slotIndex;
                 } else {
                     this._lastPickHit = null;

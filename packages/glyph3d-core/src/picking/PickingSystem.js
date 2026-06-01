@@ -1,27 +1,40 @@
 /**
- * PickingSystem - GPU-based glyph picking via material-swap on the main scene.
+ * PickingSystem — GPU ID-pass picking across independent CHANNELS.
  *
- * Renders the SAME scene to an offscreen target with picking materials swapped
- * onto each registered glyph mesh. Since the meshes stay in the main scene graph
- * with their real transforms, no transform syncing is needed — the picking pass
- * is a pixel-perfect mirror of the visible render, just with ID-encoded colors
- * instead of textured glyphs.
+ * Each channel is a self-contained pickable set: its own THREE render layer, its
+ * own first-fit ID space (so IDs never collide across channels), and its own
+ * picking material kind. The ID pass for a channel renders ONLY that channel's
+ * layer to an offscreen target and reads the pixel under the cursor — a
+ * pixel-perfect spatial mirror of the visible render, ID-encoded. No raycasting,
+ * no bounds: the buffer is the single source of truth for "what's under here".
  *
- * This matches the Swift/Metal approach: one scene, one render, read the pixel.
+ * Built-in channels:
+ *   - 'glyph' (layer 7, kind 'glyph') — instanced glyph quads, ID = base +
+ *     instanceIndex, resolves to { token: renderer, slotIndex } → char-level.
+ *   - 'grid'  (layer 8, kind 'flat')  — one solid quad per grid (the background
+ *     panel), ID = base, resolves to { token: grid } → whole-panel grid-level.
  *
- * Picking IDs are 24-bit sequential integers encoded as RGB. Black (0,0,0) = "no hit".
- * The global counter persists across hot-reloads via window.__glyph3dPickingIdCounter.
+ * Add more (buttons, control surfaces, …) with defineChannel(name,{layer,kind}).
+ * Hit-test a channel with pickAsync(name, camera, scene); they're independent, so
+ * a caller reads whichever channel(s) it cares about (hover reads 'grid' — cheap,
+ * just the panels; char features read 'glyph').
+ *
+ * Picking IDs are 24-bit integers encoded as RGB. Black (0,0,0) = "no hit".
+ * Per-channel IDs are allocated first-fit over that channel's LIVE entries, so a
+ * pickable's block is reclaimed when it unregisters (every flush/resize
+ * re-registers) — bounded by the sum of live counts, never leaking toward the
+ * 24-bit ceiling.
  */
 
 import * as THREE from 'three';
 
-// TSL imports for WebGPU picking material — loaded lazily so PickingSystem
+// TSL imports for WebGPU picking materials — loaded lazily so PickingSystem
 // works with both WebGLRenderer (no TSL needed) and WebGPURenderer.
 // We import directly from three/webgpu because the importmap maps 'three' to
 // the webgpu build at runtime; this bare specifier works in browser ES modules.
 let _tslLoaded = false;
-let _MeshBasicNodeMaterial, _Fn, _attribute, _uniform, _texture,
-    _vec2, _vec3, _vec4, _float, _int, _instanceIndex,
+let _MeshBasicNodeMaterial, _Fn, _attribute, _uniform, _texture, _textureLoad,
+    _vec2, _vec3, _vec4, _ivec2, _float, _int, _instanceIndex,
     _modelViewMatrix, _cameraProjectionMatrix, _positionLocal, _If, _Return, _select;
 
 async function _loadTSL() {
@@ -34,9 +47,11 @@ async function _loadTSL() {
     _attribute                = tsl.attribute;
     _uniform                  = tsl.uniform;
     _texture                  = tsl.texture;
+    _textureLoad              = tsl.textureLoad;
     _vec2                     = tsl.vec2;
     _vec3                     = tsl.vec3;
     _vec4                     = tsl.vec4;
+    _ivec2                    = tsl.ivec2;
     _float                    = tsl.float;
     _int                      = tsl.int;
     _instanceIndex            = tsl.instanceIndex;
@@ -49,10 +64,22 @@ async function _loadTSL() {
     _tslLoaded = true;
 }
 
+// Built-in channels. Each gets a distinct THREE render layer so the picking
+// camera can isolate it (renders ONLY that layer → the ID buffer is free of
+// every other channel and of non-pickable scene-graph noise). The meshes stay
+// on layer 0 too, so the main render pass is unaffected. New channels claim the
+// next free layer (8 used by 'grid', so buttons would take 9, etc.).
+const DEFAULT_CHANNELS = {
+    glyph: { layer: 7, kind: 'glyph' },
+    grid:  { layer: 8, kind: 'flat'  },
+};
+
 // ---------------------------------------------------------------------------
-// Picking shaders — two modes:
-//   'cell'  (default) — solid quad, entire glyph cell is pickable
-//   'glyph'           — Slug winding number coverage, only rendered strokes pick
+// WebGL (GLSL) picking shaders. Two glyph modes + a flat (solid-quad) mode.
+//   glyph 'cell'  — solid quad, entire glyph cell is pickable
+//   glyph 'glyph' — Slug winding number coverage, only rendered strokes pick
+//   flat          — one constant ID over a plain mesh (grid panels, buttons)
+// (WebGPU uses TSL NodeMaterials built below; these are the WebGLRenderer path.)
 // ---------------------------------------------------------------------------
 
 // Shared vertex core — position + group visibility
@@ -218,20 +245,39 @@ void main() {
 }
 `;
 
+// Flat mode: a plain mesh (grid panel, button) projected normally, every fragment
+// emitting one constant ID. Covers the whole surface — the grid-level pickable.
+const PICKING_VERTEX_FLAT = `
+precision highp float;
+void main() {
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+`;
+
+const PICKING_FRAGMENT_FLAT = `
+precision highp float;
+precision highp int;
+uniform int uPickId;
+out vec4 fragColor;
+void main() {
+    int id = uPickId;
+    int r = (id >> 16) & 0xFF;
+    int g = (id >> 8) & 0xFF;
+    int b = id & 0xFF;
+    fragColor = vec4(float(r) / 255.0, float(g) / 255.0, float(b) / 255.0, 1.0);
+}
+`;
+
 // ---------------------------------------------------------------------------
 
 export class PickingSystem {
     /**
-     * @param {THREE.WebGLRenderer} threeRenderer
+     * @param {THREE.WebGLRenderer|THREE.WebGPURenderer} threeRenderer
      * @param {Object} [options]
      * @param {number} [options.resolutionScale=1.0]
-     */
-    /**
-     * @param {THREE.WebGLRenderer} threeRenderer
-     * @param {Object} [options]
-     * @param {number} [options.resolutionScale=1.0]
-     * @param {'cell'|'glyph'} [options.mode='cell'] - 'cell' picks the full glyph quad,
-     *   'glyph' alpha-tests against the atlas so only rendered strokes pick.
+     * @param {'cell'|'glyph'} [options.mode='cell'] - glyph-channel hit shape:
+     *   'cell' picks the full glyph quad, 'glyph' alpha-tests against the atlas so
+     *   only rendered strokes pick.
      */
     constructor(threeRenderer, options = {}) {
         this._renderer = threeRenderer;
@@ -245,11 +291,11 @@ export class PickingSystem {
         // cache when GlyphField has already been imported by the caller).
         this._tslReady = this._isWebGPU ? _loadTSL() : Promise.resolve();
 
-        // Registry: [{ renderer, pickingMaterial, startId, endId }]
-        this._registry = [];
-
-        // Persist counter across hot-reload
-        this._nextPickingId = (window.__glyph3dPickingIdCounter || 1);
+        // Channels: name -> { layer, kind, entries: [{ mesh, material, startId, endId, token }] }
+        this._channels = new Map();
+        for (const [name, def] of Object.entries(DEFAULT_CHANNELS)) {
+            this.defineChannel(name, def);
+        }
 
         // Picking target and readback buffer
         this._target = null;
@@ -259,11 +305,41 @@ export class PickingSystem {
         // Mouse position in target-pixel coordinates
         this._mousePixel = { x: -1, y: -1 };
 
-        // Dirty flag — only render+read when mouse has moved
+        // Dirty flag — only render+read when the cursor moved (setMousePosition)
+        // or the caller forced it (markDirty, e.g. camera moved under a still
+        // cursor). pickAsync caches the last resolved hit per channel and returns
+        // it while clean, so re-picking a stationary view is free.
         this._needsPick = false;
-        this._lastPickedId = 0;
+        this._lastResult = new Map(); // channel -> last resolved hit | null
 
         this._createTarget();
+    }
+
+    // -------------------------------------------------------------------------
+    // Channels
+    // -------------------------------------------------------------------------
+
+    /**
+     * Define a pickable channel. Idempotent per name (redefining replaces the
+     * config but keeps existing entries only if the layer is unchanged).
+     * @param {string} name
+     * @param {{ layer: number, kind: 'glyph'|'flat' }} def
+     */
+    defineChannel(name, { layer, kind }) {
+        const existing = this._channels.get(name);
+        this._channels.set(name, { layer, kind, entries: existing?.entries ?? [] });
+    }
+
+    /** @private */
+    _channel(name) {
+        const ch = this._channels.get(name);
+        if (!ch) throw new Error(`[PickingSystem] unknown channel '${name}'`);
+        return ch;
+    }
+
+    /** @private — the mesh a register/unregister target maps to in a channel. */
+    _meshOf(channel, target) {
+        return channel.kind === 'glyph' ? target?.instanceMesh : target;
     }
 
     // -------------------------------------------------------------------------
@@ -280,9 +356,9 @@ export class PickingSystem {
             this._target = null;
         }
         this._createTarget();
-        // Invalidate last pick so the next frame forces a fresh read.
+        // Invalidate so the next frame forces a fresh read.
         this._needsPick = true;
-        this._lastPickedId = 0;
+        this._lastResult.clear();
     }
 
     /** @private */
@@ -328,27 +404,27 @@ export class PickingSystem {
         }
     }
 
-    // -------------------------------------------------------------------------
-    // Registration
-    // -------------------------------------------------------------------------
+    /**
+     * Force the next pickAsync to actually render+read, even if the mouse pixel
+     * did not change. setMousePosition only dirties on pixel change, so a camera
+     * move under a stationary cursor (pan / zoom / drag, which fire no pointer
+     * event) would otherwise reuse a stale pick. The hover loop calls this
+     * whenever the camera transform changed.
+     */
+    markDirty() {
+        this._needsPick = true;
+    }
 
     // -------------------------------------------------------------------------
-    // TSL picking material (WebGPU path)
+    // Picking materials
     // -------------------------------------------------------------------------
 
     /**
-     * Create a TSL-based NodeMaterial for the picking pass.
-     * Used when the renderer is a WebGPURenderer (ShaderMaterial unsupported).
-     *
-     * Vertex: applies group offset / visibility from DataTexture, projects to clip.
-     * Fragment: outputs picking ID (baseId + instanceIndex) encoded as RGB.
-     *
+     * WebGPU 'glyph' material: TSL NodeMaterial mirroring GlyphField's vertex
+     * (instanced group-DataTexture worldPos), emitting ID = base + instanceIndex.
      * @private
-     * @param {Object} glyphRenderer - GlyphField or GlyphRenderer instance
-     * @param {number} startId - Base picking ID for this renderer
-     * @returns {THREE.Material}
      */
-    _createTSLPickingMaterial(glyphRenderer, startId) {
+    _createTSLGlyphMaterial(glyphRenderer, startId) {
         const iPos   = _attribute('instancePosition', 'vec3');
         const iSize  = _attribute('instanceSize',     'vec2');
         const iGroup = _attribute('instanceGroupId',  'float');
@@ -361,17 +437,20 @@ export class PickingSystem {
             const scaled      = _positionLocal.mul(_vec3(iSize, _float(1)));
             const alignOffset = _vec3(iSize.x.mul(0.5), _float(0), _float(0));
 
-            const gv     = iGroup.add(0.5).div(groupTexHeight);
-            const gPos   = groupTex.sample(_vec2(_float(0.125), gv));
-            const gColor = groupTex.sample(_vec2(_float(0.625), gv));
-            const gScale = groupTex.sample(_vec2(_float(0.875), gv));
+            // Group DataTexture lookup — MUST mirror GlyphField's vertex node:
+            // textureLoad with exact integer texel coords (4 columns × maxGroups
+            // rows, RGBA32F). rgba32float is NOT filterable under WebGPU, so a
+            // normalized .sample() returns garbage and collapses every glyph to a
+            // degenerate position — making the pick resolve to one stuck id.
+            const grow   = _int(iGroup);
+            const gPos   = _textureLoad(groupTex, _ivec2(_int(0), grow)); // col 0: offset + visibility
+            const gColor = _textureLoad(groupTex, _ivec2(_int(2), grow)); // col 2: color multiplier
+            const gScale = _textureLoad(groupTex, _ivec2(_int(3), grow)); // col 3: scale + colorBlend (w)
 
-            // Compute normal position
             const worldPos = scaled.add(alignOffset).add(iPos.mul(gScale.xyz)).add(gPos.xyz);
             const normalClip = _cameraProjectionMatrix.mul(_modelViewMatrix.mul(_vec4(worldPos, 1)));
 
-            // If invisible, send off-screen; otherwise use normal position
-            // (Can't use Return or Discard in vertex — use select/mix instead)
+            // Invisible group → send off-screen (can't Discard in a vertex).
             const visible = gColor.a.greaterThan(0.01);
             return _select(visible, normalClip, _vec4(2, 2, 2, 1));
         });
@@ -381,134 +460,191 @@ export class PickingSystem {
             const r  = id.shiftRight(16).bitAnd(0xFF);
             const g  = id.shiftRight(8).bitAnd(0xFF);
             const b  = id.bitAnd(0xFF);
-            return _vec4(
-                _float(r).div(255.0),
-                _float(g).div(255.0),
-                _float(b).div(255.0),
-                _float(1)
-            );
+            return _vec4(_float(r).div(255.0), _float(g).div(255.0), _float(b).div(255.0), _float(1));
         });
 
         const mat = new _MeshBasicNodeMaterial();
         mat.vertexNode = vertexFn();
         mat.outputNode = fragmentFn();
         mat.side = THREE.DoubleSide;
-        mat.depthWrite = false;
-        // Store references for _growGroupTexture hot-swap
-        mat._groupTexUniform      = groupTex;
-        mat._groupTexHUniform     = groupTexHeight;
+        // depthWrite MUST stay on: the pass is opaque against a depth buffer
+        // cleared to far, so depthWrite+depthTest gives nearest-wins occlusion.
+        // Off, a FARTHER overlapping glyph would overwrite a nearer one's ID
+        // pixel — picking the wrong (back) grid.
+        mat.depthWrite = true;
+        mat._groupTexUniform  = groupTex;   // bookkeeping for group-texture hot-swap
+        mat._groupTexHUniform = groupTexHeight;
         return mat;
     }
 
     /**
-     * Register a GlyphRenderer with this picking system.
-     * Claims a contiguous block of picking IDs and creates a picking
-     * ShaderMaterial with uBasePickingId uniform. The picking shader
-     * derives per-glyph IDs as uBasePickingId + gl_InstanceID.
-     *
-     * Must be called after every flush that rebuilds geometry.
-     *
-     * @param {import('../GlyphField.js').default} glyphRenderer
-     * @returns {number} The startId assigned (0 if empty)
+     * WebGPU 'flat' material: a plain mesh (grid panel / button) projected
+     * normally, every fragment emitting one constant ID. The default NodeMaterial
+     * vertex handles projection from the mesh's own world matrix.
+     * @private
      */
-    registerRenderer(glyphRenderer) {
-        this.unregisterRenderer(glyphRenderer);
+    _createTSLFlatMaterial(id) {
+        const baseId = _int(id);
+        const fragmentFn = _Fn(() => {
+            const r = baseId.shiftRight(16).bitAnd(0xFF);
+            const g = baseId.shiftRight(8).bitAnd(0xFF);
+            const b = baseId.bitAnd(0xFF);
+            return _vec4(_float(r).div(255.0), _float(g).div(255.0), _float(b).div(255.0), _float(1));
+        });
+        const mat = new _MeshBasicNodeMaterial();
+        mat.outputNode = fragmentFn();
+        mat.side = THREE.DoubleSide;
+        mat.depthWrite = true; // nearest panel wins in an overlap (front grid)
+        return mat;
+    }
 
-        const mesh = glyphRenderer.instanceMesh;
+    /**
+     * WebGL 'glyph' material: classic ShaderMaterial (cell or Slug-winding mode).
+     * @private
+     */
+    _createGLSLGlyphMaterial(glyphRenderer, mesh, startId) {
+        const uniforms = {
+            groupTexture:       { value: glyphRenderer._groupTexture },
+            groupTextureHeight: { value: glyphRenderer._maxGroups },
+            uBasePickingId:     { value: startId },
+        };
+        let vertexShader, fragmentShader;
+        if (this._mode === 'glyph') {
+            const mainUniforms = mesh.material.uniforms;
+            uniforms.curveTexture    = mainUniforms.curveTexture;
+            uniforms.glyphMapTexture = mainUniforms.glyphMapTexture;
+            uniforms.glyphMapWidth   = mainUniforms.glyphMapWidth;
+            uniforms.glyphMapHeight  = mainUniforms.glyphMapHeight;
+            vertexShader   = PICKING_VERTEX_GLYPH;
+            fragmentShader = PICKING_FRAGMENT_GLYPH;
+        } else {
+            vertexShader   = PICKING_VERTEX_CELL;
+            fragmentShader = PICKING_FRAGMENT_CELL;
+        }
+        return new THREE.ShaderMaterial({
+            glslVersion: THREE.GLSL3, uniforms, vertexShader, fragmentShader, side: THREE.DoubleSide,
+        });
+    }
+
+    /**
+     * WebGL 'flat' material: solid-quad ShaderMaterial emitting one constant ID.
+     * @private
+     */
+    _createGLSLFlatMaterial(id) {
+        return new THREE.ShaderMaterial({
+            glslVersion: THREE.GLSL3,
+            uniforms: { uPickId: { value: id } },
+            vertexShader: PICKING_VERTEX_FLAT,
+            fragmentShader: PICKING_FRAGMENT_FLAT,
+            side: THREE.DoubleSide,
+        });
+    }
+
+    // -------------------------------------------------------------------------
+    // Registration
+    // -------------------------------------------------------------------------
+
+    /**
+     * Register a pickable into a channel. For a 'glyph' channel, `target` is the
+     * GlyphField renderer (its instanceMesh is the pickable, ID = base +
+     * instanceIndex). For a 'flat' channel, `target` is the mesh itself (one
+     * constant ID). `token` is returned verbatim from resolve()/pickAsync() — by
+     * convention the renderer for 'glyph' (so resolveGlyph works), the grid for
+     * 'grid'. Re-register after any rebuild that changes instanceCount.
+     *
+     * @param {string} channelName
+     * @param {*} target - renderer ('glyph') or mesh ('flat')
+     * @param {*} token  - what a hit resolves to
+     * @returns {number} the startId assigned (0 if nothing to register)
+     */
+    register(channelName, target, token) {
+        const ch = this._channel(channelName);
+        const mesh = this._meshOf(ch, target);
         if (!mesh?.geometry) return 0;
-        const count = mesh.geometry.instanceCount;
+
+        // Drop any prior entry for this mesh first, so its ID block is free for
+        // first-fit reuse below (re-register-in-place on flush/resize).
+        this.unregister(channelName, target);
+
+        const count = ch.kind === 'glyph' ? (mesh.geometry.instanceCount || 0) : 1;
         if (count === 0) return 0;
 
-        const startId = this._nextPickingId;
+        // First-fit over this channel's LIVE entries: lowest startId >= 1 whose
+        // [startId, startId+count) overlaps no current entry. Reclaims interior
+        // gaps so the per-channel ID space stays bounded by the sum of live counts.
+        const ranges = ch.entries.map(e => [e.startId, e.endId]).sort((a, b) => a[0] - b[0]);
+        let startId = 1;
+        for (const [s, e] of ranges) {
+            if (startId + count <= s) break;   // fits in the gap before this block
+            if (e > startId) startId = e;        // else move past this block
+        }
         const endId = startId + count;
-
-        this._nextPickingId = endId;
-        window.__glyph3dPickingIdCounter = this._nextPickingId;
-
-        // Write instancePickingId attribute so testPhase1 can validate sequential IDs.
-        // This is a Float32Array attribute on the geometry; values = startId + i.
-        const pickIdAttr = mesh.geometry.attributes.instancePickingId;
-        if (pickIdAttr) {
-            for (let i = 0; i < count; i++) {
-                pickIdAttr.array[i] = startId + i;
-            }
-            pickIdAttr.needsUpdate = true;
+        if (endId > 0xFFFFFF) {
+            console.warn(`[PickingSystem] channel '${channelName}' ID ${endId} exceeds 24-bit encoding; picks may mis-resolve`);
         }
 
-        let pickingMaterial;
+        // Glyph channel: write instancePickingId so test harnesses can validate
+        // sequential IDs (the shader derives the real ID as base + instanceIndex).
+        if (ch.kind === 'glyph') {
+            const pickIdAttr = mesh.geometry.attributes.instancePickingId;
+            if (pickIdAttr) {
+                for (let i = 0; i < count; i++) pickIdAttr.array[i] = startId + i;
+                pickIdAttr.needsUpdate = true;
+            }
+        }
 
+        let material;
         if (this._isWebGPU) {
-            // WebGPU path: TSL NodeMaterial (ShaderMaterial not supported).
-            // TSL modules are resolved from cache (GlyphField imported them first).
             if (!_tslLoaded) {
-                throw new Error(
-                    '[PickingSystem] TSL not loaded. Await pickingSystem._tslReady before calling registerRenderer() on WebGPU.'
-                );
+                throw new Error('[PickingSystem] TSL not loaded. Await pickingSystem._tslReady before register() on WebGPU.');
             }
-            // Currently only cell mode is implemented for WebGPU.
-            // Glyph mode (Slug winding test) can be added in a later commit.
-            pickingMaterial = this._createTSLPickingMaterial(glyphRenderer, startId);
+            material = ch.kind === 'glyph'
+                ? this._createTSLGlyphMaterial(target, startId)
+                : this._createTSLFlatMaterial(startId);
         } else {
-            // WebGL path: classic ShaderMaterial
-            const uniforms = {
-                groupTexture:       { value: glyphRenderer._groupTexture },
-                groupTextureHeight: { value: glyphRenderer._maxGroups },
-                uBasePickingId:     { value: startId },
-            };
-
-            let vertShader, fragShader;
-            if (this._mode === 'glyph') {
-                const mainUniforms = mesh.material.uniforms;
-                uniforms.curveTexture    = mainUniforms.curveTexture;
-                uniforms.glyphMapTexture = mainUniforms.glyphMapTexture;
-                uniforms.glyphMapWidth   = mainUniforms.glyphMapWidth;
-                uniforms.glyphMapHeight  = mainUniforms.glyphMapHeight;
-                vertShader = PICKING_VERTEX_GLYPH;
-                fragShader = PICKING_FRAGMENT_GLYPH;
-            } else {
-                vertShader = PICKING_VERTEX_CELL;
-                fragShader = PICKING_FRAGMENT_CELL;
-            }
-
-            pickingMaterial = new THREE.ShaderMaterial({
-                glslVersion: THREE.GLSL3,
-                uniforms,
-                vertexShader: vertShader,
-                fragmentShader: fragShader,
-                side: THREE.DoubleSide
-            });
+            material = ch.kind === 'glyph'
+                ? this._createGLSLGlyphMaterial(target, mesh, startId)
+                : this._createGLSLFlatMaterial(startId);
         }
 
-        this._registry.push({ renderer: glyphRenderer, pickingMaterial, startId, endId });
+        // Enable the channel's layer so its isolated pass renders this mesh (it
+        // stays on layer 0 too, so the main pass is unaffected). Paired with
+        // registry membership — disabled in unregister.
+        mesh.layers.enable(ch.layer);
+
+        ch.entries.push({ mesh, material, startId, endId, token });
         return startId;
     }
 
     /**
-     * Remove a renderer from the registry.
-     * @param {import('../GlyphField.js').default} glyphRenderer
+     * Remove a pickable from a channel.
+     * @param {string} channelName
+     * @param {*} target - the same renderer ('glyph') or mesh ('flat') passed to register
      */
-    unregisterRenderer(glyphRenderer) {
-        const idx = this._registry.findIndex(e => e.renderer === glyphRenderer);
+    unregister(channelName, target) {
+        const ch = this._channel(channelName);
+        const mesh = this._meshOf(ch, target);
+        if (!mesh) return;
+        const idx = ch.entries.findIndex(e => e.mesh === mesh);
         if (idx === -1) return;
-        const entry = this._registry[idx];
-        entry.pickingMaterial.dispose();
-        this._registry.splice(idx, 1);
+        const entry = ch.entries[idx];
+        entry.mesh?.layers.disable(ch.layer);
+        entry.material.dispose();
+        ch.entries.splice(idx, 1);
     }
 
     // -------------------------------------------------------------------------
-    // Render pass — material swap on the main scene
+    // Render pass + read
     // -------------------------------------------------------------------------
 
     /**
-     * Render the picking pass to the offscreen target and restore state.
-     * Does not read the pixel — call readPixelAsync() after this.
-     *
+     * Render ONE channel's pickables (material-swapped to their picking material,
+     * camera isolated to the channel's layer) to the offscreen target. Restores
+     * all mutated state in a finally so a throw can't corrupt the shared camera /
+     * target / materials.
      * @private
-     * @param {THREE.Camera} camera
-     * @param {THREE.Scene} scene
-     * @returns {number} t0 timestamp (performance.now() before render)
      */
-    _renderPickingPass(camera, scene) {
+    _renderChannelPass(channel, camera, scene) {
         // Auto-resize target if renderer size changed (e.g. IDE ResizeObserver)
         const size = this._renderer.getSize(this._sizeVec);
         const dpr = this._renderer.getPixelRatio();
@@ -520,37 +656,44 @@ export class PickingSystem {
 
         const t0 = performance.now();
 
-        // Swap materials: main → picking
-        for (const entry of this._registry) {
-            const mesh = entry.renderer.instanceMesh;
-            if (!mesh) continue;
-            entry._savedMaterial = mesh.material;
-            mesh.material = entry.pickingMaterial;
-        }
-
-        // Save and restore clear color
         const prevClearColor = new THREE.Color();
         const prevClearAlpha = this._renderer.getClearAlpha();
         this._renderer.getClearColor(prevClearColor);
+        const savedLayerMask = camera.layers.mask;
+        // The scene background is a fullscreen fill (not subject to camera.layers),
+        // so it would paint empty pick pixels with its color. On a plain
+        // UnsignedByte target with no sRGB encode that writes the LINEAR color
+        // raw — e.g. background 0x050608 → bytes (0,0,1) → decodes to id 1, a false
+        // hit on the first grid. Null it for the pass so empty == our black clear
+        // == id 0 == no hit.
+        const savedBackground = scene.background;
 
-        this._renderer.setRenderTarget(this._target);
-        this._renderer.setClearColor(0x000000, 1);
-        this._renderer.clear();
-        this._renderer.render(scene, camera);
+        for (const entry of channel.entries) {
+            const mesh = entry.mesh;
+            if (!mesh) continue;
+            entry._savedMaterial = mesh.material;
+            mesh.material = entry.material;
+        }
 
-        const tRender = performance.now();
-        this._lastRenderMs = tRender - t0;
-
-        // Restore render target and clear color before pixel read.
-        this._renderer.setRenderTarget(null);
-        this._renderer.setClearColor(prevClearColor, prevClearAlpha);
-
-        // Swap materials back: picking → main
-        for (const entry of this._registry) {
-            const mesh = entry.renderer.instanceMesh;
-            if (!mesh || !entry._savedMaterial) continue;
-            mesh.material = entry._savedMaterial;
-            entry._savedMaterial = null;
+        try {
+            camera.layers.set(channel.layer);
+            scene.background = null;
+            this._renderer.setRenderTarget(this._target);
+            this._renderer.setClearColor(0x000000, 1);
+            this._renderer.clear();
+            this._renderer.render(scene, camera);
+            this._lastRenderMs = performance.now() - t0;
+        } finally {
+            camera.layers.mask = savedLayerMask;
+            scene.background = savedBackground;
+            this._renderer.setRenderTarget(null);
+            this._renderer.setClearColor(prevClearColor, prevClearAlpha);
+            for (const entry of channel.entries) {
+                const mesh = entry.mesh;
+                if (!mesh || !entry._savedMaterial) continue;
+                mesh.material = entry._savedMaterial;
+                entry._savedMaterial = null;
+            }
         }
 
         return t0;
@@ -558,16 +701,7 @@ export class PickingSystem {
 
     /**
      * Read the pixel at the current mouse position from the picking target.
-     *
-     * Returns a Promise that resolves to a Uint8Array(4) containing the RGBA
-     * bytes of the sampled pixel. On WebGL2 the read is synchronous under the
-     * hood; the Promise wrapper exists so callers do not bake in sync
-     * assumptions before a WebGPU async readback path is introduced.
-     *
-     * Must be called after _renderPickingPass() while the picking target still
-     * contains the most-recent render.
-     *
-     * @param {number} [t0] - Start timestamp from _renderPickingPass, for timing.
+     * @private
      * @returns {Promise<Uint8Array>} Four-byte RGBA pixel, or all-zeros if out of bounds.
      */
     async readPixelAsync(t0) {
@@ -575,18 +709,13 @@ export class PickingSystem {
         const pixel = new Uint8Array(4);
         if (this._target && x >= 0 && y >= 0 && x < this._target.width && y < this._target.height) {
             if (this._isWebGPU && this._renderer.readRenderTargetPixelsAsync) {
-                // WebGPU path: async readback — Y=0 is top (same as CSS), no flip needed
-                const buf = await this._renderer.readRenderTargetPixelsAsync(
-                    this._target, x, y, 1, 1
-                );
-                // buf is a Uint8Array or ArrayBuffer — normalise to Uint8Array
+                // WebGPU: async readback — Y=0 is top (same as CSS), no flip needed.
+                const buf = await this._renderer.readRenderTargetPixelsAsync(this._target, x, y, 1, 1);
                 const view = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
                 pixel.set(view.subarray(0, 4));
             } else {
-                // WebGL path: synchronous readback
-                this._renderer.readRenderTargetPixels(
-                    this._target, x, this._target.height - 1 - y, 1, 1, this._readBuffer
-                );
+                // WebGL: synchronous readback (Y flipped).
+                this._renderer.readRenderTargetPixels(this._target, x, this._target.height - 1 - y, 1, 1, this._readBuffer);
                 pixel.set(this._readBuffer);
             }
         }
@@ -599,60 +728,31 @@ export class PickingSystem {
     }
 
     /**
-     * Swap picking materials onto registered glyph meshes, render the main
-     * scene to the picking target, read the pixel under the cursor, swap back.
+     * Hit-test a channel under the cursor: render its ID pass, read the pixel,
+     * resolve to the hit. Gated by the dirty flag — while the view is unchanged
+     * it returns the channel's cached last hit (no GPU work).
      *
-     * The meshes stay in the main scene graph with their real transforms —
-     * the picking texture is a pixel-perfect spatial mirror of the visible
-     * render. The swap is just JS property assignments (no GPU work).
+     * NOTE: the dirty flag is shared, so picking MULTIPLE channels in one frame
+     * needs a markDirty() between them. Current callers pick a single channel per
+     * frame (hover → 'grid'), so this is free.
      *
+     * @param {string} channelName
      * @param {THREE.Camera} camera
-     * @param {THREE.Scene} scene - The main scene
-     * @returns {number} Picking ID (0 = no hit)
+     * @param {THREE.Scene} scene
+     * @returns {Promise<{ token: *, slotIndex: number } | null>}
      */
-    renderAndRead(camera, scene) {
-        if (!this._needsPick) return this._lastPickedId;
+    async pickAsync(channelName, camera, scene) {
+        const ch = this._channel(channelName);
+        if (!this._needsPick) return this._lastResult.get(channelName) ?? null;
         this._needsPick = false;
 
-        const t0 = this._renderPickingPass(camera, scene);
-
-        // Read pixel synchronously — same GPU call as before, just factored out.
-        const { x, y } = this._mousePixel;
-        let id = 0;
-        if (this._target && x >= 0 && y >= 0 && x < this._target.width && y < this._target.height) {
-            this._renderer.readRenderTargetPixels(
-                this._target, x, this._target.height - 1 - y, 1, 1, this._readBuffer
-            );
-            const [r, g, b] = this._readBuffer;
-            id = (r << 16) | (g << 8) | b;
-        }
-
-        const tRead = performance.now();
-        this._lastReadMs = tRead - (t0 + this._lastRenderMs);
-        this._lastTotalMs = tRead - t0;
-        this._lastPickedId = id;
-
-        return id;
-    }
-
-    /**
-     * Async variant of renderAndRead. Use this when the caller can await —
-     * the pixel read is wrapped in Promise.resolve() so the call site is
-     * forward-compatible with a future WebGPU async readback implementation.
-     *
-     * @param {THREE.Camera} camera
-     * @param {THREE.Scene} scene - The main scene
-     * @returns {Promise<number>} Picking ID (0 = no hit)
-     */
-    async renderAndReadAsync(camera, scene) {
-        if (!this._needsPick) return this._lastPickedId;
-        this._needsPick = false;
-
-        const t0 = this._renderPickingPass(camera, scene);
+        const t0 = this._renderChannelPass(ch, camera, scene);
         const pixel = await this.readPixelAsync(t0);
         const id = (pixel[0] << 16) | (pixel[1] << 8) | pixel[2];
-        this._lastPickedId = id;
-        return id;
+        this._lastRawId = id; // last decoded RGB→id, for stats/debug
+        const hit = this.resolve(channelName, id);
+        this._lastResult.set(channelName, hit);
+        return hit;
     }
 
     // -------------------------------------------------------------------------
@@ -660,25 +760,24 @@ export class PickingSystem {
     // -------------------------------------------------------------------------
 
     /**
-     * Resolve a raw picking ID to renderer + buffer slot index.
+     * Resolve a raw picking ID within a channel to { token, slotIndex }.
+     * @param {string} channelName
      * @param {number} pickingId
-     * @returns {{ renderer: *, slotIndex: number } | null}
+     * @returns {{ token: *, slotIndex: number } | null}
      */
-    resolve(pickingId) {
+    resolve(channelName, pickingId) {
         if (pickingId === 0) return null;
-        for (const entry of this._registry) {
+        const ch = this._channel(channelName);
+        for (const entry of ch.entries) {
             if (pickingId >= entry.startId && pickingId < entry.endId) {
-                return {
-                    renderer: entry.renderer,
-                    slotIndex: pickingId - entry.startId
-                };
+                return { token: entry.token, slotIndex: pickingId - entry.startId };
             }
         }
         return null;
     }
 
     /**
-     * Resolve a buffer slot index within a renderer to { textId, charIndex }.
+     * Resolve a buffer slot index within a glyph renderer to { textId, charIndex }.
      * @param {*} renderer
      * @param {number} slotIndex
      * @returns {{ textId: number, charIndex: number } | null}
@@ -711,23 +810,23 @@ export class PickingSystem {
         const target = this._target;
         const targetBytes = target ? target.width * target.height * 4 : 0;
 
-        let totalInstances = 0;
-        let totalPickingIdBytes = 0;
-        for (const entry of this._registry) {
-            const count = entry.endId - entry.startId;
-            totalInstances += count;
-            totalPickingIdBytes += count * 4;
+        const channels = {};
+        let totalEntries = 0, totalIds = 0;
+        for (const [name, ch] of this._channels) {
+            let ids = 0;
+            for (const e of ch.entries) ids += e.endId - e.startId;
+            channels[name] = { layer: ch.layer, kind: ch.kind, entries: ch.entries.length, ids };
+            totalEntries += ch.entries.length;
+            totalIds += ids;
         }
 
         return {
-            rendererCount: this._registry.length,
-            totalInstances,
+            channels,
+            totalEntries,
+            totalIds,
             targetWidth: target?.width ?? 0,
             targetHeight: target?.height ?? 0,
             targetBytes,
-            pickingIdBytes: totalPickingIdBytes,
-            totalBytes: targetBytes + totalPickingIdBytes,
-            nextPickingId: this._nextPickingId,
             resolutionScale: this._scale,
             lastRenderMs: this._lastRenderMs ?? 0,
             lastReadMs: this._lastReadMs ?? 0,
@@ -736,10 +835,10 @@ export class PickingSystem {
     }
 
     dispose() {
-        for (const entry of this._registry) {
-            entry.pickingMaterial.dispose();
+        for (const ch of this._channels.values()) {
+            for (const entry of ch.entries) entry.material.dispose();
+            ch.entries = [];
         }
-        this._registry = [];
         if (this._target) {
             this._target.dispose();
             this._target = null;

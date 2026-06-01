@@ -87,6 +87,11 @@ export default class TerminalGrid extends THREE.Object3D {
         this._worldBounds = null;
         this._localBoundsDirty = true;
 
+        // Optional picking system — wired via setPickingSystem(). Terminals keep a
+        // fixed cols*rows instance count, so the renderer is re-registered only on
+        // resize (not per content frame, unlike CodeGrid which re-flushes geometry).
+        this._pickingSystem = null;
+
         // Acquire a group in the DataTexture for O(1) positioning.
         this._groupId = this._renderer.createGroup();
 
@@ -291,6 +296,30 @@ export default class TerminalGrid extends THREE.Object3D {
     }
 
     /**
+     * Get the underlying GlyphField renderer. Mirrors CodeGrid.getRenderer() so
+     * canvas picking can map a resolved pick (renderer) back to this entity.
+     * @returns {import('../GlyphField.js').default|null}
+     */
+    getRenderer() {
+        return this._renderer;
+    }
+
+    /**
+     * Wire a PickingSystem. Registers two channels (mirrors CodeGrid):
+     *   - 'glyph' (token = renderer) — per-cell picks; resize() re-registers it
+     *     (cols*rows changes the instance count).
+     *   - 'grid'  (token = this terminal) — the background panel, the whole-panel
+     *     grid-level pickable; stable, registered once here.
+     * @param {import('../picking/PickingSystem.js').PickingSystem} pickingSystem
+     */
+    setPickingSystem(pickingSystem) {
+        this._pickingSystem = pickingSystem;
+        if (!pickingSystem) return;
+        if (this._renderer)   pickingSystem.register('glyph', this._renderer, this._renderer);
+        if (this._background) pickingSystem.register('grid', this._background, this);
+    }
+
+    /**
      * Resize the terminal. Rebuilds parallel arrays and positions.
      * After resize, the next write() / applyScreen() provides the new content.
      *
@@ -327,6 +356,13 @@ export default class TerminalGrid extends THREE.Object3D {
         // Full re-apply: swaps in freshly-sized attribute arrays.
         this._applyToRenderer();
         this._updateBackground();
+
+        // Instance count changed (cols*rows) → re-register the glyph channel so
+        // the pick pass sees the new ID block and geometry. (The grid-channel
+        // panel is stable; _updateBackground only rescaled it.)
+        if (this._pickingSystem) {
+            this._pickingSystem.register('glyph', this._renderer, this._renderer);
+        }
     }
 
     /**
@@ -334,6 +370,12 @@ export default class TerminalGrid extends THREE.Object3D {
      * Call this when the terminal is permanently closed.
      */
     dispose() {
+        // Leave both picking channels cleanly before tearing down the renderer +
+        // panel, or the passes would swap materials onto a disposed mesh.
+        if (this._pickingSystem) {
+            if (this._renderer)   this._pickingSystem.unregister('glyph', this._renderer);
+            if (this._background) this._pickingSystem.unregister('grid', this._background);
+        }
         if (this._renderer) {
             this._renderer.instanceMesh.geometry.dispose();
             this._renderer.instanceMesh.material.dispose();

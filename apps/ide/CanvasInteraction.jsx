@@ -5,69 +5,97 @@ import { useAppCommands } from '../../app/client/CommandProvider.jsx';
 
 const round = (n) => Math.round(n * 100) / 100;
 
-// Canvas interaction — clicking/hovering grids in the 3D scene.
+// Canvas interaction — hovering / clicking / dragging grids in the 3D scene.
 //
 // The grids are imperative Object3Ds (not r3f <mesh> JSX), so r3f's own event
-// system doesn't see them. We attach our own pointer handlers to the canvas and
-// raycast against each grid's world-space BOUNDS (cheap + grid-level — the GPU
-// PickingSystem resolves to individual glyphs, which is overkill for "select a
-// file"). Selection is written through the SAME attention.set / camera.focus
-// commands the CLI uses, so a canvas click and `glyph3d-cli attention.set primary
-// <id>` are indistinguishable downstream.
+// system doesn't see them. Hit-testing is the GPU ID pass (PickingSystem), NOT
+// raycasting: the picking buffer is the single source of truth for what's under
+// the cursor. The 'grid' channel renders each grid's background panel with a
+// grid-level ID — pixel-precise, covers the whole panel (no gaps), and resolves
+// the FRONT grid in an overlap/cascade (depth-tested). The 'glyph' channel
+// (char-level) stays registered for highlighting features.
+//
+// Selection is written through the SAME attention.set / camera.focus commands the
+// CLI uses, so a canvas click and `glyph3d-cli attention.set primary <id>` are
+// indistinguishable downstream.
 
 const DRAG_PX = 5; // pointer travel above this = a drag (orbit/pan), not a click
 
-/**
- * Raycast every registered entity that exposes world bounds (code grids AND
- * terminals); return the nearest entry ({ id, type, grid, ... }) or null.
- * Bounds-only — no per-instance glyph raycast. We iterate registry.list()
- * rather than getGrids() (which is grids-only) so terminals are pickable too.
- */
-function pickEntity(ctx, raycaster) {
-  const ray = raycaster.ray;
-  const hit = new THREE.Vector3();
-  let best = null;
-  let bestDist = Infinity;
-  for (const entry of ctx.registry.list()) {
-    const box = entry.grid?.getBounds?.();
-    if (!box || box.isEmpty()) continue;
-    if (ray.intersectBox(box, hit)) {
-      const d = ray.origin.distanceToSquared(hit);
-      if (d < bestDist) { bestDist = d; best = entry; }
-    }
-  }
-  return best;
+// Map a grid object (the token a 'grid'-channel pick resolves to) back to its
+// registry entry { id, type, grid }.
+function entryForGrid(registry, grid) {
+  if (!grid) return null;
+  const id = registry.getIdByGrid(grid);
+  return id ? registry.get(id) : null;
 }
 
-/** Pointer → raycast → attention + camera, all via the command router. */
+/** Pointer + camera → GPU grid-channel pick → attention + camera, via the router. */
 export function CanvasPicker() {
-  const { gl, camera } = useThree();
+  const { gl, camera, scene } = useThree();
   const client = useAppCommands();
+  // Cursor + last-pick guards, so the per-frame hover only picks when the cursor
+  // OR the camera actually moved (idle frames cost nothing). hoverEntry caches the
+  // last resolved entity so a click/drag acts on exactly what's highlighted.
+  const s = useRef({
+    x: 0, y: 0, in: false, downX: 0, downY: 0,
+    hoverId: null, hoverEntry: null,
+    pickPending: false, gpuOk: false, gpuWarned: false, lastPs: null,
+    lx: NaN, ly: NaN, lin: false,
+    px: NaN, py: NaN, pz: NaN, qx: NaN, qy: NaN, qz: NaN, qw: NaN,
+  }).current;
+
+  // Wire the picking system into each grid/terminal as it registers, so the ID
+  // pass covers every glyph mesh + panel. ps is created in CommandProvider's
+  // effect (which runs after this child mounts), so we (re)sweep on every registry
+  // change — by the time any grid registers (session restore / file.open), ps exists.
+  useEffect(() => {
+    if (!client) return;
+    const { ctx, registry } = client;
+    const wired = new WeakSet();
+    let cancelled = false;
+    let tslWarned = false;
+    const wire = () => {
+      const ps = ctx.pickingSystem;
+      if (!ps) return;
+      ps._tslReady.then(() => {
+        if (cancelled) return;
+        for (const entry of [...registry.findByType('grid'), ...registry.findByType('terminal')]) {
+          const grid = entry.grid;
+          if (grid && !wired.has(grid) && typeof grid.setPickingSystem === 'function') {
+            wired.add(grid);
+            grid.setPickingSystem(ps);
+          }
+        }
+      }).catch((e) => {
+        // TSL failed to load (e.g. the dynamic three/webgpu import rejected): no
+        // grid gets wired and the ID pass stays empty (hover/click won't resolve).
+        // Warn once so it isn't silent.
+        if (!tslWarned) { tslWarned = true; console.warn('[CanvasPicker] TSL picking unavailable; hover/select disabled', e); }
+      });
+    };
+    wire();
+    registry.addChangeListener(wire);
+    return () => { cancelled = true; registry.removeChangeListener(wire); };
+  }, [client]);
 
   useEffect(() => {
     if (!client) return;
-    const { ctx, router } = client;
+    const { router } = client;
     const dom = gl.domElement;
-    const raycaster = new THREE.Raycaster();
-    const ndc = new THREE.Vector2();
-    let downX = 0, downY = 0, hoverId = null;
 
-    const pickAt = (e) => {
-      const r = dom.getBoundingClientRect();
-      ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
-      raycaster.setFromCamera(ndc, camera);
-      return pickEntity(ctx, raycaster);
-    };
-
-    const onDown = (e) => { downX = e.clientX; downY = e.clientY; };
+    const onMove = (e) => { s.x = e.clientX; s.y = e.clientY; s.in = true; };
+    const onEnter = () => { s.in = true; };
+    const onLeave = () => { s.in = false; };
+    const onDown = (e) => { s.downX = e.clientX; s.downY = e.clientY; };
 
     const onUp = (e) => {
-      // Only a click if the pointer barely moved (else it was an orbit/pan).
-      if (Math.hypot(e.clientX - downX, e.clientY - downY) > DRAG_PX) return;
-      const entry = pickAt(e);
+      // Only a click if the pointer barely moved (else it was an orbit/pan/drag).
+      if (Math.hypot(e.clientX - s.downX, e.clientY - s.downY) > DRAG_PX) return;
+      // Act on exactly what's highlighted (the grid-channel hover result). The
+      // hover loop keeps s.hoverEntry current for the cursor position; clicking
+      // empty space (hoverEntry null) releases keyboard focus.
+      const entry = s.hoverEntry;
       if (!entry) {
-        // Click on empty space releases keyboard focus so a terminal you clicked
-        // away from stops receiving keystrokes.
         router.execute('attention.set key none');
         return;
       }
@@ -75,31 +103,91 @@ export function CanvasPicker() {
       router.execute(`camera.focus ${entry.id}`);
       // Terminals take keyboard focus on click (type immediately); clicking any
       // other entity releases the key slot.
-      if (entry.type === 'terminal') {
-        router.execute(`attention.set key ${entry.id}`);
-      } else {
-        router.execute('attention.set key none');
-      }
+      router.execute(entry.type === 'terminal' ? `attention.set key ${entry.id}` : 'attention.set key none');
     };
 
-    const onMove = (e) => {
-      const id = pickAt(e)?.id ?? null;
-      if (id !== hoverId) {
-        hoverId = id;
-        router.execute(`attention.set hover ${id || 'none'}`);
-        dom.style.cursor = id ? 'pointer' : 'default';
-      }
-    };
-
+    dom.addEventListener('pointermove', onMove);
+    dom.addEventListener('pointerenter', onEnter);
+    dom.addEventListener('pointerleave', onLeave);
     dom.addEventListener('pointerdown', onDown);
     dom.addEventListener('pointerup', onUp);
-    dom.addEventListener('pointermove', onMove);
     return () => {
+      dom.removeEventListener('pointermove', onMove);
+      dom.removeEventListener('pointerenter', onEnter);
+      dom.removeEventListener('pointerleave', onLeave);
       dom.removeEventListener('pointerdown', onDown);
       dom.removeEventListener('pointerup', onUp);
-      dom.removeEventListener('pointermove', onMove);
     };
-  }, [client, gl, camera]);
+  }, [client, gl, s]);
+
+  // Re-evaluate hover every frame the cursor OR camera moved. A pure pointermove
+  // hover goes stale the moment the CAMERA moves under a still cursor (pan / zoom /
+  // Ctrl-drag fire no pointer event). The 'grid' channel ID pass is pixel-precise
+  // and covers the whole panel — immune to the AABB overlap ambiguity that
+  // mis-hovered cascaded grids, and with no dead zones between glyphs.
+  useFrame(() => {
+    if (!client) return;
+    const c = camera;
+    const dom = gl.domElement;
+
+    // Resolve a picked entry into the hover slot. Always refresh the cached entry
+    // (cheap); only fire the command + cursor change when the id changes.
+    const applyHover = (entry) => {
+      const id = entry?.id ?? null;
+      s.hoverEntry = entry ?? null;
+      if (id === s.hoverId) return;
+      s.hoverId = id;
+      client.router.execute(`attention.set hover ${id || 'none'}`);
+      dom.style.cursor = id ? 'pointer' : 'default';
+    };
+
+    const cursorMoved = s.x !== s.lx || s.y !== s.ly || s.in !== s.lin;
+    const camMoved =
+      c.position.x !== s.px || c.position.y !== s.py || c.position.z !== s.pz ||
+      c.quaternion.x !== s.qx || c.quaternion.y !== s.qy || c.quaternion.z !== s.qz || c.quaternion.w !== s.qw;
+    if (!cursorMoved && !camMoved) return;
+    s.lx = s.x; s.ly = s.y; s.lin = s.in;
+    s.px = c.position.x; s.py = c.position.y; s.pz = c.position.z;
+    s.qx = c.quaternion.x; s.qy = c.quaternion.y; s.qz = c.quaternion.z; s.qw = c.quaternion.w;
+
+    const ps = client.ctx.pickingSystem;
+    // If the PickingSystem instance was swapped (dev HMR of CommandProvider),
+    // reset the per-instance confirmation latch so the log reflects the new one.
+    if (ps !== s.lastPs) { s.lastPs = ps; s.gpuOk = false; s.gpuWarned = false; }
+
+    if (ps && s.in) {
+      // Feed the cursor (canvas-relative); force a pick on camera-move (no pointer
+      // event fires then). One pick in flight at a time. useFrame runs before r3f's
+      // main render, so the offscreen ID pass is safe here.
+      const rect = dom.getBoundingClientRect();
+      ps.setMousePosition(s.x - rect.left, s.y - rect.top);
+      if (camMoved) ps.markDirty();
+      if (!s.pickPending && ps._needsPick) {
+        s.pickPending = true;
+        ps.pickAsync('grid', c, scene).then((hit) => {
+          s.pickPending = false;
+          // Guard on s.in: a pick resolving AFTER the cursor left must clear hover.
+          const entry = (s.in && hit) ? entryForGrid(client.ctx.registry, hit.token) : null;
+          if (entry && !s.gpuOk) {
+            s.gpuOk = true;
+            console.log(`[CanvasPicker] grid picking confirmed → ${entry.id}`);
+          }
+          applyHover(entry);
+        }).catch((err) => {
+          s.pickPending = false;
+          if (!s.gpuWarned) {
+            s.gpuWarned = true;
+            console.warn('[CanvasPicker] grid pick failed', err);
+          }
+          applyHover(null);
+        });
+      }
+      return;
+    }
+
+    // No picking system yet, or cursor outside the canvas → clear hover.
+    applyHover(null);
+  });
 
   return null;
 }
@@ -120,20 +208,14 @@ export function ObjectDragger() {
     if (!client) return;
     const { ctx, router } = client;
     const dom = gl.domElement;
-    const raycaster = new THREE.Raycaster();
-    const ndc = new THREE.Vector2();
     let drag = null; // { grid, id, type, lastX, lastY }
-
-    const pickAt = (e) => {
-      const r = dom.getBoundingClientRect();
-      ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
-      raycaster.setFromCamera(ndc, camera);
-      return pickEntity(ctx, raycaster);
-    };
 
     const onDown = (e) => {
       if (e.button !== 0 || !(e.ctrlKey || e.metaKey)) return; // Ctrl/Cmd + LMB only
-      const entry = pickAt(e);
+      // Grab whatever's highlighted — the grid-channel hover result, in the
+      // attention bus. Consistent with the outline the user sees.
+      const hid = ctx.attentionManager?.get('hover')?.id;
+      const entry = hid ? ctx.registry.get(hid) : null;
       if (!entry) return;
       drag = { grid: entry.grid, id: entry.id, type: entry.type, lastX: e.clientX, lastY: e.clientY };
       router.execute(`attention.set primary ${entry.id}`); // highlight what you're moving
@@ -246,7 +328,7 @@ export function SelectionIndicator() {
   }, [client, scene]);
 
   // Re-sync box geometry from the tracked grids' bounds each frame (2 boxes —
-  // cheap, and getBounds is cached unless the grid actually moved).
+  // cheap: getBounds is an 8-corner transform of cached local content bounds).
   useFrame(() => {
     const t = tracked.current;
     const fit = (box, grid) => {

@@ -112,11 +112,13 @@ class CodeGrid extends THREE.Object3D {
             this.scale.setScalar(this.config.gridScale);
         }
 
-        // Cached world-space bounds — avoids allocating a new Box3 and recomputing
-        // applyMatrix4 on every getBounds() call. Dirtied on content change and
-        // on matrixWorld updates (position/rotation/scale changes).
+        // Reusable output Box3 for getBounds(). NOT a cache of the world box —
+        // getBounds() recomputes it fresh every call (cheap: an 8-corner transform
+        // of the cached LOCAL content bounds by the current matrix). Caching the
+        // *world* box silently broke picking/selection after a move (the dirty
+        // probe only watched translation X), so the expensive part (local content
+        // bounds) is cached and the cheap transform is always re-derived.
         this._boundsCache = null;
-        this._boundsCacheDirty = true;
         // Bounds from the worker path (raw plain-object bounds from buffer builder)
         this._workerBoundsCache = null;
         // Whether the renderer-side content bounds should be recomputed
@@ -378,74 +380,39 @@ class CodeGrid extends THREE.Object3D {
     // ============ Spatial Queries ============
 
     /**
-     * Override updateMatrixWorld to dirty the bounds cache whenever this
-     * object's world transform changes (position, rotation, or scale).
-     * @override
-     */
-    updateMatrixWorld(force) {
-        // Read the dirty flag before super clears it, and snapshot tx for change detection.
-        const needsUpdate = this.matrixWorldNeedsUpdate || force;
-        const prevTx = this.matrixWorld.elements[12]; // translation x as cheap change probe
-        super.updateMatrixWorld(force);
-        if (needsUpdate || this.matrixWorld.elements[12] !== prevTx) {
-            this._boundsCacheDirty = true;
-        }
-    }
-
-    /**
-     * Get bounding box of this grid.
-     * Returns a cached THREE.Box3 in world coordinates. The cache is invalidated
-     * whenever the transform changes (via updateMatrixWorld) or content is updated
-     * (via _markBoundsDirty). Callers must NOT mutate the returned object.
+     * World-space AABB of this grid, for picking, selection, and framing.
+     * Re-derived FRESH on every call: the local content bounds are cached (rebuilt
+     * only on content change), and the cheap 8-corner transform by the current
+     * world matrix is redone each time — so a move/rotate/scale in ANY axis is
+     * reflected immediately, with no cache to go stale. Mirrors TerminalGrid.
+     * Callers must not hold the returned box across calls (it is reused).
      * @returns {THREE.Box3} Bounding box in world coordinates
      */
     getBounds() {
-        if (this._contentBoundsDirty) {
-            this._boundsCacheDirty = true;
-        }
+        // Ensure matrixWorld reflects the latest transform — getBounds is called
+        // from pointer / useFrame paths that run before r3f renders, so the matrix
+        // can otherwise lag a just-applied move.
+        this.updateWorldMatrix(true, false);
 
-        if (!this._boundsCacheDirty && this._boundsCache) {
-            return this._boundsCache;
-        }
-
-        const padding = this.config.backgroundPadding;
-
-        // Get content bounds (null when content is unloaded)
-        const contentBounds = this._getContentBounds();
-
-        if (!this._boundsCache) {
-            this._boundsCache = new THREE.Box3();
-        }
+        const contentBounds = this._getContentBounds(); // local AABB, cached on content change
+        if (!this._boundsCache) this._boundsCache = new THREE.Box3();
         const box = this._boundsCache;
 
-        if (contentBounds) {
-            box.min.set(
-                contentBounds.min.x - padding,
-                contentBounds.min.y - padding,
-                contentBounds.min.z
-            );
-            box.max.set(
-                contentBounds.max.x + padding,
-                contentBounds.max.y + padding,
-                contentBounds.max.z
-            );
-        } else {
-            box.makeEmpty();
-        }
+        if (!contentBounds) { box.makeEmpty(); return box; }
 
-        // Transform to world coordinates
-        box.applyMatrix4(this.matrixWorld);
-        this._boundsCacheDirty = false;
+        const padding = this.config.backgroundPadding;
+        box.min.set(contentBounds.min.x - padding, contentBounds.min.y - padding, contentBounds.min.z);
+        box.max.set(contentBounds.max.x + padding, contentBounds.max.y + padding, contentBounds.max.z);
+        box.applyMatrix4(this.matrixWorld); // world box re-derived from current matrix
         return box;
     }
 
     /**
-     * Mark the world-space bounds cache dirty. Call after content changes or
-     * manual position adjustments that bypass updateMatrixWorld.
+     * No-op. getBounds() now recomputes the world box fresh every call, so there
+     * is no world-bounds cache to invalidate. Kept because external callers
+     * (fileCommands, layoutCommands) still call it defensively after moving a grid.
      */
-    _markBoundsDirty() {
-        this._boundsCacheDirty = true;
-    }
+    _markBoundsDirty() {}
 
     /**
      * Get local content bounds (plain-object form, not a THREE.Box3).
@@ -486,15 +453,19 @@ class CodeGrid extends THREE.Object3D {
     }
 
     /**
-     * Wire a PickingSystem so flush paths automatically re-register this
-     * grid's renderer after every buffer rebuild.
+     * Wire a PickingSystem so flush paths automatically re-register this grid's
+     * renderer after every buffer rebuild. Registers two channels:
+     *   - 'glyph' (token = renderer) — per-character picks; flush re-registers it
+     *     because instanceCount changes.
+     *   - 'grid'  (token = this grid) — the background panel, the whole-panel
+     *     grid-level pickable; stable, registered once here.
      * @param {import('../picking/PickingSystem.js').PickingSystem} pickingSystem
      */
     setPickingSystem(pickingSystem) {
         this._pickingSystem = pickingSystem;
-        if (this._renderer && pickingSystem) {
-            pickingSystem.registerRenderer(this._renderer);
-        }
+        if (!pickingSystem) return;
+        if (this._renderer)   pickingSystem.register('glyph', this._renderer, this._renderer);
+        if (this._background) pickingSystem.register('grid', this._background, this);
     }
 
     /**
@@ -601,6 +572,16 @@ class CodeGrid extends THREE.Object3D {
     unloadContent() {
         if (!this._renderer) return; // already unloaded or fully disposed
 
+        // Leave the glyph channel cleanly. _pickingSystem survives unload, and
+        // reloadContent() builds a NEW renderer that re-registers; without this,
+        // register (which de-dups only by mesh identity) can't drop the old block,
+        // so a stale entry pointing at the disposed renderer leaks per evict→reload
+        // cycle. The grid channel (background panel) persists — the grid stays
+        // pickable while its content is unloaded.
+        if (this._pickingSystem && this._renderer) {
+            this._pickingSystem.unregister('glyph', this._renderer);
+        }
+
         this._renderer.dispose();
         this._renderer = null;
 
@@ -669,6 +650,13 @@ class CodeGrid extends THREE.Object3D {
      * Dispose of all resources
      */
     dispose() {
+        // Leave both picking channels cleanly before the renderer + panel are
+        // torn down, or the passes would swap materials onto a disposed mesh.
+        if (this._pickingSystem) {
+            if (this._renderer)   this._pickingSystem.unregister('glyph', this._renderer);
+            if (this._background) this._pickingSystem.unregister('grid', this._background);
+        }
+
         // Dispose renderer
         if (this._renderer) {
             this._renderer.dispose();
@@ -768,7 +756,7 @@ class CodeGrid extends THREE.Object3D {
         });
 
         if (this._pickingSystem) {
-            this._pickingSystem.registerRenderer(this._renderer);
+            this._pickingSystem.register('glyph', this._renderer, this._renderer);
         }
     }
 
@@ -938,7 +926,7 @@ class CodeGrid extends THREE.Object3D {
         }
 
         if (this._renderer && this._pickingSystem) {
-            this._pickingSystem.registerRenderer(this._renderer);
+            this._pickingSystem.register('glyph', this._renderer, this._renderer);
         }
 
         this._dirty = false;
@@ -980,7 +968,7 @@ class CodeGrid extends THREE.Object3D {
         }
 
         if (this._renderer && this._pickingSystem) {
-            this._pickingSystem.registerRenderer(this._renderer);
+            this._pickingSystem.register('glyph', this._renderer, this._renderer);
         }
 
         this._dirty = false;
@@ -1716,8 +1704,9 @@ class CodeGrid extends THREE.Object3D {
      * @private
      */
     _updateBackground() {
-        // Content changed — dirty the world-space bounds cache
-        this._boundsCacheDirty = true;
+        // Content changed — the local content bounds must be recomputed (getBounds
+        // re-derives the world box from them each call).
+        this._contentBoundsDirty = true;
 
         if (!this._background || !this.config.showBackground) {
             if (this._background) {

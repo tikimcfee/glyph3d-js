@@ -8,6 +8,7 @@ import { installConsoleForwarder } from '@glyph3d/core/services/orchestration/co
 import AttentionManager from '@glyph3d/core/services/interaction/AttentionManager.js';
 import EntityKeystrokeRouter from '@glyph3d/core/services/interaction/EntityKeystrokeRouter.js';
 import RemoteFileSystemProvider from '@glyph3d/core/services/data/RemoteFileSystemProvider.js';
+import { PickingSystem } from '@glyph3d/core/picking/PickingSystem.js';
 import SessionStore from './SessionStore.js';
 // The spine, ported verbatim — handlers register lazily; nothing here knows the
 // shell. Their only deps are @glyph3d/core, three, and sibling helpers.
@@ -83,6 +84,11 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     windowManager: null,
     wsbridge: null,
 
+    // GPU glyph-picking system (material-swap ID pass on a dedicated render
+    // layer). Created in the effect below once gl exists; canvas hover/click
+    // resolves pixel-perfect picks through it. Null until then.
+    pickingSystem: null,
+
     // Read-only local filesystem over the relay (fs/* RPC). Set once the bridge
     // exists; commands like file.open read files through it. Swap for the GitHub
     // adapter (RepositoryAdapter) here later — same surface, no command changes.
@@ -140,6 +146,13 @@ export default function CommandProvider({ atlas, port = 8080, cameraControllerRe
 
   useEffect(() => {
     const state = stateRef.current;
+
+    // GPU glyph picking — one ID-pass system bound to the WebGPU renderer. Canvas
+    // hover/click resolves through it (CanvasPicker wires each grid/terminal in
+    // via setPickingSystem). 'cell' mode: the whole glyph quad is pickable.
+    const pickingSystem = new PickingSystem(gl, { mode: 'cell' });
+    state.ctx.pickingSystem = pickingSystem;
+
     const url = `ws://localhost:${port}`;
     const bridge = new WebSocketBridge(state.router, {
       port,
@@ -184,6 +197,8 @@ export default function CommandProvider({ atlas, port = 8080, cameraControllerRe
       session.dispose();
       keystrokes.dispose();
       bridge.disconnect();
+      pickingSystem.dispose();
+      state.ctx.pickingSystem = null;
     };
   }, [port]);
 

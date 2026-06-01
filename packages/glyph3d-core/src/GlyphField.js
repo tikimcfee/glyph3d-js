@@ -17,7 +17,7 @@
  *   render(), setGlyphHighlight(), getMemoryStats(), beginBatchUpdate(),
  *   endBatchUpdate(), instanceMesh, renderedTexts, _groupTexture, _maxGroups
  *
- * instancePickingId is populated by PickingSystem.registerRenderer() after render().
+ * instancePickingId is populated by PickingSystem.register() after render().
  */
 
 import * as THREE from 'three';
@@ -443,7 +443,7 @@ export default class GlyphField {
             new THREE.InstancedBufferAttribute(new Float32Array(maxCount * 3), 3));
         geometry.setAttribute('instanceGroupId',
             new THREE.InstancedBufferAttribute(new Float32Array(maxCount), 1));
-        // instancePickingId — written by PickingSystem.registerRenderer() after flush
+        // instancePickingId — written by PickingSystem.register() after flush
         geometry.setAttribute('instancePickingId',
             new THREE.InstancedBufferAttribute(new Float32Array(maxCount), 1));
 
@@ -782,7 +782,7 @@ export default class GlyphField {
     // ── Picking seam ──────────────────────────────────────────────────────────
 
     /**
-     * Descriptor for PickingSystem.registerRenderer() — exposes the same
+     * Descriptor for PickingSystem.register() — exposes the same
      * properties that GlyphRenderer exposes for backward compatibility.
      */
     getPickingDescriptor() {
