@@ -209,6 +209,7 @@ export class WorkerBridge {
                         metrics: shared.metrics,
                         defaultColor: shared.defaultColor,
                         upem: this._upem,
+                        layout: shared.layout,  // per-grid layout params (structured-clone-safe)
                     }
                 }
             });
@@ -280,6 +281,7 @@ export class WorkerBridge {
             metrics: shared.metrics,
             defaultColor: shared.defaultColor,
             upem: this._upem,
+            layout: shared.layout,  // per-grid layout params
         });
     }
 

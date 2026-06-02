@@ -23,7 +23,7 @@ import GlyphField from '../GlyphField.js';
 import { getWorkerBridge, isWorkersSupported } from '../workers/WorkerBridge.js';
 import { iterGraphemes } from '../utils/grapheme.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
-import { paginationGeometry } from '../workers/builders/index.js';
+import { paginationGeometry, resolveLayoutParams, DEFAULT_LAYOUT } from '../workers/builders/index.js';
 import LayoutDescription from '../core/LayoutDescription.js';
 
 // Reused for lines without wraps — most lines, in the common case.
@@ -62,6 +62,10 @@ class CodeGrid extends THREE.Object3D {
             // Check options first, then atlas (shared across all renderers)
             slugData: options.slugData || (atlas && atlas._slugData) || null,
             shaper: options.shaper || (atlas && atlas._shaper) || null,
+            // Layout params — how this file folds into space (Step 3a). Per-grid; threaded
+            // through the build's `shared` channel AND read by _buildLayoutDescription's geom,
+            // so the glyphs and the caret/highlight queries can never fold differently.
+            layout: { ...DEFAULT_LAYOUT, ...(options.layout || {}) },
         };
 
         // Content state
@@ -649,6 +653,43 @@ class CodeGrid extends THREE.Object3D {
     }
 
     /**
+     * Change this grid's layout params and refold the glyphs in place — the source
+     * text and the camera don't move, only HOW the file folds into space. Merges
+     * `params` over the current `config.layout`, then re-runs the full layout pipeline
+     * (the reload path), so the builder AND the LayoutDescription pick up the new params
+     * together (caret/highlight stay aligned). No-op when there's no source text yet;
+     * an evicted grid is reconstructed first. See LAYOUT_PLAN.md §3a.
+     *
+     * @param {Object} [params] - subset of layout params (wrapWidth, pageHeight, pagesWide,
+     *   pageGapX, pageGapY, zWrapSpacing, axis). 0 = off for wrapWidth/pageHeight.
+     * @returns {Promise<this>}
+     */
+    async setLayout(params) {
+        if (params) this.config.layout = { ...this.config.layout, ...params };
+        if (!this.content) return this;        // nothing to lay out yet
+        this.getLineCount();                   // guarantee this.lines is populated (wrap index reads it)
+        this._ensureRenderer();                // reconstruct if content was evicted
+        this._clearContent();                  // queue removal of current filename + content items
+        await this._layoutContentAsync();      // re-add + re-flush + rebuild line tables + _layout
+        this._updateBackground();
+        // If editing, the glyphs just moved under the caret — repaint it against the fresh
+        // _layout (mirrors _relayoutPreservingCursor); else it lingers at the old fold's spot.
+        if (this._cursor) {
+            const ln = Math.max(0, Math.min(this._cursor.line, this.lines.length - 1));
+            const cl = Math.max(0, Math.min(this._cursor.col, this.lines[ln]?.length ?? 0));
+            this._cursor.line = ln;
+            this._cursor.col = cl;
+            this._updateCaretMesh();
+        }
+        return this;
+    }
+
+    /** @returns {Object} the current layout params (live reference to config.layout) */
+    getLayout() {
+        return this.config.layout;
+    }
+
+    /**
      * Dispose of all resources
      */
     dispose() {
@@ -850,7 +891,7 @@ class CodeGrid extends THREE.Object3D {
             if (missing.size > 0) this.atlas.ensureGraphemes(Array.from(missing));
         }
 
-        return { items, metrics, defaultColor };
+        return { items, metrics, defaultColor, layout: this.config.layout };
     }
 
     /**
@@ -922,8 +963,8 @@ class CodeGrid extends THREE.Object3D {
 
         // Process adds via the builder (synchronous main-thread build)
         if (this._pendingAdds.length > 0) {
-            const { items, metrics, defaultColor } = this._prepareAddsForBuild();
-            const buffers = getWorkerBridge().buildBatchBuffersSync(items, { metrics, defaultColor });
+            const { items, metrics, defaultColor, layout } = this._prepareAddsForBuild();
+            const buffers = getWorkerBridge().buildBatchBuffersSync(items, { metrics, defaultColor, layout });
             this._commitBuiltBuffers(buffers, items);
         }
 
@@ -956,9 +997,9 @@ class CodeGrid extends THREE.Object3D {
         this._pendingRemovals = [];
 
         if (this._pendingAdds.length > 0) {
-            const { items, metrics, defaultColor } = this._prepareAddsForBuild();
+            const { items, metrics, defaultColor, layout } = this._prepareAddsForBuild();
             try {
-                const buffers = await getWorkerBridge().buildBatchBuffers(items, { metrics, defaultColor });
+                const buffers = await getWorkerBridge().buildBatchBuffers(items, { metrics, defaultColor, layout });
                 this._commitBuiltBuffers(buffers, items, deferredRemovals);
             } catch (error) {
                 console.warn('CodeGrid: Worker flush failed, falling back to sync:', error);
@@ -1290,6 +1331,7 @@ class CodeGrid extends THREE.Object3D {
         const geom = paginationGeometry(
             { charWidth: m.charWidth, letterSpacing: m.spacing || 0, lineSpacing: m.lineHeight },
             contentWidth,
+            resolveLayoutParams(this.config.layout),  // SAME normalization the builder applies — geom can't drift
         );
         this._layout = new LayoutDescription({
             lineSlotBase: this._lineSlotBase,

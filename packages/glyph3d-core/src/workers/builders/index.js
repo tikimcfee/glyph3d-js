@@ -18,47 +18,72 @@
  */
 
 /**
- * Z-depth wrapping configuration
- * When a line exceeds maxLineWidth characters without a newline,
- * wrap in Z-depth (behind) AND Y (down) so the continuation is
- * readable when viewed head-on — a stepped staircase going down-and-back.
+ * Default layout params — the shape of a glyph field. A per-grid `layout` object
+ * (threaded through the build's `shared` config channel) overrides any subset;
+ * `resolveLayoutParams` merges over these. This is the ONE source of default layout
+ * values — the old `Z_WRAP_CONFIG` / `PAGE_CONFIG` globals folded into one params
+ * struct so "modes" are just param bundles, not code paths. See LAYOUT_PLAN.md §3a.
+ *
+ *  wrapWidth     glyphs on a source line before it wraps down-and-back (Z staircase). 0 = no wrap.
+ *  zWrapSpacing  Z step per intra-line wrap segment, as a multiple of charHeight.
+ *  pageHeight    visual rows per page before pagination breaks to a new column. 0 = no pagination.
+ *  pagesWide     horizontal pages before pagination wraps downward (newspaper columns).
+ *  pageGapX      char-width gap between horizontal pages.
+ *  pageGapY      line-height gap between page rows (vertical).
+ *  axis          'xy' = newspaper columns (default); 'z' = z-pages (reserved for Step 3b).
+ *
+ * `0` means "off/unbounded" for wrapWidth/pageHeight so the struct stays
+ * structured-clone-safe across the worker boundary (no `Infinity`).
  */
-export const Z_WRAP_CONFIG = {
-    maxLineWidth: 200,    // Characters before wrap (0 = disabled)
-    zWrapSpacing: 0.15    // Z spacing multiplier (relative to charHeight) — tight, matches background gap
+export const DEFAULT_LAYOUT = {
+    wrapWidth: 200,
+    zWrapSpacing: 0.15,
+    pageHeight: 150,
+    pagesWide: 5,
+    pageGapX: 10,
+    pageGapY: 10,
+    axis: 'xy',
 };
 
 /**
- * Page-break pagination configuration
- * When a text block exceeds pageHeight visual lines, break into pages.
- * Pages extend right first (up to pagesWide), then wrap downward (Y-stack).
- * Creates a length-wrap flow: right → down, like newspaper columns.
+ * Merge a partial per-grid `layout` over DEFAULT_LAYOUT. `??` keeps an explicit `0`
+ * (the "off" sentinel) rather than treating it as missing. Returns DEFAULT_LAYOUT
+ * directly when nothing is supplied (the common full-default path).
+ * @param {Partial<typeof DEFAULT_LAYOUT>} [layout]
+ * @returns {typeof DEFAULT_LAYOUT}
  */
-export const PAGE_CONFIG = {
-    pageHeight: 150,       // Visual lines per page before page break
-    pagesWide: 5,          // Horizontal pages before wrapping down
-    pageGapX: 10,          // Char-width gap between horizontal pages
-    pageGapY: 10,          // Line-height gap between page rows (vertical)
-};
+export function resolveLayoutParams(layout) {
+    if (!layout) return DEFAULT_LAYOUT;
+    return {
+        wrapWidth:    layout.wrapWidth    ?? DEFAULT_LAYOUT.wrapWidth,
+        zWrapSpacing: layout.zWrapSpacing ?? DEFAULT_LAYOUT.zWrapSpacing,
+        pageHeight:   layout.pageHeight   ?? DEFAULT_LAYOUT.pageHeight,
+        pagesWide:    layout.pagesWide    ?? DEFAULT_LAYOUT.pagesWide,
+        pageGapX:     layout.pageGapX     ?? DEFAULT_LAYOUT.pageGapX,
+        pageGapY:     layout.pageGapY     ?? DEFAULT_LAYOUT.pageGapY,
+        axis:         layout.axis         ?? DEFAULT_LAYOUT.axis,
+    };
+}
 
 /**
  * Page geometry in world units, derived from metrics + the ACTUAL content width
  * (the widest laid-out line's extent). pageWidthWorld is the column spacing; using
- * the real extent — not `maxLineWidth * charAdvance` — is what keeps fanned columns
+ * the real extent — not `wrapWidth * charAdvance` — is what keeps fanned columns
  * from overlapping: the char-count guess drifts against summed HarfBuzz advances and
  * the error accumulates over a column's width. See LAYOUT_PLAN.md.
  *
  * @param {Object} metrics - {charWidth, charHeight, letterSpacing, lineSpacing}
  * @param {number} contentWidth - widest line's world extent (itemMaxX - origin.x)
+ * @param {typeof DEFAULT_LAYOUT} [layout] - resolved layout params (defaults applied if omitted)
  */
-export function paginationGeometry(metrics, contentWidth) {
+export function paginationGeometry(metrics, contentWidth, layout = DEFAULT_LAYOUT) {
     const charAdvance = metrics.charWidth + metrics.letterSpacing;
     return {
-        pageHeightWorld: PAGE_CONFIG.pageHeight * metrics.lineSpacing,
-        pageWidthWorld: contentWidth > 0 ? contentWidth : Z_WRAP_CONFIG.maxLineWidth * charAdvance,
-        gapXWorld: PAGE_CONFIG.pageGapX * charAdvance,
-        gapYWorld: PAGE_CONFIG.pageGapY * metrics.lineSpacing,
-        pagesWide: PAGE_CONFIG.pagesWide,
+        pageHeightWorld: layout.pageHeight * metrics.lineSpacing,
+        pageWidthWorld: contentWidth > 0 ? contentWidth : layout.wrapWidth * charAdvance,
+        gapXWorld: layout.pageGapX * charAdvance,
+        gapYWorld: layout.pageGapY * metrics.lineSpacing,
+        pagesWide: Math.max(1, layout.pagesWide),  // clamp: pagesWide<1 would break the % in paginationShift
     };
 }
 
@@ -73,7 +98,8 @@ export function paginationGeometry(metrics, contentWidth) {
  * @returns {{shiftX:number, mappedRelY:number}}
  */
 export function paginationShift(relY, geom) {
-    if (relY < geom.pageHeightWorld) return { shiftX: 0, mappedRelY: relY };
+    // pageHeightWorld<=0 means pagination is off (pageHeight:0) — no shift, ever.
+    if (geom.pageHeightWorld <= 0 || relY < geom.pageHeightWorld) return { shiftX: 0, mappedRelY: relY };
     const vPage = Math.floor(relY / geom.pageHeightWorld);
     const rowOffsetInPage = relY - vPage * geom.pageHeightWorld;
     const hSlot = vPage % geom.pagesWide;
@@ -123,6 +149,7 @@ export function applyPagination(positions, startIdx, endIdx, origin, geom) {
  */
 export function buildBatchBuffers(items, shared) {
     const { metrics, defaultColor, upem } = shared;
+    const layout = resolveLayoutParams(shared.layout);
 
     // Convert HarfBuzz font units to world units.
     //
@@ -138,9 +165,9 @@ export function buildBatchBuffers(items, shared) {
     const pixelHeight = metrics.pixelHeight || metrics.charHeight / worldScale;
     const ws = worldScale * pixelHeight;
 
-    // Z-depth wrapping settings
-    const maxLineWidth = Z_WRAP_CONFIG.maxLineWidth;
-    const zWrapSpacing = metrics.charHeight * Z_WRAP_CONFIG.zWrapSpacing;
+    // Z-depth wrapping settings (per-grid layout params; wrapWidth 0 = no wrap)
+    const maxLineWidth = layout.wrapWidth;
+    const zWrapSpacing = metrics.charHeight * layout.zWrapSpacing;
 
     // First pass: read pre-shaped data from items to count total glyphs (worst-case)
     let totalGlyphs = 0;
@@ -295,16 +322,16 @@ export function buildBatchBuffers(items, shared) {
         let pageContentWidth = 0;
 
         // Apply page-break pagination if needed
-        if (itemGlyphCount > 0) {
+        if (itemGlyphCount > 0 && layout.pageHeight > 0) {
             const totalYSpan = pos.y - itemMinY;
-            const pageHeightWorld = PAGE_CONFIG.pageHeight * metrics.lineSpacing;
+            const pageHeightWorld = layout.pageHeight * metrics.lineSpacing;
             if (totalYSpan > pageHeightWorld) {
                 // Column spacing = the ACTUAL widest-line extent (itemMaxX is still the
                 // pre-pagination max here, before the recompute below overwrites it), not
                 // maxLineWidth*charAdvance — fixes the fanned-column edge overlap.
                 const contentWidth = itemMaxX > pos.x ? itemMaxX - pos.x : 0;
                 pageContentWidth = contentWidth;
-                applyPagination(positions, itemStartOffset, bufferOffset, pos, paginationGeometry(metrics, contentWidth));
+                applyPagination(positions, itemStartOffset, bufferOffset, pos, paginationGeometry(metrics, contentWidth, layout));
                 // Recompute bounds
                 itemMinX = Infinity; itemMaxX = -Infinity;
                 itemMinY = Infinity; itemMaxY = -Infinity;

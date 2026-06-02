@@ -5,8 +5,8 @@ plus queries) from **buffer construction** (filling instance arrays). Make line/
 data authoritative + queryable; make the two layout shapes *params* not code paths; make
 the eventual GPU compute kernel a transcription with the CPU layout as its oracle.
 
-Status: **design approved 2026-06-01, starting Step 1.** Supersedes the parked
-`experiment/layout-substrate` proposal (reconstructed here from the subsystem map).
+Status: **Steps 1–2 landed (2026-06-01); Step 3 (3a→3b→3c) in progress.** Supersedes the
+parked `experiment/layout-substrate` proposal (reconstructed here from the subsystem map).
 
 ## Decisions locked (Ivan)
 
@@ -71,9 +71,12 @@ Query surface (forward; synchronous; pure math over flat arrays):
   page width comes from the *actual* per-page max-x extent (kills the overlap), and the
   caret reads the same pagination math (kills the duplication).
 
-Modes are params: `{ wrapWidth(=200 glyphs), columnHeight, columnsWide, gaps }`. Tall
-column = `columnHeight:∞, columnsWide:1`; newspaper = finite height, N wide; wall = a flat
-embedding. No `if(mode)` branches.
+Modes are params: `{ wrapWidth(=200 glyphs), pageHeight, pagesWide, gaps, axis }`. Tall
+column = `pageHeight:0(off), pagesWide:1`; no-wrap = `wrapWidth:0`; newspaper = finite
+height, N wide; wall = columns marching wide. No `if(mode)` branches — a preset is just a
+params bundle, and the params feed one `fold()` (see Step 3). `0` = "off/unbounded" for
+`wrapWidth`/`pageHeight` (keeps the params structured-clone-safe across the worker boundary
+— no `Infinity`).
 
 **Compute-ready:** the whole thing is a pure per-glyph function over flat typed arrays + a
 params struct, so the future compute kernel is a mechanical transcription and the CPU
@@ -107,12 +110,39 @@ same windowed-surface object: `{ placement(tree), frame, source, scrollOffset }`
   through `applyPrebuiltBuffers`; formalize `lineSlotOffsets`/`wrapColsPerLine` in the
   `GlyphBufferItemMeta` typedef. Caret shakiness fixed as a side effect.
 
-**Step 3 (later) — output-framing windowing.** Rip out `_renderWindow` input-truncation;
-window = frame + scrollOffset + partial materialization (row-snapped). Wire to wheel-scroll
-(reuse the terminal scroll path) + resize-reflow. Restores source-authoritative line/col.
+**Step 3 (now) — output-framing: one scroll primitive, `fold`, and a frame.**
+The unification (Ivan, 2026-06-01): scrolling *any* surface is one scalar.
+`screenRow = sourceVisualRow − scrollOffset`, then `fold(screenRow, col, params) → (x,y,z)`,
+then clip to the frame. The **macro line table stays scroll-stable** (computed once from the
+full file; `scrollOffset` is a *frame* param, never a layout one) — that is what keeps SOURCE
+`(line,col)` correct across scrolls, i.e. the bug class Step 1–2 killed. `fold` is the only
+per-mode difference, and the terminal is its **degenerate case** (one plane, clip to N rows):
+- flat tall column → no fold; scroll is a rigid `y += offset` slide + clip (no recompute).
+- newspaper → wrap at width, advance columns in **X**.
+- z-pages → wrap at width, advance planes in **Z** — the depth-conveyor falls straight out:
+  `e = r − s`, `page = ⌊e/rowsPerPage⌋`, `z = −page·depth`; bump `s` and a glyph at a page
+  top crosses to the next plane's bottom (content flows up the back planes, hops forward a
+  plane, reaches the front, scrolls off). Back planes hold later rows = look-ahead.
 
-**Step 4 (later) — compute kernel** fills the bulk position buffer behind the same seam;
-CPU stays the oracle + the query engine. Kernel-flags = the params struct.
+For *folded* modes the glyphs don't rigid-slide, they **re-fold** (`fold(r−s,…)` per glyph) —
+still one offset scalar; and `fold` being a pure per-glyph function over the params struct IS
+the compute-kernel shape (Step 4 falls out: scroll-on-GPU = one `scrollOffset` uniform, CPU
+fold stays the oracle).
+
+Ordered sub-steps:
+- **3a (now)** — per-grid layout **params** + a `grid.layout <id> <mode|flags>` verb +
+  relayout. The algorithm reads params from the `shared` config channel instead of the
+  `Z_WRAP_CONFIG`/`PAGE_CONFIG` globals; the builder AND `_buildLayoutDescription` read the
+  *same* per-grid params (so caret/queries can't drift). Defaults reproduce today's output
+  exactly (oracle). Presets: long-column / no-wrap / newspaper / wall.
+- **3b** — z-pages fold variant: same params struct, `axis:'z'`. Static depth-stack first.
+- **3c** — scroll: expose `scrollOffset` + a clip frame + row-snap (reuse the terminal
+  scroll path) + the focus-lock-mode affordance (tab + lock/edit icon — explicit edit, no
+  silent click-to-edit). Then rip `_renderWindow` input-truncation; windowing (partial
+  materialization) becomes a *memory* optimization on the same offset, not a new path.
+
+**Step 4 (later) — compute kernel** transcribes `fold` to fill the bulk position buffer
+behind the same seam; CPU stays the oracle + query engine. Kernel-flags = the params struct.
 
 ## Anchors (from the map)
 

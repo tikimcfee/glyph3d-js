@@ -285,4 +285,69 @@ export default function registerGridCommands(router) {
             data: { index: resolved.idx, cols, rows },
         };
     }, { description: 'Window a code grid to a scrollable cols×rows viewport and re-flow', usage: '<id|index> <cols> <rows>' });
+
+    // grid.layout <id|index> [preset] [--flag value ...] — refold a code grid in place
+    // (Step 3a). Source + camera stay put; only how the file folds into space changes. A
+    // preset is a params bundle; --flags override on top. No params after the id → report
+    // current. Re-flows neighbors after (footprint changes). Modes are params, not branches.
+    const LAYOUT_PRESETS = {
+        newspaper:     { wrapWidth: 200, pageHeight: 150, pagesWide: 5 },   // fan into columns (default)
+        'long-column': { wrapWidth: 200, pageHeight: 0,   pagesWide: 1 },   // one tall column; long lines z-wrap
+        'no-wrap':     { wrapWidth: 0,   pageHeight: 0,   pagesWide: 1 },   // lines run off right; rows = line count
+        wall:          { wrapWidth: 200, pageHeight: 150, pagesWide: 32 },  // wide wall of columns marching right
+    };
+    const LAYOUT_FLAGS = {
+        '--wrap': 'wrapWidth', '--page-height': 'pageHeight', '--pages-wide': 'pagesWide',
+        '--z-spacing': 'zWrapSpacing', '--gap-x': 'pageGapX', '--gap-y': 'pageGapY',
+        // --axis is intentionally NOT exposed yet: axis:'z' (z-pages) is reserved for Step 3b,
+        // and advertising a validated flag that silently no-ops would be a misleading success.
+    };
+    const COUNT_FLAGS = new Set(['wrapWidth', 'pageHeight', 'pagesWide']);  // integer counts → floored
+    router.register('grid.layout', async (args, ctx) => {
+        const presetNames = Object.keys(LAYOUT_PRESETS).join('|');
+        if (args.length < 1) {
+            return { text: `ERR: usage: grid.layout <id|index> [${presetNames}] [--wrap N --page-height H --pages-wide W --z-spacing Z --gap-x X --gap-y Y]`, data: null };
+        }
+        const resolved = resolveGridByIdOrIndex(ctx, args[0]);
+        if (resolved.error) return { text: resolved.error, data: null };
+        if (!(resolved.grid instanceof CodeGrid) || typeof resolved.grid.setLayout !== 'function') {
+            return { text: 'ERR: grid.layout applies only to code grids', data: null };
+        }
+
+        // No params → report the grid's current layout.
+        if (args.length === 1) {
+            const cur = resolved.grid.getLayout();
+            const kv = Object.fromEntries(Object.entries(cur).map(([k, v]) => [k, String(v)]));
+            return { text: box(`GRID #${resolved.idx} LAYOUT`, kvLines(kv), 50) + '\nOK: layout', data: { index: resolved.idx, layout: cur } };
+        }
+
+        // Build the param patch: an optional leading preset, then --flag overrides.
+        const patch = {};
+        let i = 1;
+        if (!args[1].startsWith('--')) {
+            const preset = LAYOUT_PRESETS[args[1]];
+            if (!preset) return { text: `ERR: unknown preset "${args[1]}" (${presetNames})`, data: null };
+            Object.assign(patch, preset);
+            i = 2;
+        }
+        for (; i < args.length; i += 2) {
+            const key = LAYOUT_FLAGS[args[i]];
+            if (!key) return { text: `ERR: unknown flag "${args[i]}" (${Object.keys(LAYOUT_FLAGS).join(' ')})`, data: null };
+            const raw = args[i + 1];
+            if (raw === undefined) return { text: `ERR: ${args[i]} needs a value`, data: null };
+            const n = Number(raw);
+            // Reject Infinity/NaN/negatives — the params struct uses 0 as its off-sentinel,
+            // never Infinity (keeps it clean + structured-clone-safe). Counts floor to ints.
+            if (!Number.isFinite(n) || n < 0) return { text: `ERR: ${args[i]} must be a finite number ≥ 0`, data: null };
+            patch[key] = COUNT_FLAGS.has(key) ? Math.floor(n) : n;
+        }
+
+        await resolved.grid.setLayout(patch);
+        flowLayout(ctx.getGrids());
+
+        return {
+            text: `OK: grid #${resolved.idx} relaid (${resolved.grid.getGlyphCount()} glyphs, ${resolved.grid.getLineCount()} lines)`,
+            data: { index: resolved.idx, layout: resolved.grid.getLayout() },
+        };
+    }, { description: 'Refold a code grid in place: preset or --flags, then re-flow', usage: '<id|index> [preset] [--wrap N ...]' });
 }
