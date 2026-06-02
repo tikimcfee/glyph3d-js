@@ -37,6 +37,7 @@ self.onmessage = function(event) {
                     defaultColor: payload.shared.defaultColor,
                     upem: payload.shared.upem,
                     layout: payload.shared.layout,  // per-grid layout params (else builder falls back to defaults)
+                    scrollOffset: payload.shared.scrollOffset,  // visual rows scrolled (Step 3c)
                 };
                 // Shape raw text → glyph arrays here, off the main thread. The
                 // builder reads item.shaped, so attach it before building. (Items

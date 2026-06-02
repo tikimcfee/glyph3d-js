@@ -33,6 +33,7 @@ export default class LayoutDescription {
      * @param {number} p.originY
      * @param {number} p.lineSpacing
      * @param {number} p.advance - fixed per-glyph advance (analytic fallback only)
+     * @param {number} [p.scrollOffset] - visual rows the fold is scrolled (Step 3c conveyor)
      */
     constructor(p) {
         this.lineSlotBase = p.lineSlotBase ?? null;
@@ -46,6 +47,7 @@ export default class LayoutDescription {
         this.originY = p.originY ?? 0;
         this.lineSpacing = p.lineSpacing ?? 0;
         this.advance = p.advance ?? 0;
+        this.scrollOffset = p.scrollOffset ?? 0;  // visual rows the fold is scrolled (Step 3c)
     }
 
     /** @returns {number} number of source lines */
@@ -122,7 +124,10 @@ export default class LayoutDescription {
         }
         const visualRow = this.lineStartRow[line] + segRow;
         const x = this.originX + (col - segStart) * this.advance;
-        const y = this.originY - visualRow * this.lineSpacing;
+        // Scroll (Step 3c): the builder shifts materialized glyphs up by scrollOffset rows,
+        // so screenRow = visualRow − scrollOffset; the analytic fallback must match, else an
+        // empty-line caret would sit at the unscrolled position.
+        const y = this.originY - (visualRow - this.scrollOffset) * this.lineSpacing;
         if (!this.geom) return { x, y, z: 0 };
         // Empty line has no glyph z (no intra-line wrap); the page fold supplies z via shiftZ
         // (0 for axis 'xy', -page*depth for 'z'), so the caret lands on the right page plane.

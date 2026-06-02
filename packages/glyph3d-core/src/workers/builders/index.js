@@ -163,6 +163,7 @@ export function applyPagination(positions, startIdx, endIdx, origin, geom) {
 export function buildBatchBuffers(items, shared) {
     const { metrics, defaultColor, upem } = shared;
     const layout = resolveLayoutParams(shared.layout);
+    const scrollOffset = shared.scrollOffset || 0;  // visual rows scrolled (Step 3c, the conveyor)
 
     // Convert HarfBuzz font units to world units.
     //
@@ -249,7 +250,11 @@ export function buildBatchBuffers(items, shared) {
         let lineColIdx = 0;  // source col within current line (advances per sg)
 
         let x = pos.x;
-        let y = pos.y;
+        // Step 3c (the conveyor): shift content up by scrollOffset visual rows, so the fold
+        // operates on screenRow = visualRow − scrollOffset. Pagination uses relY = pos.y −
+        // glyphY (origin stays at pos), which then equals screenRow*lineSpacing — content
+        // flows up and, in folded modes, hops between columns/planes at page boundaries.
+        let y = pos.y + scrollOffset * metrics.lineSpacing;
         let z = pos.z;
         const startZ = pos.z;
         let glyphsOnSegment = 0;

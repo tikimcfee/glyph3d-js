@@ -141,6 +141,11 @@ class CodeGrid extends THREE.Object3D {
         this._winRows = 0;
         this._winFirstLine = 0;
         this._sourceLines = null;
+
+        // Scroll offset in VISUAL rows (Step 3c, the conveyor). The fold shifts content up
+        // by this many rows (screenRow = visualRow − scrollOffset), so content flows through
+        // the frame while the camera stays put; folded modes hop columns/planes. 0 = top.
+        this._scrollOffset = 0;
     }
 
     // ============ Slug data ============
@@ -653,19 +658,15 @@ class CodeGrid extends THREE.Object3D {
     }
 
     /**
-     * Change this grid's layout params and refold the glyphs in place — the source
-     * text and the camera don't move, only HOW the file folds into space. Merges
-     * `params` over the current `config.layout`, then re-runs the full layout pipeline
-     * (the reload path), so the builder AND the LayoutDescription pick up the new params
-     * together (caret/highlight stay aligned). No-op when there's no source text yet;
-     * an evicted grid is reconstructed first. See LAYOUT_PLAN.md §3a.
-     *
-     * @param {Object} [params] - subset of layout params (wrapWidth, pageHeight, pagesWide,
-     *   pageGapX, pageGapY, zWrapSpacing, axis). 0 = off for wrapWidth/pageHeight.
+     * Re-fold the grid in place from current state (layout params + scroll offset). Source
+     * text and camera stay put — only how the file folds into space changes. Runs the reload
+     * pipeline so the builder AND the LayoutDescription pick up the current state together
+     * (caret/highlight stay aligned). Shared by setLayout / setScrollOffset. No-op without
+     * source text; reconstructs an evicted grid first.
+     * @private
      * @returns {Promise<this>}
      */
-    async setLayout(params) {
-        if (params) this.config.layout = { ...this.config.layout, ...params };
+    async _relayoutInPlace() {
         if (!this.content) return this;        // nothing to lay out yet
         this.getLineCount();                   // guarantee this.lines is populated (wrap index reads it)
         this._ensureRenderer();                // reconstruct if content was evicted
@@ -684,9 +685,55 @@ class CodeGrid extends THREE.Object3D {
         return this;
     }
 
+    /**
+     * Change this grid's layout params and refold in place (see _relayoutInPlace). Merges
+     * `params` over the current config.layout. See LAYOUT_PLAN.md §3a.
+     * @param {Object} [params] - subset of layout params (wrapWidth, pageHeight, pagesWide, …).
+     * @returns {Promise<this>}
+     */
+    async setLayout(params) {
+        if (params) this.config.layout = { ...this.config.layout, ...params };
+        return this._relayoutInPlace();
+    }
+
     /** @returns {Object} the current layout params (live reference to config.layout) */
     getLayout() {
         return this.config.layout;
+    }
+
+    /**
+     * Set the scroll offset (in VISUAL rows) and refold in place — the conveyor (Step 3c).
+     * The fold shifts content up by `rows`, so content flows through a fixed frame while the
+     * camera stays put; folded modes (newspaper/z-pages) hop content between columns/planes
+     * as it crosses page boundaries. Clamped to [0, total visual rows].
+     * @param {number} rows
+     * @returns {Promise<this>}
+     */
+    async setScrollOffset(rows) {
+        const total = this.getTotalVisualRows();
+        this._scrollOffset = Math.max(0, Math.min(Math.round(rows), total));
+        return this._relayoutInPlace();
+    }
+
+    /** Scroll by a delta in visual rows (positive = scroll down, content flows up). */
+    async scrollBy(deltaRows) {
+        return this.setScrollOffset((this._scrollOffset || 0) + deltaRows);
+    }
+
+    /** @returns {number} current scroll offset in visual rows */
+    getScrollOffset() {
+        return this._scrollOffset || 0;
+    }
+
+    /**
+     * Total VISUAL rows in the current fold (source lines + intra-line wraps). Scroll-stable
+     * (independent of scrollOffset) — derived from the macro line table built each layout.
+     * @returns {number}
+     */
+    getTotalVisualRows() {
+        if (!this._lineStartRow || this._lineStartRow.length === 0) return 0;
+        const last = this._lineStartRow.length - 1;
+        return this._lineStartRow[last] + 1 + (this._lineWrapCols?.[last]?.length || 0);
     }
 
     /**
@@ -891,7 +938,7 @@ class CodeGrid extends THREE.Object3D {
             if (missing.size > 0) this.atlas.ensureGraphemes(Array.from(missing));
         }
 
-        return { items, metrics, defaultColor, layout: this.config.layout };
+        return { items, metrics, defaultColor, layout: this.config.layout, scrollOffset: this._scrollOffset };
     }
 
     /**
@@ -963,8 +1010,8 @@ class CodeGrid extends THREE.Object3D {
 
         // Process adds via the builder (synchronous main-thread build)
         if (this._pendingAdds.length > 0) {
-            const { items, metrics, defaultColor, layout } = this._prepareAddsForBuild();
-            const buffers = getWorkerBridge().buildBatchBuffersSync(items, { metrics, defaultColor, layout });
+            const { items, metrics, defaultColor, layout, scrollOffset } = this._prepareAddsForBuild();
+            const buffers = getWorkerBridge().buildBatchBuffersSync(items, { metrics, defaultColor, layout, scrollOffset });
             this._commitBuiltBuffers(buffers, items);
         }
 
@@ -997,9 +1044,9 @@ class CodeGrid extends THREE.Object3D {
         this._pendingRemovals = [];
 
         if (this._pendingAdds.length > 0) {
-            const { items, metrics, defaultColor, layout } = this._prepareAddsForBuild();
+            const { items, metrics, defaultColor, layout, scrollOffset } = this._prepareAddsForBuild();
             try {
-                const buffers = await getWorkerBridge().buildBatchBuffers(items, { metrics, defaultColor, layout });
+                const buffers = await getWorkerBridge().buildBatchBuffers(items, { metrics, defaultColor, layout, scrollOffset });
                 this._commitBuiltBuffers(buffers, items, deferredRemovals);
             } catch (error) {
                 console.warn('CodeGrid: Worker flush failed, falling back to sync:', error);
@@ -1345,6 +1392,7 @@ class CodeGrid extends THREE.Object3D {
             originY: this._layoutOriginY ?? 0,
             lineSpacing: m.lineHeight,
             advance: m.charWidth + (m.spacing || 0),
+            scrollOffset: this._scrollOffset || 0,  // so the analytic fallback matches the scrolled glyphs
         });
     }
 

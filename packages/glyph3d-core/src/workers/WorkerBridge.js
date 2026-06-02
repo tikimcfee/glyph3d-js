@@ -210,6 +210,7 @@ export class WorkerBridge {
                         defaultColor: shared.defaultColor,
                         upem: this._upem,
                         layout: shared.layout,  // per-grid layout params (structured-clone-safe)
+                        scrollOffset: shared.scrollOffset,  // visual rows scrolled (Step 3c)
                     }
                 }
             });
@@ -282,6 +283,7 @@ export class WorkerBridge {
             defaultColor: shared.defaultColor,
             upem: this._upem,
             layout: shared.layout,  // per-grid layout params
+            scrollOffset: shared.scrollOffset,  // visual rows scrolled (Step 3c)
         });
     }
 

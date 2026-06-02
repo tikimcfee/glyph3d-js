@@ -357,4 +357,35 @@ export default function registerGridCommands(router) {
             data: { index: resolved.idx, layout: resolved.grid.getLayout() },
         };
     }, { description: 'Refold a code grid in place: preset or --flags, then re-flow', usage: '<id|index> [preset] [--wrap N ...]' });
+
+    // grid.scroll <id|index> <±rows|top|bottom> — scroll a code grid's content THROUGH the
+    // fold (Step 3c, the conveyor). scrollOffset shifts content up by N visual rows; the
+    // camera stays put. Folded modes (newspaper/z-pages) flow content between columns/planes.
+    // No 2nd arg → report. Re-folds in place; no neighbor reflow (scroll is a frame op).
+    router.register('grid.scroll', async (args, ctx) => {
+        if (args.length < 1) return { text: 'ERR: usage: grid.scroll <id|index> <±rows|top|bottom>', data: null };
+        const resolved = resolveGridByIdOrIndex(ctx, args[0]);
+        if (resolved.error) return { text: resolved.error, data: null };
+        const g = resolved.grid;
+        if (!(g instanceof CodeGrid) || typeof g.setScrollOffset !== 'function') {
+            return { text: 'ERR: grid.scroll applies only to code grids', data: null };
+        }
+
+        const report = () => ({
+            text: `OK: grid #${resolved.idx} scroll ${g.getScrollOffset()} / ${g.getTotalVisualRows()} rows`,
+            data: { index: resolved.idx, scrollOffset: g.getScrollOffset(), totalRows: g.getTotalVisualRows() },
+        });
+
+        if (args.length === 1) return report();   // no amount → just report current
+
+        const arg = args[1];
+        if (arg === 'top')         await g.setScrollOffset(0);
+        else if (arg === 'bottom') await g.setScrollOffset(g.getTotalVisualRows());
+        else {
+            const delta = parseInt(arg, 10);
+            if (isNaN(delta)) return { text: 'ERR: scroll must be an integer (±rows) or top|bottom', data: null };
+            await g.scrollBy(delta);
+        }
+        return report();
+    }, { description: 'Scroll a code grid through the fold (the conveyor)', usage: '<id|index> <±rows|top|bottom>' });
 }
