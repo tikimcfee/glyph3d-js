@@ -64,6 +64,10 @@ export default class LayoutDescription {
      */
     slotForChar(line, col) {
         if (!this.lineSlotBase || line < 0 || line >= this.lineSlotBase.length) return -1;
+        // col must be in-range too — an out-of-range col would otherwise return a slot
+        // that points at a DIFFERENT line's glyphs (highlightRange can pass endCol past
+        // EOL). Honors the "−1 if out of range" contract.
+        if (col < 0 || col >= this.lineSlotCount(line)) return -1;
         return this.lineSlotBase[line] + col;
     }
 
@@ -88,11 +92,12 @@ export default class LayoutDescription {
                     return { x: pos[s * 3], y: pos[s * 3 + 1], z: pos[s * 3 + 2] };
                 }
             } else {
-                // End-of-line → right edge of the last glyph (its x + advance).
+                // End-of-line → right edge of the last glyph (its x + advance). Require
+                // BOTH buffers — if sizes is missing we'd add advance 0 and place the
+                // caret at the last glyph's LEFT edge; fall through to analytic instead.
                 const s = base + (len - 1);
-                if (s * 3 + 2 < pos.length) {
-                    const adv = sz ? sz[s * 2] : 0;
-                    return { x: pos[s * 3] + adv, y: pos[s * 3 + 1], z: pos[s * 3 + 2] };
+                if (s * 3 + 2 < pos.length && sz && s * 2 + 1 < sz.length) {
+                    return { x: pos[s * 3] + sz[s * 2], y: pos[s * 3 + 1], z: pos[s * 3 + 2] };
                 }
             }
         }

@@ -597,6 +597,7 @@ class CodeGrid extends THREE.Object3D {
         this._filenameTextId = null;
         this._contentTextIds = [];
         this._lineSlotBase = null;
+        this._layout = null; // drop the LayoutDescription's refs to the now-dead buffers
 
         // Mark as unloaded — reloadContent() checks this flag
         this._contentUnloaded = true;
@@ -1408,7 +1409,7 @@ class CodeGrid extends THREE.Object3D {
      * Delegates to clearLineHighlight() for each line — uses the RGBA8 DataTexture path.
      */
     clearAllHighlights() {
-        if (!this._lineSlotBase) return;
+        if (!this._layout) return; // canonical state guard, matches clearLineHighlight
         const lineCount = this.getLineCount();
         for (let line = 0; line < lineCount; line++) {
             this.clearLineHighlight(line);
@@ -1645,7 +1646,9 @@ class CodeGrid extends THREE.Object3D {
         // Plane is centered on its origin; shift right by half-width so the
         // bar's left edge sits at the resolved x.
         this._caretMesh.scale.set(barWidth, barHeight, 1);
-        this._caretMesh.position.set(pos.x + barWidth / 2, pos.y, 0.05);
+        // pos.z tracks the glyph depth (z-wrap staircase / pagination); +0.05 keeps the
+        // caret just in front so it never z-fights the glyphs (0 for unwrapped lines).
+        this._caretMesh.position.set(pos.x + barWidth / 2, pos.y, pos.z + 0.05);
         this._caretMesh.visible = true;
     }
 
