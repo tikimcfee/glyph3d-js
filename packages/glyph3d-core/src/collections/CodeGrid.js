@@ -23,7 +23,8 @@ import GlyphField from '../GlyphField.js';
 import { getWorkerBridge, isWorkersSupported } from '../workers/WorkerBridge.js';
 import { iterGraphemes } from '../utils/grapheme.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
-import { PAGE_CONFIG, Z_WRAP_CONFIG } from '../workers/builders/index.js';
+import { paginationGeometry } from '../workers/builders/index.js';
+import LayoutDescription from '../core/LayoutDescription.js';
 
 // Reused for lines without wraps — most lines, in the common case.
 // Frozen so accidental mutation surfaces immediately.
@@ -1057,6 +1058,7 @@ class CodeGrid extends THREE.Object3D {
         this._layoutOriginY = (this.config.showFilename && this.filename)
             ? -this.metrics.lineHeight * 1.5
             : 0;
+        this._buildLayoutDescription();
     }
 
     /**
@@ -1100,6 +1102,7 @@ class CodeGrid extends THREE.Object3D {
         this._layoutOriginY = (this.config.showFilename && this.filename)
             ? -this.metrics.lineHeight * 1.5
             : 0;
+        this._buildLayoutDescription();
     }
 
     /**
@@ -1267,6 +1270,42 @@ class CodeGrid extends THREE.Object3D {
     }
 
     /**
+     * Build the queryable LayoutDescription for the current flush — the ONE source
+     * caret / highlight / selection query against (positionAt, slotForChar). positionAt
+     * is buffer-backed: it reads the renderer's authoritative position attribute, so
+     * consumers never re-derive wrap/pagination math. The line tables + geom back the
+     * analytic fallback (empty lines now; off-screen lines once windowing lands).
+     * Rebuilt every flush. @private
+     */
+    _buildLayoutDescription() {
+        if (!this._lineSlotBase || !this._lineStartRow) { this._layout = null; return; }
+        const m = this.metrics;
+        const lineLengths = new Int32Array(this.lines.length);
+        for (let i = 0; i < this.lines.length; i++) lineLengths[i] = this.getLineSlotCount(i);
+        // Same page geometry the builder used (pageContentWidth threaded through meta),
+        // so the analytic fallback aligns with the glyphs. CodeGrid metrics → builder
+        // metric names.
+        const contentWidth = this._getContentItemMeta()?.pageContentWidth || 0;
+        const geom = paginationGeometry(
+            { charWidth: m.charWidth, letterSpacing: m.spacing || 0, lineSpacing: m.lineHeight },
+            contentWidth,
+        );
+        this._layout = new LayoutDescription({
+            lineSlotBase: this._lineSlotBase,
+            lineStartRow: this._lineStartRow,
+            lineWrapCols: this._lineWrapCols,
+            lineLengths,
+            positions: this._renderer?.getInstancePositions?.() ?? null,
+            sizes: this._renderer?.getInstanceSizes?.() ?? null,
+            geom,
+            originX: 0,
+            originY: this._layoutOriginY ?? 0,
+            lineSpacing: m.lineHeight,
+            advance: m.charWidth + (m.spacing || 0),
+        });
+    }
+
+    /**
      * Resolve the world-space caret position for a logical (line, col).
      *
      * Pure deterministic math from layout invariants the worker also
@@ -1282,57 +1321,12 @@ class CodeGrid extends THREE.Object3D {
      * @returns {{x: number, y: number} | null}
      */
     _resolveCaretWorldPosition(line, col) {
-        if (!this._lineWrapCols || !this._lineStartRow) return null;
-        if (line < 0 || line >= this._lineStartRow.length) return null;
-        const m = this.metrics;
-        if (!m) return null;
-
-        // Clamp col to source-line length so cursors past EOL still resolve.
-        const lineLen = this.lines[line]?.length ?? 0;
-        const c = Math.max(0, Math.min(col, lineLen));
-
-        // Find which wrap segment this col is on (affinity=right at boundaries).
-        const wraps = this._lineWrapCols[line];
-        let segmentRow = 0;
-        let segmentStartCol = 0;
-        for (let i = 0; i < wraps.length; i++) {
-            if (wraps[i] > c) break;
-            segmentRow = i + 1;
-            segmentStartCol = wraps[i];
-        }
-
-        const visualRow  = this._lineStartRow[line] + segmentRow;
-        const advance    = m.charWidth + (m.spacing || 0);
-        const originY    = this._layoutOriginY ?? 0;
-        const originX    = 0;
-
-        // Pre-pagination position.
-        let x = originX + (c - segmentStartCol) * advance;
-        // CodeGrid's metrics call this lineHeight; the worker's metrics call
-        // the same value lineSpacing — both = atlasCharSize.height * scale * 1.2.
-        const lineSpacing = m.lineHeight;
-        let y = originY - visualRow * lineSpacing;
-
-        // Apply pagination — same formula buildBatchBuffers / applyPagination
-        // use, so the caret aligns with glyphs that were similarly shifted.
-        const pageHeightWorld = PAGE_CONFIG.pageHeight * lineSpacing;
-        const relY = originY - y;
-        if (relY >= pageHeightWorld) {
-            const charAdvance   = m.charWidth + (m.spacing || 0);
-            const pageWidthWorld = Z_WRAP_CONFIG.maxLineWidth * charAdvance;
-            const gapXWorld     = PAGE_CONFIG.pageGapX * charAdvance;
-            const gapYWorld     = PAGE_CONFIG.pageGapY * lineSpacing;
-
-            const vPage           = Math.floor(relY / pageHeightWorld);
-            const rowOffsetInPage = relY - vPage * pageHeightWorld;
-            const hSlot           = vPage % PAGE_CONFIG.pagesWide;
-            const yRow            = Math.floor(vPage / PAGE_CONFIG.pagesWide);
-
-            y = originY - rowOffsetInPage - yRow * (pageHeightWorld + gapYWorld);
-            x = x + hSlot * (pageWidthWorld + gapXWorld);
-        }
-
-        return { x, y };
+        // Delegated to the LayoutDescription: positionAt is buffer-backed (the glyph's
+        // exact laid-out position, wrap + pagination already applied), with an analytic
+        // fallback for empty lines. The old duplicate wrap+pagination re-derivation —
+        // which kept its own (now-stale) column-width copy and drifted from the glyphs —
+        // is gone. ONE source of layout math.
+        return this._layout?.positionAt(line, col) ?? null;
     }
 
     /**
@@ -1347,8 +1341,7 @@ class CodeGrid extends THREE.Object3D {
      * @returns {number} Buffer slot index, or -1 if out of range
      */
     getSlotForChar(line, col) {
-        if (!this._lineSlotBase || line < 0 || line >= this._lineSlotBase.length) return -1;
-        return this._lineSlotBase[line] + col;
+        return this._layout?.slotForChar(line, col) ?? -1;
     }
 
     /**
@@ -1385,16 +1378,14 @@ class CodeGrid extends THREE.Object3D {
      * @param {{r:number, g:number, b:number}} color
      */
     highlightRange(startLine, startCol, endLine, endCol, color) {
-        if (!this._renderer || !this._lineSlotBase) return;
+        if (!this._renderer || !this._layout) return;
 
         for (let line = startLine; line <= endLine; line++) {
             const cStart = (line === startLine) ? startCol : 0;
             const cEnd   = (line === endLine)   ? endCol   : this.getLineSlotCount(line);
-            const lineBase = this._lineSlotBase[line];
-            if (lineBase === undefined) continue;
-
             for (let col = cStart; col < cEnd; col++) {
-                this._renderer.setGlyphHighlight(lineBase + col, color);
+                const slot = this.getSlotForChar(line, col); // → LayoutDescription, one source
+                if (slot >= 0) this._renderer.setGlyphHighlight(slot, color);
             }
         }
     }
@@ -1404,11 +1395,11 @@ class CodeGrid extends THREE.Object3D {
      * @param {number} line - 0-based line index
      */
     clearLineHighlight(line) {
-        if (!this._renderer || !this._lineSlotBase) return;
+        if (!this._renderer || !this._layout) return;
         const count = this.getLineSlotCount(line);
-        const base  = this._lineSlotBase[line];
         for (let i = 0; i < count; i++) {
-            this._renderer.setGlyphHighlight(base + i, null);
+            const slot = this.getSlotForChar(line, i); // → LayoutDescription, one source
+            if (slot >= 0) this._renderer.setGlyphHighlight(slot, null);
         }
     }
 
