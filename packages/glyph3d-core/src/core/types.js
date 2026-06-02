@@ -55,6 +55,13 @@
  *   on that line. lineSlotOffsets[0] equals bufferStartIndex. Built in the same pass as the buffer
  *   fill; used by CodeGrid.highlightRange() to map source line numbers to highlight texture slots.
  *   Stored as a plain Array (not Int32Array) in the builder output.
+ * @property {number[][]} wrapColsPerLine - per source line, the source-col indices where the
+ *   builder wrapped that line into a new visual row (empty for lines that fit). Backs the
+ *   LayoutDescription's visual-row mapping for the caret. REQUIRED for cursor-accurate layout —
+ *   must be preserved through applyPrebuiltBuffers, not dropped.
+ * @property {number} pageContentWidth - the page column width (world units) used when this item
+ *   paginated, or 0 if unpaginated. The LayoutDescription/caret pass the SAME width to pagination
+ *   so the caret aligns with glyphs (never a second char-count guess).
  */
 
 /**

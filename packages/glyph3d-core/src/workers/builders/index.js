@@ -289,6 +289,11 @@ export function buildBatchBuffers(items, shared) {
 
         const itemGlyphCount = bufferOffset - itemStartOffset;
 
+        // Page column width actually used (0 = unpaginated). Threaded into itemMeta so
+        // the LayoutDescription / caret query pagination with the SAME geometry the
+        // glyphs got — never a second char-count guess.
+        let pageContentWidth = 0;
+
         // Apply page-break pagination if needed
         if (itemGlyphCount > 0) {
             const totalYSpan = pos.y - itemMinY;
@@ -298,6 +303,7 @@ export function buildBatchBuffers(items, shared) {
                 // pre-pagination max here, before the recompute below overwrites it), not
                 // maxLineWidth*charAdvance — fixes the fanned-column edge overlap.
                 const contentWidth = itemMaxX > pos.x ? itemMaxX - pos.x : 0;
+                pageContentWidth = contentWidth;
                 applyPagination(positions, itemStartOffset, bufferOffset, pos, paginationGeometry(metrics, contentWidth));
                 // Recompute bounds
                 itemMinX = Infinity; itemMaxX = -Infinity;
@@ -324,6 +330,7 @@ export function buildBatchBuffers(items, shared) {
             glyphCount: itemGlyphCount,
             lineSlotOffsets: itemLineSlotOffsets,
             wrapColsPerLine: itemWrapColsPerLine,  // [line][i] = wrap col i within that source line
+            pageContentWidth,                      // page column width used (0 = unpaginated)
             bounds: itemGlyphCount > 0 ? {
                 min: { x: itemMinX, y: itemMinY, z: itemMinZ },
                 max: { x: itemMaxX, y: itemMaxY, z: itemMaxZ },

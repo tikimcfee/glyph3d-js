@@ -1139,11 +1139,38 @@ export default class GlyphField {
                     bufferStartIndex:  meta.bufferStartIndex,
                     glyphCount:        meta.glyphCount,
                     lineSlotOffsets:   meta.lineSlotOffsets || null,
+                    // Preserve the layout tables the LayoutDescription / caret need.
+                    // These were being DROPPED here — _buildLayoutWrapIndex then got
+                    // undefined and built an all-empty wrap table, so the caret ignored
+                    // intra-line wraps on long (>wrapWidth) lines. Carry them through.
+                    wrapColsPerLine:   meta.wrapColsPerLine || null,
+                    pageContentWidth:  meta.pageContentWidth || 0,
                 });
                 this._cachedGlyphCount += meta.glyphCount;
                 rendererIds.push(id);
             }
         }
         return rendererIds;
+    }
+
+    /**
+     * The authoritative per-glyph position buffer (xyz per slot) as bound to the
+     * instanced geometry. The LayoutDescription reads this for buffer-backed
+     * positionAt — the glyph's exact laid-out position (wrap + pagination already
+     * applied), so the caret never re-derives layout math. Null before first flush.
+     * @returns {Float32Array|null}
+     */
+    getInstancePositions() {
+        return this.instanceMesh?.geometry?.attributes?.instancePosition?.array ?? null;
+    }
+
+    /**
+     * Per-glyph [advance, height] buffer (xy per slot). Paired with
+     * getInstancePositions for end-of-line caret placement (last glyph's right edge
+     * = position + advance).
+     * @returns {Float32Array|null}
+     */
+    getInstanceSizes() {
+        return this.instanceMesh?.geometry?.attributes?.instanceSize?.array ?? null;
     }
 }
