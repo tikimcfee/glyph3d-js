@@ -30,7 +30,8 @@
  *  pagesWide     horizontal pages before pagination wraps downward (newspaper columns).
  *  pageGapX      char-width gap between horizontal pages.
  *  pageGapY      line-height gap between page rows (vertical).
- *  axis          'xy' = newspaper columns (default); 'z' = z-pages (reserved for Step 3b).
+ *  pageDepth     z-gap between page planes when axis:'z', as a multiple of lineSpacing.
+ *  axis          'xy' = newspaper (pages fan in X, default); 'z' = z-pages (pages stack in depth, later behind earlier).
  *
  * `0` means "off/unbounded" for wrapWidth/pageHeight so the struct stays
  * structured-clone-safe across the worker boundary (no `Infinity`).
@@ -42,6 +43,7 @@ export const DEFAULT_LAYOUT = {
     pagesWide: 5,
     pageGapX: 10,
     pageGapY: 10,
+    pageDepth: 20,
     axis: 'xy',
 };
 
@@ -61,6 +63,7 @@ export function resolveLayoutParams(layout) {
         pagesWide:    layout.pagesWide    ?? DEFAULT_LAYOUT.pagesWide,
         pageGapX:     layout.pageGapX     ?? DEFAULT_LAYOUT.pageGapX,
         pageGapY:     layout.pageGapY     ?? DEFAULT_LAYOUT.pageGapY,
+        pageDepth:    layout.pageDepth    ?? DEFAULT_LAYOUT.pageDepth,
         axis:         layout.axis         ?? DEFAULT_LAYOUT.axis,
     };
 }
@@ -84,6 +87,8 @@ export function paginationGeometry(metrics, contentWidth, layout = DEFAULT_LAYOU
         gapXWorld: layout.pageGapX * charAdvance,
         gapYWorld: layout.pageGapY * metrics.lineSpacing,
         pagesWide: Math.max(1, layout.pagesWide),  // clamp: pagesWide<1 would break the % in paginationShift
+        axis: layout.axis,                          // 'xy' = fan in X | 'z' = stack in depth
+        pageDepthWorld: layout.pageDepth * metrics.lineSpacing,  // z-gap between page planes (axis:'z')
     };
 }
 
@@ -94,26 +99,33 @@ export function paginationGeometry(metrics, contentWidth, layout = DEFAULT_LAYOU
  * in Step 2 — the caret/selection queries, so the two can never diverge.
  *
  * @param {number} relY - origin.y - glyphY (distance below origin, ≥ 0)
- * @param {{pageHeightWorld,pageWidthWorld,gapXWorld,gapYWorld,pagesWide}} geom
- * @returns {{shiftX:number, mappedRelY:number}}
+ * @param {{pageHeightWorld,pageWidthWorld,gapXWorld,gapYWorld,pagesWide,axis,pageDepthWorld}} geom
+ * @returns {{shiftX:number, mappedRelY:number, shiftZ:number}}
  */
 export function paginationShift(relY, geom) {
     // pageHeightWorld<=0 means pagination is off (pageHeight:0) — no shift, ever.
-    if (geom.pageHeightWorld <= 0 || relY < geom.pageHeightWorld) return { shiftX: 0, mappedRelY: relY };
+    if (geom.pageHeightWorld <= 0 || relY < geom.pageHeightWorld) return { shiftX: 0, mappedRelY: relY, shiftZ: 0 };
     const vPage = Math.floor(relY / geom.pageHeightWorld);
     const rowOffsetInPage = relY - vPage * geom.pageHeightWorld;
+    if (geom.axis === 'z') {
+        // z-pages: every page shares the front page's x,y footprint (top-aligned) and
+        // recedes in depth by its page index — later content sits behind earlier content.
+        return { shiftX: 0, mappedRelY: rowOffsetInPage, shiftZ: -vPage * geom.pageDepthWorld };
+    }
+    // newspaper (axis 'xy'): pages fan right (X) up to pagesWide, then wrap down (Y).
     const hSlot = vPage % geom.pagesWide;
     const yRow = Math.floor(vPage / geom.pagesWide);
     return {
         shiftX: hSlot * (geom.pageWidthWorld + geom.gapXWorld),
         mappedRelY: rowOffsetInPage + yRow * (geom.pageHeightWorld + geom.gapYWorld),
+        shiftZ: 0,
     };
 }
 
 /**
- * Apply page-break pagination to glyph positions in-place. Pages fan right, then
- * wrap down. Pure transform via paginationShift — see paginationGeometry for why the
- * width is the real content extent, not a char-count guess.
+ * Apply page-break pagination to glyph positions in-place. axis 'xy' fans pages right
+ * then wraps down; axis 'z' stacks them in depth (shiftZ). Pure transform via
+ * paginationShift — see paginationGeometry for why the width is the real content extent.
  *
  * @param {Float32Array} positions - Position buffer (mutated in place)
  * @param {number} startIdx - First glyph index for this item
@@ -125,9 +137,10 @@ export function applyPagination(positions, startIdx, endIdx, origin, geom) {
     for (let i = startIdx; i < endIdx; i++) {
         const relY = origin.y - positions[i * 3 + 1];  // distance below origin
         if (relY < geom.pageHeightWorld) continue;      // first page — no transform
-        const { shiftX, mappedRelY } = paginationShift(relY, geom);
+        const { shiftX, mappedRelY, shiftZ } = paginationShift(relY, geom);
         positions[i * 3 + 1] = origin.y - mappedRelY;
         positions[i * 3] += shiftX;
+        positions[i * 3 + 2] += shiftZ;
     }
 }
 

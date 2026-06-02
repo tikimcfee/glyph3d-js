@@ -290,23 +290,25 @@ export default function registerGridCommands(router) {
     // (Step 3a). Source + camera stay put; only how the file folds into space changes. A
     // preset is a params bundle; --flags override on top. No params after the id → report
     // current. Re-flows neighbors after (footprint changes). Modes are params, not branches.
+    // Presets are COMPLETE fold bundles (every one sets axis) so switching modes always
+    // resets the fold — e.g. z-pages → newspaper must clear axis:'z', not inherit it.
     const LAYOUT_PRESETS = {
-        newspaper:     { wrapWidth: 200, pageHeight: 150, pagesWide: 5 },   // fan into columns (default)
-        'long-column': { wrapWidth: 200, pageHeight: 0,   pagesWide: 1 },   // one tall column; long lines z-wrap
-        'no-wrap':     { wrapWidth: 0,   pageHeight: 0,   pagesWide: 1 },   // lines run off right; rows = line count
-        wall:          { wrapWidth: 200, pageHeight: 150, pagesWide: 32 },  // wide wall of columns marching right
+        newspaper:     { wrapWidth: 200, pageHeight: 150, pagesWide: 5,  axis: 'xy' },  // fan into columns (default)
+        'long-column': { wrapWidth: 200, pageHeight: 0,   pagesWide: 1,  axis: 'xy' },  // one tall column; long lines z-wrap
+        'no-wrap':     { wrapWidth: 0,   pageHeight: 0,   pagesWide: 1,  axis: 'xy' },  // lines run off right; rows = line count
+        wall:          { wrapWidth: 200, pageHeight: 150, pagesWide: 32, axis: 'xy' },  // wide wall of columns marching right
+        'z-pages':     { wrapWidth: 200, pageHeight: 150, pagesWide: 1,  axis: 'z'  },  // pages stack in depth (later behind earlier)
     };
     const LAYOUT_FLAGS = {
         '--wrap': 'wrapWidth', '--page-height': 'pageHeight', '--pages-wide': 'pagesWide',
         '--z-spacing': 'zWrapSpacing', '--gap-x': 'pageGapX', '--gap-y': 'pageGapY',
-        // --axis is intentionally NOT exposed yet: axis:'z' (z-pages) is reserved for Step 3b,
-        // and advertising a validated flag that silently no-ops would be a misleading success.
+        '--page-depth': 'pageDepth', '--axis': 'axis',  // axis z = pages stack in depth (Step 3b)
     };
     const COUNT_FLAGS = new Set(['wrapWidth', 'pageHeight', 'pagesWide']);  // integer counts → floored
     router.register('grid.layout', async (args, ctx) => {
         const presetNames = Object.keys(LAYOUT_PRESETS).join('|');
         if (args.length < 1) {
-            return { text: `ERR: usage: grid.layout <id|index> [${presetNames}] [--wrap N --page-height H --pages-wide W --z-spacing Z --gap-x X --gap-y Y]`, data: null };
+            return { text: `ERR: usage: grid.layout <id|index> [${presetNames}] [--wrap N --page-height H --pages-wide W --z-spacing Z --gap-x X --gap-y Y --page-depth D --axis xy|z]`, data: null };
         }
         const resolved = resolveGridByIdOrIndex(ctx, args[0]);
         if (resolved.error) return { text: resolved.error, data: null };
@@ -335,6 +337,11 @@ export default function registerGridCommands(router) {
             if (!key) return { text: `ERR: unknown flag "${args[i]}" (${Object.keys(LAYOUT_FLAGS).join(' ')})`, data: null };
             const raw = args[i + 1];
             if (raw === undefined) return { text: `ERR: ${args[i]} needs a value`, data: null };
+            if (key === 'axis') {
+                if (raw !== 'xy' && raw !== 'z') return { text: 'ERR: --axis must be xy or z', data: null };
+                patch.axis = raw;
+                continue;
+            }
             const n = Number(raw);
             // Reject Infinity/NaN/negatives — the params struct uses 0 as its off-sentinel,
             // never Infinity (keeps it clean + structured-clone-safe). Counts floor to ints.

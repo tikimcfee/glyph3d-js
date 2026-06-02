@@ -124,7 +124,9 @@ export default class LayoutDescription {
         const x = this.originX + (col - segStart) * this.advance;
         const y = this.originY - visualRow * this.lineSpacing;
         if (!this.geom) return { x, y, z: 0 };
-        const { shiftX, mappedRelY } = paginationShift(this.originY - y, this.geom);
-        return { x: x + shiftX, y: this.originY - mappedRelY, z: 0 };
+        // Empty line has no glyph z (no intra-line wrap); the page fold supplies z via shiftZ
+        // (0 for axis 'xy', -page*depth for 'z'), so the caret lands on the right page plane.
+        const { shiftX, mappedRelY, shiftZ } = paginationShift(this.originY - y, this.geom);
+        return { x: x + shiftX, y: this.originY - mappedRelY, z: shiftZ };
     }
 }
