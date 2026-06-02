@@ -91,7 +91,7 @@ same windowed-surface object: `{ placement(tree), frame, source, scrollOffset }`
 
 ## Staged migration (atomic per step; full-load throughout Steps 1–2)
 
-**Step 1 — extract the seam, full-load, fix the bug.**
+**Step 1 — ✅ DONE** (f550da4, 983be1a, c5dbece, beb0215). extract the seam, full-load, fix the bug.
 - New `core/LayoutDescription.js`: the analytic layout (positions + line/wrap/slot tables)
   + the query methods. Layout becomes the authoritative product; the GPU buffer is derived.
 - Unify pagination into one function both the buffer fill and `positionAt` call (kills the
@@ -100,7 +100,7 @@ same windowed-surface object: `{ placement(tree), frame, source, scrollOffset }`
   (kills the edge overlap). Tight bounds from `position+advance`, not `+charWidth`.
 - *No windowing yet — the whole file materializes.* Baseline: load-it-all, render correct.
 
-**Step 2 — route consumers through the seam; retire the hand-plumbing.**
+**Step 2 — ✅ DONE** (c5dbece, beb0215; caret confirmed by hand — move + edit). route consumers through the seam; retire the hand-plumbing.
 - Caret (`_resolveCaretWorldPosition`), highlight (`highlightRange`/`slotForChar`),
   selection rects read the `LayoutDescription` snapshot, not buffer-curated fields.
 - Retire the fragile `_buildLineSlotBase` fallback + the `wrapColsPerLine` hand-threading
