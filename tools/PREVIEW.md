@@ -14,6 +14,12 @@ uses Vivaldi + CDP screenshots, which is simpler when you just need to *see* it)
 - **`tools/cdp-shot.mjs <out.png> [port] [urlMatch]`** — `bun` script that pulls
   a PNG straight from the browser via the remote-debugging protocol. Captures the
   rendered page even when the window isn't focused.
+- **`tools/capture.mjs <url> <outDir> [name]`** — `bun` + Playwright: records a
+  looping **video** + stills while scripting the real controls (orbit/zoom/type).
+  This is the "live-generate the glyph3d.dev media" pipeline — re-runnable, points
+  at any glyph3d URL (the hero, or the full app once the binary serves it).
+  Playwright bundles Chromium + ffmpeg, so no extra installs; runs headed for
+  WebGPU. Example: `bun tools/capture.mjs http://127.0.0.1:5181/ media hero`.
 
 ## The loop
 
