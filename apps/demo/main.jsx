@@ -20,6 +20,7 @@ import fontUrl from '@glyph3d/core/fonts/Cousine-Regular.ttf?url';
 const SAGE = { r: 0.659, g: 0.627, b: 0.447 };
 const NAME = { r: 0.90, g: 0.85, b: 0.60 };  // bright — the dominant nameplate, the hero
 const DIM  = { r: 0.42, g: 0.40, b: 0.30 };  // dim — the ring of files is a subtle hint
+const SUB  = { r: 0.62, g: 0.59, b: 0.42 };  // the subtitle — present, subordinate to the title
 const TAU = Math.PI * 2;
 // Independent animation rates (rad/s on a continuous clock) so orbit and the
 // waves tune separately. Live autoplay runs a continuous clock — no loop
@@ -31,6 +32,8 @@ const CAM_Z = 140;           // frames the dominant title + its ring of files in
 const CAPTURE_SECS = 92;     // seek window ≈ one full revolution
 const RING_CY = 16;          // vertical center of the title and the ring around it
 const TITLE_X = -14;         // x offset that centers "glyph3d" at the dominant scale
+const SUB_X = -12;           // x offset that centers the subtitle "millions, in space"
+const SUB_GAP = 9;           // the subtitle rides this far below the title
 
 const FILES = [
   { name: 'atlas.js', target: [0, 13, 4], text:
@@ -140,7 +143,7 @@ function waveGrid(grid, i, time, store, xyW, zW) {
   attr.needsUpdate = true;
 }
 
-function Director({ gridRefs, nameRef }) {
+function Director({ gridRefs, nameRef, subRef }) {
   const { camera } = useThree();
   const timeRef = useRef(0);                      // continuous seconds — no loop seam
   const auto = useRef(true);
@@ -162,10 +165,18 @@ function Director({ gridRefs, nameRef }) {
       waveGrid(g, i, time, waves, WAVE_XY_W, WAVE_Z_W);
     });
     // The nameplate is the hero — big, bright, centered in the ring it orbits.
+    const titleFloat = Math.sin(time * 0.25) * 0.8;
+    const titleSway = Math.sin(time * 0.15) * 0.10;
     const nm = nameRef.current;
     if (nm) {
-      nm.position.set(TITLE_X, RING_CY + 2 + Math.sin(time * 0.25) * 0.8, 0);
-      nm.rotation.set(0, Math.sin(time * 0.15) * 0.10, 0);  // subtle sway
+      nm.position.set(TITLE_X, RING_CY + 2 + titleFloat, 0);
+      nm.rotation.set(0, titleSway, 0);                     // subtle sway
+    }
+    // The subtitle rides just under the title, floating with it as one lockup.
+    const sub = subRef.current;
+    if (sub) {
+      sub.position.set(SUB_X, RING_CY + 2 + titleFloat - SUB_GAP, 0);
+      sub.rotation.set(0, titleSway, 0);
     }
     // Camera centers the lockup: dominant title, ring of files around it.
     camera.position.set(0, RING_CY, CAM_Z);
@@ -193,6 +204,7 @@ function App() {
   const { atlas, error } = useGlyphEngine({ fontUrl });
   const gridRefs = useRef([]);
   const nameRef = useRef(null);
+  const subRef = useRef(null);
   if (error || !atlas) return null;
   return (
     <GlyphCanvas
@@ -200,10 +212,13 @@ function App() {
       camera={{ position: [0, 16, 140], fov: 30, near: 0.1, far: 6000 }}
       onCreated={({ scene }) => { scene.background = new THREE.Color(0x0e0c08); }}
     >
-      <Director gridRefs={gridRefs} nameRef={nameRef} />
+      <Director gridRefs={gridRefs} nameRef={nameRef} subRef={subRef} />
       {/* the hero — dominant, bright; the ring of files orbits around it */}
       <CodeGrid ref={nameRef} filename="" text="glyph3d" worldScale={0.095}
         textColor={NAME} showBackground={false} />
+      {/* the subtitle — small, just under the title */}
+      <CodeGrid ref={subRef} filename="" text="millions, in space" worldScale={0.032}
+        textColor={SUB} showBackground={false} />
       {FILES.map((f, i) => (
         <CodeGrid
           key={f.name}
