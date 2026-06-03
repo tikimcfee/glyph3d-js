@@ -25,7 +25,7 @@ uses Vivaldi + CDP screenshots, which is simpler when you just need to *see* it)
 
 ```bash
 # 1. Serve the app on an EXPLICIT, free port + IPv4 host (see gotcha below).
-cd apps/hero && bun run dev -- --port 5180 --strictPort --host 127.0.0.1 &
+cd app && bun run dev -- --port 5180 --strictPort --host 127.0.0.1 &
 curl -s http://127.0.0.1:5180/ | grep -i '<title>'    # confirm it's the app you think
 
 # 2. Launch the preview browser with a debug port (once).
