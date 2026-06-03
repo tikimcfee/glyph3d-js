@@ -134,6 +134,16 @@ export default function registerTerminalCommands(router) {
                 owner,
             });
 
+            // Re-adoption repaint HANDSHAKE: the grid + its parser are ready NOW (synchronous
+            // build), so tell the owning adapter to repaint into it. The adapter's timed
+            // refresh-client retries race grid creation under reload contention — late-built grids
+            // miss all the retries and stay BLANK until a resize tickles SIGWINCH. This fires the
+            // repaint exactly when the grid exists, not on a timer guess. Idempotent (an extra
+            // repaint is harmless), so it's safe for the initial create too.
+            if (owner && ctx.wsbridge && ctx.wsbridge.connected) {
+                ctx.wsbridge.push(owner, { event: 'terminal.refresh', data: { terminalId: id } });
+            }
+
             const pos = grid.position;
             return {
                 text: `OK: terminal '${id}' created (${cols}x${rows}) scale=${gridScale}`,

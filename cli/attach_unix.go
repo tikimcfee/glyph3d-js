@@ -128,6 +128,23 @@ func runTerminal(cfg terminalConfig) {
 		shutdown()
 	}()
 
+	// Repaint THIS session's OWN client. A bare `refresh-client` targets tmux's most-recently-used
+	// client (the focused terminal), so N re-adopting adapters would all repaint the SAME one —
+	// only the focused terminal comes back, the rest stay blank (the exact reload symptom). Resolve
+	// our session's client by name and refresh exactly it.
+	repaint := func() {
+		out, err := tmuxCmd("list-clients", "-t", cfg.session, "-F", "#{client_name}").Output()
+		client := strings.TrimSpace(string(out))
+		if err != nil || client == "" {
+			tmuxCmd("refresh-client").Run() // best-effort fallback
+			return
+		}
+		if i := strings.IndexByte(client, '\n'); i >= 0 {
+			client = client[:i] // one client per session, but be defensive
+		}
+		tmuxCmd("refresh-client", "-t", client).Run()
+	}
+
 	// Re-adoption: a display reload wipes its terminal registry, so terminal.ping
 	// starts bouncing "ERR: no terminal <id>". Re-issue terminal.create so the fresh
 	// display rebuilds the grid (owner = us → input still routes), then force tmux to
@@ -143,21 +160,19 @@ func runTerminal(cfg terminalConfig) {
 			log.Printf("[attach] re-create send failed: %v", err)
 			return
 		}
-		// Repaint the full screen into the fresh emulator. The re-create above is
-		// fire-and-forget (unlike the initial, ack-waited create), so the display
-		// rebuilds the grid ASYNCHRONOUSLY — an immediate refresh-client races that:
-		// its repaint bytes arrive before the grid exists and are dropped, leaving an
-		// idle pane BLANK until the next output/resize (confirmed: re-adopted grids
-		// come up with an all-spaces first frame). Defer + retry so at least one
-		// repaint lands after the grid is live, even under reload contention (many
-		// terminals re-adopting at once slows each grid's creation).
+		// Repaint the fresh emulator. PRIMARY path is now a HANDSHAKE: the display pushes
+		// terminal.refresh the instant it has rebuilt the grid (handled below → repaint()), so the
+		// repaint lands exactly when the grid is ready — not on a timer guess. These timed retries
+		// are a FALLBACK in case that push is missed; repaint() targets OUR client specifically.
+		// (Old behavior — fixed-time bare refresh-client — raced grid creation AND hit the wrong
+		// client under contention, so late/non-focused grids stayed blank until a manual resize.)
 		go func() {
 			for _, d := range []time.Duration{150 * time.Millisecond, 500 * time.Millisecond, 1200 * time.Millisecond} {
 				select {
 				case <-done:
 					return
 				case <-time.After(d):
-					tmuxCmd("refresh-client").Run()
+					repaint()
 				}
 			}
 		}()
@@ -218,7 +233,7 @@ func runTerminal(cfg terminalConfig) {
 				shutdown()
 				return
 			}
-			handleInbound(msg, cfg.id, ptmx, requestKill, recreate, scroll, exitScroll)
+			handleInbound(msg, cfg.id, ptmx, requestKill, recreate, repaint, scroll, exitScroll)
 		}
 	}()
 
@@ -372,7 +387,7 @@ func encodeOutputFrame(id string, payload []byte) []byte {
 // controller push): terminal.bytes (input → PTY), terminal.resize (→ SIGWINCH),
 // terminal.shutdown (graceful teardown). Command responses also land here; an
 // "ERR: no terminal" reply (to our liveness ping) means the display reloaded → re-adopt.
-func handleInbound(msg []byte, termID string, ptmx *os.File, requestKill func(), recreate func(), scroll func(int), exitScroll func()) {
+func handleInbound(msg []byte, termID string, ptmx *os.File, requestKill func(), recreate func(), repaint func(), scroll func(int), exitScroll func()) {
 	var ev struct {
 		Event string `json:"event"`
 		Data  struct {
@@ -404,6 +419,10 @@ func handleInbound(msg []byte, termID string, ptmx *os.File, requestKill func(),
 		case "terminal.scroll": // wheel-gated tmux copy-mode scroll (+back / -forward)
 			if scroll != nil {
 				scroll(ev.Data.Lines)
+			}
+		case "terminal.refresh": // display rebuilt our grid (re-adoption) + is ready — repaint into it NOW
+			if repaint != nil {
+				repaint()
 			}
 		case "terminal.shutdown":
 			fmt.Fprintln(os.Stderr, "[attach] kill requested by display (terminal.kill) — destroying session")
