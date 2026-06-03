@@ -11,6 +11,33 @@ import fontUrl from '@glyph3d/core/fonts/Cousine-Regular.ttf?url';
 const setStatus = (t) => { const el = document.getElementById('status'); if (el) el.textContent = t; };
 const relayPort = Number(new URLSearchParams(location.search).get('relay')) || 8080;
 
+// Draggable splitter between the dock sidebar and the canvas. The sidebar width is
+// app state (not pinned), so panels are resizable; the r3f canvas auto-resizes to its
+// container as the width changes.
+function DockResizer({ width, setWidth }) {
+  const onDown = (e) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = width;
+    const onMove = (ev) => setWidth(Math.max(180, Math.min(900, startW + (ev.clientX - startX))));
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.style.userSelect = '';
+    };
+    document.body.style.userSelect = 'none';
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+  return (
+    <div
+      onMouseDown={onDown}
+      title="Drag to resize panels"
+      style={{ flex: '0 0 6px', cursor: 'col-resize', background: '#11141b', borderLeft: '1px solid #1b1f29', borderRight: '1px solid #1b1f29' }}
+    />
+  );
+}
+
 function App() {
   const { atlas, stage, error } = useGlyphEngine({ fontUrl });
   const cameraRef = useRef(null);
@@ -18,6 +45,7 @@ function App() {
   // onReady so the DOM sidebar — which can't read the in-canvas context — can use
   // it. One source of truth, prop-drilled to the chrome.
   const [client, setClient] = useState(null);
+  const [dockW, setDockW] = useState(320);   // resizable sidebar width (px)
 
   useEffect(() => {
     setStatus(
@@ -35,11 +63,12 @@ function App() {
     <div style={{ display: 'flex', flexDirection: 'column', width: '100%', height: '100%' }}>
       <ButtonBar client={client} />
       <div style={{ display: 'flex', flex: '1 1 auto', minHeight: 0 }}>
-        <div style={{ flex: '0 0 300px', minWidth: 0 }}>
+        <div style={{ flex: `0 0 ${dockW}px`, minWidth: 0, overflow: 'hidden' }}>
           {client
             ? <IdeDock client={client} />
             : <div style={{ width: '100%', padding: 12, color: '#7c8596', background: 'rgba(8,10,14,0.92)', font: '12px ui-monospace, monospace' }}>starting…</div>}
         </div>
+        <DockResizer width={dockW} setWidth={setDockW} />
         <div style={{ flex: '1 1 auto', position: 'relative', minWidth: 0 }}>
           {atlas && !error && (
             <GlyphCanvas

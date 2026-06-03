@@ -4,6 +4,7 @@ import 'dockview/dist/styles/dockview.css';
 import './ide-dock.css';
 import FileTree from './FileTree.jsx';
 import TerminalsPanel from './TerminalsPanel.jsx';
+import FieldVisitorsPanel from './FieldVisitorsPanel.jsx';
 
 // IdeDock — the panel layer. A dockview surface that hosts the IDE's DOM panels
 // (file tree, terminals; inspector/search later) with tabs, splits, float and
@@ -32,6 +33,7 @@ export default function IdeDock({ client }) {
   const components = useMemo(() => ({
     files: () => <FileTree client={clientRef.current} />,
     terminals: () => <TerminalsPanel client={clientRef.current} />,
+    fieldVisitors: () => <FieldVisitorsPanel client={clientRef.current} />,
   }), []);
 
   const onReady = useCallback((event) => {
@@ -57,6 +59,14 @@ export default function IdeDock({ client }) {
         component: 'terminals',
         title: 'Terminals',
         position: { referencePanel: 'files', direction: 'within' },
+      });
+    }
+    if (!api.getPanel('fieldVisitors')) {
+      api.addPanel({
+        id: 'fieldVisitors',
+        component: 'fieldVisitors',
+        title: 'Crew',
+        position: { referencePanel: 'terminals', direction: 'within' },
       });
     }
 

@@ -105,6 +105,11 @@ export class ViewerCameraController {
         // Event handlers update this; applyCamera() reads it.
         this.input = this._makeInputState();
 
+        // camera.lock: when true, applyCamera applies NO camera transform (drag / WASD /
+        // rotation / zoom frozen) — but the wheel still routes to a focused framed surface
+        // (grid/terminal scroll is not camera motion). Toggled via setLocked() / camera.lock.
+        this.locked = false;
+
         // Backwards-compat alias. Other code and helpers in this file still
         // reference `_focusPivot` directly; point both at the same Vector3.
         this._focusPivot = this.input.focus.pivot;
@@ -451,6 +456,15 @@ export class ViewerCameraController {
      * the external entry point because the animate loop already calls it.
      */
     applyCamera(deltaTime) {
+        if (this.locked) {
+            // Camera frozen (camera.lock). Still drain the wheel so a focused framed grid/
+            // terminal scrolls — that is NOT camera motion, and _applyWheel self-gates its zoom
+            // on `locked`. Apply no other transform; drop accumulated drag so unlocking can't jump.
+            this._applyWheel();
+            this.input.drag.dx = 0;
+            this.input.drag.dy = 0;
+            return;
+        }
         this._applyDrag();
         this._applyWheel();
         this._applyKeyboardMotion(deltaTime);
@@ -482,6 +496,14 @@ export class ViewerCameraController {
         // gate here in the drain (not the listener) so the verdict uses live focus and the
         // camera never also zooms/pans. Mirrors the WASD focus gate.
         if (this.ctx?.tryScrollFocused?.(wheel.dy)) {
+            wheel.dx = 0;
+            wheel.dy = 0;
+            return;
+        }
+
+        // Camera frozen (camera.lock): the wheel didn't hit a focused surface, so consume it
+        // without zooming/panning the camera.
+        if (this.locked) {
             wheel.dx = 0;
             wheel.dy = 0;
             return;
@@ -531,6 +553,17 @@ export class ViewerCameraController {
         q.setFromEuler(new THREE.Euler(this.pitch, this.yaw, 0, 'YXZ'));
         this.ctx.camera.quaternion.copy(q);
     }
+
+    /**
+     * Freeze / unfreeze camera motion (camera.lock). When locked, applyCamera applies no
+     * camera transform, but the wheel still routes to a focused framed surface (grid/terminal
+     * scroll). Idempotent.
+     * @param {boolean} locked
+     */
+    setLocked(locked) { this.locked = !!locked; }
+
+    /** @returns {boolean} whether camera motion is frozen */
+    isLocked() { return this.locked; }
 
     // ============ Camera math (called from applyCamera only) ============
 

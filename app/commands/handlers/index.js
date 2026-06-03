@@ -27,6 +27,8 @@ import registerModeCommands from './modeCommands.js';
 import registerFileCommands from './fileCommands.js';
 import registerAttentionCommands from './attentionCommands.js';
 import registerEditCommands from './editCommands.js';
+import registerAgentVisitorCommands from './agentVisitorCommands.js';
+import registerMemoryCommands from './memoryCommands.js';
 
 /**
  * Register all built-in commands on a router.
@@ -57,6 +59,8 @@ export function registerAllCommands(router) {
     registerFileCommands(router);
     registerAttentionCommands(router);
     registerEditCommands(router);
+    registerAgentVisitorCommands(router);
+    registerMemoryCommands(router);
 }
 
 // Dev ergonomics: handlers register imperatively ONCE per page load (CommandProvider's

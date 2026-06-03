@@ -44,6 +44,24 @@ export class RemoteFileSystemProvider {
     }
 
     /**
+     * Read a raw byte window from a file — the memory-viewer / demand-paging tap.
+     * Binary-safe (no UTF-8 gate) and large-file-safe (only the window is read,
+     * capped server-side at 4MB/call). Decodes the base64 payload to bytes here
+     * so callers get a Uint8Array directly.
+     * @param {string} uri - e.g. "file:///vmlinux"
+     * @param {number} offset - byte offset into the file (the "address")
+     * @param {number} length - bytes requested (actual may be fewer at EOF)
+     * @returns {Promise<{ uri: string, offset: number, length: number, totalSize: number, bytes: Uint8Array }>}
+     */
+    async readRange(uri, offset, length) {
+        const r = await this._rpc('fs/readRange', { uri, offset, length });
+        const bin = atob(r.content || '');
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        return { uri: r.uri, offset: r.offset, length: r.length, totalSize: r.totalSize, bytes };
+    }
+
+    /**
      * List the full tree from the relay root.
      * @param {string} uri - e.g. "file:///" (root)
      * @param {Object} [options]

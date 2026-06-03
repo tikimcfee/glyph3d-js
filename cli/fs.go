@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"os"
@@ -27,6 +28,7 @@ const (
 
 const (
 	maxFileSize    = 10 * 1024 * 1024 // 10MB
+	maxRangeLen    = 4 * 1024 * 1024  // 4MB — per-chunk cap for fs/readRange (the file itself may be far larger)
 	maxTreeEntries = 50000
 	rpcTimeout     = 10 * time.Second
 )
@@ -229,6 +231,28 @@ type readFileParams struct {
 	URI string `json:"uri"`
 }
 
+// readRangeParams is the body of fs/readRange — a raw, binary-safe byte tap.
+// Unlike fs/readFile it does NOT gate on total file size or UTF-8 validity;
+// it returns base64-encoded bytes from [offset, offset+length). This is the
+// demand-paging primitive for the memory viewer: the file is the address
+// space, each call faults in one page-sized window.
+type readRangeParams struct {
+	URI    string `json:"uri"`
+	Offset int64  `json:"offset"`
+	Length int64  `json:"length"`
+}
+
+// rangeContent is the fs/readRange result. Content is base64; TotalSize is the
+// full file size so the client knows the extent of the address space it is
+// windowing into.
+type rangeContent struct {
+	URI       string `json:"uri"`
+	Offset    int64  `json:"offset"`
+	Length    int64  `json:"length"`  // actual bytes returned (may be < requested at EOF)
+	TotalSize int64  `json:"totalSize"`
+	Content   string `json:"content"` // base64-encoded bytes
+}
+
 type listTreeParams struct {
 	URI string `json:"uri"`
 }
@@ -314,6 +338,8 @@ func (h *FSHandler) Handle(method string, rawID json.RawMessage, params json.Raw
 			switch method {
 			case "fs/readFile":
 				h.handleReadFile(write, rawID, params)
+			case "fs/readRange":
+				h.handleReadRange(write, rawID, params)
 			case "fs/listTree":
 				h.handleListTree(write, rawID, params)
 			case "fs/stat":
@@ -384,6 +410,71 @@ func (h *FSHandler) handleReadFile(write writeFn, id json.RawMessage, raw json.R
 			Size:  info.Size(),
 			Mtime: info.ModTime().UnixMilli(),
 		},
+	}
+	h.sendRPCResult(write, id, result)
+}
+
+// handleReadRange serves a raw byte window from a file — the memory-viewer tap.
+//
+// Shape:  { uri, offset, length }  ->  { uri, offset, length, totalSize, content(base64) }
+// Unlike readFile it tolerates binary and arbitrarily large files: it only
+// reads [offset, offset+length) (capped at maxRangeLen per call) via ReadAt,
+// so a 1GB file is windowed, never slurped. EOF short-reads are not an error —
+// the returned Length reflects how many bytes actually landed.
+func (h *FSHandler) handleReadRange(write writeFn, id json.RawMessage, raw json.RawMessage) {
+	var p readRangeParams
+	if err := json.Unmarshal(raw, &p); err != nil {
+		h.sendRPCError(write, id, -32602, "invalid params", nil)
+		return
+	}
+	if p.Offset < 0 || p.Length < 0 {
+		h.sendRPCError(write, id, -32602, "offset and length must be non-negative", map[string]string{"uri": p.URI})
+		return
+	}
+	n := p.Length
+	if n > maxRangeLen {
+		n = maxRangeLen
+	}
+
+	resolved, err := h.resolvePath(p.URI)
+	if err != nil {
+		h.sendRPCError(write, id, errPermissionDenied, err.Error(), map[string]string{"uri": p.URI})
+		return
+	}
+
+	info, err := os.Stat(resolved)
+	if err != nil {
+		h.sendRPCError(write, id, errFileNotFound, "file not found: "+p.URI, map[string]string{"uri": p.URI})
+		return
+	}
+	if info.IsDir() {
+		h.sendRPCError(write, id, errIsDirectory, "is a directory: "+p.URI, map[string]string{"uri": p.URI})
+		return
+	}
+
+	f, err := os.Open(resolved)
+	if err != nil {
+		h.sendRPCError(write, id, errFileNotFound, "open error: "+err.Error(), map[string]string{"uri": p.URI})
+		return
+	}
+	defer f.Close()
+
+	buf := make([]byte, n)
+	got, err := f.ReadAt(buf, p.Offset)
+	// ReadAt reports io.EOF when it fills fewer than len(buf) bytes at end of
+	// file — that's expected for the tail window, not a failure. Any other
+	// error is real.
+	if err != nil && err != io.EOF {
+		h.sendRPCError(write, id, errFileNotFound, "read error: "+err.Error(), map[string]string{"uri": p.URI})
+		return
+	}
+
+	result := rangeContent{
+		URI:       p.URI,
+		Offset:    p.Offset,
+		Length:    int64(got),
+		TotalSize: info.Size(),
+		Content:   base64.StdEncoding.EncodeToString(buf[:got]),
 	}
 	h.sendRPCResult(write, id, result)
 }

@@ -1,8 +1,9 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import * as THREE from 'three/webgpu';
 import { useGlyphEngine, GlyphCanvas, CodeGrid, ViewerCamera } from 'glyph3d-r3f';
 import CommandProvider from '../../app/client/CommandProvider.jsx';
+import HudPanel from './HudPanel.jsx';
 // The consumer owns the font choice — the engine doesn't bake a path. Resolved
 // via the core's "./fonts/*" export, not a reach into src/.
 import fontUrl from '@glyph3d/core/fonts/Cousine-Regular.ttf?url';
@@ -30,6 +31,10 @@ function App() {
   const { atlas, stage, error } = useGlyphEngine({ fontUrl });
   const gridRef = useRef(null);
   const cameraRef = useRef(null);
+  // The wired command client ({ ctx, router, registry, bridge }), handed up by
+  // CommandProvider.onReady once the bridge connects. DOM chrome (the HUD) lives OUTSIDE the
+  // Canvas, so it can't read the in-canvas context — it gets the client as a prop instead.
+  const [client, setClient] = useState(null);
 
   useEffect(() => {
     setStatus(error ? `boot failed: ${error.message}` : `engine: ${stage}`);
@@ -49,24 +54,30 @@ function App() {
 
   if (error || !atlas) return null;
   return (
-    <GlyphCanvas
-      atlas={atlas}
-      camera={{ position: [0, 0, 200], fov: 70, near: 0.1, far: 10000 }}
-      onCreated={({ scene }) => { scene.background = new THREE.Color(0x050608); }}
-    >
-      <ViewerCamera ref={cameraRef} />
-      {/* The page is served by Vite (:5173); the command relay is the Go
-          server (glyph3d-cli serve) on :8080. Override with ?relay=PORT.
-          <CodeGrid> self-registers into the shared registry, so the command
-          layer sees it with no wrapper. */}
-      <CommandProvider
+    <>
+      <GlyphCanvas
         atlas={atlas}
-        port={Number(new URLSearchParams(location.search).get('relay')) || 8080}
-        cameraControllerRef={cameraRef}
+        camera={{ position: [0, 0, 200], fov: 70, near: 0.1, far: 10000 }}
+        onCreated={({ scene }) => { scene.background = new THREE.Color(0x050608); }}
       >
-        <CodeGrid ref={onGrid} filename="home.js" text={SAMPLE} worldScale={0.025} />
-      </CommandProvider>
-    </GlyphCanvas>
+        <ViewerCamera ref={cameraRef} />
+        {/* The page is served by Vite (:5173); the command relay is the Go
+            server (glyph3d-cli serve) on :8080. Override with ?relay=PORT.
+            <CodeGrid> self-registers into the shared registry, so the command
+            layer sees it with no wrapper. onReady hands the wired client up so
+            DOM chrome (the HUD, outside the Canvas) can drive the command bus. */}
+        <CommandProvider
+          atlas={atlas}
+          port={Number(new URLSearchParams(location.search).get('relay')) || 8080}
+          cameraControllerRef={cameraRef}
+          onReady={setClient}
+        >
+          <CodeGrid ref={onGrid} filename="home.js" text={SAMPLE} worldScale={0.025} />
+        </CommandProvider>
+      </GlyphCanvas>
+      {/* State HUD — DOM chrome reflecting/controlling the focused window via command verbs. */}
+      <HudPanel client={client} />
+    </>
   );
 }
 

@@ -1,9 +1,10 @@
 import React, { createContext, useContext, useEffect, useRef } from 'react';
-import { useThree } from '@react-three/fiber';
+import { useThree, useFrame } from '@react-three/fiber';
 import { useGridRegistry } from 'glyph3d-r3f';
 
 import CommandRouter from '@glyph3d/core/services/orchestration/CommandRouter.js';
 import WebSocketBridge from '@glyph3d/core/services/orchestration/WebSocketBridge.js';
+import FieldVisitorManager from '@glyph3d/core/services/orchestration/FieldVisitorManager.js';
 import { installConsoleForwarder } from '@glyph3d/core/services/orchestration/consoleForwarder.js';
 import AttentionManager from '@glyph3d/core/services/interaction/AttentionManager.js';
 import EntityKeystrokeRouter from '@glyph3d/core/services/interaction/EntityKeystrokeRouter.js';
@@ -84,6 +85,10 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     windowManager: null,
     wsbridge: null,
 
+    // Field-visitor multiplexer — one self-driving visitor per agent. Created in the
+    // effect (needs the live ctx); ticked each frame by <VisitorRunner/>.
+    visitorManager: null,
+
     // GPU glyph-picking system (material-swap ID pass on a dedicated render
     // layer). Created in the effect below once gl exists; canvas hover/click
     // resolves pixel-perfect picks through it. Null until then.
@@ -106,6 +111,16 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
 }
 
 const AppCommandContext = createContext(null);
+
+/**
+ * VisitorRunner — drives the field-visitor multiplexer once per frame. Rendered
+ * inside the Canvas (so useFrame is valid); a logic-only component (returns null).
+ * Guards on visitorManager so it's a no-op until the effect wires it.
+ */
+function VisitorRunner({ stateRef }) {
+  useFrame((_, dt) => stateRef.current?.ctx?.visitorManager?.update(dt));
+  return null;
+}
 
 /** Access the wired command client: { ctx, router, registry, bridge }. */
 export function useAppCommands() {
@@ -152,6 +167,10 @@ export default function CommandProvider({ atlas, port = 8080, cameraControllerRe
     // via setPickingSystem). 'cell' mode: the whole glyph quad is pickable.
     const pickingSystem = new PickingSystem(gl, { mode: 'cell' });
     state.ctx.pickingSystem = pickingSystem;
+
+    // Field-visitor multiplexer: agent.* commands spawn/move/follow one self-driving
+    // visitor per agent. The camera stays free unless `camera.follow <id>` opts in.
+    state.ctx.visitorManager = new FieldVisitorManager(state.ctx);
 
     const url = `ws://localhost:${port}`;
     const bridge = new WebSocketBridge(state.router, {
@@ -262,11 +281,14 @@ export default function CommandProvider({ atlas, port = 8080, cameraControllerRe
       bridge.disconnect();
       pickingSystem.dispose();
       state.ctx.pickingSystem = null;
+      state.ctx.visitorManager?.dispose();
+      state.ctx.visitorManager = null;
     };
   }, [port]);
 
   return (
     <AppCommandContext.Provider value={stateRef.current}>
+      <VisitorRunner stateRef={stateRef} />
       {children}
     </AppCommandContext.Provider>
   );

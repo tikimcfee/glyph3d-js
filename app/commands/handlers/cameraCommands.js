@@ -59,6 +59,18 @@ export default function registerCameraCommands(router) {
         return { text: 'OK: camera reset', data: null };
     }, { description: 'Reset camera to default position' });
 
+    router.register('camera.lock', (args, ctx) => {
+        const cc = ctx.cameraController;
+        if (!cc || typeof cc.setLocked !== 'function') return { text: 'ERR: camera controller not ready', data: null };
+        const cur = cc.isLocked?.() ?? false;
+        const arg = (args[0] || 'toggle').toLowerCase();
+        const next = (arg === 'on' || arg === 'true' || arg === '1') ? true
+                   : (arg === 'off' || arg === 'false' || arg === '0') ? false
+                   : !cur;  // toggle (default / any other arg)
+        cc.setLocked(next);
+        return { text: `OK: camera ${next ? 'locked' : 'unlocked'}`, data: { locked: next } };
+    }, { description: 'Freeze/unfreeze camera motion (the wheel still scrolls a focused framed grid)', usage: '[on|off|toggle]' });
+
     router.register('camera.speed', (args, ctx) => {
         if (args.length < 1) return { text: 'ERR: usage: camera.speed <value>', data: null };
         const speed = parseFloat(args[0]);
