@@ -131,9 +131,25 @@ export function CanvasPicker() {
       }
       router.execute(`attention.set primary ${entry.id}`);
       router.execute(`camera.focus ${entry.id}`);
-      // Terminals take keyboard focus on click (type immediately); clicking any
-      // other entity releases the key slot.
-      router.execute(entry.type === 'terminal' ? `attention.set key ${entry.id}` : 'attention.set key none');
+      // Terminals take keyboard focus on click (type immediately). A grid that's
+      // ALREADY the key target stays keyboard-focused — clicking inside the doc you're
+      // editing must not drop edit mode. Any other grid gets visual focus only (no
+      // silent click-to-edit), so the key slot is released.
+      const keyId = client.ctx.attentionManager?.get('key')?.id;
+      const keepKey = entry.type === 'terminal' || keyId === entry.id;
+      router.execute(keepKey ? `attention.set key ${entry.id}` : 'attention.set key none');
+    };
+
+    // Double-click a grid to ENTER edit mode — the deliberate gesture that honors
+    // "no SILENT click-to-edit" while staying low-friction. Single click focuses
+    // (above); double-click drops into editing (caret on, keystrokes → the doc).
+    // Terminals already take keyboard focus on a single click, so they're skipped.
+    const onDblClick = (e) => {
+      if (client.ctx.resizing) return;
+      const entry = s.hoverEntry;
+      if (!entry || entry.type !== 'grid') return;
+      router.execute(`attention.set primary ${entry.id}`);
+      router.execute(`edit.start ${entry.id}`);
     };
 
     dom.addEventListener('pointermove', onMove);
@@ -141,12 +157,14 @@ export function CanvasPicker() {
     dom.addEventListener('pointerleave', onLeave);
     dom.addEventListener('pointerdown', onDown);
     dom.addEventListener('pointerup', onUp);
+    dom.addEventListener('dblclick', onDblClick);
     return () => {
       dom.removeEventListener('pointermove', onMove);
       dom.removeEventListener('pointerenter', onEnter);
       dom.removeEventListener('pointerleave', onLeave);
       dom.removeEventListener('pointerdown', onDown);
       dom.removeEventListener('pointerup', onUp);
+      dom.removeEventListener('dblclick', onDblClick);
       if (client.ctx.isGripPress === isGripPress) client.ctx.isGripPress = null;
     };
   }, [client, gl, s]);
