@@ -42,11 +42,13 @@ function Demo() {
   return (
     <GlyphCanvas
       atlas={atlas}
-      camera={{ position: [0, 0, 200], fov: 70, near: 0.1, far: 10000 }}
+      camera={{ position: [0, 0, 95], fov: 70, near: 0.1, far: 10000 }}
       onCreated={({ scene }) => { scene.background = new THREE.Color(0x0e0c08); }}
     >
       <ViewerCamera />                                       {/* drag = orbit/pan · wheel = zoom */}
-      <CodeGrid filename="hello.js" text={text} worldScale={0.025} />
+      {/* sage (#a8a072) to match glyph3d.dev, not the library's default green */}
+      <CodeGrid filename="hello.js" text={text} worldScale={0.025}
+        textColor={{ r: 0.659, g: 0.627, b: 0.447 }} />
     </GlyphCanvas>
   );
 }
