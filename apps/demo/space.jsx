@@ -35,36 +35,36 @@ const PALETTE = [
 const RAW = import.meta.glob('../../packages/glyph3d-core/src/**/*.js', {
   query: '?raw', import: 'default', eager: true,
 });
-const MAX_FILES = 54, MAX_LINES = 14;
 const dirColor = {}; let dirN = 0;
 const colorFor = (dir) => (dir in dirColor ? dirColor[dir] : (dirColor[dir] = PALETTE[dirN++ % PALETTE.length]));
+// EVERY file, FULL content — the whole library rendered, no truncation.
 const FILES = Object.entries(RAW)
   .map(([path, src]) => { const parts = path.split('/'); return { name: parts.pop(), dir: parts.pop(), src: String(src) }; })
   .filter((f) => f.src.trim().length > 0)
-  .sort((a, b) => (a.dir + '/' + a.name).localeCompare(b.dir + '/' + b.name))   // cluster by directory
-  .slice(0, MAX_FILES)
-  .map((f) => ({ name: f.name, color: colorFor(f.dir), text: f.src.split('\n').slice(0, MAX_LINES).join('\n') }));
+  .sort((a, b) => (a.dir + '/' + a.name).localeCompare(b.dir + '/' + b.name));   // cluster by directory
 
-// arrange into a deep 3D grid — the layout (depth sells the scale on the orbit)
-const COLS = 6, ROWS = 3;
-const PER_PLANE = COLS * ROWS;
-const PLANES = Math.max(1, Math.ceil(FILES.length / PER_PLANE));
-const COLX = 84, ROWY = 66, PLANEZ = 125;
+const WS = 0.018;
+const LH = WS * 140;                 // ~world units per text line (skyline heights)
+// SKYLINE: each file is its own column on a footprint grid, rising from a shared
+// baseline by its real line count. The big files literally tower — it's a real
+// repo, all of it, at once.
+const COLS = 12;
+const PLANES = Math.ceil(FILES.length / COLS);
+const COLX = 80, PLANEZ = 120;
 const CELLS = FILES.map((f, i) => {
-  const plane = Math.floor(i / PER_PLANE), within = i % PER_PLANE;
-  const row = Math.floor(within / COLS), col = within % COLS;
+  const col = i % COLS, plane = Math.floor(i / COLS);
+  const lines = f.src.split('\n').length;
   return {
-    key: 'f' + i, name: f.name, text: f.text, color: f.color,
+    key: 'f' + i, name: f.name, text: f.src, color: PALETTE[i % PALETTE.length],
     pos: [
       (col - (COLS - 1) / 2) * COLX,
-      ((ROWS - 1) / 2 - row) * ROWY,
+      lines * LH,                    // anchor at top → the file rises from baseline 0
       (plane - (PLANES - 1) / 2) * PLANEZ,
     ],
   };
 });
 
-const WS = 0.03;
-const RAD = 470, CAM_Y = 48, SWAY = 0.52;
+const RAD = 880, CAM_Y = 300, LOOK_Y = 470, SWAY = 0.6;
 
 function Director() {
   const { camera } = useThree();
@@ -75,10 +75,10 @@ function Director() {
     const az = Math.sin(t * TAU) * SWAY;                 // pendulum across the front
     camera.position.set(
       Math.sin(az) * RAD,
-      CAM_Y + Math.sin(t * TAU + 1.3) * 22,              // gentle vertical drift
+      CAM_Y + Math.sin(t * TAU + 1.3) * 70,              // gentle vertical drift
       Math.cos(az) * RAD,
     );
-    camera.lookAt(0, 0, 0);
+    camera.lookAt(0, LOOK_Y, 0);
   };
 
   React.useEffect(() => {
@@ -104,7 +104,7 @@ function App() {
   return (
     <GlyphCanvas
       atlas={atlas}
-      camera={{ position: [0, CAM_Y, RAD], fov: 50, near: 1, far: 5000 }}
+      camera={{ position: [0, CAM_Y, RAD], fov: 55, near: 1, far: 13000 }}
       onCreated={({ scene }) => { scene.background = new THREE.Color(0x0e0c08); }}
     >
       <Director />
