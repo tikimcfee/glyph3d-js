@@ -50,7 +50,7 @@ app/
   ButtonBar IdeDock FileTree TerminalsPanel FieldVisitorsPanel   dockview panels
 cli/
   main.go relay.go fs.go embed.go attach_unix.go   serve + relay + fs-RPC + terminals
-Makefile  tools/dev.sh  examples/  docs/
+Makefile  tools/dev.sh
 ```
 
 ## How it runs
