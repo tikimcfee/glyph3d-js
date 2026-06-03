@@ -3,7 +3,7 @@
  *
  * This file contains only JSDoc @typedef declarations — no runtime code.
  * It is the single source of truth for the portable data contract between
- * text processing (builders, workers) and GPU rendering (GlyphRenderer).
+ * text processing (builders, workers) and GPU rendering (GlyphField).
  *
  * Import this file for type reference only:
  *   import './core/types.js'; // JSDoc only — no exports consumed at runtime

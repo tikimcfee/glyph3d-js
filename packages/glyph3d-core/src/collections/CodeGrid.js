@@ -50,7 +50,7 @@ class CodeGrid extends THREE.Object3D {
             gridScale: options.gridScale || 1.0,
             // World scale passed to renderer (pixels to world units)
             worldScale: options.worldScale || 0.025,
-            // Slug vector rendering data (passed through to GlyphRenderer)
+            // Slug vector rendering data (passed through to the renderer)
             // Check options first, then atlas (shared across all renderers)
             slugData: options.slugData || (atlas && atlas._slugData) || null,
             shaper: options.shaper || (atlas && atlas._shaper) || null,
@@ -461,9 +461,9 @@ class CodeGrid extends THREE.Object3D {
     }
 
     /**
-     * Get the underlying GlyphRenderer, or null if not yet created.
+     * Get the underlying GlyphField renderer, or null if not yet created.
      * Used by PickingSystem, highlight commands, and external callers.
-     * @returns {GlyphRendererV15|null}
+     * @returns {GlyphField|null}
      */
     getRenderer() {
         return this._renderer;
@@ -579,7 +579,7 @@ class CodeGrid extends THREE.Object3D {
      * Release GPU buffers while preserving source reference for reload.
      * Called by GridVirtualizer when a grid exits the eviction threshold.
      * Preserves: position, metadata, bounding box, source text, config.
-     * Releases: GlyphRendererV15 (InstancedBufferGeometry, highlight texture,
+     * Releases: GlyphField (InstancedBufferGeometry, highlight texture,
      *   group DataTexture, all instance attribute buffers).
      *
      * After this call `isContentLoaded` returns false. The grid remains in
@@ -888,7 +888,7 @@ class CodeGrid extends THREE.Object3D {
     }
 
     /**
-     * Ensure the GlyphRenderer exists, reconstructing it from the stored atlas
+     * Ensure the GlyphField renderer exists, reconstructing it from the stored atlas
      * if content was previously evicted. Called at the top of loadText() and
      * loadTextAsync() so those methods are safe to use on evicted grids.
      * @private
@@ -913,7 +913,7 @@ class CodeGrid extends THREE.Object3D {
     }
 
     /**
-     * Create a GlyphRendererV15 with a specific buffer size and wire it up.
+     * Create a GlyphField with a specific buffer size and wire it up.
      * @private
      * @param {number} size - Max instance count for the renderer
      * @param {boolean} [skipPrealloc=false]

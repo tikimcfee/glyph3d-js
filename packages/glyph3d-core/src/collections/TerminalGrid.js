@@ -1,9 +1,9 @@
 /**
  * TerminalGrid — renders a fixed-size terminal cell grid using direct typed array
- * writes to GlyphRendererV15.
+ * writes to GlyphField.
  *
  * Each cell in the (cols × rows) grid maps to exactly one glyph instance via
- * row-major indexing. The grid uses a dedicated GlyphRenderer instance and a
+ * row-major indexing. The grid uses a dedicated GlyphField instance and a
  * single group in the DataTexture for O(1) world-position moves.
  *
  * Design principles (from cross-ref/tmux-terminal-integration convergence):

@@ -1,7 +1,7 @@
 /**
  * TreemapLabelManager — LOD-aware labels for treemap mode
  *
- * All label text shares a single GlyphRendererV15 instance (one draw call for
+ * All label text shares a single GlyphField instance (one draw call for
  * all labels). Two tiers:
  *
  *   Directory labels  — shown when camera Z > DIR_THRESHOLD
@@ -55,7 +55,7 @@ export class TreemapLabelManager {
         this._treemapManager = treemapManager;
         this._camera         = camera;
 
-        /** @type {GlyphRendererV15|null} Single renderer for all labels */
+        /** @type {GlyphField|null} Single renderer for all labels */
         this._renderer = null;
 
         this._dirGroupIds  = [];   // group IDs used by directory labels

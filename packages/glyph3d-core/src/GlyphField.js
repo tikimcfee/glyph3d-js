@@ -58,7 +58,7 @@ const MAX_GROUPS_DIM     = 16000;
 
 /**
  * Build TSL vertex node for instanced glyph rendering.
- * Replicates GlyphRenderer vertex shader logic in TSL.
+ * The instanced vertex shader logic, in TSL.
  *
  * @param {Object} uniforms - { groupTex, groupTexHeight, highlightTex }
  * @returns {Object} { vertexFn, vColor, vGroupAlpha, vAddedColor }
@@ -166,7 +166,7 @@ function _buildVertexNode(uniforms) {
 /**
  * Build TSL fragment (output) node — Slug analytic coverage + bitmap emoji branch.
  *
- * Port of GlyphRenderer's GLSL fragment shader: accumulate fractional winding
+ * Fragment shader: accumulate fractional winding
  * over every quadratic bezier in the glyph along an X ray and a Y ray
  * (2D anti-aliasing), scaled by the per-pixel footprint (fwidth). Single sample
  * (no supersampling / no band structure); under minification the ink is dilated
@@ -443,7 +443,7 @@ export default class GlyphField {
             worldScale: scale,
         };
 
-        // Group DataTexture (identical layout to GlyphRenderer)
+        // Group DataTexture
         const requestedGroups = options.maxGroups || MAX_GROUPS_DEFAULT;
         this._maxGroups  = Math.min(requestedGroups, MAX_GROUPS_DIM);
         this._groupData  = new Float32Array(this._maxGroups * 4 * 4);
@@ -456,7 +456,7 @@ export default class GlyphField {
         this._highlightSize     = 0;
         this._highlightTexWidth = 1024;
 
-        // Text registry (same shape as GlyphRenderer for PickingSystem.resolveGlyph)
+        // Text registry (the shape PickingSystem.resolveGlyph reads)
         this.renderedTexts     = new Map();
         this.nextId            = 1;
         this._cachedGlyphCount = 0;
@@ -835,7 +835,7 @@ export default class GlyphField {
     // ── Stats ─────────────────────────────────────────────────────────────────
 
     /**
-     * Memory / instance statistics (same shape as GlyphRenderer.getMemoryStats()).
+     * Memory / instance statistics.
      */
     getMemoryStats() {
         const geom = this.instanceMesh?.geometry;
@@ -968,8 +968,7 @@ export default class GlyphField {
     // ── Picking seam ──────────────────────────────────────────────────────────
 
     /**
-     * Descriptor for PickingSystem.register() — exposes the same
-     * properties that GlyphRenderer exposes for backward compatibility.
+     * Descriptor for PickingSystem.register().
      */
     getPickingDescriptor() {
         return {
@@ -1293,7 +1292,7 @@ export default class GlyphField {
     }
 
     /**
-     * Apply worker-prebuilt buffers (same interface as GlyphRenderer).
+     * Apply worker-prebuilt buffers.
      */
     applyPrebuiltBuffers(buffers, items) {
         const { positions, sizes, colors, groupIds, count } = buffers;
