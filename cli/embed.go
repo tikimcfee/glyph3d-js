@@ -5,10 +5,10 @@ import (
 	"io/fs"
 )
 
-// webFS holds all static assets copied into web/ by the build script.
-// The build step (Makefile) copies packages/glyph3d-core/src/, app/,
-// examples/, index.html, etc. into cli/web/ (paths preserved via
-// cp --parents) before compilation, then cleans up after.
+// webFS holds the built app staged into web/ by `make prep`. The build step
+// runs the app's Vite production build and copies app/dist/* into cli/web/
+// (index.html + assets/) before compilation, then cleans up after. The served
+// tree is the app itself: / → index.html, /assets/... → the bundle.
 //
 //go:embed all:web
 var webFS embed.FS

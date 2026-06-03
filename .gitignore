@@ -45,3 +45,6 @@ glyph3d-cli
 
 # Per-workspace saved session (SessionStore writes this via the relay)
 .glyph3d-session.json
+
+# Browser console capture (dev aid)
+console.log

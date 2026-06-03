@@ -586,7 +586,6 @@ type ServerConfig struct {
 	FSHandler *FSHandler // Filesystem JSON-RPC handler (nil if no --root)
 	StaticFS  fs.FS      // Static file source: embedded FS or os.DirFS
 	StaticTag string     // Label for logs: "embedded" or the disk path
-	WatchRoot string     // Live reload: watch this directory for source changes (empty = disabled)
 }
 
 // RunServer starts a unified HTTP + WebSocket server on a single port.
@@ -603,27 +602,6 @@ func RunServer(cfg ServerConfig) error {
 		cfg.FSHandler.SetNotifyHook(relay.NotifyDisplayRPC)
 	}
 
-	// Live reload: watch source directories and push notifications to the browser
-	if cfg.WatchRoot != "" {
-		lr, err := NewLiveReloader(func(path string) {
-			rel, _ := filepath.Rel(cfg.WatchRoot, path)
-			log.Printf("[livereload] %s changed → notifying browser", rel)
-			relay.NotifyDisplayRPC("fs/didChange", map[string]string{
-				"path":  rel,
-				"event": "change",
-			})
-		})
-		if err != nil {
-			log.Printf("[livereload] failed to start watcher: %v", err)
-		} else {
-			lr.Watch(
-				filepath.Join(cfg.WatchRoot, "src"),
-				filepath.Join(cfg.WatchRoot, "app"),
-			)
-			log.Printf("[livereload] watching src/, app/ for changes")
-		}
-	}
-
 	fileServer := http.FileServer(http.FS(cfg.StaticFS))
 
 	mux := http.NewServeMux()
@@ -632,12 +610,6 @@ func RunServer(cfg ServerConfig) error {
 		if isWebSocketUpgrade(r) {
 			relay.ServeHTTP(w, r)
 			return
-		}
-
-		// In local/dev mode, prevent browser caching so live reload
-		// always picks up the latest source files.
-		if cfg.WatchRoot != "" {
-			w.Header().Set("Cache-Control", "no-store")
 		}
 
 		// Static files — set correct MIME types for ES modules
@@ -669,11 +641,11 @@ func RunServer(cfg ServerConfig) error {
 		log.Printf("[glyph3d] Project: %s", cfg.FSHandler.root)
 	}
 	log.Printf("[glyph3d] ──────────────────────────────────────")
-	log.Printf("[glyph3d]   http://localhost:%d/app/ide.html", cfg.Port)
+	log.Printf("[glyph3d]   http://localhost:%d/", cfg.Port)
 	log.Printf("[glyph3d]   ws://localhost:%d  (relay)", cfg.Port)
 	if cfg.Host == "0.0.0.0" {
 		for _, a := range getLANAddresses() {
-			log.Printf("[glyph3d]   http://%s:%d/app/ide.html", a, cfg.Port)
+			log.Printf("[glyph3d]   http://%s:%d/", a, cfg.Port)
 		}
 	}
 	log.Printf("[glyph3d] ══════════════════════════════════════")

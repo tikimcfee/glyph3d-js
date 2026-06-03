@@ -16,11 +16,7 @@ BINARY   := glyph3d-cli
 CLI_DIR  := cli
 WEB_DIR  := $(CLI_DIR)/web
 OUT_DIR  := dist
-
-# Assets to embed. Paths are preserved under web/ via `cp --parents`, so the
-# served URL tree matches: /packages/glyph3d-core/src/... is what the app
-# importmaps ("@glyph3d/core/") resolve to.
-ASSETS := packages/glyph3d-core/src app examples index.html package.json
+APP_DIR  := app
 
 # Version info — override with: make VERSION=v1.2.3
 VERSION    ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -44,17 +40,19 @@ build: prep
 	cd $(CLI_DIR) && go build $(GOFLAGS) -o ../$(BINARY) .
 	@echo "Built ./$(BINARY) ($$(du -h $(BINARY) | cut -f1)) — $(VERSION)"
 
-# --- Prep: copy assets into cli/web/ for go:embed ---
+# --- Prep: build the app (Vite) and stage it into cli/web/ for go:embed ---
+# The app is a self-contained production build — it bundles @glyph3d/core + the
+# r3f bindings + three + react, and emits fonts/WASM as hashed assets. Served at
+# the web root: / → index.html, /assets/... → the bundle. No importmap, no raw
+# /packages/ source served. Prerequisite: deps installed (`bun install` at root).
 
 prep:
 	@rm -rf $(WEB_DIR)
 	@mkdir -p $(WEB_DIR)
-	@for asset in $(ASSETS); do \
-		if [ -e "$$asset" ]; then \
-			cp -r --parents "$$asset" $(WEB_DIR)/; \
-		fi; \
-	done
-	@echo "Prepared $(WEB_DIR)/ for embedding"
+	@echo "Building app (vite)…"
+	@cd $(APP_DIR) && bun run build
+	@cp -r $(APP_DIR)/dist/. $(WEB_DIR)/
+	@echo "Prepared $(WEB_DIR)/ (built app) for embedding"
 
 # --- Vendor HarfBuzz WASM from node_modules ---
 # Run after npm install to refresh vendored harfbuzzjs files.

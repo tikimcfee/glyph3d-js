@@ -293,10 +293,8 @@ type FSHandler struct {
 
 	// notify, if non-nil, is called on successful fs/writeFile to push an
 	// fs/didChange JSON-RPC notification to the display. Wired by RunServer
-	// / RunRelay to relay.NotifyDisplayRPC. When the server is running with
-	// --local (LiveReloader watching app/ + src/), the watcher may ALSO
-	// fire for the same path — the browser-side handler is idempotent
-	// (it just reloads), so the dupe is harmless.
+	// / RunRelay to relay.NotifyDisplayRPC — this is the save-confirm round
+	// trip (file.save → didChange → the browser reloads the affected grid).
 	notify func(method string, params any)
 }
 

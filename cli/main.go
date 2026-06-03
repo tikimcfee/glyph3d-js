@@ -390,27 +390,30 @@ func serveCmd() {
 	}
 
 	if *local {
-		// Dev mode: serve IDE app from disk (for hacking on glyph3d itself).
-		// The static root must be the repo root (where app/, src/, examples/ live),
-		// NOT the project path (which is for filesystem browsing).
-		// Find the repo root by looking for app/ide.html relative to the binary
-		// or cwd, then fall back to projectPath.
+		// Dev/test: serve the BUILT app (app/dist) from disk instead of the
+		// embedded copy — rebuild with `cd app && bun run build` and reload
+		// without recompiling the binary. (Live source editing is the Vite dev
+		// server on :5173; the Go binary only ever serves the built app.)
+		// Find the repo root by looking for app/dist/index.html relative to the
+		// project path or the binary, then fall back to projectPath.
 		staticRoot := projectPath
-		// If projectPath doesn't contain app/ide.html, try the binary's directory
-		if _, err := os.Stat(filepath.Join(staticRoot, "app", "ide.html")); err != nil {
-			// Try the executable's directory (binary is usually at repo root)
+		sentinel := filepath.Join("app", "dist", "index.html")
+		if _, err := os.Stat(filepath.Join(staticRoot, sentinel)); err != nil {
 			if exe, exeErr := os.Executable(); exeErr == nil {
 				candidate := filepath.Dir(exe)
-				if _, err2 := os.Stat(filepath.Join(candidate, "app", "ide.html")); err2 == nil {
+				if _, err2 := os.Stat(filepath.Join(candidate, sentinel)); err2 == nil {
 					staticRoot = candidate
 				}
 			}
 		}
-		cfg.StaticFS = os.DirFS(staticRoot)
-		cfg.StaticTag = staticRoot + " (local)"
-		cfg.WatchRoot = staticRoot
+		distDir := filepath.Join(staticRoot, "app", "dist")
+		if _, err := os.Stat(filepath.Join(distDir, "index.html")); err != nil {
+			log.Fatalf("[serve --local] no built app at %s — run: cd app && bun run build", distDir)
+		}
+		cfg.StaticFS = os.DirFS(distDir)
+		cfg.StaticTag = distDir + " (local)"
 	} else {
-		// Normal mode: embedded IDE app
+		// Normal mode: the embedded built app
 		webRoot, err := WebRoot()
 		if err != nil {
 			log.Fatalf("[serve] embedded FS: %v", err)
