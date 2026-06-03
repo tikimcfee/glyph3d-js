@@ -23,11 +23,11 @@ const TAU = Math.PI * 2;
 // Independent animation rates (rad/s on a continuous clock) so orbit and the
 // waves tune separately. Live autoplay runs a continuous clock — no loop
 // boundary, so no seam; seek(t) maps t∈[0,1] across CAPTURE_SECS for capture.
-const ORBIT_W = 0.135;       // slow dome revolution (~0.30× the prior speed)
-const WAVE_XY_W = 0.90;      // XY ripple — kept lively
-const WAVE_Z_W = 0.45;       // z voxel float (~0.5× the prior speed)
+const ORBIT_W = 0.0675;      // slow dome revolution — halved (calmer, more "title")
+const WAVE_XY_W = 0.45;      // XY ripple — halved in step
+const WAVE_Z_W = 0.225;      // z voxel float — halved in step
 const CAM_Z = 138;           // frame the header band (top) + the title (lower-center)
-const CAPTURE_SECS = 46;     // seek window ≈ one full revolution
+const CAPTURE_SECS = 92;     // seek window ≈ one full revolution (doubled w/ orbit)
 const DOME_LIFT = 16;        // float the orbiting files up — a header animation band
 const TITLE_Y = 2;           // the glyph3d title sits lower-center, under the header
 
@@ -161,8 +161,8 @@ function Director({ gridRefs, nameRef }) {
     // Central floating nameplate — the dome of files orbits around this.
     const nm = nameRef.current;
     if (nm) {
-      nm.position.set(-15, TITLE_Y + Math.sin(time * 0.5) * 1.6, 0);   // lower-center float
-      nm.rotation.set(0, Math.sin(time * 0.3) * 0.12, 0);              // subtle sway
+      nm.position.set(-15, TITLE_Y + Math.sin(time * 0.25) * 1.6, 0);  // lower-center float — halved
+      nm.rotation.set(0, Math.sin(time * 0.15) * 0.12, 0);             // subtle sway — halved
     }
     // Camera frames the header band (up) and the title (lower-center).
     camera.position.set(0, 18, CAM_Z);
@@ -217,7 +217,14 @@ function App() {
 }
 
 function Root() {
-  if (typeof navigator !== 'undefined' && !navigator.gpu) return null;
+  if (typeof navigator !== 'undefined' && !navigator.gpu) {
+    return (
+      <div className="nogpu">
+        this browser doesn't support WebGPU yet —&nbsp;
+        <a href="https://github.com/tikimcfee/glyph3d-js">see glyph3d on GitHub</a>
+      </div>
+    );
+  }
   return <App />;
 }
 

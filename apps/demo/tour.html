@@ -19,6 +19,13 @@
         background: rgba(14, 12, 8, 0.72); padding: 5px 16px; border-radius: 5px;
         transition: opacity 180ms;
       }
+      /* no-WebGPU fallback — never a blank box; matches glyph3d.dev tones */
+      .nogpu {
+        position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+        padding: 1.5rem; text-align: center;
+        font: 14px/1.6 'IBM Plex Mono', ui-monospace, Menlo, monospace; color: #a39a7f;
+      }
+      .nogpu a { color: #a8a072; }
     </style>
   </head>
   <body>

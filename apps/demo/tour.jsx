@@ -224,7 +224,14 @@ function App() {
 }
 
 function Root() {
-  if (typeof navigator !== 'undefined' && !navigator.gpu) return null;
+  if (typeof navigator !== 'undefined' && !navigator.gpu) {
+    return (
+      <div className="nogpu">
+        this browser doesn't support WebGPU yet —&nbsp;
+        <a href="https://github.com/tikimcfee/glyph3d-js">see glyph3d on GitHub</a>
+      </div>
+    );
+  }
   return <App />;
 }
 

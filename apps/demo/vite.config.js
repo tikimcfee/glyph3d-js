@@ -17,8 +17,18 @@ const threeWebGPU = require.resolve('three/webgpu');
 
 export default defineConfig({
   // Relative base so the built bundle works when iframed under a subpath
-  // (e.g. glyph3d.dev embeds /hero/) rather than only at domain root.
+  // (e.g. glyph3d.dev embeds /demo/) rather than only at domain root.
   base: './',
+  // Multi-page: index.html (the rotation-title hero) + tour.html (the
+  // core-features tour). glyph3d.dev iframes both, live — no captured video.
+  build: {
+    rollupOptions: {
+      input: {
+        main: path.resolve(here, 'index.html'),
+        tour: path.resolve(here, 'tour.html'),
+      },
+    },
+  },
   plugins: [react()],
   resolve: {
     alias: [
