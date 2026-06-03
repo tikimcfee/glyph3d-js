@@ -1,22 +1,26 @@
 import React, { useEffect, useState, useCallback } from 'react';
 
 /**
- * HudPanel — the first modal-interface: a DOM-overlay "state HUD" that reflects + controls the
- * currently-focused window (attention.primary). It owns NO behavior — every control is a thin
- * binding of { fire: a command-bus verb, reflect: live state }. That makes it composable (add a
- * control = add a binding) and makes it the payoff of command-bus-first: chrome is bindings.
+ * HudPanel — the window helper + state HUD for apps/home (the first modal-interface). DOM chrome
+ * (outside the r3f Canvas, fed `client` via CommandProvider.onReady). Two stacked, composable
+ * sections, both pure bindings of { fire: a command-bus verb, reflect: live state } — the panel
+ * owns NO behavior:
  *
- * State flows ONE WAY (state → view): we subscribe to AttentionManager change events for instant
- * focus/edit retargeting + poll lightly (~150ms) for the readouts that don't emit (scroll/frame/
- * layout). The lit state of the edit toggle IS the affordance — editing is explicit + visible,
- * never a silent click-to-edit. See [[project_control_state_layer]] / LAYOUT_PLAN §3c.
+ *   1. WINDOW LIST (always shown when any window exists): every registry window (grid/terminal),
+ *      click to focus-back (select + go to it). This is the "see all windows / get back to one"
+ *      surface — and the focus SOURCE the state section needs. (Replaces the framework-heavy
+ *      apps/ide dock; here windows are command-bus-managed, never lost behind a closed tab.)
+ *   2. STATE controls (shown for the focused window): focus/reset/cam-lock, layout mode, edit
+ *      toggle (lit = editing — the explicit, no-silent-edit affordance), scroll/frame readout.
+ *
+ * State flows ONE WAY: subscribe to AttentionManager change events + registry changes for instant
+ * retarget, + a light ~150ms poll for the readouts that don't emit (scroll/frame/layout/edit).
  */
 
-// Layout-mode presets exposed in the HUD (match gridCommands.js LAYOUT_PRESETS).
 const LAYOUT_MODES = ['newspaper', 'long-column', 'no-wrap', 'z-pages'];
 
-// Best-guess the active preset from the grid's layout params. Modes are param bundles, so this
-// is an inference for the highlight (not authoritative — a --flag combo may not map to a preset).
+// Best-guess the active preset from the grid's layout params (modes are param bundles, so this is
+// an inference for the highlight, not authoritative).
 function inferMode(L) {
   if (!L) return null;
   if (L.axis === 'z') return 'z-pages';
@@ -25,7 +29,26 @@ function inferMode(L) {
   return 'newspaper';
 }
 
-// Read the focused window's live state from the command client. Pure read — no mutation.
+// Trim a label (filename/path) to something tab-sized, keeping the tail (the basename).
+function short(s, n = 22) {
+  s = String(s || '');
+  return s.length <= n ? s : '…' + s.slice(-(n - 1));
+}
+
+// Every registry window (grid + terminal) → a flat list for the window strip. Pure read.
+function readWindows(client) {
+  const reg = client?.ctx?.registry;
+  if (!reg) return [];
+  const grids = reg.findByType?.('grid') || [];
+  const terms = reg.findByType?.('terminal') || [];
+  return [...grids, ...terms].map((e) => ({
+    id: e.id,
+    type: e.type || 'grid',
+    name: e.grid?.getFilename?.() || e.id,
+  }));
+}
+
+// The focused window's live state (attention.primary) for the control section. Pure read.
 function readFocus(client) {
   const am = client?.ctx?.attentionManager;
   const reg = client?.ctx?.registry;
@@ -35,7 +58,7 @@ function readFocus(client) {
   const entry = reg.get(p.id);
   if (!entry?.grid) return null;
   const { id, grid, type } = entry;
-  const isGrid = typeof grid.getLayout === 'function';     // duck-type: terminals lack getLayout
+  const isGrid = typeof grid.getLayout === 'function';   // duck-type: terminals lack getLayout
   const cc = client.ctx.cameraController;
   return {
     id,
@@ -52,61 +75,80 @@ function readFocus(client) {
 }
 
 export default function HudPanel({ client }) {
+  const [windows, setWindows] = useState(() => readWindows(client));
   const [f, setF] = useState(() => readFocus(client));
 
   useEffect(() => {
     if (!client) return undefined;
-    const refresh = () => setF(readFocus(client));
+    const refresh = () => { setWindows(readWindows(client)); setF(readFocus(client)); };
     const am = client.ctx?.attentionManager;
+    const reg = client.ctx?.registry;
     const unsubs = [am?.on?.('change:primary', refresh), am?.on?.('change:key', refresh)].filter(Boolean);
-    const iv = setInterval(refresh, 150);  // scroll/frame/layout don't emit — poll lightly
+    reg?.addChangeListener?.(refresh);                 // window added/removed → restrip
+    const iv = setInterval(refresh, 150);              // scroll/frame/layout/edit don't emit — poll
     refresh();
-    return () => { unsubs.forEach((u) => u?.()); clearInterval(iv); };
+    return () => {
+      unsubs.forEach((u) => u?.());
+      reg?.removeChangeListener?.(refresh);
+      clearInterval(iv);
+    };
   }, [client]);
 
   const fire = useCallback((...argv) => client?.router?.execute(argv), [client]);
 
-  if (!f) return null;  // nothing focused → no HUD (the panel is the focused window's chrome)
+  if (windows.length === 0 && !f) return null;  // nothing to show yet
+  const focusedId = f?.id ?? null;
 
   return (
-    <div
-      style={S.panel}
-      onPointerDown={(e) => e.stopPropagation()}  // the panel owns its clicks; don't start a camera drag
-      onWheel={(e) => e.stopPropagation()}
-    >
-      <div style={S.title} title={f.id}>{f.type === 'terminal' ? '▤' : '▦'} {f.name}</div>
+    <div style={S.panel} onPointerDown={(e) => e.stopPropagation()} onWheel={(e) => e.stopPropagation()}>
+      {/* 1. window list — click to focus-back (select + go to it) */}
+      {windows.length > 0 && (
+        <div style={S.windows}>
+          {windows.map((w) => (
+            <button key={w.id} type="button" title={w.id}
+              style={{ ...S.tab, ...(w.id === focusedId ? S.tabOn : null) }}
+              onClick={() => { fire('attention.set', 'primary', w.id); fire('camera.focus', w.id); }}>
+              {w.type === 'terminal' ? '▤' : '▦'} {short(w.name)}
+            </button>
+          ))}
+        </div>
+      )}
 
-      <div style={S.row}>
-        <Btn onClick={() => fire('camera.focus', f.id)}>focus</Btn>
-        <Btn onClick={() => fire('camera.reset')}>reset</Btn>
-        <Toggle on={f.cameraLocked} onStyle={S.cyanOn} onClick={() => fire('camera.lock')}>
-          {f.cameraLocked ? 'cam ●' : 'cam ○'}
-        </Toggle>
-      </div>
-
-      {f.isGrid && (
-        <>
+      {/* 2. focused-window controls */}
+      {f && (
+        <div style={S.controls}>
           <div style={S.row}>
-            {LAYOUT_MODES.map((m) => (
-              <Mode key={m} on={f.layoutMode === m} onClick={() => fire('grid.layout', f.id, m)}>{m}</Mode>
-            ))}
-          </div>
-          <div style={S.row}>
-            <Toggle on={f.editing} onStyle={S.editOn}
-              onClick={() => fire(f.editing ? 'edit.stop' : 'edit.start', f.id)}>
-              {f.editing ? 'edit ●' : 'edit ○'}
+            <Btn onClick={() => fire('camera.focus', f.id)}>focus</Btn>
+            <Btn onClick={() => fire('camera.reset')}>reset</Btn>
+            <Toggle on={f.cameraLocked} onStyle={S.cyanOn} onClick={() => fire('camera.lock')}>
+              {f.cameraLocked ? 'cam ●' : 'cam ○'}
             </Toggle>
-            <span style={S.readout}>
-              {f.frameRows > 0 ? `frame ${f.frameRows} · ` : ''}row {f.scroll}/{f.total}
-            </span>
           </div>
-        </>
+          {f.isGrid && (
+            <>
+              <div style={S.row}>
+                {LAYOUT_MODES.map((m) => (
+                  <Mode key={m} on={f.layoutMode === m} onClick={() => fire('grid.layout', f.id, m)}>{m}</Mode>
+                ))}
+              </div>
+              <div style={S.row}>
+                <Toggle on={f.editing} onStyle={S.editOn}
+                  onClick={() => fire(f.editing ? 'edit.stop' : 'edit.start', f.id)}>
+                  {f.editing ? 'edit ●' : 'edit ○'}
+                </Toggle>
+                <span style={S.readout}>
+                  {f.frameRows > 0 ? `frame ${f.frameRows} · ` : ''}row {f.scroll}/{f.total}
+                </span>
+              </div>
+            </>
+          )}
+        </div>
       )}
     </div>
   );
 }
 
-// ── composable primitives — each is a thin binding of { onClick: fire(verb), reflect: on } ──
+// ── composable primitives — each a thin binding of { onClick: fire(verb), reflect: on } ──
 function Btn({ onClick, children }) {
   return <button type="button" style={S.btn} onClick={onClick}>{children}</button>;
 }
@@ -123,14 +165,17 @@ const S = {
     font: '12px ui-monospace, Menlo, Consolas, monospace',
     background: 'rgba(10,12,16,0.82)', color: '#aebccb',
     border: '1px solid #283341', borderRadius: 7, padding: '8px 10px',
-    display: 'flex', flexDirection: 'column', gap: 6, minWidth: 210,
-    userSelect: 'none', backdropFilter: 'blur(6px)',
-    boxShadow: '0 4px 18px rgba(0,0,0,0.35)',
+    display: 'flex', flexDirection: 'column', gap: 8, minWidth: 210, maxWidth: 320,
+    userSelect: 'none', backdropFilter: 'blur(6px)', boxShadow: '0 4px 18px rgba(0,0,0,0.35)',
   },
-  title: {
-    color: '#6cf', fontWeight: 600, maxWidth: 280,
+  windows: { display: 'flex', flexDirection: 'column', gap: 3, maxHeight: 220, overflowY: 'auto' },
+  tab: {
+    font: 'inherit', textAlign: 'left', color: '#9ab', background: '#141a22',
+    border: '1px solid #232b34', borderRadius: 4, padding: '3px 8px', cursor: 'pointer',
     whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
   },
+  tabOn: { color: '#08101a', background: '#6cf', borderColor: '#6cf', fontWeight: 600 },
+  controls: { display: 'flex', flexDirection: 'column', gap: 6, borderTop: '1px solid #232b34', paddingTop: 7 },
   row: { display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' },
   btn: {
     font: 'inherit', color: '#aebccb', background: '#1a212b',
