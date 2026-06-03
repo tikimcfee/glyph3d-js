@@ -146,6 +146,10 @@ class CodeGrid extends THREE.Object3D {
         // by this many rows (screenRow = visualRow − scrollOffset), so content flows through
         // the frame while the camera stays put; folded modes hop columns/planes. 0 = top.
         this._scrollOffset = 0;
+
+        // Frame height in VISUAL rows (Step 3c.2). >0 clips the grid to a fixed window
+        // (shader vertex cull) the content scrolls through; 0 = no frame (full content).
+        this._frameRows = 0;
     }
 
     // ============ Slug data ============
@@ -710,8 +714,7 @@ class CodeGrid extends THREE.Object3D {
      * @returns {Promise<this>}
      */
     async setScrollOffset(rows) {
-        const total = this.getTotalVisualRows();
-        this._scrollOffset = Math.max(0, Math.min(Math.round(rows), total));
+        this._scrollOffset = Math.max(0, Math.min(Math.round(rows), this.getMaxScroll()));
         return this._relayoutInPlace();
     }
 
@@ -734,6 +737,56 @@ class CodeGrid extends THREE.Object3D {
         if (!this._lineStartRow || this._lineStartRow.length === 0) return 0;
         const last = this._lineStartRow.length - 1;
         return this._lineStartRow[last] + 1 + (this._lineWrapCols?.[last]?.length || 0);
+    }
+
+    /**
+     * Max scroll offset (hard-stop). With a frame, stop so the last frameRows fill the
+     * window; without one, allow scrolling to the last row.
+     * @returns {number}
+     */
+    getMaxScroll() {
+        const total = this.getTotalVisualRows();
+        return this._frameRows > 0 ? Math.max(0, total - this._frameRows) : total;
+    }
+
+    /**
+     * Set the clip-frame height in VISUAL rows (Step 3c.2). >0 clips the grid to a fixed
+     * window the content scrolls through (shader vertex cull); 0 disables (full content).
+     * Pure render-side — no re-fold; re-clamps scroll to the new window (relayout only if the
+     * offset actually moves).
+     * @param {number} rows
+     * @returns {Promise<this>}
+     */
+    async setFrameRows(rows) {
+        this._frameRows = Math.max(0, Math.round(rows) || 0);
+        this._applyClip();
+        this._updateBackground();  // panel tracks the frame even when no scroll re-clamp/relayout is needed
+        const clamped = Math.max(0, Math.min(this._scrollOffset, this.getMaxScroll()));
+        if (clamped !== this._scrollOffset) return this.setScrollOffset(clamped);
+        return this;
+    }
+
+    /** @returns {number} current clip-frame height in visual rows (0 = no frame) */
+    getFrameRows() {
+        return this._frameRows || 0;
+    }
+
+    /**
+     * Push the current frame window to the renderer's shader clip (Step 3c.2). Clip range is
+     * grid-local y: top = origin + half a row (so screenRow 0 fully shows), bottom = origin −
+     * (frameRows − ½) rows. Called after every (re)layout (origin/renderer may change) and on
+     * setFrameRows. frameRows 0 → clip off.
+     * @private
+     */
+    _applyClip() {
+        if (!this._renderer || typeof this._renderer.setClipYRange !== 'function') return;
+        if (this._frameRows > 0) {
+            const ls = this.metrics.lineHeight;
+            const originY = this._layoutOriginY ?? 0;
+            this._renderer.setClipYRange(originY + 0.5 * ls, originY - (this._frameRows - 0.5) * ls);
+        } else {
+            this._renderer.setClipYRange(null, null);
+        }
     }
 
     /**
@@ -1148,6 +1201,7 @@ class CodeGrid extends THREE.Object3D {
             ? -this.metrics.lineHeight * 1.5
             : 0;
         this._buildLayoutDescription();
+        this._applyClip();
     }
 
     /**
@@ -1192,6 +1246,20 @@ class CodeGrid extends THREE.Object3D {
             ? -this.metrics.lineHeight * 1.5
             : 0;
         this._buildLayoutDescription();
+        this._applyClip();
+
+        // If content shrank below the scroll position (e.g. an edit deleted lines while a
+        // frame was active), the conveyor shifted past the end and the framed window would be
+        // left blank. Clamp to the now-smaller max and rebuild ONCE (guarded against re-entry)
+        // so it self-corrects this pass instead of waiting for the next scroll. Rare — only
+        // fires when actually over-scrolled.
+        if (!this._scrollClampGuard && this._scrollOffset > this.getMaxScroll()) {
+            this._scrollClampGuard = true;
+            this._scrollOffset = this.getMaxScroll();
+            this._clearContent();
+            await this._layoutContentAsync();
+            this._scrollClampGuard = false;
+        }
     }
 
     /**
@@ -1807,21 +1875,36 @@ class CodeGrid extends THREE.Object3D {
 
         const padding = this.config.backgroundPadding;
 
-        // Size background to content
-        const width  = bounds.width  + padding * 2;
-        const height = bounds.height + padding * 2;
+        // When a frame is active (Step 3c.2), back the FRAME window — a fixed band of
+        // frameRows rows at the content x-extent — not the full (scrolled) content, so the
+        // panel matches what the shader clip actually shows and stays put as content scrolls
+        // through it. Otherwise back the whole content. The frame clips Y only, so width is
+        // always the content x-extent.
+        const ls      = this.metrics.lineHeight;
+        const originY = this._layoutOriginY ?? 0;
+        const framed  = this._frameRows > 0;
+        const frameH  = this._frameRows * ls;
+
+        const width  = bounds.width + padding * 2;
+        const height = (framed ? frameH : bounds.height) + padding * 2;
 
         if (width > 0 && height > 0) {
             this._background.scale.set(width, height, 1);
 
-            // Position background at the BACK of the bounding box (Z min)
-            // This ensures background is behind all Z-wrapped text layers
+            // Position background at the BACK of the bounding box (Z min) so it sits behind
+            // all Z-wrapped / z-paged text layers.
             const zMin = bounds.min.z !== undefined ? bounds.min.z : 0;
             const backgroundZ = zMin - 0.5;  // Slightly behind the furthest text
 
+            // Vertical center: the fixed frame band when framed (scroll-independent — the
+            // window stays put while content flows through it), else the content center.
+            const centerY = framed
+                ? (originY + 0.5 * ls) - frameH / 2
+                : bounds.min.y + bounds.height / 2;
+
             this._background.position.set(
-                bounds.min.x + bounds.width  / 2,
-                bounds.min.y + bounds.height / 2,
+                bounds.min.x + bounds.width / 2,
+                centerY,
                 backgroundZ
             );
 

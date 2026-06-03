@@ -388,4 +388,27 @@ export default function registerGridCommands(router) {
         }
         return report();
     }, { description: 'Scroll a code grid through the fold (the conveyor)', usage: '<id|index> <±rows|top|bottom>' });
+
+    // grid.frame <id|index> <rows|off> — clip a code grid to a fixed window of N visual rows
+    // (Step 3c.2, clean-frame-first). A shader vertex cull hides content outside the window;
+    // grid.scroll then flows content THROUGH it (the "monitor"). 0/off = no frame (full content).
+    router.register('grid.frame', async (args, ctx) => {
+        if (args.length < 2) return { text: 'ERR: usage: grid.frame <id|index> <rows|off>', data: null };
+        const resolved = resolveGridByIdOrIndex(ctx, args[0]);
+        if (resolved.error) return { text: resolved.error, data: null };
+        const g = resolved.grid;
+        if (!(g instanceof CodeGrid) || typeof g.setFrameRows !== 'function') {
+            return { text: 'ERR: grid.frame applies only to code grids', data: null };
+        }
+        const arg = args[1];
+        const rows = (arg === 'off') ? 0 : parseInt(arg, 10);
+        if (isNaN(rows) || rows < 0) return { text: 'ERR: frame rows must be a non-negative integer, or off', data: null };
+        await g.setFrameRows(rows);
+        return {
+            text: rows > 0
+                ? `OK: grid #${resolved.idx} framed to ${rows} rows (grid.scroll to move content through it)`
+                : `OK: grid #${resolved.idx} frame off (full content)`,
+            data: { index: resolved.idx, frameRows: g.getFrameRows(), scrollOffset: g.getScrollOffset(), totalRows: g.getTotalVisualRows() },
+        };
+    }, { description: 'Clip a code grid to a scrollable frame of N visual rows (0/off = full)', usage: '<id|index> <rows|off>' });
 }

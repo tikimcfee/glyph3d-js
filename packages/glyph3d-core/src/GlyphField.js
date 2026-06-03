@@ -81,7 +81,7 @@ function _buildVertexNode(uniforms) {
     const vCurveStart = varying(int(0),   'vCurveStart');
     const vCurveCount = varying(int(0),   'vCurveCount');
 
-    const { groupTex, groupTexHeight, highlightTex, glyphMapTex, glyphMapWidth } = uniforms;
+    const { groupTex, groupTexHeight, highlightTex, glyphMapTex, glyphMapWidth, clipEnabled, clipTop, clipBottom } = uniforms;
 
     const vertexFn = Fn(() => {
         // Scale base quad by per-instance size
@@ -130,7 +130,16 @@ function _buildVertexNode(uniforms) {
         // PlaneGeometry's uv attribute is [0,1] across the quad → glyph-space [0,1]².
         vGlyphUV.assign(uv());
 
-        return clipPos;
+        // Frame clip (Step 3c.2): cull this instance when its anchor y is outside the window
+        // [clipBottom, clipTop]. iPos.y is per-instance (identical for all 4 quad verts) so
+        // quads cull whole — no torn triangles at the edge. clipEnabled 0 = off. Degenerate
+        // to outside-NDC (z/w = 2 > 1) so the GPU discards the triangles.
+        const culled = clipEnabled.greaterThan(0.5).and(
+            iPos.y.greaterThan(clipTop).or(iPos.y.lessThan(clipBottom))
+        );
+        const outClip = clipPos.toVar();
+        If(culled, () => { outClip.assign(vec4(float(2), float(2), float(2), float(1))); });
+        return outClip;
     });
 
     return { vertexFn, vColor, vGroupAlpha, vAddedColor, vGlyphUV, vCurveStart, vCurveCount };
@@ -141,8 +150,10 @@ function _buildVertexNode(uniforms) {
  *
  * Port of GlyphRenderer's GLSL fragment shader: accumulate fractional winding
  * over every quadratic bezier in the glyph along an X ray and a Y ray
- * (2D anti-aliasing), scaled by the per-pixel footprint (fwidth). Single
- * sample, no supersampling, no band acceleration structure.
+ * (2D anti-aliasing), scaled by the per-pixel footprint (fwidth). Single sample
+ * (no supersampling / no band structure); under minification the ink is dilated
+ * and the AA ramp softened so zoomed-out text degrades to a stable fuzzy shape
+ * rather than flickering/dropping strokes — see the `m` ramp in the body.
  *
  * @param {Object} varyings - { vColor, vGroupAlpha, vAddedColor, vGlyphUV, vCurveStart, vCurveCount }
  * @param {Object} uniforms - { curveTex }
@@ -151,14 +162,43 @@ function _buildOutputNode(varyings, uniforms) {
     const { vColor, vGroupAlpha, vAddedColor, vGlyphUV, vCurveStart, vCurveCount } = varyings;
     const { curveTex } = uniforms;
 
+    // Minification tuning knobs (see below). DILATE_PX = half-width, in pixels, of the
+    // stroke fattening applied at full zoom-out; SOFTEN = how much the AA ramp widens.
+    // Both are the human-tunable dials — nudge in Firefox.
+    const DILATE_PX = 0.75;
+    const SOFTEN    = 0.45;
+
     return Fn(() => {
         // Invisible group, or empty glyph (space / .notdef = 0 curves): nothing to draw.
         Discard(vGroupAlpha.lessThan(0.01));
         Discard(vCurveCount.equal(int(0)));
 
-        // Inverse pixel footprint in glyph-UV space, per axis. fwidth is the
-        // screen-space derivative magnitude, so AA is resolution-independent.
-        const invDiameter = vec2(1).div(fwidth(vGlyphUV));
+        // Pixel footprint in glyph-UV space, per axis. fwidth is the screen-space
+        // derivative magnitude, so AA is resolution-independent.
+        const fw = fwidth(vGlyphUV).toVar();
+
+        // Minification amount, 0→1. fwMax = worst-axis footprint = the fraction of the glyph
+        // cell one pixel spans. Small ⇒ magnified (crisp, single-sample). Large ⇒ many strokes
+        // per pixel, where the two centre scanlines beat sub-pixel against the strokes → the
+        // strokes flicker in and out (the moiré). We can't resolve sub-pixel strokes from a
+        // point sample (box-filter aliasing is invariant to sample count — supersampling just
+        // trades the moiré for a screen-door grid), so instead we make the failure GRACEFUL:
+        // as the glyph shrinks we (a) DILATE the ink so thin strokes fatten-and-merge into a
+        // stable fuzzy shape instead of dropping below a pixel and vanishing, and (b) SOFTEN
+        // the AA ramp so edges blur. This is the "forgot my glasses" look — unreadable but a
+        // steady, recognisable silhouette. It's what Slug ships (it dropped supersampling for
+        // dilation). `m` smoothstep-ramps so the hand-off has no seam under a continuous dolly.
+        const MIN_LO = float(0.05);  // onset (~20 px glyph): below this, bit-identical to crisp
+        const MIN_HI = float(0.18);  // full  (~6 px glyph):  above this, max dilation + softening
+        const fwMax = fw.x.max(fw.y);
+        const m = fwMax.sub(MIN_LO).div(MIN_HI.sub(MIN_LO)).clamp(0, 1).toVar();
+        m.assign(m.mul(m).mul(float(3).sub(m.mul(2)))); // smoothstep — continuous derivative
+
+        // Dilation half-width (passed into the winding accumulation: it pushes each stroke's
+        // two edges symmetrically apart, fattening the ink). Softened footprint widens the
+        // per-edge AA ramp. Both fold to identity at m=0 → the magnified path is untouched.
+        const dilate = m.mul(DILATE_PX);
+        const invD   = vec2(1).div(fw).mul(float(1).sub(m.mul(SOFTEN)));
 
         const coverage = float(0).toVar();
         Loop(MAX_CURVES, ({ i }) => {
@@ -174,8 +214,8 @@ function _buildOutputNode(varyings, uniforms) {
             const p1 = vec2(float(t0.z), float(t0.w)).div(65535).sub(vGlyphUV);
             const p2 = vec2(float(t1.x), float(t1.y)).div(65535).sub(vGlyphUV);
 
-            coverage.addAssign(computeCoverage(invDiameter.x, p0, p1, p2));
-            coverage.addAssign(computeCoverage(invDiameter.y, rot90(p0), rot90(p1), rot90(p2)));
+            coverage.addAssign(computeCoverage(invD.x, dilate, p0, p1, p2));
+            coverage.addAssign(computeCoverage(invD.y, dilate, rot90(p0), rot90(p1), rot90(p2)));
         });
 
         // Average the two rays; fills accumulate positive under y-up normalization.
@@ -203,8 +243,14 @@ const rot90 = Fn(([v]) => vec2(v.y, v.x.negate()));
  * footprint along the ray axis; fractional crossings give sub-pixel coverage.
  * (Dobbie / Lengyel "Slug".) Restructured from the GLSL early-returns into
  * guarded accumulation for clean TSL codegen.
+ *
+ * `dilate` (pixels) fattens the ink: it biases the entering edge's contribution
+ * down and the exiting edge's up, so a stroke's two boundaries move symmetrically
+ * APART. At 0 the result is the exact Slug coverage (magnified path); ramped up
+ * under minification it keeps thin strokes from dropping below a pixel and
+ * vanishing — they fatten and merge into a stable fuzzy shape instead.
  */
-const computeCoverage = Fn(([invDiameter, p0, p1, p2]) => {
+const computeCoverage = Fn(([invDiameter, dilate, p0, p1, p2]) => {
     const result = float(0).toVar();
 
     // Cheap reject: curve entirely on one side of the ray (y == 0).
@@ -244,11 +290,11 @@ const computeCoverage = Fn(([invDiameter, p0, p1, p2]) => {
         If(solvable.greaterThan(0.5), () => {
             If(t0.greaterThanEqual(0).and(t0.lessThan(1)), () => {
                 const x = a.x.mul(t0).sub(b.x.mul(2)).mul(t0).add(c.x);
-                result.addAssign(x.mul(invDiameter).add(0.5).clamp(0, 1));
+                result.addAssign(x.mul(invDiameter).add(0.5).add(dilate).clamp(0, 1));
             });
             If(t1.greaterThanEqual(0).and(t1.lessThan(1)), () => {
                 const x = a.x.mul(t1).sub(b.x.mul(2)).mul(t1).add(c.x);
-                result.subAssign(x.mul(invDiameter).add(0.5).clamp(0, 1));
+                result.subAssign(x.mul(invDiameter).add(0.5).sub(dilate).clamp(0, 1));
             });
         });
     });
@@ -463,6 +509,12 @@ export default class GlyphField {
         const glyphMapTexNode = texture(this._glyphMapTexture);
         const glyphMapWNode   = uniform(float(this._glyphMapWidth));
 
+        // Frame clip (Step 3c.2): cull instances whose grid-local anchor y is outside the
+        // window. clipEnabled 0 = no clip (default); driven by setClipYRange().
+        const clipEnabledNode = uniform(float(0));
+        const clipTopNode     = uniform(float(0));
+        const clipBottomNode  = uniform(float(0));
+
         // Store for hot-swap (.value = newTexture)
         this._groupTexUniform     = groupTexNode;
         this._groupTexHUniform    = groupTexHNode;
@@ -470,6 +522,9 @@ export default class GlyphField {
         this._curveTexUniform     = curveTexNode;
         this._glyphMapTexUniform  = glyphMapTexNode;
         this._glyphMapWUniform    = glyphMapWNode;
+        this._clipEnabledUniform  = clipEnabledNode;
+        this._clipTopUniform      = clipTopNode;
+        this._clipBottomUniform   = clipBottomNode;
 
         const { vertexFn, vColor, vGroupAlpha, vAddedColor, vGlyphUV, vCurveStart, vCurveCount } =
             _buildVertexNode({
@@ -478,6 +533,9 @@ export default class GlyphField {
                 highlightTex:   highlightTexNode,
                 glyphMapTex:    glyphMapTexNode,
                 glyphMapWidth:  glyphMapWNode,
+                clipEnabled:    clipEnabledNode,
+                clipTop:        clipTopNode,
+                clipBottom:     clipBottomNode,
             });
 
         const outputNode = _buildOutputNode(
@@ -515,6 +573,23 @@ export default class GlyphField {
         if (this._curveTexUniform)    this._curveTexUniform.value    = this._curveTexture;
         if (this._glyphMapTexUniform) this._glyphMapTexUniform.value = this._glyphMapTexture;
         if (this._glyphMapWUniform)   this._glyphMapWUniform.value   = this._glyphMapWidth;
+    }
+
+    /**
+     * Set the frame clip window in GRID-LOCAL y (Step 3c.2). Instances whose anchor y is
+     * outside [bottom, top] are culled in the vertex stage. Pass null/non-finite (either arg)
+     * to disable the clip (show everything). Pure render-side uniform update — no re-fold.
+     * @param {number|null} top
+     * @param {number|null} bottom
+     */
+    setClipYRange(top, bottom) {
+        if (!this._clipEnabledUniform) return;
+        const on = Number.isFinite(top) && Number.isFinite(bottom);
+        this._clipEnabledUniform.value = on ? 1 : 0;
+        if (on) {
+            this._clipTopUniform.value    = top;
+            this._clipBottomUniform.value = bottom;
+        }
     }
 
     /**
