@@ -268,7 +268,7 @@ export function initCommandCenter(viewer, options = {}) {
     //   - terminals: scene click sets primary AND key (ide.html click
     //     handler) so typing on a clicked terminal Just Works.
     //   - grids:     edit.start [id] sets key explicitly and calls
-    //     enterEdit; the deliberate-action gate Ivan asked for.
+    //     enterEdit; the deliberate-action gate.
     _installEntityKeystrokeDelivery(context);
 
     // 3. Add logging middleware (logs all commands to console in debug)

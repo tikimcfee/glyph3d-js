@@ -26,7 +26,7 @@
  *   - `ts` is performance.now() at write time. Handy for debugging
  *     ("when did reader mode last fire?") and for the billboard attention
  *     fade that wants a monotonically-advancing timestamp.
- *   - 'key' slot spelling matches Ivan's L1 spec. Internally the
+ *   - 'key' slot spelling matches the L1 spec. Internally the
  *     convergence docs called it 'keyFocus'; migration writes synonymize
  *     them when convenient but the external verb surface is `key`.
  *

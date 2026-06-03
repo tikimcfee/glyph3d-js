@@ -16,7 +16,7 @@
 
 /**
  * @typedef {Object} FileContent
- * @property {string} uri       - canonical identifier (e.g. "file:///home/user/foo.js")
+ * @property {string} uri       - canonical identifier (e.g. "file:///path/to/foo.js")
  * @property {string} content   - UTF-8 text
  * @property {FileStat} stat
  */

@@ -1,4 +1,4 @@
-module github.com/ivanlugo/glyph3d-cli
+module glyph3d-cli
 
 go 1.26.1
 

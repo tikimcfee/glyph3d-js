@@ -15,7 +15,7 @@
  *     reconnect (you reattach to a living shell, never resurrect a dead one);
  *     this file only carries their last positions as a placement hint.
  *
- * Self-heal policy (Ivan's call): when saved state doesn't match reality, CLEAR
+ * Self-heal policy: when saved state doesn't match reality, CLEAR
  * IT WITH A LOG — never fight to resurrect. A missing file is dropped, a
  * non-finite camera is ignored, an orphaned dock panel is filtered, and a whole
  * snapshot whose schema version differs is wiped rather than migrated.
