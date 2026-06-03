@@ -1,21 +1,19 @@
 /**
  * GlyphField — WebGPU-native instanced glyph renderer.
  *
- * Drop-in primitive replacement for GlyphRendererV15 that uses
- * THREE.WebGPURenderer + TSL (Three Shading Language) NodeMaterial
- * instead of ShaderMaterial / GLSL.
+ * Renders thousands of glyphs in a single InstancedBufferGeometry draw call
+ * via THREE.WebGPURenderer + TSL (Three Shading Language) NodeMaterial, with
+ * Slug winding-number coverage for crisp vector glyphs at any scale.
  *
- * C3 scope (picking-test validation):
  * - Material: MeshBasicNodeMaterial with TSL vertexNode + outputNode
- * - Fragment: solid quads with per-instance color + group visibility + highlight
- *   (Slug winding-number coverage added post-C3 once pipeline is proven)
- * - Picking: compatible with PickingSystem (instanceMesh, _groupTexture, _maxGroups,
- *   renderedTexts, instancePickingId attribute)
+ * - Per-instance: position, size, codepoint, color, group id; highlight via an
+ *   RGBA texture; group visibility/transforms via a group DataTexture
+ * - Picking: registers with PickingSystem (instanceMesh, _groupTexture,
+ *   _maxGroups, renderedTexts, instancePickingId attribute)
  *
- * Public surface is API-compatible with GlyphRendererV15 for all methods
- * exercised by picking-test:
- *   render(), setGlyphHighlight(), getMemoryStats(), beginBatchUpdate(),
- *   endBatchUpdate(), instanceMesh, renderedTexts, _groupTexture, _maxGroups
+ * Public surface: render(), setGlyphHighlight(), getMemoryStats(),
+ * beginBatchUpdate(), endBatchUpdate(), instanceMesh, renderedTexts,
+ * _groupTexture, _maxGroups
  *
  * instancePickingId is populated by PickingSystem.register() after render().
  */

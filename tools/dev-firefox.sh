@@ -18,8 +18,8 @@
 # is process env, so it lives in the launch line here.
 #
 # Usage:
-#   tools/dev-firefox.sh                 # default: app/home.html on :9876
-#   tools/dev-firefox.sh app/ide.html    # a different page (path under the server root)
+#   tools/dev-firefox.sh                 # default: the app at the server root
+#   tools/dev-firefox.sh some/page.html  # a different page (path under the server root)
 #   tools/dev-firefox.sh https://...     # an explicit URL
 #   PORT=8080 tools/dev-firefox.sh       # different server port
 #

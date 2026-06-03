@@ -2,7 +2,7 @@
  * GlyphAtlasLoader — Load a pre-baked glyph atlas from static assets.
  *
  * Eliminates runtime Canvas 2D font rasterization for the common charset.
- * Pre-baked atlases are generated via `tools/bake-atlas.mjs` and ship as a
+ * Pre-baked atlases are generated via `tools/bake-atlas.html` and ship as a
  * PNG + JSON pair. Loading them skips the ~200ms generate() cost entirely.
  *
  * ensureGraphemes() still works after loading — unknown graphemes fall through

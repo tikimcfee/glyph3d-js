@@ -1,18 +1,10 @@
 /**
- * CodeGrid - Single source file representation in 3D space
+ * CodeGrid — a single source file represented in 3D space.
  *
- * Directly manages a GlyphRenderer (WebGL path, GlyphRendererV15) for all
- * deferred batching, flush, and GPU updates. The intermediate GlyphCollection
- * wrapper was deleted in C4; its deferred-add / flush / worker-flush logic now
- * lives here.
- *
- * Dual-backend note (C4):
- *   The IDE and all existing examples use THREE.WebGLRenderer + three.module.js.
- *   GlyphField (WebGPU + TSL NodeMaterial) requires THREE.WebGPURenderer and
- *   three/webgpu imports — it is NOT compatible with raw WebGLRenderer.
- *   Until the IDE switches to WebGPURenderer, CodeGrid continues to create a
- *   GlyphRendererV15 (WebGL). The GlyphField path will be wired in a later
- *   commit once the renderer detection hook is in place.
+ * Directly manages a GlyphField (WebGPU / TSL) renderer for deferred
+ * batching, flush, and GPU updates, plus the cursor + in-place edit ops,
+ * highlight ranges, and the windowing/framing layout. (The deferred-add /
+ * flush / worker-flush logic lives here.)
  *
  * Part of the layered rendering architecture:
  * - GlyphAtlas -> CodeGrid -> GridLayoutManager

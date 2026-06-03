@@ -8,10 +8,8 @@
  *   attention.info                     returns the current state record
  *   attention.clear [slot]             clear one slot, or all when omitted
  *
- * `attention.set primary <id>` is the replacement for the parallel
- * raycaster at app/ide.html:303-336 that directly wrote
- * commandBar.setTarget(termId) — it routes through the same slot the
- * compass and reader mode use, so the command bar becomes a consumer
+ * `attention.set primary <id>` routes through the same slot the
+ * compass and reader mode use, so the command bar is a consumer
  * of attention.primary rather than an independent attention axis.
  *
  * All verbs return the standard { text, data } shape so controllers

@@ -479,7 +479,7 @@ class GlyphAtlas {
      *   vUv = mix(uvRect.xy, uvRect.zw, uv);  // bilinear interp across quad
      *
      * Texture is created once and cached. Call this before constructing any
-     * GlyphRenderer so the uniforms can be populated at mesh creation time.
+     * GlyphField so the uniforms can be populated at mesh creation time.
      *
      * @param {THREE} THREE - Three.js module reference
      * @returns {THREE.DataTexture} Atlas map texture (shared, created once)
