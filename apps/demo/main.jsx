@@ -31,9 +31,9 @@ const WAVE_Z_W = 0.225;      // z voxel float — halved in step
 const CAM_Z = 140;           // frames the dominant title + its ring of files in the 16:7 band
 const CAPTURE_SECS = 92;     // seek window ≈ one full revolution
 const RING_CY = 16;          // vertical center of the title and the ring around it
-const TITLE_X = -14;         // x offset that centers "glyph3d" at the dominant scale
-const SUB_X = -12;           // x offset that centers the subtitle "millions, in space"
-const SUB_GAP = 9;           // the subtitle rides this far below the title
+const TITLE_X = -16;         // x offset that centers "glyph3d" at the dominant scale
+const SUB_X = -14;           // x offset that centers the subtitle "millions, in space"
+const SUB_GAP = 11;          // the subtitle rides this far below the (now larger) title
 
 const FILES = [
   { name: 'atlas.js', target: [0, 13, 4], text:
@@ -214,10 +214,10 @@ function App() {
     >
       <Director gridRefs={gridRefs} nameRef={nameRef} subRef={subRef} />
       {/* the hero — dominant, bright; the ring of files orbits around it */}
-      <CodeGrid ref={nameRef} filename="" text="glyph3d" worldScale={0.095}
+      <CodeGrid ref={nameRef} filename="" text="glyph3d" worldScale={0.110}
         textColor={NAME} showBackground={false} />
-      {/* the subtitle — small, just under the title */}
-      <CodeGrid ref={subRef} filename="" text="millions, in space" worldScale={0.032}
+      {/* the subtitle — just under the title */}
+      <CodeGrid ref={subRef} filename="" text="millions, in space" worldScale={0.038}
         textColor={SUB} showBackground={false} />
       {FILES.map((f, i) => (
         <CodeGrid
