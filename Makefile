@@ -134,13 +134,16 @@ release: all
 	@echo "Release created: https://github.com/$$(gh repo view --json nameWithOwner -q .nameWithOwner)/releases/tag/$(VERSION)"
 
 # --- Deploy helper ---
-# Build for production target and show deploy command.
+# Build for production target and show the deploy command.
+# Set your target host:  make deploy DEPLOY_HOST=user@host
+
+DEPLOY_HOST ?= your-server
 
 deploy: linux-amd64
 	@echo ""
-	@echo "Deploy to your-server:"
-	@echo "  scp $(OUT_DIR)/$(BINARY)-linux-amd64 your-server:/usr/local/bin/$(BINARY)"
-	@echo "  ssh your-server '$(BINARY) serve --port 8080'"
+	@echo "Deploy to $(DEPLOY_HOST):"
+	@echo "  scp $(OUT_DIR)/$(BINARY)-linux-amd64 $(DEPLOY_HOST):/usr/local/bin/$(BINARY)"
+	@echo "  ssh $(DEPLOY_HOST) '$(BINARY) serve --port 8080'"
 
 # --- Cleanup ---
 
