@@ -48,3 +48,4 @@ glyph3d-cli
 
 # Browser console capture (dev aid)
 console.log
+.claude/
