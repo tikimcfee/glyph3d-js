@@ -28,6 +28,7 @@ export default defineConfig({
         tour: path.resolve(here, 'tour.html'),
         play: path.resolve(here, 'play.html'),
         shell: path.resolve(here, 'shell.html'),
+        space: path.resolve(here, 'space.html'),
       },
     },
   },
