@@ -57,6 +57,12 @@ class InputManager {
      * Keyboard event handlers
      */
     onKeyDown(event) {
+        // Ignore movement keys while a real text input is focused (the command bar, any DOM
+        // <input>) — otherwise typing a command would also drive the camera (WASD/Space/E/Q).
+        // EntityKeystrokeRouter guards the in-grid edit path the same way. onKeyUp stays
+        // unguarded so a key held before focus still clears.
+        const tag = (typeof document !== 'undefined' ? document.activeElement?.tagName : '')?.toLowerCase();
+        if (tag === 'input' || tag === 'select' || tag === 'textarea') return;
         this.keys.set(event.key.toLowerCase(), true);
     }
 
