@@ -25,8 +25,8 @@ const AGENT_C = { r: 0.82, g: 0.56, b: 0.38 };  // amber agent
 const HL     = { r: 0.30, g: 0.22, b: 0.05 };   // the agent's edit highlight
 const DURATION = 24;
 const FOV = 34;
-const WS = 0.044;
-const PTOP = 11;             // pane anchor top (content hangs down from here)
+const WS = 0.05;
+const CAM_Z = 124;           // frames the workspace of panes
 
 // ── canned content ─────────────────────────────────────────────────────
 const TERM_TEXT = [
@@ -77,33 +77,34 @@ const AGENT_TEXT = [
 const agentStep = (t) => (t < 0.88 ? 0 : 1);
 
 // ── position tracks: keyframes {t,x,y,z,s} smoothly interpolated ─────────
+// x/y are the pane CENTER (place() offsets by measured half-extents).
 const TERM_K = [
-  { t: 0.00, x: 0,  y: PTOP, z: 0,  s: 0 },
-  { t: 0.05, x: 0,  y: PTOP, z: 0,  s: 1 },
-  { t: 0.30, x: 0,  y: PTOP, z: 0,  s: 1 },
-  { t: 0.40, x: 0,  y: PTOP, z: -12, s: 1 },   // recede as the file pages in front
-  { t: 0.56, x: 42, y: PTOP, z: 0,  s: 1 },    // glide right — side by side
-  { t: 0.80, x: 42, y: PTOP, z: 0,  s: 1 },
-  { t: 0.88, x: 0,  y: PTOP, z: 0,  s: 1 },     // recenter — make room for the agent
-  { t: 0.94, x: 0,  y: PTOP, z: 0,  s: 1 },
-  { t: 1.00, x: 0,  y: PTOP, z: 0,  s: 0 },
+  { t: 0.00, x: 0,  y: 0, z: 0,   s: 0 },
+  { t: 0.05, x: 0,  y: 0, z: 0,   s: 1 },
+  { t: 0.32, x: 0,  y: 0, z: 0,   s: 1 },
+  { t: 0.42, x: 4,  y: 0, z: -14, s: 1 },   // recede as the file pages in front
+  { t: 0.56, x: 26, y: 0, z: 0,   s: 1 },   // glide right — side by side
+  { t: 0.80, x: 26, y: 0, z: 0,   s: 1 },
+  { t: 0.88, x: 0,  y: 0, z: 0,   s: 1 },   // recenter — make room for the agent
+  { t: 0.94, x: 0,  y: 0, z: 0,   s: 1 },
+  { t: 1.00, x: 0,  y: 0, z: 0,   s: 0 },
 ];
 const FILE_K = [
-  { t: 0.00, x: 0,   y: PTOP, z: 16, s: 0 },
-  { t: 0.32, x: 0,   y: PTOP, z: 16, s: 0 },
-  { t: 0.40, x: 0,   y: PTOP, z: 16, s: 1 },    // pages in FRONT of the terminal
-  { t: 0.56, x: -42, y: PTOP, z: 0,  s: 1 },    // settle left — side by side
-  { t: 0.80, x: -42, y: PTOP, z: 0,  s: 1 },
-  { t: 0.88, x: -64, y: PTOP, z: 0,  s: 1 },    // shift further left — 3-up
-  { t: 0.94, x: -64, y: PTOP, z: 0,  s: 1 },
-  { t: 1.00, x: -64, y: PTOP, z: 0,  s: 0 },
+  { t: 0.00, x: 0,   y: 0, z: 18, s: 0 },
+  { t: 0.32, x: 0,   y: 0, z: 18, s: 0 },
+  { t: 0.42, x: 0,   y: 0, z: 18, s: 1 },   // pages in FRONT of the terminal
+  { t: 0.56, x: -26, y: 0, z: 0,  s: 1 },   // settle left — side by side
+  { t: 0.80, x: -26, y: 0, z: 0,  s: 1 },
+  { t: 0.88, x: -46, y: 0, z: 0,  s: 1 },   // shift further left — 3-up
+  { t: 0.94, x: -46, y: 0, z: 0,  s: 1 },
+  { t: 1.00, x: -46, y: 0, z: 0,  s: 0 },
 ];
 const AGENT_K = [
-  { t: 0.00, x: 96, y: PTOP, z: 0, s: 0 },
-  { t: 0.78, x: 96, y: PTOP, z: 0, s: 0 },
-  { t: 0.88, x: 64, y: PTOP, z: 0, s: 1 },      // slides in from the right
-  { t: 0.94, x: 64, y: PTOP, z: 0, s: 1 },
-  { t: 1.00, x: 64, y: PTOP, z: 0, s: 0 },
+  { t: 0.00, x: 80, y: 0, z: 0, s: 0 },
+  { t: 0.78, x: 80, y: 0, z: 0, s: 0 },
+  { t: 0.88, x: 46, y: 0, z: 0, s: 1 },     // slides in from the right
+  { t: 0.94, x: 46, y: 0, z: 0, s: 1 },
+  { t: 1.00, x: 46, y: 0, z: 0, s: 0 },
 ];
 
 const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
@@ -138,25 +139,35 @@ function Director({ termRef, fileRef, agentRef }) {
   const auto = useRef(true);
   const sT = useRef(-1), sA = useRef(-1), sHL = useRef(false);
   const _t = { x: 0, y: 0, z: 0, s: 1 };
+  // measured half-extents so each pane centers on its keyframe (content hangs
+  // right+down from the top-left anchor, so we offset by -hw / +hh).
+  const dimT = useRef({ hw: 0, hh: 0 }), dimF = useRef({ hw: 0, hh: 0 }), dimA = useRef({ hw: 0, hh: 0 });
 
-  const place = (grid, keys, t) => {
+  const measure = (grid, dim) => {
+    const b = grid?.getContentBounds?.();
+    if (b && b.width) { dim.hw = b.width / 2; dim.hh = b.height / 2; }
+  };
+
+  const place = (grid, keys, t, dim) => {
     if (!grid) return;
+    if (!dim.hw) measure(grid, dim);                 // lazy first measure
     track(keys, t, _t);
-    grid.position.set(_t.x, _t.y, _t.z);
-    grid.scale.setScalar(Math.max(0.0001, _t.s));
+    const sc = Math.max(0.0001, _t.s);
+    grid.position.set(_t.x - dim.hw * sc, _t.y + dim.hh * sc, _t.z);  // center on keyframe
+    grid.scale.setScalar(sc);
     grid.visible = _t.s > 0.01;
   };
 
   const apply = (t) => {
-    place(termRef.current, TERM_K, t);
-    place(fileRef.current, FILE_K, t);
-    place(agentRef.current, AGENT_K, t);
-
-    // content — reload only on discrete step changes (never per frame)
+    // content — reload only on discrete step changes (never per frame); remeasure after
     const ts = termStep(t);
-    if (ts !== sT.current) { termRef.current?.loadFile?.('term', TERM_TEXT[ts]); sT.current = ts; }
+    if (ts !== sT.current) { termRef.current?.loadFile?.('term', TERM_TEXT[ts]); measure(termRef.current, dimT.current); sT.current = ts; }
     const as = agentStep(t);
-    if (as !== sA.current) { agentRef.current?.loadFile?.('agent', AGENT_TEXT[as]); sA.current = as; }
+    if (as !== sA.current) { agentRef.current?.loadFile?.('agent', AGENT_TEXT[as]); measure(agentRef.current, dimA.current); sA.current = as; }
+
+    place(termRef.current, TERM_K, t, dimT.current);
+    place(fileRef.current, FILE_K, t, dimF.current);
+    place(agentRef.current, AGENT_K, t, dimA.current);
 
     // the agent "edits" the file — highlight write() once it's working
     const wantHL = t >= 0.90;
@@ -166,8 +177,8 @@ function Director({ termRef, fileRef, agentRef }) {
       sHL.current = wantHL;
     }
 
-    camera.position.set(Math.sin(t * Math.PI * 2) * 2.5, -3, 168);
-    camera.lookAt(0, -3, 0);
+    camera.position.set(Math.sin(t * Math.PI * 2) * 2.5, 0, CAM_Z);
+    camera.lookAt(0, 0, 0);
 
     const pe = document.getElementById('phase');
     if (pe) pe.textContent = phaseLabel(t);
@@ -197,7 +208,7 @@ function App() {
   return (
     <GlyphCanvas
       atlas={atlas}
-      camera={{ position: [0, -3, 168], fov: FOV, near: 0.1, far: 8000 }}
+      camera={{ position: [0, 0, CAM_Z], fov: FOV, near: 0.1, far: 8000 }}
       onCreated={({ scene }) => { scene.background = new THREE.Color(0x0e0c08); }}
     >
       <Director termRef={termRef} fileRef={fileRef} agentRef={agentRef} />
