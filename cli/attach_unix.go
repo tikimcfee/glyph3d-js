@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -111,6 +112,14 @@ func runTerminal(cfg terminalConfig) {
 	var closeOnce sync.Once
 	shutdown := func() { closeOnce.Do(func() { close(done) }) }
 
+	// Only an EXPLICIT kill (terminal.kill → terminal.shutdown from the display) may destroy the
+	// tmux session. EVERY other path to shutdown — relay-read error, SIGINT/SIGTERM, PTY EOF, a
+	// ping that can't be sent, a browser reload that drops our conn — must leave the session ALIVE
+	// (detach), so running work survives an incidental disconnect and stays re-adoptable. Teardown
+	// reads this; it is set ONLY by handleInbound's terminal.shutdown case.
+	var killRequested atomic.Bool
+	requestKill := func() { killRequested.Store(true); shutdown() }
+
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
@@ -134,7 +143,24 @@ func runTerminal(cfg terminalConfig) {
 			log.Printf("[attach] re-create send failed: %v", err)
 			return
 		}
-		tmuxCmd("refresh-client").Run() // repaint the current screen into the fresh emulator
+		// Repaint the full screen into the fresh emulator. The re-create above is
+		// fire-and-forget (unlike the initial, ack-waited create), so the display
+		// rebuilds the grid ASYNCHRONOUSLY — an immediate refresh-client races that:
+		// its repaint bytes arrive before the grid exists and are dropped, leaving an
+		// idle pane BLANK until the next output/resize (confirmed: re-adopted grids
+		// come up with an all-spaces first frame). Defer + retry so at least one
+		// repaint lands after the grid is live, even under reload contention (many
+		// terminals re-adopting at once slows each grid's creation).
+		go func() {
+			for _, d := range []time.Duration{150 * time.Millisecond, 500 * time.Millisecond, 1200 * time.Millisecond} {
+				select {
+				case <-done:
+					return
+				case <-time.After(d):
+					tmuxCmd("refresh-client").Run()
+				}
+			}
+		}()
 	}
 
 	// Scrollback is tmux-owned: wheel-gated scroll from the focused terminal arrives as
@@ -192,7 +218,7 @@ func runTerminal(cfg terminalConfig) {
 				shutdown()
 				return
 			}
-			handleInbound(msg, cfg.id, ptmx, shutdown, recreate, scroll, exitScroll)
+			handleInbound(msg, cfg.id, ptmx, requestKill, recreate, scroll, exitScroll)
 		}
 	}()
 
@@ -276,13 +302,17 @@ func runTerminal(cfg terminalConfig) {
 
 	<-done
 
-	// Teardown: drop the display grid and kill the tmux session. (The session survives
-	// a BROWSER reload because this adapter survives it — re-adopt handles that. We
-	// only reach here on signal / terminal.kill / PTY EOF / relay loss, where killing
-	// the session is the correct cleanup.)
+	// Teardown. DETACH by default: drop the display grid, but leave the tmux session RUNNING so the
+	// work in it survives ANY incidental end — relay loss, SIGINT/SIGTERM, PTY EOF, or a browser
+	// reload that dropped our conn — and stays re-adoptable. ONLY an explicit terminal.kill (which
+	// arrives as terminal.shutdown and set killRequested) destroys the session. (This previously
+	// killed UNCONDITIONALLY, so any teardown of the adapter silently destroyed running shells —
+	// a reload could wipe live Claude sessions.)
 	conn.SetWriteDeadline(time.Now().Add(time.Second))
 	sendText("terminal.close " + cfg.id)
-	tmuxCmd("kill-session", "-t", cfg.session).Run()
+	if killRequested.Load() {
+		tmuxCmd("kill-session", "-t", cfg.session).Run()
+	}
 }
 
 // ensureTmuxSession creates the session if absent (NOT `new -A -d`, which errors on
@@ -342,7 +372,7 @@ func encodeOutputFrame(id string, payload []byte) []byte {
 // controller push): terminal.bytes (input → PTY), terminal.resize (→ SIGWINCH),
 // terminal.shutdown (graceful teardown). Command responses also land here; an
 // "ERR: no terminal" reply (to our liveness ping) means the display reloaded → re-adopt.
-func handleInbound(msg []byte, termID string, ptmx *os.File, shutdown func(), recreate func(), scroll func(int), exitScroll func()) {
+func handleInbound(msg []byte, termID string, ptmx *os.File, requestKill func(), recreate func(), scroll func(int), exitScroll func()) {
 	var ev struct {
 		Event string `json:"event"`
 		Data  struct {
@@ -376,8 +406,8 @@ func handleInbound(msg []byte, termID string, ptmx *os.File, shutdown func(), re
 				scroll(ev.Data.Lines)
 			}
 		case "terminal.shutdown":
-			fmt.Fprintln(os.Stderr, "[attach] shutdown requested by display")
-			shutdown()
+			fmt.Fprintln(os.Stderr, "[attach] kill requested by display (terminal.kill) — destroying session")
+			requestKill()
 		}
 		return
 	}
