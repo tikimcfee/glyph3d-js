@@ -25,6 +25,12 @@ const DRAG_PX = 5; // pointer travel above this = a drag (orbit/pan), not a clic
 // box, instead of the two line-boxes merging into one.
 const HOVER_INFLATE = 3;
 
+// Control-state outline colors. The focus box recolors by where keystrokes land, so the window's
+// state is legible in 3D (not only in the HUD): green = focused/selected, amber = input-active
+// (a code grid in edit mode, or the keyboard-target terminal). Amber matches the HUD edit color.
+const FOCUS_COLOR = 0x6ee7a0;  // green
+const INPUT_COLOR = 0xf0b45a;  // amber (HUD editOn)
+
 // Resize floors — a terminal smaller than this is useless (and a SIGWINCH to 0
 // rows confuses the shell). Drags clamp the prospective size to these.
 const MIN_COLS = 8;
@@ -484,7 +490,7 @@ export function ResizeDragger() {
 export function SelectionIndicator() {
   const { scene } = useThree();
   const client = useAppCommands();
-  const tracked = useRef({ primaryBox: null, hoverBox: null, am: null, registry: null });
+  const tracked = useRef({ primaryBox: null, hoverBox: null, am: null, registry: null, primaryActive: null });
 
   useEffect(() => {
     if (!client) return;
@@ -502,7 +508,7 @@ export function SelectionIndicator() {
     // Distinct styles: a steady green box for the SELECTED grid, a lighter blue
     // box for HOVER drawn on top (higher renderOrder). They read as different
     // things even when both land on the same grid.
-    t.primaryBox = mkBox(0x6ee7a0, 9999);  // green — the selected / active grid
+    t.primaryBox = mkBox(FOCUS_COLOR, 9999);  // green — focused; recolored amber when input-active
     t.hoverBox = mkBox(0x9fd2ff, 10000);   // light blue — hover (follows the cursor)
 
     return () => {
@@ -534,11 +540,23 @@ export function SelectionIndicator() {
         box.visible = true;
       } else box.visible = false;
     };
-    // Selection: exact bounds, steady. Hover: ALWAYS shown on the cursor grid —
-    // including the selected one — inflated into a light halo just outside the
-    // selection box. No suppression special-case: selection and hover are two
-    // distinct, independently-tracked things.
-    fit(t.primaryBox, gridFor('primary'), 0);
+    // The focus box recolors to signal WHERE KEYSTROKES LAND: amber when the focused window is
+    // input-active (a code grid in edit mode, or the keyboard-target terminal — attention.key),
+    // green when focused-but-inert. So "type here" reads the same in the HUD and in 3D. Recolor
+    // only on change (cheap, no per-frame churn).
+    const primaryId = t.am.get('primary')?.id ?? null;
+    const keyId = t.am.get('key')?.id ?? null;
+    const primaryGrid = primaryId ? (t.registry.get(primaryId)?.grid ?? null) : null;
+    const editing = typeof primaryGrid?.getCursor === 'function' && primaryGrid.getCursor() != null;
+    const inputActive = !!primaryGrid && (editing || (!!keyId && keyId === primaryId));
+    if (inputActive !== t.primaryActive) {
+      t.primaryActive = inputActive;
+      t.primaryBox.material?.color.set(inputActive ? INPUT_COLOR : FOCUS_COLOR);
+    }
+    // Selection: exact bounds, steady. Hover: ALWAYS shown on the cursor grid — including the
+    // selected one — inflated into a light halo just outside the selection box. Two distinct,
+    // independently-tracked things.
+    fit(t.primaryBox, primaryGrid, 0);
     fit(t.hoverBox, gridFor('hover'), HOVER_INFLATE);
   });
 
