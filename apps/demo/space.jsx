@@ -27,71 +27,44 @@ const PALETTE = [
   { r: 0.80,  g: 0.66,  b: 0.42  }, // gold
 ];
 
-// a pool of short snippets — repeated across the field with varied color/shape
-const SNIPS = [
-`class GlyphAtlas {
-  pack(g) {
-    return shelf(g)
-  }
-}`,
-`field.render(text, pos, {
-  color, groupId,
-})`,
-`camera.focusOnGrids()
-camera.lerp(t, 0.05)`,
-`new GridLayoutManager()
-  .addAuto(grid)`,
-`buildSlugBuffers(
-  shapeText(src, font)
-)`,
-`onmessage = (e) => {
-  post(build(e.data))
-}`,
-`pick(x, y) {
-  return resolve(
-    read(x, y))
-}`,
-`class CodeGrid {
-  loadFile(name, src)
-}`,
-`lines.set(id,
-  from, to, color)`,
-`boot()
-mount(scene)`,
-`export * from
-  './core'`,
-`for (const g of glyphs)
-  buffer.push(g, pos)`,
-];
-const NAMES = ['atlas.js', 'field.js', 'camera.js', 'layout.js', 'shape.js', 'worker.js',
-  'picking.js', 'grid.js', 'connect.js', 'main.js', 'index.js', 'write.js'];
+// Bake in an ACTUAL project directory at build time and let the substrate
+// render it — real files, real sizes, the product's own use case ("point it at
+// a repo"), not hand-written samples. import.meta.glob pulls the core library
+// source as raw text; each file is truncated to its first lines so the field
+// stays a readable mass, and colored by its directory so modules cluster.
+const RAW = import.meta.glob('../../packages/glyph3d-core/src/**/*.js', {
+  query: '?raw', import: 'default', eager: true,
+});
+const MAX_FILES = 54, MAX_LINES = 14;
+const dirColor = {}; let dirN = 0;
+const colorFor = (dir) => (dir in dirColor ? dirColor[dir] : (dirColor[dir] = PALETTE[dirN++ % PALETTE.length]));
+const FILES = Object.entries(RAW)
+  .map(([path, src]) => { const parts = path.split('/'); return { name: parts.pop(), dir: parts.pop(), src: String(src) }; })
+  .filter((f) => f.src.trim().length > 0)
+  .sort((a, b) => (a.dir + '/' + a.name).localeCompare(b.dir + '/' + b.name))   // cluster by directory
+  .slice(0, MAX_FILES)
+  .map((f) => ({ name: f.name, color: colorFor(f.dir), text: f.src.split('\n').slice(0, MAX_LINES).join('\n') }));
 
-// 3D grid: cols × rows × planes (the spatial layout, with depth for the orbit)
-const COLS = 5, ROWS = 4, PLANES = 3;
-const COLX = 52, ROWY = 38, PLANEZ = 66;
-const CELLS = [];
-{
-  let i = 0;
-  for (let p = 0; p < PLANES; p++)
-    for (let r = 0; r < ROWS; r++)
-      for (let c = 0; c < COLS; c++) {
-        CELLS.push({
-          key: `f${i}`,
-          name: NAMES[i % NAMES.length],
-          text: SNIPS[i % SNIPS.length],
-          color: PALETTE[(c * 2 + r + p * 3) % PALETTE.length],
-          pos: [
-            (c - (COLS - 1) / 2) * COLX,
-            ((ROWS - 1) / 2 - r) * ROWY,
-            (p - (PLANES - 1) / 2) * PLANEZ,
-          ],
-        });
-        i++;
-      }
-}
+// arrange into a deep 3D grid — the layout (depth sells the scale on the orbit)
+const COLS = 6, ROWS = 3;
+const PER_PLANE = COLS * ROWS;
+const PLANES = Math.max(1, Math.ceil(FILES.length / PER_PLANE));
+const COLX = 84, ROWY = 66, PLANEZ = 125;
+const CELLS = FILES.map((f, i) => {
+  const plane = Math.floor(i / PER_PLANE), within = i % PER_PLANE;
+  const row = Math.floor(within / COLS), col = within % COLS;
+  return {
+    key: 'f' + i, name: f.name, text: f.text, color: f.color,
+    pos: [
+      (col - (COLS - 1) / 2) * COLX,
+      ((ROWS - 1) / 2 - row) * ROWY,
+      (plane - (PLANES - 1) / 2) * PLANEZ,
+    ],
+  };
+});
 
-const WS = 0.04;
-const RAD = 290, CAM_Y = 34, SWAY = 0.62;
+const WS = 0.03;
+const RAD = 470, CAM_Y = 48, SWAY = 0.52;
 
 function Director() {
   const { camera } = useThree();
@@ -102,7 +75,7 @@ function Director() {
     const az = Math.sin(t * TAU) * SWAY;                 // pendulum across the front
     camera.position.set(
       Math.sin(az) * RAD,
-      CAM_Y + Math.sin(t * TAU + 1.3) * 16,              // gentle vertical drift
+      CAM_Y + Math.sin(t * TAU + 1.3) * 22,              // gentle vertical drift
       Math.cos(az) * RAD,
     );
     camera.lookAt(0, 0, 0);
@@ -131,7 +104,7 @@ function App() {
   return (
     <GlyphCanvas
       atlas={atlas}
-      camera={{ position: [0, CAM_Y, RAD], fov: 48, near: 1, far: 4000 }}
+      camera={{ position: [0, CAM_Y, RAD], fov: 50, near: 1, far: 5000 }}
       onCreated={({ scene }) => { scene.background = new THREE.Color(0x0e0c08); }}
     >
       <Director />
