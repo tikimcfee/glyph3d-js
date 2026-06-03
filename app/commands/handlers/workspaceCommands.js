@@ -5,8 +5,9 @@
  * rendering is delegated to the existing render verbs (wired in later steps). The HUD is a
  * pure reflection of this model. See the fields→sheets→panels design.
  *
- * Build status: Step 0–1 — sheet.open / sheet.list / field.list (headless: proves the
- * open⊋rendered layer with nothing drawn). sheet.render/derender/focus + field.* land next.
+ * Build status: Steps 0–4 — open / list / render / derender / focus + field.list. sheet.focus is
+ * the render-if-needed → attention-primary → camera-frame → mark-active gesture. Multi-field
+ * (per-field camera) + SessionStore persistence land next.
  */
 import { box, table } from '../formatResponse.js';
 import { renderSheetGrid, reflowGrids } from './fileCommands.js';
@@ -73,11 +74,49 @@ export default function registerWorkspaceCommands(router) {
       ws.setPanelId(sheet.id, null);  // clear any stale panelId; sheet stays open
       return { text: `OK: "${sheet.title}" not rendered (still open)`, data: { id: sheet.id, rendered: false } };
     }
-    ctx.removeGrid(sheet.panelId);    // unregister + dispose + scene.remove
+    // Null the panel ref BEFORE unregistering. SceneRegistry.unregister fires its change
+    // listeners synchronously, and reconcile() is wired to them — if the sheet still pointed
+    // at the just-removed id, reconcile would see it as "dangling" and log the out-of-band
+    // self-heal on this fully-sanctioned path. Clearing first keeps that diagnostic honest:
+    // it only fires for removals that bypassed sheet.derender (raw grid.remove / eviction).
+    const pid = sheet.panelId;
     ws.setPanelId(sheet.id, null);
+    ctx.removeGrid(pid);              // unregister + dispose + scene.remove
     reflowGrids(ctx);
     return { text: `OK: derendered "${sheet.title}" (still open)`, data: { id: sheet.id, rendered: false } };
   }, { description: 'Remove a sheet\'s panel but keep the sheet open', usage: '<sheetId>' });
+
+  router.register('sheet.focus', async (args, ctx) => {
+    if (args.length < 1) return { text: 'ERR: usage: sheet.focus <sheetId>', data: null };
+    const ws = ctx.workspace;
+    if (!ws) return { text: 'ERR: workspace not ready', data: null };
+    const sheetId = args.join(' ');
+    const sheet = ws.getSheet(sheetId);
+    if (!sheet) return { text: `ERR: no sheet "${sheetId}"`, data: null };
+
+    // Render-if-needed: focusing an open-but-undrawn sheet draws it first — the single gesture
+    // that takes you from a tab to looking at it. Already-rendered → straight to refocus.
+    let panelId = (sheet.panelId && ctx.registry.has(sheet.panelId)) ? sheet.panelId : null;
+    if (!panelId) {
+      if (sheet.kind !== 'file') return { text: `ERR: sheet kind '${sheet.kind}' not renderable yet`, data: null };
+      try {
+        panelId = await renderSheetGrid(ctx, sheet.source.path);
+      } catch (err) {
+        return { text: `ERR: render failed for ${sheet.title}: ${err?.message || err}`, data: null };
+      }
+      if (!panelId) return { text: `ERR: could not render "${sheet.title}"`, data: null };
+      ws.setPanelId(sheet.id, panelId);
+      reflowGrids(ctx);
+    }
+
+    // Focus = attention primary (single writer, drives the HUD's ●) + camera framing (reuse the
+    // verb — array form keeps a space/slash path intact) + the field's remembered active sheet.
+    ctx.attentionManager?.set('primary', panelId, { registry: ctx.registry });
+    await router.execute(['camera.focus', panelId]);
+    ws.setActiveSheet(sheet.id);
+
+    return { text: `OK: focused "${sheet.title}" → panel ${panelId}`, data: { id: sheet.id, panelId, focused: true } };
+  }, { description: 'Focus a sheet: render if needed, set attention primary, frame the camera, mark active', usage: '<sheetId>' });
 
   router.register('field.list', (args, ctx) => {
     const ws = ctx.workspace;

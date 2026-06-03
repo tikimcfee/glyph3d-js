@@ -97,6 +97,14 @@ export default class WorkspaceModel {
     if (s && s.panelId !== panelId) { s.panelId = panelId; this._emit('change:sheets'); }
   }
 
+  /** Mark a sheet active in its field (the field's remembered focus; drives the active tab). */
+  setActiveSheet(sheetId) {
+    const f = this.getActiveField();
+    if (!f || !f.sheetIds.includes(sheetId)) return false;
+    if (f.activeSheetId !== sheetId) { f.activeSheetId = sheetId; this._emit('change:fields'); }
+    return true;
+  }
+
   /** Drop a sheet from every field + the sheet map. (Derendering its panel is the caller's job.) */
   removeSheet(sheetId) {
     let fieldChanged = false;
