@@ -721,9 +721,7 @@ export default class TerminalGrid extends THREE.Object3D {
         this._background = new THREE.Mesh(geometry, material);
         this._background.renderOrder = RENDER_ORDER.GRID_BACKGROUND;
         // Tagged so gesture dispatch can resolve background → terminal id
-        // without a reverse-lookup through the registry. Matches the pattern
-        // the app/ide.html parallel raycaster used (it stamped
-        // `_background._terminalId` onto each mesh at hit time).
+        // without a reverse-lookup through the registry.
         this._background.userData.entityType = 'terminal';
         this.add(this._background);
         this._updateBackground();

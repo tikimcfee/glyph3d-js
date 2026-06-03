@@ -28,8 +28,8 @@
  *     (or spatial group), pixel → world via screenToWorldDelta
  *   - mouseup < 5px displacement → re-emit `canvas-click` with gridId
  *   - mouseup > 5px with ctrl/meta → _checkDropTarget for auto-grouping
- *   - raycastAtClient(x, y) is public (camera focus probe, external
- *     callers like app/ide.html's click-to-attention path).
+ *   - raycastAtClient(x, y) is public (camera focus probe + other external
+ *     callers).
  */
 
 import * as THREE from 'three';
@@ -258,9 +258,8 @@ export class EntityInputRouter {
     // ============ Raycasting ============
 
     /**
-     * Public raycast at client coords. Used by the camera focus probe,
-     * the app/ide.html click-to-attention path, and anyone else who needs
-     * "what entity is under this pixel?"
+     * Public raycast at client coords. Used by the camera focus probe and
+     * anyone else who needs "what entity is under this pixel?"
      *
      * @param {number} clientX
      * @param {number} clientY

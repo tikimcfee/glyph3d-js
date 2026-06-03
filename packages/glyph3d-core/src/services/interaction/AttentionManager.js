@@ -5,7 +5,7 @@
  * across at least three uncoordinated fields
  *   - ViewerCameraController.input.focus.attendedId (hover)  [removed]
  *   - ctx.mode.readerGridId                         (reader target) [removed]
- *   - commandBar.target (via app/ide.html:303-336 parallel raycaster)
+ *   - commandBar.target (via a separate parallel raycaster)
  * each with its own writers and no shared vocabulary. L1 collapses them
  * into one record with one writer per slot:
  *
@@ -36,7 +36,7 @@
  *   - VCC probe/wheel gates read attentionManager.get('primary')
  *   - mode.* commands read/write attention.primary
  *   - camera.attend is now a thin alias for attention.set primary
- *   - the parallel raycaster at app/ide.html:303-336 went away
+ *   - the separate parallel raycaster is gone
  * If you see `focus.attendedId` or `ctx.mode.readerGridId` anywhere
  * it is a bug and a regression — they are removed.
  *
