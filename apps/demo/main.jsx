@@ -26,10 +26,10 @@ const TAU = Math.PI * 2;
 const ORBIT_W = 0.0675;      // slow dome revolution — halved (calmer, more "title")
 const WAVE_XY_W = 0.45;      // XY ripple — halved in step
 const WAVE_Z_W = 0.225;      // z voxel float — halved in step
-const CAM_Z = 138;           // frame the header band (top) + the title (lower-center)
+const CAM_Z = 120;           // banner reframe: telephoto fov + this distance fills the short 16:7 band
 const CAPTURE_SECS = 92;     // seek window ≈ one full revolution (doubled w/ orbit)
-const DOME_LIFT = 16;        // float the orbiting files up — a header animation band
-const TITLE_Y = 2;           // the glyph3d title sits lower-center, under the header
+const DOME_LIFT = 6;         // float the file band above the title
+const TITLE_Y = 9;           // the glyph3d title sits just under the file band
 
 const FILES = [
   { name: 'atlas.js', target: [0, 13, 4], text:
@@ -96,10 +96,13 @@ function buildSlugBuffers(shaped) {
 }` },
 ];
 
-// Files live on a hemisphere (a "semi-dome"), spread around in azimuth and up
-// in elevation, each facing radially outward. The whole dome slowly revolves,
-// so the per-glyph z-float reads as real depth as each file comes around.
-const R_DOME = 64;           // dome scaled to ~0.75 total volume
+// Files ride a wide, shallow revolving arc — a title BAND, not a deep dome.
+// Azimuth spreads them across the banner width (X_RADIUS) with only gentle
+// depth (Z_DEPTH) so every file stays a similar distance and reads uniform;
+// elevation tiers them vertically (Y_SPAN). The whole arc slowly revolves.
+const X_RADIUS = 56;         // horizontal spread across the banner
+const Y_SPAN = 50;           // vertical tiering from elevation
+const Z_DEPTH = 16;          // shallow depth — keeps file sizes uniform (no front-file blowup)
 const DOME = [
   { az: 0.00, el: 0.18 },
   { az: 0.79, el: 0.55 },
@@ -126,13 +129,13 @@ function waveGrid(grid, i, time, store, xyW, zW) {
   const wXY = time * xyW, wZ = time * zW;           // independent temporal speeds
   for (let k = 0; k < count; k++) {
     const bx = base[k * 3], by = base[k * 3 + 1];
-    // smooth XY travelling wave (per column) — amp scaled with the 0.75 volume
-    arr[k * 3 + 1] = by + 1.65 * Math.sin(bx * 0.10 + wXY + phase);
+    // smooth XY travelling wave (per column) — amp scaled to the smaller banner text
+    arr[k * 3 + 1] = by + 0.45 * Math.sin(bx * 0.10 + wXY + phase);
     // QUANTIZED z, per individual glyph (x AND y) → glyphs snap between discrete
     // depth planes: a voxelized, step-function pop. Math.round = the steps.
     const sz = Math.sin(bx * 0.55 + by * 0.70 + wZ + phase);
     // twice the steps, same total depth → finer, more "motion"-like stepping
-    arr[k * 3 + 2] = base[k * 3 + 2] + (Math.round(sz * 2) / 2) * 1.30;
+    arr[k * 3 + 2] = base[k * 3 + 2] + (Math.round(sz * 2) / 2) * 0.35;
   }
   attr.needsUpdate = true;
 }
@@ -149,24 +152,24 @@ function Director({ gridRefs, nameRef }) {
       const g = gridRefs.current[i];
       if (!g) return;
       const az = DOME[i].az + theta, el = DOME[i].el;
-      const ce = Math.cos(el) * R_DOME;
+      const ce = Math.cos(el);
       g.position.set(
-        ce * Math.sin(az),
-        Math.sin(el) * R_DOME + DOME_LIFT + Math.sin(theta + i) * 1.2,   // dome height, lifted
-        ce * Math.cos(az),
+        Math.sin(az) * ce * X_RADIUS,                                    // spread across the band
+        Math.sin(el) * Y_SPAN + DOME_LIFT + Math.sin(theta + i) * 1.0,   // vertical tier, lifted
+        Math.cos(az) * ce * Z_DEPTH,                                     // shallow depth
       );
-      g.rotation.set(0, az, 0);                   // face radially outward
+      g.rotation.set(0, -Math.sin(az) * 0.30, 0); // gentle tilt — stays camera-readable across the band
       waveGrid(g, i, time, waves, WAVE_XY_W, WAVE_Z_W);
     });
     // Central floating nameplate — the dome of files orbits around this.
     const nm = nameRef.current;
     if (nm) {
-      nm.position.set(-15, TITLE_Y + Math.sin(time * 0.25) * 1.6, 0);  // lower-center float — halved
+      nm.position.set(-5, TITLE_Y + Math.sin(time * 0.25) * 1.0, 0);   // lower-center float (offset re-centered for banner title scale)
       nm.rotation.set(0, Math.sin(time * 0.15) * 0.12, 0);             // subtle sway — halved
     }
     // Camera frames the header band (up) and the title (lower-center).
-    camera.position.set(0, 18, CAM_Z);
-    camera.lookAt(0, 16, 0);
+    camera.position.set(0, 20, CAM_Z);
+    camera.lookAt(0, 18, 0);
   };
 
   useFrame((_, dt) => {
@@ -194,12 +197,12 @@ function App() {
   return (
     <GlyphCanvas
       atlas={atlas}
-      camera={{ position: [0, 18, 138], fov: 70, near: 0.1, far: 6000 }}
+      camera={{ position: [0, 20, 120], fov: 24, near: 0.1, far: 6000 }}
       onCreated={({ scene }) => { scene.background = new THREE.Color(0x0e0c08); }}
     >
       <Director gridRefs={gridRefs} nameRef={nameRef} />
-      {/* central floating nameplate — bigger, brighter, no background */}
-      <CodeGrid ref={nameRef} filename="" text="glyph3d" worldScale={0.10}
+      {/* central floating nameplate — banner scale (telephoto fov keeps it legible) */}
+      <CodeGrid ref={nameRef} filename="" text="glyph3d" worldScale={0.034}
         textColor={NAME} showBackground={false} />
       {FILES.map((f, i) => (
         <CodeGrid
@@ -207,7 +210,7 @@ function App() {
           ref={(el) => { gridRefs.current[i] = el; }}
           filename={f.name}
           text={f.text}
-          worldScale={0.034}
+          worldScale={0.009}
           textColor={SAGE}
           showBackground={false}
         />
