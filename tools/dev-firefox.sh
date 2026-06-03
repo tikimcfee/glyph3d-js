@@ -26,7 +26,7 @@
 set -euo pipefail
 
 PORT="${PORT:-8080}"
-ARG="${1:-app/ide.html}"
+ARG="${1:-}"
 case "$ARG" in
   http://*|https://*) URL="$ARG" ;;
   /*)                 URL="http://localhost:${PORT}${ARG}" ;;

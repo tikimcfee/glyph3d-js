@@ -52,10 +52,10 @@ export default function registerEditCommands(router) {
             return { text: 'ERR: AttentionManager not wired into ctx', data: null };
         }
 
-        // Set attention.key first; if the slot already pointed at this grid
-        // the AttentionManager dedupes the write, and either way the key
-        // listener won't fire an unwanted exitEdit on the grid we're about
-        // to enterEdit.
+        // Set attention.key first. If the slot already points at this grid,
+        // the change:key listener no-ops (same-grid guard in
+        // EntityKeystrokeRouter), so it won't fire an unwanted exitEdit on the
+        // grid we're about to enterEdit.
         ctx.attentionManager.set('key', resolved.registryId, { registry: ctx.registry });
         grid.enterEdit();
 
