@@ -13,10 +13,13 @@
     "serve": "cd cli && ./glyph3d-cli serve --root .. --http 8000"
   },
   "license": "MIT",
+  "author": "tikimcfee (https://github.com/tikimcfee)",
   "repository": {
     "type": "git",
-    "url": "https://github.com/yourusername/glyph3d-js.git"
+    "url": "git+https://github.com/tikimcfee/glyph3d-js.git"
   },
+  "homepage": "https://github.com/tikimcfee/glyph3d-js#readme",
+  "bugs": "https://github.com/tikimcfee/glyph3d-js/issues",
   "devDependencies": {
     "harfbuzzjs": "^0.4.8",
     "playwright": "^1.60.0",

@@ -32,8 +32,8 @@
   "keywords": [
     "three.js",
     "threejs",
-    "webgl",
     "webgpu",
+    "tsl",
     "text",
     "3d",
     "glyph",
@@ -44,6 +44,14 @@
     "atlas"
   ],
   "license": "MIT",
+  "author": "tikimcfee (https://github.com/tikimcfee)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tikimcfee/glyph3d-js.git",
+    "directory": "packages/glyph3d-core"
+  },
+  "homepage": "https://github.com/tikimcfee/glyph3d-js#readme",
+  "bugs": "https://github.com/tikimcfee/glyph3d-js/issues",
   "peerDependencies": {
     "three": ">=0.150.0"
   },
