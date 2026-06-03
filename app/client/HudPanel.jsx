@@ -49,6 +49,7 @@ function readSheets(client) {
     id: s.id,                                   // sheetId ("sheet:"+path) — what the verbs take
     title: s.title,
     panelId: s.panelId,
+    uri: s.source?.uri ?? null,                 // for orphan-strip dedup by source (open-only sheets)
     state: s.focused ? 'focused' : s.rendered ? 'rendered' : 'open',
   }));
 }
@@ -59,10 +60,13 @@ function readOrphanWindows(client, sheets) {
   const reg = client?.ctx?.registry;
   if (!reg) return [];
   const sheetPanels = new Set(sheets.map((s) => s.panelId).filter(Boolean));
+  // Also dedup by source uri: an OPEN-only sheet (panelId null) whose file is separately drawn
+  // (e.g. file.openDir registered a grid but never linked it) would otherwise show in BOTH strips.
+  const sheetUris = new Set(sheets.map((s) => s.uri).filter(Boolean));
   const grids = reg.findByType?.('grid') || [];
   const terms = reg.findByType?.('terminal') || [];
   return [...grids, ...terms]
-    .filter((e) => !sheetPanels.has(e.id))
+    .filter((e) => !sheetPanels.has(e.id) && !sheetUris.has(e.grid?.getSourcePath?.()))
     .map((e) => ({ id: e.id, type: e.type || 'grid', name: e.grid?.getFilename?.() || e.id }));
 }
 
@@ -232,7 +236,7 @@ const S = {
     display: 'flex', alignItems: 'stretch', gap: 2,
     background: '#141a22', border: '1px solid #232b34', borderRadius: 4, overflow: 'hidden',
   },
-  tabRowOn: { background: '#6cf', borderColor: '#6cf' },
+  tabRowOn: { color: '#08101a', background: '#6cf', borderColor: '#6cf' },  // dark-on-cyan: label, ● dot, × all flip via inherit
   tabMain: {
     flex: 1, minWidth: 0, font: 'inherit', textAlign: 'left', color: 'inherit',
     background: 'transparent', border: 'none', padding: '3px 8px', cursor: 'pointer',

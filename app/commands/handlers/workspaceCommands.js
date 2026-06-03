@@ -131,6 +131,13 @@ export default function registerWorkspaceCommands(router) {
     // held attention.primary, clear it — otherwise focus dangles on a panel that no longer exists.
     if (sheet.panelId && ctx.registry.has(sheet.panelId)) {
       const pid = sheet.panelId;
+      // Clear the key slot FIRST (if this panel held it): change:key fires exitEdit() on the
+      // still-live grid (hides the caret + nulls _cursor) before disposal — otherwise an in-edit
+      // grid is removed with _cursor intact, and a later keystroke resurrects a phantom unregistered
+      // grid. Then clear primary so focus doesn't dangle on a panel that no longer exists.
+      if (ctx.attentionManager?.get?.('key')?.id === pid) {
+        ctx.attentionManager.set('key', null, { registry: ctx.registry });
+      }
       if (ctx.attentionManager?.get?.('primary')?.id === pid) {
         ctx.attentionManager.set('primary', null, { registry: ctx.registry });
       }
