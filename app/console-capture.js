@@ -35,6 +35,9 @@ const CLIENT = `
 export function consoleCapture() {
   return {
     name: 'keystone-console-capture',
+    // Dev-server only — never inject the /__log beacon into a production build
+    // (the served binary has no such endpoint; it'd just fire silent 404s).
+    apply: 'serve',
     configureServer(server) {
       // Truncate on server (re)start so each run is a clean slate.
       fs.writeFileSync(LOG, `=== keystone console — ${new Date().toISOString()} ===\n`);
