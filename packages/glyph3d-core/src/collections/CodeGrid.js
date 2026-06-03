@@ -82,7 +82,8 @@ class CodeGrid extends THREE.Object3D {
         this._reverseIdMap   = new Map(); // renderer ID → our ID
         this._committedTexts = new Map(); // our ID → { id, rendererId, textLength, position, options }
         this._nextLocalId    = 1;
-        this._dirty          = false;
+        this._dirty          = false;   // GPU buffer needs flush (render dirty)
+        this._modified       = false;   // content edited since load / last save (the UNSAVED state)
         this._bufferHeadroom = 1.1; // 10% extra
         this._bufferSize     = 0;
         // ─────────────────────────────────────────────────────────────────────────
@@ -1689,6 +1690,12 @@ class CodeGrid extends THREE.Object3D {
         return this._cursor ? { line: this._cursor.line, col: this._cursor.col } : null;
     }
 
+    /** True if content was edited since load / last save — drives the HUD's unsaved (•) marker. */
+    isModified() { return this._modified === true; }
+
+    /** Clear the modified flag. Called by file.save after a successful write. */
+    markSaved() { this._modified = false; }
+
     /**
      * Move the cursor to (line, col), clamping to valid bounds. Repaints
      * the caret. No-op if not in edit mode.
@@ -1899,6 +1906,7 @@ class CodeGrid extends THREE.Object3D {
      */
     async _relayoutPreservingCursor() {
         this._linesDirty = true;
+        this._modified = true;   // a content edit (insert/delete/split) happened → unsaved until file.save
         return this._relayout();
     }
 

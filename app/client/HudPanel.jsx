@@ -45,13 +45,17 @@ function readSheets(client) {
   if (!ws) return [];
   const reg = client.ctx?.registry;
   const am = client.ctx?.attentionManager;
-  return ws.listActiveSheets(reg, am).map((s) => ({
-    id: s.id,                                   // sheetId ("sheet:"+path) — what the verbs take
-    title: s.title,
-    panelId: s.panelId,
-    uri: s.source?.uri ?? null,                 // for orphan-strip dedup by source (open-only sheets)
-    state: s.focused ? 'focused' : s.rendered ? 'rendered' : 'open',
-  }));
+  return ws.listActiveSheets(reg, am).map((s) => {
+    const grid = s.panelId ? (reg?.get(s.panelId)?.grid ?? null) : null;
+    return {
+      id: s.id,                                 // sheetId ("sheet:"+path) — what the verbs take
+      title: s.title,
+      panelId: s.panelId,
+      uri: s.source?.uri ?? null,               // for orphan-strip dedup by source (open-only sheets)
+      state: s.focused ? 'focused' : s.rendered ? 'rendered' : 'open',
+      dirty: !!(grid && grid.isModified?.()),   // unsaved edits → the • marker
+    };
+  });
 }
 
 // Registry windows NOT backed by a sheet (terminals, mem grids, raw grids) — kept reachable in the
@@ -147,9 +151,11 @@ export default function HudPanel({ client }) {
           {sheets.map((s) => (
             <div key={s.id} title={s.id}
               style={{ ...S.tabRow, ...(s.state === 'focused' ? S.tabRowOn : null) }}>
-              <button type="button" style={S.tabMain} onClick={() => fire('sheet.focus', s.id)}>
+              <button type="button" style={S.tabMain}
+                title={s.dirty ? 'unsaved edits' : undefined} onClick={() => fire('sheet.focus', s.id)}>
                 <span style={{ ...S.dot, ...(s.state === 'focused' ? null : DOT[s.state]) }}>{GLYPH[s.state]}</span>
                 {short(s.title)}
+                {s.dirty ? <span style={S.dirtyDot}>•</span> : null}
               </button>
               <button type="button" style={S.close} title="close sheet"
                 onClick={() => fire('sheet.close', s.id)}>×</button>
@@ -243,6 +249,7 @@ const S = {
     whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
   },
   dot: { marginRight: 5 },
+  dirtyDot: { marginLeft: 6, color: '#f0b45a', fontWeight: 700 },  // amber • = unsaved edits
   close: {
     font: 'inherit', color: 'inherit', opacity: 0.55, background: 'transparent', border: 'none',
     borderLeft: '1px solid rgba(255,255,255,0.08)', padding: '0 7px', cursor: 'pointer',

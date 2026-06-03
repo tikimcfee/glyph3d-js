@@ -300,6 +300,9 @@ export default function registerFileCommands(router) {
             r.grid._savedTextHash = contentHash(content);
         }
 
+        // Clear the live unsaved flag (the HUD's • marker) — content now matches disk.
+        r.grid.markSaved?.();
+
         const bytes = result?.bytesWritten ?? content.length;
         return {
             text: `OK: wrote ${bytes} bytes to ${r.uri}`,
