@@ -670,23 +670,52 @@ class CodeGrid extends THREE.Object3D {
      * @private
      * @returns {Promise<this>}
      */
-    async _relayoutInPlace() {
-        if (!this.content) return this;        // nothing to lay out yet
-        this.getLineCount();                   // guarantee this.lines is populated (wrap index reads it)
-        this._ensureRenderer();                // reconstruct if content was evicted
-        this._clearContent();                  // queue removal of current filename + content items
-        await this._layoutContentAsync();      // re-add + re-flush + rebuild line tables + _layout
-        this._updateBackground();
-        // If editing, the glyphs just moved under the caret — repaint it against the fresh
-        // _layout (mirrors _relayoutPreservingCursor); else it lingers at the old fold's spot.
-        if (this._cursor) {
-            const ln = Math.max(0, Math.min(this._cursor.line, this.lines.length - 1));
-            const cl = Math.max(0, Math.min(this._cursor.col, this.lines[ln]?.length ?? 0));
-            this._cursor.line = ln;
-            this._cursor.col = cl;
-            this._updateCaretMesh();
+    /**
+     * THE single relayout pipeline — re-fold the grid from current state (this.lines/content,
+     * scrollOffset, layout params) and repaint the edit caret. ONE mutex (_relayoutBusy /
+     * _relayoutPending) serializes ALL relayouts — scroll, layout, frame, AND edit — so two
+     * pipelines can never interleave _clearContent/_flushAsync on the shared deferred-batch
+     * state (_pendingAdds/_idMap/_contentTextIds), which would corrupt the buffers. Rapid calls
+     * coalesce: the in-flight pass loops once more with the LATEST state. Edit callers set
+     * _linesDirty so content re-syncs from the edit-mutated line array; scroll/layout/frame
+     * callers leave this.content untouched (no per-tick join cost).
+     * @private
+     * @returns {Promise<this>}
+     */
+    async _relayout() {
+        if (this._relayoutBusy) { this._relayoutPending = true; return this; }
+        this._relayoutBusy = true;
+        try {
+            do {
+                this._relayoutPending = false;
+                this.getLineCount();                       // ensure this.lines is populated
+                if (this._linesDirty) {                    // edits mutate this.lines → resync content
+                    this.content = this.lines.join('\n');
+                    this._linesDirty = false;
+                }
+                if (!this.content) continue;               // nothing to lay out (loop exits unless pending)
+                this._ensureRenderer();                    // reconstruct if content was evicted
+                this._clearContent();                      // queue removal of current filename + content
+                await this._layoutContentAsync();          // re-add + re-flush + rebuild line tables + _layout
+                this._updateBackground();
+                // Repaint the edit caret against the fresh _layout, else it lingers stale.
+                if (this._cursor) {
+                    const ln = Math.max(0, Math.min(this._cursor.line, this.lines.length - 1));
+                    const cl = Math.max(0, Math.min(this._cursor.col, this.lines[ln]?.length ?? 0));
+                    this._cursor.line = ln;
+                    this._cursor.col = cl;
+                    this._updateCaretMesh();
+                }
+            } while (this._relayoutPending);
+        } finally {
+            this._relayoutBusy = false;
         }
         return this;
+    }
+
+    /** Scroll / layout / frame relayout (reuses this.content). @private @returns {Promise<this>} */
+    _relayoutInPlace() {
+        return this._relayout();
     }
 
     /**
@@ -1822,33 +1851,17 @@ class CodeGrid extends THREE.Object3D {
      * "instance fetch requires N, attribs only supply M" and rendering
      * silently breaks).
      *
-     * Edit ops fire-and-forget the returned promise. Rapid keystrokes are
-     * coalesced via _relayoutInFlight + _relayoutQueued so concurrent
-     * flushes don't trample _pendingAdds / _pendingRemovals.
+     * Edit ops fire-and-forget the returned promise. Routes through the SHARED _relayout mutex
+     * (not a separate guard) so edit and scroll/layout relayouts serialize and never trample the
+     * shared _pendingAdds / _pendingRemovals / _idMap state. _linesDirty tells _relayout to
+     * re-sync content from the edit-mutated line array (cursor clamp + repaint live in _relayout).
      *
      * @private
+     * @returns {Promise<this>}
      */
     async _relayoutPreservingCursor() {
-        if (this._relayoutInFlight) {
-            this._relayoutQueued = true;
-            return;
-        }
-        this._relayoutInFlight = true;
-        try {
-            do {
-                this._relayoutQueued = false;
-                await this.loadTextAsync(this.lines.join('\n'));
-                if (this._cursor) {
-                    const ln = Math.min(this._cursor.line, this.lines.length - 1);
-                    const cl = Math.min(this._cursor.col,  this.lines[ln]?.length ?? 0);
-                    this._cursor.line = Math.max(0, ln);
-                    this._cursor.col  = Math.max(0, cl);
-                    this._updateCaretMesh();
-                }
-            } while (this._relayoutQueued);
-        } finally {
-            this._relayoutInFlight = false;
-        }
+        this._linesDirty = true;
+        return this._relayout();
     }
 
     /**

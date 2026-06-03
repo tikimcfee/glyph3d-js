@@ -192,15 +192,39 @@ export default function CommandProvider({ atlas, port = 8080, cameraControllerRe
     // per-frame wheel drain; it returns true when it consumed the wheel. ~30px ≈ one
     // line, min one line in the wheel direction. wheel up (dy<0) → +lines = back into
     // history; the adapter drives tmux copy-mode and the repaint streams back.
-    state.ctx.tryScrollFocusedTerminal = (dy) => {
+    // Wheel-gate: a focused, FRAMED surface scrolls ITSELF instead of moving the camera.
+    // Terminals (key focus) are always a fixed screen → scroll tmux scrollback. Code grids
+    // (primary focus) scroll only when framed (frameRows>0) — a "table in a window"; unframed
+    // grids leave the wheel to the camera. One gate, dispatched by surface not by type. Returns
+    // true when it consumes the wheel. ~30px ≈ one line/row; min one in the wheel direction.
+    state.ctx.tryScrollFocused = (dy) => {
       if (!dy) return false;
+      // 1. Terminal holding KEY focus → its (tmux-owned) scrollback. wheel up (dy<0) → +lines
+      //    = back into history; the adapter drives copy-mode and the repaint streams back.
       const key = state.ctx.attentionManager?.get('key');
-      const entry = key?.id ? state.registry.get(key.id) : null;
-      if (entry?.type !== 'terminal') return false;
-      let lines = -Math.round(dy / 30);
-      if (lines === 0) lines = dy > 0 ? -1 : 1;
-      state.router.execute(`terminal.scroll ${entry.id} ${lines}`);
-      return true;
+      const kEntry = key?.id ? state.registry.get(key.id) : null;
+      if (kEntry?.type === 'terminal') {
+        let lines = -Math.round(dy / 30);
+        if (lines === 0) lines = dy > 0 ? -1 : 1;
+        // Array form skips the router's space-tokenizer — a registry id with a space (a
+        // file path) would otherwise split into bogus args and dead-end the wheel.
+        state.router.execute(['terminal.scroll', kEntry.id, String(lines)]);
+        return true;
+      }
+      // 2. PRIMARY-focused, FRAMED code grid → flow content through its frame (the conveyor).
+      //    wheel down (dy>0) → +rows = scroll down (later content). Duck-typed on getFrameRows
+      //    so terminals/other entries fall through to the camera.
+      const primary = state.ctx.attentionManager?.get('primary');
+      const pEntry = primary?.id ? state.registry.get(primary.id) : null;
+      const grid = pEntry?.grid;
+      if (grid && typeof grid.getFrameRows === 'function' && grid.getFrameRows() > 0) {
+        let rows = Math.round(dy / 30);
+        if (rows === 0) rows = dy > 0 ? 1 : -1;
+        // Array form skips the router's space-tokenizer (id may be a file path with spaces).
+        state.router.execute(['grid.scroll', pEntry.id, String(rows)]);
+        return true;
+      }
+      return false;
     };
 
     const cc = cameraControllerRef?.current;
@@ -210,14 +234,14 @@ export default function CommandProvider({ atlas, port = 8080, cameraControllerRe
       // authorities aren't visible to it by default. Forward them LIVE (getters, not
       // copies) so VCC's handlers consult the same verdict the draggers do:
       //   • isGripPress — a plain left-press on a resize grip yields the camera pan.
-      //   • tryScrollFocusedTerminal — the wheel scrolls a key-focused terminal.
+      //   • tryScrollFocused — the wheel scrolls a focused framed surface (terminal or grid).
       Object.defineProperty(cc.ctx, 'isGripPress', {
         configurable: true,
         get: () => state.ctx.isGripPress ?? null,
       });
-      Object.defineProperty(cc.ctx, 'tryScrollFocusedTerminal', {
+      Object.defineProperty(cc.ctx, 'tryScrollFocused', {
         configurable: true,
-        get: () => state.ctx.tryScrollFocusedTerminal ?? null,
+        get: () => state.ctx.tryScrollFocused ?? null,
       });
     }
 

@@ -476,12 +476,12 @@ export class ViewerCameraController {
         const wheel = this.input.wheel;
         if (wheel.dx === 0 && wheel.dy === 0) return;
 
-        // Focused-terminal scroll gate: if a terminal holds key focus, the wheel
-        // scrolls ITS (tmux-owned) scrollback, not the camera. The bridged hook
-        // dispatches terminal.scroll and returns true when it consumes the wheel —
-        // gate here in the drain (not the listener) so the verdict uses live focus
-        // and the camera never also zooms/pans. Mirrors the WASD focus gate.
-        if (this.ctx?.tryScrollFocusedTerminal?.(wheel.dy)) {
+        // Focused-surface scroll gate: a focused FRAMED surface (a terminal, or a framed code
+        // grid) takes the wheel to scroll ITSELF instead of moving the camera. The bridged hook
+        // dispatches terminal.scroll / grid.scroll and returns true when it consumes the wheel —
+        // gate here in the drain (not the listener) so the verdict uses live focus and the
+        // camera never also zooms/pans. Mirrors the WASD focus gate.
+        if (this.ctx?.tryScrollFocused?.(wheel.dy)) {
             wheel.dx = 0;
             wheel.dy = 0;
             return;
