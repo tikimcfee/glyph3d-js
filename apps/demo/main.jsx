@@ -18,7 +18,8 @@ import { useGlyphEngine, GlyphCanvas, CodeGrid } from 'glyph3d-r3f';
 import fontUrl from '@glyph3d/core/fonts/Cousine-Regular.ttf?url';
 
 const SAGE = { r: 0.659, g: 0.627, b: 0.447 };
-const NAME = { r: 0.88, g: 0.84, b: 0.60 };  // brighter — the central nameplate pops
+const NAME = { r: 0.90, g: 0.85, b: 0.60 };  // bright — the dominant nameplate, the hero
+const DIM  = { r: 0.42, g: 0.40, b: 0.30 };  // dim — the ring of files is a subtle hint
 const TAU = Math.PI * 2;
 // Independent animation rates (rad/s on a continuous clock) so orbit and the
 // waves tune separately. Live autoplay runs a continuous clock — no loop
@@ -26,10 +27,10 @@ const TAU = Math.PI * 2;
 const ORBIT_W = 0.0675;      // slow dome revolution — halved (calmer, more "title")
 const WAVE_XY_W = 0.45;      // XY ripple — halved in step
 const WAVE_Z_W = 0.225;      // z voxel float — halved in step
-const CAM_Z = 120;           // banner reframe: telephoto fov + this distance fills the short 16:7 band
-const CAPTURE_SECS = 92;     // seek window ≈ one full revolution (doubled w/ orbit)
-const DOME_LIFT = 6;         // float the file band above the title
-const TITLE_Y = 9;           // the glyph3d title sits just under the file band
+const CAM_Z = 140;           // frames the dominant title + its ring of files in the 16:7 band
+const CAPTURE_SECS = 92;     // seek window ≈ one full revolution
+const RING_CY = 16;          // vertical center of the title and the ring around it
+const TITLE_X = -14;         // x offset that centers "glyph3d" at the dominant scale
 
 const FILES = [
   { name: 'atlas.js', target: [0, 13, 4], text:
@@ -96,13 +97,12 @@ function buildSlugBuffers(shaped) {
 }` },
 ];
 
-// Files ride a wide, shallow revolving arc — a title BAND, not a deep dome.
-// Azimuth spreads them across the banner width (X_RADIUS) with only gentle
-// depth (Z_DEPTH) so every file stays a similar distance and reads uniform;
-// elevation tiers them vertically (Y_SPAN). The whole arc slowly revolves.
-const X_RADIUS = 56;         // horizontal spread across the banner
-const Y_SPAN = 50;           // vertical tiering from elevation
-const Z_DEPTH = 16;          // shallow depth — keeps file sizes uniform (no front-file blowup)
+// Files orbit as a SUBTLE RING around the dominant title — a quiet "what's
+// this?" halo, not a competing band. Even azimuths (DOME[i].az) place them
+// around an ellipse sized to the wide banner; the ring slowly revolves.
+const RING_RX = 72;          // horizontal ring radius (wide banner)
+const RING_RY = 28;          // vertical ring radius (short banner)
+const RING_ZD = 9;           // gentle depth float on the ring
 const DOME = [
   { az: 0.00, el: 0.18 },
   { az: 0.79, el: 0.55 },
@@ -129,13 +129,13 @@ function waveGrid(grid, i, time, store, xyW, zW) {
   const wXY = time * xyW, wZ = time * zW;           // independent temporal speeds
   for (let k = 0; k < count; k++) {
     const bx = base[k * 3], by = base[k * 3 + 1];
-    // smooth XY travelling wave (per column) — amp scaled to the smaller banner text
-    arr[k * 3 + 1] = by + 0.45 * Math.sin(bx * 0.10 + wXY + phase);
+    // smooth XY travelling wave (per column) — gentle, the ring is subtle
+    arr[k * 3 + 1] = by + 0.30 * Math.sin(bx * 0.10 + wXY + phase);
     // QUANTIZED z, per individual glyph (x AND y) → glyphs snap between discrete
     // depth planes: a voxelized, step-function pop. Math.round = the steps.
     const sz = Math.sin(bx * 0.55 + by * 0.70 + wZ + phase);
     // twice the steps, same total depth → finer, more "motion"-like stepping
-    arr[k * 3 + 2] = base[k * 3 + 2] + (Math.round(sz * 2) / 2) * 0.35;
+    arr[k * 3 + 2] = base[k * 3 + 2] + (Math.round(sz * 2) / 2) * 0.22;
   }
   attr.needsUpdate = true;
 }
@@ -151,25 +151,25 @@ function Director({ gridRefs, nameRef }) {
     FILES.forEach((f, i) => {
       const g = gridRefs.current[i];
       if (!g) return;
-      const az = DOME[i].az + theta, el = DOME[i].el;
-      const ce = Math.cos(el);
+      const ang = DOME[i].az + theta;                       // even angle around the ring
+      const jit = 0.86 + Math.sin(DOME[i].el * 4) * 0.14;   // subtle per-file radius variance
       g.position.set(
-        Math.sin(az) * ce * X_RADIUS,                                    // spread across the band
-        Math.sin(el) * Y_SPAN + DOME_LIFT + Math.sin(theta + i) * 1.0,   // vertical tier, lifted
-        Math.cos(az) * ce * Z_DEPTH,                                     // shallow depth
+        Math.cos(ang) * RING_RX * jit,                      // around the title, ellipse
+        RING_CY + Math.sin(ang) * RING_RY * jit,
+        Math.sin(ang + i) * RING_ZD,                        // gentle depth float
       );
-      g.rotation.set(0, -Math.sin(az) * 0.30, 0); // gentle tilt — stays camera-readable across the band
+      g.rotation.set(0, -Math.sin(ang) * 0.15, 0);          // barely-there tilt, stays readable
       waveGrid(g, i, time, waves, WAVE_XY_W, WAVE_Z_W);
     });
-    // Central floating nameplate — the dome of files orbits around this.
+    // The nameplate is the hero — big, bright, centered in the ring it orbits.
     const nm = nameRef.current;
     if (nm) {
-      nm.position.set(-5, TITLE_Y + Math.sin(time * 0.25) * 1.0, 0);   // lower-center float (offset re-centered for banner title scale)
-      nm.rotation.set(0, Math.sin(time * 0.15) * 0.12, 0);             // subtle sway — halved
+      nm.position.set(TITLE_X, RING_CY + 2 + Math.sin(time * 0.25) * 0.8, 0);
+      nm.rotation.set(0, Math.sin(time * 0.15) * 0.10, 0);  // subtle sway
     }
-    // Camera frames the header band (up) and the title (lower-center).
-    camera.position.set(0, 20, CAM_Z);
-    camera.lookAt(0, 18, 0);
+    // Camera centers the lockup: dominant title, ring of files around it.
+    camera.position.set(0, RING_CY, CAM_Z);
+    camera.lookAt(0, RING_CY, 0);
   };
 
   useFrame((_, dt) => {
@@ -197,12 +197,12 @@ function App() {
   return (
     <GlyphCanvas
       atlas={atlas}
-      camera={{ position: [0, 20, 120], fov: 24, near: 0.1, far: 6000 }}
+      camera={{ position: [0, 16, 140], fov: 30, near: 0.1, far: 6000 }}
       onCreated={({ scene }) => { scene.background = new THREE.Color(0x0e0c08); }}
     >
       <Director gridRefs={gridRefs} nameRef={nameRef} />
-      {/* central floating nameplate — banner scale (telephoto fov keeps it legible) */}
-      <CodeGrid ref={nameRef} filename="" text="glyph3d" worldScale={0.034}
+      {/* the hero — dominant, bright; the ring of files orbits around it */}
+      <CodeGrid ref={nameRef} filename="" text="glyph3d" worldScale={0.095}
         textColor={NAME} showBackground={false} />
       {FILES.map((f, i) => (
         <CodeGrid
@@ -210,8 +210,8 @@ function App() {
           ref={(el) => { gridRefs.current[i] = el; }}
           filename={f.name}
           text={f.text}
-          worldScale={0.009}
-          textColor={SAGE}
+          worldScale={0.0095}
+          textColor={DIM}
           showBackground={false}
         />
       ))}
