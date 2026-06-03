@@ -118,6 +118,30 @@ export default function registerWorkspaceCommands(router) {
     return { text: `OK: focused "${sheet.title}" → panel ${panelId}`, data: { id: sheet.id, panelId, focused: true } };
   }, { description: 'Focus a sheet: render if needed, set attention primary, frame the camera, mark active', usage: '<sheetId>' });
 
+  router.register('sheet.close', (args, ctx) => {
+    if (args.length < 1) return { text: 'ERR: usage: sheet.close <sheetId>', data: null };
+    const ws = ctx.workspace;
+    if (!ws) return { text: 'ERR: workspace not ready', data: null };
+    const sheetId = args.join(' ');
+    const sheet = ws.getSheet(sheetId);
+    if (!sheet) return { text: `ERR: no sheet "${sheetId}"`, data: null };
+    const title = sheet.title;
+    // Closing = derender-if-drawn (same null-before-remove ordering as sheet.derender, so the
+    // reconcile self-heal stays quiet) THEN drop the sheet from its field(s). If the closed panel
+    // held attention.primary, clear it — otherwise focus dangles on a panel that no longer exists.
+    if (sheet.panelId && ctx.registry.has(sheet.panelId)) {
+      const pid = sheet.panelId;
+      if (ctx.attentionManager?.get?.('primary')?.id === pid) {
+        ctx.attentionManager.set('primary', null, { registry: ctx.registry });
+      }
+      ws.setPanelId(sheet.id, null);
+      ctx.removeGrid(pid);
+      reflowGrids(ctx);
+    }
+    ws.removeSheet(sheet.id);
+    return { text: `OK: closed sheet "${title}"`, data: { id: sheetId, closed: true } };
+  }, { description: 'Close a sheet: derender its panel (if drawn) + drop it from the field', usage: '<sheetId>' });
+
   router.register('field.list', (args, ctx) => {
     const ws = ctx.workspace;
     if (!ws) return { text: 'ERR: workspace not ready', data: null };

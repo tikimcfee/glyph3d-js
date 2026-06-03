@@ -67,8 +67,13 @@ export default class WorkspaceModel {
    * @returns {object|null} the sheet record
    */
   openSheet({ kind = 'file', source, title } = {}) {
-    const key = source?.path ?? source?.adapterId;
-    if (!key) return null;
+    const raw = source?.path ?? source?.adapterId;
+    if (!raw) return null;
+    // Canonicalize file paths (strip leading slashes) so ONE file is ONE sheet regardless of the
+    // caller's path form — matches the file:/// URI canonicalization fileCommands uses for grid
+    // dedup. Without this, file.open's rooted "/x" and a bare "x" from the CLI make two sheets for
+    // one file. (adapterId-keyed sheets — terminals — are not path-like, so leave them as-is.)
+    const key = source?.path != null ? String(source.path).replace(/^\/+/, '') : raw;
     const id = 'sheet:' + key;
     let sheet = this.sheets.get(id);
     let added = false;
