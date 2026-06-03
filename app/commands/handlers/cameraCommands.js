@@ -43,10 +43,18 @@ export default function registerCameraCommands(router) {
         if (resolved.error) return { text: `ERR: no grid matching '${target}'`, data: null };
 
         const idx = resolved.idx >= 0 ? resolved.idx : grids.indexOf(resolved.grid);
+        let framed = false;
         if (idx >= 0) {
             ctx.cameraController.focusOnGrid(idx);
             if (ctx.spatialNav) ctx.spatialNav.focusGrid(idx, false);
+            framed = true;
+        } else if (resolved.grid) {
+            // A non-grid window (e.g. a terminal): frame it by its world bounds. Terminals aren't
+            // in getGrids('grid') so focusOnGrid can't reach them, but they carry getBounds, and
+            // terminal.focus deliberately leaves framing to camera.focus. One focus verb, any window.
+            framed = !!ctx.cameraController.focusOnObject?.(resolved.grid);
         }
+        if (!framed) return { text: `ERR: resolved "${target}" but could not frame it`, data: null };
         const label = resolved.registryId || grids[idx]?.getFilename?.() || `#${idx}`;
         return {
             text: `OK: focusing on "${label}"`,

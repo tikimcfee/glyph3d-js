@@ -847,6 +847,28 @@ export class ViewerCameraController {
         }));
     }
 
+    /**
+     * Frame a single registry object (a grid OR a terminal — anything with getBounds) by its
+     * world bounds, centered. focusOnGrid is grid-INDEX-coupled (getGrids('grid') excludes
+     * terminals), so camera.focus routes non-grid windows here. Center-framed — the readable-
+     * lines / top-anchor logic in computeGridFocus is code-grid-specific and irrelevant here.
+     * @returns {boolean} true if it framed something.
+     */
+    focusOnObject(obj) {
+        const THREE = this.THREE;
+        const bounds = obj?.getBounds?.();
+        if (!bounds || bounds.isEmpty?.()) return false;
+        const center = new THREE.Vector3();
+        bounds.getCenter(center);
+        const size = new THREE.Vector3();
+        bounds.getSize(size);
+        const distance = zDistanceForFit(this.ctx.camera, size.x, size.y, 0.85);
+        this.pitch = 0;
+        this.yaw = 0;
+        this.ctx.camera.position.set(center.x, center.y, bounds.max.z + distance);
+        return true;
+    }
+
     focusOnGrids() {
         const THREE = this.THREE;
         const grids = this.ctx.getGrids();
