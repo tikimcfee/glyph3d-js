@@ -1,13 +1,7 @@
-// glyph3d cinematic TOUR — a single continuous arc through the substrate's
-// capabilities, built phase by phase. It drives the REAL core systems (layout
-// managers, ConnectionRenderer, CodeGrid load/unload) so it doubles as a
-// repeatable exercise/test of those features — where a primitive is missing or
-// awkward, this demo is where it shows.
+// glyph3d cinematic TOUR — a continuous arc driving the real core systems.
 //
-// Arc:  load → graph → refactor → morph → unload
-//   Phase 1 (this round): LOAD — a repo flies in and arranges into a wall;
-//                         UNLOAD — it dissolves back out. Middle phases hold
-//                         at the assembled state for now (slot in next).
+// Arc:  load → graph (sequential, highlighted, captioned) → layout (organize
+//       into a dependency tree, arrows following) → unload.
 //
 // Timeline is a pure function of t∈[0,1): autoplays live, exposes
 // window.demo.seek(t) for frame-perfect capture (tools/capture.mjs).
@@ -18,91 +12,174 @@ import * as THREE from 'three/webgpu';
 import { useThree, useFrame } from '@react-three/fiber';
 import { useGlyphEngine, GlyphCanvas, CodeGrid } from 'glyph3d-r3f';
 import fontUrl from '@glyph3d/core/fonts/Cousine-Regular.ttf?url';
+import { ConnectionRenderer } from '@glyph3d/core/annotations';
 
 const SAGE = { r: 0.659, g: 0.627, b: 0.447 };
+const WARM = { r: 0.45, g: 0.34, b: 0.12 };   // additive highlight on focused files
 const TAU = Math.PI * 2;
+const DURATION = 20;
 
-// A small curated "repo" (real glyph3d-flavored files). Default-to-ours; later
-// this can be swapped for a user-loaded repo via the fs API.
+// Curated "repo" (indices used by the graph): 0 atlas 1 field 2 camera 3 layout
+// 4 shape 5 worker 6 picking 7 grid 8 tour 9 connect 10 main 11 index
 const REPO = [
-  { name: 'atlas.js',    text: `class GlyphAtlas {\n  pack(g) {\n    return this.shelf(g)\n  }\n}` },
-  { name: 'field.js',    text: `field.render(text, pos, {\n  color, groupId,\n})` },
-  { name: 'camera.js',   text: `camera.focusOnGrids()\ncamera.lerp(target)` },
-  { name: 'layout.js',   text: `new GridLayoutManager()\n  .addAuto(grid)` },
-  { name: 'shape.js',    text: `buildSlugBuffers(\n  shapeText(src, font)\n)` },
-  { name: 'worker.js',   text: `onmessage = (e) => {\n  post(build(e.data))\n}` },
-  { name: 'picking.js',  text: `pick(x, y) {\n  return resolve(\n    read(x, y))\n}` },
-  { name: 'grid.js',     text: `class CodeGrid {\n  loadFile(name, src)\n}` },
-  { name: 'tour.js',     text: `seq.load(steps)\nseq.next()` },
-  { name: 'connect.js',  text: `lines.set(id,\n  from, to, color)` },
-  { name: 'main.js',     text: `boot()\nmount(scene)` },
-  { name: 'index.js',    text: `export * from\n  './core'` },
+  { name: 'atlas.js',   text: `class GlyphAtlas {\n  pack(g) {\n    return this.shelf(g)\n  }\n}` },
+  { name: 'field.js',   text: `field.render(text, pos, {\n  color, groupId,\n})` },
+  { name: 'camera.js',  text: `camera.focusOnGrids()\ncamera.lerp(target)` },
+  { name: 'layout.js',  text: `new GridLayoutManager()\n  .addAuto(grid)` },
+  { name: 'shape.js',   text: `buildSlugBuffers(\n  shapeText(src, font)\n)` },
+  { name: 'worker.js',  text: `onmessage = (e) => {\n  post(build(e.data))\n}` },
+  { name: 'picking.js', text: `pick(x, y) {\n  return resolve(\n    read(x, y))\n}` },
+  { name: 'grid.js',    text: `class CodeGrid {\n  loadFile(name, src)\n}` },
+  { name: 'tour.js',    text: `seq.load(steps)\nseq.next()` },
+  { name: 'connect.js', text: `lines.set(id,\n  from, to, color)` },
+  { name: 'main.js',    text: `boot()\nmount(scene)` },
+  { name: 'index.js',   text: `export * from\n  './core'` },
 ];
 
-// 4×3 wall, centered on origin — tiled-window spacing. (Phase 4 morphs these
-// into spiral/treemap/etc.)
+// Wall layout (load target): 4×3, centered (files anchor top-left → nudge).
 const COLS = 4, COLX = 60, ROWY = 42;
 const TARGET = REPO.map((_, i) => {
   const c = i % COLS, r = Math.floor(i / COLS);
-  // -22 x / +6 y: files anchor top-left, so nudge to visually center the wall.
   return [(c - (COLS - 1) / 2) * COLX - 22, (1 - r) * ROWY + 6, 0];
 });
-// Scattered far start for the fly-in (deterministic per index).
 const START = TARGET.map((t, i) => [t[0] * 3.0, t[1] * 3.0 + 40, -520 - (i % 5) * 60]);
+
+// Organized layout (dependency tree): roots up, leaves down — so the arrows
+// read as clean parent→child flow once files move here.
+const ROWS = [[10], [11, 1, 2, 8], [7, 5, 3, 9, 6], [0, 4]];
+const ORG = (() => {
+  const out = [], CX = 64, RY = 46, TOP = 75;
+  ROWS.forEach((row, ri) => row.forEach((fi, ci) => {
+    out[fi] = [(ci - (row.length - 1) / 2) * CX - 22, TOP - ri * RY, 0];
+  }));
+  return out;
+})();
+
+// Sequential steps: each lights up one source file's outgoing edges, highlights
+// it, and shows a descriptor. Edges accumulate as the web builds.
+const STEPS = [
+  { desc: 'main.js — the entry point',          edges: [[10, 11], [10, 1], [10, 2]], focus: [10] },
+  { desc: 'index.js re-exports the core',        edges: [[11, 0], [11, 7]],            focus: [11] },
+  { desc: 'grid.js builds on atlas + shape',     edges: [[7, 0], [7, 4]],              focus: [7] },
+  { desc: 'field.js renders through a worker',   edges: [[1, 0], [1, 5]],              focus: [1] },
+  { desc: 'shaping: worker → shape → atlas',     edges: [[5, 4], [4, 0]],              focus: [5, 4] },
+  { desc: 'camera & layout cooperate',           edges: [[2, 3], [3, 7]],              focus: [2, 3] },
+  { desc: 'tour.js drives camera & connect',     edges: [[8, 2], [8, 9], [9, 1]],      focus: [8, 9] },
+  { desc: 'picking.js resolves on the grid',     edges: [[6, 7]],                      focus: [6] },
+];
+const GS = 0.42, GE = 0.84;                       // relationships phase (after organize)
+const STEP_SLOT = (GE - GS) / STEPS.length;
+const FLAT = STEPS.flatMap((s, k) => s.edges.map((e) => ({ from: e[0], to: e[1], t0: GS + k * STEP_SLOT })));
+// Hot-path scratch — reused every frame so the animation allocates nothing
+// (no lerp3 arrays, no per-edge objects/strings → no GC hitch).
+const EIDF = FLAT.map((_, k) => 'F' + k);   // faint full guide line (structure)
+const EIDS = FLAT.map((_, k) => 'S' + k);   // bright travelling snake segment (liveness)
+const SNAKE_LEN = 0.28, SNAKE_CYCLES = 12;  // segment length (fraction) + traversals/loop
+const EMPTY = {};
+const _f = { x: 0, y: 0, z: 0 }, _t = { x: 0, y: 0, z: 0 }, _c = { r: 0, g: 0, b: 0 };
 
 const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
 const smooth = (x) => x * x * (3 - 2 * x);
 const lerp = (a, b, t) => a + (b - a) * t;
 const lerp3 = (a, b, t) => [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)];
 
-// Assembly envelope across the loop: per-grid staggered ramp-in (LOAD), hold,
-// then ramp-out (UNLOAD). 0 = scattered/away, 1 = seated in the wall.
-function seat(t, i) {
-  const inA = i * 0.005, inB = inA + 0.08;            // faster staggered load
-  const outA = 0.86 + i * 0.006, outB = outA + 0.10;  // staggered unload
-  if (t < inA) return 0;
-  if (t < inB) return smooth((t - inA) / (inB - inA));
-  if (t < outA) return 1;
-  if (t < outB) return 1 - smooth((t - outA) / (outB - outA));
+// (file position is computed component-wise inline in apply — see below — to
+// keep the hot path allocation-free.)
+
+function graphAlpha(t) {
+  if (t < GS) return 0;
+  if (t < GS + 0.10) return smooth((t - GS) / 0.10);
+  if (t < 0.86) return 1;
+  if (t < 0.96) return 1 - smooth((t - 0.86) / 0.10);
   return 0;
 }
 
 function phaseLabel(t) {
-  if (t < 0.22) return 'load · a repo flies in';
-  if (t < 0.42) return 'graph · (next)';
-  if (t < 0.62) return 'refactor · (next)';
-  if (t < 0.82) return 'morph · (next)';
+  if (t < 0.15) return 'load · a repo flies in';
+  if (t < GS) return 'layout · organize by dependencies';
+  if (t < 0.86) return 'trace · live call relationships';
   return 'unload · dissolve out';
 }
 
-const DURATION = 13;
-
 function Director({ gridRefs }) {
-  const { camera } = useThree();
+  const { camera, scene } = useThree();
   const tRef = useRef(0);
   const auto = useRef(true);
+  const crRef = useRef(null);
+  const lastStep = useRef(-2);
 
   const apply = (t) => {
-    REPO.forEach((f, i) => {
+    // Files — component-wise, ZERO allocation (no lerp3 arrays in the hot path).
+    // fly in (load) → seat at wall → morph to org (layout) → fly out (unload).
+    for (let i = 0; i < REPO.length; i++) {
       const g = gridRefs.current[i];
-      if (!g) return;
-      const a = seat(t, i);
-      const p = lerp3(START[i], TARGET[i], a);
-      g.position.set(p[0], p[1], p[2]);
-      g.rotation.set(0, 0, 0);
-    });
-    // Quick push-in to a tiled-window framing that nearly fills the view.
-    const z = lerp(150, 115, smooth(clamp(t / 0.10, 0, 1)));
-    camera.position.set(Math.sin(t * TAU) * 4, -3, z);
-    camera.lookAt(0, -4, 0);
-    const el = document.getElementById('phase');
-    if (el) el.textContent = phaseLabel(t);
+      if (!g) continue;
+      const load = smooth(clamp((t - i * 0.004) / 0.12, 0, 1));   // fly into wall
+      const lay  = smooth(clamp((t - 0.15) / 0.25, 0, 1));        // organize into tree (now early)
+      const out  = smooth(clamp((t - (0.87 + i * 0.004)) / 0.10, 0, 1));
+      const T = TARGET[i], O = ORG[i], S = START[i];
+      const sx = T[0] + (O[0] - T[0]) * lay, sy = T[1] + (O[1] - T[1]) * lay, sz = T[2] + (O[2] - T[2]) * lay;
+      const ax = S[0] + (sx - S[0]) * load, ay = S[1] + (sy - S[1]) * load, az = S[2] + (sz - S[2]) * load;
+      g.position.set(ax + (S[0] - ax) * out, ay + (S[1] - ay) * out, az + (S[2] - az) * out);
+    }
+
+    // Highlight focused files — ONLY on step change (rare), small range.
+    const stepIdx = (t >= GS && t < GE) ? Math.min(STEPS.length - 1, Math.floor((t - GS) / STEP_SLOT)) : -1;
+    if (stepIdx !== lastStep.current) {
+      for (let i = 0; i < REPO.length; i++) gridRefs.current[i]?.clearAllHighlights?.();
+      if (stepIdx >= 0) for (const fi of STEPS[stepIdx].focus) gridRefs.current[fi]?.highlightRange?.(0, 0, 6, 40, WARM);
+      lastStep.current = stepIdx;
+    }
+    const desc = stepIdx >= 0 ? STEPS[stepIdx].desc : (t >= 0.15 && t < GS ? 'organizing by dependencies' : '');
+    const de = document.getElementById('descriptor');
+    if (de) { de.textContent = desc; de.style.opacity = desc ? 1 : 0; }
+
+    // Call-graph edges — reuse scratch objects + plain loop: no per-frame alloc.
+    const cr = crRef.current;
+    if (cr) {
+      const g = graphAlpha(t);
+      if (g <= 0.001) cr.setVisible(false);
+      else {
+        cr.setVisible(true);
+        for (let k = 0; k < FLAT.length; k++) {
+          const ed = FLAT[k];
+          const pf = gridRefs.current[ed.from]?.position, pt = gridRefs.current[ed.to]?.position;
+          if (!pf || !pt) continue;
+          const reveal = smooth(clamp((t - ed.t0) / 0.04, 0, 1));      // sequential appear
+          const ax = pf.x + 22, ay = pf.y - 9, az = pf.z + 3;
+          const bx = pt.x + 22, by = pt.y - 9, bz = pt.z + 3;
+          // faint full guide line — shows the structure
+          _f.x = ax; _f.y = ay; _f.z = az; _t.x = bx; _t.y = by; _t.z = bz;
+          const db = g * reveal * 0.16;
+          _c.r = 0.92 * db; _c.g = 0.66 * db; _c.b = 0.28 * db;
+          cr.set(EIDF[k], _f, _t, _c, EMPTY);
+          // bright snake segment travelling source → target (liveness)
+          const head = ((t * SNAKE_CYCLES) + k * 0.13) % 1;
+          const tail = head > SNAKE_LEN ? head - SNAKE_LEN : 0;
+          _f.x = ax + (bx - ax) * tail; _f.y = ay + (by - ay) * tail; _f.z = az + (bz - az) * tail + 0.6;
+          _t.x = ax + (bx - ax) * head; _t.y = ay + (by - ay) * head; _t.z = az + (bz - az) * head + 0.6;
+          const sb = g * reveal;
+          _c.r = 1.0 * sb; _c.g = 0.80 * sb; _c.b = 0.34 * sb;
+          cr.set(EIDS[k], _f, _t, _c, EMPTY);
+        }
+      }
+    }
+
+    // Camera: push in for load, pull back a touch for the taller tree.
+    const z = lerp(150, 115, smooth(clamp(t / 0.10, 0, 1))) + 18 * smooth(clamp((t - 0.15) / 0.25, 0, 1));
+    camera.position.set(Math.sin(t * TAU) * 4, 2, z);
+    camera.lookAt(0, 6, 0);
+
+    const pe = document.getElementById('phase');
+    if (pe) pe.textContent = phaseLabel(t);
   };
 
-  useFrame((_, dt) => {
-    if (auto.current) tRef.current = (tRef.current + dt / DURATION) % 1;
-    apply(tRef.current);
-  });
+  React.useEffect(() => {
+    const cr = new ConnectionRenderer(scene, { maxConnections: 64, arrowLengthRatio: 0.03 });
+    cr.setVisible(false);
+    crRef.current = cr;
+    return () => { cr.dispose?.(); crRef.current = null; };
+  }, [scene]);
 
   React.useEffect(() => {
     window.demo = {
@@ -112,6 +189,11 @@ function Director({ gridRefs }) {
     };
     return () => { delete window.demo; };
   }, []);
+
+  useFrame((_, dt) => {
+    if (auto.current) tRef.current = (tRef.current + dt / DURATION) % 1;
+    apply(tRef.current);
+  });
 
   return null;
 }
@@ -123,7 +205,7 @@ function App() {
   return (
     <GlyphCanvas
       atlas={atlas}
-      camera={{ position: [0, 1, 150], fov: 70, near: 0.1, far: 8000 }}
+      camera={{ position: [0, 2, 150], fov: 70, near: 0.1, far: 8000 }}
       onCreated={({ scene }) => { scene.background = new THREE.Color(0x0e0c08); }}
     >
       <Director gridRefs={gridRefs} />
