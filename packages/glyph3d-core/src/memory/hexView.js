@@ -18,6 +18,29 @@
 
 const HEX = '0123456789abcdef';
 
+// Layout metrics — the single source of truth for where each byte's hex pair
+// lands in the dump, so the pointer-edge / coloring code can map a byte offset
+// back to a (line, col) span without re-deriving the format. A row is:
+//   <addr:HEX_ADDR_WIDTH><2 spaces><byte><byte>...   (each byte = "HH " = stride 3)
+export const HEX_ADDR_WIDTH = 8;
+export const HEX_GUTTER = HEX_ADDR_WIDTH + 2; // address digits + the two spaces after
+export const HEX_BYTE_STRIDE = 3;             // "HH " — two hex digits + one space
+
+/**
+ * Map a byte's index within the window to its (line, col) span in the dump —
+ * the inverse of the layout bytesToHexView produces. Used to anchor pointer
+ * edges and per-byte coloring to the exact glyphs.
+ * @param {number} localIndex - byte offset within the rendered window (0-based)
+ * @param {number} cols - bytes per row (must match the bytesToHexView call)
+ * @returns {{ line: number, startCol: number, endCol: number }} endCol exclusive
+ */
+export function hexCellSpan(localIndex, cols) {
+    const line = Math.floor(localIndex / cols);
+    const byteCol = localIndex % cols;
+    const startCol = HEX_GUTTER + byteCol * HEX_BYTE_STRIDE;
+    return { line, startCol, endCol: startCol + 2 };
+}
+
 /** Lowercase 2-char hex for a byte (0-255), allocation-light. */
 function hex2(b) {
     return HEX[(b >> 4) & 0xf] + HEX[b & 0xf];
@@ -44,7 +67,7 @@ function addr(n, width) {
 export function bytesToHexView(bytes, opts = {}) {
     const cols = opts.cols ?? 16;
     const baseOffset = opts.baseOffset ?? 0;
-    const addrWidth = opts.addrWidth ?? 8;
+    const addrWidth = opts.addrWidth ?? HEX_ADDR_WIDTH;
     const wantAscii = opts.ascii ?? true;
 
     const lines = [];
