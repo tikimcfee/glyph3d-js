@@ -143,8 +143,8 @@ export function useAppCommands() {
  * `onReady(client)` hands the wired client up to the app once the bridge connects
  * — the app then prop-drills it to panels (file tree, command bar, …).
  *
- * Shared by apps/home and apps/ide — it sits next to the spine (app/commands) it
- * wires, so there's exactly one of it.
+ * The app's client layer — it sits next to the spine (app/commands) it wires,
+ * so there's exactly one of it.
  */
 export default function CommandProvider({ atlas, port = 8080, cameraControllerRef, onReady, children }) {
   const { scene, camera, gl } = useThree();

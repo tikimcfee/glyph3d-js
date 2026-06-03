@@ -23,13 +23,13 @@
 #
 # After `vite`/`refresh`: HARD-RELOAD the browser (Ctrl+Shift+R).
 #
-# Env overrides: GLYPH_APP_DIR (default apps/ide), VITE_PORT (5173),
+# Env overrides: GLYPH_APP_DIR (default app), VITE_PORT (5173),
 #                RELAY_PORT (8080), GLYPH_LOG_DIR (/tmp/glyph3d).
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_DIR="${GLYPH_APP_DIR:-$ROOT/apps/ide}"   # the full panel system + the HUD overlay on top; apps/home is the lean alt
+APP_DIR="${GLYPH_APP_DIR:-$ROOT/app}"   # THE app: the r3f IDE (panel system + HUD overlay + command bar)
 VITE_PORT="${VITE_PORT:-5173}"
 RELAY_PORT="${RELAY_PORT:-8080}"
 LOG_DIR="${GLYPH_LOG_DIR:-/tmp/glyph3d}"

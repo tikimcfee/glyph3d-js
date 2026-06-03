@@ -6,7 +6,7 @@ import path from 'node:path';
 import { consoleCapture } from './console-capture.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const repoRoot = path.resolve(here, '../..'); // apps/home → repo root
+const repoRoot = path.resolve(here, '..'); // app → repo root
 const require = createRequire(import.meta.url);
 
 // The ONE intentional alias: serve the WebGPU build of three for BOTH `three`

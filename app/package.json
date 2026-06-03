@@ -4,7 +4,8 @@
   "type": "module",
   "description": "glyph3d IDE — react-three-fiber client on @glyph3d/core + glyph3d-r3f. File tree + 3D code grids, driven by the command bus (UI clicks and CLI/RPC hit the same handlers).",
   "scripts": {
-    "dev": "vite"
+    "dev": "vite",
+    "build": "vite build"
   },
   "dependencies": {
     "@glyph3d/core": "workspace:*",

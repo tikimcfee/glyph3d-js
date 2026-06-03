@@ -2,12 +2,12 @@ import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import * as THREE from 'three/webgpu';
 import { useGlyphEngine, GlyphCanvas, ViewerCamera } from 'glyph3d-r3f';
-import CommandProvider from '../../app/client/CommandProvider.jsx';
+import CommandProvider from './client/CommandProvider.jsx';
 import ButtonBar from './ButtonBar.jsx';
 import IdeDock from './IdeDock.jsx';
-import { CanvasPicker, ObjectDragger, ResizeDragger, SelectionIndicator } from '../../app/client/CanvasInteraction.jsx';
-import HudPanel from '../../app/client/HudPanel.jsx';
-import CommandBar from '../../app/client/CommandBar.jsx';
+import { CanvasPicker, ObjectDragger, ResizeDragger, SelectionIndicator } from './client/CanvasInteraction.jsx';
+import HudPanel from './client/HudPanel.jsx';
+import CommandBar from './client/CommandBar.jsx';
 // Font fallback chain, priority order: clean code monospace first, then fonts
 // that cover what it lacks (Nerd-Font icons/powerline/rounded box/stars, then
 // braille + broad symbols), then "oh well" (a blank cell) for the rare holdout.
