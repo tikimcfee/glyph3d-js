@@ -54,6 +54,12 @@ export default class TerminalGrid extends THREE.Object3D {
         this._shapeCache = atlas?._shapeCache
             || (atlas?._shaper ? new MonospaceShapeCache(atlas._shaper) : null);
 
+        // Codepoints we've already handed to the live Slug atlas for curve encoding.
+        // Steady-state, every cell's codepoint is already in here, so per-frame work
+        // is just a Set membership check — no calls into the encoder until a genuinely
+        // new glyph (box-drawing, spinner star, …) shows up.
+        this._liveEnsured = new Set();
+
         this.cols = options.cols ?? 80;
         this.rows = options.rows ?? 24;
         this.name = options.title ?? 'TerminalGrid';
@@ -639,15 +645,27 @@ export default class TerminalGrid extends THREE.Object3D {
     }
 
     /**
-     * Ensure all codepoints in the incoming ScreenBuffer are present in the atlas.
-     * Missing codepoints are added by GlyphAtlas.ensureCodepoints(), which handles
-     * canvas re-pack, DataTexture invalidation, and CanvasTexture deferred re-upload.
+     * Ensure every glyph the incoming ScreenBuffer needs has its Slug curves
+     * encoded in the live atlas before we write slots into the GPU buffer.
+     *
+     * Each new codepoint is routed through the font chain and encoded on first
+     * sighting; the live atlas re-encodes + hot-swaps the curve/glyph-map
+     * textures into every field (including this terminal's) synchronously, so by
+     * the time _writeToInstanceBuffer() writes the slot the glyph is renderable.
+     *
+     * A per-terminal "seen" set keeps this O(new glyphs), not O(cols×rows), per
+     * screen update — after warm-up almost every cell is already seen.
      *
      * @private
-     * @param {{ cells: Array<Array<{codepoint:number}>> }} screen
+     * @param {{ rows:number, cols:number, cells: Array<Array<{codepoint:number}>> }} screen
      */
     _ensureAtlasCodepoints(screen) {
-        const missing = [];
+        const live = this.atlas && this.atlas._live;
+        if (!live || !this._shapeCache) return; // degraded boot: nothing to encode
+
+        const seen = this._liveEnsured;
+        let fresh = null;
+
         for (let row = 0; row < screen.rows; row++) {
             const screenRow = screen.cells[row];
             if (!screenRow) continue;
@@ -655,20 +673,15 @@ export default class TerminalGrid extends THREE.Object3D {
                 const cell = screenRow[col];
                 if (!cell) continue;
                 const code = cell.codepoint ?? 32;
-                if (code > 32 && !this.atlas.uvMap.has(code)) {
-                    missing.push(code);
+                if (code > 32 && !seen.has(code)) {
+                    seen.add(code);
+                    (fresh ?? (fresh = [])).push(code);
                 }
             }
         }
-        if (missing.length > 0) {
-            this.atlas.ensureCodepoints(missing);
-            // Flush the deferred CanvasTexture re-upload flag immediately so the
-            // atlas texture is fresh before the next draw call.
-            if (this.atlas.checkAndClearTextureUpdate && this._renderer.texture) {
-                this.atlas.checkAndClearTextureUpdate();
-                this._renderer.texture.needsUpdate = true;
-            }
-        }
+        // ensureCodepoints dedups globally (its encoded set), so codepoints another
+        // grid already encoded are a cheap no-op here.
+        if (fresh) live.ensureCodepoints(fresh, this._shapeCache);
     }
 
     // ================================================================

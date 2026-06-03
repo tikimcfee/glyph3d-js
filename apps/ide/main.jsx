@@ -7,7 +7,19 @@ import ButtonBar from './ButtonBar.jsx';
 import IdeDock from './IdeDock.jsx';
 import { CanvasPicker, ObjectDragger, ResizeDragger, SelectionIndicator } from '../../app/client/CanvasInteraction.jsx';
 import HudPanel from '../../app/client/HudPanel.jsx';
+import CommandBar from '../../app/client/CommandBar.jsx';
+// Font fallback chain, priority order: clean code monospace first, then fonts
+// that cover what it lacks (Nerd-Font icons/powerline/rounded box/stars, then
+// braille + broad symbols), then "oh well" (a blank cell) for the rare holdout.
 import fontUrl from '@glyph3d/core/fonts/Cousine-Regular.ttf?url';
+import mesloUrl from '@glyph3d/core/fonts/MesloLGS-NF-Mono.ttf?url';
+import dejavuUrl from '@glyph3d/core/fonts/DejaVuSans.ttf?url';
+
+const FONT_CHAIN = [
+  { url: fontUrl,   name: 'Cousine' },
+  { url: mesloUrl,  name: 'MesloLGS NF Mono' },
+  { url: dejavuUrl, name: 'DejaVu Sans' },
+];
 
 const setStatus = (t) => { const el = document.getElementById('status'); if (el) el.textContent = t; };
 const relayPort = Number(new URLSearchParams(location.search).get('relay')) || 8080;
@@ -40,7 +52,7 @@ function DockResizer({ width, setWidth }) {
 }
 
 function App() {
-  const { atlas, stage, error } = useGlyphEngine({ fontUrl });
+  const { atlas, stage, error } = useGlyphEngine({ fontUrl, fonts: FONT_CHAIN });
   const cameraRef = useRef(null);
   // The wired command client. CommandProvider (inside the Canvas) hands it up via
   // onReady so the DOM sidebar — which can't read the in-canvas context — can use
@@ -105,6 +117,8 @@ function App() {
       </div>
       {/* control HUD — companion overlay on top of the canvas + the panel system */}
       <HudPanel client={client} />
+      {/* in-canvas command input — drive bus verbs without leaving for the terminal */}
+      <CommandBar client={client} />
     </div>
   );
 }

@@ -277,6 +277,16 @@ class CodeGrid extends THREE.Object3D {
         return this._windowed;
     }
 
+    /**
+     * @returns {{cols:number,rows:number,firstLine:number}|null} the current window
+     * view-state (size + scroll offset in lines), or null when not windowed. Pure
+     * snapshot for persistence — restore via setWindow(cols, rows) + scrollLines.
+     */
+    getWindow() {
+        if (!this._windowed) return null;
+        return { cols: this._winCols, rows: this._winRows, firstLine: this._winFirstLine };
+    }
+
     /** @private Clamp _winFirstLine to [0, lineCount - visibleRows]. */
     _clampWindow() {
         const total = this._sourceLines ? this._sourceLines.length : 0;
@@ -1018,6 +1028,34 @@ class CodeGrid extends THREE.Object3D {
                 }
             }
             if (missing.size > 0) this.atlas.ensureGraphemes(Array.from(missing));
+        }
+
+        // Live Slug path (shaper present): ensure every codepoint's curves are
+        // encoded before the builder maps text → slots. First sighting of a glyph
+        // (box-drawing, stars, …) allocates its slot in the shared shape cache and
+        // re-encodes the GPU textures; a per-grid "seen" set keeps this O(new).
+        // The worker build path uses a transferred COPY of the cache, so on growth
+        // we resync it to the workers before they shape (resync postMessage is
+        // FIFO-ordered ahead of the build job → no stale-cache misses).
+        const live = this.atlas && this.atlas._live;
+        if (this.config.shaper && live && this.atlas._shapeCache) {
+            if (!this._liveEnsured) this._liveEnsured = new Set();
+            const seen = this._liveEnsured;
+            let fresh = null;
+            for (const it of items) {
+                if (!it.text) continue;
+                const t = it.text;
+                for (let i = 0; i < t.length;) {
+                    const cp = t.codePointAt(i);
+                    i += cp > 0xFFFF ? 2 : 1;
+                    if (cp > 32 && !seen.has(cp)) { seen.add(cp); (fresh ?? (fresh = [])).push(cp); }
+                }
+            }
+            if (fresh) {
+                const before = live.size;
+                live.ensureCodepoints(fresh, this.atlas._shapeCache);
+                if (live.size !== before) getWorkerBridge().resyncShapeCache();
+            }
         }
 
         return { items, metrics, defaultColor, layout: this.config.layout, scrollOffset: this._scrollOffset };

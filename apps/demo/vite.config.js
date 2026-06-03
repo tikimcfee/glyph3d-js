@@ -27,6 +27,7 @@ export default defineConfig({
         main: path.resolve(here, 'index.html'),
         tour: path.resolve(here, 'tour.html'),
         play: path.resolve(here, 'play.html'),
+        shell: path.resolve(here, 'shell.html'),
       },
     },
   },

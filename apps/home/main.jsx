@@ -5,9 +5,21 @@ import { useGlyphEngine, GlyphCanvas, CodeGrid, ViewerCamera } from 'glyph3d-r3f
 import CommandProvider from '../../app/client/CommandProvider.jsx';
 import { CanvasPicker, ObjectDragger, ResizeDragger, SelectionIndicator } from '../../app/client/CanvasInteraction.jsx';
 import HudPanel from '../../app/client/HudPanel.jsx';
+import CommandBar from '../../app/client/CommandBar.jsx';
 // The consumer owns the font choice — the engine doesn't bake a path. Resolved
-// via the core's "./fonts/*" export, not a reach into src/.
+// via the core's "./fonts/*" export, not a reach into src/. The chain is ordered
+// by priority: a clean code monospace first, then fonts that cover what it lacks
+// (Nerd-Font icons/powerline/rounded box/stars, then braille + broad symbols),
+// then "oh well" (a blank cell) for the rare glyph no font has.
 import fontUrl from '@glyph3d/core/fonts/Cousine-Regular.ttf?url';
+import mesloUrl from '@glyph3d/core/fonts/MesloLGS-NF-Mono.ttf?url';
+import dejavuUrl from '@glyph3d/core/fonts/DejaVuSans.ttf?url';
+
+const FONT_CHAIN = [
+  { url: fontUrl,   name: 'Cousine' },
+  { url: mesloUrl,  name: 'MesloLGS NF Mono' },
+  { url: dejavuUrl, name: 'DejaVu Sans' },
+];
 
 // Placeholder landing content — a single grid so the app has something to read
 // while the real home surface (free-floating glyphs, parsed repositories) gets
@@ -29,7 +41,7 @@ const SAMPLE = `// glyph3d — home
 const setStatus = (t) => { const el = document.getElementById('status'); if (el) el.textContent = t; };
 
 function App() {
-  const { atlas, stage, error } = useGlyphEngine({ fontUrl });
+  const { atlas, stage, error } = useGlyphEngine({ fontUrl, fonts: FONT_CHAIN });
   const gridRef = useRef(null);
   const cameraRef = useRef(null);
   // The wired command client ({ ctx, router, registry, bridge }), handed up by
@@ -85,6 +97,8 @@ function App() {
       </GlyphCanvas>
       {/* State HUD — DOM chrome reflecting/controlling the focused window via command verbs. */}
       <HudPanel client={client} />
+      {/* in-canvas command input — drive bus verbs without leaving for the terminal */}
+      <CommandBar client={client} />
     </>
   );
 }

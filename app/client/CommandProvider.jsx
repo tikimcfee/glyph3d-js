@@ -273,6 +273,7 @@ export default function CommandProvider({ atlas, port = 8080, cameraControllerRe
     // load; autosave arms after. IdeDock registers its dock bridge onto it.
     const session = new SessionStore({ ctx: state.ctx, router: state.router, bridge });
     state.session = session;
+    state.ctx.session = session; // so session.* command handlers can reach it
     const offConn = bridge.onConnectionChange((connected) => { if (connected) session.startOnConnect(); });
 
     // Workspace self-heal: when a panel is removed out-of-band (grid.remove, scene.clear_*,

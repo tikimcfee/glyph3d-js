@@ -22,6 +22,10 @@
  */
 
 const SESSION_URI = 'file:///.glyph3d-session.json';
+// Kept at 1: the sizing/frame fields (grid window+frame+scroll, terminal cols/rows)
+// are ADDITIVE and optional — restore guards each, so a pre-sizing v1 snapshot loads
+// cleanly (full-file grids, default-size terminals). Bumping would needlessly trip the
+// schema-mismatch WIPE and lose an existing workspace, the opposite of restore-in-place.
 const SCHEMA_VERSION = 1;
 const SAVE_DEBOUNCE_MS = 600;
 const PERIODIC_SAVE_MS = 5000;
@@ -53,8 +57,8 @@ export default class SessionStore {
     /** @type {{toJSON:Function, fromJSON:Function, components:string[]}|null} */
     this._dock = null;
     this._pendingDock = null;       // dock layout from a loaded snapshot, awaiting the dock bridge
-    /** @type {Array<{id:string,x:number,y:number,z:number}>} */
-    this.pendingTerminals = [];     // last-known terminal positions, consumed by terminal re-adoption
+    /** @type {Array<{id:string,x:number,y:number,z:number,cols?:number,rows?:number}>} */
+    this.pendingTerminals = [];     // last-known terminal placement + size, consumed by terminal re-adoption
 
     this._restored = false;         // load+restore runs ONCE per page load (not per reconnect)
     this._autosaveOn = false;       // gate: no save may clobber the file until restore finishes
@@ -83,13 +87,34 @@ export default class SessionStore {
       // The registry id IS the file path; meta.sourcePath is its file:// URI.
       const path = e.meta?.sourcePath ? e.meta.sourcePath.replace(/^file:\/\//, '') : e.id;
       const p = e.grid.position;
-      files.push({ path, x: round(p.x), y: round(p.y), z: round(p.z) });
+      const entry = { path, x: round(p.x), y: round(p.y), z: round(p.z) };
+      // Window state: a code grid sized to a cols×rows scrollable viewport (grid.window).
+      // This is the user's "sizing" — restore it so a reload comes back to the same view.
+      if (e.grid.isWindowed?.()) {
+        const w = e.grid.getWindow();
+        if (w) entry.window = { cols: w.cols, rows: w.rows, firstLine: w.firstLine || 0 };
+      }
+      // Frame state (Step 3c.2): a clipped/scrolled code grid restores its window.
+      // Omit zeros so unframed grids stay terse and the dedup compare stays stable.
+      if (typeof e.grid.getFrameRows === 'function') {
+        const frameRows = e.grid.getFrameRows() || 0;
+        const scrollOffset = (e.grid.getScrollOffset?.() || 0);
+        if (frameRows) entry.frameRows = frameRows;
+        if (scrollOffset) entry.scrollOffset = scrollOffset;
+      }
+      files.push(entry);
     }
 
     const terminals = [];
     for (const e of ctx.registry.findByType('terminal')) {
       const p = e.grid.position;
-      terminals.push({ id: e.id, x: round(p.x), y: round(p.y), z: round(p.z) });
+      const entry = { id: e.id, x: round(p.x), y: round(p.y), z: round(p.z) };
+      // Resize state: cols/rows live on the TerminalGrid (terminal.resize mutates them).
+      if (Number.isInteger(e.grid.cols) && Number.isInteger(e.grid.rows)) {
+        entry.cols = e.grid.cols;
+        entry.rows = e.grid.rows;
+      }
+      terminals.push(entry);
     }
 
     let dock = this._pendingDock; // if we never got a live dock bridge, preserve what we loaded
@@ -179,6 +204,16 @@ export default class SessionStore {
         }
         try {
           await this.router.execute(`file.open ${f.path} ${f.x ?? 0} ${f.y ?? 0} ${f.z ?? 0}`);
+          // Restore sizing + frame state (each a no-op when absent). Window first —
+          // it re-renders the slice; grid.window takes an absolute firstLine to
+          // reproduce the scroll. Then frame/scroll: file.open lands at scroll 0, so
+          // a relative scroll by the saved offset reproduces the absolute position.
+          const w = f.window;
+          if (w && w.cols > 0 && w.rows > 0) {
+            await this.router.execute(`grid.window ${f.path} ${w.cols} ${w.rows} ${w.firstLine || 0}`);
+          }
+          if (f.frameRows > 0) await this.router.execute(`grid.frame ${f.path} ${f.frameRows}`);
+          if (f.scrollOffset > 0) await this.router.execute(`grid.scroll ${f.path} ${f.scrollOffset}`);
         } catch (e) {
           console.warn(`[session] failed to reopen ${f.path}:`, e?.message || e);
         }
@@ -210,6 +245,13 @@ export default class SessionStore {
     for (const t of this.pendingTerminals) {
       if (t?.id && isFinitePos(t) && this.ctx.registry.has(t.id)) {
         this.router.execute(`terminal.move ${t.id} ${t.x} ${t.y} ${t.z}`);
+        // Restore saved size — terminal.resize drives grid + emulator + PTY in lockstep,
+        // so the re-adopted shell comes back at its last dimensions, not the adapter default.
+        const grid = this.ctx.registry.get(t.id)?.grid;
+        if (Number.isInteger(t.cols) && Number.isInteger(t.rows) && t.cols > 0 && t.rows > 0
+            && grid && (grid.cols !== t.cols || grid.rows !== t.rows)) {
+          this.router.execute(`terminal.resize ${t.id} ${t.cols} ${t.rows}`);
+        }
       } else {
         remaining.push(t);
       }
@@ -253,6 +295,16 @@ export default class SessionStore {
       panels[id] = p;
     }
     return { ...layout, panels };
+  }
+
+  // Public clear — wipe the saved snapshot on demand (the `session.clear` verb).
+  // Drops any pending dock/terminal placement so a stale snapshot can't re-apply,
+  // then writes the empty file. Live objects stay in the scene; autosave will
+  // re-capture them on the next change (clear-with-log, mirror-of-reality policy).
+  async clear() {
+    this._pendingDock = null;
+    this.pendingTerminals = [];
+    await this._clear();
   }
 
   async _clear() {

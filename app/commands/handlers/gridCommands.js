@@ -258,12 +258,13 @@ export default function registerGridCommands(router) {
         };
     }, { description: 'Set grid uniform scale', usage: '<id|index> <factor>' });
 
-    // grid.window <id|index> <cols> <rows> — turn a code grid into a fixed
-    // cols×rows scrollable viewport over its file (opt-in; whole-file is the
-    // baseline), then re-flow neighbors around the new footprint. The await
-    // ensures the rebuilt bounds are fresh before flowLayout measures them.
+    // grid.window <id|index> <cols> <rows> [firstLine] — turn a code grid into a fixed
+    // cols×rows scrollable viewport over its file (opt-in; whole-file is the baseline),
+    // then re-flow neighbors around the new footprint. The optional firstLine scrolls the
+    // window to an absolute line (used by session restore to reproduce the saved view).
+    // The await ensures the rebuilt bounds are fresh before flowLayout measures them.
     router.register('grid.window', async (args, ctx) => {
-        if (args.length < 3) return { text: 'ERR: usage: grid.window <id|index> <cols> <rows>', data: null };
+        if (args.length < 3) return { text: 'ERR: usage: grid.window <id|index> <cols> <rows> [firstLine]', data: null };
 
         const resolved = resolveGridByIdOrIndex(ctx, args[0]);
         if (resolved.error) return { text: resolved.error, data: null };
@@ -278,13 +279,20 @@ export default function registerGridCommands(router) {
         }
 
         await resolved.grid.setWindow(cols, rows);
+        // setWindow leaves firstLine where it was (0 on a fresh grid); an absolute
+        // scroll from there reproduces a saved offset. scrollLines clamps internally.
+        if (args[3] != null) {
+            const firstLine = parseInt(args[3], 10);
+            if (!isNaN(firstLine) && firstLine > 0) await resolved.grid.scrollLines(firstLine);
+        }
         flowLayout(ctx.getGrids());
 
+        const win = resolved.grid.getWindow();
         return {
-            text: `OK: grid #${resolved.idx} windowed to ${cols}x${rows}`,
-            data: { index: resolved.idx, cols, rows },
+            text: `OK: grid #${resolved.idx} windowed to ${cols}x${rows}${win?.firstLine ? ` @line ${win.firstLine}` : ''}`,
+            data: { index: resolved.idx, cols, rows, firstLine: win?.firstLine ?? 0 },
         };
-    }, { description: 'Window a code grid to a scrollable cols×rows viewport and re-flow', usage: '<id|index> <cols> <rows>' });
+    }, { description: 'Window a code grid to a scrollable cols×rows viewport and re-flow', usage: '<id|index> <cols> <rows> [firstLine]' });
 
     // grid.layout <id|index> [preset] [--flag value ...] — refold a code grid in place
     // (Step 3a). Source + camera stay put; only how the file folds into space changes. A
