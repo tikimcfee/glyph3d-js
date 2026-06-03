@@ -77,6 +77,7 @@ function readFocus(client) {
 export default function HudPanel({ client }) {
   const [windows, setWindows] = useState(() => readWindows(client));
   const [f, setF] = useState(() => readFocus(client));
+  const [collapsed, setCollapsed] = useState(false);
 
   useEffect(() => {
     if (!client) return undefined;
@@ -101,6 +102,13 @@ export default function HudPanel({ client }) {
 
   return (
     <div style={S.panel} onPointerDown={(e) => e.stopPropagation()} onWheel={(e) => e.stopPropagation()}>
+      {/* header — the companion HUD's handle: collapse/expand the overlay */}
+      <div style={S.header}>
+        <span style={S.htitle}>workspace</span>
+        <button type="button" style={S.collapse} title={collapsed ? 'expand' : 'collapse'}
+          onClick={() => setCollapsed((c) => !c)}>{collapsed ? '▸' : '▾'}</button>
+      </div>
+      {!collapsed && <>
       {/* 1. window list — click to focus-back (select + go to it) */}
       {windows.length > 0 && (
         <div style={S.windows}>
@@ -144,6 +152,7 @@ export default function HudPanel({ client }) {
           )}
         </div>
       )}
+      </>}
     </div>
   );
 }
@@ -161,7 +170,7 @@ function Mode({ on, onClick, children }) {
 
 const S = {
   panel: {
-    position: 'fixed', left: 12, bottom: 12, zIndex: 20,
+    position: 'fixed', right: 12, bottom: 12, zIndex: 20,   // bottom-right: over the canvas, clear of the IDE's left dock
     font: '12px ui-monospace, Menlo, Consolas, monospace',
     background: 'rgba(10,12,16,0.82)', color: '#aebccb',
     border: '1px solid #283341', borderRadius: 7, padding: '8px 10px',
@@ -188,4 +197,7 @@ const S = {
   cyanOn: { color: '#08101a', background: '#6cf', borderColor: '#6cf' },        // active mode / cam-lock
   editOn: { color: '#1a1206', background: '#f0b45a', borderColor: '#f0b45a' },  // amber = editing
   readout: { color: '#6b7785', fontSize: 11, marginLeft: 'auto', whiteSpace: 'nowrap' },
+  header: { display: 'flex', alignItems: 'center', gap: 6 },
+  htitle: { color: '#6cf', fontWeight: 600, fontSize: 11, letterSpacing: 0.4, textTransform: 'uppercase', flex: 1 },
+  collapse: { font: 'inherit', color: '#9ab', background: 'transparent', border: 'none', cursor: 'pointer', padding: '0 2px', lineHeight: 1 },
 };

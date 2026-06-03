@@ -29,7 +29,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_DIR="${GLYPH_APP_DIR:-$ROOT/apps/home}"   # all-in on apps/home; the framework-heavy apps/ide is being retired
+APP_DIR="${GLYPH_APP_DIR:-$ROOT/apps/ide}"   # the full panel system + the HUD overlay on top; apps/home is the lean alt
 VITE_PORT="${VITE_PORT:-5173}"
 RELAY_PORT="${RELAY_PORT:-8080}"
 LOG_DIR="${GLYPH_LOG_DIR:-/tmp/glyph3d}"

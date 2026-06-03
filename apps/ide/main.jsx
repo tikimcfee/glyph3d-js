@@ -5,7 +5,8 @@ import { useGlyphEngine, GlyphCanvas, ViewerCamera } from 'glyph3d-r3f';
 import CommandProvider from '../../app/client/CommandProvider.jsx';
 import ButtonBar from './ButtonBar.jsx';
 import IdeDock from './IdeDock.jsx';
-import { CanvasPicker, ObjectDragger, ResizeDragger, SelectionIndicator } from './CanvasInteraction.jsx';
+import { CanvasPicker, ObjectDragger, ResizeDragger, SelectionIndicator } from '../../app/client/CanvasInteraction.jsx';
+import HudPanel from '../../app/client/HudPanel.jsx';
 import fontUrl from '@glyph3d/core/fonts/Cousine-Regular.ttf?url';
 
 const setStatus = (t) => { const el = document.getElementById('status'); if (el) el.textContent = t; };
@@ -102,6 +103,8 @@ function App() {
           )}
         </div>
       </div>
+      {/* control HUD — companion overlay on top of the canvas + the panel system */}
+      <HudPanel client={client} />
     </div>
   );
 }

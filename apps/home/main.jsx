@@ -3,7 +3,8 @@ import { createRoot } from 'react-dom/client';
 import * as THREE from 'three/webgpu';
 import { useGlyphEngine, GlyphCanvas, CodeGrid, ViewerCamera } from 'glyph3d-r3f';
 import CommandProvider from '../../app/client/CommandProvider.jsx';
-import HudPanel from './HudPanel.jsx';
+import { CanvasPicker, ObjectDragger, ResizeDragger, SelectionIndicator } from '../../app/client/CanvasInteraction.jsx';
+import HudPanel from '../../app/client/HudPanel.jsx';
 // The consumer owns the font choice — the engine doesn't bake a path. Resolved
 // via the core's "./fonts/*" export, not a reach into src/.
 import fontUrl from '@glyph3d/core/fonts/Cousine-Regular.ttf?url';
@@ -73,6 +74,13 @@ function App() {
           onReady={setClient}
         >
           <CodeGrid ref={onGrid} filename="home.js" text={SAMPLE} worldScale={0.025} />
+          {/* The interaction layer — GPU-pick hover/click-to-focus, Ctrl-drag move, grip-drag
+              resize, selection outline. Shared with apps/ide (app/client/CanvasInteraction);
+              the HUD overlay is a COMPANION on top of this, not a replacement for it. */}
+          <CanvasPicker />
+          <ObjectDragger />
+          <ResizeDragger />
+          <SelectionIndicator />
         </CommandProvider>
       </GlyphCanvas>
       {/* State HUD — DOM chrome reflecting/controlling the focused window via command verbs. */}

@@ -11,6 +11,7 @@ import EntityKeystrokeRouter from '@glyph3d/core/services/interaction/EntityKeys
 import RemoteFileSystemProvider from '@glyph3d/core/services/data/RemoteFileSystemProvider.js';
 import { PickingSystem } from '@glyph3d/core/picking/PickingSystem.js';
 import SessionStore from './SessionStore.js';
+import WorkspaceModel from './WorkspaceModel.js';
 // The spine, ported verbatim — handlers register lazily; nothing here knows the
 // shell. Their only deps are @glyph3d/core, three, and sibling helpers.
 import { registerAllCommands } from '../commands/handlers/index.js';
@@ -106,6 +107,9 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
 
     mode: { state: 'explorer' },
     attentionManager: new AttentionManager(),
+    // Working-set model (fields → sheets → panels) — the editor-tab layer ABOVE the registry.
+    // The HUD reflects it; the field.*/sheet.* verbs mutate it. Client-side, like SessionStore.
+    workspace: new WorkspaceModel(),
     get attention() { return this.attentionManager.state; },
   };
 }

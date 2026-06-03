@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { useThree, useFrame } from '@react-three/fiber';
 import * as THREE from 'three/webgpu';
-import { useAppCommands } from '../../app/client/CommandProvider.jsx';
+import { useAppCommands } from './CommandProvider.jsx';
 
 const round = (n) => Math.round(n * 100) / 100;
 

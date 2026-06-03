@@ -10,51 +10,8 @@
 
 import CodeGrid from '@glyph3d/core/collections/CodeGrid.js';
 import ConnectionRenderer from '@glyph3d/core/annotations/ConnectionRenderer.js';
-import { bytesToHexView, hexCellSpan } from '@glyph3d/core/memory/hexView.js';
-import { byteColor, findPointers } from '@glyph3d/core/memory/memoryViz.js';
-
-const EDGE_COLOR = { r: 0.25, g: 0.85, b: 1.0 }; // cyan — stands out from the byte colors
-
-// Transform a grid-local {x,y,z} by a column-major mat4 (grid.matrixWorld.elements).
-function mat4Apply(e, x, y, z) {
-    return {
-        x: e[0] * x + e[4] * y + e[8] * z + e[12],
-        y: e[1] * x + e[5] * y + e[9] * z + e[13],
-        z: e[2] * x + e[6] * y + e[10] * z + e[14],
-    };
-}
-
-// World-space anchor for a byte's hex pair: hexCellSpan → (line, startCol) →
-// the glyph's grid-local instancePosition → world via matrixWorld.
-function cellAnchor(grid, elements, localIndex, cols) {
-    const { line, startCol } = hexCellSpan(localIndex, cols);
-    const p = grid._layout?.positionAt(line, startCol);
-    if (!p) return null;
-    return mat4Apply(elements, p.x, p.y, p.z);
-}
-
-// Apply the two visualization channels to a freshly-loaded memory grid:
-// color = meaning (per byte), pointers = edges (intra-window references).
-function decorateMemoryGrid(ctx, grid, bytes, windowOffset, cols) {
-    for (let k = 0; k < bytes.length; k++) {
-        const { line, startCol, endCol } = hexCellSpan(k, cols);
-        grid.highlightRange(line, startCol, line, endCol, byteColor(bytes[k]));
-    }
-
-    grid.updateMatrixWorld(true);
-    const elements = grid.matrixWorld.elements;
-    const cr = ctx.connectionRenderer || (ctx.connectionRenderer = new ConnectionRenderer(ctx.scene));
-    let edges = 0;
-    for (const { from, to } of findPointers(bytes, { windowOffset, minValue: windowOffset + 16 })) {
-        const a = cellAnchor(grid, elements, from, cols);
-        const b = cellAnchor(grid, elements, to, cols);
-        if (!a || !b) continue;
-        cr.set(`memptr:${windowOffset}:${from}`, a, b, EDGE_COLOR, { fromGrid: grid, toGrid: grid });
-        edges++;
-    }
-    cr.refreshVisibility?.();
-    return { colored: bytes.length, edges };
-}
+import { bytesToHexView } from '@glyph3d/core/memory/hexView.js';
+import { decorateMemoryGrid } from '@glyph3d/core/memory/memoryGridView.js';
 
 /**
  * @param {import('../CommandRouter.js').default} router
@@ -78,26 +35,34 @@ export default function registerMemoryCommands(router) {
             return { text: `ERR: readRange failed for ${path}: ${err?.message || err}`, data: null };
         }
 
+        const _t0 = performance.now(); // [PERF-PROBE temp — remove after optimization]
         const dump = bytesToHexView(res.bytes, { cols, baseOffset: res.offset });
+        const _t1 = performance.now();
 
         const grid = new CodeGrid(ctx.scene, ctx.atlas, {
             name: `${path} @0x${offset.toString(16)}`,
             showBackground: true,
             showFilename: true,
+            // Hexdump is ~3.7 chars/byte; default 50k cap truncates windows past ~13KB.
+            maxChars: Math.max(50000, dump.length + 1024),
             // Neutral dark base: per-byte highlight color is ADDITIVE, so a green
             // base would tint every byte green (zeros included). A dim slate base
             // lets byteColor read true while keeping address/ascii gutters legible.
             textColor: { r: 0.22, g: 0.26, b: 0.32 },
         });
         grid.loadText(dump);
+        const _t2 = performance.now();
 
         const registryId = ctx.addGrid(grid, { id: `mem:${path}:${offset}` });
         ctx.attentionManager?.set('primary', registryId, { registry: ctx.registry });
 
-        // Defer one frame so the builder's instancePosition buffer is materialized
-        // before we anchor per-byte colors + pointer edges to specific glyphs.
-        await new Promise((r) => requestAnimationFrame(r));
-        const viz = decorateMemoryGrid(ctx, grid, res.bytes, res.offset, cols);
+        // No frame defer: loadText populates the instancePosition CPU array
+        // synchronously, so positionAt resolves immediately — saves ~16ms/call
+        // latency that would otherwise compound per window-fault in the pager.
+        const cr = ctx.connectionRenderer || (ctx.connectionRenderer = new ConnectionRenderer(ctx.scene));
+        const viz = decorateMemoryGrid(grid, cr, res.bytes, { cols, windowOffset: res.offset });
+        const _t3 = performance.now();
+        console.log(`[mem-perf] bytes=${res.length} glyphs=${grid.getGlyphCount?.() ?? '?'} | hexview=${(_t1 - _t0).toFixed(1)} build=${(_t2 - _t1).toFixed(1)} decorate=${(_t3 - _t2).toFixed(1)} | total=${(_t3 - _t0).toFixed(1)}ms`); // [PERF-PROBE temp]
 
         const sizeHex = `0x${(res.totalSize ?? 0).toString(16)}`;
         return {
