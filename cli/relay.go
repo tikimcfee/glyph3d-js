@@ -453,6 +453,9 @@ func (r *Relay) handleRelayMessage(ws *websocket.Conn, msg []byte) {
 	case "terminal.spawn":
 		r.spawnTerminalAdapter(ws, m.Cols, m.Rows)
 
+	case "terminal.recover":
+		r.recoverTerminals(ws)
+
 	default:
 		ws.WriteJSON(map[string]any{"error": fmt.Sprintf("unknown relay command: %s", m.Relay)})
 	}
@@ -496,6 +499,68 @@ func (r *Relay) spawnTerminalAdapter(ws *websocket.Conn, cols, rows int) {
 		err := cmd.Wait()
 		log.Printf("[relay] terminal adapter '%s' (pid %d) exited: %v", id, pid, err)
 	}()
+}
+
+// recoverTerminals re-adopts every live `glyph-*` tmux session that has NO attached client —
+// orphaned sessions whose adapter died (e.g. a relay restart severed it, but detach-not-kill kept
+// the session and its work alive). For each, fork a fresh `attach <id>` adapter so the display
+// rebuilds the grid and the re-adoption handshake repaints it. Sessions that still have a client
+// are skipped (already adopted). Dedup is via tmux's own client list — the relay keeps no adapter
+// map — so this is idempotent, one-command recovery after any relay restart. (tmux-absent / non-unix:
+// `ls` errors → nothing to recover, returned gracefully.)
+func (r *Relay) recoverTerminals(ws *websocket.Conn) {
+	out, err := exec.Command("tmux", "-L", "glyphd", "ls", "-F", "#{session_name}").Output()
+	if err != nil {
+		ws.WriteJSON(map[string]any{"event": "terminal.recovered", "ids": []string{}, "count": 0})
+		return
+	}
+	exePath, err := os.Executable()
+	if err != nil {
+		ws.WriteJSON(map[string]any{"error": "cannot locate glyph3d-cli binary: " + err.Error()})
+		return
+	}
+	recovered := []string{}
+	var maxSeq int64
+	for _, session := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		session = strings.TrimSpace(session)
+		if !strings.HasPrefix(session, "glyph-") {
+			continue
+		}
+		// Already adopted? A session with an attached client has a live adapter — skip it.
+		clients, _ := exec.Command("tmux", "-L", "glyphd", "list-clients", "-t", session, "-F", "#{client_name}").Output()
+		if strings.TrimSpace(string(clients)) != "" {
+			continue
+		}
+		id := strings.TrimPrefix(session, "glyph-")
+		args := []string{"attach", id, "--port", strconv.Itoa(r.port)}
+		if sz, e := exec.Command("tmux", "-L", "glyphd", "display-message", "-t", session, "-p", "#{pane_width} #{pane_height}").Output(); e == nil {
+			if f := strings.Fields(strings.TrimSpace(string(sz))); len(f) == 2 {
+				args = append(args, "--cols", f[0], "--rows", f[1])
+			}
+		}
+		cmd := exec.Command(exePath, args...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if e := cmd.Start(); e != nil {
+			log.Printf("[relay] recover: spawn %s failed: %v", id, e)
+			continue
+		}
+		log.Printf("[relay] recovered terminal '%s' (pid %d)", id, cmd.Process.Pid)
+		go func(c *exec.Cmd) { c.Wait() }(cmd)
+		recovered = append(recovered, id)
+		if n, e := strconv.ParseInt(strings.TrimPrefix(id, "term-"), 10, 64); e == nil && n > maxSeq {
+			maxSeq = n
+		}
+	}
+	// Don't let a post-restart seq reset later mint an id that collides with a recovered one.
+	for {
+		cur := r.termSeq.Load()
+		if cur >= maxSeq || r.termSeq.CompareAndSwap(cur, maxSeq) {
+			break
+		}
+	}
+	log.Printf("[relay] terminal.recover: %d session(s) re-adopted", len(recovered))
+	ws.WriteJSON(map[string]any{"event": "terminal.recovered", "ids": recovered, "count": len(recovered)})
 }
 
 func (r *Relay) notifyDisplay(event, clientID string) {

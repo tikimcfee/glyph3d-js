@@ -64,6 +64,25 @@ export default function registerTerminalCommands(router) {
     }, { description: 'Ask the relay to fork a terminal adapter — a real shell in the canvas', usage: '[cols] [rows]' });
 
     // ------------------------------------------------------------------
+    // terminal.recover
+    //   Re-adopt orphaned tmux sessions — live `glyph-*` sessions whose adapter died (e.g. a relay
+    //   restart severed it; detach-not-kill kept the session + its work alive). The relay lists
+    //   them, skips any with a live client, and forks a fresh `attach <id>` at each orphan; the
+    //   re-adoption handshake repaints them. One-command recovery after any relay restart.
+    // ------------------------------------------------------------------
+    router.register('terminal.recover', (args, ctx) => {
+        const bridge = ctx.wsbridge;
+        if (!bridge || !bridge.connected || typeof bridge.send !== 'function') {
+            return { text: 'ERR: not connected to the relay — terminal.recover needs the Go server', data: null };
+        }
+        bridge.send(JSON.stringify({ relay: 'terminal.recover' }));
+        return {
+            text: 'OK: requested terminal recovery (relay is re-adopting orphaned glyphd sessions)',
+            data: { requested: true },
+        };
+    }, { description: 'Re-adopt orphaned tmux terminal sessions (after a relay restart) — one-command recovery', usage: '' });
+
+    // ------------------------------------------------------------------
     // terminal.create <id> [cols] [rows] [--scale N]
     // ------------------------------------------------------------------
     router.register('terminal.create', (args, ctx) => {
