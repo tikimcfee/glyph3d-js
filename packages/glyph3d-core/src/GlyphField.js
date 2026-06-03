@@ -188,8 +188,13 @@ function _buildOutputNode(varyings, uniforms) {
         // the AA ramp so edges blur. This is the "forgot my glasses" look — unreadable but a
         // steady, recognisable silhouette. It's what Slug ships (it dropped supersampling for
         // dilation). `m` smoothstep-ramps so the hand-off has no seam under a continuous dolly.
-        const MIN_LO = float(0.05);  // onset (~20 px glyph): below this, bit-identical to crisp
-        const MIN_HI = float(0.18);  // full  (~6 px glyph):  above this, max dilation + softening
+        // ↓↓ THE "scaling speed" DIALS — tune live in Firefox ↓↓
+        // MIN_LO = fuzz ONSET (footprint where softening begins). RAISE it to keep text crisp
+        //   farther out / start the fuzz later (i.e. less fuzzy at a given distance).
+        // MIN_HI = fuzz FULL (footprint for max dilation+softening).
+        // The MIN_LO→MIN_HI gap IS the ramp speed: widen it for a gentler, slower fade-to-fuzzy.
+        const MIN_LO = float(0.06);  // ~16 px glyph: below this, bit-identical to crisp
+        const MIN_HI = float(0.20);  // ~5 px glyph:  above this, max dilation + softening
         const fwMax = fw.x.max(fw.y);
         const m = fwMax.sub(MIN_LO).div(MIN_HI.sub(MIN_LO)).clamp(0, 1).toVar();
         m.assign(m.mul(m).mul(float(3).sub(m.mul(2)))); // smoothstep — continuous derivative
@@ -246,9 +251,8 @@ const rot90 = Fn(([v]) => vec2(v.y, v.x.negate()));
  *
  * `dilate` (pixels) fattens the ink: it biases the entering edge's contribution
  * down and the exiting edge's up, so a stroke's two boundaries move symmetrically
- * APART. At 0 the result is the exact Slug coverage (magnified path); ramped up
- * under minification it keeps thin strokes from dropping below a pixel and
- * vanishing — they fatten and merge into a stable fuzzy shape instead.
+ * APART — keeping thin strokes from dropping below a pixel and vanishing. At 0 the
+ * result is the exact Slug coverage (the magnified path, untouched).
  */
 const computeCoverage = Fn(([invDiameter, dilate, p0, p1, p2]) => {
     const result = float(0).toVar();
