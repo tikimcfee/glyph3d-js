@@ -129,7 +129,7 @@ release: all
 		$(OUT_DIR)/$(BINARY)-darwin-arm64 \
 		$(OUT_DIR)/$(BINARY)-windows-amd64.exe \
 		--title "$(BINARY) $(VERSION)" \
-		--notes "Single-binary server for glyph3d-js IDE. Download the binary for your platform, make it executable, and run: glyph3d-cli serve"
+		--notes-file RELEASE_NOTES.md
 	@echo ""
 	@echo "Release created: https://github.com/$$(gh repo view --json nameWithOwner -q .nameWithOwner)/releases/tag/$(VERSION)"
 
