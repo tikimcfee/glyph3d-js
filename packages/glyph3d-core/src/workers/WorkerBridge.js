@@ -139,6 +139,16 @@ export class WorkerBridge {
         );
     }
 
+    /**
+     * Re-transfer the shape cache to all workers. Call after the shared cache
+     * grows (the live Slug atlas allocated new codepoint→slot mappings) so worker
+     * builds don't shape against a stale copy and emit blank slots. Safe + cheap;
+     * no-op without workers. Ordered ahead of any subsequent build job (FIFO).
+     */
+    resyncShapeCache() {
+        this._sendGlyphMapToWorkers();
+    }
+
     /** @returns {boolean} Whether the main-thread shaper is ready */
     get fontReady() { return this._shaper != null && this._shaper.ready; }
 

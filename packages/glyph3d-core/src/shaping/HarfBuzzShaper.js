@@ -35,18 +35,26 @@ export default class HarfBuzzShaper {
 
     /**
      * Initialize WASM and load a font from an ArrayBuffer.
+     *
+     * Pass a shared `hb` module to reuse one WASM instance across several faces
+     * (a font chain) instead of spinning up a separate WASM module per font.
+     *
      * @param {ArrayBuffer} fontBuffer - Raw .ttf/.otf font file bytes
-     * @param {string} [wasmUrl] - Override path to hb.wasm (for workers)
+     * @param {Object}  [options]
+     * @param {string}  [options.wasmUrl] - Override path to hb.wasm (for workers)
+     * @param {Object}  [options.hb]      - An already-initialized hbjs module to reuse
+     * @param {string}  [options.name]    - Human-readable font name (logging only)
      * @returns {Promise<void>}
      */
-    async init(fontBuffer, wasmUrl) {
-        const wasmStart = performance.now();
-        this._hb = await initHarfBuzz(wasmUrl);
-        const wasmMs = (performance.now() - wasmStart).toFixed(1);
-
-        // The WASM binary is already loaded inside initHarfBuzz;
-        // log approximate size from the font buffer as a reference
-        console.log(`[HarfBuzz] WASM loaded (${wasmMs}ms)`);
+    async init(fontBuffer, options = {}) {
+        const { wasmUrl, hb, name = 'font' } = options;
+        if (hb) {
+            this._hb = hb;
+        } else {
+            const wasmStart = performance.now();
+            this._hb = await initHarfBuzz(wasmUrl);
+            console.log(`[HarfBuzz] WASM loaded (${(performance.now() - wasmStart).toFixed(1)}ms)`);
+        }
 
         this._blob = this._hb.createBlob(fontBuffer);
         this._face = this._hb.createFace(this._blob, 0);
@@ -58,10 +66,22 @@ export default class HarfBuzzShaper {
         this._glyphCount = unicodes.length;
 
         console.log(
-            `[HarfBuzz] Font loaded: Cousine-Regular, ${this._glyphCount} glyphs, upem=${this._upem}`
+            `[HarfBuzz] Font loaded: ${name}, ${this._glyphCount} glyphs, upem=${this._upem}`
         );
 
         this._ready = true;
+    }
+
+    /** @returns {Object} the underlying hbjs module (shareable across faces) */
+    get hb() { return this._hb; }
+
+    /**
+     * The set of Unicode codepoints this font's cmap covers. Used by FontChain
+     * to route each codepoint to the first font that can render it.
+     * @returns {number[]} codepoints (unsorted)
+     */
+    collectUnicodes() {
+        return this._face ? this._face.collectUnicodes() : [];
     }
 
     /** @returns {boolean} Whether the shaper is ready for use */

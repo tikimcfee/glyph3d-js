@@ -9,13 +9,17 @@
 // independent: GlyphAtlas is Canvas2D, the shaper is WASM, SlugEncoder is data —
 // so it can run before any WebGPU device exists.
 
-import { GlyphAtlas, HarfBuzzShaper, SlugEncoder, collectUniqueGlyphIds } from '@glyph3d/core';
-import { MonospaceShapeCache, shapeText } from '@glyph3d/core/shaping';
+import { GlyphAtlas, EmojiAtlas, SlugEncoder, collectUniqueGlyphIds } from '@glyph3d/core';
+import { MonospaceShapeCache, shapeText, LiveSlugAtlas, FontChain } from '@glyph3d/core/shaping';
 import { getWorkerBridge } from '@glyph3d/core/workers';
 
 /**
  * @typedef {Object} GlyphEngineOptions
- * @property {string}   fontUrl      - URL to the .ttf/.otf font file (required).
+ * @property {string}   fontUrl      - URL to the PRIMARY .ttf/.otf font (required).
+ * @property {Array<{url:string, name?:string}>} [fonts] - Full font-fallback chain
+ *           in priority order. If omitted, a single-font chain is built from `fontUrl`.
+ *           The first entry should be the primary monospace; later entries cover
+ *           glyphs the primary lacks (symbols, braille, …); routing is per-codepoint.
  * @property {string}   [fontFamily] - CSS font stack for the Canvas2D atlas.
  * @property {number}   [fontSize]   - Atlas glyph cell font size in px.
  * @property {number}   [atlasSize]  - Atlas texture dimension in px (square).
@@ -60,9 +64,19 @@ export async function bootGlyphEngine(options) {
   await atlas.generate();
 
   stage('shaper');
-  const fontBuffer = await (await fetch(opts.fontUrl)).arrayBuffer();
-  const shaper = new HarfBuzzShaper();
-  await shaper.init(fontBuffer);
+  // The font chain IS the shaper for the whole pipeline: it presents the same
+  // method surface as a single HarfBuzzShaper, but glyph IDs are global slots
+  // spanning every font. Falls back to a single-font chain from `fontUrl`.
+  const fontSpecs = (opts.fonts && opts.fonts.length)
+    ? opts.fonts
+    : [{ url: opts.fontUrl, name: 'primary' }];
+  const shaper = new FontChain();
+  await shaper.init(fontSpecs);
+
+  // Color-emoji bitmap fallback: codepoints no outline font covers (🎉 ✅ 🚀 …)
+  // get a cell in this Canvas2D color atlas, rendered by the shader's bitmap branch.
+  const emojiAtlas = new EmojiAtlas();
+  shaper.setEmojiAtlas(emojiAtlas);
 
   const shapeCache = new MonospaceShapeCache(shaper);
   shapeCache.prime(codepointsFromRanges(opts.primeRanges));
@@ -82,6 +96,18 @@ export async function bootGlyphEngine(options) {
   // TerminalGrid maps codepoint→glyphId through this primed cache (its glyph IDs
   // are the same ones the Slug glyphMapTexture is keyed by).
   atlas._shapeCache = shapeCache;
+  // Color-emoji bitmap atlas — GlyphField discovers this for its bitmap branch.
+  atlas._emojiAtlas = emojiAtlas;
+  // Live, growable Slug atlas: glyphs encountered after boot (box-drawing, the
+  // Claude Code spinner stars, rounded box corners, …) get encoded on demand and
+  // hot-swapped into every live field. Seed it with the boot-encoded glyph IDs +
+  // textures so the first frame is already warm. Fields self-register here.
+  atlas._live = new LiveSlugAtlas({
+    atlas,
+    shaper,
+    initialGlyphIds: glyphIds,
+    initialSlugData: slugData,
+  });
 
   stage('ready');
   return atlas;

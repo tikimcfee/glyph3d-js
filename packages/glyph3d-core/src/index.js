@@ -9,6 +9,7 @@
 
 // Core rendering — GlyphField is the WebGPU/TSL renderer (the one renderer).
 export { default as GlyphAtlas } from './GlyphAtlas.js';
+export { default as EmojiAtlas } from './EmojiAtlas.js';
 export { default as GlyphField } from './GlyphField.js';
 export { loadPrebakedAtlas } from './GlyphAtlasLoader.js';
 

@@ -104,15 +104,18 @@ export function buildSlugBuffers(shaper, glyphIds) {
             curveIndex += 1;
         }
 
-        // Pack glyphMap entry: [curveStart, curveCount, _, _]
+        // Pack glyphMap entry: [curveStart, curveCount, mode, emojiCell]
         // curveStart = curve index (not texel offset); shader computes texel as curveStart * 2.
-        // The fragment shader iterates all of a glyph's curves directly, so no
-        // acceleration structure is stored — the per-curve y-reject is enough.
+        // mode 0 = Slug bezier (curveStart/curveCount valid); mode 1 = color-emoji
+        // bitmap (curveCount 0; emojiCell indexes the emoji atlas — the shader samples
+        // it instead of running the coverage loop). The fragment shader branches on
+        // mode BEFORE the curveCount==0 discard, so bitmap glyphs aren't dropped.
+        const isBitmap = typeof shaper.isBitmapSlot === 'function' && shaper.isBitmapSlot(glyphId);
         const gmIdx = glyphId * 4;
-        glyphMapData[gmIdx + 0] = curveStart;
-        glyphMapData[gmIdx + 1] = data.curves.length;
-        glyphMapData[gmIdx + 2] = 0;
-        glyphMapData[gmIdx + 3] = 0;
+        glyphMapData[gmIdx + 0] = isBitmap ? 0 : curveStart;
+        glyphMapData[gmIdx + 1] = isBitmap ? 0 : data.curves.length;
+        glyphMapData[gmIdx + 2] = isBitmap ? 1 : 0;
+        glyphMapData[gmIdx + 3] = isBitmap ? shaper.emojiCellOf(glyphId) : 0;
 
         // Log first 3 glyphs
         if (loggedCount < 3) {
@@ -172,9 +175,11 @@ function _encodeGlyph(shaper, glyphId) {
         return { curves: [] };
     }
 
-    // Step 2: Get advance width and font extents for normalization
+    // Step 2: Get advance width and font extents for normalization. With a font
+    // chain, glyphId is a global slot; fontExtents(slot) returns the metrics of
+    // THAT glyph's font so fallback glyphs normalize against their own em box.
     const advance = shaper.glyphAdvance(glyphId);
-    const fontExt = shaper.fontExtents();
+    const fontExt = shaper.fontExtents(glyphId);
     const ascender = fontExt.ascender;
     const descender = fontExt.descender; // Typically negative
 

@@ -80,14 +80,41 @@ function _buildVertexNode(uniforms) {
     const vGlyphUV    = varying(vec2(0),  'vGlyphUV');
     const vCurveStart = varying(int(0),   'vCurveStart');
     const vCurveCount = varying(int(0),   'vCurveCount');
+    // Bitmap/emoji branch varyings
+    const vMode       = varying(int(0),   'vMode');
+    const vEmojiCell  = varying(int(0),   'vEmojiCell');
 
     const { groupTex, groupTexHeight, highlightTex, glyphMapTex, glyphMapWidth, clipEnabled, clipTop, clipBottom } = uniforms;
 
     const vertexFn = Fn(() => {
-        // Scale base quad by per-instance size
-        const scaled = positionLocal.mul(vec3(iSize, float(1)));
+        // Glyph-map lookup: glyphId → curve range + mode (RGBA32Uint, 1 texel/glyph).
+        // Done first so glyphInfo.z (mode) is available for quad-size selection below.
+        const gid       = int(iGlyphId);
+        const mapW      = int(glyphMapWidth);
+        const glyphInfo = textureLoad(glyphMapTex, ivec2(gid.mod(mapW), gid.div(mapW)));
+        vCurveStart.assign(int(glyphInfo.x));
+        vCurveCount.assign(int(glyphInfo.y));
+        // Channels .z/.w added by FontChain: mode (0=slug, 1=bitmap) and emoji cell index.
+        vMode.assign(int(glyphInfo.z));
+        vEmojiCell.assign(int(glyphInfo.w));
 
-        // Left-align: PlaneGeometry center-anchored → shift right by half width
+        // For bitmap (emoji) glyphs the atlas cell is square, but a monospace glyph quad
+        // is narrow (iSize.x ≈ 0.5·iSize.y). Sampling a square emoji into a narrow quad
+        // squishes it horizontally. Fix: use iSize.y for the quad width when mode == 1,
+        // making the quad square. alignOffset stays at iSize.x.mul(0.5) so the center of
+        // the wider square quad sits at the cell center (PlaneGeometry is center-anchored),
+        // overflowing symmetrically left and right. Layout advance is UNCHANGED — iSize is
+        // not modified — so columns stay aligned. Dense emoji runs will visually overlap;
+        // the proper terminal-correct fix (double-width advance) is deferred.
+        // .select(trueValue, falseValue) on a bool node — ConditionalNode API.
+        const isBitmap = int(glyphInfo.z).equal(int(1));
+        const quadW    = isBitmap.select(iSize.y, iSize.x); // square for emoji, narrow for slug
+
+        // Scale base quad by per-instance size
+        const scaled = positionLocal.mul(vec3(quadW, iSize.y, float(1)));
+
+        // Left-align: PlaneGeometry center-anchored → shift right by half the LAYOUT width
+        // (iSize.x, not quadW) so the cell anchor is consistent regardless of visual quad size.
         const alignOffset = vec3(iSize.x.mul(0.5), float(0), float(0));
 
         // Group DataTexture lookup (4 columns × maxGroups rows, RGBA32F).
@@ -120,13 +147,6 @@ function _buildVertexNode(uniforms) {
         const highlight = textureLoad(highlightTex, ivec2(hx, hy));
         vAddedColor.assign(highlight.rgb);
 
-        // Glyph-map lookup: glyphId → curve range (RGBA16UI, 1 texel/glyph)
-        const gid       = int(iGlyphId);
-        const mapW      = int(glyphMapWidth);
-        const glyphInfo = textureLoad(glyphMapTex, ivec2(gid.mod(mapW), gid.div(mapW)));
-        vCurveStart.assign(int(glyphInfo.x));
-        vCurveCount.assign(int(glyphInfo.y));
-
         // PlaneGeometry's uv attribute is [0,1] across the quad → glyph-space [0,1]².
         vGlyphUV.assign(uv());
 
@@ -142,11 +162,11 @@ function _buildVertexNode(uniforms) {
         return outClip;
     });
 
-    return { vertexFn, vColor, vGroupAlpha, vAddedColor, vGlyphUV, vCurveStart, vCurveCount };
+    return { vertexFn, vColor, vGroupAlpha, vAddedColor, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell };
 }
 
 /**
- * Build TSL fragment (output) node — Slug analytic coverage.
+ * Build TSL fragment (output) node — Slug analytic coverage + bitmap emoji branch.
  *
  * Port of GlyphRenderer's GLSL fragment shader: accumulate fractional winding
  * over every quadratic bezier in the glyph along an X ray and a Y ray
@@ -155,12 +175,15 @@ function _buildVertexNode(uniforms) {
  * and the AA ramp softened so zoomed-out text degrades to a stable fuzzy shape
  * rather than flickering/dropping strokes — see the `m` ramp in the body.
  *
- * @param {Object} varyings - { vColor, vGroupAlpha, vAddedColor, vGlyphUV, vCurveStart, vCurveCount }
- * @param {Object} uniforms - { curveTex }
+ * When vMode == 1 (bitmap emoji) the bezier path is skipped and the glyph is
+ * sampled from the RGBA emoji atlas instead (see bitmap branch below).
+ *
+ * @param {Object} varyings - { vColor, vGroupAlpha, vAddedColor, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell }
+ * @param {Object} uniforms - { curveTex, emojiTex, emojiCols }
  */
 function _buildOutputNode(varyings, uniforms) {
-    const { vColor, vGroupAlpha, vAddedColor, vGlyphUV, vCurveStart, vCurveCount } = varyings;
-    const { curveTex } = uniforms;
+    const { vColor, vGroupAlpha, vAddedColor, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell } = varyings;
+    const { curveTex, emojiTex, emojiCols } = uniforms;
 
     // Minification tuning knobs (see below). DILATE_PX = half-width, in pixels, of the
     // stroke fattening applied at full zoom-out; SOFTEN = how much the AA ramp widens.
@@ -169,73 +192,109 @@ function _buildOutputNode(varyings, uniforms) {
     const SOFTEN    = 0.45;
 
     return Fn(() => {
-        // Invisible group, or empty glyph (space / .notdef = 0 curves): nothing to draw.
+        // Invisible group — applies to both slug and bitmap paths.
         Discard(vGroupAlpha.lessThan(0.01));
-        Discard(vCurveCount.equal(int(0)));
 
-        // Pixel footprint in glyph-UV space, per axis. fwidth is the screen-space
-        // derivative magnitude, so AA is resolution-independent.
-        const fw = fwidth(vGlyphUV).toVar();
+        // Output color accumulator; filled by whichever branch executes.
+        const outColor = vec4(0).toVar();
 
-        // Minification amount, 0→1. fwMax = worst-axis footprint = the fraction of the glyph
-        // cell one pixel spans. Small ⇒ magnified (crisp, single-sample). Large ⇒ many strokes
-        // per pixel, where the two centre scanlines beat sub-pixel against the strokes → the
-        // strokes flicker in and out (the moiré). We can't resolve sub-pixel strokes from a
-        // point sample (box-filter aliasing is invariant to sample count — supersampling just
-        // trades the moiré for a screen-door grid), so instead we make the failure GRACEFUL:
-        // as the glyph shrinks we (a) DILATE the ink so thin strokes fatten-and-merge into a
-        // stable fuzzy shape instead of dropping below a pixel and vanishing, and (b) SOFTEN
-        // the AA ramp so edges blur. This is the "forgot my glasses" look — unreadable but a
-        // steady, recognisable silhouette. It's what Slug ships (it dropped supersampling for
-        // dilation). `m` smoothstep-ramps so the hand-off has no seam under a continuous dolly.
-        // ↓↓ THE "scaling speed" DIALS — tune live in Firefox ↓↓
-        // MIN_LO = fuzz ONSET (footprint where softening begins). RAISE it to keep text crisp
-        //   farther out / start the fuzz later (i.e. less fuzzy at a given distance).
-        // MIN_HI = fuzz FULL (footprint for max dilation+softening).
-        // The MIN_LO→MIN_HI gap IS the ramp speed: widen it for a gentler, slower fade-to-fuzzy.
-        const MIN_LO = float(0.06);  // ~16 px glyph: below this, bit-identical to crisp
-        const MIN_HI = float(0.20);  // ~5 px glyph:  above this, max dilation + softening
-        const fwMax = fw.x.max(fw.y);
-        const m = fwMax.sub(MIN_LO).div(MIN_HI.sub(MIN_LO)).clamp(0, 1).toVar();
-        m.assign(m.mul(m).mul(float(3).sub(m.mul(2)))); // smoothstep — continuous derivative
+        If(vMode.equal(int(1)), () => {
+            // ── Bitmap / emoji branch ────────────────────────────────────────────
+            // Atlas is a square grid of `emojiCols × emojiCols` equal-sized cells.
+            // cell index → (col = cell % cols, row = floor(cell / cols)).
+            // vGlyphUV is [0,1]² across the quad → maps to the sub-cell region.
+            //
+            // Atlas canvas has flipY=false, so the v axis is inverted relative to our
+            // quad UVs (which run bottom=0, top=1 in Three.js). Flip is ACTIVE:
+            // we use (1 - vGlyphUV.y) so row 0 of the cell maps to the top of the texel,
+            // which is where the canvas drew it. If emoji ever appear upside-down again,
+            // swap float(1).sub(vGlyphUV.y) back to vGlyphUV.y as the flip dial.
+            const col = float(vEmojiCell).mod(emojiCols);
+            const row = float(vEmojiCell).div(emojiCols).floor();
+            const atlasUV = vec2(
+                col.add(vGlyphUV.x).div(emojiCols),
+                row.add(float(1).sub(vGlyphUV.y)).div(emojiCols)   // ← flip ACTIVE (flipY=false atlas)
+            );
+            // Filtered (bilinear) RGBA sample — emojiTex is a normal filterable texture.
+            // .sample(uvNode) uses the sampler path (not textureLoad), giving interpolation.
+            const texel = emojiTex.sample(atlasUV);
+            Discard(texel.a.lessThan(0.01));
+            // pow(2.2): emoji atlas pixels are sRGB display values; decode to linear to
+            // match the slug path and the renderer's sRGB output re-encode.
+            // If emoji look too dark/washed after testing, this is the decode dial to revisit.
+            outColor.assign(vec4(texel.rgb.pow(vec3(2.2)), texel.a.mul(vGroupAlpha)));
 
-        // Dilation half-width (passed into the winding accumulation: it pushes each stroke's
-        // two edges symmetrically apart, fattening the ink). Softened footprint widens the
-        // per-edge AA ramp. Both fold to identity at m=0 → the magnified path is untouched.
-        const dilate = m.mul(DILATE_PX);
-        const invD   = vec2(1).div(fw).mul(float(1).sub(m.mul(SOFTEN)));
+        }).Else(() => {
+            // ── Slug bezier-coverage branch (existing path, unchanged) ───────────
+            // Empty glyph (space / .notdef = 0 curves): discard within slug branch only.
+            Discard(vCurveCount.equal(int(0)));
 
-        const coverage = float(0).toVar();
-        Loop(MAX_CURVES, ({ i }) => {
-            If(i.greaterThanEqual(vCurveCount), () => { Break(); });
+            // Pixel footprint in glyph-UV space, per axis. fwidth is the screen-space
+            // derivative magnitude, so AA is resolution-independent.
+            const fw = fwidth(vGlyphUV).toVar();
 
-            // 2 texels per curve: [P0.xy, P1.xy] then [P2.xy, _, _].
-            const ci = vCurveStart.add(i).mul(2);
-            const t0 = textureLoad(curveTex, ivec2(ci.mod(1024), ci.div(1024)));
-            const t1 = textureLoad(curveTex, ivec2(ci.add(1).mod(1024), ci.add(1).div(1024)));
+            // Minification amount, 0→1. fwMax = worst-axis footprint = the fraction of the glyph
+            // cell one pixel spans. Small ⇒ magnified (crisp, single-sample). Large ⇒ many strokes
+            // per pixel, where the two centre scanlines beat sub-pixel against the strokes → the
+            // strokes flicker in and out (the moiré). We can't resolve sub-pixel strokes from a
+            // point sample (box-filter aliasing is invariant to sample count — supersampling just
+            // trades the moiré for a screen-door grid), so instead we make the failure GRACEFUL:
+            // as the glyph shrinks we (a) DILATE the ink so thin strokes fatten-and-merge into a
+            // stable fuzzy shape instead of dropping below a pixel and vanishing, and (b) SOFTEN
+            // the AA ramp so edges blur. This is the "forgot my glasses" look — unreadable but a
+            // steady, recognisable silhouette. It's what Slug ships (it dropped supersampling for
+            // dilation). `m` smoothstep-ramps so the hand-off has no seam under a continuous dolly.
+            // ↓↓ THE "scaling speed" DIALS — tune live in Firefox ↓↓
+            // MIN_LO = fuzz ONSET (footprint where softening begins). RAISE it to keep text crisp
+            //   farther out / start the fuzz later (i.e. less fuzzy at a given distance).
+            // MIN_HI = fuzz FULL (footprint for max dilation+softening).
+            // The MIN_LO→MIN_HI gap IS the ramp speed: widen it for a gentler, slower fade-to-fuzzy.
+            const MIN_LO = float(0.06);  // ~16 px glyph: below this, bit-identical to crisp
+            const MIN_HI = float(0.20);  // ~5 px glyph:  above this, max dilation + softening
+            const fwMax = fw.x.max(fw.y);
+            const m = fwMax.sub(MIN_LO).div(MIN_HI.sub(MIN_LO)).clamp(0, 1).toVar();
+            m.assign(m.mul(m).mul(float(3).sub(m.mul(2)))); // smoothstep — continuous derivative
 
-            // Unpack uint16 → [0,1], translate so the sample point is the origin.
-            const p0 = vec2(float(t0.x), float(t0.y)).div(65535).sub(vGlyphUV);
-            const p1 = vec2(float(t0.z), float(t0.w)).div(65535).sub(vGlyphUV);
-            const p2 = vec2(float(t1.x), float(t1.y)).div(65535).sub(vGlyphUV);
+            // Dilation half-width (passed into the winding accumulation: it pushes each stroke's
+            // two edges symmetrically apart, fattening the ink). Softened footprint widens the
+            // per-edge AA ramp. Both fold to identity at m=0 → the magnified path is untouched.
+            const dilate = m.mul(DILATE_PX);
+            const invD   = vec2(1).div(fw).mul(float(1).sub(m.mul(SOFTEN)));
 
-            coverage.addAssign(computeCoverage(invD.x, dilate, p0, p1, p2));
-            coverage.addAssign(computeCoverage(invD.y, dilate, rot90(p0), rot90(p1), rot90(p2)));
+            const coverage = float(0).toVar();
+            Loop(MAX_CURVES, ({ i }) => {
+                If(i.greaterThanEqual(vCurveCount), () => { Break(); });
+
+                // 2 texels per curve: [P0.xy, P1.xy] then [P2.xy, _, _].
+                const ci = vCurveStart.add(i).mul(2);
+                const t0 = textureLoad(curveTex, ivec2(ci.mod(1024), ci.div(1024)));
+                const t1 = textureLoad(curveTex, ivec2(ci.add(1).mod(1024), ci.add(1).div(1024)));
+
+                // Unpack uint16 → [0,1], translate so the sample point is the origin.
+                const p0 = vec2(float(t0.x), float(t0.y)).div(65535).sub(vGlyphUV);
+                const p1 = vec2(float(t0.z), float(t0.w)).div(65535).sub(vGlyphUV);
+                const p2 = vec2(float(t1.x), float(t1.y)).div(65535).sub(vGlyphUV);
+
+                coverage.addAssign(computeCoverage(invD.x, dilate, p0, p1, p2));
+                coverage.addAssign(computeCoverage(invD.y, dilate, rot90(p0), rot90(p1), rot90(p2)));
+            });
+
+            // Average the two rays; fills accumulate positive under y-up normalization.
+            const cov = coverage.mul(0.5).clamp(0, 1).toVar();
+            Discard(cov.lessThan(0.01));
+
+            const outAlpha   = cov.mul(vGroupAlpha);
+            Discard(outAlpha.lessThan(0.01));
+
+            const finalColor = vColor.mul(cov).add(vAddedColor).clamp(0, 1);
+            // Glyph colors are authored as display (sRGB) values; decode to linear so
+            // the renderer's default sRGB output-encode returns them to the authored
+            // value — consistent with the THREE.Color-managed rest of the scene
+            // (which needs sRGB output and goes dark if output encoding is disabled).
+            outColor.assign(vec4(finalColor.pow(vec3(2.2)), outAlpha));
         });
 
-        // Average the two rays; fills accumulate positive under y-up normalization.
-        const cov = coverage.mul(0.5).clamp(0, 1).toVar();
-        Discard(cov.lessThan(0.01));
-
-        const outAlpha   = cov.mul(vGroupAlpha);
-        Discard(outAlpha.lessThan(0.01));
-
-        const finalColor = vColor.mul(cov).add(vAddedColor).clamp(0, 1);
-        // Glyph colors are authored as display (sRGB) values; decode to linear so
-        // the renderer's default sRGB output-encode returns them to the authored
-        // value — consistent with the THREE.Color-managed rest of the scene
-        // (which needs sRGB output and goes dark if output encoding is disabled).
-        return vec4(finalColor.pow(vec3(2.2)), outAlpha);
+        return outColor;
     })();
 }
 
@@ -322,6 +381,23 @@ function _makePlaceholderUintTexture() {
     return tex;
 }
 
+/**
+ * 1×1 RGBA8 filterable placeholder so the NodeMaterial compiles before the
+ * emoji atlas lands. Uses a fully transparent black texel.
+ * @returns {THREE.DataTexture}
+ */
+function _makePlaceholderRGBATexture() {
+    const tex = new THREE.DataTexture(
+        new Uint8Array(4), 1, 1,
+        THREE.RGBAFormat, THREE.UnsignedByteType
+    );
+    tex.minFilter       = THREE.LinearFilter;
+    tex.magFilter       = THREE.LinearFilter;
+    tex.generateMipmaps = false;
+    tex.needsUpdate     = true;
+    return tex;
+}
+
 // ─── GlyphField ───────────────────────────────────────────────────────────────
 
 export default class GlyphField {
@@ -344,6 +420,12 @@ export default class GlyphField {
 
         this._slugData = options.slugData || (atlas && atlas._slugData) || null;
         this._shaper   = options.shaper   || (atlas && atlas._shaper)   || null;
+
+        // Register with the live Slug atlas so on-demand glyph encoding (box-drawing,
+        // spinner stars, rounded corners, …) hot-swaps fresh curve textures into us.
+        if (atlas && atlas._live && typeof atlas._live.registerField === 'function') {
+            atlas._live.registerField(this);
+        }
 
         const atlasCharSize = atlas.getCharSize();
         const scale = options.worldScale || 0.025;
@@ -392,6 +474,8 @@ export default class GlyphField {
         this._curveTexUniform    = null;
         this._glyphMapTexUniform = null;
         this._glyphMapWUniform   = null;
+        this._emojiTexUniform    = null;
+        this._emojiColsUniform   = null;
 
         // Slug curve + glyph-map textures (resolved in _ensureSlugTextures)
         this._curveTexture    = null;
@@ -519,6 +603,14 @@ export default class GlyphField {
         const clipTopNode     = uniform(float(0));
         const clipBottomNode  = uniform(float(0));
 
+        // Emoji atlas texture + cols uniform. Falls back to a 1×1 filterable RGBA
+        // placeholder so the NodeMaterial compiles before any emoji atlas exists.
+        const emojiAtlas = this.atlas && this.atlas._emojiAtlas;
+        const emojiTexture = emojiAtlas ? emojiAtlas.getTexture(THREE) : _makePlaceholderRGBATexture();
+        const emojiCols    = emojiAtlas ? emojiAtlas.cols : 16;
+        const emojiTexNode  = texture(emojiTexture);
+        const emojiColsNode = uniform(float(emojiCols));
+
         // Store for hot-swap (.value = newTexture)
         this._groupTexUniform     = groupTexNode;
         this._groupTexHUniform    = groupTexHNode;
@@ -529,8 +621,10 @@ export default class GlyphField {
         this._clipEnabledUniform  = clipEnabledNode;
         this._clipTopUniform      = clipTopNode;
         this._clipBottomUniform   = clipBottomNode;
+        this._emojiTexUniform     = emojiTexNode;
+        this._emojiColsUniform    = emojiColsNode;
 
-        const { vertexFn, vColor, vGroupAlpha, vAddedColor, vGlyphUV, vCurveStart, vCurveCount } =
+        const { vertexFn, vColor, vGroupAlpha, vAddedColor, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell } =
             _buildVertexNode({
                 groupTex:       groupTexNode,
                 groupTexHeight: groupTexHNode,
@@ -543,8 +637,8 @@ export default class GlyphField {
             });
 
         const outputNode = _buildOutputNode(
-            { vColor, vGroupAlpha, vAddedColor, vGlyphUV, vCurveStart, vCurveCount },
-            { curveTex: curveTexNode }
+            { vColor, vGroupAlpha, vAddedColor, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell },
+            { curveTex: curveTexNode, emojiTex: emojiTexNode, emojiCols: emojiColsNode }
         );
 
         const material = new MeshBasicNodeMaterial();
@@ -577,6 +671,21 @@ export default class GlyphField {
         if (this._curveTexUniform)    this._curveTexUniform.value    = this._curveTexture;
         if (this._glyphMapTexUniform) this._glyphMapTexUniform.value = this._glyphMapTexture;
         if (this._glyphMapWUniform)   this._glyphMapWUniform.value   = this._glyphMapWidth;
+    }
+
+    /**
+     * Refresh the emoji atlas texture node after the atlas has grown or changed.
+     * Call this whenever EmojiAtlas re-packs (e.g. after new emoji are encoded).
+     * Safe to call before the emoji atlas exists — no-op in that case.
+     */
+    setEmojiTexture() {
+        if (!this._emojiTexUniform || !this.atlas || !this.atlas._emojiAtlas) return;
+        const tex = this.atlas._emojiAtlas.getTexture(THREE);
+        if (tex) {
+            tex.needsUpdate = true;
+            this._emojiTexUniform.value  = tex;
+            this._emojiColsUniform.value = this.atlas._emojiAtlas.cols;
+        }
     }
 
     /**
@@ -998,6 +1107,9 @@ export default class GlyphField {
     }
 
     dispose() {
+        if (this.atlas && this.atlas._live && typeof this.atlas._live.unregisterField === 'function') {
+            this.atlas._live.unregisterField(this);
+        }
         if (this.instanceMesh) {
             this.scene.remove(this.instanceMesh);
             this.instanceMesh.geometry.dispose();
