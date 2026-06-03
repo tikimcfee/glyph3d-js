@@ -11,6 +11,7 @@
 import CodeGrid from '@glyph3d/core/collections/CodeGrid.js';
 import { bytesToHexView } from '@glyph3d/core/memory/hexView.js';
 import { decorateMemoryGrid } from '@glyph3d/core/memory/memoryGridView.js';
+import { buildMemoryLegend } from '@glyph3d/core/memory/memoryLegend.js';
 
 /**
  * @param {import('../CommandRouter.js').default} router
@@ -57,6 +58,32 @@ export default function registerMemoryCommands(router) {
         // latency that would otherwise compound per window-fault in the pager).
         // decorateMemoryGrid draws its own grid-parented edges, so no renderer arg.
         const viz = decorateMemoryGrid(grid, res.bytes, { cols, windowOffset: res.offset });
+
+        // Companion legend grid: color/accent/edge key + window stats + an
+        // inspect slot (rewritten on hover once interactive inspect lands).
+        const legend = buildMemoryLegend({
+            path, offset: res.offset, length: res.length, totalSize: res.totalSize, edges: viz.edges,
+        });
+        const legendGrid = new CodeGrid(ctx.scene, ctx.atlas, {
+            name: 'mem-legend', showBackground: true, showFilename: false,
+            textColor: { r: 0.55, g: 0.6, b: 0.66 },
+        });
+        legendGrid.loadText(legend.text);
+        for (const c of legend.colorings) {
+            legendGrid.highlightRange(c.line, c.startCol, c.line, c.endCol, c.color);
+        }
+        const legendId = ctx.addGrid(legendGrid, { id: `mem-legend:${path}:${offset}` });
+        // Place to the LEFT of the memory grid, top-aligned (bounds are world-space
+        // at position 0,0,0 → shift right edge to mem.min.x and top to mem.max.y).
+        legendGrid.position.set(0, 0, 0);
+        legendGrid.updateMatrixWorld(true);
+        const lb = legendGrid.getBounds();
+        const mb = grid.getBounds();
+        const gap = Math.max(2, (mb.max.x - mb.min.x) * 0.05);
+        legendGrid.position.set(mb.min.x - gap - lb.max.x, mb.max.y - lb.max.y, grid.position.z);
+        legendGrid.updateMatrixWorld(true);
+        grid._legendGrid = legendGrid;          // for interactive inspect (next batch)
+        grid._memInspectMeta = { cols, baseOffset: res.offset, bytes: res.bytes, inspectLine: legend.inspectLine };
 
         const sizeHex = `0x${(res.totalSize ?? 0).toString(16)}`;
         return {
