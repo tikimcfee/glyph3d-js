@@ -39,11 +39,13 @@ const REPO = [
   { name: 'index.js',    text: `export * from\n  './core'` },
 ];
 
-// 4×3 wall, centered on origin. (Phase 4 will morph these into spiral/treemap/etc.)
-const COLS = 4, COLX = 42, ROWY = 34;
+// 4×3 wall, centered on origin — tiled-window spacing. (Phase 4 morphs these
+// into spiral/treemap/etc.)
+const COLS = 4, COLX = 60, ROWY = 42;
 const TARGET = REPO.map((_, i) => {
   const c = i % COLS, r = Math.floor(i / COLS);
-  return [(c - (COLS - 1) / 2) * COLX, (1 - r) * ROWY, 0];
+  // -22 x / +6 y: files anchor top-left, so nudge to visually center the wall.
+  return [(c - (COLS - 1) / 2) * COLX - 22, (1 - r) * ROWY + 6, 0];
 });
 // Scattered far start for the fly-in (deterministic per index).
 const START = TARGET.map((t, i) => [t[0] * 3.0, t[1] * 3.0 + 40, -520 - (i % 5) * 60]);
@@ -56,8 +58,8 @@ const lerp3 = (a, b, t) => [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2],
 // Assembly envelope across the loop: per-grid staggered ramp-in (LOAD), hold,
 // then ramp-out (UNLOAD). 0 = scattered/away, 1 = seated in the wall.
 function seat(t, i) {
-  const inA = 0.02 + i * 0.012, inB = inA + 0.16;     // staggered load
-  const outA = 0.84 + i * 0.008, outB = outA + 0.12;  // staggered unload
+  const inA = i * 0.005, inB = inA + 0.08;            // faster staggered load
+  const outA = 0.86 + i * 0.006, outB = outA + 0.10;  // staggered unload
   if (t < inA) return 0;
   if (t < inB) return smooth((t - inA) / (inB - inA));
   if (t < outA) return 1;
@@ -73,7 +75,7 @@ function phaseLabel(t) {
   return 'unload · dissolve out';
 }
 
-const DURATION = 16;
+const DURATION = 13;
 
 function Director({ gridRefs }) {
   const { camera } = useThree();
@@ -89,10 +91,10 @@ function Director({ gridRefs }) {
       g.position.set(p[0], p[1], p[2]);
       g.rotation.set(0, 0, 0);
     });
-    // Slow push-in over the loaded stretch; framed on the wall.
-    const z = lerp(250, 205, smooth(clamp((t - 0.05) / 0.2, 0, 1)));
-    camera.position.set(Math.sin(t * TAU) * 8, 4, z);
-    camera.lookAt(0, 2, 0);
+    // Quick push-in to a tiled-window framing that nearly fills the view.
+    const z = lerp(150, 115, smooth(clamp(t / 0.10, 0, 1)));
+    camera.position.set(Math.sin(t * TAU) * 4, -3, z);
+    camera.lookAt(0, -4, 0);
     const el = document.getElementById('phase');
     if (el) el.textContent = phaseLabel(t);
   };
@@ -121,7 +123,7 @@ function App() {
   return (
     <GlyphCanvas
       atlas={atlas}
-      camera={{ position: [0, 4, 250], fov: 70, near: 0.1, far: 8000 }}
+      camera={{ position: [0, 1, 150], fov: 70, near: 0.1, far: 8000 }}
       onCreated={({ scene }) => { scene.background = new THREE.Color(0x0e0c08); }}
     >
       <Director gridRefs={gridRefs} />
@@ -131,7 +133,7 @@ function App() {
           ref={(el) => { gridRefs.current[i] = el; }}
           filename={f.name}
           text={f.text}
-          worldScale={0.03}
+          worldScale={0.05}
           textColor={SAGE}
         />
       ))}
