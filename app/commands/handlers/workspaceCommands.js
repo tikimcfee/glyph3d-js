@@ -9,6 +9,7 @@
  * open⊋rendered layer with nothing drawn). sheet.render/derender/focus + field.* land next.
  */
 import { box, table } from '../formatResponse.js';
+import { renderSheetGrid, reflowGrids } from './fileCommands.js';
 
 const dot = (s) => (s.focused ? '●' : s.rendered ? '◐' : '○');  // focused · rendered · open-only
 
@@ -18,7 +19,8 @@ export default function registerWorkspaceCommands(router) {
     const ws = ctx.workspace;
     if (!ws) return { text: 'ERR: workspace not ready', data: null };
     const path = args.join(' ');
-    const sheet = ws.openSheet({ kind: 'file', source: { path, uri: 'file://' + path } });
+    const uri = 'file:///' + String(path).replace(/^\/+/, '');   // canonical form — matches file.open / the registry meta
+    const sheet = ws.openSheet({ kind: 'file', source: { path, uri } });
     if (!sheet) return { text: 'ERR: could not open sheet', data: null };
     return {
       text: `OK: opened sheet "${sheet.title}" (open, not rendered — sheet.render ${sheet.id} to draw it)`,
@@ -39,6 +41,43 @@ export default function registerWorkspaceCommands(router) {
       data: { sheets, count: sheets.length },
     };
   }, { description: "List the active field's sheets with open/rendered/focused state" });
+
+  router.register('sheet.render', async (args, ctx) => {
+    if (args.length < 1) return { text: 'ERR: usage: sheet.render <sheetId>', data: null };
+    const ws = ctx.workspace;
+    if (!ws) return { text: 'ERR: workspace not ready', data: null };
+    const sheetId = args.join(' ');   // sheetId is "sheet:"+path; a path can contain spaces
+    const sheet = ws.getSheet(sheetId);
+    if (!sheet) return { text: `ERR: no sheet "${sheetId}"`, data: null };
+    if (sheet.kind !== 'file') return { text: `ERR: sheet kind '${sheet.kind}' not renderable yet`, data: null };
+    let id;
+    try {
+      id = await renderSheetGrid(ctx, sheet.source.path);  // load + create + register (or existing)
+    } catch (err) {
+      return { text: `ERR: render failed for ${sheet.title}: ${err?.message || err}`, data: null };
+    }
+    if (!id) return { text: `ERR: could not render "${sheet.title}"`, data: null };
+    ws.setPanelId(sheet.id, id);
+    reflowGrids(ctx);
+    return { text: `OK: rendered "${sheet.title}" → panel ${id}`, data: { id: sheet.id, panelId: id, rendered: true } };
+  }, { description: 'Render an open sheet (draw its panel)', usage: '<sheetId>' });
+
+  router.register('sheet.derender', (args, ctx) => {
+    if (args.length < 1) return { text: 'ERR: usage: sheet.derender <sheetId>', data: null };
+    const ws = ctx.workspace;
+    if (!ws) return { text: 'ERR: workspace not ready', data: null };
+    const sheetId = args.join(' ');
+    const sheet = ws.getSheet(sheetId);
+    if (!sheet) return { text: `ERR: no sheet "${sheetId}"`, data: null };
+    if (!sheet.panelId || !ctx.registry.has(sheet.panelId)) {
+      ws.setPanelId(sheet.id, null);  // clear any stale panelId; sheet stays open
+      return { text: `OK: "${sheet.title}" not rendered (still open)`, data: { id: sheet.id, rendered: false } };
+    }
+    ctx.removeGrid(sheet.panelId);    // unregister + dispose + scene.remove
+    ws.setPanelId(sheet.id, null);
+    reflowGrids(ctx);
+    return { text: `OK: derendered "${sheet.title}" (still open)`, data: { id: sheet.id, rendered: false } };
+  }, { description: 'Remove a sheet\'s panel but keep the sheet open', usage: '<sheetId>' });
 
   router.register('field.list', (args, ctx) => {
     const ws = ctx.workspace;

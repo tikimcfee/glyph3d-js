@@ -55,6 +55,31 @@ function addFileGrid(ctx, path, content) {
 }
 
 /**
+ * Render core shared by file.open and the workspace's sheet.render: ensure a panel exists for
+ * `path`. Returns the registry id (= path) — the existing one if already rendered, else a freshly
+ * loaded + registered grid. Does NOT position/flow (the caller decides). Throws if read fails.
+ */
+export async function renderSheetGrid(ctx, path) {
+    const uri = `file:///${String(path).replace(/^\/+/, '')}`;
+    const existing = ctx.registry.findByMeta?.('sourcePath', uri) || [];
+    if (existing.length) return existing[0].id;          // already rendered
+    if (!ctx.fileProvider) throw new Error('no fileProvider — relay bridge not connected');
+    const content = await ctx.fileProvider.getFile(path);
+    const id = addFileGrid(ctx, path, content);          // create + register (id = path)
+    if (id) return id;
+    // Lost a same-path race (a concurrent open registered it during our getFile await) — return
+    // that grid's id, never null, so callers don't clear a just-set panelId or deref undefined.
+    const raced = ctx.registry.findByMeta?.('sourcePath', uri) || [];
+    return raced[0]?.id ?? null;
+}
+
+/** Re-flow the shelf (drop tree markers, lay the loaded grids out flat). Shared shelf reflow. */
+export function reflowGrids(ctx) {
+    clearTreeMarkers(ctx);
+    flowLayout(ctx.getGrids());
+}
+
+/**
  * Fast non-crypto content hash. FNV-1a 32-bit over the full string. Collision
  * rate is acceptable for a dirty-check (false-negatives mean "looks clean
  * when it isn't" which is only possible if two texts genuinely collide — a
@@ -122,9 +147,14 @@ export default function registerFileCommands(router) {
 
         const uri = `file:///${String(path).replace(/^\/+/, '')}`;
 
-        // Don't duplicate an already-open file — report the existing grid.
+        // file.open IS the workspace's sheet.open + sheet.render — one path (Step 3). Track the
+        // sheet regardless of render state so the HUD reflects every open.
+        const sheet = ctx.workspace?.openSheet({ kind: 'file', source: { path, uri } });
+
+        // Don't duplicate an already-open file — report the existing grid (+ record its panel).
         const existing = ctx.registry.findByMeta?.('sourcePath', uri) || [];
         if (existing.length) {
+            if (sheet) ctx.workspace.setPanelId(sheet.id, existing[0].id);
             return {
                 text: `OK: ${path} already open as "${existing[0].id}"`,
                 data: { id: existing[0].id, path, alreadyOpen: true },
@@ -135,15 +165,15 @@ export default function registerFileCommands(router) {
             return { text: 'ERR: no fileProvider — relay bridge not connected', data: null };
         }
 
-        let content;
+        let id;
         try {
-            content = await ctx.fileProvider.getFile(path);
+            id = await renderSheetGrid(ctx, path);   // load + create + register (id = path)
         } catch (err) {
             return { text: `ERR: read failed for ${path}: ${err?.message || err}`, data: null };
         }
-
-        const id = addFileGrid(ctx, path, content);
-        const grid = ctx.registry.get(id)?.grid;
+        const grid = id ? ctx.registry.get(id)?.grid : null;
+        if (!grid) return { text: `ERR: could not open ${path}`, data: null };   // guard: no deref / no setPanelId(null)
+        if (sheet) ctx.workspace.setPanelId(sheet.id, id);
 
         // Explicit coords place precisely (tour scripts position by hand);
         // otherwise the grid joins the shelf via flowLayout after registration.
@@ -154,10 +184,8 @@ export default function registerFileCommands(router) {
             grid.updateMatrixWorld(true);
             grid._markBoundsDirty?.();
         } else {
-            // Reflow the shelf so the new file lands cleanly beside the others —
-            // never stacked. Opening reverts to the flat shelf, so drop volumes.
-            clearTreeMarkers(ctx);
-            flowLayout(ctx.getGrids());
+            // Reflow the shelf so the new file lands cleanly beside the others.
+            reflowGrids(ctx);
         }
 
         return {

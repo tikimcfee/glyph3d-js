@@ -275,11 +275,18 @@ export default function CommandProvider({ atlas, port = 8080, cameraControllerRe
     state.session = session;
     const offConn = bridge.onConnectionChange((connected) => { if (connected) session.startOnConnect(); });
 
+    // Workspace self-heal: when a panel is removed out-of-band (grid.remove, scene.clear_*,
+    // eviction) rather than via sheet.derender, scrub the dangling sheet.panelId so the
+    // working-set model never diverges from the rendered registry (clear-with-log policy).
+    const reconcileWorkspace = () => state.ctx.workspace?.reconcile(state.registry);
+    state.registry.addChangeListener(reconcileWorkspace);
+
     // Hand the wired client to the app (for DOM chrome outside the Canvas).
     onReady?.(state);
 
     return () => {
       offConn?.();
+      state.registry.removeChangeListener(reconcileWorkspace);
       session.dispose();
       keystrokes.dispose();
       bridge.disconnect();
