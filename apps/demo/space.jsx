@@ -28,20 +28,16 @@ const PALETTE = [
 ];
 
 // Bake in an ACTUAL project directory at build time and let the substrate
-// render it — real files, real sizes, the product's own use case ("point it at
-// a repo"), not hand-written samples. import.meta.glob pulls the core library
-// source as raw text; each file is truncated to its first lines so the field
-// stays a readable mass, and colored by its directory so modules cluster.
+// render it — real files, full content, the product's own use case ("point it
+// at a repo"), not hand-written samples. import.meta.glob pulls the whole core
+// library source as raw text; nothing is truncated — every file, in full.
 const RAW = import.meta.glob('../../packages/glyph3d-core/src/**/*.js', {
   query: '?raw', import: 'default', eager: true,
 });
-const dirColor = {}; let dirN = 0;
-const colorFor = (dir) => (dir in dirColor ? dirColor[dir] : (dirColor[dir] = PALETTE[dirN++ % PALETTE.length]));
-// EVERY file, FULL content — the whole library rendered, no truncation.
 const FILES = Object.entries(RAW)
   .map(([path, src]) => { const parts = path.split('/'); return { name: parts.pop(), dir: parts.pop(), src: String(src) }; })
   .filter((f) => f.src.trim().length > 0)
-  .sort((a, b) => (a.dir + '/' + a.name).localeCompare(b.dir + '/' + b.name));   // cluster by directory
+  .sort((a, b) => (a.dir + '/' + a.name).localeCompare(b.dir + '/' + b.name));   // group by directory
 
 const WS = 0.018;
 const LH = WS * 140;                 // ~world units per text line (skyline heights)

@@ -1,14 +1,11 @@
-// glyph3d cinematic demo — a scripted, deterministic showcase.
+// glyph3d HERO — the masthead. A dominant "glyph3d" title + "millions, in space"
+// subtitle, with a quiet revolving ring of code files around them as a halo.
+// Each line of file text ripples on a sine wave written straight into the glyph
+// instance-position buffer — the thesis ("it's just rendering text + moving
+// buffer locations") made literal.
 //
-// The timeline is a pure function of t∈[0,1): seek(t) sets every animated thing
-// so the same t always renders the same frame. It autoplays live (watch on
-// refresh) AND exposes window.demo.seek for frame-perfect capture
-// (tools/capture.mjs). Everything periodic in t ⇒ t=1 ≡ t=0 ⇒ seamless loop.
-//
-// ROUND 2 — the living headline: "it's all just rendering text and manipulating
-// buffer locations." A constellation of code files in a slow, comfortable
-// sway-orbit, each line of text rippling on a sine wave driven straight into the
-// glyph instance-position buffer. (Round 3: lift a function out + connection lines.)
+// Autoplays live; also exposes window.demo.seek(t) for frame-perfect capture
+// (a pure function of t, so any t renders the same frame).
 
 import React, { useRef } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -25,7 +22,7 @@ const TAU = Math.PI * 2;
 // Independent animation rates (rad/s on a continuous clock) so orbit and the
 // waves tune separately. Live autoplay runs a continuous clock — no loop
 // boundary, so no seam; seek(t) maps t∈[0,1] across CAPTURE_SECS for capture.
-const ORBIT_W = 0.0675;      // slow dome revolution — halved (calmer, more "title")
+const ORBIT_W = 0.0675;      // slow ring revolution — calm, more "title" than motion
 const WAVE_XY_W = 0.45;      // XY ripple — halved in step
 const WAVE_Z_W = 0.225;      // z voxel float — halved in step
 const CAM_Z = 140;           // frames the dominant title + its ring of files in the 16:7 band
@@ -36,7 +33,7 @@ const SUB_X = -14;           // x offset that centers the subtitle "millions, in
 const SUB_GAP = 11;          // the subtitle rides this far below the (now larger) title
 
 const FILES = [
-  { name: 'atlas.js', target: [0, 13, 4], text:
+  { name: 'atlas.js', text:
 `export class GlyphAtlas {
   pack(grapheme) {
     const uv = this.shelf(grapheme)
@@ -44,21 +41,21 @@ const FILES = [
     return uv
   }
 }` },
-  { name: 'field.js', target: [-60, 0, -8], text:
+  { name: 'field.js', text:
 `field.render(text, { x, y, z }, {
   color, groupId, worldScale,
 })
 // thousands of glyphs,
 // one instanced draw call.` },
-  { name: 'camera.js', target: [58, 3, -14], text:
+  { name: 'camera.js', text:
 `camera.focusOnGrids()
 camera.position.lerp(target, 0.05)
 // pan / orbit / zoom` },
-  { name: 'layout.js', target: [-34, -32, -4], text:
+  { name: 'layout.js', text:
 `new GridLayoutManager()
   .addAuto(grid)
 // spatial 3D placement` },
-  { name: 'shape.js', target: [38, -30, -16], text:
+  { name: 'shape.js', text:
 `const buf = buildSlugBuffers(
   shapeText(src, font)
 ) // HarfBuzz -> GPU` },
@@ -101,12 +98,12 @@ function buildSlugBuffers(shaped) {
 ];
 
 // Files orbit as a SUBTLE RING around the dominant title — a quiet "what's
-// this?" halo, not a competing band. Even azimuths (DOME[i].az) place them
+// this?" halo, not a competing band. Even azimuths (SLOTS[i].az) place them
 // around an ellipse sized to the wide banner; the ring slowly revolves.
 const RING_RX = 72;          // horizontal ring radius (wide banner)
 const RING_RY = 28;          // vertical ring radius (short banner)
 const RING_ZD = 9;           // gentle depth float on the ring
-const DOME = [
+const SLOTS = [
   { az: 0.00, el: 0.18 },
   { az: 0.79, el: 0.55 },
   { az: 1.57, el: 0.30 },
@@ -154,8 +151,8 @@ function Director({ gridRefs, nameRef, subRef }) {
     FILES.forEach((f, i) => {
       const g = gridRefs.current[i];
       if (!g) return;
-      const ang = DOME[i].az + theta;                       // even angle around the ring
-      const jit = 0.86 + Math.sin(DOME[i].el * 4) * 0.14;   // subtle per-file radius variance
+      const ang = SLOTS[i].az + theta;                       // even angle around the ring
+      const jit = 0.86 + Math.sin(SLOTS[i].el * 4) * 0.14;   // subtle per-file radius variance
       g.position.set(
         Math.cos(ang) * RING_RX * jit,                      // around the title, ellipse
         RING_CY + Math.sin(ang) * RING_RY * jit,

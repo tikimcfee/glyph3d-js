@@ -81,7 +81,6 @@ const _f = { x: 0, y: 0, z: 0 }, _t = { x: 0, y: 0, z: 0 }, _c = { r: 0, g: 0, b
 const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
 const smooth = (x) => x * x * (3 - 2 * x);
 const lerp = (a, b, t) => a + (b - a) * t;
-const lerp3 = (a, b, t) => [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)];
 
 // (file position is computed component-wise inline in apply — see below — to
 // keep the hot path allocation-free.)
