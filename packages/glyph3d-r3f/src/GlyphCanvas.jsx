@@ -8,13 +8,18 @@ import { GlyphProvider } from './context.jsx';
  * REAL pixel size. The async WebGPU `gl` factory (`await renderer.init()`)
  * builds the renderer's CanvasTarget (which owns the screen depth texture) at
  * the canvas default 300×150; the color attachment then follows the laid-out
- * size, but the depth texture's GPU resource is left at 300×150 — yielding a
- * per-frame (and fatal: "invalid command buffer") "depth attachment size does
- * not match" error. setSize alone doesn't reliably rebuild it — the
- * CanvasTarget 'resize' listener can miss the event fired during the async init
- * window — so we also resize the depth texture's image and dispose it, forcing
- * its GPU resource to be recreated at the right size. Size is read from the DOM,
- * not r3f's size store, so it's correct even for a lazily-mounted iframe canvas.
+ * size, but the depth texture's GPU resource stays at 300×150 — a per-frame
+ * (and fatal: "invalid command buffer") "depth attachment size does not match"
+ * error.
+ *
+ * Why setSize alone isn't enough: three rebuilds the screen depth via
+ * `backend.updateSize()`, but only through the CanvasTarget 'resize' listener,
+ * which guards on `renderer._initialized`. The resize fired while the async init
+ * is still in flight is therefore dropped and never re-fires — so the depth is
+ * never rebuilt. We call `backend.updateSize()` directly (it drops the cached
+ * canvas target so the next render recreates the depth at the current size),
+ * after setSize. Size is read from the DOM, not r3f's size store, so it's
+ * correct even for a lazily-mounted iframe canvas.
  */
 function fitRenderer(gl) {
   const canvas = gl && gl.domElement;
@@ -23,13 +28,9 @@ function fitRenderer(gl) {
   const h = canvas.clientHeight || (typeof window !== 'undefined' ? window.innerHeight : 0);
   if (w <= 0 || h <= 0) return;
   gl.setSize(w, h, false);
-  const depth = gl._canvasTarget && gl._canvasTarget.depthTexture;
-  if (depth && depth.image) {
-    const dpr = gl.getPixelRatio ? gl.getPixelRatio() : 1;
-    depth.image.width = Math.floor(w * dpr);
-    depth.image.height = Math.floor(h * dpr);
-    depth.dispose();   // force the GPU depth texture to be recreated at the new size
-  }
+  // Directly rebuild the screen render target (incl. depth) — the 'resize'-driven
+  // path is gated on _initialized and misses the async-init window (see above).
+  if (gl.backend && typeof gl.backend.updateSize === 'function') gl.backend.updateSize();
 }
 
 function SyncSize() {
