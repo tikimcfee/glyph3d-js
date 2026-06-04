@@ -352,7 +352,12 @@ function _buildOccluderOutputNode(varyings) {
         const dens = float(vCurveCount).mul(0.035).clamp(0, 0.72);
         const rgb  = vColor.mul(dens).mul(vGroupAlpha).clamp(0, 1);
         // Opaque: alpha = 1 writes depth and occludes; no Discard keeps early-Z on.
-        return vec4(rgb.pow(vec3(2.2)), 1.0);
+        // NO pow(2.2): occluder fields run with the renderer's colorspace conversion
+        // OFF (outputColorSpace = LinearSRGB), so there's no extra colorspace render
+        // pass — that opaque-into-framebuffer pass is what carried a mis-sized depth
+        // on some HiDPI GPUs. pow + the sRGB output-encode were an identity round
+        // trip, so dropping both leaves the displayed color unchanged.
+        return vec4(rgb, 1.0);
     })();
 }
 
