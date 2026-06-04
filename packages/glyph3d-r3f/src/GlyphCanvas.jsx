@@ -31,7 +31,20 @@ function SyncSize() {
   const width = useThree((s) => s.size.width);
   const height = useThree((s) => s.size.height);
   const dpr = useThree((s) => s.viewport.dpr);
-  useEffect(() => { applyFit(gl, width, height, dpr); }, [gl, width, height, dpr]);
+  useEffect(() => {
+    if (!gl || width <= 0 || height <= 0) return;
+    // Re-fit across the first several frames, not just once. The async WebGPU
+    // init means the first fit can land before the renderer/layout has settled —
+    // leaving the reel blank until a manual window resize re-fires it. Re-running
+    // for a dozen frames makes it recover on its own (no manual resize needed).
+    let n = 0, raf;
+    const tick = () => {
+      applyFit(gl, width, height, dpr);
+      if (++n < 12) raf = requestAnimationFrame(tick);
+    };
+    tick();
+    return () => { if (raf) cancelAnimationFrame(raf); };
+  }, [gl, width, height, dpr]);
   return null;
 }
 
@@ -59,6 +72,7 @@ export default function GlyphCanvas({
   onRenderer,
   onCreated,
   dpr = 1,
+  antialias = true,
   children,
   ...canvasProps
 }) {
@@ -73,7 +87,7 @@ export default function GlyphCanvas({
       dpr={dpr}
       onCreated={handleCreated}
       gl={async (glProps) => {
-        const renderer = new THREE.WebGPURenderer({ ...glProps, antialias: true });
+        const renderer = new THREE.WebGPURenderer({ ...glProps, antialias });
         renderer.toneMapping = toneMapping;
         await renderer.init();
         onRenderer?.(renderer, glProps);
