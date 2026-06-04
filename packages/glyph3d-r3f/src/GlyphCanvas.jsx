@@ -1,7 +1,28 @@
-import React from 'react';
-import { Canvas } from '@react-three/fiber';
+import React, { useEffect } from 'react';
+import { Canvas, useThree } from '@react-three/fiber';
 import * as THREE from 'three/webgpu';
 import { GlyphProvider } from './context.jsx';
+
+/**
+ * Re-apply the renderer size once the (async) WebGPU renderer is live and on
+ * every resize. r3f's async `gl` factory creates the renderer with `await
+ * renderer.init()`; in that window r3f sizes the canvas backing store (so the
+ * color attachment follows the laid-out size) but the renderer's *internal*
+ * size — which drives the screen depth texture — can be left at the canvas
+ * default (300×150). The result is a per-frame WebGPU validation error:
+ * "depth stencil attachment size … does not match … the other attachments".
+ * Forcing setSize here (after `gl` exists) makes three rebuild the depth at the
+ * real size, so the two attachments match.
+ */
+function SyncSize() {
+  const gl = useThree((s) => s.gl);
+  const width = useThree((s) => s.size.width);
+  const height = useThree((s) => s.size.height);
+  useEffect(() => {
+    if (gl && width > 0 && height > 0) gl.setSize(width, height, false);
+  }, [gl, width, height]);
+  return null;
+}
 
 /**
  * GlyphCanvas — an r3f <Canvas> wired for the WebGPU GlyphField stack.
@@ -46,6 +67,7 @@ export default function GlyphCanvas({
       {...canvasProps}
     >
       <GlyphProvider atlas={atlas}>
+        <SyncSize />
         {children}
       </GlyphProvider>
     </Canvas>
