@@ -22,7 +22,10 @@ const FONT_CHAIN = [
 ];
 
 const setStatus = (t) => { const el = document.getElementById('status'); if (el) el.textContent = t; };
-const relayPort = Number(new URLSearchParams(location.search).get('relay')) || 8080;
+// ?relay=PORT pins the relay to a specific port (dev: vite serves the page, the Go
+// relay is on another port). Absent → the relay (if any) is same-origin as the page
+// (the binary serves both). null lets CommandProvider gate auto-connect by host.
+const relayParam = new URLSearchParams(location.search).get('relay');
 // ?repo=owner/repo[/branch] → render that GitHub repo client-only (no relay needed).
 const repoParam = new URLSearchParams(location.search).get('repo');
 
@@ -101,7 +104,7 @@ function App() {
                   Page served by Vite (:5173); relay is the Go server :8080. */}
               <CommandProvider
                 atlas={atlas}
-                port={relayPort}
+                relay={relayParam}
                 repo={repoParam}
                 cameraControllerRef={cameraRef}
                 onReady={setClient}

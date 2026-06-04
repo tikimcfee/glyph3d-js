@@ -44,6 +44,13 @@ const styles = {
     borderRadius: 4, cursor: 'pointer', color: '#c8ccd6', whiteSpace: 'nowrap',
   },
   menuDot: (open) => ({ width: 12, flex: '0 0 auto', color: open ? '#7ad7a0' : '#4a515f' }),
+  conn: { marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6, flex: '0 0 auto' },
+  connDot: (ok) => ({ color: ok ? '#7ad7a0' : '#4a515f', fontSize: 10 }),
+  connLabel: { color: '#9aa3b2' },
+  connPort: {
+    width: 46, font: 'inherit', color: '#c8ccd6', background: '#0f141b',
+    border: '1px solid #232b34', borderRadius: 4, padding: '2px 5px', outline: 'none',
+  },
 };
 
 /** A single text button that runs a command and surfaces hover. */
@@ -119,6 +126,50 @@ function PanelsMenu({ client }) {
   );
 }
 
+// ConnectionChip — the relay on/off switch. The relay is pure enhancement (local
+// files + terminals + the bus); this shows whether it's live and toggles it via the
+// bus (relay.connect/disconnect), same as the CLI. The port field overrides the
+// boot-resolved target (blank = same origin as the page — the binary's case).
+function ConnectionChip({ client }) {
+  const [connected, setConnected] = useState(false);
+  const [port, setPort] = useState('');
+  const bridge = client?.bridge;
+
+  useEffect(() => {
+    if (!bridge?.onConnectionChange) return undefined;
+    setPort(bridge.port ? String(bridge.port) : '');
+    return bridge.onConnectionChange(setConnected);
+  }, [bridge]);
+
+  if (!client) return null;
+
+  const toggle = () => {
+    if (connected) client.router.execute('relay.disconnect');
+    else client.router.execute(port ? ['relay.connect', port] : 'relay.connect');
+  };
+  // Keep keystrokes in the field (don't drive the camera/grid); Enter (re)connects.
+  const onKey = (e) => { e.stopPropagation(); if (e.key === 'Enter') toggle(); };
+
+  return (
+    <div style={styles.conn}>
+      <span style={styles.connDot(connected)} title={connected ? bridge?.url : 'no relay'}>●</span>
+      <span style={styles.connLabel}>{connected ? 'relay' : 'no relay'}</span>
+      <input
+        style={styles.connPort}
+        value={port}
+        onChange={(e) => setPort(e.target.value.replace(/[^0-9]/g, ''))}
+        onKeyDown={onKey}
+        placeholder="port"
+        title="relay port — blank connects to the page's origin (the binary)"
+        spellCheck={false}
+      />
+      <button type="button" style={styles.btn(true)} onClick={toggle}>
+        {connected ? 'disconnect' : 'connect'}
+      </button>
+    </div>
+  );
+}
+
 export default function ButtonBar({ client }) {
   return (
     <div style={styles.bar}>
@@ -131,6 +182,7 @@ export default function ButtonBar({ client }) {
       <Btn label="relayout" title="re-pack the open grids into a flow layout" cmd="layout.flow" client={client} />
       <span style={styles.sep} />
       <Btn label="clear" title="remove all open code grids (terminals stay)" cmd="scene.clear_grids" client={client} />
+      <ConnectionChip client={client} />
     </div>
   );
 }

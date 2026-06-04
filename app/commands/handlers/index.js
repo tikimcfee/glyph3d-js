@@ -27,6 +27,7 @@ import registerModeCommands from './modeCommands.js';
 import registerFileCommands from './fileCommands.js';
 import registerRepoCommands from './repoCommands.js';
 import registerPanelCommands from './panelCommands.js';
+import registerRelayCommands from './relayCommands.js';
 import registerAttentionCommands from './attentionCommands.js';
 import registerEditCommands from './editCommands.js';
 import registerAgentVisitorCommands from './agentVisitorCommands.js';
@@ -64,6 +65,7 @@ export function registerAllCommands(router) {
     registerFileCommands(router);
     registerRepoCommands(router);
     registerPanelCommands(router);
+    registerRelayCommands(router);
     registerAttentionCommands(router);
     registerEditCommands(router);
     registerAgentVisitorCommands(router);

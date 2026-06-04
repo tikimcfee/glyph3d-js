@@ -66,6 +66,9 @@ export default class WebSocketBridge {
         // Lets DOM chrome fetch-on-connect and refetch-on-reconnect instead of
         // racing a not-yet-open socket (the relay restarts often in dev).
         this._connectionListeners = new Set();
+        // Last broadcast state — so a failed-reconnect storm (close after close,
+        // each retry) doesn't spam listeners with repeated `false`.
+        this._lastEmitted = null;
 
         // Binary data-plane frame demux: type byte → handler(id, payload). The bridge
         // is transport-only — byte/terminal semantics register here (terminal OUTPUT).
@@ -203,6 +206,8 @@ export default class WebSocketBridge {
 
     /** @private */
     _emitConnection(state) {
+        if (state === this._lastEmitted) return;  // ignore repeated false during a reconnect storm
+        this._lastEmitted = state;
         for (const fn of this._connectionListeners) {
             try { fn(state); } catch (e) { console.error('[ws-bridge] connection listener threw:', e); }
         }
@@ -424,14 +429,17 @@ export default class WebSocketBridge {
             this._updateStatus();
             this._emitConnection(false);
             if (!this._intentionalClose) {
-                console.log('[ws-bridge] disconnected, will retry...');
+                // Debug-level: when no relay is running this fires on every retry —
+                // the visible signal is the connection chip, not the console.
+                console.debug('[ws-bridge] disconnected, will retry...');
                 this._scheduleReconnect();
             }
         };
 
         this.ws.onerror = () => {
-            // Errors are followed by onclose, so just log
-            console.warn('[ws-bridge] connection error');
+            // Errors are always followed by onclose (which schedules the retry), so
+            // this is just a quiet breadcrumb — no warn-level spam while polling.
+            console.debug('[ws-bridge] connection error');
         };
     }
 
@@ -440,7 +448,7 @@ export default class WebSocketBridge {
         if (this._reconnectTimer) return;
         this._reconnectTimer = setTimeout(() => {
             this._reconnectTimer = null;
-            console.log(`[ws-bridge] reconnecting...`);
+            console.debug(`[ws-bridge] reconnecting...`);
             this._doConnect();
             this._currentDelay = Math.min(this._currentDelay * 1.5, this._maxReconnectDelay);
         }, this._currentDelay);

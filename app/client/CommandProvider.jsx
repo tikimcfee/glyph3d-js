@@ -149,7 +149,24 @@ export function useAppCommands() {
  * The app's client layer — it sits next to the spine (app/commands) it wires,
  * so there's exactly one of it.
  */
-export default function CommandProvider({ atlas, port = 8080, repo = null, cameraControllerRef, onReady, children }) {
+// Resolve where the relay is and whether to auto-dial it. The relay is pure
+// enhancement, so we only auto-connect where one is plausibly present:
+//   • ?relay=PORT        — dev: vite serves the page (:5173), relay on another port.
+//   • localhost / LAN IP — the glyph3d-cli binary serves page + relay same-origin.
+// A public host (glyph3d.dev) is the static hosted demo: no relay there, so we
+// never cross-dial the visitor's OWN localhost. The connection chip can still
+// connect manually. ws for http, wss for https — same scheme as the page.
+function resolveRelay(loc, relayParam) {
+  const port = relayParam ? Number(relayParam) : null;
+  const wsProto = loc.protocol === 'https:' ? 'wss:' : 'ws:';
+  const url = port ? `ws://${loc.hostname}:${port}` : `${wsProto}//${loc.host}`;
+  const h = loc.hostname;
+  const isLocal = h === 'localhost' || h === '127.0.0.1'
+    || /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(h);
+  return { url, port: port || Number(loc.port) || null, autoConnect: !!port || isLocal };
+}
+
+export default function CommandProvider({ atlas, relay = null, repo = null, cameraControllerRef, onReady, children }) {
   const { scene, camera, gl } = useThree();
   const registryBundle = useGridRegistry();
   const stateRef = useRef(null);
@@ -179,10 +196,12 @@ export default function CommandProvider({ atlas, port = 8080, repo = null, camer
     // visitor per agent. The camera stays free unless `camera.follow <id>` opts in.
     state.ctx.visitorManager = new FieldVisitorManager(state.ctx);
 
-    const url = `ws://localhost:${port}`;
+    // Where's the relay, and should we auto-dial it? (See resolveRelay.)
+    const { url, port, autoConnect } = resolveRelay(window.location, relay);
     const bridge = new WebSocketBridge(state.router, {
-      port,
-      autoConnect: false,
+      url,                 // boot-resolved target; relay.connect reuses it
+      port,                // for status display
+      autoConnect: false,  // we gate the dial explicitly below
       showStatus: false,
     });
     state.ctx.wsbridge = bridge;
@@ -199,12 +218,14 @@ export default function CommandProvider({ atlas, port = 8080, repo = null, camer
     // baseline until then.
     const remoteProvider = new RemoteFileSystemProvider(bridge);
     state.bridge = bridge;
-    bridge.connect(url);
+    // Auto-dial only where a relay is plausibly present; otherwise stay client-only
+    // (the chip can connect on demand) so the hosted demo never polls a dead socket.
+    if (autoConnect) bridge.connect();
     installConsoleForwarder(bridge);
 
     // Devtools/agent handle, mirroring the vanilla IDE's window.viewer.
     window.__glyphClient = state;
-    console.log(`[command-center] r3f client wired — relay ${url}, ${state.router.commands.size} handlers`);
+    console.log(`[command-center] r3f client wired — relay ${url}${autoConnect ? '' : ' (manual)'}, ${state.router.commands.size} handlers`);
 
     // Keyboard delivery to the focused entity (terminal → ANSI bytes via
     // grid.onInput; grid → edit ops). One capture-phase listener, sharing the
@@ -319,7 +340,7 @@ export default function CommandProvider({ atlas, port = 8080, repo = null, camer
       state.ctx.visitorManager?.dispose();
       state.ctx.visitorManager = null;
     };
-  }, [port]);
+  }, [relay]);
 
   return (
     <AppCommandContext.Provider value={stateRef.current}>
