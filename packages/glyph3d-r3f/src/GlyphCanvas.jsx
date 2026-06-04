@@ -4,22 +4,12 @@ import * as THREE from 'three/webgpu';
 import { GlyphProvider } from './context.jsx';
 
 /**
- * Re-apply r3f's measured size to the renderer and rebuild the screen depth
- * texture.
- *
- * Why this is needed: three's WebGPU renderer rebuilds its screen depth texture
- * only through a CanvasTarget 'resize' listener gated on `renderer._initialized`.
- * Because the WebGPU `gl` factory is async (`await renderer.init()`), the size
- * event fired while r3f is configuring lands before init finishes, is dropped,
- * and never re-fires — so the depth stays at the canvas default (300×150) while
- * the color attachment tracks the real size. That's a fatal, per-frame WebGPU
- * error: "depth stencil attachment size … does not match". We re-apply setSize
- * and call `backend.updateSize()` directly (it drops the cached screen target so
- * the depth is recreated at the current size) to cover the missed event.
- *
- * Size comes from r3f's LOGICAL `size` — never the canvas backing / clientWidth,
- * which feeds back into the canvas size and grows without bound (a loop that
- * shows up as an ever-growing depth attachment).
+ * Re-apply r3f's measured size to the renderer and rebuild the screen depth on
+ * resize. three sizes the screen depth from `canvasTarget._width × pixelRatio`
+ * and only rebuilds it through a resize listener gated on `_initialized`, which
+ * the async WebGPU init can miss. `backend.updateSize()` drops the cached screen
+ * target so the depth is recreated at the current size. Size comes from r3f's
+ * LOGICAL `size` — never the canvas backing, which would feed back and grow.
  */
 function applyFit(gl, width, height) {
   if (!gl || width <= 0 || height <= 0) return;
@@ -38,16 +28,19 @@ function SyncSize() {
 /**
  * GlyphCanvas — an r3f <Canvas> wired for the WebGPU GlyphField stack.
  *
- * Encapsulates the one genuinely fiddly thing (the async WebGPU `gl` factory)
- * and the depth-resize workaround (see applyFit). It does NOT impose a camera, a
- * background, or scene content — those are the consumer's. The only opinion it
- * holds is `toneMapping`, which defaults to NoToneMapping because the GlyphField
- * coverage shader emits its own pow(2.2)-encoded color (r3f's default ACESFilmic
- * would crush it). That default is overridable via `toneMapping`.
+ * Handles the async WebGPU `gl` factory and the screen-depth sizing dance. The
+ * latter is the load-bearing bit: three builds the screen depth texture from
+ * `canvas.width/height` at renderer construction and its rebuild path can miss
+ * the async-init window — so a canvas at the 300×150 default when the renderer is
+ * constructed yields a depth that never matches the color attachment, a fatal
+ * per-frame WebGPU error (most visible on HiDPI, where the dpr mismatch makes the
+ * early frames fail instead of self-correcting). The fix: size the canvas (×dpr)
+ * BEFORE `new WebGPURenderer`, and pin dpr so r3f's later sizing matches.
  *
  * @param {object} props
  * @param {number} [props.toneMapping] - THREE tone-mapping constant. Default NoToneMapping.
- * @param {(renderer, props) => void} [props.onRenderer] - Hook after init() (clear color, etc.).
+ * @param {number} [props.dpr] - Device pixel ratio. Defaults to clamped window.devicePixelRatio.
+ * @param {(renderer, props) => void} [props.onRenderer] - Hook after init().
  * @param {import('@glyph3d/core').GlyphAtlas} props.atlas - Ready atlas from bootGlyphEngine.
  */
 export default function GlyphCanvas({
@@ -55,23 +48,40 @@ export default function GlyphCanvas({
   toneMapping = THREE.NoToneMapping,
   onRenderer,
   onCreated,
+  dpr,
   children,
   ...canvasProps
 }) {
-  // Fit once before the first frame (onCreated runs ahead of the render loop) so
-  // there are no startup mismatch frames; <SyncSize> re-fits on every resize.
+  // Pin dpr so the size baked into the canvas (gl factory) matches what r3f uses
+  // afterward — otherwise depth and color diverge by the dpr factor on HiDPI.
+  const resolvedDpr = dpr ?? (typeof window !== 'undefined'
+    ? Math.min(Math.max(window.devicePixelRatio || 1, 1), 2) : 1);
+
   const handleCreated = (state) => {
     applyFit(state.gl, state.size.width, state.size.height);
     onCreated?.(state);
   };
+
   return (
     <Canvas
       {...canvasProps}
+      dpr={resolvedDpr}
       onCreated={handleCreated}
-      // r3f v9: the gl factory may be async; configure() awaits it and mounts
-      // children only after it resolves — so the WebGPU backend is initialized
-      // before the first render(). (Verified against r3f 9.6.1 + three 0.183.)
       gl={async (glProps) => {
+        // Size the canvas backing BEFORE constructing the renderer so the screen
+        // depth texture is born at the right size (see component note). Use the
+        // PARENT's layout size (or the window) × dpr — never the canvas's own
+        // clientWidth, which would feed back from the backing we're setting.
+        const canvas = glProps && glProps.canvas;
+        if (canvas) {
+          const host = canvas.parentElement;
+          const w = (host && host.clientWidth) || (typeof window !== 'undefined' ? window.innerWidth : 0);
+          const h = (host && host.clientHeight) || (typeof window !== 'undefined' ? window.innerHeight : 0);
+          if (w > 0 && h > 0) {
+            canvas.width = Math.round(w * resolvedDpr);
+            canvas.height = Math.round(h * resolvedDpr);
+          }
+        }
         const renderer = new THREE.WebGPURenderer({ ...glProps, antialias: true });
         renderer.toneMapping = toneMapping;
         await renderer.init();
