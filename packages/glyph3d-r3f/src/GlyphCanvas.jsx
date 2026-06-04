@@ -4,23 +4,43 @@ import * as THREE from 'three/webgpu';
 import { GlyphProvider } from './context.jsx';
 
 /**
- * Re-apply the renderer size once the (async) WebGPU renderer is live and on
- * every resize. r3f's async `gl` factory creates the renderer with `await
- * renderer.init()`; in that window r3f sizes the canvas backing store (so the
- * color attachment follows the laid-out size) but the renderer's *internal*
- * size — which drives the screen depth texture — can be left at the canvas
- * default (300×150). The result is a per-frame WebGPU validation error:
- * "depth stencil attachment size … does not match … the other attachments".
- * Forcing setSize here (after `gl` exists) makes three rebuild the depth at the
- * real size, so the two attachments match.
+ * Force the renderer — and crucially its screen depth texture — to the canvas's
+ * REAL pixel size. The async WebGPU `gl` factory (`await renderer.init()`)
+ * builds the renderer's CanvasTarget (which owns the screen depth texture) at
+ * the canvas default 300×150; the color attachment then follows the laid-out
+ * size, but the depth texture's GPU resource is left at 300×150 — yielding a
+ * per-frame (and fatal: "invalid command buffer") "depth attachment size does
+ * not match" error. setSize alone doesn't reliably rebuild it — the
+ * CanvasTarget 'resize' listener can miss the event fired during the async init
+ * window — so we also resize the depth texture's image and dispose it, forcing
+ * its GPU resource to be recreated at the right size. Size is read from the DOM,
+ * not r3f's size store, so it's correct even for a lazily-mounted iframe canvas.
  */
+function fitRenderer(gl) {
+  const canvas = gl && gl.domElement;
+  if (!canvas) return;
+  const w = canvas.clientWidth || (typeof window !== 'undefined' ? window.innerWidth : 0);
+  const h = canvas.clientHeight || (typeof window !== 'undefined' ? window.innerHeight : 0);
+  if (w <= 0 || h <= 0) return;
+  gl.setSize(w, h, false);
+  const depth = gl._canvasTarget && gl._canvasTarget.depthTexture;
+  if (depth && depth.image) {
+    const dpr = gl.getPixelRatio ? gl.getPixelRatio() : 1;
+    depth.image.width = Math.floor(w * dpr);
+    depth.image.height = Math.floor(h * dpr);
+    depth.dispose();   // force the GPU depth texture to be recreated at the new size
+  }
+}
+
 function SyncSize() {
   const gl = useThree((s) => s.gl);
-  const width = useThree((s) => s.size.width);
-  const height = useThree((s) => s.size.height);
   useEffect(() => {
-    if (gl && width > 0 && height > 0) gl.setSize(width, height, false);
-  }, [gl, width, height]);
+    if (!gl || !gl.domElement) return;
+    fitRenderer(gl);
+    const ro = new ResizeObserver(() => fitRenderer(gl));
+    ro.observe(gl.domElement);
+    return () => ro.disconnect();
+  }, [gl]);
   return null;
 }
 
@@ -53,15 +73,11 @@ export default function GlyphCanvas({
   children,
   ...canvasProps
 }) {
-  // Size the renderer BEFORE the first frame. The async WebGPU init leaves the
-  // renderer at the canvas default (300×150), and <SyncSize> only corrects it
-  // after the first commit — so the opening frames would render with a depth
-  // attachment that doesn't match the color target. onCreated runs before the
-  // render loop, so sizing here avoids those startup validation errors too.
+  // Size the renderer BEFORE the first frame (onCreated runs ahead of the render
+  // loop), then again on resize via <SyncSize>. fitRenderer reads the real DOM
+  // size and rebuilds the depth texture — see its note above.
   const handleCreated = (state) => {
-    if (state?.gl && state.size?.width > 0 && state.size?.height > 0) {
-      state.gl.setSize(state.size.width, state.size.height, false);
-    }
+    fitRenderer(state.gl);
     onCreated?.(state);
   };
   return (
