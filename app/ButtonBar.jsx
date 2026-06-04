@@ -183,10 +183,6 @@ export default function ButtonBar({ client, onOpenPalette }) {
       >commands ⌘K</button>
       <span style={styles.sep} />
       <Btn label="fit" title="frame all grids in view" cmd="camera.fitall" client={client} />
-      <Btn label="reset" title="reset the camera to its home view" cmd="camera.reset" client={client} />
-      <Btn label="relayout" title="re-pack the open grids into a flow layout" cmd="layout.flow" client={client} />
-      <span style={styles.sep} />
-      <Btn label="clear" title="remove all open code grids (terminals stay)" cmd="scene.clear_grids" client={client} />
       <ConnectionChip client={client} />
     </div>
   );

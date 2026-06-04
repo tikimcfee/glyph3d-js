@@ -29,6 +29,10 @@ const styles = {
     flex: '0 0 auto', font: 'inherit', fontSize: 11, cursor: 'pointer', borderRadius: 4, padding: '1px 7px',
     color: on ? '#08101a' : '#8b9aa8', background: on ? '#6cf' : 'transparent', border: '1px solid ' + (on ? '#6cf' : '#2a3340'),
   }),
+  clearAll: {
+    flex: '0 0 auto', font: 'inherit', fontSize: 11, cursor: 'pointer', borderRadius: 4, padding: '1px 7px',
+    color: '#d99', background: 'transparent', border: '1px solid #4a2730',
+  },
   dot: (ok) => ({ color: ok ? '#7ad7a0' : '#caa14a', flex: '0 0 auto' }),
   list: { overflowY: 'auto', flex: '1 1 auto', padding: '4px 0' },
   row: {
@@ -236,6 +240,10 @@ export default function FileTree({ client }) {
         <span style={{ flex: '1 1 auto', overflow: 'hidden', textOverflow: 'ellipsis' }}>
           {files ? `${files.length} files` : 'files'}{loadedVis.size ? ` · ${loadedVis.size} loaded` : ''}
         </span>
+        {loadedVis.size > 0 && (
+          <span style={styles.clearAll} title="remove all loaded grids — clear the scene"
+            onClick={() => client?.router.execute('scene.clear_grids')}>clear</span>
+        )}
         <span style={styles.filter(loadedOnly)} title="show only files loaded into the scene"
           onClick={() => setLoadedOnly((v) => !v)}>loaded</span>
         <span style={styles.dot(connected)} title={connected ? 'relay connected' : 'relay disconnected'}>●</span>
