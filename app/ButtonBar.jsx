@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 
 // ButtonBar — the top toolbar of text-label buttons (no icons, per the house
 // style). Each button is a thin command-bus surface: it runs a router command,
@@ -16,6 +16,8 @@ const styles = {
     borderBottom: '1px solid #1b1f29',
     font: '12px/1.4 ui-monospace, "JetBrains Mono", Menlo, monospace',
     userSelect: 'none',
+    position: 'relative',  // stacking context so the panels menu paints over the canvas
+    zIndex: 20,
   },
   btn: (enabled) => ({
     appearance: 'none',
@@ -31,6 +33,17 @@ const styles = {
     width: 1, alignSelf: 'stretch', margin: '2px 4px',
     background: '#1b1f29', flex: '0 0 auto',
   },
+  menuWrap: { position: 'relative', flex: '0 0 auto' },
+  menu: {
+    position: 'absolute', top: 'calc(100% + 5px)', left: 0, zIndex: 50,
+    background: 'rgba(10,12,17,0.98)', border: '1px solid #1b1f29', borderRadius: 5,
+    padding: 4, minWidth: 150, boxShadow: '0 6px 20px rgba(0,0,0,0.5)',
+  },
+  menuItem: {
+    display: 'flex', alignItems: 'center', gap: 8, padding: '4px 8px',
+    borderRadius: 4, cursor: 'pointer', color: '#c8ccd6', whiteSpace: 'nowrap',
+  },
+  menuDot: (open) => ({ width: 12, flex: '0 0 auto', color: open ? '#7ad7a0' : '#4a515f' }),
 };
 
 /** A single text button that runs a command and surfaces hover. */
@@ -51,9 +64,66 @@ function Btn({ label, title, cmd, client }) {
   );
 }
 
+// Panels menu — the way back for a closed dock tab. Lists the catalog with its
+// open/closed state; a click toggles via the bus (panel.toggle), so it's the same
+// action the CLI/Claude can run. The list is read on open (no live subscription
+// needed — it's a momentary menu).
+function PanelsMenu({ client }) {
+  const [open, setOpen] = useState(false);
+  const [items, setItems] = useState([]);
+  const wrapRef = useRef(null);
+  // Gate on `client` (reactive state) — NOT on ctx.dock: the dock controller is
+  // attached by IdeDock's onReady via a plain mutation, which triggers no
+  // re-render, so a dock-gated button would render disabled once and stay stuck.
+  // The dock is set right after the client mounts; we read it fresh on click.
+  const enabled = !!client;
+
+  const refresh = () => setItems(client?.ctx?.dock?.list?.() || []);
+  const toggleMenu = () => { if (!enabled) return; refresh(); setOpen((o) => !o); };
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const onDoc = (e) => { if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open]);
+
+  const pick = (id) => { client?.router.execute(['panel.toggle', id]); refresh(); };
+
+  return (
+    <div ref={wrapRef} style={styles.menuWrap}>
+      <button
+        type="button"
+        title="show / hide dock panels"
+        disabled={!enabled}
+        style={styles.btn(enabled)}
+        onClick={toggleMenu}
+      >panels ▾</button>
+      {open && (
+        <div style={styles.menu}>
+          {items.map((p) => (
+            <div
+              key={p.id}
+              style={styles.menuItem}
+              onClick={() => pick(p.id)}
+              onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255,255,255,0.06)'; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
+            >
+              <span style={styles.menuDot(p.open)}>{p.open ? '●' : '○'}</span>
+              <span>{p.title}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function ButtonBar({ client }) {
   return (
     <div style={styles.bar}>
+      <PanelsMenu client={client} />
+      <span style={styles.sep} />
       <Btn label="+ terminal" title="spawn a shell in the canvas" cmd="terminal.spawn" client={client} />
       <span style={styles.sep} />
       <Btn label="fit" title="frame all grids in view" cmd="camera.fitall" client={client} />

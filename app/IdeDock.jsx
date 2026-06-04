@@ -3,6 +3,7 @@ import { DockviewReact } from 'dockview';
 import 'dockview/dist/styles/dockview.css';
 import './ide-dock.css';
 import FileTree from './FileTree.jsx';
+import RepoPanel from './RepoPanel.jsx';
 import TerminalsPanel from './TerminalsPanel.jsx';
 import FieldVisitorsPanel from './FieldVisitorsPanel.jsx';
 
@@ -21,6 +22,30 @@ import FieldVisitorsPanel from './FieldVisitorsPanel.jsx';
 // from serialized panel params — because dockview's toJSON turns a live object
 // into `undefined`; the ref keeps both default and restored panels wired.
 
+// The panel catalog — the SINGLE source for both the default layout and the
+// reopen path (the ButtonBar's panels menu / panel.* verbs). component === id.
+// Array order matters: each position anchor must be added before the panel that
+// references it.
+const PANELS = [
+  { id: 'files', title: 'Files' },
+  { id: 'repo', title: 'Repo', position: { referencePanel: 'files', direction: 'within' } },
+  { id: 'terminals', title: 'Terminals', position: { referencePanel: 'files', direction: 'within' } },
+  { id: 'fieldVisitors', title: 'Crew', position: { referencePanel: 'terminals', direction: 'within' } },
+];
+const panelDef = (id) => PANELS.find((p) => p.id === id);
+
+// Add a panel if absent (placed by its catalog position when the anchor exists,
+// else into the active group), or just focus it if already open. null = unknown id.
+function openPanel(api, id) {
+  const existing = api.getPanel(id);
+  if (existing) { existing.api.setActive(); return existing; }
+  const def = panelDef(id);
+  if (!def) return null;
+  const opts = { id, component: id, title: def.title };
+  if (def.position && api.getPanel(def.position.referencePanel)) opts.position = def.position;
+  return api.addPanel(opts);
+}
+
 export default function IdeDock({ client }) {
   const apiRef = useRef(null);
   // Live client, read by the component factory below. Survives fromJSON restore
@@ -32,6 +57,7 @@ export default function IdeDock({ client }) {
   // client from the ref, so a restored panel is wired exactly like a fresh one.
   const components = useMemo(() => ({
     files: () => <FileTree client={clientRef.current} />,
+    repo: () => <RepoPanel client={clientRef.current} />,
     terminals: () => <TerminalsPanel client={clientRef.current} />,
     fieldVisitors: () => <FieldVisitorsPanel client={clientRef.current} />,
   }), []);
@@ -49,25 +75,36 @@ export default function IdeDock({ client }) {
     });
 
     // Default panels — always built so the dock is never empty. A saved layout
-    // (if any) replaces these via SessionStore's fromJSON.
-    if (!api.getPanel('files')) {
-      api.addPanel({ id: 'files', component: 'files', title: 'Files' });
+    // (restored above via setDockBridge → fromJSON) keeps its panels; this only
+    // adds catalog panels that layout lacks (e.g. a newly introduced one), and
+    // never re-adds or re-focuses an already-present panel.
+    for (const def of PANELS) {
+      if (api.getPanel(def.id)) continue;
+      const opts = { id: def.id, component: def.id, title: def.title };
+      if (def.position && api.getPanel(def.position.referencePanel)) opts.position = def.position;
+      api.addPanel(opts);
     }
-    if (!api.getPanel('terminals')) {
-      api.addPanel({
-        id: 'terminals',
-        component: 'terminals',
-        title: 'Terminals',
-        position: { referencePanel: 'files', direction: 'within' },
-      });
-    }
-    if (!api.getPanel('fieldVisitors')) {
-      api.addPanel({
-        id: 'fieldVisitors',
-        component: 'fieldVisitors',
-        title: 'Crew',
-        position: { referencePanel: 'terminals', direction: 'within' },
-      });
+
+    // Expose a dock controller on the command ctx so panel.* verbs (and the
+    // ButtonBar's panels menu) can reopen a closed tab. The DOM layer owns the
+    // dockview api; the bus stays provider-agnostic.
+    if (client?.ctx) {
+      client.ctx.dock = {
+        open: (id) => (openPanel(api, id) ? { open: true } : null),
+        close: (id) => {
+          if (!panelDef(id)) return null;
+          api.getPanel(id)?.api.close();
+          return { open: false };
+        },
+        toggle: (id) => {
+          if (!panelDef(id)) return null;
+          const p = api.getPanel(id);
+          if (p) { p.api.close(); return { open: false }; }
+          openPanel(api, id);
+          return { open: true };
+        },
+        list: () => PANELS.map((p) => ({ id: p.id, title: p.title, open: !!api.getPanel(p.id) })),
+      };
     }
 
     // Persist on any layout change (add/remove/move/resize). The store debounces
