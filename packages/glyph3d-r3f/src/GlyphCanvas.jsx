@@ -71,30 +71,53 @@ export default function GlyphCanvas({
   toneMapping = THREE.NoToneMapping,
   onRenderer,
   onCreated,
+  dpr,
   children,
   ...canvasProps
 }) {
-  // Size the renderer BEFORE the first frame (onCreated runs ahead of the render
-  // loop), then again on resize via <SyncSize>. fitRenderer reads the real DOM
-  // size and rebuilds the depth texture — see its note above.
+  // Pin the device pixel ratio so the size we bake into the canvas (in the gl
+  // factory, below) matches exactly what r3f uses afterward — otherwise the
+  // depth (sized once, at renderer construction) and the color (which tracks
+  // r3f's setSize) diverge by the dpr factor.
+  const resolvedDpr = dpr ?? (typeof window !== 'undefined'
+    ? Math.min(Math.max(window.devicePixelRatio || 1, 1), 2) : 1);
+
   const handleCreated = (state) => {
-    fitRenderer(state.gl);
+    fitRenderer(state.gl);   // belt-and-suspenders: re-fit on real resizes
     onCreated?.(state);
   };
   return (
     <Canvas
+      {...canvasProps}
+      dpr={resolvedDpr}
       onCreated={handleCreated}
       // r3f v9: the gl factory may be async; configure() awaits it and mounts
       // children only after it resolves — so the WebGPU backend is initialized
       // before the first render(). (Verified against r3f 9.6.1 + three 0.183.)
       gl={async (glProps) => {
+        // THE fix: size the canvas backing store BEFORE constructing the renderer.
+        // three's WebGPU CanvasTarget builds the screen depth texture from
+        // canvas.width/height at construction and only rebuilds it via a resize
+        // listener gated on `_initialized` — so a canvas still at the 300×150
+        // default here gets a depth that's wrong forever (the "depth attachment
+        // size does not match" flood). Sizing it up front (real DOM size × the
+        // pinned dpr) means the depth is born correct. DOM-read so it's right even
+        // for a lazily-mounted iframe canvas.
+        const canvas = glProps && glProps.canvas;
+        if (canvas) {
+          const w = canvas.clientWidth || (typeof window !== 'undefined' ? window.innerWidth : 0);
+          const h = canvas.clientHeight || (typeof window !== 'undefined' ? window.innerHeight : 0);
+          if (w > 0 && h > 0) {
+            canvas.width = Math.round(w * resolvedDpr);
+            canvas.height = Math.round(h * resolvedDpr);
+          }
+        }
         const renderer = new THREE.WebGPURenderer({ ...glProps, antialias: true });
         renderer.toneMapping = toneMapping;
         await renderer.init();
         onRenderer?.(renderer, glProps);
         return renderer;
       }}
-      {...canvasProps}
     >
       <GlyphProvider atlas={atlas}>
         <SyncSize />
