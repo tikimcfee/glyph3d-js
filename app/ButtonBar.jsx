@@ -182,8 +182,6 @@ export default function ButtonBar({ client, onOpenPalette }) {
         onClick={onOpenPalette}
       >commands ⌘K</button>
       <span style={styles.sep} />
-      <Btn label="+ terminal" title="spawn a shell in the canvas" cmd="terminal.spawn" client={client} />
-      <span style={styles.sep} />
       <Btn label="fit" title="frame all grids in view" cmd="camera.fitall" client={client} />
       <Btn label="reset" title="reset the camera to its home view" cmd="camera.reset" client={client} />
       <Btn label="relayout" title="re-pack the open grids into a flow layout" cmd="layout.flow" client={client} />

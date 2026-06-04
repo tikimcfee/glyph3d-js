@@ -146,10 +146,11 @@ function App() {
           )}
         </div>
       </div>
-      {/* control HUD — companion overlay on top of the canvas + the panel system */}
-      <HudPanel client={client} />
-      {/* slim status pill — load/restore narration + relay dot (bottom-left) */}
+      {/* inline status bar — the bottom strip (a real flex row, not a floating pill):
+          activity/load narration on the left, relay state on the right */}
       <StatusBar client={client} hint={hint} />
+      {/* control HUD — fixed overlay on the canvas (raised to clear the status bar) */}
+      <HudPanel client={client} />
       {/* command palette — summoned modal (⌘K) to drive bus verbs; stays open per command */}
       <CommandBar client={client} open={paletteOpen} onClose={() => setPaletteOpen(false)} />
     </div>

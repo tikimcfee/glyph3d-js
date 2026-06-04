@@ -50,29 +50,30 @@ export default function StatusBar({ client, hint }) {
     ? `${shortCurrent(prog.current)}${hasCount ? `  ${prog.loaded}/${prog.total}` : ''}`
     : (activity || hint);
 
-  if (!label) return null;
-
   return (
     <div style={S.bar}>
-      <span style={S.dot(connected)} title={connected ? 'relay connected' : 'client-only'}>●</span>
       <span style={S.msg}>{label}</span>
       {hasCount && <span style={S.track}><span style={{ ...S.fill, width: `${pct}%` }} /></span>}
+      <span style={S.relay(connected)}
+        title={connected ? (client?.bridge?.url || 'relay connected') : 'client-only — no relay'}>
+        {connected ? '● relay' : '○ client-only'}
+      </span>
     </div>
   );
 }
 
+// Inline bottom strip — a flex row in the app column (not a floating pill): activity/
+// hint on the left, relay state on the right.
 const S = {
   bar: {
-    position: 'fixed', left: 12, bottom: 12, zIndex: 20,
-    display: 'flex', alignItems: 'center', gap: 8,
-    font: '11px/1.4 ui-monospace, Menlo, monospace', color: '#9fb1c2',
-    background: 'rgba(10,12,16,0.82)', border: '1px solid #283341', borderRadius: 7,
-    padding: '5px 10px', maxWidth: '46vw',
-    backdropFilter: 'blur(6px)', boxShadow: '0 4px 18px rgba(0,0,0,0.35)',
-    pointerEvents: 'none', userSelect: 'none',
+    flex: '0 0 auto', width: '100%', boxSizing: 'border-box',
+    display: 'flex', alignItems: 'center', gap: 10, height: 22, padding: '0 10px',
+    font: '11px/1 ui-monospace, Menlo, Consolas, monospace', color: '#9fb1c2',
+    background: 'rgba(10,12,16,0.96)', borderTop: '1px solid #1b1f29',
+    userSelect: 'none', whiteSpace: 'nowrap', overflow: 'hidden',
   },
-  dot: (ok) => ({ color: ok ? '#7ad7a0' : '#5b6675', fontSize: 9, flex: '0 0 auto' }),
-  msg: { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
-  track: { flex: '0 0 70px', height: 3, background: '#1c2530', borderRadius: 2, overflow: 'hidden' },
+  msg: { flex: '1 1 auto', overflow: 'hidden', textOverflow: 'ellipsis' },
+  track: { flex: '0 0 80px', height: 4, background: '#1c2530', borderRadius: 2, overflow: 'hidden' },
   fill: { display: 'block', height: '100%', background: '#6cf', transition: 'width 0.12s linear' },
+  relay: (ok) => ({ flex: '0 0 auto', color: ok ? '#7ad7a0' : '#5b6675' }),
 };

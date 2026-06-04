@@ -141,7 +141,7 @@ function Mode({ on, onClick, children }) {
 
 const S = {
   panel: {
-    position: 'fixed', right: 12, bottom: 12, zIndex: 20,   // bottom-right: over the canvas, clear of the IDE's left dock
+    position: 'fixed', right: 12, bottom: 30, zIndex: 20,   // bottom-right over the canvas, raised to clear the inline status bar
     font: '12px ui-monospace, Menlo, Consolas, monospace',
     background: 'rgba(10,12,16,0.82)', color: '#aebccb',
     border: '1px solid #283341', borderRadius: 7, padding: '8px 10px',
