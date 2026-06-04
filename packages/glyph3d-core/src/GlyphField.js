@@ -249,7 +249,21 @@ function _buildOutputNode(varyings, uniforms) {
             // The MIN_LO→MIN_HI gap IS the ramp speed: widen it for a gentler, slower fade-to-fuzzy.
             const MIN_LO = float(0.06);  // ~16 px glyph: below this, bit-identical to crisp
             const MIN_HI = float(0.20);  // ~5 px glyph:  above this, max dilation + softening
+            // LOD impostor dials — used by the coverage branch below.
+            // LOD cross-fade band (footprint = glyph-UV per pixel, best-resolved axis):
+            const LOD_LO      = float(0.30);   // begin fading exact → impostor (~3px glyph)
+            const LOD_HI      = float(0.60);   // fully impostor beyond here (~1.5px); loop skipped
+            const LOD_DENSITY = float(0.035);  // curveCount → coverage (cheap ink-density proxy)
+            const LOD_MAXCOV  = float(0.72);   // cap so the densest glyphs don't fully saturate
             const fwMax = fw.x.max(fw.y);
+            // LOD switch uses the BEST-resolved axis (min footprint), not the worst.
+            // An angled page foreshortens one axis, which spikes fwMax and would flip
+            // readable angled text to the impostor too early (the threshold appears to
+            // move with viewing angle). fwMin only crosses the cutoff when the glyph is
+            // small in BOTH axes — i.e. genuinely tiny — so the switch tracks real
+            // on-screen size, not the camera angle. (fwMax still drives AA dilation below,
+            // where worst-axis IS what we want for moiré.)
+            const fwMin = fw.x.min(fw.y);
             const m = fwMax.sub(MIN_LO).div(MIN_HI.sub(MIN_LO)).clamp(0, 1).toVar();
             m.assign(m.mul(m).mul(float(3).sub(m.mul(2)))); // smoothstep — continuous derivative
 
@@ -259,26 +273,47 @@ function _buildOutputNode(varyings, uniforms) {
             const dilate = m.mul(DILATE_PX);
             const invD   = vec2(1).div(fw).mul(float(1).sub(m.mul(SOFTEN)));
 
-            const coverage = float(0).toVar();
-            Loop(MAX_CURVES, ({ i }) => {
-                If(i.greaterThanEqual(vCurveCount), () => { Break(); });
+            // LOD impostor: once a glyph shrinks past the point where its strokes can
+            // be resolved (~2px footprint — the same regime the dilation note above
+            // calls an "unreadable steady silhouette"), the per-curve bezier loop is
+            // pure waste — it runs MAX_CURVES iterations with 2 texture loads each, per
+            // fragment, only to produce a fuzzy blob. Below LOD_CUTOFF we skip the loop
+            // entirely and approximate coverage from the glyph's curve count (a cheap
+            // ink-density proxy: denser glyphs read darker). This is the LOD that lets
+            // an entire repo render at once — distant files become cheap colored
+            // text-mass, and the exact analytic path returns as the camera approaches.
+            // Impostor coverage (cheap, no loop): curve count as an ink-density proxy.
+            const impostorCov = float(vCurveCount).mul(LOD_DENSITY).clamp(0, LOD_MAXCOV);
+            const cov = float(0).toVar();
+            If(fwMin.greaterThan(LOD_HI), () => {
+                cov.assign(impostorCov);   // far: strokes unresolvable → pure impostor, loop skipped
+            }).Else(() => {
+                const coverage = float(0).toVar();
+                Loop(MAX_CURVES, ({ i }) => {
+                    If(i.greaterThanEqual(vCurveCount), () => { Break(); });
 
-                // 2 texels per curve: [P0.xy, P1.xy] then [P2.xy, _, _].
-                const ci = vCurveStart.add(i).mul(2);
-                const t0 = textureLoad(curveTex, ivec2(ci.mod(1024), ci.div(1024)));
-                const t1 = textureLoad(curveTex, ivec2(ci.add(1).mod(1024), ci.add(1).div(1024)));
+                    // 2 texels per curve: [P0.xy, P1.xy] then [P2.xy, _, _].
+                    const ci = vCurveStart.add(i).mul(2);
+                    const t0 = textureLoad(curveTex, ivec2(ci.mod(1024), ci.div(1024)));
+                    const t1 = textureLoad(curveTex, ivec2(ci.add(1).mod(1024), ci.add(1).div(1024)));
 
-                // Unpack uint16 → [0,1], translate so the sample point is the origin.
-                const p0 = vec2(float(t0.x), float(t0.y)).div(65535).sub(vGlyphUV);
-                const p1 = vec2(float(t0.z), float(t0.w)).div(65535).sub(vGlyphUV);
-                const p2 = vec2(float(t1.x), float(t1.y)).div(65535).sub(vGlyphUV);
+                    // Unpack uint16 → [0,1], translate so the sample point is the origin.
+                    const p0 = vec2(float(t0.x), float(t0.y)).div(65535).sub(vGlyphUV);
+                    const p1 = vec2(float(t0.z), float(t0.w)).div(65535).sub(vGlyphUV);
+                    const p2 = vec2(float(t1.x), float(t1.y)).div(65535).sub(vGlyphUV);
 
-                coverage.addAssign(computeCoverage(invD.x, dilate, p0, p1, p2));
-                coverage.addAssign(computeCoverage(invD.y, dilate, rot90(p0), rot90(p1), rot90(p2)));
+                    coverage.addAssign(computeCoverage(invD.x, dilate, p0, p1, p2));
+                    coverage.addAssign(computeCoverage(invD.y, dilate, rot90(p0), rot90(p1), rot90(p2)));
+                });
+                // Average the two rays; fills accumulate positive under y-up normalization.
+                const exactCov = coverage.mul(0.5).clamp(0, 1);
+                // Cross-fade exact → impostor across [LOD_LO, LOD_HI] so the quality
+                // switch has no hard seam (the diagonal line that otherwise sweeps an
+                // angled wall). smoothstep ramp; manual mix to avoid extra imports.
+                const t = fwMin.sub(LOD_LO).div(LOD_HI.sub(LOD_LO)).clamp(0, 1).toVar();
+                t.assign(t.mul(t).mul(float(3).sub(t.mul(2))));
+                cov.assign(exactCov.add(impostorCov.sub(exactCov).mul(t)));
             });
-
-            // Average the two rays; fills accumulate positive under y-up normalization.
-            const cov = coverage.mul(0.5).clamp(0, 1).toVar();
             Discard(cov.lessThan(0.01));
 
             const outAlpha   = cov.mul(vGroupAlpha);
@@ -293,6 +328,31 @@ function _buildOutputNode(varyings, uniforms) {
         });
 
         return outColor;
+    })();
+}
+
+/**
+ * Opaque OCCLUDER LOD output — a discard-free, depth-writing fragment for dense
+ * distant scenes (a skyline of whole source files stacked many planes deep).
+ *
+ * The normal path is transparent and uses Discard (for crisp AA text), which both
+ * forces the back-to-front transparent pass AND disables hardware early-Z — so
+ * occluded towers still run the fragment shader and overdraw scales with depth
+ * complexity. This path is the inverse: every cell is opaque (alpha = 1 → writes
+ * depth) and there is NO discard, so the GPU's early-Z rejects fragments behind
+ * nearer towers BEFORE shading — real hardware occlusion culling. Cells are
+ * colored by curve count (a cheap ink-density proxy) over black: dense glyphs
+ * glow, blank/sparse cells fall to ~black and vanish into the dark background
+ * while still occluding. No per-curve loop, no AA — for the minified regime only.
+ */
+function _buildOccluderOutputNode(varyings) {
+    const { vColor, vGroupAlpha, vCurveCount } = varyings;
+    return Fn(() => {
+        // Ink-density proxy (matches the impostor branch in _buildOutputNode).
+        const dens = float(vCurveCount).mul(0.035).clamp(0, 0.72);
+        const rgb  = vColor.mul(dens).mul(vGroupAlpha).clamp(0, 1);
+        // Opaque: alpha = 1 writes depth and occludes; no Discard keeps early-Z on.
+        return vec4(rgb.pow(vec3(2.2)), 1.0);
     })();
 }
 
@@ -418,6 +478,9 @@ export default class GlyphField {
 
         this._slugData = options.slugData || (atlas && atlas._slugData) || null;
         this._shaper   = options.shaper   || (atlas && atlas._shaper)   || null;
+
+        // Opaque occluder LOD mode (dense distant scenes) — see _createInstanceMesh.
+        this._occluder = !!options.occluder;
 
         // Register with the live Slug atlas so on-demand glyph encoding (box-drawing,
         // spinner stars, rounded corners, …) hot-swaps fresh curve textures into us.
@@ -634,17 +697,28 @@ export default class GlyphField {
                 clipBottom:     clipBottomNode,
             });
 
-        const outputNode = _buildOutputNode(
-            { vColor, vGroupAlpha, vAddedColor, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell },
-            { curveTex: curveTexNode, emojiTex: emojiTexNode, emojiCols: emojiColsNode }
-        );
+        const outputNode = this._occluder
+            ? _buildOccluderOutputNode({ vColor, vGroupAlpha, vCurveCount })
+            : _buildOutputNode(
+                { vColor, vGroupAlpha, vAddedColor, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell },
+                { curveTex: curveTexNode, emojiTex: emojiTexNode, emojiCols: emojiColsNode }
+            );
 
         const material = new MeshBasicNodeMaterial();
-        material.vertexNode = vertexFn();
+        material.vertexNode  = vertexFn();
         material.outputNode  = outputNode;
-        material.transparent = true;
         material.side        = THREE.DoubleSide;
-        material.depthWrite  = true;
+        if (this._occluder) {
+            // Opaque + depth-writing → Three renders these grids front-to-back, so the
+            // GPU's early-Z occludes hidden towers (the discard-free occluder node keeps
+            // early-Z enabled). This collapses deep-skyline overdraw to ~one layer.
+            material.transparent = false;
+            material.depthWrite  = true;
+            material.depthTest   = true;
+        } else {
+            material.transparent = true;
+            material.depthWrite  = true;
+        }
 
         this._material = material;
 

@@ -50,6 +50,9 @@ class CodeGrid extends THREE.Object3D {
             gridScale: options.gridScale || 1.0,
             // World scale passed to renderer (pixels to world units)
             worldScale: options.worldScale || 0.025,
+            // Opaque occluder LOD: render as a discard-free, depth-writing impostor so
+            // the grid occlusion-culls in dense distant scenes (a skyline of files).
+            occluder: !!options.occluder,
             // Slug vector rendering data (passed through to the renderer)
             // Check options first, then atlas (shared across all renderers)
             slugData: options.slugData || (atlas && atlas._slugData) || null,
@@ -928,6 +931,7 @@ class CodeGrid extends THREE.Object3D {
             worldScale:    this.config.worldScale,
             slugData:      this.config.slugData,
             shaper:        this.config.shaper,
+            occluder:      this.config.occluder,
         });
 
         if (this._pickingSystem) {

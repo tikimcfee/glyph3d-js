@@ -42,6 +42,7 @@ const CodeGrid = forwardRef(function CodeGrid({
   showBackground = true,
   maxChars,
   name,
+  occluder = false,
 }, ref) {
   const scene = useThree((s) => s.scene);
   const atlas = useGlyphAtlas();
@@ -58,6 +59,7 @@ const CodeGrid = forwardRef(function CodeGrid({
       showBackground,
       ...(textColor ? { textColor } : {}),
       ...(maxChars ? { maxChars } : {}),
+      ...(occluder ? { occluder: true } : {}),
     });
     scene.add(grid); // required — see contract note above
     addGrid(grid, { id: filename || name, type: 'grid' });
