@@ -13,6 +13,7 @@ import GitHubFileProvider from '@glyph3d/core/services/data/GitHubFileProvider.j
 import { PickingSystem } from '@glyph3d/core/picking/PickingSystem.js';
 import SessionStore from './SessionStore.js';
 import WorkspaceModel from './WorkspaceModel.js';
+import { getSetting } from './settings.js';
 // The spine, ported verbatim — handlers register lazily; nothing here knows the
 // shell. Their only deps are @glyph3d/core, three, and sibling helpers.
 import { registerAllCommands } from '../commands/handlers/index.js';
@@ -218,9 +219,11 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // baseline until then.
     const remoteProvider = new RemoteFileSystemProvider(bridge);
     state.bridge = bridge;
-    // Auto-dial only where a relay is plausibly present; otherwise stay client-only
-    // (the chip can connect on demand) so the hosted demo never polls a dead socket.
-    if (autoConnect) bridge.connect();
+    // Auto-dial only where a relay is plausibly present (resolveRelay's host gate) AND
+    // the user hasn't opted out (settings: relay.autoConnect, default on). Otherwise
+    // stay client-only — the chip can connect on demand — so the hosted demo never
+    // polls a dead socket.
+    if (autoConnect && getSetting('relay.autoConnect')) bridge.connect();
     installConsoleForwarder(bridge);
 
     // Devtools/agent handle, mirroring the vanilla IDE's window.viewer.

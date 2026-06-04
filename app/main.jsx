@@ -8,6 +8,7 @@ import IdeDock from './IdeDock.jsx';
 import { CanvasPicker, ObjectDragger, ResizeDragger, SelectionIndicator } from './client/CanvasInteraction.jsx';
 import HudPanel from './client/HudPanel.jsx';
 import CommandBar from './client/CommandBar.jsx';
+import { getSetting } from './client/settings.js';
 // Font fallback chain, priority order: clean code monospace first, then fonts
 // that cover what it lacks (Nerd-Font icons/powerline/rounded box/stars, then
 // braille + broad symbols), then "oh well" (a blank cell) for the rare holdout.
@@ -57,7 +58,13 @@ function DockResizer({ width, setWidth }) {
 }
 
 function App() {
-  const { atlas, stage, error } = useGlyphEngine({ fontUrl, fonts: FONT_CHAIN });
+  // Atlas is built once at boot, so font/atlas-size settings are read here (a
+  // change persists and takes hold on the next reload — the Settings panel says so).
+  const { atlas, stage, error } = useGlyphEngine({
+    fontUrl, fonts: FONT_CHAIN,
+    fontSize: getSetting('atlas.fontSize'),
+    atlasSize: getSetting('atlas.size'),
+  });
   const cameraRef = useRef(null);
   // The wired command client. CommandProvider (inside the Canvas) hands it up via
   // onReady so the DOM sidebar — which can't read the in-canvas context — can use

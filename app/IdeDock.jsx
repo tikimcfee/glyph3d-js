@@ -4,6 +4,7 @@ import 'dockview/dist/styles/dockview.css';
 import './ide-dock.css';
 import FileTree from './FileTree.jsx';
 import RepoPanel from './RepoPanel.jsx';
+import SettingsPanel from './SettingsPanel.jsx';
 import TerminalsPanel from './TerminalsPanel.jsx';
 import FieldVisitorsPanel from './FieldVisitorsPanel.jsx';
 
@@ -31,6 +32,7 @@ const PANELS = [
   { id: 'repo', title: 'Repo', position: { referencePanel: 'files', direction: 'within' } },
   { id: 'terminals', title: 'Terminals', position: { referencePanel: 'files', direction: 'within' } },
   { id: 'fieldVisitors', title: 'Crew', position: { referencePanel: 'terminals', direction: 'within' } },
+  { id: 'settings', title: 'Settings', position: { referencePanel: 'files', direction: 'within' } },
 ];
 const panelDef = (id) => PANELS.find((p) => p.id === id);
 
@@ -58,6 +60,7 @@ export default function IdeDock({ client }) {
   const components = useMemo(() => ({
     files: () => <FileTree client={clientRef.current} />,
     repo: () => <RepoPanel client={clientRef.current} />,
+    settings: () => <SettingsPanel client={clientRef.current} />,
     terminals: () => <TerminalsPanel client={clientRef.current} />,
     fieldVisitors: () => <FieldVisitorsPanel client={clientRef.current} />,
   }), []);
