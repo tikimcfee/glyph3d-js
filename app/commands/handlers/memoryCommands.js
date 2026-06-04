@@ -21,7 +21,9 @@ export default function registerMemoryCommands(router) {
     router.register('mem.view', async (args, ctx) => {
         const path = args[0];
         if (!path) return { text: 'ERR: usage: mem.view <path> [offset] [length] [cols]', data: null };
-        if (!ctx.fileProvider) return { text: 'ERR: no fileProvider — relay bridge not connected', data: null };
+        if (typeof ctx.fileProvider?.readRange !== 'function') {
+            return { text: 'ERR: mem.view needs the local relay (byte-range reads); not available for a GitHub repo', data: null };
+        }
 
         const offset = Math.max(0, parseInt(args[1] ?? '0', 10) || 0);
         const length = Math.max(1, parseInt(args[2] ?? '512', 10) || 512);

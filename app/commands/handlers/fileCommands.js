@@ -63,7 +63,7 @@ export async function renderSheetGrid(ctx, path) {
     const uri = `file:///${String(path).replace(/^\/+/, '')}`;
     const existing = ctx.registry.findByMeta?.('sourcePath', uri) || [];
     if (existing.length) return existing[0].id;          // already rendered
-    if (!ctx.fileProvider) throw new Error('no fileProvider — relay bridge not connected');
+    if (!ctx.fileProvider) throw new Error('no file source — load a repo or connect the relay');
     const content = await ctx.fileProvider.getFile(path);
     const id = addFileGrid(ctx, path, content);          // create + register (id = path)
     if (id) return id;
@@ -162,7 +162,7 @@ export default function registerFileCommands(router) {
         }
 
         if (!ctx.fileProvider) {
-            return { text: 'ERR: no fileProvider — relay bridge not connected', data: null };
+            return { text: 'ERR: no file source — load a repo or connect the relay', data: null };
         }
 
         let id;
@@ -208,7 +208,7 @@ export default function registerFileCommands(router) {
         const dir = String(args[0] || '').replace(/^\/+|\/+$/g, '');
         const cap = args[1] != null ? Math.max(1, parseInt(args[1], 10)) : DIR_OPEN_CAP;
         if (!ctx.fileProvider) {
-            return { text: 'ERR: no fileProvider — relay bridge not connected', data: null };
+            return { text: 'ERR: no file source — load a repo or connect the relay', data: null };
         }
 
         let entries;
@@ -264,7 +264,7 @@ export default function registerFileCommands(router) {
 
         if (!ctx.wsbridge || !ctx.wsbridge.connected) {
             return {
-                text: 'ERR: WebSocket bridge not connected — cannot reach fs/writeFile',
+                text: 'ERR: save needs the local relay — GitHub repos are read-only',
                 data: null,
             };
         }
