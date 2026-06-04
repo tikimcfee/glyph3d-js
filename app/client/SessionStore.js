@@ -23,10 +23,12 @@
 
 const SESSION_URI = 'file:///.glyph3d-session.json';
 // Kept at 1: the sizing/frame fields (grid window+frame+scroll, terminal cols/rows)
-// are ADDITIVE and optional — restore guards each, so a pre-sizing v1 snapshot loads
-// cleanly (full-file grids, default-size terminals). Bumping would needlessly trip the
-// schema-mismatch WIPE and lose an existing workspace, the opposite of restore-in-place.
-const SCHEMA_VERSION = 1;
+// are ADDITIVE and optional — restore guards each, so an older same-schema snapshot
+// loads cleanly. v2 is NOT additive: `files` now means the TABS (sheet-backed grids)
+// only, and a new `field` records the bulk source (repo / local). A v1 snapshot dumped
+// the WHOLE field into `files`, so loading it under v2 restore would flood the tab bar —
+// the schema-mismatch WIPE is intended here (one clean reset, then the v2 shape).
+const SCHEMA_VERSION = 2;
 const SAVE_DEBOUNCE_MS = 600;
 const PERIODIC_SAVE_MS = 5000;
 const CAMERA_TARGET_DIST = 100; // how far ahead to place the look-target we restore via camera.aim
@@ -82,27 +84,51 @@ export default class SessionStore {
   // -- Capture --------------------------------------------------------------
   capture() {
     const ctx = this.ctx;
+    // Persist the TABS (sheet-backed grids), NOT the whole field. A bulk repo/local
+    // load drops hundreds of grids into the registry; those are the field, not tabs —
+    // restoring them as individual file.opens floods the tab bar. The field is
+    // persisted as one `field` source (below) and replayed in bulk on restore; only
+    // sheets the user actually opened come back as tabs.
     const files = [];
-    for (const e of ctx.registry.findByType('grid')) {
-      // The registry id IS the file path; meta.sourcePath is its file:// URI.
-      const path = e.meta?.sourcePath ? e.meta.sourcePath.replace(/^file:\/\//, '') : e.id;
-      const p = e.grid.position;
-      const entry = { path, x: round(p.x), y: round(p.y), z: round(p.z) };
-      // Window state: a code grid sized to a cols×rows scrollable viewport (grid.window).
-      // This is the user's "sizing" — restore it so a reload comes back to the same view.
-      if (e.grid.isWindowed?.()) {
-        const w = e.grid.getWindow();
-        if (w) entry.window = { cols: w.cols, rows: w.rows, firstLine: w.firstLine || 0 };
-      }
-      // Frame state (Step 3c.2): a clipped/scrolled code grid restores its window.
-      // Omit zeros so unframed grids stay terse and the dedup compare stays stable.
-      if (typeof e.grid.getFrameRows === 'function') {
-        const frameRows = e.grid.getFrameRows() || 0;
-        const scrollOffset = (e.grid.getScrollOffset?.() || 0);
-        if (frameRows) entry.frameRows = frameRows;
-        if (scrollOffset) entry.scrollOffset = scrollOffset;
+    const ws = ctx.workspace;
+    const sheets = ws ? ws.listActiveSheets(ctx.registry, ctx.attentionManager) : [];
+    const sheetPanelIds = new Set();
+    for (const s of sheets) {
+      if (s.kind !== 'file') continue;
+      const path = s.source?.path ?? (s.id.startsWith('sheet:') ? s.id.slice(6) : s.id);
+      const entry = { path };
+      const grid = (s.panelId && ctx.registry.has(s.panelId)) ? ctx.registry.get(s.panelId).grid : null;
+      if (grid) {
+        sheetPanelIds.add(s.panelId);
+        const p = grid.position;
+        entry.x = round(p.x); entry.y = round(p.y); entry.z = round(p.z);
+        // Window state: a code grid sized to a cols×rows scrollable viewport (grid.window).
+        if (grid.isWindowed?.()) {
+          const w = grid.getWindow();
+          if (w) entry.window = { cols: w.cols, rows: w.rows, firstLine: w.firstLine || 0 };
+        }
+        // Frame state (Step 3c.2): a clipped/scrolled code grid restores its window.
+        // Omit zeros so unframed grids stay terse and the dedup compare stays stable.
+        if (typeof grid.getFrameRows === 'function') {
+          const frameRows = grid.getFrameRows() || 0;
+          const scrollOffset = (grid.getScrollOffset?.() || 0);
+          if (frameRows) entry.frameRows = frameRows;
+          if (scrollOffset) entry.scrollOffset = scrollOffset;
+        }
       }
       files.push(entry);
+    }
+
+    // The bulk field source — what fills the scene without tabs. A GitHub repo
+    // restores via repo.load; a relay-local project via file.openDir. A repo is the
+    // field whenever one is loaded; otherwise local only if there ARE non-tab grids
+    // (so a tabs-only session stays tabs-only and doesn't re-bulk-load on restore).
+    let field = null;
+    const repo = ctx.fileProvider?._currentRepo;
+    if (repo?.owner) {
+      field = { type: 'repo', ref: `${repo.owner}/${repo.repo}${repo.branch ? '/' + repo.branch : ''}` };
+    } else if (ctx.registry.findByType('grid').some((e) => !sheetPanelIds.has(e.id))) {
+      field = { type: 'local' };
     }
 
     const terminals = [];
@@ -126,6 +152,7 @@ export default class SessionStore {
       version: SCHEMA_VERSION,
       savedAt: Date.now(),
       files,
+      field,
       camera: this._captureCamera(),
       dock: dock || null,
       terminals,
@@ -192,13 +219,29 @@ export default class SessionStore {
       return;
     }
 
-    // Files first — so the camera (restored next) isn't fought by file.open's
-    // framing, and so the dock/registry are populated.
+    // The bulk field fills the scene first (no tabs), so tabs layer on top and the
+    // camera (restored last) wins. repo.load clears the scene itself; both are
+    // guarded so a network/offline failure still lets the tabs restore.
+    if (snap.field?.type === 'repo' && snap.field.ref) {
+      try { await this.router.execute(['repo.load', snap.field.ref]); }
+      catch (e) { console.warn('[session] repo field restore failed:', e?.message || e); }
+    } else if (snap.field?.type === 'local') {
+      try {
+        await this.router.execute(['file.openDir', '']);
+        await this.router.execute('camera.fitall');
+      } catch (e) { console.warn('[session] local field restore failed:', e?.message || e); }
+    }
+
+    // Tabs next — so the camera (restored next) isn't fought by file.open's framing,
+    // and so the dock/registry are populated.
     if (Array.isArray(snap.files)) {
       for (const f of snap.files) {
         if (!f?.path) continue;
-        if (this.ctx.registry.has(f.path)) continue;              // already open — don't double
-        if (!(await this._fileExists(f.path))) {
+        // The grid may already exist (the field-restore above bulk-loaded it). Still
+        // run file.open — it dedups the grid and creates the SHEET, so the file comes
+        // back as a tab. Only probe existence for files not already loaded.
+        const already = this.ctx.registry.has(f.path);
+        if (!already && !(await this._fileExists(f.path))) {
           console.warn(`[session] dropped missing file: ${f.path}`);
           continue;
         }
