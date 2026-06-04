@@ -292,6 +292,10 @@ export class RepositoryAdapter {
         const results = new Map();
         const toFetch = [];
 
+        // Progress: this is the path the viewer's bulk open uses (not streamFiles),
+        // so tick _progress here too — getProgress() drives the repo-load UI.
+        this._progress = { loaded: 0, total: paths.length, current: 'Fetching files…' };
+
         // First pass: check cache for all files
         for (const path of paths) {
             const cacheKey = RepositoryContentCache.makeKey('file', owner, repo, path, branch);
@@ -301,17 +305,18 @@ export class RepositoryAdapter {
                 results.set(path, cached);
                 this.stats.cacheHits++;
                 this.stats.totalRequests++;
+                this._progress.loaded++;
             } else {
                 toFetch.push(path);
             }
         }
 
-        // Second pass: fetch missing files in parallel
+        // Second pass: fetch missing files in parallel (count each as it resolves)
         if (toFetch.length > 0) {
             const fetchPromises = toFetch.map(path =>
                 this.getFileContent(owner, repo, path, branch)
-                    .then(content => ({ path, content }))
-                    .catch(error => ({ path, content: null, error }))
+                    .then(content => { this._progress.loaded++; this._progress.current = path; return { path, content }; })
+                    .catch(error => { this._progress.loaded++; return { path, content: null, error }; })
             );
 
             const fetchedResults = await Promise.all(fetchPromises);
@@ -323,6 +328,7 @@ export class RepositoryAdapter {
             }
         }
 
+        this._progress.current = null;
         return results;
     }
 

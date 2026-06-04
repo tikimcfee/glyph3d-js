@@ -54,6 +54,7 @@ function currentRepoLabel(client) {
 export default function RepoPanel({ client }) {
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState(null);
   const [error, setError] = useState(null);
   const [current, setCurrent] = useState(() => currentRepoLabel(client));
   const [connected, setConnected] = useState(false);
@@ -79,7 +80,13 @@ export default function RepoPanel({ client }) {
   const load = useCallback(async () => {
     const ref = input.trim();
     if (!ref || !client || busy) return;
-    setBusy(true); setError(null);
+    setBusy(true); setError(null); setProgress(null);
+    // Surface fetch progress while the load runs. Read the provider fresh each tick
+    // (repo.load may swap in a GitHubFileProvider) and let getProgress drive the count.
+    const poll = setInterval(() => {
+      const p = client.ctx?.fileProvider?.getProgress?.();
+      if (p && p.total) setProgress({ loaded: p.loaded, total: p.total });
+    }, 120);
     try {
       const r = await client.router.execute(['repo.load', ref]);
       if (r?.text?.startsWith('ERR')) setError(r.text.replace(/^ERR:\s*/, ''));
@@ -87,6 +94,8 @@ export default function RepoPanel({ client }) {
     } catch (e) {
       setError(e?.message || String(e));
     } finally {
+      clearInterval(poll);
+      setProgress(null);
       setBusy(false);
     }
   }, [input, client, busy]);
@@ -129,7 +138,11 @@ export default function RepoPanel({ client }) {
             {busy ? '…' : 'Load'}
           </button>
         </div>
-        {busy && <div style={styles.hint}>loading repo…</div>}
+        {busy && (
+          <div style={styles.hint}>
+            {progress ? `fetching ${progress.loaded}/${progress.total}…` : 'loading repo…'}
+          </div>
+        )}
         {error && <div style={styles.err}>{error}</div>}
         {current && (
           <div style={styles.current}>

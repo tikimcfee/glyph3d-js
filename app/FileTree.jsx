@@ -43,6 +43,7 @@ const styles = {
   }),
   dir: { color: '#9aa3b2' },
   fileOpen: { color: '#7ad7a0' },
+  fileActive: { color: '#cfeaff', boxShadow: 'inset 2px 0 0 #6cf' },  // the focused file (attention.primary)
   msg: { padding: '12px', color: '#7c8596' },
   err: { padding: '12px', color: '#e0888f', whiteSpace: 'pre-wrap' },
 };
@@ -76,7 +77,7 @@ function buildTree(paths) {
   return root;
 }
 
-function TreeRow({ node, depth, expanded, toggle, open, openFile, openDir, hover, setHover }) {
+function TreeRow({ node, depth, expanded, toggle, open, openFile, openDir, hover, setHover, activePath }) {
   const pad = 8 + depth * 12;
   const hovered = hover === node.path;
   const bg = hovered ? 'rgba(255,255,255,0.05)' : 'transparent';
@@ -102,12 +103,13 @@ function TreeRow({ node, depth, expanded, toggle, open, openFile, openDir, hover
         {isExp && node.children.map((c) => (
           <TreeRow key={c.path} node={c} depth={depth + 1}
             expanded={expanded} toggle={toggle} open={open}
-            openFile={openFile} openDir={openDir} hover={hover} setHover={setHover} />
+            openFile={openFile} openDir={openDir} hover={hover} setHover={setHover} activePath={activePath} />
         ))}
       </>
     );
   }
 
+  const isActive = node.path === activePath;
   return (
     <div
       title={node.path}
@@ -115,8 +117,10 @@ function TreeRow({ node, depth, expanded, toggle, open, openFile, openDir, hover
       onMouseEnter={() => setHover(node.path)}
       onMouseLeave={() => setHover((h) => (h === node.path ? null : h))}
       style={{
-        ...styles.row, paddingLeft: pad + 12, background: bg,
+        ...styles.row, paddingLeft: pad + 12,
+        background: isActive ? 'rgba(102,204,255,0.16)' : bg,
         ...(open.has(node.path) ? styles.fileOpen : null),
+        ...(isActive ? styles.fileActive : null),
       }}
     >
       <span style={styles.name}>{node.name}</span>
@@ -131,6 +135,18 @@ export default function FileTree({ client }) {
   const [open, setOpen] = useState(() => new Set());
   const [expanded, setExpanded] = useState(() => new Set([''])); // root expanded
   const [hover, setHover] = useState(null);
+  const [activePath, setActivePath] = useState(null);  // the focused file (attention.primary)
+
+  // Reflect scene/tab selection in the tree: the focused grid's registry id IS its
+  // path, so highlight the row that matches attention.primary. Click → sheet.focus
+  // sets it; a canvas/tab click sets it too — the tree follows either way.
+  useEffect(() => {
+    const am = client?.ctx?.attentionManager;
+    if (!am?.on) return undefined;
+    const update = () => setActivePath(am.get?.('primary')?.id ?? null);
+    update();
+    return am.on('change:primary', update);
+  }, [client]);
 
   // List the active fileProvider's tree — GitHub (client-only) or the relay's local
   // fs. NOT gated on the relay. Re-list (debounced) on scene changes (repo.load /
@@ -183,9 +199,10 @@ export default function FileTree({ client }) {
     if (!client) return;
     await client.router.execute(`file.open ${path}`);
     setOpen((prev) => new Set(prev).add(path));
-    // Tightest feedback loop: frame the file you just opened so it doesn't load
-    // off-screen. Same camera.focus command the CLI/Claude uses (id == path).
-    client.router.execute(`camera.focus ${path}`);
+    // sheet.focus is the single "go look at it" gesture: sets attention.primary (so
+    // the tree row + HUD tab light up as focused), frames the camera, marks the tab
+    // active. Array form keeps a space/slash path intact. (file.open created the sheet.)
+    client.router.execute(['sheet.focus', `sheet:${path}`]);
   }, [client]);
 
   // The ⊞ button: recursively open a directory's files + tree-layout, then frame
@@ -206,7 +223,7 @@ export default function FileTree({ client }) {
       {/* The root is just a directory row: its ⊞ opens the whole project. */}
       <TreeRow node={tree} depth={0}
         expanded={expanded} toggle={toggle} open={open}
-        openFile={openFile} openDir={openDir} hover={hover} setHover={setHover} />
+        openFile={openFile} openDir={openDir} hover={hover} setHover={setHover} activePath={activePath} />
     </div>
   );
 
