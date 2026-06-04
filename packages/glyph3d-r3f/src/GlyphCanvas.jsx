@@ -11,9 +11,18 @@ import { GlyphProvider } from './context.jsx';
  * target so the depth is recreated at the current size. Size comes from r3f's
  * LOGICAL `size` — never the canvas backing, which would feed back and grow.
  */
-function applyFit(gl, width, height) {
+function applyFit(gl, width, height, dpr) {
   if (!gl || width <= 0 || height <= 0) return;
-  gl.setSize(width, height, false);
+  const pr = dpr || (gl.getPixelRatio ? gl.getPixelRatio() : 1);
+  // Set size AND pixel ratio ATOMICALLY. r3f applies them in two separate calls
+  // (setSize then setPixelRatio), which momentarily leaves canvas.width !=
+  // _width × pixelRatio — and a frame rendered in that window has a depth
+  // attachment that doesn't match the color (harmless at dpr 1, fatal on HiDPI).
+  // setDrawingBufferSize sets _width/_height/_pixelRatio/canvas all at once, so
+  // the invariant never breaks. Then drop the cached screen target so the depth
+  // is rebuilt at the new size.
+  if (typeof gl.setDrawingBufferSize === 'function') gl.setDrawingBufferSize(width, height, pr);
+  else gl.setSize(width, height, false);
   if (gl.backend && typeof gl.backend.updateSize === 'function') gl.backend.updateSize();
 }
 
@@ -21,7 +30,8 @@ function SyncSize() {
   const gl = useThree((s) => s.gl);
   const width = useThree((s) => s.size.width);
   const height = useThree((s) => s.size.height);
-  useEffect(() => { applyFit(gl, width, height); }, [gl, width, height]);
+  const dpr = useThree((s) => s.viewport.dpr);
+  useEffect(() => { applyFit(gl, width, height, dpr); }, [gl, width, height, dpr]);
   return null;
 }
 
@@ -48,40 +58,21 @@ export default function GlyphCanvas({
   toneMapping = THREE.NoToneMapping,
   onRenderer,
   onCreated,
-  dpr,
+  dpr = 1,
   children,
   ...canvasProps
 }) {
-  // Pin dpr so the size baked into the canvas (gl factory) matches what r3f uses
-  // afterward — otherwise depth and color diverge by the dpr factor on HiDPI.
-  const resolvedDpr = dpr ?? (typeof window !== 'undefined'
-    ? Math.min(Math.max(window.devicePixelRatio || 1, 1), 2) : 1);
-
   const handleCreated = (state) => {
-    applyFit(state.gl, state.size.width, state.size.height);
+    applyFit(state.gl, state.size.width, state.size.height, state.viewport && state.viewport.dpr);
     onCreated?.(state);
   };
 
   return (
     <Canvas
       {...canvasProps}
-      dpr={resolvedDpr}
+      dpr={dpr}
       onCreated={handleCreated}
       gl={async (glProps) => {
-        // Size the canvas backing BEFORE constructing the renderer so the screen
-        // depth texture is born at the right size (see component note). Use the
-        // PARENT's layout size (or the window) × dpr — never the canvas's own
-        // clientWidth, which would feed back from the backing we're setting.
-        const canvas = glProps && glProps.canvas;
-        if (canvas) {
-          const host = canvas.parentElement;
-          const w = (host && host.clientWidth) || (typeof window !== 'undefined' ? window.innerWidth : 0);
-          const h = (host && host.clientHeight) || (typeof window !== 'undefined' ? window.innerHeight : 0);
-          if (w > 0 && h > 0) {
-            canvas.width = Math.round(w * resolvedDpr);
-            canvas.height = Math.round(h * resolvedDpr);
-          }
-        }
         const renderer = new THREE.WebGPURenderer({ ...glProps, antialias: true });
         renderer.toneMapping = toneMapping;
         await renderer.init();
