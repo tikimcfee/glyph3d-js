@@ -52,12 +52,16 @@ export default function GlyphCanvas({
       gl={async (glProps) => {
         const canvas = glProps && glProps.canvas;
         if (canvas) {
+          // Match r3f's own sizing math EXACTLY: it does Math.floor(rect × dpr)
+          // off the measured bounding rect (fractional). Math.round + clientWidth
+          // (integer) drifted by a pixel → depth 839 vs color 838, the mismatch.
           const host = canvas.parentElement;
-          const w = (host && host.clientWidth) || (typeof window !== 'undefined' ? window.innerWidth : 0);
-          const h = (host && host.clientHeight) || (typeof window !== 'undefined' ? window.innerHeight : 0);
+          const rect = host && host.getBoundingClientRect();
+          const w = (rect && rect.width) || (typeof window !== 'undefined' ? window.innerWidth : 0);
+          const h = (rect && rect.height) || (typeof window !== 'undefined' ? window.innerHeight : 0);
           if (w > 0 && h > 0) {
-            canvas.width = Math.round(w * resolvedDpr);
-            canvas.height = Math.round(h * resolvedDpr);
+            canvas.width = Math.floor(w * resolvedDpr);
+            canvas.height = Math.floor(h * resolvedDpr);
           }
         }
         const renderer = new THREE.WebGPURenderer({ ...glProps, antialias: true });
