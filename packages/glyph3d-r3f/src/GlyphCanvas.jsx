@@ -49,11 +49,24 @@ export default function GlyphCanvas({
   atlas,
   toneMapping = THREE.NoToneMapping,
   onRenderer,
+  onCreated,
   children,
   ...canvasProps
 }) {
+  // Size the renderer BEFORE the first frame. The async WebGPU init leaves the
+  // renderer at the canvas default (300×150), and <SyncSize> only corrects it
+  // after the first commit — so the opening frames would render with a depth
+  // attachment that doesn't match the color target. onCreated runs before the
+  // render loop, so sizing here avoids those startup validation errors too.
+  const handleCreated = (state) => {
+    if (state?.gl && state.size?.width > 0 && state.size?.height > 0) {
+      state.gl.setSize(state.size.width, state.size.height, false);
+    }
+    onCreated?.(state);
+  };
   return (
     <Canvas
+      onCreated={handleCreated}
       // r3f v9: the gl factory may be async; configure() awaits it and mounts
       // children only after it resolves — so the WebGPU backend is initialized
       // before the first render(). (Verified against r3f 9.6.1 + three 0.183.)
