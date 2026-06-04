@@ -23,6 +23,8 @@ const FONT_CHAIN = [
 
 const setStatus = (t) => { const el = document.getElementById('status'); if (el) el.textContent = t; };
 const relayPort = Number(new URLSearchParams(location.search).get('relay')) || 8080;
+// ?repo=owner/repo[/branch] → render that GitHub repo client-only (no relay needed).
+const repoParam = new URLSearchParams(location.search).get('repo');
 
 // Draggable splitter between the dock sidebar and the canvas. The sidebar width is
 // app state (not pinned), so panels are resizable; the r3f canvas auto-resizes to its
@@ -100,6 +102,7 @@ function App() {
               <CommandProvider
                 atlas={atlas}
                 port={relayPort}
+                repo={repoParam}
                 cameraControllerRef={cameraRef}
                 onReady={setClient}
               >

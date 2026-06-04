@@ -1,15 +1,17 @@
 import React, { useEffect, useMemo, useState, useCallback } from 'react';
 
-// FileTree — the IDE's DOM chrome. Lists the relay's filesystem (the locally
-// served project) as a collapsible tree and opens a file as a 3D grid on click.
+// FileTree — the IDE's DOM chrome. Lists the ACTIVE file source as a collapsible
+// tree and opens a file as a 3D grid on click. The source is whatever
+// ctx.fileProvider is: the GitHub baseline (client-only, no relay) or the relay's
+// local filesystem. It is NOT gated on the relay — the GitHub tree lists with zero
+// backend.
 //
 // It issues NO bespoke loading logic: a click runs `file.open <path>` through the
 // command router — the exact command the CLI/Claude runs. The panel is a thin
 // command surface, so UI and bus stay in lockstep by construction.
 //
-// Fetching is connection-aware: the bridge connects asynchronously (and the relay
-// restarts often in dev), so we list the tree when the socket actually opens and
-// re-list on every reconnect — never against a not-yet-open socket.
+// Re-lists (debounced) whenever the scene changes (a repo.load / file.open / local
+// restore mutates the registry) or the relay (re)connects (local re-mirror).
 
 const styles = {
   // FileTree is now panel CONTENT — dockview owns the panel container + tab chrome
@@ -130,35 +132,37 @@ export default function FileTree({ client }) {
   const [expanded, setExpanded] = useState(() => new Set([''])); // root expanded
   const [hover, setHover] = useState(null);
 
-  // Live socket state via the bridge listener (fires true immediately if already
-  // connected, and on every reconnect).
+  // List the active fileProvider's tree — GitHub (client-only) or the relay's local
+  // fs. NOT gated on the relay. Re-list (debounced) on scene changes (repo.load /
+  // file.open / local restore mutate the registry) and on relay (re)connect.
   useEffect(() => {
-    const bridge = client?.bridge;
-    if (!bridge?.onConnectionChange) return;
-    return bridge.onConnectionChange(setConnected);
-  }, [client]);
-
-  // List the tree on (re)connect. Read fresh — no provider cache — so a relay
-  // restart re-mirrors the actual disk.
-  useEffect(() => {
-    const provider = client?.ctx?.fileProvider;
-    if (!provider || !connected) return;
-    let cancelled = false;
-    (async () => {
+    if (!client) return undefined;
+    let cancelled = false, timer = null;
+    const list = async () => {
+      const provider = client.ctx?.fileProvider;
+      if (!provider) return;
       try {
         const entries = await provider.listTree('file:///');
         const code = provider.filterCodeFiles({ tree: entries });
-        if (!cancelled) {
-          setFiles(code.map((f) => f.path).sort());
-          setError(null);
-          console.log(`[filetree] listed ${code.length} code files (${entries.length} tree entries)`);
-        }
+        if (cancelled) return;
+        setFiles(code.map((f) => f.path).sort());
+        setError(null);
       } catch (e) {
         if (!cancelled) setError(e?.message || String(e));
       }
-    })();
-    return () => { cancelled = true; };
-  }, [client, connected]);
+    };
+    const schedule = () => { clearTimeout(timer); timer = setTimeout(list, 150); };
+    const reg = client.ctx?.registry;
+    const bridge = client.bridge;
+    reg?.addChangeListener?.(schedule);
+    const offConn = bridge?.onConnectionChange?.((c) => { setConnected(c); schedule(); });
+    list();  // initial — a ?repo GitHub tree may already be loaded
+    return () => {
+      cancelled = true; clearTimeout(timer);
+      reg?.removeChangeListener?.(schedule);
+      offConn?.();
+    };
+  }, [client]);
 
   const tree = useMemo(() => {
     if (!files) return null;
@@ -194,10 +198,9 @@ export default function FileTree({ client }) {
 
   let body;
   if (!client) body = <div style={styles.msg}>starting…</div>;
-  else if (!connected) body = <div style={styles.msg}>connecting to relay…</div>;
   else if (error) body = <div style={styles.err}>tree error:{'\n'}{error}</div>;
   else if (!tree) body = <div style={styles.msg}>listing files…</div>;
-  else if (tree.children.length === 0) body = <div style={styles.msg}>(no code files found)</div>;
+  else if (tree.children.length === 0) body = <div style={styles.msg}>no files — load a repo (or connect the relay)</div>;
   else body = (
     <div style={styles.list}>
       {/* The root is just a directory row: its ⊞ opens the whole project. */}

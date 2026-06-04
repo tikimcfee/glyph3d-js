@@ -25,6 +25,7 @@ import registerGroupCommands from './groupCommands.js';
 import registerSimulateCommands from './simulateCommands.js';
 import registerModeCommands from './modeCommands.js';
 import registerFileCommands from './fileCommands.js';
+import registerRepoCommands from './repoCommands.js';
 import registerAttentionCommands from './attentionCommands.js';
 import registerEditCommands from './editCommands.js';
 import registerAgentVisitorCommands from './agentVisitorCommands.js';
@@ -60,6 +61,7 @@ export function registerAllCommands(router) {
     registerSimulateCommands(router);
     registerModeCommands(router);
     registerFileCommands(router);
+    registerRepoCommands(router);
     registerAttentionCommands(router);
     registerEditCommands(router);
     registerAgentVisitorCommands(router);

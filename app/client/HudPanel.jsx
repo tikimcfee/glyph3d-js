@@ -6,14 +6,15 @@ import React, { useEffect, useState, useCallback } from 'react';
  * sections, each a pure binding of { fire: a command-bus verb, reflect: live state } — the
  * panel owns NO behavior:
  *
- *   1. SHEETS — the working set (the active field's sheets): one tab each, marked with the
- *      open/rendered/focused triple ● ◐ ○ (focused · rendered · open-only). Click a tab →
- *      sheet.focus (render-if-needed + frame + focus); × → sheet.close. This is the editor
- *      tab-bar: open files that may or may not be drawn, all reachable without typing ids.
- *   1b. OTHER WINDOWS — registry windows NOT backed by a sheet (terminals, memory grids, raw
- *      grids): still focus-back-able (select + go to it) so nothing gets lost off-tab.
- *   2. STATE controls (for the focused window): focus/reset/cam-lock, layout mode, edit toggle
- *      (lit = editing — the explicit, no-silent-edit affordance), scroll/frame readout.
+ *   1. TABS — the open-tab bar (the active field's sheets): the small, user-curated set of
+ *      files opened AS tabs, NOT a mirror of everything loaded in the field (a repo can load
+ *      thousands of grids — those live in the file tree, not here). Each tab is marked with the
+ *      open/rendered/focused triple ● ◐ ○. Click → sheet.focus (render-if-needed + frame +
+ *      focus); × → sheet.close. Addable/removable like editor tabs; browse-everything is the
+ *      file-tree panel's job.
+ *   2. STATE controls (for the focused window — the selection): focus/reset/cam-lock, layout
+ *      mode, edit toggle (lit = editing — the explicit, no-silent-edit affordance), scroll/
+ *      frame readout. Works for ANY focused grid, tab or not.
  *
  * State flows ONE WAY: subscribe to WorkspaceModel change events (sheets/fields) + AttentionManager
  * + registry changes for instant retarget, + a light ~150ms poll for readouts that don't emit
@@ -51,27 +52,10 @@ function readSheets(client) {
       id: s.id,                                 // sheetId ("sheet:"+path) — what the verbs take
       title: s.title,
       panelId: s.panelId,
-      uri: s.source?.uri ?? null,               // for orphan-strip dedup by source (open-only sheets)
       state: s.focused ? 'focused' : s.rendered ? 'rendered' : 'open',
       dirty: !!(grid && grid.isModified?.()),   // unsaved edits → the • marker
     };
   });
-}
-
-// Registry windows NOT backed by a sheet (terminals, mem grids, raw grids) — kept reachable in the
-// HUD even though they're outside the sheet working set. Pure read; dedup against the sheet panels.
-function readOrphanWindows(client, sheets) {
-  const reg = client?.ctx?.registry;
-  if (!reg) return [];
-  const sheetPanels = new Set(sheets.map((s) => s.panelId).filter(Boolean));
-  // Also dedup by source uri: an OPEN-only sheet (panelId null) whose file is separately drawn
-  // (e.g. file.openDir registered a grid but never linked it) would otherwise show in BOTH strips.
-  const sheetUris = new Set(sheets.map((s) => s.uri).filter(Boolean));
-  const grids = reg.findByType?.('grid') || [];
-  const terms = reg.findByType?.('terminal') || [];
-  return [...grids, ...terms]
-    .filter((e) => !sheetPanels.has(e.id) && !sheetUris.has(e.grid?.getSourcePath?.()))
-    .map((e) => ({ id: e.id, type: e.type || 'grid', name: e.grid?.getFilename?.() || e.id }));
 }
 
 // The focused window's live state (attention.primary) for the control section. Pure read.
@@ -102,16 +86,13 @@ function readFocus(client) {
 
 export default function HudPanel({ client }) {
   const [sheets, setSheets] = useState(() => readSheets(client));
-  const [orphans, setOrphans] = useState(() => readOrphanWindows(client, readSheets(client)));
   const [f, setF] = useState(() => readFocus(client));
   const [collapsed, setCollapsed] = useState(false);
 
   useEffect(() => {
     if (!client) return undefined;
     const refresh = () => {
-      const s = readSheets(client);
-      setSheets(s);
-      setOrphans(readOrphanWindows(client, s));
+      setSheets(readSheets(client));
       setF(readFocus(client));
     };
     const ws = client.ctx?.workspace;
@@ -133,14 +114,13 @@ export default function HudPanel({ client }) {
 
   const fire = useCallback((...argv) => client?.router?.execute(argv), [client]);
 
-  if (sheets.length === 0 && orphans.length === 0 && !f) return null;  // nothing to show yet
-  const focusedId = f?.id ?? null;
+  if (sheets.length === 0 && !f) return null;  // nothing to show yet
 
   return (
     <div style={S.panel} onPointerDown={(e) => e.stopPropagation()} onWheel={(e) => e.stopPropagation()}>
       {/* header — the companion HUD's handle: collapse/expand the overlay */}
       <div style={S.header}>
-        <span style={S.htitle}>workspace</span>
+        <span style={S.htitle}>tabs</span>
         <button type="button" style={S.collapse} title={collapsed ? 'expand' : 'collapse'}
           onClick={() => setCollapsed((c) => !c)}>{collapsed ? '▸' : '▾'}</button>
       </div>
@@ -160,19 +140,6 @@ export default function HudPanel({ client }) {
               <button type="button" style={S.close} title="close sheet"
                 onClick={() => fire('sheet.close', s.id)}>×</button>
             </div>
-          ))}
-        </div>
-      )}
-
-      {/* 1b. other windows (terminals / mem grids not backed by a sheet) — focus-back only */}
-      {orphans.length > 0 && (
-        <div style={{ ...S.list, ...(sheets.length > 0 ? S.listGap : null) }}>
-          {orphans.map((w) => (
-            <button key={w.id} type="button" title={w.id}
-              style={{ ...S.tab, ...(w.id === focusedId ? S.tabOn : null) }}
-              onClick={() => { fire('attention.set', 'primary', w.id); fire('camera.focus', w.id); }}>
-              {w.type === 'terminal' ? '▤' : '▦'} {short(w.name)}
-            </button>
           ))}
         </div>
       )}
@@ -236,7 +203,6 @@ const S = {
     userSelect: 'none', backdropFilter: 'blur(6px)', boxShadow: '0 4px 18px rgba(0,0,0,0.35)',
   },
   list: { display: 'flex', flexDirection: 'column', gap: 3, maxHeight: 220, overflowY: 'auto' },
-  listGap: { borderTop: '1px solid #1c242e', paddingTop: 5, marginTop: 2 },
   // sheet tab = a row: a left-aligned focus button + a close ×. Highlighted when focused.
   tabRow: {
     display: 'flex', alignItems: 'stretch', gap: 2,
@@ -254,13 +220,6 @@ const S = {
     font: 'inherit', color: 'inherit', opacity: 0.55, background: 'transparent', border: 'none',
     borderLeft: '1px solid rgba(255,255,255,0.08)', padding: '0 7px', cursor: 'pointer',
   },
-  // plain window tab (orphans): single button, focus-back
-  tab: {
-    font: 'inherit', textAlign: 'left', color: '#9ab', background: '#141a22',
-    border: '1px solid #232b34', borderRadius: 4, padding: '3px 8px', cursor: 'pointer',
-    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-  },
-  tabOn: { color: '#08101a', background: '#6cf', borderColor: '#6cf', fontWeight: 600 },
   controls: { display: 'flex', flexDirection: 'column', gap: 6, borderTop: '1px solid #232b34', paddingTop: 7 },
   row: { display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' },
   btn: {

@@ -7,3 +7,4 @@ export { RepositoryContentCache } from './RepositoryContentCache.js';
 export { HeatmapProvider } from './HeatmapProvider.js';
 export { FileSystemError } from './types.js';
 export { RemoteFileSystemProvider } from './RemoteFileSystemProvider.js';
+export { GitHubFileProvider } from './GitHubFileProvider.js';

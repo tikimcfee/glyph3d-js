@@ -9,6 +9,7 @@ import { installConsoleForwarder } from '@glyph3d/core/services/orchestration/co
 import AttentionManager from '@glyph3d/core/services/interaction/AttentionManager.js';
 import EntityKeystrokeRouter from '@glyph3d/core/services/interaction/EntityKeystrokeRouter.js';
 import RemoteFileSystemProvider from '@glyph3d/core/services/data/RemoteFileSystemProvider.js';
+import GitHubFileProvider from '@glyph3d/core/services/data/GitHubFileProvider.js';
 import { PickingSystem } from '@glyph3d/core/picking/PickingSystem.js';
 import SessionStore from './SessionStore.js';
 import WorkspaceModel from './WorkspaceModel.js';
@@ -95,10 +96,12 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     // resolves pixel-perfect picks through it. Null until then.
     pickingSystem: null,
 
-    // Read-only local filesystem over the relay (fs/* RPC). Set once the bridge
-    // exists; commands like file.open read files through it. Swap for the GitHub
-    // adapter (RepositoryAdapter) here later — same surface, no command changes.
-    fileProvider: null,
+    // The file source. BASELINE = GitHubFileProvider: client-only GitHub browsing
+    // that always works, no relay needed. The effect swaps in RemoteFileSystemProvider
+    // (local fs over the relay) when the binary is serving a project. Same surface
+    // either way (getFile / listTree / filterCodeFiles / getMultipleFiles), so
+    // file.open / FileTree don't care which is active.
+    fileProvider: new GitHubFileProvider(),
 
     annotations: new Map(),
     gridVisualState: new Map(),
@@ -146,7 +149,7 @@ export function useAppCommands() {
  * The app's client layer — it sits next to the spine (app/commands) it wires,
  * so there's exactly one of it.
  */
-export default function CommandProvider({ atlas, port = 8080, cameraControllerRef, onReady, children }) {
+export default function CommandProvider({ atlas, port = 8080, repo = null, cameraControllerRef, onReady, children }) {
   const { scene, camera, gl } = useThree();
   const registryBundle = useGridRegistry();
   const stateRef = useRef(null);
@@ -191,7 +194,10 @@ export default function CommandProvider({ atlas, port = 8080, cameraControllerRe
       state.ctx.terminals?.get(id)?.writeBytes?.(bytes);
     });
 
-    state.ctx.fileProvider = new RemoteFileSystemProvider(bridge);
+    // The relay's local file source. Swapped in as ctx.fileProvider on connect when
+    // no explicit ?repo was given (the binary serving a project); GitHub stays the
+    // baseline until then.
+    const remoteProvider = new RemoteFileSystemProvider(bridge);
     state.bridge = bridge;
     bridge.connect(url);
     installConsoleForwarder(bridge);
@@ -274,7 +280,15 @@ export default function CommandProvider({ atlas, port = 8080, cameraControllerRe
     const session = new SessionStore({ ctx: state.ctx, router: state.router, bridge });
     state.session = session;
     state.ctx.session = session; // so session.* command handlers can reach it
-    const offConn = bridge.onConnectionChange((connected) => { if (connected) session.startOnConnect(); });
+    // The relay is pure enhancement. When it connects it lights up terminals + the
+    // command bus; and — unless an explicit ?repo pinned us to GitHub — it makes the
+    // local project the binary serves the active file source + restores its session.
+    // (SessionStore is a local/relay feature; it never runs in pure GitHub mode.)
+    const offConn = bridge.onConnectionChange((connected) => {
+      if (!connected || repo) return;
+      state.ctx.fileProvider = remoteProvider;
+      session.startOnConnect();
+    });
 
     // Workspace self-heal: when a panel is removed out-of-band (grid.remove, scene.clear_*,
     // eviction) rather than via sheet.derender, scrub the dangling sheet.panelId so the
@@ -284,6 +298,15 @@ export default function CommandProvider({ atlas, port = 8080, cameraControllerRe
 
     // Hand the wired client to the app (for DOM chrome outside the Canvas).
     onReady?.(state);
+
+    // Baseline client-only load: ?repo=owner/repo[/branch] renders that GitHub repo
+    // immediately, no relay required (the hosted-demo path). repo.load does the
+    // clear → fetch → field-render.
+    if (repo) {
+      state.router.execute(['repo.load', repo]).catch(
+        (err) => console.warn('[repo] initial load failed:', err?.message || err)
+      );
+    }
 
     return () => {
       offConn?.();
