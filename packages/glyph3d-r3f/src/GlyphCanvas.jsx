@@ -60,8 +60,14 @@ export default function GlyphCanvas({
           const w = (rect && rect.width) || (typeof window !== 'undefined' ? window.innerWidth : 0);
           const h = (rect && rect.height) || (typeof window !== 'undefined' ? window.innerHeight : 0);
           if (w > 0 && h > 0) {
+            // Backing store (physical px) AND CSS display size (logical px) — the
+            // standard HiDPI canvas setup. Without the style, the canvas displays
+            // at its intrinsic backing size, overflowing the frame (clipped →
+            // blank) until a resize makes r3f set the style.
             canvas.width = Math.floor(w * resolvedDpr);
             canvas.height = Math.floor(h * resolvedDpr);
+            canvas.style.width = w + 'px';
+            canvas.style.height = h + 'px';
           }
         }
         const renderer = new THREE.WebGPURenderer({ ...glProps, antialias: true });
