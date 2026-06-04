@@ -1,39 +1,39 @@
 import React, { useEffect, useMemo, useState, useCallback } from 'react';
+import { buildTree } from './treeUtil.js';
 
-// FileTree — the IDE's DOM chrome. Lists the ACTIVE file source as a collapsible
-// tree and opens a file as a 3D grid on click. The source is whatever
-// ctx.fileProvider is: the GitHub baseline (client-only, no relay) or the relay's
-// local filesystem. It is NOT gated on the relay — the GitHub tree lists with zero
-// backend.
+// FileTree — the Files panel: ONE tree that is both the source browser (summon a file
+// into the scene with a click) AND the scene view for files (loaded rows are lit, with
+// per-row hide + close, and a "loaded only" filter to prune to what's in the field).
 //
-// It issues NO bespoke loading logic: a click runs `file.open <path>` through the
-// command router — the exact command the CLI/Claude runs. The panel is a thin
-// command surface, so UI and bus stay in lockstep by construction.
+// Why one tree, not a browser + a separate outliner: in glyph3d a file loads as exactly
+// one grid — scene objects are 1:1 with source files — so a second "scene tree" is just
+// a near-duplicate of this one. (The DCC browser/outliner split assumes assets ≠ scene
+// instances; that doesn't hold for files here. Terminals/memory, which have no source
+// row, are a different story — they live in their own panels.)
 //
-// Re-lists (debounced) whenever the scene changes (a repo.load / file.open / local
-// restore mutates the registry) or the relay (re)connects (local re-mirror).
+// No bespoke logic: every action is a bus verb (file.open / grid.close / grid.visibility),
+// the same the CLI/Claude run. `loaded` comes straight from the registry (the truth of
+// what's rendered); `attention.primary` is the one selection authority, reflected here.
 
 const styles = {
-  // FileTree is now panel CONTENT — dockview owns the panel container + tab chrome
-  // (title, drag, close), so this just fills the panel with the same near-black,
-  // monospace surface the chrome uses elsewhere.
   content: {
-    width: '100%', height: '100%',
-    background: 'rgba(8,10,14,0.92)',
+    width: '100%', height: '100%', background: 'rgba(8,10,14,0.92)',
     display: 'flex', flexDirection: 'column', overflow: 'hidden',
     font: '12px/1.55 ui-monospace, "JetBrains Mono", Menlo, monospace', color: '#c8ccd6',
   },
   contentHeader: {
-    padding: '8px', borderBottom: '1px solid #1b1f29',
-    color: '#7c8596', letterSpacing: '0.04em', flex: '0 0 auto',
-    display: 'flex', alignItems: 'center', gap: 8,
+    padding: '8px', borderBottom: '1px solid #1b1f29', color: '#7c8596',
+    letterSpacing: '0.04em', flex: '0 0 auto', display: 'flex', alignItems: 'center', gap: 8,
   },
-  dot: (ok) => ({ color: ok ? '#7ad7a0' : '#caa14a' }),
+  filter: (on) => ({
+    flex: '0 0 auto', font: 'inherit', fontSize: 11, cursor: 'pointer', borderRadius: 4, padding: '1px 7px',
+    color: on ? '#08101a' : '#8b9aa8', background: on ? '#6cf' : 'transparent', border: '1px solid ' + (on ? '#6cf' : '#2a3340'),
+  }),
+  dot: (ok) => ({ color: ok ? '#7ad7a0' : '#caa14a', flex: '0 0 auto' }),
   list: { overflowY: 'auto', flex: '1 1 auto', padding: '4px 0' },
   row: {
-    cursor: 'pointer', whiteSpace: 'nowrap', overflow: 'hidden',
-    textOverflow: 'ellipsis', userSelect: 'none', paddingRight: 8,
-    display: 'flex', alignItems: 'center',
+    cursor: 'pointer', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+    userSelect: 'none', paddingRight: 8, display: 'flex', alignItems: 'center',
   },
   caret: { display: 'inline-block', width: 12, color: '#5c6675', opacity: 0.8, flex: '0 0 auto' },
   name: { flex: '1 1 auto', overflow: 'hidden', textOverflow: 'ellipsis' },
@@ -41,47 +41,23 @@ const styles = {
     flex: '0 0 auto', marginLeft: 6, padding: '0 5px', borderRadius: 3,
     color: lit ? '#7ad7a0' : '#39414f', cursor: 'pointer',
   }),
-  closeBtn: (lit) => ({
-    flex: '0 0 auto', marginLeft: 6, padding: '0 5px', borderRadius: 3,
+  vis: (shown, lit) => ({
+    flex: '0 0 auto', marginLeft: 6, padding: '0 4px', borderRadius: 3,
+    color: shown ? (lit ? '#cfe3ff' : '#4a5566') : '#caa14a', cursor: 'pointer',
+  }),
+  close: (lit) => ({
+    flex: '0 0 auto', marginLeft: 4, padding: '0 5px', borderRadius: 3,
     color: lit ? '#e0888f' : '#4a515f', cursor: 'pointer',
   }),
   dir: { color: '#9aa3b2' },
-  fileLoaded: { color: '#7ad7a0' },                                   // a grid for this file is in the field
+  fileLoaded: { color: '#7ad7a0' },                                   // a grid for this file is in the scene
+  fileHidden: { color: '#5c6675', fontStyle: 'italic' },              // loaded but grid.visible === false
   fileActive: { color: '#cfeaff', boxShadow: 'inset 2px 0 0 #6cf' },  // the focused file (attention.primary)
   msg: { padding: '12px', color: '#7c8596' },
   err: { padding: '12px', color: '#e0888f', whiteSpace: 'pre-wrap' },
 };
 
-// Build a nested {name, path, isDir, children[]} tree from flat path strings.
-// Only directories that contain code files appear (we build from the filtered
-// file list, not the raw tree). Sorted dirs-first, then alphabetical.
-function buildTree(paths) {
-  const root = { name: '', path: '', isDir: true, children: [], _map: new Map() };
-  for (const p of paths) {
-    const parts = p.split('/');
-    let node = root, acc = '';
-    for (let i = 0; i < parts.length; i++) {
-      acc = acc ? `${acc}/${parts[i]}` : parts[i];
-      const isDir = i < parts.length - 1;
-      let child = node._map.get(parts[i]);
-      if (!child) {
-        child = { name: parts[i], path: acc, isDir, children: [], _map: new Map() };
-        node._map.set(parts[i], child);
-        node.children.push(child);
-      }
-      node = child;
-    }
-  }
-  const sortRec = (n) => {
-    n.children.sort((a, b) =>
-      a.isDir !== b.isDir ? (a.isDir ? -1 : 1) : a.name.localeCompare(b.name));
-    n.children.forEach(sortRec);
-  };
-  sortRec(root);
-  return root;
-}
-
-function TreeRow({ node, depth, expanded, toggle, loaded, openFile, openDir, closeFile, hover, setHover, activePath }) {
+function TreeRow({ node, depth, expanded, toggle, loadedVis, openFile, openDir, closeFile, hideFile, hover, setHover, activePath }) {
   const pad = 8 + depth * 12;
   const hovered = hover === node.path;
   const bg = hovered ? 'rgba(255,255,255,0.05)' : 'transparent';
@@ -98,16 +74,14 @@ function TreeRow({ node, depth, expanded, toggle, loaded, openFile, openDir, clo
         >
           <span style={styles.caret}>{isExp ? '▾' : '▸'}</span>
           <span style={styles.name}>{node.name}</span>
-          <span
-            title="lay this folder out in 3D"
+          <span title="lay this folder out in 3D"
             onClick={(e) => { e.stopPropagation(); openDir(node.path); }}
-            style={styles.treeBtn(hovered)}
-          >⊞</span>
+            style={styles.treeBtn(hovered)}>⊞</span>
         </div>
         {isExp && node.children.map((c) => (
           <TreeRow key={c.path} node={c} depth={depth + 1}
-            expanded={expanded} toggle={toggle} loaded={loaded}
-            openFile={openFile} openDir={openDir} closeFile={closeFile}
+            expanded={expanded} toggle={toggle} loadedVis={loadedVis}
+            openFile={openFile} openDir={openDir} closeFile={closeFile} hideFile={hideFile}
             hover={hover} setHover={setHover} activePath={activePath} />
         ))}
       </>
@@ -115,7 +89,8 @@ function TreeRow({ node, depth, expanded, toggle, loaded, openFile, openDir, clo
   }
 
   const isActive = node.path === activePath;
-  const isLoaded = loaded.has(node.path);
+  const isLoaded = loadedVis.has(node.path);
+  const shown = loadedVis.get(node.path) !== false;
   return (
     <div
       title={node.path}
@@ -125,16 +100,19 @@ function TreeRow({ node, depth, expanded, toggle, loaded, openFile, openDir, clo
       style={{
         ...styles.row, paddingLeft: pad + 12,
         background: isActive ? 'rgba(102,204,255,0.16)' : bg,
-        ...(isLoaded ? styles.fileLoaded : null),
+        ...(isLoaded ? (shown ? styles.fileLoaded : styles.fileHidden) : null),
         ...(isActive ? styles.fileActive : null),
       }}
     >
       <span style={styles.name}>{node.name}</span>
-      {/* a grid for this file is in the field → close it from the list */}
+      {/* loaded files get scene-management affordances inline: hide + close */}
       {isLoaded && (
-        <span title="close / remove from view"
-          onClick={(e) => { e.stopPropagation(); closeFile(node.path); }}
-          style={styles.closeBtn(hovered)}>✕</span>
+        <>
+          <span title={shown ? 'hide' : 'show'} style={styles.vis(shown, hovered)}
+            onClick={(e) => { e.stopPropagation(); hideFile(node.path, shown); }}>{shown ? '◉' : '○'}</span>
+          <span title="close / remove from scene" style={styles.close(hovered)}
+            onClick={(e) => { e.stopPropagation(); closeFile(node.path); }}>✕</span>
+        </>
       )}
     </div>
   );
@@ -144,14 +122,13 @@ export default function FileTree({ client }) {
   const [connected, setConnected] = useState(false);
   const [files, setFiles] = useState(null);
   const [error, setError] = useState(null);
-  const [loaded, setLoaded] = useState(() => new Set());  // files with a grid in the field (from the registry)
+  const [loadedVis, setLoadedVis] = useState(() => new Map());  // path → visible, from the registry
   const [expanded, setExpanded] = useState(() => new Set([''])); // root expanded
   const [hover, setHover] = useState(null);
   const [activePath, setActivePath] = useState(null);  // the focused file (attention.primary)
+  const [loadedOnly, setLoadedOnly] = useState(false); // filter the tree to scene contents
 
-  // Reflect scene/tab selection in the tree: the focused grid's registry id IS its
-  // path, so highlight the row that matches attention.primary. Click → sheet.focus
-  // sets it; a canvas/tab click sets it too — the tree follows either way.
+  // The focused grid → row accent (one attention.primary authority).
   useEffect(() => {
     const am = client?.ctx?.attentionManager;
     if (!am?.on) return undefined;
@@ -160,9 +137,7 @@ export default function FileTree({ client }) {
     return am.on('change:primary', update);
   }, [client]);
 
-  // List the active fileProvider's tree — GitHub (client-only) or the relay's local
-  // fs. NOT gated on the relay. Re-list (debounced) on scene changes (repo.load /
-  // file.open / local restore mutate the registry) and on relay (re)connect.
+  // Source listing (debounced) + the loaded map (immediate), both off the registry.
   useEffect(() => {
     if (!client) return undefined;
     let cancelled = false, timer = null;
@@ -179,12 +154,9 @@ export default function FileTree({ client }) {
         if (!cancelled) setError(e?.message || String(e));
       }
     };
-    // `loaded` = files with a grid in the field, straight from the registry (the
-    // truth of what's rendered). Recompute immediately on change so a close drops the
-    // ✕ at once; the tree re-list is debounced separately.
     const recomputeLoaded = () => {
       const r = client.ctx?.registry;
-      if (r) setLoaded(new Set(r.findByType('grid').map((e) => e.id)));
+      if (r) setLoadedVis(new Map(r.findByType('grid').map((e) => [e.id, e.grid?.visible !== false])));
     };
     const schedule = () => { clearTimeout(timer); timer = setTimeout(list, 150); };
     const onReg = () => { recomputeLoaded(); schedule(); };
@@ -193,7 +165,7 @@ export default function FileTree({ client }) {
     reg?.addChangeListener?.(onReg);
     const offConn = bridge?.onConnectionChange?.((c) => { setConnected(c); schedule(); });
     recomputeLoaded();
-    list();  // initial — a ?repo GitHub tree may already be loaded
+    list();
     return () => {
       cancelled = true; clearTimeout(timer);
       reg?.removeChangeListener?.(onReg);
@@ -201,12 +173,14 @@ export default function FileTree({ client }) {
     };
   }, [client]);
 
+  // Source vs scene-only: build the tree from all files, or just the loaded subset.
   const tree = useMemo(() => {
-    if (!files) return null;
-    const t = buildTree(files);
-    t.name = '/'; // the repo root — same ⊞ as any dir; its empty path opens it all
+    const paths = loadedOnly ? [...loadedVis.keys()] : files;
+    if (!paths || paths.length === 0) return null;
+    const t = buildTree([...paths].sort());
+    t.name = '/';
     return t;
-  }, [files]);
+  }, [files, loadedOnly, loadedVis]);
 
   const toggle = useCallback((path) => {
     setExpanded((prev) => {
@@ -219,37 +193,39 @@ export default function FileTree({ client }) {
   const openFile = useCallback(async (path) => {
     if (!client) return;
     await client.router.execute(`file.open ${path}`);
-    // sheet.focus is the single "go look at it" gesture: sets attention.primary (so
-    // the tree row lights up as focused), frames the camera, marks the sheet active.
-    // Array form keeps a space/slash path intact. (file.open created the sheet.)
+    // sheet.focus = the single "go look at it" gesture: attention.primary (drives the
+    // accent) + frame + mark active. Array form keeps a space/slash path intact.
     client.router.execute(['sheet.focus', `sheet:${path}`]);
   }, [client]);
 
-  // The ⊞ button: recursively open a directory's files + tree-layout, then frame
-  // the lot. Empty path == repo root == the whole project (root is just a dir).
   const openDir = useCallback(async (path) => {
     if (!client) return;
     await client.router.execute(`file.openDir ${path}`.trimEnd());
     client.router.execute('camera.fitall');
   }, [client]);
 
-  // The ✕ on a loaded row: remove that grid from the field (grid.close = sheet.close
-  // if it backs a tab, else a bare remove). The registry change recomputes `loaded`.
   const closeFile = useCallback((path) => {
-    client?.router.execute(['grid.close', path]);
+    client?.router.execute(['grid.close', path]);  // sheet.close if a tab, else bare remove
+  }, [client]);
+
+  const hideFile = useCallback((path, shown) => {
+    if (!client) return;
+    client.router.execute(['grid.visibility', path, shown ? 'false' : 'true']);
+    // grid.visible mutates without a registry event → refresh the loaded map now.
+    const r = client.ctx?.registry;
+    if (r) setLoadedVis(new Map(r.findByType('grid').map((e) => [e.id, e.grid?.visible !== false])));
   }, [client]);
 
   let body;
   if (!client) body = <div style={styles.msg}>starting…</div>;
   else if (error) body = <div style={styles.err}>tree error:{'\n'}{error}</div>;
-  else if (!tree) body = <div style={styles.msg}>listing files…</div>;
+  else if (!tree) body = <div style={styles.msg}>{loadedOnly ? 'nothing loaded yet' : 'listing files…'}</div>;
   else if (tree.children.length === 0) body = <div style={styles.msg}>no files — load a repo (or connect the relay)</div>;
   else body = (
     <div style={styles.list}>
-      {/* The root is just a directory row: its ⊞ opens the whole project. */}
       <TreeRow node={tree} depth={0}
-        expanded={expanded} toggle={toggle} loaded={loaded}
-        openFile={openFile} openDir={openDir} closeFile={closeFile}
+        expanded={expanded} toggle={toggle} loadedVis={loadedVis}
+        openFile={openFile} openDir={openDir} closeFile={closeFile} hideFile={hideFile}
         hover={hover} setHover={setHover} activePath={activePath} />
     </div>
   );
@@ -258,8 +234,10 @@ export default function FileTree({ client }) {
     <div style={styles.content}>
       <div style={styles.contentHeader}>
         <span style={{ flex: '1 1 auto', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-          {files ? `${files.length} files` : 'files'}{loaded.size ? ` · ${loaded.size} loaded` : ''}
+          {files ? `${files.length} files` : 'files'}{loadedVis.size ? ` · ${loadedVis.size} loaded` : ''}
         </span>
+        <span style={styles.filter(loadedOnly)} title="show only files loaded into the scene"
+          onClick={() => setLoadedOnly((v) => !v)}>loaded</span>
         <span style={styles.dot(connected)} title={connected ? 'relay connected' : 'relay disconnected'}>●</span>
       </div>
       {body}
