@@ -5,6 +5,12 @@ using GPU-instanced glyphs on a WebGPU renderer. Thousands of glyphs in a single
 draw call — built for navigating source code, directory trees, and live terminals
 in 3D space.
 
+<p align="center">
+  <img src="docs/media/code-in-3d.png" alt="A wall of source files rendered as GPU-instanced text in 3D, receding at an angle" width="820">
+  <br>
+  <em>Whole source files as GPU-instanced glyphs in 3D — thousands of glyphs, one draw call.</em>
+</p>
+
 > Status: `v0.1.0`, pre-release. The core library API is still settling.
 
 ## What's in here
@@ -64,6 +70,12 @@ make build                       # build the app + bake it into the binary (~13M
 
 The binary is self-contained — it serves the built IDE and runs the relay +
 filesystem RPC for a single operator (no auth; designed for personal/dev use).
+
+<p align="center">
+  <img src="docs/media/ide.png" alt="The glyph3d IDE: a 3D field of code grids with file and terminal panels and a command bar" width="820">
+  <br>
+  <em>The bundled IDE — a navigable 3D field of code grids and terminals, all on the core renderer.</em>
+</p>
 
 ## Development
 
