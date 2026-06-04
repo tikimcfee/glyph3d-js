@@ -219,6 +219,10 @@ export default class SessionStore {
       return;
     }
 
+    // Live status for the reload story — the field/tab ops below override it with
+    // their own, then clear; this finally tidies up the slot at the end.
+    this.ctx.status?.set('Restoring session…');
+    try {
     // The bulk field fills the scene first (no tabs), so tabs layer on top and the
     // camera (restored last) wins. repo.load clears the scene itself; both are
     // guarded so a network/offline failure still lets the tabs restore.
@@ -270,6 +274,9 @@ export default class SessionStore {
     this._pendingDock = snap.dock || null;
     this.pendingTerminals = Array.isArray(snap.terminals) ? snap.terminals : [];
     this._maybeApplyDock();
+    } finally {
+      this.ctx.status?.clear();
+    }
   }
 
   async _fileExists(path) {

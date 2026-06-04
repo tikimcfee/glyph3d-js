@@ -48,39 +48,44 @@ export default function registerRepoCommands(router) {
         if (!ref) return { text: 'ERR: usage: repo.load <owner/repo[/branch] | github-url>', data: null };
         const url = normalizeRepoRef(ref);
 
-        // The active source must be GitHub-backed. In the hosted baseline it already is;
-        // if a relay swapped in the local provider, switch back to GitHub for this load.
-        let provider = ctx.fileProvider;
-        if (!(provider instanceof GitHubFileProvider)) {
-            provider = new GitHubFileProvider();
-            ctx.fileProvider = provider;
-        }
-
-        // 1. Fresh slate.
-        const cleared = clearScene(ctx);
-
-        // 2. Client-side GitHub fetch of the tree (sets the provider's _currentTree so
-        //    listTree/filterCodeFiles/getFile resolve against this repo).
-        let info;
+        ctx.status?.set(`Loading ${ref}…`);   // live status; cleared however we return
         try {
-            info = await provider.loadRepository(url);
-        } catch (err) {
-            return { text: `ERR: repo load failed for ${ref}: ${err?.message || err}`, data: null };
+            // The active source must be GitHub-backed. In the hosted baseline it already is;
+            // if a relay swapped in the local provider, switch back to GitHub for this load.
+            let provider = ctx.fileProvider;
+            if (!(provider instanceof GitHubFileProvider)) {
+                provider = new GitHubFileProvider();
+                ctx.fileProvider = provider;
+            }
+
+            // 1. Fresh slate.
+            const cleared = clearScene(ctx);
+
+            // 2. Client-side GitHub fetch of the tree (sets the provider's _currentTree so
+            //    listTree/filterCodeFiles/getFile resolve against this repo).
+            let info;
+            try {
+                info = await provider.loadRepository(url);
+            } catch (err) {
+                return { text: `ERR: repo load failed for ${ref}: ${err?.message || err}`, data: null };
+            }
+
+            // 3. Render the whole repo as the field — the same provider-agnostic bulk-open +
+            //    tree layout the relay path uses, now sourcing from GitHub.
+            const open = await router.execute(['file.openDir', '']);
+
+            // 4. Frame the field.
+            await router.execute('camera.fitall');
+
+            const where = `${info.owner}/${info.repo}@${info.branch}`;
+            const opened = open?.data?.opened;
+            return {
+                text: `OK: loaded ${where}${cleared ? ` (cleared ${cleared} prior)` : ''} — ${opened ?? '?'} files`,
+                data: { repo: where, owner: info.owner, name: info.repo, branch: info.branch, cleared, ...(open?.data || {}) },
+            };
+        } finally {
+            ctx.status?.clear();
         }
-
-        // 3. Render the whole repo as the field — the same provider-agnostic bulk-open +
-        //    tree layout the relay path uses, now sourcing from GitHub.
-        const open = await router.execute(['file.openDir', '']);
-
-        // 4. Frame the field.
-        await router.execute('camera.fitall');
-
-        const where = `${info.owner}/${info.repo}@${info.branch}`;
-        const opened = open?.data?.opened;
-        return {
-            text: `OK: loaded ${where}${cleared ? ` (cleared ${cleared} prior)` : ''} — ${opened ?? '?'} files`,
-            data: { repo: where, owner: info.owner, name: info.repo, branch: info.branch, cleared, ...(open?.data || {}) },
-        };
     }, {
         description: 'Load a GitHub repo as a 3D field, client-only (no relay needed)',
         usage: '<owner/repo[/branch] | github-url>',

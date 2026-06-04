@@ -41,8 +41,12 @@ const styles = {
     flex: '0 0 auto', marginLeft: 6, padding: '0 5px', borderRadius: 3,
     color: lit ? '#7ad7a0' : '#39414f', cursor: 'pointer',
   }),
+  closeBtn: (lit) => ({
+    flex: '0 0 auto', marginLeft: 6, padding: '0 5px', borderRadius: 3,
+    color: lit ? '#e0888f' : '#4a515f', cursor: 'pointer',
+  }),
   dir: { color: '#9aa3b2' },
-  fileOpen: { color: '#7ad7a0' },
+  fileLoaded: { color: '#7ad7a0' },                                   // a grid for this file is in the field
   fileActive: { color: '#cfeaff', boxShadow: 'inset 2px 0 0 #6cf' },  // the focused file (attention.primary)
   msg: { padding: '12px', color: '#7c8596' },
   err: { padding: '12px', color: '#e0888f', whiteSpace: 'pre-wrap' },
@@ -77,7 +81,7 @@ function buildTree(paths) {
   return root;
 }
 
-function TreeRow({ node, depth, expanded, toggle, open, openFile, openDir, hover, setHover, activePath }) {
+function TreeRow({ node, depth, expanded, toggle, loaded, openFile, openDir, closeFile, hover, setHover, activePath }) {
   const pad = 8 + depth * 12;
   const hovered = hover === node.path;
   const bg = hovered ? 'rgba(255,255,255,0.05)' : 'transparent';
@@ -102,14 +106,16 @@ function TreeRow({ node, depth, expanded, toggle, open, openFile, openDir, hover
         </div>
         {isExp && node.children.map((c) => (
           <TreeRow key={c.path} node={c} depth={depth + 1}
-            expanded={expanded} toggle={toggle} open={open}
-            openFile={openFile} openDir={openDir} hover={hover} setHover={setHover} activePath={activePath} />
+            expanded={expanded} toggle={toggle} loaded={loaded}
+            openFile={openFile} openDir={openDir} closeFile={closeFile}
+            hover={hover} setHover={setHover} activePath={activePath} />
         ))}
       </>
     );
   }
 
   const isActive = node.path === activePath;
+  const isLoaded = loaded.has(node.path);
   return (
     <div
       title={node.path}
@@ -119,11 +125,17 @@ function TreeRow({ node, depth, expanded, toggle, open, openFile, openDir, hover
       style={{
         ...styles.row, paddingLeft: pad + 12,
         background: isActive ? 'rgba(102,204,255,0.16)' : bg,
-        ...(open.has(node.path) ? styles.fileOpen : null),
+        ...(isLoaded ? styles.fileLoaded : null),
         ...(isActive ? styles.fileActive : null),
       }}
     >
       <span style={styles.name}>{node.name}</span>
+      {/* a grid for this file is in the field → close it from the list */}
+      {isLoaded && (
+        <span title="close / remove from view"
+          onClick={(e) => { e.stopPropagation(); closeFile(node.path); }}
+          style={styles.closeBtn(hovered)}>✕</span>
+      )}
     </div>
   );
 }
@@ -132,7 +144,7 @@ export default function FileTree({ client }) {
   const [connected, setConnected] = useState(false);
   const [files, setFiles] = useState(null);
   const [error, setError] = useState(null);
-  const [open, setOpen] = useState(() => new Set());
+  const [loaded, setLoaded] = useState(() => new Set());  // files with a grid in the field (from the registry)
   const [expanded, setExpanded] = useState(() => new Set([''])); // root expanded
   const [hover, setHover] = useState(null);
   const [activePath, setActivePath] = useState(null);  // the focused file (attention.primary)
@@ -167,15 +179,24 @@ export default function FileTree({ client }) {
         if (!cancelled) setError(e?.message || String(e));
       }
     };
+    // `loaded` = files with a grid in the field, straight from the registry (the
+    // truth of what's rendered). Recompute immediately on change so a close drops the
+    // ✕ at once; the tree re-list is debounced separately.
+    const recomputeLoaded = () => {
+      const r = client.ctx?.registry;
+      if (r) setLoaded(new Set(r.findByType('grid').map((e) => e.id)));
+    };
     const schedule = () => { clearTimeout(timer); timer = setTimeout(list, 150); };
+    const onReg = () => { recomputeLoaded(); schedule(); };
     const reg = client.ctx?.registry;
     const bridge = client.bridge;
-    reg?.addChangeListener?.(schedule);
+    reg?.addChangeListener?.(onReg);
     const offConn = bridge?.onConnectionChange?.((c) => { setConnected(c); schedule(); });
+    recomputeLoaded();
     list();  // initial — a ?repo GitHub tree may already be loaded
     return () => {
       cancelled = true; clearTimeout(timer);
-      reg?.removeChangeListener?.(schedule);
+      reg?.removeChangeListener?.(onReg);
       offConn?.();
     };
   }, [client]);
@@ -198,10 +219,9 @@ export default function FileTree({ client }) {
   const openFile = useCallback(async (path) => {
     if (!client) return;
     await client.router.execute(`file.open ${path}`);
-    setOpen((prev) => new Set(prev).add(path));
     // sheet.focus is the single "go look at it" gesture: sets attention.primary (so
-    // the tree row + HUD tab light up as focused), frames the camera, marks the tab
-    // active. Array form keeps a space/slash path intact. (file.open created the sheet.)
+    // the tree row lights up as focused), frames the camera, marks the sheet active.
+    // Array form keeps a space/slash path intact. (file.open created the sheet.)
     client.router.execute(['sheet.focus', `sheet:${path}`]);
   }, [client]);
 
@@ -213,6 +233,12 @@ export default function FileTree({ client }) {
     client.router.execute('camera.fitall');
   }, [client]);
 
+  // The ✕ on a loaded row: remove that grid from the field (grid.close = sheet.close
+  // if it backs a tab, else a bare remove). The registry change recomputes `loaded`.
+  const closeFile = useCallback((path) => {
+    client?.router.execute(['grid.close', path]);
+  }, [client]);
+
   let body;
   if (!client) body = <div style={styles.msg}>starting…</div>;
   else if (error) body = <div style={styles.err}>tree error:{'\n'}{error}</div>;
@@ -222,8 +248,9 @@ export default function FileTree({ client }) {
     <div style={styles.list}>
       {/* The root is just a directory row: its ⊞ opens the whole project. */}
       <TreeRow node={tree} depth={0}
-        expanded={expanded} toggle={toggle} open={open}
-        openFile={openFile} openDir={openDir} hover={hover} setHover={setHover} activePath={activePath} />
+        expanded={expanded} toggle={toggle} loaded={loaded}
+        openFile={openFile} openDir={openDir} closeFile={closeFile}
+        hover={hover} setHover={setHover} activePath={activePath} />
     </div>
   );
 
@@ -231,7 +258,7 @@ export default function FileTree({ client }) {
     <div style={styles.content}>
       <div style={styles.contentHeader}>
         <span style={{ flex: '1 1 auto', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-          {files ? `${files.length} files` : 'files'}{open.size ? ` · ${open.size} open` : ''}
+          {files ? `${files.length} files` : 'files'}{loaded.size ? ` · ${loaded.size} loaded` : ''}
         </span>
         <span style={styles.dot(connected)} title={connected ? 'relay connected' : 'relay disconnected'}>●</span>
       </div>

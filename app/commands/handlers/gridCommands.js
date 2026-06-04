@@ -178,6 +178,33 @@ export default function registerGridCommands(router) {
         };
     }, { description: 'Remove a grid from the scene', usage: '<id|index>' });
 
+    router.register('grid.close', (args, ctx) => {
+        // Default to the focused grid (attention.primary) — the HUD's "close" fires
+        // with no arg; the CLI can pass an id/index.
+        const target = args[0] ?? ctx.attentionManager?.get('primary')?.id;
+        if (!target) return { text: 'ERR: usage: grid.close <id|index> (or focus a grid first)', data: null };
+
+        const resolved = resolveGridByIdOrIndex(ctx, String(target));
+        if (resolved.error) return { text: resolved.error, data: null };
+        const id = resolved.registryId;
+        const name = resolved.grid.getFilename?.() || id || '(unnamed)';
+
+        // If a workspace sheet renders this panel, closing the SHEET is the full path
+        // (derender + drop the tab + clear attention) — delegate so tab and grid agree.
+        const ws = ctx.workspace;
+        const sheet = ws ? [...ws.sheets.values()].find((s) => s.panelId === id) : null;
+        if (sheet) return router.execute(['sheet.close', sheet.id]);
+
+        // A bare field grid (not a tab): clear attention if it points here so focus/key
+        // don't dangle on a removed panel, then remove. No reflow — keep the field layout.
+        const am = ctx.attentionManager;
+        if (am?.get?.('key')?.id === id) am.set('key', null, { registry: ctx.registry });
+        if (am?.get?.('primary')?.id === id) am.set('primary', null, { registry: ctx.registry });
+        const removed = ctx.removeGrid(id);
+        if (!removed) return { text: 'ERR: removal failed', data: null };
+        return { text: `OK: closed "${name}"`, data: { removedId: id, name } };
+    }, { description: 'Close a grid: sheet.close if it backs a tab, else remove it from the field', usage: '[id|index]' });
+
     router.register('grid.move', (args, ctx) => {
         if (args.length < 4) return { text: 'ERR: usage: grid.move <id|index> <x> <y> <z>', data: null };
 

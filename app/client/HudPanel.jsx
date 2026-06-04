@@ -1,28 +1,19 @@
 import React, { useEffect, useState, useCallback } from 'react';
 
 /**
- * HudPanel — the workspace HUD: the companion control overlay on the canvas. DOM chrome
- * (outside the r3f Canvas, fed `client` via CommandProvider.onReady). Stacked, composable
- * sections, each a pure binding of { fire: a command-bus verb, reflect: live state } — the
- * panel owns NO behavior:
+ * HudPanel — the focused-window control helper. A small companion overlay on the canvas
+ * (bottom-right), it shows controls for the ONE grid that currently holds attention.primary
+ * — the genuinely dynamic, contextual bit that doesn't fit a static panel:
  *
- *   1. TABS — the open-tab bar (the active field's sheets): the small, user-curated set of
- *      files opened AS tabs, NOT a mirror of everything loaded in the field (a repo can load
- *      thousands of grids — those live in the file tree, not here). Each tab is marked with the
- *      open/rendered/focused triple ● ◐ ○. Click → sheet.focus (render-if-needed + frame +
- *      focus); × → sheet.close. Addable/removable like editor tabs; browse-everything is the
- *      file-tree panel's job.
- *   2. STATE controls (for the focused window — the selection): focus/reset/cam-lock, layout
- *      mode, edit toggle (lit = editing — the explicit, no-silent-edit affordance), scroll/
- *      frame readout. Works for ANY focused grid, tab or not.
+ *   focus / reset / cam-lock · layout mode · edit toggle (lit = editing) · scroll/frame readout · close
  *
- * State flows ONE WAY: subscribe to WorkspaceModel change events (sheets/fields) + AttentionManager
- * + registry changes for instant retarget, + a light ~150ms poll for readouts that don't emit
- * (scroll/frame/layout/edit).
+ * It is NOT the open-file list — that's the FileTree (loaded rows + ✕ + the focused accent).
+ * The HUD owns no behavior: each control is a thin binding of { fire: a bus verb, reflect: live
+ * state }. State flows ONE WAY — subscribe to AttentionManager (primary/key) + registry changes
+ * for instant retarget, plus a light poll for readouts that don't emit (scroll/frame/layout/edit).
  */
 
 const LAYOUT_MODES = ['newspaper', 'long-column', 'no-wrap', 'z-pages'];
-const GLYPH = { focused: '●', rendered: '◐', open: '○' };
 
 // Best-guess the active preset from the grid's layout params (modes are param bundles, so this is
 // an inference for the highlight, not authoritative).
@@ -34,31 +25,13 @@ function inferMode(L) {
   return 'newspaper';
 }
 
-// Trim a label (filename/path) to something tab-sized, keeping the tail (the basename).
-function short(s, n = 20) {
+// Trim a label (filename/path) for the header, keeping the tail (the basename).
+function short(s, n = 26) {
   s = String(s || '');
   return s.length <= n ? s : '…' + s.slice(-(n - 1));
 }
 
-// The active field's sheets = the working set, each annotated with the derived triple. Pure read.
-function readSheets(client) {
-  const ws = client?.ctx?.workspace;
-  if (!ws) return [];
-  const reg = client.ctx?.registry;
-  const am = client.ctx?.attentionManager;
-  return ws.listActiveSheets(reg, am).map((s) => {
-    const grid = s.panelId ? (reg?.get(s.panelId)?.grid ?? null) : null;
-    return {
-      id: s.id,                                 // sheetId ("sheet:"+path) — what the verbs take
-      title: s.title,
-      panelId: s.panelId,
-      state: s.focused ? 'focused' : s.rendered ? 'rendered' : 'open',
-      dirty: !!(grid && grid.isModified?.()),   // unsaved edits → the • marker
-    };
-  });
-}
-
-// The focused window's live state (attention.primary) for the control section. Pure read.
+// The focused window's live state (attention.primary). Pure read.
 function readFocus(client) {
   const am = client?.ctx?.attentionManager;
   const reg = client?.ctx?.registry;
@@ -85,24 +58,18 @@ function readFocus(client) {
 }
 
 export default function HudPanel({ client }) {
-  const [sheets, setSheets] = useState(() => readSheets(client));
   const [f, setF] = useState(() => readFocus(client));
   const [collapsed, setCollapsed] = useState(false);
 
   useEffect(() => {
     if (!client) return undefined;
-    const refresh = () => {
-      setSheets(readSheets(client));
-      setF(readFocus(client));
-    };
-    const ws = client.ctx?.workspace;
+    const refresh = () => setF(readFocus(client));
     const am = client.ctx?.attentionManager;
     const reg = client.ctx?.registry;
     const unsubs = [
-      ws?.on?.('change:sheets', refresh), ws?.on?.('change:fields', refresh),
       am?.on?.('change:primary', refresh), am?.on?.('change:key', refresh),
     ].filter(Boolean);
-    reg?.addChangeListener?.(refresh);                 // window added/removed → restrip
+    reg?.addChangeListener?.(refresh);                 // window removed/retargeted → restate
     const iv = setInterval(refresh, 150);              // scroll/frame/layout/edit don't emit — poll
     refresh();
     return () => {
@@ -114,38 +81,16 @@ export default function HudPanel({ client }) {
 
   const fire = useCallback((...argv) => client?.router?.execute(argv), [client]);
 
-  if (sheets.length === 0 && !f) return null;  // nothing to show yet
+  if (!f) return null;  // nothing focused → no helper
 
   return (
     <div style={S.panel} onPointerDown={(e) => e.stopPropagation()} onWheel={(e) => e.stopPropagation()}>
-      {/* header — the companion HUD's handle: collapse/expand the overlay */}
       <div style={S.header}>
-        <span style={S.htitle}>tabs</span>
+        <span style={S.htitle} title={f.name}>{short(f.name)}</span>
         <button type="button" style={S.collapse} title={collapsed ? 'expand' : 'collapse'}
           onClick={() => setCollapsed((c) => !c)}>{collapsed ? '▸' : '▾'}</button>
       </div>
-      {!collapsed && <>
-      {/* 1. sheets — the working set; click a tab → sheet.focus, × → sheet.close */}
-      {sheets.length > 0 && (
-        <div style={S.list}>
-          {sheets.map((s) => (
-            <div key={s.id} title={s.id}
-              style={{ ...S.tabRow, ...(s.state === 'focused' ? S.tabRowOn : null) }}>
-              <button type="button" style={S.tabMain}
-                title={s.dirty ? 'unsaved edits' : undefined} onClick={() => fire('sheet.focus', s.id)}>
-                <span style={{ ...S.dot, ...(s.state === 'focused' ? null : DOT[s.state]) }}>{GLYPH[s.state]}</span>
-                {short(s.title)}
-                {s.dirty ? <span style={S.dirtyDot}>•</span> : null}
-              </button>
-              <button type="button" style={S.close} title="close sheet"
-                onClick={() => fire('sheet.close', s.id)}>×</button>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* 2. focused-window controls */}
-      {f && (
+      {!collapsed && (
         <div style={S.controls}>
           <div style={S.row}>
             <Btn onClick={() => fire('camera.focus', f.id)}>focus</Btn>
@@ -153,6 +98,11 @@ export default function HudPanel({ client }) {
             <Toggle on={f.cameraLocked} onStyle={S.cyanOn} onClick={() => fire('camera.lock')}>
               {f.cameraLocked ? 'cam ●' : 'cam ○'}
             </Toggle>
+            {/* close = remove the focused grid from the field (sheet.close if it's a tab) */}
+            {f.isGrid && (
+              <button type="button" style={S.closeBtn} title="close / remove this grid"
+                onClick={() => fire('grid.close', f.id)}>close ✕</button>
+            )}
           </div>
           {f.isGrid && (
             <>
@@ -174,7 +124,6 @@ export default function HudPanel({ client }) {
           )}
         </div>
       )}
-      </>}
     </div>
   );
 }
@@ -190,9 +139,6 @@ function Mode({ on, onClick, children }) {
   return <button type="button" style={{ ...S.mode, ...(on ? S.cyanOn : null) }} onClick={onClick}>{children}</button>;
 }
 
-// dot color per non-focused state (focused dot rides the cyan-filled tab, so it inherits dark)
-const DOT = { rendered: { color: '#6cf' }, open: { color: '#5b6675' } };
-
 const S = {
   panel: {
     position: 'fixed', right: 12, bottom: 12, zIndex: 20,   // bottom-right: over the canvas, clear of the IDE's left dock
@@ -202,29 +148,15 @@ const S = {
     display: 'flex', flexDirection: 'column', gap: 8, minWidth: 210, maxWidth: 320,
     userSelect: 'none', backdropFilter: 'blur(6px)', boxShadow: '0 4px 18px rgba(0,0,0,0.35)',
   },
-  list: { display: 'flex', flexDirection: 'column', gap: 3, maxHeight: 220, overflowY: 'auto' },
-  // sheet tab = a row: a left-aligned focus button + a close ×. Highlighted when focused.
-  tabRow: {
-    display: 'flex', alignItems: 'stretch', gap: 2,
-    background: '#141a22', border: '1px solid #232b34', borderRadius: 4, overflow: 'hidden',
-  },
-  tabRowOn: { color: '#08101a', background: '#6cf', borderColor: '#6cf' },  // dark-on-cyan: label, ● dot, × all flip via inherit
-  tabMain: {
-    flex: 1, minWidth: 0, font: 'inherit', textAlign: 'left', color: 'inherit',
-    background: 'transparent', border: 'none', padding: '3px 8px', cursor: 'pointer',
-    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-  },
-  dot: { marginRight: 5 },
-  dirtyDot: { marginLeft: 6, color: '#f0b45a', fontWeight: 700 },  // amber • = unsaved edits
-  close: {
-    font: 'inherit', color: 'inherit', opacity: 0.55, background: 'transparent', border: 'none',
-    borderLeft: '1px solid rgba(255,255,255,0.08)', padding: '0 7px', cursor: 'pointer',
-  },
-  controls: { display: 'flex', flexDirection: 'column', gap: 6, borderTop: '1px solid #232b34', paddingTop: 7 },
+  controls: { display: 'flex', flexDirection: 'column', gap: 6 },
   row: { display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' },
   btn: {
     font: 'inherit', color: '#aebccb', background: '#1a212b',
     border: '1px solid #2a3340', borderRadius: 4, padding: '2px 8px', cursor: 'pointer',
+  },
+  closeBtn: {
+    font: 'inherit', color: '#d99', background: '#241a1d',
+    border: '1px solid #4a2730', borderRadius: 4, padding: '2px 8px', cursor: 'pointer', marginLeft: 'auto',
   },
   mode: {
     font: 'inherit', fontSize: 11, color: '#8b9aa8', background: '#141a22',
@@ -234,6 +166,6 @@ const S = {
   editOn: { color: '#1a1206', background: '#f0b45a', borderColor: '#f0b45a' },  // amber = editing
   readout: { color: '#6b7785', fontSize: 11, marginLeft: 'auto', whiteSpace: 'nowrap' },
   header: { display: 'flex', alignItems: 'center', gap: 6 },
-  htitle: { color: '#6cf', fontWeight: 600, fontSize: 11, letterSpacing: 0.4, textTransform: 'uppercase', flex: 1 },
+  htitle: { color: '#6cf', fontWeight: 600, fontSize: 11, letterSpacing: 0.4, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   collapse: { font: 'inherit', color: '#9ab', background: 'transparent', border: 'none', cursor: 'pointer', padding: '0 2px', lineHeight: 1 },
 };

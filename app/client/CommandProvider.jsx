@@ -14,6 +14,7 @@ import { PickingSystem } from '@glyph3d/core/picking/PickingSystem.js';
 import SessionStore from './SessionStore.js';
 import WorkspaceModel from './WorkspaceModel.js';
 import { getSetting } from './settings.js';
+import { createStatusChannel } from './statusChannel.js';
 // The spine, ported verbatim — handlers register lazily; nothing here knows the
 // shell. Their only deps are @glyph3d/core, three, and sibling helpers.
 import { registerAllCommands } from '../commands/handlers/index.js';
@@ -43,6 +44,9 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
 
     registry,
     getGrids,
+
+    // Live activity signal — operations post here; the StatusBar reflects it.
+    status: createStatusChannel(),
 
     // For grids created imperatively by a command (not via <CodeGrid>): register
     // in the shared registry AND scene.add (React grids do their own scene.add).

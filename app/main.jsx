@@ -8,6 +8,7 @@ import IdeDock from './IdeDock.jsx';
 import { CanvasPicker, ObjectDragger, ResizeDragger, SelectionIndicator } from './client/CanvasInteraction.jsx';
 import HudPanel from './client/HudPanel.jsx';
 import CommandBar from './client/CommandBar.jsx';
+import StatusBar from './StatusBar.jsx';
 import { getSetting } from './client/settings.js';
 // Font fallback chain, priority order: clean code monospace first, then fonts
 // that cover what it lacks (Nerd-Font icons/powerline/rounded box/stars, then
@@ -22,7 +23,6 @@ const FONT_CHAIN = [
   { url: dejavuUrl, name: 'DejaVu Sans' },
 ];
 
-const setStatus = (t) => { const el = document.getElementById('status'); if (el) el.textContent = t; };
 // ?relay=PORT pins the relay to a specific port (dev: vite serves the page, the Go
 // relay is on another port). Absent → the relay (if any) is same-origin as the page
 // (the binary serves both). null lets CommandProvider gate auto-connect by host.
@@ -71,14 +71,32 @@ function App() {
   // it. One source of truth, prop-drilled to the chrome.
   const [client, setClient] = useState(null);
   const [dockW, setDockW] = useState(320);   // resizable sidebar width (px)
+  const [paletteOpen, setPaletteOpen] = useState(false);
 
+  // ⌘K / Ctrl-K summons (and toggles) the command palette — the classic shortcut.
+  // Capture phase + a modifier keeps it clear of the camera/edit keystroke paths.
   useEffect(() => {
-    setStatus(
-      error ? `boot failed: ${error.message}`
-      : client ? 'shift-drag = look · drag = pan · scroll = up/down · shift-scroll = dolly · WASD = move'
-      : `engine: ${stage}`
-    );
-  }, [stage, error, client]);
+    const onKey = (e) => {
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
+        e.preventDefault();
+        setPaletteOpen((o) => !o);
+      }
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, []);
+
+  // The StatusBar owns status now — retire the pre-mount #status text (index.html's
+  // first-paint "booting…") so the two don't double up.
+  useEffect(() => {
+    const el = document.getElementById('status');
+    if (el) el.style.display = 'none';
+  }, []);
+
+  // Idle resting message for the StatusBar (loading activity overrides it there).
+  const hint = error ? `boot failed: ${error.message}`
+    : !client ? `engine: ${stage}`
+    : 'shift-drag look · drag pan · scroll up/down · shift-scroll dolly · WASD move';
 
   // Layout: a top ButtonBar, then a row of [dockview panel sidebar | canvas].
   // The dock and canvas are flex SIBLINGS (not overlay), so the WebGPU canvas
@@ -86,7 +104,7 @@ function App() {
   // op, and r3f auto-resizes to its container when the sidebar width changes.
   return (
     <div style={{ display: 'flex', flexDirection: 'column', width: '100%', height: '100%' }}>
-      <ButtonBar client={client} />
+      <ButtonBar client={client} onOpenPalette={() => setPaletteOpen(true)} />
       <div style={{ display: 'flex', flex: '1 1 auto', minHeight: 0 }}>
         <div style={{ flex: `0 0 ${dockW}px`, minWidth: 0, overflow: 'hidden' }}>
           {client
@@ -130,8 +148,10 @@ function App() {
       </div>
       {/* control HUD — companion overlay on top of the canvas + the panel system */}
       <HudPanel client={client} />
-      {/* in-canvas command input — drive bus verbs without leaving for the terminal */}
-      <CommandBar client={client} />
+      {/* slim status pill — load/restore narration + relay dot (bottom-left) */}
+      <StatusBar client={client} hint={hint} />
+      {/* command palette — summoned modal (⌘K) to drive bus verbs; stays open per command */}
+      <CommandBar client={client} open={paletteOpen} onClose={() => setPaletteOpen(false)} />
     </div>
   );
 }

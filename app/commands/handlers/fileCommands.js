@@ -165,11 +165,14 @@ export default function registerFileCommands(router) {
             return { text: 'ERR: no file source — load a repo or connect the relay', data: null };
         }
 
+        ctx.status?.set(`Opening ${path}…`);
         let id;
         try {
             id = await renderSheetGrid(ctx, path);   // load + create + register (id = path)
         } catch (err) {
             return { text: `ERR: read failed for ${path}: ${err?.message || err}`, data: null };
+        } finally {
+            ctx.status?.clear();
         }
         const grid = id ? ctx.registry.get(id)?.grid : null;
         if (!grid) return { text: `ERR: could not open ${path}`, data: null };   // guard: no deref / no setPanelId(null)
@@ -231,27 +234,34 @@ export default function registerFileCommands(router) {
         const capped = want.slice(0, cap);
         const skipped = want.length - capped.length;
 
-        let contentMap;
+        // Live status — the only activity signal on the local (relay) path, which
+        // has no getProgress counts; cleared no matter how we return.
+        ctx.status?.set(`Opening ${capped.length} file${capped.length === 1 ? '' : 's'}${dir ? ' · ' + dir : ''}…`);
         try {
-            contentMap = await ctx.fileProvider.getMultipleFiles(null, null, capped);
-        } catch (err) {
-            return { text: `ERR: fetch failed: ${err?.message || err}`, data: null };
+            let contentMap;
+            try {
+                contentMap = await ctx.fileProvider.getMultipleFiles(null, null, capped);
+            } catch (err) {
+                return { text: `ERR: fetch failed: ${err?.message || err}`, data: null };
+            }
+
+            let opened = 0;
+            for (const p of capped) {
+                const c = contentMap.get(p);
+                if (c == null) continue;
+                if (addFileGrid(ctx, p, c.content) != null) opened++;
+            }
+
+            // Lay everything currently loaded out as the walk-tree (sections in X,
+            // depth in Z, branch edges) — default depth/gap.
+            const layout = applyTreeLayout(ctx);
+
+            let text = `OK: opened ${opened} file(s) under "${dir || '/'}" → tree (${layout.dirs} dirs, ${layout.volumes} volumes)`;
+            if (skipped) text += `; ${skipped} skipped (cap ${cap})`;
+            return { text, data: { dir, opened, skipped, cap, ...layout } };
+        } finally {
+            ctx.status?.clear();
         }
-
-        let opened = 0;
-        for (const p of capped) {
-            const c = contentMap.get(p);
-            if (c == null) continue;
-            if (addFileGrid(ctx, p, c.content) != null) opened++;
-        }
-
-        // Lay everything currently loaded out as the walk-tree (sections in X,
-        // depth in Z, branch edges) — default depth/gap.
-        const layout = applyTreeLayout(ctx);
-
-        let text = `OK: opened ${opened} file(s) under "${dir || '/'}" → tree (${layout.dirs} dirs, ${layout.volumes} volumes)`;
-        if (skipped) text += `; ${skipped} skipped (cap ${cap})`;
-        return { text, data: { dir, opened, skipped, cap, ...layout } };
     }, {
         description: 'Open all code files under a directory (recursive) and lay them out as a 3D tree',
         usage: '<dir-path> [cap]   (empty path = whole project)',
@@ -271,6 +281,7 @@ export default function registerFileCommands(router) {
 
         const content = gridToText(r.grid);
 
+        ctx.status?.set(`Saving ${r.uri.replace(/^file:\/\//, '')}…`);
         let result;
         try {
             result = await ctx.wsbridge.rpcRequest('fs/writeFile', {
@@ -283,6 +294,8 @@ export default function registerFileCommands(router) {
                 text: `ERR: fs/writeFile failed: ${err.message || err}`,
                 data: { uri: r.uri, code: err.code ?? null },
             };
+        } finally {
+            ctx.status?.clear();
         }
 
         // Stash the hash so the next file.dirty can detect further edits.

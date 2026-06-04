@@ -170,10 +170,17 @@ function ConnectionChip({ client }) {
   );
 }
 
-export default function ButtonBar({ client }) {
+export default function ButtonBar({ client, onOpenPalette }) {
   return (
     <div style={styles.bar}>
       <PanelsMenu client={client} />
+      <button
+        type="button"
+        title="command palette (⌘K / Ctrl-K)"
+        disabled={!client}
+        style={styles.btn(!!client)}
+        onClick={onOpenPalette}
+      >commands ⌘K</button>
       <span style={styles.sep} />
       <Btn label="+ terminal" title="spawn a shell in the canvas" cmd="terminal.spawn" client={client} />
       <span style={styles.sep} />
