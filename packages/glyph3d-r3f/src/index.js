@@ -1,4 +1,4 @@
-// glyph3d-r3f — react-three-fiber bindings for the WebGPU glyph rendering stack.
+// @glyph3d/r3f — react-three-fiber bindings for the WebGPU glyph rendering stack.
 //
 // Composable primitives, not a monolithic wrapper:
 //   useGlyphEngine / bootGlyphEngine  — boot atlas + shaper + slug (renderer-free)

@@ -48,7 +48,7 @@ export function GlyphProvider({ atlas, children }) {
 
 function useGlyph() {
   const ctx = useContext(GlyphContext);
-  if (!ctx) throw new Error('glyph3d-r3f components must be rendered inside <GlyphCanvas> (it provides the glyph context).');
+  if (!ctx) throw new Error('@glyph3d/r3f components must be rendered inside <GlyphCanvas> (it provides the glyph context).');
   return ctx;
 }
 
