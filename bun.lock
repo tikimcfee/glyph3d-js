@@ -14,9 +14,9 @@
       "name": "glyph3d-ide",
       "dependencies": {
         "@glyph3d/core": "workspace:*",
+        "@glyph3d/r3f": "workspace:*",
         "@react-three/fiber": "^9.0.0",
         "dockview": "^6.6.1",
-        "glyph3d-r3f": "workspace:*",
         "react": "^19.0.0",
         "react-dom": "^19.0.0",
         "three": "^0.183.0",
@@ -37,10 +37,10 @@
       },
     },
     "packages/glyph3d-r3f": {
-      "name": "glyph3d-r3f",
-      "version": "0.0.0",
+      "name": "@glyph3d/r3f",
+      "version": "0.1.0",
       "dependencies": {
-        "@glyph3d/core": "workspace:*",
+        "@glyph3d/core": "^0.1.0",
       },
       "peerDependencies": {
         "@react-three/fiber": ">=9",
@@ -138,6 +138,8 @@
     "@esbuild/win32-x64": ["@esbuild/win32-x64@0.21.5", "", { "os": "win32", "cpu": "x64" }, "sha512-tQd/1efJuzPC6rCFwEvLtci/xNFcTZknmXs98FYDfGE4wP9ClFV98nyKrzJKVPMhdDnjzLhdUyMX4PsQAPjwIw=="],
 
     "@glyph3d/core": ["@glyph3d/core@workspace:packages/glyph3d-core"],
+
+    "@glyph3d/r3f": ["@glyph3d/r3f@workspace:packages/glyph3d-r3f"],
 
     "@jridgewell/gen-mapping": ["@jridgewell/gen-mapping@0.3.13", "", { "dependencies": { "@jridgewell/sourcemap-codec": "^1.5.0", "@jridgewell/trace-mapping": "^0.3.24" } }, "sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA=="],
 
@@ -254,8 +256,6 @@
     "gensync": ["gensync@1.0.0-beta.2", "", {}, "sha512-3hN7NaskYvMDLQY55gnW3NQ+mesEAepTqlg+VEbj7zzqEMBVNhzcGYYeqFo/TlYz6eQiFcp1HcsCZO+nGgS8zg=="],
 
     "glyph3d-ide": ["glyph3d-ide@workspace:app"],
-
-    "glyph3d-r3f": ["glyph3d-r3f@workspace:packages/glyph3d-r3f"],
 
     "harfbuzzjs": ["harfbuzzjs@0.4.15", "", {}, "sha512-p1edvnlc+vpRe2kz7OKzcscf0gyFiDZpco+miDxAiiZ67cu1oNlbuOkmP/A/i1l/w938VrkF2FdZ8scNcnkPrQ=="],
 

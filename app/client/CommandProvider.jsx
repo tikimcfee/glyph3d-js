@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useRef } from 'react';
 import { useThree, useFrame } from '@react-three/fiber';
-import { useGridRegistry } from 'glyph3d-r3f';
+import { useGridRegistry } from '@glyph3d/r3f';
 
 import CommandRouter from '@glyph3d/core/services/orchestration/CommandRouter.js';
 import WebSocketBridge from '@glyph3d/core/services/orchestration/WebSocketBridge.js';

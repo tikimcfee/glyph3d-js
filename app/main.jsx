@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import * as THREE from 'three/webgpu';
-import { useGlyphEngine, GlyphCanvas, ViewerCamera } from 'glyph3d-r3f';
+import { useGlyphEngine, GlyphCanvas, ViewerCamera } from '@glyph3d/r3f';
 import CommandProvider from './client/CommandProvider.jsx';
 import ButtonBar from './ButtonBar.jsx';
 import IdeDock from './IdeDock.jsx';
