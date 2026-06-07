@@ -12,28 +12,13 @@
 
 import errorTracker from '@glyph3d/core/utils/ErrorTracker.js';
 import metrics from '@glyph3d/core/utils/Metrics.js';
-import { addGlobalLogListener, setGlobalLogLevel, getAllLoggers } from '@glyph3d/core/utils/Logger.js';
-
-// In-memory log ring fed by the global log tap — log.tail reads it. Captures every scope
-// (current + future loggers). Installed once per page (idempotent guard).
-const LOG_RING_MAX = 500;
-const logRing = [];
-let _tapInstalled = false;
-function ensureLogTap() {
-    if (_tapInstalled) return;
-    _tapInstalled = true;
-    addGlobalLogListener((entry) => {
-        logRing.push(entry);
-        if (logRing.length > LOG_RING_MAX) logRing.shift();
-    });
-}
+import { setGlobalLogLevel, getAllLoggers } from '@glyph3d/core/utils/Logger.js';
+import { recentConsole } from '@glyph3d/core/services/orchestration/consoleForwarder.js';
 
 /**
  * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
  */
 export default function registerObservabilityCommands(router) {
-    ensureLogTap();
-
     // ── error.* — the structured error buffer (ErrorTracker) ──
     router.register('error.list', (args) => {
         const n = args[0] ? Number(args[0]) : 20;
@@ -55,9 +40,9 @@ export default function registerObservabilityCommands(router) {
     // ── log.* — runtime verbosity + the log ring ──
     router.register('log.tail', (args) => {
         const n = args[0] ? Number(args[0]) : 30;
-        const entries = logRing.slice(-n);
+        const entries = recentConsole(n);
         return { text: `${entries.length} log line(s)`, data: { entries } };
-    }, { description: 'Tail the recent in-memory log ring', usage: '[count]', returns: '{entries}' });
+    }, { description: 'Tail recent console output (all levels) from the single capture ring', usage: '[count]', returns: '{entries}' });
 
     router.register('log.level', (args) => {
         const level = args[0];

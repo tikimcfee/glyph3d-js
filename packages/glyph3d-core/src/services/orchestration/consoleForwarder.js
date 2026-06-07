@@ -17,6 +17,16 @@
 
 let _installed = false;
 
+// In-memory ring of recent console output (ALL levels) — the single, consistent log sink
+// the log.tail verb reads. Captured here because this is the one place every console.* call
+// is intercepted; relay forwarding stays log/warn/error only (no debug/info spam on the wire).
+const RING_MAX = 500;
+const ring = [];
+/** Recent console entries, oldest→newest. @param {number} [limit] @returns {Array<{ts:number,level:string,text:string}>} */
+export function recentConsole(limit) {
+    return limit ? ring.slice(-limit) : ring.slice();
+}
+
 /**
  * @param {import('./WebSocketBridge.js').default} bridge - the relay bridge;
  *   only its `send(raw)` method is used (it self-guards on connection state).
@@ -59,23 +69,32 @@ export function installConsoleForwarder(bridge, options = {}) {
         }
     };
 
-    for (const level of ['log', 'warn', 'error']) {
+    // The single, consistent capture path: ring (all levels, local + verbose) + relay
+    // (log/warn/error only). Raw console.*, Logger output, and command traces all land here
+    // uniformly, so log.tail sees everything regardless of how a module chose to log.
+    const RELAY_LEVELS = new Set(['log', 'warn', 'error']);
+    const capture = (level, text) => {
+        if (text.length > maxLen) text = text.slice(0, maxLen) + '…';
+        ring.push({ ts: Date.now(), level, text });
+        if (ring.length > RING_MAX) ring.shift();
+        if (RELAY_LEVELS.has(level)) send(level, text);
+    };
+
+    for (const level of ['log', 'info', 'warn', 'error', 'debug']) {
         const original = console[level].bind(console);
         console[level] = (...args) => {
             original(...args);
-            send(level, serialize(args));
+            capture(level, serialize(args));
         };
     }
 
     if (captureWindowErrors && typeof window !== 'undefined') {
         window.addEventListener('error', (e) => {
-            const msg = e.error?.stack || e.message || String(e);
-            send('error', `[uncaught] ${msg}`);
+            capture('error', `[uncaught] ${e.error?.stack || e.message || String(e)}`);
         });
         window.addEventListener('unhandledrejection', (e) => {
             const r = e.reason;
-            const msg = r?.stack || r?.message || String(r);
-            send('error', `[unhandled-rejection] ${msg}`);
+            capture('error', `[unhandled-rejection] ${r?.stack || r?.message || String(r)}`);
         });
     }
 
