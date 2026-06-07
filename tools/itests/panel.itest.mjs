@@ -15,12 +15,9 @@ export default async ({ app, assert }) => {
 
   const open = await app.cmd('file.open cli/main.go');
   assert.ok(!open.error, `file.open → ${open.text || open.error}`);
-  await app.waitFor(2500); // lazy grammar load + parse + colorize
-
-  // A real grid click sets primary via picking; drive it explicitly here.
-  const focus = await app.cmd('attention.set primary cli/main.go');
-  assert.ok(!focus.error, `attention.set → ${focus.text || focus.error}`);
-  await app.waitFor(1500); // React re-render + CodeMirror mount
+  // Phase 1.5: file.open auto-focuses (sets primary attention), so the editor panel links
+  // with NO manual click — that's the behavior under test.
+  await app.waitFor(3000); // colorize + primary → React re-render + CodeMirror mount
 
   const r = await app.evalPage(READ);
   assert.ok(!r.err, `editor panel → ${r.err}`);

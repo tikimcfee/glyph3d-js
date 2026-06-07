@@ -155,6 +155,8 @@ export default function registerFileCommands(router) {
         const existing = ctx.registry.findByMeta?.('sourcePath', uri) || [];
         if (existing.length) {
             if (sheet) ctx.workspace.setPanelId(sheet.id, existing[0].id);
+            // Re-opening focuses the existing grid (so the 2D editor panel links to it).
+            ctx.attentionManager?.set?.('primary', existing[0].id, { registry: ctx.registry });
             return {
                 text: `OK: ${path} already open as "${existing[0].id}"`,
                 data: { id: existing[0].id, path, alreadyOpen: true },
@@ -177,6 +179,12 @@ export default function registerFileCommands(router) {
         const grid = id ? ctx.registry.get(id)?.grid : null;
         if (!grid) return { text: `ERR: could not open ${path}`, data: null };   // guard: no deref / no setPanelId(null)
         if (sheet) ctx.workspace.setPanelId(sheet.id, id);
+
+        // Phase 1.5 — auto-focus: opening a file makes it the primary attention target, so the
+        // 2D editor panel links to it (and the HUD reflects it) for EVERY open path — tree
+        // click, CLI, Claude — not just sheet.focus. Frame-the-camera stays a separate gesture
+        // (sheet.focus / camera.focus), so a scripted/bulk open never yanks the view.
+        ctx.attentionManager?.set?.('primary', id, { registry: ctx.registry });
 
         // Explicit coords place precisely (tour scripts position by hand);
         // otherwise the grid joins the shelf via flowLayout after registration.
