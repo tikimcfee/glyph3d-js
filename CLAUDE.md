@@ -28,6 +28,11 @@ terminals in 3D space. The repo is organized as **a package, an app, and a cli**
 - Glyph shaping: **HarfBuzz** + **Slug** GPU bezier coverage, with a font fallback
   chain and color-emoji support.
 
+The IDE shell is a react-three-fiber application on a framework-agnostic rendering
+core: `@glyph3d/core` is vanilla `three/webgpu` with no UI-framework dependency; the
+shell is **React 19 + react-three-fiber 9**; the two meet at the thin `@glyph3d/r3f`
+binding. New shell code is React/r3f; new rendering code is `three/webgpu` + TSL.
+
 ## Structure
 
 ```

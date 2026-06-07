@@ -17,6 +17,7 @@ import { iterGraphemes } from '../utils/grapheme.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import { paginationGeometry, resolveLayoutParams, DEFAULT_LAYOUT } from '../workers/builders/index.js';
 import LayoutDescription from '../core/LayoutDescription.js';
+import { colorizeGrid } from '../parsing/SyntaxColorizer.js';
 
 // Reused for lines without wraps — most lines, in the common case.
 // Frozen so accidental mutation surfaces immediately.
@@ -1526,6 +1527,19 @@ class CodeGrid extends THREE.Object3D {
             advance: m.charWidth + (m.spacing || 0),
             scrollOffset: this._scrollOffset || 0,  // so the analytic fallback matches the scrolled glyphs
         });
+        this._scheduleColorize();
+    }
+
+    /**
+     * Schedule a syntax-coloring pass for the layout just built. Fire-and-forget:
+     * the colorizer parses off the critical path and paints base glyph colors via
+     * the renderer. The generation token lets a newer layout supersede an in-flight
+     * pass (edits relayout often). A no-op for unsupported file types.
+     * @private
+     */
+    _scheduleColorize() {
+        this._colorizeGen = (this._colorizeGen || 0) + 1;
+        colorizeGrid(this);
     }
 
     /**

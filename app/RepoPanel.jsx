@@ -131,11 +131,7 @@ export default function RepoPanel({ client }) {
             {busy ? '…' : 'Load'}
           </button>
         </div>
-        {busy && (
-          <div style={styles.hint}>
-            {progress ? `fetching ${progress.loaded}/${progress.total}…` : 'loading repo…'}
-          </div>
-        )}
+        {busy && <div style={styles.hint}>loading repo…</div>}
         {error && <div style={styles.err}>{error}</div>}
         {current && (
           <div style={styles.current}>

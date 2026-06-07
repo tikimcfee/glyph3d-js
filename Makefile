@@ -32,7 +32,7 @@ LDFLAGS := -s -w \
 	-X main.Platform=$(HOST_PLATFORM)
 GOFLAGS := -trimpath -ldflags='$(LDFLAGS)'
 
-.PHONY: all build clean prep prep-wasm deploy release linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64 dev dev-vite dev-relay dev-status dev-stop
+.PHONY: all build clean prep prep-wasm prep-tree-sitter deploy release linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64 dev dev-vite dev-relay dev-status dev-stop
 
 # --- Default: build for current platform ---
 
@@ -68,6 +68,25 @@ prep-wasm:
 	@cp node_modules/harfbuzzjs/hbjs.js $(VENDOR)/hbjs.js
 	@echo 'export default hbjs;' >> $(VENDOR)/hbjs.js
 	@echo "Vendored hb.wasm ($$(du -h $(VENDOR)/hb.wasm | cut -f1)), hb.js, hbjs.js → $(VENDOR)/"
+
+# --- Vendor tree-sitter WASM (runtime + grammars) from node_modules ---
+# Run after upgrading web-tree-sitter or a grammar package. Vendored files in
+# src/parsing/vendor/ are checked into git and bundled by Vite as hashed assets,
+# so they ship inside the single binary; grammars are lazy-loaded at runtime.
+# Grammar wasms come from the individual tree-sitter-<lang> packages — NOT
+# tree-sitter-wasms, whose prebuilts are an older ABI the 0.26 runtime can't load
+# (dylink metadata mismatch). The tsx grammar ships inside tree-sitter-typescript.
+TS_VENDOR := packages/glyph3d-core/src/parsing/vendor
+prep-tree-sitter:
+	@echo "Vendoring tree-sitter runtime + grammars..."
+	@cp node_modules/web-tree-sitter/web-tree-sitter.wasm $(TS_VENDOR)/
+	@cp node_modules/tree-sitter-javascript/tree-sitter-javascript.wasm $(TS_VENDOR)/
+	@cp node_modules/tree-sitter-typescript/tree-sitter-typescript.wasm $(TS_VENDOR)/
+	@cp node_modules/tree-sitter-typescript/tree-sitter-tsx.wasm $(TS_VENDOR)/
+	@cp node_modules/tree-sitter-go/tree-sitter-go.wasm $(TS_VENDOR)/
+	@cp node_modules/tree-sitter-python/tree-sitter-python.wasm $(TS_VENDOR)/
+	@cp node_modules/tree-sitter-json/tree-sitter-json.wasm $(TS_VENDOR)/
+	@echo "Vendored web-tree-sitter.wasm + 6 grammars ($$(du -sh $(TS_VENDOR) | cut -f1)) → $(TS_VENDOR)/"
 
 # --- Cross-compilation ---
 # Each target sets Platform via LDFLAGS override.

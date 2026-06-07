@@ -896,6 +896,51 @@ export default class GlyphField {
         this._highlightTexture.needsUpdate = true;
     }
 
+    /**
+     * Set a glyph's BASE color by absolute buffer slot — overwrites the
+     * instanceColor the builder wrote. Unlike setGlyphHighlight (additive, its own
+     * texture), this reuses the existing per-glyph instanceColor attribute, so it
+     * costs no extra GPU memory. Group color + highlight still layer on top in the
+     * shader. Syntax coloring drives this. A relayout rebuilds instanceColor to the
+     * defaults, so the caller re-applies after each layout (as highlights do).
+     * @param {number} absoluteSlot
+     * @param {{r:number,g:number,b:number}} color
+     */
+    setGlyphColor(absoluteSlot, color) {
+        const attr = this.instanceMesh?.geometry?.attributes?.instanceColor;
+        if (!attr) return;
+        const b = absoluteSlot * 3;
+        if (b < 0 || b + 2 >= attr.array.length) return;
+        attr.array[b] = color.r; attr.array[b + 1] = color.g; attr.array[b + 2] = color.b;
+        attr.addUpdateRange(b, 3);
+        attr.needsUpdate = true;
+    }
+
+    /**
+     * Bulk base-color write: `count` consecutive glyphs from `startSlot`, in one
+     * update range. A tree-sitter capture maps to exactly one such contiguous span
+     * (the builder slots glyphs in source order, newlines excluded), so syntax
+     * coloring is one call per capture rather than one per glyph.
+     * @param {number} startSlot
+     * @param {number} count
+     * @param {{r:number,g:number,b:number}} color
+     */
+    setGlyphColorRange(startSlot, count, color) {
+        const attr = this.instanceMesh?.geometry?.attributes?.instanceColor;
+        if (!attr || count <= 0) return;
+        const arr = attr.array;
+        const start = Math.max(0, startSlot | 0);
+        const end = Math.min((arr.length / 3) | 0, start + count);
+        for (let s = start; s < end; s++) {
+            const b = s * 3;
+            arr[b] = color.r; arr[b + 1] = color.g; arr[b + 2] = color.b;
+        }
+        if (end > start) {
+            attr.addUpdateRange(start * 3, (end - start) * 3);
+            attr.needsUpdate = true;
+        }
+    }
+
     // ── Batch mode ────────────────────────────────────────────────────────────
 
     beginBatchUpdate() {
