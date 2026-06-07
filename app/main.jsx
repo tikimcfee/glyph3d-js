@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import * as THREE from 'three/webgpu';
-import { useGlyphEngine, GlyphCanvas, ViewerCamera } from '@glyph3d/r3f';
+import { useGlyphEngine, GlyphCanvas, ViewerCamera, SceneEnvironment } from '@glyph3d/r3f';
 import CommandProvider from './client/CommandProvider.jsx';
 import ButtonBar from './ButtonBar.jsx';
 import IdeDock from './IdeDock.jsx';
@@ -96,7 +96,7 @@ function App() {
   // Idle resting message for the StatusBar (loading activity overrides it there).
   const hint = error ? `boot failed: ${error.message}`
     : !client ? `engine: ${stage}`
-    : 'shift-drag look · drag pan · scroll up/down · shift-scroll dolly · WASD move';
+    : 'drag pan · shift-drag look · scroll dolly · WASD move';
 
   // Layout: a top ButtonBar, then a row of [dockview panel sidebar | canvas].
   // The dock and canvas are flex SIBLINGS (not overlay), so the WebGPU canvas
@@ -125,6 +125,10 @@ function App() {
               style={{ position: 'absolute', inset: 0 }}
             >
               <ViewerCamera ref={cameraRef} />
+              {/* Orientation landmarks for the fly camera (ground grid + gradient
+                  skydome). On the default layer + unregistered, so picking, culling,
+                  and the camera's look-distance never see them. */}
+              <SceneEnvironment />
               {/* IDE starts empty; files arrive via file.open (sidebar click or CLI).
                   Page served by Vite (:5173); relay is the Go server :8080. */}
               <CommandProvider
