@@ -47,6 +47,12 @@ export default defineConfig({
     include: ['@xterm/headless/lib-headless/xterm-headless.mjs'],
   },
   server: {
+    // Port is env-overridable so an isolated worktree (e.g. experiment/gpu-sweep)
+    // can run its own dev server alongside main's without colliding. Defaults to
+    // 5173 so the normal checkout is unchanged. strictPort = fail loudly instead
+    // of silently drifting to 5174 (which would break the A/B port assumptions).
+    port: Number(process.env.VITE_PORT) || 5173,
+    strictPort: true,
     // Workspace packages + the core's font asset resolve to real paths under the
     // repo root (via node_modules symlinks); allow Vite to serve them.
     fs: { allow: [repoRoot] },
