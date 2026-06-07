@@ -1,0 +1,12 @@
+plain ascii line: let x = computeOffset(i, 42) + scale * 3;
+double-width cjk: こんにちは、世界。日本語のテキストです。
+mixed run line:   const 名前 = "🧑‍🚀" + こ; // 10 ascii, then emoji, then cjk
+zwj sequences:    🧑‍🚀 👩🏽‍🔬 👨‍👩‍👧‍👦 🏳️‍🌈
+skin tone mods:   👋🏻 👋🏼 👋🏽 👋🏾 👋🏿
+regional flags:   🇯🇵 🇺🇸 🇪🇺 🇧🇷
+combining marks:   é (e+acute)  vs  é (precomposed)  �​n̈  o͝o
+rtl arabic:       مرحبا بالعالم  ←  hello mixed بالعالم world
+rtl hebrew:       שלום עולם  ←  שלום
+greek + symbols:  λ ∀x∈ℝ ∑ ∫ √ ≠ ≤ ≥ → ⇒ ∂ ∇
+box drawing:      ┌──┬──┐ │ab│cd│ ├──┼──┤ └──┴──┘ ▓▒░█
+tabs and spaces:	leading tab, then	mid	tabs, trailing spaces
