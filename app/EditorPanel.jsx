@@ -26,14 +26,19 @@ const baseTheme = EditorView.theme({
 // A CM decoration StateField built from tree-sitter captures (absolute offsets + scope),
 // colored via the shared theme. RangeSetBuilder needs sorted, non-overlapping ranges, so
 // overlaps are clamped (first wins) and ends are clamped to the doc length.
-function decorationField(captures, docLength) {
-  const build = () => {
+function decorationField(captures) {
+  // Build against CM's ACTUAL live doc length (state.doc.length), not a snapshot's: CM
+  // normalizes line endings, and the value/extensions props can update a tick apart, so a
+  // capture offset can momentarily exceed the current doc. Skip out-of-range starts, clamp
+  // ends — never hand RangeSetBuilder a position past the doc (that throws and crashes CM).
+  const build = (docLength) => {
     if (!captures || !captures.length) return Decoration.none;
     const marks = [];
     for (const c of captures) {
       const color = resolveScopeColor(c.scope);
       if (!color) continue;
       const from = c.startIndex | 0;
+      if (from >= docLength) continue;
       const to = Math.min(c.endIndex | 0, docLength);
       if (to > from) marks.push({ from, to, style: `color: ${rgb(color)}` });
     }
@@ -49,8 +54,8 @@ function decorationField(captures, docLength) {
     return builder.finish();
   };
   return StateField.define({
-    create: build,
-    update: (v) => v, // read-only doc; rebuilt via reconfigure when captures change
+    create: (state) => build(state.doc.length),
+    update: (value, tr) => (tr.docChanged ? build(tr.state.doc.length) : value),
     provide: (f) => EditorView.decorations.from(f),
   });
 }
@@ -102,7 +107,7 @@ export default function EditorPanel({ client }) {
   }, [client]);
 
   const extensions = useMemo(
-    () => [baseTheme, EditorView.editable.of(false), EditorView.lineWrapping, decorationField(snap.captures, snap.content.length)],
+    () => [baseTheme, EditorView.editable.of(false), EditorView.lineWrapping, decorationField(snap.captures)],
     [snap.captures, snap.content],
   );
 

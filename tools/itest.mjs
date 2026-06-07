@@ -38,11 +38,23 @@ for (const f of files.sort()) {
   const app = await openApp(browser, { url });
   try {
     await mod.default({ app, assert: makeAssert(), url });
-    console.log(`  ✓ ${name}`);
+    // Backstop: fail the test if the app's own error-tracker caught anything during it,
+    // even when no explicit assertion covered it (catches render crashes for free).
+    const tracked = await app.trackedErrors();
+    if (tracked.length) {
+      failed++;
+      console.log(`  ✗ ${name}: app error-tracker caught ${tracked.length}`);
+      for (const er of tracked.slice(0, 3)) console.log(`      └ [${er.type || er.name}] ${er.message}`);
+    } else {
+      console.log(`  ✓ ${name}`);
+    }
   } catch (e) {
     failed++;
     console.log(`  ✗ ${name}: ${e.message}`);
-    for (const er of app.errors.slice(0, 3)) console.log(`      └ ${er.text}`);
+    for (const er of app.errors.slice(0, 3)) console.log(`      └ console: ${er.text}`);
+    for (const er of (await app.trackedErrors().catch(() => [])).slice(0, 3)) {
+      console.log(`      └ tracked[${er.type || er.name}]: ${er.message}`);
+    }
   } finally {
     await app.close();
   }

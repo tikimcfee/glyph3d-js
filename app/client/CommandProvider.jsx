@@ -14,6 +14,7 @@ import { PickingSystem } from '@glyph3d/core/picking/PickingSystem.js';
 import SessionStore from './SessionStore.js';
 import WorkspaceModel from './WorkspaceModel.js';
 import { getSetting } from './settings.js';
+import errorTracker from '@glyph3d/core/utils/ErrorTracker.js';
 import { createStatusChannel } from './statusChannel.js';
 // The spine, ported verbatim — handlers register lazily; nothing here knows the
 // shell. Their only deps are @glyph3d/core, three, and sibling helpers.
@@ -232,6 +233,10 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
 
     // Devtools/agent handle, mirroring the vanilla IDE's window.viewer.
     window.__glyphClient = state;
+    // Structured error buffer (uncaught + rejections + captured) for the test harness:
+    // it preventDefault()s the error event, so reading getErrors() is the authoritative
+    // signal — see tools/itest/driver.mjs trackedErrors().
+    window.__errorTracker = errorTracker;
     console.log(`[command-center] r3f client wired — relay ${url}${autoConnect ? '' : ' (manual)'}, ${state.router.commands.size} handlers`);
 
     // Keyboard delivery to the focused entity (terminal → ANSI bytes via

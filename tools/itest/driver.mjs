@@ -61,6 +61,17 @@ export async function openApp(browser, {
     evalPage: (expr, arg) => page.evaluate(expr, arg),
     waitFor: (ms) => page.waitForTimeout(ms),
     shot: async (path) => { await page.screenshot({ path }); return path; },
+    // Structured errors from the app's own ErrorTracker (window.__errorTracker) — the
+    // authoritative signal, since the tracker preventDefault()s the error event so
+    // Playwright's pageerror never fires for uncaught exceptions.
+    async trackedErrors() {
+      const list = await page.evaluate(() =>
+        (window.__errorTracker?.getErrors?.(50) || []).map((e) => ({
+          message: e.message, name: e.name, type: e.context?.type,
+          stack: e.stack ? String(e.stack).split('\n').slice(0, 3).join(' | ') : null,
+        }))).catch(() => []);
+      return list.filter((e) => !isGpuNoise(e.message || ''));
+    },
     close: () => page.close(),
   };
 }

@@ -162,8 +162,8 @@ const S = {
     font: 'inherit', fontSize: 11, color: '#8b9aa8', background: '#141a22',
     border: '1px solid #232b34', borderRadius: 4, padding: '2px 6px', cursor: 'pointer',
   },
-  cyanOn: { color: '#08101a', background: '#6cf', borderColor: '#6cf' },        // active mode / cam-lock
-  editOn: { color: '#1a1206', background: '#f0b45a', borderColor: '#f0b45a' },  // amber = editing
+  cyanOn: { color: '#08101a', background: '#6cf', border: '1px solid #6cf' },        // active mode / cam-lock
+  editOn: { color: '#1a1206', background: '#f0b45a', border: '1px solid #f0b45a' },  // amber = editing
   readout: { color: '#6b7785', fontSize: 11, marginLeft: 'auto', whiteSpace: 'nowrap' },
   header: { display: 'flex', alignItems: 'center', gap: 6 },
   htitle: { color: '#6cf', fontWeight: 600, fontSize: 11, letterSpacing: 0.4, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },

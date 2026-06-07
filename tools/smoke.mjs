@@ -47,17 +47,19 @@ try {
   }
   if (args.shot) { await app.shot(args.shot); console.log(`shot: ${args.shot}`); }
 } finally {
+  const tracked = await app.trackedErrors().catch(() => []);
   const { booted, errors, gpuErrors, failedResources, warnings } = app;
   console.log(`\n── smoke report ──`);
   console.log(`url:    ${args.url}   (${args.headed ? 'headed' : 'headless'})`);
   console.log(`booted: ${booted ? 'yes (window.__glyphClient present)' : 'NO — app did not initialize'}`);
-  console.log(`errors: ${errors.length} | failed-resources: ${failedResources.length} | gpu-noise: ${gpuErrors.length} | warnings: ${warnings.length}`);
+  console.log(`errors: ${errors.length} | tracked: ${tracked.length} | failed-resources: ${failedResources.length} | gpu-noise: ${gpuErrors.length} | warnings: ${warnings.length}`);
   for (const e of errors) console.log(`  ✗ [${e.kind}] ${e.text}`);
+  for (const e of tracked) console.log(`  ✗ tracked[${e.type || e.name}] ${e.message}${e.stack ? '\n       ' + e.stack : ''}`);
   for (const r of [...new Set(failedResources)].slice(0, 12)) console.log(`  ↯ ${r}`);
   for (const w of warnings.slice(0, 12)) console.log(`  ⚠ ${w}`);
   if (gpuErrors.length) console.log(`  (gpu-noise, non-fatal: ${gpuErrors[0].text.slice(0, 80)}…)`);
   await browser.close();
-  const ok = booted && errors.length === 0;
+  const ok = booted && errors.length === 0 && tracked.length === 0;
   console.log(ok ? '\nPASS' : '\nFAIL');
   process.exit(ok ? 0 : 1);
 }
