@@ -223,6 +223,7 @@ function App() {
 
   // Wall mode: actually render N repo files on screen via the map→GPU path.
   const [view, setView] = useState('demo');
+  const [wallMode, setWallMode] = useState('map'); // 'map' (new) vs 'text' (old/unoptimized text-path)
   const repoEntries = useMemo(() => Object.entries(REPO).filter(([, c]) => typeof c === 'string'), []);
   const btn = { background: '#234', color: '#cde', border: '1px solid #356', borderRadius: 4, padding: '2px 7px', cursor: 'pointer', font: 'inherit' };
 
@@ -231,6 +232,7 @@ function App() {
   const [wallCount, setWallCount] = useState(0);
   useEffect(() => {
     if (view !== 'wall') { setWallCount(0); return; }
+    setWallCount(0);
     let n = 0;
     const t = setInterval(() => {
       n = Math.min(repoEntries.length, n + 6);
@@ -238,7 +240,7 @@ function App() {
       if (n >= repoEntries.length) clearInterval(t);
     }, 120);
     return () => clearInterval(t);
-  }, [view, repoEntries.length]);
+  }, [view, wallMode, repoEntries.length]);
 
   return (
     <>
@@ -256,6 +258,11 @@ function App() {
           {' · '}<button onClick={() => setView(view === 'wall' ? 'demo' : 'wall')} style={btn}>
             {view === 'wall' ? `wall ${wallCount}/${repoEntries.length} — back to demo` : `render whole repo wall (${repoEntries.length} files) →`}
           </button>
+          {view === 'wall' && <>{' · '}pipeline:{' '}
+            <button onClick={() => setWallMode(wallMode === 'map' ? 'text' : 'map')} style={btn}>
+              {wallMode === 'map' ? 'MAP (new)' : 'TEXT-PATH (old/unoptimized)'} — switch
+            </button>
+          </>}
         </div>
         <div>codec in-browser: round-trip {m.ok ? 'OK ✓' : 'FAIL ✗'} · {m.sz.glyphs} glyphs, {m.sz.distinct} distinct · map {(m.sz.mapBytes / 1024).toFixed(1)}k vs GPU buf {(m.sz.current / 1024).toFixed(1)}k ({(m.sz.current / m.sz.mapBytes).toFixed(1)}×)</div>
         <div style={{ color: mapStatus && !mapStatus.ok ? '#f88' : '#cde' }}>map → GPU: {
@@ -293,13 +300,15 @@ function App() {
                 <MapGrid key={`map-${sel}`} text={text} position={[70, 0, 0]} textColor={{ r: 0.5, g: 0.85, b: 1.0 }} onStatus={setMapStatus} />
               </>
             ) : (
-              // Wall: each file rendered for real via the map→GPU path. Watch the live heap.
-              repoEntries.slice(0, wallCount).map(([path, content], i) => (
-                <MapGrid key={`wall-${i}`} text={content} quiet
-                  position={[(i % 12) * 58, -Math.floor(i / 12) * 115, 0]}
-                  textColor={{ r: 0.5, g: 0.85, b: 1.0 }}
-                  onStatus={i === 0 ? setMapStatus : undefined} />
-              ))
+              // Wall: whole repo rendered for real. Toggle pipeline (map vs text-path)
+              // to compare heap. Both build instance buffers to draw → similar when
+              // rendering ALL; the map's win is the resident-not-rendered form (8MB).
+              repoEntries.slice(0, wallCount).map(([path, content], i) => {
+                const pos = [(i % 12) * 58, -Math.floor(i / 12) * 115, 0];
+                return wallMode === 'text'
+                  ? <CodeGrid key={`wt-${i}`} text={content} filename="" position={pos} textColor={{ r: 0.55, g: 0.92, b: 0.7 }} />
+                  : <MapGrid key={`wm-${i}`} text={content} quiet position={pos} textColor={{ r: 0.5, g: 0.85, b: 1.0 }} onStatus={i === 0 ? setMapStatus : undefined} />;
+              })
             )}
           </GlyphCanvas>
         </div>
