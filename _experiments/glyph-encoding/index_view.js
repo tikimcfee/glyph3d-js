@@ -52,6 +52,21 @@ export class IndexView {
       for (let k = 0; k < counts.length; k++) s[k + 1] = s[k] + counts[k];
       return s;
     });
+
+    // UTF-16 offset of each line's start in source — tree-sitter / getHighlights()
+    // captures are in UTF-16 (row/col cols and absolute startIndex/endIndex), so
+    // we map UTF-16 → codepoint slot to compose with them.
+    const lineUtf16Start = new Uint32Array(nLines + 1);
+    let u = 0;
+    for (let i = 0; i < nLines; i++) {
+      let lu = 0;
+      for (const di of map.lines[i]) lu += map.dict[di].cp > 0xffff ? 2 : 1;
+      lineUtf16Start[i] = u;
+      u += lu + (i < nLines - 1 ? 1 : 0);
+    }
+    lineUtf16Start[nLines] = u;
+    this.lineUtf16Start = lineUtf16Start;
+    this.utf16Length = u;
   }
 
   /** binary search: line containing a slot. */
@@ -66,8 +81,8 @@ export class IndexView {
   lineColToSlot(line, col) { return this.lineStart[line] + col; }
   slotToCp(slot) { const { line, col } = this.slotToLineCol(slot); return this.map.dict[this.map.lines[line][col]].cp; }
   slotToChar(slot) { return String.fromCodePoint(this.slotToCp(slot)); }
-  /** the FontChain slot (drawn glyph id) for an instance — for re-rendering. */
-  slotToGlyphId(slot) { const { line, col } = this.slotToLineCol(slot); return this.map.dict[this.map.lines[line][col]].slot; }
+  /** the live drawn glyph id for an instance, via a cp→slot resolver. */
+  slotToGlyphId(slot, resolve) { return resolve(this.slotToCp(slot)); }
 
   /** [startByte, endByte) of the source codepoint this slot draws. */
   slotToByteRange(slot) {
@@ -124,4 +139,38 @@ export class IndexView {
 
   /** reconstruct the source covered by a set/list of slots (skips newlines). */
   sourceForSlots(slots) { return slots.map((s) => this.slotToChar(s)).join(''); }
+
+  // ── syntax-highlight composition (tree-sitter / getHighlights() captures) ──
+  /** UTF-16 column within a line → codepoint column (slot offset within the line). */
+  utf16ColToCol(line, u16col) {
+    const arr = this.map.lines[line];
+    let u = 0;
+    for (let col = 0; col < arr.length; col++) {
+      if (u >= u16col) return col;
+      u += this.map.dict[arr[col]].cp > 0xffff ? 2 : 1;
+    }
+    return arr.length;
+  }
+
+  /** tree-sitter (row, UTF-16 col) → slot. */
+  rowU16ColToSlot(row, u16col) { return this.lineStart[row] + this.utf16ColToCol(row, u16col); }
+
+  /** absolute UTF-16 source offset → slot. */
+  utf16IndexToSlot(idx) {
+    let lo = 0, hi = this.nLines;
+    while (lo < hi - 1) { const m = (lo + hi) >> 1; if (this.lineUtf16Start[m] <= idx) lo = m; else hi = m; }
+    return this.rowU16ColToSlot(lo, idx - this.lineUtf16Start[lo]);
+  }
+
+  /**
+   * A highlight capture → [slotStart, slotEnd). Accepts tree-sitter row/col
+   * (UTF-16 cols) or absolute UTF-16 startIndex/endIndex (CodeGrid.getHighlights()).
+   * @param {{startRow?:number,startCol?:number,endRow?:number,endCol?:number,startIndex?:number,endIndex?:number}} cap
+   */
+  captureToSlots(cap) {
+    if (cap.startIndex !== undefined) {
+      return [this.utf16IndexToSlot(cap.startIndex), this.utf16IndexToSlot(cap.endIndex)];
+    }
+    return [this.rowU16ColToSlot(cap.startRow, cap.startCol), this.rowU16ColToSlot(cap.endRow, cap.endCol)];
+  }
 }

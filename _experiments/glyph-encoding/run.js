@@ -13,8 +13,9 @@
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { loadChain } from './shaper.js';
-import { encode, pack, unpack, decodeSource, expandRender, referenceRender, sizes } from './codec.js';
+import { loadAppEngine } from './shaper.js';
+import { encode, pack, unpack, decodeSource, expandRender, sizes } from './codec.js';
+import { shapeText } from '../../packages/glyph3d-core/src/shaping/shapeText.js';
 import { renderToImage, diffImages } from './raster.js';
 import { encodePNG } from './png.js';
 
@@ -34,7 +35,7 @@ const padR = (s, n) => (String(s).length >= n ? String(s) : String(s) + ' '.repe
 const pad = (s, n) => (String(s).length >= n ? String(s) : ' '.repeat(n - String(s).length) + String(s));
 const kb = (n) => (n / 1024).toFixed(1) + 'k';
 
-const chain = await loadChain();
+const { chain, cache, resolve } = await loadAppEngine();
 let failures = 0;
 const rows = [];
 
@@ -49,7 +50,7 @@ function eqLines(a, b) {
 
 for (const input of INPUTS) {
   const text = readFileSync(input.path, 'utf8');
-  const map = encode(text, chain);
+  const map = encode(text);
   const packed = pack(map);
   const map2 = unpack(packed); // round-trip through the actual bytes
 
@@ -59,9 +60,9 @@ for (const input of INPUTS) {
   const sourceOk = decodeSource(map2) === text;
   checks.push(['source', sourceOk]);
 
-  // 2. glyph fidelity: expanded map vs fresh shaping
-  const reconLines = expandRender(map2);
-  const refLines = referenceRender(text, chain);
+  // 2. glyph fidelity: map resolved via the live cache vs the app's own shaping
+  const reconLines = expandRender(map2, resolve);
+  const refLines = shapeText(cache, text).lines.map((l) => l.shaped.map((g) => g.g));
   const fidelityOk = eqLines(reconLines, refLines);
   checks.push(['glyphs', fidelityOk]);
 

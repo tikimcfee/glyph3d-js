@@ -8,8 +8,9 @@
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { loadChain } from './shaper.js';
-import { encode, pack, unpack, decodeSource, referenceRender, expandRender, sizes } from './codec.js';
+import { loadAppEngine } from './shaper.js';
+import { encode, pack, unpack, decodeSource, expandRender, sizes } from './codec.js';
+import { shapeText } from '../../packages/glyph3d-core/src/shaping/shapeText.js';
 import { IndexView, cpByte } from './index_view.js';
 import { renderToImage, renderHighlighted, diffImages } from './raster.js';
 import { encodePNG } from './png.js';
@@ -18,7 +19,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const OUT = join(HERE, 'out');
 mkdirSync(OUT, { recursive: true });
 
-const chain = await loadChain();
+const { chain, cache, resolve } = await loadAppEngine();
 
 // ── compositor helpers ──────────────────────────────────────────────────────
 const toRGB = (img) => {
@@ -64,10 +65,10 @@ function coverage(slotLines) {
 
 // ── build + validate sample.js ──────────────────────────────────────────────
 const text = readFileSync(join(HERE, 'corpus/sample.js'), 'utf8');
-const map = unpack(pack(encode(text, chain)));      // through packed bytes
+const map = unpack(pack(encode(text)));             // through packed bytes
 const idx = new IndexView(map);
-const refLines = referenceRender(text, chain);
-const reconLines = expandRender(map);
+const refLines = shapeText(cache, text).lines.map((l) => l.shaped.map((g) => g.g));
+const reconLines = expandRender(map, resolve);
 const opts = { emPx: 10, maxLines: 28, maxCols: 84 };
 
 const refImg = renderToImage(chain, refLines, opts);
@@ -110,9 +111,9 @@ const sz = sizes(text, map, pack(map));
 
 // torture (robustness on hard Unicode)
 const tText = readFileSync(join(HERE, 'corpus/torture.txt'), 'utf8');
-const tMap = unpack(pack(encode(tText, chain)));
+const tMap = unpack(pack(encode(tText)));
 const tRoundtrip = decodeSource(tMap) === tText;
-const tLines = expandRender(tMap);
+const tLines = expandRender(tMap, resolve);
 const tImg = renderToImage(chain, tLines, { emPx: 10, maxLines: 12, maxCols: 84 });
 
 const covS = coverage(reconLines);

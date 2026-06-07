@@ -16,8 +16,8 @@
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { loadChain } from './shaper.js';
-import { encode, pack, unpack } from './codec.js';
+import { loadAppEngine } from './shaper.js';
+import { encode, pack, unpack, expandRender } from './codec.js';
 import { IndexView, cpByte } from './index_view.js';
 import { renderHighlighted } from './raster.js';
 import { encodePNG } from './png.js';
@@ -72,11 +72,11 @@ const INPUTS = [
   { label: 'HarfBuzzShaper.js', path: join(ROOT, 'packages/glyph3d-core/src/shaping/HarfBuzzShaper.js'), image: false, highlights: [] },
 ];
 
-const chain = await loadChain();
+const { chain, resolve } = await loadAppEngine();
 
 for (const input of INPUTS) {
   const text = readFileSync(input.path, 'utf8');
-  const map = unpack(pack(encode(text, chain))); // through the packed bytes
+  const map = unpack(pack(encode(text))); // through the packed bytes
   const idx = new IndexView(map);
   const gt = groundTruth(text);
 
@@ -107,7 +107,7 @@ for (const input of INPUTS) {
   if (probe >= 0) {
     const lc = idx.slotToLineCol(probe), br = idx.slotToByteRange(probe), g = idx.slotToGrapheme(probe);
     console.log(`  hover slot ${probe}: '${idx.slotToChar(probe)}' line ${lc.line} col ${lc.col} ` +
-      `bytes [${br[0]},${br[1]}) glyphId ${idx.slotToGlyphId(probe)} grapheme slots [${g.slotStart},${g.slotEnd})`);
+      `bytes [${br[0]},${br[1]}) glyphId ${idx.slotToGlyphId(probe, resolve)} grapheme slots [${g.slotStart},${g.slotEnd})`);
   }
 
   // use-case 2: highlight a substring by byte range → slots → source must match
@@ -135,7 +135,7 @@ for (const input of INPUTS) {
 
   // visual: render with the first highlight tinted
   if (input.image && input.highlights.length) {
-    const refLines = map.lines.map((line) => line.map((i) => map.dict[i].slot));
+    const refLines = expandRender(map, resolve);
     const hi = new Set();
     const h = input.highlights[0];
     if (h.kind === 'substring') {
