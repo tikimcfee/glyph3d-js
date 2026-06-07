@@ -15,6 +15,11 @@ import mesloUrl from '@glyph3d/core/fonts/MesloLGS-NF-Mono.ttf?url';
 import dejavuUrl from '@glyph3d/core/fonts/DejaVuSans.ttf?url';
 import { encode, pack, unpack, decodeSource, sizes } from '../_experiments/glyph-encoding/codec.js';
 import { buildBatchBuffers, resolveLayoutParams } from '../packages/glyph3d-core/src/workers/builders/index.js';
+// Corpus fixtures, imported as raw text (Vite ?raw).
+import sampleJs from '../_experiments/glyph-encoding/corpus/sample.js?raw';
+import tortureTxt from '../_experiments/glyph-encoding/corpus/torture.txt?raw';
+import harfbuzzSrc from '../packages/glyph3d-core/src/shaping/HarfBuzzShaper.js?raw';
+import glyphFieldSrc from '../packages/glyph3d-core/src/GlyphField.js?raw';
 
 const FONT_CHAIN = [
   { url: fontUrl, name: 'Cousine' },
@@ -22,7 +27,7 @@ const FONT_CHAIN = [
   { url: dejavuUrl, name: 'DejaVu Sans' },
 ];
 
-const SAMPLE = `// left = text-path (renderer shapes it)   right = map -> GPU (our slots)
+const FIB = `// left = text-path (renderer shapes it)   right = map -> GPU (our slots)
 export function fib(n) {
   let a = 0;
   let b = 1;
@@ -41,6 +46,14 @@ export function fibMemo(n) {
   const v = fibMemo(n - 1) + fibMemo(n - 2);
   return (memo.set(n, v), v);
 }`;
+
+const FIXTURES = [
+  { name: 'fib (inline)', text: FIB },
+  { name: 'sample.js', text: sampleJs },
+  { name: 'torture.txt (CJK/emoji/RTL)', text: tortureTxt },
+  { name: 'HarfBuzzShaper.js (~7k glyphs)', text: harfbuzzSrc },
+  { name: 'GlyphField.js (~64k glyphs)', text: glyphFieldSrc },
+];
 
 const toXYZ = (p) => (Array.isArray(p) ? p : [p?.x ?? 0, p?.y ?? 0, p?.z ?? 0]);
 
@@ -156,17 +169,26 @@ function App() {
   const { atlas, stage, error } = useGlyphEngine({ fontUrl, fonts: FONT_CHAIN, fontSize: 48, atlasSize: 2048 });
   console.log('[bench] App render', { atlas: !!atlas, stage, error: error ? String(error) : null });
   const [mapStatus, setMapStatus] = useState(null);
+  const [sel, setSel] = useState(0);
+  const text = FIXTURES[sel].text;
 
   const m = useMemo(() => {
-    const map = unpack(pack(encode(SAMPLE)));
-    const sz = sizes(SAMPLE, map, pack(map));
-    return { ok: decodeSource(map) === SAMPLE, sz };
-  }, []);
+    const map = unpack(pack(encode(text)));
+    const sz = sizes(text, map, pack(map));
+    return { ok: decodeSource(map) === text, sz };
+  }, [text]);
 
   return (
     <>
       <div style={overlay}>
         <div><b>glyph-encoding bench — map drives the real WebGPU renderer</b></div>
+        <div style={{ margin: '4px 0' }}>
+          fixture:{' '}
+          <select value={sel} onChange={(e) => { setSel(+e.target.value); setMapStatus(null); }}
+            style={{ background: '#0c0f15', color: '#cde', border: '1px solid #243', borderRadius: 4, padding: '2px 4px', font: 'inherit' }}>
+            {FIXTURES.map((f, i) => <option key={i} value={i}>{f.name}</option>)}
+          </select>
+        </div>
         <div>engine: {error ? `ERROR: ${String(error)}` : stage}</div>
         <div>codec in-browser: round-trip {m.ok ? 'OK ✓' : 'FAIL ✗'} · {m.sz.glyphs} glyphs, {m.sz.distinct} distinct · map {(m.sz.mapBytes / 1024).toFixed(1)}k vs GPU buf {(m.sz.current / 1024).toFixed(1)}k ({(m.sz.current / m.sz.mapBytes).toFixed(1)}×)</div>
         <div style={{ color: mapStatus && !mapStatus.ok ? '#f88' : '#cde' }}>map → GPU: {
@@ -181,10 +203,11 @@ function App() {
       </div>
       {atlas && (
         <div style={{ position: 'fixed', inset: 0 }}>
-          <GlyphCanvas atlas={atlas} camera={{ position: [40, -20, 90], fov: 70, near: 0.1, far: 20000 }}>
+          <GlyphCanvas atlas={atlas} camera={{ position: [38, -18, 135], fov: 70, near: 0.1, far: 20000 }}>
             <ViewerCamera />
-            {/* map-path ONLY, at the known-good origin from pass 1 — is the GPU driven by the map? */}
-            <MapGrid text={SAMPLE} position={[0, 0, 0]} textColor={{ r: 0.5, g: 0.85, b: 1.0 }} onStatus={setMapStatus} />
+            {/* LEFT green = text-path (renderer shapes it). RIGHT cyan = map → GPU (our slots). */}
+            <CodeGrid key={`text-${sel}`} text={text} filename="" position={[0, 0, 0]} textColor={{ r: 0.55, g: 0.92, b: 0.7 }} />
+            <MapGrid key={`map-${sel}`} text={text} position={[70, 0, 0]} textColor={{ r: 0.5, g: 0.85, b: 1.0 }} onStatus={setMapStatus} />
           </GlyphCanvas>
         </div>
       )}
