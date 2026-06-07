@@ -71,10 +71,16 @@ it left `packages/glyph3d-core` untouched.
 
 ## Test strategy (reuse the bench)
 
-- `app/glyph-bench.jsx` side-by-side: old path (green) vs new packed path (cyan)
-  must stay pixel-identical. Add the in-browser readback diff for a number.
+- **Data-path guard (run after every core edit):**
+  `bun _experiments/glyph-encoding/check.mjs` — runs all five headless harnesses;
+  `measure.js` + `parity.js` import the REAL core, so a broken builder or slot
+  space surfaces here. Exits non-zero on any failure.
+- **Live / GPU guard:** edit `app/glyph-bench.jsx`, then
+  `bun _experiments/glyph-encoding/bench-reload.mjs "<marker-from-your-edit>"` —
+  restarts Vite and PROVES the fresh code is served (kills the stale-HMR trap) —
+  then hard-reload and compare old(green) vs new-packed(cyan) side-by-side for
+  pixel-identity. Add the in-browser readback diff for a number.
 - `measure.js`: real packed-buffer byteLength vs 40 B/glyph = the actual VRAM cut.
-- Headless harnesses (`run.js`/`validate_picking.js`) guard encoding + picking.
 
 ## Risks / sharp spots
 
