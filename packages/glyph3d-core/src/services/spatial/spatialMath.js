@@ -35,6 +35,22 @@ export function screenToWorldDelta(dx, dy, objectZ, camera, canvas) {
 }
 
 /**
+ * World units spanned by one screen pixel at a given VIEW-AXIS depth (distance
+ * along the camera's forward direction). The single conversion behind every
+ * drag/pan/dolly so they can't drift: the caller supplies the depth — egocentric,
+ * "how far down my own view axis is the thing I'm moving toward / looking at" —
+ * and applies the camera's right/up basis to the scalar this returns.
+ *
+ * @param {THREE.PerspectiveCamera} camera
+ * @param {number} depth - distance along the camera forward axis
+ * @param {number} viewportHeight - canvas height in CSS pixels
+ * @returns {number} world units per pixel
+ */
+export function worldPerPixel(camera, depth, viewportHeight) {
+    return (2 * depth * Math.tan((camera.fov * Math.PI / 180) / 2)) / viewportHeight;
+}
+
+/**
  * Z distance at which a `width`×`height` world-space region fills `fillFraction`
  * of the viewport, accounting for FOV and aspect. The single source of truth for
  * "how far back to sit to frame this box" — VCC focus helpers, command-handler

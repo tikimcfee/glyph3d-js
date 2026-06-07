@@ -157,44 +157,34 @@ export default function registerCameraCommands(router) {
         };
     }, { description: 'Manually set the primary attention target (drives billboard attention blend)', usage: '<id|none>' });
 
-    router.register('camera.pivot', (args, ctx) => {
-        if (args.length < 3) return { text: 'ERR: usage: camera.pivot <x> <y> <z>', data: null };
-        const [x, y, z] = args.map(Number);
-        if ([x, y, z].some(isNaN)) return { text: 'ERR: x, y, z must be numbers', data: null };
-        const cc = ctx.cameraController;
-        if (!cc?.input?.focus?.pivot) return { text: 'ERR: no focus pivot on controller', data: null };
-        cc.input.focus.pivot.set(x, y, z);
-        return { text: `OK: focus pivot set to ${x}, ${y}, ${z}`, data: { x, y, z } };
-    }, { description: 'Set the camera focus pivot (zoom/orbit anchor)', usage: '<x> <y> <z>' });
-
     router.register('camera.sim', (args, ctx) => {
-        if (args.length < 1) return { text: 'ERR: usage: camera.sim <zoom|orbit|pan> <args>', data: null };
+        if (args.length < 1) return { text: 'ERR: usage: camera.sim <dolly|look|pan> <args>', data: null };
         const cc = ctx.cameraController;
         if (!cc) return { text: 'ERR: no camera controller', data: null };
         const action = args[0];
-        if (action === 'zoom') {
+        if (action === 'dolly') {
             const dy = Number(args[1]);
-            if (isNaN(dy)) return { text: 'ERR: camera.sim zoom <deltaY>', data: null };
+            if (isNaN(dy)) return { text: 'ERR: camera.sim dolly <deltaY>', data: null };
             cc._zoomBy(dy);
-        } else if (action === 'orbit') {
+        } else if (action === 'look') {
             const dx = Number(args[1]), dy = Number(args[2]);
-            if (isNaN(dx) || isNaN(dy)) return { text: 'ERR: camera.sim orbit <dx> <dy>', data: null };
-            cc._orbitBy(dx, dy);
+            if (isNaN(dx) || isNaN(dy)) return { text: 'ERR: camera.sim look <dx> <dy>', data: null };
+            cc._lookBy(dx, dy);
         } else if (action === 'pan') {
             const dx = Number(args[1]), dy = Number(args[2]);
             if (isNaN(dx) || isNaN(dy)) return { text: 'ERR: camera.sim pan <dx> <dy>', data: null };
             cc._panBy(dx, dy);
         } else {
-            return { text: `ERR: unknown action '${action}' (zoom|orbit|pan)`, data: null };
+            return { text: `ERR: unknown action '${action}' (dolly|look|pan)`, data: null };
         }
-        // Apply the resulting rotation (orbit sets pitch/yaw; next frame's
-        // applyCamera would normally pick that up, but we want the effect
-        // visible in an immediate screenshot).
+        // Push the resulting rotation into the camera now (look sets pitch/yaw;
+        // applyCamera would pick it up next frame, but we want it visible in an
+        // immediate screenshot).
         cc._applyRotation?.();
         const p = ctx.camera.position;
         return {
             text: `OK: ${action} applied; cam at ${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)}`,
             data: { position: { x: p.x, y: p.y, z: p.z } }
         };
-    }, { description: 'Simulate camera input', usage: 'zoom <dy> | orbit <dx> <dy> | pan <dx> <dy>' });
+    }, { description: 'Simulate camera input', usage: 'dolly <dy> | look <dx> <dy> | pan <dx> <dy>' });
 }

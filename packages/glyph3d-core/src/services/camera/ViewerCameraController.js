@@ -1,64 +1,40 @@
 /**
- * ViewerCameraController — extracted camera subsystem
+ * ViewerCameraController — the fly camera.
  *
- * Translation-first navigation: click-drag pans, scroll zooms,
- * WASD translates in camera-relative directions.
+ * The camera IS the viewer. Every motion is egocentric — measured in the
+ * camera's own frame, never relative to an external anchor:
+ *
+ *   - drag       → pan (truck/pedestal: slide along your own right/up)
+ *   - shift+drag → look (yaw/pitch in place — turn to face things)
+ *   - wheel      → dolly (move yourself toward/away from what you're looking at)
+ *   - WASD/QE    → strafe / dolly / rise
+ *
+ * Movement scales to the distance down your forward axis to whatever you're looking
+ * at (`_lookDistance()`) — but the anchor is STILL, not live (the Blender lesson).
+ * pan/WASD SAMPLE that distance once, when the gesture starts, and HOLD it in
+ * `_moveScale` for the stroke — so a drag or a flight keeps one feel start to finish
+ * instead of morphing as you near a file. Reading a file head-on → fine + steady;
+ * sweeping the void → coarse + steady. Dolly is the exception: it reads the distance
+ * LIVE (a smooth approach is the right feel while zooming) and doubles as the manual
+ * granularity knob. Nothing scales off the cursor or a content centroid — the
+ * RTS-style refs that made the same gesture behave differently over a grid vs. empty
+ * space, and a live per-frame recompute that smeared the two together, are both gone.
  *
  * Architecture: single-drain input state machine.
+ *   - Event handlers are pure state updaters — they record intent into
+ *     `this.input` and never touch the camera.
+ *   - `applyCamera(dt)`, once per frame, reduces `this.input` into one camera
+ *     transform. All position/rotation writes live here — the only place the
+ *     camera is mutated.
  *
- *   - Event handlers are pure state updaters. They record what the user is
- *     doing into `this.input` and never touch the camera directly.
- *   - `applyCamera(dt)`, called once per frame from the animate loop,
- *     reduces `this.input` into a single camera transform. All position
- *     and rotation writes live here.
- *
- * This is the only place the camera is mutated. New modes (focus-lock,
- * fly-cam, trackball) are added as branches inside `applyCamera`, not as
- * new event listeners fighting over the camera matrix.
- *
- * All user-adjustable settings are persisted to localStorage under
- * namespaced g3d.camera.* keys via StateController.
- *
- * Receives a SceneContext for shared references (camera, canvas, etc.).
+ * Settings persist to localStorage under namespaced g3d.camera.* keys via
+ * StateController. Receives a SceneContext for shared refs (camera, canvas, …).
  * Emits 'camera-focus-changed' window events for tree UI sync.
  */
 
-import { primaryMod, secondaryMod } from '../utils/platform.js';
 import { getCanvasViewportSize } from '../../core/canvasSize.js';
 import { stateController } from '../state/StateController.js';
-import { zDistanceForFit } from '../spatial/spatialMath.js';
-
-/**
- * Distinguish a trackpad two-finger swipe from a discrete mouse-wheel
- * tick. Wheel events carry no "source" field in browsers, so we infer
- * from delta characteristics and latch the result once any definitive
- * signal fires.
- *
- * Definitive trackpad signals (any one latches the detection):
- *   - non-zero deltaX — vertical mouse wheels don't produce it
- *   - fractional deltaY — most mouse wheels emit exact integers
- *     (100, 120, ...), trackpads produce fine-grained floats
- *   - |deltaY| < 40 px — real wheel ticks are ≥100 per event
- *
- * Definitive mouse signals:
- *   - deltaMode 1 (line) or 2 (page) — trackpads always emit pixel mode
- *
- * Ambiguous cases (integer deltaY ≥ 40 in pixel mode with no dx) fall
- * back to the latched state. Once we've seen the trackpad fingerprint
- * once in the session, we assume it holds — a fast vertical swipe that
- * produces a 150 px integer-rounded delta is still a trackpad gesture.
- *
- * If we never see a trackpad signal, we stay in "mouse wheel" mode by
- * default — the correct behaviour for desktop/mouse users.
- */
-let _trackpadLatched = false;
-function wheelLooksLikeTrackpad(e) {
-    if (e.deltaMode !== 0) return false;
-    if (Math.abs(e.deltaX) > 0.01)            { _trackpadLatched = true; return true; }
-    if (e.deltaY !== Math.trunc(e.deltaY))    { _trackpadLatched = true; return true; }
-    if (Math.abs(e.deltaY) < 40)              { _trackpadLatched = true; return true; }
-    return _trackpadLatched;
-}
+import { zDistanceForFit, worldPerPixel } from '../spatial/spatialMath.js';
 
 const CAMERA_DEFAULTS = {
     cameraSpeed: 100,
@@ -71,7 +47,13 @@ const CAMERA_DEFAULTS = {
 };
 
 const CLICK_THRESHOLD_PX = 5;
-const FOCUS_PROBE_INTERVAL_MS = 60;
+
+// Movement scale (world units): the flat constant when dynamicSpeed is off / no content
+// exists, and the floor & ceiling that clamp the dynamic look-distance so a glance at
+// empty space can never make dolly/zoom run away (nor freeze it nose-against a panel).
+const DEFAULT_LOOK_DIST = 200;
+const MIN_LOOK_DIST = 2;
+const MAX_LOOK_DIST = 2000;
 
 export class ViewerCameraController {
     /**
@@ -105,25 +87,28 @@ export class ViewerCameraController {
         // Event handlers update this; applyCamera() reads it.
         this.input = this._makeInputState();
 
+        // Movement scale, the Blender-honest way: a STILL anchor, not a live one.
+        //  - _moveScale: the held scale that pan + WASD read. Sampled ONCE at the
+        //    start of a move gesture (via _lookDistance) and held for its duration,
+        //    so a stroke never morphs mid-way. Reading a file head-on → fine + steady;
+        //    sweeping open space → coarse + steady. Dolly is the exception: it samples
+        //    live (a smooth approach is what you want while zooming) and is also the
+        //    manual granularity knob.
+        //  - _wasMoving: rising-edge latch so a WASD flight samples once, on key-down.
+        this._moveScale = DEFAULT_LOOK_DIST;
+        this._wasMoving = false;
+
         // camera.lock: when true, applyCamera applies NO camera transform (drag / WASD /
         // rotation / zoom frozen) — but the wheel still routes to a focused framed surface
         // (grid/terminal scroll is not camera motion). Toggled via setLocked() / camera.lock.
         this.locked = false;
-
-        // Backwards-compat alias. Other code and helpers in this file still
-        // reference `_focusPivot` directly; point both at the same Vector3.
-        this._focusPivot = this.input.focus.pivot;
 
         // Listener registry for clean teardown.
         this._listeners = [];
     }
 
     _makeInputState() {
-        const THREE = this.THREE;
         return {
-            // Event-shaped modifier snapshot — passed directly to
-            // primaryMod / secondaryMod without needing a conversion.
-            modifiers: { shiftKey: false, altKey: false, ctrlKey: false, metaKey: false },
             buttons:   { left: false, middle: false, right: false },
             cursor:    { x: 0, y: 0, inCanvas: false },
             keys:      new Set(),
@@ -133,31 +118,9 @@ export class ViewerCameraController {
                 startX: 0, startY: 0,
                 prevX:  0, prevY:  0,
                 dx:     0, dy:     0,     // accumulated since last drain
-                grabDepth: null,         // view-axis depth of the point grabbed at pan-start (1:1 pan)
             },
             wheel: {
-                dx: 0, dy: 0,             // accumulated since last drain
-                clientX: 0, clientY: 0,
-                mods: null,               // snapshot at event time
-            },
-            focus: {
-                // Geometric state only: the pivot point (where zoom/orbit
-                // anchor) and the gesture-anchor client coords. Attention
-                // semantics (who is "attended", whether the probe should
-                // suppress) moved to ctx.attentionManager in L1-A:
-                //   attention.primary !== null  = probe suppressed
-                //                                 (replaces focus.locked)
-                //   attention.hover.id          = hovered entity
-                //                                 (replaces focus.attendedId)
-                pivot:       new THREE.Vector3(0, 0, 0),
-                lastProbeMs: 0,
-                // Client-space position of the current gesture's "anchor":
-                // cursor for mouse, pinch centroid for touch. The zoom
-                // pipeline itself is dolly-forward (doesn't use these),
-                // but the focus probe + future anchor-aware handlers need
-                // a common place to read where the gesture is happening.
-                clientX:     0,
-                clientY:     0,
+                dy: 0,                    // accumulated wheel delta since last drain (dolly)
             },
         };
     }
@@ -177,17 +140,9 @@ export class ViewerCameraController {
             this._listeners.push({ target, event, handler, opts });
         };
 
-        const snapshotModifiers = (e) => {
-            input.modifiers.shiftKey = !!e.shiftKey;
-            input.modifiers.altKey   = !!e.altKey;
-            input.modifiers.ctrlKey  = !!e.ctrlKey;
-            input.modifiers.metaKey  = !!e.metaKey;
-        };
-
         // --- Keyboard ---
 
         track(document, 'keydown', (e) => {
-            snapshotModifiers(e);
             // L1-A WASD gate: when an entity holds the key-focus slot
             // (attention.key.id set to e.g. a terminal), the camera
             // drain stops consuming keys. Without this, typing in a
@@ -199,7 +154,6 @@ export class ViewerCameraController {
             input.keys.add(e.code);
         });
         track(document, 'keyup', (e) => {
-            snapshotModifiers(e);
             // Symmetric: if key-focus is active, keyup for that same
             // focused period should also not reach the camera. The
             // input.keys set is ignored in that mode; nothing to clear.
@@ -212,7 +166,6 @@ export class ViewerCameraController {
 
         track(canvas, 'mousedown', (e) => {
             if (!(e.target === canvas || canvas.contains(e.target))) return;
-            snapshotModifiers(e);
             if (e.button === 0) input.buttons.left = true;
             if (e.button === 1) input.buttons.middle = true;
             if (e.button === 2) input.buttons.right = true;
@@ -238,19 +191,15 @@ export class ViewerCameraController {
             input.drag.prevY  = e.clientY;
             input.drag.dx     = 0;
             input.drag.dy     = 0;
-            // True 1:1 pan: lock the pan to the depth of whatever's under the
-            // cursor at grab time, so the grabbed point tracks the pointer
-            // exactly (was scaled by the scene-centroid distance — felt off,
-            // especially with the depth-varied walk-tree layout).
-            input.drag.grabDepth = input.drag.mode === 'pan'
-                ? this._grabDepthAt(e.clientX, e.clientY)
-                : null;
+            // Sample the move scale ONCE, here, and hold it for the whole drag — the
+            // pan keeps one consistent feel from grab to release (the per-frame
+            // recompute is what made it morph as the camera neared a file).
+            if (input.drag.mode === 'pan') this._moveScale = this._lookDistance();
 
             canvas.style.cursor = input.drag.mode === 'look' ? 'move' : 'grabbing';
         });
 
         track(document, 'mouseup', (e) => {
-            snapshotModifiers(e);
             if (e.button === 0) input.buttons.left = false;
             if (e.button === 1) input.buttons.middle = false;
             if (e.button === 2) input.buttons.right = false;
@@ -277,7 +226,6 @@ export class ViewerCameraController {
         });
 
         track(document, 'mousemove', (e) => {
-            snapshotModifiers(e);
             input.cursor.x = e.clientX;
             input.cursor.y = e.clientY;
             input.cursor.inCanvas = (e.target === canvas || canvas.contains(e.target));
@@ -288,75 +236,19 @@ export class ViewerCameraController {
                 input.drag.dy += e.clientY - input.drag.prevY;
                 input.drag.prevX = e.clientX;
                 input.drag.prevY = e.clientY;
-            } else {
-                // Idle hover — probe the focus pivot so zoom/orbit anchor on
-                // whatever the cursor is pointing at.
-                this._probeFocusPivot(e.clientX, e.clientY);
             }
+            // Idle hover is resolved by the GPU pick (CanvasPicker), not here.
         });
 
-        // --- Scroll: pan by default, zoom with secondary mod or pinch ---
+        // --- Wheel: dolly toward / away from what you're looking at ---
 
         track(canvas, 'wheel', (e) => {
             if (!(e.target === canvas || canvas.contains(e.target))) return;
             e.preventDefault();
-            snapshotModifiers(e);
-            input.wheel.dx += e.deltaX;
+            // One axis, one meaning: the wheel dollies (moves you along your view
+            // axis). applyCamera's _applyWheel drains it. No device heuristic, no
+            // cursor raycast — the dolly is purely egocentric.
             input.wheel.dy += e.deltaY;
-            input.wheel.clientX = e.clientX;
-            input.wheel.clientY = e.clientY;
-            input.wheel.mods = {
-                shiftKey: e.shiftKey,
-                altKey:   e.altKey,
-                ctrlKey:  e.ctrlKey,
-                metaKey:  e.metaKey,
-            };
-
-            // Device heuristic: trackpad two-finger swipes produce small,
-            // smooth pixel deltas (often with a non-zero dx axis). Mouse
-            // wheels fire larger discrete ticks on the dy axis only. This
-            // flips the default action so a wheel-user gets zoom-to-cursor
-            // while a trackpad-user gets the natural two-finger pan.
-            //
-            // Synthetic ctrlKey — set by browsers during trackpad pinch —
-            // is treated as a modifier, which pairs with the trackpad
-            // default (modifier → zoom) so pinch-to-zoom does what you
-            // expect.
-            // First-person scheme: plain scroll pans vertically (Y), shift+scroll
-            // dollies forward/back. Explicit + predictable — no device heuristic.
-            const willZoom = e.shiftKey;
-            input.wheel.isTrackpad = wheelLooksLikeTrackpad(e);
-            input.wheel.willZoom   = willZoom;
-
-            // Fresh raycast at the cursor so the focus pivot reflects
-            // exactly where the user is pointing. The mousemove probe
-            // throttles to 60ms, so without a fresh hit a zoom initiated
-            // right after a cursor jump uses the previous target and
-            // "rolls off" onto the old hit point.
-            // Probe gate: when the primary attention is sticky-set (reader
-            // mode, camera.attend) we don't want the wheel-zoom to steal
-            // hover attention back to whatever happens to be under the
-            // cursor. Previously this was `!input.focus.locked`; L1-A
-            // replaces that gate with a direct AttentionManager check.
-            const am = this.ctx?.attentionManager;
-            const primaryHeld = !!am?.get?.('primary');
-            if (!primaryHeld && willZoom) {
-                const router = this.ctx?.entityInputRouter;
-                if (router && typeof router.raycastAtClient === 'function') {
-                    const hit = router.raycastAtClient(e.clientX, e.clientY);
-                    if (hit && hit.point) {
-                        input.focus.pivot.copy(hit.point);
-                        // Wheel-zoom's fresh hit is a stronger signal than
-                        // the throttled mousemove probe, so update the
-                        // hover slot directly (single writer: AttentionManager).
-                        if (hit.registryId) {
-                            am?.set?.('hover', hit.registryId, { entity: hit.entry || null });
-                        } else {
-                            am?.clear?.('hover');
-                        }
-                    }
-                }
-            }
         }, { passive: false });
 
         // --- Window resize ---
@@ -395,43 +287,6 @@ export class ViewerCameraController {
         }
 
         this._restoreUI();
-    }
-
-    /**
-     * Throttled raycast under the cursor; updates `focus.pivot` to the
-     * exact world-space hit point. Left alone when no window is hit so the
-     * pivot doesn't flick back to origin between windows.
-     *
-     * @private
-     */
-    _probeFocusPivot(clientX, clientY) {
-        // Probe gate: when primary is sticky-set, don't let the free-roaming
-        // hover probe overwrite the attended entity. (Pre-L1 this was
-        // `focus.locked`; AttentionManager.primary is the single source.)
-        const am = this.ctx?.attentionManager;
-        if (am?.get?.('primary')) return;
-
-        const focus = this.input.focus;
-        const now = performance.now();
-        if (now - focus.lastProbeMs < FOCUS_PROBE_INTERVAL_MS) return;
-        focus.lastProbeMs = now;
-
-        const router = this.ctx?.entityInputRouter;
-        if (!router || typeof router.raycastAtClient !== 'function') return;
-        const hit = router.raycastAtClient(clientX, clientY);
-        if (!hit) {
-            // Cursor over empty space — keep the pivot where it was (avoid
-            // flicking back to origin) but clear hover attention so the
-            // previously-hovered grid starts easing back to its default.
-            am?.clear?.('hover');
-            return;
-        }
-        if (hit.point) focus.pivot.copy(hit.point);
-        if (hit.registryId) {
-            am?.set?.('hover', hit.registryId, { entity: hit.entry || null });
-        } else {
-            am?.clear?.('hover');
-        }
     }
 
     // ============ Per-frame drain ============
@@ -479,7 +334,7 @@ export class ViewerCameraController {
         if (drag.mode === 'look') {
             this._lookBy(drag.dx, drag.dy);
         } else {
-            this._panBy(drag.dx, drag.dy, drag.grabDepth);
+            this._panBy(drag.dx, drag.dy);
         }
         drag.dx = 0;
         drag.dy = 0;
@@ -488,37 +343,26 @@ export class ViewerCameraController {
     /** @private */
     _applyWheel() {
         const wheel = this.input.wheel;
-        if (wheel.dx === 0 && wheel.dy === 0) return;
+        if (wheel.dy === 0) return;
 
         // Focused-surface scroll gate: a focused FRAMED surface (a terminal, or a framed code
         // grid) takes the wheel to scroll ITSELF instead of moving the camera. The bridged hook
         // dispatches terminal.scroll / grid.scroll and returns true when it consumes the wheel —
         // gate here in the drain (not the listener) so the verdict uses live focus and the
-        // camera never also zooms/pans. Mirrors the WASD focus gate.
+        // camera never also dollies. Mirrors the WASD focus gate.
         if (this.ctx?.tryScrollFocused?.(wheel.dy)) {
-            wheel.dx = 0;
             wheel.dy = 0;
             return;
         }
 
         // Camera frozen (camera.lock): the wheel didn't hit a focused surface, so consume it
-        // without zooming/panning the camera.
+        // without moving the camera.
         if (this.locked) {
-            wheel.dx = 0;
             wheel.dy = 0;
             return;
         }
 
-        // willZoom was resolved at event time against the device heuristic
-        // + modifier state (see wheel listener). Fall back to mouse-wheel
-        // semantics if the field is missing (e.g. code injected a delta).
-        const willZoom = wheel.willZoom ?? true;
-        if (willZoom) {
-            this._zoomBy(wheel.dy);
-        } else {
-            this._panBy(-wheel.dx, -wheel.dy);
-        }
-        wheel.dx = 0;
+        this._zoomBy(wheel.dy); // dolly along the view axis
         wheel.dy = 0;
     }
 
@@ -535,13 +379,18 @@ export class ViewerCameraController {
         if (keys.has('KeyD')) moveDir.x += 1;
         if (keys.has('Space') || keys.has('KeyQ')) moveDir.y += 1;
         if (keys.has('KeyE')) moveDir.y -= 1;
-        if (moveDir.lengthSq() === 0) return;
+
+        // Rising edge: sample the scale once when a flight STARTS and hold it, so a
+        // sustained WASD sweep keeps one speed instead of decelerating as it nears
+        // content. (Falling edge clears the latch for the next flight.)
+        const moving = moveDir.lengthSq() > 0;
+        if (moving && !this._wasMoving) this._moveScale = this._lookDistance();
+        this._wasMoving = moving;
+        if (!moving) return;
 
         moveDir.normalize();
         moveDir.applyQuaternion(camera.quaternion);
-        const speedScale = this.settings.dynamicSpeed
-            ? this._getViewDistance() / 200
-            : 1;
+        const speedScale = this._moveScale / DEFAULT_LOOK_DIST;
         moveDir.multiplyScalar(this.cameraSpeed * dt * speedScale);
         camera.position.add(moveDir);
     }
@@ -582,29 +431,20 @@ export class ViewerCameraController {
     }
 
     /**
-     * Pan: translate the camera in its own right/up plane. Pixel deltas
-     * are scaled to world units via FOV + viewport height; when
-     * dynamicSpeed is on, view distance also factors in so drag feels
-     * proportional at any zoom.
+     * Pan (truck/pedestal): slide the camera in its own right/up plane. Pixel deltas
+     * convert to world units through `_moveScale` — the scale SAMPLED at gesture start
+     * and held — so a drag covers the same on-screen distance start to finish, and
+     * feels identical whether you're over a grid or empty space.
      * @private
      */
-    _panBy(dx, dy, depthOverride = null) {
+    _panBy(dx, dy) {
         const THREE = this.THREE;
         const camera = this.ctx.camera;
-        const sens = this.settings.dragSensitivity;
-
-        // depthOverride (the grabbed point's view-axis depth) gives true 1:1
-        // drag-pan. Wheel-pan / touch pass nothing and keep the distance-scaled
-        // feel via the content-centroid view distance.
-        const dist = depthOverride != null
-            ? depthOverride
-            : (this.settings.dynamicSpeed ? this._getViewDistance() : 200);
-        const fovFactor = 2 * Math.tan((camera.fov * Math.PI / 180) / 2);
         const { height: vpHeight } = getCanvasViewportSize(this.ctx.canvas);
-        const pixelScale = (dist * fovFactor) / vpHeight;
+        const wpp = worldPerPixel(camera, this._moveScale, vpHeight) * this.settings.dragSensitivity;
 
-        const moveX = (this.settings.invertDragX ? dx : -dx) * pixelScale * sens;
-        const moveY = (this.settings.invertDragY ? -dy : dy) * pixelScale * sens;
+        const moveX = (this.settings.invertDragX ? dx : -dx) * wpp;
+        const moveY = (this.settings.invertDragY ? -dy : dy) * wpp;
 
         const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
         const up    = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
@@ -614,49 +454,36 @@ export class ViewerCameraController {
     }
 
     /**
-     * Zoom: dolly the camera toward the focus pivot using a multiplicative
-     * (geometric) step. Each unit of wheel delta multiplies the camera's
-     * distance from the pivot by a constant ratio — so consecutive scroll
-     * ticks feel consistent whether you're far from the pivot or close to
-     * it, instead of asymptotically braking as dist → 0 (the old linear
-     * step did that and felt like rolling a skateboard over a cylinder).
+     * Dolly: move the camera along its OWN forward axis — no pivot, no anchor. Unlike
+     * pan/WASD (which hold a sampled scale), dolly reads the LIVE look distance each
+     * tick: the step is a geometric fraction of it, so you approach smoothly and
+     * brake as you near what you're pointed at — the one motion where a continuously-
+     * updating distance is the right feel, and your manual granularity knob. It also
+     * refreshes `_moveScale`, so a pan right after a dolly inherits the new distance.
      *
-     * Because the camera translates along the camera→pivot axis, the pivot
-     * stays pinned to its screen-space position — so if the pivot was set
-     * from a cursor raycast, zoom visibly converges on the cursor.
+     *   Positive deltaY = "scroll away" = dolly back (camera retreats).
+     *   Negative deltaY = "scroll toward" = dolly in (camera advances).
+     *
+     * Shared with TouchController: pinch-delta becomes a wheel-equivalent deltaY
+     * (sign flipped, fingers-spreading = in) and lands here so the math lives once.
      * @private
-     */
-    /**
-     * Dolly along the camera's current forward direction — no pivot, no
-     * raycast, no anchor point. Each call moves the camera by a step
-     * proportional to the current view distance, so the perceived zoom
-     * rate stays consistent whether you're close to or far from the scene.
-     *
-     * Positive deltaY = "scroll away" = zoom out (camera retreats).
-     * Negative deltaY = "scroll toward" = zoom in (camera advances).
-     *
-     * Shared with TouchController: pinch-delta becomes a wheel-equivalent
-     * deltaY (sign flipped because fingers-spreading = zoom in) and lands
-     * here so the math lives in exactly one place.
      */
     _zoomBy(deltaY) {
         const THREE = this.THREE;
         const camera = this.ctx.camera;
         const delta = this.settings.invertScroll ? -deltaY : deltaY;
 
-        // k controls perceived speed: each unit of deltaY multiplies view
-        // distance by exp(k · delta), so a typical wheel tick (≈100) is
-        // ≈22% of current distance. Exponential keeps near and far zoom
-        // feeling the same instead of asymptotically braking.
+        // K sets perceived speed: each unit of deltaY scales distance by exp(K·delta),
+        // so a typical wheel tick (≈100) moves ≈22% of the current view distance.
         const K = 0.002;
         const factor = Math.exp(delta * K * this.settings.scrollSensitivity);
 
-        const viewDist = this._getViewDistance();
-        const newDist = Math.max(1, viewDist * factor);
-        const step = newDist - viewDist; // + when zooming out, − zooming in
+        const dist = this._lookDistance();   // live: smooth approach while zooming
+        const step = dist * factor - dist;   // + when dollying back, − when dollying in
+        this._moveScale = dist;              // keep pan/WASD in sync with the new granularity
 
-        // camera-local −Z is "forward" (what the camera faces). Zooming
-        // out moves backward (+step in the −forward direction).
+        // camera-local −Z is "forward" (what the camera faces). Dollying back moves
+        // backward (+step in the −forward direction).
         const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
         camera.position.addScaledVector(forward, -step);
     }
@@ -669,63 +496,58 @@ export class ViewerCameraController {
         this._panBy(dx, dy);
     }
 
-    /** @private */
-    _getViewDistance() {
-        // Distance from the camera to the scene's content centroid — a stable
-        // first-person speed reference, independent of world-origin Z. (The old
-        // |camera.z| broke once content lived at negative Z, e.g. the walk-tree:
-        // zoom braked to nothing at the z=0 plane and felt like a microscope.)
-        const grids = this.ctx.getGrids?.() || [];
-        if (grids.length === 0) return 200;
-        let cx = 0, cy = 0, cz = 0;
-        for (const g of grids) { cx += g.position.x; cy += g.position.y; cz += g.position.z; }
-        const n = grids.length;
-        const cam = this.ctx.camera.position;
-        return Math.max(Math.hypot(cx / n - cam.x, cy / n - cam.y, cz / n - cam.z), 1);
-    }
-
     /**
-     * View-axis depth of the grid under the cursor — the basis for true 1:1
-     * panning. Casts a ray through the pointer, intersects grid world-bounds,
-     * and returns the forward-projected distance to the nearest hit. Falls back
-     * to the content-centroid view distance when the cursor isn't over a grid.
-     * (We raycast here rather than reusing focus.pivot because the r3f client has
-     * no entityInputRouter, so the hover probe never sets the pivot.)
-     * @private
+     * Look distance: how far away the content is that you're navigating relative to.
+     * The SAMPLING PRIMITIVE — pan/WASD read it once at gesture start (then hold in
+     * `_moveScale`); dolly reads it live. Depends only on the camera, never on the
+     * cursor or a content centroid.
+     *
+     * Two samples, one robust answer (the cheap version of multiscale-nav's depth
+     * cubemap — see [[reference_camera_navigation_prior_art]]):
+     *   1. `fwd`  — nearest hit of a ray straight down the view axis. Precise "what
+     *      I'm aimed at" when you're pointed at something (reading head-on).
+     *   2. `near` — distance to the nearest grid AABB in ANY direction (no raycast).
+     *      Always finite, so it has no blind spot.
+     * Prefer `fwd`; fall back to `near` when the ray misses (looking at empty space)
+     * — NOT a stale hold, which is what let dolly run away off the top of the tree.
+     * Clamp to [MIN, MAX] so a glance at the void can never blow the scale up (nor a
+     * nose-against-panel pin it to zero). dynamicSpeed off → flat constant.
+     * @private @returns {number} distance in world units, in [MIN_LOOK_DIST, MAX_LOOK_DIST]
      */
-    _grabDepthAt(clientX, clientY) {
+    _lookDistance() {
+        if (!this.settings.dynamicSpeed) return DEFAULT_LOOK_DIST;
         const THREE = this.THREE;
         const camera = this.ctx.camera;
-        const fallback = this.settings.dynamicSpeed ? this._getViewDistance() : 200;
-        const canvas = this.ctx.canvas;
-        if (!canvas) return fallback;
-
-        const rect = canvas.getBoundingClientRect();
-        const ndc = new THREE.Vector2(
-            ((clientX - rect.left) / rect.width) * 2 - 1,
-            -((clientY - rect.top) / rect.height) * 2 + 1,
-        );
-        const ray = new THREE.Raycaster();
-        ray.setFromCamera(ndc, camera);
-
         const grids = this.ctx.getGrids?.() || [];
+        if (!grids.length) return DEFAULT_LOOK_DIST;
+
+        const origin = camera.position;
+        const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+        const ray = (this._ray ??= new THREE.Ray());
+        ray.origin.copy(origin);
+        ray.direction.copy(forward);
         const hit = new THREE.Vector3();
-        let best = null, bestDistSq = Infinity;
+        let fwd = Infinity;   // nearest forward hit — precise "what I'm aimed at"
+        let near = Infinity;  // nearest content in ANY direction — no blind spot
         for (const g of grids) {
             const box = g.getBounds?.();
             if (!box || box.isEmpty?.()) continue;
-            if (ray.ray.intersectBox(box, hit)) {
-                const dSq = ray.ray.origin.distanceToSquared(hit);
-                if (dSq < bestDistSq) { bestDistSq = dSq; best = hit.clone(); }
+            const dn = box.distanceToPoint(origin);
+            if (dn < near) near = dn;
+            if (ray.intersectBox(box, hit)) {
+                // Project onto the view axis (forward is unit-length); skip hits
+                // behind us / where we're standing inside the box.
+                const d = (hit.x - origin.x) * forward.x
+                        + (hit.y - origin.y) * forward.y
+                        + (hit.z - origin.z) * forward.z;
+                if (d > 0 && d < fwd) fwd = d;
             }
         }
-        if (!best) return fallback;
 
-        // Project onto the view axis: pixelScale wants depth along forward, not
-        // the raw distance to the (possibly off-axis) hit point.
-        const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-        const depth = best.sub(camera.position).dot(forward);
-        return depth > 1 ? depth : fallback;
+        const d = Number.isFinite(fwd) ? fwd
+                : Number.isFinite(near) ? near
+                : DEFAULT_LOOK_DIST;
+        return Math.min(Math.max(d, MIN_LOOK_DIST), MAX_LOOK_DIST);
     }
 
     // ============ UI glue ============

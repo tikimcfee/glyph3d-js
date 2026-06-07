@@ -64,10 +64,8 @@ function enterReader(ctx, grid, regIdx, registryId, { animate = true } = {}) {
     }
 
     // Attention: write primary through AttentionManager (single writer).
-    // The "sticky" semantics of reader mode — suppress hover-probe updates
-    // while reader is active — fall out of having attention.primary set,
-    // which is what the probe gate at ViewerCameraController._probeFocusPivot
-    // now checks.
+    // Reader mode's "sticky" focus falls out of having attention.primary set —
+    // the GPU hover pick (CanvasPicker) is the single hover writer.
     ctx.attentionManager.set('primary', registryId || null,
         { entity: ctx.registry?.get?.(registryId) || null });
     ctx.mode.state = 'reader';
