@@ -31,6 +31,8 @@ function decorationField(captures) {
   // normalizes line endings, and the value/extensions props can update a tick apart, so a
   // capture offset can momentarily exceed the current doc. Skip out-of-range starts, clamp
   // ends — never hand RangeSetBuilder a position past the doc (that throws and crashes CM).
+  // TODO(load+normalize): once CodeGrid normalizes content to \n at the load seam, CM's
+  // line-ending normalization can't drift captures vs the doc and this clamp is just belt-and-suspenders.
   const build = (docLength) => {
     if (!captures || !captures.length) return Decoration.none;
     const marks = [];

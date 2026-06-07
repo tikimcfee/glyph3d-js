@@ -22,7 +22,7 @@ export async function launchBrowser({ headed = false } = {}) {
 // (failure-worthy); GPU-init noise and 4xx/5xx resources are bucketed separately so
 // headless runs stay useful.
 export async function openApp(browser, {
-  url = 'http://localhost:5173/', wait = 5000, bootTimeout = 20000,
+  url = 'http://localhost:5173/', relayPort = null, wait = 5000, bootTimeout = 20000,
   viewport = { width: 1280, height: 800 },
 } = {}) {
   const errors = [], gpuErrors = [], failedResources = [], warnings = [];
@@ -42,7 +42,13 @@ export async function openApp(browser, {
   page.on('requestfailed', (r) => failedResources.push(`ERR ${r.url()} (${r.failure()?.errorText || 'failed'})`));
 
   let booted = false;
-  await page.goto(url, { waitUntil: 'load', timeout: 30000 });
+  // Optional: inject the relay port through the app's OWN config path (resolveRelay honors
+  // ?relay) to dial a real relay — by construction, not a hack. DEFAULT null = no relay dial:
+  // tests drive via the command bus and don't need it, and connecting swaps the file provider
+  // + races GitHub repo.load (nondeterministic). Opt in (relayPort: 8080) only when a test
+  // actually exercises the relay's local project.
+  const target = relayPort && !url.includes('?') ? `${url}?relay=${relayPort}` : url;
+  await page.goto(target, { waitUntil: 'load', timeout: 30000 });
   try { await page.waitForFunction(() => !!window.__glyphClient, { timeout: bootTimeout }); booted = true; } catch { /* caller checks .booted */ }
   await page.waitForTimeout(wait); // atlas gen + async content + first frames
 

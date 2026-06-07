@@ -54,6 +54,9 @@ export async function colorizeGrid(grid) {
         if (!renderer || typeof renderer.setGlyphColorRange !== 'function') return;
         if (!grid._layout) return;
 
+        // TODO(load+normalize): captures index into this raw text. If content has \r\n, the
+        // 3D builder's split('\n') leaves \r in lines and CM strips it in 2D — both drift.
+        // Normalizing line endings at load (CodeGrid.loadText) fixes both paths at once.
         const text = grid.content ?? (grid.lines ? grid.lines.join('\n') : '');
         if (!text) return;
 

@@ -173,6 +173,13 @@ class CodeGrid extends THREE.Object3D {
      * @returns {this} For chaining
      */
     loadText(text, options = {}) {
+        // TODO(load+normalize): content is stored RAW. A future "load & normalize data" pass
+        // belongs here — normalize line endings (\r\n, \r → \n), strip BOM, settle encoding —
+        // ONCE at the load seam so every downstream consumer can assume \n. Today \r\n drifts
+        // the two render targets apart: split('\n') leaves \r in a line (a \r buffer slot in
+        // 3D), while CodeMirror strips \r in the 2D editor, so tree-sitter capture offsets
+        // (indexed into this raw text) misalign across the views. Normalizing here removes the
+        // whole off-by-N class. See EditorPanel.decorationField + SyntaxColorizer.
         this.content = text;
         this.lines = text.split('\n');
 
@@ -208,6 +215,8 @@ class CodeGrid extends THREE.Object3D {
      * @returns {Promise<this>} For chaining
      */
     async loadTextAsync(text) {
+        // TODO(load+normalize): see loadText — normalize content (line endings/BOM/encoding)
+        // here too, as part of the future load-and-normalize-data pass.
         this.content = text;
         // Note: lines array populated lazily only if needed (getLineCount, getMaxLineWidth)
 
