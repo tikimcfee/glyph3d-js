@@ -12,6 +12,12 @@
  */
 
 import errorTracker from '../../utils/ErrorTracker.js';
+import metrics from '../../utils/Metrics.js';
+import { createLogger } from '../../utils/Logger.js';
+
+// Per-command telemetry sink: TRACE keeps the console quiet (console.debug) while populating
+// the log ring (log.tail). Every verb becomes a timed, counted, logged event.
+const cmdLog = createLogger('command', 0);
 
 export default class CommandRouter {
     /**
@@ -213,18 +219,27 @@ export default class CommandRouter {
         const ctx = this.context;
         ctx.sender = options.sender || null;
 
+        // Self-instrument: every verb is a timed, counted, logged event — so metric.list /
+        // log.tail / error.list show live command telemetry, and the bus's own failures land
+        // in the structured buffer the harness reads. (This is the seam Step 2's spans wrap.)
+        const t0 = performance.now();
         try {
             const result = await cmd.handler(args, ctx);
+            const ms = performance.now() - t0;
+            metrics.timing('command.duration', ms, { command: name });
+            metrics.counter('command.total', 1, { command: name, status: 'ok' });
+            cmdLog.trace(name, { ms: Math.round(ms) });
             // Normalize: if handler returned a plain string, wrap it
             if (typeof result === 'string') {
                 return { text: result, data: null };
             }
             return result || { text: 'OK', data: null };
         } catch (err) {
-            // Self-instrument: route the throw into ErrorTracker so command failures land in
-            // the same structured buffer the harness and error.* verbs read, instead of
-            // vanishing into a returned string. (Expected failures RETURN {text:'ERR:…'} and
-            // never reach here — only genuine exceptions do.)
+            const ms = performance.now() - t0;
+            metrics.timing('command.duration', ms, { command: name });
+            metrics.counter('command.total', 1, { command: name, status: 'err' });
+            // Expected failures RETURN {text:'ERR:…'} and never reach here — only genuine
+            // exceptions do, so route them to ErrorTracker (type: command_error).
             errorTracker.captureException(err, { type: 'command_error', command: name, args });
             return { text: `ERR: ${err.message}`, data: null };
         }
