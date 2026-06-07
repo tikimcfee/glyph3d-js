@@ -71,11 +71,17 @@ export async function openApp(browser, {
     // authoritative signal, since the tracker preventDefault()s the error event so
     // Playwright's pageerror never fires for uncaught exceptions.
     async trackedErrors() {
-      const list = await page.evaluate(() =>
-        (window.__errorTracker?.getErrors?.(50) || []).map((e) => ({
-          message: e.message, name: e.name, type: e.context?.type,
-          stack: e.stack ? String(e.stack).split('\n').slice(0, 3).join(' | ') : null,
-        }))).catch(() => []);
+      const list = await page.evaluate(async () => {
+        const norm = (e) => ({ message: e.message, name: e.name, type: e.context?.type,
+          stack: e.stack ? String(e.stack).split('\n').slice(0, 3).join(' | ') : null });
+        // Prefer the command bus (error.list) — the bus-native source of truth; fall back to
+        // the raw tracker global if the verb isn't wired (older build).
+        try {
+          const r = await window.__glyphClient?.router?.execute?.('error.list 50');
+          if (Array.isArray(r?.data?.errors)) return r.data.errors.map(norm);
+        } catch { /* fall through */ }
+        return (window.__errorTracker?.getErrors?.(50) || []).map(norm);
+      }).catch(() => []);
       return list.filter((e) => !isGpuNoise(e.message || ''));
     },
     close: () => page.close(),

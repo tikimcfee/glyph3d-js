@@ -11,6 +11,8 @@
  * Partial-match autocomplete when a prefix is unambiguous.
  */
 
+import errorTracker from '../../utils/ErrorTracker.js';
+
 export default class CommandRouter {
     /**
      * @param {Object} context - service registry bag with subsystem references
@@ -219,6 +221,11 @@ export default class CommandRouter {
             }
             return result || { text: 'OK', data: null };
         } catch (err) {
+            // Self-instrument: route the throw into ErrorTracker so command failures land in
+            // the same structured buffer the harness and error.* verbs read, instead of
+            // vanishing into a returned string. (Expected failures RETURN {text:'ERR:…'} and
+            // never reach here — only genuine exceptions do.)
+            errorTracker.captureException(err, { type: 'command_error', command: name, args });
             return { text: `ERR: ${err.message}`, data: null };
         }
     }

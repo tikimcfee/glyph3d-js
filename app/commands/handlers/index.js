@@ -36,6 +36,7 @@ import registerMemoryCommands from './memoryCommands.js';
 import registerWorkspaceCommands from './workspaceCommands.js';
 import registerAtlasCommands from './atlasCommands.js';
 import registerSessionCommands from './sessionCommands.js';
+import registerObservabilityCommands from './observabilityCommands.js';
 
 /**
  * Register all built-in commands on a router.
@@ -75,6 +76,7 @@ export function registerAllCommands(router) {
     registerWorkspaceCommands(router);
     registerAtlasCommands(router);
     registerSessionCommands(router);
+    registerObservabilityCommands(router);
 }
 
 // Dev ergonomics: handlers register imperatively ONCE per page load (CommandProvider's

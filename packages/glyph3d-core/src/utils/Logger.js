@@ -23,6 +23,15 @@ const LogLevelNames = {
     5: 'METRIC'
 };
 
+// Global log tap — every logger's _log fans here ONCE per originating call, so a single
+// observability consumer (the log.* verbs' ring) captures all scopes without subscribing to
+// each logger (current + future). Returns an unsubscribe fn.
+const globalLogListeners = [];
+export function addGlobalLogListener(cb) {
+    globalLogListeners.push(cb);
+    return () => { const i = globalLogListeners.indexOf(cb); if (i >= 0) globalLogListeners.splice(i, 1); };
+}
+
 class Logger {
     /**
      * Create a new Logger instance
@@ -113,6 +122,13 @@ class Logger {
 
         // Emit to listeners first
         this._emit(level, message, context);
+
+        // Global observability tap — fan here in _log (once per originating call); _emit's
+        // parent recursion would double-count. Respects each logger's minLevel (gated above).
+        if (globalLogListeners.length) {
+            const entry = { timestamp: Date.now(), level: LogLevelNames[level], name: this.fullName, message, context };
+            for (const cb of globalLogListeners) { try { cb(entry); } catch (e) { /* ignore tap errors */ } }
+        }
 
         // Console output with appropriate method
         const hasContext = Object.keys(context).length > 0;
