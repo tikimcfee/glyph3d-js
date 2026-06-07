@@ -7,7 +7,7 @@
       "devDependencies": {
         "harfbuzzjs": "^0.4.8",
         "playwright": "^1.60.0",
-        "three": "^0.183.0",
+        "three": "^0.184.0",
       },
     },
     "app": {
@@ -24,7 +24,7 @@
         "fzf": "^0.5.2",
         "react": "^19.0.0",
         "react-dom": "^19.0.0",
-        "three": "^0.183.0",
+        "three": "^0.184.0",
       },
       "devDependencies": {
         "@vitejs/plugin-react": "^4.3.4",
@@ -358,7 +358,7 @@
 
     "suspend-react": ["suspend-react@0.1.3", "", { "peerDependencies": { "react": ">=17.0" } }, "sha512-aqldKgX9aZqpoDp3e8/BZ8Dm7x1pJl+qI3ZKxDN0i/IQTWUwBx/ManmlVJ3wowqbno6c2bmiIfs+Um6LbsjJyQ=="],
 
-    "three": ["three@0.183.2", "", {}, "sha512-di3BsL2FEQ1PA7Hcvn4fyJOlxRRgFYBpMTcyOgkwJIaDOdJMebEFPA+t98EvjuljDx4hNulAGwF6KIjtwI5jgQ=="],
+    "three": ["three@0.184.0", "", {}, "sha512-wtTRjG92pM5eUg/KuUnHsqSAlPM296brTOcLgMRqEeylYTh/CdtvKUvCyyCQTzFuStieWxvZb8mVTMvdPyUpxg=="],
 
     "tree-sitter-go": ["tree-sitter-go@0.25.0", "", { "dependencies": { "node-addon-api": "^8.3.1", "node-gyp-build": "^4.8.4" }, "peerDependencies": { "tree-sitter": "^0.25.0" }, "optionalPeers": ["tree-sitter"] }, "sha512-APBc/Dq3xz/e35Xpkhb1blu5UgW+2E3RyGWawZSCNcbGwa7jhSQPS8KsUupuzBla8PCo8+lz9W/JDJjmfRa2tw=="],
 
