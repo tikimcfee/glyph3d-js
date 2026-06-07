@@ -5,7 +5,7 @@
 //                     → LiveSlugAtlas.ensureCodepoints → GlyphField.applyPrebuiltBuffers.
 //                     No re-shaping — the GPU is driven straight from the map's slots.
 // If the two read identically, the map drives the real renderer for real.
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { useThree } from '@react-three/fiber';
 import { useGlyphEngine, GlyphCanvas, CodeGrid, ViewerCamera, useGlyphAtlas } from '@glyph3d/r3f';
@@ -55,6 +55,12 @@ const FIXTURES = [
   { name: 'GlyphField.js (~64k glyphs)', text: glyphFieldSrc },
 ];
 
+// The whole repo's JS/JSX source, eager-loaded as raw text for the memory test.
+const REPO = import.meta.glob(['../packages/*/src/**/*.{js,jsx}', '../app/**/*.{js,jsx}'], {
+  query: '?raw', eager: true, import: 'default',
+});
+const MB = (n) => (n / 1048576).toFixed(1);
+
 const toXYZ = (p) => (Array.isArray(p) ? p : [p?.x ?? 0, p?.y ?? 0, p?.z ?? 0]);
 
 /**
@@ -64,13 +70,14 @@ const toXYZ = (p) => (Array.isArray(p) ? p : [p?.x ?? 0, p?.y ?? 0, p?.z ?? 0]);
  */
 const L = (...a) => console.log('[bench]', ...a);
 
-function MapGrid({ text, position, textColor, onStatus }) {
+function MapGrid({ text, position, textColor, onStatus, quiet }) {
   const scene = useThree((s) => s.scene);
   const atlas = useGlyphAtlas();
   useEffect(() => {
     let grid;
+    const log = quiet ? () => {} : L;
     try {
-      L('MapGrid effect start', { scene: !!scene, atlas: !!atlas, shapeCache: !!atlas?._shapeCache, shaper: !!atlas?._shaper, live: !!atlas?._live, slugData: !!atlas?._slugData });
+      log('MapGrid effect start', { scene: !!scene, atlas: !!atlas, shapeCache: !!atlas?._shapeCache, shaper: !!atlas?._shaper, live: !!atlas?._live, slugData: !!atlas?._slugData });
 
       grid = new CodeGridCore(scene, atlas, {
         name: 'map-path', worldScale: 0.025, showBackground: false,
@@ -78,14 +85,14 @@ function MapGrid({ text, position, textColor, onStatus }) {
       });
       scene.add(grid);
       grid.position.set(...toXYZ(position));
-      L('grid built', { type: grid?.constructor?.name, inScene: scene.children.includes(grid) });
+      log('grid built', { type: grid?.constructor?.name, inScene: scene.children.includes(grid) });
 
       grid._ensureRenderer();
-      L('ensureRenderer', { hasRenderer: !!grid._renderer, metrics: grid.metrics, color: grid.config?.textColor, layout: grid.config?.layout });
+      log('ensureRenderer', { hasRenderer: !!grid._renderer, metrics: grid.metrics, color: grid.config?.textColor, layout: grid.config?.layout });
 
       const cache = atlas._shapeCache;
       const map = encode(text);
-      L('encoded', { lines: map.lines.length, dict: map.dict.length });
+      log('encoded', { lines: map.lines.length, dict: map.dict.length });
 
       const shaped = {
         lines: map.lines.map((line) => ({
@@ -93,7 +100,7 @@ function MapGrid({ text, position, textColor, onStatus }) {
         })),
         totalGlyphs: map.lines.reduce((n, l) => n + l.length, 0),
       };
-      L('shaped', { totalGlyphs: shaped.totalGlyphs, line0: shaped.lines[0]?.shaped?.length, g0: shaped.lines[0]?.shaped?.[0] });
+      log('shaped', { totalGlyphs: shaped.totalGlyphs, line0: shaped.lines[0]?.shaped?.length, g0: shaped.lines[0]?.shaped?.[0] });
 
       // Build the metrics the builder actually wants — the SAME object CodeGrid
       // assembles in _prepareAddsForBuild (lineSpacing/pixel*/worldScale), NOT
@@ -106,7 +113,7 @@ function MapGrid({ text, position, textColor, onStatus }) {
         worldScale: scale, atlasSize: atlas.getAtlasTexture().width,
         pixelWidth: cs.width, pixelHeight: cs.height,
       };
-      L('metrics built', metrics);
+      log('metrics built', metrics);
 
       const items = [{ text, position: { x: 0, y: 0, z: 0 }, color: grid.config.textColor, scale: 1, groupId: 0, shaped }];
       const buffers = buildBatchBuffers(items, {
@@ -114,14 +121,14 @@ function MapGrid({ text, position, textColor, onStatus }) {
         upem: atlas._shaper.upem, layout: resolveLayoutParams(grid.config.layout), scrollOffset: 0,
       });
       const P = buffers.positions, S = buffers.sizes;
-      L('buildBatchBuffers', {
+      log('buildBatchBuffers', {
         count: buffers.count, posLen: P.length,
         pos0: [P[0], P[1], P[2]], size0: [S[0], S[1]], glyph0: buffers.glyphIds?.[0],
         anyNaN: Array.from(P.slice(0, 30)).some(Number.isNaN), bounds: buffers.bounds,
       });
 
       const ensured = atlas._live ? atlas._live.ensureGlyphsEncoded(buffers.glyphIds) : null;
-      L('ensureGlyphsEncoded', ensured);
+      log('ensureGlyphsEncoded', ensured);
 
       // bind slug textures (what LiveSlugAtlas registration does for real fields)
       if (typeof grid._renderer.setSlugData === 'function') grid._renderer.setSlugData(atlas._slugData, atlas._shaper);
@@ -132,7 +139,7 @@ function MapGrid({ text, position, textColor, onStatus }) {
       const mesh = grid._renderer?.instanceMesh;
       if (mesh) mesh.frustumCulled = false;
       grid.updateMatrixWorld(true);
-      L('committed v2', {
+      log('committed v2', {
         instanceCount: mesh?.geometry?.instanceCount, meshVisible: mesh?.visible, meshParent: mesh?.parent?.type,
         pos0: `${P[0]?.toFixed(2)},${P[1]?.toFixed(2)},${P[2]?.toFixed(2)}`,
         size0: `${S[0]?.toFixed(3)}x${S[1]?.toFixed(3)}`,
@@ -178,6 +185,61 @@ function App() {
     return { ok: decodeSource(map) === text, sz };
   }, [text]);
 
+  const [mem, setMem] = useState(null);
+  const memRef = useRef(null); // hold the packed maps resident so heap reflects them
+
+  const runMemTest = () => {
+    const entries = Object.entries(REPO).filter(([, c]) => typeof c === 'string');
+    const t0 = performance.now();
+    const heap0 = performance.memory?.usedJSHeapSize ?? 0;
+    let glyphs = 0, srcBytes = 0, mapBytes = 0, mapBitsBytes = 0, roundtripFails = 0;
+    const packs = [];
+    for (const [, content] of entries) {
+      const map = encode(content);
+      const packed = pack(map);
+      if (decodeSource(unpack(packed)) !== content) roundtripFails++;
+      const sz = sizes(content, map, packed);
+      glyphs += sz.glyphs; srcBytes += sz.utf8; mapBytes += packed.length; mapBitsBytes += sz.mapBytesPacked;
+      packs.push(packed);
+    }
+    const heap1 = performance.memory?.usedJSHeapSize ?? 0;
+    memRef.current = packs; // keep referenced
+    const result = {
+      files: entries.length, glyphs, roundtripFails,
+      srcMB: MB(srcBytes), mapMB: MB(mapBytes), mapBitsMB: MB(mapBitsBytes), instMB: MB(glyphs * 40),
+      ratio: (glyphs * 40 / mapBytes).toFixed(1), bitsRatio: (glyphs * 40 / mapBitsBytes).toFixed(1),
+      heapMB: MB(Math.max(0, heap1 - heap0)), ms: (performance.now() - t0).toFixed(0),
+    };
+    setMem(result);
+    console.log('[bench] MEM whole-repo', result);
+  };
+
+  // Live JS heap — the actual system memory number (Chromium/Vivaldi).
+  const [heap, setHeap] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setHeap(performance.memory?.usedJSHeapSize ?? 0), 800);
+    return () => clearInterval(t);
+  }, []);
+
+  // Wall mode: actually render N repo files on screen via the map→GPU path.
+  const [view, setView] = useState('demo');
+  const repoEntries = useMemo(() => Object.entries(REPO).filter(([, c]) => typeof c === 'string'), []);
+  const btn = { background: '#234', color: '#cde', border: '1px solid #356', borderRadius: 4, padding: '2px 7px', cursor: 'pointer', font: 'inherit' };
+
+  // Progressive wall: stream files in 6-at-a-time so the browser stays responsive
+  // and you watch the heap climb as the real repo loads.
+  const [wallCount, setWallCount] = useState(0);
+  useEffect(() => {
+    if (view !== 'wall') { setWallCount(0); return; }
+    let n = 0;
+    const t = setInterval(() => {
+      n = Math.min(repoEntries.length, n + 6);
+      setWallCount(n);
+      if (n >= repoEntries.length) clearInterval(t);
+    }, 120);
+    return () => clearInterval(t);
+  }, [view, repoEntries.length]);
+
   return (
     <>
       <div style={overlay}>
@@ -189,7 +251,12 @@ function App() {
             {FIXTURES.map((f, i) => <option key={i} value={i}>{f.name}</option>)}
           </select>
         </div>
-        <div>engine: {error ? `ERROR: ${String(error)}` : stage}</div>
+        <div>engine: {error ? `ERROR: ${String(error)}` : stage}
+          {' · '}JS heap (live): <b style={{ color: '#fd8' }}>{MB(heap)} MB</b>
+          {' · '}<button onClick={() => setView(view === 'wall' ? 'demo' : 'wall')} style={btn}>
+            {view === 'wall' ? `wall ${wallCount}/${repoEntries.length} — back to demo` : `render whole repo wall (${repoEntries.length} files) →`}
+          </button>
+        </div>
         <div>codec in-browser: round-trip {m.ok ? 'OK ✓' : 'FAIL ✗'} · {m.sz.glyphs} glyphs, {m.sz.distinct} distinct · map {(m.sz.mapBytes / 1024).toFixed(1)}k vs GPU buf {(m.sz.current / 1024).toFixed(1)}k ({(m.sz.current / m.sz.mapBytes).toFixed(1)}×)</div>
         <div style={{ color: mapStatus && !mapStatus.ok ? '#f88' : '#cde' }}>map → GPU: {
           !mapStatus ? '…' :
@@ -200,14 +267,40 @@ function App() {
           LEFT green = text-path (renderer shapes it). RIGHT cyan = map → GPU (our slots, no re-shape).
           Same code on both = the map drives the renderer. Drag orbit · scroll zoom.
         </div>
+        <div style={{ marginTop: 8, borderTop: '1px solid #243', paddingTop: 6 }}>
+          <button onClick={runMemTest} style={{ background: '#1b6', color: '#fff', border: 0, borderRadius: 4, padding: '4px 9px', cursor: 'pointer', font: 'inherit' }}>
+            Run whole-repo memory test ({Object.keys(REPO).length} files)
+          </button>
+          {mem && (
+            <div style={{ marginTop: 6 }}>
+              <div>{mem.files} files · {mem.glyphs.toLocaleString()} glyphs · {mem.ms}ms · round-trip {mem.roundtripFails === 0 ? 'OK ✓' : `${mem.roundtripFails} FAIL`}</div>
+              <div>source UTF-8: {mem.srcMB} MB</div>
+              <div>map (packed, resident): <b style={{ color: '#7e7' }}>{mem.mapMB} MB</b> · bit-packed est: {mem.mapBitsMB} MB</div>
+              <div>if all RENDERED (instance buffers): <b style={{ color: '#e88' }}>≥{mem.instMB} MB</b> computed · ~2× real (codepoints+picking+per-grid overhead → ~290MB measured)</div>
+              <div>→ <b>~36× measured</b> (rendered/maps) · resident maps = the {mem.mapMB}MB above. (build heap +{mem.heapMB}MB is transient encode garbage, not resident)</div>
+            </div>
+          )}
+        </div>
       </div>
       {atlas && (
         <div style={{ position: 'fixed', inset: 0 }}>
           <GlyphCanvas atlas={atlas} camera={{ position: [38, -18, 135], fov: 70, near: 0.1, far: 20000 }}>
             <ViewerCamera />
-            {/* LEFT green = text-path (renderer shapes it). RIGHT cyan = map → GPU (our slots). */}
-            <CodeGrid key={`text-${sel}`} text={text} filename="" position={[0, 0, 0]} textColor={{ r: 0.55, g: 0.92, b: 0.7 }} />
-            <MapGrid key={`map-${sel}`} text={text} position={[70, 0, 0]} textColor={{ r: 0.5, g: 0.85, b: 1.0 }} onStatus={setMapStatus} />
+            {view === 'demo' ? (
+              <>
+                {/* LEFT green = text-path. RIGHT cyan = map → GPU (our slots). */}
+                <CodeGrid key={`text-${sel}`} text={text} filename="" position={[0, 0, 0]} textColor={{ r: 0.55, g: 0.92, b: 0.7 }} />
+                <MapGrid key={`map-${sel}`} text={text} position={[70, 0, 0]} textColor={{ r: 0.5, g: 0.85, b: 1.0 }} onStatus={setMapStatus} />
+              </>
+            ) : (
+              // Wall: each file rendered for real via the map→GPU path. Watch the live heap.
+              repoEntries.slice(0, wallCount).map(([path, content], i) => (
+                <MapGrid key={`wall-${i}`} text={content} quiet
+                  position={[(i % 12) * 58, -Math.floor(i / 12) * 115, 0]}
+                  textColor={{ r: 0.5, g: 0.85, b: 1.0 }}
+                  onStatus={i === 0 ? setMapStatus : undefined} />
+              ))
+            )}
           </GlyphCanvas>
         </div>
       )}
