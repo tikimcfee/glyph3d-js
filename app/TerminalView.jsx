@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
+import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 
 // TerminalView — a 2D interactive companion to the focused 3D TerminalGrid. Separate from
@@ -50,7 +51,6 @@ export default function TerminalView({ client }) {
     const grid = client?.ctx?.registry?.get?.(termId)?.grid;
     if (!grid) return undefined;
 
-    // Match the PTY's fixed geometry (no fit) so wrapping agrees with the 3D view + the shell.
     const term = new Terminal({
       cols: grid.cols || 80,
       rows: grid.rows || 24,
@@ -60,15 +60,40 @@ export default function TerminalView({ client }) {
       cursorBlink: true,
       scrollback: 2000,
     });
+    const fit = new FitAddon();
+    term.loadAddon(fit);
     term.open(hostRef.current);
 
-    // OUTPUT: same PTY stream the 3D emulator renders.
+    // Fit the xterm to the dock panel, then resize the whole terminal (PTY + 3D grid) to match.
+    // Two birds, one surface: (1) SIZING — nothing clipped, no manual-resize-to-see; (2) REPLAY —
+    // the resize SIGWINCHs the program, which repaints the full screen, so the freshly-attached
+    // xterm gets the CURRENT state, not just bytes-from-now. Skip until the panel has real dims.
+    const syncSize = () => {
+      try {
+        fit.fit();
+        const { cols, rows } = term;
+        if (!cols || !rows || cols < 2 || rows < 2) return;
+        if (cols !== grid.cols || rows !== grid.rows) {
+          client?.router?.execute?.(['terminal.resize', termId, String(cols), String(rows)]);
+        }
+      } catch { /* renderer not ready yet */ }
+    };
+
+    // OUTPUT: same PTY stream the 3D emulator renders (incl. the resize-triggered repaint).
     const offBytes = grid.onBytes?.((payload) => { try { term.write(payload); } catch { /* disposed */ } });
     // INPUT: xterm emits the correct terminal bytes (as a string) → the grid's input hook.
     const onData = term.onData((data) => { grid.onInput?.(data, termId); });
+
+    // Refit on mount (after layout settles) and live as the dock panel resizes (debounced).
+    let timer = null;
+    const ro = new ResizeObserver(() => { clearTimeout(timer); timer = setTimeout(syncSize, 150); });
+    ro.observe(hostRef.current);
+    requestAnimationFrame(syncSize);
     term.focus();
 
     return () => {
+      ro.disconnect();
+      clearTimeout(timer);
       offBytes?.();
       onData?.dispose?.();
       term.dispose();
