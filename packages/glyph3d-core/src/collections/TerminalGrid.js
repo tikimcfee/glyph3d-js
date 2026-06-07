@@ -240,6 +240,21 @@ export default class TerminalGrid extends THREE.Object3D {
      */
     writeBytes(payload) {
         this._emulator.write(payload);
+        // Byte-output tap: a 2D companion view (DOM xterm) consumes the SAME PTY stream the
+        // 3D emulator renders — one source, two projections. Fires with the raw payload.
+        if (this._byteListeners) {
+            for (const cb of this._byteListeners) { try { cb(payload); } catch (e) { /* ignore tap errors */ } }
+        }
+    }
+
+    /**
+     * Subscribe to the raw PTY byte stream this terminal renders — lets a 2D xterm mirror the
+     * live output. Returns an unsubscribe fn. @param {(payload:Uint8Array)=>void} cb
+     */
+    onBytes(cb) {
+        if (!this._byteListeners) this._byteListeners = new Set();
+        this._byteListeners.add(cb);
+        return () => { this._byteListeners?.delete(cb); };
     }
 
     /**

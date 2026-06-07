@@ -8,6 +8,7 @@ import SettingsPanel from './SettingsPanel.jsx';
 import TerminalsPanel from './TerminalsPanel.jsx';
 import FieldVisitorsPanel from './FieldVisitorsPanel.jsx';
 import EditorPanel from './EditorPanel.jsx';
+import TerminalView from './TerminalView.jsx';
 
 // IdeDock — the panel layer. A dockview surface that hosts the IDE's DOM panels
 // (file tree, terminals; inspector/search later) with tabs, splits, float and
@@ -35,6 +36,7 @@ const PANELS = [
   { id: 'fieldVisitors', title: 'Crew', position: { referencePanel: 'terminals', direction: 'within' } },
   { id: 'settings', title: 'Settings', position: { referencePanel: 'files', direction: 'within' } },
   { id: 'editor', title: 'Editor', position: { referencePanel: 'files', direction: 'below' } },
+  { id: 'terminalView', title: 'Terminal', position: { referencePanel: 'editor', direction: 'within' } },
 ];
 const panelDef = (id) => PANELS.find((p) => p.id === id);
 
@@ -66,6 +68,7 @@ export default function IdeDock({ client }) {
     terminals: () => <TerminalsPanel client={clientRef.current} />,
     fieldVisitors: () => <FieldVisitorsPanel client={clientRef.current} />,
     editor: () => <EditorPanel client={clientRef.current} />,
+    terminalView: () => <TerminalView client={clientRef.current} />,
   }), []);
 
   const onReady = useCallback((event) => {
@@ -111,6 +114,24 @@ export default function IdeDock({ client }) {
         },
         list: () => PANELS.map((p) => ({ id: p.id, title: p.title, open: !!api.getPanel(p.id) })),
       };
+    }
+
+    // Auto-raise the matching 2D view when focus changes type: a code grid raises the Editor
+    // tab, a terminal raises the Terminal tab. They're tabbed together (one "focused thing in
+    // 2D" area), and dockview unmounts inactive tabs — so this also remounts the right panel,
+    // making "click a thing → see it in 2D" work without manual tab-switching.
+    const am = client?.ctx?.attentionManager;
+    const reg = client?.ctx?.registry;
+    if (am?.on) {
+      const raiseFocusView = () => {
+        const slot = am.get('primary') || am.get('key');
+        const entry = slot?.id ? reg?.get?.(slot.id) : null;
+        const want = entry?.type === 'terminal' ? 'terminalView'
+                   : entry?.type === 'grid' ? 'editor' : null;
+        if (want) api.getPanel(want)?.api.setActive();
+      };
+      am.on('change:primary', raiseFocusView);
+      am.on('change:key', raiseFocusView);
     }
 
     // Persist on any layout change (add/remove/move/resize). The store debounces

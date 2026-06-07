@@ -17,7 +17,7 @@
 import { launchBrowser, openApp } from './itest/driver.mjs';
 
 function parseArgs(argv) {
-  const a = { url: 'http://localhost:5173/', shot: null, headed: false, wait: 5000, cmds: [], eval: null };
+  const a = { url: 'http://localhost:5173/', shot: null, headed: false, wait: 5000, cmds: [], eval: null, relayPort: null };
   for (let i = 0; i < argv.length; i++) {
     const t = argv[i];
     if (t === '--url') a.url = argv[++i];
@@ -26,13 +26,14 @@ function parseArgs(argv) {
     else if (t === '--wait') a.wait = Number(argv[++i]);
     else if (t === '--cmd') a.cmds.push(argv[++i]);
     else if (t === '--eval') a.eval = argv[++i];
+    else if (t === '--relay') a.relayPort = Number(argv[++i]); // dial the relay (e.g. terminals)
   }
   return a;
 }
 
 const args = parseArgs(process.argv.slice(2));
 const browser = await launchBrowser({ headed: args.headed });
-const app = await openApp(browser, { url: args.url, wait: args.wait });
+const app = await openApp(browser, { url: args.url, wait: args.wait, relayPort: args.relayPort });
 
 try {
   for (const cmd of args.cmds) {
