@@ -9,11 +9,20 @@ import { chromium } from 'playwright';
 const isGpuNoise = (s) =>
   /webgpu|gpuadapter|gpudevice|requestadapter|gpu process|fallback to|swiftshader/i.test(s);
 
-// Flags proven to render WebGPU headed on a GPU box (see tools/capture.mjs).
+// WebGPU on the REAL GPU. The two ANGLE flags are load-bearing for HEADLESS: without
+// them, headless Chromium has no display/Vulkan surface and silently falls back to the
+// SwiftShader SOFTWARE adapter (google/swiftshader). The minimal page survives that, but
+// the full GlyphField workload (compute + big int textures + Slug coverage) overwhelms it
+// and the device is dropped mid-run ("Instance dropped in popErrorScope"). With
+// --use-angle=vulkan + --use-gl=angle, headless gets the actual GPU (nvidia/...), matching
+// headed — verified via the wgpu adapter probe. Harmless in headed mode (already on-GPU).
 export async function launchBrowser({ headed = false } = {}) {
   return chromium.launch({
     headless: !headed,
-    args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--ignore-gpu-blocklist'],
+    args: [
+      '--enable-unsafe-webgpu', '--enable-features=Vulkan', '--ignore-gpu-blocklist',
+      '--use-angle=vulkan', '--use-gl=angle',
+    ],
   });
 }
 
