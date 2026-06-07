@@ -7,6 +7,7 @@ import RepoPanel from './RepoPanel.jsx';
 import SettingsPanel from './SettingsPanel.jsx';
 import TerminalsPanel from './TerminalsPanel.jsx';
 import FieldVisitorsPanel from './FieldVisitorsPanel.jsx';
+import EditorPanel from './EditorPanel.jsx';
 
 // IdeDock — the panel layer. A dockview surface that hosts the IDE's DOM panels
 // (file tree, terminals; inspector/search later) with tabs, splits, float and
@@ -33,6 +34,7 @@ const PANELS = [
   { id: 'terminals', title: 'Terminals', position: { referencePanel: 'files', direction: 'within' } },
   { id: 'fieldVisitors', title: 'Crew', position: { referencePanel: 'terminals', direction: 'within' } },
   { id: 'settings', title: 'Settings', position: { referencePanel: 'files', direction: 'within' } },
+  { id: 'editor', title: 'Editor', position: { referencePanel: 'files', direction: 'below' } },
 ];
 const panelDef = (id) => PANELS.find((p) => p.id === id);
 
@@ -63,6 +65,7 @@ export default function IdeDock({ client }) {
     settings: () => <SettingsPanel client={clientRef.current} />,
     terminals: () => <TerminalsPanel client={clientRef.current} />,
     fieldVisitors: () => <FieldVisitorsPanel client={clientRef.current} />,
+    editor: () => <EditorPanel client={clientRef.current} />,
   }), []);
 
   const onReady = useCallback((event) => {

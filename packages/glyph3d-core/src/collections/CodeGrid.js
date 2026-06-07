@@ -570,6 +570,26 @@ class CodeGrid extends THREE.Object3D {
     }
 
     /**
+     * Subscribe to highlight (re)computation for this grid. Returns an unsubscribe fn.
+     * Fired by the SyntaxColorizer after each (re)parse so a 2D companion view refreshes
+     * reactively instead of polling. @param {(h:object)=>void} cb
+     */
+    onHighlightsChanged(cb) {
+        if (!this._highlightListeners) this._highlightListeners = new Set();
+        this._highlightListeners.add(cb);
+        return () => { this._highlightListeners?.delete(cb); };
+    }
+
+    /** @private Set highlights + notify listeners. Called by the colorizer. */
+    _setHighlights(h) {
+        this._highlights = h;
+        if (!this._highlightListeners) return;
+        for (const cb of this._highlightListeners) {
+            try { cb(h); } catch (e) { console.warn('[highlights] listener error:', e?.message ?? e); }
+        }
+    }
+
+    /**
      * Get source path
      * @returns {string|null} Source file path
      */
