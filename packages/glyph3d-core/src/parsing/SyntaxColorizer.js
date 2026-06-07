@@ -61,6 +61,11 @@ export async function colorizeGrid(grid) {
         const captures = await highlight(text, descriptor);
         if (grid._colorizeGen !== gen) return;          // superseded by a newer layout — abort
 
+        // Stash the captures on the grid as render-neutral highlight state, so a 2D
+        // companion view consumes the SAME single parse (via getHighlights()) instead of
+        // re-parsing — one parse, many views. The 3D apply below reads the same array.
+        grid._highlights = { gen, lang: descriptor.key, captures };
+
         // Cohesive base: paint every glyph FOREGROUND first so the builder's
         // default color doesn't show through between tokens.
         const total = renderer.getGlyphCount?.() ?? 0;

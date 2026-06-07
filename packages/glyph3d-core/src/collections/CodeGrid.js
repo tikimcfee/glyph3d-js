@@ -553,6 +553,22 @@ class CodeGrid extends THREE.Object3D {
         return this.filename || null;
     }
 
+    /** The file's full source text (the buffer a 2D companion view renders). */
+    getContent() {
+        return this.content;
+    }
+
+    /**
+     * The file's current syntax highlights, or null if not computed yet / unsupported.
+     * Render-target-neutral: the SyntaxColorizer parses ONCE and stashes the captures
+     * here; the 3D coloring reads {startRow,startCol,endRow,endCol} → slots, and a 2D
+     * companion view reads {startIndex,endIndex} (absolute UTF-16 offsets) → editor
+     * decorations. One parse, many views. Shape: { gen, lang, captures }.
+     */
+    getHighlights() {
+        return this._highlights || null;
+    }
+
     /**
      * Get source path
      * @returns {string|null} Source file path

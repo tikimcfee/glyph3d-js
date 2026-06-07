@@ -12,7 +12,15 @@
  * thread; parse is synchronous once the grammar is loaded.
  */
 
-/** @typedef {{ scope:string, startRow:number, startCol:number, endRow:number, endCol:number }} Capture */
+/**
+ * @typedef {Object} Capture
+ * @property {string} scope
+ * @property {number} startRow @property {number} startCol  - tree-sitter row/col (UTF-16 cols)
+ * @property {number} endRow   @property {number} endCol
+ * @property {number} startIndex @property {number} endIndex - absolute UTF-16 char offsets
+ *   into the source. Render-neutral: 3D maps row/col → buffer slots; a 2D editor (CodeMirror)
+ *   indexes by these absolute offsets for decorations. One parse feeds both.
+ */
 
 const RUNTIME_WASM_URL = new URL('./vendor/web-tree-sitter.wasm', import.meta.url).href;
 
@@ -94,6 +102,8 @@ export async function highlight(text, descriptor) {
                 startCol: n.startPosition.column,
                 endRow: n.endPosition.row,
                 endCol: n.endPosition.column,
+                startIndex: n.startIndex,   // absolute UTF-16 offset — for 2D editor decorations
+                endIndex: n.endIndex,
             };
         }
         return out;
