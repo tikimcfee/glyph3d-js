@@ -10,7 +10,7 @@
  * (per-field camera) + SessionStore persistence land next.
  */
 import { box, table } from '../formatResponse.js';
-import { renderSheetGrid, reflowGrids } from './fileCommands.js';
+import { renderSheetGrid } from './fileCommands.js';
 
 const dot = (s) => (s.focused ? '●' : s.rendered ? '◐' : '○');  // focused · rendered · open-only
 
@@ -59,7 +59,7 @@ export default function registerWorkspaceCommands(router) {
     }
     if (!id) return { text: `ERR: could not render "${sheet.title}"`, data: null };
     ws.setPanelId(sheet.id, id);
-    reflowGrids(ctx);
+    ctx.contentTree?.relayoutAndRest();
     return { text: `OK: rendered "${sheet.title}" → panel ${id}`, data: { id: sheet.id, panelId: id, rendered: true } };
   }, { description: 'Render an open sheet (draw its panel)', usage: '<sheetId>' });
 
@@ -82,7 +82,7 @@ export default function registerWorkspaceCommands(router) {
     const pid = sheet.panelId;
     ws.setPanelId(sheet.id, null);
     ctx.removeGrid(pid);              // unregister + dispose + scene.remove
-    reflowGrids(ctx);
+    ctx.contentTree?.relayoutAndRest();
     return { text: `OK: derendered "${sheet.title}" (still open)`, data: { id: sheet.id, rendered: false } };
   }, { description: 'Remove a sheet\'s panel but keep the sheet open', usage: '<sheetId>' });
 
@@ -106,7 +106,7 @@ export default function registerWorkspaceCommands(router) {
       }
       if (!panelId) return { text: `ERR: could not render "${sheet.title}"`, data: null };
       ws.setPanelId(sheet.id, panelId);
-      reflowGrids(ctx);
+      ctx.contentTree?.relayoutAndRest();
     }
 
     // Focus = attention primary (single writer, drives the HUD's ●) + camera framing (reuse the
@@ -143,7 +143,7 @@ export default function registerWorkspaceCommands(router) {
       }
       ws.setPanelId(sheet.id, null);
       ctx.removeGrid(pid);
-      reflowGrids(ctx);
+      ctx.contentTree?.relayoutAndRest();
     }
     ws.removeSheet(sheet.id);
     return { text: `OK: closed sheet "${title}"`, data: { id: sheetId, closed: true } };

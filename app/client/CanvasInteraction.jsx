@@ -502,7 +502,7 @@ export function ResizeDragger() {
  * Selection feedback — wireframe boxes around the primary (selected) and hover
  * grids. WHICH grid each box tracks comes from attentionManager change events
  * (not a per-frame scan of all grids); the box GEOMETRY is re-synced each frame
- * from that one grid's bounds, so the outline follows when layout.flow moves it.
+ * from that one grid's bounds, so the outline follows when a relayout moves it.
  * Reads the same state whether selection came from a canvas click or a command.
  */
 export function SelectionIndicator() {

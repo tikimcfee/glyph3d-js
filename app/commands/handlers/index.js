@@ -8,7 +8,6 @@ import registerCameraCommands from './cameraCommands.js';
 import registerGridCommands from './gridCommands.js';
 import registerSceneCommands from './sceneCommands.js';
 import registerSelectCommands from './selectCommands.js';
-import registerLayoutCommands from './layoutCommands.js';
 import registerSearchCommands from './searchCommands.js';
 import registerAgentLayoutCommands from './agentLayoutCommands.js';
 import registerAnnotationCommands from './annotationCommands.js';
@@ -48,7 +47,6 @@ export function registerAllCommands(router) {
     registerGridCommands(router);
     registerSceneCommands(router);
     registerSelectCommands(router);
-    registerLayoutCommands(router);
     registerSearchCommands(router);
     registerAgentLayoutCommands(router);
     registerAnnotationCommands(router);

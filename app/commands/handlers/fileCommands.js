@@ -35,8 +35,6 @@
  */
 
 import { resolveGridByIdOrIndex } from './spatialHelpers.js';
-import { flowLayout, clearTreeMarkers } from './layoutCommands.js';
-
 // The world floor (a fixed constant): content rests above it. The ground plane
 // (SceneEnvironment) is drawn at this same Y. The world is a paused physics scene —
 // a regular world with a floor and a down; loaded content sits on the floor.
@@ -56,7 +54,12 @@ function addFileGrid(ctx, path, content) {
     const grid = new CodeGrid(ctx.scene, ctx.atlas, { name: path, worldScale: 0.025 });
     grid.setSourcePath(uri); // so file.save / fs/didChange refresh can find it
     grid.loadFile(path, content);
-    return ctx.addGrid(grid, { id: path, type: 'grid' }); // registers + scene.adds
+    // The single insertion point into the content tree: parent the grid under its directory
+    // node BEFORE addGrid (so addGrid's `if (!grid.parent) scene.add` skips — the tree owns it).
+    // The caller relayouts once after a batch. Every file path (file.open / openDir / sheet)
+    // flows through here, so they all land in the one dir-mirroring scene graph.
+    ctx.contentTree?.insert(grid, path);
+    return ctx.addGrid(grid, { id: path, type: 'grid' }); // registers (scene.add skipped — parented)
 }
 
 /**
@@ -76,12 +79,6 @@ export async function renderSheetGrid(ctx, path) {
     // that grid's id, never null, so callers don't clear a just-set panelId or deref undefined.
     const raced = ctx.registry.findByMeta?.('sourcePath', uri) || [];
     return raced[0]?.id ?? null;
-}
-
-/** Re-flow the shelf (drop tree markers, lay the loaded grids out flat). Shared shelf reflow. */
-export function reflowGrids(ctx) {
-    clearTreeMarkers(ctx);
-    flowLayout(ctx.getGrids());
 }
 
 /**
@@ -191,13 +188,10 @@ export default function registerFileCommands(router) {
         // (sheet.focus / camera.focus), so a scripted/bulk open never yanks the view.
         ctx.attentionManager?.set?.('primary', id, { registry: ctx.registry });
 
-        // Route the file into the content tree (the dir-mirroring scene graph): insert at its
-        // path — building the directory-node chain on demand — relayout, and rest the whole
-        // tree above the world floor (a fixed constant the content sits on). A single open is
-        // just the degenerate one-leaf batch of the same machine a repo load uses.
-        ctx.contentTree.insert(grid, path);
-        ctx.contentTree.relayout();
-        ctx.contentTree.restAbove(WORLD_FLOOR_Y);
+        // The grid is already in the content tree (addFileGrid inserted it). Relayout the
+        // tree and rest it on the world floor — a single open is the degenerate one-leaf
+        // batch of the same machine a repo load uses.
+        ctx.contentTree.relayoutAndRest(WORLD_FLOOR_Y);
 
         return {
             text: `OK: opened ${path} (${grid.getLineCount()} lines, ${grid.getGlyphCount?.() ?? '?'} glyphs)`,
@@ -257,18 +251,12 @@ export default function registerFileCommands(router) {
             for (const p of capped) {
                 const c = contentMap.get(p);
                 if (c == null) continue;
-                const id = addFileGrid(ctx, p, c.content);
-                if (id == null) continue;
-                opened++;
-                const grid = ctx.registry.get(id)?.grid;
-                if (grid) ctx.contentTree.insert(grid, p); // into the dir-mirroring tree (batch)
+                if (addFileGrid(ctx, p, c.content) != null) opened++; // addFileGrid inserts into the tree
             }
 
-            // One relayout for the whole batch (the RenderPlan), then rest the tree on the
-            // world floor — the directory structure IS the scene graph now (the walk-tree
-            // scheme places it; volumes/connectors come next).
-            ctx.contentTree.relayout();
-            ctx.contentTree.restAbove(WORLD_FLOOR_Y);
+            // One relayout for the whole batch (the RenderPlan), then rest on the world floor —
+            // the directory structure IS the scene graph now (the walk-tree scheme places it).
+            ctx.contentTree.relayoutAndRest(WORLD_FLOOR_Y);
             const dirs = ctx.contentTree.dirCount();
 
             let text = `OK: opened ${opened} file(s) under "${dir || '/'}" → content tree (${dirs} dirs)`;

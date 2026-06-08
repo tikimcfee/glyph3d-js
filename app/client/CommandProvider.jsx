@@ -103,9 +103,6 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     codeColorManager: null,
     spatialManager: null,
 
-    getActiveLayout: () => null,
-    layoutManagers: { hierarchical: null, spiral: null, treemap: null, grid: null },
-
     windowManager: null,
     wsbridge: null,
 

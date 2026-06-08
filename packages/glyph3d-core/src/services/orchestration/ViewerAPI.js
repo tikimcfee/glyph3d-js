@@ -203,15 +203,6 @@ export default class ViewerAPI {
         return (await this._router.execute('scene.info')).data;
     }
 
-    // -- Layout --
-
-    /**
-     * Get layout info.
-     */
-    async layoutInfo() {
-        return (await this._router.execute('layout.info')).data;
-    }
-
     // ============ WebSocket Info ============
 
     /**
