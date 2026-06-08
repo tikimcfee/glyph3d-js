@@ -28,6 +28,7 @@
  */
 
 import * as THREE from 'three';
+import walkTreeLayout from './layouts/walkTreeLayout.js';
 
 /** Normalize a path: trim, drop leading/trailing/duplicate slashes → clean segments. */
 function splitPath(path) {
@@ -38,48 +39,16 @@ function splitPath(path) {
 function dirOf(parts) { return parts.slice(0, -1); }
 function baseOf(parts) { return parts.length ? parts[parts.length - 1] : ''; }
 
-/** Sort key: directories first, then case-insensitive name (matches buildTree / the Files panel). */
-function childSort(a, b) {
-    const ad = !!a.userData.isDir, bd = !!b.userData.isDir;
-    if (ad !== bd) return ad ? -1 : 1;
-    return String(a.userData.name).localeCompare(String(b.userData.name), undefined, { sensitivity: 'base' });
-}
-
-/**
- * Default measure: a leaf's intrinsic size in world units. Prefers an explicit
- * userData.size (tests / synthetic leaves), then a getBounds()-derived size (CodeGrid /
- * TerminalGrid), else a unit box. Returns a fresh {x,y,z} (never shared).
- */
-function defaultMeasure(leaf) {
-    const s = leaf.userData && leaf.userData.size;
-    if (s && Number.isFinite(s.x)) return { x: s.x, y: s.y, z: s.z };
-    if (typeof leaf.getBounds === 'function') {
-        const b = leaf.getBounds();
-        if (b && !b.isEmpty?.()) {
-            const v = new THREE.Vector3();
-            b.getSize(v);
-            return { x: v.x, y: v.y, z: v.z };
-        }
-    }
-    return { x: 1, y: 1, z: 1 };
-}
-
-const DEFAULTS = {
-    gap: 6,        // world units between stacked siblings
-    pad: 4,        // padding a directory node adds around its children
-};
-
 export default class ContentTree {
     /**
      * @param {object} [opts]
-     * @param {(leaf:THREE.Object3D)=>{x:number,y:number,z:number}} [opts.measure] intrinsic leaf size
-     * @param {number} [opts.gap] gap between siblings
-     * @param {number} [opts.pad] padding a directory adds around its children
+     * @param {(root:THREE.Object3D, opts:object)=>{w:number,h:number}} [opts.layout] layout scheme
+     *        (default: the walk-tree). Measures + places a subtree's children in their local frame.
+     * @param {object} [opts.layoutOpts] options forwarded to the layout scheme.
      */
     constructor(opts = {}) {
-        this.measure = opts.measure || defaultMeasure;
-        this.gap = opts.gap ?? DEFAULTS.gap;
-        this.pad = opts.pad ?? DEFAULTS.pad;
+        this.layout = opts.layout || walkTreeLayout;
+        this.layoutOpts = opts.layoutOpts || {};
 
         this.root = new THREE.Group();
         this.root.name = 'content-root';
@@ -188,66 +157,18 @@ export default class ContentTree {
         return this;
     }
 
-    // ============ layout (two-pass, recursive container) ============
+    // ============ layout ============
 
     /**
-     * Re-measure and re-place `node` and its subtree. Default `node` = root (full pass).
-     * Sizes propagate bottom-up; positions are assigned top-down in each node's local space.
-     * @returns {{x:number,y:number,z:number}} the node's measured size
+     * Lay out `node` and its subtree via the layout scheme (default: the walk-tree). The
+     * scheme measures bottom-up and places each node's children in its own local frame, so a
+     * node's transform carries its subtree. Default `node` = root (full pass).
+     * @returns {{w:number,h:number}} the node's measured footprint
      */
     relayout(node = this.root) {
-        const size = this._measure(node);
-        this._place(node);
+        const size = this.layout(node, this.layoutOpts);
         if (node === this.root) this._dirty = false;
         return size;
-    }
-
-    /**
-     * Post-order measure: cache an intrinsic {x,y,z} size on every node. A leaf measures
-     * directly; a directory stacks its (sorted) children vertically — width = widest child,
-     * height = sum of child heights + gaps, plus padding all around. An empty directory
-     * measures to zero so it occupies no space.
-     * @private
-     */
-    _measure(node) {
-        if (!node.userData.isDir) {
-            const s = this.measure(node);
-            node.userData.size = s;
-            return s;
-        }
-        // Deterministic order — sort the actual child list so structure == layout order.
-        node.children.sort(childSort);
-        let w = 0, h = 0, d = 0, n = 0;
-        for (const child of node.children) {
-            const cs = this._measure(child);
-            w = Math.max(w, cs.x);
-            h += cs.y;
-            d = Math.max(d, cs.z);
-            n++;
-        }
-        if (n === 0) { node.userData.size = { x: 0, y: 0, z: 0 }; return node.userData.size; }
-        h += this.gap * (n - 1);
-        const size = { x: w + this.pad * 2, y: h + this.pad * 2, z: d };
-        node.userData.size = size;
-        return size;
-    }
-
-    /**
-     * Pre-order place: stack a node's sorted children top→down in the node's LOCAL space,
-     * each centered on x. Positions are the child's offset from this node's origin, so the
-     * node's own transform (set by its parent) carries the whole subtree. Recurses.
-     * @private
-     */
-    _place(node) {
-        if (!node.userData.isDir || node.children.length === 0) return;
-        // Top of the content region (inside the padding), descending in -Y.
-        let cursorY = (node.userData.size.y / 2) - this.pad;
-        for (const child of node.children) { // already sorted by _measure
-            const cs = child.userData.size;
-            child.position.set(0, cursorY - cs.y / 2, 0);
-            cursorY -= cs.y + this.gap;
-            this._place(child);
-        }
     }
 
     /**

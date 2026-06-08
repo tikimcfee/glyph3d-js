@@ -91,7 +91,7 @@ const snapshot = (tree) => {
   t.relayout();
   ok(dir === t.root, 'lone file parents under root');
   ok(leaf.parent === t.root, 'leaf.parent is root');
-  ok(r2(t.root.userData.size.x) === r2(8 + 'solo.js'.length + 4 * 2), 'root size = leaf width + padding'); // pad=4 each side
+  ok(t.root.userData.size.x > 0 && t.root.userData.size.y > 0, 'root has a real footprint for one file');
 }
 
 // 4. full fixture: every ancestor exists, leaves parented correctly, deep chain intact.
@@ -116,26 +116,27 @@ const snapshot = (tree) => {
   eq(t.getNode('src').children.map((c) => c.userData.name), ['components', 'util', 'index.js'], 'src sorted: dirs then file');
 }
 
-// 6. size propagation: a leaf dir's size = widest child + pad*2, sum heights + gaps + pad*2.
+// 6. walk sizing: a dir with files has a real footprint that covers its widest file.
 {
-  const t = build(['x/aa.js', 'x/bbbb.js']);   // names len 5 ('aa.js') and 7 ('bbbb.js') → widths 13,15; heights 4,4
+  const t = build(['x/aa.js', 'x/bbbb.js']);   // file widths 8+name.length → 13, 15
   const x = t.getNode('x');
-  const gap = 6, pad = 4;
-  eq(r2(x.userData.size.x), r2(15 + pad * 2), 'dir width = widest child + pad');
-  eq(r2(x.userData.size.y), r2(4 + 4 + gap + pad * 2), 'dir height = sum heights + gap + pad');
+  ok(x.userData.size.x > 0 && x.userData.size.y > 0, 'dir with files has a real footprint');
+  ok(x.userData.size.x >= 15 - 0.01, 'dir footprint covers its widest file');
 }
 
-// 7. placement: siblings stack descending in -Y with no overlap (gap respected).
+// 7. walk invariants — the optical properties: depth→Z (deeper sits further back), and
+//    sibling files in a directory are flow-packed without overlapping.
 {
-  const t = build(['x/aa.js', 'x/bb.js', 'x/cc.js']);
-  const kids = t.getNode('x').children; // sorted
-  for (let i = 0; i + 1 < kids.length; i++) {
-    const top = kids[i], bot = kids[i + 1];
-    ok(top.position.y > bot.position.y, `sibling ${i} sits above ${i + 1}`);
-    const topBottomEdge = top.position.y - top.userData.size.y / 2;
-    const botTopEdge = bot.position.y + bot.userData.size.y / 2;
-    ok(r2(topBottomEdge - botTopEdge) >= r2(t.gap) - 0.01, `gap respected between ${i} and ${i + 1} (no overlap)`);
-  }
+  const t = build(PATHS);
+  const wpos = (p) => { const v = new THREE.Vector3(); t._leaves.get(p).getWorldPosition(v); return v; };
+  const shallowZ = wpos('readme.md').z;                       // root, depth 0
+  const deepZ = wpos('src/util/deep/a/b/c/leaf.txt').z;       // depth 6
+  ok(deepZ < shallowZ - 0.01, `depth→Z: deeper file further back (deep ${r2(deepZ)} < shallow ${r2(shallowZ)})`);
+
+  const box = (p) => { const g = t._leaves.get(p); const v = new THREE.Vector3(); g.getWorldPosition(v); const s = g.userData.size; return { x0: v.x - s.x / 2, x1: v.x + s.x / 2, y0: v.y - s.y / 2, y1: v.y + s.y / 2 }; };
+  const a = box('src/components/Button.jsx'), b = box('src/components/Modal.jsx');
+  const overlap = a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;
+  ok(!overlap, 'sibling files in a dir are flow-packed without overlap');
 }
 
 // 8. THE BIG ONE — insert-order independence: forward vs reversed insertion → identical tree.
