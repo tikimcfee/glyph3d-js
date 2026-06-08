@@ -7,7 +7,8 @@ import React, { useCallback, useEffect, useState } from 'react';
  * bus the spatial visitors respond to. Spatial view + list view, one source of truth.
  *
  *   + summon          → agent.spawn   (request an instance)
- *   ✕ (per row)       → agent.stop    (request dismissal — lingers, then reaps)
+ *   clear done        → agent.clear done   (sweep finished visitors off the field)
+ *   ✕ (per row)       → agent.clear   (remove this visitor; 'done' ones persist until you do)
  *   ○ follow / ◉      → camera.follow / camera.free  (ride a visitor)
  *
  * House style mirrors FileTree / TerminalsPanel: a `client` prop, subscription-driven
@@ -18,7 +19,7 @@ const STATE_DOT = {
     active:  '#7ad7a0',  // mint — working
     idle:    '#8aa0b8',  // cool grey — between tasks
     stalled: '#e0b54a',  // amber — gone quiet
-    done:    '#6a6a72',  // dim — finished, lingering
+    done:    '#6a6a72',  // dim — finished (persists until cleared)
 };
 
 const S = {
@@ -88,10 +89,16 @@ export default function FieldVisitorsPanel({ client }) {
         exec(['agent.spawn', id, 'agent']);
     }, [exec]);
 
+    const doneCount = roster.reduce((n, v) => n + (v.state === 'done' ? 1 : 0), 0);
+
     return (
         <div style={S.content}>
             <div style={S.header}>
                 <span style={S.count}>Field Visitors ({roster.length})</span>
+                {doneCount > 0 && (
+                    <span style={S.summon} onClick={() => exec(['agent.clear', 'done'])}
+                        title="Clear finished visitors (agent.clear done)">clear done ({doneCount})</span>
+                )}
                 <span style={S.summon} onClick={summon} title="Summon a visitor (agent.spawn)">+ summon</span>
             </div>
             <div style={S.list}>
@@ -116,8 +123,8 @@ export default function FieldVisitorsPanel({ client }) {
                         >{v.following ? '◉ following' : '○ follow'}</span>
                         <span
                             style={S.act(false)}
-                            onClick={() => exec(['agent.stop', v.id])}
-                            title="Dismiss (agent.stop)"
+                            onClick={() => exec(['agent.clear', v.id])}
+                            title="Remove from field (agent.clear)"
                         >✕</span>
                     </div>
                 ))}

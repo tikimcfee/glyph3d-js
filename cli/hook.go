@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -27,40 +26,11 @@ type HookEvent struct {
 	AgentType    string          `json:"agent_type"`
 }
 
-// Tool input shapes we care about
-type ReadInput struct {
-	FilePath string `json:"file_path"`
-	Offset   int    `json:"offset"`
-	Limit    int    `json:"limit"`
-}
-
-type EditInput struct {
-	FilePath  string `json:"file_path"`
-	OldString string `json:"old_string"`
-	NewString string `json:"new_string"`
-}
-
-type WriteInput struct {
+// FilePathInput is all we need from Read/Edit/Write tool inputs: the file the agent
+// touched. The visitor moves to that file; the camera stays where the user put it.
+type FilePathInput struct {
 	FilePath string `json:"file_path"`
 }
-
-type BashInput struct {
-	Command     string `json:"command"`
-	Description string `json:"description"`
-}
-
-type GrepInput struct {
-	Pattern string `json:"pattern"`
-	Path    string `json:"path"`
-}
-
-type GlobInput struct {
-	Pattern string `json:"pattern"`
-	Path    string `json:"path"`
-}
-
-const agentWindowID = "claude"
-const trackingGroupID = "claude-reads"
 
 var debug bool
 
@@ -142,105 +112,28 @@ func hookConnect(url string) (*websocket.Conn, error) {
 // --- Event Handlers ---
 
 func handlePostToolUse(conn *websocket.Conn, event *HookEvent) {
+	id, typ := agentIdentity(event)
 	switch event.ToolName {
-	case "Read":
-		var input ReadInput
+	case "Read", "Edit", "Write":
+		// File tools move the agent's visitor to the file (camera stays free).
+		var input FilePathInput
 		json.Unmarshal(event.ToolInput, &input)
 		if input.FilePath == "" {
 			return
 		}
-		relPath := relativize(input.FilePath, event.CWD)
-
-		lines := fmt.Sprintf("lines %d-%d", input.Offset, input.Offset+input.Limit)
-		if input.Offset == 0 && input.Limit == 0 {
-			lines = "full file"
-		}
-		msg := fmt.Sprintf("📖 Read %s (%s)", relPath, lines)
-		sendWindowAppend(conn, msg)
-
-		// Track the file in the claude-reads group (idempotent — re-adding is a no-op)
-		sendCmd(conn, fmt.Sprintf("group.create %s", trackingGroupID))
-		sendCmd(conn, fmt.Sprintf("group.add %s %s", trackingGroupID, relPath))
-
-		// Focus camera on the file being read
-		sendCmd(conn, fmt.Sprintf("camera.focus %s", relPath))
-
-		if input.Offset > 0 || input.Limit > 0 {
-			end := input.Offset + input.Limit
-			if input.Limit == 0 {
-				end = input.Offset + 50
-			}
-			sendHighlight(conn, relPath, input.Offset, end)
-		}
-
-	case "Edit":
-		var input EditInput
-		json.Unmarshal(event.ToolInput, &input)
-		if input.FilePath == "" {
-			return
-		}
-		relPath := relativize(input.FilePath, event.CWD)
-		oldLines := strings.Count(input.OldString, "\n") + 1
-		newLines := strings.Count(input.NewString, "\n") + 1
-		msg := fmt.Sprintf("✏️  Edit %s (%d→%d lines)", relPath, oldLines, newLines)
-		sendWindowAppend(conn, msg)
-
-		// Track edited files too
-		sendCmd(conn, fmt.Sprintf("group.create %s", trackingGroupID))
-		sendCmd(conn, fmt.Sprintf("group.add %s %s", trackingGroupID, relPath))
-		sendCmd(conn, fmt.Sprintf("camera.focus %s", relPath))
-
-	case "Write":
-		var input WriteInput
-		json.Unmarshal(event.ToolInput, &input)
-		if input.FilePath == "" {
-			return
-		}
-		relPath := relativize(input.FilePath, event.CWD)
-		msg := fmt.Sprintf("📝 Write %s", relPath)
-		sendWindowAppend(conn, msg)
-
-		// Track written files
-		sendCmd(conn, fmt.Sprintf("group.create %s", trackingGroupID))
-		sendCmd(conn, fmt.Sprintf("group.add %s %s", trackingGroupID, relPath))
-		sendCmd(conn, fmt.Sprintf("camera.focus %s", relPath))
+		action := map[string]string{"Read": "read", "Edit": "edit", "Write": "write"}[event.ToolName]
+		sendActivity(conn, id, typ, action, relativize(input.FilePath, event.CWD))
 
 	case "Bash":
-		var input BashInput
-		json.Unmarshal(event.ToolInput, &input)
-		cmd := input.Command
-		if len(cmd) > 80 {
-			cmd = cmd[:77] + "..."
-		}
-		if input.Description != "" {
-			sendWindowAppend(conn, fmt.Sprintf("⚡ %s", input.Description))
-		} else {
-			sendWindowAppend(conn, fmt.Sprintf("⚡ $ %s", cmd))
-		}
-
+		sendActivity(conn, id, typ, "bash", "")
 	case "Grep":
-		var input GrepInput
-		json.Unmarshal(event.ToolInput, &input)
-		msg := fmt.Sprintf("🔍 Grep /%s/", input.Pattern)
-		if input.Path != "" {
-			msg += fmt.Sprintf(" in %s", relativize(input.Path, event.CWD))
-		}
-		sendWindowAppend(conn, msg)
-
+		sendActivity(conn, id, typ, "grep", "")
 	case "Glob":
-		var input GlobInput
-		json.Unmarshal(event.ToolInput, &input)
-		sendWindowAppend(conn, fmt.Sprintf("📂 Glob %s", input.Pattern))
-
+		sendActivity(conn, id, typ, "glob", "")
 	case "Agent":
-		msg := "🤖 Launched subagent"
-		if event.AgentType != "" {
-			msg = fmt.Sprintf("🤖 Launched %s agent", event.AgentType)
-		}
-		sendWindowAppend(conn, msg)
-
+		sendActivity(conn, id, typ, "subagent", "")
 	default:
-		sendWindowAppend(conn, fmt.Sprintf("🔧 %s", event.ToolName))
+		sendActivity(conn, id, typ, strings.ToLower(event.ToolName), "")
 	}
 }
 
@@ -249,23 +142,43 @@ func handlePreToolUse(conn *websocket.Conn, event *HookEvent) {
 }
 
 func handleStop(conn *websocket.Conn, event *HookEvent) {
-	sendWindowAppend(conn, "⏹  Claude stopped")
+	id, _ := agentIdentity(event)
+	sendCmd(conn, fmt.Sprintf("agent.stop %s", id))
 }
 
 // --- Viewer Commands ---
 
-func sendWindowAppend(conn *websocket.Conn, text string) {
-	ensureCmd := fmt.Sprintf("window.create %s 100 40 claude-activity", agentWindowID)
-	sendCmd(conn, ensureCmd)
-
-	encoded := base64.StdEncoding.EncodeToString([]byte(text))
-	cmd := fmt.Sprintf("window.append %s %s", agentWindowID, encoded)
-	sendCmd(conn, cmd)
+// agentIdentity derives a stable per-agent id + type for the visitor multiplexer.
+// Prefer the explicit agent fields (distinct per subagent when Claude Code provides
+// them); otherwise fall back to a short slice of the session id so separate sessions
+// still read as separate visitors. Tokens only (no spaces) — the bus splits on space.
+func agentIdentity(event *HookEvent) (id, typ string) {
+	id, typ = event.AgentID, event.AgentType
+	if id == "" {
+		if s := strings.ReplaceAll(event.SessionID, "-", ""); s != "" {
+			if len(s) > 8 {
+				s = s[:8]
+			}
+			id = s
+		} else {
+			id = "claude"
+		}
+	}
+	if typ == "" {
+		typ = "claude"
+	}
+	return id, typ
 }
 
-func sendHighlight(conn *websocket.Conn, filePath string, startLine, endLine int) {
-	cmd := fmt.Sprintf("highlight.lines %s %d %d", filePath, startLine, endLine)
-	sendCmd(conn, cmd)
+// sendActivity tells the viewer an agent acted. A relPath moves the agent's field
+// visitor to that file (the camera is NOT touched); an empty path just keeps the
+// visitor live and logs the action. This replaces the old camera.focus yank.
+func sendActivity(conn *websocket.Conn, id, typ, action, relPath string) {
+	if relPath != "" {
+		sendCmd(conn, fmt.Sprintf("agent.activity %s %s %s %s", id, typ, action, relPath))
+	} else {
+		sendCmd(conn, fmt.Sprintf("agent.activity %s %s %s", id, typ, action))
+	}
 }
 
 func sendCmd(conn *websocket.Conn, cmd string) {

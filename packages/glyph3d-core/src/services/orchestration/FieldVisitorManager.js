@@ -17,7 +17,6 @@ import * as THREE from 'three';
 import FieldVisitor from '../../collections/FieldVisitor.js';
 
 const STALL_MS = 12000;        // no activity for this long → 'stalled'
-const DONE_LINGER_MS = 8000;   // keep a finished visitor on-screen this long, then reap
 const FOLLOW_EASE = 3;         // camera-follow lerp rate (per second)
 
 // Distinct hues so concurrent agents read apart at a glance.
@@ -109,13 +108,41 @@ export default class FieldVisitorManager {
         v.placeAt(pos);
     }
 
-    /** agent.stop — finished. Lingers (so you can read its last state), then reaps. */
+    /** agent.stop — the agent finished. The visitor switches to 'done' and PERSISTS:
+     *  small/fast helpers you never looked at stay on the field, viewable, instead of
+     *  vanishing on a timer. Nothing auto-reaps — removal is explicit (remove/clear). */
     stop(agentId) {
         const v = this.visitors.get(agentId);
         if (!v) return;
         v.setState('done');
-        v._doneAt = _now();
         this._emitChange();
+    }
+
+    /** Manually remove ONE visitor (any state) — the crew panel ✕ / `agent.clear <id>`.
+     *  The only path that drops a visitor now that 'done' lingers indefinitely. */
+    remove(agentId) {
+        const v = this.visitors.get(agentId);
+        if (!v) return false;
+        if (this.followId === agentId) this.followId = null;
+        v.dispose();
+        this.visitors.delete(agentId);
+        this._emitChange();
+        return true;
+    }
+
+    /** Bulk clear: 'all' visitors, or just the 'done' ones (the common cleanup).
+     *  Returns the count removed. */
+    clear(which = 'all') {
+        let n = 0;
+        for (const [id, v] of this.visitors) {
+            if (which === 'done' && v.state !== 'done') continue;
+            if (this.followId === id) this.followId = null;
+            v.dispose();
+            this.visitors.delete(id);
+            n++;
+        }
+        if (n) this._emitChange();
+        return n;
     }
 
     /** agent.request — the agent raises a hand for input/advice. */
@@ -138,15 +165,10 @@ export default class FieldVisitorManager {
     update(dt) {
         const now = _now();
         let changed = false;   // emit once per frame only on DISCRETE transitions (not eases)
-        for (const [id, v] of this.visitors) {
+        for (const v of this.visitors.values()) {
+            // Active → stalled after a quiet spell. 'done' is terminal but NOT reaped —
+            // a finished visitor stays until you clear it (see remove/clear).
             if (v.state === 'active' && now - v.lastActivityTs > STALL_MS) { v.setState('stalled'); changed = true; }
-            if (v.state === 'done' && v._doneAt && now - v._doneAt > DONE_LINGER_MS) {
-                if (this.followId === id) this.followId = null;
-                v.dispose();
-                this.visitors.delete(id);
-                changed = true;
-                continue;
-            }
             v.update(dt);
         }
         this._applyFollow(dt);

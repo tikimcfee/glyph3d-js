@@ -8,7 +8,8 @@
  *
  *   agent.activity <id> <type> <action> [path...]   spawn/move a visitor to a file
  *   agent.state    <id> <active|idle|stalled|done>  set lifecycle state
- *   agent.stop     <id>                             finish (lingers, then reaps)
+ *   agent.stop     <id>                             mark finished ('done' — PERSISTS)
+ *   agent.clear    <id|all|done>                    remove visitor(s) from the field
  *   agent.request  <id> [message...]                raise a hand ("follow me!")
  *   camera.follow  <id>                             ride a visitor (opt-in)
  *   camera.free                                     release the camera (free flight)
@@ -65,7 +66,22 @@ export default function registerAgentVisitorCommands(router) {
         if (!id) return { text: 'ERR: usage: agent.stop <id>', data: null };
         mgr.stop(id);
         return { text: `OK: ${id} finished`, data: { id } };
-    }, { description: 'Mark an agent finished — its visitor lingers then reaps', usage: '<id>' });
+    }, { description: "Mark an agent finished ('done') — its visitor persists until cleared", usage: '<id>' });
+
+    router.register('agent.clear', (args, ctx) => {
+        const mgr = ctx.visitorManager;
+        if (!mgr) return noMgr;
+        const [target] = args;
+        if (!target) return { text: 'ERR: usage: agent.clear <id|all|done>', data: null };
+        if (target === 'all' || target === 'done') {
+            const n = mgr.clear(target);
+            return { text: `OK: cleared ${n} visitor${n === 1 ? '' : 's'}`, data: { cleared: n } };
+        }
+        const ok = mgr.remove(target);
+        return ok
+            ? { text: `OK: cleared ${target}`, data: { id: target } }
+            : { text: `ERR: no visitor '${target}'`, data: null };
+    }, { description: "Remove a field visitor, or all/done ('done' agents persist until cleared)", usage: '<id|all|done>' });
 
     router.register('agent.request', (args, ctx) => {
         const mgr = ctx.visitorManager;
