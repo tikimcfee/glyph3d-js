@@ -251,6 +251,20 @@ export default class ContentTree {
     }
 
     /**
+     * Position the root so the content rests ABOVE a fixed world floor — the world is a
+     * paused physics scene: the ground is a constant, content sits on top of it. Content is
+     * laid out centered on the root's origin, so lifting the root by half its height puts the
+     * content's bottom at `floorY` (and it grows upward from there). Call after relayout().
+     * @param {number} [floorY=0] the constant world floor the content rests on
+     */
+    restAbove(floorY = 0) {
+        const wb = this.getWorldBounds();           // current content extent (scheme-agnostic)
+        if (!wb.isEmpty()) this.root.position.y += (floorY - wb.min.y); // drop/lift bottom onto the floor
+        this.root.updateMatrixWorld(true);
+        return this;
+    }
+
+    /**
      * World-space AABB of all content — for ground anchoring etc. Unions each leaf's own
      * world box: a real grid's getBounds() when available, else a box derived from its
      * world position ± its measured size (so it's correct even for geometry-less leaves,

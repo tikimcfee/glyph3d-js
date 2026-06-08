@@ -36,6 +36,11 @@
 
 import { resolveGridByIdOrIndex } from './spatialHelpers.js';
 import { flowLayout, clearTreeMarkers, applyTreeLayout } from './layoutCommands.js';
+
+// The world floor (a fixed constant): content rests above it. The ground plane
+// (SceneEnvironment) is drawn at this same Y. The world is a paused physics scene —
+// a regular world with a floor and a down; loaded content sits on the floor.
+const WORLD_FLOOR_Y = 0;
 import CodeGrid from '@glyph3d/core/collections/CodeGrid.js';
 
 const DIR_OPEN_CAP = 250; // default safety bound on bulk opens; override per-call
@@ -186,18 +191,13 @@ export default function registerFileCommands(router) {
         // (sheet.focus / camera.focus), so a scripted/bulk open never yanks the view.
         ctx.attentionManager?.set?.('primary', id, { registry: ctx.registry });
 
-        // Explicit coords place precisely (tour scripts position by hand);
-        // otherwise the grid joins the shelf via flowLayout after registration.
-        const x = parseFloat(args[1]), y = parseFloat(args[2]), z = parseFloat(args[3]);
-        const explicit = Number.isFinite(x);
-        if (explicit) {
-            grid.position.set(x, Number.isFinite(y) ? y : 0, Number.isFinite(z) ? z : 0);
-            grid.updateMatrixWorld(true);
-            grid._markBoundsDirty?.();
-        } else {
-            // Reflow the shelf so the new file lands cleanly beside the others.
-            reflowGrids(ctx);
-        }
+        // Route the file into the content tree (the dir-mirroring scene graph): insert at its
+        // path — building the directory-node chain on demand — relayout, and rest the whole
+        // tree above the world floor (a fixed constant the content sits on). A single open is
+        // just the degenerate one-leaf batch of the same machine a repo load uses.
+        ctx.contentTree.insert(grid, path);
+        ctx.contentTree.relayout();
+        ctx.contentTree.restAbove(WORLD_FLOOR_Y);
 
         return {
             text: `OK: opened ${path} (${grid.getLineCount()} lines, ${grid.getGlyphCount?.() ?? '?'} glyphs)`,

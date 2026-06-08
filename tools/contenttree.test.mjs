@@ -179,5 +179,15 @@ const snapshot = (tree) => {
   ok(size.x > 0 && size.y > 0, 'world bounds have real extent');
 }
 
+// 12. restAbove: content rests on the fixed floor (bottom at floorY, grows upward).
+{
+  const t = build(PATHS);
+  t.restAbove(0);
+  const min = t.getWorldBounds().min;
+  ok(Math.abs(r2(min.y) - 0) <= 0.01, `content bottom rests at floor 0 (got ${r2(min.y)})`);
+  t.restAbove(50);
+  ok(Math.abs(r2(t.getWorldBounds().min.y) - 50) <= 0.01, 'content bottom follows a non-zero floor');
+}
+
 console.log(`\ncontenttree: ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

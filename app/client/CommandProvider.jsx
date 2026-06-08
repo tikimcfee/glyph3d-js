@@ -11,6 +11,7 @@ import EntityKeystrokeRouter from '@glyph3d/core/services/interaction/EntityKeys
 import RemoteFileSystemProvider from '@glyph3d/core/services/data/RemoteFileSystemProvider.js';
 import GitHubFileProvider from '@glyph3d/core/services/data/GitHubFileProvider.js';
 import { PickingSystem } from '@glyph3d/core/picking/PickingSystem.js';
+import ContentTree from '@glyph3d/core/collections/ContentTree.js';
 import SessionStore from './SessionStore.js';
 import WorkspaceModel from './WorkspaceModel.js';
 import { getSetting } from './settings.js';
@@ -197,6 +198,14 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // via setPickingSystem). 'cell' mode: the whole glyph quad is pickable.
     const pickingSystem = new PickingSystem(gl, { mode: 'cell' });
     state.ctx.pickingSystem = pickingSystem;
+
+    // The content tree — the project as a directory-mirroring scene graph (one root Group;
+    // dir nodes parent file grids). Loads route through it (tree.insert + relayout), so the
+    // whole project moves as a unit and the ground (a fixed world floor) stays a constant the
+    // content rests above. Only the root is scene.add-ed; leaves attach under their dir node.
+    const contentTree = new ContentTree();
+    scene.add(contentTree.root);
+    state.ctx.contentTree = contentTree;
 
     // Field-visitor multiplexer: agent.* commands spawn/move/follow one self-driving
     // visitor per agent. The camera stays free unless `camera.follow <id>` opts in.

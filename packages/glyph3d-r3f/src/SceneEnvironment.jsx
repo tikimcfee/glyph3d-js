@@ -27,7 +27,8 @@ import * as THREE from 'three/webgpu';
  * a no-op here — the skydome's gradient IS the "lit environment" feel, for free.
  *
  * @param {object} [props]
- * @param {number} [props.groundY=-120]   world Y of the ground plane (below typical content)
+ * @param {number} [props.groundY=0]   world Y of the ground plane (the fixed world floor;
+ *                                     content is positioned to rest above it, never the reverse)
  * @param {number} [props.size=4000]      ground grid extent in world units
  * @param {number} [props.divisions=80]   cells across (spacing = size/divisions)
  * @param {number} [props.lineColor=0x161b26]   minor grid line color
@@ -37,7 +38,7 @@ import * as THREE from 'three/webgpu';
  * @param {number} [props.skyBottom=0x0c1018]   skydome color at the horizon/nadir
  */
 export default function SceneEnvironment({
-  groundY = -120,
+  groundY = 0,
   size = 4000,
   divisions = 80,
   lineColor = 0x161b26,
