@@ -35,7 +35,7 @@
  */
 
 import { resolveGridByIdOrIndex } from './spatialHelpers.js';
-import { flowLayout, clearTreeMarkers, applyTreeLayout } from './layoutCommands.js';
+import { flowLayout, clearTreeMarkers } from './layoutCommands.js';
 
 // The world floor (a fixed constant): content rests above it. The ground plane
 // (SceneEnvironment) is drawn at this same Y. The world is a paused physics scene —
@@ -257,16 +257,23 @@ export default function registerFileCommands(router) {
             for (const p of capped) {
                 const c = contentMap.get(p);
                 if (c == null) continue;
-                if (addFileGrid(ctx, p, c.content) != null) opened++;
+                const id = addFileGrid(ctx, p, c.content);
+                if (id == null) continue;
+                opened++;
+                const grid = ctx.registry.get(id)?.grid;
+                if (grid) ctx.contentTree.insert(grid, p); // into the dir-mirroring tree (batch)
             }
 
-            // Lay everything currently loaded out as the walk-tree (sections in X,
-            // depth in Z, branch edges) — default depth/gap.
-            const layout = applyTreeLayout(ctx);
+            // One relayout for the whole batch (the RenderPlan), then rest the tree on the
+            // world floor — the directory structure IS the scene graph now (the walk-tree
+            // scheme places it; volumes/connectors come next).
+            ctx.contentTree.relayout();
+            ctx.contentTree.restAbove(WORLD_FLOOR_Y);
+            const dirs = ctx.contentTree.dirCount();
 
-            let text = `OK: opened ${opened} file(s) under "${dir || '/'}" → tree (${layout.dirs} dirs, ${layout.volumes} volumes)`;
+            let text = `OK: opened ${opened} file(s) under "${dir || '/'}" → content tree (${dirs} dirs)`;
             if (skipped) text += `; ${skipped} skipped (cap ${cap})`;
-            return { text, data: { dir, opened, skipped, cap, ...layout } };
+            return { text, data: { dir, opened, skipped, cap, dirs } };
         } finally {
             ctx.status?.clear();
         }

@@ -75,6 +75,9 @@ export default class ContentTree {
     /** Every file path currently in the tree. */
     paths() { return [...this._leaves.keys()]; }
 
+    /** Number of directory nodes (excluding the root). */
+    dirCount() { return this._dirs.size - 1; }
+
     /**
      * Ensure the directory-node chain for `dirParts` exists, creating only the missing
      * tail and parenting each new node under its parent. Idempotent. Returns the deepest
