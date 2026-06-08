@@ -59,20 +59,35 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     },
 
     removeGrid(idOrIndex) {
-      let entry;
+      let entry, regId;
       if (typeof idOrIndex === 'number' || /^\d+$/.test(idOrIndex)) {
         const idx = typeof idOrIndex === 'number' ? idOrIndex : parseInt(idOrIndex);
         const grids = registry.toArray('grid');
         if (idx < 0 || idx >= grids.length) return null;
-        const regId = registry.getIdByGrid(grids[idx]);
+        regId = registry.getIdByGrid(grids[idx]);
         if (!regId) return null;
         entry = registry.unregister(regId);
       } else {
+        regId = idOrIndex;
         entry = registry.unregister(idOrIndex);
       }
       if (!entry) return null;
-      entry.grid.dispose?.();
-      scene.remove(entry.grid);
+
+      // A content-tree leaf (registry id == its path) detaches THROUGH the tree and
+      // relayouts, so removing a file closes its gap and the project re-settles on the
+      // floor — the unload half of the dynamic add/remove. Plain scene grids (terminals,
+      // workspace sheets) take the flat scene.remove. (scene.remove is a no-op on a tree
+      // leaf anyway — its parent is a dir node, not the scene.)
+      const tree = this.contentTree;
+      if (tree && regId && tree.has(regId)) {
+        tree.remove(regId, { prune: true }); // detach leaf + drop now-empty dir nodes
+        entry.grid.dispose?.();
+        tree.relayout();
+        tree.restAbove();                    // rest the re-settled tree on the floor (default y=0)
+      } else {
+        entry.grid.dispose?.();
+        scene.remove(entry.grid);
+      }
       return entry;
     },
 

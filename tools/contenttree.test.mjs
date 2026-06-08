@@ -190,5 +190,16 @@ const snapshot = (tree) => {
   ok(Math.abs(r2(t.getWorldBounds().min.y) - 50) <= 0.01, 'content bottom follows a non-zero floor');
 }
 
+// 13. the dynamic repro property: add-then-remove returns to the EXACT pre-add layout.
+// This is what makes live load/unload trustworthy — the relayout is stable, not drifting.
+{
+  const t = build(PATHS);
+  const before = snapshot(t);
+  t.insert(makeLeaf('new/extra.js'), 'new/extra.js'); t.relayout();
+  ok(t.has('new/extra.js'), 'added a file');
+  t.remove('new/extra.js', { prune: true }); t.relayout();
+  eq(snapshot(t), before, 'add then remove returns to the exact pre-add layout (idempotent)');
+}
+
 console.log(`\ncontenttree: ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
