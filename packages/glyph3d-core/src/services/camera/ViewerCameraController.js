@@ -34,7 +34,7 @@
 
 import { getCanvasViewportSize } from '../../core/canvasSize.js';
 import { stateController } from '../state/StateController.js';
-import { zDistanceForFit, worldPerPixel } from '../spatial/spatialMath.js';
+import { zDistanceForFit, worldPerPixel, tweenPose } from '../spatial/spatialMath.js';
 
 const CAMERA_DEFAULTS = {
     cameraSpeed: 100,
@@ -320,10 +320,50 @@ export class ViewerCameraController {
             this.input.drag.dy = 0;
             return;
         }
+        // A camera fly (flyTo) owns the frame while it runs — UNLESS the user grabs control
+        // (drag / wheel / WASD), which cancels it instantly so the fly never traps the view.
+        if (this._tween && this._stepTween(deltaTime)) return;
         this._applyDrag();
         this._applyWheel();
         this._applyKeyboardMotion(deltaTime);
         this._applyRotation();
+    }
+
+    /**
+     * Animate the camera to a target pose over `ms` (ease-out). Replayable — calling it again
+     * retargets from wherever the camera is now. Interruptible (see applyCamera). The actual
+     * interpolation is the pure `tweenPose` (unit-tested); this just holds the from/to/clock.
+     * @param {{position:{x,y,z}, pitch?:number, yaw?:number}} to
+     * @param {{ms?:number}} [opts]
+     */
+    flyTo(to, { ms = 300 } = {}) {
+        const cam = this.ctx.camera;
+        this._tween = {
+            from: { position: { x: cam.position.x, y: cam.position.y, z: cam.position.z }, pitch: this.pitch, yaw: this.yaw },
+            to:   { position: { x: to.position.x, y: to.position.y, z: to.position.z }, pitch: to.pitch ?? 0, yaw: to.yaw ?? 0 },
+            ms: Math.max(1, ms),
+            elapsed: 0,
+        };
+    }
+
+    /**
+     * Advance the active fly one frame. Returns true if it consumed the frame (still flying),
+     * false if it was cancelled by user input (so applyCamera falls through to normal control).
+     * @private
+     */
+    _stepTween(dt) {
+        const i = this.input;
+        if (i.drag.active || i.wheel.dy !== 0 || i.keys.size > 0) { this._tween = null; return false; }
+        const tw = this._tween;
+        tw.elapsed += dt * 1000;
+        const t = Math.min(tw.elapsed / tw.ms, 1);
+        const pose = tweenPose(tw.from, tw.to, t);
+        this.ctx.camera.position.set(pose.position.x, pose.position.y, pose.position.z);
+        this.pitch = pose.pitch;
+        this.yaw = pose.yaw;
+        this._applyRotation();
+        if (t >= 1) this._tween = null;
+        return true;
     }
 
     /** @private */
@@ -661,9 +701,8 @@ export class ViewerCameraController {
     focusOnGrid(index) {
         const target = this.computeGridFocus(index);
         if (!target) return;
-        this.pitch = 0;
-        this.yaw = 0;
-        this.ctx.camera.position.set(target.x, target.y, target.z);
+        // Fly to the file's head (computeGridFocus is top-anchored), head-on (pitch/yaw→0).
+        this.flyTo({ position: target, pitch: 0, yaw: 0 });
         window.dispatchEvent(new CustomEvent('camera-focus-changed', {
             detail: { index }
         }));
@@ -685,9 +724,7 @@ export class ViewerCameraController {
         const size = new THREE.Vector3();
         bounds.getSize(size);
         const distance = zDistanceForFit(this.ctx.camera, size.x, size.y, 0.85);
-        this.pitch = 0;
-        this.yaw = 0;
-        this.ctx.camera.position.set(center.x, center.y, bounds.max.z + distance);
+        this.flyTo({ position: { x: center.x, y: center.y, z: bounds.max.z + distance }, pitch: 0, yaw: 0 });
         return true;
     }
 

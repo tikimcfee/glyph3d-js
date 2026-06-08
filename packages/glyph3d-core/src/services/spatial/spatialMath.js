@@ -77,3 +77,38 @@ export function zDistanceForFit(camera, width, height, fillFraction = 0.85) {
 export function easeInOutCubic(t) {
     return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 }
+
+/**
+ * Cubic ease-OUT — fast start, gentle settle. The "comfortably snappy" curve for camera
+ * flies. Clamped to [0,1]: easeOutCubic(0)=0, easeOutCubic(1)=1, monotonic.
+ * @param {number} t - 0..1
+ * @returns {number} eased 0..1
+ */
+export function easeOutCubic(t) {
+    const u = 1 - Math.min(Math.max(t, 0), 1);
+    return 1 - u * u * u;
+}
+
+/**
+ * Sample a camera "pose" (position + pitch + yaw) eased from `from` to `to` at normalized
+ * time t. Pure — the camera tween's whole interpolation lives here so it's unit-testable
+ * away from THREE/the renderer. t=0 → from, t=1 → to, ease-out between.
+ *
+ * @param {{position:{x,y,z}, pitch:number, yaw:number}} from
+ * @param {{position:{x,y,z}, pitch:number, yaw:number}} to
+ * @param {number} t - 0..1 (clamped)
+ * @returns {{position:{x:number,y:number,z:number}, pitch:number, yaw:number}}
+ */
+export function tweenPose(from, to, t) {
+    const e = easeOutCubic(t);
+    const lerp = (a, b) => a + (b - a) * e;
+    return {
+        position: {
+            x: lerp(from.position.x, to.position.x),
+            y: lerp(from.position.y, to.position.y),
+            z: lerp(from.position.z, to.position.z),
+        },
+        pitch: lerp(from.pitch, to.pitch),
+        yaw: lerp(from.yaw, to.yaw),
+    };
+}

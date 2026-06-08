@@ -390,6 +390,11 @@ export default function registerGridCommands(router) {
         // shelf and fought the tree). Inter-grid layout and intra-grid style, one flow.
         ctx.contentTree?.relayoutAndRest();
 
+        // Fly to the changed grid's head — a tall/columnar refold can shove the file off
+        // screen, so take the viewer to its head (replayable; user input cancels the fly).
+        const idx = ctx.getGrids().indexOf(resolved.grid);
+        if (idx >= 0) ctx.cameraController?.focusOnGrid?.(idx);
+
         return {
             text: `OK: grid #${resolved.idx} relaid (${resolved.grid.getGlyphCount()} glyphs, ${resolved.grid.getLineCount()} lines)`,
             data: { index: resolved.idx, layout: resolved.grid.getLayout() },
