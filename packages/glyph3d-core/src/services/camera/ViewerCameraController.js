@@ -385,12 +385,13 @@ export class ViewerCameraController {
         const wheel = this.input.wheel;
         if (wheel.dy === 0) return;
 
-        // Focused-surface scroll gate: a focused FRAMED surface (a terminal, or a framed code
-        // grid) takes the wheel to scroll ITSELF instead of moving the camera. The bridged hook
-        // dispatches terminal.scroll / grid.scroll and returns true when it consumes the wheel —
-        // gate here in the drain (not the listener) so the verdict uses live focus and the
-        // camera never also dollies. Mirrors the WASD focus gate.
-        if (this.ctx?.tryScrollFocused?.(wheel.dy)) {
+        // Hovered-surface scroll gate: the framed surface UNDER THE CURSOR (a terminal, or a
+        // framed code grid) takes the wheel to scroll ITSELF instead of moving the camera —
+        // pointing at open space or an unframed grid falls through to the dynamic-speed dolly.
+        // The bridged hook dispatches terminal.scroll / grid.scroll and returns true when it
+        // consumes the wheel — gate here in the drain (not the listener) so the verdict uses the
+        // live hover and the camera never also dollies.
+        if (this.ctx?.tryScrollHovered?.(wheel.dy)) {
             wheel.dy = 0;
             return;
         }
@@ -546,8 +547,11 @@ export class ViewerCameraController {
      * cubemap — see [[reference_camera_navigation_prior_art]]):
      *   1. `fwd`  — nearest hit of a ray straight down the view axis. Precise "what
      *      I'm aimed at" when you're pointed at something (reading head-on).
-     *   2. `near` — distance to the nearest grid AABB in ANY direction (no raycast).
+     *   2. `near` — distance to the nearest surface AABB in ANY direction (no raycast).
      *      Always finite, so it has no blind spot.
+     * Samples EVERY framed surface (code grids AND terminals — getSurfaces, not the
+     * grid-only getGrids), so flying toward a terminal slows you down exactly as flying
+     * toward a file does; a terminal is content too.
      * Prefer `fwd`; fall back to `near` when the ray misses (looking at empty space)
      * — NOT a stale hold, which is what let dolly run away off the top of the tree.
      * Clamp to [MIN, MAX] so a glance at the void can never blow the scale up (nor a
@@ -558,8 +562,8 @@ export class ViewerCameraController {
         if (!this.settings.dynamicSpeed) return DEFAULT_LOOK_DIST;
         const THREE = this.THREE;
         const camera = this.ctx.camera;
-        const grids = this.ctx.getGrids?.() || [];
-        if (!grids.length) return DEFAULT_LOOK_DIST;
+        const surfaces = this.ctx.getSurfaces?.() || this.ctx.getGrids?.() || [];
+        if (!surfaces.length) return DEFAULT_LOOK_DIST;
 
         const origin = camera.position;
         const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
@@ -569,7 +573,7 @@ export class ViewerCameraController {
         const hit = new THREE.Vector3();
         let fwd = Infinity;   // nearest forward hit — precise "what I'm aimed at"
         let near = Infinity;  // nearest content in ANY direction — no blind spot
-        for (const g of grids) {
+        for (const g of surfaces) {
             const box = g.getBounds?.();
             if (!box || box.isEmpty?.()) continue;
             const dn = box.distanceToPoint(origin);
@@ -728,13 +732,54 @@ export class ViewerCameraController {
         return true;
     }
 
+    /**
+     * Drop a framed surface (grid / terminal) into the viewer's CURRENT view — the inverse
+     * of focusOnObject. focusOnObject flies the camera to a still object; this places a still
+     * camera's gaze ONTO an object: it centers the object's bounds on the view axis, a fitting
+     * distance ahead, and leaves it axis-aligned (+Z toward the viewer) so focusOnObject's
+     * head-on framing still squares to it later. Used by terminal.create so a new terminal
+     * lands where you're looking instead of at the world origin. The camera does NOT move.
+     * @param {{getBounds:Function,setWorldPosition:Function,position?:Object,getWorldPosition?:Function}} obj
+     * @param {{fill?:number}} [opts] - fraction of the viewport the panel should fill (default 0.7)
+     * @returns {boolean} true if it placed the object
+     */
+    placeInView(obj, { fill = 0.7 } = {}) {
+        const THREE = this.THREE;
+        const camera = this.ctx.camera;
+        if (!camera || typeof obj?.getBounds !== 'function' || typeof obj?.setWorldPosition !== 'function') return false;
+        const bounds = obj.getBounds();
+        if (!bounds || bounds.isEmpty?.()) return false;
+
+        const size = new THREE.Vector3();
+        bounds.getSize(size);
+        const center = new THREE.Vector3();
+        bounds.getCenter(center);
+
+        // How far ahead to sit the panel so it fills `fill` of the view; floored so a tiny
+        // panel can't land on the camera's nose.
+        const distance = Math.max(zDistanceForFit(camera, size.x, size.y, fill), 5);
+        const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+        const target = camera.position.clone().addScaledVector(forward, distance);
+
+        // setWorldPosition moves the object's ORIGIN; its bounds center sits at a fixed local
+        // offset from that origin. Translation preserves the offset, so solve for the origin
+        // that lands the center exactly on `target`.
+        const origin = obj.getWorldPosition?.(new THREE.Vector3()) ?? obj.position?.clone?.() ?? new THREE.Vector3();
+        const offset = center.clone().sub(origin);
+        const pos = target.sub(offset);
+        obj.setWorldPosition({ x: pos.x, y: pos.y, z: pos.z });
+        return true;
+    }
+
     focusOnGrids() {
         const THREE = this.THREE;
-        const grids = this.ctx.getGrids();
-        if (grids.length === 0) return;
+        // Fit-all frames every framed surface — terminals included, so a "+ terminal"
+        // you spawned off to the side is still pulled into view by fit-all.
+        const surfaces = this.ctx.getSurfaces?.() || this.ctx.getGrids?.() || [];
+        if (surfaces.length === 0) return;
 
         // Prefer a layout manager's cached total bounds; otherwise (e.g. the r3f
-        // client, which has no managers) union the grids' own world bounds.
+        // client, which has no managers) union the surfaces' own world bounds.
         const mgr = this.ctx.stackManager || this.ctx.treemapManager
             || this.ctx.spiralManager || this.ctx.hierarchicalManager || this.ctx.layoutManager;
         let bounds;
@@ -742,7 +787,7 @@ export class ViewerCameraController {
             bounds = mgr.getTotalBounds();
         } else {
             bounds = new THREE.Box3();
-            for (const g of grids) {
+            for (const g of surfaces) {
                 const b = g.getBounds?.();
                 if (b && !b.isEmpty()) bounds.union(b);
             }

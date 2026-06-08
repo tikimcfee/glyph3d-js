@@ -15,6 +15,7 @@ import ContentTree from '@glyph3d/core/collections/ContentTree.js';
 import SessionStore from './SessionStore.js';
 import WorkspaceModel from './WorkspaceModel.js';
 import { getSetting } from './settings.js';
+import { wheelScrollCommand } from './surfaceInteractions.js';
 import errorTracker from '@glyph3d/core/utils/ErrorTracker.js';
 import { createStatusChannel } from './statusChannel.js';
 // The spine, ported verbatim — handlers register lazily; nothing here knows the
@@ -35,7 +36,7 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
   // The registry is the ONE core SceneRegistry, provided by GlyphCanvas and
   // shared with the binding components (<CodeGrid> self-registers into it,
   // <ViewerCamera> frames it). No second registry, no drift.
-  const { registry, addGrid, removeGrid, getGrids } = registryBundle;
+  const { registry, addGrid, removeGrid, getGrids, getSurfaces } = registryBundle;
 
   return {
     // Core Three.js — straight from r3f
@@ -46,6 +47,9 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
 
     registry,
     getGrids,
+    // Grids + terminals — every bounds-bearing window. Used for dynamic-speed sampling,
+    // fit-all framing, and viewport-relative placement (terminal.create).
+    getSurfaces,
 
     // Live activity signal — operations post here; the StatusBar reflects it.
     status: createStatusChannel(),
@@ -270,44 +274,25 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // keydown gate bails while an entity holds key focus — otherwise typing 'w'
     // into a terminal would also fly the camera. Analog of the vanilla
     // initCommandCenter wiring (viewer.sceneContext.attentionManager = ...).
-    // Wheel-gate: when a terminal holds key focus, the mouse wheel scrolls ITS
-    // (tmux-owned) scrollback instead of moving the camera. VCC calls this in its
-    // per-frame wheel drain; it returns true when it consumed the wheel. ~30px ≈ one
-    // line, min one line in the wheel direction. wheel up (dy<0) → +lines = back into
-    // history; the adapter drives tmux copy-mode and the repaint streams back.
-    // Wheel-gate: a focused, FRAMED surface scrolls ITSELF instead of moving the camera.
-    // Terminals (key focus) are always a fixed screen → scroll tmux scrollback. Code grids
-    // (primary focus) scroll only when framed (frameRows>0) — a "table in a window"; unframed
-    // grids leave the wheel to the camera. One gate, dispatched by surface not by type. Returns
-    // true when it consumes the wheel. ~30px ≈ one line/row; min one in the wheel direction.
-    state.ctx.tryScrollFocused = (dy) => {
+    //
+    // Wheel routing: the wheel scrolls the framed surface UNDER THE CURSOR (a terminal's tmux
+    // scrollback, or a framed code grid's conveyor) and otherwise yields to the camera dolly.
+    // HOVER, not focus — so pointing at open space (or an unframed whole-file grid) always flies,
+    // and the dynamic-speed braking is available near a terminal exactly as it is near a file:
+    // you scroll the thing you point at, and fly when you point at the world. The per-surface
+    // verb mapping is one record per type in surfaceInteractions — this gate just reads the
+    // hovered entry and dispatches. VCC calls this in its per-frame wheel drain; it returns true
+    // when it consumed the wheel.
+    state.ctx.tryScrollHovered = (dy) => {
       if (!dy) return false;
-      // 1. Terminal holding KEY focus → its (tmux-owned) scrollback. wheel up (dy<0) → +lines
-      //    = back into history; the adapter drives copy-mode and the repaint streams back.
-      const key = state.ctx.attentionManager?.get('key');
-      const kEntry = key?.id ? state.registry.get(key.id) : null;
-      if (kEntry?.type === 'terminal') {
-        let lines = -Math.round(dy / 30);
-        if (lines === 0) lines = dy > 0 ? -1 : 1;
-        // Array form skips the router's space-tokenizer — a registry id with a space (a
-        // file path) would otherwise split into bogus args and dead-end the wheel.
-        state.router.execute(['terminal.scroll', kEntry.id, String(lines)]);
-        return true;
-      }
-      // 2. PRIMARY-focused, FRAMED code grid → flow content through its frame (the conveyor).
-      //    wheel down (dy>0) → +rows = scroll down (later content). Duck-typed on getFrameRows
-      //    so terminals/other entries fall through to the camera.
-      const primary = state.ctx.attentionManager?.get('primary');
-      const pEntry = primary?.id ? state.registry.get(primary.id) : null;
-      const grid = pEntry?.grid;
-      if (grid && typeof grid.getFrameRows === 'function' && grid.getFrameRows() > 0) {
-        let rows = Math.round(dy / 30);
-        if (rows === 0) rows = dy > 0 ? 1 : -1;
-        // Array form skips the router's space-tokenizer (id may be a file path with spaces).
-        state.router.execute(['grid.scroll', pEntry.id, String(rows)]);
-        return true;
-      }
-      return false;
+      const hov = state.ctx.attentionManager?.get('hover');
+      const entry = hov?.id ? state.registry.get(hov.id) : null;
+      // Array form skips the router's space-tokenizer — a registry id with a space (a file path)
+      // would otherwise split into bogus args and dead-end the wheel.
+      const cmd = wheelScrollCommand(entry, dy);
+      if (!cmd) return false;
+      state.router.execute(cmd);
+      return true;
     };
 
     const cc = cameraControllerRef?.current;
@@ -317,14 +302,14 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       // authorities aren't visible to it by default. Forward them LIVE (getters, not
       // copies) so VCC's handlers consult the same verdict the draggers do:
       //   • isGripPress — a plain left-press on a resize grip yields the camera pan.
-      //   • tryScrollFocused — the wheel scrolls a focused framed surface (terminal or grid).
+      //   • tryScrollHovered — the wheel scrolls the framed surface under the cursor (terminal/grid).
       Object.defineProperty(cc.ctx, 'isGripPress', {
         configurable: true,
         get: () => state.ctx.isGripPress ?? null,
       });
-      Object.defineProperty(cc.ctx, 'tryScrollFocused', {
+      Object.defineProperty(cc.ctx, 'tryScrollHovered', {
         configurable: true,
-        get: () => state.ctx.tryScrollFocused ?? null,
+        get: () => state.ctx.tryScrollHovered ?? null,
       });
     }
 

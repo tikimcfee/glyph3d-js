@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import { useThree, useFrame } from '@react-three/fiber';
 import * as THREE from 'three/webgpu';
 import { useAppCommands } from './CommandProvider.jsx';
+import { moveVerbFor } from './surfaceInteractions.js';
 
 const round = (n) => Math.round(n * 100) / 100;
 
@@ -342,9 +343,9 @@ export function ObjectDragger() {
       dom.style.cursor = 'default';
       dom.releasePointerCapture?.(e.pointerId);
       // Persist through the bus (CLI/session parity), then let the session store
-      // capture the new layout.
-      const verb = type === 'terminal' ? 'terminal.move' : 'grid.move';
-      router.execute(`${verb} ${id} ${round(p.x)} ${round(p.y)} ${round(p.z)}`);
+      // capture the new layout. The per-surface move verb is one record per type
+      // (surfaceInteractions), not a type branch here.
+      router.execute(`${moveVerbFor(type)} ${id} ${round(p.x)} ${round(p.y)} ${round(p.z)}`);
       client.session?.scheduleSave?.();
     };
 

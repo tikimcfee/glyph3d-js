@@ -126,6 +126,12 @@ export default function registerTerminalCommands(router) {
                 title: id,
             });
 
+            // Land it in the viewer's CURRENT view, not at the world origin — a spawned
+            // terminal appears where you're looking. Inverse of camera.focus: it moves the
+            // terminal in front of a still camera (no camera fly). No camera controller
+            // (e.g. headless CLI) → it stays at the origin, harmless.
+            ctx.cameraController?.placeInView?.(grid);
+
             terminals.set(id, grid);
 
             // Wire onInput callback for remote owners (agent controllers).

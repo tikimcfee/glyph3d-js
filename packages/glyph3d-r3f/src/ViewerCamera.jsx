@@ -25,7 +25,7 @@ const assignRef = (ref, value) => {
 const ViewerCamera = forwardRef(function ViewerCamera(_props, ref) {
   const { scene, camera, gl } = useThree();
   const atlas = useGlyphAtlas();
-  const { getGrids } = useGridRegistry();
+  const { getGrids, getSurfaces } = useGridRegistry();
   const ctrlRef = useRef(null);
 
   useEffect(() => {
@@ -37,6 +37,9 @@ const ViewerCamera = forwardRef(function ViewerCamera(_props, ref) {
       canvas: gl.domElement,
       atlas,
       getGrids: () => getGrids(),
+      // Terminals + grids: the dynamic-speed sampling and fit-all frame off every
+      // framed surface, not just code grids.
+      getSurfaces: () => getSurfaces(),
     });
     const controller = new ViewerCameraController(ctx);
     controller.setupEventListeners(); // ctor builds state only; this binds input
@@ -48,7 +51,7 @@ const ViewerCamera = forwardRef(function ViewerCamera(_props, ref) {
       ctrlRef.current = null;
       assignRef(ref, null);
     };
-  }, [scene, camera, gl, atlas, getGrids]);
+  }, [scene, camera, gl, atlas, getGrids, getSurfaces]);
 
   useFrame((_state, delta) => {
     ctrlRef.current?.update(delta);
