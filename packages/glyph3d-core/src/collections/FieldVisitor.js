@@ -25,8 +25,8 @@ const STATE_STYLE = {
 };
 
 // Parked pose relative to the file the agent is acting on (world units): upper-right
-// and slightly forward — the "reading over the shoulder" placement, reusing the
-// window.track snap-beside idea but as a continuously-eased target.
+// and slightly forward — the "reading over the shoulder" placement: snap beside the
+// file, but as a continuously-eased target rather than a static snap.
 const FOLLOW_GAP_X = 3;
 const FOLLOW_Z_FORWARD = 4;
 const MAX_LOG = 6;   // rolling action lines on the card

@@ -32,7 +32,6 @@
  *
  * No back-compat layer. Every writer and every reader was migrated to
  * ctx.attention.{hover,primary,key}?.id in a single sweep:
- *   - updateWindowBillboards (windowCommands.js) reads ctx.attention
  *   - VCC probe/wheel gates read attentionManager.get('primary')
  *   - mode.* commands read/write attention.primary
  *   - camera.attend is now a thin alias for attention.set primary

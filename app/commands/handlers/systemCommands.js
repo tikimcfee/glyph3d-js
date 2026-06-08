@@ -49,13 +49,11 @@ export default function registerSystemCommands(router) {
         let totalGlyphs = 0;
         for (const e of gridEntries) totalGlyphs += e.grid.getGlyphCount();
 
-        const winCount = ctx._agentGrids ? ctx._agentGrids.size : 0;
         const wsConnected = ctx.wsbridge ? ctx.wsbridge.connected : false;
 
         const data = {
             'grids': String(gridEntries.length),
             'glyphs': totalGlyphs.toLocaleString(),
-            'windows': String(winCount),
             'registry': String(ctx.registry.size),
             'camera': `${cam.x.toFixed(0)}, ${cam.y.toFixed(0)}, ${cam.z.toFixed(0)}`,
             'websocket': wsConnected ? 'connected' : 'disconnected',
@@ -67,7 +65,6 @@ export default function registerSystemCommands(router) {
             data: {
                 gridCount: gridEntries.length,
                 glyphCount: totalGlyphs,
-                windowCount: winCount,
                 registryTotal: ctx.registry.size,
                 camera: { x: cam.x, y: cam.y, z: cam.z },
                 websocket: wsConnected,

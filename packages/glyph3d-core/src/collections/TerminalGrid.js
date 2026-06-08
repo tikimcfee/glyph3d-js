@@ -15,7 +15,7 @@
  *   - Group DataTexture for O(1) position changes (one DataTexture write vs. N buffer writes)
  *   - setWorldPosition() mirrors to both group offset AND Object3D.position
  *
- * Differs from TUIWindow / CodeGrid:
+ * Differs from CodeGrid:
  *   - No line-buffer history, no ANSI stripping
  *   - No GlyphCollection deferred queue, no _rebuildAllInstances() on update
  *   - No background plane, no filename label

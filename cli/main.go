@@ -46,7 +46,6 @@ var (
 var b64Commands = map[string]bool{
 	"grid.create":    true,
 	"grid.text":      true,
-	"window.write":   true,
 	"label.create":   true,
 	"scene.annotate": true,
 	"terminal.input": true,

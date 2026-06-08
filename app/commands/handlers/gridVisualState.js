@@ -1,9 +1,8 @@
 /**
  * Shared grid visual state save/restore helpers.
  *
- * Used by both annotationCommands (highlight.grid / highlight.clear)
- * and agentLayoutCommands (layout.focus / layout.undim) to avoid
- * conflicting modifications to the same grid.
+ * Used by annotationCommands (highlight.grid / highlight.clear) to save and
+ * restore a grid's pre-emphasis visual state without conflicting modifications.
  *
  * State is stored in ctx.gridVisualState (Map<number, SavedState>).
  * First-writer-wins: once a grid's state is saved, subsequent saves
