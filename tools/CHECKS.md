@@ -60,6 +60,17 @@ that — prefer it for deterministic CI once wired.
   bun tools/verify-tree-sitter.mjs
   ```
 
+- **`contenttree.test.mjs`** — unit-tests the directory recursion in `ContentTree`
+  (the dir-mirroring scene graph: `insert(path)` builds the dir-node chain, `remove`,
+  two-pass `relayout`). Pure `three` (no WebGPU) with synthetic leaves, so it's fast and
+  deterministic. Covers the directory gotchas: substring-path collisions (`b` vs `bc`),
+  create-once node reuse, deep empty-intermediate chains, dirs-first ordering, removal /
+  prune, and **insert-order independence** (forward vs reversed insertion → identical
+  tree). Run after touching `ContentTree` or its layout.
+  ```
+  bun tools/contenttree.test.mjs
+  ```
+
 ## Build / serve
 
 - `cd app && bun run build` — production Vite build (static gate: imports, assets, syntax).
