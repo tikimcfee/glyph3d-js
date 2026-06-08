@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { stateController } from '@glyph3d/core/services/state';
 
 // ButtonBar — the top toolbar of text-label buttons (no icons, per the house
 // style). Each button is a thin command-bus surface: it runs a router command,
@@ -157,7 +158,13 @@ function ConnectionChip({ client }) {
       <input
         style={styles.connPort}
         value={port}
-        onChange={(e) => setPort(e.target.value.replace(/[^0-9]/g, ''))}
+        onChange={(e) => {
+          const v = e.target.value.replace(/[^0-9]/g, '');
+          setPort(v);
+          // Remember the last entered port so the next page load auto-dials it
+          // (main.jsx reads relay.lastPort as the ?relay fallback). Blank = clear.
+          stateController.set('relay.lastPort', v ? Number(v) : null);
+        }}
         onKeyDown={onKey}
         placeholder="port"
         title="relay port — blank connects to the page's origin (the binary)"

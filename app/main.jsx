@@ -10,6 +10,7 @@ import HudPanel from './client/HudPanel.jsx';
 import CommandBar from './client/CommandBar.jsx';
 import StatusBar from './StatusBar.jsx';
 import { getSetting } from './client/settings.js';
+import { stateController } from '@glyph3d/core/services/state';
 // Font fallback chain, priority order: clean code monospace first, then fonts
 // that cover what it lacks (Nerd-Font icons/powerline/rounded box/stars, then
 // braille + broad symbols), then "oh well" (a blank cell) for the rare holdout.
@@ -24,9 +25,13 @@ const FONT_CHAIN = [
 ];
 
 // ?relay=PORT pins the relay to a specific port (dev: vite serves the page, the Go
-// relay is on another port). Absent → the relay (if any) is same-origin as the page
-// (the binary serves both). null lets CommandProvider gate auto-connect by host.
-const relayParam = new URLSearchParams(location.search).get('relay');
+// relay is on another port). Absent → fall back to the last port the connection chip
+// used (persisted in g3d.* localStorage), so a dev reload re-dials it without retyping;
+// absent + none saved → the relay (if any) is same-origin as the page (the binary
+// serves both). null lets CommandProvider gate auto-connect by host.
+const savedRelayPort = stateController.get('relay.lastPort', null);
+const relayParam = new URLSearchParams(location.search).get('relay')
+  ?? (savedRelayPort != null ? String(savedRelayPort) : null);
 // ?repo=owner/repo[/branch] → render that GitHub repo client-only (no relay needed).
 const repoParam = new URLSearchParams(location.search).get('repo');
 
