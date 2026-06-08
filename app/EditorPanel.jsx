@@ -108,8 +108,12 @@ export default function EditorPanel({ client }) {
     };
   }, [client]);
 
+  // No lineWrapping: long lines SCROLL horizontally (the .cm-scroller's native overflow) rather
+  // than wrap. Wrapping made the 2D read fight its panel for width and broke the 1:1 line
+  // correspondence with the 3D grid (whose lines are the file's true lines). The panel is a
+  // viewport onto the grid — it clips and scrolls; it never reshapes what it mirrors.
   const extensions = useMemo(
-    () => [baseTheme, EditorView.editable.of(false), EditorView.lineWrapping, decorationField(snap.captures)],
+    () => [baseTheme, EditorView.editable.of(false), decorationField(snap.captures)],
     [snap.captures, snap.content],
   );
 

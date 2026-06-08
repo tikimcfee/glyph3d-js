@@ -234,6 +234,30 @@ export default function registerTerminalCommands(router) {
     }, { description: 'Resize a terminal grid', usage: '<id> <cols> <rows>' });
 
     // ------------------------------------------------------------------
+    // terminal.refresh <id>
+    //   Ask the owning adapter to repaint the FULL current screen into the byte lane
+    //   (refresh-client → a redraw, no SIGWINCH / no resize). Both projections — the 3D
+    //   grid and any attached 2D xterm — render it off the shared stream. This is the
+    //   replay trigger when a 2D companion view attaches: it shows the CURRENT screen,
+    //   not just bytes-from-now, WITHOUT resizing anything (size is owned by the 3D grid,
+    //   never the panel). Idempotent — an extra repaint is harmless.
+    // ------------------------------------------------------------------
+    router.register('terminal.refresh', (args, ctx) => {
+        const id = args[0];
+        if (!id) return { text: 'ERR: usage: terminal.refresh <id>', data: null };
+
+        const info = ctx.registry.get(id);
+        if (!info) return { text: `ERR: no terminal '${id}'`, data: null };
+
+        const owner = info?.meta?.owner;
+        if (owner && ctx.wsbridge?.connected) {
+            ctx.wsbridge.push(owner, { event: 'terminal.refresh', data: { terminalId: id } });
+        }
+
+        return { text: `OK: terminal '${id}' refresh requested`, data: { id } };
+    }, { description: 'Repaint the terminal\'s full current screen into the byte stream', usage: '<id>' });
+
+    // ------------------------------------------------------------------
     // terminal.scroll <id> <lines>   (+ = back into history, − = forward to live)
     // ------------------------------------------------------------------
     router.register('terminal.scroll', (args, ctx) => {
