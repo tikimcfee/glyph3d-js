@@ -7,7 +7,6 @@ import { box, table, kvLines } from '../formatResponse.js';
 import CodeGrid from '@glyph3d/core/collections/CodeGrid.js';
 import { resolveGridByIdOrIndex } from './spatialHelpers.js';
 import { decodeBase64 } from '@glyph3d/core/utils/encoding.js';
-import { flowLayout } from './layoutCommands.js';
 
 /**
  * @param {import('../CommandRouter.js').default} router
@@ -287,9 +286,9 @@ export default function registerGridCommands(router) {
 
     // grid.window <id|index> <cols> <rows> [firstLine] — turn a code grid into a fixed
     // cols×rows scrollable viewport over its file (opt-in; whole-file is the baseline),
-    // then re-flow neighbors around the new footprint. The optional firstLine scrolls the
+    // then relayout the tree around the new footprint. The optional firstLine scrolls the
     // window to an absolute line (used by session restore to reproduce the saved view).
-    // The await ensures the rebuilt bounds are fresh before flowLayout measures them.
+    // The await ensures the rebuilt bounds are fresh before the tree relayout measures them.
     router.register('grid.window', async (args, ctx) => {
         if (args.length < 3) return { text: 'ERR: usage: grid.window <id|index> <cols> <rows> [firstLine]', data: null };
 
@@ -312,7 +311,8 @@ export default function registerGridCommands(router) {
             const firstLine = parseInt(args[3], 10);
             if (!isNaN(firstLine) && firstLine > 0) await resolved.grid.scrollLines(firstLine);
         }
-        flowLayout(ctx.getGrids());
+        // Windowing changed the grid's footprint → relayout the tree (not the flat flow).
+        ctx.contentTree?.relayoutAndRest();
 
         const win = resolved.grid.getWindow();
         return {
@@ -385,7 +385,10 @@ export default function registerGridCommands(router) {
         }
 
         await resolved.grid.setLayout(patch);
-        flowLayout(ctx.getGrids());
+        // The render-style change resized the grid → relayout the content tree so siblings
+        // reposition (NOT the old flat flowLayout, which yanked everything into a columnar
+        // shelf and fought the tree). Inter-grid layout and intra-grid style, one flow.
+        ctx.contentTree?.relayoutAndRest();
 
         return {
             text: `OK: grid #${resolved.idx} relaid (${resolved.grid.getGlyphCount()} glyphs, ${resolved.grid.getLineCount()} lines)`,

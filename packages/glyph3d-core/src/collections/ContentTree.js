@@ -175,6 +175,18 @@ export default class ContentTree {
     }
 
     /**
+     * The one relayout entry point callers should use after any content/footprint change
+     * (insert, remove, a grid's render-style/window change): re-lay the tree and re-settle
+     * it on the world floor. Replaces the old flat `flowLayout(getGrids())` reflows.
+     * @param {number} [floorY=0] the world floor to rest content above
+     */
+    relayoutAndRest(floorY = 0) {
+        this.relayout();
+        this.restAbove(floorY);
+        return this;
+    }
+
+    /**
      * Position the root so the content rests ABOVE a fixed world floor — the world is a
      * paused physics scene: the ground is a constant, content sits on top of it. Content is
      * laid out centered on the root's origin, so lifting the root by half its height puts the
