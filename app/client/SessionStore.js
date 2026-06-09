@@ -120,15 +120,19 @@ export default class SessionStore {
     }
 
     // The bulk field source — what fills the scene without tabs. A GitHub repo
-    // restores via repo.load; a relay-local project via file.openDir. A repo is the
-    // field whenever one is loaded; otherwise local only if there ARE non-tab grids
-    // (so a tabs-only session stays tabs-only and doesn't re-bulk-load on restore).
+    // restores via repo.load; a relay-local project via file.openDir. Both are
+    // recorded INTENT: the repo from the provider's loaded repo, the local field
+    // from ctx.fieldSource (written by the file.openDir handler, cleared by
+    // scene.clear_grids). Never inferred from a census of non-tab grids — a
+    // census can't tell a deliberate dir pop from grids other systems created,
+    // and it re-trips on the grids its own restore opened (a session that could
+    // never stop bulk-loading the whole project).
     let field = null;
     const repo = ctx.fileProvider?._currentRepo;
     if (repo?.owner) {
       field = { type: 'repo', ref: `${repo.owner}/${repo.repo}${repo.branch ? '/' + repo.branch : ''}` };
-    } else if (ctx.registry.findByType('grid').some((e) => !sheetPanelIds.has(e.id))) {
-      field = { type: 'local' };
+    } else if (ctx.fieldSource?.type === 'local') {
+      field = { type: 'local', dir: ctx.fieldSource.dir || '', cap: ctx.fieldSource.cap ?? null };
     }
 
     const terminals = [];
@@ -231,7 +235,11 @@ export default class SessionStore {
       catch (e) { console.warn('[session] repo field restore failed:', e?.message || e); }
     } else if (snap.field?.type === 'local') {
       try {
-        await this.router.execute(['file.openDir', '']);
+        // Replay the recorded pop exactly: same dir, same cap. (Pre-intent saves
+        // carry neither — those fall back to the whole project at the default cap.)
+        const dirArgs = ['file.openDir', snap.field.dir || ''];
+        if (snap.field.cap != null) dirArgs.push(String(snap.field.cap));
+        await this.router.execute(dirArgs);
         await this.router.execute('camera.fitall');
       } catch (e) { console.warn('[session] local field restore failed:', e?.message || e); }
     }

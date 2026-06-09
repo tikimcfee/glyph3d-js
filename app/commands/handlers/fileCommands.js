@@ -259,6 +259,11 @@ export default function registerFileCommands(router) {
             ctx.contentTree.relayoutAndRest(WORLD_FLOOR_Y);
             const dirs = ctx.contentTree.dirCount();
 
+            // Record the pop as the session's field source. Session capture persists
+            // exactly this intent (dir + cap) — the field is never inferred from a
+            // census of what happens to be in the registry.
+            ctx.fieldSource = { type: 'local', dir, cap };
+
             let text = `OK: opened ${opened} file(s) under "${dir || '/'}" → content tree (${dirs} dirs)`;
             if (skipped) text += `; ${skipped} skipped (cap ${cap})`;
             return { text, data: { dir, opened, skipped, cap, dirs } };
