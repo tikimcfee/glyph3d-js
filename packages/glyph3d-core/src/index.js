@@ -29,6 +29,7 @@ export { WorkerBridge, getWorkerBridge, isWorkersSupported } from './workers/Wor
 
 // Core utilities
 export { PERF_THRESHOLDS, shouldDebugLog } from './core/constants.js';
+export { READABLE_MAX_CHARS, READABLE_MAX_LINE_CHARS, unreadableReason } from './core/readability.js';
 
 // Observability
 export {

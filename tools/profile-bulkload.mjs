@@ -3,7 +3,7 @@
 // (e.g. "200 files = one 53s long task"): attaches a CDP sampling profiler around
 // the trigger, then aggregates self-time by function and by module.
 //
-//   bun tools/profile-bulkload.mjs [--relay PORT] [--cap N] [--dir PATH] [--top N] [--out FILE.json]
+//   bun tools/profile-bulkload.mjs [--relay PORT] [--dir PATH] [--top N] [--out FILE.json]
 //
 // Needs Vite on :5173 and a relay on --relay (default 8099 — run a PRIVATE relay,
 // the user's display on :8080 holds that relay's one display slot).
@@ -11,11 +11,10 @@
 import { launchBrowser, openApp } from './itest/driver.mjs';
 
 function parseArgs(argv) {
-  const a = { relayPort: 8099, cap: 200, dir: '', top: 30, out: null };
+  const a = { relayPort: 8099, dir: '', top: 30, out: null };
   for (let i = 0; i < argv.length; i++) {
     const t = argv[i];
     if (t === '--relay') a.relayPort = Number(argv[++i]);
-    else if (t === '--cap') a.cap = Number(argv[++i]);
     else if (t === '--dir') a.dir = argv[++i];
     else if (t === '--top') a.top = Number(argv[++i]);
     else if (t === '--out') a.out = argv[++i];
@@ -44,10 +43,10 @@ try {
 
   await cdp.send('Profiler.start');
   const t0 = Date.now();
-  const trigger = await app.page.evaluate(async ({ dir, cap }) => {
+  const trigger = await app.page.evaluate(async ({ dir }) => {
     const c = window.__glyphClient;
     const t0 = performance.now();
-    const r = await c.router.execute(['file.openDir', dir, String(cap)]);
+    const r = await c.router.execute(['file.openDir', dir]);
     const tCmd = performance.now() - t0;
     // The blowup is deferred (next frames). A timer can only fire after the long
     // task ends, so awaiting it measures through the block; rAFs ensure renders ran.
@@ -55,7 +54,7 @@ try {
     await new Promise((r2) => requestAnimationFrame(() => requestAnimationFrame(r2)));
     const tTotal = performance.now() - t0;
     return { text: r.text, cmdMs: Math.round(tCmd), totalMs: Math.round(tTotal) };
-  }, { dir: args.dir, cap: args.cap });
+  }, { dir: args.dir });
   const wallMs = Date.now() - t0;
   const { profile } = await cdp.send('Profiler.stop');
 

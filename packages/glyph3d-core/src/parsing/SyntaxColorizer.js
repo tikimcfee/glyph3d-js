@@ -18,13 +18,7 @@
 import { detectLanguage } from './languageRegistry.js';
 import { highlight } from './TreeSitterEngine.js';
 import { resolveScopeColor, FOREGROUND } from './syntaxTheme.js';
-
-// Colorizing is for READING; past these bounds the content is a built artifact
-// (minified bundle, data dump) where token colors are noise and the parse +
-// per-capture conversion costs explode — a 3MB single-line bundle once cost 51s
-// of pure column conversion. Skip the pass entirely.
-const MAX_COLORIZE_CHARS = 1_000_000;
-const MAX_COLORIZE_LINE_CHARS = 10_000;
+import { unreadableReason } from '../core/readability.js';
 
 const SURROGATE_RE = /[\uD800-\uDFFF]/;
 
@@ -88,12 +82,12 @@ export async function colorizeGrid(grid) {
         // Normalizing line endings at load (CodeGrid.loadText) fixes both paths at once.
         const text = grid.content ?? (grid.lines ? grid.lines.join('\n') : '');
         if (!text) return;
-        if (text.length > MAX_COLORIZE_CHARS) return;
+        // Colorizing is for READING; an unreadable artifact (minified bundle, data
+        // dump) gets token-color noise at parse prices — a 3MB single-line bundle
+        // once cost 51s of pure column conversion. Skip the pass entirely.
+        if (unreadableReason(text)) return;
 
         const lines = (grid.lines && grid.lines.length) ? grid.lines : text.split('\n');
-        for (let i = 0; i < lines.length; i++) {
-            if (lines[i].length > MAX_COLORIZE_LINE_CHARS) return;
-        }
 
         const gen = grid._colorizeGen;                 // snapshot before the async parse
         const captures = await highlight(text, descriptor);

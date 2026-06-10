@@ -132,7 +132,7 @@ export default class SessionStore {
     if (repo?.owner) {
       field = { type: 'repo', ref: `${repo.owner}/${repo.repo}${repo.branch ? '/' + repo.branch : ''}` };
     } else if (ctx.fieldSource?.type === 'local') {
-      field = { type: 'local', dir: ctx.fieldSource.dir || '', cap: ctx.fieldSource.cap ?? null };
+      field = { type: 'local', dir: ctx.fieldSource.dir || '' };
     }
 
     const terminals = [];
@@ -235,11 +235,9 @@ export default class SessionStore {
       catch (e) { console.warn('[session] repo field restore failed:', e?.message || e); }
     } else if (snap.field?.type === 'local') {
       try {
-        // Replay the recorded pop exactly: same dir, same cap. (Pre-intent saves
-        // carry neither — those fall back to the whole project at the default cap.)
-        const dirArgs = ['file.openDir', snap.field.dir || ''];
-        if (snap.field.cap != null) dirArgs.push(String(snap.field.cap));
-        await this.router.execute(dirArgs);
+        // Replay the recorded pop exactly (a pre-intent save carries no dir —
+        // that restores as the whole project).
+        await this.router.execute(['file.openDir', snap.field.dir || '']);
         await this.router.execute('camera.fitall');
       } catch (e) { console.warn('[session] local field restore failed:', e?.message || e); }
     }

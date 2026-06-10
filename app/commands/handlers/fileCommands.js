@@ -40,26 +40,61 @@ import { resolveGridByIdOrIndex } from './spatialHelpers.js';
 // a regular world with a floor and a down; loaded content sits on the floor.
 const WORLD_FLOOR_Y = 0;
 import CodeGrid from '@glyph3d/core/collections/CodeGrid.js';
-
-const DIR_OPEN_CAP = 250; // default safety bound on bulk opens; override per-call
+import { unreadableReason, READABLE_MAX_CHARS, READABLE_MAX_LINE_CHARS } from '@glyph3d/core';
 
 /**
- * Build a CodeGrid from file content and register it. The shared core of
- * file.open and file.openDir — no positioning (the caller lays out). Returns the
- * registry id, or null if the file is already open.
+ * The in-space stand-in for a file whose content isn't readable source (built
+ * artifact, data dump). The file still EXISTS in the field — addressable,
+ * clickable, in the tree — it just doesn't cost millions of glyphs to say so.
  */
-function addFileGrid(ctx, path, content) {
+function placeholderBody(reason) {
+    const why = reason.bytes != null
+        ? [`  size: ${reason.bytes.toLocaleString()} bytes on disk  (not fetched; limit ${READABLE_MAX_CHARS.toLocaleString()})`]
+        : [
+            `  chars:        ${reason.chars.toLocaleString()}  (limit ${READABLE_MAX_CHARS.toLocaleString()})`,
+            `  longest line: ${reason.maxLineChars.toLocaleString()}  (limit ${READABLE_MAX_LINE_CHARS.toLocaleString()})`,
+        ];
+    return [
+        'file not rendered because: {',
+        ...why,
+        '}',
+        '',
+        'looks like a built artifact or data dump, not readable source.',
+        'the file on disk is untouched; file.save is disabled for this grid.',
+    ].join('\n');
+}
+
+/**
+ * Create + register a grid for `path` with the given body. The shared core of
+ * every file path (file.open / openDir / sheet) — no positioning (the caller
+ * lays out). Returns the registry id, or null if the file is already open.
+ * `notRendered` marks placeholder grids so file.save refuses to write the
+ * placeholder text over the real file.
+ */
+function registerFileGrid(ctx, path, body, notRendered) {
     const uri = `file:///${String(path).replace(/^\/+/, '')}`;
     if ((ctx.registry.findByMeta?.('sourcePath', uri) || []).length) return null;
     const grid = new CodeGrid(ctx.scene, ctx.atlas, { name: path, worldScale: 0.025 });
     grid.setSourcePath(uri); // so file.save / fs/didChange refresh can find it
-    grid.loadFile(path, content);
+    if (notRendered) grid.userData.notRendered = notRendered;
+    grid.loadFile(path, body);
     // The single insertion point into the content tree: parent the grid under its directory
     // node BEFORE addGrid (so addGrid's `if (!grid.parent) scene.add` skips — the tree owns it).
-    // The caller relayouts once after a batch. Every file path (file.open / openDir / sheet)
-    // flows through here, so they all land in the one dir-mirroring scene graph.
+    // The caller relayouts once after a batch.
     ctx.contentTree?.insert(grid, path);
     return ctx.addGrid(grid, { id: path, type: 'grid' }); // registers (scene.add skipped — parented)
+}
+
+/** Register fetched content — unreadable content renders as a placeholder card. */
+function addFileGrid(ctx, path, content) {
+    const reason = unreadableReason(content);
+    return registerFileGrid(ctx, path, reason ? placeholderBody(reason) : content, reason);
+}
+
+/** Register a placeholder from tree metadata alone — the file was never fetched. */
+function addUnfetchedGrid(ctx, path, bytes) {
+    const reason = { bytes };
+    return registerFileGrid(ctx, path, placeholderBody(reason), reason);
 }
 
 /**
@@ -207,11 +242,11 @@ export default function registerFileCommands(router) {
     //
     // Open every code file under a directory and lay the result out as a 3D tree
     // (directory volumes + labels + depth). The directory-row button in the file
-    // tree runs this — "pop this folder out into space". Capped for safety
-    // (full-content grids are heavy); fetch is concurrent.
+    // tree runs this — "pop this folder out into space". No count cap: unreadable
+    // content renders as placeholder cards, so the whole dir always arrives;
+    // fetch is concurrent.
     router.register('file.openDir', async (args, ctx) => {
         const dir = String(args[0] || '').replace(/^\/+|\/+$/g, '');
-        const cap = args[1] != null ? Math.max(1, parseInt(args[1], 10)) : DIR_OPEN_CAP;
         if (!ctx.fileProvider) {
             return { text: 'ERR: no file source — load a repo or connect the relay', data: null };
         }
@@ -229,29 +264,41 @@ export default function registerFileCommands(router) {
             return { text: `OK: no code files under "${dir || '/'}"`, data: { dir, opened: 0 } };
         }
 
-        // Skip already-open files; cap the remainder.
+        // Partition by the walker's size metadata: an oversized file becomes a
+        // placeholder card straight from its tree entry — never fetched. (Bytes ≈
+        // chars for source; the post-fetch line check in addFileGrid catches the
+        // under-limit long-line artifacts.) Skip already-open files in both halves.
+        const notOpen = (p) => !(ctx.registry.findByMeta?.('sourcePath', `file:///${p}`) || []).length;
+        const oversized = under.filter((f) => (f.size ?? 0) > READABLE_MAX_CHARS && notOpen(f.path));
         const want = under
+            .filter((f) => (f.size ?? 0) <= READABLE_MAX_CHARS)
             .map((f) => f.path)
-            .filter((p) => !(ctx.registry.findByMeta?.('sourcePath', `file:///${p}`) || []).length);
-        const capped = want.slice(0, cap);
-        const skipped = want.length - capped.length;
+            .filter(notOpen);
 
         // Live status — the only activity signal on the local (relay) path, which
         // has no getProgress counts; cleared no matter how we return.
-        ctx.status?.set(`Opening ${capped.length} file${capped.length === 1 ? '' : 's'}${dir ? ' · ' + dir : ''}…`);
+        const n = want.length + oversized.length;
+        ctx.status?.set(`Opening ${n} file${n === 1 ? '' : 's'}${dir ? ' · ' + dir : ''}…`);
         try {
             let contentMap;
             try {
-                contentMap = await ctx.fileProvider.getMultipleFiles(null, null, capped);
+                contentMap = await ctx.fileProvider.getMultipleFiles(null, null, want);
             } catch (err) {
                 return { text: `ERR: fetch failed: ${err?.message || err}`, data: null };
             }
 
             let opened = 0;
-            for (const p of capped) {
+            let placeholders = 0;
+            for (const f of oversized) {
+                if (addUnfetchedGrid(ctx, f.path, f.size) != null) { opened++; placeholders++; }
+            }
+            for (const p of want) {
                 const c = contentMap.get(p);
                 if (c == null) continue;
-                if (addFileGrid(ctx, p, c.content) != null) opened++; // addFileGrid inserts into the tree
+                const id = addFileGrid(ctx, p, c.content); // inserts into the tree
+                if (id == null) continue;
+                opened++;
+                if (ctx.registry.get(id)?.grid?.userData?.notRendered) placeholders++;
             }
 
             // One relayout for the whole batch (the RenderPlan), then rest on the world floor —
@@ -260,25 +307,28 @@ export default function registerFileCommands(router) {
             const dirs = ctx.contentTree.dirCount();
 
             // Record the pop as the session's field source. Session capture persists
-            // exactly this intent (dir + cap) — the field is never inferred from a
-            // census of what happens to be in the registry.
-            ctx.fieldSource = { type: 'local', dir, cap };
+            // exactly this intent — the field is never inferred from a census of
+            // what happens to be in the registry.
+            ctx.fieldSource = { type: 'local', dir };
 
             let text = `OK: opened ${opened} file(s) under "${dir || '/'}" → content tree (${dirs} dirs)`;
-            if (skipped) text += `; ${skipped} skipped (cap ${cap})`;
-            return { text, data: { dir, opened, skipped, cap, dirs } };
+            if (placeholders) text += `; ${placeholders} as not-rendered placeholder${placeholders === 1 ? '' : 's'}`;
+            return { text, data: { dir, opened, placeholders, dirs } };
         } finally {
             ctx.status?.clear();
         }
     }, {
         description: 'Open all code files under a directory (recursive) and lay them out as a 3D tree',
-        usage: '<dir-path> [cap]   (empty path = whole project)',
-        returns: '{ dir, opened, skipped, cap, placed, dirs, depth, volumes }',
+        usage: '<dir-path>   (empty path = whole project)',
+        returns: '{ dir, opened, placeholders, dirs }',
     });
 
     router.register('file.save', async (args, ctx) => {
         const r = resolveSaveTarget(ctx, args);
         if (r.error) return { text: r.error, data: null };
+        if (r.grid.userData?.notRendered) {
+            return { text: `ERR: "${r.registryId}" is a not-rendered placeholder — its buffer is not the file's content; save disabled`, data: null };
+        }
 
         if (!ctx.wsbridge || !ctx.wsbridge.connected) {
             return {
