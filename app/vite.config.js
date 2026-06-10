@@ -21,6 +21,10 @@ const threeWebGPU = require.resolve('three/webgpu');
 // resolves natively through the bun workspace's node_modules symlinks + each
 // package's exports map. No alias reinvention of module resolution.
 export default defineConfig({
+  // Where the build will be MOUNTED. Default '/' serves dev and the cli-embedded
+  // build (binary serves at root); the hosted IDE lives under glyph3d.dev/ide/,
+  // so its deploy builds with GLYPH_BASE=/ide/ (see `make deploy-ide`).
+  base: process.env.GLYPH_BASE || '/',
   plugins: [react(), consoleCapture()],
   resolve: {
     alias: [

@@ -32,7 +32,7 @@ LDFLAGS := -s -w \
 	-X main.Platform=$(HOST_PLATFORM)
 GOFLAGS := -trimpath -ldflags='$(LDFLAGS)'
 
-.PHONY: all build clean prep prep-wasm prep-tree-sitter deploy release linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64 dev dev-vite dev-relay dev-status dev-stop
+.PHONY: all build clean prep prep-wasm prep-tree-sitter deploy deploy-ide release linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64 dev dev-vite dev-relay dev-status dev-stop
 
 # --- Default: build for current platform ---
 
@@ -161,6 +161,17 @@ deploy: linux-amd64
 	@echo "Deploy to $(DEPLOY_HOST):"
 	@echo "  scp $(OUT_DIR)/$(BINARY)-linux-amd64 $(DEPLOY_HOST):/usr/local/bin/$(BINARY)"
 	@echo "  ssh $(DEPLOY_HOST) '$(BINARY) serve --port 8080'"
+
+# Promote the IDE to the hosted demo at glyph3d.dev/ide (static, GitHub-only mode).
+# Builds with the /ide/ mount point and syncs to the web root.
+# Set your target at call time:  make deploy-ide IDE_DEPLOY_HOST=user@host
+IDE_DEPLOY_HOST ?= your-server
+IDE_DEPLOY_ROOT ?= /srv/www/glyph3d-ide
+
+deploy-ide:
+	cd app && GLYPH_BASE=/ide/ bun run build
+	rsync -az --delete app/dist/ $(IDE_DEPLOY_HOST):$(IDE_DEPLOY_ROOT)/
+	@echo "Deployed → https://glyph3d.dev/ide/"
 
 # --- Cleanup ---
 
