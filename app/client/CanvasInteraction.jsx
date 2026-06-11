@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import { useThree, useFrame } from '@react-three/fiber';
 import * as THREE from 'three/webgpu';
 import { useAppCommands } from './CommandProvider.jsx';
+import { resolveGesture } from './gestureResolver.js';
 import { moveVerbFor } from './surfaceInteractions.js';
 
 const round = (n) => Math.round(n * 100) / 100;
@@ -141,53 +142,34 @@ export function CanvasPicker() {
       }).catch(() => false);
     };
 
+    // The responder chain env: gestures resolve against the context nodes and
+    // emit VERBS (never direct mutation) — see gestureResolver.js. The guards
+    // here decide whether a pointer release IS a gesture; the resolver decides
+    // what the gesture MEANS in the current context.
+    // Lazy getters, deliberately: this CHILD effect runs before CommandProvider's
+    // PARENT effect creates interactionContext, so capturing the reference here
+    // would freeze it as undefined and every gesture would fall to the ROOT tier.
+    const gestureEnv = {
+      exec: (cmd) => router.execute(cmd),
+      get attention() { return client.ctx.attentionManager; },
+      get context() { return client.ctx.interactionContext; },
+      placeCaretFromPointer,
+    };
+
     const onUp = (e) => {
       // A resize drag (ResizeDragger) owns this release — never treat its tiny
       // sub-DRAG_PX nudges as a click that would re-select / refocus.
       if (client.ctx.resizing) return;
       // Only a click if the pointer barely moved (else it was an orbit/pan/drag).
       if (Math.hypot(e.clientX - s.downX, e.clientY - s.downY) > DRAG_PX) return;
-      // Act on exactly what's highlighted (the grid-channel hover result). The
-      // hover loop keeps s.hoverEntry current for the cursor position; clicking
-      // empty space (hoverEntry null) releases keyboard focus.
-      const entry = s.hoverEntry;
-      if (!entry) {
-        router.execute('attention.set key none');
-        return;
-      }
-      // Context de-overload: camera flight belongs to a focus CHANGE, not to every
-      // click. Re-clicking the focused grid (caret repositioning, re-affirming
-      // selection) must not re-fly the camera — that's a different modal intent.
-      // (Interim resolution until the interaction-context layer owns gesture→verb.)
-      const prevPrimary = client.ctx.attentionManager?.get('primary')?.id;
-      router.execute(`attention.set primary ${entry.id}`);
-      if (entry.id !== prevPrimary) router.execute(`camera.focus ${entry.id}`);
-      // Terminals take keyboard focus on click (type immediately). A grid that's
-      // ALREADY the key target stays keyboard-focused — clicking inside the doc you're
-      // editing must not drop edit mode. Any other grid gets visual focus only (no
-      // silent click-to-edit), so the key slot is released.
-      const keyId = client.ctx.attentionManager?.get('key')?.id;
-      const keepKey = entry.type === 'terminal' || keyId === entry.id;
-      router.execute(keepKey ? `attention.set key ${entry.id}` : 'attention.set key none');
-      // Clicking inside the doc being edited repositions the caret to the glyph
-      // under the pointer — the click-and-type-away half of the editing loop.
-      if (keepKey && entry.type === 'grid') placeCaretFromPointer(entry);
+      // Act on exactly what's highlighted (the grid-channel hover result the
+      // hover loop keeps current). hoverEntry null = empty space.
+      resolveGesture({ type: 'click', target: s.hoverEntry }, gestureEnv);
     };
 
-    // Double-click a grid to ENTER edit mode — the deliberate gesture that honors
-    // "no SILENT click-to-edit" while staying low-friction. Single click focuses
-    // (above); double-click drops into editing AT THE CLICKED GLYPH (caret lands
-    // under the pointer; falls back to edit.start's end-of-file caret when the
-    // pointer is on the panel but not a glyph). Terminals already take keyboard
-    // focus on a single click, so they're skipped.
     const onDblClick = (e) => {
       if (client.ctx.resizing) return;
-      const entry = s.hoverEntry;
-      if (!entry || entry.type !== 'grid') return;
-      router.execute(`attention.set primary ${entry.id}`);
-      placeCaretFromPointer(entry).then((placed) => {
-        if (!placed) router.execute(`edit.start ${entry.id}`);
-      });
+      resolveGesture({ type: 'dblclick', target: s.hoverEntry }, gestureEnv);
     };
 
     dom.addEventListener('pointermove', onMove);
