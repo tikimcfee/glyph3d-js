@@ -27,6 +27,7 @@ import registerRelayCommands from './relayCommands.js';
 import registerSettingsCommands from './settingsCommands.js';
 import registerAttentionCommands from './attentionCommands.js';
 import registerEditCommands from './editCommands.js';
+import registerContextCommands from './contextCommands.js';
 import registerAgentVisitorCommands from './agentVisitorCommands.js';
 import registerMemoryCommands from './memoryCommands.js';
 import registerWorkspaceCommands from './workspaceCommands.js';
@@ -63,6 +64,7 @@ export function registerAllCommands(router) {
     registerSettingsCommands(router);
     registerAttentionCommands(router);
     registerEditCommands(router);
+    registerContextCommands(router);
     registerAgentVisitorCommands(router);
     registerMemoryCommands(router);
     registerWorkspaceCommands(router);

@@ -4,3 +4,4 @@
 export { SelectionManager } from './SelectionManager.js';
 export { CodeColorManager } from './CodeColorManager.js';
 export { ShortcutManager } from './ShortcutManager.js';
+export { InteractionContext } from './InteractionContext.js';

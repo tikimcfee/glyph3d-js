@@ -8,6 +8,7 @@ import FieldVisitorManager from '@glyph3d/core/services/orchestration/FieldVisit
 import { installConsoleForwarder } from '@glyph3d/core/services/orchestration/consoleForwarder.js';
 import AttentionManager from '@glyph3d/core/services/interaction/AttentionManager.js';
 import EntityKeystrokeRouter from '@glyph3d/core/services/interaction/EntityKeystrokeRouter.js';
+import InteractionContext from '@glyph3d/core/services/interaction/InteractionContext.js';
 import RemoteFileSystemProvider from '@glyph3d/core/services/data/RemoteFileSystemProvider.js';
 import GitHubFileProvider from '@glyph3d/core/services/data/GitHubFileProvider.js';
 import { PickingSystem } from '@glyph3d/core/picking/PickingSystem.js';
@@ -227,6 +228,14 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // visitor per agent. The camera stays free unless `camera.follow <id>` opts in.
     state.ctx.visitorManager = new FieldVisitorManager(state.ctx);
 
+    // The composable "what is the user locked into" projection — focus/edit/key
+    // nodes derived from attention + cursor state (owns nothing). The breadcrumb
+    // chips and context.info read it; gesture resolution and binding tables will.
+    state.ctx.interactionContext = new InteractionContext({
+      attentionManager: state.ctx.attentionManager,
+      registry: state.ctx.registry,
+    });
+
     // Where's the relay, and should we auto-dial it? (See resolveRelay.)
     const { url, port, autoConnect } = resolveRelay(window.location, relay);
     const bridge = new WebSocketBridge(state.router, {
@@ -357,6 +366,8 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       state.ctx.pickingSystem = null;
       state.ctx.visitorManager?.dispose();
       state.ctx.visitorManager = null;
+      state.ctx.interactionContext?.dispose();
+      state.ctx.interactionContext = null;
     };
   }, [relay]);
 

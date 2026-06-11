@@ -1750,11 +1750,34 @@ class CodeGrid extends THREE.Object3D {
     exitEdit() {
         if (this._caretMesh) this._caretMesh.visible = false;
         this._cursor = null;
+        this._emitCursorChange();
     }
 
     /** @returns {{line:number, col:number}|null} */
     getCursor() {
         return this._cursor ? { line: this._cursor.line, col: this._cursor.col } : null;
+    }
+
+    /**
+     * Subscribe to cursor lifecycle (enter / move / relayout-clamp / exit). The
+     * callback receives getCursor()'s value — null on exit. The interaction
+     * context and 2D companions consume this instead of polling.
+     * @param {(cursor: {line:number,col:number}|null) => void} fn
+     * @returns {() => void} unsubscribe
+     */
+    onCursorChange(fn) {
+        (this._cursorListeners ??= new Set()).add(fn);
+        return () => { this._cursorListeners?.delete(fn); };
+    }
+
+    /** @private */
+    _emitCursorChange() {
+        if (!this._cursorListeners?.size) return;
+        const c = this.getCursor();
+        for (const fn of this._cursorListeners) {
+            try { fn(c); }
+            catch (err) { console.error('[CodeGrid] cursor listener error:', err); }
+        }
     }
 
     /** True if content was edited since load / last save — drives the HUD's unsaved (•) marker. */
@@ -1936,6 +1959,7 @@ class CodeGrid extends THREE.Object3D {
         const pos = this._resolveCaretWorldPosition(this._cursor.line, this._cursor.col);
         if (!pos) {
             this._caretMesh.visible = false;
+            this._emitCursorChange(); // cursor is still live; only the caret hid
             return;
         }
 
@@ -1949,6 +1973,10 @@ class CodeGrid extends THREE.Object3D {
         // caret just in front so it never z-fights the glyphs (0 for unwrapped lines).
         this._caretMesh.position.set(pos.x + barWidth / 2, pos.y, pos.z + 0.05);
         this._caretMesh.visible = true;
+        // Every cursor-visible change funnels through this repaint (setCursor,
+        // enterEdit, arrow moves, post-edit relayout clamp) — emit here so
+        // subscribers track the cursor without polling.
+        this._emitCursorChange();
     }
 
     /**
