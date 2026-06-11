@@ -42,6 +42,8 @@ function flyIfChanged(env, id) {
 const POLICIES = {
     // The doc being edited: clicks inside it move the caret and never drop edit.
     edit: {
+        // Esc pops the innermost node: leave edit, keep focus.
+        esc(g, node, env) { env.exec('edit.stop'); return true; },
         click(g, node, env) {
             if (g.target?.id !== node.id) return false; // a different target → bubble (fresh focus)
             // A 'sticky edit' user policy (config plane) would claim the foreign-target
@@ -67,15 +69,29 @@ const POLICIES = {
             env.exec(`attention.set key ${node.id}`);
             return true;
         },
+        // Esc releases the keyboard hold. NOTE: a future greedy 'capture' kind
+        // (terminal hosting vim/less) will claim Esc as PASSTHROUGH and reserve
+        // its own pop chord — that policy replaces this row for capture nodes.
+        esc(g, node, env) { env.exec('edit.stop'); return true; },
     },
 
-    // Plain focus: re-clicking the focused entity re-affirms without flying
-    // (same id → no flight) and keeps the keyboard free.
+    // Plain focus (not editing): re-clicking the focused entity re-affirms
+    // without flying (same id → no flight) — and on a GRID, a click that lands
+    // on a glyph enters edit AT that glyph, the shortcut for
+    // dblclick-to-edit-then-click-to-move. First click still only focuses ("no
+    // silent click-to-edit" holds — the second click is the opt-in); a panel
+    // hit (no glyph under the pointer) keeps the keyboard free as before.
     focus: {
         click(g, node, env) {
             if (g.target?.id !== node.id) return false;
             flyIfChanged(env, node.id);
-            env.exec('attention.set key none');
+            if (g.target.type === 'terminal') {
+                env.exec(`attention.set key ${node.id}`); // terminals always take the keyboard on click
+                return true;
+            }
+            env.placeCaretFromPointer(g.target).then((placed) => {
+                if (!placed) env.exec('attention.set key none'); // panel, not glyph → stay nav-free
+            });
             return true;
         },
     },

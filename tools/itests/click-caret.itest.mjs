@@ -1,8 +1,10 @@
 // click-caret — a glyph-channel pick becomes a caret: dblclick a glyph to start
 // editing AT that glyph, single-click repositions while editing, typing lands at
-// the clicked position, and it all still works in a framed (clipped) layout —
-// the layout-independence claim (instance order == slot order; layout only moves
-// quads). Also asserts the hover caret-preview tint writes the highlight texture.
+// the clicked position, a glyph click on a FOCUSED (non-editing) grid enters
+// edit at that glyph (the dblclick-then-click shortcut), and it all still works
+// in a framed (clipped) layout — the layout-independence claim (instance order
+// == slot order; layout only moves quads). Also asserts the hover caret-preview
+// tint writes the highlight texture.
 //
 // Coordinates: LayoutDescription.positionAt(line,col) is the glyph's LEFT edge at
 // vertical CENTER (calibrated empirically), so glyph center = +advance*0.5, +0.
@@ -110,7 +112,22 @@ export default async ({ app, assert }) => {
   })()`);
   assert.ok(tint.slot >= 0 && tint.lit, `hover tint lit at slot ${tint.slot}`);
 
-  // 5) Layout independence: frame the grid (shader clip) and click a glyph that's
+  // 5) Focused-but-not-editing + click on a glyph = enter edit AT that glyph —
+  // the dblclick-then-click shortcut (the focus policy's claim). Esc exits edit
+  // but the grid keeps focus, so the next glyph click drops straight back in.
+  await page.keyboard.press('Escape');
+  await app.waitFor(400);
+  assert.ok(!(await cursor()), 'Escape exited edit mode');
+  const t5 = { line: target.line, col: target.col + 4 };
+  const pt5 = await hoverAt(t5.line, t5.col);
+  assert.ok(pt5, 'pointer settled for the focused-click shortcut');
+  await page.mouse.click(pt5.x, pt5.y);
+  await app.waitFor(1000);
+  cur = await cursor();
+  assert.ok(cur && cur[0] === t5.line && cur[1] === t5.col,
+    `focused-click shortcut → edit at ${cur?.join(':')} (want ${t5.line}:${t5.col})`);
+
+  // 6) Layout independence: frame the grid (shader clip) and click a glyph that's
   // still visible — same slot math, caret exact.
   await app.cmd(`grid.frame ${FILE} 8`);
   await app.waitFor(1200);

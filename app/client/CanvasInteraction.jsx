@@ -172,6 +172,18 @@ export function CanvasPicker() {
       resolveGesture({ type: 'dblclick', target: s.hoverEntry }, gestureEnv);
     };
 
+    // Escape = pop the innermost context node (leave edit / release the keyboard
+    // hold), resolved through the chain — the first KEYBOARD gesture in it.
+    // EntityKeystrokeRouter deliberately ignores Escape for the host; this is the
+    // host. DOM inputs (command bar, panels) keep their own Escape.
+    const onKeyDown = (e) => {
+      if (e.key !== 'Escape') return;
+      const t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      if (resolveGesture({ type: 'esc', target: null }, gestureEnv)) e.preventDefault();
+    };
+    document.addEventListener('keydown', onKeyDown);
+
     dom.addEventListener('pointermove', onMove);
     dom.addEventListener('pointerenter', onEnter);
     dom.addEventListener('pointerleave', onLeave);
@@ -185,6 +197,7 @@ export function CanvasPicker() {
       dom.removeEventListener('pointerdown', onDown);
       dom.removeEventListener('pointerup', onUp);
       dom.removeEventListener('dblclick', onDblClick);
+      document.removeEventListener('keydown', onKeyDown);
       if (client.ctx.isGripPress === isGripPress) client.ctx.isGripPress = null;
     };
   }, [client, gl, s]);
