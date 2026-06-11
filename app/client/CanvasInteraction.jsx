@@ -155,8 +155,13 @@ export function CanvasPicker() {
         router.execute('attention.set key none');
         return;
       }
+      // Context de-overload: camera flight belongs to a focus CHANGE, not to every
+      // click. Re-clicking the focused grid (caret repositioning, re-affirming
+      // selection) must not re-fly the camera — that's a different modal intent.
+      // (Interim resolution until the interaction-context layer owns gesture→verb.)
+      const prevPrimary = client.ctx.attentionManager?.get('primary')?.id;
       router.execute(`attention.set primary ${entry.id}`);
-      router.execute(`camera.focus ${entry.id}`);
+      if (entry.id !== prevPrimary) router.execute(`camera.focus ${entry.id}`);
       // Terminals take keyboard focus on click (type immediately). A grid that's
       // ALREADY the key target stays keyboard-focused — clicking inside the doc you're
       // editing must not drop edit mode. Any other grid gets visual focus only (no
