@@ -21,6 +21,9 @@ const round = (n) => Math.round(n * 100) / 100;
 // indistinguishable downstream.
 
 const DRAG_PX = 5; // pointer travel above this = a drag (orbit/pan), not a click
+// Caret-preview tint for the glyph under the pointer (additive over syntax color,
+// via the highlight texture). Mid-tone cool lift — pure white blows out light glyphs.
+const HOVER_GLYPH_TINT = { r: 0.18, g: 0.25, b: 0.38 };
 // Hover outline is inflated by this many world units so that when you hover the
 // already-selected grid it reads as a light halo just OUTSIDE the steady selection
 // box, instead of the two line-boxes merging into one.
@@ -54,7 +57,7 @@ export function CanvasPicker() {
   // last resolved entity so a click/drag acts on exactly what's highlighted.
   const s = useRef({
     x: 0, y: 0, in: false, downX: 0, downY: 0,
-    hoverId: null, hoverEntry: null,
+    hoverId: null, hoverEntry: null, hoverGlyph: null,
     pickPending: false, gpuOk: false, gpuWarned: false, lastPs: null,
     lx: NaN, ly: NaN, lin: false,
     px: NaN, py: NaN, pz: NaN, qx: NaN, qy: NaN, qz: NaN, qw: NaN,
@@ -116,6 +119,28 @@ export function CanvasPicker() {
     const onLeave = () => { s.in = false; };
     const onDown = (e) => { s.downX = e.clientX; s.downY = e.clientY; };
 
+    // Glyph-level pick at the current pointer → caret. The glyph channel returns
+    // the instance index; instance order == buffer-slot order, so the grid inverts
+    // it to (line,col) and edit.goto places the caret — in ANY layout (column,
+    // framed, z-pages), because layout only moves quads, never slots. Resolves
+    // false when the pointer is over the panel but not a glyph. Async: the GPU
+    // readback lands a frame later; the click guards already passed, so the
+    // pointer is parked.
+    const placeCaretFromPointer = (entry) => {
+      const ps = client.ctx.pickingSystem;
+      if (!ps || entry?.type !== 'grid') return Promise.resolve(false);
+      const rect = dom.getBoundingClientRect();
+      ps.setMousePosition(s.x - rect.left, s.y - rect.top);
+      ps.markDirty(); // channels share one _needsPick latch — mandatory before this pass
+      return ps.pickAsync('glyph', camera, scene).then((hit) => {
+        if (!hit || hit.token !== entry.grid.getRenderer?.()) return false; // missed, or another grid's glyphs
+        const pos = entry.grid.getCharForSlot?.(hit.slotIndex);
+        if (!pos) return false;
+        router.execute(['edit.goto', entry.id, String(pos.line), String(pos.col)]);
+        return true;
+      }).catch(() => false);
+    };
+
     const onUp = (e) => {
       // A resize drag (ResizeDragger) owns this release — never treat its tiny
       // sub-DRAG_PX nudges as a click that would re-select / refocus.
@@ -139,18 +164,25 @@ export function CanvasPicker() {
       const keyId = client.ctx.attentionManager?.get('key')?.id;
       const keepKey = entry.type === 'terminal' || keyId === entry.id;
       router.execute(keepKey ? `attention.set key ${entry.id}` : 'attention.set key none');
+      // Clicking inside the doc being edited repositions the caret to the glyph
+      // under the pointer — the click-and-type-away half of the editing loop.
+      if (keepKey && entry.type === 'grid') placeCaretFromPointer(entry);
     };
 
     // Double-click a grid to ENTER edit mode — the deliberate gesture that honors
     // "no SILENT click-to-edit" while staying low-friction. Single click focuses
-    // (above); double-click drops into editing (caret on, keystrokes → the doc).
-    // Terminals already take keyboard focus on a single click, so they're skipped.
+    // (above); double-click drops into editing AT THE CLICKED GLYPH (caret lands
+    // under the pointer; falls back to edit.start's end-of-file caret when the
+    // pointer is on the panel but not a glyph). Terminals already take keyboard
+    // focus on a single click, so they're skipped.
     const onDblClick = (e) => {
       if (client.ctx.resizing) return;
       const entry = s.hoverEntry;
       if (!entry || entry.type !== 'grid') return;
       router.execute(`attention.set primary ${entry.id}`);
-      router.execute(`edit.start ${entry.id}`);
+      placeCaretFromPointer(entry).then((placed) => {
+        if (!placed) router.execute(`edit.start ${entry.id}`);
+      });
     };
 
     dom.addEventListener('pointermove', onMove);
@@ -208,6 +240,20 @@ export function CanvasPicker() {
       if (token) dom.style.cursor = 'nwse-resize';
     };
 
+    // Caret-preview tint: light the glyph under the pointer (additive highlight
+    // texture — one texel write, syntax colors untouched). Tracks the lit slot so
+    // each move clears the last. KNOWN LIMIT: the highlight texture is shared, so
+    // clearing the tint also clears a user highlight.* on that exact glyph.
+    const applyGlyphHover = (renderer, slot) => {
+      const prev = s.hoverGlyph;
+      if (prev && (prev.renderer !== renderer || prev.slot !== slot)) {
+        prev.renderer.setGlyphHighlight?.(prev.slot, null);
+      }
+      s.hoverGlyph = (renderer && slot != null)
+        ? (renderer.setGlyphHighlight?.(slot, HOVER_GLYPH_TINT), { renderer, slot })
+        : null;
+    };
+
     const cursorMoved = s.x !== s.lx || s.y !== s.ly || s.in !== s.lin;
     const camMoved =
       c.position.x !== s.px || c.position.y !== s.py || c.position.z !== s.pz ||
@@ -249,7 +295,22 @@ export function CanvasPicker() {
           return ps.pickAsync('handle', c, scene).then(
             (h) => applyHandleHover(s.in ? (h?.token ?? null) : null, sx, sy),
             () => applyHandleHover(null),
-          );
+          ).then(() => {
+            // Third channel: caret-preview on the doc being EDITED. Gated to the
+            // key-target grid — the glyph pass renders every instance, so it stays
+            // off during plain navigation. (markDirty: shared latch, as above.)
+            const keyId = client.ctx.attentionManager?.get('key')?.id;
+            if (!entry || entry.type !== 'grid' || entry.id !== keyId) {
+              applyGlyphHover(null, null);
+              return;
+            }
+            ps.markDirty();
+            return ps.pickAsync('glyph', c, scene).then((gh) => {
+              const renderer = entry.grid.getRenderer?.();
+              if (s.in && gh && gh.token === renderer) applyGlyphHover(renderer, gh.slotIndex);
+              else applyGlyphHover(null, null);
+            }, () => applyGlyphHover(null, null));
+          });
         }).then(() => {
           s.pickPending = false;
         }).catch((err) => {
@@ -260,6 +321,7 @@ export function CanvasPicker() {
           }
           applyHover(null);
           applyHandleHover(null);
+          applyGlyphHover(null, null);
         });
       }
       return;
@@ -268,6 +330,7 @@ export function CanvasPicker() {
     // No picking system yet, or cursor outside the canvas → clear hover + grip flag.
     applyHover(null);
     applyHandleHover(null);
+    applyGlyphHover(null, null);
   });
 
   return null;

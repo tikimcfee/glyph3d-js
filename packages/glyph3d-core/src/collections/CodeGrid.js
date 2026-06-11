@@ -1627,6 +1627,18 @@ class CodeGrid extends THREE.Object3D {
     }
 
     /**
+     * Inverse of getSlotForChar: buffer slot → {line, col}. A glyph-channel pick
+     * yields an instance index; instance order == slot order, so this maps the
+     * picked glyph back to the cursor's coordinate space — in ANY layout mode
+     * (column / framed / z-pages), since layout only moves quads, never slots.
+     * @param {number} slot - grid-global buffer slot (== glyph instance index)
+     * @returns {{line:number,col:number}|null} null when layout isn't ready or slot is out of range
+     */
+    getCharForSlot(slot) {
+        return this._layout?.charForSlot(slot) ?? null;
+    }
+
+    /**
      * Number of buffer slots on a line — i.e. its codepoint count, since the
      * builder slots every codepoint (see getSlotForChar). Used as the
      * exclusive end column for "highlight to end of line".

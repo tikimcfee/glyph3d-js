@@ -74,6 +74,28 @@ export default class LayoutDescription {
     }
 
     /**
+     * BUFFER slot → SOURCE {line,col}. The inverse of slotForChar: a glyph-channel
+     * pick returns an instance index, instance order == slot order, so this is how
+     * "the glyph under the pointer" becomes a cursor position. Binary search for
+     * the greatest line whose base ≤ slot; empty lines (base[n] == base[n+1]) hold
+     * no slots, so the search naturally lands on the line that owns the glyph.
+     * @param {number} slot
+     * @returns {{line:number,col:number}|null} null when out of range
+     */
+    charForSlot(slot) {
+        const base = this.lineSlotBase;
+        if (!base || base.length === 0 || slot < 0) return null;
+        let lo = 0, hi = base.length - 1;
+        while (lo < hi) {
+            const mid = (lo + hi + 1) >> 1;
+            if (base[mid] <= slot) lo = mid; else hi = mid - 1;
+        }
+        const col = slot - base[lo];
+        if (col >= this.lineSlotCount(lo)) return null; // past the buffer's last glyph
+        return { line: lo, col };
+    }
+
+    /**
      * SOURCE (line,col) → grid-local {x,y,z}. Buffer-backed for materialized glyphs
      * (exact; wrap + pagination already applied), analytic fallback for empty lines.
      * Returns null when the layout isn't ready.
