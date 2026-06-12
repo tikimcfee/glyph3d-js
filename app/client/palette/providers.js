@@ -1,0 +1,65 @@
+/**
+ * providers — the palette's noun sources. Each provider lists addressable THINGS
+ * and the verb line each one implies; the bar executes that line through
+ * router.execute, so selecting a row and typing the command are the same act.
+ * The subtitle under every row IS entry.command — the palette teaches the bus
+ * vocabulary while you use it, and a row that can't show its command line is a
+ * row reaching around the bus.
+ *
+ * Entry shape:
+ *   { kind, key, command, insert, detail, usage }
+ *     kind    — 'file' | 'sheet' | 'scheme' | 'verb'
+ *     key     — the searched AND displayed text (rank positions index into it)
+ *     command — token array for router.execute (array form keeps a path with
+ *               spaces intact); null for verbs
+ *     insert  — verbs only: what Tab/Enter put in the input for arg entry
+ *     detail  — small annotation ('open — jump', 'layout scheme', verb description)
+ */
+import { LAYOUT_SCHEMES } from '@glyph3d/core/collections/layouts/index.js';
+
+/** Verbs from the router registry — selecting one inserts `name ` for arg entry. */
+export function verbEntries(client) {
+    let list = [];
+    try { list = client?.router?.listCommands?.() || []; } catch { /* registry not up */ }
+    return list.map((v) => ({
+        kind: 'verb', key: v.name, command: null, insert: v.name + ' ',
+        detail: v.description || '', usage: v.usage || '',
+    }));
+}
+
+/**
+ * Nouns: open sheets (jump via sheet.focus), the repo file roster (open via
+ * file.open), layout schemes. A file already open as a sheet is deduped out —
+ * the jump row subsumes the open row. Async because the roster may be an RPC
+ * away; every source degrades to "absent" rather than failing the palette.
+ */
+export async function nounEntries(client) {
+    const ctx = client?.ctx;
+    const out = [];
+    const openPaths = new Set();
+
+    // Open sheets — the working set. sheet.focus is THE jump gesture in one verb:
+    // render-if-needed → attention primary → camera frame → mark active.
+    try {
+        const sheets = ctx?.workspace?.listActiveSheets?.(ctx.registry, ctx.attentionManager) || [];
+        for (const s of sheets) {
+            const path = s.source?.path ? String(s.source.path).replace(/^\/+/, '') : null;
+            if (path) openPaths.add(path);
+            out.push({ kind: 'sheet', key: path || s.title, command: ['sheet.focus', s.id], detail: 'open — jump' });
+        }
+    } catch { /* workspace not wired yet */ }
+
+    // The repo roster — relay fs or GitHub, same surface; the same call openDir uses.
+    try {
+        const tree = await ctx.fileProvider.listTree('file:///');
+        for (const f of ctx.fileProvider.filterCodeFiles({ tree })) {
+            if (openPaths.has(f.path)) continue;
+            out.push({ kind: 'file', key: f.path, command: ['file.open', f.path], detail: '' });
+        }
+    } catch { /* no source yet (no repo, relay down) — sheets/schemes/verbs still work */ }
+
+    for (const name of Object.keys(LAYOUT_SCHEMES)) {
+        out.push({ kind: 'scheme', key: name, command: ['layout.scheme', name], detail: 'layout scheme' });
+    }
+    return out;
+}
