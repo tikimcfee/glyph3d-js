@@ -8,6 +8,8 @@
 
 import * as THREE from 'three';
 import ContentTree from '../packages/glyph3d-core/src/collections/ContentTree.js';
+import { walkTreeLayout, districtLayout, packedLayout, PACKED_DEFAULTS } from '../packages/glyph3d-core/src/collections/layouts/index.js';
+import ContentTreeMarkers from '../packages/glyph3d-core/src/collections/ContentTreeMarkers.js';
 
 let pass = 0, fail = 0;
 const ok = (cond, msg) => { if (cond) pass++; else { fail++; console.log(`  ✗ ${msg}`); } };
@@ -37,8 +39,10 @@ const PATHS = [
   'bc/two.js',
 ];
 
+// Structure tests pin the WALK scheme explicitly (they assert walk's invariants);
+// the tree's factory default is packed — covered by its own section below.
 const build = (paths, order = paths) => {
-  const t = new ContentTree();
+  const t = new ContentTree({ layout: walkTreeLayout });
   for (const p of order) t.insert(makeLeaf(p), p);
   t.relayout();
   return t;
@@ -199,6 +203,264 @@ const snapshot = (tree) => {
   ok(t.has('new/extra.js'), 'added a file');
   t.remove('new/extra.js', { prune: true }); t.relayout();
   eq(snapshot(t), before, 'add then remove returns to the exact pre-add layout (idempotent)');
+}
+
+// ───────────────────────── district scheme ─────────────────────────
+
+const buildDistrict = (paths, order = paths) => {
+  const t = new ContentTree({ layout: districtLayout });
+  for (const p of order) t.insert(makeLeaf(p), p);
+  t.relayout();
+  return t;
+};
+
+// A node's world-space plot rect (origin = footprint top-center, content below).
+const plotRect = (node) => {
+  const v = new THREE.Vector3();
+  node.getWorldPosition(v);
+  const s = node.userData.size;
+  return { x0: v.x - s.x / 2, x1: v.x + s.x / 2, y0: v.y - s.y, y1: v.y };
+};
+
+// 14. district containment — the scheme's defining property: every child dir's plot
+//     sits INSIDE its parent's footprint (nesting IS the hierarchy).
+{
+  const t = buildDistrict(PATHS);
+  const eps = 0.01;
+  const inside = (c, p) => c.x0 >= p.x0 - eps && c.x1 <= p.x1 + eps && c.y0 >= p.y0 - eps && c.y1 <= p.y1 + eps;
+  const walk = (node) => {
+    for (const child of node.children.filter((c) => c.userData.isDir)) {
+      if (child.userData.size.x > 0) {  // empty plots have no extent to contain
+        ok(inside(plotRect(child), plotRect(node)), `district: ${child.userData.path} plot inside ${node.userData.path || '(root)'}`);
+      }
+      walk(child);
+    }
+  };
+  walk(t.root);
+}
+
+// 15. district depth — nesting recedes in Z, one inset step per level (cumulative).
+{
+  const t = buildDistrict(PATHS);
+  const wz = (p) => { const v = new THREE.Vector3(); t._leaves.get(p).getWorldPosition(v); return v.z; };
+  ok(wz('src/index.js') < wz('readme.md') - 0.01, 'district: depth-1 file behind root file');
+  ok(wz('src/util/deep/a/b/c/leaf.txt') < wz('src/index.js') - 0.01, 'district: deeper nesting further back');
+}
+
+// 16. district siblings don't overlap (files AND child plots share one mosaic).
+{
+  const t = buildDistrict(PATHS);
+  const src = t.getNode('src');
+  const rects = src.children
+    .filter((c) => !c.userData.isDir || c.userData.size.x > 0)
+    .map((c) => {
+      if (c.userData.isDir) return plotRect(c);
+      const v = new THREE.Vector3(); c.getWorldPosition(v); const s = c.userData.size;
+      return { x0: v.x - s.x / 2, x1: v.x + s.x / 2, y0: v.y - s.y / 2, y1: v.y + s.y / 2 };
+    });
+  let overlaps = 0;
+  for (let i = 0; i < rects.length; i++) for (let j = i + 1; j < rects.length; j++) {
+    const a = rects[i], b = rects[j];
+    if (a.x0 < b.x1 - 0.01 && b.x0 < a.x1 - 0.01 && a.y0 < b.y1 - 0.01 && b.y0 < a.y1 - 0.01) overlaps++;
+  }
+  eq(overlaps, 0, 'district: src children (files + child plots) pack without overlap');
+}
+
+// 17. district order independence — same property as the walk (test 8).
+{
+  const fwd = buildDistrict(PATHS, PATHS);
+  const rev = buildDistrict(PATHS, [...PATHS].reverse());
+  eq(snapshot(fwd), snapshot(rev), 'district tree identical regardless of insert order');
+}
+
+// 18. scheme switching round-trips — walk → district → walk reproduces each layout
+//     exactly (switching lenses is lossless; nothing drifts).
+{
+  const t = build(PATHS);                  // default walk
+  const walkSnap = snapshot(t);
+  t.setLayout(districtLayout); t.relayout();
+  const districtSnap = snapshot(t);
+  ok(JSON.stringify(walkSnap) !== JSON.stringify(districtSnap), 'walk and district are genuinely different layouts');
+  t.setLayout(walkTreeLayout); t.relayout();
+  eq(snapshot(t), walkSnap, 'switching back to walk reproduces the walk layout exactly');
+  t.setLayout(districtLayout); t.relayout();
+  eq(snapshot(t), districtSnap, 'switching back to district reproduces the district layout exactly');
+}
+
+// ───────────────────────── packed scheme ─────────────────────────
+
+const buildPacked = (paths, order = paths) => {
+  const t = new ContentTree({ layout: packedLayout });
+  for (const p of order) t.insert(makeLeaf(p), p);
+  t.relayout();
+  return t;
+};
+
+// 19. packed depth topography — THE defining property: a leaf's world z is exactly
+//     −(dir depth × depthZ), accumulated through the transform chain.
+{
+  const t = buildPacked(PATHS);
+  const dz = PACKED_DEFAULTS.depthZ;
+  const wz = (p) => { const v = new THREE.Vector3(); t._leaves.get(p).getWorldPosition(v); return v.z; };
+  eq(r2(wz('readme.md')), 0, 'packed: root file at z=0');
+  eq(r2(wz('src/index.js')), r2(-1 * dz), 'packed: depth-1 file at −1×depthZ');
+  eq(r2(wz('src/util/log.js')), r2(-2 * dz), 'packed: depth-2 file at −2×depthZ');
+  eq(r2(wz('src/util/deep/a/b/c/leaf.txt')), r2(-6 * dz), 'packed: depth-6 file at −6×depthZ');
+}
+
+// 20. packed containment + sibling non-overlap: child blocks stay inside the parent
+//     footprint; a node's file block and child blocks never collide in XY.
+{
+  const t = buildPacked(PATHS);
+  const eps = 0.01;
+  const inside = (c, p) => c.x0 >= p.x0 - eps && c.x1 <= p.x1 + eps && c.y0 >= p.y0 - eps && c.y1 <= p.y1 + eps;
+  const checkNode = (node) => {
+    const dirs = node.children.filter((c) => c.userData.isDir && c.userData.size.x > 0);
+    for (const child of dirs) {
+      ok(inside(plotRect(child), plotRect(node)), `packed: ${child.userData.path} block inside ${node.userData.path || '(root)'}`);
+      checkNode(child);
+    }
+    // dir blocks don't collide with each other (files are at a different z anyway,
+    // but blocks share the parent's sheet).
+    for (let i = 0; i < dirs.length; i++) for (let j = i + 1; j < dirs.length; j++) {
+      const a = plotRect(dirs[i]), b = plotRect(dirs[j]);
+      ok(!(a.x0 < b.x1 - eps && b.x0 < a.x1 - eps && a.y0 < b.y1 - eps && b.y0 < a.y1 - eps),
+        `packed: sibling blocks ${dirs[i].userData.path} / ${dirs[j].userData.path} don't overlap`);
+    }
+  };
+  checkNode(t.root);
+}
+
+// 21. packed file packing: siblings in one dir don't overlap (height-sorted shelves).
+{
+  const t = buildPacked(PATHS);
+  const box = (p) => { const g = t._leaves.get(p); const v = new THREE.Vector3(); g.getWorldPosition(v); const s = g.userData.size; return { x0: v.x - s.x / 2, x1: v.x + s.x / 2, y0: v.y - s.y / 2, y1: v.y + s.y / 2 }; };
+  const a = box('src/components/Button.jsx'), b = box('src/components/Modal.jsx');
+  ok(!(a.x0 < b.x1 - 0.01 && b.x0 < a.x1 - 0.01 && a.y0 < b.y1 - 0.01 && b.y0 < a.y1 - 0.01),
+    'packed: sibling files shelf-pack without overlap');
+}
+
+// 21b. packed reads like a tree: a node's OWN files sit ABOVE its child-dir blocks
+//      (root files at the visual top; depth cascades down/backward).
+{
+  const t = buildPacked(PATHS);
+  const v = new THREE.Vector3();
+  const rootFileBottoms = [...t._leaves.entries()]
+    .filter(([p]) => !p.includes('/'))
+    .map(([, leaf]) => { leaf.getWorldPosition(v); return v.y - leaf.userData.size.y / 2; });
+  const depth1Tops = t.root.children
+    .filter((c) => c.userData.isDir && c.userData.size.x > 0)
+    .map((d) => { d.getWorldPosition(v); return v.y; });   // dir origin = footprint TOP-center
+  ok(Math.min(...rootFileBottoms) >= Math.max(...depth1Tops) - 0.01,
+    'packed: root files sit above every depth-1 dir block');
+}
+
+// 22. packed order independence (the height-sort is stable, so this must hold).
+{
+  const fwd = buildPacked(PATHS, PATHS);
+  const rev = buildPacked(PATHS, [...PATHS].reverse());
+  eq(snapshot(fwd), snapshot(rev), 'packed tree identical regardless of insert order');
+}
+
+// 23. three-way scheme switching is lossless (walk → district → packed → walk …).
+{
+  const t = build(PATHS);                  // default walk
+  const walkSnap = snapshot(t);
+  t.setLayout(packedLayout); t.relayout();
+  const packedSnap = snapshot(t);
+  ok(JSON.stringify(packedSnap) !== JSON.stringify(walkSnap), 'packed and walk are genuinely different layouts');
+  t.setLayout(districtLayout); t.relayout();
+  t.setLayout(packedLayout); t.relayout();
+  eq(snapshot(t), packedSnap, 'returning to packed reproduces the packed layout exactly');
+  t.setLayout(walkTreeLayout); t.relayout();
+  eq(snapshot(t), walkSnap, 'returning to walk reproduces the walk layout exactly');
+}
+
+// ───────────────────────── bounding prisms ─────────────────────────
+
+// Content-only snapshot: leaf + dir world positions, ignoring marker meshes.
+const contentSnapshot = (tree) => {
+  const out = {};
+  const v = new THREE.Vector3();
+  for (const [p, leaf] of tree._leaves) { leaf.getWorldPosition(v); out[p] = { x: r2(v.x), y: r2(v.y), z: r2(v.z) }; }
+  for (const [p, node] of tree._dirs) { if (!p) continue; node.getWorldPosition(v); out[`dir:${p}`] = { x: r2(v.x), y: r2(v.y), z: r2(v.z) }; }
+  return out;
+};
+
+// 24. markers do NOT perturb layout — the scheme must ignore marker children entirely.
+{
+  const plain = buildPacked(PATHS);
+  const marked = buildPacked(PATHS);
+  const markers = new ContentTreeMarkers(marked);
+  marked.relayout();   // relayout WITH prisms parented inside the dir nodes
+  eq(contentSnapshot(marked), contentSnapshot(plain), 'layout identical with and without markers');
+  ok(markers._prisms.size > 0, 'markers actually built prisms for that test to mean anything');
+}
+
+// 25. every non-empty dir gets a prism, parented INTO its node; the root gets none.
+{
+  const t = buildPacked(PATHS);
+  const markers = new ContentTreeMarkers(t);
+  for (const dir of ['src', 'src/util', 'src/util/deep/a/b/c', 'b', 'bc']) {
+    const prism = markers._prisms.get(dir);
+    ok(prism && prism.mesh.parent === t.getNode(dir), `prism exists and is parented in ${dir}`);
+  }
+  ok(![...t.root.children].some((c) => c.userData.isMarker), 'no prism directly on the root');
+}
+
+// 26. containment: each prism's world box encloses every leaf in its subtree.
+{
+  const t = buildPacked(PATHS);
+  const markers = new ContentTreeMarkers(t);
+  t.root.updateMatrixWorld(true);
+  const eps = 0.01;
+  for (const [dir, { mesh }] of markers._prisms) {
+    const c = new THREE.Vector3(); mesh.getWorldPosition(c);
+    const s = mesh.scale; // unit box scaled, unrotated → world box = center ± scale/2
+    const pb = { x0: c.x - s.x / 2, x1: c.x + s.x / 2, y0: c.y - s.y / 2, y1: c.y + s.y / 2, z0: c.z - s.z / 2, z1: c.z + s.z / 2 };
+    for (const [p, leaf] of t._leaves) {
+      if (p !== dir && !p.startsWith(dir + '/')) continue;
+      const v = new THREE.Vector3(); leaf.getWorldPosition(v);
+      const sz = leaf.userData.size;
+      ok(v.x - sz.x / 2 >= pb.x0 - eps && v.x + sz.x / 2 <= pb.x1 + eps
+        && v.y - sz.y / 2 >= pb.y0 - eps && v.y + sz.y / 2 <= pb.y1 + eps
+        && v.z >= pb.z0 - eps && v.z <= pb.z1 + eps,
+        `prism ${dir} encloses ${p}`);
+    }
+  }
+}
+
+// 27. depth gradient: shallow and deep prisms get different colors; same-depth match.
+{
+  const t = buildPacked(PATHS);
+  const markers = new ContentTreeMarkers(t);
+  const hex = (d) => markers._prisms.get(d).mesh.material.color.getHexString();
+  ok(hex('src') !== hex('src/util/deep/a/b/c'), 'gradient: depth-1 and depth-6 colors differ');
+  eq(hex('b'), hex('bc'), 'gradient: same-depth dirs share a color');
+}
+
+// 28. removal + prune still works with prisms attached (markers are not content),
+//     and the pruned dir's prism is dropped + the survivors stay correct.
+{
+  const t = buildPacked(['keep/a.js', 'x/y/z/deep.js']);
+  const markers = new ContentTreeMarkers(t);
+  ok(markers._prisms.has('x/y/z'), 'prism existed on the doomed chain');
+  t.remove('x/y/z/deep.js', { prune: true });
+  t.relayout();
+  ok(t.getNode('x') === null, 'prune drops the empty chain despite prism children');
+  ok(!markers._prisms.has('x/y/z') && !markers._prisms.has('x'), 'pruned dirs lost their prisms');
+  ok(markers._prisms.has('keep'), 'surviving dir keeps its prism');
+}
+
+// 29. disabled markers hide; re-enabling rebuilds against the CURRENT layout.
+{
+  const t = buildPacked(PATHS);
+  const markers = new ContentTreeMarkers(t);
+  markers.setEnabled(false);
+  ok([...markers._prisms.values()].every((p) => !p.mesh.visible), 'off → all prisms hidden');
+  t.insert(makeLeaf('src/new.js'), 'src/new.js'); t.relayout();
+  markers.setEnabled(true);
+  ok([...markers._prisms.values()].every((p) => p.mesh.visible), 'on → prisms visible again');
 }
 
 console.log(`\ncontenttree: ${pass} passed, ${fail} failed`);

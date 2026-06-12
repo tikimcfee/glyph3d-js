@@ -28,7 +28,7 @@
  */
 
 import * as THREE from 'three';
-import walkTreeLayout from './layouts/walkTreeLayout.js';
+import packedLayout from './layouts/packedLayout.js';
 
 /** Normalize a path: trim, drop leading/trailing/duplicate slashes → clean segments. */
 function splitPath(path) {
@@ -43,11 +43,11 @@ export default class ContentTree {
     /**
      * @param {object} [opts]
      * @param {(root:THREE.Object3D, opts:object)=>{w:number,h:number}} [opts.layout] layout scheme
-     *        (default: the walk-tree). Measures + places a subtree's children in their local frame.
+     *        (default: packed). Measures + places a subtree's children in their local frame.
      * @param {object} [opts.layoutOpts] options forwarded to the layout scheme.
      */
     constructor(opts = {}) {
-        this.layout = opts.layout || walkTreeLayout;
+        this.layout = opts.layout || packedLayout;
         this.layoutOpts = opts.layoutOpts || {};
 
         this.root = new THREE.Group();
@@ -60,6 +60,15 @@ export default class ContentTree {
         // Leaf grids by full file path.
         this._leaves = new Map();
         this._dirty = true;
+        // Fired after every full (root) relayout — markers and other tree-decorating
+        // systems rebuild from here, so they can never observe a stale layout.
+        this._onRelayout = new Set();
+    }
+
+    /** Subscribe to full-tree relayouts. Returns an unsubscribe function. */
+    onRelayout(cb) {
+        this._onRelayout.add(cb);
+        return () => this._onRelayout.delete(cb);
     }
 
     /** The dir node for a directory path ('' → root), or null if it doesn't exist. */
@@ -136,10 +145,13 @@ export default class ContentTree {
         return leaf;
     }
 
-    /** Drop empty dir nodes from `node` upward, stopping at the first non-empty (or root). */
+    /** Drop empty dir nodes from `node` upward, stopping at the first non-empty (or root).
+     *  Markers (bounding prisms etc.) are decorations, not content — a dir holding only
+     *  markers is empty and prunes; its markers go with it. */
     _pruneEmptyUp(node) {
+        const isEmpty = (n) => n.children.every((c) => c.userData?.isMarker);
         let cur = node;
-        while (cur && cur !== this.root && cur.children.length === 0) {
+        while (cur && cur !== this.root && isEmpty(cur)) {
             const parent = cur.parent;
             parent?.remove(cur);
             this._dirs.delete(cur.userData.path);
@@ -163,6 +175,18 @@ export default class ContentTree {
     // ============ layout ============
 
     /**
+     * Swap the layout scheme (and optionally its opts). Marks the tree dirty but does
+     * NOT relayout — callers follow with relayoutAndRest() so the switch and the
+     * re-lay stay one explicit flow (the layout.scheme verb is the canonical caller).
+     */
+    setLayout(layout, layoutOpts) {
+        this.layout = layout;
+        if (layoutOpts !== undefined) this.layoutOpts = layoutOpts;
+        this._dirty = true;
+        return this;
+    }
+
+    /**
      * Lay out `node` and its subtree via the layout scheme (default: the walk-tree). The
      * scheme measures bottom-up and places each node's children in its own local frame, so a
      * node's transform carries its subtree. Default `node` = root (full pass).
@@ -170,7 +194,10 @@ export default class ContentTree {
      */
     relayout(node = this.root) {
         const size = this.layout(node, this.layoutOpts);
-        if (node === this.root) this._dirty = false;
+        if (node === this.root) {
+            this._dirty = false;
+            for (const cb of this._onRelayout) cb(this);
+        }
         return size;
     }
 

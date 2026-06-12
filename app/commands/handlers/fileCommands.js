@@ -34,11 +34,7 @@
  * round3-hud-convergence.md §"File: fileCommands.js" / round1-hud E4).
  */
 
-import { resolveGridByIdOrIndex } from './spatialHelpers.js';
-// The world floor (a fixed constant): content rests above it. The ground plane
-// (SceneEnvironment) is drawn at this same Y. The world is a paused physics scene —
-// a regular world with a floor and a down; loaded content sits on the floor.
-const WORLD_FLOOR_Y = 0;
+import { resolveGridByIdOrIndex, WORLD_FLOOR_Y } from './spatialHelpers.js';
 import CodeGrid from '@glyph3d/core/collections/CodeGrid.js';
 import { unreadableReason, READABLE_MAX_CHARS, READABLE_MAX_LINE_CHARS } from '@glyph3d/core';
 

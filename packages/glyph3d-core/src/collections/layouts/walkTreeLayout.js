@@ -15,35 +15,14 @@
  * (a grid's local content Box3) when present, else a centered box from userData.size (mocks).
  */
 
-import * as THREE from 'three';
 import { flowBoxes, squareWrap } from './flowBoxes.js';
+import { leafBox, partitionChildren } from './nodeUtils.js';
 
 export const WALK_DEFAULTS = { margin: 16, gap: 60, zStep: 170, yStep: 70, minW: 50, minH: 30 };
 
-/** Directories first, then case-insensitive name — the deterministic sibling order. */
-function childSort(a, b) {
-    const ad = !!a.userData.isDir, bd = !!b.userData.isDir;
-    if (ad !== bd) return ad ? -1 : 1;
-    return String(a.userData.name).localeCompare(String(b.userData.name), undefined, { sensitivity: 'base' });
-}
-
-/** A leaf's LOCAL content box (frame-independent). Real grid → layoutBounds(); mock → a box
- *  centered on the origin from userData.size, so placement and getWorldBounds stay consistent. */
-function leafBox(leaf) {
-    if (typeof leaf.layoutBounds === 'function') {
-        const b = leaf.layoutBounds();
-        if (b && !b.isEmpty()) return b;
-    }
-    const s = (leaf.userData && leaf.userData.size) || { x: 1, y: 1, z: 1 };
-    const hx = s.x / 2, hy = s.y / 2, hz = (s.z || 0) / 2;
-    return new THREE.Box3(new THREE.Vector3(-hx, -hy, -hz), new THREE.Vector3(hx, hy, hz));
-}
-
 /** Post-order: cache each node's packed footprint + measured size. Returns {w,h}. */
 function measure(node, opts) {
-    node.children.sort(childSort);                 // deterministic order (in the scene graph too)
-    const files = node.children.filter((c) => !c.userData.isDir);
-    const dirs = node.children.filter((c) => c.userData.isDir);
+    const { files, dirs } = partitionChildren(node);   // deterministic order; markers excluded
 
     const fileBoxes = files.map(leafBox);
     const fSizes = fileBoxes.map((b) => ({ w: b.max.x - b.min.x, h: b.max.y - b.min.y }));

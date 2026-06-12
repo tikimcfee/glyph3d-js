@@ -12,6 +12,11 @@
 import * as THREE from 'three';
 import { zDistanceForFit, easeInOutCubic } from '@glyph3d/core/services/spatial/spatialMath.js';
 
+// The world floor (a fixed constant): content rests above it. The ground plane
+// (SceneEnvironment) is drawn at this same Y. The world is a paused physics scene —
+// a regular world with a floor and a down; loaded content sits on the floor.
+export const WORLD_FLOOR_Y = 0;
+
 // ──────────────────────────────────────────────────────────────
 //  Grid Resolution
 // ──────────────────────────────────────────────────────────────
