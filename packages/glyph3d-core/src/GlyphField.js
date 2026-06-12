@@ -461,6 +461,105 @@ function _makePlaceholderRGBATexture() {
     return tex;
 }
 
+// ─── Shared field material ────────────────────────────────────────────────────
+// Three's WebGPU renderer keys its shader cache by NODE INSTANCE identity
+// (Node.customCacheKey() → node.id), so a material per field means every grid pays
+// a full TSL graph analysis + WGSL build — ~8ms each, seconds on a repo load.
+// Instead ONE material per kind (glyph / occluder) is shared by every field. All
+// per-field state — group/highlight/slug textures, clip window, emoji atlas —
+// resolves PER OBJECT at draw: the mesh carries its field on userData.glyphField
+// and these nodes read it in onObjectUpdate callbacks. Bindings are cloned per
+// render object (NodeBuilderState.createBindings), so two grids bind different
+// textures under the same material; the placeholder initial values fix the WGSL
+// sample types (float/uint/filterable), which every real texture matches.
+
+const _sharedFieldMaterials = new Map(); // 'glyph' | 'occluder' → MeshBasicNodeMaterial
+
+/** 1×1 RGBA float placeholder matching the group DataTexture's sample type. */
+function _makePlaceholderFloatTexture() {
+    const tex = new THREE.DataTexture(
+        new Float32Array(4), 1, 1,
+        THREE.RGBAFormat, THREE.FloatType
+    );
+    tex.minFilter       = THREE.NearestFilter;
+    tex.magFilter       = THREE.NearestFilter;
+    tex.generateMipmaps = false;
+    tex.needsUpdate     = true;
+    return tex;
+}
+
+/** Texture node whose value resolves per rendered object from its field. */
+function _fieldTexture(placeholder, prop) {
+    return texture(placeholder).onObjectUpdate(({ object }, self) => {
+        const f = object && object.userData && object.userData.glyphField;
+        return (f && f[prop]) || self.value;
+    });
+}
+
+/** Uniform node whose value resolves per rendered object from its field. */
+function _fieldUniform(initial, read) {
+    return uniform(initial).onObjectUpdate(({ object }, self) => {
+        const f = object && object.userData && object.userData.glyphField;
+        return f ? read(f) : self.value;
+    });
+}
+
+/** The one material all fields of a kind share — built (and TSL-compiled) once. */
+function _getSharedFieldMaterial(kind) {
+    let material = _sharedFieldMaterials.get(kind);
+    if (material) return material;
+
+    const groupTexNode     = _fieldTexture(_makePlaceholderFloatTexture(), '_groupTexture');
+    const groupTexHNode    = _fieldUniform(1, (f) => f._maxGroups);
+    const highlightTexNode = _fieldTexture(_makePlaceholderRGBATexture(), '_highlightTexture');
+    const curveTexNode     = _fieldTexture(_makePlaceholderUintTexture(), '_curveTexture');
+    const glyphMapTexNode  = _fieldTexture(_makePlaceholderUintTexture(), '_glyphMapTexture');
+    const glyphMapWNode    = _fieldUniform(1, (f) => f._glyphMapWidth);
+    const clipEnabledNode  = _fieldUniform(0, (f) => f._clipEnabledVal);
+    const clipTopNode      = _fieldUniform(0, (f) => f._clipTopVal);
+    const clipBottomNode   = _fieldUniform(0, (f) => f._clipBottomVal);
+    const emojiTexNode     = _fieldTexture(_makePlaceholderRGBATexture(), '_emojiTexture');
+    const emojiColsNode    = _fieldUniform(16, (f) => f._emojiCols);
+
+    const { vertexFn, vColor, vGroupAlpha, vAddedColor, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell } =
+        _buildVertexNode({
+            groupTex:       groupTexNode,
+            groupTexHeight: groupTexHNode,
+            highlightTex:   highlightTexNode,
+            glyphMapTex:    glyphMapTexNode,
+            glyphMapWidth:  glyphMapWNode,
+            clipEnabled:    clipEnabledNode,
+            clipTop:        clipTopNode,
+            clipBottom:     clipBottomNode,
+        });
+
+    const outputNode = kind === 'occluder'
+        ? _buildOccluderOutputNode({ vColor, vGroupAlpha, vCurveCount })
+        : _buildOutputNode(
+            { vColor, vGroupAlpha, vAddedColor, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell },
+            { curveTex: curveTexNode, emojiTex: emojiTexNode, emojiCols: emojiColsNode }
+        );
+
+    material = new MeshBasicNodeMaterial();
+    material.vertexNode  = vertexFn();
+    material.outputNode  = outputNode;
+    material.side        = THREE.DoubleSide;
+    if (kind === 'occluder') {
+        // Opaque + depth-writing → Three renders these grids front-to-back, so the
+        // GPU's early-Z occludes hidden towers (the discard-free occluder node keeps
+        // early-Z enabled). This collapses deep-skyline overdraw to ~one layer.
+        material.transparent = false;
+        material.depthWrite  = true;
+        material.depthTest   = true;
+    } else {
+        material.transparent = true;
+        material.depthWrite  = true;
+    }
+
+    _sharedFieldMaterials.set(kind, material);
+    return material;
+}
+
 // ─── GlyphField ───────────────────────────────────────────────────────────────
 
 export default class GlyphField {
@@ -534,14 +633,14 @@ export default class GlyphField {
         this._batchDirty = false;
 
         // TSL uniform nodes — stored for hot-swap (setGroupOffset, _ensureHighlightTexture, etc.)
-        this._groupTexUniform    = null;
-        this._groupTexHUniform   = null;
-        this._highlightUniform   = null;
-        this._curveTexUniform    = null;
-        this._glyphMapTexUniform = null;
-        this._glyphMapWUniform   = null;
-        this._emojiTexUniform    = null;
-        this._emojiColsUniform   = null;
+        // Per-field shader state, resolved PER OBJECT by the shared material (the
+        // mesh's userData.glyphField points back here; the material's nodes read
+        // these fields in onObjectUpdate callbacks — no per-field uniform nodes).
+        this._clipEnabledVal = 0;
+        this._clipTopVal     = 0;
+        this._clipBottomVal  = 0;
+        this._emojiTexture   = null;
+        this._emojiCols      = 16;
 
         // Slug curve + glyph-map textures (resolved in _ensureSlugTextures)
         this._curveTexture    = null;
@@ -609,11 +708,7 @@ export default class GlyphField {
 
         this._highlightTexture = tex;
         this._highlightSize    = count;
-
-        // Update TSL uniform node value so the shader sees the new texture
-        if (this._highlightUniform) {
-            this._highlightUniform.value = tex;
-        }
+        // The shared material reads _highlightTexture per object — no node to poke.
     }
 
     // ── Instance mesh ─────────────────────────────────────────────────────────
@@ -650,84 +745,19 @@ export default class GlyphField {
         geometry._maxInstanceCount = maxCount;
         geometry.instanceCount = 0;
 
-        // ── Build TSL NodeMaterial ────────────────────────────────────────────
-        // texture() creates a TextureNode — use .value for hot-swap, NOT uniform()
-        const groupTexNode     = texture(this._groupTexture);
-        const groupTexHNode    = uniform(float(this._maxGroups));
-        const highlightTexNode = texture(this._highlightTexture);
-
-        // Slug curve + glyph-map textures (real data or 1×1 placeholders until
-        // setSlugData arrives). texelFetch'd via textureLoad in the shader.
+        // ── Material: the SHARED field material (one TSL build for all fields). All
+        // per-field shader state lives on `this` and resolves per object at draw via
+        // mesh.userData.glyphField (see _getSharedFieldMaterial above).
         this._ensureSlugTextures();
-        const curveTexNode    = texture(this._curveTexture);
-        const glyphMapTexNode = texture(this._glyphMapTexture);
-        const glyphMapWNode   = uniform(float(this._glyphMapWidth));
-
-        // Frame clip (Step 3c.2): cull instances whose grid-local anchor y is outside the
-        // window. clipEnabled 0 = no clip (default); driven by setClipYRange().
-        const clipEnabledNode = uniform(float(0));
-        const clipTopNode     = uniform(float(0));
-        const clipBottomNode  = uniform(float(0));
-
-        // Emoji atlas texture + cols uniform. Falls back to a 1×1 filterable RGBA
-        // placeholder so the NodeMaterial compiles before any emoji atlas exists.
         const emojiAtlas = this.atlas && this.atlas._emojiAtlas;
-        const emojiTexture = emojiAtlas ? emojiAtlas.getTexture(THREE) : _makePlaceholderRGBATexture();
-        const emojiCols    = emojiAtlas ? emojiAtlas.cols : 16;
-        const emojiTexNode  = texture(emojiTexture);
-        const emojiColsNode = uniform(float(emojiCols));
+        this._emojiTexture = emojiAtlas ? emojiAtlas.getTexture(THREE) : null;
+        this._emojiCols    = emojiAtlas ? emojiAtlas.cols : 16;
 
-        // Store for hot-swap (.value = newTexture)
-        this._groupTexUniform     = groupTexNode;
-        this._groupTexHUniform    = groupTexHNode;
-        this._highlightUniform    = highlightTexNode;
-        this._curveTexUniform     = curveTexNode;
-        this._glyphMapTexUniform  = glyphMapTexNode;
-        this._glyphMapWUniform    = glyphMapWNode;
-        this._clipEnabledUniform  = clipEnabledNode;
-        this._clipTopUniform      = clipTopNode;
-        this._clipBottomUniform   = clipBottomNode;
-        this._emojiTexUniform     = emojiTexNode;
-        this._emojiColsUniform    = emojiColsNode;
-
-        const { vertexFn, vColor, vGroupAlpha, vAddedColor, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell } =
-            _buildVertexNode({
-                groupTex:       groupTexNode,
-                groupTexHeight: groupTexHNode,
-                highlightTex:   highlightTexNode,
-                glyphMapTex:    glyphMapTexNode,
-                glyphMapWidth:  glyphMapWNode,
-                clipEnabled:    clipEnabledNode,
-                clipTop:        clipTopNode,
-                clipBottom:     clipBottomNode,
-            });
-
-        const outputNode = this._occluder
-            ? _buildOccluderOutputNode({ vColor, vGroupAlpha, vCurveCount })
-            : _buildOutputNode(
-                { vColor, vGroupAlpha, vAddedColor, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell },
-                { curveTex: curveTexNode, emojiTex: emojiTexNode, emojiCols: emojiColsNode }
-            );
-
-        const material = new MeshBasicNodeMaterial();
-        material.vertexNode  = vertexFn();
-        material.outputNode  = outputNode;
-        material.side        = THREE.DoubleSide;
-        if (this._occluder) {
-            // Opaque + depth-writing → Three renders these grids front-to-back, so the
-            // GPU's early-Z occludes hidden towers (the discard-free occluder node keeps
-            // early-Z enabled). This collapses deep-skyline overdraw to ~one layer.
-            material.transparent = false;
-            material.depthWrite  = true;
-            material.depthTest   = true;
-        } else {
-            material.transparent = true;
-            material.depthWrite  = true;
-        }
-
+        const material = _getSharedFieldMaterial(this._occluder ? 'occluder' : 'glyph');
         this._material = material;
 
         const mesh = new THREE.Mesh(geometry, material);
+        mesh.userData.glyphField = this;   // the shared material's per-object state hook
         mesh.frustumCulled = false;
         return mesh;
     }
@@ -743,11 +773,9 @@ export default class GlyphField {
     setSlugData(slugData, shaper) {
         if (shaper) this._shaper = shaper;
         this._slugData = slugData;
+        // The shared material reads _curveTexture/_glyphMapTexture/_glyphMapWidth
+        // per object — resolving them here is the whole hot-swap.
         this._ensureSlugTextures();
-        // Hot-swap the live shader texture nodes to the real curve/glyph-map data.
-        if (this._curveTexUniform)    this._curveTexUniform.value    = this._curveTexture;
-        if (this._glyphMapTexUniform) this._glyphMapTexUniform.value = this._glyphMapTexture;
-        if (this._glyphMapWUniform)   this._glyphMapWUniform.value   = this._glyphMapWidth;
     }
 
     /**
@@ -756,12 +784,12 @@ export default class GlyphField {
      * Safe to call before the emoji atlas exists — no-op in that case.
      */
     setEmojiTexture() {
-        if (!this._emojiTexUniform || !this.atlas || !this.atlas._emojiAtlas) return;
+        if (!this.atlas || !this.atlas._emojiAtlas) return;
         const tex = this.atlas._emojiAtlas.getTexture(THREE);
         if (tex) {
             tex.needsUpdate = true;
-            this._emojiTexUniform.value  = tex;
-            this._emojiColsUniform.value = this.atlas._emojiAtlas.cols;
+            this._emojiTexture = tex;
+            this._emojiCols   = this.atlas._emojiAtlas.cols;
         }
     }
 
@@ -773,12 +801,11 @@ export default class GlyphField {
      * @param {number|null} bottom
      */
     setClipYRange(top, bottom) {
-        if (!this._clipEnabledUniform) return;
         const on = Number.isFinite(top) && Number.isFinite(bottom);
-        this._clipEnabledUniform.value = on ? 1 : 0;
+        this._clipEnabledVal = on ? 1 : 0;
         if (on) {
-            this._clipTopUniform.value    = top;
-            this._clipBottomUniform.value = bottom;
+            this._clipTopVal    = top;
+            this._clipBottomVal = bottom;
         }
     }
 
@@ -1057,10 +1084,9 @@ export default class GlyphField {
         this._syncGroupTexture();
     }
 
-    /** @private — mark group DataTexture dirty and update the TSL uniform node */
+    /** @private — mark group DataTexture dirty (the shared material reads it per object) */
     _syncGroupTexture() {
         this._groupTexture.needsUpdate = true;
-        if (this._groupTexUniform) this._groupTexUniform.value = this._groupTexture;
     }
 
     /** @private */
@@ -1085,8 +1111,7 @@ export default class GlyphField {
         }
         if (this._groupTexture) this._groupTexture.dispose();
         this._groupTexture = this._createGroupTexture();
-        if (this._groupTexUniform)  this._groupTexUniform.value  = this._groupTexture;
-        if (this._groupTexHUniform) this._groupTexHUniform.value = float(this._maxGroups);
+        // The shared material reads _groupTexture/_maxGroups per object — nothing to poke.
     }
 
     // ── Picking seam ──────────────────────────────────────────────────────────
@@ -1234,7 +1259,7 @@ export default class GlyphField {
         if (this.instanceMesh) {
             this.scene.remove(this.instanceMesh);
             this.instanceMesh.geometry.dispose();
-            this.instanceMesh.material.dispose();
+            // material is the SHARED field material — never disposed per field.
         }
         if (this._groupTexture)    this._groupTexture.dispose();
         if (this._highlightTexture) this._highlightTexture.dispose();

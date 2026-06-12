@@ -290,6 +290,10 @@ export class PickingSystem {
         // Detect WebGPU renderer — ShaderMaterial doesn't work there.
         this._isWebGPU = threeRenderer.isWebGPURenderer === true;
 
+        // The shared WebGPU pick materials (one TSL build each, per-object IDs).
+        this._sharedGlyphPickMaterial = null;
+        this._sharedFlatPickMaterial  = null;
+
         // Eagerly start loading TSL if on WebGPU (async, resolves from module
         // cache when GlyphField has already been imported by the caller).
         this._tslReady = this._isWebGPU ? _loadTSL() : Promise.resolve();
@@ -425,16 +429,36 @@ export class PickingSystem {
     /**
      * WebGPU 'glyph' material: TSL NodeMaterial mirroring GlyphField's vertex
      * (instanced group-DataTexture worldPos), emitting ID = base + instanceIndex.
+     *
+     * SHARED across every registered field — one TSL build total (a build per mesh
+     * made the FIRST pick pass pay ~269 graph builds at once). Per-mesh state
+     * resolves per object: the field rides mesh.userData.glyphField (set by
+     * GlyphField) and the ID-block start rides mesh.userData.pickStartId (set by
+     * register; one value per mesh — a mesh registered in two channels would
+     * collide, which the channel design never does).
      * @private
      */
-    _createTSLGlyphMaterial(glyphRenderer, startId) {
+    _getTSLGlyphMaterial() {
+        if (this._sharedGlyphPickMaterial) return this._sharedGlyphPickMaterial;
+
         const iPos   = _attribute('instancePosition', 'vec3');
         const iSize  = _attribute('instanceSize',     'vec2');
         const iGroup = _attribute('instanceGroupId',  'float');
 
-        const groupTex       = _texture(glyphRenderer._groupTexture);
-        const groupTexHeight = _uniform(glyphRenderer._maxGroups);
-        const baseId         = _uniform(startId);
+        // 1×1 float placeholder fixes the sample type; real group textures match.
+        const placeholder = new THREE.DataTexture(
+            new Float32Array(4), 1, 1, THREE.RGBAFormat, THREE.FloatType);
+        placeholder.minFilter = THREE.NearestFilter;
+        placeholder.magFilter = THREE.NearestFilter;
+        placeholder.generateMipmaps = false;
+        placeholder.needsUpdate = true;
+
+        const groupTex = _texture(placeholder).onObjectUpdate(({ object }, self) =>
+            (object && object.userData.glyphField && object.userData.glyphField._groupTexture) || self.value);
+        const groupTexHeight = _uniform(1).onObjectUpdate(({ object }, self) =>
+            (object && object.userData.glyphField) ? object.userData.glyphField._maxGroups : self.value);
+        const baseId = _uniform(0).onObjectUpdate(({ object }, self) =>
+            (object && object.userData.pickStartId != null) ? object.userData.pickStartId : self.value);
 
         const vertexFn = _Fn(() => {
             const scaled      = _positionLocal.mul(_vec3(iSize, _float(1)));
@@ -459,7 +483,8 @@ export class PickingSystem {
         });
 
         const fragmentFn = _Fn(() => {
-            const id = baseId.add(_int(_instanceIndex));
+            // int-cast the (float) per-object uniform so the bit ops stay exact.
+            const id = _int(baseId).add(_int(_instanceIndex));
             const r  = id.shiftRight(16).bitAnd(0xFF);
             const g  = id.shiftRight(8).bitAnd(0xFF);
             const b  = id.bitAnd(0xFF);
@@ -475,8 +500,8 @@ export class PickingSystem {
         // Off, a FARTHER overlapping glyph would overwrite a nearer one's ID
         // pixel — picking the wrong (back) grid.
         mat.depthWrite = true;
-        mat._groupTexUniform  = groupTex;   // bookkeeping for group-texture hot-swap
-        mat._groupTexHUniform = groupTexHeight;
+
+        this._sharedGlyphPickMaterial = mat;
         return mat;
     }
 
@@ -484,20 +509,28 @@ export class PickingSystem {
      * WebGPU 'flat' material: a plain mesh (grid panel / button) projected
      * normally, every fragment emitting one constant ID. The default NodeMaterial
      * vertex handles projection from the mesh's own world matrix.
+     *
+     * SHARED across every flat pickable — the ID rides mesh.userData.pickStartId.
      * @private
      */
-    _createTSLFlatMaterial(id) {
-        const baseId = _int(id);
+    _getTSLFlatMaterial() {
+        if (this._sharedFlatPickMaterial) return this._sharedFlatPickMaterial;
+
+        const baseId = _uniform(0).onObjectUpdate(({ object }, self) =>
+            (object && object.userData.pickStartId != null) ? object.userData.pickStartId : self.value);
         const fragmentFn = _Fn(() => {
-            const r = baseId.shiftRight(16).bitAnd(0xFF);
-            const g = baseId.shiftRight(8).bitAnd(0xFF);
-            const b = baseId.bitAnd(0xFF);
+            const id = _int(baseId);
+            const r = id.shiftRight(16).bitAnd(0xFF);
+            const g = id.shiftRight(8).bitAnd(0xFF);
+            const b = id.bitAnd(0xFF);
             return _vec4(_float(r).div(255.0), _float(g).div(255.0), _float(b).div(255.0), _float(1));
         });
         const mat = new _MeshBasicNodeMaterial();
         mat.outputNode = fragmentFn();
         mat.side = THREE.DoubleSide;
         mat.depthWrite = true; // nearest panel wins in an overlap (front grid)
+
+        this._sharedFlatPickMaterial = mat;
         return mat;
     }
 
@@ -601,9 +634,11 @@ export class PickingSystem {
             if (!_tslLoaded) {
                 throw new Error('[PickingSystem] TSL not loaded. Await pickingSystem._tslReady before register() on WebGPU.');
             }
+            // Shared pick materials read the ID block per object from here.
+            mesh.userData.pickStartId = startId;
             material = ch.kind === 'glyph'
-                ? this._createTSLGlyphMaterial(target, startId)
-                : this._createTSLFlatMaterial(startId);
+                ? this._getTSLGlyphMaterial()
+                : this._getTSLFlatMaterial();
         } else {
             material = ch.kind === 'glyph'
                 ? this._createGLSLGlyphMaterial(target, mesh, startId)
@@ -632,7 +667,9 @@ export class PickingSystem {
         if (idx === -1) return;
         const entry = ch.entries[idx];
         entry.mesh?.layers.disable(ch.layer);
-        entry.material.dispose();
+        // WebGPU pick materials are SHARED (never disposed per entry); the WebGL
+        // path still builds one per mesh.
+        if (!this._isWebGPU) entry.material.dispose();
         ch.entries.splice(idx, 1);
     }
 
