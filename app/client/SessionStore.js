@@ -139,7 +139,9 @@ export default class SessionStore {
     }
 
     const terminals = [];
+    const liveTerminals = new Set();
     for (const e of ctx.registry.findByType('terminal')) {
+      liveTerminals.add(e.id);
       // Docked → persist the home it returns to, not the tile-local coordinate.
       const p = (ctx.cameraDock?.has?.(e.id) && ctx.cameraDock.homePosition(e.id)) || e.grid.position;
       const entry = { id: e.id, x: round(p.x), y: round(p.y), z: round(p.z) };
@@ -149,6 +151,18 @@ export default class SessionStore {
         entry.rows = e.grid.rows;
       }
       terminals.push(entry);
+    }
+    // Carry forward terminals that haven't re-adopted yet — symmetric with the dock3d
+    // pending merge below. Re-adoption is async (the adapter only re-creates its grid once
+    // a liveness ping bounces, and not at all until `terminal.recover` after a relay restart
+    // that orphaned the tmux session), so a save landing in that gap would otherwise DROP a
+    // terminal's saved size+placement. That loss is permanent, not transient: the adapter
+    // always re-creates at its STARTUP cols/rows — never the size the browser last resized it
+    // to — so this file is the only record of the resized size. Drop it and the terminal
+    // ratchets back to the 80×24 default on the next restore (the _placePendingTerminals
+    // `grid.cols !== t.cols` guard then sees 80==80 and skips), and the size never returns.
+    for (const t of this.pendingTerminals) {
+      if (t?.id && !liveTerminals.has(t.id)) terminals.push({ ...t });
     }
 
     let dock = this._pendingDock; // if we never got a live dock bridge, preserve what we loaded
