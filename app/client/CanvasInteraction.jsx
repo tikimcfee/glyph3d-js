@@ -45,6 +45,15 @@ const HOVER_COLOR = 0x9fd2ff;  // light blue — hover
 const HOVER_FOCUS_BLEND = 0.5;
 const OUTLINE_FADE = 0.16;
 
+// A directory reads as a glowing REGION, not just an edge: when the focused entity
+// is a directory, its footprint fills with a faint, slowly breathing tint (the same
+// focus-state color) inside the edge box. A file is a panel — a crisp wireframe; a
+// directory is a volume — a soft lit area. Same color language, different body.
+const FILL_OPACITY_MIN = 0.05; // breathing low — barely-there wash
+const FILL_OPACITY_MAX = 0.14; // breathing high
+const FILL_BREATH_HZ = 0.24;   // breaths per second (~4s cycle) — calm, not blinky
+const FILL_INFLATE = 0.1;      // a little z-thickness so the flat footprint reads as a slab
+
 // Resize floors — a terminal smaller than this is useless (and a SIGWINCH to 0
 // rows confuses the shell). Drags clamp the prospective size to these.
 const MIN_COLS = 8;
@@ -682,6 +691,21 @@ export function SelectionIndicator() {
       scene.add(b);
       return b;
     };
+    // A translucent solid box (not edges) — the directory region glow. Same
+    // matrix-driven, frustum-free setup as the edge boxes; renderOrder just under
+    // the green edge so the outline still crowns it. depthWrite off so it never
+    // occludes glyphs; transparent so it sorts into the post-opaque pass.
+    const mkFill = (color, renderOrder) => {
+      const geo = new THREE.BoxGeometry(1, 1, 1);
+      const mat = new THREE.MeshBasicMaterial({ color: new THREE.Color(color), depthTest: true, depthWrite: false, transparent: true, opacity: 0, side: THREE.DoubleSide });
+      const m = new THREE.Mesh(geo, mat);
+      m.visible = false;
+      m.renderOrder = renderOrder;
+      m.matrixAutoUpdate = false;
+      m.frustumCulled = false;
+      scene.add(m);
+      return m;
+    };
     const t = tracked.current;
     t.am = client.ctx.attentionManager;
     t.registry = client.ctx.registry;
@@ -690,12 +714,13 @@ export function SelectionIndicator() {
     // box (fades toward blue) rather than drawing the hover box on top — no stack.
     t.primaryBox = mkBox(FOCUS_COLOR, 9999);  // green — focused; recolored amber when input-active, blue-tinted on hover
     t.hoverBox = mkBox(HOVER_COLOR, 10000);   // light blue — hover (follows the cursor)
+    t.primaryFill = mkFill(FOCUS_COLOR, 9998); // directory-only region glow, under the edge box
 
     return () => {
-      scene.remove(t.primaryBox); scene.remove(t.hoverBox);
-      t.primaryBox.geometry?.dispose?.(); t.hoverBox.geometry?.dispose?.();
-      t.primaryBox.material?.dispose?.(); t.hoverBox.material?.dispose?.();
-      t.primaryBox = t.hoverBox = t.am = t.registry = null;
+      scene.remove(t.primaryBox); scene.remove(t.hoverBox); scene.remove(t.primaryFill);
+      t.primaryBox.geometry?.dispose?.(); t.hoverBox.geometry?.dispose?.(); t.primaryFill.geometry?.dispose?.();
+      t.primaryBox.material?.dispose?.(); t.hoverBox.material?.dispose?.(); t.primaryFill.material?.dispose?.();
+      t.primaryBox = t.hoverBox = t.primaryFill = t.am = t.registry = null;
     };
   }, [client, scene]);
 
@@ -705,27 +730,42 @@ export function SelectionIndicator() {
   // restore) is picked up immediately, and a same-id re-selection that fires no
   // change event still tracks correctly. (2 boxes/frame: a Map get + an 8-corner
   // getBounds transform each — negligible.)
-  useFrame(() => {
+  useFrame((state) => {
     const t = tracked.current;
     if (!t.am || !t.registry) return;
     const gridFor = (slot) => {
       const id = t.am.get(slot)?.id;
       return id ? (t.registry.get(id)?.grid ?? null) : null;
     };
-    const fit = (box, grid, inflate) => {
+    const fit = (box, node, inflate) => {
       if (!box) return;
-      // LOCAL bounds + the grid's matrixWorld → an oriented box glued to the grid,
-      // whatever the grid's parent (scene, a ContentTree node, or the camera dock).
-      const lb = grid?.getLocalBounds?.();
-      if (!lb || lb.isEmpty()) { box.visible = false; return; }
-      grid.updateWorldMatrix(true, false);
-      lb.getCenter(_center);
-      lb.getSize(_size);
-      // unit cube → padded panel: scale to size (+ hover inflate), keep a sliver of z
-      // so a flat panel's outline still composes a valid (non-degenerate) matrix.
-      _size.set(_size.x + inflate * 2, _size.y + inflate * 2, Math.max(_size.z, 1e-3) + inflate * 2);
-      _off.compose(_center, _identQ, _size);
-      box.matrix.multiplyMatrices(grid.matrixWorld, _off);
+      // Two bounds sources, one unit cube. File grids expose LOCAL bounds → compose
+      // with grid.matrixWorld for an ORIENTED box glued to the grid whatever its
+      // parent (scene, a ContentTree node, the camera dock). Directory nodes expose
+      // only a world-space getBounds() footprint (axis-aligned in the tree plane) →
+      // drive the box matrix straight from that AABB, no parent transform.
+      const lb = node?.getLocalBounds?.();
+      const sizeForOutline = () => {
+        // unit cube → padded box: scale to size (+ inflate), keep a sliver of z so a
+        // flat panel/footprint still composes a valid (non-degenerate) matrix.
+        _size.set(_size.x + inflate * 2, _size.y + inflate * 2, Math.max(_size.z, 1e-3) + inflate * 2);
+        _off.compose(_center, _identQ, _size);
+      };
+      if (lb) {
+        if (lb.isEmpty()) { box.visible = false; return; }
+        node.updateWorldMatrix(true, false);
+        lb.getCenter(_center);
+        lb.getSize(_size);
+        sizeForOutline();
+        box.matrix.multiplyMatrices(node.matrixWorld, _off);
+      } else {
+        const wb = node?.getBounds?.();
+        if (!wb || wb.isEmpty()) { box.visible = false; return; }
+        wb.getCenter(_center);
+        wb.getSize(_size);
+        sizeForOutline();
+        box.matrix.copy(_off); // world-space AABB — the composed offset IS the world matrix
+      }
       box.matrixWorldNeedsUpdate = true;
       box.visible = true;
     };
@@ -734,7 +774,9 @@ export function SelectionIndicator() {
     // green when focused-but-inert. So "type here" reads the same in the HUD and in 3D.
     const primaryId = t.am.get('primary')?.id ?? null;
     const keyId = t.am.get('key')?.id ?? null;
-    const primaryGrid = primaryId ? (t.registry.get(primaryId)?.grid ?? null) : null;
+    const primaryEntry = primaryId ? t.registry.get(primaryId) : null;
+    const primaryGrid = primaryEntry?.grid ?? null;
+    const primaryIsDir = primaryEntry?.type === 'dir';
     const hoverGrid = gridFor('hover');
     const editing = typeof primaryGrid?.getCursor === 'function' && primaryGrid.getCursor() != null;
     const inputActive = !!primaryGrid && (editing || (!!keyId && keyId === primaryId));
@@ -752,6 +794,21 @@ export function SelectionIndicator() {
     fit(t.primaryBox, primaryGrid, 0);
     if (hoverOnFocus) t.hoverBox.visible = false;
     else fit(t.hoverBox, hoverGrid, HOVER_INFLATE);
+
+    // Directory region glow: when the focused entity is a directory, fill its
+    // footprint with a faint, slowly breathing tint inside the edge box (tracks the
+    // same state color). Files leave it hidden — they're panels, not regions. The
+    // breath rides r3f's clock (not wall time), so it pauses with the render loop.
+    if (t.primaryFill) {
+      if (primaryIsDir && primaryGrid) {
+        fit(t.primaryFill, primaryGrid, FILL_INFLATE);
+        t.primaryFill.material.color.copy(_targetColor);
+        const breath = 0.5 + 0.5 * Math.sin(state.clock.elapsedTime * FILL_BREATH_HZ * Math.PI * 2);
+        t.primaryFill.material.opacity = FILL_OPACITY_MIN + (FILL_OPACITY_MAX - FILL_OPACITY_MIN) * breath;
+      } else {
+        t.primaryFill.visible = false;
+      }
+    }
   });
 
   return null;
