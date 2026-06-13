@@ -29,6 +29,8 @@ import { detectVerticalScroll, captureScrolledRows, depthFade, reflowHistoryRows
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import MonospaceShapeCache from '../shaping/MonospaceShapeCache.js';
 
+const _cellStrideScale = new THREE.Vector3(); // scratch for cellStride's world-scale read
+
 export default class TerminalGrid extends THREE.Object3D {
     /**
      * @param {THREE.Scene} scene
@@ -868,15 +870,20 @@ export default class TerminalGrid extends THREE.Object3D {
     }
 
     /**
-     * World-unit cell stride (one column right, one row down), gridScale included.
-     * The resize dragger maps Δworld → Δcols/Δrows through this.
+     * World-unit cell stride (one column right, one row down) at the panel's LIVE world
+     * scale. The resize dragger maps Δworld → Δcols/Δrows through this, so it must be the
+     * on-screen cell size right now — NOT the construction-time _gridScale. When a tile is
+     * docked the dock shrinks it via this.scale (the Object3D), leaving _gridScale stale;
+     * reading the world scale (incl. any parent scaling) is what keeps the drag 1:1.
      * @returns {{ x: number, y: number }}
      */
     get cellStride() {
         const m = this._metrics;
+        this.updateWorldMatrix(true, false);
+        const s = this.getWorldScale(_cellStrideScale);
         return {
-            x: (m.charWidth + m.letterSpacing) * this._gridScale,
-            y: m.lineSpacing * this._gridScale,
+            x: (m.charWidth + m.letterSpacing) * s.x,
+            y: m.lineSpacing * s.y,
         };
     }
 

@@ -468,6 +468,15 @@ export function ObjectDragger() {
  * The grip renders depthTest-off (an always-on-top overlay), so "the grip you see
  * is the grip you grab" even when it sits over another terminal's panel.
  */
+// Scratch vectors for the resize-drag math — reused per pointermove (no allocation).
+const _rzFwd = new THREE.Vector3();
+const _rzRight = new THREE.Vector3();
+const _rzUp = new THREE.Vector3();
+const _rzCenter = new THREE.Vector3();
+const _rzDrag = new THREE.Vector3();
+const _rzGridRight = new THREE.Vector3();
+const _rzGridDown = new THREE.Vector3();
+
 export function ResizeDragger() {
   const { gl, camera } = useThree();
   const client = useAppCommands();
@@ -515,10 +524,14 @@ export function ResizeDragger() {
         grid, id,
         startCols: grid.cols, startRows: grid.rows,
         startBounds: grid.getBounds().clone(),
-        // Cellstride captured at the START: the screen→cell mapping stays anchored to
-        // the drag origin even as live re-grids (and a docked tile's rescale) change
-        // the panel's current stride — the grip tracks the cursor without drift.
+        // Captured at the START so the screen→cell mapping stays anchored to the drag
+        // origin even as live re-grids (and a docked tile's rescale) change things:
+        //  - startStride: the panel's LIVE world cell size (cellStride now reads world
+        //    scale, so a docked/shrunk tile maps 1:1, not at its un-docked size).
+        //  - startQuat: the panel's world orientation, to project the drag onto its OWN
+        //    right/down axes (a docked tile faces the camera at an arbitrary world angle).
         startStride: { x: grid.cellStride.x, y: grid.cellStride.y },
+        startQuat: grid.getWorldQuaternion(new THREE.Quaternion()),
         startX: e.clientX, startY: e.clientY,
         appliedCols: grid.cols, appliedRows: grid.rows,
       };
@@ -532,24 +545,27 @@ export function ResizeDragger() {
       if (!drag) return;
       const dx = e.clientX - drag.startX;
       const dy = e.clientY - drag.startY;
-      // Map the screen delta into the panel's fixed world axes through the camera's
-      // right/up basis (mirrors ObjectDragger) — so cols grow east / rows grow south
-      // correctly from ANY camera angle, not just head-on (the first-person mouselook
-      // can view a panel rotated; raw dx→cols/dy→rows would map to the wrong axis).
-      // Depth is probed at the panel CENTER (startBounds), not grid.position (the
-      // NW-ish cell origin), so a pixel of travel maps to the right cell count for
-      // large / close panels. cellStride is world-units/cell, gridScale included.
+      // Screen delta → a world-space drag vector at the panel's depth (camera right/up
+      // basis), THEN projected onto the panel's OWN right/down axes — so cols grow along
+      // the panel and rows down it, for ANY orientation: a head-on world grid, a docked
+      // tile facing the camera at an arbitrary world angle, or a tile tilted on the dome.
+      // (Dividing the drag's world X/Y components by the stride was the bug — that only
+      // matched an unrotated, head-on panel.) Depth is probed at the panel CENTER
+      // (startBounds) so a pixel of travel maps to the right cell count for large/close
+      // panels; startStride is the panel's LIVE world cell size (docked tiles included).
       const q = camera.quaternion;
-      const fwd   = new THREE.Vector3(0, 0, -1).applyQuaternion(q);
-      const right = new THREE.Vector3(1, 0, 0).applyQuaternion(q);
-      const up    = new THREE.Vector3(0, 1, 0).applyQuaternion(q);
-      const center = drag.startBounds.getCenter(new THREE.Vector3());
+      const fwd   = _rzFwd.set(0, 0, -1).applyQuaternion(q);
+      const right = _rzRight.set(1, 0, 0).applyQuaternion(q);
+      const up    = _rzUp.set(0, 1, 0).applyQuaternion(q);
+      const center = drag.startBounds.getCenter(_rzCenter);
       const depth = Math.max(1, center.sub(camera.position).dot(fwd));
       const pixelScale = (2 * depth * Math.tan((camera.fov * Math.PI / 180) / 2)) / dom.clientHeight;
-      const world = right.multiplyScalar(dx * pixelScale).add(up.multiplyScalar(-dy * pixelScale));
+      const dragVec = _rzDrag.copy(right).multiplyScalar(dx * pixelScale).addScaledVector(up, -dy * pixelScale);
+      const gridRight = _rzGridRight.set(1, 0, 0).applyQuaternion(drag.startQuat);   // panel +X (cols east)
+      const gridDown  = _rzGridDown.set(0, -1, 0).applyQuaternion(drag.startQuat);   // panel −Y (rows south)
       const stride = drag.startStride;
-      const newCols = Math.max(MIN_COLS, drag.startCols + Math.round(world.x / stride.x));
-      const newRows = Math.max(MIN_ROWS, drag.startRows + Math.round(-world.y / stride.y));
+      const newCols = Math.max(MIN_COLS, drag.startCols + Math.round(dragVec.dot(gridRight) / stride.x));
+      const newRows = Math.max(MIN_ROWS, drag.startRows + Math.round(dragVec.dot(gridDown) / stride.y));
       if (newCols === drag.appliedCols && newRows === drag.appliedRows) return; // same cell step → nothing to do
       drag.appliedCols = newCols; drag.appliedRows = newRows;
 
