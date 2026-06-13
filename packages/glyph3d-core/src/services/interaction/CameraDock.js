@@ -39,6 +39,8 @@ import * as THREE from 'three';
 import { SpatialAnimator } from '../spatial/SpatialAnimator.js';
 
 const _forward = new THREE.Vector3();
+const _up = new THREE.Vector3(0, 1, 0);
+const _off = new THREE.Vector3();
 
 /** Walk up the parent chain to confirm an object still reaches a live Scene. */
 function reachesScene(obj) {
@@ -282,17 +284,18 @@ export class CameraDock extends THREE.Object3D {
     // ===================== layout & tick =====================
 
     /** Animate one tile so its CENTER sits at (sx,sy,sz) at a uniform-height scale,
-     *  squared up to the bar. Origin = center − centerOffset·scale (grids are
-     *  top-anchored, so the origin is offset from the visual center). */
-    _animateTile(e, sx, sy, sz, scale) {
-        const target = {
-            x: sx - e.centerOffset.x * scale,
-            y: sy - e.centerOffset.y * scale,
-            z: sz - e.centerOffset.z * scale,
-        };
+     *  optionally yawed by `yaw` radians about up (to face the viewer on the arc).
+     *  Origin = center − R_yaw·(centerOffset·scale): grids are top-anchored, so the
+     *  origin is offset from the visual center, and that offset rotates with the yaw. */
+    _animateTile(e, sx, sy, sz, scale, yaw = 0) {
+        if (yaw) e.quatTarget.setFromAxisAngle(_up, yaw);
+        else e.quatTarget.identity(); // square up to the bar (which faces the camera)
+
+        _off.set(e.centerOffset.x * scale, e.centerOffset.y * scale, e.centerOffset.z * scale)
+            .applyQuaternion(e.quatTarget);
+        const target = { x: sx - _off.x, y: sy - _off.y, z: sz - _off.z };
         this.animator.animateTo(e.grid, 'position', target, { duration: 0.4 });
         this.animator.animateTo(e.grid, 'scale', scale, { duration: 0.4 });
-        e.quatTarget.identity(); // square up to the bar (which faces the camera)
     }
 
     /** Pack the bar tiles into a row and place the focused tile (if any) in the
@@ -310,33 +313,61 @@ export class CameraDock extends THREE.Object3D {
         // ---- bar row ----
         const n = bar.length;
         if (n > 0) {
-            // Per-tile scale (uniform height) and resulting world width (centerOffset.x
-            // is the half-width in window units, so width = 2·|cx|·scale).
-            const scales = bar.map((e) => tileH / e.naturalH);
-            const widths = bar.map((e, i) => Math.max(2 * Math.abs(e.centerOffset.x) * scales[i], tileH * 0.4));
-
-            // Slot CENTERS: pack left→right with a gap, centered on x=0. Radial bends
-            // the same packed centers onto a gentle downward arc.
+            // Per-tile scale (uniform height) and world width (centerOffset.x is the
+            // half-width in window units, so width = 2·|cx|·scale).
+            let scales = bar.map((e) => tileH / e.naturalH);
+            let widths = bar.map((e, i) => Math.max(2 * Math.abs(e.centerOffset.x) * scales[i], tileH * 0.4));
             const gap = tileH * 0.3;
-            const totalW = widths.reduce((a, w) => a + w, 0) + gap * (n - 1);
-            const centers = [];
-            let cx = -totalW * 0.5;
-            for (let i = 0; i < n; i++) { centers.push(cx + widths[i] * 0.5); cx += widths[i] + gap; }
 
-            bar.forEach((e, i) => {
-                e.slot = i;
-                const sx = centers[i];
-                let sy = rowY;
-                if (this.layoutMode === 'radial' && n > 1) {
-                    const half = totalW * 0.5;
-                    const t = half > 0 ? sx / half : 0;   // -1..1 across the bar
-                    const dip = this._viewH * 0.10;        // how far the ends rise
-                    sy = rowY + dip * (t * t);             // parabola: ends up, middle low
+            if (this.layoutMode === 'radial') {
+                // Hemispherical: tiles ride a sphere of radius `distance` centered on the
+                // POV, spread in azimuth and yawed to face the viewer; side tiles curve
+                // toward you. Fit-to-arc: shrink tiles so the angular span ≤ maxSpan
+                // (fixed angular gaps subtracted first, so the shrink is exact).
+                const R = this.distance;
+                const angGap = gap / R;
+                const maxSpan = Math.PI * 0.85;            // ~153°, just shy of a full hemisphere
+                const tilesAng = widths.reduce((a, w) => a + w / R, 0);
+                const gapsAng = angGap * (n - 1);
+                if (tilesAng + gapsAng > maxSpan) {
+                    const f = Math.max(0.1, (maxSpan - gapsAng) / tilesAng);
+                    scales = scales.map((s) => s * f);
+                    widths = widths.map((w) => w * f);
                 }
-                this._animateTile(e, sx, sy, 0, scales[i]);
-                const d = this.attentionManager?.docks?.get(e.id);
-                if (d) d.offset = { slot: i };
-            });
+                const angW = widths.map((w) => w / R);
+                const totalAng = angW.reduce((a, w) => a + w, 0) + angGap * (n - 1);
+                let a = -totalAng * 0.5;
+                bar.forEach((e, i) => {
+                    e.slot = i;
+                    const th = a + angW[i] * 0.5;
+                    a += angW[i] + angGap;
+                    // center on the sphere (dock-local): x right, z toward camera at the sides
+                    this._animateTile(e, R * Math.sin(th), rowY, R * (1 - Math.cos(th)), scales[i], -th);
+                    const d = this.attentionManager?.docks?.get(e.id);
+                    if (d) d.offset = { slot: i };
+                });
+            } else {
+                // Linear row, centered on x=0. Fit-to-width: shrink tiles so the row
+                // never overruns the viewport (gaps fixed, subtracted first → exact fit).
+                const availW = this._viewW * 0.88;
+                const tilesW = widths.reduce((a, w) => a + w, 0);
+                const gapsW = gap * (n - 1);
+                if (tilesW + gapsW > availW) {
+                    const f = Math.max(0.1, (availW - gapsW) / tilesW);
+                    scales = scales.map((s) => s * f);
+                    widths = widths.map((w) => w * f);
+                }
+                const totalW = widths.reduce((a, w) => a + w, 0) + gap * (n - 1);
+                let cx = -totalW * 0.5;
+                bar.forEach((e, i) => {
+                    e.slot = i;
+                    const sx = cx + widths[i] * 0.5;
+                    cx += widths[i] + gap;
+                    this._animateTile(e, sx, rowY, 0, scales[i]);
+                    const d = this.attentionManager?.docks?.get(e.id);
+                    if (d) d.offset = { slot: i };
+                });
+            }
         }
 
         // ---- focus area: centered + enlarged, just above the view center ----
