@@ -318,18 +318,19 @@ export default function registerTerminalCommands(router) {
         const grid = getTerminals(ctx).get(id);
         if (!grid) return { text: `ERR: no terminal '${id}'`, data: null };
 
-        // `terminal.depth <id> ramp <yStep> [zStep]` tunes the ramp shape live (rise +
-        // recession per line, ×lineSpacing). yStep=0 → flat straight-back stack.
+        // `terminal.depth <id> ramp <pageRise> [pageDepth]` tunes the page layout live
+        // (rise + recession PER PAGE, ×lineSpacing). pageRise=0 → flat straight-back
+        // deck of pages; pageDepth sets how far each screenful steps back.
         if ((args[1] || '').toLowerCase() === 'ramp') {
             const yf = parseFloat(args[2]);
             const zf = parseFloat(args[3]);
             if (!Number.isFinite(yf) && !Number.isFinite(zf)) {
-                return { text: 'ERR: usage: terminal.depth <id> ramp <yStep> [zStep]', data: null };
+                return { text: 'ERR: usage: terminal.depth <id> ramp <pageRise> [pageDepth]', data: null };
             }
             grid.setDepthShape(Number.isFinite(yf) ? yf : null, Number.isFinite(zf) ? zf : null);
             return {
-                text: `OK: terminal '${id}' ramp y=${grid._depthYFactor} z=${grid._depthZFactor}`,
-                data: { id, yStep: grid._depthYFactor, zStep: grid._depthZFactor },
+                text: `OK: terminal '${id}' pages rise=${grid._depthYFactor} depth=${grid._depthZFactor}`,
+                data: { id, pageRise: grid._depthYFactor, pageDepth: grid._depthZFactor },
             };
         }
 

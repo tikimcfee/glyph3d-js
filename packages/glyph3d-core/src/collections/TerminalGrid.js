@@ -65,27 +65,29 @@ export default class TerminalGrid extends THREE.Object3D {
         this.rows = options.rows ?? 24;
         this.name = options.title ?? 'TerminalGrid';
 
-        // ---- Scrollback-into-depth ----
+        // ---- Scrollback-into-depth (page-quantized) ----
         // Lines that scroll off the top of the live screen are kept as a client-side
-        // ring and rendered as an "up-and-back ramp": each older line both RISES above
-        // the live top row (+Y) AND steps back in −Z, faded with depth — so history
-        // climbs into the distance like scrollback receding, readable at a glance
-        // (newest just above/behind the screen, oldest highest + furthest). With
-        // _depthYFactor=0 it degenerates to a flat straight-back stack on the top line.
+        // ring and rendered as a receipt of PAGES: history is grouped into screenfuls
+        // (`rows` lines each), and each page is a flat, coplanar block at the live
+        // screen's Y, stepped straight back in −Z. The newest page sits just behind the
+        // live screen; older pages are pushed further back (reverse-from-last). A burst
+        // like `git log` that fills a screenful lands as ONE readable page that recedes
+        // as a block — lines within a page never smear across depth. Pages may also
+        // optionally rise (_depthYFactor>0); 0 keeps them a clean straight-back deck.
         // (tmux owns true scrollback + repaints the visible pane only, so there is no
         // free "line scrolled off" event — we recover it by diffing frames; see
         // terminalDepthHistory.detectVerticalScroll.) Full-screen TUIs (alt-screen)
         // are excluded.
         this._depthEnabled = options.depthHistory ?? true;
         this._depthMax     = Math.max(0, options.depthMax ?? 80);   // history lines rendered
-        this._depthFadeMin = options.depthFadeMin ?? 0.4;           // oldest line's brightness
-        this._depthYFactor = options.depthYStep ?? 1.0;             // ×lineSpacing rise per line
-        this._depthZFactor = options.depthZStep ?? 0.6;             // ×lineSpacing recede per line
+        this._depthFadeMin = options.depthFadeMin ?? 0.4;           // oldest page's brightness
+        this._depthYFactor = options.depthYStep ?? 0;               // ×lineSpacing rise per PAGE
+        this._depthZFactor = options.depthZStep ?? 6;               // ×lineSpacing recede per PAGE
         this._history  = [];      // captured rows, index 0 = newest scrolled-off
         this._prevRows = null;    // last live-screen snapshot, for scroll detection
         this._altActive = false;  // current frame is an alt-screen (TUI) repaint
-        this._depthYStep = 0;     // world rise per history line (set once metrics exist)
-        this._depthZStep = 0;     // world recede per history line (set once metrics exist)
+        this._depthYStep = 0;     // world rise per page (set once metrics exist)
+        this._depthZStep = 0;     // world recede per page (set once metrics exist)
 
         /**
          * Input callback -- set by the owning agent or process.
@@ -116,8 +118,8 @@ export default class TerminalGrid extends THREE.Object3D {
 
         // Derive world-unit metrics from the renderer so glyph sizes match the atlas.
         this._metrics = this._renderer.metrics;
-        // Per-history-line rise (+Y) and recession (−Z). Depth scales with the terminal
-        // via this.scale, like X/Y, since positions are local.
+        // Per-PAGE rise (+Y) and recession (−Z). Depth scales with the terminal via
+        // this.scale, like X/Y, since positions are local.
         this._depthYStep = this._metrics.lineSpacing * this._depthYFactor;
         this._depthZStep = this._metrics.lineSpacing * this._depthZFactor;
 
@@ -339,6 +341,9 @@ export default class TerminalGrid extends THREE.Object3D {
         const dmax = this._depthMax;
         const fmin = this._depthFadeMin;
         const hide = !this._depthEnabled || this._altActive;
+        // Fade by PAGE (not per line) so each page is uniformly lit + readable, with
+        // older pages dimmer — matches the page-quantized layout.
+        const pageCount = Math.max(1, Math.ceil(dmax / this.rows));
 
         for (let h = 0; h < dmax; h++) {
             const base = base0 + h * cols;
@@ -350,7 +355,7 @@ export default class TerminalGrid extends THREE.Object3D {
                 continue;
             }
             const row = hist[h];
-            const fade = depthFade(h, dmax, fmin);
+            const fade = depthFade(Math.floor(h / this.rows), pageCount, fmin);
             for (let x = 0; x < cols; x++) {
                 const i = base + x;
                 cp[i] = row.cp[x];
@@ -436,12 +441,12 @@ export default class TerminalGrid extends THREE.Object3D {
     }
 
     /**
-     * Tune the depth-history ramp live: per-line rise (+Y) and recession (−Z), each a
-     * multiple of lineSpacing. yFactor=0 → flat straight-back stack; yFactor=1 → each
-     * older line one row higher (reads like climbing scrollback). Recomputes slot
+     * Tune the depth-history layout live: per-PAGE rise (+Y) and recession (−Z), each a
+     * multiple of lineSpacing. yFactor=0 → a flat straight-back deck of pages; yFactor>0
+     * → pages also climb. zFactor sets how far each page steps back. Recomputes slot
      * positions and re-pushes them (no reload). Pass null for either to leave it.
-     * @param {number|null} yFactor  rise per line ×lineSpacing
-     * @param {number|null} zFactor  recession per line ×lineSpacing
+     * @param {number|null} yFactor  rise per page ×lineSpacing
+     * @param {number|null} zFactor  recession per page ×lineSpacing
      */
     setDepthShape(yFactor, zFactor) {
         if (Number.isFinite(yFactor)) {
@@ -823,16 +828,22 @@ export default class TerminalGrid extends THREE.Object3D {
             }
         }
 
-        // Depth-history slots: each older line RISES above the live top row (+Y) and
-        // recedes (−Z) — an up-and-back ramp. Slot h is fixed; history CONTENT shifts
-        // through slots, so these positions never change between frames (only on resize
-        // or a depth-shape change). _depthYStep=0 → a flat straight-back stack.
+        // Depth-history slots, PAGE-QUANTIZED: history is grouped into pages of `rows`
+        // lines. Each page is a flat screenful at the live screen's Y, stepped straight
+        // back by one page-depth in −Z (page 0 = newest screenful, just behind the live
+        // screen; higher p = older, further back). Within a page the newest line sits
+        // at the bottom row (mirroring how it looked live). Slot positions are fixed;
+        // history CONTENT shifts through slots, so they only change on resize / reshape.
         const base0 = this._cellCount;
-        const yStep = this._depthYStep;
-        const zStep = this._depthZStep;
+        const R = this.rows;
+        const pageRise  = this._depthYStep;   // +Y per page (0 → flat straight-back deck)
+        const pageDepth = this._depthZStep;   // −Z per page
         for (let h = 0; h < this._depthMax; h++) {
-            const y = (h + 1) * yStep;
-            const z = -(h + 1) * zStep;
+            const p = Math.floor(h / R);          // page index (0 = newest screenful)
+            const i = h % R;                      // line within page (0 = newest line)
+            const rowFromTop = (R - 1) - i;       // newest line → bottom row of the page
+            const y = (p + 1) * pageRise - rowFromTop * strideY;
+            const z = -(p + 1) * pageDepth;
             for (let col = 0; col < this.cols; col++) {
                 const idx = (base0 + h * this.cols + col) * 3;
                 this._positions[idx]     = col * strideX;
