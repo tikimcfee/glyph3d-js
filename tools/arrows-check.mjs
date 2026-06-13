@@ -234,6 +234,7 @@ const childDirCount = (tree, path) => partitionChildren(tree.getNode(path)).dirs
     const src = partitionChildren(t.root).dirs.find((d) => d.userData.name === 'src');
     const a = new ContentTreeArrows(t);
     const p = new ContentTreeProbes(t);
+    p.setEnabled(true);                                    // diagnostic is off by default — build it to inspect
     const anchor = a._anchor(src);                         // in root (parent) frame
     const probe = p._probes.get('src');
     ok(probe.origin.position.x === 0 && probe.origin.position.y === 0 && probe.origin.position.z === 0,
