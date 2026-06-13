@@ -86,4 +86,39 @@ export default function registerDockCommands(router) {
         if (!dock.setLayout(mode)) return { text: 'ERR: usage: dock.layout <linear|radial>', data: null };
         return { text: `OK: dock layout ${mode}`, data: { layout: mode } };
     }, { description: 'Set the dock tile arrangement', usage: '<linear|radial>', returns: '{ layout }' });
+
+    router.register('dock.focus', (args, ctx) => {
+        const dock = getDock(ctx);
+        if (!dock) return { text: 'ERR: camera dock not ready', data: null };
+        const r = resolveSurface(ctx, args[0]);
+        const id = r?.id ?? String(args[0] ?? '');
+        if (!dock.has(id)) return { text: `ERR: '${id}' is not docked`, data: null };
+        // Frame the captured HOME bounds (stable) — read BEFORE release drops the entry —
+        // then release the tile back home and make it the focus. Window slides home while
+        // the camera flies to meet it.
+        const box = dock.homeBounds(id);
+        dock.release(id);
+        if (box) ctx.cameraController?.focusOnBox?.(box);
+        ctx.attentionManager?.set('primary', id, { registry: ctx.registry });
+        return { text: `OK: focused '${id}'`, data: { id, docked: false } };
+    }, { description: 'Release a docked surface and fly to frame it', usage: '<id|index>', returns: '{ id, docked }' });
+
+    router.register('dock.clear', (_args, ctx) => {
+        const dock = getDock(ctx);
+        if (!dock) return { text: 'ERR: camera dock not ready', data: null };
+        const n = dock.list().length;
+        dock.releaseAll();
+        return { text: `OK: released ${n} tile(s)`, data: { released: n } };
+    }, { description: 'Release every docked surface', returns: '{ released }' });
+
+    router.register('dock.set', (args, ctx) => {
+        const dock = getDock(ctx);
+        if (!dock) return { text: 'ERR: camera dock not ready', data: null };
+        const key = String(args[0] ?? '');
+        const value = parseFloat(args[1]);
+        if (!dock.setParam(key, value)) {
+            return { text: 'ERR: usage: dock.set <distance|tileFrac|bottomFrac> <number>', data: null };
+        }
+        return { text: `OK: dock ${key} = ${value}`, data: { key, value } };
+    }, { description: 'Tune a dock layout parameter live', usage: '<distance|tileFrac|bottomFrac> <number>', returns: '{ key, value }' });
 }

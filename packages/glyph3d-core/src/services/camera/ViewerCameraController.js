@@ -737,8 +737,18 @@ export class ViewerCameraController {
      * @returns {boolean} true if it framed something.
      */
     focusOnObject(obj) {
+        return this.focusOnBox(obj?.getBounds?.());
+    }
+
+    /**
+     * Frame a world-space AABB head-on, centered. The box-taking core of
+     * focusOnObject — dock.focus passes a docked window's captured HOME bounds so
+     * the camera frames where it'll land, not its live mid-slide tile bounds.
+     * @param {Object} bounds THREE.Box3
+     * @returns {boolean}
+     */
+    focusOnBox(bounds) {
         const THREE = this.THREE;
-        const bounds = obj?.getBounds?.();
         if (!bounds || bounds.isEmpty?.()) return false;
         const center = new THREE.Vector3();
         bounds.getCenter(center);

@@ -110,6 +110,33 @@ export class CameraDock extends THREE.Object3D {
     }
 
     /**
+     * The world AABB the docked window had at home — for framing it on focus.
+     * @param {string} id
+     * @returns {Object|null} a THREE.Box3 clone, or null
+     */
+    homeBounds(id) {
+        const e = this.entries.get(id);
+        return e?.homeBounds ? e.homeBounds.clone() : null;
+    }
+
+    /** Release every docked tile (back to its home). */
+    releaseAll() {
+        for (const id of [...this.entries.keys()]) this.release(id);
+    }
+
+    /**
+     * Tune a layout parameter live and re-pack. Keys: distance, tileFrac, bottomFrac.
+     * @param {string} key @param {number} value @returns {boolean}
+     */
+    setParam(key, value) {
+        if (!['distance', 'tileFrac', 'bottomFrac'].includes(key)) return false;
+        if (!Number.isFinite(value)) return false;
+        this[key] = value;
+        this._relayout();
+        return true;
+    }
+
+    /**
      * Dock a window: capture its home, reparent it under the bar (world-preserving),
      * and animate it into its slot at tile scale.
      * @param {string} id  registry id
@@ -152,6 +179,9 @@ export class CameraDock extends THREE.Object3D {
             },
             naturalH: Math.max(worldH / homeScale, 1e-3),
             centerOffset,
+            // The world AABB the window had at home, captured before docking — dock.focus
+            // frames THIS (computed, stable) rather than the tile's live mid-slide bounds.
+            homeBounds: hasBounds ? b.clone() : null,
             slot: this.entries.size,
             quatTarget: new THREE.Quaternion(),
         };

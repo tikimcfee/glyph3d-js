@@ -122,10 +122,19 @@ const ROOT = {
 /**
  * Walk the chain: innermost node → outward → root tier.
  * @param {{type: string, target: object|null}} gesture
- * @param {{exec: Function, attention: object, context: object, placeCaretFromPointer: Function}} env
+ * @param {{exec: Function, attention: object, context: object, cameraDock: object, placeCaretFromPointer: Function}} env
  * @returns {boolean} whether anything claimed the gesture
  */
 export function resolveGesture(gesture, env) {
+    // A click on a docked tile is a launcher action: undock it and fly to it. It
+    // pre-empts the responder chain — the tile is camera-locked chrome you're
+    // picking to bring BACK, not a window to focus in place. dock.focus sets
+    // primary + flies itself. (dblclick falls through to normal handling.)
+    if (gesture.type === 'click' && gesture.target && env.cameraDock?.has?.(gesture.target.id)) {
+        env.exec(['dock.focus', gesture.target.id]);
+        return true;
+    }
+
     const nodes = env.context?.nodes() ?? [];
     for (let i = nodes.length - 1; i >= 0; i--) {
         const handler = POLICIES[nodes[i].kind]?.[gesture.type];

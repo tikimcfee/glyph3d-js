@@ -154,6 +154,7 @@ export function CanvasPicker() {
       exec: (cmd) => router.execute(cmd),
       get attention() { return client.ctx.attentionManager; },
       get context() { return client.ctx.interactionContext; },
+      get cameraDock() { return client.ctx.cameraDock; },
       placeCaretFromPointer,
     };
 
