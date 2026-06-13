@@ -55,6 +55,69 @@ func paneScrollPosition(session string) int {
 	return n
 }
 
+// paneScreenMode reports the pane's live VT mode straight from tmux (the source of
+// truth — the app negotiated these with tmux, not with us): whether the ALTERNATE
+// screen is active (a full-screen TUI), and whether the app requested SGR mouse
+// reporting (DECSET 1006). The downstream display can't see these, so the decision of
+// how a wheel gesture is realized has to be made here, where the flags actually live.
+func paneScreenMode(session string) (alt, sgr bool) {
+	out, err := tmuxCmd("display-message", "-p", "-t", session, "#{alternate_on},#{mouse_sgr_flag}").Output()
+	if err != nil {
+		return false, false
+	}
+	f := strings.Split(strings.TrimSpace(string(out)), ",")
+	if len(f) == 2 {
+		alt = f[0] == "1"
+		sgr = f[1] == "1"
+	}
+	return
+}
+
+// forwardWheelToApp realizes a wheel gesture for an ALT-SCREEN app. Such apps own the
+// screen and have NO tmux scrollback — driving copy-mode there is meaningless ([0/0])
+// and worse, it traps the app in copy-mode and swallows its input. So the wheel goes
+// straight to the app's PTY instead: SGR mouse-wheel events when the app asked for
+// mouse mode (claude, vim ttymouse=sgr — it scrolls its OWN content), else arrow keys
+// (pagers like less/man — the behaviour xterm calls "alternateScroll"). `lines` follows
+// the scroll convention: >0 = back/up, <0 = forward/down; |lines| notches are sent.
+func forwardWheelToApp(ptmx *os.File, lines int, sgr bool, cols, rows int) {
+	n, up := lines, lines > 0
+	if n < 0 {
+		n = -n
+	}
+	var notch string
+	if sgr {
+		// SGR (1006): ESC[<btn;col;row M, press-only. Wheel up=64, down=65. The coordinate
+		// barely matters for a wheel event; aim at the pane centre so it lands inside it.
+		col, row := cols/2, rows/2
+		if col < 1 {
+			col = 1
+		}
+		if row < 1 {
+			row = 1
+		}
+		btn := 65
+		if up {
+			btn = 64
+		}
+		notch = fmt.Sprintf("\x1b[<%d;%d;%dM", btn, col, row)
+	} else {
+		// No mouse mode → arrow keys, one line per notch (the alternateScroll fallback).
+		if up {
+			notch = "\x1b[A"
+		} else {
+			notch = "\x1b[B"
+		}
+	}
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		b.WriteString(notch)
+	}
+	if _, err := ptmx.Write([]byte(b.String())); err != nil {
+		log.Printf("[attach] wheel forward: %v", err)
+	}
+}
+
 // runTerminal connects to the relay, creates the display grid, attaches a PTY to a
 // tmux session, and runs the bidirectional byte pump until shutdown.
 func runTerminal(cfg terminalConfig) {
@@ -199,6 +262,13 @@ func runTerminal(cfg terminalConfig) {
 	}
 	scroll := func(lines int) {
 		if lines == 0 {
+			return
+		}
+		// Alt-screen TUIs (claude/vim/less) own the screen and have no tmux scrollback —
+		// copy-mode there is the [0/0] dead end. Forward the wheel TO the app instead so it
+		// scrolls its own content. Normal shells keep the tmux copy-mode scrollback below.
+		if alt, sgr := paneScreenMode(cfg.session); alt {
+			forwardWheelToApp(ptmx, lines, sgr, cfg.cols, cfg.rows)
 			return
 		}
 		if lines > 0 {
