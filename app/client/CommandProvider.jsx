@@ -349,6 +349,12 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
         configurable: true,
         get: () => state.ctx.tryScrollHovered ?? null,
       });
+      //   • dockTiles — the CameraDock's identity Set of docked grids; VCC's per-frame
+      //     look-distance / fit-all skip them (camera-locked chrome, not world content).
+      Object.defineProperty(cc.ctx, 'dockTiles', {
+        configurable: true,
+        get: () => state.ctx.cameraDock?.tiles ?? null,
+      });
     }
 
     // Saved-state system: the server-side session store. Restore (open files +

@@ -575,6 +575,12 @@ export class ViewerCameraController {
         const surfaces = this.ctx.getSurfaces?.() || this.ctx.getGrids?.() || [];
         if (!surfaces.length) return DEFAULT_LOOK_DIST;
 
+        // Dock tiles ride a fixed offset ahead of the camera (CameraDock). Counted,
+        // they'd pin look-distance to ~0 — a wall in your face braking every move. We
+        // skip them inline (Set.has on identity) rather than pre-filtering the array:
+        // this runs every frame, so no per-frame allocation. Null when no dock exists.
+        const dockTiles = this.ctx.dockTiles ?? null;
+
         const origin = camera.position;
         const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
         const ray = (this._ray ??= new THREE.Ray());
@@ -584,6 +590,7 @@ export class ViewerCameraController {
         let fwd = Infinity;   // nearest forward hit — precise "what I'm aimed at"
         let near = Infinity;  // nearest content in ANY direction — no blind spot
         for (const g of surfaces) {
+            if (dockTiles?.has(g)) continue; // camera-locked chrome, not world content
             const box = g.getBounds?.();
             if (!box || box.isEmpty?.()) continue;
             const dn = box.distanceToPoint(origin);
@@ -784,9 +791,12 @@ export class ViewerCameraController {
     focusOnGrids() {
         const THREE = this.THREE;
         // Fit-all frames every framed surface — terminals included, so a "+ terminal"
-        // you spawned off to the side is still pulled into view by fit-all.
+        // you spawned off to the side is still pulled into view by fit-all. Dock tiles
+        // are excluded: they're camera-locked chrome, always in view, and would skew
+        // the union toward the camera.
         const surfaces = this.ctx.getSurfaces?.() || this.ctx.getGrids?.() || [];
         if (surfaces.length === 0) return;
+        const dockTiles = this.ctx.dockTiles ?? null; // camera-locked chrome, excluded from the fit
 
         // Prefer a layout manager's cached total bounds; otherwise (e.g. the r3f
         // client, which has no managers) union the surfaces' own world bounds.
@@ -798,6 +808,7 @@ export class ViewerCameraController {
         } else {
             bounds = new THREE.Box3();
             for (const g of surfaces) {
+                if (dockTiles?.has(g)) continue;
                 const b = g.getBounds?.();
                 if (b && !b.isEmpty()) bounds.union(b);
             }

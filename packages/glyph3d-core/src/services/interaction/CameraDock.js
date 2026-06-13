@@ -74,6 +74,10 @@ export class CameraDock extends THREE.Object3D {
         this.entries = new Map();
         /** @type {Map<string, DockEntry>} tiles mid-release (kept for the slerp-home) */
         this._releasing = new Map();
+        /** Identity set of docked grid objects — the camera reads this (ctx.dockTiles)
+         *  to skip dock chrome in its per-frame look-distance sampling, an O(1) has()
+         *  with no array allocation. @type {Set<Object>} */
+        this.tiles = new Set();
 
         // Visible extents at `distance`, refreshed each frame from the camera.
         this._viewH = 100;
@@ -91,6 +95,18 @@ export class CameraDock extends THREE.Object3D {
     /** @returns {Array<{id:string, slot:number, layout:string}>} */
     list() {
         return [...this.entries.values()].map((e) => ({ id: e.id, slot: e.slot, layout: this.layoutMode }));
+    }
+
+    /**
+     * The HOME position a docked window will return to on release (in its home
+     * parent's space) — NOT its current tile-local position. Persistence reads this
+     * so a docked window's saved position is its world home, not the tile coordinate.
+     * @param {string} id
+     * @returns {{x:number,y:number,z:number}|null}
+     */
+    homePosition(id) {
+        const e = this.entries.get(id);
+        return e ? { x: e.home.pos.x, y: e.home.pos.y, z: e.home.pos.z } : null;
     }
 
     /**
@@ -144,6 +160,10 @@ export class CameraDock extends THREE.Object3D {
         // then the animator slides it to its slot while the bar carries it cameraward.
         this.attach(grid);
 
+        // Register as chrome so the camera's dynamic-speed / fit-all sampling skips it
+        // (a tile pinned ahead of the camera would otherwise brake every move).
+        this.tiles.add(grid);
+
         this.entries.set(id, entry);
         this.attentionManager?.docks?.set(id, {
             anchor: 'camera',
@@ -166,6 +186,7 @@ export class CameraDock extends THREE.Object3D {
         if (!e) return false;
 
         this.entries.delete(id);
+        this.tiles.delete(e.grid); // back to world content for the camera the moment it heads home
         this.attentionManager?.docks?.delete(id);
 
         // Home parent may have been pruned (file closed while docked) — fall back to
@@ -282,6 +303,7 @@ export class CameraDock extends THREE.Object3D {
         this.animator.dispose();
         this.entries.clear();
         this._releasing.clear();
+        this.tiles.clear();
     }
 }
 

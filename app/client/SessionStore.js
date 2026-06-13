@@ -59,6 +59,7 @@ export default class SessionStore {
     /** @type {{toJSON:Function, fromJSON:Function, components:string[]}|null} */
     this._dock = null;
     this._pendingDock = null;       // dock layout from a loaded snapshot, awaiting the dock bridge
+    this._pendingDock3d = null;     // {layout, tiles[]} from a snapshot, applied as surfaces reappear (CameraDock)
     /** @type {Array<{id:string,x:number,y:number,z:number,cols?:number,rows?:number}>} */
     this.pendingTerminals = [];     // last-known terminal placement + size, consumed by terminal re-adoption
 
@@ -69,7 +70,7 @@ export default class SessionStore {
     this._periodic = null;
     this._disposed = false;
 
-    this._onRegistryChange = () => { this._placePendingTerminals(); this.scheduleSave(); };
+    this._onRegistryChange = () => { this._placePendingTerminals(); this._applyDock3d(); this.scheduleSave(); };
     this._onVisibility = () => { if (typeof document !== 'undefined' && document.visibilityState === 'hidden') this.saveNow(); };
   }
 
@@ -100,7 +101,9 @@ export default class SessionStore {
       const grid = (s.panelId && ctx.registry.has(s.panelId)) ? ctx.registry.get(s.panelId).grid : null;
       if (grid) {
         sheetPanelIds.add(s.panelId);
-        const p = grid.position;
+        // A docked grid's .position is its tiny tile-local coordinate; persist the
+        // HOME it returns to on release instead, so the saved position is meaningful.
+        const p = (ctx.cameraDock?.has?.(s.panelId) && ctx.cameraDock.homePosition(s.panelId)) || grid.position;
         entry.x = round(p.x); entry.y = round(p.y); entry.z = round(p.z);
         // Window state: a code grid sized to a cols×rows scrollable viewport (grid.window).
         if (grid.isWindowed?.()) {
@@ -137,7 +140,8 @@ export default class SessionStore {
 
     const terminals = [];
     for (const e of ctx.registry.findByType('terminal')) {
-      const p = e.grid.position;
+      // Docked → persist the home it returns to, not the tile-local coordinate.
+      const p = (ctx.cameraDock?.has?.(e.id) && ctx.cameraDock.homePosition(e.id)) || e.grid.position;
       const entry = { id: e.id, x: round(p.x), y: round(p.y), z: round(p.z) };
       // Resize state: cols/rows live on the TerminalGrid (terminal.resize mutates them).
       if (Number.isInteger(e.grid.cols) && Number.isInteger(e.grid.rows)) {
@@ -152,6 +156,18 @@ export default class SessionStore {
       try { dock = this._dock.toJSON(); } catch (e) { console.warn('[session] dock toJSON failed:', e?.message || e); }
     }
 
+    // The 3D camera-dock: ordered tile membership + layout mode. If a surface hasn't
+    // reappeared yet (terminal re-adopting), its id is still in _pendingDock3d —
+    // carry those forward so a save mid-restore doesn't drop them.
+    let dock3d = this._pendingDock3d;
+    const cd = ctx.cameraDock;
+    if (cd) {
+      const tiles = cd.list().sort((a, b) => a.slot - b.slot).map((t) => t.id);
+      const pend = this._pendingDock3d?.tiles?.filter((id) => !tiles.includes(id)) || [];
+      const all = [...tiles, ...pend];
+      dock3d = all.length ? { layout: cd.layoutMode, tiles: all } : null;
+    }
+
     return {
       version: SCHEMA_VERSION,
       savedAt: Date.now(),
@@ -159,6 +175,7 @@ export default class SessionStore {
       field,
       camera: this._captureCamera(),
       dock: dock || null,
+      dock3d: dock3d || null,
       terminals,
     };
   }
@@ -280,6 +297,14 @@ export default class SessionStore {
     this._pendingDock = snap.dock || null;
     this.pendingTerminals = Array.isArray(snap.terminals) ? snap.terminals : [];
     this._maybeApplyDock();
+
+    // 3D camera-dock: lock the surfaces already back now (code grids restored above);
+    // terminals re-adopt async, so the rest is replayed from _onRegistryChange as they
+    // reappear (same pattern as pendingTerminals).
+    this._pendingDock3d = (snap.dock3d?.tiles?.length)
+      ? { layout: snap.dock3d.layout || 'linear', tiles: [...snap.dock3d.tiles] }
+      : null;
+    this._applyDock3d();
     } finally {
       this.ctx.status?.clear();
     }
@@ -313,6 +338,29 @@ export default class SessionStore {
       }
     }
     this.pendingTerminals = remaining;
+  }
+
+  // Replay 3D dock membership as surfaces reappear. Code grids are back synchronously
+  // after restore()'s file loop; terminals re-adopt later, so this is also fired from
+  // the registry-change listener (after _placePendingTerminals, so a docked terminal
+  // captures a sensible home before it's reparented away). Ids not yet in the registry
+  // linger in _pendingDock3d (or forever, if that shell died — harmless).
+  _applyDock3d() {
+    const cd = this.ctx.cameraDock;
+    const pend = this._pendingDock3d;
+    if (!cd || !pend) return;
+    if (pend.layout) cd.setLayout(pend.layout);
+    const remaining = [];
+    for (const id of pend.tiles) {
+      if (cd.has(id)) continue;
+      if (this.ctx.registry.has(id)) {
+        // Array form skips the router's space-tokenizer — a registry id can be a file path.
+        this.router.execute(['dock.lock', id]);
+      } else {
+        remaining.push(id);
+      }
+    }
+    this._pendingDock3d = remaining.length ? { layout: pend.layout, tiles: remaining } : null;
   }
 
   _restoreCamera(cam) {
@@ -359,6 +407,7 @@ export default class SessionStore {
   // re-capture them on the next change (clear-with-log, mirror-of-reality policy).
   async clear() {
     this._pendingDock = null;
+    this._pendingDock3d = null;
     this.pendingTerminals = [];
     await this._clear();
   }
