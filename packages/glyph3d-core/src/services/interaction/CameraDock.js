@@ -334,6 +334,15 @@ export class CameraDock extends THREE.Object3D {
         const all = [...this.entries.values()];
         if (all.length === 0) return;
 
+        // Slot = each tile's position in the (insertion-ordered) entry set — assigned in
+        // THIS one place, before the bar/focus split, so every tile gets a UNIQUE label
+        // (focused included). Previously the bar renumbered 0..n-1 while the spotlit tile
+        // kept a stale number → two tiles could share a slot, and a shadowed tile silently
+        // ate its sibling's hover/wheel. Slots are LABELS (dock.list + session order);
+        // placement is by bar geometry / Map order, never by e.slot — so numbering here
+        // changes no placement, only kills the collision.
+        all.forEach((e, i) => { e.slot = i; });
+
         const focused = this.focusedId ? this.entries.get(this.focusedId) : null;
         const bar = all.filter((e) => e !== focused);
 
@@ -375,7 +384,6 @@ export class CameraDock extends THREE.Object3D {
                 const phiBase = rowY / R; // bottom row sits where the linear bar sits
 
                 bar.forEach((e, i) => {
-                    e.slot = i;
                     const s = slots[i];
                     const th = (((s.x + sizes[i].w * 0.5) - W * 0.5) * f) / R;     // azimuth, centered
                     const phi = phiBase + (((s.y - tileH * 0.5) + H) * f) / R;     // elevation, bottom-anchored
@@ -386,7 +394,7 @@ export class CameraDock extends THREE.Object3D {
                     _dir.set(-sx, -sy, R - sz).normalize();                        // toward the eye (0,0,R)
                     this._animateTile(e, sx, sy, sz, scales[i] * f, _dir);
                     const d = this.attentionManager?.docks?.get(e.id);
-                    if (d) d.offset = { slot: i };
+                    if (d) d.offset = { slot: e.slot };
                 });
             } else {
                 // Linear row, centered on x=0. Fit-to-width: shrink tiles so the row
@@ -402,12 +410,11 @@ export class CameraDock extends THREE.Object3D {
                 const totalW = widths.reduce((a, w) => a + w, 0) + gap * (n - 1);
                 let cx = -totalW * 0.5;
                 bar.forEach((e, i) => {
-                    e.slot = i;
                     const sx = cx + widths[i] * 0.5;
                     cx += widths[i] + gap;
                     this._animateTile(e, sx, rowY, 0, scales[i]);
                     const d = this.attentionManager?.docks?.get(e.id);
-                    if (d) d.offset = { slot: i };
+                    if (d) d.offset = { slot: e.slot };
                 });
             }
         }

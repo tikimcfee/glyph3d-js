@@ -85,5 +85,48 @@ ok(refreshed === 1, `grid resize fires dock.refreshTile (got ${refreshed})`);
 dock2.release('t2');
 ok(g2._resizeCb() === null, `release unsubscribes the resize tap`);
 
+// ---- slot uniqueness across spotlight/relayout (the collision fix) --------
+// Regression: the spotlit tile used to keep a STALE slot while the bar renumbered
+// 0..n-1, so two tiles could report the same slot — and a shadowed tile then ate its
+// sibling's hover/wheel (the term-11 scroll bug). _relayout now numbers ALL entries by
+// Map order in one place, so slots stay unique through any spotlight state.
+function slotDock(n) {
+  const d = new CameraDock({ attentionManager: { docks: new Map() } });
+  d.attach = () => {};
+  d._animateTile = () => {};        // skip THREE math; we only assert slot labels
+  d._viewH = 100; d._viewW = 160;
+  for (let i = 0; i < n; i++) {
+    const id = `s${i}`;
+    d.entries.set(id, {
+      id, grid: { scaleModel: null },
+      home: { pos: { x: 0, y: 0, z: 0 }, scale: 0.1, quat: {} },
+      naturalH: 100, centerOffset: { x: 50, y: -50, z: 0 },
+      dims: { cols: 80, rows: 24 }, slot: i,
+      quatTarget: { setFromUnitVectors() {}, identity() {} },
+    });
+    d.attentionManager.docks.set(id, { offset: {} });
+  }
+  return d;
+}
+const slotsOf = (d) => [...d.entries.values()].map((e) => e.slot);
+const allUnique = (d) => new Set(slotsOf(d)).size === d.entries.size;
+
+for (const mode of ['linear', 'radial']) {
+  const d = slotDock(4);
+  d.setLayout(mode); // triggers _relayout, no focus
+  ok(allUnique(d), `${mode}: 4 tiles, no focus → unique slots [${slotsOf(d)}]`);
+
+  d.focusedId = 's1'; // spotlight one — used to leave it with a stale, colliding slot
+  d._relayout();
+  ok(allUnique(d), `${mode}: spotlit s1 → still unique slots [${slotsOf(d)}]`);
+  const focusSlot = d.entries.get('s1').slot;
+  const barSlots = [...d.entries.values()].filter((e) => e.id !== 's1').map((e) => e.slot);
+  ok(!barSlots.includes(focusSlot), `${mode}: focused slot ${focusSlot} not shared by any bar tile`);
+
+  d.focusedId = null; // un-spotlight — returns to the bar, slots still clean
+  d._relayout();
+  ok(allUnique(d), `${mode}: un-spotlit → unique slots preserved [${slotsOf(d)}]`);
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
