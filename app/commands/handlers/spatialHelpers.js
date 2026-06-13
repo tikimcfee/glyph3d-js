@@ -244,13 +244,20 @@ export function resolveAdjacencies(ctx, currentId) {
     return best;
 }
 
+const _adjCenter = new THREE.Vector3();
+
 /**
- * Nearest TREE-SIBLING in each screen-plane direction from a focused node — the
- * scoped cousin of resolveAdjacencies. The candidate set is just the node's
- * content-siblings (its parent's children in the ContentTree), so directional nav
- * moves by the eye ("the thing closest in that direction") yet can NEVER cross a
- * directory boundary — changing directory is i/o (focus.parent/child) or the palette.
- * Works for files AND dirs: both carry getBounds() (dirs via ContentTree footprint).
+ * Nearest REAL SIBLING in each screen-plane direction from a focused node. The
+ * candidate set is ONLY the node's tree-siblings (its parent's children — files AND
+ * dirs, both selectable), so the boundary is enforced by construction: you can never
+ * land in another branch, no gate needed. The layout packs a directory's siblings
+ * contiguously in its own footprint, so "nearest sibling in a direction" is the
+ * adjacent one — it never leaps across foreign content. A direction with no sibling
+ * stops (null). Changing directory is i/o (focus.parent/child) or the palette.
+ *
+ * Nearest by EDGE distance (bounds, not center) so a large sub-dir block wins via its
+ * near edge instead of losing to a small file on its center. Sibling-ness is
+ * PATH-derived (parentOf), immune to reparenting (dock).
  *
  * @param {Object} ctx - command context (needs .contentTree)
  * @param {THREE.Object3D} node - the focused tree node (file leaf or dir node)
@@ -260,27 +267,29 @@ export function resolveSiblingAdjacencies(ctx, node) {
     const empty = { up: null, down: null, left: null, right: null };
     const tree = ctx.contentTree;
     if (!tree || !node) return empty;
-    const parent = tree.parentOf(node);   // PATH-derived: immune to reparenting (dock)
+    const parent = tree.parentOf(node);    // PATH-derived: immune to reparenting (dock)
     if (!parent) return empty;             // root has no siblings
-    const sibs = tree.contentChildren(parent).filter((n) => n !== node);
-    const centerOf = (n) => { const b = getWorldBounds(n); return b ? b.center : null; };
-    const origin = centerOf(node);
-    if (!origin) return empty;
+    const focusBox = getWorldBox3(node);
+    if (!focusBox) return empty;
+    const fc = focusBox.getCenter(new THREE.Vector3());
+
     const best = { ...empty };
     const bestDist = { up: Infinity, down: Infinity, left: Infinity, right: Infinity };
-    for (const sib of sibs) {
-        const c = centerOf(sib);
-        if (!c) continue;
-        const dx = c.x - origin.x;
-        const dy = c.y - origin.y;
-        const dist = Math.hypot(dx, dy);
-        if (dist < 1e-3) continue;
+    for (const sib of tree.contentChildren(parent)) {
+        if (sib === node) continue;
+        const box = getWorldBox3(sib);
+        if (!box) continue;
+        const c = box.getCenter(_adjCenter);
+        const dx = c.x - fc.x;
+        const dy = c.y - fc.y;
+        if (Math.abs(dx) < 1e-3 && Math.abs(dy) < 1e-3) continue;
         const dir = Math.abs(dx) > Math.abs(dy)
             ? (dx > 0 ? 'right' : 'left')
             : (dy > 0 ? 'up'    : 'down');
+        const dist = box.distanceToPoint(fc); // edge distance — fair to large dir blocks
         if (dist < bestDist[dir]) {
-            best[dir] = sib;
             bestDist[dir] = dist;
+            best[dir] = sib;
         }
     }
     return best;
