@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -879,7 +881,37 @@ func RunServer(cfg ServerConfig) error {
 	}
 	log.Printf("[glyph3d] ══════════════════════════════════════")
 
-	return http.ListenAndServe(addr, mux)
+	return listenAndServe(addr, mux)
+}
+
+// listenAndServe binds addr with a short retry window, then serves. The dev loop
+// restarts the relay by killing the old one and starting a new one; a just-killed
+// predecessor can hold the listen socket for a beat while it drains, so a fresh start
+// racing it would otherwise die instantly on EADDRINUSE and drop the display + every
+// terminal. Retrying the bind for ~5s turns that race into a brief wait. A genuine
+// second server already up will exhaust the window and fail loudly — the honest answer
+// (one port, one relay). Non-EADDRINUSE errors fail immediately (bad addr / perms).
+func listenAndServe(addr string, handler http.Handler) error {
+	const tries, gap = 25, 200 * time.Millisecond // ~5s total
+	var ln net.Listener
+	var err error
+	for i := 0; i < tries; i++ {
+		if ln, err = net.Listen("tcp", addr); err == nil {
+			break
+		}
+		if !errors.Is(err, syscall.EADDRINUSE) {
+			return err
+		}
+		if i == 0 {
+			log.Printf("[serve] %s in use — waiting for the previous server to release it…", addr)
+		}
+		time.Sleep(gap)
+	}
+	if err != nil {
+		return fmt.Errorf("listen %s: still in use after %v (another server already running?): %w",
+			addr, time.Duration(tries)*gap, err)
+	}
+	return http.Serve(ln, handler)
 }
 
 func isWebSocketUpgrade(r *http.Request) bool {
@@ -905,7 +937,7 @@ func RunRelay(host string, port int, fsHandler *FSHandler) error {
 	mux.Handle("/", relay)
 
 	log.Printf("[relay] glyph3d WebSocket relay on %s", addr)
-	return http.ListenAndServe(addr, mux)
+	return listenAndServe(addr, mux)
 }
 
 func getLANAddresses() []string {

@@ -80,13 +80,18 @@ start_relay() {
   ( cd "$ROOT" && make )
   kill_port "$RELAY_PORT" relay
   ( cd "$ROOT" && nohup ./glyph3d-cli serve "$ROOT" --port "$RELAY_PORT" >"$RELAY_LOG" 2>&1 & )
-  sleep 1
-  if [ -n "$(pid_on_port "$RELAY_PORT")" ]; then
-    echo "  relay up → http://localhost:$RELAY_PORT/   (log: $RELAY_LOG)"
-  else
-    echo "  ✗ relay failed to start — last lines of $RELAY_LOG:"; tail -n6 "$RELAY_LOG"
-    return 1
-  fi
+  # The relay retries the bind for ~5s if a just-killed predecessor still holds the
+  # port (relay.go listenAndServe), so poll the window before declaring failure —
+  # otherwise a relay that's simply waiting reads as a false "✗ failed to start".
+  for _ in $(seq 1 14); do
+    if [ -n "$(pid_on_port "$RELAY_PORT")" ]; then
+      echo "  relay up → http://localhost:$RELAY_PORT/   (log: $RELAY_LOG)"
+      return 0
+    fi
+    sleep 0.5
+  done
+  echo "  ✗ relay failed to start — last lines of $RELAY_LOG:"; tail -n6 "$RELAY_LOG"
+  return 1
 }
 
 status() {
