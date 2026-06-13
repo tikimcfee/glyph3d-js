@@ -25,7 +25,7 @@
 import * as THREE from 'three';
 import GlyphField from '../GlyphField.js';
 import TerminalEmulator from './TerminalEmulator.js';
-import { detectVerticalScroll, captureScrolledRows, depthFade } from './terminalDepthHistory.js';
+import { detectVerticalScroll, captureScrolledRows, depthFade, reflowHistoryRows } from './terminalDepthHistory.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import MonospaceShapeCache from '../shaping/MonospaceShapeCache.js';
 
@@ -665,6 +665,12 @@ export default class TerminalGrid extends THREE.Object3D {
      * @param {number} rows
      */
     resize(cols, rows) {
+        const oldCols = this.cols;
+        // Snapshot the live screen BEFORE we mutate dims/buffers, to restore it below so
+        // the panel doesn't flash blank between this resize and the emulator's next
+        // repaint — matters most under a live grip-drag firing resize every cell step.
+        const prevLive = this._prevRows;
+
         this.cols = cols;
         this.rows = rows;
         this._cellCount  = cols * rows;
@@ -672,9 +678,16 @@ export default class TerminalGrid extends THREE.Object3D {
         this._totalCount = this._cellCount + this._depthCount;
         this._localBoundsDirty = true;
 
-        // Captured history is keyed to the old column width — drop it on resize
-        // rather than render torn rows; it refills as the new screen scrolls.
-        this._history = [];
+        // Captured depth-history SURVIVES a resize (a live grip-drag must not wipe the
+        // scrollback wall every step). Rows are kept as-is when only the height changes;
+        // when cols change each row is reflowed — clipped if narrower, blank-padded if
+        // wider — so every row stays exactly `cols` wide (the _paintHistory invariant).
+        // tmux holds the durable scrollback; terminal.depth.seed re-fills clipped columns.
+        if (cols !== oldCols && this._history.length) {
+            this._history = reflowHistoryRows(this._history, cols);
+        }
+        // _prevRows is scroll-detection state tied to the OLD dimensions — drop it so the
+        // next frame re-snapshots rather than diffing a phantom scroll across the resize.
         this._prevRows = null;
 
         const total = this._totalCount;
@@ -698,7 +711,28 @@ export default class TerminalGrid extends THREE.Object3D {
         this._computePositions();
         this._computeSizes();
 
-        // Full re-apply: swaps in freshly-sized attribute arrays.
+        // Restore the live screen region from the pre-resize snapshot (clipped to the
+        // new width/height) so the panel doesn't flash blank before the emulator's next
+        // repaint. The buffers above were zeroed/grown, so this writes over blanks.
+        if (prevLive) {
+            const cp = this._codepoints, cr = this._cellR, cg = this._cellG, cb = this._cellB;
+            const yN = Math.min(rows, prevLive.length);
+            for (let y = 0; y < yN; y++) {
+                const row = prevLive[y];
+                const xN = Math.min(cols, row.cp.length);
+                const base = y * cols;
+                for (let x = 0; x < xN; x++) {
+                    cp[base + x] = row.cp[x]; cr[base + x] = row.r[x];
+                    cg[base + x] = row.g[x]; cb[base + x] = row.b[x];
+                }
+            }
+        }
+        // Paint the preserved depth ring into the (resized) history block so the
+        // scrollback wall renders immediately rather than blanking until the next frame.
+        this._paintHistory();
+
+        // Full re-apply: swaps in freshly-sized attribute arrays (uploads the restored
+        // live region + repainted history in one shot, since it reads the canonical arrays).
         this._applyToRenderer();
         this._updateBackground();
 

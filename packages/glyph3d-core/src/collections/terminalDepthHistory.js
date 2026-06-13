@@ -81,6 +81,34 @@ export function captureScrolledRows(prevRows, k) {
 }
 
 /**
+ * Re-fit captured history rows to a new column width after a resize: clip if the
+ * panel narrowed, blank-pad (space + default fg 0.8) if it widened. Terminals don't
+ * re-wrap scrollback on resize — they clip — and tmux holds the durable copy
+ * (terminal.depth.seed restores the lost columns). Returns a NEW ring; a row already
+ * at `cols` is reused as-is (snapshots are immutable). Every row staying exactly
+ * `cols` wide is a hard invariant — _paintHistory reads row.cp[0..cols), so a short
+ * row would yield undefined → NaN in the GPU buffer.
+ * @param {Array<{cp:Float32Array,r:Float32Array,g:Float32Array,b:Float32Array}>} history  newest-first ring
+ * @param {number} cols  the new column width
+ * @returns {Array} a ring of the same length, every row exactly `cols` wide
+ */
+export function reflowHistoryRows(history, cols) {
+    return history.map((row) => {
+        if (row.cp.length === cols) return row;
+        const cp = new Float32Array(cols).fill(32);
+        const r  = new Float32Array(cols).fill(0.8);
+        const g  = new Float32Array(cols).fill(0.8);
+        const b  = new Float32Array(cols).fill(0.8);
+        const n = Math.min(row.cp.length, cols);
+        cp.set(row.cp.subarray(0, n));
+        r.set(row.r.subarray(0, n));
+        g.set(row.g.subarray(0, n));
+        b.set(row.b.subarray(0, n));
+        return { cp, r, g, b };
+    });
+}
+
+/**
  * Brightness multiplier for depth slot h (0 = newest, in the forefront). Fades
  * linearly from 1 at the front to fadeMin at the deepest slot — atmospheric
  * perspective so older history recedes visually as well as in Z.
