@@ -50,6 +50,11 @@ const S = {
     who: { color: '#dfe3ea', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
     tag: { color: '#7c8596' },
     sub: { color: '#7c8596', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 11 },
+    hist: { display: 'flex', flexDirection: 'column', minWidth: 0 },
+    histLine: (fresh) => ({
+        color: fresh ? '#aeb6c4' : '#6b727e',
+        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 11,
+    }),
     beacon: { color: '#e0b54a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 11 },
     act: (on) => ({
         flex: '0 0 auto', cursor: 'pointer', padding: '0 5px', borderRadius: 3,
@@ -114,7 +119,15 @@ export default function FieldVisitorsPanel({ client }) {
                             </span>
                             {v.beacon
                                 ? <span style={S.beacon}>✋ {v.beacon}</span>
-                                : v.lastAction ? <span style={S.sub}>{v.lastAction}</span> : null}
+                                : v.recent && v.recent.length
+                                    ? (
+                                        <span style={S.hist}>
+                                            {v.recent.slice(-3).reverse().map((e, i) => (
+                                                <span key={`${e.ts}:${i}`} style={S.histLine(i === 0)} title={e.text}>{e.text}</span>
+                                            ))}
+                                        </span>
+                                    )
+                                    : null}
                         </span>
                         <span
                             style={S.act(v.following)}

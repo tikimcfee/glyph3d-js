@@ -46,12 +46,14 @@ export default class FieldVisitorManager {
     getRoster() {
         const out = [];
         for (const v of this.visitors.values()) {
+            const recent = v.recent(5);   // last few records, each with a composed `text`
             out.push({
                 id: v.agentId,
                 type: v.agentType,
                 state: v.state,
                 beacon: v._beacon || null,
-                lastAction: v._actions.length ? v._actions[v._actions.length - 1] : null,
+                recent,
+                lastAction: recent.length ? recent[recent.length - 1].text : null,
                 lastActivityTs: v.lastActivityTs,
                 following: this.followId === v.agentId,
             });
@@ -75,13 +77,20 @@ export default class FieldVisitorManager {
         return v;
     }
 
-    /** agent.activity — agent acted on a file. `targetGrid` is resolved by the handler. */
-    activity(agentId, agentType, action, targetGrid, detail) {
+    /**
+     * agent.activity — the agent acted. The handler resolves the file path to a grid and
+     * passes a record: `{ action, target, detail, result, targetGrid }`. `targetGrid` (if
+     * present) is what the visitor eases toward; `target` is the human label kept in the log.
+     * @param {string} agentId
+     * @param {string} agentType
+     * @param {{action:string, target?:string, detail?:string, result?:string, targetGrid?:Object}} record
+     */
+    activity(agentId, agentType, record) {
         const v = this.ensure(agentId, agentType);
         v.setState('active');
         v.clearAttention();              // it's acting → hand lowered
-        if (targetGrid) v.setTarget(targetGrid);
-        v.note(action, detail);
+        if (record.targetGrid) v.setTarget(record.targetGrid);
+        v.note({ action: record.action, target: record.target, detail: record.detail, result: record.result });
         v.touch();
         this._emitChange();
         return v;

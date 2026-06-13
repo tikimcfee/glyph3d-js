@@ -29,8 +29,24 @@ const STATE_STYLE = {
 // file, but as a continuously-eased target rather than a static snap.
 const FOLLOW_GAP_X = 3;
 const FOLLOW_Z_FORWARD = 4;
-const MAX_LOG = 6;   // rolling action lines on the card
+const MAX_LOG = 8;   // rolling action records on the card (richer entries, still bounded)
 const EASE = 6;      // position-lerp rate (per second); higher = snappier follow
+
+/**
+ * Compose one log record into a single glanceable line:
+ *   read  src/foo.js
+ *   bash  rg -n TODO src/   → 3 matches
+ *   grep  TODO
+ * `target` is the file the agent touched; `detail` the meaningful arg (command/pattern/
+ * task); `result` a terse outcome. Any may be absent — the line collapses around what's there.
+ * @param {{action:string,target?:string,detail?:string,result?:string}} e
+ */
+function fmtEntry(e) {
+    const head = e.target ? `${e.action}  ${e.target}` : e.action;
+    const mid = e.detail ? `  ${e.detail}` : '';
+    const tail = e.result ? `   → ${e.result}` : '';
+    return `${head}${mid}${tail}`;
+}
 
 export default class FieldVisitor extends AgentGrid {
     /**
@@ -51,7 +67,7 @@ export default class FieldVisitor extends AgentGrid {
         this.state = 'active';
         this.lastActivityTs = _now();
 
-        this._actions = [];           // rolling action log (capped at MAX_LOG)
+        this._actions = [];           // rolling log of records {ts,action,target,detail,result} (capped at MAX_LOG)
         this._beacon = null;          // "follow me!" message, or null
         this._targetGrid = null;      // the file-grid we hover beside
         this._desired = new THREE.Vector3().copy(this.grid.position);
@@ -71,11 +87,30 @@ export default class FieldVisitor extends AgentGrid {
         this._placed = true;
     }
 
-    /** Record an action in the rolling log and refresh the card. */
-    note(action, detail) {
-        this._actions.push(detail ? `${action}  ${detail}` : String(action));
+    /**
+     * Record an action in the rolling log and refresh the card.
+     * @param {{action:string,target?:string,detail?:string,result?:string}} entry
+     * @returns {Object} the stored record (with ts)
+     */
+    note(entry) {
+        const rec = {
+            ts: _now(),
+            action: String(entry.action || ''),
+            target: entry.target || '',
+            detail: entry.detail || '',
+            result: entry.result || '',
+        };
+        this._actions.push(rec);
         if (this._actions.length > MAX_LOG) this._actions.shift();
         this._compose();
+        return rec;
+    }
+
+    /** Recent log records (newest last), each with a composed one-line `text`. The roster
+     *  panel renders these; the same records are the breadcrumb source for the trail. */
+    recent(n = MAX_LOG) {
+        const start = Math.max(0, this._actions.length - n);
+        return this._actions.slice(start).map((e) => ({ ...e, text: fmtEntry(e) }));
     }
 
     /** Mark fresh activity (resets the stall clock). */
@@ -121,7 +156,7 @@ export default class FieldVisitor extends AgentGrid {
         const style = STATE_STYLE[this.state] || STATE_STYLE.active;
         const beacon = this._beacon ? `   (!) follow me: ${this._beacon}` : '';
         this.title = `${this.agentType}:${this.agentId} [${style.tag}]${beacon}`;
-        this.write(this._actions.join('\n'));
+        this.write(this._actions.map(fmtEntry).join('\n'));
         // Lifecycle shows as a subtle backdrop tint — cheap (no text reflow) and
         // glanceable from a zoomed-out field — plus the [tag] in the header. (CodeGrid
         // has no text-recolour API; setBackgroundColor takes a THREE.Color.)

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -113,28 +114,131 @@ func hookConnect(url string) (*websocket.Conn, error) {
 
 func handlePostToolUse(conn *websocket.Conn, event *HookEvent) {
 	id, typ := agentIdentity(event)
+	action := actionVerb(event.ToolName)
+
+	// File tools move the visitor TO the file — the path is the target (camera stays free).
+	// Everything else carries its meaningful argument as `detail`: the bash command, the
+	// grep pattern, the subagent's task. Both pull from the same raw ToolInput the hook
+	// already receives; we just stop throwing it away.
+	target := ""
 	switch event.ToolName {
 	case "Read", "Edit", "Write":
-		// File tools move the agent's visitor to the file (camera stays free).
 		var input FilePathInput
 		json.Unmarshal(event.ToolInput, &input)
 		if input.FilePath == "" {
 			return
 		}
-		action := map[string]string{"Read": "read", "Edit": "edit", "Write": "write"}[event.ToolName]
-		sendActivity(conn, id, typ, action, relativize(input.FilePath, event.CWD))
-
-	case "Bash":
-		sendActivity(conn, id, typ, "bash", "")
-	case "Grep":
-		sendActivity(conn, id, typ, "grep", "")
-	case "Glob":
-		sendActivity(conn, id, typ, "glob", "")
-	case "Agent":
-		sendActivity(conn, id, typ, "subagent", "")
-	default:
-		sendActivity(conn, id, typ, strings.ToLower(event.ToolName), "")
+		target = relativize(input.FilePath, event.CWD)
 	}
+
+	detail := clip(extractDetail(event.ToolName, event.ToolInput), 200)
+	result := clip(summarizeResult(event.ToolResponse), 80)
+	sendActivity(conn, id, typ, action, target, detail, result)
+}
+
+// actionVerb normalizes a tool name to the short lifecycle verb shown on the visitor card.
+func actionVerb(tool string) string {
+	switch tool {
+	case "Read":
+		return "read"
+	case "Edit":
+		return "edit"
+	case "Write":
+		return "write"
+	case "Agent":
+		return "subagent"
+	default:
+		return strings.ToLower(tool)
+	}
+}
+
+// extractDetail pulls the one meaningful argument out of a tool's input — the thing a human
+// watching the field wants to see. Tolerant by design: a generic decode + key-preference,
+// so a tool we've never special-cased still surfaces SOMETHING rather than a bare verb.
+func extractDetail(tool string, raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var m map[string]any
+	if json.Unmarshal(raw, &m) != nil {
+		return ""
+	}
+	pick := func(keys ...string) string {
+		for _, k := range keys {
+			if s, ok := m[k].(string); ok && s != "" {
+				return s
+			}
+		}
+		return ""
+	}
+	switch tool {
+	case "Bash":
+		return pick("command")
+	case "Grep":
+		return pick("pattern")
+	case "Glob":
+		return pick("pattern")
+	case "Task", "Agent":
+		return pick("description", "prompt")
+	case "WebFetch":
+		return pick("url")
+	case "WebSearch":
+		return pick("query")
+	case "Read", "Edit", "Write":
+		return "" // the file path is the target, not the detail
+	default:
+		// Unknown tool: surface the first recognizable scalar so the card still says something.
+		return pick("command", "pattern", "query", "url", "description", "prompt", "path", "file_path", "name")
+	}
+}
+
+// summarizeResult derives a short outcome from the tool response. tool_response is sometimes
+// a bare string and sometimes a structured object — handle both, prefer an error if present,
+// and keep it terse (the detail is the headline; this is the footnote).
+func summarizeResult(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	// String response: first non-empty line is the summary.
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return firstLine(s)
+	}
+	var m map[string]any
+	if json.Unmarshal(raw, &m) != nil {
+		return ""
+	}
+	if b, ok := m["is_error"].(bool); ok && b {
+		if e, ok := m["error"].(string); ok && e != "" {
+			return "error: " + firstLine(e)
+		}
+		return "error"
+	}
+	if e, ok := m["error"].(string); ok && e != "" {
+		return "error: " + firstLine(e)
+	}
+	for _, k := range []string{"stdout", "content", "result", "output"} {
+		if v, ok := m[k].(string); ok && v != "" {
+			return firstLine(v)
+		}
+	}
+	return ""
+}
+
+func firstLine(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	return s
+}
+
+func clip(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max-1]) + "…"
 }
 
 func handlePreToolUse(conn *websocket.Conn, event *HookEvent) {
@@ -170,15 +274,41 @@ func agentIdentity(event *HookEvent) (id, typ string) {
 	return id, typ
 }
 
-// sendActivity tells the viewer an agent acted. A relPath moves the agent's field
-// visitor to that file (the camera is NOT touched); an empty path just keeps the
-// visitor live and logs the action. This replaces the old camera.focus yank.
-func sendActivity(conn *websocket.Conn, id, typ, action, relPath string) {
-	if relPath != "" {
-		sendCmd(conn, fmt.Sprintf("agent.activity %s %s %s %s", id, typ, action, relPath))
-	} else {
-		sendCmd(conn, fmt.Sprintf("agent.activity %s %s %s", id, typ, action))
+// sendActivity tells the viewer an agent acted, carrying the full record:
+//
+//	agent.activity <id> <type> <action> [target] [detail] [result]
+//
+// A `target` (a file path) moves the visitor to that file; `detail`/`result` fill its
+// card. The camera is never touched. Two serializations of the SAME verb: when every
+// field is whitespace/quote-free we send the plain readable line (keeps the relay log
+// legible for the high-frequency file-op case); otherwise we route the record through
+// the `call` hatch (base64'd JSON arg vector), which survives the bus tokenizer intact.
+func sendActivity(conn *websocket.Conn, id, typ, action, target, detail, result string) {
+	if bareSafe(target) && detail == "" && result == "" {
+		if target != "" {
+			sendCmd(conn, fmt.Sprintf("agent.activity %s %s %s %s", id, typ, action, target))
+		} else {
+			sendCmd(conn, fmt.Sprintf("agent.activity %s %s %s", id, typ, action))
+		}
+		return
 	}
+	// Structured path: positional arg vector, trailing empties trimmed, base64'd via `call`.
+	argv := []string{"agent.activity", id, typ, action, target, detail, result}
+	for len(argv) > 4 && argv[len(argv)-1] == "" {
+		argv = argv[:len(argv)-1]
+	}
+	payload, err := json.Marshal(argv)
+	if err != nil {
+		dbg("activity marshal error: %v", err)
+		return
+	}
+	sendCmd(conn, "call "+base64.StdEncoding.EncodeToString(payload))
+}
+
+// bareSafe reports whether a token can ride the plain command line without quoting —
+// no whitespace, quotes, or backslashes that the bus tokenizer would mangle.
+func bareSafe(s string) bool {
+	return !strings.ContainsAny(s, " \t\n\r\"\\")
 }
 
 func sendCmd(conn *websocket.Conn, cmd string) {

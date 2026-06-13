@@ -6,6 +6,20 @@
 import { box, kvLines } from '../formatResponse.js';
 
 /**
+ * Decode a base64 string to a UTF-8 JS string. `atob` alone yields a binary string that
+ * mangles multibyte sequences (paths/commands with unicode, emoji) — round-trip the bytes
+ * through TextDecoder so the bundle survives intact. Tolerates base64url (-/_) too.
+ * @param {string} b64
+ * @returns {string}
+ */
+function b64ToUtf8(b64) {
+    const norm = b64.replace(/-/g, '+').replace(/_/g, '/');
+    const bin = atob(norm);
+    const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+    return new TextDecoder().decode(bytes);
+}
+
+/**
  * @param {import('../CommandRouter.js').default} router
  */
 export default function registerSystemCommands(router) {
@@ -93,6 +107,52 @@ export default function registerSystemCommands(router) {
             data: { results, succeeded, failed }
         };
     }, { description: 'Execute multiple commands in one round-trip', usage: '<json-array>' });
+
+    router.register('call', async (args, ctx) => {
+        // The structured side-hatch: any command, invoked from a base64'd bundle instead
+        // of a space-delimited line. The bundle decodes to the SAME [name, ...args] vector
+        // a typed line produces — it's a serialization of the call, NOT a second calling
+        // convention, so handlers are untouched (they still read positional args).
+        //
+        // Why base64 and not raw JSON-on-the-line: the bus tokenizer (parse) strips quotes
+        // and splits on spaces, so a JSON payload typed inline loses its structure. base64's
+        // alphabet (A-Za-z0-9+/=) has neither spaces nor quotes, so a bundle survives the
+        // tokenizer AND any args.join(' ') intact — transport-agnostic across CLI/hook/agent.
+        //
+        // Payload (after decode) is JSON, either form:
+        //   ["grid.layout", "3", "--mode", "newspaper"]        positional array
+        //   {"cmd": "grid.layout", "args": ["3", "--mode"]}    object form
+        // The object form reserves a "kwargs" slot for the future named-param layer; it is
+        // NOT interpreted yet (positional-only, by design — named rides the arg-schema work).
+        if (args.length < 1) {
+            return { text: 'ERR: usage: call <base64-json>  (JSON: [name, ...args] or {cmd, args})', data: null };
+        }
+        let spec;
+        try {
+            spec = JSON.parse(b64ToUtf8(args[0]));
+        } catch (e) {
+            return { text: `ERR: call payload must be base64-encoded JSON: ${e.message}`, data: null };
+        }
+        let invocation;
+        if (Array.isArray(spec)) {
+            invocation = spec;
+        } else if (spec && typeof spec === 'object' && typeof spec.cmd === 'string') {
+            invocation = [spec.cmd, ...(Array.isArray(spec.args) ? spec.args : [])];
+        } else {
+            return { text: 'ERR: call payload must be [name, ...args] or {cmd, args}', data: null };
+        }
+        if (!invocation.length || typeof invocation[0] !== 'string') {
+            return { text: 'ERR: call payload has no command name', data: null };
+        }
+        // A bundle that wraps `call` is a recursion bomb (and pointless) — refuse it.
+        if (invocation[0].toLowerCase() === 'call') {
+            return { text: 'ERR: call cannot wrap call', data: null };
+        }
+        // Coerce non-string args to strings: handlers read positional string tokens, and the
+        // typed-CLI path always delivers strings — keep the hatch byte-identical to it.
+        const argv = [invocation[0], ...invocation.slice(1).map(a => (typeof a === 'string' ? a : String(a)))];
+        return router.execute(argv, { sender: ctx.sender });
+    }, { description: 'Invoke any command from a base64-encoded JSON bundle ([name,...args] or {cmd,args})', usage: '<base64-json>' });
 
     router.register('reload', (args, ctx) => {
         // Schedule the reload after sending the response, so the caller gets the OK.

@@ -6,7 +6,8 @@
  * spam), but they're plain commands first: you can spawn, move, and follow visitors
  * by typing them, which is how this whole spine is verified before the hook is wired.
  *
- *   agent.activity <id> <type> <action> [path...]   spawn/move a visitor to a file
+ *   agent.activity <id> <type> <action> [target] [detail] [result]   spawn/move + log
+ *       (detail/result with spaces ride the `call` base64 hatch — see cli/hook.go)
  *   agent.state    <id> <active|idle|stalled|done>  set lifecycle state
  *   agent.stop     <id>                             mark finished ('done' — PERSISTS)
  *   agent.clear    <id|all|done>                    remove visitor(s) from the field
@@ -27,19 +28,28 @@ export default function registerAgentVisitorCommands(router) {
         const mgr = ctx.visitorManager;
         if (!mgr) return noMgr;
         if (args.length < 3) {
-            return { text: 'ERR: usage: agent.activity <id> <type> <action> [path...]', data: null };
+            return { text: 'ERR: usage: agent.activity <id> <type> <action> [target] [detail] [result]', data: null };
         }
+        // Positional record. Fields that carry spaces/quotes (detail, result) arrive intact
+        // via the `call` hatch (base64'd arg vector); a bare typed line still works for the
+        // simple <id> <type> <action> <target> case. See cli/hook.go sendActivity.
         const [id, type, action] = args;
-        const path = args.slice(3).join(' ');   // rejoin so paths with spaces survive
+        const target = args[3] || '';
+        const detail = args[4] || '';
+        const result = args[5] || '';
         let targetGrid = null;
-        let label = path || null;
-        if (path) {
-            const r = resolveGridByIdOrIndex(ctx, path, 'grid', { byName: true });
-            if (!r.error) { targetGrid = r.grid; label = r.registryId || path; }
+        let label = target || null;
+        if (target) {
+            const r = resolveGridByIdOrIndex(ctx, target, 'grid', { byName: true });
+            if (!r.error) { targetGrid = r.grid; label = r.registryId || target; }
         }
-        mgr.activity(id, type, action, targetGrid, label);
-        return { text: `OK: ${id} ${action}${label ? ' ' + label : ''}`, data: { id, action, target: label } };
-    }, { description: 'Agent acted on a file — spawn/move its field visitor', usage: '<id> <type> <action> [path]' });
+        mgr.activity(id, type, { action, target: label, detail, result, targetGrid });
+        const echo = [label, detail, result].filter(Boolean).join('  ');
+        return {
+            text: `OK: ${id} ${action}${echo ? ' ' + echo : ''}`,
+            data: { id, action, target: label, detail, result },
+        };
+    }, { description: 'Agent acted — spawn/move its field visitor', usage: '<id> <type> <action> [target] [detail] [result]' });
 
     router.register('agent.spawn', (args, ctx) => {
         const mgr = ctx.visitorManager;
