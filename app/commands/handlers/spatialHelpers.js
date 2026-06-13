@@ -244,6 +244,46 @@ export function resolveAdjacencies(ctx, currentId) {
     return best;
 }
 
+/**
+ * Nearest TREE-SIBLING in each screen-plane direction from a focused node — the
+ * scoped cousin of resolveAdjacencies. The candidate set is just the node's
+ * content-siblings (its parent's children in the ContentTree), so directional nav
+ * moves by the eye ("the thing closest in that direction") yet can NEVER cross a
+ * directory boundary — changing directory is i/o (focus.parent/child) or the palette.
+ * Works for files AND dirs: both carry getBounds() (dirs via ContentTree footprint).
+ *
+ * @param {Object} ctx - command context (needs .contentTree)
+ * @param {THREE.Object3D} node - the focused tree node (file leaf or dir node)
+ * @returns {{ up: THREE.Object3D|null, down: THREE.Object3D|null, left: THREE.Object3D|null, right: THREE.Object3D|null }}
+ */
+export function resolveSiblingAdjacencies(ctx, node) {
+    const empty = { up: null, down: null, left: null, right: null };
+    const tree = ctx.contentTree;
+    if (!tree || !node || !node.parent) return empty;
+    const sibs = tree.contentChildren(node.parent).filter((n) => n !== node);
+    const centerOf = (n) => { const b = getWorldBounds(n); return b ? b.center : null; };
+    const origin = centerOf(node);
+    if (!origin) return empty;
+    const best = { ...empty };
+    const bestDist = { up: Infinity, down: Infinity, left: Infinity, right: Infinity };
+    for (const sib of sibs) {
+        const c = centerOf(sib);
+        if (!c) continue;
+        const dx = c.x - origin.x;
+        const dy = c.y - origin.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist < 1e-3) continue;
+        const dir = Math.abs(dx) > Math.abs(dy)
+            ? (dx > 0 ? 'right' : 'left')
+            : (dy > 0 ? 'up'    : 'down');
+        if (dist < bestDist[dir]) {
+            best[dir] = sib;
+            bestDist[dir] = dist;
+        }
+    }
+    return best;
+}
+
 // ──────────────────────────────────────────────────────────────
 //  Anchor Resolution
 // ──────────────────────────────────────────────────────────────

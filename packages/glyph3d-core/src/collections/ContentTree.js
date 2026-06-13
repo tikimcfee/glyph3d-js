@@ -30,6 +30,9 @@
 import * as THREE from 'three';
 import packedLayout from './layouts/packedLayout.js';
 
+/** Scratch vector for footprintBounds — one focused node measured per frame, no per-call alloc. */
+const _fpPos = new THREE.Vector3();
+
 /** Normalize a path: trim, drop leading/trailing/duplicate slashes → clean segments. */
 function splitPath(path) {
     return String(path == null ? '' : path).split('/').filter((s) => s.length > 0);
@@ -53,6 +56,7 @@ export default class ContentTree {
         this.root = new THREE.Group();
         this.root.name = 'content-root';
         this.root.userData = { path: '', name: '', isDir: true };
+        this.root.getBounds = () => this.footprintBounds(this.root);
 
         // Keyed by FULL normalized path (NOT by name) so `b` and `bc` never collide and
         // every dir is created exactly once. '' → root.
@@ -88,6 +92,44 @@ export default class ContentTree {
     dirCount() { return this._dirs.size - 1; }
 
     /**
+     * Direct CONTENT children of a node — file leaves + subdirectory nodes, with
+     * decorations (bounding-prism markers etc.) excluded. Ordered dirs-first then by
+     * name, so sibling traversal (focus.sibling) and descent (focus.child) are
+     * deterministic regardless of insertion order. Both files and dirs are THREE
+     * objects parented in the tree, so node.parent + this give the full walk.
+     * @param {THREE.Object3D} node
+     * @returns {THREE.Object3D[]}
+     */
+    contentChildren(node) {
+        if (!node) return [];
+        return node.children
+            .filter((c) => c.userData && c.userData.path !== undefined && !c.userData.isMarker)
+            .sort((a, b) => {
+                const ad = !!a.userData.isDir, bd = !!b.userData.isDir;
+                if (ad !== bd) return ad ? -1 : 1; // directories first
+                return String(a.userData.name || '').localeCompare(String(b.userData.name || ''));
+            });
+    }
+
+    /**
+     * World-space AABB of a single node from its laid-out footprint (userData.size at
+     * the node's world position) — the O(1) layout-extent model getWorldBounds uses for
+     * geometry-less leaves, so framing a directory is cheap even per-frame. Footprints
+     * are 2D (z-thin); the box sits at the node's z-plane.
+     * @param {THREE.Object3D} node
+     * @param {THREE.Box3} [target]
+     * @returns {THREE.Box3}
+     */
+    footprintBounds(node, target = new THREE.Box3()) {
+        node.updateWorldMatrix(true, false);
+        node.getWorldPosition(_fpPos);
+        const s = (node.userData && node.userData.size) || { x: 1, y: 1, z: 0 };
+        target.min.set(_fpPos.x - s.x / 2, _fpPos.y - s.y / 2, _fpPos.z - s.z / 2);
+        target.max.set(_fpPos.x + s.x / 2, _fpPos.y + s.y / 2, _fpPos.z + s.z / 2);
+        return target;
+    }
+
+    /**
      * Ensure the directory-node chain for `dirParts` exists, creating only the missing
      * tail and parenting each new node under its parent. Idempotent. Returns the deepest
      * node. (mkdir -p, keyed by full path so it's create-once and substring-safe.)
@@ -102,6 +144,10 @@ export default class ContentTree {
                 child = new THREE.Group();
                 child.name = `dir:${acc}`;
                 child.userData = { path: acc, name: seg, isDir: true };
+                // Directories are first-class focus targets: a getBounds() (the laid-out
+                // footprint) lets the camera frame a dir and the selection box draw around
+                // it, exactly like a file. focus.parent/child/sibling navigate these nodes.
+                child.getBounds = () => this.footprintBounds(child);
                 node.add(child);
                 this._dirs.set(acc, child);
             }

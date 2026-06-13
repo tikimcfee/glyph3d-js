@@ -22,12 +22,22 @@
  *   label   — human description, for the future which-key overlay
  */
 
-/** @type {Binding[]} The nav layer: hjkl move focus between neighbor grids. */
+/**
+ * @type {Binding[]} The nav layer — all movement SCOPED to the current directory:
+ *   h / j / k / l  — nearest sibling left / down / up / right (spatial direction,
+ *                    but candidates are tree-siblings only, so it never crosses a
+ *                    directory boundary — moves match the eye, stay in scope).
+ *   i / o          — change scope: up to the parent directory / down into the first
+ *                    child. Changing directory is ONLY this (or the palette).
+ * Directories are first-class focus targets — i/o land focus on a directory itself.
+ */
 export const NAV_BINDINGS = [
-    { key: 'h', command: ['focus.neighbor', 'left'],  label: 'focus file left' },
-    { key: 'j', command: ['focus.neighbor', 'down'],  label: 'focus file down' },
-    { key: 'k', command: ['focus.neighbor', 'up'],    label: 'focus file up' },
-    { key: 'l', command: ['focus.neighbor', 'right'], label: 'focus file right' },
+    { key: 'h', command: ['focus.neighbor', 'left'],  label: 'sibling left' },
+    { key: 'j', command: ['focus.neighbor', 'down'],  label: 'sibling down' },
+    { key: 'k', command: ['focus.neighbor', 'up'],    label: 'sibling up' },
+    { key: 'l', command: ['focus.neighbor', 'right'], label: 'sibling right' },
+    { key: 'i', command: ['focus.parent'],            label: 'up to parent directory' },
+    { key: 'o', command: ['focus.child'],             label: 'into first child' },
 ];
 
 /**

@@ -15,7 +15,7 @@ import { COLORS } from './colorConstants.js';
 import {
     resolveGridByIdOrIndex, getWorldBounds, unionBounds,
     resolveAnchor, fmtVec,
-    frameBounds, animateCamera, resolveAdjacencies,
+    frameBounds, animateCamera, resolveSiblingAdjacencies,
 } from './spatialHelpers.js';
 import { zDistanceForFit } from '@glyph3d/core/services/spatial/spatialMath.js';
 import { decodeBase64 } from '@glyph3d/core/utils/encoding.js';
@@ -121,47 +121,92 @@ function removeTourAnnotation(ctx, id) {
 export default function registerNavigationCommands(router) {
 
     // ================================================================
-    //  focus.neighbor <left|right|up|down>
+    //  Focus navigation — all SCOPED to the current directory.
     //
-    //  Move focus to the nearest neighbor grid in a screen-plane direction.
-    //  The clean spatial-nav primitive: it sets attention.primary (the green
-    //  "highlight" box) and frames the camera with the SAME focusOnGrid /
-    //  focusOnObject path camera.focus uses — so a key-nav, a canvas click, and
-    //  `camera.focus <id>` all land identically. No reader/explorer mode state:
-    //  one source of truth (the bus + AttentionManager). hjkl bind to this.
+    //  hjkl (focus.neighbor) move to the nearest SIBLING in a screen-plane
+    //  direction — spatial, so it matches the eye ("the thing closest"), but the
+    //  candidate set is only the focused node's tree-siblings, so it NEVER crosses
+    //  a directory boundary. Changing directory is i/o (focus.parent/child) or the
+    //  palette — nothing else. Directories are first-class focus targets: focusing
+    //  one registers a 'dir' entity (id 'dir:<path>') and frames its footprint, so
+    //  the selection box + breadcrumb chip treat a directory exactly like a file.
     // ================================================================
+
+    // The focused tree node = attention.primary's entity. Both file leaves (grids)
+    // and dir nodes live in the ContentTree as THREE objects, so .parent /
+    // contentChildren / sibling-adjacency walk either uniformly.
+    const currentFocusNode = (ctx) => {
+        const id = ctx.attention?.primary?.id ?? null;
+        return id ? (ctx.registry?.get(id)?.grid ?? null) : null;
+    };
+
+    // Set primary + frame a tree node. Dirs are registered on demand as a 'dir'
+    // entity and framed by their footprint (focusOnObject reads the getBounds
+    // ContentTree gave them); files take the grid-index focus path camera.focus uses.
+    const focusTreeNode = (ctx, node) => {
+        if (node.userData?.isDir) {
+            const id = `dir:${node.userData.path}`;
+            if (ctx.registry.get(id)?.grid !== node) {
+                ctx.registry.register(id, node, { type: 'dir', path: node.userData.path, name: node.userData.name });
+            }
+            ctx.attentionManager.set('primary', id, { entity: ctx.registry.get(id) });
+            ctx.cameraController?.focusOnObject?.(node);
+            return id;
+        }
+        const id = ctx.registry.getIdByGrid(node);
+        ctx.attentionManager.set('primary', id, { entity: ctx.registry.get(id) });
+        const idx = ctx.getGrids().indexOf(node);
+        if (idx >= 0) ctx.cameraController?.focusOnGrid(idx);
+        else ctx.cameraController?.focusOnObject?.(node);
+        return id;
+    };
 
     router.register('focus.neighbor', (args, ctx) => {
         const dir = (args[0] || '').toLowerCase();
         if (!['left', 'right', 'up', 'down'].includes(dir)) {
             return { text: 'ERR: usage: focus.neighbor <left|right|up|down>', data: null };
         }
-        const currentId = ctx.attention?.primary?.id ?? null;
-        if (!currentId) {
-            return { text: 'ERR: focus.neighbor needs a focused grid to move from (attention primary is empty)', data: null };
+        if (!ctx.contentTree) return { text: 'ERR: content tree not ready', data: null };
+        const node = currentFocusNode(ctx);
+        if (!node) {
+            return { text: 'ERR: focus.neighbor needs a focused file/dir (attention primary is empty)', data: null };
         }
-        const next = resolveAdjacencies(ctx, currentId)[dir];
+        const next = resolveSiblingAdjacencies(ctx, node)[dir];
         if (!next) {
-            return { text: `OK: no neighbor ${dir} of ${currentId}`, data: { direction: dir, from: currentId, target: null } };
+            return { text: `OK: no sibling ${dir} in this directory`, data: { direction: dir, target: null } };
         }
-
-        ctx.attentionManager.set('primary', next.id, { entity: next });
-        const grids = ctx.getGrids();
-        const idx = grids.indexOf(next.grid);
-        if (idx >= 0) {
-            ctx.cameraController?.focusOnGrid(idx);
-            ctx.spatialNav?.focusGrid?.(idx, false);
-        } else {
-            ctx.cameraController?.focusOnObject?.(next.grid);
-        }
-        return {
-            text: `OK: focus ${dir} → ${next.id}`,
-            data: { direction: dir, from: currentId, target: next.id },
-        };
+        const id = focusTreeNode(ctx, next);
+        return { text: `OK: ${dir} → ${id}`, data: { direction: dir, target: id } };
     }, {
-        description: 'Move focus (highlight + camera) to the nearest neighbor grid in a screen-plane direction',
+        description: 'Focus the nearest sibling in a screen-plane direction, scoped to the current directory',
         usage: '<left|right|up|down>',
     });
+
+    router.register('focus.parent', (args, ctx) => {
+        const tree = ctx.contentTree;
+        if (!tree) return { text: 'ERR: content tree not ready', data: null };
+        const node = currentFocusNode(ctx);
+        if (!node) return { text: 'ERR: focus.parent needs a focused file/dir', data: null };
+        const parent = node.parent;
+        // The tree root is the ceiling — its parent is the scene, with no content userData.
+        if (!parent || parent.userData?.path === undefined || parent === node) {
+            return { text: 'OK: already at the top of the tree', data: { target: null } };
+        }
+        const id = focusTreeNode(ctx, parent);
+        return { text: `OK: up to parent → ${id}`, data: { target: id } };
+    }, { description: 'Focus up to the parent directory (tree hierarchy)' });
+
+    router.register('focus.child', (args, ctx) => {
+        const tree = ctx.contentTree;
+        if (!tree) return { text: 'ERR: content tree not ready', data: null };
+        const node = currentFocusNode(ctx);
+        if (!node) return { text: 'ERR: focus.child needs a focused dir', data: null };
+        if (!node.userData?.isDir) return { text: 'OK: a file has no children to enter', data: { target: null } };
+        const kids = tree.contentChildren(node);
+        if (kids.length === 0) return { text: 'OK: empty directory', data: { target: null } };
+        const id = focusTreeNode(ctx, kids[0]); // descend into the first child (dirs-first order)
+        return { text: `OK: into → ${id}`, data: { target: id } };
+    }, { description: 'Focus down into the first child of the focused directory (tree hierarchy)' });
 
     // ================================================================
     //  camera.frame <index1> [index2...] [--padding <n>]
