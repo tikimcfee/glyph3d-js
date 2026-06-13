@@ -9,6 +9,7 @@ import { installConsoleForwarder } from '@glyph3d/core/services/orchestration/co
 import AttentionManager from '@glyph3d/core/services/interaction/AttentionManager.js';
 import EntityKeystrokeRouter from '@glyph3d/core/services/interaction/EntityKeystrokeRouter.js';
 import InteractionContext from '@glyph3d/core/services/interaction/InteractionContext.js';
+import CameraDock from '@glyph3d/core/services/interaction/CameraDock.js';
 import RemoteFileSystemProvider from '@glyph3d/core/services/data/RemoteFileSystemProvider.js';
 import GitHubFileProvider from '@glyph3d/core/services/data/GitHubFileProvider.js';
 import { PickingSystem } from '@glyph3d/core/picking/PickingSystem.js';
@@ -112,6 +113,11 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     windowManager: null,
     wsbridge: null,
 
+    // Camera-locked HUD bar of window tiles (CameraDock). Created in the effect
+    // (needs scene + the shared AttentionManager) and ticked by <DockRunner/>.
+    // dock.* verbs drive it; distinct from ctx.dock (the DOM dockview).
+    cameraDock: null,
+
     // Field-visitor multiplexer — one self-driving visitor per agent. Created in the
     // effect (needs the live ctx); ticked each frame by <VisitorRunner/>.
     visitorManager: null,
@@ -151,6 +157,16 @@ const AppCommandContext = createContext(null);
  */
 function VisitorRunner({ stateRef }) {
   useFrame((_, dt) => stateRef.current?.ctx?.visitorManager?.update(dt));
+  return null;
+}
+
+/**
+ * DockRunner — parks the camera-locked dock ahead of the active camera and
+ * advances its tile animations once per frame. Logic-only (returns null);
+ * guarded so it's a no-op until the effect wires ctx.cameraDock.
+ */
+function DockRunner({ stateRef }) {
+  useFrame((state, dt) => stateRef.current?.ctx?.cameraDock?.update(dt, state.camera));
   return null;
 }
 
@@ -232,6 +248,14 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // Field-visitor multiplexer: agent.* commands spawn/move/follow one self-driving
     // visitor per agent. The camera stays free unless `camera.follow <id>` opts in.
     state.ctx.visitorManager = new FieldVisitorManager(state.ctx);
+
+    // Camera-locked HUD dock: a bar of window tiles that rides the view. Reparents
+    // a docked grid/terminal under itself (world-preserving attach) and scales it to
+    // a tile. Shares the AttentionManager so its .docks map is the record of truth.
+    // <DockRunner/> ticks it; dock.* verbs drive it.
+    const cameraDock = new CameraDock({ attentionManager: state.ctx.attentionManager });
+    scene.add(cameraDock);
+    state.ctx.cameraDock = cameraDock;
 
     // The composable "what is the user locked into" projection — focus/edit/key
     // nodes derived from attention + cursor state (owns nothing). The breadcrumb
@@ -373,12 +397,18 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       state.ctx.visitorManager = null;
       state.ctx.interactionContext?.dispose();
       state.ctx.interactionContext = null;
+      if (state.ctx.cameraDock) {
+        scene.remove(state.ctx.cameraDock);
+        state.ctx.cameraDock.dispose();
+        state.ctx.cameraDock = null;
+      }
     };
   }, [relay]);
 
   return (
     <AppCommandContext.Provider value={stateRef.current}>
       <VisitorRunner stateRef={stateRef} />
+      <DockRunner stateRef={stateRef} />
       {children}
     </AppCommandContext.Provider>
   );
