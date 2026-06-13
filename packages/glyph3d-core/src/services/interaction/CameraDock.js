@@ -64,7 +64,7 @@ export class CameraDock extends THREE.Object3D {
      * @param {'linear'|'radial'} [opts.layout='linear']
      */
     constructor({ attentionManager = null, distance = 40, tileFrac = 0.18, bottomFrac = 0.66,
-                  focusFrac = 0.5, focusY = 0.06, animDur = 0.22, layout = 'radial' } = {}) {
+                  focusFrac = 0.5, focusY = 0.06, focusDistFrac = 0.7, animDur = 0.22, layout = 'radial' } = {}) {
         super();
         this.name = 'camera-dock';
         this.attentionManager = attentionManager;
@@ -73,6 +73,10 @@ export class CameraDock extends THREE.Object3D {
         this.bottomFrac = bottomFrac;
         this.focusFrac = focusFrac;   // focus-area tile height as a fraction of the visible height
         this.focusY = focusY;         // focus-area center: fraction of viewH above the view center
+        this.focusDistFrac = focusDistFrac; // focus tile sits this fraction of `distance` from the
+                                            // eye — <1 pulls it IN FRONT of the dock sphere so it
+                                            // always renders on top (scale/y compensate, so it
+                                            // looks identical, just nearer)
         this.animDur = animDur;       // tile slide/scale duration (s) — a curt, polite snap
         this.layoutMode = layout;     // 'radial' (hemisphere, default) | 'linear'
 
@@ -158,7 +162,7 @@ export class CameraDock extends THREE.Object3D {
      * @param {string} key @param {number} value @returns {boolean}
      */
     setParam(key, value) {
-        if (!['distance', 'tileFrac', 'bottomFrac', 'focusFrac', 'focusY', 'animDur'].includes(key)) return false;
+        if (!['distance', 'tileFrac', 'bottomFrac', 'focusFrac', 'focusY', 'focusDistFrac', 'animDur'].includes(key)) return false;
         if (!Number.isFinite(value)) return false;
         this[key] = value;
         this._relayout();
@@ -382,10 +386,14 @@ export class CameraDock extends THREE.Object3D {
             }
         }
 
-        // ---- focus area: centered + enlarged, just above the view center ----
+        // ---- focus area: centered + enlarged, and pulled toward the eye so it always
+        //      renders in front of the dock sphere (and the scene). focusDistFrac<1 sits
+        //      it at that fraction of `distance`; scale and screen-y scale by it too, so
+        //      it looks identical — just nearer, so plain depth-testing puts it on top.
         if (focused) {
-            const scale = (this._viewH * this.focusFrac) / focused.naturalH;
-            this._animateTile(focused, 0, this._viewH * this.focusY, 0, scale);
+            const fd = this.focusDistFrac;
+            const scale = (this._viewH * this.focusFrac / focused.naturalH) * fd;
+            this._animateTile(focused, 0, this._viewH * this.focusY * fd, this.distance * (1 - fd), scale);
             const d = this.attentionManager?.docks?.get(focused.id);
             if (d) d.offset = { slot: 'focus' };
         }
