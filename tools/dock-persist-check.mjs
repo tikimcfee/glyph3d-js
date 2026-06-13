@@ -70,7 +70,7 @@ function makeRouter(cameraDock) {
   cd.setLayout('radial'); cd._lock('term-1'); // term-1 is docked
   const ss = new SessionStore({ ctx: makeCtx(reg, cd), router: makeRouter(cd), bridge: {} });
   const snap = ss.capture();
-  eq(snap.dock3d, { layout: 'radial', tiles: ['term-1'] }, 'capture: dock3d has layout + ordered tiles');
+  eq(snap.dock3d, { layout: 'radial', tiles: [{ id: 'term-1', zoom: 1 }] }, 'capture: dock3d has layout + ordered tiles (id+zoom)');
   const term = snap.terminals.find((t) => t.id === 'term-1');
   eq({ x: term.x, y: term.y, z: term.z }, { x: 100, y: 200, z: 300 },
      'capture: docked terminal persists HOME (100,200,300), not tile-local (1,2,3)');
@@ -89,14 +89,38 @@ function makeRouter(cameraDock) {
   ok(!router.calls.some((c) => Array.isArray(c) && c[1] === 'term-1'),
      'restore: did NOT lock the absent terminal yet');
   eq(cd.layoutMode, 'radial', 'restore: applied saved layout mode');
-  eq(ss._pendingDock3d, { layout: 'radial', tiles: ['term-1'] }, 'restore: term-1 deferred in _pendingDock3d');
+  eq(ss._pendingDock3d, { layout: 'radial', tiles: [{ id: 'term-1', zoom: 1 }] }, 'restore: term-1 deferred in _pendingDock3d');
 
   // ---- 3. terminal re-adopts → registry-change replays its lock ----------------
   reg._ids.add('term-1');
-  ss._applyDock3d(); // what _onRegistryChange calls
+  ss._applyDock3d(); // what _onRegistryChange → _reconcileSurfaces calls
   ok(router.calls.some((c) => Array.isArray(c) && c[1] === 'term-1'),
      're-adopt: locked term-1 once it reappeared');
   eq(ss._pendingDock3d, null, 're-adopt: pending cleared when all tiles landed');
+}
+
+// ---- 4. terminal SIZE reconciles when it re-adopts DURING restore --------------
+// The regression this guards: restore() locked dock tiles (membership + zoom) at its
+// end but never ran _placePendingTerminals, so a terminal that re-created mid-restore
+// (already in the registry by restore's end, but the change-listener not yet armed)
+// kept its dock+zoom yet never got resized/moved — it stuck at the adapter's spawn
+// default (the "zoom kept, 80×24 size lost" symptom). The end-of-restore reconcile now
+// nets it. Assert restore issues terminal.resize + move for a pending terminal already
+// present at the wrong size.
+{
+  const reg = makeRegistry(new Set(['term-9'])); // term-9 re-adopted mid-restore, at 80×24
+  const cd = makeCameraDock();
+  const router = makeRouter(cd);
+  const ss = new SessionStore({ ctx: makeCtx(reg, cd), router, bridge: {} });
+  await ss.restore({
+    version: 2, files: [], camera: null, dock3d: null,
+    terminals: [{ id: 'term-9', x: 10, y: 20, z: 30, cols: 121, rows: 122 }],
+  });
+  ok(router.calls.includes('terminal.resize term-9 121 122'),
+     'restore: resized a terminal that re-adopted mid-restore (80×24 → 121×122)');
+  ok(router.calls.includes('terminal.move term-9 10 20 30'),
+     'restore: moved that terminal to its saved home');
+  eq(ss.pendingTerminals, [], 'restore: pending terminal consumed once placed');
 }
 
 console.log(failures === 0 ? '\nPASS — dock persistence round-trips' : `\nFAIL — ${failures} assertion(s)`);

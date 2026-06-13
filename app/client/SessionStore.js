@@ -70,7 +70,7 @@ export default class SessionStore {
     this._periodic = null;
     this._disposed = false;
 
-    this._onRegistryChange = () => { this._placePendingTerminals(); this._applyDock3d(); this.scheduleSave(); };
+    this._onRegistryChange = () => { this._reconcileSurfaces(); this.scheduleSave(); };
     this._onVisibility = () => { if (typeof document !== 'undefined' && document.visibilityState === 'hidden') this.saveNow(); };
   }
 
@@ -309,16 +309,11 @@ export default class SessionStore {
 
     this._restoreCamera(snap.camera);
 
-    // Stash for the dock bridge (may not be registered yet) and for terminal
-    // re-adoption (handled by the relay roster path, not here).
+    // Publish the loaded INTENT — terminal size/placement, dockview layout, and 3D
+    // dock membership/zoom — then reconcile it into whatever has re-adopted so far.
+    // Normalize dock3d tiles to { id, zoom } (tolerant of the legacy string-id form).
     this._pendingDock = snap.dock || null;
     this.pendingTerminals = Array.isArray(snap.terminals) ? snap.terminals : [];
-    this._maybeApplyDock();
-
-    // 3D camera-dock: lock the surfaces already back now (code grids restored above);
-    // terminals re-adopt async, so the rest is replayed from _onRegistryChange as they
-    // reappear (same pattern as pendingTerminals).
-    // Normalize tiles to { id, zoom } — tolerant of the legacy string-id array form.
     this._pendingDock3d = (snap.dock3d?.tiles?.length)
       ? {
           layout: snap.dock3d.layout || 'linear',
@@ -326,7 +321,15 @@ export default class SessionStore {
             (typeof t === 'string' ? { id: t, zoom: 1 } : { id: t.id, zoom: t.zoom ?? 1 })),
         }
       : null;
-    this._applyDock3d();
+    this._maybeApplyDock();
+
+    // One reconcile pass at the end of restore. Re-adoption is driven by an independent
+    // adapter ping loop that races this whole method, and the registry-change listener
+    // isn't armed until _armAutosave (below) — so a terminal that re-created DURING the
+    // awaits above is already in the registry but was never sized/placed. This nets it
+    // (and any docked surface whose home only now exists); later stragglers re-adopt
+    // into the live listener, which runs the SAME _reconcileSurfaces.
+    this._reconcileSurfaces();
     } finally {
       this.ctx.status?.clear();
     }
@@ -335,6 +338,18 @@ export default class SessionStore {
   async _fileExists(path) {
     try { await this.ctx.fileProvider.stat('file:///' + path); return true; }
     catch { return false; }
+  }
+
+  // Reconcile the loaded INTENT into the live scene as surfaces re-adopt. The SINGLE
+  // entry point for it — driven both by the registry-change listener (each surface as
+  // it reappears) and by the final pass at the end of restore (any that re-adopted
+  // mid-restore, before the listener was armed). Order is load-bearing: terminals
+  // move/size FIRST so the subsequent 3D-dock lock captures the RESTORED home, not the
+  // adapter's spawn placement. Both steps are pending-driven and idempotent — each
+  // consumed surface drops out of its pending list — so repeated calls are safe.
+  _reconcileSurfaces() {
+    this._placePendingTerminals();
+    this._applyDock3d();
   }
 
   // Terminals re-adopt themselves on reload (the adapter re-creates its grid when
