@@ -37,9 +37,11 @@
 
 import * as THREE from 'three';
 import { SpatialAnimator } from '../spatial/SpatialAnimator.js';
+import { flowBoxes } from '../../collections/layouts/flowBoxes.js';
 
 const _forward = new THREE.Vector3();
-const _up = new THREE.Vector3(0, 1, 0);
+const _z = new THREE.Vector3(0, 0, 1);
+const _dir = new THREE.Vector3();
 const _off = new THREE.Vector3();
 
 /** Walk up the parent chain to confirm an object still reaches a live Scene. */
@@ -284,13 +286,14 @@ export class CameraDock extends THREE.Object3D {
 
     // ===================== layout & tick =====================
 
-    /** Animate one tile so its CENTER sits at (sx,sy,sz) at a uniform-height scale,
-     *  optionally yawed by `yaw` radians about up (to face the viewer on the arc).
-     *  Origin = center − R_yaw·(centerOffset·scale): grids are top-anchored, so the
-     *  origin is offset from the visual center, and that offset rotates with the yaw. */
-    _animateTile(e, sx, sy, sz, scale, yaw = 0) {
-        if (yaw) e.quatTarget.setFromAxisAngle(_up, yaw);
-        else e.quatTarget.identity(); // square up to the bar (which faces the camera)
+    /** Animate one tile so its CENTER sits at (sx,sy,sz) at a uniform-height scale.
+     *  `faceDir` (dock-local, toward the eye) tilts the tile to face the POV — used on
+     *  the arc/dome; null squares it flat to the bar (linear row, focus area). Origin =
+     *  center − R·(centerOffset·scale): grids are top-anchored, so the origin sits off
+     *  the visual center, and that offset rotates with the tile's orientation. */
+    _animateTile(e, sx, sy, sz, scale, faceDir = null) {
+        if (faceDir) e.quatTarget.setFromUnitVectors(_z, faceDir);
+        else e.quatTarget.identity();
 
         _off.set(e.centerOffset.x * scale, e.centerOffset.y * scale, e.centerOffset.z * scale)
             .applyQuaternion(e.quatTarget);
@@ -322,28 +325,36 @@ export class CameraDock extends THREE.Object3D {
 
             if (this.layoutMode === 'radial') {
                 // Hemispherical: tiles ride a sphere of radius `distance` centered on the
-                // POV, spread in azimuth and yawed to face the viewer; side tiles curve
-                // toward you. Fit-to-arc: shrink tiles so the angular span ≤ maxSpan
-                // (fixed angular gaps subtracted first, so the shrink is exact).
+                // POV, each tilted to face the eye. Placement is GRIDDED through flowBoxes
+                // (the packing DSL): few tiles → one row (an arc), more → multiple rows
+                // (a dome), automatically. The planar grid is wrapped onto the sphere —
+                // x → azimuth, height-above-bottom → elevation (angle = arc length / R) —
+                // and bottom-anchored at the same place the bar sits (phiBase = rowY/R).
                 const R = this.distance;
-                const angGap = gap / R;
-                const maxSpan = Math.PI * 0.85;            // ~153°, just shy of a full hemisphere
-                const tilesAng = widths.reduce((a, w) => a + w / R, 0);
-                const gapsAng = angGap * (n - 1);
-                if (tilesAng + gapsAng > maxSpan) {
-                    const f = Math.max(0.1, (maxSpan - gapsAng) / tilesAng);
-                    scales = scales.map((s) => s * f);
-                    widths = widths.map((w) => w * f);
-                }
-                const angW = widths.map((w) => w / R);
-                const totalAng = angW.reduce((a, w) => a + w, 0) + angGap * (n - 1);
-                let a = -totalAng * 0.5;
+                const maxAz = Math.PI * 0.85, maxEl = Math.PI * 0.45;
+                const sizes = widths.map((w) => ({ w, h: tileH }));
+                // Wrap at the max azimuth arc: tiles fill one row up to that width, then
+                // wrap UP into the next row — few tiles = a single arc, many = a dome.
+                const { slots, width: W, height: H } = flowBoxes(sizes, {
+                    margin: gap, wrapWidth: maxAz * R, serpentine: false,
+                });
+
+                // Azimuth is already bounded by wrapWidth; only shrink if the dome grew
+                // too TALL (too many rows → elevation span > maxEl).
+                const f = Math.min(1, (maxEl * R) / H);
+                const phiBase = rowY / R; // bottom row sits where the linear bar sits
+
                 bar.forEach((e, i) => {
                     e.slot = i;
-                    const th = a + angW[i] * 0.5;
-                    a += angW[i] + angGap;
-                    // center on the sphere (dock-local): x right, z toward camera at the sides
-                    this._animateTile(e, R * Math.sin(th), rowY, R * (1 - Math.cos(th)), scales[i], -th);
+                    const s = slots[i];
+                    const th = (((s.x + sizes[i].w * 0.5) - W * 0.5) * f) / R;     // azimuth, centered
+                    const phi = phiBase + (((s.y - tileH * 0.5) + H) * f) / R;     // elevation, bottom-anchored
+                    const cs = Math.cos(phi);
+                    const sx = R * Math.sin(th) * cs;
+                    const sy = R * Math.sin(phi);
+                    const sz = R * (1 - Math.cos(th) * cs);
+                    _dir.set(-sx, -sy, R - sz).normalize();                        // toward the eye (0,0,R)
+                    this._animateTile(e, sx, sy, sz, scales[i] * f, _dir);
                     const d = this.attentionManager?.docks?.get(e.id);
                     if (d) d.offset = { slot: i };
                 });
