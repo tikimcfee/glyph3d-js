@@ -19,7 +19,7 @@ import ContentTreeArrows from '@glyph3d/core/collections/ContentTreeArrows.js';
 import ContentTreeProbes from '@glyph3d/core/collections/ContentTreeProbes.js';
 import SessionStore from './SessionStore.js';
 import WorkspaceModel from './WorkspaceModel.js';
-import { getSetting } from './settings.js';
+import { getSetting, applyGroupSettings } from './settings.js';
 import { wheelScrollCommand } from './surfaceInteractions.js';
 import errorTracker from '@glyph3d/core/utils/ErrorTracker.js';
 import { createStatusChannel } from './statusChannel.js';
@@ -266,6 +266,9 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     const cameraDock = new CameraDock({ attentionManager: state.ctx.attentionManager });
     scene.add(cameraDock);
     state.ctx.cameraDock = cameraDock;
+    // Fold the persisted Dock settings into the freshly-built dock — its apply()s only
+    // fire on a user change, so without this a stored value would wait until next touch.
+    applyGroupSettings(state.ctx, 'Dock');
 
     // The composable "what is the user locked into" projection — focus/edit/key
     // nodes derived from attention + cursor state (owns nothing). The breadcrumb

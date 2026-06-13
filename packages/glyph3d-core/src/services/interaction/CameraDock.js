@@ -50,6 +50,7 @@ const _forward = new THREE.Vector3();
 const _z = new THREE.Vector3(0, 0, 1);
 const _dir = new THREE.Vector3();
 const _off = new THREE.Vector3();
+const DEG2RAD = Math.PI / 180;
 
 /** Walk up the parent chain to confirm an object still reaches a live Scene. */
 function reachesScene(obj) {
@@ -65,20 +66,34 @@ export class CameraDock extends THREE.Object3D {
     /**
      * @param {Object} [opts]
      * @param {Object} [opts.attentionManager] - shared AttentionManager (its .docks map is the record of truth)
-     * @param {number} [opts.distance=40]   - world units ahead of the camera the bar sits
-     * @param {number} [opts.boxFrac=0.18]  - slot-box height as a fraction of the visible height
-     * @param {number} [opts.boxAspect=1.5] - slot-box width/height (3:2); content contain-fits inside
-     * @param {number} [opts.bottomFrac=0.66] - row depth: 0 = view center, 1 = bottom edge
+     * @param {number} [opts.distance=10]   - world units ahead of the camera the bar sits
+     * @param {number} [opts.boxFrac=0.1]   - slot-box height as a fraction of the visible height
+     * @param {number} [opts.boxAspect=1.15] - slot-box width/height; content contain-fits inside
+     * @param {number} [opts.gapFrac=0.4]   - gap between tiles as a fraction of the box height
+     * @param {number} [opts.maxColumns=0]  - radial: max tiles per row (0 = auto, fill the arc)
+     * @param {number} [opts.fillFrac=0.9]  - linear: fraction of viewport width the row may fill
+     * @param {number} [opts.maxArcDeg=80]  - radial: azimuth span the dome wraps within (degrees)
+     * @param {number} [opts.maxRiseDeg=80] - radial: elevation span the dome rises through (degrees)
+     * @param {number} [opts.bottomFrac=0.86] - row depth: 0 = view center, 1 = bottom edge
+     * @param {number} [opts.yawRate=14]    - tile face-the-eye slerp rate (×dt)
      * @param {'linear'|'radial'} [opts.layout='radial']
      */
-    constructor({ attentionManager = null, distance = 40, boxFrac = 0.18, boxAspect = 1.5, bottomFrac = 0.66,
-                  focusFrac = 0.5, focusY = 0.06, focusDistFrac = 0.7, animDur = 0.22, layout = 'radial' } = {}) {
+    constructor({ attentionManager = null, distance = 10, boxFrac = 0.1, boxAspect = 1.15, gapFrac = 0.4,
+                  maxColumns = 0, fillFrac = 0.9, maxArcDeg = 80, maxRiseDeg = 80, bottomFrac = 0.86,
+                  focusFrac = 0.62, focusY = 0.06, focusDistFrac = 0.7, animDur = 0.167, yawRate = 14,
+                  layout = 'radial' } = {}) {
         super();
         this.name = 'camera-dock';
         this.attentionManager = attentionManager;
         this.distance = distance;
-        this.boxFrac = boxFrac;     // slot-box height as a fraction of the visible height
-        this.boxAspect = boxAspect; // slot-box width/height (3:2 default); content contain-fits inside
+        this.boxFrac = boxFrac;       // slot-box height as a fraction of the visible height
+        this.boxAspect = boxAspect;   // slot-box width/height; content contain-fits inside
+        this.gapFrac = gapFrac;       // tile gap as a fraction of the box height
+        this.maxColumns = maxColumns; // radial: cap tiles per row (0 = auto, fill the arc)
+        this.fillFrac = fillFrac;     // linear: row may fill this fraction of the viewport width
+        this.maxArcDeg = maxArcDeg;   // radial: azimuth span the dome wraps within (degrees)
+        this.maxRiseDeg = maxRiseDeg; // radial: elevation span the dome rises through (degrees)
+        this.yawRate = yawRate;       // tile face-the-eye slerp rate (×dt)
         this.bottomFrac = bottomFrac;
         this.focusFrac = focusFrac;   // focus-area tile height as a fraction of the visible height
         this.focusY = focusY;         // focus-area center: fraction of viewH above the view center
@@ -168,11 +183,15 @@ export class CameraDock extends THREE.Object3D {
     }
 
     /**
-     * Tune a layout parameter live and re-pack. Keys: distance, boxFrac, boxAspect, bottomFrac.
+     * Tune a layout parameter live and re-pack. Keys: distance, boxFrac, boxAspect, gapFrac,
+     * maxColumns, fillFrac, maxArcDeg, maxRiseDeg, bottomFrac, focusFrac, focusY, focusDistFrac,
+     * animDur, yawRate.
      * @param {string} key @param {number} value @returns {boolean}
      */
     setParam(key, value) {
-        if (!['distance', 'boxFrac', 'boxAspect', 'bottomFrac', 'focusFrac', 'focusY', 'focusDistFrac', 'animDur'].includes(key)) return false;
+        if (!['distance', 'boxFrac', 'boxAspect', 'gapFrac', 'maxColumns', 'fillFrac', 'maxArcDeg',
+              'maxRiseDeg', 'bottomFrac', 'focusFrac', 'focusY', 'focusDistFrac', 'animDur',
+              'yawRate'].includes(key)) return false;
         if (!Number.isFinite(value)) return false;
         this[key] = value;
         this._relayout();
@@ -396,7 +415,7 @@ export class CameraDock extends THREE.Object3D {
         const bar = all.filter((e) => e !== focused);
 
         const rowY = -this._viewH * 0.5 * this.bottomFrac; // tile-CENTER row
-        const gap = (this._viewH * this.boxFrac) * 0.3;
+        const gap = (this._viewH * this.boxFrac) * this.gapFrac;
 
         // ---- bar row ----
         const n = bar.length;
@@ -416,12 +435,17 @@ export class CameraDock extends THREE.Object3D {
                 // height-above-bottom → elevation (angle = arc length / R) — and bottom-anchored
                 // at the same place the bar sits (phiBase = rowY/R).
                 const R = this.distance;
-                const maxAz = Math.PI * 0.85, maxEl = Math.PI * 0.45;
+                const maxAz = this.maxArcDeg * DEG2RAD, maxEl = this.maxRiseDeg * DEG2RAD;
                 const sizes = boxes.map((b) => ({ w: b.w, h: b.h }));
-                // Wrap at the max azimuth arc: boxes fill one row up to that width, then
-                // wrap UP into the next row — few = a single arc, many = a dome.
+                // Wrap rule: fill a row up to the wrap width, then wrap UP into the next row —
+                // few = a single arc, many = a dome. maxColumns caps tiles per row (a representative
+                // box width sets the count threshold); 0 = auto, bounded only by the arc. The arc
+                // (maxAz·R) is always the ceiling so a high column cap can't overrun the hemisphere.
+                const cols = Math.floor(this.maxColumns);
+                const defBoxW = this._viewH * this.boxFrac * this.boxAspect;
+                const wrapWidth = Math.min(cols > 0 ? cols * (defBoxW + gap) : Infinity, maxAz * R);
                 const { slots, width: W, height: H } = flowBoxes(sizes, {
-                    margin: gap, wrapWidth: maxAz * R, serpentine: false,
+                    margin: gap, wrapWidth, serpentine: false,
                 });
 
                 // Azimuth is already bounded by wrapWidth; only shrink if the dome grew
@@ -446,7 +470,7 @@ export class CameraDock extends THREE.Object3D {
                 // Linear row, centered on x=0. Fit-to-width still guards genuine overflow (too
                 // many boxes to fit), but it now fires only on COUNT — never because one tile's
                 // content or zoom is wide — so adding a wide tile no longer snaps the whole row.
-                const availW = this._viewW * 0.88;
+                const availW = this._viewW * this.fillFrac;
                 const tilesW = widths.reduce((a, w) => a + w, 0);
                 const gapsW = gap * (n - 1);
                 if (tilesW + gapsW > availW) {
@@ -493,18 +517,28 @@ export class CameraDock extends THREE.Object3D {
 
     /**
      * Re-place a docked tile after a size change, without a full membership pass — called by
-     * refreshTile when a terminal's cell grid changes. The focused tile re-fits to the focus
-     * area at its new natural size (free-grow on a live grip-resize); a bar tile re-contains
-     * into its FIXED slot box, so the row never reshuffles on resize — only the content
-     * rescales inside the unchanged slot.
+     * refreshTile when a terminal's cell grid changes. The focused tile FREE-GROWS: it holds
+     * its current on-screen scale and just re-centers on the new content extent, so a live
+     * grip-resize visibly upsizes it rather than re-pinning to focusFrac (which barely moves for
+     * a small resize delta). A bar tile re-contains into its FIXED slot box, so the row never
+     * reshuffles on resize — only the content rescales inside the unchanged slot.
      * @param {string} id
      * @returns {boolean}
      */
     reflowTile(id) {
         const e = this.entries.get(id);
         if (!e) return false;
-        if (id === this.focusedId) this._placeFocus(e);
-        else this._relayout();
+        if (id === this.focusedId) {
+            // free-grow: hold the current RENDERED scale (grid.scale.x = placement·user) and just
+            // re-center on the new centerOffset — _animateTile divides user back out for placement.
+            const eff = e.grid.scale.x || 1;
+            this._animateTile(e, 0, this._viewH * this.focusY * this.focusDistFrac,
+                              this.distance * (1 - this.focusDistFrac), eff);
+            const d = this.attentionManager?.docks?.get(e.id);
+            if (d) d.offset = { slot: 'focus' };
+        } else {
+            this._relayout();
+        }
         return true;
     }
 
@@ -527,7 +561,7 @@ export class CameraDock extends THREE.Object3D {
 
         this.animator.update(dt);
 
-        const rate = Math.min(1, dt * 14); // crisp yaw to match the curter slide
+        const rate = Math.min(1, dt * this.yawRate); // crisp yaw to match the curter slide
         for (const e of this.entries.values()) e.grid.quaternion.slerp(e.quatTarget, rate);
         for (const e of this._releasing.values()) e.grid.quaternion.slerp(e.quatTarget, rate);
     }

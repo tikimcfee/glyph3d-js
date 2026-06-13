@@ -10,6 +10,10 @@ import { stateController } from '@glyph3d/core/services/state';
 // boot-time knob — the glyph atlas is built once at startup, so font/atlas changes
 // persist now and take hold on the next page load.
 
+/** apply() for a dock layout knob: push the value to CameraDock.setParam, which
+ *  re-packs the live bar. The bare param name (not the `dock.` setting key) goes through. */
+const dockParam = (param) => (ctx, v) => ctx.cameraDock?.setParam?.(param, v);
+
 export const SETTINGS = [
   {
     key: 'camera.speed', label: 'Move speed', group: 'Camera',
@@ -61,6 +65,23 @@ export const SETTINGS = [
     type: 'number', default: 0.96, min: 0, max: 1, step: 0.01,
     apply: (ctx, v) => themeAll(ctx, 'terminal', { opacity: v }),
   },
+  // Dock — the camera-locked tile bar (CameraDock). Every knob here was a baked
+  // constant; setParam re-packs the live dock and the value persists client-side.
+  // maxColumns + the dome arc/rise only bite in the RADIAL layout; fillFrac only in
+  // LINEAR. Layout itself stays the `dock.layout` verb + session state, not a setting.
+  { key: 'dock.distance', label: 'Distance', group: 'Dock', type: 'number', default: 10, min: 5, max: 120, step: 1, apply: dockParam('distance') },
+  { key: 'dock.boxFrac', label: 'Tile size', group: 'Dock', type: 'number', default: 0.1, min: 0.05, max: 0.5, step: 0.01, apply: dockParam('boxFrac') },
+  { key: 'dock.boxAspect', label: 'Tile aspect (w:h)', group: 'Dock', type: 'number', default: 1.15, min: 0.5, max: 3, step: 0.05, apply: dockParam('boxAspect') },
+  { key: 'dock.gapFrac', label: 'Tile gap', group: 'Dock', type: 'number', default: 0.4, min: 0, max: 1.5, step: 0.05, apply: dockParam('gapFrac') },
+  { key: 'dock.maxColumns', label: 'Max tiles/row (0=auto)', group: 'Dock', type: 'number', default: 0, min: 0, max: 24, step: 1, apply: dockParam('maxColumns') },
+  { key: 'dock.maxArcDeg', label: 'Dome arc span°', group: 'Dock', type: 'number', default: 80, min: 30, max: 180, step: 5, apply: dockParam('maxArcDeg') },
+  { key: 'dock.maxRiseDeg', label: 'Dome height span°', group: 'Dock', type: 'number', default: 80, min: 20, max: 110, step: 5, apply: dockParam('maxRiseDeg') },
+  { key: 'dock.bottomFrac', label: 'Bar depth', group: 'Dock', type: 'number', default: 0.86, min: 0, max: 1, step: 0.02, apply: dockParam('bottomFrac') },
+  { key: 'dock.fillFrac', label: 'Bar fill (linear)', group: 'Dock', type: 'number', default: 0.9, min: 0.5, max: 1, step: 0.02, apply: dockParam('fillFrac') },
+  { key: 'dock.focusFrac', label: 'Focus size', group: 'Dock', type: 'number', default: 0.62, min: 0.2, max: 1, step: 0.02, apply: dockParam('focusFrac') },
+  { key: 'dock.focusY', label: 'Focus height', group: 'Dock', type: 'number', default: 0.06, min: -0.4, max: 0.4, step: 0.02, apply: dockParam('focusY') },
+  { key: 'dock.focusDistFrac', label: 'Focus pull-in', group: 'Dock', type: 'number', default: 0.7, min: 0.3, max: 1, step: 0.02, apply: dockParam('focusDistFrac') },
+  { key: 'dock.animDur', label: 'Animation (s)', group: 'Dock', type: 'number', default: 0.167, min: 0, max: 0.6, step: 0.01, apply: dockParam('animDur') },
 ];
 
 /** Push a background restyle to every live grid/terminal of `type`. */
@@ -117,6 +138,19 @@ export function setSetting(ctx, key, value) {
   stateController.set(key, v);
   def.apply?.(ctx, v);
   return { ok: true, value: v, reload: !!def.reload };
+}
+
+/**
+ * Apply every stored (or default) setting in a group to its subsystem. The per-knob
+ * apply()s otherwise fire only on a user change, so a persisted value would sit unused
+ * until touched; call this once the subsystem exists (e.g. the dock, post-construction)
+ * to fold the stored values in at boot. Skips reload-required (boot-baked) knobs.
+ * @param {Object} ctx @param {string} group
+ */
+export function applyGroupSettings(ctx, group) {
+  for (const def of SETTINGS) {
+    if (def.group === group && !def.reload) def.apply?.(ctx, getSetting(def.key));
+  }
 }
 
 /** Drop all stored settings (back to defaults) and re-apply the live ones. */

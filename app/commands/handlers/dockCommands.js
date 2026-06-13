@@ -134,8 +134,8 @@ export default function registerDockCommands(router) {
         const key = String(args[0] ?? '');
         const value = parseFloat(args[1]);
         if (!dock.setParam(key, value)) {
-            return { text: 'ERR: usage: dock.set <distance|boxFrac|boxAspect|bottomFrac> <number>', data: null };
+            return { text: 'ERR: usage: dock.set <distance|boxFrac|boxAspect|gapFrac|maxColumns|fillFrac|maxArcDeg|maxRiseDeg|bottomFrac|focusFrac|focusY|focusDistFrac|animDur|yawRate> <number>', data: null };
         }
         return { text: `OK: dock ${key} = ${value}`, data: { key, value } };
-    }, { description: 'Tune a dock layout parameter live', usage: '<distance|boxFrac|boxAspect|bottomFrac> <number>', returns: '{ key, value }' });
+    }, { description: 'Tune a dock layout parameter live (also exposed in Settings ▸ Dock)', usage: '<param> <number>', returns: '{ key, value }' });
 }
