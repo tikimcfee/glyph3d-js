@@ -582,6 +582,12 @@ export function ResizeDragger() {
  * from that one grid's bounds, so the outline follows when a relayout moves it.
  * Reads the same state whether selection came from a canvas click or a command.
  */
+// Reused per frame to compose each outline's matrix (grid.matrixWorld × local offset).
+const _off = new THREE.Matrix4();
+const _center = new THREE.Vector3();
+const _size = new THREE.Vector3();
+const _identQ = new THREE.Quaternion();
+
 export function SelectionIndicator() {
   const { scene } = useThree();
   const client = useAppCommands();
@@ -589,11 +595,17 @@ export function SelectionIndicator() {
 
   useEffect(() => {
     if (!client) return;
+    // An ORIENTED unit-box outline (not a Box3Helper): its matrix is driven from the
+    // grid's matrixWorld each frame, so it rides the grid's rotation/scale instead of
+    // morphing like a world-space AABB does when the grid is docked under the camera.
     const mkBox = (color, renderOrder) => {
-      const b = new THREE.Box3Helper(new THREE.Box3(), new THREE.Color(color));
+      const geo = new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1)); // unit cube, centered
+      const mat = new THREE.LineBasicMaterial({ color: new THREE.Color(color), depthTest: false });
+      const b = new THREE.LineSegments(geo, mat);
       b.visible = false;
       b.renderOrder = renderOrder;     // draw the outline over the glyphs
-      if (b.material) b.material.depthTest = false;
+      b.matrixAutoUpdate = false;      // we set b.matrix directly from the grid transform
+      b.frustumCulled = false;         // its real extent lives in the composed matrix, not the unit geo
       scene.add(b);
       return b;
     };
@@ -609,6 +621,7 @@ export function SelectionIndicator() {
     return () => {
       scene.remove(t.primaryBox); scene.remove(t.hoverBox);
       t.primaryBox.geometry?.dispose?.(); t.hoverBox.geometry?.dispose?.();
+      t.primaryBox.material?.dispose?.(); t.hoverBox.material?.dispose?.();
       t.primaryBox = t.hoverBox = t.am = t.registry = null;
     };
   }, [client, scene]);
@@ -628,12 +641,20 @@ export function SelectionIndicator() {
     };
     const fit = (box, grid, inflate) => {
       if (!box) return;
-      const b = grid?.getBounds?.();
-      if (b && !b.isEmpty()) {
-        box.box.copy(b);
-        if (inflate) box.box.expandByScalar(inflate);
-        box.visible = true;
-      } else box.visible = false;
+      // LOCAL bounds + the grid's matrixWorld → an oriented box glued to the grid,
+      // whatever the grid's parent (scene, a ContentTree node, or the camera dock).
+      const lb = grid?.getLocalBounds?.();
+      if (!lb || lb.isEmpty()) { box.visible = false; return; }
+      grid.updateWorldMatrix(true, false);
+      lb.getCenter(_center);
+      lb.getSize(_size);
+      // unit cube → padded panel: scale to size (+ hover inflate), keep a sliver of z
+      // so a flat panel's outline still composes a valid (non-degenerate) matrix.
+      _size.set(_size.x + inflate * 2, _size.y + inflate * 2, Math.max(_size.z, 1e-3) + inflate * 2);
+      _off.compose(_center, _identQ, _size);
+      box.matrix.multiplyMatrices(grid.matrixWorld, _off);
+      box.matrixWorldNeedsUpdate = true;
+      box.visible = true;
     };
     // The focus box recolors to signal WHERE KEYSTROKES LAND: amber when the focused window is
     // input-active (a code grid in edit mode, or the keyboard-target terminal — attention.key),

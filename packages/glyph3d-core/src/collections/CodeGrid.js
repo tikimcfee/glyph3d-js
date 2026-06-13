@@ -418,21 +418,34 @@ class CodeGrid extends THREE.Object3D {
      * Callers must not hold the returned box across calls (it is reused).
      * @returns {THREE.Box3} Bounding box in world coordinates
      */
+    /**
+     * The padded panel bounds in the grid's OWN local frame (no world transform).
+     * This is the orientation-stable box: an outline parented to / composed with the
+     * grid's matrixWorld rides every rotation, where a world-space AABB (getBounds)
+     * morphs as the grid rotates relative to world (e.g. docked under the camera).
+     * Callers must not hold the returned box across calls (it is reused).
+     * @returns {THREE.Box3} Bounding box in local coordinates
+     */
+    getLocalBounds() {
+        const contentBounds = this._getContentBounds(); // local AABB, cached on content change
+        if (!this._localBoundsCache) this._localBoundsCache = new THREE.Box3();
+        const box = this._localBoundsCache;
+        if (!contentBounds) { box.makeEmpty(); return box; }
+        const padding = this.config.backgroundPadding;
+        box.min.set(contentBounds.min.x - padding, contentBounds.min.y - padding, contentBounds.min.z);
+        box.max.set(contentBounds.max.x + padding, contentBounds.max.y + padding, contentBounds.max.z);
+        return box;
+    }
+
     getBounds() {
         // Ensure matrixWorld reflects the latest transform — getBounds is called
         // from pointer / useFrame paths that run before r3f renders, so the matrix
         // can otherwise lag a just-applied move.
         this.updateWorldMatrix(true, false);
 
-        const contentBounds = this._getContentBounds(); // local AABB, cached on content change
         if (!this._boundsCache) this._boundsCache = new THREE.Box3();
-        const box = this._boundsCache;
-
-        if (!contentBounds) { box.makeEmpty(); return box; }
-
-        const padding = this.config.backgroundPadding;
-        box.min.set(contentBounds.min.x - padding, contentBounds.min.y - padding, contentBounds.min.z);
-        box.max.set(contentBounds.max.x + padding, contentBounds.max.y + padding, contentBounds.max.z);
+        const box = this._boundsCache.copy(this.getLocalBounds());
+        if (box.isEmpty()) return box;
         box.applyMatrix4(this.matrixWorld); // world box re-derived from current matrix
         return box;
     }

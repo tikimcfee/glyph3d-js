@@ -308,9 +308,14 @@ export default class TerminalGrid extends THREE.Object3D {
      * world matrix (8-corner transform — cheap).
      * @returns {THREE.Box3}
      */
-    getBounds() {
-        this.updateWorldMatrix(true, false);
-
+    /**
+     * The padded cell panel in the terminal's OWN local frame (no world transform).
+     * The orientation-stable box: composed with matrixWorld it rides every rotation,
+     * where the world-space AABB (getBounds) morphs as the panel rotates relative to
+     * world (e.g. docked under the camera). Rebuilt only on resize. Mirrors CodeGrid.
+     * @returns {THREE.Box3}
+     */
+    getLocalBounds() {
         if (!this._localBounds || this._localBoundsDirty) {
             const m = this._metrics;
             const strideX = m.charWidth + m.letterSpacing;
@@ -327,9 +332,13 @@ export default class TerminalGrid extends THREE.Object3D {
             );
             this._localBoundsDirty = false;
         }
+        return this._localBounds;
+    }
 
+    getBounds() {
+        this.updateWorldMatrix(true, false);
         if (!this._worldBounds) this._worldBounds = new THREE.Box3();
-        this._worldBounds.copy(this._localBounds).applyMatrix4(this.matrixWorld);
+        this._worldBounds.copy(this.getLocalBounds()).applyMatrix4(this.matrixWorld);
         return this._worldBounds;
     }
 
