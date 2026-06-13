@@ -447,16 +447,21 @@ export function ObjectDragger() {
  * consult — so a grip press resizes (and the camera yields its pan) while a stale,
  * async-lagged token never starts a resize on a grip the cursor has left.
  *
- * The drag is preview-only — a ghost Box3 shows the prospective size at integer
- * cell steps and we never re-grid (rebuild buffers) per frame. On release we commit
- * ONCE through terminal.resize, which moves grid + emulator + the adapter's PTY
- * (pty.Setsize → SIGWINCH) in lockstep — identical to the CLI verb.
+ * The drag is LIVE — each time the cursor crosses an integer cell step we fire
+ * terminal.resize, so the panel re-grids under the cursor (the grip tracks your
+ * hand) and the PTY reflows as you go, exactly as a real terminal window does.
+ * Every step is the same bus verb the CLI uses, so each one lands as a logged
+ * command record — drag and watch them stream via log.search / buslog. A clean
+ * release just saves the session; an interrupt (pointercancel / lostpointercapture)
+ * reverts to the size the drag started at. The verb moves grid + emulator + the
+ * adapter's PTY (pty.Setsize → SIGWINCH) in lockstep, and a docked tile's
+ * onResize tap lets CameraDock re-pack around the new size.
  *
  * The grip renders depthTest-off (an always-on-top overlay), so "the grip you see
  * is the grip you grab" even when it sits over another terminal's panel.
  */
 export function ResizeDragger() {
-  const { gl, camera, scene } = useThree();
+  const { gl, camera } = useThree();
   const client = useAppCommands();
 
   useEffect(() => {
@@ -464,25 +469,17 @@ export function ResizeDragger() {
     const { ctx, router } = client;
     const dom = gl.domElement;
 
-    // Preview box, mounted once. depthTest off + high renderOrder so it reads over
-    // the panel/glyphs and the selection outline — a live size hint.
-    const ghost = new THREE.Box3Helper(new THREE.Box3(), new THREE.Color(0x6ee7a0));
-    ghost.visible = false;
-    ghost.renderOrder = 10002;
-    if (ghost.material) ghost.material.depthTest = false;
-    scene.add(ghost);
+    let drag = null; // { grid, id, startCols, startRows, startBounds, startStride, startX, startY, appliedCols, appliedRows }
 
-    let drag = null; // { grid, id, startCols, startRows, startBounds, startX, startY, newCols, newRows }
-
-    // Single teardown for EVERY way a drag can end. commit=true only on a clean
-    // pointerup; pointercancel / lostpointercapture end WITHOUT committing. Either
-    // way the shared flags reset, so an interrupted drag can never wedge the canvas
-    // (a stuck ctx.resizing kills hover picking + click-select until reload).
+    // Single teardown for EVERY way a drag can end. A clean pointerup KEEPS the live
+    // size and saves; pointercancel / lostpointercapture REVERT to the start size (the
+    // live steps already re-gridded, so an interrupt must undo them). Either way the
+    // shared flags reset, so an interrupted drag can never wedge the canvas (a stuck
+    // ctx.resizing kills hover picking + click-select until reload).
     const endDrag = (e, commit) => {
       if (!drag) return; // lostpointercapture also echoes after a normal up — ignore it
-      const { id, startCols, startRows, newCols, newRows } = drag;
+      const { id, startCols, startRows, appliedCols, appliedRows } = drag;
       drag = null;
-      ghost.visible = false;
       dom.style.cursor = 'default';
       ctx.handleHover = null;   // drop the cached grip; next press must re-establish via a fresh pick
       ctx.handleHoverAt = null;
@@ -490,10 +487,10 @@ export function ResizeDragger() {
       // Hold ctx.resizing across THIS event dispatch so CanvasPicker's onUp (same
       // tick, listener-order-independent) skips its click-select; clear once drained.
       queueMicrotask(() => { ctx.resizing = false; });
-      if (commit && (newCols !== startCols || newRows !== startRows)) {
-        router.execute(`terminal.resize ${id} ${newCols} ${newRows}`);
-        client.session?.scheduleSave?.();
-      }
+      const changed = appliedCols !== startCols || appliedRows !== startRows;
+      if (!changed) return;
+      if (commit) client.session?.scheduleSave?.();      // keep the live size, persist it
+      else router.execute(`terminal.resize ${id} ${startCols} ${startRows}`); // undo the live steps
     };
 
     const onDown = (e) => {
@@ -510,8 +507,12 @@ export function ResizeDragger() {
         grid, id,
         startCols: grid.cols, startRows: grid.rows,
         startBounds: grid.getBounds().clone(),
+        // Cellstride captured at the START: the screen→cell mapping stays anchored to
+        // the drag origin even as live re-grids (and a docked tile's rescale) change
+        // the panel's current stride — the grip tracks the cursor without drift.
+        startStride: { x: grid.cellStride.x, y: grid.cellStride.y },
         startX: e.clientX, startY: e.clientY,
-        newCols: grid.cols, newRows: grid.rows,
+        appliedCols: grid.cols, appliedRows: grid.rows,
       };
       ctx.resizing = true; // CanvasPicker pauses hover + skips click-select while set
       dom.style.cursor = 'nwse-resize';
@@ -538,21 +539,20 @@ export function ResizeDragger() {
       const depth = Math.max(1, center.sub(camera.position).dot(fwd));
       const pixelScale = (2 * depth * Math.tan((camera.fov * Math.PI / 180) / 2)) / dom.clientHeight;
       const world = right.multiplyScalar(dx * pixelScale).add(up.multiplyScalar(-dy * pixelScale));
-      const stride = drag.grid.cellStride;
+      const stride = drag.startStride;
       const newCols = Math.max(MIN_COLS, drag.startCols + Math.round(world.x / stride.x));
       const newRows = Math.max(MIN_ROWS, drag.startRows + Math.round(-world.y / stride.y));
-      drag.newCols = newCols; drag.newRows = newRows;
+      if (newCols === drag.appliedCols && newRows === drag.appliedRows) return; // same cell step → nothing to do
+      drag.appliedCols = newCols; drag.appliedRows = newRows;
 
-      // Ghost = the start panel with its SE corner pushed out, NW pinned — matches
-      // resize()'s own anchor (NW ~fixed, grows east/south), so no jump on commit.
-      const b = ghost.box.copy(drag.startBounds);
-      b.max.x = drag.startBounds.max.x + (newCols - drag.startCols) * stride.x;
-      b.min.y = drag.startBounds.min.y - (newRows - drag.startRows) * stride.y;
-      ghost.visible = true;
+      // LIVE re-grid: the panel itself is the preview. One bus verb per integer step —
+      // grid + emulator + PTY in lockstep, logged, and a docked tile re-packs via its
+      // onResize tap. Session save is deferred to release (endDrag), not per step.
+      router.execute(`terminal.resize ${drag.id} ${newCols} ${newRows}`);
     };
 
-    const onUp     = (e) => endDrag(e, true);  // clean release → commit the new size
-    const onCancel = (e) => endDrag(e, false); // gesture interrupted → reset, no commit
+    const onUp     = (e) => endDrag(e, true);  // clean release → keep the live size + save
+    const onCancel = (e) => endDrag(e, false); // gesture interrupted → revert to the start size
 
     dom.addEventListener('pointerdown', onDown);
     dom.addEventListener('pointermove', onMove);
@@ -565,12 +565,9 @@ export function ResizeDragger() {
       dom.removeEventListener('pointerup', onUp);
       dom.removeEventListener('pointercancel', onCancel);
       dom.removeEventListener('lostpointercapture', onCancel);
-      scene.remove(ghost);
-      ghost.geometry?.dispose?.();
-      ghost.material?.dispose?.();
       if (drag) ctx.resizing = false; // unmounted mid-drag → never leave the shared flag stuck
     };
-  }, [client, gl, camera, scene]);
+  }, [client, gl, camera]);
 
   return null;
 }

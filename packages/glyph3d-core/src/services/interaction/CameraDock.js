@@ -212,6 +212,12 @@ export class CameraDock extends THREE.Object3D {
             },
             naturalH: Math.max(worldH / homeScale, 1e-3),
             centerOffset,
+            // Cell-grid dimensions at lock — refreshTile scales naturalH/centerOffset by
+            // the col/row ratio when the tile resizes (cell metrics are constant, so the
+            // natural extent scales linearly with the grid), avoiding a world-AABB
+            // re-measure that the tile's eye-facing rotation would corrupt.
+            dims: { cols: grid.cols ?? 0, rows: grid.rows ?? 0 },
+            unsubscribeResize: null,
             // The world AABB the window had at home, captured before docking — dock.focus
             // frames THIS (computed, stable) rather than the tile's live mid-slide bounds.
             homeBounds: hasBounds ? b.clone() : null,
@@ -222,6 +228,11 @@ export class CameraDock extends THREE.Object3D {
         // Reparent preserving world transform — the tile stays put for this frame,
         // then the animator slides it to its slot while the bar carries it cameraward.
         this.attach(grid);
+
+        // The dock reacts to the tile actually changing size (grip-resize, terminal.resize,
+        // CLI) — re-pack so a resized tile never overlaps the bar and a focused tile grows
+        // in place. Terminals expose onResize; grids that don't simply never refresh.
+        entry.unsubscribeResize = grid.onResize?.((c, r) => this.refreshTile(id, c, r)) ?? null;
 
         // Register as chrome so the camera's dynamic-speed / fit-all sampling skips it
         // (a tile pinned ahead of the camera would otherwise brake every move).
@@ -248,6 +259,7 @@ export class CameraDock extends THREE.Object3D {
         const e = this.entries.get(id);
         if (!e) return false;
 
+        e.unsubscribeResize?.(); // stop reacting to its size once it leaves the dock
         this.entries.delete(id);
         this.tiles.delete(e.grid); // back to world content for the camera the moment it heads home
         if (this.focusedId === id) this.focusedId = null;
@@ -396,6 +408,34 @@ export class CameraDock extends THREE.Object3D {
             this._animateTile(focused, 0, this._viewH * this.focusY * fd, this.distance * (1 - fd), scale);
             const d = this.attentionManager?.docks?.get(focused.id);
             if (d) d.offset = { slot: 'focus' };
+        }
+    }
+
+    /**
+     * React to a docked tile changing size (subscribed via grid.onResize at lock).
+     * Cell metrics are constant, so the natural extent scales linearly with the cell
+     * grid — scale naturalH/centerOffset by the col/row ratio rather than re-measuring
+     * the world AABB (which the tile's eye-facing rotation would distort). A BAR tile
+     * re-packs (fit stays bounded); the FOCUSED tile grows in place at its current
+     * scale (re-centered so it expands from the middle), so a live grip-drag visibly
+     * upsizes it on the fly instead of being re-pinned to the focus fraction.
+     * @param {string} id @param {number} cols @param {number} rows
+     */
+    refreshTile(id, cols, rows) {
+        const e = this.entries.get(id);
+        if (!e || !e.dims) return;
+        const cx = e.dims.cols ? cols / e.dims.cols : 1;
+        const ry = e.dims.rows ? rows / e.dims.rows : 1;
+        e.naturalH = Math.max(e.naturalH * ry, 1e-3);
+        e.centerOffset = { x: e.centerOffset.x * cx, y: e.centerOffset.y * ry, z: e.centerOffset.z };
+        e.dims = { cols, rows };
+
+        if (id === this.focusedId) {
+            const scale = e.grid.scale.x || 1; // free-grow: keep scale, re-center on the focus point
+            this._animateTile(e, 0, this._viewH * this.focusY * this.focusDistFrac,
+                              this.distance * (1 - this.focusDistFrac), scale);
+        } else {
+            this._relayout();
         }
     }
 

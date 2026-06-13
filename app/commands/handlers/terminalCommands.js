@@ -20,6 +20,9 @@
 
 import TerminalGrid from '@glyph3d/core/collections/TerminalGrid.js';
 import { encodeBase64 } from '@glyph3d/core/utils/encoding.js';
+import { createLogger } from '@glyph3d/core/utils/Logger.js';
+
+const log = createLogger('terminal');
 
 /**
  * Lazily initialise the terminal registry map on ctx.
@@ -216,7 +219,18 @@ export default function registerTerminalCommands(router) {
             return { text: 'ERR: cols and rows must be positive integers', data: null };
         }
 
+        // Verify-as-they-land: one terse record per resize, enriched with the FROM
+        // dims (read before grid.resize mutates them) and the dock state — so a live
+        // grip-drag streams its steps through log.search/buslog and the
+        // resize↔dock-relayout interplay is visible. No-op steps never reach here
+        // (the dragger only fires the verb on an integer cell change).
+        const from = `${grid.cols}x${grid.rows}`;
+        const dock = ctx.cameraDock;
+        const where = dock?.has?.(id) ? (dock.focusedId === id ? ' [focus]' : ' [docked]') : '';
+
         grid.resize(cols, rows);
+
+        log.info(`resize ${id} ${from} → ${cols}x${rows}${where}`);
 
         // Update registry metadata if it exists
         const info = ctx.registry.get(id);
