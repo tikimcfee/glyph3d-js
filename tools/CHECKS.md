@@ -34,6 +34,20 @@ after editing core, `make dev-status` to check.
   bun tools/loadcurve.mjs --dir static/app/views --relay 8099
   ```
 
+- **`glance.mjs`** — one-shot screenshot of the **LIVE** display (the window a human is
+  watching), not a fresh browser. Dials the running relay over WS, optionally issues bus
+  verb(s), then sends the bus-native `screenshot` verb and writes the returned PNG. This
+  is how a headless agent (a plain Bash tool) closes its own pixel loop: it can SEE its
+  WebGPU/dock/layout work instead of verifying by math + asking the human. One-shot by
+  design (connect → command(s) → capture → exit) so the harness can't reap it mid-run.
+  ```
+  bun tools/glance.mjs --shot /tmp/glance.png                    # capture current scene
+  bun tools/glance.mjs --cmd 'dock.list' --shot /tmp/glance.png  # issue a verb, then capture
+  bun tools/glance.mjs --cmd 'camera.frame all' --wait 500 --shot /tmp/x.png
+  ```
+  Contrast `smoke.mjs`, which launches its OWN headless browser (an empty display) — use
+  `glance` when you need to see what's actually on screen right now.
+
 - **`capture.mjs`** — cinematic/media capture (per-frame CDP screenshots → ffmpeg loop).
 - **`cdp-shot.mjs`** + **`web-preview.sh`** — attach to an already-running browser via
   CDP and grab a PNG (works headed on a busy desktop). See `PREVIEW.md`.
