@@ -162,8 +162,11 @@ export default class SessionStore {
     let dock3d = this._pendingDock3d;
     const cd = ctx.cameraDock;
     if (cd) {
-      const tiles = cd.list().sort((a, b) => a.slot - b.slot).map((t) => t.id);
-      const pend = this._pendingDock3d?.tiles?.filter((id) => !tiles.includes(id)) || [];
+      // Each tile records its readability zoom alongside membership, so a docked window
+      // restores at the size the operator scaled it to (orthogonal to its cols/rows).
+      const tiles = cd.list().sort((a, b) => a.slot - b.slot).map((t) => ({ id: t.id, zoom: t.zoom ?? 1 }));
+      const have = new Set(tiles.map((t) => t.id));
+      const pend = this._pendingDock3d?.tiles?.filter((t) => !have.has(t.id)) || [];
       const all = [...tiles, ...pend];
       dock3d = all.length ? { layout: cd.layoutMode, tiles: all } : null;
     }
@@ -301,8 +304,13 @@ export default class SessionStore {
     // 3D camera-dock: lock the surfaces already back now (code grids restored above);
     // terminals re-adopt async, so the rest is replayed from _onRegistryChange as they
     // reappear (same pattern as pendingTerminals).
+    // Normalize tiles to { id, zoom } — tolerant of the legacy string-id array form.
     this._pendingDock3d = (snap.dock3d?.tiles?.length)
-      ? { layout: snap.dock3d.layout || 'linear', tiles: [...snap.dock3d.tiles] }
+      ? {
+          layout: snap.dock3d.layout || 'linear',
+          tiles: snap.dock3d.tiles.map((t) =>
+            (typeof t === 'string' ? { id: t, zoom: 1 } : { id: t.id, zoom: t.zoom ?? 1 })),
+        }
       : null;
     this._applyDock3d();
     } finally {
@@ -351,13 +359,16 @@ export default class SessionStore {
     if (!cd || !pend) return;
     if (pend.layout) cd.setLayout(pend.layout);
     const remaining = [];
-    for (const id of pend.tiles) {
-      if (cd.has(id)) continue;
-      if (this.ctx.registry.has(id)) {
+    for (const t of pend.tiles) {
+      if (cd.has(t.id)) continue;
+      if (this.ctx.registry.has(t.id)) {
         // Array form skips the router's space-tokenizer — a registry id can be a file path.
-        this.router.execute(['dock.lock', id]);
+        this.router.execute(['dock.lock', t.id]);
+        // Restore the readability zoom after the lock captures home (the dock reads
+        // user back for layout, so this re-places the tile at its saved size).
+        if (t.zoom && t.zoom !== 1) this.router.execute(['window.scale', t.id, String(t.zoom)]);
       } else {
-        remaining.push(id);
+        remaining.push(t);
       }
     }
     this._pendingDock3d = remaining.length ? { layout: pend.layout, tiles: remaining } : null;

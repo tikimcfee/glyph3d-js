@@ -108,10 +108,11 @@ export class CameraDock extends THREE.Object3D {
     /** @param {string} id @returns {boolean} */
     has(id) { return this.entries.has(id); }
 
-    /** @returns {Array<{id:string, slot:number, layout:string, focused:boolean}>} */
+    /** @returns {Array<{id:string, slot:number, layout:string, focused:boolean, zoom:number}>} */
     list() {
         return [...this.entries.values()].map((e) => ({
             id: e.id, slot: e.slot, layout: this.layoutMode, focused: e.id === this.focusedId,
+            zoom: e.grid?.scaleModel ? e.grid.scaleModel.zoomScalar : 1,
         }));
     }
 
@@ -182,22 +183,28 @@ export class CameraDock extends THREE.Object3D {
         // World bounds BEFORE reparent/scale: tile scale is computed against the
         // window's natural size (getBounds is world-space, includes current scale).
         const b = grid.getBounds?.();
-        const homeScale = grid.scale.x || 1;
+        // The RESOLVED world scale (placement · user) is what getBounds reflects, so it
+        // is the divisor that brings measurements back to user-free LOCAL units — both
+        // naturalH and centerOffset. The home PLACEMENT (user-free) is what release
+        // animates back to; resolve() re-applies the persisted zoom on top.
+        const resolvedScale = grid.scale.x || 1;
+        const homePlacement = grid.scaleModel ? grid.scaleModel.placement : resolvedScale;
         const hasBounds = b && !b.isEmpty?.();
         const worldH = hasBounds ? (b.max.y - b.min.y) : 10;
 
         // Grids are top-anchored (origin at top-left; content flows down/right), so the
         // origin is NOT the visual center. Capture the origin→bounds-center vector in the
-        // window's own units (scale 1) so _relayout can place the tile's CENTER in its slot
-        // at any scale: targetOrigin = slotCenter − centerOffset·tileScale.
+        // window's own LOCAL units (user/placement divided out) so _relayout can place
+        // the tile's CENTER in its slot at any scale: targetOrigin = slotCenter −
+        // centerOffset·(placement·user). _animateTile re-applies that effective scale.
         let centerOffset = { x: 0, y: 0, z: 0 };
         if (hasBounds) {
             const origin = grid.getWorldPosition(new THREE.Vector3());
             const center = b.getCenter(new THREE.Vector3());
             centerOffset = {
-                x: (center.x - origin.x) / homeScale,
-                y: (center.y - origin.y) / homeScale,
-                z: (center.z - origin.z) / homeScale,
+                x: (center.x - origin.x) / resolvedScale,
+                y: (center.y - origin.y) / resolvedScale,
+                z: (center.z - origin.z) / resolvedScale,
             };
         }
 
@@ -207,10 +214,10 @@ export class CameraDock extends THREE.Object3D {
             homeParent: grid.parent || null,
             home: {
                 pos: { x: grid.position.x, y: grid.position.y, z: grid.position.z },
-                scale: homeScale,
+                scale: homePlacement, // release animates PLACEMENT home; resolve re-adds zoom
                 quat: grid.quaternion.clone(),
             },
-            naturalH: Math.max(worldH / homeScale, 1e-3),
+            naturalH: Math.max(worldH / resolvedScale, 1e-3),
             centerOffset,
             // Cell-grid dimensions at lock — refreshTile scales naturalH/centerOffset by
             // the col/row ratio when the tile resizes (cell metrics are constant, so the
@@ -302,20 +309,23 @@ export class CameraDock extends THREE.Object3D {
 
     // ===================== layout & tick =====================
 
-    /** Animate one tile so its CENTER sits at (sx,sy,sz) at a uniform-height scale.
-     *  `faceDir` (dock-local, toward the eye) tilts the tile to face the POV — used on
-     *  the arc/dome; null squares it flat to the bar (linear row, focus area). Origin =
-     *  center − R·(centerOffset·scale): grids are top-anchored, so the origin sits off
-     *  the visual center, and that offset rotates with the tile's orientation. */
-    _animateTile(e, sx, sy, sz, scale, faceDir = null) {
+    /** Animate one tile so its CENTER sits at (sx,sy,sz). `placement` is the height-fit
+     *  context scale (user-free) that ANIMATES; the tile's persisted zoom composes on top
+     *  via its ScaleModel, so the EFFECTIVE world scale is placement·user — and that is
+     *  what positions the top-anchored origin off the visual center (centerOffset·eff).
+     *  `faceDir` (dock-local, toward the eye) tilts the tile to face the POV — used on the
+     *  arc/dome; null squares it flat to the bar (linear row, focus area). */
+    _animateTile(e, sx, sy, sz, placement, faceDir = null) {
         if (faceDir) e.quatTarget.setFromUnitVectors(_z, faceDir);
         else e.quatTarget.identity();
 
-        _off.set(e.centerOffset.x * scale, e.centerOffset.y * scale, e.centerOffset.z * scale)
+        const u = e.grid.scaleModel ? e.grid.scaleModel.user.x : 1; // uniform zoom (the mouse path)
+        const eff = placement * u;
+        _off.set(e.centerOffset.x * eff, e.centerOffset.y * eff, e.centerOffset.z * eff)
             .applyQuaternion(e.quatTarget);
         const target = { x: sx - _off.x, y: sy - _off.y, z: sz - _off.z };
         this.animator.animateTo(e.grid, 'position', target, { duration: this.animDur });
-        this.animator.animateTo(e.grid, 'scale', scale, { duration: this.animDur });
+        this.animator.animateTo(e.grid, 'scale', placement, { duration: this.animDur });
     }
 
     /** Pack the bar tiles into a row and place the focused tile (if any) in the
@@ -333,10 +343,14 @@ export class CameraDock extends THREE.Object3D {
         // ---- bar row ----
         const n = bar.length;
         if (n > 0) {
-            // Per-tile scale (uniform height) and world width (centerOffset.x is the
-            // half-width in window units, so width = 2·|cx|·scale).
+            // Per-tile PLACEMENT (height-fit, user-free) and world width. Width uses the
+            // EFFECTIVE scale placement·user (centerOffset.x is the local half-width, so
+            // width = 2·|cx|·placement·user) — a zoomed-up tile reserves its real footprint
+            // so the row never overlaps. `scales` stays user-free (it is the animated
+            // placement); `userOf` re-applies zoom wherever a SIZE is needed.
+            const userOf = (e) => (e.grid.scaleModel ? e.grid.scaleModel.user.x : 1);
             let scales = bar.map((e) => tileH / e.naturalH);
-            let widths = bar.map((e, i) => Math.max(2 * Math.abs(e.centerOffset.x) * scales[i], tileH * 0.4));
+            let widths = bar.map((e, i) => Math.max(2 * Math.abs(e.centerOffset.x) * scales[i] * userOf(e), tileH * 0.4));
             const gap = tileH * 0.3;
 
             if (this.layoutMode === 'radial') {
@@ -429,14 +443,30 @@ export class CameraDock extends THREE.Object3D {
         e.naturalH = Math.max(e.naturalH * ry, 1e-3);
         e.centerOffset = { x: e.centerOffset.x * cx, y: e.centerOffset.y * ry, z: e.centerOffset.z };
         e.dims = { cols, rows };
+        this.reflowTile(id);
+    }
 
+    /**
+     * Re-place a docked tile after a SIZE-only change (its zoom/user scale moved, dims
+     * unchanged) — the readability counterpart to refreshTile. The focused tile free-grows
+     * from the focus point (re-centered so it expands from the middle, picking up the new
+     * effective scale); a bar tile re-packs the row so the zoomed footprint never overlaps.
+     * @param {string} id
+     * @returns {boolean}
+     */
+    reflowTile(id) {
+        const e = this.entries.get(id);
+        if (!e) return false;
         if (id === this.focusedId) {
-            const scale = e.grid.scale.x || 1; // free-grow: keep scale, re-center on the focus point
+            // free-grow: animate the current PLACEMENT (user-free; _animateTile re-applies
+            // zoom via the ScaleModel), re-centered on the focus point.
+            const placement = e.grid.scaleModel ? e.grid.scaleModel.placement : (e.grid.scale.x || 1);
             this._animateTile(e, 0, this._viewH * this.focusY * this.focusDistFrac,
-                              this.distance * (1 - this.focusDistFrac), scale);
+                              this.distance * (1 - this.focusDistFrac), placement);
         } else {
             this._relayout();
         }
+        return true;
     }
 
     /**

@@ -18,6 +18,7 @@ import { RENDER_ORDER } from '../core/renderOrder.js';
 import { paginationGeometry, resolveLayoutParams, DEFAULT_LAYOUT } from '../workers/builders/index.js';
 import LayoutDescription from '../core/LayoutDescription.js';
 import { colorizeGrid } from '../parsing/SyntaxColorizer.js';
+import ScaleModel from './ScaleModel.js';
 
 // Reused for lines without wraps — most lines, in the common case.
 // Frozen so accidental mutation surfaces immediately.
@@ -109,10 +110,11 @@ class CodeGrid extends THREE.Object3D {
         // Add renderer group as our child for proper transforms
         this.add(this._rendererGroup);
 
-        // Apply overall grid scale
-        if (this.config.gridScale !== 1.0) {
-            this.scale.setScalar(this.config.gridScale);
-        }
+        // ScaleModel is the single authority for this.scale: placement (gridScale at
+        // home, the dock's tile-fit when docked) · user (persisted readability zoom).
+        // resolve() is the only writer.
+        this.scaleModel = new ScaleModel(this.config.gridScale);
+        this.scaleModel.resolve(this);
 
         // Reusable output Box3 for getBounds(). NOT a cache of the world box —
         // getBounds() recomputes it fresh every call (cheap: an 8-corner transform
@@ -456,6 +458,30 @@ class CodeGrid extends THREE.Object3D {
      * (fileCommands, layoutCommands) still call it defensively after moving a grid.
      */
     _markBoundsDirty() {}
+
+    /**
+     * Set the PLACEMENT scale (natural home size). The dock overrides this while
+     * docked; composed through ScaleModel so any active zoom is preserved.
+     * @param {number} factor
+     */
+    setScale(factor) {
+        this.config.gridScale = factor;
+        this.scaleModel.placement = factor;
+        this.scaleModel.resolve(this);
+    }
+
+    /**
+     * Set the user ZOOM — readability scale, independent of layout and of the dock's
+     * tile-fit. Number = uniform (text aspect preserved); {x,y,z} = deliberate stretch.
+     * @param {number|{x?:number,y?:number,z?:number}} factor
+     */
+    setZoom(factor) {
+        this.scaleModel.setZoom(factor);
+        this.scaleModel.resolve(this);
+    }
+
+    /** Current uniform zoom magnitude. @returns {number} */
+    get zoom() { return this.scaleModel.zoomScalar; }
 
     /**
      * Get local content bounds (plain-object form, not a THREE.Box3).

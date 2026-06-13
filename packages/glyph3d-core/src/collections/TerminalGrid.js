@@ -28,6 +28,7 @@ import TerminalEmulator from './TerminalEmulator.js';
 import { detectVerticalScroll, captureScrolledRows, depthFade, reflowHistoryRows } from './terminalDepthHistory.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import MonospaceShapeCache from '../shaping/MonospaceShapeCache.js';
+import ScaleModel from './ScaleModel.js';
 
 const _cellStrideScale = new THREE.Vector3(); // scratch for cellStride's world-scale read
 
@@ -180,17 +181,22 @@ export default class TerminalGrid extends THREE.Object3D {
         // as one coherent sheet (text + bg together), not opaque text over glass.
         this._applyGlyphAlpha();
 
-        // SE-corner resize grip — a visible affordance AND the 'handle' pick target.
-        this._handle = null;
+        // SE-corner control grips — visible affordances AND 'handle' pick targets.
+        // Two sibling corners (OS-titlebar style): green RESIZES (cols/rows → PTY),
+        // red SCALES (Object3D zoom for readability). Distinct roles on one channel.
+        this._handle = null;       // green: resize grip
+        this._scaleHandle = null;  // red: scale grip
         this._initHandle();
+        this._initScaleHandle();
 
         // Add the renderer's mesh as a child so transforms propagate.
         this.add(this._renderer.instanceMesh);
 
-        // Apply gridScale (larger = bigger terminal in world space).
-        if (this._gridScale !== 1.0) {
-            this.scale.setScalar(this._gridScale);
-        }
+        // ScaleModel is the single authority for this.scale: placement (gridScale at
+        // home, the dock's tile-fit when docked) · user (persisted zoom). resolve()
+        // is the only writer; setScale/setZoom/the dock feed it, never this.scale.
+        this.scaleModel = new ScaleModel(this._gridScale);
+        this.scaleModel.resolve(this);
 
         // Add this Object3D to the scene.
         scene.add(this);
@@ -587,15 +593,31 @@ export default class TerminalGrid extends THREE.Object3D {
     }
 
     /**
-     * Apply a uniform scale to this terminal's group.
-     * O(1): one DataTexture write.
-     *
+     * Set the PLACEMENT scale (the window's natural home size). This is the context
+     * scale the dock overrides while docked; setting it here updates the home size.
+     * Composes through ScaleModel so any active zoom is preserved.
      * @param {number} factor
      */
     setScale(factor) {
         this._gridScale = factor;
-        this.scale.setScalar(factor);
+        this.scaleModel.placement = factor;
+        this.scaleModel.resolve(this);
     }
+
+    /**
+     * Set the user ZOOM — readability scale, independent of cols/rows/PTY and of the
+     * dock's tile-fit. A number is uniform (glyph aspect preserved); an {x,y,z} is the
+     * deliberate per-axis stretch. Composed onto this.scale via the ScaleModel; when
+     * docked, the dock reads it back for layout (call dock.refreshTile to re-place).
+     * @param {number|{x?:number,y?:number,z?:number}} factor
+     */
+    setZoom(factor) {
+        this.scaleModel.setZoom(factor);
+        this.scaleModel.resolve(this);
+    }
+
+    /** Current uniform zoom magnitude (the persisted readability scale). @returns {number} */
+    get zoom() { return this.scaleModel.zoomScalar; }
 
     /**
      * World-space axis-aligned bounds of the terminal (the padded cell panel),
@@ -661,7 +683,8 @@ export default class TerminalGrid extends THREE.Object3D {
         if (!pickingSystem) return;
         if (this._renderer)   pickingSystem.register('glyph', this._renderer, this._renderer);
         if (this._background) pickingSystem.register('grid', this._background, this);
-        if (this._handle)     pickingSystem.register('handle', this._handle, { grid: this, edge: 'se' });
+        if (this._handle)      pickingSystem.register('handle', this._handle, { grid: this, edge: 'se', role: 'resize' });
+        if (this._scaleHandle) pickingSystem.register('handle', this._scaleHandle, { grid: this, edge: 'se', role: 'scale' });
     }
 
     /**
@@ -750,11 +773,15 @@ export default class TerminalGrid extends THREE.Object3D {
             this._pickingSystem.register('glyph', this._renderer, this._renderer);
         }
 
-        // Move the grip to the new SE corner + re-register (its world extent moved
+        // Move both grips to the new SE corner + re-register (their world extent moved
         // with the panel; the 'handle' channel id-block is keyed per mesh).
         this._positionHandle();
+        this._positionScaleHandle();
         if (this._pickingSystem && this._handle) {
-            this._pickingSystem.register('handle', this._handle, { grid: this, edge: 'se' });
+            this._pickingSystem.register('handle', this._handle, { grid: this, edge: 'se', role: 'resize' });
+        }
+        if (this._pickingSystem && this._scaleHandle) {
+            this._pickingSystem.register('handle', this._scaleHandle, { grid: this, edge: 'se', role: 'scale' });
         }
 
         // Keep the byte→screen emulator in lockstep — its next screen reflects the
@@ -784,7 +811,8 @@ export default class TerminalGrid extends THREE.Object3D {
         if (this._pickingSystem) {
             if (this._renderer)   this._pickingSystem.unregister('glyph', this._renderer);
             if (this._background) this._pickingSystem.unregister('grid', this._background);
-            if (this._handle)     this._pickingSystem.unregister('handle', this._handle);
+            if (this._handle)      this._pickingSystem.unregister('handle', this._handle);
+            if (this._scaleHandle) this._pickingSystem.unregister('handle', this._scaleHandle);
         }
         if (this._renderer) {
             this._renderer.instanceMesh.geometry.dispose();
@@ -800,6 +828,11 @@ export default class TerminalGrid extends THREE.Object3D {
             this._handle.geometry.dispose();
             this._handle.material.dispose();
             this._handle = null;
+        }
+        if (this._scaleHandle) {
+            this._scaleHandle.geometry.dispose();
+            this._scaleHandle.material.dispose();
+            this._scaleHandle = null;
         }
         this.scene.remove(this);
     }
@@ -923,6 +956,48 @@ export default class TerminalGrid extends THREE.Object3D {
         const cx = (this.cols * strideX) / 2 - m.charWidth / 2;
         const cy = -(this.rows * strideY) / 2 + strideY / 2;
         this._handle.position.set(cx + width / 2, cy - height / 2, 0.5);
+    }
+
+    /**
+     * Create the SCALE grip: a red sibling of the green resize grip, sitting just to
+     * its left along the bottom edge (OS-titlebar row of corner controls). Same
+     * 'handle' pick channel, but its token carries role:'scale' so the dragger routes
+     * a zoom (Object3D scale) instead of a cols/rows resize. Object3D scale is uniform,
+     * so the grip is the readability knob — distinct surface from the resize corner.
+     * @private
+     */
+    _initScaleHandle() {
+        const m = this._metrics;
+        const w = (m.charWidth + m.letterSpacing) * 2;
+        const h = m.lineSpacing * 2;
+        const geo = new THREE.PlaneGeometry(w, h);
+        const mat = new THREE.MeshBasicMaterial({
+            color: 0xf2787a, transparent: true, opacity: 0.5, depthTest: false,
+        });
+        this._scaleHandle = new THREE.Mesh(geo, mat);
+        this._scaleHandle.renderOrder = 10001; // same overlay tier as the resize grip
+        this.add(this._scaleHandle);
+        this._positionScaleHandle();
+    }
+
+    /**
+     * Place the scale grip one grip-width (+ a small gap) to the LEFT of the resize
+     * grip, on the same bottom edge. Mirrors _positionHandle's extent math.
+     * @private
+     */
+    _positionScaleHandle() {
+        if (!this._scaleHandle) return;
+        const m = this._metrics;
+        const strideX = m.charWidth + m.letterSpacing;
+        const strideY = m.lineSpacing;
+        const pad = this._bgPadding;
+        const width  = this.cols * strideX + pad * 2;
+        const height = this.rows * strideY + pad * 2;
+        const cx = (this.cols * strideX) / 2 - m.charWidth / 2;
+        const cy = -(this.rows * strideY) / 2 + strideY / 2;
+        const gripW = strideX * 2;
+        // SE corner is at (cx+width/2); step left by one grip-width + a 0.4-grip gap.
+        this._scaleHandle.position.set(cx + width / 2 - gripW * 1.4, cy - height / 2, 0.5);
     }
 
     // ================================================================

@@ -476,6 +476,7 @@ const _rzCenter = new THREE.Vector3();
 const _rzDrag = new THREE.Vector3();
 const _rzGridRight = new THREE.Vector3();
 const _rzGridDown = new THREE.Vector3();
+const _rzGridDiag = new THREE.Vector3();
 
 export function ResizeDragger() {
   const { gl, camera } = useThree();
@@ -495,7 +496,7 @@ export function ResizeDragger() {
     // ctx.resizing kills hover picking + click-select until reload).
     const endDrag = (e, commit) => {
       if (!drag) return; // lostpointercapture also echoes after a normal up — ignore it
-      const { id, startCols, startRows, appliedCols, appliedRows } = drag;
+      const { id, mode, startCols, startRows, appliedCols, appliedRows, startZoom, appliedZoom } = drag;
       drag = null;
       dom.style.cursor = 'default';
       ctx.handleHover = null;   // drop the cached grip; next press must re-establish via a fresh pick
@@ -504,6 +505,14 @@ export function ResizeDragger() {
       // Hold ctx.resizing across THIS event dispatch so CanvasPicker's onUp (same
       // tick, listener-order-independent) skips its click-select; clear once drained.
       queueMicrotask(() => { ctx.resizing = false; });
+      if (mode === 'scale') {
+        // SCALE grip: the live steps already applied window.scale (which saves). A
+        // clean release just keeps it; an interrupt reverts to the start zoom.
+        if (Math.abs(appliedZoom - startZoom) <= 1e-4) return;
+        if (commit) client.session?.scheduleSave?.();
+        else router.execute(`window.scale ${id} ${startZoom}`); // undo the live zoom
+        return;
+      }
       const changed = appliedCols !== startCols || appliedRows !== startRows;
       if (!changed) return;
       if (commit) client.session?.scheduleSave?.();      // keep the live size, persist it
@@ -516,16 +525,22 @@ export function ResizeDragger() {
       // authority is isGripPress() (freshness-gated), NOT the raw async hover flag.
       if (e.button !== 0 || e.ctrlKey || e.metaKey) return;
       if (!ctx.isGripPress?.(e.clientX, e.clientY)) return;
-      const grid = ctx.handleHover?.grid; // token = { grid, edge }; isGripPress ⇒ non-null
+      const token = ctx.handleHover;       // { grid, edge, role }; isGripPress ⇒ non-null
+      const grid = token?.grid;
       if (!grid) return;
       const id = ctx.registry.getIdByGrid(grid);
       if (!id) return;
+      // Two sibling corners on the 'handle' channel: 'scale' (red) zooms the Object3D,
+      // anything else (green) resizes cols/rows. The press authority is identical; only
+      // the drag math differs.
+      const mode = token.role === 'scale' ? 'scale' : 'resize';
+      const startBounds = grid.getBounds().clone();
       drag = {
-        grid, id,
+        grid, id, mode,
         startCols: grid.cols, startRows: grid.rows,
-        startBounds: grid.getBounds().clone(),
-        // Captured at the START so the screen→cell mapping stays anchored to the drag
-        // origin even as live re-grids (and a docked tile's rescale) change things:
+        startBounds,
+        // Captured at the START so the screen→{cells|zoom} mapping stays anchored to the
+        // drag origin even as live re-grids / rescales change things:
         //  - startStride: the panel's LIVE world cell size (cellStride now reads world
         //    scale, so a docked/shrunk tile maps 1:1, not at its un-docked size).
         //  - startQuat: the panel's world orientation, to project the drag onto its OWN
@@ -534,9 +549,16 @@ export function ResizeDragger() {
         startQuat: grid.getWorldQuaternion(new THREE.Quaternion()),
         startX: e.clientX, startY: e.clientY,
         appliedCols: grid.cols, appliedRows: grid.rows,
+        // scale mode: zoom is proportional to how far the corner is pulled along the
+        // panel diagonal relative to its start half-diagonal (pull the corner out by its
+        // own reach → 2×). startReach is that half-diagonal in world units.
+        startZoom: grid.zoom ?? 1,
+        appliedZoom: grid.zoom ?? 1,
+        startReach: Math.max(1e-3, 0.5 * Math.hypot(
+          startBounds.max.x - startBounds.min.x, startBounds.max.y - startBounds.min.y)),
       };
       ctx.resizing = true; // CanvasPicker pauses hover + skips click-select while set
-      dom.style.cursor = 'nwse-resize';
+      dom.style.cursor = mode === 'scale' ? 'nesw-resize' : 'nwse-resize';
       dom.setPointerCapture?.(e.pointerId);
       e.preventDefault();
     };
@@ -563,6 +585,21 @@ export function ResizeDragger() {
       const dragVec = _rzDrag.copy(right).multiplyScalar(dx * pixelScale).addScaledVector(up, -dy * pixelScale);
       const gridRight = _rzGridRight.set(1, 0, 0).applyQuaternion(drag.startQuat);   // panel +X (cols east)
       const gridDown  = _rzGridDown.set(0, -1, 0).applyQuaternion(drag.startQuat);   // panel −Y (rows south)
+
+      if (drag.mode === 'scale') {
+        // SCALE: project the drag onto the panel's SE diagonal; the signed distance past
+        // the start reach scales the zoom proportionally. Uniform (glyph aspect kept) —
+        // the deliberate stretch is the verb's tuple form, never the mouse. window.scale
+        // applies it live (and re-places the docked tile via the dock).
+        const diag = _rzGridDiag.copy(gridRight).add(gridDown).normalize();
+        const factor = Math.max(0.1, (drag.startReach + dragVec.dot(diag)) / drag.startReach);
+        const zoom = Math.min(20, Math.max(0.1, drag.startZoom * factor));
+        if (Math.abs(zoom - drag.appliedZoom) < 0.01) return; // sub-step → nothing to do
+        drag.appliedZoom = zoom;
+        router.execute(`window.scale ${drag.id} ${zoom.toFixed(3)}`);
+        return;
+      }
+
       const stride = drag.startStride;
       const newCols = Math.max(MIN_COLS, drag.startCols + Math.round(dragVec.dot(gridRight) / stride.x));
       const newRows = Math.max(MIN_ROWS, drag.startRows + Math.round(dragVec.dot(gridDown) / stride.y));

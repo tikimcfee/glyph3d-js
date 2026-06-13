@@ -277,12 +277,15 @@ export default function registerGridCommands(router) {
 
         const scale = parseFloat(args[1]);
         if (isNaN(scale)) return { text: 'ERR: scale must be a number', data: null };
-        resolved.grid.scale.setScalar(scale);
+        // Route through the ScaleModel (placement) so object.scale has one writer; falls
+        // back to a raw set for any grid that predates the model.
+        if (typeof resolved.grid.setScale === 'function') resolved.grid.setScale(scale);
+        else resolved.grid.scale.setScalar(scale);
         return {
             text: `OK: grid #${resolved.idx} scale = ${scale}`,
             data: { index: resolved.idx, scale }
         };
-    }, { description: 'Set grid uniform scale', usage: '<id|index> <factor>' });
+    }, { description: 'Set grid placement scale (natural size; window.scale sets readability zoom)', usage: '<id|index> <factor>' });
 
     // grid.window <id|index> <cols> <rows> [firstLine] — turn a code grid into a fixed
     // cols×rows scrollable viewport over its file (opt-in; whole-file is the baseline),

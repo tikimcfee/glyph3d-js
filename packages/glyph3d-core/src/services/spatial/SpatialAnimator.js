@@ -7,7 +7,8 @@
  *
  * Supported properties:
  *   - 'position' -- vec3 lerp on object.position
- *   - 'scale'    -- scalar lerp on object.scale (uniform)
+ *   - 'scale'    -- scalar lerp on the PLACEMENT scale: through object.scaleModel
+ *                   (placement · user) when present, else a uniform object.scale
  *   - 'opacity'  -- float lerp on object._background.material.opacity
  */
 
@@ -56,7 +57,10 @@ export class SpatialAnimator {
         if (property === 'position') {
             from = { x: object.position.x, y: object.position.y, z: object.position.z };
         } else if (property === 'scale') {
-            from = object.scale.x;
+            // 'scale' animates the PLACEMENT (context scale), not the final transform.
+            // A window with a ScaleModel keeps placement as its record; resolve() then
+            // composes the user zoom on top each tick (see update()).
+            from = object.scaleModel ? object.scaleModel.placement : object.scale.x;
         } else if (property === 'opacity') {
             from = object._background?.material?.opacity ?? 1;
         } else {
@@ -140,7 +144,14 @@ export class SpatialAnimator {
                 );
             } else if (anim.property === 'scale') {
                 const s = anim.from + (anim.to - anim.from) * t;
-                anim.object.scale.setScalar(s);
+                // Drive placement through the ScaleModel so the user zoom composes in
+                // (placement · user); fall back to a raw uniform scale for plain objects.
+                if (anim.object.scaleModel) {
+                    anim.object.scaleModel.placement = s;
+                    anim.object.scaleModel.resolve(anim.object);
+                } else {
+                    anim.object.scale.setScalar(s);
+                }
             } else if (anim.property === 'opacity') {
                 const mat = anim.object._background?.material;
                 if (mat) {

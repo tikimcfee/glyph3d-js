@@ -19,7 +19,7 @@ function getDock(ctx) {
  * Unlike resolveGridByIdOrIndex (code grids only), the dock takes any framed
  * surface — a terminal docks exactly like a file.
  */
-function resolveSurface(ctx, arg) {
+export function resolveSurface(ctx, arg) {
     const key = String(arg ?? '');
     const entry = ctx.registry?.get?.(key);
     if (entry) return { id: entry.id, grid: entry.grid };
