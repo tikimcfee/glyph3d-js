@@ -139,12 +139,14 @@ export function resolveGesture(gesture, env) {
         return true;
     }
 
-    // A click on a docked tile is a launcher action: undock it and fly to it. It
-    // pre-empts the responder chain — the tile is camera-locked chrome you're
-    // picking to bring BACK, not a window to focus in place. dock.focus sets
-    // primary + flies itself. (dblclick falls through to normal handling.)
+    // A plain click on a docked tile toggles it in/out of the dock's focus area
+    // (centered + enlarged, still docked) — click again to drop it back to its bar
+    // slot. Pre-empts the responder chain (the tile is camera-locked chrome, not a
+    // window to focus in place). Ejecting a tile back to the world is dock.focus
+    // (drop-and-follow) / dock.toggle (drop home) — verbs, not this gesture.
+    // (dblclick falls through to normal handling.)
     if (gesture.type === 'click' && gesture.target && env.cameraDock?.has?.(gesture.target.id)) {
-        env.exec(['dock.focus', gesture.target.id]);
+        env.exec(['dock.spotlight', gesture.target.id]);
         return true;
     }
 

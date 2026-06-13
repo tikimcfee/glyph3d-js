@@ -103,6 +103,16 @@ export default function registerDockCommands(router) {
         return { text: `OK: focused '${id}'`, data: { id, docked: false } };
     }, { description: 'Release a docked surface and fly to frame it', usage: '<id|index>', returns: '{ id, docked }' });
 
+    router.register('dock.spotlight', (args, ctx) => {
+        const dock = getDock(ctx);
+        if (!dock) return { text: 'ERR: camera dock not ready', data: null };
+        const r = resolveSurface(ctx, args[0]);
+        const id = r?.id ?? String(args[0] ?? '');
+        if (!dock.has(id)) return { text: `ERR: '${id}' is not docked`, data: null };
+        const state = dock.spotlight(id); // 'spotlit' | 'returned'
+        return { text: `OK: ${state} '${id}'`, data: { id, spotlit: state === 'spotlit' } };
+    }, { description: 'Toggle a docked tile in/out of the focus area (centered + enlarged, still docked)', usage: '<id|index>', returns: '{ id, spotlit }' });
+
     router.register('dock.clear', (_args, ctx) => {
         const dock = getDock(ctx);
         if (!dock) return { text: 'ERR: camera dock not ready', data: null };

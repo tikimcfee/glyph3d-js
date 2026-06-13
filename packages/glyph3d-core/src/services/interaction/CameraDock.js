@@ -59,14 +59,21 @@ export class CameraDock extends THREE.Object3D {
      * @param {number} [opts.bottomFrac=0.74] - row depth: 0 = view center, 1 = bottom edge
      * @param {'linear'|'radial'} [opts.layout='linear']
      */
-    constructor({ attentionManager = null, distance = 40, tileFrac = 0.18, bottomFrac = 0.66, layout = 'linear' } = {}) {
+    constructor({ attentionManager = null, distance = 40, tileFrac = 0.18, bottomFrac = 0.66,
+                  focusFrac = 0.5, focusY = 0.06, layout = 'linear' } = {}) {
         super();
         this.name = 'camera-dock';
         this.attentionManager = attentionManager;
         this.distance = distance;
         this.tileFrac = tileFrac;
         this.bottomFrac = bottomFrac;
+        this.focusFrac = focusFrac;   // focus-area tile height as a fraction of the visible height
+        this.focusY = focusY;         // focus-area center: fraction of viewH above the view center
         this.layoutMode = layout;
+
+        /** The tile currently raised into the focus area (centered + enlarged, still
+         *  camera-locked), or null. Toggled by spotlight(); excluded from bar packing. */
+        this.focusedId = null;
 
         this.animator = new SpatialAnimator();
 
@@ -92,9 +99,26 @@ export class CameraDock extends THREE.Object3D {
     /** @param {string} id @returns {boolean} */
     has(id) { return this.entries.has(id); }
 
-    /** @returns {Array<{id:string, slot:number, layout:string}>} */
+    /** @returns {Array<{id:string, slot:number, layout:string, focused:boolean}>} */
     list() {
-        return [...this.entries.values()].map((e) => ({ id: e.id, slot: e.slot, layout: this.layoutMode }));
+        return [...this.entries.values()].map((e) => ({
+            id: e.id, slot: e.slot, layout: this.layoutMode, focused: e.id === this.focusedId,
+        }));
+    }
+
+    /**
+     * Toggle a docked tile in/out of the focus area: raised, it sits centered and
+     * enlarged (still camera-locked, still a dock entry); clicking it again — or
+     * spotlighting another — returns it to its bar slot. At most one is focused.
+     * @param {string} id
+     * @returns {'spotlit'|'returned'|false}
+     */
+    spotlight(id) {
+        if (!this.entries.has(id)) return false;
+        if (this.focusedId === id) { this.focusedId = null; this._relayout(); return 'returned'; }
+        this.focusedId = id;
+        this._relayout();
+        return 'spotlit';
     }
 
     /**
@@ -129,7 +153,7 @@ export class CameraDock extends THREE.Object3D {
      * @param {string} key @param {number} value @returns {boolean}
      */
     setParam(key, value) {
-        if (!['distance', 'tileFrac', 'bottomFrac'].includes(key)) return false;
+        if (!['distance', 'tileFrac', 'bottomFrac', 'focusFrac', 'focusY'].includes(key)) return false;
         if (!Number.isFinite(value)) return false;
         this[key] = value;
         this._relayout();
@@ -217,6 +241,7 @@ export class CameraDock extends THREE.Object3D {
 
         this.entries.delete(id);
         this.tiles.delete(e.grid); // back to world content for the camera the moment it heads home
+        if (this.focusedId === id) this.focusedId = null;
         this.attentionManager?.docks?.delete(id);
 
         // Home parent may have been pruned (file closed while docked) — fall back to
@@ -256,53 +281,71 @@ export class CameraDock extends THREE.Object3D {
 
     // ===================== layout & tick =====================
 
-    /** Re-pack every docked tile into a slot and animate it there. */
+    /** Animate one tile so its CENTER sits at (sx,sy,sz) at a uniform-height scale,
+     *  squared up to the bar. Origin = center − centerOffset·scale (grids are
+     *  top-anchored, so the origin is offset from the visual center). */
+    _animateTile(e, sx, sy, sz, scale) {
+        const target = {
+            x: sx - e.centerOffset.x * scale,
+            y: sy - e.centerOffset.y * scale,
+            z: sz - e.centerOffset.z * scale,
+        };
+        this.animator.animateTo(e.grid, 'position', target, { duration: 0.4 });
+        this.animator.animateTo(e.grid, 'scale', scale, { duration: 0.4 });
+        e.quatTarget.identity(); // square up to the bar (which faces the camera)
+    }
+
+    /** Pack the bar tiles into a row and place the focused tile (if any) in the
+     *  focus area (centered + enlarged). The focused tile is excluded from the row. */
     _relayout() {
-        const tiles = [...this.entries.values()];
-        const n = tiles.length;
-        if (n === 0) return;
+        const all = [...this.entries.values()];
+        if (all.length === 0) return;
+
+        const focused = this.focusedId ? this.entries.get(this.focusedId) : null;
+        const bar = all.filter((e) => e !== focused);
 
         const tileH = this._viewH * this.tileFrac;
         const rowY = -this._viewH * 0.5 * this.bottomFrac; // tile-CENTER row
 
-        // Per-tile scale (uniform height) and resulting world width (centerOffset.x is
-        // the half-width in window units, so width = 2·|cx|·scale).
-        const scales = tiles.map((e) => tileH / e.naturalH);
-        const widths = tiles.map((e, i) => Math.max(2 * Math.abs(e.centerOffset.x) * scales[i], tileH * 0.4));
+        // ---- bar row ----
+        const n = bar.length;
+        if (n > 0) {
+            // Per-tile scale (uniform height) and resulting world width (centerOffset.x
+            // is the half-width in window units, so width = 2·|cx|·scale).
+            const scales = bar.map((e) => tileH / e.naturalH);
+            const widths = bar.map((e, i) => Math.max(2 * Math.abs(e.centerOffset.x) * scales[i], tileH * 0.4));
 
-        // Slot CENTERS: pack left→right with a gap, centered on x=0. Radial bends the
-        // same packed centers onto a gentle downward arc.
-        const gap = tileH * 0.3;
-        const totalW = widths.reduce((a, w) => a + w, 0) + gap * (n - 1);
-        const centers = [];
-        let cx = -totalW * 0.5;
-        for (let i = 0; i < n; i++) { centers.push(cx + widths[i] * 0.5); cx += widths[i] + gap; }
+            // Slot CENTERS: pack left→right with a gap, centered on x=0. Radial bends
+            // the same packed centers onto a gentle downward arc.
+            const gap = tileH * 0.3;
+            const totalW = widths.reduce((a, w) => a + w, 0) + gap * (n - 1);
+            const centers = [];
+            let cx = -totalW * 0.5;
+            for (let i = 0; i < n; i++) { centers.push(cx + widths[i] * 0.5); cx += widths[i] + gap; }
 
-        tiles.forEach((e, i) => {
-            e.slot = i;
-            const scale = scales[i];
-            let sx = centers[i];
-            let sy = rowY;
-            if (this.layoutMode === 'radial' && n > 1) {
-                const half = totalW * 0.5;
-                const t = half > 0 ? sx / half : 0;       // -1..1 across the bar
-                const dip = this._viewH * 0.10;            // how far the ends rise
-                sy = rowY + dip * (t * t);                 // parabola: ends up, middle low
-            }
+            bar.forEach((e, i) => {
+                e.slot = i;
+                const sx = centers[i];
+                let sy = rowY;
+                if (this.layoutMode === 'radial' && n > 1) {
+                    const half = totalW * 0.5;
+                    const t = half > 0 ? sx / half : 0;   // -1..1 across the bar
+                    const dip = this._viewH * 0.10;        // how far the ends rise
+                    sy = rowY + dip * (t * t);             // parabola: ends up, middle low
+                }
+                this._animateTile(e, sx, sy, 0, scales[i]);
+                const d = this.attentionManager?.docks?.get(e.id);
+                if (d) d.offset = { slot: i };
+            });
+        }
 
-            // Place the tile's CENTER at the slot; origin = center − centerOffset·scale.
-            const target = {
-                x: sx - e.centerOffset.x * scale,
-                y: sy - e.centerOffset.y * scale,
-                z: 0 - e.centerOffset.z * scale,
-            };
-            this.animator.animateTo(e.grid, 'position', target, { duration: 0.4 });
-            this.animator.animateTo(e.grid, 'scale', scale, { duration: 0.4 });
-            e.quatTarget.identity(); // square up to the bar (which faces the camera)
-
-            const d = this.attentionManager?.docks?.get(e.id);
-            if (d) d.offset = { slot: i };
-        });
+        // ---- focus area: centered + enlarged, just above the view center ----
+        if (focused) {
+            const scale = (this._viewH * this.focusFrac) / focused.naturalH;
+            this._animateTile(focused, 0, this._viewH * this.focusY, 0, scale);
+            const d = this.attentionManager?.docks?.get(focused.id);
+            if (d) d.offset = { slot: 'focus' };
+        }
     }
 
     /**
@@ -334,6 +377,7 @@ export class CameraDock extends THREE.Object3D {
         this.entries.clear();
         this._releasing.clear();
         this.tiles.clear();
+        this.focusedId = null;
     }
 }
 
