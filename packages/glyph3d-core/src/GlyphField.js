@@ -1062,6 +1062,22 @@ export default class GlyphField {
         this._syncGroupTexture();
     }
 
+    /**
+     * Fractional group fade — same DataTexture slot as setGroupVisibility, but any
+     * 0..1 value. The shader multiplies glyph coverage by this (vGroupAlpha), so a
+     * grid can fade its text in lockstep with its background panel (a translucent
+     * tile reads as one coherent sheet rather than opaque text over glass). 0 still
+     * trips the fragment discard.
+     * @param {number} groupId
+     * @param {number} alpha 0..1
+     */
+    setGroupAlpha(groupId, alpha) {
+        if (groupId < 0 || groupId >= this._maxGroups) return;
+        const base = (groupId * 4 + 2) * 4;
+        this._groupData[base + 3] = alpha;
+        this._syncGroupTexture();
+    }
+
     setGroupScale(groupId, scale) {
         if (groupId < 0 || groupId >= this._maxGroups) return;
         const base = (groupId * 4 + 3) * 4;

@@ -19,7 +19,8 @@
  */
 
 import TerminalGrid from '@glyph3d/core/collections/TerminalGrid.js';
-import { encodeBase64 } from '@glyph3d/core/utils/encoding.js';
+import { terminalTheme } from '../../client/settings.js';
+import { encodeBase64, decodeBase64 } from '@glyph3d/core/utils/encoding.js';
 import { createLogger } from '@glyph3d/core/utils/Logger.js';
 
 const log = createLogger('terminal');
@@ -127,6 +128,7 @@ export default function registerTerminalCommands(router) {
                 rows,
                 gridScale,
                 title: id,
+                ...terminalTheme(),
             });
 
             // Land it in the viewer's CURRENT view, not at the world origin — a spawned
@@ -301,6 +303,89 @@ export default function registerTerminalCommands(router) {
         }
         return { text: `OK: terminal '${id}' scroll ${lines}`, data: { id, lines } };
     }, { description: "Scroll a terminal's tmux scrollback (+ back / - forward)", usage: '<id> <lines>' });
+
+    // ------------------------------------------------------------------
+    // terminal.depth <id> [on|off]
+    //   Toggle scrollback-into-depth: lines that scroll off the top of the live
+    //   screen accumulate as a straight-back stack receding in −Z (newest in the
+    //   forefront), so recent history is readable at a glance without copy-mode.
+    //   On by default per terminal; omit the mode to flip current state.
+    // ------------------------------------------------------------------
+    router.register('terminal.depth', (args, ctx) => {
+        const id = args[0];
+        if (!id) return { text: 'ERR: usage: terminal.depth <id> [on|off]', data: null };
+
+        const grid = getTerminals(ctx).get(id);
+        if (!grid) return { text: `ERR: no terminal '${id}'`, data: null };
+
+        // `terminal.depth <id> ramp <yStep> [zStep]` tunes the ramp shape live (rise +
+        // recession per line, ×lineSpacing). yStep=0 → flat straight-back stack.
+        if ((args[1] || '').toLowerCase() === 'ramp') {
+            const yf = parseFloat(args[2]);
+            const zf = parseFloat(args[3]);
+            if (!Number.isFinite(yf) && !Number.isFinite(zf)) {
+                return { text: 'ERR: usage: terminal.depth <id> ramp <yStep> [zStep]', data: null };
+            }
+            grid.setDepthShape(Number.isFinite(yf) ? yf : null, Number.isFinite(zf) ? zf : null);
+            return {
+                text: `OK: terminal '${id}' ramp y=${grid._depthYFactor} z=${grid._depthZFactor}`,
+                data: { id, yStep: grid._depthYFactor, zStep: grid._depthZFactor },
+            };
+        }
+
+        // A bare integer (e.g. `terminal.depth term-5 1000`) sets how many history
+        // lines recede in depth, and enables it. ('1'/'0' stay on/off shorthands.)
+        const raw = args[1] || '';
+        if (/^\d+$/.test(raw) && raw !== '1' && raw !== '0') {
+            const max = parseInt(raw, 10);
+            grid.setDepthMax(max);
+            if (!grid.depthHistory) grid.setDepthHistory(true);
+            return { text: `OK: terminal '${id}' depth-history depth=${max} (on)`, data: { id, depthMax: max, enabled: true } };
+        }
+
+        const mode = raw.toLowerCase() || 'toggle';
+        let on;
+        if (mode === 'on' || mode === 'true' || mode === '1') on = true;
+        else if (mode === 'off' || mode === 'false' || mode === '0') on = false;
+        else on = !grid.depthHistory;
+
+        grid.setDepthHistory(on);
+        return { text: `OK: terminal '${id}' depth-history ${on ? 'on' : 'off'}`, data: { id, enabled: on } };
+    }, { description: 'Toggle/scale scrollback-into-depth for a terminal (on|off, or a line count)', usage: '<id> [on|off|<lines>]' });
+
+    // ------------------------------------------------------------------
+    // terminal.depth.seed <id> <base64-scrollback>
+    //   Back-fill a terminal's depth-history from external scrollback (tmux
+    //   capture-pane), so the history that ALREADY exists shows receding in space —
+    //   forward-capture only sees lines that scroll off from now on. Payload is the
+    //   base64 of the raw scrollback text, oldest→newest (capture-pane order); the
+    //   ring wants newest-first, so we reverse here. Re-run after a reload to restore
+    //   (the ring is in-memory; tmux is the durable source). See tools/seed-history.mjs.
+    // ------------------------------------------------------------------
+    router.register('terminal.depth.seed', (args, ctx) => {
+        const id = args[0];
+        if (!id) return { text: 'ERR: usage: terminal.depth.seed <id> <base64-scrollback>', data: null };
+
+        const grid = getTerminals(ctx).get(id);
+        if (!grid) return { text: `ERR: no terminal '${id}'`, data: null };
+
+        let text;
+        try { text = decodeBase64(args[1] || ''); }
+        catch (e) { return { text: 'ERR: bad base64 payload', data: null }; }
+
+        const lines = text.split('\n');
+        if (lines.length && lines[lines.length - 1] === '') lines.pop(); // trailing newline
+        lines.reverse();                                                 // → newest-first
+
+        if (!grid.depthHistory) grid.setDepthHistory(true);
+        grid.seedHistory(lines);
+
+        const shown = Math.min(lines.length, grid._depthMax);
+        return {
+            text: `OK: seeded ${shown} of ${lines.length} scrollback line(s) into '${id}' (alt=${grid._altActive})`,
+            data: { id, lines: lines.length, shown, alt: grid._altActive },
+        };
+    }, { description: "Back-fill a terminal's depth-history from scrollback (base64, oldest→newest)", usage: '<id> <base64-scrollback>' });
 
     // ------------------------------------------------------------------
     // terminal.close <id>

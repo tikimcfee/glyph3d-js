@@ -41,8 +41,8 @@ class CodeGrid extends THREE.Object3D {
         this.config = {
             maxChars: options.maxChars || 50000,
             showBackground: options.showBackground !== false,
-            backgroundColor: options.backgroundColor || 0x1a1a2e,
-            backgroundOpacity: options.backgroundOpacity || 0.85,
+            backgroundColor: options.backgroundColor ?? 0x1a1a2e,
+            backgroundOpacity: options.backgroundOpacity ?? 0.92,
             backgroundPadding: options.backgroundPadding || 1.0,
             showFilename: options.showFilename !== false,
             filenameColor: options.filenameColor || { r: 0.6, g: 0.8, b: 1.0 },
@@ -996,6 +996,9 @@ class CodeGrid extends THREE.Object3D {
         if (this._pickingSystem) {
             this._pickingSystem.register('glyph', this._renderer, this._renderer);
         }
+        // Fade glyphs to match the panel from the start (group 0 = all this grid's
+        // glyphs), so a translucent grid reads as one coherent sheet.
+        this._applyGlyphAlpha();
     }
 
     /**
@@ -1248,10 +1251,15 @@ class CodeGrid extends THREE.Object3D {
         const geometry = new THREE.PlaneGeometry(1, 1);
         const material = new THREE.MeshBasicMaterial({
             color: this.config.backgroundColor,
-            transparent: true,
+            // depthWrite: the panel must OCCLUDE content behind it (other grids
+            // stacked behind it in a dock) — without it, later-drawn geometry
+            // composites straight through regardless of alpha and the grid reads as
+            // see-through. `transparent` only when opacity<1, so the slider works
+            // but a full-opacity panel is genuinely solid.
+            transparent: this.config.backgroundOpacity < 1,
             opacity: this.config.backgroundOpacity,
             side: THREE.DoubleSide,
-            depthWrite: false
+            depthWrite: true
         });
 
         this._background = new THREE.Mesh(geometry, material);
@@ -1259,6 +1267,32 @@ class CodeGrid extends THREE.Object3D {
         this._background.position.z = -0.1; // Just behind text — minimal float
         this._background.visible = this.config.showBackground;
         this.add(this._background);
+    }
+
+    /**
+     * Live-restyle the background panel — color (hex int or '#rrggbb' string)
+     * and/or opacity (0–1). Drives the configurable color scheme; readability of
+     * stacked tiles in a dock comes down to this opacity. Either field optional.
+     * @param {{ color?: number|string, opacity?: number }} style
+     */
+    setBackgroundStyle({ color, opacity } = {}) {
+        if (color != null) this.config.backgroundColor = color;
+        if (opacity != null) this.config.backgroundOpacity = opacity;
+        const m = this._background?.material;
+        if (!m) return;
+        if (color != null) m.color.set(color);
+        if (opacity != null) { m.opacity = opacity; m.transparent = opacity < 1; this._applyGlyphAlpha(); }
+        m.needsUpdate = true;
+    }
+
+    /**
+     * Fade this grid's glyphs (group 0 holds them all) to match the panel opacity,
+     * so a translucent grid reads as one coherent sheet (text + bg together) rather
+     * than opaque text over glass. No-op until the renderer exists.
+     * @private
+     */
+    _applyGlyphAlpha() {
+        this._renderer?.setGroupAlpha(0, this.config.backgroundOpacity);
     }
 
     /**

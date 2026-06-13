@@ -36,6 +36,7 @@
 
 import { resolveGridByIdOrIndex, WORLD_FLOOR_Y } from './spatialHelpers.js';
 import CodeGrid from '@glyph3d/core/collections/CodeGrid.js';
+import { gridTheme } from '../../client/settings.js';
 import { unreadableReason, READABLE_MAX_CHARS, READABLE_MAX_LINE_CHARS } from '@glyph3d/core';
 
 /**
@@ -70,7 +71,7 @@ function placeholderBody(reason) {
 function registerFileGrid(ctx, path, body, notRendered) {
     const uri = `file:///${String(path).replace(/^\/+/, '')}`;
     if ((ctx.registry.findByMeta?.('sourcePath', uri) || []).length) return null;
-    const grid = new CodeGrid(ctx.scene, ctx.atlas, { name: path, worldScale: 0.025 });
+    const grid = new CodeGrid(ctx.scene, ctx.atlas, { name: path, worldScale: 0.025, ...gridTheme() });
     grid.setSourcePath(uri); // so file.save / fs/didChange refresh can find it
     if (notRendered) grid.userData.notRendered = notRendered;
     grid.loadFile(path, body);

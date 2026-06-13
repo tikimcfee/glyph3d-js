@@ -38,7 +38,51 @@ export const SETTINGS = [
     key: 'relay.autoConnect', label: 'Auto-connect to relay on load', group: 'Connection',
     type: 'bool', default: true,
   },
+  // Theme — surface backgrounds. Color is a '#rrggbb' string (THREE.Color eats it
+  // directly); opacity drives stacked-tile readability in a dock. apply() restyles
+  // every live grid/terminal; new ones inherit via gridTheme()/terminalTheme().
+  {
+    key: 'grid.backgroundColor', label: 'Code background', group: 'Theme',
+    type: 'color', default: '#1a1a2e',
+    apply: (ctx, v) => themeAll(ctx, 'grid', { color: v }),
+  },
+  {
+    key: 'grid.backgroundOpacity', label: 'Code background opacity', group: 'Theme',
+    type: 'number', default: 0.92, min: 0, max: 1, step: 0.01,
+    apply: (ctx, v) => themeAll(ctx, 'grid', { opacity: v }),
+  },
+  {
+    key: 'terminal.backgroundColor', label: 'Terminal background', group: 'Theme',
+    type: 'color', default: '#0a0a1e',
+    apply: (ctx, v) => themeAll(ctx, 'terminal', { color: v }),
+  },
+  {
+    key: 'terminal.backgroundOpacity', label: 'Terminal background opacity', group: 'Theme',
+    type: 'number', default: 0.96, min: 0, max: 1, step: 0.01,
+    apply: (ctx, v) => themeAll(ctx, 'terminal', { opacity: v }),
+  },
 ];
+
+/** Push a background restyle to every live grid/terminal of `type`. */
+function themeAll(ctx, type, style) {
+  for (const e of ctx?.registry?.findByType?.(type) ?? []) e.grid?.setBackgroundStyle?.(style);
+}
+
+/** Background options for a NEW CodeGrid — so it spawns in the current scheme. */
+export function gridTheme() {
+  return {
+    backgroundColor: getSetting('grid.backgroundColor'),
+    backgroundOpacity: getSetting('grid.backgroundOpacity'),
+  };
+}
+
+/** Background options for a NEW TerminalGrid — so it spawns in the current scheme. */
+export function terminalTheme() {
+  return {
+    backgroundColor: getSetting('terminal.backgroundColor'),
+    backgroundOpacity: getSetting('terminal.backgroundOpacity'),
+  };
+}
 
 const BY_KEY = new Map(SETTINGS.map((s) => [s.key, s]));
 
@@ -47,6 +91,7 @@ export function settingDef(key) { return BY_KEY.get(key) || null; }
 /** Coerce a raw (stored or user-typed) value to the def's type + clamp numbers. */
 export function coerce(def, raw) {
   if (def.type === 'bool') return raw === true || raw === 'true';
+  if (def.type === 'color') return typeof raw === 'string' && raw ? raw : def.default;
   if (def.type === 'number') {
     let n = typeof raw === 'number' ? raw : parseFloat(raw);
     if (Number.isNaN(n)) n = def.default;

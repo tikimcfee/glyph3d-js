@@ -85,6 +85,10 @@ export default class TerminalEmulator {
         const rows = term.rows;
         const buf = term.buffer.active;
         const base = buf.baseY; // 0 with scrollback off; general either way
+        // Alt-screen apps (vim/htop/less) repaint the whole pane each frame, not a
+        // line-shift — so depth-history capture must NOT treat their redraws as
+        // scroll. Surface the buffer type so TerminalGrid can suppress it.
+        const alt = buf.type === 'alternate';
         const cells = new Array(rows);
 
         for (let y = 0; y < rows; y++) {
@@ -112,7 +116,7 @@ export default class TerminalEmulator {
             }
             cells[y] = row;
         }
-        return { cols, rows, cells };
+        return { cols, rows, cells, alt };
     }
 
     /**

@@ -32,6 +32,10 @@ const styles = {
     width: 64, font: 'inherit', color: '#c8ccd6', background: '#0f141b',
     border: '1px solid #232b34', borderRadius: 4, padding: '2px 5px', outline: 'none', textAlign: 'right',
   },
+  swatch: {
+    width: 32, height: 20, padding: 0, background: '#0f141b',
+    border: '1px solid #232b34', borderRadius: 4, cursor: 'pointer',
+  },
   banner: {
     margin: '10px 2px 2px', padding: '6px 8px', borderRadius: 4, background: '#1c1606',
     border: '1px solid #4a3a12', color: '#d9b25a', display: 'flex', alignItems: 'center', gap: 8,
@@ -87,7 +91,14 @@ export default function SettingsPanel({ client }) {
               <div key={def.key} style={styles.row}>
                 <span style={styles.label} title={def.key}>{def.label}</span>
                 {def.reload && <span style={styles.reload}>reload</span>}
-                {def.type === 'bool' ? (
+                {def.type === 'color' ? (
+                  <input
+                    type="color"
+                    style={styles.swatch}
+                    value={vals[def.key]}
+                    onChange={(e) => commit(def, e.target.value)}
+                  />
+                ) : def.type === 'bool' ? (
                   <input
                     type="checkbox"
                     checked={!!vals[def.key]}

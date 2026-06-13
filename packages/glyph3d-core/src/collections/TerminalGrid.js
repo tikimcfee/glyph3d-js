@@ -25,6 +25,7 @@
 import * as THREE from 'three';
 import GlyphField from '../GlyphField.js';
 import TerminalEmulator from './TerminalEmulator.js';
+import { detectVerticalScroll, captureScrolledRows, depthFade } from './terminalDepthHistory.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import MonospaceShapeCache from '../shaping/MonospaceShapeCache.js';
 
@@ -64,6 +65,28 @@ export default class TerminalGrid extends THREE.Object3D {
         this.rows = options.rows ?? 24;
         this.name = options.title ?? 'TerminalGrid';
 
+        // ---- Scrollback-into-depth ----
+        // Lines that scroll off the top of the live screen are kept as a client-side
+        // ring and rendered as an "up-and-back ramp": each older line both RISES above
+        // the live top row (+Y) AND steps back in −Z, faded with depth — so history
+        // climbs into the distance like scrollback receding, readable at a glance
+        // (newest just above/behind the screen, oldest highest + furthest). With
+        // _depthYFactor=0 it degenerates to a flat straight-back stack on the top line.
+        // (tmux owns true scrollback + repaints the visible pane only, so there is no
+        // free "line scrolled off" event — we recover it by diffing frames; see
+        // terminalDepthHistory.detectVerticalScroll.) Full-screen TUIs (alt-screen)
+        // are excluded.
+        this._depthEnabled = options.depthHistory ?? true;
+        this._depthMax     = Math.max(0, options.depthMax ?? 80);   // history lines rendered
+        this._depthFadeMin = options.depthFadeMin ?? 0.4;           // oldest line's brightness
+        this._depthYFactor = options.depthYStep ?? 1.0;             // ×lineSpacing rise per line
+        this._depthZFactor = options.depthZStep ?? 0.6;             // ×lineSpacing recede per line
+        this._history  = [];      // captured rows, index 0 = newest scrolled-off
+        this._prevRows = null;    // last live-screen snapshot, for scroll detection
+        this._altActive = false;  // current frame is an alt-screen (TUI) repaint
+        this._depthYStep = 0;     // world rise per history line (set once metrics exist)
+        this._depthZStep = 0;     // world recede per history line (set once metrics exist)
+
         /**
          * Input callback -- set by the owning agent or process.
          * When set, `terminal.input` routes decoded plaintext through this callback.
@@ -75,16 +98,28 @@ export default class TerminalGrid extends THREE.Object3D {
         const worldScale = options.worldScale ?? 0.025;
         this._gridScale = options.gridScale ?? 1.0;
 
+        // Instance budget = live cells + a depth-history block (cols × _depthMax).
+        // The live screen owns [0, _cellCount); history owns [_cellCount, _totalCount).
+        // Allocated up front so the picking glyph-channel id-block stays stable
+        // (history never grows the instance count — rows shift through fixed slots).
+        this._cellCount  = this.cols * this.rows;
+        this._depthCount = this.cols * this._depthMax;
+        this._totalCount = this._cellCount + this._depthCount;
+
         // One dedicated renderer per terminal (phase 1).
         // Phase 2: shared renderer via segment allocation.
         this._renderer = new GlyphField(scene, atlas, {
-            maxInstances: this.cols * this.rows,
+            maxInstances: this._totalCount,
             worldScale,
             defaultColor: { r: 0.0, g: 1.0, b: 0.0 },
         });
 
         // Derive world-unit metrics from the renderer so glyph sizes match the atlas.
         this._metrics = this._renderer.metrics;
+        // Per-history-line rise (+Y) and recession (−Z). Depth scales with the terminal
+        // via this.scale, like X/Y, since positions are local.
+        this._depthYStep = this._metrics.lineSpacing * this._depthYFactor;
+        this._depthZStep = this._metrics.lineSpacing * this._depthZFactor;
 
         // World-space bounds cache (for picking + camera framing). The local box
         // depends only on cols/rows/metrics (dirtied on resize); the world box is
@@ -106,23 +141,24 @@ export default class TerminalGrid extends THREE.Object3D {
         // Invariant: _codepoints[i], _cellR[i], _cellG[i], _cellB[i] always reflect
         // the most recently written cell state. GPU attributes are synced by
         // _writeToInstanceBuffer() / _applyToRenderer().
-        this._cellCount = this.cols * this.rows;
-        this._codepoints = new Float32Array(this._cellCount).fill(32);     // space
-        this._cellR      = new Float32Array(this._cellCount).fill(0.8);
-        this._cellG      = new Float32Array(this._cellCount).fill(0.8);
-        this._cellB      = new Float32Array(this._cellCount).fill(0.8);
+        this._codepoints = new Float32Array(this._totalCount).fill(32);     // space
+        this._cellR      = new Float32Array(this._totalCount).fill(0.8);
+        this._cellG      = new Float32Array(this._totalCount).fill(0.8);
+        this._cellB      = new Float32Array(this._totalCount).fill(0.8);
 
-        // Pre-computed positions (only change on resize).
-        this._positions = new Float32Array(this._cellCount * 3);
+        // Pre-computed positions (only change on resize). Live cells + the static
+        // depth-history slots (history CONTENT shifts through slots; slot positions
+        // are fixed, so positions never change between frames).
+        this._positions = new Float32Array(this._totalCount * 3);
         this._computePositions();
 
         // Constant sizes: every cell gets the same charWidth × charHeight.
         // Written once at construction / resize; never touched during updates.
-        this._sizes = new Float32Array(this._cellCount * 2);
+        this._sizes = new Float32Array(this._totalCount * 2);
         this._computeSizes();
 
-        // All cells share this terminal's groupId.
-        this._groupIds = new Float32Array(this._cellCount).fill(this._groupId);
+        // All cells (live + history) share this terminal's groupId.
+        this._groupIds = new Float32Array(this._totalCount).fill(this._groupId);
 
         // Push the initial empty buffer to the renderer (swaps in our typed arrays).
         // After this call, geometry.attributes.* point directly at our arrays, so
@@ -132,9 +168,13 @@ export default class TerminalGrid extends THREE.Object3D {
         // Background plane — dark panel behind the terminal for readability.
         this._background = null;
         this._bgColor = options.backgroundColor ?? 0x0a0a1e;
-        this._bgOpacity = options.backgroundOpacity ?? 0.92;
+        this._bgOpacity = options.backgroundOpacity ?? 0.96;
         this._bgPadding = options.backgroundPadding ?? 0.3;
+        this._visible = true; // setVisible state — folded with the fade (shared alpha slot)
         this._initBackground();
+        // Fade glyphs to match the panel from the start, so a translucent tile reads
+        // as one coherent sheet (text + bg together), not opaque text over glass.
+        this._applyGlyphAlpha();
 
         // SE-corner resize grip — a visible affordance AND the 'handle' pick target.
         this._handle = null;
@@ -180,6 +220,22 @@ export default class TerminalGrid extends THREE.Object3D {
     applyScreen(screen) {
         // Ensure all incoming codepoints are present in the atlas before writing.
         this._ensureAtlasCodepoints(screen);
+
+        this._altActive = !!screen.alt;
+
+        // Capture lines that scrolled off the top SINCE the last frame, BEFORE the
+        // live loop overwrites the canonical arrays. _prevRows holds last frame's
+        // snapshot; a detected upward shift of k means its top k rows are now history.
+        if (this._depthEnabled && !this._altActive && this._prevRows) {
+            const k = detectVerticalScroll(this._prevRows, screen, this.rows, this.cols);
+            if (k > 0) {
+                // Newest-first, so the line that was just above the new top lands at
+                // index 0 (the forefront slot). Snapshot rows are immutable, so
+                // aliasing them into the ring is safe.
+                this._history.unshift(...captureScrolledRows(this._prevRows, k));
+                if (this._history.length > this._depthMax) this._history.length = this._depthMax;
+            }
+        }
 
         const cols = this.cols;
         const rows = this.rows;
@@ -227,7 +283,230 @@ export default class TerminalGrid extends THREE.Object3D {
             }
         }
 
-        // Project canonical arrays → GPU attribute arrays.
+        // Snapshot the freshly-written live screen for next frame's scroll diff, then
+        // paint the depth-history block from the ring. (Snapshot rows are fresh arrays
+        // each frame, so aliasing one into _history is safe — it is never mutated.)
+        this._snapshotLive();
+        this._paintHistory();
+
+        // Project canonical arrays (live + history) → GPU attribute arrays.
+        this._writeToInstanceBuffer();
+    }
+
+    /**
+     * Snapshot the live screen region of the canonical arrays into _prevRows — one
+     * fresh {cp,r,g,b} per row. Used both for next frame's scroll diff (cp) and as
+     * the immutable rows handed to the depth-history ring (cp + color).
+     * @private
+     */
+    _snapshotLive() {
+        const cols = this.cols;
+        const rows = this.rows;
+        const cp = this._codepoints, cr = this._cellR, cg = this._cellG, cb = this._cellB;
+        const snap = new Array(rows);
+        for (let y = 0; y < rows; y++) {
+            const base = y * cols;
+            const rcp = new Float32Array(cols);
+            const rr = new Float32Array(cols);
+            const rg = new Float32Array(cols);
+            const rb = new Float32Array(cols);
+            for (let x = 0; x < cols; x++) {
+                rcp[x] = cp[base + x];
+                rr[x] = cr[base + x];
+                rg[x] = cg[base + x];
+                rb[x] = cb[base + x];
+            }
+            snap[y] = { cp: rcp, r: rr, g: rg, b: rb };
+        }
+        this._prevRows = snap;
+    }
+
+    /**
+     * Write the depth-history ring into the history region of the canonical arrays
+     * ([_cellCount, _totalCount)). History slot h holds ring entry h (newest at 0),
+     * dimmed by depth toward _depthFadeMin. Empty slots — and the whole block while
+     * disabled or showing an alt-screen TUI — are blanked (spaces draw nothing).
+     * Slot POSITIONS are static (see _computePositions); only content moves here.
+     * @private
+     */
+    _paintHistory() {
+        if (this._depthMax === 0) return;
+        const cols = this.cols;
+        const base0 = this._cellCount;
+        const cp = this._codepoints, cr = this._cellR, cg = this._cellG, cb = this._cellB;
+        const hist = this._history;
+        const n = hist.length;
+        const dmax = this._depthMax;
+        const fmin = this._depthFadeMin;
+        const hide = !this._depthEnabled || this._altActive;
+
+        for (let h = 0; h < dmax; h++) {
+            const base = base0 + h * cols;
+            if (hide || h >= n) {
+                for (let x = 0; x < cols; x++) {
+                    const i = base + x;
+                    cp[i] = 32; cr[i] = 0; cg[i] = 0; cb[i] = 0;
+                }
+                continue;
+            }
+            const row = hist[h];
+            const fade = depthFade(h, dmax, fmin);
+            for (let x = 0; x < cols; x++) {
+                const i = base + x;
+                cp[i] = row.cp[x];
+                cr[i] = row.r[x] * fade;
+                cg[i] = row.g[x] * fade;
+                cb[i] = row.b[x] * fade;
+            }
+        }
+    }
+
+    /**
+     * Whether scrollback-into-depth is active for this terminal.
+     * @returns {boolean}
+     */
+    get depthHistory() {
+        return this._depthEnabled;
+    }
+
+    /**
+     * Toggle scrollback-into-depth. Disabling clears the captured ring (off means
+     * gone) and blanks the depth block on the next paint; it refills as the live
+     * screen scrolls once re-enabled.
+     * @param {boolean} enabled
+     */
+    setDepthHistory(enabled) {
+        this._depthEnabled = !!enabled;
+        if (!this._depthEnabled) this._history = [];
+        this._paintHistory();
+        this._writeToInstanceBuffer();
+    }
+
+    /**
+     * Change how many depth-history lines this terminal keeps and renders, reallocating
+     * the instance budget (cols × (rows + max)). The captured ring is PRESERVED (trimmed
+     * if shrinking); the live region is restored from the last snapshot so it doesn't
+     * flash blank. Lets you crank a deeper "wall of history" than the construction
+     * default (1000 lines is still a single instanced draw call).
+     * @param {number} max
+     */
+    setDepthMax(max) {
+        max = Math.max(0, Math.floor(max) || 0);
+        if (max === this._depthMax) return;
+        this._depthMax = max;
+        this._depthCount = this.cols * max;
+        this._totalCount = this._cellCount + this._depthCount;
+
+        const total = this._totalCount;
+        this._codepoints = new Float32Array(total).fill(32);
+        this._cellR = new Float32Array(total).fill(0.8);
+        this._cellG = new Float32Array(total).fill(0.8);
+        this._cellB = new Float32Array(total).fill(0.8);
+        this._positions = new Float32Array(total * 3);
+        this._sizes = new Float32Array(total * 2);
+        this._groupIds = new Float32Array(total).fill(this._groupId);
+
+        if (this._history.length > max) this._history.length = max;
+
+        this._computePositions();
+        this._computeSizes();
+
+        // Restore the live region from the last snapshot (the terminal may be idle for
+        // a frame after this) so we don't flash a blank screen.
+        if (this._prevRows) {
+            const cols = this.cols;
+            const cp = this._codepoints, cr = this._cellR, cg = this._cellG, cb = this._cellB;
+            for (let y = 0; y < this.rows && y < this._prevRows.length; y++) {
+                const row = this._prevRows[y];
+                const base = y * cols;
+                for (let x = 0; x < cols; x++) {
+                    cp[base + x] = row.cp[x]; cr[base + x] = row.r[x];
+                    cg[base + x] = row.g[x]; cb[base + x] = row.b[x];
+                }
+            }
+        }
+
+        this._applyToRenderer();   // grows the renderer's maxInstances + swaps in sized attrs
+        this._paintHistory();
+        this._writeToInstanceBuffer();
+
+        if (this._pickingSystem) {
+            this._pickingSystem.register('glyph', this._renderer, this._renderer);
+        }
+    }
+
+    /**
+     * Tune the depth-history ramp live: per-line rise (+Y) and recession (−Z), each a
+     * multiple of lineSpacing. yFactor=0 → flat straight-back stack; yFactor=1 → each
+     * older line one row higher (reads like climbing scrollback). Recomputes slot
+     * positions and re-pushes them (no reload). Pass null for either to leave it.
+     * @param {number|null} yFactor  rise per line ×lineSpacing
+     * @param {number|null} zFactor  recession per line ×lineSpacing
+     */
+    setDepthShape(yFactor, zFactor) {
+        if (Number.isFinite(yFactor)) {
+            this._depthYFactor = yFactor;
+            this._depthYStep = this._metrics.lineSpacing * yFactor;
+        }
+        if (Number.isFinite(zFactor)) {
+            this._depthZFactor = zFactor;
+            this._depthZStep = this._metrics.lineSpacing * zFactor;
+        }
+        this._computePositions();
+        this._applyToRenderer();   // re-push positions (the GPU attr is a copy of _positions)
+        this._paintHistory();
+        this._writeToInstanceBuffer();
+        if (this._pickingSystem) {
+            this._pickingSystem.register('glyph', this._renderer, this._renderer);
+        }
+    }
+
+    /**
+     * Seed the depth-history ring from EXTERNAL scrollback (e.g. tmux capture-pane),
+     * NEWEST-FIRST. Forward-capture (the frame diff) only sees lines that scroll off
+     * from now on; this back-fills the history that already exists — so the session's
+     * accumulated scrollback shows receding in depth immediately, and a re-seed after
+     * a reload restores it (tmux is the durable source; the ring is in-memory).
+     *
+     * Each string becomes one history row (one codepoint per column, padded/truncated
+     * to cols) at the default foreground color; normal depth fade + placement apply.
+     * Glyphs not yet in the live atlas are encoded first. Lines past _depthMax are
+     * dropped (only that many slots render). Replaces the current ring; later
+     * forward-captures unshift in front of the seed seamlessly.
+     * @param {string[]} lines  scrollback rows, newest first
+     */
+    seedHistory(lines) {
+        if (this._depthMax === 0) return;
+        const cols = this.cols;
+        const n = Math.min(lines.length, this._depthMax);
+        const ring = new Array(n);
+        const live = this.atlas && this.atlas._live;
+        const seen = this._liveEnsured;
+        let fresh = null;
+
+        for (let i = 0; i < n; i++) {
+            const s = lines[i] || '';
+            const cp = new Float32Array(cols).fill(32);
+            const r = new Float32Array(cols).fill(0.8);
+            const g = new Float32Array(cols).fill(0.8);
+            const b = new Float32Array(cols).fill(0.8);
+            let x = 0;
+            for (const ch of s) {            // iterate by code point (surrogate-safe)
+                if (x >= cols) break;
+                const code = ch.codePointAt(0);
+                cp[x] = code;
+                if (live && this._shapeCache && code > 32 && !seen.has(code)) {
+                    seen.add(code);
+                    (fresh ?? (fresh = [])).push(code);
+                }
+                x++;
+            }
+            ring[i] = { cp, r, g, b };
+        }
+        if (fresh && live) live.ensureCodepoints(fresh, this._shapeCache);
+
+        this._history = ring;
+        this._paintHistory();
         this._writeToInstanceBuffer();
     }
 
@@ -286,7 +565,18 @@ export default class TerminalGrid extends THREE.Object3D {
      * @param {boolean} visible
      */
     setVisible(visible) {
-        this._renderer.setGroupVisibility(this._groupId, visible);
+        this._visible = visible;
+        this._applyGlyphAlpha();
+    }
+
+    /**
+     * Push the effective glyph alpha to the group: the panel opacity when visible,
+     * 0 when hidden. Visibility and the panel-matched fade share one DataTexture
+     * slot (gColor.a → vGroupAlpha), so they're folded here rather than fighting.
+     * @private
+     */
+    _applyGlyphAlpha() {
+        this._renderer?.setGroupAlpha(this._groupId, this._visible ? this._bgOpacity : 0);
     }
 
     /**
@@ -375,27 +665,34 @@ export default class TerminalGrid extends THREE.Object3D {
      * @param {number} rows
      */
     resize(cols, rows) {
-        const newCount = cols * rows;
         this.cols = cols;
         this.rows = rows;
-        this._cellCount = newCount;
+        this._cellCount  = cols * rows;
+        this._depthCount = cols * this._depthMax;
+        this._totalCount = this._cellCount + this._depthCount;
         this._localBoundsDirty = true;
 
-        // Grow typed arrays if the new size exceeds current capacity.
-        if (newCount > this._codepoints.length) {
-            this._codepoints = new Float32Array(newCount).fill(32);
-            this._cellR      = new Float32Array(newCount).fill(0.8);
-            this._cellG      = new Float32Array(newCount).fill(0.8);
-            this._cellB      = new Float32Array(newCount).fill(0.8);
-            this._positions  = new Float32Array(newCount * 3);
-            this._sizes      = new Float32Array(newCount * 2);
-            this._groupIds   = new Float32Array(newCount).fill(this._groupId);
+        // Captured history is keyed to the old column width — drop it on resize
+        // rather than render torn rows; it refills as the new screen scrolls.
+        this._history = [];
+        this._prevRows = null;
+
+        const total = this._totalCount;
+        // Grow typed arrays if the new budget exceeds current capacity.
+        if (total > this._codepoints.length) {
+            this._codepoints = new Float32Array(total).fill(32);
+            this._cellR      = new Float32Array(total).fill(0.8);
+            this._cellG      = new Float32Array(total).fill(0.8);
+            this._cellB      = new Float32Array(total).fill(0.8);
+            this._positions  = new Float32Array(total * 3);
+            this._sizes      = new Float32Array(total * 2);
+            this._groupIds   = new Float32Array(total).fill(this._groupId);
         } else {
             // Reuse existing buffers; zero them out to avoid stale cell data.
-            this._codepoints.fill(32, 0, newCount);
-            this._cellR.fill(0.8, 0, newCount);
-            this._cellG.fill(0.8, 0, newCount);
-            this._cellB.fill(0.8, 0, newCount);
+            this._codepoints.fill(32, 0, total);
+            this._cellR.fill(0.8, 0, total);
+            this._cellG.fill(0.8, 0, total);
+            this._cellB.fill(0.8, 0, total);
         }
 
         this._computePositions();
@@ -491,6 +788,24 @@ export default class TerminalGrid extends THREE.Object3D {
                 this._positions[idx + 2] = 0;
             }
         }
+
+        // Depth-history slots: each older line RISES above the live top row (+Y) and
+        // recedes (−Z) — an up-and-back ramp. Slot h is fixed; history CONTENT shifts
+        // through slots, so these positions never change between frames (only on resize
+        // or a depth-shape change). _depthYStep=0 → a flat straight-back stack.
+        const base0 = this._cellCount;
+        const yStep = this._depthYStep;
+        const zStep = this._depthZStep;
+        for (let h = 0; h < this._depthMax; h++) {
+            const y = (h + 1) * yStep;
+            const z = -(h + 1) * zStep;
+            for (let col = 0; col < this.cols; col++) {
+                const idx = (base0 + h * this.cols + col) * 3;
+                this._positions[idx]     = col * strideX;
+                this._positions[idx + 1] = y;
+                this._positions[idx + 2] = z;
+            }
+        }
     }
 
     /**
@@ -501,7 +816,7 @@ export default class TerminalGrid extends THREE.Object3D {
     _computeSizes() {
         const w = this._metrics.charWidth;
         const h = this._metrics.charHeight;
-        for (let i = 0; i < this._cellCount; i++) {
+        for (let i = 0; i < this._totalCount; i++) {
             this._sizes[i * 2]     = w;
             this._sizes[i * 2 + 1] = h;
         }
@@ -571,7 +886,7 @@ export default class TerminalGrid extends THREE.Object3D {
      * @private
      */
     _applyToRenderer() {
-        const count = this._cellCount;
+        const count = this._totalCount;
         const colors = this._buildColorArray();
 
         this._renderer.applyPrebuiltBuffers({
@@ -616,7 +931,7 @@ export default class TerminalGrid extends THREE.Object3D {
 
         const cpArr    = cpAttr.array;
         const colorArr = colorAttr.array;
-        const count    = this._cellCount;
+        const count    = this._totalCount;   // live cells + depth-history block
 
         for (let i = 0; i < count; i++) {
             cpArr[i] = this._glyphId(this._codepoints[i]);
@@ -644,7 +959,7 @@ export default class TerminalGrid extends THREE.Object3D {
      * @returns {Float32Array}
      */
     _buildColorArray() {
-        const count = this._cellCount;
+        const count = this._totalCount;
         const arr = new Float32Array(count * 3);
         for (let i = 0; i < count; i++) {
             arr[i * 3]     = this._cellR[i];
@@ -678,7 +993,7 @@ export default class TerminalGrid extends THREE.Object3D {
      * @returns {Float32Array}
      */
     _buildGlyphIdArray() {
-        const count = this._cellCount;
+        const count = this._totalCount;
         const arr = new Float32Array(count);
         for (let i = 0; i < count; i++) {
             arr[i] = this._glyphId(this._codepoints[i]);
@@ -754,10 +1069,15 @@ export default class TerminalGrid extends THREE.Object3D {
         const geometry = new THREE.PlaneGeometry(1, 1);
         const material = new THREE.MeshBasicMaterial({
             color: this._bgColor,
-            transparent: true,
+            // depthWrite: the panel must OCCLUDE content behind it (the floor, and
+            // tiles stacked behind it in a dock) — without it, later-drawn geometry
+            // composites straight through regardless of alpha and the terminal reads
+            // as see-through. `transparent` only when opacity<1, so the slider works
+            // but a full-opacity panel is genuinely solid.
+            transparent: this._bgOpacity < 1,
             opacity: this._bgOpacity,
             side: THREE.DoubleSide,
-            depthWrite: false,
+            depthWrite: true,
         });
 
         this._background = new THREE.Mesh(geometry, material);
@@ -767,6 +1087,22 @@ export default class TerminalGrid extends THREE.Object3D {
         this._background.userData.entityType = 'terminal';
         this.add(this._background);
         this._updateBackground();
+    }
+
+    /**
+     * Live-restyle the background panel — color (hex int or '#rrggbb' string)
+     * and/or opacity (0–1). Drives the configurable color scheme; readability of
+     * stacked tiles in a dock comes down to this opacity. Either field optional.
+     * @param {{ color?: number|string, opacity?: number }} style
+     */
+    setBackgroundStyle({ color, opacity } = {}) {
+        if (color != null) this._bgColor = color;
+        if (opacity != null) this._bgOpacity = opacity;
+        const m = this._background?.material;
+        if (!m) return;
+        if (color != null) m.color.set(color);
+        if (opacity != null) { m.opacity = opacity; m.transparent = opacity < 1; this._applyGlyphAlpha(); }
+        m.needsUpdate = true;
     }
 
     /**
