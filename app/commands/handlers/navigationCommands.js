@@ -15,7 +15,7 @@ import { COLORS } from './colorConstants.js';
 import {
     resolveGridByIdOrIndex, getWorldBounds, unionBounds,
     resolveAnchor, fmtVec,
-    frameBounds, animateCamera,
+    frameBounds, animateCamera, resolveAdjacencies,
 } from './spatialHelpers.js';
 import { zDistanceForFit } from '@glyph3d/core/services/spatial/spatialMath.js';
 import { decodeBase64 } from '@glyph3d/core/utils/encoding.js';
@@ -119,6 +119,49 @@ function removeTourAnnotation(ctx, id) {
  * @param {import('../CommandRouter.js').default} router
  */
 export default function registerNavigationCommands(router) {
+
+    // ================================================================
+    //  focus.neighbor <left|right|up|down>
+    //
+    //  Move focus to the nearest neighbor grid in a screen-plane direction.
+    //  The clean spatial-nav primitive: it sets attention.primary (the green
+    //  "highlight" box) and frames the camera with the SAME focusOnGrid /
+    //  focusOnObject path camera.focus uses — so a key-nav, a canvas click, and
+    //  `camera.focus <id>` all land identically. No reader/explorer mode state:
+    //  one source of truth (the bus + AttentionManager). hjkl bind to this.
+    // ================================================================
+
+    router.register('focus.neighbor', (args, ctx) => {
+        const dir = (args[0] || '').toLowerCase();
+        if (!['left', 'right', 'up', 'down'].includes(dir)) {
+            return { text: 'ERR: usage: focus.neighbor <left|right|up|down>', data: null };
+        }
+        const currentId = ctx.attention?.primary?.id ?? null;
+        if (!currentId) {
+            return { text: 'ERR: focus.neighbor needs a focused grid to move from (attention primary is empty)', data: null };
+        }
+        const next = resolveAdjacencies(ctx, currentId)[dir];
+        if (!next) {
+            return { text: `OK: no neighbor ${dir} of ${currentId}`, data: { direction: dir, from: currentId, target: null } };
+        }
+
+        ctx.attentionManager.set('primary', next.id, { entity: next });
+        const grids = ctx.getGrids();
+        const idx = grids.indexOf(next.grid);
+        if (idx >= 0) {
+            ctx.cameraController?.focusOnGrid(idx);
+            ctx.spatialNav?.focusGrid?.(idx, false);
+        } else {
+            ctx.cameraController?.focusOnObject?.(next.grid);
+        }
+        return {
+            text: `OK: focus ${dir} → ${next.id}`,
+            data: { direction: dir, from: currentId, target: next.id },
+        };
+    }, {
+        description: 'Move focus (highlight + camera) to the nearest neighbor grid in a screen-plane direction',
+        usage: '<left|right|up|down>',
+    });
 
     // ================================================================
     //  camera.frame <index1> [index2...] [--padding <n>]

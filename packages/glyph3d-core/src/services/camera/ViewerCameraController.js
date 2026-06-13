@@ -55,6 +55,16 @@ const DEFAULT_LOOK_DIST = 200;
 const MIN_LOOK_DIST = 2;
 const MAX_LOOK_DIST = 2000;
 
+// The keys that drive the camera (WASD pan, Q/E/Space vertical). A fly (flyTo)
+// is cancelled when the user "grabs control" — but only via THESE keys, not any
+// keypress: nav bindings (hjkl → focus.neighbor) issue a fly AND hold a key, so
+// a blanket "any key held" cancel would kill the fly the same frame it starts.
+const FLIGHT_KEYS = new Set(['KeyW', 'KeyS', 'KeyA', 'KeyD', 'Space', 'KeyQ', 'KeyE']);
+const anyFlightKey = (keys) => {
+    for (const k of FLIGHT_KEYS) if (keys.has(k)) return true;
+    return false;
+};
+
 export class ViewerCameraController {
     /**
      * @param {SceneContext} ctx
@@ -353,7 +363,7 @@ export class ViewerCameraController {
      */
     _stepTween(dt) {
         const i = this.input;
-        if (i.drag.active || i.wheel.dy !== 0 || i.keys.size > 0) { this._tween = null; return false; }
+        if (i.drag.active || i.wheel.dy !== 0 || anyFlightKey(i.keys)) { this._tween = null; return false; }
         const tw = this._tween;
         tw.elapsed += dt * 1000;
         const t = Math.min(tw.elapsed / tw.ms, 1);

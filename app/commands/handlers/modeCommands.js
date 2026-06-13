@@ -16,6 +16,7 @@ import {
     frameBounds,
     computeBoundsFocus,
     animateCamera,
+    resolveAdjacencies,
 } from './spatialHelpers.js';
 
 const READER_ANIMATE_MS = 350;
@@ -89,54 +90,6 @@ function enterExplorer(ctx) {
     ctx.attentionManager.clear('primary');
     ctx.mode.state = 'explorer';
     if (ctx.readerCompass) ctx.readerCompass.setVisible(false);
-}
-
-/**
- * For reader mode: find the nearest adjacent grid in each of the four
- * screen-space directions. Since reader mode always has pitch=yaw=0, screen
- * axes map straight to world XY — no camera-basis projection needed.
- *
- * For each candidate, the axis with the larger |delta| component decides
- * which direction "bucket" it belongs to; within each bucket we pick the
- * smallest Euclidean distance.
- *
- * @returns {{ up: RegistryEntry|null, down: RegistryEntry|null, left: RegistryEntry|null, right: RegistryEntry|null }}
- */
-export function resolveAdjacencies(ctx, currentId) {
-    const empty = { up: null, down: null, left: null, right: null };
-    if (!ctx.registry) return empty;
-    const entries = ctx.registry.list().filter(
-        e => e.type === 'grid' || e.type === 'agent' || e.type === 'terminal'
-    );
-    const currentEntry = entries.find(e => e.id === currentId);
-    if (!currentEntry) return empty;
-    const centerOf = (entry) => {
-        const aabb = getWorldBounds(entry.grid);
-        return aabb ? aabb.center : null;
-    };
-    const origin = centerOf(currentEntry);
-    if (!origin) return empty;
-    const best = { ...empty };
-    const bestDist = { up: Infinity, down: Infinity, left: Infinity, right: Infinity };
-    for (const entry of entries) {
-        if (entry.id === currentId) continue;
-        const c = centerOf(entry);
-        if (!c) continue;
-        const dx = c.x - origin.x;
-        const dy = c.y - origin.y;
-        const dist = Math.hypot(dx, dy);
-        if (dist < 1e-3) continue;
-        const absDx = Math.abs(dx);
-        const absDy = Math.abs(dy);
-        const dir = absDx > absDy
-            ? (dx > 0 ? 'right' : 'left')
-            : (dy > 0 ? 'up'    : 'down');
-        if (dist < bestDist[dir]) {
-            best[dir] = entry;
-            bestDist[dir] = dist;
-        }
-    }
-    return best;
 }
 
 function resolveByNameOrFallback(ctx, target) {

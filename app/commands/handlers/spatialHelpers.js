@@ -189,6 +189,62 @@ export function unionBounds(grids, indices) {
 }
 
 // ──────────────────────────────────────────────────────────────
+//  Directional Adjacency
+// ──────────────────────────────────────────────────────────────
+
+/**
+ * Find the nearest adjacent entity in each of the four screen-plane directions
+ * from a current entity, by grid-center distance. The axis with the larger
+ * |delta| decides which direction bucket a candidate falls in; within a bucket
+ * the smallest Euclidean distance wins. World XY == screen plane when the camera
+ * is axis-aligned (pitch=yaw=0); off-axis it stays a reasonable world-space
+ * heuristic. Considers grid / agent / terminal entries (anything framable).
+ *
+ * Pure: reads ctx.registry + world bounds, mutates nothing. The single neighbor
+ * resolver — modeCommands' mode.jump/adjacencies and navigationCommands'
+ * focus.neighbor both call it, so spatial nav has one definition.
+ *
+ * @param {Object} ctx - command context (needs .registry)
+ * @param {string|null} currentId - registry id to navigate FROM
+ * @returns {{ up: Object|null, down: Object|null, left: Object|null, right: Object|null }}
+ *   each value a RegistryEntry or null
+ */
+export function resolveAdjacencies(ctx, currentId) {
+    const empty = { up: null, down: null, left: null, right: null };
+    if (!ctx.registry) return empty;
+    const entries = ctx.registry.list().filter(
+        e => e.type === 'grid' || e.type === 'agent' || e.type === 'terminal'
+    );
+    const currentEntry = entries.find(e => e.id === currentId);
+    if (!currentEntry) return empty;
+    const centerOf = (entry) => {
+        const aabb = getWorldBounds(entry.grid);
+        return aabb ? aabb.center : null;
+    };
+    const origin = centerOf(currentEntry);
+    if (!origin) return empty;
+    const best = { ...empty };
+    const bestDist = { up: Infinity, down: Infinity, left: Infinity, right: Infinity };
+    for (const entry of entries) {
+        if (entry.id === currentId) continue;
+        const c = centerOf(entry);
+        if (!c) continue;
+        const dx = c.x - origin.x;
+        const dy = c.y - origin.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist < 1e-3) continue;
+        const dir = Math.abs(dx) > Math.abs(dy)
+            ? (dx > 0 ? 'right' : 'left')
+            : (dy > 0 ? 'up'    : 'down');
+        if (dist < bestDist[dir]) {
+            best[dir] = entry;
+            bestDist[dir] = dist;
+        }
+    }
+    return best;
+}
+
+// ──────────────────────────────────────────────────────────────
 //  Anchor Resolution
 // ──────────────────────────────────────────────────────────────
 

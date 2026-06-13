@@ -3,6 +3,7 @@ import { useThree, useFrame } from '@react-three/fiber';
 import * as THREE from 'three/webgpu';
 import { useAppCommands } from './CommandProvider.jsx';
 import { resolveGesture } from './gestureResolver.js';
+import { resolveKeyBinding } from './keymap.js';
 import { moveVerbFor } from './surfaceInteractions.js';
 
 const round = (n) => Math.round(n * 100) / 100;
@@ -172,15 +173,24 @@ export function CanvasPicker() {
       resolveGesture({ type: 'dblclick', target: s.hoverEntry }, gestureEnv);
     };
 
-    // Escape = pop the innermost context node (leave edit / release the keyboard
-    // hold), resolved through the chain — the first KEYBOARD gesture in it.
-    // EntityKeystrokeRouter deliberately ignores Escape for the host; this is the
-    // host. DOM inputs (command bar, panels) keep their own Escape.
+    // Host keyboard (bubble phase): EntityKeystrokeRouter (capture) has already
+    // taken edit/terminal keys, so anything reaching here is NAV mode.
+    //   • Escape pops the innermost context node (leave edit / release the hold),
+    //     resolved through the gesture chain. EntityKeystrokeRouter deliberately
+    //     ignores Escape for the host; this is the host.
+    //   • Otherwise consult the nav keymap (hjkl → focus.neighbor, …) and fire
+    //     the bound verb through the bus — same path as a click / the CLI.
+    // DOM inputs (command bar, panels) keep their own keys — guarded first.
     const onKeyDown = (e) => {
-      if (e.key !== 'Escape') return;
       const t = e.target;
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
-      if (resolveGesture({ type: 'esc', target: null }, gestureEnv)) e.preventDefault();
+      if (e.key === 'Escape') {
+        if (resolveGesture({ type: 'esc', target: null }, gestureEnv)) e.preventDefault();
+        return;
+      }
+      if (e.repeat) return; // one press = one jump; holding a key doesn't sweep the field
+      const cmd = resolveKeyBinding(e);
+      if (cmd) { router.execute(cmd); e.preventDefault(); }
     };
     document.addEventListener('keydown', onKeyDown);
 
