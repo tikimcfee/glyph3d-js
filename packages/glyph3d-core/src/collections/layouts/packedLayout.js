@@ -42,13 +42,21 @@ function areaWrapWidth(sizes, margin, aspect) {
 
 /** Dense shelf pack: items sorted tallest-first (stable — index breaks ties, so two
  *  identically-sized trees pack identically), wrapped to an area-derived width. Slots
- *  come back in the CALLER's original item order. */
-function packBlock(sizes, { margin, aspect }) {
+ *  come back in the CALLER's original item order.
+ *
+ *  With `ordered`, the size sort is skipped: items pack in their GIVEN sequence and the
+ *  rows boustrophedon (serpentine). This is the child-DIRECTORY tier — directory order is
+ *  a first-class spatial axis there (a small early sibling stays early, not size-sunk),
+ *  so the ordered-arrow chain threads a clean snake. Files keep the dense tallest-first
+ *  pack: they carry no arrows, so density wins for them. */
+function packBlock(sizes, { margin, aspect, ordered = false }) {
+    const wrapWidth = areaWrapWidth(sizes, margin, aspect);
+    if (ordered) {
+        const flow = flowBoxes(sizes, { margin, wrapWidth, serpentine: true });
+        return { slots: flow.slots, width: flow.width, height: flow.height };
+    }
     const order = sizes.map((_, i) => i).sort((a, b) => (sizes[b].h - sizes[a].h) || (a - b));
-    const flow = flowBoxes(order.map((i) => sizes[i]), {
-        margin,
-        wrapWidth: areaWrapWidth(sizes, margin, aspect),
-    });
+    const flow = flowBoxes(order.map((i) => sizes[i]), { margin, wrapWidth });
     const slots = new Array(sizes.length);
     order.forEach((orig, k) => { slots[orig] = flow.slots[k]; });
     return { slots, width: flow.width, height: flow.height };
@@ -65,7 +73,9 @@ function measure(node, opts) {
             { margin: opts.margin, aspect: opts.aspect })
         : null;
     const dirSizes = dirs.map((d) => measure(d, opts));
-    const childPack = dirs.length ? packBlock(dirSizes, { margin: opts.dirGap, aspect: opts.aspect }) : null;
+    // Child dirs pack in canonical order (serpentine), not by size — directory order is
+    // the priority here, so the arrow chain reads as a clean snake.
+    const childPack = dirs.length ? packBlock(dirSizes, { margin: opts.dirGap, aspect: opts.aspect, ordered: true }) : null;
 
     // Truly-empty node → zero footprint (siblings close the gap); otherwise a floor for
     // visual consistency. The clamp only grows the reported size, so packed content

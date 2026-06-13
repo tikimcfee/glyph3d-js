@@ -29,7 +29,9 @@ function measure(node, opts) {
     const fileFlow = flowBoxes(fSizes, { margin: opts.margin, wrapWidth: squareWrap(fSizes, opts.margin) });
 
     const childSizes = dirs.map((d) => measure(d, opts));
-    const childPack = flowBoxes(childSizes, { margin: opts.gap, wrapWidth: squareWrap(childSizes, opts.gap) });
+    // Child dirs cascade in canonical order, snaking across wraps so the ordered-arrow
+    // chain steps to a neighbor instead of backtracking to the left margin each row.
+    const childPack = flowBoxes(childSizes, { margin: opts.gap, wrapWidth: squareWrap(childSizes, opts.gap), serpentine: true });
 
     // A truly-empty node (no files, no child dirs — e.g. a dir left empty after a removal)
     // measures to ZERO so it occupies no space and siblings close the gap. Non-empty

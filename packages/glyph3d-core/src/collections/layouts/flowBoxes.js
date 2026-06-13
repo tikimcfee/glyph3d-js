@@ -10,23 +10,39 @@
  * would exceed wrapWidth. Returns each box's TOP-LEFT slot (y descends: rows go
  * downward, slot.y <= 0) plus the cluster's total extent.
  *
+ * With `serpentine`, alternate rows run RIGHT-TO-LEFT: the box sequence boustrophedons
+ * (row 0 → , row 1 ← , row 2 → …) so consecutive boxes always land adjacent across a
+ * row break instead of jumping back to the left margin. Item ORDER is unchanged — only
+ * the x of odd rows is mirrored across the cluster width — so callers still read slots
+ * in their original order. This is what makes an ordered dir tier's arrow chain snake
+ * cleanly rather than backtrack on every wrap.
+ *
  * @param {Array<{w:number,h:number}>} sizes
- * @param {{margin?:number, wrapWidth?:number}} [opts]
+ * @param {{margin?:number, wrapWidth?:number, serpentine?:boolean}} [opts]
  * @returns {{slots: Array<{x:number,y:number}>, width:number, height:number, rows:number}}
  */
-export function flowBoxes(sizes, { margin = 16, wrapWidth = Infinity } = {}) {
+export function flowBoxes(sizes, { margin = 16, wrapWidth = Infinity, serpentine = false } = {}) {
     const slots = [];
-    let cx = 0, topY = 0, rowH = 0, rows = 1, maxW = 0;
+    const rowOf = [];
+    let cx = 0, topY = 0, rowH = 0, rows = 1, maxW = 0, row = 0;
     for (const s of sizes) {
         if (cx > 0 && cx + s.w > wrapWidth) {
             maxW = Math.max(maxW, cx - margin);
-            cx = 0; topY -= rowH + margin; rowH = 0; rows++;
+            cx = 0; topY -= rowH + margin; rowH = 0; rows++; row++;
         }
         slots.push({ x: cx, y: topY });
+        rowOf.push(row);
         cx += s.w + margin;
         rowH = Math.max(rowH, s.h);
     }
     maxW = Math.max(maxW, cx - margin);
+    // Mirror odd rows across the cluster width so the box sequence snakes (the last box
+    // of a row sits directly above the first box of the next), keeping every step local.
+    if (serpentine) {
+        for (let i = 0; i < slots.length; i++) {
+            if (rowOf[i] & 1) slots[i].x = maxW - slots[i].x - sizes[i].w;
+        }
+    }
     return { slots, width: maxW, height: -topY + rowH, rows };
 }
 

@@ -9,6 +9,10 @@
  * layout.markers on|off    → toggle the per-directory bounding prisms
  *   [--opacity N --pad N --color-a HEX --color-b HEX …]  → dial them live
  *
+ * layout.arrows            → report the ordered-arrow state + options
+ * layout.arrows on|off     → toggle the per-directory sibling-order arrow chains
+ *   [--opacity N --z-lift N --arrow-ratio N --color-a HEX --color-b HEX]  → dial them live
+ *
  * The scheme applies to every subsequent tree relayout too — file.open,
  * file.openDir, grid.layout/grid.window footprint changes all flow through
  * ContentTree.relayoutAndRest, so a directory-row "load it all" lands in
@@ -126,6 +130,56 @@ export default function registerLayoutCommands(router) {
     }, {
         description: 'Toggle/dial the per-directory bounding prisms (depth-gradient colored volumes)',
         usage: '[on|off] [--opacity N --opacity-decay N --pad N --z-pad N --min-thickness N --edge-opacity N --color-a HEX --color-b HEX]',
+        returns: '{ enabled, patch } or { enabled, opts }',
+    });
+
+    // Ordered arrows: per-directory chains threading the child dirs in canonical order.
+    // Same color/number knob grammar as layout.markers (colorA/colorB take hex).
+    router.register('layout.arrows', (args, ctx) => {
+        const arrows = ctx.contentTreeArrows;
+        if (!arrows) return { text: 'ERR: no content-tree arrows in this context', data: null };
+
+        if (!args[0]) {
+            const opts = Object.fromEntries(Object.entries(arrows.opts).map(([k, v]) =>
+                [k, COLOR_KEYS.has(k) ? '#' + v.toString(16).padStart(6, '0') : String(v)]));
+            return {
+                text: box('LAYOUT ARROWS', kvLines({ enabled: String(arrows.enabled), ...opts }), 56) + '\nOK: layout.arrows',
+                data: { enabled: arrows.enabled, opts: { ...arrows.opts } },
+            };
+        }
+
+        let i = 0;
+        let enabled = arrows.enabled;
+        if (args[0] === 'on' || args[0] === 'off') { enabled = args[0] === 'on'; i = 1; }
+        else if (!args[0].startsWith('--')) return { text: `ERR: expected on|off or --flags, got "${args[0]}"`, data: null };
+
+        const patch = {};
+        for (; i < args.length; i += 2) {
+            const flag = args[i];
+            if (!flag.startsWith('--')) return { text: `ERR: expected --flag, got "${flag}"`, data: null };
+            const raw = args[i + 1];
+            if (raw === undefined) return { text: `ERR: ${flag} needs a value`, data: null };
+            const key = flag.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+            if (COLOR_KEYS.has(key)) {
+                const hex = raw.replace(/^#|^0x/, '');
+                if (!/^[0-9a-fA-F]{6}$/.test(hex)) return { text: `ERR: ${flag} wants a 6-digit hex color`, data: null };
+                patch[key] = parseInt(hex, 16);
+                continue;
+            }
+            const n = Number(raw);
+            if (!Number.isFinite(n) || n < 0) return { text: `ERR: ${flag} must be a finite number ≥ 0`, data: null };
+            patch[key] = n;
+        }
+
+        if (Object.keys(patch).length) arrows.configure(patch);
+        arrows.setEnabled(enabled);
+        return {
+            text: `OK: arrows ${enabled ? 'on' : 'off'}${Object.keys(patch).length ? ' · ' + Object.entries(patch).map(([k, v]) => `${k}=${COLOR_KEYS.has(k) ? '#' + v.toString(16) : v}`).join(' ') : ''}`,
+            data: { enabled, patch },
+        };
+    }, {
+        description: 'Toggle/dial the per-directory ordered-arrow chains (sibling reading-order threads)',
+        usage: '[on|off] [--opacity N --z-lift N --arrow-ratio N --arrow-angle N --color-a HEX --color-b HEX]',
         returns: '{ enabled, patch } or { enabled, opts }',
     });
 }

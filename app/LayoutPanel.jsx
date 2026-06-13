@@ -49,6 +49,7 @@ function readField(client) {
         files: tree.paths().length,
         dirs: tree.dirCount(),
         markers: !!client?.ctx?.contentTreeMarkers?.enabled,
+        arrows: !!client?.ctx?.contentTreeArrows?.enabled,
     };
 }
 
@@ -91,13 +92,22 @@ export default function LayoutPanel({ client }) {
                             title={`layout.markers ${state}`}>{state}</span>
                     ))}
                 </div>
+                <div style={S.section}>order arrows</div>
+                <div style={S.chips}>
+                    {['on', 'off'].map((state) => (
+                        <span key={state} style={S.chip(field.arrows === (state === 'on'))}
+                            onClick={() => fire(['layout.arrows', state])}
+                            title={`layout.arrows ${state}`}>{state}</span>
+                    ))}
+                </div>
                 <div style={S.hint}>
                     The scheme packs the directory tree into the world — switching re-lays
                     the field in place, and every load (a file, a whole directory) arrives
                     in the active scheme. Markers draw a bounding prism per directory,
-                    colored by a depth gradient. Dial knobs from the command bar, e.g.{' '}
+                    colored by a depth gradient; arrows thread each directory's child
+                    dirs in reading order. Dial knobs from the command bar, e.g.{' '}
                     <code>layout.scheme --depth-z 150</code> or{' '}
-                    <code>layout.markers --opacity 0.12 --color-b 8a3a3a</code>.
+                    <code>layout.arrows --opacity 0.4 --z-lift 40</code>.
                 </div>
             </div>
         </div>
