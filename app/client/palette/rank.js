@@ -19,6 +19,22 @@ import { Fzf, byLengthAsc } from 'fzf';
 const KIND_BOOST = { sheet: 24, scheme: 8, verb: 0, file: 0 };
 const EXACT_VERB_PIN = 1000;
 
+// Verbs aren't equal. "Go look at X" (*.focus) and "open X" (*.open[Dir]) are
+// the everyday moves; highlight.* is decoration — niche, and usually issued
+// programmatically (hover-preview), not typed. On an ambiguous short query
+// (six highlight.* verbs crowd the corpus) that floated highlight above
+// file.open / *.focus, which is the wrong default. So float focus/open and
+// sink highlight by a swing comparable to the sheet boost — WITHOUT removing
+// highlight: typing toward it still surfaces it (the nudge only reorders the
+// matched set), and a fully-typed verb still pins via EXACT_VERB_PIN.
+const VERB_NUDGE = 16;
+function verbNudge(key) {
+    const action = key.slice(key.lastIndexOf('.') + 1);
+    if (action === 'focus' || action === 'open' || action === 'openDir') return VERB_NUDGE;
+    if (key.startsWith('highlight.')) return -VERB_NUDGE;
+    return 0;
+}
+
 // Corpus is stable for a whole bar-open (the bar memoizes its entries array),
 // so build the fzf index once per array identity, not once per keystroke.
 const _fzfByEntries = new WeakMap();
@@ -49,6 +65,7 @@ export function rank(query, entries, limit = 9) {
             positions: r.positions,
             score: r.score
                 + (KIND_BOOST[r.item.kind] || 0)
+                + (r.item.kind === 'verb' ? verbNudge(r.item.key) : 0)
                 + (r.item.kind === 'verb' && r.item.key === q.toLowerCase() ? EXACT_VERB_PIN : 0),
         }))
         .sort((a, b) => b.score - a.score)
