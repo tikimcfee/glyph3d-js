@@ -1,8 +1,9 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
+import { stateController } from '@glyph3d/core/services/state';
 
 /**
  * HudPanel — the focused-window control helper. A small companion overlay on the canvas
- * (bottom-right), it shows controls for the ONE grid that currently holds attention.primary
+ * (bottom-right by default, draggable), it shows controls for the ONE grid that currently holds attention.primary
  * — the genuinely dynamic, contextual bit that doesn't fit a static panel:
  *
  *   focus / reset / cam-lock · layout mode · edit toggle (lit = editing) · scroll/frame readout · close
@@ -59,7 +60,10 @@ function readFocus(client) {
 
 export default function HudPanel({ client }) {
   const [f, setF] = useState(() => readFocus(client));
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(() => !!stateController.get('hud.collapsed', false));
+  const [pos, setPos] = useState(() => stateController.get('hud.pos', null)); // {x,y} once dragged
+  const posRef = useRef(pos);
+  const rootRef = useRef(null);
 
   useEffect(() => {
     if (!client) return undefined;
@@ -81,14 +85,50 @@ export default function HudPanel({ client }) {
 
   const fire = useCallback((...argv) => client?.router?.execute(argv), [client]);
 
+  // Drag by the grip: fixed-position move clamped to the viewport; position
+  // persists on release. Until first drag it anchors bottom-right above the
+  // status bar. Mirrors the focus bar (ContextBreadcrumb) frame.
+  const onGripDown = (e) => {
+    e.preventDefault();
+    const el = rootRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const dx = e.clientX - r.left, dy = e.clientY - r.top;
+    const move = (ev) => {
+      const p = {
+        x: Math.max(0, Math.min(window.innerWidth - r.width, ev.clientX - dx)),
+        y: Math.max(0, Math.min(window.innerHeight - r.height, ev.clientY - dy)),
+      };
+      posRef.current = p;
+      setPos(p);
+    };
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      if (posRef.current) stateController.set('hud.pos', posRef.current);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up, { once: true });
+  };
+
+  const toggle = () => setCollapsed((c) => {
+    stateController.set('hud.collapsed', !c);
+    return !c;
+  });
+
   if (!f) return null;  // nothing focused → no helper
 
+  // Until first drag: bottom-right over the canvas, raised to clear the inline
+  // status bar. A drag switches to explicit x/y.
+  const place = pos ? { left: pos.x, top: pos.y } : { right: 12, bottom: 30 };
+
   return (
-    <div style={S.panel} onPointerDown={(e) => e.stopPropagation()} onWheel={(e) => e.stopPropagation()}>
+    <div ref={rootRef} style={{ ...S.panel, ...place }}
+      onPointerDown={(e) => e.stopPropagation()} onWheel={(e) => e.stopPropagation()}>
       <div style={S.header}>
+        <span onPointerDown={onGripDown} title="drag to move" style={S.grip}>⠿</span>
         <span style={S.htitle} title={f.name}>{short(f.name)}</span>
         <button type="button" style={S.collapse} title={collapsed ? 'expand' : 'collapse'}
-          onClick={() => setCollapsed((c) => !c)}>{collapsed ? '▸' : '▾'}</button>
+          onClick={toggle}>{collapsed ? '▸' : '▾'}</button>
       </div>
       {!collapsed && (
         <div style={S.controls}>
@@ -141,7 +181,7 @@ function Mode({ on, onClick, children }) {
 
 const S = {
   panel: {
-    position: 'fixed', right: 12, bottom: 30, zIndex: 20,   // bottom-right over the canvas, raised to clear the inline status bar
+    position: 'fixed', zIndex: 20,   // placed via `place` — bottom-right default, draggable
     font: '12px ui-monospace, Menlo, Consolas, monospace',
     background: 'rgba(10,12,16,0.82)', color: '#aebccb',
     border: '1px solid #283341', borderRadius: 7, padding: '8px 10px',
@@ -166,6 +206,7 @@ const S = {
   editOn: { color: '#1a1206', background: '#f0b45a', border: '1px solid #f0b45a' },  // amber = editing
   readout: { color: '#6b7785', fontSize: 11, marginLeft: 'auto', whiteSpace: 'nowrap' },
   header: { display: 'flex', alignItems: 'center', gap: 6 },
+  grip: { cursor: 'grab', color: '#4a5468', letterSpacing: -1, padding: '0 2px' },
   htitle: { color: '#6cf', fontWeight: 600, fontSize: 11, letterSpacing: 0.4, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   collapse: { font: 'inherit', color: '#9ab', background: 'transparent', border: 'none', cursor: 'pointer', padding: '0 2px', lineHeight: 1 },
 };
