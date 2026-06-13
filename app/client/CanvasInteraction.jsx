@@ -26,16 +26,24 @@ const DRAG_PX = 5; // pointer travel above this = a drag (orbit/pan), not a clic
 // Caret-preview tint for the glyph under the pointer (additive over syntax color,
 // via the highlight texture). Mid-tone cool lift — pure white blows out light glyphs.
 const HOVER_GLYPH_TINT = { r: 0.18, g: 0.25, b: 0.38 };
-// Hover outline is inflated by this many world units so that when you hover the
-// already-selected grid it reads as a light halo just OUTSIDE the steady selection
-// box, instead of the two line-boxes merging into one.
-const HOVER_INFLATE = 3;
+// Hover outline inflation. Small — the box hugs the panel edge (getLocalBounds
+// already carries the background padding), so a hover on an UNfocused grid reads as
+// a tight halo, not a fat frame floating out in space. When hover lands on the
+// focused grid we don't draw a second box at all (see below) — we recolor the one
+// focus box — so there's no two-boxes-merging case left to space apart.
+const HOVER_INFLATE = 0.35;
 
 // Control-state outline colors. The focus box recolors by where keystrokes land, so the window's
 // state is legible in 3D (not only in the HUD): green = focused/selected, amber = input-active
 // (a code grid in edit mode, or the keyboard-target terminal). Amber matches the HUD edit color.
 const FOCUS_COLOR = 0x6ee7a0;  // green
 const INPUT_COLOR = 0xf0b45a;  // amber (HUD editOn)
+const HOVER_COLOR = 0x9fd2ff;  // light blue — hover
+// When you hover the grid that's ALREADY focused, the single focus box fades part-
+// way toward the hover blue instead of stacking a second outline on top. Keeps the
+// state color legible while still acknowledging the hover. Lerp/frame = the fade rate.
+const HOVER_FOCUS_BLEND = 0.5;
+const OUTLINE_FADE = 0.16;
 
 // Resize floors — a terminal smaller than this is useless (and a SIGWINCH to 0
 // rows confuses the shell). Drags clamp the prospective size to these.
@@ -584,11 +592,13 @@ const _off = new THREE.Matrix4();
 const _center = new THREE.Vector3();
 const _size = new THREE.Vector3();
 const _identQ = new THREE.Quaternion();
+const _targetColor = new THREE.Color();
+const _hoverColor = new THREE.Color(HOVER_COLOR);
 
 export function SelectionIndicator() {
   const { scene } = useThree();
   const client = useAppCommands();
-  const tracked = useRef({ primaryBox: null, hoverBox: null, am: null, registry: null, primaryActive: null });
+  const tracked = useRef({ primaryBox: null, hoverBox: null, am: null, registry: null });
 
   useEffect(() => {
     if (!client) return;
@@ -609,11 +619,11 @@ export function SelectionIndicator() {
     const t = tracked.current;
     t.am = client.ctx.attentionManager;
     t.registry = client.ctx.registry;
-    // Distinct styles: a steady green box for the SELECTED grid, a lighter blue
-    // box for HOVER drawn on top (higher renderOrder). They read as different
-    // things even when both land on the same grid.
-    t.primaryBox = mkBox(FOCUS_COLOR, 9999);  // green — focused; recolored amber when input-active
-    t.hoverBox = mkBox(0x9fd2ff, 10000);   // light blue — hover (follows the cursor)
+    // One box per role: a green/amber box for the SELECTED grid, a light-blue box
+    // for HOVER on a DIFFERENT grid. Hovering the focused grid recolors the focus
+    // box (fades toward blue) rather than drawing the hover box on top — no stack.
+    t.primaryBox = mkBox(FOCUS_COLOR, 9999);  // green — focused; recolored amber when input-active, blue-tinted on hover
+    t.hoverBox = mkBox(HOVER_COLOR, 10000);   // light blue — hover (follows the cursor)
 
     return () => {
       scene.remove(t.primaryBox); scene.remove(t.hoverBox);
@@ -655,22 +665,27 @@ export function SelectionIndicator() {
     };
     // The focus box recolors to signal WHERE KEYSTROKES LAND: amber when the focused window is
     // input-active (a code grid in edit mode, or the keyboard-target terminal — attention.key),
-    // green when focused-but-inert. So "type here" reads the same in the HUD and in 3D. Recolor
-    // only on change (cheap, no per-frame churn).
+    // green when focused-but-inert. So "type here" reads the same in the HUD and in 3D.
     const primaryId = t.am.get('primary')?.id ?? null;
     const keyId = t.am.get('key')?.id ?? null;
     const primaryGrid = primaryId ? (t.registry.get(primaryId)?.grid ?? null) : null;
+    const hoverGrid = gridFor('hover');
     const editing = typeof primaryGrid?.getCursor === 'function' && primaryGrid.getCursor() != null;
     const inputActive = !!primaryGrid && (editing || (!!keyId && keyId === primaryId));
-    if (inputActive !== t.primaryActive) {
-      t.primaryActive = inputActive;
-      t.primaryBox.material?.color.set(inputActive ? INPUT_COLOR : FOCUS_COLOR);
-    }
-    // Selection: exact bounds, steady. Hover: ALWAYS shown on the cursor grid — including the
-    // selected one — inflated into a light halo just outside the selection box. Two distinct,
-    // independently-tracked things.
+    // Hover on the already-focused grid → no second box; the focus box itself fades
+    // partway toward the hover blue. Otherwise the focus box holds its state color.
+    const hoverOnFocus = !!hoverGrid && hoverGrid === primaryGrid;
+    _targetColor.set(inputActive ? INPUT_COLOR : FOCUS_COLOR);
+    if (hoverOnFocus) _targetColor.lerp(_hoverColor, HOVER_FOCUS_BLEND);
+    // Smooth fade toward the target (state change OR hover on/off) — no instant snap.
+    if (t.primaryBox.material) t.primaryBox.material.color.lerp(_targetColor, OUTLINE_FADE);
+
+    // Selection box: exact panel bounds, steady. Hover box: only on a DIFFERENT grid
+    // than the focused one (the merge case is handled by the recolor above), hugging
+    // the panel edge so it's a tight halo, not a fat floating frame.
     fit(t.primaryBox, primaryGrid, 0);
-    fit(t.hoverBox, gridFor('hover'), HOVER_INFLATE);
+    if (hoverOnFocus) t.hoverBox.visible = false;
+    else fit(t.hoverBox, hoverGrid, HOVER_INFLATE);
   });
 
   return null;
