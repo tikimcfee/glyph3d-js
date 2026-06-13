@@ -29,6 +29,7 @@
 
 import * as THREE from 'three';
 import packedLayout from './layouts/packedLayout.js';
+import { BOUNDS_Z_PAD } from '../core/constants.js';
 
 /** Scratch vector for footprintBounds — one focused node measured per frame, no per-call alloc. */
 const _fpPos = new THREE.Vector3();
@@ -145,8 +146,12 @@ export default class ContentTree {
         node.updateWorldMatrix(true, false);
         node.getWorldPosition(_fpPos);
         const s = (node.userData && node.userData.size) || { x: 1, y: 1, z: 0 };
-        target.min.set(_fpPos.x - s.x / 2, _fpPos.y - s.y,     _fpPos.z - s.z / 2);
-        target.max.set(_fpPos.x + s.x / 2, _fpPos.y,           _fpPos.z + s.z / 2);
+        // z gets BOUNDS_Z_PAD on each side: the footprint is laid out flat (size.z = 0)
+        // on the same plane as the contained grids' background panels, so the focus
+        // region fill would sit coplanar with them and z-fight. The pad makes it a thin
+        // slab that straddles the plane and clears the panels.
+        target.min.set(_fpPos.x - s.x / 2, _fpPos.y - s.y,     _fpPos.z - s.z / 2 - BOUNDS_Z_PAD);
+        target.max.set(_fpPos.x + s.x / 2, _fpPos.y,           _fpPos.z + s.z / 2 + BOUNDS_Z_PAD);
         return target;
     }
 

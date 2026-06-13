@@ -29,6 +29,18 @@ export const DEBUG_SETTINGS = {
     enabled: typeof process !== 'undefined' && process.env?.DEBUG_RENDERING === 'true'
 };
 
+// Bound-area depth padding. A grid's content (and a directory's footprint) is
+// essentially FLAT — it lives on the same z-plane as the grid background panels
+// (which write depth as occluders). Focus/selection overlays (the selection
+// wireframe, the directory region fill) derive their box from these bound areas;
+// a box face landing EXACTLY on a background panel z-fights as the camera moves.
+// This half-depth lifts the bound area off the content plane so an overlay
+// STRADDLES it (a thin slab) and edge-on rays still hit a flat panel — exactly
+// what TerminalGrid already bakes in (its local bounds carry their own z span).
+// Named + field-level on purpose: the separation is a knob you can see and tune,
+// not a magic number hidden inside per-scheme layout math.
+export const BOUNDS_Z_PAD = 0.5;
+
 // Performance thresholds
 export const PERF_THRESHOLDS = {
     maxInstancesPerMesh: 10000,  // Split if more instances needed

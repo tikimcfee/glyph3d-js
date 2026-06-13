@@ -15,6 +15,7 @@ import GlyphField from '../GlyphField.js';
 import { getWorkerBridge, isWorkersSupported } from '../workers/WorkerBridge.js';
 import { iterGraphemes } from '../utils/grapheme.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
+import { BOUNDS_Z_PAD } from '../core/constants.js';
 import { paginationGeometry, resolveLayoutParams, DEFAULT_LAYOUT } from '../workers/builders/index.js';
 import LayoutDescription from '../core/LayoutDescription.js';
 import { colorizeGrid } from '../parsing/SyntaxColorizer.js';
@@ -434,8 +435,11 @@ class CodeGrid extends THREE.Object3D {
         const box = this._localBoundsCache;
         if (!contentBounds) { box.makeEmpty(); return box; }
         const padding = this.config.backgroundPadding;
-        box.min.set(contentBounds.min.x - padding, contentBounds.min.y - padding, contentBounds.min.z);
-        box.max.set(contentBounds.max.x + padding, contentBounds.max.y + padding, contentBounds.max.z);
+        // x/y: panel padding around content. z: a tiny slab (content is flat at z=0,
+        // the background panel sits just behind it) so a focus overlay straddles the
+        // panel plane instead of lying coplanar with it — see BOUNDS_Z_PAD.
+        box.min.set(contentBounds.min.x - padding, contentBounds.min.y - padding, contentBounds.min.z - BOUNDS_Z_PAD);
+        box.max.set(contentBounds.max.x + padding, contentBounds.max.y + padding, contentBounds.max.z + BOUNDS_Z_PAD);
         return box;
     }
 
