@@ -5,8 +5,9 @@
  * window.scale sets the user ZOOM: the Object3D readability scale, orthogonal to
  * terminal.resize (which reshapes the PTY) and to the dock's tile-fit. It composes
  * through each window's ScaleModel (placement · user), so the single transform
- * authority stays one place. When the target is docked, we re-place its tile (its
- * effective footprint changed) so the bar re-packs / the focused tile free-grows.
+ * authority stays one place. A docked window contain-fits a FIXED slot box, so zoom never
+ * changes its bar FOOTPRINT (the box wins) — it shows when the tile is spotlit or returns
+ * home; we re-place a docked target so its bar tile stays box-fit as the zoom moves.
  */
 
 import { resolveSurface } from './dockCommands.js';
@@ -38,8 +39,10 @@ export default function registerWindowCommands(router) {
 
         r.grid.setZoom(zoom);
 
-        // Docked tiles size against their zoom — re-place so the row re-packs (or the
-        // focused tile free-grows). Loose windows already updated via setZoom→resolve.
+        // A docked tile renders box-fit in the bar (zoom divided out of its placement) and
+        // zoom-applied in the focus area. setZoom moved `user`, so re-place the tile to fold
+        // the new zoom back through: a bar tile stays box-fit, the spotlit tile free-grows.
+        // Loose windows already updated via setZoom→resolve.
         const dock = ctx.cameraDock;
         if (dock?.has?.(r.id)) dock.reflowTile(r.id);
 

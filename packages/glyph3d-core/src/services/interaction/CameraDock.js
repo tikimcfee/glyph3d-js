@@ -8,6 +8,13 @@
  * its 80×80 buffer; only its `scale` shrinks, so it reads as a tidy box without
  * losing a cell. ("Shrunk dimensionally, not re-windowed.")
  *
+ * Each tile is CONTAIN-FIT into a fixed bounding box (boxFrac·viewH tall, boxAspect
+ * wide — per-entity overridable): the box owns the packing footprint, the content
+ * scales to sit inside it (tall files pillarbox, wide terminals letterbox). So a
+ * tile's slot is independent of its content size or readability zoom — the bar packs
+ * as a uniform icon strip and nothing slides off the sides. Zoom lives at home/focus,
+ * never in the bar.
+ *
  * How it rides the camera: this node is itself a THREE.Object3D added to the
  * scene. Each frame `update(dt, camera)` parks it a fixed `distance` ahead of
  * the camera, matching the camera's orientation — the sky-follow trick with an
@@ -59,17 +66,19 @@ export class CameraDock extends THREE.Object3D {
      * @param {Object} [opts]
      * @param {Object} [opts.attentionManager] - shared AttentionManager (its .docks map is the record of truth)
      * @param {number} [opts.distance=40]   - world units ahead of the camera the bar sits
-     * @param {number} [opts.tileFrac=0.16] - tile height as a fraction of the visible height
-     * @param {number} [opts.bottomFrac=0.74] - row depth: 0 = view center, 1 = bottom edge
-     * @param {'linear'|'radial'} [opts.layout='linear']
+     * @param {number} [opts.boxFrac=0.18]  - slot-box height as a fraction of the visible height
+     * @param {number} [opts.boxAspect=1.5] - slot-box width/height (3:2); content contain-fits inside
+     * @param {number} [opts.bottomFrac=0.66] - row depth: 0 = view center, 1 = bottom edge
+     * @param {'linear'|'radial'} [opts.layout='radial']
      */
-    constructor({ attentionManager = null, distance = 40, tileFrac = 0.18, bottomFrac = 0.66,
+    constructor({ attentionManager = null, distance = 40, boxFrac = 0.18, boxAspect = 1.5, bottomFrac = 0.66,
                   focusFrac = 0.5, focusY = 0.06, focusDistFrac = 0.7, animDur = 0.22, layout = 'radial' } = {}) {
         super();
         this.name = 'camera-dock';
         this.attentionManager = attentionManager;
         this.distance = distance;
-        this.tileFrac = tileFrac;
+        this.boxFrac = boxFrac;     // slot-box height as a fraction of the visible height
+        this.boxAspect = boxAspect; // slot-box width/height (3:2 default); content contain-fits inside
         this.bottomFrac = bottomFrac;
         this.focusFrac = focusFrac;   // focus-area tile height as a fraction of the visible height
         this.focusY = focusY;         // focus-area center: fraction of viewH above the view center
@@ -159,11 +168,11 @@ export class CameraDock extends THREE.Object3D {
     }
 
     /**
-     * Tune a layout parameter live and re-pack. Keys: distance, tileFrac, bottomFrac.
+     * Tune a layout parameter live and re-pack. Keys: distance, boxFrac, boxAspect, bottomFrac.
      * @param {string} key @param {number} value @returns {boolean}
      */
     setParam(key, value) {
-        if (!['distance', 'tileFrac', 'bottomFrac', 'focusFrac', 'focusY', 'focusDistFrac', 'animDur'].includes(key)) return false;
+        if (!['distance', 'boxFrac', 'boxAspect', 'bottomFrac', 'focusFrac', 'focusY', 'focusDistFrac', 'animDur'].includes(key)) return false;
         if (!Number.isFinite(value)) return false;
         this[key] = value;
         this._relayout();
@@ -309,27 +318,67 @@ export class CameraDock extends THREE.Object3D {
 
     // ===================== layout & tick =====================
 
-    /** Animate one tile so its CENTER sits at (sx,sy,sz). `placement` is the height-fit
-     *  context scale (user-free) that ANIMATES; the tile's persisted zoom composes on top
-     *  via its ScaleModel, so the EFFECTIVE world scale is placement·user — and that is
-     *  what positions the top-anchored origin off the visual center (centerOffset·eff).
-     *  `faceDir` (dock-local, toward the eye) tilts the tile to face the POV — used on the
-     *  arc/dome; null squares it flat to the bar (linear row, focus area). */
-    _animateTile(e, sx, sy, sz, placement, faceDir = null) {
+    /** The slot box for an entry, in dock-local world units: height = boxFrac·viewH,
+     *  width = height·boxAspect. Per-entry boxFrac/boxAspect override the dock defaults —
+     *  the "configurable bounding volume" a window can ask for. */
+    _boxFor(e) {
+        const h = this._viewH * (e.boxFrac ?? this.boxFrac);
+        return { w: h * (e.boxAspect ?? this.boxAspect), h };
+    }
+
+    /** Contain-fit: the EFFECTIVE (rendered) scale that sits an entry's natural content INSIDE
+     *  box (w,h) with aspect preserved — tall content pillarboxes, wide content letterboxes.
+     *  The footprint stays the box; only the content shrinks, never the slot. This is a RENDERED
+     *  scale (it ignores zoom), so the bar shows box-fit no matter what zoom is dialed in. */
+    _containScale(e, box) {
+        const nW = Math.max(2 * Math.abs(e.centerOffset.x), 1e-3); // local content width (top-left anchored)
+        const nH = Math.max(e.naturalH, 1e-3);
+        return Math.min(box.w / nW, box.h / nH);
+    }
+
+    /** The uniform zoom an entry's grid carries (the ScaleModel `user` scalar); 1 when absent.
+     *  The dock works in RENDERED scale, so it divides this out of the placement it animates
+     *  (the animator re-applies it via resolve) — see _animateTile. */
+    _userOf(e) { return (e.grid.scaleModel && e.grid.scaleModel.user.x) || 1; }
+
+    /** Place the focused tile: centered, height-fit to focusFrac, pulled toward the eye
+     *  (focusDistFrac) so it renders in front of the dock sphere. This is the "read it" state —
+     *  not box-bounded — so the dialed zoom DOES show here (eff = height-fit · zoom): focus is
+     *  where reading happens, the bar is where the icon sits. */
+    _placeFocus(e) {
+        const fd = this.focusDistFrac;
+        const eff = (this._viewH * this.focusFrac / Math.max(e.naturalH, 1e-3)) * fd * this._userOf(e);
+        this._animateTile(e, 0, this._viewH * this.focusY * fd, this.distance * (1 - fd), eff);
+        const d = this.attentionManager?.docks?.get(e.id);
+        if (d) d.offset = { slot: 'focus' };
+    }
+
+    /** Animate one tile so its CONTENT CENTER sits at (sx,sy,sz) at the RENDERED scale `eff`.
+     *  The top-anchored origin is offset off the visual center by centerOffset·eff (rotated to
+     *  match the tile's facing), so the center lands on (sx,sy,sz) at any zoom. `faceDir`
+     *  (dock-local, toward the eye) tilts the tile to face the POV on the arc/dome; null squares
+     *  it flat (linear row, focus area).
+     *
+     *  The 'scale' animation drives ScaleModel.placement (the animator resolve()s placement·user,
+     *  per SpatialAnimator), so to LAND the rendered scale at `eff` we target placement = eff/user.
+     *  That makes `eff` the single source of truth for on-screen size — the box-fit the bar wants
+     *  (zoom divided out) or the zoom-applied size focus wants (zoom multiplied into eff). */
+    _animateTile(e, sx, sy, sz, eff, faceDir = null) {
         if (faceDir) e.quatTarget.setFromUnitVectors(_z, faceDir);
         else e.quatTarget.identity();
 
-        const u = e.grid.scaleModel ? e.grid.scaleModel.user.x : 1; // uniform zoom (the mouse path)
-        const eff = placement * u;
         _off.set(e.centerOffset.x * eff, e.centerOffset.y * eff, e.centerOffset.z * eff)
             .applyQuaternion(e.quatTarget);
         const target = { x: sx - _off.x, y: sy - _off.y, z: sz - _off.z };
         this.animator.animateTo(e.grid, 'position', target, { duration: this.animDur });
-        this.animator.animateTo(e.grid, 'scale', placement, { duration: this.animDur });
+        this.animator.animateTo(e.grid, 'scale', eff / this._userOf(e), { duration: this.animDur });
     }
 
-    /** Pack the bar tiles into a row and place the focused tile (if any) in the
-     *  focus area (centered + enlarged). The focused tile is excluded from the row. */
+    /** Pack the bar tiles into a row (or dome) of fixed-size slot boxes and place the
+     *  focused tile (if any) in the focus area. The focused tile is excluded from the row.
+     *  Each tile contain-fits its slot box, so footprint == box (uniform unless per-entity
+     *  overridden), independent of content size or zoom — the row packs as an even icon
+     *  strip and nothing slides off the sides. */
     _relayout() {
         const all = [...this.entries.values()];
         if (all.length === 0) return;
@@ -346,34 +395,31 @@ export class CameraDock extends THREE.Object3D {
         const focused = this.focusedId ? this.entries.get(this.focusedId) : null;
         const bar = all.filter((e) => e !== focused);
 
-        const tileH = this._viewH * this.tileFrac;
         const rowY = -this._viewH * 0.5 * this.bottomFrac; // tile-CENTER row
+        const gap = (this._viewH * this.boxFrac) * 0.3;
 
         // ---- bar row ----
         const n = bar.length;
         if (n > 0) {
-            // Per-tile PLACEMENT (height-fit, user-free) and world width. Width uses the
-            // EFFECTIVE scale placement·user (centerOffset.x is the local half-width, so
-            // width = 2·|cx|·placement·user) — a zoomed-up tile reserves its real footprint
-            // so the row never overlaps. `scales` stays user-free (it is the animated
-            // placement); `userOf` re-applies zoom wherever a SIZE is needed.
-            const userOf = (e) => (e.grid.scaleModel ? e.grid.scaleModel.user.x : 1);
-            let scales = bar.map((e) => tileH / e.naturalH);
-            let widths = bar.map((e, i) => Math.max(2 * Math.abs(e.centerOffset.x) * scales[i] * userOf(e), tileH * 0.4));
-            const gap = tileH * 0.3;
+            // Each tile's FIXED slot box + the contain-fit scale that sits its content inside.
+            // The BOX is the packing footprint (uniform unless per-entity overridden); the
+            // content scale is whatever fits — never the other way around. Zoom does NOT enter
+            // here (it lives at home/focus), so a zoomed-up tile never bloats the bar.
+            const boxes = bar.map((e) => this._boxFor(e));
+            let scales = bar.map((e, i) => this._containScale(e, boxes[i]));
+            let widths = boxes.map((b) => b.w);
 
             if (this.layoutMode === 'radial') {
-                // Hemispherical: tiles ride a sphere of radius `distance` centered on the
-                // POV, each tilted to face the eye. Placement is GRIDDED through flowBoxes
-                // (the packing DSL): few tiles → one row (an arc), more → multiple rows
-                // (a dome), automatically. The planar grid is wrapped onto the sphere —
-                // x → azimuth, height-above-bottom → elevation (angle = arc length / R) —
-                // and bottom-anchored at the same place the bar sits (phiBase = rowY/R).
+                // Hemispherical: slot boxes ride a sphere of radius `distance` centered on the
+                // POV, each tilted to face the eye. flowBoxes grids the boxes (few → an arc,
+                // more → a dome). The planar grid is wrapped onto the sphere — x → azimuth,
+                // height-above-bottom → elevation (angle = arc length / R) — and bottom-anchored
+                // at the same place the bar sits (phiBase = rowY/R).
                 const R = this.distance;
                 const maxAz = Math.PI * 0.85, maxEl = Math.PI * 0.45;
-                const sizes = widths.map((w) => ({ w, h: tileH }));
-                // Wrap at the max azimuth arc: tiles fill one row up to that width, then
-                // wrap UP into the next row — few tiles = a single arc, many = a dome.
+                const sizes = boxes.map((b) => ({ w: b.w, h: b.h }));
+                // Wrap at the max azimuth arc: boxes fill one row up to that width, then
+                // wrap UP into the next row — few = a single arc, many = a dome.
                 const { slots, width: W, height: H } = flowBoxes(sizes, {
                     margin: gap, wrapWidth: maxAz * R, serpentine: false,
                 });
@@ -385,20 +431,21 @@ export class CameraDock extends THREE.Object3D {
 
                 bar.forEach((e, i) => {
                     const s = slots[i];
-                    const th = (((s.x + sizes[i].w * 0.5) - W * 0.5) * f) / R;     // azimuth, centered
-                    const phi = phiBase + (((s.y - tileH * 0.5) + H) * f) / R;     // elevation, bottom-anchored
+                    const th = (((s.x + sizes[i].w * 0.5) - W * 0.5) * f) / R;       // azimuth, centered
+                    const phi = phiBase + (((s.y - sizes[i].h * 0.5) + H) * f) / R;  // elevation, bottom-anchored
                     const cs = Math.cos(phi);
                     const sx = R * Math.sin(th) * cs;
                     const sy = R * Math.sin(phi);
                     const sz = R * (1 - Math.cos(th) * cs);
-                    _dir.set(-sx, -sy, R - sz).normalize();                        // toward the eye (0,0,R)
+                    _dir.set(-sx, -sy, R - sz).normalize();                          // toward the eye (0,0,R)
                     this._animateTile(e, sx, sy, sz, scales[i] * f, _dir);
                     const d = this.attentionManager?.docks?.get(e.id);
                     if (d) d.offset = { slot: e.slot };
                 });
             } else {
-                // Linear row, centered on x=0. Fit-to-width: shrink tiles so the row
-                // never overruns the viewport (gaps fixed, subtracted first → exact fit).
+                // Linear row, centered on x=0. Fit-to-width still guards genuine overflow (too
+                // many boxes to fit), but it now fires only on COUNT — never because one tile's
+                // content or zoom is wide — so adding a wide tile no longer snaps the whole row.
                 const availW = this._viewW * 0.88;
                 const tilesW = widths.reduce((a, w) => a + w, 0);
                 const gapsW = gap * (n - 1);
@@ -419,17 +466,8 @@ export class CameraDock extends THREE.Object3D {
             }
         }
 
-        // ---- focus area: centered + enlarged, and pulled toward the eye so it always
-        //      renders in front of the dock sphere (and the scene). focusDistFrac<1 sits
-        //      it at that fraction of `distance`; scale and screen-y scale by it too, so
-        //      it looks identical — just nearer, so plain depth-testing puts it on top.
-        if (focused) {
-            const fd = this.focusDistFrac;
-            const scale = (this._viewH * this.focusFrac / focused.naturalH) * fd;
-            this._animateTile(focused, 0, this._viewH * this.focusY * fd, this.distance * (1 - fd), scale);
-            const d = this.attentionManager?.docks?.get(focused.id);
-            if (d) d.offset = { slot: 'focus' };
-        }
+        // ---- focus area (centered + enlarged, pulled in front of the dock sphere) ----
+        if (focused) this._placeFocus(focused);
     }
 
     /**
@@ -454,25 +492,19 @@ export class CameraDock extends THREE.Object3D {
     }
 
     /**
-     * Re-place a docked tile after a SIZE-only change (its zoom/user scale moved, dims
-     * unchanged) — the readability counterpart to refreshTile. The focused tile free-grows
-     * from the focus point (re-centered so it expands from the middle, picking up the new
-     * effective scale); a bar tile re-packs the row so the zoomed footprint never overlaps.
+     * Re-place a docked tile after a size change, without a full membership pass — called by
+     * refreshTile when a terminal's cell grid changes. The focused tile re-fits to the focus
+     * area at its new natural size (free-grow on a live grip-resize); a bar tile re-contains
+     * into its FIXED slot box, so the row never reshuffles on resize — only the content
+     * rescales inside the unchanged slot.
      * @param {string} id
      * @returns {boolean}
      */
     reflowTile(id) {
         const e = this.entries.get(id);
         if (!e) return false;
-        if (id === this.focusedId) {
-            // free-grow: animate the current PLACEMENT (user-free; _animateTile re-applies
-            // zoom via the ScaleModel), re-centered on the focus point.
-            const placement = e.grid.scaleModel ? e.grid.scaleModel.placement : (e.grid.scale.x || 1);
-            this._animateTile(e, 0, this._viewH * this.focusY * this.focusDistFrac,
-                              this.distance * (1 - this.focusDistFrac), placement);
-        } else {
-            this._relayout();
-        }
+        if (id === this.focusedId) this._placeFocus(e);
+        else this._relayout();
         return true;
     }
 
