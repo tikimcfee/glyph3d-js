@@ -20,6 +20,10 @@ const tail = (s, n = 24) => {
   return t.length > n ? '…' + t.slice(-(n - 1)) : t;
 };
 
+// Split a flattened path into its address-bar segments (drop empties so a
+// leading/trailing slash doesn't render a blank chip).
+const segmentsOf = (p) => String(p || '').split('/').filter(Boolean);
+
 function chipLabel(n) {
   if (n.kind === 'edit') return `EDIT ${n.cursor.line}:${n.cursor.col}`;
   if (n.kind === 'key') return `KEY ${n.entityType || tail(n.id)}`;
@@ -27,15 +31,24 @@ function chipLabel(n) {
 }
 
 const wrapStyle = {
-  position: 'fixed', zIndex: 40, display: 'flex', alignItems: 'center', gap: 4,
+  position: 'fixed', zIndex: 40, display: 'flex', flexDirection: 'column',
   background: 'rgba(11,14,19,0.82)', border: '1px solid #2a3140', borderRadius: 6,
-  padding: '3px 6px', font: '11px ui-monospace, SFMono-Regular, Menlo, monospace',
-  color: '#aeb8c6', userSelect: 'none',
+  font: '11px ui-monospace, SFMono-Regular, Menlo, monospace',
+  color: '#aeb8c6', userSelect: 'none', maxWidth: '60vw',
+};
+
+// The chip row (grip + state chips + controls) and, below it, the optional
+// address bar — a segmented view of the focused entity's full flattened path.
+const rowStyle = { display: 'flex', alignItems: 'center', gap: 4, padding: '3px 6px' };
+const addrStyle = {
+  display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 3,
+  padding: '3px 8px', borderTop: '1px solid #1c222c',
 };
 
 export default function ContextBreadcrumb({ client }) {
   const [nodes, setNodes] = useState([]);
   const [collapsed, setCollapsed] = useState(() => !!stateController.get('contextHud.collapsed', false));
+  const [addr, setAddr] = useState(() => !!stateController.get('contextHud.addr', false)); // address bar open
   const [pos, setPos] = useState(() => stateController.get('contextHud.pos', null)); // {x,y} once dragged
   const posRef = useRef(pos);
   const rootRef = useRef(null);
@@ -81,46 +94,79 @@ export default function ContextBreadcrumb({ client }) {
     });
   };
 
+  const toggleAddr = () => {
+    setAddr((a) => {
+      stateController.set('contextHud.addr', !a);
+      return !a;
+    });
+  };
+
   // Until first drag: bottom-center, the vim command-line home — clear of the
   // HUD (bottom-right) and the dock (left). A drag switches to explicit x/y.
   const place = pos
     ? { left: pos.x, top: pos.y }
     : { left: '50%', bottom: 36, transform: 'translateX(-50%)' };
   const innermost = nodes[nodes.length - 1];
+  const focus = nodes.find((n) => n.kind === 'focus') || null;
+  const segs = focus ? segmentsOf(focus.path) : [];
+  const showAddr = !collapsed && addr && segs.length > 0;
 
   return (
     <div ref={rootRef} data-g3d-context style={{ ...wrapStyle, ...place }}>
-      <span
-        onPointerDown={onGripDown}
-        title="drag to move"
-        style={{ cursor: 'grab', color: '#4a5468', letterSpacing: -1, padding: '0 2px' }}
-      >⠿</span>
-      {collapsed ? (
+      <div style={rowStyle}>
         <span
-          onClick={toggle}
-          title={nodes.map(chipLabel).join(' · ') || 'no locked context'}
-          style={{ cursor: 'pointer', color: innermost ? ACCENT[innermost.kind] : '#4a5468' }}
-        >
-          ● {nodes.length}
-        </span>
-      ) : (
-        <>
-          {nodes.length === 0 && <span style={{ color: '#4a5468' }}>free</span>}
-          {nodes.map((n, i) => (
-            <span
-              key={`${n.kind}:${n.id}:${i}`}
-              data-kind={n.kind}
-              title={n.id}
-              style={{
-                borderLeft: `2px solid ${ACCENT[n.kind] || '#4a5468'}`,
-                padding: '0 5px', whiteSpace: 'nowrap',
-              }}
-            >
-              {chipLabel(n)}
-            </span>
+          onPointerDown={onGripDown}
+          title="drag to move"
+          style={{ cursor: 'grab', color: '#4a5468', letterSpacing: -1, padding: '0 2px' }}
+        >⠿</span>
+        {collapsed ? (
+          <span
+            onClick={toggle}
+            title={nodes.map(chipLabel).join(' · ') || 'no locked context'}
+            style={{ cursor: 'pointer', color: innermost ? ACCENT[innermost.kind] : '#4a5468' }}
+          >
+            ● {nodes.length}
+          </span>
+        ) : (
+          <>
+            {nodes.length === 0 && <span style={{ color: '#4a5468' }}>free</span>}
+            {nodes.map((n, i) => (
+              <span
+                key={`${n.kind}:${n.id}:${i}`}
+                data-kind={n.kind}
+                title={n.id}
+                style={{
+                  borderLeft: `2px solid ${ACCENT[n.kind] || '#4a5468'}`,
+                  padding: '0 5px', whiteSpace: 'nowrap',
+                }}
+              >
+                {chipLabel(n)}
+              </span>
+            ))}
+            {segs.length > 0 && (
+              <span
+                onClick={toggleAddr}
+                title={addr ? 'hide path' : 'show full path'}
+                style={{ cursor: 'pointer', color: addr ? ACCENT.focus : '#4a5468', padding: '0 2px' }}
+              >{addr ? '▾' : '▸'}</span>
+            )}
+            <span onClick={toggle} title="collapse" style={{ cursor: 'pointer', color: '#4a5468', padding: '0 2px' }}>–</span>
+          </>
+        )}
+      </div>
+      {showAddr && (
+        <div style={addrStyle} data-g3d-address title={focus.path}>
+          <span style={{ color: '#4a5468' }}>⌂</span>
+          {segs.map((s, i) => (
+            <React.Fragment key={i}>
+              <span style={{ color: '#39424f' }}>›</span>
+              <span style={{
+                color: i === segs.length - 1 ? ACCENT.focus : '#8893a3',
+                whiteSpace: 'nowrap',
+              }}>{s}</span>
+            </React.Fragment>
           ))}
-          <span onClick={toggle} title="collapse" style={{ cursor: 'pointer', color: '#4a5468', padding: '0 2px' }}>–</span>
-        </>
+        </div>
       )}
     </div>
   );

@@ -6,7 +6,7 @@
  * of its slots; this projects attention + edit state into an ordered list of
  * plain state NODES (innermost-last), each a composable entity:
  *
- *   { kind: 'focus', id, entityType }              ← attention.primary
+ *   { kind: 'focus', id, entityType, path }        ← attention.primary (path = full address)
  *   { kind: 'edit',  id, cursor: { line, col } }   ← key slot on a grid with a live cursor
  *   { kind: 'key',   id, entityType }              ← key slot held elsewhere (terminal capture)
  *
@@ -51,7 +51,13 @@ export class InteractionContext {
         const reg = this._registry;
         const primary = this._am.get('primary');
         if (primary) {
-            out.push({ kind: 'focus', id: primary.id, entityType: reg?.get?.(primary.id)?.type ?? null });
+            const entry = reg?.get?.(primary.id) ?? null;
+            // Full flattened address of the focused entity, for the breadcrumb's
+            // address bar. Dirs carry it as meta.path (id is the prefixed `dir:<path>`);
+            // file grids register under their path as the id, so getFilename — falling
+            // back to the id itself — is the path.
+            const path = entry?.meta?.path ?? entry?.grid?.getFilename?.() ?? primary.id;
+            out.push({ kind: 'focus', id: primary.id, entityType: entry?.type ?? null, path });
         }
         const key = this._am.get('key');
         if (key) {
