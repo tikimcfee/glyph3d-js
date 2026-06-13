@@ -110,8 +110,15 @@ export default function registerDockCommands(router) {
         const id = r?.id ?? String(args[0] ?? '');
         if (!dock.has(id)) return { text: `ERR: '${id}' is not docked`, data: null };
         const state = dock.spotlight(id); // 'spotlit' | 'returned'
+        // Selecting a tile is also a focus gesture, but with NO camera move (it's
+        // already in view): set primary + route the keyboard (terminal → key, grid →
+        // none) so a docked terminal goes keyboard-live. Lives HERE in the verb — not
+        // composed in the click handler — so click, CLI, and RPC behave identically.
+        const type = ctx.registry?.get?.(id)?.type;
+        ctx.attentionManager?.set('primary', id, { registry: ctx.registry });
+        ctx.attentionManager?.set('key', type === 'terminal' ? id : null, { registry: ctx.registry });
         return { text: `OK: ${state} '${id}'`, data: { id, spotlit: state === 'spotlit' } };
-    }, { description: 'Toggle a docked tile in/out of the focus area (centered + enlarged, still docked)', usage: '<id|index>', returns: '{ id, spotlit }' });
+    }, { description: 'Spotlight a docked tile (focus area) and focus it (keyboard-live for terminals)', usage: '<id|index>', returns: '{ id, spotlit }' });
 
     router.register('dock.clear', (_args, ctx) => {
         const dock = getDock(ctx);

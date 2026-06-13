@@ -139,19 +139,14 @@ export function resolveGesture(gesture, env) {
         return true;
     }
 
-    // A plain click on a docked tile does two things at once. (1) Stage: toggle it
-    // in/out of the focus area (centered + enlarged; click again drops it back).
-    // (2) Focus: select it exactly like a normal click — set primary, and route the
-    // keyboard (terminal → key, grid → none) — but WITHOUT the camera flight, since
-    // the tile is already right here in the dock. So keystrokes flow straight to it:
-    // pick a docked terminal and type into it live. Pre-empts the responder chain
-    // (its flyIfChanged would move the camera); ejecting a tile back to the world
-    // stays dock.focus / dock.toggle (verbs). dblclick falls through to normal handling.
+    // A plain click on a docked tile = dock.spotlight: stage it in the focus area
+    // (click again drops it back) AND focus it (keyboard-live for terminals), with no
+    // camera move. ALL of that behavior lives in the verb — the click emits ONE verb,
+    // so click ≡ CLI ≡ RPC (no UI-composed fork). Pre-empts the responder chain (its
+    // flyIfChanged would move the camera); ejecting a tile back to the world stays
+    // dock.focus / dock.toggle (verbs). dblclick falls through to normal handling.
     if (gesture.type === 'click' && gesture.target && env.cameraDock?.has?.(gesture.target.id)) {
-        const t = gesture.target;
-        env.exec(['dock.spotlight', t.id]);
-        env.exec(['attention.set', 'primary', t.id]);
-        env.exec(['attention.set', 'key', t.type === 'terminal' ? t.id : 'none']);
+        env.exec(['dock.spotlight', gesture.target.id]);
         return true;
     }
 
