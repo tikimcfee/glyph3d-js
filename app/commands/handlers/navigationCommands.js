@@ -143,21 +143,28 @@ export default function registerNavigationCommands(router) {
     // Set primary + frame a tree node. Dirs are registered on demand as a 'dir'
     // entity and framed by their footprint (focusOnObject reads the getBounds
     // ContentTree gave them); files take the grid-index focus path camera.focus uses.
+    // Records the node as its directory's last-focused child so focus.child (o)
+    // descends BACK to where you were — i/o is a reversible elevator, not a bounce
+    // onto the first-child spine.
     const focusTreeNode = (ctx, node) => {
+        let id;
         if (node.userData?.isDir) {
-            const id = `dir:${node.userData.path}`;
+            id = `dir:${node.userData.path}`;
             if (ctx.registry.get(id)?.grid !== node) {
                 ctx.registry.register(id, node, { type: 'dir', path: node.userData.path, name: node.userData.name });
             }
             ctx.attentionManager.set('primary', id, { entity: ctx.registry.get(id) });
             ctx.cameraController?.focusOnObject?.(node);
-            return id;
+        } else {
+            id = ctx.registry.getIdByGrid(node);
+            if (!id) return null; // a tree leaf not in the registry — never clear primary by "focusing" it
+            ctx.attentionManager.set('primary', id, { entity: ctx.registry.get(id) });
+            const idx = ctx.getGrids().indexOf(node);
+            if (idx >= 0) ctx.cameraController?.focusOnGrid(idx);
+            else ctx.cameraController?.focusOnObject?.(node);
         }
-        const id = ctx.registry.getIdByGrid(node);
-        ctx.attentionManager.set('primary', id, { entity: ctx.registry.get(id) });
-        const idx = ctx.getGrids().indexOf(node);
-        if (idx >= 0) ctx.cameraController?.focusOnGrid(idx);
-        else ctx.cameraController?.focusOnObject?.(node);
+        const p = node.parent;
+        if (p && p.userData && p.userData.path !== undefined) p.userData._navLastChild = node;
         return id;
     };
 
@@ -176,6 +183,7 @@ export default function registerNavigationCommands(router) {
             return { text: `OK: no sibling ${dir} in this directory`, data: { direction: dir, target: null } };
         }
         const id = focusTreeNode(ctx, next);
+        if (!id) return { text: `OK: sibling ${dir} not focusable`, data: { direction: dir, target: null } };
         return { text: `OK: ${dir} → ${id}`, data: { direction: dir, target: id } };
     }, {
         description: 'Focus the nearest sibling in a screen-plane direction, scoped to the current directory',
@@ -188,11 +196,14 @@ export default function registerNavigationCommands(router) {
         const node = currentFocusNode(ctx);
         if (!node) return { text: 'ERR: focus.parent needs a focused file/dir', data: null };
         const parent = node.parent;
-        // The tree root is the ceiling — its parent is the scene, with no content userData.
-        if (!parent || parent.userData?.path === undefined || parent === node) {
-            return { text: 'OK: already at the top of the tree', data: { target: null } };
+        // Ceiling at the TOP-LEVEL directory. The content-root (userData.path === '') is the
+        // scene container, not a directory you navigate — climbing into it frames the whole
+        // tree and strands you there (no siblings, no parent up). Stop on the top-level item.
+        if (!parent || parent.userData?.path === undefined || parent.userData.path === '' || parent === node) {
+            return { text: 'OK: at the top level', data: { target: null } };
         }
         const id = focusTreeNode(ctx, parent);
+        if (!id) return { text: 'OK: parent not focusable', data: { target: null } };
         return { text: `OK: up to parent → ${id}`, data: { target: id } };
     }, { description: 'Focus up to the parent directory (tree hierarchy)' });
 
@@ -204,7 +215,12 @@ export default function registerNavigationCommands(router) {
         if (!node.userData?.isDir) return { text: 'OK: a file has no children to enter', data: { target: null } };
         const kids = tree.contentChildren(node);
         if (kids.length === 0) return { text: 'OK: empty directory', data: { target: null } };
-        const id = focusTreeNode(ctx, kids[0]); // descend into the first child (dirs-first order)
+        // Descend BACK to the child you were last on in this dir (the reversible
+        // elevator), else the first child (dirs-first) on a fresh descent.
+        const last = node.userData?._navLastChild;
+        const target = (last && last.parent === node) ? last : kids[0];
+        const id = focusTreeNode(ctx, target);
+        if (!id) return { text: 'OK: child not focusable', data: { target: null } };
         return { text: `OK: into → ${id}`, data: { target: id } };
     }, { description: 'Focus down into the first child of the focused directory (tree hierarchy)' });
 
