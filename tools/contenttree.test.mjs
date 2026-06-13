@@ -297,9 +297,12 @@ const buildPacked = (paths, order = paths) => {
 };
 
 // 19. packed depth topography — THE defining property: a leaf's world z is exactly
-//     −(dir depth × depthZ), accumulated through the transform chain.
+//     −(dir depth × depthZ), accumulated through the transform chain. Pin rakeZ:0 to
+//     isolate the per-nesting depth step (the gravity row-rake is checked in arrows-check).
 {
-  const t = buildPacked(PATHS);
+  const t = new ContentTree({ layout: packedLayout, layoutOpts: { rakeZ: 0 } });
+  for (const p of PATHS) t.insert(makeLeaf(p), p);
+  t.relayout();
   const dz = PACKED_DEFAULTS.depthZ;
   const wz = (p) => { const v = new THREE.Vector3(); t._leaves.get(p).getWorldPosition(v); return v.z; };
   eq(r2(wz('readme.md')), 0, 'packed: root file at z=0');

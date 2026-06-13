@@ -16,6 +16,7 @@ import { PickingSystem } from '@glyph3d/core/picking/PickingSystem.js';
 import ContentTree from '@glyph3d/core/collections/ContentTree.js';
 import ContentTreeMarkers from '@glyph3d/core/collections/ContentTreeMarkers.js';
 import ContentTreeArrows from '@glyph3d/core/collections/ContentTreeArrows.js';
+import ContentTreeProbes from '@glyph3d/core/collections/ContentTreeProbes.js';
 import SessionStore from './SessionStore.js';
 import WorkspaceModel from './WorkspaceModel.js';
 import { getSetting } from './settings.js';
@@ -249,6 +250,10 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // Ordered arrows: per-directory chains threading the child dirs in canonical order,
     // parented into the parent nodes and rebuilt on tree relayout. layout.arrows dials them.
     state.ctx.contentTreeArrows = new ContentTreeArrows(contentTree);
+
+    // Diagnostic: origin-vs-content-anchor dots per dir (layout.probes). Reveals where the
+    // arrows anchor relative to each footprint origin — a debug instrument, toggle off when done.
+    state.ctx.contentTreeProbes = new ContentTreeProbes(contentTree);
 
     // Field-visitor multiplexer: agent.* commands spawn/move/follow one self-driving
     // visitor per agent. The camera stays free unless `camera.follow <id>` opts in.

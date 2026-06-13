@@ -42,3 +42,33 @@ export function leafBox(leaf) {
     const hx = s.x / 2, hy = s.y / 2, hz = (s.z || 0) / 2;
     return new THREE.Box3(new THREE.Vector3(-hx, -hy, -hz), new THREE.Vector3(hx, hy, hz));
 }
+
+const _ORIGIN = new THREE.Vector3(0, 0, 0);
+
+/** A directory subtree's content bounds in `node`'s LOCAL frame: every descendant leaf's box
+ *  carried through the intermediate dir transforms (markers skipped). The single source of
+ *  truth for "where is this directory in space" — markers size their prism to it, arrows
+ *  anchor to it, probes mark it.
+ *
+ *  With `includeOrigin` (the default), the node's own origin (0,0,0) is unioned in, so the
+ *  box always reaches the directory's front plane. This gives every dir — even a pure
+ *  CONTAINER whose content sits a depthZ step back, or an empty stub — a bounded box that
+ *  includes its origin, so an origin-anchored arrow lands ON the box instead of floating in
+ *  the empty space in front of the content. */
+export function subtreeContentBounds(node, target = new THREE.Box3(), includeOrigin = true) {
+    target.makeEmpty();
+    const tmp = new THREE.Box3();
+    const walk = (n, mat) => {
+        for (const c of n.children) {
+            if (c.userData?.isMarker) continue;
+            c.updateMatrix();
+            const m = new THREE.Matrix4().multiplyMatrices(mat, c.matrix);
+            if (c.userData?.isDir) { walk(c, m); continue; }
+            tmp.copy(leafBox(c)).applyMatrix4(m);
+            target.union(tmp);
+        }
+    };
+    walk(node, new THREE.Matrix4());
+    if (includeOrigin) target.expandByPoint(_ORIGIN);
+    return target;
+}

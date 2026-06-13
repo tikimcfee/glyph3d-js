@@ -23,7 +23,7 @@
 
 import * as THREE from 'three';
 import { RENDER_ORDER } from '../core/renderOrder.js';
-import { leafBox } from './layouts/nodeUtils.js';
+import { subtreeContentBounds } from './layouts/nodeUtils.js';
 
 export const MARKER_DEFAULTS = {
     pad: 10,            // XY inflation beyond the subtree's content bounds
@@ -109,8 +109,9 @@ export default class ContentTreeMarkers {
 
         const seen = new Set();
         for (const [path, node] of dirs) {
-            const bounds = this._subtreeLocalBounds(node);
-            if (bounds.isEmpty()) continue;             // nothing to bound (empty dir)
+            // Box includes the dir's own origin → every directory (container or empty stub)
+            // gets a bounded box reaching its front plane, so it has spatial presence.
+            const bounds = subtreeContentBounds(node);
             seen.add(path);
 
             const depth = path.split('/').length;
@@ -152,25 +153,6 @@ export default class ContentTreeMarkers {
             prism.mesh.parent?.remove(prism.mesh);
             this._prisms.delete(path);
         }
-    }
-
-    /** The subtree's content bounds in `node`'s LOCAL frame: every descendant leaf's
-     *  box, carried through the intermediate dir transforms. Markers are skipped. */
-    _subtreeLocalBounds(node, target = new THREE.Box3()) {
-        target.makeEmpty();
-        const tmp = new THREE.Box3();
-        const walk = (n, mat) => {
-            for (const c of n.children) {
-                if (c.userData?.isMarker) continue;
-                c.updateMatrix();
-                const m = new THREE.Matrix4().multiplyMatrices(mat, c.matrix);
-                if (c.userData?.isDir) { walk(c, m); continue; }
-                tmp.copy(leafBox(c)).applyMatrix4(m);
-                target.union(tmp);
-            }
-        };
-        walk(node, new THREE.Matrix4());
-        return target;
     }
 
     dispose() {

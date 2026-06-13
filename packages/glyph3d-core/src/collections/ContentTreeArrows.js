@@ -25,16 +25,17 @@
 
 import * as THREE from 'three';
 import { RENDER_ORDER } from '../core/renderOrder.js';
-import { partitionChildren } from './layouts/nodeUtils.js';
+import { partitionChildren, subtreeContentBounds } from './layouts/nodeUtils.js';
 
 export const ARROW_DEFAULTS = {
-    zLift: 24,                  // +z float above the dir's content plane so the thread isn't buried
+    zLift: 24,                  // +z float in FRONT of the content's front face so the thread isn't buried
     opacity: 0.6,
     arrowRatio: 0.14,           // arrowhead length as a fraction of the segment length
     arrowAngle: Math.PI / 7,    // arrowhead half-angle (~25°), matches ConnectionRenderer
     colorA: 0x4a8acc,           // sequence start — the FIRST child dir
     colorB: 0xcc7a4a,           // sequence end — the LAST child dir
     minSiblings: 2,             // a chain needs at least two child dirs
+    anchor: 'top',              // x of the join on the content's top-front edge: top | top-left | top-right
 };
 
 const VERTS_PER_SEGMENT = 6;    // shaft(2) + arrowL(2) + arrowR(2)
@@ -91,8 +92,13 @@ export default class ContentTreeArrows {
 
         for (const [path, node] of parents) {
             const { dirs } = partitionChildren(node);   // canonical child-dir order, markers excluded
-            const segCount = dirs.length - 1;
-            if (segCount < o.minSiblings - 1) {          // fewer than minSiblings child dirs → no thread
+            // Anchor each child dir once, dropping the EMPTY ones (no visible content):
+            // threading them would park an endpoint on a bare origin, floating in space.
+            // The chain just connects the dirs that are actually there, in order.
+            const anchors = [];
+            for (const d of dirs) { const p = this._anchor(d); if (p) anchors.push(p); }
+            const segCount = anchors.length - 1;
+            if (segCount < o.minSiblings - 1) {          // fewer than minSiblings drawable child dirs → no thread
                 this._dropChain(path);
                 continue;
             }
@@ -116,12 +122,10 @@ export default class ContentTreeArrows {
             const pos = chain.geo.getAttribute('position');
             const col = chain.geo.getAttribute('color');
             for (let i = 0; i < segCount; i++) {
-                const from = this._anchor(dirs[i]);
-                const to = this._anchor(dirs[i + 1]);
                 // Gradient by the segment's start position along the chain.
                 const t = segCount > 1 ? i / (segCount - 1) : 0;
                 tmp.copy(colA).lerp(colB, t);
-                this._writeSegment(pos.array, col.array, i * VERTS_PER_SEGMENT * 3, from, to, tmp);
+                this._writeSegment(pos.array, col.array, i * VERTS_PER_SEGMENT * 3, anchors[i], anchors[i + 1], tmp);
             }
             pos.needsUpdate = true;
             col.needsUpdate = true;
@@ -135,12 +139,23 @@ export default class ContentTreeArrows {
         }
     }
 
-    /** A child dir's footprint center in its PARENT's local frame, lifted in +z. The
-     *  scheme places a node at its footprint top-center (y ∈ [-h, 0]), so the visual
-     *  center sits half the footprint height below the placed origin. */
+    /** A concrete join point on the child dir's bounded box — the same box the marker prisms
+     *  draw — in the PARENT's local frame. The box includes the dir's own origin (see
+     *  subtreeContentBounds), so its TOP-FRONT edge (max.y, max.z) sits on the directory's
+     *  front plane even for a pure container whose files are a depthZ step back. That's why
+     *  an origin-region anchor no longer floats: there's box there. `anchor` picks the x
+     *  along the edge: center, or the left/right corner of the box. */
     _anchor(node) {
-        const h = node.userData?.size?.y || 0;
-        return { x: node.position.x, y: node.position.y - h / 2, z: node.position.z + this.opts.zLift };
+        const b = subtreeContentBounds(node);
+        if (b.isEmpty()) return null;                           // nothing at all under it
+        const ax = this.opts.anchor === 'top-left' ? b.min.x
+            : this.opts.anchor === 'top-right' ? b.max.x
+                : (b.min.x + b.max.x) / 2;
+        return {
+            x: node.position.x + ax,
+            y: node.position.y + b.max.y,                       // top of the box
+            z: node.position.z + b.max.z + this.opts.zLift,     // just in front of the box's front face
+        };
     }
 
     /** Write one segment's shaft + arrowhead vertices into the position/color arrays.

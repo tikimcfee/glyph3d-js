@@ -79,7 +79,7 @@ export default function registerLayoutCommands(router) {
         };
     }, {
         description: "Report or set the content tree's packing scheme (+ knob overrides) and re-lay the field",
-        usage: `[${Object.keys(LAYOUT_SCHEMES).join('|')}] [--depth-z N --dir-gap N --margin N --aspect N …]   (flags alone re-dial the active scheme)`,
+        usage: `[${Object.keys(LAYOUT_SCHEMES).join('|')}] [--depth-z N --rake-z N --dir-gap N --margin N --aspect N …]   (flags alone re-dial the active scheme)`,
         returns: '{ scheme, opts, files, dirs } or { scheme, opts, available }',
     });
 
@@ -153,6 +153,7 @@ export default function registerLayoutCommands(router) {
         if (args[0] === 'on' || args[0] === 'off') { enabled = args[0] === 'on'; i = 1; }
         else if (!args[0].startsWith('--')) return { text: `ERR: expected on|off or --flags, got "${args[0]}"`, data: null };
 
+        const ANCHORS = new Set(['top', 'top-left', 'top-right']);
         const patch = {};
         for (; i < args.length; i += 2) {
             const flag = args[i];
@@ -160,6 +161,11 @@ export default function registerLayoutCommands(router) {
             const raw = args[i + 1];
             if (raw === undefined) return { text: `ERR: ${flag} needs a value`, data: null };
             const key = flag.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+            if (key === 'anchor') {
+                if (!ANCHORS.has(raw)) return { text: `ERR: --anchor must be one of ${[...ANCHORS].join('|')}`, data: null };
+                patch.anchor = raw;
+                continue;
+            }
             if (COLOR_KEYS.has(key)) {
                 const hex = raw.replace(/^#|^0x/, '');
                 if (!/^[0-9a-fA-F]{6}$/.test(hex)) return { text: `ERR: ${flag} wants a 6-digit hex color`, data: null };
@@ -179,7 +185,63 @@ export default function registerLayoutCommands(router) {
         };
     }, {
         description: 'Toggle/dial the per-directory ordered-arrow chains (sibling reading-order threads)',
-        usage: '[on|off] [--opacity N --z-lift N --arrow-ratio N --arrow-angle N --color-a HEX --color-b HEX]',
+        usage: '[on|off] [--anchor top|top-left|top-right --opacity N --z-lift N --arrow-ratio N --arrow-angle N --color-a HEX --color-b HEX]',
+        returns: '{ enabled, patch } or { enabled, opts }',
+    });
+
+    // Diagnostic: per-dir origin vs content-anchor dots + link. colorKeys here are the
+    // probe's own (originColor/contentColor/linkColor); everything else numeric.
+    const PROBE_COLORS = new Set(['originColor', 'contentColor', 'linkColor']);
+    router.register('layout.probes', (args, ctx) => {
+        const probes = ctx.contentTreeProbes;
+        if (!probes) return { text: 'ERR: no content-tree probes in this context', data: null };
+
+        if (!args[0]) {
+            const opts = Object.fromEntries(Object.entries(probes.opts).map(([k, v]) =>
+                [k, PROBE_COLORS.has(k) ? '#' + v.toString(16).padStart(6, '0') : String(v)]));
+            return {
+                text: box('LAYOUT PROBES', kvLines({ enabled: String(probes.enabled), ...opts }), 56) + '\nOK: layout.probes',
+                data: { enabled: probes.enabled, opts: { ...probes.opts } },
+            };
+        }
+
+        let i = 0;
+        let enabled = probes.enabled;
+        if (args[0] === 'on' || args[0] === 'off') { enabled = args[0] === 'on'; i = 1; }
+        else if (!args[0].startsWith('--')) return { text: `ERR: expected on|off or --flags, got "${args[0]}"`, data: null };
+
+        const patch = {};
+        for (; i < args.length; i += 2) {
+            const flag = args[i];
+            if (!flag.startsWith('--')) return { text: `ERR: expected --flag, got "${flag}"`, data: null };
+            const raw = args[i + 1];
+            if (raw === undefined) return { text: `ERR: ${flag} needs a value`, data: null };
+            const key = flag.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+            if (key === 'anchor') {
+                if (!['top', 'top-left', 'top-right'].includes(raw)) return { text: `ERR: --anchor must be top|top-left|top-right`, data: null };
+                patch.anchor = raw;
+                continue;
+            }
+            if (PROBE_COLORS.has(key)) {
+                const hex = raw.replace(/^#|^0x/, '');
+                if (!/^[0-9a-fA-F]{6}$/.test(hex)) return { text: `ERR: ${flag} wants a 6-digit hex color`, data: null };
+                patch[key] = parseInt(hex, 16);
+                continue;
+            }
+            const n = Number(raw);
+            if (!Number.isFinite(n) || n < 0) return { text: `ERR: ${flag} must be a finite number ≥ 0`, data: null };
+            patch[key] = n;
+        }
+
+        if (Object.keys(patch).length) probes.configure(patch);
+        probes.setEnabled(enabled);
+        return {
+            text: `OK: probes ${enabled ? 'on' : 'off'}${Object.keys(patch).length ? ' · ' + Object.entries(patch).map(([k, v]) => `${k}=${PROBE_COLORS.has(k) ? '#' + v.toString(16) : v}`).join(' ') : ''}`,
+            data: { enabled, patch },
+        };
+    }, {
+        description: 'DIAGNOSTIC: per-directory dots at the footprint origin vs the content anchor (+link) — reveals where arrows anchor',
+        usage: '[on|off] [--size N --z-lift N --anchor top|top-left|top-right --origin-color HEX --content-color HEX --link-color HEX]',
         returns: '{ enabled, patch } or { enabled, opts }',
     });
 }

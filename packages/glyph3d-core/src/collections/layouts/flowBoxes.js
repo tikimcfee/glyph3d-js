@@ -17,21 +17,22 @@
  * in their original order. This is what makes an ordered dir tier's arrow chain snake
  * cleanly rather than backtrack on every wrap.
  *
+ * Each slot carries its `row` (0-based, top→down) so callers can rake the rows on a
+ * third axis — e.g. packed's gravity cascade steps each descending row back in Z.
+ *
  * @param {Array<{w:number,h:number}>} sizes
  * @param {{margin?:number, wrapWidth?:number, serpentine?:boolean}} [opts]
- * @returns {{slots: Array<{x:number,y:number}>, width:number, height:number, rows:number}}
+ * @returns {{slots: Array<{x:number,y:number,row:number}>, width:number, height:number, rows:number}}
  */
 export function flowBoxes(sizes, { margin = 16, wrapWidth = Infinity, serpentine = false } = {}) {
     const slots = [];
-    const rowOf = [];
     let cx = 0, topY = 0, rowH = 0, rows = 1, maxW = 0, row = 0;
     for (const s of sizes) {
         if (cx > 0 && cx + s.w > wrapWidth) {
             maxW = Math.max(maxW, cx - margin);
             cx = 0; topY -= rowH + margin; rowH = 0; rows++; row++;
         }
-        slots.push({ x: cx, y: topY });
-        rowOf.push(row);
+        slots.push({ x: cx, y: topY, row });
         cx += s.w + margin;
         rowH = Math.max(rowH, s.h);
     }
@@ -40,7 +41,7 @@ export function flowBoxes(sizes, { margin = 16, wrapWidth = Infinity, serpentine
     // of a row sits directly above the first box of the next), keeping every step local.
     if (serpentine) {
         for (let i = 0; i < slots.length; i++) {
-            if (rowOf[i] & 1) slots[i].x = maxW - slots[i].x - sizes[i].w;
+            if (slots[i].row & 1) slots[i].x = maxW - slots[i].x - sizes[i].w;
         }
     }
     return { slots, width: maxW, height: -topY + rowH, rows };

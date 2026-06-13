@@ -26,7 +26,11 @@ import { leafBox, partitionChildren } from './nodeUtils.js';
 // depthZ is in WORLD units and must read against panel-sized content — below ~50 the
 // layering disappears entirely; 500 is where Ivan found the hierarchy snaps into an
 // obvious structure on a repo-sized tree (walk's stairway steps 170 for reference).
-export const PACKED_DEFAULTS = { margin: 6, dirGap: 14, depthZ: 500, aspect: 1.5, minW: 50, minH: 30 };
+// rakeZ is the GRAVITY cascade: each descending row of a node's child dirs steps this
+// far further back in Z, so the serpentine snake falls as a curtain that leans gently
+// away (never toward the camera) — lower rows recede and compress instead of piling up
+// a taller flat wall. Modest against depthZ so the downward −Y hang always dominates.
+export const PACKED_DEFAULTS = { margin: 6, dirGap: 14, depthZ: 500, rakeZ: 120, aspect: 1.5, minW: 50, minH: 30 };
 
 /** Wrap width targeting a footprint of the given aspect (w ≈ aspect × h): from the
  *  total packed area, never narrower than the widest item. Infinity for 0–1 items. */
@@ -113,8 +117,10 @@ function place(node, opts) {
     const cTop = -(fileBlock ? fileBlock.height + opts.dirGap : 0);
     dirs.forEach((child, j) => {
         const s = childPack.slots[j];
-        // child origin = its footprint top-center; depth accumulates: −depthZ per level.
-        child.position.set(cLeft + s.x + dirSizes[j].w / 2, cTop + s.y, -opts.depthZ);
+        // child origin = its footprint top-center; depth accumulates: −depthZ per level,
+        // plus a gravity rake — each descending row leans one rakeZ further back, so the
+        // hanging snake reads as a curtain falling down-and-away.
+        child.position.set(cLeft + s.x + dirSizes[j].w / 2, cTop + s.y, -opts.depthZ - s.row * opts.rakeZ);
         place(child, opts);
     });
 }

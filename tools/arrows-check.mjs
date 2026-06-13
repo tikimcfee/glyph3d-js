@@ -12,8 +12,9 @@ import * as THREE from 'three';
 import ContentTree from '../packages/glyph3d-core/src/collections/ContentTree.js';
 import { walkTreeLayout, districtLayout, packedLayout } from '../packages/glyph3d-core/src/collections/layouts/index.js';
 import { flowBoxes } from '../packages/glyph3d-core/src/collections/layouts/flowBoxes.js';
-import { partitionChildren } from '../packages/glyph3d-core/src/collections/layouts/nodeUtils.js';
+import { partitionChildren, subtreeContentBounds } from '../packages/glyph3d-core/src/collections/layouts/nodeUtils.js';
 import ContentTreeArrows from '../packages/glyph3d-core/src/collections/ContentTreeArrows.js';
+import ContentTreeProbes from '../packages/glyph3d-core/src/collections/ContentTreeProbes.js';
 
 let pass = 0, fail = 0;
 const ok = (cond, msg) => { if (cond) pass++; else { fail++; console.log(`  ✗ ${msg}`); } };
@@ -170,6 +171,78 @@ const childDirCount = (tree, path) => partitionChildren(tree.getNode(path)).dirs
         }
     });
     ok(snaked, 'packed child dirs snake (row 0 →, row 1 ←, …) in canonical order');
+
+    // Gravity rake: lower rows (more-negative y) hang further BACK in z (more-negative),
+    // never toward the camera. Each row's z is constant; rows step away as they descend.
+    const dirByZ = new Map();   // round(y) → z (constant per row)
+    dirs.forEach((d) => dirByZ.set(Math.round(d.position.y * 100), d.position.z));
+    const rowKeysTopDown = [...dirByZ.keys()].sort((a, b) => b - a);   // highest y first
+    let rakedBack = true;
+    for (let k = 1; k < rowKeysTopDown.length; k++) {
+        if (!(dirByZ.get(rowKeysTopDown[k]) < dirByZ.get(rowKeysTopDown[k - 1]))) rakedBack = false;
+    }
+    ok(rowKeysTopDown.length >= 2 && rakedBack, 'gravity rake: each lower row hangs further back in −z (curtain leans away)');
+}
+
+// ──────── anchors land on the dir's content VOLUME, not the footprint origin ────────
+{
+    const t = build(districtLayout);
+    const dirs = partitionChildren(t.root).dirs;   // b, bc, src
+    const src = dirs.find((d) => d.userData.name === 'src');
+    const idx = dirs.indexOf(src);                  // src is the `to` of segment idx-1
+    const vTo = (idx - 1) * 6 + 1;                  // shaft-end vertex of that segment
+
+    const a = new ContentTreeArrows(t);
+    const pos = a._chains.get('').geo.getAttribute('position');
+    const to = { x: pos.getX(vTo), y: pos.getY(vTo), z: pos.getZ(vTo) };
+    // The endpoint must sit on src's bounded box (carried into the root frame) — on the
+    // box you can see, not at a bare floating point.
+    const b = subtreeContentBounds(src);
+    const eps = 1e-3;
+    ok(to.x >= src.position.x + b.min.x - eps && to.x <= src.position.x + b.max.x + eps, 'anchor x within the box');
+    ok(Math.abs(to.y - (src.position.y + b.max.y)) < eps, 'anchor y on the box top edge');
+    ok(Math.abs(to.z - (src.position.z + b.max.z + a.opts.zLift)) < eps, 'anchor z on the box front face (+zLift)');
+    a.dispose();
+}
+
+// THE container-dir case: a dir with NO files of its own has content a full depthZ BACK.
+// The fix is NOT to chase the content back — it's to give the dir a box that reaches its
+// origin, so the origin-front anchor lands ON the box (not floating in the empty bell).
+{
+    const t = new ContentTree({ layout: packedLayout });
+    // app/ holds only sub1/ and sub2/, each itself fileless until a deeper dir with a file.
+    t.insert(makeLeaf('app/sub1/deep/a.js'), 'app/sub1/deep/a.js');
+    t.insert(makeLeaf('app/sub2/deep/b.js'), 'app/sub2/deep/b.js');
+    t.relayout();
+    const a = new ContentTreeArrows(t);
+    const app = t.getNode('app');
+    const subs = partitionChildren(app).dirs;       // sub1, sub2 — both fileless containers
+    const pos = a._chains.get('app').geo.getAttribute('position');
+    const toZ = pos.getZ(1);                         // segment 0 to-vertex = sub2's anchor
+    const sub2 = subs[1];
+    const b = subtreeContentBounds(sub2);
+    ok(b.min.z < -1, 'fileless container: its box still encloses content a depthZ BACK');
+    ok(Math.abs(b.max.z) < 1e-6, 'fileless container: its box reaches the ORIGIN front plane (z=0)');
+    ok(Math.abs(toZ - (sub2.position.z + a.opts.zLift)) < 1e-6,
+        `anchor lands on the box front at the origin plane (got ${Math.round(toZ)}, origin ${Math.round(sub2.position.z)})`);
+    a.dispose();
+}
+
+// ──────── diagnostic probes: content dot == the arrow anchor, origin dot at 0 ────────
+{
+    const t = build(districtLayout);
+    const src = partitionChildren(t.root).dirs.find((d) => d.userData.name === 'src');
+    const a = new ContentTreeArrows(t);
+    const p = new ContentTreeProbes(t);
+    const anchor = a._anchor(src);                         // in root (parent) frame
+    const probe = p._probes.get('src');
+    ok(probe.origin.position.x === 0 && probe.origin.position.y === 0 && probe.origin.position.z === 0,
+        'probe origin dot sits at the node origin (0,0,0)');
+    // content dot is parented INTO the node, so its local pos + node.position == the arrow anchor.
+    ok(Math.abs((src.position.x + probe.content.position.x) - anchor.x) < 1e-6, 'probe content dot x == arrow anchor x');
+    ok(Math.abs((src.position.y + probe.content.position.y) - anchor.y) < 1e-6, 'probe content dot y == arrow anchor y');
+    ok(Math.abs((src.position.z + probe.content.position.z) - anchor.z) < 1e-6, 'probe content dot z == arrow anchor z');
+    p.dispose(); a.dispose();
 }
 
 console.log(`\n${fail === 0 ? '✓ PASS' : '✗ FAIL'} — ${pass} passed, ${fail} failed`);
