@@ -163,8 +163,8 @@ export default function registerNavigationCommands(router) {
             if (idx >= 0) ctx.cameraController?.focusOnGrid(idx);
             else ctx.cameraController?.focusOnObject?.(node);
         }
-        const p = node.parent;
-        if (p && p.userData && p.userData.path !== undefined) p.userData._navLastChild = node;
+        const p = ctx.contentTree?.parentOf(node); // PATH-derived parent, not the (reparent-able) THREE parent
+        if (p && p.userData) p.userData._navLastChild = node;
         return id;
     };
 
@@ -195,11 +195,11 @@ export default function registerNavigationCommands(router) {
         if (!tree) return { text: 'ERR: content tree not ready', data: null };
         const node = currentFocusNode(ctx);
         if (!node) return { text: 'ERR: focus.parent needs a focused file/dir', data: null };
-        const parent = node.parent;
-        // Ceiling at the TOP-LEVEL directory. The content-root (userData.path === '') is the
-        // scene container, not a directory you navigate — climbing into it frames the whole
-        // tree and strands you there (no siblings, no parent up). Stop on the top-level item.
-        if (!parent || parent.userData?.path === undefined || parent.userData.path === '' || parent === node) {
+        const parent = tree.parentOf(node); // PATH-derived, not the (reparent-able) THREE parent
+        // Ceiling at the TOP-LEVEL directory. parentOf returns the content-root (path '') for a
+        // top-level item — that's the scene container, not a directory you navigate (climbing in
+        // frames the whole tree and strands you there). Stop on the top-level item instead.
+        if (!parent || parent.userData?.path === '' || parent.userData?.path === undefined) {
             return { text: 'OK: at the top level', data: { target: null } };
         }
         const id = focusTreeNode(ctx, parent);
@@ -218,7 +218,7 @@ export default function registerNavigationCommands(router) {
         // Descend BACK to the child you were last on in this dir (the reversible
         // elevator), else the first child (dirs-first) on a fresh descent.
         const last = node.userData?._navLastChild;
-        const target = (last && last.parent === node) ? last : kids[0];
+        const target = (last && tree.parentOf(last) === node) ? last : kids[0];
         const id = focusTreeNode(ctx, target);
         if (!id) return { text: 'OK: child not focusable', data: { target: null } };
         return { text: `OK: into → ${id}`, data: { target: id } };

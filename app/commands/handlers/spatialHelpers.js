@@ -259,8 +259,10 @@ export function resolveAdjacencies(ctx, currentId) {
 export function resolveSiblingAdjacencies(ctx, node) {
     const empty = { up: null, down: null, left: null, right: null };
     const tree = ctx.contentTree;
-    if (!tree || !node || !node.parent) return empty;
-    const sibs = tree.contentChildren(node.parent).filter((n) => n !== node);
+    if (!tree || !node) return empty;
+    const parent = tree.parentOf(node);   // PATH-derived: immune to reparenting (dock)
+    if (!parent) return empty;             // root has no siblings
+    const sibs = tree.contentChildren(parent).filter((n) => n !== node);
     const centerOf = (n) => { const b = getWorldBounds(n); return b ? b.center : null; };
     const origin = centerOf(node);
     if (!origin) return empty;

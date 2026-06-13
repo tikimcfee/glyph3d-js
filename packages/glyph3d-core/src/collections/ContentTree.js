@@ -92,6 +92,23 @@ export default class ContentTree {
     dirCount() { return this._dirs.size - 1; }
 
     /**
+     * The tree-parent directory node of a node, derived from its PATH — NOT from
+     * node.parent (the THREE parent), which reparenting can hijack: a leaf docked to
+     * the camera bar has .parent === the dock, so node.parent's children would be
+     * other dock tiles from unrelated directories. Path-derived parenthood keeps
+     * sibling/hierarchy navigation tied to the real tree no matter where a node's
+     * Object3D currently hangs. Root (path '') has no parent → null.
+     * @param {THREE.Object3D} node
+     * @returns {THREE.Object3D|null} the parent dir node ('' → root), or null
+     */
+    parentOf(node) {
+        const path = node?.userData?.path;
+        if (path == null || path === '') return null;
+        const parentPath = splitPath(path).slice(0, -1).join('/');
+        return this._dirs.get(parentPath) || null;
+    }
+
+    /**
      * Direct CONTENT children of a node — file leaves + subdirectory nodes, with
      * decorations (bounding-prism markers etc.) excluded. Ordered dirs-first then by
      * name, so sibling traversal (focus.sibling) and descent (focus.child) are
