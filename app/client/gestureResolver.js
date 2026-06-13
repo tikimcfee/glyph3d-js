@@ -18,7 +18,7 @@
  * each policy reads like the inline code it replaced and can collapse back into
  * one in minutes if the abstraction stops paying.
  *
- * gesture = { type: 'click' | 'dblclick', target: registryEntry | null }
+ * gesture = { type: 'click' | 'dblclick', target: registryEntry | null, mods?: {meta,alt,ctrl,shift} }
  *   target is a CO-EQUAL input to context: the keyboard goes to the locked
  *   context, but the pointer can address anything in the field. A node's policy
  *   typically claims only gestures targeting ITS entity and declines the rest —
@@ -126,6 +126,19 @@ const ROOT = {
  * @returns {boolean} whether anything claimed the gesture
  */
 export function resolveGesture(gesture, env) {
+    // A modifier+click toggles dock membership — the gestural complement to
+    // click-to-focus. On a world window it stashes it into the bar (camera stays);
+    // on a docked tile it pops it back home (no fly). ANY modifier
+    // (meta/alt/ctrl/shift) counts, deliberately: it sidesteps WMs that swallow
+    // Super by accepting whatever modifier reaches the browser. Checked FIRST so a
+    // modifier-click on a tile releases it rather than focusing it. dock.toggle
+    // resolves loose-vs-docked itself.
+    const m = gesture.mods;
+    if (gesture.type === 'click' && gesture.target && m && (m.meta || m.alt || m.ctrl || m.shift)) {
+        env.exec(['dock.toggle', gesture.target.id]);
+        return true;
+    }
+
     // A click on a docked tile is a launcher action: undock it and fly to it. It
     // pre-empts the responder chain — the tile is camera-locked chrome you're
     // picking to bring BACK, not a window to focus in place. dock.focus sets

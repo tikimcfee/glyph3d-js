@@ -165,8 +165,10 @@ export function CanvasPicker() {
       // Only a click if the pointer barely moved (else it was an orbit/pan/drag).
       if (Math.hypot(e.clientX - s.downX, e.clientY - s.downY) > DRAG_PX) return;
       // Act on exactly what's highlighted (the grid-channel hover result the
-      // hover loop keeps current). hoverEntry null = empty space.
-      resolveGesture({ type: 'click', target: s.hoverEntry }, gestureEnv);
+      // hover loop keeps current). hoverEntry null = empty space. Modifiers ride
+      // along so meta+click can toggle dock membership (gestureResolver).
+      const mods = { meta: e.metaKey, alt: e.altKey, ctrl: e.ctrlKey, shift: e.shiftKey };
+      resolveGesture({ type: 'click', target: s.hoverEntry, mods }, gestureEnv);
     };
 
     const onDblClick = (e) => {
