@@ -23,6 +23,30 @@ const LogLevelNames = {
     5: 'METRIC'
 };
 
+// Module-level structured-record sink (the console forwarder registers itself here),
+// plus a re-entrancy depth so console patches can tell Logger-originated console
+// output apart from raw console.* calls.
+let _sink = null;
+let _emitDepth = 0;
+
+/**
+ * Register the structured-record sink. Receives every record that passes a logger's
+ * minLevel gate: {timestamp, level (NAME string), name, message, context}.
+ * @param {Function|null} fn
+ */
+export function setLogRecordSink(fn) {
+    _sink = fn;
+}
+
+/**
+ * True while Logger is writing to the console — console patches use this to skip
+ * Logger-originated calls (those arrive structured via the sink).
+ * @returns {boolean}
+ */
+export function isLoggerEmitting() {
+    return _emitDepth > 0;
+}
+
 class Logger {
     /**
      * Create a new Logger instance
@@ -114,52 +138,69 @@ class Logger {
         // Emit to listeners first
         this._emit(level, message, context);
 
-        // Console output with appropriate method
+        // Structured-record sink (console forwarder): the same shape _emit builds.
+        try {
+            _sink?.({
+                timestamp: Date.now(),
+                level: levelName,
+                name: this.fullName,
+                message,
+                context
+            });
+        } catch { /* sink errors never break logging */ }
+
+        // Console output with appropriate method. The depth guard marks these calls
+        // as Logger-originated so console patches (isLoggerEmitting) skip them.
         const hasContext = Object.keys(context).length > 0;
 
-        switch (level) {
-            case LogLevel.TRACE:
-                if (hasContext) {
-                    console.debug(prefix, message, context);
-                } else {
-                    console.debug(prefix, message);
-                }
-                break;
-            case LogLevel.DEBUG:
-                if (hasContext) {
-                    console.debug(prefix, message, context);
-                } else {
-                    console.debug(prefix, message);
-                }
-                break;
-            case LogLevel.INFO:
-                if (hasContext) {
-                    console.info(prefix, message, context);
-                } else {
-                    console.info(prefix, message);
-                }
-                break;
-            case LogLevel.WARN:
-                if (hasContext) {
-                    console.warn(prefix, message, context);
-                } else {
-                    console.warn(prefix, message);
-                }
-                break;
-            case LogLevel.ERROR:
-                if (hasContext) {
-                    console.error(prefix, message, context);
-                } else {
-                    console.error(prefix, message);
-                }
-                break;
-            case LogLevel.METRIC:
-                if (hasContext) {
-                    console.log(prefix, message, context);
-                } else {
-                    console.log(prefix, message);
-                }
-                break;
+        _emitDepth++;
+        try {
+            switch (level) {
+                case LogLevel.TRACE:
+                    if (hasContext) {
+                        console.debug(prefix, message, context);
+                    } else {
+                        console.debug(prefix, message);
+                    }
+                    break;
+                case LogLevel.DEBUG:
+                    if (hasContext) {
+                        console.debug(prefix, message, context);
+                    } else {
+                        console.debug(prefix, message);
+                    }
+                    break;
+                case LogLevel.INFO:
+                    if (hasContext) {
+                        console.info(prefix, message, context);
+                    } else {
+                        console.info(prefix, message);
+                    }
+                    break;
+                case LogLevel.WARN:
+                    if (hasContext) {
+                        console.warn(prefix, message, context);
+                    } else {
+                        console.warn(prefix, message);
+                    }
+                    break;
+                case LogLevel.ERROR:
+                    if (hasContext) {
+                        console.error(prefix, message, context);
+                    } else {
+                        console.error(prefix, message);
+                    }
+                    break;
+                case LogLevel.METRIC:
+                    if (hasContext) {
+                        console.log(prefix, message, context);
+                    } else {
+                        console.log(prefix, message);
+                    }
+                    break;
+            }
+        } finally {
+            _emitDepth--;
         }
     }
 

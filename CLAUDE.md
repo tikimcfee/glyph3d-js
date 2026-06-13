@@ -83,7 +83,10 @@ bundles its deps at build (no importmap). `make all` cross-compiles all platform
 
 Every action is a verb. `CommandRouter.execute(input)` dispatches to a handler in
 `app/commands/handlers/`; UI clicks and CLI/RPC hit the same handlers (one source of
-truth). The relay forwards CLI commands to the browser display over WebSocket.
+truth). The relay forwards CLI commands to the browser display over WebSocket, and
+keeps a structured in-memory SQLite store of every browser log record — `log.query` /
+`log.search` / `log.errors` / `log.stats` / `log.dump` answer relay-side (page-less),
+with live follow via `bun tools/buslog.mjs`.
 
 - **AttentionManager** (`services/interaction`) owns three slots: `hover`, `primary`
   (sticky focus), `key` (keyboard target). One writer per slot; `attention.set <slot>

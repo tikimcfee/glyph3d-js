@@ -32,25 +32,32 @@ export default async ({ app, assert }) => {
   );
   assert.atLeast(rows.length, 1, 'query produced ranked rows');
   assert.equal(rows[0].kind, 'file', 'top match is the file noun');
-  assert.equal(rows[0].cmd, 'file.open app/main.jsx', 'row subtitle is the exact verb line');
+  assert.equal(rows[0].cmd, 'sheet.focus app/main.jsx', 'row subtitle is the exact verb line (the jump)');
 
-  // Enter executes the selected row's command line through the bus.
+  // Enter executes the selected row's command line through the bus. sheet.focus
+  // is THE jump: it must open the file AND fly the camera — pin the position
+  // first so flightlessness fails loudly (the asymmetry this test exists for).
+  const camBefore = await app.evalPage(`(()=>{ const p = window.__glyphClient.ctx.camera.position; return { x: p.x, y: p.y, z: p.z }; })()`);
   await app.evalPage(`${INPUT}.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))`);
-  await app.waitFor(3000); // fetch + grid build + tree relayout
+  await app.waitFor(3000); // fetch + grid build + tree relayout + camera ease
 
   const after = await app.evalPage(`(()=>{
     const c = window.__glyphClient;
+    const p = c.ctx.camera.position;
     return {
       open: c.ctx.registry.has('app/main.jsx'),
       primary: c.ctx.attentionManager?.get?.('primary')?.id || null,
+      cam: { x: p.x, y: p.y, z: p.z },
     };
   })()`);
-  assert.ok(after.open, 'Enter ran file.open — the grid landed in the registry');
-  assert.equal(after.primary, 'app/main.jsx', 'open file took primary attention');
+  assert.ok(after.open, 'Enter ran sheet.focus — the grid landed in the registry');
+  assert.equal(after.primary, 'app/main.jsx', 'jumped file took primary attention');
+  const moved = Math.hypot(after.cam.x - camBefore.x, after.cam.y - camBefore.y, after.cam.z - camBefore.z);
+  assert.atLeast(moved, 1, `camera flew to the jump target (moved ${moved.toFixed(1)})`);
 
   // The executed verb line entered history verbatim (the re-teach loop).
   const hist = await app.evalPage(`JSON.parse(localStorage.getItem('glyph3d.cmdHistory') || '[]')`);
-  assert.ok(hist.includes('file.open app/main.jsx'), 'verb line recorded in history');
+  assert.ok(hist.includes('sheet.focus app/main.jsx'), 'verb line recorded in history');
 
   assert.noErrors(app);
 };

@@ -13,11 +13,11 @@
 
 import errorTracker from '../../utils/ErrorTracker.js';
 import metrics from '../../utils/Metrics.js';
-import { createLogger } from '../../utils/Logger.js';
+import { emitLogRecord } from './consoleForwarder.js';
 
-// Per-command telemetry sink: TRACE keeps the console quiet (console.debug) while populating
-// the log ring (log.tail). Every verb becomes a timed, counted, logged event.
-const cmdLog = createLogger('command', 0);
+// Per-dispatch correlation id, attached to ctx.cid so anything a handler logs can be
+// joined back to its dispatch record.
+let _cid = 0;
 
 export default class CommandRouter {
     /**
@@ -218,17 +218,23 @@ export default class CommandRouter {
         // their changes across calls. Sender is overwritten on each call.
         const ctx = this.context;
         ctx.sender = options.sender || null;
+        const cid = ++_cid;
+        ctx.cid = cid;
 
         // Self-instrument: every verb is a timed, counted, logged event — so metric.list /
         // log.tail / error.list show live command telemetry, and the bus's own failures land
         // in the structured buffer the harness reads. (This is the seam Step 2's spans wrap.)
+        // The dispatch trace is telemetry, not gated debug chatter: it emits structured
+        // records directly (scope 'command'), bypassing Logger level gates entirely.
         const t0 = performance.now();
         try {
             const result = await cmd.handler(args, ctx);
             const ms = performance.now() - t0;
             metrics.timing('command.duration', ms, { command: name });
             metrics.counter('command.total', 1, { command: name, status: 'ok' });
-            cmdLog.trace(name, { ms: Math.round(ms) });
+            emitLogRecord('trace', 'command', name, {
+                args, ms: Math.round(ms), status: 'ok', cid, sender: ctx.sender ?? null
+            });
             // Normalize: if handler returned a plain string, wrap it
             if (typeof result === 'string') {
                 return { text: result, data: null };
@@ -238,6 +244,10 @@ export default class CommandRouter {
             const ms = performance.now() - t0;
             metrics.timing('command.duration', ms, { command: name });
             metrics.counter('command.total', 1, { command: name, status: 'err' });
+            emitLogRecord('trace', 'command', name, {
+                args, ms: Math.round(ms), status: 'err', cid, sender: ctx.sender ?? null,
+                error: err.message
+            });
             // Expected failures RETURN {text:'ERR:…'} and never reach here — only genuine
             // exceptions do, so route them to ErrorTracker (type: command_error).
             errorTracker.captureException(err, { type: 'command_error', command: name, args });

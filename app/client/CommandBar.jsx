@@ -1,6 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import { createLogger } from '@glyph3d/core/utils/Logger.js';
 import { rank } from './palette/rank.js';
 import { verbEntries, nounEntries } from './palette/providers.js';
+
+// One INFO line per palette action — what was picked and the verb line it ran.
+// Pairs with the bus dispatch trace (console.debug) and the attention timeline
+// (`log.level DEBUG attention`); all three land in the capture ring → log.tail.
+const plog = createLogger('palette');
 
 /**
  * CommandBar — the command palette: one summoned modal that is the ingress for
@@ -145,8 +151,8 @@ export default function CommandBar({ client, open, onClose, onHighlight }) {
   const activate = useCallback((row) => {
     const e = row?.entry;
     if (!e) return;
-    if (e.command) run(e.command);
-    else if (e.kind === 'history') run(e.key);
+    if (e.command) { plog.info(`${e.kind} ${e.key} → ${e.command.join(' ')}`); run(e.command); }
+    else if (e.kind === 'history') { plog.info(`history → ${e.key}`); run(e.key); }
     else insert(e.insert ?? e.key);
   }, [run, insert]);
 

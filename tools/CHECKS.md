@@ -23,6 +23,17 @@ after editing core, `make dev-status` to check.
   Use `--headed` on a GPU box when the screenshot must show real pixels; headless still
   catches all JS errors (GPU-init noise is reported but not counted as failure).
 
+- **`loadcurve.mjs`** — survival probe for bulk loads at scale: samples JS heap / grid
+  count every 500ms while a `file.openDir` runs, detects renderer crashes, measures
+  post-load FPS. The companion to `profile-bulkload.mjs` (CPU time) — this answers
+  "does it survive, and what's resident afterward". Point it at a relay serving the
+  BUILT app (`glyph3d-cli serve --local --port 8099 <project>`) — a Vite restart
+  mid-run reloads the page, and dev mode retains ~17x more heap than the build.
+  A gap in the sample stream means the main thread was blocked for that span.
+  ```
+  bun tools/loadcurve.mjs --dir static/app/views --relay 8099
+  ```
+
 - **`capture.mjs`** — cinematic/media capture (per-frame CDP screenshots → ffmpeg loop).
 - **`cdp-shot.mjs`** + **`web-preview.sh`** — attach to an already-running browser via
   CDP and grab a PNG (works headed on a busy desktop). See `PREVIEW.md`.
@@ -49,6 +60,32 @@ integration-test territory: drive verbs, then assert on the resulting state/buff
 
 Note: tests that `repo.load` reach GitHub (network). A relay-served local project avoids
 that — prefer it for deterministic CI once wired.
+
+## Log store (relay SQLite)
+
+The relay keeps every browser log record in an in-memory SQLite store (FTS5-indexed).
+**`buslog.mjs`** is the client. Store verbs answer **page-less** — only the relay needs
+to be up — while `log.tail` / `log.level` are ring verbs living in the page (reach those
+via `./glyph3d-cli`, or `--level-set` from buslog).
+
+Three-command smoke (relay on :8080):
+```
+bun tools/buslog.mjs errors                            # recent error/warn records
+bun tools/buslog.mjs search <expr> --since 5m          # FTS5 (LIKE under 3 chars)
+bun tools/buslog.mjs q "SELECT level, count(*) FROM logs GROUP BY level"
+```
+
+Live follow — a push subscription (lossless, no polling), "tail -f for the app":
+```
+bun tools/buslog.mjs                                   # everything, rendered
+bun tools/buslog.mjs --filter attention --level debug,trace
+bun tools/buslog.mjs --json                            # raw records as JSONL
+```
+
+Also: `stats` (store shape), `dump [path]` (VACUUM INTO snapshot, default
+`/tmp/glyph3d/logs-<ts>.db`), `search <expr> --fuzzy <query>` (client-side fzf rank).
+`tools/itests/logstore.itest.mjs` locks in ingest + search/query/stats end-to-end
+(skips loudly when no relay answers on :8080).
 
 ## Headless checks (no browser)
 

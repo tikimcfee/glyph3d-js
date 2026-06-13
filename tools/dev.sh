@@ -96,6 +96,7 @@ status() {
   [ -n "$vp" ] && echo "vite  :$VITE_PORT  up (pid $vp)" || echo "vite  :$VITE_PORT  down"
   [ -n "$rp" ] && echo "relay :$RELAY_PORT  up (pid $rp)" || echo "relay :$RELAY_PORT  down"
   echo "logs  $LOG_DIR/{vite,relay}.log"
+  echo "      structured app logs: bun tools/buslog.mjs  (live follow / search / q / errors / stats)"
 }
 
 case "${1:-refresh}" in

@@ -50,6 +50,21 @@ export default async ({ app, assert }) => {
   })()`;
   const cursor = async () => (await app.cmd('edit.info')).text.match(/at (\d+):(\d+)/)?.slice(1).map(Number) ?? null;
 
+  // A glyph click enters edit IMMEDIATELY (caret parks at EOF) and the ASYNC pick
+  // then moves the caret to the clicked glyph. Poll until it arrives instead of
+  // trusting a fixed wait — GPU load (another tab, a sibling agent) stretches the
+  // pick's resolve time past any constant. Returns the last cursor seen.
+  const cursorSettles = async (line, col, timeout = 5000) => {
+    const t0 = Date.now();
+    let cur = null;
+    while (Date.now() - t0 < timeout) {
+      cur = await cursor();
+      if (cur && cur[0] === line && cur[1] === col) return cur;
+      await app.waitFor(200);
+    }
+    return cur;
+  };
+
   // Park the pointer on the glyph and wait until the GRID hover actually reports
   // our file (camera flight / projection settle), then re-project for stability.
   // Self-calibrating: no fixed waits on flight timing.
@@ -74,8 +89,7 @@ export default async ({ app, assert }) => {
   const pt1 = await hoverAt(target.line, target.col);
   assert.ok(pt1, 'pointer settled over the target glyph (grid hover confirmed)');
   await page.mouse.dblclick(pt1.x, pt1.y);
-  await app.waitFor(1000); // async glyph pick + edit.goto
-  let cur = await cursor();
+  let cur = await cursorSettles(target.line, target.col);
   assert.ok(cur && cur[0] === target.line && cur[1] === target.col,
     `dblclick → caret at ${cur?.join(':')} (want ${target.line}:${target.col})`);
 
@@ -84,8 +98,7 @@ export default async ({ app, assert }) => {
   const pt2 = await hoverAt(t2.line, t2.col);
   assert.ok(pt2, 'pointer settled for the reposition click');
   await page.mouse.click(pt2.x, pt2.y);
-  await app.waitFor(1000);
-  cur = await cursor();
+  cur = await cursorSettles(t2.line, t2.col);
   assert.ok(cur && cur[0] === t2.line && cur[1] === t2.col,
     `click-while-editing → caret at ${cur?.join(':')} (want ${t2.line}:${t2.col})`);
 
@@ -122,8 +135,7 @@ export default async ({ app, assert }) => {
   const pt5 = await hoverAt(t5.line, t5.col);
   assert.ok(pt5, 'pointer settled for the focused-click shortcut');
   await page.mouse.click(pt5.x, pt5.y);
-  await app.waitFor(1000);
-  cur = await cursor();
+  cur = await cursorSettles(t5.line, t5.col);
   assert.ok(cur && cur[0] === t5.line && cur[1] === t5.col,
     `focused-click shortcut → edit at ${cur?.join(':')} (want ${t5.line}:${t5.col})`);
 
@@ -140,8 +152,7 @@ export default async ({ app, assert }) => {
     const pt4 = await hoverAt(t4.line, t4.col);
     assert.ok(pt4, 'pointer settled for the framed-layout click');
     await page.mouse.click(pt4.x, pt4.y);
-    await app.waitFor(1000);
-    cur = await cursor();
+    cur = await cursorSettles(t4.line, t4.col);
     assert.ok(cur && cur[0] === t4.line && cur[1] === t4.col,
       `framed-layout click → caret at ${cur?.join(':')} (want ${t4.line}:${t4.col})`);
   }

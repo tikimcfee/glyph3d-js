@@ -48,7 +48,15 @@
  * Not an EventTarget subclass — deliberately minimal, no DOM dep.
  */
 
+import { createLogger } from '../../utils/Logger.js';
+
 const SLOTS = ['hover', 'primary', 'key'];
+
+// The attention timeline. Quiet by default (INFO); dial it live with
+// `log.level DEBUG attention` to see primary/key transitions (TRACE adds
+// hover) — handler-internal set() calls never cross the command bus, so
+// this is the only place the full timeline exists. Read it back with log.tail.
+const log = createLogger('attention');
 
 export class AttentionManager {
     constructor() {
@@ -90,6 +98,8 @@ export class AttentionManager {
         if (cleared) {
             if (prev == null) return null; // no-op, no event
             this.state[slot] = null;
+            if (slot === 'hover') log.trace(`hover ${prev.id} → ∅`);
+            else log.debug(`${slot} ${prev.id} → ∅`);
             this._emit(slot, null, prev);
             return null;
         }
@@ -109,6 +119,8 @@ export class AttentionManager {
         // "re-clicking the same grid does nothing until you touch another one".
         const value = { id, entity: entity || null, ts: performance.now() };
         this.state[slot] = value;
+        if (slot === 'hover') log.trace(`hover ${prev?.id ?? '∅'} → ${id}`);
+        else log.debug(`${slot} ${prev?.id ?? '∅'} → ${id}`);
         this._emit(slot, value, prev);
         return value;
     }

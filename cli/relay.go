@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -23,20 +24,28 @@ import (
 type Relay struct {
 	mu           sync.RWMutex
 	display      *websocket.Conn
-	displayWrite chan []byte    // control/JSON write queue (non-blocking, drop-OK — self-correcting)
-	displayBytes chan []byte    // terminal OUTPUT binary frames (blocking send = lossless backpressure)
-	displayDone  chan struct{}  // closed on display teardown — unblocks writer + blocked byte senders
+	displayWrite chan []byte   // control/JSON write queue (non-blocking, drop-OK — self-correcting)
+	displayBytes chan []byte   // terminal OUTPUT binary frames (blocking send = lossless backpressure)
+	displayDone  chan struct{} // closed on display teardown — unblocks writer + blocked byte senders
 	controllers  map[string]*websocket.Conn
 	nextID       atomic.Int64
 	termSeq      atomic.Int64 // monotonic id source for relay-spawned terminal adapters
 	upgrader     websocket.Upgrader
-	fs           *FSHandler // nil if --root not provided
-	port         int        // port this relay serves on (spawned adapters connect back here)
+	fs           *FSHandler      // nil if --root not provided
+	port         int             // port this relay serves on (spawned adapters connect back here)
+	logs         *LogStore       // relay-resident browser-log store (SQLite :memory: + FTS5)
+	logSubs      map[string]bool // controller ids subscribed via log.follow (guarded by mu)
 }
 
 func NewRelay() *Relay {
+	logs, err := NewLogStore()
+	if err != nil {
+		log.Fatalf("[relay] log store: %v", err)
+	}
 	return &Relay{
 		controllers: make(map[string]*websocket.Conn),
+		logs:        logs,
+		logSubs:     make(map[string]bool),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
@@ -154,7 +163,7 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 			Relay string `json:"relay"`
 		}
 		if json.Unmarshal(msg, &relayProbe) == nil && relayProbe.Relay != "" {
-			r.handleRelayMessage(ws, msg)
+			r.handleRelayMessage(ws, msg, clientID, role)
 			continue
 		}
 
@@ -168,8 +177,8 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 					return
 				}
 				r.display = ws
-				ch := make(chan []byte, 64)        // control/JSON
-				bytesCh := make(chan []byte, 256)  // terminal OUTPUT (deeper: ~16ms coalesced frames)
+				ch := make(chan []byte, 64)       // control/JSON
+				bytesCh := make(chan []byte, 256) // terminal OUTPUT (deeper: ~16ms coalesced frames)
 				done := make(chan struct{})
 				r.displayWrite = ch
 				r.displayBytes = bytesCh
@@ -229,6 +238,13 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 				continue
 			}
 
+			// Relay-resident log verbs — answered from the in-relay store, never
+			// forwarded. (log.tail / log.level stay display verbs and fall through.)
+			if verb, rest, ok := splitLogVerb(raw); ok {
+				r.handleLogCommand(ws, verb, rest)
+				continue
+			}
+
 			r.mu.RLock()
 			d := r.display
 			r.mu.RUnlock()
@@ -242,19 +258,30 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 			r.sendToDisplay(envelope)
 
 		} else if role == "display" {
-			// Browser log forwarding: { event: "browser.log", level, text }
-			// Print to stdout so CLI users see browser console output.
+			// Browser log ingest: {"event":"browser.log","rec":{ts,level,scope,msg,attrs,page}}.
+			// Every record lands in the relay-resident store; log/warn/error also
+			// print to relay stdout (trace/debug/info are stored silently); the
+			// stored record is pushed to every log.follow subscriber.
 			var logProbe struct {
-				Event string `json:"event"`
-				Level string `json:"level"`
-				Text  string `json:"text"`
+				Event string  `json:"event"`
+				Rec   *LogRec `json:"rec"`
 			}
-			if json.Unmarshal(msg, &logProbe) == nil && logProbe.Event == "browser.log" {
-				level := logProbe.Level
-				if level == "" {
-					level = "log"
+			if json.Unmarshal(msg, &logProbe) == nil && logProbe.Event == "browser.log" && logProbe.Rec != nil {
+				rec := logProbe.Rec
+				if rec.Level == "" {
+					rec.Level = "log"
 				}
-				log.Printf("[browser:%s] %s", level, logProbe.Text)
+				rec.RTS = time.Now().UnixMilli()
+				stored, err := r.logs.Ingest(rec)
+				if err != nil {
+					log.Printf("[relay] log ingest error: %v", err)
+					continue
+				}
+				switch rec.Level {
+				case "log", "warn", "error":
+					log.Printf("[browser:%s] %s", rec.Level, rec.Msg)
+				}
+				r.pushLogToFollowers(stored)
 				continue
 			}
 
@@ -358,6 +385,7 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 	} else if role == "controller" && clientID != "" {
 		r.mu.Lock()
 		delete(r.controllers, clientID)
+		delete(r.logSubs, clientID)
 		r.mu.Unlock()
 		log.Printf("[relay] controller '%s' disconnected", clientID)
 		r.notifyDisplay("client_disconnected", clientID)
@@ -378,7 +406,7 @@ func atlasCacheKey(font string, size float64) string {
 	return fmt.Sprintf("atlas-%s-%d", slug, int(size))
 }
 
-func (r *Relay) handleRelayMessage(ws *websocket.Conn, msg []byte) {
+func (r *Relay) handleRelayMessage(ws *websocket.Conn, msg []byte, clientID, role string) {
 	var m struct {
 		Relay      string          `json:"relay"`
 		Font       string          `json:"font"`
@@ -456,9 +484,210 @@ func (r *Relay) handleRelayMessage(ws *websocket.Conn, msg []byte) {
 	case "terminal.recover":
 		r.recoverTerminals(ws)
 
+	case "log.follow":
+		if role != "controller" || clientID == "" {
+			ws.WriteJSON(map[string]any{"event": "log.follow", "ok": false, "error": "log.follow requires a controller connection"})
+			return
+		}
+		r.mu.Lock()
+		r.logSubs[clientID] = true
+		r.mu.Unlock()
+		log.Printf("[relay] controller '%s' following logs", clientID)
+		ws.WriteJSON(map[string]any{"event": "log.follow", "ok": true})
+
+	case "log.unfollow":
+		r.mu.Lock()
+		delete(r.logSubs, clientID)
+		r.mu.Unlock()
+		ws.WriteJSON(map[string]any{"event": "log.unfollow", "ok": true})
+
 	default:
 		ws.WriteJSON(map[string]any{"error": fmt.Sprintf("unknown relay command: %s", m.Relay)})
 	}
+}
+
+// pushLogToFollowers fans one stored log record out to every log.follow
+// subscriber as {"event":"browser.log","data":<rec>}. Called from the display
+// read goroutine after ingest, so a coalesced repeat pushes the updated record.
+func (r *Relay) pushLogToFollowers(rec *LogRec) {
+	r.mu.RLock()
+	conns := make([]*websocket.Conn, 0, len(r.logSubs))
+	for id := range r.logSubs {
+		if c, ok := r.controllers[id]; ok {
+			conns = append(conns, c)
+		}
+	}
+	r.mu.RUnlock()
+	if len(conns) == 0 {
+		return
+	}
+	msg, err := json.Marshal(map[string]any{"event": "browser.log", "data": rec})
+	if err != nil {
+		return
+	}
+	for _, c := range conns {
+		c.WriteMessage(websocket.TextMessage, msg)
+	}
+}
+
+// relayLogVerbs are the controller plain-text commands answered by the relay's
+// log store. log.tail and log.level are NOT here — they forward to the display.
+var relayLogVerbs = map[string]bool{
+	"log.query":  true,
+	"log.search": true,
+	"log.errors": true,
+	"log.stats":  true,
+	"log.dump":   true,
+}
+
+// splitLogVerb splits a raw controller command into (verb, rest) when the
+// first token is a relay-resident log verb. rest keeps the argument string
+// (for log.query, the SQL).
+func splitLogVerb(raw string) (verb, rest string, ok bool) {
+	verb, rest, _ = strings.Cut(raw, " ")
+	if !relayLogVerbs[verb] {
+		return "", "", false
+	}
+	return verb, strings.TrimSpace(rest), true
+}
+
+// handleLogCommand answers a relay-resident log verb on the controller's
+// socket using the {"response":...,"data":...} shape the CLI expects; errors
+// reply as plain "ERR: ..." text.
+func (r *Relay) handleLogCommand(ws *websocket.Conn, verb, rest string) {
+	fail := func(err error) {
+		ws.WriteMessage(websocket.TextMessage, []byte("ERR: "+err.Error()))
+	}
+	reply := func(text string, data any) {
+		msg, err := json.Marshal(map[string]any{"response": text, "data": data})
+		if err != nil {
+			fail(err)
+			return
+		}
+		ws.WriteMessage(websocket.TextMessage, msg)
+	}
+
+	switch verb {
+	case "log.query":
+		cols, rows, err := r.logs.Query(rest)
+		if err != nil {
+			fail(err)
+			return
+		}
+		reply(fmt.Sprintf("%d row(s)", len(rows)), map[string]any{"columns": cols, "rows": rows})
+
+	case "log.search":
+		expr, opts, err := parseLogSearchArgs(rest)
+		if err != nil {
+			fail(err)
+			return
+		}
+		entries, err := r.logs.Search(expr, opts)
+		if err != nil {
+			fail(err)
+			return
+		}
+		reply(fmt.Sprintf("%d hit(s)", len(entries)), map[string]any{"entries": entries})
+
+	case "log.errors":
+		_, opts, err := parseLogSearchArgs(rest)
+		if err != nil {
+			fail(err)
+			return
+		}
+		entries, err := r.logs.Errors(opts.Since, opts.Limit)
+		if err != nil {
+			fail(err)
+			return
+		}
+		reply(fmt.Sprintf("%d hit(s)", len(entries)), map[string]any{"entries": entries})
+
+	case "log.stats":
+		stats, err := r.logs.Stats()
+		if err != nil {
+			fail(err)
+			return
+		}
+		reply(fmt.Sprintf("%d row(s)", stats.Rows), stats)
+
+	case "log.dump":
+		n, path, err := r.logs.Dump(rest)
+		if err != nil {
+			fail(err)
+			return
+		}
+		reply(fmt.Sprintf("OK: dumped %d rows to %s", n, path), nil)
+	}
+}
+
+// parseLogSearchArgs parses "expr words --since 5m --level error,warn
+// --scope s --page cur --limit 50". Flags may appear in any order; non-flag
+// tokens join (space-separated) into the search expression.
+func parseLogSearchArgs(rest string) (string, SearchOpts, error) {
+	var opts SearchOpts
+	var exprParts []string
+	toks := strings.Fields(rest)
+	for i := 0; i < len(toks); i++ {
+		t := toks[i]
+		if !strings.HasPrefix(t, "--") {
+			exprParts = append(exprParts, t)
+			continue
+		}
+		if i+1 >= len(toks) {
+			return "", opts, fmt.Errorf("flag %s requires a value", t)
+		}
+		i++
+		v := toks[i]
+		switch t {
+		case "--since":
+			d, err := parseSinceDuration(v)
+			if err != nil {
+				return "", opts, err
+			}
+			opts.Since = d
+		case "--level":
+			for _, l := range strings.Split(v, ",") {
+				if l = strings.TrimSpace(l); l != "" {
+					opts.Levels = append(opts.Levels, l)
+				}
+			}
+		case "--scope":
+			opts.Scope = v
+		case "--page":
+			opts.Page = v
+		case "--limit":
+			n, err := strconv.Atoi(v)
+			if err != nil || n <= 0 {
+				return "", opts, fmt.Errorf("invalid --limit %q", v)
+			}
+			opts.Limit = n
+		default:
+			return "", opts, fmt.Errorf("unknown flag %s", t)
+		}
+	}
+	return strings.Join(exprParts, " "), opts, nil
+}
+
+// parseSinceDuration parses "<int><s|m|h|d>" (e.g. 30s, 5m, 2h, 1d).
+func parseSinceDuration(s string) (time.Duration, error) {
+	if len(s) < 2 {
+		return 0, fmt.Errorf("invalid duration %q (want e.g. 30s, 5m, 2h, 1d)", s)
+	}
+	n, err := strconv.Atoi(s[:len(s)-1])
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("invalid duration %q (want e.g. 30s, 5m, 2h, 1d)", s)
+	}
+	switch s[len(s)-1] {
+	case 's':
+		return time.Duration(n) * time.Second, nil
+	case 'm':
+		return time.Duration(n) * time.Minute, nil
+	case 'h':
+		return time.Duration(n) * time.Hour, nil
+	case 'd':
+		return time.Duration(n) * 24 * time.Hour, nil
+	}
+	return 0, fmt.Errorf("invalid duration unit in %q (want s|m|h|d)", s)
 }
 
 // spawnTerminalAdapter forks `glyph3d-cli attach <id> --port <port>` as a child

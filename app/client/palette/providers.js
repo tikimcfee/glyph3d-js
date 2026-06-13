@@ -50,11 +50,14 @@ export async function nounEntries(client) {
     } catch { /* workspace not wired yet */ }
 
     // The repo roster — relay fs or GitHub, same surface; the same call openDir uses.
+    // File rows ALSO ride sheet.focus (it opens unopened paths on the way through),
+    // so every palette jump flies the camera — open or not, same gesture, same verb.
+    // file.open stays the no-camera-yank primitive for bulk/scripted opens.
     try {
         const tree = await ctx.fileProvider.listTree('file:///');
         for (const f of ctx.fileProvider.filterCodeFiles({ tree })) {
             if (openPaths.has(f.path)) continue;
-            out.push({ kind: 'file', key: f.path, command: ['file.open', f.path], detail: '' });
+            out.push({ kind: 'file', key: f.path, command: ['sheet.focus', f.path], detail: '' });
         }
     } catch { /* no source yet (no repo, relay down) — sheets/schemes/verbs still work */ }
 

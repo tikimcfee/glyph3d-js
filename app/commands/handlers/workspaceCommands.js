@@ -87,11 +87,20 @@ export default function registerWorkspaceCommands(router) {
   }, { description: 'Remove a sheet\'s panel but keep the sheet open', usage: '<sheetId>' });
 
   router.register('sheet.focus', async (args, ctx) => {
-    if (args.length < 1) return { text: 'ERR: usage: sheet.focus <sheetId>', data: null };
+    if (args.length < 1) return { text: 'ERR: usage: sheet.focus <sheetId|path>', data: null };
     const ws = ctx.workspace;
     if (!ws) return { text: 'ERR: workspace not ready', data: null };
     const sheetId = args.join(' ');
-    const sheet = ws.getSheet(sheetId);
+    let sheet = ws.getSheet(sheetId);
+    // A file path is a sheet that hasn't been opened yet. sheet.focus IS the jump
+    // gesture — open it on the way through, so "jump to a file" is ONE verb whether
+    // or not it's in the working set (the palette's file rows ride this). An
+    // explicit sheet:* id that doesn't resolve is still an error, not an open.
+    if (!sheet && !sheetId.startsWith('sheet:')) {
+      const path = sheetId;
+      const uri = 'file:///' + String(path).replace(/^\/+/, '');
+      sheet = ws.openSheet({ kind: 'file', source: { path, uri } });
+    }
     if (!sheet) return { text: `ERR: no sheet "${sheetId}"`, data: null };
 
     // Render-if-needed: focusing an open-but-undrawn sheet draws it first — the single gesture
@@ -116,7 +125,7 @@ export default function registerWorkspaceCommands(router) {
     ws.setActiveSheet(sheet.id);
 
     return { text: `OK: focused "${sheet.title}" → panel ${panelId}`, data: { id: sheet.id, panelId, focused: true } };
-  }, { description: 'Focus a sheet: render if needed, set attention primary, frame the camera, mark active', usage: '<sheetId>' });
+  }, { description: 'Jump to a sheet or file: open+render if needed, set attention primary, frame the camera, mark active', usage: '<sheetId|path>' });
 
   router.register('sheet.close', (args, ctx) => {
     if (args.length < 1) return { text: 'ERR: usage: sheet.close <sheetId>', data: null };

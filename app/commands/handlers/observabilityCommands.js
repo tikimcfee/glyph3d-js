@@ -42,7 +42,7 @@ export default function registerObservabilityCommands(router) {
         const n = args[0] ? Number(args[0]) : 30;
         const entries = recentConsole(n);
         return { text: `${entries.length} log line(s)`, data: { entries } };
-    }, { description: 'Tail recent console output (all levels) from the single capture ring', usage: '[count]', returns: '{entries}' });
+    }, { description: 'Tail recent structured log records (all levels) from the capture ring', usage: '[count]', returns: '{entries: [{ts,level,scope,msg,attrs,page,repeat?}]}' });
 
     router.register('log.level', (args) => {
         const level = args[0];

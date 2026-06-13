@@ -1,40 +1,129 @@
 /**
- * Forward browser console output to a WebSocketBridge as `browser.log` events,
- * so a relay / server log mirrors what the browser sees in real time. This is
- * the single canonical forwarder — both the IDE command center and HomeShell
- * install it (it used to be copy-pasted between them, drifted on MAX_LEN and
- * uncaught-error handling).
+ * Structured browser-log capture + relay forwarding.
  *
- * Patches console.log/warn/error in place (original output is preserved) and,
- * unless disabled, also captures the two failure surfaces plain console.* miss:
- * window.onerror (uncaught sync errors) and unhandledrejection (uncaught promise
- * rejections). Forwarding is a no-op until `bridge.connected` flips true —
- * `bridge.send` already guards on `ws && connected`, so callers needn't.
+ * Every log record — raw console.* calls, Logger output (via the structured sink),
+ * window error/unhandledrejection, and direct emitLogRecord() callers — lands in one
+ * in-memory ring of structured records and forwards to the relay as a `browser.log`
+ * wire message:
+ *
+ *   {"event":"browser.log","rec":{ts,level,scope,msg,attrs,page,trunc?}}
+ *
+ * ALL levels forward (trace|debug|info|log|warn|error); filtering is the relay's job
+ * (it stores records in SQLite and answers log.query / log.search / log.errors).
+ *
+ * Logger calls arrive structured through setLogRecordSink (scope = logger fullName,
+ * attrs = context); the console.* patch skips Logger-originated console output via
+ * isLoggerEmitting() so each Logger line lands exactly once.
  *
  * Idempotent at module scope: console is patched once per page regardless of how
- * many times this is called.
+ * many times installConsoleForwarder is called. emitLogRecord works before install
+ * (ring only) — records emitted before the bridge connects are flushed
+ * opportunistically: on each emit, any unsent backlog still in the ring goes out
+ * (oldest first) before the current record. No timer — the next emit after connect
+ * drains the backlog, which is the accepted boot-time behavior.
  */
 
-let _installed = false;
+import { setLogRecordSink, isLoggerEmitting } from '../../utils/Logger.js';
 
-// In-memory ring of recent console output (ALL levels) — the single, consistent log sink
-// the log.tail verb reads. Captured here because this is the one place every console.* call
-// is intercepted; relay forwarding stays log/warn/error only (no debug/info spam on the wire).
 const RING_MAX = 500;
+const MSG_MAX = 4096;
+const ATTRS_MAX = 4096;
+
+/** Short page-load id, minted once per page so the relay can group records by load. */
+const PAGE_ID = Math.random().toString(36).slice(2, 10);
+
+/** @typedef {{ts:number, level:string, scope:string|null, msg:string, attrs:Object|null, page:string, trunc?:boolean}} LogRecord */
+
+/** @type {LogRecord[]} */
 const ring = [];
-/** Recent console entries, oldest→newest. @param {number} [limit] @returns {Array<{ts:number,level:string,text:string}>} */
+
+let _installed = false;
+/** @type {{send: (raw:string)=>void, connected?: boolean}|null} */
+let _bridge = null;
+let _pushed = 0; // total records ever pushed to the ring
+let _sent = 0;   // records handed to a connected bridge
+
+/**
+ * Recent structured log records, oldest→newest.
+ * @param {number} [limit]
+ * @returns {LogRecord[]}
+ */
 export function recentConsole(limit) {
     return limit ? ring.slice(-limit) : ring.slice();
 }
 
 /**
+ * Wire form of attrs: the object itself when its JSON form fits the cap, otherwise
+ * the clipped JSON text (or String(attrs) when not JSON-stringifiable). The ring
+ * always keeps the original object.
+ * @param {Object|null} attrs
+ * @returns {Object|string|null}
+ */
+function wireAttrs(attrs) {
+    if (attrs == null) return null;
+    let s;
+    try { s = JSON.stringify(attrs); } catch { s = undefined; }
+    if (typeof s !== 'string') s = String(attrs);
+    else if (s.length <= ATTRS_MAX) return attrs;
+    return s.slice(0, ATTRS_MAX);
+}
+
+/**
+ * @param {LogRecord} record
+ * @returns {string} the serialized browser.log wire message
+ */
+function wireForm(record) {
+    const rec = {
+        ts: record.ts,
+        level: record.level,
+        scope: record.scope,
+        msg: record.msg,
+        attrs: wireAttrs(record.attrs),
+        page: record.page,
+    };
+    if (record.trunc) rec.trunc = true;
+    return JSON.stringify({ event: 'browser.log', rec });
+}
+
+/**
+ * Structured log ingest: cap, ring, forward. The single path every capture surface
+ * (console patch, Logger sink, window errors, dispatch telemetry) funnels through.
+ * @param {string} level - trace|debug|info|log|warn|error
+ * @param {string|null} scope - Logger fullName, or null for raw console output
+ * @param {string} msg
+ * @param {Object|null} attrs - structured context; stored as the object in the ring,
+ *   defensively serialized (capped at 4096 chars) for the wire
+ */
+export function emitLogRecord(level, scope, msg, attrs) {
+    if (typeof msg !== 'string') msg = String(msg ?? '');
+    /** @type {LogRecord} */
+    const record = { ts: Date.now(), level, scope: scope ?? null, msg, attrs: attrs ?? null, page: PAGE_ID };
+    if (msg.length > MSG_MAX) {
+        record.msg = msg.slice(0, MSG_MAX);
+        record.trunc = true;
+    }
+    ring.push(record);
+    if (ring.length > RING_MAX) ring.shift();
+    _pushed++;
+
+    // bridge.send no-ops until bridge.connected, so boot-time records would otherwise
+    // never reach the relay. Opportunistic flush: send any unsent backlog still in the
+    // ring (oldest first) — the slice includes the record just pushed.
+    if (_bridge && _bridge.connected) {
+        const backlog = Math.min(_pushed - _sent, ring.length);
+        for (let i = ring.length - backlog; i < ring.length; i++) {
+            try { _bridge.send(wireForm(ring[i])); } catch { /* bridge hiccup — drop silently */ }
+        }
+        _sent = _pushed;
+    }
+}
+
+/**
  * @param {import('./WebSocketBridge.js').default} bridge - the relay bridge;
- *   only its `send(raw)` method is used (it self-guards on connection state).
+ *   `send(raw)` self-guards on connection state, `connected` gates forwarding.
  * @param {Object} [options]
- * @param {number} [options.maxLen=400] - truncate each forwarded message to this
- *   many characters (an ellipsis is appended when clipped).
- * @param {boolean} [options.captureWindowErrors=true] - also forward
- *   window.onerror and unhandledrejection as error-level entries.
+ * @param {boolean} [options.captureWindowErrors=true] - also capture
+ *   window.onerror and unhandledrejection as error-level records.
  * @returns {boolean} true if it installed the forwarder, false if it was already
  *   installed (and this call did nothing).
  */
@@ -42,19 +131,13 @@ export function installConsoleForwarder(bridge, options = {}) {
     if (_installed) return false;
     if (!bridge || typeof bridge.send !== 'function') return false;
     _installed = true;
+    _bridge = bridge;
 
-    const { maxLen = 400, captureWindowErrors = true } = options;
-
-    const send = (level, text) => {
-        if (text.length > maxLen) text = text.slice(0, maxLen) + '…';
-        try {
-            bridge.send(JSON.stringify({ event: 'browser.log', level, text }));
-        } catch { /* bridge not ready / serialization failed — drop silently */ }
-    };
+    const { captureWindowErrors = true } = options;
 
     // Serialize console args to a single string. Error instances need special
     // handling — their enumerable own-props are empty, so JSON.stringify(err)
-    // === "{}" and the relay log would lose the actual failure.
+    // === "{}" and the record would lose the actual failure.
     const serialize = (args) => {
         try {
             return args.map((a) => {
@@ -69,32 +152,32 @@ export function installConsoleForwarder(bridge, options = {}) {
         }
     };
 
-    // The single, consistent capture path: ring (all levels, local + verbose) + relay
-    // (log/warn/error only). Raw console.*, Logger output, and command traces all land here
-    // uniformly, so log.tail sees everything regardless of how a module chose to log.
-    const RELAY_LEVELS = new Set(['log', 'warn', 'error']);
-    const capture = (level, text) => {
-        if (text.length > maxLen) text = text.slice(0, maxLen) + '…';
-        ring.push({ ts: Date.now(), level, text });
-        if (ring.length > RING_MAX) ring.shift();
-        if (RELAY_LEVELS.has(level)) send(level, text);
-    };
+    // Logger output arrives here structured (scope = fullName, attrs = context); the
+    // console patch below skips Logger-originated calls so each line lands once.
+    // Logger level names are uppercase (TRACE..ERROR, plus METRIC which Logger routes
+    // to console.log — it maps to 'log' to stay inside the wire's level vocabulary).
+    setLogRecordSink((record) => {
+        const level = record.level === 'METRIC' ? 'log' : String(record.level).toLowerCase();
+        const attrs = record.context && Object.keys(record.context).length > 0 ? record.context : null;
+        emitLogRecord(level, record.name ?? null, record.message, attrs);
+    });
 
     for (const level of ['log', 'info', 'warn', 'error', 'debug']) {
         const original = console[level].bind(console);
         console[level] = (...args) => {
             original(...args);
-            capture(level, serialize(args));
+            if (isLoggerEmitting()) return; // structured via the Logger sink
+            emitLogRecord(level, null, serialize(args), null);
         };
     }
 
     if (captureWindowErrors && typeof window !== 'undefined') {
         window.addEventListener('error', (e) => {
-            capture('error', `[uncaught] ${e.error?.stack || e.message || String(e)}`);
+            emitLogRecord('error', null, `[uncaught] ${e.error?.stack || e.message || String(e)}`, null);
         });
         window.addEventListener('unhandledrejection', (e) => {
             const r = e.reason;
-            capture('error', `[unhandled-rejection] ${r?.stack || r?.message || String(r)}`);
+            emitLogRecord('error', null, `[unhandled-rejection] ${r?.stack || r?.message || String(r)}`, null);
         });
     }
 
