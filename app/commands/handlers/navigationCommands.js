@@ -224,6 +224,23 @@ export default function registerNavigationCommands(router) {
         return { text: `OK: into → ${id}`, data: { target: id } };
     }, { description: 'Focus down into the first child of the focused directory (tree hierarchy)' });
 
+    // Absolute counterpart to the relative parent/child/neighbor walk: focus any
+    // node by its full path. A directory resolves through the tree (getNode); a
+    // file leaf resolves through the registry, where grids register under their
+    // path as the id. Powers the breadcrumb address bar — click an ancestor
+    // segment to jump straight to that directory. Pass the path as a single token
+    // (array form) so paths with spaces survive the space-split tokenizer.
+    router.register('focus.path', (args, ctx) => {
+        if (!ctx.contentTree) return { text: 'ERR: content tree not ready', data: null };
+        const path = args[0];
+        if (!path) return { text: 'ERR: usage: focus.path <dir-or-file-path>', data: null };
+        const node = ctx.contentTree.getNode(path) || ctx.registry?.get(path)?.grid || null;
+        if (!node) return { text: `OK: no node at ${path}`, data: { target: null } };
+        const id = focusTreeNode(ctx, node);
+        if (!id) return { text: `OK: ${path} not focusable`, data: { target: null } };
+        return { text: `OK: focus → ${id}`, data: { target: id } };
+    }, { description: 'Focus a directory or file by its full path', usage: '<path>' });
+
     // ================================================================
     //  camera.frame <index1> [index2...] [--padding <n>]
     //

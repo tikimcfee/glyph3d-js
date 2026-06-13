@@ -49,6 +49,7 @@ export default function ContextBreadcrumb({ client }) {
   const [nodes, setNodes] = useState([]);
   const [collapsed, setCollapsed] = useState(() => !!stateController.get('contextHud.collapsed', false));
   const [addr, setAddr] = useState(() => !!stateController.get('contextHud.addr', false)); // address bar open
+  const [hoverSeg, setHoverSeg] = useState(-1); // address-bar segment under the cursor
   const [pos, setPos] = useState(() => stateController.get('contextHud.pos', null)); // {x,y} once dragged
   const posRef = useRef(pos);
   const rootRef = useRef(null);
@@ -100,6 +101,10 @@ export default function ContextBreadcrumb({ client }) {
       return !a;
     });
   };
+
+  // Jump to an ancestor directory (or the focused entity itself) by its full
+  // path — the same absolute focus the keyboard walk lands on, via the bus.
+  const focusPath = (p) => { if (p) client?.router?.execute?.(['focus.path', p]); };
 
   // Until first drag: bottom-center, the vim command-line home — clear of the
   // HUD (bottom-right) and the dock (left). A drag switches to explicit x/y.
@@ -155,17 +160,28 @@ export default function ContextBreadcrumb({ client }) {
         )}
       </div>
       {showAddr && (
-        <div style={addrStyle} data-g3d-address title={focus.path}>
+        <div style={addrStyle} data-g3d-address onMouseLeave={() => setHoverSeg(-1)}>
           <span style={{ color: '#4a5468' }}>⌂</span>
-          {segs.map((s, i) => (
-            <React.Fragment key={i}>
-              <span style={{ color: '#39424f' }}>›</span>
-              <span style={{
-                color: i === segs.length - 1 ? ACCENT.focus : '#8893a3',
-                whiteSpace: 'nowrap',
-              }}>{s}</span>
-            </React.Fragment>
-          ))}
+          {segs.map((s, i) => {
+            const prefix = segs.slice(0, i + 1).join('/');
+            const isTail = i === segs.length - 1;
+            const hot = hoverSeg === i;
+            return (
+              <React.Fragment key={i}>
+                <span style={{ color: '#39424f' }}>›</span>
+                <span
+                  onClick={() => focusPath(prefix)}
+                  onMouseEnter={() => setHoverSeg(i)}
+                  title={`focus ${prefix}`}
+                  style={{
+                    cursor: 'pointer', whiteSpace: 'nowrap',
+                    color: isTail ? ACCENT.focus : (hot ? '#cdd6e2' : '#8893a3'),
+                    textDecoration: hot ? 'underline' : 'none',
+                  }}
+                >{s}</span>
+              </React.Fragment>
+            );
+          })}
         </div>
       )}
     </div>
