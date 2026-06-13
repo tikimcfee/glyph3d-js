@@ -623,7 +623,20 @@ export function SelectionIndicator() {
     // morphing like a world-space AABB does when the grid is docked under the camera.
     const mkBox = (color, renderOrder) => {
       const geo = new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1)); // unit cube, centered
-      const mat = new THREE.LineBasicMaterial({ color: new THREE.Color(color), depthTest: false });
+      // depthTest ON so the grid's own (depth-writing) background panel occludes the
+      // box's REAR edges — the back of the cuboid is logically behind the tile body,
+      // and should read that way instead of ghosting over the panel. depthWrite OFF:
+      // the outline tests against the scene's depth but never writes its own, so it
+      // can't occlude glyphs or other tiles. Front edges sit in front of the panel
+      // and still draw over the content.
+      //
+      // transparent ON is the load-bearing bit for TRANSLUCENT panels: a panel at
+      // opacity<1 draws in the transparent pass (which runs AFTER the opaque pass),
+      // so if the box were opaque it would draw BEFORE the panel wrote its depth and
+      // lose the occlusion. As a transparent object the box sorts by renderOrder, and
+      // 9999/10000 ≫ the panel's -1, so the panel's depth is always laid down first —
+      // occlusion holds whether the panel is opaque or see-through.
+      const mat = new THREE.LineBasicMaterial({ color: new THREE.Color(color), depthTest: true, depthWrite: false, transparent: true });
       const b = new THREE.LineSegments(geo, mat);
       b.visible = false;
       b.renderOrder = renderOrder;     // draw the outline over the glyphs

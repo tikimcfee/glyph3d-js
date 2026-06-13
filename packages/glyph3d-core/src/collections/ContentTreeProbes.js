@@ -37,7 +37,7 @@ export default class ContentTreeProbes {
     constructor(tree, opts = {}) {
         this.tree = tree;
         this.opts = { ...PROBE_DEFAULTS, ...opts };
-        this.enabled = true;
+        this.enabled = false;   // diagnostic overlay — off by default, on via layout.probes
         this._probes = new Map();   // dir path → { origin, content, link }
         this._dot = new THREE.SphereGeometry(1, 12, 8);   // shared; meshes scale it
         this._matOrigin = new THREE.MeshBasicMaterial({ color: this.opts.originColor, depthTest: false });
