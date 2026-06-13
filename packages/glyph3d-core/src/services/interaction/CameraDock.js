@@ -62,7 +62,7 @@ export class CameraDock extends THREE.Object3D {
      * @param {'linear'|'radial'} [opts.layout='linear']
      */
     constructor({ attentionManager = null, distance = 40, tileFrac = 0.18, bottomFrac = 0.66,
-                  focusFrac = 0.5, focusY = 0.06, layout = 'linear' } = {}) {
+                  focusFrac = 0.5, focusY = 0.06, animDur = 0.22, layout = 'radial' } = {}) {
         super();
         this.name = 'camera-dock';
         this.attentionManager = attentionManager;
@@ -71,7 +71,8 @@ export class CameraDock extends THREE.Object3D {
         this.bottomFrac = bottomFrac;
         this.focusFrac = focusFrac;   // focus-area tile height as a fraction of the visible height
         this.focusY = focusY;         // focus-area center: fraction of viewH above the view center
-        this.layoutMode = layout;
+        this.animDur = animDur;       // tile slide/scale duration (s) — a curt, polite snap
+        this.layoutMode = layout;     // 'radial' (hemisphere, default) | 'linear'
 
         /** The tile currently raised into the focus area (centered + enlarged, still
          *  camera-locked), or null. Toggled by spotlight(); excluded from bar packing. */
@@ -155,7 +156,7 @@ export class CameraDock extends THREE.Object3D {
      * @param {string} key @param {number} value @returns {boolean}
      */
     setParam(key, value) {
-        if (!['distance', 'tileFrac', 'bottomFrac', 'focusFrac', 'focusY'].includes(key)) return false;
+        if (!['distance', 'tileFrac', 'bottomFrac', 'focusFrac', 'focusY', 'animDur'].includes(key)) return false;
         if (!Number.isFinite(value)) return false;
         this[key] = value;
         this._relayout();
@@ -254,9 +255,9 @@ export class CameraDock extends THREE.Object3D {
         e.quatTarget.copy(e.home.quat);
         this._releasing.set(id, e);
 
-        this.animator.animateTo(e.grid, 'position', e.home.pos, { duration: 0.45 });
+        this.animator.animateTo(e.grid, 'position', e.home.pos, { duration: this.animDur });
         this.animator.animateTo(e.grid, 'scale', e.home.scale, {
-            duration: 0.45,
+            duration: this.animDur,
             onComplete: () => { this._releasing.delete(id); },
         });
 
@@ -294,8 +295,8 @@ export class CameraDock extends THREE.Object3D {
         _off.set(e.centerOffset.x * scale, e.centerOffset.y * scale, e.centerOffset.z * scale)
             .applyQuaternion(e.quatTarget);
         const target = { x: sx - _off.x, y: sy - _off.y, z: sz - _off.z };
-        this.animator.animateTo(e.grid, 'position', target, { duration: 0.4 });
-        this.animator.animateTo(e.grid, 'scale', scale, { duration: 0.4 });
+        this.animator.animateTo(e.grid, 'position', target, { duration: this.animDur });
+        this.animator.animateTo(e.grid, 'scale', scale, { duration: this.animDur });
     }
 
     /** Pack the bar tiles into a row and place the focused tile (if any) in the
@@ -398,7 +399,7 @@ export class CameraDock extends THREE.Object3D {
 
         this.animator.update(dt);
 
-        const rate = Math.min(1, dt * 8);
+        const rate = Math.min(1, dt * 14); // crisp yaw to match the curter slide
         for (const e of this.entries.values()) e.grid.quaternion.slerp(e.quatTarget, rate);
         for (const e of this._releasing.values()) e.grid.quaternion.slerp(e.quatTarget, rate);
     }
