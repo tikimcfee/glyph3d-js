@@ -114,8 +114,12 @@ export default class ContentTree {
     /**
      * World-space AABB of a single node from its laid-out footprint (userData.size at
      * the node's world position) — the O(1) layout-extent model getWorldBounds uses for
-     * geometry-less leaves, so framing a directory is cheap even per-frame. Footprints
-     * are 2D (z-thin); the box sits at the node's z-plane.
+     * geometry-less leaves, so framing a directory is cheap even per-frame.
+     *
+     * ANCHOR: every layout scheme places a node with its origin at the footprint
+     * TOP-CENTER (see layouts/index.js) — content extends DOWNWARD (and child dirs back
+     * in z). So x is centered on the origin (±w/2) but y spans [origin − h, origin], NOT
+     * origin ± h/2. Footprints are z-thin; the box sits at the node's own z-plane.
      * @param {THREE.Object3D} node
      * @param {THREE.Box3} [target]
      * @returns {THREE.Box3}
@@ -124,8 +128,8 @@ export default class ContentTree {
         node.updateWorldMatrix(true, false);
         node.getWorldPosition(_fpPos);
         const s = (node.userData && node.userData.size) || { x: 1, y: 1, z: 0 };
-        target.min.set(_fpPos.x - s.x / 2, _fpPos.y - s.y / 2, _fpPos.z - s.z / 2);
-        target.max.set(_fpPos.x + s.x / 2, _fpPos.y + s.y / 2, _fpPos.z + s.z / 2);
+        target.min.set(_fpPos.x - s.x / 2, _fpPos.y - s.y,     _fpPos.z - s.z / 2);
+        target.max.set(_fpPos.x + s.x / 2, _fpPos.y,           _fpPos.z + s.z / 2);
         return target;
     }
 
