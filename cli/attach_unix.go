@@ -141,10 +141,14 @@ func runTerminal(cfg terminalConfig) {
 		return conn.WriteMessage(websocket.BinaryMessage, b)
 	}
 
-	// Create the grid in the display, confirm synchronously. Idempotent browser-side,
-	// so re-adoption can re-send this verbatim.
-	createCmd := fmt.Sprintf("terminal.create %s %d %d --scale %g", cfg.id, cfg.cols, cfg.rows, cfg.scale)
-	if err := sendText(createCmd); err != nil {
+	// Create the grid in the display, confirm synchronously. Idempotent browser-side, so
+	// re-adoption re-sends it. Built from cfg LIVE (not a frozen string): a browser resize updates
+	// cfg.cols/rows (handleInbound → onResize below), so a re-create lands at the CURRENT size. The
+	// adapter's cfg is a CACHE that mirrors the browser's decision, never a stale startup snapshot.
+	makeCreateCmd := func() string {
+		return fmt.Sprintf("terminal.create %s %d %d --scale %g", cfg.id, cfg.cols, cfg.rows, cfg.scale)
+	}
+	if err := sendText(makeCreateCmd()); err != nil {
 		log.Fatalf("attach: send create: %v", err)
 	}
 	conn.SetReadDeadline(time.Now().Add(*timeout))
@@ -219,7 +223,7 @@ func runTerminal(cfg terminalConfig) {
 		}
 		lastRecreate = time.Now()
 		fmt.Fprintln(os.Stderr, "[attach] display lost the terminal — re-creating")
-		if err := sendText(createCmd); err != nil {
+		if err := sendText(makeCreateCmd()); err != nil {
 			log.Printf("[attach] re-create send failed: %v", err)
 			return
 		}
@@ -293,6 +297,16 @@ func runTerminal(cfg terminalConfig) {
 		}
 	}
 
+	// A browser-driven resize updates our cached size, so a later re-create / wheel-forward uses the
+	// CURRENT dimensions, not the startup ones. cfg is the adapter-local copy, mutated ONLY here and
+	// read by makeCreateCmd + forwardWheelToApp — all on the single INPUT goroutine after startup,
+	// so no lock is needed.
+	onResize := func(c, r int) {
+		if c > 0 && r > 0 {
+			cfg.cols, cfg.rows = c, r
+		}
+	}
+
 	// INPUT goroutine: drain the relay. Carries terminal.bytes (→ PTY), resize,
 	// shutdown, and the ping bounce that triggers re-adoption. Kept separate from the
 	// output pump so a blocked output write can never stall input (deadlock).
@@ -303,7 +317,7 @@ func runTerminal(cfg terminalConfig) {
 				shutdown()
 				return
 			}
-			handleInbound(msg, cfg.id, ptmx, requestKill, recreate, repaint, scroll, exitScroll)
+			handleInbound(msg, cfg.id, ptmx, requestKill, recreate, repaint, scroll, exitScroll, onResize)
 		}
 	}()
 
@@ -457,7 +471,7 @@ func encodeOutputFrame(id string, payload []byte) []byte {
 // controller push): terminal.bytes (input → PTY), terminal.resize (→ SIGWINCH),
 // terminal.shutdown (graceful teardown). Command responses also land here; an
 // "ERR: no terminal" reply (to our liveness ping) means the display reloaded → re-adopt.
-func handleInbound(msg []byte, termID string, ptmx *os.File, requestKill func(), recreate func(), repaint func(), scroll func(int), exitScroll func()) {
+func handleInbound(msg []byte, termID string, ptmx *os.File, requestKill func(), recreate func(), repaint func(), scroll func(int), exitScroll func(), onResize func(int, int)) {
 	var ev struct {
 		Event string `json:"event"`
 		Data  struct {
@@ -485,6 +499,9 @@ func handleInbound(msg []byte, termID string, ptmx *os.File, requestKill func(),
 		case "terminal.resize":
 			if ev.Data.Cols > 0 && ev.Data.Rows > 0 {
 				pty.Setsize(ptmx, &pty.Winsize{Cols: uint16(ev.Data.Cols), Rows: uint16(ev.Data.Rows)})
+				if onResize != nil {
+					onResize(ev.Data.Cols, ev.Data.Rows) // mirror the browser's size into cfg (re-create/wheel use it)
+				}
 			}
 		case "terminal.scroll": // wheel-gated tmux copy-mode scroll (+back / -forward)
 			if scroll != nil {
