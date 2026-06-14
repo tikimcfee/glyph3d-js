@@ -87,11 +87,8 @@ export const SETTINGS = [
   { key: 'dock.focusDistFrac', label: 'Focus pull-in', group: 'Dock', type: 'number', default: 0.7, min: 0.3, max: 1, step: 0.02, apply: dockParam('focusDistFrac') },
   { key: 'dock.animDur', label: 'Animation (s)', group: 'Dock', type: 'number', default: 0.167, min: 0, max: 0.6, step: 0.01, apply: dockParam('animDur') },
   // Window — per-window controls surfaced as the terminal chrome buttons. maxPinZoom is the
-  // pin target on the zoom axis; the dial steps drive the ± size (cols/rows) and ± scale
-  // buttons. Read off ctx.windowConfig by the window.pin verb + the CanvasInteraction dials.
+  // pin target on the zoom axis, read off ctx.windowConfig by the window.pin verb.
   { key: 'window.maxPinZoom', label: 'Pin max zoom (×)', group: 'Window', type: 'number', default: 3, min: 1.5, max: 10, step: 0.5, apply: windowParam('maxPinZoom') },
-  { key: 'window.sizeStep', label: 'Size dial step (cols)', group: 'Window', type: 'number', default: 4, min: 1, max: 20, step: 1, apply: windowParam('sizeStep') },
-  { key: 'window.scaleStep', label: 'Scale dial step (×)', group: 'Window', type: 'number', default: 1.1, min: 1.02, max: 2, step: 0.02, apply: windowParam('scaleStep') },
   // Tree — the ContentTree ownership-line overlay (hub → what it contains). File lines
   // and directory lines toggle independently; layout.arrows is the master on/off verb.
   {

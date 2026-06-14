@@ -120,9 +120,8 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     // dock.* verbs drive it; distinct from ctx.dock (the DOM dockview).
     cameraDock: null,
 
-    // Per-window control config (Settings ▸ Window): { maxPinZoom, sizeStep, scaleStep }.
-    // Read by the window.pin verb and the terminal chrome size/scale dials; folded from
-    // stored/default settings at boot via applyGroupSettings(ctx, 'Window').
+    // Per-window control config (Settings ▸ Window): { maxPinZoom }. Read by the window.pin
+    // verb; folded from stored/default settings at boot via applyGroupSettings(ctx, 'Window').
     windowConfig: {},
 
     // Field-visitor multiplexer — one self-driving visitor per agent. Created in the

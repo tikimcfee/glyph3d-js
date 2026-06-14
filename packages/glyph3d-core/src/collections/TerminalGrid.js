@@ -907,30 +907,29 @@ export default class TerminalGrid extends THREE.Object3D {
 
     /**
      * Window chrome spec: a row of bottom-edge controls, laid out right→left from the SE
-     * corner (index 0 = rightmost). Each becomes a labeled Button3D that is BOTH a visible
-     * affordance and a 'handle'-channel pick target whose token carries `role` + the button.
-     * `grab:true` marks the two DRAG grips (the ResizeDragger turns them into a live
-     * resize/scale drag); the rest are CLICK buttons (pin toggle + the size/scale ± dials).
-     * Colour codes the AXIS — green = the size axis (cols/rows → PTY), red = the scale/zoom
-     * axis (Object3D), amber = pin — so the "+"/"−" steppers read by colour + the labeled grip.
+     * corner. Each becomes a labeled Button3D that is BOTH a visible affordance and a
+     * 'handle'-channel pick target whose token carries `role` + the button. `grab:true` marks
+     * the two DRAG grips (the ResizeDragger turns them into a live resize/scale drag); the rest
+     * are CLICK buttons. A `popupOf` entry is a confirm popup for another control: it starts
+     * HIDDEN (so it's inert — an invisible mesh isn't pick-rendered) and is placed ABOVE its
+     * anchor; the shell toggles it visible on demand (setControlVisible). 'close' mirrors the
+     * terminal-tab × (terminal.kill) and arms the red 'close-confirm' "Sure?" popup.
      * @private
      */
     static CONTROL_SPEC = [
-        { role: 'resize',    label: 'Resize', color: 0x6ee7a0, grab: true  }, // green grip: drag → cols/rows
-        { role: 'scale',     label: 'Scale',  color: 0xf2787a, grab: true  }, // red grip:   drag → zoom
-        { role: 'pin',       label: 'Pin',    color: 0xf2c14e, grab: false }, // amber:      click → maximize toggle
-        { role: 'size-inc',  label: '+',      color: 0x6ee7a0, grab: false }, // green +:    bigger panel
-        { role: 'size-dec',  label: '−',      color: 0x6ee7a0, grab: false }, // green −:    smaller panel
-        { role: 'scale-inc', label: '+',      color: 0xf2787a, grab: false }, // red +:      zoom in
-        { role: 'scale-dec', label: '−',      color: 0xf2787a, grab: false }, // red −:      zoom out
+        { role: 'resize',        label: 'Resize', color: 0x6ee7a0, grab: true  },                    // green grip: drag → cols/rows
+        { role: 'scale',         label: 'Scale',  color: 0xf2787a, grab: true  },                    // red grip:   drag → zoom
+        { role: 'pin',           label: 'Pin',    color: 0xf2c14e, grab: false },                    // amber:      click → maximize toggle
+        { role: 'close',         label: 'Close',  color: 0x8a93a0, grab: false },                    // slate:      click → arm the confirm
+        { role: 'close-confirm', label: 'Sure?',  color: 0xe5534b, grab: false, popupOf: 'close' },  // alarm red:  click → terminal.kill
     ];
 
     /**
      * Build the chrome control row from CONTROL_SPEC: one labeled Button3D per control, sized
      * to ~1.5 cells tall (width derives from the label). The buttons own their hover/active
      * visuals and are DEPTH-TESTED (RENDER_ORDER.GRID_CHROME) so a closer window occludes them
-     * rather than floating on top. Children of this Object3D, so they ride gridScale + world
-     * position; placed by _layoutControls(). @private
+     * rather than floating on top. `popupOf` controls start hidden. Children of this Object3D,
+     * so they ride gridScale + world position; placed by _layoutControls(). @private
      */
     _initControls() {
         const m = this._metrics;
@@ -940,6 +939,7 @@ export default class TerminalGrid extends THREE.Object3D {
                 label: spec.label, height: h, color: spec.color, grab: spec.grab,
                 opacity: spec.grab ? 0.66 : 0.6, role: spec.role,
             });
+            if (spec.popupOf) button.visible = false; // a confirm popup — hidden (and inert) until armed
             this.add(button);
             return { spec, button };
         });
@@ -948,8 +948,9 @@ export default class TerminalGrid extends THREE.Object3D {
 
     /**
      * Place the control row along the bottom edge, packing the pills right→left from the SE
-     * corner (each by its own width + a gap). Same extent math as getBounds(); called on
-     * construction and after every resize. @private
+     * corner (each by its own width + a gap). A `popupOf` control is placed ABOVE its anchor
+     * instead of in the row. Same extent math as getBounds(); called on construction and after
+     * every resize. @private
      */
     _layoutControls() {
         if (!this._controls?.length) return;
@@ -963,11 +964,20 @@ export default class TerminalGrid extends THREE.Object3D {
         const cy = -(this.rows * strideY) / 2 + strideY / 2;
         const edgeY = cy - height / 2;
         const gap = strideX * 0.5;
+        const placed = new Map(); // role → { x, h } so popups can sit above their anchor
         let xRight = cx + width / 2;     // right edge of the next pill (rightmost sits on the SE corner)
         for (const c of this._controls) {
+            if (c.spec.popupOf) continue; // placed below, relative to its anchor
             const w = c.button.width;
-            c.button.position.set(xRight - w / 2, edgeY, 0.5);
+            const x = xRight - w / 2;
+            c.button.position.set(x, edgeY, 0.5);
+            placed.set(c.spec.role, { x, h: c.button.height });
             xRight -= (w + gap);
+        }
+        for (const c of this._controls) {
+            if (!c.spec.popupOf) continue;
+            const anchor = placed.get(c.spec.popupOf);
+            if (anchor) c.button.position.set(anchor.x, edgeY + anchor.h + gap, 0.5);
         }
     }
 
@@ -988,6 +998,13 @@ export default class TerminalGrid extends THREE.Object3D {
     setControlActive(role, on) {
         const c = this._controls?.find((x) => x.spec.role === role);
         c?.button.setActive(!!on);
+    }
+
+    /** Show/hide a control (e.g. the 'close-confirm' popup). A hidden button isn't pick-rendered,
+     *  so it's inert until shown. Looked up by role; a no-op if the control isn't present. */
+    setControlVisible(role, on) {
+        const c = this._controls?.find((x) => x.spec.role === role);
+        if (c) c.button.visible = !!on;
     }
 
     // ================================================================

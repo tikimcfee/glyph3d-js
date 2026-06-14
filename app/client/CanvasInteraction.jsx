@@ -551,28 +551,40 @@ export function ResizeDragger() {
       else router.execute(`terminal.resize ${id} ${startCols} ${startRows}`); // undo the live steps
     };
 
-    // CLICK chrome controls (pin + the size/scale ± dials) share the 'handle' channel with
-    // the drag grips; a press FIRES a verb instead of starting a drag. Steps read from
-    // ctx.windowConfig (Settings ▸ Window). The dials compose the same window.scale /
-    // terminal.resize verbs the CLI uses, so each step lands as a logged command record.
+    // CLICK chrome controls (pin, close, close-confirm) share the 'handle' channel with the
+    // drag grips; a press FIRES instead of starting a drag. 'close' mirrors the terminal-tab ×
+    // but ARMS a confirm first: it pops up the red 'close-confirm' "Sure?" button (a pre-built
+    // hidden sibling on the same window), which auto-disarms after a few seconds or on any
+    // press elsewhere. 'close-confirm' is the actual kill.
+    let armedClose = null; // { grid, timeoutId } — the window whose Close is awaiting "Sure?"
+    const disarmClose = () => {
+      if (!armedClose) return;
+      clearTimeout(armedClose.timeoutId);
+      try { armedClose.grid.setControlVisible?.('close-confirm', false); } catch { /* grid gone */ }
+      armedClose = null;
+    };
     const fireChromeAction = (role, id, grid) => {
-      const wc = ctx.windowConfig || {};
       if (role === 'pin') { router.execute(['window.pin', id]); return; } // verb lights the Pin button
-      if (role === 'scale-inc' || role === 'scale-dec') {
-        const step = wc.scaleStep || 1.1;
-        const z = (grid.zoom ?? 1) * (role === 'scale-inc' ? step : 1 / step);
-        router.execute(`window.scale ${id} ${z}`);
+      if (role === 'close') {
+        if (armedClose && armedClose.grid !== grid) disarmClose();
+        grid.setControlVisible?.('close-confirm', true);
+        armedClose = { grid, timeoutId: setTimeout(disarmClose, 4000) };
         return;
       }
-      // size dial: step cols by sizeStep, rows in proportion so the panel keeps its aspect.
-      const dir = role === 'size-inc' ? 1 : -1;
-      const step = Math.max(1, Math.round(wc.sizeStep || 4));
-      const cols = grid.cols ?? 0, rows = grid.rows ?? 0;
-      const dRows = Math.max(1, Math.round(step * (rows / Math.max(cols, 1))));
-      router.execute(`terminal.resize ${id} ${cols + dir * step} ${rows + dir * dRows}`);
+      if (role === 'close-confirm') {
+        disarmClose();
+        router.execute(['terminal.kill', id]); // mirror the terminal-tab × — full teardown
+        return;
+      }
     };
 
     const onDown = (e) => {
+      // An armed close-confirm dismisses on ANY press that isn't its own "Sure?" button
+      // (click-away to cancel). Runs before the guards so a press on empty space cancels too.
+      if (armedClose) {
+        const t = ctx.handleHover;
+        if (!(t?.role === 'close-confirm' && t.grid === armedClose.grid)) disarmClose();
+      }
       // Plain LMB on a grip. Ctrl/Cmd is the MOVE gesture (ObjectDragger owns it),
       // so a modifier here is not a resize — bail and let that path run. The press
       // authority is isGripPress() (freshness-gated), NOT the raw async hover flag.
@@ -696,6 +708,7 @@ export function ResizeDragger() {
       dom.removeEventListener('pointercancel', onCancel);
       dom.removeEventListener('lostpointercapture', onCancel);
       if (drag) ctx.resizing = false; // unmounted mid-drag → never leave the shared flag stuck
+      disarmClose();                  // clear any pending close-confirm timeout
     };
   }, [client, gl, camera]);
 
