@@ -180,7 +180,11 @@ export default class SessionStore {
         return tile;
       });
       const have = new Set(tiles.map((t) => t.id));
-      const pend = this._pendingDock3d?.tiles?.filter((t) => !have.has(t.id)) || [];
+      // Carry forward any tile that hasn't re-adopted yet, stripping the restore-only `order` field
+      // (array position is the persisted sequence — order is recomputed from the index on restore).
+      const pend = (this._pendingDock3d?.tiles || [])
+        .filter((t) => !have.has(t.id))
+        .map(({ order, ...t }) => t);
       const all = [...tiles, ...pend];
       dock3d = all.length ? { layout: cd.layoutMode, tiles: all } : null;
     }
@@ -328,13 +332,16 @@ export default class SessionStore {
         this.ctx.workspace?.setSurfaceView?.(t.id, 'terminal', view);
       }
     }
+    // `order` = the tile's index in the saved (slot-ordered) array. It rides each pending tile
+    // through to dock.lock so a terminal re-adopting out of arrival order still lands in its saved
+    // bar slot — the saved sequence is array order, not the order shells happen to come back in.
     this._pendingDock3d = (snap.dock3d?.tiles?.length)
       ? {
           layout: snap.dock3d.layout || 'linear',
-          tiles: snap.dock3d.tiles.map((t) =>
+          tiles: snap.dock3d.tiles.map((t, i) =>
             (typeof t === 'string'
-              ? { id: t, zoom: 1 }
-              : { id: t.id, zoom: t.zoom ?? 1, pinned: !!t.pinned, prePinZoom: t.prePinZoom })),
+              ? { id: t, zoom: 1, order: i }
+              : { id: t.id, zoom: t.zoom ?? 1, pinned: !!t.pinned, prePinZoom: t.prePinZoom, order: i })),
         }
       : null;
     this._maybeApplyDock();
@@ -411,7 +418,8 @@ export default class SessionStore {
       if (cd.has(t.id)) continue;
       if (this.ctx.registry.has(t.id)) {
         // Array form skips the router's space-tokenizer — a registry id can be a file path.
-        this.router.execute(['dock.lock', t.id]);
+        // Pass the saved order so the lock pins this tile's bar slot regardless of arrival timing.
+        this.router.execute(['dock.lock', t.id, String(t.order)]);
         // Restore the readability zoom after the lock captures home (the dock reads
         // user back for layout, so this re-places the tile at its saved size).
         if (t.zoom && t.zoom !== 1) this.router.execute(['window.scale', t.id, String(t.zoom)]);

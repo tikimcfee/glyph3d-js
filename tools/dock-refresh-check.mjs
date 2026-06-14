@@ -119,6 +119,36 @@ const apparentH = (g) => g.scale.x * (g.rows * LH); // world panel height
   ok(g._resizeCb() === null, `release unsubscribes the resize tap`);
 }
 
+// ---- ORDER PRESERVATION: tiles re-adopting OUT of saved order still pack in saved order ----
+// The restore scramble: terminals re-adopt async (arrival order ≠ saved order), each firing
+// dock.lock as it lands. Without a hint the bar packed by ARRIVAL, so a reload reordered the row
+// and re-saved the scramble. lock({order}) pins each tile's saved slot regardless of WHEN it lands.
+{
+  const d = rig();
+  // Saved order is A,B,C; they "re-adopt" scrambled as C,A,B — each locked with its SAVED index as
+  // the order hint, exactly as SessionStore._applyDock3d threads it through dock.lock.
+  d.lock('C', makeGrid(80, 24), { order: 2 });
+  d.lock('A', makeGrid(80, 24), { order: 0 });
+  d.lock('B', makeGrid(80, 24), { order: 1 });
+  d.settle();
+  const ids = d.list().map((t) => t.id);
+  ok(JSON.stringify(ids) === JSON.stringify(['A', 'B', 'C']), `out-of-order arrival packs in SAVED order [${ids}]`);
+  const slots = d.list().map((t) => t.slot);
+  ok(JSON.stringify(slots) === JSON.stringify([0, 1, 2]), `slots dense 0..n-1 in saved order [${slots}]`);
+  ok(d.list().every((t, i) => t.slot === i), `list() is slot-ordered (this is what persistence serializes)`);
+}
+
+// ---- interactive locks (no hint) append in lock order; release+new keeps order ------------
+{
+  const d = rig();
+  d.lock('x', makeGrid(80, 24)); d.lock('y', makeGrid(80, 24)); d.lock('z', makeGrid(80, 24));
+  d.settle();
+  ok(JSON.stringify(d.list().map((t) => t.id)) === JSON.stringify(['x', 'y', 'z']), `interactive locks append in lock order`);
+  d.release('y'); d.lock('w', makeGrid(80, 24)); d.settle();
+  const ids2 = d.list().map((t) => t.id);
+  ok(JSON.stringify(ids2) === JSON.stringify(['x', 'z', 'w']), `release+new keeps order, new tile appends [${ids2}]`);
+}
+
 // ---- slot uniqueness across spotlight/relayout (the collision fix) --------------------
 // Regression: the spotlit tile used to keep a STALE slot while the bar renumbered 0..n-1, so two
 // tiles could report the same slot and a shadowed tile ate its sibling's hover/wheel. _relayout

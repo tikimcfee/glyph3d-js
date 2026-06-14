@@ -46,9 +46,12 @@ export default function registerDockCommands(router) {
         const r = resolveSurface(ctx, args[0]);
         if (!r) return { text: `ERR: no surface for "${args[0]}" (registry id or surface index)`, data: null };
         if (dock.has(r.id)) return { text: `OK: '${r.id}' already docked`, data: { id: r.id, docked: true } };
-        dock.lock(r.id, r.grid);
+        // Optional order hint: restore passes the saved slot index so a tile re-adopting out of
+        // arrival order still lands in its saved bar position. Omitted (interactive) → append.
+        const order = parseFloat(args[1]);
+        dock.lock(r.id, r.grid, Number.isFinite(order) ? { order } : undefined);
         return { text: `OK: docked '${r.id}'`, data: { id: r.id, docked: true } };
-    }, { description: 'Dock a surface into the camera-locked HUD bar', usage: '<id|index>', returns: '{ id, docked }' });
+    }, { description: 'Dock a surface into the camera-locked HUD bar', usage: '<id|index> [order]', returns: '{ id, docked }' });
 
     router.register('dock.release', (args, ctx) => {
         const dock = getDock(ctx);

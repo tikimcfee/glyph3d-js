@@ -94,7 +94,9 @@ function makeRouter(cameraDock) {
   ok(!router.calls.some((c) => Array.isArray(c) && c[1] === 'term-1'),
      'restore: did NOT lock the absent terminal yet');
   eq(cd.layoutMode, 'radial', 'restore: applied saved layout mode');
-  eq(ss._pendingDock3d, { layout: 'radial', tiles: [{ id: 'term-1', zoom: 1 }] }, 'restore: term-1 deferred in _pendingDock3d');
+  // term-1 is index 1 in the saved array → carries order:1 so it locks into its saved slot when it
+  // re-adopts (even if it comes back before/after other deferred tiles).
+  eq(ss._pendingDock3d, { layout: 'radial', tiles: [{ id: 'term-1', zoom: 1, order: 1 }] }, 'restore: term-1 deferred in _pendingDock3d (with saved order)');
 
   // ---- 3. terminal re-adopts → registry-change replays its lock ----------------
   reg._ids.add('term-1');
