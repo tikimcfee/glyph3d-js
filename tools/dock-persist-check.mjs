@@ -9,6 +9,7 @@
 // Graduated from a one-off probe per the debug-into-tools practice.
 
 import SessionStore from '../app/client/SessionStore.js';
+import WorkspaceModel from '../app/client/WorkspaceModel.js';
 
 let failures = 0;
 const ok = (cond, msg) => { console.log(`${cond ? '✓' : '✗ FAIL'} ${msg}`); if (!cond) failures++; };
@@ -44,7 +45,7 @@ function makeCtx(registry, cameraDock) {
     registry, cameraDock,
     camera: { position: { x: 0, y: 0, z: 0 }, quaternion: { x: 0, y: 0, z: 0, w: 1 }, fov: 70 },
     cameraController: { cameraSpeed: 100 },
-    workspace: { listActiveSheets: () => [] },
+    workspace: new WorkspaceModel(),  // real model — terminal geometry intent lives here now
     fileProvider: { _currentRepo: null },
     fieldSource: null,
     status: { set() {}, clear() {} },
@@ -63,17 +64,21 @@ function makeRouter(cameraDock) {
   };
 }
 
-// ---- 1. capture: ordered tiles + layout, HOME position for docked terminal -----
+// ---- 1. capture: ordered dock tiles + layout; terminal geometry from the MODEL -----
 {
   const reg = makeRegistry(new Set(['term-1']));
   const cd = makeCameraDock();
   cd.setLayout('radial'); cd._lock('term-1'); // term-1 is docked
-  const ss = new SessionStore({ ctx: makeCtx(reg, cd), router: makeRouter(cd), bridge: {} });
+  const ctx = makeCtx(reg, cd);
+  // The model holds the terminal's HOME (the verb wrote it pre-dock); capture serializes THAT,
+  // not a live-grid scrape — so a docked tile's saved position is its world home, not tile-local.
+  ctx.workspace.setSurfaceView('term-1', 'terminal', { position: { x: 100, y: 200, z: 300 }, cols: 80, rows: 24 });
+  const ss = new SessionStore({ ctx, router: makeRouter(cd), bridge: {} });
   const snap = ss.capture();
   eq(snap.dock3d, { layout: 'radial', tiles: [{ id: 'term-1', zoom: 1 }] }, 'capture: dock3d has layout + ordered tiles (id+zoom)');
   const term = snap.terminals.find((t) => t.id === 'term-1');
   eq({ x: term.x, y: term.y, z: term.z }, { x: 100, y: 200, z: 300 },
-     'capture: docked terminal persists HOME (100,200,300), not tile-local (1,2,3)');
+     'capture: terminal HOME comes from the model (100,200,300)');
 }
 
 // ---- 2. restore: lock present surfaces now, defer absent ones ------------------
@@ -99,19 +104,17 @@ function makeRouter(cameraDock) {
   eq(ss._pendingDock3d, null, 're-adopt: pending cleared when all tiles landed');
 }
 
-// ---- 4. terminal SIZE reconciles when it re-adopts DURING restore --------------
-// The regression this guards: restore() locked dock tiles (membership + zoom) at its
-// end but never ran _placePendingTerminals, so a terminal that re-created mid-restore
-// (already in the registry by restore's end, but the change-listener not yet armed)
-// kept its dock+zoom yet never got resized/moved — it stuck at the adapter's spawn
-// default (the "zoom kept, 80×24 size lost" symptom). The end-of-restore reconcile now
-// nets it. Assert restore issues terminal.resize + move for a pending terminal already
-// present at the wrong size.
+// ---- 4. terminal geometry reconciles from the MODEL when it re-adopts mid-restore ----
+// The bug this guards (now fixed structurally): a terminal that re-created mid-restore stuck at
+// the adapter's spawn 80×24 because restore reconciled dock+zoom but not size. Now restore loads
+// the geometry into the model and end-of-restore apply() pushes it; the model is the durable
+// buffer (NOT consumed). See tools/term-geom-persist-check.mjs for the full order-fuzzed coverage.
 {
   const reg = makeRegistry(new Set(['term-9'])); // term-9 re-adopted mid-restore, at 80×24
   const cd = makeCameraDock();
   const router = makeRouter(cd);
-  const ss = new SessionStore({ ctx: makeCtx(reg, cd), router, bridge: {} });
+  const ctx = makeCtx(reg, cd);
+  const ss = new SessionStore({ ctx, router, bridge: {} });
   await ss.restore({
     version: 2, files: [], camera: null, dock3d: null,
     terminals: [{ id: 'term-9', x: 10, y: 20, z: 30, cols: 121, rows: 122 }],
@@ -120,7 +123,7 @@ function makeRouter(cameraDock) {
      'restore: resized a terminal that re-adopted mid-restore (80×24 → 121×122)');
   ok(router.calls.includes('terminal.move term-9 10 20 30'),
      'restore: moved that terminal to its saved home');
-  eq(ss.pendingTerminals, [], 'restore: pending terminal consumed once placed');
+  eq(ctx.workspace.getSurface('term-9')?.view.cols, 121, 'restore: model retains the terminal intent (not consumed)');
 }
 
 console.log(failures === 0 ? '\nPASS — dock persistence round-trips' : `\nFAIL — ${failures} assertion(s)`);

@@ -7,6 +7,7 @@
 
 import SessionStore from '../app/client/SessionStore.js';
 import WorkspaceModel from '../app/client/WorkspaceModel.js';
+// terminal geometry intent now lands in the WorkspaceModel surface table (Slice 1), not a queue.
 
 let failures = 0;
 const ok = (c, m) => { console.log(`${c ? '✓' : '✗ FAIL'} ${m}`); if (!c) failures++; };
@@ -15,7 +16,7 @@ const ok = (c, m) => { console.log(`${c ? '✓' : '✗ FAIL'} ${m}`); if (!c) fa
 function makeCtx() {
   return {
     registry: { has: () => false, get: () => null, findByType: () => [], addChangeListener() {}, removeChangeListener() {} },
-    camera: null, cameraController: null, cameraDock: null, workspace: null,
+    camera: null, cameraController: null, cameraDock: null, workspace: new WorkspaceModel(),
     status: { set() {}, clear() {} },
     fileProvider: { stat: async () => { throw new Error('absent'); } },
   };
@@ -36,8 +37,9 @@ function makeStore(writes) {
     terminals: [{ id: 'term-x', x: 1, y: 2, z: 3, cols: 120, rows: 40 }],
   });
   ok(writes.length === 0, 'future-version blob is NOT wiped (no _clear write)');
-  ok(ss.pendingTerminals.some((t) => t.id === 'term-x' && t.cols === 120 && t.rows === 40),
-     'future-version blob: known terminal intent still restored (guarded read, unknown key ignored)');
+  const surf = ss.ctx.workspace.getSurface('term-x');
+  ok(surf?.view.cols === 120 && surf?.view.rows === 40,
+     'future-version blob: known terminal intent still restored into the model (unknown key ignored)');
 }
 
 // ---- 2. a v1 blob (the real cliff) IS wiped to an empty v2 snapshot ----

@@ -175,6 +175,13 @@ export default function registerTerminalCommands(router) {
             }
 
             const pos = grid.position;
+            // Seed the surface view-intent in the model — but DON'T clobber an existing/restored
+            // one. On re-adopt the adapter re-creates at its startup 80×24; the model already holds
+            // the real resized size, and apply() (SessionStore._applyTerminalViews) pushes it back.
+            // Only a genuinely-new terminal seeds the default.
+            if (ctx.workspace?.setSurfaceView && !ctx.workspace.getSurface?.(id)) {
+                ctx.workspace.setSurfaceView(id, 'terminal', { cols, rows, position: { x: pos.x, y: pos.y, z: pos.z } });
+            }
             return {
                 text: `OK: terminal '${id}' created (${cols}x${rows}) scale=${gridScale}`,
                 data: { id, cols, rows, gridScale, position: { x: pos.x, y: pos.y, z: pos.z } },
@@ -248,6 +255,10 @@ export default function registerTerminalCommands(router) {
         if (owner && ctx.wsbridge?.connected) {
             ctx.wsbridge.push(owner, { event: 'terminal.resize', data: { terminalId: id, cols, rows } });
         }
+
+        // The model is the source of truth for persistence: capture serializes it, apply re-pushes
+        // it as the grid re-adopts. Writing it here is what makes the resized size survive reload.
+        ctx.workspace?.setSurfaceView?.(id, 'terminal', { cols, rows });
 
         return {
             text: `OK: terminal '${id}' resized to ${cols}x${rows}`,
@@ -404,6 +415,7 @@ export default function registerTerminalCommands(router) {
         grid.dispose();
         terminals.delete(id);
         ctx.registry.unregister(id);
+        ctx.workspace?.removeSurface?.(id); // gone for real — drop its intent so it doesn't persist
 
         return {
             text: `OK: terminal '${id}' closed`,
@@ -455,6 +467,8 @@ export default function registerTerminalCommands(router) {
 
         // setWorldPosition mirrors to both group DataTexture and Object3D.position.
         grid.setWorldPosition({ x, y, z });
+
+        ctx.workspace?.setSurfaceView?.(id, 'terminal', { position: { x, y, z } });
 
         return {
             text: `OK: terminal '${id}' moved to (${x},${y},${z})`,

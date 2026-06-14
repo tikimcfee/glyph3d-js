@@ -61,8 +61,9 @@ export default class SessionStore {
     this._dock = null;
     this._pendingDock = null;       // dock layout from a loaded snapshot, awaiting the dock bridge
     this._pendingDock3d = null;     // {layout, tiles[]} from a snapshot, applied as surfaces reappear (CameraDock)
-    /** @type {Array<{id:string,x:number,y:number,z:number,cols?:number,rows?:number}>} */
-    this.pendingTerminals = [];     // last-known terminal placement + size, consumed by terminal re-adoption
+    // Terminal geometry intent now lives in the WorkspaceModel surface table (ctx.workspace),
+    // the durable buffer — apply() pushes it onto each grid as it re-adopts. No pending queue.
+    this._offSurfaces = null;       // unsubscribe from the model's change:surfaces (autosave trigger)
 
     this._restored = false;         // load+restore runs ONCE per page load (not per reconnect)
     this._autosaveOn = false;       // gate: no save may clobber the file until restore finishes
@@ -139,31 +140,21 @@ export default class SessionStore {
       field = { type: 'local', dir: ctx.fieldSource.dir || '' };
     }
 
+    // Terminals: serialize the MODEL's surface view-intent (cols/rows + position), NOT a scrape of
+    // the live grids. The model is the durable buffer — it holds a terminal's geometry whether or
+    // not its grid is currently in the scene (the PTY re-adopts async on the relay's clock), so a
+    // save landing mid-re-adopt reads a consistent intent snapshot instead of a half-built scene.
+    // This retired pendingTerminals + the carry-forward + the docked-vs-loose position scrape.
     const terminals = [];
-    const liveTerminals = new Set();
-    for (const e of ctx.registry.findByType('terminal')) {
-      liveTerminals.add(e.id);
-      // Docked → persist the home it returns to, not the tile-local coordinate.
-      const p = (ctx.cameraDock?.has?.(e.id) && ctx.cameraDock.homePosition(e.id)) || e.grid.position;
-      const entry = { id: e.id, x: round(p.x), y: round(p.y), z: round(p.z) };
-      // Resize state: cols/rows live on the TerminalGrid (terminal.resize mutates them).
-      if (Number.isInteger(e.grid.cols) && Number.isInteger(e.grid.rows)) {
-        entry.cols = e.grid.cols;
-        entry.rows = e.grid.rows;
+    if (ws?.listSurfaces) {
+      for (const s of ws.listSurfaces()) {
+        if (s.kind !== 'terminal') continue;
+        const v = s.view || {};
+        const entry = { id: s.id };
+        if (isFinitePos(v.position)) { entry.x = round(v.position.x); entry.y = round(v.position.y); entry.z = round(v.position.z); }
+        if (Number.isInteger(v.cols) && Number.isInteger(v.rows)) { entry.cols = v.cols; entry.rows = v.rows; }
+        terminals.push(entry);
       }
-      terminals.push(entry);
-    }
-    // Carry forward terminals that haven't re-adopted yet — symmetric with the dock3d
-    // pending merge below. Re-adoption is async (the adapter only re-creates its grid once
-    // a liveness ping bounces, and not at all until `terminal.recover` after a relay restart
-    // that orphaned the tmux session), so a save landing in that gap would otherwise DROP a
-    // terminal's saved size+placement. That loss is permanent, not transient: the adapter
-    // always re-creates at its STARTUP cols/rows — never the size the browser last resized it
-    // to — so this file is the only record of the resized size. Drop it and the terminal
-    // ratchets back to the 80×24 default on the next restore (the _placePendingTerminals
-    // `grid.cols !== t.cols` guard then sees 80==80 and skips), and the size never returns.
-    for (const t of this.pendingTerminals) {
-      if (t?.id && !liveTerminals.has(t.id)) terminals.push({ ...t });
     }
 
     let dock = this._pendingDock; // if we never got a live dock bridge, preserve what we loaded
@@ -318,7 +309,17 @@ export default class SessionStore {
     // dock membership/zoom — then reconcile it into whatever has re-adopted so far.
     // Normalize dock3d tiles to { id, zoom } (tolerant of the legacy string-id form).
     this._pendingDock = snap.dock || null;
-    this.pendingTerminals = Array.isArray(snap.terminals) ? snap.terminals : [];
+    // Load terminal geometry intent into the model (the durable buffer). apply() pushes it onto
+    // each terminal grid as it re-adopts — at end-of-restore (below) and via the registry listener.
+    if (Array.isArray(snap.terminals)) {
+      for (const t of snap.terminals) {
+        if (!t?.id) continue;
+        const view = {};
+        if (isFinitePos(t)) view.position = { x: t.x, y: t.y, z: t.z };
+        if (Number.isInteger(t.cols) && Number.isInteger(t.rows)) { view.cols = t.cols; view.rows = t.rows; }
+        this.ctx.workspace?.setSurfaceView?.(t.id, 'terminal', view);
+      }
+    }
     this._pendingDock3d = (snap.dock3d?.tiles?.length)
       ? {
           layout: snap.dock3d.layout || 'linear',
@@ -345,46 +346,49 @@ export default class SessionStore {
     catch { return false; }
   }
 
-  // Reconcile the loaded INTENT into the live scene as surfaces re-adopt. The SINGLE
-  // entry point for it — driven both by the registry-change listener (each surface as
-  // it reappears) and by the final pass at the end of restore (any that re-adopted
-  // mid-restore, before the listener was armed). Order is load-bearing: terminals
-  // move/size FIRST so the subsequent 3D-dock lock captures the RESTORED home, not the
-  // adapter's spawn placement. Both steps are pending-driven and idempotent — each
-  // consumed surface drops out of its pending list — so repeated calls are safe.
+  // Reconcile the loaded INTENT into the live scene as surfaces re-adopt. The SINGLE entry
+  // point — driven both by the registry-change listener (each surface as it reappears) and by
+  // the final pass at the end of restore (any that re-adopted mid-restore, before the listener
+  // was armed). Order is load-bearing: terminals move/size FIRST so the subsequent 3D-dock lock
+  // captures the RESTORED home, not the adapter's spawn placement. Idempotent, so repeats are free.
   _reconcileSurfaces() {
-    this._placePendingTerminals();
+    this._applyTerminalViews();
     this._applyDock3d();
   }
 
-  // Terminals re-adopt themselves on reload (the adapter re-creates its grid when
-  // the reloaded display has forgotten it). We don't reconstruct them — we just
-  // nudge each back to its saved position once it reappears in the registry.
-  // Fired from the registry change listener; entries linger in pendingTerminals
-  // until their terminal shows up (or forever if that shell died — harmless).
-  _placePendingTerminals() {
-    if (!this.pendingTerminals.length) return;
-    const remaining = [];
-    for (const t of this.pendingTerminals) {
-      if (t?.id && isFinitePos(t) && this.ctx.registry.has(t.id)) {
-        this.router.execute(`terminal.move ${t.id} ${t.x} ${t.y} ${t.z}`);
-        // Restore saved size — terminal.resize drives grid + emulator + PTY in lockstep,
-        // so the re-adopted shell comes back at its last dimensions, not the adapter default.
-        const grid = this.ctx.registry.get(t.id)?.grid;
-        if (Number.isInteger(t.cols) && Number.isInteger(t.rows) && t.cols > 0 && t.rows > 0
-            && grid && (grid.cols !== t.cols || grid.rows !== t.rows)) {
-          this.router.execute(`terminal.resize ${t.id} ${t.cols} ${t.rows}`);
-        }
-      } else {
-        remaining.push(t);
+  // apply(): push terminal geometry intent from the MODEL onto each live terminal grid. The PTY
+  // re-adopts async — the adapter re-creates its grid on a liveness-ping bounce, ALWAYS at its
+  // startup 80×24 (never the resized size), so the model is the only record — so this runs both as
+  // terminals reappear (the registry listener) and once at end-of-restore. The model is NOT
+  // consumed: each push is a guarded set-to-target (resize/move only when the grid differs),
+  // idempotent, so re-running is free and order stops mattering. This retired pendingTerminals.
+  _applyTerminalViews() {
+    const ws = this.ctx.workspace;
+    if (!ws?.listSurfaces) return;
+    for (const s of ws.listSurfaces()) {
+      if (s.kind !== 'terminal' || !this.ctx.registry.has(s.id)) continue;
+      const grid = this.ctx.registry.get(s.id)?.grid;
+      if (!grid) continue;
+      const v = s.view || {};
+      // Position: skip while docked — the dock owns a docked tile's transform (its home is set by
+      // the pre-dock move below, then captured at lock). Loose terminals get moved to their home.
+      const docked = this.ctx.cameraDock?.has?.(s.id);
+      if (!docked && isFinitePos(v.position)
+          && (grid.position.x !== v.position.x || grid.position.y !== v.position.y || grid.position.z !== v.position.z)) {
+        this.router.execute(`terminal.move ${s.id} ${v.position.x} ${v.position.y} ${v.position.z}`);
+      }
+      // Size: terminal.resize drives grid + emulator + PTY in lockstep; guarded so it only fires
+      // when the re-adopted grid (spawned at 80×24) differs from the intent.
+      if (Number.isInteger(v.cols) && Number.isInteger(v.rows) && v.cols > 0 && v.rows > 0
+          && (grid.cols !== v.cols || grid.rows !== v.rows)) {
+        this.router.execute(`terminal.resize ${s.id} ${v.cols} ${v.rows}`);
       }
     }
-    this.pendingTerminals = remaining;
   }
 
   // Replay 3D dock membership as surfaces reappear. Code grids are back synchronously
   // after restore()'s file loop; terminals re-adopt later, so this is also fired from
-  // the registry-change listener (after _placePendingTerminals, so a docked terminal
+  // the registry-change listener (after _applyTerminalViews, so a docked terminal
   // captures a sensible home before it's reparented away). Ids not yet in the registry
   // linger in _pendingDock3d (or forever, if that shell died — harmless).
   _applyDock3d() {
@@ -453,7 +457,6 @@ export default class SessionStore {
   async clear() {
     this._pendingDock = null;
     this._pendingDock3d = null;
-    this.pendingTerminals = [];
     await this._clear();
   }
 
@@ -488,6 +491,9 @@ export default class SessionStore {
     if (this._disposed) return;
     this._autosaveOn = true;
     this.ctx.registry.addChangeListener(this._onRegistryChange);
+    // A verb writing the model (terminal.resize/move/…) is intent changing — save it. The model
+    // emits change:surfaces only on a real change, so this can't churn on idempotent re-pushes.
+    this._offSurfaces = this.ctx.workspace?.on?.('change:surfaces', () => this.scheduleSave()) || null;
     if (typeof document !== 'undefined') document.addEventListener('visibilitychange', this._onVisibility);
     if (typeof window !== 'undefined') window.addEventListener('beforeunload', this._onVisibility);
     this._periodic = setInterval(() => this.scheduleSave(), PERIODIC_SAVE_MS);
@@ -499,6 +505,7 @@ export default class SessionStore {
     clearTimeout(this._saveTimer);
     clearInterval(this._periodic);
     this.ctx.registry.removeChangeListener(this._onRegistryChange);
+    this._offSurfaces?.();
     if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', this._onVisibility);
     if (typeof window !== 'undefined') window.removeEventListener('beforeunload', this._onVisibility);
   }

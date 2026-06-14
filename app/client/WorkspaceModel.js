@@ -31,6 +31,11 @@ export default class WorkspaceModel {
     this.fields = new Map();
     /** @type {Map<string, {id:string,kind:string,source:object,title:string,panelId:string|null,view:object|null}>} */
     this.sheets = new Map();
+    /** Per-rendered-thing view-intent (appState.surfaces): the declarative geometry/placement a
+     *  reconcile pass pushes onto the live three.js object, keyed by the REGISTRY id. Distinct from
+     *  `sheets` (open documents/tabs). Terminals live here now; code grids join in later slices.
+     *  @type {Map<string, {id:string,kind:string,view:object}>} */
+    this.surfaces = new Map();
     this.activeFieldId = 'field:main';
     this.fields.set(this.activeFieldId, {
       id: this.activeFieldId, name: 'main', sheetIds: [], activeSheetId: null, camera: null,
@@ -132,6 +137,35 @@ export default class WorkspaceModel {
     if (hadSheets) this._emit('change:sheets');
     if (fieldsChanged) this._emit('change:fields');
   }
+
+  // ── surfaces: per-rendered-thing view-intent (appState.surfaces) ──
+  // Keyed by the registry id, so a reconcile pass joins straight to the live object. A verb
+  // writes the intent here; the reconcile pushes it onto the live grid (and re-pushes idempotently
+  // when the grid re-adopts). This is the durable buffer that retired SessionStore.pendingTerminals.
+
+  /**
+   * Create-or-merge a surface's view-intent. Only emits when something actually changed, so a
+   * re-push of the same value (the idempotent apply path) can't churn the autosave.
+   * @param {string} id registry id @param {string} kind 'terminal' | … @param {object} patch view fields
+   * @returns {object|null} the surface record
+   */
+  setSurfaceView(id, kind, patch) {
+    if (!id || !patch) return null;
+    let s = this.surfaces.get(id);
+    let changed = false;
+    if (!s) { s = { id, kind: kind || 'surface', view: {} }; this.surfaces.set(id, s); changed = true; }
+    if (kind && s.kind !== kind) { s.kind = kind; changed = true; }
+    for (const [k, v] of Object.entries(patch)) {
+      if (JSON.stringify(s.view[k]) !== JSON.stringify(v)) { s.view[k] = v; changed = true; }
+    }
+    if (changed) this._emit('change:surfaces');
+    return s;
+  }
+
+  getSurface(id) { return this.surfaces.get(id) || null; }
+  listSurfaces() { return [...this.surfaces.values()]; }
+  /** Drop a surface's view-intent (the thing was explicitly closed/killed). */
+  removeSurface(id) { if (this.surfaces.delete(id)) this._emit('change:surfaces'); }
 
   /** Drop a sheet from every field + the sheet map. (Derendering its panel is the caller's job.) */
   removeSheet(sheetId) {
