@@ -221,10 +221,12 @@ class FrameGrid extends THREE.Object3D {
             this._texture = null;
         }
         const mesh = this._renderer?.instanceMesh;
-        if (mesh) {
-            this.remove(mesh);
-            mesh.geometry?.dispose?.();
-        }
+        if (mesh) this.remove(mesh);   // mesh is parented here, not the renderer's scene
+        // Full renderer teardown: unregisters from the live slug atlas (so no dangling
+        // field reference / stray setSlugData pushes), disposes the geometry and the
+        // group/highlight DataTextures. The field MATERIAL is shared across all fields
+        // and is intentionally left untouched.
+        this._renderer?.dispose?.();
         if (this.parent) this.parent.remove(this);
     }
 }
