@@ -842,6 +842,23 @@ export default class GlyphField {
     }
 
     /**
+     * Put the field into frame mode: render every instance as a cell of an external
+     * NxM grid texture (screen capture / video / image) instead of a glyph. The
+     * per-instance cell index is the existing instanceGlyphId (0 = top-left, row
+     * major). Pass a null texture to return the field to normal glyph rendering.
+     *
+     * @param {THREE.Texture|null} tex - filterable RGBA texture (VideoTexture/CanvasTexture/DataTexture)
+     * @param {number} cols - number of cells across the source frame
+     * @param {number} rows - number of cells down the source frame
+     */
+    setFrameTexture(tex, cols, rows) {
+        this._frameTexture = tex || null;
+        this._frameCols    = Math.max(1, Math.floor(cols) || 1);
+        this._frameRows    = Math.max(1, Math.floor(rows) || 1);
+        this._renderMode   = tex ? 2 : 0;
+    }
+
+    /**
      * Set the frame clip window in GRID-LOCAL y (Step 3c.2). Instances whose anchor y is
      * outside [bottom, top] are culled in the vertex stage. Pass null/non-finite (either arg)
      * to disable the clip (show everything). Pure render-side uniform update — no re-fold.
