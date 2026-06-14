@@ -90,6 +90,34 @@ class FrameGrid extends THREE.Object3D {
      * groups) and push them to the renderer. The grid is centered on this Object3D's
      * local origin; row 0 is at the top so it lines up with the source frame's top
      * (the fragment frame branch maps cell row 0 → top of the texture).
+     *
+     * ── Frame cell mapping (the addressing contract) ──────────────────────────────
+     * A cell is one instanced quad. Its identity is a single row-major index
+     *   cell = row * cols + col        (0 = top-left, increasing left→right, top→bottom)
+     * carried in the instanceGlyphId attribute. The shader frame branch turns that
+     * back into a sub-rectangle of the source texture:
+     *   col = cell % frameCols;  row = floor(cell / frameCols)
+     *   uv  = ((col + quadUV.x) / frameCols, (row + 1 - quadUV.y) / frameRows)
+     * Spatial position (this _build) and texture cell (the index) are independent —
+     * that decoupling is the whole trick: move a quad anywhere while it keeps sampling
+     * its cell, or repoint a quad at a different cell, and you get screen-in-place,
+     * region slicing, or scatter, all from the same instanced draw.
+     *
+     * ── Performance trajectory: push per-cell manipulation across the GPU fence ────
+     * Today this is CPU-side: we write the typed arrays here and hand them over once
+     * via applyPrebuiltBuffers (one upload). That's perfect for a static grid, and
+     * fine for occasional whole-rebuilds. Per-cell ANIMATION today would mean
+     * rewriting these arrays on the CPU each frame and re-uploading — exactly the
+     * CPU→GPU fence cost that glyph text alignment also pays (lay out on the CPU, copy
+     * over the boundary).
+     *
+     * The eventual win is to keep the per-cell state GPU-side: a small data texture
+     * (or a compute / GPGPU pass) holding per-cell offset / target-cell / tint,
+     * sampled in the vertex stage by instanceIndex — the same group-DataTexture
+     * pattern GlyphField already uses for group transforms, but at cell granularity.
+     * Then scatter/particle effects animate without ever crossing the fence per frame.
+     * See the Codrops GPGPU grid-displacement / particle recipes for the established
+     * approach. (Not needed for the first pass — basic CPU writes are fine for now.)
      * @private
      */
     _build() {
