@@ -127,7 +127,10 @@ function _buildVertexNode(uniforms) {
         // not modified — so columns stay aligned. Dense emoji runs will visually overlap;
         // the proper terminal-correct fix (double-width advance) is deferred.
         // .select(trueValue, falseValue) on a bool node — ConditionalNode API.
-        const isBitmap = int(glyphInfo.z).equal(int(RENDER_MODE.BITMAP));
+        // Read the RESOLVED vMode (not glyphInfo.z): in frame mode vMode is FRAME, so
+        // isBitmap is false and the quad keeps its real cell width (iSize.x) instead of
+        // being forced square like an emoji cell.
+        const isBitmap = vMode.equal(int(RENDER_MODE.BITMAP));
         const quadW    = isBitmap.select(iSize.y, iSize.x); // square for emoji, narrow for slug
 
         // Scale base quad by per-instance size
