@@ -232,7 +232,10 @@ function _buildOutputNode(varyings, uniforms) {
             const frow = float(vEmojiCell).div(frameCols).floor();
             const frameUV = vec2(
                 fcol.add(vGlyphUV.x).div(frameCols),
-                frow.add(float(1).sub(vGlyphUV.y)).div(frameRows)   // flip v (same as emoji atlas)
+                // VideoTexture uploads flipY=true (unlike the flipY=false emoji canvas),
+                // so the emoji-path flip double-flips and the frame lands upside down.
+                // Invert the v build — row order AND sub-cell — to mirror it upright.
+                frameRows.sub(1).sub(frow).add(vGlyphUV.y).div(frameRows)
             );
             const ftexel = frameTex.sample(frameUV);
             // vColor (instanceColor) modulates: white = the frame's true color, or a
