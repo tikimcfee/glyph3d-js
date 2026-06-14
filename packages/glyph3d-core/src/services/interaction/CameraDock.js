@@ -319,6 +319,47 @@ export class CameraDock extends THREE.Object3D {
     }
 
     /**
+     * Dismiss a tile whose window is GONE (closed/disposed) — the clean-removal counterpart to
+     * release(). Unlike release() it does NOT send the grid home (there's no live grid to send): it
+     * drops the entry, lifts the orphan object out of the bar, clears focus if it held it, and
+     * re-packs the survivors. This is how the dock "handles its own removal" — see pruneDismissed.
+     * @param {string} id @returns {boolean}
+     */
+    dismiss(id) {
+        const e = this.entries.get(id);
+        if (!e) return false;
+
+        e.unsubscribeResize?.();
+        this.entries.delete(id);
+        this._releasing.delete(id);            // abandon any in-flight release of the same id
+        this.tiles.delete(e.grid);
+        if (this.focusedId === id) this.focusedId = null;
+        this.attentionManager?.docks?.delete(id);
+
+        // The grid is being disposed, so stop any tween still writing to it and lift it out of the
+        // bar's children. dispose() couldn't: a DOCKED grid's parent is THIS node (reparented on
+        // lock), not its origin scene, so the grid's own scene.remove(this) was a no-op — exactly
+        // why a closed-while-docked window left an orphan the dock kept animating every frame.
+        this.animator.cancelAll(e.grid);
+        if (e.grid && e.grid.parent === this) this.remove(e.grid);
+
+        this._relayout();                      // re-pack the survivors (no-op when empty)
+        return true;
+    }
+
+    /**
+     * Self-heal: dismiss any docked tile whose window is no longer live. Driven by the registry's
+     * change event, so closing a window ANY way (terminal.kill→close, grid.remove, scene clear)
+     * cascades to the dock without the closer needing to know the window was docked.
+     * @param {(id:string)=>boolean} isLive returns true while a window id is still registered
+     */
+    pruneDismissed(isLive) {
+        for (const id of [...this.entries.keys()]) {
+            if (!isLive(id)) this.dismiss(id);
+        }
+    }
+
+    /**
      * Dock if loose, release if docked.
      * @param {string} id @param {Object} grid @returns {'locked'|'released'}
      */

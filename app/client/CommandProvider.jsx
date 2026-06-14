@@ -247,9 +247,11 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // and rebuilt on every tree relayout (tree.onRelayout). layout.markers dials them.
     state.ctx.contentTreeMarkers = new ContentTreeMarkers(contentTree);
 
-    // Ordered arrows: per-directory chains threading the child dirs in canonical order,
-    // parented into the parent nodes and rebuilt on tree relayout. layout.arrows dials them.
+    // Ownership lines: per-directory wires from each dir's hub to every file and child
+    // dir it contains, parented into the node and rebuilt on relayout. File lines and dir
+    // lines toggle independently (Tree settings); layout.arrows is the master on/off.
     state.ctx.contentTreeArrows = new ContentTreeArrows(contentTree);
+    applyGroupSettings(state.ctx, 'Tree');   // fold persisted file/dir-line toggles in at boot
 
     // Diagnostic: origin-vs-content-anchor dots per dir (layout.probes). Reveals where the
     // arrows anchor relative to each footprint origin — a debug instrument, toggle off when done.
@@ -269,6 +271,12 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // Fold the persisted Dock settings into the freshly-built dock — its apply()s only
     // fire on a user change, so without this a stored value would wait until next touch.
     applyGroupSettings(state.ctx, 'Dock');
+    // However a docked window is closed (terminal.kill→close, grid.remove, scene clear), its
+    // registry entry vanishes — the dock self-heals off that single event: dismiss any tile whose
+    // window is no longer live (orphan lifted, focus cleared, bar re-packed). One cascade, every
+    // close path; no closer needs to know the window happened to be docked.
+    const dockPrune = () => cameraDock.pruneDismissed((id) => state.ctx.registry.has(id));
+    state.ctx.registry.addChangeListener(dockPrune);
 
     // The composable "what is the user locked into" projection — focus/edit/key
     // nodes derived from attention + cursor state (owns nothing). The breadcrumb
@@ -417,6 +425,7 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       state.ctx.interactionContext?.dispose();
       state.ctx.interactionContext = null;
       if (state.ctx.cameraDock) {
+        state.ctx.registry.removeChangeListener(dockPrune);
         scene.remove(state.ctx.cameraDock);
         state.ctx.cameraDock.dispose();
         state.ctx.cameraDock = null;
