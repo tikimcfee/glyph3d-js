@@ -5,7 +5,7 @@
 //
 //   bun tools/panel-material-check.mjs
 
-import { createPanelMaterial } from '../packages/glyph3d-core/src/collections/panelMaterial.js';
+import { createPanelMaterial, BORDER_FLAGS } from '../packages/glyph3d-core/src/collections/panelMaterial.js';
 
 let failures = 0;
 const ok = (c, m) => { console.log(`${c ? '✓' : '✗ FAIL'} ${m}`); if (!c) failures++; };
@@ -29,11 +29,18 @@ ok(glass.material.transparent === true, 'setFill(opacity 0.6) → transparent ag
 
 let threw = false;
 try {
-  glass.setBorder({ color: 0x8ee6a8, width: 1.5, strength: 1 }); // width in screen pixels
-  glass.setBorder({ strength: 0 });           // clear
+  glass.setBorder({ color: 0x8ee6a8, width: 1.5, intensity: 1 }); // width in screen pixels
   glass.setFill(0x000000);                     // color only
 } catch (e) { threw = true; console.log('  threw:', e?.message); }
-ok(!threw, 'setBorder / color-only setFill all run clean');
+ok(!threw, 'setBorder / color-only setFill run clean');
+
+// Flag bit-set: each subsystem owns its own bits; flips are independent.
+glass.setBorderFlag(BORDER_FLAGS.DOCKED, true);
+ok(glass.getBorderFlags() === BORDER_FLAGS.DOCKED, 'setBorderFlag(DOCKED) → only that bit');
+glass.setBorderFlag(BORDER_FLAGS.HOVERED, true);
+ok(glass.getBorderFlags() === (BORDER_FLAGS.DOCKED | BORDER_FLAGS.HOVERED), 'flags OR together (no clobber)');
+glass.setBorderFlag(BORDER_FLAGS.DOCKED, false);
+ok(glass.getBorderFlags() === BORDER_FLAGS.HOVERED, 'clearing one bit leaves the others');
 
 console.log(failures === 0 ? '\nPASS — panel material builds + restyles headless (border pixels verified live)'
                            : `\nFAIL — ${failures} assertion(s)`);

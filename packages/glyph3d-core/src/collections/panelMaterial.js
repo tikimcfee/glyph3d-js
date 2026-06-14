@@ -4,34 +4,50 @@
  * A code grid / terminal lays its glyphs out as quads in front of a flat background plane (the
  * "wall" the text contrasts against). That plane already IS the window's bounding rectangle, so the
  * border isn't a separate object — it's an effect painted onto the same plane: a thin crisp line
- * right at the plane's edge, in the window's identity color. The GPU does it per-pixel.
+ * right at the panel edge. The GPU does it per-pixel.
  *
- * The line is measured in SCREEN PIXELS, not world units, so it stays a clean 1–2px hairline at any
- * zoom or distance and never ramps inward into the text. The trick is screen-space derivatives:
+ * The line is measured in SCREEN PIXELS (edge / fwidth(edge) — the panel-size term cancels), so it
+ * stays a clean 1–2px hairline at any zoom or distance and never ramps inward into the text.
  *
- *   edge(uv)  = per-axis distance to the nearest edge, unitless [0, 0.5]
- *   pixels    = edge / fwidth(edge)          // edge distance expressed in screen pixels —
- *                                            //   the panel-size term cancels, so no size uniform
- *   d         = min(pixels.x, pixels.y)      // pixels to the nearest edge
- *   band      = (1 − smoothstep(W−0.5, W+0.5, d)) · strength   // solid to W px, 1px AA shoulder
- *   rgb       = mix(fill, borderColor, band)
- *   alpha     = max(fillOpacity, band)       // the rim stays legible on a translucent docked tile
+ * WHAT the border shows is driven by a group-level BIT-SET (one uint per window), not a CPU-computed
+ * color. Each subsystem owns its own bits and flips them; the shader decodes the int and decides the
+ * look — so there's no single-writer contention, and the whole visual language lives in one place:
  *
- * strength = 0 means "no border" — the panel paints as a plain fill, so this is a drop-in for the
- * MeshBasicMaterial it replaces.
+ *   DOCKED  — wears its dock identity hue (set by CameraDock, with the hue in uBorderColor)
+ *   HOVERED — pointer is over it (a gentle time-pulse brighten)
+ *   FOCUSED — sticky/primary focus (a thicker line)
+ *   INPUT   — edit mode / keyboard target (amber accent, thicker)
+ *
+ * flags == 0 → no border (a plain fill), so this stays a drop-in for the MeshBasicMaterial it
+ * replaced. Docked windows keep their identity hue and let state TINT it; undocked windows show the
+ * pure state color. The interpretation here is just a default — it's all tunable in this one shader,
+ * including time-based animation, without touching any CPU code.
  *
  * One material per panel (each grid keeps its own, preserving the per-grid `transparent`/`depthWrite`
  * the dock-stacking occlusion depends on); the node graph is identical across them, so the renderer
- * reuses one compiled pipeline. The generalization Ivan noted — z-pages wanting a real 3D container
- * — is the SAME effect on a box carrier; only the edge field gains a third axis.
+ * reuses one compiled pipeline.
  */
 
 import * as THREE from 'three';
 import { MeshBasicNodeMaterial } from 'three/webgpu';
-import { uv, vec2, float, uniform, mix, smoothstep, min, max, fwidth } from 'three/tsl';
+import { uv, vec2, vec3, float, uint, uniform, mix, smoothstep, min, max, fwidth, bitAnd, select, time, sin } from 'three/tsl';
 
 /** Default border thickness in SCREEN PIXELS. */
 export const PANEL_BORDER_WIDTH = 1.5;
+
+/** Group-level border state bits. Each subsystem owns its own; the shader decodes them. */
+export const BORDER_FLAGS = Object.freeze({
+    DOCKED:  1 << 0,
+    HOVERED: 1 << 1,
+    FOCUSED: 1 << 2,
+    INPUT:   1 << 3,
+});
+
+const TAU = Math.PI * 2;
+// State colors — the legible vocabulary carried over from the roving outline overlay.
+const C_HOVER = vec3(0.624, 0.824, 1.0);  // 0x9fd2ff — light blue
+const C_FOCUS = vec3(0.431, 0.906, 0.627); // 0x6ee7a0 — green
+const C_INPUT = vec3(0.941, 0.706, 0.353); // 0xf0b45a — amber
 
 /**
  * @param {Object} [opts]
@@ -39,31 +55,48 @@ export const PANEL_BORDER_WIDTH = 1.5;
  * @param {number} [opts.opacity=1] - fill opacity (transparent flag tracks opacity<1)
  * @param {number} [opts.side=THREE.DoubleSide]
  * @param {boolean} [opts.depthWrite=true] - the panel occludes content behind it (dock stacks)
- * @returns {{ material: MeshBasicNodeMaterial, setFill, setBorder }}
+ * @returns {{ material: MeshBasicNodeMaterial, setFill, setBorder, setBorderFlag, getBorderFlags }}
  */
 export function createPanelMaterial({ color = 0x000000, opacity = 1,
                                       side = THREE.DoubleSide, depthWrite = true } = {}) {
     const uFill = uniform(new THREE.Color(color));
     const uOpacity = uniform(opacity);
-    const uBorderColor = uniform(new THREE.Color(0xffffff));
-    const uBorderWidth = uniform(PANEL_BORDER_WIDTH); // screen pixels
-    const uBorderStrength = uniform(0);               // 0 = no border (plain fill)
+    const uBorderColor = uniform(new THREE.Color(0xffffff)); // identity hue (DOCKED)
+    const uBorderWidth = uniform(PANEL_BORDER_WIDTH);        // screen pixels
+    const uBorderIntensity = uniform(1);                    // master rim opacity
+    const uFlags = uniform(0, 'uint');                      // BORDER_FLAGS bit-set
 
-    // A crisp pixel-wide line at the panel edge. edge → pixels via the screen-space derivative
-    // (panel size cancels); the smoothstep is a 1px anti-alias shoulder, NOT an inward gradient.
-    const edge = vec2(0.5, 0.5).sub(uv().sub(0.5).abs());      // per-axis dist to edge, [0, 0.5]
+    const F = BORDER_FLAGS;
+    const has = (mask) => bitAnd(uFlags, uint(mask)).greaterThan(uint(0)); // bool node
+    const on = uFlags.greaterThan(uint(0));
+    const docked = has(F.DOCKED);
+    const anyState = has(F.HOVERED | F.FOCUSED | F.INPUT);
+    const accent = has(F.FOCUSED | F.INPUT); // states that thicken the line
+
+    // Border COLOR: docked windows keep their identity hue and let state tint it; undocked windows
+    // show the dominant state color (priority: input > focused > hovered). A gentle hover pulse.
+    const stateCol = select(has(F.INPUT), C_INPUT, select(has(F.FOCUSED), C_FOCUS, C_HOVER));
+    const tint = select(anyState, float(0.5), float(0));
+    const baseCol = select(docked, mix(uBorderColor, stateCol, tint), stateCol);
+    const pulse = select(has(F.HOVERED), sin(time.mul(TAU * 1.1)).mul(0.5).add(0.5).mul(0.2).add(0.85), float(1));
+    const borderCol = baseCol.mul(pulse);
+
+    // Border SHAPE: a crisp pixel-wide line at the edge; focus/input thicken it.
+    const w = uBorderWidth.mul(select(accent, float(1.6), float(1)));
+    const edge = vec2(0.5, 0.5).sub(uv().sub(0.5).abs());     // per-axis dist to edge, [0, 0.5]
     const px = edge.div(max(fwidth(edge), float(1e-6)));       // → screen pixels, per axis
-    const d = min(px.x, px.y);                                 // pixels to the nearest edge
-    const band = smoothstep(uBorderWidth.sub(float(0.5)), uBorderWidth.add(float(0.5)), d)
-        .oneMinus().mul(uBorderStrength);
+    const d = min(px.x, px.y);                                // pixels to the nearest edge
+    const band = smoothstep(w.sub(float(0.5)), w.add(float(0.5)), d).oneMinus();
+    const rim = band.mul(select(on, uBorderIntensity, float(0)));
 
     const material = new MeshBasicNodeMaterial();
     material.transparent = opacity < 1;
     material.side = side;
     material.depthWrite = depthWrite;
-    material.colorNode = mix(uFill, uBorderColor, band);
-    material.opacityNode = max(uOpacity, band);
+    material.colorNode = mix(uFill, borderCol, rim);
+    material.opacityNode = max(uOpacity, rim);
 
+    let flags = 0;
     return {
         material,
 
@@ -73,11 +106,19 @@ export function createPanelMaterial({ color = 0x000000, opacity = 1,
             if (o != null) { uOpacity.value = o; material.transparent = o < 1; }
         },
 
-        /** Set the border. strength 0 = off. width is in SCREEN PIXELS (omit to keep current). */
-        setBorder({ color, width, strength } = {}) {
+        /** Set the identity color / width(px) / master intensity. State is via setBorderFlag. */
+        setBorder({ color, width, intensity } = {}) {
             if (color != null) uBorderColor.value.set(color);
             if (width != null) uBorderWidth.value = width;
-            if (strength != null) uBorderStrength.value = strength;
+            if (intensity != null) uBorderIntensity.value = intensity;
         },
+
+        /** Flip one or more BORDER_FLAGS bits. Each subsystem owns its bits (no contention). */
+        setBorderFlag(mask, present) {
+            flags = present ? (flags | mask) : (flags & ~mask);
+            uFlags.value = flags >>> 0;
+        },
+
+        getBorderFlags() { return flags; },
     };
 }

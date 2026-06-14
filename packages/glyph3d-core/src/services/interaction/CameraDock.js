@@ -40,13 +40,18 @@
  * @property {{h:number,cx:number,cy:number,cz:number}} _extentFallback - last-resort content
  *   extent for a transient empty-bounds read; the LIVE grid.getLocalBounds() (via _extentOf)
  *   is preferred. Content size is derived, never cached as a delta.
- * @property {number} slot
+ * @property {number} order - stable sort key (the dock's record of "which tile is which slot").
+ *   Assigned a monotonic counter on an interactive dock so new tiles append; threaded from the saved
+ *   snapshot on restore so a tile lands in its SAVED position no matter WHEN its surface re-adopts
+ *   (terminals re-adopt async, in arrival order — order is what keeps the bar from scrambling).
+ * @property {number} slot - dense 0..n-1 DISPLAY rank, derived from `order` every _relayout.
  * @property {THREE.Quaternion} quatTarget - orientation the tile slerps toward
  */
 
 import * as THREE from 'three';
 import { SpatialAnimator } from '../spatial/SpatialAnimator.js';
 import { flowBoxes } from '../../collections/layouts/flowBoxes.js';
+import { BORDER_FLAGS } from '../../collections/panelMaterial.js';
 
 const _forward = new THREE.Vector3();
 const _z = new THREE.Vector3(0, 0, 1);
@@ -147,6 +152,7 @@ export class CameraDock extends THREE.Object3D {
         this.borderWidth = borderWidth;       // docked window's panel-border thickness (screen pixels)
         this.borderStrength = borderStrength; // docked window's panel-border intensity (0 = off)
         this._colorCursor = 0;            // cycles GHOST_PALETTE so each docked window gets a hue
+        this._orderSeq = 0;               // monotonic sort-key source for interactive locks (restore overrides per-tile)
 
         /** The tile currently raised into the focus area (centered + enlarged, still
          *  camera-locked), or null. Toggled by spotlight(). Its bar slot stays RESERVED and a
@@ -184,7 +190,9 @@ export class CameraDock extends THREE.Object3D {
 
     /** @returns {Array<{id:string, slot:number, layout:string, focused:boolean, zoom:number}>} */
     list() {
-        return [...this.entries.values()].map((e) => ({
+        // Sorted by slot (the order-derived display rank), so list order == bar order — what
+        // persistence serializes and dock.list prints.
+        return [...this.entries.values()].sort((a, b) => a.slot - b.slot).map((e) => ({
             id: e.id, slot: e.slot, layout: this.layoutMode, focused: e.id === this.focusedId,
             zoom: e.grid?.scaleModel ? e.grid.scaleModel.zoomScalar : 1,
         }));
@@ -253,10 +261,19 @@ export class CameraDock extends THREE.Object3D {
      * and animate it into its slot at tile scale.
      * @param {string} id  registry id
      * @param {Object} grid live Object3D with getBounds()
+     * @param {{order?:number}} [opts] order = a stable sort-key hint (restore passes the saved
+     *   index so an async-re-adopting tile lands in its saved position); omitted = append (next
+     *   monotonic counter), which is what an interactive dock wants.
      * @returns {boolean}
      */
-    lock(id, grid) {
+    lock(id, grid, opts = {}) {
         if (!grid || this.entries.has(id)) return false;
+
+        // Order is the dock's record of "which tile goes where" — a sort key, not a placement.
+        // A hint (restore) pins the saved position; absent, the next counter appends. Either way the
+        // counter advances past it so subsequent interactive locks land AFTER, never colliding.
+        const order = Number.isFinite(opts?.order) ? opts.order : this._orderSeq;
+        this._orderSeq = Math.max(this._orderSeq, order + 1);
 
         // World bounds at lock, for the home framing (dock.focus) and the home PLACEMENT to
         // animate back to on release. Content EXTENT (height + center offset) is NOT captured
@@ -283,7 +300,8 @@ export class CameraDock extends THREE.Object3D {
             // The world AABB the window had at home, captured before docking — dock.focus
             // frames THIS (computed, stable) rather than the tile's live mid-slide bounds.
             homeBounds: hasBounds ? b.clone() : null,
-            slot: this.entries.size,
+            order,
+            slot: this.entries.size, // provisional; _relayout re-ranks by `order` immediately below
             quatTarget: new THREE.Quaternion(),
             // This window's identity hue — painted as its panel border AND its ghost outline, so the
             // tile in the bar and its placeholder read as the same window by color.
@@ -311,8 +329,9 @@ export class CameraDock extends THREE.Object3D {
         });
 
         // Paint the window's identity hue onto its panel edge — the in-shader border (no extra
-        // object). It wears this hue for as long as it's docked; release() clears it.
-        grid.setBorder?.({ color: entry.ghostColor, width: this.borderWidth, strength: this.borderStrength });
+        // object). The DOCKED bit makes it show; it wears this hue while docked, release() clears it.
+        grid.setBorder?.({ color: entry.ghostColor, width: this.borderWidth, intensity: this.borderStrength });
+        grid.setBorderFlag?.(BORDER_FLAGS.DOCKED, true);
 
         this._relayout();
         return true;
@@ -329,7 +348,7 @@ export class CameraDock extends THREE.Object3D {
         if (!e) return false;
 
         e.unsubscribeResize?.(); // stop reacting to its size once it leaves the dock
-        e.grid.setBorder?.({ strength: 0 }); // drop the dock identity hue — it's leaving the bar
+        e.grid.setBorderFlag?.(BORDER_FLAGS.DOCKED, false); // drop the dock identity — leaving the bar
         this.entries.delete(id);
         this.tiles.delete(e.grid); // back to world content for the camera the moment it heads home
         if (this.focusedId === id) this.focusedId = null;
@@ -545,16 +564,19 @@ export class CameraDock extends THREE.Object3D {
      *  overridden), independent of content size or zoom — the row packs as an even icon
      *  strip and nothing slides off the sides. */
     _relayout() {
-        const all = [...this.entries.values()];
+        // Sort by `order` (the stable per-tile sort key), NOT raw Map insertion order — so a tile
+        // that re-adopted late on restore still sits in its saved position rather than at the end.
+        // Interactive locks get a monotonic order == lock sequence, so this is a no-op reorder there.
+        const all = [...this.entries.values()].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
         if (all.length === 0) { this._hideGhost(); return; }
 
-        // Slot = each tile's position in the (insertion-ordered) entry set — assigned in
-        // THIS one place, before the bar/focus split, so every tile gets a UNIQUE label
-        // (focused included). Previously the bar renumbered 0..n-1 while the spotlit tile
-        // kept a stale number → two tiles could share a slot, and a shadowed tile silently
-        // ate its sibling's hover/wheel. Slots are LABELS (dock.list + session order);
-        // placement is by bar geometry / Map order, never by e.slot — so numbering here
-        // changes no placement, only kills the collision.
+        // Slot = each tile's position in the (order-sorted) entry set — assigned in THIS one place,
+        // before the bar/focus split, so every tile gets a UNIQUE label (focused included).
+        // Previously the bar renumbered 0..n-1 while the spotlit tile kept a stale number → two
+        // tiles could share a slot, and a shadowed tile silently ate its sibling's hover/wheel.
+        // Slots are LABELS (dock.list + session order); placement is by bar geometry / this sorted
+        // order, never by a stale e.slot — so numbering here changes no placement, only kills the
+        // collision and pins the saved sequence.
         all.forEach((e, i) => { e.slot = i; });
 
         // The focused tile keeps its slot RESERVED — neighbors don't shift when it lifts out. Every

@@ -1239,12 +1239,22 @@ export default class TerminalGrid extends THREE.Object3D {
     }
 
     /**
-     * Set this window's in-shader border. The dock paints the focused/docked tile's ghost color
-     * here so its panel edge glows the hue that matches its placeholder. strength 0 clears it.
-     * @param {{ color?: number|string, width?: number, strength?: number }} style
+     * Set this window's in-shader border identity: color (the dock's ghost hue), width (screen
+     * pixels), intensity. WHAT shows is driven by the border flags (setBorderFlag) — each subsystem
+     * owns its own bits and the shader decodes them.
+     * @param {{ color?: number|string, width?: number, intensity?: number }} style
      */
     setBorder(style = {}) {
         this._panel?.setBorder(style);
+    }
+
+    /**
+     * Flip one or more BORDER_FLAGS bits on this window's border (DOCKED / HOVERED / FOCUSED /
+     * INPUT). The dock owns DOCKED; the attention-driven border controller owns the rest.
+     * @param {number} mask @param {boolean} present
+     */
+    setBorderFlag(mask, present) {
+        this._panel?.setBorderFlag(mask, present);
     }
 
     /**
