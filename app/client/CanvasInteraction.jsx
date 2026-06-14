@@ -23,6 +23,7 @@ const round = (n) => Math.round(n * 100) / 100;
 // indistinguishable downstream.
 
 const DRAG_PX = 5; // pointer travel above this = a drag (orbit/pan), not a click
+const _pickWorld = new THREE.Vector3(); // scratch for cross-channel camera-distance compares
 // Caret-preview tint for the glyph under the pointer (additive over syntax color,
 // via the highlight texture). Mid-tone cool lift — pure white blows out light glyphs.
 const HOVER_GLYPH_TINT = { r: 0.18, g: 0.25, b: 0.38 };
@@ -316,25 +317,41 @@ export function CanvasPicker() {
         s.pickPending = true;
         ps.pickAsync('grid', c, scene).then((hit) => {
           // Guard on s.in: a pick resolving AFTER the cursor left must clear hover.
-          const entry = (s.in && hit) ? entryForGrid(client.ctx.registry, hit.token) : null;
-          if (entry && !s.gpuOk) {
+          const gridEntry = (s.in && hit) ? entryForGrid(client.ctx.registry, hit.token) : null;
+          if (gridEntry && !s.gpuOk) {
             s.gpuOk = true;
-            console.log(`[CanvasPicker] grid picking confirmed → ${entry.id}`);
+            console.log(`[CanvasPicker] grid picking confirmed → ${gridEntry.id}`);
           }
-          applyHover(entry);
-          // Second channel, SAME frame: the resize grips. markDirty() is
-          // MANDATORY — both passes share one _needsPick latch, so without it the
-          // handle pass no-ops and hands back the prior frame's hit. The grip
-          // stage swallows its own error so a handle-pass hiccup never clears a
-          // good grid hover (the outer catch is for grid-pass failures only).
+          // Second channel, SAME frame: the window-control grips/buttons. markDirty() is
+          // MANDATORY — both passes share one _needsPick latch, so without it the handle
+          // pass no-ops and hands back the prior frame's hit. The handle stage swallows its
+          // own error (→ null) so a handle-pass hiccup never clears a good grid hover.
           ps.markDirty();
           return ps.pickAsync('handle', c, scene).then(
-            (h) => applyHandleHover(s.in ? (h?.token ?? null) : null, sx, sy),
-            () => applyHandleHover(null),
-          ).then(() => {
-            // Third channel: caret-preview on the doc being EDITED. Gated to the
-            // key-target grid — the glyph pass renders every instance, so it stays
-            // off during plain navigation. (markDirty: shared latch, as above.)
+            (h) => (s.in ? (h?.token ?? null) : null),
+            () => null,
+          ).then((handleToken) => {
+            // CROSS-CHANNEL PRIORITY. The channels don't share a depth buffer, so when both a
+            // grid and a control land under the cursor we decide which is in front here. A
+            // window's OWN control is always in front of its own panel; for different objects
+            // it's closest-to-camera wins — a cheap object-distance tiebreak, good enough until
+            // a per-pixel case needs real GPU depth. The loser is dropped so it neither hovers
+            // nor takes the click (the depth ordering a raycast gets for free).
+            let hoverEntry = gridEntry;
+            let activeHandle = handleToken;
+            if (handleToken && gridEntry && handleToken.grid !== gridEntry.grid && handleToken.button) {
+              const dHandle = c.position.distanceTo(handleToken.button.getWorldPosition(_pickWorld));
+              const dGrid = c.position.distanceTo(gridEntry.grid.getWorldPosition(_pickWorld));
+              if (dHandle <= dGrid) hoverEntry = null;   // control nearer → it occludes the grid behind
+              else activeHandle = null;                  // grid nearer → the control is hidden, ignore it
+            } else if (handleToken) {
+              hoverEntry = null;                         // same-window control (or empty grid) wins
+            }
+            applyHandleHover(activeHandle, sx, sy);
+            applyHover(hoverEntry);
+            // Third channel: caret-preview on the doc being EDITED. Gated to the key-target
+            // grid (the glyph pass renders every instance) and never under a control.
+            const entry = hoverEntry;
             const keyId = client.ctx.attentionManager?.get('key')?.id;
             if (!entry || entry.type !== 'grid' || entry.id !== keyId) {
               applyGlyphHover(null, null);
