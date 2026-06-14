@@ -49,6 +49,18 @@ const {
 /** Upper bound on quadratic beziers per glyph (TSL loop cap). */
 const MAX_CURVES = 256;
 
+/**
+ * Render modes. These integers cross the JS→GPU boundary as a numeric uniform
+ * (WGSL has no enums — a uniform is a scalar), so the value itself must stay a
+ * small int; the shader casts the uniform with int() and compares with .equal().
+ *
+ * Used in two places with the SAME numbers:
+ *   - the per-instance `vMode` varying (the fragment branch selector), and
+ *   - the field-level `_renderMode` uniform, where GLYPH lets the per-glyph map
+ *     pick SLUG vs BITMAP, and FRAME forces every instance to the frame branch.
+ */
+const RENDER_MODE = Object.freeze({ GLYPH: 0, BITMAP: 1, FRAME: 2 });
+
 import { PERF_THRESHOLDS } from './core/constants.js';
 
 const MAX_GROUPS_DEFAULT = PERF_THRESHOLDS.defaultMaxGroups ?? 64;
@@ -96,13 +108,13 @@ function _buildVertexNode(uniforms) {
         vMode.assign(int(glyphInfo.z));
         vEmojiCell.assign(int(glyphInfo.w));
 
-        // Frame mode (field-level, renderMode == 2): the WHOLE field samples an
-        // external frame texture (screen capture / video / image) as an NxM grid.
-        // The cell index comes straight from instanceGlyphId — no glyph-map, no Slug,
-        // no atlas — and mode is forced to 2 so the fragment takes the frame branch.
-        // (renderMode is a float uniform; > 1.5 reads true for the integer value 2.)
-        If(renderMode.greaterThan(float(1.5)), () => {
-            vMode.assign(int(2));
+        // Frame mode (field-level): the WHOLE field samples an external frame texture
+        // (screen capture / video / image) as an NxM grid. The cell index comes
+        // straight from instanceGlyphId — no glyph-map, no Slug, no atlas — and vMode
+        // is forced to FRAME so the fragment takes the frame branch. renderMode is a
+        // numeric uniform; cast to int and compare exactly (0/2 are exact in float).
+        If(int(renderMode).equal(int(RENDER_MODE.FRAME)), () => {
+            vMode.assign(int(RENDER_MODE.FRAME));
             vEmojiCell.assign(int(iGlyphId));
         });
 
@@ -115,7 +127,7 @@ function _buildVertexNode(uniforms) {
         // not modified — so columns stay aligned. Dense emoji runs will visually overlap;
         // the proper terminal-correct fix (double-width advance) is deferred.
         // .select(trueValue, falseValue) on a bool node — ConditionalNode API.
-        const isBitmap = int(glyphInfo.z).equal(int(1));
+        const isBitmap = int(glyphInfo.z).equal(int(RENDER_MODE.BITMAP));
         const quadW    = isBitmap.select(iSize.y, iSize.x); // square for emoji, narrow for slug
 
         // Scale base quad by per-instance size
@@ -206,7 +218,7 @@ function _buildOutputNode(varyings, uniforms) {
         // Output color accumulator; filled by whichever branch executes.
         const outColor = vec4(0).toVar();
 
-        If(vMode.equal(int(2)), () => {
+        If(vMode.equal(int(RENDER_MODE.FRAME)), () => {
             // ── Frame branch: external NxM video/image grid sampled as the atlas ──
             // Field-level frame mode (vertex forced vMode = 2). The source frame is a
             // grid of `frameCols × frameRows` equal cells; the cell index is the
@@ -226,7 +238,7 @@ function _buildOutputNode(varyings, uniforms) {
             outColor.assign(vec4(ftexel.rgb.pow(vec3(2.2)).mul(vColor), ftexel.a.mul(vGroupAlpha)));
 
         }).Else(() => {
-        If(vMode.equal(int(1)), () => {
+        If(vMode.equal(int(RENDER_MODE.BITMAP)), () => {
             // ── Bitmap / emoji branch ────────────────────────────────────────────
             // Atlas is a square grid of `emojiCols × emojiCols` equal-sized cells.
             // cell index → (col = cell % cols, row = floor(cell / cols)).
@@ -552,7 +564,7 @@ function _getSharedFieldMaterial(kind) {
     const emojiTexNode     = _fieldTexture(_makePlaceholderRGBATexture(), '_emojiTexture');
     const emojiColsNode    = _fieldUniform(16, (f) => f._emojiCols);
     // Frame-mode (external NxM image/video) nodes — resolve per object like the rest.
-    const renderModeNode   = _fieldUniform(0, (f) => f._renderMode || 0);
+    const renderModeNode   = _fieldUniform(RENDER_MODE.GLYPH, (f) => f._renderMode || RENDER_MODE.GLYPH);
     const frameTexNode     = _fieldTexture(_makePlaceholderRGBATexture(), '_frameTexture');
     const frameColsNode    = _fieldUniform(1, (f) => f._frameCols || 1);
     const frameRowsNode    = _fieldUniform(1, (f) => f._frameRows || 1);
@@ -683,9 +695,9 @@ export default class GlyphField {
         this._emojiCols      = 16;
 
         // Frame mode: render the whole field as an NxM grid sampled from an external
-        // texture (screen capture / video / image) instead of glyphs. renderMode 0 =
-        // glyph (default), 2 = frame. Set via setFrameTexture().
-        this._renderMode   = 0;
+        // texture (screen capture / video / image) instead of glyphs. Defaults to the
+        // GLYPH path; setFrameTexture() flips it to FRAME (see RENDER_MODE).
+        this._renderMode   = RENDER_MODE.GLYPH;
         this._frameTexture = null;
         this._frameCols    = 1;
         this._frameRows    = 1;
@@ -855,7 +867,7 @@ export default class GlyphField {
         this._frameTexture = tex || null;
         this._frameCols    = Math.max(1, Math.floor(cols) || 1);
         this._frameRows    = Math.max(1, Math.floor(rows) || 1);
-        this._renderMode   = tex ? 2 : 0;
+        this._renderMode   = tex ? RENDER_MODE.FRAME : RENDER_MODE.GLYPH;
     }
 
     /**
