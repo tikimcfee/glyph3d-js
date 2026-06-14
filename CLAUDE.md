@@ -100,8 +100,7 @@ with live follow via `bun tools/buslog.mjs`.
 
 - **Single instanced draw call.** Text becomes a `Float32Array` of per-glyph instance
   attributes (built single-pass, optionally in a Web Worker via `WorkerBridge`) and
-  renders as one `InstancedBufferGeometry`. Meshes auto-split past
-  `PERF_THRESHOLDS.maxInstancesPerMesh` (10,000).
+  renders as one `InstancedBufferGeometry`.
 - **CodeGrid** is a source file as an `Object3D` — cursor + in-place edit ops, highlight
   ranges, a windowing/framing layout, and a caret overlay. The edit path funnels
   through `_relayoutPreservingCursor()`.

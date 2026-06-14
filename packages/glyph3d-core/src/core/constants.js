@@ -43,7 +43,7 @@ export const BOUNDS_Z_PAD = 0.5;
 
 // Performance thresholds
 export const PERF_THRESHOLDS = {
-    maxInstancesPerMesh: 10000,  // Split if more instances needed
+    maxInstancesPerMesh: 10000,  // default per-field instance capacity; callers with a known size pass their own maxInstances
     targetFPS: 60,
     warnRenderTime: 16.67,  // ms (1 frame at 60fps)
     defaultMaxGroups: 4    // Initial group DataTexture height (grows on demand)
