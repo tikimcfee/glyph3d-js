@@ -134,6 +134,21 @@ export class AttentionManager {
     }
 
     /**
+     * Release any slot whose entity is gone (its registry id was unregistered). Driven by the
+     * registry's removal event, so closing a FOCUSED window drops focus + the keystroke target
+     * instead of routing input to a corpse ("can't interact with anything after I close it"). Each
+     * cleared slot emits change:<slot>, so dependent consumers (InteractionContext, the keystroke
+     * router, the panels) re-arm. This is how attention "handles its own removal".
+     * @param {(id:string)=>boolean} isLive returns true while an id is still registered
+     */
+    pruneGone(isLive) {
+        for (const slot of SLOTS) {
+            const v = this.state[slot];
+            if (v && v.id != null && !isLive(v.id)) this.set(slot, null);
+        }
+    }
+
+    /**
      * Clear one slot (`clear(slot)`) or all slots (`clear()`).
      * @param {'hover'|'primary'|'key'} [slot]
      */

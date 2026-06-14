@@ -10,6 +10,7 @@
 
 import * as THREE from 'three';
 import CameraDock from '../packages/glyph3d-core/src/services/interaction/CameraDock.js';
+import { AttentionManager } from '../packages/glyph3d-core/src/services/interaction/AttentionManager.js';
 
 let failures = 0;
 const ok = (c, m) => { console.log(`${c ? '✓' : '✗ FAIL'} ${m}`); if (!c) failures++; };
@@ -57,5 +58,19 @@ const g3 = mockWindow(); scene.add(g3); dock.lock('t3', g3);
 dock.pruneDismissed((id) => true); // everything live → nothing dismissed
 ok(dock.has('t3'), 'pruneDismissed: a still-live tile is kept');
 
-console.log(failures === 0 ? '\nPASS — close cascades to the dock (dismiss + prune)' : `\nFAIL — ${failures} assertion(s)`);
+// ---- attention releases a focused window when it's removed (the "can't interact" half) ----
+{
+  const am = new AttentionManager();
+  am.set('primary', 'term-x');
+  am.set('key', 'term-x');
+  am.set('hover', 'other');
+  ok(am.get('primary')?.id === 'term-x' && am.get('key')?.id === 'term-x', 'precondition: term-x is the focus + keystroke target');
+  // term-x is closed (unregistered) — everything else still live
+  am.pruneGone((id) => id !== 'term-x');
+  ok(am.get('primary') === null, 'pruneGone: focus released from the closed window');
+  ok(am.get('key') === null, 'pruneGone: keystroke target released (input no longer routes to a corpse)');
+  ok(am.get('hover')?.id === 'other', 'pruneGone: a slot pointing at a live entity is kept');
+}
+
+console.log(failures === 0 ? '\nPASS — close cascades to dock + attention (dismiss + prune)' : `\nFAIL — ${failures} assertion(s)`);
 process.exit(failures === 0 ? 0 : 1);

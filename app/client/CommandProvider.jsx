@@ -271,12 +271,17 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // Fold the persisted Dock settings into the freshly-built dock — its apply()s only
     // fire on a user change, so without this a stored value would wait until next touch.
     applyGroupSettings(state.ctx, 'Dock');
-    // However a docked window is closed (terminal.kill→close, grid.remove, scene clear), its
-    // registry entry vanishes — the dock self-heals off that single event: dismiss any tile whose
-    // window is no longer live (orphan lifted, focus cleared, bar re-packed). One cascade, every
-    // close path; no closer needs to know the window happened to be docked.
-    const dockPrune = () => cameraDock.pruneDismissed((id) => state.ctx.registry.has(id));
-    state.ctx.registry.addChangeListener(dockPrune);
+    // Removal cascade: however a window is closed (terminal.kill→close, grid.remove, scene clear),
+    // its registry entry vanishes — and the holders self-heal off that single event. Attention
+    // releases focus/keystroke-target from the gone id (else input routes to a corpse); the dock
+    // dismisses its tile (orphan lifted, focus cleared, bar re-packed). One cascade, every close
+    // path; no closer needs to know the window was focused or docked.
+    const onRemoval = () => {
+      const isLive = (id) => state.ctx.registry.has(id);
+      state.ctx.attentionManager?.pruneGone?.(isLive);
+      cameraDock.pruneDismissed(isLive);
+    };
+    state.ctx.registry.addChangeListener(onRemoval);
 
     // The composable "what is the user locked into" projection — focus/edit/key
     // nodes derived from attention + cursor state (owns nothing). The breadcrumb
@@ -425,7 +430,7 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       state.ctx.interactionContext?.dispose();
       state.ctx.interactionContext = null;
       if (state.ctx.cameraDock) {
-        state.ctx.registry.removeChangeListener(dockPrune);
+        state.ctx.registry.removeChangeListener(onRemoval);
         scene.remove(state.ctx.cameraDock);
         state.ctx.cameraDock.dispose();
         state.ctx.cameraDock = null;
