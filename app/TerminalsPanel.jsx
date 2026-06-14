@@ -59,10 +59,11 @@ function readTerminals(client) {
   if (!registry?.findByType) return [];
   return registry.findByType('terminal').map((e) => e.id);
 }
-// Live dims for one terminal (post-resize, read off the grid not the stale meta).
+// Live dims for one terminal — read off the grid (the live cache), the one place that always
+// carries the rendered dimensions. (The registry no longer mirrors size; the model decides it.)
 function readDims(client, id) {
   const e = client?.ctx?.registry?.get?.(id);
-  return e ? `${e.grid?.cols ?? e.meta?.cols ?? '?'}×${e.grid?.rows ?? e.meta?.rows ?? '?'}` : '';
+  return e ? `${e.grid?.cols ?? '?'}×${e.grid?.rows ?? '?'}` : '';
 }
 
 export default function TerminalsPanel({ client }) {

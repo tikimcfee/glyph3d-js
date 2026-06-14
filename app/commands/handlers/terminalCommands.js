@@ -156,11 +156,12 @@ export default function registerTerminalCommands(router) {
             }
 
             // Register in the scene registry so spatial commands, highlight, etc. work.
+            // Size is NOT stored here — the WorkspaceModel surface record is the one decider of a
+            // terminal's cols/rows; the registry entry, the live grid, the emulator and the PTY are
+            // caches told by it. (The grid carries the live dimensions for anything that needs them.)
             ctx.registry.register(id, grid, {
                 type: 'terminal',
                 terminalId: id,
-                cols,
-                rows,
                 owner,
             });
 
@@ -241,12 +242,7 @@ export default function registerTerminalCommands(router) {
 
         log.info(`resize ${id} ${from} → ${cols}x${rows}${where}`);
 
-        // Update registry metadata if it exists
         const info = ctx.registry.get(id);
-        if (info) {
-            info.cols = cols;
-            info.rows = rows;
-        }
 
         // Tell the owning adapter so it resizes the REAL PTY (pty.Setsize → SIGWINCH →
         // tmux). Without this the shell keeps its old winsize and reflow breaks — the
