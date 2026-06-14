@@ -49,6 +49,18 @@ const {
 /** Upper bound on quadratic beziers per glyph (TSL loop cap). */
 const MAX_CURVES = 256;
 
+/**
+ * Render modes. These integers cross the JS→GPU boundary as a numeric uniform
+ * (WGSL has no enums — a uniform is a scalar), so the value itself must stay a
+ * small int; the shader casts the uniform with int() and compares with .equal().
+ *
+ * Used in two places with the SAME numbers:
+ *   - the per-instance `vMode` varying (the fragment branch selector), and
+ *   - the field-level `_renderMode` uniform, where GLYPH lets the per-glyph map
+ *     pick SLUG vs BITMAP, and FRAME forces every instance to the frame branch.
+ */
+const RENDER_MODE = Object.freeze({ GLYPH: 0, BITMAP: 1, FRAME: 2 });
+
 import { PERF_THRESHOLDS } from './core/constants.js';
 
 const MAX_GROUPS_DEFAULT = PERF_THRESHOLDS.defaultMaxGroups ?? 64;
@@ -82,7 +94,7 @@ function _buildVertexNode(uniforms) {
     const vMode       = varying(int(0),   'vMode');
     const vEmojiCell  = varying(int(0),   'vEmojiCell');
 
-    const { groupTex, groupTexHeight, highlightTex, glyphMapTex, glyphMapWidth, clipEnabled, clipTop, clipBottom } = uniforms;
+    const { groupTex, groupTexHeight, highlightTex, glyphMapTex, glyphMapWidth, clipEnabled, clipTop, clipBottom, renderMode } = uniforms;
 
     const vertexFn = Fn(() => {
         // Glyph-map lookup: glyphId → curve range + mode (RGBA32Uint, 1 texel/glyph).
@@ -96,6 +108,16 @@ function _buildVertexNode(uniforms) {
         vMode.assign(int(glyphInfo.z));
         vEmojiCell.assign(int(glyphInfo.w));
 
+        // Frame mode (field-level): the WHOLE field samples an external frame texture
+        // (screen capture / video / image) as an NxM grid. The cell index comes
+        // straight from instanceGlyphId — no glyph-map, no Slug, no atlas — and vMode
+        // is forced to FRAME so the fragment takes the frame branch. renderMode is a
+        // numeric uniform; cast to int and compare exactly (0/2 are exact in float).
+        If(int(renderMode).equal(int(RENDER_MODE.FRAME)), () => {
+            vMode.assign(int(RENDER_MODE.FRAME));
+            vEmojiCell.assign(int(iGlyphId));
+        });
+
         // For bitmap (emoji) glyphs the atlas cell is square, but a monospace glyph quad
         // is narrow (iSize.x ≈ 0.5·iSize.y). Sampling a square emoji into a narrow quad
         // squishes it horizontally. Fix: use iSize.y for the quad width when mode == 1,
@@ -105,7 +127,10 @@ function _buildVertexNode(uniforms) {
         // not modified — so columns stay aligned. Dense emoji runs will visually overlap;
         // the proper terminal-correct fix (double-width advance) is deferred.
         // .select(trueValue, falseValue) on a bool node — ConditionalNode API.
-        const isBitmap = int(glyphInfo.z).equal(int(1));
+        // Read the RESOLVED vMode (not glyphInfo.z): in frame mode vMode is FRAME, so
+        // isBitmap is false and the quad keeps its real cell width (iSize.x) instead of
+        // being forced square like an emoji cell.
+        const isBitmap = vMode.equal(int(RENDER_MODE.BITMAP));
         const quadW    = isBitmap.select(iSize.y, iSize.x); // square for emoji, narrow for slug
 
         // Scale base quad by per-instance size
@@ -181,7 +206,7 @@ function _buildVertexNode(uniforms) {
  */
 function _buildOutputNode(varyings, uniforms) {
     const { vColor, vGroupAlpha, vAddedColor, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell } = varyings;
-    const { curveTex, emojiTex, emojiCols } = uniforms;
+    const { curveTex, emojiTex, emojiCols, frameTex, frameCols, frameRows } = uniforms;
 
     // Minification tuning knobs (see below). DILATE_PX = half-width, in pixels, of the
     // stroke fattening applied at full zoom-out; SOFTEN = how much the AA ramp widens.
@@ -196,7 +221,31 @@ function _buildOutputNode(varyings, uniforms) {
         // Output color accumulator; filled by whichever branch executes.
         const outColor = vec4(0).toVar();
 
-        If(vMode.equal(int(1)), () => {
+        If(vMode.equal(int(RENDER_MODE.FRAME)), () => {
+            // ── Frame branch: external NxM video/image grid sampled as the atlas ──
+            // Field-level frame mode (vertex forced vMode = 2). The source frame is a
+            // grid of `frameCols × frameRows` equal cells; the cell index is the
+            // per-instance vEmojiCell (= instanceGlyphId). Independent cols/rows (unlike
+            // the single-`emojiCols` emoji path) so a 16:9 capture reassembles without
+            // square-cell squish. vGlyphUV is [0,1]² across the quad → the sub-cell.
+            const fcol = float(vEmojiCell).mod(frameCols);
+            const frow = float(vEmojiCell).div(frameCols).floor();
+            const frameUV = vec2(
+                fcol.add(vGlyphUV.x).div(frameCols),
+                frow.add(float(1).sub(vGlyphUV.y)).div(frameRows)   // flip v (same as emoji atlas)
+            );
+            const ftexel = frameTex.sample(frameUV);
+            // vColor (instanceColor) modulates: white = the frame's true color, or a
+            // per-cell tint for effects. The frame texture is tagged SRGBColorSpace, so
+            // three's texture node already linearizes on sample (the documented WebGPU
+            // VideoTexture path) — do NOT pow() here, that would double-decode. If the
+            // frame looks too bright/washed, the conversion isn't reaching this
+            // outputNode: tag the texture NoColorSpace and restore .pow(vec3(2.2)),
+            // matching the emoji branch's manual decode below. (colorspace dial)
+            outColor.assign(vec4(ftexel.rgb.mul(vColor), ftexel.a.mul(vGroupAlpha)));
+
+        }).Else(() => {
+        If(vMode.equal(int(RENDER_MODE.BITMAP)), () => {
             // ── Bitmap / emoji branch ────────────────────────────────────────────
             // Atlas is a square grid of `emojiCols × emojiCols` equal-sized cells.
             // cell index → (col = cell % cols, row = floor(cell / cols)).
@@ -326,6 +375,7 @@ function _buildOutputNode(varyings, uniforms) {
             // (which needs sRGB output and goes dark if output encoding is disabled).
             outColor.assign(vec4(finalColor.pow(vec3(2.2)), outAlpha));
         });
+        });   // close frame-mode .Else (wraps the emoji/slug If·Else)
 
         return outColor;
     })();
@@ -520,6 +570,11 @@ function _getSharedFieldMaterial(kind) {
     const clipBottomNode   = _fieldUniform(0, (f) => f._clipBottomVal);
     const emojiTexNode     = _fieldTexture(_makePlaceholderRGBATexture(), '_emojiTexture');
     const emojiColsNode    = _fieldUniform(16, (f) => f._emojiCols);
+    // Frame-mode (external NxM image/video) nodes — resolve per object like the rest.
+    const renderModeNode   = _fieldUniform(RENDER_MODE.GLYPH, (f) => f._renderMode || RENDER_MODE.GLYPH);
+    const frameTexNode     = _fieldTexture(_makePlaceholderRGBATexture(), '_frameTexture');
+    const frameColsNode    = _fieldUniform(1, (f) => f._frameCols || 1);
+    const frameRowsNode    = _fieldUniform(1, (f) => f._frameRows || 1);
 
     const { vertexFn, vColor, vGroupAlpha, vAddedColor, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell } =
         _buildVertexNode({
@@ -531,13 +586,17 @@ function _getSharedFieldMaterial(kind) {
             clipEnabled:    clipEnabledNode,
             clipTop:        clipTopNode,
             clipBottom:     clipBottomNode,
+            renderMode:     renderModeNode,
         });
 
     const outputNode = kind === 'occluder'
         ? _buildOccluderOutputNode({ vColor, vGroupAlpha, vCurveCount })
         : _buildOutputNode(
             { vColor, vGroupAlpha, vAddedColor, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell },
-            { curveTex: curveTexNode, emojiTex: emojiTexNode, emojiCols: emojiColsNode }
+            {
+                curveTex: curveTexNode, emojiTex: emojiTexNode, emojiCols: emojiColsNode,
+                frameTex: frameTexNode, frameCols: frameColsNode, frameRows: frameRowsNode,
+            }
         );
 
     material = new MeshBasicNodeMaterial();
@@ -641,6 +700,14 @@ export default class GlyphField {
         this._clipBottomVal  = 0;
         this._emojiTexture   = null;
         this._emojiCols      = 16;
+
+        // Frame mode: render the whole field as an NxM grid sampled from an external
+        // texture (screen capture / video / image) instead of glyphs. Defaults to the
+        // GLYPH path; setFrameTexture() flips it to FRAME (see RENDER_MODE).
+        this._renderMode   = RENDER_MODE.GLYPH;
+        this._frameTexture = null;
+        this._frameCols    = 1;
+        this._frameRows    = 1;
 
         // Slug curve + glyph-map textures (resolved in _ensureSlugTextures)
         this._curveTexture    = null;
@@ -791,6 +858,23 @@ export default class GlyphField {
             this._emojiTexture = tex;
             this._emojiCols   = this.atlas._emojiAtlas.cols;
         }
+    }
+
+    /**
+     * Put the field into frame mode: render every instance as a cell of an external
+     * NxM grid texture (screen capture / video / image) instead of a glyph. The
+     * per-instance cell index is the existing instanceGlyphId (0 = top-left, row
+     * major). Pass a null texture to return the field to normal glyph rendering.
+     *
+     * @param {THREE.Texture|null} tex - filterable RGBA texture (VideoTexture/CanvasTexture/DataTexture)
+     * @param {number} cols - number of cells across the source frame
+     * @param {number} rows - number of cells down the source frame
+     */
+    setFrameTexture(tex, cols, rows) {
+        this._frameTexture = tex || null;
+        this._frameCols    = Math.max(1, Math.floor(cols) || 1);
+        this._frameRows    = Math.max(1, Math.floor(rows) || 1);
+        this._renderMode   = tex ? RENDER_MODE.FRAME : RENDER_MODE.GLYPH;
     }
 
     /**

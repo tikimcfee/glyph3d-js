@@ -190,6 +190,7 @@ export default function ButtonBar({ client, onOpenPalette }) {
       >commands ⌘K</button>
       <span style={styles.sep} />
       <Btn label="fit" title="frame all grids in view" cmd="camera.fitall" client={client} />
+      <Btn label="capture" title="capture the OS screen share into a FrameGrid" cmd="frame.capture" client={client} />
       <ConnectionChip client={client} />
     </div>
   );
