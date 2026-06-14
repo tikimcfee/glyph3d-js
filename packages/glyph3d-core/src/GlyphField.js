@@ -82,7 +82,7 @@ function _buildVertexNode(uniforms) {
     const vMode       = varying(int(0),   'vMode');
     const vEmojiCell  = varying(int(0),   'vEmojiCell');
 
-    const { groupTex, groupTexHeight, highlightTex, glyphMapTex, glyphMapWidth, clipEnabled, clipTop, clipBottom } = uniforms;
+    const { groupTex, groupTexHeight, highlightTex, glyphMapTex, glyphMapWidth, clipEnabled, clipTop, clipBottom, renderMode } = uniforms;
 
     const vertexFn = Fn(() => {
         // Glyph-map lookup: glyphId → curve range + mode (RGBA32Uint, 1 texel/glyph).
@@ -95,6 +95,16 @@ function _buildVertexNode(uniforms) {
         // Channels .z/.w added by FontChain: mode (0=slug, 1=bitmap) and emoji cell index.
         vMode.assign(int(glyphInfo.z));
         vEmojiCell.assign(int(glyphInfo.w));
+
+        // Frame mode (field-level, renderMode == 2): the WHOLE field samples an
+        // external frame texture (screen capture / video / image) as an NxM grid.
+        // The cell index comes straight from instanceGlyphId — no glyph-map, no Slug,
+        // no atlas — and mode is forced to 2 so the fragment takes the frame branch.
+        // (renderMode is a float uniform; > 1.5 reads true for the integer value 2.)
+        If(renderMode.greaterThan(float(1.5)), () => {
+            vMode.assign(int(2));
+            vEmojiCell.assign(int(iGlyphId));
+        });
 
         // For bitmap (emoji) glyphs the atlas cell is square, but a monospace glyph quad
         // is narrow (iSize.x ≈ 0.5·iSize.y). Sampling a square emoji into a narrow quad
@@ -181,7 +191,7 @@ function _buildVertexNode(uniforms) {
  */
 function _buildOutputNode(varyings, uniforms) {
     const { vColor, vGroupAlpha, vAddedColor, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell } = varyings;
-    const { curveTex, emojiTex, emojiCols } = uniforms;
+    const { curveTex, emojiTex, emojiCols, frameTex, frameCols, frameRows } = uniforms;
 
     // Minification tuning knobs (see below). DILATE_PX = half-width, in pixels, of the
     // stroke fattening applied at full zoom-out; SOFTEN = how much the AA ramp widens.
@@ -196,6 +206,26 @@ function _buildOutputNode(varyings, uniforms) {
         // Output color accumulator; filled by whichever branch executes.
         const outColor = vec4(0).toVar();
 
+        If(vMode.equal(int(2)), () => {
+            // ── Frame branch: external NxM video/image grid sampled as the atlas ──
+            // Field-level frame mode (vertex forced vMode = 2). The source frame is a
+            // grid of `frameCols × frameRows` equal cells; the cell index is the
+            // per-instance vEmojiCell (= instanceGlyphId). Independent cols/rows (unlike
+            // the single-`emojiCols` emoji path) so a 16:9 capture reassembles without
+            // square-cell squish. vGlyphUV is [0,1]² across the quad → the sub-cell.
+            const fcol = float(vEmojiCell).mod(frameCols);
+            const frow = float(vEmojiCell).div(frameCols).floor();
+            const frameUV = vec2(
+                fcol.add(vGlyphUV.x).div(frameCols),
+                frow.add(float(1).sub(vGlyphUV.y)).div(frameRows)   // flip v (same as emoji atlas)
+            );
+            const ftexel = frameTex.sample(frameUV);
+            // vColor (instanceColor) modulates: white = the frame's true color, or a
+            // per-cell tint for effects. pow(2.2) decodes display-sRGB → linear to match
+            // the renderer's sRGB output re-encode (identical reasoning to emoji below).
+            outColor.assign(vec4(ftexel.rgb.pow(vec3(2.2)).mul(vColor), ftexel.a.mul(vGroupAlpha)));
+
+        }).Else(() => {
         If(vMode.equal(int(1)), () => {
             // ── Bitmap / emoji branch ────────────────────────────────────────────
             // Atlas is a square grid of `emojiCols × emojiCols` equal-sized cells.
@@ -326,6 +356,7 @@ function _buildOutputNode(varyings, uniforms) {
             // (which needs sRGB output and goes dark if output encoding is disabled).
             outColor.assign(vec4(finalColor.pow(vec3(2.2)), outAlpha));
         });
+        });   // close frame-mode .Else (wraps the emoji/slug If·Else)
 
         return outColor;
     })();
@@ -520,6 +551,11 @@ function _getSharedFieldMaterial(kind) {
     const clipBottomNode   = _fieldUniform(0, (f) => f._clipBottomVal);
     const emojiTexNode     = _fieldTexture(_makePlaceholderRGBATexture(), '_emojiTexture');
     const emojiColsNode    = _fieldUniform(16, (f) => f._emojiCols);
+    // Frame-mode (external NxM image/video) nodes — resolve per object like the rest.
+    const renderModeNode   = _fieldUniform(0, (f) => f._renderMode || 0);
+    const frameTexNode     = _fieldTexture(_makePlaceholderRGBATexture(), '_frameTexture');
+    const frameColsNode    = _fieldUniform(1, (f) => f._frameCols || 1);
+    const frameRowsNode    = _fieldUniform(1, (f) => f._frameRows || 1);
 
     const { vertexFn, vColor, vGroupAlpha, vAddedColor, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell } =
         _buildVertexNode({
@@ -531,13 +567,17 @@ function _getSharedFieldMaterial(kind) {
             clipEnabled:    clipEnabledNode,
             clipTop:        clipTopNode,
             clipBottom:     clipBottomNode,
+            renderMode:     renderModeNode,
         });
 
     const outputNode = kind === 'occluder'
         ? _buildOccluderOutputNode({ vColor, vGroupAlpha, vCurveCount })
         : _buildOutputNode(
             { vColor, vGroupAlpha, vAddedColor, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell },
-            { curveTex: curveTexNode, emojiTex: emojiTexNode, emojiCols: emojiColsNode }
+            {
+                curveTex: curveTexNode, emojiTex: emojiTexNode, emojiCols: emojiColsNode,
+                frameTex: frameTexNode, frameCols: frameColsNode, frameRows: frameRowsNode,
+            }
         );
 
     material = new MeshBasicNodeMaterial();
@@ -641,6 +681,14 @@ export default class GlyphField {
         this._clipBottomVal  = 0;
         this._emojiTexture   = null;
         this._emojiCols      = 16;
+
+        // Frame mode: render the whole field as an NxM grid sampled from an external
+        // texture (screen capture / video / image) instead of glyphs. renderMode 0 =
+        // glyph (default), 2 = frame. Set via setFrameTexture().
+        this._renderMode   = 0;
+        this._frameTexture = null;
+        this._frameCols    = 1;
+        this._frameRows    = 1;
 
         // Slug curve + glyph-map textures (resolved in _ensureSlugTextures)
         this._curveTexture    = null;
