@@ -37,12 +37,9 @@
  * @property {Object} grid        - the live Object3D (CodeGrid / TerminalGrid)
  * @property {Object|null} homeParent
  * @property {{pos:{x,y,z}, scale:number, quat:THREE.Quaternion}} home
- * @property {number} naturalH    - world height at scale 1 (for tile-scale math)
- * @property {number|null} focusHeightFrac - focus-slot size INTENT: the tile's target
- *   apparent height in the focus area, as a fraction of the view. null = a never-grown
- *   tile that follows the live global `focusFrac`. A resize done WHILE FOCUSED bumps it
- *   (free-grow), so the grown size is recorded here and survives a focus toggle instead
- *   of being re-derived from the rendered transform.
+ * @property {{h:number,cx:number,cy:number,cz:number}} _extentFallback - last-resort content
+ *   extent for a transient empty-bounds read; the LIVE grid.getLocalBounds() (via _extentOf)
+ *   is preferred. Content size is derived, never cached as a delta.
  * @property {number} slot
  * @property {THREE.Quaternion} quatTarget - orientation the tile slerps toward
  */
@@ -65,6 +62,20 @@ function reachesScene(obj) {
         o = o.parent;
     }
     return false;
+}
+
+/** A grid's content extent in its OWN local frame (scale-free, orientation-free): panel height
+ *  + the origin→center offset. Pulled from a local-frame Box3; null if empty. This is the dock's
+ *  content-size truth — read LIVE from the grid each time it's needed, never cached and
+ *  delta-updated (the cached `*= ratio` form desynced from cols/rows and double-applied). */
+function extentFromBox(lb) {
+    if (!lb || lb.isEmpty?.()) return null;
+    return {
+        h: Math.max(lb.max.y - lb.min.y, 1e-3),
+        cx: (lb.min.x + lb.max.x) * 0.5,
+        cy: (lb.min.y + lb.max.y) * 0.5,
+        cz: (lb.min.z + lb.max.z) * 0.5,
+    };
 }
 
 export class CameraDock extends THREE.Object3D {
@@ -213,33 +224,14 @@ export class CameraDock extends THREE.Object3D {
     lock(id, grid) {
         if (!grid || this.entries.has(id)) return false;
 
-        // World bounds BEFORE reparent/scale: tile scale is computed against the
-        // window's natural size (getBounds is world-space, includes current scale).
+        // World bounds at lock, for the home framing (dock.focus) and the home PLACEMENT to
+        // animate back to on release. Content EXTENT (height + center offset) is NOT captured
+        // here — it's derived live from grid.getLocalBounds() each time it's needed (_extentOf),
+        // so a resize can never desync a cached copy.
         const b = grid.getBounds?.();
-        // The RESOLVED world scale (placement · user) is what getBounds reflects, so it
-        // is the divisor that brings measurements back to user-free LOCAL units — both
-        // naturalH and centerOffset. The home PLACEMENT (user-free) is what release
-        // animates back to; resolve() re-applies the persisted zoom on top.
+        const hasBounds = b && !b.isEmpty?.();
         const resolvedScale = grid.scale.x || 1;
         const homePlacement = grid.scaleModel ? grid.scaleModel.placement : resolvedScale;
-        const hasBounds = b && !b.isEmpty?.();
-        const worldH = hasBounds ? (b.max.y - b.min.y) : 10;
-
-        // Grids are top-anchored (origin at top-left; content flows down/right), so the
-        // origin is NOT the visual center. Capture the origin→bounds-center vector in the
-        // window's own LOCAL units (user/placement divided out) so _relayout can place
-        // the tile's CENTER in its slot at any scale: targetOrigin = slotCenter −
-        // centerOffset·(placement·user). _animateTile re-applies that effective scale.
-        let centerOffset = { x: 0, y: 0, z: 0 };
-        if (hasBounds) {
-            const origin = grid.getWorldPosition(new THREE.Vector3());
-            const center = b.getCenter(new THREE.Vector3());
-            centerOffset = {
-                x: (center.x - origin.x) / resolvedScale,
-                y: (center.y - origin.y) / resolvedScale,
-                z: (center.z - origin.z) / resolvedScale,
-            };
-        }
 
         const entry = {
             id,
@@ -250,16 +242,9 @@ export class CameraDock extends THREE.Object3D {
                 scale: homePlacement, // release animates PLACEMENT home; resolve re-adds zoom
                 quat: grid.quaternion.clone(),
             },
-            naturalH: Math.max(worldH / resolvedScale, 1e-3),
-            // Focus-slot size intent. null until the tile is grown while focused, so a fresh
-            // tile spotlights at the live global focusFrac; free-grow records the grown size here.
-            focusHeightFrac: null,
-            centerOffset,
-            // Cell-grid dimensions at lock — refreshTile scales naturalH/centerOffset by
-            // the col/row ratio when the tile resizes (cell metrics are constant, so the
-            // natural extent scales linearly with the grid), avoiding a world-AABB
-            // re-measure that the tile's eye-facing rotation would corrupt.
-            dims: { cols: grid.cols ?? 0, rows: grid.rows ?? 0 },
+            // Fallback only for a transient empty-bounds read; the live getLocalBounds path wins.
+            _extentFallback: extentFromBox(grid.getLocalBounds?.()) ||
+                { h: hasBounds ? Math.max((b.max.y - b.min.y) / resolvedScale, 1e-3) : 10, cx: 0, cy: 0, cz: 0 },
             unsubscribeResize: null,
             // The world AABB the window had at home, captured before docking — dock.focus
             // frames THIS (computed, stable) rather than the tile's live mid-slide bounds.
@@ -273,9 +258,9 @@ export class CameraDock extends THREE.Object3D {
         this.attach(grid);
 
         // The dock reacts to the tile actually changing size (grip-resize, terminal.resize,
-        // CLI) — re-pack so a resized tile never overlaps the bar and a focused tile grows
-        // in place. Terminals expose onResize; grids that don't simply never refresh.
-        entry.unsubscribeResize = grid.onResize?.((c, r) => this.refreshTile(id, c, r)) ?? null;
+        // CLI) — just re-place it (reflowTile reads the new extent live). Terminals expose
+        // onResize; grids that don't simply never refresh.
+        entry.unsubscribeResize = grid.onResize?.(() => this.reflowTile(id)) ?? null;
 
         // Register as chrome so the camera's dynamic-speed / fit-all sampling skips it
         // (a tile pinned ahead of the camera would otherwise brake every move).
@@ -394,13 +379,18 @@ export class CameraDock extends THREE.Object3D {
         return { w: h * (e.boxAspect ?? this.boxAspect), h };
     }
 
+    /** The entry's content extent, derived LIVE from the grid (never a cached delta). @returns
+     *  {{h:number,cx:number,cy:number,cz:number}} */
+    _extentOf(e) { return extentFromBox(e.grid.getLocalBounds?.()) || e._extentFallback; }
+
     /** Contain-fit: the EFFECTIVE (rendered) scale that sits an entry's natural content INSIDE
      *  box (w,h) with aspect preserved — tall content pillarboxes, wide content letterboxes.
      *  The footprint stays the box; only the content shrinks, never the slot. This is a RENDERED
      *  scale (it ignores zoom), so the bar shows box-fit no matter what zoom is dialed in. */
     _containScale(e, box) {
-        const nW = Math.max(2 * Math.abs(e.centerOffset.x), 1e-3); // local content width (top-left anchored)
-        const nH = Math.max(e.naturalH, 1e-3);
+        const ext = this._extentOf(e);
+        const nW = Math.max(2 * Math.abs(ext.cx), 1e-3); // local content width (top-left anchored)
+        const nH = Math.max(ext.h, 1e-3);
         return Math.min(box.w / nW, box.h / nH);
     }
 
@@ -409,20 +399,18 @@ export class CameraDock extends THREE.Object3D {
      *  (the animator re-applies it via resolve) — see _animateTile. */
     _userOf(e) { return (e.grid.scaleModel && e.grid.scaleModel.user.x) || 1; }
 
-    /** Place the focused tile: centered, height-fit to the tile's TRACKED focus size, pulled
-     *  toward the eye (focusDistFrac) so it renders in front of the dock sphere. This is the
-     *  "read it" state — not box-bounded — so the dialed zoom DOES show here (eff = height-fit ·
-     *  zoom): focus is where reading happens, the bar is where the icon sits.
+    /** Place the focused tile: centered, height-fit to `focusFrac`, pulled toward the eye
+     *  (focusDistFrac) so it renders in front of the dock sphere. This is the "read it" state —
+     *  not box-bounded — so the dialed zoom DOES show here (eff = focusFrac-fit · zoom): focus is
+     *  where reading happens, the bar is where the icon sits.
      *
-     *  The target height is per-window INTENT (`e.focusHeightFrac`), not the global default —
-     *  so a tile spotlights at the size you last left it, and a resize/rescale done while
-     *  focused survives a focus toggle. null = a never-grown tile, which follows the live global
-     *  `focusFrac` (so tuning it in Settings still moves fresh tiles). Computing eff from this
-     *  durable intent (not the live grid.scale.x) is what removed the resize→scale snap. */
+     *  Size is a PURE FUNCTION of the live extent + zoom + focusFrac — no stored per-tile focus
+     *  state. Resize reshapes content inside the fixed focus box (more rows → smaller cells);
+     *  zoom changes the box size; both compose and persist with no toggle snap. (The earlier
+     *  free-grow stored a per-tile height that delta-desynced from cols/rows — the double.) */
     _placeFocus(e) {
         const fd = this.focusDistFrac;
-        const heightFrac = e.focusHeightFrac ?? this.focusFrac;
-        const eff = (this._viewH * heightFrac / Math.max(e.naturalH, 1e-3)) * fd * this._userOf(e);
+        const eff = (this._viewH * this.focusFrac / Math.max(this._extentOf(e).h, 1e-3)) * fd * this._userOf(e);
         this._animateTile(e, 0, this._viewH * this.focusY * fd, this.distance * (1 - fd), eff);
         const d = this.attentionManager?.docks?.get(e.id);
         if (d) d.offset = { slot: 'focus' };
@@ -442,7 +430,8 @@ export class CameraDock extends THREE.Object3D {
         if (faceDir) e.quatTarget.setFromUnitVectors(_z, faceDir);
         else e.quatTarget.identity();
 
-        _off.set(e.centerOffset.x * eff, e.centerOffset.y * eff, e.centerOffset.z * eff)
+        const ext = this._extentOf(e);
+        _off.set(ext.cx * eff, ext.cy * eff, ext.cz * eff)
             .applyQuaternion(e.quatTarget);
         const target = { x: sx - _off.x, y: sy - _off.y, z: sz - _off.z };
         this.animator.animateTo(e.grid, 'position', target, { duration: this.animDur });
@@ -551,39 +540,11 @@ export class CameraDock extends THREE.Object3D {
     }
 
     /**
-     * React to a docked tile changing size (subscribed via grid.onResize at lock).
-     * Cell metrics are constant, so the natural extent scales linearly with the cell
-     * grid — scale naturalH/centerOffset by the col/row ratio rather than re-measuring
-     * the world AABB (which the tile's eye-facing rotation would distort). A BAR tile
-     * re-packs (fit stays bounded); the FOCUSED tile grows in place — see below.
-     * @param {string} id @param {number} cols @param {number} rows
-     */
-    refreshTile(id, cols, rows) {
-        const e = this.entries.get(id);
-        if (!e || !e.dims) return;
-        const cx = e.dims.cols ? cols / e.dims.cols : 1;
-        const ry = e.dims.rows ? rows / e.dims.rows : 1;
-        e.naturalH = Math.max(e.naturalH * ry, 1e-3);
-        e.centerOffset = { x: e.centerOffset.x * cx, y: e.centerOffset.y * ry, z: e.centerOffset.z };
-        e.dims = { cols, rows };
-        // FREE-GROW as recorded INTENT: a resize done WHILE FOCUSED grows the focus size with the
-        // row count (focusHeightFrac ∝ naturalH → placement held → per-cell size constant → the
-        // panel visibly upsizes as you drag). Storing it in the intent — not leaving it implicit
-        // in the rendered scale — is what lets a focus toggle restore it instead of snapping back.
-        // A bar resize leaves it untouched, so a never-grown tile keeps fitting to focusFrac.
-        if (id === this.focusedId) e.focusHeightFrac = (e.focusHeightFrac ?? this.focusFrac) * ry;
-        this.reflowTile(id);
-    }
-
-    /**
-     * Re-place a docked tile after a size change, without a full membership pass — called by
-     * refreshTile when a terminal's cell grid changes (and by window.scale). The FOCUSED tile
-     * re-places from its tracked focus-size intent (`_placeFocus` reads `focusHeightFrac`), which
-     * refreshTile has already grown for a resize — so free-grow happens, but it lives in the
-     * intent rather than in the rendered transform. Reading grid.scale.x back as truth was the
-     * resize→scale coupling: it left a size nothing recorded, so the next spotlight re-derived a
-     * different one and the tile snapped. A bar tile re-contains into its FIXED slot box, so the
-     * row never reshuffles on resize — only the content rescales inside the unchanged slot.
+     * Re-place a docked tile after a size or zoom change — the grid.onResize tap and window.scale
+     * both land here. There is no size math to do: the FOCUSED tile re-fits to `focusFrac` and the
+     * BAR tile re-contains into its FIXED slot box, BOTH reading the grid's current extent live
+     * (_extentOf). So a resize reshapes the content inside an unchanged slot, idempotently — no
+     * cached delta to desync, no rendered-scale read-back, no toggle snap.
      * @param {string} id
      * @returns {boolean}
      */

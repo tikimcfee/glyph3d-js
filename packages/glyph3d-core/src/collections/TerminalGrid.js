@@ -608,7 +608,7 @@ export default class TerminalGrid extends THREE.Object3D {
      * Set the user ZOOM — readability scale, independent of cols/rows/PTY and of the
      * dock's tile-fit. A number is uniform (glyph aspect preserved); an {x,y,z} is the
      * deliberate per-axis stretch. Composed onto this.scale via the ScaleModel; when
-     * docked, the dock reads it back for layout (call dock.refreshTile to re-place).
+     * docked, the dock reads it back for layout (call dock.reflowTile to re-place).
      * @param {number|{x?:number,y?:number,z?:number}} factor
      */
     setZoom(factor) {
