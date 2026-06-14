@@ -12,11 +12,16 @@
 import * as THREE from 'three';
 import FrameGrid from '@glyph3d/core/collections/FrameGrid.js';
 
-/** Parse a "COLSxROWS" dims arg (e.g. "16x9"); falls back to defaults. */
-function parseDims(arg, defCols, defRows) {
-    if (typeof arg !== 'string') return { cols: defCols, rows: defRows };
+/** Default cell budget when dims aren't given — see FrameGrid.deriveGrid. Cell count is
+ *  scatter granularity, not image detail, so this is a perf/taste ceiling. */
+const DEFAULT_CELL_BUDGET = 4096;
+
+/** Parse an explicit "COLSxROWS" dims arg (e.g. "16x9"); null if absent/unparseable
+ *  (the capture path then derives a grid from the real frame size). */
+function parseDims(arg) {
+    if (typeof arg !== 'string') return null;
     const m = arg.match(/^(\d+)\s*[xX]\s*(\d+)$/);
-    if (!m) return { cols: defCols, rows: defRows };
+    if (!m) return null;
     return { cols: Math.max(1, +m[1]), rows: Math.max(1, +m[2]) };
 }
 
@@ -30,8 +35,10 @@ export default function registerFrameCommands(router) {
             return { text: 'ERR: getDisplayMedia not available in this environment', data: null };
         }
 
-        const { cols, rows } = parseDims(args[0], 16, 9);
-        const name = args[1] || `screen-${Date.now()}`;
+        // Explicit "COLSxROWS" wins; otherwise the grid is derived from the real capture
+        // size below (once getSettings() is known). If arg0 isn't dims, it's the name.
+        const explicitDims = parseDims(args[0]);
+        const name = (explicitDims ? args[1] : args[0]) || `screen-${Date.now()}`;
 
         // Must run inside the click gesture — await directly, no pre-work.
         let stream;
@@ -59,6 +66,11 @@ export default function registerFrameCommands(router) {
         const aspect = (settings.width && settings.height)
             ? settings.width / settings.height
             : (16 / 9);
+
+        // Cell grid: honor an explicit COLSxROWS, else derive one proportional to the
+        // real capture size, bounded by the cell budget (always within the buffer).
+        const { cols, rows } = explicitDims
+            || FrameGrid.deriveGrid(settings.width, settings.height, { budget: DEFAULT_CELL_BUDGET });
 
         const texture = new THREE.VideoTexture(video);
         texture.minFilter = THREE.LinearFilter;
@@ -100,4 +112,22 @@ export default function registerFrameCommands(router) {
             data: { registryId, cols, rows, cells: grid.getCellCount(), aspect },
         };
     }, { description: 'Capture the OS screen share into a FrameGrid', usage: '[COLSxROWS] [name]' });
+
+    router.register('frame.regrid', (args, ctx) => {
+        const id   = args[0];
+        const dims = parseDims(args[1]);
+        if (!id || !dims) {
+            return { text: 'ERR: usage: frame.regrid <id> <COLSxROWS>', data: null };
+        }
+        const grid = ctx.registry?.get(id)?.grid;
+        if (!grid || typeof grid.setGrid !== 'function') {
+            return { text: `ERR: no FrameGrid "${id}"`, data: null };
+        }
+        // Live re-dice: same texture, finer/coarser independently-movable cells.
+        grid.setGrid(dims.cols, dims.rows);
+        return {
+            text: `OK: re-diced "${id}" → ${grid.cols}x${grid.rows} (${grid.getCellCount()} cells)`,
+            data: { id, cols: grid.cols, rows: grid.rows, cells: grid.getCellCount() },
+        };
+    }, { description: 'Re-dice a FrameGrid into a new cell grid (live)', usage: '<id> <COLSxROWS>' });
 }

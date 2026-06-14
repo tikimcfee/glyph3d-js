@@ -28,6 +28,32 @@ import GlyphField from '../GlyphField.js';
 
 class FrameGrid extends THREE.Object3D {
     /**
+     * Choose a cell grid (cols × rows) for a source frame of srcW × srcH: matches the
+     * source aspect (so cells stay ~square) while keeping cols × rows within `budget`.
+     *
+     * Cell count is the SCATTER / effect granularity, not image detail — the texture
+     * carries full detail no matter how coarsely it's diced (a 1×1 grid still shows the
+     * whole frame). So `budget` is a perf/taste ceiling on independently-movable pieces,
+     * not a fidelity floor; the math guarantees cols × rows ≤ budget for any aspect, so
+     * the single instanced buffer is always within one allocation (no split needed).
+     *
+     * @param {number} srcW - source width in pixels
+     * @param {number} srcH - source height in pixels
+     * @param {Object} [opts]
+     * @param {number} [opts.budget=4096] - upper bound on cell count (cols × rows)
+     * @returns {{cols:number, rows:number, aspect:number}}
+     */
+    static deriveGrid(srcW, srcH, { budget = 4096 } = {}) {
+        const aspect = (srcW > 0 && srcH > 0) ? srcW / srcH : (16 / 9);
+        const b = Math.max(1, Math.floor(budget));
+        // Square cells ⇒ cols = aspect·rows. Bound cols·rows ≤ b ⇒ rows ≤ √(b/aspect);
+        // the floors only shrink the product, so the bound holds for every aspect.
+        const rows = Math.max(1, Math.floor(Math.sqrt(b / aspect)));
+        const cols = Math.max(1, Math.floor(rows * aspect));
+        return { cols, rows, aspect };
+    }
+
+    /**
      * @param {THREE.Scene} scene - Three.js scene (renderer mesh is reparented under this Object3D)
      * @param {GlyphAtlas} atlas - shared atlas (only used for GlyphField construction; no glyphs are shaped)
      * @param {Object} [options]
@@ -188,6 +214,26 @@ class FrameGrid extends THREE.Object3D {
         if (!(aspect > 0) || aspect === this.aspect) return;
         this.aspect = aspect;
         this._build();
+    }
+
+    /**
+     * Re-dice the frame into a new cols × rows cell grid live. Rebuilds the per-instance
+     * quads (new sizes + cell indices) AND re-pushes the grid dims to the renderer so the
+     * shader samples the matching sub-rectangles. The source texture is untouched — only
+     * how finely it's cut into independently-addressable cells changes (the scatter
+     * resolution). No-op if the dims are unchanged.
+     * @param {number} cols - new cells across
+     * @param {number} rows - new cells down
+     */
+    setGrid(cols, rows) {
+        const c = Math.max(1, Math.floor(cols) || 1);
+        const r = Math.max(1, Math.floor(rows) || 1);
+        if (c === this.cols && r === this.rows) return;
+        this.cols = c;
+        this.rows = r;
+        this._cellCount = c * r;
+        this._build();                                       // rebuild quads at the new granularity
+        this._renderer.setFrameTexture(this._texture, c, r); // re-push dims so frameCols/frameRows match
     }
 
     /** @returns {number} number of cells (cols × rows). */
