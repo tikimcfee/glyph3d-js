@@ -110,6 +110,29 @@ export default class WorkspaceModel {
     return true;
   }
 
+  /**
+   * Wipe every sheet and reset all fields to empty — the model side of a scene clear or repo
+   * switch, so stale surface intent can't survive (repo.load A → repo.load B must not leave A's
+   * tabs). Derendering the live panels is the caller's job (clearScene removes the grids; this
+   * drops the intent). Mirrors SessionStore's clear-with-log policy.
+   * (When terminals become surfaces — Slice 1 — this will need to spare live terminal records;
+   * today the model holds only file sheets, so a blanket clear is correct.)
+   */
+  clear() {
+    const hadSheets = this.sheets.size > 0;
+    this.sheets.clear();
+    let fieldsChanged = false;
+    for (const f of this.fields.values()) {
+      if (f.sheetIds.length || f.activeSheetId) {
+        f.sheetIds = [];
+        f.activeSheetId = null;
+        fieldsChanged = true;
+      }
+    }
+    if (hadSheets) this._emit('change:sheets');
+    if (fieldsChanged) this._emit('change:fields');
+  }
+
   /** Drop a sheet from every field + the sheet map. (Derendering its panel is the caller's job.) */
   removeSheet(sheetId) {
     let fieldChanged = false;

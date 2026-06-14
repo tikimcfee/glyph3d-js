@@ -22,12 +22,13 @@
  */
 
 const SESSION_URI = 'file:///.glyph3d-session.json';
-// Kept at 1: the sizing/frame fields (grid window+frame+scroll, terminal cols/rows)
-// are ADDITIVE and optional — restore guards each, so an older same-schema snapshot
-// loads cleanly. v2 is NOT additive: `files` now means the TABS (sheet-backed grids)
-// only, and a new `field` records the bulk source (repo / local). A v1 snapshot dumped
-// the WHOLE field into `files`, so loading it under v2 restore would flood the tab bar —
-// the schema-mismatch WIPE is intended here (one clean reset, then the v2 shape).
+// Schema policy: restore is FORWARD-ADDITIVE. Every restored field is guarded/optional, so a
+// snapshot at this version OR a newer one (read back after a code rollback over a newer file)
+// loads the keys this build understands and ignores the rest — NEVER wiping on version drift
+// (that drift-wipe used to destroy the session on any bump and block additive migration). The
+// ONE hard cliff is v1→v2: v1 dumped the whole field into `files`, v2 made `files` mean the TABS
+// only, so a v1 blob would flood the tab bar — restore() wipes `version < 2` once, cleanly. Bump
+// this only for a genuinely incompatible reshape (and add its migration/wipe at the boundary).
 const SCHEMA_VERSION = 2;
 const SAVE_DEBOUNCE_MS = 600;
 const PERIODIC_SAVE_MS = 5000;
@@ -251,8 +252,12 @@ export default class SessionStore {
   // -- Restore (self-heal: clear-with-log on mismatch) ----------------------
   async restore(snap) {
     if (!snap || typeof snap !== 'object') return;
-    if (snap.version !== SCHEMA_VERSION) {
-      console.warn(`[session] schema mismatch (saved v${snap.version}, expected v${SCHEMA_VERSION}) — clearing session, not migrating`);
+    // Forward-additive: a snapshot at this major (v2) or a FUTURE one (after a code rollback over
+    // a newer file) restores its known, guarded keys and ignores the rest — no wipe on version
+    // drift. Only the genuine cliff wipes: v1 stored the whole field in `files` (v2 made `files`
+    // mean TABS only), so a v1 blob under v2 restore would flood the tab bar — reset it once.
+    if (typeof snap.version !== 'number' || snap.version < 2) {
+      console.warn(`[session] incompatible schema (saved v${snap.version}) — clearing, not migrating`);
       await this._clear();
       return;
     }
