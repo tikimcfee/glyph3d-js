@@ -45,8 +45,14 @@ export default function registerFrameCommands(router) {
         // capture dimensions up front, so the grid's aspect is right on frame one.
         const video = document.createElement('video');
         video.muted = true;
+        video.autoplay = true;
         video.playsInline = true;
         video.srcObject = stream;
+        // Attach offscreen (NOT display:none — that pauses playback in some browsers,
+        // the classic "black panel" cause). 1px, transparent, out of the way keeps it
+        // decoding. Removed again in FrameGrid.dispose().
+        video.style.cssText = 'position:fixed;left:-2px;top:-2px;width:1px;height:1px;opacity:0;pointer-events:none;';
+        document.body.appendChild(video);
         try { await video.play(); } catch { /* autoplay of a muted stream is allowed; ignore */ }
 
         const settings = stream.getVideoTracks()[0]?.getSettings?.() || {};
@@ -58,10 +64,10 @@ export default function registerFrameCommands(router) {
         texture.minFilter = THREE.LinearFilter;
         texture.magFilter = THREE.LinearFilter;
         texture.generateMipmaps = false;
-        // NoColorSpace: the frame branch decodes display-sRGB → linear with pow(2.2)
-        // itself (matching the emoji path), so we must NOT also let three convert on
-        // sample. If the frame looks washed/dark, this is the colorspace dial.
-        texture.colorSpace = THREE.NoColorSpace;
+        // SRGBColorSpace is three's documented WebGPU VideoTexture path: the texture
+        // node linearizes on sample, and the frame branch does NOT manually pow(). See
+        // the colorspace dial note in GlyphField's frame branch if this looks off.
+        texture.colorSpace = THREE.SRGBColorSpace;
 
         const grid = new FrameGrid(ctx.scene, ctx.atlas, { name, cols, rows, aspect });
 

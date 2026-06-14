@@ -185,6 +185,7 @@ class FrameGrid extends THREE.Object3D {
         if (this._video) {
             this._video.pause?.();
             this._video.srcObject = null;
+            this._video.remove?.();   // detach the offscreen <video> the handler appended
             this._video = null;
         }
         if (this._texture) {

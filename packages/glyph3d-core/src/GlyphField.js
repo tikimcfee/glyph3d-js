@@ -236,9 +236,13 @@ function _buildOutputNode(varyings, uniforms) {
             );
             const ftexel = frameTex.sample(frameUV);
             // vColor (instanceColor) modulates: white = the frame's true color, or a
-            // per-cell tint for effects. pow(2.2) decodes display-sRGB → linear to match
-            // the renderer's sRGB output re-encode (identical reasoning to emoji below).
-            outColor.assign(vec4(ftexel.rgb.pow(vec3(2.2)).mul(vColor), ftexel.a.mul(vGroupAlpha)));
+            // per-cell tint for effects. The frame texture is tagged SRGBColorSpace, so
+            // three's texture node already linearizes on sample (the documented WebGPU
+            // VideoTexture path) — do NOT pow() here, that would double-decode. If the
+            // frame looks too bright/washed, the conversion isn't reaching this
+            // outputNode: tag the texture NoColorSpace and restore .pow(vec3(2.2)),
+            // matching the emoji branch's manual decode below. (colorspace dial)
+            outColor.assign(vec4(ftexel.rgb.mul(vColor), ftexel.a.mul(vGroupAlpha)));
 
         }).Else(() => {
         If(vMode.equal(int(RENDER_MODE.BITMAP)), () => {
