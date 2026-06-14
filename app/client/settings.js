@@ -82,6 +82,16 @@ export const SETTINGS = [
   { key: 'dock.focusY', label: 'Focus height', group: 'Dock', type: 'number', default: 0.06, min: -0.4, max: 0.4, step: 0.02, apply: dockParam('focusY') },
   { key: 'dock.focusDistFrac', label: 'Focus pull-in', group: 'Dock', type: 'number', default: 0.7, min: 0.3, max: 1, step: 0.02, apply: dockParam('focusDistFrac') },
   { key: 'dock.animDur', label: 'Animation (s)', group: 'Dock', type: 'number', default: 0.167, min: 0, max: 0.6, step: 0.01, apply: dockParam('animDur') },
+  // Tree — the ContentTree ownership-line overlay (hub → what it contains). File lines
+  // and directory lines toggle independently; layout.arrows is the master on/off verb.
+  {
+    key: 'tree.fileLines', label: 'File ownership lines', group: 'Tree', type: 'bool', default: true,
+    apply: (ctx, v) => ctx.contentTreeArrows?.setShowFiles?.(v),
+  },
+  {
+    key: 'tree.dirLines', label: 'Directory ownership lines', group: 'Tree', type: 'bool', default: true,
+    apply: (ctx, v) => ctx.contentTreeArrows?.setShowDirs?.(v),
+  },
 ];
 
 /** Push a background restyle to every live grid/terminal of `type`. */

@@ -9,9 +9,9 @@
  * layout.markers on|off    → toggle the per-directory bounding prisms
  *   [--opacity N --pad N --color-a HEX --color-b HEX …]  → dial them live
  *
- * layout.arrows            → report the ordered-arrow state + options
- * layout.arrows on|off     → toggle the per-directory sibling-order arrow chains
- *   [--opacity N --z-lift N --arrow-ratio N --color-a HEX --color-b HEX]  → dial them live
+ * layout.arrows            → report the ownership-line state + options
+ * layout.arrows on|off     → toggle the per-directory ownership lines (hub → files + child dirs)
+ *   [--opacity N --z-lift N --color-a HEX (files) --color-b HEX (dirs)]  → dial them live
  *
  * The scheme applies to every subsequent tree relayout too — file.open,
  * file.openDir, grid.layout/grid.window footprint changes all flow through
@@ -64,9 +64,16 @@ export default function registerLayoutCommands(router) {
             if (!flag.startsWith('--')) return { text: `ERR: expected --flag, got "${flag}"`, data: null };
             const raw = args[i + 1];
             if (raw === undefined) return { text: `ERR: ${flag} needs a value`, data: null };
+            // Numeric knobs stay numeric (and non-negative); a non-numeric value passes
+            // through as a string for enum knobs like jellyfish --orient uniform|out.
+            const key = flag.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
             const n = Number(raw);
-            if (!Number.isFinite(n) || n < 0) return { text: `ERR: ${flag} must be a finite number ≥ 0`, data: null };
-            opts[flag.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = n;
+            if (raw.trim() !== '' && Number.isFinite(n)) {
+                if (n < 0) return { text: `ERR: ${flag} must be ≥ 0`, data: null };
+                opts[key] = n;
+            } else {
+                opts[key] = raw;
+            }
         }
 
         tree.setLayout(scheme, opts);
@@ -79,7 +86,7 @@ export default function registerLayoutCommands(router) {
         };
     }, {
         description: "Report or set the content tree's packing scheme (+ knob overrides) and re-lay the field",
-        usage: `[${Object.keys(LAYOUT_SCHEMES).join('|')}] [--depth-z N --rake-z N --dir-gap N --margin N --aspect N …]   (flags alone re-dial the active scheme)`,
+        usage: `[${Object.keys(LAYOUT_SCHEMES).join('|')}] [--depth-z N --rake-z N --dir-gap N --margin N --aspect N | jellyfish: --hang N --file-gap N --child-gap N --orient uniform|out …]   (flags alone re-dial the active scheme)`,
         returns: '{ scheme, opts, files, dirs } or { scheme, opts, available }',
     });
 
@@ -153,7 +160,6 @@ export default function registerLayoutCommands(router) {
         if (args[0] === 'on' || args[0] === 'off') { enabled = args[0] === 'on'; i = 1; }
         else if (!args[0].startsWith('--')) return { text: `ERR: expected on|off or --flags, got "${args[0]}"`, data: null };
 
-        const ANCHORS = new Set(['top', 'top-left', 'top-right']);
         const patch = {};
         for (; i < args.length; i += 2) {
             const flag = args[i];
@@ -161,11 +167,6 @@ export default function registerLayoutCommands(router) {
             const raw = args[i + 1];
             if (raw === undefined) return { text: `ERR: ${flag} needs a value`, data: null };
             const key = flag.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
-            if (key === 'anchor') {
-                if (!ANCHORS.has(raw)) return { text: `ERR: --anchor must be one of ${[...ANCHORS].join('|')}`, data: null };
-                patch.anchor = raw;
-                continue;
-            }
             if (COLOR_KEYS.has(key)) {
                 const hex = raw.replace(/^#|^0x/, '');
                 if (!/^[0-9a-fA-F]{6}$/.test(hex)) return { text: `ERR: ${flag} wants a 6-digit hex color`, data: null };

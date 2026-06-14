@@ -57,6 +57,7 @@ function place(node, opts) {
         const s = pack.slots[i];                    // top-left of this file's cell
         const b = fileBoxes[i];                     // local content box
         leaf.position.set(left + s.x - b.min.x, s.y - b.max.y, 0);
+        leaf.rotation.set(0, 0, 0);             // a 2D scheme owns identity rotation (cf. jellyfish 'out')
     });
 
     dirs.forEach((child, j) => {
@@ -65,6 +66,7 @@ function place(node, opts) {
         // child origin = its footprint top-center, inset pad inside the padded cell,
         // one z-step back — nesting depth accumulates through the node transforms.
         child.position.set(left + s.x + opts.pad + sz.w / 2, s.y - opts.pad, -opts.zInset);
+        child.rotation.set(0, 0, 0);
         place(child, opts);
     });
 }

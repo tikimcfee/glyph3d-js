@@ -110,6 +110,7 @@ function place(node, opts) {
             const s = fileBlock.slots[i];
             const b = fileBoxes[i];
             leaf.position.set(fLeft + s.x - b.min.x, s.y - b.max.y, 0);
+            leaf.rotation.set(0, 0, 0);             // a 2D scheme owns identity rotation (cf. jellyfish 'out')
         });
     }
     if (!childPack) return;
@@ -121,6 +122,7 @@ function place(node, opts) {
         // plus a gravity rake — each descending row leans one rakeZ further back, so the
         // hanging snake reads as a curtain falling down-and-away.
         child.position.set(cLeft + s.x + dirSizes[j].w / 2, cTop + s.y, -opts.depthZ - s.row * opts.rakeZ);
+        child.rotation.set(0, 0, 0);
         place(child, opts);
     });
 }

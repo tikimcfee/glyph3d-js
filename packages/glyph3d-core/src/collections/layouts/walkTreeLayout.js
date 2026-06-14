@@ -61,6 +61,7 @@ function place(node, opts) {
         // position the leaf so its content's top-left lands at the cell (subtract the
         // content offset from the leaf origin → works for any origin/nesting).
         leaf.position.set(fLeft + s.x - b.min.x, s.y - b.max.y, 0);
+        leaf.rotation.set(0, 0, 0);             // a 2D scheme owns identity rotation (cf. jellyfish 'out')
     });
 
     if (childPack.slots.length === 0) return;
@@ -70,6 +71,7 @@ function place(node, opts) {
         const s = childPack.slots[i];               // top-left of this child's footprint
         const cw = childSizes[i].w;
         child.position.set(pLeft + s.x + cw / 2, pTop + s.y, -opts.zStep); // origin = footprint top-center, one z back
+        child.rotation.set(0, 0, 0);
         place(child, opts);
     });
 }

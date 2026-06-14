@@ -9,16 +9,19 @@
 import walkTreeLayout, { WALK_DEFAULTS } from './walkTreeLayout.js';
 import districtLayout, { DISTRICT_DEFAULTS } from './districtLayout.js';
 import packedLayout, { PACKED_DEFAULTS } from './packedLayout.js';
+import jellyfishLayout, { JELLYFISH_DEFAULTS } from './jellyfishLayout.js';
 
 export { flowBoxes, squareWrap } from './flowBoxes.js';
 export { childSort, leafBox } from './nodeUtils.js';
-export { walkTreeLayout, districtLayout, packedLayout, WALK_DEFAULTS, DISTRICT_DEFAULTS, PACKED_DEFAULTS };
+export { walkTreeLayout, districtLayout, packedLayout, jellyfishLayout };
+export { WALK_DEFAULTS, DISTRICT_DEFAULTS, PACKED_DEFAULTS, JELLYFISH_DEFAULTS };
 
 /** name → scheme function. Order here is presentation order (packed = the default). */
 export const LAYOUT_SCHEMES = {
     packed: packedLayout,
     walk: walkTreeLayout,
     district: districtLayout,
+    jellyfish: jellyfishLayout,
 };
 
 /** Reverse lookup for reporting: the registry name of a scheme fn, or null if custom. */
