@@ -54,6 +54,11 @@ const _dir = new THREE.Vector3();
 const _off = new THREE.Vector3();
 const DEG2RAD = Math.PI / 180;
 
+// Focus-placeholder animation. A spotlit tile leaves a ghost outline in its held-open slot; this
+// drives the subtle breathe that says "this is where it lives; it returns here".
+const GHOST_PULSE_HZ = 0.5;          // outline opacity breathe (cycles/sec)
+const GHOST_RENDER_ORDER = 1000;     // HUD affordance — drawn over the tiles, depth-test off
+
 /** Walk up the parent chain to confirm an object still reaches a live Scene. */
 function reachesScene(obj) {
     let o = obj;
@@ -97,7 +102,7 @@ export class CameraDock extends THREE.Object3D {
     constructor({ attentionManager = null, distance = 10, boxFrac = 0.1, boxAspect = 1.15, gapFrac = 0.4,
                   maxColumns = 0, fillFrac = 0.9, maxArcDeg = 80, maxRiseDeg = 80, bottomFrac = 0.86,
                   focusFrac = 0.62, focusY = 0.06, focusDistFrac = 0.7, animDur = 0.167, yawRate = 14,
-                  layout = 'radial' } = {}) {
+                  ghostColor = 0x8ab4ff, ghostOpacity = 0.55, layout = 'radial' } = {}) {
         super();
         this.name = 'camera-dock';
         this.attentionManager = attentionManager;
@@ -119,10 +124,18 @@ export class CameraDock extends THREE.Object3D {
                                             // looks identical, just nearer)
         this.animDur = animDur;       // tile slide/scale duration (s) — a curt, polite snap
         this.layoutMode = layout;     // 'radial' (hemisphere, default) | 'linear'
+        this.ghostColor = ghostColor;     // focus-placeholder outline color
+        this.ghostOpacity = ghostOpacity; // its peak opacity (breathes below this)
 
         /** The tile currently raised into the focus area (centered + enlarged, still
-         *  camera-locked), or null. Toggled by spotlight(); excluded from bar packing. */
+         *  camera-locked), or null. Toggled by spotlight(). Its bar slot stays RESERVED and a
+         *  ghost placeholder stands in for it — see _showGhost. */
         this.focusedId = null;
+
+        /** The focus placeholder — a slot-box outline parked in the focused tile's held-open slot.
+         *  Built on first spotlight and reused (at most one tile is focused). @type {Object|null} */
+        this._ghost = null;
+        this._ghostClock = 0;  // seconds, advances each update() to drive the breathe
 
         this.animator = new SpatialAnimator();
 
@@ -207,7 +220,7 @@ export class CameraDock extends THREE.Object3D {
     setParam(key, value) {
         if (!['distance', 'boxFrac', 'boxAspect', 'gapFrac', 'maxColumns', 'fillFrac', 'maxArcDeg',
               'maxRiseDeg', 'bottomFrac', 'focusFrac', 'focusY', 'focusDistFrac', 'animDur',
-              'yawRate'].includes(key)) return false;
+              'yawRate', 'ghostOpacity'].includes(key)) return false;
         if (!Number.isFinite(value)) return false;
         this[key] = value;
         this._relayout();
@@ -408,12 +421,69 @@ export class CameraDock extends THREE.Object3D {
      *  state. Resize reshapes content inside the fixed focus box (more rows → smaller cells);
      *  zoom changes the box size; both compose and persist with no toggle snap. (The earlier
      *  free-grow stored a per-tile height that delta-desynced from cols/rows — the double.) */
-    _placeFocus(e) {
+    /** The focus area's CENTER in dock-local units — where a raised tile's content center lands. */
+    _focusCenterPoint() {
         const fd = this.focusDistFrac;
-        const eff = (this._viewH * this.focusFrac / Math.max(this._extentOf(e).h, 1e-3)) * fd * this._userOf(e);
-        this._animateTile(e, 0, this._viewH * this.focusY * fd, this.distance * (1 - fd), eff);
+        return { x: 0, y: this._viewH * this.focusY * fd, z: this.distance * (1 - fd) };
+    }
+
+    _placeFocus(e) {
+        const c = this._focusCenterPoint();
+        const eff = (this._viewH * this.focusFrac / Math.max(this._extentOf(e).h, 1e-3)) * this.focusDistFrac * this._userOf(e);
+        this._animateTile(e, c.x, c.y, c.z, eff);
         const d = this.attentionManager?.docks?.get(e.id);
         if (d) d.offset = { slot: 'focus' };
+    }
+
+    /** Lazily build the focus placeholder: a slot-box outline. One per dock (at most one tile is
+     *  focused), reused across spotlights. A HUD affordance — depth-test off, drawn over the tiles,
+     *  pick-inert (isMarker). @private */
+    _ensureGhost() {
+        if (this._ghost) return this._ghost;
+
+        const boxMat = new THREE.LineBasicMaterial({ color: this.ghostColor });
+        boxMat.transparent = true; boxMat.depthTest = false; boxMat.depthWrite = false;
+
+        // Unit rectangle (XY plane, centered) as a closed line loop — scaled to the slot box each
+        // relayout, so a single geometry serves any box size.
+        const r = 0.5;
+        const boxGeo = new THREE.BufferGeometry().setFromPoints([
+            new THREE.Vector3(-r, -r, 0), new THREE.Vector3(r, -r, 0),
+            new THREE.Vector3(r, r, 0), new THREE.Vector3(-r, r, 0), new THREE.Vector3(-r, -r, 0),
+        ]);
+        const box = new THREE.Line(boxGeo, boxMat);
+        box.name = 'dock-focus-ghost';
+        box.renderOrder = GHOST_RENDER_ORDER;
+        box.userData.isMarker = true;
+        this.add(box);
+
+        this._ghost = { box, boxMat };
+        return this._ghost;
+    }
+
+    /** Stand the placeholder in the focused tile's held-open slot. boxW/boxH are the slot-box dims
+     *  (the tile's footprint); faceDir tilts the outline to face the eye like the tile did
+     *  (null = flat, for the linear row). @private */
+    _showGhost(slot, boxW, boxH, faceDir) {
+        const g = this._ensureGhost();
+        g.box.visible = true;
+        g.box.position.set(slot.x, slot.y, slot.z);
+        g.box.scale.set(boxW, boxH, 1);
+        if (faceDir) g.box.quaternion.setFromUnitVectors(_z, faceDir);
+        else g.box.quaternion.identity();
+    }
+
+    /** Hide the placeholder (nothing focused). @private */
+    _hideGhost() { if (this._ghost) this._ghost.box.visible = false; }
+
+    /** @private — free the placeholder's geometry + material. */
+    _disposeGhost() {
+        const g = this._ghost;
+        if (!g) return;
+        this.remove(g.box);
+        g.box.geometry.dispose();
+        g.boxMat.dispose();
+        this._ghost = null;
     }
 
     /** Animate one tile so its CONTENT CENTER sits at (sx,sy,sz) at the RENDERED scale `eff`.
@@ -445,7 +515,7 @@ export class CameraDock extends THREE.Object3D {
      *  strip and nothing slides off the sides. */
     _relayout() {
         const all = [...this.entries.values()];
-        if (all.length === 0) return;
+        if (all.length === 0) { this._hideGhost(); return; }
 
         // Slot = each tile's position in the (insertion-ordered) entry set — assigned in
         // THIS one place, before the bar/focus split, so every tile gets a UNIQUE label
@@ -456,8 +526,12 @@ export class CameraDock extends THREE.Object3D {
         // changes no placement, only kills the collision.
         all.forEach((e, i) => { e.slot = i; });
 
+        // The focused tile keeps its slot RESERVED — neighbors don't shift when it lifts out. Every
+        // entry takes a bar slot; only the focused one renders as a ghost outline (a placeholder for
+        // where it returns) instead of the live grid. So `bar` is the full set and the placement
+        // branches per tile, rather than excluding the focused tile from packing.
         const focused = this.focusedId ? this.entries.get(this.focusedId) : null;
-        const bar = all.filter((e) => e !== focused);
+        const bar = all;
 
         const rowY = -this._viewH * 0.5 * this.bottomFrac; // tile-CENTER row
         const gap = (this._viewH * this.boxFrac) * this.gapFrac;
@@ -507,9 +581,13 @@ export class CameraDock extends THREE.Object3D {
                     const sy = R * Math.sin(phi);
                     const sz = R * (1 - Math.cos(th) * cs);
                     _dir.set(-sx, -sy, R - sz).normalize();                          // toward the eye (0,0,R)
-                    this._animateTile(e, sx, sy, sz, scales[i] * f, _dir);
-                    const d = this.attentionManager?.docks?.get(e.id);
-                    if (d) d.offset = { slot: e.slot };
+                    if (e === focused) {
+                        this._showGhost({ x: sx, y: sy, z: sz }, boxes[i].w * f, boxes[i].h * f, _dir);
+                    } else {
+                        this._animateTile(e, sx, sy, sz, scales[i] * f, _dir);
+                        const d = this.attentionManager?.docks?.get(e.id);
+                        if (d) d.offset = { slot: e.slot };
+                    }
                 });
             } else {
                 // Linear row, centered on x=0. Fit-to-width still guards genuine overflow (too
@@ -528,15 +606,22 @@ export class CameraDock extends THREE.Object3D {
                 bar.forEach((e, i) => {
                     const sx = cx + widths[i] * 0.5;
                     cx += widths[i] + gap;
-                    this._animateTile(e, sx, rowY, 0, scales[i]);
-                    const d = this.attentionManager?.docks?.get(e.id);
-                    if (d) d.offset = { slot: e.slot };
+                    if (e === focused) {
+                        // Slot box shrinks with the fit-to-width factor too (widths[i] already has it).
+                        const boxH = boxes[i].h * (widths[i] / Math.max(boxes[i].w, 1e-9));
+                        this._showGhost({ x: sx, y: rowY, z: 0 }, widths[i], boxH, null);
+                    } else {
+                        this._animateTile(e, sx, rowY, 0, scales[i]);
+                        const d = this.attentionManager?.docks?.get(e.id);
+                        if (d) d.offset = { slot: e.slot };
+                    }
                 });
             }
         }
 
         // ---- focus area (centered + enlarged, pulled in front of the dock sphere) ----
         if (focused) this._placeFocus(focused);
+        else this._hideGhost();
     }
 
     /**
@@ -578,10 +663,23 @@ export class CameraDock extends THREE.Object3D {
         const rate = Math.min(1, dt * this.yawRate); // crisp yaw to match the curter slide
         for (const e of this.entries.values()) e.grid.quaternion.slerp(e.quatTarget, rate);
         for (const e of this._releasing.values()) e.grid.quaternion.slerp(e.quatTarget, rate);
+
+        this._tickGhost(dt);
+    }
+
+    /** Advance the focus placeholder's breathe — the outline pulses gently below ghostOpacity.
+     *  Driven here, not by the SpatialAnimator: it's a steady cosmetic cycle, not a one-shot tween. */
+    _tickGhost(dt) {
+        this._ghostClock += dt;
+        const g = this._ghost;
+        if (!g || !g.box.visible) return;
+        const breathe = 0.6 + 0.4 * (0.5 + 0.5 * Math.sin(this._ghostClock * GHOST_PULSE_HZ * 2 * Math.PI));
+        g.boxMat.opacity = this.ghostOpacity * breathe;
     }
 
     dispose() {
         this.animator.dispose();
+        this._disposeGhost();
         this.entries.clear();
         this._releasing.clear();
         this.tiles.clear();
