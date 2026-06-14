@@ -10,10 +10,11 @@ import { stateController } from '@glyph3d/core/services/state';
  * panel without re-homing. Position + collapsed state persist (g3d.contextHud.*).
  */
 
-// kind → chip accent. FOCUS pale blue (hover/selection family), EDIT caret
-// yellow (CodeGrid.CARET_COLOR), KEY green (live capture). Future kinds
-// (visual, capture) add a row here and a renderer below — nothing else.
-const ACCENT = { focus: '#9fd2ff', edit: '#ffd84d', key: '#7fe0a0' };
+// kind → chip accent. FOCUS pale blue (hover/selection family), AST violet
+// (the semantic family), EDIT caret yellow (CodeGrid.CARET_COLOR), KEY green
+// (live capture). Future kinds (visual, capture) add a row here and a renderer
+// below — nothing else.
+const ACCENT = { focus: '#9fd2ff', ast: '#c8a9ff', edit: '#ffd84d', key: '#7fe0a0' };
 
 const tail = (s, n = 24) => {
   const t = String(s || '').split('/').pop();
@@ -26,6 +27,7 @@ const segmentsOf = (p) => String(p || '').split('/').filter(Boolean);
 
 function chipLabel(n) {
   if (n.kind === 'edit') return `EDIT ${n.cursor.line}:${n.cursor.col}`;
+  if (n.kind === 'ast') return n.label;
   if (n.kind === 'key') return `KEY ${n.entityType || tail(n.id)}`;
   return `${n.kind.toUpperCase()} ${tail(n.id)}`;
 }

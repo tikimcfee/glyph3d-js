@@ -1,23 +1,34 @@
 /**
- * SyntaxColorizer.js — the parallel, post-layout coloring pass.
+ * SyntaxColorizer.js — the parallel, post-layout analysis pass, split in two by
+ * cost profile:
  *
- * Decoupled from the build/layout pipeline: CodeGrid fires colorizeGrid() (fire
- * and forget) after each layout. It parses the grid's source off the critical
- * path, then paints the result into the BASE instanceColor attribute via
- * GlyphField.setGlyphColorRange — no extra GPU memory, no shader change. A
- * generation token aborts a stale pass if the grid relayouts before parsing
- * finishes (edits relayout often).
+ *   analyzeGrid(grid)        EAGER (every layout, fire-and-forget) — parses for
+ *                            highlight captures and paints base glyph colors.
+ *                            This runs for every visible file, so it stays lean.
+ *   buildGridSemantics(grid) LAZY (on demand, cached by CodeGrid) — a dedicated
+ *                            structure-only parse → the grid's SemanticModel. Kept
+ *                            OFF the bulk path: a 305-file load colorizes every
+ *                            file but walks the AST only for the handful actually
+ *                            interrogated. The full-AST walk is the cost we don't
+ *                            want to pay ×N on render.
+ *
+ * The two were one parse; the walk's per-file cost on bulk render is why structure
+ * went lazy. A generation token (color) / content identity (structure) aborts or
+ * invalidates a stale result.
  *
  * Index model: a glyph's buffer slot == its codepoint index within the line
  * (spaces/tabs slotted, newlines not), and slots run contiguously in source
  * order. tree-sitter reports {row, column} in UTF-16 code units; we convert to
- * codepoint columns (identity for BMP text, i.e. ≈ all code) and map a capture's
- * per-line span to one contiguous slot range.
+ * codepoint columns (identity for BMP text, i.e. ≈ all code) — for captures, to
+ * map a per-line span to one contiguous slot range; for structure, to make the
+ * model's columns share the glyph-slot coordinate space.
  */
 
 import { detectLanguage } from './languageRegistry.js';
-import { highlight } from './TreeSitterEngine.js';
+import { parseDocument } from './TreeSitterEngine.js';
 import { resolveScopeColor, FOREGROUND } from './syntaxTheme.js';
+import { structureSpecFor } from './semanticKinds.js';
+import SemanticModel from './SemanticModel.js';
 import { unreadableReason } from '../core/readability.js';
 
 const SURROGATE_RE = /[\uD800-\uDFFF]/;
@@ -62,42 +73,49 @@ function makeColConverter(lines) {
 }
 
 /**
- * Parse the grid's source and paint syntax colors onto its glyphs. No-op for
+ * Shared front-half: resolve the grid's language + readable source lines, or null
+ * when there's nothing to analyze — an unsupported file type, empty content, or an
+ * unreadable artifact we refuse to parse at the 51s column-conversion price.
+ * @param {import('../collections/CodeGrid.js').default} grid
+ * @returns {{ descriptor: any, text: string, lines: string[] } | null}
+ */
+function readableSource(grid) {
+    const filename = grid.filename || grid.userData?.sourcePath || '';
+    const descriptor = detectLanguage(filename);
+    if (!descriptor) return null;
+    // TODO(load+normalize): captures index into this raw text. If content has \r\n, the
+    // 3D builder's split('\n') leaves \r in lines and CM strips it in 2D — both drift.
+    // Normalizing line endings at load (CodeGrid.loadText) fixes both paths at once.
+    const text = grid.content ?? (grid.lines ? grid.lines.join('\n') : '');
+    if (!text || unreadableReason(text)) return null;
+    const lines = (grid.lines && grid.lines.length) ? grid.lines : text.split('\n');
+    return { descriptor, text, lines };
+}
+
+/**
+ * Parse the grid's source for highlight captures and paint syntax colors onto its
+ * glyphs. No structure here — that's the lazy buildGridSemantics. No-op for
  * unsupported file types or when the renderer/layout isn't ready. Safe to call
  * fire-and-forget; never throws.
  * @param {import('../collections/CodeGrid.js').default} grid
  */
-export async function colorizeGrid(grid) {
+export async function analyzeGrid(grid) {
     try {
-        const filename = grid.filename || grid.userData?.sourcePath || '';
-        const descriptor = detectLanguage(filename);
-        if (!descriptor) return;
-
         const renderer = grid.getRenderer?.();
         if (!renderer || typeof renderer.setGlyphColorRange !== 'function') return;
         if (!grid._layout) return;
+        const src = readableSource(grid);
+        if (!src) return;
+        const { descriptor, text, lines } = src;
 
-        // TODO(load+normalize): captures index into this raw text. If content has \r\n, the
-        // 3D builder's split('\n') leaves \r in lines and CM strips it in 2D — both drift.
-        // Normalizing line endings at load (CodeGrid.loadText) fixes both paths at once.
-        const text = grid.content ?? (grid.lines ? grid.lines.join('\n') : '');
-        if (!text) return;
-        // Colorizing is for READING; an unreadable artifact (minified bundle, data
-        // dump) gets token-color noise at parse prices — a 3MB single-line bundle
-        // once cost 51s of pure column conversion. Skip the pass entirely.
-        if (unreadableReason(text)) return;
-
-        const lines = (grid.lines && grid.lines.length) ? grid.lines : text.split('\n');
-
-        const gen = grid._colorizeGen;                 // snapshot before the async parse
-        const captures = await highlight(text, descriptor);
-        if (grid._colorizeGen !== gen) return;          // superseded by a newer layout — abort
+        const gen = grid._analyzeGen;                 // snapshot before the async parse
+        const { captures } = await parseDocument(text, descriptor);  // colors only — structure is lazy
+        if (grid._analyzeGen !== gen) return;         // superseded by a newer layout — abort
 
         // Stash the captures on the grid as render-neutral highlight state, so a 2D
-        // companion view consumes the SAME single parse (via getHighlights()) instead of
-        // re-parsing — one parse, many views. _setHighlights also notifies subscribers
-        // (the 2D editor panel) so they refresh on each (re)parse. The 3D apply below
-        // reads the same array.
+        // companion view consumes the SAME parse (via getHighlights()) instead of
+        // re-parsing. _setHighlights also notifies subscribers (the 2D editor panel)
+        // so they refresh on each (re)parse. The 3D apply below reads the same array.
         const hl = { gen, lang: descriptor.key, captures };
         if (typeof grid._setHighlights === 'function') grid._setHighlights(hl);
         else grid._highlights = hl;
@@ -126,6 +144,43 @@ export async function colorizeGrid(grid) {
             }
         }
     } catch (e) {
-        console.warn('[tree-sitter] colorizeGrid failed:', e?.message ?? e);
+        console.warn('[tree-sitter] analyzeGrid failed:', e?.message ?? e);
+    }
+}
+
+/**
+ * Build the grid's SemanticModel — the lazy half of analysis. A dedicated
+ * structure-only parse (no highlight query), deliberately off the bulk colorize
+ * path. CodeGrid.ensureSemantics() owns the caching; this is the pure builder.
+ * Returns the model, or null for unsupported/unreadable files. Never throws.
+ * @param {import('../collections/CodeGrid.js').default} grid
+ * @returns {Promise<SemanticModel|null>}
+ */
+export async function buildGridSemantics(grid) {
+    try {
+        const src = readableSource(grid);
+        if (!src) return null;
+        const { descriptor, text, lines } = src;
+
+        const spec = structureSpecFor(descriptor.key);  // labels the full named-node tree
+        const { structure } = await parseDocument(text, descriptor, spec, { captures: false });
+        if (!structure) return null;
+
+        // UTF-16 → codepoint columns, so the model shares the glyph-slot space
+        // (col == slot offset) and resolves to slots through the layout with no
+        // further conversion.
+        const toCp = makeColConverter(lines);
+        const normalizeCols = (nodes) => {
+            for (const node of nodes) {
+                node.start.col = toCp(node.start.line, lines[node.start.line] ?? '', node.start.col);
+                node.end.col = toCp(node.end.line, lines[node.end.line] ?? '', node.end.col);
+                if (node.children.length) normalizeCols(node.children);
+            }
+        };
+        normalizeCols(structure);
+        return new SemanticModel(structure);
+    } catch (e) {
+        console.warn('[tree-sitter] buildGridSemantics failed:', e?.message ?? e);
+        return null;
     }
 }

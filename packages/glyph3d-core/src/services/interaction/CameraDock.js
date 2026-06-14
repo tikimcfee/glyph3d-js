@@ -59,6 +59,21 @@ const DEG2RAD = Math.PI / 180;
 const GHOST_PULSE_HZ = 0.5;          // outline opacity breathe (cycles/sec)
 const GHOST_RENDER_ORDER = 1000;     // HUD affordance — drawn over the tiles, depth-test off
 
+// Per-tile identity palette. Each docked window is assigned one hue (cycled on lock); that hue is
+// painted as its in-shader panel border AND as its dock ghost outline, so a window out in the bar
+// and its placeholder read as the same thing by color — the "which rectangle is which" solver.
+// Quiet, distinct, desaturated — not garish. First entry matches the old single ghost blue.
+const GHOST_PALETTE = [
+    0x8ab4ff, // blue
+    0x8ee6a8, // green
+    0xc9a0ff, // violet
+    0xf0b45a, // amber
+    0x6ed0d6, // teal
+    0xf08aa8, // rose
+    0xb4d96a, // lime
+    0xd0a070, // tan
+];
+
 /** Walk up the parent chain to confirm an object still reaches a live Scene. */
 function reachesScene(obj) {
     let o = obj;
@@ -97,12 +112,15 @@ export class CameraDock extends THREE.Object3D {
      * @param {number} [opts.maxRiseDeg=80] - radial: elevation span the dome rises through (degrees)
      * @param {number} [opts.bottomFrac=0.86] - row depth: 0 = view center, 1 = bottom edge
      * @param {number} [opts.yawRate=14]    - tile face-the-eye slerp rate (×dt)
+     * @param {number} [opts.borderWidth=1.5] - docked window's panel-border thickness (screen pixels)
+     * @param {number} [opts.borderStrength=1] - docked window's border intensity (0 = no border)
      * @param {'linear'|'radial'} [opts.layout='radial']
      */
     constructor({ attentionManager = null, distance = 10, boxFrac = 0.1, boxAspect = 1.15, gapFrac = 0.4,
                   maxColumns = 0, fillFrac = 0.9, maxArcDeg = 80, maxRiseDeg = 80, bottomFrac = 0.86,
                   focusFrac = 0.62, focusY = 0.06, focusDistFrac = 0.7, animDur = 0.167, yawRate = 14,
-                  ghostColor = 0x8ab4ff, ghostOpacity = 0.55, layout = 'radial' } = {}) {
+                  ghostColor = 0x8ab4ff, ghostOpacity = 0.55, borderWidth = 1.5, borderStrength = 1,
+                  layout = 'radial' } = {}) {
         super();
         this.name = 'camera-dock';
         this.attentionManager = attentionManager;
@@ -124,8 +142,11 @@ export class CameraDock extends THREE.Object3D {
                                             // looks identical, just nearer)
         this.animDur = animDur;       // tile slide/scale duration (s) — a curt, polite snap
         this.layoutMode = layout;     // 'radial' (hemisphere, default) | 'linear'
-        this.ghostColor = ghostColor;     // focus-placeholder outline color
+        this.ghostColor = ghostColor;     // fallback outline color (entries get a palette hue)
         this.ghostOpacity = ghostOpacity; // its peak opacity (breathes below this)
+        this.borderWidth = borderWidth;       // docked window's panel-border thickness (screen pixels)
+        this.borderStrength = borderStrength; // docked window's panel-border intensity (0 = off)
+        this._colorCursor = 0;            // cycles GHOST_PALETTE so each docked window gets a hue
 
         /** The tile currently raised into the focus area (centered + enlarged, still
          *  camera-locked), or null. Toggled by spotlight(). Its bar slot stays RESERVED and a
@@ -220,7 +241,7 @@ export class CameraDock extends THREE.Object3D {
     setParam(key, value) {
         if (!['distance', 'boxFrac', 'boxAspect', 'gapFrac', 'maxColumns', 'fillFrac', 'maxArcDeg',
               'maxRiseDeg', 'bottomFrac', 'focusFrac', 'focusY', 'focusDistFrac', 'animDur',
-              'yawRate', 'ghostOpacity'].includes(key)) return false;
+              'yawRate', 'ghostOpacity', 'borderWidth', 'borderStrength'].includes(key)) return false;
         if (!Number.isFinite(value)) return false;
         this[key] = value;
         this._relayout();
@@ -264,6 +285,9 @@ export class CameraDock extends THREE.Object3D {
             homeBounds: hasBounds ? b.clone() : null,
             slot: this.entries.size,
             quatTarget: new THREE.Quaternion(),
+            // This window's identity hue — painted as its panel border AND its ghost outline, so the
+            // tile in the bar and its placeholder read as the same window by color.
+            ghostColor: GHOST_PALETTE[this._colorCursor++ % GHOST_PALETTE.length],
         };
 
         // Reparent preserving world transform — the tile stays put for this frame,
@@ -286,6 +310,10 @@ export class CameraDock extends THREE.Object3D {
             ts: (typeof performance !== 'undefined' ? performance.now() : 0),
         });
 
+        // Paint the window's identity hue onto its panel edge — the in-shader border (no extra
+        // object). It wears this hue for as long as it's docked; release() clears it.
+        grid.setBorder?.({ color: entry.ghostColor, width: this.borderWidth, strength: this.borderStrength });
+
         this._relayout();
         return true;
     }
@@ -301,6 +329,7 @@ export class CameraDock extends THREE.Object3D {
         if (!e) return false;
 
         e.unsubscribeResize?.(); // stop reacting to its size once it leaves the dock
+        e.grid.setBorder?.({ strength: 0 }); // drop the dock identity hue — it's leaving the bar
         this.entries.delete(id);
         this.tiles.delete(e.grid); // back to world content for the camera the moment it heads home
         if (this.focusedId === id) this.focusedId = null;
@@ -463,14 +492,16 @@ export class CameraDock extends THREE.Object3D {
 
     /** Stand the placeholder in the focused tile's held-open slot. boxW/boxH are the slot-box dims
      *  (the tile's footprint); faceDir tilts the outline to face the eye like the tile did
-     *  (null = flat, for the linear row). @private */
-    _showGhost(slot, boxW, boxH, faceDir) {
+     *  (null = flat, for the linear row); color is the focused window's identity hue, so the
+     *  placeholder matches that window's panel border. @private */
+    _showGhost(slot, boxW, boxH, faceDir, color) {
         const g = this._ensureGhost();
         g.box.visible = true;
         g.box.position.set(slot.x, slot.y, slot.z);
         g.box.scale.set(boxW, boxH, 1);
         if (faceDir) g.box.quaternion.setFromUnitVectors(_z, faceDir);
         else g.box.quaternion.identity();
+        g.boxMat.color.set(color ?? this.ghostColor);
     }
 
     /** Hide the placeholder (nothing focused). @private */
@@ -582,7 +613,7 @@ export class CameraDock extends THREE.Object3D {
                     const sz = R * (1 - Math.cos(th) * cs);
                     _dir.set(-sx, -sy, R - sz).normalize();                          // toward the eye (0,0,R)
                     if (e === focused) {
-                        this._showGhost({ x: sx, y: sy, z: sz }, boxes[i].w * f, boxes[i].h * f, _dir);
+                        this._showGhost({ x: sx, y: sy, z: sz }, boxes[i].w * f, boxes[i].h * f, _dir, focused.ghostColor);
                     } else {
                         this._animateTile(e, sx, sy, sz, scales[i] * f, _dir);
                         const d = this.attentionManager?.docks?.get(e.id);
@@ -609,7 +640,7 @@ export class CameraDock extends THREE.Object3D {
                     if (e === focused) {
                         // Slot box shrinks with the fit-to-width factor too (widths[i] already has it).
                         const boxH = boxes[i].h * (widths[i] / Math.max(boxes[i].w, 1e-9));
-                        this._showGhost({ x: sx, y: rowY, z: 0 }, widths[i], boxH, null);
+                        this._showGhost({ x: sx, y: rowY, z: 0 }, widths[i], boxH, null, focused.ghostColor);
                     } else {
                         this._animateTile(e, sx, rowY, 0, scales[i]);
                         const d = this.attentionManager?.docks?.get(e.id);

@@ -3,9 +3,11 @@
  *
  * Singleton. Initializes the WASM runtime once, lazily loads + caches one Language
  * per grammar (the ~MB grammar wasm is only fetched when a file of that type is
- * first opened), compiles + caches one highlight Query per language, and turns
- * source text into a flat list of capture ranges. It holds NO opinion about
- * colors or buffers — that's syntaxTheme + SyntaxColorizer.
+ * first opened), compiles + caches one highlight Query per language, and parses
+ * source text into the two products of a single parse: flat highlight captures
+ * and (given a structure spec) a nested structural tree. It holds NO opinion
+ * about colors, buffers, or kind vocabulary — those are syntaxTheme,
+ * SyntaxColorizer, and semanticKinds.
  *
  * web-tree-sitter is dynamically imported on first use, so it (and the runtime
  * wasm) stay out of the bundle until colorization actually runs. Runs on the main
@@ -74,39 +76,86 @@ function getQuery(key, language, scmSource) {
 }
 
 /**
- * Parse `text` with the given language descriptor and return highlight captures.
- * Positions are tree-sitter {row, column}; columns are UTF-16 code units for
- * string input (the caller converts to codepoint columns where it matters).
+ * Walk EVERY named node once into a faithful nested tree — the full AST minus
+ * anonymous tokens (keywords/operators/punctuation), nesting free from the
+ * parse. No pruning: depth is whatever the grammar resolved. Stays
+ * vocabulary-agnostic — the spec (kindOf labels, nameOf) is the only opinion,
+ * injected by the caller. Columns are raw tree-sitter (UTF-16); the caller
+ * converts to codepoint columns where it owns the line text.
+ * @param {any} node live tree-sitter node
+ * @param {{kindOf:(t:string)=>string, nameOf:(n:any)=>string|null}} spec
+ * @param {Array} out sibling list to append entries to
+ */
+function walkStructure(node, spec, out) {
+    const count = node.namedChildCount;
+    for (let i = 0; i < count; i++) {
+        const child = node.namedChild(i);
+        const entry = {
+            kind: spec.kindOf(child.type),
+            name: spec.nameOf(child) ?? null,
+            type: child.type,
+            start: { line: child.startPosition.row, col: child.startPosition.column },
+            end: { line: child.endPosition.row, col: child.endPosition.column },
+            startIndex: child.startIndex,
+            endIndex: child.endIndex,
+            children: [],
+        };
+        out.push(entry);
+        walkStructure(child, spec, entry.children);
+    }
+}
+
+/**
+ * Parse `text` ONCE and return both products of that parse: the flat highlight
+ * `captures` (for coloring) and, when a structure `spec` is given, the nested
+ * `structure` roots (for the semantic model). One parse, two products — the
+ * tree is walked for both before it's freed. Positions are tree-sitter
+ * {row, column} in UTF-16 code units; the caller converts to codepoint columns
+ * where it matters.
  * @param {string} text
  * @param {{ key:string, grammarUrl:string, query:string }} descriptor
- * @returns {Promise<Capture[]>}
+ * @param {{kindOf:(t:string)=>string, nameOf:(n:any)=>string|null}|null} [spec]
+ * @param {{ captures?: boolean }} [opts] set `captures:false` for a structure-only
+ *   parse (the lazy semantic build) — skips the highlight query entirely.
+ * @returns {Promise<{ captures: Capture[], structure: Array|null }>}
  */
-export async function highlight(text, descriptor) {
+export async function parseDocument(text, descriptor, spec = null, opts = {}) {
+    const wantCaptures = opts.captures !== false;
     const { Parser } = await ensureInit();
     const language = await loadLanguage(descriptor.key, descriptor.grammarUrl);
-    const query = getQuery(descriptor.key, language, descriptor.query);
-    if (!query) return [];
+    const query = wantCaptures ? getQuery(descriptor.key, language, descriptor.query) : null;
 
     const parser = new Parser();
     let tree = null;
     try {
         parser.setLanguage(language);
         tree = parser.parse(text);
-        const caps = query.captures(tree.rootNode);
-        const out = new Array(caps.length);
-        for (let i = 0; i < caps.length; i++) {
-            const n = caps[i].node;
-            out[i] = {
-                scope: caps[i].name,
-                startRow: n.startPosition.row,
-                startCol: n.startPosition.column,
-                endRow: n.endPosition.row,
-                endCol: n.endPosition.column,
-                startIndex: n.startIndex,   // absolute UTF-16 offset — for 2D editor decorations
-                endIndex: n.endIndex,
-            };
+
+        let captures = [];
+        if (query) {
+            const caps = query.captures(tree.rootNode);
+            captures = new Array(caps.length);
+            for (let i = 0; i < caps.length; i++) {
+                const n = caps[i].node;
+                captures[i] = {
+                    scope: caps[i].name,
+                    startRow: n.startPosition.row,
+                    startCol: n.startPosition.column,
+                    endRow: n.endPosition.row,
+                    endCol: n.endPosition.column,
+                    startIndex: n.startIndex,   // absolute UTF-16 offset — for 2D editor decorations
+                    endIndex: n.endIndex,
+                };
+            }
         }
-        return out;
+
+        let structure = null;
+        if (spec) {
+            structure = [];
+            walkStructure(tree.rootNode, spec, structure);
+        }
+
+        return { captures, structure };
     } finally {
         tree?.delete?.();
         parser.delete?.();

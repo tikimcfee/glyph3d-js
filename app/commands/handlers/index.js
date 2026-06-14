@@ -16,6 +16,7 @@ import registerNavigationCommands from './navigationCommands.js';
 import registerRegistryCommands from './registryCommands.js';
 import registerTerminalCommands from './terminalCommands.js';
 import registerHighlightCommands from './highlightCommands.js';
+import registerSemanticCommands from './semanticCommands.js';
 import registerTourCommands from './tourCommands.js';
 import registerGroupCommands from './groupCommands.js';
 import registerSimulateCommands from './simulateCommands.js';
@@ -56,6 +57,7 @@ export function registerAllCommands(router) {
     registerRegistryCommands(router);
     registerTerminalCommands(router);
     registerHighlightCommands(router);
+    registerSemanticCommands(router);
     registerTourCommands(router);
     registerGroupCommands(router);
     registerSimulateCommands(router);

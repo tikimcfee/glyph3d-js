@@ -18,8 +18,9 @@ import { RENDER_ORDER } from '../core/renderOrder.js';
 import { BOUNDS_Z_PAD } from '../core/constants.js';
 import { paginationGeometry, resolveLayoutParams, DEFAULT_LAYOUT } from '../workers/builders/index.js';
 import LayoutDescription from '../core/LayoutDescription.js';
-import { colorizeGrid } from '../parsing/SyntaxColorizer.js';
+import { analyzeGrid, buildGridSemantics } from '../parsing/SyntaxColorizer.js';
 import ScaleModel from './ScaleModel.js';
+import { createPanelMaterial } from './panelMaterial.js';
 
 // Reused for lines without wraps — most lines, in the common case.
 // Frozen so accidental mutation surfaces immediately.
@@ -72,6 +73,11 @@ class CodeGrid extends THREE.Object3D {
         this.content = '';
         this.lines = [];
 
+        // Render-neutral analysis products (built off-critical-path).
+        this._highlights = null;        // { gen, lang, captures } — syntax colors / 2D decorations (eager)
+        this._semantics = null;         // SemanticModel — structural tree (lazy, built on demand)
+        this._semanticsContent = null;  // the content string the cached model was built from
+
         // ── Deferred-batch state (was GlyphCollection._pendingAdds etc.) ────────
         this._pendingAdds    = [];  // { id, text, position, options }
         this._pendingRemovals = []; // renderer IDs to remove
@@ -106,6 +112,7 @@ class CodeGrid extends THREE.Object3D {
 
         // Background element (separate from renderer)
         this._background = null;
+        this._panel = null;        // panel-material handle (fill + in-shader border)
         this._initBackground();
 
         // Add renderer group as our child for proper transforms
@@ -352,10 +359,17 @@ class CodeGrid extends THREE.Object3D {
      * @param {number|THREE.Color} color - Background color
      */
     setBackgroundColor(color) {
-        if (this._background) {
-            this._background.material.color.set(color);
-        }
+        this._panel?.setFill(color);
         this.config.backgroundColor = color;
+    }
+
+    /**
+     * Set this window's in-shader border. The dock paints the focused/docked tile's ghost color
+     * here so its panel edge glows the hue that matches its placeholder. strength 0 clears it.
+     * @param {{ color?: number|string, width?: number, strength?: number }} style
+     */
+    setBorder(style = {}) {
+        this._panel?.setBorder(style);
     }
 
     /**
@@ -639,6 +653,54 @@ class CodeGrid extends THREE.Object3D {
         for (const cb of this._highlightListeners) {
             try { cb(h); } catch (e) { console.warn('[highlights] listener error:', e?.message ?? e); }
         }
+    }
+
+    /**
+     * The cached semantic structure model (the arborist's output) for the CURRENT
+     * content, or null if it hasn't been built yet / is stale / unsupported. Sync
+     * and side-effect-free — use ensureSemantics() to build on demand. Canonical
+     * coords are {line, col} in the glyph-slot space.
+     * @returns {import('../parsing/SemanticModel.js').default|null}
+     */
+    getSemantics() {
+        return (this._semantics && this._semanticsContent === this.content) ? this._semantics : null;
+    }
+
+    /**
+     * Build-or-return the SemanticModel, lazily. The structural AST walk is OFF the
+     * bulk colorize path (a 305-file load doesn't pay for it) — it runs the first
+     * time something asks for structure on THIS content, then caches against the
+     * content identity. An edit swaps `this.content`, invalidating the cache; the
+     * next caller rebuilds. A layout/scroll does NOT (content unchanged), so the
+     * cache survives navigation. Concurrent callers share one in-flight parse.
+     * @returns {Promise<import('../parsing/SemanticModel.js').default|null>}
+     */
+    ensureSemantics() {
+        const content = this.content;
+        if (this._semantics && this._semanticsContent === content) return Promise.resolve(this._semantics);
+        if (this._semanticsPending && this._semanticsPendingContent === content) return this._semanticsPending;
+
+        this._semanticsPendingContent = content;
+        this._semanticsPending = buildGridSemantics(this).then((model) => {
+            if (this.content === content) {        // still the same content — cache it
+                this._semantics = model;
+                this._semanticsContent = content;
+            }
+            return this.content === content ? model : this.getSemantics();
+        }).finally(() => {
+            if (this._semanticsPendingContent === content) this._semanticsPending = null;
+        });
+        return this._semanticsPending;
+    }
+
+    /**
+     * Innermost semantic node at a (line, col), optionally constrained to a kind
+     * ('function' | 'class' | 'method' | …). Drives "select the function I'm in"
+     * from a caret/pick. Reads the cache only (call ensureSemantics() first if the
+     * model may not be built). @returns {object|null}
+     */
+    nodeAtChar(line, col, kind = null) {
+        return this.getSemantics()?.nodeAt(line, col, kind) ?? null;
     }
 
     /**
@@ -944,6 +1006,7 @@ class CodeGrid extends THREE.Object3D {
             this._background.material.dispose();
             this.remove(this._background);
             this._background = null;
+            this._panel = null;
         }
 
         // Dispose caret overlay (lazy-created in enterEdit)
@@ -1279,20 +1342,18 @@ class CodeGrid extends THREE.Object3D {
      */
     _initBackground() {
         const geometry = new THREE.PlaneGeometry(1, 1);
-        const material = new THREE.MeshBasicMaterial({
+        // The panel material paints the fill AND an in-shader border band (see panelMaterial.js):
+        // border strength 0 = a plain fill, drop-in for the old MeshBasicMaterial. depthWrite: the
+        // panel must OCCLUDE content behind it (other grids stacked in a dock); `transparent` only
+        // when opacity<1, so a full-opacity panel stays genuinely solid.
+        this._panel = createPanelMaterial({
             color: this.config.backgroundColor,
-            // depthWrite: the panel must OCCLUDE content behind it (other grids
-            // stacked behind it in a dock) — without it, later-drawn geometry
-            // composites straight through regardless of alpha and the grid reads as
-            // see-through. `transparent` only when opacity<1, so the slider works
-            // but a full-opacity panel is genuinely solid.
-            transparent: this.config.backgroundOpacity < 1,
             opacity: this.config.backgroundOpacity,
             side: THREE.DoubleSide,
-            depthWrite: true
+            depthWrite: true,
         });
 
-        this._background = new THREE.Mesh(geometry, material);
+        this._background = new THREE.Mesh(geometry, this._panel.material);
         this._background.renderOrder = RENDER_ORDER.GRID_BACKGROUND; // Draw backgrounds before glyphs
         this._background.position.z = -0.1; // Just behind text — minimal float
         this._background.visible = this.config.showBackground;
@@ -1308,11 +1369,9 @@ class CodeGrid extends THREE.Object3D {
     setBackgroundStyle({ color, opacity } = {}) {
         if (color != null) this.config.backgroundColor = color;
         if (opacity != null) this.config.backgroundOpacity = opacity;
-        const m = this._background?.material;
-        if (!m) return;
-        if (color != null) m.color.set(color);
-        if (opacity != null) { m.opacity = opacity; m.transparent = opacity < 1; this._applyGlyphAlpha(); }
-        m.needsUpdate = true;
+        if (!this._panel) return;
+        this._panel.setFill(color, opacity);
+        if (opacity != null) this._applyGlyphAlpha();
     }
 
     /**
@@ -1649,19 +1708,20 @@ class CodeGrid extends THREE.Object3D {
             advance: m.charWidth + (m.spacing || 0),
             scrollOffset: this._scrollOffset || 0,  // so the analytic fallback matches the scrolled glyphs
         });
-        this._scheduleColorize();
+        this._scheduleAnalyze();
     }
 
     /**
-     * Schedule a syntax-coloring pass for the layout just built. Fire-and-forget:
-     * the colorizer parses off the critical path and paints base glyph colors via
-     * the renderer. The generation token lets a newer layout supersede an in-flight
-     * pass (edits relayout often). A no-op for unsupported file types.
+     * Schedule an analysis pass for the layout just built. Fire-and-forget: one
+     * tree-sitter parse paints base glyph colors via the renderer AND rebuilds the
+     * grid's SemanticModel, off the critical path. The generation token lets a
+     * newer layout supersede an in-flight pass (edits relayout often). A no-op for
+     * unsupported file types.
      * @private
      */
-    _scheduleColorize() {
-        this._colorizeGen = (this._colorizeGen || 0) + 1;
-        colorizeGrid(this);
+    _scheduleAnalyze() {
+        this._analyzeGen = (this._analyzeGen || 0) + 1;
+        analyzeGrid(this);
     }
 
     /**
@@ -1759,6 +1819,21 @@ class CodeGrid extends THREE.Object3D {
                 if (slot >= 0) this._renderer.setGlyphHighlight(slot, color);
             }
         }
+    }
+
+    /**
+     * Highlight a semantic node's full source span with additive color. The node
+     * carries canonical {line, col} (codepoint) ranges, so this resolves to glyph
+     * slots through the live layout — the same path as highlightRange. Returns
+     * false for a null node.
+     * @param {{start:{line:number,col:number}, end:{line:number,col:number}}} node
+     * @param {{r:number, g:number, b:number}} color
+     * @returns {boolean}
+     */
+    highlightNode(node, color) {
+        if (!node || !node.start || !node.end) return false;
+        this.highlightRange(node.start.line, node.start.col, node.end.line, node.end.col, color);
+        return true;
     }
 
     /**

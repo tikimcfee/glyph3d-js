@@ -30,6 +30,7 @@ import { RENDER_ORDER } from '../core/renderOrder.js';
 import MonospaceShapeCache from '../shaping/MonospaceShapeCache.js';
 import ScaleModel from './ScaleModel.js';
 import Button3D from '../components/Button3D.js';
+import { createPanelMaterial } from './panelMaterial.js';
 
 const _cellStrideScale = new THREE.Vector3(); // scratch for cellStride's world-scale read
 
@@ -173,6 +174,7 @@ export default class TerminalGrid extends THREE.Object3D {
 
         // Background plane — dark panel behind the terminal for readability.
         this._background = null;
+        this._panel = null;        // panel-material handle (fill + in-shader border)
         this._bgColor = options.backgroundColor ?? 0x0a0a1e;
         this._bgOpacity = options.backgroundOpacity ?? 0.96;
         this._bgPadding = options.backgroundPadding ?? 0.3;
@@ -816,6 +818,7 @@ export default class TerminalGrid extends THREE.Object3D {
             this._background.geometry.dispose();
             this._background.material.dispose();
             this._background = null;
+            this._panel = null;
         }
         for (const c of this._controls) c.button.dispose();
         this._controls = [];
@@ -1201,20 +1204,18 @@ export default class TerminalGrid extends THREE.Object3D {
      */
     _initBackground() {
         const geometry = new THREE.PlaneGeometry(1, 1);
-        const material = new THREE.MeshBasicMaterial({
+        // The panel material paints the fill AND an in-shader border band (see panelMaterial.js):
+        // border strength 0 = a plain fill, drop-in for the old MeshBasicMaterial. depthWrite: the
+        // panel must OCCLUDE content behind it (the floor, tiles stacked in a dock); `transparent`
+        // only when opacity<1, so a full-opacity panel stays genuinely solid.
+        this._panel = createPanelMaterial({
             color: this._bgColor,
-            // depthWrite: the panel must OCCLUDE content behind it (the floor, and
-            // tiles stacked behind it in a dock) — without it, later-drawn geometry
-            // composites straight through regardless of alpha and the terminal reads
-            // as see-through. `transparent` only when opacity<1, so the slider works
-            // but a full-opacity panel is genuinely solid.
-            transparent: this._bgOpacity < 1,
             opacity: this._bgOpacity,
             side: THREE.DoubleSide,
             depthWrite: true,
         });
 
-        this._background = new THREE.Mesh(geometry, material);
+        this._background = new THREE.Mesh(geometry, this._panel.material);
         this._background.renderOrder = RENDER_ORDER.GRID_BACKGROUND;
         // Tagged so gesture dispatch can resolve background → terminal id
         // without a reverse-lookup through the registry.
@@ -1232,11 +1233,18 @@ export default class TerminalGrid extends THREE.Object3D {
     setBackgroundStyle({ color, opacity } = {}) {
         if (color != null) this._bgColor = color;
         if (opacity != null) this._bgOpacity = opacity;
-        const m = this._background?.material;
-        if (!m) return;
-        if (color != null) m.color.set(color);
-        if (opacity != null) { m.opacity = opacity; m.transparent = opacity < 1; this._applyGlyphAlpha(); }
-        m.needsUpdate = true;
+        if (!this._panel) return;
+        this._panel.setFill(color, opacity);
+        if (opacity != null) this._applyGlyphAlpha();
+    }
+
+    /**
+     * Set this window's in-shader border. The dock paints the focused/docked tile's ghost color
+     * here so its panel edge glows the hue that matches its placeholder. strength 0 clears it.
+     * @param {{ color?: number|string, width?: number, strength?: number }} style
+     */
+    setBorder(style = {}) {
+        this._panel?.setBorder(style);
     }
 
     /**
