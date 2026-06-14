@@ -53,6 +53,13 @@ export const RENDER_ORDER = Object.freeze({
     // src/hand/HandRenderer.js:151 — skeleton joints, one notch above bones.
     HAND_JOINT:            2,
 
+    // src/collections/TerminalGrid.js — window control chrome (resize/scale grips,
+    // pin + size/scale dial buttons). DEPTH-TESTED, so a window in front occludes it:
+    // chrome occludes like its parent panel rather than floating on top of the scene
+    // (the prior 10001 + depthTest:false was an always-on-top overlay). renderOrder
+    // only sorts it above the tile's OWN glyphs (0) and caret (5).
+    GRID_CHROME:           6,
+
     // src/services/interaction/ReaderCompass.js:65 — compass root group.
     COMPASS_ROOT:          999,
 

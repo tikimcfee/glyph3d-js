@@ -29,6 +29,7 @@ import { detectVerticalScroll, captureScrolledRows, depthFade, reflowHistoryRows
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import MonospaceShapeCache from '../shaping/MonospaceShapeCache.js';
 import ScaleModel from './ScaleModel.js';
+import Button3D from '../components/Button3D.js';
 
 const _cellStrideScale = new THREE.Vector3(); // scratch for cellStride's world-scale read
 
@@ -181,13 +182,13 @@ export default class TerminalGrid extends THREE.Object3D {
         // as one coherent sheet (text + bg together), not opaque text over glass.
         this._applyGlyphAlpha();
 
-        // SE-corner control grips — visible affordances AND 'handle' pick targets.
-        // Two sibling corners (OS-titlebar style): green RESIZES (cols/rows → PTY),
-        // red SCALES (Object3D zoom for readability). Distinct roles on one channel.
-        this._handle = null;       // green: resize grip
-        this._scaleHandle = null;  // red: scale grip
-        this._initHandle();
-        this._initScaleHandle();
+        // Window chrome: a bottom-edge row of controls — the drag grips (green RESIZES
+        // cols/rows → PTY, red SCALES the Object3D zoom) PLUS click buttons (pin, and the
+        // size/scale ± dials). All are visible affordances AND 'handle' pick targets on
+        // one channel, distinguished by token.role. Generalized into a single control
+        // list (CONTROL_SPEC) and DEPTH-TESTED so they occlude like the panel.
+        this._controls = [];       // [{ spec, mesh }] — see CONTROL_SPEC
+        this._initControls();
 
         // Add the renderer's mesh as a child so transforms propagate.
         this.add(this._renderer.instanceMesh);
@@ -683,8 +684,7 @@ export default class TerminalGrid extends THREE.Object3D {
         if (!pickingSystem) return;
         if (this._renderer)   pickingSystem.register('glyph', this._renderer, this._renderer);
         if (this._background) pickingSystem.register('grid', this._background, this);
-        if (this._handle)      pickingSystem.register('handle', this._handle, { grid: this, edge: 'se', role: 'resize' });
-        if (this._scaleHandle) pickingSystem.register('handle', this._scaleHandle, { grid: this, edge: 'se', role: 'scale' });
+        this._registerControls();
     }
 
     /**
@@ -773,16 +773,10 @@ export default class TerminalGrid extends THREE.Object3D {
             this._pickingSystem.register('glyph', this._renderer, this._renderer);
         }
 
-        // Move both grips to the new SE corner + re-register (their world extent moved
-        // with the panel; the 'handle' channel id-block is keyed per mesh).
-        this._positionHandle();
-        this._positionScaleHandle();
-        if (this._pickingSystem && this._handle) {
-            this._pickingSystem.register('handle', this._handle, { grid: this, edge: 'se', role: 'resize' });
-        }
-        if (this._pickingSystem && this._scaleHandle) {
-            this._pickingSystem.register('handle', this._scaleHandle, { grid: this, edge: 'se', role: 'scale' });
-        }
+        // Re-place the control row at the new SE corner + re-register (their world extent
+        // moved with the panel; the 'handle' channel id-block is keyed per mesh).
+        this._layoutControls();
+        this._registerControls();
 
         // Keep the byte→screen emulator in lockstep — its next screen reflects the
         // new dimensions. (Pairs with the adapter's pty.Setsize for full agreement.)
@@ -811,8 +805,7 @@ export default class TerminalGrid extends THREE.Object3D {
         if (this._pickingSystem) {
             if (this._renderer)   this._pickingSystem.unregister('glyph', this._renderer);
             if (this._background) this._pickingSystem.unregister('grid', this._background);
-            if (this._handle)      this._pickingSystem.unregister('handle', this._handle);
-            if (this._scaleHandle) this._pickingSystem.unregister('handle', this._scaleHandle);
+            for (const c of this._controls) this._pickingSystem.unregister('handle', c.button);
         }
         if (this._renderer) {
             this._renderer.instanceMesh.geometry.dispose();
@@ -824,16 +817,8 @@ export default class TerminalGrid extends THREE.Object3D {
             this._background.material.dispose();
             this._background = null;
         }
-        if (this._handle) {
-            this._handle.geometry.dispose();
-            this._handle.material.dispose();
-            this._handle = null;
-        }
-        if (this._scaleHandle) {
-            this._scaleHandle.geometry.dispose();
-            this._scaleHandle.material.dispose();
-            this._scaleHandle = null;
-        }
+        for (const c of this._controls) c.button.dispose();
+        this._controls = [];
         this.scene.remove(this);
     }
 
@@ -921,32 +906,53 @@ export default class TerminalGrid extends THREE.Object3D {
     }
 
     /**
-     * Create the SE-corner resize grip: a small visible quad that is both the user's
-     * grab affordance AND the 'handle' pick target. A child of this Object3D, so it
-     * inherits gridScale + world position; placed by _positionHandle().
+     * Window chrome spec: a row of bottom-edge controls, laid out right→left from the SE
+     * corner (index 0 = rightmost). Each becomes a labeled Button3D that is BOTH a visible
+     * affordance and a 'handle'-channel pick target whose token carries `role` + the button.
+     * `grab:true` marks the two DRAG grips (the ResizeDragger turns them into a live
+     * resize/scale drag); the rest are CLICK buttons (pin toggle + the size/scale ± dials).
+     * Colour codes the AXIS — green = the size axis (cols/rows → PTY), red = the scale/zoom
+     * axis (Object3D), amber = pin — so the "+"/"−" steppers read by colour + the labeled grip.
      * @private
      */
-    _initHandle() {
+    static CONTROL_SPEC = [
+        { role: 'resize',    label: 'Resize', color: 0x6ee7a0, grab: true  }, // green grip: drag → cols/rows
+        { role: 'scale',     label: 'Scale',  color: 0xf2787a, grab: true  }, // red grip:   drag → zoom
+        { role: 'pin',       label: 'Pin',    color: 0xf2c14e, grab: false }, // amber:      click → maximize toggle
+        { role: 'size-inc',  label: '+',      color: 0x6ee7a0, grab: false }, // green +:    bigger panel
+        { role: 'size-dec',  label: '−',      color: 0x6ee7a0, grab: false }, // green −:    smaller panel
+        { role: 'scale-inc', label: '+',      color: 0xf2787a, grab: false }, // red +:      zoom in
+        { role: 'scale-dec', label: '−',      color: 0xf2787a, grab: false }, // red −:      zoom out
+    ];
+
+    /**
+     * Build the chrome control row from CONTROL_SPEC: one labeled Button3D per control, sized
+     * to ~1.5 cells tall (width derives from the label). The buttons own their hover/active
+     * visuals and are DEPTH-TESTED (RENDER_ORDER.GRID_CHROME) so a closer window occludes them
+     * rather than floating on top. Children of this Object3D, so they ride gridScale + world
+     * position; placed by _layoutControls(). @private
+     */
+    _initControls() {
         const m = this._metrics;
-        const w = (m.charWidth + m.letterSpacing) * 2; // ~2 cells — comfortably grabbable
-        const h = m.lineSpacing * 2;
-        const geo = new THREE.PlaneGeometry(w, h);
-        const mat = new THREE.MeshBasicMaterial({
-            color: 0x6ee7a0, transparent: true, opacity: 0.5, depthTest: false,
+        const h = m.lineSpacing * 1.5;
+        this._controls = TerminalGrid.CONTROL_SPEC.map((spec) => {
+            const button = new Button3D({
+                label: spec.label, height: h, color: spec.color, grab: spec.grab,
+                opacity: spec.grab ? 0.66 : 0.6, role: spec.role,
+            });
+            this.add(button);
+            return { spec, button };
         });
-        this._handle = new THREE.Mesh(geo, mat);
-        this._handle.renderOrder = 10001; // above the selection / hover outlines
-        this.add(this._handle);
-        this._positionHandle();
+        this._layoutControls();
     }
 
     /**
-     * Place the grip at the panel's bottom-right (SE) corner in local coords — same
-     * extent math as getBounds(). Called on construction and after resize.
-     * @private
+     * Place the control row along the bottom edge, packing the pills right→left from the SE
+     * corner (each by its own width + a gap). Same extent math as getBounds(); called on
+     * construction and after every resize. @private
      */
-    _positionHandle() {
-        if (!this._handle) return;
+    _layoutControls() {
+        if (!this._controls?.length) return;
         const m = this._metrics;
         const strideX = m.charWidth + m.letterSpacing;
         const strideY = m.lineSpacing;
@@ -955,49 +961,33 @@ export default class TerminalGrid extends THREE.Object3D {
         const height = this.rows * strideY + pad * 2;
         const cx = (this.cols * strideX) / 2 - m.charWidth / 2;
         const cy = -(this.rows * strideY) / 2 + strideY / 2;
-        this._handle.position.set(cx + width / 2, cy - height / 2, 0.5);
+        const edgeY = cy - height / 2;
+        const gap = strideX * 0.5;
+        let xRight = cx + width / 2;     // right edge of the next pill (rightmost sits on the SE corner)
+        for (const c of this._controls) {
+            const w = c.button.width;
+            c.button.position.set(xRight - w / 2, edgeY, 0.5);
+            xRight -= (w + gap);
+        }
     }
 
     /**
-     * Create the SCALE grip: a red sibling of the green resize grip, sitting just to
-     * its left along the bottom edge (OS-titlebar row of corner controls). Same
-     * 'handle' pick channel, but its token carries role:'scale' so the dragger routes
-     * a zoom (Object3D scale) instead of a cols/rows resize. Object3D scale is uniform,
-     * so the grip is the readability knob — distinct surface from the resize corner.
-     * @private
+     * Register every chrome control on the 'handle' pick channel. The token carries the
+     * `button` so the central press router can call its onClick + drive setHovered. Idempotent
+     * re-register after a resize re-keys the moved meshes' id-blocks. @private
      */
-    _initScaleHandle() {
-        const m = this._metrics;
-        const w = (m.charWidth + m.letterSpacing) * 2;
-        const h = m.lineSpacing * 2;
-        const geo = new THREE.PlaneGeometry(w, h);
-        const mat = new THREE.MeshBasicMaterial({
-            color: 0xf2787a, transparent: true, opacity: 0.5, depthTest: false,
-        });
-        this._scaleHandle = new THREE.Mesh(geo, mat);
-        this._scaleHandle.renderOrder = 10001; // same overlay tier as the resize grip
-        this.add(this._scaleHandle);
-        this._positionScaleHandle();
+    _registerControls() {
+        if (!this._pickingSystem) return;
+        for (const c of this._controls) {
+            this._pickingSystem.register('handle', c.button, { grid: this, edge: 'se', role: c.spec.role, button: c.button });
+        }
     }
 
-    /**
-     * Place the scale grip one grip-width (+ a small gap) to the LEFT of the resize
-     * grip, on the same bottom edge. Mirrors _positionHandle's extent math.
-     * @private
-     */
-    _positionScaleHandle() {
-        if (!this._scaleHandle) return;
-        const m = this._metrics;
-        const strideX = m.charWidth + m.letterSpacing;
-        const strideY = m.lineSpacing;
-        const pad = this._bgPadding;
-        const width  = this.cols * strideX + pad * 2;
-        const height = this.rows * strideY + pad * 2;
-        const cx = (this.cols * strideX) / 2 - m.charWidth / 2;
-        const cy = -(this.rows * strideY) / 2 + strideY / 2;
-        const gripW = strideX * 2;
-        // SE corner is at (cx+width/2); step left by one grip-width + a 0.4-grip gap.
-        this._scaleHandle.position.set(cx + width / 2 - gripW * 1.4, cy - height / 2, 0.5);
+    /** Reflect a control's sticky "engaged" visual (e.g. the Pin button while the window is
+     *  pinned). Looked up by role; a no-op if the control isn't present. */
+    setControlActive(role, on) {
+        const c = this._controls?.find((x) => x.spec.role === role);
+        c?.button.setActive(!!on);
     }
 
     // ================================================================

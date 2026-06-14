@@ -265,9 +265,15 @@ export function CanvasPicker() {
     // ResizeDragger and ViewerCameraController go through isGripPress. atX/atY are
     // the cursor at pick-sample time (threaded in), not at resolve time.
     const applyHandleHover = (token, atX, atY) => {
+      // Drive the Button3D hover visual: clear the one we're leaving, light the one we're on.
+      const prev = client.ctx.handleHover;
+      if (prev?.button && prev.button !== token?.button) prev.button.setHovered(false);
       client.ctx.handleHover = token ?? null;
       client.ctx.handleHoverAt = token ? { x: atX, y: atY } : null;
-      if (token) dom.style.cursor = 'nwse-resize';
+      if (token?.button) token.button.setHovered(true);
+      // Drag grips show the resize cursor; the click buttons (pin + dials) keep the
+      // 'pointer' that the grid-hover pass already set this frame.
+      if (token && (token.role === 'resize' || token.role === 'scale')) dom.style.cursor = 'nwse-resize';
     };
 
     // Caret-preview tint: light the glyph under the pointer (additive highlight
@@ -528,6 +534,27 @@ export function ResizeDragger() {
       else router.execute(`terminal.resize ${id} ${startCols} ${startRows}`); // undo the live steps
     };
 
+    // CLICK chrome controls (pin + the size/scale ± dials) share the 'handle' channel with
+    // the drag grips; a press FIRES a verb instead of starting a drag. Steps read from
+    // ctx.windowConfig (Settings ▸ Window). The dials compose the same window.scale /
+    // terminal.resize verbs the CLI uses, so each step lands as a logged command record.
+    const fireChromeAction = (role, id, grid) => {
+      const wc = ctx.windowConfig || {};
+      if (role === 'pin') { router.execute(['window.pin', id]); return; } // verb lights the Pin button
+      if (role === 'scale-inc' || role === 'scale-dec') {
+        const step = wc.scaleStep || 1.1;
+        const z = (grid.zoom ?? 1) * (role === 'scale-inc' ? step : 1 / step);
+        router.execute(`window.scale ${id} ${z}`);
+        return;
+      }
+      // size dial: step cols by sizeStep, rows in proportion so the panel keeps its aspect.
+      const dir = role === 'size-inc' ? 1 : -1;
+      const step = Math.max(1, Math.round(wc.sizeStep || 4));
+      const cols = grid.cols ?? 0, rows = grid.rows ?? 0;
+      const dRows = Math.max(1, Math.round(step * (rows / Math.max(cols, 1))));
+      router.execute(`terminal.resize ${id} ${cols + dir * step} ${rows + dir * dRows}`);
+    };
+
     const onDown = (e) => {
       // Plain LMB on a grip. Ctrl/Cmd is the MOVE gesture (ObjectDragger owns it),
       // so a modifier here is not a resize — bail and let that path run. The press
@@ -539,9 +566,25 @@ export function ResizeDragger() {
       if (!grid) return;
       const id = ctx.registry.getIdByGrid(grid);
       if (!id) return;
-      // Two sibling corners on the 'handle' channel: 'scale' (red) zooms the Object3D,
-      // anything else (green) resizes cols/rows. The press authority is identical; only
-      // the drag math differs.
+      // Chrome splits by role: the click buttons (pin + dials) fire a verb on press and
+      // return — NO drag. ctx.resizing (drained the microtask after this press's trailing
+      // pointerup) suppresses the click-select so the press acts on the button, not the
+      // panel behind it. The two drag grips fall through to the ResizeDragger setup below.
+      if (token.role !== 'resize' && token.role !== 'scale') {
+        // The button can carry its own handler (token.onClick); else the role→verb map runs.
+        if (token.button?.onClick) token.button.onClick(id, grid);
+        else fireChromeAction(token.role, id, grid);
+        // Suppress the trailing click-select so the press acts on the button, not the panel
+        // behind it (drained the microtask after this press's pointerup). handleHover is left
+        // intact — the hover loop clears the button's visual when the cursor leaves it.
+        ctx.resizing = true;
+        const drain = () => { queueMicrotask(() => { ctx.resizing = false; }); window.removeEventListener('pointerup', drain, true); };
+        window.addEventListener('pointerup', drain, true);
+        e.preventDefault();
+        return;
+      }
+      // The two drag grips: 'scale' (red) zooms the Object3D, 'resize' (green) reshapes
+      // cols/rows. Press authority is identical; only the drag math differs.
       const mode = token.role === 'scale' ? 'scale' : 'resize';
       const startBounds = grid.getBounds().clone();
       drag = {

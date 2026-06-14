@@ -54,4 +54,46 @@ export default function registerWindowCommands(router) {
         usage: '<id|index> <factor | x,y,z>',
         returns: '{ id, zoom }',
     });
+
+    router.register('window.pin', (args, ctx) => {
+        const r = resolveSurface(ctx, args[0]);
+        if (!r) return { text: `ERR: no surface for "${args[0]}" (registry id or surface index)`, data: null };
+        if (typeof r.grid.setZoom !== 'function') return { text: `ERR: '${r.id}' is not pinnable`, data: null };
+        const id = r.id;
+        const kind = ctx.registry?.get?.(id)?.type || 'surface';
+        // Pin state is a per-surface view field — the durable "verb mutates state idempotently"
+        // home (WorkspaceModel.surfaces[id].view): { pinned, prePinZoom }. The live size IS the
+        // zoom; pin snaps it to the max and remembers the prior value to restore on unpin.
+        const view = ctx.workspace?.getSurface?.(id)?.view || {};
+        const isPinned = !!view.pinned;
+        // Explicit on|off is the idempotent state-setter (CLI/RPC); no arg toggles (the button).
+        const arg = String(args[1] ?? '').toLowerCase();
+        const want = ['on', 'true', '1'].includes(arg) ? true
+                   : ['off', 'false', '0'].includes(arg) ? false
+                   : !isPinned;
+        const maxPinZoom = ctx.windowConfig?.maxPinZoom ?? 3;
+
+        if (want) {
+            // Capture the pre-pin zoom only on the 0→1 edge, so re-pinning an already-pinned
+            // window re-asserts the max without clobbering the saved restore value (idempotent).
+            const prePinZoom = isPinned ? (view.prePinZoom ?? 1) : (r.grid.zoom ?? 1);
+            ctx.workspace?.setSurfaceView?.(id, kind, { pinned: true, prePinZoom });
+            router.execute(['window.scale', id, String(maxPinZoom)]); // saves + reflows a docked tile
+        } else {
+            const restore = view.prePinZoom ?? (r.grid.zoom ?? 1);
+            ctx.workspace?.setSurfaceView?.(id, kind, { pinned: false, prePinZoom: null });
+            if (isPinned) router.execute(['window.scale', id, String(restore)]);
+        }
+        // Reflect the pinned state on the window's Pin button (any caller — button, CLI, palette).
+        if (typeof r.grid.setControlActive === 'function') r.grid.setControlActive('pin', want);
+        ctx.session?.scheduleSave?.();
+        return {
+            text: `OK: ${want ? `pinned '${id}' → ×${maxPinZoom}` : `unpinned '${id}'`}`,
+            data: { id, pinned: want },
+        };
+    }, {
+        description: 'Maximize a window to the max pin zoom (toggle); unpin restores the prior zoom',
+        usage: '<id|index> [on|off]',
+        returns: '{ id, pinned }',
+    });
 }

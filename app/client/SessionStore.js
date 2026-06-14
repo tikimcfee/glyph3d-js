@@ -169,8 +169,16 @@ export default class SessionStore {
     const cd = ctx.cameraDock;
     if (cd) {
       // Each tile records its readability zoom alongside membership, so a docked window
-      // restores at the size the operator scaled it to (orthogonal to its cols/rows).
-      const tiles = cd.list().sort((a, b) => a.slot - b.slot).map((t) => ({ id: t.id, zoom: t.zoom ?? 1 }));
+      // restores at the size the operator scaled it to (orthogonal to its cols/rows). A
+      // pinned window also carries its pin state (+ the pre-pin zoom) so a post-reload
+      // unpin still drops back to the right size. (Loose-window zoom/pin persistence is
+      // the known migration gap — only docked tiles round-trip today.)
+      const tiles = cd.list().sort((a, b) => a.slot - b.slot).map((t) => {
+        const v = ctx.workspace?.getSurface?.(t.id)?.view || {};
+        const tile = { id: t.id, zoom: t.zoom ?? 1 };
+        if (v.pinned) { tile.pinned = true; tile.prePinZoom = v.prePinZoom ?? 1; }
+        return tile;
+      });
       const have = new Set(tiles.map((t) => t.id));
       const pend = this._pendingDock3d?.tiles?.filter((t) => !have.has(t.id)) || [];
       const all = [...tiles, ...pend];
@@ -324,7 +332,9 @@ export default class SessionStore {
       ? {
           layout: snap.dock3d.layout || 'linear',
           tiles: snap.dock3d.tiles.map((t) =>
-            (typeof t === 'string' ? { id: t, zoom: 1 } : { id: t.id, zoom: t.zoom ?? 1 })),
+            (typeof t === 'string'
+              ? { id: t, zoom: 1 }
+              : { id: t.id, zoom: t.zoom ?? 1, pinned: !!t.pinned, prePinZoom: t.prePinZoom })),
         }
       : null;
     this._maybeApplyDock();
@@ -405,6 +415,13 @@ export default class SessionStore {
         // Restore the readability zoom after the lock captures home (the dock reads
         // user back for layout, so this re-places the tile at its saved size).
         if (t.zoom && t.zoom !== 1) this.router.execute(['window.scale', t.id, String(t.zoom)]);
+        // Re-seat the pin view state: the saved zoom already IS the pinned (max) size, so
+        // this only restores the flag + pre-pin zoom so a later unpin drops back correctly,
+        // and lights the Pin button to match.
+        if (t.pinned) {
+          this.ctx.workspace?.setSurfaceView?.(t.id, 'terminal', { pinned: true, prePinZoom: t.prePinZoom ?? 1 });
+          this.ctx.registry?.get?.(t.id)?.grid?.setControlActive?.('pin', true);
+        }
       } else {
         remaining.push(t);
       }
