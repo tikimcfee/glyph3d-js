@@ -25,6 +25,7 @@ function clearScene(ctx) {
     ctx.annotations?.clear?.();
     ctx.workspace?.clear?.();
     ctx._cancelCameraAnimation?.();
+    ctx.fieldSource = null; // the field is gone — clear the one source-of-truth (capture reads it)
     return cleared;
 }
 
@@ -76,6 +77,11 @@ export default function registerRepoCommands(router) {
 
             // 4. Frame the field.
             await router.execute('camera.fitall');
+
+            // 5. Record the field source — the ONE decider the session persists. file.openDir (step 3)
+            //    just wrote {type:'local'} into it; overwrite with the repo ref so a reload restores
+            //    via repo.load, not a local dir pop. owner/repo/branch is the form repo.load parses.
+            ctx.fieldSource = { type: 'repo', ref: `${info.owner}/${info.repo}/${info.branch}` };
 
             const where = `${info.owner}/${info.repo}@${info.branch}`;
             const opened = open?.data?.opened;

@@ -151,21 +151,17 @@ export default class SessionStore {
       files.push(entry);
     }
 
-    // The bulk field source — what fills the scene without tabs. A GitHub repo
-    // restores via repo.load; a relay-local project via file.openDir. Both are
-    // recorded INTENT: the repo from the provider's loaded repo, the local field
-    // from ctx.fieldSource (written by the file.openDir handler, cleared by
-    // scene.clear_grids). Never inferred from a census of non-tab grids — a
-    // census can't tell a deliberate dir pop from grids other systems created,
-    // and it re-trips on the grids its own restore opened (a session that could
-    // never stop bulk-loading the whole project).
+    // The bulk field source — what fills the scene without tabs. ONE decider: ctx.fieldSource,
+    // recorded INTENT written by the field-load handlers (file.openDir → {type:'local',dir};
+    // repo.load → {type:'repo',ref}) and nulled by clearScene / scene.clear_grids. The provider's
+    // _currentRepo is its OWN working state (it needs the parsed repo to fetch files) — a cache, not
+    // this fact's owner; capture reads fieldSource alone. Never inferred from a census of non-tab
+    // grids — a census can't tell a deliberate dir pop from grids other systems made, and it
+    // re-trips on the grids its own restore opened (a session that could never stop bulk-loading).
     let field = null;
-    const repo = ctx.fileProvider?._currentRepo;
-    if (repo?.owner) {
-      field = { type: 'repo', ref: `${repo.owner}/${repo.repo}${repo.branch ? '/' + repo.branch : ''}` };
-    } else if (ctx.fieldSource?.type === 'local') {
-      field = { type: 'local', dir: ctx.fieldSource.dir || '' };
-    }
+    const fs = ctx.fieldSource;
+    if (fs?.type === 'repo' && fs.ref) field = { type: 'repo', ref: fs.ref };
+    else if (fs?.type === 'local') field = { type: 'local', dir: fs.dir || '' };
 
     // Terminals: serialize the MODEL's surface view-intent (cols/rows + position), NOT a scrape of
     // the live grids. The model is the durable buffer — it holds a terminal's geometry whether or

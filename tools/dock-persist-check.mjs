@@ -266,5 +266,26 @@ function makeRouter(cameraDock) {
   ok(!router.calls.some((c) => String(c).startsWith('attention.')), 'restore: NO attention.* verb replay (direct state only)');
 }
 
+// ---- 9. field source = ONE decider (ctx.fieldSource), NOT the provider's _currentRepo cache ----
+{
+  const cap = (mutate) => {
+    const ctx = makeCtx(makeRegistry(), makeCameraDock());
+    mutate(ctx);
+    return new SessionStore({ ctx, router: makeRouter(makeCameraDock()), bridge: {} }).capture();
+  };
+  const repo = cap((ctx) => {
+    ctx.fieldSource = { type: 'repo', ref: 'owner/repo/main' };
+    ctx.fileProvider._currentRepo = { owner: 'STALE', repo: 'x', branch: 'y' }; // must be IGNORED
+  });
+  eq(repo.field, { type: 'repo', ref: 'owner/repo/main' }, 'capture: repo field from ctx.fieldSource (ignores provider _currentRepo)');
+  const local = cap((ctx) => { ctx.fieldSource = { type: 'local', dir: 'src' }; });
+  eq(local.field, { type: 'local', dir: 'src' }, 'capture: local field from ctx.fieldSource');
+  const none = cap((ctx) => {
+    ctx.fieldSource = null;
+    ctx.fileProvider._currentRepo = { owner: 'lingering', repo: 'r', branch: 'b' }; // cache, not the decider
+  });
+  ok(none.field === null, 'capture: no fieldSource → field null (the provider cache is NOT the decider)');
+}
+
 console.log(failures === 0 ? '\nPASS — dock persistence round-trips' : `\nFAIL — ${failures} assertion(s)`);
 process.exit(failures === 0 ? 0 : 1);
