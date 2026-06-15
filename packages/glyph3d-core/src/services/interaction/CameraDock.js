@@ -64,20 +64,16 @@ const DEG2RAD = Math.PI / 180;
 const GHOST_PULSE_HZ = 0.5;          // outline opacity breathe (cycles/sec)
 const GHOST_RENDER_ORDER = 1000;     // HUD affordance — drawn over the tiles, depth-test off
 
-// Per-tile identity palette. Each docked window is assigned one hue (cycled on lock); that hue is
-// painted as its in-shader panel border AND as its dock ghost outline, so a window out in the bar
-// and its placeholder read as the same thing by color — the "which rectangle is which" solver.
-// Quiet, distinct, desaturated — not garish. First entry matches the old single ghost blue.
-const GHOST_PALETTE = [
-    0x8ab4ff, // blue
-    0x8ee6a8, // green
-    0xc9a0ff, // violet
-    0xf0b45a, // amber
-    0x6ed0d6, // teal
-    0xf08aa8, // rose
-    0xb4d96a, // lime
-    0xd0a070, // tan
-];
+// Per-tile identity hue — AUTO-GENERATED per docked window, not a fixed palette. A golden-angle
+// rotation (137.5°) walks the hue circle so successive windows land maximally far apart: distinct for
+// ANY count, no ring-buffer wrap/collision past N. Quiet fixed S/L keeps them desaturated (not
+// garish); the start hue sits near the old single ghost blue for continuity. The hue is painted as the
+// window's in-shader panel border AND its dock ghost outline, so a tile in the bar and its placeholder
+// read as the same window by color — the "which rectangle is which" solver.
+const IDENTITY_GOLDEN = 137.508 / 360; // golden-angle as a hue fraction — the most-irrational step
+const IDENTITY_HUE0 = 0.58;            // start hue (~blue) — continuity with the old ghost color
+const IDENTITY_SAT = 0.72;             // quiet but present — distinct as a hairline on a small tile
+const IDENTITY_LIGHT = 0.68;           // light — reads on the dark background, not washed out
 
 /** Walk up the parent chain to confirm an object still reaches a live Scene. */
 function reachesScene(obj) {
@@ -151,7 +147,7 @@ export class CameraDock extends THREE.Object3D {
         this.ghostOpacity = ghostOpacity; // its peak opacity (breathes below this)
         this.borderWidth = borderWidth;       // docked window's panel-border thickness (screen pixels)
         this.borderStrength = borderStrength; // docked window's panel-border intensity (0 = off)
-        this._colorCursor = 0;            // cycles GHOST_PALETTE so each docked window gets a hue
+        this._colorCursor = 0;            // golden-angle step counter — each docked window gets a fresh spread hue
         this._orderSeq = 0;               // monotonic sort-key source for interactive locks (restore overrides per-tile)
 
         /** The tile currently raised into the focus area (centered + enlarged, still
@@ -257,6 +253,18 @@ export class CameraDock extends THREE.Object3D {
     }
 
     /**
+     * Auto-generate the i-th identity hue: a golden-angle walk of the hue circle at a fixed quiet
+     * S/L. Deterministic in the lock sequence (each entry keeps its hue for its docked lifetime) and
+     * maximally spread for any count — no fixed list to wrap or collide.
+     * @param {number} i sequence index (this._colorCursor at lock time)
+     * @returns {number} hex color
+     */
+    _identityColor(i) {
+        const hue = (IDENTITY_HUE0 + i * IDENTITY_GOLDEN) % 1;
+        return new THREE.Color().setHSL(hue, IDENTITY_SAT, IDENTITY_LIGHT).getHex();
+    }
+
+    /**
      * Dock a window: capture its home, reparent it under the bar (world-preserving),
      * and animate it into its slot at tile scale.
      * @param {string} id  registry id
@@ -305,7 +313,7 @@ export class CameraDock extends THREE.Object3D {
             quatTarget: new THREE.Quaternion(),
             // This window's identity hue — painted as its panel border AND its ghost outline, so the
             // tile in the bar and its placeholder read as the same window by color.
-            ghostColor: GHOST_PALETTE[this._colorCursor++ % GHOST_PALETTE.length],
+            ghostColor: this._identityColor(this._colorCursor++),
         };
 
         // Reparent preserving world transform — the tile stays put for this frame,
