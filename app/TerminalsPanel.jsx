@@ -3,6 +3,7 @@ import { DockviewReact } from 'dockview';
 import 'dockview/dist/styles/dockview.css';
 import './ide-dock.css';
 import TerminalView from './TerminalView.jsx';
+import { wireTerminalDock } from './client/terminalDockSync.js';
 
 // TerminalsPanel — the IDE's terminal workspace: a NESTED dockview where each live shell is a
 // real panel. Folding the old roster list and the standalone Terminal view into one tab, the
@@ -17,8 +18,9 @@ import TerminalView from './TerminalView.jsx';
 //   registry → panels: a registry change-listener (spawn/kill fire it synchronously, in-process)
 //     adds/removes panels to match the live terminal set.
 //   attention ↔ active tab: the AttentionManager's `primary` slot drives which tab is active, and
-//     a user-initiated tab activation drives terminal.focus back. Programmatic activations are
-//     flagged (`applying`) so the two directions can't echo into a loop.
+//     a user-initiated tab activation drives terminal.focus back. Activations WE initiate are
+//     identity-matched and consumed silently (see client/terminalDockSync.js) so the two directions
+//     can't echo into a loop — and so a restore-time activation can't fly the camera on launch.
 //
 // Containment: dockview gates drops by the originating instance's id, and each DockviewComponent
 // gets a distinct module-counter id — so a terminal tab can't be dragged out into the main IDE
@@ -134,58 +136,24 @@ export default function TerminalsPanel({ client }) {
     const api = event.api;
     apiRef.current = api;
     const disposers = [];
-    let applying = false; // suppress focus-echo while we drive the dock programmatically
 
-    const primaryId = () => clientRef.current?.ctx?.attentionManager?.get('primary')?.id ?? null;
-
-    // attention → active tab: raise the panel for the primary slot (no-op if already active).
-    const syncActive = () => {
-      const id = primaryId();
-      if (!id) return;
-      const p = api.getPanel(id);
-      if (p && !p.api.isActive) { applying = true; try { p.api.setActive(); } finally { applying = false; } }
-    };
-
-    // registry → panels: add a panel per new terminal, close panels for killed ones. New panels
-    // are added inactive (attention, not panel-add, decides what's active) except the first, which
-    // a group must have. dockview events fire synchronously, so the `applying` flag holds.
-    const syncPanels = () => {
-      applying = true;
-      try {
-        const live = readTerminals(clientRef.current);
-        const liveIds = new Set(live);
-        for (const p of [...api.panels]) if (!liveIds.has(p.id)) p.api.close();
-        for (const id of live) {
-          if (api.getPanel(id)) continue;
-          api.addPanel({
-            id, component: 'terminal', tabComponent: 'terminal',
-            params: { termId: id },
-            inactive: api.panels.length > 0 && primaryId() !== id,
-          });
-        }
-      } finally { applying = false; }
-      syncActive();
-    };
-
-    syncPanels();
+    // The registry↔panels↔attention state machine, incl. the identity-matched guard that keeps a
+    // programmatic activation (restore re-adopt, attention sync) from flying the camera / hijacking
+    // focus the way a real tab click does — robust to dockview's async activation events.
+    const dock = wireTerminalDock(api, {
+      getClient: () => clientRef.current,
+      listTerminalIds: readTerminals,
+    });
+    dock.syncPanels();
 
     const reg = clientRef.current?.ctx?.registry;
     if (reg?.addChangeListener) {
-      reg.addChangeListener(syncPanels);
-      disposers.push(() => reg.removeChangeListener(syncPanels));
+      reg.addChangeListener(dock.syncPanels);
+      disposers.push(() => reg.removeChangeListener(dock.syncPanels));
     }
     const am = clientRef.current?.ctx?.attentionManager;
-    if (am?.on) disposers.push(am.on('change:primary', syncActive));
-
-    // active tab → focus: a USER-initiated activation (drag/click) takes focus + frames it. Skip
-    // programmatic activations (applying) and no-op echoes (attention already on this id).
-    const d = api.onDidActivePanelChange((panel) => {
-      if (applying || !panel) return;
-      if (primaryId() === panel.id) return;
-      clientRef.current?.router?.execute(`terminal.focus ${panel.id}`);
-      clientRef.current?.router?.execute(`camera.focus ${panel.id}`);
-    });
-    disposers.push(() => d.dispose());
+    if (am?.on) disposers.push(am.on('change:primary', dock.syncActive));
+    disposers.push(() => dock.dispose());
 
     disposersRef.current = disposers;
   }, []);
