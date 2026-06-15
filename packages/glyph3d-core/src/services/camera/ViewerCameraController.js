@@ -113,6 +113,11 @@ export class ViewerCameraController {
         // (grid/terminal scroll is not camera motion). Toggled via setLocked() / camera.lock.
         this.locked = false;
 
+        // Save trigger: SessionStore hangs a callback here, fired from applyCamera whenever the
+        // pose actually changes this frame. Debounced downstream, so a continuous flight collapses
+        // to one save ~when the camera settles. Null until armed (and during/after dispose).
+        this.onMoved = null;
+
         // Listener registry for clean teardown.
         this._listeners = [];
     }
@@ -306,13 +311,61 @@ export class ViewerCameraController {
             this.input.drag.dy = 0;
             return;
         }
+        // Snapshot the pose so we can tell, after the transforms below, whether the camera ACTUALLY
+        // moved this frame — that edge is the save trigger (a flight/drag/zoom/fly all flow through
+        // here, so one check covers every motion path).
+        const cam = this.ctx.camera;
+        const bx = cam.position.x, by = cam.position.y, bz = cam.position.z, bp = this.pitch, byaw = this.yaw;
         // A camera fly (flyTo) owns the frame while it runs — UNLESS the user grabs control
         // (drag / wheel / WASD), which cancels it instantly so the fly never traps the view.
-        if (this._tween && this._stepTween(deltaTime)) return;
+        if (this._tween && this._stepTween(deltaTime)) { this._notifyMoved(bx, by, bz, bp, byaw); return; }
         this._applyDrag();
         this._applyWheel();
         this._applyKeyboardMotion(deltaTime);
         this._applyRotation();
+        this._notifyMoved(bx, by, bz, bp, byaw);
+    }
+
+    /**
+     * Fire onMoved iff the camera pose changed since the frame's start snapshot. At rest the camera
+     * re-derives the same quaternion every frame but position/pitch/yaw don't move, so this stays
+     * silent — no idle save churn. @private
+     */
+    _notifyMoved(bx, by, bz, bp, byaw) {
+        if (!this.onMoved) return;
+        const p = this.ctx.camera.position;
+        if (p.x !== bx || p.y !== by || p.z !== bz || this.pitch !== bp || this.yaw !== byaw) this.onMoved();
+    }
+
+    /**
+     * The camera's full serializable state: position + orientation (pitch/yaw — the camera carries
+     * no roll) + flight speed. This IS the camera for persistence; pitch/yaw are the raw inputs to
+     * the per-frame YXZ quaternion, so they round-trip orientation exactly with no reconstruction.
+     * @returns {{pos:{x:number,y:number,z:number}, pitch:number, yaw:number, speed:number}}
+     */
+    getState() {
+        const p = this.ctx.camera.position;
+        return { pos: { x: p.x, y: p.y, z: p.z }, pitch: this.pitch, yaw: this.yaw, speed: this.cameraSpeed };
+    }
+
+    /**
+     * Set the camera DIRECTLY from serialized state — position, orientation, speed — with no tween
+     * and no verb replay. Cancels any in-flight fly so a restored pose isn't immediately overridden.
+     * This is the load path: deserialize → applyState, and the camera lands exactly where it was
+     * saved. Each field is guarded so a partial/legacy blob applies what it has and ignores the rest.
+     * @param {{pos?:{x:number,y:number,z:number}, pitch?:number, yaw?:number, speed?:number}} s
+     */
+    applyState(s) {
+        if (!s) return;
+        this._tween = null;
+        const p = s.pos;
+        if (p && Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z)) {
+            this.ctx.camera.position.set(p.x, p.y, p.z);
+        }
+        if (Number.isFinite(s.pitch)) this.pitch = s.pitch;
+        if (Number.isFinite(s.yaw)) this.yaw = s.yaw;
+        this._applyRotation();
+        if (Number.isFinite(s.speed)) { this.cameraSpeed = s.speed; this.settings.cameraSpeed = s.speed; }
     }
 
     /**

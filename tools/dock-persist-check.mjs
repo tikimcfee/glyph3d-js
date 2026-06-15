@@ -161,5 +161,48 @@ function makeRouter(cameraDock) {
      'restore: applied layout state DIRECTLY onto the tree (no verb)');
 }
 
+// ---- 7. camera round-trips as DIRECT STATE: capture reads the controller's getState() (pose +
+// speed, no forward/target reconstruction); restore SETS it back via applyState() — NO camera.move/
+// camera.aim verb replay (that fired async and fought the field-restore fly). Plus the save trigger:
+// arming autosave hangs onMoved on the controller, disposing clears it. ----
+{
+  // Stub mirroring ViewerCameraController.getState/applyState (the persisted slice = pose + speed).
+  const makeCamCtl = (init = null) => {
+    let state = init;
+    return {
+      onMoved: null,
+      getState: () => state,
+      applyState: (s) => { state = s ? { pos: { ...s.pos }, pitch: s.pitch, yaw: s.yaw, speed: s.speed } : state; },
+      _state: () => state,
+    };
+  };
+
+  const pose = { pos: { x: 12, y: 34, z: 56 }, pitch: 0.5, yaw: -1.25, speed: 80 };
+
+  const capCtx = makeCtx(makeRegistry(), makeCameraDock());
+  capCtx.cameraController = makeCamCtl(pose);
+  const snap = new SessionStore({ ctx: capCtx, router: makeRouter(makeCameraDock()), bridge: {} }).capture();
+  eq(snap.camera, { pos: { x: 12, y: 34, z: 56 }, pitch: 0.5, yaw: -1.25, speed: 80 },
+     'capture: camera read DIRECTLY from the controller (pose + speed, no target)');
+
+  const resCtx = makeCtx(makeRegistry(), makeCameraDock());
+  resCtx.cameraController = makeCamCtl(null);
+  const router = makeRouter(makeCameraDock());
+  const ss = new SessionStore({ ctx: resCtx, router, bridge: {} });
+  await ss.restore({ version: 2, files: [], camera: pose });
+  eq(resCtx.cameraController._state(), { pos: { x: 12, y: 34, z: 56 }, pitch: 0.5, yaw: -1.25, speed: 80 },
+     'restore: applied camera state DIRECTLY onto the controller');
+  ok(!router.calls.some((c) => typeof c === 'string' && c.startsWith('camera.')),
+     'restore: NO camera.move/aim verb replayed (direct state only)');
+
+  // Save trigger: arming wires onMoved → a pose change schedules a save; disposing clears it.
+  resCtx.bridge = {};
+  ss.bridge = { rpcRequest: () => Promise.resolve() };
+  ss._armAutosave();
+  ok(typeof resCtx.cameraController.onMoved === 'function', 'arm: onMoved hung on the controller (camera moves trigger save)');
+  ss.dispose();
+  ok(resCtx.cameraController.onMoved === null, 'dispose: onMoved cleared');
+}
+
 console.log(failures === 0 ? '\nPASS — dock persistence round-trips' : `\nFAIL — ${failures} assertion(s)`);
 process.exit(failures === 0 ? 0 : 1);

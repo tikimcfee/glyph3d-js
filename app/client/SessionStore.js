@@ -32,23 +32,9 @@ const SESSION_URI = 'file:///.glyph3d-session.json';
 const SCHEMA_VERSION = 2;
 const SAVE_DEBOUNCE_MS = 600;
 const PERIODIC_SAVE_MS = 5000;
-const CAMERA_TARGET_DIST = 100; // how far ahead to place the look-target we restore via camera.aim
 
 const round = (n) => Math.round(n * 100) / 100;
 const isFinitePos = (p) => p && Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z);
-
-// Camera forward = local -Z rotated by the camera quaternion. We save a look
-// TARGET (pos + forward) rather than a raw rotation so restore can go through
-// camera.aim, which re-syncs the controller's pitch/yaw (a raw quaternion set
-// would desync the next mouse input).
-function forwardFromQuat(q) {
-  const { x, y, z, w } = q;
-  return {
-    x: -2 * (x * z + w * y),
-    y: -2 * (y * z - w * x),
-    z: -(1 - 2 * (x * x + y * y)),
-  };
-}
 
 /**
  * A surface's POSITION is derived — never stored, never projected — iff it's a grid laid out by the
@@ -247,19 +233,17 @@ export default class SessionStore {
     return this.ctx.contentTree?.getLayoutState?.() ?? null;
   }
 
+  // Camera = serializable state read DIRECTLY off the controller (position + pitch/yaw + speed —
+  // its complete pose; pitch/yaw are the raw quaternion inputs, so no forward/target reconstruction).
+  // Rounded here only to keep the dedup compare and the on-disk blob terse.
   _captureCamera() {
-    const cam = this.ctx.camera;
-    if (!cam?.position) return null;
-    const p = cam.position;
-    const fwd = forwardFromQuat(cam.quaternion);
+    const s = this.ctx.cameraController?.getState?.();
+    if (!s || !isFinitePos(s.pos)) return null;
     return {
-      pos: { x: round(p.x), y: round(p.y), z: round(p.z) },
-      target: {
-        x: round(p.x + fwd.x * CAMERA_TARGET_DIST),
-        y: round(p.y + fwd.y * CAMERA_TARGET_DIST),
-        z: round(p.z + fwd.z * CAMERA_TARGET_DIST),
-      },
-      speed: this.ctx.cameraController?.cameraSpeed ?? null,
+      pos: { x: round(s.pos.x), y: round(s.pos.y), z: round(s.pos.z) },
+      pitch: round(s.pitch),
+      yaw: round(s.yaw),
+      speed: s.speed ?? null,
     };
   }
 
@@ -477,14 +461,13 @@ export default class SessionStore {
     this._pendingDock3d = remaining.length ? { layout: pend.layout, tiles: remaining } : null;
   }
 
+  // Load the camera by SETTING it directly on the controller — no camera.move/aim verb replay (which
+  // fired async and fought the field-restore fly), no quaternion stomp. applyState cancels any
+  // in-flight fly and lands the saved pose exactly.
   _restoreCamera(cam) {
     if (!cam?.pos) return;
     if (!isFinitePos(cam.pos)) { console.warn('[session] dropped non-finite camera position'); return; }
-    this.router.execute(`camera.move ${cam.pos.x} ${cam.pos.y} ${cam.pos.z}`);
-    if (isFinitePos(cam.target)) {
-      this.router.execute(`camera.aim ${cam.target.x} ${cam.target.y} ${cam.target.z}`);
-    }
-    if (cam.speed != null && this.ctx.cameraController) this.ctx.cameraController.cameraSpeed = cam.speed;
+    this.ctx.cameraController?.applyState?.(cam);
   }
 
   _maybeApplyDock() {
@@ -559,6 +542,11 @@ export default class SessionStore {
     // A verb writing the model (terminal.resize/move/…) is intent changing — save it. The model
     // emits change:surfaces only on a real change, so this can't churn on idempotent re-pushes.
     this._offSurfaces = this.ctx.workspace?.on?.('change:surfaces', () => this.scheduleSave()) || null;
+    // Camera pose is intent too, but it lives on the controller, not the model — so the controller
+    // fires onMoved when the pose actually changes (debounced here → one save when flight settles).
+    // This is the fix for "saved the first time, not again": without it, a move persisted only if a
+    // periodic tick or tab-hide happened to catch it before reload.
+    if (this.ctx.cameraController) this.ctx.cameraController.onMoved = () => this.scheduleSave();
     if (typeof document !== 'undefined') document.addEventListener('visibilitychange', this._onVisibility);
     if (typeof window !== 'undefined') window.addEventListener('beforeunload', this._onVisibility);
     this._periodic = setInterval(() => this.scheduleSave(), PERIODIC_SAVE_MS);
@@ -570,6 +558,7 @@ export default class SessionStore {
     clearTimeout(this._saveTimer);
     clearInterval(this._periodic);
     this.ctx.registry.removeChangeListener(this._onRegistryChange);
+    if (this.ctx.cameraController) this.ctx.cameraController.onMoved = null;
     this._offSurfaces?.();
     if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', this._onVisibility);
     if (typeof window !== 'undefined') window.removeEventListener('beforeunload', this._onVisibility);
