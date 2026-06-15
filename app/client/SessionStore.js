@@ -48,28 +48,31 @@ export function positionIsDerived(ctx, id) {
 }
 
 /**
- * Per-kind PROJECTORS: push a surface's view-intent onto its live object by RE-EXECUTING the kind's
- * own verbs (guarded — they short-circuit when the live object already matches). The verb is the one
- * projection definition; this re-invokes it when a genuinely-external child (relay PTY, capture
- * stream) re-adopts after the original gesture. Adding a surface kind = adding a projector here.
- * NOT a drift-scanner: for a surface that's present and already correct, every guard no-ops.
+ * Per-kind PROJECTORS: push a surface's view-intent onto its live object by calling the object's own
+ * `applyView(view)` — DIRECT state, not a replay of the verbs that produced it. applyView is guarded
+ * (a present, already-correct surface is a no-op), so this re-projects a genuinely-external child
+ * (relay PTY, capture stream) when it re-adopts after the original gesture. Adding a surface kind =
+ * adding a projector here. NOT a drift-scanner.
  * @type {Record<string, (store: SessionStore, s: object, grid: object) => void>}
  */
 const SURFACE_PROJECTORS = {
   terminal(store, s, grid) {
-    const v = s.view || {};
-    // Position: skip while docked (the dock owns a docked tile's transform; its home is set by the
-    // pre-dock move, then captured at lock). Loose terminals get moved to their stored home.
+    // Skip position while docked (the dock owns a docked tile's transform; its home is set by the
+    // pre-dock move, then captured at lock). applyView sets the LOCAL geometry (position + grid +
+    // emulator) directly — no terminal.move / terminal.resize verb replay on the load path.
     const docked = store.ctx.cameraDock?.has?.(s.id);
-    if (!docked && isFinitePos(v.position)
-        && (grid.position.x !== v.position.x || grid.position.y !== v.position.y || grid.position.z !== v.position.z)) {
-      store.router.execute(`terminal.move ${s.id} ${v.position.x} ${v.position.y} ${v.position.z}`);
-    }
-    // Size: terminal.resize drives grid + emulator + PTY in lockstep; guarded so it only fires when
-    // the re-adopted grid (spawned at 80×24) differs from the intent.
-    if (Number.isInteger(v.cols) && Number.isInteger(v.rows) && v.cols > 0 && v.rows > 0
-        && (grid.cols !== v.cols || grid.rows !== v.rows)) {
-      store.router.execute(`terminal.resize ${s.id} ${v.cols} ${v.rows}`);
+    const changed = grid.applyView?.(s.view || {}, { skipPosition: docked }) || {};
+    // The relay PTY is the one external child the grid can't reach. If applyView resized the local
+    // grid/emulator, tell the owning adapter to match (pty.Setsize → SIGWINCH → tmux), exactly as
+    // terminal.resize does — the bridge lives at THIS layer, not on the grid.
+    if (changed.resized) {
+      const owner = store.ctx.registry.get(s.id)?.meta?.owner;
+      if (owner && store.ctx.wsbridge?.connected) {
+        store.ctx.wsbridge.push(owner, {
+          event: 'terminal.resize',
+          data: { terminalId: s.id, cols: changed.resized.cols, rows: changed.resized.rows },
+        });
+      }
     }
   },
 };

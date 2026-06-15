@@ -16,13 +16,35 @@ const ok = (cond, msg) => { console.log(`${cond ? '✓' : '✗ FAIL'} ${msg}`); 
 const eq = (a, b, msg) => ok(JSON.stringify(a) === JSON.stringify(b), `${msg} — got ${JSON.stringify(a)}`);
 
 // ---- mocks ----------------------------------------------------------------
-function makeRegistry(ids = new Set()) {
+// Mock terminal grid: mirrors TerminalGrid.applyView (local geometry only; records calls + returns
+// what changed) so the projector's direct-state contract is exercised without a real GPU grid.
+function makeTermGrid() {
   return {
-    _ids: ids,
+    position: { x: 0, y: 0, z: 0 }, cols: 80, rows: 24, _views: [],
+    applyView(view, opts = {}) {
+      this._views.push({ view, opts });
+      const v = view || {}; let moved = false, resized = null;
+      const p = v.position;
+      if (!opts.skipPosition && p && Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z)
+          && (this.position.x !== p.x || this.position.y !== p.y || this.position.z !== p.z)) {
+        this.position = { x: p.x, y: p.y, z: p.z }; moved = true;
+      }
+      if (Number.isInteger(v.cols) && Number.isInteger(v.rows) && (this.cols !== v.cols || this.rows !== v.rows)) {
+        this.cols = v.cols; this.rows = v.rows; resized = { cols: v.cols, rows: v.rows };
+      }
+      return { moved, resized };
+    },
+  };
+}
+function makeRegistry(ids = new Set()) {
+  const grids = new Map();                                       // stable grid per id (mutations persist)
+  const gridFor = (id) => { if (!grids.has(id)) grids.set(id, makeTermGrid()); return grids.get(id); };
+  return {
+    _ids: ids, _grids: grids,
     has: (id) => ids.has(id),
-    get: (id) => ids.has(id) ? { id, grid: { position: { x: 0, y: 0, z: 0 }, cols: 80, rows: 24 } } : null,
+    get: (id) => ids.has(id) ? { id, grid: gridFor(id), meta: { owner: `owner-${id}` } } : null,
     findByType: (t) => t === 'terminal'
-      ? [...ids].filter((i) => i.startsWith('term-')).map((id) => ({ id, grid: { position: { x: 1, y: 2, z: 3 }, cols: 80, rows: 24 } }))
+      ? [...ids].filter((i) => i.startsWith('term-')).map((id) => ({ id, grid: gridFor(id) }))
       : [],
     addChangeListener() {}, removeChangeListener() {},
   };
@@ -49,6 +71,8 @@ function makeCtx(registry, cameraDock) {
     fileProvider: { _currentRepo: null },
     fieldSource: null,
     status: { set() {}, clear() {} },
+    // wsbridge: the projector pushes a PTY resize over this when applyView resizes a terminal.
+    wsbridge: { connected: true, _pushes: [], push(owner, msg) { this._pushes.push({ owner, msg }); } },
   };
 }
 function makeRouter(cameraDock) {
@@ -106,11 +130,12 @@ function makeRouter(cameraDock) {
   eq(ss._pendingDock3d, null, 're-adopt: pending cleared when all tiles landed');
 }
 
-// ---- 4. terminal geometry reconciles from the MODEL when it re-adopts mid-restore ----
-// The bug this guards (now fixed structurally): a terminal that re-created mid-restore stuck at
-// the adapter's spawn 80×24 because restore reconciled dock+zoom but not size. Now restore loads
-// the geometry into the model and end-of-restore apply() pushes it; the model is the durable
-// buffer (NOT consumed). See tools/term-geom-persist-check.mjs for the full order-fuzzed coverage.
+// ---- 4. terminal geometry projects DIRECTLY via grid.applyView when it re-adopts mid-restore ----
+// The bug this guards: a terminal re-created mid-restore stuck at the adapter's spawn 80×24 because
+// restore reconciled dock+zoom but not size. Now restore loads the geometry into the model and
+// end-of-restore _projectSurfaces() pushes it onto the grid via applyView — DIRECT state, NOT a
+// terminal.resize/move verb replay — then re-syncs the external PTY over the bridge. The model is
+// the durable buffer (NOT consumed). See tools/term-geom-persist-check.mjs for order-fuzzed coverage.
 {
   const reg = makeRegistry(new Set(['term-9'])); // term-9 re-adopted mid-restore, at 80×24
   const cd = makeCameraDock();
@@ -121,10 +146,13 @@ function makeRouter(cameraDock) {
     version: 2, files: [], camera: null, dock3d: null,
     terminals: [{ id: 'term-9', x: 10, y: 20, z: 30, cols: 121, rows: 122 }],
   });
-  ok(router.calls.includes('terminal.resize term-9 121 122'),
-     'restore: resized a terminal that re-adopted mid-restore (80×24 → 121×122)');
-  ok(router.calls.includes('terminal.move term-9 10 20 30'),
-     'restore: moved that terminal to its saved home');
+  const grid = reg.get('term-9').grid;
+  eq({ cols: grid.cols, rows: grid.rows }, { cols: 121, rows: 122 }, 'restore: applyView resized the grid (80×24 → 121×122)');
+  eq(grid.position, { x: 10, y: 20, z: 30 }, 'restore: applyView moved the grid to its saved home');
+  ok(!router.calls.some((c) => typeof c === 'string' && (c.startsWith('terminal.resize') || c.startsWith('terminal.move'))),
+     'restore: NO terminal.resize/move verb replay (direct state only)');
+  ok(ctx.wsbridge._pushes.some((p) => p.msg?.data?.terminalId === 'term-9' && p.msg.data.cols === 121 && p.msg.data.rows === 122),
+     'restore: PTY re-synced over the bridge (SIGWINCH match)');
   eq(ctx.workspace.getSurface('term-9')?.view.cols, 121, 'restore: model retains the terminal intent (not consumed)');
 }
 

@@ -575,6 +575,40 @@ export default class TerminalGrid extends THREE.Object3D {
     }
 
     /**
+     * Apply a saved view record to this terminal's LOCAL geometry — position + cols/rows — directly.
+     * This is the load-path counterpart to the terminal.move / terminal.resize verbs: those verbs
+     * AND the session projection both drive this one method, so a reload is `applyView(record)`, not
+     * a replay of the verbs that produced it. Each field is guarded (a no-op view is a no-op), and
+     * `skipPosition` lets a docked tile keep its dock-owned transform.
+     *
+     * It deliberately touches only what this grid OWNS (grid buffers + emulator, via resize/
+     * setWorldPosition). The relay-backed PTY is an external child this grid has no handle to —
+     * applyView reports `resized` so the caller that DOES hold the bridge can match it (SIGWINCH →
+     * tmux), exactly as terminal.resize does.
+     *
+     * @param {{position?:{x:number,y:number,z:number}, cols?:number, rows?:number}} view
+     * @param {{skipPosition?:boolean}} [opts]
+     * @returns {{moved:boolean, resized:{cols:number,rows:number}|null}}
+     */
+    applyView(view, { skipPosition = false } = {}) {
+        const v = view || {};
+        let moved = false;
+        let resized = null;
+        const p = v.position;
+        if (!skipPosition && p && Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z)
+            && (this.position.x !== p.x || this.position.y !== p.y || this.position.z !== p.z)) {
+            this.setWorldPosition(p);
+            moved = true;
+        }
+        if (Number.isInteger(v.cols) && Number.isInteger(v.rows) && v.cols > 0 && v.rows > 0
+            && (this.cols !== v.cols || this.rows !== v.rows)) {
+            this.resize(v.cols, v.rows);
+            resized = { cols: v.cols, rows: v.rows };
+        }
+        return { moved, resized };
+    }
+
+    /**
      * Show or hide the terminal. O(1): sets group color alpha in DataTexture.
      * Invisible groups trigger the fragment shader's alpha discard.
      *
