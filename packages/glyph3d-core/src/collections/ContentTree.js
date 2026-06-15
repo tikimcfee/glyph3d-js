@@ -29,6 +29,7 @@
 
 import * as THREE from 'three';
 import packedLayout from './layouts/packedLayout.js';
+import { LAYOUT_SCHEMES, schemeNameOf } from './layouts/index.js';
 import { BOUNDS_Z_PAD } from '../core/constants.js';
 
 /** Scratch vector for footprintBounds — one focused node measured per frame, no per-call alloc. */
@@ -256,6 +257,31 @@ export default class ContentTree {
         if (layoutOpts !== undefined) this.layoutOpts = layoutOpts;
         this._dirty = true;
         return this;
+    }
+
+    /**
+     * The layout as SERIALIZABLE STATE — the scheme NAME + its opt overrides (schemeNameOf maps the
+     * active layout function back to its name). This is what persistence READS: plain data, a direct
+     * synchronous property read, no verb and no async. null for an unnamed/custom layout function.
+     * @returns {{scheme:string, opts:object}|null}
+     */
+    getLayoutState() {
+        const scheme = schemeNameOf(this.layout);
+        return scheme ? { scheme, opts: { ...this.layoutOpts } } : null;
+    }
+
+    /**
+     * SET the layout from serialized state and re-lay — the load path's direct WRITE (no verb replay).
+     * Maps the scheme NAME back to its function via LAYOUT_SCHEMES; an unknown name is ignored
+     * (self-heal). Rests the field on the world floor (y=0), same as the layout.scheme verb does.
+     * @param {{scheme:string, opts?:object}} state @returns {boolean} whether it applied
+     */
+    applyLayoutState(state) {
+        const layout = state?.scheme && LAYOUT_SCHEMES[state.scheme];
+        if (!layout) return false;
+        this.setLayout(layout, state.opts || {});
+        this.relayoutAndRest();
+        return true;
     }
 
     /**

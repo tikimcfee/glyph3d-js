@@ -139,24 +139,26 @@ function makeRouter(cameraDock) {
   ok(positionIsDerived({}, 'x') === false, 'positionIsDerived: no tree → stored');
 }
 
-// ---- 6. field layout scheme round-trips: capture reads the layout.scheme report; restore re-runs
-// the verb with the opt overrides as kebab --flags, BEFORE any field/file load. ----
+// ---- 6. field layout scheme round-trips as DIRECT STATE: capture reads the tree's layout state
+// synchronously (NOT an async bus round-trip — that was the bug that silently saved no scheme);
+// restore SETS it straight back onto the tree via applyLayoutState. No verb replay. ----
 {
-  const capRouter = {
-    execute(cmd) {
-      if (cmd === 'layout.scheme') return { data: { scheme: 'jellyfish', opts: { hang: 5, fileGap: 2 } } };
-      return Promise.resolve({ text: 'OK' });
-    },
+  // Stub mirroring ContentTree.getLayoutState/applyLayoutState (sync data in / sync data out).
+  const makeTree = (init = null) => {
+    let state = init;
+    return { getLayoutState: () => state, applyLayoutState: (s) => { state = s; return true; }, _state: () => state };
   };
-  const snap = new SessionStore({ ctx: makeCtx(makeRegistry(), makeCameraDock()), router: capRouter, bridge: {} }).capture();
-  eq(snap.layout, { scheme: 'jellyfish', opts: { hang: 5, fileGap: 2 } }, 'capture: field layout = active scheme + opt overrides');
+  const capCtx = makeCtx(makeRegistry(), makeCameraDock());
+  capCtx.contentTree = makeTree({ scheme: 'jellyfish', opts: { hang: 5, fileGap: 2 } });
+  const snap = new SessionStore({ ctx: capCtx, router: makeRouter(makeCameraDock()), bridge: {} }).capture();
+  eq(snap.layout, { scheme: 'jellyfish', opts: { hang: 5, fileGap: 2 } }, 'capture: field layout read DIRECTLY from the tree (sync)');
 
-  const calls = [];
-  const resRouter = { execute(cmd) { calls.push(cmd); return Promise.resolve({ text: 'OK' }); } };
-  await new SessionStore({ ctx: makeCtx(makeRegistry(), makeCameraDock()), router: resRouter, bridge: {} })
+  const resCtx = makeCtx(makeRegistry(), makeCameraDock());
+  resCtx.contentTree = makeTree(null);
+  await new SessionStore({ ctx: resCtx, router: makeRouter(makeCameraDock()), bridge: {} })
     .restore({ version: 2, files: [], field: null, layout: { scheme: 'jellyfish', opts: { hang: 5, fileGap: 2 } } });
-  ok(calls.includes('layout.scheme jellyfish --hang 5 --file-gap 2'),
-     'restore: re-ran layout.scheme with kebab-flagged opts, before field load');
+  eq(resCtx.contentTree._state(), { scheme: 'jellyfish', opts: { hang: 5, fileGap: 2 } },
+     'restore: applied layout state DIRECTLY onto the tree (no verb)');
 }
 
 console.log(failures === 0 ? '\nPASS — dock persistence round-trips' : `\nFAIL — ${failures} assertion(s)`);
