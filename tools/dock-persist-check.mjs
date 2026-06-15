@@ -232,5 +232,39 @@ function makeRouter(cameraDock) {
   ok(resCtx.cameraController.onMoved === null, 'dispose: onMoved cleared');
 }
 
+// ---- 8. focus round-trips as DIRECT state: capture reads attention.{primary,key} ids; restore
+// SETS them straight onto the AttentionManager (its own writer, no verb). Hover is never persisted;
+// a stale id self-heals via pruning (not modeled here — that's the registry's job). ----
+{
+  // Minimal AttentionManager stub: set()/get() over the three slots, resolving entity via registry.
+  const makeAttention = () => {
+    const state = { primary: null, key: null, hover: null };
+    return {
+      state,
+      set(slot, id, opts) { state[slot] = id ? { id, entity: opts?.registry?.get?.(id) ?? null } : null; },
+      get(slot) { return state[slot]; },
+    };
+  };
+
+  // capture: serialize the live primary + key ids (not hover)
+  const capCtx = makeCtx(makeRegistry(new Set(['a.js'])), makeCameraDock());
+  capCtx.attentionManager = makeAttention();
+  capCtx.attentionManager.set('primary', 'a.js', { registry: capCtx.registry });
+  capCtx.attentionManager.set('key', 'term-1', {});
+  capCtx.attentionManager.set('hover', 'b.js', {});               // transient — must NOT persist
+  const snap = new SessionStore({ ctx: capCtx, router: makeRouter(makeCameraDock()), bridge: {} }).capture();
+  eq(snap.focus, { primary: 'a.js', key: 'term-1' }, 'capture: focus = primary + key ids (no hover)');
+
+  // restore: set them straight back onto the AttentionManager (no verb)
+  const resCtx = makeCtx(makeRegistry(new Set(['a.js'])), makeCameraDock());
+  resCtx.attentionManager = makeAttention();
+  const router = makeRouter(makeCameraDock());
+  await new SessionStore({ ctx: resCtx, router, bridge: {} })
+    .restore({ version: 2, files: [], focus: { primary: 'a.js', key: 'term-1' } });
+  ok(resCtx.attentionManager.get('primary')?.id === 'a.js', 'restore: primary set directly on the AttentionManager');
+  ok(resCtx.attentionManager.get('key')?.id === 'term-1', 'restore: key set directly');
+  ok(!router.calls.some((c) => String(c).startsWith('attention.')), 'restore: NO attention.* verb replay (direct state only)');
+}
+
 console.log(failures === 0 ? '\nPASS — dock persistence round-trips' : `\nFAIL — ${failures} assertion(s)`);
 process.exit(failures === 0 ? 0 : 1);

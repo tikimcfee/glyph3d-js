@@ -223,10 +223,22 @@ export default class SessionStore {
       field,
       layout: this._captureLayout(),
       camera: this._captureCamera(),
+      focus: this._captureFocus(),
       dock: dock || null,
       dock3d: dock3d || null,
       terminals,
     };
+  }
+
+  // Focus = the sticky `primary` (what you're looking at) + `key` (keystroke target) attention slots,
+  // by id only. Hover is transient (mouse position) — never persisted. Ids can be any kind (grid,
+  // terminal, dir:, agent:); restore sets them directly and lets pruning self-heal a stale one.
+  _captureFocus() {
+    const am = this.ctx.attentionManager;
+    if (!am?.get) return null;
+    const primary = am.get('primary')?.id ?? null;
+    const key = am.get('key')?.id ?? null;
+    return (primary || key) ? { primary, key } : null;
   }
 
   // Field layout = serializable state read DIRECTLY off the live tree (scheme name + opt overrides),
@@ -394,9 +406,24 @@ export default class SessionStore {
     // (and any docked surface whose home only now exists); later stragglers re-adopt
     // into the live listener, which runs the SAME _projectSurfaces.
     this._projectSurfaces();
+
+    // Focus LAST — after surfaces re-adopt, so a focused grid/terminal is live when we set it.
+    this._restoreFocus(snap.focus);
     } finally {
       this.ctx.status?.clear();
     }
+  }
+
+  // Restore the sticky focus by SETTING the attention slots directly (the AttentionManager IS the
+  // owner — set() is its writer, not a verb replay). Self-healing by design: an id whose entity
+  // isn't live sets with entity null and is pruned on the next registry change (pruneGone) — exactly
+  // the mirror-of-reality policy. Setting primary/key emits change:<slot>; no listener flies the
+  // camera (that lives in the click path), so this can't clobber the just-restored pose.
+  _restoreFocus(focus) {
+    const am = this.ctx.attentionManager;
+    if (!focus || !am?.set) return;
+    if (focus.primary) am.set('primary', focus.primary, { registry: this.ctx.registry });
+    if (focus.key) am.set('key', focus.key, { registry: this.ctx.registry });
   }
 
   async _fileExists(path) {
