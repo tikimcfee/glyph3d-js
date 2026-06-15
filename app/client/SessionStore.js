@@ -213,7 +213,6 @@ export default class SessionStore {
         y: round(p.y + fwd.y * CAMERA_TARGET_DIST),
         z: round(p.z + fwd.z * CAMERA_TARGET_DIST),
       },
-      fov: cam.fov ?? null,
       speed: this.ctx.cameraController?.cameraSpeed ?? null,
     };
   }

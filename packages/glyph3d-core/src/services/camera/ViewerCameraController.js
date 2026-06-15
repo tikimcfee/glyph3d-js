@@ -885,7 +885,11 @@ export class ViewerCameraController {
     // ============ Controls ============
 
     setSpeed(speed) {
-        this.cameraSpeed = speed * 20;
+        // One unit convention: cameraSpeed is RAW — the same units the ctor reads from
+        // settings (:94), the session saves/restores (SessionStore), and the integrator
+        // consumes. The old ×20 made the verb + settings-slider 20× the boot speed while
+        // save/restore stayed raw — two conventions on one key. Raw everywhere now.
+        this.cameraSpeed = speed;
         this.settings.cameraSpeed = this.cameraSpeed;
         this._persistSettings();
     }

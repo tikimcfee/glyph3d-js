@@ -8,6 +8,20 @@ import { box, kvLines } from '../formatResponse.js';
 import { resolveGridByIdOrIndex } from './spatialHelpers.js';
 
 /**
+ * Point the camera at a world point AND sync the controller's pitch/yaw. lookAt() writes the
+ * quaternion, but VCC's per-frame _applyRotation rebuilds it from pitch/yaw (YXZ) and would
+ * stomp the aim next frame — so extract pitch/yaw from the lookAt quaternion and write them
+ * back. The only correct way to aim this camera. Shared by camera.aim + camera.lookat.
+ */
+function aimCameraAt(cc, cam, x, y, z) {
+    cam.lookAt(x, y, z);
+    const euler = new THREE.Euler(0, 0, 0, 'YXZ');
+    euler.setFromQuaternion(cam.quaternion);
+    cc.pitch = euler.x;
+    cc.yaw = euler.y;
+}
+
+/**
  * @param {import('../CommandRouter.js').default} router
  */
 export default function registerCameraCommands(router) {
@@ -26,7 +40,10 @@ export default function registerCameraCommands(router) {
         if (args.length < 3) return { text: 'ERR: usage: camera.lookat <x> <y> <z>', data: null };
         const [x, y, z] = args.map(Number);
         if ([x, y, z].some(isNaN)) return { text: 'ERR: x, y, z must be numbers', data: null };
-        ctx.camera.lookAt(x, y, z);
+        const cc = ctx.cameraController;
+        if (!cc) return { text: 'ERR: no camera controller', data: null };
+        // Persist the aim through pitch/yaw — a bare camera.lookAt is stomped next frame.
+        aimCameraAt(cc, ctx.camera, x, y, z);
         return {
             text: `OK: camera looking at ${x}, ${y}, ${z}`,
             data: { x, y, z }
@@ -129,15 +146,8 @@ export default function registerCameraCommands(router) {
         const [tx, ty, tz] = args.map(Number);
         if ([tx, ty, tz].some(isNaN)) return { text: 'ERR: x, y, z must be numbers', data: null };
         const cc = ctx.cameraController;
-        const cam = ctx.camera;
         if (!cc) return { text: 'ERR: no camera controller', data: null };
-        // lookAt writes a quaternion; extract pitch/yaw in YXZ order so the
-        // controller's per-frame _applyRotation doesn't stomp our aim.
-        cam.lookAt(tx, ty, tz);
-        const euler = new THREE.Euler(0, 0, 0, 'YXZ');
-        euler.setFromQuaternion(cam.quaternion);
-        cc.pitch = euler.x;
-        cc.yaw = euler.y;
+        aimCameraAt(cc, ctx.camera, tx, ty, tz);
         return { text: `OK: aimed at ${tx}, ${ty}, ${tz}`, data: { pitch: cc.pitch, yaw: cc.yaw } };
     }, { description: 'Aim camera at a world point (persists: syncs pitch/yaw)', usage: '<x> <y> <z>' });
 
