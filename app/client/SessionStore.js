@@ -323,6 +323,7 @@ export default class SessionStore {
     // Tabs next — so the camera (restored next) isn't fought by file.open's framing,
     // and so the dock/registry are populated.
     if (Array.isArray(snap.files)) {
+      let anyWindowed = false;
       for (const f of snap.files) {
         if (!f?.path) continue;
         // The grid may already exist (the field-restore above bulk-loaded it). Still
@@ -335,20 +336,24 @@ export default class SessionStore {
         }
         try {
           await this.router.execute(`file.open ${f.path} ${f.x ?? 0} ${f.y ?? 0} ${f.z ?? 0}`);
-          // Restore sizing + frame state (each a no-op when absent). Window first —
-          // it re-renders the slice; grid.window takes an absolute firstLine to
-          // reproduce the scroll. Then frame/scroll: file.open lands at scroll 0, so
-          // a relative scroll by the saved offset reproduces the absolute position.
-          const w = f.window;
-          if (w && w.cols > 0 && w.rows > 0) {
-            await this.router.execute(`grid.window ${f.path} ${w.cols} ${w.rows} ${w.firstLine || 0}`);
+          // Viewport (window / frame / scroll) loads as DIRECT state — the grid's own applyView,
+          // NOT a replay of grid.window/grid.frame/grid.scroll. file.open created/deduped the grid +
+          // sheet; the viewport rides on top. applyView orders window→frame→scroll itself and is
+          // absolute (no "scroll-from-0" assumption).
+          if (f.window || f.frameRows || f.scrollOffset) {
+            const grid = this.ctx.registry.get(f.path)?.grid;
+            if (grid?.applyView) {
+              const { windowed } = await grid.applyView({ window: f.window, frameRows: f.frameRows, scrollOffset: f.scrollOffset });
+              if (windowed) anyWindowed = true;
+            }
           }
-          if (f.frameRows > 0) await this.router.execute(`grid.frame ${f.path} ${f.frameRows}`);
-          if (f.scrollOffset > 0) await this.router.execute(`grid.scroll ${f.path} ${f.scrollOffset}`);
         } catch (e) {
           console.warn(`[session] failed to reopen ${f.path}:`, e?.message || e);
         }
       }
+      // Windowing changes a grid's footprint → relayout the tree ONCE after all tabs land (the
+      // grid.window verb did this per-call; batching is the same end-state, less churn).
+      if (anyWindowed) this.ctx.contentTree?.relayoutAndRest?.();
     }
 
     this._restoreCamera(snap.camera);

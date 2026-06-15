@@ -977,6 +977,41 @@ class CodeGrid extends THREE.Object3D {
     }
 
     /**
+     * Apply a saved viewport record to this grid directly — window (size + firstLine) → frame →
+     * scroll, in that order: window re-flows the slice, frame clips it, scroll moves content through
+     * the clip. This is the load-path counterpart to the grid.window / grid.frame / grid.scroll
+     * verbs — those verbs AND the session projection drive this one method, so a reload is
+     * applyView(record), not a replay of the verbs that produced it. Every field is guarded and
+     * absolute, so applyView is idempotent. Returns whether the WINDOW changed: that's a footprint
+     * change, and only the caller can relayout the tree (the grid has no handle to it).
+     * @param {{window?:{cols:number,rows:number,firstLine?:number}, frameRows?:number, scrollOffset?:number}} view
+     * @returns {Promise<{windowed:boolean}>}
+     */
+    async applyView(view) {
+        const v = view || {};
+        let windowed = false;
+        const w = v.window;
+        if (w && w.cols > 0 && w.rows > 0) {
+            if (!this._windowed || this._winCols !== w.cols || this._winRows !== w.rows) {
+                await this.setWindow(w.cols, w.rows);
+                windowed = true; // window SIZE changed → footprint moved → tree relayout needed
+            }
+            // firstLine is the window's own scroll; scrollLines is by-delta, so drive it to the
+            // absolute target. A scroll within a same-size window doesn't change the footprint.
+            const fl = Math.max(0, Math.round(w.firstLine || 0));
+            const cur = this._winFirstLine || 0;
+            if (cur !== fl) await this.scrollLines(fl - cur);
+        }
+        if (Number.isInteger(v.frameRows) && v.frameRows >= 0 && this.getFrameRows() !== v.frameRows) {
+            await this.setFrameRows(v.frameRows);
+        }
+        if (Number.isInteger(v.scrollOffset) && v.scrollOffset >= 0 && this.getScrollOffset() !== v.scrollOffset) {
+            await this.setScrollOffset(v.scrollOffset);
+        }
+        return { windowed };
+    }
+
+    /**
      * Push the current frame window to the renderer's shader clip (Step 3c.2). Clip range is
      * grid-local y: top = origin + half a row (so screenRow 0 fully shows), bottom = origin −
      * (frameRows − ½) rows. Called after every (re)layout (origin/renderer may change) and on
