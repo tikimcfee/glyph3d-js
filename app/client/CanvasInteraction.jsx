@@ -5,6 +5,7 @@ import { useAppCommands } from './CommandProvider.jsx';
 import { resolveGesture } from './gestureResolver.js';
 import { resolveKeyBinding } from './keymap.js';
 import { moveVerbFor } from './surfaceInteractions.js';
+import { BORDER_FLAGS } from '@glyph3d/core/collections';
 
 const round = (n) => Math.round(n * 100) / 100;
 
@@ -722,6 +723,17 @@ export function ResizeDragger() {
  * from that one grid's bounds, so the outline follows when a relayout moves it.
  * Reads the same state whether selection came from a canvas click or a command.
  */
+// Flip a border-state bit on a panel window, clearing it on whichever window held it before. Each
+// state (focus/input/hover) tracks one window; different bits, so this never disturbs the dock's
+// DOCKED bit on the same window. Dirs (no setBorderFlag) are skipped by the optional chain.
+function applyBorderFlag(state, key, grid, mask) {
+  const prev = state[key];
+  if (prev === grid) return;
+  prev?.setBorderFlag?.(mask, false);
+  grid?.setBorderFlag?.(mask, true);
+  state[key] = grid;
+}
+
 // Reused per frame to compose each outline's matrix (grid.matrixWorld × local offset).
 const _off = new THREE.Matrix4();
 const _center = new THREE.Vector3();
@@ -782,6 +794,8 @@ export function SelectionIndicator() {
     const t = tracked.current;
     t.am = client.ctx.attentionManager;
     t.registry = client.ctx.registry;
+    // Which panel currently holds each state bit, so we can clear it when the target moves.
+    t.flagged = { focus: null, input: null, hover: null };
     // One box per role: a green/amber box for the SELECTED grid, a light-blue box
     // for HOVER on a DIFFERENT grid. Hovering the focused grid recolors the focus
     // box (fades toward blue) rather than drawing the hover box on top — no stack.
@@ -790,10 +804,15 @@ export function SelectionIndicator() {
     t.primaryFill = mkFill(FOCUS_COLOR, 9998); // directory-only region glow, under the edge box
 
     return () => {
+      // Drop any border-state bits we set so an unmount/remount doesn't strand a lit border.
+      t.flagged?.focus?.setBorderFlag?.(BORDER_FLAGS.FOCUSED, false);
+      t.flagged?.input?.setBorderFlag?.(BORDER_FLAGS.INPUT, false);
+      t.flagged?.hover?.setBorderFlag?.(BORDER_FLAGS.HOVERED, false);
       scene.remove(t.primaryBox); scene.remove(t.hoverBox); scene.remove(t.primaryFill);
       t.primaryBox.geometry?.dispose?.(); t.hoverBox.geometry?.dispose?.(); t.primaryFill.geometry?.dispose?.();
       t.primaryBox.material?.dispose?.(); t.hoverBox.material?.dispose?.(); t.primaryFill.material?.dispose?.();
       t.primaryBox = t.hoverBox = t.primaryFill = t.am = t.registry = null;
+      t.flagged = { focus: null, input: null, hover: null };
     };
   }, [client, scene]);
 
@@ -806,10 +825,6 @@ export function SelectionIndicator() {
   useFrame((state) => {
     const t = tracked.current;
     if (!t.am || !t.registry) return;
-    const gridFor = (slot) => {
-      const id = t.am.get(slot)?.id;
-      return id ? (t.registry.get(id)?.grid ?? null) : null;
-    };
     const fit = (box, node, inflate) => {
       if (!box) return;
       // Two bounds sources, one unit cube. File grids expose LOCAL bounds → compose
@@ -842,31 +857,40 @@ export function SelectionIndicator() {
       box.matrixWorldNeedsUpdate = true;
       box.visible = true;
     };
-    // The focus box recolors to signal WHERE KEYSTROKES LAND: amber when the focused window is
-    // input-active (a code grid in edit mode, or the keyboard-target terminal — attention.key),
-    // green when focused-but-inert. So "type here" reads the same in the HUD and in 3D.
     const primaryId = t.am.get('primary')?.id ?? null;
     const keyId = t.am.get('key')?.id ?? null;
+    const hoverId = t.am.get('hover')?.id ?? null;
     const primaryEntry = primaryId ? t.registry.get(primaryId) : null;
+    const hoverEntry = hoverId ? t.registry.get(hoverId) : null;
     const primaryGrid = primaryEntry?.grid ?? null;
+    const hoverGrid = hoverEntry?.grid ?? null;
     const primaryIsDir = primaryEntry?.type === 'dir';
-    const hoverGrid = gridFor('hover');
+    const hoverIsDir = hoverEntry?.type === 'dir';
     const editing = typeof primaryGrid?.getCursor === 'function' && primaryGrid.getCursor() != null;
     const inputActive = !!primaryGrid && (editing || (!!keyId && keyId === primaryId));
-    // Hover on the already-focused grid → no second box; the focus box itself fades
-    // partway toward the hover blue. Otherwise the focus box holds its state color.
     const hoverOnFocus = !!hoverGrid && hoverGrid === primaryGrid;
+
+    // PANELS (grids/terminals) wear their state on their OWN in-shader border — flip the flag bits,
+    // don't draw a box. FOCUSED + INPUT ride the focused panel (INPUT = edit mode / keyboard target,
+    // the amber "type here" cue); HOVERED rides the hovered panel. The shader decodes the bits. These
+    // are different bits from the dock's DOCKED, so a docked window keeps its identity hue underneath.
+    const focusPanel = (primaryGrid && !primaryIsDir) ? primaryGrid : null;
+    const hoverPanel = (hoverGrid && !hoverIsDir) ? hoverGrid : null;
+    applyBorderFlag(t.flagged, 'focus', focusPanel, BORDER_FLAGS.FOCUSED);
+    applyBorderFlag(t.flagged, 'input', inputActive ? focusPanel : null, BORDER_FLAGS.INPUT);
+    applyBorderFlag(t.flagged, 'hover', hoverPanel, BORDER_FLAGS.HOVERED);
+
+    // DIRECTORIES have no panel to host a border, so they keep the overlay box. The edge box recolors
+    // to signal WHERE KEYSTROKES LAND (amber input-active / green focused), fading toward blue when
+    // the focused dir is also hovered. Grids/terminals leave the boxes hidden — the shader has them.
     _targetColor.set(inputActive ? INPUT_COLOR : FOCUS_COLOR);
     if (hoverOnFocus) _targetColor.lerp(_hoverColor, HOVER_FOCUS_BLEND);
-    // Smooth fade toward the target (state change OR hover on/off) — no instant snap.
     if (t.primaryBox.material) t.primaryBox.material.color.lerp(_targetColor, OUTLINE_FADE);
 
-    // Selection box: exact panel bounds, steady. Hover box: only on a DIFFERENT grid
-    // than the focused one (the merge case is handled by the recolor above), hugging
-    // the panel edge so it's a tight halo, not a fat floating frame.
-    fit(t.primaryBox, primaryGrid, 0);
-    if (hoverOnFocus) t.hoverBox.visible = false;
-    else fit(t.hoverBox, hoverGrid, HOVER_INFLATE);
+    if (primaryIsDir && primaryGrid) fit(t.primaryBox, primaryGrid, 0);
+    else t.primaryBox.visible = false;
+    if (hoverIsDir && hoverGrid && !hoverOnFocus) fit(t.hoverBox, hoverGrid, HOVER_INFLATE);
+    else t.hoverBox.visible = false;
 
     // Directory region glow: when the focused entity is a directory, fill its
     // footprint with a faint, slowly breathing tint inside the edge box (tracks the

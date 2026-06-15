@@ -19,9 +19,11 @@
  *   INPUT   — edit mode / keyboard target (amber accent, thicker)
  *
  * flags == 0 → no border (a plain fill), so this stays a drop-in for the MeshBasicMaterial it
- * replaced. Docked windows keep their identity hue and let state TINT it; undocked windows show the
- * pure state color. The interpretation here is just a default — it's all tunable in this one shader,
- * including time-based animation, without touching any CPU code.
+ * replaced. A transient state REPLACES the resting color outright (no blend): the border shows the
+ * full state color while hovered/focused/input-active, and reverts to its resting color — whatever
+ * was set on the material, i.e. the dock's identity hue — when the state clears. The interpretation
+ * here is just a default — it's all tunable in this one shader, including time-based animation,
+ * without touching any CPU code.
  *
  * One material per panel (each grid keeps its own, preserving the per-grid `transparent`/`depthWrite`
  * the dock-stacking occlusion depends on); the node graph is identical across them, so the renderer
@@ -69,17 +71,16 @@ export function createPanelMaterial({ color = 0x000000, opacity = 1,
     const F = BORDER_FLAGS;
     const has = (mask) => bitAnd(uFlags, uint(mask)).greaterThan(uint(0)); // bool node
     const on = uFlags.greaterThan(uint(0));
-    const docked = has(F.DOCKED);
     const anyState = has(F.HOVERED | F.FOCUSED | F.INPUT);
     const accent = has(F.FOCUSED | F.INPUT); // states that thicken the line
 
-    // Border COLOR: docked windows keep their identity hue and let state tint it; undocked windows
-    // show the dominant state color (priority: input > focused > hovered). A gentle hover pulse.
+    // Border COLOR: a transient state REPLACES the resting color outright — the dominant state color
+    // (priority input > focused > hovered) while any state is active, else the material's set color
+    // (the dock identity hue). A gentle hover pulse rides on top. No blend, so focus shows full
+    // strength, not a half-tint of the identity.
     const stateCol = select(has(F.INPUT), C_INPUT, select(has(F.FOCUSED), C_FOCUS, C_HOVER));
-    const tint = select(anyState, float(0.5), float(0));
-    const baseCol = select(docked, mix(uBorderColor, stateCol, tint), stateCol);
     const pulse = select(has(F.HOVERED), sin(time.mul(TAU * 1.1)).mul(0.5).add(0.5).mul(0.2).add(0.85), float(1));
-    const borderCol = baseCol.mul(pulse);
+    const borderCol = select(anyState, stateCol, uBorderColor).mul(pulse);
 
     // Border SHAPE: a crisp pixel-wide line at the edge; focus/input thicken it.
     const w = uBorderWidth.mul(select(accent, float(1.6), float(1)));
