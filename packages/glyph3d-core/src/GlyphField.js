@@ -191,12 +191,15 @@ function _buildVertexNode(uniforms) {
 /**
  * Build TSL fragment (output) node — Slug analytic coverage + bitmap emoji branch.
  *
- * Fragment shader: accumulate fractional winding
- * over every quadratic bezier in the glyph along an X ray and a Y ray
- * (2D anti-aliasing), scaled by the per-pixel footprint (fwidth). Single sample
- * (no supersampling / no band structure); under minification the ink is dilated
- * and the AA ramp softened so zoomed-out text degrades to a stable fuzzy shape
- * rather than flickering/dropping strokes — see the `m` ramp in the body.
+ * Fragment shader: accumulate fractional winding over every quadratic bezier in the
+ * glyph along an X ray and a Y ray, scaled by the per-pixel footprint (fwidth). This
+ * is single-sample analytic coverage: crisp at any magnification, and 1D per ray —
+ * each ray antialiases only along its own axis. Under minification the ink is dilated
+ * and the AA ramp softened (the `m` ramp in the body) so zoomed-out text settles to a
+ * stable fuzzy silhouette rather than flickering its strokes away. The foreshortened-
+ * minification breakup — the axis perpendicular to both rays is under-resolved — is
+ * structural to single-sample coverage; the standing fix for that regime is a mipped,
+ * anisotropically-filtered glyph-atlas LOD, deferred for now.
  *
  * When vMode == 1 (bitmap emoji) the bezier path is skipped and the glyph is
  * sampled from the RGBA emoji atlas instead (see bitmap branch below).
@@ -285,15 +288,15 @@ function _buildOutputNode(varyings, uniforms) {
 
             // Minification amount, 0→1. fwMax = worst-axis footprint = the fraction of the glyph
             // cell one pixel spans. Small ⇒ magnified (crisp, single-sample). Large ⇒ many strokes
-            // per pixel, where the two centre scanlines beat sub-pixel against the strokes → the
-            // strokes flicker in and out (the moiré). We can't resolve sub-pixel strokes from a
-            // point sample (box-filter aliasing is invariant to sample count — supersampling just
-            // trades the moiré for a screen-door grid), so instead we make the failure GRACEFUL:
-            // as the glyph shrinks we (a) DILATE the ink so thin strokes fatten-and-merge into a
-            // stable fuzzy shape instead of dropping below a pixel and vanishing, and (b) SOFTEN
-            // the AA ramp so edges blur. This is the "forgot my glasses" look — unreadable but a
-            // steady, recognisable silhouette. It's what Slug ships (it dropped supersampling for
-            // dilation). `m` smoothstep-ramps so the hand-off has no seam under a continuous dolly.
+            // per pixel, where the centre sample beats sub-pixel against the strokes and they alias
+            // in and out (the moiré). A point sample cannot resolve sub-pixel strokes: box-filter
+            // aliasing is invariant to sample count, so supersampling only trades the moiré for a
+            // screen-door grid. The minified regime is therefore handled by graceful degradation —
+            // Slug's shipping approach: as the glyph shrinks, (a) DILATE the ink so thin strokes
+            // fatten-and-merge into a stable shape rather than dropping below a pixel and vanishing,
+            // and (b) SOFTEN the AA ramp so edges blur. The result is the "forgot my glasses" look
+            // — unreadable but a steady, recognisable silhouette. `m` smoothstep-ramps so the
+            // hand-off has no seam under a continuous dolly.
             // ↓↓ THE "scaling speed" DIALS — tune live in Firefox ↓↓
             // MIN_LO = fuzz ONSET (footprint where softening begins). RAISE it to keep text crisp
             //   farther out / start the fuzz later (i.e. less fuzzy at a given distance).
@@ -329,7 +332,7 @@ function _buildOutputNode(varyings, uniforms) {
             // be resolved (~2px footprint — the same regime the dilation note above
             // calls an "unreadable steady silhouette"), the per-curve bezier loop is
             // pure waste — it runs MAX_CURVES iterations with 2 texture loads each, per
-            // fragment, only to produce a fuzzy blob. Below LOD_CUTOFF we skip the loop
+            // fragment, only to produce a fuzzy blob. Past LOD_HI we skip the loop
             // entirely and approximate coverage from the glyph's curve count (a cheap
             // ink-density proxy: denser glyphs read darker). This is the LOD that lets
             // an entire repo render at once — distant files become cheap colored
@@ -421,8 +424,7 @@ const rot90 = Fn(([v]) => vec2(v.y, v.x.negate()));
  * Analytic coverage of one quadratic bezier for a +X ray through the origin
  * (endpoints pre-translated by the sample point). invDiameter = 1 / pixel
  * footprint along the ray axis; fractional crossings give sub-pixel coverage.
- * (Dobbie / Lengyel "Slug".) Restructured from the GLSL early-returns into
- * guarded accumulation for clean TSL codegen.
+ * (Dobbie / Lengyel "Slug".) Structured as guarded accumulation for clean TSL codegen.
  *
  * `dilate` (pixels) fattens the ink: it biases the entering edge's contribution
  * down and the exiting edge's up, so a stroke's two boundaries move symmetrically
