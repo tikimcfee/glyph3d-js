@@ -54,10 +54,6 @@ export { PickingSystem } from './picking/PickingSystem.js';
 export { SemanticInfo, SemanticInfoMap } from './semantic/SemanticInfoMap.js';
 export { GlyphEventType, GlyphEventBus } from './semantic/GlyphEvents.js';
 
-// Camera controls (optional)
-export { default as CameraController } from './camera/CameraController.js';
-export { default as InputManager } from './camera/InputManager.js';
-
 // Utility
 export { default as FPSCounter } from './utils/FPSCounter.js';
 

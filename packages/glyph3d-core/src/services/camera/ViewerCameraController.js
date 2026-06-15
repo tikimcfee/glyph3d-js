@@ -270,33 +270,9 @@ export class ViewerCameraController {
         });
 
         canvas.style.cursor = 'grab';
-
-        // --- Settings UI (sliders, buttons) ---
-
-        this._bindSlider('cam-speed', 'cam-speed-value', (val) => this.setSpeed(val));
-        this._bindSlider('drag-sensitivity', 'drag-sensitivity-value', (val) => {
-            this.settings.dragSensitivity = val;
-            this._persistSettings();
-        });
-        this._bindSlider('scroll-sensitivity', 'scroll-sensitivity-value', (val) => {
-            this.settings.scrollSensitivity = val;
-            this._persistSettings();
-        });
-
-        const resetBtn = document.getElementById('reset-camera');
-        if (resetBtn) {
-            const handler = () => this.reset();
-            resetBtn.addEventListener('click', handler);
-            this._listeners.push({ target: resetBtn, event: 'click', handler });
-        }
-        const fitAllBtn = document.getElementById('fit-all');
-        if (fitAllBtn) {
-            const handler = () => this.focusOnGrids();
-            fitAllBtn.addEventListener('click', handler);
-            this._listeners.push({ target: fitAllBtn, event: 'click', handler });
-        }
-
-        this._restoreUI();
+        // (The old DOM slider/button glue — cam-speed/drag-/scroll-sensitivity, reset-camera,
+        //  fit-all — targeted elements that don't exist in the r3f app. Settings now flow
+        //  through app/client/settings.js + the camera.* verbs. Glue deleted.)
     }
 
     // ============ Per-frame drain ============
@@ -611,49 +587,6 @@ export class ViewerCameraController {
         return Math.min(Math.max(d, MIN_LOOK_DIST), MAX_LOOK_DIST);
     }
 
-    // ============ UI glue ============
-
-    /** @private */
-    _bindSlider(sliderId, labelId, onChange) {
-        const slider = document.getElementById(sliderId);
-        const label = document.getElementById(labelId);
-        if (!slider) return;
-        const handler = (e) => {
-            const val = parseFloat(e.target.value);
-            if (label) label.textContent = val.toFixed(1);
-            onChange(val);
-        };
-        slider.addEventListener('input', handler);
-        this._listeners.push({ target: slider, event: 'input', handler });
-    }
-
-    /** @private */
-    _restoreUI() {
-        const s = this.settings;
-
-        const speedSlider = document.getElementById('cam-speed');
-        const speedLabel = document.getElementById('cam-speed-value');
-        if (speedSlider) {
-            const sliderVal = s.cameraSpeed / 20;
-            speedSlider.value = sliderVal;
-            if (speedLabel) speedLabel.textContent = sliderVal.toFixed(1);
-        }
-
-        const dragSlider = document.getElementById('drag-sensitivity');
-        const dragLabel = document.getElementById('drag-sensitivity-value');
-        if (dragSlider) {
-            dragSlider.value = s.dragSensitivity;
-            if (dragLabel) dragLabel.textContent = s.dragSensitivity.toFixed(1);
-        }
-
-        const scrollSlider = document.getElementById('scroll-sensitivity');
-        const scrollLabel = document.getElementById('scroll-sensitivity-value');
-        if (scrollSlider) {
-            scrollSlider.value = s.scrollSensitivity;
-            if (scrollLabel) scrollLabel.textContent = s.scrollSensitivity.toFixed(1);
-        }
-    }
-
     /** @private */
     _persistSettings() {
         const s = this.settings;
@@ -910,7 +843,6 @@ export class ViewerCameraController {
         this.settings = { ...CAMERA_DEFAULTS };
         this.cameraSpeed = this.settings.cameraSpeed;
         this._persistSettings();
-        this._restoreUI();
     }
 
     // ============ Helpers ============
