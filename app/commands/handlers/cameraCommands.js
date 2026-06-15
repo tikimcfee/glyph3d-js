@@ -59,6 +59,15 @@ export default function registerCameraCommands(router) {
         const resolved = resolveGridByIdOrIndex(ctx, target, 'grid', { byName: true });
         if (resolved.error) return { text: `ERR: no grid matching '${target}'`, data: null };
 
+        // A docked surface is camera-locked chrome — it rides the camera, always in view. Flying the
+        // WORLD camera at it is meaningless, and it was the launch-time bug: on restore a programmatic
+        // tab-activation fired `camera.focus <docked terminal>`, whose flyTo({pitch:0,yaw:0}) zeroed
+        // the just-loaded camera pose (position looked kept since the tile sits where you are). The
+        // dock owns a docked tile's framing — leave the world camera be. Loose windows still frame.
+        if (resolved.registryId && ctx.cameraDock?.has?.(resolved.registryId)) {
+            return { text: `OK: '${resolved.registryId}' is docked — the dock frames it`, data: { docked: true, registryId: resolved.registryId } };
+        }
+
         const idx = resolved.idx >= 0 ? resolved.idx : grids.indexOf(resolved.grid);
         let framed = false;
         if (idx >= 0) {
