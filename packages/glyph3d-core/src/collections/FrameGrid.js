@@ -246,6 +246,46 @@ class FrameGrid extends THREE.Object3D {
         return this._groupId;
     }
 
+    // ── Surface interface — graduates a capture into a first-class window, on par with
+    //    CodeGrid / TerminalGrid (camera fit-all, dynamic-speed, picking, dock). These are
+    //    duck-typed across the collections (no shared Surface base yet — that dedup is the
+    //    glyph-field-unification work); mirror the existing contract here.
+
+    /**
+     * The grid's extent in its OWN local frame — width × (width/aspect), centered on the
+     * origin (the build centers the cells there), with a thin Z so an edge-on pick ray
+     * still hits the flat panel. Trivial to recompute, so derived each call (no cache).
+     * @returns {THREE.Box3}
+     */
+    getLocalBounds() {
+        const totalH = this.width / this.aspect;
+        const hw = this.width / 2, hh = totalH / 2;
+        return new THREE.Box3(
+            new THREE.Vector3(-hw, -hh, -0.5),
+            new THREE.Vector3( hw,  hh,  0.5),
+        );
+    }
+
+    /**
+     * World-space AABB, for canvas picking and camera framing (fit-all / dynamic-speed).
+     * Re-derived each call from the current world matrix so it rides drag / scale / dock
+     * rotation. Mirrors TerminalGrid.getBounds() (a THREE.Box3 in world space).
+     * @returns {THREE.Box3}
+     */
+    getBounds() {
+        this.updateWorldMatrix(true, false);
+        return this.getLocalBounds().applyMatrix4(this.matrixWorld);
+    }
+
+    /**
+     * The underlying GlyphField renderer, so canvas picking can map a resolved pick
+     * (renderer) back to this capture entity. Mirrors CodeGrid / TerminalGrid.getRenderer().
+     * @returns {import('../GlyphField.js').default|null}
+     */
+    getRenderer() {
+        return this._renderer;
+    }
+
     /**
      * Tear down: stop the capture (so the OS stops sharing), drop the texture, remove
      * the renderer mesh, and dispose the geometry. The field material is SHARED across

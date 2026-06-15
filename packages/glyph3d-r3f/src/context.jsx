@@ -40,11 +40,11 @@ export function GlyphProvider({ atlas, children }) {
         return gid ? registry.unregister(gid) : null;
       },
       getGrids: () => registry.toArray('grid'),
-      // Every framed surface that occupies 3D space — code grids AND terminals.
+      // Every framed surface that occupies 3D space — code grids, terminals, AND captures.
       // getGrids() is grid-INDEX-coupled (focusOnGrid/computeGridFocus read code-grid
       // internals), so it stays grid-only; the camera's distance sampling + fit-all want
-      // ALL bounds-bearing windows so a terminal slows the flythrough and frames like a file.
-      getSurfaces: () => [...registry.toArray('grid'), ...registry.toArray('terminal')],
+      // ALL bounds-bearing windows so a terminal/capture slows the flythrough and frames like a file.
+      getSurfaces: () => [...registry.toArray('grid'), ...registry.toArray('terminal'), ...registry.toArray('frame')],
     };
   }, [atlas]);
 
