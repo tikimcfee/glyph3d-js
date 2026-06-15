@@ -417,18 +417,27 @@ export default class SessionStore {
     for (const t of pend.tiles) {
       if (cd.has(t.id)) continue;
       if (this.ctx.registry.has(t.id)) {
-        // Array form skips the router's space-tokenizer — a registry id can be a file path.
-        // Pass the saved order so the lock pins this tile's bar slot regardless of arrival timing.
-        this.router.execute(['dock.lock', t.id, String(t.order)]);
-        // Restore the readability zoom after the lock captures home (the dock reads
-        // user back for layout, so this re-places the tile at its saved size).
-        if (t.zoom && t.zoom !== 1) this.router.execute(['window.scale', t.id, String(t.zoom)]);
-        // Re-seat the pin view state: the saved zoom already IS the pinned (max) size, so
-        // this only restores the flag + pre-pin zoom so a later unpin drops back correctly,
-        // and lights the Pin button to match.
-        if (t.pinned) {
-          this.ctx.workspace?.setSurfaceView?.(t.id, 'terminal', { pinned: true, prePinZoom: t.prePinZoom ?? 1 });
-          this.ctx.registry?.get?.(t.id)?.grid?.setControlActive?.('pin', true);
+        // Per-tile guard: ONE failing dock.lock (a stale module, a bad surface) must not abort the
+        // whole replay — log it and move on so the rest of the dock still restores. The tile is
+        // consumed either way (never pushed to `remaining`), so a hard failure can't retry-storm on
+        // the next reconcile pass. (An unguarded loop here once turned a single module bug into a
+        // whole-dock outage + a stale carried-forward dock3d — dev-loop gotcha #11.)
+        try {
+          // Array form skips the router's space-tokenizer — a registry id can be a file path.
+          // Pass the saved order so the lock pins this tile's bar slot regardless of arrival timing.
+          this.router.execute(['dock.lock', t.id, String(t.order)]);
+          // Restore the readability zoom after the lock captures home (the dock reads
+          // user back for layout, so this re-places the tile at its saved size).
+          if (t.zoom && t.zoom !== 1) this.router.execute(['window.scale', t.id, String(t.zoom)]);
+          // Re-seat the pin view state: the saved zoom already IS the pinned (max) size, so
+          // this only restores the flag + pre-pin zoom so a later unpin drops back correctly,
+          // and lights the Pin button to match.
+          if (t.pinned) {
+            this.ctx.workspace?.setSurfaceView?.(t.id, 'terminal', { pinned: true, prePinZoom: t.prePinZoom ?? 1 });
+            this.ctx.registry?.get?.(t.id)?.grid?.setControlActive?.('pin', true);
+          }
+        } catch (e) {
+          console.warn(`[session] dock restore failed for '${t.id}' — skipping tile:`, e?.message || e);
         }
       } else {
         remaining.push(t);
