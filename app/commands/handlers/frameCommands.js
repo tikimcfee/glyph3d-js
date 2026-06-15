@@ -130,4 +130,50 @@ export default function registerFrameCommands(router) {
             data: { id, cols: grid.cols, rows: grid.rows, cells: grid.getCellCount() },
         };
     }, { description: 'Re-dice a FrameGrid into a new cell grid (live)', usage: '<id> <COLSxROWS>' });
+
+    // ── Observability + lifecycle: CLI/bus control of capture state, mirroring the
+    //    terminal.* roster verbs. These ride only the registry (no interaction/scale
+    //    layer), so they're independent of the chrome/dock work. The richer per-capture
+    //    intent (source label, place, resume) lands with the state-model work.
+
+    /** Summarize one FrameGrid for list/info output. */
+    const frameSummary = (id, grid) => ({
+        id,
+        cols: grid.cols,
+        rows: grid.rows,
+        cells: grid.getCellCount?.() ?? grid.cols * grid.rows,
+        aspect: +(grid.aspect ?? 0).toFixed(3),
+    });
+
+    router.register('frame.list', (args, ctx) => {
+        const entries = ctx.registry?.findByType?.('frame') ?? [];
+        const frames = entries.map((e) => frameSummary(ctx.registry.getIdByGrid(e.grid), e.grid));
+        const text = frames.length
+            ? frames.map((f) => `${f.id}  ${f.cols}x${f.rows} (${f.cells} cells, aspect ${f.aspect})`).join('\n')
+            : '(no captures)';
+        return { text, data: { frames, count: frames.length } };
+    }, { description: 'List active screen captures (FrameGrids)', usage: '' });
+
+    router.register('frame.info', (args, ctx) => {
+        const id = args[0];
+        const grid = id && ctx.registry?.get(id)?.grid;
+        if (!grid || typeof grid.getCellCount !== 'function') {
+            return { text: `ERR: no FrameGrid "${id}"`, data: null };
+        }
+        const info = frameSummary(id, grid);
+        return { text: `${info.id}: ${info.cols}x${info.rows}, ${info.cells} cells, aspect ${info.aspect}`, data: info };
+    }, { description: 'Show one capture’s grid + dims', usage: '<id>' });
+
+    router.register('frame.kill', (args, ctx) => {
+        const id = args[0];
+        if (!id) return { text: 'ERR: usage: frame.kill <id>', data: null };
+        const entry = ctx.registry?.get(id);
+        if (!entry || entry.type !== 'frame') {
+            return { text: `ERR: no FrameGrid "${id}"`, data: null };
+        }
+        // Generic teardown — removeGrid disposes the grid, which stops the MediaStream
+        // (so the OS "sharing" indicator clears) and detaches the offscreen <video>.
+        ctx.removeGrid(id);
+        return { text: `OK: killed capture "${id}"`, data: { id } };
+    }, { description: 'Stop a screen capture and remove it', usage: '<id>' });
 }
