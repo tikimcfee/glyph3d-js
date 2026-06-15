@@ -139,5 +139,25 @@ function makeRouter(cameraDock) {
   ok(positionIsDerived({}, 'x') === false, 'positionIsDerived: no tree → stored');
 }
 
+// ---- 6. field layout scheme round-trips: capture reads the layout.scheme report; restore re-runs
+// the verb with the opt overrides as kebab --flags, BEFORE any field/file load. ----
+{
+  const capRouter = {
+    execute(cmd) {
+      if (cmd === 'layout.scheme') return { data: { scheme: 'jellyfish', opts: { hang: 5, fileGap: 2 } } };
+      return Promise.resolve({ text: 'OK' });
+    },
+  };
+  const snap = new SessionStore({ ctx: makeCtx(makeRegistry(), makeCameraDock()), router: capRouter, bridge: {} }).capture();
+  eq(snap.layout, { scheme: 'jellyfish', opts: { hang: 5, fileGap: 2 } }, 'capture: field layout = active scheme + opt overrides');
+
+  const calls = [];
+  const resRouter = { execute(cmd) { calls.push(cmd); return Promise.resolve({ text: 'OK' }); } };
+  await new SessionStore({ ctx: makeCtx(makeRegistry(), makeCameraDock()), router: resRouter, bridge: {} })
+    .restore({ version: 2, files: [], field: null, layout: { scheme: 'jellyfish', opts: { hang: 5, fileGap: 2 } } });
+  ok(calls.includes('layout.scheme jellyfish --hang 5 --file-gap 2'),
+     'restore: re-ran layout.scheme with kebab-flagged opts, before field load');
+}
+
 console.log(failures === 0 ? '\nPASS — dock persistence round-trips' : `\nFAIL — ${failures} assertion(s)`);
 process.exit(failures === 0 ? 0 : 1);

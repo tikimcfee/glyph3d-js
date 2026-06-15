@@ -232,11 +232,25 @@ export default class SessionStore {
       savedAt: Date.now(),
       files,
       field,
+      layout: this._captureLayout(),
       camera: this._captureCamera(),
       dock: dock || null,
       dock3d: dock3d || null,
       terminals,
     };
+  }
+
+  // Field layout: the ContentTree packing scheme + its opt OVERRIDES, so the field comes back in the
+  // same scheme instead of resetting to the packed default (the biggest gap — the scheme governs
+  // every tree grid's position). Read through the bus (the layout.scheme report) so this file stays
+  // import-free of the core layouts module. null for an unnamed/'(custom)' scheme — nothing to persist.
+  _captureLayout() {
+    try {
+      const r = this.router.execute('layout.scheme');
+      const scheme = r?.data?.scheme;
+      if (!scheme || scheme === '(custom)') return null;
+      return { scheme, opts: r.data.opts || {} };
+    } catch { return null; }
   }
 
   _captureCamera() {
@@ -306,6 +320,16 @@ export default class SessionStore {
     // their own, then clear; this finally tidies up the slot at the end.
     this.ctx.status?.set('Restoring session…');
     try {
+    // Field layout scheme FIRST — set it on the (still-empty) tree so the bulk field-load below and
+    // every grid land in the saved scheme instead of the packed default. Re-runs the canonical verb
+    // (the one setter); the captured camelCase opt keys go back out as kebab --flags.
+    if (snap.layout?.scheme) {
+      const flags = Object.entries(snap.layout.opts || {})
+        .map(([k, v]) => `--${k.replace(/[A-Z]/g, (c) => '-' + c.toLowerCase())} ${v}`).join(' ');
+      try { await this.router.execute(`layout.scheme ${snap.layout.scheme} ${flags}`.trim()); }
+      catch (e) { console.warn('[session] layout scheme restore failed:', e?.message || e); }
+    }
+
     // The bulk field fills the scene first (no tabs), so tabs layer on top and the
     // camera (restored last) wins. repo.load clears the scene itself; both are
     // guarded so a network/offline failure still lets the tabs restore.
