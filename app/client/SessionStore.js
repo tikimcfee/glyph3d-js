@@ -50,6 +50,44 @@ function forwardFromQuat(q) {
   };
 }
 
+/**
+ * A surface's POSITION is derived — never stored, never projected — iff it's a grid laid out by the
+ * ContentTree: its xyz comes from `field.layout` + the tree path, recomputed on load. Terminals,
+ * captures, and manually-moved/loose grids are NOT tree leaves, so their position is stored intent.
+ * The one subtle discriminator the projection and capture paths share (STATE_ARCHITECTURE.md §9).
+ * @param {object} ctx @param {string} id registry id
+ */
+export function positionIsDerived(ctx, id) {
+  return ctx?.contentTree?.has?.(id) === true;
+}
+
+/**
+ * Per-kind PROJECTORS: push a surface's view-intent onto its live object by RE-EXECUTING the kind's
+ * own verbs (guarded — they short-circuit when the live object already matches). The verb is the one
+ * projection definition; this re-invokes it when a genuinely-external child (relay PTY, capture
+ * stream) re-adopts after the original gesture. Adding a surface kind = adding a projector here.
+ * NOT a drift-scanner: for a surface that's present and already correct, every guard no-ops.
+ * @type {Record<string, (store: SessionStore, s: object, grid: object) => void>}
+ */
+const SURFACE_PROJECTORS = {
+  terminal(store, s, grid) {
+    const v = s.view || {};
+    // Position: skip while docked (the dock owns a docked tile's transform; its home is set by the
+    // pre-dock move, then captured at lock). Loose terminals get moved to their stored home.
+    const docked = store.ctx.cameraDock?.has?.(s.id);
+    if (!docked && isFinitePos(v.position)
+        && (grid.position.x !== v.position.x || grid.position.y !== v.position.y || grid.position.z !== v.position.z)) {
+      store.router.execute(`terminal.move ${s.id} ${v.position.x} ${v.position.y} ${v.position.z}`);
+    }
+    // Size: terminal.resize drives grid + emulator + PTY in lockstep; guarded so it only fires when
+    // the re-adopted grid (spawned at 80×24) differs from the intent.
+    if (Number.isInteger(v.cols) && Number.isInteger(v.rows) && v.cols > 0 && v.rows > 0
+        && (grid.cols !== v.cols || grid.rows !== v.rows)) {
+      store.router.execute(`terminal.resize ${s.id} ${v.cols} ${v.rows}`);
+    }
+  },
+};
+
 export default class SessionStore {
   /** @param {{ ctx: object, router: object, bridge: object }} deps */
   constructor({ ctx, router, bridge }) {
@@ -72,7 +110,7 @@ export default class SessionStore {
     this._periodic = null;
     this._disposed = false;
 
-    this._onRegistryChange = () => { this._reconcileSurfaces(); this.scheduleSave(); };
+    this._onRegistryChange = () => { this._projectSurfaces(); this.scheduleSave(); };
     this._onVisibility = () => { if (typeof document !== 'undefined' && document.visibilityState === 'hidden') this.saveNow(); };
   }
 
@@ -350,8 +388,8 @@ export default class SessionStore {
     // isn't armed until _armAutosave (below) — so a terminal that re-created DURING the
     // awaits above is already in the registry but was never sized/placed. This nets it
     // (and any docked surface whose home only now exists); later stragglers re-adopt
-    // into the live listener, which runs the SAME _reconcileSurfaces.
-    this._reconcileSurfaces();
+    // into the live listener, which runs the SAME _projectSurfaces.
+    this._projectSurfaces();
     } finally {
       this.ctx.status?.clear();
     }
@@ -362,44 +400,26 @@ export default class SessionStore {
     catch { return false; }
   }
 
-  // Reconcile the loaded INTENT into the live scene as surfaces re-adopt. The SINGLE entry
-  // point — driven both by the registry-change listener (each surface as it reappears) and by
-  // the final pass at the end of restore (any that re-adopted mid-restore, before the listener
-  // was armed). Order is load-bearing: terminals move/size FIRST so the subsequent 3D-dock lock
-  // captures the RESTORED home, not the adapter's spawn placement. Idempotent, so repeats are free.
-  _reconcileSurfaces() {
-    this._applyTerminalViews();
-    this._applyDock3d();
-  }
-
-  // apply(): push terminal geometry intent from the MODEL onto each live terminal grid. The PTY
-  // re-adopts async — the adapter re-creates its grid on a liveness-ping bounce, ALWAYS at its
-  // startup 80×24 (never the resized size), so the model is the only record — so this runs both as
-  // terminals reappear (the registry listener) and once at end-of-restore. The model is NOT
-  // consumed: each push is a guarded set-to-target (resize/move only when the grid differs),
-  // idempotent, so re-running is free and order stops mattering. This retired pendingTerminals.
-  _applyTerminalViews() {
+  // The deferred-construction tail of the projection. The live three object is a PROJECTION of the
+  // model, never a peer that drifts: a verb writes intent AND projects it synchronously, so the
+  // common path is correct by construction. THIS exists only for genuinely-external children — the
+  // relay-backed PTY (and, later, the capture stream) re-adopt on their own clock and reappear AFTER
+  // the verb ran, ALWAYS at a default size — so we re-project them from the model when they land.
+  // Driven by the registry-change listener (each surface as it reappears) + one pass at the end of
+  // restore (any that re-adopted mid-restore, before the listener was armed). Per-kind via
+  // SURFACE_PROJECTORS, guarded → a present, already-correct surface is a no-op (NOT a drift-scan).
+  // Order is load-bearing: surfaces move/size FIRST so the subsequent 3D-dock lock captures the
+  // RESTORED home, not the adapter's spawn placement.
+  _projectSurfaces() {
     const ws = this.ctx.workspace;
-    if (!ws?.listSurfaces) return;
-    for (const s of ws.listSurfaces()) {
-      if (s.kind !== 'terminal' || !this.ctx.registry.has(s.id)) continue;
-      const grid = this.ctx.registry.get(s.id)?.grid;
-      if (!grid) continue;
-      const v = s.view || {};
-      // Position: skip while docked — the dock owns a docked tile's transform (its home is set by
-      // the pre-dock move below, then captured at lock). Loose terminals get moved to their home.
-      const docked = this.ctx.cameraDock?.has?.(s.id);
-      if (!docked && isFinitePos(v.position)
-          && (grid.position.x !== v.position.x || grid.position.y !== v.position.y || grid.position.z !== v.position.z)) {
-        this.router.execute(`terminal.move ${s.id} ${v.position.x} ${v.position.y} ${v.position.z}`);
-      }
-      // Size: terminal.resize drives grid + emulator + PTY in lockstep; guarded so it only fires
-      // when the re-adopted grid (spawned at 80×24) differs from the intent.
-      if (Number.isInteger(v.cols) && Number.isInteger(v.rows) && v.cols > 0 && v.rows > 0
-          && (grid.cols !== v.cols || grid.rows !== v.rows)) {
-        this.router.execute(`terminal.resize ${s.id} ${v.cols} ${v.rows}`);
+    if (ws?.listSurfaces) {
+      for (const s of ws.listSurfaces()) {
+        if (!this.ctx.registry.has(s.id)) continue;
+        const grid = this.ctx.registry.get(s.id)?.grid;
+        if (grid) SURFACE_PROJECTORS[s.kind]?.(this, s, grid);
       }
     }
+    this._applyDock3d();
   }
 
   // Replay 3D dock membership as surfaces reappear. Code grids are back synchronously

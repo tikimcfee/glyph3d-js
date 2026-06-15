@@ -8,7 +8,7 @@
 //
 // Graduated from a one-off probe per the debug-into-tools practice.
 
-import SessionStore from '../app/client/SessionStore.js';
+import SessionStore, { positionIsDerived } from '../app/client/SessionStore.js';
 import WorkspaceModel from '../app/client/WorkspaceModel.js';
 
 let failures = 0;
@@ -100,7 +100,7 @@ function makeRouter(cameraDock) {
 
   // ---- 3. terminal re-adopts → registry-change replays its lock ----------------
   reg._ids.add('term-1');
-  ss._applyDock3d(); // what _onRegistryChange → _reconcileSurfaces calls
+  ss._applyDock3d(); // what _onRegistryChange → _projectSurfaces calls
   ok(router.calls.some((c) => Array.isArray(c) && c[1] === 'term-1'),
      're-adopt: locked term-1 once it reappeared');
   eq(ss._pendingDock3d, null, 're-adopt: pending cleared when all tiles landed');
@@ -126,6 +126,17 @@ function makeRouter(cameraDock) {
   ok(router.calls.includes('terminal.move term-9 10 20 30'),
      'restore: moved that terminal to its saved home');
   eq(ctx.workspace.getSurface('term-9')?.view.cols, 121, 'restore: model retains the terminal intent (not consumed)');
+}
+
+// ---- 5. positionIsDerived discriminator: a tree-laid grid's position is derived (never
+// stored/projected); terminals + loose grids + captures are stored intent. The one subtle helper
+// Slice 3's code-grid projector hangs on, tested in isolation here. ----
+{
+  const treeCtx = { contentTree: { has: (id) => id === 'src/a.js' } };
+  ok(positionIsDerived(treeCtx, 'src/a.js') === true, 'positionIsDerived: tree leaf → derived (omit)');
+  ok(positionIsDerived(treeCtx, 'term-1') === false, 'positionIsDerived: terminal → stored intent');
+  ok(positionIsDerived(treeCtx, 'screen-1') === false, 'positionIsDerived: capture → stored intent');
+  ok(positionIsDerived({}, 'x') === false, 'positionIsDerived: no tree → stored');
 }
 
 console.log(failures === 0 ? '\nPASS — dock persistence round-trips' : `\nFAIL — ${failures} assertion(s)`);
