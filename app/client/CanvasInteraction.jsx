@@ -6,6 +6,7 @@ import { resolveGesture } from './gestureResolver.js';
 import { resolveKeyBinding } from './keymap.js';
 import { moveVerbFor } from './surfaceInteractions.js';
 import { BORDER_FLAGS } from '@glyph3d/core/collections';
+import { interactionTheme } from './settings.js';
 
 const round = (n) => Math.round(n * 100) / 100;
 
@@ -36,11 +37,18 @@ const HOVER_GLYPH_TINT = { r: 0.18, g: 0.25, b: 0.38 };
 const HOVER_INFLATE = 0.35;
 
 // Control-state outline colors. The focus box recolors by where keystrokes land, so the window's
-// state is legible in 3D (not only in the HUD): green = focused/selected, amber = input-active
-// (a code grid in edit mode, or the keyboard-target terminal). Amber matches the HUD edit color.
-const FOCUS_COLOR = 0x6ee7a0;  // green
-const INPUT_COLOR = 0xf0b45a;  // amber (HUD editOn)
-const HOVER_COLOR = 0x9fd2ff;  // light blue — hover
+// state is legible in 3D (not only in the HUD): focus = focused/selected, input = input-active (a
+// code grid in edit mode, or the keyboard-target terminal). These are the SAME vocabulary the
+// in-shader panel border wears — pulled from Settings ▸ Appearance via interactionTheme(), so the
+// directory overlay and the panel borders never disagree. The defaults here mirror the shader's,
+// used only until refreshInteractionColors() pulls the configured values (called each frame).
+const _iFocus = new THREE.Color(0x6ee7a0); // focus — green
+const _iInput = new THREE.Color(0xf0b45a); // input — amber (matches the HUD edit color)
+const _iHover = new THREE.Color(0x9fd2ff); // hover — light blue
+function refreshInteractionColors() {
+  const c = interactionTheme();
+  _iFocus.set(c.focus); _iInput.set(c.input); _iHover.set(c.hover);
+}
 // When you hover the grid that's ALREADY focused, the single focus box fades part-
 // way toward the hover blue instead of stacking a second outline on top. Keeps the
 // state color legible while still acknowledging the hover. Lerp/frame = the fade rate.
@@ -740,7 +748,6 @@ const _center = new THREE.Vector3();
 const _size = new THREE.Vector3();
 const _identQ = new THREE.Quaternion();
 const _targetColor = new THREE.Color();
-const _hoverColor = new THREE.Color(HOVER_COLOR);
 
 export function SelectionIndicator() {
   const { scene } = useThree();
@@ -799,9 +806,10 @@ export function SelectionIndicator() {
     // One box per role: a green/amber box for the SELECTED grid, a light-blue box
     // for HOVER on a DIFFERENT grid. Hovering the focused grid recolors the focus
     // box (fades toward blue) rather than drawing the hover box on top — no stack.
-    t.primaryBox = mkBox(FOCUS_COLOR, 9999);  // green — focused; recolored amber when input-active, blue-tinted on hover
-    t.hoverBox = mkBox(HOVER_COLOR, 10000);   // light blue — hover (follows the cursor)
-    t.primaryFill = mkFill(FOCUS_COLOR, 9998); // directory-only region glow, under the edge box
+    refreshInteractionColors();               // seed from the configured Appearance vocabulary
+    t.primaryBox = mkBox(_iFocus.getHex(), 9999);  // focus; recolored to input when input-active, hover-tinted on hover
+    t.hoverBox = mkBox(_iHover.getHex(), 10000);   // hover (follows the cursor)
+    t.primaryFill = mkFill(_iFocus.getHex(), 9998); // directory-only region glow, under the edge box
 
     return () => {
       // Drop any border-state bits we set so an unmount/remount doesn't strand a lit border.
@@ -825,6 +833,7 @@ export function SelectionIndicator() {
   useFrame((state) => {
     const t = tracked.current;
     if (!t.am || !t.registry) return;
+    refreshInteractionColors(); // live: a Settings ▸ Appearance change tracks without a remount
     const fit = (box, node, inflate) => {
       if (!box) return;
       // Two bounds sources, one unit cube. File grids expose LOCAL bounds → compose
@@ -883,9 +892,10 @@ export function SelectionIndicator() {
     // DIRECTORIES have no panel to host a border, so they keep the overlay box. The edge box recolors
     // to signal WHERE KEYSTROKES LAND (amber input-active / green focused), fading toward blue when
     // the focused dir is also hovered. Grids/terminals leave the boxes hidden — the shader has them.
-    _targetColor.set(inputActive ? INPUT_COLOR : FOCUS_COLOR);
-    if (hoverOnFocus) _targetColor.lerp(_hoverColor, HOVER_FOCUS_BLEND);
+    _targetColor.set(inputActive ? _iInput : _iFocus);
+    if (hoverOnFocus) _targetColor.lerp(_iHover, HOVER_FOCUS_BLEND);
     if (t.primaryBox.material) t.primaryBox.material.color.lerp(_targetColor, OUTLINE_FADE);
+    if (t.hoverBox?.material) t.hoverBox.material.color.copy(_iHover); // track live hover-color changes
 
     if (primaryIsDir && primaryGrid) fit(t.primaryBox, primaryGrid, 0);
     else t.primaryBox.visible = false;

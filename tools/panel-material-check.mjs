@@ -5,7 +5,7 @@
 //
 //   bun tools/panel-material-check.mjs
 
-import { createPanelMaterial, BORDER_FLAGS } from '../packages/glyph3d-core/src/collections/panelMaterial.js';
+import { createPanelMaterial, BORDER_FLAGS, setPanelStateColorDefaults } from '../packages/glyph3d-core/src/collections/panelMaterial.js';
 
 let failures = 0;
 const ok = (c, m) => { console.log(`${c ? '✓' : '✗ FAIL'} ${m}`); if (!c) failures++; };
@@ -41,6 +41,19 @@ glass.setBorderFlag(BORDER_FLAGS.HOVERED, true);
 ok(glass.getBorderFlags() === (BORDER_FLAGS.DOCKED | BORDER_FLAGS.HOVERED), 'flags OR together (no clobber)');
 glass.setBorderFlag(BORDER_FLAGS.DOCKED, false);
 ok(glass.getBorderFlags() === BORDER_FLAGS.HOVERED, 'clearing one bit leaves the others');
+
+// State colors: the shared focus/hover/input vocabulary. Per-panel live restyle takes on THIS panel.
+glass.setStateColors({ focus: 0x112233, hover: 0x445566, input: 0x778899 });
+const sc = glass.getStateColors();
+ok(sc.focus === 0x112233 && sc.hover === 0x445566 && sc.input === 0x778899, 'setStateColors → all three uniforms updated');
+
+// The module default is what a panel is BORN with — set it, and a NEW panel inherits it; existing
+// panels keep their own (each owns its uniform, no shared mutation).
+setPanelStateColorDefaults({ focus: 0x6ee7a0, hover: 0x9fd2ff, input: 0xf0b45a }); // restore canonical defaults
+const born = createPanelMaterial({ color: 0x101020 });
+const bc = born.getStateColors();
+ok(bc.focus === 0x6ee7a0 && bc.hover === 0x9fd2ff && bc.input === 0xf0b45a, 'new panel born with the current module defaults');
+ok(glass.getStateColors().focus === 0x112233, 'setPanelStateColorDefaults does NOT mutate existing panels');
 
 console.log(failures === 0 ? '\nPASS — panel material builds + restyles headless (border pixels verified live)'
                            : `\nFAIL — ${failures} assertion(s)`);

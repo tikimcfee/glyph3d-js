@@ -12,4 +12,4 @@ export { default as GridVirtualizer } from './GridVirtualizer.js';
 export { default as TerminalGrid } from './TerminalGrid.js';
 export { default as TerminalEmulator } from './TerminalEmulator.js';
 export { default as FrameGrid } from './FrameGrid.js';
-export { BORDER_FLAGS } from './panelMaterial.js';
+export { BORDER_FLAGS, setPanelStateColorDefaults } from './panelMaterial.js';

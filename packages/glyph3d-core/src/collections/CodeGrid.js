@@ -374,6 +374,15 @@ class CodeGrid extends THREE.Object3D {
     }
 
     /**
+     * Restyle this window's focus/hover/input border state colors (the shared interaction vocabulary,
+     * configured in Settings ▸ Appearance). WHICH one shows is still driven by the border flags.
+     * @param {{ hover?: number|string, focus?: number|string, input?: number|string }} colors
+     */
+    setStateColors(colors = {}) {
+        this._panel?.setStateColors(colors);
+    }
+
+    /**
      * Flip one or more BORDER_FLAGS bits on this window's border (DOCKED / HOVERED / FOCUSED /
      * INPUT). The dock owns DOCKED; the attention-driven border controller owns the rest.
      * @param {number} mask @param {boolean} present

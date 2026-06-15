@@ -32,7 +32,7 @@
 
 import * as THREE from 'three';
 import { MeshBasicNodeMaterial } from 'three/webgpu';
-import { uv, vec2, vec3, float, uint, uniform, mix, smoothstep, min, max, fwidth, bitAnd, select, time, sin } from 'three/tsl';
+import { uv, vec2, float, uint, uniform, mix, smoothstep, min, max, fwidth, bitAnd, select, time, sin } from 'three/tsl';
 
 /** Default border thickness in SCREEN PIXELS. */
 export const PANEL_BORDER_WIDTH = 1.5;
@@ -46,10 +46,28 @@ export const BORDER_FLAGS = Object.freeze({
 });
 
 const TAU = Math.PI * 2;
-// State colors — the legible vocabulary carried over from the roving outline overlay.
-const C_HOVER = vec3(0.624, 0.824, 1.0);  // 0x9fd2ff — light blue
-const C_FOCUS = vec3(0.431, 0.906, 0.627); // 0x6ee7a0 — green
-const C_INPUT = vec3(0.941, 0.706, 0.353); // 0xf0b45a — amber
+
+// State colors — the legible interaction vocabulary (focus/hover/input), shared by the in-shader
+// border AND the directory overlay so the two never drift. These are the DEFAULTS a panel is born
+// with; the app folds the configured values (Settings ▸ Appearance) in via setPanelStateColorDefaults
+// for new panels + per-panel setStateColors() for live restyle. Mutable module state so a freshly
+// created panel inherits the current scheme without threading colors through every constructor.
+const STATE_DEFAULTS = {
+    hover: new THREE.Color(0x9fd2ff), // light blue
+    focus: new THREE.Color(0x6ee7a0), // green
+    input: new THREE.Color(0xf0b45a), // amber
+};
+
+/**
+ * Set the default state colors panels created AFTER this call are born with. Live panels keep their
+ * own uniforms — restyle those with the handle's setStateColors(). Accepts anything THREE.Color eats.
+ * @param {{ hover?: number|string, focus?: number|string, input?: number|string }} colors
+ */
+export function setPanelStateColorDefaults({ hover, focus, input } = {}) {
+    if (hover != null) STATE_DEFAULTS.hover.set(hover);
+    if (focus != null) STATE_DEFAULTS.focus.set(focus);
+    if (input != null) STATE_DEFAULTS.input.set(input);
+}
 
 /**
  * @param {Object} [opts]
@@ -67,6 +85,11 @@ export function createPanelMaterial({ color = 0x000000, opacity = 1,
     const uBorderWidth = uniform(PANEL_BORDER_WIDTH);        // screen pixels
     const uBorderIntensity = uniform(1);                    // master rim opacity
     const uFlags = uniform(0, 'uint');                      // BORDER_FLAGS bit-set
+    // Per-panel state colors, seeded from the current module defaults (clone so each panel owns its
+    // own uniform); setStateColors() restyles them live.
+    const uHoverColor = uniform(STATE_DEFAULTS.hover.clone());
+    const uFocusColor = uniform(STATE_DEFAULTS.focus.clone());
+    const uInputColor = uniform(STATE_DEFAULTS.input.clone());
 
     const F = BORDER_FLAGS;
     const has = (mask) => bitAnd(uFlags, uint(mask)).greaterThan(uint(0)); // bool node
@@ -78,7 +101,7 @@ export function createPanelMaterial({ color = 0x000000, opacity = 1,
     // (priority input > focused > hovered) while any state is active, else the material's set color
     // (the dock identity hue). A gentle hover pulse rides on top. No blend, so focus shows full
     // strength, not a half-tint of the identity.
-    const stateCol = select(has(F.INPUT), C_INPUT, select(has(F.FOCUSED), C_FOCUS, C_HOVER));
+    const stateCol = select(has(F.INPUT), uInputColor, select(has(F.FOCUSED), uFocusColor, uHoverColor));
     const pulse = select(has(F.HOVERED), sin(time.mul(TAU * 1.1)).mul(0.5).add(0.5).mul(0.2).add(0.85), float(1));
     const borderCol = select(anyState, stateCol, uBorderColor).mul(pulse);
 
@@ -112,6 +135,18 @@ export function createPanelMaterial({ color = 0x000000, opacity = 1,
             if (color != null) uBorderColor.value.set(color);
             if (width != null) uBorderWidth.value = width;
             if (intensity != null) uBorderIntensity.value = intensity;
+        },
+
+        /** Restyle the focus/hover/input state colors live (the shared interaction vocabulary). */
+        setStateColors({ hover, focus, input } = {}) {
+            if (hover != null) uHoverColor.value.set(hover);
+            if (focus != null) uFocusColor.value.set(focus);
+            if (input != null) uInputColor.value.set(input);
+        },
+
+        /** This panel's current state colors as hex ints (inspection — symmetric with getBorderFlags). */
+        getStateColors() {
+            return { hover: uHoverColor.value.getHex(), focus: uFocusColor.value.getHex(), input: uInputColor.value.getHex() };
         },
 
         /** Flip one or more BORDER_FLAGS bits. Each subsystem owns its bits (no contention). */

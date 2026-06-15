@@ -256,6 +256,7 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // lines toggle independently (Tree settings); layout.arrows is the master on/off.
     state.ctx.contentTreeArrows = new ContentTreeArrows(contentTree);
     applyGroupSettings(state.ctx, 'Tree');   // fold persisted file/dir-line toggles in at boot
+    applyGroupSettings(state.ctx, 'Appearance'); // set the configured interaction colors as the panel default before any window spawns
 
     // Diagnostic: origin-vs-content-anchor dots per dir (layout.probes). Reveals where the
     // arrows anchor relative to each footprint origin — a debug instrument, toggle off when done.

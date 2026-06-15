@@ -1,4 +1,5 @@
 import { stateController } from '@glyph3d/core/services/state';
+import { setPanelStateColorDefaults } from '@glyph3d/core/collections';
 
 // Settings schema — the SINGLE source for both the Settings panel (renders a row
 // per entry) and the settings.* verbs (validate + apply). Only WIRED knobs live
@@ -69,6 +70,22 @@ export const SETTINGS = [
     type: 'number', default: 0.96, min: 0, max: 1, step: 0.01,
     apply: (ctx, v) => themeAll(ctx, 'terminal', { opacity: v }),
   },
+  // Appearance — the interaction color vocabulary (focus / hover / edit-input). ONE source of truth,
+  // shared by the in-shader panel border (every grid/terminal) AND the directory overlay, so the two
+  // never drift. apply() restyles every live panel + sets the default new panels are born with; the
+  // overlay reads the same values via interactionTheme().
+  {
+    key: 'appearance.focusColor', label: 'Focus', group: 'Appearance',
+    type: 'color', default: '#6ee7a0', apply: (ctx) => applyStateColors(ctx),
+  },
+  {
+    key: 'appearance.hoverColor', label: 'Hover', group: 'Appearance',
+    type: 'color', default: '#9fd2ff', apply: (ctx) => applyStateColors(ctx),
+  },
+  {
+    key: 'appearance.inputColor', label: 'Edit / input', group: 'Appearance',
+    type: 'color', default: '#f0b45a', apply: (ctx) => applyStateColors(ctx),
+  },
   // Dock — the camera-locked tile bar (CameraDock). Every knob here was a baked
   // constant; setParam re-packs the live dock and the value persists client-side.
   // maxColumns + the dome arc/rise only bite in the RADIAL layout; fillFrac only in
@@ -104,6 +121,32 @@ export const SETTINGS = [
 /** Push a background restyle to every live grid/terminal of `type`. */
 function themeAll(ctx, type, style) {
   for (const e of ctx?.registry?.findByType?.(type) ?? []) e.grid?.setBackgroundStyle?.(style);
+}
+
+/** The interaction color vocabulary (focus/hover/input) as '#rrggbb' strings. Cached so the per-frame
+ *  directory overlay can read it without hitting storage; applyStateColors() mutates it in place. */
+let _interaction = null;
+export function interactionTheme() {
+  if (!_interaction) _interaction = {
+    focus: getSetting('appearance.focusColor'),
+    hover: getSetting('appearance.hoverColor'),
+    input: getSetting('appearance.inputColor'),
+  };
+  return _interaction;
+}
+
+/** Push the configured state colors to every surface that wears them: the cache the overlay reads,
+ *  the default new panels are born with, and every live panel's in-shader border. One vocabulary. */
+function applyStateColors(ctx) {
+  const c = {
+    focus: getSetting('appearance.focusColor'),
+    hover: getSetting('appearance.hoverColor'),
+    input: getSetting('appearance.inputColor'),
+  };
+  if (_interaction) Object.assign(_interaction, c); else _interaction = { ...c };
+  setPanelStateColorDefaults(c);
+  for (const type of ['grid', 'terminal'])
+    for (const e of ctx?.registry?.findByType?.(type) ?? []) e.grid?.setStateColors?.(c);
 }
 
 /** Background options for a NEW CodeGrid — so it spawns in the current scheme. */
