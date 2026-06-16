@@ -46,10 +46,15 @@ export default function registerDockCommands(router) {
         const r = resolveSurface(ctx, args[0]);
         if (!r) return { text: `ERR: no surface for "${args[0]}" (registry id or surface index)`, data: null };
         if (dock.has(r.id)) return { text: `OK: '${r.id}' already docked`, data: { id: r.id, docked: true } };
-        // Optional order hint: restore passes the saved slot index so a tile re-adopting out of
-        // arrival order still lands in its saved bar position. Omitted (interactive) → append.
-        const order = parseFloat(args[1]);
-        dock.lock(r.id, r.grid, Number.isFinite(order) ? { order } : undefined);
+        // Order: an explicit hint (legacy callers) else the next bar slot from the model. The model is
+        // the order authority now — it persists, and the dock reconcile reads it back on reload.
+        const hint = parseFloat(args[1]);
+        const order = Number.isFinite(hint) ? hint : (ctx.workspace?.nextDockOrder?.() ?? 0);
+        // Write the dock intent (the persisted fact) AND project it onto the live dock — the verb does
+        // both, so it's correct by construction. Restore writes the model alone and lets the reconciler
+        // project as tiles re-adopt (no dock.lock replay).
+        ctx.workspace?.setSurfaceView?.(r.id, ctx.registry?.get?.(r.id)?.type, { docked: true, dockOrder: order });
+        dock.lock(r.id, r.grid, { order });
         return { text: `OK: docked '${r.id}'`, data: { id: r.id, docked: true } };
     }, { description: 'Dock a surface into the camera-locked HUD bar', usage: '<id|index> [order]', returns: '{ id, docked }' });
 
@@ -59,6 +64,7 @@ export default function registerDockCommands(router) {
         const r = resolveSurface(ctx, args[0]);
         const id = r?.id ?? String(args[0] ?? '');
         if (!dock.has(id)) return { text: `ERR: '${id}' is not docked`, data: null };
+        ctx.workspace?.setSurfaceView?.(id, undefined, { docked: false }); // drop the intent + project
         dock.release(id);
         return { text: `OK: released '${id}'`, data: { id, docked: false } };
     }, { description: 'Release a docked surface back into the world', usage: '<id|index>', returns: '{ id, docked }' });
@@ -68,8 +74,15 @@ export default function registerDockCommands(router) {
         if (!dock) return { text: 'ERR: camera dock not ready', data: null };
         const r = resolveSurface(ctx, args[0]);
         if (!r) return { text: `ERR: no surface for "${args[0]}" (registry id or surface index)`, data: null };
-        const state = dock.toggle(r.id, r.grid);
-        return { text: `OK: ${state} '${r.id}'`, data: { id: r.id, docked: state === 'locked' } };
+        if (dock.has(r.id)) {
+            ctx.workspace?.setSurfaceView?.(r.id, undefined, { docked: false });
+            dock.release(r.id);
+            return { text: `OK: released '${r.id}'`, data: { id: r.id, docked: false } };
+        }
+        const order = ctx.workspace?.nextDockOrder?.() ?? 0;
+        ctx.workspace?.setSurfaceView?.(r.id, ctx.registry?.get?.(r.id)?.type, { docked: true, dockOrder: order });
+        dock.lock(r.id, r.grid, { order });
+        return { text: `OK: locked '${r.id}'`, data: { id: r.id, docked: true } };
     }, { description: 'Dock a surface if loose, release it if docked', usage: '<id|index>', returns: '{ id, docked }' });
 
     router.register('dock.list', (_args, ctx) => {
@@ -100,6 +113,7 @@ export default function registerDockCommands(router) {
         // then release the tile back home and make it the focus. Window slides home while
         // the camera flies to meet it.
         const box = dock.homeBounds(id);
+        ctx.workspace?.setSurfaceView?.(id, undefined, { docked: false });
         dock.release(id);
         if (box) ctx.cameraController?.focusOnBox?.(box);
         ctx.attentionManager?.set('primary', id, { registry: ctx.registry });
@@ -127,6 +141,7 @@ export default function registerDockCommands(router) {
         const dock = getDock(ctx);
         if (!dock) return { text: 'ERR: camera dock not ready', data: null };
         const n = dock.list().length;
+        for (const s of ctx.workspace?.listDocked?.() || []) ctx.workspace.setSurfaceView(s.id, undefined, { docked: false });
         dock.releaseAll();
         return { text: `OK: released ${n} tile(s)`, data: { released: n } };
     }, { description: 'Release every docked surface', returns: '{ released }' });

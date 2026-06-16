@@ -167,6 +167,24 @@ export default class WorkspaceModel {
   /** Drop a surface's view-intent (the thing was explicitly closed/killed). */
   removeSurface(id) { if (this.surfaces.delete(id)) this._emit('change:surfaces'); }
 
+  // ── dock membership (a view fact): which surfaces are in the camera-locked HUD, in what order.
+  // The CameraDock is a PROJECTION of this — the dock reconciler locks these as they go live, so the
+  // model is the durable buffer across an async re-adopt (no separate pending queue).
+
+  /** Docked surfaces, sorted by their persisted slot order (the bar sequence). */
+  listDocked() {
+    return [...this.surfaces.values()]
+      .filter((s) => s.view?.docked)
+      .sort((a, b) => (a.view.dockOrder ?? 0) - (b.view.dockOrder ?? 0));
+  }
+
+  /** The next slot order for an interactive dock — one past the current max (append to the bar). */
+  nextDockOrder() {
+    let max = -1;
+    for (const s of this.surfaces.values()) if (s.view?.docked && (s.view.dockOrder ?? 0) > max) max = s.view.dockOrder ?? 0;
+    return max + 1;
+  }
+
   /** Drop a sheet from every field + the sheet map. (Derendering its panel is the caller's job.) */
   removeSheet(sheetId) {
     let fieldChanged = false;

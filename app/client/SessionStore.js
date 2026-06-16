@@ -86,10 +86,10 @@ export default class SessionStore {
 
     /** @type {{toJSON:Function, fromJSON:Function, components:string[]}|null} */
     this._dock = null;
-    this._pendingDock = null;       // dock layout from a loaded snapshot, awaiting the dock bridge
-    this._pendingDock3d = null;     // {layout, tiles[]} from a snapshot, applied as surfaces reappear (CameraDock)
-    // Terminal geometry intent now lives in the WorkspaceModel surface table (ctx.workspace),
-    // the durable buffer — apply() pushes it onto each grid as it re-adopts. No pending queue.
+    this._pendingDock = null;       // 2D dockview layout from a loaded snapshot, awaiting the dock bridge
+    // Surface intent (terminal geometry AND dock membership/order/zoom) lives in the WorkspaceModel
+    // surface table (ctx.workspace) — the durable buffer. _projectSurfaces pushes it onto each live
+    // object as it re-adopts (terminal applyView + dock reconcile). No pending queue, no scrape.
     this._offSurfaces = null;       // unsubscribe from the model's change:surfaces (autosave trigger)
 
     this._restored = false;         // load+restore runs ONCE per page load (not per reconnect)
@@ -185,31 +185,21 @@ export default class SessionStore {
       try { dock = this._dock.toJSON(); } catch (e) { console.warn('[session] dock toJSON failed:', e?.message || e); }
     }
 
-    // The 3D camera-dock: ordered tile membership + layout mode. If a surface hasn't
-    // reappeared yet (terminal re-adopting), its id is still in _pendingDock3d —
-    // carry those forward so a save mid-restore doesn't drop them.
-    let dock3d = this._pendingDock3d;
-    const cd = ctx.cameraDock;
-    if (cd) {
-      // Each tile records its readability zoom alongside membership, so a docked window
-      // restores at the size the operator scaled it to (orthogonal to its cols/rows). A
-      // pinned window also carries its pin state (+ the pre-pin zoom) so a post-reload
-      // unpin still drops back to the right size. (Loose-window zoom/pin persistence is
-      // the known migration gap — only docked tiles round-trip today.)
-      const tiles = cd.list().sort((a, b) => a.slot - b.slot).map((t) => {
-        const v = ctx.workspace?.getSurface?.(t.id)?.view || {};
-        const tile = { id: t.id, zoom: t.zoom ?? 1 };
+    // The 3D camera-dock: ordered membership + per-tile zoom/pin, read straight from the MODEL
+    // (ws.listDocked, sorted by the persisted slot order) — NOT a scrape of the live CameraDock. The
+    // model is the durable buffer, so a docked terminal still re-adopting (its grid temporarily
+    // gone) stays in the snapshot without a carry-forward shadow. The CameraDock is just the
+    // projection; only its layout mode is read live. Array order IS the slot order on restore.
+    let dock3d = null;
+    const docked = ws?.listDocked ? ws.listDocked() : [];
+    if (docked.length) {
+      const tiles = docked.map((s) => {
+        const v = s.view || {};
+        const tile = { id: s.id, zoom: v.zoom ?? 1 };
         if (v.pinned) { tile.pinned = true; tile.prePinZoom = v.prePinZoom ?? 1; }
         return tile;
       });
-      const have = new Set(tiles.map((t) => t.id));
-      // Carry forward any tile that hasn't re-adopted yet, stripping the restore-only `order` field
-      // (array position is the persisted sequence — order is recomputed from the index on restore).
-      const pend = (this._pendingDock3d?.tiles || [])
-        .filter((t) => !have.has(t.id))
-        .map(({ order, ...t }) => t);
-      const all = [...tiles, ...pend];
-      dock3d = all.length ? { layout: cd.layoutMode, tiles: all } : null;
+      dock3d = { layout: ctx.cameraDock?.layoutMode || 'linear', tiles };
     }
 
     return {
@@ -381,18 +371,23 @@ export default class SessionStore {
         this.ctx.workspace?.setSurfaceView?.(t.id, 'terminal', view);
       }
     }
-    // `order` = the tile's index in the saved (slot-ordered) array. It rides each pending tile
-    // through to dock.lock so a terminal re-adopting out of arrival order still lands in its saved
-    // bar slot — the saved sequence is array order, not the order shells happen to come back in.
-    this._pendingDock3d = (snap.dock3d?.tiles?.length)
-      ? {
-          layout: snap.dock3d.layout || 'linear',
-          tiles: snap.dock3d.tiles.map((t, i) =>
-            (typeof t === 'string'
-              ? { id: t, zoom: 1, order: i }
-              : { id: t.id, zoom: t.zoom ?? 1, pinned: !!t.pinned, prePinZoom: t.prePinZoom, order: i })),
-        }
-      : null;
+    // Dock membership/order/zoom/pin → the MODEL (the durable buffer the reconcile reads), and the
+    // bar LAYOUT straight onto the live CameraDock. `dockOrder` = the tile's index in the saved
+    // slot-ordered array, so a terminal re-adopting out of arrival order still lands in its saved
+    // bar slot. No verb replay, no _pendingDock3d: _projectSurfaces → _reconcileDock locks each tile
+    // as its grid goes live, in any order. Tolerant of the legacy string-tile form.
+    if (snap.dock3d?.tiles?.length) {
+      this.ctx.cameraDock?.setLayout?.(snap.dock3d.layout || 'linear');
+      snap.dock3d.tiles.forEach((t, i) => {
+        const id = typeof t === 'string' ? t : t?.id;
+        if (!id) return;
+        const patch = { docked: true, dockOrder: i, zoom: (typeof t === 'object' ? t.zoom : 1) ?? 1 };
+        if (typeof t === 'object' && t.pinned) { patch.pinned = true; patch.prePinZoom = t.prePinZoom ?? 1; }
+        // kind undefined: don't clobber a terminal's 'terminal' kind (set by the loop above); a docked
+        // code grid with no prior record becomes a generic 'surface' (the reconcile ignores kind).
+        this.ctx.workspace?.setSurfaceView?.(id, undefined, patch);
+      });
+    }
     this._maybeApplyDock();
 
     // One reconcile pass at the end of restore. Re-adoption is driven by an independent
@@ -446,50 +441,41 @@ export default class SessionStore {
         if (grid) SURFACE_PROJECTORS[s.kind]?.(this, s, grid);
       }
     }
-    this._applyDock3d();
+    this._reconcileDock();
   }
 
-  // Replay 3D dock membership as surfaces reappear. Code grids are back synchronously
-  // after restore()'s file loop; terminals re-adopt later, so this is also fired from
-  // the registry-change listener (after _applyTerminalViews, so a docked terminal
-  // captures a sensible home before it's reparented away). Ids not yet in the registry
-  // linger in _pendingDock3d (or forever, if that shell died — harmless).
-  _applyDock3d() {
+  // Dock = f(model): converge the live CameraDock to the model's docked surfaces. ADDITIVE — it locks
+  // each docked surface that's live but not yet a tile (a terminal re-adopting AFTER restore lands
+  // here when its grid appears) and re-applies its zoom + pin. It does NOT release: a verb releases
+  // live (writing docked:false), and a gone window is dismissed by pruneDismissed — both keep model
+  // and dock in step without this pass fighting them. The model IS the durable buffer, so there's no
+  // pending queue: a not-yet-live docked surface is simply skipped and caught on the next pass. This
+  // replaced the dock.lock + window.scale VERB REPLAY (+ the _pendingDock3d carry-forward shadow).
+  // Runs after the per-surface projection above, so a docked terminal is moved/sized to its restored
+  // home BEFORE it's reparented into a tile.
+  _reconcileDock() {
     const cd = this.ctx.cameraDock;
-    const pend = this._pendingDock3d;
-    if (!cd || !pend) return;
-    if (pend.layout) cd.setLayout(pend.layout);
-    const remaining = [];
-    for (const t of pend.tiles) {
-      if (cd.has(t.id)) continue;
-      if (this.ctx.registry.has(t.id)) {
-        // Per-tile guard: ONE failing dock.lock (a stale module, a bad surface) must not abort the
-        // whole replay — log it and move on so the rest of the dock still restores. The tile is
-        // consumed either way (never pushed to `remaining`), so a hard failure can't retry-storm on
-        // the next reconcile pass. (An unguarded loop here once turned a single module bug into a
-        // whole-dock outage + a stale carried-forward dock3d — dev-loop gotcha #11.)
-        try {
-          // Array form skips the router's space-tokenizer — a registry id can be a file path.
-          // Pass the saved order so the lock pins this tile's bar slot regardless of arrival timing.
-          this.router.execute(['dock.lock', t.id, String(t.order)]);
-          // Restore the readability zoom after the lock captures home (the dock reads
-          // user back for layout, so this re-places the tile at its saved size).
-          if (t.zoom && t.zoom !== 1) this.router.execute(['window.scale', t.id, String(t.zoom)]);
-          // Re-seat the pin view state: the saved zoom already IS the pinned (max) size, so
-          // this only restores the flag + pre-pin zoom so a later unpin drops back correctly,
-          // and lights the Pin button to match.
-          if (t.pinned) {
-            this.ctx.workspace?.setSurfaceView?.(t.id, 'terminal', { pinned: true, prePinZoom: t.prePinZoom ?? 1 });
-            this.ctx.registry?.get?.(t.id)?.grid?.setControlActive?.('pin', true);
-          }
-        } catch (e) {
-          console.warn(`[session] dock restore failed for '${t.id}' — skipping tile:`, e?.message || e);
-        }
-      } else {
-        remaining.push(t);
+    const ws = this.ctx.workspace;
+    if (!cd || !ws?.listDocked) return;
+    for (const s of ws.listDocked()) {
+      if (cd.has(s.id)) continue;                       // already a tile
+      if (!this.ctx.registry.has(s.id)) continue;       // not live yet → re-adopts later, caught next pass
+      const grid = this.ctx.registry.get(s.id)?.grid;
+      if (!grid) continue;
+      const v = s.view || {};
+      // Per-tile guard: one bad surface must not abort the whole reconcile.
+      try {
+        // Direct CameraDock method (NOT a dock.lock verb). The saved slot order pins the bar
+        // position regardless of arrival timing.
+        cd.lock(s.id, grid, { order: v.dockOrder });
+        // Re-apply the readability zoom (the dock reads `user` back for its box-fit / spotlight).
+        if (v.zoom && v.zoom !== 1) { grid.setZoom?.(v.zoom); cd.reflowTile?.(s.id); }
+        // Light the Pin button to match the restored flag (the saved zoom already IS the pinned size).
+        if (v.pinned) grid.setControlActive?.('pin', true);
+      } catch (e) {
+        console.warn(`[session] dock reconcile failed for '${s.id}' — skipping:`, e?.message || e);
       }
     }
-    this._pendingDock3d = remaining.length ? { layout: pend.layout, tiles: remaining } : null;
   }
 
   // Load the camera by SETTING it directly on the controller — no camera.move/aim verb replay (which
@@ -530,12 +516,11 @@ export default class SessionStore {
   }
 
   // Public clear — wipe the saved snapshot on demand (the `session.clear` verb).
-  // Drops any pending dock/terminal placement so a stale snapshot can't re-apply,
-  // then writes the empty file. Live objects stay in the scene; autosave will
-  // re-capture them on the next change (clear-with-log, mirror-of-reality policy).
+  // Drops the pending 2D-dock layout so a stale snapshot can't re-apply, then writes the empty file.
+  // Dock membership lives in the model now (cleared by clearScene), not a pending buffer here.
+  // Live objects stay in the scene; autosave re-captures them on the next change (mirror-of-reality).
   async clear() {
     this._pendingDock = null;
-    this._pendingDock3d = null;
     await this._clear();
   }
 

@@ -49,17 +49,21 @@ function makeRegistry(ids = new Set()) {
     addChangeListener() {}, removeChangeListener() {},
   };
 }
-// CameraDock stub: records locks, reports membership/home/layout like the real one.
+// CameraDock stub: the PROJECTION. lock(id,grid,{order}) is the real method the reconcile calls
+// DIRECTLY (no dock.lock verb); records each lock so tests can assert membership + order.
 function makeCameraDock() {
-  const tiles = []; // {id, slot}
+  const entries = new Map(); // id -> { id, order }
   return {
     layoutMode: 'linear',
-    _set: new Set(),
-    has(id) { return this._set.has(id); },
-    list() { return tiles.map((t, i) => ({ id: t.id, slot: i, layout: this.layoutMode })); },
-    homePosition(id) { return this._set.has(id) ? { x: 100, y: 200, z: 300 } : null; },
+    _locks: [],
+    has(id) { return entries.has(id); },
+    lock(id, grid, opts = {}) { entries.set(id, { id, order: opts.order ?? 0 }); this._locks.push({ id, order: opts.order, grid }); return true; },
+    release(id) { entries.delete(id); },
+    releaseAll() { entries.clear(); },
+    reflowTile() {},
+    list() { return [...entries.values()].sort((a, b) => a.order - b.order).map((e, i) => ({ id: e.id, slot: i })); },
+    homePosition() { return null; },
     setLayout(m) { this.layoutMode = m; return true; },
-    _lock(id) { if (!this._set.has(id)) { this._set.add(id); tiles.push({ id }); } },
   };
 }
 function makeCtx(registry, cameraDock) {
@@ -75,59 +79,52 @@ function makeCtx(registry, cameraDock) {
     wsbridge: { connected: true, _pushes: [], push(owner, msg) { this._pushes.push({ owner, msg }); } },
   };
 }
-function makeRouter(cameraDock) {
+function makeRouter() {
   const calls = [];
-  return {
-    calls,
-    execute(cmd) {
-      calls.push(cmd);
-      // Emulate dock.lock landing the tile (array form: ['dock.lock', id]).
-      if (Array.isArray(cmd) && cmd[0] === 'dock.lock') cameraDock._lock(cmd[1]);
-      return Promise.resolve({ text: 'OK' });
-    },
-  };
+  return { calls, execute(cmd) { calls.push(cmd); return Promise.resolve({ text: 'OK' }); } };
 }
 
-// ---- 1. capture: ordered dock tiles + layout; terminal geometry from the MODEL -----
+// ---- 1. capture: dock3d read from the MODEL (membership/order/zoom/pin), layout from the live dock --
 {
   const reg = makeRegistry(new Set(['term-1']));
   const cd = makeCameraDock();
-  cd.setLayout('radial'); cd._lock('term-1'); // term-1 is docked
+  cd.setLayout('radial');
   const ctx = makeCtx(reg, cd);
-  // The model holds the terminal's HOME (the verb wrote it pre-dock); capture serializes THAT,
-  // not a live-grid scrape — so a docked tile's saved position is its world home, not tile-local.
-  ctx.workspace.setSurfaceView('term-1', 'terminal', { position: { x: 100, y: 200, z: 300 }, cols: 80, rows: 24 });
-  const ss = new SessionStore({ ctx, router: makeRouter(cd), bridge: {} });
-  const snap = ss.capture();
-  eq(snap.dock3d, { layout: 'radial', tiles: [{ id: 'term-1', zoom: 1 }] }, 'capture: dock3d has layout + ordered tiles (id+zoom)');
+  // The MODEL owns dock membership + the terminal's geometry. capture serializes THAT (not a
+  // live-dock scrape) — so a docked tile round-trips even while its grid is mid-re-adopt.
+  ctx.workspace.setSurfaceView('term-1', 'terminal',
+    { docked: true, dockOrder: 0, zoom: 1.5, position: { x: 100, y: 200, z: 300 }, cols: 80, rows: 24 });
+  const snap = new SessionStore({ ctx, router: makeRouter(), bridge: {} }).capture();
+  eq(snap.dock3d, { layout: 'radial', tiles: [{ id: 'term-1', zoom: 1.5 }] },
+     'capture: dock3d from model.listDocked (zoom from the model, layout from the live dock)');
   const term = snap.terminals.find((t) => t.id === 'term-1');
   eq({ x: term.x, y: term.y, z: term.z }, { x: 100, y: 200, z: 300 },
      'capture: terminal HOME comes from the model (100,200,300)');
 }
 
-// ---- 2. restore: lock present surfaces now, defer absent ones ------------------
+// ---- 2. restore: dock intent → the MODEL; reconcile locks LIVE tiles directly, defers absent ones --
 {
   const reg = makeRegistry(new Set(['a.js']));        // code grid back; term-1 not yet
   const cd = makeCameraDock();
-  const router = makeRouter(cd);
-  const ss = new SessionStore({ ctx: makeCtx(reg, cd), router, bridge: {} });
+  const router = makeRouter();
+  const ctx = makeCtx(reg, cd);
+  const ss = new SessionStore({ ctx, router, bridge: {} });
   await ss.restore({ version: 2, files: [], camera: null, terminals: [],
-                     dock3d: { layout: 'radial', tiles: ['a.js', 'term-1'] } });
-  ok(router.calls.some((c) => Array.isArray(c) && c[0] === 'dock.lock' && c[1] === 'a.js'),
-     'restore: locked the present code grid a.js');
-  ok(!router.calls.some((c) => Array.isArray(c) && c[1] === 'term-1'),
-     'restore: did NOT lock the absent terminal yet');
-  eq(cd.layoutMode, 'radial', 'restore: applied saved layout mode');
-  // term-1 is index 1 in the saved array → carries order:1 so it locks into its saved slot when it
-  // re-adopts (even if it comes back before/after other deferred tiles).
-  eq(ss._pendingDock3d, { layout: 'radial', tiles: [{ id: 'term-1', zoom: 1, order: 1 }] }, 'restore: term-1 deferred in _pendingDock3d (with saved order)');
+                     dock3d: { layout: 'radial', tiles: [{ id: 'a.js', zoom: 1 }, { id: 'term-1', zoom: 1 }] } });
+  ok(ctx.workspace.getSurface('a.js')?.view.docked === true, 'restore: a.js docked in the MODEL');
+  ok(ctx.workspace.getSurface('term-1')?.view.docked === true, 'restore: term-1 docked in the MODEL (durable buffer, grid absent)');
+  eq(ctx.workspace.getSurface('term-1')?.view.dockOrder, 1, 'restore: term-1 keeps its saved slot order (index 1)');
+  ok(cd.has('a.js'), 'reconcile: locked the present grid a.js DIRECTLY');
+  ok(!cd.has('term-1'), 'reconcile: did NOT lock the absent terminal yet');
+  ok(!router.calls.some((c) => (Array.isArray(c) ? c[0] : String(c)).startsWith?.('dock.lock') || (Array.isArray(c) && c[0] === 'dock.lock')),
+     'restore: NO dock.lock verb replay (direct cd.lock only)');
+  eq(cd.layoutMode, 'radial', 'restore: applied saved layout directly onto the dock');
 
-  // ---- 3. terminal re-adopts → registry-change replays its lock ----------------
+  // ---- 3. terminal re-adopts → registry-change reconcile locks it from the MODEL ----------------
   reg._ids.add('term-1');
-  ss._applyDock3d(); // what _onRegistryChange → _projectSurfaces calls
-  ok(router.calls.some((c) => Array.isArray(c) && c[1] === 'term-1'),
-     're-adopt: locked term-1 once it reappeared');
-  eq(ss._pendingDock3d, null, 're-adopt: pending cleared when all tiles landed');
+  ss._projectSurfaces(); // what _onRegistryChange fires
+  ok(cd.has('term-1'), 're-adopt: reconcile locked term-1 once it reappeared (model-driven)');
+  eq(cd._locks.find((l) => l.id === 'term-1')?.order, 1, 're-adopt: term-1 locked into its saved slot order');
 }
 
 // ---- 4. terminal geometry projects DIRECTLY via grid.applyView when it re-adopts mid-restore ----

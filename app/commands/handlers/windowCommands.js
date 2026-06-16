@@ -47,6 +47,9 @@ export default function registerWindowCommands(router) {
         if (dock?.has?.(r.id)) dock.reflowTile(r.id);
 
         const z = r.grid.zoom;
+        // The model owns the zoom (the persisted decider; the grid's scaleModel is the live cache we
+        // just told). Capture serializes it; the dock reconcile re-applies it as a tile re-adopts.
+        ctx.workspace?.setSurfaceView?.(r.id, ctx.registry?.get?.(r.id)?.type, { zoom: z });
         ctx.session?.scheduleSave?.();
         return { text: `OK: scaled '${r.id}' → ${z.toFixed?.(3) ?? z}`, data: { id: r.id, zoom: z } };
     }, {

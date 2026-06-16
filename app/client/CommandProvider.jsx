@@ -287,6 +287,11 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       const isLive = (id) => state.ctx.registry.has(id);
       state.ctx.attentionManager?.pruneGone?.(isLive);
       cameraDock.pruneDismissed(isLive);
+      // A gone NON-terminal surface drops its intent (e.g. a closed docked code grid) so capture
+      // can't serialize a phantom tile. Terminals are spared — their PTY re-adopts and the surface
+      // is the durable buffer that re-docks/re-sizes them (terminal.kill drops it explicitly).
+      for (const s of state.ctx.workspace?.listSurfaces?.() || [])
+        if (s.kind !== 'terminal' && !isLive(s.id)) state.ctx.workspace.removeSurface(s.id);
     };
     state.ctx.registry.addChangeListener(onRemoval);
 
