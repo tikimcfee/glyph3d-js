@@ -25,6 +25,9 @@
 
 import * as THREE from 'three';
 import GlyphField from '../GlyphField.js';
+import ScaleModel from './ScaleModel.js';
+import { createPanelMaterial } from './panelMaterial.js';
+import { RENDER_ORDER } from '../core/renderOrder.js';
 
 class FrameGrid extends THREE.Object3D {
     /**
@@ -94,10 +97,30 @@ class FrameGrid extends THREE.Object3D {
         this._stream  = null;
         this._video   = null;
 
+        // Picking — wired via setPickingSystem(); re-registered whenever _build re-dices the cells.
+        this._pickingSystem = null;
+        // Size-change taps (the dock auto-reflows a docked tile via this); fired on setAspect.
+        this._resizeListeners = null;
+
         this._build();
+
+        // Background panel: the flat 'grid'-channel PICK target (a capture has no glyph panel of its
+        // own, so this is how a click resolves to the whole tile) AND the carrier of the in-shader
+        // identity border the dock paints. Sits just behind the cells; sized to the frame.
+        this._panel = null;
+        this._background = null;
+        this._bgColor   = options.backgroundColor   ?? 0x0a0a1e;
+        this._bgOpacity = options.backgroundOpacity ?? 0.9;
+        this._initBackground();
 
         // Reparent the renderer mesh under this Object3D so this.position/scale apply.
         this.add(this._renderer.instanceMesh);
+
+        // ScaleModel is the single authority for this.scale: placement (natural size at home, the
+        // dock's tile-fit when docked) · user (persisted zoom). resolve() is the only writer — the
+        // dock + setScale/setZoom feed it, never this.scale directly. Mirrors CodeGrid/TerminalGrid.
+        this.scaleModel = new ScaleModel(options.gridScale ?? 1);
+        this.scaleModel.resolve(this);
     }
 
     /**
@@ -214,6 +237,9 @@ class FrameGrid extends THREE.Object3D {
         if (!(aspect > 0) || aspect === this.aspect) return;
         this.aspect = aspect;
         this._build();
+        this._updateBackground();   // aspect changed → panel height changed
+        this._reregisterPicking();  // _build re-diced → glyph-channel id block changed
+        this._fireResize();         // a docked tile re-fits
     }
 
     /**
@@ -234,6 +260,7 @@ class FrameGrid extends THREE.Object3D {
         this._cellCount = c * r;
         this._build();                                       // rebuild quads at the new granularity
         this._renderer.setFrameTexture(this._texture, c, r); // re-push dims so frameCols/frameRows match
+        this._reregisterPicking();                           // re-dice changed the cell count → glyph channel
     }
 
     /** @returns {number} number of cells (cols × rows). */
@@ -286,6 +313,96 @@ class FrameGrid extends THREE.Object3D {
         return this._renderer;
     }
 
+    // ── Interactive-window interface — position / scale / zoom / border / picking, mirroring
+    //    CodeGrid / TerminalGrid so a capture drags, docks, and scales like any other window.
+    //    Duck-typed across the collections; the shared base is the deferred unification work.
+
+    /** Move the capture in 3D. The ObjectDragger (Ctrl-drag) calls this on the picked grid. */
+    setWorldPosition(pos) {
+        this.position.set(pos.x, pos.y, pos.z);
+    }
+
+    /** Set the PLACEMENT scale (natural home size; the dock overrides it while docked). */
+    setScale(factor) {
+        this.scaleModel.placement = factor;
+        this.scaleModel.resolve(this);
+    }
+
+    /** Set the user ZOOM — readability scale, composed onto this.scale via ScaleModel. The dock
+     *  reads it back for tile-fit; window.scale calls dock.reflowTile after. */
+    setZoom(factor) {
+        this.scaleModel.setZoom(factor);
+        this.scaleModel.resolve(this);
+    }
+
+    /** Current uniform zoom magnitude (the persisted readability scale). @returns {number} */
+    get zoom() { return this.scaleModel.zoomScalar; }
+
+    /** Subscribe to size changes (the dock auto-reflows a docked tile via this). Returns unsubscribe. */
+    onResize(cb) {
+        if (!this._resizeListeners) this._resizeListeners = new Set();
+        this._resizeListeners.add(cb);
+        return () => { this._resizeListeners?.delete(cb); };
+    }
+
+    /** @private */
+    _fireResize() {
+        if (!this._resizeListeners) return;
+        for (const cb of this._resizeListeners) { try { cb(this.cols, this.rows); } catch { /* ignore tap errors */ } }
+    }
+
+    /** Set the in-shader identity border (the dock's ghost hue); WHAT shows is driven by setBorderFlag. */
+    setBorder(style = {}) { this._panel?.setBorder(style); }
+
+    /** Flip BORDER_FLAGS bits (DOCKED / HOVERED / FOCUSED / INPUT) on the border. */
+    setBorderFlag(mask, present) { this._panel?.setBorderFlag(mask, present); }
+
+    /** Restyle the focus/hover/input border state colors (shared interaction vocabulary). */
+    setStateColors(colors = {}) { this._panel?.setStateColors(colors); }
+
+    /** Live-restyle the backing panel (color / opacity). */
+    setBackgroundStyle({ color, opacity } = {}) {
+        if (color != null) this._bgColor = color;
+        if (opacity != null) this._bgOpacity = opacity;
+        this._panel?.setFill(this._bgColor, this._bgOpacity);
+    }
+
+    /** @private The flat 'grid'-channel pick target + border carrier, sized to the frame. */
+    _initBackground() {
+        const geometry = new THREE.PlaneGeometry(1, 1);
+        this._panel = createPanelMaterial({ color: this._bgColor, opacity: this._bgOpacity, side: THREE.DoubleSide, depthWrite: true });
+        this._background = new THREE.Mesh(geometry, this._panel.material);
+        this._background.renderOrder = RENDER_ORDER.GRID_BACKGROUND;
+        this._background.userData.entityType = 'frame'; // gesture dispatch resolves background → capture id
+        this.add(this._background);
+        this._updateBackground();
+    }
+
+    /** @private Size + place the backing panel to the frame (centered, just behind the cells). */
+    _updateBackground() {
+        if (!this._background) return;
+        const totalH = this.width / this.aspect;
+        this._background.scale.set(this.width, totalH, 1);
+        this._background.position.set(0, 0, -0.05);
+    }
+
+    /**
+     * Wire the picking system: the cell renderer on the 'glyph' channel (per-cell picks) + the
+     * backing panel on the 'grid' channel (one flat quad → resolves a click to this capture, for
+     * hover / select / Ctrl-drag). Mirrors TerminalGrid.setPickingSystem.
+     */
+    setPickingSystem(pickingSystem) {
+        this._pickingSystem = pickingSystem;
+        if (!pickingSystem) return;
+        if (this._renderer)   pickingSystem.register('glyph', this._renderer, this._renderer);
+        if (this._background) pickingSystem.register('grid', this._background, this);
+    }
+
+    /** @private Re-register the glyph channel after a re-dice changed the cell count. */
+    _reregisterPicking() {
+        if (this._pickingSystem && this._renderer) this._pickingSystem.register('glyph', this._renderer, this._renderer);
+    }
+
     /**
      * Tear down: stop the capture (so the OS stops sharing), drop the texture, remove
      * the renderer mesh, and dispose the geometry. The field material is SHARED across
@@ -305,6 +422,19 @@ class FrameGrid extends THREE.Object3D {
         if (this._texture) {
             this._texture.dispose?.();
             this._texture = null;
+        }
+        // Unregister from picking BEFORE the renderer is torn down (the 'glyph' target is the
+        // renderer; the 'grid' target is the backing panel).
+        if (this._pickingSystem) {
+            if (this._renderer)   this._pickingSystem.unregister('glyph', this._renderer);
+            if (this._background) this._pickingSystem.unregister('grid', this._background);
+        }
+        if (this._background) {
+            this._background.geometry.dispose();
+            this._background.material.dispose();
+            this.remove(this._background);
+            this._background = null;
+            this._panel = null;
         }
         const mesh = this._renderer?.instanceMesh;
         if (mesh) this.remove(mesh);   // mesh is parented here, not the renderer's scene
