@@ -104,13 +104,16 @@ class FrameGrid extends THREE.Object3D {
 
         this._build();
 
-        // Background panel: the flat 'grid'-channel PICK target (a capture has no glyph panel of its
-        // own, so this is how a click resolves to the whole tile) AND the carrier of the in-shader
-        // identity border the dock paints. Sits just behind the cells; sized to the frame.
+        // Backing panel: a TRANSPARENT plane that is the flat 'grid'-channel PICK target (a capture
+        // has no glyph panel, so this is how a click resolves to the whole tile) AND the carrier of
+        // the in-shader identity/hover/dock border. The fill is invisible (opacity 0) — the video
+        // cells ARE the content, so the panel must not darken or occlude them; only the border rim
+        // shows, and only when a state flag is set. Picking reads the ID pass, not the visible
+        // material, so a transparent panel is still fully clickable.
         this._panel = null;
         this._background = null;
         this._bgColor   = options.backgroundColor   ?? 0x0a0a1e;
-        this._bgOpacity = options.backgroundOpacity ?? 0.9;
+        this._bgOpacity = options.backgroundOpacity ?? 0; // transparent fill; border rim still shows
         this._initBackground();
 
         // Reparent the renderer mesh under this Object3D so this.position/scale apply.
@@ -370,7 +373,10 @@ class FrameGrid extends THREE.Object3D {
     /** @private The flat 'grid'-channel pick target + border carrier, sized to the frame. */
     _initBackground() {
         const geometry = new THREE.PlaneGeometry(1, 1);
-        this._panel = createPanelMaterial({ color: this._bgColor, opacity: this._bgOpacity, side: THREE.DoubleSide, depthWrite: true });
+        // depthWrite FALSE: a transparent overlay must not occlude the video cells (or anything
+        // behind), regardless of which face of the capture the viewer sees. (TerminalGrid writes
+        // depth because its panel IS a solid backing; a capture's content is the cells.)
+        this._panel = createPanelMaterial({ color: this._bgColor, opacity: this._bgOpacity, side: THREE.DoubleSide, depthWrite: false });
         this._background = new THREE.Mesh(geometry, this._panel.material);
         this._background.renderOrder = RENDER_ORDER.GRID_BACKGROUND;
         this._background.userData.entityType = 'frame'; // gesture dispatch resolves background → capture id
