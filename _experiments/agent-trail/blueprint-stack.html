@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Agent Trail — blueprint stack</title>
+<style>
+  :root{
+    --bg:#04121e; --sheet:#0a2236; --sheet2:#0c2a44;
+    --grid:rgba(95,165,215,.09); --gridMaj:rgba(95,165,215,.16);
+    --line:#3f86bb; --edge:#1f4d6e;
+    --ink:#d4e9f7; --dim:#7ba6c6; --faint:#456f93;
+    --read:#5aa9e6; --search:#b07fd6; --edit:#e0a85a; --run:#6fbf73; --note:#9fb4c4;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:radial-gradient(120% 90% at 50% 0%, #06182a 0%, var(--bg) 70%);color:var(--ink);font-family:var(--mono)}
+  body{padding:28px 38px 60px;overflow-x:hidden}
+
+  .head{max-width:1180px;margin:0 auto 18px}
+  .head h1{font-size:15px;font-weight:600;letter-spacing:.06em;margin:0 0 5px;text-transform:uppercase}
+  .head p{margin:0;color:var(--dim);font-size:12px;line-height:1.65;max-width:880px}
+  .legend{display:flex;gap:16px;margin-top:12px;flex-wrap:wrap;align-items:center;font-size:11px;color:var(--dim)}
+  .legend .chip{display:flex;gap:6px;align-items:center;letter-spacing:.02em}
+  .legend .dot{width:9px;height:9px;border-radius:2px}
+
+  /* ---- the 3D stack ---- */
+  .stage{ perspective:2100px; perspective-origin:54% 42%; margin-top:8px; }
+  .stack{
+    position:relative; width:920px; height:600px; margin:0 auto;
+    transform-style:preserve-3d;
+    transform:rotateX(7deg) rotateY(-21deg);
+  }
+  .sheet{
+    position:absolute; inset:0; width:920px; height:600px;
+    background-color:var(--sheet);
+    background-image:
+      linear-gradient(var(--gridMaj) 1px, transparent 1px),
+      linear-gradient(90deg, var(--gridMaj) 1px, transparent 1px),
+      linear-gradient(var(--grid) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size: 110px 110px, 110px 110px, 22px 22px, 22px 22px;
+    border:1px solid var(--line);
+    box-shadow: 0 0 0 1px rgba(63,134,187,.15), 0 30px 80px -40px #000;
+    transform-style:preserve-3d;
+  }
+  /* receding turns — each deeper, dimmer, fanned up-right so its edge + title block peek */
+  .s4{ transform:translateZ(-150px) translate(58px,-34px); filter:brightness(.62) saturate(.8); }
+  .s3{ transform:translateZ(-300px) translate(116px,-68px); filter:brightness(.46) saturate(.65); }
+  .s2{ transform:translateZ(-450px) translate(174px,-102px); filter:brightness(.34) saturate(.5); }
+  .s1{ transform:translateZ(-600px) translate(232px,-136px); filter:brightness(.26) saturate(.4); }
+
+  /* corner registration ticks (drafting convention) */
+  .sheet .tick{position:absolute;width:13px;height:13px;border:1px solid var(--line);opacity:.7}
+  .sheet .tick.tl{left:8px;top:8px;border-right:0;border-bottom:0}
+  .sheet .tick.tr{right:8px;top:8px;border-left:0;border-bottom:0}
+  .sheet .tick.bl{left:8px;bottom:8px;border-right:0;border-top:0}
+  .sheet .tick.br{right:8px;bottom:8px;border-left:0;border-top:0}
+
+  /* title block — bottom-right, like a real drawing sheet */
+  .titleblock{position:absolute;right:14px;bottom:14px;border:1px solid var(--line);display:grid;
+    grid-template-columns:auto auto;font-size:10px;letter-spacing:.04em;background:rgba(4,18,30,.6)}
+  .titleblock div{padding:3px 9px;border-top:1px solid var(--edge)}
+  .titleblock div:nth-child(-n+2){border-top:0}
+  .titleblock .k{color:var(--faint);border-right:1px solid var(--edge)}
+  .titleblock .v{color:var(--ink)}
+  .titleblock .big{grid-column:1 / -1;color:var(--line);font-size:12px;font-weight:600;letter-spacing:.12em;text-align:center;border-right:0}
+
+  /* ---- lanes on the front sheet ---- */
+  .lanes{position:absolute;left:26px;right:26px;top:24px;bottom:118px;display:grid;
+    grid-template-columns:1fr 1.15fr 1.5fr;gap:0}
+  .lane{padding:0 16px;border-left:1px dashed var(--edge)}
+  .lane:first-child{border-left:0;padding-left:0}
+  .lanehead{font-size:10px;letter-spacing:.16em;color:var(--faint);text-transform:uppercase;
+    border-bottom:1px solid var(--edge);padding-bottom:5px;margin-bottom:11px}
+
+  .turn-tag{position:absolute;left:26px;top:-2px;transform:translateY(-100%);font-size:11px;
+    letter-spacing:.14em;color:var(--line);text-transform:uppercase}
+
+  /* dialogue lane */
+  .msg{margin-bottom:10px;font-size:11.5px;line-height:1.5}
+  .msg .who{font-size:9.5px;letter-spacing:.1em;color:var(--faint);text-transform:uppercase;display:block;margin-bottom:2px}
+  .msg.user .who{color:var(--note)} .msg.agent .who{color:var(--read)}
+  .msg .body{color:var(--ink)}
+
+  /* action lane */
+  .act{display:flex;gap:8px;align-items:baseline;font-size:11.5px;margin-bottom:9px;padding:4px 7px;
+    border:1px solid var(--edge);border-left-width:2px;background:rgba(8,30,48,.5)}
+  .act .verb{font-size:9.5px;letter-spacing:.08em;font-weight:600;flex:0 0 auto;width:42px}
+  .act .arg{color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .act.read{border-left-color:var(--read)} .act.read .verb{color:var(--read)}
+  .act.search{border-left-color:var(--search)} .act.search .verb{color:var(--search)}
+  .act.edit{border-left-color:var(--edit)} .act.edit .verb{color:var(--edit)}
+  .act.run{border-left-color:var(--run)} .act.run .verb{color:var(--run)}
+
+  /* artifact lane */
+  .art{border:1px solid var(--edge);border-left-width:2px;margin-bottom:9px;background:rgba(6,24,40,.6)}
+  .art .bar{display:flex;justify-content:space-between;font-size:9.5px;color:var(--dim);padding:3px 8px;border-bottom:1px solid var(--edge)}
+  .art .bar .nm{color:var(--ink)}
+  .art .code{font-size:9.5px;line-height:1.45;padding:5px 8px;white-space:pre;overflow:hidden;color:#9fc0d8}
+  .art .code .hl{background:rgba(90,169,230,.16);box-shadow:inset 2px 0 0 var(--read);display:block}
+  .art.read{border-left-color:var(--read)} .art.search{border-left-color:var(--search)}
+  .art.edit{border-left-color:var(--edit)} .art.run{border-left-color:var(--run)}
+  .art .add{color:#a9e3ad} .art .del{color:#e7a9af} .art .pass{color:var(--run)}
+
+  .conn{position:fixed;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:50}
+
+  .foot{max-width:1180px;margin:26px auto 0;color:var(--dim);font-size:11.5px;line-height:1.7}
+  .foot b{color:var(--ink);font-weight:600}
+  .foot .keycap{color:var(--line);border:1px solid var(--edge);border-radius:3px;padding:0 5px}
+</style>
+</head>
+<body>
+  <div class="head">
+    <h1>Agent Trail — blueprint stack</h1>
+    <p>Each <b style="color:var(--ink)">turn is one blueprint sheet</b>; its inputs · actions · outputs are organized into lanes on the sheet, with actions tethered to the data they produced. New turns <b style="color:var(--ink)">stack in depth</b> — append front or back, like a chat thread's top/bottom. You read the front sheet; the history recedes behind it, edges and title-blocks peeking. Fly to a sheet to read it.</p>
+    <div class="legend">
+      <span class="chip"><span class="dot" style="background:var(--read)"></span>read</span>
+      <span class="chip"><span class="dot" style="background:var(--search)"></span>search</span>
+      <span class="chip"><span class="dot" style="background:var(--edit)"></span>edit</span>
+      <span class="chip"><span class="dot" style="background:var(--run)"></span>run</span>
+      <span class="chip" style="color:var(--faint)">— lanes are a convenient organizer; what's on a sheet is otherwise arbitrary —</span>
+    </div>
+  </div>
+
+  <div class="stage">
+    <div class="stack" id="stack">
+      <!-- receding turns: deepest first so the front paints last -->
+      <div class="sheet s1"><span class="tick tl"></span><span class="tick tr"></span><span class="tick bl"></span><span class="tick br"></span>
+        <div class="titleblock"><div class="big">TURN 02</div><div class="k">agent</div><div class="v">dev</div></div></div>
+      <div class="sheet s2"><span class="tick tl"></span><span class="tick tr"></span><span class="tick bl"></span><span class="tick br"></span>
+        <div class="titleblock"><div class="big">TURN 03</div><div class="k">agent</div><div class="v">dev</div></div></div>
+      <div class="sheet s3"><span class="tick tl"></span><span class="tick tr"></span><span class="tick bl"></span><span class="tick br"></span>
+        <div class="titleblock"><div class="big">TURN 04</div><div class="k">agent</div><div class="v">dev</div></div></div>
+      <div class="sheet s4"><span class="tick tl"></span><span class="tick tr"></span><span class="tick bl"></span><span class="tick br"></span>
+        <div class="titleblock"><div class="big">TURN 05</div><div class="k">agent</div><div class="v">dev</div></div></div>
+
+      <!-- FRONT sheet: fully laid out -->
+      <div class="sheet front" id="front">
+        <span class="tick tl"></span><span class="tick tr"></span><span class="tick bl"></span><span class="tick br"></span>
+        <div class="lanes">
+          <div class="lane">
+            <div class="turn-tag">Turn 06</div>
+            <div class="lanehead">① input · dialogue</div>
+            <div class="msg user"><span class="who">user</span><span class="body">Caret lands one glyph off on wrapped lines. Find &amp; fix.</span></div>
+            <div class="msg agent"><span class="who">claude</span><span class="body">Tracing the click→caret path; smells like a visible-col vs slot ruler mismatch.</span></div>
+            <div class="msg agent"><span class="who">claude</span><span class="body">Found it — the click path reads the visible ruler, not the slot ruler. Patching.</span></div>
+          </div>
+
+          <div class="lane">
+            <div class="lanehead">② actions</div>
+            <div class="act read" data-pair="a"><span class="verb">READ</span><span class="arg">CodeGrid.js</span></div>
+            <div class="act search" data-pair="b"><span class="verb">GREP</span><span class="arg">"visibleCol"</span></div>
+            <div class="act edit" data-pair="c"><span class="verb">EDIT</span><span class="arg">CodeGrid.js</span></div>
+            <div class="act run" data-pair="d"><span class="verb">RUN</span><span class="arg">caret.itest.mjs</span></div>
+          </div>
+
+          <div class="lane">
+            <div class="lanehead">③ outputs · artifacts</div>
+            <div class="art read" data-pair="a">
+              <div class="bar"><span class="nm">CodeGrid.js</span><span>L612–615</span></div>
+              <div class="code">  const line = this._lineAtY(p.y);
+<span class="hl">  const col  = this._visibleColAtX(p.x);</span>
+<span class="hl">  // BUG: visible col ≠ buffer slot</span>
+  return this.charForSlot(line, col);</div>
+            </div>
+            <div class="art search" data-pair="b">
+              <div class="bar"><span class="nm">grep "visibleCol"</span><span>4 hits</span></div>
+              <div class="code">CodeGrid.js:612  _visibleColAtX(...)
+SemanticModel.js:91  slot===codepoint
+layout/Ruler.js:33   visibleCol(line,x)</div>
+            </div>
+            <div class="art edit" data-pair="c">
+              <div class="bar"><span class="nm">CodeGrid.js</span><span>+2 −1</span></div>
+              <div class="code"><span class="del">- const col = this._visibleColAtX(p.x);</span>
+<span class="add">+ const vc  = this._visibleColAtX(p.x);</span>
+<span class="add">+ const col = this.semantic.slotFromVisibleCol(line, vc);</span></div>
+            </div>
+            <div class="art run" data-pair="d">
+              <div class="bar"><span class="nm">stdout</span><span>exit 0</span></div>
+              <div class="code">click→caret · wrapped .... ok
+click→caret · RTL ........ ok
+<span class="pass">5 passing (1.2s)</span></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="titleblock">
+          <div class="big">TURN 06</div>
+          <div class="k">agent</div><div class="v">dev</div>
+          <div class="k">time</div><div class="v">12:24:07</div>
+          <div class="k">scope</div><div class="v">4 act · 4 art</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <svg class="conn" id="conn"></svg>
+
+  <div class="foot">
+    <b>The marriage:</b> the 3-lane layout is the <i>content of one sheet</i>; the stack is <i>turns over time</i>. Append direction is a knob —
+    <span class="keycap">front</span> (newest toward you, history recedes) or <span class="keycap">back</span> (newest deepest, you fly forward through it).
+    What lands on a sheet is arbitrary; lanes just keep it legible.
+  </div>
+
+<script>
+  // tethers: action (②) → its artifact (③), on the front sheet, in screen space.
+  // The sheet is 3D-transformed, but getBoundingClientRect returns the PROJECTED
+  // boxes, so a screen-space overlay still lines the connectors up with the skew.
+  const HUE = { a:'#5aa9e6', b:'#b07fd6', c:'#e0a85a', d:'#6fbf73' };
+  function draw(){
+    const svg = document.getElementById('conn');
+    svg.innerHTML='';
+    document.querySelectorAll('.act[data-pair]').forEach(act=>{
+      const art = document.querySelector('.art[data-pair="'+act.dataset.pair+'"]');
+      if(!art) return;
+      const a = act.getBoundingClientRect(), b = art.getBoundingClientRect();
+      const x1 = a.right, y1 = a.top + a.height/2;
+      const x2 = b.left,  y2 = b.top + 12;
+      const dx = Math.max(24,(x2-x1)*0.5);
+      const d = `M ${x1} ${y1} C ${x1+dx} ${y1}, ${x2-dx} ${y2}, ${x2} ${y2}`;
+      svg.appendChild(path(d, HUE[act.dataset.pair], 3.5, .14));
+      svg.appendChild(path(d, HUE[act.dataset.pair], 1.2, .9));
+      svg.appendChild(dot(x1,y1,HUE[act.dataset.pair]));
+      svg.appendChild(dot(x2,y2,HUE[act.dataset.pair]));
+    });
+  }
+  function path(d,s,w,o){const p=document.createElementNS('http://www.w3.org/2000/svg','path');
+    p.setAttribute('d',d);p.setAttribute('fill','none');p.setAttribute('stroke',s);
+    p.setAttribute('stroke-width',w);p.setAttribute('stroke-opacity',o);p.setAttribute('stroke-linecap','round');return p;}
+  function dot(x,y,f){const c=document.createElementNS('http://www.w3.org/2000/svg','circle');
+    c.setAttribute('cx',x);c.setAttribute('cy',y);c.setAttribute('r',2.4);c.setAttribute('fill',f);return c;}
+  window.addEventListener('resize',draw); window.addEventListener('load',draw); draw();
+</script>
+</body>
+</html>

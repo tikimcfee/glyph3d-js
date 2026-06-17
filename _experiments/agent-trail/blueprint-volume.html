@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Agent Trail — blueprint volume</title>
+<style>
+  :root{
+    --bg:#04121e; --sheet:#0a2236; --grid:rgba(95,165,215,.07); --gridMaj:rgba(95,165,215,.13);
+    --line:#3f86bb; --edge:#1f4d6e;
+    --ink:#d4e9f7; --dim:#7ba6c6; --faint:#456f93;
+    --read:#5aa9e6; --search:#b07fd6; --edit:#e0a85a; --run:#6fbf73; --note:#9fb4c4;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:radial-gradient(130% 90% at 46% 4%, #06182a 0%, var(--bg) 72%);color:var(--ink);font-family:var(--mono)}
+  body{padding:26px 36px 40px;overflow-x:hidden}
+
+  .head{max-width:1240px;margin:0 auto 16px}
+  .head h1{font-size:15px;font-weight:600;letter-spacing:.06em;margin:0 0 5px;text-transform:uppercase}
+  .head p{margin:0;color:var(--dim);font-size:12px;line-height:1.65;max-width:980px}
+  .head b{color:var(--ink);font-weight:600}
+  .legend{display:flex;gap:15px;margin-top:11px;flex-wrap:wrap;align-items:center;font-size:11px;color:var(--dim)}
+  .legend .chip{display:flex;gap:6px;align-items:center}
+  .legend .dot{width:9px;height:9px;border-radius:2px}
+
+  .stage{ perspective:2300px; perspective-origin:50% 42%; height:680px; }
+  .cell{
+    position:relative; width:1180px; height:620px; margin:0 auto;
+    transform-style:preserve-3d; transform:rotateX(5deg) rotateY(-22deg) translateZ(120px);
+  }
+  .layer{ position:absolute; transform-style:preserve-3d; }
+
+  /* the blueprint is the BACK WALL of the volume — everything floats in front of it,
+     so nothing is clipped by a front plane. */
+  .backwall{
+    left:0; top:0; width:1180px; height:620px;
+    background-color:var(--sheet);
+    background-image:
+      linear-gradient(var(--gridMaj) 1px,transparent 1px),
+      linear-gradient(90deg,var(--gridMaj) 1px,transparent 1px),
+      linear-gradient(var(--grid) 1px,transparent 1px),
+      linear-gradient(90deg,var(--grid) 1px,transparent 1px);
+    background-size:88px 88px,88px 88px,22px 22px,22px 22px;
+    border:1px solid var(--line);
+  }
+  .tick{position:absolute;width:14px;height:14px;border:1px solid var(--line);opacity:.7}
+  .tick.tl{left:8px;top:8px;border-right:0;border-bottom:0}.tick.tr{right:8px;top:8px;border-left:0;border-bottom:0}
+  .tick.bl{left:8px;bottom:8px;border-right:0;border-top:0}.tick.br{right:8px;bottom:8px;border-left:0;border-top:0}
+  .turn-tag{position:absolute;left:18px;top:14px;font-size:12px;letter-spacing:.16em;color:var(--line);text-transform:uppercase}
+  .titleblock{position:absolute;right:16px;bottom:16px;border:1px solid var(--line);display:grid;
+    grid-template-columns:auto auto;font-size:10px;letter-spacing:.04em;background:rgba(4,18,30,.55)}
+  .titleblock div{padding:3px 9px;border-top:1px solid var(--edge)} .titleblock div:nth-child(-n+2){border-top:0}
+  .titleblock .k{color:var(--faint);border-right:1px solid var(--edge)} .titleblock .v{color:var(--ink)}
+  .titleblock .big{grid-column:1/-1;color:var(--line);font-size:12px;font-weight:600;letter-spacing:.12em;text-align:center;border-right:0}
+
+  .lanehead{font-size:10px;letter-spacing:.15em;color:var(--faint);text-transform:uppercase;border-bottom:1px solid var(--edge);padding-bottom:5px;margin-bottom:10px}
+
+  /* ① dialogue — floats near the front-left */
+  .dialogue{left:24px;top:70px;width:286px;}
+  .msg{margin-bottom:9px;font-size:11px;line-height:1.5}
+  .msg .who{font-size:9px;letter-spacing:.1em;color:var(--faint);text-transform:uppercase;display:block;margin-bottom:1px}
+  .msg.user .who{color:var(--note)} .msg.agent .who{color:var(--read)} .msg .body{color:var(--ink)}
+  .dialogue, .msg{background:rgba(5,20,33,.55)}
+
+  /* ② action spine — a gentle fan boring into the volume */
+  .spinehead{left:352px;top:62px}
+  .chip{
+    left:352px; width:228px; padding:5px 9px; background:rgba(8,30,48,.95);
+    border:1px solid var(--edge); border-left-width:2px; font-size:11px; display:flex; gap:8px; align-items:baseline;
+  }
+  .chip .verb{font-size:9px;letter-spacing:.08em;font-weight:600;width:38px;flex:0 0 auto}
+  .chip .arg{color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .chip.read{border-left-color:var(--read)} .chip.read .verb{color:var(--read)}
+  .chip.search{border-left-color:var(--search)} .chip.search .verb{color:var(--search)}
+  .chip.edit{border-left-color:var(--edit)} .chip.edit .verb{color:var(--edit)}
+  .chip.run{border-left-color:var(--run)} .chip.run .verb{color:var(--run)}
+  .more{left:352px;width:228px;padding:6px 9px;border:1px dashed var(--faint);color:var(--dim);
+    font-size:10.5px;text-align:center;letter-spacing:.06em;background:rgba(4,18,30,.75)}
+
+  /* ③ full-file artifacts — fan open TOWARD the viewer (counter-rotated), z-ordered */
+  .file{ width:330px; background:rgba(7,26,42,.97); border:1px solid var(--edge); border-left-width:2px;
+    box-shadow:0 18px 50px -28px #000; }
+  .file.read{border-left-color:var(--read)} .file.search{border-left-color:var(--search)}
+  .file.edit{border-left-color:var(--edit)} .file.run{border-left-color:var(--run)}
+  .file .bar{display:flex;justify-content:space-between;font-size:9.5px;color:var(--dim);padding:3px 9px;border-bottom:1px solid var(--edge)}
+  .file .bar .nm{color:var(--ink)} .file .bar .badge{color:var(--line)}
+  .file .code{font-size:8.5px;line-height:1.5;padding:5px 9px;white-space:pre;overflow:hidden;color:#9fc0d8;max-height:340px}
+  .file .code .hl{background:rgba(90,169,230,.15);box-shadow:inset 2px 0 0 var(--read);display:block}
+  .file .add{color:#a9e3ad}.file .del{color:#e7a9af}.file .pass{color:var(--run)}
+  .file .fold{margin-top:4px;padding-top:4px;border-top:1px dashed var(--edge);color:var(--faint);font-size:8.5px;white-space:normal}
+
+  .conn{position:fixed;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:60}
+
+  .foot{max-width:1240px;margin:18px auto 0;color:var(--dim);font-size:11.5px;line-height:1.7}
+  .foot b{color:var(--ink)} .foot .q{color:var(--line)}
+</style>
+</head>
+<body>
+  <div class="head">
+    <h1>Agent Trail — blueprint volume (a turn is a stackable element of elements)</h1>
+    <p>One turn = one sheet, with <b>volume</b>. The blueprint is the volume's <b>back wall</b>; ① dialogue, ② actions, ③ files all float <b>in front</b> of it — hung in space, no front plane clipping anything. A single input can fire hundreds of actions, so the <b>action spine fans into depth</b> ("+184 more" is just further back, not truncated), and each action's <b>full file</b> (real framed/z-page layout, not a snippet) hangs in the volume, <b>counter-rotated to face you</b> and z-ordered so they fan open. Depth is the budget that replaces scroll &amp; collapse.</p>
+    <div class="legend">
+      <span class="chip"><span class="dot" style="background:var(--read)"></span>read</span>
+      <span class="chip"><span class="dot" style="background:var(--search)"></span>search</span>
+      <span class="chip"><span class="dot" style="background:var(--edit)"></span>edit</span>
+      <span class="chip"><span class="dot" style="background:var(--run)"></span>run</span>
+    </div>
+  </div>
+
+  <div class="stage">
+    <div class="cell">
+      <!-- BACK WALL: the blueprint, deepest; everything else floats in front of it -->
+      <div class="layer backwall" style="transform:translateZ(-560px)">
+        <span class="tick tl"></span><span class="tick tr"></span><span class="tick bl"></span><span class="tick br"></span>
+        <div class="turn-tag">Turn 06 — "fix the visible-col ruler everywhere"</div>
+        <div class="titleblock">
+          <div class="big">TURN 06</div>
+          <div class="k">agent</div><div class="v">dev</div>
+          <div class="k">actions</div><div class="v">190</div>
+          <div class="k">elapsed</div><div class="v">4m 12s</div>
+        </div>
+      </div>
+
+      <!-- ① dialogue (floats near front-left) -->
+      <div class="layer dialogue" style="transform:translateZ(-30px)">
+        <div class="lanehead">① dialogue</div>
+        <div class="msg user"><span class="who">user</span><span class="body">The visible-col→slot mismatch is everywhere. Audit the repo and fix all of it.</span></div>
+        <div class="msg agent"><span class="who">claude</span><span class="body">Found 190 call sites. Reading the ruler, then patching each grid + the semantic map.</span></div>
+        <div class="msg agent"><span class="who">claude</span><span class="body">Patched 23 files; itests green. Slot-true caret + highlight in every layout.</span></div>
+      </div>
+
+      <!-- ② action spine — fans down-right INTO depth -->
+      <div class="layer spinehead" style="transform:translateZ(-30px)"><div class="lanehead">② actions ↘ depth</div></div>
+      <div class="layer chip read"   style="transform:translate3d(0,30px,-40px)">                        <span class="verb">READ</span><span class="arg">layout/Ruler.js</span></div>
+      <div class="layer chip search" style="transform:translate3d(8px,86px,-128px);filter:brightness(.92)"><span class="verb">GREP</span><span class="arg">"visibleCol" · 190 hits</span></div>
+      <div class="layer chip edit"   style="transform:translate3d(16px,142px,-216px);filter:brightness(.82)"><span class="verb">EDIT</span><span class="arg">CodeGrid.js</span></div>
+      <div class="layer chip edit"   style="transform:translate3d(24px,198px,-304px);filter:brightness(.7)"> <span class="verb">EDIT</span><span class="arg">SemanticModel.js</span></div>
+      <div class="layer chip edit"   style="transform:translate3d(32px,254px,-392px);filter:brightness(.58)"><span class="verb">EDIT</span><span class="arg">TerminalGrid.js</span></div>
+      <div class="layer chip run"    style="transform:translate3d(40px,310px,-480px);filter:brightness(.48)"><span class="verb">RUN</span><span class="arg">caret.itest.mjs</span></div>
+      <div class="layer more"        style="transform:translate3d(50px,364px,-540px);filter:brightness(.42)">↘ +184 more, ordered into depth</div>
+
+      <!-- ③ full-file artifacts — fan open toward the viewer; focused one forward & largest -->
+      <div class="layer file run"  style="transform:translate3d(906px,176px,-470px) rotateY(34deg);filter:brightness(.5)">
+        <div class="bar"><span class="nm">stdout</span><span class="badge">exit 0</span></div>
+        <div class="code">caret · wrapped ... ok
+caret · RTL ....... ok
+<span class="pass">190/190 passing</span></div>
+      </div>
+      <div class="layer file edit" style="transform:translate3d(862px,132px,-330px) rotateY(31deg);filter:brightness(.64)">
+        <div class="bar"><span class="nm">SemanticModel.js</span><span class="badge">+4 −2</span></div>
+        <div class="code"><span class="del">- return this._slotMap[line].at(vc)</span>
+<span class="add">+ return this.ruler.slotAt(line, vc)</span>
+  // canonical: slot === codepoint</div>
+      </div>
+      <div class="layer file edit" style="transform:translate3d(812px,92px,-190px) rotateY(28deg);filter:brightness(.82)">
+        <div class="bar"><span class="nm">CodeGrid.js</span><span class="badge">+2 −1 · L612</span></div>
+        <div class="code"><span class="del">- const col = this._visibleColAtX(p.x)</span>
+<span class="add">+ const vc  = this._visibleColAtX(p.x)</span>
+<span class="add">+ const col = this.semantic.slotFromVisibleCol(line,vc)</span></div>
+      </div>
+      <!-- ACTIVE / focused artifact: a FULL framed file, forward and face-on -->
+      <div class="layer file read" style="transform:translate3d(742px,48px,-30px) rotateY(25deg)">
+        <div class="bar"><span class="nm">layout/Ruler.js</span><span class="badge">▤ L1–28 / 612 · framed</span></div>
+        <div class="code">export class Ruler {
+  // visible col ↔ buffer slot, layout-aware
+  constructor(metrics, slotMap) {
+    this.metrics = metrics
+    this.slotMap = slotMap
+  }
+<span class="hl">  slotAt(line, visibleCol) {</span>
+<span class="hl">    // THE canonical mapping every</span>
+<span class="hl">    // caller must funnel through</span>
+<span class="hl">    return this.slotMap[line].at(visibleCol)</span>
+  }
+  visibleCol(line, x) {
+    let acc = 0, col = 0
+    for (const w of this.widths[line]) {
+      if (acc + w/2 > x) break
+      acc += w; col++
+    }
+    return col
+  }
+  widthAt(line, col) {
+    return this.widths[line][col] ?? this.metrics.advance
+  }
+  rowOf(line) { return this.startRow[line] }
+        <div class="fold">⠿ z-page fold · 584 more lines recede behind this frame — fly in to scroll / unwrap</div></div>
+      </div>
+    </div>
+  </div>
+
+  <svg class="conn" id="conn"></svg>
+
+  <div class="foot">
+    <b>What changed:</b> blueprint is now the back wall, contents hang in front (no front-plane clipping), files counter-rotated to face you.
+    <br><span class="q">Still open:</span> spine as straight bore vs. the gentle fan shown · artifact fan keyed to the <b>focused</b> action (fly the spine → that file comes forward, others recede) · turn-to-turn seam: butt edge-to-edge or slight overlap.
+  </div>
+
+<script>
+  const HUE={read:'#5aa9e6',search:'#b07fd6',edit:'#e0a85a',run:'#6fbf73'};
+  function draw(){
+    const svg=document.getElementById('conn'); svg.innerHTML='';
+    document.querySelectorAll('.file').forEach(f=>delete f.dataset.used);
+    [...document.querySelectorAll('.chip')].forEach(chip=>{
+      const kind=[...chip.classList].find(c=>HUE[c]); if(!kind) return;
+      const file=[...document.querySelectorAll('.file.'+kind)].find(f=>!f.dataset.used);
+      if(!file) return; file.dataset.used='1';
+      const a=chip.getBoundingClientRect(), b=file.getBoundingClientRect();
+      const x1=a.right,y1=a.top+a.height/2, x2=b.left+6,y2=b.top+11;
+      const dx=Math.max(30,(x2-x1)*0.42);
+      const d=`M ${x1} ${y1} C ${x1+dx} ${y1}, ${x2-dx} ${y2}, ${x2} ${y2}`;
+      svg.appendChild(path(d,HUE[kind],3,.12)); svg.appendChild(path(d,HUE[kind],1.1,.85));
+      svg.appendChild(dot(x1,y1,HUE[kind])); svg.appendChild(dot(x2,y2,HUE[kind]));
+    });
+  }
+  function path(d,s,w,o){const p=document.createElementNS('http://www.w3.org/2000/svg','path');
+    p.setAttribute('d',d);p.setAttribute('fill','none');p.setAttribute('stroke',s);p.setAttribute('stroke-width',w);
+    p.setAttribute('stroke-opacity',o);p.setAttribute('stroke-linecap','round');return p;}
+  function dot(x,y,f){const c=document.createElementNS('http://www.w3.org/2000/svg','circle');
+    c.setAttribute('cx',x);c.setAttribute('cy',y);c.setAttribute('r',2.3);c.setAttribute('fill',f);return c;}
+  window.addEventListener('resize',draw); window.addEventListener('load',draw); draw();
+</script>
+</body>
+</html>
