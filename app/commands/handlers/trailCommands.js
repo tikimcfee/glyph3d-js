@@ -44,6 +44,7 @@ export default function registerTrailCommands(router) {
         const [key, val] = args;
         const n = Number(val);
         t.cfg[key] = Number.isFinite(n) ? n : val;
-        return { text: `OK: trail.${key} = ${t.cfg[key]} (applies to new cards)`, data: { [key]: t.cfg[key] } };
-    }, { description: 'Get or set a trail layout constant (applies to new cards)', usage: '[key value]' });
+        t._relayout?.();   // re-flow the existing trail immediately
+        return { text: `OK: trail.${key} = ${t.cfg[key]} (re-flowed)`, data: { [key]: t.cfg[key] } };
+    }, { description: 'Get or set a trail layout constant — re-flows the trail live', usage: '[key value]' });
 }

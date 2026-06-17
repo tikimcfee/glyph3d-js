@@ -64,6 +64,13 @@ const topLeft = (w, h) => { const o = new THREE.Object3D(); o.layoutBounds = () 
     check('nested centers both columns', approx(big.position.x, 0) && approx(inner.position.x, 0), [big.position.x, inner.position.x]);
 }
 
+// 5b — reverse: last-added child takes the front slot (newest-in-front deck)
+{
+    const a = mock(10, 4), b = mock(10, 4), c = mock(10, 4);
+    ZStack({ spacing: 0, zStep: 2, reverse: true, children: [a, b, c] }).layout();
+    check('ZStack reverse newest-front (c=0,a=-4)', approx(c.position.z, 0) && approx(b.position.z, -2) && approx(a.position.z, -4), [a.position.z, b.position.z, c.position.z]);
+}
+
 // 6 — scale is read: a 2× child occupies 2× the main extent
 {
     const a = mock(10, 4); a.scale.setScalar(2);

@@ -76,6 +76,8 @@ export default class StackContainer extends THREE.Object3D {
      * @param {number} [opts.align] in-plane cross-axis fraction [0,1] (default per axis)
      * @param {number} [opts.depthAlign] out-of-plane cross-axis fraction [0,1] (default per axis)
      * @param {number} [opts.zStep=0] ZStack-only: extra per-index depth pitch beyond spacing
+     * @param {boolean} [opts.reverse=false] fill from the far end — last child takes the first slot
+     *   (front of a ZStack deck / bottom of a VStack), so appending puts newest in front
      * @param {boolean} [opts.resetRotation=true] reset each child's rotation to identity on place
      * @param {Object} [opts.animator] optional SpatialAnimator — eases children to targets instead of snapping
      * @param {THREE.Object3D[]} [opts.children] children to add immediately
@@ -92,6 +94,7 @@ export default class StackContainer extends THREE.Object3D {
         this.align = clamp01(opts.align ?? defaultAlign(A.cross));
         this.depthAlign = clamp01(opts.depthAlign ?? defaultAlign(A.depth));
         this.resetRotation = opts.resetRotation !== false;
+        this.reverse = !!opts.reverse;
         this.animator = opts.animator || null;
 
         this._box = new THREE.Box3().makeEmpty();
@@ -136,21 +139,29 @@ export default class StackContainer extends THREE.Object3D {
         const depthMax = Math.max(...boxes.map((b) => ext(b, depth)));
         const pitch = this.spacing + this.zStep;   // ZStack deck pitch
 
+        // sequence order along the main axis (reverse → last child takes the first slot).
+        const N = kids.length;
+        const seq = this.reverse
+            ? Array.from({ length: N }, (_, k) => N - 1 - k)
+            : Array.from({ length: N }, (_, k) => k);
+
         // main-axis cursor start: X rows center on origin; Y columns start at the top (0).
         let cursor = this.axis === 'x'
-            ? -(boxes.reduce((s, b) => s + ext(b, main), 0) + this.spacing * (kids.length - 1)) / 2
+            ? -(boxes.reduce((s, b) => s + ext(b, main), 0) + this.spacing * (N - 1)) / 2
             : 0;
 
-        const targets = kids.map((c, i) => {
-            const b = boxes[i];
+        const targets = new Array(N);
+        for (let k = 0; k < N; k++) {
+            const idx = seq[k];
+            const b = boxes[idx];
             const p = { x: 0, y: 0, z: 0 };
             if (this.axis === 'x') { p.x = cursor - b.min.x; cursor += ext(b, 'x') + this.spacing; }
             else if (this.axis === 'y') { p.y = cursor - b.max.y; cursor -= ext(b, 'y') + this.spacing; }
-            else { p.z = -i * pitch - b.max.z; }   // deck: front near 0, recedes −Z
+            else { p.z = -k * pitch - b.max.z; }   // deck: slot k recedes −Z (k follows the sequence)
             p[cross] = alignCoord(cross, this.align, crossMax, b);
             p[depth] = alignCoord(depth, this.depthAlign, depthMax, b);
-            return p;
-        });
+            targets[idx] = p;
+        }
 
         // place
         kids.forEach((c, i) => {
