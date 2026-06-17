@@ -870,6 +870,9 @@ func RunServer(cfg ServerConfig) error {
 	log.Printf("[glyph3d] App:     %s", cfg.StaticTag)
 	if cfg.FSHandler != nil {
 		log.Printf("[glyph3d] Project: %s", cfg.FSHandler.root)
+		if len(cfg.FSHandler.extraRoots) > 0 {
+			log.Printf("[glyph3d] Reach:   %s", strings.Join(cfg.FSHandler.extraRoots, "  "))
+		}
 	}
 	log.Printf("[glyph3d] ──────────────────────────────────────")
 	log.Printf("[glyph3d]   http://localhost:%d/", cfg.Port)

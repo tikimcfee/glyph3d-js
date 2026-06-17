@@ -338,6 +338,17 @@ func isInteractive() bool {
 	return fi.Mode()&os.ModeCharDevice != 0
 }
 
+// stringListFlag collects a repeatable string flag (e.g. --reach /a --reach /b)
+// into a slice. Implements flag.Value.
+type stringListFlag []string
+
+func (s *stringListFlag) String() string { return strings.Join(*s, ",") }
+
+func (s *stringListFlag) Set(v string) error {
+	*s = append(*s, v)
+	return nil
+}
+
 // serveCmd runs the unified HTTP + WebSocket server.
 //
 // The positional argument is the project directory to browse (default: cwd).
@@ -356,6 +367,8 @@ func serveCmd() {
 	listen := flagSet.String("listen", "0.0.0.0", "Address to listen on")
 	local := flagSet.Bool("local", false, "Serve IDE app from disk instead of embedded (dev mode)")
 	relayOnly := flagSet.Bool("relay-only", false, "WebSocket relay only, no static files")
+	var reach stringListFlag
+	flagSet.Var(&reach, "reach", "Extra directory the relay may read/write outside the project root (repeatable). Temp dirs are always reachable.")
 	flagSet.Parse(os.Args[2:])
 
 	// Project path: positional arg or cwd
@@ -366,7 +379,7 @@ func serveCmd() {
 
 	// Legacy relay-only mode
 	if *relayOnly {
-		fsHandler, err := NewFSHandler(projectPath)
+		fsHandler, err := NewFSHandler(projectPath, reach)
 		if err != nil {
 			log.Fatalf("[relay] project path: %v", err)
 		}
@@ -377,7 +390,7 @@ func serveCmd() {
 	}
 
 	// Filesystem access: always on, rooted at the project path
-	fsHandler, err := NewFSHandler(projectPath)
+	fsHandler, err := NewFSHandler(projectPath, reach)
 	if err != nil {
 		log.Fatalf("[serve] project path: %v", err)
 	}

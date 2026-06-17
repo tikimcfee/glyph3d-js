@@ -291,6 +291,14 @@ type writeFn func(data []byte)
 type FSHandler struct {
 	root string // absolute path, symlinks resolved
 
+	// extraRoots are additional absolute, symlink-resolved directories the
+	// handler may reach OUTSIDE the project root — the agent-scratch hatch.
+	// Defaults to the temp dirs (/tmp, /var/tmp, $TMPDIR) so a file an agent
+	// drops in /tmp can be pulled up and rendered; widened by the --reach flag.
+	// resolvePath treats a path as reachable when it lands under root OR any of
+	// these. See resolvePath for the precedence rules.
+	extraRoots []string
+
 	// notify, if non-nil, is called on successful fs/writeFile to push an
 	// fs/didChange JSON-RPC notification to the display. Wired by RunServer
 	// / RunRelay to relay.NotifyDisplayRPC — this is the save-confirm round
@@ -304,9 +312,12 @@ func (h *FSHandler) SetNotifyHook(fn func(method string, params any)) {
 	h.notify = fn
 }
 
-// NewFSHandler creates a handler rooted at the given directory.
-// Returns an error if the path doesn't exist or isn't a directory.
-func NewFSHandler(root string) (*FSHandler, error) {
+// NewFSHandler creates a handler rooted at the given directory. The optional
+// reach paths are extra directories the handler may read/write outside the
+// project root (operator-supplied via --reach); the system temp dirs are always
+// included so agent scratch in /tmp is reachable. Returns an error if root
+// doesn't exist or isn't a directory.
+func NewFSHandler(root string, reach []string) (*FSHandler, error) {
 	abs, err := filepath.Abs(root)
 	if err != nil {
 		return nil, fmt.Errorf("resolve root: %w", err)
@@ -322,7 +333,78 @@ func NewFSHandler(root string) (*FSHandler, error) {
 	if !info.IsDir() {
 		return nil, fmt.Errorf("root is not a directory: %s", resolved)
 	}
-	return &FSHandler{root: resolved}, nil
+
+	// Temp dirs are reachable by default (the motivating case: agents writing
+	// scratch to /tmp). os.TempDir honors $TMPDIR/$TMP/$TEMP. Append any
+	// operator-supplied roots, resolve + dedupe, and drop ones already covered
+	// by the project root so underAnyRoot stays cheap.
+	candidates := append([]string{os.TempDir(), "/tmp", "/var/tmp"}, reach...)
+	extra := make([]string, 0, len(candidates))
+	seen := map[string]bool{resolved: true}
+	for _, c := range candidates {
+		r := evalRootOrEmpty(c)
+		if r == "" || seen[r] || isUnder(r, resolved) {
+			continue
+		}
+		seen[r] = true
+		extra = append(extra, r)
+	}
+
+	return &FSHandler{root: resolved, extraRoots: extra}, nil
+}
+
+// evalRootOrEmpty resolves a candidate reach directory to its absolute,
+// symlink-free form, or "" if it can't be resolved (doesn't exist / not a dir).
+// Resolving symlinks here matters so the prefix check in underAnyRoot lines up
+// with resolvePath's symlink-resolved targets (e.g. macOS /tmp → /private/tmp).
+func evalRootOrEmpty(p string) string {
+	if p == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return ""
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return ""
+	}
+	if info, err := os.Stat(resolved); err != nil || !info.IsDir() {
+		return ""
+	}
+	return resolved
+}
+
+// isUnder reports whether path is root itself or lives beneath it. The
+// separator-boundary check stops "/a/b" from matching sibling "/a/bc".
+func isUnder(path, root string) bool {
+	if path == root {
+		return true
+	}
+	return strings.HasPrefix(path, root+string(filepath.Separator))
+}
+
+// underAnyRoot reports whether path is reachable — under the project root or any
+// extra reach root.
+func (h *FSHandler) underAnyRoot(path string) bool {
+	if isUnder(path, h.root) {
+		return true
+	}
+	for _, r := range h.extraRoots {
+		if isUnder(path, r) {
+			return true
+		}
+	}
+	return false
+}
+
+// evalSymlinksOrSelf resolves symlinks in p, falling back to p unchanged when it
+// doesn't exist yet (the write-a-new-file / stat-of-absent case).
+func evalSymlinksOrSelf(p string) string {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	return p
 }
 
 // Handle dispatches a JSON-RPC request to the appropriate method.
@@ -708,39 +790,67 @@ func (h *FSHandler) handleWriteFile(write writeFn, id json.RawMessage, raw json.
 
 // ---- Path Security ----
 
-// resolvePath strips the "file://" prefix, joins with root, resolves symlinks,
-// and verifies the result is under root. Rejects ".." traversal.
+// resolvePath maps a file:// URI to a concrete on-disk path, enforcing the
+// reachability boundary: the result must live under the project root or one of
+// the extra reach roots (e.g. /tmp).
+//
+// The canonical URI form is file:///<path>, so once "file://" is stripped every
+// path carries a leading "/" and looks absolute — we cannot tell a root-relative
+// "tmp/foo" from a genuinely-absolute "/tmp/foo" by syntax. We disambiguate by
+// existence, with the project root taking precedence:
+//
+//  1. <root>/<path> exists           → that. The project always wins, so a repo
+//                                       with its own top-level tmp/ still
+//                                       addresses its own files (backward compat).
+//  2. <path> is under a reach root   → that. The escape hatch: a file an agent
+//                                       dropped in /tmp resolves to /tmp/foo.
+//  3. otherwise                      → <root>/<path>. Default to in-project so a
+//                                       NEW file (write/stat of a not-yet-created
+//                                       path) lands under the project root.
+//
+// ".." traversal is rejected up front, and every candidate is symlink-resolved
+// then re-checked against the allowed roots so a symlink can't tunnel out.
 func (h *FSHandler) resolvePath(uri string) (string, error) {
-	// Strip file:// prefix
 	path := uri
 	if strings.HasPrefix(path, "file://") {
 		path = strings.TrimPrefix(path, "file://")
 	}
-
-	// Reject obvious traversal
 	if strings.Contains(path, "..") {
 		return "", fmt.Errorf("path traversal rejected: %s", uri)
 	}
-
-	// Clean and join with root
 	path = filepath.Clean(path)
+
+	// Candidate 1 — root-relative: strip the leading slash the file:/// form
+	// always carries, then join under the project root.
+	rel := strings.TrimPrefix(path, "/")
+	rootCand := evalSymlinksOrSelf(filepath.Join(h.root, rel))
+
+	// Candidate 2 — literal absolute path: the reach hatch into /tmp & friends.
+	var absCand string
 	if filepath.IsAbs(path) {
-		// Absolute path: strip leading "/" so it becomes relative to root
-		path = strings.TrimPrefix(path, "/")
-	}
-	full := filepath.Join(h.root, path)
-
-	// Resolve symlinks and verify still under root
-	resolved, err := filepath.EvalSymlinks(full)
-	if err != nil {
-		// File might not exist yet (for stat calls); try parent
-		resolved = full
-	}
-	if !strings.HasPrefix(resolved, h.root) {
-		return "", fmt.Errorf("path escapes root: %s → %s", uri, resolved)
+		absCand = evalSymlinksOrSelf(path)
 	}
 
-	return resolved, nil
+	// 1: an existing project file always wins.
+	if h.underAnyRoot(rootCand) && pathExists(rootCand) {
+		return rootCand, nil
+	}
+	// 2: reach out to an absolute path under an extra root (exists, or a
+	//    not-yet-created write target whose root is allowed).
+	if absCand != "" && h.underAnyRoot(absCand) {
+		return absCand, nil
+	}
+	// 3: default to the project-relative path so new files land in-project.
+	if h.underAnyRoot(rootCand) {
+		return rootCand, nil
+	}
+	return "", fmt.Errorf("path escapes reachable roots: %s → %s", uri, rootCand)
+}
+
+// pathExists reports whether a path currently resolves to something on disk.
+func pathExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
 }
 
 // ---- JSON-RPC Response Helpers ----
