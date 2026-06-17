@@ -5,6 +5,7 @@ import { useGridRegistry } from '@glyph3d/r3f';
 import CommandRouter from '@glyph3d/core/services/orchestration/CommandRouter.js';
 import WebSocketBridge from '@glyph3d/core/services/orchestration/WebSocketBridge.js';
 import FieldVisitorManager from '@glyph3d/core/services/orchestration/FieldVisitorManager.js';
+import AgentTrail from '@glyph3d/core/collections/AgentTrail.js';
 import { installConsoleForwarder } from '@glyph3d/core/services/orchestration/consoleForwarder.js';
 import AttentionManager from '@glyph3d/core/services/interaction/AttentionManager.js';
 import EntityKeystrokeRouter from '@glyph3d/core/services/interaction/EntityKeystrokeRouter.js';
@@ -128,6 +129,10 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     // effect (needs the live ctx); ticked each frame by <VisitorRunner/>.
     visitorManager: null,
 
+    // Agent trail — every agent action laid out as a card receding into depth, the file
+    // it touched on a parallel rail, tethered. Fed by visitorManager.onActivity.
+    agentTrail: null,
+
     // GPU glyph-picking system (material-swap ID pass on a dedicated render
     // layer). Created in the effect below once gl exists; canvas hover/click
     // resolves pixel-perfect picks through it. Null until then.
@@ -162,7 +167,11 @@ const AppCommandContext = createContext(null);
  * Guards on visitorManager so it's a no-op until the effect wires it.
  */
 function VisitorRunner({ stateRef }) {
-  useFrame((_, dt) => stateRef.current?.ctx?.visitorManager?.update(dt));
+  useFrame((_, dt) => {
+    const c = stateRef.current?.ctx;
+    c?.visitorManager?.update(dt);
+    c?.agentTrail?.update(dt);
+  });
   return null;
 }
 
@@ -265,6 +274,10 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // Field-visitor multiplexer: agent.* commands spawn/move/follow one self-driving
     // visitor per agent. The camera stays free unless `camera.follow <id>` opts in.
     state.ctx.visitorManager = new FieldVisitorManager(state.ctx);
+
+    // Spatial trail: every agent action leaves a card receding into depth, the file it
+    // touched on a parallel rail, tethered. Subscribes to visitorManager.onActivity.
+    state.ctx.agentTrail = new AgentTrail(state.ctx).attach(state.ctx.visitorManager);
 
     // Camera-locked HUD dock: a bar of window tiles that rides the view. Reparents
     // a docked grid/terminal under itself (world-preserving attach) and scales it to
@@ -439,6 +452,8 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       state.ctx.pickingSystem = null;
       state.ctx.visitorManager?.dispose();
       state.ctx.visitorManager = null;
+      state.ctx.agentTrail?.dispose();
+      state.ctx.agentTrail = null;
       state.ctx.interactionContext?.dispose();
       state.ctx.interactionContext = null;
       if (state.ctx.cameraDock) {

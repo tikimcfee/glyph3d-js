@@ -33,6 +33,7 @@ import registerAttentionCommands from './attentionCommands.js';
 import registerEditCommands from './editCommands.js';
 import registerContextCommands from './contextCommands.js';
 import registerAgentVisitorCommands from './agentVisitorCommands.js';
+import registerTrailCommands from './trailCommands.js';
 import registerMemoryCommands from './memoryCommands.js';
 import registerWorkspaceCommands from './workspaceCommands.js';
 import registerAtlasCommands from './atlasCommands.js';
@@ -75,6 +76,7 @@ export function registerAllCommands(router) {
     registerEditCommands(router);
     registerContextCommands(router);
     registerAgentVisitorCommands(router);
+    registerTrailCommands(router);
     registerMemoryCommands(router);
     registerWorkspaceCommands(router);
     registerAtlasCommands(router);

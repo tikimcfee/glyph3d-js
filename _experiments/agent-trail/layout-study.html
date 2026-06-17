@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Agent Trail — layout study</title>
+<style>
+  :root{
+    --bg:#0a0c10; --sheet:#0f1217; --edge:#1b212b;
+    --ink:#c9d1d9; --dim:#6b7480; --faint:#3c434f;
+    --read:#5aa9e6; --search:#b07fd6; --edit:#e0a85a; --run:#6fbf73;
+    --user:#9aa3b0; --agent:#6b9bc9;
+    --add:#6fbf73; --del:#e06c75;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--mono);font-size:13px}
+  body{padding:34px 40px 120px}
+  a{color:inherit}
+
+  .head{max-width:1280px;margin:0 auto 26px}
+  .head h1{font-size:15px;font-weight:600;letter-spacing:.04em;margin:0 0 4px}
+  .head p{margin:0;color:var(--dim);font-size:12px;line-height:1.6}
+  .legend{display:flex;gap:18px;margin-top:14px;flex-wrap:wrap;align-items:center}
+  .legend .chip{display:flex;gap:7px;align-items:center;color:var(--dim);font-size:11.5px;letter-spacing:.02em}
+  .legend .dot{width:9px;height:9px;border-radius:2px}
+
+  .sheet{
+    max-width:1280px;margin:0 auto;background:var(--sheet);
+    border:1px solid var(--edge);border-radius:6px;padding:26px 30px 40px;
+    box-shadow:0 1px 0 rgba(255,255,255,.02) inset, 0 24px 60px -30px #000;
+    position:relative;overflow:hidden;
+  }
+
+  .grid{
+    position:relative;
+    display:grid;
+    grid-template-columns:30px 1.05fr 1px 1fr 1px 1.55fr;
+    column-gap:22px;
+    row-gap:18px;
+    align-items:start;
+  }
+
+  .sep{width:1px;background:var(--edge);grid-row:1 / -1;align-self:stretch}
+  .sep1{grid-column:3}
+  .sep2{grid-column:5}
+
+  .rail{grid-column:1}
+  .c1{grid-column:2}
+  .c2{grid-column:4}
+  .c3{grid-column:6}
+
+  /* column heads */
+  .colhead{font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--faint);padding-bottom:2px;border-bottom:1px solid var(--edge);grid-row:1}
+  .rail.colhead{color:var(--faint)}
+
+  .tick{grid-column:1;color:var(--faint);font-size:10px;letter-spacing:.04em;padding-top:11px;text-align:right;padding-right:2px}
+
+  /* generic card */
+  .card{
+    background:#13171e;border:1px solid var(--edge);border-left-width:2px;border-radius:3px;
+    padding:9px 12px;line-height:1.55;position:relative;z-index:2;
+  }
+  .card .k{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim);margin-bottom:3px;display:flex;gap:8px;align-items:center}
+  .card .k .who{font-weight:600}
+  .body{color:var(--ink);font-size:12.5px}
+  .muted{color:var(--dim)}
+
+  /* col1 conversation */
+  .turn.user{border-left-color:var(--user)}
+  .turn.agent{border-left-color:var(--agent)}
+  .turn.user .who{color:var(--user)}
+  .turn.agent .who{color:var(--agent)}
+
+  /* col2 thinking + calls */
+  .think{border-left-color:var(--faint);background:#10141a}
+  .think .k{color:var(--faint)}
+  .think .body{color:#8b93a0;font-style:italic}
+
+  .call{cursor:default}
+  .call.read{border-left-color:var(--read)}
+  .call.search{border-left-color:var(--search)}
+  .call.edit{border-left-color:var(--edit)}
+  .call.run{border-left-color:var(--run)}
+  .call .verb{font-weight:600}
+  .call.read .verb{color:var(--read)}
+  .call.search .verb{color:var(--search)}
+  .call.edit .verb{color:var(--edit)}
+  .call.run .verb{color:var(--run)}
+  .call .arg{color:var(--ink)}
+  .call .meta{color:var(--dim);font-size:11px;margin-top:2px}
+
+  /* col3 artifacts */
+  .art{border-left-color:var(--edge)}
+  .art.read{border-left-color:var(--read)}
+  .art.search{border-left-color:var(--search)}
+  .art.edit{border-left-color:var(--edit)}
+  .art.run{border-left-color:var(--run)}
+  .art .filebar{display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--dim);margin-bottom:6px}
+  .art .filebar .name{color:var(--ink)}
+  .art .badge{font-size:10px;color:var(--dim);border:1px solid var(--edge);border-radius:10px;padding:1px 7px}
+
+  .code{font-size:11.5px;line-height:1.5;white-space:pre;overflow:hidden}
+  .code .ln{display:flex}
+  .code .gut{color:var(--faint);width:34px;flex:0 0 34px;text-align:right;padding-right:10px;user-select:none}
+  .code .src{color:#aeb6c2}
+  .code .hl{background:rgba(90,169,230,.10)}
+  .art.read .hl{background:rgba(90,169,230,.12);box-shadow:inset 2px 0 0 var(--read)}
+
+  .matches .m{display:flex;gap:10px;padding:1px 0;font-size:11.5px}
+  .matches .loc{color:var(--search);flex:0 0 auto}
+  .matches .snip{color:#9aa2ad;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+  .diff .ln{display:flex;font-size:11.5px;line-height:1.5;white-space:pre}
+  .diff .sign{width:16px;flex:0 0 16px;color:var(--faint)}
+  .diff .add{background:rgba(111,191,115,.10)}
+  .diff .add .sign{color:var(--add)} .diff .add .t{color:#bfe3c2}
+  .diff .del{background:rgba(224,108,117,.10)}
+  .diff .del .sign{color:var(--del)} .diff .del .t{color:#e9b9bd}
+  .diff .ctx .t{color:#8b93a0}
+
+  .term{font-size:11.5px;line-height:1.55;white-space:pre-wrap}
+  .term .prompt{color:var(--dim)} .term .prompt b{color:var(--run);font-weight:600}
+  .term .out{color:#9aa2ad}
+  .term .pass{color:var(--run)}
+
+  svg.connectors{position:absolute;left:0;top:0;pointer-events:none;z-index:6;overflow:visible}
+</style>
+</head>
+<body>
+  <div class="head">
+    <h1>Agent Trail — layout study</h1>
+    <p>One agent's run, laid on a sheet. Time flows downward — scroll through it to replay the run.<br>
+       Column ② actions tether by a direct line to the data they touched in column ③, top-aligned.</p>
+    <div class="legend">
+      <span class="chip"><span class="dot" style="background:var(--read)"></span>read</span>
+      <span class="chip"><span class="dot" style="background:var(--search)"></span>search</span>
+      <span class="chip"><span class="dot" style="background:var(--edit)"></span>edit · write</span>
+      <span class="chip"><span class="dot" style="background:var(--run)"></span>run</span>
+      <span class="chip"><span class="dot" style="background:var(--faint)"></span>thinking</span>
+    </div>
+  </div>
+
+  <div class="sheet">
+    <div class="grid" id="grid">
+      <!-- separators -->
+      <div class="sep sep1"></div>
+      <div class="sep sep2"></div>
+
+      <!-- column heads (row 1) -->
+      <div class="rail colhead">t</div>
+      <div class="c1 colhead">① Conversation</div>
+      <div class="c2 colhead">② Thinking · Tool calls</div>
+      <div class="c3 colhead">③ Artifacts — files · output · diffs</div>
+
+      <!-- t01 : user -->
+      <div class="tick" style="grid-row:2">t01</div>
+      <div class="c1 card turn user" style="grid-row:2">
+        <div class="k"><span class="who">USER</span></div>
+        <div class="body">The caret lands one glyph off when I click into a wrapped line. Find where the offset is computed and fix it.</div>
+      </div>
+
+      <!-- t02 : agent opening -->
+      <div class="tick" style="grid-row:3">t02</div>
+      <div class="c1 card turn agent" style="grid-row:3">
+        <div class="k"><span class="who">CLAUDE</span></div>
+        <div class="body">On it — tracing the click→caret path through the edit funnel.</div>
+      </div>
+
+      <!-- t03 : thinking -->
+      <div class="tick" style="grid-row:4">t03</div>
+      <div class="c2 card think" style="grid-row:4">
+        <div class="k">thinking</div>
+        <div class="body">Edits funnel through _relayoutPreservingCursor. An off-by-one on a wrapped line smells like a visible-col vs codepoint-slot ruler mismatch.</div>
+      </div>
+
+      <!-- t04 : read CodeGrid.js + artifact -->
+      <div class="tick" style="grid-row:5">t04</div>
+      <div class="c2 card call read" data-pair="p1" data-kind="read" style="grid-row:5">
+        <div class="k"><span class="verb">READ</span></div>
+        <div class="body"><span class="arg">collections/CodeGrid.js</span></div>
+        <div class="meta">lines 612–631</div>
+      </div>
+      <div class="c3 card art read" data-pair="p1" style="grid-row:5">
+        <div class="filebar"><span class="name">collections/CodeGrid.js</span><span class="badge">L612–631</span></div>
+        <div class="code">
+<div class="ln"><span class="gut">610</span><span class="src">  _caretSlotForPoint(p) {</span></div>
+<div class="ln"><span class="gut">611</span><span class="src">    const line = this._lineAtY(p.y);</span></div>
+<div class="ln hl"><span class="gut">612</span><span class="src">    const col  = this._visibleColAtX(p.x, line);</span></div>
+<div class="ln hl"><span class="gut">613</span><span class="src">    // BUG: visible col is not the buffer slot on</span></div>
+<div class="ln hl"><span class="gut">614</span><span class="src">    // wrapped/RTL/tab lines — needs slot mapping.</span></div>
+<div class="ln hl"><span class="gut">615</span><span class="src">    return this.charForSlot(line, col);</span></div>
+<div class="ln"><span class="gut">616</span><span class="src">  }</span></div>
+        </div>
+      </div>
+
+      <!-- t05 : search + artifact -->
+      <div class="tick" style="grid-row:6">t05</div>
+      <div class="c2 card call search" data-pair="p2" data-kind="search" style="grid-row:6">
+        <div class="k"><span class="verb">SEARCH</span></div>
+        <div class="body"><span class="arg">"visibleCol" — collections/</span></div>
+        <div class="meta">4 matches · 3 files</div>
+      </div>
+      <div class="c3 card art search" data-pair="p2" style="grid-row:6">
+        <div class="filebar"><span class="name">grep "visibleCol"</span><span class="badge">4 hits</span></div>
+        <div class="matches">
+          <div class="m"><span class="loc">CodeGrid.js:612</span><span class="snip">const col = this._visibleColAtX(p.x, line);</span></div>
+          <div class="m"><span class="loc">CodeGrid.js:740</span><span class="snip">slot = this._slotFromVisibleCol(line, vc);</span></div>
+          <div class="m"><span class="loc">SemanticModel.js:91</span><span class="snip">// canonical: slot === codepoint index</span></div>
+          <div class="m"><span class="loc">layout/Ruler.js:33</span><span class="snip">visibleCol(line, x) { /* width walk */ }</span></div>
+        </div>
+      </div>
+
+      <!-- t06 : thinking -->
+      <div class="tick" style="grid-row:7">t06</div>
+      <div class="c2 card think" style="grid-row:7">
+        <div class="k">thinking</div>
+        <div class="body">Confirmed. charForSlot is fed the visible ruler directly. Fix belongs at the derivation — map visible col → buffer slot — not at the caret.</div>
+      </div>
+
+      <!-- t07 : read SemanticModel.js + artifact -->
+      <div class="tick" style="grid-row:8">t07</div>
+      <div class="c2 card call read" data-pair="p3" data-kind="read" style="grid-row:8">
+        <div class="k"><span class="verb">READ</span></div>
+        <div class="body"><span class="arg">services/.../SemanticModel.js</span></div>
+        <div class="meta">lines 88–97</div>
+      </div>
+      <div class="c3 card art read" data-pair="p3" style="grid-row:8">
+        <div class="filebar"><span class="name">SemanticModel.js</span><span class="badge">L88–97</span></div>
+        <div class="code">
+<div class="ln"><span class="gut">88</span><span class="src">  // The canonical ruler: a buffer slot is</span></div>
+<div class="ln hl"><span class="gut">89</span><span class="src">  // exactly one codepoint index, layout-free.</span></div>
+<div class="ln hl"><span class="gut">90</span><span class="src">  slotFromVisibleCol(line, vc) {</span></div>
+<div class="ln hl"><span class="gut">91</span><span class="src">    return this._slotMap[line].at(vc);</span></div>
+<div class="ln"><span class="gut">92</span><span class="src">  }</span></div>
+        </div>
+      </div>
+
+      <!-- t08 : agent interim -->
+      <div class="tick" style="grid-row:9">t08</div>
+      <div class="c1 card turn agent" style="grid-row:9">
+        <div class="k"><span class="who">CLAUDE</span></div>
+        <div class="body">Found it — the click path reads the visible ruler instead of the slot ruler. Patching the derivation.</div>
+      </div>
+
+      <!-- t09 : edit + diff -->
+      <div class="tick" style="grid-row:10">t09</div>
+      <div class="c2 card call edit" data-pair="p4" data-kind="edit" style="grid-row:10">
+        <div class="k"><span class="verb">EDIT</span></div>
+        <div class="body"><span class="arg">collections/CodeGrid.js</span></div>
+        <div class="meta">+1 −1 · L612</div>
+      </div>
+      <div class="c3 card art edit" data-pair="p4" style="grid-row:10">
+        <div class="filebar"><span class="name">collections/CodeGrid.js</span><span class="badge">+1 −1</span></div>
+        <div class="diff">
+<div class="ln ctx"><span class="sign"> </span><span class="t">    const line = this._lineAtY(p.y);</span></div>
+<div class="ln del"><span class="sign">-</span><span class="t">    const col  = this._visibleColAtX(p.x, line);</span></div>
+<div class="ln add"><span class="sign">+</span><span class="t">    const vc   = this._visibleColAtX(p.x, line);</span></div>
+<div class="ln add"><span class="sign">+</span><span class="t">    const col  = this.semantic.slotFromVisibleCol(line, vc);</span></div>
+<div class="ln ctx"><span class="sign"> </span><span class="t">    return this.charForSlot(line, col);</span></div>
+        </div>
+      </div>
+
+      <!-- t10 : run + output -->
+      <div class="tick" style="grid-row:11">t10</div>
+      <div class="c2 card call run" data-pair="p5" data-kind="run" style="grid-row:11">
+        <div class="k"><span class="verb">RUN</span></div>
+        <div class="body"><span class="arg">node tools/itests/caret.itest.mjs</span></div>
+        <div class="meta">exit 0 · 1.2s</div>
+      </div>
+      <div class="c3 card art run" data-pair="p5" style="grid-row:11">
+        <div class="filebar"><span class="name">stdout</span><span class="badge">exit 0</span></div>
+        <div class="term"><span class="prompt"><b>$</b> node tools/itests/caret.itest.mjs</span>
+<span class="out">click→caret · flat layout ........ ok
+click→caret · wrapped line ....... ok
+click→caret · tab-indented ....... ok
+click→caret · RTL run ............ ok
+reposition while editing ......... ok</span>
+<span class="pass">5 passing (1.2s)</span></div>
+      </div>
+
+      <!-- t11 : agent final -->
+      <div class="tick" style="grid-row:12">t11</div>
+      <div class="c1 card turn agent" style="grid-row:12">
+        <div class="k"><span class="who">CLAUDE</span></div>
+        <div class="body">Fixed. The click path now resolves through the slot ruler, so the caret lands exactly in every layout — itest 5/5.</div>
+      </div>
+    </div>
+
+    <svg class="connectors" id="conn"></svg>
+  </div>
+
+<script>
+  const HUE = { read:'#5aa9e6', search:'#b07fd6', edit:'#e0a85a', run:'#6fbf73' };
+
+  function draw(){
+    const grid = document.getElementById('grid');
+    const svg  = document.getElementById('conn');
+    const gr   = grid.getBoundingClientRect();
+    svg.setAttribute('width', gr.width);
+    svg.setAttribute('height', gr.height);
+    svg.innerHTML = '';
+
+    document.querySelectorAll('.c2[data-pair]').forEach(call => {
+      const art = document.querySelector('.c3[data-pair="'+call.dataset.pair+'"]');
+      if(!art) return;
+      const hue = HUE[call.dataset.kind] || '#8a93a0';
+      const a = call.getBoundingClientRect();
+      const b = art.getBoundingClientRect();
+      const x1 = a.right - gr.left, y1 = a.top - gr.top + 17;
+      const x2 = b.left  - gr.left, y2 = b.top - gr.top + 17;
+      const dx = Math.max(26, (x2 - x1) * 0.45);
+
+      const d = `M ${x1} ${y1} C ${x1+dx} ${y1}, ${x2-dx} ${y2}, ${x2} ${y2}`;
+      svg.appendChild(path(d, hue, 4.5, 0.16));   // glow under-stroke
+      svg.appendChild(path(d, hue, 1.4, 0.9));     // bright line
+      svg.appendChild(dot(x1, y1, hue));
+      svg.appendChild(dot(x2, y2, hue));
+    });
+  }
+  function path(d, stroke, w, op){
+    const p = document.createElementNS('http://www.w3.org/2000/svg','path');
+    p.setAttribute('d', d); p.setAttribute('fill','none');
+    p.setAttribute('stroke', stroke); p.setAttribute('stroke-width', w);
+    p.setAttribute('stroke-opacity', op); p.setAttribute('stroke-linecap','round');
+    return p;
+  }
+  function dot(x, y, fill){
+    const c = document.createElementNS('http://www.w3.org/2000/svg','circle');
+    c.setAttribute('cx', x); c.setAttribute('cy', y); c.setAttribute('r', 2.6);
+    c.setAttribute('fill', fill);
+    return c;
+  }
+  window.addEventListener('resize', draw);
+  window.addEventListener('load', draw);
+  draw();
+</script>
+</body>
+</html>

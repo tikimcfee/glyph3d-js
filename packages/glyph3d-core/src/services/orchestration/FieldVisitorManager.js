@@ -34,12 +34,22 @@ export default class FieldVisitorManager {
         this.followId = null;        // agentId the camera is riding, or null
         this.onRequest = null;       // (agentId, msg) => void — DOM "follow me!" popup hook
         this._listeners = new Set(); // roster-change subscribers (the crew panel)
+        this._activityListeners = new Set(); // per-record subscribers (the trail) — fires once per record
         this._tmp = new THREE.Vector3();
     }
 
     /** Subscribe to roster changes (spawn / activity / state / stop / reap / follow). */
     onChange(fn) { this._listeners.add(fn); return () => this._listeners.delete(fn); }
     _emitChange() { for (const fn of this._listeners) { try { fn(); } catch (_e) { /* listener owns its errors */ } } }
+
+    /**
+     * Subscribe to EACH activity record as it lands (the spatial trail's feed). Distinct from
+     * onChange: that coalesces to "something changed, re-read the roster" (and the roster is a
+     * capped ring); this delivers every individual record exactly once, with the resolved grid —
+     * so an append-only trail never misses one. Payload: { agentId, agentType, record, targetGrid }.
+     */
+    onActivity(fn) { this._activityListeners.add(fn); return () => this._activityListeners.delete(fn); }
+    _emitActivity(p) { for (const fn of this._activityListeners) { try { fn(p); } catch (_e) { /* listener owns its errors */ } } }
 
     /** A snapshot of the crew for a list UI (the roster panel). Discrete fields only — */
     /** position eases continuously and isn't part of the roster. */
@@ -90,9 +100,10 @@ export default class FieldVisitorManager {
         v.setState('active');
         v.clearAttention();              // it's acting → hand lowered
         if (record.targetGrid) v.setTarget(record.targetGrid);
-        v.note({ action: record.action, target: record.target, detail: record.detail, result: record.result });
+        const rec = v.note({ action: record.action, target: record.target, detail: record.detail, result: record.result });
         v.touch();
         this._emitChange();
+        this._emitActivity({ agentId, agentType: v.agentType, record: rec, targetGrid: record.targetGrid || null });
         return v;
     }
 
