@@ -71,7 +71,7 @@ export class RemoteFileSystemProvider {
      * @returns {Promise<Uint8Array>}
      */
     async getBytes(path, { maxBytes = Infinity, chunk = 1 << 20 } = {}) {
-        const uri = `file:///${path}`;
+        const uri = `file:///${String(path).replace(/^\/+/, '')}`;   // strip leading slashes → canonical (matches file.open)
         const parts = [];
         let offset = 0, total = Infinity, size = 0;
         while (offset < total && size < maxBytes) {
@@ -174,7 +174,7 @@ export class RemoteFileSystemProvider {
             const batch = paths.slice(i, i + concurrency);
             const settled = await Promise.allSettled(
                 batch.map(async (path) => {
-                    const uri = `file:///${path}`;
+                    const uri = `file:///${String(path).replace(/^\/+/, '')}`;   // strip leading slashes → canonical (matches file.open)
                     const fc = await this.readFile(uri);
                     return { path, content: fc.content };
                 })
@@ -221,7 +221,7 @@ export class RemoteFileSystemProvider {
      * @returns {Promise<string>}
      */
     async getFile(path) {
-        const uri = `file:///${path}`;
+        const uri = `file:///${String(path).replace(/^\/+/, '')}`;   // strip leading slashes → canonical (matches file.open)
         const fc = await this.readFile(uri);
         return fc.content;
     }

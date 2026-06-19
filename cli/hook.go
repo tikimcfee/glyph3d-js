@@ -131,8 +131,16 @@ func handlePostToolUse(conn *websocket.Conn, event *HookEvent) {
 		target = relativize(input.FilePath, event.CWD)
 	}
 
-	detail := clip(extractDetail(event.ToolName, event.ToolInput), 200)
-	result := clip(summarizeResult(event.ToolResponse), 80)
+	// Ship raw — the trail renders these in grids whose layout system does its own
+	// line-splitting + windowing, so the hook truncates nothing. A file's content IS its
+	// snapshot, so file tools carry no result (matches the replay).
+	detail := extractDetail(event.ToolName, event.ToolInput)
+	result := ""
+	switch event.ToolName {
+	case "Read", "Edit", "Write":
+	default:
+		result = extractResult(event.ToolResponse)
+	}
 	sendActivity(conn, id, typ, action, target, detail, result)
 }
 
@@ -192,17 +200,16 @@ func extractDetail(tool string, raw json.RawMessage) string {
 	}
 }
 
-// summarizeResult derives a short outcome from the tool response. tool_response is sometimes
-// a bare string and sometimes a structured object — handle both, prefer an error if present,
-// and keep it terse (the detail is the headline; this is the footnote).
-func summarizeResult(raw json.RawMessage) string {
+// extractResult pulls the FULL output text from a tool response (a bare string or a structured
+// object), preferring an error if present. Raw — the trail renders it in a grid that does its own
+// line-splitting + windowing, so nothing is truncated here.
+func extractResult(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
 	}
-	// String response: first non-empty line is the summary.
 	var s string
 	if json.Unmarshal(raw, &s) == nil {
-		return firstLine(s)
+		return s
 	}
 	var m map[string]any
 	if json.Unmarshal(raw, &m) != nil {
@@ -210,35 +217,19 @@ func summarizeResult(raw json.RawMessage) string {
 	}
 	if b, ok := m["is_error"].(bool); ok && b {
 		if e, ok := m["error"].(string); ok && e != "" {
-			return "error: " + firstLine(e)
+			return "error: " + e
 		}
 		return "error"
 	}
 	if e, ok := m["error"].(string); ok && e != "" {
-		return "error: " + firstLine(e)
+		return "error: " + e
 	}
 	for _, k := range []string{"stdout", "content", "result", "output"} {
 		if v, ok := m[k].(string); ok && v != "" {
-			return firstLine(v)
+			return v
 		}
 	}
 	return ""
-}
-
-func firstLine(s string) string {
-	s = strings.TrimSpace(s)
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = s[:i]
-	}
-	return s
-}
-
-func clip(s string, max int) string {
-	r := []rune(s)
-	if len(r) <= max {
-		return s
-	}
-	return string(r[:max-1]) + "…"
 }
 
 func handlePreToolUse(conn *websocket.Conn, event *HookEvent) {
@@ -336,8 +327,8 @@ func relativize(absPath, cwd string) string {
 		return absPath
 	}
 	rel, err := filepath.Rel(cwd, absPath)
-	if err != nil {
-		return absPath
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return absPath // outside the project root — keep it absolute (a /tmp file the relay reaches)
 	}
 	return rel
 }
