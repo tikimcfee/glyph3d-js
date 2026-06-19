@@ -79,5 +79,44 @@ const topLeft = (w, h) => { const o = new THREE.Object3D(); o.layoutBounds = () 
     check('scaled child widens footprint (20+10=30)', approx(size.x, 30), size);
 }
 
+// 7 — columnWidths: child LEADS in a fixed slot; cursor advances by the slot, not the extent
+{
+    const a = mock(4, 4), b = mock(6, 4);
+    const size = HStack({ spacing: 0, columnWidths: [20, 10], children: [a, b] }).layout();
+    check('columnWidths a leads col0 (left edge 0)', approx(a.position.x - 2, 0), a.position.x);
+    check('columnWidths b leads col1 (left edge 20)', approx(b.position.x - 3, 20), b.position.x);
+    check('columnWidths footprint = col0 end 20 + b extent 6 = 26', approx(size.x, 26), size);
+}
+
+// 8 — childExtents reports per-child content size (the measure seam columns build on)
+{
+    const r = HStack({ children: [mock(4, 2), mock(8, 2)] });
+    check('childExtents → [4, 8]', JSON.stringify(r.childExtents('x')) === '[4,8]', r.childExtents('x'));
+}
+
+// 9 — columnAlign (data-driven): two rows share content-sized columns (widest tool, widest content)
+{
+    const r1 = HStack({ spacing: 1, children: [mock(4, 2), mock(8, 2)] });   // tool 4, content 8
+    const r2 = HStack({ spacing: 1, children: [mock(6, 2), mock(5, 2)] });   // tool 6, content 5
+    ZStack({ spacing: 0, columnAlign: true, children: [r1, r2] }).layout();
+    // col0 = max(4,6) = 6, col1 = max(8,5) = 8 → both rows lay their cells into [6,8].
+    const [a1, b1] = r1.children, [a2, b2] = r2.children;
+    check('columnAlign tool left edges both 0', approx(a1.position.x - 2, 0) && approx(a2.position.x - 3, 0), [a1.position.x, a2.position.x]);
+    check('columnAlign content left edges both 7 (col0 6 + gap 1)', approx(b1.position.x - 4, 7) && approx(b2.position.x - 2.5, 7), [b1.position.x, b2.position.x]);
+    check('track is transient — never stamped onto rows', r1.columnWidths === null && r2.columnWidths === null, [r1.columnWidths, r2.columnWidths]);
+}
+
+// 10 — toggling columnAlign OFF reverts to ragged (no sticky state)
+{
+    const r1 = HStack({ spacing: 1, children: [mock(4, 2), mock(8, 2)] });
+    const r2 = HStack({ spacing: 1, children: [mock(6, 2), mock(5, 2)] });
+    const z = ZStack({ spacing: 0, columnAlign: true, children: [r1, r2] });
+    z.layout();
+    const aligned = r2.children[1].position.x;          // content x while aligned
+    z.columnAlign = false; z.layout();
+    const ragged = r2.children[1].position.x;           // content x after toggle off
+    check('columnAlign off changes content placement (reverts)', Math.abs(aligned - ragged) > 1e-6, [aligned, ragged]);
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

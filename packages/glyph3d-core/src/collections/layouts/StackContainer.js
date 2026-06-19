@@ -78,6 +78,14 @@ export default class StackContainer extends THREE.Object3D {
      * @param {number} [opts.zStep=0] ZStack-only: extra per-index depth pitch beyond spacing
      * @param {boolean} [opts.reverse=false] fill from the far end — last child takes the first slot
      *   (front of a ZStack deck / bottom of a VStack), so appending puts newest in front
+     * @param {number[]} [opts.columnWidths] fixed per-slot main-axis widths (CSS grid-template-columns):
+     *   the cursor advances by columnWidths[i] (not the child's own extent) and the child LEADS in its
+     *   slot, so sibling stacks given the same widths align into columns. Non-reverse only. 'x'/'y' axes.
+     * @param {boolean} [opts.columnAlign=false] DATA-DRIVEN columns (CSS table-layout:auto): if this
+     *   container's children are themselves row-stacks, size column i to the WIDEST cell-i across all
+     *   rows (via childExtents) and HAND that track to each row as it lays out — so the rows align
+     *   into content-sized columns. Pairs with a leading cross-align (so the rows' shared left edge
+     *   lines the columns up). Cells should be leaves (measured pre-layout).
      * @param {boolean} [opts.resetRotation=true] reset each child's rotation to identity on place
      * @param {Object} [opts.animator] optional SpatialAnimator — eases children to targets instead of snapping
      * @param {THREE.Object3D[]} [opts.children] children to add immediately
@@ -96,6 +104,8 @@ export default class StackContainer extends THREE.Object3D {
         this.resetRotation = opts.resetRotation !== false;
         this.reverse = !!opts.reverse;
         this.animator = opts.animator || null;
+        this.columnWidths = opts.columnWidths || null;   // fixed per-slot main-axis widths
+        this.columnAlign = !!opts.columnAlign;           // data-driven: harmonize child row-stacks into columns
 
         this._box = new THREE.Box3().makeEmpty();
         this.userData.size = { x: 0, y: 0, z: 0 };   // nodeUtils fallback for non-layoutBounds readers
@@ -116,14 +126,25 @@ export default class StackContainer extends THREE.Object3D {
      * Measure (post-order) then place (pre-order). Idempotent and change-driven — call it
      * after adding/removing children or when a child's bounds settle (e.g. an async file load
      * the CALLER awaited). Never call per-frame. Returns the container's own footprint.
+     *
+     * @param {number[]} [cols] a column track handed down by a column-aligning PARENT: the
+     *   per-slot main-axis widths to lay THIS container's children into. Defaults to the
+     *   container's own columnWidths. Transient — never stored — so a parent toggling columnAlign
+     *   off simply stops passing it and the row reverts to ragged.
      * @returns {{x:number, y:number, z:number}}
      */
-    layout() {
+    layout(cols = this.columnWidths) {
         const A = AXES[this.axis];
         const kids = this.children.filter((c) => !c.userData?.isMarker);
 
-        // post-order: a nested stack lays itself out first, so leafBox() reads a current box.
-        for (const c of kids) if (c.isStackContainer && typeof c.layout === 'function') c.layout();
+        // If I align my children into columns, measure their cells (childExtents) and size each
+        // column to the widest one, then HAND that track down as each child lays out below — never
+        // stamped onto the child, so it's transient and toggling columnAlign off reverts for free.
+        const childTrack = this.columnAlign ? this._columnTrack(kids) : null;
+
+        // post-order: a nested stack lays itself out first (within its column track), so leafBox()
+        // reads a current box.
+        for (const c of kids) if (c.isStackContainer && typeof c.layout === 'function') c.layout(childTrack ?? undefined);
 
         if (kids.length === 0) {
             this._box.makeEmpty();
@@ -139,14 +160,18 @@ export default class StackContainer extends THREE.Object3D {
         const depthMax = Math.max(...boxes.map((b) => ext(b, depth)));
         const pitch = this.spacing + this.zStep;   // ZStack deck pitch
 
+        // a child consumes its COLUMN width (the track slot) if one is set, else its own extent.
+        const slot = (b, idx) => (cols && cols[idx] != null ? cols[idx] : ext(b, main));
+
         // sequence order along the main axis (reverse → last child takes the first slot).
         const N = kids.length;
         const seq = this.reverse
             ? Array.from({ length: N }, (_, k) => N - 1 - k)
             : Array.from({ length: N }, (_, k) => k);
 
-        // main-axis cursor start: X rows center on origin; Y columns start at the top (0).
-        let cursor = this.axis === 'x'
+        // main-axis cursor start: an X row centers on origin, UNLESS it has fixed columns (then it
+        // leads from 0 so sibling rows align); Y columns start at the top (0).
+        let cursor = (this.axis === 'x' && !cols)
             ? -(boxes.reduce((s, b) => s + ext(b, main), 0) + this.spacing * (N - 1)) / 2
             : 0;
 
@@ -155,8 +180,8 @@ export default class StackContainer extends THREE.Object3D {
             const idx = seq[k];
             const b = boxes[idx];
             const p = { x: 0, y: 0, z: 0 };
-            if (this.axis === 'x') { p.x = cursor - b.min.x; cursor += ext(b, 'x') + this.spacing; }
-            else if (this.axis === 'y') { p.y = cursor - b.max.y; cursor -= ext(b, 'y') + this.spacing; }
+            if (this.axis === 'x') { p.x = cursor - b.min.x; cursor += slot(b, idx) + this.spacing; }
+            else if (this.axis === 'y') { p.y = cursor - b.max.y; cursor -= slot(b, idx) + this.spacing; }
             else { p.z = -k * pitch - b.max.z; }   // deck: slot k recedes −Z (k follows the sequence)
             p[cross] = alignCoord(cross, this.align, crossMax, b);
             p[depth] = alignCoord(depth, this.depthAlign, depthMax, b);
@@ -182,6 +207,38 @@ export default class StackContainer extends THREE.Object3D {
         const size = this._box.getSize(new THREE.Vector3());
         this.userData.size = { x: size.x, y: size.y, z: size.z };
         return { x: size.x, y: size.y, z: size.z };
+    }
+
+    /**
+     * Content size from my children: each non-marker child's measured extent along `axis` (its
+     * own scale folded in). The measure seam a parent uses to size columns/rows to content.
+     * @param {'x'|'y'|'z'} axis
+     * @returns {number[]} per-child extent, in child order
+     */
+    childExtents(axis) {
+        const out = [];
+        for (const c of this.children) {
+            if (c.userData?.isMarker) continue;
+            const b = measuredBox(c);
+            out.push(b.max[axis] - b.min[axis]);
+        }
+        return out;
+    }
+
+    /**
+     * The column track for my children: column i sized to the WIDEST cell-i across my row-children
+     * (each measured along its own main axis). Returns null if there are no rows. @private
+     */
+    _columnTrack(kids) {
+        const track = [];
+        let any = false;
+        for (const row of kids) {
+            if (!row.isStackContainer) continue;
+            any = true;
+            const exts = row.childExtents(AXES[row.axis].main);
+            for (let i = 0; i < exts.length; i++) if (!(exts[i] <= track[i])) track[i] = exts[i];   // NaN/undefined-safe max
+        }
+        return any ? track : null;
     }
 }
 
