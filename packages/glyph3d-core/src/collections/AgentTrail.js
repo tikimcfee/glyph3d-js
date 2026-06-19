@@ -77,12 +77,31 @@ function classify(action) {
     return 'other';
 }
 
+const fmtNum = (n) => (n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'K' : String(n));
+const fmtBytes = (b) => (b >= 1048576 ? (b / 1048576).toFixed(1) + ' MB' : b >= 1024 ? Math.round(b / 1024) + ' KB' : b + ' B');
+
+/** A terse one-line summary of an action's structured meta (lines read/written, +/−, tokens…). */
+function fmtMeta(meta) {
+    if (!meta || typeof meta !== 'object') return '';
+    const p = [];
+    if (meta.lines != null) p.push(`${meta.lines} lines`);
+    if (meta.added != null || meta.removed != null) p.push(`+${meta.added || 0} −${meta.removed || 0}`);
+    if (meta.kind) p.push(String(meta.kind));
+    if (meta.bytes != null) p.push(fmtBytes(meta.bytes));
+    if (meta.tools != null) p.push(`${meta.tools} tools`);
+    if (meta.tokens != null) p.push(`${fmtNum(meta.tokens)} tok`);
+    if (meta.ms != null) p.push(`${(meta.ms / 1000).toFixed(1)}s`);
+    if (meta.interrupted) p.push('interrupted');
+    return p.join(' · ');
+}
+
 function fmtCall(rec) {
-    // The call card carries the action's INPUT only — target path or command. The RESULT/OUTPUT
-    // always lives in the sibling (a file's snapshot, a command's output grid), never on the call.
+    // The call card carries the action's INPUT (target path / command) + a terse META subtitle
+    // (lines read/written, +/−, tokens). The full RESULT/OUTPUT lives in the sibling, never here.
     const head = rec.target || rec.detail || rec.action || '';
     const mid = (rec.target && rec.detail) ? `\n${rec.detail}` : '';
-    return `${head}${mid}`;
+    const meta = fmtMeta(rec.meta);
+    return `${head}${mid}${meta ? `\n${meta}` : ''}`;
 }
 
 function clip(text, maxLines) {

@@ -93,14 +93,14 @@ export default class FieldVisitorManager {
      * present) is what the visitor eases toward; `target` is the human label kept in the log.
      * @param {string} agentId
      * @param {string} agentType
-     * @param {{action:string, target?:string, detail?:string, result?:string, targetGrid?:Object}} record
+     * @param {{action:string, target?:string, detail?:string, result?:string, meta?:Object, targetGrid?:Object}} record
      */
     activity(agentId, agentType, record) {
         const v = this.ensure(agentId, agentType);
         v.setState('active');
         v.clearAttention();              // it's acting → hand lowered
         if (record.targetGrid) v.setTarget(record.targetGrid);
-        const rec = v.note({ action: record.action, target: record.target, detail: record.detail, result: record.result });
+        const rec = v.note({ action: record.action, target: record.target, detail: record.detail, result: record.result, meta: record.meta });
         v.touch();
         this._emitChange();
         this._emitActivity({ agentId, agentType: v.agentType, record: rec, targetGrid: record.targetGrid || null });

@@ -69,9 +69,37 @@ function mapTool(name, input = {}) {
   return { action: t.toLowerCase() || 'act', target: '', detail: JSON.stringify(input) };
 }
 
+// Pull the structured per-tool metadata out of the session's top-level `toolUseResult` — the little
+// details (lines read/written, +/−, tokens) the result TEXT never carries. Shipped as a `meta`
+// object on the activity record; the trail renders it as a terse subtitle.
+function extractMeta(name, tur) {
+  if (!tur || typeof tur !== 'object') return null;
+  const t = String(name || '');
+  if (t === 'Read') {
+    if (tur.file?.numLines != null) return { lines: tur.file.numLines };
+    if (tur.file?.originalSize != null) return { bytes: tur.file.originalSize };
+    return null;
+  }
+  if (t === 'Write') return { kind: tur.type, lines: String(tur.content || '').split('\n').length };
+  if (t === 'Edit' || t === 'MultiEdit') {
+    let added = 0, removed = 0;
+    for (const h of (tur.structuredPatch || [])) for (const ln of (h.lines || [])) { if (ln[0] === '+') added++; else if (ln[0] === '-') removed++; }
+    return { added, removed };
+  }
+  if (t === 'Bash') {
+    const out = String(tur.stdout || '');
+    const m = { lines: out ? out.replace(/\n$/, '').split('\n').length : 0 };
+    if (tur.interrupted) m.interrupted = true;
+    return m;
+  }
+  if (t === 'Task' || t === 'Agent') return { tools: tur.totalToolUseCount, tokens: tur.totalTokens, ms: tur.totalDurationMs };
+  return null;
+}
+
 // --- parse the session JSONL ---
 const lines = fs.readFileSync(sessionPath, 'utf8').split('\n').filter(Boolean);
-const results = new Map();   // tool_use_id -> FULL result text (formatted per-action below)
+const results = new Map();   // tool_use_id -> FULL result text
+const metas = new Map();     // tool_use_id -> structured toolUseResult (per-tool details)
 const raw = [];
 for (const line of lines) {
   let obj; try { obj = JSON.parse(line); } catch { continue; }
@@ -82,7 +110,8 @@ for (const line of lines) {
     else if (b.type === 'tool_result') {
       const c = b.content;
       const txt = typeof c === 'string' ? c : Array.isArray(c) ? c.map((x) => (x.type === 'text' ? x.text : '')).join('\n') : '';
-      results.set(b.tool_use_id, txt);   // store the FULL output (newlines intact); per-action formatting below
+      results.set(b.tool_use_id, txt);
+      if (obj.toolUseResult != null) metas.set(b.tool_use_id, obj.toolUseResult);  // structured details ride alongside
     }
   }
 }
@@ -92,7 +121,8 @@ let mapped = raw.map((a) => {
   // A file action's content IS its snapshot, so it carries no result. A no-target action's output
   // (bash/grep/…) ships RAW — it becomes a sibling output grid that does its own line-splitting.
   const result = m.target ? '' : (results.get(a.id) || '');
-  return { ...m, result };
+  const meta = extractMeta(a.name, metas.get(a.id));   // little details: lines read/written, +/−, tokens
+  return { ...m, result, meta };
 })
   .filter((m) => m.action && m.action !== 'todowrite' && m.action !== 'task_get' && m.action !== 'toolsearch');
 if (flags.limit) mapped = mapped.slice(0, Number(flags.limit));
@@ -137,7 +167,7 @@ if (!flags['no-clear']) { c.send('trail.clear all'); await c.take().catch(() => 
 
 let sent = 0;
 for (const m of mapped) {
-  c.send(enc('agent.activity', agentId(sent), 'claude', m.action, m.target || '', m.detail || '', m.result || ''));
+  c.send(enc('agent.activity', agentId(sent), 'claude', m.action, m.target || '', m.detail || '', m.result || '', m.meta ? JSON.stringify(m.meta) : ''));
   await c.take().catch(() => {});
   if (++sent % 25 === 0) console.error(`[trail-replay] sent ${sent}/${mapped.length}`);
   if (RATE) await sleep(RATE);

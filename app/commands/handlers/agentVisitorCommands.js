@@ -37,13 +37,20 @@ export default function registerAgentVisitorCommands(router) {
         const target = args[3] || '';
         const detail = args[4] || '';
         const result = args[5] || '';
+        // Optional structured per-tool details (lines read/written, +/−, tokens…). The `call` hatch
+        // coerces non-string args to strings, so meta rides as a JSON STRING; accept that or a
+        // direct object. A bare typed line just omits it.
+        let meta = null;
+        const m6 = args[6];
+        if (m6 && typeof m6 === 'object') meta = m6;
+        else if (typeof m6 === 'string' && m6.trim()) { try { meta = JSON.parse(m6); } catch { /* ignore malformed */ } }
         let targetGrid = null;
         let label = target || null;
         if (target) {
             const r = resolveGridByIdOrIndex(ctx, target, 'grid', { byName: true });
             if (!r.error) { targetGrid = r.grid; label = r.registryId || target; }
         }
-        mgr.activity(id, type, { action, target: label, detail, result, targetGrid });
+        mgr.activity(id, type, { action, target: label, detail, result, meta, targetGrid });
         const echo = [label, detail, result].filter(Boolean).join('  ');
         return {
             text: `OK: ${id} ${action}${echo ? ' ' + echo : ''}`,

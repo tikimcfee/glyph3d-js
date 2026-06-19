@@ -89,7 +89,7 @@ export default class FieldVisitor extends AgentGrid {
 
     /**
      * Record an action in the rolling log and refresh the card.
-     * @param {{action:string,target?:string,detail?:string,result?:string}} entry
+     * @param {{action:string,target?:string,detail?:string,result?:string,meta?:Object}} entry
      * @returns {Object} the stored record (with ts)
      */
     note(entry) {
@@ -99,6 +99,7 @@ export default class FieldVisitor extends AgentGrid {
             target: entry.target || '',
             detail: entry.detail || '',
             result: entry.result || '',
+            meta: entry.meta || null,   // structured per-tool details (lines read/written, +/−, tokens…)
         };
         this._actions.push(rec);
         if (this._actions.length > MAX_LOG) this._actions.shift();
