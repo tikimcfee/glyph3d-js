@@ -107,7 +107,7 @@ export function CanvasPicker() {
       if (!ps) return;
       ps._tslReady.then(() => {
         if (cancelled) return;
-        for (const entry of [...registry.findByType('grid'), ...registry.findByType('terminal'), ...registry.findByType('frame')]) {
+        for (const entry of registry.pickables()) {
           const grid = entry.grid;
           if (grid && !wired.has(grid) && typeof grid.setPickingSystem === 'function') {
             wired.add(grid);

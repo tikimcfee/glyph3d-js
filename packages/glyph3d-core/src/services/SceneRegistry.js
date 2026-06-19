@@ -28,6 +28,17 @@ export default class SceneRegistry {
 
         /** @type {Set<Function>} change listeners */
         this._changeListeners = new Set();
+
+        /** @type {Set<string>} types whose entries are pick-targets (hover / click / drag). */
+        this._pickableTypes = new Set(['grid', 'terminal', 'frame']);
+
+        /**
+         * @type {Set<RegistryEntry>} entries of a pickable type — maintained
+         * incrementally on register/unregister so the input layer reads ONE set
+         * instead of re-scanning + concatenating findByType per change (which is O(N)
+         * on every registry mutation → O(N²) over a bulk tree load).
+         */
+        this._pickable = new Set();
     }
 
     // -- Mutation -------------------------------------------------------
@@ -45,6 +56,7 @@ export default class SceneRegistry {
         if (this._entries.has(id)) {
             const existing = this._entries.get(id);
             this._gridToId.delete(existing.grid);
+            this._pickable.delete(existing);
             if (existing.grid !== grid || existing.type !== type) {
                 console.warn(`[registry] overwriting "${id}" (type: ${existing.type} -> ${type})`);
             }
@@ -53,6 +65,7 @@ export default class SceneRegistry {
         const entry = { id, grid, type, meta };
         this._entries.set(id, entry);
         this._gridToId.set(grid, id);
+        if (this._pickableTypes.has(type)) this._pickable.add(entry);
         this._invalidateCache(type);
         return entry;
     }
@@ -67,6 +80,7 @@ export default class SceneRegistry {
         if (!entry) return null;
         this._entries.delete(id);
         this._gridToId.delete(entry.grid);
+        this._pickable.delete(entry);
         this._invalidateCache(entry.type);
         return entry;
     }
@@ -93,6 +107,7 @@ export default class SceneRegistry {
             if (entry.type === type) {
                 this._entries.delete(id);
                 this._gridToId.delete(entry.grid);
+                this._pickable.delete(entry);
                 removed.push(entry);
             }
         }
@@ -196,6 +211,36 @@ export default class SceneRegistry {
      */
     getIdByGrid(grid) {
         return this._gridToId.get(grid) || null;
+    }
+
+    /**
+     * Mark a type as pick-eligible (hover / click / drag), back-filling any entries
+     * already registered under it. New entity types (trail groups, overlays) opt in
+     * HERE instead of editing the input layer's hardcoded type list — one seam.
+     * @param {string} type
+     * @param {boolean} [on=true]
+     * @returns {this}
+     */
+    setPickable(type, on = true) {
+        if (on) {
+            if (this._pickableTypes.has(type)) return this;
+            this._pickableTypes.add(type);
+            for (const e of this._entries.values()) if (e.type === type) this._pickable.add(e);
+        } else {
+            this._pickableTypes.delete(type);
+            for (const e of this._entries.values()) if (e.type === type) this._pickable.delete(e);
+        }
+        return this;
+    }
+
+    /**
+     * Every entry whose type is pick-eligible, as a fresh array. O(pickable count) —
+     * no full-registry rescan, no per-type concat (the hover wire runs this on every
+     * registry change).
+     * @returns {RegistryEntry[]}
+     */
+    pickables() {
+        return [...this._pickable];
     }
 
     /**
