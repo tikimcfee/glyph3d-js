@@ -51,25 +51,22 @@ function latestSession() {
 const sessionPath = (!flags.session || flags.session === 'latest') ? latestSession() : flags.session;
 
 const rel = (p) => (typeof p === 'string' && p.startsWith(REPO) ? p.slice(REPO.length) : p);
-const oneLine = (s, n = 90) => { s = String(s ?? '').replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
-// A multi-line BLOCK (a command / its output): preserve newlines, cap generously — it becomes a
-// grid in the trail, not a one-line tail, so it should carry real structure.
-const clipBlock = (s, n = 16000) => { s = String(s ?? ''); return s.length > n ? s.slice(0, n) + `\n… (+${(s.length - n).toLocaleString()} more chars)` : s; };
-
+// No munging here: a command and its output ship RAW to the trail, which renders them in grids
+// whose layout system already does line-splitting + windowing. Managing size is the layout's job.
 function mapTool(name, input = {}) {
   const t = String(name || '');
   if (t === 'Read') return { action: 'read', target: rel(input.file_path), detail: '' };
   if (t === 'Edit' || t === 'MultiEdit') return { action: 'edit', target: rel(input.file_path), detail: '' };
   if (t === 'Write') return { action: 'write', target: rel(input.file_path), detail: '' };
   if (t === 'NotebookEdit') return { action: 'edit', target: rel(input.notebook_path), detail: '' };
-  if (t === 'Bash') return { action: 'bash', target: '', detail: clipBlock(input.command, 4000) };
-  if (t === 'Grep') return { action: 'grep', target: rel(input.path) || '', detail: oneLine(input.pattern) };
-  if (t === 'Glob') return { action: 'glob', target: '', detail: oneLine(input.pattern) };
-  if (t === 'Task' || t === 'Agent') return { action: 'task', target: '', detail: oneLine(input.subagent_type || input.description) };
-  if (t === 'Workflow') return { action: 'task', target: '', detail: oneLine('workflow: ' + (input.name || (input.script || '').slice(0, 40))) };
-  if (t === 'WebFetch') return { action: 'fetch', target: '', detail: oneLine(input.url) };
-  if (t === 'WebSearch') return { action: 'search', target: '', detail: oneLine(input.query) };
-  return { action: t.toLowerCase() || 'act', target: '', detail: oneLine(JSON.stringify(input)) };
+  if (t === 'Bash') return { action: 'bash', target: '', detail: input.command || '' };
+  if (t === 'Grep') return { action: 'grep', target: rel(input.path) || '', detail: input.pattern || '' };
+  if (t === 'Glob') return { action: 'glob', target: '', detail: input.pattern || '' };
+  if (t === 'Task' || t === 'Agent') return { action: 'task', target: '', detail: input.subagent_type || input.description || '' };
+  if (t === 'Workflow') return { action: 'task', target: '', detail: 'workflow: ' + (input.name || '') };
+  if (t === 'WebFetch') return { action: 'fetch', target: '', detail: input.url || '' };
+  if (t === 'WebSearch') return { action: 'search', target: '', detail: input.query || '' };
+  return { action: t.toLowerCase() || 'act', target: '', detail: JSON.stringify(input) };
 }
 
 // --- parse the session JSONL ---
@@ -92,10 +89,9 @@ for (const line of lines) {
 
 let mapped = raw.map((a) => {
   const m = mapTool(a.name, a.input);
-  const full = results.get(a.id) || '';
-  // File actions: a terse one-line tail (the file SNAPSHOT shows the real content). Output actions
-  // (bash/grep/glob — no file target): the FULL output, which becomes a sibling grid in the trail.
-  const result = m.target ? oneLine(full, 80) : clipBlock(full);
+  // A file action's content IS its snapshot, so it carries no result. A no-target action's output
+  // (bash/grep/…) ships RAW — it becomes a sibling output grid that does its own line-splitting.
+  const result = m.target ? '' : (results.get(a.id) || '');
   return { ...m, result };
 })
   .filter((m) => m.action && m.action !== 'todowrite' && m.action !== 'task_get' && m.action !== 'toolsearch');
