@@ -62,6 +62,36 @@ export class RemoteFileSystemProvider {
     }
 
     /**
+     * Read a whole file as bytes — the image / binary transport. Loops readRange until
+     * EOF, so a large file is fetched in server-capped windows rather than one slurp.
+     * Mirrors getFile()'s path→uri convention. Pass { maxBytes } to stop early (a head
+     * sniff for magic bytes); reads stop at the cap or EOF, whichever comes first.
+     * @param {string} path
+     * @param {{ maxBytes?: number, chunk?: number }} [opts]
+     * @returns {Promise<Uint8Array>}
+     */
+    async getBytes(path, { maxBytes = Infinity, chunk = 1 << 20 } = {}) {
+        const uri = `file:///${path}`;
+        const parts = [];
+        let offset = 0, total = Infinity, size = 0;
+        while (offset < total && size < maxBytes) {
+            const want = Math.min(chunk, maxBytes - size);
+            const r = await this.readRange(uri, offset, want);
+            total = r.totalSize;
+            if (!r.bytes.length) break;          // EOF / empty
+            parts.push(r.bytes);
+            offset += r.bytes.length;
+            size += r.bytes.length;
+            if (r.bytes.length < want) break;    // short read = EOF
+        }
+        if (parts.length === 1) return parts[0];
+        const out = new Uint8Array(size);
+        let p = 0;
+        for (const b of parts) { out.set(b, p); p += b.length; }
+        return out;
+    }
+
+    /**
      * List the full tree from the relay root.
      * @param {string} uri - e.g. "file:///" (root)
      * @param {Object} [options]

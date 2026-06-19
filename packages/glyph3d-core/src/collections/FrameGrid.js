@@ -72,6 +72,10 @@ class FrameGrid extends THREE.Object3D {
         this.scene = scene;
         this.atlas = atlas;
         this.name  = options.name || 'FrameGrid';
+        // The file:// uri this frame was loaded from, when it backs an image file (set by the
+        // image-open path). null for a live capture. Lets the registry index it by sourcePath
+        // (dedup / refresh), same as CodeGrid — a frame from a file is a first-class file entity.
+        this.sourcePath = options.sourcePath || null;
 
         this.cols   = Math.max(1, Math.floor(options.cols ?? 16));
         this.rows   = Math.max(1, Math.floor(options.rows ?? 9));
@@ -314,6 +318,38 @@ class FrameGrid extends THREE.Object3D {
      */
     getRenderer() {
         return this._renderer;
+    }
+
+    /** @returns {string|null} the file:// uri this frame was loaded from, if any. Mirrors CodeGrid. */
+    getSourcePath() {
+        return this.sourcePath || this.userData?.sourcePath || null;
+    }
+
+    /** @param {string} path - file:// uri the registry indexes this frame under. */
+    setSourcePath(path) {
+        this.sourcePath = path;
+    }
+
+    // ── Content-grid duck-typed surface ──────────────────────────────────────────────
+    // When a FrameGrid backs an image FILE it registers as a 'grid' (a first-class file
+    // entity), so the generic grid consumers (grid.list, the file.open summary) call the
+    // same methods they call on a CodeGrid. A frame is a texture, not text, so these report
+    // name / zero — enough to coexist without a special case. (A shared Surface protocol is
+    // the eventual home for this contract; duck-typing is the deliberate stop-gap.)
+
+    /** @returns {string|null} display name. Mirrors CodeGrid.getFilename(). */
+    getFilename() {
+        return this.name || null;
+    }
+
+    /** @returns {number} 0 — a frame has no text lines. Mirrors CodeGrid.getLineCount(). */
+    getLineCount() {
+        return 0;
+    }
+
+    /** @returns {number} 0 — a frame samples a texture; it has no glyphs. Mirrors CodeGrid.getGlyphCount(). */
+    getGlyphCount() {
+        return 0;
     }
 
     // ── Interactive-window interface — position / scale / zoom / border / picking, mirroring

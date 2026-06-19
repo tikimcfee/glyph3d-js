@@ -10,7 +10,7 @@
  * (per-field camera) + SessionStore persistence land next.
  */
 import { box, table } from '../formatResponse.js';
-import { renderSheetGrid } from './fileCommands.js';
+import { renderSheetGrid } from './fileLoader.js';
 
 const dot = (s) => (s.focused ? '●' : s.rendered ? '◐' : '○');  // focused · rendered · open-only
 
