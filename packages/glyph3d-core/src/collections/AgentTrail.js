@@ -77,10 +77,10 @@ function classify(action) {
     return 'other';
 }
 
-function fmtCall(rec) {
+function fmtCall(rec, includeResult = true) {
     const head = rec.target || rec.detail || rec.action || '';
     const mid = (rec.target && rec.detail) ? `\n${rec.detail}` : '';
-    const tail = rec.result ? `\n→ ${rec.result}` : '';
+    const tail = (includeResult && rec.result) ? `\n→ ${rec.result}` : '';
     return `${head}${mid}${tail}`;
 }
 
@@ -127,7 +127,13 @@ export default class AgentTrail {
         const lane = this._lane(agentId);
         const hue = this.cfg.hues[classify(record.action)] || this.cfg.hues.other;
 
-        const call = this._card(`[${record.action || 'act'}]`, fmtCall(record), { gridScale: this.cfg.callScale, textColor: hue });
+        // A no-file-target action with a result (bash/grep/…) splits command from output: the
+        // command headlines the call card, the output becomes a sibling grid. The output is
+        // EPHEMERAL (no path to re-read), so it rides the record — which is why command + output
+        // must arrive un-truncated. File actions keep their terse result as a tail on the call.
+        const pullOutput = !record.target && !!record.result;
+
+        const call = this._card(`[${record.action || 'act'}]`, fmtCall(record, !pullOutput), { gridScale: this.cfg.callScale, textColor: hue });
         const children = [call];
 
         let snapshot = null;
@@ -141,6 +147,9 @@ export default class AgentTrail {
                 snapshot = this._card(record.target, '…', { worldScale: this.cfg.artifactWorldScale });
                 this._loadSnapshot(snapshot, record.target);   // fetch the file AS-OF now
             }
+            children.push(snapshot);
+        } else if (pullOutput) {
+            snapshot = this._outputSnapshot(record);   // the command's output as a sibling grid
             children.push(snapshot);
         }
 
@@ -290,6 +299,19 @@ export default class AgentTrail {
         const grid = new CodeGrid(this.scene, this.atlas, { name: `trail:${filename}`, showFilename: true, showBackground: true, ...opts });
         grid.loadFileAsync(filename, body).then(() => this._relayout()).catch(() => { /* render best-effort */ });
         return grid;
+    }
+
+    /**
+     * Per-action OUTPUT snapshot: a command's result (bash/grep/…) as a sibling text grid — the
+     * command headlines the call card, this is what it produced. Unlike a file the output is
+     * EPHEMERAL (no path to re-read), so it comes straight from the record. Windowed when
+     * snapshotWindow is on, same as file snapshots.
+     */
+    _outputSnapshot(record) {
+        const cmd = String(record.detail || '').split('\n')[0].trim();
+        const title = cmd || `${record.action || 'output'}`;
+        const body = this.cfg.snapshotWindow ? clip(record.result, this.cfg.snapshotRows) : String(record.result ?? '');
+        return this._card(title, body, { worldScale: this.cfg.artifactWorldScale });
     }
 
     /** Per-action snapshot: the file's content AS-OF this moment (the repo falls out of the action). */

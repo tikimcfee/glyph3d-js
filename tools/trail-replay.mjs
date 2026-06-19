@@ -52,6 +52,9 @@ const sessionPath = (!flags.session || flags.session === 'latest') ? latestSessi
 
 const rel = (p) => (typeof p === 'string' && p.startsWith(REPO) ? p.slice(REPO.length) : p);
 const oneLine = (s, n = 90) => { s = String(s ?? '').replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
+// A multi-line BLOCK (a command / its output): preserve newlines, cap generously — it becomes a
+// grid in the trail, not a one-line tail, so it should carry real structure.
+const clipBlock = (s, n = 16000) => { s = String(s ?? ''); return s.length > n ? s.slice(0, n) + `\n… (+${(s.length - n).toLocaleString()} more chars)` : s; };
 
 function mapTool(name, input = {}) {
   const t = String(name || '');
@@ -59,7 +62,7 @@ function mapTool(name, input = {}) {
   if (t === 'Edit' || t === 'MultiEdit') return { action: 'edit', target: rel(input.file_path), detail: '' };
   if (t === 'Write') return { action: 'write', target: rel(input.file_path), detail: '' };
   if (t === 'NotebookEdit') return { action: 'edit', target: rel(input.notebook_path), detail: '' };
-  if (t === 'Bash') return { action: 'bash', target: '', detail: oneLine(input.command) };
+  if (t === 'Bash') return { action: 'bash', target: '', detail: clipBlock(input.command, 4000) };
   if (t === 'Grep') return { action: 'grep', target: rel(input.path) || '', detail: oneLine(input.pattern) };
   if (t === 'Glob') return { action: 'glob', target: '', detail: oneLine(input.pattern) };
   if (t === 'Task' || t === 'Agent') return { action: 'task', target: '', detail: oneLine(input.subagent_type || input.description) };
@@ -71,7 +74,7 @@ function mapTool(name, input = {}) {
 
 // --- parse the session JSONL ---
 const lines = fs.readFileSync(sessionPath, 'utf8').split('\n').filter(Boolean);
-const results = new Map();   // tool_use_id -> first line of its result
+const results = new Map();   // tool_use_id -> FULL result text (formatted per-action below)
 const raw = [];
 for (const line of lines) {
   let obj; try { obj = JSON.parse(line); } catch { continue; }
@@ -81,13 +84,20 @@ for (const line of lines) {
     if (b.type === 'tool_use') raw.push({ id: b.id, name: b.name, input: b.input || {} });
     else if (b.type === 'tool_result') {
       const c = b.content;
-      const txt = typeof c === 'string' ? c : Array.isArray(c) ? c.map((x) => (x.type === 'text' ? x.text : '')).join(' ') : '';
-      results.set(b.tool_use_id, oneLine(txt, 70));
+      const txt = typeof c === 'string' ? c : Array.isArray(c) ? c.map((x) => (x.type === 'text' ? x.text : '')).join('\n') : '';
+      results.set(b.tool_use_id, txt);   // store the FULL output (newlines intact); per-action formatting below
     }
   }
 }
 
-let mapped = raw.map((a) => ({ ...mapTool(a.name, a.input), result: results.get(a.id) || '' }))
+let mapped = raw.map((a) => {
+  const m = mapTool(a.name, a.input);
+  const full = results.get(a.id) || '';
+  // File actions: a terse one-line tail (the file SNAPSHOT shows the real content). Output actions
+  // (bash/grep/glob — no file target): the FULL output, which becomes a sibling grid in the trail.
+  const result = m.target ? oneLine(full, 80) : clipBlock(full);
+  return { ...m, result };
+})
   .filter((m) => m.action && m.action !== 'todowrite' && m.action !== 'task_get' && m.action !== 'toolsearch');
 if (flags.limit) mapped = mapped.slice(0, Number(flags.limit));
 
