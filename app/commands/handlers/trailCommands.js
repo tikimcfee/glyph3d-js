@@ -43,7 +43,10 @@ export default function registerTrailCommands(router) {
         if (args.length < 2) return { text: `trail cfg: ${JSON.stringify(t.cfg)}`, data: t.cfg };
         const [key, val] = args;
         const n = Number(val);
-        t.cfg[key] = Number.isFinite(n) ? n : val;
+        // booleans first ("false" is a truthy string and Number("false") is NaN),
+        // then numbers, else the raw string.
+        t.cfg[key] = (val === 'true' || val === 'false') ? (val === 'true')
+                   : Number.isFinite(n) ? n : val;
         t._relayout?.();   // re-flow the existing trail immediately
         return { text: `OK: trail.${key} = ${t.cfg[key]} (re-flowed)`, data: { [key]: t.cfg[key] } };
     }, { description: 'Get or set a trail layout constant — re-flows the trail live', usage: '[key value]' });

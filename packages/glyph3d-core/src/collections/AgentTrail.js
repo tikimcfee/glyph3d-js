@@ -31,7 +31,8 @@ export const TRAIL_DEFAULTS = {
     align: 0,                   // corridor cross-align: 0 = leading edge (tiny calls + big stacks share a left edge)
     callScale: 3.0,             // gridScale for call cards — the readable HEADLINE (big glyphs, few lines)
     artifactWorldScale: 0.025,  // worldScale for snapshot cards (fine-print document you fly into)
-    snapshotRows: 28,           // window: visible lines per snapshot — tames the jagged skyline into a rhythm
+    snapshotWindow: false,      // OFF by default → load the WHOLE file (an edit touches all of it; show everything)
+    snapshotRows: 28,           // visible-line cap — used ONLY when snapshotWindow is on
     maxConnections: 512,        // tether budget
     showTethers: true,          // draw a call→snapshot beam per moment
 
@@ -248,7 +249,7 @@ export default class AgentTrail {
     /** Per-action snapshot: the file's content AS-OF this moment (the repo falls out of the action). */
     _loadSnapshot(grid, path) {
         Promise.resolve(this.ctx.fileProvider?.getFile?.(path))
-            .then((content) => grid.loadFileAsync(path, clip(content, this.cfg.snapshotRows)))
+            .then((content) => grid.loadFileAsync(path, this.cfg.snapshotWindow ? clip(content, this.cfg.snapshotRows) : String(content ?? '')))
             .then(() => this._relayout())
             .catch(() => grid.loadFileAsync(path, '(could not load)').then(() => this._relayout()).catch(() => {}));
     }
