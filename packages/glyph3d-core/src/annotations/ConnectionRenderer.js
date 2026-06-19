@@ -9,13 +9,21 @@ const ARROW_HALF_ANGLE = Math.PI / 7;  // ~25 degrees
 const ARROW_LENGTH_RATIO = 0.12;       // arrowhead = 12% of connection length
 
 /**
+ * @typedef {{ object: import('three').Object3D, local?: { x, y, z } }} Anchor
+ *   a point PINNED inside an object's local space — resolved to world each frame so
+ *   the connection follows the object (drag, relayout, scroll) for free.
+ */
+
+/**
  * @typedef {Object} ConnectionEntry
  * @property {number} slot
- * @property {{ x, y, z }} from
- * @property {{ x, y, z }} to
+ * @property {{ x, y, z }|null} from - literal world point (static endpoint), or null if bound
+ * @property {{ x, y, z }|null} to
+ * @property {Anchor|null} fromAnchor - bound endpoint (follows its object), or null if static
+ * @property {Anchor|null} toAnchor
  * @property {{ r, g, b }} color
- * @property {Object|null} fromGrid - CodeGrid or null
- * @property {Object|null} toGrid   - CodeGrid or null
+ * @property {Object|null} fromGrid - visibility ref for a STATIC endpoint
+ * @property {Object|null} toGrid
  * @property {boolean} visible
  */
 
@@ -24,12 +32,27 @@ const ARROW_LENGTH_RATIO = 0.12;       // arrowhead = 12% of connection length
  * All connections share one THREE.LineSegments geometry — one draw call total.
  * Supports arrowheads, frustum-aware visibility, and partial buffer uploads.
  *
+ * Each endpoint is EITHER a literal world point {x,y,z} (static) OR an ANCHOR — an
+ * Object3D (or { object, local }) the endpoint is pinned to. Bound endpoints resolve
+ * their world position from the object's matrix every refresh(), so the line follows
+ * the object through drags/relayout without the caller re-setting positions. (You
+ * can't scene-parent a batched line — its two ends follow two different parents — so
+ * binding-and-resolving is the parenting.)
+ *
  * Usage:
  *   const cr = new ConnectionRenderer(scene);
- *   cr.set('my-link', from, to, color, { fromGrid, toGrid });
- *   // in animate loop, after virtualizer.update():
- *   cr.refreshVisibility();
+ *   cr.set('static', fromPoint, toPoint, color, { fromGrid, toGrid });  // frozen
+ *   cr.set('bound',  callGrid,  snapGrid,  color);                       // follows the grids
+ *   // each frame: cr.refresh();
  */
+/** Normalize an endpoint arg into an Anchor, or null if it's a literal {x,y,z} point. */
+function _asAnchor(ep) {
+    if (!ep) return null;
+    if (ep.isObject3D) return { object: ep };                                  // a bare Object3D
+    if (ep.object?.isObject3D) return { object: ep.object, local: ep.local || null };
+    return null;                                                              // literal world point
+}
+
 export default class ConnectionRenderer {
     /**
      * @param {THREE.Scene} scene
@@ -70,18 +93,23 @@ export default class ConnectionRenderer {
         this._mesh.frustumCulled = false; // connections span arbitrary world space
         this._mesh.renderOrder = RENDER_ORDER.CONNECTION;       // draw on top of grid quads
         scene.add(this._mesh);
+
+        this._tmpA = new THREE.Vector3();   // scratch for anchor resolution
+        this._tmpB = new THREE.Vector3();
     }
 
     /**
      * Add or replace a connection. Idempotent: same id -> same visual result.
-     * Stores grid references for frustum-aware visibility via refreshVisibility().
+     * Bound endpoints (Object3D / anchor) follow their object each refresh(); literal
+     * points stay put and cull via opts.fromGrid/toGrid.
      * @param {string} id - stable identifier (e.g. 'call:foo->bar')
-     * @param {{ x, y, z }} from - world-space start point
-     * @param {{ x, y, z }} to   - world-space end point
+     * @param {{ x, y, z }|import('three').Object3D|Anchor} from - a literal world point,
+     *   an Object3D, or an { object, local } anchor. Anchors follow their object each refresh().
+     * @param {{ x, y, z }|import('three').Object3D|Anchor} to
      * @param {{ r, g, b }} color
      * @param {Object} [opts]
-     * @param {Object|null} [opts.fromGrid] - source CodeGrid (for frustum check)
-     * @param {Object|null} [opts.toGrid]   - target CodeGrid (for frustum check)
+     * @param {Object|null} [opts.fromGrid] - visibility ref for a STATIC endpoint (anchors self-cull)
+     * @param {Object|null} [opts.toGrid]
      * @returns {string} id
      */
     set(id, from, to, color, { fromGrid, toGrid } = {}) {
@@ -92,15 +120,20 @@ export default class ConnectionRenderer {
                 console.warn('[ConnectionRenderer] MAX_CONNECTIONS reached, dropping:', id);
                 return id;
             }
-            entry = { slot, from: null, to: null, color: null, fromGrid: null, toGrid: null, visible: true };
+            entry = { slot, from: null, to: null, fromAnchor: null, toAnchor: null, color: null, fromGrid: null, toGrid: null, visible: true };
             this._connections.set(id, entry);
         }
-        entry.from = from;
-        entry.to = to;
+        entry.fromAnchor = _asAnchor(from);
+        entry.toAnchor   = _asAnchor(to);
+        entry.from = entry.fromAnchor ? null : from;
+        entry.to   = entry.toAnchor   ? null : to;
         entry.color = color;
         if (fromGrid !== undefined) entry.fromGrid = fromGrid;
         if (toGrid !== undefined) entry.toGrid = toGrid;
-        this._writeSlot(entry.slot, from, to, color);
+        // Draw once now (bound endpoints get re-resolved every refresh()).
+        const f = entry.fromAnchor ? this._resolveAnchor(entry.fromAnchor, this._tmpA) : from;
+        const t = entry.toAnchor   ? this._resolveAnchor(entry.toAnchor, this._tmpB)   : to;
+        this._writeSlot(entry.slot, f, t, color);
         this._refreshDrawRange();
         return id;
     }
@@ -153,20 +186,33 @@ export default class ConnectionRenderer {
     }
 
     /**
-     * Called each frame after virtualizer.update(). Hides connections whose grids are
-     * off-screen (grid.parent === null) and restores them when grids re-appear.
+     * Called each frame. For BOUND connections, re-resolves both endpoints from their
+     * anchor objects' current world matrices and rewrites the slot (this is what makes
+     * a tether follow a dragged corridor). For STATIC connections, only rewrites on a
+     * visibility transition. Either way, culls when an endpoint's object leaves the
+     * scene (parent === null) and restores it when it returns.
      */
-    refreshVisibility() {
+    refresh() {
         for (const [, entry] of this._connections) {
-            const shouldShow = (!entry.fromGrid || entry.fromGrid.parent !== null)
-                            && (!entry.toGrid   || entry.toGrid.parent   !== null);
-            if (shouldShow !== entry.visible) {
-                entry.visible = shouldShow;
-                if (shouldShow) {
-                    this._writeSlot(entry.slot, entry.from, entry.to, entry.color);
-                } else {
-                    this._zeroSlot(entry.slot);
-                }
+            const fromObj = entry.fromAnchor?.object || entry.fromGrid;
+            const toObj   = entry.toAnchor?.object   || entry.toGrid;
+            const shouldShow = (!fromObj || fromObj.parent !== null)
+                            && (!toObj   || toObj.parent   !== null);
+
+            if (!shouldShow) {
+                if (entry.visible) { entry.visible = false; this._zeroSlot(entry.slot); }
+                continue;
+            }
+            if (entry.fromAnchor || entry.toAnchor) {
+                // Bound: resolve live world positions and rewrite every frame.
+                const f = entry.fromAnchor ? this._resolveAnchor(entry.fromAnchor, this._tmpA) : entry.from;
+                const t = entry.toAnchor   ? this._resolveAnchor(entry.toAnchor, this._tmpB)   : entry.to;
+                entry.visible = true;
+                this._writeSlot(entry.slot, f, t, entry.color);
+            } else if (!entry.visible) {
+                // Static: just re-entered the frustum.
+                entry.visible = true;
+                this._writeSlot(entry.slot, entry.from, entry.to, entry.color);
             }
         }
     }
@@ -189,6 +235,24 @@ export default class ConnectionRenderer {
     }
 
     // -- private ----------------------------------------------------------
+
+    /**
+     * Resolve a bound anchor to its current world position (into `out`). Freshens the
+     * object's transform chain (parents only — skips its heavy descendant grids) so a
+     * mid-drag read is zero-lag.
+     * @param {Anchor} anchor
+     * @param {THREE.Vector3} out
+     * @returns {THREE.Vector3}
+     * @private
+     */
+    _resolveAnchor(anchor, out) {
+        const obj = anchor.object;
+        obj.updateWorldMatrix(true, false);
+        const lo = anchor.local;
+        return lo
+            ? out.set(lo.x || 0, lo.y || 0, lo.z || 0).applyMatrix4(obj.matrixWorld)
+            : out.setFromMatrixPosition(obj.matrixWorld);
+    }
 
     /**
      * Write shaft + arrowhead vertices for a slot.

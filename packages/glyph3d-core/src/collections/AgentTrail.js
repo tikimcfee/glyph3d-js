@@ -77,11 +77,12 @@ function classify(action) {
     return 'other';
 }
 
-function fmtCall(rec, includeResult = true) {
+function fmtCall(rec) {
+    // The call card carries the action's INPUT only — target path or command. The RESULT/OUTPUT
+    // always lives in the sibling (a file's snapshot, a command's output grid), never on the call.
     const head = rec.target || rec.detail || rec.action || '';
     const mid = (rec.target && rec.detail) ? `\n${rec.detail}` : '';
-    const tail = (includeResult && rec.result) ? `\n→ ${rec.result}` : '';
-    return `${head}${mid}${tail}`;
+    return `${head}${mid}`;
 }
 
 function clip(text, maxLines) {
@@ -127,13 +128,13 @@ export default class AgentTrail {
         const lane = this._lane(agentId);
         const hue = this.cfg.hues[classify(record.action)] || this.cfg.hues.other;
 
-        // A no-file-target action with a result (bash/grep/…) splits command from output: the
-        // command headlines the call card, the output becomes a sibling grid. The output is
-        // EPHEMERAL (no path to re-read), so it rides the record — which is why command + output
-        // must arrive un-truncated. File actions keep their terse result as a tail on the call.
+        // One home each: the call card holds the action's INPUT (target / command); the RESULT
+        // lives in a sibling. A file's content is its snapshot; a no-target action's output
+        // (bash/grep/…) becomes its own output grid. The output is EPHEMERAL (no path to re-read),
+        // so it rides the record raw — the grid's layout system splits/lays it out, not us.
         const pullOutput = !record.target && !!record.result;
 
-        const call = this._card(`[${record.action || 'act'}]`, fmtCall(record, !pullOutput), { gridScale: this.cfg.callScale, textColor: hue });
+        const call = this._card(`[${record.action || 'act'}]`, fmtCall(record), { gridScale: this.cfg.callScale, textColor: hue });
         const children = [call];
 
         let snapshot = null;
@@ -155,7 +156,11 @@ export default class AgentTrail {
 
         const moment = new HStack({ spacing: this.cfg.railGap, children });
         lane.corridor.add(moment);
-        lane.moments.push({ moment, call, snapshot, hue, tetherId: snapshot ? `tether:${agentId}:${lane.seq}` : null });
+        const tetherId = snapshot ? `tether:${agentId}:${lane.seq}` : null;
+        lane.moments.push({ moment, call, snapshot, hue, tetherId });
+        // BIND the tether to the two cards — it resolves their world positions each
+        // frame, so it follows layout, scroll, and corridor drags with no re-tether.
+        if (tetherId) this.conn.set(tetherId, call, snapshot, hue);
         lane.seq++;
         this._relayout();
     }
@@ -175,7 +180,7 @@ export default class AgentTrail {
         return true;
     }
 
-    update() { this.conn.refreshVisibility(); }
+    update() { this.conn.refresh(); }
 
     clear(which = 'all') {
         const kill = (lane) => {
@@ -256,8 +261,7 @@ export default class AgentTrail {
         lane.pinned = true;
         lane.pinnedPos = new THREE.Vector3(x, y, z);
         lane.corridor.position.copy(lane.pinnedPos);
-        if (this.cfg.showTethers) this._retether();
-        return true;
+        return true;   // the bound tethers follow the corridor on the next refresh()
     }
 
     /** A translucent identity box + wireframe frame, in the ContentTreeMarkers prism style. */
@@ -308,10 +312,10 @@ export default class AgentTrail {
      * snapshotWindow is on, same as file snapshots.
      */
     _outputSnapshot(record) {
-        const cmd = String(record.detail || '').split('\n')[0].trim();
-        const title = cmd || `${record.action || 'output'}`;
+        // The output ONLY — the command lives on the call card, never echoed here (one home each).
+        // Raw text to the grid; its layout system does the line-splitting (windowing is a primitive).
         const body = this.cfg.snapshotWindow ? clip(record.result, this.cfg.snapshotRows) : String(record.result ?? '');
-        return this._card(title, body, { worldScale: this.cfg.artifactWorldScale });
+        return this._card('output', body, { worldScale: this.cfg.artifactWorldScale });
     }
 
     /** Per-action snapshot: the file's content AS-OF this moment (the repo falls out of the action). */
@@ -360,19 +364,7 @@ export default class AgentTrail {
             if (lane.pinned && lane.pinnedPos) lane.corridor.position.copy(lane.pinnedPos);
         }
         this._updateCorridorBoxes();
-        if (this.cfg.showTethers) this._retether();
-    }
-
-    _retether() {
-        const a = new THREE.Vector3(), b = new THREE.Vector3();
-        for (const lane of this.lanes.values()) {
-            for (const e of lane.moments) {
-                if (!e.snapshot || !e.tetherId) continue;
-                e.call.getWorldPosition(a);
-                e.snapshot.getWorldPosition(b);
-                this.conn.set(e.tetherId, { x: a.x, y: a.y, z: a.z }, { x: b.x, y: b.y, z: b.z }, e.hue, { fromGrid: e.call, toGrid: e.snapshot });
-            }
-        }
+        this.conn.setVisible(this.cfg.showTethers);   // positions are bound; this just toggles the beam
     }
 
     /** Drop the corridor root in front of the camera once, so the trail builds in view. */
