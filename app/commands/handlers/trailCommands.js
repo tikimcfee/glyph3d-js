@@ -37,6 +37,17 @@ export default function registerTrailCommands(router) {
             : { text: 'ERR: no trail to frame', data: null };
     }, { description: 'Point the camera at an agent corridor', usage: '[agentId]' });
 
+    router.register('trail.move', (args, ctx) => {
+        const t = ctx.agentTrail;
+        if (!t) return noTrail;
+        if (args.length < 4) return { text: 'ERR: usage: trail.move <id> <x> <y> <z>', data: null };
+        const [id, x, y, z] = args;
+        const ok = t.moveGroup?.(id, Number(x) || 0, Number(y) || 0, Number(z) || 0);
+        return ok
+            ? { text: `OK: moved ${id}`, data: { id, x: Number(x) || 0, y: Number(y) || 0, z: Number(z) || 0 } }
+            : { text: `ERR: no trail group '${id}'`, data: null };
+    }, { description: 'Reposition (pin) an agent corridor — drag-release / CLI', usage: '<id> <x> <y> <z>' });
+
     router.register('trail.config', (args, ctx) => {
         const t = ctx.agentTrail;
         if (!t) return noTrail;

@@ -47,6 +47,12 @@ const RECORDS = {
     },
     moveVerb: 'grid.move',
   },
+  'trail.group': {
+    // An agent corridor: drag the identity box to reposition the whole deck. Ephemeral
+    // observation state, so the move verb pins it in-place (no workspace persistence) and
+    // there's no wheel-scroll — the wheel stays the camera's.
+    moveVerb: 'trail.move',
+  },
 };
 
 /**

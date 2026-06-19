@@ -175,7 +175,11 @@ export default class AgentTrail {
                 for (const g of [e.call, e.snapshot]) { if (g) { try { g.parent?.remove(g); g.dispose?.(); } catch (_e) { /* best effort */ } } }
                 try { lane.corridor.remove(e.moment); } catch (_e) { /* best effort */ }
             }
-            if (lane.box) { try { lane.box.mesh.parent?.remove(lane.box.mesh); lane.box.fill.dispose(); lane.box.edge.dispose(); } catch (_e) { /* best effort */ } }
+            if (lane.groupId) { try { this.ctx.registry?.unregister?.(lane.groupId); } catch (_e) { /* best effort */ } }
+            if (lane.box) {
+                try { this.ctx.pickingSystem?.unregister?.('grid', lane.box.mesh); } catch (_e) { /* best effort */ }
+                try { lane.box.mesh.parent?.remove(lane.box.mesh); lane.box.fill.dispose(); lane.box.edge.dispose(); } catch (_e) { /* best effort */ }
+            }
             this.root.remove(lane.corridor);
         };
         if (!which || which === 'all') {
@@ -209,10 +213,42 @@ export default class AgentTrail {
             const hueIdx = this.lanes.size;
             const box = this._makeCorridorBox(this.cfg.corridorPalette[hueIdx % this.cfg.corridorPalette.length]);
             corridor.add(box.mesh);   // parented IN → rides transforms; isMarker → StackContainer.layout skips it
-            lane = { corridor, seq: 0, moments: [], box, hueIdx };
+            lane = { corridor, seq: 0, moments: [], box, hueIdx, groupId: `trail:group:${agentId}`, pinned: false, pinnedPos: null };
             this.lanes.set(agentId, lane);
+            this._registerGroup(lane);
         }
         return lane;
+    }
+
+    /**
+     * Make a corridor a draggable GROUP. The identity box is the pick HANDLE: registered on
+     * the 'grid' channel with the corridor NODE as its token, and the corridor itself is a
+     * registry entry of type 'trail.group'. So a hover-pick of the box resolves (getIdByGrid)
+     * to this entry → ObjectDragger Ctrl-drags entry.grid (the node) → the whole deck follows
+     * by parenting. Release routes through trail.move (ephemeral — no workspace persistence).
+     */
+    _registerGroup(lane) {
+        this.ctx.registry?.register?.(lane.groupId, lane.corridor, { type: 'trail.group' });
+        const ps = this.ctx.pickingSystem;
+        if (!ps) return;
+        Promise.resolve(ps._tslReady).then(() => {
+            try { ps.register('grid', lane.box.mesh, lane.corridor); }
+            catch (e) { console.warn('[AgentTrail] group pick register failed', e); }
+        });
+    }
+
+    /**
+     * Pin a corridor to a user position (drag-release / CLI). Once grabbed it's USER-PLACED —
+     * `_relayout` flows the other corridors around it instead of re-snapping it to its slot.
+     */
+    moveGroup(id, x, y, z) {
+        const lane = [...this.lanes.values()].find((l) => l.groupId === id);
+        if (!lane) return false;
+        lane.pinned = true;
+        lane.pinnedPos = new THREE.Vector3(x, y, z);
+        lane.corridor.position.copy(lane.pinnedPos);
+        if (this.cfg.showTethers) this._retether();
+        return true;
     }
 
     /** A translucent identity box + wireframe frame, in the ContentTreeMarkers prism style. */
@@ -296,6 +332,11 @@ export default class AgentTrail {
             for (const e of lane.moments) e.moment.spacing = this.cfg.railGap;
         }
         this.root.layout();
+        // A pinned (user-dragged) corridor overrides its auto-layout slot — the HStack
+        // still reserves the slot, so the others flow around the gap it left.
+        for (const lane of this.lanes.values()) {
+            if (lane.pinned && lane.pinnedPos) lane.corridor.position.copy(lane.pinnedPos);
+        }
         this._updateCorridorBoxes();
         if (this.cfg.showTethers) this._retether();
     }
