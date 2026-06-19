@@ -20,9 +20,11 @@
 
 import * as THREE from 'three';
 import CodeGrid from './CodeGrid.js';
+import FrameGrid from './FrameGrid.js';
 import ConnectionRenderer from '../annotations/ConnectionRenderer.js';
 import { HStack, ZStack } from './layouts/StackContainer.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
+import { classifyByExtension } from '../core/fileKind.js';
 
 export const TRAIL_DEFAULTS = {
     zPitch: 90,                 // ZStack deck pitch between moments (time depth) — fly-through room
@@ -33,6 +35,7 @@ export const TRAIL_DEFAULTS = {
     artifactWorldScale: 0.025,  // worldScale for snapshot cards (fine-print document you fly into)
     snapshotWindow: false,      // OFF by default → load the WHOLE file (an edit touches all of it; show everything)
     snapshotRows: 28,           // visible-line cap — used ONLY when snapshotWindow is on
+    snapshotImageWidth: 40,     // world width of an image snapshot quad (height follows aspect)
     maxConnections: 512,        // tether budget
     showTethers: true,          // draw a call→snapshot beam per moment
 
@@ -129,8 +132,15 @@ export default class AgentTrail {
 
         let snapshot = null;
         if (record.target) {
-            snapshot = this._card(record.target, '…', { worldScale: this.cfg.artifactWorldScale });
-            this._loadSnapshot(snapshot, record.target);   // fetch the file AS-OF now
+            // A snapshot is whatever the target file IS, as-of now: an image renders as a frame,
+            // everything else as a text/hex card (same classifier as file.open — [[fileLoader]]).
+            const kind = classifyByExtension(record.target);
+            if (kind?.kind === 'image') {
+                snapshot = this._imageSnapshot(record.target, kind.format);
+            } else {
+                snapshot = this._card(record.target, '…', { worldScale: this.cfg.artifactWorldScale });
+                this._loadSnapshot(snapshot, record.target);   // fetch the file AS-OF now
+            }
             children.push(snapshot);
         }
 
@@ -252,6 +262,27 @@ export default class AgentTrail {
             .then((content) => grid.loadFileAsync(path, this.cfg.snapshotWindow ? clip(content, this.cfg.snapshotRows) : String(content ?? '')))
             .then(() => this._relayout())
             .catch(() => grid.loadFileAsync(path, '(could not load)').then(() => this._relayout()).catch(() => {}));
+    }
+
+    /**
+     * Per-action IMAGE snapshot: a single-cell FrameGrid sampling the file's pixels AS-OF now —
+     * an empty quad placed immediately (so the moment lays out), filled async once the bytes
+     * decode. Shares FrameGrid.textureFromImageBytes + provider.getBytes with file.open's image
+     * path; cols:1/rows:1 keeps it one quad over a full-res texture (never pixel-dim cells).
+     */
+    _imageSnapshot(path, format) {
+        const grid = new FrameGrid(this.scene, this.atlas, { name: `trail:${path}`, cols: 1, rows: 1, width: this.cfg.snapshotImageWidth });
+        Promise.resolve(this.ctx.fileProvider?.getBytes?.(path))
+            .then((bytes) => bytes && FrameGrid.textureFromImageBytes(bytes, format))
+            .then((res) => {
+                if (res) {
+                    grid.setFrameTexture(res.texture);
+                    if (res.width > 0 && res.height > 0) grid.setAspect(res.width / res.height);
+                }
+                this._relayout();
+            })
+            .catch(() => this._relayout());
+        return grid;
     }
 
     /** Re-run the whole stack tree (idempotent) and refresh the tethers off the new positions. */

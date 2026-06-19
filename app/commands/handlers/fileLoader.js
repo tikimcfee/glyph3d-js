@@ -26,12 +26,11 @@
  *   addUnfetchedGrid(ctx, path, bytes)  register an oversize file as a placeholder from metadata
  */
 
-import * as THREE from 'three';
 import CodeGrid from '@glyph3d/core/collections/CodeGrid.js';
 import FrameGrid from '@glyph3d/core/collections/FrameGrid.js';
 import { gridTheme } from '../../client/settings.js';
 import { unreadableReason, READABLE_MAX_CHARS, READABLE_MAX_LINE_CHARS } from '@glyph3d/core';
-import { classifyByExtension, classifyBytes, mimeForFormat } from '@glyph3d/core';
+import { classifyByExtension, classifyBytes } from '@glyph3d/core';
 import { bytesToHexView } from '@glyph3d/core/memory/hexView.js';
 
 const SNIFF_BYTES = 4096;        // head window for the magic-bytes + UTF-8 probe (doubles as the hex block)
@@ -95,19 +94,7 @@ export function addUnfetchedGrid(ctx, path, bytes) {
 }
 
 // ── image grids ─────────────────────────────────────────────────────────────────────────
-
-/** Decode image bytes → a WebGPU-ready texture (mirrors the capture path's filter/colorspace dials). */
-async function imageTextureFromBytes(bytes, kind) {
-    const blob = new Blob([bytes], { type: mimeForFormat(kind.format) });
-    const bitmap = await createImageBitmap(blob);
-    const texture = new THREE.Texture(bitmap);
-    texture.minFilter = THREE.LinearFilter;
-    texture.magFilter = THREE.LinearFilter;
-    texture.generateMipmaps = false;
-    texture.colorSpace = THREE.SRGBColorSpace;   // same WebGPU path as the VideoTexture capture
-    texture.needsUpdate = true;
-    return { texture, width: bitmap.width, height: bitmap.height };
-}
+// Decode lives in FrameGrid.textureFromImageBytes (core) so the trail's image snapshots share it.
 
 /** Create + register an image as a single-cell FrameGrid — the texture carries the pixels, NOT the cells. */
 function registerImageGrid(ctx, path, texture, width, height, kind) {
@@ -177,7 +164,7 @@ async function renderTextSheet(ctx, path, uri) {
 async function renderImageSheet(ctx, path, uri, kind) {
     if (typeof ctx.fileProvider.getBytes !== 'function') throw new Error('image open needs the relay file source');
     const bytes = await ctx.fileProvider.getBytes(path);
-    const { texture, width, height } = await imageTextureFromBytes(bytes, kind);
+    const { texture, width, height } = await FrameGrid.textureFromImageBytes(bytes, kind.format);
     return registerImageGrid(ctx, path, texture, width, height, kind) ?? racedId(ctx, uri);
 }
 

@@ -28,6 +28,7 @@ import GlyphField from '../GlyphField.js';
 import ScaleModel from './ScaleModel.js';
 import { createPanelMaterial } from './panelMaterial.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
+import { mimeForFormat } from '../core/fileKind.js';
 
 class FrameGrid extends THREE.Object3D {
     /**
@@ -225,6 +226,27 @@ class FrameGrid extends THREE.Object3D {
     }
 
     /**
+     * Decode raw image bytes → a WebGPU-ready texture (filterable RGBA, SRGB, no mipmaps). The
+     * single home for "image bytes → a frame texture", shared by file.open's image path AND the
+     * agent trail's image snapshots — the decode dials live in ONE place. Returns the texture plus
+     * the source pixel dims (for aspect + registry type metadata).
+     * @param {Uint8Array} bytes
+     * @param {string} [format='png'] - the FileKind.format token (png/jpeg/gif/webp/bmp)
+     * @returns {Promise<{ texture: THREE.Texture, width: number, height: number }>}
+     */
+    static async textureFromImageBytes(bytes, format = 'png') {
+        const blob = new Blob([bytes], { type: mimeForFormat(format) });
+        const bitmap = await createImageBitmap(blob);
+        const texture = new THREE.Texture(bitmap);
+        texture.minFilter = THREE.LinearFilter;
+        texture.magFilter = THREE.LinearFilter;
+        texture.generateMipmaps = false;
+        texture.colorSpace = THREE.SRGBColorSpace;   // matches the VideoTexture capture path
+        texture.needsUpdate = true;
+        return { texture, width: bitmap.width, height: bitmap.height };
+    }
+
+    /**
      * Attach the full capture source so dispose() can stop it. The texture is applied
      * immediately; the stream/video are retained only for teardown.
      * @param {{texture: THREE.Texture, stream?: MediaStream, video?: HTMLVideoElement}} source
@@ -298,6 +320,17 @@ class FrameGrid extends THREE.Object3D {
             new THREE.Vector3(-hw, -hh, -0.5),
             new THREE.Vector3( hw,  hh,  0.5),
         );
+    }
+
+    /**
+     * Frame-independent LOCAL content box for the stack-layout DSL — StackContainer's leafBox
+     * reads layoutBounds() first, else falls back to userData.size (a 1×1 mock). Same box as
+     * getLocalBounds(); the alias is the duck-typed contract CodeGrid also satisfies, so a
+     * FrameGrid can be a child in an HStack/VStack/ZStack (e.g. an image snapshot in the trail).
+     * @returns {THREE.Box3}
+     */
+    layoutBounds() {
+        return this.getLocalBounds();
     }
 
     /**
