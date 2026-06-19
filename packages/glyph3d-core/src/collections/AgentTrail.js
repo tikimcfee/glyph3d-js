@@ -22,17 +22,33 @@ import * as THREE from 'three';
 import CodeGrid from './CodeGrid.js';
 import ConnectionRenderer from '../annotations/ConnectionRenderer.js';
 import { HStack, ZStack } from './layouts/StackContainer.js';
+import { RENDER_ORDER } from '../core/renderOrder.js';
 
 export const TRAIL_DEFAULTS = {
     zPitch: 90,                 // ZStack deck pitch between moments (time depth) — fly-through room
     railGap: 20,                // HStack gap between a call and its snapshot
     corridorGap: 120,           // HStack gap between concurrent agents' corridors
     align: 0,                   // corridor cross-align: 0 = leading edge (tiny calls + big stacks share a left edge)
-    callScale: 1.4,             // gridScale for call cards
-    artifactWorldScale: 0.025,  // worldScale for snapshot cards (file scale)
-    artifactMaxLines: 400,      // crude readability gate for giant payloads
+    callScale: 3.0,             // gridScale for call cards — the readable HEADLINE (big glyphs, few lines)
+    artifactWorldScale: 0.025,  // worldScale for snapshot cards (fine-print document you fly into)
+    snapshotRows: 28,           // window: visible lines per snapshot — tames the jagged skyline into a rhythm
     maxConnections: 512,        // tether budget
     showTethers: true,          // draw a call→snapshot beam per moment
+
+    // Corridor identity — a translucent colored box around each agent's deck (the
+    // ContentTreeMarkers dir-prism recipe, per-AGENT hue instead of depth-gradient).
+    // Parented INTO the corridor so it rides every transform; sized to the deck's
+    // bounds on each relayout, so it GROWS as moments append — a 3D window of what's
+    // happening, and the frame the rolodex-pager will eventually scroll through.
+    corridorBox: true,          // draw the per-agent identity box
+    corridorPad: 16,            // XY inflation beyond the deck's content bounds
+    corridorZPad: 24,           // Z inflation (front of newest / behind oldest)
+    corridorBoxOpacity: 0.06,   // translucent fill — identity tint, never occlusion
+    corridorEdgeOpacity: 0.22,  // wireframe frame line (0 = no edges)
+    corridorPalette: [          // per-agent identity hues, indexed by corridor order
+        0x3a6ea5, 0xa56a3a, 0x4a9a6a, 0x8a5aa5, 0xa54a5a, 0x5a8aa5,
+    ],
+
     hues: {
         read:   { r: 0.35, g: 0.66, b: 0.92 },
         search: { r: 0.70, g: 0.50, b: 0.85 },
@@ -83,9 +99,13 @@ export default class AgentTrail {
         this._rootPlaced = false;
 
         this.conn = new ConnectionRenderer(this.scene, { maxConnections: this.cfg.maxConnections });
-        this.lanes = new Map();   // agentId -> { corridor:ZStack, seq, moments:[{moment,call,snapshot,hue,tetherId}] }
+        this.lanes = new Map();   // agentId -> { corridor:ZStack, seq, moments:[...], box, hueIdx }
         this._off = null;
         this._tmp = new THREE.Vector3();
+
+        // Shared unit geometry for the corridor identity boxes (scaled per corridor).
+        this._unitBox = new THREE.BoxGeometry(1, 1, 1);
+        this._unitEdges = new THREE.EdgesGeometry(this._unitBox);
     }
 
     attach(mgr) {
@@ -144,6 +164,7 @@ export default class AgentTrail {
                 for (const g of [e.call, e.snapshot]) { if (g) { try { g.parent?.remove(g); g.dispose?.(); } catch (_e) { /* best effort */ } } }
                 try { lane.corridor.remove(e.moment); } catch (_e) { /* best effort */ }
             }
+            if (lane.box) { try { lane.box.mesh.parent?.remove(lane.box.mesh); lane.box.fill.dispose(); lane.box.edge.dispose(); } catch (_e) { /* best effort */ } }
             this.root.remove(lane.corridor);
         };
         if (!which || which === 'all') {
@@ -162,6 +183,8 @@ export default class AgentTrail {
         this.clear('all');
         this.conn.dispose();
         this.scene.remove(this.root);
+        this._unitBox.dispose();
+        this._unitEdges.dispose();
     }
 
     // -- private --------------------------------------------------------
@@ -172,10 +195,47 @@ export default class AgentTrail {
             const corridor = new ZStack({ spacing: this.cfg.zPitch, reverse: true, align: this.cfg.align });   // newest in front, leading-aligned
             corridor.name = `trail:${agentId}`;
             this.root.add(corridor);
-            lane = { corridor, seq: 0, moments: [] };
+            const hueIdx = this.lanes.size;
+            const box = this._makeCorridorBox(this.cfg.corridorPalette[hueIdx % this.cfg.corridorPalette.length]);
+            corridor.add(box.mesh);   // parented IN → rides transforms; isMarker → StackContainer.layout skips it
+            lane = { corridor, seq: 0, moments: [], box, hueIdx };
             this.lanes.set(agentId, lane);
         }
         return lane;
+    }
+
+    /** A translucent identity box + wireframe frame, in the ContentTreeMarkers prism style. */
+    _makeCorridorBox(colorHex) {
+        const color = new THREE.Color(colorHex);
+        const fill = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: this.cfg.corridorBoxOpacity, depthWrite: false, side: THREE.DoubleSide });
+        const edge = new THREE.LineBasicMaterial({ color, transparent: true, opacity: this.cfg.corridorEdgeOpacity, depthWrite: false });
+        const mesh = new THREE.Mesh(this._unitBox, fill);
+        mesh.userData = { isMarker: true };
+        mesh.renderOrder = RENDER_ORDER.BACKDROP_BASE;
+        const edges = new THREE.LineSegments(this._unitEdges, edge);
+        edges.userData = { isMarker: true };
+        edges.renderOrder = RENDER_ORDER.BACKDROP_BASE;
+        mesh.add(edges);   // edges inherit the mesh's scale/position
+        return { mesh, edges, fill, edge };
+    }
+
+    /** Size each corridor's identity box to its deck bounds — it grows as moments append. */
+    _updateCorridorBoxes() {
+        const c = this.cfg;
+        const size = new THREE.Vector3(), center = new THREE.Vector3();
+        for (const lane of this.lanes.values()) {
+            const box = lane.box;
+            if (!box) continue;
+            const b = lane.corridor.layoutBounds();
+            if (!c.corridorBox || lane.moments.length === 0 || b.isEmpty()) { box.mesh.visible = false; continue; }
+            b.getSize(size); b.getCenter(center);
+            box.mesh.position.copy(center);
+            box.mesh.scale.set(size.x + 2 * c.corridorPad, size.y + 2 * c.corridorPad, size.z + 2 * c.corridorZPad);
+            box.mesh.visible = true;
+            box.fill.opacity = c.corridorBoxOpacity;   // re-read so trail.config tunes live
+            box.edge.opacity = c.corridorEdgeOpacity;
+            box.edges.visible = c.corridorEdgeOpacity > 0;
+        }
     }
 
     /** A free CodeGrid card; re-layouts the trail once its content (and bounds) settle. */
@@ -188,7 +248,7 @@ export default class AgentTrail {
     /** Per-action snapshot: the file's content AS-OF this moment (the repo falls out of the action). */
     _loadSnapshot(grid, path) {
         Promise.resolve(this.ctx.fileProvider?.getFile?.(path))
-            .then((content) => grid.loadFileAsync(path, clip(content, this.cfg.artifactMaxLines)))
+            .then((content) => grid.loadFileAsync(path, clip(content, this.cfg.snapshotRows)))
             .then(() => this._relayout())
             .catch(() => grid.loadFileAsync(path, '(could not load)').then(() => this._relayout()).catch(() => {}));
     }
@@ -204,6 +264,7 @@ export default class AgentTrail {
             for (const e of lane.moments) e.moment.spacing = this.cfg.railGap;
         }
         this.root.layout();
+        this._updateCorridorBoxes();
         if (this.cfg.showTethers) this._retether();
     }
 
