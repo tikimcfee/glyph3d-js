@@ -21,6 +21,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { parseToolMeta } from '../packages/glyph3d-core/src/collections/toolMeta.js';
 
 const VALUE = new Set(['session', 'agent', 'split-agents', 'limit', 'rate', 'port']);
 const BOOL = new Set(['no-clear', 'dry', 'help']);
@@ -69,32 +70,9 @@ function mapTool(name, input = {}) {
   return { action: t.toLowerCase() || 'act', target: '', detail: JSON.stringify(input) };
 }
 
-// Pull the structured per-tool metadata out of the session's top-level `toolUseResult` — the little
-// details (lines read/written, +/−, tokens) the result TEXT never carries. Shipped as a `meta`
-// object on the activity record; the trail renders it as a terse subtitle.
-function extractMeta(name, tur) {
-  if (!tur || typeof tur !== 'object') return null;
-  const t = String(name || '');
-  if (t === 'Read') {
-    if (tur.file?.numLines != null) return { lines: tur.file.numLines };
-    if (tur.file?.originalSize != null) return { bytes: tur.file.originalSize };
-    return null;
-  }
-  if (t === 'Write') return { kind: tur.type, lines: String(tur.content || '').split('\n').length };
-  if (t === 'Edit' || t === 'MultiEdit') {
-    let added = 0, removed = 0;
-    for (const h of (tur.structuredPatch || [])) for (const ln of (h.lines || [])) { if (ln[0] === '+') added++; else if (ln[0] === '-') removed++; }
-    return { added, removed };
-  }
-  if (t === 'Bash') {
-    const out = String(tur.stdout || '');
-    const m = { lines: out ? out.replace(/\n$/, '').split('\n').length : 0 };
-    if (tur.interrupted) m.interrupted = true;
-    return m;
-  }
-  if (t === 'Task' || t === 'Agent') return { tools: tur.totalToolUseCount, tokens: tur.totalTokens, ms: tur.totalDurationMs };
-  return null;
-}
+// Per-tool metadata (lines read/written, +/−, tokens) lives in the session's top-level
+// `toolUseResult`, which the result TEXT never carries. parseToolMeta (the shared registry,
+// keyed by normalized action) turns it into a `meta` object on the record — see toolMeta.js.
 
 // --- parse the session JSONL ---
 const lines = fs.readFileSync(sessionPath, 'utf8').split('\n').filter(Boolean);
@@ -121,7 +99,7 @@ let mapped = raw.map((a) => {
   // A file action's content IS its snapshot, so it carries no result. A no-target action's output
   // (bash/grep/…) ships RAW — it becomes a sibling output grid that does its own line-splitting.
   const result = m.target ? '' : (results.get(a.id) || '');
-  const meta = extractMeta(a.name, metas.get(a.id));   // little details: lines read/written, +/−, tokens
+  const meta = parseToolMeta(m.action, metas.get(a.id));   // little details: lines read/written, +/−, tokens, ranges
   return { ...m, result, meta };
 })
   .filter((m) => m.action && m.action !== 'todowrite' && m.action !== 'task_get' && m.action !== 'toolsearch');

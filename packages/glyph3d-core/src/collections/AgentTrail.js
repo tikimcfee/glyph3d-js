@@ -25,6 +25,7 @@ import ConnectionRenderer from '../annotations/ConnectionRenderer.js';
 import { HStack, ZStack } from './layouts/StackContainer.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import { classifyByExtension } from '../core/fileKind.js';
+import { decorateForMeta } from './toolMeta.js';
 
 export const TRAIL_DEFAULTS = {
     zPitch: 90,                 // ZStack deck pitch between moments (time depth) — fly-through room
@@ -38,6 +39,7 @@ export const TRAIL_DEFAULTS = {
     snapshotImageWidth: 40,     // world width of an image snapshot quad (height follows aspect)
     maxConnections: 512,        // tether budget
     showTethers: true,          // draw a call→snapshot beam per moment
+    debug: false,               // ON → log the decoration decision per snapshot (trail.config debug true)
 
     // Corridor identity — a translucent colored box around each agent's deck (the
     // ContentTreeMarkers dir-prism recipe, per-AGENT hue instead of depth-gradient).
@@ -165,7 +167,7 @@ export default class AgentTrail {
                 snapshot = this._imageSnapshot(record.target, kind.format);
             } else {
                 snapshot = this._card(record.target, '…', { worldScale: this.cfg.artifactWorldScale });
-                this._loadSnapshot(snapshot, record.target);   // fetch the file AS-OF now
+                this._loadSnapshot(snapshot, record);   // fetch the file AS-OF now + decorate what it touched
             }
             children.push(snapshot);
         } else if (pullOutput) {
@@ -337,12 +339,51 @@ export default class AgentTrail {
         return this._card('output', body, { worldScale: this.cfg.artifactWorldScale });
     }
 
-    /** Per-action snapshot: the file's content AS-OF this moment (the repo falls out of the action). */
-    _loadSnapshot(grid, path) {
+    /** Per-action snapshot: the file's content AS-OF this moment, with the lines the action touched lit up. */
+    _loadSnapshot(grid, record) {
+        const path = record.target;
         Promise.resolve(this.ctx.fileProvider?.getFile?.(path))
             .then((content) => grid.loadFileAsync(path, this.cfg.snapshotWindow ? clip(content, this.cfg.snapshotRows) : String(content ?? '')))
-            .then(() => this._relayout())
+            .then(() => { this._decorateSnapshot(grid, record); this._relayout(); })
             .catch(() => grid.loadFileAsync(path, '(could not load)').then(() => this._relayout()).catch(() => {}));
+    }
+
+    /**
+     * Light up the lines an action touched on its loaded snapshot — the mapping from the action to
+     * the content. Edits glow green on their added lines; a partial read tints its slice blue. The
+     * directives come from the shared toolMeta registry (decorateForMeta), applied as additive glyph
+     * highlights via highlightRange. Runs AFTER load (the layout/slots must exist), clamped to the
+     * rendered line range (so a windowed snapshot doesn't index past its content).
+     */
+    _decorateSnapshot(grid, record) {
+        const dbg = this.cfg.debug ? (msg) => console.log(`[trail.decorate] ${record.action} ${record.target || ''} — ${msg}`) : null;
+        const directives = decorateForMeta(record.action, record.meta);
+        if (!directives) {
+            // The two distinct silent-return reasons, so the log says WHICH: no meta reached the
+            // record (data flow) vs meta present but this action/shape decorates nothing (by design).
+            dbg?.(record.meta ? 'no directives (meta present, nothing to light up)' : 'no meta on record');
+            return;
+        }
+        if (typeof grid.highlightRange !== 'function') { dbg?.('grid has no highlightRange — not a CodeGrid'); return; }
+        const apply = (pass) => {
+            const lastLine = (typeof grid.getLineCount === 'function' ? grid.getLineCount() : 0) - 1;
+            let litLines = 0, litSlots = 0;
+            for (const d of directives) {
+                const start = Math.max(0, d.startLine);
+                const end = Math.min(lastLine, d.endLine);
+                for (let ln = start; ln <= end; ln++) {
+                    const cols = typeof grid.getLineSlotCount === 'function' ? grid.getLineSlotCount(ln) : 0;
+                    if (cols > 0) { grid.highlightRange(ln, 0, ln, cols, d.color); litLines++; litSlots += cols; }
+                }
+            }
+            // Counts make absent-vs-subtle answerable: "lit 9 lines / 240 slots" + nothing on screen
+            // means a visibility problem, not a no-op. lastLine<0 means the content isn't loaded yet.
+            dbg?.(`pass ${pass}: ${directives.length} directive(s) → lit ${litLines} line(s) / ${litSlots} slot(s) (lastLine=${lastLine})`);
+        };
+        apply('sync');
+        // The snapshot double-loads (placeholder then content); re-apply next frame so a late
+        // rebuild can't wipe the highlights.
+        if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => apply('raf'));
     }
 
     /**

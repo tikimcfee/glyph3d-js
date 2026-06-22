@@ -225,24 +225,40 @@ class CodeGrid extends THREE.Object3D {
      * @returns {Promise<this>} For chaining
      */
     async loadTextAsync(text) {
-        // TODO(load+normalize): see loadText — normalize content (line endings/BOM/encoding)
-        // here too, as part of the future load-and-normalize-data pass.
-        this.content = text;
-        // Note: lines array populated lazily only if needed (getLineCount, getMaxLineWidth)
+        // Serialize loads on this grid. Two rapid loadTextAsync calls — e.g. a trail snapshot's '…'
+        // placeholder followed by its fetched file content — otherwise interleave _clearContent +
+        // _flushAsync on the shared deferred-batch state (_pendingAdds/_idMap/_contentTextIds),
+        // corrupting the buffers AND leaving the analyze generation pointing at the wrong content,
+        // so syntax colors never land (glyphs stay at the builder default — white — until a later
+        // clean reload "prods" a single uncontended pass). The edit/scroll/frame path's _relayout
+        // mutex guards exactly this; loads were its unguarded sibling. Each call awaits the prior
+        // one's full completion, so the await contract ("resolved == rendered") still holds.
+        const prev = this._loadChain;
+        let release;
+        this._loadChain = new Promise((r) => { release = r; });
+        try {
+            if (prev) await prev.catch(() => {});
+            // TODO(load+normalize): see loadText — normalize content (line endings/BOM/encoding)
+            // here too, as part of the future load-and-normalize-data pass.
+            this.content = text;
+            // Note: lines array populated lazily only if needed (getLineCount, getMaxLineWidth)
 
-        // If content was evicted, reconstruct the renderer before clearing/loading
-        this._ensureRenderer();
+            // If content was evicted, reconstruct the renderer before clearing/loading
+            this._ensureRenderer();
 
-        // Clear previous content
-        this._clearContent();
+            // Clear previous content
+            this._clearContent();
 
-        // Layout text using renderer (async worker path)
-        await this._layoutContentAsync();
+            // Layout text using renderer (async worker path)
+            await this._layoutContentAsync();
 
-        // Update background
-        this._updateBackground();
+            // Update background
+            this._updateBackground();
 
-        return this;
+            return this;
+        } finally {
+            release();
+        }
     }
 
     // ============ Windowing (scrollable viewport) ============

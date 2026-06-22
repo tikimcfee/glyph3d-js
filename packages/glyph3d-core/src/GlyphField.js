@@ -1002,7 +1002,15 @@ export default class GlyphField {
      * @param {{r,g,b}|null} color - null clears
      */
     setGlyphHighlight(absoluteSlot, color) {
-        if (!this._highlightTexture) return;
+        if (!this._highlightTexture) {
+            // Silent no-op was a debugging black hole (highlights "applied" but invisible). Announce
+            // it once per renderer: a highlight was requested before the highlight texture existed.
+            if (!this._warnedNoHighlightTex) {
+                this._warnedNoHighlightTex = true;
+                console.warn('[GlyphField] setGlyphHighlight no-op — highlight texture not allocated (build buffers / _ensureHighlightTexture before highlighting)');
+            }
+            return;
+        }
         const data = this._highlightTexture.image.data;
         const i = absoluteSlot * 4;
         data[i]     = color ? ((color.r * 255 + 0.5) | 0) : 0;
