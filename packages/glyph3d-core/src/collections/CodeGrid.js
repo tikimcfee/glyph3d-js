@@ -179,29 +179,36 @@ class CodeGrid extends MeasurableObject3D {
      * @param {Object} options - Loading options
      * @returns {this} For chaining
      */
-    loadText(text, options = {}) {
-        // TODO(load+normalize): content is stored RAW. A future "load & normalize data" pass
-        // belongs here — normalize line endings (\r\n, \r → \n), strip BOM, settle encoding —
-        // ONCE at the load seam so every downstream consumer can assume \n. Today \r\n drifts
-        // the two render targets apart: split('\n') leaves \r in a line (a \r buffer slot in
-        // 3D), while CodeMirror strips \r in the 2D editor, so tree-sitter capture offsets
-        // (indexed into this raw text) misalign across the views. Normalizing here removes the
-        // whole off-by-N class. See EditorPanel.decorationField + SyntaxColorizer.
-        this.content = text;
+    /**
+     * Shared load preamble for BOTH render paths: stash content + lines, reconstruct an evicted
+     * renderer, and queue the clear. loadText (sync) and loadTextAsync (worker) differ ONLY in
+     * their one layout call, so everything up to it lives here once — content and lines are always
+     * set together, on every load.
+     *
+     * TODO(load+normalize): content is stored RAW. A future "load & normalize data" pass belongs
+     * here — normalize line endings (\r\n, \r → \n), strip BOM, settle encoding — ONCE at the load
+     * seam so every downstream consumer can assume \n. Today \r\n drifts the two render targets
+     * apart: split('\n') leaves \r in a line (a \r buffer slot in 3D), while CodeMirror strips \r in
+     * the 2D editor, so tree-sitter capture offsets (indexed into this raw text) misalign across the
+     * views. Normalizing here removes the whole off-by-N class. See EditorPanel + SyntaxColorizer.
+     * @private @param {string} text
+     */
+    _beginLoad(text) {
+        this.content = text;                 // the new data (content + lines set together)
         this.lines = text.split('\n');
+        this._ensureRenderer();              // reconstruct if content was evicted
+        this._clearRenderedText();           // drop the PRIOR render's glyphs; the layout below adds the new ones
+    }
 
-        // If content was evicted, reconstruct the renderer before clearing/loading
-        this._ensureRenderer();
-
-        // Clear previous content
-        this._clearContent();
-
-        // Layout text using renderer
+    /**
+     * Load text content into the grid (synchronous render path).
+     * @param {string} text - Text content to display
+     * @returns {this} For chaining
+     */
+    loadText(text) {
+        this._beginLoad(text);
         this._layoutContent();
-
-        // Update background
         this._updateBackground();
-
         return this;
     }
 
@@ -222,40 +229,10 @@ class CodeGrid extends MeasurableObject3D {
      * @returns {Promise<this>} For chaining
      */
     async loadTextAsync(text) {
-        // Serialize loads on this grid. Two rapid loadTextAsync calls — e.g. a trail snapshot's '…'
-        // placeholder followed by its fetched file content — otherwise interleave _clearContent +
-        // _flushAsync on the shared deferred-batch state (_pendingAdds/_idMap/_contentTextIds),
-        // corrupting the buffers AND leaving the analyze generation pointing at the wrong content,
-        // so syntax colors never land (glyphs stay at the builder default — white — until a later
-        // clean reload "prods" a single uncontended pass). The edit/scroll/frame path's _relayout
-        // mutex guards exactly this; loads were its unguarded sibling. Each call awaits the prior
-        // one's full completion, so the await contract ("resolved == rendered") still holds.
-        const prev = this._loadChain;
-        let release;
-        this._loadChain = new Promise((r) => { release = r; });
-        try {
-            if (prev) await prev.catch(() => {});
-            // TODO(load+normalize): see loadText — normalize content (line endings/BOM/encoding)
-            // here too, as part of the future load-and-normalize-data pass.
-            this.content = text;
-            // Note: lines array populated lazily only if needed (getLineCount, getMaxLineWidth)
-
-            // If content was evicted, reconstruct the renderer before clearing/loading
-            this._ensureRenderer();
-
-            // Clear previous content
-            this._clearContent();
-
-            // Layout text using renderer (async worker path)
-            await this._layoutContentAsync();
-
-            // Update background
-            this._updateBackground();
-
-            return this;
-        } finally {
-            release();
-        }
+        this._beginLoad(text);
+        await this._layoutContentAsync();
+        this._updateBackground();
+        return this;
     }
 
     // ============ Windowing (scrollable viewport) ============
@@ -430,7 +407,7 @@ class CodeGrid extends MeasurableObject3D {
         this.filename = name;
         // Re-layout to update filename
         if (this.content) {
-            this._clearContent();
+            this._clearRenderedText();
             this._layoutContent();
             this._updateBackground();
         }
@@ -443,7 +420,7 @@ class CodeGrid extends MeasurableObject3D {
     showFilename(visible) {
         this.config.showFilename = visible;
         if (this.content) {
-            this._clearContent();
+            this._clearRenderedText();
             this._layoutContent();
             this._updateBackground();
         }
@@ -837,7 +814,7 @@ class CodeGrid extends MeasurableObject3D {
      * THE single relayout pipeline — re-fold the grid from current state (this.lines/content,
      * scrollOffset, layout params) and repaint the edit caret. ONE mutex (_relayoutBusy /
      * _relayoutPending) serializes ALL relayouts — scroll, layout, frame, AND edit — so two
-     * pipelines can never interleave _clearContent/_flushAsync on the shared deferred-batch
+     * pipelines can never interleave _clearRenderedText/_flushAsync on the shared deferred-batch
      * state (_pendingAdds/_idMap/_contentTextIds), which would corrupt the buffers. Rapid calls
      * coalesce: the in-flight pass loops once more with the LATEST state. Edit callers set
      * _linesDirty so content re-syncs from the edit-mutated line array; scroll/layout/frame
@@ -858,7 +835,7 @@ class CodeGrid extends MeasurableObject3D {
                 }
                 if (!this.content) continue;               // nothing to lay out (loop exits unless pending)
                 this._ensureRenderer();                    // reconstruct if content was evicted
-                this._clearContent();                      // queue removal of current filename + content
+                this._clearRenderedText();                 // drop the prior render's glyphs
                 await this._layoutContentAsync();          // re-add + re-flush + rebuild line tables + _layout
                 this._updateBackground();
                 // Repaint the edit caret against the fresh _layout, else it lingers stale.
@@ -1426,10 +1403,12 @@ class CodeGrid extends MeasurableObject3D {
     }
 
     /**
-     * Clear content from renderer
+     * Drop the PREVIOUSLY-RENDERED text items (the filename + content glyph instances) from the
+     * renderer, so a re-layout can add the new ones. Does NOT touch this.content / this.lines — the
+     * data is set separately at the load seam (_beginLoad); this only clears the prior render.
      * @private
      */
-    _clearContent() {
+    _clearRenderedText() {
         // Remove filename text if exists
         if (this._filenameTextId !== null) {
             this._removeText(this._filenameTextId);
@@ -1543,7 +1522,7 @@ class CodeGrid extends MeasurableObject3D {
         if (!this._scrollClampGuard && this._scrollOffset > this.getMaxScroll()) {
             this._scrollClampGuard = true;
             this._scrollOffset = this.getMaxScroll();
-            this._clearContent();
+            this._clearRenderedText();
             await this._layoutContentAsync();
             this._scrollClampGuard = false;
         }
