@@ -25,13 +25,12 @@
 
 import * as THREE from 'three';
 import GlyphField from '../GlyphField.js';
-import ScaleModel from './ScaleModel.js';
-import BoundedObject3D from './BoundedObject3D.js';
+import FramedGlyphField from './FramedGlyphField.js';
 import { createPanelMaterial } from './panelMaterial.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import { mimeForFormat } from '../core/fileKind.js';
 
-class FrameGrid extends BoundedObject3D {
+class FrameGrid extends FramedGlyphField {
     /**
      * Choose a cell grid (cols × rows) for a source frame of srcW × srcH: matches the
      * source aspect (so cells stay ~square) while keeping cols × rows within `budget`.
@@ -128,8 +127,7 @@ class FrameGrid extends BoundedObject3D {
         // ScaleModel is the single authority for this.scale: placement (natural size at home, the
         // dock's tile-fit when docked) · user (persisted zoom). resolve() is the only writer — the
         // dock + setScale/setZoom feed it, never this.scale directly. Mirrors CodeGrid/TerminalGrid.
-        this.scaleModel = new ScaleModel(options.gridScale ?? 1);
-        this.scaleModel.resolve(this);
+        this._initScale(options.gridScale ?? 1);
     }
 
     /**
@@ -390,21 +388,8 @@ class FrameGrid extends BoundedObject3D {
         this.position.set(pos.x, pos.y, pos.z);
     }
 
-    /** Set the PLACEMENT scale (natural home size; the dock overrides it while docked). */
-    setScale(factor) {
-        this.scaleModel.placement = factor;
-        this.scaleModel.resolve(this);
-    }
-
-    /** Set the user ZOOM — readability scale, composed onto this.scale via ScaleModel. The dock
-     *  reads it back for tile-fit; window.scale calls dock.reflowTile after. */
-    setZoom(factor) {
-        this.scaleModel.setZoom(factor);
-        this.scaleModel.resolve(this);
-    }
-
-    /** Current uniform zoom magnitude (the persisted readability scale). @returns {number} */
-    get zoom() { return this.scaleModel.zoomScalar; }
+    // setScale(factor) + setZoom(factor) + get zoom — the full scale API — are inherited from
+    // FramedGlyphField. FrameGrid keeps no home-scale mirror field, so it uses them unchanged.
 
     /** Subscribe to size changes (the dock auto-reflows a docked tile via this). Returns unsubscribe. */
     onResize(cb) {

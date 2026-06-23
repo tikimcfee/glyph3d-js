@@ -28,14 +28,13 @@ import TerminalEmulator from './TerminalEmulator.js';
 import { detectVerticalScroll, captureScrolledRows, depthFade, reflowHistoryRows } from './terminalDepthHistory.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import MonospaceShapeCache from '../shaping/MonospaceShapeCache.js';
-import ScaleModel from './ScaleModel.js';
-import BoundedObject3D from './BoundedObject3D.js';
+import FramedGlyphField from './FramedGlyphField.js';
 import Button3D from '../components/Button3D.js';
 import { createPanelMaterial } from './panelMaterial.js';
 
 const _cellStrideScale = new THREE.Vector3(); // scratch for cellStride's world-scale read
 
-export default class TerminalGrid extends BoundedObject3D {
+export default class TerminalGrid extends FramedGlyphField {
     /**
      * @param {THREE.Scene} scene
      * @param {import('../GlyphAtlas.js').default} atlas
@@ -199,8 +198,7 @@ export default class TerminalGrid extends BoundedObject3D {
         // ScaleModel is the single authority for this.scale: placement (gridScale at
         // home, the dock's tile-fit when docked) · user (persisted zoom). resolve()
         // is the only writer; setScale/setZoom/the dock feed it, never this.scale.
-        this.scaleModel = new ScaleModel(this._gridScale);
-        this.scaleModel.resolve(this);
+        this._initScale(this._gridScale);
 
         // Add this Object3D to the scene.
         scene.add(this);
@@ -637,25 +635,11 @@ export default class TerminalGrid extends BoundedObject3D {
      * @param {number} factor
      */
     setScale(factor) {
-        this._gridScale = factor;
-        this.scaleModel.placement = factor;
-        this.scaleModel.resolve(this);
+        this._gridScale = factor;              // mirror the home scale, then base drives this.scale
+        super.setScale(factor);
     }
 
-    /**
-     * Set the user ZOOM — readability scale, independent of cols/rows/PTY and of the
-     * dock's tile-fit. A number is uniform (glyph aspect preserved); an {x,y,z} is the
-     * deliberate per-axis stretch. Composed onto this.scale via the ScaleModel; when
-     * docked, the dock reads it back for layout (call dock.reflowTile to re-place).
-     * @param {number|{x?:number,y?:number,z?:number}} factor
-     */
-    setZoom(factor) {
-        this.scaleModel.setZoom(factor);
-        this.scaleModel.resolve(this);
-    }
-
-    /** Current uniform zoom magnitude (the persisted readability scale). @returns {number} */
-    get zoom() { return this.scaleModel.zoomScalar; }
+    // setZoom(factor) + get zoom — the readability-zoom API — are inherited from FramedGlyphField.
 
     /**
      * The padded cell panel in the terminal's OWN local frame (no world transform) —

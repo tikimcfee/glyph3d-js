@@ -19,15 +19,14 @@ import { BOUNDS_Z_PAD } from '../core/constants.js';
 import { paginationGeometry, resolveLayoutParams, DEFAULT_LAYOUT } from '../workers/builders/index.js';
 import LayoutDescription from '../core/LayoutDescription.js';
 import { analyzeGrid, buildGridSemantics } from '../parsing/SyntaxColorizer.js';
-import ScaleModel from './ScaleModel.js';
-import BoundedObject3D from './BoundedObject3D.js';
+import FramedGlyphField from './FramedGlyphField.js';
 import { createPanelMaterial } from './panelMaterial.js';
 
 // Reused for lines without wraps — most lines, in the common case.
 // Frozen so accidental mutation surfaces immediately.
 const EMPTY_WRAPS = Object.freeze([]);
 
-class CodeGrid extends BoundedObject3D {
+class CodeGrid extends FramedGlyphField {
     /**
      * Create a CodeGrid
      * @param {THREE.Scene} scene - Three.js scene
@@ -119,11 +118,10 @@ class CodeGrid extends BoundedObject3D {
         // Add renderer group as our child for proper transforms
         this.add(this._rendererGroup);
 
-        // ScaleModel is the single authority for this.scale: placement (gridScale at
-        // home, the dock's tile-fit when docked) · user (persisted readability zoom).
-        // resolve() is the only writer.
-        this.scaleModel = new ScaleModel(this.config.gridScale);
-        this.scaleModel.resolve(this);
+        // ScaleModel (the single authority for this.scale: placement · user) + the
+        // setScale/setZoom/zoom API live in FramedGlyphField. _initScale builds the model
+        // with this grid's home placement and writes the initial transform.
+        this._initScale(this.config.gridScale);
 
         // World box (getBounds) is owned by BoundedObject3D: it recomputes fresh
         // every call (cheap 8-corner transform of the cached LOCAL content bounds by
@@ -466,23 +464,11 @@ class CodeGrid extends BoundedObject3D {
      * @param {number} factor
      */
     setScale(factor) {
-        this.config.gridScale = factor;
-        this.scaleModel.placement = factor;
-        this.scaleModel.resolve(this);
+        this.config.gridScale = factor;        // mirror the home scale, then base drives this.scale
+        super.setScale(factor);
     }
 
-    /**
-     * Set the user ZOOM — readability scale, independent of layout and of the dock's
-     * tile-fit. Number = uniform (text aspect preserved); {x,y,z} = deliberate stretch.
-     * @param {number|{x?:number,y?:number,z?:number}} factor
-     */
-    setZoom(factor) {
-        this.scaleModel.setZoom(factor);
-        this.scaleModel.resolve(this);
-    }
-
-    /** Current uniform zoom magnitude. @returns {number} */
-    get zoom() { return this.scaleModel.zoomScalar; }
+    // setZoom(factor) + get zoom — the readability-zoom API — are inherited from FramedGlyphField.
 
     /**
      * Get local content bounds (plain-object form, not a THREE.Box3).
