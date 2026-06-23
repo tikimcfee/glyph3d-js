@@ -1,8 +1,8 @@
-// bounds-measurable.test.mjs — headless, GPU-free behavior lock for MeasurableObject3D.
+// bounds-measurable.test.mjs — headless, GPU-free behavior lock for BoundedObject3D.
 //
 //   bun tools/bounds-measurable.test.mjs
 //
-// MeasurableObject3D is the on-demand bounds base: getBounds() recomputes the WORLD
+// BoundedObject3D is the on-demand bounds base: getBounds() recomputes the WORLD
 // AABB fresh on every call (local content box × current matrixWorld) — no validity
 // cache, no dirty flag, no transform observation. This test pins exactly that contract:
 // every transform / content change is reflected on the NEXT getBounds() with zero
@@ -10,7 +10,7 @@
 // getLocalBounds().clone().applyMatrix4(matrixWorld). Pure three — no WebGPU.
 
 import * as THREE from 'three';
-import MeasurableObject3D from '../packages/glyph3d-core/src/collections/MeasurableObject3D.js';
+import BoundedObject3D from '../packages/glyph3d-core/src/collections/BoundedObject3D.js';
 
 let pass = 0, fail = 0;
 const ok = (cond, msg) => { if (cond) pass++; else { fail++; console.log(`  ✗ ${msg}`); } };
@@ -33,7 +33,7 @@ const oracle = (obj, local) => {
 
 // A minimal Measurable subclass whose local content box is MUTABLE — the knob that lets
 // us prove a content change (not just a transform) lands immediately.
-class MutableMeasurable extends MeasurableObject3D {
+class MutableBounded extends BoundedObject3D {
   constructor(min = [-1, -1, -1], max = [1, 1, 1]) {
     super();
     this._local = new THREE.Box3(new THREE.Vector3(...min), new THREE.Vector3(...max));
@@ -48,7 +48,7 @@ class MutableMeasurable extends MeasurableObject3D {
 
 // ── 1. position change reflected on the NEXT call (no staleness) ──────────────────────
 {
-  const m = new MutableMeasurable([-2, -2, -2], [2, 2, 2]);
+  const m = new MutableBounded([-2, -2, -2], [2, 2, 2]);
   const before = m.getBounds().clone();                      // box at origin
   m.position.set(10, 0, 0);                                  // move — no invalidation call
   const after = m.getBounds().clone();
@@ -60,7 +60,7 @@ class MutableMeasurable extends MeasurableObject3D {
 
 // ── 2. scale change reflected immediately ─────────────────────────────────────────────
 {
-  const m = new MutableMeasurable([-1, -1, -1], [1, 1, 1]);
+  const m = new MutableBounded([-1, -1, -1], [1, 1, 1]);
   m.getBounds();                                             // prime (would seed a cache if one existed)
   m.scale.set(3, 1, 1);
   const after = m.getBounds().clone();
@@ -71,7 +71,7 @@ class MutableMeasurable extends MeasurableObject3D {
 
 // ── 3. content (getLocalBounds) change reflected immediately ──────────────────────────
 {
-  const m = new MutableMeasurable([-1, -1, -1], [1, 1, 1]);
+  const m = new MutableBounded([-1, -1, -1], [1, 1, 1]);
   m.position.set(5, 0, 0);
   m.getBounds();                                             // prime
   m.setLocal([-4, -1, -1], [4, 1, 1]);                      // content grew along x
@@ -83,7 +83,7 @@ class MutableMeasurable extends MeasurableObject3D {
 
 // ── 4. getBounds() == getLocalBounds().clone().applyMatrix4(matrixWorld) — full TRS ──
 {
-  const m = new MutableMeasurable([-2, -1, -0.5], [3, 2, 0.5]);
+  const m = new MutableBounded([-2, -1, -0.5], [3, 2, 0.5]);
   m.position.set(7, -3, 2);
   m.rotation.set(0.3, -0.6, 1.1);
   m.scale.set(2, 0.5, 4);
@@ -93,7 +93,7 @@ class MutableMeasurable extends MeasurableObject3D {
 
 // ── 5. idempotent: two calls with no change return EQUAL boxes ────────────────────────
 {
-  const m = new MutableMeasurable([-1.5, -2.5, -3.5], [1.5, 2.5, 3.5]);
+  const m = new MutableBounded([-1.5, -2.5, -3.5], [1.5, 2.5, 3.5]);
   m.position.set(2, 4, 6);
   m.rotation.set(0.2, 0.4, 0.6);
   const a = m.getBounds().clone();
@@ -103,7 +103,7 @@ class MutableMeasurable extends MeasurableObject3D {
 
 // ── 6. empty local box stays empty in world (guard path) ──────────────────────────────
 {
-  const m = new MutableMeasurable();
+  const m = new MutableBounded();
   m._local.makeEmpty();
   m.position.set(100, 0, 0);
   ok(m.getBounds().isEmpty(), 'empty: empty local box yields empty world box (no spurious transform)');
@@ -111,7 +111,7 @@ class MutableMeasurable extends MeasurableObject3D {
 
 // ── 7. abstract contract: a subclass that forgets getLocalBounds() throws clearly ─────
 {
-  class Bad extends MeasurableObject3D {}
+  class Bad extends BoundedObject3D {}
   let threw = false;
   try { new Bad().getBounds(); } catch (e) { threw = /getLocalBounds/.test(e.message); }
   ok(threw, 'contract: missing getLocalBounds() throws a Measurable-contract error');
@@ -123,7 +123,7 @@ class MutableMeasurable extends MeasurableObject3D {
 // panel local box (cached, dirtied on resize, never empty) and proves the inherited world
 // box is identical under full TRS, and that a resize lands with zero staleness.
 {
-  class TerminalLike extends MeasurableObject3D {
+  class TerminalLike extends BoundedObject3D {
     constructor(cols, rows) { super(); this.cols = cols; this.rows = rows; this._local = null; this._dirty = true; }
     getLocalBounds() {
       if (!this._local || this._dirty) {
@@ -153,7 +153,7 @@ class MutableMeasurable extends MeasurableObject3D {
 // getBounds().min.y). Prove the world VALUE matches the old formula AND that the double-call
 // height is correct despite both reads hitting the same scratch object.
 {
-  class FrameLike extends MeasurableObject3D {
+  class FrameLike extends BoundedObject3D {
     constructor(width, aspect) { super(); this.width = width; this.aspect = aspect; }
     getLocalBounds() {
       const totalH = this.width / this.aspect, hw = this.width / 2, hh = totalH / 2;

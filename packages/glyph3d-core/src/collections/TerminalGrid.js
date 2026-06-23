@@ -29,13 +29,13 @@ import { detectVerticalScroll, captureScrolledRows, depthFade, reflowHistoryRows
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import MonospaceShapeCache from '../shaping/MonospaceShapeCache.js';
 import ScaleModel from './ScaleModel.js';
-import MeasurableObject3D from './MeasurableObject3D.js';
+import BoundedObject3D from './BoundedObject3D.js';
 import Button3D from '../components/Button3D.js';
 import { createPanelMaterial } from './panelMaterial.js';
 
 const _cellStrideScale = new THREE.Vector3(); // scratch for cellStride's world-scale read
 
-export default class TerminalGrid extends MeasurableObject3D {
+export default class TerminalGrid extends BoundedObject3D {
     /**
      * @param {THREE.Scene} scene
      * @param {import('../GlyphAtlas.js').default} atlas
@@ -131,7 +131,7 @@ export default class TerminalGrid extends MeasurableObject3D {
 
         // Local-bounds cache (for picking + camera framing). The local box depends
         // only on cols/rows/metrics (dirtied on resize); the WORLD box is owned by
-        // MeasurableObject3D.getBounds(), which re-derives it per call by applying
+        // BoundedObject3D.getBounds(), which re-derives it per call by applying
         // the current world matrix to this cached local box (no world cache here).
         this._localBounds = null;
         this._localBoundsDirty = true;
@@ -659,7 +659,7 @@ export default class TerminalGrid extends MeasurableObject3D {
 
     /**
      * The padded cell panel in the terminal's OWN local frame (no world transform) —
-     * the {@link MeasurableObject3D} contract hook. The orientation-stable box: composed
+     * the {@link BoundedObject3D} contract hook. The orientation-stable box: composed
      * with matrixWorld (by the inherited getBounds) it rides every rotation, where the
      * world-space AABB morphs as the panel rotates relative to world (e.g. docked under
      * the camera). Cached; rebuilt only on resize (dirtied via _localBoundsDirty).
@@ -686,7 +686,7 @@ export default class TerminalGrid extends MeasurableObject3D {
     }
 
     // getBounds(target) — world-space AABB, recomputed on demand — is inherited from
-    // MeasurableObject3D (getLocalBounds() applied by the current matrixWorld).
+    // BoundedObject3D (getLocalBounds() applied by the current matrixWorld).
 
     /**
      * Get the underlying GlyphField renderer. Mirrors CodeGrid.getRenderer() so

@@ -26,12 +26,12 @@
 import * as THREE from 'three';
 import GlyphField from '../GlyphField.js';
 import ScaleModel from './ScaleModel.js';
-import MeasurableObject3D from './MeasurableObject3D.js';
+import BoundedObject3D from './BoundedObject3D.js';
 import { createPanelMaterial } from './panelMaterial.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import { mimeForFormat } from '../core/fileKind.js';
 
-class FrameGrid extends MeasurableObject3D {
+class FrameGrid extends BoundedObject3D {
     /**
      * Choose a cell grid (cols × rows) for a source frame of srcW × srcH: matches the
      * source aspect (so cells stay ~square) while keeping cols × rows within `budget`.
@@ -311,7 +311,7 @@ class FrameGrid extends MeasurableObject3D {
     /**
      * The grid's extent in its OWN local frame — width × (width/aspect), centered on the
      * origin (the build centers the cells there), with a thin Z so an edge-on pick ray
-     * still hits the flat panel — the {@link MeasurableObject3D} contract hook. Trivial to
+     * still hits the flat panel — the {@link BoundedObject3D} contract hook. Trivial to
      * recompute, so derived fresh each call (no cache); the inherited getBounds() composes
      * it with the current matrixWorld for the world-space AABB.
      * @returns {THREE.Box3}
@@ -338,7 +338,7 @@ class FrameGrid extends MeasurableObject3D {
 
     // getBounds(target) — world-space AABB for picking + camera framing (fit-all /
     // dynamic-speed), recomputed on demand so it rides drag / scale / dock rotation —
-    // is inherited from MeasurableObject3D (getLocalBounds() applied by matrixWorld).
+    // is inherited from BoundedObject3D (getLocalBounds() applied by matrixWorld).
 
     /**
      * The underlying GlyphField renderer, so canvas picking can map a resolved pick

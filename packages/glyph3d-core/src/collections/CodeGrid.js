@@ -20,14 +20,14 @@ import { paginationGeometry, resolveLayoutParams, DEFAULT_LAYOUT } from '../work
 import LayoutDescription from '../core/LayoutDescription.js';
 import { analyzeGrid, buildGridSemantics } from '../parsing/SyntaxColorizer.js';
 import ScaleModel from './ScaleModel.js';
-import MeasurableObject3D from './MeasurableObject3D.js';
+import BoundedObject3D from './BoundedObject3D.js';
 import { createPanelMaterial } from './panelMaterial.js';
 
 // Reused for lines without wraps — most lines, in the common case.
 // Frozen so accidental mutation surfaces immediately.
 const EMPTY_WRAPS = Object.freeze([]);
 
-class CodeGrid extends MeasurableObject3D {
+class CodeGrid extends BoundedObject3D {
     /**
      * Create a CodeGrid
      * @param {THREE.Scene} scene - Three.js scene
@@ -125,7 +125,7 @@ class CodeGrid extends MeasurableObject3D {
         this.scaleModel = new ScaleModel(this.config.gridScale);
         this.scaleModel.resolve(this);
 
-        // World box (getBounds) is owned by MeasurableObject3D: it recomputes fresh
+        // World box (getBounds) is owned by BoundedObject3D: it recomputes fresh
         // every call (cheap 8-corner transform of the cached LOCAL content bounds by
         // the current matrix), so there is no world-bounds cache to hold here.
         // Bounds from the worker path (raw plain-object bounds from buffer builder)
@@ -458,7 +458,7 @@ class CodeGrid extends MeasurableObject3D {
     }
 
     // getBounds(target) — world-space AABB, recomputed on demand — is inherited from
-    // MeasurableObject3D (getLocalBounds() applied by the current matrixWorld).
+    // BoundedObject3D (getLocalBounds() applied by the current matrixWorld).
 
     /**
      * Set the PLACEMENT scale (natural home size). The dock overrides this while

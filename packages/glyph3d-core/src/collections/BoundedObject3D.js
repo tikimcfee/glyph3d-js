@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 
 /**
- * MeasurableObject3D — the on-demand bounds contract for grid primitives.
+ * BoundedObject3D — the on-demand bounds contract for grid primitives.
  *
  * One thin base that lifts the (previously triplicated) world-bounds derivation
  * into a single place. It is deliberately stateless about the world box:
@@ -32,7 +32,7 @@ import * as THREE from 'three';
  *
  * @abstract getLocalBounds
  */
-export default class MeasurableObject3D extends THREE.Object3D {
+export default class BoundedObject3D extends THREE.Object3D {
     /**
      * Local content AABB, in this object's own frame (no world transform).
      * Subclasses MUST override. The base getBounds() builds the world box from it.
