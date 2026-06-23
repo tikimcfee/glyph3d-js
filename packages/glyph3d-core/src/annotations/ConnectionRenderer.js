@@ -57,7 +57,7 @@ export default class ConnectionRenderer {
     /**
      * @param {THREE.Scene} scene
      * @param {Object} [options]
-     * @param {number} [options.maxConnections=256]
+     * @param {number} [options.maxConnections=256] - INITIAL capacity; grows on demand (no hard cap)
      * @param {number} [options.arrowLengthRatio=0.12]
      */
     constructor(scene, options = {}) {
@@ -115,11 +115,8 @@ export default class ConnectionRenderer {
     set(id, from, to, color, { fromGrid, toGrid } = {}) {
         let entry = this._connections.get(id);
         if (!entry) {
+            if (this._slotFree.length === 0) this._grow();   // no hard cap — capacity follows the data
             const slot = this._slotFree.pop();
-            if (slot === undefined) {
-                console.warn('[ConnectionRenderer] MAX_CONNECTIONS reached, dropping:', id);
-                return id;
-            }
             entry = { slot, from: null, to: null, fromAnchor: null, toAnchor: null, color: null, fromGrid: null, toGrid: null, visible: true };
             this._connections.set(id, entry);
         }
@@ -235,6 +232,28 @@ export default class ConnectionRenderer {
     }
 
     // -- private ----------------------------------------------------------
+
+    /**
+     * Double the capacity in place — keeps the tether budget DATA-DRIVEN (no hard cap): when the
+     * slot pool runs dry, grow the backing arrays, copy the live data, and re-bind the geometry.
+     * Called only on exhaustion (amortized O(1) per connection). @private
+     */
+    _grow() {
+        const newMax = this._max * 2;
+        const span = VERTS_PER_CONNECTION * 3;
+        const pos = new Float32Array(newMax * span); pos.set(this._posArr);
+        const col = new Float32Array(newMax * span); col.set(this._colArr);
+        this._posArr = pos;
+        this._colArr = col;
+        for (let i = newMax - 1; i >= this._max; i--) this._slotFree.push(i);   // new slots, popped ascending
+        this._max = newMax;
+        console.log(`[ConnectionRenderer] grew tether capacity → ${newMax}`);   // rare (log2 N) — observability
+        // re-bind the geometry to the grown arrays; a fresh BufferAttribute uploads in full.
+        this._posBuf = new THREE.BufferAttribute(this._posArr, 3); this._posBuf.setUsage(THREE.DynamicDrawUsage);
+        this._colBuf = new THREE.BufferAttribute(this._colArr, 3); this._colBuf.setUsage(THREE.DynamicDrawUsage);
+        this._geo.setAttribute('position', this._posBuf);
+        this._geo.setAttribute('color', this._colBuf);
+    }
 
     /**
      * Resolve a bound anchor to its current world position (into `out`). Freshens the
