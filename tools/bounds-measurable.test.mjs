@@ -117,5 +117,57 @@ class MutableMeasurable extends MeasurableObject3D {
   ok(threw, 'contract: missing getLocalBounds() throws a Measurable-contract error');
 }
 
+// ── 8. TerminalGrid swap: inherited getBounds() == TG's old hand-rolled formula ───────
+// TG used to cache a _worldBounds and do updateWorldMatrix → _worldBounds.copy(local) →
+// applyMatrix4. UNIT-005 dropped that; the base owns it now. This stand-in replicates TG's
+// panel local box (cached, dirtied on resize, never empty) and proves the inherited world
+// box is identical under full TRS, and that a resize lands with zero staleness.
+{
+  class TerminalLike extends MeasurableObject3D {
+    constructor(cols, rows) { super(); this.cols = cols; this.rows = rows; this._local = null; this._dirty = true; }
+    getLocalBounds() {
+      if (!this._local || this._dirty) {
+        const strideX = 1.2, strideY = 1.5, pad = 0.3;        // arbitrary metrics (shape, not values, is the point)
+        const width = this.cols * strideX + pad * 2, height = this.rows * strideY + pad * 2;
+        const cx = (this.cols * strideX) / 2 - strideX / 2, cy = -(this.rows * strideY) / 2 + strideY / 2;
+        this._local = new THREE.Box3(
+          new THREE.Vector3(cx - width / 2, cy - height / 2, -1),
+          new THREE.Vector3(cx + width / 2, cy + height / 2,  1),
+        );
+        this._dirty = false;
+      }
+      return this._local;                                     // cached + reused (mirrors TG)
+    }
+  }
+  const t = new TerminalLike(80, 24);
+  t.position.set(4, -2, 1); t.rotation.set(0.2, 0.5, -0.3); t.scale.set(2, 2, 1);
+  boxEq(t.getBounds(), oracle(t, t.getLocalBounds()), 'TerminalGrid swap: inherited world box == old hand-rolled formula (full TRS)');
+  t.cols = 120; t._dirty = true;                              // resize → local-cache dirty
+  boxEq(t.getBounds(), oracle(t, t.getLocalBounds()), 'TerminalGrid swap: resize reflected on next getBounds() (no staleness)');
+}
+
+// ── 9. FrameGrid swap: inherited getBounds() == FG's old formula; shared scratch is safe ─
+// FG used to return a FRESH box every call (getLocalBounds().applyMatrix4). The base returns
+// a per-instance REUSED scratch. The one real risk is object identity: TreemapLayoutManager
+// reads two getBounds() of the SAME frame in one expression (getBounds().max.y -
+// getBounds().min.y). Prove the world VALUE matches the old formula AND that the double-call
+// height is correct despite both reads hitting the same scratch object.
+{
+  class FrameLike extends MeasurableObject3D {
+    constructor(width, aspect) { super(); this.width = width; this.aspect = aspect; }
+    getLocalBounds() {
+      const totalH = this.width / this.aspect, hw = this.width / 2, hh = totalH / 2;
+      return new THREE.Box3(new THREE.Vector3(-hw, -hh, -0.5), new THREE.Vector3(hw, hh, 0.5)); // fresh each call (mirrors FG)
+    }
+  }
+  const f = new FrameLike(6, 1.5);
+  f.position.set(-3, 5, 0); f.rotation.set(0, 0.7, 0); f.scale.set(1.5, 1.5, 1);
+  boxEq(f.getBounds(), oracle(f, f.getLocalBounds()), 'FrameGrid swap: inherited world box == old fresh-box formula (full TRS)');
+  const height = f.getBounds().max.y - f.getBounds().min.y;   // two getBounds() on one instance → shared scratch
+  const ref = oracle(f, f.getLocalBounds());
+  ok(Math.abs(height - (ref.max.y - ref.min.y)) < EPS,
+     'FrameGrid swap: double getBounds() in one expression yields correct height (shared scratch is deterministic)');
+}
+
 console.log(`bounds-measurable: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

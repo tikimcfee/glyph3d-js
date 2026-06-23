@@ -29,12 +29,13 @@ import { detectVerticalScroll, captureScrolledRows, depthFade, reflowHistoryRows
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import MonospaceShapeCache from '../shaping/MonospaceShapeCache.js';
 import ScaleModel from './ScaleModel.js';
+import MeasurableObject3D from './MeasurableObject3D.js';
 import Button3D from '../components/Button3D.js';
 import { createPanelMaterial } from './panelMaterial.js';
 
 const _cellStrideScale = new THREE.Vector3(); // scratch for cellStride's world-scale read
 
-export default class TerminalGrid extends THREE.Object3D {
+export default class TerminalGrid extends MeasurableObject3D {
     /**
      * @param {THREE.Scene} scene
      * @param {import('../GlyphAtlas.js').default} atlas
@@ -128,11 +129,11 @@ export default class TerminalGrid extends THREE.Object3D {
         this._depthYStep = this._metrics.lineSpacing * this._depthYFactor;
         this._depthZStep = this._metrics.lineSpacing * this._depthZFactor;
 
-        // World-space bounds cache (for picking + camera framing). The local box
-        // depends only on cols/rows/metrics (dirtied on resize); the world box is
-        // re-derived per call by applying the current world matrix.
+        // Local-bounds cache (for picking + camera framing). The local box depends
+        // only on cols/rows/metrics (dirtied on resize); the WORLD box is owned by
+        // MeasurableObject3D.getBounds(), which re-derives it per call by applying
+        // the current world matrix to this cached local box (no world cache here).
         this._localBounds = null;
-        this._worldBounds = null;
         this._localBoundsDirty = true;
 
         // Optional picking system — wired via setPickingSystem(). Terminals keep a
@@ -657,18 +658,11 @@ export default class TerminalGrid extends THREE.Object3D {
     get zoom() { return this.scaleModel.zoomScalar; }
 
     /**
-     * World-space axis-aligned bounds of the terminal (the padded cell panel),
-     * for canvas picking and camera framing. Mirrors CodeGrid.getBounds()'s
-     * contract: a THREE.Box3 in world space. The local extent is cached and only
-     * rebuilt on resize; the world box is re-derived each call from the current
-     * world matrix (8-corner transform — cheap).
-     * @returns {THREE.Box3}
-     */
-    /**
-     * The padded cell panel in the terminal's OWN local frame (no world transform).
-     * The orientation-stable box: composed with matrixWorld it rides every rotation,
-     * where the world-space AABB (getBounds) morphs as the panel rotates relative to
-     * world (e.g. docked under the camera). Rebuilt only on resize. Mirrors CodeGrid.
+     * The padded cell panel in the terminal's OWN local frame (no world transform) —
+     * the {@link MeasurableObject3D} contract hook. The orientation-stable box: composed
+     * with matrixWorld (by the inherited getBounds) it rides every rotation, where the
+     * world-space AABB morphs as the panel rotates relative to world (e.g. docked under
+     * the camera). Cached; rebuilt only on resize (dirtied via _localBoundsDirty).
      * @returns {THREE.Box3}
      */
     getLocalBounds() {
@@ -691,12 +685,8 @@ export default class TerminalGrid extends THREE.Object3D {
         return this._localBounds;
     }
 
-    getBounds() {
-        this.updateWorldMatrix(true, false);
-        if (!this._worldBounds) this._worldBounds = new THREE.Box3();
-        this._worldBounds.copy(this.getLocalBounds()).applyMatrix4(this.matrixWorld);
-        return this._worldBounds;
-    }
+    // getBounds(target) — world-space AABB, recomputed on demand — is inherited from
+    // MeasurableObject3D (getLocalBounds() applied by the current matrixWorld).
 
     /**
      * Get the underlying GlyphField renderer. Mirrors CodeGrid.getRenderer() so
