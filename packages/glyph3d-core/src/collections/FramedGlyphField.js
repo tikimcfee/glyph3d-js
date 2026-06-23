@@ -30,6 +30,22 @@ import BoundedObject3D from './BoundedObject3D.js';
  * @abstract getLocalBounds — inherited contract from BoundedObject3D (subclasses implement it).
  */
 export default class FramedGlyphField extends BoundedObject3D {
+    constructor() {
+        super();
+        /**
+         * The GlyphField renderer. The SLOT lives here (the base owns getRenderer); each
+         * subclass CONSTRUCTS it — lazily in CodeGrid (created on first flush), eagerly in
+         * TerminalGrid/FrameGrid (a fixed-size buffer in their constructor).
+         * @type {import('../GlyphField.js').default|null}
+         */
+        this._renderer = null;
+        /**
+         * The PickingSystem, wired post-construction via setPickingSystem(). Null until then.
+         * @type {import('../picking/PickingSystem.js').PickingSystem|null}
+         */
+        this._pickingSystem = null;
+    }
+
     /**
      * Build the ScaleModel with the given home/context placement and resolve it onto
      * this.scale immediately (the initial transform write). A subclass calls this from its
@@ -66,4 +82,30 @@ export default class FramedGlyphField extends BoundedObject3D {
 
     /** Current uniform zoom magnitude (the persisted readability scale). @returns {number} */
     get zoom() { return this.scaleModel.zoomScalar; }
+
+    /**
+     * The underlying GlyphField renderer, so canvas picking can map a resolved pick (the
+     * renderer is the 'glyph'-channel token) back to this entity. Null if a lazy subclass
+     * has not created it yet.
+     * @returns {import('../GlyphField.js').default|null}
+     */
+    getRenderer() {
+        return this._renderer;
+    }
+
+    /**
+     * Wire a PickingSystem and register this field's two stable channels:
+     *   - 'glyph' (token = renderer) — per-character / per-cell picks. A subclass whose
+     *     instanceCount changes re-registers it after a rebuild (flush / resize / re-dice).
+     *   - 'grid'  (token = this)     — the whole-panel background pickable.
+     * A subclass with an extra pickable (e.g. TerminalGrid's resize grip) overrides this,
+     * calls super(), then registers its own channel.
+     * @param {import('../picking/PickingSystem.js').PickingSystem} pickingSystem
+     */
+    setPickingSystem(pickingSystem) {
+        this._pickingSystem = pickingSystem;
+        if (!pickingSystem) return;
+        if (this._renderer)   pickingSystem.register('glyph', this._renderer, this._renderer);
+        if (this._background) pickingSystem.register('grid', this._background, this);
+    }
 }

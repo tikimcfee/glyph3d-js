@@ -135,10 +135,6 @@ export default class TerminalGrid extends FramedGlyphField {
         this._localBounds = null;
         this._localBoundsDirty = true;
 
-        // Optional picking system — wired via setPickingSystem(). Terminals keep a
-        // fixed cols*rows instance count, so the renderer is re-registered only on
-        // resize (not per content frame, unlike CodeGrid which re-flushes geometry).
-        this._pickingSystem = null;
 
         // Acquire a group in the DataTexture for O(1) positioning.
         this._groupId = this._renderer.createGroup();
@@ -673,28 +669,14 @@ export default class TerminalGrid extends FramedGlyphField {
     // BoundedObject3D (getLocalBounds() applied by the current matrixWorld).
 
     /**
-     * Get the underlying GlyphField renderer. Mirrors CodeGrid.getRenderer() so
-     * canvas picking can map a resolved pick (renderer) back to this entity.
-     * @returns {import('../GlyphField.js').default|null}
-     */
-    getRenderer() {
-        return this._renderer;
-    }
-
-    /**
-     * Wire a PickingSystem. Registers three channels (mirrors CodeGrid + the grip):
-     *   - 'glyph'  (token = renderer) — per-cell picks; resize() re-registers it.
-     *   - 'grid'   (token = this terminal) — the whole-panel background pickable.
-     *   - 'handle' (token = { grid, edge }) — the SE resize grip; resize()
-     *     re-registers it (it moves with the panel).
+     * Wire a PickingSystem. The base (FramedGlyphField) registers the 'glyph' (renderer) and
+     * 'grid' (background) channels; TerminalGrid adds a third — 'handle', the SE resize grip,
+     * which resize() also re-registers since it moves with the panel.
      * @param {import('../picking/PickingSystem.js').PickingSystem} pickingSystem
      */
     setPickingSystem(pickingSystem) {
-        this._pickingSystem = pickingSystem;
-        if (!pickingSystem) return;
-        if (this._renderer)   pickingSystem.register('glyph', this._renderer, this._renderer);
-        if (this._background) pickingSystem.register('grid', this._background, this);
-        this._registerControls();
+        super.setPickingSystem(pickingSystem);
+        if (pickingSystem) this._registerControls();
     }
 
     /**

@@ -92,16 +92,13 @@ class CodeGrid extends FramedGlyphField {
         this._bufferSize     = 0;
         // ─────────────────────────────────────────────────────────────────────────
 
-        // Optional picking system — wired via setPickingSystem()
-        this._pickingSystem = null;
-
         // Group — the renderer's instanceMesh will be added to the scene through
         // a THREE.Group child so CodeGrid's own Object3D transform is honoured.
         this._rendererGroup = new THREE.Group();
         this.scene.add(this._rendererGroup);
 
-        // Lazy GPU renderer — created on first flush() with right-sized buffer
-        this._renderer = null;
+        // Lazy GPU renderer — the _renderer slot is declared by FramedGlyphField; CodeGrid
+        // creates it on first flush() with a right-sized buffer, so it stays null until then.
 
         // Derive metrics from atlas directly (no renderer needed)
         this.metrics = this._computeMetrics();
@@ -499,30 +496,9 @@ class CodeGrid extends FramedGlyphField {
         );
     }
 
-    /**
-     * Get the underlying GlyphField renderer, or null if not yet created.
-     * Used by PickingSystem, highlight commands, and external callers.
-     * @returns {GlyphField|null}
-     */
-    getRenderer() {
-        return this._renderer;
-    }
-
-    /**
-     * Wire a PickingSystem so flush paths automatically re-register this grid's
-     * renderer after every buffer rebuild. Registers two channels:
-     *   - 'glyph' (token = renderer) — per-character picks; flush re-registers it
-     *     because instanceCount changes.
-     *   - 'grid'  (token = this grid) — the background panel, the whole-panel
-     *     grid-level pickable; stable, registered once here.
-     * @param {import('../picking/PickingSystem.js').PickingSystem} pickingSystem
-     */
-    setPickingSystem(pickingSystem) {
-        this._pickingSystem = pickingSystem;
-        if (!pickingSystem) return;
-        if (this._renderer)   pickingSystem.register('glyph', this._renderer, this._renderer);
-        if (this._background) pickingSystem.register('grid', this._background, this);
-    }
+    // getRenderer() + setPickingSystem() (the glyph + grid channels) are inherited from
+    // FramedGlyphField. The flush path re-registers the glyph channel after each rebuild
+    // (instanceCount changes) via this._pickingSystem directly.
 
     /**
      * Add text (deferred until flush / flushAsync).

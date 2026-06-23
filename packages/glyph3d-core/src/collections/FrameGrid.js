@@ -102,8 +102,6 @@ class FrameGrid extends FramedGlyphField {
         this._stream  = null;
         this._video   = null;
 
-        // Picking — wired via setPickingSystem(); re-registered whenever _build re-dices the cells.
-        this._pickingSystem = null;
         // Size-change taps (the dock auto-reflows a docked tile via this); fired on setAspect.
         this._resizeListeners = null;
 
@@ -338,15 +336,6 @@ class FrameGrid extends FramedGlyphField {
     // dynamic-speed), recomputed on demand so it rides drag / scale / dock rotation —
     // is inherited from BoundedObject3D (getLocalBounds() applied by matrixWorld).
 
-    /**
-     * The underlying GlyphField renderer, so canvas picking can map a resolved pick
-     * (renderer) back to this capture entity. Mirrors CodeGrid / TerminalGrid.getRenderer().
-     * @returns {import('../GlyphField.js').default|null}
-     */
-    getRenderer() {
-        return this._renderer;
-    }
-
     /** @returns {string|null} the file:// uri this frame was loaded from, if any. Mirrors CodeGrid. */
     getSourcePath() {
         return this.sourcePath || this.userData?.sourcePath || null;
@@ -442,17 +431,9 @@ class FrameGrid extends FramedGlyphField {
         this._background.position.set(0, 0, -0.05);
     }
 
-    /**
-     * Wire the picking system: the cell renderer on the 'glyph' channel (per-cell picks) + the
-     * backing panel on the 'grid' channel (one flat quad → resolves a click to this capture, for
-     * hover / select / Ctrl-drag). Mirrors TerminalGrid.setPickingSystem.
-     */
-    setPickingSystem(pickingSystem) {
-        this._pickingSystem = pickingSystem;
-        if (!pickingSystem) return;
-        if (this._renderer)   pickingSystem.register('glyph', this._renderer, this._renderer);
-        if (this._background) pickingSystem.register('grid', this._background, this);
-    }
+    // getRenderer() + setPickingSystem() (the glyph + grid channels) are inherited from
+    // FramedGlyphField. _reregisterPicking (below) re-registers just the glyph channel after a
+    // re-dice changes the cell count.
 
     /** @private Re-register the glyph channel after a re-dice changed the cell count. */
     _reregisterPicking() {
