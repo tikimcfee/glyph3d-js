@@ -35,8 +35,6 @@ export const TRAIL_DEFAULTS = {
     columnAlign: false,         // ON → tool/content size to columns (widest tool, widest content) so the aisle reads as a table
     callScale: 3.0,             // gridScale for call cards — the readable HEADLINE (big glyphs, few lines)
     artifactWorldScale: 0.025,  // worldScale for snapshot cards (fine-print document you fly into)
-    snapshotWindow: false,      // OFF by default → load the WHOLE file (an edit touches all of it; show everything)
-    snapshotRows: 28,           // visible-line cap — used ONLY when snapshotWindow is on
     snapshotImageWidth: 40,     // world width of an image snapshot quad (height follows aspect)
     maxConnections: 512,        // tether budget
     showTethers: true,          // draw a call→snapshot beam per moment
@@ -107,11 +105,6 @@ function fmtCall(rec) {
     return `${head}${mid}${meta ? `\n${meta}` : ''}`;
 }
 
-function clip(text, maxLines) {
-    const lines = String(text || '').split('\n');
-    if (lines.length <= maxLines) return String(text || '');
-    return lines.slice(0, maxLines).join('\n') + `\n… (${lines.length - maxLines} more lines)`;
-}
 
 export default class AgentTrail {
     constructor(ctx, opts = {}) {
@@ -167,8 +160,8 @@ export default class AgentTrail {
             if (kind?.kind === 'image') {
                 snapshot = this._imageSnapshot(record.target, kind.format);
             } else {
-                snapshot = this._card(record.target, '…', { worldScale: this.cfg.artifactWorldScale });
-                this._loadSnapshot(snapshot, record);   // fetch the file AS-OF now + decorate what it touched
+                snapshot = this._makeGrid(record.target, { worldScale: this.cfg.artifactWorldScale });
+                this._loadSnapshot(snapshot, record);   // ONE fetch + load of the file AS-OF now, then decorate
             }
             children.push(snapshot);
         } else if (pullOutput) {
@@ -320,9 +313,14 @@ export default class AgentTrail {
         }
     }
 
-    /** A free CodeGrid card; re-layouts the trail once its content (and bounds) settle. */
+    /** A bare CodeGrid (no content yet) — the caller drives the single load. */
+    _makeGrid(filename, opts) {
+        return new CodeGrid(this.scene, this.atlas, { name: `trail:${filename}`, showFilename: true, showBackground: true, ...opts });
+    }
+
+    /** A free CodeGrid card with content; re-layouts the trail once its bounds settle. */
     _card(filename, body, opts) {
-        const grid = new CodeGrid(this.scene, this.atlas, { name: `trail:${filename}`, showFilename: true, showBackground: true, ...opts });
+        const grid = this._makeGrid(filename, opts);
         grid.loadFileAsync(filename, body).then(() => this._relayout()).catch(() => { /* render best-effort */ });
         return grid;
     }
@@ -330,21 +328,19 @@ export default class AgentTrail {
     /**
      * Per-action OUTPUT snapshot: a command's result (bash/grep/…) as a sibling text grid — the
      * command headlines the call card, this is what it produced. Unlike a file the output is
-     * EPHEMERAL (no path to re-read), so it comes straight from the record. Windowed when
-     * snapshotWindow is on, same as file snapshots.
+     * EPHEMERAL (no path to re-read), so it comes straight from the record. Ships RAW — the grid's
+     * layout system does the line-splitting and any framing; nothing is truncated here.
      */
     _outputSnapshot(record) {
         // The output ONLY — the command lives on the call card, never echoed here (one home each).
-        // Raw text to the grid; its layout system does the line-splitting (windowing is a primitive).
-        const body = this.cfg.snapshotWindow ? clip(record.result, this.cfg.snapshotRows) : String(record.result ?? '');
-        return this._card('output', body, { worldScale: this.cfg.artifactWorldScale });
+        return this._card('output', String(record.result ?? ''), { worldScale: this.cfg.artifactWorldScale });
     }
 
-    /** Per-action snapshot: the file's content AS-OF this moment, with the lines the action touched lit up. */
+    /** Per-action snapshot: the file's content AS-OF this moment (loaded ONCE), with touched lines lit up. */
     _loadSnapshot(grid, record) {
         const path = record.target;
         Promise.resolve(this.ctx.fileProvider?.getFile?.(path))
-            .then((content) => grid.loadFileAsync(path, this.cfg.snapshotWindow ? clip(content, this.cfg.snapshotRows) : String(content ?? '')))
+            .then((content) => grid.loadFileAsync(path, String(content ?? '')))
             .then(() => { this._decorateSnapshot(grid, record); this._relayout(); })
             .catch(() => grid.loadFileAsync(path, '(could not load)').then(() => this._relayout()).catch(() => {}));
     }
@@ -353,8 +349,8 @@ export default class AgentTrail {
      * Light up the lines an action touched on its loaded snapshot — the mapping from the action to
      * the content. Edits glow green on their added lines; a partial read tints its slice blue. The
      * directives come from the shared toolMeta registry (decorateForMeta), applied as additive glyph
-     * highlights via highlightRange. Runs AFTER load (the layout/slots must exist), clamped to the
-     * rendered line range (so a windowed snapshot doesn't index past its content).
+     * highlights via highlightRange. Runs AFTER the single load resolves (the layout/slots exist),
+     * clamped to the rendered line range.
      */
     _decorateSnapshot(grid, record) {
         const dbg = this.cfg.debug ? (msg) => console.log(`[trail.decorate] ${record.action} ${record.target || ''} — ${msg}`) : null;
@@ -366,25 +362,17 @@ export default class AgentTrail {
             return;
         }
         if (typeof grid.highlightRange !== 'function') { dbg?.('grid has no highlightRange — not a CodeGrid'); return; }
-        const apply = (pass) => {
-            const lastLine = (typeof grid.getLineCount === 'function' ? grid.getLineCount() : 0) - 1;
-            let litLines = 0, litSlots = 0;
-            for (const d of directives) {
-                const start = Math.max(0, d.startLine);
-                const end = Math.min(lastLine, d.endLine);
-                for (let ln = start; ln <= end; ln++) {
-                    const cols = typeof grid.getLineSlotCount === 'function' ? grid.getLineSlotCount(ln) : 0;
-                    if (cols > 0) { grid.highlightRange(ln, 0, ln, cols, d.color); litLines++; litSlots += cols; }
-                }
+        const lastLine = (typeof grid.getLineCount === 'function' ? grid.getLineCount() : 0) - 1;
+        let litLines = 0, litSlots = 0;
+        for (const d of directives) {
+            const start = Math.max(0, d.startLine);
+            const end = Math.min(lastLine, d.endLine);
+            for (let ln = start; ln <= end; ln++) {
+                const cols = typeof grid.getLineSlotCount === 'function' ? grid.getLineSlotCount(ln) : 0;
+                if (cols > 0) { grid.highlightRange(ln, 0, ln, cols, d.color); litLines++; litSlots += cols; }
             }
-            // Counts make absent-vs-subtle answerable: "lit 9 lines / 240 slots" + nothing on screen
-            // means a visibility problem, not a no-op. lastLine<0 means the content isn't loaded yet.
-            dbg?.(`pass ${pass}: ${directives.length} directive(s) → lit ${litLines} line(s) / ${litSlots} slot(s) (lastLine=${lastLine})`);
-        };
-        apply('sync');
-        // The snapshot double-loads (placeholder then content); re-apply next frame so a late
-        // rebuild can't wipe the highlights.
-        if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => apply('raf'));
+        }
+        dbg?.(`${directives.length} directive(s) → lit ${litLines} line(s) / ${litSlots} slot(s) (lastLine=${lastLine})`);
     }
 
     /**
