@@ -32,6 +32,7 @@ export const TRAIL_DEFAULTS = {
     railGap: 20,                // HStack gap between a call and its snapshot
     corridorGap: 120,           // HStack gap between concurrent agents' corridors
     align: 0,                   // corridor cross-align: 0 = leading edge (tiny calls + big stacks share a left edge)
+    columnAlign: false,         // ON → tool/content size to columns (widest tool, widest content) so the aisle reads as a table
     callScale: 3.0,             // gridScale for call cards — the readable HEADLINE (big glyphs, few lines)
     artifactWorldScale: 0.025,  // worldScale for snapshot cards (fine-print document you fly into)
     snapshotWindow: false,      // OFF by default → load the WHOLE file (an edit touches all of it; show everything)
@@ -415,6 +416,7 @@ export default class AgentTrail {
         for (const lane of this.lanes.values()) {
             lane.corridor.spacing = this.cfg.zPitch;
             lane.corridor.align = this.cfg.align;
+            lane.corridor.columnAlign = this.cfg.columnAlign;   // the corridor sizes moment columns from content
             for (const e of lane.moments) e.moment.spacing = this.cfg.railGap;
         }
         this.root.layout();
