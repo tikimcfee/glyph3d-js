@@ -13,6 +13,8 @@
 //   --agent <prefix>         agent id / id prefix (default 'run')
 //   --split-agents N         round-robin actions across N agents → N corridors (default 1)
 //   --limit N                cap to the first N actions
+//   --latest N               cap to the LAST N actions (the most recent — what you usually want
+//                            on a chunky session; applied after --limit)
 //   --rate <ms>              delay between sends (default 0; the WS reply already paces)
 //   --port N                 relay port (default 8080)
 //   --no-clear               don't `trail.clear all` first
@@ -23,7 +25,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { parseToolMeta } from '../packages/glyph3d-core/src/collections/toolMeta.js';
 
-const VALUE = new Set(['session', 'agent', 'split-agents', 'limit', 'rate', 'port']);
+const VALUE = new Set(['session', 'agent', 'split-agents', 'limit', 'latest', 'rate', 'port']);
 const BOOL = new Set(['no-clear', 'dry', 'help']);
 const flags = {};
 {
@@ -104,6 +106,7 @@ let mapped = raw.map((a) => {
 })
   .filter((m) => m.action && m.action !== 'todowrite' && m.action !== 'task_get' && m.action !== 'toolsearch');
 if (flags.limit) mapped = mapped.slice(0, Number(flags.limit));
+if (flags.latest) mapped = mapped.slice(-Number(flags.latest));   // keep the most recent N (tail)
 
 const A = Math.max(1, Number(flags['split-agents'] || 1));
 const prefix = flags.agent || 'run';
