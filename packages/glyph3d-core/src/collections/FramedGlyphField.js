@@ -147,4 +147,19 @@ export default class FramedGlyphField extends BoundedObject3D {
     setBorderFlag(mask, present) {
         this._panel?.setBorderFlag(mask, present);
     }
+
+    /**
+     * Tear down the background panel: free its GPU geometry + material, detach the mesh from this
+     * Object3D, and clear both slots. Idempotent (no-op once disposed). A subclass calls this from
+     * its own dispose() AFTER unregistering picking (the 'grid' channel's token is the background)
+     * and alongside its own renderer / PTY / capture teardown.
+     */
+    _disposePanel() {
+        if (!this._background) return;
+        this._background.geometry.dispose();
+        this._background.material.dispose();
+        this.remove(this._background);
+        this._background = null;
+        this._panel = null;
+    }
 }

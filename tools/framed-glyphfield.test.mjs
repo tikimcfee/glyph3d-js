@@ -11,6 +11,7 @@
 //      TerminalGrid-style override that adds a 'handle' channel after super()).
 //   3. panel slots (_panel/_background) + the in-shader border delegators (setBorder /
 //      setStateColors / setBorderFlag). setBackgroundStyle stays per-class — it diverges.
+//   4. _disposePanel() — the shared background teardown (free geometry+material, detach, clear).
 
 import * as THREE from 'three';
 import FramedGlyphField from '../packages/glyph3d-core/src/collections/FramedGlyphField.js';
@@ -168,6 +169,23 @@ const mockPicking = () => { const calls = []; return { calls, register: (channel
   let threw = false;
   try { f.setBorder({}); f.setStateColors({}); f.setBorderFlag(1, false); } catch { threw = true; }
   ok(!threw, 'border delegators: null panel → safe no-op (optional-chaining guard)');
+}
+
+// ── dispose slice (UNIT-010) ─────────────────────────────────────────────────────────────
+// ── 15. _disposePanel frees geometry+material, detaches the panel, clears slots, idempotent ─
+{
+  const f = new FramedGlyphField();
+  const dis = { geom: 0, mat: 0 };
+  const bg = { geometry: { dispose: () => dis.geom++ }, material: { dispose: () => dis.mat++ } };
+  let removed = null;
+  f._background = bg; f._panel = { id: 'panel' };
+  f.remove = (child) => { removed = child; };           // spy (skip THREE child bookkeeping)
+  f._disposePanel();
+  ok(dis.geom === 1 && dis.mat === 1, '_disposePanel: frees the panel geometry + material');
+  ok(removed === bg, '_disposePanel: detaches the panel via this.remove (the fix for TG\'s omission)');
+  ok(f._background === null && f._panel === null, '_disposePanel: clears both slots');
+  f._disposePanel();                                    // second call on an already-disposed panel
+  ok(dis.geom === 1 && dis.mat === 1, '_disposePanel: idempotent — no-op once the panel is gone');
 }
 
 console.log(`framed-glyphfield: ${pass} passed, ${fail} failed`);

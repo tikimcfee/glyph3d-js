@@ -803,12 +803,8 @@ export default class TerminalGrid extends FramedGlyphField {
             this._renderer.instanceMesh.material.dispose();
             this._renderer = null;
         }
-        if (this._background) {
-            this._background.geometry.dispose();
-            this._background.material.dispose();
-            this._background = null;
-            this._panel = null;
-        }
+        this._disposePanel();   // free + detach the background panel (FramedGlyphField) — now also
+                                // removes it from this Object3D, which TG's inline teardown skipped
         for (const c of this._controls) c.button.dispose();
         this._controls = [];
         this.scene.remove(this);

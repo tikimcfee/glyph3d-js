@@ -459,13 +459,7 @@ class FrameGrid extends FramedGlyphField {
             if (this._renderer)   this._pickingSystem.unregister('glyph', this._renderer);
             if (this._background) this._pickingSystem.unregister('grid', this._background);
         }
-        if (this._background) {
-            this._background.geometry.dispose();
-            this._background.material.dispose();
-            this.remove(this._background);
-            this._background = null;
-            this._panel = null;
-        }
+        this._disposePanel();   // free + detach the background panel (FramedGlyphField)
         const mesh = this._renderer?.instanceMesh;
         if (mesh) this.remove(mesh);   // mesh is parented here, not the renderer's scene
         // Full renderer teardown: unregisters from the live slug atlas (so no dangling

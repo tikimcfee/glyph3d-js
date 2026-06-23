@@ -955,14 +955,7 @@ class CodeGrid extends FramedGlyphField {
             }
         }
 
-        // Dispose background
-        if (this._background) {
-            this._background.geometry.dispose();
-            this._background.material.dispose();
-            this.remove(this._background);
-            this._background = null;
-            this._panel = null;
-        }
+        this._disposePanel();   // free + detach the background panel (FramedGlyphField)
 
         // Dispose caret overlay (lazy-created in enterEdit)
         if (this._caretMesh) {
