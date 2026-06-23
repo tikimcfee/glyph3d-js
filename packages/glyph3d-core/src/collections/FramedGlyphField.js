@@ -55,6 +55,12 @@ export default class FramedGlyphField extends BoundedObject3D {
          * @type {object|null}
          */
         this._panel = null;
+        /**
+         * Size-change subscribers (lazily created on first onResize). Taps fire AFTER a resize with
+         * the new (cols, rows) — the 3D grid OWNS its size; a 2D companion view / the dock tracks it.
+         * @type {Set<(cols:number, rows:number)=>void>|null}
+         */
+        this._resizeListeners = null;
     }
 
     /**
@@ -146,6 +152,31 @@ export default class FramedGlyphField extends BoundedObject3D {
      */
     setBorderFlag(mask, present) {
         this._panel?.setBorderFlag(mask, present);
+    }
+
+    /**
+     * Subscribe to size changes. The tap fires AFTER a resize with the new (cols, rows) — the 3D
+     * grid OWNS its size; a 2D companion view or the dock tracks it. Returns an unsubscribe fn.
+     * @param {(cols:number, rows:number)=>void} cb
+     * @returns {() => void} unsubscribe
+     */
+    onResize(cb) {
+        if (!this._resizeListeners) this._resizeListeners = new Set();
+        this._resizeListeners.add(cb);
+        return () => { this._resizeListeners?.delete(cb); };
+    }
+
+    /**
+     * Fire the size-change taps with the new (cols, rows). A throwing tap is isolated so one bad
+     * subscriber can't break the others or the resize itself. No-op when there are no subscribers.
+     * @param {number} cols @param {number} rows
+     * @protected
+     */
+    _emitResize(cols, rows) {
+        if (!this._resizeListeners) return;
+        for (const cb of this._resizeListeners) {
+            try { cb(cols, rows); } catch { /* ignore tap errors */ }
+        }
     }
 
     /**

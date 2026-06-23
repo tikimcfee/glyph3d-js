@@ -102,9 +102,6 @@ class FrameGrid extends FramedGlyphField {
         this._stream  = null;
         this._video   = null;
 
-        // Size-change taps (the dock auto-reflows a docked tile via this); fired on setAspect.
-        this._resizeListeners = null;
-
         this._build();
 
         // Backing panel: a TRANSPARENT plane that is the flat 'grid'-channel PICK target (a capture
@@ -264,7 +261,7 @@ class FrameGrid extends FramedGlyphField {
         this._build();
         this._updateBackground();   // aspect changed → panel height changed
         this._reregisterPicking();  // _build re-diced → glyph-channel id block changed
-        this._fireResize();         // a docked tile re-fits
+        this._emitResize(this.cols, this.rows);   // size-change taps → a docked tile re-fits
     }
 
     /**
@@ -379,18 +376,8 @@ class FrameGrid extends FramedGlyphField {
     // setScale(factor) + setZoom(factor) + get zoom — the full scale API — are inherited from
     // FramedGlyphField. FrameGrid keeps no home-scale mirror field, so it uses them unchanged.
 
-    /** Subscribe to size changes (the dock auto-reflows a docked tile via this). Returns unsubscribe. */
-    onResize(cb) {
-        if (!this._resizeListeners) this._resizeListeners = new Set();
-        this._resizeListeners.add(cb);
-        return () => { this._resizeListeners?.delete(cb); };
-    }
-
-    /** @private */
-    _fireResize() {
-        if (!this._resizeListeners) return;
-        for (const cb of this._resizeListeners) { try { cb(this.cols, this.rows); } catch { /* ignore tap errors */ } }
-    }
+    // onResize(cb) — subscribe to size-change taps — is inherited from FramedGlyphField; setAspect
+    // fires them via the base _emitResize(this.cols, this.rows).
 
     // setBorder / setBorderFlag / setStateColors — the in-shader border delegators — are inherited
     // from FramedGlyphField. setBackgroundStyle stays below (frame-specific _bg*).

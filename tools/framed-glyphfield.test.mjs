@@ -12,6 +12,7 @@
 //   3. panel slots (_panel/_background) + the in-shader border delegators (setBorder /
 //      setStateColors / setBorderFlag). setBackgroundStyle stays per-class — it diverges.
 //   4. _disposePanel() — the shared background teardown (free geometry+material, detach, clear).
+//   5. onResize(cb) + _emitResize(cols,rows) — the size-change taps (subscribe / fire / isolate).
 
 import * as THREE from 'three';
 import FramedGlyphField from '../packages/glyph3d-core/src/collections/FramedGlyphField.js';
@@ -186,6 +187,34 @@ const mockPicking = () => { const calls = []; return { calls, register: (channel
   ok(f._background === null && f._panel === null, '_disposePanel: clears both slots');
   f._disposePanel();                                    // second call on an already-disposed panel
   ok(dis.geom === 1 && dis.mat === 1, '_disposePanel: idempotent — no-op once the panel is gone');
+}
+
+// ── resize-taps slice (UNIT-011) ─────────────────────────────────────────────────────────
+// ── 16. onResize subscribe → _emitResize fires with (cols,rows); unsubscribe stops it ─────
+{
+  const f = new FramedGlyphField();
+  const seen = [];
+  const off = f.onResize((c, r) => seen.push([c, r]));
+  f._emitResize(80, 24);
+  ok(seen.length === 1 && seen[0][0] === 80 && seen[0][1] === 24, 'onResize: tap fires with the new (cols, rows)');
+  off();                                          // unsubscribe
+  f._emitResize(100, 30);
+  ok(seen.length === 1, 'onResize: the returned unsubscribe stops further taps');
+}
+
+// ── 17. _emitResize: no subscribers → safe no-op; a throwing tap is isolated ──────────────
+{
+  const f = new FramedGlyphField();
+  let threw = false;
+  try { f._emitResize(1, 1); } catch { threw = true; }   // no listeners yet
+  ok(!threw, '_emitResize: no subscribers → safe no-op');
+  const good = [];
+  f.onResize(() => { throw new Error('bad tap'); });      // added first
+  f.onResize((c, r) => good.push([c, r]));                // added second
+  let threw2 = false;
+  try { f._emitResize(5, 6); } catch { threw2 = true; }
+  ok(!threw2, '_emitResize: a throwing tap does not propagate out');
+  ok(good.length === 1 && good[0][0] === 5, '_emitResize: a throwing tap does not block the other subscribers');
 }
 
 console.log(`framed-glyphfield: ${pass} passed, ${fail} failed`);

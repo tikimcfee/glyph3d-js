@@ -546,17 +546,8 @@ export default class TerminalGrid extends FramedGlyphField {
         return () => { this._byteListeners?.delete(cb); };
     }
 
-    /**
-     * Subscribe to size changes (cols/rows). A 2D companion xterm follows these so its VT
-     * interpretation stays matched to the PTY — the 3D grid OWNS the size, the 2D view tracks
-     * it. Fires after resize() with the new (cols, rows). Returns an unsubscribe fn.
-     * @param {(cols:number, rows:number)=>void} cb
-     */
-    onResize(cb) {
-        if (!this._resizeListeners) this._resizeListeners = new Set();
-        this._resizeListeners.add(cb);
-        return () => { this._resizeListeners?.delete(cb); };
-    }
+    // onResize(cb) — subscribe to size-change taps (fires after resize with the new cols/rows; a
+    // 2D companion xterm follows the PTY-owned size) — is inherited from FramedGlyphField.
 
     /**
      * Move the terminal in 3D space. O(1): one DataTexture write.
@@ -775,9 +766,7 @@ export default class TerminalGrid extends FramedGlyphField {
 
         // Size-change tap: a 2D companion xterm follows so it re-interprets the shared byte
         // stream at the new dimensions (one source, two projections — see onBytes).
-        if (this._resizeListeners) {
-            for (const cb of this._resizeListeners) { try { cb(cols, rows); } catch (e) { /* ignore tap errors */ } }
-        }
+        this._emitResize(cols, rows);
     }
 
     /**
