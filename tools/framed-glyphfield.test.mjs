@@ -9,6 +9,8 @@
 //      including the subclass stash-then-super setScale override.
 //   2. renderer slot + getRenderer(), and setPickingSystem() (the glyph+grid channels, plus the
 //      TerminalGrid-style override that adds a 'handle' channel after super()).
+//   3. panel slots (_panel/_background) + the in-shader border delegators (setBorder /
+//      setStateColors / setBorderFlag). setBackgroundStyle stays per-class — it diverges.
 
 import * as THREE from 'three';
 import FramedGlyphField from '../packages/glyph3d-core/src/collections/FramedGlyphField.js';
@@ -139,6 +141,33 @@ const mockPicking = () => { const calls = []; return { calls, register: (channel
   f.setPickingSystem(ps);
   ok(ps.calls.length === 3, 'override: super (glyph+grid) + subclass handle = 3 channels');
   ok(ps.calls.some(c => c.channel === 'handle' && c.token === H && c.owner === f), 'override: handle channel registered after super()');
+}
+
+// ── panel styling slice (UNIT-009) ───────────────────────────────────────────────────────
+// ── 13. the in-shader border delegators forward verbatim to the panel handle ──────────────
+{
+  const f = new FramedGlyphField();
+  ok(f._panel === null && f._background === null, 'base ctor: _panel + _background default to null');
+  const calls = [];
+  f._panel = {
+    setBorder: (s) => calls.push(['border', s]),
+    setStateColors: (c) => calls.push(['state', c]),
+    setBorderFlag: (m, p) => calls.push(['flag', m, p]),
+  };
+  const style = { color: 0xff0000 }, colors = { hover: 1 };
+  f.setBorder(style); f.setStateColors(colors); f.setBorderFlag(4, true);
+  ok(calls.length === 3, 'border delegators: each forwards exactly once to the panel');
+  ok(calls[0][0] === 'border' && calls[0][1] === style, 'setBorder → panel.setBorder(style)');
+  ok(calls[1][0] === 'state' && calls[1][1] === colors, 'setStateColors → panel.setStateColors(colors)');
+  ok(calls[2][0] === 'flag' && calls[2][1] === 4 && calls[2][2] === true, 'setBorderFlag → panel.setBorderFlag(mask, present)');
+}
+
+// ── 14. border delegators are a safe no-op before the panel exists (the ?. guard) ─────────
+{
+  const f = new FramedGlyphField();   // _panel is null
+  let threw = false;
+  try { f.setBorder({}); f.setStateColors({}); f.setBorderFlag(1, false); } catch { threw = true; }
+  ok(!threw, 'border delegators: null panel → safe no-op (optional-chaining guard)');
 }
 
 console.log(`framed-glyphfield: ${pass} passed, ${fail} failed`);

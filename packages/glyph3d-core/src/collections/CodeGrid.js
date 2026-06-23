@@ -107,9 +107,8 @@ class CodeGrid extends FramedGlyphField {
         this._filenameTextId = null;
         this._contentTextIds = [];
 
-        // Background element (separate from renderer)
-        this._background = null;
-        this._panel = null;        // panel-material handle (fill + in-shader border)
+        // Background panel — the _panel/_background slots are declared by FramedGlyphField;
+        // _initBackground builds the mesh + panel material for this grid.
         this._initBackground();
 
         // Add renderer group as our child for proper transforms
@@ -348,33 +347,9 @@ class CodeGrid extends FramedGlyphField {
         this.config.backgroundColor = color;
     }
 
-    /**
-     * Set this window's in-shader border identity: color (the dock's ghost hue), width (screen
-     * pixels), intensity. WHAT shows is driven by the border flags (setBorderFlag) — each subsystem
-     * owns its own bits and the shader decodes them.
-     * @param {{ color?: number|string, width?: number, intensity?: number }} style
-     */
-    setBorder(style = {}) {
-        this._panel?.setBorder(style);
-    }
-
-    /**
-     * Restyle this window's focus/hover/input border state colors (the shared interaction vocabulary,
-     * configured in Settings ▸ Appearance). WHICH one shows is still driven by the border flags.
-     * @param {{ hover?: number|string, focus?: number|string, input?: number|string }} colors
-     */
-    setStateColors(colors = {}) {
-        this._panel?.setStateColors(colors);
-    }
-
-    /**
-     * Flip one or more BORDER_FLAGS bits on this window's border (DOCKED / HOVERED / FOCUSED /
-     * INPUT). The dock owns DOCKED; the attention-driven border controller owns the rest.
-     * @param {number} mask @param {boolean} present
-     */
-    setBorderFlag(mask, present) {
-        this._panel?.setBorderFlag(mask, present);
-    }
+    // setBorder / setStateColors / setBorderFlag — the in-shader border delegators (this._panel?.x)
+    // — are inherited from FramedGlyphField. setBackgroundColor / setBackgroundStyle stay below
+    // (they touch CodeGrid-specific config + glyph-alpha).
 
     /**
      * Show or hide background

@@ -44,6 +44,17 @@ export default class FramedGlyphField extends BoundedObject3D {
          * @type {import('../picking/PickingSystem.js').PickingSystem|null}
          */
         this._pickingSystem = null;
+        /**
+         * The background panel mesh — the 'grid' pick target + in-shader border carrier. The SLOT
+         * lives here; each subclass BUILDS it (and its own sizing) in its _initBackground.
+         * @type {import('three').Mesh|null}
+         */
+        this._background = null;
+        /**
+         * The panel-material handle (fill + in-shader border) backing _background. Subclass-built.
+         * @type {object|null}
+         */
+        this._panel = null;
     }
 
     /**
@@ -107,5 +118,33 @@ export default class FramedGlyphField extends BoundedObject3D {
         if (!pickingSystem) return;
         if (this._renderer)   pickingSystem.register('glyph', this._renderer, this._renderer);
         if (this._background) pickingSystem.register('grid', this._background, this);
+    }
+
+    /**
+     * Set this window's in-shader border identity: color (the dock's ghost hue), width (screen
+     * pixels), intensity. WHAT shows is driven by the border flags (setBorderFlag) — each subsystem
+     * owns its own bits and the shader decodes them. No-op until the panel exists.
+     * @param {{ color?: number|string, width?: number, intensity?: number }} style
+     */
+    setBorder(style = {}) {
+        this._panel?.setBorder(style);
+    }
+
+    /**
+     * Restyle this window's focus/hover/input border state colors (the shared interaction
+     * vocabulary, configured in Settings ▸ Appearance). WHICH one shows is driven by the flags.
+     * @param {{ hover?: number|string, focus?: number|string, input?: number|string }} colors
+     */
+    setStateColors(colors = {}) {
+        this._panel?.setStateColors(colors);
+    }
+
+    /**
+     * Flip one or more BORDER_FLAGS bits on this window's border (DOCKED / HOVERED / FOCUSED /
+     * INPUT). The dock owns DOCKED; the attention-driven border controller owns the rest.
+     * @param {number} mask @param {boolean} present
+     */
+    setBorderFlag(mask, present) {
+        this._panel?.setBorderFlag(mask, present);
     }
 }

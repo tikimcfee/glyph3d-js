@@ -168,9 +168,8 @@ export default class TerminalGrid extends FramedGlyphField {
         // _writeToInstanceBuffer() can write in place without allocation.
         this._applyToRenderer();
 
-        // Background plane — dark panel behind the terminal for readability.
-        this._background = null;
-        this._panel = null;        // panel-material handle (fill + in-shader border)
+        // Background plane — dark panel behind the terminal for readability. The _panel/
+        // _background slots are declared by FramedGlyphField; _initBackground builds them.
         this._bgColor = options.backgroundColor ?? 0x0a0a1e;
         this._bgOpacity = options.backgroundOpacity ?? 0.96;
         this._bgPadding = options.backgroundPadding ?? 0.3;
@@ -1228,33 +1227,8 @@ export default class TerminalGrid extends FramedGlyphField {
         if (opacity != null) this._applyGlyphAlpha();
     }
 
-    /**
-     * Set this window's in-shader border identity: color (the dock's ghost hue), width (screen
-     * pixels), intensity. WHAT shows is driven by the border flags (setBorderFlag) — each subsystem
-     * owns its own bits and the shader decodes them.
-     * @param {{ color?: number|string, width?: number, intensity?: number }} style
-     */
-    setBorder(style = {}) {
-        this._panel?.setBorder(style);
-    }
-
-    /**
-     * Restyle this window's focus/hover/input border state colors (the shared interaction vocabulary,
-     * configured in Settings ▸ Appearance). WHICH one shows is still driven by the border flags.
-     * @param {{ hover?: number|string, focus?: number|string, input?: number|string }} colors
-     */
-    setStateColors(colors = {}) {
-        this._panel?.setStateColors(colors);
-    }
-
-    /**
-     * Flip one or more BORDER_FLAGS bits on this window's border (DOCKED / HOVERED / FOCUSED /
-     * INPUT). The dock owns DOCKED; the attention-driven border controller owns the rest.
-     * @param {number} mask @param {boolean} present
-     */
-    setBorderFlag(mask, present) {
-        this._panel?.setBorderFlag(mask, present);
-    }
+    // setBorder / setStateColors / setBorderFlag — the in-shader border delegators (this._panel?.x)
+    // — are inherited from FramedGlyphField. setBackgroundStyle stays below (terminal-specific _bg*).
 
     /**
      * Resize and reposition the background plane to fit the current grid.

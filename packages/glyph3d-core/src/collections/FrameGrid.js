@@ -112,9 +112,8 @@ class FrameGrid extends FramedGlyphField {
         // the in-shader identity/hover/dock border. The fill is invisible (opacity 0) — the video
         // cells ARE the content, so the panel must not darken or occlude them; only the border rim
         // shows, and only when a state flag is set. Picking reads the ID pass, not the visible
-        // material, so a transparent panel is still fully clickable.
-        this._panel = null;
-        this._background = null;
+        // material, so a transparent panel is still fully clickable. The _panel/_background slots
+        // are declared by FramedGlyphField; _initBackground builds them.
         this._bgColor   = options.backgroundColor   ?? 0x0a0a1e;
         this._bgOpacity = options.backgroundOpacity ?? 0; // transparent fill; border rim still shows
         this._initBackground();
@@ -393,14 +392,8 @@ class FrameGrid extends FramedGlyphField {
         for (const cb of this._resizeListeners) { try { cb(this.cols, this.rows); } catch { /* ignore tap errors */ } }
     }
 
-    /** Set the in-shader identity border (the dock's ghost hue); WHAT shows is driven by setBorderFlag. */
-    setBorder(style = {}) { this._panel?.setBorder(style); }
-
-    /** Flip BORDER_FLAGS bits (DOCKED / HOVERED / FOCUSED / INPUT) on the border. */
-    setBorderFlag(mask, present) { this._panel?.setBorderFlag(mask, present); }
-
-    /** Restyle the focus/hover/input border state colors (shared interaction vocabulary). */
-    setStateColors(colors = {}) { this._panel?.setStateColors(colors); }
+    // setBorder / setBorderFlag / setStateColors — the in-shader border delegators — are inherited
+    // from FramedGlyphField. setBackgroundStyle stays below (frame-specific _bg*).
 
     /** Live-restyle the backing panel (color / opacity). */
     setBackgroundStyle({ color, opacity } = {}) {
