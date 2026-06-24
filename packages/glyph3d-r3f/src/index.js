@@ -14,4 +14,5 @@ export { default as GlyphCanvas } from './GlyphCanvas.jsx';
 export { default as CodeGrid } from './CodeGrid.jsx';
 export { default as ViewerCamera } from './ViewerCamera.jsx';
 export { default as SceneEnvironment } from './SceneEnvironment.jsx';
+export { default as Minimap } from './Minimap.jsx';
 export { GlyphProvider, useGlyphAtlas, useGridRegistry } from './context.jsx';

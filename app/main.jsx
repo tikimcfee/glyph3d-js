@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import * as THREE from 'three/webgpu';
-import { useGlyphEngine, GlyphCanvas, ViewerCamera, SceneEnvironment } from '@glyph3d/r3f';
+import { useGlyphEngine, GlyphCanvas, ViewerCamera, SceneEnvironment, Minimap } from '@glyph3d/r3f';
 import CommandProvider from './client/CommandProvider.jsx';
 import ButtonBar from './ButtonBar.jsx';
 import IdeDock from './IdeDock.jsx';
@@ -135,6 +135,10 @@ function App() {
                   skydome). On the default layer + unregistered, so picking, culling,
                   and the camera's look-distance never see them. */}
               <SceneEnvironment />
+              {/* 3D overview HUD — schematic boxes (per surface bounds) + the camera as a
+                  moving frustum-cone, rendered as a scissored second pass. Takes over the
+                  render loop while mounted; remove this line to disable. (Spike.) */}
+              <Minimap />
               {/* IDE starts empty; files arrive via file.open (sidebar click or CLI).
                   Page served by Vite (:5173); relay is the Go server :8080. */}
               <CommandProvider
