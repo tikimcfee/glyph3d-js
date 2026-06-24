@@ -78,6 +78,7 @@ function App() {
   const [client, setClient] = useState(null);
   const [dockW, setDockW] = useState(320);   // resizable sidebar width (px)
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [showMinimap, setShowMinimap] = useState(() => getSetting('view.minimap'));
 
   // ⌘K / Ctrl-K summons (and toggles) the command palette — the classic shortcut.
   // Capture phase + a modifier keeps it clear of the camera/edit keystroke paths.
@@ -97,6 +98,16 @@ function App() {
   useEffect(() => {
     const el = document.getElementById('status');
     if (el) el.style.display = 'none';
+  }, []);
+
+  // The 3D minimap mounts/unmounts off its persisted setting — the toolbar button, the
+  // Settings panel, and the `view.minimap` verb all flip the one key, and StateController
+  // fires a `state-changed` event we re-read here. Unmounting cleanly returns the render
+  // loop to r3f's auto-render; mounting hands it to <Minimap>'s scissored second pass.
+  useEffect(() => {
+    const sync = () => setShowMinimap(getSetting('view.minimap'));
+    window.addEventListener('state-changed', sync);
+    return () => window.removeEventListener('state-changed', sync);
   }, []);
 
   // Idle resting message for the StatusBar (loading activity overrides it there).
@@ -136,9 +147,10 @@ function App() {
                   and the camera's look-distance never see them. */}
               <SceneEnvironment />
               {/* 3D overview HUD — schematic boxes (per surface bounds) + the camera as a
-                  moving frustum-cone, rendered as a scissored second pass. Takes over the
-                  render loop while mounted; remove this line to disable. (Spike.) */}
-              <Minimap />
+                  moving frustum-cone, rendered as a scissored second pass. Mounts off the
+                  view.minimap setting (toolbar button / Settings / `view.minimap` verb);
+                  unmounting returns the render loop to r3f. */}
+              {showMinimap && <Minimap />}
               {/* IDE starts empty; files arrive via file.open (sidebar click or CLI).
                   Page served by Vite (:5173); relay is the Go server :8080. */}
               <CommandProvider

@@ -77,6 +77,12 @@ export const SETTINGS = [
     type: 'number', default: 1, min: 0.1, max: 5, step: 0.1,
     apply: (ctx, v) => { if (ctx.cameraController) ctx.cameraController.settings.scrollSensitivity = v; },
   },
+  // View — high-level view primitives (HUD overlays). No live apply(): main.jsx mounts/
+  // unmounts the widget off the persisted value via StateController's state-changed event.
+  {
+    key: 'view.minimap', label: 'Minimap overview', group: 'View',
+    type: 'bool', default: true,
+  },
   {
     key: 'atlas.fontSize', label: 'Font size (px)', group: 'Display',
     type: 'number', default: 48, min: 16, max: 96, step: 1, reload: true,

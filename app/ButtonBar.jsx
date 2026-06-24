@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { stateController } from '@glyph3d/core/services/state';
+import { getSetting } from './client/settings.js';
 
 // ButtonBar — the top toolbar of text-label buttons (no icons, per the house
 // style). Each button is a thin command-bus surface: it runs a router command,
@@ -68,6 +69,34 @@ function Btn({ label, title, cmd, client }) {
       onClick={() => client?.router.execute(cmd)}
     >
       {label}
+    </button>
+  );
+}
+
+// MinimapToggle — a stateful toggle for the 3D minimap overview. Reflects the persisted
+// view.minimap setting (lit when on) and flips it via the bus (view.minimap), so the
+// button, the Settings panel, and the CLI stay in sync through the one key. Re-reads on
+// StateController's state-changed event (same channel the panel writes through).
+function MinimapToggle({ client }) {
+  const enabled = !!client;
+  const [on, setOn] = useState(() => getSetting('view.minimap'));
+  useEffect(() => {
+    const sync = () => setOn(getSetting('view.minimap'));
+    window.addEventListener('state-changed', sync);
+    return () => window.removeEventListener('state-changed', sync);
+  }, []);
+  const lit = on && enabled;
+  return (
+    <button
+      type="button"
+      title="toggle the 3D minimap overview"
+      disabled={!enabled}
+      style={{ ...styles.btn(enabled), ...(lit ? { color: '#7ad7a0', borderColor: '#2c4636' } : {}) }}
+      onMouseEnter={(e) => { if (enabled) e.currentTarget.style.background = 'rgba(255,255,255,0.07)'; }}
+      onMouseLeave={(e) => { if (enabled) e.currentTarget.style.background = 'rgba(255,255,255,0.03)'; }}
+      onClick={() => client?.router.execute('view.minimap')}
+    >
+      map {on ? '●' : '○'}
     </button>
   );
 }
@@ -191,6 +220,7 @@ export default function ButtonBar({ client, onOpenPalette }) {
       <span style={styles.sep} />
       <Btn label="fit" title="frame all grids in view" cmd="camera.fitall" client={client} />
       <Btn label="capture" title="capture the OS screen share into a FrameGrid" cmd="frame.capture" client={client} />
+      <MinimapToggle client={client} />
       <ConnectionChip client={client} />
     </div>
   );
