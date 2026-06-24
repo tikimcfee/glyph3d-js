@@ -10,14 +10,15 @@
  *   - WASD/QE    → strafe / dolly / rise
  *
  * Movement scales to the distance down your forward axis to whatever you're looking at
- * (`_lookDistance()`, clamped to the auto-slow band by `_movementScale()`). PAN holds a
- * STILL anchor — it SAMPLES that distance once when the drag starts and holds it for the
+ * (`_lookDistance()`). PAN holds a STILL anchor — it SAMPLES that distance once when the
+ * drag starts (clamped to the engagement band by `_panDistance()`) and holds it for the
  * stroke, so a drag covers consistent on-screen distance start to finish (the Blender
- * lesson; a drag has an anchor, the thing under your cursor). WASD and dolly read it
- * LIVE: a flight visibly slows as it nears a file and speeds back up as it clears it, and
- * a dolly is a smooth approach while zooming. Reading a file head-on → fine; sweeping the
- * void → coarse. Nothing scales off the cursor or a content centroid — the RTS-style refs
- * that made the same gesture behave differently over a grid vs. empty space are gone.
+ * lesson; a drag has an anchor, the thing under your cursor). WASD and dolly read it LIVE:
+ * a flight's speed follows the `_flightSpeedScale()` valley — slow as it nears a file, snap
+ * back to cruise once it's too close — and a dolly is a smooth approach while zooming.
+ * Reading a file head-on → fine; sweeping the void → coarse. Nothing scales off the cursor
+ * or a content centroid — the RTS-style refs that made the same gesture behave differently
+ * over a grid vs. empty space are gone.
  *
  * Architecture: single-drain input state machine.
  *   - Event handlers are pure state updaters — they record intent into
@@ -36,19 +37,28 @@ import { stateController } from '../state/StateController.js';
 import { zDistanceForFit, worldPerPixel, tweenPose } from '../spatial/spatialMath.js';
 
 const CAMERA_DEFAULTS = {
-    cameraSpeed: 100,
+    cameraSpeed: 500,
     dragSensitivity: 1.0,
     scrollSensitivity: 1.0,
     invertDragX: false,
     invertDragY: false,
     invertScroll: false,
     dynamicSpeed: true,
-    // Proximity auto-slow band, as MULTIPLES of the base move speed. The dynamic look
-    // distance gets clamped to [min·DEFAULT_LOOK_DIST, max·DEFAULT_LOOK_DIST] before it
-    // drives movement, so a nose-against-a-panel floors at min· (not the old ~0.01× that
-    // froze you to a crawl) and a glance into the void caps at max· (no runaway).
+    // Proximity auto-slow. The speed is a relevance VALLEY over distance-to-content,
+    // decoupling WHERE the slow happens (the distance knobs) from HOW slow/fast it gets
+    // (the × knobs — multiples of base move speed). See _flightSpeedScale for the curve.
+    //   min/max   — floor (closest) and ceiling (far/cruise) speed multipliers.
+    //   near/far  — distances bounding the ramp: floor reached at nearDist, cruise at farDist.
+    //   release   — TOO-close cutoff: inside it you snap back to cruise (you've passed through
+    //               the content). 0 disables the snap-back.
+    // Values below are hand-tuned by feel (not derived): a gentle ramp to a 2× cruise that
+    // tops out by 800 units, with an early 40-unit punch-through. Keep in lockstep with the
+    // settings-schema defaults (app/client/settings.js) so a fresh controller + panel agree.
     dynamicSpeedMin: 0.15,
-    dynamicSpeedMax: 8,
+    dynamicSpeedMax: 2,
+    dynamicNearDist: 30,
+    dynamicFarDist: 800,
+    dynamicReleaseDist: 40,
 };
 
 const CLICK_THRESHOLD_PX = 5;
@@ -88,6 +98,9 @@ export class ViewerCameraController {
             dynamicSpeed:      stateController.get('camera.dynamicSpeed', CAMERA_DEFAULTS.dynamicSpeed),
             dynamicSpeedMin:   stateController.get('camera.dynamicSpeedMin', CAMERA_DEFAULTS.dynamicSpeedMin),
             dynamicSpeedMax:   stateController.get('camera.dynamicSpeedMax', CAMERA_DEFAULTS.dynamicSpeedMax),
+            dynamicNearDist:   stateController.get('camera.dynamicNearDist', CAMERA_DEFAULTS.dynamicNearDist),
+            dynamicFarDist:    stateController.get('camera.dynamicFarDist', CAMERA_DEFAULTS.dynamicFarDist),
+            dynamicReleaseDist: stateController.get('camera.dynamicReleaseDist', CAMERA_DEFAULTS.dynamicReleaseDist),
         };
 
         // Publicly-readable rotation state. `applyCamera` writes these into
@@ -214,7 +227,7 @@ export class ViewerCameraController {
             // Sample the move scale ONCE, here, and hold it for the whole drag — the
             // pan keeps one consistent feel from grab to release (the per-frame
             // recompute is what made it morph as the camera neared a file).
-            if (input.drag.mode === 'pan') this._moveScale = this._movementScale();
+            if (input.drag.mode === 'pan') this._moveScale = this._panDistance();
 
             canvas.style.cursor = input.drag.mode === 'look' ? 'move' : 'grabbing';
         });
@@ -468,17 +481,17 @@ export class ViewerCameraController {
         const moving = moveDir.lengthSq() > 0;
         if (!moving) return;
 
-        // LIVE proximity scale, re-sampled every frame: the flight visibly DECELERATES as
-        // it nears content and re-accelerates as it clears it — the auto-slow you feel
-        // mid-flight, not only after a stop-and-restart. The floor in _movementScale keeps
-        // the approach from crawling to a halt. (Pan instead HOLDS its sample — a drag has
-        // an on-screen anchor a flight doesn't.) Held here so a pan begun right after a
-        // flight inherits the live distance.
-        this._moveScale = this._movementScale();
-
+        // LIVE, re-sampled every frame: the flight visibly DECELERATES as it nears content
+        // and re-accelerates as it clears it (or punches back to cruise once it's too close
+        // — the release zone) — the auto-slow you feel mid-flight, not only after a stop-
+        // and-restart. One distance read drives both the speed curve and the held pan
+        // distance, so a pan begun right after a flight inherits the live distance. (Pan
+        // itself HOLDS its sample — a drag has an on-screen anchor a flight doesn't.)
+        const dist = this._lookDistance();
+        this._moveScale = this._panDistance(dist);
+        const speedScale = this._flightSpeedScale(dist);
         moveDir.normalize();
         moveDir.applyQuaternion(camera.quaternion);
-        const speedScale = this._moveScale / DEFAULT_LOOK_DIST;
         moveDir.multiplyScalar(this.cameraSpeed * dt * speedScale);
         camera.position.add(moveDir);
     }
@@ -669,23 +682,46 @@ export class ViewerCameraController {
     }
 
     /**
-     * The MOVEMENT scale — `_lookDistance()` clamped to the configurable auto-slow band.
-     * This, not the raw look distance, is what pan + WASD sample and hold, so the
-     * proximity slow can't run off the rails either way: a glance into the void can't
-     * launch you (ceiling) and a nose-against-a-panel can't pin you to a crawl (floor —
-     * the near-0 problem). The band is in MULTIPLES of the base move speed (it rides
-     * DEFAULT_LOOK_DIST), so min/max read straight as "× cameraSpeed": effective WASD
-     * speed = cameraSpeed · clamp(dist/DEFAULT, min, max). Dolly is deliberately NOT
-     * banded — fine zoom granularity up close is the right feel there. dynamicSpeed off
-     * → flat DEFAULT (no proximity scaling at all).
-     * @private @returns {number} move scale in world units, [min·DEFAULT, max·DEFAULT]
+     * The PAN move distance — the held look distance, clamped to the engagement band
+     * [nearDist, farDist]. Pan needs a real DISTANCE (it drives worldPerPixel, so a drag
+     * covers consistent on-screen distance), not a speed multiplier — so it just bounds
+     * the raw look distance: a nose-against-a-panel floors at nearDist instead of crawling
+     * to ~0, a sweep of the void caps at farDist. dynamicSpeed off → flat DEFAULT.
+     * @private @param {number} [dist] the look distance to clamp (defaults to a fresh read)
+     * @returns {number} pan distance in world units, in [nearDist, farDist]
      */
-    _movementScale() {
+    _panDistance(dist = this._lookDistance()) {
         if (!this.settings.dynamicSpeed) return DEFAULT_LOOK_DIST;
-        const d = this._lookDistance();
-        const lo = this.settings.dynamicSpeedMin * DEFAULT_LOOK_DIST;
-        const hi = this.settings.dynamicSpeedMax * DEFAULT_LOOK_DIST;
-        return Math.min(Math.max(d, lo), hi);
+        const lo = this.settings.dynamicNearDist;
+        const hi = this.settings.dynamicFarDist;
+        return Math.min(Math.max(dist, lo), hi);
+    }
+
+    /**
+     * The WASD flight SPEED multiplier (× cameraSpeed) for a given content distance — the
+     * decoupled remap that splits WHERE the slow happens (nearDist/farDist) from HOW slow
+     * it gets (min/max). A relevance valley as you fly at a file:
+     *   - dist ≥ farDist            → ceiling (max): far content, cruise.
+     *   - nearDist ≤ dist < farDist → lerp(ceiling, floor): natural deceleration approaching.
+     *   - releaseDist ≤ dist < near → floor (min): the slow reading plateau.
+     *   - dist < releaseDist        → ceiling: TOO close — you've effectively passed through
+     *                                 it, so it stops braking you (same idea as the behind-
+     *                                 the-eye cull). releaseDist = 0 disables the snap-back.
+     * Distances are decoupled from the speeds: floor/ceiling no longer ride
+     * DEFAULT_LOOK_DIST, so the default near/far/release are hand-tuned by feel, not
+     * derived from the multipliers. dynamicSpeed off → flat 1×.
+     * @private @param {number} [dist] content distance (defaults to a fresh read)
+     * @returns {number} speed multiplier in [min, max]
+     */
+    _flightSpeedScale(dist = this._lookDistance()) {
+        const s = this.settings;
+        if (!s.dynamicSpeed) return 1;
+        const { dynamicNearDist: near, dynamicFarDist: far, dynamicSpeedMin: floor, dynamicSpeedMax: ceil, dynamicReleaseDist: release } = s;
+        if (release > 0 && dist < release) return ceil;  // too close → snap back to cruise
+        if (dist >= far) return ceil;
+        if (dist <= near) return floor;
+        const t = (far - dist) / (far - near);           // 0 at far, 1 at near
+        return ceil + t * (floor - ceil);                // lerp(ceil, floor, t)
     }
 
     /** @private */
@@ -700,6 +736,9 @@ export class ViewerCameraController {
         stateController.set('camera.dynamicSpeed', s.dynamicSpeed);
         stateController.set('camera.dynamicSpeedMin', s.dynamicSpeedMin);
         stateController.set('camera.dynamicSpeedMax', s.dynamicSpeedMax);
+        stateController.set('camera.dynamicNearDist', s.dynamicNearDist);
+        stateController.set('camera.dynamicFarDist', s.dynamicFarDist);
+        stateController.set('camera.dynamicReleaseDist', s.dynamicReleaseDist);
     }
 
     teardownEventListeners() {

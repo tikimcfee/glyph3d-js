@@ -22,12 +22,16 @@ const windowParam = (param) => (ctx, v) => { (ctx.windowConfig ||= {})[param] = 
 export const SETTINGS = [
   {
     key: 'camera.speed', label: 'Move speed', group: 'Camera',
-    type: 'number', default: 100, min: 1, max: 1000, step: 1,
+    type: 'number', default: 500, min: 1, max: 1000, step: 1,
     apply: (ctx, v) => ctx.cameraController?.setSpeed?.(v),
   },
-  // Proximity auto-slow: movement scales to how close the content you're heading toward
-  // is. The min/max bound that scaling (× the base move speed) so close-up doesn't crawl
-  // to ~0 and a glance at the void doesn't launch you. Off → flat speed everywhere.
+  // Proximity auto-slow: a WASD flight slows as it nears content and speeds back up as it
+  // clears it. A relevance VALLEY over distance — the × knobs set how slow/fast the ends
+  // are, the distance knobs set where the ramp sits. Off → flat speed everywhere.
+  //   floor/ceiling (×) — slowest (closest) and cruise (far) speed, × base move speed.
+  //   slow start / floor (dist) — ramp begins (cruise→slow) at 'slow start', bottoms out at 'floor at'.
+  //   snap-back (dist) — get closer than this and you punch back to cruise (you've passed
+  //                      through it); 0 disables it.
   {
     key: 'camera.dynamicSpeed', label: 'Proximity auto-slow', group: 'Camera',
     type: 'bool', default: true,
@@ -40,8 +44,23 @@ export const SETTINGS = [
   },
   {
     key: 'camera.dynamicSpeedMax', label: 'Auto-slow ceiling (×)', group: 'Camera',
-    type: 'number', default: 8, min: 1, max: 20, step: 0.5,
+    type: 'number', default: 2, min: 1, max: 20, step: 0.5,
     apply: (ctx, v) => { if (ctx.cameraController) ctx.cameraController.settings.dynamicSpeedMax = v; },
+  },
+  {
+    key: 'camera.dynamicNearDist', label: 'Auto-slow floor at (dist)', group: 'Camera',
+    type: 'number', default: 30, min: 1, max: 500, step: 1,
+    apply: (ctx, v) => { if (ctx.cameraController) ctx.cameraController.settings.dynamicNearDist = v; },
+  },
+  {
+    key: 'camera.dynamicFarDist', label: 'Auto-slow starts at (dist)', group: 'Camera',
+    type: 'number', default: 800, min: 50, max: 4000, step: 50,
+    apply: (ctx, v) => { if (ctx.cameraController) ctx.cameraController.settings.dynamicFarDist = v; },
+  },
+  {
+    key: 'camera.dynamicReleaseDist', label: 'Auto-slow snap-back (dist, 0=off)', group: 'Camera',
+    type: 'number', default: 40, min: 0, max: 200, step: 1,
+    apply: (ctx, v) => { if (ctx.cameraController) ctx.cameraController.settings.dynamicReleaseDist = v; },
   },
   {
     key: 'camera.dragSensitivity', label: 'Drag sensitivity', group: 'Camera',
