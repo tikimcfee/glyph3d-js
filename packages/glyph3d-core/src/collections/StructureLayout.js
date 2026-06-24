@@ -1,5 +1,11 @@
 import { flowBoxes, squareWrap } from './layouts/flowBoxes.js';
 
+// "Callable units" — the default griddable leaf scopes. A file is rarely a bag of
+// free functions; it's usually a class full of methods. So the default grids
+// functions AND methods wherever they nest (outermost-first), which is what you
+// almost always mean by "lay out this file's routines".
+const LEAF_SCOPES = new Set(['function', 'method', 'constructor', 'getter', 'setter']);
+
 /**
  * StructureLayout — a per-grid control surface that re-arranges a code grid's
  * glyphs BY SEMANTIC ENTITY, using the AST.
@@ -31,18 +37,22 @@ export class StructureLayout {
     get active() { return this._scheme; }
 
     /**
-     * Arrange the grid's top-level <kind> blocks into a grid sorted by glyph
-     * surface area (smallest→largest), hiding everything else. Lens-style.
-     * @param {string} [kind='function']
-     * @returns {{ok:boolean, count?:number, reason?:string}}
+     * Arrange the grid's blocks into a grid sorted by glyph surface area
+     * (smallest→largest), hiding everything else. Lens-style.
+     * @param {string|null} [kind=null] a specific normalized kind, or null for the
+     *   "callable units" default (functions + methods at any depth).
+     * @returns {{ok:boolean, count?:number, reason?:string, available?:string[]}}
      */
-    grid(kind = 'function') {
+    grid(kind = null) {
         const r = this._renderer();
         const model = this._grid.getSemantics?.();
         if (!r || !model) return { ok: false, reason: 'grid has no renderer or semantic model' };
 
         const blocks = this._blocks(model, kind, r);
-        if (!blocks.length) return { ok: false, reason: `no top-level ${kind} blocks in this file` };
+        if (!blocks.length) {
+            const available = [...new Set((model.flat ?? []).map((n) => n.kind))].filter(Boolean);
+            return { ok: false, reason: kind ? `no ${kind} blocks` : 'no functions or methods', available };
+        }
 
         // Smallest surface-area first, then pack into a roughly-square grid.
         blocks.sort((a, b) => a.bounds.width * a.bounds.height - b.bounds.width * b.bounds.height);
@@ -51,7 +61,7 @@ export class StructureLayout {
         const { slots } = flowBoxes(sizes, { margin, wrapWidth: squareWrap(sizes, margin) });
 
         this._apply(r, blocks, slots);
-        this._scheme = { kind, scheme: 'grid', count: blocks.length };
+        this._scheme = { kind: kind || 'callable', scheme: 'grid', count: blocks.length };
         return { ok: true, count: blocks.length };
     }
 
@@ -70,12 +80,26 @@ export class StructureLayout {
 
     _glyphCount(r) { return r.instanceMesh?.geometry?.instanceCount ?? 0; }
 
-    /** Top-level nodes of `kind` → [{node, startSlot, count, bounds}]. */
+    /**
+     * Outermost nodes matching the kind → [{node, startSlot, count, bounds}].
+     * Don't descend into a match (so a block's nested functions stay part of it,
+     * and parent/child never both get selected → no overlap). With no kind, the
+     * default is the "callable units" — functions + methods wherever they nest, so
+     * a class's methods grid just as cleanly as a file's free functions.
+     */
     _blocks(model, kind, r) {
-        const top = model.outline ? model.outline() : (model.roots ?? []); // top-level (no nesting overlap)
+        const match = kind ? (n) => n.kind === kind : (n) => LEAF_SCOPES.has(n.kind);
+        const picked = [];
+        const visit = (nodes) => {
+            for (const n of nodes || []) {
+                if (match(n)) picked.push(n);                   // outermost match — stop here
+                else if (n.children?.length) visit(n.children); // a container — descend to find members
+            }
+        };
+        visit(model.roots ?? (model.outline ? model.outline() : []));
+
         const out = [];
-        for (const n of top) {
-            if (n.kind !== kind) continue;
+        for (const n of picked) {
             const startSlot = this._grid.getSlotForChar(n.start.line, n.start.col);
             const endSlot = this._endSlot(n.end);
             if (startSlot < 0 || endSlot <= startSlot) continue;

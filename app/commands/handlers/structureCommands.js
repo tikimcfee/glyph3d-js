@@ -29,7 +29,8 @@ function resolveGrid(ctx, gridArg) {
 export default function registerStructureCommands(router) {
     router.register('structure.grid', async (args, ctx) => {
         // [grid] [kind]; a lone arg that's a known kind applies to the focused grid.
-        let gridArg = null, kind = 'function';
+        // No kind → the "callable units" default (functions + methods at any depth).
+        let gridArg = null, kind = null;
         if (args.length === 1) {
             if (KINDS.has(args[0])) kind = args[0]; else gridArg = args[0];
         } else if (args.length >= 2) {
@@ -45,9 +46,14 @@ export default function registerStructureCommands(router) {
         await grid.ensureSemantics();
 
         const res = controllerFor(grid).grid(kind);
-        return res.ok
-            ? { text: `OK: ${res.count} top-level ${kind} block(s) → size-sorted grid`, data: { registryId: resolved.registryId, ...res } }
-            : { text: `ERR: ${res.reason}`, data: null };
+        if (!res.ok) {
+            const hint = res.available?.length ? ` (file has: ${res.available.join(', ')})` : '';
+            return { text: `ERR: ${res.reason}${hint}`, data: null };
+        }
+        return {
+            text: `OK: ${res.count} ${kind || 'callable'} block(s) → size-sorted grid`,
+            data: { registryId: resolved.registryId, ...res },
+        };
     }, {
         description: 'Arrange a code grid\'s top-level <kind> blocks into a grid sorted by glyph area (AST-driven, hides the rest)',
         usage: '[grid] [kind=function]',
