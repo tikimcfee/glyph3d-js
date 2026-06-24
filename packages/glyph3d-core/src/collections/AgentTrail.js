@@ -1,8 +1,9 @@
 /**
  * AgentTrail — an agent's run laid out as a spatial corridor, composed with the stack DSL.
  *
- * Every action leaves a MOMENT — an `HStack([callCard, snapshotCard])`, the call beside the
- * file it touched, bounds-aligned. Moments deck into depth via a reverse `ZStack` (time = Z,
+ * Every action leaves a MOMENT — a `VStack([actionRow, HStack([infoCol, parseCol…])])`: the
+ * action headline on top, its info + parse-mapping columns directly below, bounds-aligned.
+ * Moments deck into depth via a reverse `ZStack` (time = Z,
  * newest in front, history recedes — fly and look past). Concurrent agents are an outer
  * `HStack` of corridors. The whole layout (gaps, alignment, sizing) is the DSL's job; this
  * file just builds the tree and re-runs `.layout()` when content settles.
@@ -22,19 +23,21 @@ import * as THREE from 'three';
 import CodeGrid from './CodeGrid.js';
 import FrameGrid from './FrameGrid.js';
 import ConnectionRenderer from '../annotations/ConnectionRenderer.js';
-import { HStack, ZStack } from './layouts/StackContainer.js';
+import { HStack, VStack, ZStack } from './layouts/StackContainer.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import { classifyByExtension } from '../core/fileKind.js';
 import { decorateForMeta } from './toolMeta.js';
 
 export const TRAIL_DEFAULTS = {
     zPitch: 90,                 // ZStack deck pitch between moments (time depth) — fly-through room
-    railGap: 20,                // HStack gap between a call and its snapshot
+    rowGap: 10,                 // VStack gap inside a moment: action headline → its info/parse columns
+    colGap: 20,                 // HStack gap between a moment's columns (info, then parse-mapping(s))
     corridorGap: 120,           // HStack gap between concurrent agents' corridors
     align: 0,                   // corridor cross-align: 0 = leading edge (tiny calls + big stacks share a left edge)
-    columnAlign: false,         // ON → tool/content size to columns (widest tool, widest content) so the aisle reads as a table
-    callScale: 3.0,             // gridScale for call cards — the readable HEADLINE (big glyphs, few lines)
-    artifactWorldScale: 0.025,  // worldScale for snapshot cards (fine-print document you fly into)
+    columnAlign: false,         // ON → size the body columns down the deck (widest info, widest parse) so the aisle reads as a table
+    callScale: 3.0,             // gridScale for the action headline — the readable HEADLINE (big glyphs, few lines)
+    infoScale: 1.5,             // gridScale for the info column — readable, subordinate to the action headline
+    artifactWorldScale: 0.025,  // worldScale for parse-mapping (snapshot) cards (fine-print document you fly into)
     snapshotImageWidth: 40,     // world width of an image snapshot quad (height follows aspect)
     maxConnections: 512,        // tether budget
     showTethers: true,          // draw a call→snapshot beam per moment
@@ -81,8 +84,9 @@ function classify(action) {
 const fmtNum = (n) => (n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'K' : String(n));
 const fmtBytes = (b) => (b >= 1048576 ? (b / 1048576).toFixed(1) + ' MB' : b >= 1024 ? Math.round(b / 1024) + ' KB' : b + ' B');
 
-/** A terse one-line summary of an action's structured meta (lines read/written, +/−, tokens…). */
-function fmtMeta(meta) {
+/** A terse summary of an action's structured meta (lines read/written, +/−, tokens…), one item
+ *  per `sep` — ' · ' for a one-line subtitle, '\n' to stack as rows in the info column. */
+function fmtMeta(meta, sep = ' · ') {
     if (!meta || typeof meta !== 'object') return '';
     const p = [];
     if (meta.lines != null) p.push(`${meta.lines} lines`);
@@ -93,16 +97,13 @@ function fmtMeta(meta) {
     if (meta.tokens != null) p.push(`${fmtNum(meta.tokens)} tok`);
     if (meta.ms != null) p.push(`${(meta.ms / 1000).toFixed(1)}s`);
     if (meta.interrupted) p.push('interrupted');
-    return p.join(' · ');
+    return p.join(sep);
 }
 
-function fmtCall(rec) {
-    // The call card carries the action's INPUT (target path / command) + a terse META subtitle
-    // (lines read/written, +/−, tokens). The full RESULT/OUTPUT lives in the sibling, never here.
-    const head = rec.target || rec.detail || rec.action || '';
-    const mid = (rec.target && rec.detail) ? `\n${rec.detail}` : '';
-    const meta = fmtMeta(rec.meta);
-    return `${head}${mid}${meta ? `\n${meta}` : ''}`;
+function fmtAction(rec) {
+    // The action headline's BODY: what the agent did and to what — target path and/or command/args.
+    // The numeric meta lives in the info column; the result lives in the parse column. One home each.
+    return [rec.target, rec.detail].filter(Boolean).join('\n');
 }
 
 
@@ -140,7 +141,7 @@ export default class AgentTrail {
         return this;
     }
 
-    /** One activity record → a moment (call beside its snapshot) decked into the corridor. */
+    /** One activity record → a moment (action headline over its info/parse columns) decked into the corridor. */
     ingest({ agentId, record } = {}) {
         if (!record) return;
         if (!this._rootPlaced) this._placeRootInView();
@@ -154,17 +155,30 @@ export default class AgentTrail {
         // so it rides the record raw — the grid's layout system splits/lays it out, not us.
         const pullOutput = !record.target && !!record.result;
 
-        // Identity for THIS moment: both the call card and its snapshot register under the same
-        // momentId so a click on either focuses the one moment (call + snapshot together).
+        // Identity for THIS moment: the action headline and its column cards all register under the
+        // same momentId so a click on any of them focuses the one moment (action + info + parse).
         const seq = lane.seq;
         const momentId = `trail:moment:${agentId}:${seq}`;
-        const callId = `${momentId}:call`;
+        const actionId = `${momentId}:action`;
+        const infoId = `${momentId}:info`;
         const snapId = `${momentId}:snap`;
         const meta = { agentId, seq, momentId, record };
 
-        const call = this._card(`[${record.action || 'act'}]`, fmtCall(record),
-            { gridScale: this.cfg.callScale, textColor: hue }, { id: callId, meta: { ...meta, kind: 'call' } });
-        const children = [call];
+        // ROW 0 — the agent's ACTION: a readable headline, `[verb]` over its target/command.
+        const action = this._card(`[${record.action || 'act'}]`, fmtAction(record),
+            { gridScale: this.cfg.callScale, textColor: hue }, { id: actionId, meta: { ...meta, kind: 'action' } });
+
+        // ROW 1 — the COLUMNS below, left→right: INFO (terse numeric meta) then the PARSE
+        // MAPPING(s) (the file/output snapshot the action touched). Built into `columns`.
+        const columns = [];
+
+        const infoText = fmtMeta(record.meta, '\n');
+        let info = null;
+        if (infoText) {
+            info = this._card('info', infoText, { gridScale: this.cfg.infoScale, textColor: hue, showFilename: false },
+                { id: infoId, meta: { ...meta, kind: 'info' } });
+            columns.push(info);
+        }
 
         let snapshot = null, hasSnapPick = false;
         if (record.target) {
@@ -178,20 +192,23 @@ export default class AgentTrail {
                 this._loadSnapshot(snapshot, record, { id: snapId, meta: { ...meta, kind: 'snap' } });   // ONE fetch + load, decorate, then register
                 hasSnapPick = true;
             }
-            children.push(snapshot);
+            columns.push(snapshot);
         } else if (pullOutput) {
             snapshot = this._outputSnapshot(record, { id: snapId, meta: { ...meta, kind: 'snap' } });   // the command's output as a sibling grid
-            children.push(snapshot);
+            columns.push(snapshot);
             hasSnapPick = true;
         }
 
-        const moment = new HStack({ spacing: this.cfg.railGap, children });
+        // VStack{ action, HStack{ info, parse… } } — the action headline on top, its columns below
+        // (the body HStack is omitted when the action produced no columns). align 0 → shared left edge.
+        const body = columns.length ? new HStack({ spacing: this.cfg.colGap, children: columns }) : null;
+        const moment = new VStack({ spacing: this.cfg.rowGap, align: 0, children: body ? [action, body] : [action] });
         lane.corridor.add(moment);
         const tetherId = snapshot ? `tether:${agentId}:${seq}` : null;
-        lane.moments.push({ moment, call, snapshot, hue, tetherId, callId, snapId: hasSnapPick ? snapId : null });
-        // BIND the tether to the two cards — it resolves their world positions each
-        // frame, so it follows layout, scroll, and corridor drags with no re-tether.
-        if (tetherId) this.conn.set(tetherId, call, snapshot, hue);
+        lane.moments.push({ moment, body, action, info, snapshot, hue, tetherId, actionId, infoId: info ? infoId : null, snapId: hasSnapPick ? snapId : null });
+        // BIND the tether to the action card and its parse mapping — it resolves their world
+        // positions each frame, so it follows layout, scroll, and corridor drags with no re-tether.
+        if (tetherId) this.conn.set(tetherId, action, snapshot, hue);
         lane.seq++;
         this._relayout();
     }
@@ -217,8 +234,8 @@ export default class AgentTrail {
         const kill = (lane) => {
             for (const e of lane.moments) {
                 if (e.tetherId) this.conn.remove(e.tetherId);
-                for (const id of [e.callId, e.snapId]) { if (id) { try { this.ctx.registry?.unregister?.(id); } catch (_e) { /* best effort */ } } }
-                for (const g of [e.call, e.snapshot]) {
+                for (const id of [e.actionId, e.infoId, e.snapId]) { if (id) { try { this.ctx.registry?.unregister?.(id); } catch (_e) { /* best effort */ } } }
+                for (const g of [e.action, e.info, e.snapshot]) {
                     if (!g) continue;
                     try { this.ctx.pickingSystem?.unregister?.('grid', g._background); } catch (_e) { /* best effort */ }
                     try { g.parent?.remove(g); g.dispose?.(); } catch (_e) { /* best effort */ }
@@ -380,9 +397,43 @@ export default class AgentTrail {
         const path = record.target;
         const wire = () => { if (pick) this._wireCardPick(grid, pick.id, pick.meta); };
         Promise.resolve(this.ctx.fileProvider?.getFile?.(path))
-            .then((content) => grid.loadFileAsync(path, String(content ?? '')))
+            .then((content) => this._resolveSnapshotText(path, String(content ?? '')))
+            .then((text) => grid.loadFileAsync(path, text))
             .then(() => { this._decorateSnapshot(grid, record); wire(); this._relayout(); })
             .catch(() => grid.loadFileAsync(path, '(could not load)').then(() => { wire(); this._relayout(); }).catch(() => {}));
+    }
+
+    /**
+     * Guard against an EMPTY live read. getFile reads from DISK at the moment the moment builds,
+     * which races a concurrent agent writing the same file: a truncate→write leaves a 0-byte
+     * window, so the read comes back '' — a SUCCESS, not an error, so the '(could not load)'
+     * fallback never fires and the snapshot collapses to a bare filename card. (This used to be
+     * masked by the old '…' placeholder double-load; the single-load path unmasked it.)
+     *
+     * On an empty read, prefer the file's OPEN grid content — what's on screen, immune to the
+     * write window — then re-read once after a beat (the window is milliseconds, so the retry
+     * almost always lands the finished write). A genuinely-empty file just stays empty (harmless).
+     * The faithful end-state is to carry the content the agent actually read IN THE RECORD (see the
+     * file header TODO) — this keeps live watching honest until then.
+     * @private @returns {Promise<string>}
+     */
+    _resolveSnapshotText(path, disk) {
+        if (disk) return Promise.resolve(disk);
+        const live = this._openGridContent(path);
+        if (live) return Promise.resolve(live);
+        return new Promise((r) => setTimeout(r, 120))
+            .then(() => this.ctx.fileProvider?.getFile?.(path))
+            .then((c) => String(c ?? ''))
+            .catch(() => '');
+    }
+
+    /** The in-memory content of `path` if it's currently open as a grid (immune to a concurrent
+     *  writer's truncate window), else null. Matches file.open's path→uri convention. */
+    _openGridContent(path) {
+        const uri = `file:///${String(path).replace(/^\/+/, '')}`;
+        const open = this.ctx.registry?.findByMeta?.('sourcePath', uri) || [];
+        const g = open[0]?.grid;
+        return (g && typeof g.content === 'string' && g.content.length) ? g.content : null;
     }
 
     /**
@@ -436,6 +487,17 @@ export default class AgentTrail {
         return grid;
     }
 
+    /** Widest cell-i across a lane's body HStacks → a shared column track (info col, parse col, …),
+     *  so columns line up down the deck. null when there are no bodies. @private */
+    _bodyColumnTrack(bodies) {
+        const track = [];
+        for (const body of bodies) {
+            const exts = body.childExtents('x');
+            for (let i = 0; i < exts.length; i++) if (!(exts[i] <= track[i])) track[i] = exts[i];   // NaN/undefined-safe max
+        }
+        return track.length ? track : null;
+    }
+
     /** Re-run the whole stack tree (idempotent) and refresh the tethers off the new positions. */
     _relayout() {
         // cfg is the LIVE source of truth — push current spacing/align into the containers so
@@ -444,8 +506,21 @@ export default class AgentTrail {
         for (const lane of this.lanes.values()) {
             lane.corridor.spacing = this.cfg.zPitch;
             lane.corridor.align = this.cfg.align;
-            lane.corridor.columnAlign = this.cfg.columnAlign;   // the corridor sizes moment columns from content
-            for (const e of lane.moments) e.moment.spacing = this.cfg.railGap;
+            lane.corridor.columnAlign = false;   // moments are VStacks now — columns live one level down, in the body HStacks
+            // Harmonize the body columns DOWN the deck so info/parse line up as a table: a per-corridor
+            // track (widest info cell, widest parse cell across this lane) stamped as each body's fixed
+            // columnWidths. childExtents reads each cell's own content box (layout-independent), so the
+            // normal single layout pass picks it up via body.layout()'s columnWidths default. OFF → clear
+            // the track (ragged). NOTE: assumes a consistent column ORDER across moments (info, then
+            // parse) — a moment missing the info column shifts its parse into slot 0; placeholder slots
+            // are a follow-on if that bites.
+            const bodies = lane.moments.map((e) => e.body).filter(Boolean);
+            const track = this.cfg.columnAlign ? this._bodyColumnTrack(bodies) : null;
+            for (const body of bodies) body.columnWidths = track;
+            for (const e of lane.moments) {
+                e.moment.spacing = this.cfg.rowGap;
+                if (e.body) e.body.spacing = this.cfg.colGap;
+            }
         }
         this.root.layout();
         // A pinned (user-dragged) corridor overrides its auto-layout slot — the HStack
