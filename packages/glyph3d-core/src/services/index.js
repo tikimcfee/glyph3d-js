@@ -28,6 +28,9 @@ export { SelectionManager } from './interaction/SelectionManager.js';
 export { CodeColorManager } from './interaction/CodeColorManager.js';
 export { ShortcutManager } from './interaction/ShortcutManager.js';
 
+// Spatial
+export { worldBounds } from './spatial/sceneBounds.js';
+
 // Camera
 export { ViewerCameraController } from './camera/ViewerCameraController.js';
 

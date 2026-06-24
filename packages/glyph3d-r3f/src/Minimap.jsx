@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { useThree, useFrame } from '@react-three/fiber';
 import * as THREE from 'three/webgpu';
+import { worldBounds } from '@glyph3d/core/services';
 import { useGridRegistry } from './context.jsx';
 
 /**
@@ -87,7 +88,7 @@ export default function Minimap({
     mscene.add(cone, apex);
 
     mm.current = { mscene, mcam, proxies, pool, cone, apex, boxGeo, edgeGeo, fill, edge,
-                   _box: new THREE.Box3(), _v: new THREE.Vector3(), _c: new THREE.Vector3() };
+                   _box: new THREE.Box3(), _v: new THREE.Vector3(), _c: new THREE.Vector3(), _list: [] };
 
     return () => {
       boxGeo.dispose(); edgeGeo.dispose(); coneGeo.dispose();
@@ -112,10 +113,11 @@ export default function Minimap({
       for (const t of ['grid', 'terminal', 'frame'])
         for (const s of registry.toArray(t)) tagged.push([s, t]);
 
-      // sync the proxy pool to the current surfaces, and union their bounds for framing.
-      const union = M._box.makeEmpty();
+      // sync the proxy pool to the current surfaces; collect them for the framing extent.
+      M._list.length = 0;
       for (let i = 0; i < tagged.length; i++) {
         const [s, type] = tagged[i];
+        M._list.push(s);
         const b = s.getBounds?.();
         let node = M.pool[i];
         if (!node) {                                  // grow the pool lazily
@@ -133,12 +135,12 @@ export default function Minimap({
         node.node.scale.set(Math.max(node.node.scale.x, 0.01),
                             Math.max(node.node.scale.y, 0.01),
                             Math.max(node.node.scale.z, 0.01));
-        union.union(b);
       }
       for (let i = tagged.length; i < M.pool.length; i++) M.pool[i].node.visible = false;
 
-      // the user camera lives in the framing too, so the cone never leaves the map.
-      union.expandByPoint(camera.position);
+      // the shared world extent (+ the eye, so the cone never leaves the map). One canonical
+      // computation — worldBounds — that the grounding arena + soft camera bounds will share.
+      const union = worldBounds(M._list, M._box, { expandToInclude: camera.position });
       const center = union.getCenter(M._c);
       const radius = union.isEmpty() ? 200 : Math.max(union.getSize(M._v).length() * 0.5, 1);
 
