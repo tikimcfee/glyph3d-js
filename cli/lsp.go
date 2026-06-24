@@ -258,7 +258,7 @@ func (s *LSPSupervisor) definition(ctx context.Context, q lspQuery) ([]lspLoc, *
 		}
 		time.Sleep(lspReadyBackoff) // server still indexing → empty, not not-found
 	}
-	return toLspLocs(locs), nil
+	return s.toLspLocs(locs), nil
 }
 
 func (s *LSPSupervisor) references(ctx context.Context, q lspQuery) ([]lspLoc, *lspError) {
@@ -282,7 +282,7 @@ func (s *LSPSupervisor) references(ctx context.Context, q lspQuery) ([]lspLoc, *
 		}
 		time.Sleep(lspReadyBackoff)
 	}
-	return toLspLocs(locs), nil
+	return s.toLspLocs(locs), nil
 }
 
 func (s *LSPSupervisor) status() map[string]any {
@@ -497,11 +497,11 @@ func flattenDef(r protocol.DefinitionResult) []protocol.Location {
 	return nil
 }
 
-func toLspLocs(locs []protocol.Location) []lspLoc {
+func (s *LSPSupervisor) toLspLocs(locs []protocol.Location) []lspLoc {
 	out := make([]lspLoc, 0, len(locs))
 	for _, l := range locs {
 		out = append(out, lspLoc{
-			URI: string(l.URI),
+			URI: s.ideURI(l.URI),
 			Range: lspRange{
 				Start: lspPos{l.Range.Start.Line, l.Range.Start.Character},
 				End:   lspPos{l.Range.End.Line, l.Range.End.Character},
@@ -509,6 +509,19 @@ func toLspLocs(locs []protocol.Location) []lspLoc {
 		})
 	}
 	return out
+}
+
+// ideURI rewrites an absolute file:// URI from the language server into the
+// repo-relative form the IDE addresses files by (file:///<rel>), so results
+// match grid source paths. URIs outside the workspace root (rare — a dep
+// resolving to an unreachable path) are left absolute for best-effort handling.
+func (s *LSPSupervisor) ideURI(u uri.URI) string {
+	p := strings.TrimPrefix(string(u), "file://")
+	rel, err := filepath.Rel(s.root, p)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return string(u)
+	}
+	return "file:///" + filepath.ToSlash(rel)
 }
 
 func hash64(s string) uint64 {

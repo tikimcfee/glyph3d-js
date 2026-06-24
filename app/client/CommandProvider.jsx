@@ -12,6 +12,7 @@ import EntityKeystrokeRouter from '@glyph3d/core/services/interaction/EntityKeys
 import InteractionContext from '@glyph3d/core/services/interaction/InteractionContext.js';
 import CameraDock from '@glyph3d/core/services/interaction/CameraDock.js';
 import RemoteFileSystemProvider from '@glyph3d/core/services/data/RemoteFileSystemProvider.js';
+import RemoteLspProvider from '@glyph3d/core/services/data/RemoteLspProvider.js';
 import GitHubFileProvider from '@glyph3d/core/services/data/GitHubFileProvider.js';
 import { PickingSystem } from '@glyph3d/core/picking/PickingSystem.js';
 import ContentTree from '@glyph3d/core/collections/ContentTree.js';
@@ -325,6 +326,9 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       showStatus: false,
     });
     state.ctx.wsbridge = bridge;
+    // LSP client: present whenever the bridge is, but only functional against a
+    // relay started with a project root (the relay gates lsp/* on --root).
+    state.ctx.lsp = new RemoteLspProvider(bridge);
 
     // Terminal OUTPUT data plane: binary frames (type 1) carry raw VT bytes → the
     // terminal's emulator (grid.writeBytes). The bridge demuxes by type byte; terminal
