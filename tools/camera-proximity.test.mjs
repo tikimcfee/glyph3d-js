@@ -1,8 +1,9 @@
 // camera-proximity.test.mjs — headless behavior lock for the proximity auto-slow:
-//   • _lookDistance()  — the distance scan, incl. the behind-the-eye cull.
+//   • _lookDistance()  — the distance scan: the forward CONE (A2) + the behind-the-eye cull.
 //   • _flightSpeedScale(dist) — the WASD speed VALLEY: cruise far, ramp down approaching,
 //     floor plateau at reading distance, snap back to cruise once too close (release).
 //   • _panDistance(dist)      — pan's held DISTANCE, clamped to the [near,far] band.
+//   • _applyKeyboardMotion()  — live WASD + the exponential speed-scale damping (A1).
 //   bun tools/camera-proximity.test.mjs
 //
 // Drives the REAL controller methods via the prototype (Object.create skips the ctor,
@@ -34,7 +35,8 @@ const make = (surfaces, { settings = {}, dock = null, camPos = [0, 0, 0] } = {})
   cc.THREE = THREE;
   cc.settings = {
     dynamicSpeed: true, dynamicSpeedMin: 0.15, dynamicSpeedMax: 8,
-    dynamicNearDist: 30, dynamicFarDist: 1600, dynamicReleaseDist: 0, ...settings,
+    dynamicNearDist: 30, dynamicFarDist: 1600, dynamicReleaseDist: 0,
+    dynamicSpeedSmoothing: 0, ...settings,   // smoothing off by default → deterministic
   };
   cc.ctx = {
     camera: { position: new THREE.Vector3(...camPos), quaternion: new THREE.Quaternion() },
@@ -65,6 +67,16 @@ ok(make([surf(0, 0, -5, 10, 10, 20)])._lookDistance() < DEFAULT, 'straddle: a bo
 {
   const tile = surf(0, 0, -100);
   eq(make([tile], { dock: new Set([tile]) })._lookDistance(), DEFAULT, 'dock: a camera-locked tile never brakes you');
+}
+
+// ── 6. CONE (A2): off-axis content you're flying toward is caught, not threaded past ──
+{
+  // Box A far dead-ahead (the lone forward ray hits it); Box B closer but off to the right.
+  // The old single ray missed B and returned A's far distance — the cone's tilted ray catches B.
+  const A = surf(0, 0, -500);            // forward ray → 490
+  const B = surf(20, 0, -100);           // +right, inside the cone → 90
+  eq(make([A])._lookDistance(), 490, 'cone: a lone dead-ahead box still reads its near face (forward ray)');
+  eq(make([A, B])._lookDistance(), 90, 'cone: a closer off-axis box you fly toward wins (caught by a tilted ray)');
 }
 
 // ════════ _flightSpeedScale: the WASD speed valley ════════
@@ -157,6 +169,56 @@ ok(make([surf(0, 0, -5, 10, 10, 20)])._lookDistance() < DEFAULT, 'straddle: a bo
   const stepSnap = zB - cc.ctx.camera.position.z;
 
   ok(stepSnap > stepSlow, 'release: punching inside releaseDist jumps the step back up to cruise');
+}
+
+// ════════ A1 · exponential damping of the live speed scale ════════
+// A flier set to hold W, with one box dead-ahead at z=-100 (cone = forward-only here).
+const flyer = (settings, camZ) => {
+  const cc = make([surf(0, 0, -100)], { settings, camPos: [0, 0, camZ] });
+  cc.cameraSpeed = 100;
+  cc.input = { keys: new Set(['KeyW']) };
+  return cc;
+};
+
+// ── A1.1 first moving frame SNAPS to target (null latch) — crisp takeoff, no ramp-from-0 ──
+{
+  const cc = flyer({ dynamicSpeedSmoothing: 0.1 }, 0);   // dist 90 → target 0.45 (harness band)
+  cc._applyKeyboardMotion(1 / 60);
+  eq(cc._dampedSpeedScale, 0.45, 'A1: first frame snaps the damped scale to target (crisp takeoff)');
+}
+
+// ── A1.2 an in-flight target jump is DAMPED — lands strictly between, by the exact formula ──
+{
+  const cc = flyer({ dynamicSpeedSmoothing: 0.1, dynamicReleaseDist: 10 }, -85); // dist 5 (<release) → ceiling 8
+  cc._dampedSpeedScale = 0.15;                            // pretend we were down at the floor
+  cc._applyKeyboardMotion(1 / 60);
+  ok(cc._dampedSpeedScale > 0.15 && cc._dampedSpeedScale < 8, 'A1: a jump to ceiling is damped (between floor and ceiling)');
+  const alpha = 1 - Math.exp(-(1 / 60) / 0.1);
+  eq(cc._dampedSpeedScale, 0.15 + (8 - 0.15) * alpha, 'A1: damp = cur + (target-cur)·(1-exp(-dt/τ))');
+}
+
+// ── A1.3 smoothing OFF (τ=0) snaps instantly — identical to pre-A1 behavior ──
+{
+  const cc = flyer({ dynamicSpeedSmoothing: 0, dynamicReleaseDist: 10 }, -85);   // target ceiling 8
+  cc._dampedSpeedScale = 0.15;
+  cc._applyKeyboardMotion(1 / 60);
+  eq(cc._dampedSpeedScale, 8, 'A1: smoothing 0 → instant snap (no damping)');
+}
+
+// ── A1.4 frame-rate independence: a huge frame asymptotes to target, never overshoots ──
+{
+  const cc = flyer({ dynamicSpeedSmoothing: 0.1 }, 0); cc._dampedSpeedScale = 0;  // target 0.45
+  cc._applyKeyboardMotion(1.0);                          // a giant 1s frame
+  ok(cc._dampedSpeedScale <= 0.45 + 1e-9 && cc._dampedSpeedScale > 0.44, 'A1: a 1s frame closes the gap without overshoot');
+}
+
+// ── A1.5 releasing the keys UNLATCHES (null) so the next takeoff snaps fresh ──
+{
+  const cc = flyer({ dynamicSpeedSmoothing: 0.1 }, 0);
+  cc._dampedSpeedScale = 5;
+  cc.input = { keys: new Set() };                        // not moving
+  cc._applyKeyboardMotion(1 / 60);
+  ok(cc._dampedSpeedScale === null, 'A1: releasing keys unlatches the damp → next flight snaps');
 }
 
 console.log(`\ncamera-proximity: ${pass} passed, ${fail} failed`);

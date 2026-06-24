@@ -51,6 +51,8 @@ const CAMERA_DEFAULTS = {
     //   near/far  — distances bounding the ramp: floor reached at nearDist, cruise at farDist.
     //   release   — TOO-close cutoff: inside it you snap back to cruise (you've passed through
     //               the content). 0 disables the snap-back.
+    //   smoothing — seconds: exponential damping of the live speed scale so the valley (and the
+    //               snap-back) arrive as a smooth surge, not a per-frame step. 0 = off/instant.
     // Values below are hand-tuned by feel (not derived): a gentle ramp to a 2× cruise that
     // tops out by 800 units, with an early 40-unit punch-through. Keep in lockstep with the
     // settings-schema defaults (app/client/settings.js) so a fresh controller + panel agree.
@@ -59,6 +61,7 @@ const CAMERA_DEFAULTS = {
     dynamicNearDist: 30,
     dynamicFarDist: 800,
     dynamicReleaseDist: 40,
+    dynamicSpeedSmoothing: 0.12,
 };
 
 const CLICK_THRESHOLD_PX = 5;
@@ -69,6 +72,11 @@ const CLICK_THRESHOLD_PX = 5;
 const DEFAULT_LOOK_DIST = 200;
 const MIN_LOOK_DIST = 2;
 const MAX_LOOK_DIST = 2000;
+
+// A2 — the look-ray is a small CONE: forward + 4 rays tilted by ±CONE_TAN in the screen
+// right/up axes. A single thin ray threads through gaps to a far hit and misses near
+// content just off the view axis that you're actually flying toward; the cone catches it.
+const CONE_TAN = 0.25;   // tan of the cone half-angle (~14°)
 
 // The keys that drive the camera (WASD pan, Q/E/Space vertical). A fly (flyTo)
 // is cancelled when the user "grabs control" — but only via THESE keys, not any
@@ -101,6 +109,7 @@ export class ViewerCameraController {
             dynamicNearDist:   stateController.get('camera.dynamicNearDist', CAMERA_DEFAULTS.dynamicNearDist),
             dynamicFarDist:    stateController.get('camera.dynamicFarDist', CAMERA_DEFAULTS.dynamicFarDist),
             dynamicReleaseDist: stateController.get('camera.dynamicReleaseDist', CAMERA_DEFAULTS.dynamicReleaseDist),
+            dynamicSpeedSmoothing: stateController.get('camera.dynamicSpeedSmoothing', CAMERA_DEFAULTS.dynamicSpeedSmoothing),
         };
 
         // Publicly-readable rotation state. `applyCamera` writes these into
@@ -125,6 +134,11 @@ export class ViewerCameraController {
         //    while zooming) and is the manual granularity knob. The last write is held
         //    here so a pan begun right after a flight/dolly inherits the live distance.
         this._moveScale = DEFAULT_LOOK_DIST;
+
+        // A1 — the exponentially-damped flight speed scale, carried across frames so the
+        // valley transitions surge smoothly. null = unlatched (next flight frame snaps);
+        // reset to null whenever movement stops, so takeoff stays crisp.
+        this._dampedSpeedScale = null;
 
         // camera.lock: when true, applyCamera applies NO camera transform (drag / WASD /
         // rotation / zoom frozen) — but the wheel still routes to a focused framed surface
@@ -479,7 +493,7 @@ export class ViewerCameraController {
         if (keys.has('KeyE')) moveDir.y -= 1;
 
         const moving = moveDir.lengthSq() > 0;
-        if (!moving) return;
+        if (!moving) { this._dampedSpeedScale = null; return; } // unlatch → next takeoff snaps
 
         // LIVE, re-sampled every frame: the flight visibly DECELERATES as it nears content
         // and re-accelerates as it clears it (or punches back to cruise once it's too close
@@ -489,7 +503,20 @@ export class ViewerCameraController {
         // itself HOLDS its sample — a drag has an on-screen anchor a flight doesn't.)
         const dist = this._lookDistance();
         this._moveScale = this._panDistance(dist);
-        const speedScale = this._flightSpeedScale(dist);
+
+        // A1 — frame-rate-independent exponential damping of the speed scale: the valley and
+        // the snap-back arrive as a smooth surge, not a per-frame step. alpha = 1−exp(−dt/τ),
+        // τ = dynamicSpeedSmoothing seconds. The first frame of a flight (null latch) or
+        // smoothing off (τ≤0) snaps, so takeoff is crisp; only in-flight changes are damped.
+        const target = this._flightSpeedScale(dist);
+        const tau = this.settings.dynamicSpeedSmoothing;
+        if (this._dampedSpeedScale == null || !(tau > 0)) {
+            this._dampedSpeedScale = target;
+        } else {
+            this._dampedSpeedScale += (target - this._dampedSpeedScale) * (1 - Math.exp(-dt / tau));
+        }
+        const speedScale = this._dampedSpeedScale;
+
         moveDir.normalize();
         moveDir.applyQuaternion(camera.quaternion);
         moveDir.multiplyScalar(this.cameraSpeed * dt * speedScale);
@@ -605,8 +632,10 @@ export class ViewerCameraController {
      *
      * Two samples, one robust answer (the cheap version of multiscale-nav's depth
      * cubemap — see [[reference_camera_navigation_prior_art]]):
-     *   1. `fwd`  — nearest hit of a ray straight down the view axis. Precise "what
-     *      I'm aimed at" when you're pointed at something (reading head-on).
+     *   1. `fwd`  — nearest hit within a small forward CONE (the view ray + 4 rays tilted
+     *      ±CONE_TAN in screen right/up), each hit projected onto the view axis. "What I'm
+     *      flying toward" — the cone catches near content just off-axis that a single thin
+     *      ray would thread past on its way to a far hit.
      *   2. `near` — distance to the nearest surface AABB that ISN'T fully behind the eye
      *      (any direction you could be moving into). No raycast, so no forward blind spot;
      *      the behind-cull keeps content you've already flown past from braking you — no
@@ -634,10 +663,19 @@ export class ViewerCameraController {
         const dockTiles = this.ctx.dockTiles ?? null;
 
         const origin = camera.position;
-        const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+        const q = camera.quaternion;
+        const forward = (this._lookFwd ??= new THREE.Vector3()).set(0, 0, -1).applyQuaternion(q);
+        const right   = (this._lookRight ??= new THREE.Vector3()).set(1, 0, 0).applyQuaternion(q);
+        const up      = (this._lookUp ??= new THREE.Vector3()).set(0, 1, 0).applyQuaternion(q);
+        // The forward cone: view ray + 4 tilted rays (±CONE_TAN in right/up), renormalized.
+        const dirs = (this._coneDirs ??= [0, 0, 0, 0, 0].map(() => new THREE.Vector3()));
+        dirs[0].copy(forward);
+        dirs[1].copy(forward).addScaledVector(right,  CONE_TAN).normalize();
+        dirs[2].copy(forward).addScaledVector(right, -CONE_TAN).normalize();
+        dirs[3].copy(forward).addScaledVector(up,     CONE_TAN).normalize();
+        dirs[4].copy(forward).addScaledVector(up,    -CONE_TAN).normalize();
         const ray = (this._ray ??= new THREE.Ray());
         ray.origin.copy(origin);
-        ray.direction.copy(forward);
         const hit = new THREE.Vector3();
         const center = (this._lookCenter ??= new THREE.Vector3());
         const half = (this._lookHalf ??= new THREE.Vector3());
@@ -665,9 +703,11 @@ export class ViewerCameraController {
 
             const dn = box.distanceToPoint(origin);
             if (dn < near) near = dn;
-            if (ray.intersectBox(box, hit)) {
-                // Project onto the view axis (forward is unit-length); skip hits
-                // behind us / where we're standing inside the box.
+            for (let i = 0; i < dirs.length; i++) {
+                ray.direction.copy(dirs[i]);
+                if (!ray.intersectBox(box, hit)) continue;
+                // Project onto the view axis (forward is unit-length) — forward-distance to
+                // the content, consistent across cone rays; skip hits behind us / inside.
                 const d = (hit.x - origin.x) * forward.x
                         + (hit.y - origin.y) * forward.y
                         + (hit.z - origin.z) * forward.z;
@@ -739,6 +779,7 @@ export class ViewerCameraController {
         stateController.set('camera.dynamicNearDist', s.dynamicNearDist);
         stateController.set('camera.dynamicFarDist', s.dynamicFarDist);
         stateController.set('camera.dynamicReleaseDist', s.dynamicReleaseDist);
+        stateController.set('camera.dynamicSpeedSmoothing', s.dynamicSpeedSmoothing);
     }
 
     teardownEventListeners() {

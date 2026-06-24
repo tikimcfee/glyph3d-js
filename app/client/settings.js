@@ -63,6 +63,11 @@ export const SETTINGS = [
     apply: (ctx, v) => { if (ctx.cameraController) ctx.cameraController.settings.dynamicReleaseDist = v; },
   },
   {
+    key: 'camera.dynamicSpeedSmoothing', label: 'Auto-slow smoothing (s, 0=off)', group: 'Camera',
+    type: 'number', default: 0.12, min: 0, max: 0.6, step: 0.01,
+    apply: (ctx, v) => { if (ctx.cameraController) ctx.cameraController.settings.dynamicSpeedSmoothing = v; },
+  },
+  {
     key: 'camera.dragSensitivity', label: 'Drag sensitivity', group: 'Camera',
     type: 'number', default: 1, min: 0.1, max: 5, step: 0.1,
     apply: (ctx, v) => { if (ctx.cameraController) ctx.cameraController.settings.dragSensitivity = v; },
