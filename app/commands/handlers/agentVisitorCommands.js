@@ -1,13 +1,14 @@
 /**
  * Agent field-visitor commands — the addressable surface over FieldVisitorManager.
  *
- * Each agent is a self-driving "field visitor" you can address by id. The Claude
- * Code hook will drive these automatically (replacing the old singular camera.focus
- * spam), but they're plain commands first: you can spawn, move, and follow visitors
- * by typing them, which is how this whole spine is verified before the hook is wired.
+ * Each agent is a self-driving "field visitor" you can address by id. The Claude Code
+ * hook drives these automatically via `agent.tool` (the raw tool event → the shared tool
+ * registry), but they're plain commands first: you can spawn, move, and follow visitors
+ * by typing them, which is how this whole spine is verified.
  *
- *   agent.activity <id> <type> <action> [target] [detail] [result]   spawn/move + log
- *       (detail/result with spaces ride the `call` base64 hatch — see cli/hook.go)
+ *   agent.tool     <id> <type> <ToolName> [inputJSON] [responseJSON] [cwd]  raw tool event → normalized record
+ *   agent.activity <id> <type> <action> [target] [detail] [result]   the normalized record directly (manual/CLI/tests)
+ *       (detail/result with spaces ride the `call` base64 hatch)
  *   agent.state    <id> <active|idle|stalled|done>  set lifecycle state
  *   agent.stop     <id>                             mark finished ('done' — PERSISTS)
  *   agent.clear    <id|all|done>                    remove visitor(s) from the field
@@ -17,8 +18,29 @@
  */
 
 import { resolveGridByIdOrIndex } from './spatialHelpers.js';
+import { normalizeToolCall } from '@glyph3d/core/collections/toolRegistry.js';
 
 const noMgr = { text: 'ERR: visitor manager not wired', data: null };
+
+/** Resolve a record's target to a live grid (if any), then push the record to the visitor manager.
+ *  The shared sink for BOTH the manual `agent.activity` verb and the raw `agent.tool` ingress. */
+function emitActivity(ctx, mgr, id, type, { action, target, detail, result, meta }) {
+    let targetGrid = null;
+    let label = target || null;
+    if (target) {
+        const r = resolveGridByIdOrIndex(ctx, target, 'grid', { byName: true });
+        if (!r.error) { targetGrid = r.grid; label = r.registryId || target; }
+    }
+    mgr.activity(id, type, { action, target: label, detail, result, meta, targetGrid });
+    return label;
+}
+
+/** A `call`-hatch arg that may be a parsed object, a JSON string, or empty → object | null. */
+function parseJSONArg(a) {
+    if (a && typeof a === 'object') return a;
+    if (typeof a === 'string' && a.trim()) { try { return JSON.parse(a); } catch { /* malformed */ } }
+    return null;
+}
 
 /**
  * @param {import('../CommandRouter.js').default} router
@@ -32,7 +54,7 @@ export default function registerAgentVisitorCommands(router) {
         }
         // Positional record. Fields that carry spaces/quotes (detail, result) arrive intact
         // via the `call` hatch (base64'd arg vector); a bare typed line still works for the
-        // simple <id> <type> <action> <target> case. See cli/hook.go sendActivity.
+        // simple <id> <type> <action> <target> case. (Live agents arrive via agent.tool instead.)
         const [id, type, action] = args;
         const target = args[3] || '';
         const detail = args[4] || '';
@@ -44,19 +66,35 @@ export default function registerAgentVisitorCommands(router) {
         const m6 = args[6];
         if (m6 && typeof m6 === 'object') meta = m6;
         else if (typeof m6 === 'string' && m6.trim()) { try { meta = JSON.parse(m6); } catch { /* ignore malformed */ } }
-        let targetGrid = null;
-        let label = target || null;
-        if (target) {
-            const r = resolveGridByIdOrIndex(ctx, target, 'grid', { byName: true });
-            if (!r.error) { targetGrid = r.grid; label = r.registryId || target; }
-        }
-        mgr.activity(id, type, { action, target: label, detail, result, meta, targetGrid });
+        const label = emitActivity(ctx, mgr, id, type, { action, target, detail, result, meta });
         const echo = [label, detail, result].filter(Boolean).join('  ');
         return {
             text: `OK: ${id} ${action}${echo ? ' ' + echo : ''}`,
             data: { id, action, target: label, detail, result },
         };
     }, { description: 'Agent acted — spawn/move its field visitor', usage: '<id> <type> <action> [target] [detail] [result]' });
+
+    router.register('agent.tool', (args, ctx) => {
+        const mgr = ctx.visitorManager;
+        if (!mgr) return noMgr;
+        if (args.length < 3) {
+            return { text: 'ERR: usage: agent.tool <id> <type> <ToolName> [inputJSON] [responseJSON] [cwd]', data: null };
+        }
+        // The RAW tool event — both the live Go hook and the replay forward it here and let the ONE
+        // tool registry derive action/target/detail/result/meta. input/response ride as JSON strings
+        // (the `call` hatch String-coerces objects — see systemCommands `call`), parsed back here.
+        const [id, type, name] = args;
+        const input = parseJSONArg(args[3]) || {};
+        const response = parseJSONArg(args[4]);
+        const cwd = typeof args[5] === 'string' ? args[5] : '';
+        const rec = normalizeToolCall(name, input, response, cwd);
+        if (!rec) return { text: `OK: ${name} dropped (noise)`, data: { dropped: name } };   // TodoWrite/ToolSearch/…
+        const label = emitActivity(ctx, mgr, id, type, rec);
+        return {
+            text: `OK: ${id} ${rec.action}${label ? ' ' + label : ''}`,
+            data: { id, action: rec.action, target: label, detail: rec.detail },
+        };
+    }, { description: 'Agent tool call (raw event) — normalized via the tool registry, then logged', usage: '<id> <type> <ToolName> [inputJSON] [responseJSON] [cwd]' });
 
     router.register('agent.spawn', (args, ctx) => {
         const mgr = ctx.visitorManager;

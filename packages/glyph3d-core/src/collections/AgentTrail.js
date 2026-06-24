@@ -26,7 +26,7 @@ import ConnectionRenderer from '../annotations/ConnectionRenderer.js';
 import { HStack, VStack, ZStack } from './layouts/StackContainer.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import { classifyByExtension } from '../core/fileKind.js';
-import { decorateForMeta } from './toolMeta.js';
+import { decorateForAction } from './toolRegistry.js';
 
 export const TRAIL_DEFAULTS = {
     zPitch: 90,                 // ZStack deck pitch between moments (time depth) — fly-through room
@@ -91,6 +91,8 @@ function fmtMeta(meta, sep = ' · ') {
     const p = [];
     if (meta.lines != null) p.push(`${meta.lines} lines`);
     if (meta.added != null || meta.removed != null) p.push(`+${meta.added || 0} −${meta.removed || 0}`);
+    if (meta.range) p.push(`L${meta.range[0]}–${meta.range[1]}`);                                          // a partial read's slice
+    if (meta.ranges && meta.ranges.length) p.push('L' + meta.ranges.map(([s, e]) => (s === e ? `${s}` : `${s}–${e}`)).join(', '));   // an edit's touched runs
     if (meta.kind) p.push(String(meta.kind));
     if (meta.bytes != null) p.push(fmtBytes(meta.bytes));
     if (meta.tools != null) p.push(`${meta.tools} tools`);
@@ -439,13 +441,13 @@ export default class AgentTrail {
     /**
      * Light up the lines an action touched on its loaded snapshot — the mapping from the action to
      * the content. Edits glow green on their added lines; a partial read tints its slice blue. The
-     * directives come from the shared toolMeta registry (decorateForMeta), applied as additive glyph
+     * directives come from the shared tool registry (decorateForAction), applied as additive glyph
      * highlights via highlightRange. Runs AFTER the single load resolves (the layout/slots exist),
      * clamped to the rendered line range.
      */
     _decorateSnapshot(grid, record) {
         const dbg = this.cfg.debug ? (msg) => console.log(`[trail.decorate] ${record.action} ${record.target || ''} — ${msg}`) : null;
-        const directives = decorateForMeta(record.action, record.meta);
+        const directives = decorateForAction(record.action, record.meta);
         if (!directives) {
             // The two distinct silent-return reasons, so the log says WHICH: no meta reached the
             // record (data flow) vs meta present but this action/shape decorates nothing (by design).

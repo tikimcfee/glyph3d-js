@@ -23,7 +23,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { parseToolMeta } from '../packages/glyph3d-core/src/collections/toolMeta.js';
+import { normalizeToolCall } from '../packages/glyph3d-core/src/collections/toolRegistry.js';
 
 const VALUE = new Set(['session', 'agent', 'split-agents', 'limit', 'latest', 'rate', 'port']);
 const BOOL = new Set(['no-clear', 'dry', 'help']);
@@ -53,28 +53,18 @@ function latestSession() {
 }
 const sessionPath = (!flags.session || flags.session === 'latest') ? latestSession() : flags.session;
 
-const rel = (p) => (typeof p === 'string' && p.startsWith(REPO) ? p.slice(REPO.length) : p);
-// No munging here: a command and its output ship RAW to the trail, which renders them in grids
-// whose layout system already does line-splitting + windowing. Managing size is the layout's job.
-function mapTool(name, input = {}) {
-  const t = String(name || '');
-  if (t === 'Read') return { action: 'read', target: rel(input.file_path), detail: '' };
-  if (t === 'Edit' || t === 'MultiEdit') return { action: 'edit', target: rel(input.file_path), detail: '' };
-  if (t === 'Write') return { action: 'write', target: rel(input.file_path), detail: '' };
-  if (t === 'NotebookEdit') return { action: 'edit', target: rel(input.notebook_path), detail: '' };
-  if (t === 'Bash') return { action: 'bash', target: '', detail: input.command || '' };
-  if (t === 'Grep') return { action: 'grep', target: rel(input.path) || '', detail: input.pattern || '' };
-  if (t === 'Glob') return { action: 'glob', target: '', detail: input.pattern || '' };
-  if (t === 'Task' || t === 'Agent') return { action: 'task', target: '', detail: input.subagent_type || input.description || '' };
-  if (t === 'Workflow') return { action: 'task', target: '', detail: 'workflow: ' + (input.name || '') };
-  if (t === 'WebFetch') return { action: 'fetch', target: '', detail: input.url || '' };
-  if (t === 'WebSearch') return { action: 'search', target: '', detail: input.query || '' };
-  return { action: t.toLowerCase() || 'act', target: '', detail: JSON.stringify(input) };
+// The replay is a DUMB FORWARDER: it ships the RAW tool event (name, input, response) and lets the
+// ONE tool registry derive action/target/detail/result/meta — the SAME path the live hook takes, so
+// replay and live can't drift. The session keeps the structured `toolUseResult` (the meta side:
+// structuredPatch / numLines / stdout) separate from the tool_result TEXT; merge them so the
+// registry's output extractor finds the text without any per-tool knowledge living here.
+function forwardResponse(tur, resultText) {
+  if (tur && typeof tur === 'object') {
+    const hasText = tur.stdout || tur.content || tur.result || tur.output;
+    return (resultText && !hasText) ? { ...tur, content: resultText } : tur;
+  }
+  return tur ?? (resultText || null);
 }
-
-// Per-tool metadata (lines read/written, +/−, tokens) lives in the session's top-level
-// `toolUseResult`, which the result TEXT never carries. parseToolMeta (the shared registry,
-// keyed by normalized action) turns it into a `meta` object on the record — see toolMeta.js.
 
 // --- parse the session JSONL ---
 const lines = fs.readFileSync(sessionPath, 'utf8').split('\n').filter(Boolean);
@@ -97,14 +87,10 @@ for (const line of lines) {
 }
 
 let mapped = raw.map((a) => {
-  const m = mapTool(a.name, a.input);
-  // A file action's content IS its snapshot, so it carries no result. A no-target action's output
-  // (bash/grep/…) ships RAW — it becomes a sibling output grid that does its own line-splitting.
-  const result = m.target ? '' : (results.get(a.id) || '');
-  const meta = parseToolMeta(m.action, metas.get(a.id));   // little details: lines read/written, +/−, tokens, ranges
-  return { ...m, result, meta };
-})
-  .filter((m) => m.action && m.action !== 'todowrite' && m.action !== 'task_get' && m.action !== 'toolsearch');
+  const response = forwardResponse(metas.get(a.id) ?? null, results.get(a.id) || '');
+  const rec = normalizeToolCall(a.name, a.input, response, REPO);   // null = a noise tool (TodoWrite/ToolSearch/…)
+  return rec && { name: a.name, input: a.input, response, action: rec.action, target: rec.target, detail: rec.detail };
+}).filter(Boolean);
 if (flags.limit) mapped = mapped.slice(0, Number(flags.limit));
 if (flags.latest) mapped = mapped.slice(-Number(flags.latest));   // keep the most recent N (tail)
 
@@ -148,7 +134,10 @@ if (!flags['no-clear']) { c.send('trail.clear all'); await c.take().catch(() => 
 
 let sent = 0;
 for (const m of mapped) {
-  c.send(enc('agent.activity', agentId(sent), 'claude', m.action, m.target || '', m.detail || '', m.result || '', m.meta ? JSON.stringify(m.meta) : ''));
+  // Raw forward: input/response ride as JSON STRINGS (the `call` hatch String-coerces objects);
+  // the agent.tool verb JSON.parses them and the registry does the rest — see toolRegistry.js.
+  c.send(enc('agent.tool', agentId(sent), 'claude', m.name,
+    JSON.stringify(m.input), m.response != null ? JSON.stringify(m.response) : '', REPO));
   await c.take().catch(() => {});
   if (++sent % 25 === 0) console.error(`[trail-replay] sent ${sent}/${mapped.length}`);
   if (RATE) await sleep(RATE);

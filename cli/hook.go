@@ -7,7 +7,6 @@ import (
 	"io"
 	"log"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -25,12 +24,6 @@ type HookEvent struct {
 	ToolUseID    string          `json:"tool_use_id"`
 	AgentID      string          `json:"agent_id"`
 	AgentType    string          `json:"agent_type"`
-}
-
-// FilePathInput is all we need from Read/Edit/Write tool inputs: the file the agent
-// touched. The visitor moves to that file; the camera stays where the user put it.
-type FilePathInput struct {
-	FilePath string `json:"file_path"`
 }
 
 var debug bool
@@ -114,122 +107,11 @@ func hookConnect(url string) (*websocket.Conn, error) {
 
 func handlePostToolUse(conn *websocket.Conn, event *HookEvent) {
 	id, typ := agentIdentity(event)
-	action := actionVerb(event.ToolName)
-
-	// File tools move the visitor TO the file — the path is the target (camera stays free).
-	// Everything else carries its meaningful argument as `detail`: the bash command, the
-	// grep pattern, the subagent's task. Both pull from the same raw ToolInput the hook
-	// already receives; we just stop throwing it away.
-	target := ""
-	switch event.ToolName {
-	case "Read", "Edit", "Write":
-		var input FilePathInput
-		json.Unmarshal(event.ToolInput, &input)
-		if input.FilePath == "" {
-			return
-		}
-		target = relativize(input.FilePath, event.CWD)
-	}
-
-	// Ship raw — the trail renders these in grids whose layout system does its own
-	// line-splitting + windowing, so the hook truncates nothing. A file's content IS its
-	// snapshot, so file tools carry no result (matches the replay).
-	detail := extractDetail(event.ToolName, event.ToolInput)
-	result := ""
-	switch event.ToolName {
-	case "Read", "Edit", "Write":
-	default:
-		result = extractResult(event.ToolResponse)
-	}
-	sendActivity(conn, id, typ, action, target, detail, result)
-}
-
-// actionVerb normalizes a tool name to the short lifecycle verb shown on the visitor card.
-func actionVerb(tool string) string {
-	switch tool {
-	case "Read":
-		return "read"
-	case "Edit":
-		return "edit"
-	case "Write":
-		return "write"
-	case "Agent":
-		return "subagent"
-	default:
-		return strings.ToLower(tool)
-	}
-}
-
-// extractDetail pulls the one meaningful argument out of a tool's input — the thing a human
-// watching the field wants to see. Tolerant by design: a generic decode + key-preference,
-// so a tool we've never special-cased still surfaces SOMETHING rather than a bare verb.
-func extractDetail(tool string, raw json.RawMessage) string {
-	if len(raw) == 0 {
-		return ""
-	}
-	var m map[string]any
-	if json.Unmarshal(raw, &m) != nil {
-		return ""
-	}
-	pick := func(keys ...string) string {
-		for _, k := range keys {
-			if s, ok := m[k].(string); ok && s != "" {
-				return s
-			}
-		}
-		return ""
-	}
-	switch tool {
-	case "Bash":
-		return pick("command")
-	case "Grep":
-		return pick("pattern")
-	case "Glob":
-		return pick("pattern")
-	case "Task", "Agent":
-		return pick("description", "prompt")
-	case "WebFetch":
-		return pick("url")
-	case "WebSearch":
-		return pick("query")
-	case "Read", "Edit", "Write":
-		return "" // the file path is the target, not the detail
-	default:
-		// Unknown tool: surface the first recognizable scalar so the card still says something.
-		return pick("command", "pattern", "query", "url", "description", "prompt", "path", "file_path", "name")
-	}
-}
-
-// extractResult pulls the FULL output text from a tool response (a bare string or a structured
-// object), preferring an error if present. Raw — the trail renders it in a grid that does its own
-// line-splitting + windowing, so nothing is truncated here.
-func extractResult(raw json.RawMessage) string {
-	if len(raw) == 0 {
-		return ""
-	}
-	var s string
-	if json.Unmarshal(raw, &s) == nil {
-		return s
-	}
-	var m map[string]any
-	if json.Unmarshal(raw, &m) != nil {
-		return ""
-	}
-	if b, ok := m["is_error"].(bool); ok && b {
-		if e, ok := m["error"].(string); ok && e != "" {
-			return "error: " + e
-		}
-		return "error"
-	}
-	if e, ok := m["error"].(string); ok && e != "" {
-		return "error: " + e
-	}
-	for _, k := range []string{"stdout", "content", "result", "output"} {
-		if v, ok := m[k].(string); ok && v != "" {
-			return v
-		}
-	}
-	return ""
+	// Pure transport: ship the RAW tool event. ALL semantics — action/target/detail/result/meta,
+	// the touched-line ranges, which tools are noise — live in the ONE JS tool registry
+	// (packages/glyph3d-core/src/collections/toolRegistry.js), shared by this hook and the replay.
+	// Adding or removing a tool never touches this file.
+	sendTool(conn, id, typ, event.ToolName, event.ToolInput, event.ToolResponse, event.CWD)
 }
 
 func handlePreToolUse(conn *websocket.Conn, event *HookEvent) {
@@ -265,41 +147,32 @@ func agentIdentity(event *HookEvent) (id, typ string) {
 	return id, typ
 }
 
-// sendActivity tells the viewer an agent acted, carrying the full record:
+// sendTool ships the RAW tool event to the viewer:
 //
-//	agent.activity <id> <type> <action> [target] [detail] [result]
+//	agent.tool <id> <type> <ToolName> [inputJSON] [responseJSON] [cwd]
 //
-// A `target` (a file path) moves the visitor to that file; `detail`/`result` fill its
-// card. The camera is never touched. Two serializations of the SAME verb: when every
-// field is whitespace/quote-free we send the plain readable line (keeps the relay log
-// legible for the high-frequency file-op case); otherwise we route the record through
-// the `call` hatch (base64'd JSON arg vector), which survives the bus tokenizer intact.
-func sendActivity(conn *websocket.Conn, id, typ, action, target, detail, result string) {
-	if bareSafe(target) && detail == "" && result == "" {
-		if target != "" {
-			sendCmd(conn, fmt.Sprintf("agent.activity %s %s %s %s", id, typ, action, target))
-		} else {
-			sendCmd(conn, fmt.Sprintf("agent.activity %s %s %s", id, typ, action))
-		}
-		return
+// input/response ride as JSON STRINGS inside the `call` bundle (the hatch String-coerces
+// non-string args, so a raw object would mangle — see systemCommands `call`); the verb's
+// handler JSON.parses them and the ONE tool registry derives action/target/detail/result/meta.
+// Trailing empties are trimmed so a fire with no input/response/cwd stays compact.
+func sendTool(conn *websocket.Conn, id, typ, name string, input, response json.RawMessage, cwd string) {
+	inStr, respStr := "", ""
+	if len(input) > 0 {
+		inStr = string(input)
 	}
-	// Structured path: positional arg vector, trailing empties trimmed, base64'd via `call`.
-	argv := []string{"agent.activity", id, typ, action, target, detail, result}
+	if len(response) > 0 {
+		respStr = string(response)
+	}
+	argv := []string{"agent.tool", id, typ, name, inStr, respStr, cwd}
 	for len(argv) > 4 && argv[len(argv)-1] == "" {
 		argv = argv[:len(argv)-1]
 	}
 	payload, err := json.Marshal(argv)
 	if err != nil {
-		dbg("activity marshal error: %v", err)
+		dbg("tool marshal error: %v", err)
 		return
 	}
 	sendCmd(conn, "call "+base64.StdEncoding.EncodeToString(payload))
-}
-
-// bareSafe reports whether a token can ride the plain command line without quoting —
-// no whitespace, quotes, or backslashes that the bus tokenizer would mangle.
-func bareSafe(s string) bool {
-	return !strings.ContainsAny(s, " \t\n\r\"\\")
 }
 
 func sendCmd(conn *websocket.Conn, cmd string) {
@@ -318,19 +191,6 @@ func sendCmd(conn *websocket.Conn, cmd string) {
 		dbg("recv: %s", string(resp))
 	}
 	conn.SetReadDeadline(time.Time{})
-}
-
-// --- Helpers ---
-
-func relativize(absPath, cwd string) string {
-	if cwd == "" {
-		return absPath
-	}
-	rel, err := filepath.Rel(cwd, absPath)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		return absPath // outside the project root — keep it absolute (a /tmp file the relay reaches)
-	}
-	return rel
 }
 
 const hookLogPath = "/tmp/glyph-hook.log"
