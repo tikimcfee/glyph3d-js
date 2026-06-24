@@ -3,7 +3,6 @@ import react from '@vitejs/plugin-react';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import path from 'node:path';
-import { consoleCapture } from './console-capture.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '..'); // app → repo root
@@ -25,7 +24,7 @@ export default defineConfig({
   // build (binary serves at root); the hosted IDE lives under glyph3d.dev/ide/,
   // so its deploy builds with GLYPH_BASE=/ide/ (see `make deploy-ide`).
   base: process.env.GLYPH_BASE || '/',
-  plugins: [react(), consoleCapture()],
+  plugins: [react()],
   resolve: {
     alias: [
       { find: /^three$/, replacement: threeWebGPU },
