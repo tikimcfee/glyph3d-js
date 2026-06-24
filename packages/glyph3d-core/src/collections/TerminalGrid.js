@@ -148,6 +148,13 @@ export default class TerminalGrid extends FramedGlyphField {
         this._cellR      = new Float32Array(this._totalCount).fill(0.8);
         this._cellG      = new Float32Array(this._totalCount).fill(0.8);
         this._cellB      = new Float32Array(this._totalCount).fill(0.8);
+        // Per-cell ANSI BACKGROUND (live region only — [0, _cellCount)). RGB + a per-cell opacity
+        // (0 = no fill → the terminal's bg plane shows). Projected into the fill carrier (the
+        // highlight texture) each frame by _writeToInstanceBuffer. History keeps no bg for now.
+        this._cellBgR    = new Float32Array(this._cellCount);
+        this._cellBgG    = new Float32Array(this._cellCount);
+        this._cellBgB    = new Float32Array(this._cellCount);
+        this._cellBgA    = new Float32Array(this._cellCount);   // 0 = no fill; else _bgFillOpacity
 
         // Pre-computed positions (only change on resize). Live cells + the static
         // depth-history slots (history CONTENT shifts through slots; slot positions
@@ -173,6 +180,9 @@ export default class TerminalGrid extends FramedGlyphField {
         this._bgColor = options.backgroundColor ?? 0x0a0a1e;
         this._bgOpacity = options.backgroundOpacity ?? 0.96;
         this._bgPadding = options.backgroundPadding ?? 0.3;
+        // Per-cell ANSI background fill opacity (git-diff bars, ls --color, selections). Solid by
+        // default — a colored cell reads as an opaque block like a real terminal; tunable live.
+        this._bgFillOpacity = options.cellBgFillOpacity ?? 1.0;
         this._visible = true; // setVisible state — folded with the fade (shared alpha slot)
         this._initBackground();
         // Fade glyphs to match the panel from the start, so a translucent tile reads
@@ -250,15 +260,18 @@ export default class TerminalGrid extends FramedGlyphField {
         const cr = this._cellR;
         const cg = this._cellG;
         const cb = this._cellB;
+        const bgR = this._cellBgR, bgG = this._cellBgG, bgB = this._cellBgB, bgA = this._cellBgA;
+        const bgFill = this._bgFillOpacity;
 
         for (let row = 0; row < rows; row++) {
             const screenRow = screen.cells[row];
             if (!screenRow) {
-                // Row not present in buffer: fill with spaces at default color
+                // Row not present in buffer: fill with spaces at default color, no bg fill
                 for (let col = 0; col < cols; col++) {
                     const idx = row * cols + col;
                     cp[idx] = 32;
                     cr[idx] = 0.8; cg[idx] = 0.8; cb[idx] = 0.8;
+                    bgA[idx] = 0;
                 }
                 continue;
             }
@@ -270,6 +283,7 @@ export default class TerminalGrid extends FramedGlyphField {
                 if (!cell) {
                     cp[idx] = 32;
                     cr[idx] = 0.8; cg[idx] = 0.8; cb[idx] = 0.8;
+                    bgA[idx] = 0;
                     continue;
                 }
 
@@ -287,6 +301,12 @@ export default class TerminalGrid extends FramedGlyphField {
                     cg[idx] = fg.g;
                     cb[idx] = fg.b;
                 }
+
+                // Per-cell ANSI background: explicit bg → a fill at _bgFillOpacity; default bg
+                // (null) → no fill (alpha 0), so the terminal's bg plane shows through.
+                const bg = cell.bg;
+                if (bg) { bgR[idx] = bg.r; bgG[idx] = bg.g; bgB[idx] = bg.b; bgA[idx] = bgFill; }
+                else { bgA[idx] = 0; }
             }
         }
 
@@ -720,6 +740,17 @@ export default class TerminalGrid extends FramedGlyphField {
             this._cellB.fill(0.8, 0, total);
         }
 
+        // Per-cell bg tracks the LIVE region (_cellCount), which changed; resize dropped _prevRows
+        // and bg isn't in the snapshot, so just size + clear (the next emulator frame repaints it).
+        if (this._cellBgA.length !== this._cellCount) {
+            this._cellBgR = new Float32Array(this._cellCount);
+            this._cellBgG = new Float32Array(this._cellCount);
+            this._cellBgB = new Float32Array(this._cellCount);
+            this._cellBgA = new Float32Array(this._cellCount);
+        } else {
+            this._cellBgA.fill(0);
+        }
+
         this._computePositions();
         this._computeSizes();
 
@@ -1043,6 +1074,15 @@ export default class TerminalGrid extends FramedGlyphField {
         const cpArr    = cpAttr.array;
         const colorArr = colorAttr.array;
         const count    = this._totalCount;   // live cells + depth-history block
+        const live     = this._cellCount;    // bg applies to the live region only
+
+        // BULK fill-carrier write: piggyback the per-cell ANSI bg onto this existing projection
+        // loop — 4 bytes/slot straight into the highlight texture's data, then ONE markHighlightDirty()
+        // (vs N setGlyphHighlight calls, each re-flagging the upload). Live cells with a bg paint a
+        // FILL texel; everything else (default-bg live cells + the whole history block) writes 0 = no
+        // fill, so a cleared cell doesn't leave a stale bar. See GlyphField.highlightBuffer.
+        const hl = this._renderer.highlightBuffer(count);
+        const bgR = this._cellBgR, bgG = this._cellBgG, bgB = this._cellBgB, bgA = this._cellBgA;
 
         for (let i = 0; i < count; i++) {
             cpArr[i] = this._glyphId(this._codepoints[i]);
@@ -1051,10 +1091,23 @@ export default class TerminalGrid extends FramedGlyphField {
             colorArr[c]     = this._cellR[i];
             colorArr[c + 1] = this._cellG[i];
             colorArr[c + 2] = this._cellB[i];
+
+            if (hl) {
+                const h = i * 4;
+                if (i < live && bgA[i] > 0) {
+                    hl[h]     = (bgR[i] * 255 + 0.5) | 0;
+                    hl[h + 1] = (bgG[i] * 255 + 0.5) | 0;
+                    hl[h + 2] = (bgB[i] * 255 + 0.5) | 0;
+                    hl[h + 3] = GlyphField.encodeHighlightAlpha(bgA[i]);   // >0 → FILL
+                } else {
+                    hl[h] = 0; hl[h + 1] = 0; hl[h + 2] = 0; hl[h + 3] = 0;   // no fill
+                }
+            }
         }
 
         cpAttr.needsUpdate    = true;
         colorAttr.needsUpdate = true;
+        if (hl) this._renderer.markHighlightDirty();
         // instanceCount is unchanged if cell count did not change.
         // After resize, _applyToRenderer() sets the correct instanceCount.
     }
@@ -1201,12 +1254,15 @@ export default class TerminalGrid extends FramedGlyphField {
     /**
      * Live-restyle the background panel — color (hex int or '#rrggbb' string)
      * and/or opacity (0–1). Drives the configurable color scheme; readability of
-     * stacked tiles in a dock comes down to this opacity. Either field optional.
-     * @param {{ color?: number|string, opacity?: number }} style
+     * stacked tiles in a dock comes down to this opacity. Also tunes cellBgFillOpacity:
+     * the opacity of per-cell ANSI background fills (git-diff bars etc.) — applied on the
+     * next emulator repaint. All fields optional.
+     * @param {{ color?: number|string, opacity?: number, cellBgFillOpacity?: number }} style
      */
-    setBackgroundStyle({ color, opacity } = {}) {
+    setBackgroundStyle({ color, opacity, cellBgFillOpacity } = {}) {
         if (color != null) this._bgColor = color;
         if (opacity != null) this._bgOpacity = opacity;
+        if (cellBgFillOpacity != null) this._bgFillOpacity = cellBgFillOpacity;
         if (!this._panel) return;
         this._panel.setFill(color, opacity);
         if (opacity != null) this._applyGlyphAlpha();

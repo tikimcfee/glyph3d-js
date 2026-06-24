@@ -1050,10 +1050,39 @@ export default class GlyphField {
         data[i]     = color ? ((color.r * 255 + 0.5) | 0) : 0;
         data[i + 1] = color ? ((color.g * 255 + 0.5) | 0) : 0;
         data[i + 2] = color ? ((color.b * 255 + 0.5) | 0) : 0;
-        // Alpha = mode: 0 keeps the legacy additive tint; a fill clamps to [1,255] so a tiny
-        // opacity still reads as FILL (never silently degrades to tint at the 0 boundary).
-        data[i + 3] = (color && fillOpacity > 0) ? Math.min(255, Math.max(1, (fillOpacity * 255 + 0.5) | 0)) : 0;
+        data[i + 3] = color ? GlyphField.encodeHighlightAlpha(fillOpacity) : 0;
         this._highlightTexture.needsUpdate = true;
+    }
+
+    /**
+     * Encode a fill opacity into the highlight texel's ALPHA byte — the ONE place the mode/opacity
+     * encoding lives (shared by setGlyphHighlight and the bulk highlightBuffer writers, so they
+     * can't drift). 0 keeps the legacy additive tint; a fill clamps to [1,255] so a tiny opacity
+     * still reads as FILL (never silently degrades to tint at the 0 boundary).
+     * @param {number} fillOpacity 0 = tint; >0 = fill opacity (0–1)
+     * @returns {number} 0–255
+     */
+    static encodeHighlightAlpha(fillOpacity) {
+        return fillOpacity > 0 ? Math.min(255, Math.max(1, (fillOpacity * 255 + 0.5) | 0)) : 0;
+    }
+
+    /**
+     * Bulk per-glyph highlight access for high-frequency writers (TerminalGrid's per-cell ANSI bg
+     * projection). Ensures the highlight texture covers `count` slots and returns its raw RGBA8
+     * data array for DIRECT writes (4 bytes/slot: R, G, B, then the encodeHighlightAlpha byte) — the
+     * caller piggybacks the writes onto its existing projection loop and calls markHighlightDirty()
+     * ONCE, instead of N setGlyphHighlight calls (N redundant needsUpdate flips + guard checks).
+     * @param {number} count number of glyph slots that must be addressable
+     * @returns {Uint8Array|Uint8ClampedArray|null} the texel data, or null if not allocatable
+     */
+    highlightBuffer(count) {
+        this._ensureHighlightTexture(count);
+        return this._highlightTexture ? this._highlightTexture.image.data : null;
+    }
+
+    /** Flag the highlight texture for GPU re-upload after a batch of highlightBuffer() writes. */
+    markHighlightDirty() {
+        if (this._highlightTexture) this._highlightTexture.needsUpdate = true;
     }
 
     /**

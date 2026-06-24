@@ -13,7 +13,8 @@
  * coalesce into one applyScreen.
  *
  * ScreenBuffer contract (what applyScreen consumes):
- *   { cols, rows, cells: Array<Array<{ codepoint:number, fg:{r,g,b}, bold:boolean }>> }
+ *   { cols, rows, cells: Array<Array<{ codepoint:number, fg:{r,g,b}, bg:{r,g,b}|null, bold:boolean }>> }
+ *   bg is null for the DEFAULT background (no per-cell fill); only explicit ANSI bg paints a cell.
  */
 
 // Deep import of the real ESM build: @xterm/headless@6's package.json "module" field
@@ -96,12 +97,12 @@ export default class TerminalEmulator {
             const row = new Array(cols);
             for (let x = 0; x < cols; x++) {
                 if (!line) {
-                    row[x] = { codepoint: 32, fg: RESET_FG, bold: false };
+                    row[x] = { codepoint: 32, fg: RESET_FG, bg: null, bold: false };
                     continue;
                 }
                 this._cell = line.getCell(x, this._cell);
                 if (!this._cell) {
-                    row[x] = { codepoint: 32, fg: RESET_FG, bold: false };
+                    row[x] = { codepoint: 32, fg: RESET_FG, bg: null, bold: false };
                     continue;
                 }
                 // getCode() is the unicode codepoint of the cell (0 = empty / the
@@ -111,6 +112,7 @@ export default class TerminalEmulator {
                 row[x] = {
                     codepoint: code === 0 ? 32 : code,
                     fg: this._fgOf(this._cell),
+                    bg: this._bgOf(this._cell),
                     bold: !!this._cell.isBold(),
                 };
             }
@@ -131,6 +133,22 @@ export default class TerminalEmulator {
         }
         if (cell.isFgPalette()) return ansi256toRGB(c);
         return RESET_FG;
+    }
+
+    /**
+     * @private — the cell's BACKGROUND as RGB, or null for the DEFAULT bg. Mirrors _fgOf (xterm's
+     * symmetric isBgDefault/getBgColor/isBgRGB/isBgPalette). Null is meaningful: a default-bg cell
+     * gets NO per-cell fill, so the terminal's own background plane shows through — only explicit
+     * ANSI backgrounds (git-diff bars, ls --color, selections) paint a cell fill.
+     */
+    _bgOf(cell) {
+        if (cell.isBgDefault()) return null;
+        const c = cell.getBgColor();
+        if (cell.isBgRGB()) {
+            return { r: ((c >> 16) & 0xff) / 255, g: ((c >> 8) & 0xff) / 255, b: (c & 0xff) / 255 };
+        }
+        if (cell.isBgPalette()) return ansi256toRGB(c);
+        return null;
     }
 
     dispose() {
