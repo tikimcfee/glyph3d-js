@@ -34,6 +34,7 @@ type Relay struct {
 	termSeq      atomic.Int64 // monotonic id source for relay-spawned terminal adapters
 	upgrader     websocket.Upgrader
 	fs           *FSHandler      // nil if --root not provided
+	lsp          *LSPSupervisor  // nil if --root not provided; hosts language servers
 	port         int             // port this relay serves on (spawned adapters connect back here)
 	logs         *LogStore       // relay-resident browser-log store (SQLite :memory: + FTS5)
 	logSubs      map[string]bool // controller ids subscribed via log.follow (guarded by mu)
@@ -287,30 +288,27 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 				continue
 			}
 
-			// JSON-RPC 2.0 detection: route FS requests to FSHandler
+			// JSON-RPC 2.0 detection: route fs/* to FSHandler, lsp/* to the LSP supervisor.
 			var probe struct {
 				JSONRPC string `json:"jsonrpc"`
 			}
 			if json.Unmarshal(msg, &probe) == nil && probe.JSONRPC == "2.0" {
-				if r.fs != nil {
-					var rpc rpcRequest
-					if err := json.Unmarshal(msg, &rpc); err == nil {
-						r.fs.Handle(rpc.Method, rpc.ID, rpc.Params, r.sendToDisplay)
+				var rpc rpcRequest
+				if err := json.Unmarshal(msg, &rpc); err != nil {
+					log.Printf("[relay] malformed JSON-RPC from display: %.100s", raw)
+					continue
+				}
+				switch {
+				case strings.HasPrefix(rpc.Method, "lsp/"):
+					if r.lsp != nil {
+						r.lsp.Handle(rpc.Method, rpc.ID, rpc.Params, r.sendToDisplay)
 					} else {
-						log.Printf("[relay] malformed JSON-RPC from display: %.100s", raw)
+						r.sendJSONRPCError(rpc.ID, -32003, "LSP not enabled (start relay with --root)")
 					}
-				} else {
-					// No FSHandler — return JSON-RPC error inline
-					var rpc struct {
-						ID json.RawMessage `json:"id"`
-					}
-					json.Unmarshal(msg, &rpc)
-					errResp, _ := json.Marshal(map[string]any{
-						"jsonrpc": "2.0",
-						"id":      json.RawMessage(rpc.ID),
-						"error":   map[string]any{"code": -32003, "message": "filesystem not enabled (start relay with --root)"},
-					})
-					r.sendToDisplay(errResp)
+				case r.fs != nil:
+					r.fs.Handle(rpc.Method, rpc.ID, rpc.Params, r.sendToDisplay)
+				default:
+					r.sendJSONRPCError(rpc.ID, -32003, "filesystem not enabled (start relay with --root)")
 				}
 				continue
 			}
@@ -799,6 +797,17 @@ func (r *Relay) notifyDisplay(event, clientID string) {
 	r.sendToDisplay(msg)
 }
 
+// sendJSONRPCError writes a JSON-RPC 2.0 error response to the display — for
+// inline relay-level failures (e.g. a subsystem not being enabled).
+func (r *Relay) sendJSONRPCError(id json.RawMessage, code int, message string) {
+	resp, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      json.RawMessage(id),
+		"error":   map[string]any{"code": code, "message": message},
+	})
+	r.sendToDisplay(resp)
+}
+
 // NotifyDisplayRPC sends a JSON-RPC 2.0 notification (no id) to the display.
 // Used for server-initiated push events like live reload.
 func (r *Relay) NotifyDisplayRPC(method string, params any) {
@@ -831,6 +840,8 @@ func RunServer(cfg ServerConfig) error {
 	// round-trip-confirm a save and reload the affected grid.
 	if cfg.FSHandler != nil {
 		cfg.FSHandler.SetNotifyHook(relay.NotifyDisplayRPC)
+		relay.lsp = NewLSPSupervisor(cfg.FSHandler)
+		relay.lsp.SetNotifyHook(relay.NotifyDisplayRPC)
 	}
 
 	fileServer := http.FileServer(http.FS(cfg.StaticFS))
@@ -933,6 +944,8 @@ func RunRelay(host string, port int, fsHandler *FSHandler) error {
 	relay.port = port
 	if fsHandler != nil {
 		fsHandler.SetNotifyHook(relay.NotifyDisplayRPC)
+		relay.lsp = NewLSPSupervisor(fsHandler)
+		relay.lsp.SetNotifyHook(relay.NotifyDisplayRPC)
 	}
 
 	addr := fmt.Sprintf("%s:%d", host, port)

@@ -1,0 +1,12 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": false,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "target": "ES2022",
+    "resolveJsonModule": true
+  },
+  "include": ["packages/*/src", "app"],
+  "exclude": ["node_modules", "**/node_modules", "cli", "app/dist", "packages/*/dist"]
+}
