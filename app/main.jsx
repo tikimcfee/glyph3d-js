@@ -170,4 +170,9 @@ function App() {
   );
 }
 
-createRoot(document.getElementById('root')).render(<App />);
+// Fast Refresh re-executes this entry module on edit, so a bare createRoot() would run
+// twice on the same container and warn ("already passed to createRoot"). Cache the root
+// on the container and reuse it across re-runs — one root per #root, HMR-safe.
+const container = document.getElementById('root');
+const root = (container.__glyphRoot ??= createRoot(container));
+root.render(<App />);
