@@ -1172,6 +1172,29 @@ export default class GlyphField {
         return { x: this._groupData[base], y: this._groupData[base + 1], z: this._groupData[base + 2] };
     }
 
+    /**
+     * Assign a contiguous range of glyph slots to a transform group (instanceGroupId).
+     * The group's offset / visibility (setGroupOffset / setGroupVisibility) then apply to
+     * exactly those glyphs — the primitive behind structural sub-layouts: move or hide a
+     * whole swathe of text by AST range. The shader ADDS the group offset on top of the
+     * base flow position, so this composes with the layout and survives relayout.
+     * @param {number} startSlot inclusive buffer slot
+     * @param {number} count number of consecutive slots
+     * @param {number} groupId target group (createGroup() / 0 = identity)
+     */
+    setGlyphGroupRange(startSlot, count, groupId) {
+        const attr = this.instanceMesh?.geometry?.attributes?.instanceGroupId;
+        if (!attr || count <= 0) return;
+        const arr = attr.array;
+        const start = Math.max(0, startSlot | 0);
+        const end = Math.min(arr.length, start + count);
+        for (let s = start; s < end; s++) arr[s] = groupId;
+        if (end > start) {
+            attr.addUpdateRange(start, end - start);
+            attr.needsUpdate = true;
+        }
+    }
+
     setGroupColor(groupId, color) {
         if (groupId < 0 || groupId >= this._maxGroups) return;
         const base = (groupId * 4 + 2) * 4;
@@ -1345,19 +1368,26 @@ export default class GlyphField {
      * @param {Object} entry - renderedTexts value with bufferStartIndex + glyphCount
      * @returns {{min,max,width,height,depth}|null}
      */
-    _getTextBounds(entry) {
-        if (!entry || entry.glyphCount === 0 || !this.instanceMesh) return null;
-
+    /**
+     * Local-space bounds of a contiguous slot range — min/max over its glyph quads
+     * (position + per-glyph [advance, height]). The measurement behind structural
+     * sub-layouts (an AST block's extents) and the per-text bounds below.
+     * @param {number} startSlot inclusive
+     * @param {number} count number of consecutive slots
+     * @returns {{min:{x,y,z},max:{x,y,z},width:number,height:number,depth:number}|null}
+     */
+    measureSlotRange(startSlot, count) {
+        if (!this.instanceMesh || count <= 0) return null;
         const geom      = this.instanceMesh.geometry;
         const positions = geom.attributes.instancePosition.array;
         const sizes     = geom.attributes.instanceSize.array;
-        const start     = entry.bufferStartIndex;
+        const start     = Math.max(0, startSlot | 0);
+        const end       = Math.min((positions.length / 3) | 0, start + count);
 
         let minX = Infinity, minY = Infinity, minZ = Infinity;
         let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
 
-        for (let i = 0; i < entry.glyphCount; i++) {
-            const buf = start + i;
+        for (let buf = start; buf < end; buf++) {
             const px = positions[buf * 3];
             const py = positions[buf * 3 + 1];
             const pz = positions[buf * 3 + 2];
@@ -1379,6 +1409,11 @@ export default class GlyphField {
             height: maxY - minY,
             depth:  maxZ - minZ,
         };
+    }
+
+    _getTextBounds(entry) {
+        if (!entry || entry.glyphCount === 0) return null;
+        return this.measureSlotRange(entry.bufferStartIndex, entry.glyphCount);
     }
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
