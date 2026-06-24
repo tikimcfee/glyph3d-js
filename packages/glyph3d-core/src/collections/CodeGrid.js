@@ -1751,14 +1751,17 @@ class CodeGrid extends FramedGlyphField {
     // ============ Glyph Highlighting ============
 
     /**
-     * Highlight a range of characters with additive color.
+     * Highlight a range of characters. `fillOpacity` selects the mode: 0 (default) = additive
+     * tint on the glyph ink; >0 = a background-fill bar at that opacity behind the glyphs (the
+     * cells tile seamlessly). See GlyphField.setGlyphHighlight.
      * @param {number} startLine - 0-based inclusive
      * @param {number} startCol - 0-based inclusive (codepoint index)
      * @param {number} endLine - 0-based inclusive
      * @param {number} endCol - 0-based exclusive (codepoint index)
      * @param {{r:number, g:number, b:number}} color
+     * @param {number} [fillOpacity=0] - 0 = additive tint; >0 = background-fill opacity (0–1)
      */
-    highlightRange(startLine, startCol, endLine, endCol, color) {
+    highlightRange(startLine, startCol, endLine, endCol, color, fillOpacity = 0) {
         if (!this._renderer || !this._layout) return;
 
         for (let line = startLine; line <= endLine; line++) {
@@ -1766,7 +1769,7 @@ class CodeGrid extends FramedGlyphField {
             const cEnd   = (line === endLine)   ? endCol   : this.getLineSlotCount(line);
             for (let col = cStart; col < cEnd; col++) {
                 const slot = this.getSlotForChar(line, col); // → LayoutDescription, one source
-                if (slot >= 0) this._renderer.setGlyphHighlight(slot, color);
+                if (slot >= 0) this._renderer.setGlyphHighlight(slot, color, fillOpacity);
             }
         }
     }
@@ -1778,11 +1781,12 @@ class CodeGrid extends FramedGlyphField {
      * false for a null node.
      * @param {{start:{line:number,col:number}, end:{line:number,col:number}}} node
      * @param {{r:number, g:number, b:number}} color
+     * @param {number} [fillOpacity=0] - 0 = additive tint; >0 = background-fill opacity (0–1)
      * @returns {boolean}
      */
-    highlightNode(node, color) {
+    highlightNode(node, color, fillOpacity = 0) {
         if (!node || !node.start || !node.end) return false;
-        this.highlightRange(node.start.line, node.start.col, node.end.line, node.end.col, color);
+        this.highlightRange(node.start.line, node.start.col, node.end.line, node.end.col, color, fillOpacity);
         return true;
     }
 

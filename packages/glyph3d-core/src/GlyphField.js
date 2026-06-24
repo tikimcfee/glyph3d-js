@@ -87,6 +87,7 @@ function _buildVertexNode(uniforms) {
     const vColor      = varying(vec3(0),  'vColor');
     const vGroupAlpha = varying(float(1), 'vGroupAlpha');
     const vAddedColor = varying(vec3(0),  'vAddedColor');
+    const vFillAmount = varying(float(0), 'vFillAmount');   // highlight texel alpha: 0=tint (additive), >0=background-fill opacity
     const vGlyphUV    = varying(vec2(0),  'vGlyphUV');
     const vCurveStart = varying(int(0),   'vCurveStart');
     const vCurveCount = varying(int(0),   'vCurveCount');
@@ -169,6 +170,9 @@ function _buildVertexNode(uniforms) {
         const hy = int(instanceIndex).div(int(1024));
         const highlight = textureLoad(highlightTex, ivec2(hx, hy));
         vAddedColor.assign(highlight.rgb);
+        // The alpha byte (was unused) is the MODE/opacity carrier: 0 → additive tint (legacy),
+        // >0 → background-fill opacity. RGBA8 unorm samples to [0,1], so this IS the opacity.
+        vFillAmount.assign(highlight.a);
 
         // PlaneGeometry's uv attribute is [0,1] across the quad → glyph-space [0,1]².
         vGlyphUV.assign(uv());
@@ -185,7 +189,7 @@ function _buildVertexNode(uniforms) {
         return outClip;
     });
 
-    return { vertexFn, vColor, vGroupAlpha, vAddedColor, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell };
+    return { vertexFn, vColor, vGroupAlpha, vAddedColor, vFillAmount, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell };
 }
 
 /**
@@ -204,11 +208,11 @@ function _buildVertexNode(uniforms) {
  * When vMode == 1 (bitmap emoji) the bezier path is skipped and the glyph is
  * sampled from the RGBA emoji atlas instead (see bitmap branch below).
  *
- * @param {Object} varyings - { vColor, vGroupAlpha, vAddedColor, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell }
+ * @param {Object} varyings - { vColor, vGroupAlpha, vAddedColor, vFillAmount, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell }
  * @param {Object} uniforms - { curveTex, emojiTex, emojiCols }
  */
 function _buildOutputNode(varyings, uniforms) {
-    const { vColor, vGroupAlpha, vAddedColor, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell } = varyings;
+    const { vColor, vGroupAlpha, vAddedColor, vFillAmount, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell } = varyings;
     const { curveTex, emojiTex, emojiCols, frameTex, frameCols, frameRows } = uniforms;
 
     // Minification tuning knobs (see below). DILATE_PX = half-width, in pixels, of the
@@ -369,12 +373,28 @@ function _buildOutputNode(varyings, uniforms) {
                 t.assign(t.mul(t).mul(float(3).sub(t.mul(2))));
                 cov.assign(exactCov.add(impostorCov.sub(exactCov).mul(t)));
             });
-            Discard(cov.lessThan(0.01));
+            // Highlight has two modes, carried by the highlight texel's alpha (vFillAmount):
+            //   TINT (alpha 0, legacy): an additive glyph tint — vColor·cov + vAddedColor.
+            //   FILL (alpha >0): a background BAR — the cell rect fills with vAddedColor at
+            //     opacity=vFillAmount and the glyph ink (vColor) composites ON TOP via coverage.
+            // The quad spans the full advance cell (quadW=iSize.x), so adjacent FILL cells tile
+            // into a seamless bar. One draw, analytic composite, no extra pass.
+            const isFill = vFillAmount.greaterThan(float(0));
 
-            const outAlpha   = cov.mul(vGroupAlpha);
+            // A TINT cell with no ink is empty → discard (the legacy cov<0.01 cull). A FILL cell
+            // is never coverage-empty (the bar IS the point) → only cull when even the fill is clear.
+            Discard(isFill.select(vFillAmount, cov).lessThan(0.01));
+
+            // alpha: a FILL cell is opaque to at least its fill opacity even ink-free; a TINT cell
+            // (vFillAmount=0) reduces to cov, since max(cov,0)=cov. Then × group visibility.
+            const outAlpha = cov.max(vFillAmount).mul(vGroupAlpha);
             Discard(outAlpha.lessThan(0.01));
 
-            const finalColor = vColor.mul(cov).add(vAddedColor).clamp(0, 1);
+            // vAddedColor coefficient: TINT adds it fully (k=1); FILL lerps fill→ink by coverage,
+            // i.e. k=(1−cov) so cov=0 is pure fill and cov=1 is pure ink. Explicit lerp — NOT TSL
+            // .mix() (it returns the wrong operand at t=0; see the vertex colorBlend note).
+            const addK = isFill.select(float(1).sub(cov), float(1));
+            const finalColor = vColor.mul(cov).add(vAddedColor.mul(addK)).clamp(0, 1);
             // Glyph colors are authored as display (sRGB) values; decode to linear so
             // the renderer's default sRGB output-encode returns them to the authored
             // value — consistent with the THREE.Color-managed rest of the scene
@@ -581,7 +601,7 @@ function _getSharedFieldMaterial(kind) {
     const frameColsNode    = _fieldUniform(1, (f) => f._frameCols || 1);
     const frameRowsNode    = _fieldUniform(1, (f) => f._frameRows || 1);
 
-    const { vertexFn, vColor, vGroupAlpha, vAddedColor, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell } =
+    const { vertexFn, vColor, vGroupAlpha, vAddedColor, vFillAmount, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell } =
         _buildVertexNode({
             groupTex:       groupTexNode,
             groupTexHeight: groupTexHNode,
@@ -597,7 +617,7 @@ function _getSharedFieldMaterial(kind) {
     const outputNode = kind === 'occluder'
         ? _buildOccluderOutputNode({ vColor, vGroupAlpha, vCurveCount })
         : _buildOutputNode(
-            { vColor, vGroupAlpha, vAddedColor, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell },
+            { vColor, vGroupAlpha, vAddedColor, vFillAmount, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell },
             {
                 curveTex: curveTexNode, emojiTex: emojiTexNode, emojiCols: emojiColsNode,
                 frameTex: frameTexNode, frameCols: frameColsNode, frameRows: frameRowsNode,
@@ -1003,11 +1023,19 @@ export default class GlyphField {
     }
 
     /**
-     * Set per-glyph highlight (additive) by absolute buffer slot index.
+     * Set a per-glyph highlight by absolute buffer slot. The highlight texel's RGB is the
+     * highlight color; its ALPHA byte selects the MODE the shader applies:
+     *   fillOpacity 0  → TINT  (additive: the glyph ink brightened by `color`) — default/legacy.
+     *   fillOpacity >0 → FILL  (a background bar: the cell rect fills with `color` at this
+     *                    opacity, the glyph ink composites on top). Adjacent FILL cells tile
+     *                    into a seamless bar (the quad spans the full advance cell).
+     * Rides the existing RGBA8 highlight texture (the alpha byte was previously unused) — no new
+     * per-glyph data.
      * @param {number} absoluteSlot
      * @param {{r,g,b}|null} color - null clears
+     * @param {number} [fillOpacity=0] - 0 = additive tint; >0 = background-fill opacity (0–1)
      */
-    setGlyphHighlight(absoluteSlot, color) {
+    setGlyphHighlight(absoluteSlot, color, fillOpacity = 0) {
         if (!this._highlightTexture) {
             // Silent no-op was a debugging black hole (highlights "applied" but invisible). Announce
             // it once per renderer: a highlight was requested before the highlight texture existed.
@@ -1022,7 +1050,9 @@ export default class GlyphField {
         data[i]     = color ? ((color.r * 255 + 0.5) | 0) : 0;
         data[i + 1] = color ? ((color.g * 255 + 0.5) | 0) : 0;
         data[i + 2] = color ? ((color.b * 255 + 0.5) | 0) : 0;
-        data[i + 3] = 0;
+        // Alpha = mode: 0 keeps the legacy additive tint; a fill clamps to [1,255] so a tiny
+        // opacity still reads as FILL (never silently degrades to tint at the 0 boundary).
+        data[i + 3] = (color && fillOpacity > 0) ? Math.min(255, Math.max(1, (fillOpacity * 255 + 0.5) | 0)) : 0;
         this._highlightTexture.needsUpdate = true;
     }
 

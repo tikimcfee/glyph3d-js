@@ -28,6 +28,7 @@ const CWD = '/home/ivan/dev/glyph3d-js/';
   const d = decorateForAction('read', r.meta);
   eq(d?.map(({ startLine, endLine }) => [startLine, endLine]), [[39, 80]], 'read: decorate is 0-based slice');
   ok(d[0].color.b === 1.0, 'read: decoration is the READ (blue) color');
+  ok(d[0].fill === true, 'read: directive requests a background FILL bar');
 }
 
 // ── read: a FULL read decorates nothing (no range) ────────────────────────────────────
@@ -47,6 +48,7 @@ const CWD = '/home/ivan/dev/glyph3d-js/';
   const d = decorateForAction('edit', r.meta);
   eq(d.map(({ startLine, endLine }) => [startLine, endLine]), [[10, 11], [13, 13]], 'edit: decorate 0-based runs');
   ok(d[0].color.g === 1.0, 'edit: decoration is the ADDED (green) color');
+  ok(d.every((x) => x.fill === true), 'edit: directives request a background FILL bar');
 }
 
 // ── edit aliases: MultiEdit / NotebookEdit normalize to the same action ────────────────

@@ -164,11 +164,13 @@ const TOOLS = {
 };
 
 // DECORATION is per-ACTION, not per-tool (an edit lights up the same whether Edit/MultiEdit produced it).
+// `fill: true` asks the consumer for a background-fill BAR (vs an additive tint) — the touched block
+// reads as a filled region; the actual opacity is the consumer's knob (e.g. trail cfg.highlightFillOpacity).
 const ACTION_DECORATORS = {
     read: (meta) => (meta && meta.range
-        ? [{ startLine: meta.range[0] - 1, endLine: meta.range[1] - 1, color: READ }]
+        ? [{ startLine: meta.range[0] - 1, endLine: meta.range[1] - 1, color: READ, fill: true }]
         : null),
-    edit: (meta) => ((meta && meta.ranges) || []).map(([s, e]) => ({ startLine: s - 1, endLine: e - 1, color: ADDED })),
+    edit: (meta) => ((meta && meta.ranges) || []).map(([s, e]) => ({ startLine: s - 1, endLine: e - 1, color: ADDED, fill: true })),
 };
 
 /**

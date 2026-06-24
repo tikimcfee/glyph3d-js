@@ -41,6 +41,7 @@ export const TRAIL_DEFAULTS = {
     snapshotImageWidth: 40,     // world width of an image snapshot quad (height follows aspect)
     maxConnections: 512,        // tether budget
     showTethers: true,          // draw a call→snapshot beam per moment
+    highlightFillOpacity: 0.22, // opacity of a decorate FILL bar (the touched block's background) — 0 falls back to additive tint
     debug: false,               // ON → log the decoration decision per snapshot (trail.config debug true)
 
     // Corridor identity — a translucent colored box around each agent's deck (the
@@ -440,10 +441,11 @@ export default class AgentTrail {
 
     /**
      * Light up the lines an action touched on its loaded snapshot — the mapping from the action to
-     * the content. Edits glow green on their added lines; a partial read tints its slice blue. The
-     * directives come from the shared tool registry (decorateForAction), applied as additive glyph
-     * highlights via highlightRange. Runs AFTER the single load resolves (the layout/slots exist),
-     * clamped to the rendered line range.
+     * the content. Edits fill their added lines green; a partial read fills its slice blue. A
+     * directive's `fill` flag becomes a background-fill BAR at cfg.highlightFillOpacity (the touched
+     * block reads as a filled region); a non-fill directive falls back to an additive glyph tint.
+     * Directives come from the shared tool registry (decorateForAction), applied via highlightRange.
+     * Runs AFTER the single load resolves (the layout/slots exist), clamped to the rendered range.
      */
     _decorateSnapshot(grid, record) {
         const dbg = this.cfg.debug ? (msg) => console.log(`[trail.decorate] ${record.action} ${record.target || ''} — ${msg}`) : null;
@@ -462,7 +464,8 @@ export default class AgentTrail {
             const end = Math.min(lastLine, d.endLine);
             for (let ln = start; ln <= end; ln++) {
                 const cols = typeof grid.getLineSlotCount === 'function' ? grid.getLineSlotCount(ln) : 0;
-                if (cols > 0) { grid.highlightRange(ln, 0, ln, cols, d.color); litLines++; litSlots += cols; }
+                const fillOpacity = d.fill ? this.cfg.highlightFillOpacity : 0;   // FILL bar vs additive tint
+                if (cols > 0) { grid.highlightRange(ln, 0, ln, cols, d.color, fillOpacity); litLines++; litSlots += cols; }
             }
         }
         dbg?.(`${directives.length} directive(s) → lit ${litLines} line(s) / ${litSlots} slot(s) (lastLine=${lastLine})`);
