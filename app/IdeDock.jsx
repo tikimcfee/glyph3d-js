@@ -9,6 +9,7 @@ import TerminalsPanel from './TerminalsPanel.jsx';
 import FieldVisitorsPanel from './FieldVisitorsPanel.jsx';
 import LayoutPanel from './LayoutPanel.jsx';
 import EditorPanel from './EditorPanel.jsx';
+import LspResultsPanel from './LspResultsPanel.jsx';
 
 // IdeDock — the panel layer. A dockview surface that hosts the IDE's DOM panels
 // (file tree, terminals; inspector/search later) with tabs, splits, float and
@@ -33,6 +34,7 @@ const PANELS = [
   { id: 'files', title: 'Files' },
   { id: 'repo', title: 'Repo', position: { referencePanel: 'files', direction: 'within' } },
   { id: 'fieldVisitors', title: 'Crew', position: { referencePanel: 'files', direction: 'within' } },
+  { id: 'lspResults', title: 'LSP', position: { referencePanel: 'files', direction: 'within' } },
   { id: 'layout', title: 'Layout', position: { referencePanel: 'files', direction: 'within' } },
   { id: 'settings', title: 'Settings', position: { referencePanel: 'files', direction: 'within' } },
   { id: 'editor', title: 'Editor', position: { referencePanel: 'files', direction: 'below' } },
@@ -71,6 +73,7 @@ export default function IdeDock({ client }) {
     settings: () => <SettingsPanel client={clientRef.current} />,
     terminals: () => <TerminalsPanel client={clientRef.current} />,
     fieldVisitors: () => <FieldVisitorsPanel client={clientRef.current} />,
+    lspResults: () => <LspResultsPanel client={clientRef.current} />,
     layout: () => <LayoutPanel client={clientRef.current} />,
     editor: () => <EditorPanel client={clientRef.current} />,
   }), []);

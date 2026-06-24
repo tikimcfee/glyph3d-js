@@ -13,7 +13,7 @@
  * whose caret has moved on drops itself (signature guard) — empty ≠ stale.
  *
  * State shape (state()):
- *   { status: 'idle'|'ready', origin: {gridId,uri,line,col}|null,
+ *   { status: 'idle'|'loading'|'ready', origin: {gridId,uri,line,col}|null,
  *     def: Item|null, refs: Item[], refsTotal: number, selection: number }
  *   Item = { uri, sL, sC, eL, eC, label, preview }
  */
@@ -101,6 +101,14 @@ export class LspNavigator {
         const sig = `${edit.id}:${cur.line}:${cur.col}`;
         if (sig === this._sig) return; // already querying / already have this spot
         this._sig = sig;
+        // New spot → clear to 'loading' immediately so views never show stale results
+        // from the previous symbol while the round-trip is in flight.
+        this._state = {
+            status: 'loading',
+            origin: { gridId: edit.id, uri, line: cur.line, col: cur.col },
+            def: null, refs: [], refsTotal: 0, selection: -1,
+        };
+        this._emit();
         clearTimeout(this._timer);
         this._timer = setTimeout(() => this._run(sig, grid, cur, uri, edit.id), DEBOUNCE_MS);
     }

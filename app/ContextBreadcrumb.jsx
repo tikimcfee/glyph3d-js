@@ -30,12 +30,6 @@ const tail = (s, n = 24) => {
 // leading/trailing slash doesn't render a blank chip).
 const segmentsOf = (p) => String(p || '').split('/').filter(Boolean);
 
-// Collapse whitespace + truncate a source-line preview to fit a compact chip.
-const snippet = (s, n = 30) => {
-  const t = String(s || '').replace(/\s+/g, ' ').trim();
-  return t.length > n ? t.slice(0, n - 1) + '…' : t;
-};
-
 function chipLabel(n) {
   if (n.kind === 'edit') return `EDIT ${n.cursor.line}:${n.cursor.col}`;
   if (n.kind === 'ast') return n.label;
@@ -58,14 +52,10 @@ const addrStyle = {
   padding: '3px 8px', borderTop: '1px solid #1c222c',
 };
 const lspRowStyle = {
-  display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 4,
-  padding: '3px 8px', borderTop: '1px solid #1c222c',
+  display: 'flex', alignItems: 'center', gap: 4, padding: '3px 8px',
+  borderTop: '1px solid #1c222c',
 };
-const lspChip = (color) => ({
-  cursor: 'pointer', whiteSpace: 'nowrap', padding: '0 5px',
-  borderLeft: `2px solid ${color}`, color: '#cdd6e2',
-});
-const previewStyle = { color: '#7e8896', marginLeft: 6 };
+const lspBtn = (color) => ({ cursor: 'pointer', color, padding: '0 4px', whiteSpace: 'nowrap' });
 
 export default function ContextBreadcrumb({ client }) {
   const [nodes, setNodes] = useState([]);
@@ -220,25 +210,16 @@ export default function ContextBreadcrumb({ client }) {
             <span
               onClick={() => jumpLoc(lsp.def)}
               title={`definition\n${lsp.def.uri}\n${lsp.def.preview}`}
-              style={lspChip(ACCENT.lsp)}
-            >
-              <b style={{ color: ACCENT.lsp, fontWeight: 600 }}>def</b> {lsp.def.label}
-              {lsp.def.preview && <span style={previewStyle}>{snippet(lsp.def.preview)}</span>}
-            </span>
+              style={lspBtn(ACCENT.lsp)}
+            >def {lsp.def.label}</span>
           )}
-          {lsp.refs.length > 0 && <span style={{ color: '#5a6573' }}>refs {lsp.refsTotal}</span>}
-          {lsp.refs.slice(0, 6).map((r, i) => (
+          {lsp.refsTotal > 0 && (
             <span
-              key={`ref-${i}`}
-              onClick={() => jumpLoc(r)}
-              title={`reference\n${r.uri}\n${r.preview}`}
-              style={lspChip(ACCENT.ast)}
-            >
-              {r.label}
-              {r.preview && <span style={previewStyle}>{snippet(r.preview, 22)}</span>}
-            </span>
-          ))}
-          {lsp.refsTotal > 6 && <span style={{ color: '#6a7585' }}>+{lsp.refsTotal - 6}</span>}
+              onClick={() => client?.router?.execute?.(['panel.open', 'lspResults'])}
+              title="open the LSP results panel"
+              style={lspBtn(ACCENT.ast)}
+            >{lsp.refsTotal} ref{lsp.refsTotal === 1 ? '' : 's'} ▸</span>
+          )}
         </div>
       )}
     </div>
