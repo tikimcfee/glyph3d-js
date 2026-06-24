@@ -50,6 +50,9 @@ export default function registerStructureCommands(router) {
             const hint = res.available?.length ? ` (file has: ${res.available.join(', ')})` : '';
             return { text: `ERR: ${res.reason}${hint}`, data: null };
         }
+        // Footprint changed → re-fit the scene so the grown grid flows back in among its
+        // neighbours, exactly like a layout-mode change (only the caller can relayout the tree).
+        ctx.contentTree?.relayoutAndRest();
         return {
             text: `OK: ${res.count} ${kind || 'callable'} block(s) → size-sorted grid`,
             data: { registryId: resolved.registryId, ...res },
@@ -64,6 +67,7 @@ export default function registerStructureCommands(router) {
         const resolved = resolveGrid(ctx, args[0] ?? null);
         if (resolved.error) return { text: `ERR: ${resolved.error}`, data: null };
         const res = controllerFor(resolved.grid).reset();
+        ctx.contentTree?.relayoutAndRest(); // footprint shrank back → re-fit the scene
         return res.ok
             ? { text: `OK: ${resolved.registryId} restored to flow layout`, data: { registryId: resolved.registryId } }
             : { text: 'ERR: grid has no renderer', data: null };

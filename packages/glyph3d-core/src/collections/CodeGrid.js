@@ -451,6 +451,32 @@ class CodeGrid extends FramedGlyphField {
     }
 
     /**
+     * Override the cached content bounds (drives getLocalBounds → the background
+     * panel, focus overlay, dock tile, picking grid-channel, and layout). For
+     * structural sub-layouts that move glyphs via in-shader group offsets the normal
+     * bounds-walk can't see, the StructureLayout pushes the arranged extent here.
+     * Pass null to drop the override; the next read recomputes from the live buffer.
+     * @param {{min:{x,y,z},max:{x,y,z}}|null} bounds local-space AABB
+     */
+    setContentBoundsOverride(bounds) {
+        if (bounds) {
+            this._contentBoundsCache = {
+                min: { x: bounds.min.x, y: bounds.min.y, z: bounds.min.z },
+                max: { x: bounds.max.x, y: bounds.max.y, z: bounds.max.z },
+                width:  bounds.max.x - bounds.min.x,
+                height: bounds.max.y - bounds.min.y,
+                depth:  bounds.max.z - bounds.min.z,
+            };
+            this._workerBoundsCache  = null; // the override wins over the worker extent
+            this._contentBoundsDirty = false;
+            this._sizeBackgroundTo(this._contentBoundsCache); // re-fit the panel to the arrangement
+        } else {
+            this._workerBoundsCache  = null;
+            this._updateBackground(); // recompute from the live (base) positions + re-fit
+        }
+    }
+
+    /**
      * Local-space AABB suitable for composable layout containers.
      *
      * Why a dedicated method instead of relying on THREE.Box3.setFromObject?
@@ -2119,7 +2145,18 @@ class CodeGrid extends FramedGlyphField {
         // Content changed — the local content bounds must be recomputed (getBounds
         // re-derives the world box from them each call).
         this._contentBoundsDirty = true;
+        this._sizeBackgroundTo(this._getContentBounds());
+    }
 
+    /**
+     * Size + position the background panel to a content-bounds box. Split out of
+     * _updateBackground so a structural sub-layout can re-fit the panel to its
+     * OVERRIDDEN (group-offset) extent without forcing a base-position recompute —
+     * _updateBackground marks bounds dirty, which would clobber the override.
+     * @param {{min:{x,y,z},max:{x,y,z},width:number,height:number}|null} bounds
+     * @private
+     */
+    _sizeBackgroundTo(bounds) {
         if (!this._background || !this.config.showBackground) {
             if (this._background) {
                 this._background.visible = false;
@@ -2127,7 +2164,6 @@ class CodeGrid extends FramedGlyphField {
             return;
         }
 
-        const bounds = this._getContentBounds();
         if (!bounds) {
             this._background.visible = false;
             return;

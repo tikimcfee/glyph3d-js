@@ -1704,6 +1704,17 @@ export default class GlyphField {
     }
 
     /**
+     * Public: refresh the geometry's frustum-cull bounds (boundingBox + Sphere).
+     * Pass a precomputed {min,max} local extent — required when glyphs are moved by
+     * in-shader group offsets (structural sub-layouts), which the base-position walk
+     * below cannot see — or omit to walk the live buffer.
+     * @param {{min:{x,y,z},max:{x,y,z}}} [precomputed]
+     */
+    refreshBounds(precomputed) {
+        this._updateGeometryBounds(precomputed);
+    }
+
+    /**
      * Apply worker-prebuilt buffers.
      */
     applyPrebuiltBuffers(buffers, items) {

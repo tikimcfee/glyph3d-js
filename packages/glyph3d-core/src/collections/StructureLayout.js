@@ -54,7 +54,10 @@ export class StructureLayout {
             return { ok: false, reason: kind ? `no ${kind} blocks` : 'no functions or methods', available };
         }
 
-        // Smallest surface-area first, then pack into a roughly-square grid.
+        // Smallest surface-area first, then pack into a roughly-square grid. The grid is
+        // free to take its natural shape — the caller re-fits the scene (a tree relayout)
+        // around the grown footprint afterwards, exactly like a layout-mode change, so a
+        // bigger arrangement never overlaps its neighbours.
         blocks.sort((a, b) => a.bounds.width * a.bounds.height - b.bounds.width * b.bounds.height);
         const sizes = blocks.map((b) => ({ w: b.bounds.width, h: b.bounds.height }));
         const margin = (this._grid.metrics?.lineSpacing ?? this._grid.metrics?.charHeight ?? 1) * 1.6;
@@ -70,6 +73,8 @@ export class StructureLayout {
         const r = this._renderer();
         if (!r) return { ok: false };
         r.setGlyphGroupRange(0, this._glyphCount(r), 0);
+        r.refreshBounds();                            // re-walk the base positions
+        this._grid.setContentBoundsOverride?.(null);  // drop the override → recompute
         this._scheme = null;
         return { ok: true };
     }
@@ -137,17 +142,34 @@ export class StructureLayout {
         r.setGroupVisibility(hidden, false);
         r.setGlyphGroupRange(0, this._glyphCount(r), hidden);
 
+        // Track the ARRANGED extent: glyphs move via in-shader group offsets, so the
+        // renderer's base-position bounds-walk can't see the new shape. We feed the
+        // extent we already know to both the frustum-cull bounds and the grid's
+        // content bounds — otherwise blocks fall outside the stale box and get culled.
+        let minX = Infinity, minY = Infinity, minZ = Infinity;
+        let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+
         for (let i = 0; i < blocks.length; i++) {
             const b = blocks[i];
             const slot = slots[i];
+            const ox = slot.x - b.bounds.min.x; // slot.x = box left; bounds.min.x = block left
+            const oy = slot.y - b.bounds.max.y; // slot.y = box top (y descends); bounds.max.y = block top
             const g = r.createGroup();
-            r.setGroupOffset(g, {
-                x: slot.x - b.bounds.min.x, // slot.x = box left; bounds.min.x = block left
-                y: slot.y - b.bounds.max.y, // slot.y = box top (y descends); bounds.max.y = block top
-                z: 0,
-            });
+            r.setGroupOffset(g, { x: ox, y: oy, z: 0 });
             r.setGlyphGroupRange(b.startSlot, b.count, g);
+
+            // block's arranged box: [slot.x, slot.y - h] .. [slot.x + w, slot.y]
+            if (slot.x < minX) minX = slot.x;
+            if (slot.y - b.bounds.height < minY) minY = slot.y - b.bounds.height;
+            if (b.bounds.min.z < minZ) minZ = b.bounds.min.z;
+            if (slot.x + b.bounds.width > maxX) maxX = slot.x + b.bounds.width;
+            if (slot.y > maxY) maxY = slot.y;
+            if (b.bounds.max.z > maxZ) maxZ = b.bounds.max.z;
         }
+
+        const extent = { min: { x: minX, y: minY, z: minZ }, max: { x: maxX, y: maxY, z: maxZ } };
+        r.refreshBounds(extent);                       // Three's frustum cull tests the new shape
+        this._grid.setContentBoundsOverride?.(extent); // panel / focus / dock / picking / layout
     }
 }
 
