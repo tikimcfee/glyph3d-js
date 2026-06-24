@@ -14,7 +14,7 @@ import { stateController } from '@glyph3d/core/services/state';
 // (the semantic family), EDIT caret yellow (CodeGrid.CARET_COLOR), KEY green
 // (live capture). Future kinds (visual, capture) add a row here and a renderer
 // below — nothing else.
-const ACCENT = { focus: '#9fd2ff', ast: '#c8a9ff', edit: '#ffd84d', key: '#7fe0a0' };
+const ACCENT = { focus: '#9fd2ff', ast: '#c8a9ff', edit: '#ffd84d', key: '#7fe0a0', lsp: '#6fe0c8' };
 
 const tail = (s, n = 24) => {
   const t = String(s || '').split('/').pop();
@@ -46,6 +46,16 @@ const addrStyle = {
   display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 3,
   padding: '3px 8px', borderTop: '1px solid #1c222c',
 };
+// LSP row: definition + reference chips for the symbol at the caret, each a
+// clickable jump. Its own row so it never crowds the scope-chain chips.
+const lspRowStyle = {
+  display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 4,
+  padding: '3px 8px', borderTop: '1px solid #1c222c',
+};
+const lspChip = (color) => ({
+  cursor: 'pointer', whiteSpace: 'nowrap', padding: '0 5px',
+  borderLeft: `2px solid ${color}`, color: '#cdd6e2',
+});
 
 export default function ContextBreadcrumb({ client }) {
   const [nodes, setNodes] = useState([]);
@@ -113,10 +123,15 @@ export default function ContextBreadcrumb({ client }) {
   const place = pos
     ? { left: pos.x, top: pos.y }
     : { left: '50%', bottom: 36, transform: 'translateX(-50%)' };
-  const innermost = nodes[nodes.length - 1];
+  const lsp = nodes.find((n) => n.kind === 'lsp') || null;
+  const mainNodes = lsp ? nodes.filter((n) => n.kind !== 'lsp') : nodes;
+  const innermost = mainNodes[mainNodes.length - 1];
   const focus = nodes.find((n) => n.kind === 'focus') || null;
   const segs = focus ? segmentsOf(focus.path) : [];
   const showAddr = !collapsed && addr && segs.length > 0;
+  // Jump to a known LSP location (a def/ref chip) via the bus.
+  const jumpLoc = (l) => client?.router?.execute?.(
+    ['lsp.goto', l.uri, String(l.sL), String(l.sC), String(l.eL), String(l.eC)]);
 
   return (
     <div ref={rootRef} data-g3d-context style={{ ...wrapStyle, ...place }}>
@@ -129,15 +144,15 @@ export default function ContextBreadcrumb({ client }) {
         {collapsed ? (
           <span
             onClick={toggle}
-            title={nodes.map(chipLabel).join(' · ') || 'no locked context'}
+            title={mainNodes.map(chipLabel).join(' · ') || 'no locked context'}
             style={{ cursor: 'pointer', color: innermost ? ACCENT[innermost.kind] : '#4a5468' }}
           >
-            ● {nodes.length}
+            ● {mainNodes.length}
           </span>
         ) : (
           <>
-            {nodes.length === 0 && <span style={{ color: '#4a5468' }}>free</span>}
-            {nodes.map((n, i) => (
+            {mainNodes.length === 0 && <span style={{ color: '#4a5468' }}>free</span>}
+            {mainNodes.map((n, i) => (
               <span
                 key={`${n.kind}:${n.id}:${i}`}
                 data-kind={n.kind}
@@ -184,6 +199,25 @@ export default function ContextBreadcrumb({ client }) {
               </React.Fragment>
             );
           })}
+        </div>
+      )}
+      {!collapsed && lsp && (lsp.def || lsp.refs?.length > 0) && (
+        <div style={lspRowStyle} data-g3d-lsp>
+          <span style={{ color: '#4a5468' }} title="LSP — definition & references">⌖</span>
+          {lsp.def && (
+            <span onClick={() => jumpLoc(lsp.def)} title={`definition · ${lsp.def.uri}`} style={lspChip(ACCENT.lsp)}>
+              def {lsp.def.label}
+            </span>
+          )}
+          {lsp.refs?.length > 0 && <span style={{ color: '#5a6573' }}>refs</span>}
+          {lsp.refs?.map((r, i) => (
+            <span key={`ref-${i}`} onClick={() => jumpLoc(r)} title={`reference · ${r.uri}`} style={lspChip(ACCENT.ast)}>
+              {r.label}
+            </span>
+          ))}
+          {lsp.refsTotal > lsp.refs.length && (
+            <span style={{ color: '#6a7585' }}>+{lsp.refsTotal - lsp.refs.length}</span>
+          )}
         </div>
       )}
     </div>

@@ -329,6 +329,7 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // LSP client: present whenever the bridge is, but only functional against a
     // relay started with a project root (the relay gates lsp/* on --root).
     state.ctx.lsp = new RemoteLspProvider(bridge);
+    state.ctx.interactionContext.setLsp(state.ctx.lsp); // breadcrumb LSP row reads it
 
     // Terminal OUTPUT data plane: binary frames (type 1) carry raw VT bytes → the
     // terminal's emulator (grid.writeBytes). The bridge demuxes by type byte; terminal
