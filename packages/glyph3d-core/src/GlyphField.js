@@ -830,7 +830,12 @@ export default class GlyphField {
 
         const mesh = new THREE.Mesh(geometry, material);
         mesh.userData.glyphField = this;   // the shared material's per-object state hook
-        mesh.frustumCulled = false;
+        // Glyphs are placed by in-shader instance attributes (instancePosition) that three can't
+        // see, so the unit-quad geometry's auto-bounds are meaningless and three would mis-cull.
+        // We instead write the REAL instance extent into geometry.boundingBox/Sphere on every
+        // position change (_updateGeometryBounds), so three's built-in per-object frustum cull
+        // works: off-screen grids skip their draw for free, every render — no virtualizer needed.
+        mesh.frustumCulled = true;
         return mesh;
     }
 
@@ -974,6 +979,7 @@ export default class GlyphField {
         const attr = geom.attributes.instancePosition;
         attr.addUpdateRange(base * 3, entry.glyphCount * 3);
         attr.needsUpdate = true;
+        this._updateGeometryBounds();   // glyphs moved in place (no rebuild) — resync the cull bounds
     }
 
     /**
@@ -1362,7 +1368,7 @@ export default class GlyphField {
     clear() {
         this.renderedTexts.clear();
         this._cachedGlyphCount = 0;
-        if (this.instanceMesh) this.instanceMesh.geometry.instanceCount = 0;
+        if (this.instanceMesh) { this.instanceMesh.geometry.instanceCount = 0; this._updateGeometryBounds(); }
     }
 
     dispose() {
@@ -1517,6 +1523,7 @@ export default class GlyphField {
         }
         this._ensureHighlightTexture(total);
         geom.instanceCount = total;
+        this._updateGeometryBounds();
     }
 
     /** @private */
@@ -1551,6 +1558,55 @@ export default class GlyphField {
 
         this._ensureHighlightTexture(count);
         geom.instanceCount = count;
+        this._updateGeometryBounds();
+    }
+
+    /**
+     * Write geometry.boundingBox + boundingSphere so three's built-in per-object frustum cull
+     * (mesh.frustumCulled = true) tests the REAL extent — our glyphs are placed by in-shader
+     * instance attributes three can't see, so the unit-quad auto-bounds are meaningless.
+     *
+     * The worker ALREADY computes this extent during layout (builders/index.js returns `bounds`),
+     * so the async/bulk path passes it straight in — O(1), no second pass. The sync / in-place
+     * paths have no precomputed bounds, so they fall back to one O(n) min/max over the live buffer.
+     *
+     * INVARIANT: call after ANY mutation of instancePosition / instanceCount. Known callers:
+     * _writeGlyphsToGeometry, _rebuildAllInstances, applyPrebuiltBuffers (worker bounds),
+     * updatePosition, clear. A NEW path that moves glyphs WITHOUT a rebuild must call this too, or
+     * the cull will test stale bounds and wrongly drop a grid whose glyphs moved. (Clip is safe —
+     * it discards in-shader without moving positions, leaving these bounds conservative; scroll
+     * folds into positions at build time, so a rebuild already covers it.)
+     * @param {{min:{x,y,z},max:{x,y,z}}} [precomputed] - layout extent from the worker, if available
+     * @private
+     */
+    _updateGeometryBounds(precomputed) {
+        const geom = this.instanceMesh?.geometry;
+        if (!geom) return;
+        const n = geom.instanceCount || 0;
+        const sphere = (this._boundsSphere ||= new THREE.Sphere());
+        if (n === 0) { geom.boundingBox = null; sphere.center.set(0, 0, 0); sphere.radius = 0; geom.boundingSphere = sphere; return; }
+        const box = (this._boundsBox ||= new THREE.Box3());
+        if (precomputed?.min && precomputed?.max) {
+            // The worker already measured the layout extent during its build — reuse it (O(1)).
+            box.min.set(precomputed.min.x, precomputed.min.y, precomputed.min.z);
+            box.max.set(precomputed.max.x, precomputed.max.y, precomputed.max.z);
+        } else {
+            // No precomputed extent (sync / in-place move) — one O(n) min/max over the live buffer.
+            const pos = geom.attributes.instancePosition.array;
+            const siz = geom.attributes.instanceSize.array;
+            let minX = Infinity, minY = Infinity, minZ = Infinity, maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+            for (let i = 0; i < n; i++) {
+                const px = pos[i * 3], py = pos[i * 3 + 1], pz = pos[i * 3 + 2];
+                const sw = siz[i * 2], sh = siz[i * 2 + 1];
+                if (px < minX) minX = px; if (py < minY) minY = py; if (pz < minZ) minZ = pz;
+                if (px + sw > maxX) maxX = px + sw; if (py + sh > maxY) maxY = py + sh; if (pz > maxZ) maxZ = pz;
+            }
+            box.min.set(minX, minY, minZ);
+            box.max.set(maxX, maxY, maxZ);
+        }
+        geom.boundingBox = box;
+        box.getBoundingSphere(sphere);
+        geom.boundingSphere = sphere;
     }
 
     /**
@@ -1574,6 +1630,7 @@ export default class GlyphField {
         this._ensureHighlightTexture(count);
         geom.instanceCount = count;
         this.config.maxInstances = Math.max(this.config.maxInstances, count);
+        this._updateGeometryBounds(buffers.bounds);   // reuse the worker's already-measured extent (O(1))
 
         this.renderedTexts.clear();
         this._cachedGlyphCount = 0;
