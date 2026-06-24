@@ -43,10 +43,20 @@ export class StructureLayout {
      *   "callable units" default (functions + methods at any depth).
      * @returns {{ok:boolean, count?:number, reason?:string, available?:string[]}}
      */
-    grid(kind = null) {
+    async grid(kind = null) {
         const r = this._renderer();
         const model = this._grid.getSemantics?.();
         if (!r || !model) return { ok: false, reason: 'grid has no renderer or semantic model' };
+
+        // A structural arrangement moves each block as one rigid swathe, so a block must
+        // be a CONTIGUOUS vertical run. A paginated (newspaper) layout fans a long method
+        // across columns — moving it as a unit then shatters it into hanging fragments.
+        // Collapse to a single long column first; reset() restores the prior pagination.
+        const cur = this._grid.getLayout?.();
+        if (cur && ((cur.pagesWide ?? 1) > 1 || (cur.pageHeight ?? 0) > 0)) {
+            this._priorLayout = { pageHeight: cur.pageHeight ?? 0, pagesWide: cur.pagesWide ?? 1 };
+            await this._grid.setLayout({ pageHeight: 0, pagesWide: 1 });
+        }
 
         const blocks = this._blocks(model, kind, r);
         if (!blocks.length) {
@@ -68,14 +78,48 @@ export class StructureLayout {
         return { ok: true, count: blocks.length };
     }
 
-    /** Restore every glyph to the identity group — back to the normal flow layout. */
-    reset() {
+    /**
+     * Debug: for each block, what the AST claims vs. what the slot range actually
+     * lands on — so an off-by-N shows up as a mismatch between `head`/`tail` (the
+     * AST's view of the text) and `slotHead`/`slotTail` (the glyphs the range moves).
+     */
+    inspect(kind = null) {
+        const r = this._renderer();
+        const model = this._grid.getSemantics?.();
+        if (!r || !model) return { ok: false, reason: 'no renderer or semantic model' };
+        const lines = this._grid.lines || [];
+        const charAt = (slot) => {
+            const c = this._grid.getCharForSlot?.(slot);
+            return c ? { at: `${c.line}:${c.col}`, ch: (lines[c.line] ?? '')[c.col] ?? '' } : null;
+        };
+        const blocks = this._blocks(model, kind, r).map((b) => {
+            const s = b.node.start, e = b.node.end;
+            return {
+                kind: b.node.kind, name: b.node.name,
+                node: `${s.line}:${s.col}..${e.line}:${e.col}`,
+                slots: `${b.startSlot}..${b.startSlot + b.count}`,
+                head: (lines[s.line] ?? '').slice(s.col, s.col + 20),
+                tail: (lines[e.line] ?? '').slice(Math.max(0, e.col - 20), e.col),
+                slotHead: charAt(b.startSlot),               // glyph the range STARTS on
+                slotTail: charAt(b.startSlot + b.count - 1), // glyph the range ENDS on
+            };
+        });
+        return { ok: true, count: blocks.length, blocks };
+    }
+
+    /** Restore every glyph to the identity group + the prior pagination — back to flow. */
+    async reset() {
         const r = this._renderer();
         if (!r) return { ok: false };
         r.setGlyphGroupRange(0, this._glyphCount(r), 0);
         r.refreshBounds();                            // re-walk the base positions
         this._grid.setContentBoundsOverride?.(null);  // drop the override → recompute
         this._scheme = null;
+        if (this._priorLayout) {
+            const prior = this._priorLayout;
+            this._priorLayout = null;
+            await this._grid.setLayout?.(prior);      // restore the pagination we collapsed
+        }
         return { ok: true };
     }
 

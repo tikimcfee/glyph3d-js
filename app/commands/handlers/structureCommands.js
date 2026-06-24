@@ -45,7 +45,7 @@ export default function registerStructureCommands(router) {
         }
         await grid.ensureSemantics();
 
-        const res = controllerFor(grid).grid(kind);
+        const res = await controllerFor(grid).grid(kind);
         if (!res.ok) {
             const hint = res.available?.length ? ` (file has: ${res.available.join(', ')})` : '';
             return { text: `ERR: ${res.reason}${hint}`, data: null };
@@ -63,10 +63,34 @@ export default function registerStructureCommands(router) {
         returns: '{ ok, count }',
     });
 
-    router.register('structure.reset', (args, ctx) => {
+    router.register('structure.inspect', async (args, ctx) => {
+        // structure.inspect [grid] [kind] — dump AST-vs-slot boundaries to find offsets.
+        let gridArg = null, kind = null;
+        if (args.length === 1) { if (KINDS.has(args[0])) kind = args[0]; else gridArg = args[0]; }
+        else if (args.length >= 2) { gridArg = args[0]; kind = args[1]; }
+        const resolved = resolveGrid(ctx, gridArg);
+        if (resolved.error) return { text: `ERR: ${resolved.error}`, data: null };
+        const grid = resolved.grid;
+        if (typeof grid.ensureSemantics === 'function') await grid.ensureSemantics();
+        const res = controllerFor(grid).inspect(kind);
+        if (!res.ok) return { text: `ERR: ${res.reason}`, data: null };
+        const rows = res.blocks.map((b, i) =>
+            `[${i}] ${b.kind} ${b.name || '·'}\n` +
+            `    node  ${b.node}   slots ${b.slots}\n` +
+            `    head  ${JSON.stringify(b.head)}  →slotHead ${JSON.stringify(b.slotHead?.ch)} @${b.slotHead?.at}\n` +
+            `    tail  ${JSON.stringify(b.tail)}  →slotTail ${JSON.stringify(b.slotTail?.ch)} @${b.slotTail?.at}`,
+        );
+        return { text: `STRUCTURE INSPECT — ${res.count} block(s):\n${rows.join('\n')}`, data: res };
+    }, {
+        description: 'Debug: dump each AST block\'s claimed boundaries vs the slot range it moves',
+        usage: '[grid] [kind]',
+        returns: '{ count, blocks }',
+    });
+
+    router.register('structure.reset', async (args, ctx) => {
         const resolved = resolveGrid(ctx, args[0] ?? null);
         if (resolved.error) return { text: `ERR: ${resolved.error}`, data: null };
-        const res = controllerFor(resolved.grid).reset();
+        const res = await controllerFor(resolved.grid).reset();
         ctx.contentTree?.relayoutAndRest(); // footprint shrank back → re-fit the scene
         return res.ok
             ? { text: `OK: ${resolved.registryId} restored to flow layout`, data: { registryId: resolved.registryId } }
