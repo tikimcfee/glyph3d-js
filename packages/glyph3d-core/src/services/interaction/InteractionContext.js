@@ -9,65 +9,34 @@
  *   { kind: 'focus', id, entityType, path }        ← attention.primary (path = full address)
  *   { kind: 'ast',   id, nodeKind, name, label }   ← enclosing scope (fn/class) at the cursor
  *   { kind: 'edit',  id, cursor: { line, col } }   ← key slot on a grid with a live cursor
- *   { kind: 'lsp',   id, def, refs, refsTotal }    ← LSP definition + references at the caret
  *   { kind: 'key',   id, entityType }              ← key slot held elsewhere (terminal capture)
  *
  * The 'ast' chain sits between focus and edit (file › class › method › line:col) —
  * the structural "where am I", from the keyed grid's lazily-built SemanticModel.
- * The 'lsp' node hangs the SEMANTIC answer ("where is this defined / used") off
- * the same caret, filled async from the relay-hosted language server and surfaced
- * only when it still matches the current caret. Future kinds ride the same shape:
- * 'visual' (a selection), 'capture' (greedy terminal passthrough). One source,
- * several consumers: the breadcrumb HUD renders chips 1:1 from nodes, `context.info`
- * exposes them on the bus, gesture resolution reads the innermost node to decide
- * what a click/key means, and binding tables predicate on node kinds.
+ * Future kinds ride the same shape: 'visual' (a selection), 'capture' (greedy
+ * terminal passthrough). One source, several consumers: the breadcrumb HUD
+ * renders chips 1:1 from nodes, `context.info` exposes them on the bus, gesture
+ * resolution reads the innermost node to decide what a click/key means, and
+ * binding tables predicate on node kinds (a vim layer's mode system, derived).
+ * Downstream enrichments (e.g. LspNavigator's def/refs for the symbol) subscribe
+ * to the 'edit' node rather than living here — this stays the caret/focus model.
  *
- * Events: `on(fn)` → fn(nodes) on every attention change, on the key grid's cursor
- * movement (via CodeGrid.onCursorChange — no polling), and when async enrichment
- * (semantics, LSP) lands for the current caret.
+ * Events: `on(fn)` → fn(nodes) on every attention change and on the key grid's
+ * cursor movement (via CodeGrid.onCursorChange — no polling).
  */
-
-const LSP_DEBOUNCE_MS = 280; // let the caret settle before a round-trip to the server
-const LSP_REF_CAP = 8;       // chips shown inline; the rest collapse into "+N"
-
-/** Stable signature for a caret position — lets a stale async LSP result self-drop. */
-function lspSig(id, cursor) {
-    return `${id}:${cursor.line}:${cursor.col}`;
-}
-
-/** Map an lsp/* location { uri, range } to a breadcrumb chip descriptor. */
-function lspLocToChip(loc) {
-    if (!loc?.uri || !loc.range?.start) return null;
-    const { start, end } = loc.range;
-    const base = String(loc.uri).split('/').pop() || loc.uri;
-    return {
-        uri: loc.uri,
-        sL: start.line, sC: start.character,
-        eL: end?.line ?? start.line, eC: end?.character ?? start.character,
-        label: `${base}:${start.line + 1}`, // 1-based line for humans
-    };
-}
-
 export class InteractionContext {
     /**
      * @param {Object} deps
      * @param {import('./AttentionManager.js').AttentionManager} deps.attentionManager
      * @param {Object} deps.registry - SceneRegistry (get(id) → { id, grid, type, ... })
-     * @param {Object} [deps.lsp] - RemoteLspProvider (definition/references); optional, set later via setLsp.
      */
-    constructor({ attentionManager, registry, lsp = null }) {
+    constructor({ attentionManager, registry }) {
         this._am = attentionManager;
         this._registry = registry;
-        this._lsp = lsp;
         /** @private @type {Set<Function>} */
         this._listeners = new Set();
         this._offCursor = null;
         this._cursorGridId = null;
-        // LSP enrichment state: a debounce timer, the in-flight query signature
-        // (so a result that outlived its caret is dropped), and the last result.
-        this._lspTimer = null;
-        this._lspSig = null;
-        this._lspResult = null;
 
         const refresh = () => this._refresh();
         this._offs = [
@@ -76,9 +45,6 @@ export class InteractionContext {
         ];
         this._refresh();
     }
-
-    /** Wire the LSP provider after construction (the provider is built later than this). */
-    setLsp(lsp) { this._lsp = lsp; }
 
     /**
      * The current node list, innermost-last. Always a fresh array of plain
@@ -118,14 +84,6 @@ export class InteractionContext {
                     }
                 }
                 out.push({ kind: 'edit', id: key.id, cursor });
-                // LSP: definition + references for the symbol under the caret, surfaced
-                // only when the cached result still matches THIS caret (a result from a
-                // prior position drops itself — the breadcrumb shows scope chips until
-                // the fresh query lands).
-                const r = this._lspResult;
-                if (r && r.sig === lspSig(key.id, cursor) && (r.def || r.refs.length)) {
-                    out.push({ kind: 'lsp', id: key.id, def: r.def, refs: r.refs, refsTotal: r.refsTotal });
-                }
             } else {
                 out.push({ kind: 'key', id: key.id, entityType: entry?.type ?? null });
             }
@@ -148,7 +106,6 @@ export class InteractionContext {
         this._offs = [];
         this._offCursor?.();
         this._offCursor = null;
-        clearTimeout(this._lspTimer);
         this._listeners.clear();
     }
 
@@ -159,10 +116,7 @@ export class InteractionContext {
         const gridId = (entry?.type === 'grid' && entry.grid?.onCursorChange) ? key.id : null;
         if (gridId !== this._cursorGridId) {
             this._offCursor?.();
-            // Cursor movement re-emits AND re-queries LSP for the new spot.
-            this._offCursor = gridId
-                ? entry.grid.onCursorChange(() => { this._emit(); this._enrichLsp(); })
-                : null;
+            this._offCursor = gridId ? entry.grid.onCursorChange(() => this._emit()) : null;
             this._cursorGridId = gridId;
             // Pre-warm the structural model for the newly-keyed grid (lazy/cached) so
             // the breadcrumb's 'ast' chips can fill; re-emit when the build lands, if
@@ -173,52 +127,6 @@ export class InteractionContext {
                     .catch(() => {});
             }
         }
-        this._emit();
-        this._enrichLsp();
-    }
-
-    /**
-     * @private — schedule a debounced LSP lookup (definition + references) for the
-     * symbol at the caret. Deduped by caret signature so holding still or re-firing
-     * doesn't re-query; the result re-emits via _runLspQuery when it lands.
-     */
-    _enrichLsp() {
-        if (!this._lsp) return;
-        const key = this._am.get('key');
-        const entry = key ? this._registry?.get?.(key.id) : null;
-        const grid = entry?.type === 'grid' ? entry.grid : null;
-        const cur = grid?.getCursor?.();
-        const uri = grid?.getSourcePath?.();
-        if (!grid || !cur || !uri) { this._lspSig = null; return; }
-        const sig = lspSig(key.id, cur);
-        if (sig === this._lspSig) return; // already queried / in-flight for this exact spot
-        this._lspSig = sig;
-        clearTimeout(this._lspTimer);
-        this._lspTimer = setTimeout(() => this._runLspQuery(sig, grid, cur), LSP_DEBOUNCE_MS);
-    }
-
-    /** @private — run definition+references for (grid, cursor); re-emit if still current. */
-    async _runLspQuery(sig, grid, cur) {
-        const uri = grid.getSourcePath?.();
-        if (!uri || this._lspSig !== sig) return;
-        const lineText = grid.lines?.[cur.line] ?? '';
-        const character = [...lineText].slice(0, cur.col).join('').length; // codepoint → UTF-16
-        const text = grid.getContent?.();
-        let result = null;
-        try {
-            const [d, r] = await Promise.all([
-                this._lsp.definition(uri, cur.line, character, text).catch(() => null),
-                this._lsp.references(uri, cur.line, character, text).catch(() => null),
-            ]);
-            if (this._lspSig !== sig) return; // caret moved while in-flight → drop
-            const def = (d?.locations || []).map(lspLocToChip).filter(Boolean)[0] ?? null;
-            const refs = (r?.locations || []).map(lspLocToChip).filter(Boolean);
-            result = { sig, def, refs: refs.slice(0, LSP_REF_CAP), refsTotal: refs.length };
-        } catch {
-            return;
-        }
-        if (this._lspSig !== sig) return;
-        this._lspResult = result;
         this._emit();
     }
 

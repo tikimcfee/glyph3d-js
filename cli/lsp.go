@@ -102,8 +102,9 @@ type lspRange struct {
 	End   lspPos `json:"end"`
 }
 type lspLoc struct {
-	URI   string   `json:"uri"`
-	Range lspRange `json:"range"`
+	URI     string   `json:"uri"`
+	Range   lspRange `json:"range"`
+	Preview string   `json:"preview,omitempty"` // trimmed source line at the location, for legible chips
 }
 
 // lspError carries a JSON-RPC error back through dispatch.
@@ -499,6 +500,7 @@ func flattenDef(r protocol.DefinitionResult) []protocol.Location {
 
 func (s *LSPSupervisor) toLspLocs(locs []protocol.Location) []lspLoc {
 	out := make([]lspLoc, 0, len(locs))
+	cache := map[string][]string{} // abs path → lines, read once per file per result set
 	for _, l := range locs {
 		out = append(out, lspLoc{
 			URI: s.ideURI(l.URI),
@@ -506,9 +508,36 @@ func (s *LSPSupervisor) toLspLocs(locs []protocol.Location) []lspLoc {
 				Start: lspPos{l.Range.Start.Line, l.Range.Start.Character},
 				End:   lspPos{l.Range.End.Line, l.Range.End.Character},
 			},
+			Preview: s.previewLine(string(l.URI), l.Range.Start.Line, cache),
 		})
 	}
 	return out
+}
+
+// previewLine returns the trimmed source line at a location so a result reads as
+// "file:line  <code>" instead of a bare coordinate. Files are read once per result
+// set (cache) and resolved through the same sandbox as fs/*. Empty on any miss.
+func (s *LSPSupervisor) previewLine(uriStr string, line uint32, cache map[string][]string) string {
+	abs, err := s.fs.resolvePath(uriStr)
+	if err != nil {
+		return ""
+	}
+	lines, ok := cache[abs]
+	if !ok {
+		if b, e := os.ReadFile(abs); e == nil {
+			lines = strings.Split(string(b), "\n")
+		}
+		cache[abs] = lines // cache the miss (nil) too, so a bad file isn't re-read
+	}
+	n := int(line)
+	if n < 0 || n >= len(lines) {
+		return ""
+	}
+	txt := strings.TrimSpace(lines[n])
+	if r := []rune(txt); len(r) > 200 {
+		txt = string(r[:200]) + "…"
+	}
+	return txt
 }
 
 // ideURI rewrites an absolute file:// URI from the language server into the

@@ -10,6 +10,7 @@ import { installConsoleForwarder } from '@glyph3d/core/services/orchestration/co
 import AttentionManager from '@glyph3d/core/services/interaction/AttentionManager.js';
 import EntityKeystrokeRouter from '@glyph3d/core/services/interaction/EntityKeystrokeRouter.js';
 import InteractionContext from '@glyph3d/core/services/interaction/InteractionContext.js';
+import LspNavigator from '@glyph3d/core/services/interaction/LspNavigator.js';
 import CameraDock from '@glyph3d/core/services/interaction/CameraDock.js';
 import RemoteFileSystemProvider from '@glyph3d/core/services/data/RemoteFileSystemProvider.js';
 import RemoteLspProvider from '@glyph3d/core/services/data/RemoteLspProvider.js';
@@ -329,7 +330,13 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // LSP client: present whenever the bridge is, but only functional against a
     // relay started with a project root (the relay gates lsp/* on --root).
     state.ctx.lsp = new RemoteLspProvider(bridge);
-    state.ctx.interactionContext.setLsp(state.ctx.lsp); // breadcrumb LSP row reads it
+    // LspNavigator: the presentation-agnostic def/refs model that the breadcrumb
+    // (and, later, the 2D panel + 3D peek) render. Layered on the caret model.
+    state.ctx.lspNavigator = new LspNavigator({
+      interactionContext: state.ctx.interactionContext,
+      registry: state.ctx.registry,
+      lsp: state.ctx.lsp,
+    });
 
     // Terminal OUTPUT data plane: binary frames (type 1) carry raw VT bytes → the
     // terminal's emulator (grid.writeBytes). The bridge demuxes by type byte; terminal

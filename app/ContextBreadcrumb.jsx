@@ -8,12 +8,17 @@ import { stateController } from '@glyph3d/core/services/state';
  * layer); compact but complete, tucked in a corner, collapsible, and movable —
  * deliberately a free-floating component so it can grow into a richer state
  * panel without re-homing. Position + collapsed state persist (g3d.contextHud.*).
+ *
+ * It also renders the LSP row — a SEPARATE subscription to the LspNavigator (the
+ * def/refs model for the symbol at the caret) — as its first, compact view: a
+ * launcher-grade summary of definition + references, each chip click jumping via
+ * lsp.goto. The full, previewed list is the dedicated panel's job.
  */
 
 // kind → chip accent. FOCUS pale blue (hover/selection family), AST violet
 // (the semantic family), EDIT caret yellow (CodeGrid.CARET_COLOR), KEY green
-// (live capture). Future kinds (visual, capture) add a row here and a renderer
-// below — nothing else.
+// (live capture), LSP teal (the navigator). Future kinds add a row here and a
+// renderer below — nothing else.
 const ACCENT = { focus: '#9fd2ff', ast: '#c8a9ff', edit: '#ffd84d', key: '#7fe0a0', lsp: '#6fe0c8' };
 
 const tail = (s, n = 24) => {
@@ -24,6 +29,12 @@ const tail = (s, n = 24) => {
 // Split a flattened path into its address-bar segments (drop empties so a
 // leading/trailing slash doesn't render a blank chip).
 const segmentsOf = (p) => String(p || '').split('/').filter(Boolean);
+
+// Collapse whitespace + truncate a source-line preview to fit a compact chip.
+const snippet = (s, n = 30) => {
+  const t = String(s || '').replace(/\s+/g, ' ').trim();
+  return t.length > n ? t.slice(0, n - 1) + '…' : t;
+};
 
 function chipLabel(n) {
   if (n.kind === 'edit') return `EDIT ${n.cursor.line}:${n.cursor.col}`;
@@ -39,15 +50,13 @@ const wrapStyle = {
   color: '#aeb8c6', userSelect: 'none', maxWidth: '60vw',
 };
 
-// The chip row (grip + state chips + controls) and, below it, the optional
-// address bar — a segmented view of the focused entity's full flattened path.
+// The chip row (grip + state chips + controls), the optional address bar, and
+// the optional LSP row — each a horizontal strip stacked vertically.
 const rowStyle = { display: 'flex', alignItems: 'center', gap: 4, padding: '3px 6px' };
 const addrStyle = {
   display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 3,
   padding: '3px 8px', borderTop: '1px solid #1c222c',
 };
-// LSP row: definition + reference chips for the symbol at the caret, each a
-// clickable jump. Its own row so it never crowds the scope-chain chips.
 const lspRowStyle = {
   display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 4,
   padding: '3px 8px', borderTop: '1px solid #1c222c',
@@ -56,9 +65,11 @@ const lspChip = (color) => ({
   cursor: 'pointer', whiteSpace: 'nowrap', padding: '0 5px',
   borderLeft: `2px solid ${color}`, color: '#cdd6e2',
 });
+const previewStyle = { color: '#7e8896', marginLeft: 6 };
 
 export default function ContextBreadcrumb({ client }) {
   const [nodes, setNodes] = useState([]);
+  const [lsp, setLsp] = useState(null); // LspNavigator state
   const [collapsed, setCollapsed] = useState(() => !!stateController.get('contextHud.collapsed', false));
   const [addr, setAddr] = useState(() => !!stateController.get('contextHud.addr', false)); // address bar open
   const [hoverSeg, setHoverSeg] = useState(-1); // address-bar segment under the cursor
@@ -68,16 +79,17 @@ export default function ContextBreadcrumb({ client }) {
 
   useEffect(() => {
     const ic = client?.ctx?.interactionContext;
-    if (!ic) return;
-    setNodes(ic.nodes());
-    return ic.on(setNodes);
+    const nav = client?.ctx?.lspNavigator;
+    const offs = [];
+    if (ic) { setNodes(ic.nodes()); offs.push(ic.on(setNodes)); }
+    if (nav) { setLsp(nav.state()); offs.push(nav.on(setLsp)); }
+    return () => offs.forEach((o) => o?.());
   }, [client]);
 
   if (!client) return null;
 
   // Drag by the grip: fixed-position move clamped to the viewport; position
-  // persists on release. Until first drag it anchors bottom-right above the
-  // status bar.
+  // persists on release. Until first drag it anchors bottom-center.
   const onGripDown = (e) => {
     e.preventDefault();
     const el = rootRef.current;
@@ -118,20 +130,20 @@ export default function ContextBreadcrumb({ client }) {
   // path — the same absolute focus the keyboard walk lands on, via the bus.
   const focusPath = (p) => { if (p) client?.router?.execute?.(['focus.path', p]); };
 
+  // Jump to a known LSP location (a def/ref chip) via the bus.
+  const jumpLoc = (l) => client?.router?.execute?.(
+    ['lsp.goto', l.uri, String(l.sL), String(l.sC), String(l.eL), String(l.eC)]);
+
   // Until first drag: bottom-center, the vim command-line home — clear of the
   // HUD (bottom-right) and the dock (left). A drag switches to explicit x/y.
   const place = pos
     ? { left: pos.x, top: pos.y }
     : { left: '50%', bottom: 36, transform: 'translateX(-50%)' };
-  const lsp = nodes.find((n) => n.kind === 'lsp') || null;
-  const mainNodes = lsp ? nodes.filter((n) => n.kind !== 'lsp') : nodes;
-  const innermost = mainNodes[mainNodes.length - 1];
+  const innermost = nodes[nodes.length - 1];
   const focus = nodes.find((n) => n.kind === 'focus') || null;
   const segs = focus ? segmentsOf(focus.path) : [];
   const showAddr = !collapsed && addr && segs.length > 0;
-  // Jump to a known LSP location (a def/ref chip) via the bus.
-  const jumpLoc = (l) => client?.router?.execute?.(
-    ['lsp.goto', l.uri, String(l.sL), String(l.sC), String(l.eL), String(l.eC)]);
+  const showLsp = !collapsed && lsp?.status === 'ready' && (lsp.def || lsp.refs.length > 0);
 
   return (
     <div ref={rootRef} data-g3d-context style={{ ...wrapStyle, ...place }}>
@@ -144,15 +156,15 @@ export default function ContextBreadcrumb({ client }) {
         {collapsed ? (
           <span
             onClick={toggle}
-            title={mainNodes.map(chipLabel).join(' · ') || 'no locked context'}
+            title={nodes.map(chipLabel).join(' · ') || 'no locked context'}
             style={{ cursor: 'pointer', color: innermost ? ACCENT[innermost.kind] : '#4a5468' }}
           >
-            ● {mainNodes.length}
+            ● {nodes.length}
           </span>
         ) : (
           <>
-            {mainNodes.length === 0 && <span style={{ color: '#4a5468' }}>free</span>}
-            {mainNodes.map((n, i) => (
+            {nodes.length === 0 && <span style={{ color: '#4a5468' }}>free</span>}
+            {nodes.map((n, i) => (
               <span
                 key={`${n.kind}:${n.id}:${i}`}
                 data-kind={n.kind}
@@ -201,23 +213,32 @@ export default function ContextBreadcrumb({ client }) {
           })}
         </div>
       )}
-      {!collapsed && lsp && (lsp.def || lsp.refs?.length > 0) && (
+      {showLsp && (
         <div style={lspRowStyle} data-g3d-lsp>
           <span style={{ color: '#4a5468' }} title="LSP — definition & references">⌖</span>
           {lsp.def && (
-            <span onClick={() => jumpLoc(lsp.def)} title={`definition · ${lsp.def.uri}`} style={lspChip(ACCENT.lsp)}>
-              def {lsp.def.label}
+            <span
+              onClick={() => jumpLoc(lsp.def)}
+              title={`definition\n${lsp.def.uri}\n${lsp.def.preview}`}
+              style={lspChip(ACCENT.lsp)}
+            >
+              <b style={{ color: ACCENT.lsp, fontWeight: 600 }}>def</b> {lsp.def.label}
+              {lsp.def.preview && <span style={previewStyle}>{snippet(lsp.def.preview)}</span>}
             </span>
           )}
-          {lsp.refs?.length > 0 && <span style={{ color: '#5a6573' }}>refs</span>}
-          {lsp.refs?.map((r, i) => (
-            <span key={`ref-${i}`} onClick={() => jumpLoc(r)} title={`reference · ${r.uri}`} style={lspChip(ACCENT.ast)}>
+          {lsp.refs.length > 0 && <span style={{ color: '#5a6573' }}>refs {lsp.refsTotal}</span>}
+          {lsp.refs.slice(0, 6).map((r, i) => (
+            <span
+              key={`ref-${i}`}
+              onClick={() => jumpLoc(r)}
+              title={`reference\n${r.uri}\n${r.preview}`}
+              style={lspChip(ACCENT.ast)}
+            >
               {r.label}
+              {r.preview && <span style={previewStyle}>{snippet(r.preview, 22)}</span>}
             </span>
           ))}
-          {lsp.refsTotal > lsp.refs.length && (
-            <span style={{ color: '#6a7585' }}>+{lsp.refsTotal - lsp.refs.length}</span>
-          )}
+          {lsp.refsTotal > 6 && <span style={{ color: '#6a7585' }}>+{lsp.refsTotal - 6}</span>}
         </div>
       )}
     </div>

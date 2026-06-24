@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -49,7 +50,11 @@ func TestLSPDefinition(t *testing.T) {
 	if got := locs[0].Range.Start.Line; got != 0 {
 		t.Fatalf("definition resolved to line %d, want 0 (the `function greet` decl)", got)
 	}
-	t.Logf("✓ definition → %s @ line %d char %d", locs[0].URI, locs[0].Range.Start.Line, locs[0].Range.Start.Character)
+	if !strings.Contains(locs[0].Preview, "function greet") {
+		t.Fatalf("definition preview = %q, want it to contain the source line `function greet`", locs[0].Preview)
+	}
+	t.Logf("✓ definition → %s @ line %d char %d  preview=%q",
+		locs[0].URI, locs[0].Range.Start.Line, locs[0].Range.Start.Character, locs[0].Preview)
 
 	// Readiness/empty path: a position on whitespace resolves to nothing, and
 	// must not error (empty ≠ not-found, just no symbol there).
