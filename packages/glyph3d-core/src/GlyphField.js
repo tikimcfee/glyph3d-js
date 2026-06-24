@@ -283,8 +283,11 @@ function _buildOutputNode(varyings, uniforms) {
 
         }).Else(() => {
             // ── Slug bezier-coverage branch (existing path, unchanged) ───────────
-            // Empty glyph (space / .notdef = 0 curves): discard within slug branch only.
-            Discard(vCurveCount.equal(int(0)));
+            // Empty glyph (space / .notdef = 0 curves) → no ink, so the fast path discards it…
+            // EXCEPT when it carries a background FILL (vFillAmount>0): a space inside a highlight
+            // bar must paint its cell, or the bar gaps at every whitespace. So keep empty glyphs
+            // that fill (cov stays 0 → the fill code paints pure fill), discard the rest.
+            Discard(vCurveCount.equal(int(0)).and(vFillAmount.equal(float(0))));
 
             // Pixel footprint in glyph-UV space, per axis. fwidth is the screen-space
             // derivative magnitude, so AA is resolution-independent.
