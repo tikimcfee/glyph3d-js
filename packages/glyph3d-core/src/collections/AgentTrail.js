@@ -227,7 +227,7 @@ export default class AgentTrail {
             }
             if (lane.groupId) { try { this.ctx.registry?.unregister?.(lane.groupId); } catch (_e) { /* best effort */ } }
             if (lane.box) {
-                try { this.ctx.pickingSystem?.unregister?.('grid', lane.box.mesh); } catch (_e) { /* best effort */ }
+                try { this.ctx.pickingSystem?.unregister?.('group', lane.box.mesh); } catch (_e) { /* best effort */ }
                 try { lane.box.mesh.parent?.remove(lane.box.mesh); lane.box.fill.dispose(); lane.box.edge.dispose(); } catch (_e) { /* best effort */ }
             }
             this.root.remove(lane.corridor);
@@ -282,7 +282,7 @@ export default class AgentTrail {
         const ps = this.ctx.pickingSystem;
         if (!ps) return;
         Promise.resolve(ps._tslReady).then(() => {
-            try { ps.register('grid', lane.box.mesh, lane.corridor); }
+            try { ps.register('group', lane.box.mesh, lane.corridor); }   // own channel: cards (grid) out-pick the box
             catch (e) { console.warn('[AgentTrail] group pick register failed', e); }
         });
     }

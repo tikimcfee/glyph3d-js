@@ -75,6 +75,7 @@ const DEFAULT_CHANNELS = {
     glyph:  { layer: 7, kind: 'glyph' },
     grid:   { layer: 8, kind: 'flat'  },
     handle: { layer: 9, kind: 'flat'  }, // resize grips / control surfaces — one constant id per mesh
+    group:  { layer: 10, kind: 'flat' }, // container volumes (agent-trail corridor boxes) — LOWEST pick precedence; a grid/card hover beats it
 };
 
 // ---------------------------------------------------------------------------

@@ -356,22 +356,44 @@ export function CanvasPicker() {
             } else if (handleToken) {
               hoverEntry = null;                         // same-window control (or empty grid) wins
             }
-            applyHandleHover(activeHandle, sx, sy);
-            applyHover(hoverEntry);
-            // Third channel: caret-preview on the doc being EDITED. Gated to the key-target
-            // grid (the glyph pass renders every instance) and never under a control.
-            const entry = hoverEntry;
-            const keyId = client.ctx.attentionManager?.get('key')?.id;
-            if (!entry || entry.type !== 'grid' || entry.id !== keyId) {
-              applyGlyphHover(null, null);
-              return;
-            }
+            // CONTAINER channel (corridor boxes) — LOWEST precedence. A grid/card or handle hover
+            // beats it, so over a card you select the card and the box only catches clicks in the
+            // EMPTY interior (→ drag the corridor); over empty space the box wins. The override
+            // (Alt → s.preferContainer, set in onMove) FLIPS it so the container wins even over a
+            // card — the canvas-editor "hold-a-key drags the canvas" idiom.
             ps.markDirty();
-            return ps.pickAsync('glyph', c, scene).then((gh) => {
-              const renderer = entry.grid.getRenderer?.();
-              if (s.in && gh && gh.token === renderer) applyGlyphHover(renderer, gh.slotIndex);
-              else applyGlyphHover(null, null);
-            }, () => applyGlyphHover(null, null));
+            return ps.pickAsync('group', c, scene).then(
+              (g) => (s.in ? (g?.token ?? null) : null),
+              () => null,
+            ).then((groupToken) => {
+              if (groupToken) {
+                const groupEntry = entryForGrid(client.ctx.registry, groupToken);
+                // Container is LOWEST precedence: it wins only in the EMPTY interior (no card/handle).
+                // PARKED: an Alt override to force container ≻ card even over a card plugs in here
+                // (`|| s.preferContainer`, set from a held modifier) once we work out why the held
+                // key wasn't reaching the resolve on this setup — see the picking memory.
+                if (groupEntry && !hoverEntry && !activeHandle) {
+                  hoverEntry = groupEntry;
+                  activeHandle = null;
+                }
+              }
+              applyHandleHover(activeHandle, sx, sy);
+              applyHover(hoverEntry);
+              // Glyph channel: caret-preview on the doc being EDITED. Gated to the key-target
+              // grid (the glyph pass renders every instance) and never under a control.
+              const entry = hoverEntry;
+              const keyId = client.ctx.attentionManager?.get('key')?.id;
+              if (!entry || entry.type !== 'grid' || entry.id !== keyId) {
+                applyGlyphHover(null, null);
+                return;
+              }
+              ps.markDirty();
+              return ps.pickAsync('glyph', c, scene).then((gh) => {
+                const renderer = entry.grid.getRenderer?.();
+                if (s.in && gh && gh.token === renderer) applyGlyphHover(renderer, gh.slotIndex);
+                else applyGlyphHover(null, null);
+              }, () => applyGlyphHover(null, null));
+            });
           });
         }).then(() => {
           s.pickPending = false;
