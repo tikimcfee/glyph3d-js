@@ -9,16 +9,15 @@
  *   - wheel      → dolly (move yourself toward/away from what you're looking at)
  *   - WASD/QE    → strafe / dolly / rise
  *
- * Movement scales to the distance down your forward axis to whatever you're looking
- * at (`_lookDistance()`) — but the anchor is STILL, not live (the Blender lesson).
- * pan/WASD SAMPLE that distance once, when the gesture starts, and HOLD it in
- * `_moveScale` for the stroke — so a drag or a flight keeps one feel start to finish
- * instead of morphing as you near a file. Reading a file head-on → fine + steady;
- * sweeping the void → coarse + steady. Dolly is the exception: it reads the distance
- * LIVE (a smooth approach is the right feel while zooming) and doubles as the manual
- * granularity knob. Nothing scales off the cursor or a content centroid — the
- * RTS-style refs that made the same gesture behave differently over a grid vs. empty
- * space, and a live per-frame recompute that smeared the two together, are both gone.
+ * Movement scales to the distance down your forward axis to whatever you're looking at
+ * (`_lookDistance()`, clamped to the auto-slow band by `_movementScale()`). PAN holds a
+ * STILL anchor — it SAMPLES that distance once when the drag starts and holds it for the
+ * stroke, so a drag covers consistent on-screen distance start to finish (the Blender
+ * lesson; a drag has an anchor, the thing under your cursor). WASD and dolly read it
+ * LIVE: a flight visibly slows as it nears a file and speeds back up as it clears it, and
+ * a dolly is a smooth approach while zooming. Reading a file head-on → fine; sweeping the
+ * void → coarse. Nothing scales off the cursor or a content centroid — the RTS-style refs
+ * that made the same gesture behave differently over a grid vs. empty space are gone.
  *
  * Architecture: single-drain input state machine.
  *   - Event handlers are pure state updaters — they record intent into
@@ -44,6 +43,12 @@ const CAMERA_DEFAULTS = {
     invertDragY: false,
     invertScroll: false,
     dynamicSpeed: true,
+    // Proximity auto-slow band, as MULTIPLES of the base move speed. The dynamic look
+    // distance gets clamped to [min·DEFAULT_LOOK_DIST, max·DEFAULT_LOOK_DIST] before it
+    // drives movement, so a nose-against-a-panel floors at min· (not the old ~0.01× that
+    // froze you to a crawl) and a glance into the void caps at max· (no runaway).
+    dynamicSpeedMin: 0.15,
+    dynamicSpeedMax: 8,
 };
 
 const CLICK_THRESHOLD_PX = 5;
@@ -81,6 +86,8 @@ export class ViewerCameraController {
             invertDragY:       stateController.get('camera.invertDragY', CAMERA_DEFAULTS.invertDragY),
             invertScroll:      stateController.get('camera.invertScroll', CAMERA_DEFAULTS.invertScroll),
             dynamicSpeed:      stateController.get('camera.dynamicSpeed', CAMERA_DEFAULTS.dynamicSpeed),
+            dynamicSpeedMin:   stateController.get('camera.dynamicSpeedMin', CAMERA_DEFAULTS.dynamicSpeedMin),
+            dynamicSpeedMax:   stateController.get('camera.dynamicSpeedMax', CAMERA_DEFAULTS.dynamicSpeedMax),
         };
 
         // Publicly-readable rotation state. `applyCamera` writes these into
@@ -97,16 +104,14 @@ export class ViewerCameraController {
         // Event handlers update this; applyCamera() reads it.
         this.input = this._makeInputState();
 
-        // Movement scale, the Blender-honest way: a STILL anchor, not a live one.
-        //  - _moveScale: the held scale that pan + WASD read. Sampled ONCE at the
-        //    start of a move gesture (via _lookDistance) and held for its duration,
-        //    so a stroke never morphs mid-way. Reading a file head-on → fine + steady;
-        //    sweeping open space → coarse + steady. Dolly is the exception: it samples
-        //    live (a smooth approach is what you want while zooming) and is also the
-        //    manual granularity knob.
-        //  - _wasMoving: rising-edge latch so a WASD flight samples once, on key-down.
+        // Movement scale — the proximity distance that movement reads.
+        //  - _moveScale: PAN samples it once at gesture start and HOLDS it (a drag must
+        //    cover consistent on-screen distance start to finish — a still anchor). WASD
+        //    re-samples it LIVE every frame, so a flight slows as it nears content and
+        //    speeds back up as it clears it. Dolly also reads live (a smooth approach
+        //    while zooming) and is the manual granularity knob. The last write is held
+        //    here so a pan begun right after a flight/dolly inherits the live distance.
         this._moveScale = DEFAULT_LOOK_DIST;
-        this._wasMoving = false;
 
         // camera.lock: when true, applyCamera applies NO camera transform (drag / WASD /
         // rotation / zoom frozen) — but the wheel still routes to a focused framed surface
@@ -209,7 +214,7 @@ export class ViewerCameraController {
             // Sample the move scale ONCE, here, and hold it for the whole drag — the
             // pan keeps one consistent feel from grab to release (the per-frame
             // recompute is what made it morph as the camera neared a file).
-            if (input.drag.mode === 'pan') this._moveScale = this._lookDistance();
+            if (input.drag.mode === 'pan') this._moveScale = this._movementScale();
 
             canvas.style.cursor = input.drag.mode === 'look' ? 'move' : 'grabbing';
         });
@@ -460,13 +465,16 @@ export class ViewerCameraController {
         if (keys.has('Space') || keys.has('KeyQ')) moveDir.y += 1;
         if (keys.has('KeyE')) moveDir.y -= 1;
 
-        // Rising edge: sample the scale once when a flight STARTS and hold it, so a
-        // sustained WASD sweep keeps one speed instead of decelerating as it nears
-        // content. (Falling edge clears the latch for the next flight.)
         const moving = moveDir.lengthSq() > 0;
-        if (moving && !this._wasMoving) this._moveScale = this._lookDistance();
-        this._wasMoving = moving;
         if (!moving) return;
+
+        // LIVE proximity scale, re-sampled every frame: the flight visibly DECELERATES as
+        // it nears content and re-accelerates as it clears it — the auto-slow you feel
+        // mid-flight, not only after a stop-and-restart. The floor in _movementScale keeps
+        // the approach from crawling to a halt. (Pan instead HOLDS its sample — a drag has
+        // an on-screen anchor a flight doesn't.) Held here so a pan begun right after a
+        // flight inherits the live distance.
+        this._moveScale = this._movementScale();
 
         moveDir.normalize();
         moveDir.applyQuaternion(camera.quaternion);
@@ -586,8 +594,10 @@ export class ViewerCameraController {
      * cubemap — see [[reference_camera_navigation_prior_art]]):
      *   1. `fwd`  — nearest hit of a ray straight down the view axis. Precise "what
      *      I'm aimed at" when you're pointed at something (reading head-on).
-     *   2. `near` — distance to the nearest surface AABB in ANY direction (no raycast).
-     *      Always finite, so it has no blind spot.
+     *   2. `near` — distance to the nearest surface AABB that ISN'T fully behind the eye
+     *      (any direction you could be moving into). No raycast, so no forward blind spot;
+     *      the behind-cull keeps content you've already flown past from braking you — no
+     *      reason to slow for what you're not looking at.
      * Samples EVERY framed surface (code grids AND terminals — getSurfaces, not the
      * grid-only getGrids), so flying toward a terminal slows you down exactly as flying
      * toward a file does; a terminal is content too.
@@ -616,12 +626,30 @@ export class ViewerCameraController {
         ray.origin.copy(origin);
         ray.direction.copy(forward);
         const hit = new THREE.Vector3();
+        const center = (this._lookCenter ??= new THREE.Vector3());
+        const half = (this._lookHalf ??= new THREE.Vector3());
         let fwd = Infinity;   // nearest forward hit — precise "what I'm aimed at"
-        let near = Infinity;  // nearest content in ANY direction — no blind spot
+        let near = Infinity;  // nearest content you could move into — behind-eye excluded
         for (const g of surfaces) {
             if (dockTiles?.has(g)) continue; // camera-locked chrome, not world content
             const box = g.getBounds?.();
             if (!box || box.isEmpty?.()) continue;
+
+            // Ignore surfaces fully BEHIND the eye — you're flying away from them, so they
+            // have no business braking you. AABB vs the camera plane (point = eye, normal =
+            // forward): the box's farthest reach along forward is centerProj + the extent's
+            // projection onto |forward|; ≤0 means every corner sits behind you. A box that
+            // straddles the plane (you're inside / nosing into it) still counts.
+            box.getCenter(center);
+            box.getSize(half).multiplyScalar(0.5);
+            const centerProj = (center.x - origin.x) * forward.x
+                             + (center.y - origin.y) * forward.y
+                             + (center.z - origin.z) * forward.z;
+            const reach = half.x * Math.abs(forward.x)
+                        + half.y * Math.abs(forward.y)
+                        + half.z * Math.abs(forward.z);
+            if (centerProj + reach <= 0) continue; // fully behind the eye → ignore
+
             const dn = box.distanceToPoint(origin);
             if (dn < near) near = dn;
             if (ray.intersectBox(box, hit)) {
@@ -640,6 +668,26 @@ export class ViewerCameraController {
         return Math.min(Math.max(d, MIN_LOOK_DIST), MAX_LOOK_DIST);
     }
 
+    /**
+     * The MOVEMENT scale — `_lookDistance()` clamped to the configurable auto-slow band.
+     * This, not the raw look distance, is what pan + WASD sample and hold, so the
+     * proximity slow can't run off the rails either way: a glance into the void can't
+     * launch you (ceiling) and a nose-against-a-panel can't pin you to a crawl (floor —
+     * the near-0 problem). The band is in MULTIPLES of the base move speed (it rides
+     * DEFAULT_LOOK_DIST), so min/max read straight as "× cameraSpeed": effective WASD
+     * speed = cameraSpeed · clamp(dist/DEFAULT, min, max). Dolly is deliberately NOT
+     * banded — fine zoom granularity up close is the right feel there. dynamicSpeed off
+     * → flat DEFAULT (no proximity scaling at all).
+     * @private @returns {number} move scale in world units, [min·DEFAULT, max·DEFAULT]
+     */
+    _movementScale() {
+        if (!this.settings.dynamicSpeed) return DEFAULT_LOOK_DIST;
+        const d = this._lookDistance();
+        const lo = this.settings.dynamicSpeedMin * DEFAULT_LOOK_DIST;
+        const hi = this.settings.dynamicSpeedMax * DEFAULT_LOOK_DIST;
+        return Math.min(Math.max(d, lo), hi);
+    }
+
     /** @private */
     _persistSettings() {
         const s = this.settings;
@@ -650,6 +698,8 @@ export class ViewerCameraController {
         stateController.set('camera.invertDragY', s.invertDragY);
         stateController.set('camera.invertScroll', s.invertScroll);
         stateController.set('camera.dynamicSpeed', s.dynamicSpeed);
+        stateController.set('camera.dynamicSpeedMin', s.dynamicSpeedMin);
+        stateController.set('camera.dynamicSpeedMax', s.dynamicSpeedMax);
     }
 
     teardownEventListeners() {

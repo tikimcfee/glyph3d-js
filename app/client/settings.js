@@ -25,6 +25,24 @@ export const SETTINGS = [
     type: 'number', default: 100, min: 1, max: 1000, step: 1,
     apply: (ctx, v) => ctx.cameraController?.setSpeed?.(v),
   },
+  // Proximity auto-slow: movement scales to how close the content you're heading toward
+  // is. The min/max bound that scaling (× the base move speed) so close-up doesn't crawl
+  // to ~0 and a glance at the void doesn't launch you. Off → flat speed everywhere.
+  {
+    key: 'camera.dynamicSpeed', label: 'Proximity auto-slow', group: 'Camera',
+    type: 'bool', default: true,
+    apply: (ctx, v) => { if (ctx.cameraController) ctx.cameraController.settings.dynamicSpeed = v; },
+  },
+  {
+    key: 'camera.dynamicSpeedMin', label: 'Auto-slow floor (×)', group: 'Camera',
+    type: 'number', default: 0.15, min: 0.02, max: 1, step: 0.01,
+    apply: (ctx, v) => { if (ctx.cameraController) ctx.cameraController.settings.dynamicSpeedMin = v; },
+  },
+  {
+    key: 'camera.dynamicSpeedMax', label: 'Auto-slow ceiling (×)', group: 'Camera',
+    type: 'number', default: 8, min: 1, max: 20, step: 0.5,
+    apply: (ctx, v) => { if (ctx.cameraController) ctx.cameraController.settings.dynamicSpeedMax = v; },
+  },
   {
     key: 'camera.dragSensitivity', label: 'Drag sensitivity', group: 'Camera',
     type: 'number', default: 1, min: 0.1, max: 5, step: 0.1,
