@@ -120,6 +120,11 @@ export default class AgentTrail {
 
         this.conn = new ConnectionRenderer(this.scene, { maxConnections: this.cfg.maxConnections });
         this.lanes = new Map();   // agentId -> { corridor:ZStack, seq, moments:[...], box, hueIdx }
+        // Moment cards register as a pickable 'trail.card' so they hover-highlight (the CodeGrid
+        // panel rides the 'grid' pick channel) and a click can focus the moment. Mark the type
+        // pickable BEFORE any register() — SceneRegistry only adds an entry to the pickable set if
+        // its type is already known (SceneRegistry register():68).
+        this.ctx.registry?.setPickable?.('trail.card');
         this._off = null;
         this._tmp = new THREE.Vector3();
 
@@ -149,30 +154,41 @@ export default class AgentTrail {
         // so it rides the record raw — the grid's layout system splits/lays it out, not us.
         const pullOutput = !record.target && !!record.result;
 
-        const call = this._card(`[${record.action || 'act'}]`, fmtCall(record), { gridScale: this.cfg.callScale, textColor: hue });
+        // Identity for THIS moment: both the call card and its snapshot register under the same
+        // momentId so a click on either focuses the one moment (call + snapshot together).
+        const seq = lane.seq;
+        const momentId = `trail:moment:${agentId}:${seq}`;
+        const callId = `${momentId}:call`;
+        const snapId = `${momentId}:snap`;
+        const meta = { agentId, seq, momentId, record };
+
+        const call = this._card(`[${record.action || 'act'}]`, fmtCall(record),
+            { gridScale: this.cfg.callScale, textColor: hue }, { id: callId, meta: { ...meta, kind: 'call' } });
         const children = [call];
 
-        let snapshot = null;
+        let snapshot = null, hasSnapPick = false;
         if (record.target) {
             // A snapshot is whatever the target file IS, as-of now: an image renders as a frame,
             // everything else as a text/hex card (same classifier as file.open — [[fileLoader]]).
             const kind = classifyByExtension(record.target);
             if (kind?.kind === 'image') {
-                snapshot = this._imageSnapshot(record.target, kind.format);
+                snapshot = this._imageSnapshot(record.target, kind.format);   // image picking = a follow-on (FrameGrid)
             } else {
                 snapshot = this._makeGrid(record.target, { worldScale: this.cfg.artifactWorldScale });
-                this._loadSnapshot(snapshot, record);   // ONE fetch + load of the file AS-OF now, then decorate
+                this._loadSnapshot(snapshot, record, { id: snapId, meta: { ...meta, kind: 'snap' } });   // ONE fetch + load, decorate, then register
+                hasSnapPick = true;
             }
             children.push(snapshot);
         } else if (pullOutput) {
-            snapshot = this._outputSnapshot(record);   // the command's output as a sibling grid
+            snapshot = this._outputSnapshot(record, { id: snapId, meta: { ...meta, kind: 'snap' } });   // the command's output as a sibling grid
             children.push(snapshot);
+            hasSnapPick = true;
         }
 
         const moment = new HStack({ spacing: this.cfg.railGap, children });
         lane.corridor.add(moment);
-        const tetherId = snapshot ? `tether:${agentId}:${lane.seq}` : null;
-        lane.moments.push({ moment, call, snapshot, hue, tetherId });
+        const tetherId = snapshot ? `tether:${agentId}:${seq}` : null;
+        lane.moments.push({ moment, call, snapshot, hue, tetherId, callId, snapId: hasSnapPick ? snapId : null });
         // BIND the tether to the two cards — it resolves their world positions each
         // frame, so it follows layout, scroll, and corridor drags with no re-tether.
         if (tetherId) this.conn.set(tetherId, call, snapshot, hue);
@@ -201,7 +217,12 @@ export default class AgentTrail {
         const kill = (lane) => {
             for (const e of lane.moments) {
                 if (e.tetherId) this.conn.remove(e.tetherId);
-                for (const g of [e.call, e.snapshot]) { if (g) { try { g.parent?.remove(g); g.dispose?.(); } catch (_e) { /* best effort */ } } }
+                for (const id of [e.callId, e.snapId]) { if (id) { try { this.ctx.registry?.unregister?.(id); } catch (_e) { /* best effort */ } } }
+                for (const g of [e.call, e.snapshot]) {
+                    if (!g) continue;
+                    try { this.ctx.pickingSystem?.unregister?.('grid', g._background); } catch (_e) { /* best effort */ }
+                    try { g.parent?.remove(g); g.dispose?.(); } catch (_e) { /* best effort */ }
+                }
                 try { lane.corridor.remove(e.moment); } catch (_e) { /* best effort */ }
             }
             if (lane.groupId) { try { this.ctx.registry?.unregister?.(lane.groupId); } catch (_e) { /* best effort */ } }
@@ -318,11 +339,28 @@ export default class AgentTrail {
         return new CodeGrid(this.scene, this.atlas, { name: `trail:${filename}`, showFilename: true, showBackground: true, ...opts });
     }
 
-    /** A free CodeGrid card with content; re-layouts the trail once its bounds settle. */
-    _card(filename, body, opts) {
+    /** A free CodeGrid card with content; re-layouts once its bounds settle, and (if `pick` given)
+     *  registers it as a pickable moment card AFTER load (so its panel exists — see _wireCardPick). */
+    _card(filename, body, opts, pick) {
         const grid = this._makeGrid(filename, opts);
-        grid.loadFileAsync(filename, body).then(() => this._relayout()).catch(() => { /* render best-effort */ });
+        grid.loadFileAsync(filename, body)
+            .then(() => { if (pick) this._wireCardPick(grid, pick.id, pick.meta); this._relayout(); })
+            .catch(() => { /* render best-effort */ });
         return grid;
+    }
+
+    /**
+     * Register a LOADED moment card as a pickable 'trail.card' registry entry. Its background panel
+     * rides the 'grid' pick channel (FramedGlyphField.setPickingSystem, wired by CanvasInteraction's
+     * registry-change sweep), so getIdByGrid resolves it → hover-highlight + click-to-focus-the-moment.
+     * MUST run after load: _background (the pick panel) is created lazily in _updateBackground, so an
+     * earlier register would let the sweep mark the grid wired before the panel exists.
+     * @private
+     */
+    _wireCardPick(grid, id, meta) {
+        if (!grid || typeof grid.setPickingSystem !== 'function') return;   // e.g. image FrameGrid — skip for now
+        try { this.ctx.registry?.register?.(id, grid, { type: 'trail.card', ...meta }); }
+        catch (e) { console.warn('[AgentTrail] card pick register failed', e); }
     }
 
     /**
@@ -331,18 +369,20 @@ export default class AgentTrail {
      * EPHEMERAL (no path to re-read), so it comes straight from the record. Ships RAW — the grid's
      * layout system does the line-splitting and any framing; nothing is truncated here.
      */
-    _outputSnapshot(record) {
+    _outputSnapshot(record, pick) {
         // The output ONLY — the command lives on the call card, never echoed here (one home each).
-        return this._card('output', String(record.result ?? ''), { worldScale: this.cfg.artifactWorldScale });
+        return this._card('output', String(record.result ?? ''), { worldScale: this.cfg.artifactWorldScale }, pick);
     }
 
-    /** Per-action snapshot: the file's content AS-OF this moment (loaded ONCE), with touched lines lit up. */
-    _loadSnapshot(grid, record) {
+    /** Per-action snapshot: the file's content AS-OF this moment (loaded ONCE), with touched lines lit
+     *  up; registers as a pickable moment card after load (if `pick` given). */
+    _loadSnapshot(grid, record, pick) {
         const path = record.target;
+        const wire = () => { if (pick) this._wireCardPick(grid, pick.id, pick.meta); };
         Promise.resolve(this.ctx.fileProvider?.getFile?.(path))
             .then((content) => grid.loadFileAsync(path, String(content ?? '')))
-            .then(() => { this._decorateSnapshot(grid, record); this._relayout(); })
-            .catch(() => grid.loadFileAsync(path, '(could not load)').then(() => this._relayout()).catch(() => {}));
+            .then(() => { this._decorateSnapshot(grid, record); wire(); this._relayout(); })
+            .catch(() => grid.loadFileAsync(path, '(could not load)').then(() => { wire(); this._relayout(); }).catch(() => {}));
     }
 
     /**
