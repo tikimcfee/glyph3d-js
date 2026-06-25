@@ -22,6 +22,9 @@
  *        Entries that are null, lack getBounds, or whose bounds are empty are skipped.
  * @param {import('three').Box3} target  reused output box (caller owns it) — emptied first.
  * @param {object} [opts]
+ * @param {Set<object>} [opts.skip]  objects to exclude from the union (identity `Set.has`) — e.g.
+ *        camera-locked dock chrome, which rides a fixed offset ahead of the eye, so counting it
+ *        would drag a camera-CONSTRAINT box around with the camera. Null/absent → nothing skipped.
  * @param {import('three').Vector3} [opts.expandToInclude]  also stretch the box to cover this
  *        point (e.g. the camera eye, so the minimap keeps the cone in frame). Do NOT pass it
  *        when the box is a camera CONSTRAINT — including the eye would defeat the leash.
@@ -29,7 +32,9 @@
  */
 export function worldBounds(objects, target, opts = {}) {
     target.makeEmpty();
+    const skip = opts.skip;
     for (const o of objects) {
+        if (skip && skip.has(o)) continue;
         const b = o?.getBounds?.();
         if (b && !(b.isEmpty?.())) target.union(b);
     }

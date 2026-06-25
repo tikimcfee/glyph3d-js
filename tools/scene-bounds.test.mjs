@@ -57,5 +57,19 @@ ok(worldBounds([surf(0, 0, 0, 5)], T()).max.x === 5, 'no expandToInclude → con
   ok(worldBounds([surf(0, 0, 0)], t) === t, 'returns the passed-in target');
 }
 
+// ── 8. opts.skip excludes objects by identity (e.g. camera-locked dock chrome) ───────
+{
+  const tile = surf(500, 0, 0, 5);                       // a far box we want left out of the union
+  const content = surf(0, 0, 0, 5);
+  const b = worldBounds([content, tile], T(), { skip: new Set([tile]) });
+  ok(b.min.x === -5 && b.max.x === 5, 'opts.skip drops skipped objects (the dock tile never widens the extent)');
+}
+
+// ── 9. a null/absent skip set excludes nothing ───────────────────────────────────────
+{
+  const b = worldBounds([surf(0, 0, 0, 5), surf(500, 0, 0, 5)], T(), { skip: null });
+  ok(b.max.x === 505, 'skip:null → nothing excluded (unions everything)');
+}
+
 console.log(`\nscene-bounds: ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

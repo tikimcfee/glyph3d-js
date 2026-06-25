@@ -35,6 +35,7 @@
 import { getCanvasViewportSize } from '../../core/canvasSize.js';
 import { stateController } from '../state/StateController.js';
 import { zDistanceForFit, worldPerPixel, tweenPose } from '../spatial/spatialMath.js';
+import { worldBounds } from '../spatial/sceneBounds.js';
 
 const CAMERA_DEFAULTS = {
     cameraSpeed: 500,
@@ -62,6 +63,18 @@ const CAMERA_DEFAULTS = {
     dynamicFarDist: 800,
     dynamicReleaseDist: 40,
     dynamicSpeedSmoothing: 0.12,
+    // Soft bounds — a gentle leash so a dropped frame (a dev hot-reload stalls, dt balloons,
+    // one WASD step flings you miles) can't strand the camera in the void with the content out
+    // of sight. The content's world AABB padded by `softBoundsPadding` × the world's max
+    // dimension is the FREE zone — inside it you fly unhindered. Stray outside AND let go of the
+    // controls and a spring (`softBoundsReturn` seconds) eases you back to the nearest edge; it
+    // never fights an active drive, so a deliberate pull-back-for-overview still works. A hard
+    // wall at `softBoundsHardCap` × the world size is always on (even mid-drive) so nothing can
+    // launch you to infinity. Keep in lockstep with the settings-schema defaults (app/client/settings.js).
+    softBounds: true,
+    softBoundsPadding: 1.0,
+    softBoundsHardCap: 4.0,
+    softBoundsReturn: 0.35,
 };
 
 const CLICK_THRESHOLD_PX = 5;
@@ -77,6 +90,15 @@ const MAX_LOOK_DIST = 2000;
 // right/up axes. A single thin ray threads through gaps to a far hit and misses near
 // content just off the view axis that you're actually flying toward; the cone catches it.
 const CONE_TAN = 0.25;   // tan of the cone half-angle (~14°)
+
+// Soft-bounds scale floor (world units): the world's max dimension is clamped up to this before
+// the leash margins are derived from it, so a tiny or near-empty world still leaves a sane amount
+// of room — a single small file shouldn't leash the camera to its face.
+const MIN_WORLD_EXTENT = 500;
+// Soft-bounds settle deadband (world units): an exp glide is asymptotic, so once the spring is
+// within this of the boundary, snap exactly onto it and stop — otherwise the sub-unit residual
+// would re-fire the move-save trigger every idle frame.
+const SOFT_BOUNDS_SETTLE = 0.5;
 
 // The keys that drive the camera (WASD pan, Q/E/Space vertical). A fly (flyTo)
 // is cancelled when the user "grabs control" — but only via THESE keys, not any
@@ -110,6 +132,10 @@ export class ViewerCameraController {
             dynamicFarDist:    stateController.get('camera.dynamicFarDist', CAMERA_DEFAULTS.dynamicFarDist),
             dynamicReleaseDist: stateController.get('camera.dynamicReleaseDist', CAMERA_DEFAULTS.dynamicReleaseDist),
             dynamicSpeedSmoothing: stateController.get('camera.dynamicSpeedSmoothing', CAMERA_DEFAULTS.dynamicSpeedSmoothing),
+            softBounds:        stateController.get('camera.softBounds', CAMERA_DEFAULTS.softBounds),
+            softBoundsPadding: stateController.get('camera.softBoundsPadding', CAMERA_DEFAULTS.softBoundsPadding),
+            softBoundsHardCap: stateController.get('camera.softBoundsHardCap', CAMERA_DEFAULTS.softBoundsHardCap),
+            softBoundsReturn:  stateController.get('camera.softBoundsReturn', CAMERA_DEFAULTS.softBoundsReturn),
         };
 
         // Publicly-readable rotation state. `applyCamera` writes these into
@@ -351,10 +377,14 @@ export class ViewerCameraController {
         // A camera fly (flyTo) owns the frame while it runs — UNLESS the user grabs control
         // (drag / wheel / WASD), which cancels it instantly so the fly never traps the view.
         if (this._tween && this._stepTween(deltaTime)) { this._notifyMoved(bx, by, bz, bp, byaw); return; }
+        // Did the user drive THIS frame? Capture the wheel intent before _applyWheel drains it
+        // (drag.active and held keys persist across frames; wheel.dy is zeroed by the drain).
+        const drovewheel = this.input.wheel.dy !== 0;
         this._applyDrag();
         this._applyWheel();
         this._applyKeyboardMotion(deltaTime);
         this._applyRotation();
+        this._applySoftBounds(deltaTime, drovewheel);
         this._notifyMoved(bx, by, bz, bp, byaw);
     }
 
@@ -529,6 +559,61 @@ export class ViewerCameraController {
         const q = new THREE.Quaternion();
         q.setFromEuler(new THREE.Euler(this.pitch, this.yaw, 0, 'YXZ'));
         this.ctx.camera.quaternion.copy(q);
+    }
+
+    /**
+     * Soft bounds — keep the fly camera from getting lost in the void. The content's world AABB
+     * (the shared `worldBounds` spine, dock chrome excluded) padded by `softBoundsPadding` × the
+     * world's max dimension is the FREE zone — inside it nothing happens. Outside it, and only
+     * when you're NOT actively driving, a frame-rate-independent spring (`softBoundsReturn`
+     * seconds) eases the eye back to the nearest point on that padded box: a fling that overshoots
+     * glides home the moment you let go, while a deliberate pull-back for an overview is never
+     * fought. A HARD wall at `softBoundsHardCap` × the world size is clamped every frame — even
+     * mid-drive — so a dropped-frame step (a huge dt during a dev hot-reload) can't strand the
+     * camera in orbit. No content → no leash. Never runs during a fly or while locked (those
+     * paths return from applyCamera before reaching here).
+     * @private
+     * @param {number} dt seconds since last frame
+     * @param {boolean} drovewheel whether the wheel dollied this frame (drained before this runs)
+     */
+    _applySoftBounds(dt, drovewheel) {
+        const s = this.settings;
+        if (!s.softBounds) return;
+        const surfaces = this.ctx.getSurfaces?.() || this.ctx.getGrids?.() || [];
+        if (!surfaces.length) return;
+
+        const THREE = this.THREE;
+        // The content extent — the shared world-bounds spine. Dock tiles ride a fixed offset
+        // ahead of the eye, so counting them would drag the leash box around with the camera;
+        // skip them (the same exclusion the look-distance scan makes).
+        const box = worldBounds(surfaces, this._softBox ??= new THREE.Box3(), { skip: this.ctx.dockTiles ?? null });
+        if (box.isEmpty()) return;
+
+        // Scale the margins off the world's MAX dimension (floored), not per-axis size: planar
+        // content has ~zero depth, yet you still need room to pull BACK off the plane to see it.
+        const size = box.getSize(this._softSize ??= new THREE.Vector3());
+        const extent = Math.max(size.x, size.y, size.z, MIN_WORLD_EXTENT);
+        const eye = this.ctx.camera.position;
+
+        // Hard cap FIRST and ALWAYS: an absolute wall the eye cannot cross, even while driving —
+        // the dropped-frame backstop. Forced ≥ the soft pad so the two can never invert.
+        const capScale = Math.max(s.softBoundsHardCap, s.softBoundsPadding);
+        const cap = (this._softCapBox ??= new THREE.Box3()).copy(box).expandByScalar(extent * capScale);
+        cap.clampPoint(eye, eye);   // in place; a no-op when already inside
+
+        // Soft spring: idle only. A held drive (drag / wheel / WASD) is an intentional move — the
+        // leash waits for you to let go, then eases you home, so an overview pull-back isn't fought.
+        if (this.input.drag.active || drovewheel || anyFlightKey(this.input.keys)) return;
+
+        const soft = (this._softPadBox ??= new THREE.Box3()).copy(box).expandByScalar(extent * s.softBoundsPadding);
+        const nearest = soft.clampPoint(eye, this._softNearest ??= new THREE.Vector3());
+        const gap = eye.distanceTo(nearest);
+        if (gap <= SOFT_BOUNDS_SETTLE) {            // inside, on the face, or within the deadband
+            if (gap > 0) eye.copy(nearest);         // settle exactly so the move-save trigger goes quiet
+            return;
+        }
+        const tau = s.softBoundsReturn;
+        eye.lerp(nearest, tau > 0 ? 1 - Math.exp(-dt / tau) : 1);   // frame-rate-independent ease; 0 = instant
     }
 
     /**
@@ -780,6 +865,10 @@ export class ViewerCameraController {
         stateController.set('camera.dynamicFarDist', s.dynamicFarDist);
         stateController.set('camera.dynamicReleaseDist', s.dynamicReleaseDist);
         stateController.set('camera.dynamicSpeedSmoothing', s.dynamicSpeedSmoothing);
+        stateController.set('camera.softBounds', s.softBounds);
+        stateController.set('camera.softBoundsPadding', s.softBoundsPadding);
+        stateController.set('camera.softBoundsHardCap', s.softBoundsHardCap);
+        stateController.set('camera.softBoundsReturn', s.softBoundsReturn);
     }
 
     teardownEventListeners() {

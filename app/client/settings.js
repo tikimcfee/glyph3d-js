@@ -67,6 +67,30 @@ export const SETTINGS = [
     type: 'number', default: 0.12, min: 0, max: 0.6, step: 0.01,
     apply: (ctx, v) => { if (ctx.cameraController) ctx.cameraController.settings.dynamicSpeedSmoothing = v; },
   },
+  // Soft bounds — a gentle anti-lost leash. The content's world box, padded by 'room' × the world
+  // size, is the free zone; stray past it and — once you let go of the controls — a spring eases
+  // you back over 'return' seconds (it never fights an active drive). A hard wall at 'hard wall' ×
+  // the world size is always on, so a dropped frame can't fling the camera into the void. Off → free flight.
+  {
+    key: 'camera.softBounds', label: 'Soft bounds (anti-lost)', group: 'Camera',
+    type: 'bool', default: true,
+    apply: (ctx, v) => { if (ctx.cameraController) ctx.cameraController.settings.softBounds = v; },
+  },
+  {
+    key: 'camera.softBoundsPadding', label: 'Soft bounds room (× world)', group: 'Camera',
+    type: 'number', default: 1, min: 0.25, max: 5, step: 0.25,
+    apply: (ctx, v) => { if (ctx.cameraController) ctx.cameraController.settings.softBoundsPadding = v; },
+  },
+  {
+    key: 'camera.softBoundsHardCap', label: 'Soft bounds hard wall (× world)', group: 'Camera',
+    type: 'number', default: 4, min: 1.5, max: 20, step: 0.5,
+    apply: (ctx, v) => { if (ctx.cameraController) ctx.cameraController.settings.softBoundsHardCap = v; },
+  },
+  {
+    key: 'camera.softBoundsReturn', label: 'Soft bounds return (s)', group: 'Camera',
+    type: 'number', default: 0.35, min: 0, max: 2, step: 0.05,
+    apply: (ctx, v) => { if (ctx.cameraController) ctx.cameraController.settings.softBoundsReturn = v; },
+  },
   {
     key: 'camera.dragSensitivity', label: 'Drag sensitivity', group: 'Camera',
     type: 'number', default: 1, min: 0.1, max: 5, step: 0.1,
