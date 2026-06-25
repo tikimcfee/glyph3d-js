@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useReducer, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import * as THREE from 'three/webgpu';
 import { useGlyphEngine, GlyphCanvas, ViewerCamera, SceneEnvironment, Minimap } from '@glyph3d/r3f';
@@ -79,6 +79,9 @@ function App() {
   const [dockW, setDockW] = useState(320);   // resizable sidebar width (px)
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [showMinimap, setShowMinimap] = useState(() => getSetting('view.minimap'));
+  const [, forceSettings] = useReducer((x) => x + 1, 0);   // re-read live settings on a change
+  // Settings → number (color strings '#rrggbb' or numbers both → hex int that SceneEnvironment wants).
+  const envHex = (key) => new THREE.Color(getSetting(key)).getHex();
 
   // ⌘K / Ctrl-K summons (and toggles) the command palette — the classic shortcut.
   // Capture phase + a modifier keeps it clear of the camera/edit keystroke paths.
@@ -105,7 +108,7 @@ function App() {
   // fires a `state-changed` event we re-read here. Unmounting cleanly returns the render
   // loop to r3f's auto-render; mounting hands it to <Minimap>'s scissored second pass.
   useEffect(() => {
-    const sync = () => setShowMinimap(getSetting('view.minimap'));
+    const sync = () => { setShowMinimap(getSetting('view.minimap')); forceSettings(); };
     window.addEventListener('state-changed', sync);
     return () => window.removeEventListener('state-changed', sync);
   }, []);
@@ -145,7 +148,16 @@ function App() {
               {/* Orientation landmarks for the fly camera (ground grid + gradient
                   skydome). On the default layer + unregistered, so picking, culling,
                   and the camera's look-distance never see them. */}
-              <SceneEnvironment />
+              <SceneEnvironment
+                skyHorizon={envHex('env.skyHorizon')}
+                skyZenith={envHex('env.skyZenith')}
+                lineColor={envHex('env.gridColor')}
+                xAxisColor={envHex('env.xAxisColor')}
+                zAxisColor={envHex('env.zAxisColor')}
+                minorCell={getSetting('env.minorCell')}
+                majorCell={getSetting('env.majorCell')}
+                fadeFar={getSetting('env.fadeFar')}
+              />
               {/* 3D overview HUD — schematic boxes (per surface bounds) + the camera as a
                   moving frustum-cone, rendered as a scissored second pass. Mounts off the
                   view.minimap setting (toolbar button / Settings / `view.minimap` verb);

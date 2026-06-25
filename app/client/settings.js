@@ -83,6 +83,19 @@ export const SETTINGS = [
     key: 'view.minimap', label: 'Minimap overview', group: 'View',
     type: 'bool', default: true,
   },
+  // Environment — the world: the gradient sky + the infinite grid floor. No live apply():
+  // main.jsx reads these and passes them to <SceneEnvironment>, which rebuilds on the
+  // state-changed event. Keep the grid LIGHTER than the sky (the value-range rule — that's
+  // what makes the floor read instead of whispering into the void). Defaults mirror the
+  // component's own defaults.
+  { key: 'env.skyHorizon', label: 'Sky horizon', group: 'Environment', type: 'color', default: '#343a45' },
+  { key: 'env.skyZenith', label: 'Sky top', group: 'Environment', type: 'color', default: '#191c24' },
+  { key: 'env.gridColor', label: 'Grid lines', group: 'Environment', type: 'color', default: '#5b6478' },
+  { key: 'env.xAxisColor', label: 'X axis (red)', group: 'Environment', type: 'color', default: '#e0556a' },
+  { key: 'env.zAxisColor', label: 'Z axis (blue)', group: 'Environment', type: 'color', default: '#4a86d8' },
+  { key: 'env.minorCell', label: 'Grid cell size', group: 'Environment', type: 'number', default: 200, min: 10, max: 2000, step: 10 },
+  { key: 'env.majorCell', label: 'Major cell size', group: 'Environment', type: 'number', default: 2000, min: 100, max: 20000, step: 100 },
+  { key: 'env.fadeFar', label: 'Grid extent (fade)', group: 'Environment', type: 'number', default: 7000, min: 500, max: 30000, step: 500 },
   {
     key: 'atlas.fontSize', label: 'Font size (px)', group: 'Display',
     type: 'number', default: 48, min: 16, max: 96, step: 1, reload: true,

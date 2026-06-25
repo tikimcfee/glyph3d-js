@@ -1,109 +1,121 @@
 import { useEffect, useRef } from 'react';
 import { useThree, useFrame } from '@react-three/fiber';
 import * as THREE from 'three/webgpu';
+import {
+  Fn, positionWorld, cameraPosition, fract, fwidth, abs, min, max, float,
+  color as tslColor, smoothstep as tslSmoothstep, length as tslLength, mix as tslMix,
+} from 'three/tsl';
 
 /**
- * <SceneEnvironment> — spatial-orientation landmarks for the fly camera.
+ * <SceneEnvironment> — the world: a present, lit-feeling ground like a real 3D editor, NOT a
+ * whispered grid on a black void. The lesson learned the hard way: RAISE THE VALUE RANGE.
+ * Blender's viewport is mid-grey (~#3d3d3d) with a grid that's LIGHTER than the background;
+ * we were near-black on near-black, so nothing read.
  *
- * A fly camera in a sparse scene is easy to get lost in: rotate too hard and the view
- * is featureless void with nothing to recover "down" or "where am I" against. This adds
- * the two canonical aids (cf. Blender's grid floor): an infinite GROUND GRID and a
- * subtle gradient SKYDOME.
+ * Two pieces:
+ *   - a gradient SKYDOME (a camera-riding mesh, with raised mid-grey values) — done as a mesh,
+ *     not scene.background/backgroundNode, because the GPU pick pass needs scene.background null.
+ *   - an INFINITE GRID done the real way: a TSL fragment grid off worldspace position with
+ *     fwidth() constant-pixel-width anti-aliased lines, minor + major scales, saturated red-X /
+ *     blue-Z origin axes, and a distance fade to the horizon. (A GridHelper is the fallback if
+ *     the TSL build ever throws, so a shader hiccup can't blank the scene.)
  *
- * Both are deliberately invisible to everything but the eye:
- *   - DEFAULT layer (0) → the GPU picking pass (which isolates to its own layers) never
- *     renders them, so they can't be hovered/clicked.
- *   - NOT registered grids → the frustum culler and the camera's look-distance raycast
- *     (which only sees registry grids) ignore them, so the floor never becomes the
- *     "nearest content" the camera scales movement to.
- *   - The sky is a MESH, not `scene.background` — a set background would bleed into the
- *     pick target as a stray id (a known WebGPU/TSL gotcha). Vertex-color gradient, so
- *     no shader/NodeMaterial is needed.
+ * Both ride/recenter on the camera but stay WORLD-LOCKED in pattern (the grid is computed from
+ * positionWorld, so moving the plane only provides coverage — the lines don't slide). On the
+ * DEFAULT layer + unregistered, so the pick pass, the culler, and the look-distance ignore them.
  *
- * The grid re-centers under the camera each frame, snapped to its own spacing, so it
- * reads as infinite without sliding; the sky rides the camera so it's always "far."
- *
- * Lighting note: the glyph/line materials are emissive/unlit, so THREE lights would be
- * a no-op here — the skydome's gradient IS the "lit environment" feel, for free.
- *
- * @param {object} [props]
- * @param {number} [props.groundY=0]   world Y of the ground plane (the fixed world floor;
- *                                     content is positioned to rest above it, never the reverse)
- * @param {number} [props.size=4000]      ground grid extent in world units
- * @param {number} [props.divisions=80]   cells across (spacing = size/divisions)
- * @param {number} [props.lineColor=0x161b26]   minor grid line color
- * @param {number} [props.axisColor=0x2a3550]   center cross-line color
- * @param {number} [props.opacity=0.5]    grid line opacity (quiet by default)
- * @param {number} [props.skyTop=0x05070b]      skydome color at the zenith
- * @param {number} [props.skyBottom=0x0c1018]   skydome color at the horizon/nadir
+ * Next layer (not here): a hemisphere/key light on a lit ground + a contact shadow so the
+ * content visibly SITS on the floor (the Tinkercad effect). Content is emissive, so that's
+ * mostly about the ground + shadow, not the panels.
  */
 export default function SceneEnvironment({
   groundY = 0,
-  size = 4000,
-  divisions = 80,
-  lineColor = 0x161b26,
-  axisColor = 0x2a3550,
-  opacity = 0.5,
-  skyTop = 0x05070b,
-  skyBottom = 0x0c1018,
+  skyRadius = 9000,
+  skyHorizon = 0x343a45,   // raised mid-grey-blue — the present "lit" floor of the value range
+  skyZenith = 0x191c24,
+  skyNadir = 0x0d0e12,
+  gridSize = 16000,
+  minorCell = 200,
+  majorCell = 2000,
+  lineColor = 0x5b6478,    // LIGHTER than the sky horizon (the whole point)
+  xAxisColor = 0xe0556a,   // red X axis
+  zAxisColor = 0x4a86d8,   // blue Z axis
+  fadeNear = 600,
+  fadeFar = 7000,
 } = {}) {
   const { scene, camera } = useThree();
-  const gridRef = useRef(null);
-  const skyRef = useRef(null);
-  const spacing = size / divisions;
+  const refs = useRef(null);
 
   useEffect(() => {
-    // --- ground grid -------------------------------------------------------
-    const grid = new THREE.GridHelper(size, divisions, axisColor, lineColor);
-    grid.position.y = groundY;
-    grid.renderOrder = -100;          // behind content (backdrops −10, grid bg −1)
-    grid.material.transparent = true;
-    grid.material.opacity = opacity;
-    grid.material.depthWrite = false; // a faint reference — never occludes a file
-    scene.add(grid);
-    gridRef.current = grid;
+    const objs = [];
 
-    // --- gradient skydome (vertex colors → no shader, no scene.background) --
-    const geo = new THREE.SphereGeometry(8000, 24, 16);
-    const top = new THREE.Color(skyTop);
-    const bottom = new THREE.Color(skyBottom);
-    const pos = geo.attributes.position;
-    const colors = new Float32Array(pos.count * 3);
-    const c = new THREE.Color();
-    for (let i = 0; i < pos.count; i++) {
-      const t = (pos.getY(i) / 8000 + 1) / 2;   // 0 at nadir → 1 at zenith
-      c.copy(bottom).lerp(top, t);
-      colors[i * 3] = c.r; colors[i * 3 + 1] = c.g; colors[i * 3 + 2] = c.b;
+    // --- gradient skydome (mesh → pick-pass-safe; raised value range so it actually reads) ---
+    const skyGeo = new THREE.SphereGeometry(skyRadius, 32, 24);
+    {
+      const hz = new THREE.Color(skyHorizon), zn = new THREE.Color(skyZenith), nd = new THREE.Color(skyNadir);
+      const pos = skyGeo.attributes.position, col = new Float32Array(pos.count * 3), c = new THREE.Color();
+      for (let i = 0; i < pos.count; i++) {
+        const t = pos.getY(i) / skyRadius;                 // -1 (nadir) → +1 (zenith)
+        if (t >= 0) c.copy(hz).lerp(zn, hermite(t)); else c.copy(hz).lerp(nd, hermite(-t));
+        col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b;
+      }
+      skyGeo.setAttribute('color', new THREE.BufferAttribute(col, 3));
     }
-    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-    const sky = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
-      vertexColors: true,
-      side: THREE.BackSide,   // seen from inside
-      depthWrite: false,
-      fog: false,
+    const sky = new THREE.Mesh(skyGeo, new THREE.MeshBasicMaterial({
+      vertexColors: true, side: THREE.BackSide, depthWrite: false, fog: false,
     }));
-    sky.renderOrder = -200;   // behind even the grid
-    scene.add(sky);
-    skyRef.current = sky;
+    sky.renderOrder = -1000;
+    scene.add(sky); objs.push(sky);
 
-    return () => {
-      scene.remove(grid); grid.geometry.dispose(); grid.material.dispose();
-      scene.remove(sky); sky.geometry.dispose(); sky.material.dispose();
-      gridRef.current = skyRef.current = null;
-    };
-  }, [scene, groundY, size, divisions, lineColor, axisColor, opacity, skyTop, skyBottom]);
+    // --- infinite grid (TSL; GridHelper fallback if the node build throws) ---
+    let grid, gridFollows = false;
+    try {
+      const cellGrid = Fn(([cell]) => {
+        const r = positionWorld.xz.div(cell);
+        const g = abs(fract(r.sub(0.5)).sub(0.5)).div(fwidth(r));   // distance-to-line ÷ px-derivative
+        return float(1).sub(min(min(g.x, g.y), float(1)));
+      });
+      const minor = cellGrid(float(minorCell));
+      const major = cellGrid(float(majorCell));
+      const dist = tslLength(positionWorld.xz.sub(cameraPosition.xz));
+      const fade = float(1).sub(tslSmoothstep(float(fadeNear), float(fadeFar), dist));
+      const axisW = fwidth(positionWorld.xz).mul(1.5);
+      const xAxis = tslSmoothstep(axisW.y, float(0), abs(positionWorld.z));   // z≈0 → red line along X
+      const zAxis = tslSmoothstep(axisW.x, float(0), abs(positionWorld.x));   // x≈0 → blue line along Z
+      const lines = max(minor.mul(0.5), major);                              // major dominates, minor at half
+      let rgb = tslMix(tslColor(lineColor), tslColor(xAxisColor), xAxis);
+      rgb = tslMix(rgb, tslColor(zAxisColor), zAxis);
+      const mat = new THREE.MeshBasicNodeMaterial();
+      mat.colorNode = rgb;
+      mat.opacityNode = max(lines, max(xAxis, zAxis)).mul(fade);
+      mat.transparent = true; mat.depthWrite = false;
+      grid = new THREE.Mesh(new THREE.PlaneGeometry(gridSize, gridSize).rotateX(-Math.PI / 2), mat);
+      gridFollows = true;   // shader is world-locked → safe to recenter the plane for coverage
+    } catch (err) {
+      console.warn('[SceneEnvironment] TSL grid build failed, using GridHelper fallback:', err);
+      grid = new THREE.GridHelper(gridSize, Math.max(2, Math.round(gridSize / minorCell)), lineColor, lineColor);
+      grid.material.transparent = true; grid.material.opacity = 0.7; grid.material.depthWrite = false;
+    }
+    grid.position.y = groundY;
+    grid.renderOrder = -100;
+    scene.add(grid); objs.push(grid);
+
+    refs.current = { sky, grid, gridFollows };
+    return () => { objs.forEach(o => { scene.remove(o); o.geometry.dispose(); o.material.dispose(); }); refs.current = null; };
+  }, [scene, groundY, skyRadius, skyHorizon, skyZenith, skyNadir, gridSize, minorCell, majorCell, lineColor, xAxisColor, zAxisColor, fadeNear, fadeFar]);
 
   useFrame(() => {
-    const grid = gridRef.current;
-    const sky = skyRef.current;
-    if (grid) {
-      // Re-center under the camera, snapped to the cell size → reads as infinite,
-      // no visible sliding of the lines as you move.
-      grid.position.x = Math.round(camera.position.x / spacing) * spacing;
-      grid.position.z = Math.round(camera.position.z / spacing) * spacing;
+    const r = refs.current;
+    if (!r) return;
+    r.sky.position.copy(camera.position);          // the sky is always around you
+    if (r.gridFollows) {                            // shader grid: recenter for coverage (pattern stays world-locked)
+      r.grid.position.x = camera.position.x;
+      r.grid.position.z = camera.position.z;
     }
-    if (sky) sky.position.copy(camera.position); // always "infinitely far"
   });
 
   return null;
 }
+
+/** Hermite smoothstep, clamped 0..1. */
+function hermite(x) { const t = Math.min(Math.max(x, 0), 1); return t * t * (3 - 2 * t); }
