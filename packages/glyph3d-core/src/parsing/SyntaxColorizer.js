@@ -25,7 +25,7 @@
  */
 
 import { detectLanguage } from './languageRegistry.js';
-import { parseDocument } from './TreeSitterEngine.js';
+import { parseDocument, parseStructureSync } from './TreeSitterEngine.js';
 import { resolveScopeColor, FOREGROUND } from './syntaxTheme.js';
 import { structureSpecFor } from './semanticKinds.js';
 import SemanticModel from './SemanticModel.js';
@@ -165,22 +165,56 @@ export async function buildGridSemantics(grid) {
         const spec = structureSpecFor(descriptor.key);  // labels the full named-node tree
         const { structure } = await parseDocument(text, descriptor, spec, { captures: false });
         if (!structure) return null;
-
-        // UTF-16 → codepoint columns, so the model shares the glyph-slot space
-        // (col == slot offset) and resolves to slots through the layout with no
-        // further conversion.
-        const toCp = makeColConverter(lines);
-        const normalizeCols = (nodes) => {
-            for (const node of nodes) {
-                node.start.col = toCp(node.start.line, lines[node.start.line] ?? '', node.start.col);
-                node.end.col = toCp(node.end.line, lines[node.end.line] ?? '', node.end.col);
-                if (node.children.length) normalizeCols(node.children);
-            }
-        };
-        normalizeCols(structure);
-        return new SemanticModel(structure);
+        return structureToModel(structure, lines);
     } catch (e) {
         console.warn('[tree-sitter] buildGridSemantics failed:', e?.message ?? e);
         return null;
     }
+}
+
+/**
+ * Synchronous SemanticModel build — same product as buildGridSemantics, but only when
+ * the tree-sitter engine + this grammar are already warm (parseStructureSync returns the
+ * structure with no await; null when cold). Returns the model, or null to defer to the
+ * async path. An arranged grid is always warm (structure.grid built the model), so an
+ * edit re-derives its arrangement within the same fold — no stale-semantics flicker.
+ * @param {import('../collections/CodeGrid.js').default} grid
+ * @returns {SemanticModel|null}
+ */
+export function buildGridSemanticsSync(grid) {
+    try {
+        const src = readableSource(grid);
+        if (!src) return null;
+        const { descriptor, text, lines } = src;
+        const spec = structureSpecFor(descriptor.key);
+        const structure = parseStructureSync(text, descriptor, spec);
+        if (!structure) return null;                     // cold engine/grammar → caller awaits
+        return structureToModel(structure, lines);
+    } catch (e) {
+        console.warn('[tree-sitter] buildGridSemanticsSync failed:', e?.message ?? e);
+        return null;
+    }
+}
+
+/**
+ * Shared post-processing for both semantic builders: convert the parse's UTF-16 columns
+ * to codepoint columns (so the model shares the glyph-slot space — col == slot offset,
+ * resolving to slots through the layout with no further conversion) and wrap into a
+ * SemanticModel. Mutates `structure` in place.
+ * @param {Array} structure raw structure roots (UTF-16 cols)
+ * @param {string[]} lines source lines (for the column converter)
+ * @returns {SemanticModel}
+ * @private
+ */
+function structureToModel(structure, lines) {
+    const toCp = makeColConverter(lines);
+    const normalizeCols = (nodes) => {
+        for (const node of nodes) {
+            node.start.col = toCp(node.start.line, lines[node.start.line] ?? '', node.start.col);
+            node.end.col = toCp(node.end.line, lines[node.end.line] ?? '', node.end.col);
+            if (node.children.length) normalizeCols(node.children);
+        }
+    };
+    normalizeCols(structure);
+    return new SemanticModel(structure);
 }

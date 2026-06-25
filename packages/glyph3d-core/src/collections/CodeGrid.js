@@ -18,7 +18,7 @@ import { RENDER_ORDER } from '../core/renderOrder.js';
 import { BOUNDS_Z_PAD } from '../core/constants.js';
 import { paginationGeometry, resolveLayoutParams, DEFAULT_LAYOUT } from '../workers/builders/index.js';
 import LayoutDescription from '../core/LayoutDescription.js';
-import { analyzeGrid, buildGridSemantics } from '../parsing/SyntaxColorizer.js';
+import { analyzeGrid, buildGridSemantics, buildGridSemanticsSync } from '../parsing/SyntaxColorizer.js';
 import FramedGlyphField from './FramedGlyphField.js';
 import { createPanelMaterial } from './panelMaterial.js';
 
@@ -692,6 +692,24 @@ class CodeGrid extends FramedGlyphField {
             if (this._semanticsPendingContent === content) this._semanticsPending = null;
         });
         return this._semanticsPending;
+    }
+
+    /**
+     * Synchronously refresh + cache the SemanticModel — but only if the tree-sitter engine
+     * is already warm (parseStructureSync; cold returns null). Returns the fresh model, or
+     * null to defer to ensureSemantics. An arranged grid is always warm, so its arranger
+     * re-derives within the same edit fold instead of awaiting — no stale-semantics flicker.
+     * @returns {import('../parsing/SemanticModel.js').default|null}
+     */
+    refreshSemanticsSync() {
+        const content = this.content;
+        if (this._semantics && this._semanticsContent === content) return this._semantics; // cache hit
+        const model = buildGridSemanticsSync(this);
+        if (model) {
+            this._semantics = model;
+            this._semanticsContent = content;
+        }
+        return model;
     }
 
     /**

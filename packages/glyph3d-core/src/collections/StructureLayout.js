@@ -102,8 +102,12 @@ export class StructureLayout {
     arrange(grid) {
         const r = this._renderer();
         if (!r || !this._active) return;
-        const model = grid.getSemantics?.();
-        if (!model) { this._healLater(grid); return; } // an edit invalidated the model → re-arrange when it rebuilds
+        // An edit invalidates the AST cache (content-identity). Prefer a SYNCHRONOUS re-parse
+        // (the engine is warm once arranged) so we re-derive in THIS fold — no flow flicker.
+        // Only if the engine is cold (can't happen for an already-arranged grid) do we fall
+        // back to the async heal, which re-folds once the model rebuilds.
+        const model = grid.getSemantics?.() || grid.refreshSemanticsSync?.();
+        if (!model) { this._healLater(grid); return; }
 
         const blocks = this._blocks(model, this._kind, r);
         if (!blocks.length) return; // nothing matches in the new content → leave this fold as flow

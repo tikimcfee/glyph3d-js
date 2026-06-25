@@ -29,6 +29,7 @@ const RUNTIME_WASM_URL = new URL('./vendor/web-tree-sitter.wasm', import.meta.ur
 let _initPromise = null;            // Promise<{Parser,Language,Query}>
 let _ts = null;                     // resolved {Parser,Language,Query}
 const _languages = new Map();       // key -> Promise<Language>
+const _languageValues = new Map();  // key -> Language (the RESOLVED value, for the sync path)
 const _queries = new Map();         // key -> Query | null (null = compile failed)
 
 async function ensureInit() {
@@ -53,7 +54,12 @@ async function ensureInit() {
 function loadLanguage(key, grammarUrl) {
     let p = _languages.get(key);
     if (p) return p;
-    p = ensureInit().then(({ Language }) => Language.load(grammarUrl));
+    // Stash the resolved Language too, so parseStructureSync can reach it without awaiting
+    // (once warm, an edit can re-parse synchronously — no stale-semantics frame).
+    p = ensureInit().then(({ Language }) => Language.load(grammarUrl)).then((lang) => {
+        _languageValues.set(key, lang);
+        return lang;
+    });
     _languages.set(key, p);
     return p;
 }
@@ -156,6 +162,37 @@ export async function parseDocument(text, descriptor, spec = null, opts = {}) {
         }
 
         return { captures, structure };
+    } finally {
+        tree?.delete?.();
+        parser.delete?.();
+    }
+}
+
+/**
+ * Structure-only parse on the SYNCHRONOUS fast path — returns the nested named-node
+ * tree if (and only if) the engine and this grammar are already warm, else null. The
+ * actual parse (`parser.parse`) is synchronous; only the one-time WASM init + grammar
+ * load are async, and once they've resolved (the first parse of a file of this language)
+ * a re-parse needs no await. This lets an edit refresh its SemanticModel within the same
+ * relayout fold, so a structural arrangement re-applies with no intermediate flow frame.
+ * Caller converts UTF-16 columns to codepoints (same as parseDocument's structure).
+ * @param {string} text
+ * @param {{ key:string, grammarUrl:string }} descriptor
+ * @param {{kindOf:(t:string)=>string, nameOf:(n:any)=>string|null}} spec
+ * @returns {Array|null} structure roots, or null if cold (caller falls back to async)
+ */
+export function parseStructureSync(text, descriptor, spec) {
+    if (!_ts || !spec) return null;                       // WASM not initialized yet
+    const language = _languageValues.get(descriptor.key);
+    if (!language) return null;                            // this grammar not loaded yet → cold
+    const parser = new _ts.Parser();
+    let tree = null;
+    try {
+        parser.setLanguage(language);
+        tree = parser.parse(text);
+        const structure = [];
+        walkStructure(tree.rootNode, spec, structure);
+        return structure;
     } finally {
         tree?.delete?.();
         parser.delete?.();
