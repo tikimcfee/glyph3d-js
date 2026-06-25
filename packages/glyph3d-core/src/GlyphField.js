@@ -1707,14 +1707,13 @@ export default class GlyphField {
     }
 
     /**
-     * Public: refresh the geometry's frustum-cull bounds (boundingBox + Sphere).
-     * Pass a precomputed {min,max} local extent — required when glyphs are moved by
-     * in-shader group offsets (structural sub-layouts), which the base-position walk
-     * below cannot see — or omit to walk the live buffer.
-     * @param {{min:{x,y,z},max:{x,y,z}}} [precomputed]
+     * Public: refresh the geometry's frustum-cull bounds (boundingBox + Sphere) by
+     * walking the live instance buffer. A structural arranger bakes its glyph moves
+     * straight into instancePosition, so a plain walk sees the arranged footprint —
+     * no precomputed extent needed.
      */
-    refreshBounds(precomputed) {
-        this._updateGeometryBounds(precomputed);
+    refreshBounds() {
+        this._updateGeometryBounds();
     }
 
     /**
@@ -1787,5 +1786,17 @@ export default class GlyphField {
      */
     getInstanceSizes() {
         return this.instanceMesh?.geometry?.attributes?.instanceSize?.array ?? null;
+    }
+
+    /**
+     * Flag the position + size instance attributes for GPU re-upload after an external
+     * in-place write to the live arrays (getInstancePositions/getInstanceSizes) — e.g. a
+     * structural arranger baking glyph moves into the buffer. Caller refreshes bounds.
+     */
+    markInstanceTransformsDirty() {
+        const geom = this.instanceMesh?.geometry;
+        if (!geom) return;
+        if (geom.attributes.instancePosition) geom.attributes.instancePosition.needsUpdate = true;
+        if (geom.attributes.instanceSize)     geom.attributes.instanceSize.needsUpdate     = true;
     }
 }

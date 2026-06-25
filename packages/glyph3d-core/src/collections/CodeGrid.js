@@ -148,6 +148,87 @@ class CodeGrid extends FramedGlyphField {
         // Frame height in VISUAL rows (Step 3c.2). >0 clips the grid to a fixed window
         // (shader vertex cull) the content scrolls through; 0 = no frame (full content).
         this._frameRows = 0;
+
+        // ── Relayout pipeline participants ───────────────────────────────────────
+        // A fold (text → buffer) is destructive: it rebuilds the instance buffer from
+        // scratch, so anything derived from it must be re-established after. The pipeline
+        // runs in order: fold → ARRANGE → bounds → DECORATE. Two extension seams:
+        //   • Arrangers (footprint-CHANGING) re-derive glyph positions from stable anchors
+        //     and run INSIDE the fold (before bounds), so the footprint stays honest — the
+        //     structural sub-layout is one. They may also constrain the fold's layout
+        //     (foldLayout) without mutating config.layout.
+        //   • Decorations (footprint-NEUTRAL) re-project after bounds settle — the caret is
+        //     the built-in one; LSP arrows will register here. (Highlights are NOT here: they
+        //     live in a persistent, slot-keyed side texture that survives a rebuild on its
+        //     own — an ABSOLUTE decoration, re-applied only on content change by the colorizer.)
+        this._arrangers   = [];
+        this._decorations = [];
+        // The caret is a decoration: re-painted from the (now buffer-backed) layout after
+        // every fold, exactly like an external overlay. _updateCaretMesh guards on cursor.
+        this._decorations.push({ name: 'caret', apply: (g) => g._updateCaretMesh() });
+    }
+
+    // ── Relayout pipeline: registries + stages ───────────────────────────────────
+
+    /**
+     * Register an arranger — a footprint-changing participant re-applied INSIDE every
+     * fold (before bounds). Contract: `arrange(grid)` re-derives glyph transforms from
+     * stable anchors (idempotent — it runs again on the next fold); optional
+     * `foldLayout` constrains the fold (merged over config.layout, not mutating it);
+     * optional `clear(grid)`. Idempotent registration.
+     */
+    registerArranger(a) { if (a && !this._arrangers.includes(a)) this._arrangers.push(a); }
+    /** Remove a previously-registered arranger. */
+    unregisterArranger(a) { const i = this._arrangers.indexOf(a); if (i >= 0) this._arrangers.splice(i, 1); }
+
+    /** Register a decoration — a footprint-neutral overlay re-applied after bounds settle. */
+    registerDecoration(d) { if (d && !this._decorations.includes(d)) this._decorations.push(d); }
+    /** Remove a previously-registered decoration. */
+    unregisterDecoration(d) { const i = this._decorations.indexOf(d); if (i >= 0) this._decorations.splice(i, 1); }
+
+    /**
+     * The ARRANGE stage. After the fold has materialized the buffer + LayoutDescription,
+     * run each arranger (it re-derives positions from anchors and writes the live instance
+     * buffer). Because this runs before bounds, the footprint walk sees the arranged shape —
+     * no override needed. Invalidates the bounds caches + refreshes the frustum-cull bounds.
+     * No-op (and zero cost) when nothing is registered.
+     * @private
+     */
+    _applyArrangers() {
+        if (!this._arrangers.length || !this._renderer) return;
+        let ran = false;
+        for (const a of this._arrangers) { if (a.arrange) { a.arrange(this); ran = true; } }
+        if (!ran) return;
+        // The arrangers rewrote the live positions; the worker's flow-bounds cache is now
+        // wrong and the cull bounds were set to the flow extent. Drop the cache, mark dirty
+        // (the next _getContentBounds re-walks the arranged buffer), refresh the cull bounds.
+        this._workerBoundsCache  = null;
+        this._contentBoundsDirty = true;
+        this._renderer.refreshBounds(); // re-walk the now-arranged buffer
+    }
+
+    /**
+     * The DECORATE stage. Re-apply footprint-neutral overlays after bounds have settled —
+     * the caret, and any registered external overlay (LSP arrows). Runs every relayout.
+     * @private
+     */
+    _applyDecorations() {
+        for (const d of this._decorations) d.apply?.(this);
+    }
+
+    /**
+     * The layout params the fold should use — config.layout, with any active arranger's
+     * required `foldLayout` merged over it. Lets a structural arranger force a single
+     * column (so a block is a contiguous run it can move as a unit) WITHOUT mutating the
+     * user's config.layout, so reset just stops merging and the original layout returns.
+     * @private
+     */
+    _foldLayout() {
+        let layout = this.config.layout;
+        for (const a of this._arrangers) {
+            if (a.foldLayout) layout = { ...layout, ...a.foldLayout };
+        }
+        return layout;
     }
 
     // ============ Slug data ============
@@ -448,32 +529,6 @@ class CodeGrid extends FramedGlyphField {
      */
     getContentBounds() {
         return this._getContentBounds();
-    }
-
-    /**
-     * Override the cached content bounds (drives getLocalBounds → the background
-     * panel, focus overlay, dock tile, picking grid-channel, and layout). For
-     * structural sub-layouts that move glyphs via in-shader group offsets the normal
-     * bounds-walk can't see, the StructureLayout pushes the arranged extent here.
-     * Pass null to drop the override; the next read recomputes from the live buffer.
-     * @param {{min:{x,y,z},max:{x,y,z}}|null} bounds local-space AABB
-     */
-    setContentBoundsOverride(bounds) {
-        if (bounds) {
-            this._contentBoundsCache = {
-                min: { x: bounds.min.x, y: bounds.min.y, z: bounds.min.z },
-                max: { x: bounds.max.x, y: bounds.max.y, z: bounds.max.z },
-                width:  bounds.max.x - bounds.min.x,
-                height: bounds.max.y - bounds.min.y,
-                depth:  bounds.max.z - bounds.min.z,
-            };
-            this._workerBoundsCache  = null; // the override wins over the worker extent
-            this._contentBoundsDirty = false;
-            this._sizeBackgroundTo(this._contentBoundsCache); // re-fit the panel to the arrangement
-        } else {
-            this._workerBoundsCache  = null;
-            this._updateBackground(); // recompute from the live (base) positions + re-fit
-        }
     }
 
     /**
@@ -799,16 +854,19 @@ class CodeGrid extends FramedGlyphField {
                 if (!this.content) continue;               // nothing to lay out (loop exits unless pending)
                 this._ensureRenderer();                    // reconstruct if content was evicted
                 this._clearRenderedText();                 // drop the prior render's glyphs
-                await this._layoutContentAsync();          // re-add + re-flush + rebuild line tables + _layout
-                this._updateBackground();
-                // Repaint the edit caret against the fresh _layout, else it lingers stale.
+                // The staged pipeline: FOLD (+ ARRANGE, inside _layoutContentAsync) → BOUNDS →
+                // clamp → DECORATE. Arrangers already re-derived inside the fold, so the bounds
+                // walk below sees the arranged footprint; decorations re-project on top of it.
+                await this._layoutContentAsync();          // FOLD: re-add + re-flush + line tables + _layout (+ arrange)
+                this._updateBackground();                  // BOUNDS: re-walk the (arranged) footprint, re-fit the panel
+                // Clamp the edit caret into the fresh content before the decorate stage paints it.
                 if (this._cursor) {
                     const ln = Math.max(0, Math.min(this._cursor.line, this.lines.length - 1));
                     const cl = Math.max(0, Math.min(this._cursor.col, this.lines[ln]?.length ?? 0));
                     this._cursor.line = ln;
                     this._cursor.col = cl;
-                    this._updateCaretMesh();
                 }
+                this._applyDecorations();                  // DECORATE: caret + external overlays, re-projected onto the new fold
             } while (this._relayoutPending);
         } finally {
             this._relayoutBusy = false;
@@ -1184,7 +1242,7 @@ class CodeGrid extends FramedGlyphField {
             }
         }
 
-        return { items, metrics, defaultColor, layout: this.config.layout, scrollOffset: this._scrollOffset };
+        return { items, metrics, defaultColor, layout: this._foldLayout(), scrollOffset: this._scrollOffset };
     }
 
     /**
@@ -1424,6 +1482,7 @@ class CodeGrid extends FramedGlyphField {
             : 0;
         this._buildLayoutDescription();
         this._applyClip();
+        this._applyArrangers(); // ARRANGE stage (see _applyArrangers) — runs every fold
     }
 
     /**
@@ -1481,7 +1540,9 @@ class CodeGrid extends FramedGlyphField {
             this._clearRenderedText();
             await this._layoutContentAsync();
             this._scrollClampGuard = false;
+            return; // the re-entrant fold already arranged on the clamped buffer
         }
+        this._applyArrangers(); // ARRANGE stage (see _applyArrangers) — runs every fold
     }
 
     /**
@@ -2150,9 +2211,8 @@ class CodeGrid extends FramedGlyphField {
 
     /**
      * Size + position the background panel to a content-bounds box. Split out of
-     * _updateBackground so a structural sub-layout can re-fit the panel to its
-     * OVERRIDDEN (group-offset) extent without forcing a base-position recompute —
-     * _updateBackground marks bounds dirty, which would clobber the override.
+     * _updateBackground (which first marks bounds dirty) so it can re-fit the panel to an
+     * already-computed extent without forcing another base-position walk.
      * @param {{min:{x,y,z},max:{x,y,z},width:number,height:number}|null} bounds
      * @private
      */
