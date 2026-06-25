@@ -66,6 +66,51 @@ import { PERF_THRESHOLDS } from './core/constants.js';
 const MAX_GROUPS_DEFAULT = PERF_THRESHOLDS.defaultMaxGroups ?? 64;
 const MAX_GROUPS_DIM     = 16000;
 
+/**
+ * GLOBAL minification / LOD dials — the exact-curve ↔ stable-block handoff that governs how minified
+ * text degrades. These were baked float() literals (labelled "tune live in Firefox" but NOT actually
+ * live — each change needed an edit + rebuild). Promoted to uniforms so the handoff can be dialed IN
+ * MOTION (flicker is only judgeable in motion) and per device (a phone's DPI wants a different handoff
+ * than a 4K panel). ONE shared set across every glyph material — a render-quality setting, not per-grid;
+ * driven by setGlyphLodParam ← the `glyph.*` entries in app settings.
+ *
+ * Footprints are fwidth(glyphUV) = the fraction of a glyph cell one pixel spans (bigger = smaller on
+ * screen). The stable IMPOSTOR block is the only flicker-free path (a per-glyph constant has no sub-pixel
+ * strokes to alias); the dilation/softening of the exact path only attenuates flicker. So the lever for
+ * killing flicker is the lod* band — hand off to the block where the exact path stops being resolvable.
+ *   dilatePx/soften — minification fuzz shape (ink fattening + AA-ramp widening).
+ *   minLo/minHi     — fuzz band: onset → full (footprint).
+ *   lodLo/lodHi     — exact → block cross-fade band (footprint). Pull DOWN to kill flicker sooner.
+ *   density/maxCov  — the impostor block's coverage (curveCount·density, capped).
+ *   lodAxisBias     — 0 = switch on the BEST-resolved axis (today: angled text stays exact longer);
+ *                     1 = switch on the WORST axis (engage the block on the foreshortened axis that
+ *                     actually flickers). The research-flagged lever for angled-surface flicker.
+ */
+export const GLYPH_LOD_DEFAULTS = Object.freeze({
+    dilatePx: 0.75, soften: 0.45,
+    minLo: 0.06, minHi: 0.20,
+    lodLo: 0.30, lodHi: 0.60,
+    density: 0.035, maxCov: 0.72,
+    lodAxisBias: 0,
+});
+
+const LOD_UNIFORMS = Object.fromEntries(
+    Object.entries(GLYPH_LOD_DEFAULTS).map(([k, v]) => [k, uniform(v)]),
+);
+
+/** Set one global LOD dial live. Keys: see GLYPH_LOD_DEFAULTS. Ignores unknown keys / non-finite values. */
+export function setGlyphLodParam(key, value) {
+    const u = LOD_UNIFORMS[key];
+    if (u && Number.isFinite(value)) u.value = value;
+}
+
+/** Read the current global LOD dials (settings defaults / debugging). */
+export function getGlyphLodParams() {
+    const out = {};
+    for (const k in LOD_UNIFORMS) out[k] = LOD_UNIFORMS[k].value;
+    return out;
+}
+
 // ─── TSL vertex node ─────────────────────────────────────────────────────────
 
 /**
@@ -215,11 +260,11 @@ function _buildOutputNode(varyings, uniforms) {
     const { vColor, vGroupAlpha, vAddedColor, vFillAmount, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell } = varyings;
     const { curveTex, emojiTex, emojiCols, frameTex, frameCols, frameRows } = uniforms;
 
-    // Minification tuning knobs (see below). DILATE_PX = half-width, in pixels, of the
-    // stroke fattening applied at full zoom-out; SOFTEN = how much the AA ramp widens.
-    // Both are the human-tunable dials — nudge in Firefox.
-    const DILATE_PX = 0.75;
-    const SOFTEN    = 0.45;
+    // Minification tuning knobs — now LIVE uniforms (GLYPH_LOD_DEFAULTS / setGlyphLodParam), dialable
+    // via app settings. DILATE_PX = half-width, in pixels, of the stroke fattening applied at full
+    // zoom-out; SOFTEN = how much the AA ramp widens. (Same nodes the math below already operated on.)
+    const DILATE_PX = LOD_UNIFORMS.dilatePx;
+    const SOFTEN    = LOD_UNIFORMS.soften;
 
     return Fn(() => {
         // Invisible group — applies to both slug and bitmap paths.
@@ -309,14 +354,14 @@ function _buildOutputNode(varyings, uniforms) {
             //   farther out / start the fuzz later (i.e. less fuzzy at a given distance).
             // MIN_HI = fuzz FULL (footprint for max dilation+softening).
             // The MIN_LO→MIN_HI gap IS the ramp speed: widen it for a gentler, slower fade-to-fuzzy.
-            const MIN_LO = float(0.06);  // ~16 px glyph: below this, bit-identical to crisp
-            const MIN_HI = float(0.20);  // ~5 px glyph:  above this, max dilation + softening
-            // LOD impostor dials — used by the coverage branch below.
-            // LOD cross-fade band (footprint = glyph-UV per pixel, best-resolved axis):
-            const LOD_LO      = float(0.30);   // begin fading exact → impostor (~3px glyph)
-            const LOD_HI      = float(0.60);   // fully impostor beyond here (~1.5px); loop skipped
-            const LOD_DENSITY = float(0.035);  // curveCount → coverage (cheap ink-density proxy)
-            const LOD_MAXCOV  = float(0.72);   // cap so the densest glyphs don't fully saturate
+            // Minification + LOD dials — LIVE uniforms (GLYPH_LOD_DEFAULTS / setGlyphLodParam), same
+            // nodes the math already used (were float() literals). Tune in motion via app settings.
+            const MIN_LO = LOD_UNIFORMS.minLo;       // fuzz onset (~16px glyph at the default 0.06)
+            const MIN_HI = LOD_UNIFORMS.minHi;       // fuzz full  (~5px glyph at the default 0.20)
+            const LOD_LO      = LOD_UNIFORMS.lodLo;  // begin fading exact → impostor (~3px at 0.30)
+            const LOD_HI      = LOD_UNIFORMS.lodHi;  // fully impostor beyond here (~1.5px at 0.60)
+            const LOD_DENSITY = LOD_UNIFORMS.density; // curveCount → coverage (cheap ink-density proxy)
+            const LOD_MAXCOV  = LOD_UNIFORMS.maxCov;  // cap so the densest glyphs don't fully saturate
             const fwMax = fw.x.max(fw.y);
             // LOD switch uses the BEST-resolved axis (min footprint), not the worst.
             // An angled page foreshortens one axis, which spikes fwMax and would flip
@@ -326,6 +371,10 @@ function _buildOutputNode(varyings, uniforms) {
             // on-screen size, not the camera angle. (fwMax still drives AA dilation below,
             // where worst-axis IS what we want for moiré.)
             const fwMin = fw.x.min(fw.y);
+            // The footprint that drives the exact→block LOD switch. lodAxisBias lerps it from the
+            // BEST-resolved axis (fwMin, 0 = today: angled text keeps the exact path longer) toward
+            // the WORST axis (fwMax, 1: engage the block on the foreshortened axis that flickers).
+            const fwLod = fwMin.add(fwMax.sub(fwMin).mul(LOD_UNIFORMS.lodAxisBias));
             const m = fwMax.sub(MIN_LO).div(MIN_HI.sub(MIN_LO)).clamp(0, 1).toVar();
             m.assign(m.mul(m).mul(float(3).sub(m.mul(2)))); // smoothstep — continuous derivative
 
@@ -347,7 +396,7 @@ function _buildOutputNode(varyings, uniforms) {
             // Impostor coverage (cheap, no loop): curve count as an ink-density proxy.
             const impostorCov = float(vCurveCount).mul(LOD_DENSITY).clamp(0, LOD_MAXCOV);
             const cov = float(0).toVar();
-            If(fwMin.greaterThan(LOD_HI), () => {
+            If(fwLod.greaterThan(LOD_HI), () => {
                 cov.assign(impostorCov);   // far: strokes unresolvable → pure impostor, loop skipped
             }).Else(() => {
                 const coverage = float(0).toVar();
@@ -372,7 +421,7 @@ function _buildOutputNode(varyings, uniforms) {
                 // Cross-fade exact → impostor across [LOD_LO, LOD_HI] so the quality
                 // switch has no hard seam (the diagonal line that otherwise sweeps an
                 // angled wall). smoothstep ramp; manual mix to avoid extra imports.
-                const t = fwMin.sub(LOD_LO).div(LOD_HI.sub(LOD_LO)).clamp(0, 1).toVar();
+                const t = fwLod.sub(LOD_LO).div(LOD_HI.sub(LOD_LO)).clamp(0, 1).toVar();
                 t.assign(t.mul(t).mul(float(3).sub(t.mul(2))));
                 cov.assign(exactCov.add(impostorCov.sub(exactCov).mul(t)));
             });

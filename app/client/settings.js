@@ -1,5 +1,6 @@
 import { stateController } from '@glyph3d/core/services/state';
 import { setPanelStateColorDefaults } from '@glyph3d/core/collections';
+import { setGlyphLodParam, GLYPH_LOD_DEFAULTS } from '@glyph3d/core/GlyphField.js';
 
 // Settings schema — the SINGLE source for both the Settings panel (renders a row
 // per entry) and the settings.* verbs (validate + apply). Only WIRED knobs live
@@ -18,6 +19,14 @@ const dockParam = (param) => (ctx, v) => ctx.cameraDock?.setParam?.(param, v);
 /** apply() for a window-control knob: store it on ctx.windowConfig (the bare param name,
  *  not the `window.` key). Read by the window.pin verb and the size/scale dial handler. */
 const windowParam = (param) => (ctx, v) => { (ctx.windowConfig ||= {})[param] = v; };
+
+/** apply() for a glyph minification/LOD dial: push the bare dial name (not the `glyph.` key) to the
+ *  global GlyphField LOD uniform — live across every glyph material, no ctx subsystem needed. */
+const lodParam = (param) => (_ctx, v) => setGlyphLodParam(param, v);
+
+/** apply() for an agent-trail card-scale knob: push the value to AgentTrail.cfg (the bare param name,
+ *  not the `trail.` key) and re-apply — the header/info cards re-scale live, body sizes land on new moments. */
+const trailParam = (param) => (ctx, v) => { const t = ctx.agentTrail; if (!t) return; t.cfg[param] = v; t.applyScales?.(); };
 
 export const SETTINGS = [
   {
@@ -201,6 +210,28 @@ export const SETTINGS = [
     key: 'tree.dirLines', label: 'Directory ownership lines', group: 'Tree', type: 'bool', default: true,
     apply: (ctx, v) => ctx.contentTreeArrows?.setShowDirs?.(v),
   },
+  // Glyph LOD — the exact-curve ↔ stable-block handoff for minified text (kills the moiré/flicker of
+  // sub-pixel strokes). Footprints are fwidth(glyphUV): bigger = smaller on screen. Pull the lod*
+  // band DOWN to hand off to the flicker-free block sooner (trades mid-distance crispness for
+  // stability); raise it to keep exact curves longer. Tune live in motion; defaults mirror the shader.
+  { key: 'glyph.dilatePx', label: 'Minify dilate (px)', group: 'Glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.dilatePx, min: 0, max: 3, step: 0.05, apply: lodParam('dilatePx') },
+  { key: 'glyph.soften', label: 'Minify soften', group: 'Glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.soften, min: 0, max: 1, step: 0.05, apply: lodParam('soften') },
+  { key: 'glyph.minLo', label: 'Fuzz onset (footprint)', group: 'Glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.minLo, min: 0.01, max: 0.5, step: 0.01, apply: lodParam('minLo') },
+  { key: 'glyph.minHi', label: 'Fuzz full (footprint)', group: 'Glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.minHi, min: 0.02, max: 0.6, step: 0.01, apply: lodParam('minHi') },
+  { key: 'glyph.lodLo', label: 'Block fade-in (footprint)', group: 'Glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.lodLo, min: 0.05, max: 0.9, step: 0.01, apply: lodParam('lodLo') },
+  { key: 'glyph.lodHi', label: 'Block full (footprint)', group: 'Glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.lodHi, min: 0.1, max: 1.2, step: 0.01, apply: lodParam('lodHi') },
+  { key: 'glyph.density', label: 'Block ink density', group: 'Glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.density, min: 0.005, max: 0.15, step: 0.005, apply: lodParam('density') },
+  { key: 'glyph.maxCov', label: 'Block max coverage', group: 'Glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.maxCov, min: 0.1, max: 1, step: 0.02, apply: lodParam('maxCov') },
+  { key: 'glyph.lodAxisBias', label: 'Block axis bias (0 best→1 worst)', group: 'Glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.lodAxisBias, min: 0, max: 1, step: 0.05, apply: lodParam('lodAxisBias') },
+  // Trail — agent-trail card scales, a row per card type (the spatial forward of the agent's run). The
+  // header + info cards re-scale the whole corridor live; snapshot/output + say-think sizes bake at build,
+  // so they land on NEW moments (the trail streams, so near-immediate; `trail.clear` rebuilds the view).
+  // Defaults mirror AgentTrail's TRAIL_DEFAULTS — tune here, then bake the winners back into TRAIL_DEFAULTS.
+  { key: 'trail.callScale', label: 'Header card size', group: 'Trail', type: 'number', default: 3.0, min: 0.5, max: 10, step: 0.1, apply: trailParam('callScale') },
+  { key: 'trail.infoScale', label: 'Info card size', group: 'Trail', type: 'number', default: 1.5, min: 0.25, max: 6, step: 0.05, apply: trailParam('infoScale') },
+  { key: 'trail.artifactWorldScale', label: 'Snapshot / output size', group: 'Trail', type: 'number', default: 0.025, min: 0.005, max: 0.3, step: 0.005, apply: trailParam('artifactWorldScale') },
+  { key: 'trail.messageScale', label: 'Message (say / think) size', group: 'Trail', type: 'number', default: 0.05, min: 0.005, max: 0.3, step: 0.005, apply: trailParam('messageScale') },
+  { key: 'trail.snapshotImageWidth', label: 'Image card width', group: 'Trail', type: 'number', default: 40, min: 5, max: 200, step: 5, apply: trailParam('snapshotImageWidth') },
 ];
 
 /** Push a background restyle to every live grid/terminal of `type`. */
