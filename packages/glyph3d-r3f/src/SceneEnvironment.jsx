@@ -20,9 +20,12 @@ import {
  *     blue-Z origin axes, and a distance fade to the horizon. (A GridHelper is the fallback if
  *     the TSL build ever throws, so a shader hiccup can't blank the scene.)
  *
- * Both ride/recenter on the camera but stay WORLD-LOCKED in pattern (the grid is computed from
- * positionWorld, so moving the plane only provides coverage — the lines don't slide). On the
- * DEFAULT layer + unregistered, so the pick pass, the culler, and the look-distance ignore them.
+ * The SKY rides the camera (a smooth dome, always around you). The GRID does NOT chase the eye —
+ * it's a large, static, world-locked plane at the origin, and the distance fade hides its far
+ * edge so it reads as infinite without moving. (A plane that continuously recentered on the exact
+ * camera position every frame made the floor feel like it was slip-sliding — coverage we get from
+ * size + fade instead.) On the DEFAULT layer + unregistered, so the pick pass, the culler, and the
+ * look-distance ignore them.
  *
  * Next layer (not here): a hemisphere/key light on a lit ground + a contact shadow so the
  * content visibly SITS on the floor (the Tinkercad effect). Content is emissive, so that's
@@ -34,7 +37,7 @@ export default function SceneEnvironment({
   skyHorizon = 0x343a45,   // raised mid-grey-blue — the present "lit" floor of the value range
   skyZenith = 0x191c24,
   skyNadir = 0x0d0e12,
-  gridSize = 16000,
+  gridSize = 40000,   // large + STATIC (no camera-follow): the fade hides the far edge
   minorCell = 200,
   majorCell = 2000,
   lineColor = 0x5b6478,    // LIGHTER than the sky horizon (the whole point)
@@ -67,8 +70,9 @@ export default function SceneEnvironment({
     sky.renderOrder = -1000;
     scene.add(sky); objs.push(sky);
 
-    // --- infinite grid (TSL; GridHelper fallback if the node build throws) ---
-    let grid, gridFollows = false;
+    // --- infinite-looking grid (TSL; GridHelper fallback if the node build throws). Static at
+    //     the origin — the world-locked pattern + distance fade do the work, no camera-follow. ---
+    let grid;
     try {
       const cellGrid = Fn(([cell]) => {
         const r = positionWorld.xz.div(cell);
@@ -90,7 +94,6 @@ export default function SceneEnvironment({
       mat.opacityNode = max(lines, max(xAxis, zAxis)).mul(fade);
       mat.transparent = true; mat.depthWrite = false;
       grid = new THREE.Mesh(new THREE.PlaneGeometry(gridSize, gridSize).rotateX(-Math.PI / 2), mat);
-      gridFollows = true;   // shader is world-locked → safe to recenter the plane for coverage
     } catch (err) {
       console.warn('[SceneEnvironment] TSL grid build failed, using GridHelper fallback:', err);
       grid = new THREE.GridHelper(gridSize, Math.max(2, Math.round(gridSize / minorCell)), lineColor, lineColor);
@@ -100,18 +103,14 @@ export default function SceneEnvironment({
     grid.renderOrder = -100;
     scene.add(grid); objs.push(grid);
 
-    refs.current = { sky, grid, gridFollows };
+    refs.current = { sky, grid };
     return () => { objs.forEach(o => { scene.remove(o); o.geometry.dispose(); o.material.dispose(); }); refs.current = null; };
   }, [scene, groundY, skyRadius, skyHorizon, skyZenith, skyNadir, gridSize, minorCell, majorCell, lineColor, xAxisColor, zAxisColor, fadeNear, fadeFar]);
 
   useFrame(() => {
     const r = refs.current;
     if (!r) return;
-    r.sky.position.copy(camera.position);          // the sky is always around you
-    if (r.gridFollows) {                            // shader grid: recenter for coverage (pattern stays world-locked)
-      r.grid.position.x = camera.position.x;
-      r.grid.position.z = camera.position.z;
-    }
+    r.sky.position.copy(camera.position);          // the sky is always around you; the grid stays put (static, world-locked)
   });
 
   return null;
