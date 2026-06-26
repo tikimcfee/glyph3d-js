@@ -76,8 +76,11 @@ function App() {
   // onReady so the DOM sidebar — which can't read the in-canvas context — can use
   // it. One source of truth, prop-drilled to the chrome.
   const [client, setClient] = useState(null);
-  const [dockW, setDockW] = useState(320);   // resizable dock-overlay width (px)
-  const [dockHidden, setDockHidden] = useState(false);   // slide the dock out to reclaim the field
+  // Dock-overlay width + hidden state persist as chrome prefs (StateController /
+  // localStorage), NOT in the relay-backed session snapshot — they're UI chrome and
+  // should survive a reload even in client-only mode.
+  const [dockW, setDockW] = useState(() => stateController.get('chrome.dockWidth', 320));
+  const [dockHidden, setDockHidden] = useState(() => stateController.get('chrome.dockHidden', false));
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [showMinimap, setShowMinimap] = useState(() => getSetting('view.minimap'));
   const [, forceSettings] = useReducer((x) => x + 1, 0);   // re-read live settings on a change
@@ -113,6 +116,15 @@ function App() {
     window.addEventListener('state-changed', sync);
     return () => window.removeEventListener('state-changed', sync);
   }, []);
+
+  // Persist the dock chrome prefs. Width is debounced (a resize drag fires many
+  // updates) so it writes once when the drag settles; the hidden toggle is rare and
+  // written immediately. Reads happen at mount (the useState initializers above).
+  useEffect(() => {
+    const t = setTimeout(() => stateController.set('chrome.dockWidth', dockW), 400);
+    return () => clearTimeout(t);
+  }, [dockW]);
+  useEffect(() => { stateController.set('chrome.dockHidden', dockHidden); }, [dockHidden]);
 
   // Idle resting message for the StatusBar (loading activity overrides it there).
   const hint = error ? `boot failed: ${error.message}`

@@ -82,23 +82,32 @@ export default function IdeDock({ client }) {
     const api = event.api;
     apiRef.current = api;
 
-    // Give SessionStore a handle to serialize/restore this layout. If a saved
-    // layout already loaded, this triggers the restore (fromJSON) immediately.
+    // Give SessionStore a handle to serialize/restore this layout. A saved layout
+    // is AUTHORITATIVE. setDockBridge synchronously triggers fromJSON when a snapshot
+    // already loaded (restore-first ordering); a later restore() calls it too
+    // (bridge-first ordering). We flag a successful restore so the default-build
+    // below runs ONLY when nothing was restored — it must never top up over a
+    // restored layout, which is what used to re-open tabs you'd deliberately closed,
+    // nondeterministically, depending on which clock (bridge vs restore) won.
+    let restoredFromSave = false;
     client?.session?.setDockBridge({
       toJSON: () => api.toJSON(),
-      fromJSON: (layout) => api.fromJSON(layout),
+      fromJSON: (layout) => { api.fromJSON(layout); restoredFromSave = true; },
       components: Object.keys(components),
     });
 
-    // Default panels — always built so the dock is never empty. A saved layout
-    // (restored above via setDockBridge → fromJSON) keeps its panels; this only
-    // adds catalog panels that layout lacks (e.g. a newly introduced one), and
-    // never re-adds or re-focuses an already-present panel.
-    for (const def of PANELS) {
-      if (api.getPanel(def.id)) continue;
-      const opts = { id: def.id, component: def.id, title: def.title };
-      if (def.position && api.getPanel(def.position.referencePanel)) opts.position = def.position;
-      api.addPanel(opts);
+    // Default panels — built ONLY when no saved layout was (or will be) applied: a
+    // fresh session, or client-only/no-relay mode where no restore ever runs. In
+    // bridge-first ordering a later restore REPLACES these wholesale via fromJSON
+    // (so closed tabs stay closed); a newly-introduced catalog panel reaches an
+    // existing session via the panels menu, not by force-injection here.
+    if (!restoredFromSave) {
+      for (const def of PANELS) {
+        if (api.getPanel(def.id)) continue;
+        const opts = { id: def.id, component: def.id, title: def.title };
+        if (def.position && api.getPanel(def.position.referencePanel)) opts.position = def.position;
+        api.addPanel(opts);
+      }
     }
 
     // Expose a dock controller on the command ctx so panel.* verbs (and the
