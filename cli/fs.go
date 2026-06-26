@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/google/renameio/v2"
 )
 
 // JSON-RPC error codes (mirrored in src/services/data/types.js)
@@ -24,6 +26,8 @@ const (
 	errNotText          = -32005
 	errWriteFailed      = -32006
 	errInvalidEncoding  = -32007
+	errStaleWrite       = -32008
+	errWouldTruncate    = -32009
 )
 
 const (
@@ -72,7 +76,7 @@ var textExts = map[string]bool{
 	".lua": true,
 	".php": true, ".phtml": true,
 	".r": true, ".R": true,
-	".jl": true,
+	".jl":  true,
 	".tcl": true,
 
 	// Shell
@@ -112,8 +116,8 @@ var textExts = map[string]bool{
 	// Build / CI
 	".cmake": true, ".make": true, ".mk": true,
 	".dockerfile": true,
-	".tf": true, ".hcl": true,
-	".nix": true,
+	".tf":         true, ".hcl": true,
+	".nix":   true,
 	".bazel": true, ".bzl": true,
 
 	// Package manifests / lock files
@@ -130,33 +134,33 @@ var textExts = map[string]bool{
 
 // Extensionless files that are known text.
 var textNames = map[string]bool{
-	"Makefile":     true,
-	"makefile":     true,
-	"GNUmakefile":  true,
-	"Dockerfile":   true,
-	"Containerfile": true,
-	"Rakefile":     true,
-	"Gemfile":      true,
-	"Podfile":      true,
-	"Vagrantfile":  true,
-	"Procfile":     true,
-	"Justfile":     true,
+	"Makefile":       true,
+	"makefile":       true,
+	"GNUmakefile":    true,
+	"Dockerfile":     true,
+	"Containerfile":  true,
+	"Rakefile":       true,
+	"Gemfile":        true,
+	"Podfile":        true,
+	"Vagrantfile":    true,
+	"Procfile":       true,
+	"Justfile":       true,
 	"CMakeLists.txt": true,
-	"CLAUDE.md":    true,
-	"LICENSE":      true,
-	"COPYING":      true,
-	"README":       true,
-	"CHANGELOG":    true,
-	"AUTHORS":      true,
-	"CONTRIBUTORS": true,
-	".gitignore":   true,
+	"CLAUDE.md":      true,
+	"LICENSE":        true,
+	"COPYING":        true,
+	"README":         true,
+	"CHANGELOG":      true,
+	"AUTHORS":        true,
+	"CONTRIBUTORS":   true,
+	".gitignore":     true,
 	".gitattributes": true,
-	".editorconfig": true,
-	".clang-format": true,
-	".clang-tidy":  true,
-	".eslintrc":    true,
-	".prettierrc":  true,
-	".babelrc":     true,
+	".editorconfig":  true,
+	".clang-format":  true,
+	".clang-tidy":    true,
+	".eslintrc":      true,
+	".prettierrc":    true,
+	".babelrc":       true,
 }
 
 // fileFilter holds a thread-safe, runtime-replaceable copy of the whitelist.
@@ -248,7 +252,7 @@ type readRangeParams struct {
 type rangeContent struct {
 	URI       string `json:"uri"`
 	Offset    int64  `json:"offset"`
-	Length    int64  `json:"length"`  // actual bytes returned (may be < requested at EOF)
+	Length    int64  `json:"length"` // actual bytes returned (may be < requested at EOF)
 	TotalSize int64  `json:"totalSize"`
 	Content   string `json:"content"` // base64-encoded bytes
 }
@@ -273,6 +277,16 @@ type writeFileParams struct {
 	URI      string `json:"uri"`
 	Content  string `json:"content"`
 	Encoding string `json:"encoding"`
+
+	// BaseMtime is the file mtime (UnixMilli) the client last synced this
+	// buffer at — from the fs/readFile that loaded it, or the previous
+	// fs/writeFile. The handler refuses the write if the file on disk has a
+	// different mtime now (it changed under the editor). 0 = no base, no check.
+	BaseMtime int64 `json:"baseMtime"`
+
+	// AllowEmpty overrides the truncation barrier: by default the handler
+	// refuses to overwrite an existing non-empty file with empty content.
+	AllowEmpty bool `json:"allowEmpty"`
 }
 
 // writeFileResult is returned on successful fs/writeFile.
@@ -675,16 +689,29 @@ func (h *FSHandler) handleSetFilter(write writeFn, id json.RawMessage, raw json.
 
 // handleWriteFile persists a UTF-8 or base64 payload to a resolved path.
 //
-// Shape:   { uri, content, encoding? }  ->  { uri, bytesWritten, mtime }
+// Shape:   { uri, content, encoding?, baseMtime?, allowEmpty? }  ->  { uri, bytesWritten, mtime }
 // Safety:  resolvePath enforces the project-root boundary (same as read).
-//          Refuses directories, refuses payloads over maxFileSize, and
-//          refuses utf-8 payloads that don't actually decode cleanly.
-// Atomicity: writes to "<target>.glyph3d.tmp" then os.Rename over the
-//          final path — on Linux this is atomic for same-filesystem
-//          replacement. If the rename fails the tmp is cleaned up.
+//
+//	Refuses directories, refuses payloads over maxFileSize, and
+//	refuses utf-8 payloads that don't actually decode cleanly.
+//
+// Correctness barriers:
+//   - stale write: if baseMtime is set and the file's mtime has moved
+//     since, refuse (errStaleWrite) rather than clobber an external
+//     change with a stale buffer.
+//   - truncation: refuse to overwrite a non-empty file with empty
+//     content unless allowEmpty is set (errWouldTruncate).
+//
+// Durability: renameio writes a randomly-named temp in the target's directory,
+//
+//	fsyncs it, then renames over the target — atomic and crash-safe
+//	against zero-length files. The existing file's mode is preserved;
+//	the parent directory is fsynced best-effort after the rename.
+//
 // Notification: on success, if a notify hook is wired, emits an
-//          fs/didChange RPC to the display so any open editor can
-//          round-trip-confirm the write (editable-3d-ide L0).
+//
+//	fs/didChange RPC to the display so any open editor can
+//	round-trip-confirm the write (editable-3d-ide L0).
 func (h *FSHandler) handleWriteFile(write writeFn, id json.RawMessage, raw json.RawMessage) {
 	var p writeFileParams
 	if err := json.Unmarshal(raw, &p); err != nil {
@@ -727,34 +754,60 @@ func (h *FSHandler) handleWriteFile(write writeFn, id json.RawMessage, raw json.
 		return
 	}
 
-	// If the target already exists, refuse if it's a directory. If it
-	// doesn't exist, that's fine — writeFile creates new files. We do
-	// NOT auto-mkdir parent directories yet (adds surface area; can be a
+	// Stat the target once — it drives three checks here (refuse a directory,
+	// detect a stale write, guard against catastrophic truncation) and a
+	// fourth inside renameio (preserve the existing file's mode). A stat error
+	// means the path doesn't exist yet — a fresh create, where all three skip.
+	// We do NOT auto-mkdir parent directories yet (adds surface area; can be a
 	// flag in a later phase if a real need appears).
-	if info, err := os.Stat(resolved); err == nil && info.IsDir() {
-		h.sendRPCError(write, id, errIsDirectory, "is a directory: "+p.URI, map[string]string{"uri": p.URI})
+	var existed bool
+	var curSize, curMtime int64
+	if info, err := os.Stat(resolved); err == nil {
+		if info.IsDir() {
+			h.sendRPCError(write, id, errIsDirectory, "is a directory: "+p.URI, map[string]string{"uri": p.URI})
+			return
+		}
+		existed = true
+		curSize = info.Size()
+		curMtime = info.ModTime().UnixMilli()
+	}
+
+	// Barrier 1 — stale write / lost update. BaseMtime is the mtime the client
+	// last synced this buffer at; if the file on disk has moved since (git pull,
+	// a formatter, another agent), refuse rather than clobber that change with
+	// our stale buffer. 0 means the client has no base → skip the check.
+	if existed && p.BaseMtime != 0 && p.BaseMtime != curMtime {
+		h.sendRPCError(write, id, errStaleWrite, "file changed on disk since it was opened: "+p.URI,
+			map[string]any{"uri": p.URI, "baseMtime": p.BaseMtime, "currentMtime": curMtime})
 		return
 	}
 
-	tmp := resolved + ".glyph3d.tmp"
+	// Barrier 2 — catastrophic truncation. Refuse to durably overwrite a
+	// non-empty file with nothing unless the caller opts in. Catches a buffer
+	// bug emptying the payload and atomically wiping a real file; clearing a
+	// file on purpose is a deliberate AllowEmpty.
+	if existed && curSize > 0 && len(data) == 0 && !p.AllowEmpty {
+		h.sendRPCError(write, id, errWouldTruncate,
+			"refusing to overwrite a non-empty file with empty content (set allowEmpty to override): "+p.URI,
+			map[string]any{"uri": p.URI, "currentSize": curSize})
+		return
+	}
 
-	// Write the full payload to tmp, then rename. 0644 matches the
-	// permissions os.ReadFile/os.WriteFile typically produce; if the
-	// destination already existed with different perms, os.Rename
-	// preserves the original inode's metadata only on some OSes —
-	// acceptable for L0; can be tightened with a stat+chmod pass later.
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
-		h.sendRPCError(write, id, errWriteFailed, "tmp write failed: "+err.Error(), map[string]string{"uri": p.URI, "tmp": tmp})
+	// Durable atomic replace via renameio: it writes a randomly-named temp in
+	// the target's directory, fsyncs it (the guarantee against a zero-length
+	// file after a crash), then renames over the target. WriteFile preserves
+	// the existing file's mode (exec bit, 0600 secrets); 0644 is only the
+	// fallback for a brand-new file. The random temp name also retires the old
+	// fixed-".glyph3d.tmp" concurrent-write race.
+	if err := renameio.WriteFile(resolved, data, 0644, renameio.WithTempDir(filepath.Dir(resolved))); err != nil {
+		h.sendRPCError(write, id, errWriteFailed, "atomic write failed: "+err.Error(), map[string]string{"uri": p.URI})
 		return
 	}
-	if err := os.Rename(tmp, resolved); err != nil {
-		// Clean up the orphaned tmp. Deliberately ignore the remove
-		// error — we're already in a failure path, the rename error is
-		// the one the caller needs.
-		_ = os.Remove(tmp)
-		h.sendRPCError(write, id, errWriteFailed, "rename failed: "+err.Error(), map[string]string{"uri": p.URI})
-		return
-	}
+	// renameio fsyncs the file but not the parent directory. fsync the dir too
+	// so the rename itself survives a crash — best-effort: the bytes are already
+	// durable, so a dir-sync failure (e.g. Windows directory handles) must not
+	// fail an otherwise-successful write.
+	syncDir(filepath.Dir(resolved))
 
 	// Stat the result so we can return mtime — some clients use it as
 	// a freshness token for the in-memory grid.
@@ -800,13 +853,13 @@ func (h *FSHandler) handleWriteFile(write writeFn, id json.RawMessage, raw json.
 // existence, with the project root taking precedence:
 //
 //  1. <root>/<path> exists           → that. The project always wins, so a repo
-//                                       with its own top-level tmp/ still
-//                                       addresses its own files (backward compat).
+//     with its own top-level tmp/ still
+//     addresses its own files (backward compat).
 //  2. <path> is under a reach root   → that. The escape hatch: a file an agent
-//                                       dropped in /tmp resolves to /tmp/foo.
+//     dropped in /tmp resolves to /tmp/foo.
 //  3. otherwise                      → <root>/<path>. Default to in-project so a
-//                                       NEW file (write/stat of a not-yet-created
-//                                       path) lands under the project root.
+//     NEW file (write/stat of a not-yet-created
+//     path) lands under the project root.
 //
 // ".." traversal is rejected up front, and every candidate is symlink-resolved
 // then re-checked against the allowed roots so a symlink can't tunnel out.
@@ -851,6 +904,19 @@ func (h *FSHandler) resolvePath(uri string) (string, error) {
 func pathExists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
+}
+
+// syncDir best-effort fsyncs a directory so a rename within it is durable
+// across a crash. Errors are intentionally swallowed: the file data is already
+// synced by the time we get here, this only hardens rename durability, and not
+// every platform/filesystem permits fsync on a directory handle (Windows).
+func syncDir(dir string) {
+	d, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	defer d.Close()
+	_ = d.Sync()
 }
 
 // ---- JSON-RPC Response Helpers ----

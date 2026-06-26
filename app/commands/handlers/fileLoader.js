@@ -22,7 +22,7 @@
  *
  * Public surface (kept deliberately small — a shared Surface protocol is the eventual home):
  *   renderSheetGrid(ctx, path)          classify + fetch + build + register one file → id
- *   addFileGrid(ctx, path, content)     register already-fetched text (openDir's batch path)
+ *   addFileGrid(ctx, path, content, mtime?)  register already-fetched text (openDir's batch path)
  *   addUnfetchedGrid(ctx, path, bytes)  register an oversize file as a placeholder from metadata
  */
 
@@ -67,13 +67,37 @@ function placeholderBody(reason) {
  * file is already open. `notRendered` marks placeholder/hex grids so file.save refuses to
  * write that synthetic text over the real file.
  */
-function registerFileGrid(ctx, path, body, notRendered) {
+/**
+ * Stash the disk mtime a grid's buffer is in sync with — the token file.save sends
+ * as baseMtime so the relay can refuse a write when the file changed on disk
+ * underneath us. Non-enumerable to keep grid serialization clean (mirrors
+ * _savedTextHash). Set at load (the fs/readFile stat) and after each save (the
+ * writeFile result's fresh mtime); a no-op when mtime is unknown (e.g. GitHub).
+ */
+export function setDiskMtime(grid, mtime) {
+    if (grid == null || mtime == null) return;
+    try {
+        Object.defineProperty(grid, '_diskMtime', { value: mtime, writable: true, configurable: true, enumerable: false });
+    } catch {
+        grid._diskMtime = mtime;
+    }
+}
+
+/** The disk mtime this grid's buffer is known in sync with, or null if never synced. */
+export function getDiskMtime(grid) {
+    return grid?._diskMtime ?? null;
+}
+
+function registerFileGrid(ctx, path, body, notRendered, mtime) {
     const uri = `file:///${String(path).replace(/^\/+/, '')}`;
     if ((ctx.registry.findByMeta?.('sourcePath', uri) || []).length) return null;
     const grid = new CodeGrid(ctx.scene, ctx.atlas, { name: path, worldScale: 0.025, ...gridTheme() });
     grid.setSourcePath(uri); // so file.save / fs/didChange refresh can find it
     if (notRendered) grid.userData.notRendered = notRendered;
     grid.loadFile(path, body);
+    // Real content only: a placeholder/hex grid's text is synthetic, never the file's
+    // bytes, so it carries no disk-sync token (and file.save is disabled for it anyway).
+    if (!notRendered) setDiskMtime(grid, mtime);
     // The single insertion point into the content tree: parent the grid under its directory
     // node BEFORE addGrid (so addGrid's `if (!grid.parent) scene.add` skips — the tree owns it).
     // The caller relayouts once after a batch.
@@ -81,10 +105,12 @@ function registerFileGrid(ctx, path, body, notRendered) {
     return ctx.addGrid(grid, { id: path, type: 'grid' }); // registers (scene.add skipped — parented)
 }
 
-/** Register fetched text content — unreadable content renders as a placeholder card. */
-export function addFileGrid(ctx, path, content) {
+/** Register fetched text content — unreadable content renders as a placeholder card.
+ *  `mtime` (optional) is the disk mtime the content was read at, stashed for the
+ *  save-time stale-write check; omit it for content with no disk identity (GitHub). */
+export function addFileGrid(ctx, path, content, mtime) {
     const reason = unreadableReason(content);
-    return registerFileGrid(ctx, path, reason ? placeholderBody(reason) : content, reason);
+    return registerFileGrid(ctx, path, reason ? placeholderBody(reason) : content, reason, mtime);
 }
 
 /** Register a placeholder from tree metadata alone — the file was never fetched (oversize). */
@@ -156,7 +182,15 @@ export async function renderSheetGrid(ctx, path) {
 
 /** Text path — fetch UTF-8, render as a CodeGrid (placeholder if oversize). */
 async function renderTextSheet(ctx, path, uri) {
-    const content = await ctx.fileProvider.getFile(path);
+    const fp = ctx.fileProvider;
+    // Prefer the stat-aware read so the grid learns the disk mtime it's synced to
+    // (the save-time stale-write token). Providers without it (GitHub) fall back to a
+    // plain content fetch — those grids carry no mtime and skip the stale check.
+    if (typeof fp.getFileWithStat === 'function') {
+        const { content, mtime } = await fp.getFileWithStat(path);
+        return addFileGrid(ctx, path, content, mtime) ?? racedId(ctx, uri);
+    }
+    const content = await fp.getFile(path);
     return addFileGrid(ctx, path, content) ?? racedId(ctx, uri);
 }
 

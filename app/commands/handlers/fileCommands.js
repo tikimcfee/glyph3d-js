@@ -17,7 +17,8 @@
 
 import { resolveGridByIdOrIndex, WORLD_FLOOR_Y } from './spatialHelpers.js';
 import { READABLE_MAX_CHARS } from '@glyph3d/core';
-import { renderSheetGrid, addFileGrid, addUnfetchedGrid } from './fileLoader.js';
+import { FS_ERROR_CODES } from '@glyph3d/core/services/data';
+import { renderSheetGrid, addFileGrid, addUnfetchedGrid, getDiskMtime, setDiskMtime } from './fileLoader.js';
 
 /**
  * Fast non-crypto content hash. FNV-1a 32-bit over the full string. Collision rate is
@@ -231,7 +232,13 @@ export default function registerFileCommands(router) {
     });
 
     router.register('file.save', async (args, ctx) => {
-        const r = resolveSaveTarget(ctx, args);
+        // --force (-f) overrides the relay's two correctness barriers: it skips the
+        // stale-write check (omits baseMtime) and permits an empty overwrite
+        // (allowEmpty). Strip it before positional resolution.
+        const force = args.includes('--force') || args.includes('-f');
+        const posArgs = args.filter(a => a !== '--force' && a !== '-f');
+
+        const r = resolveSaveTarget(ctx, posArgs);
         if (r.error) return { text: r.error, data: null };
         if (r.grid.userData?.notRendered) {
             return { text: `ERR: "${r.registryId}" is a not-rendered placeholder — its buffer is not the file's content; save disabled`, data: null };
@@ -246,18 +253,41 @@ export default function registerFileCommands(router) {
 
         const content = gridToText(r.grid);
 
-        ctx.status?.set(`Saving ${r.uri.replace(/^file:\/\//, '')}…`);
+        // baseMtime is the disk mtime this buffer last synced to (load, or a prior
+        // save); the relay refuses the write if disk has moved since — so we never
+        // clobber an external change with a stale buffer. --force omits it and opts
+        // into the empty-overwrite path.
+        const params = { uri: r.uri, content, encoding: 'utf8' };
+        if (force) {
+            params.allowEmpty = true;
+        } else {
+            const base = getDiskMtime(r.grid);
+            if (base != null) params.baseMtime = base;
+        }
+
+        const shortUri = r.uri.replace(/^file:\/\//, '');
+        const forceHint = `file.save ${r.registryId ?? r.idx ?? ''} --force`.replace(/\s+/g, ' ').trim();
+        ctx.status?.set(`Saving ${shortUri}…`);
         let result;
         try {
-            result = await ctx.wsbridge.rpcRequest('fs/writeFile', {
-                uri: r.uri,
-                content,
-                encoding: 'utf8',
-            });
+            result = await ctx.wsbridge.rpcRequest('fs/writeFile', params);
         } catch (err) {
+            const code = err.code ?? null;
+            if (code === FS_ERROR_CODES.StaleWrite) {
+                return {
+                    text: `ERR: ${shortUri} changed on disk since you opened it — reopen to pick up the change, or "${forceHint}" to overwrite it.`,
+                    data: { uri: r.uri, code, currentMtime: err.data?.currentMtime ?? null, baseMtime: err.data?.baseMtime ?? null },
+                };
+            }
+            if (code === FS_ERROR_CODES.WouldTruncate) {
+                return {
+                    text: `ERR: refusing to write empty content over non-empty ${shortUri} — "${forceHint}" if you really mean to clear it.`,
+                    data: { uri: r.uri, code, currentSize: err.data?.currentSize ?? null },
+                };
+            }
             return {
                 text: `ERR: fs/writeFile failed: ${err.message || err}`,
-                data: { uri: r.uri, code: err.code ?? null },
+                data: { uri: r.uri, code },
             };
         } finally {
             ctx.status?.clear();
@@ -277,6 +307,10 @@ export default function registerFileCommands(router) {
             r.grid._savedTextHash = contentHash(content);
         }
 
+        // Re-sync the disk-mtime token to the file we just wrote, so the NEXT save
+        // compares against this write — not the now-stale load-time mtime.
+        setDiskMtime(r.grid, result?.mtime);
+
         // Clear the live unsaved flag (the HUD's • marker) — content now matches disk.
         r.grid.markSaved?.();
 
@@ -292,8 +326,8 @@ export default function registerFileCommands(router) {
             },
         };
     }, {
-        description: 'Persist a grid\'s current text to disk via fs/writeFile',
-        usage: '[grid-id|index] [uri]',
+        description: 'Persist a grid\'s current text to disk via fs/writeFile (atomic + mode-preserving; refuses stale/empty overwrites — pass --force to override)',
+        usage: '[grid-id|index] [uri] [--force]',
         returns: '{ uri, bytesWritten, mtime, registryId, index }',
     });
 

@@ -38,12 +38,16 @@
  */
 
 // ---- JSON-RPC error codes (mirrored in cli/fs.go) ----
-const FS_ERROR_CODES = {
+export const FS_ERROR_CODES = {
     FileNotFound:     -32001,
     PermissionDenied: -32002,
     IsDirectory:      -32003,
     FileTooLarge:     -32004,
     NotText:          -32005,
+    WriteFailed:      -32006,
+    InvalidEncoding:  -32007,
+    StaleWrite:       -32008,  // file changed on disk since baseMtime (lost-update guard)
+    WouldTruncate:    -32009,  // refused: empty content over a non-empty file (set allowEmpty)
 };
 
 /**

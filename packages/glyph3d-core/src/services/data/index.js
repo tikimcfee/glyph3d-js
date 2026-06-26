@@ -5,6 +5,6 @@ export { GitHubRepositorySource, GitHubError, RateLimitError } from './GitHubRep
 export { RepositoryAdapter } from './RepositoryAdapter.js';
 export { RepositoryContentCache } from './RepositoryContentCache.js';
 export { HeatmapProvider } from './HeatmapProvider.js';
-export { FileSystemError } from './types.js';
+export { FileSystemError, FS_ERROR_CODES } from './types.js';
 export { RemoteFileSystemProvider } from './RemoteFileSystemProvider.js';
 export { GitHubFileProvider } from './GitHubFileProvider.js';

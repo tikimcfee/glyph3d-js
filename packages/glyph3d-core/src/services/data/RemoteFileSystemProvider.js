@@ -6,7 +6,11 @@
  * for transport. Mirrors RepositoryAdapter's public surface so the viewer
  * can swap providers without changing the grid creation / layout pipeline.
  *
- * Tier 1: read-only. writeFile / applyEdits throw PermissionDenied.
+ * Reads (readFile / readRange / listTree / stat) flow through here. Writes do
+ * NOT — file.save issues fs/writeFile on the bridge directly. The one write-side
+ * affordance this provider adds is getFileWithStat: it surfaces the disk mtime
+ * alongside content so the editor can stash a sync token for the save-time
+ * stale-write check (the GitHub adapter has no mtime and omits this method).
  */
 
 import { FileSystemError } from './types.js';
@@ -224,6 +228,21 @@ export class RemoteFileSystemProvider {
         const uri = `file:///${String(path).replace(/^\/+/, '')}`;   // strip leading slashes → canonical (matches file.open)
         const fc = await this.readFile(uri);
         return fc.content;
+    }
+
+    /**
+     * Like getFile, but also returns the disk mtime the content was read at —
+     * the sync token the editor stashes so a later fs/writeFile can pass it as
+     * baseMtime and the relay can refuse the write if the file changed on disk
+     * underneath us. Local-only; the GitHub adapter has no mtime and does not
+     * offer this method (callers feature-detect it).
+     * @param {string} path
+     * @returns {Promise<{ content: string, mtime: number|null }>}
+     */
+    async getFileWithStat(path) {
+        const uri = `file:///${String(path).replace(/^\/+/, '')}`;   // strip leading slashes → canonical (matches file.open)
+        const fc = await this.readFile(uri);
+        return { content: fc.content, mtime: fc.stat?.mtime ?? null };
     }
 
     /**

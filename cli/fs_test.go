@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // newTestHandler roots a handler at a temp project dir, with one extra reach
@@ -187,6 +188,181 @@ func mustJSON(t *testing.T, v any) json.RawMessage {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// callWriteFile invokes handleWriteFile and decodes the JSON-RPC envelope into
+// either a result (success) or an error object (rpcErr is nil on success). The
+// error map's "code" is a float64 (JSON number) — compare via int(...).
+func callWriteFile(t *testing.T, h *FSHandler, p writeFileParams) (*writeFileResult, map[string]any) {
+	t.Helper()
+	var captured []byte
+	h.handleWriteFile(func(data []byte) { captured = data }, json.RawMessage(`1`), mustJSON(t, p))
+	var resp struct {
+		Result *writeFileResult `json:"result"`
+		Error  map[string]any   `json:"error"`
+	}
+	if err := json.Unmarshal(captured, &resp); err != nil {
+		t.Fatalf("unmarshal write response: %v (raw: %s)", err, captured)
+	}
+	return resp.Result, resp.Error
+}
+
+func errCode(t *testing.T, rpcErr map[string]any) int {
+	t.Helper()
+	code, ok := rpcErr["code"].(float64)
+	if !ok {
+		t.Fatalf("error has no numeric code: %v", rpcErr)
+	}
+	return int(code)
+}
+
+// TestHandleWriteFile_NewFile is the happy path: a fresh file is created with
+// the right bytes, and renameio leaves no temp turds behind.
+func TestHandleWriteFile_NewFile(t *testing.T) {
+	h, root, _ := newTestHandler(t)
+	const body = "hello, disk\n"
+
+	res, rpcErr := callWriteFile(t, h, writeFileParams{URI: "file:///newfile.txt", Content: body})
+	if rpcErr != nil {
+		t.Fatalf("write errored: %v", rpcErr)
+	}
+	if res == nil || int(res.BytesWritten) != len(body) {
+		t.Fatalf("bytesWritten: got %+v, want %d", res, len(body))
+	}
+	got, err := os.ReadFile(filepath.Join(root, "newfile.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != body {
+		t.Errorf("content: got %q, want %q", got, body)
+	}
+	// The atomic-replace temp must be cleaned up — only the target remains.
+	entries, _ := os.ReadDir(root)
+	for _, e := range entries {
+		if e.Name() != "newfile.txt" {
+			t.Errorf("leftover file in root after write: %q", e.Name())
+		}
+	}
+}
+
+// TestHandleWriteFile_PreservesMode proves the renameio replace keeps the
+// existing file's mode — the exec bit on a script, and the tight 0600 on a
+// secrets file — rather than flattening everything to 0644.
+func TestHandleWriteFile_PreservesMode(t *testing.T) {
+	h, root, _ := newTestHandler(t)
+	cases := []struct {
+		name string
+		mode os.FileMode
+	}{
+		{"deploy.sh", 0o755},   // exec bit must survive a save
+		{"secrets.env", 0o600}, // a secret must NOT be widened to world-readable
+	}
+	for _, c := range cases {
+		target := filepath.Join(root, c.name)
+		if err := os.WriteFile(target, []byte("old\n"), c.mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(target, c.mode); err != nil { // defeat umask
+			t.Fatal(err)
+		}
+		_, rpcErr := callWriteFile(t, h, writeFileParams{URI: "file:///" + c.name, Content: "new\n"})
+		if rpcErr != nil {
+			t.Fatalf("%s: write errored: %v", c.name, rpcErr)
+		}
+		info, err := os.Stat(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != c.mode {
+			t.Errorf("%s: mode not preserved: got %o, want %o", c.name, got, c.mode)
+		}
+	}
+}
+
+// TestHandleWriteFile_StaleWrite is the lost-update barrier: a write whose
+// baseMtime no longer matches the file on disk is refused, and the on-disk
+// content is left exactly as the external writer left it.
+func TestHandleWriteFile_StaleWrite(t *testing.T) {
+	h, root, _ := newTestHandler(t)
+	target := filepath.Join(root, "notes.md")
+	if err := os.WriteFile(target, []byte("v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, _ := os.Stat(target)
+	base := info.ModTime().UnixMilli()
+
+	// Correct base → the write goes through.
+	res, rpcErr := callWriteFile(t, h, writeFileParams{URI: "file:///notes.md", Content: "v2\n", BaseMtime: base})
+	if rpcErr != nil {
+		t.Fatalf("write with correct base errored: %v", rpcErr)
+	}
+	if res == nil || res.BytesWritten != 3 {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+
+	// Something else changes the file underneath us (forced to a distinct mtime).
+	if err := os.WriteFile(target, []byte("external\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Unix(0, base*1e6).Add(5 * time.Second)
+	if err := os.Chtimes(target, future, future); err != nil {
+		t.Fatal(err)
+	}
+
+	// A write still carrying the OLD base must be refused.
+	_, rpcErr = callWriteFile(t, h, writeFileParams{URI: "file:///notes.md", Content: "v3\n", BaseMtime: base})
+	if rpcErr == nil {
+		t.Fatal("expected stale-write rejection")
+	}
+	if code := errCode(t, rpcErr); code != errStaleWrite {
+		t.Errorf("wrong error code: got %d, want %d (errStaleWrite)", code, errStaleWrite)
+	}
+	if got, _ := os.ReadFile(target); string(got) != "external\n" {
+		t.Errorf("stale write clobbered the file: got %q, want %q", got, "external\n")
+	}
+}
+
+// TestHandleWriteFile_TruncationBarrier is the empty-overwrite guard: empty
+// content over a non-empty file is refused unless allowEmpty is set; an empty
+// brand-new file is always fine.
+func TestHandleWriteFile_TruncationBarrier(t *testing.T) {
+	h, root, _ := newTestHandler(t)
+	target := filepath.Join(root, "data.json")
+	if err := os.WriteFile(target, []byte("{\"a\":1}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Empty over non-empty → refused, file untouched.
+	_, rpcErr := callWriteFile(t, h, writeFileParams{URI: "file:///data.json", Content: ""})
+	if rpcErr == nil {
+		t.Fatal("expected truncation rejection")
+	}
+	if code := errCode(t, rpcErr); code != errWouldTruncate {
+		t.Errorf("wrong code: got %d, want %d (errWouldTruncate)", code, errWouldTruncate)
+	}
+	if got, _ := os.ReadFile(target); string(got) != "{\"a\":1}\n" {
+		t.Errorf("file truncated despite barrier: got %q", got)
+	}
+
+	// allowEmpty → the deliberate clear is permitted.
+	res, rpcErr := callWriteFile(t, h, writeFileParams{URI: "file:///data.json", Content: "", AllowEmpty: true})
+	if rpcErr != nil {
+		t.Fatalf("allowEmpty write errored: %v", rpcErr)
+	}
+	if res == nil || res.BytesWritten != 0 {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+	if got, _ := os.ReadFile(target); len(got) != 0 {
+		t.Errorf("allowEmpty did not clear the file: got %q", got)
+	}
+
+	// Empty content to a brand-new path is always fine (no truncation to guard).
+	if _, rpcErr := callWriteFile(t, h, writeFileParams{URI: "file:///fresh-empty.txt", Content: ""}); rpcErr != nil {
+		t.Fatalf("empty new file errored: %v", rpcErr)
+	}
+	if _, err := os.Stat(filepath.Join(root, "fresh-empty.txt")); err != nil {
+		t.Errorf("empty new file not created: %v", err)
+	}
 }
 
 func TestResolvePath_TempDirReachableByDefault(t *testing.T) {

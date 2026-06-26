@@ -4,6 +4,7 @@ go 1.26.1
 
 require (
 	github.com/creack/pty v1.1.24
+	github.com/google/renameio/v2 v2.0.2
 	github.com/gorilla/websocket v1.5.3
 	go.lsp.dev/jsonrpc2 v1.0.0
 	go.lsp.dev/protocol v1.0.0
