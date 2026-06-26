@@ -37,7 +37,7 @@ export const STRATA_DEFAULTS = Object.freeze({
     boxBrightness: 1.0,   // master multiplier on the depth palette (dim ↔ vivid)
     clipLeadingWhitespace: true, // box left = scope's content edge, not the col-0 indentation
     minSlots:      2,     // skip boxing nodes smaller than this many glyphs
-    maxDepth:      16,    // recursion guard
+    maxDepth:      64,    // recursion guard — high enough to box deep nested closures/leaves
 });
 
 /** LIVE params — mutable copy every instance reads. setStrataParam mutates this + pushes

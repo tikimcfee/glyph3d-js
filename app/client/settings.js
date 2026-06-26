@@ -247,7 +247,7 @@ export const SETTINGS = [
   { key: 'strata.padFactor', label: 'Box padding (× line)', group: 'Strata', type: 'number', default: STRATA_DEFAULTS.padFactor, min: 0, max: 2, step: 0.05, apply: strataParam('padFactor') },
   { key: 'strata.clipLeadingWhitespace', label: 'Clip leading whitespace', group: 'Strata', type: 'bool', default: STRATA_DEFAULTS.clipLeadingWhitespace, apply: strataParam('clipLeadingWhitespace') },
   { key: 'strata.minSlots', label: 'Min glyphs per box', group: 'Strata', type: 'number', default: STRATA_DEFAULTS.minSlots, min: 1, max: 40, step: 1, apply: strataParam('minSlots') },
-  { key: 'strata.maxDepth', label: 'Max nesting depth', group: 'Strata', type: 'number', default: STRATA_DEFAULTS.maxDepth, min: 1, max: 24, step: 1, apply: strataParam('maxDepth') },
+  { key: 'strata.maxDepth', label: 'Max nesting depth', group: 'Strata', type: 'number', default: STRATA_DEFAULTS.maxDepth, min: 1, max: 64, step: 1, apply: strataParam('maxDepth') },
 ];
 
 /** Push a background restyle to every live grid/terminal of `type`. */
