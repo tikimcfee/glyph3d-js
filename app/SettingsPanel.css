@@ -1,0 +1,43 @@
+/* Settings sliders — thin, dark range inputs tuned to the chrome. The native track
+ * renders as a glaring light bar against the near-black panel; these draw a slim
+ * dark track (the chrome's hairline color) with a small accent thumb. Both the
+ * Chromium and Firefox pseudo-element sets are covered. */
+.glyph-range {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;   /* track is drawn by the pseudo-elements below */
+  height: 12px;
+  cursor: pointer;
+  margin: 0;
+}
+.glyph-range:focus { outline: none; }
+
+.glyph-range::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 2px;
+  background: #1b1f29;
+}
+.glyph-range::-moz-range-track {
+  height: 3px;
+  border-radius: 2px;
+  background: #1b1f29;
+}
+
+.glyph-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 9px;
+  height: 9px;
+  margin-top: -3px;          /* center the 9px thumb on the 3px track */
+  border-radius: 50%;
+  background: #4a7f9a;
+}
+.glyph-range::-moz-range-thumb {
+  width: 9px;
+  height: 9px;
+  border: none;
+  border-radius: 50%;
+  background: #4a7f9a;
+}
+.glyph-range:hover::-webkit-slider-thumb { background: #5a96b3; }
+.glyph-range:hover::-moz-range-thumb { background: #5a96b3; }

@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { SETTINGS, getSetting } from './client/settings.js';
+import './SettingsPanel.css';
 
 // SettingsPanel — the IDE's settings surface. Renders the shared SETTINGS schema
 // (one row per knob, grouped) and writes through the bus (settings.set / reset),
@@ -36,9 +37,10 @@ const styles = {
     width: 64, font: 'inherit', color: '#c8ccd6', background: '#0f141b',
     border: '1px solid #232b34', borderRadius: 4, padding: '2px 5px', outline: 'none', textAlign: 'right',
   },
-  // Slider under each numeric row: min/max bounds flank an accent-tinted range input.
-  sliderRow: { display: 'flex', alignItems: 'center', gap: 6, padding: '0 2px 5px' },
-  slider: { flex: '1 1 auto', minWidth: 0, height: 16, cursor: 'pointer', accentColor: '#4a7f9a' },
+  // Slider under each numeric row: min/max bounds flank a slim dark range input
+  // (appearance styled in SettingsPanel.css via .glyph-range).
+  sliderRow: { display: 'flex', alignItems: 'center', gap: 6, padding: '0 2px 3px' },
+  slider: { flex: '1 1 auto', minWidth: 0 },
   bound: { flex: '0 0 auto', fontSize: 9, color: '#5c6675', fontVariantNumeric: 'tabular-nums', minWidth: 28 },
   swatch: {
     width: 32, height: 20, padding: 0, background: '#0f141b',
@@ -156,6 +158,7 @@ export default function SettingsPanel({ client }) {
                     <span style={{ ...styles.bound, textAlign: 'right' }}>{def.min}</span>
                     <input
                       type="range"
+                      className="glyph-range"
                       style={styles.slider}
                       min={def.min} max={def.max} step={def.step}
                       value={Number.isFinite(parseFloat(vals[def.key])) ? parseFloat(vals[def.key]) : def.default}
