@@ -7,8 +7,9 @@
  * by typing them, which is how this whole spine is verified.
  *
  *   agent.tool     <id> <type> <ToolName> [inputJSON] [responseJSON] [cwd]  raw tool event → normalized record
+ *   agent.message  <id> <type> <kind> <text>         a conversation block (text/thinking) → say/think moment
  *   agent.activity <id> <type> <action> [target] [detail] [result]   the normalized record directly (manual/CLI/tests)
- *       (detail/result with spaces ride the `call` base64 hatch)
+ *       (detail/result/text with spaces ride the `call` base64 hatch)
  *   agent.state    <id> <active|idle|stalled|done>  set lifecycle state
  *   agent.stop     <id>                             mark finished ('done' — PERSISTS)
  *   agent.clear    <id|all|done>                    remove visitor(s) from the field
@@ -18,7 +19,7 @@
  */
 
 import { resolveGridByIdOrIndex } from './spatialHelpers.js';
-import { normalizeToolCall } from '@glyph3d/core/collections/toolRegistry.js';
+import { normalizeToolCall, normalizeMessage } from '@glyph3d/core/collections/toolRegistry.js';
 
 const noMgr = { text: 'ERR: visitor manager not wired', data: null };
 
@@ -95,6 +96,27 @@ export default function registerAgentVisitorCommands(router) {
             data: { id, action: rec.action, target: label, detail: rec.detail },
         };
     }, { description: 'Agent tool call (raw event) — normalized via the tool registry, then logged', usage: '<id> <type> <ToolName> [inputJSON] [responseJSON] [cwd]' });
+
+    router.register('agent.message', (args, ctx) => {
+        const mgr = ctx.visitorManager;
+        if (!mgr) return noMgr;
+        if (args.length < 4) {
+            return { text: 'ERR: usage: agent.message <id> <type> <kind> <text>', data: null };
+        }
+        // A conversation turn — the agent's prose, not a tool call. The hook reads `text`/`thinking`
+        // blocks off the transcript and forwards them here (same pure-transport contract as agent.tool):
+        // the ONE registry maps kind→action (say/think) + gist/full. text rides the `call` hatch so its
+        // newlines/quotes survive the tokenizer. A whitespace-only block drops (normalizeMessage → null).
+        const [id, type, kind] = args;
+        const text = typeof args[3] === 'string' ? args[3] : String(args[3] ?? '');
+        const rec = normalizeMessage(kind, text);
+        if (!rec) return { text: `OK: ${kind} dropped (empty)`, data: { dropped: kind } };
+        emitActivity(ctx, mgr, id, type, rec);
+        return {
+            text: `OK: ${id} ${rec.action}${rec.detail ? ' ' + rec.detail : ''}`,
+            data: { id, action: rec.action, detail: rec.detail },
+        };
+    }, { description: 'Agent conversation turn (text/thinking) → a say/think moment in the trail', usage: '<id> <type> <kind> <text>' });
 
     router.register('agent.spawn', (args, ctx) => {
         const mgr = ctx.visitorManager;

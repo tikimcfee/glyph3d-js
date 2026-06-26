@@ -58,7 +58,7 @@ export default function registerTrailCommands(router) {
         // then numbers, else the raw string.
         t.cfg[key] = (val === 'true' || val === 'false') ? (val === 'true')
                    : Number.isFinite(n) ? n : val;
-        t._relayout?.();   // re-flow the existing trail immediately
+        (t.applyScales || t._relayout)?.call(t);   // re-scale live (header/info) + re-flow the trail
         return { text: `OK: trail.${key} = ${t.cfg[key]} (re-flowed)`, data: { [key]: t.cfg[key] } };
     }, { description: 'Get or set a trail layout constant — re-flows the trail live', usage: '[key value]' });
 }

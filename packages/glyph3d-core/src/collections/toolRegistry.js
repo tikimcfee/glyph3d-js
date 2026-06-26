@@ -196,6 +196,35 @@ export function normalizeToolCall(name, input = {}, response = null, cwd = '') {
     return { action, target, detail, result, meta };
 }
 
+// --- conversation blocks: an assistant turn's PROSE → the same record shape ------------------------
+// A turn is not only its tool calls — it's the reasoning and speech around them. The hook reads
+// `text` / `thinking` blocks from the session transcript (it already has transcript_path) and
+// forwards them through the SAME agent.* path as the tools; the offline replay can forward them too.
+// So this is the one home for "an assistant block → a record", the sibling of normalizeToolCall:
+// a `text` block becomes a `say` moment (what the agent told you), a `thinking` block a `think`
+// moment (its interior reasoning, whether or not a tool followed).
+//
+// The FULL prose rides as the moment's body — NEVER truncated. It takes the same target-less path a
+// bash/grep output does ("nothing is truncated here; the grid's layout system does the line-splitting
+// and any framing"), so the words are all there to read; you fly into the card. The headline is just
+// the role tag. No previews, no gist, no '…' — clamping the corpus is the layout's job, not ours.
+
+/**
+ * Normalize one assistant conversation block into the trail's record fields. Pure, so the replay
+ * and the unit tests import it alongside normalizeToolCall.
+ * @param {string} kind  the transcript block type: 'text' | 'thinking'
+ * @param {string} text  the block's prose
+ * @returns {{action:string, target:string, detail:string, result:string, meta:null}|null}
+ *          null for an empty/whitespace block the caller should drop.
+ */
+export function normalizeMessage(kind, text) {
+    const full = String(text ?? '').trim();
+    if (!full) return null;
+    const action = String(kind).toLowerCase() === 'thinking' ? 'think' : 'say';
+    // result = the whole block, verbatim; no detail/headline preview (that was a truncation seam).
+    return { action, target: '', detail: '', result: full, meta: null };
+}
+
 /**
  * Highlight directives for a snapshot grid, given a record's action + normalized meta.
  * @param {string} action  normalized action (read/edit/…)

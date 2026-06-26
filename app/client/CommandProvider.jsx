@@ -281,6 +281,9 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // Spatial trail: every agent action leaves a card receding into depth, the file it
     // touched on a parallel rail, tethered. Subscribes to visitorManager.onActivity.
     state.ctx.agentTrail = new AgentTrail(state.ctx).attach(state.ctx.visitorManager);
+    // Fold the persisted Trail card-scale settings into the freshly-built trail (its apply()s
+    // otherwise fire only on a user change), so tuned sizes hold from boot.
+    applyGroupSettings(state.ctx, 'Trail');
 
     // Camera-locked HUD dock: a bar of window tiles that rides the view. Reparents
     // a docked grid/terminal under itself (world-preserving attach) and scales it to

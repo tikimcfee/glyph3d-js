@@ -14,9 +14,11 @@
  * provider); the rendered grids are independent. Content is fetched at the moment of the
  * action (correct for live watching; faithful replay would capture content in the record).
  *
- * Fed by FieldVisitorManager.onActivity (one payload per record). Today's hook stream is
- * tool-calls only — grouping moments into per-turn SHEETS (the blueprint-volume model) is a
- * follow-on once turn boundaries are forwarded.
+ * Fed by FieldVisitorManager.onActivity (one payload per record). The hook stream carries both the
+ * agent's TOOL CALLS and its CONVERSATION — `text` blocks deck as `say` moments, `thinking` blocks
+ * as `think` moments (read off the transcript and forwarded just ahead of the tool they led to). So
+ * the corridor reads as a faithful forward of the run: reasoning, speech, and action interleaved in
+ * time. Grouping a turn's moments into per-turn SHEETS (the blueprint-volume model) is the next step.
  */
 
 import * as THREE from 'three';
@@ -38,6 +40,7 @@ export const TRAIL_DEFAULTS = {
     callScale: 3.0,             // gridScale for the action headline — the readable HEADLINE (big glyphs, few lines)
     infoScale: 1.5,             // gridScale for the info column — readable, subordinate to the action headline
     artifactWorldScale: 0.025,  // worldScale for parse-mapping (snapshot) cards (fine-print document you fly into)
+    messageScale: 0.05,         // worldScale for say/think conversation cards — its OWN knob (prose is meant to read bigger than a fine-print artifact)
     snapshotImageWidth: 40,     // world width of an image snapshot quad (height follows aspect)
     maxConnections: 512,        // tether budget
     showTethers: true,          // draw a call→snapshot beam per moment
@@ -64,6 +67,8 @@ export const TRAIL_DEFAULTS = {
         edit:   { r: 0.90, g: 0.66, b: 0.36 },
         write:  { r: 0.90, g: 0.66, b: 0.36 },
         run:    { r: 0.44, g: 0.76, b: 0.46 },
+        say:    { r: 0.92, g: 0.94, b: 0.98 },   // near-white — the agent SPEAKING (its reply to you)
+        think:  { r: 0.58, g: 0.52, b: 0.78 },   // dim violet — interior REASONING (the thinking turns)
         other:  { r: 0.62, g: 0.64, b: 0.68 },
     },
 };
@@ -72,9 +77,13 @@ const READ_RE   = /^(read|cat|view|open)$/;
 const SEARCH_RE = /^(grep|search|glob|rg|find|ls)$/;
 const EDIT_RE   = /^(edit|write|multiedit|notebookedit|create)$/;
 const RUN_RE    = /^(bash|run|shell|exec|task)$/;
+const SAY_RE    = /^(say|text|message)$/;
+const THINK_RE  = /^(think|thinking|reason)$/;
 
 function classify(action) {
     const a = String(action || '').toLowerCase();
+    if (SAY_RE.test(a)) return 'say';
+    if (THINK_RE.test(a)) return 'think';
     if (READ_RE.test(a)) return 'read';
     if (SEARCH_RE.test(a)) return 'search';
     if (EDIT_RE.test(a)) return 'edit';
@@ -183,7 +192,10 @@ export default class AgentTrail {
             columns.push(info);
         }
 
-        let snapshot = null, hasSnapPick = false;
+        // snapScaleKey names the cfg knob that drives this body card's worldScale, so applyScales can
+        // re-size it live (an image sizes by width, not a worldScale — left null; new image moments
+        // pick up the width).
+        let snapshot = null, hasSnapPick = false, snapScaleKey = null;
         if (record.target) {
             // A snapshot is whatever the target file IS, as-of now: an image renders as a frame,
             // everything else as a text/hex card (same classifier as file.open — [[fileLoader]]).
@@ -192,12 +204,14 @@ export default class AgentTrail {
                 snapshot = this._imageSnapshot(record.target, kind.format);   // image picking = a follow-on (FrameGrid)
             } else {
                 snapshot = this._makeGrid(record.target, { worldScale: this.cfg.artifactWorldScale });
+                snapScaleKey = 'artifactWorldScale';
                 this._loadSnapshot(snapshot, record, { id: snapId, meta: { ...meta, kind: 'snap' } });   // ONE fetch + load, decorate, then register
                 hasSnapPick = true;
             }
             columns.push(snapshot);
         } else if (pullOutput) {
             snapshot = this._outputSnapshot(record, { id: snapId, meta: { ...meta, kind: 'snap' } });   // the command's output as a sibling grid
+            snapScaleKey = (record.action === 'say' || record.action === 'think') ? 'messageScale' : 'artifactWorldScale';
             columns.push(snapshot);
             hasSnapPick = true;
         }
@@ -208,7 +222,7 @@ export default class AgentTrail {
         const moment = new VStack({ spacing: this.cfg.rowGap, align: 0, children: body ? [action, body] : [action] });
         lane.corridor.add(moment);
         const tetherId = snapshot ? `tether:${agentId}:${seq}` : null;
-        lane.moments.push({ moment, body, action, info, snapshot, hue, tetherId, actionId, infoId: info ? infoId : null, snapId: hasSnapPick ? snapId : null });
+        lane.moments.push({ moment, body, action, info, snapshot, snapScaleKey, hue, tetherId, actionId, infoId: info ? infoId : null, snapId: hasSnapPick ? snapId : null });
         // BIND the tether to the action card and its parse mapping — it resolves their world
         // positions each frame, so it follows layout, scroll, and corridor drags with no re-tether.
         if (tetherId) this.conn.set(tetherId, action, snapshot, hue);
@@ -232,6 +246,31 @@ export default class AgentTrail {
     }
 
     update() { this.conn.refresh(); }
+
+    /**
+     * Re-apply the current cfg SCALES to the whole live trail — the one entry the `trail.config` verb
+     * and the Settings rows both route through, so dialing any 'card size' updates every existing
+     * moment, not just new ones. The gridScale cards (action HEADLINE + info column) re-scale directly
+     * via setScale. The worldScale body cards (snapshot / output / say-think) bake their glyph layout
+     * at build, so a uniform transform re-sizes them: the desired worldScale ÷ the one baked into the
+     * card. config.worldScale never moves (setScale drives gridScale), so this stays correct across
+     * repeated tweaks; an image card (no config.worldScale) is left alone. Then re-flow so the new
+     * footprints re-pack and the tethers follow.
+     */
+    applyScales() {
+        for (const lane of this.lanes.values()) {
+            for (const e of lane.moments) {
+                e.action?.setScale?.(this.cfg.callScale);
+                e.info?.setScale?.(this.cfg.infoScale);
+                if (e.snapScaleKey && typeof e.snapshot?.setScale === 'function') {
+                    const built = e.snapshot.config?.worldScale;
+                    const target = this.cfg[e.snapScaleKey];
+                    if (built > 0 && target > 0) e.snapshot.setScale(target / built);
+                }
+            }
+        }
+        this._relayout();
+    }
 
     clear(which = 'all') {
         const kill = (lane) => {
@@ -391,7 +430,13 @@ export default class AgentTrail {
      */
     _outputSnapshot(record, pick) {
         // The output ONLY — the command lives on the call card, never echoed here (one home each).
-        return this._card('output', String(record.result ?? ''), { worldScale: this.cfg.artifactWorldScale }, pick);
+        // A say/think moment carries prose, not command output: name its card for what it is so the
+        // fly-in body reads 'said'/'thinking', not 'output', and size it by the message scale (its own
+        // knob — conversation reads bigger than a fine-print artifact). Other outputs keep the artifact scale.
+        const isMessage = record.action === 'say' || record.action === 'think';
+        const name = record.action === 'say' ? 'said' : record.action === 'think' ? 'thinking' : 'output';
+        const worldScale = isMessage ? this.cfg.messageScale : this.cfg.artifactWorldScale;
+        return this._card(name, String(record.result ?? ''), { worldScale }, pick);
     }
 
     /** Per-action snapshot: the file's content AS-OF this moment (loaded ONCE), with touched lines lit
