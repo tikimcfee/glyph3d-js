@@ -30,6 +30,8 @@ const styles = {
   },
   body: { padding: '6px 8px 12px', overflowY: 'auto', flex: '1 1 auto' },
   group: { color: '#5c6675', textTransform: 'uppercase', fontSize: 10, letterSpacing: '0.08em', margin: '12px 2px 4px' },
+  // Hairline separator above each section after the first (uses the chrome divider color).
+  groupSep: { borderTop: '2px solid #1b1f29', marginTop: 16, paddingTop: 12 },
   row: { display: 'flex', alignItems: 'center', gap: 8, padding: '3px 2px' },
   label: { flex: '1 1 auto', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   reload: { color: '#caa14a', fontSize: 10, flex: '0 0 auto' },
@@ -111,9 +113,9 @@ export default function SettingsPanel({ client }) {
         <button type="button" style={styles.reset} onClick={reset} title="reset all settings to defaults">reset</button>
       </div>
       <div style={styles.body}>
-        {groups.map(([group, defs]) => (
+        {groups.map(([group, defs], gi) => (
           <div key={group}>
-            <div style={styles.group}>{group}</div>
+            <div style={gi === 0 ? styles.group : { ...styles.group, ...styles.groupSep }}>{group}</div>
             {defs.map((def) => (
               <div key={def.key}>
                 <div style={styles.row}>
