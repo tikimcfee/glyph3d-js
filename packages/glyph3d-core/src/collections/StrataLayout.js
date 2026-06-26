@@ -147,7 +147,7 @@ export class StrataLayout {
             if (!range) continue;
             const z = depth * zStep;
             for (let s = range.start; s < range.end; s++) pos[s * 3 + 2] = z;
-            boxes.push({ start: range.start, count: range.end - range.start, depth, z });
+            boxes.push({ start: range.start, count: range.end - range.start, depth, z, node });
         }
         r.markInstanceTransformsDirty();
 
@@ -207,11 +207,34 @@ export class StrataLayout {
         return -1;
     }
 
+    /** Leftmost CONTENT x for a node: the min, over its lines, of the first non-whitespace
+     *  glyph's x (respecting the node's start col on its first line, and its end col on its
+     *  last). Clips the leading indentation whitespace that otherwise drags the box to col 0. */
+    _contentLeftX(node, pos) {
+        if (!pos || !node) return null;
+        const lines = this._grid.lines || [];
+        let minX = Infinity;
+        for (let L = node.start.line; L <= node.end.line; L++) {
+            const src = lines[L] ?? '';
+            let c = 0;
+            while (c < src.length && (src[c] === ' ' || src[c] === '\t')) c++;
+            if (c >= src.length) continue;                          // blank / whitespace-only line
+            if (L === node.start.line && node.start.col > c) c = node.start.col;
+            if (L === node.end.line && node.end.col <= c) continue; // node ends before content here
+            const slot = this._grid.getSlotForChar(L, c);
+            if (slot < 0) continue;
+            const x = pos[slot * 3];
+            if (x < minX) minX = x;
+        }
+        return minX === Infinity ? null : minX;
+    }
+
     /** Rebuild the batched box LineSegments — 4 edges (8 verts) per node. */
     _rebuildBoxes(r, boxes, pad) {
         if (!boxes.length) { this._clearBoxes(); return; }
         const bright = this.cfg.boxBrightness;
         const siz = r.getInstanceSizes?.();           // glyph cell heights — for the centering fix
+        const pos = r.getInstancePositions?.();        // for the content-left (whitespace-clip)
         const cap = boxes.length * 8;                 // 4 edges × 2 verts
         const posArr = new Float32Array(cap * 3);
         const colArr = new Float32Array(cap * 3);
@@ -225,7 +248,12 @@ export class StrataLayout {
             // overlap). Shift down by half a cell to hug the actual glyphs. (X is left-aligned via
             // alignOffset = iSize.x/2, so its corner-style bounds already match the visible cell.)
             const half = (siz ? (siz[b.start * 2 + 1] || 0) : 0) * 0.5;
-            const x0 = bb.min.x - pad, y0 = bb.min.y - half - pad;
+            // Clip the left edge to the scope's leading-most CONTENT (its indentation), not to
+            // column 0 — every indented body line's leading spaces are glyphs at col 0, so the raw
+            // bounds drag the box all the way left. _contentLeftX takes the min over the node's
+            // lines of the first non-whitespace glyph's x. Falls back to the raw bounds if unknown.
+            const leftX = this._contentLeftX(b.node, pos);
+            const x0 = (leftX != null ? leftX : bb.min.x) - pad, y0 = bb.min.y - half - pad;
             const x1 = bb.max.x + pad, y1 = bb.max.y - half + pad;
             const z = b.z;
             const c = DEPTH_COLORS[b.depth % DEPTH_COLORS.length];
