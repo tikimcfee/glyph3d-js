@@ -62,12 +62,12 @@ export default class SlugEncoder {
      * hot-swap when nothing changed.
      *
      * @param {Iterable<number>} glyphIds
-     * @returns {{ curveTexture, glyphMapTexture, stats, added: number, grew: boolean }}
+     * @returns {{ curveTexture, glyphMapTexture, stats, added: number, addedIds: number[], grew: boolean }}
      */
     appendGlyphs(glyphIds) {
-        const { added } = this._buffer.addGlyphs(this._shaper, glyphIds);
-        if (added === 0) return { ...(this._lastTextures || this._buildTextures()), added: 0, grew: false };
-        return { ...this._buildTextures(), added, grew: true };
+        const { added, addedIds } = this._buffer.addGlyphs(this._shaper, glyphIds);
+        if (added === 0) return { ...(this._lastTextures || this._buildTextures()), added: 0, addedIds: [], grew: false };
+        return { ...this._buildTextures(), added, addedIds, grew: true };
     }
 
     /** @private Wrap the accumulator's current views in DataTextures + stats. */

@@ -61,13 +61,14 @@ export class SlugBuffer {
      * @returns {{ added: number }}
      */
     addGlyphs(shaper, glyphIds) {
-        let added = 0, overhangCount = 0, worstFrac = 0, worstId = -1, worstName = '';
+        let overhangCount = 0, worstFrac = 0, worstId = -1, worstName = '';
+        const addedIds = [];
         for (const glyphId of glyphIds) {
             if (glyphId <= 0 || this._encoded.has(glyphId)) continue; // .notdef has no curves; dupes are done
             const data = encodeGlyph(shaper, glyphId);
             this._append(shaper, glyphId, data);
             this._encoded.add(glyphId);
-            added++;
+            addedIds.push(glyphId);
             if (data.overhang) {
                 overhangCount++;
                 if (data.overhang.frac > worstFrac) {
@@ -75,6 +76,7 @@ export class SlugBuffer {
                 }
             }
         }
+        const added = addedIds.length;
         // One aggregated note for the NEW overhangers (ink clipped at the cell edge — benign for a
         // clean monospace). Replaces the per-glyph console.warn that re-fired on every re-encode.
         if (overhangCount > 0) {
@@ -83,7 +85,7 @@ export class SlugBuffer {
                 `(ink clipped at the edge; benign for monospace) — worst: ${worstId} ("${worstName}") +${(worstFrac * 100).toFixed(1)}%`
             );
         }
-        return { added };
+        return { added, addedIds };
     }
 
     /** @private Pack one glyph's curves at the cursor + write its glyph-map entry. */

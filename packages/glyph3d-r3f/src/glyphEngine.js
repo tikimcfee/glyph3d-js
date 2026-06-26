@@ -44,6 +44,8 @@ const LARGE_CORE_RANGES = [
   [0x0300, 0x036f], // combining diacriticals
   [0x0370, 0x03ff], // Greek
   [0x0400, 0x04ff], // Cyrillic
+  [0x0590, 0x05ff], // Hebrew
+  [0x0600, 0x06ff], // Arabic
   [0x1e00, 0x1eff], // Latin Extended Additional
   [0x2000, 0x206f], // general punctuation
   [0x2070, 0x20cf], // super/subscripts + currency
@@ -59,8 +61,10 @@ const LARGE_CORE_RANGES = [
   [0x2700, 0x27bf], // dingbats
   [0x2800, 0x28ff], // braille patterns
   [0x2900, 0x297f], // supplemental arrows-B
+  [0x2a00, 0x2aff], // supplemental mathematical operators
   [0x2b00, 0x2bff], // misc symbols & arrows
   [0xe0a0, 0xe0d4], // powerline (private use)
+  [0xfff0, 0xffff], // specials (replacement char U+FFFD)
 ];
 
 /** Sensible defaults — explicit, overridable, and documented (not hidden). */

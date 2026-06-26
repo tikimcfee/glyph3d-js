@@ -107,9 +107,13 @@ export default class LiveSlugAtlas {
             }
         }
 
+        // Name the new glyphs so it's visible WHAT grew (→ decide if it belongs in the boot core).
+        const ids = res.addedIds || [];
+        const names = ids.slice(0, 24).map((id) => (this._shaper.glyphName?.(id)) || id).join(', ');
+        const more = ids.length > 24 ? ` …+${ids.length - 24}` : '';
         console.log(
-            `[LiveSlugAtlas] grew v${this._version}: +${res.added} → ${this._encoder.size} glyphs, ` +
-            `${updated}/${this._fields.size} fields hot-swapped`
+            `[LiveSlugAtlas] grew v${this._version}: +${res.added} → ${this._encoder.size} glyphs ` +
+            `[${names}${more}], ${updated}/${this._fields.size} fields hot-swapped`
         );
         return { grew: true, added: res.added, total: this._encoder.size };
     }
