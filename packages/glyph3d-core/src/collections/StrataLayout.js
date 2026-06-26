@@ -35,6 +35,7 @@ export const STRATA_DEFAULTS = Object.freeze({
     padFactor:     0.35,  // box outset around a node's glyph bounds (× lineSpacing)
     boxOpacity:    0.28,  // translucent — borders recede behind the glyphs (text stays primary)
     boxBrightness: 1.0,   // master multiplier on the depth palette (dim ↔ vivid)
+    clipLeadingWhitespace: true, // box left = scope's content edge, not the col-0 indentation
     minSlots:      2,     // skip boxing nodes smaller than this many glyphs
     maxDepth:      16,    // recursion guard
 });
@@ -252,7 +253,7 @@ export class StrataLayout {
             // column 0 — every indented body line's leading spaces are glyphs at col 0, so the raw
             // bounds drag the box all the way left. _contentLeftX takes the min over the node's
             // lines of the first non-whitespace glyph's x. Falls back to the raw bounds if unknown.
-            const leftX = this._contentLeftX(b.node, pos);
+            const leftX = this.cfg.clipLeadingWhitespace ? this._contentLeftX(b.node, pos) : null;
             const x0 = (leftX != null ? leftX : bb.min.x) - pad, y0 = bb.min.y - half - pad;
             const x1 = bb.max.x + pad, y1 = bb.max.y - half + pad;
             const z = b.z;

@@ -245,6 +245,7 @@ export const SETTINGS = [
   { key: 'strata.boxBrightness', label: 'Border brightness', group: 'Strata', type: 'number', default: STRATA_DEFAULTS.boxBrightness, min: 0, max: 2, step: 0.05, apply: strataParam('boxBrightness') },
   { key: 'strata.zStepFactor', label: 'Depth step (× line)', group: 'Strata', type: 'number', default: STRATA_DEFAULTS.zStepFactor, min: 0, max: 8, step: 0.1, apply: strataParam('zStepFactor') },
   { key: 'strata.padFactor', label: 'Box padding (× line)', group: 'Strata', type: 'number', default: STRATA_DEFAULTS.padFactor, min: 0, max: 2, step: 0.05, apply: strataParam('padFactor') },
+  { key: 'strata.clipLeadingWhitespace', label: 'Clip leading whitespace', group: 'Strata', type: 'bool', default: STRATA_DEFAULTS.clipLeadingWhitespace, apply: strataParam('clipLeadingWhitespace') },
   { key: 'strata.minSlots', label: 'Min glyphs per box', group: 'Strata', type: 'number', default: STRATA_DEFAULTS.minSlots, min: 1, max: 40, step: 1, apply: strataParam('minSlots') },
   { key: 'strata.maxDepth', label: 'Max nesting depth', group: 'Strata', type: 'number', default: STRATA_DEFAULTS.maxDepth, min: 1, max: 24, step: 1, apply: strataParam('maxDepth') },
 ];
