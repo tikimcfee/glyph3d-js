@@ -206,17 +206,25 @@ function ConnectionChip({ client }) {
   );
 }
 
-export default function ButtonBar({ client, onOpenPalette, dockHidden, onToggleDock }) {
+export default function ButtonBar({ client, onOpenPalette, dockHidden, onToggleDock, dockMode, onToggleDockMode }) {
   return (
     <div style={styles.bar}>
       <button
         type="button"
-        title="hide / show the panel dock (slides over the field)"
+        title="hide / show the panel dock"
         style={styles.btn(true)}
         onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255,255,255,0.07)'; }}
         onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255,255,255,0.03)'; }}
         onClick={onToggleDock}
       >{dockHidden ? 'show ›' : 'hide ‹'}</button>
+      <button
+        type="button"
+        title={`dock mode: ${dockMode} — click to switch to ${dockMode === 'overlay' ? 'inline (splits the row)' : 'overlay (floats over the field)'}`}
+        style={styles.btn(true)}
+        onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255,255,255,0.07)'; }}
+        onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255,255,255,0.03)'; }}
+        onClick={onToggleDockMode}
+      >{dockMode === 'overlay' ? 'overlay' : 'inline'}</button>
       <PanelsMenu client={client} />
       <button
         type="button"

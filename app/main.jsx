@@ -81,6 +81,9 @@ function App() {
   // should survive a reload even in client-only mode.
   const [dockW, setDockW] = useState(() => stateController.get('chrome.dockWidth', 320));
   const [dockHidden, setDockHidden] = useState(() => stateController.get('chrome.dockHidden', false));
+  // 'overlay' = dock floats over a constant-size canvas (slides to hide); 'inline' =
+  // dock is a flex sibling that splits the row (canvas reflows to the rest).
+  const [dockMode, setDockMode] = useState(() => stateController.get('chrome.dockMode', 'overlay'));
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [showMinimap, setShowMinimap] = useState(() => getSetting('view.minimap'));
   const [, forceSettings] = useReducer((x) => x + 1, 0);   // re-read live settings on a change
@@ -125,17 +128,37 @@ function App() {
     return () => clearTimeout(t);
   }, [dockW]);
   useEffect(() => { stateController.set('chrome.dockHidden', dockHidden); }, [dockHidden]);
+  useEffect(() => { stateController.set('chrome.dockMode', dockMode); }, [dockMode]);
 
   // Idle resting message for the StatusBar (loading activity overrides it there).
   const hint = error ? `boot failed: ${error.message}`
     : !client ? `engine: ${stage}`
     : 'drag pan · shift-drag look · scroll dolly · WASD move';
 
-  // Layout: a top ButtonBar, then the full-bleed canvas with the dock as a left
-  // OVERLAY sliding over it. The canvas is constant-size (absolute, inset:0), so
-  // hiding or resizing the dock never resizes the WebGPU canvas — the dock just
-  // occludes a strip and slides out of the way; only dockview re-lays out on a
-  // resize. The canvas is never a dockview panel, so its GPU context is safe.
+  // Dock placement is a chrome toggle (persisted). 'overlay': the dock floats over a
+  // constant-size canvas and slides to hide — resizing/hiding never resizes the WebGPU
+  // canvas. 'inline': the dock is a flex sibling that splits the row, so the canvas
+  // reflows to the remaining space (the classic sidebar, at the cost of a canvas resize
+  // on each dock resize). Crucially, the canvas + dock keep the SAME tree position in
+  // both modes — only these style objects change — so the GlyphCanvas is never
+  // remounted (no GPU-context churn) on a toggle.
+  const inlineDock = dockMode === 'inline';
+  const rowStyle = inlineDock
+    ? { display: 'flex', flex: '1 1 auto', minHeight: 0 }
+    : { position: 'relative', flex: '1 1 auto', minHeight: 0 };
+  const canvasWrapStyle = inlineDock
+    ? { position: 'relative', flex: '1 1 auto', minWidth: 0, order: 2 }
+    : { position: 'absolute', inset: 0 };
+  const dockWrapStyle = inlineDock
+    ? { flex: `0 0 ${dockHidden ? 0 : dockW}px`, minWidth: 0, display: 'flex', order: 1, overflow: 'hidden' }
+    : {
+        position: 'absolute', top: 0, left: 0, bottom: 0, width: `${dockW}px`,
+        display: 'flex', zIndex: 10,
+        transform: dockHidden ? 'translateX(-100%)' : 'translateX(0)',
+        transition: 'transform 0.18s ease',
+      };
+
+  // Layout: a top ButtonBar, then the canvas + dock laid out per dockMode (see above).
   return (
     <div style={{ display: 'flex', flexDirection: 'column', width: '100%', height: '100%' }}>
       <ButtonBar
@@ -143,11 +166,14 @@ function App() {
         onOpenPalette={() => setPaletteOpen(true)}
         dockHidden={dockHidden}
         onToggleDock={() => setDockHidden((h) => !h)}
+        dockMode={dockMode}
+        onToggleDockMode={() => setDockMode((m) => (m === 'overlay' ? 'inline' : 'overlay'))}
       />
-      <div style={{ position: 'relative', flex: '1 1 auto', minHeight: 0 }}>
-        {/* full-bleed WebGPU canvas — constant size; the dock overlays it rather
-            than splitting the row, so hiding/resizing the dock never resizes it. */}
-        <div style={{ position: 'absolute', inset: 0 }}>
+      <div style={rowStyle}>
+        {/* WebGPU canvas. Overlay mode: full-bleed/constant. Inline mode: the flex-1
+            column that reflows to the space the dock leaves. Same element in both, so
+            toggling never remounts it. */}
+        <div style={canvasWrapStyle}>
           {atlas && !error && (
             <GlyphCanvas
               atlas={atlas}
@@ -198,16 +224,10 @@ function App() {
             </GlyphCanvas>
           )}
         </div>
-        {/* dock overlay — a left sidebar floating over the canvas. It covers only
-            its own width (the canvas to its right stays directly drivable) and
-            slides out of view when hidden via the top-bar toggle. The transform
-            never changes the dock's layout size, so dockview doesn't re-lay out. */}
-        <div style={{
-          position: 'absolute', top: 0, left: 0, bottom: 0, width: `${dockW}px`,
-          display: 'flex', zIndex: 10,
-          transform: dockHidden ? 'translateX(-100%)' : 'translateX(0)',
-          transition: 'transform 0.18s ease',
-        }}>
+        {/* dock — overlay (absolute, slides to hide) or inline (flex sibling that
+            collapses to hide) per dockMode; see dockWrapStyle above. The DockResizer
+            sets dockW in both modes; in inline the canvas reflows, in overlay it doesn't. */}
+        <div style={dockWrapStyle}>
           <div style={{ flex: '1 1 auto', minWidth: 0, overflow: 'hidden' }}>
             {client
               ? <IdeDock client={client} />
