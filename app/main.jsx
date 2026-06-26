@@ -36,33 +36,6 @@ const relayParam = new URLSearchParams(location.search).get('relay')
 // ?repo=owner/repo[/branch] → render that GitHub repo client-only (no relay needed).
 const repoParam = new URLSearchParams(location.search).get('repo');
 
-// Draggable splitter between the dock sidebar and the canvas. The sidebar width is
-// app state (not pinned), so panels are resizable; the r3f canvas auto-resizes to its
-// container as the width changes.
-function DockResizer({ width, setWidth }) {
-  const onDown = (e) => {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startW = width;
-    const onMove = (ev) => setWidth(Math.max(180, Math.min(900, startW + (ev.clientX - startX))));
-    const onUp = () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      document.body.style.userSelect = '';
-    };
-    document.body.style.userSelect = 'none';
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-  };
-  return (
-    <div
-      onMouseDown={onDown}
-      title="Drag to resize panels"
-      style={{ flex: '0 0 6px', cursor: 'col-resize', background: '#11141b', borderLeft: '1px solid #1b1f29', borderRight: '1px solid #1b1f29' }}
-    />
-  );
-}
-
 function App() {
   // Atlas is built once at boot, so font/atlas-size settings are read here (a
   // change persists and takes hold on the next reload — the Settings panel says so).
@@ -76,7 +49,6 @@ function App() {
   // onReady so the DOM sidebar — which can't read the in-canvas context — can use
   // it. One source of truth, prop-drilled to the chrome.
   const [client, setClient] = useState(null);
-  const [dockW, setDockW] = useState(320);   // resizable sidebar width (px)
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [showMinimap, setShowMinimap] = useState(() => getSetting('view.minimap'));
   const [, forceSettings] = useReducer((x) => x + 1, 0);   // re-read live settings on a change
@@ -118,21 +90,16 @@ function App() {
     : !client ? `engine: ${stage}`
     : 'drag pan · shift-drag look · scroll dolly · WASD move';
 
-  // Layout: a top ButtonBar, then a row of [dockview panel sidebar | canvas].
-  // The dock and canvas are flex SIBLINGS (not overlay), so the WebGPU canvas
-  // is never a dockview panel — its GPU context can't be unmounted by a docking
-  // op, and r3f auto-resizes to its container when the sidebar width changes.
+  // Layout: a top ButtonBar, then the full-bleed canvas with the dock as a
+  // click-through OVERLAY of floating panels on top of it (see IdeDock /
+  // ide-dock.css). The canvas is never a dockview panel — its GPU context can't
+  // be unmounted by a docking op — and the field stays drivable wherever a panel
+  // isn't, because the dock's base grid passes clicks through to the canvas.
   return (
     <div style={{ display: 'flex', flexDirection: 'column', width: '100%', height: '100%' }}>
       <ButtonBar client={client} onOpenPalette={() => setPaletteOpen(true)} />
-      <div style={{ display: 'flex', flex: '1 1 auto', minHeight: 0 }}>
-        <div style={{ flex: `0 0 ${dockW}px`, minWidth: 0, overflow: 'hidden' }}>
-          {client
-            ? <IdeDock client={client} />
-            : <div style={{ width: '100%', padding: 12, color: '#7c8596', background: 'rgba(8,10,14,0.92)', font: '12px ui-monospace, monospace' }}>starting…</div>}
-        </div>
-        <DockResizer width={dockW} setWidth={setDockW} />
-        <div style={{ flex: '1 1 auto', position: 'relative', minWidth: 0 }}>
+      <div style={{ position: 'relative', flex: '1 1 auto', minHeight: 0 }}>
+        <div style={{ position: 'absolute', inset: 0 }}>
           {atlas && !error && (
             <GlyphCanvas
               atlas={atlas}
@@ -182,6 +149,14 @@ function App() {
               </CommandProvider>
             </GlyphCanvas>
           )}
+        </div>
+        {/* Dock overlay: the wrapper is click-through (pointerEvents:none); only the
+            floating panel windows capture clicks (ide-dock.css), so the field stays
+            drivable wherever a panel isn't. */}
+        <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
+          {client
+            ? <IdeDock client={client} />
+            : <div style={{ position: 'absolute', top: 12, left: 12, pointerEvents: 'auto', padding: 12, color: '#7c8596', background: 'rgba(8,10,14,0.92)', font: '12px ui-monospace, monospace' }}>starting…</div>}
         </div>
       </div>
       {/* inline status bar — the bottom strip (a real flex row, not a floating pill):

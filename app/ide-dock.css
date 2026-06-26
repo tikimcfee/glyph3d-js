@@ -3,7 +3,12 @@
  * FileTree/ButtonBar use. Scoped to .glyph-dock so it only touches our dock.
  * Anything not overridden falls back to dockview-theme-dark (graceful). */
 .glyph-dock {
-  --dv-background-color: rgba(8, 10, 14, 0.92);
+  /* Overlay mode (see main.jsx / IdeDock): the dock floats over the full-bleed
+   * WebGPU canvas. The base grid is transparent + click-through so the 3D field
+   * shows through and stays drivable wherever no panel sits; only the floating
+   * panel windows (.dv-resize-container) paint their translucent card and capture
+   * clicks. The panel components also paint their own bg, so cards stay legible. */
+  --dv-background-color: transparent;
   --dv-group-view-background-color: rgba(8, 10, 14, 0.92);
   --dv-tabs-and-actions-container-background-color: #0c0e14;
   --dv-activegroup-visiblepanel-tab-background-color: rgba(8, 10, 14, 0.92);
@@ -30,3 +35,11 @@
   font-size: 12px;
   letter-spacing: 0.02em;
 }
+
+/* Pass-through: the dock surface is click-through so the canvas behind stays
+ * drivable; only the floating panel windows re-capture clicks. (The wrapper in
+ * main.jsx is also pointer-events:none; this re-enables the windows themselves.) */
+.glyph-dock { pointer-events: none; }
+.glyph-dock .dv-resize-container { pointer-events: auto; }
+/* No empty-state placeholder over the field — the base grid stays bare/transparent. */
+.glyph-dock .dv-watermark { display: none; }
