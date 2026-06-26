@@ -10,6 +10,7 @@
 import StructureLayout from '@glyph3d/core/collections/StructureLayout.js';
 import StrataLayout from '@glyph3d/core/collections/StrataLayout.js';
 import { resolveGridByIdOrIndex } from './spatialHelpers.js';
+import { applyGroupSettings } from '../../client/settings.js';
 
 const KINDS = new Set(['function', 'method', 'class', 'interface', 'enum', 'type', 'variable', 'field']);
 
@@ -113,6 +114,7 @@ export default function registerStructureCommands(router) {
             await ctrl.reset();
             return { text: `OK: ${resolved.registryId} strata off`, data: { registryId: resolved.registryId, active: false } };
         }
+        applyGroupSettings(ctx, 'Strata'); // seed persisted dials into STRATA_PARAMS before arranging
         const res = await ctrl.start();
         if (!res.ok) return { text: `ERR: ${res.reason}`, data: null };
         return {

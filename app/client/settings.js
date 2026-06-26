@@ -1,6 +1,7 @@
 import { stateController } from '@glyph3d/core/services/state';
 import { setPanelStateColorDefaults } from '@glyph3d/core/collections';
 import { setGlyphLodParam, GLYPH_LOD_DEFAULTS } from '@glyph3d/core/GlyphField.js';
+import { setStrataParam, STRATA_DEFAULTS } from '@glyph3d/core/collections/StrataLayout.js';
 
 // Settings schema — the SINGLE source for both the Settings panel (renders a row
 // per entry) and the settings.* verbs (validate + apply). Only WIRED knobs live
@@ -23,6 +24,10 @@ const windowParam = (param) => (ctx, v) => { (ctx.windowConfig ||= {})[param] = 
 /** apply() for a glyph minification/LOD dial: push the bare dial name (not the `glyph.` key) to the
  *  global GlyphField LOD uniform — live across every glyph material, no ctx subsystem needed. */
 const lodParam = (param) => (_ctx, v) => setGlyphLodParam(param, v);
+
+/** apply() for a strata dial: push the bare param name (not the `strata.` key) to the global
+ *  StrataLayout params — re-applies live to every on-screen strata view, no ctx needed. */
+const strataParam = (param) => (_ctx, v) => setStrataParam(param, v);
 
 /** apply() for an agent-trail card-scale knob: push the value to AgentTrail.cfg (the bare param name,
  *  not the `trail.` key) and re-apply — the header/info cards re-scale live, body sizes land on new moments. */
@@ -232,6 +237,16 @@ export const SETTINGS = [
   { key: 'trail.artifactWorldScale', label: 'Snapshot / output size', group: 'Trail', type: 'number', default: 0.025, min: 0.005, max: 0.3, step: 0.005, apply: trailParam('artifactWorldScale') },
   { key: 'trail.messageScale', label: 'Message (say / think) size', group: 'Trail', type: 'number', default: 0.05, min: 0.005, max: 0.3, step: 0.005, apply: trailParam('messageScale') },
   { key: 'trail.snapshotImageWidth', label: 'Image card width', group: 'Trail', type: 'number', default: 40, min: 5, max: 200, step: 5, apply: trailParam('snapshotImageWidth') },
+  // Strata — the nested Z-depth structure view (structure.strata). Every dial is LIVE: a
+  // change re-applies to the on-screen strata immediately (boxOpacity rides a shader uniform;
+  // the rest re-derive positions/boxes). Borders should recede behind the glyphs — drop
+  // opacity/brightness for subtler, raise zStep to fan the depth planes further apart.
+  { key: 'strata.boxOpacity', label: 'Border opacity', group: 'Strata', type: 'number', default: STRATA_DEFAULTS.boxOpacity, min: 0, max: 1, step: 0.02, apply: strataParam('boxOpacity') },
+  { key: 'strata.boxBrightness', label: 'Border brightness', group: 'Strata', type: 'number', default: STRATA_DEFAULTS.boxBrightness, min: 0, max: 2, step: 0.05, apply: strataParam('boxBrightness') },
+  { key: 'strata.zStepFactor', label: 'Depth step (× line)', group: 'Strata', type: 'number', default: STRATA_DEFAULTS.zStepFactor, min: 0, max: 8, step: 0.1, apply: strataParam('zStepFactor') },
+  { key: 'strata.padFactor', label: 'Box padding (× line)', group: 'Strata', type: 'number', default: STRATA_DEFAULTS.padFactor, min: 0, max: 2, step: 0.05, apply: strataParam('padFactor') },
+  { key: 'strata.minSlots', label: 'Min glyphs per box', group: 'Strata', type: 'number', default: STRATA_DEFAULTS.minSlots, min: 1, max: 40, step: 1, apply: strataParam('minSlots') },
+  { key: 'strata.maxDepth', label: 'Max nesting depth', group: 'Strata', type: 'number', default: STRATA_DEFAULTS.maxDepth, min: 1, max: 24, step: 1, apply: strataParam('maxDepth') },
 ];
 
 /** Push a background restyle to every live grid/terminal of `type`. */
