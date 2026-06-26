@@ -36,6 +36,10 @@ const styles = {
     width: 64, font: 'inherit', color: '#c8ccd6', background: '#0f141b',
     border: '1px solid #232b34', borderRadius: 4, padding: '2px 5px', outline: 'none', textAlign: 'right',
   },
+  // Slider under each numeric row: min/max bounds flank an accent-tinted range input.
+  sliderRow: { display: 'flex', alignItems: 'center', gap: 6, padding: '0 2px 5px' },
+  slider: { flex: '1 1 auto', minWidth: 0, height: 16, cursor: 'pointer', accentColor: '#4a7f9a' },
+  bound: { flex: '0 0 auto', fontSize: 9, color: '#5c6675', fontVariantNumeric: 'tabular-nums', minWidth: 28 },
   swatch: {
     width: 32, height: 20, padding: 0, background: '#0f141b',
     border: '1px solid #232b34', borderRadius: 4, cursor: 'pointer',
@@ -109,39 +113,57 @@ export default function SettingsPanel({ client }) {
           <div key={group}>
             <div style={styles.group}>{group}</div>
             {defs.map((def) => (
-              <div key={def.key} style={styles.row}>
-                <span style={styles.label} title={def.key}>{def.label}</span>
-                {def.reload && <span style={styles.reload}>reload</span>}
-                {isModified(def) && (
-                  <button
-                    type="button"
-                    style={styles.rowReset}
-                    title={`reset to default (${def.default})`}
-                    onClick={() => resetOne(def)}
-                  >↺</button>
-                )}
-                {def.type === 'color' ? (
-                  <input
-                    type="color"
-                    style={styles.swatch}
-                    value={vals[def.key]}
-                    onChange={(e) => commit(def, e.target.value)}
-                  />
-                ) : def.type === 'bool' ? (
-                  <input
-                    type="checkbox"
-                    checked={!!vals[def.key]}
-                    onChange={(e) => commit(def, e.target.checked)}
-                  />
-                ) : (
-                  <input
-                    type="number"
-                    style={styles.num}
-                    value={vals[def.key]}
-                    min={def.min} max={def.max} step={def.step}
-                    onChange={(e) => commit(def, e.target.value)}
-                    onKeyDown={(e) => e.stopPropagation()}
-                  />
+              <div key={def.key}>
+                <div style={styles.row}>
+                  <span style={styles.label} title={def.key}>{def.label}</span>
+                  {def.reload && <span style={styles.reload}>reload</span>}
+                  {isModified(def) && (
+                    <button
+                      type="button"
+                      style={styles.rowReset}
+                      title={`reset to default (${def.default})`}
+                      onClick={() => resetOne(def)}
+                    >↺</button>
+                  )}
+                  {def.type === 'color' ? (
+                    <input
+                      type="color"
+                      style={styles.swatch}
+                      value={vals[def.key]}
+                      onChange={(e) => commit(def, e.target.value)}
+                    />
+                  ) : def.type === 'bool' ? (
+                    <input
+                      type="checkbox"
+                      checked={!!vals[def.key]}
+                      onChange={(e) => commit(def, e.target.checked)}
+                    />
+                  ) : (
+                    <input
+                      type="number"
+                      style={styles.num}
+                      value={vals[def.key]}
+                      min={def.min} max={def.max} step={def.step}
+                      onChange={(e) => commit(def, e.target.value)}
+                      onKeyDown={(e) => e.stopPropagation()}
+                    />
+                  )}
+                </div>
+                {/* Slider under each numeric row — min/max bounds + drag for quick
+                    tweaks; shares commit() with the number field, so they stay in sync. */}
+                {def.type === 'number' && (
+                  <div style={styles.sliderRow}>
+                    <span style={{ ...styles.bound, textAlign: 'right' }}>{def.min}</span>
+                    <input
+                      type="range"
+                      style={styles.slider}
+                      min={def.min} max={def.max} step={def.step}
+                      value={Number.isFinite(parseFloat(vals[def.key])) ? parseFloat(vals[def.key]) : def.default}
+                      onChange={(e) => commit(def, e.target.value)}
+                      onKeyDown={(e) => e.stopPropagation()}
+                    />
+                    <span style={{ ...styles.bound, textAlign: 'left' }}>{def.max}</span>
+                  </div>
                 )}
               </div>
             ))}
