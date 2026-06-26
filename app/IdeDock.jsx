@@ -16,12 +16,9 @@ import LspResultsPanel from './LspResultsPanel.jsx';
 // layout persistence for free. Panels render our own React components, so going
 // custom stays open.
 //
-// Canvas coexistence: this dock is an OVERLAY over the full-bleed WebGPU canvas
-// (see main.jsx) — the canvas is never a dockview panel, so its GPU context is
-// never unmounted by a docking op. Panels open as FLOATING groups; the base grid
-// is empty, transparent, and click-through (ide-dock.css), so the field shows
-// through and stays drivable wherever a panel isn't, and only the floating panel
-// windows capture clicks. Drag a window to a side to "frame" the field there.
+// Canvas coexistence: this dock lives as a flex SIBLING of the WebGPU canvas
+// (see main.jsx) — NOT an overlay, NOT hosting the canvas as a panel — so the
+// GPU context is never unmounted by a docking op and no canvas clicks are stolen.
 //
 // Layout persistence: the dockview layout is part of the saved session. We hand
 // SessionStore a thin bridge (toJSON/fromJSON + the known component names) and
@@ -31,48 +28,34 @@ import LspResultsPanel from './LspResultsPanel.jsx';
 
 // The panel catalog — the SINGLE source for both the default layout and the
 // reopen path (the ButtonBar's panels menu / panel.* verbs). component === id.
-// Array order matters: a `float` entry anchors a floating group; a `position`
-// entry tabs INTO an earlier panel's group, so its anchor must be listed first.
+// Array order matters: each position anchor must be added before the panel that
+// references it.
 const PANELS = [
-  // Sidebar group — tabbed together in one floating window (top-left).
-  { id: 'files', title: 'Files', float: { x: 16, y: 16, width: 340, height: 540 } },
+  { id: 'files', title: 'Files' },
   { id: 'repo', title: 'Repo', position: { referencePanel: 'files', direction: 'within' } },
   { id: 'fieldVisitors', title: 'Crew', position: { referencePanel: 'files', direction: 'within' } },
   { id: 'lspResults', title: 'LSP', position: { referencePanel: 'files', direction: 'within' } },
   { id: 'layout', title: 'Layout', position: { referencePanel: 'files', direction: 'within' } },
   { id: 'settings', title: 'Settings', position: { referencePanel: 'files', direction: 'within' } },
-  // The "focused thing in 2D" group — Editor + the combined Terminals workspace
-  // (sub-tab strip + 2D view) tabbed together in their own floating window. It
-  // replaces the old sidebar roster AND the standalone Terminal tab.
-  { id: 'editor', title: 'Editor', float: { x: 392, y: 384, width: 760, height: 320 } },
+  { id: 'editor', title: 'Editor', position: { referencePanel: 'files', direction: 'below' } },
+  // The combined Terminals workspace (sub-tab strip + 2D view) lives in the
+  // bottom group tabbed with the Editor — the "focused thing in 2D" area — so
+  // the terminal keeps a usable size. It replaces the old sidebar roster AND
+  // the standalone Terminal tab.
   { id: 'terminals', title: 'Terminals', position: { referencePanel: 'editor', direction: 'within' } },
 ];
 const panelDef = (id) => PANELS.find((p) => p.id === id);
 
-// Add a panel by its catalog def. A `position` joiner tabs into its reference
-// panel's group when that anchor is present (which, since the anchor is floating,
-// lands it in the same floating window); otherwise the panel opens as its own
-// floating group at its `float` bounds (or a default), so a reopened panel whose
-// anchor is gone is never lost off-grid.
-function addPanelDef(api, def) {
-  const opts = { id: def.id, component: def.id, title: def.title };
-  if (def.position && api.getPanel(def.position.referencePanel)) {
-    opts.position = def.position;
-    opts.floating = false;
-  } else {
-    opts.floating = def.float || { width: 360, height: 440 };
-  }
-  return api.addPanel(opts);
-}
-
-// Add a panel if absent (per addPanelDef), or just focus it if already open.
-// null = unknown id.
+// Add a panel if absent (placed by its catalog position when the anchor exists,
+// else into the active group), or just focus it if already open. null = unknown id.
 function openPanel(api, id) {
   const existing = api.getPanel(id);
   if (existing) { existing.api.setActive(); return existing; }
   const def = panelDef(id);
   if (!def) return null;
-  return addPanelDef(api, def);
+  const opts = { id, component: id, title: def.title };
+  if (def.position && api.getPanel(def.position.referencePanel)) opts.position = def.position;
+  return api.addPanel(opts);
 }
 
 export default function IdeDock({ client }) {
@@ -103,11 +86,7 @@ export default function IdeDock({ client }) {
     // layout already loaded, this triggers the restore (fromJSON) immediately.
     client?.session?.setDockBridge({
       toJSON: () => api.toJSON(),
-      // The overlay model lives in FLOATING groups. An old saved layout from the
-      // docked-sidebar era has no floatingGroups — replaying it would re-fill the
-      // window and bury the canvas — so drop it and let the default build below
-      // lay out the floating panels. Forward layouts always carry floatingGroups.
-      fromJSON: (layout) => { if (layout?.floatingGroups?.length) api.fromJSON(layout); },
+      fromJSON: (layout) => api.fromJSON(layout),
       components: Object.keys(components),
     });
 
@@ -117,7 +96,9 @@ export default function IdeDock({ client }) {
     // never re-adds or re-focuses an already-present panel.
     for (const def of PANELS) {
       if (api.getPanel(def.id)) continue;
-      addPanelDef(api, def);
+      const opts = { id: def.id, component: def.id, title: def.title };
+      if (def.position && api.getPanel(def.position.referencePanel)) opts.position = def.position;
+      api.addPanel(opts);
     }
 
     // Expose a dock controller on the command ctx so panel.* verbs (and the
@@ -166,12 +147,11 @@ export default function IdeDock({ client }) {
   }, [client, components]);
 
   return (
-    <div style={{ width: '100%', height: '100%', pointerEvents: 'none' }}>
+    <div style={{ width: '100%', height: '100%' }}>
       <DockviewReact
         className="dockview-theme-dark glyph-dock"
         components={components}
         onReady={onReady}
-        floatingGroupBounds="boundedWithinViewport"
       />
     </div>
   );

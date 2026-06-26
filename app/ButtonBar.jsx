@@ -206,9 +206,17 @@ function ConnectionChip({ client }) {
   );
 }
 
-export default function ButtonBar({ client, onOpenPalette }) {
+export default function ButtonBar({ client, onOpenPalette, dockHidden, onToggleDock }) {
   return (
     <div style={styles.bar}>
+      <button
+        type="button"
+        title="hide / show the panel dock (slides over the field)"
+        style={styles.btn(true)}
+        onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255,255,255,0.07)'; }}
+        onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255,255,255,0.03)'; }}
+        onClick={onToggleDock}
+      >{dockHidden ? 'show ›' : 'hide ‹'}</button>
       <PanelsMenu client={client} />
       <button
         type="button"
