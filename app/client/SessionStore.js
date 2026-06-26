@@ -87,6 +87,7 @@ export default class SessionStore {
     /** @type {{toJSON:Function, fromJSON:Function, components:string[]}|null} */
     this._dock = null;
     this._pendingDock = null;       // 2D dockview layout from a loaded snapshot, awaiting the dock bridge
+    this._lastGoodDock = null;      // last live dock layout that actually had panels — anti-clobber (never persist an empty dock over a good one)
     // Surface intent (terminal geometry AND dock membership/order/zoom) lives in the WorkspaceModel
     // surface table (ctx.workspace) — the durable buffer. _projectSurfaces pushes it onto each live
     // object as it re-adopts (terminal applyView + dock reconcile). No pending queue, no scrape.
@@ -182,7 +183,16 @@ export default class SessionStore {
 
     let dock = this._pendingDock; // if we never got a live dock bridge, preserve what we loaded
     if (this._dock?.toJSON) {
-      try { dock = this._dock.toJSON(); } catch (e) { console.warn('[session] dock toJSON failed:', e?.message || e); }
+      try {
+        const live = this._dock.toJSON();
+        // Never persist a degenerate EMPTY dock (panels:{}) over a good layout — a
+        // reload caught mid-rebuild, an all-closed dock, or (historically) experiment
+        // churn would otherwise clobber the saved layout with an empty grid and strand
+        // the next restore. Persist the live layout only when it actually has panels;
+        // otherwise keep the last one that did.
+        if (live?.panels && Object.keys(live.panels).length > 0) { dock = live; this._lastGoodDock = live; }
+        else dock = this._lastGoodDock ?? dock;
+      } catch (e) { console.warn('[session] dock toJSON failed:', e?.message || e); }
     }
 
     // The 3D camera-dock: ordered membership + per-tile zoom/pin, read straight from the MODEL

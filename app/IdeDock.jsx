@@ -89,26 +89,39 @@ export default function IdeDock({ client }) {
     // below runs ONLY when nothing was restored — it must never top up over a
     // restored layout, which is what used to re-open tabs you'd deliberately closed,
     // nondeterministically, depending on which clock (bridge vs restore) won.
-    let restoredFromSave = false;
-    client?.session?.setDockBridge({
-      toJSON: () => api.toJSON(),
-      fromJSON: (layout) => { api.fromJSON(layout); restoredFromSave = true; },
-      components: Object.keys(components),
-    });
-
-    // Default panels — built ONLY when no saved layout was (or will be) applied: a
-    // fresh session, or client-only/no-relay mode where no restore ever runs. In
-    // bridge-first ordering a later restore REPLACES these wholesale via fromJSON
-    // (so closed tabs stay closed); a newly-introduced catalog panel reaches an
-    // existing session via the panels menu, not by force-injection here.
-    if (!restoredFromSave) {
+    // Build the default catalog layout. Factored out so it serves both the
+    // no-restore path (below) and the empty-restore fallback (in fromJSON).
+    const buildDefaults = () => {
       for (const def of PANELS) {
         if (api.getPanel(def.id)) continue;
         const opts = { id: def.id, component: def.id, title: def.title };
         if (def.position && api.getPanel(def.position.referencePanel)) opts.position = def.position;
         api.addPanel(opts);
       }
-    }
+    };
+
+    let restoredFromSave = false;
+    client?.session?.setDockBridge({
+      toJSON: () => api.toJSON(),
+      fromJSON: (layout) => {
+        api.fromJSON(layout);
+        // A blank/degenerate saved layout (zero panels — e.g. left over from an
+        // earlier experiment) must NOT strand the user with no dock: fall back to
+        // defaults. A normal layout with some tabs closed still wins (it has
+        // panels), so this never re-opens a deliberately-closed tab. Self-heals:
+        // the next autosave overwrites the blank layout with the rebuilt one.
+        if (api.panels.length === 0) buildDefaults();
+        restoredFromSave = true;
+      },
+      components: Object.keys(components),
+    });
+
+    // Default panels — built when no saved layout was (or will be) applied: a fresh
+    // session, or client-only/no-relay mode where no restore ever runs. In
+    // bridge-first ordering a later restore REPLACES these wholesale via fromJSON
+    // (so closed tabs stay closed); a newly-introduced catalog panel reaches an
+    // existing session via the panels menu, not by force-injection here.
+    if (!restoredFromSave) buildDefaults();
 
     // Expose a dock controller on the command ctx so panel.* verbs (and the
     // ButtonBar's panels menu) can reopen a closed tab. The DOM layer owns the
