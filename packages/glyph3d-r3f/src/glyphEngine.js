@@ -30,15 +30,48 @@ import { getWorkerBridge } from '@glyph3d/core/workers';
  * @property {(stage: string) => void} [onStage] - Progress callback.
  */
 
+// LARGE CORE — ~everything a code IDE + terminal actually renders, encoded up front so the
+// live atlas rarely has to grow mid-session (growth = a main-thread encode + a field hot-swap).
+// Codepoints the font chain doesn't cover resolve to .notdef (glyph 0) and are skipped by the
+// encoder, so this list is generous without waste — only font-covered glyphs cost anything.
+// Deliberately bounded: NO full CJK (DejaVu doesn't cover it) and NO giant Nerd-Font icon PUA
+// (thousands of rarely-used icons — those stay cheap live-encodes). Serializing this core to a
+// prebaked blob (the next step) is what would let us go to literal full-coverage for free.
+const LARGE_CORE_RANGES = [
+  [0x0020, 0x007e], // ASCII printable
+  [0x00a0, 0x024f], // Latin-1 Supplement + Latin Extended-A/B
+  [0x0250, 0x02ff], // IPA + spacing modifiers
+  [0x0300, 0x036f], // combining diacriticals
+  [0x0370, 0x03ff], // Greek
+  [0x0400, 0x04ff], // Cyrillic
+  [0x1e00, 0x1eff], // Latin Extended Additional
+  [0x2000, 0x206f], // general punctuation
+  [0x2070, 0x20cf], // super/subscripts + currency
+  [0x2100, 0x218f], // letterlike + number forms
+  [0x2190, 0x21ff], // arrows
+  [0x2200, 0x22ff], // mathematical operators
+  [0x2300, 0x23ff], // miscellaneous technical
+  [0x2400, 0x24ff], // control pictures + enclosed alphanumerics
+  [0x2500, 0x257f], // box drawing
+  [0x2580, 0x259f], // block elements
+  [0x25a0, 0x25ff], // geometric shapes
+  [0x2600, 0x26ff], // miscellaneous symbols
+  [0x2700, 0x27bf], // dingbats
+  [0x2800, 0x28ff], // braille patterns
+  [0x2900, 0x297f], // supplemental arrows-B
+  [0x2b00, 0x2bff], // misc symbols & arrows
+  [0xe0a0, 0xe0d4], // powerline (private use)
+];
+
 /** Sensible defaults — explicit, overridable, and documented (not hidden). */
 export const DEFAULT_ENGINE_OPTIONS = {
   fontFamily: 'Cousine, Monaco, Menlo, Courier New, monospace',
   fontSize: 48,
   atlasSize: 2048,
-  // ASCII + Latin-1 + box-drawing. The consumer can widen this for other scripts.
-  primeRanges: [[0x20, 0x7e], [0xa0, 0xff], [0x2500, 0x257f]],
-  // Up-front Slug encode covers printable ASCII; atlas/slug auto-grow for the rest.
-  encodeRanges: [[0x20, 0x7e]],
+  // Prime + encode the LARGE CORE up front (was ASCII-only encode → constant live growth).
+  // The consumer can override either; the atlas still auto-grows for anything outside this.
+  primeRanges: LARGE_CORE_RANGES,
+  encodeRanges: LARGE_CORE_RANGES,
 };
 
 const codepointsFromRanges = (ranges) => {
