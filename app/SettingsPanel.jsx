@@ -23,6 +23,10 @@ const styles = {
     flex: '0 0 auto', font: 'inherit', color: '#9aa3b2', background: 'transparent',
     border: '1px solid #232b34', borderRadius: 4, padding: '2px 8px', cursor: 'pointer',
   },
+  rowReset: {
+    flex: '0 0 auto', font: 'inherit', fontSize: 13, lineHeight: 1, color: '#7c8596',
+    background: 'transparent', border: 'none', cursor: 'pointer', padding: '0 2px',
+  },
   body: { padding: '6px 8px 12px', overflowY: 'auto', flex: '1 1 auto' },
   group: { color: '#5c6675', textTransform: 'uppercase', fontSize: 10, letterSpacing: '0.08em', margin: '12px 2px 4px' },
   row: { display: 'flex', alignItems: 'center', gap: 8, padding: '3px 2px' },
@@ -77,6 +81,23 @@ export default function SettingsPanel({ client }) {
     setReloadPending(needReload);
   };
 
+  // Per-row reset to default — same bus verb with a key. A reload knob always flags
+  // the banner (its baked value changes); the ↺ only shows when the row is off-default.
+  const resetOne = (def) => {
+    client?.router.execute(['settings.reset', def.key]);
+    setVals((v) => ({ ...v, [def.key]: def.default }));
+    if (def.reload) setReloadPending(true);
+  };
+
+  // Is the row's current value different from its default? Numbers/bools coerce so a
+  // mid-edit string ("0.30") still compares right. Doubles as the "modified" cue.
+  const isModified = (def) => {
+    const cur = vals[def.key];
+    if (def.type === 'number') return parseFloat(cur) !== def.default;
+    if (def.type === 'bool') return !!cur !== def.default;
+    return cur !== def.default;
+  };
+
   return (
     <div style={styles.content}>
       <div style={styles.header}>
@@ -91,6 +112,14 @@ export default function SettingsPanel({ client }) {
               <div key={def.key} style={styles.row}>
                 <span style={styles.label} title={def.key}>{def.label}</span>
                 {def.reload && <span style={styles.reload}>reload</span>}
+                {isModified(def) && (
+                  <button
+                    type="button"
+                    style={styles.rowReset}
+                    title={`reset to default (${def.default})`}
+                    onClick={() => resetOne(def)}
+                  >↺</button>
+                )}
                 {def.type === 'color' ? (
                   <input
                     type="color"

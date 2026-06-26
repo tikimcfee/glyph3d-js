@@ -339,3 +339,13 @@ export function resetSettings(ctx) {
   }
   return { reloadNeeded };
 }
+
+/** Reset ONE setting to its default — drop the stored value, re-apply the default live. */
+export function resetSetting(ctx, key) {
+  const def = BY_KEY.get(key);
+  if (!def) return { ok: false, error: `unknown setting "${key}"` };
+  const reloadNeeded = !!def.reload && getSetting(key) !== def.default;
+  stateController.delete(key);
+  def.apply?.(ctx, def.default);
+  return { ok: true, value: def.default, reload: !!def.reload, reloadNeeded };
+}

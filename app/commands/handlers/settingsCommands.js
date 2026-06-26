@@ -5,10 +5,10 @@
  *
  *   settings.set <key> <value>   persist + apply live (reload-required knobs say so)
  *   settings.get [key]           one value, or all
- *   settings.reset               back to defaults
+ *   settings.reset [key]         all back to defaults, or just one if a key is given
  */
 
-import { SETTINGS, settingDef, getSetting, setSetting, resetSettings } from '../../client/settings.js';
+import { SETTINGS, settingDef, getSetting, setSetting, resetSettings, resetSetting } from '../../client/settings.js';
 
 /**
  * @param {import('../CommandRouter.js').default} router
@@ -37,11 +37,20 @@ export default function registerSettingsCommands(router) {
         return { text: `OK: ${settings.map((s) => `${s.key}=${s.value}`).join('  ')}`, data: { settings } };
     }, { description: 'Get one setting value, or all of them', usage: '[key]' });
 
-    router.register('settings.reset', (_args, ctx) => {
+    router.register('settings.reset', (args, ctx) => {
+        const key = args[0];
+        if (key) {
+            if (!settingDef(key)) return { text: `ERR: unknown setting "${key}"`, data: null };
+            const r = resetSetting(ctx, key);
+            return {
+                text: `OK: ${key} reset to ${r.value}${r.reloadNeeded ? ' (reload to apply)' : ''}`,
+                data: { key, ...r },
+            };
+        }
         const r = resetSettings(ctx);
         return {
             text: `OK: settings reset to defaults${r.reloadNeeded ? ' (reload for display settings)' : ''}`,
             data: r,
         };
-    }, { description: 'Reset all settings to their defaults' });
+    }, { description: 'Reset all settings to defaults, or one if a key is given', usage: '[key]' });
 }
