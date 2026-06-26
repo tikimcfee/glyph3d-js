@@ -65,7 +65,7 @@ export { ConnectionRenderer } from './annotations/index.js';
 export { parseFileRef, parseStackTrace, parseLogLine, parseAuto } from './parsing/index.js';
 
 // Text shaping (HarfBuzz WASM) + Slug vector encoding
-export { HarfBuzzShaper, MonospaceShapeCache, shapeText, collectUniqueGlyphIds, SlugEncoder, buildSlugBuffers } from './shaping/index.js';
+export { HarfBuzzShaper, MonospaceShapeCache, shapeText, collectUniqueGlyphIds, SlugEncoder, SlugBuffer, encodeGlyph } from './shaping/index.js';
 
 // Buffer builders (HarfBuzz-shaped path only)
 export { buildBatchBuffers, buildShapedBatchBuffers } from './workers/builders/index.js';

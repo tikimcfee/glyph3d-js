@@ -14,4 +14,4 @@ export { default as MonospaceShapeCache } from './MonospaceShapeCache.js';
 export { shapeText, collectUniqueGlyphIds } from './shapeText.js';
 export { default as SlugEncoder } from './SlugEncoder.js';
 export { default as LiveSlugAtlas } from './LiveSlugAtlas.js';
-export { buildSlugBuffers } from './slugData.js';
+export { SlugBuffer, encodeGlyph } from './slugData.js';

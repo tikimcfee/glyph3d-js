@@ -34,17 +34,21 @@ export default class LiveSlugAtlas {
      * @param {Object}   opts
      * @param {Object}   opts.atlas        - GlyphAtlas the fields read `_slugData` off of.
      * @param {Object}   opts.shaper       - HarfBuzzShaper (or chain, later) for outline extraction.
-     * @param {Iterable<number>} [opts.initialGlyphIds] - Glyph IDs already encoded at boot.
-     * @param {Object}   [opts.initialSlugData]          - Boot slug data ({ curveTexture, glyphMapTexture }).
+     * @param {Iterable<number>} [opts.initialGlyphIds] - Glyph IDs to encode at boot (the encoder
+     *           does the initial encode and stashes the result on atlas._slugData).
      */
-    constructor({ atlas, shaper, initialGlyphIds = [], initialSlugData = null }) {
+    constructor({ atlas, shaper, initialGlyphIds = [] }) {
         /** @private */ this._atlas    = atlas;
         /** @private */ this._shaper   = shaper;
         /** @private */ this._encoder  = new SlugEncoder(shaper);
-        /** @private @type {Set<number>} */ this._encoded = new Set(initialGlyphIds);
         /** @private @type {Set<Object>} live GlyphFields */ this._fields = new Set();
-        /** @private */ this._slugData = initialSlugData;
-        /** @private bumped on every re-encode; lets callers detect staleness */
+        // The initial encode lives HERE now (it used to be a throwaway SlugEncoder in
+        // glyphEngine) so the encoder that GROWS the atlas is the same one holding the boot
+        // glyphs — growth APPENDS to them instead of re-encoding the whole set. The encoder
+        // owns the encoded-glyph set; we no longer track a parallel _encoded here.
+        /** @private */ this._slugData = this._encoder.encode(initialGlyphIds);
+        if (atlas) atlas._slugData = this._slugData;
+        /** @private bumped on every growth; lets callers detect staleness */
         this._version = 0;
     }
 
@@ -52,7 +56,7 @@ export default class LiveSlugAtlas {
     get slugData() { return this._slugData; }
 
     /** @returns {number} number of distinct glyph IDs currently encoded */
-    get size() { return this._encoded.size; }
+    get size() { return this._encoder.size; }
 
     /** @returns {number} monotonically increasing re-encode counter */
     get version() { return this._version; }
@@ -82,13 +86,32 @@ export default class LiveSlugAtlas {
      * @returns {{ grew: boolean, added: number, total: number }}
      */
     ensureGlyphsEncoded(glyphIds) {
-        let added = 0;
-        for (const g of glyphIds) {
-            if (g > 0 && !this._encoded.has(g)) { this._encoded.add(g); added++; }
+        // The encoder skips .notdef + already-encoded internally and APPENDS only the new glyphs
+        // (each extracted exactly once — no full re-encode). It returns the rebuilt textures and
+        // whether anything grew.
+        const res = this._encoder.appendGlyphs(glyphIds);
+        if (!res.grew) return { grew: false, added: 0, total: this._encoder.size };
+
+        this._slugData = res;            // { curveTexture, glyphMapTexture, stats }
+        this._version++;
+        if (this._atlas) this._atlas._slugData = this._slugData;
+
+        let updated = 0;
+        for (const field of this._fields) {
+            if (field && typeof field.setSlugData === 'function') {
+                field.setSlugData(this._slugData, this._shaper);
+                // A growth may have allocated new emoji cells (bitmap slots); refresh the
+                // color-emoji atlas texture so the shader's bitmap branch sees them.
+                if (typeof field.setEmojiTexture === 'function') field.setEmojiTexture();
+                updated++;
+            }
         }
-        if (added === 0) return { grew: false, added: 0, total: this._encoded.size };
-        this._reencode();
-        return { grew: true, added, total: this._encoded.size };
+
+        console.log(
+            `[LiveSlugAtlas] grew v${this._version}: +${res.added} → ${this._encoder.size} glyphs, ` +
+            `${updated}/${this._fields.size} fields hot-swapped`
+        );
+        return { grew: true, added: res.added, total: this._encoder.size };
     }
 
     /**
@@ -107,33 +130,4 @@ export default class LiveSlugAtlas {
         return this.ensureGlyphsEncoded(gids);
     }
 
-    /**
-     * Re-encode the full encoded set and hot-swap the result into every live
-     * field. Also updates the atlas's `_slugData` so any field constructed AFTER
-     * this point starts with the current textures.
-     * @private
-     */
-    _reencode() {
-        const t0 = performance.now();
-        this._slugData = this._encoder.encode(this._encoded);
-        this._version++;
-
-        if (this._atlas) this._atlas._slugData = this._slugData;
-
-        let updated = 0;
-        for (const field of this._fields) {
-            if (field && typeof field.setSlugData === 'function') {
-                field.setSlugData(this._slugData, this._shaper);
-                // A re-encode may have allocated new emoji cells (bitmap slots); refresh
-                // the color-emoji atlas texture so the shader's bitmap branch sees them.
-                if (typeof field.setEmojiTexture === 'function') field.setEmojiTexture();
-                updated++;
-            }
-        }
-
-        console.log(
-            `[LiveSlugAtlas] re-encode v${this._version}: ${this._encoded.size} glyphs, ` +
-            `${updated}/${this._fields.size} fields hot-swapped (${(performance.now() - t0).toFixed(1)}ms)`
-        );
-    }
 }

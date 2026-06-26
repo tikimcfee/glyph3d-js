@@ -9,7 +9,7 @@
 // independent: GlyphAtlas is Canvas2D, the shaper is WASM, SlugEncoder is data —
 // so it can run before any WebGPU device exists.
 
-import { GlyphAtlas, EmojiAtlas, SlugEncoder, collectUniqueGlyphIds } from '@glyph3d/core';
+import { GlyphAtlas, EmojiAtlas, collectUniqueGlyphIds } from '@glyph3d/core';
 import { MonospaceShapeCache, shapeText, LiveSlugAtlas, FontChain } from '@glyph3d/core/shaping';
 import { getWorkerBridge } from '@glyph3d/core/workers';
 
@@ -88,11 +88,11 @@ export async function bootGlyphEngine(options) {
   const encodeText = codepointsFromRanges(opts.encodeRanges);
   const shaped = shapeText(shapeCache, encodeText);
   const glyphIds = collectUniqueGlyphIds(shaped.lines);
-  const slugData = new SlugEncoder(shaper).encode(glyphIds);
 
   // CodeGrid (and GlyphField) auto-discover these off the atlas.
   atlas._shaper = shaper;
-  atlas._slugData = slugData;
+  // atlas._slugData is set by LiveSlugAtlas below — it now owns the initial encode (one encoder
+  // for boot AND growth, so growth appends instead of re-encoding the whole set).
   // TerminalGrid maps codepoint→glyphId through this primed cache (its glyph IDs
   // are the same ones the Slug glyphMapTexture is keyed by).
   atlas._shapeCache = shapeCache;
@@ -106,7 +106,6 @@ export async function bootGlyphEngine(options) {
     atlas,
     shaper,
     initialGlyphIds: glyphIds,
-    initialSlugData: slugData,
   });
 
   stage('ready');
