@@ -211,6 +211,7 @@ export class StrataLayout {
     _rebuildBoxes(r, boxes, pad) {
         if (!boxes.length) { this._clearBoxes(); return; }
         const bright = this.cfg.boxBrightness;
+        const siz = r.getInstanceSizes?.();           // glyph cell heights — for the centering fix
         const cap = boxes.length * 8;                 // 4 edges × 2 verts
         const posArr = new Float32Array(cap * 3);
         const colArr = new Float32Array(cap * 3);
@@ -218,8 +219,14 @@ export class StrataLayout {
         for (const b of boxes) {
             const bb = r.measureSlotRange(b.start, b.count);
             if (!bb) continue;
-            const x0 = bb.min.x - pad, y0 = bb.min.y - pad;
-            const x1 = bb.max.x + pad, y1 = bb.max.y + pad;
+            // The glyph quad is CENTER-anchored in Y (worldPos.y = iPos.y ± iSize.y/2), but
+            // measureSlotRange reports min.y = iPos.y / max.y = iPos.y + iSize.y (corner-style),
+            // so its Y reads half a glyph too HIGH — the box floats up into the node above (the
+            // overlap). Shift down by half a cell to hug the actual glyphs. (X is left-aligned via
+            // alignOffset = iSize.x/2, so its corner-style bounds already match the visible cell.)
+            const half = (siz ? (siz[b.start * 2 + 1] || 0) : 0) * 0.5;
+            const x0 = bb.min.x - pad, y0 = bb.min.y - half - pad;
+            const x1 = bb.max.x + pad, y1 = bb.max.y - half + pad;
             const z = b.z;
             const c = DEPTH_COLORS[b.depth % DEPTH_COLORS.length];
             const cr = c[0] * bright, cg = c[1] * bright, cb = c[2] * bright;
