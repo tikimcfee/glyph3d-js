@@ -8,6 +8,7 @@
  *   structure.reset [grid]          — back to the normal flow layout
  */
 import StructureLayout from '@glyph3d/core/collections/StructureLayout.js';
+import StrataLayout from '@glyph3d/core/collections/StrataLayout.js';
 import { resolveGridByIdOrIndex } from './spatialHelpers.js';
 
 const KINDS = new Set(['function', 'method', 'class', 'interface', 'enum', 'type', 'variable', 'field']);
@@ -17,6 +18,14 @@ const _controllers = new WeakMap();
 function controllerFor(grid) {
     let c = _controllers.get(grid);
     if (!c) { c = new StructureLayout(grid); _controllers.set(grid, c); }
+    return c;
+}
+
+/** Per-grid strata controllers (the nested Z-depth view), separate from the lens above. */
+const _strata = new WeakMap();
+function strataFor(grid) {
+    let c = _strata.get(grid);
+    if (!c) { c = new StrataLayout(grid); _strata.set(grid, c); }
     return c;
 }
 
@@ -85,6 +94,35 @@ export default function registerStructureCommands(router) {
         description: 'Debug: dump each AST block\'s claimed boundaries vs the slot range it moves',
         usage: '[grid] [kind]',
         returns: '{ count, blocks }',
+    });
+
+    router.register('structure.strata', async (args, ctx) => {
+        // structure.strata [grid] — TOGGLE a nested Z-depth strata view: every AST node
+        // floats forward by its nesting level and gets a border box, text staying readable
+        // in X/Y. Toggling keeps it a single self-contained verb.
+        const resolved = resolveGrid(ctx, args[0] ?? null);
+        if (resolved.error) return { text: `ERR: ${resolved.error}`, data: null };
+        const grid = resolved.grid;
+        if (typeof grid.ensureSemantics !== 'function') {
+            return { text: 'ERR: grid has no semantic model (not a code grid?)', data: null };
+        }
+        await grid.ensureSemantics();
+
+        const ctrl = strataFor(grid);
+        if (ctrl.active) {
+            await ctrl.reset();
+            return { text: `OK: ${resolved.registryId} strata off`, data: { registryId: resolved.registryId, active: false } };
+        }
+        const res = await ctrl.start();
+        if (!res.ok) return { text: `ERR: ${res.reason}`, data: null };
+        return {
+            text: `OK: strata on — ${res.count} node(s), depth 0..${res.maxDepth}`,
+            data: { registryId: resolved.registryId, active: true, ...res },
+        };
+    }, {
+        description: 'Toggle a nested Z-depth strata view: AST nodes float forward by nesting level + get border boxes (text stays readable in X/Y)',
+        usage: '[grid]',
+        returns: '{ ok, active, count, maxDepth }',
     });
 
     router.register('structure.reset', async (args, ctx) => {
