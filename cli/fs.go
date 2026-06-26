@@ -13,8 +13,6 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
-
-	"github.com/google/renameio/v2"
 )
 
 // JSON-RPC error codes (mirrored in src/services/data/types.js)
@@ -702,11 +700,11 @@ func (h *FSHandler) handleSetFilter(write writeFn, id json.RawMessage, raw json.
 //   - truncation: refuse to overwrite a non-empty file with empty
 //     content unless allowEmpty is set (errWouldTruncate).
 //
-// Durability: renameio writes a randomly-named temp in the target's directory,
-//
-//	fsyncs it, then renames over the target — atomic and crash-safe
-//	against zero-length files. The existing file's mode is preserved;
-//	the parent directory is fsynced best-effort after the rename.
+// Durability: atomicReplace writes a temp in the target's directory, fsyncs it,
+// then renames over the target — atomic and crash-safe against zero-length
+// files (renameio on Unix; temp + fsync + MoveFileEx on Windows). On Unix the
+// existing file's mode is preserved and the parent directory is fsynced
+// best-effort.
 //
 // Notification: on success, if a notify hook is wired, emits an
 //
@@ -793,21 +791,16 @@ func (h *FSHandler) handleWriteFile(write writeFn, id json.RawMessage, raw json.
 		return
 	}
 
-	// Durable atomic replace via renameio: it writes a randomly-named temp in
-	// the target's directory, fsyncs it (the guarantee against a zero-length
-	// file after a crash), then renames over the target. WriteFile preserves
-	// the existing file's mode (exec bit, 0600 secrets); 0644 is only the
-	// fallback for a brand-new file. The random temp name also retires the old
-	// fixed-".glyph3d.tmp" concurrent-write race.
-	if err := renameio.WriteFile(resolved, data, 0644, renameio.WithTempDir(filepath.Dir(resolved))); err != nil {
+	// Durable atomic replace. atomicReplace is platform-specific (see
+	// fs_atomic_unix.go / fs_atomic_windows.go): on Unix it's renameio — a
+	// randomly-named temp in the target dir, fsync'd, renamed over the target,
+	// the existing mode preserved, parent dir fsync'd; on Windows it's the
+	// closest safe approximation (temp + fsync + MoveFileEx replace). Either way
+	// the fsync-before-rename rules out a zero-length file after a crash.
+	if err := atomicReplace(resolved, data); err != nil {
 		h.sendRPCError(write, id, errWriteFailed, "atomic write failed: "+err.Error(), map[string]string{"uri": p.URI})
 		return
 	}
-	// renameio fsyncs the file but not the parent directory. fsync the dir too
-	// so the rename itself survives a crash — best-effort: the bytes are already
-	// durable, so a dir-sync failure (e.g. Windows directory handles) must not
-	// fail an otherwise-successful write.
-	syncDir(filepath.Dir(resolved))
 
 	// Stat the result so we can return mtime — some clients use it as
 	// a freshness token for the in-memory grid.
@@ -904,19 +897,6 @@ func (h *FSHandler) resolvePath(uri string) (string, error) {
 func pathExists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
-}
-
-// syncDir best-effort fsyncs a directory so a rename within it is durable
-// across a crash. Errors are intentionally swallowed: the file data is already
-// synced by the time we get here, this only hardens rename durability, and not
-// every platform/filesystem permits fsync on a directory handle (Windows).
-func syncDir(dir string) {
-	d, err := os.Open(dir)
-	if err != nil {
-		return
-	}
-	defer d.Close()
-	_ = d.Sync()
 }
 
 // ---- JSON-RPC Response Helpers ----

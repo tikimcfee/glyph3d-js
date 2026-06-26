@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -230,11 +229,12 @@ func forwardConversation(conn *websocket.Conn, event *HookEvent) {
 		return
 	}
 	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+	unlock, err := flockExclusive(lock)
+	if err != nil {
 		dbg("conv: flock: %v", err)
 		return
 	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	defer unlock()
 
 	cur, _ := io.ReadAll(lock)
 	offset, _ := strconv.ParseInt(strings.TrimSpace(string(cur)), 10, 64)
