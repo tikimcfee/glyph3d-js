@@ -228,15 +228,17 @@ export const SETTINGS = [
   { key: 'glyph.density', label: 'Block ink density', group: 'Glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.density, min: 0.005, max: 0.15, step: 0.005, apply: lodParam('density') },
   { key: 'glyph.maxCov', label: 'Block max coverage', group: 'Glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.maxCov, min: 0.1, max: 1, step: 0.02, apply: lodParam('maxCov') },
   { key: 'glyph.lodAxisBias', label: 'Block axis bias (0 best→1 worst)', group: 'Glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.lodAxisBias, min: 0, max: 1, step: 0.05, apply: lodParam('lodAxisBias') },
-  // Trail — agent-trail card scales, a row per card type (the spatial forward of the agent's run). The
-  // header + info cards re-scale the whole corridor live; snapshot/output + say-think sizes bake at build,
-  // so they land on NEW moments (the trail streams, so near-immediate; `trail.clear` rebuilds the view).
-  // Defaults mirror AgentTrail's TRAIL_DEFAULTS — tune here, then bake the winners back into TRAIL_DEFAULTS.
-  { key: 'trail.callScale', label: 'Header card size', group: 'Trail', type: 'number', default: 3.0, min: 0.5, max: 10, step: 0.1, apply: trailParam('callScale') },
-  { key: 'trail.infoScale', label: 'Info card size', group: 'Trail', type: 'number', default: 1.5, min: 0.25, max: 6, step: 0.05, apply: trailParam('infoScale') },
-  { key: 'trail.artifactWorldScale', label: 'Snapshot / output size', group: 'Trail', type: 'number', default: 0.025, min: 0.005, max: 0.3, step: 0.005, apply: trailParam('artifactWorldScale') },
-  { key: 'trail.messageScale', label: 'Message (say / think) size', group: 'Trail', type: 'number', default: 0.05, min: 0.005, max: 0.3, step: 0.005, apply: trailParam('messageScale') },
-  { key: 'trail.snapshotImageWidth', label: 'Image card width', group: 'Trail', type: 'number', default: 40, min: 5, max: 200, step: 5, apply: trailParam('snapshotImageWidth') },
+  // Trail — agent-trail layout + card scales (the spatial forward of the agent's run). Depth pitch +
+  // header/info re-deck/re-scale the whole corridor live; snapshot/output + say-think sizes bake at
+  // build, so they land on NEW moments (the trail streams, so near-immediate; `trail.clear` rebuilds).
+  // Ranges are deliberately WIDE — a small positive min just keeps a scale off 0/negative; the user, not
+  // us, decides what's "too big". Defaults mirror AgentTrail's TRAIL_DEFAULTS.
+  { key: 'trail.zPitch', label: 'Card depth spacing (Z)', group: 'Trail', type: 'number', default: 90, min: 1, max: 4000, step: 5, apply: trailParam('zPitch') },
+  { key: 'trail.callScale', label: 'Header card size', group: 'Trail', type: 'number', default: 3.0, min: 0.05, max: 50, step: 0.1, apply: trailParam('callScale') },
+  { key: 'trail.infoScale', label: 'Info card size', group: 'Trail', type: 'number', default: 1.5, min: 0.05, max: 50, step: 0.05, apply: trailParam('infoScale') },
+  { key: 'trail.artifactWorldScale', label: 'Snapshot / output size', group: 'Trail', type: 'number', default: 0.025, min: 0.001, max: 5, step: 0.005, apply: trailParam('artifactWorldScale') },
+  { key: 'trail.messageScale', label: 'Message (say / think) size', group: 'Trail', type: 'number', default: 0.05, min: 0.001, max: 5, step: 0.005, apply: trailParam('messageScale') },
+  { key: 'trail.snapshotImageWidth', label: 'Image card width', group: 'Trail', type: 'number', default: 40, min: 1, max: 2000, step: 5, apply: trailParam('snapshotImageWidth') },
   // Strata — the nested Z-depth structure view (structure.strata). Every dial is LIVE: a
   // change re-applies to the on-screen strata immediately (boxOpacity rides a shader uniform;
   // the rest re-derive positions/boxes). Borders should recede behind the glyphs — drop
