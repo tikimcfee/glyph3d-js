@@ -86,6 +86,16 @@ const codepointsFromRanges = (ranges) => {
   return s;
 };
 
+/** Monospace cell size FROM THE SHAPER — the single metrics source, replacing GlyphAtlas's
+ *  Canvas2D 'M' measure. width = the 'M' advance (= the forced monospace cell, what the builder
+ *  lays out to); height = fontSize × 1.15 (byte-identical to the old glyphHeight formula). */
+const deriveCharSize = (shaper, fontSize) => {
+  const upem = shaper.upem || 2048;
+  const shaped = shaper.shape ? shaper.shape('M') : null;
+  const ax = (shaped && shaped[0]) ? shaped[0].ax : upem * 0.6;
+  return { width: Math.ceil(ax / upem * fontSize), height: fontSize * 1.15 };
+};
+
 /**
  * Boot the glyph pipeline.
  * @param {GlyphEngineOptions} options
@@ -128,6 +138,11 @@ export async function bootGlyphEngine(options) {
 
   // CodeGrid (and GlyphField) auto-discover these off the atlas.
   atlas._shaper = shaper;
+  // charSize from the SHAPER now (was GlyphAtlas's Canvas2D 'M' measure) — step 1 of retiring
+  // the bitmap rasterization. Logs both so we can confirm they match before pulling generate().
+  const _csOld = atlas.getCharSize();
+  atlas._charSize = deriveCharSize(shaper, opts.fontSize);
+  console.log(`[glyphEngine] charSize: canvas=${_csOld.width}x${_csOld.height} → shaper=${atlas._charSize.width}x${atlas._charSize.height}`);
   // atlas._slugData is set by LiveSlugAtlas below — it now owns the initial encode (one encoder
   // for boot AND growth, so growth appends instead of re-encoding the whole set).
   // TerminalGrid maps codepoint→glyphId through this primed cache (its glyph IDs
