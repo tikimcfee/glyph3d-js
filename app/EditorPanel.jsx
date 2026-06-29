@@ -17,7 +17,10 @@ const rgb = (c) => `rgb(${(c.r * 255) | 0}, ${(c.g * 255) | 0}, ${(c.b * 255) | 
 // glyphs read the same in both views.
 const baseTheme = EditorView.theme({
   '&': { backgroundColor: '#0b0e13', color: rgb(FOREGROUND), height: '100%', fontSize: '12px' },
-  '.cm-scroller': { fontFamily: 'ui-monospace, "JetBrains Mono", Menlo, monospace', lineHeight: '1.5' },
+  // Emoji fonts appended so CodeMirror (browser-native DOM text) renders emoji like the 3D
+  // view's EmojiAtlas does. The monospace faces carry no emoji glyphs, so emoji codepoints fall
+  // THROUGH to these; without them the browser's default fallback drops some (tofu) on Linux.
+  '.cm-scroller': { fontFamily: 'ui-monospace, "JetBrains Mono", Menlo, monospace, "Noto Color Emoji", "Apple Color Emoji", "Segoe UI Emoji"', lineHeight: '1.5' },
   '.cm-gutters': { backgroundColor: '#0b0e13', color: '#3a4350', border: 'none' },
   '.cm-activeLine, .cm-activeLineGutter': { backgroundColor: 'transparent' },
   '&.cm-focused': { outline: 'none' },
