@@ -32,7 +32,7 @@ LDFLAGS := -s -w \
 	-X main.Platform=$(HOST_PLATFORM)
 GOFLAGS := -trimpath -ldflags='$(LDFLAGS)'
 
-.PHONY: all build clean prep bake-core prep-wasm prep-tree-sitter deploy deploy-ide release linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64 dev dev-vite dev-relay dev-status dev-stop
+.PHONY: all build clean prep bake-core strip-runtime-wasm prep-wasm prep-tree-sitter deploy deploy-ide release linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64 dev dev-vite dev-relay dev-status dev-stop
 
 # --- Default: build for current platform ---
 
@@ -46,13 +46,26 @@ build: prep
 # the web root: / → index.html, /assets/... → the bundle. No importmap, no raw
 # /packages/ source served. Prerequisite: deps installed (`bun install` at root).
 
-prep: bake-core
+prep: bake-core strip-runtime-wasm
 	@rm -rf $(WEB_DIR)
 	@mkdir -p $(WEB_DIR)
 	@echo "Building app (vite)…"
 	@cd $(APP_DIR) && bun run build
+	@bun tools/strip-wasm-sourcemap.mjs --check $(APP_DIR)/dist/assets/*.wasm
 	@cp -r $(APP_DIR)/dist/. $(WEB_DIR)/
 	@echo "Prepared $(WEB_DIR)/ (built app) for embedding"
+
+# --- Strip the dangling sourceMappingURL from the tree-sitter runtime wasm ---
+# Two copies feed the build: our checked-in vendor copy (loaded at runtime via
+# TreeSitterEngine's locateFile) and node_modules' copy (bundled because
+# web-tree-sitter's own glue self-references its wasm). Both upstream-built copies
+# embed a sourceMappingURL custom section pointing at a .wasm.map sidecar we don't
+# ship — Firefox devtools then emits a noisy "URL constructor: is not a valid url"
+# source-map warning every load. Stripping BOTH to identical bytes also lets Vite
+# dedupe them into a SINGLE clean asset instead of a clean + dead-weight pair.
+# Idempotent: a no-op (no rewrite) once a copy is already clean.
+strip-runtime-wasm:
+	@bun tools/strip-wasm-sourcemap.mjs node_modules/web-tree-sitter/web-tree-sitter.wasm $(TS_VENDOR)/web-tree-sitter.wasm
 
 # --- Bake the prebaked slug-core static asset (app/public/slug-core/<key>.bin) ---
 # Headless HarfBuzz encode of the LARGE_CORE for the app's font chain. Vite copies
@@ -91,6 +104,10 @@ TS_VENDOR := packages/glyph3d-core/src/parsing/vendor
 prep-tree-sitter:
 	@echo "Vendoring tree-sitter runtime + grammars..."
 	@cp node_modules/web-tree-sitter/web-tree-sitter.wasm $(TS_VENDOR)/
+	@# The upstream runtime wasm embeds a sourceMappingURL custom section pointing
+	@# at a .wasm.map sidecar we don't ship; the dangling ref makes devtools emit a
+	@# noisy "URL constructor: is not a valid url" source-map warning every load.
+	@bun tools/strip-wasm-sourcemap.mjs $(TS_VENDOR)/web-tree-sitter.wasm
 	@cp node_modules/tree-sitter-javascript/tree-sitter-javascript.wasm $(TS_VENDOR)/
 	@cp node_modules/tree-sitter-typescript/tree-sitter-typescript.wasm $(TS_VENDOR)/
 	@cp node_modules/tree-sitter-typescript/tree-sitter-tsx.wasm $(TS_VENDOR)/
@@ -179,8 +196,9 @@ deploy: linux-amd64
 IDE_DEPLOY_HOST ?= your-server
 IDE_DEPLOY_ROOT ?= /srv/www/glyph3d-ide
 
-deploy-ide: bake-core
+deploy-ide: bake-core strip-runtime-wasm
 	cd app && GLYPH_BASE=/ide/ bun run build
+	@bun tools/strip-wasm-sourcemap.mjs --check app/dist/assets/*.wasm
 	rsync -az --delete app/dist/ $(IDE_DEPLOY_HOST):$(IDE_DEPLOY_ROOT)/
 	@echo "Deployed → https://glyph3d.dev/ide/"
 
