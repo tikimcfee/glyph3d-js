@@ -28,14 +28,14 @@ import { leafBox, partitionChildren } from './nodeUtils.js';
 import { packPanels, PANEL_DEFAULTS } from './panelPack.js';
 
 export const JELLYFISH_DEFAULTS = {
-    targetRadius: 860,   // preferred column radius — sets how many panels sit abreast; width ≈ 2R
-    hubRadius: 155,      // minimum radius (the bare pole), floors the apothem for 1–2 faces
-    panelGap: 66,        // vertical gap between panels stacked down one face/column
-    faceGap: 0.4,        // tangential gap fraction between abreast faces
-    drop: 800,           // −Y descent from a column's base to its child-directory ring
+    targetRadius: 510,   // preferred column radius — sets how many panels sit abreast; width ≈ 2R
+    hubRadius: 730,      // minimum radius (the bare pole), floors the apothem for 1–2 faces
+    panelGap: 40,        // vertical gap between panels stacked down one face/column
+    faceGap: 0.38,       // tangential gap fraction between abreast faces
+    drop: 330,           // −Y descent from a column's base to its child-directory ring
     childGap: 0.2,       // ring spacing between sibling child columns
-    minRadius: 290,      // floor for the various radii (keeps a lone column/ring legible)
-    warpPanels: false,   // toggle: curve each panel's grids around the core (apothem flows down to
+    minRadius: 530,      // floor for the various radii (keeps a lone column/ring legible)
+    warpPanels: true,    // toggle: curve each panel's grids around the core (apothem flows down to
                          // the grid level) instead of laying the panel as one flat chord-face
     ...PANEL_DEFAULTS,   // panelW / panelH / colGap / rowGap — the panel packing budget
 };

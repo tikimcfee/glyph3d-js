@@ -28,10 +28,10 @@ export const PANEL_DEFAULTS = {
     // A panel is a TILE of the cylinder surface, so its budget must stay small relative to the
     // column's target radius — a grid wider than panelW becomes its own (solo) face, smaller grids
     // pack a few to a tile. Big files → few fat tiles (blocky); tiny files → many small tiles (mosaic).
-    panelW: 660,    // a row spills to the next row past this width (a panel's tangential bound)
-    panelH: 930,    // a panel spills to the next panel past this stacked height
-    colGap: 46,     // HStack gap between grids within a row
-    rowGap: 34,     // VStack gap between rows within a panel
+    panelW: 1090,   // a row spills to the next row past this width (a panel's tangential bound)
+    panelH: 960,    // a panel spills to the next panel past this stacked height
+    colGap: 32,     // HStack gap between grids within a row
+    rowGap: 48,     // VStack gap between rows within a panel
 };
 
 const widthOf = (leaf) => { const b = leafBox(leaf); return b.max.x - b.min.x; };
