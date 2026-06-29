@@ -12,6 +12,7 @@
  */
 
 import { box, kvLines } from '../formatResponse.js';
+import { getSlugCacheState, clearSlugCore } from '@glyph3d/core/shaping';
 
 /** Parse a codepoint token: hex by default ("2500"), or "U+2500"/"0x2500". */
 function parseCodepoint(tok) {
@@ -145,5 +146,43 @@ export default function registerAtlasCommands(router) {
     }, {
         description: 'Trace how a codepoint routes through the font chain (font + slot)',
         usage: '<cp-hex>',
+    });
+
+    // ================================================================
+    //  atlas.cache  [clear]
+    //  Slug-core prebake cache: the last boot outcome (loaded/cached/miss) +
+    //  stored entries. Pull-based on purpose — boot's hit/miss logs fire before
+    //  the relay WS connects, so this verb is the reliable way to observe them.
+    // ================================================================
+    router.register('atlas.cache', async (args) => {
+        if (args[0] === 'clear') {
+            const n = await clearSlugCore();
+            return {
+                text: `OK: cleared ${n} slug-core cache entr${n === 1 ? 'y' : 'ies'} (reload to re-encode + re-cache)`,
+                data: { cleared: n },
+            };
+        }
+        const s = await getSlugCacheState();
+        const kb = (b) => (b == null ? '—' : `${(b / 1024).toFixed(1)}KB`);
+        const last = s.last;
+        const lines = [];
+        if (last) {
+            lines.push(`last:    ${last.op}`);
+            if (last.glyphs != null) lines.push(`glyphs:  ${last.glyphs}   curves: ${last.curves}`);
+            if (last.gzBytes != null) lines.push(`size:    ${kb(last.rawBytes)} → ${kb(last.gzBytes)} gz`);
+            if (last.ms != null) lines.push(`took:    ${last.ms.toFixed(1)}ms`);
+            if (last.error) lines.push(`error:   ${last.error}`);
+            if (last.key) lines.push(`key:     ${last.key}`);
+        } else {
+            lines.push('last:    (no cache activity this session)');
+        }
+        lines.push('');
+        lines.push(`stored:  ${s.entries.length} entr${s.entries.length === 1 ? 'y' : 'ies'}`);
+        for (const e of s.entries) lines.push(`  ${e.key}  ${kb(e.bytes)}  (${e.meta?.glyphs ?? '?'}g)`);
+        const verb = last ? last.op : 'idle';
+        return { text: box('SLUG-CORE CACHE', lines, 58) + `\nOK: ${verb}`, data: s };
+    }, {
+        description: 'Slug-core prebake cache: last boot outcome + stored entries ("clear" to wipe)',
+        usage: '[clear]',
     });
 }

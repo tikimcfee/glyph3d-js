@@ -36,20 +36,30 @@ export default class LiveSlugAtlas {
      * @param {Object}   opts.shaper       - HarfBuzzShaper (or chain, later) for outline extraction.
      * @param {Iterable<number>} [opts.initialGlyphIds] - Glyph IDs to encode at boot (the encoder
      *           does the initial encode and stashes the result on atlas._slugData).
+     * @param {Object}   [opts.initialDescriptor] - A prebaked SlugBuffer descriptor (from the
+     *           slug-core cache). When present the encoder HYDRATES from it — skipping the boot
+     *           encode entirely — and `initialGlyphIds` is ignored. The buffer stays live (growth
+     *           appends from the hydrated set).
      */
-    constructor({ atlas, shaper, initialGlyphIds = [] }) {
+    constructor({ atlas, shaper, initialGlyphIds = [], initialDescriptor = null }) {
         /** @private */ this._atlas    = atlas;
         /** @private */ this._shaper   = shaper;
         /** @private */ this._encoder  = new SlugEncoder(shaper);
         /** @private @type {Set<Object>} live GlyphFields */ this._fields = new Set();
-        // The initial encode lives HERE now (it used to be a throwaway SlugEncoder in
-        // glyphEngine) so the encoder that GROWS the atlas is the same one holding the boot
-        // glyphs — growth APPENDS to them instead of re-encoding the whole set. The encoder
-        // owns the encoded-glyph set; we no longer track a parallel _encoded here.
-        /** @private */ this._slugData = this._encoder.encode(initialGlyphIds);
+        // The encoder that GROWS the atlas is the same one that holds the boot glyphs, so growth
+        // APPENDS instead of re-encoding the whole set. Boot either HYDRATES from a prebaked
+        // descriptor (cache hit → skip the encode) or encodes the glyph set from scratch (miss).
+        /** @private */ this._slugData = initialDescriptor
+            ? this._encoder.loadSerialized(initialDescriptor)
+            : this._encoder.encode(initialGlyphIds);
         if (atlas) atlas._slugData = this._slugData;
         /** @private bumped on every growth; lets callers detect staleness */
         this._version = 0;
+    }
+
+    /** Snapshot the encoded core as a serializable descriptor (for the slug-core cache). */
+    serialize() {
+        return this._encoder.serialize();
     }
 
     /** @returns {Object|null} the current { curveTexture, glyphMapTexture } */

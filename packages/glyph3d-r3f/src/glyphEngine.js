@@ -10,7 +10,8 @@
 // data — so it can run before any WebGPU device exists.
 
 import { GlyphAtlas, EmojiAtlas, collectUniqueGlyphIds } from '@glyph3d/core';
-import { MonospaceShapeCache, shapeText, LiveSlugAtlas, FontChain } from '@glyph3d/core/shaping';
+import { MonospaceShapeCache, shapeText, LiveSlugAtlas, FontChain,
+         slugCoreKey, loadSlugCore, saveSlugCore, discardSlugCore } from '@glyph3d/core/shaping';
 import { getWorkerBridge } from '@glyph3d/core/workers';
 
 /**
@@ -28,6 +29,8 @@ import { getWorkerBridge } from '@glyph3d/core/workers';
  * @property {Array<[number, number]>} [encodeRanges] - Inclusive codepoint ranges
  *           to encode into Slug curve textures up front.
  * @property {(stage: string) => void} [onStage] - Progress callback.
+ * @property {boolean} [cache] - Set false to bypass the prebaked slug-core cache and
+ *           force a fresh encode (the default loads-else-encodes-and-self-caches).
  */
 
 // LARGE CORE — ~everything a code IDE + terminal actually renders, encoded up front so the
@@ -133,32 +136,48 @@ export async function bootGlyphEngine(options) {
   getWorkerBridge().setShaper(shaper, shapeCache);
 
   stage('slug');
-  const encodeText = codepointsFromRanges(opts.encodeRanges);
-  const shaped = shapeText(shapeCache, encodeText);
-  const glyphIds = collectUniqueGlyphIds(shaped.lines);
-
   // CodeGrid (and GlyphField) auto-discover these off the atlas.
   atlas._shaper = shaper;
   // charSize from the SHAPER — the single metrics source (width = the 'M' advance =
   // the forced monospace cell; height = fontSize × 1.15). This is what GlyphAtlas's
   // retired Canvas2D 'M' measure used to provide.
   atlas._charSize = deriveCharSize(shaper, opts.fontSize);
-  // atlas._slugData is set by LiveSlugAtlas below — it now owns the initial encode (one encoder
-  // for boot AND growth, so growth appends instead of re-encoding the whole set).
   // TerminalGrid maps codepoint→glyphId through this primed cache (its glyph IDs
   // are the same ones the Slug glyphMapTexture is keyed by).
   atlas._shapeCache = shapeCache;
   // Color-emoji bitmap atlas — GlyphField discovers this for its bitmap branch.
   atlas._emojiAtlas = emojiAtlas;
-  // Live, growable Slug atlas: glyphs encountered after boot (box-drawing, the
-  // Claude Code spinner stars, rounded box corners, …) get encoded on demand and
-  // hot-swapped into every live field. Seed it with the boot-encoded glyph IDs +
-  // textures so the first frame is already warm. Fields self-register here.
-  atlas._live = new LiveSlugAtlas({
-    atlas,
-    shaper,
-    initialGlyphIds: glyphIds,
-  });
+
+  // Prebaked-core cache ladder. Try the local blob store first (hydrate → SKIP the
+  // boot encode); on miss/corruption, live-encode the boot glyph set and self-cache
+  // it for next boot. The key binds the font chain + encoded ranges + buffer format,
+  // so any of those changing misses → recompute. `cache: false` bypasses it (a forced
+  // re-encode). Fail-safe throughout: the live encode is always the fallback, so a bad
+  // cache entry never breaks boot — it's discarded and recomputed.
+  const useCache = opts.cache !== false;
+  const cacheKey = slugCoreKey({ fonts: fontSpecs, encodeRanges: opts.encodeRanges });
+  const cachedDescriptor = useCache ? await loadSlugCore(cacheKey) : null;
+
+  // The live, growable Slug atlas owns one encoder for BOTH boot and growth: glyphs
+  // encountered after boot (box-drawing, spinner stars, …) are appended on demand and
+  // hot-swapped into every live field. Boot either hydrates from the cache or encodes.
+  let live = null;
+  if (cachedDescriptor) {
+    try {
+      live = new LiveSlugAtlas({ atlas, shaper, initialDescriptor: cachedDescriptor });
+    } catch (err) {
+      console.warn(`[glyphEngine] slug-core hydrate failed (${err.message}) → recompute`);
+      await discardSlugCore(cacheKey);
+      live = null;
+    }
+  }
+  if (!live) {
+    const shaped = shapeText(shapeCache, codepointsFromRanges(opts.encodeRanges));
+    const glyphIds = collectUniqueGlyphIds(shaped.lines);
+    live = new LiveSlugAtlas({ atlas, shaper, initialGlyphIds: glyphIds });
+    if (useCache) await saveSlugCore(cacheKey, live.serialize());
+  }
+  atlas._live = live;
 
   stage('ready');
   return atlas;
