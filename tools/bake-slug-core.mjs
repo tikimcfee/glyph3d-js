@@ -65,18 +65,17 @@ await chain.init(fonts);
 // CRITICAL: the runtime sets an EmojiAtlas, and FontChain allocates a BITMAP slot for any
 // emoji-presentable codepoint (0x2600–0x27BF, 0x2B00–0x2BFF) that no outline font covers —
 // from the SAME dense slot counter as outline glyphs. Without it the bake would skip those
-// ~256 slots and every later slot would shift, so the hydrated textures would be keyed wrong
-// (common text fine, symbols garbled). This stub replicates EmojiAtlas.ensure() EXACTLY —
-// a per-cp-cached monotonic counter capped at the atlas capacity — so the bake's slot+cell
-// allocation matches the runtime's. It draws nothing (the runtime redraws cells via prime);
-// only the allocation ORDER + CAP matter for alignment. Keep CAPACITY = EmojiAtlas cols² (16²).
-const EMOJI_CAPACITY = 256;
+// slots and every later slot would shift, so the hydrated textures would be keyed wrong
+// (common text fine, symbols garbled). This stub replicates EmojiAtlas.ensure() — a per-cp-
+// cached monotonic counter — so the bake's slot+cell allocation matches the runtime's. It
+// draws nothing (the runtime redraws cells via prime); only the allocation ORDER matters.
+// The real atlas now GROWS (no fixed cap), and the count of uncovered emoji-symbols in the
+// core is far below its ceiling, so the stub is uncapped — both allocate every one.
 const stubEmojiAtlas = {
     _byCp: new Map(), _next: 0,
     ensure(cp) {
         const c = this._byCp.get(cp);
         if (c !== undefined) return c;
-        if (this._next >= EMOJI_CAPACITY) return -1;
         const idx = this._next++;
         this._byCp.set(cp, idx);
         return idx;

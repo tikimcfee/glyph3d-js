@@ -258,7 +258,7 @@ function _buildVertexNode(uniforms) {
  */
 function _buildOutputNode(varyings, uniforms) {
     const { vColor, vGroupAlpha, vAddedColor, vFillAmount, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell } = varyings;
-    const { curveTex, emojiTex, emojiCols, frameTex, frameCols, frameRows } = uniforms;
+    const { curveTex, emojiTex, emojiCols, emojiRows, frameTex, frameCols, frameRows } = uniforms;
 
     // Minification tuning knobs — now LIVE uniforms (GLYPH_LOD_DEFAULTS / setGlyphLodParam), dialable
     // via app settings. DILATE_PX = half-width, in pixels, of the stroke fattening applied at full
@@ -302,7 +302,9 @@ function _buildOutputNode(varyings, uniforms) {
         }).Else(() => {
         If(vMode.equal(int(RENDER_MODE.BITMAP)), () => {
             // ── Bitmap / emoji branch ────────────────────────────────────────────
-            // Atlas is a square grid of `emojiCols × emojiCols` equal-sized cells.
+            // Atlas is an `emojiCols × emojiRows` grid of equal square cells — cols is
+            // FIXED, rows GROW (the atlas adds rows on overflow), so it's non-square in
+            // general: U divides by cols, V divides by ROWS.
             // cell index → (col = cell % cols, row = floor(cell / cols)).
             // vGlyphUV is [0,1]² across the quad → maps to the sub-cell region.
             //
@@ -315,7 +317,7 @@ function _buildOutputNode(varyings, uniforms) {
             const row = float(vEmojiCell).div(emojiCols).floor();
             const atlasUV = vec2(
                 col.add(vGlyphUV.x).div(emojiCols),
-                row.add(float(1).sub(vGlyphUV.y)).div(emojiCols)   // ← flip ACTIVE (flipY=false atlas)
+                row.add(float(1).sub(vGlyphUV.y)).div(emojiRows)   // ← /ROWS; flip ACTIVE (flipY=false atlas)
             );
             // Filtered (bilinear) RGBA sample — emojiTex is a normal filterable texture.
             // .sample(uvNode) uses the sampler path (not textureLoad), giving interpolation.
@@ -647,6 +649,7 @@ function _getSharedFieldMaterial(kind) {
     const clipBottomNode   = _fieldUniform(0, (f) => f._clipBottomVal);
     const emojiTexNode     = _fieldTexture(_makePlaceholderRGBATexture(), '_emojiTexture');
     const emojiColsNode    = _fieldUniform(16, (f) => f._emojiCols);
+    const emojiRowsNode    = _fieldUniform(16, (f) => f._emojiRows);
     // Frame-mode (external NxM image/video) nodes — resolve per object like the rest.
     const renderModeNode   = _fieldUniform(RENDER_MODE.GLYPH, (f) => f._renderMode || RENDER_MODE.GLYPH);
     const frameTexNode     = _fieldTexture(_makePlaceholderRGBATexture(), '_frameTexture');
@@ -671,7 +674,7 @@ function _getSharedFieldMaterial(kind) {
         : _buildOutputNode(
             { vColor, vGroupAlpha, vAddedColor, vFillAmount, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell },
             {
-                curveTex: curveTexNode, emojiTex: emojiTexNode, emojiCols: emojiColsNode,
+                curveTex: curveTexNode, emojiTex: emojiTexNode, emojiCols: emojiColsNode, emojiRows: emojiRowsNode,
                 frameTex: frameTexNode, frameCols: frameColsNode, frameRows: frameRowsNode,
             }
         );
@@ -777,6 +780,7 @@ export default class GlyphField {
         this._clipBottomVal  = 0;
         this._emojiTexture   = null;
         this._emojiCols      = 16;
+        this._emojiRows      = 16;
 
         // Frame mode: render the whole field as an NxM grid sampled from an external
         // texture (screen capture / video / image) instead of glyphs. Defaults to the
@@ -896,6 +900,7 @@ export default class GlyphField {
         const emojiAtlas = this.atlas && this.atlas._emojiAtlas;
         this._emojiTexture = emojiAtlas ? emojiAtlas.getTexture(THREE) : null;
         this._emojiCols    = emojiAtlas ? emojiAtlas.cols : 16;
+        this._emojiRows    = emojiAtlas ? emojiAtlas.rows : 16;
 
         const material = _getSharedFieldMaterial(this._occluder ? 'occluder' : 'glyph');
         this._material = material;
@@ -939,6 +944,7 @@ export default class GlyphField {
             tex.needsUpdate = true;
             this._emojiTexture = tex;
             this._emojiCols   = this.atlas._emojiAtlas.cols;
+            this._emojiRows   = this.atlas._emojiAtlas.rows;
         }
     }
 

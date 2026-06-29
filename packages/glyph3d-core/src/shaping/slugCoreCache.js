@@ -35,7 +35,7 @@ const HEADER_U32 = 8;
 // the key is identity-based (font NAMES, not urls), so it can't otherwise notice new bytes.
 // Names, because Vite `?url` imports resolve to DIFFERENT strings in dev vs build; keying on
 // the url would make the key environment-volatile and a baked asset unfindable at runtime.
-const FONT_CHAIN_VERSION = 1;
+const FONT_CHAIN_VERSION = 2;
 
 const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
