@@ -2,6 +2,7 @@ import { stateController } from '@glyph3d/core/services/state';
 import { setPanelStateColorDefaults } from '@glyph3d/core/collections';
 import { setGlyphLodParam, GLYPH_LOD_DEFAULTS } from '@glyph3d/core/GlyphField.js';
 import { setStrataParam, STRATA_DEFAULTS } from '@glyph3d/core/collections/StrataLayout.js';
+import { TERMINAL_CURSOR_DEFAULTS } from '@glyph3d/core/collections/TerminalGrid.js';
 import { JELLYFISH_DEFAULTS, schemeNameOf } from '@glyph3d/core/collections/layouts/index.js';
 
 // Settings schema — the SINGLE source for both the Settings panel (renders a row
@@ -177,6 +178,24 @@ export const SETTINGS = [
     type: 'number', default: 0.96, min: 0, max: 1, step: 0.01,
     apply: (ctx, v) => themeAll(ctx, 'terminal', { opacity: v }),
   },
+  // Terminal cursor — the block that marks where typing lands. Color + the focused (solid) fill +
+  // the unfocused (hollow) outline width, each pushed live to every terminal. Defaults shared with
+  // the TerminalGrid constructor (TERMINAL_CURSOR_DEFAULTS) so the panel and a fresh terminal agree.
+  {
+    key: 'terminal.cursorColor', label: 'Terminal cursor', group: 'Theme',
+    type: 'color', default: TERMINAL_CURSOR_DEFAULTS.color,
+    apply: (ctx, v) => cursorStyleAll(ctx, { color: v }),
+  },
+  {
+    key: 'terminal.cursorFill', label: 'Terminal cursor fill (focused)', group: 'Theme',
+    type: 'number', default: TERMINAL_CURSOR_DEFAULTS.fillOpacity, min: 0, max: 1, step: 0.01,
+    apply: (ctx, v) => cursorStyleAll(ctx, { fillOpacity: v }),
+  },
+  {
+    key: 'terminal.cursorOutline', label: 'Terminal cursor outline (px)', group: 'Theme',
+    type: 'number', default: TERMINAL_CURSOR_DEFAULTS.borderWidth, min: 0.5, max: 6, step: 0.1,
+    apply: (ctx, v) => cursorStyleAll(ctx, { borderWidth: v }),
+  },
   // Appearance — the interaction color vocabulary (focus / hover / edit-input). ONE source of truth,
   // shared by the in-shader panel border (every grid/terminal) AND the directory overlay, so the two
   // never drift. apply() restyles every live panel + sets the default new panels are born with; the
@@ -276,6 +295,7 @@ export const SETTINGS = [
   { key: 'trail.artifactWorldScale', label: 'Snapshot / output size', group: 'Trail', type: 'number', default: 0.025, min: 0.001, max: 5, step: 0.005, apply: trailParam('artifactWorldScale') },
   { key: 'trail.messageScale', label: 'Message (say / think) size', group: 'Trail', type: 'number', default: 0.05, min: 0.001, max: 5, step: 0.005, apply: trailParam('messageScale') },
   { key: 'trail.snapshotImageWidth', label: 'Image card width', group: 'Trail', type: 'number', default: 40, min: 1, max: 2000, step: 5, apply: trailParam('snapshotImageWidth') },
+  { key: 'trail.pagerLerp', label: 'Page animation speed', group: 'Trail', type: 'number', default: 9, min: 0, max: 60, step: 0.5, apply: trailParam('pagerLerp') },
   // Strata — the nested Z-depth structure view (structure.strata). Every dial is LIVE: a
   // change re-applies to the on-screen strata immediately (boxOpacity rides a shader uniform;
   // the rest re-derive positions/boxes). Borders should recede behind the glyphs — drop
@@ -292,6 +312,11 @@ export const SETTINGS = [
 /** Push a background restyle to every live grid/terminal of `type`. */
 function themeAll(ctx, type, style) {
   for (const e of ctx?.registry?.findByType?.(type) ?? []) e.grid?.setBackgroundStyle?.(style);
+}
+
+/** Push a cursor-block restyle to every live terminal (color / focused fill / hollow outline). */
+function cursorStyleAll(ctx, style) {
+  for (const e of ctx?.registry?.findByType?.('terminal') ?? []) e.grid?.setCursorStyle?.(style);
 }
 
 /** The interaction color vocabulary (focus/hover/input) as '#rrggbb' strings. Cached so the per-frame
@@ -328,11 +353,14 @@ export function gridTheme() {
   };
 }
 
-/** Background options for a NEW TerminalGrid — so it spawns in the current scheme. */
+/** Background + cursor options for a NEW TerminalGrid — so it spawns in the current scheme. */
 export function terminalTheme() {
   return {
     backgroundColor: getSetting('terminal.backgroundColor'),
     backgroundOpacity: getSetting('terminal.backgroundOpacity'),
+    cursorColor: getSetting('terminal.cursorColor'),
+    cursorFillOpacity: getSetting('terminal.cursorFill'),
+    cursorBorderWidth: getSetting('terminal.cursorOutline'),
   };
 }
 

@@ -13,8 +13,11 @@
  * coalesce into one applyScreen.
  *
  * ScreenBuffer contract (what applyScreen consumes):
- *   { cols, rows, cells: Array<Array<{ codepoint:number, fg:{r,g,b}, bg:{r,g,b}|null, bold:boolean }>> }
+ *   { cols, rows, cells: Array<Array<{ codepoint:number, fg:{r,g,b}, bg:{r,g,b}|null, bold:boolean }>>,
+ *     alt: boolean, cursor: { x:number, y:number } }
  *   bg is null for the DEFAULT background (no per-cell fill); only explicit ANSI bg paints a cell.
+ *   cursor is the VIEWPORT-relative cell the terminal would draw its caret on (x = column, y = row);
+ *   the renderer parks a cursor block there so you can see where typing lands.
  */
 
 // Deep import of the real ESM build: @xterm/headless@6's package.json "module" field
@@ -118,7 +121,12 @@ export default class TerminalEmulator {
             }
             cells[y] = row;
         }
-        return { cols, rows, cells, alt };
+        // Cursor cell. xterm's cursorY is already viewport-relative (0..rows-1), so it
+        // maps straight to our row index; cursorX is the column. The renderer parks a
+        // block here. (DECTCEM show/hide isn't on the public buffer API, so we always
+        // surface the position and let the renderer decide whether to draw it.)
+        const cursor = { x: buf.cursorX, y: buf.cursorY };
+        return { cols, rows, cells, alt, cursor };
     }
 
     /**

@@ -31,8 +31,27 @@ import MonospaceShapeCache from '../shaping/MonospaceShapeCache.js';
 import FramedGlyphField from './FramedGlyphField.js';
 import Button3D from '../components/Button3D.js';
 import { createPanelMaterial } from './panelMaterial.js';
+import { createCursorMaterial } from './cursorMaterial.js';
 
 const _cellStrideScale = new THREE.Vector3(); // scratch for cellStride's world-scale read
+
+/**
+ * Terminal cursor defaults — the block that marks where typing lands. Born configurable
+ * (Settings ▸ Theme + the constructor's `cursor*` options + setCursorStyle) rather than baked,
+ * so the look is tunable live. `color` defaults to the focus-green of the interaction-state
+ * vocabulary; `fillOpacity` is the translucent solid-block alpha when the terminal holds the
+ * keyboard; `borderWidth` is the hollow-outline thickness (screen px) when it doesn't. Shared as
+ * the SINGLE source of truth so the settings schema and the constructor never drift.
+ */
+export const TERMINAL_CURSOR_DEFAULTS = Object.freeze({
+    color: '#6ee7a0',
+    fillOpacity: 0.5,
+    borderWidth: 1.5,
+});
+
+// Cursor block render order: above glyphs (0), below the window chrome (GRID_CHROME = 6) — the
+// same band CodeGrid's caret uses. A compositing constant, not a taste knob, so it stays baked.
+const CURSOR_RENDER_ORDER = 5;
 
 export default class TerminalGrid extends FramedGlyphField {
     /**
@@ -44,6 +63,9 @@ export default class TerminalGrid extends FramedGlyphField {
      * @param {number} [options.worldScale=0.025] World units per atlas pixel
      * @param {{x:number,y:number,z:number}} [options.position]  Initial world position
      * @param {string} [options.title='TerminalGrid']  Debug name
+     * @param {number|string} [options.cursorColor]  Cursor block color (default TERMINAL_CURSOR_DEFAULTS.color)
+     * @param {number} [options.cursorFillOpacity]   Solid-block alpha when focused (default ….fillOpacity)
+     * @param {number} [options.cursorBorderWidth]   Hollow-outline thickness, screen px (default ….borderWidth)
      */
     constructor(scene, atlas, options = {}) {
         super();
@@ -197,6 +219,21 @@ export default class TerminalGrid extends FramedGlyphField {
         this._controls = [];       // [{ spec, mesh }] — see CONTROL_SPEC
         this._initControls();
 
+        // Cursor block — marks the live cell where typing lands (xterm's cursorX/cursorY, surfaced
+        // by the emulator into the screen buffer). Drawn SOLID (translucent block, glyph reads
+        // through) when this terminal holds the keyboard, HOLLOW (outline) otherwise — so every
+        // terminal shows its prompt spot and the focused one reads as "type here". Style is born
+        // configurable (see TERMINAL_CURSOR_DEFAULTS); focus state rides setCursorFocused.
+        this._cursorColor       = options.cursorColor       ?? TERMINAL_CURSOR_DEFAULTS.color;
+        this._cursorFillOpacity = options.cursorFillOpacity ?? TERMINAL_CURSOR_DEFAULTS.fillOpacity;
+        this._cursorBorderWidth = options.cursorBorderWidth ?? TERMINAL_CURSOR_DEFAULTS.borderWidth;
+        this._cursor        = { x: 0, y: 0 };   // live cursor cell (viewport-relative)
+        this._cursorVisible = true;             // emulator-driven draw gate (always on for now)
+        this._cursorFocused = false;            // keyboard-target → solid; else hollow
+        this._cursorMesh    = null;
+        this._cursorCtl     = null;
+        this._initCursorMesh();
+
         // Add the renderer's mesh as a child so transforms propagate.
         this.add(this._renderer.instanceMesh);
 
@@ -318,6 +355,14 @@ export default class TerminalGrid extends FramedGlyphField {
 
         // Project canonical arrays (live + history) → GPU attribute arrays.
         this._writeToInstanceBuffer();
+
+        // Move the cursor block to the cell the emulator reports. (Sources without a cursor —
+        // future file-slice / graphics surfaces — simply leave it where it was.)
+        if (screen.cursor) {
+            this._cursor.x = screen.cursor.x;
+            this._cursor.y = screen.cursor.y;
+            this._updateCursorMesh();
+        }
     }
 
     /**
@@ -622,6 +667,7 @@ export default class TerminalGrid extends FramedGlyphField {
     setVisible(visible) {
         this._visible = visible;
         this._applyGlyphAlpha();
+        this._updateCursorMesh();   // the cursor mesh isn't in the glyph group; hide/show it explicitly
     }
 
     /**
@@ -632,6 +678,83 @@ export default class TerminalGrid extends FramedGlyphField {
      */
     _applyGlyphAlpha() {
         this._renderer?.setGroupAlpha(this._groupId, this._visible ? this._bgOpacity : 0);
+    }
+
+    // ================================================================
+    // Cursor block — "where typing lands"
+    // ================================================================
+
+    /**
+     * Mark this terminal as the keyboard target (solid block) or not (hollow outline). Driven by
+     * the shell's attention loop: the input-active terminal goes solid, the rest stay hollow. Cheap
+     * (one uniform flip), so calling it every frame is fine.
+     * @param {boolean} focused
+     */
+    setCursorFocused(focused) {
+        this._cursorFocused = !!focused;
+        this._cursorCtl?.setFocused(this._cursorFocused);
+    }
+
+    /** Show/hide the cursor block without forgetting its cell (e.g. a future DECTCEM hide). */
+    setCursorVisible(visible) {
+        this._cursorVisible = !!visible;
+        this._updateCursorMesh();
+    }
+
+    /**
+     * Live restyle the cursor block — color, solid-fill alpha, hollow-outline width. Mirrors
+     * setBackgroundStyle; the Settings ▸ Theme cursor knobs push through here for every terminal.
+     * @param {{ color?: number|string, fillOpacity?: number, borderWidth?: number }} style
+     */
+    setCursorStyle({ color, fillOpacity, borderWidth } = {}) {
+        if (color != null) this._cursorColor = color;
+        if (fillOpacity != null) this._cursorFillOpacity = fillOpacity;
+        if (borderWidth != null) this._cursorBorderWidth = borderWidth;
+        this._cursorCtl?.setStyle({ color, fillOpacity, borderWidth });
+    }
+
+    /**
+     * Lazy-build the cursor block: a unit plane scaled per cell, its material flipping between a
+     * translucent solid (focused) and a hollow outline (unfocused). A child of this Object3D, so it
+     * rides the terminal's world position/scale exactly like the glyph cells. @private
+     */
+    _initCursorMesh() {
+        if (this._cursorMesh) return;
+        this._cursorCtl = createCursorMaterial({
+            color: this._cursorColor,
+            fillOpacity: this._cursorFillOpacity,
+            borderWidth: this._cursorBorderWidth,
+        });
+        this._cursorCtl.setFocused(this._cursorFocused);
+        this._cursorMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), this._cursorCtl.material);
+        this._cursorMesh.renderOrder = CURSOR_RENDER_ORDER;
+        this._cursorMesh.frustumCulled = false;   // grid-local; the parent culls
+        this.add(this._cursorMesh);
+        this._updateCursorMesh();
+    }
+
+    /**
+     * Park the cursor block on its live cell. Same cell math as _computePositions (glyph anchor =
+     * col*strideX, −row*strideY) shifted to the cell CENTER and sized to the full advance cell, so
+     * the block tiles the cell like a real terminal cursor. Hidden when the terminal is hidden or the
+     * cursor falls outside the live screen. @private
+     */
+    _updateCursorMesh() {
+        if (!this._cursorMesh) return;
+        const { x, y } = this._cursor;
+        if (!this._visible || !this._cursorVisible || x < 0 || x >= this.cols || y < 0 || y >= this.rows) {
+            this._cursorMesh.visible = false;
+            return;
+        }
+        const m = this._metrics;
+        const strideX = m.charWidth + m.letterSpacing;
+        const strideY = m.lineSpacing;
+        this._cursorMesh.scale.set(strideX, strideY, 1);
+        // Cell left edge sits at col*strideX (the glyph anchor); +½ stride centers the block. y is
+        // the glyph's vertical center (rows step by strideY). +0.05 z keeps it just in front of the
+        // glyph so it never z-fights — same offset as CodeGrid's caret.
+        this._cursorMesh.position.set(x * strideX + strideX / 2, -y * strideY, 0.05);
+        this._cursorMesh.visible = true;
     }
 
     /**
@@ -798,6 +921,11 @@ export default class TerminalGrid extends FramedGlyphField {
         // Size-change tap: a 2D companion xterm follows so it re-interprets the shared byte
         // stream at the new dimensions (one source, two projections — see onBytes).
         this._emitResize(cols, rows);
+
+        // Re-park the cursor: cols/rows changed, so its cell may now be off-screen (→ hidden) and
+        // the cell math depends on the new dims. The next emulator frame will reposition it anyway,
+        // but this keeps it correct in the gap before that repaint.
+        this._updateCursorMesh();
     }
 
     /**
@@ -822,6 +950,13 @@ export default class TerminalGrid extends FramedGlyphField {
             this._renderer.instanceMesh.geometry.dispose();
             this._renderer.instanceMesh.material.dispose();
             this._renderer = null;
+        }
+        if (this._cursorMesh) {
+            this._cursorMesh.geometry.dispose();
+            this._cursorMesh.material.dispose();
+            this.remove(this._cursorMesh);
+            this._cursorMesh = null;
+            this._cursorCtl = null;
         }
         this._disposePanel();   // free + detach the background panel (FramedGlyphField) — now also
                                 // removes it from this Object3D, which TG's inline teardown skipped

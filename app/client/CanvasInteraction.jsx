@@ -764,6 +764,17 @@ function applyBorderFlag(state, key, grid, mask) {
   state[key] = grid;
 }
 
+// The input-active terminal's cursor reads SOLID ("type here"); when focus leaves it, back to a
+// HOLLOW outline. Same single-writer pattern as applyBorderFlag (one terminal holds it at a time);
+// non-tracked terminals keep their born-hollow default, so we only ever flip the one that changed.
+function applyCursorFocus(state, terminal) {
+  const prev = state.cursorFocus;
+  if (prev === terminal) return;
+  prev?.setCursorFocused?.(false);
+  terminal?.setCursorFocused?.(true);
+  state.cursorFocus = terminal;
+}
+
 // Reused per frame to compose each outline's matrix (grid.matrixWorld × local offset).
 const _off = new THREE.Matrix4();
 const _center = new THREE.Vector3();
@@ -824,7 +835,7 @@ export function SelectionIndicator() {
     t.am = client.ctx.attentionManager;
     t.registry = client.ctx.registry;
     // Which panel currently holds each state bit, so we can clear it when the target moves.
-    t.flagged = { focus: null, input: null, hover: null };
+    t.flagged = { focus: null, input: null, hover: null, cursorFocus: null };
     // One box per role: a green/amber box for the SELECTED grid, a light-blue box
     // for HOVER on a DIFFERENT grid. Hovering the focused grid recolors the focus
     // box (fades toward blue) rather than drawing the hover box on top — no stack.
@@ -838,11 +849,12 @@ export function SelectionIndicator() {
       t.flagged?.focus?.setBorderFlag?.(BORDER_FLAGS.FOCUSED, false);
       t.flagged?.input?.setBorderFlag?.(BORDER_FLAGS.INPUT, false);
       t.flagged?.hover?.setBorderFlag?.(BORDER_FLAGS.HOVERED, false);
+      t.flagged?.cursorFocus?.setCursorFocused?.(false);
       scene.remove(t.primaryBox); scene.remove(t.hoverBox); scene.remove(t.primaryFill);
       t.primaryBox.geometry?.dispose?.(); t.hoverBox.geometry?.dispose?.(); t.primaryFill.geometry?.dispose?.();
       t.primaryBox.material?.dispose?.(); t.hoverBox.material?.dispose?.(); t.primaryFill.material?.dispose?.();
       t.primaryBox = t.hoverBox = t.primaryFill = t.am = t.registry = null;
-      t.flagged = { focus: null, input: null, hover: null };
+      t.flagged = { focus: null, input: null, hover: null, cursorFocus: null };
     };
   }, [client, scene]);
 
@@ -910,6 +922,10 @@ export function SelectionIndicator() {
     applyBorderFlag(t.flagged, 'focus', focusPanel, BORDER_FLAGS.FOCUSED);
     applyBorderFlag(t.flagged, 'input', inputActive ? focusPanel : null, BORDER_FLAGS.INPUT);
     applyBorderFlag(t.flagged, 'hover', hoverPanel, BORDER_FLAGS.HOVERED);
+
+    // The focused terminal's cursor goes solid (it's the keyboard target — same condition as the
+    // amber INPUT border above); every other terminal keeps its hollow outline.
+    applyCursorFocus(t.flagged, (inputActive && primaryEntry?.type === 'terminal') ? focusPanel : null);
 
     // DIRECTORIES have no panel to host a border, so they keep the overlay box. The edge box recolors
     // to signal WHERE KEYSTROKES LAND (amber input-active / green focused), fading toward blue when
