@@ -527,18 +527,41 @@ const computeCoverage = Fn(([invDiameter, dilate, p0, p1, p2]) => {
             const radicand = b.y.mul(b.y).sub(a.y.mul(c.y));
             If(radicand.greaterThan(0), () => {
                 const s = radicand.sqrt();
-                t0.assign(b.y.sub(s).div(a.y));
-                t1.assign(b.y.add(s).div(a.y));
+                // STABLE roots: q = b.y + sign(b.y)·s (the larger-magnitude numerator, so no
+                // cancellation), then the two roots are q/a.y and c.y/q. The naive (b.y ∓ s)/a.y
+                // cancels catastrophically when a.y is small (the curve runs ~parallel to the ray,
+                // so b.y ≈ s); at magnification invDiameter amplifies that lost precision into a
+                // SPURIOUS crossing — the faint stray lines along near-axis curves. t0 = exit
+                // (dy<0), t1 = enter (dy>0); which of q/a.y vs c.y/q is which flips with sign(b.y).
+                const q = b.y.add(b.y.greaterThanEqual(0).select(s, s.negate()));
+                If(b.y.greaterThanEqual(0), () => {
+                    t0.assign(c.y.div(q));
+                    t1.assign(q.div(a.y));
+                }).Else(() => {
+                    t0.assign(q.div(a.y));
+                    t1.assign(c.y.div(q));
+                });
             }).Else(() => {
                 solvable.assign(0); // radicand ≤ 0 → no crossing
             });
         }).Else(() => {
             // Degenerate quadratic = line segment; one root, assigned by direction.
-            const t = p0.y.div(p0.y.sub(p2.y));
-            If(p0.y.lessThan(p2.y), () => {
-                t0.assign(-1); t1.assign(t);
+            // Guard the division: if the endpoints sit at (nearly) the same y, the segment
+            // runs ∥ to the ray — there's no well-defined crossing, and p0.y/(p0.y−p2.y)
+            // would divide by ~0 → a garbage t that can land in [0,1) and paint a stray
+            // near-horizontal line. Skip it; the orthogonal ray (which sees this curve as
+            // ~perpendicular) resolves it stably. This is the long-standing "curve goes off
+            // the rails" artifact (e.g. the thin line on 'g').
+            const denom = p0.y.sub(p2.y);
+            If(denom.abs().greaterThanEqual(1e-6), () => {
+                const t = p0.y.div(denom);
+                If(p0.y.lessThan(p2.y), () => {
+                    t0.assign(-1); t1.assign(t);
+                }).Else(() => {
+                    t0.assign(t); t1.assign(-1);
+                });
             }).Else(() => {
-                t0.assign(t); t1.assign(-1);
+                solvable.assign(0);
             });
         });
 
