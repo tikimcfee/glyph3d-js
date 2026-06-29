@@ -13,7 +13,6 @@
 import * as THREE from 'three';
 import GlyphField from '../GlyphField.js';
 import { getWorkerBridge, isWorkersSupported } from '../workers/WorkerBridge.js';
-import { iterGraphemes } from '../utils/grapheme.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import { BOUNDS_Z_PAD } from '../core/constants.js';
 import { paginationGeometry, resolveLayoutParams, DEFAULT_LAYOUT } from '../workers/builders/index.js';
@@ -1219,20 +1218,7 @@ class CodeGrid extends FramedGlyphField {
             pixelHeight:   atlasCharSize.height,
         };
 
-        // Ensure codepoints exist in atlas before building (legacy non-shaper path)
-        if (!this.config.shaper) {
-            const missing = new Set();
-            for (const it of items) {
-                if (!it.text) continue;
-                for (const grapheme of iterGraphemes(it.text)) {
-                    const cp = grapheme.codePointAt(0);
-                    if (cp > 32 && !this.atlas.uvMap.has(grapheme)) missing.add(grapheme);
-                }
-            }
-            if (missing.size > 0) this.atlas.ensureGraphemes(Array.from(missing));
-        }
-
-        // Live Slug path (shaper present): ensure every codepoint's curves are
+        // Live Slug path: ensure every codepoint's curves are
         // encoded before the builder maps text → slots. First sighting of a glyph
         // (box-drawing, stars, …) allocates its slot in the shared shape cache and
         // re-encodes the GPU textures; a per-grid "seen" set keeps this O(new).

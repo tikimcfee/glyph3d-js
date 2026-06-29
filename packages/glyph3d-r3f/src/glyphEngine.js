@@ -1,13 +1,13 @@
-// glyphEngine — boot the renderer-independent glyph pipeline (atlas + HarfBuzz
-// shaper + Slug curve encoding). Returns a ready GlyphAtlas with the shaper and
-// slug textures stashed on it (the convention CodeGrid auto-discovers).
+// glyphEngine — boot the renderer-independent glyph pipeline (atlas handle +
+// HarfBuzz shaper + Slug curve encoding). Returns a ready GlyphAtlas with the
+// shaper and slug textures stashed on it (the convention CodeGrid auto-discovers).
 //
 // Design note: this deliberately takes EVERYTHING as explicit options — the font
 // URL, family, sizes, and which codepoint ranges to prime/encode. Nothing about
 // "Cousine at 48px in a 2048 atlas" is baked in here; those are the consumer's
 // decisions. The keystone (and later apps) pass their own. This is GPU/renderer
-// independent: GlyphAtlas is Canvas2D, the shaper is WASM, SlugEncoder is data —
-// so it can run before any WebGPU device exists.
+// independent: GlyphAtlas is a plain handle, the shaper is WASM, SlugEncoder is
+// data — so it can run before any WebGPU device exists.
 
 import { GlyphAtlas, EmojiAtlas, collectUniqueGlyphIds } from '@glyph3d/core';
 import { MonospaceShapeCache, shapeText, LiveSlugAtlas, FontChain } from '@glyph3d/core/shaping';
@@ -107,8 +107,9 @@ export async function bootGlyphEngine(options) {
   const stage = opts.onStage ?? (() => {});
 
   stage('atlas');
+  // A bare handle now — no Canvas2D rasterization. It holds the shared pipeline
+  // handles (shaper/cache/emoji/live) and answers charSize + atlasSize.
   const atlas = new GlyphAtlas(opts.fontFamily, opts.fontSize, opts.atlasSize);
-  await atlas.generate();
 
   stage('shaper');
   // The font chain IS the shaper for the whole pipeline: it presents the same
@@ -138,11 +139,10 @@ export async function bootGlyphEngine(options) {
 
   // CodeGrid (and GlyphField) auto-discover these off the atlas.
   atlas._shaper = shaper;
-  // charSize from the SHAPER now (was GlyphAtlas's Canvas2D 'M' measure) — step 1 of retiring
-  // the bitmap rasterization. Logs both so we can confirm they match before pulling generate().
-  const _csOld = atlas.getCharSize();
+  // charSize from the SHAPER — the single metrics source (width = the 'M' advance =
+  // the forced monospace cell; height = fontSize × 1.15). This is what GlyphAtlas's
+  // retired Canvas2D 'M' measure used to provide.
   atlas._charSize = deriveCharSize(shaper, opts.fontSize);
-  console.log(`[glyphEngine] charSize: canvas=${_csOld.width}x${_csOld.height} → shaper=${atlas._charSize.width}x${atlas._charSize.height}`);
   // atlas._slugData is set by LiveSlugAtlas below — it now owns the initial encode (one encoder
   // for boot AND growth, so growth appends instead of re-encoding the whole set).
   // TerminalGrid maps codepoint→glyphId through this primed cache (its glyph IDs

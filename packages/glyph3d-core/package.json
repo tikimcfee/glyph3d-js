@@ -7,7 +7,6 @@
   "module": "src/index.js",
   "exports": {
     ".": "./src/index.js",
-    "./atlas-loader": "./src/GlyphAtlasLoader.js",
     "./collections": "./src/collections/index.js",
     "./workers": "./src/workers/WorkerBridge.js",
     "./utils": "./src/utils/index.js",

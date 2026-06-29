@@ -26,7 +26,6 @@
 
 import GlyphField from '../../GlyphField.js';
 import { getWorkerBridge, isWorkersSupported } from '../../workers/WorkerBridge.js';
-import { iterGraphemes } from '../../utils/grapheme.js';
 
 // Camera Z thresholds for LOD switching
 const DIR_VISIBLE_MIN_Z   = 100;    // directory labels visible above this Z
@@ -107,6 +106,10 @@ export class TreemapLabelManager {
         // Set initial group visibilities (all on)
         for (const gid of this._dirGroupIds)  this._renderer.setGroupVisibility(gid, true);
         for (const gid of this._fileGroupIds) this._renderer.setGroupVisibility(gid, true);
+
+        // Encode any not-yet-seen glyphs into the live Slug atlas before the
+        // builder maps text → slots (covers both the worker and sync paths).
+        this._ensureGlyphsEncoded(pendingItems);
 
         // Flush to GPU
         if (isWorkersSupported()) {
@@ -209,6 +212,38 @@ export class TreemapLabelManager {
     }
 
     /**
+     * Ensure every codepoint across the pending labels has its Slug curves
+     * encoded before the builder maps text → glyph slots. Mirrors CodeGrid's
+     * live-encode path: first sighting of a glyph allocates its slot + re-encodes
+     * the GPU textures (O(new) via a persistent seen-set), and a growth resyncs
+     * the worker shape cache. No-op without a live atlas (e.g. a bare GlyphAtlas
+     * in a test harness).
+     * @private
+     */
+    _ensureGlyphsEncoded(pendingItems) {
+        const atlas = this._atlas;
+        const live  = atlas && atlas._live;
+        if (!live || !atlas._shapeCache) return;
+        if (!this._liveEnsured) this._liveEnsured = new Set();
+        const seen = this._liveEnsured;
+        let fresh = null;
+        for (const it of pendingItems) {
+            const t = it.text;
+            if (!t) continue;
+            for (let i = 0; i < t.length;) {
+                const cp = t.codePointAt(i);
+                i += cp > 0xFFFF ? 2 : 1;
+                if (cp > 32 && !seen.has(cp)) { seen.add(cp); (fresh ?? (fresh = [])).push(cp); }
+            }
+        }
+        if (fresh) {
+            const before = live.size;
+            live.ensureCodepoints(fresh, atlas._shapeCache);
+            if (live.size !== before) getWorkerBridge().resyncShapeCache();
+        }
+    }
+
+    /**
      * Flush items via worker (async path).
      * @private
      */
@@ -216,19 +251,6 @@ export class TreemapLabelManager {
         const bridge       = getWorkerBridge();
         const defaultColor = { r: 1, g: 1, b: 1 };
         const atlas        = this._atlas;
-
-        // Ensure all codepoints exist in atlas before dispatching
-        const missingGraphemes = new Set();
-        for (const item of pendingItems) {
-            if (!item.text) continue;
-            for (const grapheme of iterGraphemes(item.text)) {
-                const cp = grapheme.codePointAt(0);
-                if (cp > 32 && !atlas.uvMap.has(grapheme)) {
-                    missingGraphemes.add(grapheme);
-                }
-            }
-        }
-        if (missingGraphemes.size > 0) atlas.ensureGraphemes(Array.from(missingGraphemes));
 
         const atlasCharSize = atlas.getCharSize();
         const scale = 0.025;
