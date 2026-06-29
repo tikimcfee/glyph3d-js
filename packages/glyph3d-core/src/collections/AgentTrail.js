@@ -32,6 +32,7 @@ import { decorateForAction } from './toolRegistry.js';
 
 export const TRAIL_DEFAULTS = {
     zPitch: 90,                 // ZStack deck pitch between moments (time depth) — fly-through room
+    pagerWindow: 12,            // rolodex pager: moments kept visible behind the focused one (older recede; newer hidden)
     rowGap: 10,                 // VStack gap inside a moment: action headline → its info/parse columns
     colGap: 20,                 // HStack gap between a moment's columns (info, then parse-mapping(s))
     corridorGap: 120,           // HStack gap between concurrent agents' corridors
@@ -141,6 +142,12 @@ export default class AgentTrail {
         this._off = null;
         this._tmp = new THREE.Vector3();
 
+        // Rolodex pager. When docked, one corridor's deck slides so the FOCUSED moment sits at a
+        // fixed front plane (where the newest normally rests) and the rest window out — older recede
+        // behind it, newer (scrolled-past) hide. null = undocked (the natural full deck). The focus is
+        // a moments[] INDEX (0 = oldest). Applied at the tail of every _relayout, so it survives append.
+        this._pager = null;
+
         // Shared unit geometry for the corridor identity boxes (scaled per corridor).
         this._unitBox = new THREE.BoxGeometry(1, 1, 1);
         this._unitEdges = new THREE.EdgesGeometry(this._unitBox);
@@ -222,11 +229,18 @@ export default class AgentTrail {
         const moment = new VStack({ spacing: this.cfg.rowGap, align: 0, children: body ? [action, body] : [action] });
         lane.corridor.add(moment);
         const tetherId = snapshot ? `tether:${agentId}:${seq}` : null;
-        lane.moments.push({ moment, body, action, info, snapshot, snapScaleKey, hue, tetherId, actionId, infoId: info ? infoId : null, snapId: hasSnapPick ? snapId : null });
+        // record + ts ride the entry so the 2D moment-stream panel (getStream) can list rows without
+        // re-deriving them, and the pager can timestamp the deck.
+        lane.moments.push({ moment, body, action, info, snapshot, snapScaleKey, hue, tetherId, actionId, infoId: info ? infoId : null, snapId: hasSnapPick ? snapId : null, record, ts: this._now() });
         // BIND the tether to the action card and its parse mapping — it resolves their world
         // positions each frame, so it follows layout, scroll, and corridor drags with no re-tether.
         if (tetherId) this.conn.set(tetherId, action, snapshot, hue);
         lane.seq++;
+        // LIVE-FOLLOW: if the pager is parked on this corridor's newest moment, ride the new arrival to
+        // the front (watch the run stream in). If the user scrolled back to inspect history, hold there.
+        if (this._pager?.agentId === agentId && this._pager.focus >= lane.moments.length - 2) {
+            this._pager.focus = lane.moments.length - 1;
+        }
         this._relayout();
     }
 
@@ -246,6 +260,80 @@ export default class AgentTrail {
     }
 
     update() { this.conn.refresh(); }
+
+    _now() { return typeof performance !== 'undefined' ? performance.now() : 0; }
+
+    // -- rolodex pager: scrub a corridor's moments through a fixed camera-front frame -----------------
+
+    /**
+     * Dock a corridor into the pager: park the focus on its newest moment, slide the deck so that
+     * moment sits at the front plane, window the rest, and frame the camera on the visible window.
+     * No arg (or an unknown id) docks the first corridor. Returns false if there's nothing to show.
+     */
+    dock(agentId) {
+        let id = agentId, lane = id ? this.lanes.get(id) : null;
+        if (!lane) { const first = this.lanes.entries().next().value; if (first) [id, lane] = first; }
+        if (!lane || !lane.moments.length) return false;
+        this._pager = { agentId: id, focus: lane.moments.length - 1 };
+        this._relayout();      // applies the window + deck slide (via _applyPager)
+        this._frameFocus();
+        return true;
+    }
+
+    /** Leave the pager — every moment visible again, deck back to its natural recede. */
+    undock() {
+        if (!this._pager) return false;
+        this._pager = null;
+        this._relayout();
+        return true;
+    }
+
+    /** Scrub the docked corridor by `delta` moments (− older / back in time, + newer). */
+    scroll(delta) { return this.pageTo((this._pager?.focus ?? 0) + (Number(delta) || 0)); }
+
+    /** Page the docked corridor to a specific moment index (0 = oldest, clamped). Re-frames the camera. */
+    pageTo(index) {
+        const p = this._pager;
+        if (!p) return false;
+        const lane = this.lanes.get(p.agentId);
+        if (!lane || !lane.moments.length) return false;
+        p.focus = Math.min(Math.max(0, Math.round(index)), lane.moments.length - 1);
+        this._relayout();
+        this._frameFocus();
+        return true;
+    }
+
+    /** The pager's current state (for the panel), or null when undocked. */
+    pagerState() {
+        const p = this._pager;
+        if (!p) return null;
+        const lane = this.lanes.get(p.agentId);
+        return { agentId: p.agentId, focus: p.focus, count: lane ? lane.moments.length : 0 };
+    }
+
+    /** The corridors present, for a panel's agent selector — id + moment count + identity hue index. */
+    agents() {
+        return [...this.lanes.entries()].map(([id, l]) => ({ id, count: l.moments.length, hueIdx: l.hueIdx }));
+    }
+
+    /**
+     * A corridor's moment stream as terse rows (oldest first), for the 2D moment-stream panel: each row
+     * is { index, action, kind, label, ts, focused } — enough to render a clickable log without the
+     * panel reaching into the scene graph. `focused` flags the row the pager is parked on.
+     */
+    getStream(agentId) {
+        const lane = this.lanes.get(agentId);
+        if (!lane) return [];
+        const focus = this._pager?.agentId === agentId ? this._pager.focus : null;
+        return lane.moments.map((e, j) => ({
+            index: j,
+            action: e.record?.action || 'act',
+            kind: classify(e.record?.action),
+            label: [e.record?.target, e.record?.detail].filter(Boolean).join(' · '),
+            ts: e.ts,
+            focused: j === focus,
+        }));
+    }
 
     /**
      * Re-apply the current cfg SCALES to the whole live trail — the one entry the `trail.config` verb
@@ -579,7 +667,45 @@ export default class AgentTrail {
             if (lane.pinned && lane.pinnedPos) lane.corridor.position.copy(lane.pinnedPos);
         }
         this._updateCorridorBoxes();
+        this._applyPager();   // tail: window + deck-slide the docked corridor over the freshly-laid deck
         this.conn.setVisible(this.cfg.showTethers);   // positions are bound; this just toggles the beam
+    }
+
+    /**
+     * The rolodex mechanism, run at the tail of every _relayout (so it survives append + re-flow).
+     * Undocked: every moment visible (restores after undock). Docked: the focused moment's neighbours
+     * window out — `pagerWindow` older stay visible and recede, everything newer hides — and the deck
+     * slides +Z by `(n-1-focus)·zPitch` so moments[focus] lands at the FRONT plane (the world z where
+     * the newest moment rests at focus=n-1). Because the focused moment always returns to that same z,
+     * the camera (parked on dock) keeps it framed as you scrub; only the content under it changes.
+     * @private
+     */
+    _applyPager() {
+        const p = this._pager;
+        const paged = p ? this.lanes.get(p.agentId) : null;
+        for (const lane of this.lanes.values()) {
+            if (lane !== paged) for (const e of lane.moments) e.moment.visible = true;   // restore non-paged lanes
+        }
+        if (!paged) return;
+        const n = paged.moments.length;
+        if (!n) { this._pager = null; return; }
+        const focus = Math.min(Math.max(0, p.focus), n - 1);
+        p.focus = focus;
+        const win = Math.max(0, this.cfg.pagerWindow);
+        for (let j = 0; j < n; j++) paged.moments[j].moment.visible = (j <= focus && j >= focus - win);
+        paged.corridor.position.z += (n - 1 - focus) * this.cfg.zPitch;   // bring moments[focus] to the front plane
+    }
+
+    /**
+     * Aim the camera at the focused moment via the shared reverse-billboard focus — it squares to the
+     * moment's OWN plane and flies through the controller's flyTo, so it neither fights the soft-bounds
+     * nor needs us to compute "where to look" (focusOnObject solves that). The deck slid the moment to a
+     * fixed world z, so each scrub re-frames the same plane — a stable rolodex window, not a jumpy pan.
+     */
+    _frameFocus() {
+        const p = this._pager;
+        const moment = p && this.lanes.get(p.agentId)?.moments?.[p.focus]?.moment;
+        if (moment) this.ctx.cameraController?.focusOnObject?.(moment);
     }
 
     /** Drop the corridor root in front of the camera once, so the trail builds in view. */
