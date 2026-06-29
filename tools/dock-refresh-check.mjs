@@ -4,10 +4,10 @@
 //
 // The model under test is IDEMPOTENT by construction: a tile's content extent is derived LIVE
 // from grid.getLocalBounds() (never a cached `*= ratio` delta, which desynced from cols/rows and
-// double-applied), and the focus slot is a pure function of that extent + zoom + focusFrac (no
-// stored per-tile focus size). So:
+// double-applied), and the frame fit is a pure function of (frustum, root frame rect, extent) —
+// with zoom DIVIDED OUT and no stored per-tile size. So:
 //   - a BAR tile box-fits its FIXED slot — resize reshapes the content inside, footprint unchanged;
-//   - a FOCUSED tile fits focusFrac — resize reshapes content, zoom changes apparent size;
+//   - the FRAME occupant contain-fits the root view-frame — content-independent, zoom-independent;
 //   - both survive a focus toggle with NO snap and NO double (the two regressions this guards).
 //
 //   bun tools/dock-refresh-check.mjs
@@ -67,17 +67,30 @@ const apparentH = (g) => g.scale.x * (g.rows * LH); // world panel height
   ok(Math.abs(apparentH(g) - barA) < 1e-6, `bar re-resize to same dims is a no-op`);
 }
 
-// ---- FOCUSED tile: fits focusFrac; resize reshapes content, apparent size HOLDS -------
+// frameScale mirrors CameraDock._placeFrame: contain-fit into the margin-inset frame rect, pulled
+// in by frameDistFrac. The occupant's RENDERED scale must equal this — no stored size, no zoom term.
+const frameScale = (d, g) => {
+  const m = Math.min(Math.max(d.frameMargin, 0), 0.49);
+  const fw = d._viewW * d.frameW * (1 - 2 * m);
+  const fh = d._viewH * d.frameH * (1 - 2 * m);
+  return Math.min(fw / g.cols, fh / (g.rows * LH)) * d.frameDistFrac;
+};
+
+// ---- FRAME occupant: contain-fits the root view-frame; pure fn of (frustum, frame, extent) ----
 {
   const d = rig(); const g = makeGrid(80, 24);
   d.lock('t', g); d.spotlight('t'); d.settle();
-  const focusA = apparentH(g);
-  g.resizeTo(80, 48); d.settle();                // resize while focused — stable box, not free-grow
-  ok(Math.abs(apparentH(g) - focusA) < 1e-6, `focus resize holds focusFrac (${apparentH(g).toFixed(3)} vs ${focusA.toFixed(3)})`);
-  // and it tracks the live extent: a fresh tile at 48 rows spotlights to the SAME focus height.
+  ok(Math.abs(g.scale.x - frameScale(d, g)) < 1e-6, `framed window contain-fits the frame (${g.scale.x.toFixed(3)} vs ${frameScale(d, g).toFixed(3)})`);
+  // sits WHOLLY inside the frame rect on both axes (pillarbox / letterbox, never spill past the edges).
+  const fd = d.frameDistFrac, m = 0.06;
+  ok(g.scale.x * g.cols <= d._viewW * (1 - 2 * m) * fd + 1e-6
+     && g.scale.x * g.rows * LH <= d._viewH * (1 - 2 * m) * fd + 1e-6, `window sits wholly inside the frame (no spill)`);
+  g.resizeTo(80, 48); d.settle();                // resize while framed — re-contains live, still exact
+  ok(Math.abs(g.scale.x - frameScale(d, g)) < 1e-6, `resize re-contains into the frame (${g.scale.x.toFixed(3)})`);
+  // content-independence: a FRESH 48-row tile frames to the SAME fit the resized one reaches (no stored state).
   const d2 = rig(); const g2 = makeGrid(80, 48);
   d2.lock('t', g2); d2.spotlight('t'); d2.settle();
-  ok(Math.abs(apparentH(g2) - focusA) < 1e-6, `focus height is content-independent (${apparentH(g2).toFixed(3)})`);
+  ok(Math.abs(g2.scale.x - g.scale.x) < 1e-6, `frame fit is content-independent (${g2.scale.x.toFixed(3)})`);
 }
 
 // ---- THE DOUBLE regression: free-grow-shaped detour must NOT double on refocus ---------
@@ -95,15 +108,28 @@ const apparentH = (g) => g.scale.x * (g.rows * LH); // world panel height
   ok(Math.abs(after / fresh - 1) < 1e-6, `NO DOUBLE after resize/defocus/resize/refocus (${after.toFixed(3)} vs ${fresh.toFixed(3)})`);
 }
 
-// ---- zoom persists across a focus toggle (the no-snap regression) ----------------------
+// ---- the FRAME owns the size: zoom is divided out, it never bloats past the frame ------
 {
   const d = rig(); const g = makeGrid(80, 24);
   d.lock('t', g); d.spotlight('t'); d.settle();
-  g.setZoom(1.5); d.reflowTile('t'); d.settle(); // scale up while focused
-  const zoomed = apparentH(g);
-  d.spotlight('t'); d.settle();                  // defocus
-  d.spotlight('t'); d.settle();                  // refocus
-  ok(Math.abs(apparentH(g) / zoomed - 1) < 1e-6, `zoom survives focus toggle, no snap (${apparentH(g).toFixed(3)} vs ${zoomed.toFixed(3)})`);
+  const framed = g.scale.x;
+  g.setZoom(1.5); d.reflowTile('t'); d.settle(); // dial readability zoom while framed
+  ok(Math.abs(g.scale.x - framed) < 1e-6, `zoom does NOT change the framed size (${g.scale.x.toFixed(3)} vs ${framed.toFixed(3)})`);
+  ok(Math.abs(g.scale.x - frameScale(d, g)) < 1e-6, `framed size stays the pure contain-fit`);
+  ok(Math.abs(g.scaleModel.zoomScalar - 1.5) < 1e-9, `zoom is still recorded (re-applies when released home, not in the frame)`);
+}
+
+// ---- the frame tracks the DRAWING-FRAME size: a wider canvas refits the occupant live -----
+// CameraDock.update() recomputes viewW/H from the camera each frame and re-_relayout()s on a size
+// change, so a browser/canvas resize rescales the pinned window to the new frame (here: widen viewW).
+{
+  const d = rig(); const g = makeGrid(80, 24);
+  d.lock('t', g); d.spotlight('t'); d.settle();
+  const before = g.scale.x;
+  d._viewW = 320; d._relayout();                 // canvas widened — refit (what update() drives on resize)
+  for (let i = 0; i < 6; i++) d.animator.update(10);
+  ok(g.scale.x > before + 1e-6, `a wider drawing frame refits the pinned window (${before.toFixed(3)} → ${g.scale.x.toFixed(3)})`);
+  ok(Math.abs(g.scale.x - frameScale(d, g)) < 1e-6, `refit lands the exact contain-fit at the new size`);
 }
 
 // ---- onResize tap lifecycle (lock subscribes → reflowTile; release drops) --------------

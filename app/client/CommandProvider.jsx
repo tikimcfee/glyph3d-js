@@ -123,10 +123,6 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     // dock.* verbs drive it; distinct from ctx.dock (the DOM dockview).
     cameraDock: null,
 
-    // Per-window control config (Settings ▸ Window): { maxPinZoom }. Read by the window.pin
-    // verb; folded from stored/default settings at boot via applyGroupSettings(ctx, 'Window').
-    windowConfig: {},
-
     // Field-visitor multiplexer — one self-driving visitor per agent. Created in the
     // effect (needs the live ctx); ticked each frame by <VisitorRunner/>.
     visitorManager: null,
@@ -295,8 +291,8 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // Fold the persisted Dock settings into the freshly-built dock — its apply()s only
     // fire on a user change, so without this a stored value would wait until next touch.
     applyGroupSettings(state.ctx, 'Dock');
-    // Same boot-fold for the Window controls (pin max + dial steps) → ctx.windowConfig.
-    applyGroupSettings(state.ctx, 'Window');
+    // Same boot-fold for the root view-frame knobs (Settings ▸ Frame) → CameraDock.setParam.
+    applyGroupSettings(state.ctx, 'Frame');
     // Removal cascade: however a window is closed (terminal.kill→close, grid.remove, scene clear),
     // its registry entry vanishes — and the holders self-heal off that single event. Attention
     // releases focus/keystroke-target from the gone id (else input routes to a corpse); the dock

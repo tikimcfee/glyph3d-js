@@ -17,10 +17,6 @@ import { setStrataParam, STRATA_DEFAULTS } from '@glyph3d/core/collections/Strat
  *  re-packs the live bar. The bare param name (not the `dock.` setting key) goes through. */
 const dockParam = (param) => (ctx, v) => ctx.cameraDock?.setParam?.(param, v);
 
-/** apply() for a window-control knob: store it on ctx.windowConfig (the bare param name,
- *  not the `window.` key). Read by the window.pin verb and the size/scale dial handler. */
-const windowParam = (param) => (ctx, v) => { (ctx.windowConfig ||= {})[param] = v; };
-
 /** apply() for a glyph minification/LOD dial: push the bare dial name (not the `glyph.` key) to the
  *  global GlyphField LOD uniform — live across every glyph material, no ctx subsystem needed. */
 const lodParam = (param) => (_ctx, v) => setGlyphLodParam(param, v);
@@ -198,13 +194,18 @@ export const SETTINGS = [
   { key: 'dock.maxRiseDeg', label: 'Dome height span°', group: 'Dock', type: 'number', default: 80, min: 20, max: 110, step: 5, apply: dockParam('maxRiseDeg') },
   { key: 'dock.bottomFrac', label: 'Bar depth', group: 'Dock', type: 'number', default: 0.86, min: 0, max: 1, step: 0.02, apply: dockParam('bottomFrac') },
   { key: 'dock.fillFrac', label: 'Bar fill (linear)', group: 'Dock', type: 'number', default: 0.9, min: 0.5, max: 1, step: 0.02, apply: dockParam('fillFrac') },
-  { key: 'dock.focusFrac', label: 'Focus size', group: 'Dock', type: 'number', default: 0.62, min: 0.2, max: 1, step: 0.02, apply: dockParam('focusFrac') },
-  { key: 'dock.focusY', label: 'Focus height', group: 'Dock', type: 'number', default: 0.06, min: -0.4, max: 0.4, step: 0.02, apply: dockParam('focusY') },
-  { key: 'dock.focusDistFrac', label: 'Focus pull-in', group: 'Dock', type: 'number', default: 0.7, min: 0.3, max: 1, step: 0.02, apply: dockParam('focusDistFrac') },
   { key: 'dock.animDur', label: 'Animation (s)', group: 'Dock', type: 'number', default: 0.167, min: 0, max: 0.6, step: 0.01, apply: dockParam('animDur') },
-  // Window — per-window controls surfaced as the terminal chrome buttons. maxPinZoom is the
-  // pin target on the zoom axis, read off ctx.windowConfig by the window.pin verb.
-  { key: 'window.maxPinZoom', label: 'Pin max zoom (×)', group: 'Window', type: 'number', default: 3, min: 1.5, max: 10, step: 0.5, apply: windowParam('maxPinZoom') },
+  // Frame — the root VIEW-FRAME a pinned/spotlit window contain-fits into (camera-front, the
+  // "window-pane" the canvas frames). All frustum-normalized, so the pinned window tracks the
+  // drawing-frame size live. Width/height size the pane (1 = full canvas); X/Y offset it
+  // (left/right/2-3 panes); margin insets the window inside it; pull-in draws it toward the eye
+  // so it renders over the bar. (Subframes will partition this same rect later.)
+  { key: 'frame.width', label: 'Frame width', group: 'Frame', type: 'number', default: 1, min: 0.2, max: 1, step: 0.02, apply: dockParam('frameW') },
+  { key: 'frame.height', label: 'Frame height', group: 'Frame', type: 'number', default: 1, min: 0.2, max: 1, step: 0.02, apply: dockParam('frameH') },
+  { key: 'frame.x', label: 'Frame X offset', group: 'Frame', type: 'number', default: 0, min: -1, max: 1, step: 0.02, apply: dockParam('frameX') },
+  { key: 'frame.y', label: 'Frame Y offset', group: 'Frame', type: 'number', default: 0, min: -1, max: 1, step: 0.02, apply: dockParam('frameY') },
+  { key: 'frame.margin', label: 'Frame margin', group: 'Frame', type: 'number', default: 0.06, min: 0, max: 0.4, step: 0.01, apply: dockParam('frameMargin') },
+  { key: 'frame.depth', label: 'Frame pull-in', group: 'Frame', type: 'number', default: 0.7, min: 0.3, max: 1, step: 0.02, apply: dockParam('frameDistFrac') },
   // Tree — the ContentTree ownership-line overlay (hub → what it contains). File lines
   // and directory lines toggle independently; layout.arrows is the master on/off verb.
   {

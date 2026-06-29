@@ -8,6 +8,11 @@
  * authority stays one place. A docked window contain-fits a FIXED slot box, so zoom never
  * changes its bar FOOTPRINT (the box wins) — it shows when the tile is spotlit or returns
  * home; we re-place a docked target so its bar tile stays box-fit as the zoom moves.
+ *
+ * window.pin raises a window into the CameraDock's root VIEW-FRAME — camera-front-locked,
+ * contain-fit to a configurable rect of the drawing frame (margin + offset), recomputed
+ * live. Pin and dock-spotlight are the SAME state; pin just ensures the window is docked
+ * first. It carries NO zoom of its own — the frame owns the size (see CameraDock._placeFrame).
  */
 
 import { resolveSurface } from './dockCommands.js';
@@ -61,41 +66,47 @@ export default function registerWindowCommands(router) {
     router.register('window.pin', (args, ctx) => {
         const r = resolveSurface(ctx, args[0]);
         if (!r) return { text: `ERR: no surface for "${args[0]}" (registry id or surface index)`, data: null };
-        if (typeof r.grid.setZoom !== 'function') return { text: `ERR: '${r.id}' is not pinnable`, data: null };
+        const dock = ctx.cameraDock;
+        if (!dock) return { text: 'ERR: camera dock not ready', data: null };
         const id = r.id;
-        const kind = ctx.registry?.get?.(id)?.type || 'surface';
-        // Pin state is a per-surface view field — the durable "verb mutates state idempotently"
-        // home (WorkspaceModel.surfaces[id].view): { pinned, prePinZoom }. The live size IS the
-        // zoom; pin snaps it to the max and remembers the prior value to restore on unpin.
-        const view = ctx.workspace?.getSurface?.(id)?.view || {};
-        const isPinned = !!view.pinned;
+
+        // Pin = OCCUPY THE ROOT VIEW-FRAME: the window rides the camera front and contain-fits the
+        // drawing frame (margin + offset, recomputed live from frustum + grid state). It IS the
+        // dock's frame-occupant state — pin and dock-spotlight are one thing — so pinning a loose
+        // window first docks it, then raises it into the frame. The Pin button is driven by
+        // CameraDock.spotlight, so it stays truthful whoever set the occupancy (button, click, CLI).
+        const kind = ctx.registry?.get?.(id)?.type;
+        const isFramed = dock.focusedId === id;
         // Explicit on|off is the idempotent state-setter (CLI/RPC); no arg toggles (the button).
         const arg = String(args[1] ?? '').toLowerCase();
         const want = ['on', 'true', '1'].includes(arg) ? true
                    : ['off', 'false', '0'].includes(arg) ? false
-                   : !isPinned;
-        const maxPinZoom = ctx.windowConfig?.maxPinZoom ?? 3;
+                   : !isFramed;
+        if (want === isFramed) {
+            return { text: `OK: '${id}' already ${want ? 'pinned' : 'unpinned'}`, data: { id, pinned: want } };
+        }
 
         if (want) {
-            // Capture the pre-pin zoom only on the 0→1 edge, so re-pinning an already-pinned
-            // window re-asserts the max without clobbering the saved restore value (idempotent).
-            const prePinZoom = isPinned ? (view.prePinZoom ?? 1) : (r.grid.zoom ?? 1);
-            ctx.workspace?.setSurfaceView?.(id, kind, { pinned: true, prePinZoom });
-            router.execute(['window.scale', id, String(maxPinZoom)]); // saves + reflows a docked tile
+            // Pin/unpin is a reversible toggle: if pin had to dock a LOOSE window, remember that so
+            // unpin sends it back HOME — a window already in the bar stays in the bar on unpin.
+            const wasDocked = dock.has(id);
+            if (!wasDocked) router.execute(['dock.lock', id]); // frame occupancy is a dock state
+            router.execute(['dock.spotlight', id]);            // raise into the frame (+ focus/keyboard)
+            if (!wasDocked) ctx.workspace?.setSurfaceView?.(id, kind, { pinAutoDocked: true });
         } else {
-            const restore = view.prePinZoom ?? (r.grid.zoom ?? 1);
-            ctx.workspace?.setSurfaceView?.(id, kind, { pinned: false, prePinZoom: null });
-            if (isPinned) router.execute(['window.scale', id, String(restore)]);
+            router.execute(['dock.spotlight', id]);            // toggle off → vacate the frame
+            if (ctx.workspace?.getSurface?.(id)?.view?.pinAutoDocked) {
+                ctx.workspace?.setSurfaceView?.(id, kind, { pinAutoDocked: false });
+                router.execute(['dock.release', id]);          // pin docked it → unpin sends it home
+            }
         }
-        // Reflect the pinned state on the window's Pin button (any caller — button, CLI, palette).
-        if (typeof r.grid.setControlActive === 'function') r.grid.setControlActive('pin', want);
         ctx.session?.scheduleSave?.();
         return {
-            text: `OK: ${want ? `pinned '${id}' → ×${maxPinZoom}` : `unpinned '${id}'`}`,
+            text: `OK: ${want ? `pinned '${id}' → frame` : `unpinned '${id}'`}`,
             data: { id, pinned: want },
         };
     }, {
-        description: 'Maximize a window to the max pin zoom (toggle); unpin restores the prior zoom',
+        description: 'Pin a window into the root view-frame (camera-front, contain-fit to the drawing frame); toggle',
         usage: '<id|index> [on|off]',
         returns: '{ id, pinned }',
     });

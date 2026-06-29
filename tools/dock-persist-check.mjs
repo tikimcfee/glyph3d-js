@@ -84,7 +84,7 @@ function makeRouter() {
   return { calls, execute(cmd) { calls.push(cmd); return Promise.resolve({ text: 'OK' }); } };
 }
 
-// ---- 1. capture: dock3d read from the MODEL (membership/order/zoom/pin), layout from the live dock --
+// ---- 1. capture: dock3d read from the MODEL (membership/order/zoom), layout + frame occupant from the live dock --
 {
   const reg = makeRegistry(new Set(['term-1']));
   const cd = makeCameraDock();
@@ -95,8 +95,8 @@ function makeRouter() {
   ctx.workspace.setSurfaceView('term-1', 'terminal',
     { docked: true, dockOrder: 0, zoom: 1.5, position: { x: 100, y: 200, z: 300 }, cols: 80, rows: 24 });
   const snap = new SessionStore({ ctx, router: makeRouter(), bridge: {} }).capture();
-  eq(snap.dock3d, { layout: 'radial', tiles: [{ id: 'term-1', zoom: 1.5 }] },
-     'capture: dock3d from model.listDocked (zoom from the model, layout from the live dock)');
+  eq(snap.dock3d, { layout: 'radial', tiles: [{ id: 'term-1', zoom: 1.5 }], focused: null },
+     'capture: dock3d from model.listDocked (zoom from the model, layout + frame occupant from the live dock)');
   const term = snap.terminals.find((t) => t.id === 'term-1');
   eq({ x: term.x, y: term.y, z: term.z }, { x: 100, y: 200, z: 300 },
      'capture: terminal HOME comes from the model (100,200,300)');

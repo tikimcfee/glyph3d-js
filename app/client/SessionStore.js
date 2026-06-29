@@ -203,13 +203,10 @@ export default class SessionStore {
     let dock3d = null;
     const docked = ws?.listDocked ? ws.listDocked() : [];
     if (docked.length) {
-      const tiles = docked.map((s) => {
-        const v = s.view || {};
-        const tile = { id: s.id, zoom: v.zoom ?? 1 };
-        if (v.pinned) { tile.pinned = true; tile.prePinZoom = v.prePinZoom ?? 1; }
-        return tile;
-      });
-      dock3d = { layout: ctx.cameraDock?.layoutMode || 'linear', tiles };
+      const tiles = docked.map((s) => ({ id: s.id, zoom: (s.view || {}).zoom ?? 1 }));
+      // The frame occupant (pinned window) is a single dock-level fact — the id holding the root
+      // view-frame — not a per-surface flag. Persist it so a reload re-raises the same window.
+      dock3d = { layout: ctx.cameraDock?.layoutMode || 'linear', tiles, focused: ctx.cameraDock?.focusedId || null };
     }
 
     return {
@@ -388,11 +385,13 @@ export default class SessionStore {
     // as its grid goes live, in any order. Tolerant of the legacy string-tile form.
     if (snap.dock3d?.tiles?.length) {
       this.ctx.cameraDock?.setLayout?.(snap.dock3d.layout || 'linear');
+      // The window that holds the root view-frame (pinned) — a dock-level fact, not a per-surface
+      // flag. _reconcileDock re-raises it once it's a live tile (spotlight → frame-fit + Pin light).
+      this._pendingFrameOccupant = snap.dock3d.focused || null;
       snap.dock3d.tiles.forEach((t, i) => {
         const id = typeof t === 'string' ? t : t?.id;
         if (!id) return;
         const patch = { docked: true, dockOrder: i, zoom: (typeof t === 'object' ? t.zoom : 1) ?? 1 };
-        if (typeof t === 'object' && t.pinned) { patch.pinned = true; patch.prePinZoom = t.prePinZoom ?? 1; }
         // kind undefined: don't clobber a terminal's 'terminal' kind (set by the loop above); a docked
         // code grid with no prior record becomes a generic 'surface' (the reconcile ignores kind).
         this.ctx.workspace?.setSurfaceView?.(id, undefined, patch);
@@ -478,10 +477,14 @@ export default class SessionStore {
         // Direct CameraDock method (NOT a dock.lock verb). The saved slot order pins the bar
         // position regardless of arrival timing.
         cd.lock(s.id, grid, { order: v.dockOrder });
-        // Re-apply the readability zoom (the dock reads `user` back for its box-fit / spotlight).
+        // Re-apply the readability zoom (the dock reads `user` back for its box-fit).
         if (v.zoom && v.zoom !== 1) { grid.setZoom?.(v.zoom); cd.reflowTile?.(s.id); }
-        // Light the Pin button to match the restored flag (the saved zoom already IS the pinned size).
-        if (v.pinned) grid.setControlActive?.('pin', true);
+        // Re-raise the saved frame occupant (pinned window) once it's a live tile — spotlight() fits
+        // it into the root view-frame and lights its Pin button. A dock-level fact, applied once.
+        if (this._pendingFrameOccupant === s.id && cd.focusedId !== s.id) {
+          cd.spotlight(s.id);
+          this._pendingFrameOccupant = null;
+        }
       } catch (e) {
         console.warn(`[session] dock reconcile failed for '${s.id}' — skipping:`, e?.message || e);
       }

@@ -15,6 +15,13 @@
  * as a uniform icon strip and nothing slides off the sides. Zoom lives at home/focus,
  * never in the bar.
  *
+ * A spotlit (or PINNED) tile leaves the bar and OCCUPIES the root VIEW-FRAME — a
+ * configurable rect of the camera frustum (full-screen, or a 2/3 / left / right pane)
+ * the window CONTAIN-FITS into with a margin. Pin and dock-spotlight are the SAME state
+ * ("this window holds the frame"); the frame's size is a pure function of (frustum,
+ * frame rect, live grid extent), refit live as the canvas resizes — zoom never bleeds
+ * past its edges. This is the seam future SUBFRAMES partition. See _frameRect / _placeFrame.
+ *
  * How it rides the camera: this node is itself a THREE.Object3D added to the
  * scene. Each frame `update(dt, camera)` parks it a fixed `distance` ahead of
  * the camera, matching the camera's orientation — the sky-follow trick with an
@@ -112,6 +119,12 @@ export class CameraDock extends THREE.Object3D {
      * @param {number} [opts.maxArcDeg=80]  - radial: azimuth span the dome wraps within (degrees)
      * @param {number} [opts.maxRiseDeg=80] - radial: elevation span the dome rises through (degrees)
      * @param {number} [opts.bottomFrac=0.86] - row depth: 0 = view center, 1 = bottom edge
+     * @param {number} [opts.frameW=1]    - root view-frame width as a fraction of the frustum width
+     * @param {number} [opts.frameH=1]    - root view-frame height as a fraction of the frustum height
+     * @param {number} [opts.frameX=0]    - frame center X offset (fraction of half the frustum width)
+     * @param {number} [opts.frameY=0]    - frame center Y offset (fraction of half the frustum height)
+     * @param {number} [opts.frameMargin=0.06] - inset of the framed window inside the frame rect
+     * @param {number} [opts.frameDistFrac=0.7] - frame pull-in toward the eye (renders over the bar)
      * @param {number} [opts.yawRate=14]    - tile face-the-eye slerp rate (×dt)
      * @param {number} [opts.borderWidth=1.5] - docked window's panel-border thickness (screen pixels)
      * @param {number} [opts.borderStrength=1] - docked window's border intensity (0 = no border)
@@ -119,7 +132,8 @@ export class CameraDock extends THREE.Object3D {
      */
     constructor({ attentionManager = null, distance = 10, boxFrac = 0.1, boxAspect = 1.15, gapFrac = 0.4,
                   maxColumns = 0, fillFrac = 0.9, maxArcDeg = 80, maxRiseDeg = 80, bottomFrac = 0.86,
-                  focusFrac = 0.62, focusY = 0.06, focusDistFrac = 0.7, animDur = 0.167, yawRate = 14,
+                  frameW = 1, frameH = 1, frameX = 0, frameY = 0, frameMargin = 0.06, frameDistFrac = 0.7,
+                  animDur = 0.167, yawRate = 14,
                   ghostColor = 0x8ab4ff, ghostOpacity = 0.55, borderWidth = 1.5, borderStrength = 1,
                   layout = 'radial' } = {}) {
         super();
@@ -135,12 +149,19 @@ export class CameraDock extends THREE.Object3D {
         this.maxRiseDeg = maxRiseDeg; // radial: elevation span the dome rises through (degrees)
         this.yawRate = yawRate;       // tile face-the-eye slerp rate (×dt)
         this.bottomFrac = bottomFrac;
-        this.focusFrac = focusFrac;   // focus-area tile height as a fraction of the visible height
-        this.focusY = focusY;         // focus-area center: fraction of viewH above the view center
-        this.focusDistFrac = focusDistFrac; // focus tile sits this fraction of `distance` from the
-                                            // eye — <1 pulls it IN FRONT of the dock sphere so it
-                                            // always renders on top (scale/y compensate, so it
-                                            // looks identical, just nearer)
+        // The ROOT view-frame: a rect of the camera frustum a pinned/spotlit window contain-fits
+        // INTO (the "window-pane" the canvas frames). Frustum-normalized, so it tracks the drawing
+        // frame's size live. frameW/H size it, frameX/Y offset it (full-screen, 2/3, left/right
+        // panes), frameMargin insets the window inside it. The seam future SUBFRAMES grow from.
+        this.frameW = frameW;
+        this.frameH = frameH;
+        this.frameX = frameX;
+        this.frameY = frameY;
+        this.frameMargin = frameMargin;
+        this.frameDistFrac = frameDistFrac; // frame pulls this fraction of `distance` toward the eye
+                                            // — <1 sits it IN FRONT of the dock sphere so it always
+                                            // renders on top (scale/offset compensate, so it looks
+                                            // identical in size, just nearer)
         this.animDur = animDur;       // tile slide/scale duration (s) — a curt, polite snap
         this.layoutMode = layout;     // 'radial' (hemisphere, default) | 'linear'
         this.ghostColor = ghostColor;     // fallback outline color (entries get a palette hue)
@@ -203,8 +224,20 @@ export class CameraDock extends THREE.Object3D {
      */
     spotlight(id) {
         if (!this.entries.has(id)) return false;
-        if (this.focusedId === id) { this.focusedId = null; this._relayout(); return 'returned'; }
+        const prev = this.focusedId;
+        // Toggle off: the occupant returns to its bar slot, its Pin button unlights.
+        if (prev === id) {
+            this.focusedId = null;
+            this.entries.get(id)?.grid?.setControlActive?.('pin', false);
+            this._relayout();
+            return 'returned';
+        }
+        // Move the frame to `id`: the previous occupant (if any) returns to the bar; the new one
+        // lights its Pin button. Pin and spotlight are ONE state, so the button tracks frame
+        // occupancy no matter who set it (Pin button, tile click, CLI).
+        if (prev) this.entries.get(prev)?.grid?.setControlActive?.('pin', false);
         this.focusedId = id;
+        this.entries.get(id)?.grid?.setControlActive?.('pin', true);
         this._relayout();
         return 'spotlit';
     }
@@ -238,14 +271,14 @@ export class CameraDock extends THREE.Object3D {
 
     /**
      * Tune a layout parameter live and re-pack. Keys: distance, boxFrac, boxAspect, gapFrac,
-     * maxColumns, fillFrac, maxArcDeg, maxRiseDeg, bottomFrac, focusFrac, focusY, focusDistFrac,
-     * animDur, yawRate.
+     * maxColumns, fillFrac, maxArcDeg, maxRiseDeg, bottomFrac, frameW, frameH, frameX, frameY,
+     * frameMargin, frameDistFrac, animDur, yawRate.
      * @param {string} key @param {number} value @returns {boolean}
      */
     setParam(key, value) {
         if (!['distance', 'boxFrac', 'boxAspect', 'gapFrac', 'maxColumns', 'fillFrac', 'maxArcDeg',
-              'maxRiseDeg', 'bottomFrac', 'focusFrac', 'focusY', 'focusDistFrac', 'animDur',
-              'yawRate', 'ghostOpacity', 'borderWidth', 'borderStrength'].includes(key)) return false;
+              'maxRiseDeg', 'bottomFrac', 'frameW', 'frameH', 'frameX', 'frameY', 'frameMargin',
+              'frameDistFrac', 'animDur', 'yawRate', 'ghostOpacity', 'borderWidth', 'borderStrength'].includes(key)) return false;
         if (!Number.isFinite(value)) return false;
         this[key] = value;
         this._relayout();
@@ -359,7 +392,7 @@ export class CameraDock extends THREE.Object3D {
         e.grid.setBorderFlag?.(BORDER_FLAGS.DOCKED, false); // drop the dock identity — leaving the bar
         this.entries.delete(id);
         this.tiles.delete(e.grid); // back to world content for the camera the moment it heads home
-        if (this.focusedId === id) this.focusedId = null;
+        if (this.focusedId === id) { this.focusedId = null; e.grid?.setControlActive?.('pin', false); }
         this.attentionManager?.docks?.delete(id);
 
         // Home parent may have been pruned (file closed while docked) — fall back to
@@ -395,7 +428,7 @@ export class CameraDock extends THREE.Object3D {
         this.entries.delete(id);
         this._releasing.delete(id);            // abandon any in-flight release of the same id
         this.tiles.delete(e.grid);
-        if (this.focusedId === id) this.focusedId = null;
+        if (this.focusedId === id) { this.focusedId = null; e.grid?.setControlActive?.('pin', false); }
         this.attentionManager?.docks?.delete(id);
 
         // The grid is being disposed, so stop any tween still writing to it and lift it out of the
@@ -468,27 +501,37 @@ export class CameraDock extends THREE.Object3D {
      *  (the animator re-applies it via resolve) — see _animateTile. */
     _userOf(e) { return (e.grid.scaleModel && e.grid.scaleModel.user.x) || 1; }
 
-    /** Place the focused tile: centered, height-fit to `focusFrac`, pulled toward the eye
-     *  (focusDistFrac) so it renders in front of the dock sphere. This is the "read it" state —
-     *  not box-bounded — so the dialed zoom DOES show here (eff = focusFrac-fit · zoom): focus is
-     *  where reading happens, the bar is where the icon sits.
-     *
-     *  Size is a PURE FUNCTION of the live extent + zoom + focusFrac — no stored per-tile focus
-     *  state. Resize reshapes content inside the fixed focus box (more rows → smaller cells);
-     *  zoom changes the box size; both compose and persist with no toggle snap. (The earlier
-     *  free-grow stored a per-tile height that delta-desynced from cols/rows — the double.) */
-    /** The focus area's CENTER in dock-local units — where a raised tile's content center lands. */
-    _focusCenterPoint() {
-        const fd = this.focusDistFrac;
-        return { x: 0, y: this._viewH * this.focusY * fd, z: this.distance * (1 - fd) };
+    /** The ROOT view-frame as a dock-LOCAL box at the dock plane: a rect of the camera frustum
+     *  (frameW×frameH of it), centered at the (frameX,frameY) offsets, inset by frameMargin. A
+     *  pinned/spotlit window contain-fits INTO this. Frustum-normalized (viewW/viewH), so it tracks
+     *  the drawing-frame size live — update() refits the occupant when the canvas resizes. This is
+     *  the seam future SUBFRAMES partition. @returns {{cx:number,cy:number,w:number,h:number}} */
+    _frameRect() {
+        const m = Math.min(Math.max(this.frameMargin, 0), 0.49);
+        return {
+            cx: (this._viewW * 0.5) * this.frameX,
+            cy: (this._viewH * 0.5) * this.frameY,
+            w: this._viewW * this.frameW * (1 - 2 * m),
+            h: this._viewH * this.frameH * (1 - 2 * m),
+        };
     }
 
-    _placeFocus(e) {
-        const c = this._focusCenterPoint();
-        const eff = (this._viewH * this.focusFrac / Math.max(this._extentOf(e).h, 1e-3)) * this.focusDistFrac * this._userOf(e);
-        this._animateTile(e, c.x, c.y, c.z, eff);
+    /** Place the frame occupant (the pinned/spotlit window): contain-fit the WHOLE window into the
+     *  root frame rect (margin + offset), centered, pulled toward the eye (frameDistFrac) so it
+     *  renders over the bar. Size is a PURE FUNCTION of (frustum, frame rect, live grid extent) —
+     *  zoom is DIVIDED OUT (_animateTile re-divides user), so the frame owns the size and the window
+     *  always sits wholly inside its pane (no zoom bleed past the edges; tall files pillarbox, wide
+     *  terminals letterbox). A resize / cols change reshapes content inside the unchanged pane. */
+    _placeFrame(e) {
+        const fd = this.frameDistFrac;
+        const r = this._frameRect();
+        const ext = this._extentOf(e);
+        const contentW = Math.max(2 * Math.abs(ext.cx), 1e-3); // top-left-anchored content width
+        const contentH = Math.max(ext.h, 1e-3);
+        const eff = Math.min(r.w / contentW, r.h / contentH) * fd; // contain-fit, depth-compensated
+        this._animateTile(e, r.cx * fd, r.cy * fd, this.distance * (1 - fd), eff);
         const d = this.attentionManager?.docks?.get(e.id);
-        if (d) d.offset = { slot: 'focus' };
+        if (d) d.offset = { slot: 'frame' };
     }
 
     /** Lazily build the focus placeholder: a slot-box outline. One per dock (at most one tile is
@@ -680,24 +723,24 @@ export class CameraDock extends THREE.Object3D {
             }
         }
 
-        // ---- focus area (centered + enlarged, pulled in front of the dock sphere) ----
-        if (focused) this._placeFocus(focused);
+        // ---- frame occupant (contain-fit into the root view-frame, pulled in front of the bar) ----
+        if (focused) this._placeFrame(focused);
         else this._hideGhost();
     }
 
     /**
      * Re-place a docked tile after a size or zoom change — the grid.onResize tap and window.scale
-     * both land here. There is no size math to do: the FOCUSED tile re-fits to `focusFrac` and the
-     * BAR tile re-contains into its FIXED slot box, BOTH reading the grid's current extent live
-     * (_extentOf). So a resize reshapes the content inside an unchanged slot, idempotently — no
-     * cached delta to desync, no rendered-scale read-back, no toggle snap.
+     * both land here. There is no size math to do: the FRAME occupant re-contain-fits into the root
+     * view-frame and the BAR tile re-contains into its FIXED slot box, BOTH reading the grid's
+     * current extent live (_extentOf). So a resize reshapes the content inside an unchanged
+     * pane/slot, idempotently — no cached delta to desync, no rendered-scale read-back, no toggle snap.
      * @param {string} id
      * @returns {boolean}
      */
     reflowTile(id) {
         const e = this.entries.get(id);
         if (!e) return false;
-        if (id === this.focusedId) this._placeFocus(e);
+        if (id === this.focusedId) this._placeFrame(e);
         else this._relayout();
         return true;
     }
@@ -711,12 +754,20 @@ export class CameraDock extends THREE.Object3D {
     update(dt, camera) {
         if (camera) {
             const fov = (camera.fov || 70) * Math.PI / 180;
-            this._viewH = 2 * this.distance * Math.tan(fov * 0.5);
-            this._viewW = this._viewH * (camera.aspect || 1.6);
+            const vh = 2 * this.distance * Math.tan(fov * 0.5);
+            const vw = vh * (camera.aspect || 1.6);
+            // The frame + bar are frustum-normalized; refit the live tiles when the DRAWING FRAME
+            // changes size (browser/canvas resize, fov change) so a pinned window stays locked to
+            // the canvas. Camera MOVEMENT doesn't trip this (viewW/H are position-independent).
+            const resized = Math.abs(vh - this._viewH) > 1e-3 || Math.abs(vw - this._viewW) > 1e-3;
+            this._viewH = vh;
+            this._viewW = vw;
 
             _forward.set(0, 0, -1).applyQuaternion(camera.quaternion);
             this.position.copy(camera.position).addScaledVector(_forward, this.distance);
             this.quaternion.copy(camera.quaternion);
+
+            if (resized && this.entries.size) this._relayout();
         }
 
         this.animator.update(dt);
