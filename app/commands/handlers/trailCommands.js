@@ -9,13 +9,14 @@
  *   trail.focus  [agentId]       point the camera at a corridor
  *   trail.config [key value]     get/set a layout constant (applies to new cards)
  *
- * The ROLODEX PAGER drives a corridor through a fixed camera-front frame — moments
- * scrub newest↔oldest, the focused one pinned at the front plane, the rest windowed:
+ * The ROLODEX CAROUSEL drives a corridor like a drawer of sheets: the head moment sits
+ * at a fixed front slot, the rest cascade behind it, and paging slides the front sheet
+ * to the back to bring up the next — the cards animate, the camera holds:
  *
- *   trail.dock   [agentId]       dock a corridor into the pager (newest in focus)
- *   trail.undock                 leave the pager — full deck again
- *   trail.scroll <delta>         scrub by ±N moments (− older / + newer)
- *   trail.page   <next|prev|first|last|N>   page to a neighbour / end / index
+ *   trail.dock   [agentId]       dock a corridor into the carousel (head = newest)
+ *   trail.undock                 leave it — deck eases back to its natural recede
+ *   trail.scroll <delta>         move the head by ±N moments (− older / + newer)
+ *   trail.page   <next|prev|first|last|N>   move the head to a neighbour / end / index
  *
  * To populate a trail without a live agent, drive the existing verb, e.g.:
  *   agent.activity dev claude read app/main.jsx
