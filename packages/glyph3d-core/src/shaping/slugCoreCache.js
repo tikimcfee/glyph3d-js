@@ -31,6 +31,12 @@ const ENVELOPE_VERSION = 1;
 const MAGIC = 0x43474c53;   // 'SLGC' as a little-endian uint32
 const HEADER_U32 = 8;
 
+// Bump when the FONT FILES change (a new .ttf, a different fallback) without a name change —
+// the key is identity-based (font NAMES, not urls), so it can't otherwise notice new bytes.
+// Names, because Vite `?url` imports resolve to DIFFERENT strings in dev vs build; keying on
+// the url would make the key environment-volatile and a baked asset unfindable at runtime.
+const FONT_CHAIN_VERSION = 1;
+
 const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
 // Last cache outcome (boot or runtime), surfaced by the `atlas.cache` verb. Boot's
@@ -42,15 +48,20 @@ let _lastEvent = null;
 
 /**
  * Content-addressed cache key for a font chain + encoded ranges + buffer format.
- * Any change to any of those misses → the ladder recomputes. Pure + synchronous.
+ * Keyed on font NAMES (+ FONT_CHAIN_VERSION), NOT urls — Vite hashes `?url` imports
+ * per-environment, so a url-based key would differ dev↔build and a baked asset would be
+ * unfindable. With names, the key is stable everywhere, so a build-time bake matches the
+ * runtime lookup. Any change to names/ranges/format/version misses → the ladder recomputes.
+ * Pure + synchronous.
  * @param {{ fonts?: Array<{url:string,name?:string}>, encodeRanges: Array<[number,number]> }} cfg
  * @returns {string} e.g. 'slug-core.x7k2p9'
  */
 export function slugCoreKey({ fonts, encodeRanges }) {
     const canonical = JSON.stringify({
-        fonts: (fonts || []).map((f) => `${f.name || ''}@${f.url}`),
+        fonts: (fonts || []).map((f) => f.name || f.url),
         ranges: encodeRanges,
         fmt: SLUG_BUFFER_FORMAT,
+        fontVer: FONT_CHAIN_VERSION,
     });
     return `${NS}.${cyrb53(canonical).toString(36)}`;
 }
@@ -159,6 +170,55 @@ export async function loadSlugCore(key) {
         _lastEvent = { op: 'corrupt', key, error: e.message, ms: now() - t0 };
         console.warn(`[slugCoreCache] ${key} unreadable (${e.message}) → discard + recompute`);
         await discardSlugCore(key);
+        return null;
+    }
+}
+
+/**
+ * Load the core from a STATIC ASSET (the build-time bake), e.g. `/slug-core/<key>.bin`.
+ * The ladder tries this AFTER the local blob store and BEFORE a live encode, so a fresh
+ * device (empty IndexedDB) still hydrates instead of encoding. On a hit the bytes are
+ * SELF-PROMOTED into the blob store, so every later boot takes the faster local path and
+ * never re-fetches. Same fail-safe contract as loadSlugCore — a 404 (no baked asset, e.g.
+ * in dev) or any corruption returns null and the ladder falls through to a live encode.
+ *
+ * @param {string} key
+ * @param {string} [baseUrl] - asset base path (default '/'); pass import.meta.env.BASE_URL
+ *        so a sub-path deploy (/ide/) resolves correctly.
+ * @returns {Promise<object|null>}
+ */
+export async function loadServedSlugCore(key, baseUrl = '/') {
+    const t0 = now();
+    const url = `${baseUrl}slug-core/${encodeURIComponent(key)}.bin`;
+    let resp;
+    try { resp = await fetch(url); } catch { return null; }   // offline / network error
+    if (!resp || !resp.ok) return null;                        // 404 = no baked asset (dev)
+    try {
+        const bytes = new Uint8Array(await resp.arrayBuffer());
+        // Quiet bail if it isn't a gzip stream — e.g. a dev server's SPA index.html fallback
+        // served with a 200. Avoids a per-boot "unreadable" warning when there's no real asset.
+        if (bytes.length < 2 || bytes[0] !== 0x1f || bytes[1] !== 0x8b) return null;
+        const raw = await gunzip(bytes);
+        const descriptor = unpackDescriptor(raw);
+        SlugBuffer.deserialize(descriptor);                    // structural validation
+        // Promote into the local store so subsequent boots hit IndexedDB, not the network.
+        try {
+            await blobStore.put(key, bytes, {
+                env: ENVELOPE_VERSION, fmt: descriptor.v, glyphs: descriptor.encodedIds.length,
+                curves: descriptor.curveCount, rawBytes: raw.byteLength, source: 'served',
+            });
+        } catch { /* a failed promote just means we re-fetch next boot */ }
+        _lastEvent = {
+            op: 'served', key, glyphs: descriptor.encodedIds.length, curves: descriptor.curveCount,
+            gzBytes: bytes.byteLength, rawBytes: raw.byteLength, ms: now() - t0,
+        };
+        console.log(
+            `[slugCoreCache] served ${key}: ${descriptor.encodedIds.length} glyphs, ` +
+            `${(bytes.byteLength / 1024).toFixed(1)}KB gz → promoted to local in ${(now() - t0).toFixed(1)}ms`
+        );
+        return descriptor;
+    } catch (e) {
+        console.warn(`[slugCoreCache] served ${key} unreadable (${e.message}) → ignore`);
         return null;
     }
 }

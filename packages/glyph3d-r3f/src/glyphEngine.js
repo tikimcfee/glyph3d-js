@@ -11,7 +11,7 @@
 
 import { GlyphAtlas, EmojiAtlas, collectUniqueGlyphIds } from '@glyph3d/core';
 import { MonospaceShapeCache, shapeText, LiveSlugAtlas, FontChain,
-         slugCoreKey, loadSlugCore, saveSlugCore, discardSlugCore } from '@glyph3d/core/shaping';
+         slugCoreKey, loadSlugCore, loadServedSlugCore, saveSlugCore, discardSlugCore } from '@glyph3d/core/shaping';
 import { getWorkerBridge } from '@glyph3d/core/workers';
 
 /**
@@ -31,6 +31,8 @@ import { getWorkerBridge } from '@glyph3d/core/workers';
  * @property {(stage: string) => void} [onStage] - Progress callback.
  * @property {boolean} [cache] - Set false to bypass the prebaked slug-core cache and
  *           force a fresh encode (the default loads-else-encodes-and-self-caches).
+ * @property {string} [coreAssetBase] - Base path for the served slug-core asset (default
+ *           '/'); pass import.meta.env.BASE_URL so a sub-path deploy (/ide/) resolves.
  */
 
 // LARGE CORE — ~everything a code IDE + terminal actually renders, encoded up front so the
@@ -148,15 +150,19 @@ export async function bootGlyphEngine(options) {
   // Color-emoji bitmap atlas — GlyphField discovers this for its bitmap branch.
   atlas._emojiAtlas = emojiAtlas;
 
-  // Prebaked-core cache ladder. Try the local blob store first (hydrate → SKIP the
-  // boot encode); on miss/corruption, live-encode the boot glyph set and self-cache
-  // it for next boot. The key binds the font chain + encoded ranges + buffer format,
-  // so any of those changing misses → recompute. `cache: false` bypasses it (a forced
-  // re-encode). Fail-safe throughout: the live encode is always the fallback, so a bad
-  // cache entry never breaks boot — it's discarded and recomputed.
+  // Prebaked-core cache ladder. local blob store → served static asset → live encode.
+  //   1. loadSlugCore        — local IndexedDB (fastest; previous boots wrote here)
+  //   2. loadServedSlugCore  — the build-time baked asset, self-promoted into IndexedDB
+  //                            on hit so a fresh device hydrates instead of encoding
+  //   3. live encode         — the always-present fallback; self-caches for next boot
+  // The key binds the font chain (by name) + ranges + buffer format, so any change misses
+  // → recompute. `cache: false` bypasses it. Fail-safe throughout: a bad/absent cache never
+  // breaks boot. A served/remote source is just another rung on this same ladder.
   const useCache = opts.cache !== false;
   const cacheKey = slugCoreKey({ fonts: fontSpecs, encodeRanges: opts.encodeRanges });
-  const cachedDescriptor = useCache ? await loadSlugCore(cacheKey) : null;
+  const cachedDescriptor = useCache
+    ? (await loadSlugCore(cacheKey)) || (await loadServedSlugCore(cacheKey, opts.coreAssetBase ?? '/'))
+    : null;
 
   // The live, growable Slug atlas owns one encoder for BOTH boot and growth: glyphs
   // encountered after boot (box-drawing, spinner stars, …) are appended on demand and

@@ -15,5 +15,5 @@ export { shapeText, collectUniqueGlyphIds } from './shapeText.js';
 export { default as SlugEncoder } from './SlugEncoder.js';
 export { default as LiveSlugAtlas } from './LiveSlugAtlas.js';
 export { SlugBuffer, encodeGlyph, SLUG_BUFFER_FORMAT } from './slugData.js';
-export { slugCoreKey, loadSlugCore, saveSlugCore, discardSlugCore,
+export { slugCoreKey, loadSlugCore, loadServedSlugCore, saveSlugCore, discardSlugCore,
          getSlugCacheState, clearSlugCore } from './slugCoreCache.js';

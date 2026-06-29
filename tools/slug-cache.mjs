@@ -11,7 +11,7 @@
  */
 
 import { SlugBuffer } from '../packages/glyph3d-core/src/shaping/slugData.js';
-import { slugCoreKey, saveSlugCore, loadSlugCore } from '../packages/glyph3d-core/src/shaping/slugCoreCache.js';
+import { slugCoreKey, saveSlugCore, loadSlugCore, loadServedSlugCore } from '../packages/glyph3d-core/src/shaping/slugCoreCache.js';
 import { blobStore } from '../packages/glyph3d-core/src/services/state/index.js';
 
 let pass = 0, fail = 0;
@@ -39,13 +39,14 @@ const d = buf.serialize();
 
 const cfgA = { fonts: [{ url: '/fonts/Cousine.ttf', name: 'primary' }], encodeRanges: [[32, 126], [0x2500, 0x257f]] };
 
-// ── 1. key: stable + sensitive ───────────────────────────────────────────────
-console.log('\n[1] content-addressed key');
+// ── 1. key: identity-based (build-stable) + sensitive ─────────────────────────
+console.log('\n[1] content-addressed key (name-based, dev↔build stable)');
 const keyA = slugCoreKey(cfgA);
 ok(keyA === slugCoreKey(cfgA), 'same inputs → same key (stable)');
 ok(keyA.startsWith('slug-core.'), `key is namespaced (${keyA})`);
 ok(slugCoreKey({ ...cfgA, encodeRanges: [[32, 126]] }) !== keyA, 'different ranges → different key');
-ok(slugCoreKey({ ...cfgA, fonts: [{ url: '/fonts/Other.ttf' }] }) !== keyA, 'different font chain → different key');
+ok(slugCoreKey({ ...cfgA, fonts: [{ url: '/fonts/Cousine.ttf', name: 'OtherFont' }] }) !== keyA, 'different font NAME → different key');
+ok(slugCoreKey({ ...cfgA, fonts: [{ url: '/assets/Cousine-9f3a.ttf', name: 'primary' }] }) === keyA, 'same name, DIFFERENT url → SAME key (the dev↔build fix)');
 
 // ── 2. round-trip through gzip + blobStore ───────────────────────────────────
 console.log('\n[2] save → load round-trip');
@@ -79,6 +80,23 @@ ok(!(await blobStore.has(keyA)), 'the corrupt entry was discarded (self-heal →
 console.log('\n[6] recovery');
 await saveSlugCore(keyA, d);
 ok((await loadSlugCore(keyA)) !== null, 're-cached cleanly after a discard');
+
+// ── 7. served-asset source (self-promoting) ──────────────────────────────────
+console.log('\n[7] served-asset source');
+const servedKey = slugCoreKey({ fonts: [{ name: 'ServedTest' }], encodeRanges: [[1, 2]] });
+await saveSlugCore(servedKey, d);                      // borrow save() to mint a real gz blob
+const servedBytes = await blobStore.getBytes(servedKey);
+await blobStore.delete(servedKey);                     // simulate a fresh device — empty local store
+ok(!(await blobStore.has(servedKey)), 'local store empty for the served key');
+const realFetch = globalThis.fetch;
+globalThis.fetch = async (u) => (String(u).includes(encodeURIComponent(servedKey))
+    ? { ok: true, arrayBuffer: async () => servedBytes.slice().buffer }
+    : { ok: false, status: 404 });
+const dServed = await loadServedSlugCore(servedKey, '/');
+ok(dServed !== null && eqU32(dServed.curve, d.curve), 'served asset hydrates a matching descriptor');
+ok(await blobStore.has(servedKey), 'served bytes self-promoted into the local store (next boot is local)');
+ok((await loadServedSlugCore('slug-core.nope', '/')) === null, '404 served asset → null (ladder falls through to encode)');
+globalThis.fetch = realFetch;
 
 console.log(`\n${fail === 0 ? '\x1b[32m' : '\x1b[31m'}${pass} passed, ${fail} failed\x1b[0m\n`);
 process.exit(fail === 0 ? 0 : 1);
