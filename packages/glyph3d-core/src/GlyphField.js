@@ -62,6 +62,7 @@ const MAX_CURVES = 256;
 const RENDER_MODE = Object.freeze({ GLYPH: 0, BITMAP: 1, FRAME: 2 });
 
 import { PERF_THRESHOLDS } from './core/constants.js';
+import { computeCellMetrics } from './core/cellMetrics.js';
 
 const MAX_GROUPS_DEFAULT = PERF_THRESHOLDS.defaultMaxGroups ?? 64;
 const MAX_GROUPS_DIM     = 16000;
@@ -757,14 +758,9 @@ export default class GlyphField {
         const atlasCharSize = atlas.getCharSize();
         const scale = options.worldScale || 0.025;
 
-        this.metrics = {
-            charWidth:     atlasCharSize.width  * scale,
-            charHeight:    atlasCharSize.height * scale,
-            letterSpacing: atlasCharSize.width  * scale * 0.05,
-            lineSpacing:   atlasCharSize.height * scale * 1.2,
-            pixelWidth:    atlasCharSize.width,
-            pixelHeight:   atlasCharSize.height,
-        };
+        // Shared cell metrics (real em, contiguous cells) — same source CodeGrid uses, so the
+        // terminal and code grids share one layout. This is what carries the spacing fix here.
+        this.metrics = computeCellMetrics(atlasCharSize, scale);
 
         this.config = {
             maxInstances: options.maxInstances || PERF_THRESHOLDS.maxInstancesPerMesh,

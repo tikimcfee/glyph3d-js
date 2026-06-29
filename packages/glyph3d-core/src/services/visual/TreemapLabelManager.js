@@ -26,6 +26,7 @@
 
 import GlyphField from '../../GlyphField.js';
 import { getWorkerBridge, isWorkersSupported } from '../../workers/WorkerBridge.js';
+import { computeCellMetrics } from '../../core/cellMetrics.js';
 
 // Camera Z thresholds for LOD switching
 const DIR_VISIBLE_MIN_Z   = 100;    // directory labels visible above this Z
@@ -255,14 +256,9 @@ export class TreemapLabelManager {
         const atlasCharSize = atlas.getCharSize();
         const scale = 0.025;
         const metrics = {
-            charWidth:     atlasCharSize.width  * scale,
-            charHeight:    atlasCharSize.height * scale,
-            letterSpacing: atlasCharSize.width  * scale * 0.05,
-            lineSpacing:   atlasCharSize.height * scale * 1.2,
-            worldScale:    scale,
-            atlasSize:     atlas.getAtlasTexture().width,
-            pixelWidth:    atlasCharSize.width,
-            pixelHeight:   atlasCharSize.height,
+            ...computeCellMetrics(atlasCharSize, scale),
+            worldScale: scale,
+            atlasSize:  atlas.getAtlasTexture().width,
         };
 
         try {
@@ -285,14 +281,9 @@ export class TreemapLabelManager {
         const atlasCharSize = atlas.getCharSize();
         const scale = 0.025;
         const metrics = {
-            charWidth:     atlasCharSize.width  * scale,
-            charHeight:    atlasCharSize.height * scale,
-            letterSpacing: atlasCharSize.width  * scale * 0.05,
-            lineSpacing:   atlasCharSize.height * scale * 1.2,
-            worldScale:    scale,
-            atlasSize:     atlas.getAtlasTexture().width,
-            pixelWidth:    atlasCharSize.width,
-            pixelHeight:   atlasCharSize.height,
+            ...computeCellMetrics(atlasCharSize, scale),
+            worldScale: scale,
+            atlasSize:  atlas.getAtlasTexture().width,
         };
         const buffers = getWorkerBridge().buildBatchBuffersSync(pendingItems, { metrics, defaultColor });
         this._renderer.applyPrebuiltBuffers(buffers, pendingItems);

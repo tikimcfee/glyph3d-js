@@ -15,21 +15,12 @@ import GlyphField from '../GlyphField.js';
 import { getWorkerBridge, isWorkersSupported } from '../workers/WorkerBridge.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import { BOUNDS_Z_PAD } from '../core/constants.js';
+import { computeCellMetrics } from '../core/cellMetrics.js';
 import { paginationGeometry, resolveLayoutParams, DEFAULT_LAYOUT } from '../workers/builders/index.js';
 import LayoutDescription from '../core/LayoutDescription.js';
 import { analyzeGrid, buildGridSemantics, buildGridSemanticsSync } from '../parsing/SyntaxColorizer.js';
 import FramedGlyphField from './FramedGlyphField.js';
 import { createPanelMaterial } from './panelMaterial.js';
-
-// Layout spacing, anchored on REAL font metrics (no debug fudge). The cell is the font's
-// monospace advance × real vertical em (getCharSize, from fontExtents). These multiply it:
-//   LINE_PITCH     × cell height = the line pitch. 1.0 = lines touch, so full-height box-drawing
-//                  tiles row-to-row; raise for leading. (was 1.2 — a ~0.2em dead band per line.)
-//   LETTER_SPACING × cell width  = inter-glyph gap. 0 = cells are contiguous, so box-drawing
-//                  tiles edge-to-edge and a highlight hugs the text. (was 0.05 — a 5% gap.)
-// Surfaced here so they're tunable from one place (knob-promotion is the next step if wanted).
-const LINE_PITCH = 1.0;
-const LETTER_SPACING = 0.0;
 
 // Reused for lines without wraps — most lines, in the common case.
 // Frozen so accidental mutation surfaces immediately.
@@ -1093,12 +1084,8 @@ class CodeGrid extends FramedGlyphField {
     _computeMetrics() {
         const atlasCharSize = this.atlas.getCharSize();
         const scale = this.config.worldScale;
-        return {
-            charWidth:  atlasCharSize.width  * scale,
-            charHeight: atlasCharSize.height * scale,
-            lineHeight: atlasCharSize.height * scale * LINE_PITCH,
-            spacing:    atlasCharSize.width  * scale * LETTER_SPACING,
-        };
+        const m = computeCellMetrics(atlasCharSize, scale);
+        return { charWidth: m.charWidth, charHeight: m.charHeight, lineHeight: m.lineSpacing, spacing: m.letterSpacing };
     }
 
     /**
@@ -1218,14 +1205,9 @@ class CodeGrid extends FramedGlyphField {
         const atlasCharSize = this.atlas.getCharSize();
         const scale = this.config.worldScale;
         const metrics = {
-            charWidth:     atlasCharSize.width  * scale,
-            charHeight:    atlasCharSize.height * scale,
-            letterSpacing: atlasCharSize.width  * scale * LETTER_SPACING,
-            lineSpacing:   atlasCharSize.height * scale * LINE_PITCH,
-            worldScale:    scale,
-            atlasSize:     this.atlas.getAtlasTexture().width,
-            pixelWidth:    atlasCharSize.width,
-            pixelHeight:   atlasCharSize.height,
+            ...computeCellMetrics(atlasCharSize, scale),
+            worldScale: scale,
+            atlasSize:  this.atlas.getAtlasTexture().width,
         };
 
         // Live Slug path: ensure every codepoint's curves are
