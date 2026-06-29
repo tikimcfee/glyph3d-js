@@ -377,12 +377,20 @@ export function frameBounds(ctx, bounds, padding) {
  * @param {number} duration - ms
  * @returns {Promise<void>}
  */
-export function animateCamera(ctx, x, y, z, duration) {
+export function animateCamera(ctx, x, y, z, duration, toPitch, toYaw) {
     return new Promise((resolve) => {
         const camera = ctx.camera;
+        const cc = ctx.cameraController;
         const startX = camera.position.x;
         const startY = camera.position.y;
         const startZ = camera.position.z;
+        // Optional ORIENTATION tween — reader mode billboards to a rotated grid (pitch/yaw from
+        // computeGridFocus's reverse-billboard pose). Undefined → position-only ease (axis-aligned
+        // targets, e.g. agent windows). yaw takes the SHORTEST arc so a near-π flip doesn't unwind.
+        const rot = Number.isFinite(toPitch) && Number.isFinite(toYaw) && !!cc;
+        const startPitch = rot ? cc.pitch : 0;
+        const startYaw = rot ? cc.yaw : 0;
+        const dYaw = rot ? (((toYaw - startYaw + Math.PI) % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI) - Math.PI : 0;
         const startTime = performance.now();
 
         ctx._cancelCameraAnimation?.();
@@ -398,6 +406,11 @@ export function animateCamera(ctx, x, y, z, duration) {
                 startY + (y - startY) * e,
                 startZ + (z - startZ) * e,
             );
+            if (rot) {
+                cc.pitch = startPitch + (toPitch - startPitch) * e;
+                cc.yaw = startYaw + dYaw * e;
+                cc._applyRotation?.();
+            }
             if (t < 1.0) {
                 animId = requestAnimationFrame(tick);
             } else {

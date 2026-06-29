@@ -44,17 +44,16 @@ function enterReader(ctx, grid, regIdx, registryId, { animate = true } = {}) {
 
     const cc = ctx.cameraController;
     if (target) {
-        // Zero pitch/yaw immediately so the camera eases along a clean,
-        // axis-aligned trajectory — otherwise the single-drain _applyRotation
-        // would fight the animation each frame.
-        if (cc) {
-            cc.pitch = 0;
-            cc.yaw = 0;
-        }
+        // Reader frames the file SQUARED to its face: computeGridFocus carries the reverse-billboard
+        // pitch/yaw, so the ease tweens orientation alongside position (a rotated file reads head-on,
+        // not as a sliver). The agent/bounds path leaves pitch/yaw undefined → the axis-aligned ease.
+        const tp = Number.isFinite(target.pitch) ? target.pitch : undefined;
+        const ty = Number.isFinite(target.yaw) ? target.yaw : undefined;
         if (animate) {
-            animateCamera(ctx, target.x, target.y, target.z, READER_ANIMATE_MS);
+            animateCamera(ctx, target.x, target.y, target.z, READER_ANIMATE_MS, tp, ty);
         } else {
             ctx.camera.position.set(target.x, target.y, target.z);
+            if (cc && tp !== undefined) { cc.pitch = tp; cc.yaw = ty; cc._applyRotation?.(); }
         }
     } else if (regIdx >= 0) {
         // Fall back to the snap path if target math returned null.

@@ -884,51 +884,111 @@ export class ViewerCameraController {
     // ============ Focus methods (public API) ============
 
     /**
-     * Compute the world-space target position the camera should fly to when
+     * The focused object's true content PLANE in world space — center, FRONT normal (the glyph
+     * face, local +Z), up axis (local +Y), and the on-plane width/height/depth — from its local
+     * bounds × world transform. This is what reverse-billboard frames: a rotated grid's real face,
+     * NOT its axis-aligned bounding box, which collapses to a sliver viewed straight down +Z. Null
+     * if the object exposes no local bounds.
+     * @param {Object} obj an Object3D with getLocalBounds()
+     * @returns {{center:Object, normal:Object, up:Object, width:number, height:number, depth:number}|null}
+     * @private
+     */
+    _planeOf(obj) {
+        const THREE = this.THREE;
+        const lb = obj?.getLocalBounds?.();
+        if (!lb || lb.isEmpty?.()) return null;
+        obj.updateWorldMatrix(true, false);
+        const q = obj.getWorldQuaternion(new THREE.Quaternion());
+        const s = obj.getWorldScale(new THREE.Vector3());
+        const center = obj.localToWorld(new THREE.Vector3(
+            (lb.min.x + lb.max.x) / 2, (lb.min.y + lb.max.y) / 2, (lb.min.z + lb.max.z) / 2));
+        return {
+            center,
+            normal: new THREE.Vector3(0, 0, 1).applyQuaternion(q).normalize(),
+            up: new THREE.Vector3(0, 1, 0).applyQuaternion(q).normalize(),
+            width: (lb.max.x - lb.min.x) * Math.abs(s.x),
+            height: (lb.max.y - lb.min.y) * Math.abs(s.y),
+            depth: (lb.max.z - lb.min.z) * Math.abs(s.z),
+        };
+    }
+
+    /**
+     * The flyTo pose that REVERSE-BILLBOARDS a plane: the camera squares up to `normal` at a
+     * distance that fits width×height head-on (so an oblique surface reads face-on, not as a
+     * foreshortened sliver), sitting in front of the slab and looking back along -normal. anchorTop
+     * shifts the aim toward the plane's TOP edge (reading from the head of a file — fullHeight is the
+     * un-capped content height); else it center-frames. FPS-style (pitch/yaw, roll-free): exact for
+     * upright / yaw-rotated surfaces (the common layouts), graceful for pitched ones.
+     * @returns {{position:{x:number,y:number,z:number}, pitch:number, yaw:number}}
+     * @private
+     */
+    _billboardPose({ center, normal, up, width, height, depth = 0, fullHeight = height, anchorTop = false, fill = 0.85, topMargin = 0.08 }) {
+        const camera = this.ctx.camera;
+        const n = normal.clone().normalize();
+        const distance = Math.max(zDistanceForFit(camera, width, height, fill), 5);
+
+        // Aim point on the plane: center, or shifted UP toward the top edge so the head sits near
+        // the top of the view (the content top, pulled down by the view margin).
+        const aim = center.clone();
+        if (anchorTop) {
+            const visibleHalfH = distance * Math.tan((camera.fov * Math.PI / 180) / 2);
+            aim.addScaledVector(up.clone().normalize(), fullHeight / 2 - visibleHalfH * (1 - 2 * topMargin));
+        }
+
+        const camPos = aim.addScaledVector(n, distance + depth * 0.5); // clear the slab, sit in front
+        const fwd = n.multiplyScalar(-1);                              // look back toward the plane
+        const pitch = Math.asin(Math.max(-1, Math.min(1, fwd.y)));     // YXZ inverse (see _applyRotation)
+        const yaw = Math.atan2(-fwd.x, -fwd.z);
+        return { position: { x: camPos.x, y: camPos.y, z: camPos.z }, pitch, yaw };
+    }
+
+    /**
+     * Compute the world-space target POSE the camera should fly to when
      * focusing on a grid. Pure — does not mutate the camera.
      *
      * Exposed so reader-mode can animate toward the target instead of
-     * snapping instantly.
+     * snapping instantly. REVERSE-BILLBOARDED: squares to the grid's own plane (a rotated file
+     * frames face-on, not as a sliver) and top-anchored to its head, so the pose carries pitch/yaw.
      *
      * @param {number} index - grid index in ctx.getGrids()
-     * @returns {{x:number,y:number,z:number}|null} target or null if invalid
+     * @returns {{x:number,y:number,z:number,pitch:number,yaw:number}|null} pose or null if invalid
      */
     computeGridFocus(index) {
         const THREE = this.THREE;
         const grids = this.ctx.getGrids();
         if (index < 0 || index >= grids.length) return null;
-
         const grid = grids[index];
-        const bounds = grid.getBounds();
-        const size = new THREE.Vector3();
-        bounds.getSize(size);
 
+        const plane = this._planeOf(grid);
+        if (!plane) {
+            // Defensive fallback: no local bounds → old axis-aligned AABB framing, head-on.
+            const b = grid.getBounds?.();
+            if (!b || b.isEmpty?.()) return null;
+            const size = new THREE.Vector3(); b.getSize(size);
+            const dist = Math.max(zDistanceForFit(this.ctx.camera, size.x, size.y, 0.85), 5);
+            return { x: (b.min.x + b.max.x) / 2, y: (b.min.y + b.max.y) / 2, z: b.max.z + dist, pitch: 0, yaw: 0 };
+        }
+
+        // Cap the FIT height to the readable-lines window so a long file frames its head at a
+        // readable size (the rest scrolls); the top-anchor uses the FULL plane height. lineSpacing
+        // is read off the TRUE plane height, so the cap is right even for a rotated grid.
         const lineCount = grid.lines ? grid.lines.length : 1;
-        const lineSpacing = size.y / Math.max(lineCount, 1);
-
         const READABLE_LINES = 35;
-        const visibleLines = Math.min(lineCount, READABLE_LINES);
-        const targetViewHeight = visibleLines * lineSpacing;
+        const fitHeight = (Math.min(lineCount, READABLE_LINES) / Math.max(lineCount, 1)) * plane.height;
 
-        // Fit width + the readable-lines-capped height; floor at 5.
-        const distance = Math.max(zDistanceForFit(this.ctx.camera, size.x, targetViewHeight, 0.85), 5);
-
-        const halfTan = Math.tan((this.ctx.camera.fov * Math.PI / 180) / 2);
-        const centerX = (bounds.min.x + bounds.max.x) / 2;
-        const topY = bounds.max.y;
-
-        const visibleHalfH = distance * halfTan;
-        const topMargin = 0.08;
-        const cameraY = topY - visibleHalfH * (1 - 2 * topMargin);
-
-        return { x: centerX, y: cameraY, z: bounds.max.z + distance };
+        const pose = this._billboardPose({
+            center: plane.center, normal: plane.normal, up: plane.up,
+            width: plane.width, height: fitHeight, fullHeight: plane.height, depth: plane.depth,
+            anchorTop: true,
+        });
+        return { x: pose.position.x, y: pose.position.y, z: pose.position.z, pitch: pose.pitch, yaw: pose.yaw };
     }
 
     focusOnGrid(index) {
-        const target = this.computeGridFocus(index);
-        if (!target) return;
-        // Fly to the file's head (computeGridFocus is top-anchored), head-on (pitch/yaw→0).
-        this.flyTo({ position: target, pitch: 0, yaw: 0 });
+        const pose = this.computeGridFocus(index);
+        if (!pose) return;
+        // Fly to the file's head (top-anchored), squared to its face (reverse-billboard pitch/yaw).
+        this.flyTo({ position: pose, pitch: pose.pitch, yaw: pose.yaw });
         window.dispatchEvent(new CustomEvent('camera-focus-changed', {
             detail: { index }
         }));
@@ -942,13 +1002,24 @@ export class ViewerCameraController {
      * @returns {boolean} true if it framed something.
      */
     focusOnObject(obj) {
-        return this.focusOnBox(obj?.getBounds?.());
+        // Reverse-billboard: square the camera to the object's OWN plane so a rotated grid/terminal
+        // is framed head-on (true width/height), never an edge-on sliver. Falls back to the AABB
+        // path only when the object exposes no local bounds (no orientation to read).
+        const plane = this._planeOf(obj);
+        if (!plane) return this.focusOnBox(obj?.getBounds?.());
+        const pose = this._billboardPose({
+            center: plane.center, normal: plane.normal, up: plane.up,
+            width: plane.width, height: plane.height, depth: plane.depth,
+        });
+        this.flyTo({ position: pose.position, pitch: pose.pitch, yaw: pose.yaw });
+        return true;
     }
 
     /**
-     * Frame a world-space AABB head-on, centered. The box-taking core of
-     * focusOnObject — dock.focus passes a docked window's captured HOME bounds so
-     * the camera frames where it'll land, not its live mid-slide tile bounds.
+     * Frame a world-space AABB head-on, centered — the orientation-FREE focus. A box carries no
+     * facing, so this squares straight down +Z. dock.focus passes a docked window's captured HOME
+     * bounds (frames where it'll land, not its live mid-slide tile); a loose object's own facing
+     * comes through focusOnObject/_planeOf instead.
      * @param {Object} bounds THREE.Box3
      * @returns {boolean}
      */
@@ -959,8 +1030,11 @@ export class ViewerCameraController {
         bounds.getCenter(center);
         const size = new THREE.Vector3();
         bounds.getSize(size);
-        const distance = zDistanceForFit(this.ctx.camera, size.x, size.y, 0.85);
-        this.flyTo({ position: { x: center.x, y: center.y, z: bounds.max.z + distance }, pitch: 0, yaw: 0 });
+        const pose = this._billboardPose({
+            center, normal: new THREE.Vector3(0, 0, 1), up: new THREE.Vector3(0, 1, 0),
+            width: size.x, height: size.y, depth: size.z,
+        });
+        this.flyTo({ position: pose.position, pitch: pose.pitch, yaw: pose.yaw });
         return true;
     }
 
