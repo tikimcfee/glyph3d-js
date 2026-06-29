@@ -248,7 +248,12 @@ export default class FontChain {
                 // No outline font has it, but it's emoji → color bitmap fallback.
                 slot = this._bitmapSlotFor(cp);
             }
-            out.push({ g: slot, cl: i, ax: cellAx, ay: 0, dx: 0, dy: 0, flags: 0 });
+            // Emoji render as a SQUARE bitmap ~2× the mono advance, so they take a DOUBLE-WIDTH
+            // advance (2 cells) — the terminal-standard east-asian "wide" width. The square then
+            // lands cleanly in its 2-cell span (the builder centers it on iSize.x·0.5) instead of
+            // spilling into the next glyph. Outline glyphs (incl. the blank slot) stay 1 cell.
+            const ax = this.isBitmapSlot(slot) ? cellAx * 2 : cellAx;
+            out.push({ g: slot, cl: i, ax, ay: 0, dx: 0, dy: 0, flags: 0 });
             i += step;
         }
         return out;
