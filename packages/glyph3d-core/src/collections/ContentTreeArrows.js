@@ -21,7 +21,7 @@
 
 import * as THREE from 'three';
 import { RENDER_ORDER } from '../core/renderOrder.js';
-import { partitionChildren, leafBox } from './layouts/nodeUtils.js';
+import { partitionChildren, leafBox, subtreeContentBounds } from './layouts/nodeUtils.js';
 
 export const ARROW_DEFAULTS = {
     zLift: 0,                   // +z float for flat schemes; 0 for the volumetric jellyfish
@@ -31,6 +31,7 @@ export const ARROW_DEFAULTS = {
 };
 
 const _v = new THREE.Vector3();
+const _abox = new THREE.Box3();
 
 export default class ContentTreeArrows {
     /**
@@ -121,10 +122,12 @@ export default class ContentTreeArrows {
         for (const path of [...this._links.keys()]) if (!seen.has(path)) this._dropLinks(path);
     }
 
-    /** A file's content-box center in its PARENT's local frame — where its ownership line lands. */
+    /** A file's content-box center in its PARENT's local frame — where its ownership line lands. A
+     *  layout-group panel may sit at the core with its grids warped out onto the arc, so its own
+     *  box/origin no longer marks its content; anchor to where its grids ACTUALLY are instead. */
     _fileAnchor(leaf) {
-        const b = leafBox(leaf);
         leaf.updateMatrix();
+        const b = leaf.userData?.isLayoutGroup ? subtreeContentBounds(leaf, _abox, false) : leafBox(leaf);
         return _v.set((b.min.x + b.max.x) / 2, (b.min.y + b.max.y) / 2, (b.min.z + b.max.z) / 2)
             .applyMatrix4(leaf.matrix);
     }

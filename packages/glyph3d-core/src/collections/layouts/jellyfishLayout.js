@@ -35,6 +35,8 @@ export const JELLYFISH_DEFAULTS = {
     drop: 800,           // −Y descent from a column's base to its child-directory ring
     childGap: 0.2,       // ring spacing between sibling child columns
     minRadius: 290,      // floor for the various radii (keeps a lone column/ring legible)
+    warpPanels: false,   // toggle: curve each panel's grids around the core (apothem flows down to
+                         // the grid level) instead of laying the panel as one flat chord-face
     ...PANEL_DEFAULTS,   // panelW / panelH / colGap / rowGap — the panel packing budget
 };
 
@@ -118,6 +120,47 @@ function measure(node, opts) {
     return { radius, height, reach: reachOut };
 }
 
+/** Place one grid as an OUTWARD cylinder facet: its content-center at radius R, angle θ, vertical V,
+ *  turned to read outward (rotation.y = π/2 − θ). (cx,cy,cz) is the grid's own local box center. The
+ *  panel-face placement and the warped per-grid placement are the same operation at different scales. */
+function faceGrid(obj, R, theta, V, cx, cy, cz) {
+    const cos = Math.cos(theta), sin = Math.sin(theta);
+    obj.position.set(R * cos - cx * sin - cz * cos, V - cy, R * sin + cx * cos - cz * sin);
+    obj.rotation.set(0, Math.PI / 2 - theta, 0);
+}
+
+/** Warp a panel's grids onto the cylinder arc (the `warpPanels` toggle). Instead of laying the panel
+ *  flat as one chord-face, distribute its grids across the angular slice it occupies: each grid's
+ *  tangential offset within the panel becomes an arc angle (offset / apothem — the apothem math
+ *  recursing down to the grid level), and the grid is turned to face outward there. Vertical layout
+ *  is untouched (a cylinder curves only around Y). Re-homes the grids onto the panel (now identity,
+ *  at the core) and drops the emptied rows. `topY` = the panel's top in the node's frame. */
+function warpPanel(panel, thetaCenter, topY, R) {
+    // Read each grid's content-center in the panel's flat local frame (translation-only stacks), THEN
+    // re-place — collect first so re-parenting doesn't disturb the row.position reads mid-loop.
+    const items = [];
+    for (const row of panel.children) {
+        if (!row.userData?.isPanelRow) continue;
+        for (const grid of row.children) {
+            if (grid.userData?.path === undefined) continue;
+            const gb = leafBox(grid);
+            const gc = { x: (gb.min.x + gb.max.x) / 2, y: (gb.min.y + gb.max.y) / 2, z: (gb.min.z + gb.max.z) / 2 };
+            items.push({
+                grid, gc,
+                cx: gc.x + grid.position.x + row.position.x,   // tangential offset from the panel center
+                cy: gc.y + grid.position.y + row.position.y,   // vertical offset (≤ 0, from the panel top)
+            });
+        }
+    }
+    for (const { grid, gc, cx, cy } of items) {
+        panel.add(grid);                                       // re-home onto the panel (identity, at core)
+        faceGrid(grid, R, thetaCenter - cx / R, topY + cy, gc.x, gc.y, gc.z);
+    }
+    for (const row of [...panel.children]) if (row.userData?.isPanelRow) panel.remove(row);
+    panel.position.set(0, 0, 0);
+    panel.rotation.set(0, 0, 0);
+}
+
 /** Pre-order: tile the panels around the column (faces) and down each face, hang child columns
  *  below, recurse. */
 function place(node, opts) {
@@ -130,18 +173,16 @@ function place(node, opts) {
         const k = i % nAround;
         const theta = (k * 2 * Math.PI) / nAround;       // this face's angle around the pole
         const b = panelBoxes[i];
-        const cx = (b.min.x + b.max.x) / 2, cz = (b.min.z + b.max.z) / 2;
-        const cos = Math.cos(theta), sin = Math.sin(theta);
+        const topY = -colY[k];                           // the panel's top in the node's frame
         // face: readable side (local +Z) turned to the OUTWARD radial, width (local +X) tangential.
-        // rotation.y = π/2 − θ lands +Z on (cosθ,0,sinθ); the panel's content center sits at the
-        // apothem; its top hangs at −colY[k] so panels stack DOWN the face. (Proper rotation → text
-        // never mirrors.)
-        panel.position.set(
-            apothem * cos - cx * sin - cz * cos,
-            -colY[k] - b.max.y,
-            apothem * sin + cx * cos - cz * sin,
-        );
-        panel.rotation.set(0, Math.PI / 2 - theta, 0);
+        // The panel's content center sits at the apothem; its top hangs at topY so panels stack DOWN
+        // the face. With warpPanels, the same facing is applied per-GRID across the panel's arc.
+        if (opts.warpPanels) {
+            warpPanel(panel, theta, topY, apothem);
+        } else {
+            const cx = (b.min.x + b.max.x) / 2, cy = b.max.y, cz = (b.min.z + b.max.z) / 2;
+            faceGrid(panel, apothem, theta, topY, cx, cy, cz);
+        }
         colY[k] += (b.max.y - b.min.y) + opts.panelGap;
     });
 

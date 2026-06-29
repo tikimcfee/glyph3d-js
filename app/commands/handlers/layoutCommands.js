@@ -68,13 +68,15 @@ export default function registerLayoutCommands(router) {
             if (!flag.startsWith('--')) return { text: `ERR: expected --flag, got "${flag}"`, data: null };
             const raw = args[i + 1];
             if (raw === undefined) return { text: `ERR: ${flag} needs a value`, data: null };
-            // Numeric knobs stay numeric (and non-negative); a non-numeric value passes
-            // through as a string for any enum knob a scheme may expose.
+            // Numeric knobs stay numeric (and non-negative); 'true'/'false' parse as a bool (toggle
+            // knobs like jellyfish --warp-panels); anything else passes through as a string (enums).
             const key = flag.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
             const n = Number(raw);
             if (raw.trim() !== '' && Number.isFinite(n)) {
                 if (n < 0) return { text: `ERR: ${flag} must be ≥ 0`, data: null };
                 opts[key] = n;
+            } else if (raw === 'true' || raw === 'false') {
+                opts[key] = raw === 'true';
             } else {
                 opts[key] = raw;
             }
@@ -90,7 +92,7 @@ export default function registerLayoutCommands(router) {
         };
     }, {
         description: "Report or set the content tree's packing scheme (+ knob overrides) and re-lay the field",
-        usage: `[${Object.keys(LAYOUT_SCHEMES).join('|')}] [--depth-z N --rake-z N --dir-gap N --margin N --aspect N | jellyfish: --target-radius N --panel-w N --panel-h N --panel-gap N --face-gap N --drop N --child-gap N --col-gap N --row-gap N --hub-radius N --min-radius N …]   (flags alone re-dial the active scheme)`,
+        usage: `[${Object.keys(LAYOUT_SCHEMES).join('|')}] [--depth-z N --rake-z N --dir-gap N --margin N --aspect N | jellyfish: --target-radius N --panel-w N --panel-h N --panel-gap N --face-gap N --drop N --child-gap N --col-gap N --row-gap N --hub-radius N --min-radius N --warp-panels true|false …]   (flags alone re-dial the active scheme)`,
         returns: '{ scheme, opts, files, dirs } or { scheme, opts, available }',
     });
 

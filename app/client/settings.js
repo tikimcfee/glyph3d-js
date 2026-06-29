@@ -240,6 +240,7 @@ export const SETTINGS = [
   //   panelW/panelH — a panel TILE's bound; keep SMALL vs targetRadius (big files → few fat faces =
   //                   blocky; tiny files → many small faces = mosaic). Oversized grids get a solo tile.
   // Ranges are deliberately wide (the operator decides what's "too big"); defaults mirror JELLYFISH_DEFAULTS.
+  { key: 'layout.warpPanels', label: 'Warp panels around core', group: 'Layout', scheme: 'jellyfish', type: 'bool', default: JELLYFISH_DEFAULTS.warpPanels, apply: jellyfishParam('warpPanels') },
   { key: 'layout.targetRadius', label: 'Column radius (width)', group: 'Layout', scheme: 'jellyfish', type: 'number', default: JELLYFISH_DEFAULTS.targetRadius, min: 40, max: 4000, step: 10, apply: jellyfishParam('targetRadius') },
   { key: 'layout.panelW', label: 'Panel max width', group: 'Layout', scheme: 'jellyfish', type: 'number', default: JELLYFISH_DEFAULTS.panelW, min: 40, max: 3000, step: 10, apply: jellyfishParam('panelW') },
   { key: 'layout.panelH', label: 'Panel max height', group: 'Layout', scheme: 'jellyfish', type: 'number', default: JELLYFISH_DEFAULTS.panelH, min: 40, max: 4000, step: 10, apply: jellyfishParam('panelH') },

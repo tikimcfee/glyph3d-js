@@ -63,7 +63,10 @@ export function subtreeContentBounds(node, target = new THREE.Box3(), includeOri
             if (c.userData?.isMarker) continue;
             c.updateMatrix();
             const m = new THREE.Matrix4().multiplyMatrices(mat, c.matrix);
-            if (c.userData?.isDir) { walk(c, m); continue; }
+            // Descend dirs AND layout-group containers (jellyfish panels/rows) so the bounds come
+            // from the real grids at their CURRENT transforms — a warped panel's grids ride an arc,
+            // so its own flat layoutBounds would understate the extent. Only true leaves get boxed.
+            if (c.userData?.isDir || c.userData?.isLayoutGroup) { walk(c, m); continue; }
             tmp.copy(leafBox(c)).applyMatrix4(m);
             target.union(tmp);
         }
