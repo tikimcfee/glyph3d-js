@@ -26,6 +26,24 @@ import { createPanelMaterial } from './panelMaterial.js';
 // Frozen so accidental mutation surfaces immediately.
 const EMPTY_WRAPS = Object.freeze([]);
 
+// The cursor `col` is a CODEPOINT index — the same model the render/slot path uses (1 emoji =
+// 1 col = 1 buffer slot). JS strings are UTF-16, so a surrogate-pair emoji (😀 = 2 code units)
+// makes codepoint indices diverge from String.slice/.length. These convert, so edits never land
+// inside a surrogate pair (which splits/corrupts an emoji) nor at the wrong offset (inserting
+// before the caret). For ASCII they're identity, so the common path is unaffected.
+/** Codepoint index → UTF-16 offset within `str`. */
+function cpToU16(str, cp) {
+    let u = 0;
+    for (let n = 0; n < cp && u < str.length; n++) u += str.codePointAt(u) > 0xFFFF ? 2 : 1;
+    return u;
+}
+/** Count of CODEPOINTS in `str` (not UTF-16 code units). */
+function cpLen(str) {
+    let n = 0;
+    for (let u = 0; u < str.length; n++) u += str.codePointAt(u) > 0xFFFF ? 2 : 1;
+    return n;
+}
+
 class CodeGrid extends FramedGlyphField {
     /**
      * Create a CodeGrid
@@ -880,7 +898,7 @@ class CodeGrid extends FramedGlyphField {
                 // Clamp the edit caret into the fresh content before the decorate stage paints it.
                 if (this._cursor) {
                     const ln = Math.max(0, Math.min(this._cursor.line, this.lines.length - 1));
-                    const cl = Math.max(0, Math.min(this._cursor.col, this.lines[ln]?.length ?? 0));
+                    const cl = Math.max(0, Math.min(this._cursor.col, cpLen(this.lines[ln] ?? '')));
                     this._cursor.line = ln;
                     this._cursor.col = cl;
                 }
@@ -1926,7 +1944,7 @@ class CodeGrid extends FramedGlyphField {
     enterEdit() {
         if (!this._cursor) {
             const lastLine = Math.max(0, this.lines.length - 1);
-            const lastCol  = this.lines[lastLine]?.length ?? 0;
+            const lastCol  = cpLen(this.lines[lastLine] ?? '');
             this._cursor = { line: lastLine, col: lastCol };
         }
         this._initCaretMesh();
@@ -1982,7 +2000,7 @@ class CodeGrid extends FramedGlyphField {
     setCursor(line, col) {
         if (!this._cursor) return;
         const ln = Math.max(0, Math.min(line, this.lines.length - 1));
-        const cl = Math.max(0, Math.min(col, this.lines[ln]?.length ?? 0));
+        const cl = Math.max(0, Math.min(col, cpLen(this.lines[ln] ?? '')));
         this._cursor = { line: ln, col: cl };
         this._updateCaretMesh();
     }
@@ -1993,12 +2011,13 @@ class CodeGrid extends FramedGlyphField {
         const parts = String(str).split('\n');
         const { line, col } = this._cursor;
         const cur = this.lines[line] ?? '';
-        const before = cur.slice(0, col);
-        const after  = cur.slice(col);
+        const u = cpToU16(cur, col);              // codepoint col → UTF-16 split offset
+        const before = cur.slice(0, u);
+        const after  = cur.slice(u);
 
         if (parts.length === 1) {
             this.lines[line] = before + parts[0] + after;
-            this._cursor.col = col + parts[0].length;
+            this._cursor.col = col + cpLen(parts[0]);   // advance by CODEPOINTS inserted
         } else {
             const tail = parts[parts.length - 1];
             const newLines = [
@@ -2008,7 +2027,7 @@ class CodeGrid extends FramedGlyphField {
             ];
             this.lines.splice(line, 1, ...newLines);
             this._cursor.line = line + parts.length - 1;
-            this._cursor.col  = tail.length;
+            this._cursor.col  = cpLen(tail);
         }
         this._relayoutPreservingCursor();
     }
@@ -2019,13 +2038,14 @@ class CodeGrid extends FramedGlyphField {
         const { line, col } = this._cursor;
         if (col > 0) {
             const cur = this.lines[line] ?? '';
-            this.lines[line] = cur.slice(0, col - 1) + cur.slice(col);
+            // Delete the WHOLE codepoint before the caret (both surrogate halves of an emoji).
+            this.lines[line] = cur.slice(0, cpToU16(cur, col - 1)) + cur.slice(cpToU16(cur, col));
             this._cursor.col = col - 1;
         } else if (line > 0) {
             const prev = this.lines[line - 1] ?? '';
             const cur  = this.lines[line] ?? '';
             this._cursor.line = line - 1;
-            this._cursor.col  = prev.length;
+            this._cursor.col  = cpLen(prev);
             this.lines[line - 1] = prev + cur;
             this.lines.splice(line, 1);
         } else {
@@ -2039,8 +2059,9 @@ class CodeGrid extends FramedGlyphField {
         if (!this._cursor) return;
         const { line, col } = this._cursor;
         const cur = this.lines[line] ?? '';
-        if (col < cur.length) {
-            this.lines[line] = cur.slice(0, col) + cur.slice(col + 1);
+        if (col < cpLen(cur)) {
+            // Delete the WHOLE codepoint at the caret (both surrogate halves of an emoji).
+            this.lines[line] = cur.slice(0, cpToU16(cur, col)) + cur.slice(cpToU16(cur, col + 1));
         } else if (line < this.lines.length - 1) {
             this.lines[line] = cur + (this.lines[line + 1] ?? '');
             this.lines.splice(line + 1, 1);
@@ -2055,7 +2076,8 @@ class CodeGrid extends FramedGlyphField {
         if (!this._cursor) return;
         const { line, col } = this._cursor;
         const cur = this.lines[line] ?? '';
-        this.lines.splice(line, 1, cur.slice(0, col), cur.slice(col));
+        const u = cpToU16(cur, col);
+        this.lines.splice(line, 1, cur.slice(0, u), cur.slice(u));
         this._cursor.line = line + 1;
         this._cursor.col  = 0;
         this._relayoutPreservingCursor();
@@ -2071,22 +2093,23 @@ class CodeGrid extends FramedGlyphField {
         let { line, col } = this._cursor;
         const lineCount = this.lines.length;
 
-        // Vertical first
+        // Vertical first. Steps are in CODEPOINTS (cpLen), so the caret crosses an emoji in one
+        // press and never lands between its surrogate halves.
         if (dy) {
             line = Math.max(0, Math.min(line + dy, lineCount - 1));
-            col  = Math.min(col, this.lines[line]?.length ?? 0);
+            col  = Math.min(col, cpLen(this.lines[line] ?? ''));
         }
 
         // Then horizontal, wrapping line boundaries
         while (dx > 0) {
-            const len = this.lines[line]?.length ?? 0;
+            const len = cpLen(this.lines[line] ?? '');
             if (col < len) { col++; dx--; continue; }
             if (line < lineCount - 1) { line++; col = 0; dx--; continue; }
             break;
         }
         while (dx < 0) {
             if (col > 0) { col--; dx++; continue; }
-            if (line > 0) { line--; col = this.lines[line]?.length ?? 0; dx++; continue; }
+            if (line > 0) { line--; col = cpLen(this.lines[line] ?? ''); dx++; continue; }
             break;
         }
 
@@ -2102,7 +2125,7 @@ class CodeGrid extends FramedGlyphField {
     /** End: jump to end of current line. */
     editEnd() {
         if (!this._cursor) return;
-        const len = this.lines[this._cursor.line]?.length ?? 0;
+        const len = cpLen(this.lines[this._cursor.line] ?? '');
         this.setCursor(this._cursor.line, len);
     }
 
