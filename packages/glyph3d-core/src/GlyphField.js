@@ -302,9 +302,9 @@ function _buildOutputNode(varyings, uniforms) {
         }).Else(() => {
         If(vMode.equal(int(RENDER_MODE.BITMAP)), () => {
             // ── Bitmap / emoji branch ────────────────────────────────────────────
-            // Atlas is an `emojiCols × emojiRows` grid of equal square cells — cols is
-            // FIXED, rows GROW (the atlas adds rows on overflow), so it's non-square in
-            // general: U divides by cols, V divides by ROWS.
+            // Atlas is an `emojiCols × emojiRows` grid of equal square cells — it grows
+            // SQUARELY (both double), but U÷cols and V÷rows are kept independent so any
+            // grid shape samples correctly.
             // cell index → (col = cell % cols, row = floor(cell / cols)).
             // vGlyphUV is [0,1]² across the quad → maps to the sub-cell region.
             //

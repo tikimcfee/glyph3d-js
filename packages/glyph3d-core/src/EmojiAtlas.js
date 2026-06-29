@@ -10,20 +10,24 @@
  * of running the bezier-coverage path.
  *
  * Fixed square cells (not shelf-packed): one emoji per cell, cell index → (col,row)
- * → UV is pure arithmetic in the shader, no per-glyph UV table needed. cols is FIXED
- * and rows GROW: when the grid fills, it doubles its row count (taller canvas), so the
- * cell→(col,row) mapping never moves and there's no fixed emoji limit — only the
- * browser canvas-size ceiling (thousands of cells). The shader divides U by cols and
- * V by rows (the grid is non-square once it has grown). Growth re-uploads the backing
- * texture (rare — only on first sighting of an emoji past capacity), mirroring the live
- * Slug atlas.
+ * → UV is pure arithmetic in the shader, no per-glyph UV table needed. The grid GROWS
+ * SQUARELY: when it fills, both cols and rows double (256 → 1024 → 4096 → 16384 cells),
+ * so capacity quadruples per step and there's no fixed emoji limit — it holds every
+ * standardized emoji + symbols with room to spare. Each emoji's cell INDEX is stable
+ * (the monotonic counter), so the encoded core never changes; only its on-canvas
+ * (col,row) layout moves on growth. The shader divides U by cols and V by rows. Growth
+ * re-uploads the backing texture (rare — only on first sighting of an emoji past
+ * capacity), mirroring the live Slug atlas.
  *
  * Renderer-independent: the canvas + cell map are built with no Three.js; the
  * texture is created lazily once a THREE namespace is handed in.
  */
 
-/** Browser 2D-canvas dimension ceiling — rows stop growing before the canvas would exceed it. */
-const MAX_CANVAS_PX = 16384;
+/** Atlas-canvas dimension cap. Square growth makes the texture AREA grow as side², so this sits
+ *  WELL BELOW the browser's ~16384px hard limit to keep the worst-case texture bounded:
+ *  9216 / 72px cells = a 128×128 grid = 16384 cells — far more than every standardized emoji +
+ *  symbols (which realistically settles the atlas around 64² ≈ 4k cells). */
+const MAX_ATLAS_DIM_PX = 9216;
 
 export default class EmojiAtlas {
     /**
@@ -71,12 +75,12 @@ export default class EmojiAtlas {
     has(cp) { return this._byCp.has(cp); }
 
     /**
-     * Ensure an emoji codepoint has a cell, drawing it on first sight. Grows the
-     * atlas (more rows) when it fills, so there is no fixed emoji limit — only the
-     * browser canvas-size ceiling (thousands of cells).
+     * Ensure an emoji codepoint has a cell, drawing it on first sight. Grows the atlas
+     * SQUARELY when it fills, so there is no fixed emoji limit — only the (high) capacity
+     * ceiling (~16k cells), well past every standardized emoji.
      * @param {number} codepoint
      * @returns {number} cell index, or -1 only if there's no canvas (headless) or the
-     *   canvas-size ceiling is hit (then the glyph falls back to a mono outline).
+     *   capacity ceiling is hit (then the glyph falls back to a mono outline).
      */
     ensure(codepoint) {
         let idx = this._byCp.get(codepoint);
@@ -91,26 +95,32 @@ export default class EmojiAtlas {
     }
 
     /**
-     * Grow capacity by doubling ROWS — cols stays fixed, so every cell's
-     * (col = idx % cols, row = idx / cols) mapping is unchanged and only the canvas
-     * height grows. Resizing the canvas clears it, so existing cells are repainted.
-     * Capped at the browser canvas-size ceiling. Rare: only when a new emoji crosses
-     * the current capacity. The backing texture re-uploads on the next setEmojiTexture
-     * (driven by the same growth that grew the live Slug atlas).
+     * Grow capacity by doubling the side — SQUARE growth, so capacity quadruples per step
+     * (256 → 1024 → 4096 → 16384 cells) and we exhaust 2D area instead of just height.
+     * The cell INDEX per emoji is unchanged (it's the monotonic `_next`); only its canvas
+     * (col,row) = (idx % cols, idx / cols) moves, so the encoded core never changes — but
+     * resizing the canvas clears it, so every cell is re-laid-out + repainted at the new
+     * cols. The shader divides U by cols and V by rows, so a square grid Just Works. Capped
+     * at MAX_ATLAS_DIM_PX. Rare: only when a new emoji crosses the current capacity. The
+     * backing texture re-uploads on the next setEmojiTexture.
      * @private
      * @returns {boolean} whether it actually grew
      */
     _grow() {
-        const maxRows = Math.max(this.cols, Math.floor(MAX_CANVAS_PX / this.cellPx));
-        if (this.rows >= maxRows) return false;
-        const prevRows = this.rows;
-        this.rows = Math.min(this.rows * 2, maxRows);
-        this._canvas.height = this.cellPx * this.rows;   // resize → CLEARS the canvas + resets ctx state
+        const maxSide = Math.max(this.cols, Math.floor(MAX_ATLAS_DIM_PX / this.cellPx));
+        if (this.cols >= maxSide) return false;
+        const prev = this.cols;
+        const side = Math.min(this.cols * 2, maxSide);
+        this.cols = side;
+        this.rows = side;                                // stay SQUARE — area grows, not just height
+        const px = this.cellPx * side;
+        this._canvas.width  = px;
+        this._canvas.height = px;                        // resize → CLEARS the canvas + resets ctx state
         this._ctx.textAlign = 'center';
         this._ctx.textBaseline = 'middle';
-        for (const [cp, idx] of this._byCp) this._draw(cp, idx);   // repaint existing cells
+        for (const [cp, idx] of this._byCp) this._draw(cp, idx);   // re-lay-out + repaint at the new cols
         if (this._texture) this._texture.needsUpdate = true;
-        console.log(`[EmojiAtlas] grew ${prevRows}→${this.rows} rows (${this.capacity} cells)`);
+        console.log(`[EmojiAtlas] grew ${prev}²→${side}² grid (${this.capacity} cells)`);
         return true;
     }
 
