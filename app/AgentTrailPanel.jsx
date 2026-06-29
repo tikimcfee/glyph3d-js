@@ -2,14 +2,16 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 
 /**
  * AgentTrailPanel — the moment-stream viewport. A 2D scrolling log onto the same AgentTrail the
- * in-world rolodex pager drives: one row per MOMENT of the focused corridor (oldest → newest), with
- * its verb, target, and age. It is a pure VIEWPORT — it owns no trail state; it reads getStream and
- * fires the same `trail.*` bus the 3D deck obeys, so the list view and the spatial pager stay one
+ * in-world carousel drives: one row per MOMENT of the selected corridor (oldest → newest), with its
+ * verb, target, and age. It is a pure VIEWPORT — it owns no trail state; it reads getStream/headState
+ * and fires the same `trail.*` bus the 3D deck obeys, so the list view and the spatial deck stay one
  * source of truth (the [[project_2d_companion_views]] model: the grid owns the deck, the panel scrubs it).
  *
- *   click a row        → trail.dock <agent> + trail.page <n>  (slide that moment to the front plane)
+ * Each corridor keeps its own HEAD (the front-slot moment), live-following the newest until you scrub
+ * it back. Paging moves that head and the cards ease to their slots — NOTHING here moves the camera.
+ *
+ *   click a row        → trail.page <agent> <n>   (rotate that moment to the front)
  *   ⏮ ◀ ▶ ⏭            → trail.page first|prev|next|last
- *   dock / undock      → trail.dock <agent> / trail.undock
  *   ✕ clear            → trail.clear <agent>
  *
  * House style mirrors FieldVisitorsPanel: a `client` prop, subscription-driven state, inline styles,
@@ -66,6 +68,7 @@ const S = {
         color: dim ? '#444b56' : '#9aa6ba', fontSize: 13, userSelect: 'none',
     }),
     pos: { flex: '1 1 auto', textAlign: 'center', color: '#7c8596', fontSize: 11 },
+    live: { color: '#7ad79a' },
     list: { overflowY: 'auto', flex: '1 1 auto', padding: '4px 0' },
     msg: { padding: '12px', color: '#7c8596' },
     row: (on) => ({
@@ -90,25 +93,20 @@ function ago(ts) {
 export default function AgentTrailPanel({ client }) {
     const trail = () => client?.ctx?.agentTrail || null;
     const [agents, setAgents] = useState([]);
-    const [pager, setPager] = useState(null);
     const [selected, setSelected] = useState(null);
+    const [head, setHead] = useState(null);     // { agentId, head, count, following } for the selected corridor
     const [stream, setStream] = useState([]);
     const focusRef = useRef(null);
 
-    // Selected corridor: sticky to the user's pick, but follow the pager when it's docked, and fall
-    // back to the newest corridor. Recomputed against the live roster each refresh.
+    // Roster + selection: sticky to the user's pick, else the newest corridor. Recomputed each refresh.
     const refresh = useCallback(() => {
         const t = trail();
-        if (!t) { setAgents([]); setStream([]); setPager(null); return; }
+        if (!t) { setAgents([]); setStream([]); setHead(null); return; }
         const list = t.agents?.() || [];
-        const p = t.pagerState?.() || null;
-        setAgents(list);
-        setPager(p);
+        setAgents(list);   // new array ref each poll → the stream/head effect below re-reads, staying live
         setSelected((cur) => {
             const has = (id) => id && list.some((a) => a.id === id);
-            if (p && has(p.agentId)) return p.agentId;       // docked corridor wins
-            if (has(cur)) return cur;                        // keep the user's pick
-            return list.length ? list[list.length - 1].id : null;   // else newest corridor
+            return has(cur) ? cur : (list.length ? list[list.length - 1].id : null);
         });
     }, [client]);
 
@@ -116,55 +114,36 @@ export default function AgentTrailPanel({ client }) {
         const mgr = client?.ctx?.visitorManager;
         refresh();
         const off = mgr?.onChange?.(refresh);
-        const t = setInterval(refresh, 1000);   // liveness + a net for changes the trail makes without an event
+        const t = setInterval(refresh, 1000);   // liveness ("Xs ago") + a net for head moves with no event
         return () => { off?.(); clearInterval(t); };
     }, [client, refresh]);
 
-    // Re-read the focused corridor's stream whenever the selection, roster, or pager moves.
+    // Re-read the selected corridor's stream + head whenever the selection or roster moves (the poll
+    // hands us a fresh `agents` array, so this also re-reads on every tick — keeping the head live).
     useEffect(() => {
         const t = trail();
-        setStream(selected && t ? (t.getStream?.(selected) || []) : []);
-    }, [selected, agents, pager, client]);
+        if (!selected || !t) { setStream([]); setHead(null); return; }
+        setStream(t.getStream?.(selected) || []);
+        setHead(t.headState?.(selected) || null);
+    }, [selected, agents, client]);
 
-    // Keep the focused row in view as the pager scrubs.
-    useEffect(() => { focusRef.current?.scrollIntoView?.({ block: 'nearest' }); }, [pager?.focus, selected]);
+    // Keep the focused row in view as the head scrubs.
+    useEffect(() => { focusRef.current?.scrollIntoView?.({ block: 'nearest' }); }, [head?.head, selected]);
 
     const exec = useCallback((cmd) => client?.router?.execute(cmd), [client]);
     const after = useCallback((cmd) => { const r = exec(cmd); refresh(); return r; }, [exec, refresh]);
 
-    const docked = !!pager && pager.agentId === selected;
+    // Move the selected corridor's head (keyword or 1-based index). No camera, no dock — just paging.
+    const page = useCallback((arg) => { if (selected) after(['trail.page', selected, String(arg)]); }, [selected, after]);
+    const onRow = useCallback((index) => { if (selected) after(['trail.page', selected, String(index + 1)]); }, [selected, after]);
 
-    // Ensure the pager is on `selected`, then run a trail.page argument against it.
-    const page = useCallback((arg) => {
-        if (!selected) return;
-        if (!pager || pager.agentId !== selected) exec(['trail.dock', selected]);
-        after(['trail.page', String(arg)]);
-    }, [selected, pager, exec, after]);
-
-    const onRow = useCallback((index) => {
-        if (!selected) return;
-        if (!pager || pager.agentId !== selected) exec(['trail.dock', selected]);
-        after(['trail.page', String(index + 1)]);   // trail.page is 1-based
-    }, [selected, pager, exec, after]);
-
-    const toggleDock = useCallback(() => {
-        if (docked) after(['trail.undock']);
-        else if (selected) after(['trail.dock', selected]);
-    }, [docked, selected, after]);
-
-    const atFirst = docked && pager.focus <= 0;
-    const atLast = docked && pager.focus >= (pager.count - 1);
+    const atFirst = !head || head.head <= 0;
+    const atLast = !head || head.head >= (head.count - 1);
 
     return (
         <div style={S.content}>
             <div style={S.header}>
                 <span style={S.title}>Trail · moments</span>
-                {selected && (
-                    <span style={S.btn(docked)} onClick={toggleDock}
-                        title={docked ? 'Leave the rolodex pager (trail.undock)' : 'Dock this corridor into the pager (trail.dock)'}>
-                        {docked ? '◉ docked' : '○ dock'}
-                    </span>
-                )}
                 {selected && (
                     <span style={S.btn(false)} onClick={() => after(['trail.clear', selected])}
                         title="Clear this corridor (trail.clear)">✕ clear</span>
@@ -181,15 +160,13 @@ export default function AgentTrailPanel({ client }) {
             )}
 
             <div style={S.scrub}>
-                <span style={S.nav(!docked || atFirst)} onClick={() => !atFirst && page('first')} title="Oldest (trail.page first)">⏮</span>
-                <span style={S.nav(!docked || atFirst)} onClick={() => !atFirst && page('prev')} title="Older (trail.page prev)">◀</span>
+                <span style={S.nav(atFirst)} onClick={() => !atFirst && page('first')} title="Oldest (trail.page first)">⏮</span>
+                <span style={S.nav(atFirst)} onClick={() => !atFirst && page('prev')} title="Older (trail.page prev)">◀</span>
                 <span style={S.pos}>
-                    {docked ? `moment ${pager.focus + 1} / ${pager.count}`
-                        : stream.length ? `${stream.length} moment${stream.length === 1 ? '' : 's'} — undocked`
-                            : '—'}
+                    {head ? <>moment {head.head + 1} / {head.count}{head.following && <span style={S.live}> · live</span>}</> : '—'}
                 </span>
-                <span style={S.nav(!docked || atLast)} onClick={() => !atLast && page('next')} title="Newer (trail.page next)">▶</span>
-                <span style={S.nav(!docked || atLast)} onClick={() => !atLast && page('last')} title="Newest (trail.page last)">⏭</span>
+                <span style={S.nav(atLast)} onClick={() => !atLast && page('next')} title="Newer (trail.page next)">▶</span>
+                <span style={S.nav(atLast)} onClick={() => !atLast && page('last')} title="Newest — resume live (trail.page last)">⏭</span>
             </div>
 
             <div style={S.list}>

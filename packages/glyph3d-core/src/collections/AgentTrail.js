@@ -142,11 +142,9 @@ export default class AgentTrail {
         this._off = null;
         this._tmp = new THREE.Vector3();
 
-        // Rolodex pager. When docked, one corridor's deck slides so the FOCUSED moment sits at a
-        // fixed front plane (where the newest normally rests) and the rest window out — older recede
-        // behind it, newer (scrolled-past) hide. null = undocked (the natural full deck). The focus is
-        // a moments[] INDEX (0 = oldest). Applied at the tail of every _relayout, so it survives append.
-        this._pager = null;
+        // The carousel head lives PER LANE (lane.head + lane.following) — there is no global "docked"
+        // mode and nothing here ever moves the camera. Each corridor live-follows its newest moment until
+        // you scrub it back; paging just moves that lane's head and the deck eases. See _lane / _slotZ.
 
         // Shared unit geometry for the corridor identity boxes (scaled per corridor).
         this._unitBox = new THREE.BoxGeometry(1, 1, 1);
@@ -236,14 +234,12 @@ export default class AgentTrail {
         // positions each frame, so it follows layout, scroll, and corridor drags with no re-tether.
         if (tetherId) this.conn.set(tetherId, action, snapshot, hue);
         lane.seq++;
-        // LIVE-FOLLOW: if the pager is parked on this corridor's newest moment, ride the new arrival to
-        // the front (watch the run stream in). If the user scrolled back to inspect history, hold there.
-        if (this._pager?.agentId === agentId && this._pager.focus >= lane.moments.length - 2) {
-            this._pager.focus = lane.moments.length - 1;
-        }
+        // LIVE-FOLLOW: while this lane is following, ride each new arrival to the front (watch the run
+        // stream in). Once the user has scrubbed back to inspect history, following is off and the head holds.
+        if (lane.following) lane.head = lane.moments.length - 1;
         // Seat the new card directly at its carousel slot so it appears in place (no one-frame flash at the
         // ZStack's order position); the existing cards keep their _z and ease to their shifted slots.
-        this._seatMoment(lane, agentId, lane.moments.length - 1);
+        this._seatMoment(lane, lane.moments.length - 1);
         this._relayout();
     }
 
@@ -266,55 +262,48 @@ export default class AgentTrail {
 
     _now() { return typeof performance !== 'undefined' ? performance.now() : 0; }
 
-    // -- rolodex carousel: the head index is the only state; every card's depth is a derived slot --------
+    // -- rolodex carousel: each corridor's head index is its only state; depth is a derived slot ---------
     //
-    // The deck is a circular sequence whose FRONT slot is whatever moment the head (`focus`) points at;
-    // the rest fall out behind it by `slot(i) = (focus - i) mod n` — older recede, and the scrolled-past
+    // A corridor's deck is a circular sequence whose FRONT slot is whatever moment its `head` points at;
+    // the rest fall out behind it by `slot(i) = (head - i) mod n` — older recede, and the scrolled-past
     // newer ones wrap to the very back (a drawer of sheets: move the front one back to reach the next).
     // Paging only moves the head; slots recompute and each card EASES from its old z to its new one in
-    // `update(dt)` (the motion is the navigation). The array order never changes — it's the timeline.
+    // `update(dt)` (the motion is the navigation). It never moves the camera (that's trail.focus, a
+    // deliberate act). The lane live-follows its newest moment until you scrub back. Array order is fixed.
+
+    /** Resolve a corridor by id, or the first one when the id is omitted/unknown — [id, lane] or null. */
+    _resolveLane(agentId) {
+        if (agentId && this.lanes.has(agentId)) return [agentId, this.lanes.get(agentId)];
+        return this.lanes.entries().next().value || null;
+    }
+
+    /** Move a corridor's head by `delta` moments (− older / back in time, + newer). */
+    scroll(agentId, delta) {
+        const hit = this._resolveLane(agentId);
+        return hit ? this.pageTo(hit[0], hit[1].head + (Number(delta) || 0)) : false;
+    }
 
     /**
-     * Dock a corridor into the carousel: park the head on its newest moment and frame the camera on the
-     * front slot ONCE. No arg (or an unknown id) docks the first corridor. From here paging moves cards,
-     * not the camera. Returns false if there's nothing to show.
+     * Move a corridor's head to a moment index (0 = oldest, clamped). The cards ease to their new slots;
+     * the camera is never touched. Landing on the newest resumes live-following; anywhere else holds.
      */
-    dock(agentId) {
-        let id = agentId, lane = id ? this.lanes.get(id) : null;
-        if (!lane) { const first = this.lanes.entries().next().value; if (first) [id, lane] = first; }
-        if (!lane || !lane.moments.length) return false;
-        this._pager = { agentId: id, focus: lane.moments.length - 1 };
-        this._relayout();
-        this._frameFocus();    // the one camera move: frame the front slot; scrubbing holds it
+    pageTo(agentId, index) {
+        const hit = this._resolveLane(agentId);
+        if (!hit) return false;
+        const lane = hit[1];
+        const n = lane.moments.length;
+        if (!n) return false;
+        lane.head = Math.min(Math.max(0, Math.round(index)), n - 1);
+        lane.following = lane.head === n - 1;   // back at the front edge → live again; scrubbed back → hold
         return true;
     }
 
-    /** Leave the carousel — the deck eases back to its natural newest-at-front recede (head = newest). */
-    undock() {
-        if (!this._pager) return false;
-        this._pager = null;
-        return true;   // _animateDeck retargets to the natural order and eases there; no snap
-    }
-
-    /** Scrub the docked corridor by `delta` moments (− older / back in time, + newer). */
-    scroll(delta) { return this.pageTo((this._pager?.focus ?? 0) + (Number(delta) || 0)); }
-
-    /** Move the head to a specific moment index (0 = oldest, clamped). The cards ease; the camera holds. */
-    pageTo(index) {
-        const p = this._pager;
-        if (!p) return false;
-        const lane = this.lanes.get(p.agentId);
-        if (!lane || !lane.moments.length) return false;
-        p.focus = Math.min(Math.max(0, Math.round(index)), lane.moments.length - 1);
-        return true;   // no relayout, no camera move — _animateDeck eases the slots toward the new head
-    }
-
-    /** The pager's current state (for the panel), or null when undocked. */
-    pagerState() {
-        const p = this._pager;
-        if (!p) return null;
-        const lane = this.lanes.get(p.agentId);
-        return { agentId: p.agentId, focus: p.focus, count: lane ? lane.moments.length : 0 };
+    /** A corridor's head state (for the panel), or null if it has no lane. */
+    headState(agentId) {
+        const hit = this._resolveLane(agentId);
+        if (!hit) return null;
+        const lane = hit[1];
+        return { agentId: hit[0], head: lane.head, count: lane.moments.length, following: lane.following };
     }
 
     /** The corridors present, for a panel's agent selector — id + moment count + identity hue index. */
@@ -325,12 +314,12 @@ export default class AgentTrail {
     /**
      * A corridor's moment stream as terse rows (oldest first), for the 2D moment-stream panel: each row
      * is { index, action, kind, label, ts, focused } — enough to render a clickable log without the
-     * panel reaching into the scene graph. `focused` flags the row the pager is parked on.
+     * panel reaching into the scene graph. `focused` flags the row at the corridor's head.
      */
     getStream(agentId) {
         const lane = this.lanes.get(agentId);
         if (!lane) return [];
-        const focus = this._pager?.agentId === agentId ? this._pager.focus : null;
+        const focus = lane.head;
         return lane.moments.map((e, j) => ({
             index: j,
             action: e.record?.action || 'act',
@@ -416,7 +405,9 @@ export default class AgentTrail {
             const hueIdx = this.lanes.size;
             const box = this._makeCorridorBox(this.cfg.corridorPalette[hueIdx % this.cfg.corridorPalette.length]);
             corridor.add(box.mesh);   // parented IN → rides transforms; isMarker → StackContainer.layout skips it
-            lane = { corridor, seq: 0, moments: [], box, hueIdx, groupId: `trail:group:${agentId}`, pinned: false, pinnedPos: null };
+            // head = the moments[] index at the front slot; following = auto-track the newest (live) until
+            // the user scrubs back. A fresh lane has nothing yet — head 0 becomes the first (newest) moment.
+            lane = { corridor, seq: 0, moments: [], box, hueIdx, groupId: `trail:group:${agentId}`, pinned: false, pinnedPos: null, head: 0, following: true };
             this.lanes.set(agentId, lane);
             this._registerGroup(lane);
         }
@@ -688,67 +679,40 @@ export default class AgentTrail {
         this.conn.setVisible(this.cfg.showTethers);   // positions are bound; this just toggles the beam
     }
 
-    /** The local Z a moment should rest at for the current head: `slot(i) = (focus - i) mod n`, front=0. */
-    _slotZ(lane, id, i) {
+    /** The local Z a moment should rest at for its lane's head: `slot(i) = (head - i) mod n`, front=0. */
+    _slotZ(lane, i) {
         const n = lane.moments.length;
-        const focus = this._pager?.agentId === id ? this._pager.focus : n - 1;   // undocked head = newest
-        const slot = ((focus - i) % n + n) % n;
+        const head = Math.min(Math.max(0, lane.head), n - 1);
+        const slot = ((head - i) % n + n) % n;
         return -slot * this.cfg.zPitch;
     }
 
     /** Seat moment `i` directly at its slot (no easing) — used when a card first appears so it doesn't
      *  flash at the ZStack's order position before the animator claims it. */
-    _seatMoment(lane, id, i) { lane.moments[i]._z = this._slotZ(lane, id, i); }
+    _seatMoment(lane, i) { lane.moments[i]._z = this._slotZ(lane, i); }
 
     /**
      * The carousel animator, run every frame off update(dt). For each corridor it eases every card's local
-     * Z toward its derived slot (front = head, the rest cascading behind, the scrolled-past ones wrapped to
-     * the back). Frame-rate-independent: `1 - e^(-rate·dt)`. Runs docked AND undocked — undocked the head is
-     * the newest, so the targets are just the natural recede and a settled deck is a no-op (skips the write
-     * once within ε, so a static trail doesn't dirty matrices every frame).
+     * Z toward its derived slot (front = the lane's head, the rest cascading behind, the scrolled-past ones
+     * wrapped to the back). Frame-rate-independent: `1 - e^(-rate·dt)`. A settled deck is a no-op (skips the
+     * write once within ε, so a static trail doesn't dirty matrices every frame). Never touches the camera.
      * @private
      */
     _animateDeck(dt) {
         const rate = this.cfg.pagerLerp;
         const k = rate > 0 ? 1 - Math.exp(-rate * Math.min(Math.max(dt || 0, 0), 0.1)) : 1;
-        for (const [id, lane] of this.lanes) {
+        for (const lane of this.lanes.values()) {
             const n = lane.moments.length;
             if (!n) continue;
             for (let i = 0; i < n; i++) {
                 const e = lane.moments[i];
-                const target = this._slotZ(lane, id, i);
+                const target = this._slotZ(lane, i);
                 if (e._z == null) e._z = target;                                  // first sight: snap into place
                 else if (Math.abs(target - e._z) < 0.05) { if (e._z !== target) { e._z = target; e.moment.position.z = target; } continue; }
                 else e._z += (target - e._z) * k;
                 e.moment.position.z = e._z;
             }
         }
-    }
-
-    /**
-     * Frame the focused moment through the shared camera focus — flown by the controller's flyTo, so it
-     * neither fights the soft-bounds nor needs us to compute "where to look". Frame the WHOLE moment's box
-     * (headline + body, squared down +Z — the deck is axis-aligned) for a roomy view, but ONLY when that box
-     * is finite and non-degenerate: the moment is a StackContainer with no local bounds, and its AABB can
-     * momentarily come back empty/zero-sized, which would fly the camera to a NaN pose (a blank viewport).
-     * In that case fall back to the ACTION card — a real grid with getLocalBounds, always safe. Called ONCE
-     * on dock: the front slot is a fixed world plane (the deck is anchored, cards rotate through it), so
-     * paging never re-frames.
-     */
-    _frameFocus() {
-        const e = this._pager && this.lanes.get(this._pager.agentId)?.moments?.[this._pager.focus];
-        if (!e) return;
-        const cc = this.ctx.cameraController;
-        const box = e.moment?.getBounds?.();
-        if (this._finiteBox(box)) cc?.focusOnBox?.(box);
-        else if (e.action) cc?.focusOnObject?.(e.action);
-    }
-
-    /** A world AABB safe to frame: present, non-empty, all-finite, and a real (non-degenerate) footprint. */
-    _finiteBox(b) {
-        if (!b || b.isEmpty?.()) return false;
-        const ok = [b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z].every(Number.isFinite);
-        return ok && (b.max.x - b.min.x) > 1e-3 && (b.max.y - b.min.y) > 1e-3;
     }
 
     /** Drop the corridor root in front of the camera once, so the trail builds in view. */
