@@ -2,6 +2,7 @@ import { stateController } from '@glyph3d/core/services/state';
 import { setPanelStateColorDefaults } from '@glyph3d/core/collections';
 import { setGlyphLodParam, GLYPH_LOD_DEFAULTS } from '@glyph3d/core/GlyphField.js';
 import { setStrataParam, STRATA_DEFAULTS } from '@glyph3d/core/collections/StrataLayout.js';
+import { JELLYFISH_DEFAULTS, schemeNameOf } from '@glyph3d/core/collections/layouts/index.js';
 
 // Settings schema — the SINGLE source for both the Settings panel (renders a row
 // per entry) and the settings.* verbs (validate + apply). Only WIRED knobs live
@@ -28,6 +29,17 @@ const strataParam = (param) => (_ctx, v) => setStrataParam(param, v);
 /** apply() for an agent-trail card-scale knob: push the value to AgentTrail.cfg (the bare param name,
  *  not the `trail.` key) and re-apply — the header/info cards re-scale live, body sizes land on new moments. */
 const trailParam = (param) => (ctx, v) => { const t = ctx.agentTrail; if (!t) return; t.cfg[param] = v; t.applyScales?.(); };
+
+/** apply() for a jellyfish layout dial: merge the bare param into the content tree's live layout
+ *  opts and re-lay the field — but only while the jellyfish (cylindrical-column) scheme is showing,
+ *  since only it reads these. Under a flat scheme the value just persists (via setSetting) and is
+ *  folded in when jellyfish is next named — see schemeSettingsOpts + the layout.scheme verb. */
+const jellyfishParam = (param) => (ctx, v) => {
+  const tree = ctx?.contentTree;
+  if (!tree || schemeNameOf(tree.layout) !== 'jellyfish') return;
+  tree.setLayout(tree.layout, { ...(tree.layoutOpts || {}), [param]: v });
+  tree.relayoutAndRest(0);
+};
 
 export const SETTINGS = [
   {
@@ -220,6 +232,25 @@ export const SETTINGS = [
     key: 'tree.dirLines', label: 'Directory ownership lines', group: 'Tree', type: 'bool', default: true,
     apply: (ctx, v) => ctx.contentTreeArrows?.setShowDirs?.(v),
   },
+  // Layout — the jellyfish CStack scheme: a directory becomes one TALL cylindrical COLUMN whose
+  // surface is tiled by panels (files shelf-packed into bounded tiles). Every dial re-lays the
+  // field live while jellyfish is the active scheme (else it persists and seeds on next activation
+  // — schemeSettingsOpts). `scheme: 'jellyfish'` marks a knob as that scheme's persisted opt.
+  //   targetRadius — the column's WIDTH preference (how many panels sit abreast around the rim).
+  //   panelW/panelH — a panel TILE's bound; keep SMALL vs targetRadius (big files → few fat faces =
+  //                   blocky; tiny files → many small faces = mosaic). Oversized grids get a solo tile.
+  // Ranges are deliberately wide (the operator decides what's "too big"); defaults mirror JELLYFISH_DEFAULTS.
+  { key: 'layout.targetRadius', label: 'Column radius (width)', group: 'Layout', scheme: 'jellyfish', type: 'number', default: JELLYFISH_DEFAULTS.targetRadius, min: 40, max: 4000, step: 10, apply: jellyfishParam('targetRadius') },
+  { key: 'layout.panelW', label: 'Panel max width', group: 'Layout', scheme: 'jellyfish', type: 'number', default: JELLYFISH_DEFAULTS.panelW, min: 40, max: 3000, step: 10, apply: jellyfishParam('panelW') },
+  { key: 'layout.panelH', label: 'Panel max height', group: 'Layout', scheme: 'jellyfish', type: 'number', default: JELLYFISH_DEFAULTS.panelH, min: 40, max: 4000, step: 10, apply: jellyfishParam('panelH') },
+  { key: 'layout.panelGap', label: 'Panel stack gap (down a face)', group: 'Layout', scheme: 'jellyfish', type: 'number', default: JELLYFISH_DEFAULTS.panelGap, min: 0, max: 400, step: 2, apply: jellyfishParam('panelGap') },
+  { key: 'layout.faceGap', label: 'Face gap (around the rim)', group: 'Layout', scheme: 'jellyfish', type: 'number', default: JELLYFISH_DEFAULTS.faceGap, min: 0, max: 2, step: 0.02, apply: jellyfishParam('faceGap') },
+  { key: 'layout.colGap', label: 'Grid gap within a row', group: 'Layout', scheme: 'jellyfish', type: 'number', default: JELLYFISH_DEFAULTS.colGap, min: 0, max: 400, step: 2, apply: jellyfishParam('colGap') },
+  { key: 'layout.rowGap', label: 'Row gap within a panel', group: 'Layout', scheme: 'jellyfish', type: 'number', default: JELLYFISH_DEFAULTS.rowGap, min: 0, max: 400, step: 2, apply: jellyfishParam('rowGap') },
+  { key: 'layout.drop', label: 'Child column drop (−Y)', group: 'Layout', scheme: 'jellyfish', type: 'number', default: JELLYFISH_DEFAULTS.drop, min: 0, max: 4000, step: 10, apply: jellyfishParam('drop') },
+  { key: 'layout.childGap', label: 'Child ring spacing', group: 'Layout', scheme: 'jellyfish', type: 'number', default: JELLYFISH_DEFAULTS.childGap, min: 0, max: 4, step: 0.05, apply: jellyfishParam('childGap') },
+  { key: 'layout.hubRadius', label: 'Hub radius (min)', group: 'Layout', scheme: 'jellyfish', type: 'number', default: JELLYFISH_DEFAULTS.hubRadius, min: 0, max: 1000, step: 5, apply: jellyfishParam('hubRadius') },
+  { key: 'layout.minRadius', label: 'Min radius floor', group: 'Layout', scheme: 'jellyfish', type: 'number', default: JELLYFISH_DEFAULTS.minRadius, min: 0, max: 1000, step: 5, apply: jellyfishParam('minRadius') },
   // Glyph LOD — the exact-curve ↔ stable-block handoff for minified text (kills the moiré/flicker of
   // sub-pixel strokes). Footprints are fwidth(glyphUV): bigger = smaller on screen. Pull the lod*
   // band DOWN to hand off to the flicker-free block sooner (trades mid-distance crispness for
@@ -337,6 +368,24 @@ export function setSetting(ctx, key, value) {
   stateController.set(key, v);
   def.apply?.(ctx, v);
   return { ok: true, value: v, reload: !!def.reload };
+}
+
+/**
+ * The persisted opt overrides for a layout SCHEME — every setting tagged `scheme: <name>` whose
+ * value differs from its default, keyed by the bare opt name (the key's suffix). This is how the
+ * Settings panel feeds the layout scheme: the layout.scheme verb seeds a freshly-named scheme's
+ * opts from here, so naming `jellyfish` picks up the dials the panel shows (inline --flags still
+ * override). Only non-default values are returned, so the opt set stays minimal.
+ * @param {string} scheme @returns {Object} { optName: value }
+ */
+export function schemeSettingsOpts(scheme) {
+  const out = {};
+  for (const def of SETTINGS) {
+    if (def.scheme !== scheme) continue;
+    const v = getSetting(def.key);
+    if (v !== def.default) out[def.key.split('.').pop()] = v;
+  }
+  return out;
 }
 
 /**

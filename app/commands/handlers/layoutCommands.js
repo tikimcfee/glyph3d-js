@@ -22,6 +22,7 @@
 
 import { box, kvLines } from '../formatResponse.js';
 import { LAYOUT_SCHEMES, schemeNameOf } from '@glyph3d/core/collections/layouts/index.js';
+import { schemeSettingsOpts } from '../../client/settings.js';
 import { WORLD_FLOOR_Y } from './spatialHelpers.js';
 
 /**
@@ -56,7 +57,10 @@ export default function registerLayoutCommands(router) {
             scheme = LAYOUT_SCHEMES[args[0]];
             if (!scheme) return { text: `ERR: unknown scheme "${args[0]}" (${names.join('|')})`, data: null };
             name = args[0];
-            opts = {};
+            // Naming a scheme starts its opts FRESH — seeded from the persisted Settings dials for
+            // that scheme (so naming `jellyfish` picks up the Layout panel's values), then the
+            // inline --flags below override. No settings for a scheme → {} (its baked defaults).
+            opts = schemeSettingsOpts(name);
             i = 1;
         }
         for (; i < args.length; i += 2) {
