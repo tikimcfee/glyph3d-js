@@ -70,6 +70,38 @@ export default class SlugEncoder {
         return { ...this._buildTextures(), added, addedIds, grew: true };
     }
 
+    /**
+     * Snapshot the underlying buffer as a serializable descriptor (the prebake core).
+     * Pairs with {@link loadSerialized}. Pure data — the cache layer adds the envelope.
+     * @returns {ReturnType<import('./slugData.js').SlugBuffer['serialize']>}
+     */
+    serialize() {
+        return this._buffer.serialize();
+    }
+
+    /**
+     * Hydrate from a serialized descriptor (SKIP the encode) and build textures.
+     * Symmetric with {@link encode}: replaces the buffer, returns the same
+     * { curveTexture, glyphMapTexture, stats }. The buffer stays live (it can still
+     * grow). Throws if the descriptor is structurally invalid — the caller (boot's
+     * load-else-encode branch) catches and falls back to encode().
+     *
+     * @param {ReturnType<import('./slugData.js').SlugBuffer['serialize']>} descriptor
+     * @returns {{ curveTexture: THREE.DataTexture, glyphMapTexture: THREE.DataTexture, stats: object }}
+     */
+    loadSerialized(descriptor) {
+        const t0 = performance.now();
+        this._buffer = SlugBuffer.deserialize(descriptor);
+        this._lastTextures = null;
+        const out = this._buildTextures();
+        console.log(
+            `[SlugEncoder] hydrated ${out.stats.glyphCount} glyphs, ` +
+            `${out.stats.totalCurves} curves (${out.stats.curveTextureSizeKB}KB) from cache ` +
+            `in ${(performance.now() - t0).toFixed(1)}ms`
+        );
+        return out;
+    }
+
     /** @private Wrap the accumulator's current views in DataTextures + stats. */
     _buildTextures() {
         const c = this._buffer.curveTexture();

@@ -18,6 +18,13 @@ import {
 } from './slug-constants.js';
 
 /**
+ * On-the-wire format version for {@link SlugBuffer#serialize}. Bump on ANY layout
+ * change to the descriptor (field add/remove, packing change) — the cache layer
+ * folds this into its key so a stale blob misses → falls back to live encode.
+ */
+export const SLUG_BUFFER_FORMAT = 1;
+
+/**
  * SlugBuffer — growable backing for the two Slug textures (RGBA32Uint, 4 channels/texel).
  *
  *   curve texture    — 2 texels per curve: [P0.x,P0.y,P1.x,P1.y] [P2.x,P2.y,_,_]
@@ -157,6 +164,90 @@ export class SlugBuffer {
         const entries = Math.max(1, this._maxGlyphId + 1);
         const height = Math.max(1, Math.ceil(entries / TEXTURE_WIDTH));
         return { data: this._map.subarray(0, TEXTURE_WIDTH * height * 4), width: TEXTURE_WIDTH, height };
+    }
+
+    /**
+     * Snapshot the buffer as a GPU-agnostic descriptor — the serializable core that
+     * a prebaked blob ships and boot hydrates instead of re-encoding. Pairs with the
+     * static {@link SlugBuffer.deserialize}.
+     *
+     * The arrays are COPIES, row-aligned exactly as the textures want them (so the
+     * descriptor is independent of this buffer's future growth, and a hydrate yields
+     * byte-identical textures). `encodedIds` is stored explicitly — it is NOT
+     * reconstructable from the sparse glyph-map, because an encoded-but-empty glyph
+     * writes a `[start,0,0,0]` entry indistinguishable from an unencoded slot — and
+     * sorted ascending so the snapshot is order-stable (serialize twice → identical
+     * bytes) regardless of insertion order.
+     *
+     * Stays pure: no hashing, no compression, no font identity. The cache/serving
+     * layer wraps this descriptor in a versioned, hashed, gzipped envelope.
+     *
+     * @returns {{ v:number, curveCount:number, maxGlyphId:number,
+     *             encodedIds:Uint32Array, curve:Uint32Array, map:Uint32Array }}
+     */
+    serialize() {
+        const c = this.curveTexture();    // row-aligned views
+        const g = this.glyphMapTexture();
+        const encodedIds = Uint32Array.from(this._encoded).sort((a, b) => a - b);
+        return {
+            v: SLUG_BUFFER_FORMAT,
+            curveCount: this._curveCount,
+            maxGlyphId: this._maxGlyphId,
+            encodedIds,
+            curve: c.data.slice(),        // slice() a view → owns its buffer
+            map: g.data.slice(),
+        };
+    }
+
+    /**
+     * Rebuild a live SlugBuffer from a {@link SlugBuffer#serialize} descriptor. The
+     * result is FULLY LIVE — it continues to grow via addGlyphs (capacity = the
+     * row-aligned used size; _growCurves/_growMap double from there). Throws on any
+     * structural mismatch so the cache layer can catch → fall back to live encode.
+     *
+     * @param {{ v:number, curveCount:number, maxGlyphId:number,
+     *           encodedIds:Uint32Array, curve:Uint32Array, map:Uint32Array }} d
+     * @returns {SlugBuffer}
+     */
+    static deserialize(d) {
+        _validateDescriptor(d);
+        const buf = new SlugBuffer();
+        buf._curve = Uint32Array.from(d.curve);
+        buf._curveCount = d.curveCount;
+        buf._curveTexels = d.curveCount * CURVE_TEXELS_PER_CURVE;
+        buf._map = Uint32Array.from(d.map);
+        buf._maxGlyphId = d.maxGlyphId;
+        buf._encoded = new Set(d.encodedIds);
+        return buf;
+    }
+}
+
+/**
+ * Structural validation for a serialized descriptor. The array lengths are fully
+ * determined by curveCount + maxGlyphId (both row-padded to TEXTURE_WIDTH), so a
+ * length mismatch means corruption / a format drift the version didn't catch.
+ * @param {*} d
+ */
+function _validateDescriptor(d) {
+    if (!d || d.v !== SLUG_BUFFER_FORMAT) {
+        throw new Error(`SlugBuffer.deserialize: bad/missing format version (got ${d && d.v}, want ${SLUG_BUFFER_FORMAT})`);
+    }
+    if (!(d.curve instanceof Uint32Array) || !(d.map instanceof Uint32Array) || !(d.encodedIds instanceof Uint32Array)) {
+        throw new Error('SlugBuffer.deserialize: curve/map/encodedIds must all be Uint32Array');
+    }
+    if (!Number.isInteger(d.curveCount) || d.curveCount < 0 || !Number.isInteger(d.maxGlyphId) || d.maxGlyphId < -1) {
+        throw new Error(`SlugBuffer.deserialize: bad counts (curveCount=${d.curveCount}, maxGlyphId=${d.maxGlyphId})`);
+    }
+    const curveTexels = d.curveCount * CURVE_TEXELS_PER_CURVE;
+    const curveRows = Math.max(1, Math.ceil(curveTexels / TEXTURE_WIDTH));
+    const wantCurve = TEXTURE_WIDTH * curveRows * 4;
+    if (d.curve.length !== wantCurve) {
+        throw new Error(`SlugBuffer.deserialize: curve length ${d.curve.length} != ${wantCurve} (for ${d.curveCount} curves)`);
+    }
+    const mapRows = Math.max(1, Math.ceil((d.maxGlyphId + 1) / TEXTURE_WIDTH));
+    const wantMap = TEXTURE_WIDTH * mapRows * 4;
+    if (d.map.length !== wantMap) {
+        throw new Error(`SlugBuffer.deserialize: map length ${d.map.length} != ${wantMap} (for maxGlyphId ${d.maxGlyphId})`);
     }
 }
 
