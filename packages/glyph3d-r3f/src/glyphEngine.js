@@ -58,14 +58,19 @@ const codepointsFromRanges = (ranges) => {
   return s;
 };
 
-/** Monospace cell size FROM THE SHAPER — the single metrics source, replacing GlyphAtlas's
- *  Canvas2D 'M' measure. width = the 'M' advance (= the forced monospace cell, what the builder
- *  lays out to); height = fontSize × 1.15 (byte-identical to the old glyphHeight formula). */
+/** Monospace cell size FROM THE SHAPER — the single metrics source. width = the 'M' advance
+ *  (the forced monospace column the builder lays out to); height = the PRIMARY font's REAL
+ *  vertical em (ascender − descender from fontExtents), the SAME range encodeGlyph normalizes
+ *  each glyph's Y into. Anchoring the cell on the real metric — not the old fontSize × 1.15
+ *  guess — makes a glyph fill its cell, so full-height box-drawing tiles row-to-row and a
+ *  highlight hugs the text instead of carrying a dead band. */
 const deriveCharSize = (shaper, fontSize) => {
   const upem = shaper.upem || 2048;
   const shaped = shaper.shape ? shaper.shape('M') : null;
   const ax = (shaped && shaped[0]) ? shaped[0].ax : upem * 0.6;
-  return { width: Math.ceil(ax / upem * fontSize), height: fontSize * 1.15 };
+  const ext = shaper.fontExtents ? shaper.fontExtents() : null;        // primary font's hExtents
+  const emHeight = ext ? (ext.ascender - ext.descender) / upem : 1.15; // real em, fallback to the old guess
+  return { width: Math.ceil(ax / upem * fontSize), height: emHeight * fontSize };
 };
 
 /**
