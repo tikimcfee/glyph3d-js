@@ -198,13 +198,17 @@ export const SETTINGS = [
   // Frame — the root VIEW-FRAME a pinned/spotlit window contain-fits into (camera-front, the
   // "window-pane" the canvas frames). All frustum-normalized, so the pinned window tracks the
   // drawing-frame size live. Width/height size the pane (1 = full canvas); X/Y offset it
-  // (left/right/2-3 panes); margin insets the window inside it; pull-in draws it toward the eye
-  // so it renders over the bar. (Subframes will partition this same rect later.)
+  // (left/right/2-3 panes); the four per-side margins inset it — asymmetric margins shrink AND
+  // re-center the pane (hand-placement); pull-in draws it toward the eye so it renders over the
+  // bar. (Subframes will partition this same rect later.)
   { key: 'frame.width', label: 'Frame width', group: 'Frame', type: 'number', default: 1, min: 0.2, max: 1, step: 0.02, apply: dockParam('frameW') },
   { key: 'frame.height', label: 'Frame height', group: 'Frame', type: 'number', default: 1, min: 0.2, max: 1, step: 0.02, apply: dockParam('frameH') },
   { key: 'frame.x', label: 'Frame X offset', group: 'Frame', type: 'number', default: 0, min: -1, max: 1, step: 0.02, apply: dockParam('frameX') },
   { key: 'frame.y', label: 'Frame Y offset', group: 'Frame', type: 'number', default: 0, min: -1, max: 1, step: 0.02, apply: dockParam('frameY') },
-  { key: 'frame.margin', label: 'Frame margin', group: 'Frame', type: 'number', default: 0.06, min: 0, max: 0.4, step: 0.01, apply: dockParam('frameMargin') },
+  { key: 'frame.marginLeft', label: 'Margin left', group: 'Frame', type: 'number', default: 0.06, min: 0, max: 0.49, step: 0.01, apply: dockParam('frameMarginLeft') },
+  { key: 'frame.marginRight', label: 'Margin right', group: 'Frame', type: 'number', default: 0.06, min: 0, max: 0.49, step: 0.01, apply: dockParam('frameMarginRight') },
+  { key: 'frame.marginTop', label: 'Margin top', group: 'Frame', type: 'number', default: 0.06, min: 0, max: 0.49, step: 0.01, apply: dockParam('frameMarginTop') },
+  { key: 'frame.marginBottom', label: 'Margin bottom', group: 'Frame', type: 'number', default: 0.06, min: 0, max: 0.49, step: 0.01, apply: dockParam('frameMarginBottom') },
   { key: 'frame.depth', label: 'Frame pull-in', group: 'Frame', type: 'number', default: 0.7, min: 0.3, max: 1, step: 0.02, apply: dockParam('frameDistFrac') },
   // Tree — the ContentTree ownership-line overlay (hub → what it contains). File lines
   // and directory lines toggle independently; layout.arrows is the master on/off verb.

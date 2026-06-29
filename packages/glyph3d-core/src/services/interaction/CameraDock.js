@@ -123,7 +123,10 @@ export class CameraDock extends THREE.Object3D {
      * @param {number} [opts.frameH=1]    - root view-frame height as a fraction of the frustum height
      * @param {number} [opts.frameX=0]    - frame center X offset (fraction of half the frustum width)
      * @param {number} [opts.frameY=0]    - frame center Y offset (fraction of half the frustum height)
-     * @param {number} [opts.frameMargin=0.06] - inset of the framed window inside the frame rect
+     * @param {number} [opts.frameMarginLeft=0.06]   - inset from the frame's LEFT edge (fraction of frame width)
+     * @param {number} [opts.frameMarginRight=0.06]  - inset from the frame's RIGHT edge (fraction of frame width)
+     * @param {number} [opts.frameMarginTop=0.06]    - inset from the frame's TOP edge (fraction of frame height)
+     * @param {number} [opts.frameMarginBottom=0.06] - inset from the frame's BOTTOM edge (fraction of frame height)
      * @param {number} [opts.frameDistFrac=0.7] - frame pull-in toward the eye (renders over the bar)
      * @param {number} [opts.yawRate=14]    - tile face-the-eye slerp rate (×dt)
      * @param {number} [opts.borderWidth=1.5] - docked window's panel-border thickness (screen pixels)
@@ -132,7 +135,9 @@ export class CameraDock extends THREE.Object3D {
      */
     constructor({ attentionManager = null, distance = 10, boxFrac = 0.1, boxAspect = 1.15, gapFrac = 0.4,
                   maxColumns = 0, fillFrac = 0.9, maxArcDeg = 80, maxRiseDeg = 80, bottomFrac = 0.86,
-                  frameW = 1, frameH = 1, frameX = 0, frameY = 0, frameMargin = 0.06, frameDistFrac = 0.7,
+                  frameW = 1, frameH = 1, frameX = 0, frameY = 0,
+                  frameMarginLeft = 0.06, frameMarginRight = 0.06, frameMarginTop = 0.06, frameMarginBottom = 0.06,
+                  frameDistFrac = 0.7,
                   animDur = 0.167, yawRate = 14,
                   ghostColor = 0x8ab4ff, ghostOpacity = 0.55, borderWidth = 1.5, borderStrength = 1,
                   layout = 'radial' } = {}) {
@@ -157,7 +162,13 @@ export class CameraDock extends THREE.Object3D {
         this.frameH = frameH;
         this.frameX = frameX;
         this.frameY = frameY;
-        this.frameMargin = frameMargin;
+        // Per-side margins (left/right of the width, top/bottom of the height). An ASYMMETRIC set
+        // both SHRINKS and RE-CENTERS the pane — a bigger left margin pushes content right, a bigger
+        // bottom margin pushes it up — so the four sliders hand-place the window inside its frame.
+        this.frameMarginLeft = frameMarginLeft;
+        this.frameMarginRight = frameMarginRight;
+        this.frameMarginTop = frameMarginTop;
+        this.frameMarginBottom = frameMarginBottom;
         this.frameDistFrac = frameDistFrac; // frame pulls this fraction of `distance` toward the eye
                                             // — <1 sits it IN FRONT of the dock sphere so it always
                                             // renders on top (scale/offset compensate, so it looks
@@ -272,12 +283,13 @@ export class CameraDock extends THREE.Object3D {
     /**
      * Tune a layout parameter live and re-pack. Keys: distance, boxFrac, boxAspect, gapFrac,
      * maxColumns, fillFrac, maxArcDeg, maxRiseDeg, bottomFrac, frameW, frameH, frameX, frameY,
-     * frameMargin, frameDistFrac, animDur, yawRate.
+     * frameMarginLeft, frameMarginRight, frameMarginTop, frameMarginBottom, frameDistFrac, animDur, yawRate.
      * @param {string} key @param {number} value @returns {boolean}
      */
     setParam(key, value) {
         if (!['distance', 'boxFrac', 'boxAspect', 'gapFrac', 'maxColumns', 'fillFrac', 'maxArcDeg',
-              'maxRiseDeg', 'bottomFrac', 'frameW', 'frameH', 'frameX', 'frameY', 'frameMargin',
+              'maxRiseDeg', 'bottomFrac', 'frameW', 'frameH', 'frameX', 'frameY',
+              'frameMarginLeft', 'frameMarginRight', 'frameMarginTop', 'frameMarginBottom',
               'frameDistFrac', 'animDur', 'yawRate', 'ghostOpacity', 'borderWidth', 'borderStrength'].includes(key)) return false;
         if (!Number.isFinite(value)) return false;
         this[key] = value;
@@ -502,17 +514,22 @@ export class CameraDock extends THREE.Object3D {
     _userOf(e) { return (e.grid.scaleModel && e.grid.scaleModel.user.x) || 1; }
 
     /** The ROOT view-frame as a dock-LOCAL box at the dock plane: a rect of the camera frustum
-     *  (frameW×frameH of it), centered at the (frameX,frameY) offsets, inset by frameMargin. A
-     *  pinned/spotlit window contain-fits INTO this. Frustum-normalized (viewW/viewH), so it tracks
-     *  the drawing-frame size live — update() refits the occupant when the canvas resizes. This is
-     *  the seam future SUBFRAMES partition. @returns {{cx:number,cy:number,w:number,h:number}} */
+     *  (frameW×frameH of it), centered at the (frameX,frameY) offsets, then inset by the FOUR
+     *  per-side margins. Asymmetric margins both shrink AND re-center the inner box — a bigger left
+     *  margin shifts it right, a bigger bottom margin shifts it up — so the sliders hand-place the
+     *  pane. A pinned/spotlit window contain-fits INTO this. Frustum-normalized (viewW/viewH), so it
+     *  tracks the drawing-frame size live — update() refits the occupant when the canvas resizes.
+     *  This is the seam future SUBFRAMES partition. @returns {{cx:number,cy:number,w:number,h:number}} */
     _frameRect() {
-        const m = Math.min(Math.max(this.frameMargin, 0), 0.49);
+        const cl = (v) => Math.min(Math.max(v, 0), 0.49); // keep w,h positive whatever the sliders say
+        const mL = cl(this.frameMarginLeft), mR = cl(this.frameMarginRight);
+        const mT = cl(this.frameMarginTop), mB = cl(this.frameMarginBottom);
+        const outerW = this._viewW * this.frameW, outerH = this._viewH * this.frameH;
         return {
-            cx: (this._viewW * 0.5) * this.frameX,
-            cy: (this._viewH * 0.5) * this.frameY,
-            w: this._viewW * this.frameW * (1 - 2 * m),
-            h: this._viewH * this.frameH * (1 - 2 * m),
+            cx: (this._viewW * 0.5) * this.frameX + outerW * (mL - mR) * 0.5,
+            cy: (this._viewH * 0.5) * this.frameY + outerH * (mB - mT) * 0.5,
+            w: outerW * (1 - mL - mR),
+            h: outerH * (1 - mT - mB),
         };
     }
 

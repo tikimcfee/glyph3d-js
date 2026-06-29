@@ -67,14 +67,12 @@ const apparentH = (g) => g.scale.x * (g.rows * LH); // world panel height
   ok(Math.abs(apparentH(g) - barA) < 1e-6, `bar re-resize to same dims is a no-op`);
 }
 
-// frameScale mirrors CameraDock._placeFrame: contain-fit into the margin-inset frame rect, pulled
-// in by frameDistFrac. The occupant's RENDERED scale must equal this — no stored size, no zoom term.
-const frameScale = (d, g) => {
-  const m = Math.min(Math.max(d.frameMargin, 0), 0.49);
-  const fw = d._viewW * d.frameW * (1 - 2 * m);
-  const fh = d._viewH * d.frameH * (1 - 2 * m);
-  return Math.min(fw / g.cols, fh / (g.rows * LH)) * d.frameDistFrac;
-};
+// frameScale mirrors CameraDock._placeFrame: contain-fit into the per-side-margin-inset frame rect,
+// pulled in by frameDistFrac. The occupant's RENDERED scale must equal this — no stored size, no zoom.
+const cl = (v) => Math.min(Math.max(v, 0), 0.49);
+const innerW = (d) => d._viewW * d.frameW * (1 - cl(d.frameMarginLeft) - cl(d.frameMarginRight));
+const innerH = (d) => d._viewH * d.frameH * (1 - cl(d.frameMarginTop) - cl(d.frameMarginBottom));
+const frameScale = (d, g) => Math.min(innerW(d) / g.cols, innerH(d) / (g.rows * LH)) * d.frameDistFrac;
 
 // ---- FRAME occupant: contain-fits the root view-frame; pure fn of (frustum, frame, extent) ----
 {
@@ -82,15 +80,26 @@ const frameScale = (d, g) => {
   d.lock('t', g); d.spotlight('t'); d.settle();
   ok(Math.abs(g.scale.x - frameScale(d, g)) < 1e-6, `framed window contain-fits the frame (${g.scale.x.toFixed(3)} vs ${frameScale(d, g).toFixed(3)})`);
   // sits WHOLLY inside the frame rect on both axes (pillarbox / letterbox, never spill past the edges).
-  const fd = d.frameDistFrac, m = 0.06;
-  ok(g.scale.x * g.cols <= d._viewW * (1 - 2 * m) * fd + 1e-6
-     && g.scale.x * g.rows * LH <= d._viewH * (1 - 2 * m) * fd + 1e-6, `window sits wholly inside the frame (no spill)`);
+  const fd = d.frameDistFrac;
+  ok(g.scale.x * g.cols <= innerW(d) * fd + 1e-6
+     && g.scale.x * g.rows * LH <= innerH(d) * fd + 1e-6, `window sits wholly inside the frame (no spill)`);
   g.resizeTo(80, 48); d.settle();                // resize while framed — re-contains live, still exact
   ok(Math.abs(g.scale.x - frameScale(d, g)) < 1e-6, `resize re-contains into the frame (${g.scale.x.toFixed(3)})`);
   // content-independence: a FRESH 48-row tile frames to the SAME fit the resized one reaches (no stored state).
   const d2 = rig(); const g2 = makeGrid(80, 48);
   d2.lock('t', g2); d2.spotlight('t'); d2.settle();
   ok(Math.abs(g2.scale.x - g.scale.x) < 1e-6, `frame fit is content-independent (${g2.scale.x.toFixed(3)})`);
+}
+
+// ---- per-side margins: asymmetric insets SHRINK and RE-CENTER the frame rect ------------
+{
+  const d = rig();  // viewW=160, viewH=100, frameW=frameH=1, frameX=frameY=0 → outer 160×100 at origin
+  d.frameMarginLeft = 0.30; d.frameMarginRight = 0.05; d.frameMarginTop = 0.10; d.frameMarginBottom = 0.20;
+  const r = d._frameRect();
+  ok(Math.abs(r.w - 160 * 0.65) < 1e-6, `width = outer·(1-L-R) = 104 (${r.w.toFixed(2)})`);
+  ok(Math.abs(r.h - 100 * 0.70) < 1e-6, `height = outer·(1-T-B) = 70 (${r.h.toFixed(2)})`);
+  ok(Math.abs(r.cx - 160 * (0.30 - 0.05) / 2) < 1e-6, `bigger LEFT margin shifts center right (cx=${r.cx.toFixed(2)})`);
+  ok(Math.abs(r.cy - 100 * (0.20 - 0.10) / 2) < 1e-6, `bigger BOTTOM margin shifts center up (cy=${r.cy.toFixed(2)})`);
 }
 
 // ---- THE DOUBLE regression: free-grow-shaped detour must NOT double on refocus ---------
