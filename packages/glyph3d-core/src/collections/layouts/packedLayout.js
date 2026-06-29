@@ -110,7 +110,7 @@ function place(node, opts) {
             const s = fileBlock.slots[i];
             const b = fileBoxes[i];
             leaf.position.set(fLeft + s.x - b.min.x, s.y - b.max.y, 0);
-            leaf.rotation.set(0, 0, 0);             // a 2D scheme owns identity rotation (cf. jellyfish 'out')
+            leaf.rotation.set(0, 0, 0);             // a 2D scheme owns identity rotation (cf. jellyfish, which turns each panel outward)
         });
     }
     if (!childPack) return;

@@ -57,7 +57,7 @@ function place(node, opts) {
         const s = pack.slots[i];                    // top-left of this file's cell
         const b = fileBoxes[i];                     // local content box
         leaf.position.set(left + s.x - b.min.x, s.y - b.max.y, 0);
-        leaf.rotation.set(0, 0, 0);             // a 2D scheme owns identity rotation (cf. jellyfish 'out')
+        leaf.rotation.set(0, 0, 0);             // a 2D scheme owns identity rotation (cf. jellyfish, which turns each panel outward)
     });
 
     dirs.forEach((child, j) => {

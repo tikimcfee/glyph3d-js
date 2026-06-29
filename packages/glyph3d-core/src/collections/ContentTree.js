@@ -121,13 +121,23 @@ export default class ContentTree {
      */
     contentChildren(node) {
         if (!node) return [];
-        return node.children
-            .filter((c) => c.userData && c.userData.path !== undefined && !c.userData.isMarker)
-            .sort((a, b) => {
-                const ad = !!a.userData.isDir, bd = !!b.userData.isDir;
-                if (ad !== bd) return ad ? -1 : 1; // directories first
-                return String(a.userData.name || '').localeCompare(String(b.userData.name || ''));
-            });
+        // Descend through layout-group containers (jellyfish page/row VStacks carry
+        // userData.isLayoutGroup but no path) so the file leaves nested inside a page are
+        // still reached — focus.child/sibling navigate FILES, not the presentation columns.
+        const out = [];
+        const visit = (n) => {
+            for (const c of n.children) {
+                if (!c.userData || c.userData.isMarker) continue;
+                if (c.userData.isLayoutGroup) { visit(c); continue; }
+                if (c.userData.path !== undefined) out.push(c);
+            }
+        };
+        visit(node);
+        return out.sort((a, b) => {
+            const ad = !!a.userData.isDir, bd = !!b.userData.isDir;
+            if (ad !== bd) return ad ? -1 : 1; // directories first
+            return String(a.userData.name || '').localeCompare(String(b.userData.name || ''));
+        });
     }
 
     /**
@@ -291,12 +301,47 @@ export default class ContentTree {
      * @returns {{w:number,h:number}} the node's measured footprint
      */
     relayout(node = this.root) {
+        this._flattenGroups(node);
         const size = this.layout(node, this.layoutOpts);
         if (node === this.root) {
             this._dirty = false;
             for (const cb of this._onRelayout) cb(this);
         }
         return size;
+    }
+
+    /**
+     * Normalize away any layout-inserted grouping nodes (the jellyfish scheme's page/row
+     * VStacks, tagged userData.isLayoutGroup) under `node`, re-homing their file leaves back
+     * onto their directory node and dropping the empty containers. Runs before every relayout
+     * so the active scheme always starts from the canonical flat structure (file leaves direct
+     * under their dir): the wrap is idempotent (jellyfish re-packs fresh each pass) and
+     * reversible (a flat scheme sees flat files). A tree with no groups is untouched, and
+     * leaves parented OUTSIDE the tree (e.g. docked to the camera bar) are never reached —
+     * only a group's own descendants are re-homed, onto that group's directory parent.
+     * @private
+     */
+    _flattenGroups(node = this.root) {
+        const visit = (dir) => {
+            for (const child of [...dir.children]) {
+                if (child.userData?.isLayoutGroup) {
+                    // gather the group's path-bearing leaf descendants, re-home them onto `dir`.
+                    const leaves = [];
+                    const gather = (g) => {
+                        for (const c of g.children) {
+                            if (c.userData?.isLayoutGroup) gather(c);
+                            else if (c.userData?.path !== undefined) leaves.push(c);
+                        }
+                    };
+                    gather(child);
+                    for (const leaf of leaves) dir.add(leaf);   // THREE.add re-parents (row → dir)
+                    dir.remove(child);
+                } else if (child.userData?.isDir) {
+                    visit(child);
+                }
+            }
+        };
+        visit(node);
     }
 
     /**

@@ -61,7 +61,7 @@ function place(node, opts) {
         // position the leaf so its content's top-left lands at the cell (subtract the
         // content offset from the leaf origin → works for any origin/nesting).
         leaf.position.set(fLeft + s.x - b.min.x, s.y - b.max.y, 0);
-        leaf.rotation.set(0, 0, 0);             // a 2D scheme owns identity rotation (cf. jellyfish 'out')
+        leaf.rotation.set(0, 0, 0);             // a 2D scheme owns identity rotation (cf. jellyfish, which turns each panel outward)
     });
 
     if (childPack.slots.length === 0) return;
