@@ -70,6 +70,9 @@ function App() {
     fontUrl, fonts: FONT_CHAIN,
     fontSize: getSetting('atlas.fontSize'),
     atlasSize: getSetting('atlas.size'),
+    // Base path for the prebaked slug-core asset, so a sub-path deploy (/ide/) fetches
+    // /ide/slug-core/<key>.bin and not /slug-core/<key>.bin.
+    coreAssetBase: import.meta.env.BASE_URL,
   });
   const cameraRef = useRef(null);
   // The wired command client. CommandProvider (inside the Canvas) hands it up via

@@ -13,6 +13,7 @@ import { GlyphAtlas, EmojiAtlas, collectUniqueGlyphIds } from '@glyph3d/core';
 import { MonospaceShapeCache, shapeText, LiveSlugAtlas, FontChain,
          slugCoreKey, loadSlugCore, loadServedSlugCore, saveSlugCore, discardSlugCore } from '@glyph3d/core/shaping';
 import { getWorkerBridge } from '@glyph3d/core/workers';
+import { LARGE_CORE_RANGES } from './coreRanges.js';
 
 /**
  * @typedef {Object} GlyphEngineOptions
@@ -35,42 +36,8 @@ import { getWorkerBridge } from '@glyph3d/core/workers';
  *           '/'); pass import.meta.env.BASE_URL so a sub-path deploy (/ide/) resolves.
  */
 
-// LARGE CORE — ~everything a code IDE + terminal actually renders, encoded up front so the
-// live atlas rarely has to grow mid-session (growth = a main-thread encode + a field hot-swap).
-// Codepoints the font chain doesn't cover resolve to .notdef (glyph 0) and are skipped by the
-// encoder, so this list is generous without waste — only font-covered glyphs cost anything.
-// Deliberately bounded: NO full CJK (DejaVu doesn't cover it) and NO giant Nerd-Font icon PUA
-// (thousands of rarely-used icons — those stay cheap live-encodes). Serializing this core to a
-// prebaked blob (the next step) is what would let us go to literal full-coverage for free.
-const LARGE_CORE_RANGES = [
-  [0x0020, 0x007e], // ASCII printable
-  [0x00a0, 0x024f], // Latin-1 Supplement + Latin Extended-A/B
-  [0x0250, 0x02ff], // IPA + spacing modifiers
-  [0x0300, 0x036f], // combining diacriticals
-  [0x0370, 0x03ff], // Greek
-  [0x0400, 0x04ff], // Cyrillic
-  [0x0590, 0x05ff], // Hebrew
-  [0x0600, 0x06ff], // Arabic
-  [0x1e00, 0x1eff], // Latin Extended Additional
-  [0x2000, 0x206f], // general punctuation
-  [0x2070, 0x20cf], // super/subscripts + currency
-  [0x2100, 0x218f], // letterlike + number forms
-  [0x2190, 0x21ff], // arrows
-  [0x2200, 0x22ff], // mathematical operators
-  [0x2300, 0x23ff], // miscellaneous technical
-  [0x2400, 0x24ff], // control pictures + enclosed alphanumerics
-  [0x2500, 0x257f], // box drawing
-  [0x2580, 0x259f], // block elements
-  [0x25a0, 0x25ff], // geometric shapes
-  [0x2600, 0x26ff], // miscellaneous symbols
-  [0x2700, 0x27bf], // dingbats
-  [0x2800, 0x28ff], // braille patterns
-  [0x2900, 0x297f], // supplemental arrows-B
-  [0x2a00, 0x2aff], // supplemental mathematical operators
-  [0x2b00, 0x2bff], // misc symbols & arrows
-  [0xe0a0, 0xe0d4], // powerline (private use)
-  [0xfff0, 0xffff], // specials (replacement char U+FFFD)
-];
+// LARGE_CORE_RANGES now lives in ./coreRanges.js — the single source shared with the
+// build-time bake (tools/bake-slug-core.mjs) so their cache keys agree.
 
 /** Sensible defaults — explicit, overridable, and documented (not hidden). */
 export const DEFAULT_ENGINE_OPTIONS = {

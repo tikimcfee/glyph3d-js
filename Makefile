@@ -32,7 +32,7 @@ LDFLAGS := -s -w \
 	-X main.Platform=$(HOST_PLATFORM)
 GOFLAGS := -trimpath -ldflags='$(LDFLAGS)'
 
-.PHONY: all build clean prep prep-wasm prep-tree-sitter deploy deploy-ide release linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64 dev dev-vite dev-relay dev-status dev-stop
+.PHONY: all build clean prep bake-core prep-wasm prep-tree-sitter deploy deploy-ide release linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64 dev dev-vite dev-relay dev-status dev-stop
 
 # --- Default: build for current platform ---
 
@@ -46,13 +46,24 @@ build: prep
 # the web root: / → index.html, /assets/... → the bundle. No importmap, no raw
 # /packages/ source served. Prerequisite: deps installed (`bun install` at root).
 
-prep:
+prep: bake-core
 	@rm -rf $(WEB_DIR)
 	@mkdir -p $(WEB_DIR)
 	@echo "Building app (vite)…"
 	@cd $(APP_DIR) && bun run build
 	@cp -r $(APP_DIR)/dist/. $(WEB_DIR)/
 	@echo "Prepared $(WEB_DIR)/ (built app) for embedding"
+
+# --- Bake the prebaked slug-core static asset (app/public/slug-core/<key>.bin) ---
+# Headless HarfBuzz encode of the LARGE_CORE for the app's font chain. Vite copies
+# app/public/ into the build, so the asset ships with both the web app and (via prep
+# → cli/web) the binary; at runtime a fresh device hydrates from it instead of
+# encoding. Gitignored + regenerated here so it can never go stale vs the code.
+# Non-fatal: a bake failure just means the runtime live-encodes (the ladder fallback),
+# so the build still succeeds.
+bake-core:
+	@echo "Baking slug-core asset…"
+	@bun tools/bake-slug-core.mjs || echo "  ⚠ slug-core bake failed — app will live-encode at runtime"
 
 # --- Vendor HarfBuzz WASM from node_modules ---
 # Run after npm install to refresh vendored harfbuzzjs files.
@@ -168,7 +179,7 @@ deploy: linux-amd64
 IDE_DEPLOY_HOST ?= your-server
 IDE_DEPLOY_ROOT ?= /srv/www/glyph3d-ide
 
-deploy-ide:
+deploy-ide: bake-core
 	cd app && GLYPH_BASE=/ide/ bun run build
 	rsync -az --delete app/dist/ $(IDE_DEPLOY_HOST):$(IDE_DEPLOY_ROOT)/
 	@echo "Deployed → https://glyph3d.dev/ide/"
