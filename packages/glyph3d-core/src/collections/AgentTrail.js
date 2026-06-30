@@ -24,7 +24,6 @@
 import * as THREE from 'three';
 import CodeGrid from './CodeGrid.js';
 import FrameGrid from './FrameGrid.js';
-import ConnectionRenderer from '../annotations/ConnectionRenderer.js';
 import { HStack, VStack, ZStack } from './layouts/StackContainer.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import { classifyByExtension } from '../core/fileKind.js';
@@ -43,8 +42,6 @@ export const TRAIL_DEFAULTS = {
     artifactWorldScale: 0.025,  // worldScale for parse-mapping (snapshot) cards (fine-print document you fly into)
     messageScale: 0.05,         // worldScale for say/think conversation cards — its OWN knob (prose is meant to read bigger than a fine-print artifact)
     snapshotImageWidth: 40,     // world width of an image snapshot quad (height follows aspect)
-    maxConnections: 512,        // tether budget
-    showTethers: true,          // draw a call→snapshot beam per moment
     highlightFillOpacity: 0.22, // opacity of a decorate FILL bar (the touched block's background) — 0 falls back to additive tint
     debug: false,               // ON → log the decoration decision per snapshot (trail.config debug true)
 
@@ -132,7 +129,6 @@ export default class AgentTrail {
         this.scene.add(this.root);
         this._rootPlaced = false;
 
-        this.conn = new ConnectionRenderer(this.scene, { maxConnections: this.cfg.maxConnections });
         this.lanes = new Map();   // agentId -> { corridor:ZStack, seq, moments:[...], box, hueIdx }
         // Moment cards register as a pickable 'trail.card' so they hover-highlight (the CodeGrid
         // panel rides the 'grid' pick channel) and a click can focus the moment. Mark the type
@@ -226,13 +222,9 @@ export default class AgentTrail {
         const body = columns.length ? new HStack({ spacing: this.cfg.colGap, children: columns }) : null;
         const moment = new VStack({ spacing: this.cfg.rowGap, align: 0, children: body ? [action, body] : [action] });
         lane.corridor.add(moment);
-        const tetherId = snapshot ? `tether:${agentId}:${seq}` : null;
         // record + ts ride the entry so the 2D moment-stream panel (getStream) can list rows without
         // re-deriving them, and the pager can timestamp the deck.
-        lane.moments.push({ moment, body, action, info, snapshot, snapScaleKey, hue, tetherId, actionId, infoId: info ? infoId : null, snapId: hasSnapPick ? snapId : null, record, ts: this._now() });
-        // BIND the tether to the action card and its parse mapping — it resolves their world
-        // positions each frame, so it follows layout, scroll, and corridor drags with no re-tether.
-        if (tetherId) this.conn.set(tetherId, action, snapshot, hue);
+        lane.moments.push({ moment, body, action, info, snapshot, snapScaleKey, actionId, infoId: info ? infoId : null, snapId: hasSnapPick ? snapId : null, record, ts: this._now() });
         lane.seq++;
         // LIVE-FOLLOW: while this lane is following, ride each new arrival to the front (watch the run
         // stream in). Once the user has scrubbed back to inspect history, following is off and the head holds.
@@ -258,7 +250,7 @@ export default class AgentTrail {
         return true;
     }
 
-    update(dt) { this._animateDeck(dt); this.conn.refresh(); }
+    update(dt) { this._animateDeck(dt); }
 
     _now() { return typeof performance !== 'undefined' ? performance.now() : 0; }
 
@@ -338,7 +330,7 @@ export default class AgentTrail {
      * at build, so a uniform transform re-sizes them: the desired worldScale ÷ the one baked into the
      * card. config.worldScale never moves (setScale drives gridScale), so this stays correct across
      * repeated tweaks; an image card (no config.worldScale) is left alone. Then re-flow so the new
-     * footprints re-pack and the tethers follow.
+     * footprints re-pack.
      */
     applyScales() {
         for (const lane of this.lanes.values()) {
@@ -358,7 +350,6 @@ export default class AgentTrail {
     clear(which = 'all') {
         const kill = (lane) => {
             for (const e of lane.moments) {
-                if (e.tetherId) this.conn.remove(e.tetherId);
                 for (const id of [e.actionId, e.infoId, e.snapId]) { if (id) { try { this.ctx.registry?.unregister?.(id); } catch (_e) { /* best effort */ } } }
                 for (const g of [e.action, e.info, e.snapshot]) {
                     if (!g) continue;
@@ -388,7 +379,6 @@ export default class AgentTrail {
     dispose() {
         this._off?.();
         this.clear('all');
-        this.conn.dispose();
         this.scene.remove(this.root);
         this._unitBox.dispose();
         this._unitEdges.dispose();
@@ -441,7 +431,7 @@ export default class AgentTrail {
         lane.pinned = true;
         lane.pinnedPos = new THREE.Vector3(x, y, z);
         lane.corridor.position.copy(lane.pinnedPos);
-        return true;   // the bound tethers follow the corridor on the next refresh()
+        return true;
     }
 
     /** A translucent identity box + wireframe frame, in the ContentTreeMarkers prism style. */
@@ -638,7 +628,7 @@ export default class AgentTrail {
         return track.length ? track : null;
     }
 
-    /** Re-run the whole stack tree (idempotent) and refresh the tethers off the new positions. */
+    /** Re-run the whole stack tree (idempotent) off the new positions. */
     _relayout() {
         // cfg is the LIVE source of truth — push current spacing/align into the containers so
         // `trail.config` re-flows the existing trail, not just newly-added moments.
@@ -676,7 +666,6 @@ export default class AgentTrail {
             for (const e of lane.moments) if (e._z != null) e.moment.position.z = e._z;
         }
         this._updateCorridorBoxes();
-        this.conn.setVisible(this.cfg.showTethers);   // positions are bound; this just toggles the beam
     }
 
     /** The local Z a moment should rest at for its lane's head: `slot(i) = (head - i) mod n`, front=0. */
