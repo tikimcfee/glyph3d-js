@@ -1,45 +1,97 @@
 /**
  * keyEncoding — translate a browser KeyboardEvent into the byte sequence a terminal
  * (PTY) expects. The discrete-keystroke encoder for the keyboard responder chain's
- * terminal-typing layer (app/client/keyboardRouter.js).
+ * terminal-typing tier (app/client/keyboardRouter.js).
  *
  * Pure and framework-agnostic: a KeyboardEvent in, a string of bytes out (or null to
- * ignore the key entirely). No DOM beyond reading the event, no attention/registry —
- * the chain decides WHEN a terminal should receive a key; this decides WHAT bytes.
+ * ignore the key). No DOM beyond reading the event, no attention/registry — the chain
+ * decides WHEN a terminal should receive a key; this decides WHAT bytes.
+ *
+ * Modifier-aware: Alt/Ctrl/Shift + cursor & nav keys become the xterm CSI sequences a
+ * shell reads as word-motion etc. (Alt+← = back a word), and Alt+<printable> becomes the
+ * meta ESC-prefix (Alt+f = forward a word). Plain unmodified keys, Ctrl+<letter> control
+ * bytes, and anything with the Meta/OS key are byte-identical to a bare terminal.
  */
+
+// xterm modifier parameter: 1 + Shift(1) + Alt(2) + Ctrl(4). 1 means "no modifiers", and
+// the encoders below emit the PLAIN sequence in that case (so unmodified keys are unchanged).
+function modParam(e) {
+    return 1 + (e.shiftKey ? 1 : 0) + (e.altKey ? 2 : 0) + (e.ctrlKey ? 4 : 0);
+}
+
+/** Cursor/edit key (final letter A/B/C/D/H/F): `ESC [ 1 ; <mod> <L>` when modified, else `ESC [ <L>`. */
+function csiCursor(mod, finalChar) {
+    return mod > 1 ? `\x1b[1;${mod}${finalChar}` : `\x1b[${finalChar}`;
+}
+
+/** Tilde key (Delete=3, PageUp=5, …): `ESC [ <num> ; <mod> ~` when modified, else `ESC [ <num> ~`. */
+function csiTilde(mod, num) {
+    return mod > 1 ? `\x1b[${num};${mod}~` : `\x1b[${num}~`;
+}
 
 /**
- * Translate a KeyboardEvent into the byte sequence a terminal expects (single
- * chars, ANSI escape sequences for arrows / function keys, control bytes for
- * Ctrl+letter). Returns null when the key should be ignored entirely.
+ * Translate a KeyboardEvent into the byte sequence a terminal expects, or null to ignore
+ * the key entirely (the chain then lets a lower tier — Esc-pop, nav, camera — have it).
  *
  * @param {KeyboardEvent} e
+ * @param {Object} [opts]
+ * @param {boolean} [opts.captureEscape=false] - when true, Escape encodes to ESC (\x1b) so a
+ *   captured terminal can drive vim/readline; when false it returns null so the host's
+ *   Esc-LIFO releases focus (the soft-focus default). This is the ONE key capture changes.
  * @returns {string|null}
  */
-export function keyToTerminalBytes(e) {
-    if (e.key === 'Shift' || e.key === 'Control' || e.key === 'Alt' || e.key === 'Meta') return null;
+export function keyToTerminalBytes(e, { captureEscape = false } = {}) {
+    const k = e.key;
+    if (k === 'Shift' || k === 'Control' || k === 'Alt' || k === 'Meta') return null;
 
-    if (e.ctrlKey && !e.altKey && !e.metaKey && e.key.length === 1) {
-        const c = e.key.toLowerCase().charCodeAt(0);
+    // Ctrl+<letter> → C0 control byte (Ctrl+A..Z → 1..26). Bare ctrl+letter only; ctrl+arrow
+    // and friends fall to the modifier-encoded switch below.
+    if (e.ctrlKey && !e.altKey && !e.metaKey && k.length === 1) {
+        const c = k.toLowerCase().charCodeAt(0);
         if (c >= 97 && c <= 122) return String.fromCharCode(c - 96);
     }
 
-    switch (e.key) {
+    const mod = modParam(e);
+    switch (k) {
         case 'Enter':     return '\r';
         case 'Tab':       return '\t';
         case 'Backspace': return '\x7f';
-        case 'Delete':    return '\x1b[3~';
-        case 'Escape':    return null;
-        case 'ArrowUp':    return '\x1b[A';
-        case 'ArrowDown':  return '\x1b[B';
-        case 'ArrowRight': return '\x1b[C';
-        case 'ArrowLeft':  return '\x1b[D';
-        case 'Home':       return '\x1b[H';
-        case 'End':        return '\x1b[F';
-        case 'PageUp':     return '\x1b[5~';
-        case 'PageDown':   return '\x1b[6~';
+        case 'Escape':    return captureEscape ? '\x1b' : null;
+
+        case 'ArrowUp':    return csiCursor(mod, 'A');
+        case 'ArrowDown':  return csiCursor(mod, 'B');
+        case 'ArrowRight': return csiCursor(mod, 'C');
+        case 'ArrowLeft':  return csiCursor(mod, 'D');
+        case 'Home':       return csiCursor(mod, 'H');
+        case 'End':        return csiCursor(mod, 'F');
+
+        case 'Insert':     return csiTilde(mod, 2);
+        case 'Delete':     return csiTilde(mod, 3);
+        case 'PageUp':     return csiTilde(mod, 5);
+        case 'PageDown':   return csiTilde(mod, 6);
+
+        // Function keys. F1-F4 are SS3 (ESC O P..S) unmodified, CSI when modified; F5+ are tilde keys.
+        case 'F1':  return mod > 1 ? `\x1b[1;${mod}P` : '\x1bOP';
+        case 'F2':  return mod > 1 ? `\x1b[1;${mod}Q` : '\x1bOQ';
+        case 'F3':  return mod > 1 ? `\x1b[1;${mod}R` : '\x1bOR';
+        case 'F4':  return mod > 1 ? `\x1b[1;${mod}S` : '\x1bOS';
+        case 'F5':  return csiTilde(mod, 15);
+        case 'F6':  return csiTilde(mod, 17);
+        case 'F7':  return csiTilde(mod, 18);
+        case 'F8':  return csiTilde(mod, 19);
+        case 'F9':  return csiTilde(mod, 20);
+        case 'F10': return csiTilde(mod, 21);
+        case 'F11': return csiTilde(mod, 23);
+        case 'F12': return csiTilde(mod, 24);
     }
 
-    if (e.key.length === 1) return e.key;
+    // Alt+<printable> → the meta ESC-prefix (Alt+f = forward word, Alt+b = back word, …). Not
+    // when Ctrl/Meta is also held — those are app/OS combos, left to the catch-all / the chain.
+    if (e.altKey && !e.ctrlKey && !e.metaKey && k.length === 1) return '\x1b' + k;
+
+    // Plain printable. Identical to a bare terminal — including Meta/OS combos, which fall here
+    // and send the base char exactly as before (the chain/browser owns whether they arrive).
+    if (k.length === 1) return k;
+
     return null;
 }
