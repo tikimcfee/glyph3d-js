@@ -8,7 +8,7 @@ import FieldVisitorManager from '@glyph3d/core/services/orchestration/FieldVisit
 import AgentTrail from '@glyph3d/core/collections/AgentTrail.js';
 import { installConsoleForwarder } from '@glyph3d/core/services/orchestration/consoleForwarder.js';
 import AttentionManager from '@glyph3d/core/services/interaction/AttentionManager.js';
-import EntityKeystrokeRouter from '@glyph3d/core/services/interaction/EntityKeystrokeRouter.js';
+import { installKeyboardRouter } from './keyboardRouter.js';
 import InteractionContext from '@glyph3d/core/services/interaction/InteractionContext.js';
 import LspNavigator from '@glyph3d/core/services/interaction/LspNavigator.js';
 import CameraDock from '@glyph3d/core/services/interaction/CameraDock.js';
@@ -365,10 +365,21 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     window.__errorTracker = errorTracker;
     console.log(`[command-center] r3f client wired — relay ${url}${autoConnect ? '' : ' (manual)'}, ${state.router.commands.size} handlers`);
 
-    // Keyboard delivery to the focused entity (terminal → ANSI bytes via
-    // grid.onInput; grid → edit ops). One capture-phase listener, sharing the
-    // SAME AttentionManager that attention.set writes to.
-    const keystrokes = new EntityKeystrokeRouter(state.ctx.attentionManager).start();
+    // The keyboard responder chain: ONE capture-phase listener owning an ordered, composable
+    // precedence (entity typing → Esc/context pop → nav keymap; camera WASD is the bubble-phase
+    // fallthrough). The keyboard twin of gestureResolver — see keyboardRouter.js. Shares the SAME
+    // AttentionManager that attention.set writes to. gestureEnv (for the Esc tier) reads ctx lazily
+    // so it tracks the live interactionContext/cameraDock.
+    const keystrokes = installKeyboardRouter({
+      am: state.ctx.attentionManager,
+      exec: (cmd) => state.router.execute(cmd),
+      gestureEnv: {
+        exec: (cmd) => state.router.execute(cmd),
+        get attention() { return state.ctx.attentionManager; },
+        get context() { return state.ctx.interactionContext; },
+        get cameraDock() { return state.ctx.cameraDock; },
+      },
+    });
     state.keystrokes = keystrokes;
 
     // Share that AttentionManager onto the camera controller's ctx so VCC's
@@ -458,7 +469,7 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       offConn?.();
       state.registry.removeChangeListener(reconcileWorkspace);
       session.dispose();
-      keystrokes.dispose();
+      keystrokes();   // installKeyboardRouter returns its uninstall fn
       bridge.disconnect();
       pickingSystem.dispose();
       state.ctx.pickingSystem = null;

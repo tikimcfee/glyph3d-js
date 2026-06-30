@@ -42,7 +42,7 @@ packages/
     GlyphAtlas.js          font atlas (shaping → glyph metrics)
     collections/           CodeGrid, TerminalGrid, layout managers, GridVirtualizer
     core/                  LayoutDescription (layout seam), constants, renderOrder, types
-    services/              interaction (AttentionManager, EntityKeystrokeRouter),
+    services/              interaction (AttentionManager, keyEncoding),
                            camera (ViewerCameraController), data, orchestration
                            (CommandRouter, WebSocketBridge), state, visual
     picking/  shaping/  workers/  annotations/  parsing/  hand/  fonts/
@@ -91,8 +91,11 @@ with live follow via `bun tools/buslog.mjs`.
 - **AttentionManager** (`services/interaction`) owns three slots: `hover`, `primary`
   (sticky focus), `key` (keyboard target). One writer per slot; `attention.set <slot>
   <id|none>`.
-- **EntityKeystrokeRouter** delivers keystrokes to the `key`-slot entity's handler
-  (`grid` → edit ops, `terminal` → PTY bytes), and yields when a DOM input is focused.
+- **Keyboard responder chain** (`app/client/keyboardRouter.js`, the keyboard twin of
+  `gestureResolver`) is the one capture-phase listener: an ordered, composable tier list
+  (entity typing → Esc/context pop → nav keymap; camera WASD is the bubble fallthrough).
+  The first tier to claim a key consumes it; it yields wholesale when a DOM input is focused.
+  Terminal/grid byte+edit translation comes from `keyEncoding` (`services/interaction`).
 - **HUD is one-way state→view** — it reflects attention/registry/edit state and issues
   verbs; it owns no behavior.
 

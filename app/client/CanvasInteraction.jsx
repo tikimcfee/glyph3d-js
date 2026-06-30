@@ -3,7 +3,6 @@ import { useThree, useFrame } from '@react-three/fiber';
 import * as THREE from 'three/webgpu';
 import { useAppCommands } from './CommandProvider.jsx';
 import { resolveGesture } from './gestureResolver.js';
-import { resolveKeyBinding } from './keymap.js';
 import { moveVerbFor } from './surfaceInteractions.js';
 import { BORDER_FLAGS } from '@glyph3d/core/collections';
 import { interactionTheme } from './settings.js';
@@ -203,26 +202,9 @@ export function CanvasPicker() {
       resolveGesture({ type: 'dblclick', target: s.hoverEntry }, gestureEnv);
     };
 
-    // Host keyboard (bubble phase): EntityKeystrokeRouter (capture) has already
-    // taken edit/terminal keys, so anything reaching here is NAV mode.
-    //   • Escape pops the innermost context node (leave edit / release the hold),
-    //     resolved through the gesture chain. EntityKeystrokeRouter deliberately
-    //     ignores Escape for the host; this is the host.
-    //   • Otherwise consult the nav keymap (hjkl → focus.neighbor, …) and fire
-    //     the bound verb through the bus — same path as a click / the CLI.
-    // DOM inputs (command bar, panels) keep their own keys — guarded first.
-    const onKeyDown = (e) => {
-      const t = e.target;
-      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
-      if (e.key === 'Escape') {
-        if (resolveGesture({ type: 'esc', target: null }, gestureEnv)) e.preventDefault();
-        return;
-      }
-      if (e.repeat) return; // one press = one jump; holding a key doesn't sweep the field
-      const cmd = resolveKeyBinding(e);
-      if (cmd) { router.execute(cmd); e.preventDefault(); }
-    };
-    document.addEventListener('keydown', onKeyDown);
+    // Keyboard (Esc/context pop, nav keymap, terminal/grid typing) is owned by the keyboard
+    // responder chain — installKeyboardRouter in CommandProvider (keyboardRouter.js). This effect
+    // owns only POINTER gestures now.
 
     dom.addEventListener('pointermove', onMove);
     dom.addEventListener('pointerenter', onEnter);
@@ -237,7 +219,6 @@ export function CanvasPicker() {
       dom.removeEventListener('pointerdown', onDown);
       dom.removeEventListener('pointerup', onUp);
       dom.removeEventListener('dblclick', onDblClick);
-      document.removeEventListener('keydown', onKeyDown);
       if (client.ctx.isGripPress === isGripPress) client.ctx.isGripPress = null;
     };
   }, [client, gl, s]);

@@ -9,7 +9,7 @@ import '@xterm/xterm/css/xterm.css';
 //
 // One PTY stream, two projections: OUTPUT mirrors grid.onBytes → xterm.write; INPUT goes
 // xterm.onData → grid.onInput (the exact path the 3D terminal uses, so both surfaces drive the
-// same shell). EntityKeystrokeRouter yields while the xterm DOM is focused, so keys aren't
+// same shell). The keyboard router yields while the xterm DOM is focused, so keys aren't
 // double-delivered.
 //
 // One view per terminal: TerminalsPanel mounts these as nested dockview panels (one per live

@@ -144,7 +144,7 @@ export default function registerTerminalCommands(router) {
             // route input back to the owning controller via push().
             const owner = ctx.sender || null;
             if (owner && ctx.wsbridge && ctx.wsbridge.connected) {
-                // INPUT data plane: raw ANSI bytes (from EntityKeystrokeRouter) → the
+                // INPUT data plane: raw ANSI bytes (from the keyboard router) → the
                 // owning adapter's PTY. base64 in a JSON push — keystrokes are sparse,
                 // so the binary lane is reserved for the high-volume OUTPUT direction.
                 grid.onInput = (bytes, termId) => {
@@ -560,7 +560,7 @@ export default function registerTerminalCommands(router) {
             return { text: 'ERR: AttentionManager not wired into ctx', data: null };
         }
         // Pass the resolved registry entry as the entity so keystroke routing
-        // (EntityKeystrokeRouter, keyed on entity.type) has a usable reference.
+        // (the keyboard router, keyed on entity.type) has a usable reference.
         const entity = ctx.registry?.get(id) || null;
         ctx.attentionManager.set('primary', id, { entity });
         ctx.attentionManager.set('key', id, { entity });

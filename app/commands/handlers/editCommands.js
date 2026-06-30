@@ -59,9 +59,9 @@ export default function registerEditCommands(router) {
         }
 
         // Set attention.key first. If the slot already points at this grid,
-        // the change:key listener no-ops (same-grid guard in
-        // EntityKeystrokeRouter), so it won't fire an unwanted exitEdit on the
-        // grid we're about to enterEdit.
+        // the change:key listener no-ops (same-grid guard in the keyboard
+        // router), so it won't fire an unwanted exitEdit on the grid we're
+        // about to enterEdit.
         ctx.attentionManager.set('key', resolved.registryId, { registry: ctx.registry });
         grid.enterEdit();
 

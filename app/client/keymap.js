@@ -5,11 +5,11 @@
  * key-nav is just another way to drive the same verbs the palette / CLI / canvas
  * use — every press lands as a `command`-scope trace in the log store.
  *
- * MODAL by phase, not by flag: the listener runs in the document BUBBLE phase,
- * and EntityKeystrokeRouter consumes edit/terminal keys in the CAPTURE phase
- * (stopImmediatePropagation). So these bindings only ever fire in NAV mode —
- * no grid in edit, no terminal holding the keyboard. That's vim's normal-vs-
- * insert split falling out of the existing plumbing, with no mode variable.
+ * MODAL by tier, not by flag: this nav layer is a TIER in the keyboard responder
+ * chain (keyboardRouter.js), below the entity-typing tier. Entity typing claims the
+ * key first whenever a grid is in edit or a terminal holds the keyboard, so these
+ * bindings only ever fire in NAV mode. That's vim's normal-vs-insert split falling
+ * out of the chain order, with no mode variable.
  *
  * The table is exported so a which-key / `?` overlay can render it 1:1 — the
  * bindings ARE the documentation. Add a row, the overlay grows; no second list.

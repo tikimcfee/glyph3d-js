@@ -30,9 +30,9 @@ const plog = createLogger('palette');
  *     line, exactly the classic REPL. Enter runs it verbatim; ↑/↓ walk history;
  *     a hint row shows the verb's usage.
  *
- * Keystrokes are kept out of the camera/edit paths: InputManager +
- * EntityKeystrokeRouter both yield when a real <input> is focused, and we
- * stopPropagation defensively.
+ * Keystrokes are kept out of the camera/edit paths: the camera and the keyboard
+ * responder chain (keyboardRouter.js) both yield when a real <input> is focused, and
+ * we stopPropagation defensively.
  *
  * `onHighlight(entry|null)` fires as the selection moves — a no-op socket today;
  * glance-preview (camera peeks at the highlighted candidate) plugs in there.
