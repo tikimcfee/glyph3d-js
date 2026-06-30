@@ -55,8 +55,15 @@ export function keyToTerminalBytes(e, { captureEscape = false } = {}) {
     switch (k) {
         case 'Enter':     return '\r';
         case 'Tab':       return '\t';
-        case 'Backspace': return '\x7f';
         case 'Escape':    return captureEscape ? '\x1b' : null;
+
+        // Backspace is word-aware like the cursor keys. Alt+BS → meta-DEL (readline/zsh/fish bind it
+        // to backward-kill-word by default); Ctrl+BS → C-w (unix-word-rubout, also a default bind —
+        // and it recovers the Ctrl+W the browser steals for "close tab"). Plain/Shift → DEL.
+        case 'Backspace':
+            if (e.altKey && !e.ctrlKey && !e.metaKey) return '\x1b\x7f';
+            if (e.ctrlKey && !e.altKey && !e.metaKey) return '\x17';
+            return '\x7f';
 
         case 'ArrowUp':    return csiCursor(mod, 'A');
         case 'ArrowDown':  return csiCursor(mod, 'B');
