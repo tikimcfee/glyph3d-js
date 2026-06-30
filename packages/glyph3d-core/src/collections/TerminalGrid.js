@@ -227,11 +227,12 @@ export default class TerminalGrid extends FramedGlyphField {
         this._cursorColor       = options.cursorColor       ?? TERMINAL_CURSOR_DEFAULTS.color;
         this._cursorFillOpacity = options.cursorFillOpacity ?? TERMINAL_CURSOR_DEFAULTS.fillOpacity;
         this._cursorBorderWidth = options.cursorBorderWidth ?? TERMINAL_CURSOR_DEFAULTS.borderWidth;
-        this._cursor        = { x: 0, y: 0 };   // live cursor cell (viewport-relative)
-        this._cursorVisible = true;             // emulator-driven draw gate (always on for now)
-        this._cursorFocused = false;            // keyboard-target → solid; else hollow
-        this._cursorMesh    = null;
-        this._cursorCtl     = null;
+        this._cursor         = { x: 0, y: 0 };  // live cursor cell (viewport-relative)
+        this._cursorVisible  = true;            // emulator-driven draw gate (always on for now)
+        this._cursorFocused  = false;           // keyboard-target → solid; else hollow
+        this._cursorCaptured = false;           // greedy capture settled → solid + ring (wins over focused)
+        this._cursorMesh     = null;
+        this._cursorCtl      = null;
         this._initCursorMesh();
 
         // Add the renderer's mesh as a child so transforms propagate.
@@ -692,7 +693,23 @@ export default class TerminalGrid extends FramedGlyphField {
      */
     setCursorFocused(focused) {
         this._cursorFocused = !!focused;
-        this._cursorCtl?.setFocused(this._cursorFocused);
+        this._applyCursorState();
+    }
+
+    /**
+     * Mark this terminal as CAPTURED (greedy keyboard) — the cursor goes to its block-plus-ring look,
+     * winning over plain focus. Driven by the same attention loop, off the capture flag.
+     * @param {boolean} captured
+     */
+    setCursorCaptured(captured) {
+        this._cursorCaptured = !!captured;
+        this._applyCursorState();
+    }
+
+    /** Pick the cursor look from the focus/capture flags: captured ▸ solid ▸ hollow. @private */
+    _applyCursorState() {
+        const state = this._cursorCaptured ? 'captured' : this._cursorFocused ? 'solid' : 'hollow';
+        this._cursorCtl?.setState(state);
     }
 
     /** Show/hide the cursor block without forgetting its cell (e.g. a future DECTCEM hide). */
@@ -725,7 +742,7 @@ export default class TerminalGrid extends FramedGlyphField {
             fillOpacity: this._cursorFillOpacity,
             borderWidth: this._cursorBorderWidth,
         });
-        this._cursorCtl.setFocused(this._cursorFocused);
+        this._applyCursorState();
         this._cursorMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), this._cursorCtl.material);
         this._cursorMesh.renderOrder = CURSOR_RENDER_ORDER;
         this._cursorMesh.frustumCulled = false;   // grid-local; the parent culls
@@ -1062,6 +1079,7 @@ export default class TerminalGrid extends FramedGlyphField {
     static CONTROL_SPEC = [
         { role: 'resize',        label: 'Resize', color: 0x6ee7a0, grab: true  },                    // green grip: drag → cols/rows
         { role: 'scale',         label: 'Scale',  color: 0xf2787a, grab: true  },                    // red grip:   drag → zoom
+        { role: 'capture',       label: 'Lock',   color: 0xff7a18, grab: false },                    // orange:     click → settle/unsettle keyboard capture
         { role: 'pin',           label: 'Pin',    color: 0xf2c14e, grab: false },                    // amber:      click → maximize toggle
         { role: 'close',         label: 'Close',  color: 0x8a93a0, grab: false },                    // slate:      click → arm the confirm
         { role: 'close-confirm', label: 'Sure?',  color: 0xe5534b, grab: false, popupOf: 'close' },  // alarm red:  click → terminal.kill

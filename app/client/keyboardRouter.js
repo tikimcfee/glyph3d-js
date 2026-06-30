@@ -19,27 +19,60 @@
  *
  * A handler is a plain function `(e, env) → claimed?`:
  *   env = {
- *     am,          AttentionManager — read the 'key' slot (the keystroke target)
- *     exec,        (cmd) => router.execute(cmd) — fire a verb (nav layer)
- *     gestureEnv,  the env resolveGesture wants (Esc pops the context chain)
+ *     am,             AttentionManager — read the 'key' slot + capture state
+ *     exec,           (cmd) => router.execute(cmd) — fire a verb (toggle / nav tiers)
+ *     gestureEnv,     the env resolveGesture wants (Esc pops the context chain)
+ *     captureToggle,  optional chord override for the settle/unsettle key (default CAPTURE_TOGGLE)
  *   }
  *
- * Tiers (top = highest priority). The DOM-input guard sits above all of them: when a real
- * <input>/<textarea>/<select>/contenteditable holds focus the whole chain yields, so the
- * command bar and panels keep their own keys (this runs in capture phase, BEFORE the input's
+ * Tiers (top = highest priority): captureToggle → entityTyping → contextEsc → navKeymap, then the
+ * camera (WASD, in VCC) as the implicit fallthrough. The DOM-input guard sits above all of them:
+ * when a real <input>/<textarea>/<select>/contenteditable holds focus the whole chain yields, so
+ * the command bar and panels keep their own keys (this runs in capture phase, BEFORE the input's
  * own handler, so the guard is what stops us preventing-default on its keystroke).
+ *
+ * CAPTURE: when the key entity is "settled" (AttentionManager.isCaptured()), entity typing goes
+ * greedy — Esc encodes to bytes too, so vim/readline get it — and the reserved captureToggle chord
+ * is the one key it won't see. Soft focus (not captured) keeps Esc for the host's context pop.
  */
 
 import { keyToTerminalBytes } from '@glyph3d/core/services/interaction/keyEncoding.js';
 import { resolveGesture } from './gestureResolver.js';
 import { resolveKeyBinding } from './keymap.js';
 
+// ---- Capture-toggle tier: the reserved settle/unsettle chord ----
+
+/**
+ * The chord that settles/unsettles greedy capture — the ONE key a captured terminal never
+ * receives, which is why it's checked ABOVE entity typing. Born configurable: a plain data record
+ * (key + required modifiers), overridable via installKeyboardRouter({ captureToggle }). A future
+ * keybindings UI drives this same shape; for now it's the single named default, not a buried literal.
+ */
+export const CAPTURE_TOGGLE = Object.freeze({ key: 'Enter', ctrl: true, shift: true, alt: false, meta: false });
+
+/** Exact chord match — every modifier must agree (so Ctrl+Shift+Enter ≠ Ctrl+Enter). */
+function matchesChord(e, c) {
+    return e.key === c.key
+        && e.ctrlKey === !!c.ctrl && e.shiftKey === !!c.shift
+        && e.altKey === !!c.alt && e.metaKey === !!c.meta;
+}
+
+/** Tier 0 — the reserved capture toggle. Claims only when a key entity exists to settle/unsettle
+ *  (else it passes through), so it never swallows the chord when there's nothing to capture. */
+function captureToggle(e, env) {
+    if (!matchesChord(e, env.captureToggle ?? CAPTURE_TOGGLE)) return false;
+    if (!env.am?.get?.('key')) return false;
+    env.exec('attention.capture toggle');
+    return true;
+}
+
 // ---- Entity-typing tier: deliver to whatever holds the 'key' slot ----
 
-/** Terminal: KeyboardEvent → ANSI bytes → grid.onInput (the canvas→shell leg). */
-function terminalKeyHandler(e, grid, slotId) {
+/** Terminal: KeyboardEvent → ANSI bytes → grid.onInput (the canvas→shell leg). When `captured`,
+ *  the encoder also sends Esc (otherwise Esc returns null here and falls to the context tier). */
+function terminalKeyHandler(e, grid, slotId, captured) {
     if (!grid || typeof grid.onInput !== 'function') return false;
-    const bytes = keyToTerminalBytes(e);
+    const bytes = keyToTerminalBytes(e, { captureEscape: captured });
     if (bytes == null) return false;
     grid.onInput(bytes, slotId);
     return true;
@@ -79,19 +112,20 @@ function gridKeyHandler(e, grid) {
 // One entry per keystroke-target entity type. Adding a type is a one-liner here — the chain
 // above is unchanged. (Composable like gestureResolver's POLICIES.)
 const ENTITY_HANDLERS = {
-    terminal: (e, entity, slot) => terminalKeyHandler(e, entity.grid, slot.id),
-    grid:     (e, entity)       => gridKeyHandler(e, entity.grid),
+    terminal: (e, entity, slot, captured) => terminalKeyHandler(e, entity.grid, slot.id, captured),
+    grid:     (e, entity)                 => gridKeyHandler(e, entity.grid),
 };
 
-/** Tier 1 — deliver the key to whichever entity holds the 'key' slot. */
+/** Tier 1 — deliver the key to whichever entity holds the 'key' slot (greedily when captured). */
 function entityTyping(e, env) {
     const slot = env.am?.get?.('key');
     const entity = slot?.entity;
     if (!entity) return false;
     const handler = ENTITY_HANDLERS[entity.type];
     if (!handler) return false;
+    const captured = env.am.isCaptured?.() === true;
     try {
-        return handler(e, entity, slot);
+        return handler(e, entity, slot, captured);
     } catch (err) {
         console.error(`[keyboard] ${entity.type} typing handler threw:`, err);
         return false;
@@ -116,8 +150,9 @@ function navKeymap(e, env) {
 }
 
 /** The ordered chain. Push or reorder to change precedence; the camera (WASD, in VCC) is the
- *  implicit final tier — it sees only keys NO tier here claimed. */
-const HANDLERS = [entityTyping, contextEsc, navKeymap];
+ *  implicit final tier — it sees only keys NO tier here claimed. captureToggle sits ABOVE typing
+ *  so the reserved chord releases capture even while the terminal is greedily eating keys. */
+const HANDLERS = [captureToggle, entityTyping, contextEsc, navKeymap];
 
 /** True while a real DOM input owns focus — the whole chain yields so it keeps its own keys. */
 function domInputFocused(doc) {
@@ -137,6 +172,8 @@ function domInputFocused(doc) {
  * @param {import('@glyph3d/core/services/interaction').AttentionManager} env.am
  * @param {(cmd: string|string[]) => any} env.exec
  * @param {Object} env.gestureEnv  env for resolveGesture (Esc tier)
+ * @param {{key:string,ctrl?:boolean,shift?:boolean,alt?:boolean,meta?:boolean}} [env.captureToggle]
+ *   override the settle/unsettle chord (default CAPTURE_TOGGLE = Ctrl+Shift+Enter)
  * @param {Document} [env.document] injectable for tests; defaults to the global
  * @returns {() => void} uninstall
  */

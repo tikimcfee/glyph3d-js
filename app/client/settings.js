@@ -212,6 +212,10 @@ export const SETTINGS = [
     key: 'appearance.inputColor', label: 'Edit / input', group: 'Appearance',
     type: 'color', default: '#f0b45a', apply: (ctx) => applyStateColors(ctx),
   },
+  {
+    key: 'appearance.captureColor', label: 'Capture (locked)', group: 'Appearance',
+    type: 'color', default: '#ff7a18', apply: (ctx) => applyStateColors(ctx),
+  },
   // Dock — the camera-locked tile bar (CameraDock). Every knob here was a baked
   // constant; setParam re-packs the live dock and the value persists client-side.
   // maxColumns + the dome arc/rise only bite in the RADIAL layout; fillFrac only in
@@ -338,6 +342,7 @@ function applyStateColors(ctx) {
     focus: getSetting('appearance.focusColor'),
     hover: getSetting('appearance.hoverColor'),
     input: getSetting('appearance.inputColor'),
+    capture: getSetting('appearance.captureColor'),
   };
   if (_interaction) Object.assign(_interaction, c); else _interaction = { ...c };
   setPanelStateColorDefaults(c);

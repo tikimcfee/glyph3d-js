@@ -7,6 +7,7 @@
  *                                      id = registry id, or 'none'|null to clear
  *   attention.info                     returns the current state record
  *   attention.clear [slot]             clear one slot, or all when omitted
+ *   attention.capture [toggle|on|off]  settle/unsettle greedy keyboard capture on the key entity
  *
  * `attention.set primary <id>` routes through the same slot the
  * compass and reader mode use, so the command bar is a consumer
@@ -120,5 +121,43 @@ export default function registerAttentionCommands(router) {
     }, {
         description: 'Clear one slot (arg) or all slots (no arg)',
         usage: '[slot]',
+    });
+
+    // Greedy keyboard CAPTURE on the key entity (settle/unsettle). When captured, the keyboard
+    // responder chain routes everything — Esc included — to that entity; the reserved toggle chord
+    // is the only key it won't get. Fired by the chord tier (keyboardRouter) and the chrome lock
+    // button; scriptable from the CLI for tests. An optional <id> targets a specific entity (the
+    // lock button passes its own, since its press bypasses click-to-focus) — capture implies key
+    // focus, so we make it the keyboard target first. With no id it acts on the current key entity.
+    router.register('attention.capture', (args, ctx) => {
+        const am = ctx.attentionManager;
+        if (!am) return { text: 'ERR: AttentionManager not wired into ctx', data: null };
+
+        const arg = String(args[0] ?? 'toggle').toLowerCase();
+        if (!['toggle', 'on', 'off'].includes(arg)) {
+            return { text: `ERR: usage: attention.capture [toggle|on|off] [id]`, data: null };
+        }
+        const id = args[1] != null ? String(args[1]) : null;
+        if (id && am.get('key')?.id !== id) {
+            // Capture implies focus — make this entity the keyboard target AND the focused window
+            // (the lock button bypasses click-to-focus, so do it here). Setting key to a new id drops
+            // any capture on the entity it replaces, so the toggle below settles cleanly on the new one.
+            const entity = ctx.registry?.get(id) || null;
+            am.set('primary', id, { entity });
+            am.set('key', id, { entity });
+        }
+
+        const key = am.get('key');
+        if (!key) return { text: 'ERR: no key-focus entity to capture', data: null };
+        const next = arg === 'on' ? true : arg === 'off' ? false : !am.isCaptured();
+        am.setCaptured(next);
+        return {
+            text: `OK: capture ${next ? 'on' : 'off'} (${key.id})`,
+            data: { captured: next, id: key.id, entityType: key.entity?.type ?? null },
+        };
+    }, {
+        description: 'Settle/unsettle greedy keyboard capture on the key-focus entity (or a given id)',
+        usage: '[toggle|on|off] [id]',
+        returns: '{ captured, id, entityType }',
     });
 }

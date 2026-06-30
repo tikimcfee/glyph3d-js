@@ -3,12 +3,13 @@
  *
  * A cursor marks a cell. Two looks come from one mesh + one uniform flip:
  *
- *   FOCUSED   — a translucent SOLID block over the cell. The glyph reads through it (we
- *               approximate a terminal's reverse-video cursor with an alpha overlay rather
- *               than recoloring the glyph). This is the "type here" cue for the window that
- *               currently holds the keyboard.
- *   UNFOCUSED — a HOLLOW outline (border only), so a terminal that doesn't hold the keyboard
- *               still shows where its prompt sits without claiming "type here".
+ *   'solid'    — a translucent SOLID block over the cell. The glyph reads through it (we
+ *                approximate a terminal's reverse-video cursor with an alpha overlay rather
+ *                than recoloring the glyph). The "type here" cue for the window holding the keyboard.
+ *   'hollow'   — a HOLLOW outline (border only), so a terminal that doesn't hold the keyboard
+ *                still shows where its prompt sits without claiming "type here".
+ *   'captured' — SOLID block AND a bright ring: greedy capture is settled (Esc + all keys flow
+ *                here), the strongest "you are fully in this terminal" cue.
  *
  * The outline is measured in SCREEN PIXELS (edge / fwidth(edge) — the quad-size term cancels),
  * the same crisp-hairline trick panelMaterial uses for the window border, so it stays a clean
@@ -30,7 +31,7 @@ export const CURSOR_BORDER_WIDTH = 1.5;
  * @param {number|string} [opts.color=0x6ee7a0] - cursor color (focus green by default)
  * @param {number} [opts.fillOpacity=0.5] - solid-block alpha when focused (glyph reads through)
  * @param {number} [opts.borderWidth=CURSOR_BORDER_WIDTH] - hollow-outline thickness in screen px
- * @returns {{ material: MeshBasicNodeMaterial, setFocused, setStyle }}
+ * @returns {{ material: MeshBasicNodeMaterial, setState, setStyle }}
  */
 export function createCursorMaterial({ color = 0x6ee7a0, fillOpacity = 0.5,
                                        borderWidth = CURSOR_BORDER_WIDTH } = {}) {
@@ -58,10 +59,12 @@ export function createCursorMaterial({ color = 0x6ee7a0, fillOpacity = 0.5,
     return {
         material,
 
-        /** Solid translucent block (focused) vs hollow outline (unfocused). */
-        setFocused(focused) {
-            uFill.value = focused ? fill : 0;
-            uBorder.value = focused ? 0 : 1;
+        /** Set the look: 'hollow' (outline), 'solid' (filled block), or 'captured' (filled + ring). */
+        setState(state) {
+            const solid = state === 'solid' || state === 'captured';
+            uFill.value = solid ? fill : 0;
+            // The ring shows for hollow (the whole cue) and captured (block + ring); plain solid has none.
+            uBorder.value = state === 'solid' ? 0 : 1;
         },
 
         /** Live restyle — color, solid-fill alpha, outline width. Re-applies the current look. */

@@ -63,6 +63,14 @@ export class AttentionManager {
         /** @type {{ hover: object|null, primary: object|null, key: object|null }} */
         this.state = { hover: null, primary: null, key: null };
 
+        /** Greedy keyboard CAPTURE on the current `key` entity (settle/unsettle). A lightweight
+         *  MODIFIER on the key slot, NOT a fourth slot: capture only ever means "the key entity has
+         *  grabbed the keyboard wholesale" (Esc + all combos flow to it). It can't outlive its
+         *  target — any key-focus CHANGE drops it (see set()). One writer (setCaptured); read by the
+         *  keyboard chain's Esc gate and the captured-look visual. Event: 'change:capture'.
+         *  @private @type {boolean} */
+        this._captured = false;
+
         /** Enumerable dock map. L2 will populate this via CameraDock.
          *  Kept here (not on CameraDock.docks) so L1 command handlers that
          *  snapshot scene state don't need a second service reference.
@@ -100,6 +108,7 @@ export class AttentionManager {
             this.state[slot] = null;
             if (slot === 'hover') log.trace(`hover ${prev.id} → ∅`);
             else log.debug(`${slot} ${prev.id} → ∅`);
+            if (slot === 'key') this._dropCapture();   // capture can't outlive its key entity
             this._emit(slot, null, prev);
             return null;
         }
@@ -117,12 +126,52 @@ export class AttentionManager {
         // canvas hover loop now dedups upstream via its own last-id guard). The
         // dedup's only remaining effect was swallowing explicit re-selections —
         // "re-clicking the same grid does nothing until you touch another one".
+        // A key-focus MOVE (different id) drops capture; re-affirming the SAME key keeps it (a
+        // click on the already-captured terminal shouldn't unsettle it).
+        if (slot === 'key' && prev?.id !== id) this._dropCapture();
+
         const value = { id, entity: entity || null, ts: performance.now() };
         this.state[slot] = value;
         if (slot === 'hover') log.trace(`hover ${prev?.id ?? '∅'} → ${id}`);
         else log.debug(`${slot} ${prev?.id ?? '∅'} → ${id}`);
         this._emit(slot, value, prev);
         return value;
+    }
+
+    // ============ Capture (greedy keyboard) ============
+
+    /**
+     * Settle/unsettle greedy keyboard capture on the CURRENT key entity. Capture requires a key
+     * focus — `setCaptured(true)` with no key slot is a no-op. Idempotent; emits 'change:capture'
+     * (value, prev) only on a real change.
+     * @param {boolean} on
+     * @returns {boolean} the resulting capture state
+     */
+    setCaptured(on) {
+        const next = !!on && this.state.key != null;
+        if (next === this._captured) return this._captured;
+        this._captured = next;
+        this._emitCapture(next, !next);
+        log.debug(`capture ${next ? 'on' : 'off'} (${this.state.key?.id ?? '∅'})`);
+        return this._captured;
+    }
+
+    /** @returns {boolean} whether the key entity has grabbed the keyboard wholesale. */
+    isCaptured() {
+        return this._captured;
+    }
+
+    /** @private — clear capture without requiring a key slot (used when key focus moves/clears). */
+    _dropCapture() {
+        if (!this._captured) return;
+        this._captured = false;
+        this._emitCapture(false, true);
+    }
+
+    /** @private */
+    _emitCapture(value, prev) {
+        const arr = this._listeners.get('change:capture');
+        if (arr) for (const fn of arr) safeCall(fn, value, prev);
     }
 
     /**
@@ -170,6 +219,7 @@ export class AttentionManager {
             hover:   this.state.hover   ? { id: this.state.hover.id,   ts: this.state.hover.ts }   : null,
             primary: this.state.primary ? { id: this.state.primary.id, ts: this.state.primary.ts } : null,
             key:     this.state.key     ? { id: this.state.key.id,     ts: this.state.key.ts }     : null,
+            captured: this._captured,
             docks:   Array.from(this.docks.entries()).map(([id, d]) => ({ id, ...d })),
         };
     }
@@ -177,9 +227,9 @@ export class AttentionManager {
     // ============ Events ============
 
     /**
-     * Subscribe. Events: 'change', 'change:hover', 'change:primary', 'change:key'.
-     * Callback: (slot, value, prev) for 'change'; (value, prev) for the
-     * per-slot variants.
+     * Subscribe. Events: 'change', 'change:hover', 'change:primary', 'change:key',
+     * 'change:capture'. Callback: (slot, value, prev) for 'change'; (value, prev) for the
+     * per-slot variants and (captured, prev) for 'change:capture'.
      * @param {string} evt
      * @param {Function} fn
      * @returns {Function} unsubscribe

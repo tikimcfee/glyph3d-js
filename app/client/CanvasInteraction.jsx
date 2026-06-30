@@ -576,6 +576,7 @@ export function ResizeDragger() {
       armedClose = null;
     };
     const fireChromeAction = (role, id, grid) => {
+      if (role === 'capture') { router.execute(['attention.capture', 'toggle', id]); return; } // settle/unsettle THIS terminal; loop lights the Lock
       if (role === 'pin') { router.execute(['window.pin', id]); return; } // verb lights the Pin button
       if (role === 'close') {
         if (armedClose && armedClose.grid !== grid) disarmClose();
@@ -756,6 +757,25 @@ function applyCursorFocus(state, terminal) {
   state.cursorFocus = terminal;
 }
 
+// The CAPTURED window wears the locked look as one bundle — the orange CAPTURED border, the cursor's
+// block-plus-ring, and the lit Lock control. One window is captured at a time (it's the key entity),
+// so this is the same single-writer flip; releasing clears all three on the prior window.
+function applyCapture(state, terminal) {
+  const prev = state.capture;
+  if (prev === terminal) return;
+  if (prev) {
+    prev.setBorderFlag?.(BORDER_FLAGS.CAPTURED, false);
+    prev.setCursorCaptured?.(false);
+    prev.setControlActive?.('capture', false);
+  }
+  if (terminal) {
+    terminal.setBorderFlag?.(BORDER_FLAGS.CAPTURED, true);
+    terminal.setCursorCaptured?.(true);
+    terminal.setControlActive?.('capture', true);
+  }
+  state.capture = terminal;
+}
+
 // Reused per frame to compose each outline's matrix (grid.matrixWorld × local offset).
 const _off = new THREE.Matrix4();
 const _center = new THREE.Vector3();
@@ -816,7 +836,7 @@ export function SelectionIndicator() {
     t.am = client.ctx.attentionManager;
     t.registry = client.ctx.registry;
     // Which panel currently holds each state bit, so we can clear it when the target moves.
-    t.flagged = { focus: null, input: null, hover: null, cursorFocus: null };
+    t.flagged = { focus: null, input: null, hover: null, cursorFocus: null, capture: null };
     // One box per role: a green/amber box for the SELECTED grid, a light-blue box
     // for HOVER on a DIFFERENT grid. Hovering the focused grid recolors the focus
     // box (fades toward blue) rather than drawing the hover box on top — no stack.
@@ -831,11 +851,16 @@ export function SelectionIndicator() {
       t.flagged?.input?.setBorderFlag?.(BORDER_FLAGS.INPUT, false);
       t.flagged?.hover?.setBorderFlag?.(BORDER_FLAGS.HOVERED, false);
       t.flagged?.cursorFocus?.setCursorFocused?.(false);
+      if (t.flagged?.capture) {
+        t.flagged.capture.setBorderFlag?.(BORDER_FLAGS.CAPTURED, false);
+        t.flagged.capture.setCursorCaptured?.(false);
+        t.flagged.capture.setControlActive?.('capture', false);
+      }
       scene.remove(t.primaryBox); scene.remove(t.hoverBox); scene.remove(t.primaryFill);
       t.primaryBox.geometry?.dispose?.(); t.hoverBox.geometry?.dispose?.(); t.primaryFill.geometry?.dispose?.();
       t.primaryBox.material?.dispose?.(); t.hoverBox.material?.dispose?.(); t.primaryFill.material?.dispose?.();
       t.primaryBox = t.hoverBox = t.primaryFill = t.am = t.registry = null;
-      t.flagged = { focus: null, input: null, hover: null, cursorFocus: null };
+      t.flagged = { focus: null, input: null, hover: null, cursorFocus: null, capture: null };
     };
   }, [client, scene]);
 
@@ -907,6 +932,12 @@ export function SelectionIndicator() {
     // The focused terminal's cursor goes solid (it's the keyboard target — same condition as the
     // amber INPUT border above); every other terminal keeps its hollow outline.
     applyCursorFocus(t.flagged, (inputActive && primaryEntry?.type === 'terminal') ? focusPanel : null);
+
+    // The captured terminal (the key entity, when capture is settled) wears the locked look. Rides
+    // the KEY slot + capture flag — independent of primary, so it holds even if focus is split.
+    const keyEntry = keyId ? t.registry.get(keyId) : null;
+    const capturedTerminal = (t.am.isCaptured?.() && keyEntry?.type === 'terminal') ? keyEntry.grid : null;
+    applyCapture(t.flagged, capturedTerminal);
 
     // DIRECTORIES have no panel to host a border, so they keep the overlay box. The edge box recolors
     // to signal WHERE KEYSTROKES LAND (amber input-active / green focused), fading toward blue when

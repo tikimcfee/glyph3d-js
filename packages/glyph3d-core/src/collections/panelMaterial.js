@@ -39,10 +39,11 @@ export const PANEL_BORDER_WIDTH = 1.5;
 
 /** Group-level border state bits. Each subsystem owns its own; the shader decodes them. */
 export const BORDER_FLAGS = Object.freeze({
-    DOCKED:  1 << 0,
-    HOVERED: 1 << 1,
-    FOCUSED: 1 << 2,
-    INPUT:   1 << 3,
+    DOCKED:   1 << 0,
+    HOVERED:  1 << 1,
+    FOCUSED:  1 << 2,
+    INPUT:    1 << 3,
+    CAPTURED: 1 << 4,   // greedy keyboard capture settled on this window (Esc + all keys flow here)
 });
 
 const TAU = Math.PI * 2;
@@ -53,20 +54,22 @@ const TAU = Math.PI * 2;
 // for new panels + per-panel setStateColors() for live restyle. Mutable module state so a freshly
 // created panel inherits the current scheme without threading colors through every constructor.
 const STATE_DEFAULTS = {
-    hover: new THREE.Color(0x9fd2ff), // light blue
-    focus: new THREE.Color(0x6ee7a0), // green
-    input: new THREE.Color(0xf0b45a), // amber
+    hover:   new THREE.Color(0x9fd2ff), // light blue
+    focus:   new THREE.Color(0x6ee7a0), // green
+    input:   new THREE.Color(0xf0b45a), // amber
+    capture: new THREE.Color(0xff7a18), // hot orange — "locked, keyboard fully grabbed"
 };
 
 /**
  * Set the default state colors panels created AFTER this call are born with. Live panels keep their
  * own uniforms — restyle those with the handle's setStateColors(). Accepts anything THREE.Color eats.
- * @param {{ hover?: number|string, focus?: number|string, input?: number|string }} colors
+ * @param {{ hover?: number|string, focus?: number|string, input?: number|string, capture?: number|string }} colors
  */
-export function setPanelStateColorDefaults({ hover, focus, input } = {}) {
+export function setPanelStateColorDefaults({ hover, focus, input, capture } = {}) {
     if (hover != null) STATE_DEFAULTS.hover.set(hover);
     if (focus != null) STATE_DEFAULTS.focus.set(focus);
     if (input != null) STATE_DEFAULTS.input.set(input);
+    if (capture != null) STATE_DEFAULTS.capture.set(capture);
 }
 
 /**
@@ -90,23 +93,28 @@ export function createPanelMaterial({ color = 0x000000, opacity = 1,
     const uHoverColor = uniform(STATE_DEFAULTS.hover.clone());
     const uFocusColor = uniform(STATE_DEFAULTS.focus.clone());
     const uInputColor = uniform(STATE_DEFAULTS.input.clone());
+    const uCaptureColor = uniform(STATE_DEFAULTS.capture.clone());
 
     const F = BORDER_FLAGS;
     const has = (mask) => bitAnd(uFlags, uint(mask)).greaterThan(uint(0)); // bool node
     const on = uFlags.greaterThan(uint(0));
-    const anyState = has(F.HOVERED | F.FOCUSED | F.INPUT);
-    const accent = has(F.FOCUSED | F.INPUT); // states that thicken the line
+    const anyState = has(F.HOVERED | F.FOCUSED | F.INPUT | F.CAPTURED);
+    const accent = has(F.FOCUSED | F.INPUT | F.CAPTURED); // states that thicken the line
 
     // Border COLOR: a transient state REPLACES the resting color outright — the dominant state color
-    // (priority input > focused > hovered) while any state is active, else the material's set color
-    // (the dock identity hue). A gentle hover pulse rides on top. No blend, so focus shows full
-    // strength, not a half-tint of the identity.
-    const stateCol = select(has(F.INPUT), uInputColor, select(has(F.FOCUSED), uFocusColor, uHoverColor));
+    // (priority captured > input > focused > hovered) while any state is active, else the material's
+    // set color (the dock identity hue). A gentle hover pulse rides on top. No blend, so focus shows
+    // full strength, not a half-tint of the identity. CAPTURED wins — it's the strongest "you are
+    // fully in this window" cue.
+    const stateCol = select(has(F.CAPTURED), uCaptureColor,
+                       select(has(F.INPUT), uInputColor,
+                         select(has(F.FOCUSED), uFocusColor, uHoverColor)));
     const pulse = select(has(F.HOVERED), sin(time.mul(TAU * 1.1)).mul(0.5).add(0.5).mul(0.2).add(0.85), float(1));
     const borderCol = select(anyState, stateCol, uBorderColor).mul(pulse);
 
-    // Border SHAPE: a crisp pixel-wide line at the edge; focus/input thicken it.
-    const w = uBorderWidth.mul(select(accent, float(1.6), float(1)));
+    // Border SHAPE: a crisp pixel-wide line at the edge; focus/input thicken it, CAPTURED thickest
+    // (a bold locked frame).
+    const w = uBorderWidth.mul(select(has(F.CAPTURED), float(2.6), select(accent, float(1.6), float(1))));
     const edge = vec2(0.5, 0.5).sub(uv().sub(0.5).abs());     // per-axis dist to edge, [0, 0.5]
     const px = edge.div(max(fwidth(edge), float(1e-6)));       // → screen pixels, per axis
     const d = min(px.x, px.y);                                // pixels to the nearest edge
@@ -137,16 +145,20 @@ export function createPanelMaterial({ color = 0x000000, opacity = 1,
             if (intensity != null) uBorderIntensity.value = intensity;
         },
 
-        /** Restyle the focus/hover/input state colors live (the shared interaction vocabulary). */
-        setStateColors({ hover, focus, input } = {}) {
+        /** Restyle the focus/hover/input/capture state colors live (the shared interaction vocabulary). */
+        setStateColors({ hover, focus, input, capture } = {}) {
             if (hover != null) uHoverColor.value.set(hover);
             if (focus != null) uFocusColor.value.set(focus);
             if (input != null) uInputColor.value.set(input);
+            if (capture != null) uCaptureColor.value.set(capture);
         },
 
         /** This panel's current state colors as hex ints (inspection — symmetric with getBorderFlags). */
         getStateColors() {
-            return { hover: uHoverColor.value.getHex(), focus: uFocusColor.value.getHex(), input: uInputColor.value.getHex() };
+            return {
+                hover: uHoverColor.value.getHex(), focus: uFocusColor.value.getHex(),
+                input: uInputColor.value.getHex(), capture: uCaptureColor.value.getHex(),
+            };
         },
 
         /** Flip one or more BORDER_FLAGS bits. Each subsystem owns its bits (no contention). */
