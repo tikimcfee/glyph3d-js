@@ -298,9 +298,22 @@ export default class AgentTrail {
         return { agentId: hit[0], head: lane.head, count: lane.moments.length, following: lane.following };
     }
 
-    /** The corridors present, for a panel's agent selector — id + moment count + identity hue index. */
+    /**
+     * The corridors present, for the panel's trail LIST — everything a row needs in one call: id, moment
+     * count, identity color (the corridor-box hue), the head + whether it's live-following, and the time
+     * of the newest moment (for an "Xs ago" age). Ordered oldest-corridor first (creation order).
+     */
     agents() {
-        return [...this.lanes.entries()].map(([id, l]) => ({ id, count: l.moments.length, hueIdx: l.hueIdx }));
+        const pal = this.cfg.corridorPalette;
+        return [...this.lanes.entries()].map(([id, l]) => ({
+            id,
+            count: l.moments.length,
+            hueIdx: l.hueIdx,
+            color: '#' + ((pal[l.hueIdx % pal.length] >>> 0) & 0xffffff).toString(16).padStart(6, '0'),
+            head: l.head,
+            following: l.following,
+            lastTs: l.moments.length ? l.moments[l.moments.length - 1].ts : 0,
+        }));
     }
 
     /**

@@ -1,16 +1,20 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 
 /**
- * AgentTrailPanel — the moment-stream viewport. A 2D scrolling log onto the same AgentTrail the
- * in-world carousel drives: one row per MOMENT of the selected corridor (oldest → newest), with its
- * verb, target, and age. It is a pure VIEWPORT — it owns no trail state; it reads getStream/headState
- * and fires the same `trail.*` bus the 3D deck obeys, so the list view and the spatial deck stay one
- * source of truth (the [[project_2d_companion_views]] model: the grid owns the deck, the panel scrubs it).
+ * AgentTrailPanel — the trail browser. A master-detail view onto the AgentTrail: a LIST of agent
+ * corridors up top, and underneath it a detail pane for the selected one — a scrub bar plus the
+ * scrollable stream of that trail's turns (oldest → newest). Picking a list row sets the active trail.
  *
- * Each corridor keeps its own HEAD (the front-slot moment), live-following the newest until you scrub
- * it back. Paging moves that head and the cards ease to their slots — NOTHING here moves the camera.
+ * A list (not tabs) because subagents multiply: a dozen corridors is a scrollable column, where tabs
+ * would run off the panel's edge. Both regions scroll to fit the container — the agent list caps its
+ * height and scrolls; the turn stream fills the rest and scrolls.
  *
- *   click a row        → trail.page <agent> <n>   (rotate that moment to the front)
+ * It owns no trail state; it reads agents()/getStream() and fires the same `trail.*` bus the 3D deck
+ * obeys (the [[project_2d_companion_views]] model: the grid owns the deck, the panel scrubs it). Each
+ * corridor live-follows its newest moment until you scrub back; NOTHING here moves the camera.
+ *
+ *   click an agent row → select that trail (detail pane follows)
+ *   click a turn row   → trail.page <agent> <n>   (rotate that moment to the front)
  *   ⏮ ◀ ▶ ⏭            → trail.page first|prev|next|last
  *   ✕ clear            → trail.clear <agent>
  *
@@ -45,20 +49,23 @@ const S = {
         display: 'flex', alignItems: 'center', gap: 8,
     },
     title: { flex: '1 1 auto', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-    btn: (on) => ({
-        flex: '0 0 auto', cursor: 'pointer', padding: '0 5px', borderRadius: 3,
-        color: on ? '#7ad7a0' : '#7c8596', whiteSpace: 'nowrap',
+    btn: { flex: '0 0 auto', cursor: 'pointer', padding: '0 5px', borderRadius: 3, color: '#7c8596', whiteSpace: 'nowrap' },
+
+    // -- master: the agent-corridor list (capped height, scrolls when subagents pile up) --
+    agents: { flex: '0 1 auto', maxHeight: '40%', overflowY: 'auto', borderBottom: '1px solid #1b1f29', padding: '3px 0' },
+    agentRow: (on) => ({
+        display: 'flex', alignItems: 'center', gap: 7, padding: '3px 8px',
+        cursor: 'pointer', userSelect: 'none',
+        borderLeft: `2px solid ${on ? '#6c8fc0' : 'transparent'}`,
+        background: on ? 'rgba(120,150,200,0.12)' : 'transparent',
     }),
-    tabs: {
-        display: 'flex', gap: 4, padding: '6px 8px', flex: '0 0 auto',
-        borderBottom: '1px solid #1b1f29', overflowX: 'auto',
-    },
-    tab: (on) => ({
-        cursor: 'pointer', padding: '1px 7px', borderRadius: 3, whiteSpace: 'nowrap',
-        color: on ? '#dfe3ea' : '#7c8596',
-        background: on ? 'rgba(120,150,200,0.14)' : 'transparent',
-        border: `1px solid ${on ? '#36507a' : 'transparent'}`,
-    }),
+    adot: { flex: '0 0 auto', fontSize: 9 },
+    aid: { flex: '1 1 auto', minWidth: 0, color: '#dfe3ea', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+    acount: { flex: '0 0 auto', color: '#7c8596', fontSize: 11 },
+    alive: { flex: '0 0 auto', color: '#7ad79a', fontSize: 11 },
+    aage: { flex: '0 0 auto', color: '#5a616c', fontSize: 11, minWidth: 26, textAlign: 'right' },
+
+    // -- detail: scrub bar + the selected trail's turn stream --
     scrub: {
         display: 'flex', alignItems: 'center', gap: 2, padding: '4px 8px', flex: '0 0 auto',
         borderBottom: '1px solid #1b1f29',
@@ -69,7 +76,7 @@ const S = {
     }),
     pos: { flex: '1 1 auto', textAlign: 'center', color: '#7c8596', fontSize: 11 },
     live: { color: '#7ad79a' },
-    list: { overflowY: 'auto', flex: '1 1 auto', padding: '4px 0' },
+    list: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '4px 0' },
     msg: { padding: '12px', color: '#7c8596' },
     row: (on) => ({
         display: 'flex', alignItems: 'center', gap: 7, padding: '3px 8px',
@@ -94,16 +101,15 @@ export default function AgentTrailPanel({ client }) {
     const trail = () => client?.ctx?.agentTrail || null;
     const [agents, setAgents] = useState([]);
     const [selected, setSelected] = useState(null);
-    const [head, setHead] = useState(null);     // { agentId, head, count, following } for the selected corridor
     const [stream, setStream] = useState([]);
     const focusRef = useRef(null);
 
     // Roster + selection: sticky to the user's pick, else the newest corridor. Recomputed each refresh.
     const refresh = useCallback(() => {
         const t = trail();
-        if (!t) { setAgents([]); setStream([]); setHead(null); return; }
+        if (!t) { setAgents([]); setStream([]); return; }
         const list = t.agents?.() || [];
-        setAgents(list);   // new array ref each poll → the stream/head effect below re-reads, staying live
+        setAgents(list);   // new array ref each poll → the stream effect below re-reads, staying live
         setSelected((cur) => {
             const has = (id) => id && list.some((a) => a.id === id);
             return has(cur) ? cur : (list.length ? list[list.length - 1].id : null);
@@ -118,57 +124,65 @@ export default function AgentTrailPanel({ client }) {
         return () => { off?.(); clearInterval(t); };
     }, [client, refresh]);
 
-    // Re-read the selected corridor's stream + head whenever the selection or roster moves (the poll
-    // hands us a fresh `agents` array, so this also re-reads on every tick — keeping the head live).
+    // Re-read the selected trail's stream whenever the selection or roster moves (the poll hands us a
+    // fresh `agents` array, so this also re-reads on every tick — keeping the stream + head live).
     useEffect(() => {
         const t = trail();
-        if (!selected || !t) { setStream([]); setHead(null); return; }
-        setStream(t.getStream?.(selected) || []);
-        setHead(t.headState?.(selected) || null);
+        setStream(selected && t ? (t.getStream?.(selected) || []) : []);
     }, [selected, agents, client]);
 
-    // Keep the focused row in view as the head scrubs.
-    useEffect(() => { focusRef.current?.scrollIntoView?.({ block: 'nearest' }); }, [head?.head, selected]);
+    const sel = agents.find((a) => a.id === selected) || null;
+
+    // Keep the focused turn in view as the head scrubs.
+    useEffect(() => { focusRef.current?.scrollIntoView?.({ block: 'nearest' }); }, [sel?.head, selected]);
 
     const exec = useCallback((cmd) => client?.router?.execute(cmd), [client]);
     const after = useCallback((cmd) => { const r = exec(cmd); refresh(); return r; }, [exec, refresh]);
 
-    // Move the selected corridor's head (keyword or 1-based index). No camera, no dock — just paging.
+    // Move the selected trail's head (keyword or 1-based index). No camera, no dock — just paging.
     const page = useCallback((arg) => { if (selected) after(['trail.page', selected, String(arg)]); }, [selected, after]);
     const onRow = useCallback((index) => { if (selected) after(['trail.page', selected, String(index + 1)]); }, [selected, after]);
 
-    const atFirst = !head || head.head <= 0;
-    const atLast = !head || head.head >= (head.count - 1);
+    const atFirst = !sel || sel.head <= 0;
+    const atLast = !sel || sel.head >= (sel.count - 1);
 
     return (
         <div style={S.content}>
             <div style={S.header}>
-                <span style={S.title}>Trail · moments</span>
-                {selected && (
-                    <span style={S.btn(false)} onClick={() => after(['trail.clear', selected])}
-                        title="Clear this corridor (trail.clear)">✕ clear</span>
+                <span style={S.title}>Trails{agents.length ? ` (${agents.length})` : ''}</span>
+                {sel && (
+                    <span style={S.btn} onClick={() => after(['trail.clear', selected])}
+                        title={`Clear ${selected} (trail.clear)`}>✕ clear</span>
                 )}
             </div>
 
-            {agents.length > 1 && (
-                <div style={S.tabs}>
-                    {agents.map((a) => (
-                        <span key={a.id} style={S.tab(a.id === selected)} onClick={() => setSelected(a.id)}
-                            title={`${a.id} — ${a.count} moment(s)`}>{a.id} ({a.count})</span>
-                    ))}
-                </div>
-            )}
+            {/* master — the agent-corridor list */}
+            <div style={S.agents}>
+                {agents.length === 0 && <div style={S.msg}>No agent trails yet. Activity decks a corridor here.</div>}
+                {agents.map((a) => (
+                    <div key={a.id} style={S.agentRow(a.id === selected)} onClick={() => setSelected(a.id)}
+                        title={`${a.id} — ${a.count} moment(s)`}>
+                        <span style={{ ...S.adot, color: a.color }}>●</span>
+                        <span style={S.aid}>{a.id}</span>
+                        <span style={S.acount}>{a.count}</span>
+                        {a.following && <span style={S.alive}>live</span>}
+                        <span style={S.aage}>{ago(a.lastTs)}</span>
+                    </div>
+                ))}
+            </div>
 
+            {/* detail — scrub bar for the selected trail */}
             <div style={S.scrub}>
                 <span style={S.nav(atFirst)} onClick={() => !atFirst && page('first')} title="Oldest (trail.page first)">⏮</span>
                 <span style={S.nav(atFirst)} onClick={() => !atFirst && page('prev')} title="Older (trail.page prev)">◀</span>
                 <span style={S.pos}>
-                    {head ? <>moment {head.head + 1} / {head.count}{head.following && <span style={S.live}> · live</span>}</> : '—'}
+                    {sel ? <>moment {sel.head + 1} / {sel.count}{sel.following && <span style={S.live}> · live</span>}</> : '—'}
                 </span>
                 <span style={S.nav(atLast)} onClick={() => !atLast && page('next')} title="Newer (trail.page next)">▶</span>
                 <span style={S.nav(atLast)} onClick={() => !atLast && page('last')} title="Newest — resume live (trail.page last)">⏭</span>
             </div>
 
+            {/* detail — the selected trail's turn stream */}
             <div style={S.list}>
                 {stream.length === 0 && (
                     <div style={S.msg}>No moments yet. An agent's tool calls and replies deck here as they arrive.</div>
