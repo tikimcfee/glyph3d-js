@@ -37,12 +37,12 @@ ok(dock.has('t1') && dock.has('t2'), 'precondition: two windows docked');
 ok(g1.parent === dock, 'precondition: a docked grid is reparented into the bar');
 
 dock.spotlight('t1');
-ok(dock.focusedId === 't1', 'precondition: t1 is the focused (spotlit) tile');
+ok(dock.isFramed('t1') && dock.focusedPane === 't1', 'precondition: t1 is the framed (spotlit) pane');
 
-// ---- close the FOCUSED docked window → dismiss cascades ----
-ok(dock.dismiss('t1') === true, 'dismiss(focused): returns true');
+// ---- close the FRAMED docked window → dismiss cascades ----
+ok(dock.dismiss('t1') === true, 'dismiss(framed): returns true');
 ok(!dock.has('t1'), 'dismiss: entry dropped');
-ok(dock.focusedId === null, 'dismiss(focused): focus cleared');
+ok(dock.paneTree === null && dock.focusedPane === null, 'dismiss(framed): frame emptied');
 ok(g1.parent !== dock, 'dismiss: orphan lifted out of the bar (no dead child left animating)');
 ok(!dock.attentionManager.docks.has('t1'), 'dismiss: AttentionManager.docks entry dropped');
 ok(!dock.tiles.has(g1), 'dismiss: removed from the camera-speed tiles set');

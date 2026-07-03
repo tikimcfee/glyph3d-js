@@ -27,6 +27,7 @@ import registerRepoCommands from './repoCommands.js';
 import registerPanelCommands from './panelCommands.js';
 import registerDockCommands from './dockCommands.js';
 import registerWindowCommands from './windowCommands.js';
+import registerPaneCommands from './paneCommands.js';
 import registerRelayCommands from './relayCommands.js';
 import registerSettingsCommands from './settingsCommands.js';
 import registerAttentionCommands from './attentionCommands.js';
@@ -73,6 +74,7 @@ export function registerAllCommands(router) {
     registerPanelCommands(router);
     registerDockCommands(router);
     registerWindowCommands(router);
+    registerPaneCommands(router);
     registerRelayCommands(router);
     registerSettingsCommands(router);
     registerAttentionCommands(router);

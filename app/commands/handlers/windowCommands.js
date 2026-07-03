@@ -12,7 +12,7 @@
  * window.pin raises a window into the CameraDock's root VIEW-FRAME — camera-front-locked,
  * contain-fit to a configurable rect of the drawing frame (margin + offset), recomputed
  * live. Pin and dock-spotlight are the SAME state; pin just ensures the window is docked
- * first. It carries NO zoom of its own — the frame owns the size (see CameraDock._placeFrame).
+ * first. It carries NO zoom of its own — the frame owns the size (see CameraDock._placePane).
  */
 
 import { resolveSurface } from './dockCommands.js';
@@ -76,7 +76,7 @@ export default function registerWindowCommands(router) {
         // window first docks it, then raises it into the frame. The Pin button is driven by
         // CameraDock.spotlight, so it stays truthful whoever set the occupancy (button, click, CLI).
         const kind = ctx.registry?.get?.(id)?.type;
-        const isFramed = dock.focusedId === id;
+        const isFramed = dock.isFramed?.(id) ?? false;
         // Explicit on|off is the idempotent state-setter (CLI/RPC); no arg toggles (the button).
         const arg = String(args[1] ?? '').toLowerCase();
         const want = ['on', 'true', '1'].includes(arg) ? true

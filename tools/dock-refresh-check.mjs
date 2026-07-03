@@ -67,7 +67,7 @@ const apparentH = (g) => g.scale.x * (g.rows * LH); // world panel height
   ok(Math.abs(apparentH(g) - barA) < 1e-6, `bar re-resize to same dims is a no-op`);
 }
 
-// frameScale mirrors CameraDock._placeFrame: contain-fit into the per-side-margin-inset frame rect,
+// frameScale mirrors CameraDock._placePane (single leaf): contain-fit into the margin-inset frame rect,
 // pulled in by frameDistFrac. The occupant's RENDERED scale must equal this — no stored size, no zoom.
 const cl = (v) => Math.min(Math.max(v, 0), 0.49);
 const innerW = (d) => d._viewW * d.frameW * (1 - cl(d.frameMarginLeft) - cl(d.frameMarginRight));
@@ -211,19 +211,16 @@ const allUnique = (d) => new Set(slotsOf(d)).size === d.entries.size;
 
 for (const mode of ['linear', 'radial']) {
   const d = slotDock(4);
-  d.setLayout(mode); // triggers _relayout, no focus
-  ok(allUnique(d), `${mode}: 4 tiles, no focus → unique slots [${slotsOf(d)}]`);
+  d.setLayout(mode); // triggers _relayout, nothing framed
+  ok(allUnique(d) && slotsOf(d).length === 4, `${mode}: 4 bar tiles → unique dense slots [${slotsOf(d)}]`);
 
-  d.focusedId = 's1'; // spotlight one — used to leave it with a stale, colliding slot
-  d._relayout();
-  ok(allUnique(d), `${mode}: spotlit s1 → still unique slots [${slotsOf(d)}]`);
-  const focusSlot = d.entries.get('s1').slot;
-  const barSlots = [...d.entries.values()].filter((e) => e.id !== 's1').map((e) => e.slot);
-  ok(!barSlots.includes(focusSlot), `${mode}: focused slot ${focusSlot} not shared by any bar tile`);
+  d.spotlight('s1'); // frame s1 → it LEAVES the bar (framed windows aren't bar tiles)
+  const barSlots = [...d.entries.values()].filter((e) => !d.isFramed(e.id)).map((e) => e.slot);
+  ok(d.isFramed('s1'), `${mode}: s1 is framed`);
+  ok(new Set(barSlots).size === 3, `${mode}: 3 bar tiles, unique dense slots [${barSlots}] (framed s1 excluded)`);
 
-  d.focusedId = null; // un-spotlight — returns to the bar, slots still clean
-  d._relayout();
-  ok(allUnique(d), `${mode}: un-spotlit → unique slots preserved [${slotsOf(d)}]`);
+  d.spotlight('s1'); // toggle off → s1 returns to the bar, slots re-densify
+  ok(!d.isFramed('s1') && allUnique(d), `${mode}: un-framed → s1 back in the bar, slots clean [${slotsOf(d)}]`);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

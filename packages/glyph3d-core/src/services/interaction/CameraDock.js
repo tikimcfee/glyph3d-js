@@ -15,12 +15,12 @@
  * as a uniform icon strip and nothing slides off the sides. Zoom lives at home/focus,
  * never in the bar.
  *
- * A spotlit (or PINNED) tile leaves the bar and OCCUPIES the root VIEW-FRAME — a
- * configurable rect of the camera frustum (full-screen, or a 2/3 / left / right pane)
- * the window CONTAIN-FITS into with a margin. Pin and dock-spotlight are the SAME state
- * ("this window holds the frame"); the frame's size is a pure function of (frustum,
- * frame rect, live grid extent), refit live as the canvas resizes — zoom never bleeds
- * past its edges. This is the seam future SUBFRAMES partition. See _frameRect / _placeFrame.
+ * A framed tile leaves the bar and enters the VIEW-FRAME — a configurable rect of the camera
+ * frustum (full-screen, or a 2/3 / left / right pane). The frame's occupancy is a {@link PaneTree}:
+ * a binary-BSP tiling where each leaf is one window resized to fill its sub-rect. A SINGLE-leaf
+ * tree fills the whole frame — the old single-occupant "pin / spotlight" state, unchanged. Multi-
+ * pane splits (splitPane) grow the tree; the frame's size per pane is a pure function of (frustum,
+ * frame rect, live grid extent), refit live as the canvas resizes. See _frameRect / _placePane.
  *
  * How it rides the camera: this node is itself a THREE.Object3D added to the
  * scene. Each frame `update(dt, camera)` parks it a fixed `distance` ahead of
@@ -59,17 +59,13 @@ import * as THREE from 'three';
 import { SpatialAnimator } from '../spatial/SpatialAnimator.js';
 import { flowBoxes } from '../../collections/layouts/flowBoxes.js';
 import { BORDER_FLAGS } from '../../collections/panelMaterial.js';
+import PaneTree from './PaneTree.js';
 
 const _forward = new THREE.Vector3();
 const _z = new THREE.Vector3(0, 0, 1);
 const _dir = new THREE.Vector3();
 const _off = new THREE.Vector3();
 const DEG2RAD = Math.PI / 180;
-
-// Focus-placeholder animation. A spotlit tile leaves a ghost outline in its held-open slot; this
-// drives the subtle breathe that says "this is where it lives; it returns here".
-const GHOST_PULSE_HZ = 0.5;          // outline opacity breathe (cycles/sec)
-const GHOST_RENDER_ORDER = 1000;     // HUD affordance — drawn over the tiles, depth-test off
 
 // Per-tile identity hue — AUTO-GENERATED per docked window, not a fixed palette. A golden-angle
 // rotation (137.5°) walks the hue circle so successive windows land maximally far apart: distinct for
@@ -139,7 +135,7 @@ export class CameraDock extends THREE.Object3D {
                   frameMarginLeft = 0.06, frameMarginRight = 0.06, frameMarginTop = 0.06, frameMarginBottom = 0.06,
                   frameDistFrac = 0.7,
                   animDur = 0.167, yawRate = 14,
-                  ghostColor = 0x8ab4ff, ghostOpacity = 0.55, borderWidth = 1.5, borderStrength = 1,
+                  borderWidth = 1.5, borderStrength = 1,
                   layout = 'radial' } = {}) {
         super();
         this.name = 'camera-dock';
@@ -175,22 +171,20 @@ export class CameraDock extends THREE.Object3D {
                                             // identical in size, just nearer)
         this.animDur = animDur;       // tile slide/scale duration (s) — a curt, polite snap
         this.layoutMode = layout;     // 'radial' (hemisphere, default) | 'linear'
-        this.ghostColor = ghostColor;     // fallback outline color (entries get a palette hue)
-        this.ghostOpacity = ghostOpacity; // its peak opacity (breathes below this)
         this.borderWidth = borderWidth;       // docked window's panel-border thickness (screen pixels)
         this.borderStrength = borderStrength; // docked window's panel-border intensity (0 = off)
         this._colorCursor = 0;            // golden-angle step counter — each docked window gets a fresh spread hue
         this._orderSeq = 0;               // monotonic sort-key source for interactive locks (restore overrides per-tile)
 
-        /** The tile currently raised into the focus area (centered + enlarged, still
-         *  camera-locked), or null. Toggled by spotlight(). Its bar slot stays RESERVED and a
-         *  ghost placeholder stands in for it — see _showGhost. */
-        this.focusedId = null;
+        /** The FRAME's occupancy: a PaneTree tiling the view-frame rect into panes, each leaf a
+         *  docked window id. null = nothing framed (all entries are bar tiles). A single-leaf tree
+         *  is the old single-occupant "spotlight/pin" — it fills the whole frame, identically.
+         *  @type {PaneTree|null} */
+        this.paneTree = null;
 
-        /** The focus placeholder — a slot-box outline parked in the focused tile's held-open slot.
-         *  Built on first spotlight and reused (at most one tile is focused). @type {Object|null} */
-        this._ghost = null;
-        this._ghostClock = 0;  // seconds, advances each update() to drive the breathe
+        /** The ACTIVE pane (keyboard target / which leaf is "current") within the tree, or null.
+         *  pane.focus walks it; splits follow it; the Pin button tracks it. @type {string|null} */
+        this.focusedPane = null;
 
         this.animator = new SpatialAnimator();
 
@@ -213,15 +207,18 @@ export class CameraDock extends THREE.Object3D {
 
     // ===================== membership =====================
 
-    /** @param {string} id @returns {boolean} */
+    /** @param {string} id @returns {boolean} docked at all (bar tile OR framed pane). */
     has(id) { return this.entries.has(id); }
+
+    /** @param {string} id @returns {boolean} tiled in the view-frame (a pane), vs a loose bar tile. */
+    isFramed(id) { return this.paneTree?.has(id) ?? false; }
 
     /** @returns {Array<{id:string, slot:number, layout:string, focused:boolean, zoom:number}>} */
     list() {
         // Sorted by slot (the order-derived display rank), so list order == bar order — what
-        // persistence serializes and dock.list prints.
+        // persistence serializes and dock.list prints. `focused` now means "framed" (in a pane).
         return [...this.entries.values()].sort((a, b) => a.slot - b.slot).map((e) => ({
-            id: e.id, slot: e.slot, layout: this.layoutMode, focused: e.id === this.focusedId,
+            id: e.id, slot: e.slot, layout: this.layoutMode, focused: this.isFramed(e.id),
             zoom: e.grid?.scaleModel ? e.grid.scaleModel.zoomScalar : 1,
         }));
     }
@@ -235,22 +232,85 @@ export class CameraDock extends THREE.Object3D {
      */
     spotlight(id) {
         if (!this.entries.has(id)) return false;
-        const prev = this.focusedId;
-        // Toggle off: the occupant returns to its bar slot, its Pin button unlights.
-        if (prev === id) {
-            this.focusedId = null;
+        const framed = this.paneTree ? this.paneTree.leaves() : [];
+        // Toggle off: `id` is already the SOLE frame occupant → unframe it back to the bar.
+        if (framed.length === 1 && framed[0] === id) {
+            this._setFrame(null);
             this.entries.get(id)?.grid?.setControlActive?.('pin', false);
             this._relayout();
             return 'returned';
         }
-        // Move the frame to `id`: the previous occupant (if any) returns to the bar; the new one
-        // lights its Pin button. Pin and spotlight are ONE state, so the button tracks frame
-        // occupancy no matter who set it (Pin button, tile click, CLI).
-        if (prev) this.entries.get(prev)?.grid?.setControlActive?.('pin', false);
-        this.focusedId = id;
+        // Frame `id` as the SOLE occupant: any previously-framed panes return to the bar (their Pin
+        // buttons unlight); a one-leaf tree fills the whole frame — the old single-occupant behavior.
+        // Multi-pane layouts are built deliberately with splitPane(), not by spotlighting.
+        for (const f of framed) this.entries.get(f)?.grid?.setControlActive?.('pin', false);
+        this._setFrame(PaneTree.leaf(id));
+        this.focusedPane = id;
         this.entries.get(id)?.grid?.setControlActive?.('pin', true);
         this._relayout();
         return 'spotlit';
+    }
+
+    /** Replace the frame's pane tree, clearing focus when it empties. @private */
+    _setFrame(tree) {
+        this.paneTree = tree && !tree.isEmpty() ? tree : null;
+        if (!this.paneTree) this.focusedPane = null;
+    }
+
+    /**
+     * Split the ACTIVE pane in two, tiling `newId` (a docked window) into the new leaf — the
+     * multi-pane grower (tmux split-window / i3 split). `newId` moves from the bar INTO the frame;
+     * focus follows it. @param {'x'|'y'} axis @param {string} newId @param {{ratio?:number,before?:boolean}} [opts]
+     * @returns {boolean}
+     */
+    splitPane(axis, newId, opts = {}) {
+        if (!this.paneTree || !this.focusedPane) return false; // need a live frame to split
+        if (!this.entries.has(newId) || this.paneTree.has(newId)) return false;
+        if (!this.paneTree.split(this.focusedPane, axis, newId, opts)) return false;
+        this.focusedPane = newId;
+        this.entries.get(newId)?.grid?.setControlActive?.('pin', true);
+        this._relayout();
+        return true;
+    }
+
+    /** Move the ACTIVE pane focus to the geometric neighbor in `dir`; returns the new active id.
+     *  @param {'left'|'right'|'up'|'down'} dir @returns {string|null} */
+    focusPane(dir) {
+        if (!this.paneTree || !this.focusedPane) return null;
+        const next = this.paneTree.neighbor(this.focusedPane, dir);
+        if (next) this.focusedPane = next;
+        return this.focusedPane;
+    }
+
+    /** Grow the ACTIVE pane by `delta` along `axis` (proportional; siblings give up space).
+     *  @param {'x'|'y'} axis @param {number} delta @returns {boolean} */
+    resizePane(axis, delta) {
+        if (!this.paneTree || !this.focusedPane) return false;
+        if (!this.paneTree.resize(this.focusedPane, axis, delta)) return false;
+        this._relayout();
+        return true;
+    }
+
+    /** Exchange two panes' windows in place (positions unchanged). @param {string} a @param {string} b @returns {boolean} */
+    swapPanes(a, b) {
+        if (!this.paneTree || !this.paneTree.swap(a, b)) return false;
+        this._relayout();
+        return true;
+    }
+
+    /**
+     * Un-frame a pane: remove `id` from the tree (its sibling collapses up, ratios preserved) and
+     * return it to the bar. Focus moves to the collapsed sibling. Empties the frame at the last leaf.
+     * @param {string} id @returns {boolean}
+     */
+    unframePane(id) {
+        if (!this.paneTree?.has(id)) return false;
+        const next = this.paneTree.close(id);
+        if (this.paneTree.isEmpty()) this._setFrame(null);
+        else this.focusedPane = next;
+        this.entries.get(id)?.grid?.setControlActive?.('pin', false);
+        this._relayout();
+        return true;
     }
 
     /**
@@ -290,7 +350,7 @@ export class CameraDock extends THREE.Object3D {
         if (!['distance', 'boxFrac', 'boxAspect', 'gapFrac', 'maxColumns', 'fillFrac', 'maxArcDeg',
               'maxRiseDeg', 'bottomFrac', 'frameW', 'frameH', 'frameX', 'frameY',
               'frameMarginLeft', 'frameMarginRight', 'frameMarginTop', 'frameMarginBottom',
-              'frameDistFrac', 'animDur', 'yawRate', 'ghostOpacity', 'borderWidth', 'borderStrength'].includes(key)) return false;
+              'frameDistFrac', 'animDur', 'yawRate', 'borderWidth', 'borderStrength'].includes(key)) return false;
         if (!Number.isFinite(value)) return false;
         this[key] = value;
         this._relayout();
@@ -356,9 +416,9 @@ export class CameraDock extends THREE.Object3D {
             order,
             slot: this.entries.size, // provisional; _relayout re-ranks by `order` immediately below
             quatTarget: new THREE.Quaternion(),
-            // This window's identity hue — painted as its panel border AND its ghost outline, so the
-            // tile in the bar and its placeholder read as the same window by color.
-            ghostColor: this._identityColor(this._colorCursor++),
+            // This window's identity hue — painted as its in-shader panel border, so each docked
+            // window reads as a distinct color whether it's a bar tile or a frame pane.
+            identityColor: this._identityColor(this._colorCursor++),
         };
 
         // Reparent preserving world transform — the tile stays put for this frame,
@@ -383,7 +443,7 @@ export class CameraDock extends THREE.Object3D {
 
         // Paint the window's identity hue onto its panel edge — the in-shader border (no extra
         // object). The DOCKED bit makes it show; it wears this hue while docked, release() clears it.
-        grid.setBorder?.({ color: entry.ghostColor, width: this.borderWidth, intensity: this.borderStrength });
+        grid.setBorder?.({ color: entry.identityColor, width: this.borderWidth, intensity: this.borderStrength });
         grid.setBorderFlag?.(BORDER_FLAGS.DOCKED, true);
 
         this._relayout();
@@ -404,7 +464,11 @@ export class CameraDock extends THREE.Object3D {
         e.grid.setBorderFlag?.(BORDER_FLAGS.DOCKED, false); // drop the dock identity — leaving the bar
         this.entries.delete(id);
         this.tiles.delete(e.grid); // back to world content for the camera the moment it heads home
-        if (this.focusedId === id) { this.focusedId = null; e.grid?.setControlActive?.('pin', false); }
+        if (this.paneTree?.has(id)) {
+            const next = this.paneTree.close(id);       // collapse the sibling up, ratios preserved
+            if (this.paneTree.isEmpty()) this._setFrame(null); else this.focusedPane = next;
+            e.grid?.setControlActive?.('pin', false);
+        }
         this.attentionManager?.docks?.delete(id);
 
         // Home parent may have been pruned (file closed while docked) — fall back to
@@ -440,7 +504,11 @@ export class CameraDock extends THREE.Object3D {
         this.entries.delete(id);
         this._releasing.delete(id);            // abandon any in-flight release of the same id
         this.tiles.delete(e.grid);
-        if (this.focusedId === id) { this.focusedId = null; e.grid?.setControlActive?.('pin', false); }
+        if (this.paneTree?.has(id)) {
+            const next = this.paneTree.close(id);       // collapse the sibling up, ratios preserved
+            if (this.paneTree.isEmpty()) this._setFrame(null); else this.focusedPane = next;
+            e.grid?.setControlActive?.('pin', false);
+        }
         this.attentionManager?.docks?.delete(id);
 
         // The grid is being disposed, so stop any tween still writing to it and lift it out of the
@@ -533,75 +601,26 @@ export class CameraDock extends THREE.Object3D {
         };
     }
 
-    /** Place the frame occupant (the pinned/spotlit window): contain-fit the WHOLE window into the
-     *  root frame rect (margin + offset), centered, pulled toward the eye (frameDistFrac) so it
-     *  renders over the bar. Size is a PURE FUNCTION of (frustum, frame rect, live grid extent) —
-     *  zoom is DIVIDED OUT (_animateTile re-divides user), so the frame owns the size and the window
-     *  always sits wholly inside its pane (no zoom bleed past the edges; tall files pillarbox, wide
-     *  terminals letterbox). A resize / cols change reshapes content inside the unchanged pane. */
-    _placeFrame(e) {
+    /** Place ONE pane: contain-fit its window into the normalized sub-rect `r01` (= {x,y,w,h} in
+     *  [0,1], y-up, from PaneTree.rects) mapped into the view-frame rect. A single-leaf tree has
+     *  r01 = the unit rect, so this reduces EXACTLY to the old whole-frame occupant placement. Zoom
+     *  is DIVIDED OUT (the frame owns the size; _animateTile re-divides user), so a pane always sits
+     *  wholly inside its rect — tall files pillarbox, wide terminals letterbox. Pulled toward the eye
+     *  (frameDistFrac) so panes render over the bar. Contain-fit is the "preview" policy for now —
+     *  resize-to-fill (reshape cols/rows to the sub-rect) is the next pass. */
+    _placePane(e, r01) {
         const fd = this.frameDistFrac;
-        const r = this._frameRect();
+        const fr = this._frameRect();                                  // {cx,cy,w,h} dock-local
+        const subW = fr.w * r01.w, subH = fr.h * r01.h;                // this pane's world size
+        const subCx = (fr.cx - fr.w / 2) + (r01.x + r01.w / 2) * fr.w; // its center in the frame (y-up)
+        const subCy = (fr.cy - fr.h / 2) + (r01.y + r01.h / 2) * fr.h;
         const ext = this._extentOf(e);
-        const contentW = Math.max(2 * Math.abs(ext.cx), 1e-3); // top-left-anchored content width
+        const contentW = Math.max(2 * Math.abs(ext.cx), 1e-3);         // top-left-anchored content width
         const contentH = Math.max(ext.h, 1e-3);
-        const eff = Math.min(r.w / contentW, r.h / contentH) * fd; // contain-fit, depth-compensated
-        this._animateTile(e, r.cx * fd, r.cy * fd, this.distance * (1 - fd), eff);
+        const eff = Math.min(subW / contentW, subH / contentH) * fd;   // contain-fit, depth-compensated
+        this._animateTile(e, subCx * fd, subCy * fd, this.distance * (1 - fd), eff);
         const d = this.attentionManager?.docks?.get(e.id);
         if (d) d.offset = { slot: 'frame' };
-    }
-
-    /** Lazily build the focus placeholder: a slot-box outline. One per dock (at most one tile is
-     *  focused), reused across spotlights. A HUD affordance — depth-test off, drawn over the tiles,
-     *  pick-inert (isMarker). @private */
-    _ensureGhost() {
-        if (this._ghost) return this._ghost;
-
-        const boxMat = new THREE.LineBasicMaterial({ color: this.ghostColor });
-        boxMat.transparent = true; boxMat.depthTest = false; boxMat.depthWrite = false;
-
-        // Unit rectangle (XY plane, centered) as a closed line loop — scaled to the slot box each
-        // relayout, so a single geometry serves any box size.
-        const r = 0.5;
-        const boxGeo = new THREE.BufferGeometry().setFromPoints([
-            new THREE.Vector3(-r, -r, 0), new THREE.Vector3(r, -r, 0),
-            new THREE.Vector3(r, r, 0), new THREE.Vector3(-r, r, 0), new THREE.Vector3(-r, -r, 0),
-        ]);
-        const box = new THREE.Line(boxGeo, boxMat);
-        box.name = 'dock-focus-ghost';
-        box.renderOrder = GHOST_RENDER_ORDER;
-        box.userData.isMarker = true;
-        this.add(box);
-
-        this._ghost = { box, boxMat };
-        return this._ghost;
-    }
-
-    /** Stand the placeholder in the focused tile's held-open slot. boxW/boxH are the slot-box dims
-     *  (the tile's footprint); faceDir tilts the outline to face the eye like the tile did
-     *  (null = flat, for the linear row); color is the focused window's identity hue, so the
-     *  placeholder matches that window's panel border. @private */
-    _showGhost(slot, boxW, boxH, faceDir, color) {
-        const g = this._ensureGhost();
-        g.box.visible = true;
-        g.box.position.set(slot.x, slot.y, slot.z);
-        g.box.scale.set(boxW, boxH, 1);
-        if (faceDir) g.box.quaternion.setFromUnitVectors(_z, faceDir);
-        else g.box.quaternion.identity();
-        g.boxMat.color.set(color ?? this.ghostColor);
-    }
-
-    /** Hide the placeholder (nothing focused). @private */
-    _hideGhost() { if (this._ghost) this._ghost.box.visible = false; }
-
-    /** @private — free the placeholder's geometry + material. */
-    _disposeGhost() {
-        const g = this._ghost;
-        if (!g) return;
-        this.remove(g.box);
-        g.box.geometry.dispose();
-        g.boxMat.dispose();
-        this._ghost = null;
     }
 
     /** Animate one tile so its CONTENT CENTER sits at (sx,sy,sz) at the RENDERED scale `eff`.
@@ -626,33 +645,20 @@ export class CameraDock extends THREE.Object3D {
         this.animator.animateTo(e.grid, 'scale', eff / this._userOf(e), { duration: this.animDur });
     }
 
-    /** Pack the bar tiles into a row (or dome) of fixed-size slot boxes and place the
-     *  focused tile (if any) in the focus area. The focused tile is excluded from the row.
-     *  Each tile contain-fits its slot box, so footprint == box (uniform unless per-entity
-     *  overridden), independent of content size or zoom — the row packs as an even icon
-     *  strip and nothing slides off the sides. */
+    /** Pack the loose (non-framed) tiles into the bar row/dome, then tile the pane tree over the
+     *  view-frame rect. A window is either a BAR tile (an icon in the strip) or a FRAME pane (tiled,
+     *  reading head-on) — never both, so the bar excludes framed windows and packs only the rest.
+     *  Each bar tile contain-fits its fixed slot box (footprint == box, independent of content/zoom);
+     *  each pane contain-fits its sub-rect of the frame (single leaf == the whole frame). */
     _relayout() {
-        // Sort by `order` (the stable per-tile sort key), NOT raw Map insertion order — so a tile
-        // that re-adopted late on restore still sits in its saved position rather than at the end.
-        // Interactive locks get a monotonic order == lock sequence, so this is a no-op reorder there.
-        const all = [...this.entries.values()].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
-        if (all.length === 0) { this._hideGhost(); return; }
-
-        // Slot = each tile's position in the (order-sorted) entry set — assigned in THIS one place,
-        // before the bar/focus split, so every tile gets a UNIQUE label (focused included).
-        // Previously the bar renumbered 0..n-1 while the spotlit tile kept a stale number → two
-        // tiles could share a slot, and a shadowed tile silently ate its sibling's hover/wheel.
-        // Slots are LABELS (dock.list + session order); placement is by bar geometry / this sorted
-        // order, never by a stale e.slot — so numbering here changes no placement, only kills the
-        // collision and pins the saved sequence.
-        all.forEach((e, i) => { e.slot = i; });
-
-        // The focused tile keeps its slot RESERVED — neighbors don't shift when it lifts out. Every
-        // entry takes a bar slot; only the focused one renders as a ghost outline (a placeholder for
-        // where it returns) instead of the live grid. So `bar` is the full set and the placement
-        // branches per tile, rather than excluding the focused tile from packing.
-        const focused = this.focusedId ? this.entries.get(this.focusedId) : null;
-        const bar = all;
+        // Framed windows live in the frame, not the bar — the bar packs only the loose ones.
+        const framed = new Set(this.paneTree ? this.paneTree.leaves() : []);
+        // Sort by `order` (stable per-tile key) so a tile that re-adopted late on restore still sits
+        // in its saved position. Slots are dense 0..n-1 LABELS over the BAR set (dock.list order).
+        const bar = [...this.entries.values()]
+            .filter((e) => !framed.has(e.id))
+            .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+        bar.forEach((e, i) => { e.slot = i; });
 
         const rowY = -this._viewH * 0.5 * this.bottomFrac; // tile-CENTER row
         const gap = (this._viewH * this.boxFrac) * this.gapFrac;
@@ -702,13 +708,9 @@ export class CameraDock extends THREE.Object3D {
                     const sy = R * Math.sin(phi);
                     const sz = R * (1 - Math.cos(th) * cs);
                     _dir.set(-sx, -sy, R - sz).normalize();                          // toward the eye (0,0,R)
-                    if (e === focused) {
-                        this._showGhost({ x: sx, y: sy, z: sz }, boxes[i].w * f, boxes[i].h * f, _dir, focused.ghostColor);
-                    } else {
-                        this._animateTile(e, sx, sy, sz, scales[i] * f, _dir);
-                        const d = this.attentionManager?.docks?.get(e.id);
-                        if (d) d.offset = { slot: e.slot };
-                    }
+                    this._animateTile(e, sx, sy, sz, scales[i] * f, _dir);
+                    const d = this.attentionManager?.docks?.get(e.id);
+                    if (d) d.offset = { slot: e.slot };
                 });
             } else {
                 // Linear row, centered on x=0. Fit-to-width still guards genuine overflow (too
@@ -727,22 +729,20 @@ export class CameraDock extends THREE.Object3D {
                 bar.forEach((e, i) => {
                     const sx = cx + widths[i] * 0.5;
                     cx += widths[i] + gap;
-                    if (e === focused) {
-                        // Slot box shrinks with the fit-to-width factor too (widths[i] already has it).
-                        const boxH = boxes[i].h * (widths[i] / Math.max(boxes[i].w, 1e-9));
-                        this._showGhost({ x: sx, y: rowY, z: 0 }, widths[i], boxH, null, focused.ghostColor);
-                    } else {
-                        this._animateTile(e, sx, rowY, 0, scales[i]);
-                        const d = this.attentionManager?.docks?.get(e.id);
-                        if (d) d.offset = { slot: e.slot };
-                    }
+                    this._animateTile(e, sx, rowY, 0, scales[i]);
+                    const d = this.attentionManager?.docks?.get(e.id);
+                    if (d) d.offset = { slot: e.slot };
                 });
             }
         }
 
-        // ---- frame occupant (contain-fit into the root view-frame, pulled in front of the bar) ----
-        if (focused) this._placeFrame(focused);
-        else this._hideGhost();
+        // ---- frame: tile the pane tree over the view-frame rect (single leaf == the whole frame) ----
+        if (this.paneTree) {
+            for (const [id, r01] of this.paneTree.rects()) {
+                const e = this.entries.get(id);
+                if (e) this._placePane(e, r01);
+            }
+        }
     }
 
     /**
@@ -757,7 +757,7 @@ export class CameraDock extends THREE.Object3D {
     reflowTile(id) {
         const e = this.entries.get(id);
         if (!e) return false;
-        if (id === this.focusedId) this._placeFrame(e);
+        if (this.paneTree?.has(id)) this._placePane(e, this.paneTree.rects().get(id));
         else this._relayout();
         return true;
     }
@@ -792,27 +792,17 @@ export class CameraDock extends THREE.Object3D {
         const rate = Math.min(1, dt * this.yawRate); // crisp yaw to match the curter slide
         for (const e of this.entries.values()) e.grid.quaternion.slerp(e.quatTarget, rate);
         for (const e of this._releasing.values()) e.grid.quaternion.slerp(e.quatTarget, rate);
-
-        this._tickGhost(dt);
     }
 
-    /** Advance the focus placeholder's breathe — the outline pulses gently below ghostOpacity.
-     *  Driven here, not by the SpatialAnimator: it's a steady cosmetic cycle, not a one-shot tween. */
-    _tickGhost(dt) {
-        this._ghostClock += dt;
-        const g = this._ghost;
-        if (!g || !g.box.visible) return;
-        const breathe = 0.6 + 0.4 * (0.5 + 0.5 * Math.sin(this._ghostClock * GHOST_PULSE_HZ * 2 * Math.PI));
-        g.boxMat.opacity = this.ghostOpacity * breathe;
-    }
+    /** Serialize the frame's pane tree for persistence, or null if nothing is framed. */
+    serializeFrame() { return this.paneTree ? { tree: this.paneTree.serialize(), focused: this.focusedPane } : null; }
 
     dispose() {
         this.animator.dispose();
-        this._disposeGhost();
         this.entries.clear();
         this._releasing.clear();
         this.tiles.clear();
-        this.focusedId = null;
+        this._setFrame(null);
     }
 }
 

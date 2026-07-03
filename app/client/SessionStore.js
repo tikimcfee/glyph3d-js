@@ -204,9 +204,9 @@ export default class SessionStore {
     const docked = ws?.listDocked ? ws.listDocked() : [];
     if (docked.length) {
       const tiles = docked.map((s) => ({ id: s.id, zoom: (s.view || {}).zoom ?? 1 }));
-      // The frame occupant (pinned window) is a single dock-level fact — the id holding the root
-      // view-frame — not a per-surface flag. Persist it so a reload re-raises the same window.
-      dock3d = { layout: ctx.cameraDock?.layoutMode || 'linear', tiles, focused: ctx.cameraDock?.focusedId || null };
+      // The active frame pane — persisted so a reload re-raises the single-occupant pin. (Multi-pane
+      // split trees are re-framed as the active pane for now; full tree persistence is the next pass.)
+      dock3d = { layout: ctx.cameraDock?.layoutMode || 'linear', tiles, focused: ctx.cameraDock?.focusedPane || null };
     }
 
     return {
@@ -481,7 +481,7 @@ export default class SessionStore {
         if (v.zoom && v.zoom !== 1) { grid.setZoom?.(v.zoom); cd.reflowTile?.(s.id); }
         // Re-raise the saved frame occupant (pinned window) once it's a live tile — spotlight() fits
         // it into the root view-frame and lights its Pin button. A dock-level fact, applied once.
-        if (this._pendingFrameOccupant === s.id && cd.focusedId !== s.id) {
+        if (this._pendingFrameOccupant === s.id && cd.focusedPane !== s.id) {
           cd.spotlight(s.id);
           this._pendingFrameOccupant = null;
         }

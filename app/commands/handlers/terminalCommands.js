@@ -236,7 +236,7 @@ export default function registerTerminalCommands(router) {
         // (the dragger only fires the verb on an integer cell change).
         const from = `${grid.cols}x${grid.rows}`;
         const dock = ctx.cameraDock;
-        const where = dock?.has?.(id) ? (dock.focusedId === id ? ' [focus]' : ' [docked]') : '';
+        const where = dock?.has?.(id) ? (dock.focusedPane === id ? ' [focus]' : (dock.isFramed?.(id) ? ' [pane]' : ' [docked]')) : '';
 
         grid.resize(cols, rows);
 
