@@ -25,6 +25,7 @@ import * as THREE from 'three';
 import CodeGrid from './CodeGrid.js';
 import FrameGrid from './FrameGrid.js';
 import { HStack, VStack, ZStack } from './layouts/StackContainer.js';
+import { LAYOUT_SCHEMES } from './layouts/index.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import { classifyByExtension } from '../core/fileKind.js';
 import { decorateForAction } from './toolRegistry.js';
@@ -34,7 +35,12 @@ export const TRAIL_DEFAULTS = {
     pagerLerp: 9,               // rolodex carousel: per-card z-slot easing rate (higher = snappier); driven by update(dt)
     rowGap: 10,                 // VStack gap inside a moment: action headline → its info/parse columns
     colGap: 20,                 // HStack gap between a moment's columns (info, then parse-mapping(s))
-    corridorGap: 120,           // HStack gap between concurrent agents' corridors
+    // Corridor CLUSTER layout — the concurrent-agent corridors are bounds-leaves laid out by the SAME
+    // schemes the file tree uses (a corridor is opaque; its internal carousel is untouched). `packed`
+    // gives a square-ish mosaic instead of an ever-widening row; the whole cluster rests on the floor.
+    layout: 'packed',           // scheme name (LAYOUT_SCHEMES: packed | walk | district | jellyfish)
+    layoutOpts: { margin: 80 }, // per-scheme overrides — margin is the gap between corridor cells
+    floorY: 0,                  // world floor the cluster's bottom rests on (the file tree's convention)
     align: 0,                   // corridor cross-align: 0 = leading edge (tiny calls + big stacks share a left edge)
     columnAlign: false,         // ON → size the body columns down the deck (widest info, widest parse) so the aisle reads as a table
     callScale: 3.0,             // gridScale for the action headline — the readable HEADLINE (big glyphs, few lines)
@@ -124,7 +130,9 @@ export default class AgentTrail {
         this.atlas = ctx.atlas;
         this.cfg = { ...TRAIL_DEFAULTS, ...opts, hues: { ...TRAIL_DEFAULTS.hues, ...(opts.hues || {}) } };
 
-        this.root = new HStack({ spacing: this.cfg.corridorGap });   // corridors side by side
+        // The layout target: a plain container whose children (corridors) a layout scheme places, exactly
+        // as the file tree's root hosts its file/dir nodes. Not a stack — the scheme writes child.position.
+        this.root = new THREE.Group();
         this.root.name = 'agent-trail';
         this.scene.add(this.root);
         this._rootPlaced = false;
@@ -381,8 +389,7 @@ export default class AgentTrail {
         if (!which || which === 'all') {
             for (const lane of this.lanes.values()) kill(lane);
             this.lanes.clear();
-            this._rootPlaced = false;
-            this.root.layout();
+            this._rootPlaced = false;   // nothing left to lay out; the next ingest re-places the cluster
             return;
         }
         const lane = this.lanes.get(which);
@@ -404,6 +411,10 @@ export default class AgentTrail {
         if (!lane) {
             const corridor = new ZStack({ spacing: this.cfg.zPitch, reverse: true, align: this.cfg.align });   // newest in front, leading-aligned
             corridor.name = `trail:${agentId}`;
+            // Tag it as a layout LEAF so the cluster scheme places it: name = ordering key (agentId),
+            // isDir = false (a leaf, not a container to descend). Its footprint is read via layoutBounds().
+            corridor.userData.name = agentId;
+            corridor.userData.isDir = false;
             this.root.add(corridor);
             const hueIdx = this.lanes.size;
             const box = this._makeCorridorBox(this.cfg.corridorPalette[hueIdx % this.cfg.corridorPalette.length]);
@@ -641,11 +652,15 @@ export default class AgentTrail {
         return track.length ? track : null;
     }
 
-    /** Re-run the whole stack tree (idempotent) off the new positions. */
+    /**
+     * Re-lay the trail (idempotent). Two levels: each corridor lays out its own DECK, then the corridors
+     * are laid out AS LEAVES by the cluster scheme — the same machinery the file tree uses. The scheme
+     * gives a deterministic composition (packed = a mosaic) and the cluster rests on the world floor, so
+     * the trail is a peer layout target to the ContentTree, its source being the agent stream.
+     */
     _relayout() {
-        // cfg is the LIVE source of truth — push current spacing/align into the containers so
-        // `trail.config` re-flows the existing trail, not just newly-added moments.
-        this.root.spacing = this.cfg.corridorGap;
+        // 1. cfg is the LIVE source of truth — push spacing/align into each corridor and lay out its DECK
+        //    (post-order) so its layoutBounds is current: the cluster scheme measures each corridor via leafBox.
         for (const lane of this.lanes.values()) {
             lane.corridor.spacing = this.cfg.zPitch;
             lane.corridor.align = this.cfg.align;
@@ -664,21 +679,42 @@ export default class AgentTrail {
                 e.moment.spacing = this.cfg.rowGap;
                 if (e.body) e.body.spacing = this.cfg.colGap;
             }
+            lane.corridor.layout();
         }
-        this.root.layout();
+        // 2. PACK the corridors as bounds-leaves via the chosen scheme (writes each corridor.position +
+        //    root.userData.size). packed → a square-ish mosaic; each corridor lands at local z=0, so the
+        //    carousel's front slot stays the fixed world plane it anchors on.
+        const scheme = LAYOUT_SCHEMES[this.cfg.layout] || LAYOUT_SCHEMES.packed;
+        scheme(this.root, this.cfg.layoutOpts);
+        // 3. A pinned (user-dragged) corridor overrides its scheme slot; and the carousel owns each card's
+        //    depth, so re-assert it (the deck layout just ran) — a brand-new card keeps its laid z for the
+        //    one frame until _animateDeck seats it.
         for (const lane of this.lanes.values()) {
-            // A pinned (user-dragged) corridor keeps its placed position; otherwise anchor the deck's
-            // FRONT slot at the corridor origin (z=0) so it never drifts as moments append — the carousel
-            // reads the front as a fixed world plane the camera frames once. The HStack still owns X
-            // (corridors side by side); we only pin Z.
             if (lane.pinned && lane.pinnedPos) lane.corridor.position.copy(lane.pinnedPos);
-            else lane.corridor.position.z = 0;
-            // The animator owns each card's depth — re-assert it so the ZStack's order-layout (which just
-            // ran) can't jolt an in-progress rotation. A brand-new card (no _z yet) keeps its laid z for
-            // the one frame until _animateDeck seats it.
             for (const e of lane.moments) if (e._z != null) e.moment.position.z = e._z;
         }
+        // 4. Rest the whole cluster above the world floor — the file tree's grounding convention.
+        this._restOnFloor();
         this._updateCorridorBoxes();
+    }
+
+    /** Shift the cluster so its content bottom sits on the world floor (cfg.floorY). Idempotent: once the
+     *  bottom is on the floor the adjustment is zero, so calling it every relayout just re-grounds growth. */
+    _restOnFloor() {
+        const wb = this._worldBounds();
+        if (!wb.isEmpty()) this.root.position.y += (this.cfg.floorY - wb.min.y);
+        this.root.updateMatrixWorld(true);
+    }
+
+    /** World-space AABB of the whole cluster — the union of every corridor's world box. @private */
+    _worldBounds(target = new THREE.Box3()) {
+        target.makeEmpty();
+        this.root.updateWorldMatrix(true, true);
+        for (const lane of this.lanes.values()) {
+            const b = lane.corridor.getBounds();
+            if (b && !b.isEmpty()) target.union(b);
+        }
+        return target;
     }
 
     /** The local Z a moment should rest at for its lane's head: `slot(i) = (head - i) mod n`, front=0. */
