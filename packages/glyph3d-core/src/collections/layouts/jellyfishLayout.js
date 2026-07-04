@@ -26,6 +26,7 @@
 
 import { leafBox, partitionChildren } from './nodeUtils.js';
 import { packPanels, PANEL_DEFAULTS } from './panelPack.js';
+import { addPanelSurface, PANEL_SURFACE_DEFAULTS } from './panelSurface.js';
 
 export const JELLYFISH_DEFAULTS = {
     targetRadius: 510,   // preferred column radius — sets how many panels sit abreast; width ≈ 2R
@@ -38,6 +39,7 @@ export const JELLYFISH_DEFAULTS = {
     warpPanels: true,    // toggle: curve each panel's grids around the core (apothem flows down to
                          // the grid level) instead of laying the panel as one flat chord-face
     ...PANEL_DEFAULTS,   // panelW / panelH / colGap / rowGap — the panel packing budget
+    ...PANEL_SURFACE_DEFAULTS, // surface* — the panel's backing face (mesh the fields mount onto)
 };
 
 /** Apothem (pole-center → face-midline distance) of the cylinder: a regular N-gon whose edges are
@@ -179,9 +181,16 @@ function place(node, opts) {
         // the face. With warpPanels, the same facing is applied per-GRID across the panel's arc.
         if (opts.warpPanels) {
             warpPanel(panel, theta, topY, apothem);
+            // warp re-homes the grids onto the arc + parks the panel at the pole; the face is a
+            // matching cylinder segment there. w/h come from the flat panel box (measured pre-warp).
+            addPanelSurface(panel, {
+                mode: 'warp', apothem, theta, topY,
+                w: b.max.x - b.min.x, h: b.max.y - b.min.y,
+            }, opts);
         } else {
             const cx = (b.min.x + b.max.x) / 2, cy = b.max.y, cz = (b.min.z + b.max.z) / 2;
             faceGrid(panel, apothem, theta, topY, cx, cy, cz);
+            addPanelSurface(panel, { mode: 'flat', box: b }, opts);   // a plane behind the flat face
         }
         colY[k] += (b.max.y - b.min.y) + opts.panelGap;
     });

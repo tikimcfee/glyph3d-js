@@ -29,7 +29,7 @@
 
 import * as THREE from 'three';
 import packedLayout from './layouts/packedLayout.js';
-import { LAYOUT_SCHEMES, schemeNameOf } from './layouts/index.js';
+import { LAYOUT_SCHEMES, schemeNameOf, disposePanelSurfaces } from './layouts/index.js';
 import { BOUNDS_Z_PAD } from '../core/constants.js';
 
 /** Scratch vector for footprintBounds — one focused node measured per frame, no per-call alloc. */
@@ -335,6 +335,7 @@ export default class ContentTree {
                     };
                     gather(child);
                     for (const leaf of leaves) dir.add(leaf);   // THREE.add re-parents (row → dir)
+                    disposePanelSurfaces(child);   // free the panels' backing-face geometries first
                     dir.remove(child);
                 } else if (child.userData?.isDir) {
                     visit(child);

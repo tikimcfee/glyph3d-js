@@ -39,6 +39,11 @@ export const RENDER_ORDER = Object.freeze({
     // `-10 + depth` (depth ≥ 0). Use BACKDROP_BASE + depth at the call site.
     BACKDROP_BASE:        -10,
 
+    // src/collections/layouts/panelSurface.js — the jellyfish panel's backing face,
+    // one band BEHIND a grid's own wall so the fields' walls sort in front of the
+    // shared panel surface they mount onto (and in front of dir backdrops).
+    PANEL_SURFACE:        -2,
+
     // src/collections/CodeGrid.js:982, src/collections/TerminalGrid.js:485 —
     // background plane just behind its glyphs.
     GRID_BACKGROUND:      -1,

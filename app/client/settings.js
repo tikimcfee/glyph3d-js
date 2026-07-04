@@ -275,6 +275,16 @@ export const SETTINGS = [
   { key: 'layout.childGap', label: 'Child ring spacing', group: 'Layout', scheme: 'jellyfish', type: 'number', default: JELLYFISH_DEFAULTS.childGap, min: 0, max: 4, step: 0.05, apply: jellyfishParam('childGap') },
   { key: 'layout.hubRadius', label: 'Hub radius (min)', group: 'Layout', scheme: 'jellyfish', type: 'number', default: JELLYFISH_DEFAULTS.hubRadius, min: 0, max: 1000, step: 5, apply: jellyfishParam('hubRadius') },
   { key: 'layout.minRadius', label: 'Min radius floor', group: 'Layout', scheme: 'jellyfish', type: 'number', default: JELLYFISH_DEFAULTS.minRadius, min: 0, max: 1000, step: 5, apply: jellyfishParam('minRadius') },
+  //   Panel surface — the backing FACE a panel's fields mount onto (a plane for flat panels, a
+  //   matching cylinder segment when warped), so a column reads as a solid faceted cylinder.
+  { key: 'layout.surface', label: 'Panel surface (face)', group: 'Layout', scheme: 'jellyfish', type: 'bool', default: JELLYFISH_DEFAULTS.surface, apply: jellyfishParam('surface') },
+  { key: 'layout.surfaceColor', label: 'Surface color', group: 'Layout', scheme: 'jellyfish', type: 'color', default: '#' + JELLYFISH_DEFAULTS.surfaceColor.toString(16).padStart(6, '0'), apply: jellyfishParam('surfaceColor') },
+  { key: 'layout.surfaceOpacity', label: 'Surface opacity', group: 'Layout', scheme: 'jellyfish', type: 'number', default: JELLYFISH_DEFAULTS.surfaceOpacity, min: 0, max: 1, step: 0.02, apply: jellyfishParam('surfaceOpacity') },
+  { key: 'layout.surfaceDepth', label: 'Surface set-back (behind fields)', group: 'Layout', scheme: 'jellyfish', type: 'number', default: JELLYFISH_DEFAULTS.surfaceDepth, min: 0, max: 200, step: 1, apply: jellyfishParam('surfaceDepth') },
+  { key: 'layout.surfacePad', label: 'Surface margin (past fields)', group: 'Layout', scheme: 'jellyfish', type: 'number', default: JELLYFISH_DEFAULTS.surfacePad, min: 0, max: 200, step: 1, apply: jellyfishParam('surfacePad') },
+  { key: 'layout.surfaceSegments', label: 'Surface arc segments (warped)', group: 'Layout', scheme: 'jellyfish', type: 'number', default: JELLYFISH_DEFAULTS.surfaceSegments, min: 2, max: 64, step: 1, apply: jellyfishParam('surfaceSegments') },
+  { key: 'layout.surfaceBorder', label: 'Surface rim', group: 'Layout', scheme: 'jellyfish', type: 'bool', default: JELLYFISH_DEFAULTS.surfaceBorder, apply: jellyfishParam('surfaceBorder') },
+  { key: 'layout.surfaceBorderColor', label: 'Surface rim color', group: 'Layout', scheme: 'jellyfish', type: 'color', default: '#' + JELLYFISH_DEFAULTS.surfaceBorderColor.toString(16).padStart(6, '0'), apply: jellyfishParam('surfaceBorderColor') },
   // Glyph LOD — the exact-curve ↔ stable-block handoff for minified text (kills the moiré/flicker of
   // sub-pixel strokes). Footprints are fwidth(glyphUV): bigger = smaller on screen. Pull the lod*
   // band DOWN to hand off to the flicker-free block sooner (trades mid-distance crispness for

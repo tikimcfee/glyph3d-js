@@ -13,6 +13,7 @@ import jellyfishLayout, { JELLYFISH_DEFAULTS } from './jellyfishLayout.js';
 
 export { flowBoxes, squareWrap } from './flowBoxes.js';
 export { childSort, leafBox } from './nodeUtils.js';
+export { addPanelSurface, disposePanelSurfaces, PANEL_SURFACE_DEFAULTS } from './panelSurface.js';
 export { default as StackContainer, VStack, HStack, ZStack } from './StackContainer.js';
 export { walkTreeLayout, districtLayout, packedLayout, jellyfishLayout };
 export { WALK_DEFAULTS, DISTRICT_DEFAULTS, PACKED_DEFAULTS, JELLYFISH_DEFAULTS };
