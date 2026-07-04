@@ -308,7 +308,9 @@ export class CameraDock extends THREE.Object3D {
         const next = this.paneTree.close(id);
         if (this.paneTree.isEmpty()) this._setFrame(null);
         else this.focusedPane = next;
-        this.entries.get(id)?.grid?.setControlActive?.('pin', false);
+        const e = this.entries.get(id);
+        e?.grid?.setControlActive?.('pin', false);
+        this._restoreHomeSize(e); // leaving the frame → return to its pre-frame cols×rows
         this._relayout();
         return true;
     }
@@ -413,6 +415,9 @@ export class CameraDock extends THREE.Object3D {
             // The world AABB the window had at home, captured before docking — dock.focus
             // frames THIS (computed, stable) rather than the tile's live mid-slide bounds.
             homeBounds: hasBounds ? b.clone() : null,
+            // Pre-frame cols×rows — resize-to-container reshapes a framed terminal to fill its pane;
+            // un-frame restores THIS size. Undefined for windows without cols/rows (harmless).
+            homeCols: grid.cols, homeRows: grid.rows,
             order,
             slot: this.entries.size, // provisional; _relayout re-ranks by `order` immediately below
             quatTarget: new THREE.Quaternion(),
@@ -468,6 +473,7 @@ export class CameraDock extends THREE.Object3D {
             const next = this.paneTree.close(id);       // collapse the sibling up, ratios preserved
             if (this.paneTree.isEmpty()) this._setFrame(null); else this.focusedPane = next;
             e.grid?.setControlActive?.('pin', false);
+            this._restoreHomeSize(e);                   // resize-to-container reshaped it — return home size
         }
         this.attentionManager?.docks?.delete(id);
 
@@ -614,13 +620,37 @@ export class CameraDock extends THREE.Object3D {
         const subW = fr.w * r01.w, subH = fr.h * r01.h;                // this pane's world size
         const subCx = (fr.cx - fr.w / 2) + (r01.x + r01.w / 2) * fr.w; // its center in the frame (y-up)
         const subCy = (fr.cy - fr.h / 2) + (r01.y + r01.h / 2) * fr.h;
-        const ext = this._extentOf(e);
-        const contentW = Math.max(2 * Math.abs(ext.cx), 1e-3);         // top-left-anchored content width
-        const contentH = Math.max(ext.h, 1e-3);
-        const eff = Math.min(subW / contentW, subH / contentH) * fd;   // contain-fit, depth-compensated
-        this._animateTile(e, subCx * fd, subCy * fd, this.distance * (1 - fd), eff);
+        const z = this.distance * (1 - fd);
+
+        if (typeof e.grid.fitToContainer === 'function') {
+            // RESIZE-TO-CONTAINER: the window reshapes its cols/rows to FILL the sub-rect at its HOME
+            // cell scale (readable — the scale/zoom button owns the density), instead of shrinking the
+            // whole window to fit. Semi-idempotent (floor-quantized), so calling it every relayout is a
+            // no-op once settled. The _fitting guard bars re-entry when resize() fires onResize→reflow
+            // synchronously. Placed at that scale, centered in the sub-rect.
+            const base = (e.home?.scale ?? 1) * this._userOf(e);
+            if (!e._fitting) { e._fitting = true; e.grid.fitToContainer(subW, subH, base); e._fitting = false; }
+            this._animateTile(e, subCx * fd, subCy * fd, z, base * fd);
+        } else {
+            // Contain-fit (the "preview" policy) — code grids and anything without a container receiver
+            // SHRINK to fit; zoom is divided out, tall content pillarboxes, wide content letterboxes.
+            const ext = this._extentOf(e);
+            const contentW = Math.max(2 * Math.abs(ext.cx), 1e-3);
+            const contentH = Math.max(ext.h, 1e-3);
+            const eff = Math.min(subW / contentW, subH / contentH) * fd;
+            this._animateTile(e, subCx * fd, subCy * fd, z, eff);
+        }
         const d = this.attentionManager?.docks?.get(e.id);
         if (d) d.offset = { slot: 'frame' };
+    }
+
+    /** Restore a window's pre-frame cols×rows after resize-to-container reshaped it while framed —
+     *  the "un-pin restores home size" half. No-op for windows without the receiver / unchanged size. */
+    _restoreHomeSize(e) {
+        if (e && typeof e.grid.fitToContainer === 'function' && Number.isInteger(e.homeCols) &&
+            (e.grid.cols !== e.homeCols || e.grid.rows !== e.homeRows)) {
+            e.grid.resize?.(e.homeCols, e.homeRows);
+        }
     }
 
     /** Animate one tile so its CONTENT CENTER sits at (sx,sy,sz) at the RENDERED scale `eff`.

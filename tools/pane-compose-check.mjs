@@ -37,6 +37,30 @@ function rig() {
 }
 const apparentH = (g) => g.scale.x * g.rows * LH; // world panel height
 
+// A terminal-like window: cols×rows of `cell`-sized cells, with fitToContainer mirroring
+// TerminalGrid.fitToContainer (the resize-to-container receiver) and a resize that re-derives bounds.
+function makeTermGrid(cols, rows, cell = 2) {
+    const sm = new ScaleModel(1);
+    const g = new THREE.Object3D();
+    g.cols = cols; g.rows = rows; g.scaleModel = sm; g._cb = null; g._resizes = [];
+    g.onResize = (cb) => { g._cb = cb; return () => { g._cb = null; }; };
+    g.setZoom = (f) => { sm.setZoom(f); sm.resolve(g); };
+    g.getLocalBounds = () => new THREE.Box3(new THREE.Vector3(0, -g.rows * cell, -1), new THREE.Vector3(g.cols * cell, 0, 1));
+    g.getBounds = () => { g.updateWorldMatrix(true, false); return g.getLocalBounds().clone().applyMatrix4(g.matrixWorld); };
+    g.resize = (c, r) => { g.cols = Math.round(c); g.rows = Math.round(r); g._resizes.push([g.cols, g.rows]); g._cb?.(g.cols, g.rows); };
+    g.fitToContainer = (worldW, worldH, worldScale) => {         // mirror of TerminalGrid.fitToContainer
+        const lb = g.getLocalBounds(); const s = worldScale || 1;
+        const cellW = ((lb.max.x - lb.min.x) / Math.max(g.cols, 1)) * s;
+        const cellH = ((lb.max.y - lb.min.y) / Math.max(g.rows, 1)) * s;
+        const c = Math.max(1, Math.floor(worldW / cellW + 1e-6)), r = Math.max(1, Math.floor(worldH / cellH + 1e-6));
+        const changed = c !== g.cols || r !== g.rows;
+        if (changed) g.resize(c, r);
+        return { cols: c, rows: r, changed };
+    };
+    sm.resolve(g);
+    return g;
+}
+
 // ---- single leaf == the old single-occupant frame (fills the whole frame, centered) ----
 {
     const d = rig();
@@ -115,6 +139,34 @@ const apparentH = (g) => g.scale.x * g.rows * LH; // world panel height
     d.spotlight('a'); d.splitPane('x', 'b'); d.settle();
     d.release('b'); d.settle();
     ok(!d.has('b') && d.paneTree.count() === 1 && d.isFramed('a'), 'release b: gone from dock, a collapses to sole pane');
+}
+
+// ---- RESIZE-TO-CONTAINER: a terminal reshapes cols/rows to FILL its pane (not scale-to-fit) ----
+// frame rect (viewW=160, viewH=100, margins 0.06) → w=140.8, h=88. cell=2, base scale=1 → 1 cell = 2 world.
+{
+    const d = rig();
+    const a = makeTermGrid(80, 24, 2);
+    d.lock('a', a);                              // homeCols/Rows = 80×24 captured
+    d.spotlight('a'); d.settle();
+    ok(a.cols === 70 && a.rows === 44, `framed terminal RESHAPES to fill the whole frame (70×44, got ${a.cols}×${a.rows})`);
+    // fills the sub-rect: world height == frame height · fd (44 rows × 2 × 0.7 == 88 × 0.7).
+    near(a.scale.x * a.rows * 2, 88 * d.frameDistFrac, 'fill: world height == frame height (resized, not shrunk)');
+
+    const b = makeTermGrid(80, 24, 2);
+    d.lock('b', b);
+    d.splitPane('x', 'b'); d.settle();
+    ok(a.cols === 35 && b.cols === 35, `split H: each half-width pane reshapes to 35 cols (got ${a.cols}, ${b.cols})`);
+    ok(a.rows === 44 && b.rows === 44, 'split: full-height panes keep 44 rows');
+
+    // semi-idempotent: re-fitting a settled pane is a no-op (no PTY thrash).
+    const nBefore = a._resizes.length;
+    d.reflowTile('a'); d.reflowTile('a');
+    ok(a._resizes.length === nBefore, 'semi-idempotent: re-fit at the same container is a no-op');
+
+    // un-frame restores the pre-frame cols×rows (the "un-pin restores home size" half).
+    d.unframePane('b'); d.settle();
+    ok(b.cols === 80 && b.rows === 24, `unframe restores b to its home 80×24 (got ${b.cols}×${b.rows})`);
+    ok(a.cols === 70 && a.rows === 44, 'unframe: a re-fills the whole frame (70×44)');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
