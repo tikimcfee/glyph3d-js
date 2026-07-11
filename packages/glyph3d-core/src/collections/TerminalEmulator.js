@@ -42,12 +42,6 @@ export default class TerminalEmulator {
         this._raf = 0;
         this._cell = undefined; // reusable IBufferCell, filled by getCell(x, cell)
 
-        // Resize coalescing (see resize()): the newest requested size + a single-shot arm flag, so a
-        // storm of resizes (a grip drag fires one per cell-step) collapses to ONE xterm resize.
-        this._pendingCols = cols;
-        this._pendingRows = rows;
-        this._resizeArmed = false;
-
         // scrollback 0: behind a tmux client we mirror the visible pane only (tmux owns
         // scrollback and repaints the full screen), so the active buffer == the viewport.
         // allowProposedApi: the buffer cell-reading API (getCode/getFgColor/isFgRGB/…)
@@ -68,43 +62,28 @@ export default class TerminalEmulator {
      * Resize the emulator's grid. Pairs with TerminalGrid.resize() and the adapter's
      * pty.Setsize so all three agree on cols×rows.
      *
-     * Two things this has to get right, both about xterm's ASYNCHRONOUS write buffer (see write()):
-     *
-     *   1. SERIALIZE behind the parser. Calling this._term.resize() while bytes are still queued
-     *      reflows a half-parsed screen — the cursor can sit past the new rows and xterm corrupts
-     *      its buffer, so a later lineFeed throws on an undefined line and the terminal goes blank
-     *      until reload. So the actual resize runs inside an empty-write callback, which fires only
-     *      once the write buffer has drained — the resize lands between parses, never mid-parse.
-     *
-     *   2. COALESCE the storm. A grip drag fires a resize per cell-step; each would otherwise queue
-     *      its own empty write and flood the pump. Instead we just record the newest size and arm a
-     *      SINGLE deferred apply — later calls only update the target. One resize lands per drain, at
-     *      whatever the latest size is by then; the intermediate sizes are skipped harmlessly.
-     *
+     * Set the size, wait for the parser to be done, then apply — that's the whole thing. xterm's
+     * write() parses ASYNCHRONOUSLY and runs writes in submission order; resize() is the one call
+     * that jumps that queue synchronously, and resizing a half-parsed screen corrupts the buffer
+     * (a later lineFeed throws on an undefined line → the terminal goes blank until reload). So the
+     * resize joins the SAME queue: an empty write's callback fires once the buffer has drained, so
+     * the resize lands between parses, never mid-parse. A grip drag enqueues one per cell-step —
+     * they apply in order, the last size wins, none race. No coalescing, no timers: just serialize.
      * @param {number} cols
      * @param {number} rows
      */
     resize(cols, rows) {
         if (this._disposed) return;
-        this._pendingCols = cols;
-        this._pendingRows = rows;
-        if (this._resizeArmed) return; // a deferred apply is already queued — it'll pick up the newest size
-        this._resizeArmed = true;
-        this._term.write('', () => this._applyResize());
-    }
-
-    /** @private — apply the latest pending size once the parser is idle (write buffer drained). */
-    _applyResize() {
-        this._resizeArmed = false;
-        if (this._disposed) return;
-        const cols = this._pendingCols, rows = this._pendingRows;
-        if (cols === this._term.cols && rows === this._term.rows) return; // already there → nothing to do
-        this.cols = cols;
-        this.rows = rows;
-        this._term.resize(cols, rows);
-        // Deliberately NO _schedule() here. resize() leaves the buffer blank/reflowed until the
-        // source repaints (tmux fully redraws on SIGWINCH); reading it now would flash that empty
-        // frame — the resize flicker. The repaint bytes that follow drive the next read via write().
+        this._term.write('', () => {
+            if (this._disposed) return;
+            if (cols === this._term.cols && rows === this._term.rows) return; // already there
+            this.cols = cols;
+            this.rows = rows;
+            this._term.resize(cols, rows);
+            // No _schedule() here: resize leaves the buffer blank/reflowed until the source repaints
+            // (tmux fully redraws on SIGWINCH); reading it now would flash that empty frame — the
+            // resize flicker. The repaint bytes that follow drive the next read via write().
+        });
     }
 
     /** @private — one read per frame, regardless of write count. */

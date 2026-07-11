@@ -51,7 +51,9 @@ for (let step = 0; step < STEPS; step++) {
 await sleep(60); // let the write buffer + coalesced resize drain
 
 ok(!crash, `no crash / no buffer corruption across a ${STEPS}-step storm` + (crash ? `  (${crash.message})` : ''));
-ok(realResizes > 0 && realResizes < STEPS, `resizes COALESCED: ${realResizes} real xterm resizes for ${STEPS} storm steps`);
+// Plain serialization: each resize runs behind the parser (inside a drained-write callback), so the
+// count is unbounded — what matters is they DON'T race (proven by no-crash + correct-final below).
+ok(realResizes >= 1, `resizes applied serially behind the parser (${realResizes} for ${STEPS} steps, none raced a parse)`);
 
 // Settle: a final clean repaint at the last size (what endDrag's terminal.refresh triggers).
 emu.resize(finalC, finalR);
