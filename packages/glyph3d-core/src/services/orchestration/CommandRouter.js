@@ -8,7 +8,11 @@
  * - Works standalone: callable from console, shortcuts, WebSocket, or UI
  *
  * Command names are dot-separated namespaces: camera.move, grid.list, etc.
- * Partial-match autocomplete when a prefix is unambiguous.
+ * The dot is canonical, not required: "grid list" resolves to grid.list — the
+ * verb is the longest chain of leading tokens that names a registered command
+ * (an exactly-typed first token still short-circuits, so a single-word verb
+ * like `select` keeps its arguments). Partial-match autocomplete when a prefix
+ * is unambiguous, on the typed name or its dot-joined form ("grid li").
  */
 
 import errorTracker from '../../utils/ErrorTracker.js';
@@ -138,15 +142,12 @@ export default class CommandRouter {
 
         const cmd = this.commands.get(name);
         if (!cmd) {
-            // Try partial-match autocomplete
-            const matches = [...this.commands.keys()].filter(k => k.startsWith(name));
-            if (matches.length === 1) {
-                return this._run(matches[0], args, options);
-            }
-            if (matches.length > 1) {
+            const r = this._resolveLoose(name, args);
+            if (r.name) return this._run(r.name, r.args, options);
+            if (r.matches.length > 0) {
                 return {
-                    text: `ERR: ambiguous command '${name}'. Matches: ${matches.join(', ')}`,
-                    data: { matches }
+                    text: `ERR: ambiguous command '${r.typed}'. Matches: ${r.matches.join(', ')}`,
+                    data: { matches: r.matches }
                 };
             }
             return {
@@ -156,6 +157,42 @@ export default class CommandRouter {
         }
 
         return this._run(name, args, options);
+    }
+
+    /**
+     * Resolve a first token that isn't an exact command name.
+     *
+     * 1. Dot-free spelling — leading arg tokens join into the name, and the
+     *    LONGEST registered chain wins: "camera frame bounds" means
+     *    camera.frame.bounds, not camera.frame with a stray arg. A genuine
+     *    argument can only be swallowed if it literally spells a deeper verb.
+     * 2. Unambiguous prefix, typed ("gri.list") or dot-joined ("grid li").
+     *
+     * @param {string} name - lowercased first token
+     * @param {string[]} args
+     * @returns {{name: string, args: string[]} | {typed: string, matches: string[]}}
+     * @private
+     */
+    _resolveLoose(name, args) {
+        let chain = name, best = null;
+        for (let i = 0; i < args.length; i++) {
+            chain += '.' + String(args[i]).toLowerCase();
+            if (this.commands.has(chain)) best = { name: chain, args: args.slice(i + 1) };
+        }
+        if (best) return best;
+
+        const keys = [...this.commands.keys()];
+        const byName = keys.filter(k => k.startsWith(name));
+        if (byName.length === 1) return { name: byName[0], args };
+        if (args.length > 0) {
+            const joined = name + '.' + String(args[0]).toLowerCase();
+            const byJoined = keys.filter(k => k.startsWith(joined));
+            if (byJoined.length === 1) return { name: byJoined[0], args: args.slice(1) };
+            // A joined-prefix ambiguity names the intent more tightly than the
+            // bare-name one ("grid l" lists grid.list|grid.layout, not all grid.*).
+            if (byJoined.length > 1) return { typed: joined, matches: byJoined };
+        }
+        return { typed: name, matches: byName };
     }
 
     /**

@@ -28,7 +28,10 @@ const plog = createLogger('palette');
  *
  *   COMMAND — the line starts with a known verb + a space: it's a raw command
  *     line, exactly the classic REPL. Enter runs it verbatim; ↑/↓ walk history;
- *     a hint row shows the verb's usage.
+ *     a hint row shows the verb's usage. The dot is canonical, not required —
+ *     "grid list" reads as grid.list (the router resolves both spellings), so
+ *     the bar detects the verb the same way the router does: an exact first
+ *     token wins, else the longest dot-joined chain of leading tokens.
  *
  * Keystrokes are kept out of the camera/edit paths: the camera and the keyboard
  * responder chain (keyboardRouter.js) both yield when a real <input> is focused, and
@@ -95,10 +98,25 @@ export default function CommandBar({ client, open, onClose, onHighlight }) {
   // ONE array identity per index refresh — rank() builds its fzf corpus per identity.
   const allEntries = useMemo(() => [...verbs, ...nouns], [verbs, nouns]);
 
-  // Mode is derived from the line alone: a known verb followed by a space is a
-  // raw command line; everything else is a search query.
-  const firstTok = (value.split(/\s+/)[0] || '').toLowerCase();
-  const isCommandMode = /\s/.test(value) && verbNames.has(firstTok);
+  // Mode is derived from the line alone: a known verb followed by more input is
+  // a raw command line; everything else is a search query. The verb may be
+  // dotted ("grid.list") or dot-free ("grid list") — resolution mirrors the
+  // router: an exact first token short-circuits (so `select foo` is the verb
+  // `select`), else the longest dot-joined chain of leading tokens wins.
+  const toks = value.split(/\s+/).filter(Boolean);
+  const tok0 = (toks[0] || '').toLowerCase();
+  let lineVerb = null, verbToks = 0;
+  if (verbNames.has(tok0)) { lineVerb = tok0; verbToks = 1; }
+  else {
+    let chain = tok0;
+    for (let i = 1; i < toks.length; i++) {
+      chain += '.' + toks[i].toLowerCase();
+      if (verbNames.has(chain)) { lineVerb = chain; verbToks = i + 1; }
+    }
+  }
+  // Command mode needs input BEYOND the verb (an arg token or a trailing
+  // space); until then the line is still a query, so suggestions keep showing.
+  const isCommandMode = !!lineVerb && (toks.length > verbToks || /\s$/.test(value));
   const query = isCommandMode ? '' : value.trim();
 
   // The visible rows. Searching → ranked matches; empty input → recent history
@@ -117,7 +135,7 @@ export default function CommandBar({ client, open, onClose, onHighlight }) {
   // The glance-preview socket: report the highlighted entry (or null). No-op today.
   useEffect(() => { onHighlight?.(sel >= 0 ? rows[sel]?.entry ?? null : null); }, [sel, rows, onHighlight]);
 
-  const commandUsage = isCommandMode ? verbs.find((v) => v.key === firstTok) : null;
+  const commandUsage = isCommandMode ? verbs.find((v) => v.key === lineVerb) : null;
 
   const run = useCallback(async (cmd) => {
     // cmd: string (typed line) or token array (a noun's command — array form keeps
@@ -164,8 +182,10 @@ export default function CommandBar({ client, open, onClose, onHighlight }) {
       e.preventDefault();
       if (isCommandMode) { run(value); return; }
       const row = sel >= 0 ? rows[sel] : null;
-      // The REPL contract: a fully-typed known verb always executes, args or not.
-      if (row?.entry.kind === 'verb' && row.entry.key === query.toLowerCase()) { run(row.entry.key); return; }
+      // The REPL contract: a fully-typed known verb always executes, args or
+      // not — dotted or dot-free ("grid list" runs grid.list).
+      const qDot = query.toLowerCase().replace(/\s+/g, '.');
+      if (row?.entry.kind === 'verb' && (row.entry.key === query.toLowerCase() || row.entry.key === qDot)) { run(row.entry.key); return; }
       if (row) { activate(row); return; }
       if (value.trim()) run(value);  // no match selected — fire the raw line (verbatim escape hatch)
       return;

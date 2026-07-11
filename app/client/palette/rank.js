@@ -4,14 +4,17 @@
  * scorers later is a one-file change.
  *
  * Entries are scored by fzf's v2 algorithm over entry.key (path-tuned bonuses:
- * separator boundaries, camelCase, consecutive runs), then the merge policy
- * applies on top:
- *   • an exact verb-name match pins to the top (a fully-typed verb always wins),
+ * separator boundaries, camelCase, consecutive runs) in extended-match mode —
+ * space-separated terms AND together, so the dot-free verb spelling ("grid
+ * list") matches grid.list and a multi-word file query ("pane cmd") lands on
+ * paneCommands.js. Then the merge policy applies on top:
+ *   • an exact verb-name match pins to the top (a fully-typed verb always
+ *     wins), dotted or dot-free — "grid list" pins grid.list,
  *   • open sheets outrank unopened files (jumping beats re-opening),
  *   • ties break toward the shorter key (byLengthAsc).
  * Match positions ride along so rows can highlight the matched characters.
  */
-import { Fzf, byLengthAsc } from 'fzf';
+import { Fzf, byLengthAsc, extendedMatch } from 'fzf';
 
 // Additive nudges on fzf's score, by kind. Decent fzf matches land roughly
 // 30–150, so +24 lifts a same-quality sheet above a file without letting a
@@ -42,7 +45,7 @@ const _fzfByEntries = new WeakMap();
 function fzfFor(entries) {
     let f = _fzfByEntries.get(entries);
     if (!f) {
-        f = new Fzf(entries, { selector: (e) => e.key, tiebreakers: [byLengthAsc] });
+        f = new Fzf(entries, { selector: (e) => e.key, tiebreakers: [byLengthAsc], match: extendedMatch });
         _fzfByEntries.set(entries, f);
     }
     return f;
@@ -58,6 +61,8 @@ function fzfFor(entries) {
 export function rank(query, entries, limit = 9) {
     const q = query.trim();
     if (!q) return [];
+    const qNorm = q.toLowerCase();
+    const qDot = qNorm.replace(/\s+/g, '.');   // dot-free verb spelling: "grid list" pins grid.list
     return fzfFor(entries)
         .find(q)
         .map((r) => ({
@@ -66,7 +71,7 @@ export function rank(query, entries, limit = 9) {
             score: r.score
                 + (KIND_BOOST[r.item.kind] || 0)
                 + (r.item.kind === 'verb' ? verbNudge(r.item.key) : 0)
-                + (r.item.kind === 'verb' && r.item.key === q.toLowerCase() ? EXACT_VERB_PIN : 0),
+                + (r.item.kind === 'verb' && (r.item.key === qNorm || r.item.key === qDot) ? EXACT_VERB_PIN : 0),
         }))
         .sort((a, b) => b.score - a.score)
         .slice(0, limit);
