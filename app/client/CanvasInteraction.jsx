@@ -559,8 +559,16 @@ export function ResizeDragger() {
       }
       const changed = appliedCols !== startCols || appliedRows !== startRows;
       if (!changed) return;
-      if (commit) client.session?.scheduleSave?.();      // keep the live size, persist it
-      else router.execute(`terminal.resize ${id} ${startCols} ${startRows}`); // undo the live steps
+      if (commit) {
+        client.session?.scheduleSave?.();          // keep the live size, persist it
+        // Settle: one authoritative full repaint at the final size. The live steps coalesced their
+        // emulator resizes (TerminalEmulator), so the drag never crashes/flickers — but the very
+        // last frame can be a partial tmux diff. A single refresh redraws it clean, so a drag can
+        // never leave the terminal in a stuck/blank state (no reload to recover).
+        router.execute(`terminal.refresh ${id}`);
+      } else {
+        router.execute(`terminal.resize ${id} ${startCols} ${startRows}`); // undo the live steps
+      }
     };
 
     // CLICK chrome controls (pin, close, close-confirm) share the 'handle' channel with the
