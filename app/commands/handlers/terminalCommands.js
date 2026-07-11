@@ -229,28 +229,28 @@ export default function registerTerminalCommands(router) {
             return { text: 'ERR: cols and rows must be positive integers', data: null };
         }
 
-        // Verify-as-they-land: one terse record per resize, enriched with the FROM
-        // dims (read before grid.resize mutates them) and the dock state — so a live
-        // grip-drag streams its steps through log.search/buslog and the
-        // resize↔dock-relayout interplay is visible. No-op steps never reach here
-        // (the dragger only fires the verb on an integer cell change).
+        // Verify-as-they-land: one terse record per resize, enriched with the FROM dims and the dock
+        // state — so a live grip-drag streams its steps through log.search/buslog and the resize↔dock
+        // interplay is visible. No-op steps never reach here (the dragger fires only on an integer step).
         const from = `${grid.cols}x${grid.rows}`;
         const dock = ctx.cameraDock;
         const where = dock?.has?.(id) ? (dock.focusedPane === id ? ' [focus]' : (dock.isFramed?.(id) ? ' [pane]' : ' [docked]')) : '';
 
-        grid.resize(cols, rows);
-
-        log.info(`resize ${id} ${from} → ${cols}x${rows}${where}`);
-
+        // Resize the REAL PTY (pty.Setsize → SIGWINCH → tmux) and let tmux's redraw drive the rest.
+        // The redraw streams back tagged with the new size (attach_unix.go), and THAT resizes the grid +
+        // emulator (CommandProvider's OUTPUT handler) — in lockstep with the content it's about to
+        // parse, never ahead of it. The tagged frame is the SINGLE writer of terminal size; we do NOT
+        // resize the grid locally here. (No adapter = no stream to drive it, so fall back to a direct
+        // resize rather than dropping the request — a terminal without an owner has no live PTY anyway.)
         const info = ctx.registry.get(id);
-
-        // Tell the owning adapter so it resizes the REAL PTY (pty.Setsize → SIGWINCH →
-        // tmux). Without this the shell keeps its old winsize and reflow breaks — the
-        // grid/emulator would be the only things that resized.
         const owner = info?.meta?.owner;
         if (owner && ctx.wsbridge?.connected) {
             ctx.wsbridge.push(owner, { event: 'terminal.resize', data: { terminalId: id, cols, rows } });
+        } else {
+            grid.resize(cols, rows);
         }
+
+        log.info(`resize ${id} ${from} → ${cols}x${rows}${where}`);
 
         // The model is the source of truth for persistence: capture serializes it, apply re-pushes
         // it as the grid re-adopts. Writing it here is what makes the resized size survive reload.

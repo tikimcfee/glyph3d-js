@@ -28,10 +28,14 @@ const glyphdSocket = "glyphd"
 
 // frameOutput is the type byte of an OUTPUT data-plane frame (adapter → display):
 //
-//	[frameOutput:u8][idLen:u8][id:utf8][raw VT bytes]
+//	[frameOutput:u8][idLen:u8][id:utf8][cols:u16 BE][rows:u16 BE][raw VT bytes]
 //
-// The relay forwards these binary frames verbatim; the browser parses the header and
-// feeds the payload to the terminal's headless VT emulator.
+// cols/rows are the size tmux DREW this payload at. They ride WITH the content so the display
+// resizes its emulator to match right before parsing the bytes — size and redraw travel on one
+// ordered channel and can never reorder. (Our emulator is in the browser and tmux is across a
+// WebSocket, so a locally-applied resize used to race ahead of the redraws still in flight and
+// crash xterm; tagging the content is the fix.) The relay forwards frames verbatim; the browser
+// parses the header and feeds the payload to the terminal's headless VT emulator.
 const frameOutput = 0x01
 
 // coalesceInterval bounds the OUTPUT message rate: bytes arriving within a window are
@@ -297,13 +301,22 @@ func runTerminal(cfg terminalConfig) {
 		}
 	}
 
+	// resizeCh carries a size change to the OUTPUT pump so it can flush the old-size frame and
+	// re-stamp subsequent frames — the redraw tmux emits after the SIGWINCH gets tagged at the NEW
+	// size. Buffered + non-blocking send below so a burst of grip resizes never stalls the input loop.
+	resizeCh := make(chan [2]int, 16)
+
 	// A browser-driven resize updates our cached size, so a later re-create / wheel-forward uses the
 	// CURRENT dimensions, not the startup ones. cfg is the adapter-local copy, mutated ONLY here and
-	// read by makeCreateCmd + forwardWheelToApp — all on the single INPUT goroutine after startup,
-	// so no lock is needed.
+	// read by makeCreateCmd + forwardWheelToApp — all on the single INPUT goroutine after startup, so
+	// no lock is needed. It ALSO nudges the OUTPUT pump to re-stamp frames at the new size.
 	onResize := func(c, r int) {
 		if c > 0 && r > 0 {
 			cfg.cols, cfg.rows = c, r
+			select {
+			case resizeCh <- [2]int{c, r}:
+			default: // pump busy; a following resize (or the next flush) carries the latest size
+			}
 		}
 	}
 
@@ -365,11 +378,15 @@ func runTerminal(cfg terminalConfig) {
 		ticker := time.NewTicker(coalesceInterval)
 		defer ticker.Stop()
 		var acc []byte
+		// curCols/curRows is the size the accumulated bytes were drawn at — stamped onto every frame
+		// so the display aligns its emulator to the content. Updated on a resize, AFTER the old-size
+		// bytes are flushed (below), so the boundary is exact.
+		curCols, curRows := cfg.cols, cfg.rows
 		flush := func() bool {
 			if len(acc) == 0 {
 				return true
 			}
-			if err := sendBytes(encodeOutputFrame(cfg.id, acc)); err != nil {
+			if err := sendBytes(encodeOutputFrame(cfg.id, curCols, curRows, acc)); err != nil {
 				return false
 			}
 			acc = acc[:0]
@@ -379,6 +396,29 @@ func runTerminal(cfg terminalConfig) {
 			select {
 			case <-done:
 				return
+			case sz := <-resizeCh:
+				// A resize took effect (SIGWINCH already sent by handleInbound). Everything read so
+				// far was drawn at the OLD size — drain what the PTY reader already queued into a
+				// final old-size frame and ship it, THEN adopt the new size so tmux's redraw (which
+				// FOLLOWS the SIGWINCH) is the first content tagged new.
+			drain:
+				for {
+					select {
+					case c, ok := <-chunks:
+						if !ok {
+							flush()
+							return
+						}
+						acc = append(acc, c...)
+					default:
+						break drain
+					}
+				}
+				if !flush() {
+					shutdown()
+					return
+				}
+				curCols, curRows = sz[0], sz[1]
 			case c, ok := <-chunks:
 				if !ok {
 					return
@@ -456,14 +496,19 @@ func startTmuxAttach(cfg terminalConfig) (*os.File, error) {
 	return ptmx, nil
 }
 
-// encodeOutputFrame builds an OUTPUT data-plane frame: [type][idLen][id][payload].
-func encodeOutputFrame(id string, payload []byte) []byte {
+// encodeOutputFrame builds an OUTPUT data-plane frame:
+// [type][idLen][id][cols:u16 BE][rows:u16 BE][payload]. cols/rows are the size the payload was
+// drawn at, so the display aligns its emulator to the content before parsing it.
+func encodeOutputFrame(id string, cols, rows int, payload []byte) []byte {
 	idb := []byte(id)
-	frame := make([]byte, 2+len(idb)+len(payload))
+	frame := make([]byte, 2+len(idb)+4+len(payload))
 	frame[0] = frameOutput
 	frame[1] = byte(len(idb))
 	copy(frame[2:], idb)
-	copy(frame[2+len(idb):], payload)
+	off := 2 + len(idb)
+	frame[off], frame[off+1] = byte(cols>>8), byte(cols)
+	frame[off+2], frame[off+3] = byte(rows>>8), byte(rows)
+	copy(frame[off+4:], payload)
 	return frame
 }
 

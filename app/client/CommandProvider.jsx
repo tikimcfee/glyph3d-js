@@ -352,11 +352,17 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       lsp: state.ctx.lsp,
     });
 
-    // Terminal OUTPUT data plane: binary frames (type 1) carry raw VT bytes → the
-    // terminal's emulator (grid.writeBytes). The bridge demuxes by type byte; terminal
+    // Terminal OUTPUT data plane: binary frames (type 1) carry raw VT bytes + the size tmux drew
+    // them at → the terminal's emulator (grid.writeBytes). The bridge demuxes by type byte; terminal
     // semantics live here, keyed by the id the adapter stamped into the frame.
-    bridge.onBinaryFrame(1, (id, bytes) => {
-      state.ctx.terminals?.get(id)?.writeBytes?.(bytes);
+    bridge.onBinaryFrame(1, (id, bytes, cols, rows) => {
+      const grid = state.ctx.terminals?.get(id);
+      if (!grid) return;
+      // Align the emulator to the size THIS content was drawn at BEFORE parsing it. Size and redraw
+      // ride one ordered channel (see attach_unix.go), so a resize can never race ahead of its redraw
+      // and address a row that doesn't exist — the split-across-a-WebSocket crash, gone by construction.
+      if (cols > 0 && rows > 0 && (grid.cols !== cols || grid.rows !== rows)) grid.resize(cols, rows);
+      grid.writeBytes?.(bytes);
     });
 
     // The relay's local file source. Swapped in as ctx.fileProvider on connect when

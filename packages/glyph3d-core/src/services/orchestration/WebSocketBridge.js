@@ -241,11 +241,16 @@ export default class WebSocketBridge {
         if (view.length < 2) return;
         const type = view[0];
         const idLen = view[1];
-        if (view.length < 2 + idLen) return;
+        // OUTPUT frames carry the size the payload was drawn at, right after the id:
+        // [type][idLen][id][cols:u16 BE][rows:u16 BE][payload]. See attach_unix.go (frameOutput).
+        if (view.length < 2 + idLen + 4) return;
         const id = new TextDecoder().decode(view.subarray(2, 2 + idLen));
-        const payload = view.subarray(2 + idLen);
+        const off = 2 + idLen;
+        const cols = (view[off] << 8) | view[off + 1];
+        const rows = (view[off + 2] << 8) | view[off + 3];
+        const payload = view.subarray(off + 4);
         const handler = this._binaryHandlers.get(type);
-        if (handler) handler(id, payload);
+        if (handler) handler(id, payload, cols, rows);
     }
 
     // ============ LAN Detection ============
