@@ -17,6 +17,7 @@ import RemoteLspProvider from '@glyph3d/core/services/data/RemoteLspProvider.js'
 import GitHubFileProvider from '@glyph3d/core/services/data/GitHubFileProvider.js';
 import { PickingSystem } from '@glyph3d/core/picking/PickingSystem.js';
 import ContentTree from '@glyph3d/core/collections/ContentTree.js';
+import WorldLayout from '@glyph3d/core/collections/WorldLayout.js';
 import ContentTreeMarkers from '@glyph3d/core/collections/ContentTreeMarkers.js';
 import ContentTreeArrows from '@glyph3d/core/collections/ContentTreeArrows.js';
 import ContentTreeProbes from '@glyph3d/core/collections/ContentTreeProbes.js';
@@ -246,12 +247,20 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     const pickingSystem = new PickingSystem(gl, { mode: 'cell' });
     state.ctx.pickingSystem = pickingSystem;
 
+    // The world layout — the top-level spatial system. The major groupings (file tree, agent-trail
+    // cluster, …) are SIBLINGS on a shared floor, laid out by a bottom-aligned stack (the same bounds-node
+    // + controller pattern one level up). Each grouping registers its root (with a bounds fn) and notifies
+    // the world when its footprint changes, so the whole application reads as one deterministic layout.
+    const world = new WorldLayout(scene);
+    state.ctx.world = world;
+
     // The content tree — the project as a directory-mirroring scene graph (one root Group;
     // dir nodes parent file grids). Loads route through it (tree.insert + relayout), so the
-    // whole project moves as a unit and the ground (a fixed world floor) stays a constant the
-    // content rests above. Only the root is scene.add-ed; leaves attach under their dir node.
+    // whole project moves as a unit. Its root is a world grouping (not scene-added directly);
+    // it keeps its own floor-rest, which under the world just agrees with the shared baseline.
     const contentTree = new ContentTree();
-    scene.add(contentTree.root);
+    world.register('files', contentTree.root, () => contentTree.getLocalBounds());
+    contentTree.onRelayout(() => world.relayout());   // re-space the world as the tree loads/unloads
     state.ctx.contentTree = contentTree;
 
     // Bounding prisms: per-directory translucent volumes, parented into the dir nodes
@@ -277,6 +286,11 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // Spatial trail: every agent action leaves a card receding into depth, the file it
     // touched on a parallel rail, tethered. Subscribes to visitorManager.onActivity.
     state.ctx.agentTrail = new AgentTrail(state.ctx).attach(state.ctx.visitorManager);
+    // The trail cluster is the second world grouping — a sibling of the file tree on the shared floor
+    // (its constructor scene-added its root; register reparents it under the world). It notifies the
+    // world as it streams, so new agents/moments re-space the whole layout.
+    world.register('trails', state.ctx.agentTrail.root, () => state.ctx.agentTrail.localBounds());
+    state.ctx.agentTrail.onRelayout(() => world.relayout());
     // Fold the persisted Trail card-scale settings into the freshly-built trail (its apply()s
     // otherwise fire only on a user change), so tuned sizes hold from boot.
     applyGroupSettings(state.ctx, 'Trail');

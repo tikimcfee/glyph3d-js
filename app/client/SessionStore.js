@@ -215,6 +215,7 @@ export default class SessionStore {
       files,
       field,
       layout: this._captureLayout(),
+      world: this.ctx.world?.getState?.() ?? null,   // world-grouping order (files/trails/…)
       camera: this._captureCamera(),
       focus: this._captureFocus(),
       dock: dock || null,
@@ -309,6 +310,7 @@ export default class SessionStore {
     // Field layout scheme FIRST — SET it directly on the (still-empty) tree (no verb replay) so the
     // bulk field-load below and every grid land in the saved scheme instead of the packed default.
     if (snap.layout?.scheme) this.ctx.contentTree?.applyLayoutState?.(snap.layout);
+    if (snap.world) this.ctx.world?.applyState?.(snap.world);   // world-grouping order
 
     // The bulk field fills the scene first (no tabs), so tabs layer on top and the
     // camera (restored last) wins. repo.load clears the scene itself; both are

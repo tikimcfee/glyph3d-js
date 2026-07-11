@@ -145,6 +145,7 @@ export default class AgentTrail {
         this.ctx.registry?.setPickable?.('trail.card');
         this._off = null;
         this._tmp = new THREE.Vector3();
+        this._onRelayout = [];   // fired after each _relayout — the world layout wires in to re-space the cluster
 
         // The carousel head lives PER LANE (lane.head + lane.following) — there is no global "docked"
         // mode and nothing here ever moves the camera. Each corridor live-follows its newest moment until
@@ -693,9 +694,18 @@ export default class AgentTrail {
             if (lane.pinned && lane.pinnedPos) lane.corridor.position.copy(lane.pinnedPos);
             for (const e of lane.moments) if (e._z != null) e.moment.position.z = e._z;
         }
-        // 4. Rest the whole cluster above the world floor — the file tree's grounding convention.
+        // 4. Rest the whole cluster above the world floor — the file tree's grounding convention. Under a
+        //    WorldLayout this agrees with the world's baseline (both ground to the floor), so it never fights.
         this._restOnFloor();
         this._updateCorridorBoxes();
+        // 5. Notify listeners (the world layout re-spaces the cluster as this grouping's footprint changes).
+        for (const cb of this._onRelayout) cb(this);
+    }
+
+    /** Subscribe to relayouts (footprint changes). Returns an unsubscribe fn. */
+    onRelayout(cb) {
+        this._onRelayout.push(cb);
+        return () => { const i = this._onRelayout.indexOf(cb); if (i >= 0) this._onRelayout.splice(i, 1); };
     }
 
     /** Shift the cluster so its content bottom sits on the world floor (cfg.floorY). Idempotent: once the
@@ -713,6 +723,19 @@ export default class AgentTrail {
         for (const lane of this.lanes.values()) {
             const b = lane.corridor.getBounds();
             if (b && !b.isEmpty()) target.union(b);
+        }
+        return target;
+    }
+
+    /** The cluster's LOCAL content box (root frame) — every corridor's box carried through its transform.
+     *  So the WorldLayout can measure the trail as a bounds-leaf (leafBox reads this via root.layoutBounds). */
+    localBounds(target = new THREE.Box3()) {
+        target.makeEmpty();
+        const tmp = new THREE.Box3();
+        for (const lane of this.lanes.values()) {
+            lane.corridor.updateMatrix();
+            tmp.copy(lane.corridor.layoutBounds()).applyMatrix4(lane.corridor.matrix);
+            target.union(tmp);
         }
         return target;
     }

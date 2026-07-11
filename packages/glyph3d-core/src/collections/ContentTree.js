@@ -30,6 +30,7 @@
 import * as THREE from 'three';
 import packedLayout from './layouts/packedLayout.js';
 import { LAYOUT_SCHEMES, schemeNameOf, disposePanelSurfaces } from './layouts/index.js';
+import { subtreeContentBounds } from './layouts/nodeUtils.js';
 import { BOUNDS_Z_PAD } from '../core/constants.js';
 
 /** Scratch vector for footprintBounds — one focused node measured per frame, no per-call alloc. */
@@ -369,6 +370,12 @@ export default class ContentTree {
         if (!wb.isEmpty()) this.root.position.y += (floorY - wb.min.y); // drop/lift bottom onto the floor
         this.root.updateMatrixWorld(true);
         return this;
+    }
+
+    /** The tree's LOCAL content box (root frame) — every leaf's box carried through the intermediate dir
+     *  transforms. So a WorldLayout can measure the file tree as a bounds-leaf (via root.layoutBounds). */
+    getLocalBounds(target = new THREE.Box3()) {
+        return subtreeContentBounds(this.root, target, false);   // tight content box (no origin union)
     }
 
     /**
