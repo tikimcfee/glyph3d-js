@@ -946,34 +946,6 @@ export default class TerminalGrid extends FramedGlyphField {
     }
 
     /**
-     * RESIZE-TO-CONTAINER: reshape cols×rows so this terminal FILLS a world-space container
-     * (worldW × worldH) rendered at `worldScale` (its cell density) — the "layout target param
-     * receiver" the pane compositor hands its sub-rect to. Floor-quantized, so it is SEMI-IDEMPOTENT:
-     * a container it already fits re-fits to a no-op (no PTY thrash, so the compositor can call it
-     * every relayout safely). The cell's LOCAL size is read from the live bounds (extent ÷ cols|rows),
-     * so it stays correct across fonts and zoom without re-deriving stride.
-     * @param {number} worldW container width, world units
-     * @param {number} worldH container height, world units
-     * @param {number} worldScale the Object3D scale the terminal renders at
-     * @returns {{cols:number, rows:number, changed:boolean}}
-     */
-    fitToContainer(worldW, worldH, worldScale) {
-        const lb = this.getLocalBounds?.();
-        const s = worldScale || 1;
-        if (!lb || lb.isEmpty?.() || !(s > 0)) return { cols: this.cols, rows: this.rows, changed: false };
-        const cellW = ((lb.max.x - lb.min.x) / Math.max(this.cols, 1)) * s; // world units per cell
-        const cellH = ((lb.max.y - lb.min.y) / Math.max(this.rows, 1)) * s;
-        // +EPS before floor: the frustum-derived container carries sub-cell FP noise (e.g. a "88"-tall
-        // frame reads 87.9999…), which would drop a whole row/col. The epsilon absorbs that without
-        // over-counting a genuine fractional fit (you'd have to land within a millionth of a cell).
-        const cols = Math.max(1, Math.floor(worldW / Math.max(cellW, 1e-6) + 1e-6));
-        const rows = Math.max(1, Math.floor(worldH / Math.max(cellH, 1e-6) + 1e-6));
-        const changed = cols !== this.cols || rows !== this.rows;
-        if (changed) this.resize(cols, rows);
-        return { cols, rows, changed };
-    }
-
-    /**
      * Dispose the renderer and remove the mesh from the scene.
      * Call this when the terminal is permanently closed.
      */
