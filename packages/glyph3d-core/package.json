@@ -1,6 +1,6 @@
 {
   "name": "@glyph3d/core",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "High-performance 3D text rendering for Three.js using GPU-instanced glyphs",
   "type": "module",
   "main": "src/index.js",
