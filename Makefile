@@ -5,6 +5,7 @@
 #   make all          Build for Linux, macOS, Windows (amd64 + arm64)
 #   make deploy       Build linux-amd64 + show scp command
 #   make release      Build all + create GitHub release
+#   make publish OTP=123456   Publish @glyph3d/core + @glyph3d/r3f to npm
 #   make clean        Remove build artifacts
 #
 # Run:
@@ -32,7 +33,7 @@ LDFLAGS := -s -w \
 	-X main.Platform=$(HOST_PLATFORM)
 GOFLAGS := -trimpath -ldflags='$(LDFLAGS)'
 
-.PHONY: all build clean prep bake-core strip-runtime-wasm prep-wasm prep-tree-sitter deploy deploy-ide release linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64 dev dev-vite dev-relay dev-status dev-stop
+.PHONY: all build clean prep bake-core strip-runtime-wasm prep-wasm prep-tree-sitter deploy deploy-ide release publish publish-core publish-r3f linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64 dev dev-vite dev-relay dev-status dev-stop
 
 # --- Default: build for current platform ---
 
@@ -177,6 +178,21 @@ release: all
 		--notes-file RELEASE_NOTES.md
 	@echo ""
 	@echo "Release created: https://github.com/$$(gh repo view --json nameWithOwner -q .nameWithOwner)/releases/tag/$(VERSION)"
+
+# --- npm publish ---
+# Publish the packages: core FIRST (r3f depends on @glyph3d/core ^version).
+# 2FA: pass your current authenticator code — codes expire in ~30s, so if r3f
+# misses the window, rerun just it:  make publish-r3f OTP=<fresh-code>
+#
+# Usage:
+#   make publish OTP=123456
+
+publish: publish-core publish-r3f
+
+publish-core publish-r3f: publish-%:
+	@test -n "$(OTP)" || { echo "usage: make $@ OTP=<2fa-code>"; exit 1; }
+	@npm whoami >/dev/null 2>&1 || { echo "not logged in — run: npm login"; exit 1; }
+	cd packages/glyph3d-$* && npm publish --otp=$(OTP)
 
 # --- Deploy helper ---
 # Build for production target and show the deploy command.
