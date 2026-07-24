@@ -5,7 +5,7 @@
 #   make all          Build for Linux, macOS, Windows (amd64 + arm64)
 #   make deploy       Build linux-amd64 + show scp command
 #   make release      Build all + create GitHub release
-#   make publish OTP=123456   Publish @glyph3d/core + @glyph3d/r3f to npm
+#   make publish      Publish @glyph3d/core + @glyph3d/r3f to npm (key-touch auth)
 #   make clean        Remove build artifacts
 #
 # Run:
@@ -181,18 +181,17 @@ release: all
 
 # --- npm publish ---
 # Publish the packages: core FIRST (r3f depends on @glyph3d/core ^version).
-# 2FA: pass your current authenticator code — codes expire in ~30s, so if r3f
-# misses the window, rerun just it:  make publish-r3f OTP=<fresh-code>
+# 2FA is a security key: npm pops a browser auth page per package — touch the
+# key there and the publish continues (or fails closed if you decline).
 #
 # Usage:
-#   make publish OTP=123456
+#   make publish
 
 publish: publish-core publish-r3f
 
 publish-core publish-r3f: publish-%:
-	@test -n "$(OTP)" || { echo "usage: make $@ OTP=<2fa-code>"; exit 1; }
 	@npm whoami >/dev/null 2>&1 || { echo "not logged in — run: npm login"; exit 1; }
-	cd packages/glyph3d-$* && npm publish --otp=$(OTP)
+	cd packages/glyph3d-$* && npm publish
 
 # --- Deploy helper ---
 # Build for production target and show the deploy command.
