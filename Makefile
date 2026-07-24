@@ -4,7 +4,7 @@
 #   make              Build for current platform
 #   make all          Build for Linux, macOS, Windows (amd64 + arm64)
 #   make deploy       Build linux-amd64 + show scp command
-#   make release      Build all + create GitHub release
+#   make release      Publish dist/ as a GitHub release (build first: make all)
 #   make publish      Publish @glyph3d/core + @glyph3d/r3f to npm (key-touch auth)
 #   make clean        Remove build artifacts
 #
@@ -159,13 +159,20 @@ windows-amd64: prep
 	@echo "  → $(OUT_DIR)/$(BINARY)-windows-amd64.exe"
 
 # --- GitHub Release ---
-# Build all platforms and create a GitHub release.
-#
-# Usage:
-#   make release VERSION=v0.1.0
-#   make release              # uses git describe
+# Two phases, same shape as the npm flow: build, then publish.
+#   build:    make all VERSION=v0.2.0    (every platform → dist/)
+#   publish:  make release VERSION=v0.2.0 (gh release from dist/, guarded)
+# One shot: make all release VERSION=v0.2.0. With HEAD tagged, VERSION
+# defaults to the tag via git describe. The guard refuses missing binaries
+# and a dist/ whose version stamp doesn't match VERSION — publish ships
+# exactly what was built and inspected, or nothing.
 
-release: all
+release:
+	@for p in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64.exe; do \
+		test -f $(OUT_DIR)/$(BINARY)-$$p || { echo "missing $(OUT_DIR)/$(BINARY)-$$p — run: make all VERSION=$(VERSION)"; exit 1; }; \
+	done
+	@got=$$($(OUT_DIR)/$(BINARY)-$(HOST_PLATFORM) version | head -1 | awk '{print $$2}'); \
+	test "$$got" = "$(VERSION)" || { echo "dist/ is stale: built $$got, releasing $(VERSION) — run: make all VERSION=$(VERSION)"; exit 1; }
 	@echo ""
 	@echo "Creating GitHub release $(VERSION)..."
 	gh release create $(VERSION) \
