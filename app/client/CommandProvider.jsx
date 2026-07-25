@@ -71,7 +71,9 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
       return id;
     },
 
-    removeGrid(idOrIndex) {
+    // `relayout:false` defers the tree re-pack for BULK removals (file.closeDir):
+    // the caller batches one relayout at the end instead of N full packings.
+    removeGrid(idOrIndex, { relayout = true } = {}) {
       let entry, regId;
       if (typeof idOrIndex === 'number' || /^\d+$/.test(idOrIndex)) {
         const idx = typeof idOrIndex === 'number' ? idOrIndex : parseInt(idOrIndex);
@@ -95,8 +97,10 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
       if (tree && regId && tree.has(regId)) {
         tree.remove(regId, { prune: true }); // detach leaf + drop now-empty dir nodes
         entry.grid.dispose?.();
-        tree.relayout();
-        tree.restAbove();                    // rest the re-settled tree on the floor (default y=0)
+        if (relayout) {
+          tree.relayout();
+          tree.restAbove();                  // rest the re-settled tree on the floor (default y=0)
+        }
       } else {
         entry.grid.dispose?.();
         scene.remove(entry.grid);

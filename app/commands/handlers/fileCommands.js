@@ -16,6 +16,7 @@
  */
 
 import { resolveGridByIdOrIndex, WORLD_FLOOR_Y } from './spatialHelpers.js';
+import { table } from '../formatResponse.js';
 import { READABLE_MAX_CHARS } from '@glyph3d/core';
 import { FS_ERROR_CODES } from '@glyph3d/core/services/data';
 import { renderSheetGrid, addFileGrid, addUnfetchedGrid, getDiskMtime, setDiskMtime } from './fileLoader.js';
@@ -251,7 +252,89 @@ export default function registerFileCommands(router) {
     }, {
         description: 'Open all code files under a directory (recursive) and lay them out as a 3D tree',
         usage: '<dir-path>   (empty path = whole project)',
-        returns: '{ dir, opened, placeholders, dirs }',
+        returns: '{ dir, opened, placeholders, dirs, truncated }',
+    });
+
+    // file.list <path>
+    //
+    // Shallow, unfiltered listing of one directory — the browse primitive the file
+    // browser (and the CLI: `glyph3d-cli file.list ~/dev`) reads. Nothing loads;
+    // this is pure looking. In relay mode it lists ANY absolute directory the
+    // operator can read; in GitHub mode it synthesizes from the loaded repo tree.
+    router.register('file.list', async (args, ctx) => {
+        if (!ctx.fileProvider) {
+            return { text: 'ERR: no file source — load a repo or connect the relay', data: null };
+        }
+        if (typeof ctx.fileProvider.readDir !== 'function') {
+            return { text: 'ERR: this file source cannot browse directories', data: null };
+        }
+        const path = canonicalPath(ctx, args[0] || '');
+        let res;
+        try {
+            res = await ctx.fileProvider.readDir(path);
+        } catch (err) {
+            return { text: `ERR: list failed for ${path || '/'}: ${err?.message || err}`, data: null };
+        }
+        const dirs = res.entries.filter((e) => e.type === 'directory');
+        const files = res.entries.filter((e) => e.type !== 'directory');
+        const rows = [...dirs, ...files].map((e) => [
+            e.type === 'directory' ? 'd' : e.type === 'symlink' ? 'l' : '-',
+            e.name,
+            e.type === 'directory' ? '' : String(e.size),
+        ]);
+        let text = rows.length ? table(['t', 'name', 'size'], rows) + '\n' : '';
+        text += `OK: ${res.path || path || '/'} — ${dirs.length} dir(s), ${files.length} file(s)`;
+        if (res.truncated) text += ' (TRUNCATED at the server entry cap)';
+        return { text, data: { path: res.path ?? path, entries: res.entries, truncated: !!res.truncated } };
+    }, {
+        description: 'List one directory (shallow, unfiltered — dirs, hidden files, binaries) without loading anything',
+        usage: '<path>   (relative to the served root, absolute, or ~/…)',
+        returns: '{ path, entries: [{name,type,size}], truncated }',
+    });
+
+    // file.closeDir <dir-path>
+    //
+    // The unload half of file.openDir: close every grid under a directory — the
+    // per-node ✕ for directories in the file browser. Bulk by construction: grids
+    // are removed directly (no per-grid router re-entry), sheets/tabs backing them
+    // are dropped, attention is cleared where it pointed inside, ONE relayout
+    // re-settles the tree, and the matching fieldSources entries are forgotten so
+    // a session reload doesn't resurrect the closed root.
+    router.register('file.closeDir', async (args, ctx) => {
+        if (!args[0]) return { text: 'ERR: usage: file.closeDir <dir-path>', data: null };
+        const dir = canonicalPath(ctx, args[0]);
+        const prefix = dir === '/' ? '/' : dir + '/';
+        const doomed = ctx.registry.findByType('grid')
+            .filter((e) => e.id === dir || String(e.id).startsWith(prefix));
+        if (!doomed.length) {
+            return { text: `OK: nothing loaded under "${dir}"`, data: { dir, closed: 0 } };
+        }
+
+        const ws = ctx.workspace;
+        const am = ctx.attentionManager;
+        let closed = 0;
+        for (const e of doomed) {
+            const id = e.id;
+            // Clear key BEFORE primary (exitEdit on a still-live grid), same order
+            // sheet.close uses — then neither slot dangles on a removed panel.
+            if (am?.get?.('key')?.id === id) am.set('key', null, { registry: ctx.registry });
+            if (am?.get?.('primary')?.id === id) am.set('primary', null, { registry: ctx.registry });
+            const sheet = ws ? [...ws.sheets.values()].find((s) => s.panelId === id) : null;
+            if (sheet) { ws.setPanelId(sheet.id, null); ws.removeSheet(sheet.id); }
+            if (ctx.removeGrid(id, { relayout: false })) closed++;
+        }
+        ctx.contentTree?.relayoutAndRest?.(WORLD_FLOOR_Y);
+
+        if (Array.isArray(ctx.fieldSources)) {
+            ctx.fieldSources = ctx.fieldSources.filter(
+                (s) => !(s?.type === 'local' && (s.dir === dir || String(s.dir).startsWith(prefix)))
+            );
+        }
+        return { text: `OK: closed ${closed} grid(s) under "${dir}"`, data: { dir, closed } };
+    }, {
+        description: 'Close every loaded grid under a directory (tabs drop, tree re-settles, session forgets the root)',
+        usage: '<dir-path>',
+        returns: '{ dir, closed }',
     });
 
     router.register('file.save', async (args, ctx) => {
