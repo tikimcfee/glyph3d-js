@@ -161,17 +161,21 @@ export default function registerFileCommands(router) {
             return { text: 'ERR: no file source — load a repo or connect the relay', data: null };
         }
 
-        let entries;
+        // The server walks the named directory itself (entries come back
+        // relative to it); join the dir back on so grid keys stay full paths.
+        let listing;
         try {
-            entries = await ctx.fileProvider.listTree('file:///');
+            listing = await ctx.fileProvider.listTree(`file:///${dir}`);
         } catch (err) {
             return { text: `ERR: listTree failed: ${err?.message || err}`, data: null };
         }
-        const code = ctx.fileProvider.filterCodeFiles({ tree: entries });
-        const prefix = dir ? dir + '/' : '';
-        const under = code.filter((f) => dir === '' || f.path === dir || f.path.startsWith(prefix));
+        const entries = dir
+            ? listing.entries.map((e) => ({ ...e, path: `${dir}/${e.path}` }))
+            : listing.entries;
+        const truncated = !!listing.truncated;
+        const under = ctx.fileProvider.filterCodeFiles({ tree: entries });
         if (under.length === 0) {
-            return { text: `OK: no code files under "${dir || '/'}"`, data: { dir, opened: 0 } };
+            return { text: `OK: no code files under "${dir || '/'}"`, data: { dir, opened: 0, truncated } };
         }
 
         // Partition by the walker's size metadata: an oversized file becomes a placeholder card
@@ -221,7 +225,8 @@ export default function registerFileCommands(router) {
 
             let text = `OK: opened ${opened} file(s) under "${dir || '/'}" → content tree (${dirs} dirs)`;
             if (placeholders) text += `; ${placeholders} as not-rendered placeholder${placeholders === 1 ? '' : 's'}`;
-            return { text, data: { dir, opened, placeholders, dirs } };
+            if (truncated) text += `; LISTING TRUNCATED at the server entry cap — deeper content not loaded`;
+            return { text, data: { dir, opened, placeholders, dirs, truncated } };
         } finally {
             ctx.status?.clear();
         }

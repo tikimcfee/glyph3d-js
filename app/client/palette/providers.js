@@ -54,8 +54,8 @@ export async function nounEntries(client) {
     // so every palette jump flies the camera — open or not, same gesture, same verb.
     // file.open stays the no-camera-yank primitive for bulk/scripted opens.
     try {
-        const tree = await ctx.fileProvider.listTree('file:///');
-        for (const f of ctx.fileProvider.filterCodeFiles({ tree })) {
+        const { entries } = await ctx.fileProvider.listTree('file:///');
+        for (const f of ctx.fileProvider.filterCodeFiles({ tree: entries })) {
             if (openPaths.has(f.path)) continue;
             out.push({ kind: 'file', key: f.path, command: ['sheet.focus', f.path], detail: '' });
         }

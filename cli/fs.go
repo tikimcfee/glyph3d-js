@@ -29,11 +29,14 @@ const (
 )
 
 const (
-	maxFileSize    = 10 * 1024 * 1024 // 10MB
-	maxRangeLen    = 4 * 1024 * 1024  // 4MB — per-chunk cap for fs/readRange (the file itself may be far larger)
-	maxTreeEntries = 50000
-	rpcTimeout     = 10 * time.Second
+	maxFileSize = 10 * 1024 * 1024 // 10MB
+	maxRangeLen = 4 * 1024 * 1024  // 4MB — per-chunk cap for fs/readRange (the file itself may be far larger)
+	rpcTimeout  = 10 * time.Second
 )
+
+// maxTreeEntries caps an fs/listTree walk; the response carries a truncated
+// flag when it trips. A var, not a const, so tests can lower it.
+var maxTreeEntries = 50000
 
 // maxReadDirEntries caps a single fs/readDir response (a pathological flat
 // directory — maildirs, cache dirs — shouldn't produce a multi-MB frame).
@@ -263,6 +266,14 @@ type rangeContent struct {
 
 type listTreeParams struct {
 	URI string `json:"uri"`
+}
+
+// listTreeResult is the fs/listTree response. Entries are relative to the
+// walked directory (the resolved URI); Truncated reports that the
+// maxTreeEntries cap stopped the walk early — never a silent partial.
+type listTreeResult struct {
+	Entries   []dirEntry `json:"entries"`
+	Truncated bool       `json:"truncated"`
 }
 
 // readDirParams is the body of fs/readDir — the shallow browse primitive.
@@ -660,6 +671,11 @@ func (h *FSHandler) handleReadRange(write writeFn, id json.RawMessage, raw json.
 	h.sendRPCResult(write, id, result)
 }
 
+// errWalkTruncated is the walk-abort sentinel for the maxTreeEntries cap —
+// distinguished from real walk errors so truncation is reported as data, not
+// swallowed as a log line.
+var errWalkTruncated = fmt.Errorf("tree entry limit exceeded (%d)", maxTreeEntries)
+
 func (h *FSHandler) handleListTree(write writeFn, id json.RawMessage, raw json.RawMessage) {
 	var p listTreeParams
 	if err := json.Unmarshal(raw, &p); err != nil {
@@ -667,12 +683,29 @@ func (h *FSHandler) handleListTree(write writeFn, id json.RawMessage, raw json.R
 		return
 	}
 
-	// For listTree, the URI is typically "file:///" meaning "the root".
-	// We walk from h.root.
+	// The URI names the directory to walk — "file:///" (or empty) is the served
+	// root, anything else resolves with the same precedence rules as content
+	// read/write (resolvePath), so a walk can only enter registered roots.
+	// Directories outside become walkable after fs/addRoot.
+	base, err := h.resolvePath(p.URI)
+	if err != nil {
+		h.sendRPCError(write, id, errPermissionDenied, err.Error(), map[string]string{"uri": p.URI})
+		return
+	}
+	info, err := os.Stat(base)
+	if err != nil {
+		h.sendRPCError(write, id, errFileNotFound, "not found: "+p.URI, map[string]string{"uri": p.URI})
+		return
+	}
+	if !info.IsDir() {
+		h.sendRPCError(write, id, errIsDirectory, "not a directory: "+p.URI, map[string]string{"uri": p.URI})
+		return
+	}
+
 	entries := make([]dirEntry, 0, 512)
 	count := 0
 
-	err := filepath.WalkDir(h.root, func(path string, d fs.DirEntry, err error) error {
+	walkErr := filepath.WalkDir(base, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil // skip errors (permission denied, etc.)
 		}
@@ -682,8 +715,8 @@ func (h *FSHandler) handleListTree(write writeFn, id json.RawMessage, raw json.R
 			if skipDirs[d.Name()] {
 				return filepath.SkipDir
 			}
-			// Don't include the root itself
-			if path == h.root {
+			// Don't include the walked root itself
+			if path == base {
 				return nil
 			}
 		}
@@ -696,10 +729,10 @@ func (h *FSHandler) handleListTree(write writeFn, id json.RawMessage, raw json.R
 		// Cap entry count
 		count++
 		if count > maxTreeEntries {
-			return fmt.Errorf("tree entry limit exceeded (%d)", maxTreeEntries)
+			return errWalkTruncated
 		}
 
-		rel, _ := filepath.Rel(h.root, path)
+		rel, _ := filepath.Rel(base, path)
 		entryType := "file"
 		if d.IsDir() {
 			entryType = "directory"
@@ -715,18 +748,22 @@ func (h *FSHandler) handleListTree(write writeFn, id json.RawMessage, raw json.R
 		}
 
 		entries = append(entries, dirEntry{
-			Path: rel,
+			Path: filepath.ToSlash(rel),
 			Type: entryType,
 			Size: size,
 		})
 		return nil
 	})
 
-	if err != nil {
-		log.Printf("[fs] listTree walk error: %v", err)
+	truncated := walkErr == errWalkTruncated
+	if walkErr != nil && !truncated {
+		log.Printf("[fs] listTree walk error: %v", walkErr)
+	}
+	if truncated {
+		log.Printf("[fs] listTree truncated at %d entries: %s", maxTreeEntries, base)
 	}
 
-	h.sendRPCResult(write, id, entries)
+	h.sendRPCResult(write, id, listTreeResult{Entries: entries, Truncated: truncated})
 }
 
 // handleReadDir serves a shallow, unfiltered listing of one directory — the

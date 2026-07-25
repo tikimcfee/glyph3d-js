@@ -736,6 +736,119 @@ func TestAddRootConcurrency(t *testing.T) {
 	<-done
 }
 
+// ---- listTree: uri-directed walk + truncation surfacing ----
+
+func TestHandleListTree_RootCompat(t *testing.T) {
+	h, root, _ := newTestHandler(t)
+	writeFile(t, root, "src/a.js", "x")
+	writeFile(t, root, "README.md", "x")
+	writeFile(t, root, "blob.bin", "x") // whitelist keeps this out
+
+	res, rpcErr := callRPC[listTreeResult](t, h.handleListTree, listTreeParams{URI: "file:///"})
+	if rpcErr != nil {
+		t.Fatalf("listTree errored: %v", rpcErr)
+	}
+	if res.Truncated {
+		t.Error("unexpected truncation")
+	}
+	got := map[string]string{}
+	for _, e := range res.Entries {
+		got[e.Path] = e.Type
+	}
+	if got["src"] != "directory" || got["src/a.js"] != "file" || got["README.md"] != "file" {
+		t.Errorf("root walk entries wrong: %v", got)
+	}
+	if _, ok := got["blob.bin"]; ok {
+		t.Error("whitelist should exclude blob.bin")
+	}
+}
+
+func TestHandleListTree_SubdirRelativeEntries(t *testing.T) {
+	h, root, _ := newTestHandler(t)
+	writeFile(t, root, "src/deep/a.js", "x")
+	writeFile(t, root, "other/b.js", "x")
+
+	res, rpcErr := callRPC[listTreeResult](t, h.handleListTree, listTreeParams{URI: "file:///src"})
+	if rpcErr != nil {
+		t.Fatalf("listTree errored: %v", rpcErr)
+	}
+	got := map[string]bool{}
+	for _, e := range res.Entries {
+		got[e.Path] = true
+	}
+	// Entries are relative to the WALKED dir, and the sibling dir is absent.
+	if !got["deep"] || !got["deep/a.js"] {
+		t.Errorf("subdir walk should be relative to src: %v", got)
+	}
+	if got["src/deep/a.js"] || got["other/b.js"] || got["b.js"] {
+		t.Errorf("subdir walk leaked outside src: %v", got)
+	}
+}
+
+func TestHandleListTree_AddedRootWalkable(t *testing.T) {
+	h, _, _ := newTestHandler(t)
+	outside := outsideDir(t)
+	writeFile(t, outside, "pkg/c.go", "package c")
+
+	// Before addRoot: unreachable absolute → remaps in-project → not found.
+	_, rpcErr := callRPC[listTreeResult](t, h.handleListTree, listTreeParams{URI: "file://" + outside})
+	if rpcErr == nil {
+		t.Fatal("outside dir should not walk before addRoot")
+	}
+
+	if _, rpcErr := callRPC[addRootResult](t, h.handleAddRoot, addRootParams{URI: "file://" + outside}); rpcErr != nil {
+		t.Fatalf("addRoot errored: %v", rpcErr)
+	}
+	res, rpcErr := callRPC[listTreeResult](t, h.handleListTree, listTreeParams{URI: "file://" + outside})
+	if rpcErr != nil {
+		t.Fatalf("listTree after addRoot errored: %v", rpcErr)
+	}
+	got := map[string]bool{}
+	for _, e := range res.Entries {
+		got[e.Path] = true
+	}
+	if !got["pkg"] || !got["pkg/c.go"] {
+		t.Errorf("added-root walk entries wrong: %v", got)
+	}
+}
+
+func TestHandleListTree_Truncated(t *testing.T) {
+	h, root, _ := newTestHandler(t)
+	old := maxTreeEntries
+	maxTreeEntries = 3
+	t.Cleanup(func() { maxTreeEntries = old })
+	for _, n := range []string{"a", "b", "c", "d", "e"} {
+		writeFile(t, root, n+".md", n)
+	}
+
+	res, rpcErr := callRPC[listTreeResult](t, h.handleListTree, listTreeParams{URI: "file:///"})
+	if rpcErr != nil {
+		t.Fatalf("listTree errored: %v", rpcErr)
+	}
+	if !res.Truncated {
+		t.Error("expected truncated=true past the cap")
+	}
+	if len(res.Entries) != 3 {
+		t.Errorf("entries: got %d, want 3", len(res.Entries))
+	}
+}
+
+func TestHandleListTree_SkipDirsStillApply(t *testing.T) {
+	h, root, _ := newTestHandler(t)
+	writeFile(t, root, "node_modules/dep/index.js", "x")
+	writeFile(t, root, "src/a.js", "x")
+
+	res, rpcErr := callRPC[listTreeResult](t, h.handleListTree, listTreeParams{URI: "file:///"})
+	if rpcErr != nil {
+		t.Fatalf("listTree errored: %v", rpcErr)
+	}
+	for _, e := range res.Entries {
+		if e.Path == "node_modules" || e.Path == "node_modules/dep/index.js" {
+			t.Errorf("skipDirs leaked: %v", e.Path)
+		}
+	}
+}
+
 func TestStripLeadingDriveSlash(t *testing.T) {
 	cases := map[string]string{
 		"/C:/dev/x":  "C:/dev/x",

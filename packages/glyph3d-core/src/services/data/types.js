@@ -23,16 +23,22 @@
 
 /**
  * @typedef {Object} DirEntry
- * @property {string} path      - full relative path from root (not basename)
+ * @property {string} path      - path relative to the listed directory (not basename)
  * @property {'file'|'directory'|'symlink'} type
  * @property {number} size
+ */
+
+/**
+ * @typedef {Object} TreeListing
+ * @property {DirEntry[]} entries - recursive walk, paths relative to the listed directory
+ * @property {boolean} truncated  - the server entry cap stopped the walk early (partial listing)
  */
 
 /**
  * @typedef {Object} FileSystemProvider
  * @property {string} scheme                              - URI scheme handled (e.g. "file", "github")
  * @property {function(string): Promise<FileContent>} readFile
- * @property {function(string, Object=): Promise<DirEntry[]>} listTree
+ * @property {function(string, Object=): Promise<TreeListing>} listTree
  * @property {function(string): Promise<FileStat>} stat
  * @property {function(): void} dispose
  */

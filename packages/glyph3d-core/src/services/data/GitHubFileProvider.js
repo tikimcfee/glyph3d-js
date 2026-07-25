@@ -25,19 +25,28 @@ export class GitHubFileProvider extends RepositoryAdapter {
     }
 
     /**
-     * List the loaded repo tree as DirEntry[] (`type: 'file'|'directory'`) — the
-     * shape FileTree + file.open consume. `loadRepository(url)` must have run.
-     * @param {string} [_uri] - ignored; the whole loaded tree is returned
-     * @returns {Promise<import('./types.js').DirEntry[]>}
+     * List the loaded repo tree as a TreeListing — the same contract the relay
+     * provider honors: entries relative to the listed directory, an explicit
+     * truncated flag (GitHub's tree API sets one past ~100k entries).
+     * `loadRepository(url)` must have run.
+     * @param {string} [uri] - subtree to list (any scheme; path part is used); root lists all
+     * @returns {Promise<import('./types.js').TreeListing>}
      */
-    async listTree(_uri = 'github:///', _options = {}) {
+    async listTree(uri = 'github:///', _options = {}) {
         const tree = this._currentTree;
-        if (!tree || !Array.isArray(tree.tree)) return [];
-        return tree.tree.map((e) => ({
-            path: e.path,
-            type: e.type === 'tree' ? 'directory' : 'file',
-            size: e.size || 0,
-        }));
+        if (!tree || !Array.isArray(tree.tree)) return { entries: [], truncated: false };
+        const dir = String(uri).replace(/^[a-z]+:\/\//, '').replace(/^\/+|\/+$/g, '');
+        const prefix = dir ? dir + '/' : '';
+        const entries = [];
+        for (const e of tree.tree) {
+            if (dir && !(e.path.startsWith(prefix))) continue;
+            entries.push({
+                path: dir ? e.path.slice(prefix.length) : e.path,
+                type: e.type === 'tree' ? 'directory' : 'file',
+                size: e.size || 0,
+            });
+        }
+        return { entries, truncated: !!tree.truncated };
     }
 
     /**
@@ -50,7 +59,7 @@ export class GitHubFileProvider extends RepositoryAdapter {
      * @returns {Promise<Object>}
      */
     async getRepositoryTree(owner, repo, branch) {
-        if (owner == null) return { tree: await this.listTree() };
+        if (owner == null) return { tree: (await this.listTree()).entries };
         return super.getRepositoryTree(owner, repo, branch);
     }
 

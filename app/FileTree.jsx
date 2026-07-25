@@ -149,7 +149,7 @@ export default function FileTree({ client }) {
       const provider = client.ctx?.fileProvider;
       if (!provider) return;
       try {
-        const entries = await provider.listTree('file:///');
+        const { entries } = await provider.listTree('file:///');
         const code = provider.filterCodeFiles({ tree: entries });
         if (cancelled) return;
         setFiles(code.map((f) => f.path).sort());

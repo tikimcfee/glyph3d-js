@@ -96,10 +96,14 @@ export class RemoteFileSystemProvider {
     }
 
     /**
-     * List the full tree from the relay root.
-     * @param {string} uri - e.g. "file:///" (root)
+     * Recursively list a directory. "file:///" (or empty) walks the served
+     * root; any other path resolves with the same precedence rules as content
+     * read/write, so added roots (fs/addRoot) are walkable too. Entries come
+     * back relative to the walked directory, with an explicit truncated flag
+     * when the server's entry cap stopped the walk.
+     * @param {string} uri - e.g. "file:///" (root) or "file:///home/x/proj"
      * @param {Object} [options]
-     * @returns {Promise<import('./types.js').DirEntry[]>}
+     * @returns {Promise<import('./types.js').TreeListing>}
      */
     async listTree(uri, options = {}) {
         return this._rpc('fs/listTree', { uri, ...options });
@@ -121,7 +125,7 @@ export class RemoteFileSystemProvider {
      * @returns {Promise<Object>} - { tree: { tree: DirEntry[] }, owner, repo, branch }
      */
     async loadRepository() {
-        const entries = await this.listTree('file:///');
+        const { entries } = await this.listTree('file:///');
         this._currentTree = { tree: entries };
         return {
             tree: this._currentTree,
@@ -138,7 +142,7 @@ export class RemoteFileSystemProvider {
      */
     async getRepositoryTree() {
         if (this._currentTree) return this._currentTree;
-        const entries = await this.listTree('file:///');
+        const { entries } = await this.listTree('file:///');
         this._currentTree = { tree: entries };
         return this._currentTree;
     }
