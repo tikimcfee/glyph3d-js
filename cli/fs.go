@@ -35,6 +35,12 @@ const (
 	rpcTimeout     = 10 * time.Second
 )
 
+// maxReadDirEntries caps a single fs/readDir response (a pathological flat
+// directory — maildirs, cache dirs — shouldn't produce a multi-MB frame).
+// The response carries a truncated flag when the cap trips. A var, not a
+// const, so tests can lower it.
+var maxReadDirEntries = 10000
+
 // Directories to skip during tree walk.
 var skipDirs = map[string]bool{
 	".git":         true,
@@ -259,6 +265,52 @@ type listTreeParams struct {
 	URI string `json:"uri"`
 }
 
+// readDirParams is the body of fs/readDir — the shallow browse primitive.
+type readDirParams struct {
+	URI string `json:"uri"`
+}
+
+// readDirEntry is one child in an fs/readDir result. Unlike listTree's
+// dirEntry it carries a bare name (the parent path is in the result), and the
+// listing is unfiltered: hidden files, binaries, everything the operator would
+// see with ls -a.
+type readDirEntry struct {
+	Name string `json:"name"`
+	Type string `json:"type"` // file | directory | symlink
+	Size int64  `json:"size"`
+}
+
+// readDirResult is the fs/readDir response. Path is the cleaned absolute
+// directory that was listed (forward slashes on the wire); Truncated reports
+// that the maxReadDirEntries cap trimmed the listing.
+type readDirResult struct {
+	Path      string         `json:"path"`
+	Entries   []readDirEntry `json:"entries"`
+	Truncated bool           `json:"truncated"`
+}
+
+type addRootParams struct {
+	URI string `json:"uri"`
+}
+
+// addRootResult is the fs/addRoot response: the symlink-resolved root that was
+// registered (or found already reachable — added=false), plus the current
+// reach set so the client can refresh its picture in one round trip.
+type addRootResult struct {
+	Root       string   `json:"root"`
+	Added      bool     `json:"added"`
+	ExtraRoots []string `json:"extraRoots"`
+}
+
+// rootsResult is the fs/roots response — what this handler is serving and can
+// reach, plus the anchors a browser needs to orient (home dir, separator).
+type rootsResult struct {
+	Root       string   `json:"root"`
+	ExtraRoots []string `json:"extraRoots"`
+	Home       string   `json:"home"`
+	Sep        string   `json:"sep"`
+}
+
 type setFilterParams struct {
 	Exts  []string `json:"exts"`
 	Names []string `json:"names"`
@@ -304,11 +356,13 @@ type FSHandler struct {
 	root string // absolute path, symlinks resolved
 
 	// extraRoots are additional absolute, symlink-resolved directories the
-	// handler may reach OUTSIDE the project root — the agent-scratch hatch.
-	// Defaults to the temp dirs (/tmp, /var/tmp, $TMPDIR) so a file an agent
-	// drops in /tmp can be pulled up and rendered; widened by the --reach flag.
-	// resolvePath treats a path as reachable when it lands under root OR any of
-	// these. See resolvePath for the precedence rules.
+	// handler may reach OUTSIDE the project root. Seeded at construction from
+	// the temp dirs (/tmp, /var/tmp, $TMPDIR) plus the --reach flag, and widened
+	// at runtime by fs/addRoot (the browser's "open this directory" selecting
+	// outside the served root). resolvePath treats a path as reachable when it
+	// lands under root OR any of these. Guarded by rootsMu — RPC handlers run
+	// in their own goroutines.
+	rootsMu    sync.RWMutex
 	extraRoots []string
 
 	// notify, if non-nil, is called on successful fs/writeFile to push an
@@ -402,12 +456,41 @@ func (h *FSHandler) underAnyRoot(path string) bool {
 	if isUnder(path, h.root) {
 		return true
 	}
+	h.rootsMu.RLock()
+	defer h.rootsMu.RUnlock()
 	for _, r := range h.extraRoots {
 		if isUnder(path, r) {
 			return true
 		}
 	}
 	return false
+}
+
+// Roots returns the project root and a snapshot of the extra reach roots.
+func (h *FSHandler) Roots() (string, []string) {
+	h.rootsMu.RLock()
+	defer h.rootsMu.RUnlock()
+	extra := make([]string, len(h.extraRoots))
+	copy(extra, h.extraRoots)
+	return h.root, extra
+}
+
+// addRoot registers an absolute, symlink-resolved directory as a reach root.
+// Returns false when the path is already reachable (under the project root or
+// an existing reach root, or an exact duplicate) — a no-op, not an error.
+func (h *FSHandler) addRoot(resolved string) bool {
+	if isUnder(resolved, h.root) {
+		return false
+	}
+	h.rootsMu.Lock()
+	defer h.rootsMu.Unlock()
+	for _, r := range h.extraRoots {
+		if isUnder(resolved, r) {
+			return false
+		}
+	}
+	h.extraRoots = append(h.extraRoots, resolved)
+	return true
 }
 
 // evalSymlinksOrSelf resolves symlinks in p, falling back to p unchanged when it
@@ -434,6 +517,12 @@ func (h *FSHandler) Handle(method string, rawID json.RawMessage, params json.Raw
 				h.handleReadRange(write, rawID, params)
 			case "fs/listTree":
 				h.handleListTree(write, rawID, params)
+			case "fs/readDir":
+				h.handleReadDir(write, rawID, params)
+			case "fs/addRoot":
+				h.handleAddRoot(write, rawID, params)
+			case "fs/roots":
+				h.handleRoots(write, rawID, params)
 			case "fs/stat":
 				h.handleStat(write, rawID, params)
 			case "fs/setFilter":
@@ -638,6 +727,147 @@ func (h *FSHandler) handleListTree(write writeFn, id json.RawMessage, raw json.R
 	}
 
 	h.sendRPCResult(write, id, entries)
+}
+
+// handleReadDir serves a shallow, unfiltered listing of one directory — the
+// browse primitive behind the IDE's file browser. It deliberately maps the URI
+// with uriToPath, NOT resolvePath: browsing takes literal absolute paths only,
+// so it can never mis-resolve through the root-relative existence
+// disambiguation, and it is deliberately wider than the read/write sandbox —
+// a single-operator tool listing what the operator could already `ls`.
+// Selection stays browse-wide; file CONTENT read/write stays root-gated.
+func (h *FSHandler) handleReadDir(write writeFn, id json.RawMessage, raw json.RawMessage) {
+	var p readDirParams
+	if err := json.Unmarshal(raw, &p); err != nil {
+		h.sendRPCError(write, id, -32602, "invalid params", nil)
+		return
+	}
+
+	dir, err := uriToPath(p.URI)
+	if err != nil {
+		h.sendRPCError(write, id, -32602, err.Error(), map[string]string{"uri": p.URI})
+		return
+	}
+
+	info, err := os.Stat(dir)
+	if err != nil {
+		if os.IsPermission(err) {
+			h.sendRPCError(write, id, errPermissionDenied, "permission denied: "+p.URI, map[string]string{"uri": p.URI})
+			return
+		}
+		h.sendRPCError(write, id, errFileNotFound, "not found: "+p.URI, map[string]string{"uri": p.URI})
+		return
+	}
+	if !info.IsDir() {
+		h.sendRPCError(write, id, errIsDirectory, "not a directory: "+p.URI, map[string]string{"uri": p.URI})
+		return
+	}
+
+	children, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsPermission(err) {
+			h.sendRPCError(write, id, errPermissionDenied, "permission denied: "+p.URI, map[string]string{"uri": p.URI})
+			return
+		}
+		h.sendRPCError(write, id, errFileNotFound, "read dir error: "+err.Error(), map[string]string{"uri": p.URI})
+		return
+	}
+
+	result := readDirResult{Path: filepath.ToSlash(dir), Entries: make([]readDirEntry, 0, len(children))}
+	for _, d := range children {
+		if len(result.Entries) >= maxReadDirEntries {
+			result.Truncated = true
+			break
+		}
+		entryType := "file"
+		if d.IsDir() {
+			entryType = "directory"
+		} else if d.Type()&os.ModeSymlink != 0 {
+			entryType = "symlink"
+		}
+		var size int64
+		// Info is lstat-shaped for ReadDir entries: symlinks report the link
+		// itself, and a dangling symlink still lists (its target's absence is
+		// the browser's problem to render, not ours to hide).
+		if !d.IsDir() {
+			if fi, err := d.Info(); err == nil {
+				size = fi.Size()
+			}
+		}
+		result.Entries = append(result.Entries, readDirEntry{Name: d.Name(), Type: entryType, Size: size})
+	}
+	h.sendRPCResult(write, id, result)
+}
+
+// handleAddRoot registers a directory as a runtime reach root — the dynamic
+// form of --reach, invoked when the operator opens a directory outside the
+// served root. After this, resolvePath admits reads/writes under it and
+// listTree can walk it.
+func (h *FSHandler) handleAddRoot(write writeFn, id json.RawMessage, raw json.RawMessage) {
+	var p addRootParams
+	if err := json.Unmarshal(raw, &p); err != nil {
+		h.sendRPCError(write, id, -32602, "invalid params", nil)
+		return
+	}
+
+	dir, err := uriToPath(p.URI)
+	if err != nil {
+		h.sendRPCError(write, id, -32602, err.Error(), map[string]string{"uri": p.URI})
+		return
+	}
+
+	// The root must exist and be a directory; store its symlink-resolved form
+	// so underAnyRoot's prefix checks line up with resolvePath's resolved
+	// candidates (macOS /tmp → /private/tmp and friends).
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		h.sendRPCError(write, id, errFileNotFound, "not found: "+p.URI, map[string]string{"uri": p.URI})
+		return
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		h.sendRPCError(write, id, errFileNotFound, "not found: "+p.URI, map[string]string{"uri": p.URI})
+		return
+	}
+	if !info.IsDir() {
+		h.sendRPCError(write, id, errIsDirectory, "not a directory: "+p.URI, map[string]string{"uri": p.URI})
+		return
+	}
+
+	added := h.addRoot(resolved)
+	if added {
+		log.Printf("[fs] reach root added: %s", resolved)
+	}
+	_, extra := h.Roots()
+	h.sendRPCResult(write, id, addRootResult{
+		Root:       filepath.ToSlash(resolved),
+		Added:      added,
+		ExtraRoots: toSlashAll(extra),
+	})
+}
+
+// handleRoots reports what the handler serves and can reach — the browser's
+// one source of truth for "what am I attached to" (served root, reach set)
+// and its browse anchors (home directory, path separator).
+func (h *FSHandler) handleRoots(write writeFn, id json.RawMessage, raw json.RawMessage) {
+	home, _ := os.UserHomeDir()
+	root, extra := h.Roots()
+	h.sendRPCResult(write, id, rootsResult{
+		Root:       filepath.ToSlash(root),
+		ExtraRoots: toSlashAll(extra),
+		Home:       filepath.ToSlash(home),
+		Sep:        string(filepath.Separator),
+	})
+}
+
+// toSlashAll maps filepath.ToSlash over a fresh slice — wire form is always
+// forward slashes; only URI/display boundaries convert.
+func toSlashAll(paths []string) []string {
+	out := make([]string, len(paths))
+	for i, p := range paths {
+		out[i] = filepath.ToSlash(p)
+	}
+	return out
 }
 
 func (h *FSHandler) handleStat(write writeFn, id json.RawMessage, raw json.RawMessage) {
@@ -897,6 +1127,43 @@ func (h *FSHandler) resolvePath(uri string) (string, error) {
 func pathExists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
+}
+
+// isWindows gates the drive-letter URI form in uriToPath.
+var isWindows = os.PathSeparator == '\\'
+
+// stripLeadingDriveSlash turns the URI-path form of a Windows drive path
+// ("/C:/dev/x") into the bare drive form ("C:/dev/x") so filepath.IsAbs holds.
+// Anything else passes through untouched.
+func stripLeadingDriveSlash(p string) string {
+	if len(p) >= 3 && p[0] == '/' && p[2] == ':' {
+		c := p[1]
+		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') {
+			return p[1:]
+		}
+	}
+	return p
+}
+
+// uriToPath maps a file:// URI (or bare path) to the literal absolute path it
+// names. This is the browse mapping — fs/readDir and fs/addRoot — with NO
+// root-relative disambiguation and NO reachability gate: the operator is
+// pointing at the real filesystem, and a literal-absolute contract means
+// browsing can never mis-resolve. ".." is rejected (same string rule as
+// resolvePath) and relative paths are refused outright.
+func uriToPath(uri string) (string, error) {
+	p := strings.TrimPrefix(uri, "file://")
+	if strings.Contains(p, "..") {
+		return "", fmt.Errorf("path traversal rejected: %s", uri)
+	}
+	if isWindows {
+		p = stripLeadingDriveSlash(p)
+	}
+	p = filepath.Clean(filepath.FromSlash(p))
+	if !filepath.IsAbs(p) {
+		return "", fmt.Errorf("absolute path required: %s", uri)
+	}
+	return p, nil
 }
 
 // ---- JSON-RPC Response Helpers ----

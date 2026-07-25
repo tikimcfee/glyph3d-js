@@ -880,9 +880,10 @@ func RunServer(cfg ServerConfig) error {
 	log.Printf("[glyph3d] glyph3d-cli — single-binary server")
 	log.Printf("[glyph3d] App:     %s", cfg.StaticTag)
 	if cfg.FSHandler != nil {
-		log.Printf("[glyph3d] Project: %s", cfg.FSHandler.root)
-		if len(cfg.FSHandler.extraRoots) > 0 {
-			log.Printf("[glyph3d] Reach:   %s", strings.Join(cfg.FSHandler.extraRoots, "  "))
+		root, reach := cfg.FSHandler.Roots()
+		log.Printf("[glyph3d] Project: %s", root)
+		if len(reach) > 0 {
+			log.Printf("[glyph3d] Reach:   %s", strings.Join(reach, "  "))
 		}
 	}
 	log.Printf("[glyph3d] ──────────────────────────────────────")

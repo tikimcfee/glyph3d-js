@@ -389,3 +389,385 @@ func TestResolvePath_TempDirReachableByDefault(t *testing.T) {
 		t.Errorf("temp file: got %q, want %q", got, abs)
 	}
 }
+
+// ---- Browse primitives: fs/readDir, fs/addRoot, fs/roots ----
+
+// callRPC invokes one handler func and decodes the JSON-RPC envelope into the
+// given result type. rpcErr is nil on success.
+func callRPC[T any](t *testing.T, handle func(writeFn, json.RawMessage, json.RawMessage), params any) (*T, map[string]any) {
+	t.Helper()
+	var captured []byte
+	handle(func(data []byte) { captured = data }, json.RawMessage(`1`), mustJSON(t, params))
+	var resp struct {
+		Result *T             `json:"result"`
+		Error  map[string]any `json:"error"`
+	}
+	if err := json.Unmarshal(captured, &resp); err != nil {
+		t.Fatalf("unmarshal response: %v (raw: %s)", err, captured)
+	}
+	return resp.Result, resp.Error
+}
+
+func TestHandleReadDir_Unfiltered(t *testing.T) {
+	h, root, _ := newTestHandler(t)
+	// A dotfile, a binary, a real file, a subdir, and a dangling symlink: the
+	// browse listing shows ALL of them — selection needs truth, the text
+	// whitelist only applies to tree walks.
+	writeFile(t, root, ".env", "SECRET=1")
+	writeFile(t, root, "blob.bin", "\x00\x01\x02")
+	writeFile(t, root, "main.go", "package main")
+	if err := os.Mkdir(filepath.Join(root, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(root, "gone"), filepath.Join(root, "dangling")); err != nil {
+		t.Fatal(err)
+	}
+
+	res, rpcErr := callRPC[readDirResult](t, h.handleReadDir, readDirParams{URI: "file://" + root})
+	if rpcErr != nil {
+		t.Fatalf("readDir errored: %v", rpcErr)
+	}
+	if res.Truncated {
+		t.Error("unexpected truncation")
+	}
+	types := map[string]string{}
+	sizes := map[string]int64{}
+	for _, e := range res.Entries {
+		types[e.Name] = e.Type
+		sizes[e.Name] = e.Size
+	}
+	want := map[string]string{
+		".env": "file", "blob.bin": "file", "main.go": "file",
+		"sub": "directory", "dangling": "symlink",
+	}
+	for name, wantType := range want {
+		if types[name] != wantType {
+			t.Errorf("%s: got type %q, want %q (entries: %v)", name, types[name], wantType, types)
+		}
+	}
+	if sizes["main.go"] != int64(len("package main")) {
+		t.Errorf("main.go size: got %d", sizes["main.go"])
+	}
+}
+
+func TestHandleReadDir_Errors(t *testing.T) {
+	h, root, _ := newTestHandler(t)
+	file := writeFile(t, root, "afile.txt", "x")
+
+	// Missing directory → file-not-found.
+	_, rpcErr := callRPC[readDirResult](t, h.handleReadDir, readDirParams{URI: "file:///nope/nothing-here"})
+	if rpcErr == nil || errCode(t, rpcErr) != errFileNotFound {
+		t.Errorf("missing dir: got %v, want code %d", rpcErr, errFileNotFound)
+	}
+
+	// A file is not a directory.
+	_, rpcErr = callRPC[readDirResult](t, h.handleReadDir, readDirParams{URI: "file://" + file})
+	if rpcErr == nil || errCode(t, rpcErr) != errIsDirectory {
+		t.Errorf("file as dir: got %v, want code %d", rpcErr, errIsDirectory)
+	}
+
+	// Relative URIs are refused outright — browsing is literal-absolute only.
+	_, rpcErr = callRPC[readDirResult](t, h.handleReadDir, readDirParams{URI: "relative/path"})
+	if rpcErr == nil || errCode(t, rpcErr) != -32602 {
+		t.Errorf("relative uri: got %v, want -32602", rpcErr)
+	}
+
+	// Traversal is rejected as a string rule, same as resolvePath.
+	_, rpcErr = callRPC[readDirResult](t, h.handleReadDir, readDirParams{URI: "file:///tmp/../etc"})
+	if rpcErr == nil || errCode(t, rpcErr) != -32602 {
+		t.Errorf("traversal: got %v, want -32602", rpcErr)
+	}
+}
+
+func TestHandleReadDir_PermissionDenied(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("running as root; permission bits don't bite")
+	}
+	h, root, _ := newTestHandler(t)
+	locked := filepath.Join(root, "locked")
+	if err := os.Mkdir(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(locked, 0o755) })
+
+	_, rpcErr := callRPC[readDirResult](t, h.handleReadDir, readDirParams{URI: "file://" + locked})
+	if rpcErr == nil || errCode(t, rpcErr) != errPermissionDenied {
+		t.Errorf("locked dir: got %v, want code %d", rpcErr, errPermissionDenied)
+	}
+}
+
+func TestHandleReadDir_Truncation(t *testing.T) {
+	h, root, _ := newTestHandler(t)
+	old := maxReadDirEntries
+	maxReadDirEntries = 3
+	t.Cleanup(func() { maxReadDirEntries = old })
+	for _, n := range []string{"a", "b", "c", "d", "e"} {
+		writeFile(t, root, n+".txt", n)
+	}
+
+	res, rpcErr := callRPC[readDirResult](t, h.handleReadDir, readDirParams{URI: "file://" + root})
+	if rpcErr != nil {
+		t.Fatalf("readDir errored: %v", rpcErr)
+	}
+	if !res.Truncated {
+		t.Error("expected truncated=true past the cap")
+	}
+	if len(res.Entries) != 3 {
+		t.Errorf("entries: got %d, want 3", len(res.Entries))
+	}
+}
+
+// outsideDir creates a directory that is genuinely OUTSIDE every default
+// reach root. t.TempDir() won't do here — it lives under /tmp, which is a
+// default reach seed, so addRoot against it is a no-op and assertions pass
+// vacuously. The package cwd (cli/ during go test) is not under /tmp.
+func outsideDir(t *testing.T) string {
+	t.Helper()
+	d, err := os.MkdirTemp(".", "g3d-outside-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(d) })
+	abs, err := filepath.Abs(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return abs
+}
+
+func TestHandleAddRoot_MakesResolvable(t *testing.T) {
+	h, _, _ := newTestHandler(t)
+	target := outsideDir(t)
+	inner := writeFile(t, target, "lib/util.js", "export {}")
+
+	// Before addRoot the absolute path is unreachable: resolvePath remaps it
+	// in-project and the file doesn't exist there.
+	if got, err := h.resolvePath("file://" + inner); err == nil {
+		if resolved, statErr := os.Stat(got); statErr == nil && !resolved.IsDir() {
+			t.Fatalf("file should NOT resolve before addRoot (got %q)", got)
+		}
+	}
+
+	res, rpcErr := callRPC[addRootResult](t, h.handleAddRoot, addRootParams{URI: "file://" + target})
+	if rpcErr != nil {
+		t.Fatalf("addRoot errored: %v", rpcErr)
+	}
+	if !res.Added {
+		t.Fatal("outside dir should genuinely add (added=true)")
+	}
+	resolved, _ := filepath.EvalSymlinks(target)
+	if res.Root != filepath.ToSlash(resolved) {
+		t.Errorf("root: got %q, want %q", res.Root, resolved)
+	}
+
+	// The point of it all: a file under the added root now resolves.
+	got, err := h.resolvePath("file://" + inner)
+	if err != nil {
+		t.Fatalf("file under added root should resolve: %v", err)
+	}
+	innerResolved, _ := filepath.EvalSymlinks(inner)
+	if got != innerResolved {
+		t.Errorf("resolve: got %q, want %q", got, innerResolved)
+	}
+}
+
+func TestHandleAddRoot_DedupeAndNested(t *testing.T) {
+	h, root, reach := newTestHandler(t)
+
+	// Under the project root → no-op success.
+	sub := filepath.Join(root, "src")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	res, rpcErr := callRPC[addRootResult](t, h.handleAddRoot, addRootParams{URI: "file://" + sub})
+	if rpcErr != nil {
+		t.Fatalf("addRoot under project root errored: %v", rpcErr)
+	}
+	if res.Added {
+		t.Error("dir under project root should be a no-op (added=false)")
+	}
+
+	// Under an existing reach root → no-op success.
+	reachSub := filepath.Join(reach, "nested")
+	if err := os.Mkdir(reachSub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	res, rpcErr = callRPC[addRootResult](t, h.handleAddRoot, addRootParams{URI: "file://" + reachSub})
+	if rpcErr != nil {
+		t.Fatalf("addRoot under reach root errored: %v", rpcErr)
+	}
+	if res.Added {
+		t.Error("dir under existing reach root should be a no-op")
+	}
+
+	// Exact duplicate → first add wins, second is a no-op.
+	outside := outsideDir(t)
+	first, _ := callRPC[addRootResult](t, h.handleAddRoot, addRootParams{URI: "file://" + outside})
+	second, _ := callRPC[addRootResult](t, h.handleAddRoot, addRootParams{URI: "file://" + outside})
+	if first == nil || second == nil {
+		t.Fatal("addRoot returned no result")
+	}
+	if !first.Added {
+		t.Error("first addRoot of an outside dir should add")
+	}
+	if second.Added {
+		t.Error("duplicate addRoot should be a no-op")
+	}
+}
+
+func TestHandleAddRoot_Errors(t *testing.T) {
+	h, root, _ := newTestHandler(t)
+
+	// Missing directory.
+	_, rpcErr := callRPC[addRootResult](t, h.handleAddRoot, addRootParams{URI: "file:///no/such/dir/anywhere"})
+	if rpcErr == nil || errCode(t, rpcErr) != errFileNotFound {
+		t.Errorf("missing: got %v, want code %d", rpcErr, errFileNotFound)
+	}
+
+	// A file, not a directory.
+	file := writeFile(t, root, "f.txt", "x")
+	_, rpcErr = callRPC[addRootResult](t, h.handleAddRoot, addRootParams{URI: "file://" + file})
+	if rpcErr == nil || errCode(t, rpcErr) != errIsDirectory {
+		t.Errorf("file: got %v, want code %d", rpcErr, errIsDirectory)
+	}
+
+	// Relative path refused.
+	_, rpcErr = callRPC[addRootResult](t, h.handleAddRoot, addRootParams{URI: "some/relative/dir"})
+	if rpcErr == nil || errCode(t, rpcErr) != -32602 {
+		t.Errorf("relative: got %v, want -32602", rpcErr)
+	}
+}
+
+func TestHandleAddRoot_SymlinkStoresTarget(t *testing.T) {
+	h, _, _ := newTestHandler(t)
+	realDir := filepath.Join(outsideDir(t), "real")
+	if err := os.Mkdir(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(outsideDir(t), "link")
+	if err := os.Symlink(realDir, link); err != nil {
+		t.Fatal(err)
+	}
+
+	res, rpcErr := callRPC[addRootResult](t, h.handleAddRoot, addRootParams{URI: "file://" + link})
+	if rpcErr != nil {
+		t.Fatalf("addRoot via symlink errored: %v", rpcErr)
+	}
+	realResolved, _ := filepath.EvalSymlinks(realDir)
+	if res.Root != filepath.ToSlash(realResolved) {
+		t.Errorf("symlinked root: got %q, want target %q", res.Root, realResolved)
+	}
+}
+
+func TestHandleRoots_Shape(t *testing.T) {
+	h, root, reach := newTestHandler(t)
+
+	res, rpcErr := callRPC[rootsResult](t, h.handleRoots, struct{}{})
+	if rpcErr != nil {
+		t.Fatalf("roots errored: %v", rpcErr)
+	}
+	if res.Root != filepath.ToSlash(root) {
+		t.Errorf("root: got %q, want %q", res.Root, root)
+	}
+	foundReach := false
+	for _, r := range res.ExtraRoots {
+		if r == filepath.ToSlash(reach) {
+			foundReach = true
+		}
+	}
+	if !foundReach {
+		t.Errorf("extraRoots missing the --reach seed %q: %v", reach, res.ExtraRoots)
+	}
+	if res.Home == "" {
+		t.Error("home should be populated")
+	}
+	if res.Sep != string(filepath.Separator) {
+		t.Errorf("sep: got %q", res.Sep)
+	}
+
+	// And it reflects a runtime addRoot.
+	added := outsideDir(t)
+	if _, rpcErr := callRPC[addRootResult](t, h.handleAddRoot, addRootParams{URI: "file://" + added}); rpcErr != nil {
+		t.Fatalf("addRoot errored: %v", rpcErr)
+	}
+	res, _ = callRPC[rootsResult](t, h.handleRoots, struct{}{})
+	addedResolved, _ := filepath.EvalSymlinks(added)
+	found := false
+	for _, r := range res.ExtraRoots {
+		if r == filepath.ToSlash(addedResolved) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("extraRoots should reflect runtime addRoot: %v", res.ExtraRoots)
+	}
+}
+
+// TestAddRootConcurrency exercises addRoot against concurrent resolvePath and
+// Roots readers — run with -race, this is the lock's reason to exist.
+func TestAddRootConcurrency(t *testing.T) {
+	h, root, _ := newTestHandler(t)
+	writeFile(t, root, "src/a.js", "x")
+
+	dirs := make([]string, 8)
+	for i := range dirs {
+		d := filepath.Join(outsideDir(t), "sub")
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		dirs[i] = d
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			if _, err := h.resolvePath("file:///src/a.js"); err != nil {
+				t.Errorf("resolvePath under concurrency: %v", err)
+				return
+			}
+			h.Roots()
+		}
+	}()
+	for _, d := range dirs {
+		d := d
+		go func() { h.addRoot(d) }()
+	}
+	<-done
+}
+
+func TestStripLeadingDriveSlash(t *testing.T) {
+	cases := map[string]string{
+		"/C:/dev/x":  "C:/dev/x",
+		"/z:/x":      "z:/x",
+		"/tmp/x":     "/tmp/x", // not a drive form
+		"/1:/x":      "/1:/x",  // digit is not a drive letter
+		"C:/already": "C:/already",
+		"":           "",
+	}
+	for in, want := range cases {
+		if got := stripLeadingDriveSlash(in); got != want {
+			t.Errorf("stripLeadingDriveSlash(%q): got %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestUriToPath(t *testing.T) {
+	// OS-independent cases (absolute POSIX paths are absolute everywhere we
+	// run tests; the drive-letter branch is unit-tested above).
+	got, err := uriToPath("file:///tmp/somewhere")
+	if err != nil || got != filepath.FromSlash("/tmp/somewhere") {
+		t.Errorf("plain: got %q, %v", got, err)
+	}
+	if _, err := uriToPath("file:///a/../b"); err == nil {
+		t.Error("traversal should be rejected")
+	}
+	if _, err := uriToPath("not/absolute"); err == nil {
+		t.Error("relative should be rejected")
+	}
+	// Bare paths (no file:// scheme) are accepted — the CLI hands those over.
+	got, err = uriToPath("/var/log")
+	if err != nil || got != filepath.FromSlash("/var/log") {
+		t.Errorf("bare: got %q, %v", got, err)
+	}
+}
