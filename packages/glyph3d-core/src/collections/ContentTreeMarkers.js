@@ -99,8 +99,15 @@ export default class ContentTreeMarkers {
     update() {
         if (!this.enabled) return;
         const o = this.opts;
-        const dirs = [...this.tree._dirs.entries()].filter(([path]) => path !== '');
-        const maxDepth = dirs.reduce((m, [path]) => Math.max(m, path.split('/').length), 1);
+        // Pass-through chain dirs (layout compression, see nodeUtils.collapseChain)
+        // are skipped: their prism would box the exact content their tail already
+        // boxes, stacking N identical prisms over one directory.
+        const dirs = [...this.tree._dirs.entries()]
+            .filter(([path, node]) => path !== '' && !node.userData?.isPassThrough);
+        // Segment count, not split length — canonical-absolute keys carry a leading
+        // slash whose empty first split segment is not a depth level.
+        const depthOf = (p) => p.split('/').filter(Boolean).length;
+        const maxDepth = dirs.reduce((m, [path]) => Math.max(m, depthOf(path)), 1);
         // A new max depth re-spreads the gradient → re-derive the depth materials.
         if (maxDepth !== this._materialsMaxDepth) {
             this._invalidateMaterials();
@@ -114,7 +121,7 @@ export default class ContentTreeMarkers {
             const bounds = subtreeContentBounds(node);
             seen.add(path);
 
-            const depth = path.split('/').length;
+            const depth = depthOf(path);
             const mats = this._materialsFor(depth, maxDepth);
 
             let prism = this._prisms.get(path);

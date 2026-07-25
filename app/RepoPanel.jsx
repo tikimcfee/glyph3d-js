@@ -1,10 +1,17 @@
 import React, { useState, useEffect, useCallback } from 'react';
 
-// RepoPanel — repo selection. Enter owner/repo[/branch] (or a GitHub URL) and Load
-// to render it as the 3D field, client-only (no relay needed). The dock sibling that
-// gives the IDE an in-app front door for picking a repo, instead of only the ?repo=
-// URL param. Every action is a command-bus verb (repo.load / repo.clear / file.openDir),
-// identical to a CLI invocation — UI and bus stay in lockstep.
+// RepoPanel — the thin SOURCES panel: what fills the world, from where.
+//
+// Two lanes, matching the progressive-enhancement shape of the product:
+//   • GitHub (the baseline, client-only): owner/repo[/branch] → repo.load.
+//   • Local (the relay lane): shows what the binary is serving, an "open
+//     location" input for any path on the machine (file.openDir — the same
+//     verb the file browser's ⊞ runs), and the opened roots with per-root
+//     close. The HEAVY browsing UX lives in the Files panel — this is the
+//     at-a-glance roster plus the type-a-path power move.
+//
+// Every action is a command-bus verb (repo.load / repo.clear / file.openDir /
+// file.closeDir), identical to a CLI invocation — UI and bus stay in lockstep.
 
 const styles = {
   content: {
@@ -19,6 +26,7 @@ const styles = {
   title: { flex: '1 1 auto' },
   src: { flex: '0 0 auto', fontSize: 11, color: '#5c6675' },
   body: { padding: '10px 8px', display: 'flex', flexDirection: 'column', gap: 8, overflowY: 'auto' },
+  section: { fontSize: 10, color: '#4a5566', letterSpacing: '0.08em', marginTop: 4 },
   inputRow: { display: 'flex', gap: 6 },
   input: {
     flex: '1 1 auto', minWidth: 0, font: 'inherit', color: '#c8ccd6', background: '#0f141b',
@@ -28,6 +36,10 @@ const styles = {
     flex: '0 0 auto', font: 'inherit', color: '#08101a', background: '#6cf',
     border: '1px solid #6cf', borderRadius: 4, padding: '4px 12px', cursor: 'pointer', fontWeight: 600,
   },
+  open: {
+    flex: '0 0 auto', font: 'inherit', color: '#c8ccd6', background: 'transparent',
+    border: '1px solid #2a3340', borderRadius: 4, padding: '4px 12px', cursor: 'pointer',
+  },
   hint: { fontSize: 11, color: '#5c6675' },
   err: { color: '#e0888f', whiteSpace: 'pre-wrap', fontSize: 11 },
   current: {
@@ -36,6 +48,7 @@ const styles = {
   },
   curName: { flex: '1 1 auto', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#7ad7a0' },
   clear: { flex: '0 0 auto', color: '#7c8596', cursor: 'pointer', padding: '0 4px' },
+  served: { fontSize: 11, color: '#9aa3b2', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   localRow: { color: '#9aa3b2', cursor: 'pointer', fontSize: 11, padding: '2px 0' },
 };
 
@@ -53,10 +66,13 @@ function currentRepoLabel(client) {
 
 export default function RepoPanel({ client }) {
   const [input, setInput] = useState('');
+  const [pathInput, setPathInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [current, setCurrent] = useState(() => currentRepoLabel(client));
   const [connected, setConnected] = useState(false);
+  const [servedRoot, setServedRoot] = useState(null);
+  const [localRoots, setLocalRoots] = useState([]);
 
   // Relay status drives the source line (github client-only vs +local).
   useEffect(() => {
@@ -65,16 +81,22 @@ export default function RepoPanel({ client }) {
     return bridge.onConnectionChange(setConnected);
   }, [client]);
 
-  // Reflect a repo loaded out-of-band (?repo bootstrap or a CLI repo.load): the
-  // field (re)load mutates the registry.
+  // Reflect out-of-band loads (?repo bootstrap, CLI repo.load / file.openDir):
+  // field (re)loads mutate the registry — re-read the repo label, the served
+  // root (known once fs/roots lands), and the opened local roots.
   useEffect(() => {
     const reg = client?.ctx?.registry;
     if (!reg?.addChangeListener) return undefined;
-    const refresh = () => setCurrent(currentRepoLabel(client));
+    const refresh = () => {
+      setCurrent(currentRepoLabel(client));
+      setServedRoot(client?.ctx?.fileProvider?.rootInfo?.root ?? null);
+      const sources = Array.isArray(client?.ctx?.fieldSources) ? client.ctx.fieldSources : [];
+      setLocalRoots(sources.filter((s) => s?.type === 'local').map((s) => s.dir));
+    };
     refresh();
     reg.addChangeListener(refresh);
     return () => reg.removeChangeListener(refresh);
-  }, [client]);
+  }, [client, connected]);
 
   const load = useCallback(async () => {
     const ref = input.trim();
@@ -98,6 +120,31 @@ export default function RepoPanel({ client }) {
     setCurrent(null);
   }, [client]);
 
+  // Open any local path as a field root — the typed-path twin of the file
+  // browser's ⊞. file.openDir canonicalizes ('~' works) and registers the
+  // reach root server-side.
+  const openLocation = useCallback(async () => {
+    const p = pathInput.trim();
+    if (!p || !client || busy) return;
+    setBusy(true); setError(null);
+    try {
+      const r = await client.router.execute(['file.openDir', p]);
+      if (r?.text?.startsWith('ERR')) setError(r.text.replace(/^ERR:\s*/, ''));
+      else {
+        setPathInput('');
+        client.router.execute('camera.fitall');
+      }
+    } catch (e) {
+      setError(e?.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [pathInput, client, busy]);
+
+  const closeRoot = useCallback((dir) => {
+    client?.router.execute(['file.closeDir', dir]);
+  }, [client]);
+
   // When the relay is serving a project, render it (the active local provider) as the field.
   const browseLocal = useCallback(() => {
     if (!client) return;
@@ -105,25 +152,27 @@ export default function RepoPanel({ client }) {
     client.router.execute('camera.fitall');
   }, [client]);
 
-  // Keep keystrokes in the input (don't drive WASD / the focused grid) + Enter = Load.
-  const onKey = (e) => { e.stopPropagation(); if (e.key === 'Enter') load(); };
+  // Keep keystrokes in the inputs (don't drive WASD / the focused grid) + Enter submits.
+  const onRepoKey = (e) => { e.stopPropagation(); if (e.key === 'Enter') load(); };
+  const onPathKey = (e) => { e.stopPropagation(); if (e.key === 'Enter') openLocation(); };
 
   return (
     <div style={styles.content}>
       <div style={styles.header}>
-        <span style={styles.title}>repo</span>
+        <span style={styles.title}>sources</span>
         <span style={styles.src} title={connected ? 'relay connected — local + GitHub' : 'client-only — GitHub, no backend'}>
           {connected ? '◉ local + github' : '○ github'}
         </span>
       </div>
       <div style={styles.body}>
+        <div style={styles.section}>GITHUB</div>
         <div style={styles.inputRow}>
           <input
             style={styles.input}
             placeholder="owner/repo[/branch]"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            onKeyDown={onKey}
+            onKeyDown={onRepoKey}
             disabled={busy}
             spellCheck={false}
           />
@@ -131,7 +180,7 @@ export default function RepoPanel({ client }) {
             {busy ? '…' : 'Load'}
           </button>
         </div>
-        {busy && <div style={styles.hint}>loading repo…</div>}
+        {busy && <div style={styles.hint}>working…</div>}
         {error && <div style={styles.err}>{error}</div>}
         {current && (
           <div style={styles.current}>
@@ -140,8 +189,35 @@ export default function RepoPanel({ client }) {
           </div>
         )}
         {connected && (
-          <div style={styles.localRow} title="render the local project the relay is serving"
-            onClick={browseLocal}>▦ browse local project →</div>
+          <>
+            <div style={styles.section}>LOCAL</div>
+            {servedRoot && (
+              <div style={styles.served} title={servedRoot}>serving {servedRoot}</div>
+            )}
+            <div style={styles.inputRow}>
+              <input
+                style={styles.input}
+                placeholder="/any/path or ~/anywhere"
+                value={pathInput}
+                onChange={(e) => setPathInput(e.target.value)}
+                onKeyDown={onPathKey}
+                disabled={busy}
+                spellCheck={false}
+              />
+              <button type="button" style={styles.open} onClick={openLocation} disabled={busy || !pathInput.trim()}>
+                Open
+              </button>
+            </div>
+            <div style={styles.localRow} title="render the local project the relay is serving"
+              onClick={browseLocal}>▦ open served project →</div>
+            {localRoots.map((dir) => (
+              <div key={dir} style={styles.current}>
+                <span style={styles.curName} title={dir}>{dir}</span>
+                <span style={styles.clear} title="close everything loaded from this root"
+                  onClick={() => closeRoot(dir)}>×</span>
+              </div>
+            ))}
+          </>
         )}
       </div>
     </div>

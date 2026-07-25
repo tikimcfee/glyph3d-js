@@ -33,7 +33,7 @@ import LspResultsPanel from './LspResultsPanel.jsx';
 // references it.
 const PANELS = [
   { id: 'files', title: 'Files' },
-  { id: 'repo', title: 'Repo', position: { referencePanel: 'files', direction: 'within' } },
+  { id: 'repo', title: 'Sources', position: { referencePanel: 'files', direction: 'within' } },
   { id: 'fieldVisitors', title: 'Crew', position: { referencePanel: 'files', direction: 'within' } },
   { id: 'agentTrail', title: 'Trail', position: { referencePanel: 'files', direction: 'within' } },
   { id: 'lspResults', title: 'LSP', position: { referencePanel: 'files', direction: 'within' } },

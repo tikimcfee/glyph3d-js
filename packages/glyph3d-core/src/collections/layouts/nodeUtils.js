@@ -19,16 +19,55 @@ export function childSort(a, b) {
 /** Sort a node's children deterministically and split them into the layout's inputs:
  *  file leaves and child dirs. Markers (userData.isMarker — visual annotations parented
  *  into the tree, e.g. bounding prisms) are NOT content: every scheme must ignore them,
- *  so the split lives here rather than in each scheme. */
+ *  so the split lives here rather than in each scheme.
+ *
+ *  Single-child directory CHAINS compress here — the one traversal seam every scheme
+ *  shares. A dir holding exactly one dir and nothing else (canonical-absolute keys make
+ *  /home/u/dev/proj a four-deep chain of these) is a presentation pass-through: the
+ *  chain's tail is returned in its place, so every scheme lays the tail out at the
+ *  head's slot with no per-level nesting cost. See collapseChain for the mechanics. */
 export function partitionChildren(node) {
     node.children.sort(childSort);
     const files = [], dirs = [];
     for (const c of node.children) {
         if (c.userData && c.userData.isMarker) continue;
-        if (c.userData && c.userData.isDir) dirs.push(c);
+        if (c.userData && c.userData.isDir) dirs.push(collapseChain(c));
         else files.push(c);
     }
     return { files, dirs };
+}
+
+/** Follow a single-child directory chain (dir → exactly one dir, no file leaves) to its
+ *  tail. Layout/label-level ONLY — paths, _dirs bookkeeping, and navigation stay
+ *  canonical: the intermediates' transforms are zeroed so the tail composes in space as
+ *  if it sat at the chain head's slot, they're flagged userData.isPassThrough (markers
+ *  skip boxing them — they'd double-box the same content), and the tail carries the
+ *  joined chain as userData.displayName for label consumers. Self-healing: a later
+ *  insert into an intermediate breaks the chain, and the next partition re-walks it
+ *  fresh, clearing stale flags. */
+export function collapseChain(dir) {
+    let tail = dir;
+    const names = [String(dir.userData.name ?? '')];
+    for (;;) {
+        const kids = tail.children.filter((c) => !(c.userData && c.userData.isMarker));
+        if (kids.length !== 1 || !kids[0].userData?.isDir) break;
+        tail = kids[0];
+        names.push(String(tail.userData.name ?? ''));
+    }
+    if (tail === dir) {
+        if (dir.userData.isPassThrough) dir.userData.isPassThrough = false;
+        if (dir.userData.displayName) dir.userData.displayName = null;
+        return dir;
+    }
+    for (let n = dir; n !== tail; n = n.children.find((c) => c.userData?.isDir)) {
+        n.userData.isPassThrough = true;
+        if (n.userData.displayName) n.userData.displayName = null;
+        n.position.set(0, 0, 0);
+        n.rotation.set(0, 0, 0);
+    }
+    tail.userData.isPassThrough = false;
+    tail.userData.displayName = names.join('/');
+    return tail;
 }
 
 /** A leaf's LOCAL content box (frame-independent). Real grid → layoutBounds(); mock → a box

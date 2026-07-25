@@ -228,15 +228,18 @@ const plotRect = (node) => {
   const t = buildDistrict(PATHS);
   const eps = 0.01;
   const inside = (c, p) => c.x0 >= p.x0 - eps && c.x1 <= p.x1 + eps && c.y0 >= p.y0 - eps && c.y1 <= p.y1 + eps;
-  const walk = (node) => {
+  // Pass-through chain dirs (layout compression) are unmeasured — walk THROUGH
+  // them, carrying the last measured ancestor as the containment parent.
+  const walk = (node, plotParent) => {
     for (const child of node.children.filter((c) => c.userData.isDir)) {
-      if (child.userData.size.x > 0) {  // empty plots have no extent to contain
-        ok(inside(plotRect(child), plotRect(node)), `district: ${child.userData.path} plot inside ${node.userData.path || '(root)'}`);
+      const measured = !child.userData.isPassThrough && child.userData.size?.x > 0;
+      if (measured) {
+        ok(inside(plotRect(child), plotRect(plotParent)), `district: ${child.userData.path} plot inside ${plotParent.userData.path || '(root)'}`);
       }
-      walk(child);
+      walk(child, measured ? child : plotParent);
     }
   };
-  walk(t.root);
+  walk(t.root, t.root);
 }
 
 // 15. district depth — nesting recedes in Z, one inset step per level (cumulative).
@@ -252,7 +255,7 @@ const plotRect = (node) => {
   const t = buildDistrict(PATHS);
   const src = t.getNode('src');
   const rects = src.children
-    .filter((c) => !c.userData.isDir || c.userData.size.x > 0)
+    .filter((c) => !c.userData.isDir || c.userData.size?.x > 0)
     .map((c) => {
       if (c.userData.isDir) return plotRect(c);
       const v = new THREE.Vector3(); c.getWorldPosition(v); const s = c.userData.size;
@@ -308,7 +311,10 @@ const buildPacked = (paths, order = paths) => {
   eq(r2(wz('readme.md')), 0, 'packed: root file at z=0');
   eq(r2(wz('src/index.js')), r2(-1 * dz), 'packed: depth-1 file at −1×depthZ');
   eq(r2(wz('src/util/log.js')), r2(-2 * dz), 'packed: depth-2 file at −2×depthZ');
-  eq(r2(wz('src/util/deep/a/b/c/leaf.txt')), r2(-6 * dz), 'packed: depth-6 file at −6×depthZ');
+  // deep/a/b/c is a single-child chain → layout compression collapses it to ONE
+  // level: the leaf steps −3 (src → util → the compressed chain), not −6. Dead
+  // corridors add no spatial depth.
+  eq(r2(wz('src/util/deep/a/b/c/leaf.txt')), r2(-3 * dz), 'packed: chain-compressed deep file at −3×depthZ');
 }
 
 // 20. packed containment + sibling non-overlap: child blocks stay inside the parent
@@ -318,7 +324,7 @@ const buildPacked = (paths, order = paths) => {
   const eps = 0.01;
   const inside = (c, p) => c.x0 >= p.x0 - eps && c.x1 <= p.x1 + eps && c.y0 >= p.y0 - eps && c.y1 <= p.y1 + eps;
   const checkNode = (node) => {
-    const dirs = node.children.filter((c) => c.userData.isDir && c.userData.size.x > 0);
+    const dirs = node.children.filter((c) => c.userData.isDir && c.userData.size?.x > 0);
     for (const child of dirs) {
       ok(inside(plotRect(child), plotRect(node)), `packed: ${child.userData.path} block inside ${node.userData.path || '(root)'}`);
       checkNode(child);
@@ -352,7 +358,7 @@ const buildPacked = (paths, order = paths) => {
     .filter(([p]) => !p.includes('/'))
     .map(([, leaf]) => { leaf.getWorldPosition(v); return v.y - leaf.userData.size.y / 2; });
   const depth1Tops = t.root.children
-    .filter((c) => c.userData.isDir && c.userData.size.x > 0)
+    .filter((c) => c.userData.isDir && c.userData.size?.x > 0)
     .map((d) => { d.getWorldPosition(v); return v.y; });   // dir origin = footprint TOP-center
   ok(Math.min(...rootFileBottoms) >= Math.max(...depth1Tops) - 0.01,
     'packed: root files sit above every depth-1 dir block');
@@ -493,6 +499,55 @@ const contentSnapshot = (tree) => {
   t.remove('/src/abs.js', { prune: true });
   ok(t.getNode('/src') === null, 'coexist: pruning the absolute chain leaves the relative one');
   ok(t.getNode('src') !== null, 'coexist: relative chain untouched');
+}
+
+// 32. chain compression (layout-level): a canonical-absolute load's dead ancestor
+//     chain collapses — intermediates zero out and flag isPassThrough, the tail
+//     carries the joined displayName, and NOTHING structural changes (paths,
+//     parentOf, getNode all still canonical).
+{
+  const t = buildPacked([]);
+  t.insert(makeLeaf('/home/u/dev/proj/a.js'), '/home/u/dev/proj/a.js');
+  t.insert(makeLeaf('/home/u/dev/proj/src/b.js'), '/home/u/dev/proj/src/b.js');
+  t.relayout();
+  const head = t.getNode('/home');
+  const mid = t.getNode('/home/u/dev');
+  const tail = t.getNode('/home/u/dev/proj');
+  ok(head.userData.isPassThrough && mid.userData.isPassThrough, 'compress: chain intermediates flagged pass-through');
+  ok(!tail.userData.isPassThrough, 'compress: the tail (first dir with real content) is NOT a pass-through');
+  eq(tail.userData.displayName, 'home/u/dev/proj', 'compress: tail displayName = the joined chain');
+  ok(head.position.x === 0 && head.position.y === 0 && head.position.z === 0, 'compress: head transform zeroed');
+  ok(mid.position.x === 0 && mid.position.y === 0 && mid.position.z === 0, 'compress: intermediate transform zeroed');
+  // Structure untouched: canonical navigation still walks the real chain.
+  eq(t.parentOf(tail), t.getNode('/home/u/dev'), 'compress: parentOf still canonical');
+  // src (a real subdir with content) is laid out — it got a size from the scheme.
+  ok(t.getNode('/home/u/dev/proj/src').userData.size != null, 'compress: content subdir still laid out');
+}
+
+// 33. compression self-heals when a chain breaks: inserting a file into an
+//     intermediate un-flags it on the next relayout.
+{
+  const t = buildPacked([]);
+  t.insert(makeLeaf('/home/u/proj/a.js'), '/home/u/proj/a.js');
+  t.relayout();
+  ok(t.getNode('/home/u').userData.isPassThrough, 'self-heal precondition: /home/u is pass-through');
+  t.insert(makeLeaf('/home/u/notes.md'), '/home/u/notes.md');
+  t.relayout();
+  ok(!t.getNode('/home/u').userData.isPassThrough, 'self-heal: /home/u un-flagged once it holds a file');
+  // The label rides the TAIL: /home stays a pass-through, /home/u is the new tail.
+  eq(t.getNode('/home/u').userData.displayName, 'home/u', 'self-heal: the shorter chain re-labels its new tail');
+  ok(t.getNode('/home').userData.isPassThrough, 'self-heal: /home remains the (shorter) chain\'s pass-through');
+}
+
+// 34. pass-through dirs draw no prism (they'd stack N identical boxes on the tail's).
+{
+  const t = buildPacked([]);
+  t.insert(makeLeaf('/home/u/proj/a.js'), '/home/u/proj/a.js');
+  const markers = new ContentTreeMarkers(t);
+  t.relayout();
+  markers.update();
+  ok(!markers._prisms.has('/home') && !markers._prisms.has('/home/u'), 'markers: pass-throughs skipped');
+  ok(markers._prisms.has('/home/u/proj'), 'markers: the tail keeps its prism');
 }
 
 console.log(`\ncontenttree: ${pass} passed, ${fail} failed`);
