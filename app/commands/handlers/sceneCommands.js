@@ -52,7 +52,7 @@ export default function registerSceneCommands(router) {
         for (const id of ids) {
             if (ctx.removeGrid(id)) cleared++;
         }
-        ctx.fieldSource = null; // no content grids left — the session has no local field to restore
+        ctx.fieldSources = []; // no content grids left — the session has no field to restore
         return {
             text: `OK: cleared ${cleared} grid(s)`,
             data: { cleared }

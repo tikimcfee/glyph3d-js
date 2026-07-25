@@ -21,6 +21,8 @@
  * snapshot whose schema version differs is wiped rather than migrated.
  */
 
+import { canonicalPath } from '../commands/handlers/pathResolve.js';
+
 const SESSION_URI = 'file:///.glyph3d-session.json';
 // Schema policy: restore is FORWARD-ADDITIVE. Every restored field is guarded/optional, so a
 // snapshot at this version OR a newer one (read back after a code rollback over a newer file)
@@ -152,17 +154,20 @@ export default class SessionStore {
       files.push(entry);
     }
 
-    // The bulk field source — what fills the scene without tabs. ONE decider: ctx.fieldSource,
-    // recorded INTENT written by the field-load handlers (file.openDir → {type:'local',dir};
-    // repo.load → {type:'repo',ref}) and nulled by clearScene / scene.clear_grids. The provider's
-    // _currentRepo is its OWN working state (it needs the parsed repo to fetch files) — a cache, not
-    // this fact's owner; capture reads fieldSource alone. Never inferred from a census of non-tab
-    // grids — a census can't tell a deliberate dir pop from grids other systems made, and it
-    // re-trips on the grids its own restore opened (a session that could never stop bulk-loading).
-    let field = null;
-    const fs = ctx.fieldSource;
-    if (fs?.type === 'repo' && fs.ref) field = { type: 'repo', ref: fs.ref };
-    else if (fs?.type === 'local') field = { type: 'local', dir: fs.dir || '' };
+    // The bulk field sources — what fills the scene without tabs. ONE decider: ctx.fieldSources,
+    // the recorded-INTENT list written by the field-load handlers (file.openDir APPENDS
+    // {type:'local',dir} per opened root — the additive multi-root world; repo.load replaces the
+    // list with its single {type:'repo',ref}) and emptied by clearScene / scene.clear_grids. The
+    // provider's _currentRepo is its OWN working state (it needs the parsed repo to fetch files) —
+    // a cache, not this fact's owner; capture reads fieldSources alone. Never inferred from a
+    // census of non-tab grids — a census can't tell a deliberate dir pop from grids other systems
+    // made, and it re-trips on the grids its own restore opened (a session that could never stop
+    // bulk-loading).
+    const fieldSources = [];
+    for (const fs of Array.isArray(ctx.fieldSources) ? ctx.fieldSources : []) {
+        if (fs?.type === 'repo' && fs.ref) fieldSources.push({ type: 'repo', ref: fs.ref });
+        else if (fs?.type === 'local') fieldSources.push({ type: 'local', dir: fs.dir || '' });
+    }
 
     // Terminals: serialize the MODEL's surface view-intent (cols/rows + position), NOT a scrape of
     // the live grids. The model is the durable buffer — it holds a terminal's geometry whether or
@@ -213,7 +218,7 @@ export default class SessionStore {
       version: SCHEMA_VERSION,
       savedAt: Date.now(),
       files,
-      field,
+      fieldSources,
       layout: this._captureLayout(),
       world: this.ctx.world?.getState?.() ?? null,   // world-grouping order (files/trails/…)
       camera: this._captureCamera(),
@@ -313,18 +318,31 @@ export default class SessionStore {
     if (snap.world) this.ctx.world?.applyState?.(snap.world);   // world-grouping order
 
     // The bulk field fills the scene first (no tabs), so tabs layer on top and the
-    // camera (restored last) wins. repo.load clears the scene itself; both are
-    // guarded so a network/offline failure still lets the tabs restore.
-    if (snap.field?.type === 'repo' && snap.field.ref) {
-      try { await this.router.execute(['repo.load', snap.field.ref]); }
-      catch (e) { console.warn('[session] repo field restore failed:', e?.message || e); }
-    } else if (snap.field?.type === 'local') {
-      try {
-        // Replay the recorded pop exactly (a pre-intent save carries no dir —
-        // that restores as the whole project).
-        await this.router.execute(['file.openDir', snap.field.dir || '']);
-        await this.router.execute('camera.fitall');
-      } catch (e) { console.warn('[session] local field restore failed:', e?.message || e); }
+    // camera (restored last) wins. `fieldSources` is a LIST — every opened root
+    // replays (additive multi-root world) — with a legacy single-`field` read for
+    // older snapshots (data tolerance per the forward-additive policy, not a code
+    // path fork). Each entry is guarded independently, so one vanished root (or a
+    // network/offline repo) logs + skips and the rest — and the tabs — still land.
+    const sources = Array.isArray(snap.fieldSources)
+      ? snap.fieldSources
+      : (snap.field ? [snap.field] : []);
+    let anyLocal = false;
+    for (const src of sources) {
+      if (src?.type === 'repo' && src.ref) {
+        try { await this.router.execute(['repo.load', src.ref]); }
+        catch (e) { console.warn('[session] repo field restore failed:', e?.message || e); }
+      } else if (src?.type === 'local') {
+        try {
+          // Replay the recorded pop exactly (a pre-intent save carries no dir —
+          // that restores as the whole project).
+          await this.router.execute(['file.openDir', src.dir || '']);
+          anyLocal = true;
+        } catch (e) { console.warn('[session] local field restore failed:', e?.message || e); }
+      }
+    }
+    if (anyLocal) {
+      try { await this.router.execute('camera.fitall'); }
+      catch (e) { console.warn('[session] fitall after field restore failed:', e?.message || e); }
     }
 
     // Tabs next — so the camera (restored next) isn't fought by file.open's framing,
@@ -333,29 +351,34 @@ export default class SessionStore {
       let anyWindowed = false;
       for (const f of snap.files) {
         if (!f?.path) continue;
+        // Canonicalize FIRST (an old snapshot carries root-relative paths; the
+        // registry keys on canonical ids) so the exists-probe, the dedupe inside
+        // file.open, and the applyView lookup below all address the same entity.
+        const path = canonicalPath(this.ctx, f.path);
         // The grid may already exist (the field-restore above bulk-loaded it). Still
         // run file.open — it dedups the grid and creates the SHEET, so the file comes
         // back as a tab. Only probe existence for files not already loaded.
-        const already = this.ctx.registry.has(f.path);
-        if (!already && !(await this._fileExists(f.path))) {
-          console.warn(`[session] dropped missing file: ${f.path}`);
+        const already = this.ctx.registry.has(path);
+        if (!already && !(await this._fileExists(path))) {
+          console.warn(`[session] dropped missing file: ${path}`);
           continue;
         }
         try {
-          await this.router.execute(`file.open ${f.path} ${f.x ?? 0} ${f.y ?? 0} ${f.z ?? 0}`);
+          // Array form: a path with spaces survives, and coordinates stay their own args.
+          await this.router.execute(['file.open', path, String(f.x ?? 0), String(f.y ?? 0), String(f.z ?? 0)]);
           // Viewport (window / frame / scroll) loads as DIRECT state — the grid's own applyView,
           // NOT a replay of grid.window/grid.frame/grid.scroll. file.open created/deduped the grid +
           // sheet; the viewport rides on top. applyView orders window→frame→scroll itself and is
           // absolute (no "scroll-from-0" assumption).
           if (f.window || f.frameRows || f.scrollOffset) {
-            const grid = this.ctx.registry.get(f.path)?.grid;
+            const grid = this.ctx.registry.get(path)?.grid;
             if (grid?.applyView) {
               const { windowed } = await grid.applyView({ window: f.window, frameRows: f.frameRows, scrollOffset: f.scrollOffset });
               if (windowed) anyWindowed = true;
             }
           }
         } catch (e) {
-          console.warn(`[session] failed to reopen ${f.path}:`, e?.message || e);
+          console.warn(`[session] failed to reopen ${path}:`, e?.message || e);
         }
       }
       // Windowing changes a grid's footprint → relayout the tree ONCE after all tabs land (the
@@ -429,7 +452,7 @@ export default class SessionStore {
   }
 
   async _fileExists(path) {
-    try { await this.ctx.fileProvider.stat('file:///' + path); return true; }
+    try { await this.ctx.fileProvider.stat('file:///' + String(path).replace(/^\/+/, '')); return true; }
     catch { return false; }
   }
 

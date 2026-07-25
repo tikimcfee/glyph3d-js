@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import { buildTree } from './treeUtil.js';
+import { canonicalPath } from './commands/handlers/pathResolve.js';
 
 // FileTree — the Files panel: ONE tree that is both the source browser (summon a file
 // into the scene with a click) AND the scene view for files (loaded rows are lit, with
@@ -132,14 +133,27 @@ export default function FileTree({ client }) {
   const [activePath, setActivePath] = useState(null);  // the focused file (attention.primary)
   const [loadedOnly, setLoadedOnly] = useState(false); // filter the tree to scene contents
 
+  // Registry ids are CANONICAL (absolute in relay mode); this tree's rows are
+  // root-relative until the browser rewrite. Map ids into row space here so
+  // loaded/active accents keep lighting up. (Interim — the lazy-browse tree
+  // adopts canonical node paths outright.)
+  const toRowPath = useCallback((id) => {
+    const root = client?.ctx?.fileProvider?.rootInfo?.root;
+    const s = String(id ?? '');
+    return root && s.startsWith(root + '/') ? s.slice(root.length + 1) : s;
+  }, [client]);
+
   // The focused grid → row accent (one attention.primary authority).
   useEffect(() => {
     const am = client?.ctx?.attentionManager;
     if (!am?.on) return undefined;
-    const update = () => setActivePath(am.get?.('primary')?.id ?? null);
+    const update = () => {
+      const id = am.get?.('primary')?.id ?? null;
+      setActivePath(id == null ? null : toRowPath(id));
+    };
     update();
     return am.on('change:primary', update);
-  }, [client]);
+  }, [client, toRowPath]);
 
   // Source listing (debounced) + the loaded map (immediate), both off the registry.
   useEffect(() => {
@@ -160,7 +174,7 @@ export default function FileTree({ client }) {
     };
     const recomputeLoaded = () => {
       const r = client.ctx?.registry;
-      if (r) setLoadedVis(new Map(r.findByType('grid').map((e) => [e.id, e.grid?.visible !== false])));
+      if (r) setLoadedVis(new Map(r.findByType('grid').map((e) => [toRowPath(e.id), e.grid?.visible !== false])));
     };
     const schedule = () => { clearTimeout(timer); timer = setTimeout(list, 150); };
     const onReg = () => { recomputeLoaded(); schedule(); };
@@ -196,29 +210,32 @@ export default function FileTree({ client }) {
 
   const openFile = useCallback(async (path) => {
     if (!client) return;
-    await client.router.execute(`file.open ${path}`);
+    const p = canonicalPath(client.ctx, path);
+    await client.router.execute(['file.open', p]);
     // sheet.focus = the single "go look at it" gesture: attention.primary (drives the
-    // accent) + frame + mark active. Array form keeps a space/slash path intact.
-    client.router.execute(['sheet.focus', `sheet:${path}`]);
+    // accent) + frame + mark active. Array form keeps a space/slash path intact; the
+    // sheet id is 'sheet:' + the canonical path stripped of its leading slash
+    // (WorkspaceModel.openSheet's id rule).
+    client.router.execute(['sheet.focus', `sheet:${p.replace(/^\/+/, '')}`]);
   }, [client]);
 
   const openDir = useCallback(async (path) => {
     if (!client) return;
-    await client.router.execute(`file.openDir ${path}`.trimEnd());
+    await client.router.execute(['file.openDir', canonicalPath(client.ctx, path)]);
     client.router.execute('camera.fitall');
   }, [client]);
 
   const closeFile = useCallback((path) => {
-    client?.router.execute(['grid.close', path]);  // sheet.close if a tab, else bare remove
+    client?.router.execute(['grid.close', canonicalPath(client.ctx, path)]);  // sheet.close if a tab, else bare remove
   }, [client]);
 
   const hideFile = useCallback((path, shown) => {
     if (!client) return;
-    client.router.execute(['grid.visibility', path, shown ? 'false' : 'true']);
+    client.router.execute(['grid.visibility', canonicalPath(client.ctx, path), shown ? 'false' : 'true']);
     // grid.visible mutates without a registry event → refresh the loaded map now.
     const r = client.ctx?.registry;
-    if (r) setLoadedVis(new Map(r.findByType('grid').map((e) => [e.id, e.grid?.visible !== false])));
-  }, [client]);
+    if (r) setLoadedVis(new Map(r.findByType('grid').map((e) => [toRowPath(e.id), e.grid?.visible !== false])));
+  }, [client, toRowPath]);
 
   let body;
   if (!client) body = <div style={styles.msg}>starting…</div>;

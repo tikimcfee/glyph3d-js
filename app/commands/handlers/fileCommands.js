@@ -19,6 +19,7 @@ import { resolveGridByIdOrIndex, WORLD_FLOOR_Y } from './spatialHelpers.js';
 import { READABLE_MAX_CHARS } from '@glyph3d/core';
 import { FS_ERROR_CODES } from '@glyph3d/core/services/data';
 import { renderSheetGrid, addFileGrid, addUnfetchedGrid, getDiskMtime, setDiskMtime } from './fileLoader.js';
+import { canonicalPath, toFileUri } from './pathResolve.js';
 
 /**
  * Fast non-crypto content hash. FNV-1a 32-bit over the full string. Collision rate is
@@ -86,10 +87,9 @@ export default function registerFileCommands(router) {
     // or binary (fileLoader classifies + vends; this verb owns the canvas effects). The one
     // load primitive the IDE file tree AND the CLI both call.
     router.register('file.open', async (args, ctx) => {
-        const path = args[0];
-        if (!path) return { text: 'ERR: usage: file.open <path> [x y z]', data: null };
-
-        const uri = `file:///${String(path).replace(/^\/+/, '')}`;
+        if (!args[0]) return { text: 'ERR: usage: file.open <path> [x y z]', data: null };
+        const path = canonicalPath(ctx, args[0]);
+        const uri = toFileUri(path);
 
         // file.open IS the workspace's sheet.open + sheet.render — one path (Step 3). Track the
         // sheet regardless of render state so the HUD reflects every open.
@@ -156,21 +156,34 @@ export default function registerFileCommands(router) {
     // this folder out into space". No count cap: unreadable content renders as placeholder
     // cards, so the whole dir always arrives; fetch is concurrent.
     router.register('file.openDir', async (args, ctx) => {
-        const dir = String(args[0] || '').replace(/^\/+|\/+$/g, '');
         if (!ctx.fileProvider) {
             return { text: 'ERR: no file source — load a repo or connect the relay', data: null };
+        }
+        const dir = canonicalPath(ctx, args[0] || '');
+
+        // An absolute dir may sit outside the served root + reach set: register
+        // it as a runtime reach root first (the server no-ops when it's already
+        // covered, so no client-side root arithmetic). This is also the early
+        // "does it exist / is it a dir" check for browse-opened directories.
+        if (dir.startsWith('/') && typeof ctx.fileProvider.addRoot === 'function') {
+            try {
+                await ctx.fileProvider.addRoot(dir);
+            } catch (err) {
+                return { text: `ERR: cannot reach ${dir}: ${err?.message || err}`, data: null };
+            }
         }
 
         // The server walks the named directory itself (entries come back
         // relative to it); join the dir back on so grid keys stay full paths.
         let listing;
         try {
-            listing = await ctx.fileProvider.listTree(`file:///${dir}`);
+            listing = await ctx.fileProvider.listTree(toFileUri(dir));
         } catch (err) {
             return { text: `ERR: listTree failed: ${err?.message || err}`, data: null };
         }
+        const joinBase = dir === '/' ? '' : dir;
         const entries = dir
-            ? listing.entries.map((e) => ({ ...e, path: `${dir}/${e.path}` }))
+            ? listing.entries.map((e) => ({ ...e, path: `${joinBase}/${e.path}` }))
             : listing.entries;
         const truncated = !!listing.truncated;
         const under = ctx.fileProvider.filterCodeFiles({ tree: entries });
@@ -181,7 +194,7 @@ export default function registerFileCommands(router) {
         // Partition by the walker's size metadata: an oversized file becomes a placeholder card
         // straight from its tree entry — never fetched. (Bytes ≈ chars for source; the post-fetch
         // line check in addFileGrid catches the under-limit long-line artifacts.) Skip already-open.
-        const notOpen = (p) => !(ctx.registry.findByMeta?.('sourcePath', `file:///${p}`) || []).length;
+        const notOpen = (p) => !(ctx.registry.findByMeta?.('sourcePath', toFileUri(p)) || []).length;
         const oversized = under.filter((f) => (f.size ?? 0) > READABLE_MAX_CHARS && notOpen(f.path));
         const want = under
             .filter((f) => (f.size ?? 0) <= READABLE_MAX_CHARS)
@@ -219,9 +232,14 @@ export default function registerFileCommands(router) {
             ctx.contentTree.relayoutAndRest(WORLD_FLOOR_Y);
             const dirs = ctx.contentTree.dirCount();
 
-            // Record the pop as the session's field source. Session capture persists exactly
+            // Record the pop in the session's field sources — a LIST now: every opened
+            // root restores (additive multi-root world). Session capture persists exactly
             // this intent — the field is never inferred from a census of the registry.
-            ctx.fieldSource = { type: 'local', dir };
+            const prior = Array.isArray(ctx.fieldSources) ? ctx.fieldSources : [];
+            ctx.fieldSources = [
+                ...prior.filter((s) => !(s?.type === 'local' && s.dir === dir)),
+                { type: 'local', dir },
+            ];
 
             let text = `OK: opened ${opened} file(s) under "${dir || '/'}" → content tree (${dirs} dirs)`;
             if (placeholders) text += `; ${placeholders} as not-rendered placeholder${placeholders === 1 ? '' : 's'}`;

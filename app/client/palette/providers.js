@@ -40,10 +40,17 @@ export async function nounEntries(client) {
 
     // Open sheets — the working set. sheet.focus is THE jump gesture in one verb:
     // render-if-needed → attention primary → camera frame → mark active.
+    // Sheet paths are canonical (absolute in relay mode); the roster rows below are
+    // root-relative. Compare + display both in the relative space.
+    const root = ctx?.fileProvider?.rootInfo?.root;
+    const relOf = (p) => {
+        const s = String(p ?? '');
+        return root && s.startsWith(root + '/') ? s.slice(root.length + 1) : s.replace(/^\/+/, '');
+    };
     try {
         const sheets = ctx?.workspace?.listActiveSheets?.(ctx.registry, ctx.attentionManager) || [];
         for (const s of sheets) {
-            const path = s.source?.path ? String(s.source.path).replace(/^\/+/, '') : null;
+            const path = s.source?.path ? relOf(s.source.path) : null;
             if (path) openPaths.add(path);
             out.push({ kind: 'sheet', key: path || s.title, command: ['sheet.focus', s.id], detail: 'open — jump' });
         }

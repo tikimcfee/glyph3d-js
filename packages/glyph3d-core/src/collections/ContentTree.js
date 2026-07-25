@@ -41,6 +41,20 @@ function splitPath(path) {
     return String(path == null ? '' : path).split('/').filter((s) => s.length > 0);
 }
 
+/** '/' when the path is absolute (the relay's canonical key form), else ''. Node
+ *  keys carry this prefix so userData.path byte-matches registry ids — one key
+ *  space, no stripped-vs-canonical translation at any seam. Repo-relative paths
+ *  (GitHub mode) have no prefix and behave exactly as before. */
+function prefixOf(path) {
+    return String(path == null ? '' : path).startsWith('/') ? '/' : '';
+}
+
+/** The full normalized key for a path: prefix + clean segments. '' → the root. */
+function keyOf(path) {
+    const parts = splitPath(path);
+    return parts.length ? prefixOf(path) + parts.join('/') : '';
+}
+
 /** dirname/basename on a normalized segment list. */
 function dirOf(parts) { return parts.slice(0, -1); }
 function baseOf(parts) { return parts.length ? parts[parts.length - 1] : ''; }
@@ -80,12 +94,12 @@ export default class ContentTree {
 
     /** The dir node for a directory path ('' → root), or null if it doesn't exist. */
     getNode(dirPath) {
-        return this._dirs.get(splitPath(dirPath).join('/')) || null;
+        return this._dirs.get(keyOf(dirPath)) || null;
     }
 
     /** Is a file leaf present at this path? */
     has(path) {
-        return this._leaves.has(splitPath(path).join('/'));
+        return this._leaves.has(keyOf(path));
     }
 
     /** Every file path currently in the tree. */
@@ -107,7 +121,8 @@ export default class ContentTree {
     parentOf(node) {
         const path = node?.userData?.path;
         if (path == null || path === '') return null;
-        const parentPath = splitPath(path).slice(0, -1).join('/');
+        const parts = splitPath(path).slice(0, -1);
+        const parentPath = parts.length ? prefixOf(path) + parts.join('/') : '';
         return this._dirs.get(parentPath) || null;
     }
 
@@ -172,11 +187,11 @@ export default class ContentTree {
      * tail and parenting each new node under its parent. Idempotent. Returns the deepest
      * node. (mkdir -p, keyed by full path so it's create-once and substring-safe.)
      */
-    _ensureDir(dirParts) {
+    _ensureDir(dirParts, prefix = '') {
         let node = this.root;
         let acc = '';
         for (const seg of dirParts) {
-            acc = acc ? `${acc}/${seg}` : seg;
+            acc = acc ? `${acc}/${seg}` : prefix + seg;
             let child = this._dirs.get(acc);
             if (!child) {
                 child = new THREE.Group();
@@ -202,9 +217,10 @@ export default class ContentTree {
     insert(leaf, path) {
         const parts = splitPath(path);
         if (parts.length === 0) throw new Error('ContentTree.insert: empty path');
-        const full = parts.join('/');
+        const prefix = prefixOf(path);
+        const full = prefix + parts.join('/');
         if (this._leaves.has(full)) this.remove(full); // replace
-        const dir = this._ensureDir(dirOf(parts));
+        const dir = this._ensureDir(dirOf(parts), prefix);
         leaf.userData = { ...(leaf.userData || {}), path: full, name: baseOf(parts), isDir: false };
         dir.add(leaf);
         this._leaves.set(full, leaf);
@@ -218,7 +234,7 @@ export default class ContentTree {
      * dir nodes up to (not including) the root. Returns the removed leaf or null.
      */
     remove(path, { prune = false } = {}) {
-        const full = splitPath(path).join('/');
+        const full = keyOf(path);
         const leaf = this._leaves.get(full);
         if (!leaf) return null;
         const dir = leaf.parent;

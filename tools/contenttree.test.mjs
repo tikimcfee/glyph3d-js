@@ -466,5 +466,34 @@ const contentSnapshot = (tree) => {
   ok([...markers._prisms.values()].every((p) => p.mesh.visible), 'on → prisms visible again');
 }
 
+// 30. canonical absolute keys: a leading slash is PRESERVED through every seam —
+//     userData.path byte-matches the registry's canonical id space (relay mode).
+{
+  const t = buildPacked([]);
+  const leaf = makeLeaf('/home/u/proj/src/a.js');
+  t.insert(leaf, '/home/u/proj/src/a.js');
+  eq(leaf.userData.path, '/home/u/proj/src/a.js', 'canonical: leaf userData.path keeps the leading slash');
+  ok(t.has('/home/u/proj/src/a.js'), 'canonical: has() by canonical key');
+  const dir = t.getNode('/home/u/proj/src');
+  ok(dir !== null && dir.userData.path === '/home/u/proj/src', 'canonical: dir chain keys carry the slash');
+  eq(t.parentOf(leaf), dir, 'canonical: parentOf resolves through the slashed key space');
+  // The chain tops out at the content root, exactly like relative keys.
+  const top = t.getNode('/home');
+  ok(top !== null && t.parentOf(top) === t.root, 'canonical: top-level absolute dir parents to the root');
+  // Idempotent re-listing: normalized lookups tolerate duplicate slashes.
+  ok(t.getNode('//home/u//proj/src') === dir, 'canonical: lookup normalizes duplicate slashes, prefix intact');
+}
+
+// 31. absolute and repo-relative keys coexist without collision ('/src' vs 'src').
+{
+  const t = buildPacked(['src/rel.js']);
+  t.insert(makeLeaf('/src/abs.js'), '/src/abs.js');
+  ok(t.getNode('src') !== null && t.getNode('/src') !== null, 'coexist: both key spaces materialize');
+  ok(t.getNode('src') !== t.getNode('/src'), 'coexist: they are DIFFERENT nodes (no collision)');
+  t.remove('/src/abs.js', { prune: true });
+  ok(t.getNode('/src') === null, 'coexist: pruning the absolute chain leaves the relative one');
+  ok(t.getNode('src') !== null, 'coexist: relative chain untouched');
+}
+
 console.log(`\ncontenttree: ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

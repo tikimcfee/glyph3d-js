@@ -19,6 +19,7 @@ import {
 } from './spatialHelpers.js';
 import { zDistanceForFit } from '@glyph3d/core/services/spatial/spatialMath.js';
 import { decodeBase64 } from '@glyph3d/core/utils/encoding.js';
+import { canonicalPath } from './pathResolve.js';
 
 /** @type {Map<string, TourDefinition>} */
 const tours = new Map();
@@ -232,8 +233,8 @@ export default function registerNavigationCommands(router) {
     // (array form) so paths with spaces survive the space-split tokenizer.
     router.register('focus.path', (args, ctx) => {
         if (!ctx.contentTree) return { text: 'ERR: content tree not ready', data: null };
-        const path = args[0];
-        if (!path) return { text: 'ERR: usage: focus.path <dir-or-file-path>', data: null };
+        if (!args[0]) return { text: 'ERR: usage: focus.path <dir-or-file-path>', data: null };
+        const path = canonicalPath(ctx, args[0]);
         const node = ctx.contentTree.getNode(path) || ctx.registry?.get(path)?.grid || null;
         if (!node) return { text: `OK: no node at ${path}`, data: { target: null } };
         const id = focusTreeNode(ctx, node);

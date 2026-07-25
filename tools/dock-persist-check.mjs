@@ -73,7 +73,7 @@ function makeCtx(registry, cameraDock) {
     cameraController: { cameraSpeed: 100 },
     workspace: new WorkspaceModel(),  // real model — terminal geometry intent lives here now
     fileProvider: { _currentRepo: null },
-    fieldSource: null,
+    fieldSources: [],
     status: { set() {}, clear() {} },
     // wsbridge: the projector pushes a PTY resize over this when applyView resizes a terminal.
     wsbridge: { connected: true, _pushes: [], push(owner, msg) { this._pushes.push({ owner, msg }); } },
@@ -263,7 +263,7 @@ function makeRouter() {
   ok(!router.calls.some((c) => String(c).startsWith('attention.')), 'restore: NO attention.* verb replay (direct state only)');
 }
 
-// ---- 9. field source = ONE decider (ctx.fieldSource), NOT the provider's _currentRepo cache ----
+// ---- 9. field sources = ONE decider (ctx.fieldSources list), NOT the provider's _currentRepo cache ----
 {
   const cap = (mutate) => {
     const ctx = makeCtx(makeRegistry(), makeCameraDock());
@@ -271,17 +271,21 @@ function makeRouter() {
     return new SessionStore({ ctx, router: makeRouter(makeCameraDock()), bridge: {} }).capture();
   };
   const repo = cap((ctx) => {
-    ctx.fieldSource = { type: 'repo', ref: 'owner/repo/main' };
+    ctx.fieldSources = [{ type: 'repo', ref: 'owner/repo/main' }];
     ctx.fileProvider._currentRepo = { owner: 'STALE', repo: 'x', branch: 'y' }; // must be IGNORED
   });
-  eq(repo.field, { type: 'repo', ref: 'owner/repo/main' }, 'capture: repo field from ctx.fieldSource (ignores provider _currentRepo)');
-  const local = cap((ctx) => { ctx.fieldSource = { type: 'local', dir: 'src' }; });
-  eq(local.field, { type: 'local', dir: 'src' }, 'capture: local field from ctx.fieldSource');
+  eq(repo.fieldSources, [{ type: 'repo', ref: 'owner/repo/main' }], 'capture: repo source from ctx.fieldSources (ignores provider _currentRepo)');
+  const multi = cap((ctx) => {
+    ctx.fieldSources = [{ type: 'local', dir: '/a/proj' }, { type: 'local', dir: '/b/other' }];
+  });
+  eq(multi.fieldSources, [{ type: 'local', dir: '/a/proj' }, { type: 'local', dir: '/b/other' }],
+     'capture: EVERY opened root persists (additive multi-root list)');
   const none = cap((ctx) => {
-    ctx.fieldSource = null;
+    ctx.fieldSources = [];
     ctx.fileProvider._currentRepo = { owner: 'lingering', repo: 'r', branch: 'b' }; // cache, not the decider
   });
-  ok(none.field === null, 'capture: no fieldSource → field null (the provider cache is NOT the decider)');
+  ok(Array.isArray(none.fieldSources) && none.fieldSources.length === 0,
+     'capture: no fieldSources → empty list (the provider cache is NOT the decider)');
 }
 
 console.log(failures === 0 ? '\nPASS — dock persistence round-trips' : `\nFAIL — ${failures} assertion(s)`);

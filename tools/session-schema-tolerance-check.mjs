@@ -42,6 +42,29 @@ function makeStore(writes) {
      'future-version blob: known terminal intent still restored into the model (unknown key ignored)');
 }
 
+// ---- 1b. legacy single-`field` key restores as one field source (data tolerance) ----
+{
+  const calls = [];
+  const ctx = makeCtx();
+  const router = { execute: async (cmd) => { calls.push(cmd); return { text: 'OK' }; } };
+  const bridge = { rpcRequest: async () => ({}) };
+  const ss = new SessionStore({ ctx, router, bridge });
+  await ss.restore({ version: 2, files: [], field: { type: 'local', dir: 'src' } });
+  ok(calls.some((c) => Array.isArray(c) && c[0] === 'file.openDir' && c[1] === 'src'),
+     'legacy `field` key: replayed as a field source (openDir called)');
+
+  const calls2 = [];
+  const router2 = { execute: async (cmd) => { calls2.push(cmd); return { text: 'OK' }; } };
+  const ss2 = new SessionStore({ ctx: makeCtx(), router: router2, bridge });
+  await ss2.restore({
+    version: 2, files: [],
+    fieldSources: [{ type: 'local', dir: '/a/proj' }, { type: 'local', dir: '/b/other' }],
+  });
+  const dirs = calls2.filter((c) => Array.isArray(c) && c[0] === 'file.openDir').map((c) => c[1]);
+  ok(dirs.length === 2 && dirs[0] === '/a/proj' && dirs[1] === '/b/other',
+     'fieldSources list: every root replays, in order');
+}
+
 // ---- 2. a v1 blob (the real cliff) IS wiped to an empty v2 snapshot ----
 {
   const writes = [];

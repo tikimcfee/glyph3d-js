@@ -98,7 +98,7 @@ This is why it isn't *already* a one-liner: the facts are smeared across copies,
 | **dock membership** | **4 + file**: `CameraDock.entries` · `AttentionManager.docks` (mislabeled "record of truth", `AM.js:70`) · `CameraDock.tiles` Set · scene parent · `dock3d` | `view.dock.member` (the rest become `apply()` outputs) | **store** |
 | **dock slot order** | `DockEntry.slot` (recomputed, `CameraDock.js:412`) + `docks[].offset.slot` | `view.dock.slotOrder` (relative order only) | **store order / derive the int** |
 | **dock spotlight** | `CameraDock.focusedId` (`:109`) — set only by an explicit gesture, no re-derivation source, lost on reload | `view.dock.focused` | **store** — it can be lost, therefore it's intent, not derived |
-| **field source** | `ctx.fieldSource` (local) **or** `fileProvider._currentRepo` (repo) — two homes | `field.source` (unified) | **store** |
+| **field source** | `ctx.fieldSources` — ONE home, a LIST (additive multi-root: `file.openDir` appends `{type:'local',dir}` per opened root; `repo.load` replaces with its single `{type:'repo',ref}`); `fileProvider._currentRepo` is the provider's own cache, not a decider | `field.sources` | **store** |
 | **ContentTree scheme** | `ContentTree.layout/layoutOpts` (`ContentTree.js:54`) — **persisted nowhere**; resets whole field to packed on reload | `field.layout` | **store (biggest GAP — governs every grid's position)** |
 | **camera** | live THREE camera; `snap.camera`; `field.camera` (null) | `field.camera` | **store** (see camera bugs §7) |
 | **focus** (`attention.primary/key`) | `AttentionManager.state` — **not persisted**; re-derived by accident of last replayed verb | `field.focus` | **store** (tolerate `dir:`/`agent:` ids — not surface-only) |

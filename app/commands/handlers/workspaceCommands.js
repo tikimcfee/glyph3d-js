@@ -11,6 +11,7 @@
  */
 import { box, table } from '../formatResponse.js';
 import { renderSheetGrid } from './fileLoader.js';
+import { canonicalPath, toFileUri } from './pathResolve.js';
 
 const dot = (s) => (s.focused ? '●' : s.rendered ? '◐' : '○');  // focused · rendered · open-only
 
@@ -19,8 +20,8 @@ export default function registerWorkspaceCommands(router) {
     if (args.length < 1) return { text: 'ERR: usage: sheet.open <path>', data: null };
     const ws = ctx.workspace;
     if (!ws) return { text: 'ERR: workspace not ready', data: null };
-    const path = args.join(' ');
-    const uri = 'file:///' + String(path).replace(/^\/+/, '');   // canonical form — matches file.open / the registry meta
+    const path = canonicalPath(ctx, args.join(' '));
+    const uri = toFileUri(path);   // canonical form — matches file.open / the registry meta
     const sheet = ws.openSheet({ kind: 'file', source: { path, uri } });
     if (!sheet) return { text: 'ERR: could not open sheet', data: null };
     return {
@@ -97,9 +98,8 @@ export default function registerWorkspaceCommands(router) {
     // or not it's in the working set (the palette's file rows ride this). An
     // explicit sheet:* id that doesn't resolve is still an error, not an open.
     if (!sheet && !sheetId.startsWith('sheet:')) {
-      const path = sheetId;
-      const uri = 'file:///' + String(path).replace(/^\/+/, '');
-      sheet = ws.openSheet({ kind: 'file', source: { path, uri } });
+      const path = canonicalPath(ctx, sheetId);
+      sheet = ws.openSheet({ kind: 'file', source: { path, uri: toFileUri(path) } });
     }
     if (!sheet) return { text: `ERR: no sheet "${sheetId}"`, data: null };
 

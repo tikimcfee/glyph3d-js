@@ -48,8 +48,11 @@ function makeStore(ctx, calls, reg) {
   const router = {
     execute(cmd) {
       calls.push(cmd);
-      if (typeof cmd === 'string' && cmd.startsWith('file.open ')) {
-        const path = cmd.split(' ')[1];
+      // file.open arrives in ARRAY form from restore (path survives spaces); accept both.
+      const isOpen = Array.isArray(cmd) ? cmd[0] === 'file.open'
+        : (typeof cmd === 'string' && cmd.startsWith('file.open '));
+      if (isOpen) {
+        const path = Array.isArray(cmd) ? cmd[1] : cmd.split(' ')[1];
         if (!reg.has(path)) reg.add(path, makeCodeGrid());
       }
       return Promise.resolve({ text: 'OK' });
@@ -72,7 +75,7 @@ const noViewportVerb = (calls) => !calls.some((c) => /^grid\.(window|frame|scrol
   ok(grid._views.length === 1, 'restore: applyView called once on the code grid');
   eq(grid._views[0], { window: { cols: 100, rows: 40, firstLine: 5 }, frameRows: 20, scrollOffset: 7 },
      'restore: applyView got the saved viewport');
-  ok(calls.some((c) => String(c).startsWith('file.open a.js')), 'restore: file.open created the grid');
+  ok(calls.some((c) => Array.isArray(c) && c[0] === 'file.open' && c[1] === 'a.js'), 'restore: file.open created the grid');
   ok(noViewportVerb(calls), 'restore: NO grid.window/frame/scroll verb replay (direct state only)');
   ok(relayouts === 1, 'restore: ONE batched tree relayout for the footprint change');
 }
