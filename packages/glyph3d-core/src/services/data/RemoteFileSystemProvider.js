@@ -31,6 +31,11 @@ export class RemoteFileSystemProvider {
         this._root = options.root || '.';
         this._disposed = false;
 
+        // What the binary is serving + can reach — {root, extraRoots, home, sep},
+        // null until refreshRoots() has run (CommandProvider calls it on connect,
+        // BEFORE session restore, so path normalization knows the served root).
+        this.rootInfo = null;
+
         // State matching RepositoryAdapter surface
         this._currentTree = null;
         this._progress = { loaded: 0, total: 0, current: null };
@@ -116,6 +121,44 @@ export class RemoteFileSystemProvider {
      */
     async stat(uri) {
         return this._rpc('fs/stat', { uri });
+    }
+
+    // ---- Browse surface (relay-only) ----
+
+    /**
+     * Shallow, unfiltered listing of ONE directory — the browse primitive.
+     * Absolute paths only (the server refuses relative URIs) and deliberately
+     * wider than the read/write sandbox: hidden files, binaries, symlinks all
+     * list, exactly what the operator would see with ls -a.
+     * @param {string} path - absolute directory path (e.g. "/home/x/dev")
+     * @returns {Promise<{ path: string, entries: {name:string,type:('file'|'directory'|'symlink'),size:number}[], truncated: boolean }>}
+     */
+    async readDir(path) {
+        const uri = `file:///${String(path).replace(/^\/+/, '')}`;   // strip leading slashes → canonical (matches file.open)
+        return this._rpc('fs/readDir', { uri });
+    }
+
+    /**
+     * Register a directory as a runtime reach root — the dynamic form of
+     * --reach. After this, content read/write and listTree work under it.
+     * Keeps the cached rootInfo's reach list current from the response.
+     * @param {string} path - absolute directory path
+     * @returns {Promise<{ root: string, added: boolean, extraRoots: string[] }>}
+     */
+    async addRoot(path) {
+        const uri = `file:///${String(path).replace(/^\/+/, '')}`;   // strip leading slashes → canonical (matches file.open)
+        const res = await this._rpc('fs/addRoot', { uri });
+        if (this.rootInfo && Array.isArray(res?.extraRoots)) this.rootInfo.extraRoots = res.extraRoots;
+        return res;
+    }
+
+    /**
+     * Fetch + cache what the binary is attached to: {root, extraRoots, home, sep}.
+     * @returns {Promise<{ root: string, extraRoots: string[], home: string, sep: string }>}
+     */
+    async refreshRoots() {
+        this.rootInfo = await this._rpc('fs/roots', {});
+        return this.rootInfo;
     }
 
     // ---- RepositoryAdapter surface (swap-compatible) ----

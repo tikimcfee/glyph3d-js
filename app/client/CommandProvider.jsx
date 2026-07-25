@@ -464,7 +464,13 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     const offConn = bridge.onConnectionChange((connected) => {
       if (!connected || repo) return;
       state.ctx.fileProvider = remoteProvider;
-      session.startOnConnect();
+      // Learn what the binary serves BEFORE restore: session restore normalizes
+      // saved relative paths against the served root, and the file browser needs
+      // its anchors (root, home, reach roots). An old relay without fs/roots just
+      // logs and the session starts anyway.
+      remoteProvider.refreshRoots()
+        .catch((err) => console.warn('[fs] roots unavailable:', err?.message || err))
+        .finally(() => session.startOnConnect());
     });
 
     // Workspace self-heal: when a panel is removed out-of-band (grid.remove, scene.clear_*,

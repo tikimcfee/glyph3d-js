@@ -50,6 +50,33 @@ export class GitHubFileProvider extends RepositoryAdapter {
     }
 
     /**
+     * Shallow listing of one directory of the loaded repo, synthesized from the
+     * cached flat tree — the same shape as the relay's fs/readDir, so FileTree
+     * browses both providers through ONE code path. Paths are repo-relative
+     * ('' = repo root); GitHub has no reach roots, so there is no addRoot /
+     * rootInfo here (callers feature-detect).
+     * @param {string} [path]
+     * @returns {Promise<{ path: string, entries: {name:string,type:string,size:number}[], truncated: boolean }>}
+     */
+    async readDir(path = '') {
+        const dir = String(path).replace(/^\/+|\/+$/g, '');
+        const { entries, truncated } = await this.listTree(dir ? `github:///${dir}` : 'github:///');
+        const seen = new Map();
+        for (const e of entries) {
+            const slash = e.path.indexOf('/');
+            if (slash === -1) {
+                if (!seen.has(e.path)) seen.set(e.path, { name: e.path, type: e.type, size: e.size });
+            } else {
+                // Deep entry whose parent dir wasn't its own tree row — infer it.
+                const name = e.path.slice(0, slash);
+                if (!seen.has(name)) seen.set(name, { name, type: 'directory', size: 0 });
+            }
+        }
+        const out = [...seen.values()].sort((a, b) => a.name.localeCompare(b.name));
+        return { path: dir, entries: out, truncated };
+    }
+
+    /**
      * Dual-shape, because RepositoryAdapter (parent) and RemoteFileSystemProvider
      * disagree on this method's signature:
      *   - no-arg → the cached tree as DirEntry[] (RemoteFileSystemProvider parity).
