@@ -1,20 +1,24 @@
-import React, { useEffect, useMemo, useState, useCallback } from 'react';
-import { buildTree } from './treeUtil.js';
+import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { canonicalPath } from './commands/handlers/pathResolve.js';
 
-// FileTree — the Files panel: ONE tree that is both the source browser (summon a file
-// into the scene with a click) AND the scene view for files (loaded rows are lit, with
-// per-row hide + close, and a "loaded only" filter to prune to what's in the field).
+// FileTree — the Files panel IS the file browser. One tree that:
 //
-// Why one tree, not a browser + a separate outliner: in glyph3d a file loads as exactly
-// one grid — scene objects are 1:1 with source files — so a second "scene tree" is just
-// a near-duplicate of this one. (The DCC browser/outliner split assumes assets ≠ scene
-// instances; that doesn't hold for files here. Terminals/memory, which have no source
-// row, are a different story — they live in their own panels.)
+//   • BROWSES the real filesystem lazily — one shallow readDir per expanded
+//     directory (file.list's primitive), nothing loads until asked. In relay
+//     mode that reaches ANYTHING the operator can read (served root, opened
+//     roots, ~, /); in GitHub mode it's synthesized from the loaded repo tree —
+//     one code path either way.
+//   • SHOWS what's loaded — derived live from the registry (never stored), so
+//     the same directory reached via any route lights up identically: node
+//     identity is the canonical path, exactly the registry's id space.
+//   • OPENS and CLOSES arbitrary nodes — click a file to open+focus it, ⊞ pops
+//     a whole directory into the world (file.openDir), ✕ on a directory closes
+//     everything under it (file.closeDir). Selection and viewing are the same
+//     place — no separate "Open" dialog choosing at a distance.
 //
-// No bespoke logic: every action is a bus verb (file.open / grid.close / grid.visibility),
-// the same the CLI/Claude run. `loaded` comes straight from the registry (the truth of
-// what's rendered); `attention.primary` is the one selection authority, reflected here.
+// No bespoke logic: every action is a bus verb (file.open / file.openDir /
+// file.closeDir / grid.close / grid.visibility), the same the CLI/Claude run.
+// `attention.primary` is the one selection authority, reflected here.
 
 const styles = {
   content: {
@@ -55,158 +59,267 @@ const styles = {
     color: lit ? '#e0888f' : '#4a515f', cursor: 'pointer',
   }),
   dir: { color: '#9aa3b2' },
+  anchor: { color: '#5f6875' },                                       // ~ and / — quiet browse anchors
+  loadedDot: { flex: '0 0 auto', marginLeft: 6, color: '#7ad7a0', fontSize: 9 },
+  dotfile: { opacity: 0.62 },
   fileLoaded: { color: '#7ad7a0' },                                   // a grid for this file is in the scene
   fileHidden: { color: '#5c6675', fontStyle: 'italic' },              // loaded but grid.visible === false
   fileActive: { color: '#cfeaff', boxShadow: 'inset 2px 0 0 #6cf' },  // the focused file (attention.primary)
+  note: { color: '#5c6675', fontStyle: 'italic' },
+  errNote: { color: '#b0666d', fontStyle: 'italic' },
   msg: { padding: '12px', color: '#7c8596' },
   err: { padding: '12px', color: '#e0888f', whiteSpace: 'pre-wrap' },
 };
 
-function TreeRow({ node, depth, expanded, toggle, loadedVis, openFile, openDir, closeFile, hideFile, hover, setHover, activePath }) {
-  const pad = 8 + depth * 12;
-  const hovered = hover === node.path;
-  const bg = hovered ? 'rgba(255,255,255,0.05)' : 'transparent';
+const baseName = (p) => {
+  const parts = String(p || '').split('/').filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : String(p || '');
+};
+const joinPath = (dir, name) => (dir === '/' ? `/${name}` : dir ? `${dir}/${name}` : name);
+const underOf = (path) => (path === '/' || path === '' ? path : path + '/');
 
-  if (node.isDir) {
-    const isExp = expanded.has(node.path);
-    return (
-      <>
-        <div
-          onClick={() => toggle(node.path)}
-          onMouseEnter={() => setHover(node.path)}
-          onMouseLeave={() => setHover((h) => (h === node.path ? null : h))}
-          style={{ ...styles.row, ...styles.dir, paddingLeft: pad, background: bg }}
-        >
-          <span style={styles.caret}>{isExp ? '▾' : '▸'}</span>
-          <span style={styles.name}>{node.name}</span>
-          <span title="lay this folder out in 3D"
-            onClick={(e) => { e.stopPropagation(); openDir(node.path); }}
-            style={styles.treeBtn(hovered)}>⊞</span>
-        </div>
-        {isExp && node.children.map((c) => (
-          <TreeRow key={c.path} node={c} depth={depth + 1}
-            expanded={expanded} toggle={toggle} loadedVis={loadedVis}
-            openFile={openFile} openDir={openDir} closeFile={closeFile} hideFile={hideFile}
-            hover={hover} setHover={setHover} activePath={activePath} />
-        ))}
-      </>
-    );
+/** Nest flat registry ids into {name, path, isDir, children} — the loaded-only view. */
+function nestIds(ids) {
+  const root = { name: '', path: null, isDir: true, children: new Map() };
+  for (const id of ids) {
+    const abs = String(id).startsWith('/');
+    const parts = String(id).split('/').filter(Boolean);
+    let node = root, acc = '';
+    parts.forEach((seg, i) => {
+      acc = acc ? `${acc}/${seg}` : (abs ? '/' + seg : seg);
+      if (!node.children.has(seg)) {
+        node.children.set(seg, { name: seg, path: acc, isDir: i < parts.length - 1, children: new Map() });
+      }
+      node = node.children.get(seg);
+      if (i < parts.length - 1) node.isDir = true;
+    });
   }
+  const finish = (n) => ({ ...n, children: [...n.children.values()].map(finish) });
+  return finish(root);
+}
 
-  const isActive = node.path === activePath;
-  const isLoaded = loadedVis.has(node.path);
-  const shown = loadedVis.get(node.path) !== false;
+/** One directory row + (when expanded) its lazily-fetched children. */
+function DirNode({ path, label, depth, kind, ui }) {
+  const expandedHere = ui.expanded.has(path);
+  const hovered = ui.hover === path;
+  const bg = hovered ? 'rgba(255,255,255,0.05)' : 'transparent';
+  const listing = ui.listings.get(path);
+  const loadedUnder = ui.hasLoadedUnder(path);
+  const pad = 8 + depth * 12;
+
+  return (
+    <>
+      <div
+        title={path || label}
+        onClick={() => ui.toggle(path)}
+        onMouseEnter={() => ui.setHover(path)}
+        onMouseLeave={() => ui.clearHover(path)}
+        style={{ ...styles.row, ...(kind === 'anchor' ? styles.anchor : styles.dir), paddingLeft: pad, background: bg }}
+      >
+        <span style={styles.caret}>{expandedHere ? '▾' : '▸'}</span>
+        <span style={styles.name}>{label}</span>
+        {loadedUnder && <span style={styles.loadedDot}>●</span>}
+        <span title="lay this folder out in 3D"
+          onClick={(e) => { e.stopPropagation(); ui.openDir(path); }}
+          style={styles.treeBtn(hovered)}>⊞</span>
+        {loadedUnder && (
+          <span title="close everything loaded under this folder"
+            onClick={(e) => { e.stopPropagation(); ui.closeDir(path); }}
+            style={styles.close(hovered)}>✕</span>
+        )}
+      </div>
+      {expandedHere && (
+        listing == null || listing === 'loading' ? (
+          <div style={{ ...styles.row, ...styles.note, paddingLeft: pad + 24 }}>…</div>
+        ) : listing.error ? (
+          <div style={{ ...styles.row, ...styles.errNote, paddingLeft: pad + 24 }}>{listing.error}</div>
+        ) : (
+          <>
+            {listing.entries.filter((e) => e.type === 'directory').map((e) => (
+              <DirNode key={e.name} path={joinPath(path, e.name)} label={e.name} depth={depth + 1} kind="dir" ui={ui} />
+            ))}
+            {listing.entries.filter((e) => e.type !== 'directory').map((e) => (
+              <FileNode key={e.name} path={joinPath(path, e.name)} name={e.name} depth={depth + 1} ui={ui} />
+            ))}
+            {listing.entries.length === 0 && (
+              <div style={{ ...styles.row, ...styles.note, paddingLeft: pad + 24 }}>(empty)</div>
+            )}
+            {listing.truncated && (
+              <div style={{ ...styles.row, ...styles.errNote, paddingLeft: pad + 24 }}>… listing truncated</div>
+            )}
+          </>
+        )
+      )}
+    </>
+  );
+}
+
+function FileNode({ path, name, depth, ui }) {
+  const hovered = ui.hover === path;
+  const bg = hovered ? 'rgba(255,255,255,0.05)' : 'transparent';
+  const isActive = path === ui.activeId;
+  const isLoaded = ui.loadedVis.has(path);
+  const shown = ui.loadedVis.get(path) !== false;
   return (
     <div
-      title={node.path}
-      onClick={() => openFile(node.path)}
-      onMouseEnter={() => setHover(node.path)}
-      onMouseLeave={() => setHover((h) => (h === node.path ? null : h))}
+      title={path}
+      onClick={() => ui.openFile(path)}
+      onMouseEnter={() => ui.setHover(path)}
+      onMouseLeave={() => ui.clearHover(path)}
       style={{
-        ...styles.row, paddingLeft: pad + 12,
+        ...styles.row, paddingLeft: 8 + depth * 12 + 12,
         background: isActive ? 'rgba(102,204,255,0.16)' : bg,
+        ...(name.startsWith('.') ? styles.dotfile : null),
         ...(isLoaded ? (shown ? styles.fileLoaded : styles.fileHidden) : null),
         ...(isActive ? styles.fileActive : null),
       }}
     >
-      <span style={styles.name}>{node.name}</span>
+      <span style={styles.name}>{name}</span>
       {/* loaded files get scene-management affordances inline: hide + close */}
       {isLoaded && (
         <>
           <span title={shown ? 'hide' : 'show'} style={styles.vis(shown, hovered)}
-            onClick={(e) => { e.stopPropagation(); hideFile(node.path, shown); }}>{shown ? '◉' : '○'}</span>
+            onClick={(e) => { e.stopPropagation(); ui.hideFile(path, shown); }}>{shown ? '◉' : '○'}</span>
           <span title="close / remove from scene" style={styles.close(hovered)}
-            onClick={(e) => { e.stopPropagation(); closeFile(node.path); }}>✕</span>
+            onClick={(e) => { e.stopPropagation(); ui.closeFile(path); }}>✕</span>
         </>
       )}
     </div>
   );
 }
 
+/** The loaded-only view: everything in the registry, nested, always expanded. */
+function LoadedNode({ node, depth, ui }) {
+  if (node.isDir) {
+    const pad = 8 + depth * 12;
+    const hovered = ui.hover === node.path;
+    return (
+      <>
+        {node.path != null && (
+          <div style={{ ...styles.row, ...styles.dir, paddingLeft: pad }}
+            onMouseEnter={() => ui.setHover(node.path)} onMouseLeave={() => ui.clearHover(node.path)}>
+            <span style={styles.caret}>▾</span>
+            <span style={styles.name}>{node.name}</span>
+            <span title="close everything loaded under this folder"
+              onClick={() => ui.closeDir(node.path)} style={styles.close(hovered)}>✕</span>
+          </div>
+        )}
+        {node.children.map((c) => (
+          <LoadedNode key={c.path} node={c} depth={node.path == null ? depth : depth + 1} ui={ui} />
+        ))}
+      </>
+    );
+  }
+  return <FileNode path={node.path} name={node.name} depth={depth} ui={ui} />;
+}
+
 export default function FileTree({ client }) {
   const [connected, setConnected] = useState(false);
-  const [files, setFiles] = useState(null);
-  const [error, setError] = useState(null);
-  const [loadedVis, setLoadedVis] = useState(() => new Map());  // path → visible, from the registry
-  const [expanded, setExpanded] = useState(() => new Set([''])); // root expanded
+  const [rootInfo, setRootInfo] = useState(null);          // {root, extraRoots, home, sep} | null
+  const [repoLabel, setRepoLabel] = useState(null);        // GitHub mode header label
+  const [pinnedRoots, setPinnedRoots] = useState([]);      // opened local roots outside the served one
+  const [listings, setListings] = useState(() => new Map()); // path → 'loading' | {entries,truncated} | {error}
+  const [expanded, setExpanded] = useState(() => new Set());
+  const [loadedVis, setLoadedVis] = useState(() => new Map()); // registry id → visible
+  const [activeId, setActiveId] = useState(null);
   const [hover, setHover] = useState(null);
-  const [activePath, setActivePath] = useState(null);  // the focused file (attention.primary)
-  const [loadedOnly, setLoadedOnly] = useState(false); // filter the tree to scene contents
+  const [loadedOnly, setLoadedOnly] = useState(false);
+  const fetching = useRef(new Set());
 
-  // Registry ids are CANONICAL (absolute in relay mode); this tree's rows are
-  // root-relative until the browser rewrite. Map ids into row space here so
-  // loaded/active accents keep lighting up. (Interim — the lazy-browse tree
-  // adopts canonical node paths outright.)
-  const toRowPath = useCallback((id) => {
-    const root = client?.ctx?.fileProvider?.rootInfo?.root;
-    const s = String(id ?? '');
-    return root && s.startsWith(root + '/') ? s.slice(root.length + 1) : s;
-  }, [client]);
-
-  // The focused grid → row accent (one attention.primary authority).
+  // The focused grid → row accent (one attention.primary authority; ids are canonical).
   useEffect(() => {
     const am = client?.ctx?.attentionManager;
     if (!am?.on) return undefined;
-    const update = () => {
-      const id = am.get?.('primary')?.id ?? null;
-      setActivePath(id == null ? null : toRowPath(id));
-    };
+    const update = () => setActiveId(am.get?.('primary')?.id ?? null);
     update();
     return am.on('change:primary', update);
-  }, [client, toRowPath]);
-
-  // Source listing (debounced) + the loaded map (immediate), both off the registry.
-  useEffect(() => {
-    if (!client) return undefined;
-    let cancelled = false, timer = null;
-    const list = async () => {
-      const provider = client.ctx?.fileProvider;
-      if (!provider) return;
-      try {
-        const { entries } = await provider.listTree('file:///');
-        const code = provider.filterCodeFiles({ tree: entries });
-        if (cancelled) return;
-        setFiles(code.map((f) => f.path).sort());
-        setError(null);
-      } catch (e) {
-        if (!cancelled) setError(e?.message || String(e));
-      }
-    };
-    const recomputeLoaded = () => {
-      const r = client.ctx?.registry;
-      if (r) setLoadedVis(new Map(r.findByType('grid').map((e) => [toRowPath(e.id), e.grid?.visible !== false])));
-    };
-    const schedule = () => { clearTimeout(timer); timer = setTimeout(list, 150); };
-    const onReg = () => { recomputeLoaded(); schedule(); };
-    const reg = client.ctx?.registry;
-    const bridge = client.bridge;
-    reg?.addChangeListener?.(onReg);
-    const offConn = bridge?.onConnectionChange?.((c) => { setConnected(c); schedule(); });
-    recomputeLoaded();
-    list();
-    return () => {
-      cancelled = true; clearTimeout(timer);
-      reg?.removeChangeListener?.(onReg);
-      offConn?.();
-    };
   }, [client]);
 
-  // Source vs scene-only: build the tree from all files, or just the loaded subset.
-  const tree = useMemo(() => {
-    const paths = loadedOnly ? [...loadedVis.keys()] : files;
-    if (!paths || paths.length === 0) return null;
-    const t = buildTree([...paths].sort());
-    t.name = '/';
-    return t;
-  }, [files, loadedOnly, loadedVis]);
+  // Registry → loaded map + pinned roots + the GitHub label. No tree re-walk:
+  // listings are filesystem truth, loading files doesn't change them.
+  useEffect(() => {
+    if (!client) return undefined;
+    const refresh = () => {
+      const r = client.ctx?.registry;
+      if (r) setLoadedVis(new Map(r.findByType('grid').map((e) => [e.id, e.grid?.visible !== false])));
+      const sources = Array.isArray(client.ctx?.fieldSources) ? client.ctx.fieldSources : [];
+      setPinnedRoots(sources.filter((s) => s?.type === 'local' && String(s.dir).startsWith('/')).map((s) => s.dir));
+      const p = client.ctx?.fileProvider;
+      const repo = p?._currentRepo;
+      setRepoLabel(repo ? `${repo.owner}/${repo.repo}` : null);
+      // Track the ACTIVE provider: repo.load swaps in GitHub (no rootInfo →
+      // filesystem anchors drop), a relay connect swaps the local one back in.
+      setRootInfo(p?.rootInfo ? { ...p.rootInfo } : null);
+    };
+    const reg = client.ctx?.registry;
+    reg?.addChangeListener?.(refresh);
+    refresh();
+    const offConn = client.bridge?.onConnectionChange?.((c) => {
+      setConnected(c);
+      if (!c) return;
+      // Roots arrive via the provider's own refresh (idempotent; CommandProvider
+      // already ordered one before session restore) — reflect them when known.
+      const p = client.ctx?.fileProvider;
+      p?.refreshRoots?.().then(() => setRootInfo({ ...p.rootInfo })).catch(() => {});
+    });
+    const p = client.ctx?.fileProvider;
+    if (p?.rootInfo) setRootInfo({ ...p.rootInfo });
+    return () => { reg?.removeChangeListener?.(refresh); offConn?.(); };
+  }, [client]);
+
+  // Top-level anchors: served root (expanded) + opened roots + quiet ~ and /.
+  const rootsList = useMemo(() => {
+    if (rootInfo?.root) {
+      const served = rootInfo.root;
+      const out = [{ path: served, label: baseName(served) || served, kind: 'served' }];
+      for (const p of pinnedRoots) {
+        if (p !== served && !p.startsWith(underOf(served))) out.push({ path: p, label: baseName(p), kind: 'pinned' });
+      }
+      if (rootInfo.home) out.push({ path: rootInfo.home, label: '~', kind: 'anchor' });
+      out.push({ path: '/', label: '/', kind: 'anchor' });
+      return out;
+    }
+    return [{ path: '', label: repoLabel || 'repository', kind: 'served' }];
+  }, [rootInfo, pinnedRoots, repoLabel]);
+
+  // Auto-expand the primary root when it (re)appears.
+  const primaryRoot = rootsList[0]?.path;
+  useEffect(() => {
+    if (primaryRoot == null) return;
+    setExpanded((prev) => (prev.has(primaryRoot) ? prev : new Set(prev).add(primaryRoot)));
+  }, [primaryRoot]);
+
+  // Lazy fetch: one shallow readDir per expanded dir without a listing. The
+  // fetching guard stops double-fires while a request is in flight; a landed
+  // listing re-runs the effect and finds nothing left to fetch.
+  useEffect(() => {
+    const provider = client?.ctx?.fileProvider;
+    if (!provider?.readDir) return;
+    for (const p of expanded) {
+      if (listings.has(p) || fetching.current.has(p)) continue;
+      fetching.current.add(p);
+      provider.readDir(p)
+        .then((res) => setListings((prev) => new Map(prev).set(p, { entries: res.entries, truncated: !!res.truncated })))
+        .catch((err) => setListings((prev) => new Map(prev).set(p, { error: err?.message || String(err) })))
+        .finally(() => fetching.current.delete(p));
+    }
+  }, [client, expanded, listings, rootInfo, repoLabel]);
 
   const toggle = useCallback((path) => {
     setExpanded((prev) => {
       const next = new Set(prev);
-      next.has(path) ? next.delete(path) : next.add(path);
+      if (next.has(path)) {
+        next.delete(path);
+        // Drop the cached listing so re-expanding refetches — fresh by construction.
+        setListings((l) => { const n = new Map(l); n.delete(path); return n; });
+      } else {
+        next.add(path);
+      }
       return next;
     });
   }, []);
+
+  const clearHover = useCallback((path) => setHover((h) => (h === path ? null : h)), []);
 
   const openFile = useCallback(async (path) => {
     if (!client) return;
@@ -214,8 +327,7 @@ export default function FileTree({ client }) {
     await client.router.execute(['file.open', p]);
     // sheet.focus = the single "go look at it" gesture: attention.primary (drives the
     // accent) + frame + mark active. Array form keeps a space/slash path intact; the
-    // sheet id is 'sheet:' + the canonical path stripped of its leading slash
-    // (WorkspaceModel.openSheet's id rule).
+    // sheet id is 'sheet:' + the canonical path stripped of its leading slash.
     client.router.execute(['sheet.focus', `sheet:${p.replace(/^\/+/, '')}`]);
   }, [client]);
 
@@ -223,6 +335,10 @@ export default function FileTree({ client }) {
     if (!client) return;
     await client.router.execute(['file.openDir', canonicalPath(client.ctx, path)]);
     client.router.execute('camera.fitall');
+  }, [client]);
+
+  const closeDir = useCallback((path) => {
+    client?.router.execute(['file.closeDir', canonicalPath(client.ctx, path)]);
   }, [client]);
 
   const closeFile = useCallback((path) => {
@@ -234,28 +350,47 @@ export default function FileTree({ client }) {
     client.router.execute(['grid.visibility', canonicalPath(client.ctx, path), shown ? 'false' : 'true']);
     // grid.visible mutates without a registry event → refresh the loaded map now.
     const r = client.ctx?.registry;
-    if (r) setLoadedVis(new Map(r.findByType('grid').map((e) => [toRowPath(e.id), e.grid?.visible !== false])));
-  }, [client, toRowPath]);
+    if (r) setLoadedVis(new Map(r.findByType('grid').map((e) => [e.id, e.grid?.visible !== false])));
+  }, [client]);
+
+  const hasLoadedUnder = useCallback((path) => {
+    const prefix = underOf(path);
+    for (const id of loadedVis.keys()) {
+      if (id === path || (prefix && String(id).startsWith(prefix))) return true;
+    }
+    return false;
+  }, [loadedVis]);
+
+  const ui = {
+    expanded, listings, hover, setHover, clearHover, toggle, activeId, loadedVis,
+    openFile, openDir, closeDir, closeFile, hideFile, hasLoadedUnder,
+  };
+
+  const loadedTree = useMemo(() => (loadedOnly ? nestIds([...loadedVis.keys()]) : null), [loadedOnly, loadedVis]);
 
   let body;
   if (!client) body = <div style={styles.msg}>starting…</div>;
-  else if (error) body = <div style={styles.err}>tree error:{'\n'}{error}</div>;
-  else if (!tree) body = <div style={styles.msg}>{loadedOnly ? 'nothing loaded yet' : 'listing files…'}</div>;
-  else if (tree.children.length === 0) body = <div style={styles.msg}>no files — load a repo (or connect the relay)</div>;
-  else body = (
-    <div style={styles.list}>
-      <TreeRow node={tree} depth={0}
-        expanded={expanded} toggle={toggle} loadedVis={loadedVis}
-        openFile={openFile} openDir={openDir} closeFile={closeFile} hideFile={hideFile}
-        hover={hover} setHover={setHover} activePath={activePath} />
-    </div>
-  );
+  else if (loadedOnly) {
+    body = loadedTree && loadedTree.children.length
+      ? <div style={styles.list}><LoadedNode node={loadedTree} depth={0} ui={ui} /></div>
+      : <div style={styles.msg}>nothing loaded yet</div>;
+  } else if (!rootInfo && !repoLabel) {
+    body = <div style={styles.msg}>no files — load a repo (or connect the relay)</div>;
+  } else {
+    body = (
+      <div style={styles.list}>
+        {rootsList.map((r) => (
+          <DirNode key={r.path || '(repo)'} path={r.path} label={r.label} depth={0} kind={r.kind} ui={ui} />
+        ))}
+      </div>
+    );
+  }
 
   return (
     <div style={styles.content}>
       <div style={styles.contentHeader}>
-        <span style={{ flex: '1 1 auto', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-          {files ? `${files.length} files` : 'files'}{loadedVis.size ? ` · ${loadedVis.size} loaded` : ''}
+        <span title={rootInfo?.root || ''} style={{ flex: '1 1 auto', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          {rootInfo?.root || repoLabel || 'files'}{loadedVis.size ? ` · ${loadedVis.size} loaded` : ''}
         </span>
         {loadedVis.size > 0 && (
           <span style={styles.clearAll} title="remove all loaded grids — clear the scene"
