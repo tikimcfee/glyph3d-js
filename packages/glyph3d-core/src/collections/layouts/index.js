@@ -11,13 +11,14 @@ import districtLayout, { DISTRICT_DEFAULTS } from './districtLayout.js';
 import packedLayout, { PACKED_DEFAULTS } from './packedLayout.js';
 import jellyfishLayout, { JELLYFISH_DEFAULTS } from './jellyfishLayout.js';
 import treeLayout, { TREE_DEFAULTS } from './treeLayout.js';
+import dagLayout, { DAG_DEFAULTS } from './dagLayout.js';
 
 export { flowBoxes, squareWrap } from './flowBoxes.js';
 export { childSort, leafBox } from './nodeUtils.js';
 export { addPanelSurface, disposePanelSurfaces, PANEL_SURFACE_DEFAULTS } from './panelSurface.js';
 export { default as StackContainer, VStack, HStack, ZStack } from './StackContainer.js';
-export { walkTreeLayout, districtLayout, packedLayout, jellyfishLayout, treeLayout };
-export { WALK_DEFAULTS, DISTRICT_DEFAULTS, PACKED_DEFAULTS, JELLYFISH_DEFAULTS, TREE_DEFAULTS };
+export { walkTreeLayout, districtLayout, packedLayout, jellyfishLayout, treeLayout, dagLayout };
+export { WALK_DEFAULTS, DISTRICT_DEFAULTS, PACKED_DEFAULTS, JELLYFISH_DEFAULTS, TREE_DEFAULTS, DAG_DEFAULTS };
 
 /** name → scheme function. Order here is presentation order (packed = the default). */
 export const LAYOUT_SCHEMES = {
@@ -26,6 +27,7 @@ export const LAYOUT_SCHEMES = {
     district: districtLayout,
     jellyfish: jellyfishLayout,
     tree: treeLayout,
+    dag: dagLayout,
 };
 
 /** Reverse lookup for reporting: the registry name of a scheme fn, or null if custom. */

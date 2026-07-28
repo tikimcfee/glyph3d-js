@@ -58,6 +58,7 @@
     "three": ">=0.150.0"
   },
   "dependencies": {
+    "@dagrejs/dagre": "^1.1.4",
     "@xterm/headless": "^6.0.0",
     "web-tree-sitter": "^0.26.9"
   },

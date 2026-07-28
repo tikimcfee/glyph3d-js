@@ -92,7 +92,7 @@ export default function registerLayoutCommands(router) {
         };
     }, {
         description: "Report or set the content tree's packing scheme (+ knob overrides) and re-lay the field",
-        usage: `[${Object.keys(LAYOUT_SCHEMES).join('|')}] [--depth-z N --rake-z N --dir-gap N --margin N --aspect N | jellyfish: --target-radius N --panel-w N --panel-h N --panel-gap N --face-gap N --drop N --child-gap N --col-gap N --row-gap N --hub-radius N --min-radius N --warp-panels true|false …]   (flags alone re-dial the active scheme)`,
+        usage: `[${Object.keys(LAYOUT_SCHEMES).join('|')}] [--depth-z N --rake-z N --dir-gap N --margin N --aspect N | jellyfish: --target-radius N --panel-w N --panel-h N --panel-gap N --face-gap N --drop N --child-gap N --col-gap N --row-gap N --hub-radius N --min-radius N --warp-panels true|false | dag: --rank-axis y|z --rankdir TB|LR --node-sep N --rank-sep N …]   (flags alone re-dial the active scheme)`,
         returns: '{ scheme, opts, files, dirs } or { scheme, opts, available }',
     });
 
