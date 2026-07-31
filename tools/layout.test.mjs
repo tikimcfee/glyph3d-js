@@ -11,14 +11,14 @@ const eq = (a, b, m) => ok(JSON.stringify(a) === JSON.stringify(b), `${m} (got $
 // single box: one slot at origin, extent = the box, one row
 {
   const f = flowBoxes([{ w: 10, h: 4 }], { margin: 5 });
-  eq(f.slots, [{ x: 0, y: 0 }], 'single: slot at origin');
+  eq(f.slots, [{ x: 0, y: 0, row: 0 }], 'single: slot at origin');
   eq([f.width, f.height, f.rows], [10, 4, 1], 'single: extent = box, 1 row');
 }
 
 // no wrap: boxes march right; width = sum + margins between, height = tallest
 {
   const f = flowBoxes([{ w: 10, h: 4 }, { w: 10, h: 6 }], { margin: 5 });
-  eq(f.slots, [{ x: 0, y: 0 }, { x: 15, y: 0 }], 'no-wrap: second box at x = w+margin');
+  eq(f.slots, [{ x: 0, y: 0, row: 0 }, { x: 15, y: 0, row: 0 }], 'no-wrap: second box at x = w+margin');
   eq([f.width, f.height, f.rows], [25, 6, 1], 'no-wrap: width=sum+margin, height=tallest');
 }
 
