@@ -181,7 +181,7 @@ export default function registerLayoutCommands(router) {
     });
 
     // Container labels: every visible directory named in space — the chain-compressed
-    // joined name, depth-scaled (physical LOD), easing to regular text size as you arrive.
+    // joined name, depth-scaled (physical LOD), easing to a readable name tag as you arrive.
     registerOverlay({
         verb: 'layout.labels', noun: 'labels', ctxKey: 'contentTreeLabels', title: 'LAYOUT LABELS',
         colorKeys: new Set(['colorA', 'colorB']),

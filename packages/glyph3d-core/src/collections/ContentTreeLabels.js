@@ -19,8 +19,8 @@
  * construction (a parent is always wider than its children). The only per-frame work
  * is the approach SPECTRUM: across fadeStart→fadeEnd of camera distance, alpha and
  * glyph scale both ease (smoothstepped) from the resting presentation — container-fit
- * size at `opacity` — to the arrived one: the name at `nearScale` ("regular text
- * size") and `minAlpha`. Arrived, a directory keeps a readable name tag instead of
+ * size at `opacity` — to the arrived one: the name at `nearScale` (the name-tag
+ * size) and `minAlpha`. Arrived, a directory keeps a readable name tag instead of
  * vanishing; dial minAlpha or nearScale to 0 for the old yield-to-content. Every
  * write is O(1) per label and made only when its quantized value changes.
  *
@@ -41,21 +41,21 @@ import { computeCellMetrics } from '../core/cellMetrics.js';
 import { subtreeContentBounds } from './layouts/nodeUtils.js';
 
 export const LABEL_DEFAULTS = {
-    fit: 0.85,         // the fraction of its container's width a label's name spans
+    fit: 0.65,         // the fraction of its container's width a label's name spans
     scaleMin: 0.6,     // glyph-scale floor — a long name on a narrow container stays visible
-    scaleMax: 48,      // glyph-scale cap — a short name on a vast container stays a label
-    countScale: 0.55,  // the stat line's glyph scale, as a fraction of the name's
-    hoverBoost: 1.8,   // how much a label grows while its container holds the hover
-    hoverEase: 10,     // the grow/shrink rate (1/s) — higher snaps, lower breathes
+    scaleMax: 44,      // glyph-scale cap — a short name on a vast container stays a label
+    countScale: 0.6,   // the stat line's glyph scale, as a fraction of the name's
+    hoverBoost: 1.4,   // how much a label grows while its container holds the hover
+    hoverEase: 13,     // the grow/shrink rate (1/s) — higher snaps, lower breathes
     colorA: 0x9fc2e8,  // gradient start — the shallowest containers (kin to the prism ramp)
     colorB: 0xd0a6e0,  // gradient end — the deepest
-    opacity: 0.9,      // resting label alpha (the far side of the approach band)
-    minAlpha: 0.35,    // alpha once fully approached — 0 restores the full vanish
-    nearScale: 1,      // glyph scale once fully approached ("regular text size") — 0 shrinks away
+    opacity: 0.86,     // resting label alpha (the far side of the approach band)
+    minAlpha: 0.54,    // alpha once fully approached — 0 restores the full vanish
+    nearScale: 7.3,    // glyph scale once fully approached (the arrived name-tag size) — 0 shrinks away
     fadeStart: 320,    // world distance where the approach band begins
     fadeEnd: 110,      // world distance where it completes — you've arrived at the container
-    gapY: 0.35,        // lift above the container's top edge, in label row heights
-    zLift: 6,          // world units in front of the subtree's front plane
+    gapY: 1.2,         // lift above the container's top edge, in label row heights
+    zLift: 44,         // world units in front of the subtree's front plane
     showCount: 1,      // 1 → a stat line under the name: "N files"
     worldScale: 0.025, // the field's glyph world scale (the canonical default)
 };
@@ -232,7 +232,7 @@ export default class ContentTreeLabels {
      * grow. Camera distance runs the spectrum — outside fadeStart a label rests at
      * container-fit scale and `opacity`; across fadeStart→fadeEnd both alpha and scale
      * ease (smoothstepped, so the band has no corners) toward `minAlpha` and `nearScale`.
-     * Arrived, the name holds as a regular-text tag rather than vanishing — unless
+     * Arrived, the name holds as a readable name tag rather than vanishing — unless
      * dialed to 0. The hover grow — the label whose container holds the hovered entity
      * (any descendant path) easing toward hoverBoost — multiplies on top. All writes
      * are O(1) group writes, made only on actual quantized change: a still camera with

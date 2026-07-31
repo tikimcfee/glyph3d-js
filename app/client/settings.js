@@ -268,8 +268,8 @@ export const SETTINGS = [
   // The same dials as the layout.labels verb; every change lands live and persists. Sizing is
   // the container FIT (the name spans `fit` of its container's width, clamped by the scale
   // floor/cap); the approach SPECTRUM eases opacity AND text size from the resting values to
-  // the arrived ones across the fade band, so a name melts to regular text as you fly in
-  // instead of popping out — arrived values of 0 restore the vanish. The hover pair drives
+  // the arrived ones across the fade band, so a name melts to a readable name tag as you fly
+  // in instead of popping out — arrived values of 0 restore the vanish. The hover pair drives
   // the ancestor-chain grow. Ranges are deliberately wide — the operator decides what's
   // "too big". Defaults mirror LABEL_DEFAULTS.
   {
