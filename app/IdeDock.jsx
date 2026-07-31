@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef } from 'react';
 import { DockviewReact } from 'dockview';
 import 'dockview/dist/styles/dockview.css';
 import './ide-dock.css';
@@ -21,11 +21,17 @@ import LspResultsPanel from './LspResultsPanel.jsx';
 // (see main.jsx) — NOT an overlay, NOT hosting the canvas as a panel — so the
 // GPU context is never unmounted by a docking op and no canvas clicks are stolen.
 //
-// Layout persistence: the dockview layout is part of the saved session. We hand
-// SessionStore a thin bridge (toJSON/fromJSON + the known component names) and
-// save on every layout change. Panels read the command `client` from a REF — not
-// from serialized panel params — because dockview's toJSON turns a live object
-// into `undefined`; the ref keeps both default and restored panels wired.
+// Layout persistence: the dockview layout is part of the saved session. onReady
+// builds the default catalog layout immediately (instant panels — and the only
+// layout in client-only mode, where no restore runs), then registers the
+// serialization bridge on ctx.dockLayout for the session loader's `panels` phase
+// to PULL (toJSON/fromJSON/buildDefaults + the known component names). A saved
+// layout is authoritative: the phase replaces the defaults wholesale via
+// fromJSON, so a deliberately-closed tab stays closed; a newly-introduced
+// catalog panel reaches an existing session via the panels menu, not
+// force-injection. Panels read the command `client` from a REF — not from
+// serialized panel params — because dockview's toJSON turns a live object into
+// `undefined`; the ref keeps both default and restored panels wired.
 
 // The panel catalog — the SINGLE source for both the default layout and the
 // reopen path (the ButtonBar's panels menu / panel.* verbs). component === id.
@@ -85,15 +91,7 @@ export default function IdeDock({ client }) {
     const api = event.api;
     apiRef.current = api;
 
-    // Give SessionStore a handle to serialize/restore this layout. A saved layout
-    // is AUTHORITATIVE. setDockBridge synchronously triggers fromJSON when a snapshot
-    // already loaded (restore-first ordering); a later restore() calls it too
-    // (bridge-first ordering). We flag a successful restore so the default-build
-    // below runs ONLY when nothing was restored — it must never top up over a
-    // restored layout, which is what used to re-open tabs you'd deliberately closed,
-    // nondeterministically, depending on which clock (bridge vs restore) won.
-    // Build the default catalog layout. Factored out so it serves both the
-    // no-restore path (below) and the empty-restore fallback (in fromJSON).
+    // Build the default catalog layout — every panel at its catalog position.
     const buildDefaults = () => {
       for (const def of PANELS) {
         if (api.getPanel(def.id)) continue;
@@ -102,29 +100,22 @@ export default function IdeDock({ client }) {
         api.addPanel(opts);
       }
     };
+    buildDefaults();
 
-    let restoredFromSave = false;
-    client?.session?.setDockBridge({
-      toJSON: () => api.toJSON(),
-      fromJSON: (layout) => {
-        api.fromJSON(layout);
-        // A blank/degenerate saved layout (zero panels — e.g. left over from an
-        // earlier experiment) must NOT strand the user with no dock: fall back to
-        // defaults. A normal layout with some tabs closed still wins (it has
-        // panels), so this never re-opens a deliberately-closed tab. Self-heals:
-        // the next autosave overwrites the blank layout with the rebuilt one.
-        if (api.panels.length === 0) buildDefaults();
-        restoredFromSave = true;
-      },
-      components: Object.keys(components),
-    });
-
-    // Default panels — built when no saved layout was (or will be) applied: a fresh
-    // session, or client-only/no-relay mode where no restore ever runs. In
-    // bridge-first ordering a later restore REPLACES these wholesale via fromJSON
-    // (so closed tabs stay closed); a newly-introduced catalog panel reaches an
-    // existing session via the panels menu, not by force-injection here.
-    if (!restoredFromSave) buildDefaults();
+    // The dock's session seam, PULLED by the session loader (its `panels` phase
+    // awaits ctx.dockLayout, prunes orphans against `components`, and applies the
+    // saved layout — or rebuilds defaults when the apply fails). Pull-based
+    // rendezvous by design: a store rebuilt by a vite hot swap finds the live dock
+    // here, where a push-once handshake at construction would pair a live object
+    // with a dead partner.
+    if (client?.ctx) {
+      client.ctx.dockLayout = {
+        components: Object.keys(components),
+        toJSON: () => api.toJSON(),
+        fromJSON: (layout) => api.fromJSON(layout),
+        buildDefaults,
+      };
+    }
 
     // Expose a dock controller on the command ctx so panel.* verbs (and the
     // ButtonBar's panels menu) can reopen a closed tab. The DOM layer owns the
@@ -170,6 +161,9 @@ export default function IdeDock({ client }) {
     // and no-ops until restore has finished, so this never clobbers saved state.
     api.onDidLayoutChange(() => clientRef.current?.session?.scheduleSave());
   }, [client, components]);
+
+  // A dead dock must never satisfy the loader's pull — clear the seam on unmount.
+  useEffect(() => () => { if (client?.ctx?.dockLayout) client.ctx.dockLayout = null; }, [client]);
 
   return (
     <div style={{ width: '100%', height: '100%' }}>

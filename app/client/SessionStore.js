@@ -3,10 +3,31 @@
  *
  * Persists "what's loaded" to a SERVER-SIDE file (`.glyph3d-session.json` in the
  * project root, written via the relay's fs/writeFile RPC) so a reload — or a
- * different browser/device — comes back to the same workspace. It is the spiritual
- * successor to the vanilla IDE's StatePersistence, rebuilt for the r3f client:
- * one versioned snapshot blob (not field-by-field), restored by replaying bus
- * commands, with self-heal on every step.
+ * different browser/device — comes back to the same workspace: one versioned
+ * snapshot blob, restored by a SEQUENTIAL PHASED LOADER, autosaved on change after.
+ *
+ * RESTORE = named phases, run in order, each awaited + guarded + timed:
+ *   substrate  layout scheme + world-grouping order (direct state, empty scene)
+ *   field      replay fieldSources — bulk content fetch (data acquisition, not gesture replay)
+ *   tabs       file.open each saved sheet + its viewport (grid.applyView)
+ *   surfaces   publish terminal geometry + 3D-dock membership into the WorkspaceModel
+ *   panels     2D dockview layout — awaits ctx.dockLayout, prunes orphans, fromJSON
+ *   camera     pose, set directly on the controller
+ *   settle     one projection pass over surfaces that re-adopted mid-restore
+ *   focus      attention primary/key slots, last — the scene is as live as it gets
+ *
+ * A failed phase is REPORTED (console + ctx.status + this.lastRestore; the
+ * `session.status` verb reads it) and QUARANTINED, not swallowed: later phases
+ * still run, and capture() keeps a failed section's LOADED blob verbatim — you
+ * may only re-capture a section you successfully projected, so a degraded
+ * restore can never overwrite the parts of the saved session it failed to
+ * reproduce. (The old shape armed autosave over whatever a half-restore left,
+ * which erased good layouts from the file — the self-perpetuating default-dock bug.)
+ *
+ * Restore runs once per SCENE GENERATION (ctx._sessionRestored), not per store
+ * instance, and every rendezvous is PULL-based (the dock registers ctx.dockLayout;
+ * the panels phase awaits it) — so a vite hot swap that rebuilds one participant
+ * mid-life never pairs a live object with a dead partner via a push-once handshake.
  *
  * Two cooperating stores, by design:
  *   - THIS file persists what you RECONSTRUCT: open files (path + position),
@@ -15,13 +36,14 @@
  *     reconnect (you reattach to a living shell, never resurrect a dead one);
  *     this file only carries their last positions as a placement hint.
  *
- * Self-heal policy: when saved state doesn't match reality, CLEAR
- * IT WITH A LOG — never fight to resurrect. A missing file is dropped, a
- * non-finite camera is ignored, an orphaned dock panel is filtered, and a whole
- * snapshot whose schema version differs is wiped rather than migrated.
+ * Self-heal policy: when saved DATA doesn't match reality, CLEAR IT WITH A LOG —
+ * a missing file is dropped, a non-finite camera ignored, an orphaned dock panel
+ * pruned from the layout's panel map AND grid tree (dockLayoutPrune.js). Data
+ * mismatches self-heal inside their phase; only a structural throw fails a phase.
  */
 
 import { canonicalPath } from '../commands/handlers/pathResolve.js';
+import { pruneDockLayout } from './dockLayoutPrune.js';
 
 const SESSION_URI = 'file:///.glyph3d-session.json';
 // Schema policy: restore is FORWARD-ADDITIVE. Every restored field is guarded/optional, so a
@@ -34,6 +56,9 @@ const SESSION_URI = 'file:///.glyph3d-session.json';
 const SCHEMA_VERSION = 2;
 const SAVE_DEBOUNCE_MS = 600;
 const PERIODIC_SAVE_MS = 5000;
+// How long the panels phase waits for the dock to register ctx.dockLayout before declaring
+// the section failed (headless clients have no dock; a live IDE registers it near-instantly).
+const DOCK_BRIDGE_TIMEOUT_MS = 10000;
 
 const round = (n) => Math.round(n * 100) / 100;
 const isFinitePos = (p) => p && Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z);
@@ -86,17 +111,16 @@ export default class SessionStore {
     this.router = router;
     this.bridge = bridge;
 
-    /** @type {{toJSON:Function, fromJSON:Function, components:string[]}|null} */
-    this._dock = null;
-    this._pendingDock = null;       // 2D dockview layout from a loaded snapshot, awaiting the dock bridge
-    this._lastGoodDock = null;      // last live dock layout that actually had panels — anti-clobber (never persist an empty dock over a good one)
-    // Surface intent (terminal geometry AND dock membership/order/zoom) lives in the WorkspaceModel
-    // surface table (ctx.workspace) — the durable buffer. _projectSurfaces pushes it onto each live
-    // object as it re-adopts (terminal applyView + dock reconcile). No pending queue, no scrape.
-    this._offSurfaces = null;       // unsubscribe from the model's change:surfaces (autosave trigger)
+    this._loadedSnap = null;        // the snapshot restore() ran from — quarantine + no-dock capture source
+    this._failedSections = new Set(); // snapshot keys whose phase failed → capture keeps the loaded blob
+    this._lastGoodDock = null;      // anti-clobber: last dock layout (loaded OR live) that had panels
+    this._pendingFrameOccupant = null; // saved frame pane (pinned window), re-raised by the dock reconcile
+    /** @type {{at:number, ok:boolean, phases:Array<{name:string,ok:boolean,ms:number,error?:string}>}|null} */
+    this.lastRestore = null;        // the phase report — session.status reads it
+    this.dockBridgeTimeoutMs = DOCK_BRIDGE_TIMEOUT_MS;
 
-    this._restored = false;         // load+restore runs ONCE per page load (not per reconnect)
     this._autosaveOn = false;       // gate: no save may clobber the file until restore finishes
+    this._offSurfaces = null;       // unsubscribe from the model's change:surfaces (autosave trigger)
     this._lastSavedCmp = null;      // dedup: skip writes when nothing changed
     this._saveTimer = null;
     this._periodic = null;
@@ -106,21 +130,13 @@ export default class SessionStore {
     this._onVisibility = () => { if (typeof document !== 'undefined' && document.visibilityState === 'hidden') this.saveNow(); };
   }
 
-  // -- Dock bridge ----------------------------------------------------------
-  // IdeDock registers its dockview api here (it lives outside the Canvas/ctx).
-  // Registering may complete the restore if a snapshot already loaded first.
-  setDockBridge(dock) {
-    this._dock = dock;
-    this._maybeApplyDock();
-  }
-
   // -- Capture --------------------------------------------------------------
   capture() {
     const ctx = this.ctx;
     // Persist the TABS (sheet-backed grids), NOT the whole field. A bulk repo/local
     // load drops hundreds of grids into the registry; those are the field, not tabs —
     // restoring them as individual file.opens floods the tab bar. The field is
-    // persisted as one `field` source (below) and replayed in bulk on restore; only
+    // persisted as `fieldSources` (below) and replayed in bulk on restore; only
     // sheets the user actually opened come back as tabs.
     const files = [];
     const ws = ctx.workspace;
@@ -173,7 +189,6 @@ export default class SessionStore {
     // the live grids. The model is the durable buffer — it holds a terminal's geometry whether or
     // not its grid is currently in the scene (the PTY re-adopts async on the relay's clock), so a
     // save landing mid-re-adopt reads a consistent intent snapshot instead of a half-built scene.
-    // This retired pendingTerminals + the carry-forward + the docked-vs-loose position scrape.
     const terminals = [];
     if (ws?.listSurfaces) {
       for (const s of ws.listSurfaces()) {
@@ -186,17 +201,19 @@ export default class SessionStore {
       }
     }
 
-    let dock = this._pendingDock; // if we never got a live dock bridge, preserve what we loaded
-    if (this._dock?.toJSON) {
+    // 2D dock layout: the live dock when one has registered (ctx.dockLayout, pull-based) and it
+    // actually has panels; else the last layout that did — seeded from the LOADED snapshot, so a
+    // session captured before any dock registers (or after a failed dock restore) preserves the
+    // saved layout instead of nulling it out of the file.
+    let dock = this._lastGoodDock ?? this._loadedSnap?.dock ?? null;
+    const dockBridge = ctx.dockLayout;
+    if (dockBridge?.toJSON) {
       try {
-        const live = this._dock.toJSON();
-        // Never persist a degenerate EMPTY dock (panels:{}) over a good layout — a
-        // reload caught mid-rebuild, an all-closed dock, or (historically) experiment
-        // churn would otherwise clobber the saved layout with an empty grid and strand
-        // the next restore. Persist the live layout only when it actually has panels;
-        // otherwise keep the last one that did.
+        const live = dockBridge.toJSON();
+        // Never persist a degenerate EMPTY dock (panels:{}) over a good layout — a reload caught
+        // mid-rebuild or an all-closed dock would clobber the saved layout and strand the next
+        // restore. A normal layout with some tabs closed still wins (it has panels).
         if (live?.panels && Object.keys(live.panels).length > 0) { dock = live; this._lastGoodDock = live; }
-        else dock = this._lastGoodDock ?? dock;
       } catch (e) { console.warn('[session] dock toJSON failed:', e?.message || e); }
     }
 
@@ -214,7 +231,7 @@ export default class SessionStore {
       dock3d = { layout: ctx.cameraDock?.layoutMode || 'linear', tiles, focused: ctx.cameraDock?.focusedPane || null };
     }
 
-    return {
+    const snap = {
       version: SCHEMA_VERSION,
       savedAt: Date.now(),
       files,
@@ -227,6 +244,15 @@ export default class SessionStore {
       dock3d: dock3d || null,
       terminals,
     };
+
+    // Quarantine: a section whose restore phase FAILED keeps its loaded blob verbatim — never
+    // re-capture (and thus overwrite) state you failed to project into the scene.
+    if (this._failedSections.size && this._loadedSnap) {
+      for (const key of this._failedSections) {
+        if (key in this._loadedSnap) snap[key] = this._loadedSnap[key];
+      }
+    }
+    return snap;
   }
 
   // Focus = the sticky `primary` (what you're looking at) + `key` (keystroke target) attention slots,
@@ -295,7 +321,7 @@ export default class SessionStore {
     }
   }
 
-  // -- Restore (self-heal: clear-with-log on mismatch) ----------------------
+  // -- Restore: the sequential phased loader --------------------------------
   async restore(snap) {
     if (!snap || typeof snap !== 'object') return;
     // Forward-additive: a snapshot at this major (v2) or a FUTURE one (after a code rollback over
@@ -308,24 +334,62 @@ export default class SessionStore {
       return;
     }
 
-    // Live status for the reload story — the field/tab ops below override it with
-    // their own, then clear; this finally tidies up the slot at the end.
-    this.ctx.status?.set('Restoring session…');
-    try {
-    // Field layout scheme FIRST — SET it directly on the (still-empty) tree (no verb replay) so the
-    // bulk field-load below and every grid land in the saved scheme instead of the packed default.
-    if (snap.layout?.scheme) this.ctx.contentTree?.applyLayoutState?.(snap.layout);
-    if (snap.world) this.ctx.world?.applyState?.(snap.world);   // world-grouping order
+    this._loadedSnap = snap;
+    this._failedSections = new Set();
+    // The loaded layout IS the last-good dock until a live one with panels exists — so a failed
+    // dock restore can never null the layout out of the file. (The old anti-clobber's blind spot:
+    // both of its sources were empty exactly when the dock restore had failed.)
+    this._lastGoodDock = snap.dock || null;
 
-    // The bulk field fills the scene first (no tabs), so tabs layer on top and the
-    // camera (restored last) wins. `fieldSources` is a LIST — every opened root
-    // replays (additive multi-root world) — with a legacy single-`field` read for
-    // older snapshots (data tolerance per the forward-additive policy, not a code
-    // path fork). Each entry is guarded independently, so one vanished root (or a
-    // network/offline repo) logs + skips and the rest — and the tabs — still land.
-    const sources = Array.isArray(snap.fieldSources)
-      ? snap.fieldSources
-      : (snap.field ? [snap.field] : []);
+    /** @type {Array<[string, () => any, string[]]>} name, runner, snapshot keys it projects */
+    const phases = [
+      ['substrate', () => this._restoreSubstrate(snap),     ['layout', 'world']],
+      ['field',     () => this._restoreField(snap),         ['fieldSources']],
+      ['tabs',      () => this._restoreTabs(snap),          ['files']],
+      ['surfaces',  () => this._restoreSurfaces(snap),      ['terminals', 'dock3d']],
+      ['panels',    () => this._restorePanels(snap),        ['dock']],
+      ['camera',    () => this._restoreCamera(snap.camera), ['camera']],
+      ['settle',    () => this._projectSurfaces(),          []],
+      ['focus',     () => this._restoreFocus(snap.focus),   ['focus']],
+    ];
+
+    const report = [];
+    for (const [name, run, keys] of phases) {
+      this.ctx.status?.set(`Restoring: ${name}…`);
+      const t0 = performance.now();
+      try {
+        await run();
+        report.push({ name, ok: true, ms: Math.round(performance.now() - t0) });
+      } catch (e) {
+        for (const k of keys) this._failedSections.add(k);
+        report.push({ name, ok: false, ms: Math.round(performance.now() - t0), error: e?.message || String(e) });
+        console.warn(`[session] restore: phase '${name}' failed —`, e?.message || e);
+      }
+    }
+    this.ctx.status?.clear();
+
+    const failed = report.filter((p) => !p.ok);
+    this.lastRestore = { at: Date.now(), ok: failed.length === 0, phases: report };
+    console.info(
+      `[session] restore ${failed.length ? `DEGRADED — failed: ${failed.map((p) => p.name).join(', ')}` : 'complete'} `
+      + `(${report.map((p) => `${p.name} ${p.ms}ms`).join(' · ')})`
+    );
+  }
+
+  // substrate — the field layout scheme, SET directly on the (still-empty) tree so the bulk load
+  // below and every grid land in the saved scheme instead of the packed default; plus the
+  // world-grouping order. Direct state, no verbs.
+  _restoreSubstrate(snap) {
+    if (snap.layout?.scheme) this.ctx.contentTree?.applyLayoutState?.(snap.layout);
+    if (snap.world) this.ctx.world?.applyState?.(snap.world);
+  }
+
+  // field — replay the recorded field sources: the bulk content fetch that fills the scene before
+  // tabs layer on top. `fieldSources` is a LIST — every opened root replays (additive multi-root
+  // world). Each entry is guarded independently (one vanished root, or a network/offline repo,
+  // logs + skips and the rest still land — data self-heal); only a structural throw fails the phase.
+  async _restoreField(snap) {
+    const sources = Array.isArray(snap.fieldSources) ? snap.fieldSources : [];
     let anyLocal = false;
     for (const src of sources) {
       if (src?.type === 'repo' && src.ref) {
@@ -344,56 +408,55 @@ export default class SessionStore {
       try { await this.router.execute('camera.fitall'); }
       catch (e) { console.warn('[session] fitall after field restore failed:', e?.message || e); }
     }
+  }
 
-    // Tabs next — so the camera (restored next) isn't fought by file.open's framing,
-    // and so the dock/registry are populated.
-    if (Array.isArray(snap.files)) {
-      let anyWindowed = false;
-      for (const f of snap.files) {
-        if (!f?.path) continue;
+  // tabs — reopen each saved sheet so the dock/registry are populated before the camera phase
+  // (file.open's framing must not fight the restored pose).
+  async _restoreTabs(snap) {
+    if (!Array.isArray(snap.files)) return;
+    let anyWindowed = false;
+    for (const f of snap.files) {
+      if (!f?.path) continue;
+      try {
         // Canonicalize FIRST (an old snapshot carries root-relative paths; the
         // registry keys on canonical ids) so the exists-probe, the dedupe inside
         // file.open, and the applyView lookup below all address the same entity.
         const path = canonicalPath(this.ctx, f.path);
-        // The grid may already exist (the field-restore above bulk-loaded it). Still
-        // run file.open — it dedups the grid and creates the SHEET, so the file comes
+        // The grid may already exist (the field phase bulk-loaded it). Still run
+        // file.open — it dedups the grid and creates the SHEET, so the file comes
         // back as a tab. Only probe existence for files not already loaded.
         const already = this.ctx.registry.has(path);
         if (!already && !(await this._fileExists(path))) {
           console.warn(`[session] dropped missing file: ${path}`);
           continue;
         }
-        try {
-          // Array form: a path with spaces survives, and coordinates stay their own args.
-          await this.router.execute(['file.open', path, String(f.x ?? 0), String(f.y ?? 0), String(f.z ?? 0)]);
-          // Viewport (window / frame / scroll) loads as DIRECT state — the grid's own applyView,
-          // NOT a replay of grid.window/grid.frame/grid.scroll. file.open created/deduped the grid +
-          // sheet; the viewport rides on top. applyView orders window→frame→scroll itself and is
-          // absolute (no "scroll-from-0" assumption).
-          if (f.window || f.frameRows || f.scrollOffset) {
-            const grid = this.ctx.registry.get(path)?.grid;
-            if (grid?.applyView) {
-              const { windowed } = await grid.applyView({ window: f.window, frameRows: f.frameRows, scrollOffset: f.scrollOffset });
-              if (windowed) anyWindowed = true;
-            }
+        // Array form: a path with spaces survives, and coordinates stay their own args.
+        await this.router.execute(['file.open', path, String(f.x ?? 0), String(f.y ?? 0), String(f.z ?? 0)]);
+        // Viewport (window / frame / scroll) loads as DIRECT state — the grid's own applyView,
+        // NOT a replay of grid.window/grid.frame/grid.scroll. file.open created/deduped the grid +
+        // sheet; the viewport rides on top. applyView orders window→frame→scroll itself and is
+        // absolute (no "scroll-from-0" assumption).
+        if (f.window || f.frameRows || f.scrollOffset) {
+          const grid = this.ctx.registry.get(path)?.grid;
+          if (grid?.applyView) {
+            const { windowed } = await grid.applyView({ window: f.window, frameRows: f.frameRows, scrollOffset: f.scrollOffset });
+            if (windowed) anyWindowed = true;
           }
-        } catch (e) {
-          console.warn(`[session] failed to reopen ${path}:`, e?.message || e);
         }
+      } catch (e) {
+        console.warn(`[session] failed to reopen ${f.path}:`, e?.message || e);
       }
-      // Windowing changes a grid's footprint → relayout the tree ONCE after all tabs land (the
-      // grid.window verb did this per-call; batching is the same end-state, less churn).
-      if (anyWindowed) this.ctx.contentTree?.relayoutAndRest?.();
     }
+    // Windowing changes a grid's footprint → relayout the tree ONCE after all tabs land (the
+    // grid.window verb did this per-call; batching is the same end-state, less churn).
+    if (anyWindowed) this.ctx.contentTree?.relayoutAndRest?.();
+  }
 
-    this._restoreCamera(snap.camera);
-
-    // Publish the loaded INTENT — terminal size/placement, dockview layout, and 3D
-    // dock membership/zoom — then reconcile it into whatever has re-adopted so far.
-    // Normalize dock3d tiles to { id, zoom } (tolerant of the legacy string-id form).
-    this._pendingDock = snap.dock || null;
-    // Load terminal geometry intent into the model (the durable buffer). apply() pushes it onto
-    // each terminal grid as it re-adopts — at end-of-restore (below) and via the registry listener.
+  // surfaces — publish the loaded INTENT (terminal size/placement, 3D dock membership/order/zoom)
+  // into the WorkspaceModel, the durable buffer. Nothing is pushed onto live objects here; the
+  // settle phase and the registry-change listener project it as each surface (re-)adopts, in any
+  // order. No verb replay, no pending queues.
+  _restoreSurfaces(snap) {
     if (Array.isArray(snap.terminals)) {
       for (const t of snap.terminals) {
         if (!t?.id) continue;
@@ -403,47 +466,68 @@ export default class SessionStore {
         this.ctx.workspace?.setSurfaceView?.(t.id, 'terminal', view);
       }
     }
-    // Dock membership/order/zoom/pin → the MODEL (the durable buffer the reconcile reads), and the
-    // bar LAYOUT straight onto the live CameraDock. `dockOrder` = the tile's index in the saved
-    // slot-ordered array, so a terminal re-adopting out of arrival order still lands in its saved
-    // bar slot. No verb replay, no _pendingDock3d: _projectSurfaces → _reconcileDock locks each tile
-    // as its grid goes live, in any order. Tolerant of the legacy string-tile form.
+    // `dockOrder` = the tile's index in the saved slot-ordered array, so a terminal re-adopting
+    // out of arrival order still lands in its saved bar slot.
     if (snap.dock3d?.tiles?.length) {
       this.ctx.cameraDock?.setLayout?.(snap.dock3d.layout || 'linear');
       // The window that holds the root view-frame (pinned) — a dock-level fact, not a per-surface
       // flag. _reconcileDock re-raises it once it's a live tile (spotlight → frame-fit + Pin light).
       this._pendingFrameOccupant = snap.dock3d.focused || null;
       snap.dock3d.tiles.forEach((t, i) => {
-        const id = typeof t === 'string' ? t : t?.id;
-        if (!id) return;
-        const patch = { docked: true, dockOrder: i, zoom: (typeof t === 'object' ? t.zoom : 1) ?? 1 };
+        if (!t?.id) return;
         // kind undefined: don't clobber a terminal's 'terminal' kind (set by the loop above); a docked
         // code grid with no prior record becomes a generic 'surface' (the reconcile ignores kind).
-        this.ctx.workspace?.setSurfaceView?.(id, undefined, patch);
+        this.ctx.workspace?.setSurfaceView?.(t.id, undefined, { docked: true, dockOrder: i, zoom: t.zoom ?? 1 });
       });
-    }
-    this._maybeApplyDock();
-
-    // One reconcile pass at the end of restore. Re-adoption is driven by an independent
-    // adapter ping loop that races this whole method, and the registry-change listener
-    // isn't armed until _armAutosave (below) — so a terminal that re-created DURING the
-    // awaits above is already in the registry but was never sized/placed. This nets it
-    // (and any docked surface whose home only now exists); later stragglers re-adopt
-    // into the live listener, which runs the SAME _projectSurfaces.
-    this._projectSurfaces();
-
-    // Focus LAST — after surfaces re-adopt, so a focused grid/terminal is live when we set it.
-    this._restoreFocus(snap.focus);
-    } finally {
-      this.ctx.status?.clear();
     }
   }
 
-  // Restore the sticky focus by SETTING the attention slots directly (the AttentionManager IS the
-  // owner — set() is its writer, not a verb replay). Self-healing by design: an id whose entity
-  // isn't live sets with entity null and is pruned on the next registry change (pruneGone) — exactly
-  // the mirror-of-reality policy. Setting primary/key emits change:<slot>; no listener flies the
-  // camera (that lives in the click path), so this can't clobber the just-restored pose.
+  // panels — the 2D dockview layout. Awaits the dock's pull-based bridge (ctx.dockLayout,
+  // registered by IdeDock at dock-ready), prunes panels the current catalog no longer knows —
+  // from the panel map AND the grid tree, so dockview's fromJSON can't throw on a dangling view
+  // id — and applies the saved layout wholesale (closed tabs stay closed). The defaults IdeDock
+  // built at dock-ready stand when there's nothing (usable) to apply; a failed apply rebuilds
+  // them (dockview reverts to EMPTY on a fromJSON error) and reports, which also quarantines the
+  // saved blob from capture.
+  async _restorePanels(snap) {
+    if (!snap.dock) return;   // nothing saved — the defaults stand
+    const bridge = await this._awaitDockBridge();
+    if (!bridge) throw new Error('dock bridge never registered');
+    const { layout, dropped } = pruneDockLayout(snap.dock, bridge.components);
+    for (const d of dropped) console.warn(`[session] pruned dock panel '${d.id}' — unknown component '${d.component}'`);
+    if (!layout) { console.warn('[session] saved dock layout had no live panels — keeping defaults'); return; }
+    try {
+      bridge.fromJSON(layout);
+    } catch (e) {
+      bridge.buildDefaults();
+      throw e;
+    }
+  }
+
+  async _awaitDockBridge() {
+    const t0 = performance.now();
+    while (!this.ctx.dockLayout) {
+      if (this._disposed || performance.now() - t0 > this.dockBridgeTimeoutMs) return null;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    return this.ctx.dockLayout;
+  }
+
+  // camera — SET directly on the controller: no camera.move/aim verb replay (which fired async and
+  // fought the field-restore fly), no quaternion stomp. applyState cancels any in-flight fly and
+  // lands the saved pose exactly. Non-finite data self-heals (drop with a log), it doesn't fail.
+  _restoreCamera(cam) {
+    if (!cam?.pos) return;
+    if (!isFinitePos(cam.pos)) { console.warn('[session] dropped non-finite camera position'); return; }
+    this.ctx.cameraController?.applyState?.(cam);
+  }
+
+  // focus — restore the sticky slots by SETTING them directly (the AttentionManager IS the owner —
+  // set() is its writer, not a verb replay). Runs LAST: the scene is as live as it gets. Self-healing
+  // by design: an id whose entity isn't live sets with entity null and is pruned on the next registry
+  // change (pruneGone) — exactly the mirror-of-reality policy. Setting primary/key emits
+  // change:<slot>; no listener flies the camera (that lives in the click path), so this can't
+  // clobber the just-restored pose.
   _restoreFocus(focus) {
     const am = this.ctx.attentionManager;
     if (!focus || !am?.set) return;
@@ -461,11 +545,11 @@ export default class SessionStore {
   // common path is correct by construction. THIS exists only for genuinely-external children — the
   // relay-backed PTY (and, later, the capture stream) re-adopt on their own clock and reappear AFTER
   // the verb ran, ALWAYS at a default size — so we re-project them from the model when they land.
-  // Driven by the registry-change listener (each surface as it reappears) + one pass at the end of
-  // restore (any that re-adopted mid-restore, before the listener was armed). Per-kind via
-  // SURFACE_PROJECTORS, guarded → a present, already-correct surface is a no-op (NOT a drift-scan).
-  // Order is load-bearing: surfaces move/size FIRST so the subsequent 3D-dock lock captures the
-  // RESTORED home, not the adapter's spawn placement.
+  // Driven by the registry-change listener (each surface as it reappears) + the settle phase (any
+  // that re-adopted mid-restore, before the listener was armed). Per-kind via SURFACE_PROJECTORS,
+  // guarded → a present, already-correct surface is a no-op (NOT a drift-scan). Order is
+  // load-bearing: surfaces move/size FIRST so the subsequent 3D-dock lock captures the RESTORED
+  // home, not the adapter's spawn placement.
   _projectSurfaces() {
     const ws = this.ctx.workspace;
     if (ws?.listSurfaces) {
@@ -483,8 +567,7 @@ export default class SessionStore {
   // here when its grid appears) and re-applies its zoom + pin. It does NOT release: a verb releases
   // live (writing docked:false), and a gone window is dismissed by pruneDismissed — both keep model
   // and dock in step without this pass fighting them. The model IS the durable buffer, so there's no
-  // pending queue: a not-yet-live docked surface is simply skipped and caught on the next pass. This
-  // replaced the dock.lock + window.scale VERB REPLAY (+ the _pendingDock3d carry-forward shadow).
+  // pending queue: a not-yet-live docked surface is simply skipped and caught on the next pass.
   // Runs after the per-surface projection above, so a docked terminal is moved/sized to its restored
   // home BEFORE it's reparented into a tile.
   _reconcileDock() {
@@ -516,49 +599,14 @@ export default class SessionStore {
     }
   }
 
-  // Load the camera by SETTING it directly on the controller — no camera.move/aim verb replay (which
-  // fired async and fought the field-restore fly), no quaternion stomp. applyState cancels any
-  // in-flight fly and lands the saved pose exactly.
-  _restoreCamera(cam) {
-    if (!cam?.pos) return;
-    if (!isFinitePos(cam.pos)) { console.warn('[session] dropped non-finite camera position'); return; }
-    this.ctx.cameraController?.applyState?.(cam);
-  }
-
-  _maybeApplyDock() {
-    if (!this._dock?.fromJSON || !this._pendingDock) return;
-    const layout = this._filterDockOrphans(this._pendingDock);
-    try {
-      this._dock.fromJSON(layout);
-    } catch (e) {
-      console.warn('[session] dock restore failed — keeping default layout:', e?.message || e);
-    }
-    this._pendingDock = null;
-  }
-
-  // Drop any saved panel whose component is no longer registered, so a removed
-  // panel type doesn't render as dockview's blank "unknown" placeholder.
-  _filterDockOrphans(layout) {
-    const known = this._dock?.components;
-    if (!layout?.panels || !Array.isArray(known)) return layout;
-    const panels = {};
-    for (const [id, p] of Object.entries(layout.panels)) {
-      const comp = p?.contentComponent;
-      if (comp && !known.includes(comp)) {
-        console.warn(`[session] dropped dock panel '${id}' — unknown component '${comp}'`);
-        continue;
-      }
-      panels[id] = p;
-    }
-    return { ...layout, panels };
-  }
-
-  // Public clear — wipe the saved snapshot on demand (the `session.clear` verb).
-  // Drops the pending 2D-dock layout so a stale snapshot can't re-apply, then writes the empty file.
-  // Dock membership lives in the model now (cleared by clearScene), not a pending buffer here.
-  // Live objects stay in the scene; autosave re-captures them on the next change (mirror-of-reality).
+  // Public clear — wipe the saved snapshot on demand (the `session.clear` verb). Drops the loaded
+  // snapshot + quarantine so a stale blob can't re-persist through capture's preserve paths, then
+  // writes the empty file. Live objects stay in the scene; autosave re-captures them on the next
+  // change (mirror-of-reality).
   async clear() {
-    this._pendingDock = null;
+    this._loadedSnap = null;
+    this._failedSections = new Set();
+    this._lastGoodDock = null;
     await this._clear();
   }
 
@@ -575,22 +623,22 @@ export default class SessionStore {
   }
 
   // -- Lifecycle ------------------------------------------------------------
-  // Load + restore exactly once (first connect after a page load); then arm
-  // autosave. Reconnects after that don't re-restore — the scene already holds
-  // the in-browser state, and re-restoring would snap the camera back.
+  // Load + restore once per SCENE GENERATION (ctx._sessionRestored — the ctx is born with the
+  // scene), then arm autosave. Keying on the ctx, not this instance, makes both re-entries safe:
+  // a relay reconnect (same store) and a vite hot swap that rebuilt the store inside a live tree
+  // (new store, same scene) each just re-arm autosave instead of re-restoring — which would
+  // bulk-load over the live field and snap the camera back.
   async startOnConnect() {
-    if (this._restored) return;
-    this._restored = true;
+    if (this.ctx._sessionRestored) { this._armAutosave(); return; }
+    this.ctx._sessionRestored = true;
     const snap = await this.load();
-    if (snap) {
-      try { await this.restore(snap); }
-      catch (e) { console.warn('[session] restore failed:', e?.message || e); }
-    }
+    if (snap) await this.restore(snap);   // phased; each phase is guarded, this never throws
+    else console.info('[session] no saved session — fresh start');
     this._armAutosave();
   }
 
   _armAutosave() {
-    if (this._disposed) return;
+    if (this._disposed || this._autosaveOn) return;
     this._autosaveOn = true;
     this.ctx.registry.addChangeListener(this._onRegistryChange);
     // A verb writing the model (terminal.resize/move/…) is intent changing — save it. The model

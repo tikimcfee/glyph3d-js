@@ -288,5 +288,88 @@ function makeRouter() {
      'capture: no fieldSources → empty list (the provider cache is NOT the decider)');
 }
 
+// ---- 10. phased loader: a failed phase is reported AND quarantined — capture keeps the loaded
+// blob for that section verbatim (you may only re-capture a section you successfully projected),
+// so a degraded restore can never overwrite the saved state it failed to reproduce. ----
+{
+  const ctx = makeCtx(makeRegistry(), makeCameraDock());
+  ctx.contentTree = { getLayoutState: () => null, applyLayoutState: () => { throw new Error('boom'); } };
+  const ss = new SessionStore({ ctx, router: makeRouter(), bridge: {} });
+  const savedLayout = { scheme: 'jellyfish', opts: { hang: 5 } };
+  await ss.restore({ version: 2, files: [], layout: savedLayout });
+  ok(ss.lastRestore?.ok === false, 'report: restore marked DEGRADED');
+  const ph = ss.lastRestore.phases.find((p) => p.name === 'substrate');
+  ok(ph && !ph.ok && /boom/.test(ph.error), 'report: substrate phase carries its error');
+  ok(ss.lastRestore.phases.find((p) => p.name === 'focus')?.ok === true, 'report: later phases still ran');
+  eq(ss.capture().layout, savedLayout, 'quarantine: capture keeps the LOADED layout blob, not the live null');
+}
+
+// ---- 11. panels phase: pull-based bridge (ctx.dockLayout). A saved layout is pruned (grid tree
+// included) then applied via fromJSON; a FAILED apply rebuilds defaults (dockview reverts to
+// EMPTY on a fromJSON error) and quarantines the saved dock blob — the erased-layout cascade,
+// closed at both ends. ----
+{
+  // happy path: orphan pruned before apply, defaults never rebuilt
+  const ctx = makeCtx(makeRegistry(), makeCameraDock());
+  const applied = [];
+  ctx.dockLayout = {
+    components: ['files', 'editor'],
+    toJSON: () => ({ panels: { files: {} } }),
+    fromJSON: (l) => applied.push(l),
+    buildDefaults: () => { throw new Error('defaults must not rebuild on the happy path'); },
+  };
+  const savedDock = {
+    grid: { root: { type: 'branch', data: [{ type: 'leaf', data: { id: 'g1', views: ['files', 'ghost'], activeView: 'ghost' } }] }, width: 1, height: 1 },
+    panels: { files: { id: 'files', contentComponent: 'files' }, ghost: { id: 'ghost', contentComponent: 'ghost' } },
+  };
+  const ss = new SessionStore({ ctx, router: makeRouter(), bridge: {} });
+  await ss.restore({ version: 2, files: [], dock: savedDock });
+  ok(ss.lastRestore.ok === true, 'panels: restore complete');
+  eq(applied.length, 1, 'panels: fromJSON applied once');
+  eq(applied[0].grid.root.data[0].data.views, ['files'], 'panels: orphan pruned from the grid tree before apply');
+  eq(applied[0].grid.root.data[0].data.activeView, 'files', 'panels: dead activeView re-pointed');
+
+  // failed apply: defaults rebuilt, failure reported, saved blob survives capture
+  const ctx2 = makeCtx(makeRegistry(), makeCameraDock());
+  let rebuilt = 0;
+  ctx2.dockLayout = {
+    components: ['files'],
+    toJSON: () => ({ panels: {} }),            // the dock IS empty after dockview's revert
+    fromJSON: () => { throw new Error('deserialize failed'); },
+    buildDefaults: () => { rebuilt++; },
+  };
+  const savedDock2 = {
+    grid: { root: { type: 'branch', data: [{ type: 'leaf', data: { id: 'g1', views: ['files'], activeView: 'files' } }] }, width: 1, height: 1 },
+    panels: { files: { id: 'files', contentComponent: 'files' } },
+  };
+  const ss2 = new SessionStore({ ctx: ctx2, router: makeRouter(), bridge: {} });
+  await ss2.restore({ version: 2, files: [], dock: savedDock2 });
+  ok(rebuilt === 1, 'panels: defaults rebuilt after a failed apply (no panel-less IDE)');
+  ok(ss2.lastRestore.ok === false, 'panels: failure reported');
+  eq(ss2.capture().dock, savedDock2, 'quarantine: saved dock blob survives capture after a failed apply (never nulled from the file)');
+}
+
+// ---- 12. restore-once per SCENE GENERATION (ctx._sessionRestored): a second store on the SAME
+// ctx — a vite hot swap that rebuilt the store inside a live tree — re-arms autosave without
+// re-restoring over live state. ----
+{
+  const ctx = makeCtx(makeRegistry(), makeCameraDock());
+  ctx.fileProvider.readFile = () => Promise.resolve({
+    content: JSON.stringify({ version: 2, files: [], terminals: [{ id: 'term-1', cols: 100, rows: 50 }] }),
+  });
+  const rpc = { rpcRequest: () => Promise.resolve() };
+  const ss = new SessionStore({ ctx, router: makeRouter(), bridge: rpc });
+  await ss.startOnConnect();
+  ok(ctx.workspace.getSurface('term-1')?.view.cols === 100, 'gen 1: restored from the file');
+  ss.dispose();
+
+  ctx.workspace.setSurfaceView('term-1', 'terminal', { cols: 142, rows: 42 });  // user resized since
+  const ss2 = new SessionStore({ ctx, router: makeRouter(), bridge: rpc });
+  await ss2.startOnConnect();
+  ok(ctx.workspace.getSurface('term-1')?.view.cols === 142, 'gen 2 (same ctx): did NOT re-restore over live state');
+  ok(ss2._autosaveOn === true, 'gen 2: autosave re-armed');
+  ss2.dispose();
+}
+
 console.log(failures === 0 ? '\nPASS — dock persistence round-trips' : `\nFAIL — ${failures} assertion(s)`);
 process.exit(failures === 0 ? 0 : 1);
