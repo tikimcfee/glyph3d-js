@@ -17,9 +17,12 @@
  * the room; deep, narrow ones resolve as you approach — legibility arrives with
  * proximity, the same way it does on a paper map, and hierarchy is encoded by
  * construction (a parent is always wider than its children). The only per-frame work
- * is an approach fade: inside fadeStart the label thins toward minAlpha (you've
- * arrived; the container yields to its content), one O(1) group-alpha write per label
- * and only when the quantized value changes.
+ * is the approach SPECTRUM: across fadeStart→fadeEnd of camera distance, alpha and
+ * glyph scale both ease (smoothstepped) from the resting presentation — container-fit
+ * size at `opacity` — to the arrived one: the name at `nearScale` ("regular text
+ * size") and `minAlpha`. Arrived, a directory keeps a readable name tag instead of
+ * vanishing; dial minAlpha or nearScale to 0 for the old yield-to-content. Every
+ * write is O(1) per label and made only when its quantized value changes.
  *
  * Color is the family's depth gradient (colorA → colorB over normalized visible depth,
  * the markers' ramp language, lifted brighter) so a label reads as kin to its prism.
@@ -46,15 +49,21 @@ export const LABEL_DEFAULTS = {
     hoverEase: 10,     // the grow/shrink rate (1/s) — higher snaps, lower breathes
     colorA: 0x9fc2e8,  // gradient start — the shallowest containers (kin to the prism ramp)
     colorB: 0xd0a6e0,  // gradient end — the deepest
-    opacity: 0.9,      // resting label alpha
-    minAlpha: 0.0,     // alpha once fully approached (inside fadeEnd)
-    fadeStart: 320,    // world distance where the approach fade begins
-    fadeEnd: 110,      // world distance of full fade — you've arrived at the container
+    opacity: 0.9,      // resting label alpha (the far side of the approach band)
+    minAlpha: 0.35,    // alpha once fully approached — 0 restores the full vanish
+    nearScale: 1,      // glyph scale once fully approached ("regular text size") — 0 shrinks away
+    fadeStart: 320,    // world distance where the approach band begins
+    fadeEnd: 110,      // world distance where it completes — you've arrived at the container
     gapY: 0.35,        // lift above the container's top edge, in label row heights
     zLift: 6,          // world units in front of the subtree's front plane
     showCount: 1,      // 1 → a stat line under the name: "N files"
     worldScale: 0.025, // the field's glyph world scale (the canonical default)
 };
+
+// Opts that shape the BAKED field (glyph text/scale/placement/color): a configure()
+// touching one of these rebuilds. Everything else — the approach spectrum and the
+// hover grow — just steers the next frame's update(), so dial drags stay rebuild-free.
+const BUILD_OPTS = new Set(['fit', 'scaleMin', 'scaleMax', 'countScale', 'colorA', 'colorB', 'gapY', 'zLift', 'showCount', 'worldScale']);
 
 /** Total file leaves under a node — descends child dirs and layout-inserted groups
  *  (jellyfish rows hold the books after its pass), skips markers. */
@@ -139,16 +148,24 @@ export default class ContentTreeLabels {
         this.rebuild();
     }
 
-    /** Patch options and rebuild from the current layout. */
+    /** Patch options. Build-shaping opts (BUILD_OPTS) trigger a rebuild; spectrum and
+     *  hover dials just steer the next frame — an unchanged value is a no-op either way. */
     configure(patch = {}) {
-        Object.assign(this.opts, patch);
-        this.rebuild();
+        let rebuild = false;
+        for (const [k, v] of Object.entries(patch)) {
+            if (this.opts[k] === v) continue;
+            this.opts[k] = v;
+            if (BUILD_OPTS.has(k)) rebuild = true;
+        }
+        if (rebuild) this.rebuild();
         return this;
     }
 
     setEnabled(on) {
-        this.enabled = !!on;
-        if (this.enabled) this.rebuild();
+        on = !!on;
+        if (on === this.enabled) return this;
+        this.enabled = on;
+        if (on) this.rebuild();
         else if (this._field?.instanceMesh) this._field.instanceMesh.visible = false;
         return this;
     }
@@ -183,6 +200,7 @@ export default class ContentTreeLabels {
             // scale (the hover grow) swells the label in place, one O(1) write, no rebuild.
             it.groupId = field.createGroup();
             it.boost = 1;
+            it.scaleQ = 1024;   // groups are born at scale 1 — quantized ×1024, like alpha's ×255
             field.setGroupOffset(it.groupId, { x: it.x, y: it.y, z: it.z });
             field.setGroupAlpha(it.groupId, o.opacity);
             const t = maxDepth > 1 ? (it.depth - 1) / (maxDepth - 1) : 0;
@@ -206,11 +224,15 @@ export default class ContentTreeLabels {
     }
 
     /**
-     * Per-frame work (call from the frame loop): the approach fade — labels thin toward
-     * minAlpha inside fadeStart→fadeEnd of the camera-to-label distance — and the hover
-     * grow — the label whose container holds the hovered entity (any descendant path)
-     * eases toward hoverBoost. Both are O(1) group writes, made only on actual change:
-     * a still camera with a still pointer costs a distance check per label and nothing.
+     * Per-frame work (call from the frame loop): the approach spectrum and the hover
+     * grow. Camera distance runs the spectrum — outside fadeStart a label rests at
+     * container-fit scale and `opacity`; across fadeStart→fadeEnd both alpha and scale
+     * ease (smoothstepped, so the band has no corners) toward `minAlpha` and `nearScale`.
+     * Arrived, the name holds as a regular-text tag rather than vanishing — unless
+     * dialed to 0. The hover grow — the label whose container holds the hovered entity
+     * (any descendant path) easing toward hoverBoost — multiplies on top. All writes
+     * are O(1) group writes, made only on actual quantized change: a still camera with
+     * a still pointer costs a distance check per label and nothing.
      * @param {THREE.Camera} camera
      * @param {number} [dt] seconds since the last frame (eases the hover grow)
      * @param {string|null} [hoverId] the hovered entity's registry id (a canonical path)
@@ -224,7 +246,8 @@ export default class ContentTreeLabels {
         const ease = Math.min(1, (dt || 1 / 60) * o.hoverEase);
         for (const it of this._items) {
             const d = this._v.set(it.x, it.y, it.z).applyMatrix4(m).distanceTo(camera.position);
-            const t = Math.min(Math.max((d - o.fadeEnd) / span, 0), 1);
+            let t = Math.min(Math.max((d - o.fadeEnd) / span, 0), 1);
+            t = t * t * (3 - 2 * t);
             const a = o.minAlpha + (o.opacity - o.minAlpha) * t;
             const q = Math.round(a * 255);
             if (this._alphaQ[it.groupId] !== q) {
@@ -236,7 +259,15 @@ export default class ContentTreeLabels {
             if (Math.abs(it.boost - target) > 1e-3) {
                 it.boost += (target - it.boost) * ease;
                 if (Math.abs(it.boost - target) < 1e-3) it.boost = target;
-                f.setGroupScale(it.groupId, { x: it.boost, y: it.boost, z: it.boost });
+            }
+            // The scale flow: ×1 (container-fit) far → nearScale/it.scale arrived, the
+            // hover grow riding on top — one group-scale write when it actually moves.
+            const nearF = o.nearScale / Math.max(it.scale, 1e-6);
+            const s = it.boost * (nearF + (1 - nearF) * t);
+            const sq = Math.round(s * 1024);
+            if (it.scaleQ !== sq) {
+                it.scaleQ = sq;
+                f.setGroupScale(it.groupId, { x: s, y: s, z: s });
             }
         }
     }

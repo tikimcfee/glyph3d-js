@@ -119,7 +119,8 @@ export default function registerLayoutCommands(router) {
             let i = 0;
             let enabled = overlay.enabled;
             if (args[0] === 'on' || args[0] === 'off') { enabled = args[0] === 'on'; i = 1; }
-            else if (!args[0].startsWith('--')) return { text: `ERR: expected on|off or --flags, got "${args[0]}"`, data: null };
+            else if (args[0] === 'toggle') { enabled = !overlay.enabled; i = 1; }   // stateless flip — bindable to a key
+            else if (!args[0].startsWith('--')) return { text: `ERR: expected on|off|toggle or --flags, got "${args[0]}"`, data: null };
 
             const patch = {};
             for (; i < args.length; i += 2) {
@@ -157,7 +158,7 @@ export default function registerLayoutCommands(router) {
         verb: 'layout.markers', noun: 'markers', ctxKey: 'contentTreeMarkers', title: 'LAYOUT MARKERS',
         colorKeys: new Set(['colorA', 'colorB']),
         description: 'Toggle/dial the per-directory bounding prisms (depth-gradient colored volumes)',
-        usage: '[on|off] [--opacity N --opacity-decay N --pad N --z-pad N --min-thickness N --edge-opacity N --color-a HEX --color-b HEX]',
+        usage: '[on|off|toggle] [--opacity N --opacity-decay N --pad N --z-pad N --min-thickness N --edge-opacity N --color-a HEX --color-b HEX]',
     });
 
     // Ordered arrows: per-directory chains threading the child dirs in canonical order.
@@ -166,7 +167,7 @@ export default function registerLayoutCommands(router) {
         colorKeys: new Set(['colorA', 'colorB']),
         enums: { anchor: ['top', 'top-left', 'top-right'] },
         description: 'Toggle/dial the per-directory ordered-arrow chains (sibling reading-order threads)',
-        usage: '[on|off] [--anchor top|top-left|top-right --opacity N --z-lift N --arrow-ratio N --arrow-angle N --color-a HEX --color-b HEX]',
+        usage: '[on|off|toggle] [--anchor top|top-left|top-right --opacity N --z-lift N --arrow-ratio N --arrow-angle N --color-a HEX --color-b HEX]',
     });
 
     // Diagnostic: per-dir origin vs content-anchor dots + link. Color keys here are
@@ -176,16 +177,16 @@ export default function registerLayoutCommands(router) {
         colorKeys: new Set(['originColor', 'contentColor', 'linkColor']),
         enums: { anchor: ['top', 'top-left', 'top-right'] },
         description: 'DIAGNOSTIC: per-directory dots at the footprint origin vs the content anchor (+link) — reveals where arrows anchor',
-        usage: '[on|off] [--size N --z-lift N --anchor top|top-left|top-right --origin-color HEX --content-color HEX --link-color HEX]',
+        usage: '[on|off|toggle] [--size N --z-lift N --anchor top|top-left|top-right --origin-color HEX --content-color HEX --link-color HEX]',
     });
 
     // Container labels: every visible directory named in space — the chain-compressed
-    // joined name, depth-scaled (physical LOD), fading as you arrive.
+    // joined name, depth-scaled (physical LOD), easing to regular text size as you arrive.
     registerOverlay({
         verb: 'layout.labels', noun: 'labels', ctxKey: 'contentTreeLabels', title: 'LAYOUT LABELS',
         colorKeys: new Set(['colorA', 'colorB']),
-        description: 'Toggle/dial the per-directory container labels (chain-compressed names, container-fit sizing, approach fade)',
-        usage: '[on|off] [--fit N --scale-min N --scale-max N --opacity N --min-alpha N --fade-start N --fade-end N --gap-y N --z-lift N --show-count 0|1 --color-a HEX --color-b HEX]',
+        description: 'Toggle/dial the per-directory container labels (chain-compressed names, container-fit sizing, approach spectrum)',
+        usage: '[on|off|toggle] [--fit N --scale-min N --scale-max N --opacity N --min-alpha N --near-scale N --fade-start N --fade-end N --gap-y N --z-lift N --show-count 0|1 --color-a HEX --color-b HEX]',
     });
 
 }

@@ -32,8 +32,9 @@ const strataParam = (param) => (_ctx, v) => setStrataParam(param, v);
  *  not the `trail.` key) and re-apply — the header/info cards re-scale live, body sizes land on new moments. */
 const trailParam = (param) => (ctx, v) => { const t = ctx.agentTrail; if (!t) return; t.cfg[param] = v; t.applyScales?.(); };
 
-/** apply() for a container-label dial: patch the bare param into ContentTreeLabels' opts and
- *  rebuild the label field live. Color knobs store '#rrggbb'; the overlay wants a hex int. */
+/** apply() for a container-label dial: patch the bare param into ContentTreeLabels' opts —
+ *  configure() rebuilds the field only for build-shaping opts; spectrum/hover dials just steer
+ *  the next frame. Color knobs store '#rrggbb'; the overlay wants a hex int. */
 const labelParam = (param, toHex = false) => (ctx, v) =>
   ctx.contentTreeLabels?.configure({ [param]: toHex ? parseInt(String(v).slice(1), 16) : v });
 
@@ -264,10 +265,13 @@ export const SETTINGS = [
     apply: (ctx, v) => ctx.contentTreeArrows?.setShowDirs?.(v),
   },
   // Labels — the container labels (ContentTreeLabels): every visible directory named in space.
-  // The same dials as the layout.labels verb; every change rebuilds the label field live and
-  // persists. Sizing is the container FIT (the name spans `fit` of its container's width,
-  // clamped by the scale floor/cap); the hover pair drives the ancestor-chain grow. Ranges are
-  // deliberately wide — the operator decides what's "too big". Defaults mirror LABEL_DEFAULTS.
+  // The same dials as the layout.labels verb; every change lands live and persists. Sizing is
+  // the container FIT (the name spans `fit` of its container's width, clamped by the scale
+  // floor/cap); the approach SPECTRUM eases opacity AND text size from the resting values to
+  // the arrived ones across the fade band, so a name melts to regular text as you fly in
+  // instead of popping out — arrived values of 0 restore the vanish. The hover pair drives
+  // the ancestor-chain grow. Ranges are deliberately wide — the operator decides what's
+  // "too big". Defaults mirror LABEL_DEFAULTS.
   {
     key: 'labels.enabled', label: 'Container labels', group: 'Labels', type: 'bool', default: true,
     apply: (ctx, v) => ctx.contentTreeLabels?.setEnabled?.(v),
@@ -284,6 +288,7 @@ export const SETTINGS = [
   { key: 'labels.hoverEase', label: 'Hover grow rate (1/s)', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.hoverEase, min: 0.5, max: 60, step: 0.5, apply: labelParam('hoverEase') },
   { key: 'labels.opacity', label: 'Opacity (resting)', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.opacity, min: 0, max: 1, step: 0.02, apply: labelParam('opacity') },
   { key: 'labels.minAlpha', label: 'Opacity (arrived)', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.minAlpha, min: 0, max: 1, step: 0.02, apply: labelParam('minAlpha') },
+  { key: 'labels.nearScale', label: 'Text size (arrived)', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.nearScale, min: 0, max: 48, step: 0.1, apply: labelParam('nearScale') },
   { key: 'labels.fadeStart', label: 'Approach fade starts (dist)', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.fadeStart, min: 0, max: 4000, step: 10, apply: labelParam('fadeStart') },
   { key: 'labels.fadeEnd', label: 'Approach fade full (dist)', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.fadeEnd, min: 0, max: 2000, step: 10, apply: labelParam('fadeEnd') },
   { key: 'labels.gapY', label: 'Lift above container (× row)', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.gapY, min: 0, max: 10, step: 0.05, apply: labelParam('gapY') },
