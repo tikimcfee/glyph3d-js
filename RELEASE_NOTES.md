@@ -1,71 +1,51 @@
-## What's new in v0.2.0
+## What's new in v0.2.1
 
-~460 commits since `v0.1.0`. The short version: glyph3d went from a renderer
-with an app around it to a working 3D reading instrument — projects lay out as
-structures you can read, terminals are fully live, and the whole workspace
-survives a reload.
+v0.2.0 served one directory; v0.2.1 makes the whole filesystem selectable —
+and gives every file a durable spatial body.
 
-**The field reads as the project.** `ContentTree` mirrors the directory tree
-into the scene graph, and pluggable layout schemes pack it: `packed`, `walk`,
-`district`, `jellyfish` (directories as cylindrical columns of file panels),
-and `tree`. Directory volumes, ownership lines, and ordered arrows keep the
-structure legible, and every file lands in the field — no count caps.
+**The Files panel is a real file browser.** Quiet `~` and `/` anchors browse
+the entire machine lazily — one shallow listing per expanded directory,
+nothing loads until asked, and hidden files and binaries show, because
+selection needs truth. Click a file to open and focus it, ⊞ to pop a whole
+directory into the world, ✕ on a directory to close everything under it.
+Loaded state is derived live from the scene, never stored. The Sources panel
+shows what the binary is serving, opens any typed path (`~/…` works), and
+lists every opened root with per-root close.
 
-**Code is semantic.** Tree-sitter syntax coloring; an AST-backed semantic
-model; structural layouts that move whole callable units (functions as
-sub-blocks, a nested strata view); LSP over the relay — definition and
-references at the caret, breadcrumb chips, a results panel.
+**The world is additive multi-root.** Opening a second project doesn't
+replace the first — each opened directory becomes another root in the field,
+sessions capture and restore all of them, and closing a root forgets it. One
+canonical identity per file (its absolute path) means the same file reached
+by any route — relative argument, browse selection, saved session — is the
+same entity: overlapping roots need no special cases, and dead ancestor
+chains (`/home/you/dev/…`) collapse to a single level in every layout scheme
+instead of stacking empty corridors.
 
-**Terminals grew up.** Per-cell ANSI backgrounds (git diffs and `--color`
-CLIs read correctly in 3D), scrollback paged into depth, live grip-resize,
-keyboard capture with a focus-aware block cursor, modifier-aware key encoding
-(word motion, word-aware Backspace), and self-healing re-adoption across
-reloads — resize can no longer race the redraw.
+**Every file rides a Book.** A durable, addressable carrier that outlives
+every relayout: layout schemes arrange books, they no longer create or
+destroy form. The new `library` scheme asks each book to take page form —
+one uniform contain-fit onto an identical bound page — and stacks a
+directory's collection as a deck (z), a shelf (x), or a pile (y), sorted by
+name, size, or extension. The repository as a library: the same content,
+mutable in form. `book.list` inspects the collection.
 
-**Vector glyphs matured.** A prebaked Slug glyph core ships as a static asset
-and hydrates at boot instead of re-encoding; new glyphs append incrementally.
-The monospace cell derives from real font extents, emoji get double-width
-cells in a growable atlas, and the cursor is codepoint-consistent — emoji
-editing can't corrupt the buffer.
+**The filesystem RPC grew three verbs and lost a lie.** `fs/readDir`
+(shallow browse of any absolute path), `fs/addRoot` (runtime reach — the
+`--reach` flag is now the static seed of a dynamic set), and `fs/roots` (the
+page finally knows what it's attached to). `fs/listTree` now walks the
+directory its URI names and reports truncation explicitly instead of passing
+a capped walk off as complete. Content read/write stays gated through the
+same hardened resolution path as before. New bus verbs: `file.list` (look
+without loading — also from the CLI: `glyph3d-cli file.list ~/dev`) and
+`file.closeDir` (unload a whole directory in one pass).
 
-**Picking and input.** Multi-channel GPU picking is the single hit-test
-source, down to a glyph: click-to-caret in any layout, in-place editing, hjkl
-spatial focus navigation, and composable gesture/keyboard responder chains.
+**Upgrade note:** the `fs/listTree` wire shape changed — a v0.2.0 binary and
+a v0.2.1 page (or vice versa) will not agree. Restart the binary after
+updating; terminals re-adopt and the session restores itself.
 
-**Camera.** An egocentric fly camera with proximity auto-slow and a
-soft-bounds leash; focus squares to the object's own plane, so a rotated grid
-frames face-on; interruptible `flyTo` animation.
-
-**Windows, dock, panes.** Windows dock into a camera-locked radial dome with
-a spotlight focus slot; a binary-BSP pane compositor tiles the view frame,
-and a framed window reshapes to fill its pane; `FrameGrid` turns a live video
-capture into an interactive glyph window.
-
-**The workspace persists.** A declarative `WorkspaceModel` — session restore
-applies state directly, no verb replay. Files, camera, dock, focus, and
-terminals come back after a reload, served by a `SessionStore` in the binary.
-
-**Observability.** The dispatcher self-instruments (every verb timed, counted,
-trace-logged), and the relay keeps a queryable SQLite + FTS5 store of every
-browser log record — `log.query` / `log.search` / `log.errors` / `log.stats`
-answer with no page open.
-
-**Agent trails.** A coding-agent session renders as a spatial corridor: tool
-calls as moment cards with per-tool metadata, touched files on a rail, a
-rolodex carousel to scrub history, and the live conversation decked alongside.
-
-**Performance.** One shared TSL material per grid kind (bulk load 7× faster),
-O(1) colorizer column conversion (a 200-file load: 58s → 2.7s), frustum
-culling from real instance bounds, distance LOD, and frame-time-adaptive
-reload budgets.
-
-**The bus got friendlier.** Dot-free verb spelling (`grid list` ==
-`grid.list`), `help` is a compact orientation map computed from the live
-registry, and the command palette ranks nouns — files, sheets, layout schemes
-— alongside verbs in one list.
-
-Library releases: [`@glyph3d/core@0.2.0`](https://www.npmjs.com/package/@glyph3d/core)
-and [`@glyph3d/r3f@0.2.0`](https://www.npmjs.com/package/@glyph3d/r3f).
+Also: npm publishing split from the release build (auth by security key),
+and the headless suites grew to cover the new ground — canonical keys, chain
+compression, multi-root session restore, dynamic-root race safety.
 
 ---
 
