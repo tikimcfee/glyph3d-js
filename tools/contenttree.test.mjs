@@ -8,7 +8,7 @@
 
 import * as THREE from 'three';
 import ContentTree from '../packages/glyph3d-core/src/collections/ContentTree.js';
-import { walkTreeLayout, districtLayout, packedLayout, PACKED_DEFAULTS } from '../packages/glyph3d-core/src/collections/layouts/index.js';
+import { walkTreeLayout, districtLayout, packedLayout, libraryLayout, PACKED_DEFAULTS, LIBRARY_DEFAULTS } from '../packages/glyph3d-core/src/collections/layouts/index.js';
 import ContentTreeMarkers from '../packages/glyph3d-core/src/collections/ContentTreeMarkers.js';
 
 let pass = 0, fail = 0;
@@ -53,6 +53,18 @@ const build = (paths, order = paths) => {
 const snapshot = (tree) => {
   const out = {};
   const walk = (node) => {
+    // A durable Book records as THE leaf entry — its position is the layout slot, its
+    // inner leaf rides at the origin — and its interior is form, not tree structure.
+    if (node.userData.isBook) {
+      const s = node.leaf.userData.size;
+      out[node.userData.path] = {
+        isDir: false,
+        size: s ? { x: r2(s.x), y: r2(s.y), z: r2(s.z) } : null,
+        children: [],
+        pos: { x: r2(node.position.x), y: r2(node.position.y), z: r2(node.position.z) },
+      };
+      return;
+    }
     const key = node.userData.path ?? '';
     out[key] = {
       isDir: !!node.userData.isDir,
@@ -94,7 +106,7 @@ const snapshot = (tree) => {
   const dir = t.insert(leaf, 'solo.js');
   t.relayout();
   ok(dir === t.root, 'lone file parents under root');
-  ok(leaf.parent === t.root, 'leaf.parent is root');
+  ok(leaf.parent.userData.isBook && leaf.parent.parent === t.root, 'leaf rides its book, book under root');
   ok(t.root.userData.size.x > 0 && t.root.userData.size.y > 0, 'root has a real footprint for one file');
 }
 
@@ -105,8 +117,8 @@ const snapshot = (tree) => {
     ok(t.getNode(dir), `dir node exists: ${dir}`);
   }
   ok(t.getNode('readme.md') === null, 'a file path is NOT a dir node');
-  ok(t._leaves.get('readme.md').parent === t.root, 'root-level file under root');
-  ok(t._leaves.get('src/util/deep/a/b/c/leaf.txt').parent === t.getNode('src/util/deep/a/b/c'), 'deep leaf under its (deep) dir');
+  ok(t._leaves.get('readme.md').parent.parent === t.root, 'root-level file (via its book) under root');
+  ok(t._leaves.get('src/util/deep/a/b/c/leaf.txt').parent.parent === t.getNode('src/util/deep/a/b/c'), 'deep leaf (via its book) under its (deep) dir');
   // empty-intermediate chain: each link has exactly one child
   for (const dir of ['src/util/deep', 'src/util/deep/a', 'src/util/deep/a/b']) {
     eq(t.getNode(dir).children.length, 1, `single-child empty-intermediate: ${dir}`);
@@ -172,7 +184,7 @@ const snapshot = (tree) => {
   const a = makeLeaf('f.js'), b = makeLeaf('f.js');
   t.insert(a, 'dir/f.js'); t.insert(b, 'dir/f.js');
   eq(t.paths().length, 1, 'replace keeps a single leaf for the path');
-  ok(t.getNode('dir').children.length === 1 && t.getNode('dir').children[0] === b, 'latest leaf wins');
+  ok(t.getNode('dir').children.length === 1 && t.getNode('dir').children[0].leaf === b, 'latest leaf wins (riding a fresh book)');
 }
 
 // 11. world bounds non-empty + encompasses content (for ground anchoring).
@@ -258,7 +270,7 @@ const plotRect = (node) => {
     .filter((c) => !c.userData.isDir || c.userData.size?.x > 0)
     .map((c) => {
       if (c.userData.isDir) return plotRect(c);
-      const v = new THREE.Vector3(); c.getWorldPosition(v); const s = c.userData.size;
+      const v = new THREE.Vector3(); c.getWorldPosition(v); const s = c.leaf.userData.size; // file child = a Book
       return { x0: v.x - s.x / 2, x1: v.x + s.x / 2, y0: v.y - s.y / 2, y1: v.y + s.y / 2 };
     });
   let overlaps = 0;
@@ -548,6 +560,140 @@ const contentSnapshot = (tree) => {
   markers.update();
   ok(!markers._prisms.has('/home') && !markers._prisms.has('/home/u'), 'markers: pass-throughs skipped');
   ok(markers._prisms.has('/home/u/proj'), 'markers: the tail keeps its prism');
+}
+
+// ───────────────────────── library scheme ─────────────────────────
+
+// surface:false keeps the test scene pure (no page-face meshes) — a book node then
+// holds exactly its one grid, which the structural assertions below rely on.
+const buildLibrary = (paths, opts = {}, order = paths) => {
+  const t = new ContentTree({ layout: libraryLayout, layoutOpts: { surface: false, ...opts } });
+  for (const p of order) t.insert(makeLeaf(p), p);
+  t.relayout();
+  return t;
+};
+
+// 35. books: every leaf rides its durable Book (the same object bookAt addresses),
+//     fitted by the exact UNIFORM contain-fit (never a skew, capped at maxUpscale);
+//     the grid's own transform authority untouched.
+{
+  const opts = { pageW: 20, pageH: 30, maxUpscale: 10 };   // small page so the width term binds on mock leaves
+  const t = buildLibrary(PATHS, opts);
+  for (const [p, leaf] of t._leaves) {
+    const book = leaf.parent;
+    ok(book.userData?.isBook && t.bookAt(p) === book, `library: ${p} rides its addressable book`);
+    ok(book.fitted, `library: ${p} book holds page form under the library scheme`);
+    ok(book.scale.x === book.scale.y && book.scale.y === book.scale.z, `library: ${p} book scale is uniform (no skew)`);
+    eq([leaf.scale.x, leaf.scale.y, leaf.scale.z], [1, 1, 1], `library: ${p} grid's own scale untouched`);
+    const sz = leaf.userData.size;
+    eq(r2(book.scale.x), r2(Math.min(opts.pageW / sz.x, opts.pageH / sz.y, opts.maxUpscale)),
+      `library: ${p} book carries the exact contain-fit`);
+  }
+}
+
+// 36. the deck (stack 'z', the default): a directory's books are CO-LOCATED — same x,y,
+//     page-centered — and step back exactly one gap each, front book at z=0, name order.
+{
+  const t = buildLibrary(PATHS);
+  const { pageH, gap } = LIBRARY_DEFAULTS;
+  const bookOf = (p) => t._leaves.get(p).parent;
+  const button = bookOf('src/components/Button.jsx'), modal = bookOf('src/components/Modal.jsx');
+  eq([button.position.x, button.position.y], [0, -pageH / 2], 'library: deck book sits page-centered under the stack origin');
+  eq([button.position.x, button.position.y], [modal.position.x, modal.position.y], 'library: deck books co-located in x,y');
+  eq(r2(button.position.z), 0, 'library: first book (by name) fronts the deck at z=0');
+  eq(r2(modal.position.z), r2(-gap), 'library: next book exactly one gap back');
+}
+
+// 37. sort orders are real questions: size (content area, big first) and ext (genre)
+//     reorder the same deck; reverse flips it.
+{
+  const paths = ['lib/aa.js', 'lib/zzzzzzzz.js', 'lib/b.css'];   // name↑ aa<b<z · width: zzz > b.css > aa
+  const z = (t, p) => r2(t._leaves.get(p).parent.position.z);
+  const byNameT = buildLibrary(paths);
+  ok(z(byNameT, 'lib/aa.js') > z(byNameT, 'lib/b.css') && z(byNameT, 'lib/b.css') > z(byNameT, 'lib/zzzzzzzz.js'),
+    'library: name sort decks aa → b.css → zzz front-to-back');
+  const bySize = buildLibrary(paths, { sort: 'size' });
+  eq(z(bySize, 'lib/zzzzzzzz.js'), 0, 'library: size sort fronts the biggest book');
+  const byExt = buildLibrary(paths, { sort: 'ext' });
+  eq(z(byExt, 'lib/b.css'), 0, 'library: ext sort shelves css before js');
+  const reversed = buildLibrary(paths, { reverse: true });
+  eq(z(reversed, 'lib/zzzzzzzz.js'), 0, 'library: reverse flips the name deck (zzz now fronts)');
+}
+
+// 38. stack axes: 'x' shelves books abreast (full page + gap steps), 'y' piles them
+//     descending; footprints report the pure page arithmetic (the deck's depth is honest z).
+{
+  const opts = { pageW: 20, pageH: 30, gap: 5 };
+  const deck = buildLibrary(['solo/a.js', 'solo/b.js', 'solo/c.js'], opts);
+  eq(deck.getNode('solo').userData.size, { x: 20, y: 30, z: 10 }, 'library: deck footprint = one page, (n−1)·gap deep');
+
+  const shelf = buildLibrary(['solo/a.js', 'solo/b.js', 'solo/c.js'], { ...opts, stack: 'x' });
+  eq(shelf.getNode('solo').userData.size, { x: 70, y: 30, z: 0 }, 'library: shelf footprint = n pages + gaps wide');
+  const sx = ['solo/a.js', 'solo/b.js', 'solo/c.js'].map((p) => r2(shelf._leaves.get(p).parent.position.x));
+  eq(sx, [-25, 0, 25], 'library: shelf books step one page+gap apart, centered');
+
+  const pile = buildLibrary(['solo/a.js', 'solo/b.js'], { ...opts, stack: 'y' });
+  eq(pile.getNode('solo').userData.size, { x: 20, y: 65, z: 0 }, 'library: pile footprint = n pages + gaps tall');
+  const py = ['solo/a.js', 'solo/b.js'].map((p) => r2(pile._leaves.get(p).parent.position.y));
+  eq(py, [-15, -50], 'library: pile books descend one page+gap apart');
+}
+
+// 39. child collections sit BELOW the parent's stack and one depthZ step back —
+//     the same depth-is-hierarchy reading as packed.
+{
+  const t = buildLibrary(['top.js', 'sub/inner.js'], { pageW: 20, pageH: 30, depthZ: 100, dirGap: 8 });
+  const wp = (p) => { const v = new THREE.Vector3(); t._leaves.get(p).getWorldPosition(v); return v; };
+  eq(r2(wp('top.js').z), 0, 'library: root book fronts at z=0');
+  eq(r2(wp('sub/inner.js').z), -100, 'library: child collection exactly one depthZ back');
+  ok(t.getNode('sub').position.y <= -(30 + 8) + 0.01, 'library: child collection hangs below the parent stack');
+}
+
+// 40. switching lenses is lossless AND books are durable: walk → library → walk
+//     reproduces the walk layout exactly — the SAME book objects persist, released
+//     back to natural form (no page, no scale), never dissolved or recreated.
+{
+  const t = build(PATHS);                  // walk
+  const walkSnap = snapshot(t);
+  const bookIds = new Map(t.paths().map((p) => [p, t.bookAt(p)]));
+  ok([...bookIds.values()].every((bk) => bk && !bk.fitted), 'books exist (released) under walk already');
+  t.setLayout(libraryLayout, { surface: false }); t.relayout();
+  ok(t.paths().every((p) => t.bookAt(p) === bookIds.get(p)), 'library: fit re-uses the SAME durable books');
+  ok(t.books().every((bk) => bk.fitted), 'library: every book holds page form while active');
+  t.setLayout(walkTreeLayout, {}); t.relayout();
+  eq(snapshot(t), walkSnap, 'library: switching back to walk reproduces the walk layout exactly');
+  ok(t.paths().every((p) => t.bookAt(p) === bookIds.get(p)), 'books survive the switch with identity intact');
+  ok(t.books().every((bk) => !bk.fitted && bk.scale.x === 1 && bk.parent.userData.isDir),
+    'books released to natural form, back under their dir nodes');
+  ok([...t._leaves.values()].every((l) => l.scale.x === 1 && l.scale.y === 1 && l.scale.z === 1),
+    'no fit scale leaked onto any grid');
+}
+
+// 41. order independence — the same library regardless of insert order (the sort is
+//     the spatial truth, not arrival time).
+{
+  // contentSnapshot keys ride _leaves' INSERTION order — canonicalize before comparing,
+  // so this asserts positions (the spatial truth), not map arrival order.
+  const canon = (snap) => Object.fromEntries(Object.entries(snap).sort(([a], [b]) => a.localeCompare(b)));
+  const fwd = buildLibrary(PATHS);
+  const rev = buildLibrary(PATHS, {}, [...PATHS].reverse());
+  eq(canon(contentSnapshot(fwd)), canon(contentSnapshot(rev)), 'library: identical regardless of insert order');
+}
+
+// 42. the Book as a first-class Measurable: fitted world bounds ARE the page (the bound
+//     form, what markers/framing see), and getWorldBounds unions pages so a fitted
+//     field rests on the floor by its books, not its loose text.
+{
+  const t = buildLibrary(['solo/a.js'], { pageW: 20, pageH: 30 });
+  const bk = t.bookAt('solo/a.js');
+  const size = new THREE.Vector3();
+  bk.getBounds().getSize(size);
+  eq([r2(size.x), r2(size.y)], [20, 30], 'fitted book world bounds = the exact page');
+  t.restAbove(0);
+  ok(Math.abs(r2(t.getWorldBounds().min.y)) <= 0.01, 'fitted field rests on the floor by its pages');
+  bk.release();
+  bk.getBounds().getSize(size);
+  ok(size.x < 20 - 0.01, 'released book bounds shrink back to the content');
+  eq(bk.fitInfo, null, 'released book reports no fit');
 }
 
 console.log(`\ncontenttree: ${pass} passed, ${fail} failed`);

@@ -22,6 +22,7 @@ import registerGroupCommands from './groupCommands.js';
 import registerSimulateCommands from './simulateCommands.js';
 import registerModeCommands from './modeCommands.js';
 import registerFileCommands from './fileCommands.js';
+import registerBookCommands from './bookCommands.js';
 import registerLayoutCommands from './layoutCommands.js';
 import registerRepoCommands from './repoCommands.js';
 import registerPanelCommands from './panelCommands.js';
@@ -69,6 +70,7 @@ export function registerAllCommands(router) {
     registerSimulateCommands(router);
     registerModeCommands(router);
     registerFileCommands(router);
+    registerBookCommands(router);
     registerLayoutCommands(router);
     registerRepoCommands(router);
     registerPanelCommands(router);

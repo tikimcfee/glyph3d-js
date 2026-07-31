@@ -3,7 +3,7 @@ import { setPanelStateColorDefaults } from '@glyph3d/core/collections';
 import { setGlyphLodParam, GLYPH_LOD_DEFAULTS } from '@glyph3d/core/GlyphField.js';
 import { setStrataParam, STRATA_DEFAULTS } from '@glyph3d/core/collections/StrataLayout.js';
 import { TERMINAL_CURSOR_DEFAULTS } from '@glyph3d/core/collections/TerminalGrid.js';
-import { JELLYFISH_DEFAULTS, schemeNameOf } from '@glyph3d/core/collections/layouts/index.js';
+import { JELLYFISH_DEFAULTS, LIBRARY_DEFAULTS, schemeNameOf } from '@glyph3d/core/collections/layouts/index.js';
 
 // Settings schema — the SINGLE source for both the Settings panel (renders a row
 // per entry) and the settings.* verbs (validate + apply). Only WIRED knobs live
@@ -31,16 +31,18 @@ const strataParam = (param) => (_ctx, v) => setStrataParam(param, v);
  *  not the `trail.` key) and re-apply — the header/info cards re-scale live, body sizes land on new moments. */
 const trailParam = (param) => (ctx, v) => { const t = ctx.agentTrail; if (!t) return; t.cfg[param] = v; t.applyScales?.(); };
 
-/** apply() for a jellyfish layout dial: merge the bare param into the content tree's live layout
- *  opts and re-lay the field — but only while the jellyfish (cylindrical-column) scheme is showing,
- *  since only it reads these. Under a flat scheme the value just persists (via setSetting) and is
- *  folded in when jellyfish is next named — see schemeSettingsOpts + the layout.scheme verb. */
-const jellyfishParam = (param) => (ctx, v) => {
+/** apply() for a layout-scheme dial: merge the bare param into the content tree's live layout
+ *  opts and re-lay the field — but only while that scheme is showing, since only it reads these.
+ *  Under any other scheme the value just persists (via setSetting) and is folded in when the
+ *  scheme is next named — see schemeSettingsOpts + the layout.scheme verb. */
+const schemeParam = (scheme, param) => (ctx, v) => {
   const tree = ctx?.contentTree;
-  if (!tree || schemeNameOf(tree.layout) !== 'jellyfish') return;
+  if (!tree || schemeNameOf(tree.layout) !== scheme) return;
   tree.setLayout(tree.layout, { ...(tree.layoutOpts || {}), [param]: v });
   tree.relayoutAndRest(0);
 };
+const jellyfishParam = (param) => schemeParam('jellyfish', param);
+const libraryParam = (param) => schemeParam('library', param);
 
 export const SETTINGS = [
   {
@@ -285,6 +287,15 @@ export const SETTINGS = [
   { key: 'layout.surfaceSegments', label: 'Surface arc segments (warped)', group: 'Layout', scheme: 'jellyfish', type: 'number', default: JELLYFISH_DEFAULTS.surfaceSegments, min: 2, max: 64, step: 1, apply: jellyfishParam('surfaceSegments') },
   { key: 'layout.surfaceBorder', label: 'Surface rim', group: 'Layout', scheme: 'jellyfish', type: 'bool', default: JELLYFISH_DEFAULTS.surfaceBorder, apply: jellyfishParam('surfaceBorder') },
   { key: 'layout.surfaceBorderColor', label: 'Surface rim color', group: 'Layout', scheme: 'jellyfish', type: 'color', default: '#' + JELLYFISH_DEFAULTS.surfaceBorderColor.toString(16).padStart(6, '0'), apply: jellyfishParam('surfaceBorderColor') },
+  // Layout — the library scheme: every file contain-fit onto one uniform page (a BOOK), a
+  // directory's books stacked in sorted order at a tight distance. The stack axis and sort
+  // are enum knobs and live on the verb (layout.scheme library --stack x --sort size); the
+  // surface* dials above are keyed to jellyfish, so the page face is dialed the same way.
+  { key: 'layout.pageW', label: 'Page width (book)', group: 'Layout', scheme: 'library', type: 'number', default: LIBRARY_DEFAULTS.pageW, min: 100, max: 4000, step: 20, apply: libraryParam('pageW') },
+  { key: 'layout.pageH', label: 'Page height (book)', group: 'Layout', scheme: 'library', type: 'number', default: LIBRARY_DEFAULTS.pageH, min: 100, max: 4000, step: 20, apply: libraryParam('pageH') },
+  { key: 'layout.gap', label: 'Book spacing (stack step)', group: 'Layout', scheme: 'library', type: 'number', default: LIBRARY_DEFAULTS.gap, min: 2, max: 600, step: 2, apply: libraryParam('gap') },
+  { key: 'layout.maxUpscale', label: 'Max fit upscale (small files)', group: 'Layout', scheme: 'library', type: 'number', default: LIBRARY_DEFAULTS.maxUpscale, min: 1, max: 20, step: 0.5, apply: libraryParam('maxUpscale') },
+  { key: 'layout.reverse', label: 'Reverse stack order', group: 'Layout', scheme: 'library', type: 'bool', default: LIBRARY_DEFAULTS.reverse, apply: libraryParam('reverse') },
   // Glyph LOD — the exact-curve ↔ stable-block handoff for minified text (kills the moiré/flicker of
   // sub-pixel strokes). Footprints are fwidth(glyphUV): bigger = smaller on screen. Pull the lod*
   // band DOWN to hand off to the flicker-free block sooner (trades mid-distance crispness for

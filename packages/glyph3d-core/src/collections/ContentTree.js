@@ -28,6 +28,7 @@
  */
 
 import * as THREE from 'three';
+import Book from './Book.js';
 import packedLayout from './layouts/packedLayout.js';
 import { LAYOUT_SCHEMES, schemeNameOf, disposePanelSurfaces } from './layouts/index.js';
 import { subtreeContentBounds } from './layouts/nodeUtils.js';
@@ -80,6 +81,9 @@ export default class ContentTree {
         this._dirs = new Map([['', this.root]]);
         // Leaf grids by full file path.
         this._leaves = new Map();
+        // Every leaf's durable Book (its spatial carrier), by the same path key. Books
+        // live as long as their leaf — schemes arrange them, never create/destroy them.
+        this._books = new Map();
         this._dirty = true;
         // Fired after every full (root) relayout — markers and other tree-decorating
         // systems rebuild from here, so they can never observe a stale layout.
@@ -104,6 +108,12 @@ export default class ContentTree {
 
     /** Every file path currently in the tree. */
     paths() { return [...this._leaves.keys()]; }
+
+    /** The durable Book carrying the leaf at `path`, or null. The address of a file's form. */
+    bookAt(path) { return this._books.get(keyOf(path)) || null; }
+
+    /** Every Book in the tree (the repository AS a collection of books). */
+    books() { return [...this._books.values()]; }
 
     /** Number of directory nodes (excluding the root). */
     dirCount() { return this._dirs.size - 1; }
@@ -137,14 +147,14 @@ export default class ContentTree {
      */
     contentChildren(node) {
         if (!node) return [];
-        // Descend through layout-group containers (jellyfish page/row VStacks carry
-        // userData.isLayoutGroup but no path) so the file leaves nested inside a page are
-        // still reached — focus.child/sibling navigate FILES, not the presentation columns.
+        // Descend through layout-group containers (jellyfish page/row VStacks) AND books
+        // (the durable carriers) so the file leaves inside are still reached —
+        // focus.child/sibling navigate the GRIDS, not their presentation shells.
         const out = [];
         const visit = (n) => {
             for (const c of n.children) {
                 if (!c.userData || c.userData.isMarker) continue;
-                if (c.userData.isLayoutGroup) { visit(c); continue; }
+                if (c.userData.isLayoutGroup || c.userData.isBook) { visit(c); continue; }
                 if (c.userData.path !== undefined) out.push(c);
             }
         };
@@ -210,9 +220,11 @@ export default class ContentTree {
     }
 
     /**
-     * Insert a file leaf at `path`. Builds the ancestor dir chain on demand and parents
-     * the leaf under its directory node. Re-inserting the same path replaces the leaf.
-     * Does NOT relayout (batch then call relayout()). Returns the parent dir node.
+     * Insert a file leaf at `path`. Builds the ancestor dir chain on demand, wraps the
+     * leaf in its durable Book (the spatial carrier every scheme arranges), and parents
+     * the book under the directory node. Re-inserting the same path replaces the leaf
+     * (and its book). Does NOT relayout (batch then call relayout()). Returns the
+     * parent dir node.
      */
     insert(leaf, path) {
         const parts = splitPath(path);
@@ -222,8 +234,13 @@ export default class ContentTree {
         if (this._leaves.has(full)) this.remove(full); // replace
         const dir = this._ensureDir(dirOf(parts), prefix);
         leaf.userData = { ...(leaf.userData || {}), path: full, name: baseOf(parts), isDir: false };
-        dir.add(leaf);
+        // The book mirrors the leaf's identity: it is the path-bearing child the layout
+        // partition sees, the unit structural schemes re-home, the shelf's future atom.
+        const book = new Book(leaf);
+        book.userData = { ...book.userData, path: full, name: baseOf(parts), isDir: false };
+        dir.add(book);
         this._leaves.set(full, leaf);
+        this._books.set(full, book);
         this._dirty = true;
         return dir;
     }
@@ -237,10 +254,16 @@ export default class ContentTree {
         const full = keyOf(path);
         const leaf = this._leaves.get(full);
         if (!leaf) return null;
-        const dir = leaf.parent;
-        dir?.remove(leaf);
+        const book = this._books.get(full);
+        // Prune from the PATH-derived dir, not the THREE parent — the book may currently
+        // hang inside a structural scheme's group (a jellyfish panel), and the leaf may
+        // be parented outside the tree entirely (docked to the camera bar).
+        const dir = this.parentOf(book);
+        book.parent?.remove(book);
+        book.dispose();               // detaches the leaf, frees the page face
         this._leaves.delete(full);
-        if (prune) this._pruneEmptyUp(dir);
+        this._books.delete(full);
+        if (prune && dir) this._pruneEmptyUp(dir);
         this._dirty = true;
         return leaf;
     }
@@ -318,7 +341,7 @@ export default class ContentTree {
      * @returns {{w:number,h:number}} the node's measured footprint
      */
     relayout(node = this.root) {
-        this._flattenGroups(node);
+        this._normalize(node);
         const size = this.layout(node, this.layoutOpts);
         if (node === this.root) {
             this._dirty = false;
@@ -328,30 +351,35 @@ export default class ContentTree {
     }
 
     /**
-     * Normalize away any layout-inserted grouping nodes (the jellyfish scheme's page/row
-     * VStacks, tagged userData.isLayoutGroup) under `node`, re-homing their file leaves back
-     * onto their directory node and dropping the empty containers. Runs before every relayout
-     * so the active scheme always starts from the canonical flat structure (file leaves direct
-     * under their dir): the wrap is idempotent (jellyfish re-packs fresh each pass) and
-     * reversible (a flat scheme sees flat files). A tree with no groups is untouched, and
-     * leaves parented OUTSIDE the tree (e.g. docked to the camera bar) are never reached —
-     * only a group's own descendants are re-homed, onto that group's directory parent.
+     * Normalize a subtree back to its canonical form before a layout pass, so the active
+     * scheme always starts from the same structure and switching lenses stays lossless:
+     *
+     *   1. Dissolve layout-inserted grouping nodes (the jellyfish scheme's page/row
+     *      VStacks, tagged userData.isLayoutGroup), re-homing their path-bearing units
+     *      (the BOOKS) back onto their directory node and dropping the empty containers.
+     *      The wrap is idempotent (jellyfish re-packs fresh each pass) and reversible.
+     *   2. Release every Book to its natural form (identity scale, leaf re-seated, page
+     *      face dropped) — books are DURABLE (never dissolved); only their form resets,
+     *      so the next scheme reads the canonical content and re-applies its own form.
+     *
+     * Leaves parented OUTSIDE the tree (e.g. docked to the camera bar) are never reached —
+     * their books stay in the tree, empty, as the stable home the dock re-attaches to.
      * @private
      */
-    _flattenGroups(node = this.root) {
+    _normalize(node = this.root) {
         const visit = (dir) => {
             for (const child of [...dir.children]) {
                 if (child.userData?.isLayoutGroup) {
-                    // gather the group's path-bearing leaf descendants, re-home them onto `dir`.
-                    const leaves = [];
+                    // gather the group's path-bearing unit descendants, re-home them onto `dir`.
+                    const units = [];
                     const gather = (g) => {
                         for (const c of g.children) {
                             if (c.userData?.isLayoutGroup) gather(c);
-                            else if (c.userData?.path !== undefined) leaves.push(c);
+                            else if (c.userData?.path !== undefined) units.push(c);
                         }
                     };
                     gather(child);
-                    for (const leaf of leaves) dir.add(leaf);   // THREE.add re-parents (row → dir)
+                    for (const unit of units) dir.add(unit);   // THREE.add re-parents (row → dir)
                     disposePanelSurfaces(child);   // free the panels' backing-face geometries first
                     dir.remove(child);
                 } else if (child.userData?.isDir) {
@@ -360,6 +388,7 @@ export default class ContentTree {
             }
         };
         visit(node);
+        node.traverse((o) => { if (o.userData?.isBook) o.release(); });
     }
 
     /**
@@ -395,26 +424,18 @@ export default class ContentTree {
     }
 
     /**
-     * World-space AABB of all content — for ground anchoring etc. Unions each leaf's own
-     * world box: a real grid's getBounds() when available, else a box derived from its
-     * world position ± its measured size (so it's correct even for geometry-less leaves,
-     * and reflects the LAYOUT extent rather than raw mesh geometry).
+     * World-space AABB of all content — for ground anchoring etc. Unions each BOOK's
+     * world box (BoundedObject3D.getBounds): the bound form when fitted (the page),
+     * the leaf's content box when released — and leafBox's userData.size fallback
+     * covers geometry-less leaves, so one path serves real grids and mocks alike.
      */
     getWorldBounds(target = new THREE.Box3()) {
         target.makeEmpty();
         this.root.updateWorldMatrix(true, true);
-        const wp = new THREE.Vector3();
         const tmp = new THREE.Box3();
-        for (const leaf of this._leaves.values()) {
-            if (typeof leaf.getBounds === 'function') {
-                const b = leaf.getBounds();
-                if (b && !b.isEmpty?.()) { target.union(b); continue; }
-            }
-            leaf.getWorldPosition(wp);
-            const s = leaf.userData.size || { x: 0, y: 0, z: 0 };
-            tmp.min.set(wp.x - s.x / 2, wp.y - s.y / 2, wp.z - s.z / 2);
-            tmp.max.set(wp.x + s.x / 2, wp.y + s.y / 2, wp.z + s.z / 2);
-            target.union(tmp);
+        for (const book of this._books.values()) {
+            const b = book.getBounds(tmp);
+            if (b && !b.isEmpty()) target.union(b);
         }
         return target;
     }
