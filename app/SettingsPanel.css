@@ -41,3 +41,8 @@
 }
 .glyph-range:hover::-webkit-slider-thumb { background: #5a96b3; }
 .glyph-range:hover::-moz-range-thumb { background: #5a96b3; }
+
+/* Section headers (collapsible groups) — the disclosure button's colors live here,
+ * not inline, so hover can brighten the whole row (caret + name inherit). */
+.glyph-section-hdr { color: #5c6675; }
+.glyph-section-hdr:hover { color: #9aa3b2; }

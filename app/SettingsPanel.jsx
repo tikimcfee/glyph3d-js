@@ -1,13 +1,36 @@
 import React, { useMemo, useState } from 'react';
+import { stateController } from '@glyph3d/core/services/state';
 import { SETTINGS, getSetting } from './client/settings.js';
 import './SettingsPanel.css';
 
 // SettingsPanel — the IDE's settings surface. Renders the shared SETTINGS schema
-// (one row per knob, grouped) and writes through the bus (settings.set / reset),
-// so a panel change and a CLI `settings.set` are the same action. Persistence is
-// client-only (StateController/localStorage) — settings survive a reload with no
-// relay. Display knobs (font/atlas) are built at boot, so changing them flags a
-// reload rather than pretending to apply live.
+// as collapsible sections (one row per knob, grouped; all closed by default) and
+// writes through the bus (settings.set / reset), so a panel change and a CLI
+// `settings.set` are the same action. Persistence is client-only
+// (StateController/localStorage) — settings survive a reload with no relay.
+// Display knobs (font/atlas) are built at boot, so changing them flags a reload
+// rather than pretending to apply live.
+
+// Which sections are open — view state, persisted with the rest of the settings
+// (StateController, `g3d.settingsPanel.openGroups`). Default is all closed. A
+// saved value the live schema can't account for (shape drift, or a group that was
+// renamed/removed) is cleared back to the default and the swap is logged — a
+// schema regroup never wedges the panel.
+const OPEN_KEY = 'settingsPanel.openGroups';
+
+function loadOpenGroups(groupNames) {
+  const raw = stateController.get(OPEN_KEY, null);
+  if (raw === null) return new Set();
+  if (Array.isArray(raw) && raw.every((g) => typeof g === 'string' && groupNames.has(g)))
+    return new Set(raw);
+  // Deferred past render: delete() dispatches state-changed, which other chrome
+  // listens to — firing it mid-render would nest their updates inside this one.
+  queueMicrotask(() => {
+    stateController.delete(OPEN_KEY);
+    console.warn(`[settings] saved section state ${JSON.stringify(raw)} doesn't match the current settings schema — cleared, defaulting to all sections closed`);
+  });
+  return new Set();
+}
 
 const styles = {
   content: {
@@ -29,9 +52,23 @@ const styles = {
     background: 'transparent', border: 'none', cursor: 'pointer', padding: '0 2px',
   },
   body: { padding: '6px 8px 12px', overflowY: 'auto', flex: '1 1 auto' },
-  group: { color: '#5c6675', textTransform: 'uppercase', fontSize: 10, letterSpacing: '0.08em', margin: '12px 2px 4px' },
-  // Hairline separator above each section after the first (uses the chrome divider color).
-  groupSep: { borderTop: '2px solid #1b1f29', marginTop: 16, paddingTop: 12 },
+  // Section header — a full-width disclosure button (caret + name + knob count).
+  // Its resting/hover colors live in SettingsPanel.css (.glyph-section-hdr) so
+  // :hover can win; the caret and name inherit and brighten with it.
+  groupHdr: {
+    display: 'flex', alignItems: 'center', gap: 6, width: '100%', margin: 0,
+    padding: '7px 2px', background: 'transparent', border: 'none', cursor: 'pointer',
+    font: 'inherit', textAlign: 'left', textTransform: 'uppercase', fontSize: 10,
+    letterSpacing: '0.08em',
+  },
+  caret: { flex: '0 0 auto', width: 10, fontSize: 8 },
+  groupName: { flex: '1 1 auto', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  // Closed-section cue: some knob inside is off-default (the open rows show ↺ instead).
+  groupDot: { flex: '0 0 auto', fontSize: 8, color: '#9aa3b2' },
+  groupCount: { flex: '0 0 auto', fontSize: 9, color: '#3d4450', fontVariantNumeric: 'tabular-nums' },
+  // Hairline separator above each section after the first (the chrome divider color).
+  sectionSep: { borderTop: '1px solid #1b1f29' },
+  sectionBody: { padding: '0 0 8px' },
   row: { display: 'flex', alignItems: 'center', gap: 8, padding: '3px 2px' },
   label: { flex: '1 1 auto', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   reload: { color: '#caa14a', fontSize: 10, flex: '0 0 auto' },
@@ -71,6 +108,14 @@ export default function SettingsPanel({ client }) {
     const o = {}; for (const s of SETTINGS) o[s.key] = getSetting(s.key); return o;
   });
   const [reloadPending, setReloadPending] = useState(false);
+  const [open, setOpen] = useState(() => loadOpenGroups(new Set(groups.map(([g]) => g))));
+
+  const toggleGroup = (group) => {
+    const next = new Set(open);
+    if (next.has(group)) next.delete(group); else next.add(group);
+    stateController.set(OPEN_KEY, [...next]);
+    setOpen(next);
+  };
 
   const commit = (def, value) => {
     setVals((v) => ({ ...v, [def.key]: value }));
@@ -113,67 +158,85 @@ export default function SettingsPanel({ client }) {
         <button type="button" style={styles.reset} onClick={reset} title="reset all settings to defaults">reset</button>
       </div>
       <div style={styles.body}>
-        {groups.map(([group, defs], gi) => (
-          <div key={group}>
-            <div style={gi === 0 ? styles.group : { ...styles.group, ...styles.groupSep }}>{group}</div>
-            {defs.map((def) => (
-              <div key={def.key}>
-                <div style={styles.row}>
-                  <span style={styles.label} title={def.key}>{def.label}</span>
-                  {def.reload && <span style={styles.reload}>reload</span>}
-                  {isModified(def) && (
-                    <button
-                      type="button"
-                      style={styles.rowReset}
-                      title={`reset to default (${def.default})`}
-                      onClick={() => resetOne(def)}
-                    >↺</button>
-                  )}
-                  {def.type === 'color' ? (
-                    <input
-                      type="color"
-                      style={styles.swatch}
-                      value={vals[def.key]}
-                      onChange={(e) => commit(def, e.target.value)}
-                    />
-                  ) : def.type === 'bool' ? (
-                    <input
-                      type="checkbox"
-                      checked={!!vals[def.key]}
-                      onChange={(e) => commit(def, e.target.checked)}
-                    />
-                  ) : (
-                    <input
-                      type="number"
-                      style={styles.num}
-                      value={vals[def.key]}
-                      min={def.min} max={def.max} step={def.step}
-                      onChange={(e) => commit(def, e.target.value)}
-                      onKeyDown={(e) => e.stopPropagation()}
-                    />
-                  )}
-                </div>
-                {/* Slider under each numeric row — min/max bounds + drag for quick
-                    tweaks; shares commit() with the number field, so they stay in sync. */}
-                {def.type === 'number' && (
-                  <div style={styles.sliderRow}>
-                    <span style={{ ...styles.bound, textAlign: 'right' }}>{def.min}</span>
-                    <input
-                      type="range"
-                      className="glyph-range"
-                      style={styles.slider}
-                      min={def.min} max={def.max} step={def.step}
-                      value={Number.isFinite(parseFloat(vals[def.key])) ? parseFloat(vals[def.key]) : def.default}
-                      onChange={(e) => commit(def, e.target.value)}
-                      onKeyDown={(e) => e.stopPropagation()}
-                    />
-                    <span style={{ ...styles.bound, textAlign: 'left' }}>{def.max}</span>
+        {groups.map(([group, defs], gi) => {
+          const isOpen = open.has(group);
+          return (
+          <div key={group} style={gi === 0 ? undefined : styles.sectionSep}>
+            <button
+              type="button"
+              className="glyph-section-hdr"
+              style={styles.groupHdr}
+              onClick={() => toggleGroup(group)}
+              title={`${isOpen ? 'collapse' : 'expand'} ${group}`}
+            >
+              <span style={styles.caret}>{isOpen ? '▾' : '▸'}</span>
+              <span style={styles.groupName}>{group}</span>
+              {!isOpen && defs.some(isModified) && <span style={styles.groupDot} title="has modified settings">●</span>}
+              <span style={styles.groupCount}>{defs.length}</span>
+            </button>
+            {isOpen && (
+              <div style={styles.sectionBody}>
+                {defs.map((def) => (
+                  <div key={def.key}>
+                    <div style={styles.row}>
+                      <span style={styles.label} title={def.key}>{def.label}</span>
+                      {def.reload && <span style={styles.reload}>reload</span>}
+                      {isModified(def) && (
+                        <button
+                          type="button"
+                          style={styles.rowReset}
+                          title={`reset to default (${def.default})`}
+                          onClick={() => resetOne(def)}
+                        >↺</button>
+                      )}
+                      {def.type === 'color' ? (
+                        <input
+                          type="color"
+                          style={styles.swatch}
+                          value={vals[def.key]}
+                          onChange={(e) => commit(def, e.target.value)}
+                        />
+                      ) : def.type === 'bool' ? (
+                        <input
+                          type="checkbox"
+                          checked={!!vals[def.key]}
+                          onChange={(e) => commit(def, e.target.checked)}
+                        />
+                      ) : (
+                        <input
+                          type="number"
+                          style={styles.num}
+                          value={vals[def.key]}
+                          min={def.min} max={def.max} step={def.step}
+                          onChange={(e) => commit(def, e.target.value)}
+                          onKeyDown={(e) => e.stopPropagation()}
+                        />
+                      )}
+                    </div>
+                    {/* Slider under each numeric row — min/max bounds + drag for quick
+                        tweaks; shares commit() with the number field, so they stay in sync. */}
+                    {def.type === 'number' && (
+                      <div style={styles.sliderRow}>
+                        <span style={{ ...styles.bound, textAlign: 'right' }}>{def.min}</span>
+                        <input
+                          type="range"
+                          className="glyph-range"
+                          style={styles.slider}
+                          min={def.min} max={def.max} step={def.step}
+                          value={Number.isFinite(parseFloat(vals[def.key])) ? parseFloat(vals[def.key]) : def.default}
+                          onChange={(e) => commit(def, e.target.value)}
+                          onKeyDown={(e) => e.stopPropagation()}
+                        />
+                        <span style={{ ...styles.bound, textAlign: 'left' }}>{def.max}</span>
+                      </div>
+                    )}
                   </div>
-                )}
+                ))}
               </div>
-            ))}
+            )}
           </div>
-        ))}
+          );
+        })}
         {reloadPending && (
           <div style={styles.banner}>
             <span style={{ flex: '1 1 auto' }}>Display changes need a reload.</span>
