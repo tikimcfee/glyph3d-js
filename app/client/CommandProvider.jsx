@@ -288,6 +288,7 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // lines toggle independently (Tree settings); layout.arrows is the master on/off.
     state.ctx.contentTreeArrows = new ContentTreeArrows(contentTree);
     applyGroupSettings(state.ctx, 'Tree');   // fold persisted file/dir-line toggles in at boot
+    applyGroupSettings(state.ctx, 'Labels'); // fold persisted container-label dials in at boot
     applyGroupSettings(state.ctx, 'Appearance'); // set the configured interaction colors as the panel default before any window spawns
     applyGroupSettings(state.ctx, 'Glyph LOD');  // fold persisted minification/LOD dials into the global glyph uniforms at boot
 

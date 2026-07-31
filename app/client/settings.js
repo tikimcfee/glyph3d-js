@@ -4,6 +4,7 @@ import { setGlyphLodParam, GLYPH_LOD_DEFAULTS } from '@glyph3d/core/GlyphField.j
 import { setStrataParam, STRATA_DEFAULTS } from '@glyph3d/core/collections/StrataLayout.js';
 import { TERMINAL_CURSOR_DEFAULTS } from '@glyph3d/core/collections/TerminalGrid.js';
 import { JELLYFISH_DEFAULTS, LIBRARY_DEFAULTS, schemeNameOf } from '@glyph3d/core/collections/layouts/index.js';
+import { LABEL_DEFAULTS } from '@glyph3d/core/collections/ContentTreeLabels.js';
 
 // Settings schema — the SINGLE source for both the Settings panel (renders a row
 // per entry) and the settings.* verbs (validate + apply). Only WIRED knobs live
@@ -30,6 +31,11 @@ const strataParam = (param) => (_ctx, v) => setStrataParam(param, v);
 /** apply() for an agent-trail card-scale knob: push the value to AgentTrail.cfg (the bare param name,
  *  not the `trail.` key) and re-apply — the header/info cards re-scale live, body sizes land on new moments. */
 const trailParam = (param) => (ctx, v) => { const t = ctx.agentTrail; if (!t) return; t.cfg[param] = v; t.applyScales?.(); };
+
+/** apply() for a container-label dial: patch the bare param into ContentTreeLabels' opts and
+ *  rebuild the label field live. Color knobs store '#rrggbb'; the overlay wants a hex int. */
+const labelParam = (param, toHex = false) => (ctx, v) =>
+  ctx.contentTreeLabels?.configure({ [param]: toHex ? parseInt(String(v).slice(1), 16) : v });
 
 /** apply() for a layout-scheme dial: merge the bare param into the content tree's live layout
  *  opts and re-lay the field — but only while that scheme is showing, since only it reads these.
@@ -257,6 +263,33 @@ export const SETTINGS = [
     key: 'tree.dirLines', label: 'Directory ownership lines', group: 'Tree', type: 'bool', default: true,
     apply: (ctx, v) => ctx.contentTreeArrows?.setShowDirs?.(v),
   },
+  // Labels — the container labels (ContentTreeLabels): every visible directory named in space.
+  // The same dials as the layout.labels verb; every change rebuilds the label field live and
+  // persists. Sizing is the container FIT (the name spans `fit` of its container's width,
+  // clamped by the scale floor/cap); the hover pair drives the ancestor-chain grow. Ranges are
+  // deliberately wide — the operator decides what's "too big". Defaults mirror LABEL_DEFAULTS.
+  {
+    key: 'labels.enabled', label: 'Container labels', group: 'Labels', type: 'bool', default: true,
+    apply: (ctx, v) => ctx.contentTreeLabels?.setEnabled?.(v),
+  },
+  { key: 'labels.fit', label: 'Name fit (× container width)', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.fit, min: 0.05, max: 2, step: 0.05, apply: labelParam('fit') },
+  { key: 'labels.scaleMin', label: 'Glyph scale floor', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.scaleMin, min: 0.05, max: 100, step: 0.05, apply: labelParam('scaleMin') },
+  { key: 'labels.scaleMax', label: 'Glyph scale cap', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.scaleMax, min: 0.5, max: 500, step: 0.5, apply: labelParam('scaleMax') },
+  {
+    key: 'labels.showCount', label: 'Stat line (N files)', group: 'Labels', type: 'bool', default: !!LABEL_DEFAULTS.showCount,
+    apply: (ctx, v) => ctx.contentTreeLabels?.configure({ showCount: v ? 1 : 0 }),
+  },
+  { key: 'labels.countScale', label: 'Stat line size (× name)', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.countScale, min: 0.05, max: 2, step: 0.05, apply: labelParam('countScale') },
+  { key: 'labels.hoverBoost', label: 'Hover grow (×)', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.hoverBoost, min: 0.1, max: 10, step: 0.1, apply: labelParam('hoverBoost') },
+  { key: 'labels.hoverEase', label: 'Hover grow rate (1/s)', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.hoverEase, min: 0.5, max: 60, step: 0.5, apply: labelParam('hoverEase') },
+  { key: 'labels.opacity', label: 'Opacity (resting)', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.opacity, min: 0, max: 1, step: 0.02, apply: labelParam('opacity') },
+  { key: 'labels.minAlpha', label: 'Opacity (arrived)', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.minAlpha, min: 0, max: 1, step: 0.02, apply: labelParam('minAlpha') },
+  { key: 'labels.fadeStart', label: 'Approach fade starts (dist)', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.fadeStart, min: 0, max: 4000, step: 10, apply: labelParam('fadeStart') },
+  { key: 'labels.fadeEnd', label: 'Approach fade full (dist)', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.fadeEnd, min: 0, max: 2000, step: 10, apply: labelParam('fadeEnd') },
+  { key: 'labels.gapY', label: 'Lift above container (× row)', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.gapY, min: 0, max: 10, step: 0.05, apply: labelParam('gapY') },
+  { key: 'labels.zLift', label: 'Lift toward viewer (z)', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.zLift, min: 0, max: 500, step: 1, apply: labelParam('zLift') },
+  { key: 'labels.colorA', label: 'Name color (shallow)', group: 'Labels', type: 'color', default: '#' + LABEL_DEFAULTS.colorA.toString(16).padStart(6, '0'), apply: labelParam('colorA', true) },
+  { key: 'labels.colorB', label: 'Name color (deep)', group: 'Labels', type: 'color', default: '#' + LABEL_DEFAULTS.colorB.toString(16).padStart(6, '0'), apply: labelParam('colorB', true) },
   // Layout — the jellyfish CStack scheme: a directory becomes one TALL cylindrical COLUMN whose
   // surface is tiled by panels (files shelf-packed into bounded tiles). Every dial re-lays the
   // field live while jellyfish is the active scheme (else it persists and seeds on next activation
