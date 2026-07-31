@@ -23,7 +23,9 @@ const styles = {
   },
   btn: (enabled) => ({
     appearance: 'none',
-    border: '1px solid #1b1f29',
+    // Longhand, not the `border` shorthand: the map button merges a borderColor
+    // variant on top, and React refuses shorthand+longhand mixes across rerenders.
+    borderWidth: 1, borderStyle: 'solid', borderColor: '#1b1f29',
     borderRadius: 4,
     background: enabled ? 'rgba(255,255,255,0.03)' : 'transparent',
     color: enabled ? '#c8ccd6' : '#4a515f',

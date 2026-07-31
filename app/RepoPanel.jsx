@@ -122,10 +122,12 @@ export default function RepoPanel({ client }) {
 
   // Open any local path as a field root — the typed-path twin of the file
   // browser's ⊞. file.openDir canonicalizes ('~' works) and registers the
-  // reach root server-side.
+  // reach root server-side. With an EMPTY input, Open routes you into the
+  // Files browser instead of sitting dead: selection lives in the tree.
   const openLocation = useCallback(async () => {
     const p = pathInput.trim();
-    if (!p || !client || busy) return;
+    if (!client || busy) return;
+    if (!p) { client.router.execute(['panel.open', 'files']); return; }
     setBusy(true); setError(null);
     try {
       const r = await client.router.execute(['file.openDir', p]);
@@ -204,10 +206,13 @@ export default function RepoPanel({ client }) {
                 disabled={busy}
                 spellCheck={false}
               />
-              <button type="button" style={styles.open} onClick={openLocation} disabled={busy || !pathInput.trim()}>
+              <button type="button" style={styles.open} onClick={openLocation} disabled={busy}
+                title={pathInput.trim() ? 'open this path as a field root' : 'browse the filesystem in the Files panel'}>
                 Open
               </button>
             </div>
+            <div style={styles.localRow} title="pick a directory in the Files panel — browse ~ or / and hit ⊞"
+              onClick={() => client?.router.execute(['panel.open', 'files'])}>▸ browse the filesystem →</div>
             <div style={styles.localRow} title="render the local project the relay is serving"
               onClick={browseLocal}>▦ open served project →</div>
             {localRoots.map((dir) => (

@@ -267,27 +267,32 @@ export default function FileTree({ client }) {
     return () => { reg?.removeChangeListener?.(refresh); offConn?.(); };
   }, [client]);
 
-  // Top-level anchors: served root (expanded) + opened roots + quiet ~ and /.
+  // Top-level entries: quiet browse anchors FIRST (~ and / — two collapsed rows,
+  // always visible, never buried under the expanded project), then opened roots,
+  // then the served root (expanded). Anchors-below-the-tree was the discoverability
+  // bug: a real project's expanded tree pushed them under the fold, so "browse
+  // anywhere" looked like it didn't exist.
   const rootsList = useMemo(() => {
     if (rootInfo?.root) {
       const served = rootInfo.root;
-      const out = [{ path: served, label: baseName(served) || served, kind: 'served' }];
+      const out = [];
+      if (rootInfo.home) out.push({ path: rootInfo.home, label: '~', kind: 'anchor' });
+      out.push({ path: '/', label: '/', kind: 'anchor' });
       for (const p of pinnedRoots) {
         if (p !== served && !p.startsWith(underOf(served))) out.push({ path: p, label: baseName(p), kind: 'pinned' });
       }
-      if (rootInfo.home) out.push({ path: rootInfo.home, label: '~', kind: 'anchor' });
-      out.push({ path: '/', label: '/', kind: 'anchor' });
+      out.push({ path: served, label: baseName(served) || served, kind: 'served' });
       return out;
     }
     return [{ path: '', label: repoLabel || 'repository', kind: 'served' }];
   }, [rootInfo, pinnedRoots, repoLabel]);
 
-  // Auto-expand the primary root when it (re)appears.
-  const primaryRoot = rootsList[0]?.path;
+  // Auto-expand the served root when it (re)appears.
+  const servedRoot = rootsList.find((r) => r.kind === 'served')?.path;
   useEffect(() => {
-    if (primaryRoot == null) return;
-    setExpanded((prev) => (prev.has(primaryRoot) ? prev : new Set(prev).add(primaryRoot)));
-  }, [primaryRoot]);
+    if (servedRoot == null) return;
+    setExpanded((prev) => (prev.has(servedRoot) ? prev : new Set(prev).add(servedRoot)));
+  }, [servedRoot]);
 
   // Lazy fetch: one shallow readDir per expanded dir without a listing. The
   // fetching guard stops double-fires while a request is in flight; a landed
