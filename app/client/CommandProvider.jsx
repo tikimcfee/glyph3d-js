@@ -21,6 +21,7 @@ import WorldLayout from '@glyph3d/core/collections/WorldLayout.js';
 import ContentTreeMarkers from '@glyph3d/core/collections/ContentTreeMarkers.js';
 import ContentTreeArrows from '@glyph3d/core/collections/ContentTreeArrows.js';
 import ContentTreeProbes from '@glyph3d/core/collections/ContentTreeProbes.js';
+import ContentTreeLabels from '@glyph3d/core/collections/ContentTreeLabels.js';
 import SessionStore from './SessionStore.js';
 import WorkspaceModel from './WorkspaceModel.js';
 import { getSetting, applyGroupSettings } from './settings.js';
@@ -179,12 +180,18 @@ function VisitorRunner({ stateRef }) {
 }
 
 /**
- * DockRunner — parks the camera-locked dock ahead of the active camera and
- * advances its tile animations once per frame. Logic-only (returns null);
- * guarded so it's a no-op until the effect wires ctx.cameraDock.
+ * DockRunner — the camera-coupled per-frame systems: parks the camera-locked dock
+ * ahead of the active camera and advances its tile animations, and drives the
+ * container labels' approach fade + hover grow (the hovered entity's ancestor
+ * containers swell their names). Logic-only (returns null); guarded so it's a
+ * no-op until the effect wires the ctx.
  */
 function DockRunner({ stateRef }) {
-  useFrame((state, dt) => stateRef.current?.ctx?.cameraDock?.update(dt, state.camera));
+  useFrame((state, dt) => {
+    const c = stateRef.current?.ctx;
+    c?.cameraDock?.update(dt, state.camera);
+    c?.contentTreeLabels?.update(state.camera, dt, c?.attentionManager?.state?.hover?.id ?? null);
+  });
   return null;
 }
 
@@ -270,6 +277,11 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // Bounding prisms: per-directory translucent volumes, parented into the dir nodes
     // and rebuilt on every tree relayout (tree.onRelayout). layout.markers dials them.
     state.ctx.contentTreeMarkers = new ContentTreeMarkers(contentTree);
+
+    // Container labels: every visible directory named in space — one shared GlyphField
+    // under the tree root, rebuilt on relayout; depth-scaled (physical LOD) with a
+    // per-frame approach fade (<DockRunner/> ticks it). layout.labels dials them.
+    state.ctx.contentTreeLabels = new ContentTreeLabels(contentTree, atlas);
 
     // Ownership lines: per-directory wires from each dir's hub to every file and child
     // dir it contains, parented into the node and rebuilt on relayout. File lines and dir

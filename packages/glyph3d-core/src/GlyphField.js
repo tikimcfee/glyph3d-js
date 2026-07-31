@@ -196,8 +196,12 @@ function _buildVertexNode(uniforms) {
         const gColor = textureLoad(groupTex, ivec2(int(2), grow)); // col 2: color multiplier
         const gScale = textureLoad(groupTex, ivec2(int(3), grow)); // col 3: scale + colorBlend (w)
 
-        // World position = aligned quad + (instancePos * groupScale) + groupOffset
-        const worldPos = scaled.add(alignOffset).add(iPos.mul(gScale.xyz)).add(gPos.xyz);
+        // World position = (aligned quad + instancePos) * groupScale + groupOffset.
+        // The group scale multiplies the WHOLE glyph (quad size and position alike), so
+        // a group scales as one rigid label/badge about its own origin — bake glyph
+        // positions group-LOCAL and put the anchor in the group offset to grow text in
+        // place with one O(1) write (identity groups: scale 1, offset 0 — unchanged).
+        const worldPos = scaled.add(alignOffset).add(iPos).mul(gScale.xyz).add(gPos.xyz);
 
         // Standard MVP projection
         const clipPos = cameraProjectionMatrix.mul(modelViewMatrix.mul(vec4(worldPos, float(1))));

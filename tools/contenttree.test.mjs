@@ -10,6 +10,8 @@ import * as THREE from 'three';
 import ContentTree from '../packages/glyph3d-core/src/collections/ContentTree.js';
 import { walkTreeLayout, districtLayout, packedLayout, libraryLayout, PACKED_DEFAULTS, LIBRARY_DEFAULTS } from '../packages/glyph3d-core/src/collections/layouts/index.js';
 import ContentTreeMarkers from '../packages/glyph3d-core/src/collections/ContentTreeMarkers.js';
+import { collectDirLabels, LABEL_DEFAULTS } from '../packages/glyph3d-core/src/collections/ContentTreeLabels.js';
+import { subtreeContentBounds } from '../packages/glyph3d-core/src/collections/layouts/nodeUtils.js';
 
 let pass = 0, fail = 0;
 const ok = (cond, msg) => { if (cond) pass++; else { fail++; console.log(`  ✗ ${msg}`); } };
@@ -694,6 +696,61 @@ const buildLibrary = (paths, opts = {}, order = paths) => {
   bk.getBounds().getSize(size);
   ok(size.x < 20 - 0.01, 'released book bounds shrink back to the content');
   eq(bk.fitInfo, null, 'released book reports no fit');
+}
+
+// ───────────────────────── container labels ─────────────────────────
+
+const LM = { rowH: 4, charW: 2 };   // mock cell metrics (world units at scale 1)
+
+// 43. collectDirLabels — the chain-compression displayName finally has its consumer:
+//     pass-throughs yield NO label, the tail labels itself with the JOINED chain name,
+//     real subdirs label with their own name, and counts are recursive file totals.
+{
+  const t = buildPacked([]);
+  t.insert(makeLeaf('/home/u/dev/proj/a.js'), '/home/u/dev/proj/a.js');
+  t.insert(makeLeaf('/home/u/dev/proj/src/b.js'), '/home/u/dev/proj/src/b.js');
+  t.relayout();
+  const items = collectDirLabels(t, {}, LM);
+  const byPath = new Map(items.map((i) => [i.path, i]));
+  ok(!byPath.has('/home') && !byPath.has('/home/u') && !byPath.has('/home/u/dev'), 'labels: pass-throughs get no label');
+  eq(byPath.get('/home/u/dev/proj')?.text, 'home/u/dev/proj', 'labels: the tail speaks the joined chain');
+  eq(byPath.get('/home/u/dev/proj')?.countText, '2 files', 'labels: the stat line counts recursively');
+  eq(byPath.get('/home/u/dev/proj/src')?.text, 'src', 'labels: a content subdir speaks its own name');
+  eq(byPath.get('/home/u/dev/proj/src')?.countText, '1 file', 'labels: the stat line speaks singular');
+  eq(items.length, 2, 'labels: exactly the visible containers are labeled');
+}
+
+// 44. physical LOD is the container FIT: glyph scale makes the text span `fit` of the
+//     container's width (clamped to [scaleMin, scaleMax]); visible depth survives the
+//     compressed chain (tail = 1, subdir = 2); showCount 0 drops the suffix.
+{
+  const t = buildPacked([]);
+  t.insert(makeLeaf('/home/u/dev/proj/a.js'), '/home/u/dev/proj/a.js');
+  t.insert(makeLeaf('/home/u/dev/proj/src/b.js'), '/home/u/dev/proj/src/b.js');
+  t.relayout();
+  const items = collectDirLabels(t, { showCount: 0 }, LM);
+  const byPath = new Map(items.map((i) => [i.path, i]));
+  eq(byPath.get('/home/u/dev/proj')?.depth, 1, 'labels: compressed tail is VISIBLE depth 1');
+  eq(byPath.get('/home/u/dev/proj/src')?.depth, 2, 'labels: its subdir is visible depth 2');
+  const src = byPath.get('/home/u/dev/proj/src');
+  const w = subtreeContentBounds(t.getNode('/home/u/dev/proj/src'));
+  const expected = Math.min(Math.max(LABEL_DEFAULTS.fit * (w.max.x - w.min.x) / ([...src.text].length * LM.charW), LABEL_DEFAULTS.scaleMin), LABEL_DEFAULTS.scaleMax);
+  eq(r2(src.scale), r2(expected), 'labels: scale = clamp(fit × containerW / textW)');
+  eq(byPath.get('/home/u/dev/proj')?.countText, null, 'labels: showCount 0 drops the stat line');
+  // The clamps bind at the extremes: a vanishing fit floors at scaleMin, a huge one caps at scaleMax.
+  ok(collectDirLabels(t, { fit: 1e-6 }, LM).every((i) => i.scale === LABEL_DEFAULTS.scaleMin), 'labels: tiny fit floors at scaleMin');
+  ok(collectDirLabels(t, { fit: 1e6 }, LM).every((i) => i.scale === LABEL_DEFAULTS.scaleMax), 'labels: huge fit caps at scaleMax');
+}
+
+// 45. placement: a label sits ABOVE its container's content (root-local frame), at the
+//     container's left edge — and an empty tree yields no labels at all.
+{
+  const t = build(['d/a.js', 'd/b.js']);
+  const items = collectDirLabels(t, {}, LM);
+  eq(items.length, 1, 'labels: one container, one label');
+  const top = t.getLocalBounds().max.y;
+  ok(items[0].y > top - 0.01, `labels: label rides above the container top (y=${r2(items[0].y)} vs top=${r2(top)})`);
+  ok(collectDirLabels(new ContentTree(), {}, LM).length === 0, 'labels: empty tree, silent field');
 }
 
 console.log(`\ncontenttree: ${pass} passed, ${fail} failed`);
