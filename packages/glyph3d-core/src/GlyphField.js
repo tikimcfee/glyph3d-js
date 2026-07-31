@@ -742,6 +742,10 @@ export default class GlyphField {
      * @param {Object} [options.defaultColor] - { r, g, b }
      * @param {number} [options.worldScale]
      * @param {number} [options.maxGroups]
+     * @param {boolean} [options.frustumCulled=true] - Per-object frustum culling of the instance
+     *     mesh. A field whose glyph positions ride group offsets must pass false: offsets are GPU
+     *     state the CPU-side bounds cannot see, so the bounding sphere is false and three would
+     *     cull the whole mesh mid-scene — e.g. the container-label field spanning the whole tree.
      */
     constructor(scene, atlas, options = {}) {
         this.scene  = scene;
@@ -752,6 +756,11 @@ export default class GlyphField {
 
         // Opaque occluder LOD mode (dense distant scenes) — see _createInstanceMesh.
         this._occluder = !!options.occluder;
+
+        // Frustum-cull opt-out (see _createInstanceMesh): the CPU-side geometry bounds cover
+        // instance positions only, so a field anchored via group offsets has a false bounding
+        // sphere and must not be culled as one unit.
+        this._frustumCulled = options.frustumCulled !== false;
 
         // Register with the live Slug atlas so on-demand glyph encoding (box-drawing,
         // spinner stars, rounded corners, …) hot-swaps fresh curve textures into us.
@@ -935,7 +944,9 @@ export default class GlyphField {
         // We instead write the REAL instance extent into geometry.boundingBox/Sphere on every
         // position change (_updateGeometryBounds), so three's built-in per-object frustum cull
         // works: off-screen grids skip their draw for free, every render — no virtualizer needed.
-        mesh.frustumCulled = true;
+        // That extent still covers instance positions ONLY — a field whose glyphs ride group
+        // offsets (GPU texture state) has a false sphere and constructs with frustumCulled: false.
+        mesh.frustumCulled = this._frustumCulled;
         return mesh;
     }
 
@@ -1751,6 +1762,10 @@ export default class GlyphField {
      * the cull will test stale bounds and wrongly drop a grid whose glyphs moved. (Clip is safe —
      * it discards in-shader without moving positions, leaving these bounds conservative; scroll
      * folds into positions at build time, so a rebuild already covers it.)
+     *
+     * LIMITATION: these bounds see instance positions only, never group offsets (dynamic GPU
+     * texture state) — a field that anchors its glyphs via group offsets must construct with
+     * frustumCulled: false, since its sphere here is false by construction.
      * @param {{min:{x,y,z},max:{x,y,z}}} [precomputed] - layout extent from the worker, if available
      * @private
      */
