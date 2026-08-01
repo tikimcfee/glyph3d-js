@@ -85,7 +85,11 @@ export default class ContentTreeArrows {
 
         for (const [path, node] of this.tree._dirs.entries()) {
             const { files, dirs } = partitionChildren(node);   // markers excluded
-            const nF = showF ? files.length : 0, nD = showD ? dirs.length : 0;
+            // A library VOLUME is the dir's own body sitting at its origin — a hub→volume
+            // wire is a line from the dir to itself, pure noise in the title area. The
+            // pages inside are ONE object; ownership is already told by containment.
+            const fileLeaves = files.filter((f) => !f.userData?.isVolume);
+            const nF = showF ? fileLeaves.length : 0, nD = showD ? dirs.length : 0;
             const count = nF + nD;                             // one line per shown child
             if (count === 0) { this._dropLinks(path); continue; }
             seen.add(path);
@@ -109,7 +113,7 @@ export default class ContentTreeArrows {
             const col = link.geo.getAttribute('color').array;
             let k = 0;
             // hub = the directory's own origin (top-center); wires to each shown child.
-            if (showF) for (const leaf of files) k = this._writeLine(pos, col, k, this._fileAnchor(leaf), colFile);
+            if (showF) for (const leaf of fileLeaves) k = this._writeLine(pos, col, k, this._fileAnchor(leaf), colFile);
             if (showD) for (const dir of dirs) k = this._writeLine(pos, col, k, dir.position, colDir);
 
             link.geo.getAttribute('position').needsUpdate = true;

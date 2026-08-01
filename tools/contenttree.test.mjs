@@ -905,18 +905,20 @@ const LM = { rowH: 4, charW: 2 };   // mock cell metrics (world units at scale 1
   bk.dispose();
 }
 
-// 47. volume labels: only the OPEN page wears its name (a deck of co-located labels is
-//     noise), the item carries its follow ref, a turn renames the deck's one label —
-//     and the dir's stat line still counts every page.
+// 47. volume labels compose ONE title block: in-volume books carry no label of their
+//     own — the dir's stat line BECOMES the page line (open name · position), so
+//     nothing collides in the title area; a turn re-writes the page line.
 {
   const t = buildLibrary(['d/a.js', 'd/b.js'], { pageW: 20, pageH: 30 });
-  const items = collectBookLabels(t, {}, LM);
-  eq(items.map((i) => i.text), ['a.js'], 'volume labels: only the open page speaks');
-  ok(items[0].follow === t.bookAt('d/a.js') && !!items[0].local, 'volume labels: the item follows its book');
+  eq(collectBookLabels(t, {}, LM), [], 'volume labels: deck pages carry no separate label');
+  const pageLine = () => collectDirLabels(t, {}, LM).find((i) => i.path === 'd')?.countText;
+  eq(pageLine(), 'a.js · 1/2', 'volume labels: the dir stat line is the page line');
   t.volumeAt('d').pageTo(1);
-  eq(collectBookLabels(t, {}, LM).map((i) => i.text), ['b.js'], 'volume labels: the turn renames the label');
-  const dirItems = collectDirLabels(t, {}, LM);
-  eq(dirItems.find((i) => i.path === 'd')?.countText, '2 files', 'volume labels: the dir stat line counts the pages');
+  eq(pageLine(), 'b.js · 2/2', 'volume labels: a turn re-writes the page line');
+  // Off the deck ('x' shelf), books keep their own labels and the dir counts files.
+  const shelf = buildLibrary(['d/a.js', 'd/b.js'], { pageW: 20, pageH: 30, stack: 'x' });
+  eq(collectBookLabels(shelf, {}, LM).map((i) => i.text).sort(), ['a.js', 'b.js'], 'shelf books keep their own labels');
+  eq(collectDirLabels(shelf, {}, LM).find((i) => i.path === 'd')?.countText, '2 files', 'shelf dirs keep the file count');
 }
 
 console.log(`\ncontenttree: ${pass} passed, ${fail} failed`);

@@ -125,8 +125,23 @@ export function collectDirLabels(tree, opts, metrics) {
         if (bounds.isEmpty()) continue;
         const depth = visibleDepth(node, tree.root);
         const text = String(node.userData.displayName ?? node.userData.name ?? '');
-        const count = o.showCount ? countFiles(node) : 0;
-        const countText = count > 0 ? `${count} ${count === 1 ? 'file' : 'files'}` : null;
+        // A volume'd dir composes ONE title block: its stat line becomes the PAGE line —
+        // the open file's name and position ("b.js · 2/4" — the count lives in the
+        // denominator). Separate in-volume book labels don't exist (collectBookLabels),
+        // so nothing collides in the title area; the line re-bakes on every turn.
+        let countText = null;
+        if (o.showCount) {
+            const vol = node.userData._volume;
+            if (vol?.sheets.length) {
+                const h = vol.headState();
+                const open = vol.sheets[h.head];
+                const openName = String((open?.recto ?? open?.verso)?.userData?.name ?? '');
+                countText = `${openName} · ${h.head + 1}/${h.count}`;
+            } else {
+                const count = countFiles(node);
+                countText = count > 0 ? `${count} ${count === 1 ? 'file' : 'files'}` : null;
+            }
+        }
         const cps = [...text].length;   // codepoints ≈ cells (labels are path-ish text)
         const w = bounds.max.x - bounds.min.x;
         const scale = Math.min(Math.max((o.fit * w) / Math.max(cps * charW, 1e-6), o.scaleMin), o.scaleMax);
@@ -161,18 +176,14 @@ export function collectBookLabels(tree, opts, metrics) {
     const p = new THREE.Vector3();
     for (const book of tree.books()) {
         if (!book.parent || !book.hasLeafAtHome()) continue;   // detached / empty home
-        // Inside a library VOLUME only the OPEN page wears its name — a deck's worth of
-        // co-located labels is noise; the dir label + the front page's name is the read.
-        // The item carries a follow ref: page turns EASE, so update() re-anchors it live.
-        let follow = null;
+        // Books riding a library VOLUME carry no label of their own — the volume's dir
+        // title block names the OPEN page (collectDirLabels' page line), so a deck's
+        // worth of co-located names never exists.
+        let inVolume = false;
         for (let n = book.parent; n && n !== tree.root; n = n.parent) {
-            if (n.userData?.isVolume) {
-                const head = n.sheets[n.head];
-                follow = head && (head.recto === book || head.verso === book) ? book : undefined;
-                break;
-            }
+            if (n.userData?.isVolume) { inVolume = true; break; }
         }
-        if (follow === undefined) continue;
+        if (inVolume) continue;
         const text = String(book.userData.name ?? '');
         if (!text) continue;
         const b = book.layoutBounds();
@@ -181,13 +192,12 @@ export function collectBookLabels(tree, opts, metrics) {
         const w = b.max.x - b.min.x;
         const scale = Math.min(Math.max((o.fit * w) / Math.max(cps * charW, 1e-6), o.scaleMin), o.scaleMax);
         const depth = visibleDepth(book, tree.root) + 1;
-        const local = { x: b.min.x, y: b.max.y + o.gapY * rowH * scale, z: b.max.z + o.zLift };
-        p.set(local.x, local.y, local.z);
+        p.set(b.min.x, b.max.y + o.gapY * rowH * scale, b.max.z + o.zLift);
         for (let n = book; n && n !== tree.root; n = n.parent) {
             n.updateMatrix();
             p.applyMatrix4(n.matrix);
         }
-        items.push({ path: book.userData.path, depth, text, countText: null, scale, x: p.x, y: p.y, z: p.z, follow, local: follow ? local : null });
+        items.push({ path: book.userData.path, depth, text, countText: null, scale, x: p.x, y: p.y, z: p.z });
     }
     return items;
 }
@@ -335,17 +345,6 @@ export default class ContentTreeLabels {
         const span = Math.max(o.fadeStart - o.fadeEnd, 1e-6);
         const ease = Math.min(1, (dt || 1 / 60) * o.hoverEase);
         for (const it of this._items) {
-            // A volume's open-page label FOLLOWS its book — page turns ease the sheet
-            // through the deck, so the root-local anchor is re-derived from the live
-            // matrices and the group offset re-written only when it actually moves.
-            if (it.follow && it.local) {
-                const v = this._v.set(it.local.x, it.local.y, it.local.z);
-                for (let n = it.follow; n && n !== this.tree.root; n = n.parent) v.applyMatrix4(n.matrix);
-                if (Math.abs(v.x - it.x) + Math.abs(v.y - it.y) + Math.abs(v.z - it.z) > 0.01) {
-                    it.x = v.x; it.y = v.y; it.z = v.z;
-                    f.setGroupOffset(it.groupId, { x: it.x, y: it.y, z: it.z });
-                }
-            }
             const d = this._v.set(it.x, it.y, it.z).applyMatrix4(m).distanceTo(camera.position);
             let t = Math.min(Math.max((d - o.fadeEnd) / span, 0), 1);
             t = t * t * (3 - 2 * t);
