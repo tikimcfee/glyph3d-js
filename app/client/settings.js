@@ -304,6 +304,10 @@ export const SETTINGS = [
     apply: (ctx, v) => ctx.contentTreeLabels?.configure({ showCount: v ? 1 : 0 }),
   },
   { key: 'labels.countScale', label: 'Stat line size (× name)', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.countScale, min: 0.05, max: 2, step: 0.05, apply: labelParam('countScale') },
+  {
+    key: 'labels.showFiles', label: 'Book labels (file names)', group: 'Labels', type: 'bool', default: !!LABEL_DEFAULTS.showFiles,
+    apply: (ctx, v) => ctx.contentTreeLabels?.configure({ showFiles: v ? 1 : 0 }),
+  },
   { key: 'labels.hoverBoost', label: 'Hover grow (×)', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.hoverBoost, min: 0.1, max: 10, step: 0.1, apply: labelParam('hoverBoost') },
   { key: 'labels.hoverEase', label: 'Hover grow rate (1/s)', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.hoverEase, min: 0.5, max: 60, step: 0.5, apply: labelParam('hoverEase') },
   { key: 'labels.opacity', label: 'Opacity (resting)', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.opacity, min: 0, max: 1, step: 0.02, apply: labelParam('opacity') },

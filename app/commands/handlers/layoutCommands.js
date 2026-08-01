@@ -180,13 +180,14 @@ export default function registerLayoutCommands(router) {
         usage: '[on|off|toggle] [--size N --z-lift N --anchor top|top-left|top-right --origin-color HEX --content-color HEX --link-color HEX]',
     });
 
-    // Container labels: every visible directory named in space — the chain-compressed
-    // joined name, depth-scaled (physical LOD), easing to a readable name tag as you arrive.
+    // Container + book labels: every visible directory named in space — the chain-
+    // compressed joined name, depth-scaled (physical LOD), easing to a readable name
+    // tag as you arrive — and every book wearing its file name the same way.
     registerOverlay({
         verb: 'layout.labels', noun: 'labels', ctxKey: 'contentTreeLabels', title: 'LAYOUT LABELS',
         colorKeys: new Set(['colorA', 'colorB']),
-        description: 'Toggle/dial the per-directory container labels (chain-compressed names, container-fit sizing, approach spectrum)',
-        usage: '[on|off|toggle] [--fit N --scale-min N --scale-max N --opacity N --min-alpha N --near-scale N --fade-start N --fade-end N --gap-y N --z-lift N --show-count 0|1 --color-a HEX --color-b HEX]',
+        description: 'Toggle/dial the container + book labels (chain-compressed dir names, per-book file names, container-fit sizing, approach spectrum)',
+        usage: '[on|off|toggle] [--fit N --scale-min N --scale-max N --opacity N --min-alpha N --near-scale N --fade-start N --fade-end N --gap-y N --z-lift N --show-count 0|1 --show-files 0|1 --color-a HEX --color-b HEX]',
     });
 
 }

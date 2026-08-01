@@ -5,7 +5,11 @@
  * label above the top-left corner of its subtree's content box: the chain-compressed
  * joined name where layout compression applies (userData.displayName — this is that
  * seam's long-promised label consumer), the plain dir name otherwise, with a stat line
- * ("N files") beneath it. All labels live in ONE shared GlyphField (a single instanced
+ * ("N files") beneath it. With showFiles, every BOOK wears its file name the same way
+ * (collectBookLabels): the same container-fit against the book's own bound, the
+ * gradient one step deeper than its directory, no stat line — and since a book's path
+ * IS its registry id, hovering a book swells its own name and its whole ancestor
+ * chain at once. All labels live in ONE shared GlyphField (a single instanced
  * draw call) parented under the tree root, so they ride floor-rest and world moves for
  * free. Each label's glyphs bake LABEL-LOCAL with the anchor in its group offset, so
  * hovering anything inside a container eases its label up to hoverBoost — the name
@@ -57,13 +61,14 @@ export const LABEL_DEFAULTS = {
     gapY: 1.2,         // lift above the container's top edge, in label row heights
     zLift: 44,         // world units in front of the subtree's front plane
     showCount: 1,      // 1 → a stat line under the name: "N files"
+    showFiles: 1,      // 1 → every BOOK wears its file name too (same fit, no stat line)
     worldScale: 0.025, // the field's glyph world scale (the canonical default)
 };
 
 // Opts that shape the BAKED field (glyph text/scale/placement/color): a configure()
 // touching one of these rebuilds. Everything else — the approach spectrum and the
 // hover grow — just steers the next frame's update(), so dial drags stay rebuild-free.
-const BUILD_OPTS = new Set(['fit', 'scaleMin', 'scaleMax', 'countScale', 'colorA', 'colorB', 'gapY', 'zLift', 'showCount', 'worldScale']);
+const BUILD_OPTS = new Set(['fit', 'scaleMin', 'scaleMax', 'countScale', 'colorA', 'colorB', 'gapY', 'zLift', 'showCount', 'showFiles', 'worldScale']);
 
 /** Total file leaves under a node — descends child dirs and layout-inserted groups
  *  (jellyfish rows hold the books after its pass), skips markers. */
@@ -126,6 +131,45 @@ export function collectDirLabels(tree, opts, metrics) {
     return items;
 }
 
+/**
+ * Collect one label item per BOOK — the file's name on its durable carrier, pure like
+ * collectDirLabels. Same container-fit sizing against the book's own bound (the page
+ * while fitted, the content box released), same root-local anchoring walked through
+ * whatever the active scheme parented the book under (dir nodes, jellyfish rows).
+ * A book whose leaf is away from home (docked to the camera bar) is skipped — the
+ * empty home has no face to name. Depth is the owning chain's visible depth plus one,
+ * so a file label wears the gradient one step deeper than its directory.
+ * @param {import('./ContentTree.js').default} tree
+ * @param {object} opts LABEL_DEFAULTS overrides
+ * @param {{rowH:number,charW:number}} metrics see collectDirLabels
+ * @returns {Array<{path:string,depth:number,text:string,countText:null,scale:number,x:number,y:number,z:number}>}
+ */
+export function collectBookLabels(tree, opts, metrics) {
+    const o = { ...LABEL_DEFAULTS, ...opts };
+    if (!o.showFiles) return [];
+    const { rowH, charW } = metrics;
+    const items = [];
+    const p = new THREE.Vector3();
+    for (const book of tree.books()) {
+        if (!book.parent || book.leaf?.parent !== book) continue;   // detached / empty home
+        const text = String(book.userData.name ?? '');
+        if (!text) continue;
+        const b = book.layoutBounds();
+        if (!b || b.isEmpty()) continue;
+        const cps = [...text].length;
+        const w = b.max.x - b.min.x;
+        const scale = Math.min(Math.max((o.fit * w) / Math.max(cps * charW, 1e-6), o.scaleMin), o.scaleMax);
+        const depth = visibleDepth(book, tree.root) + 1;
+        p.set(b.min.x, b.max.y + o.gapY * rowH * scale, b.max.z + o.zLift);
+        for (let n = book; n && n !== tree.root; n = n.parent) {
+            n.updateMatrix();
+            p.applyMatrix4(n.matrix);
+        }
+        items.push({ path: book.userData.path, depth, text, countText: null, scale, x: p.x, y: p.y, z: p.z });
+    }
+    return items;
+}
+
 export default class ContentTreeLabels {
     /**
      * @param {import('./ContentTree.js').default} tree
@@ -175,7 +219,8 @@ export default class ContentTreeLabels {
         if (!this.enabled) return;
         const o = this.opts;
         const cm = computeCellMetrics(this.atlas.getCharSize(), o.worldScale);
-        const items = collectDirLabels(this.tree, o, { rowH: cm.charHeight, charW: cm.charWidth });
+        const metrics = { rowH: cm.charHeight, charW: cm.charWidth };
+        const items = [...collectDirLabels(this.tree, o, metrics), ...collectBookLabels(this.tree, o, metrics)];
         this._teardown();
         this._items = items;
         if (!items.length) return;

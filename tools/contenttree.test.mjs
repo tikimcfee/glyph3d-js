@@ -10,7 +10,7 @@ import * as THREE from 'three';
 import ContentTree from '../packages/glyph3d-core/src/collections/ContentTree.js';
 import { walkTreeLayout, districtLayout, packedLayout, libraryLayout, PACKED_DEFAULTS, LIBRARY_DEFAULTS } from '../packages/glyph3d-core/src/collections/layouts/index.js';
 import ContentTreeMarkers from '../packages/glyph3d-core/src/collections/ContentTreeMarkers.js';
-import { collectDirLabels, LABEL_DEFAULTS } from '../packages/glyph3d-core/src/collections/ContentTreeLabels.js';
+import { collectDirLabels, collectBookLabels, LABEL_DEFAULTS } from '../packages/glyph3d-core/src/collections/ContentTreeLabels.js';
 import { subtreeContentBounds } from '../packages/glyph3d-core/src/collections/layouts/nodeUtils.js';
 
 let pass = 0, fail = 0;
@@ -751,6 +751,29 @@ const LM = { rowH: 4, charW: 2 };   // mock cell metrics (world units at scale 1
   const top = t.getLocalBounds().max.y;
   ok(items[0].y > top - 0.01, `labels: label rides above the container top (y=${r2(items[0].y)} vs top=${r2(top)})`);
   ok(collectDirLabels(new ContentTree(), {}, LM).length === 0, 'labels: empty tree, silent field');
+}
+
+// 46. book labels: every homed book wears its FILE NAME (not its path), fit to the
+//     book's own bound, one gradient step deeper than its directory; a book whose leaf
+//     is away from home (docked) goes nameless; showFiles 0 silences them all.
+{
+  const t = build(['d/a.js', 'd/b.js']);
+  const items = collectBookLabels(t, {}, LM);
+  const byPath = new Map(items.map((i) => [i.path, i]));
+  eq(items.length, 2, 'book labels: one per homed book');
+  eq(byPath.get('d/a.js')?.text, 'a.js', 'book labels: the label is the file NAME');
+  eq(byPath.get('d/a.js')?.depth, 2, 'book labels: gradient one step deeper than the dir');
+  eq(byPath.get('d/a.js')?.countText, null, 'book labels: no stat line');
+  const bk = t.bookAt('d/a.js');
+  const bb = bk.layoutBounds();
+  const expected = Math.min(Math.max(LABEL_DEFAULTS.fit * (bb.max.x - bb.min.x) / (4 * LM.charW), LABEL_DEFAULTS.scaleMin), LABEL_DEFAULTS.scaleMax);
+  eq(r2(byPath.get('d/a.js')?.scale), r2(expected), 'book labels: scale = clamp(fit × bookW / textW)');
+  // Dock the leaf away — the empty home goes nameless; the sibling keeps its label.
+  new THREE.Object3D().add(bk.leaf);
+  const after = collectBookLabels(t, {}, LM);
+  eq(after.map((i) => i.path), ['d/b.js'], 'book labels: an emptied home is skipped');
+  bk.add(bk.leaf);   // re-home for any later assertions
+  ok(collectBookLabels(t, { showFiles: 0 }, LM).length === 0, 'book labels: showFiles 0 silences them');
 }
 
 console.log(`\ncontenttree: ${pass} passed, ${fail} failed`);
