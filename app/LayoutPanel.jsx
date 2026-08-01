@@ -11,7 +11,7 @@ import { LAYOUT_SCHEMES, schemeNameOf } from '@glyph3d/core/collections/layouts/
  * This is the home for the layout/marker control surface as it grows
  * (scheme knobs, directory markers — borders, bounds, pointers — later).
  *
- * House style mirrors FieldVisitorsPanel / HudPanel: a `client` prop, a light
+ * House style mirrors AgentsPanel / HudPanel: a `client` prop, a light
  * poll (the tree doesn't emit), inline styles, command-bus side effects only.
  */
 

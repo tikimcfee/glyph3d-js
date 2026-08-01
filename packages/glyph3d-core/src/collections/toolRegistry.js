@@ -1,7 +1,7 @@
 /**
  * toolRegistry — the ONE home for per-tool-call knowledge, keyed by the RAW tool name Claude Code
- * emits (Read, Edit, Bash, …). It turns a raw tool event into the normalized record the trail
- * renders, plus the highlight directives that decorate a snapshot:
+ * emits (Read, Edit, Bash, …). It turns a raw tool event into the normalized record the agent
+ * books render, plus the highlight directives that decorate a snapshot:
  *
  *   normalizeToolCall(name, input, response, cwd) → { action, target, detail, result, meta } | null
  *   decorateForAction(action, meta)               → [{ startLine, endLine, color }] (0-based, incl.) | null
@@ -9,7 +9,7 @@
  * ONE entry per tool, all of a tool's knowledge co-located — add a tool = add a TOOLS entry; remove
  * one = delete it; an unmapped tool falls through to a tolerant generic so it still says something.
  * BOTH ingress paths forward the RAW event and call this — the live Go hook (`agent.tool`) and the
- * offline replay (`tools/trail-replay.mjs`) — so there is no second copy of this knowledge anywhere
+ * offline replay (`tools/agent-replay.mjs`) — so there is no second copy of this knowledge anywhere
  * (the hook is pure transport). `normalizeToolCall` returns null for noise tools the caller drops.
  *
  * Pure: plain `{ r, g, b }` colors, no THREE / DOM — so the bun replay and the unit tests import it.
@@ -235,4 +235,43 @@ export function decorateForAction(action, meta) {
     if (!meta) return null;
     const d = ACTION_DECORATORS[action] && ACTION_DECORATORS[action](meta);
     return (d && d.length) ? d : null;
+}
+
+// --- action identity: kind buckets + hues, the ONE home (3D cards and 2D panel dots) --------------
+// Keyed by the NORMALIZED action this registry emits (not raw tool names) — adding a tool
+// entry above automatically lands its action in a bucket here, or falls to 'other'.
+
+const ACTION_KIND = {
+    read: 'read',
+    grep: 'search', glob: 'search', search: 'search',
+    edit: 'edit', write: 'write',
+    bash: 'run', task: 'run',
+    ask: 'ask', fetch: 'fetch',
+    say: 'say', think: 'think',
+};
+
+/** The identity bucket an action colors/sorts under. Unknown actions read as 'other'. */
+export function kindForAction(action) {
+    return ACTION_KIND[String(action || '').toLowerCase()] || 'other';
+}
+
+/** Default per-kind identity hues (plain {r,g,b} 0–1, pure). Consumers may carry a live
+ *  override table (e.g. an agent-books cfg) seeded from this. */
+export const ACTION_HUES = {
+    read:   { r: 0.35, g: 0.66, b: 0.92 },   // cool blue
+    search: { r: 0.70, g: 0.50, b: 0.85 },   // violet
+    edit:   { r: 0.90, g: 0.66, b: 0.36 },   // amber
+    write:  { r: 0.90, g: 0.66, b: 0.36 },   // amber (its own reachable entry — dial apart at will)
+    run:    { r: 0.44, g: 0.76, b: 0.46 },   // mint
+    ask:    { r: 0.95, g: 0.58, b: 0.55 },   // warm coral — the agent needs YOU
+    fetch:  { r: 0.45, g: 0.82, b: 0.78 },   // teal — reaching out to the network
+    say:    { r: 0.92, g: 0.94, b: 0.98 },   // near-white — the agent SPEAKING (its reply to you)
+    think:  { r: 0.58, g: 0.52, b: 0.78 },   // dim violet — interior REASONING (the thinking turns)
+    other:  { r: 0.62, g: 0.64, b: 0.68 },
+};
+
+/** An {r,g,b} hue as a CSS hex string — for the 2D panels' identity dots. */
+export function cssHue(hue) {
+    const h = (n) => Math.round(Math.min(Math.max(n, 0), 1) * 255).toString(16).padStart(2, '0');
+    return hue ? `#${h(hue.r)}${h(hue.g)}${h(hue.b)}` : '#999999';
 }

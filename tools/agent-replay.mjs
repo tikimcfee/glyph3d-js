@@ -1,23 +1,23 @@
 #!/usr/bin/env bun
-// trail-replay — replay a REAL Claude Code session's tool calls into the agent trail, as a
+// agent-replay — replay a REAL Claude Code session's tool calls into the agent books, as a
 // big, repeatable stress fixture. Reads a session JSONL (~/.claude/projects/...), maps every
 // tool_use → an `agent.activity` verb, and streams them over the relay (same WS the CLI uses).
 // So we stop hand-rebuilding state and instead fly a real run of hundreds of actions.
 //
-//   bun tools/trail-replay.mjs                                  # latest session, 1 agent, all
-//   bun tools/trail-replay.mjs --limit 200 --split-agents 6 --rate 25
-//   bun tools/trail-replay.mjs --session <path.jsonl> --dry     # preview the parse, send nothing
+//   bun tools/agent-replay.mjs                                  # latest session, 1 agent, all
+//   bun tools/agent-replay.mjs --limit 200 --split-agents 6 --rate 25
+//   bun tools/agent-replay.mjs --session <path.jsonl> --dry     # preview the parse, send nothing
 //
 // FLAGS
 //   --session <path|latest>  session JSONL (default: newest in this project's dir)
 //   --agent <prefix>         agent id / id prefix (default 'run')
-//   --split-agents N         round-robin actions across N agents → N corridors (default 1)
+//   --split-agents N         round-robin actions across N agents → N books (default 1)
 //   --limit N                cap to the first N actions
 //   --latest N               cap to the LAST N actions (the most recent — what you usually want
 //                            on a chunky session; applied after --limit)
 //   --rate <ms>              delay between sends (default 0; the WS reply already paces)
 //   --port N                 relay port (default 8080)
-//   --no-clear               don't `trail.clear all` first
+//   --no-clear               don't `agent.clear all` first
 //   --dry                    parse + print a summary, send nothing
 
 import fs from 'node:fs';
@@ -34,7 +34,7 @@ const flags = {};
     const k = a[i].replace(/^--/, '');
     if (BOOL.has(k)) flags[k] = true;
     else if (VALUE.has(k)) flags[k] = a[++i];
-    else { console.error(`[trail-replay] unknown flag ${a[i]}`); process.exit(2); }
+    else { console.error(`[agent-replay] unknown flag ${a[i]}`); process.exit(2); }
   }
 }
 
@@ -48,7 +48,7 @@ function latestSession() {
   const files = fs.readdirSync(PROJ).filter((f) => f.endsWith('.jsonl'))
     .map((f) => ({ f, t: fs.statSync(path.join(PROJ, f)).mtimeMs }))
     .sort((a, b) => b.t - a.t);
-  if (!files.length) { console.error(`[trail-replay] no .jsonl in ${PROJ}`); process.exit(2); }
+  if (!files.length) { console.error(`[agent-replay] no .jsonl in ${PROJ}`); process.exit(2); }
   return path.join(PROJ, files[0].f);
 }
 const sessionPath = (!flags.session || flags.session === 'latest') ? latestSession() : flags.session;
@@ -102,13 +102,13 @@ const agentId = (i) => (A === 1 ? prefix : `${prefix}${(i % A) + 1}`);
 const byType = {};
 for (const m of mapped) byType[m.action] = (byType[m.action] || 0) + 1;
 const withFile = mapped.filter((m) => m.target).length;
-console.error(`[trail-replay] session: ${path.basename(sessionPath)}`);
-console.error(`[trail-replay] ${mapped.length} actions · ${withFile} with a file (→ snapshots) · ${A} agent(s)`);
-console.error(`[trail-replay] by action: ${Object.entries(byType).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}:${v}`).join('  ')}`);
+console.error(`[agent-replay] session: ${path.basename(sessionPath)}`);
+console.error(`[agent-replay] ${mapped.length} actions · ${withFile} with a file (→ snapshots) · ${A} agent(s)`);
+console.error(`[agent-replay] by action: ${Object.entries(byType).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}:${v}`).join('  ')}`);
 
 if (flags.dry) {
   for (const m of mapped.slice(0, 16)) console.error(`   ${m.action.padEnd(7)} ${m.target || '(' + m.detail.slice(0, 50) + ')'}`);
-  console.error(`[trail-replay] dry run — nothing sent`);
+  console.error(`[agent-replay] dry run — nothing sent`);
   process.exit(0);
 }
 
@@ -129,8 +129,8 @@ function dial(port) {
 }
 const enc = (verb, ...a) => 'call ' + Buffer.from(JSON.stringify([verb, ...a])).toString('base64');
 
-const c = await dial(PORT).catch((e) => { console.error(`[trail-replay] ${e.message}`); process.exit(2); });
-if (!flags['no-clear']) { c.send('trail.clear all'); await c.take().catch(() => {}); }
+const c = await dial(PORT).catch((e) => { console.error(`[agent-replay] ${e.message}`); process.exit(2); });
+if (!flags['no-clear']) { c.send('agent.clear all'); await c.take().catch(() => {}); }
 
 let sent = 0;
 for (const m of mapped) {
@@ -139,9 +139,9 @@ for (const m of mapped) {
   c.send(enc('agent.tool', agentId(sent), 'claude', m.name,
     JSON.stringify(m.input), m.response != null ? JSON.stringify(m.response) : '', REPO));
   await c.take().catch(() => {});
-  if (++sent % 25 === 0) console.error(`[trail-replay] sent ${sent}/${mapped.length}`);
+  if (++sent % 25 === 0) console.error(`[agent-replay] sent ${sent}/${mapped.length}`);
   if (RATE) await sleep(RATE);
 }
 c.ws.close();
-console.error(`[trail-replay] done — streamed ${sent} actions into the trail`);
+console.error(`[agent-replay] done — streamed ${sent} actions into the books`);
 process.exit(0);

@@ -158,7 +158,7 @@ export function collectBookLabels(tree, opts, metrics) {
     const items = [];
     const p = new THREE.Vector3();
     for (const book of tree.books()) {
-        if (!book.parent || book.leaf?.parent !== book) continue;   // detached / empty home
+        if (!book.parent || !book.hasLeafAtHome()) continue;   // detached / empty home
         const text = String(book.userData.name ?? '');
         if (!text) continue;
         const b = book.layoutBounds();

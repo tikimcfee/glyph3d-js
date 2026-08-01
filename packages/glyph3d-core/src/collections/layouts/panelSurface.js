@@ -45,20 +45,44 @@ export const PANEL_SURFACE_DEFAULTS = {
 let _unitPlane = null;
 const unitPlane = () => (_unitPlane ??= new THREE.PlaneGeometry(1, 1));
 
-let _mat = null;
-function surfaceMaterial(opts) {
-    if (!_mat) {
-        _mat = createPanelMaterial({
-            color: opts.surfaceColor, opacity: opts.surfaceOpacity,
-            side: THREE.DoubleSide, depthWrite: true,
-        });
-    }
-    _mat.setFill(opts.surfaceColor, opts.surfaceOpacity);
-    _mat.setBorder({ color: opts.surfaceBorderColor, width: 1 });
+/** Push the surface* opts into a panel-material wrapper (fill, rim, rim toggle). */
+function applySurfaceOpts(mat, opts) {
+    mat.setFill(opts.surfaceColor, opts.surfaceOpacity);
+    mat.setBorder({ color: opts.surfaceBorderColor, width: 1 });
     // The DOCKED bit shows the resting rim (uBorderColor) when a border is wanted; clearing every bit
     // (flags == 0) is a plain fill with no rim — see panelMaterial.
-    _mat.setBorderFlag(BORDER_FLAGS.DOCKED, !!opts.surfaceBorder);
-    return _mat.material;
+    mat.setBorderFlag(BORDER_FLAGS.DOCKED, !!opts.surfaceBorder);
+    return mat;
+}
+
+let _mat = null;
+function surfaceMaterial(opts) {
+    _mat ??= createPanelMaterial({
+        color: opts.surfaceColor, opacity: opts.surfaceOpacity,
+        side: THREE.DoubleSide, depthWrite: true,
+    });
+    return applySurfaceOpts(_mat, opts).material;
+}
+
+/**
+ * A caller-OWNED face material — for a face whose fill/rim must differ per owner (an
+ * agent book's identity hue), where the shared singleton's last-writer-wins would
+ * flatten everyone to one look. The caller keeps the wrapper, re-`apply`s opts when
+ * they change, passes `wrapper.material` as `opts.material` to addPanelSurface, and
+ * disposes it with the owner.
+ * @returns {{material:THREE.Material, apply:(opts:object)=>void, dispose:()=>void}}
+ */
+export function ownSurfaceMaterial(opts) {
+    const mat = createPanelMaterial({
+        color: opts.surfaceColor, opacity: opts.surfaceOpacity,
+        side: THREE.DoubleSide, depthWrite: true,
+    });
+    applySurfaceOpts(mat, opts);
+    return {
+        material: mat.material,
+        apply: (o) => applySurfaceOpts(mat, o),
+        dispose: () => mat.material.dispose(),
+    };
 }
 
 /** A cylinder-segment (curved rectangle) BufferGeometry in POLE-centered coords: radius `r`, spanning
@@ -93,7 +117,8 @@ function curvedSegment(r, thetaC, half, yTop, yBot, seg) {
  * @param {{mode:'flat', box:THREE.Box3} | {mode:'warp', apothem:number, theta:number, topY:number, w:number, h:number}} spec
  *   flat: the panel's local content box · warp: the arc the fields ride (apothem/theta), the panel top
  *   (topY, ≤ 0 down the face), and the panel's width/height
- * @param {object} opts merged JELLYFISH opts (surface* fields)
+ * @param {object} opts merged JELLYFISH opts (surface* fields), plus optional `material` — a
+ *   caller-owned face material (ownSurfaceMaterial) used instead of the shared singleton
  * @returns {THREE.Mesh|null}
  */
 export function addPanelSurface(panel, spec, opts) {
@@ -106,12 +131,12 @@ export function addPanelSurface(panel, spec, opts) {
         const r = Math.max(1, apothem - depth);
         const half = (w / 2 + pad) / apothem;   // the arc half-angle the face subtends at the fields' radius
         const geo = curvedSegment(r, theta, half, topY + pad, topY - h - pad, opts.surfaceSegments);
-        mesh = new THREE.Mesh(geo, surfaceMaterial(opts));
+        mesh = new THREE.Mesh(geo, opts.material || surfaceMaterial(opts));
         mesh.userData.disposeGeometry = true;   // per-panel geometry — freed when the panel is dropped
     } else {
         const b = spec.box;
         if (!b || b.isEmpty()) return null;
-        mesh = new THREE.Mesh(unitPlane(), surfaceMaterial(opts));
+        mesh = new THREE.Mesh(unitPlane(), opts.material || surfaceMaterial(opts));
         mesh.scale.set((b.max.x - b.min.x) + 2 * pad, (b.max.y - b.min.y) + 2 * pad, 1);
         mesh.position.set((b.min.x + b.max.x) / 2, (b.min.y + b.max.y) / 2, b.min.z - depth);
     }

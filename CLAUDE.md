@@ -52,7 +52,7 @@ app/
   client/                CommandProvider, CanvasInteraction, HudPanel, CommandBar,
                          SessionStore, WorkspaceModel
   commands/handlers/     command verbs (file.*, grid.*, edit.*, terminal.*, camera.*, …)
-  ButtonBar IdeDock FileTree TerminalsPanel FieldVisitorsPanel   dockview panels
+  ButtonBar IdeDock FileTree TerminalsPanel AgentsPanel   dockview panels
 cli/
   main.go relay.go fs.go embed.go attach_unix.go   serve + relay + fs-RPC + terminals
 Makefile  tools/dev.sh

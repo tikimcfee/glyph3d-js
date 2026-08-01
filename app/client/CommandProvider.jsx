@@ -5,8 +5,7 @@ import { useGridRegistry } from '@glyph3d/r3f';
 
 import CommandRouter from '@glyph3d/core/services/orchestration/CommandRouter.js';
 import WebSocketBridge from '@glyph3d/core/services/orchestration/WebSocketBridge.js';
-import FieldVisitorManager from '@glyph3d/core/services/orchestration/FieldVisitorManager.js';
-import AgentTrail from '@glyph3d/core/collections/AgentTrail.js';
+import AgentBooks from '@glyph3d/core/collections/AgentBooks.js';
 import { installConsoleForwarder } from '@glyph3d/core/services/orchestration/consoleForwarder.js';
 import AttentionManager from '@glyph3d/core/services/interaction/AttentionManager.js';
 import { installKeyboardRouter } from './keyboardRouter.js';
@@ -143,13 +142,10 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     // dock.* verbs drive it; distinct from ctx.dock (the DOM dockview).
     cameraDock: null,
 
-    // Field-visitor multiplexer — one self-driving visitor per agent. Created in the
-    // effect (needs the live ctx); ticked each frame by <VisitorRunner/>.
-    visitorManager: null,
-
-    // Agent trail — every agent action laid out as a card receding into depth, the file
-    // it touched on a parallel rail, tethered. Fed by visitorManager.onActivity.
-    agentTrail: null,
+    // Agent books — every agent's run bound as a book of page-pair spreads (description
+    // verso, content recto), the one agent-viewing system. The agent.* verbs sink here;
+    // book.* pages it. Created in the effect (needs the live ctx); ticked by <AgentRunner/>.
+    agentBooks: null,
 
     // GPU glyph-picking system (material-swap ID pass on a dedicated render
     // layer). Created in the effect below once gl exists; canvas hover/click
@@ -180,15 +176,13 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
 const AppCommandContext = createContext(null);
 
 /**
- * VisitorRunner — drives the field-visitor multiplexer once per frame. Rendered
- * inside the Canvas (so useFrame is valid); a logic-only component (returns null).
- * Guards on visitorManager so it's a no-op until the effect wires it.
+ * AgentRunner — eases every agent book's rolodex deck toward its slots and runs stall
+ * detection, once per frame. Rendered inside the Canvas (so useFrame is valid); a
+ * logic-only component (returns null). Guards on agentBooks until the effect wires it.
  */
-function VisitorRunner({ stateRef }) {
+function AgentRunner({ stateRef }) {
   useFrame((_, dt) => {
-    const c = stateRef.current?.ctx;
-    c?.visitorManager?.update(dt);
-    c?.agentTrail?.update(dt);
+    stateRef.current?.ctx?.agentBooks?.update(dt);
   });
   return null;
 }
@@ -349,21 +343,18 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // arrows anchor relative to each footprint origin — a debug instrument, toggle off when done.
     state.ctx.contentTreeProbes = new ContentTreeProbes(contentTree);
 
-    // Field-visitor multiplexer: agent.* commands spawn/move/follow one self-driving
-    // visitor per agent. The camera stays free unless `camera.follow <id>` opts in.
-    state.ctx.visitorManager = new FieldVisitorManager(state.ctx);
-
-    // Spatial trail: every agent action leaves a card receding into depth, the file it
-    // touched on a parallel rail, tethered. Subscribes to visitorManager.onActivity.
-    state.ctx.agentTrail = new AgentTrail(state.ctx).attach(state.ctx.visitorManager);
-    // The trail cluster is the second world grouping — a sibling of the file tree on the shared floor
+    // Agent books: the agent.* verbs sink here — each record an agent produces pages a
+    // sheet (description verso, content recto) into that agent's book. The camera is
+    // never touched; book.* turns the pages.
+    state.ctx.agentBooks = new AgentBooks(state.ctx);
+    // The agent shelf is the second world grouping — a sibling of the file tree on the shared floor
     // (its constructor scene-added its root; register reparents it under the world). It notifies the
-    // world as it streams, so new agents/moments re-space the whole layout.
-    world.register('trails', state.ctx.agentTrail.root, () => state.ctx.agentTrail.localBounds());
-    state.ctx.agentTrail.onRelayout(() => world.relayout());
-    // Fold the persisted Trail card-scale settings into the freshly-built trail (its apply()s
+    // world as it streams, so new agents/sheets re-space the whole layout.
+    world.register('agents', state.ctx.agentBooks.root, () => state.ctx.agentBooks.localBounds());
+    state.ctx.agentBooks.onRelayout(() => world.relayout());
+    // Fold the persisted Agent Books settings into the freshly-built shelf (its apply()s
     // otherwise fire only on a user change), so tuned sizes hold from boot.
-    applyGroupSettings(state.ctx, 'Trail');
+    applyGroupSettings(state.ctx, 'Agent Books');
 
     // Camera-locked HUD dock: a bar of window tiles that rides the view. Reparents
     // a docked grid/terminal under itself (world-preserving attach) and scales it to
@@ -587,10 +578,8 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       bridge.disconnect();
       pickingSystem.dispose();
       state.ctx.pickingSystem = null;
-      state.ctx.visitorManager?.dispose();
-      state.ctx.visitorManager = null;
-      state.ctx.agentTrail?.dispose();
-      state.ctx.agentTrail = null;
+      state.ctx.agentBooks?.dispose();
+      state.ctx.agentBooks = null;
       state.ctx.interactionContext?.dispose();
       state.ctx.interactionContext = null;
       if (state.ctx.cameraDock) {
@@ -604,7 +593,7 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
 
   return (
     <AppCommandContext.Provider value={stateRef.current}>
-      <VisitorRunner stateRef={stateRef} />
+      <AgentRunner stateRef={stateRef} />
       <DockRunner stateRef={stateRef} />
       {children}
     </AppCommandContext.Provider>

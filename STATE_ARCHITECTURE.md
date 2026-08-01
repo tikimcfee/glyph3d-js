@@ -72,7 +72,7 @@ field = {
 
 **Outputs → recomputed, never stored:** a tree-laid grid's `position` (comes from `field.layout` + tree path), `ScaleModel.placement` (= home gridScale XOR dock tile-fit), `obj.scale` (= placement·user), the dock `slot` integer (recomputed from order), `home.scale/quat/bounds`, `LayoutDescription`, line tables, `getBounds`, `_modified` (= `contentHash` vs `_savedTextHash`).
 
-**Ephemeral → thrown away:** hover, the caret/cursor mesh, in-flight `flyTo` tweens, relayout mutexes, frustum-cull visibility, `attention.hover`, the live PTY process, the visitor roster (mirrors live agent processes), input accumulators.
+**Ephemeral → thrown away:** hover, the caret/cursor mesh, in-flight `flyTo` tweens, relayout mutexes, frustum-cull visibility, `attention.hover`, the live PTY process, the agent-book roster (mirrors live agent processes), input accumulators.
 
 The boundary is the same one `InteractionContext` already nails (it owns nothing, derives focus/edit nodes on demand — keep it exactly as is). That's the reference for "derived done right."
 

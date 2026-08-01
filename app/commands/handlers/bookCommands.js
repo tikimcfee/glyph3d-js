@@ -1,35 +1,63 @@
 /**
- * Book commands — the durable Book objects (every file's spatial carrier, wrapped at
- * insert by the ContentTree and addressable for the file's whole life).
+ * Book commands — the durable Book objects: every file's spatial carrier (wrapped at
+ * insert by the ContentTree) AND every agent's run-book (grown by AgentBooks as work
+ * streams in). One address space, one paging surface.
  *
- * book.list          → every book: path · current form (fitted page ×scale, or natural)
- * book.list <path>   → one book's full record (form, page, content size, world position)
+ *   book.list            → every book: the tree's (path · form) + the agent shelf's (id · sheets)
+ *   book.list <path|id>  → one book's full record (form, page, sheets, head, world position)
+ *   book.page   [id] <next|prev|first|last|N>   turn a book's head (1-based index; N of M)
+ *   book.scroll [id] <delta>                    turn by ±N sheets (− older / + newer)
+ *   book.move   <id> <x> <y> <z>                pin an agent book where you put it (drag-release / CLI)
+ *   book.config [key value]                     get/set an agent-shelf constant — re-flows live
  *
- * Books are the units the library scheme stacks; verbs that manipulate form live here
- * as the object grows (labels, shelves, page splay ride on this address space).
+ * Paging resolves an AGENT book first (by agent id, or the first lane when omitted),
+ * else a TREE book by path — a one-sheet file book pages trivially today and grows
+ * into real page-turning as file books gain sheets. The file library's page dims stay
+ * layout-scheme opts (`layout.scheme library --page-w …`); book.config dials the agent
+ * shelf's cfg (page dims, deck pitch, card scales, faces, covers).
  */
 
 import { box, kvLines } from '../formatResponse.js';
 
 const r2 = (n) => Math.round(n * 100) / 100;
 
+/** An agent lane (by id, or the first when omitted) or a tree book (by path) — or null. */
+function resolveBook(ctx, id) {
+    const books = ctx.agentBooks;
+    if (books) {
+        const hit = books._resolveLane?.(id);
+        if (hit && (!id || hit[0] === id)) return { kind: 'agent', books, agentId: hit[0], book: hit[1].book };
+    }
+    const tree = ctx.contentTree;
+    const bk = id && tree?.bookAt?.(id);
+    return bk ? { kind: 'tree', book: bk } : null;
+}
+
+// A page-arg keyword/index, optionally preceded by an id. One trailing arg → default book.
+const splitTarget = (args) => (args.length >= 2 ? [args[0], args[1]] : [undefined, args[0]]);
+const fmtHead = (s) => (s ? `sheet ${s.head + 1}/${s.count}${s.following ? ' · live' : ''}` : '');
+
 /**
- * @param {import('../../../packages/glyph3d-core/src/services/orchestration/CommandRouter.js').default} router
+ * @param {import('../CommandRouter.js').default} router
  */
 export default function registerBookCommands(router) {
     router.register('book.list', (args, ctx) => {
         const tree = ctx.contentTree;
-        if (!tree) return { text: 'ERR: no content tree in this context', data: null };
+        const shelf = ctx.agentBooks;
 
-        // One path → the full record.
+        // One path/id → the full record.
         if (args[0]) {
-            const book = tree.bookAt(args[0]);
-            if (!book) return { text: `ERR: no book at "${args[0]}"`, data: null };
-            const f = book.fitInfo;
-            const b = book.getBounds();
+            const hit = resolveBook(ctx, args[0]);
+            if (!hit) return { text: `ERR: no book at "${args[0]}"`, data: null };
+            const bk = hit.book;
+            const f = bk.fitInfo;
+            const b = bk.getBounds();
+            const h = bk.headState();
             const record = {
-                path: book.userData.path,
+                ...(hit.kind === 'agent' ? { agent: hit.agentId } : { path: bk.userData.path }),
                 form: f ? 'fitted' : 'natural',
+                sheets: h.count,
+                head: `${h.head + 1}/${h.count}${h.following ? ' (live)' : ''}`,
                 ...(f ? { page: `${f.pageW}×${f.pageH}`, scale: r2(f.scale), content: `${r2(f.contentW)}×${r2(f.contentH)}` } : {}),
                 world: `${r2((b.min.x + b.max.x) / 2)}, ${r2((b.min.y + b.max.y) / 2)}, ${r2((b.min.z + b.max.z) / 2)}`,
             };
@@ -39,18 +67,83 @@ export default function registerBookCommands(router) {
             };
         }
 
-        const books = tree.books();
-        const lines = books.map((bk) => {
+        const lines = [];
+        const treeBooks = tree ? tree.books() : [];
+        for (const bk of treeBooks) {
             const f = bk.fitInfo;
-            return `${f ? `page ×${r2(f.scale)}` : 'natural'}  ${bk.userData.path}`;
-        });
+            lines.push(`${f ? `page ×${r2(f.scale)}` : 'natural'}  ${bk.userData.path}`);
+        }
+        const agentRows = shelf ? shelf.agents() : [];
+        for (const a of agentRows) {
+            lines.push(`${a.count} sheet${a.count === 1 ? '' : 's'} [${a.state}]  agent:${a.id}`);
+        }
         return {
-            text: box('BOOKS', lines.length ? lines : ['(none)'], 56) + `\nOK: book.list (${books.length})`,
-            data: { count: books.length, books: books.map((bk) => ({ path: bk.userData.path, fitted: bk.fitted })) },
+            text: box('BOOKS', lines.length ? lines : ['(none)'], 56) + `\nOK: book.list (${treeBooks.length + agentRows.length})`,
+            data: {
+                count: treeBooks.length + agentRows.length,
+                books: treeBooks.map((bk) => ({ path: bk.userData.path, fitted: bk.fitted })),
+                agents: agentRows.map((a) => ({ id: a.id, sheets: a.count, state: a.state })),
+            },
         };
     }, {
-        description: 'List the durable books (every file\'s spatial carrier) and their current form',
-        usage: '[path]',
-        returns: '{ count, books:[{path,fitted}] } or one book\'s full record',
+        description: 'List the durable books — the tree\'s file carriers and the agent shelf',
+        usage: '[path|agentId]',
+        returns: '{ count, books:[{path,fitted}], agents:[{id,sheets,state}] } or one book\'s record',
     });
+
+    router.register('book.scroll', (args, ctx) => {
+        const [id, delta] = splitTarget(args);
+        const hit = resolveBook(ctx, id);
+        if (!hit) return { text: id ? `ERR: no book '${id}'` : 'ERR: no book to scroll', data: null };
+        const ok = hit.book.scroll(Number(delta) || 0);
+        const s = ok ? hit.book.headState() : null;
+        return ok
+            ? { text: `OK: ${fmtHead(s)}`, data: { ...(hit.agentId ? { agentId: hit.agentId } : {}), ...s } }
+            : { text: 'ERR: could not scroll', data: null };
+    }, { description: 'Turn a book by ±N sheets (− older / + newer)', usage: '[id] <delta>' });
+
+    router.register('book.page', (args, ctx) => {
+        const [id, arg] = splitTarget(args);
+        const hit = resolveBook(ctx, id);
+        if (!hit) return { text: id ? `ERR: no book '${id}'` : 'ERR: no book to page', data: null };
+        const bk = hit.book;
+        const s0 = bk.headState();
+        if (!s0.count) return { text: 'ERR: the book has no sheets', data: null };
+        const a = String(arg ?? '').toLowerCase();
+        // next/prev step ±1 in time; first/last jump to the ends; a bare number is a 1-based index.
+        const ok = a === 'next' ? bk.scroll(+1)
+                 : a === 'prev' ? bk.scroll(-1)
+                 : a === 'first' ? bk.pageTo(0)
+                 : a === 'last' ? bk.pageTo(s0.count - 1)
+                 : bk.pageTo((Number(a) || 1) - 1);
+        const s = bk.headState();
+        return ok
+            ? { text: `OK: ${fmtHead(s)}`, data: { ...(hit.agentId ? { agentId: hit.agentId } : {}), ...s } }
+            : { text: 'ERR: could not page', data: null };
+    }, { description: 'Turn a book\'s head — next|prev|first|last or a 1-based sheet index', usage: '[id] <next|prev|first|last|N>' });
+
+    router.register('book.move', (args, ctx) => {
+        const books = ctx.agentBooks;
+        if (!books) return { text: 'ERR: agent books not wired', data: null };
+        if (args.length < 4) return { text: 'ERR: usage: book.move <id> <x> <y> <z>', data: null };
+        const [id, x, y, z] = args;
+        const ok = books.moveGroup(id, Number(x) || 0, Number(y) || 0, Number(z) || 0);
+        return ok
+            ? { text: `OK: moved ${id}`, data: { id, x: Number(x) || 0, y: Number(y) || 0, z: Number(z) || 0 } }
+            : { text: `ERR: no agent book '${id}'`, data: null };
+    }, { description: 'Reposition (pin) an agent book — drag-release / CLI', usage: '<id> <x> <y> <z>' });
+
+    router.register('book.config', (args, ctx) => {
+        const books = ctx.agentBooks;
+        if (!books) return { text: 'ERR: agent books not wired', data: null };
+        if (args.length < 2) return { text: `book cfg: ${JSON.stringify(books.cfg)}`, data: books.cfg };
+        const [key, val] = args;
+        const n = Number(val);
+        // booleans first ("false" is a truthy string and Number("false") is NaN),
+        // then numbers, else the raw string.
+        books.cfg[key] = (val === 'true' || val === 'false') ? (val === 'true')
+                       : Number.isFinite(n) ? n : val;
+        books.applyScales();   // re-scale live cards + re-fit pages + re-flow the shelf
+        return { text: `OK: book.${key} = ${books.cfg[key]} (re-flowed)`, data: { [key]: books.cfg[key] } };
+    }, { description: 'Get or set an agent-shelf constant — re-fits and re-flows live', usage: '[key value]' });
 }

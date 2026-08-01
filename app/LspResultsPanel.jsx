@@ -7,7 +7,7 @@ import React, { useCallback, useEffect, useState } from 'react';
  * for the symbol at the caret: a grouped, scrollable list where each row is
  * `file:line` over its source-line preview, clickable to jump (lsp.goto). It's
  * LIVE — it tracks the caret, so you open it once and it follows as you click
- * around. House style mirrors FieldVisitorsPanel (a `client` prop, subscription
+ * around. House style mirrors AgentsPanel (a `client` prop, subscription
  * state, command-bus side effects only).
  */
 

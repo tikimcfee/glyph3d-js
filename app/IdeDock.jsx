@@ -6,8 +6,7 @@ import FileTree from './FileTree.jsx';
 import RepoPanel from './RepoPanel.jsx';
 import SettingsPanel from './SettingsPanel.jsx';
 import TerminalsPanel from './TerminalsPanel.jsx';
-import FieldVisitorsPanel from './FieldVisitorsPanel.jsx';
-import AgentTrailPanel from './AgentTrailPanel.jsx';
+import AgentsPanel from './AgentsPanel.jsx';
 import LayoutPanel from './LayoutPanel.jsx';
 import EditorPanel from './EditorPanel.jsx';
 import LspResultsPanel from './LspResultsPanel.jsx';
@@ -40,8 +39,7 @@ import LspResultsPanel from './LspResultsPanel.jsx';
 const PANELS = [
   { id: 'files', title: 'Files' },
   { id: 'repo', title: 'Sources', position: { referencePanel: 'files', direction: 'within' } },
-  { id: 'fieldVisitors', title: 'Crew', position: { referencePanel: 'files', direction: 'within' } },
-  { id: 'agentTrail', title: 'Trail', position: { referencePanel: 'files', direction: 'within' } },
+  { id: 'agents', title: 'Agents', position: { referencePanel: 'files', direction: 'within' } },
   { id: 'lspResults', title: 'LSP', position: { referencePanel: 'files', direction: 'within' } },
   { id: 'layout', title: 'Layout', position: { referencePanel: 'files', direction: 'within' } },
   { id: 'settings', title: 'Settings', position: { referencePanel: 'files', direction: 'within' } },
@@ -80,8 +78,7 @@ export default function IdeDock({ client }) {
     repo: () => <RepoPanel client={clientRef.current} />,
     settings: () => <SettingsPanel client={clientRef.current} />,
     terminals: () => <TerminalsPanel client={clientRef.current} />,
-    fieldVisitors: () => <FieldVisitorsPanel client={clientRef.current} />,
-    agentTrail: () => <AgentTrailPanel client={clientRef.current} />,
+    agents: () => <AgentsPanel client={clientRef.current} />,
     lspResults: () => <LspResultsPanel client={clientRef.current} />,
     layout: () => <LayoutPanel client={clientRef.current} />,
     editor: () => <EditorPanel client={clientRef.current} />,

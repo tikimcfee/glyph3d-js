@@ -29,9 +29,9 @@ const lodParam = (param) => (_ctx, v) => setGlyphLodParam(param, v);
  *  StrataLayout params — re-applies live to every on-screen strata view, no ctx needed. */
 const strataParam = (param) => (_ctx, v) => setStrataParam(param, v);
 
-/** apply() for an agent-trail card-scale knob: push the value to AgentTrail.cfg (the bare param name,
- *  not the `trail.` key) and re-apply — the header/info cards re-scale live, body sizes land on new moments. */
-const trailParam = (param) => (ctx, v) => { const t = ctx.agentTrail; if (!t) return; t.cfg[param] = v; t.applyScales?.(); };
+/** apply() for an agent-books knob: push the value to AgentBooks.cfg (the bare param name, not
+ *  the `book.` key) and re-apply — live cards re-scale, every sheet re-fits, the shelf re-flows. */
+const bookParam = (param) => (ctx, v) => { const b = ctx.agentBooks; if (!b) return; b.cfg[param] = v; b.applyScales?.(); };
 
 /** apply() for a container-label dial: patch the bare param into ContentTreeLabels' opts —
  *  configure() rebuilds the field only for build-shaping opts; spectrum/hover dials just steer
@@ -378,18 +378,22 @@ export const SETTINGS = [
   { key: 'glyph.density', label: 'Block ink density', group: 'Glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.density, min: 0.005, max: 0.15, step: 0.005, apply: lodParam('density') },
   { key: 'glyph.maxCov', label: 'Block max coverage', group: 'Glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.maxCov, min: 0.1, max: 1, step: 0.02, apply: lodParam('maxCov') },
   { key: 'glyph.lodAxisBias', label: 'Block axis bias (0 best→1 worst)', group: 'Glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.lodAxisBias, min: 0, max: 1, step: 0.05, apply: lodParam('lodAxisBias') },
-  // Trail — agent-trail layout + card scales (the spatial forward of the agent's run). Depth pitch +
-  // header/info re-deck/re-scale the whole corridor live; snapshot/output + say-think sizes bake at
-  // build, so they land on NEW moments (the trail streams, so near-immediate; `trail.clear` rebuilds).
-  // Ranges are deliberately WIDE — a small positive min just keeps a scale off 0/negative; the user, not
-  // us, decides what's "too big". Defaults mirror AgentTrail's TRAIL_DEFAULTS.
-  { key: 'trail.zPitch', label: 'Card depth spacing (Z)', group: 'Trail', type: 'number', default: 90, min: 1, max: 4000, step: 5, apply: trailParam('zPitch') },
-  { key: 'trail.callScale', label: 'Header card size', group: 'Trail', type: 'number', default: 3.0, min: 0.05, max: 50, step: 0.1, apply: trailParam('callScale') },
-  { key: 'trail.infoScale', label: 'Info card size', group: 'Trail', type: 'number', default: 1.5, min: 0.05, max: 50, step: 0.05, apply: trailParam('infoScale') },
-  { key: 'trail.artifactWorldScale', label: 'Snapshot / output size', group: 'Trail', type: 'number', default: 0.025, min: 0.001, max: 5, step: 0.005, apply: trailParam('artifactWorldScale') },
-  { key: 'trail.messageScale', label: 'Message (say / think) size', group: 'Trail', type: 'number', default: 0.05, min: 0.001, max: 5, step: 0.005, apply: trailParam('messageScale') },
-  { key: 'trail.snapshotImageWidth', label: 'Image card width', group: 'Trail', type: 'number', default: 40, min: 1, max: 2000, step: 5, apply: trailParam('snapshotImageWidth') },
-  { key: 'trail.pagerLerp', label: 'Page animation speed', group: 'Trail', type: 'number', default: 9, min: 0, max: 60, step: 0.5, apply: trailParam('pagerLerp') },
+  // Agent Books — the agent shelf: page geometry, deck pitch, and card scales (each agent's run
+  // as a book of spreads). Every dial re-fits the live shelf via applyScales (cards re-scale,
+  // sheets re-fit, the cluster re-flows). Ranges are deliberately WIDE — a small positive min
+  // just keeps a value off 0/negative; the user, not us, decides what's "too big". Defaults
+  // mirror AGENT_BOOKS_DEFAULTS.
+  { key: 'book.pageW', label: 'Page width', group: 'Agent Books', type: 'number', default: 320, min: 10, max: 5000, step: 10, apply: bookParam('pageW') },
+  { key: 'book.pageH', label: 'Page height', group: 'Agent Books', type: 'number', default: 420, min: 10, max: 5000, step: 10, apply: bookParam('pageH') },
+  { key: 'book.gutter', label: 'Spread gutter (spine gap)', group: 'Agent Books', type: 'number', default: 24, min: 0, max: 500, step: 2, apply: bookParam('gutter') },
+  { key: 'book.maxUpscale', label: 'Max content upscale', group: 'Agent Books', type: 'number', default: 3, min: 0.1, max: 100, step: 0.1, apply: bookParam('maxUpscale') },
+  { key: 'book.zPitch', label: 'Sheet depth spacing (Z)', group: 'Agent Books', type: 'number', default: 90, min: 1, max: 4000, step: 5, apply: bookParam('zPitch') },
+  { key: 'book.pagerLerp', label: 'Page-turn speed', group: 'Agent Books', type: 'number', default: 9, min: 0, max: 60, step: 0.5, apply: bookParam('pagerLerp') },
+  { key: 'book.callScale', label: 'Headline card size', group: 'Agent Books', type: 'number', default: 3.0, min: 0.05, max: 50, step: 0.1, apply: bookParam('callScale') },
+  { key: 'book.infoScale', label: 'Info card size', group: 'Agent Books', type: 'number', default: 1.5, min: 0.05, max: 50, step: 0.05, apply: bookParam('infoScale') },
+  { key: 'book.artifactWorldScale', label: 'Snapshot / output size', group: 'Agent Books', type: 'number', default: 0.025, min: 0.001, max: 5, step: 0.005, apply: bookParam('artifactWorldScale') },
+  { key: 'book.messageScale', label: 'Message (say / think) size', group: 'Agent Books', type: 'number', default: 0.05, min: 0.001, max: 5, step: 0.005, apply: bookParam('messageScale') },
+  { key: 'book.snapshotImageWidth', label: 'Image page width', group: 'Agent Books', type: 'number', default: 40, min: 1, max: 2000, step: 5, apply: bookParam('snapshotImageWidth') },
   // Strata — the nested Z-depth structure view (structure.strata). Every dial is LIVE: a
   // change re-applies to the on-screen strata immediately (boxOpacity rides a shader uniform;
   // the rest re-derive positions/boxes). Borders should recede behind the glyphs — drop

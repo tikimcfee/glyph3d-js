@@ -147,14 +147,15 @@ export default class ContentTree {
      */
     contentChildren(node) {
         if (!node) return [];
-        // Descend through layout-group containers (jellyfish page/row VStacks) AND books
-        // (the durable carriers) so the file leaves inside are still reached —
-        // focus.child/sibling navigate the GRIDS, not their presentation shells.
+        // Descend through layout-group containers (jellyfish page/row VStacks), books
+        // (the durable carriers), and book internals (sheet nodes + mounts) so the file
+        // leaves inside are still reached — focus.child/sibling navigate the GRIDS, not
+        // their presentation shells.
         const out = [];
         const visit = (n) => {
             for (const c of n.children) {
                 if (!c.userData || c.userData.isMarker) continue;
-                if (c.userData.isLayoutGroup || c.userData.isBook) { visit(c); continue; }
+                if (c.userData.isLayoutGroup || c.userData.isBook || c.userData.isBookInternal) { visit(c); continue; }
                 if (c.userData.path !== undefined) out.push(c);
             }
         };

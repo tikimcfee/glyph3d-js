@@ -28,11 +28,11 @@ const obj = (n) => ({ name: n });
 // 2 — setPickable back-fills existing AND admits new entries of the type
 {
     const r = new SceneRegistry();
-    r.register('tg1', obj('tg1'), { type: 'trail.group' });   // registered BEFORE opt-in
-    check('trail.group not pickable yet', eq(ids(r), []), ids(r));
-    r.setPickable('trail.group');
+    r.register('tg1', obj('tg1'), { type: 'book.group' });   // registered BEFORE opt-in
+    check('book.group not pickable yet', eq(ids(r), []), ids(r));
+    r.setPickable('book.group');
     check('setPickable back-fills existing', eq(ids(r), ['tg1']), ids(r));
-    r.register('tg2', obj('tg2'), { type: 'trail.group' });   // new, after opt-in
+    r.register('tg2', obj('tg2'), { type: 'book.group' });   // new, after opt-in
     check('new entry of opted-in type is pickable', eq(ids(r), ['tg1', 'tg2']), ids(r));
 }
 

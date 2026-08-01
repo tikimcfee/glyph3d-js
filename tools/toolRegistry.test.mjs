@@ -4,7 +4,7 @@
 //
 // normalizeToolCall(name, input, response, cwd) → {action, target, detail, result, meta} | null is
 // the single seam BOTH the live hook (`agent.tool`) and the replay funnel through, so a regression
-// here breaks every trail card. It's pure (no THREE/DOM), so we test it directly with the real
+// here breaks every book card. It's pure (no THREE/DOM), so we test it directly with the real
 // Claude Code shapes (file.numLines, structuredPatch, stdout, …). decorateForAction(action, meta) is
 // the per-action highlight mapping (0-based, inclusive). Adding a tool? add an entry AND a case here.
 

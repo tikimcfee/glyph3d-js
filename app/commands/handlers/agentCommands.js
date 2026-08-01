@@ -1,0 +1,181 @@
+/**
+ * Agent commands — the addressable surface over AgentBooks (every agent's run, bound
+ * as a book of page-pair spreads on the field).
+ *
+ * The Claude Code hook drives these automatically via `agent.tool` (the raw tool event
+ * → the shared tool registry), but they're plain commands first: you can spawn and page
+ * agents by typing them, which is how this whole spine is verified.
+ *
+ *   agent.tool     <id> <type> <ToolName> [inputJSON] [responseJSON] [cwd]  raw tool event → normalized record
+ *   agent.message  <id> <type> <kind> <text>         a conversation block (text/thinking) → say/think sheet
+ *   agent.activity <id> <type> <action> [target] [detail] [result]   the normalized record directly (manual/CLI/tests)
+ *       (detail/result/text with spaces ride the `call` base64 hatch)
+ *   agent.spawn    <id> [type]                      summon an empty book (request an instance)
+ *   agent.state    <id> <active|idle|stalled|done>  set lifecycle state
+ *   agent.stop     <id>                             mark finished ('done' — PERSISTS)
+ *   agent.clear    <id|all|done>                    remove agent book(s) from the field
+ *   agent.request  <id> [message...]                raise a hand ("needs you")
+ *
+ * Paging/tuning the books themselves is the book.* family (bookCommands) — paging is a
+ * BOOK capability, not an agent one. Framing a book is the ordinary camera verb on its
+ * registry id: `camera.focus agent:book:<id>`.
+ *
+ * To populate a book without a live agent, drive the verb by hand, e.g.:
+ *   agent.activity dev claude read app/main.jsx
+ *   agent.activity dev claude bash "npm test" "" "5 passing"
+ */
+
+import { resolveGridByIdOrIndex } from './spatialHelpers.js';
+import { normalizeToolCall, normalizeMessage } from '@glyph3d/core/collections/toolRegistry.js';
+
+const noBooks = { text: 'ERR: agent books not wired', data: null };
+
+/** Canonicalize a record's target against the live registry (an open file's registry id
+ *  is its canonical path), then sink the record into the books. The shared sink for the
+ *  manual `agent.activity` verb and the raw `agent.tool`/`agent.message` ingress. */
+function emitActivity(ctx, books, id, type, { action, target, detail, result, meta }) {
+    let label = target || null;
+    if (target) {
+        const r = resolveGridByIdOrIndex(ctx, target, 'grid', { byName: true });
+        if (!r.error) label = r.registryId || target;
+    }
+    books.activity(id, type, { action, target: label, detail, result, meta });
+    return label;
+}
+
+/** A `call`-hatch arg that may be a parsed object, a JSON string, or empty → object | null. */
+function parseJSONArg(a) {
+    if (a && typeof a === 'object') return a;
+    if (typeof a === 'string' && a.trim()) { try { return JSON.parse(a); } catch { /* malformed */ } }
+    return null;
+}
+
+/**
+ * @param {import('../CommandRouter.js').default} router
+ */
+export default function registerAgentCommands(router) {
+    router.register('agent.activity', (args, ctx) => {
+        const books = ctx.agentBooks;
+        if (!books) return noBooks;
+        if (args.length < 3) {
+            return { text: 'ERR: usage: agent.activity <id> <type> <action> [target] [detail] [result]', data: null };
+        }
+        // Positional record. Fields that carry spaces/quotes (detail, result) arrive intact
+        // via the `call` hatch (base64'd arg vector); a bare typed line still works for the
+        // simple <id> <type> <action> <target> case. (Live agents arrive via agent.tool instead.)
+        const [id, type, action] = args;
+        const target = args[3] || '';
+        const detail = args[4] || '';
+        const result = args[5] || '';
+        // Optional structured per-tool details (lines read/written, +/−, tokens…). The `call`
+        // hatch coerces non-string args to strings, so meta rides as a JSON STRING; accept
+        // that or a direct object. A bare typed line just omits it.
+        const meta = parseJSONArg(args[6]);
+        const label = emitActivity(ctx, books, id, type, { action, target, detail, result, meta });
+        const echo = [label, detail, result].filter(Boolean).join('  ');
+        return {
+            text: `OK: ${id} ${action}${echo ? ' ' + echo : ''}`,
+            data: { id, action, target: label, detail, result },
+        };
+    }, { description: "Agent acted — page a sheet into its book", usage: '<id> <type> <action> [target] [detail] [result]' });
+
+    router.register('agent.tool', (args, ctx) => {
+        const books = ctx.agentBooks;
+        if (!books) return noBooks;
+        if (args.length < 3) {
+            return { text: 'ERR: usage: agent.tool <id> <type> <ToolName> [inputJSON] [responseJSON] [cwd]', data: null };
+        }
+        // The RAW tool event — both the live Go hook and the replay forward it here and let the
+        // ONE tool registry derive action/target/detail/result/meta. input/response ride as JSON
+        // strings (the `call` hatch String-coerces objects), parsed back here.
+        const [id, type, name] = args;
+        const input = parseJSONArg(args[3]) || {};
+        const response = parseJSONArg(args[4]);
+        const cwd = typeof args[5] === 'string' ? args[5] : '';
+        const rec = normalizeToolCall(name, input, response, cwd);
+        if (!rec) return { text: `OK: ${name} dropped (noise)`, data: { dropped: name } };   // TodoWrite/ToolSearch/…
+        const label = emitActivity(ctx, books, id, type, rec);
+        return {
+            text: `OK: ${id} ${rec.action}${label ? ' ' + label : ''}`,
+            data: { id, action: rec.action, target: label, detail: rec.detail },
+        };
+    }, { description: 'Agent tool call (raw event) — normalized via the tool registry, then paged in', usage: '<id> <type> <ToolName> [inputJSON] [responseJSON] [cwd]' });
+
+    router.register('agent.message', (args, ctx) => {
+        const books = ctx.agentBooks;
+        if (!books) return noBooks;
+        if (args.length < 4) {
+            return { text: 'ERR: usage: agent.message <id> <type> <kind> <text>', data: null };
+        }
+        // A conversation turn — the agent's prose, not a tool call. The hook reads
+        // `text`/`thinking` blocks off the transcript and forwards them here (same
+        // pure-transport contract as agent.tool): the ONE registry maps kind→action
+        // (say/think). text rides the `call` hatch so its newlines/quotes survive the
+        // tokenizer. A whitespace-only block drops (normalizeMessage → null).
+        const [id, type, kind] = args;
+        const text = typeof args[3] === 'string' ? args[3] : String(args[3] ?? '');
+        const rec = normalizeMessage(kind, text);
+        if (!rec) return { text: `OK: ${kind} dropped (empty)`, data: { dropped: kind } };
+        emitActivity(ctx, books, id, type, rec);
+        return {
+            text: `OK: ${id} ${rec.action}`,
+            data: { id, action: rec.action },
+        };
+    }, { description: 'Agent conversation turn (text/thinking) → a say/think sheet in its book', usage: '<id> <type> <kind> <text>' });
+
+    router.register('agent.spawn', (args, ctx) => {
+        const books = ctx.agentBooks;
+        if (!books) return noBooks;
+        const [id, type] = args;
+        if (!id) return { text: 'ERR: usage: agent.spawn <id> [type]', data: null };
+        books.ensure(id, type || 'agent');
+        return { text: `OK: summoned ${id}`, data: { id, type: type || 'agent' } };
+    }, { description: 'Summon an agent book with no activity yet (request an instance)', usage: '<id> [type]' });
+
+    router.register('agent.state', (args, ctx) => {
+        const books = ctx.agentBooks;
+        if (!books) return noBooks;
+        const [id, state] = args;
+        if (!id || !state) return { text: 'ERR: usage: agent.state <id> <active|idle|stalled|done>', data: null };
+        const ok = books.state(id, state);
+        return ok
+            ? { text: `OK: ${id} -> ${state}`, data: { id, state } }
+            : { text: `ERR: no agent '${id}' (or bad state '${state}')`, data: null };
+    }, { description: 'Set an agent lifecycle state', usage: '<id> <state>' });
+
+    router.register('agent.stop', (args, ctx) => {
+        const books = ctx.agentBooks;
+        if (!books) return noBooks;
+        const [id] = args;
+        if (!id) return { text: 'ERR: usage: agent.stop <id>', data: null };
+        books.stop(id);
+        return { text: `OK: ${id} finished`, data: { id } };
+    }, { description: "Mark an agent finished ('done') — its book persists until cleared", usage: '<id>' });
+
+    router.register('agent.clear', (args, ctx) => {
+        const books = ctx.agentBooks;
+        if (!books) return noBooks;
+        const [target] = args;
+        if (!target) return { text: 'ERR: usage: agent.clear <id|all|done>', data: null };
+        if (target === 'all' || target === 'done') {
+            const n = books.clear(target);
+            return { text: `OK: cleared ${n} agent book${n === 1 ? '' : 's'}`, data: { cleared: n } };
+        }
+        const ok = books.remove(target);
+        return ok
+            ? { text: `OK: cleared ${target}`, data: { id: target } }
+            : { text: `ERR: no agent '${target}'`, data: null };
+    }, { description: "Remove an agent's book, or all/done ('done' books persist until cleared)", usage: '<id|all|done>' });
+
+    router.register('agent.request', (args, ctx) => {
+        const books = ctx.agentBooks;
+        if (!books) return noBooks;
+        const [id] = args;
+        if (!id) return { text: 'ERR: usage: agent.request <id> [message...]', data: null };
+        const msg = args.slice(1).join(' ') || 'needs you';
+        const ok = books.request(id, msg);
+        return ok
+            ? { text: `OK: ${id} raised a hand: "${msg}"`, data: { id, msg } }
+            : { text: `ERR: no agent '${id}'`, data: null };
+    }, { description: 'Agent raises a hand ("needs you") for input/advice', usage: '<id> [message]' });
+}

@@ -108,7 +108,8 @@ const snapshot = (tree) => {
   const dir = t.insert(leaf, 'solo.js');
   t.relayout();
   ok(dir === t.root, 'lone file parents under root');
-  ok(leaf.parent.userData.isBook && leaf.parent.parent === t.root, 'leaf rides its book, book under root');
+  const soloBook = t.bookAt('solo.js');
+  ok(soloBook?.leaf === leaf && soloBook.parent === t.root, 'leaf rides its book, book under root');
   ok(t.root.userData.size.x > 0 && t.root.userData.size.y > 0, 'root has a real footprint for one file');
 }
 
@@ -119,8 +120,8 @@ const snapshot = (tree) => {
     ok(t.getNode(dir), `dir node exists: ${dir}`);
   }
   ok(t.getNode('readme.md') === null, 'a file path is NOT a dir node');
-  ok(t._leaves.get('readme.md').parent.parent === t.root, 'root-level file (via its book) under root');
-  ok(t._leaves.get('src/util/deep/a/b/c/leaf.txt').parent.parent === t.getNode('src/util/deep/a/b/c'), 'deep leaf (via its book) under its (deep) dir');
+  ok(t.bookAt('readme.md').parent === t.root, 'root-level file (via its book) under root');
+  ok(t.bookAt('src/util/deep/a/b/c/leaf.txt').parent === t.getNode('src/util/deep/a/b/c'), 'deep leaf (via its book) under its (deep) dir');
   // empty-intermediate chain: each link has exactly one child
   for (const dir of ['src/util/deep', 'src/util/deep/a', 'src/util/deep/a/b']) {
     eq(t.getNode(dir).children.length, 1, `single-child empty-intermediate: ${dir}`);
@@ -582,14 +583,18 @@ const buildLibrary = (paths, opts = {}, order = paths) => {
   const opts = { pageW: 20, pageH: 30, maxUpscale: 10 };   // small page so the width term binds on mock leaves
   const t = buildLibrary(PATHS, opts);
   for (const [p, leaf] of t._leaves) {
-    const book = leaf.parent;
-    ok(book.userData?.isBook && t.bookAt(p) === book, `library: ${p} rides its addressable book`);
+    const book = t.bookAt(p);
+    ok(book?.userData?.isBook && book.leaf === leaf, `library: ${p} rides its addressable book`);
     ok(book.fitted, `library: ${p} book holds page form under the library scheme`);
-    ok(book.scale.x === book.scale.y && book.scale.y === book.scale.z, `library: ${p} book scale is uniform (no skew)`);
+    const mount = leaf.parent;   // the fit scale lands on the side MOUNT, never the book or the grid
+    ok(mount.userData?.isBookInternal, `library: ${p} leaf rides its mount inside the book`);
+    ok(mount.scale.x === mount.scale.y && mount.scale.y === mount.scale.z, `library: ${p} fit scale is uniform (no skew)`);
+    eq([book.scale.x, book.scale.y, book.scale.z], [1, 1, 1], `library: ${p} book's own scale stays identity`);
     eq([leaf.scale.x, leaf.scale.y, leaf.scale.z], [1, 1, 1], `library: ${p} grid's own scale untouched`);
     const sz = leaf.userData.size;
-    eq(r2(book.scale.x), r2(Math.min(opts.pageW / sz.x, opts.pageH / sz.y, opts.maxUpscale)),
+    eq(r2(book.fitInfo.scale), r2(Math.min(opts.pageW / sz.x, opts.pageH / sz.y, opts.maxUpscale)),
       `library: ${p} book carries the exact contain-fit`);
+    eq(r2(mount.scale.x), r2(book.fitInfo.scale), `library: ${p} the mount carries that fit scale`);
   }
 }
 
@@ -598,7 +603,7 @@ const buildLibrary = (paths, opts = {}, order = paths) => {
 {
   const t = buildLibrary(PATHS);
   const { pageH, gap } = LIBRARY_DEFAULTS;
-  const bookOf = (p) => t._leaves.get(p).parent;
+  const bookOf = (p) => t.bookAt(p);
   const button = bookOf('src/components/Button.jsx'), modal = bookOf('src/components/Modal.jsx');
   eq([button.position.x, button.position.y], [0, -pageH / 2], 'library: deck book sits page-centered under the stack origin');
   eq([button.position.x, button.position.y], [modal.position.x, modal.position.y], 'library: deck books co-located in x,y');
@@ -610,7 +615,7 @@ const buildLibrary = (paths, opts = {}, order = paths) => {
 //     reorder the same deck; reverse flips it.
 {
   const paths = ['lib/aa.js', 'lib/zzzzzzzz.js', 'lib/b.css'];   // name↑ aa<b<z · width: zzz > b.css > aa
-  const z = (t, p) => r2(t._leaves.get(p).parent.position.z);
+  const z = (t, p) => r2(t.bookAt(p).position.z);
   const byNameT = buildLibrary(paths);
   ok(z(byNameT, 'lib/aa.js') > z(byNameT, 'lib/b.css') && z(byNameT, 'lib/b.css') > z(byNameT, 'lib/zzzzzzzz.js'),
     'library: name sort decks aa → b.css → zzz front-to-back');
@@ -631,12 +636,12 @@ const buildLibrary = (paths, opts = {}, order = paths) => {
 
   const shelf = buildLibrary(['solo/a.js', 'solo/b.js', 'solo/c.js'], { ...opts, stack: 'x' });
   eq(shelf.getNode('solo').userData.size, { x: 70, y: 30, z: 0 }, 'library: shelf footprint = n pages + gaps wide');
-  const sx = ['solo/a.js', 'solo/b.js', 'solo/c.js'].map((p) => r2(shelf._leaves.get(p).parent.position.x));
+  const sx = ['solo/a.js', 'solo/b.js', 'solo/c.js'].map((p) => r2(shelf.bookAt(p).position.x));
   eq(sx, [-25, 0, 25], 'library: shelf books step one page+gap apart, centered');
 
   const pile = buildLibrary(['solo/a.js', 'solo/b.js'], { ...opts, stack: 'y' });
   eq(pile.getNode('solo').userData.size, { x: 20, y: 65, z: 0 }, 'library: pile footprint = n pages + gaps tall');
-  const py = ['solo/a.js', 'solo/b.js'].map((p) => r2(pile._leaves.get(p).parent.position.y));
+  const py = ['solo/a.js', 'solo/b.js'].map((p) => r2(pile.bookAt(p).position.y));
   eq(py, [-15, -50], 'library: pile books descend one page+gap apart');
 }
 
@@ -696,6 +701,58 @@ const buildLibrary = (paths, opts = {}, order = paths) => {
   bk.getBounds().getSize(size);
   ok(size.x < 20 - 0.01, 'released book bounds shrink back to the content');
   eq(bk.fitInfo, null, 'released book reports no fit');
+}
+
+// ───────────────────────── book sheets (the spread model) ─────────────────────────
+
+// 42b. sheets: an appended page-pair spreads verso|recto around the gutter, each side
+//      contain-fit on its own mount; a one-sided sheet centers a single page; the
+//      appended sheet inherits the live fit (streaming form).
+{
+  const t = buildLibrary(['solo/a.js'], { pageW: 20, pageH: 30 });
+  const bk = t.bookAt('solo/a.js');
+  const gutter = 4;
+  bk.fit({ pageW: 20, pageH: 30, gutter, surface: false });
+  const verso = makeLeaf('desc'), recto = makeLeaf('bodybodybody');
+  const i = bk.addSheet({ verso, recto });
+  eq(i, 1, 'sheets: append returns the new index');
+  const sh = bk.sheets[1];
+  ok(sh.fit.verso && sh.fit.recto, 'sheets: appended sheet took page form immediately (live fit inherited)');
+  const dx = gutter / 2 + 20 / 2;
+  // Page centers: mount.position.x = slotX − contentCenterX·s; mock leaves center at 0 → slotX exact.
+  eq([r2(sh.versoMount.position.x), r2(sh.rectoMount.position.x)], [r2(-dx), r2(dx)],
+    'sheets: verso left / recto right around the gutter');
+  const sv = sh.fit.verso.scale, sr = sh.fit.recto.scale;
+  eq(r2(sv), r2(Math.min(20 / verso.userData.size.x, 30 / verso.userData.size.y)), 'sheets: verso contain-fits its page');
+  eq(r2(sr), r2(Math.min(20 / recto.userData.size.x, 30 / recto.userData.size.y)), 'sheets: recto contain-fits its page');
+  // The book's own transform and both contents stay untouched.
+  eq([bk.scale.x, verso.scale.x, recto.scale.x], [1, 1, 1], 'sheets: fit lands on mounts only');
+}
+
+// 42c. the rolodex deck: head is the only nav state; slots derive; following rides
+//      appends and paging back holds; layoutBounds spans the spread and the deck.
+{
+  const t = buildLibrary(['solo/a.js'], { pageW: 20, pageH: 30 });
+  const bk = t.bookAt('solo/a.js');
+  bk.fit({ pageW: 20, pageH: 30, gutter: 4, surface: false });
+  bk.deck.zPitch = 50;
+  bk.addSheet({ verso: makeLeaf('v1'), recto: makeLeaf('r1') });
+  bk.addSheet({ verso: makeLeaf('v2'), recto: makeLeaf('r2') });
+  eq(bk.headState(), { head: 2, count: 3, following: true }, 'deck: following rides each append to the front');
+  eq([bk._slotZ(2), bk._slotZ(1), bk._slotZ(0)], [0, -50, -100], 'deck: older sheets recede by zPitch');
+  bk.pageTo(1);
+  eq(bk.headState(), { head: 1, count: 3, following: false }, 'deck: paging back holds (live-follow off)');
+  eq([bk._slotZ(1), bk._slotZ(0), bk._slotZ(2)], [0, -50, -100], 'deck: scrolled-past newest wraps to the back');
+  bk.scroll(+1);
+  ok(bk.following, 'deck: landing on the newest resumes live-follow');
+  // Fitted bounds: x spans the open SPREAD (2·pageW + gutter), z spans the deck.
+  const lb = bk.layoutBounds();
+  eq([r2(lb.max.x - lb.min.x), r2(lb.max.y - lb.min.y)], [44, 30], 'deck: layoutBounds spans the open spread');
+  ok(lb.min.z <= -100, 'deck: layoutBounds spans the receding sheets');
+  // The deck animator eases nodes toward their slots (dt clamps at 0.1 per step).
+  for (let s = 0; s < 20; s++) bk.update(1);
+  ok(Math.abs(bk.sheets[1].node.position.z - (-50)) < 0.1, 'deck: update(dt) eases sheets to their slots');
+  eq(bk.contentLeaves().length, 5, 'deck: contentLeaves lists every side across the sheets');
 }
 
 // ───────────────────────── container labels ─────────────────────────
@@ -772,7 +829,7 @@ const LM = { rowH: 4, charW: 2 };   // mock cell metrics (world units at scale 1
   new THREE.Object3D().add(bk.leaf);
   const after = collectBookLabels(t, {}, LM);
   eq(after.map((i) => i.path), ['d/b.js'], 'book labels: an emptied home is skipped');
-  bk.add(bk.leaf);   // re-home for any later assertions
+  bk.sheets[0].rectoMount.add(bk.leaf);   // re-home (into the mount) for any later assertions
   ok(collectBookLabels(t, { showFiles: 0 }, LM).length === 0, 'book labels: showFiles 0 silences them');
 }
 
