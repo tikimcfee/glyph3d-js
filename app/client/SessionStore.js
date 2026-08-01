@@ -43,6 +43,7 @@
  */
 
 import { canonicalPath } from '../commands/handlers/pathResolve.js';
+import { openAgentSession } from '../commands/handlers/agentCommands.js';
 import { pruneDockLayout } from './dockLayoutPrune.js';
 
 const SESSION_URI = 'file:///.glyph3d-session.json';
@@ -231,18 +232,36 @@ export default class SessionStore {
       dock3d = { layout: ctx.cameraDock?.layoutMode || 'linear', tiles, focused: ctx.cameraDock?.focusedPane || null };
     }
 
+    // Agent books: persisted BY REFERENCE — the harness's session record is the durable
+    // state, so we save WHICH sessions are open plus view intent (head, live-follow, pin)
+    // and restore re-derives the content through the adapter. A hydrated lane knows its
+    // full session id; a hook-born lane knows only its 8-hex prefix — saved as `prefix`,
+    // resolved against the archive listing at restore.
+    const agents = [];
+    for (const a of (ctx.agentBooks?.agents?.() || [])) {
+      const lane = ctx.agentBooks.lanes.get(a.id);
+      const entry = a.sessionId ? { session: a.sessionId } : { prefix: a.id };
+      entry.head = a.head;
+      entry.following = !!a.following;
+      if (lane?.pinned && lane.pinnedPos) {
+        entry.pinned = [round(lane.pinnedPos.x), round(lane.pinnedPos.y), round(lane.pinnedPos.z)];
+      }
+      agents.push(entry);
+    }
+
     const snap = {
       version: SCHEMA_VERSION,
       savedAt: Date.now(),
       files,
       fieldSources,
       layout: this._captureLayout(),
-      world: this.ctx.world?.getState?.() ?? null,   // world-grouping order (files/trails/…)
+      world: this.ctx.world?.getState?.() ?? null,   // world-grouping order (files/agents/…)
       camera: this._captureCamera(),
       focus: this._captureFocus(),
       dock: dock || null,
       dock3d: dock3d || null,
       terminals,
+      agents,
     };
 
     // Quarantine: a section whose restore phase FAILED keeps its loaded blob verbatim — never
@@ -346,6 +365,7 @@ export default class SessionStore {
       ['substrate', () => this._restoreSubstrate(snap),     ['layout', 'world']],
       ['field',     () => this._restoreField(snap),         ['fieldSources']],
       ['tabs',      () => this._restoreTabs(snap),          ['files']],
+      ['agents',    () => this._restoreAgents(snap),        ['agents']],
       ['surfaces',  () => this._restoreSurfaces(snap),      ['terminals', 'dock3d']],
       ['panels',    () => this._restorePanels(snap),        ['dock']],
       ['camera',    () => this._restoreCamera(snap.camera), ['camera']],
@@ -374,6 +394,38 @@ export default class SessionStore {
       `[session] restore ${failed.length ? `DEGRADED — failed: ${failed.map((p) => p.name).join(', ')}` : 'complete'} `
       + `(${report.map((p) => `${p.name} ${p.ms}ms`).join(' · ')})`
     );
+  }
+
+  // agents — reopen the saved session books BY REFERENCE: each entry re-reads the harness's
+  // own record through the adapter (the one open path agent.open rides), then re-applies view
+  // intent. Per-entry guarded (a vanished record logs + skips, the rest land — data self-heal);
+  // no session provider (client-only baseline) is simply an empty phase. Saved heads index the
+  // previous view's sheet list — a tail-capped hydration clamps them (pageTo clamps).
+  async _restoreAgents(snap) {
+    const list = Array.isArray(snap.agents) ? snap.agents : [];
+    if (!list.length) return;
+    const books = this.ctx.agentBooks;
+    const provider = this.ctx.sessionProvider;
+    if (!books || !provider) return;
+    let archive = null;   // fetched once, only if a prefix needs resolving
+    for (const a of list) {
+      try {
+        let sid = a.session || null;
+        if (!sid && a.prefix) {
+          archive ??= await provider.list();
+          const norm = String(a.prefix).replace(/-/g, '');
+          sid = archive.find((s) => s.id.replace(/-/g, '').startsWith(norm))?.id || null;
+        }
+        if (!sid) continue;   // nothing on disk answers to this book — it stays closed
+        const { agentId } = await openAgentSession(this.ctx, sid);
+        const lane = books.lanes.get(agentId);
+        if (!lane) continue;
+        if (Array.isArray(a.pinned) && a.pinned.length === 3) books.moveGroup(agentId, ...a.pinned);
+        if (!a.following && Number.isInteger(a.head)) lane.book.pageTo(a.head);
+      } catch (e) {
+        console.warn('[session] agent restore failed:', a.session || a.prefix, e?.message || e);
+      }
+    }
   }
 
   // substrate — the field layout scheme, SET directly on the (still-empty) tree so the bulk load

@@ -42,7 +42,7 @@ import { VStack } from './layouts/StackContainer.js';
 import { LAYOUT_SCHEMES } from './layouts/index.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import { classifyByExtension } from '../core/fileKind.js';
-import { decorateForAction, kindForAction, ACTION_HUES, cssHue } from './toolRegistry.js';
+import { decorateForAction, kindForAction, ACTION_HUES, cssHue, normalizeToolCall, normalizeMessage } from './toolRegistry.js';
 
 export const AGENT_BOOKS_DEFAULTS = {
     // -- the page ------------------------------------------------------------------
@@ -71,6 +71,8 @@ export const AGENT_BOOKS_DEFAULTS = {
     floorY: 0,                  // world floor the cluster's bottom rests on (the file tree's convention)
     // -- lifecycle -----------------------------------------------------------------
     stallMs: 12000,             // active → stalled after this quiet spell
+    hydrateLimit: 200,          // newest events a session hydration materializes (sheets are GPU
+                                // objects — a monster transcript opens as its tail, not en masse)
     // -- identity ------------------------------------------------------------------
     cover: true,                // translucent identity box around each book's deck (also the drag handle)
     coverPad: 16,               // XY inflation beyond the deck bounds
@@ -179,6 +181,7 @@ export default class AgentBooks {
                 state: 'active', beacon: null, lastActivityTs: this._now(),
                 seq: 0, entries: [],   // one entry per sheet: cards + ids + the record
                 groupId: `agent:book:${agentId}`,
+                sessionId: null,       // the harness session record this book renders (set by hydrate)
                 pinned: false, pinnedPos: null,
             };
             book.fit(this._pageOpts(lane));   // page form from birth — appended sheets inherit it
@@ -253,9 +256,49 @@ export default class AgentBooks {
             actionId, infoId: info ? infoId : null, snapId: hasSnapPick ? snapId : null,
             record, ts: this._now(),
         });
+        if (!this._batch) { this._relayout(); this._emitChange(); }
+        return lane;
+    }
+
+    /**
+     * Bulk-hydrate a lane from a session record's events (the sessionAdapter's output) —
+     * restoration reads the harness's OWN record back through the same normalize path the
+     * live hook takes, so a restored book and that session's still-live stream converge on
+     * one lane. One layout pass for the whole read (the batch discipline): per-event
+     * relayouts are suppressed while building and a single flow lands at the end.
+     *
+     * Only the newest `limit` events materialize (default cfg.hydrateLimit) — sheets are
+     * GPU objects, and a monster transcript opens as its readable tail.
+     * @param {string} agentId
+     * @param {Array<{kind:string, name?:string, input?:Object, response?:Object, mtype?:string, text?:string}>} events
+     * @param {{agentType?:string, sessionId?:string|null, cwd?:string, limit?:number}} [opts]
+     * @returns {number} sheets added
+     */
+    hydrate(agentId, events, { agentType = 'claude', sessionId = null, cwd = '', limit } = {}) {
+        const cap = Math.max(1, limit ?? this.cfg.hydrateLimit);
+        const slice = events.length > cap ? events.slice(-cap) : events;
+        const lane = this.ensure(agentId, agentType);
+        if (sessionId) lane.sessionId = sessionId;
+        this._batch = true;
+        let added = 0;
+        try {
+            for (const ev of slice) {
+                const rec = ev.kind === 'message'
+                    ? normalizeMessage(ev.mtype, ev.text)
+                    : normalizeToolCall(ev.name, ev.input, ev.response, ev.cwd ?? cwd);
+                if (!rec) continue;   // noise tools / empty blocks drop, same as live
+                this.activity(agentId, agentType, rec);
+                added++;
+            }
+        } finally {
+            this._batch = false;
+        }
+        // A hydrated book renders a RECORD, not a live process — it rests at 'idle'
+        // (never stall-demoted) until a live hook event lands and marks it active.
+        this._setState(lane, 'idle');
         this._relayout();
         this._emitChange();
-        return lane;
+        return added;
     }
 
     /** agent.state — set a lane's lifecycle by hand. */
@@ -369,6 +412,7 @@ export default class AgentBooks {
             type: l.agentType,
             state: l.state,
             beacon: l.beacon,
+            sessionId: l.sessionId,
             count: l.book.sheets.length,
             hueIdx: l.hueIdx,
             color: '#' + ((pal[l.hueIdx % pal.length] >>> 0) & 0xffffff).toString(16).padStart(6, '0'),
@@ -447,8 +491,6 @@ export default class AgentBooks {
     dispose() {
         this.clear('all');
         this.scene.remove(this.root);
-        this._unitBox.dispose();
-        this._unitEdges.dispose();
     }
 
     // -- private: cards --------------------------------------------------------------
@@ -485,12 +527,21 @@ export default class AgentBooks {
 
     /** A loaded card's bounds settled: re-lay its verso stack (a bare-card verso has no
      *  stack — and CodeGrid's own `layout` is grid windowing, never called here), re-fit
-     *  its sheet, re-flow the cluster. @private */
+     *  its sheet, and request a re-flow. The flow is COALESCED per tick — a hydration
+     *  resolves hundreds of card loads in bursts, and each one re-packing the world
+     *  would be the minutes-not-milliseconds trap. @private */
     _settle(lane, bookIndex) {
         const entry = lane.entries[bookIndex];
         if (entry?.verso?.isStackContainer) entry.verso.layout();
         lane.book.fitSheet(bookIndex);
-        this._relayout();
+        this._requestRelayout();
+    }
+
+    /** Schedule one _relayout for this tick, however many settles ask. @private */
+    _requestRelayout() {
+        if (this._relayoutScheduled) return;
+        this._relayoutScheduled = true;
+        setTimeout(() => { this._relayoutScheduled = false; this._relayout(); }, 0);
     }
 
     /**

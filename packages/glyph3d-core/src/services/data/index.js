@@ -8,3 +8,4 @@ export { HeatmapProvider } from './HeatmapProvider.js';
 export { FileSystemError, FS_ERROR_CODES } from './types.js';
 export { RemoteFileSystemProvider } from './RemoteFileSystemProvider.js';
 export { GitHubFileProvider } from './GitHubFileProvider.js';
+export { AgentSessionProvider } from './AgentSessionProvider.js';

@@ -27,8 +27,47 @@
 
 import { resolveGridByIdOrIndex } from './spatialHelpers.js';
 import { normalizeToolCall, normalizeMessage } from '@glyph3d/core/collections/toolRegistry.js';
+import { parseClaudeSession, agentIdForSession } from '@glyph3d/core/collections/sessionAdapter.js';
 
 const noBooks = { text: 'ERR: agent books not wired', data: null };
+
+/**
+ * Open a stored agent session as a book: fetch the harness's own record (the durable
+ * state), parse it through the adapter, and bulk-hydrate a lane whose id matches the
+ * live hook's derivation — so if the session is still running, its stream converges on
+ * the same book. The ONE open path: the agent.open verb and session restore both ride it.
+ * @param {Object} ctx
+ * @param {string} sessionId full session id (the record's filename stem)
+ * @param {{limit?: number}} [opts] cap on materialized events (default cfg.hydrateLimit)
+ * @returns {Promise<{agentId: string, added: number, total: number}>}
+ */
+export async function openAgentSession(ctx, sessionId, { limit } = {}) {
+    const provider = ctx.sessionProvider;
+    if (!provider) throw new Error('no session provider (relay offline — the archive is a relay feature)');
+    if (!ctx.agentBooks) throw new Error('agent books not wired');
+    const { content } = await provider.read(sessionId);
+    const { events, cwd } = parseClaudeSession(content);
+    const agentId = agentIdForSession(sessionId);
+    const added = ctx.agentBooks.hydrate(agentId, events, { agentType: 'claude', sessionId, cwd, limit });
+    return { agentId, added, total: events.length };
+}
+
+/** Resolve a session id or unique prefix against the archive listing (dash-insensitive). */
+async function resolveSessionId(provider, idOrPrefix) {
+    const sessions = await provider.list();
+    if (sessions.some((s) => s.id === idOrPrefix)) return idOrPrefix;
+    const norm = String(idOrPrefix).replace(/-/g, '');
+    const hits = sessions.filter((s) => s.id.replace(/-/g, '').startsWith(norm));
+    if (hits.length === 1) return hits[0].id;
+    if (hits.length > 1) throw new Error(`ambiguous session '${idOrPrefix}' (${hits.length} matches)`);
+    throw new Error(`no session '${idOrPrefix}'`);
+}
+
+const fmtAge = (ms) => {
+    const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+    return s < 60 ? `${s}s` : s < 3600 ? `${Math.round(s / 60)}m` : s < 86400 ? `${Math.round(s / 3600)}h` : `${Math.round(s / 86400)}d`;
+};
+const fmtSize = (b) => (b >= 1048576 ? (b / 1048576).toFixed(1) + 'M' : b >= 1024 ? Math.round(b / 1024) + 'K' : b + 'B');
 
 /** Canonicalize a record's target against the live registry (an open file's registry id
  *  is its canonical path), then sink the record into the books. The shared sink for the
@@ -122,6 +161,43 @@ export default function registerAgentCommands(router) {
             data: { id, action: rec.action },
         };
     }, { description: 'Agent conversation turn (text/thinking) → a say/think sheet in its book', usage: '<id> <type> <kind> <text>' });
+
+    router.register('agent.sessions', async (_args, ctx) => {
+        const provider = ctx.sessionProvider;
+        if (!provider) return { text: 'ERR: no session provider (the archive is a relay feature)', data: null };
+        let sessions;
+        try { sessions = await provider.list(); }
+        catch (e) { return { text: `ERR: archive list failed — ${e?.message || e}`, data: null }; }
+        const open = new Set([...(ctx.agentBooks?.lanes.keys() ?? [])]);
+        const rows = sessions.map((s) => {
+            const isOpen = open.has(agentIdForSession(s.id));
+            return `${s.id.replace(/-/g, '').slice(0, 8)}  ${fmtAge(s.mtime).padStart(4)}  ${fmtSize(s.size).padStart(6)}${isOpen ? '  · open' : ''}`;
+        });
+        return {
+            text: `ARCHIVE (${sessions.length} session${sessions.length === 1 ? '' : 's'})\n` + (rows.length ? rows.join('\n') : '(none)'),
+            data: { sessions: sessions.map((s) => ({ id: s.id, mtime: s.mtime, size: s.size, open: open.has(agentIdForSession(s.id)) })) },
+        };
+    }, { description: 'List the stored agent session records (the archive)', returns: '{ sessions:[{id,mtime,size,open}] }' });
+
+    router.register('agent.open', async (args, ctx) => {
+        const provider = ctx.sessionProvider;
+        if (!provider) return { text: 'ERR: no session provider (the archive is a relay feature)', data: null };
+        if (!ctx.agentBooks) return noBooks;
+        const [idArg, limitArg] = args;
+        if (!idArg) return { text: 'ERR: usage: agent.open <sessionId|prefix> [limit]', data: null };
+        try {
+            const sessionId = await resolveSessionId(provider, idArg);
+            const limit = limitArg != null ? Number(limitArg) : undefined;
+            const r = await openAgentSession(ctx, sessionId, { limit });
+            const capped = r.added < r.total ? ` (of ${r.total} — tail)` : '';
+            return {
+                text: `OK: opened ${sessionId.slice(0, 8)} as ${r.agentId} — ${r.added} sheet${r.added === 1 ? '' : 's'}${capped}`,
+                data: { sessionId, ...r },
+            };
+        } catch (e) {
+            return { text: `ERR: ${e?.message || e}`, data: null };
+        }
+    }, { description: 'Open a stored session as an agent book (hydrates via the adapter; a live stream converges)', usage: '<sessionId|prefix> [limit]' });
 
     router.register('agent.spawn', (args, ctx) => {
         const books = ctx.agentBooks;

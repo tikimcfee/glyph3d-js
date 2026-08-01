@@ -13,6 +13,7 @@ import InteractionContext from '@glyph3d/core/services/interaction/InteractionCo
 import LspNavigator from '@glyph3d/core/services/interaction/LspNavigator.js';
 import CameraDock from '@glyph3d/core/services/interaction/CameraDock.js';
 import RemoteFileSystemProvider from '@glyph3d/core/services/data/RemoteFileSystemProvider.js';
+import AgentSessionProvider from '@glyph3d/core/services/data/AgentSessionProvider.js';
 import RemoteLspProvider from '@glyph3d/core/services/data/RemoteLspProvider.js';
 import GitHubFileProvider from '@glyph3d/core/services/data/GitHubFileProvider.js';
 import { PickingSystem } from '@glyph3d/core/picking/PickingSystem.js';
@@ -463,6 +464,10 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // no explicit ?repo was given (the binary serving a project); GitHub stays the
     // baseline until then.
     const remoteProvider = new RemoteFileSystemProvider(bridge);
+    // The agent-session archive (the relay's stored transcripts) — a PURE ADDITIVE
+    // relay feature: agent.open / agent.sessions / the panel's Archive region read it;
+    // client-only mode simply has no archive. Content semantics live in the adapter.
+    state.ctx.sessionProvider = new AgentSessionProvider(bridge);
     state.bridge = bridge;
     // Auto-dial only where a relay is plausibly present (resolveRelay's host gate) AND
     // the user hasn't opted out (settings: relay.autoConnect, default on). Otherwise

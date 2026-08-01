@@ -366,6 +366,12 @@ type writeFn func(data []byte)
 type FSHandler struct {
 	root string // absolute path, symlinks resolved
 
+	// sessionsDir is the Claude Code transcript directory derived from the
+	// served root (~/.claude/projects/<encoded-root> — see sessions.go). ""
+	// when the home directory is unknown, and it may simply not exist; the
+	// agentSessions/* methods treat an absent dir as empty, never an error.
+	sessionsDir string
+
 	// extraRoots are additional absolute, symlink-resolved directories the
 	// handler may reach OUTSIDE the project root. Seeded at construction from
 	// the temp dirs (/tmp, /var/tmp, $TMPDIR) plus the --reach flag, and widened
@@ -427,7 +433,7 @@ func NewFSHandler(root string, reach []string) (*FSHandler, error) {
 		extra = append(extra, r)
 	}
 
-	return &FSHandler{root: resolved, extraRoots: extra}, nil
+	return &FSHandler{root: resolved, extraRoots: extra, sessionsDir: agentSessionsDir(resolved)}, nil
 }
 
 // evalRootOrEmpty resolves a candidate reach directory to its absolute,
@@ -540,6 +546,10 @@ func (h *FSHandler) Handle(method string, rawID json.RawMessage, params json.Raw
 				h.handleSetFilter(write, rawID, params)
 			case "fs/writeFile":
 				h.handleWriteFile(write, rawID, params)
+			case "agentSessions/list":
+				h.handleAgentSessionsList(write, rawID, params)
+			case "agentSessions/read":
+				h.handleAgentSessionsRead(write, rawID, params)
 			default:
 				h.sendRPCError(write, rawID, -32601, "method not found: "+method, nil)
 			}

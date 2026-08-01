@@ -21,6 +21,12 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
  *   clear done / ✕     → agent.clear done / agent.clear <id>
  *   click a sheet row  → book.page <agent> <n>   (open that sheet)
  *   ⏮ ◀ ▶ ⏭            → book.page first|prev|next|last
+ *   click an archive row → agent.open <session-id>   (page a past session in as a lane)
+ *
+ * Below the stream sits the ARCHIVE — the relay's stored session transcripts
+ * (ctx.sessionProvider), a collapsed strip of past runs: id prefix, age, size.
+ * Rows whose id matches an open lane show an 'open' marker instead of a click
+ * target. The region exists only when a session provider is connected.
  *
  * Identity dots come from getStream()'s per-row `color` — the live hue table in
  * AgentBooks.cfg.hues (seeded from the tool registry's ONE action-hue home), so the 2D
@@ -91,7 +97,23 @@ const S = {
     verb: { flex: '0 0 auto', color: '#aeb6c4', minWidth: 52 },
     label: { flex: '1 1 auto', minWidth: 0, color: '#8a92a0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
     age: { flex: '0 0 auto', color: '#5a616c', fontSize: 11 },
+
+    // -- archive: the relay's stored session transcripts (collapsed strip below the stream) --
+    archive: { flex: '0 0 auto', maxHeight: '22%', overflowY: 'auto', borderTop: '1px solid #1b1f29', padding: '3px 0 5px' },
+    archiveTitle: { padding: '2px 8px', color: '#5a616c', fontSize: 10, letterSpacing: '0.08em', textTransform: 'uppercase' },
+    sessRow: (open) => ({
+        display: 'flex', alignItems: 'center', gap: 7, padding: '2px 8px', userSelect: 'none',
+        cursor: open ? 'default' : 'pointer',
+    }),
+    sessId: { flex: '0 0 auto', color: '#aeb6c4', minWidth: 70 },
+    sessOpen: { flex: '0 0 auto', color: '#7ad79a', fontSize: 10 },
+    sessAge: { flex: '1 1 auto', textAlign: 'right', color: '#5a616c', fontSize: 11 },
+    sessSize: { flex: '0 0 auto', color: '#5a616c', fontSize: 11, minWidth: 38, textAlign: 'right' },
 };
+
+// Archive list poll cadence (ms) — deliberately slower than the 1s roster tick;
+// the archive is disk-backed and only moves when a session file grows or appears.
+const ARCHIVE_POLL_MS = 10_000;
 
 function ago(ts) {
     if (!ts) return '';
@@ -99,12 +121,39 @@ function ago(ts) {
     return s < 1 ? 'now' : s < 60 ? `${s}s` : `${Math.round(s / 60)}m`;
 }
 
+// Wall-clock age (archive mtimes are unix ms, not performance.now() ticks) — days-scale.
+function wallAgo(ms) {
+    if (!ms) return '';
+    const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+    if (s < 60) return `${s}s`;
+    const m = Math.round(s / 60);
+    if (m < 60) return `${m}m`;
+    const h = Math.round(m / 60);
+    if (h < 48) return `${h}h`;
+    return `${Math.round(h / 24)}d`;
+}
+
+function humanSize(n) {
+    if (!Number.isFinite(n) || n < 0) return '';
+    if (n < 1024) return `${n}b`;
+    const kb = n / 1024;
+    if (kb < 1024) return `${kb < 10 ? kb.toFixed(1) : Math.round(kb)}k`;
+    const mb = kb / 1024;
+    return `${mb < 10 ? mb.toFixed(1) : Math.round(mb)}M`;
+}
+
+// Session ids are UUIDs; lanes opened from the archive carry the 8-char prefix
+// (dashes stripped). Normalizing both sides makes the open-lane match symmetric.
+const sessPrefix = (id) => String(id).replace(/-/g, '').slice(0, 8);
+
 export default function AgentsPanel({ client }) {
     const books = () => client?.ctx?.agentBooks || null;
     const [agents, setAgents] = useState([]);
     const [selected, setSelected] = useState(null);
     const [stream, setStream] = useState([]);
+    const [sessions, setSessions] = useState(null);   // null = no provider (region absent), [] = provider + empty
     const focusRef = useRef(null);
+    const aliveRef = useRef(true);
 
     // Roster + selection: sticky to the user's pick, else the newest lane. Recomputed each refresh.
     const refresh = useCallback(() => {
@@ -132,6 +181,26 @@ export default function AgentsPanel({ client }) {
         setStream(selected && b ? (b.getStream?.(selected) || []) : []);
     }, [selected, agents, client]);
 
+    // Archive: the relay's stored session list. Its own slow poll — the 1s roster tick
+    // above is liveness for in-memory lanes; this one is a disk listing over RPC.
+    const refreshArchive = useCallback(async () => {
+        const p = client?.ctx?.sessionProvider;
+        if (!p) { if (aliveRef.current) setSessions(null); return; }
+        try {
+            const list = await p.list();
+            if (aliveRef.current) setSessions(Array.isArray(list) ? list : []);
+        } catch {
+            if (aliveRef.current) setSessions(null);
+        }
+    }, [client]);
+
+    useEffect(() => {
+        aliveRef.current = true;
+        refreshArchive();
+        const t = setInterval(refreshArchive, ARCHIVE_POLL_MS);
+        return () => { aliveRef.current = false; clearInterval(t); };
+    }, [refreshArchive]);
+
     const sel = agents.find((a) => a.id === selected) || null;
 
     // Keep the open sheet in view as the head turns.
@@ -148,9 +217,17 @@ export default function AgentsPanel({ client }) {
     const page = useCallback((arg) => { if (selected) after(['book.page', selected, String(arg)]); }, [selected, after]);
     const onRow = useCallback((index) => { if (selected) after(['book.page', selected, String(index + 1)]); }, [selected, after]);
 
+    // Open a past session as a lane (fire-and-forget — the book pages in when the
+    // adapter feeds it), then re-list so the row flips to its 'open' marker.
+    const openSession = useCallback((id) => {
+        exec(['agent.open', id]);
+        refreshArchive();
+    }, [exec, refreshArchive]);
+
     const atFirst = !sel || sel.head <= 0;
     const atLast = !sel || sel.head >= (sel.count - 1);
     const anyDone = agents.some((a) => a.state === 'done');
+    const openLanes = new Set(agents.map((a) => sessPrefix(a.id)));
 
     return (
         <div style={S.content}>
@@ -212,6 +289,27 @@ export default function AgentsPanel({ client }) {
                     </div>
                 ))}
             </div>
+
+            {/* archive — past session transcripts on the relay (only when a provider is connected) */}
+            {sessions && (
+                <div style={S.archive}>
+                    <div style={S.archiveTitle}>Archive</div>
+                    {sessions.map((s) => {
+                        const pid = sessPrefix(s.id);
+                        const isOpen = openLanes.has(pid);
+                        return (
+                            <div key={s.id} style={S.sessRow(isOpen)}
+                                onClick={isOpen ? undefined : () => openSession(s.id)}
+                                title={isOpen ? `${s.id} — already open as a lane` : `${s.id} — open as a lane (agent.open)`}>
+                                <span style={S.sessId}>{pid}</span>
+                                {isOpen && <span style={S.sessOpen}>open</span>}
+                                <span style={S.sessAge}>{wallAgo(s.mtime)}</span>
+                                <span style={S.sessSize}>{humanSize(s.size)}</span>
+                            </div>
+                        );
+                    })}
+                </div>
+            )}
         </div>
     );
 }
