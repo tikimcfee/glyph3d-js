@@ -17,15 +17,9 @@ import GitHubFileProvider from '@glyph3d/core/services/data/GitHubFileProvider.j
 
 /** Dispose every code grid, clear annotations, stop any camera animation. */
 function clearScene(ctx) {
-    // Snapshot ids first — removeGrid mutates the registry as we iterate. removeGrid is
-    // the canonical dispose path (geometry freed, scene.remove, unregister, reconcile).
-    // relayout:false defers the tree re-pack: a per-removal relayout re-packs the whole
-    // field AND rebuilds every overlay (markers/arrows/labels) N times — quadratic, a
-    // minute-class clear on a 2k-file repo. One relayoutAndRest settles it after.
-    const ids = ctx.registry.findByType('grid').map((e) => e.id);
-    let cleared = 0;
-    for (const id of ids) if (ctx.removeGrid(id, { relayout: false })) cleared++;
-    ctx.contentTree?.relayoutAndRest?.();
+    // removeGrids is the canonical bulk-dispose path: geometry freed, unregistered,
+    // zero intermediate re-packs, one world settle at the end.
+    const cleared = ctx.removeGrids(ctx.registry.findByType('grid').map((e) => e.id));
     ctx.annotations?.clear?.();
     ctx.workspace?.clear?.();
     ctx._cancelCameraAnimation?.();

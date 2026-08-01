@@ -110,6 +110,19 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
       return entry;
     },
 
+    // The ONE bulk-removal primitive: remove a SET of grids with zero intermediate
+    // re-packs, then settle the world once. A per-removal relayout re-packs the whole
+    // field and rebuilds every overlay N times — quadratic, a minute-class clear on a
+    // 2k-file repo — so the batch discipline lives in this seam rather than as a flag
+    // each bulk caller must remember. Callers own their scoping (a prefix, everything)
+    // and their bookkeeping (sheets, attention, fieldSources); this owns the removal.
+    removeGrids(ids) {
+      let removed = 0;
+      for (const id of ids) if (this.removeGrid(id, { relayout: false })) removed++;
+      if (removed) this.contentTree?.relayoutAndRest?.();
+      return removed;
+    },
+
     // Camera controller — supplied by <ViewerCamera> via a ref the app threads
     // in. A live getter (not a snapshot) so handlers see it regardless of which
     // sibling effect mounted first.

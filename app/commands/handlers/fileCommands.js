@@ -312,7 +312,6 @@ export default function registerFileCommands(router) {
 
         const ws = ctx.workspace;
         const am = ctx.attentionManager;
-        let closed = 0;
         for (const e of doomed) {
             const id = e.id;
             // Clear key BEFORE primary (exitEdit on a still-live grid), same order
@@ -321,9 +320,8 @@ export default function registerFileCommands(router) {
             if (am?.get?.('primary')?.id === id) am.set('primary', null, { registry: ctx.registry });
             const sheet = ws ? [...ws.sheets.values()].find((s) => s.panelId === id) : null;
             if (sheet) { ws.setPanelId(sheet.id, null); ws.removeSheet(sheet.id); }
-            if (ctx.removeGrid(id, { relayout: false })) closed++;
         }
-        ctx.contentTree?.relayoutAndRest?.(WORLD_FLOOR_Y);
+        const closed = ctx.removeGrids(doomed.map((e) => e.id));
 
         if (Array.isArray(ctx.fieldSources)) {
             ctx.fieldSources = ctx.fieldSources.filter(
