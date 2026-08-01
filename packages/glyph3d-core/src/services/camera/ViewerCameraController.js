@@ -1113,6 +1113,17 @@ export class ViewerCameraController {
         this.ctx.camera.position.set(center.x, center.y, bounds.max.z + distance);
         this.pitch = 0;
         this.yaw = 0;
+
+        // The fit must be DRAWABLE: a large field's stand-off distance plus its own depth
+        // can exceed the camera's far plane, and a fit-all that frames content the
+        // renderer then clips reads as an empty world. Grow far (never shrink — the
+        // Draw-distance setting owns the resting horizon) so what fit-all frames,
+        // fit-all shows.
+        const needed = (distance + size.z) * 1.5;
+        if (this.ctx.camera.far < needed) {
+            this.ctx.camera.far = needed;
+            this.ctx.camera.updateProjectionMatrix();
+        }
     }
 
     focusOnDirectory(dirPath) {

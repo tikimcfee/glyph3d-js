@@ -39,13 +39,40 @@
 export const DEFAULT_LAYOUT = {
     wrapWidth: 200,
     zWrapSpacing: 0.15,
-    pageHeight: 150,
-    pagesWide: 5,
+    pageHeight: 0,
+    pagesWide: 1,
     pageGapX: 10,
     pageGapY: 10,
     pageDepth: 20,
     axis: 'xy',
 };
+
+/**
+ * The named fold presets — COMPLETE bundles (every one sets axis) so switching
+ * modes always resets the fold: e.g. z-pages → newspaper must clear axis:'z',
+ * not inherit it. The canonical table for the grid.layout verb, the default-fold
+ * setting, and anything else that speaks a fold by name.
+ */
+export const LAYOUT_PRESETS = {
+    'long-column': { wrapWidth: 200, pageHeight: 0,   pagesWide: 1,  axis: 'xy' },  // one tall column; long lines z-wrap (default)
+    newspaper:     { wrapWidth: 200, pageHeight: 150, pagesWide: 5,  axis: 'xy' },  // fan into columns
+    'no-wrap':     { wrapWidth: 0,   pageHeight: 0,   pagesWide: 1,  axis: 'xy' },  // lines run off right; rows = line count
+    wall:          { wrapWidth: 200, pageHeight: 150, pagesWide: 32, axis: 'xy' },  // wide wall of columns marching right
+    'z-pages':     { wrapWidth: 200, pageHeight: 150, pagesWide: 1,  axis: 'z'  },  // pages stack in depth (later behind earlier)
+};
+
+/**
+ * Retune the fold NEW grids are born with (CodeGrid spreads DEFAULT_LAYOUT at
+ * construction) — the seam behind the `grid.defaultLayout` setting. Mutates the
+ * shared default in place; grids already on screen keep their fold (that's
+ * grid.layout's job). Unknown keys are ignored so a preset bundle passes straight in.
+ * @param {Partial<typeof DEFAULT_LAYOUT>} patch
+ */
+export function setDefaultLayout(patch = {}) {
+    for (const k of Object.keys(DEFAULT_LAYOUT)) {
+        if (patch[k] !== undefined) DEFAULT_LAYOUT[k] = patch[k];
+    }
+}
 
 /**
  * Merge a partial per-grid `layout` over DEFAULT_LAYOUT. `??` keeps an explicit `0`

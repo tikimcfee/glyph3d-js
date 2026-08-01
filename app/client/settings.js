@@ -5,6 +5,7 @@ import { setStrataParam, STRATA_DEFAULTS } from '@glyph3d/core/collections/Strat
 import { TERMINAL_CURSOR_DEFAULTS } from '@glyph3d/core/collections/TerminalGrid.js';
 import { JELLYFISH_DEFAULTS, LIBRARY_DEFAULTS, schemeNameOf } from '@glyph3d/core/collections/layouts/index.js';
 import { LABEL_DEFAULTS } from '@glyph3d/core/collections/ContentTreeLabels.js';
+import { LAYOUT_PRESETS, setDefaultLayout } from '@glyph3d/core/workers/builders/index.js';
 
 // Settings schema — the SINGLE source for both the Settings panel (renders a row
 // per entry) and the settings.* verbs (validate + apply). Only WIRED knobs live
@@ -133,6 +134,15 @@ export const SETTINGS = [
     type: 'number', default: 1, min: 0.1, max: 5, step: 0.1,
     apply: (ctx, v) => { if (ctx.cameraController) ctx.cameraController.settings.scrollSensitivity = v; },
   },
+  // Draw distance — the camera's far plane: the resting horizon beyond which nothing
+  // renders. fit-all GROWS past it transiently when the fit it computed needs more
+  // (a fit that frames invisible content reads as an empty world); this is the value
+  // the horizon returns to. Applies straight to the canvas camera, no controller needed.
+  {
+    key: 'camera.drawDistance', label: 'Draw distance (far plane)', group: 'Camera',
+    type: 'number', default: 20000, min: 1000, max: 10000000, step: 1000,
+    apply: (ctx, v) => { const cam = ctx.camera; if (cam) { cam.far = v; cam.updateProjectionMatrix?.(); } },
+  },
   // View — high-level view primitives (HUD overlays). No live apply(): main.jsx mounts/
   // unmounts the widget off the persisted value via StateController's state-changed event.
   {
@@ -163,6 +173,16 @@ export const SETTINGS = [
   {
     key: 'relay.autoConnect', label: 'Auto-connect to relay on load', group: 'Connection',
     type: 'bool', default: true,
+  },
+  // Grid — per-grid defaults. The default fold is the shape a NEW grid is born with
+  // (CodeGrid spreads DEFAULT_LAYOUT at construction, so file.open, annotations, and
+  // session restore all inherit it); grids already on screen keep their fold —
+  // grid.layout refolds them one at a time. Presets are the same bundles the
+  // grid.layout verb speaks (LAYOUT_PRESETS, the canonical core table).
+  {
+    key: 'grid.defaultLayout', label: 'Default fold (new grids)', group: 'Grid',
+    type: 'enum', options: Object.keys(LAYOUT_PRESETS), default: 'long-column',
+    apply: (_ctx, v) => setDefaultLayout(LAYOUT_PRESETS[v]),
   },
   // Theme — surface backgrounds. Color is a '#rrggbb' string (THREE.Color eats it
   // directly); opacity drives stacked-tile readability in a dock. apply() restyles
@@ -436,6 +456,7 @@ export function settingDef(key) { return BY_KEY.get(key) || null; }
 export function coerce(def, raw) {
   if (def.type === 'bool') return raw === true || raw === 'true';
   if (def.type === 'color') return typeof raw === 'string' && raw ? raw : def.default;
+  if (def.type === 'enum') return def.options?.includes(raw) ? raw : def.default;
   if (def.type === 'number') {
     let n = typeof raw === 'number' ? raw : parseFloat(raw);
     if (Number.isNaN(n)) n = def.default;

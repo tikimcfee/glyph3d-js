@@ -85,6 +85,10 @@ const styles = {
     width: 32, height: 20, padding: 0, background: '#0f141b',
     border: '1px solid #232b34', borderRadius: 4, cursor: 'pointer',
   },
+  select: {
+    font: 'inherit', color: '#c8ccd6', background: '#0f141b',
+    border: '1px solid #232b34', borderRadius: 4, padding: '2px 5px', outline: 'none',
+  },
   banner: {
     margin: '10px 2px 2px', padding: '6px 8px', borderRadius: 4, background: '#1c1606',
     border: '1px solid #4a3a12', color: '#d9b25a', display: 'flex', alignItems: 'center', gap: 8,
@@ -202,6 +206,15 @@ export default function SettingsPanel({ client }) {
                           checked={!!vals[def.key]}
                           onChange={(e) => commit(def, e.target.checked)}
                         />
+                      ) : def.type === 'enum' ? (
+                        <select
+                          style={styles.select}
+                          value={vals[def.key]}
+                          onChange={(e) => commit(def, e.target.value)}
+                          onKeyDown={(e) => e.stopPropagation()}
+                        >
+                          {def.options.map((o) => <option key={o} value={o}>{o}</option>)}
+                        </select>
                       ) : (
                         <input
                           type="number"

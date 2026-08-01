@@ -5,6 +5,7 @@
 
 import { box, table, kvLines } from '../formatResponse.js';
 import CodeGrid from '@glyph3d/core/collections/CodeGrid.js';
+import { LAYOUT_PRESETS } from '@glyph3d/core/workers/builders/index.js';
 import { resolveGridByIdOrIndex } from './spatialHelpers.js';
 import { decodeBase64 } from '@glyph3d/core/utils/encoding.js';
 
@@ -326,17 +327,10 @@ export default function registerGridCommands(router) {
 
     // grid.layout <id|index> [preset] [--flag value ...] — refold a code grid in place
     // (Step 3a). Source + camera stay put; only how the file folds into space changes. A
-    // preset is a params bundle; --flags override on top. No params after the id → report
-    // current. Re-flows neighbors after (footprint changes). Modes are params, not branches.
-    // Presets are COMPLETE fold bundles (every one sets axis) so switching modes always
-    // resets the fold — e.g. z-pages → newspaper must clear axis:'z', not inherit it.
-    const LAYOUT_PRESETS = {
-        newspaper:     { wrapWidth: 200, pageHeight: 150, pagesWide: 5,  axis: 'xy' },  // fan into columns (default)
-        'long-column': { wrapWidth: 200, pageHeight: 0,   pagesWide: 1,  axis: 'xy' },  // one tall column; long lines z-wrap
-        'no-wrap':     { wrapWidth: 0,   pageHeight: 0,   pagesWide: 1,  axis: 'xy' },  // lines run off right; rows = line count
-        wall:          { wrapWidth: 200, pageHeight: 150, pagesWide: 32, axis: 'xy' },  // wide wall of columns marching right
-        'z-pages':     { wrapWidth: 200, pageHeight: 150, pagesWide: 1,  axis: 'z'  },  // pages stack in depth (later behind earlier)
-    };
+    // preset is a params bundle (LAYOUT_PRESETS, the canonical core table — shared with
+    // the grid.defaultLayout setting); --flags override on top. No params after the id →
+    // report current. Re-flows neighbors after (footprint changes). Modes are params,
+    // not branches.
     const LAYOUT_FLAGS = {
         '--wrap': 'wrapWidth', '--page-height': 'pageHeight', '--pages-wide': 'pagesWide',
         '--z-spacing': 'zWrapSpacing', '--gap-x': 'pageGapX', '--gap-y': 'pageGapY',

@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useEffect, useRef } from 'react';
 import { useThree, useFrame } from '@react-three/fiber';
+import * as THREE from 'three';
 import { useGridRegistry } from '@glyph3d/r3f';
 
 import CommandRouter from '@glyph3d/core/services/orchestration/CommandRouter.js';
@@ -181,18 +182,56 @@ function VisitorRunner({ stateRef }) {
 
 /**
  * DockRunner — the camera-coupled per-frame systems: parks the camera-locked dock
- * ahead of the active camera and advances its tile animations, and drives the
+ * ahead of the active camera and advances its tile animations, drives the
  * container labels' approach fade + hover grow (the hovered entity's ancestor
- * containers swell their names). Logic-only (returns null); guarded so it's a
- * no-op until the effect wires the ctx.
+ * containers swell their names), and consumes any pending first-draw warm-up.
+ * Logic-only (returns null); guarded so it's a no-op until the effect wires the ctx.
  */
 function DockRunner({ stateRef }) {
   useFrame((state, dt) => {
-    const c = stateRef.current?.ctx;
+    const s = stateRef.current;
+    const c = s?.ctx;
     c?.cameraDock?.update(dt, state.camera);
     c?.contentTreeLabels?.update(state.camera, dt, c?.attentionManager?.state?.hover?.id ?? null);
+    if (s?.warmAt && performance.now() >= s.warmAt) {
+      s.warmAt = 0;
+      warmUpRender(state.gl, state.scene, state.camera, c);
+    }
   });
   return null;
+}
+
+/**
+ * One REAL render through a throwaway camera that contains the whole field, with the
+ * far plane pushed past all of it. The WebGPU backend creates each object's draw
+ * resources (bind groups, attribute buffers) only at its first actual draw — content
+ * loaded outside the view (or beyond the far plane) pays that cost en masse the frame
+ * it first appears, a measured ~75ms hitch per ~180 fields that scales with count.
+ * Precompiling (renderer.compileAsync) does not cover it — only a draw does. This
+ * frame draws to the canvas inside the normal loop, BEFORE the frame's real render,
+ * so the real view overwrites it prior to present: the cost lands at load time, where
+ * latency already reads as loading, and first fly-in stays smooth.
+ */
+function warmUpRender(gl, scene, camera, ctx) {
+  const bounds = new THREE.Box3();
+  for (const e of ctx?.registry?.list?.() ?? []) {
+    const b = e.grid?.getBounds?.();
+    if (b && !b.isEmpty()) bounds.union(b);
+  }
+  if (bounds.isEmpty()) return;
+  const center = bounds.getCenter(new THREE.Vector3());
+  const size = bounds.getSize(new THREE.Vector3());
+  // Back off far enough that the default fov contains the widest axis; far covers the
+  // stand-off plus the field's own depth, with headroom. Containment is all that
+  // matters here — nothing about this pose is seen.
+  const d = Math.max(size.x, size.y, 100);
+  const warm = camera.clone();
+  warm.position.set(center.x, center.y, bounds.max.z + d);
+  warm.far = (d + size.z) * 4;
+  warm.lookAt(center);
+  warm.updateProjectionMatrix();
+  warm.updateMatrixWorld(true);
+  gl.render(scene, warm);
 }
 
 /** Access the wired command client: { ctx, router, registry, bridge }. */
@@ -291,6 +330,7 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     applyGroupSettings(state.ctx, 'Labels'); // fold persisted container-label dials in at boot
     applyGroupSettings(state.ctx, 'Appearance'); // set the configured interaction colors as the panel default before any window spawns
     applyGroupSettings(state.ctx, 'Glyph LOD');  // fold persisted minification/LOD dials into the global glyph uniforms at boot
+    applyGroupSettings(state.ctx, 'Grid');       // set the configured default fold before any grid spawns (file.open / session restore)
 
     // Diagnostic: origin-vs-content-anchor dots per dir (layout.probes). Reveals where the
     // arrows anchor relative to each footprint origin — a debug instrument, toggle off when done.
@@ -467,6 +507,11 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
         get: () => state.ctx.cameraDock?.tiles ?? null,
       });
     }
+    // Fold the persisted Camera dials in at boot (speed, auto-slow, soft bounds, draw
+    // distance). Each apply self-guards on its subsystem, and the controller ref is live
+    // by the time this effect runs — without this fold, stored values sat unused until
+    // the panel next touched them.
+    applyGroupSettings(state.ctx, 'Camera');
 
     // Saved-state system: the server-side session store. Restore (open files +
     // camera + dock layout) runs once, on the first connect after this page
@@ -496,6 +541,18 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     const reconcileWorkspace = () => state.ctx.workspace?.reconcile(state.registry);
     state.registry.addChangeListener(reconcileWorkspace);
 
+    // First-draw warm-up scheduling: any registry GROWTH (a load, a restore, a spawned
+    // terminal) re-arms a short debounce; when it lapses, <DockRunner/> renders one warm
+    // frame (warmUpRender) so freshly-loaded fields never pay their GPU first-draw burst
+    // at first sight. Growth-only — removals free resources, nothing to warm.
+    let warmGridCount = state.registry.list().length;
+    const scheduleWarmUp = () => {
+      const n = state.registry.list().length;
+      if (n > warmGridCount) state.warmAt = performance.now() + 400;
+      warmGridCount = n;
+    };
+    state.registry.addChangeListener(scheduleWarmUp);
+
     // Hand the wired client to the app (for DOM chrome outside the Canvas).
     onReady?.(state);
 
@@ -511,6 +568,7 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     return () => {
       offConn?.();
       state.registry.removeChangeListener(reconcileWorkspace);
+      state.registry.removeChangeListener(scheduleWarmUp);
       session.dispose();
       keystrokes();   // installKeyboardRouter returns its uninstall fn
       bridge.disconnect();

@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { stateController } from '@glyph3d/core/services/state';
+import { DEFAULT_LAYOUT } from '@glyph3d/core/workers/builders/index.js';
 
 /**
  * HudPanel — the focused-window control helper. A small companion overlay on the canvas
@@ -14,15 +15,15 @@ import { stateController } from '@glyph3d/core/services/state';
  * for instant retarget, plus a light poll for readouts that don't emit (scroll/frame/layout/edit).
  */
 
-const LAYOUT_MODES = ['newspaper', 'long-column', 'no-wrap', 'z-pages'];
+const LAYOUT_MODES = ['long-column', 'newspaper', 'no-wrap', 'z-pages'];
 
 // Best-guess the active preset from the grid's layout params (modes are param bundles, so this is
-// an inference for the highlight, not authoritative).
+// an inference for the highlight, not authoritative). Missing params read as DEFAULT_LAYOUT.
 function inferMode(L) {
   if (!L) return null;
   if (L.axis === 'z') return 'z-pages';
-  if ((L.wrapWidth ?? 200) === 0) return 'no-wrap';
-  if ((L.pageHeight ?? 150) === 0) return 'long-column';
+  if ((L.wrapWidth ?? DEFAULT_LAYOUT.wrapWidth) === 0) return 'no-wrap';
+  if ((L.pageHeight ?? DEFAULT_LAYOUT.pageHeight) === 0) return 'long-column';
   return 'newspaper';
 }
 
