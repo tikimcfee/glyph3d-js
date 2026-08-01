@@ -9,7 +9,10 @@
  * (collectBookLabels): the same container-fit against the book's own bound, the
  * gradient one step deeper than its directory, no stat line — and since a book's path
  * IS its registry id, hovering a book swells its own name and its whole ancestor
- * chain at once. All labels live in ONE shared GlyphField (a single instanced
+ * chain at once. With plate, every label wears a solid BACKPLATE (the page-face
+ * treatment): one fill-cell quad in the label's own group (renderBatch's quad item),
+ * so it rides every fade and grow with zero extra bookkeeping — still one draw call.
+ * All labels live in ONE shared GlyphField (a single instanced
  * draw call) parented under the tree root, so they ride floor-rest and world moves for
  * free. Each label's glyphs bake LABEL-LOCAL with the anchor in its group offset, so
  * hovering anything inside a container eases its label up to hoverBoost — the name
@@ -62,13 +65,17 @@ export const LABEL_DEFAULTS = {
     zLift: 44,         // world units in front of the subtree's front plane
     showCount: 1,      // 1 → a stat line under the name: "N files"
     showFiles: 1,      // 1 → every BOOK wears its file name too (same fit, no stat line)
+    plate: 1,          // 1 → a solid backplate behind each label (the page-face treatment)
+    plateColor: 0x0c0f16, // the plate's fill — dark kin of the grid/page backgrounds
+    plateOpacity: 0.62,   // the plate's fill opacity (group fades multiply on top)
+    platePad: 0.3,     // plate margin past the text, in label row heights
     worldScale: 0.025, // the field's glyph world scale (the canonical default)
 };
 
 // Opts that shape the BAKED field (glyph text/scale/placement/color): a configure()
 // touching one of these rebuilds. Everything else — the approach spectrum and the
 // hover grow — just steers the next frame's update(), so dial drags stay rebuild-free.
-const BUILD_OPTS = new Set(['fit', 'scaleMin', 'scaleMax', 'countScale', 'colorA', 'colorB', 'gapY', 'zLift', 'showCount', 'showFiles', 'worldScale']);
+const BUILD_OPTS = new Set(['fit', 'scaleMin', 'scaleMax', 'countScale', 'colorA', 'colorB', 'gapY', 'zLift', 'showCount', 'showFiles', 'plate', 'plateColor', 'plateOpacity', 'platePad', 'worldScale']);
 
 /** Total file leaves under a node — descends child dirs and layout-inserted groups
  *  (jellyfish rows hold the books after its pass), skips markers. */
@@ -227,7 +234,8 @@ export default class ContentTreeLabels {
 
         this._ensureGlyphsEncoded(items);
 
-        const glyphCount = items.reduce((n, it) => n + it.text.length + (it.countText?.length ?? 0), 0);
+        const glyphCount = items.reduce((n, it) => n + it.text.length + (it.countText?.length ?? 0), 0)
+            + (o.plate ? items.length : 0);   // one fill-cell instance per plated label
         const field = new GlyphField(this.tree.root, this.atlas, {
             maxInstances: Math.max(glyphCount, 64),
             maxGroups: items.length + 1,
@@ -242,6 +250,8 @@ export default class ContentTreeLabels {
 
         const maxDepth = items.reduce((m, it) => Math.max(m, it.depth), 1);
         const cA = new THREE.Color(o.colorA), cB = new THREE.Color(o.colorB), c = new THREE.Color();
+        const pc = new THREE.Color(o.plateColor);
+        const plateFill = { color: { r: pc.r, g: pc.g, b: pc.b }, opacity: o.plateOpacity };
         const rowH = cm.charHeight;
         const batch = [];
         for (const it of items) {
@@ -255,6 +265,22 @@ export default class ContentTreeLabels {
             const t = maxDepth > 1 ? (it.depth - 1) / (maxDepth - 1) : 0;
             c.lerpColors(cA, cB, t);
             const color = { r: c.r, g: c.g, b: c.b };
+            if (o.plate) {
+                // The backplate: one fill-cell quad in the SAME group, sized over the text
+                // block (mono advance ≈ charW — the label font is monospace), padded, pushed
+                // just behind the glyphs on z. Buffer order puts it first, so the text always
+                // composites over it; the group carries it through every fade and grow.
+                const half = rowH * it.scale / 2;
+                const nameW = [...it.text].length * cm.charWidth * it.scale;
+                const countW = it.countText ? [...it.countText].length * cm.charWidth * it.scale * o.countScale : 0;
+                const bot = it.countText ? -rowH * it.scale - (rowH * it.scale * o.countScale) / 2 : -half;
+                const pad = o.platePad * rowH * it.scale;
+                batch.push({
+                    quad: { w: Math.max(nameW, countW) + 2 * pad, h: (half - bot) + 2 * pad, fill: plateFill },
+                    position: { x: -pad, y: (half + bot) / 2, z: -1 },
+                    options: { color: plateFill.color, groupId: it.groupId },
+                });
+            }
             batch.push({ text: it.text, position: { x: 0, y: 0, z: 0 }, options: { color, scale: it.scale, groupId: it.groupId } });
             if (it.countText) {
                 batch.push({

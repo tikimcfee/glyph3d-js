@@ -1052,22 +1052,63 @@ export default class GlyphField {
     }
 
     /**
-     * Render multiple texts in one GPU rebuild.
-     * @param {Array<{text, position, options}>} items
+     * Render multiple items in one GPU rebuild. Two item forms:
+     *   { text, position, options }                — shaped text (the usual form)
+     *   { quad: {w, h, fill?}, position, options } — ONE explicit-size cell carrying a
+     *     blank glyph (no ink). With `fill` ({color:{r,g,b}, opacity}) the cell renders
+     *     as a solid rectangle via the highlight FILL path — and being an ordinary
+     *     instance in its group, it rides the group offset/scale/alpha like any glyph:
+     *     the primitive for label backplates, badges, swatches. The cell anchors like
+     *     every glyph cell: left edge at position.x, vertically centered on position.y.
+     * @param {Array<{text?:string, quad?:{w:number, h:number, fill?:{color:{r:number,g:number,b:number}, opacity:number}}, position?:{x:number,y:number,z:number}, options?:Object}>} items
      * @returns {number[]} textIds
      */
     renderBatch(items) {
         const ids = [];
+        const fills = [];
         for (const item of items) {
-            const glyphs = this._textToGlyphs(
-                item.text,
-                item.position || { x: 0, y: 0, z: 0 },
-                item.options || {}
-            );
-            ids.push(this._registerText(item.text, glyphs, item.options || {}));
+            const options = item.options || {};
+            const position = item.position || { x: 0, y: 0, z: 0 };
+            let glyphs;
+            if (item.quad) {
+                glyphs = [{
+                    position,
+                    size: { width: item.quad.w, height: item.quad.h },
+                    charCode: this._blankGlyphId(),
+                    color: options.color || this.config.defaultColor,
+                    groupId: options.groupId || 0,
+                }];
+            } else {
+                glyphs = this._textToGlyphs(item.text, position, options);
+            }
+            const id = this._registerText(item.text ?? '', glyphs, options);
+            ids.push(id);
+            if (item.quad?.fill) fills.push({ id, fill: item.quad.fill });
         }
         this._rebuildAllInstances();
+        // Fill texels address ABSOLUTE buffer slots — which the rebuild just assigned.
+        for (const { id, fill } of fills) {
+            const entry = this.renderedTexts.get(id);
+            if (entry?.bufferStartIndex !== undefined) {
+                this.setGlyphHighlight(entry.bufferStartIndex, fill.color, fill.opacity);
+            }
+        }
         return ids;
+    }
+
+    /** @private The glyph id that draws NO ink — the shaped space (empty outline) — for
+     *  quad cells whose whole point is the fill. Id 0 (.notdef) often draws a box
+     *  outline, so it is only the shaper-less fallback (mock/test fields). */
+    _blankGlyphId() {
+        if (this._blankGid === undefined) {
+            let gid = 0;
+            if (this._shaper) {
+                const shaped = this._shaper.shape(' ');
+                if (shaped && shaped.length) gid = shaped[0].g;
+            }
+            this._blankGid = gid;
+        }
+        return this._blankGid;
     }
 
     /**

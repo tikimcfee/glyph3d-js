@@ -185,9 +185,9 @@ export default function registerLayoutCommands(router) {
     // tag as you arrive — and every book wearing its file name the same way.
     registerOverlay({
         verb: 'layout.labels', noun: 'labels', ctxKey: 'contentTreeLabels', title: 'LAYOUT LABELS',
-        colorKeys: new Set(['colorA', 'colorB']),
-        description: 'Toggle/dial the container + book labels (chain-compressed dir names, per-book file names, container-fit sizing, approach spectrum)',
-        usage: '[on|off|toggle] [--fit N --scale-min N --scale-max N --opacity N --min-alpha N --near-scale N --fade-start N --fade-end N --gap-y N --z-lift N --show-count 0|1 --show-files 0|1 --color-a HEX --color-b HEX]',
+        colorKeys: new Set(['colorA', 'colorB', 'plateColor']),
+        description: 'Toggle/dial the container + book labels (chain-compressed dir names, per-book file names, container-fit sizing, approach spectrum, backplates)',
+        usage: '[on|off|toggle] [--fit N --scale-min N --scale-max N --opacity N --min-alpha N --near-scale N --fade-start N --fade-end N --gap-y N --z-lift N --show-count 0|1 --show-files 0|1 --plate 0|1 --plate-color HEX --plate-opacity N --plate-pad N --color-a HEX --color-b HEX]',
     });
 
 }
