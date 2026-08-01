@@ -250,24 +250,47 @@ export default class Book extends BoundedObject3D {
     }
 
     /**
-     * Local layout box — the bound form while fitted: x/y the open sheet's page (or
-     * spread) rect, z spanning the deck (front content forward of 0, the last slot
-     * behind). Released: the open sheet's pass-through content box. Schemes and bounds
-     * consumers apply the book's own matrix on top (leafBox contract).
+     * The deck's LIVE extent while fitted: every sheet's page (or spread) rect at the
+     * z its node ACTUALLY occupies — mid-ease included — thickened for content and
+     * faces. This is what a cover that binds the whole book must wrap: measuring slot
+     * arithmetic instead leaves pages poking out of their own binding while they ease.
+     * Empty for a released or sheetless book.
+     * @returns {THREE.Box3}
+     */
+    deckBounds() {
+        const out = new THREE.Box3();
+        const o = this._fitOpts;
+        if (!o) return out;
+        const zPad = (o.surfaceDepth ?? 8) + 2;
+        const tmpMin = new THREE.Vector3(), tmpMax = new THREE.Vector3();
+        for (const sheet of this.sheets) {
+            const sides = (sheet.verso ? 1 : 0) + (sheet.recto ? 1 : 0);
+            if (!sides) continue;
+            const hw = sides === 2 ? o.pageW + (o.gutter ?? 0) / 2 : o.pageW / 2;
+            const hh = o.pageH / 2;
+            const z = sheet.node.position.z;
+            tmpMin.set(-hw, -hh, z - zPad);
+            tmpMax.set(hw, hh, z + zPad);
+            out.expandByPoint(tmpMin);
+            out.expandByPoint(tmpMax);
+        }
+        return out;
+    }
+
+    /**
+     * Local layout box — the bound form while fitted: the LIVE deck extent (see
+     * deckBounds) unioned with the open sheet's content depth. Released: the open
+     * sheet's pass-through content box. Schemes and bounds consumers apply the book's
+     * own matrix on top (leafBox contract).
      * @returns {THREE.Box3}
      */
     layoutBounds() {
         const cb = this.contentBox();
         if (!this.fitted) return cb;
-        const o = this._fitOpts;
-        const sheet = this.sheets[this.head];
-        const spread = !!(sheet && sheet.verso && sheet.recto);
-        const hw = spread ? o.pageW + (o.gutter ?? 0) / 2 : o.pageW / 2;
-        const hh = o.pageH / 2;
-        const deckSpan = (this.sheets.length - 1) * this.deck.zPitch;
-        return new THREE.Box3(
-            new THREE.Vector3(-hw, -hh, Math.min(cb.min.z, 0) - deckSpan),
-            new THREE.Vector3(hw, hh, Math.max(cb.max.z, 0)));
+        const db = this.deckBounds();
+        if (db.isEmpty()) return cb;
+        if (!cb.isEmpty()) db.union(cb);
+        return db;
     }
 
     /** BoundedObject3D's Measurable contract — getBounds() derives the world AABB from this. */

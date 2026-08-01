@@ -47,6 +47,14 @@ const RECORDS = {
     },
     moveVerb: 'grid.move',
   },
+  'book.card': {
+    // Any page of a book IS the book: the wheel turns it from wherever you're reading —
+    // no aiming at the cover's margins. The card's registry meta names its agent lane.
+    wheelScroll(entry, dy) {
+      const id = entry.meta?.agentId;
+      return id ? ['book.scroll', id, String(dy > 0 ? -1 : 1)] : null;
+    },
+  },
   'book.group': {
     // An agent book. Wheel/touchpad over the cover TURNS THE PAGES — down = older
     // (deeper into the run), up = newer; landing on the newest resumes live-follow.

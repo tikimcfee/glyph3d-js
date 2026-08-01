@@ -745,13 +745,14 @@ const buildLibrary = (paths, opts = {}, order = paths) => {
   eq([bk._slotZ(1), bk._slotZ(0), bk._slotZ(2)], [0, -50, -100], 'deck: scrolled-past newest wraps to the back');
   bk.scroll(+1);
   ok(bk.following, 'deck: landing on the newest resumes live-follow');
-  // Fitted bounds: x spans the open SPREAD (2·pageW + gutter), z spans the deck.
+  // The deck animator eases nodes toward their slots (dt clamps at 0.1 per step).
+  for (let s = 0; s < 40; s++) bk.update(1);
+  ok(Math.abs(bk.sheets[1].node.position.z - (-50)) < 0.1, 'deck: update(dt) eases sheets to their slots');
+  // Fitted bounds: x spans the open SPREAD (2·pageW + gutter); z wraps the LIVE deck —
+  // pages measured where they actually sit, so the cover binds every sheet (deckBounds).
   const lb = bk.layoutBounds();
   eq([r2(lb.max.x - lb.min.x), r2(lb.max.y - lb.min.y)], [44, 30], 'deck: layoutBounds spans the open spread');
-  ok(lb.min.z <= -100, 'deck: layoutBounds spans the receding sheets');
-  // The deck animator eases nodes toward their slots (dt clamps at 0.1 per step).
-  for (let s = 0; s < 20; s++) bk.update(1);
-  ok(Math.abs(bk.sheets[1].node.position.z - (-50)) < 0.1, 'deck: update(dt) eases sheets to their slots');
+  ok(lb.min.z <= -100, 'deck: layoutBounds wraps the receding sheets at their live depth');
   eq(bk.contentLeaves().length, 5, 'deck: contentLeaves lists every side across the sheets');
 }
 
