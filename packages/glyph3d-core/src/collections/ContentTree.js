@@ -115,6 +115,20 @@ export default class ContentTree {
     /** Every Book in the tree (the repository AS a collection of books). */
     books() { return [...this._books.values()]; }
 
+    /** The library VOLUME presenting a directory's files as pages, or null. Volumes are
+     *  per-pass presentation Books the library deck builds (node.userData._volume) —
+     *  addressable so book.page/book.scroll can turn a directory by its path. */
+    volumeAt(dirPath) { return this._dirs.get(keyOf(dirPath))?.userData._volume ?? null; }
+
+    /** Every live volume — the decks a frame loop eases (Book.update). */
+    volumes() {
+        const out = [];
+        for (const node of this._dirs.values()) {
+            if (node.userData._volume) out.push(node.userData._volume);
+        }
+        return out;
+    }
+
     /** Number of directory nodes (excluding the root). */
     dirCount() { return this._dirs.size - 1; }
 
@@ -371,17 +385,28 @@ export default class ContentTree {
         const visit = (dir) => {
             for (const child of [...dir.children]) {
                 if (child.userData?.isLayoutGroup) {
-                    // gather the group's path-bearing unit descendants, re-home them onto `dir`.
+                    // gather the group's path-bearing unit descendants, re-home them onto
+                    // `dir` — descending book INTERNALS too, so a library VOLUME (a Book
+                    // whose sheets carry the dir's file books) gives its pages back.
                     const units = [];
                     const gather = (g) => {
                         for (const c of g.children) {
-                            if (c.userData?.isLayoutGroup) gather(c);
+                            if (c.userData?.isLayoutGroup || c.userData?.isBookInternal) gather(c);
                             else if (c.userData?.path !== undefined) units.push(c);
                         }
                     };
                     gather(child);
                     for (const unit of units) dir.add(unit);   // THREE.add re-parents (row → dir)
-                    disposePanelSurfaces(child);   // free the panels' backing-face geometries first
+                    if (child.userData.isVolume) {
+                        // The open page survives the pass on the dir node; the volume itself
+                        // is a per-pass presentation object — dispose, don't keep.
+                        dir.userData.volumeHead = child.head;
+                        dir.userData.volumeFollowing = child.following;
+                        if (dir.userData._volume === child) dir.userData._volume = null;
+                        child.dispose();
+                    } else {
+                        disposePanelSurfaces(child);   // free the panels' backing-face geometries first
+                    }
                     dir.remove(child);
                 } else if (child.userData?.isDir) {
                     visit(child);
@@ -429,13 +454,26 @@ export default class ContentTree {
      * world box (BoundedObject3D.getBounds): the bound form when fitted (the page),
      * the leaf's content box when released — and leafBox's userData.size fallback
      * covers geometry-less leaves, so one path serves real grids and mocks alike.
+     * Books riding a library VOLUME are measured by the volume instead (its live deck
+     * box IS their bound form — the field rests on the floor by its pages).
      */
     getWorldBounds(target = new THREE.Box3()) {
         target.makeEmpty();
         this.root.updateWorldMatrix(true, true);
         const tmp = new THREE.Box3();
+        const inVolume = (bk) => {
+            for (let n = bk.parent; n && n !== this.root; n = n.parent) {
+                if (n.userData?.isVolume) return true;
+            }
+            return false;
+        };
         for (const book of this._books.values()) {
+            if (inVolume(book)) continue;
             const b = book.getBounds(tmp);
+            if (b && !b.isEmpty()) target.union(b);
+        }
+        for (const vol of this.volumes()) {
+            const b = vol.getBounds(tmp);
             if (b && !b.isEmpty()) target.union(b);
         }
         return target;

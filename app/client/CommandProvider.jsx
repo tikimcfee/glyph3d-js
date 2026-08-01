@@ -176,13 +176,17 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
 const AppCommandContext = createContext(null);
 
 /**
- * AgentRunner — eases every agent book's rolodex deck toward its slots and runs stall
- * detection, once per frame. Rendered inside the Canvas (so useFrame is valid); a
- * logic-only component (returns null). Guards on agentBooks until the effect wires it.
+ * AgentRunner — eases every rolodex deck toward its slots, once per frame: the agent
+ * books (plus their stall detection) and the library's directory VOLUMES (the tree's
+ * pageable decks). Rendered inside the Canvas (so useFrame is valid); a logic-only
+ * component (returns null). Guards until the effect wires the ctx.
  */
 function AgentRunner({ stateRef }) {
   useFrame((_, dt) => {
-    stateRef.current?.ctx?.agentBooks?.update(dt);
+    const c = stateRef.current?.ctx;
+    c?.agentBooks?.update(dt);
+    const volumes = c?.contentTree?.volumes?.();
+    if (volumes) for (const v of volumes) v.update(dt);
   });
   return null;
 }

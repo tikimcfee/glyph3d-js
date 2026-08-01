@@ -8,11 +8,14 @@
  * create or own them; it only asks each book to take page form and then arranges the
  * collection. fit() is one uniform contain-fit scale (fit, never skew) onto a
  * `pageW × pageH` page with an exact page face behind it, so every book presents the
- * identical bound form regardless of what it holds. A directory's books then just stack
- * in a sorted order at a tight, configurable distance:
+ * identical bound form regardless of what it holds. A directory's books then take one
+ * of three sorted arrangements:
  *
- *   stack 'z' — a DECK: co-located (same x,y), stepped back one `gap` per book,
- *   stack 'x' — a SHELF: books abreast left→right,
+ *   stack 'z' — the VOLUME: the directory BOUND as one pageable Book — its files ride
+ *               as recto sheets on Book's rolodex deck (the same engine agent books
+ *               run), `gap` deep per page. The wheel and book.page turn it; the open
+ *               page survives relayouts on the dir node.
+ *   stack 'x' — a SHELF: books abreast left→right, each fitted individually,
  *   stack 'y' — a PILE: books descending one below the other.
  *
  * Sorting picks the question you're asking of the collection: 'name' (alphabetic),
@@ -30,6 +33,7 @@
  * measure post-order / place pre-order.
  */
 
+import Book from '../Book.js';
 import { flowBoxes } from './flowBoxes.js';
 import { partitionChildren } from './nodeUtils.js';
 import { PANEL_SURFACE_DEFAULTS } from './panelSurface.js';
@@ -39,10 +43,11 @@ export const LIBRARY_DEFAULTS = {
     pageW: 900,        // the page width every book presents (world units)
     pageH: 1200,       // the page height — portrait: these are books, not monitors
     gap: 40,           // stack spacing: the FULL z step of a deck; the gap ADDED between shelf/pile pages
-    stack: 'z',        // 'z' deck (co-located) | 'x' shelf (abreast) | 'y' pile (descending)
+    stack: 'z',        // 'z' deck (a dir BOUND as one pageable VOLUME) | 'x' shelf (abreast) | 'y' pile (descending)
     sort: 'name',      // 'name' | 'size' (content area, big first) | 'ext' (genre shelves)
     reverse: false,    // flip the stack order
     maxUpscale: 4,     // contain-fit may enlarge small files up to this — caps the one-liner giant
+    deckLerp: 9,       // a volume's page-turn easing rate (1/s) — higher snaps, lower glides
     dirGap: 80,        // gap between a node's own stack and its child-directory tier
     depthZ: 500,       // per-level z step for child dirs (packed's proven readable value)
     aspect: 1.5,       // child-tier wrap target (w ≈ aspect × h)
@@ -52,7 +57,12 @@ export const LIBRARY_DEFAULTS = {
 
 const byName = (a, b) =>
     String(a.userData.name).localeCompare(String(b.userData.name), undefined, { sensitivity: 'base' });
-const area = (b) => b.fitInfo.contentW * b.fitInfo.contentH;
+/** Natural content area — read from the RELEASED book's own box, so collections sort
+ *  before any form is applied (the volume fits its pages after adoption). */
+const area = (b) => {
+    const bb = b.layoutBounds();
+    return Math.max(bb.max.x - bb.min.x, 0) * Math.max(bb.max.y - bb.min.y, 0);
+};
 
 /** Order the books by the active question. Sorts fall back to name so equal keys stay stable. */
 function sortBooks(books, o) {
@@ -81,15 +91,46 @@ function orderedPack(sizes, gap, aspect) {
     return flowBoxes(sizes, { margin: gap, wrapWidth, serpentine: true });
 }
 
-/** Post-order: ask this node's books for page form, sort them, measure child
- *  collections, union the footprint (stack on top, child tier below). size.z is
- *  honest — a deep deck extends. */
+/** Bind a directory's books as recto sheets of ONE pageable VOLUME — the dir as a
+ *  literal book, paged by book.page/the wheel (Book's rolodex deck, the same engine
+ *  agent books run). Rebuilt fresh each pass (a layout artifact — _normalize dissolves
+ *  it, re-homing the file books); the OPEN PAGE survives on the dir node
+ *  (volumeHead/volumeFollowing, persisted at dissolve). */
+function buildVolume(node, books, o) {
+    const vol = new Book();
+    vol.userData = {
+        isBook: true, isVolume: true, isLayoutGroup: true,
+        path: node.userData.path, name: node.userData.name,
+    };
+    vol.following = false;   // a library book opens where you left it, not on the newest page
+    vol.deck.zPitch = o.gap;
+    vol.deck.lerp = o.deckLerp;
+    vol.deck.order = 1;      // page order: 1, 2, 3 recede in sequence (not agent recency)
+    node.add(vol);
+    for (const bk of books) vol.addSheet({ recto: bk });
+    vol.pageTo(Math.min(Math.max(node.userData.volumeHead ?? 0, 0), books.length - 1));
+    vol.following = !!node.userData.volumeFollowing;   // pageTo flags the last page; restore intent
+    vol.fit({ ...o, gutter: 0 });
+    vol.seatAll();
+    node.userData._volume = vol;
+    return vol;
+}
+
+/** Post-order: sort this node's books, give them page form — 'z' binds them into one
+ *  pageable VOLUME, 'x'/'y' fit each book individually — measure child collections,
+ *  union the footprint (stack on top, child tier below). size.z is honest — a deep
+ *  deck extends. */
 function measure(node, o) {
     const { files, dirs } = partitionChildren(node);   // deterministic order; markers excluded
 
     const books = files;   // in a ContentTree every file child IS a durable Book
-    for (const b of books) b.fit(o);
     sortBooks(books, o);
+    let volume = null;
+    if (o.stack === 'z' && books.length) {
+        volume = buildVolume(node, books, o);
+    } else {
+        for (const b of books) b.fit(o);
+    }
     const ext = stackExtent(books.length, o);
 
     const dirSizes = dirs.map((d) => measure(d, o));
@@ -100,7 +141,7 @@ function measure(node, o) {
     const h = empty ? 0 : ext.h + (books.length && childPack ? o.dirGap : 0) + (childPack?.height ?? 0);
     const d = Math.max(ext.d, dirs.length ? o.depthZ + Math.max(...dirSizes.map((s) => s.d)) : 0);
 
-    node.userData._lib = { books, dirs, ext, dirSizes, childPack };
+    node.userData._lib = { books, volume, dirs, ext, dirSizes, childPack };
     node.userData.size = { x: w, y: h, z: d };
     return { w, h, d };
 }
@@ -110,18 +151,23 @@ function measure(node, o) {
 function place(node, o) {
     const lib = node.userData._lib;
     if (!lib) return;
-    const { books, dirs, ext, dirSizes, childPack } = lib;
+    const { books, volume, dirs, ext, dirSizes, childPack } = lib;
 
-    books.forEach((book, i) => {
-        if (o.stack === 'x') {
-            book.position.set(-ext.w / 2 + o.pageW / 2 + i * (o.pageW + o.gap), -o.pageH / 2, 0);
-        } else if (o.stack === 'y') {
-            book.position.set(0, -o.pageH / 2 - i * (o.pageH + o.gap), 0);
-        } else {
-            book.position.set(0, -o.pageH / 2, -i * o.gap);   // the deck: co-located, stepped back
-        }
-        book.rotation.set(0, 0, 0);
-    });
+    if (volume) {
+        // The volume sits where the deck's front page reads; its sheets carry their own
+        // deck-slot z (seated at build, eased on page turns).
+        volume.position.set(0, -o.pageH / 2, 0);
+        volume.rotation.set(0, 0, 0);
+    } else {
+        books.forEach((book, i) => {
+            if (o.stack === 'x') {
+                book.position.set(-ext.w / 2 + o.pageW / 2 + i * (o.pageW + o.gap), -o.pageH / 2, 0);
+            } else {
+                book.position.set(0, -o.pageH / 2 - i * (o.pageH + o.gap), 0);   // 'y' pile
+            }
+            book.rotation.set(0, 0, 0);
+        });
+    }
 
     if (!childPack) return;
     const cLeft = -childPack.width / 2;

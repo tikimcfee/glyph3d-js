@@ -78,12 +78,14 @@ export const LABEL_DEFAULTS = {
 const BUILD_OPTS = new Set(['fit', 'scaleMin', 'scaleMax', 'countScale', 'colorA', 'colorB', 'gapY', 'zLift', 'showCount', 'showFiles', 'plate', 'plateColor', 'plateOpacity', 'platePad', 'worldScale']);
 
 /** Total file leaves under a node — descends child dirs and layout-inserted groups
- *  (jellyfish rows hold the books after its pass), skips markers. */
+ *  (jellyfish rows hold the books after its pass), skips markers. A library VOLUME
+ *  counts by its pages (the dir's books ride its sheets). */
 function countFiles(node) {
     let n = 0;
     for (const c of node.children) {
         if (c.userData?.isMarker) continue;
-        if (c.userData?.isDir || c.userData?.isLayoutGroup) n += countFiles(c);
+        if (c.userData?.isVolume) n += c.contentLeaves().length;
+        else if (c.userData?.isDir || c.userData?.isLayoutGroup) n += countFiles(c);
         else n++;
     }
     return n;
@@ -159,6 +161,18 @@ export function collectBookLabels(tree, opts, metrics) {
     const p = new THREE.Vector3();
     for (const book of tree.books()) {
         if (!book.parent || !book.hasLeafAtHome()) continue;   // detached / empty home
+        // Inside a library VOLUME only the OPEN page wears its name — a deck's worth of
+        // co-located labels is noise; the dir label + the front page's name is the read.
+        // The item carries a follow ref: page turns EASE, so update() re-anchors it live.
+        let follow = null;
+        for (let n = book.parent; n && n !== tree.root; n = n.parent) {
+            if (n.userData?.isVolume) {
+                const head = n.sheets[n.head];
+                follow = head && (head.recto === book || head.verso === book) ? book : undefined;
+                break;
+            }
+        }
+        if (follow === undefined) continue;
         const text = String(book.userData.name ?? '');
         if (!text) continue;
         const b = book.layoutBounds();
@@ -167,12 +181,13 @@ export function collectBookLabels(tree, opts, metrics) {
         const w = b.max.x - b.min.x;
         const scale = Math.min(Math.max((o.fit * w) / Math.max(cps * charW, 1e-6), o.scaleMin), o.scaleMax);
         const depth = visibleDepth(book, tree.root) + 1;
-        p.set(b.min.x, b.max.y + o.gapY * rowH * scale, b.max.z + o.zLift);
+        const local = { x: b.min.x, y: b.max.y + o.gapY * rowH * scale, z: b.max.z + o.zLift };
+        p.set(local.x, local.y, local.z);
         for (let n = book; n && n !== tree.root; n = n.parent) {
             n.updateMatrix();
             p.applyMatrix4(n.matrix);
         }
-        items.push({ path: book.userData.path, depth, text, countText: null, scale, x: p.x, y: p.y, z: p.z });
+        items.push({ path: book.userData.path, depth, text, countText: null, scale, x: p.x, y: p.y, z: p.z, follow, local: follow ? local : null });
     }
     return items;
 }
@@ -320,6 +335,17 @@ export default class ContentTreeLabels {
         const span = Math.max(o.fadeStart - o.fadeEnd, 1e-6);
         const ease = Math.min(1, (dt || 1 / 60) * o.hoverEase);
         for (const it of this._items) {
+            // A volume's open-page label FOLLOWS its book — page turns ease the sheet
+            // through the deck, so the root-local anchor is re-derived from the live
+            // matrices and the group offset re-written only when it actually moves.
+            if (it.follow && it.local) {
+                const v = this._v.set(it.local.x, it.local.y, it.local.z);
+                for (let n = it.follow; n && n !== this.tree.root; n = n.parent) v.applyMatrix4(n.matrix);
+                if (Math.abs(v.x - it.x) + Math.abs(v.y - it.y) + Math.abs(v.z - it.z) > 0.01) {
+                    it.x = v.x; it.y = v.y; it.z = v.z;
+                    f.setGroupOffset(it.groupId, { x: it.x, y: it.y, z: it.z });
+                }
+            }
             const d = this._v.set(it.x, it.y, it.z).applyMatrix4(m).distanceTo(camera.position);
             let t = Math.min(Math.max((d - o.fadeEnd) / span, 0), 1);
             t = t * t * (3 - 2 * t);

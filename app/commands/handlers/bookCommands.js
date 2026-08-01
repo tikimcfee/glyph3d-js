@@ -22,7 +22,8 @@ import { box, kvLines } from '../formatResponse.js';
 const r2 = (n) => Math.round(n * 100) / 100;
 
 /** An agent lane (by agent id or its registry group id — the wheel hands us the latter —
- *  or the first lane when omitted) or a tree book (by path) — or null. */
+ *  or the first lane when omitted), a library VOLUME (by its directory path), or a tree
+ *  book (by file path) — or null. */
 function resolveBook(ctx, id) {
     const books = ctx.agentBooks;
     if (books) {
@@ -32,8 +33,16 @@ function resolveBook(ctx, id) {
         }
     }
     const tree = ctx.contentTree;
+    const vol = id && tree?.volumeAt?.(id);
+    if (vol) return { kind: 'volume', book: vol };
     const bk = id && tree?.bookAt?.(id);
     return bk ? { kind: 'tree', book: bk } : null;
+}
+
+/** A volume's page turn changes which file fronts the deck — the open-page label's TEXT
+ *  changes with it, so the label field re-bakes (position keeps following live). */
+function afterTurn(ctx, hit) {
+    if (hit.kind === 'volume') ctx.contentTreeLabels?.rebuild?.();
 }
 
 // A page-arg keyword/index, optionally preceded by an id. One trailing arg → default book.
@@ -99,6 +108,7 @@ export default function registerBookCommands(router) {
         const hit = resolveBook(ctx, id);
         if (!hit) return { text: id ? `ERR: no book '${id}'` : 'ERR: no book to scroll', data: null };
         const ok = hit.book.scroll(Number(delta) || 0);
+        if (ok) afterTurn(ctx, hit);
         const s = ok ? hit.book.headState() : null;
         return ok
             ? { text: `OK: ${fmtHead(s)}`, data: { ...(hit.agentId ? { agentId: hit.agentId } : {}), ...s } }
@@ -119,6 +129,7 @@ export default function registerBookCommands(router) {
                  : a === 'first' ? bk.pageTo(0)
                  : a === 'last' ? bk.pageTo(s0.count - 1)
                  : bk.pageTo((Number(a) || 1) - 1);
+        if (ok) afterTurn(ctx, hit);
         const s = bk.headState();
         return ok
             ? { text: `OK: ${fmtHead(s)}`, data: { ...(hit.agentId ? { agentId: hit.agentId } : {}), ...s } }

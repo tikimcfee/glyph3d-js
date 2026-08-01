@@ -105,7 +105,10 @@ export function subtreeContentBounds(node, target = new THREE.Box3(), includeOri
             // Descend dirs AND layout-group containers (jellyfish panels/rows) so the bounds come
             // from the real grids at their CURRENT transforms — a warped panel's grids ride an arc,
             // so its own flat layoutBounds would understate the extent. Only true leaves get boxed.
-            if (c.userData?.isDir || c.userData?.isLayoutGroup) { walk(c, m); continue; }
+            // A library VOLUME is the exception: a layout group that IS a bounds-bearing leaf
+            // (Book.layoutBounds = the live deck box) — descending it would box its sheet
+            // scaffolding instead of the bound form.
+            if ((c.userData?.isDir || c.userData?.isLayoutGroup) && !c.userData?.isVolume) { walk(c, m); continue; }
             tmp.copy(leafBox(c)).applyMatrix4(m);
             target.union(tmp);
         }

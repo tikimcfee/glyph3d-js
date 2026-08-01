@@ -576,11 +576,11 @@ const buildLibrary = (paths, opts = {}, order = paths) => {
   return t;
 };
 
-// 35. books: every leaf rides its durable Book (the same object bookAt addresses),
-//     fitted by the exact UNIFORM contain-fit (never a skew, capped at maxUpscale);
-//     the grid's own transform authority untouched.
+// 35. books (shelf stack — books fitted INDIVIDUALLY): every leaf rides its durable
+//     Book (the same object bookAt addresses), fitted by the exact UNIFORM contain-fit
+//     (never a skew, capped at maxUpscale); the grid's own transform authority untouched.
 {
-  const opts = { pageW: 20, pageH: 30, maxUpscale: 10 };   // small page so the width term binds on mock leaves
+  const opts = { pageW: 20, pageH: 30, maxUpscale: 10, stack: 'x' };   // small page so the width term binds on mock leaves
   const t = buildLibrary(PATHS, opts);
   for (const [p, leaf] of t._leaves) {
     const book = t.bookAt(p);
@@ -598,33 +598,66 @@ const buildLibrary = (paths, opts = {}, order = paths) => {
   }
 }
 
-// 36. the deck (stack 'z', the default): a directory's books are CO-LOCATED — same x,y,
-//     page-centered — and step back exactly one gap each, front book at z=0, name order.
+// 36. the deck (stack 'z', the default) is a VOLUME: the directory bound as ONE
+//     pageable Book — its files ride as recto sheets in sorted order, the open page
+//     fronts at z=0, each next page exactly one gap back (page order, not recency).
 {
   const t = buildLibrary(PATHS);
   const { pageH, gap } = LIBRARY_DEFAULTS;
-  const bookOf = (p) => t.bookAt(p);
-  const button = bookOf('src/components/Button.jsx'), modal = bookOf('src/components/Modal.jsx');
-  eq([button.position.x, button.position.y], [0, -pageH / 2], 'library: deck book sits page-centered under the stack origin');
-  eq([button.position.x, button.position.y], [modal.position.x, modal.position.y], 'library: deck books co-located in x,y');
-  eq(r2(button.position.z), 0, 'library: first book (by name) fronts the deck at z=0');
-  eq(r2(modal.position.z), r2(-gap), 'library: next book exactly one gap back');
+  const vol = t.volumeAt('src/components');
+  ok(vol?.userData?.isVolume && vol.userData.isLayoutGroup && vol.userData.isBook,
+    'library: the dir holds ONE volume (a layout-group Book)');
+  eq(vol.userData.path, 'src/components', 'library: the volume is addressed by its dir path');
+  const button = t.bookAt('src/components/Button.jsx'), modal = t.bookAt('src/components/Modal.jsx');
+  eq(vol.sheets.map((s) => s.recto), [button, modal], 'library: the files ride as recto sheets, name order');
+  ok(button.hasLeafAtHome() && modal.hasLeafAtHome(), 'library: file books stay whole inside their sheets');
+  eq([r2(vol.position.x), r2(vol.position.y)], [0, r2(-pageH / 2)], 'library: the volume sits page-centered under the stack origin');
+  eq(r2(vol.sheets[0].node.position.z), 0, 'library: the open page fronts the deck at z=0');
+  eq(r2(vol.sheets[1].node.position.z), r2(-gap), 'library: the next page exactly one gap back');
+  ok(vol.fitted, 'library: the volume holds page form');
+  eq([vol.scale.x, button.scale.x], [1, 1], 'library: fit lands on sheet mounts — volume and book scales stay identity');
+}
+
+// 36b. paging + persistence: turning the volume moves only the head; the open page
+//      SURVIVES a relayout (the volume is rebuilt fresh, the head restored); switching
+//      schemes dissolves the volume and re-homes every book (lossless).
+{
+  const t = buildLibrary(['d/a.js', 'd/b.js', 'd/c.js'], { pageW: 20, pageH: 30, gap: 10 });
+  const vol = t.volumeAt('d');
+  ok(vol.pageTo(1), 'volume: pageTo turns the head');
+  t.relayout();
+  const vol2 = t.volumeAt('d');
+  ok(vol2 && vol2 !== vol, 'volume: relayout rebuilds a fresh volume');
+  eq(vol2.headState().head, 1, 'volume: the open page survives the relayout');
+  eq(vol2.sheets[1].node.position.z, 0, 'volume: the restored open page fronts the deck');
+  // Dissolution: another scheme sees the canonical structure, no volume, books re-homed.
+  t.setLayout(walkTreeLayout, {});
+  t.relayout();
+  ok(t.volumeAt('d') === null, 'volume: scheme switch dissolves the volume');
+  const d = t.getNode('d');
+  ok(['a.js', 'b.js', 'c.js'].every((n) => d.children.some((c) => c.userData.isBook && c.userData.name === n)),
+    'volume: every book re-homed onto its dir');
+  ok(!d.children.some((c) => c.userData.isVolume), 'volume: no volume child remains');
 }
 
 // 37. sort orders are real questions: size (content area, big first) and ext (genre)
 //     reorder the same deck; reverse flips it.
 {
   const paths = ['lib/aa.js', 'lib/zzzzzzzz.js', 'lib/b.css'];   // name↑ aa<b<z · width: zzz > b.css > aa
-  const z = (t, p) => r2(t.bookAt(p).position.z);
+  // WORLD z — a deck'd book's own position is identity (its sheet carries the slot).
+  const z = (t, p) => { const v = new THREE.Vector3(); t.bookAt(p).getWorldPosition(v); return r2(v.z); };
   const byNameT = buildLibrary(paths);
   ok(z(byNameT, 'lib/aa.js') > z(byNameT, 'lib/b.css') && z(byNameT, 'lib/b.css') > z(byNameT, 'lib/zzzzzzzz.js'),
     'library: name sort decks aa → b.css → zzz front-to-back');
+  // "Fronts the deck" = the greatest world z among the collection (the dir itself sits
+  // a depthZ step back, so absolute z is the dir's plane, not 0).
+  const fronts = (t, p) => z(t, p) === Math.max(...paths.map((q) => z(t, q)));
   const bySize = buildLibrary(paths, { sort: 'size' });
-  eq(z(bySize, 'lib/zzzzzzzz.js'), 0, 'library: size sort fronts the biggest book');
+  ok(fronts(bySize, 'lib/zzzzzzzz.js'), 'library: size sort fronts the biggest book');
   const byExt = buildLibrary(paths, { sort: 'ext' });
-  eq(z(byExt, 'lib/b.css'), 0, 'library: ext sort shelves css before js');
+  ok(fronts(byExt, 'lib/b.css'), 'library: ext sort shelves css before js');
   const reversed = buildLibrary(paths, { reverse: true });
-  eq(z(reversed, 'lib/zzzzzzzz.js'), 0, 'library: reverse flips the name deck (zzz now fronts)');
+  ok(fronts(reversed, 'lib/zzzzzzzz.js'), 'library: reverse flips the name deck (zzz now fronts)');
 }
 
 // 38. stack axes: 'x' shelves books abreast (full page + gap steps), 'y' piles them
@@ -665,7 +698,14 @@ const buildLibrary = (paths, opts = {}, order = paths) => {
   ok([...bookIds.values()].every((bk) => bk && !bk.fitted), 'books exist (released) under walk already');
   t.setLayout(libraryLayout, { surface: false }); t.relayout();
   ok(t.paths().every((p) => t.bookAt(p) === bookIds.get(p)), 'library: fit re-uses the SAME durable books');
-  ok(t.books().every((bk) => bk.fitted), 'library: every book holds page form while active');
+  // Page form under the deck: a book carries it itself ('x'/'y'), or rides a FITTED
+  // volume ('z' — the mounts hold the fit, the book stays natural inside its sheet).
+  const holdsPageForm = (bk) => {
+    if (bk.fitted) return true;
+    for (let n = bk.parent; n; n = n.parent) if (n.userData?.isVolume) return n.fitted;
+    return false;
+  };
+  ok(t.books().every(holdsPageForm), 'library: every book holds page form while active');
   t.setLayout(walkTreeLayout, {}); t.relayout();
   eq(snapshot(t), walkSnap, 'library: switching back to walk reproduces the walk layout exactly');
   ok(t.paths().every((p) => t.bookAt(p) === bookIds.get(p)), 'books survive the switch with identity intact');
@@ -686,21 +726,24 @@ const buildLibrary = (paths, opts = {}, order = paths) => {
   eq(canon(contentSnapshot(fwd)), canon(contentSnapshot(rev)), 'library: identical regardless of insert order');
 }
 
-// 42. the Book as a first-class Measurable: fitted world bounds ARE the page (the bound
-//     form, what markers/framing see), and getWorldBounds unions pages so a fitted
-//     field rests on the floor by its books, not its loose text.
+// 42. the VOLUME as a first-class Measurable: fitted world bounds ARE the page (the
+//     bound form, what markers/framing see), and getWorldBounds measures deck'd books
+//     BY their volume so a fitted field rests on the floor by its pages, not its
+//     loose text. Dissolving (scheme switch) shrinks bounds back to the content.
 {
-  const t = buildLibrary(['solo/a.js'], { pageW: 20, pageH: 30 });
-  const bk = t.bookAt('solo/a.js');
+  const t = buildLibrary(['solo/a.js'], { pageW: 20, pageH: 30, surfaceDepth: 0 });
+  const vol = t.volumeAt('solo');
   const size = new THREE.Vector3();
-  bk.getBounds().getSize(size);
-  eq([r2(size.x), r2(size.y)], [20, 30], 'fitted book world bounds = the exact page');
+  vol.getBounds().getSize(size);
+  eq([r2(size.x), r2(size.y)], [20, 30], 'fitted volume world bounds = the exact page');
   t.restAbove(0);
   ok(Math.abs(r2(t.getWorldBounds().min.y)) <= 0.01, 'fitted field rests on the floor by its pages');
-  bk.release();
+  t.setLayout(walkTreeLayout, {});
+  t.relayout();
+  const bk = t.bookAt('solo/a.js');
   bk.getBounds().getSize(size);
-  ok(size.x < 20 - 0.01, 'released book bounds shrink back to the content');
-  eq(bk.fitInfo, null, 'released book reports no fit');
+  ok(size.x < 20 - 0.01, 'dissolved: book bounds shrink back to the content');
+  eq(bk.fitInfo, null, 'dissolved: book reports no fit');
 }
 
 // ───────────────────────── book sheets (the spread model) ─────────────────────────
@@ -832,6 +875,20 @@ const LM = { rowH: 4, charW: 2 };   // mock cell metrics (world units at scale 1
   eq(after.map((i) => i.path), ['d/b.js'], 'book labels: an emptied home is skipped');
   bk.sheets[0].rectoMount.add(bk.leaf);   // re-home (into the mount) for any later assertions
   ok(collectBookLabels(t, { showFiles: 0 }, LM).length === 0, 'book labels: showFiles 0 silences them');
+}
+
+// 47. volume labels: only the OPEN page wears its name (a deck of co-located labels is
+//     noise), the item carries its follow ref, a turn renames the deck's one label —
+//     and the dir's stat line still counts every page.
+{
+  const t = buildLibrary(['d/a.js', 'd/b.js'], { pageW: 20, pageH: 30 });
+  const items = collectBookLabels(t, {}, LM);
+  eq(items.map((i) => i.text), ['a.js'], 'volume labels: only the open page speaks');
+  ok(items[0].follow === t.bookAt('d/a.js') && !!items[0].local, 'volume labels: the item follows its book');
+  t.volumeAt('d').pageTo(1);
+  eq(collectBookLabels(t, {}, LM).map((i) => i.text), ['b.js'], 'volume labels: the turn renames the label');
+  const dirItems = collectDirLabels(t, {}, LM);
+  eq(dirItems.find((i) => i.path === 'd')?.countText, '2 files', 'volume labels: the dir stat line counts the pages');
 }
 
 console.log(`\ncontenttree: ${pass} passed, ${fail} failed`);

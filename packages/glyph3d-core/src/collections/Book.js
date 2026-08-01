@@ -55,8 +55,12 @@ import { addPanelSurface, ownSurfaceMaterial } from './layouts/panelSurface.js';
  *  opts; a bare verb may pass only page dims). */
 const PAGE_FACE_DEFAULTS = { surface: true, surfacePad: 0, surfaceDepth: 8 };
 
-/** Deck (rolodex) defaults — multi-sheet books only; a one-sheet book never moves. */
-const DECK_DEFAULTS = { zPitch: 90, lerp: 9 };
+/** Deck (rolodex) defaults — multi-sheet books only; a one-sheet book never moves.
+ *  `order` is the wrap DIRECTION: −1 reads by RECENCY (an agent book — newer sheets
+ *  front, older recede; scrolled-past newer ones wrap to the back), +1 reads by PAGE
+ *  ORDER (a library volume — page 1, 2, 3 recede in sequence; turned pages wrap to
+ *  the back in turn order). */
+const DECK_DEFAULTS = { zPitch: 90, lerp: 9, order: -1 };
 
 export default class Book extends BoundedObject3D {
     /**
@@ -227,6 +231,13 @@ export default class Book extends BoundedObject3D {
     /** Move the head by `delta` sheets (− older / back in time, + newer). */
     scroll(delta) { return this.pageTo(this.head + (Number(delta) || 0)); }
 
+    /** Seat every sheet directly at its slot (no easing) — a builder lays a deck down
+     *  settled, so a freshly-assembled book appears in place instead of converging. */
+    seatAll() {
+        for (let i = 0; i < this.sheets.length; i++) this._seat(i);
+        return this;
+    }
+
     /** The deck's nav state — for panels and verbs. */
     headState() { return { head: this.head, count: this.sheets.length, following: this.following }; }
 
@@ -317,11 +328,12 @@ export default class Book extends BoundedObject3D {
 
     // -- private --------------------------------------------------------
 
-    /** slot(i) = (head - i) mod n, front = 0 — the local z a sheet rests at. @private */
+    /** slot(i) = (order · (i − head)) mod n, front = 0 — the local z a sheet rests at.
+     *  order −1 recovers the recency rolodex (head − i); +1 reads in page order. @private */
     _slotZ(i) {
         const n = this.sheets.length;
         const head = Math.min(Math.max(0, this.head), n - 1);
-        const slot = ((head - i) % n + n) % n;
+        const slot = (((this.deck.order ?? -1) * (i - head)) % n + n) % n;
         return -slot * this.deck.zPitch;
     }
 

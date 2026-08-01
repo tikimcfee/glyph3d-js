@@ -37,13 +37,22 @@ const RECORDS = {
   },
   grid: {
     // Scrolls only when FRAMED (frameRows>0) — the conveyor. wheel down (dy>0) → +rows = later
-    // content. An unframed whole-file grid returns null, leaving the wheel to the camera.
+    // content. An unframed grid riding a library VOLUME turns the directory's pages instead
+    // (one notch, one file — down reads forward through the sort). Otherwise the wheel falls
+    // to the camera.
     wheelScroll(entry, dy) {
       const g = entry.grid;
-      if (!(g?.getFrameRows?.() > 0)) return null;
-      let rows = Math.round(dy / 30);
-      if (rows === 0) rows = dy > 0 ? 1 : -1;
-      return ['grid.scroll', entry.id, String(rows)];
+      if (g?.getFrameRows?.() > 0) {
+        let rows = Math.round(dy / 30);
+        if (rows === 0) rows = dy > 0 ? 1 : -1;
+        return ['grid.scroll', entry.id, String(rows)];
+      }
+      for (let n = g; n; n = n.parent) {
+        if (n.userData?.isVolume && n.userData.path !== undefined) {
+          return ['book.scroll', n.userData.path, String(dy > 0 ? 1 : -1)];
+        }
+      }
+      return null;
     },
     moveVerb: 'grid.move',
   },
