@@ -389,7 +389,10 @@ export default class SessionStore {
   // world). Each entry is guarded independently (one vanished root, or a network/offline repo,
   // logs + skips and the rest still land — data self-heal); only a structural throw fails the phase.
   async _restoreField(snap) {
-    const sources = Array.isArray(snap.fieldSources) ? snap.fieldSources : [];
+    // Pre-list snapshots carried ONE `field` object — read it as a single-entry list
+    // (data tolerance, not a code shim: old saves keep restoring, capture writes the list).
+    const sources = Array.isArray(snap.fieldSources) ? snap.fieldSources
+      : (snap.field ? [snap.field] : []);
     let anyLocal = false;
     for (const src of sources) {
       if (src?.type === 'repo' && src.ref) {
