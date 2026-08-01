@@ -4,10 +4,11 @@
  * The camera IS the viewer. Every motion is egocentric — measured in the
  * camera's own frame, never relative to an external anchor:
  *
- *   - drag       → pan (truck/pedestal: slide along your own right/up)
- *   - shift+drag → look (yaw/pitch in place — turn to face things)
- *   - wheel      → dolly (move yourself toward/away from what you're looking at)
- *   - WASD/QE    → strafe / dolly / rise
+ *   - drag        → pan (truck/pedestal: slide along your own right/up)
+ *   - shift+drag  → look (yaw/pitch in place — turn to face things)
+ *   - wheel       → dolly (move yourself toward/away from what you're looking at)
+ *   - shift+wheel → page (turn the book under the cursor — paging intent, never camera motion)
+ *   - WASD/QE     → strafe / dolly / rise
  *
  * Movement scales to the distance down your forward axis to whatever you're looking at
  * (`_lookDistance()`). PAN holds a STILL anchor — it SAMPLES that distance once when the
@@ -193,7 +194,8 @@ export class ViewerCameraController {
                 dx:     0, dy:     0,     // accumulated since last drain
             },
             wheel: {
-                dy: 0,                    // accumulated wheel delta since last drain (dolly)
+                dy: 0,                    // accumulated wheel delta since last drain (dolly / surface scroll)
+                pageDy: 0,                // accumulated SHIFT+wheel delta (paging — turns the book under the cursor)
             },
         };
     }
@@ -318,10 +320,13 @@ export class ViewerCameraController {
         track(canvas, 'wheel', (e) => {
             if (!(e.target === canvas || canvas.contains(e.target))) return;
             e.preventDefault();
-            // One axis, one meaning: the wheel dollies (moves you along your view
-            // axis). applyCamera's _applyWheel drains it. No device heuristic, no
-            // cursor raycast — the dolly is purely egocentric.
-            input.wheel.dy += e.deltaY;
+            // Two gestures, split by the modifier: a PLAIN wheel dollies (moves you along
+            // your view axis — or scrolls the framed surface under the cursor); SHIFT+wheel
+            // is PAGING intent (turns the book under the cursor) and never moves the camera.
+            // Browsers remap shift+wheel to a HORIZONTAL delta on most platforms, so the
+            // paging delta reads deltaY with a deltaX fallback.
+            if (e.shiftKey) input.wheel.pageDy += (e.deltaY || e.deltaX);
+            else input.wheel.dy += e.deltaY;
         }, { passive: false });
 
         // --- Window resize ---
@@ -484,6 +489,17 @@ export class ViewerCameraController {
     /** @private */
     _applyWheel() {
         const wheel = this.input.wheel;
+
+        // Paging drain (shift+wheel): turn the book under the cursor. The modifier means
+        // paging and ONLY paging — an unconsumed paging wheel (open space, a non-book
+        // surface) is discarded rather than falling through to the dolly, so shift+scroll
+        // never surprises with camera movement. Drained before the plain wheel so a frame
+        // carrying both keeps the two gestures apart.
+        if (wheel.pageDy !== 0) {
+            this.ctx?.tryPageHovered?.(wheel.pageDy);
+            wheel.pageDy = 0;
+        }
+
         if (wheel.dy === 0) return;
 
         // Hovered-surface scroll gate: the framed surface UNDER THE CURSOR (a terminal, or a

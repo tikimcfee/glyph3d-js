@@ -25,7 +25,7 @@ import ContentTreeLabels from '@glyph3d/core/collections/ContentTreeLabels.js';
 import SessionStore from './SessionStore.js';
 import WorkspaceModel from './WorkspaceModel.js';
 import { getSetting, applyGroupSettings } from './settings.js';
-import { wheelScrollCommand } from './surfaceInteractions.js';
+import { wheelScrollCommand, wheelPageCommand } from './surfaceInteractions.js';
 import errorTracker from '@glyph3d/core/utils/ErrorTracker.js';
 import { createStatusChannel } from './statusChannel.js';
 // The spine, ported verbatim — handlers register lazily; nothing here knows the
@@ -488,6 +488,19 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       return true;
     };
 
+    // The PAGING wheel (shift+scroll): turns the book under the cursor. A separate gate from
+    // tryScrollHovered because movement and page-turning are separate gestures — the camera
+    // controller routes plain wheel there and shift+wheel here, and never mixes the two.
+    state.ctx.tryPageHovered = (dy) => {
+      if (!dy) return false;
+      const hov = state.ctx.attentionManager?.get('hover');
+      const entry = hov?.id ? state.registry.get(hov.id) : null;
+      const cmd = wheelPageCommand(entry, dy);
+      if (!cmd) return false;
+      state.router.execute(cmd);
+      return true;
+    };
+
     const cc = cameraControllerRef?.current;
     if (cc?.ctx) {
       cc.ctx.attentionManager = state.ctx.attentionManager;
@@ -503,6 +516,11 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       Object.defineProperty(cc.ctx, 'tryScrollHovered', {
         configurable: true,
         get: () => state.ctx.tryScrollHovered ?? null,
+      });
+      //   • tryPageHovered — shift+wheel turns the book under the cursor (paging, not movement).
+      Object.defineProperty(cc.ctx, 'tryPageHovered', {
+        configurable: true,
+        get: () => state.ctx.tryPageHovered ?? null,
       });
       //   • dockTiles — the CameraDock's identity Set of docked grids; VCC's per-frame
       //     look-distance / fit-all skip them (camera-locked chrome, not world content).

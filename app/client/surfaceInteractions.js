@@ -48,18 +48,19 @@ const RECORDS = {
     moveVerb: 'grid.move',
   },
   'book.card': {
-    // Any page of a book IS the book: the wheel turns it from wherever you're reading —
-    // no aiming at the cover's margins. The card's registry meta names its agent lane.
-    wheelScroll(entry, dy) {
+    // Any page of a book IS the book: SHIFT+wheel turns it from wherever you're
+    // reading — no aiming at the cover's margins. A plain wheel stays the camera's
+    // (movement and paging are separate gestures). The card's meta names its lane.
+    wheelPage(entry, dy) {
       const id = entry.meta?.agentId;
       return id ? ['book.scroll', id, String(dy > 0 ? -1 : 1)] : null;
     },
   },
   'book.group': {
-    // An agent book. Wheel/touchpad over the cover TURNS THE PAGES — down = older
+    // An agent book. SHIFT+wheel over the cover TURNS THE PAGES — down = older
     // (deeper into the run), up = newer; landing on the newest resumes live-follow.
     // One notch = one sheet: a page turn is a discrete act, not a glide.
-    wheelScroll(entry, dy) {
+    wheelPage(entry, dy) {
       return ['book.scroll', entry.id, String(dy > 0 ? -1 : 1)];
     },
     // Drag the cover to reposition the whole deck. Ephemeral observation state, so the
@@ -78,6 +79,20 @@ const RECORDS = {
 export function wheelScrollCommand(entry, dy) {
   const rec = entry ? RECORDS[entry.type] : null;
   return rec?.wheelScroll ? rec.wheelScroll(entry, dy) : null;
+}
+
+/**
+ * The command (array form) for a PAGING wheel (shift+scroll) over a surface, or null if the
+ * surface under the cursor doesn't page. Distinct from wheelScrollCommand — movement scroll
+ * and page-turn scroll are separate gestures (the modifier is the split).
+ * @param {Object|null} entry - a registry entry ({ id, type, grid, meta }) or null
+ * @param {number} dy - wheel delta (shift+wheel arrives as deltaX on most platforms;
+ *   the camera controller normalizes before it reaches here)
+ * @returns {string[]|null}
+ */
+export function wheelPageCommand(entry, dy) {
+  const rec = entry ? RECORDS[entry.type] : null;
+  return rec?.wheelPage ? rec.wheelPage(entry, dy) : null;
 }
 
 /**
