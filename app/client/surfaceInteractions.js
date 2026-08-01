@@ -4,10 +4,14 @@
  * wheel drain consult this table instead of scattering `type === 'terminal'` branches across
  * CommandProvider / CanvasInteraction / VCC.
  *
- * The split this encodes: terminals are ALWAYS a fixed screen (the wheel scrolls their
- * tmux-owned scrollback); code grids are a fixed screen ONLY when framed (a windowed/conveyor
- * view), and a whole-file grid leaves the wheel to the camera. That "framed vs not" verdict is
- * a property of the surface, not a special case the gate should re-derive — so it lives here.
+ * TWO wheel gestures, one grammar each:
+ *   plain wheel  (wheelScroll) — MOVEMENT: terminal scrollback, a framed grid's conveyor;
+ *     everything else falls through to the camera dolly.
+ *   shift+wheel  (wheelPage)   — PAGING: turns the BOOK under the cursor — an agent book
+ *     (cover or card) or a library volume (cover or any page) — wheel-down dives deeper
+ *     into the deck (older for a recency deck, the next page for a volume).
+ * The "framed vs not" verdict is a property of the surface, not a special case the gates
+ * should re-derive — so it lives here.
  *
  * A capability that returns null (or a type with no record) means "this surface does not consume
  * the gesture" → the gesture falls through to the camera (the wheel dollies). Camera-framing
@@ -37,17 +41,19 @@ const RECORDS = {
   },
   grid: {
     // Scrolls only when FRAMED (frameRows>0) — the conveyor. wheel down (dy>0) → +rows = later
-    // content. An unframed grid riding a library VOLUME turns the directory's pages instead
-    // (one notch, one file — down reads forward through the sort). Otherwise the wheel falls
-    // to the camera.
+    // content. An unframed whole-file grid returns null, leaving the plain wheel to the camera.
     wheelScroll(entry, dy) {
       const g = entry.grid;
-      if (g?.getFrameRows?.() > 0) {
-        let rows = Math.round(dy / 30);
-        if (rows === 0) rows = dy > 0 ? 1 : -1;
-        return ['grid.scroll', entry.id, String(rows)];
-      }
-      for (let n = g; n; n = n.parent) {
+      if (!(g?.getFrameRows?.() > 0)) return null;
+      let rows = Math.round(dy / 30);
+      if (rows === 0) rows = dy > 0 ? 1 : -1;
+      return ['grid.scroll', entry.id, String(rows)];
+    },
+    // Any page of a book IS the book: SHIFT+wheel over a grid riding a library VOLUME
+    // turns the directory — one notch, one file, down dives deeper into the deck —
+    // the same paging grammar as an agent book's cards. Plain wheel stays movement.
+    wheelPage(entry, dy) {
+      for (let n = entry.grid; n; n = n.parent) {
         if (n.userData?.isVolume && n.userData.path !== undefined) {
           return ['book.scroll', n.userData.path, String(dy > 0 ? 1 : -1)];
         }
@@ -66,10 +72,10 @@ const RECORDS = {
     },
   },
   'book.volume': {
-    // A library volume's COVER is the directory's book: wheel anywhere on it turns the
-    // pages — one notch, one file, down reads forward through the sort — the same
-    // gesture grammar as an agent book's cover.
-    wheelScroll(entry, dy) {
+    // A library volume's COVER is the directory's book: SHIFT+wheel anywhere on it
+    // turns the pages — one notch, one file, down dives deeper into the deck — the
+    // same paging grammar as an agent book's cover. Plain wheel stays the camera's.
+    wheelPage(entry, dy) {
       const p = entry.meta?.path;
       return p !== undefined ? ['book.scroll', p, String(dy > 0 ? 1 : -1)] : null;
     },
