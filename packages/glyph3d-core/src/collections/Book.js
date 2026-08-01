@@ -50,6 +50,7 @@ import * as THREE from 'three';
 import BoundedObject3D from './BoundedObject3D.js';
 import { leafBox } from './layouts/nodeUtils.js';
 import { addPanelSurface, ownSurfaceMaterial } from './layouts/panelSurface.js';
+import { RENDER_ORDER } from '../core/renderOrder.js';
 
 /** Page-face fallbacks when fit() is driven directly (a scheme passes its full merged
  *  opts; a bare verb may pass only page dims). */
@@ -61,6 +62,22 @@ const PAGE_FACE_DEFAULTS = { surface: true, surfacePad: 0, surfaceDepth: 8 };
  *  ORDER (a library volume — page 1, 2, 3 recede in sequence; turned pages wrap to
  *  the back in turn order). */
 const DECK_DEFAULTS = { zPitch: 90, lerp: 9, order: -1 };
+
+/** Cover styling defaults — bindCover merges over these. */
+const COVER_DEFAULTS = { color: 0x8090b0, opacity: 0.06, edgeOpacity: 0.22, pad: 16, zPad: 24 };
+
+/** The one unit box + edge geometry every cover scales (built on first bind). */
+let _coverUnit = null;
+function coverUnit() {
+    if (!_coverUnit) {
+        const box = new THREE.BoxGeometry(1, 1, 1);
+        _coverUnit = { box, edges: new THREE.EdgesGeometry(box) };
+    }
+    return _coverUnit;
+}
+
+const _coverSize = new THREE.Vector3();
+const _coverCenter = new THREE.Vector3();
 
 export default class Book extends BoundedObject3D {
     /**
@@ -87,6 +104,8 @@ export default class Book extends BoundedObject3D {
         this.fitInfo = null;
         this._fitOpts = null;    // the live fit opts — appended sheets take page form immediately
         this._faceMat = null;    // per-book face material (ownFace) — shared singleton otherwise
+        /** @type {{mesh:THREE.Mesh, edges:THREE.LineSegments, fill:THREE.Material, edge:THREE.Material, opts:Object}|null} */
+        this.cover = null;       // the identity/interaction body while bound (bindCover)
         if (leaf) this.addSheet({ recto: leaf });
     }
 
@@ -238,12 +257,77 @@ export default class Book extends BoundedObject3D {
         return this;
     }
 
+    // -- the cover: the book's identity + interaction body -----------------------------
+    //    A translucent box (the ContentTreeMarkers prism recipe) wrapping the LIVE deck
+    //    bounds — it grows as sheets append and breathes as pages ease. Parented IN
+    //    (rides every transform), userData.isMarker (bounds/schemes/gather skip it).
+    //    The cover is what a WRAPPER points interaction at: agent books and library
+    //    volumes both register it as their pick handle, so the wheel over a cover turns
+    //    the book the same way everywhere. Book owns build/sync/teardown; identity
+    //    (color), registration, and picking stay the wrapper's.
+
+    /** Build the cover — or restyle a bound one (idempotent; dials tune live). */
+    bindCover(opts = {}) {
+        const o = { ...COVER_DEFAULTS, ...(this.cover?.opts ?? {}), ...opts };
+        if (!this.cover) {
+            const unit = coverUnit();
+            const fill = new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false, side: THREE.DoubleSide });
+            const edge = new THREE.LineBasicMaterial({ transparent: true, depthWrite: false });
+            const mesh = new THREE.Mesh(unit.box, fill);
+            mesh.userData = { isMarker: true, isBookCover: true };
+            const edges = new THREE.LineSegments(unit.edges, edge);
+            edges.userData = { isMarker: true };
+            mesh.add(edges);   // edges inherit the mesh's scale/position
+            this.add(mesh);
+            this.cover = { mesh, edges, fill, edge, opts: o };
+        } else {
+            this.cover.opts = o;
+        }
+        const c = this.cover;
+        c.fill.color.set(o.color);
+        c.fill.opacity = o.opacity;
+        c.edge.color.set(o.color);
+        c.edge.opacity = o.edgeOpacity;
+        c.mesh.renderOrder = o.renderOrder ?? RENDER_ORDER.BACKDROP_BASE;
+        c.edges.renderOrder = c.mesh.renderOrder;
+        this.syncCover();
+        return this;
+    }
+
+    /** Wrap the cover around the LIVE deck bounds (mid-ease included). Runs from
+     *  update() every frame while bound; call directly after an out-of-band reshape. */
+    syncCover() {
+        const c = this.cover;
+        if (!c) return this;
+        const b = this.layoutBounds();
+        if (!this.sheets.length || b.isEmpty()) { c.mesh.visible = false; return this; }
+        b.getSize(_coverSize);
+        b.getCenter(_coverCenter);
+        c.mesh.position.copy(_coverCenter);
+        c.mesh.scale.set(_coverSize.x + 2 * c.opts.pad, _coverSize.y + 2 * c.opts.pad, _coverSize.z + 2 * c.opts.zPad);
+        c.mesh.visible = true;
+        c.edges.visible = c.opts.edgeOpacity > 0;
+        return this;
+    }
+
+    /** Drop the cover (materials freed; the shared unit geometry stays alive). */
+    dropCover() {
+        if (!this.cover) return this;
+        this.remove(this.cover.mesh);
+        this.cover.fill.dispose();
+        this.cover.edge.dispose();
+        this.cover = null;
+        return this;
+    }
+
     /** The deck's nav state — for panels and verbs. */
     headState() { return { head: this.head, count: this.sheets.length, following: this.following }; }
 
     /** Ease every sheet toward its deck slot — frame-rate-independent (`1 − e^(−rate·dt)`).
-     *  A settled deck skips the write. One-sheet books settle at 0 and stay a no-op. */
+     *  A settled deck skips the write; the cover re-wraps the live bounds either way.
+     *  One-sheet books settle at 0 and stay a no-op. */
     update(dt) {
+        if (this.cover) this.syncCover();
         const n = this.sheets.length;
         if (n < 2) return;
         const rate = this.deck.lerp;
@@ -314,6 +398,7 @@ export default class Book extends BoundedObject3D {
      */
     dispose() {
         const single = this.leaf;
+        this.dropCover();
         for (const sheet of this.sheets) {
             this._dropFaces(sheet);
             if (sheet.verso) sheet.versoMount.remove(sheet.verso);

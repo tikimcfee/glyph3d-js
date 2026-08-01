@@ -347,6 +347,35 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // arrows anchor relative to each footprint origin — a debug instrument, toggle off when done.
     state.ctx.contentTreeProbes = new ContentTreeProbes(contentTree);
 
+    // Library volumes are pickable BOOKS: each registers (id `vol:<dir>`, the volume as
+    // the entry's object) and its COVER rides the 'group' pick channel — so the wheel
+    // over a cover turns the directory, the same interaction grammar as agent books.
+    // Volumes are rebuilt every relayout, so registration reconciles per relayout.
+    state.registry.setPickable?.('book.volume');
+    let volumeEntries = new Map();   // id → { vol, mesh } from the previous reconcile
+    const syncVolumeCovers = () => {
+      const ps = state.ctx.pickingSystem;
+      for (const [id, prev] of volumeEntries) {
+        try { state.registry.unregister?.(id); } catch (_e) { /* best effort */ }
+        if (prev.mesh) { try { ps?.unregister?.('group', prev.mesh); } catch (_e) { /* best effort */ } }
+      }
+      const next = new Map();
+      for (const vol of contentTree.volumes()) {
+        const path = vol.userData.path;
+        const id = `vol:${path}`;
+        try { state.registry.register?.(id, vol, { type: 'book.volume', path }); } catch (_e) { /* best effort */ }
+        const mesh = vol.cover?.mesh ?? null;
+        if (ps && mesh) {
+          Promise.resolve(ps._tslReady).then(() => {
+            try { ps.register('group', mesh, vol); } catch (_e) { /* best effort */ }
+          });
+        }
+        next.set(id, { vol, mesh });
+      }
+      volumeEntries = next;
+    };
+    contentTree.onRelayout(syncVolumeCovers);
+
     // Agent books: the agent.* verbs sink here — each record an agent produces pages a
     // sheet (description verso, content recto) into that agent's book. The camera is
     // never touched; book.* turns the pages.
@@ -593,6 +622,10 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
 
     return () => {
       offConn?.();
+      for (const [id, prev] of volumeEntries) {
+        try { state.registry.unregister?.(id); } catch (_e) { /* best effort */ }
+        if (prev.mesh) { try { state.ctx.pickingSystem?.unregister?.('group', prev.mesh); } catch (_e) { /* best effort */ } }
+      }
       state.registry.removeChangeListener(reconcileWorkspace);
       state.registry.removeChangeListener(scheduleWarmUp);
       session.dispose();

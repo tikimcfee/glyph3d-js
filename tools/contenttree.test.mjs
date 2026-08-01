@@ -10,6 +10,7 @@ import * as THREE from 'three';
 import ContentTree from '../packages/glyph3d-core/src/collections/ContentTree.js';
 import { walkTreeLayout, districtLayout, packedLayout, libraryLayout, PACKED_DEFAULTS, LIBRARY_DEFAULTS } from '../packages/glyph3d-core/src/collections/layouts/index.js';
 import ContentTreeMarkers from '../packages/glyph3d-core/src/collections/ContentTreeMarkers.js';
+import Book from '../packages/glyph3d-core/src/collections/Book.js';
 import { collectDirLabels, collectBookLabels, LABEL_DEFAULTS } from '../packages/glyph3d-core/src/collections/ContentTreeLabels.js';
 import { subtreeContentBounds } from '../packages/glyph3d-core/src/collections/layouts/nodeUtils.js';
 
@@ -875,6 +876,33 @@ const LM = { rowH: 4, charW: 2 };   // mock cell metrics (world units at scale 1
   eq(after.map((i) => i.path), ['d/b.js'], 'book labels: an emptied home is skipped');
   bk.sheets[0].rectoMount.add(bk.leaf);   // re-home (into the mount) for any later assertions
   ok(collectBookLabels(t, { showFiles: 0 }, LM).length === 0, 'book labels: showFiles 0 silences them');
+}
+
+// 46c. the COVER is Book's own: bind wraps the live deck bounds plus pads, a turn plus
+//      update re-wraps it (the cover breathes with the easing pages), drop frees it —
+//      and a volume binds one by default (its wheel/drag body).
+{
+  const bk = new Book();
+  bk.addSheet({ recto: makeLeaf('p1') });
+  bk.addSheet({ recto: makeLeaf('p2') });
+  bk.deck.zPitch = 10;
+  bk.fit({ pageW: 20, pageH: 30, surface: false, surfaceDepth: 0 });
+  bk.seatAll();
+  bk.bindCover({ pad: 2, zPad: 3 });
+  ok(bk.cover?.mesh?.userData?.isMarker, 'cover: bound, marker-tagged (bounds/schemes/gather skip it)');
+  const db = bk.deckBounds();
+  const s = bk.cover.mesh.scale;
+  eq([r2(s.x), r2(s.y)], [r2((db.max.x - db.min.x) + 4), r2((db.max.y - db.min.y) + 4)],
+    'cover: wraps the deck bounds plus pads');
+  const zBefore = r2(s.z);
+  bk.pageTo(1);
+  for (let i = 0; i < 60; i++) bk.update(1 / 60);
+  eq(r2(bk.cover.mesh.scale.z), zBefore, 'cover: re-wraps through a turn (deck depth is head-invariant)');
+  bk.dropCover();
+  ok(bk.cover === null, 'cover: dropped');
+  const t = buildLibrary(['d/a.js', 'd/b.js'], { pageW: 20, pageH: 30 });
+  ok(!!t.volumeAt('d').cover, 'cover: a volume binds one by default');
+  bk.dispose();
 }
 
 // 47. volume labels: only the OPEN page wears its name (a deck of co-located labels is

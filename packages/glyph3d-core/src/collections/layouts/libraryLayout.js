@@ -48,6 +48,12 @@ export const LIBRARY_DEFAULTS = {
     reverse: false,    // flip the stack order
     maxUpscale: 4,     // contain-fit may enlarge small files up to this — caps the one-liner giant
     deckLerp: 9,       // a volume's page-turn easing rate (1/s) — higher snaps, lower glides
+    cover: true,       // bind a cover around each volume — the wheel/drag body of the book
+    coverColor: 0x5a7ea8, // cover tint — a lifted kin of the prism ramp's shallow end
+    coverOpacity: 0.06,   // translucent fill — identity, never occlusion
+    coverEdgeOpacity: 0.22, // wireframe frame line (0 = no edges)
+    coverPad: 16,      // XY inflation beyond the deck bounds
+    coverZPad: 24,     // Z inflation (front of the open page / behind the last)
     dirGap: 80,        // gap between a node's own stack and its child-directory tier
     depthZ: 500,       // per-level z step for child dirs (packed's proven readable value)
     aspect: 1.5,       // child-tier wrap target (w ≈ aspect × h)
@@ -112,6 +118,12 @@ function buildVolume(node, books, o) {
     vol.following = !!node.userData.volumeFollowing;   // pageTo flags the last page; restore intent
     vol.fit({ ...o, gutter: 0 });
     vol.seatAll();
+    if (o.cover) {
+        vol.bindCover({
+            color: o.coverColor, opacity: o.coverOpacity, edgeOpacity: o.coverEdgeOpacity,
+            pad: o.coverPad, zPad: o.coverZPad,
+        });
+    }
     node.userData._volume = vol;
     return vol;
 }

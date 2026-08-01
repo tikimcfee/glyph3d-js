@@ -144,9 +144,6 @@ export default class AgentBooks {
         this._onRelayout = [];         // fired after each _relayout — the world layout re-spaces the cluster
         this._tmp = new THREE.Vector3();
 
-        // Shared unit geometry for the cover boxes (scaled per book).
-        this._unitBox = new THREE.BoxGeometry(1, 1, 1);
-        this._unitEdges = new THREE.EdgesGeometry(this._unitBox);
     }
 
     // -- subscriptions ---------------------------------------------------------------
@@ -175,10 +172,9 @@ export default class AgentBooks {
             book.deck.lerp = this.cfg.pagerLerp;
             this.root.add(book);
             const hueIdx = this.lanes.size;
-            const cover = this._makeCover(this.cfg.palette[hueIdx % this.cfg.palette.length]);
-            book.add(cover.mesh);   // parented IN → rides transforms; isMarker → bounds/schemes skip it
+            book.bindCover(this._coverOpts(this.cfg.palette[hueIdx % this.cfg.palette.length]));
             lane = {
-                book, cover, hueIdx,
+                book, hueIdx,
                 agentType: agentType || 'agent',
                 state: 'active', beacon: null, lastActivityTs: this._now(),
                 seq: 0, entries: [],   // one entry per sheet: cards + ids + the record
@@ -626,42 +622,31 @@ export default class AgentBooks {
         const ps = this.ctx.pickingSystem;
         if (!ps) return;
         Promise.resolve(ps._tslReady).then(() => {
-            try { ps.register('group', lane.cover.mesh, lane.book); }
+            try { if (lane.book.cover) ps.register('group', lane.book.cover.mesh, lane.book); }
             catch (e) { console.warn('[AgentBooks] group pick register failed', e); }
         });
     }
 
-    /** A translucent identity box + wireframe frame (the ContentTreeMarkers prism recipe). */
-    _makeCover(colorHex) {
-        const color = new THREE.Color(colorHex);
-        const fill = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: this.cfg.coverOpacity, depthWrite: false, side: THREE.DoubleSide });
-        const edge = new THREE.LineBasicMaterial({ color, transparent: true, opacity: this.cfg.coverEdgeOpacity, depthWrite: false });
-        const mesh = new THREE.Mesh(this._unitBox, fill);
-        mesh.userData = { isMarker: true };
-        mesh.renderOrder = RENDER_ORDER.BACKDROP_BASE;
-        const edges = new THREE.LineSegments(this._unitEdges, edge);
-        edges.userData = { isMarker: true };
-        edges.renderOrder = RENDER_ORDER.BACKDROP_BASE;
-        mesh.add(edges);   // edges inherit the mesh's scale/position
-        return { mesh, edges, fill, edge };
+    /** The cfg-derived cover styling for a lane's book — Book owns the cover itself
+     *  (build/sync/teardown ride Book.bindCover/update); this wrapper owns identity
+     *  (the palette hue) and the shelf-wide dials. @private */
+    _coverOpts(colorHex) {
+        const c = this.cfg;
+        return {
+            color: colorHex, opacity: c.coverOpacity, edgeOpacity: c.coverEdgeOpacity,
+            pad: c.coverPad, zPad: c.coverZPad, renderOrder: RENDER_ORDER.BACKDROP_BASE,
+        };
     }
 
-    /** Size each book's cover to its deck bounds — it grows as sheets append. */
+    /** Re-style every book's cover from the live cfg (the config verb tunes live);
+     *  cfg.cover false hides them (Book.update re-wraps whatever stays bound). */
     _updateCovers() {
-        const c = this.cfg;
-        const size = new THREE.Vector3(), center = new THREE.Vector3();
         for (const lane of this.lanes.values()) {
-            const cover = lane.cover;
-            const n = lane.book.sheets.length;
-            const b = lane.book.layoutBounds();
-            if (!c.cover || n === 0 || b.isEmpty()) { cover.mesh.visible = false; continue; }
-            b.getSize(size); b.getCenter(center);
-            cover.mesh.position.copy(center);
-            cover.mesh.scale.set(size.x + 2 * c.coverPad, size.y + 2 * c.coverPad, size.z + 2 * c.coverZPad);
-            cover.mesh.visible = true;
-            cover.fill.opacity = c.coverOpacity;   // re-read so the config verb tunes live
-            cover.edge.opacity = c.coverEdgeOpacity;
-            cover.edges.visible = c.coverEdgeOpacity > 0;
+            if (!this.cfg.cover) {
+                if (lane.book.cover) lane.book.cover.mesh.visible = false;
+            } else {
+                lane.book.bindCover(this._coverOpts(this.cfg.palette[lane.hueIdx % this.cfg.palette.length]));
+            }
         }
     }
 
@@ -676,9 +661,8 @@ export default class AgentBooks {
             }
         }
         try { this.ctx.registry?.unregister?.(lane.groupId); } catch (_e) { /* best effort */ }
-        try { this.ctx.pickingSystem?.unregister?.('group', lane.cover.mesh); } catch (_e) { /* best effort */ }
-        try { lane.cover.mesh.parent?.remove(lane.cover.mesh); lane.cover.fill.dispose(); lane.cover.edge.dispose(); } catch (_e) { /* best effort */ }
-        try { lane.book.dispose(); } catch (_e) { /* best effort */ }
+        try { if (lane.book.cover) this.ctx.pickingSystem?.unregister?.('group', lane.book.cover.mesh); } catch (_e) { /* best effort */ }
+        try { lane.book.dispose(); } catch (_e) { /* best effort */ }   // drops the cover with the sheets
         this.root.remove(lane.book);
     }
 

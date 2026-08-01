@@ -65,6 +65,15 @@ const RECORDS = {
       return id ? ['book.scroll', id, String(dy > 0 ? -1 : 1)] : null;
     },
   },
+  'book.volume': {
+    // A library volume's COVER is the directory's book: wheel anywhere on it turns the
+    // pages — one notch, one file, down reads forward through the sort — the same
+    // gesture grammar as an agent book's cover.
+    wheelScroll(entry, dy) {
+      const p = entry.meta?.path;
+      return p !== undefined ? ['book.scroll', p, String(dy > 0 ? 1 : -1)] : null;
+    },
+  },
   'book.group': {
     // An agent book. SHIFT+wheel over the cover TURNS THE PAGES — down = older
     // (deeper into the run), up = newer; landing on the newest resumes live-follow.
