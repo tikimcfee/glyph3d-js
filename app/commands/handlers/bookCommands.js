@@ -21,12 +21,15 @@ import { box, kvLines } from '../formatResponse.js';
 
 const r2 = (n) => Math.round(n * 100) / 100;
 
-/** An agent lane (by id, or the first when omitted) or a tree book (by path) — or null. */
+/** An agent lane (by agent id or its registry group id — the wheel hands us the latter —
+ *  or the first lane when omitted) or a tree book (by path) — or null. */
 function resolveBook(ctx, id) {
     const books = ctx.agentBooks;
     if (books) {
         const hit = books._resolveLane?.(id);
-        if (hit && (!id || hit[0] === id)) return { kind: 'agent', books, agentId: hit[0], book: hit[1].book };
+        if (hit && (!id || hit[0] === id || hit[1].groupId === id)) {
+            return { kind: 'agent', books, agentId: hit[0], book: hit[1].book };
+        }
     }
     const tree = ctx.contentTree;
     const bk = id && tree?.bookAt?.(id);

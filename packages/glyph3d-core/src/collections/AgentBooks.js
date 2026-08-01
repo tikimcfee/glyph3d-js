@@ -317,9 +317,14 @@ export default class AgentBooks {
 
     // -- paging (the book.* verbs' engine) --------------------------------------------
 
-    /** Resolve a lane by id, or the first one when omitted/unknown — [id, lane] or null. */
-    _resolveLane(agentId) {
-        if (agentId && this.lanes.has(agentId)) return [agentId, this.lanes.get(agentId)];
+    /** Resolve a lane by agent id OR registry group id (the pick/wheel path hands us the
+     *  latter), or the first lane when omitted/unknown — [agentId, lane] or null. */
+    _resolveLane(id) {
+        if (id) {
+            if (this.lanes.has(id)) return [id, this.lanes.get(id)];
+            const byGroup = [...this.lanes.entries()].find(([, l]) => l.groupId === id);
+            if (byGroup) return byGroup;
+        }
         return this.lanes.entries().next().value || null;
     }
 

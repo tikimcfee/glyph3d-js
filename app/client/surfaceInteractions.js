@@ -48,9 +48,14 @@ const RECORDS = {
     moveVerb: 'grid.move',
   },
   'book.group': {
-    // An agent book: drag the cover box to reposition the whole deck. Ephemeral
-    // observation state, so the move verb pins it in-place (no workspace persistence) and
-    // there's no wheel-scroll — the wheel stays the camera's.
+    // An agent book. Wheel/touchpad over the cover TURNS THE PAGES — down = older
+    // (deeper into the run), up = newer; landing on the newest resumes live-follow.
+    // One notch = one sheet: a page turn is a discrete act, not a glide.
+    wheelScroll(entry, dy) {
+      return ['book.scroll', entry.id, String(dy > 0 ? -1 : 1)];
+    },
+    // Drag the cover to reposition the whole deck. Ephemeral observation state, so the
+    // move verb pins it in-place (no workspace persistence).
     moveVerb: 'book.move',
   },
 };
