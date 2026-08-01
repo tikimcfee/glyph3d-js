@@ -47,11 +47,14 @@ export default function registerSceneCommands(router) {
         const grids = ctx.registry.findByType('grid');
         if (grids.length === 0) return { text: 'OK: no grids to clear', data: { cleared: 0 } };
         // Snapshot ids first — removeGrid mutates the registry as we iterate.
+        // relayout:false defers the tree re-pack — a per-removal relayout re-packs the
+        // field and rebuilds every overlay N times (quadratic); one settle at the end.
         const ids = grids.map(e => e.id);
         let cleared = 0;
         for (const id of ids) {
-            if (ctx.removeGrid(id)) cleared++;
+            if (ctx.removeGrid(id, { relayout: false })) cleared++;
         }
+        ctx.contentTree?.relayoutAndRest?.();
         ctx.fieldSources = []; // no content grids left — the session has no field to restore
         return {
             text: `OK: cleared ${cleared} grid(s)`,
