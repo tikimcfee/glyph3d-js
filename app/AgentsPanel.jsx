@@ -8,8 +8,10 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
  * newest). Picking a roster row selects that book.
  *
  * A list (not tabs) because subagents multiply: a dozen books is a scrollable column
- * where tabs would run off the panel's edge. Both regions scroll to fit — the roster
- * caps its height; the sheet stream fills the rest.
+ * where tabs would run off the panel's edge. The three regions — open books, the
+ * selected book's detail, the archive — are FOLDABLE sections sharing the column by
+ * flex: fold one and the others take its space; nothing sits squished behind a fixed
+ * cap. Fold state is a view preference (localStorage), not workspace state.
  *
  * It owns no agent state; it reads agents()/getStream() and fires the same command bus
  * the 3D shelf obeys (the [[project_2d_companion_views]] model: the book owns the deck,
@@ -56,8 +58,21 @@ const S = {
     title: { flex: '1 1 auto', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
     btn: { flex: '0 0 auto', cursor: 'pointer', padding: '0 5px', borderRadius: 3, color: '#7c8596', whiteSpace: 'nowrap' },
 
-    // -- master: the agent roster (capped height, scrolls when subagents pile up) --
-    roster: { flex: '0 1 auto', maxHeight: '45%', overflowY: 'auto', borderBottom: '1px solid #1b1f29', padding: '3px 0' },
+    // -- section chrome: every region folds. A folded section is just its header row;
+    //    open sections SHARE the column by flex (weights below) — nothing is squished
+    //    behind a fixed cap, and folding one hands its space to the others.
+    sect: {
+        display: 'flex', alignItems: 'center', gap: 6, padding: '3px 8px', flex: '0 0 auto',
+        cursor: 'pointer', userSelect: 'none', color: '#5a616c', fontSize: 10,
+        letterSpacing: '0.08em', textTransform: 'uppercase',
+        borderTop: '1px solid #1b1f29',
+    },
+    sectCaret: { width: 10, textAlign: 'center', fontSize: 9 },
+    sectLabel: { flex: '1 1 auto', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+    sectHint: { flex: '0 0 auto', color: '#444b56', fontSize: 10 },
+
+    // -- master: the agent roster (open books) --
+    roster: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '3px 0' },
     agentRow: (on) => ({
         display: 'flex', alignItems: 'center', gap: 7, padding: '3px 8px',
         cursor: 'pointer', userSelect: 'none',
@@ -84,7 +99,7 @@ const S = {
     }),
     pos: { flex: '1 1 auto', textAlign: 'center', color: '#7c8596', fontSize: 11 },
     live: { color: '#7ad79a' },
-    list: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '4px 0' },
+    list: { flex: '2 1 auto', minHeight: 0, overflowY: 'auto', padding: '4px 0' },
     msg: { padding: '12px', color: '#7c8596' },
     row: (on) => ({
         display: 'flex', alignItems: 'center', gap: 7, padding: '3px 8px',
@@ -98,9 +113,8 @@ const S = {
     label: { flex: '1 1 auto', minWidth: 0, color: '#8a92a0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
     age: { flex: '0 0 auto', color: '#5a616c', fontSize: 11 },
 
-    // -- archive: the relay's stored session transcripts (collapsed strip below the stream) --
-    archive: { flex: '0 0 auto', maxHeight: '22%', overflowY: 'auto', borderTop: '1px solid #1b1f29', padding: '3px 0 5px' },
-    archiveTitle: { padding: '2px 8px', color: '#5a616c', fontSize: 10, letterSpacing: '0.08em', textTransform: 'uppercase' },
+    // -- archive: the relay's stored session transcripts --
+    archive: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '3px 0 5px' },
     sessRow: (open) => ({
         display: 'flex', alignItems: 'center', gap: 7, padding: '2px 8px', userSelect: 'none',
         cursor: open ? 'default' : 'pointer',
@@ -146,14 +160,30 @@ function humanSize(n) {
 // (dashes stripped). Normalizing both sides makes the open-lane match symmetric.
 const sessPrefix = (id) => String(id).replace(/-/g, '').slice(0, 8);
 
+// Fold state survives reloads (a panel-view preference, not workspace state).
+const FOLDS_KEY = 'glyph3d.agentsPanel.folds';
+const loadFolds = () => {
+    try { return { books: false, detail: false, archive: false, ...JSON.parse(localStorage.getItem(FOLDS_KEY) || '{}') }; }
+    catch { return { books: false, detail: false, archive: false }; }
+};
+
 export default function AgentsPanel({ client }) {
     const books = () => client?.ctx?.agentBooks || null;
     const [agents, setAgents] = useState([]);
     const [selected, setSelected] = useState(null);
     const [stream, setStream] = useState([]);
     const [sessions, setSessions] = useState(null);   // null = no provider (region absent), [] = provider + empty
+    const [folds, setFolds] = useState(loadFolds);
     const focusRef = useRef(null);
     const aliveRef = useRef(true);
+
+    const toggleFold = useCallback((key) => {
+        setFolds((f) => {
+            const next = { ...f, [key]: !f[key] };
+            try { localStorage.setItem(FOLDS_KEY, JSON.stringify(next)); } catch { /* view pref only */ }
+            return next;
+        });
+    }, []);
 
     // Roster + selection: sticky to the user's pick, else the newest lane. Recomputed each refresh.
     const refresh = useCallback(() => {
@@ -240,8 +270,13 @@ export default function AgentsPanel({ client }) {
                 )}
             </div>
 
-            {/* master — the agent roster */}
-            <div style={S.roster}>
+            {/* master — the agent roster (open books) */}
+            <div style={{ ...S.sect, borderTop: 'none' }} onClick={() => toggleFold('books')}
+                title="Fold / unfold the open books">
+                <span style={S.sectCaret}>{folds.books ? '▸' : '▾'}</span>
+                <span style={S.sectLabel}>open books{agents.length ? ` (${agents.length})` : ''}</span>
+            </div>
+            {!folds.books && <div style={S.roster}>
                 {agents.length === 0 && <div style={S.msg}>No agents yet. Activity pages a book in here.</div>}
                 {agents.map((a) => {
                     const st = STATE_STYLE[a.state] || STATE_STYLE.active;
@@ -260,10 +295,16 @@ export default function AgentsPanel({ client }) {
                         </div>
                     );
                 })}
-            </div>
+            </div>}
 
-            {/* detail — scrub bar for the selected book */}
-            <div style={S.scrub}>
+            {/* detail — the selected book: scrub bar + sheet stream, folded as one */}
+            <div style={S.sect} onClick={() => toggleFold('detail')}
+                title="Fold / unfold the selected book's sheet stream">
+                <span style={S.sectCaret}>{folds.detail ? '▸' : '▾'}</span>
+                <span style={S.sectLabel}>book{sel ? ` — ${sel.id}` : ''}</span>
+                {folds.detail && sel && <span style={S.sectHint}>{sel.head + 1}/{sel.count}{sel.following ? ' · live' : ''}</span>}
+            </div>
+            {!folds.detail && <div style={S.scrub}>
                 <span style={S.nav(atFirst)} onClick={() => !atFirst && page('first')} title="Oldest (book.page first)">⏮</span>
                 <span style={S.nav(atFirst)} onClick={() => !atFirst && page('prev')} title="Older (book.page prev)">◀</span>
                 <span style={S.pos}>
@@ -271,10 +312,9 @@ export default function AgentsPanel({ client }) {
                 </span>
                 <span style={S.nav(atLast)} onClick={() => !atLast && page('next')} title="Newer (book.page next)">▶</span>
                 <span style={S.nav(atLast)} onClick={() => !atLast && page('last')} title="Newest — resume live (book.page last)">⏭</span>
-            </div>
+            </div>}
 
-            {/* detail — the selected book's sheet stream */}
-            <div style={S.list}>
+            {!folds.detail && <div style={S.list}>
                 {stream.length === 0 && (
                     <div style={S.msg}>No sheets yet. An agent's tool calls and replies page in here as they arrive.</div>
                 )}
@@ -288,12 +328,16 @@ export default function AgentsPanel({ client }) {
                         <span style={S.age}>{ago(m.ts)}</span>
                     </div>
                 ))}
-            </div>
+            </div>}
 
             {/* archive — past session transcripts on the relay (only when a provider is connected) */}
-            {sessions && (
-                <div style={S.archive}>
-                    <div style={S.archiveTitle}>Archive</div>
+            {sessions && (<>
+                <div style={S.sect} onClick={() => toggleFold('archive')}
+                    title="Fold / unfold the session archive">
+                    <span style={S.sectCaret}>{folds.archive ? '▸' : '▾'}</span>
+                    <span style={S.sectLabel}>archive{sessions.length ? ` (${sessions.length})` : ''}</span>
+                </div>
+                {!folds.archive && <div style={S.archive}>
                     {sessions.map((s) => {
                         const pid = sessPrefix(s.id);
                         const isOpen = openLanes.has(pid);
@@ -308,8 +352,8 @@ export default function AgentsPanel({ client }) {
                             </div>
                         );
                     })}
-                </div>
-            )}
+                </div>}
+            </>)}
         </div>
     );
 }
