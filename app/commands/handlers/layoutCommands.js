@@ -187,7 +187,7 @@ export default function registerLayoutCommands(router) {
         verb: 'layout.labels', noun: 'labels', ctxKey: 'contentTreeLabels', title: 'LAYOUT LABELS',
         colorKeys: new Set(['colorA', 'colorB', 'plateColor']),
         description: 'Toggle/dial the container + book labels (chain-compressed dir names, per-book file names, container-fit sizing, approach spectrum, backplates)',
-        usage: '[on|off|toggle] [--fit N --scale-min N --scale-max N --opacity N --min-alpha N --near-scale N --fade-start N --fade-end N --gap-y N --z-lift N --show-count 0|1 --show-files 0|1 --plate 0|1 --plate-color HEX --plate-opacity N --plate-pad N --color-a HEX --color-b HEX]',
+        usage: '[on|off|toggle] [--fit N --scale-min N --scale-max N --opacity N --min-alpha N --near-scale N --fade-start N --fade-end N --gap-y N --z-lift N --turn-ease N --turn-dip N --turn-pop N --show-count 0|1 --show-files 0|1 --plate 0|1 --plate-color HEX --plate-opacity N --plate-pad N --color-a HEX --color-b HEX]',
     });
 
     // Relayout motion: every re-lay is a glide — durable nodes ease from where they

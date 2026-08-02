@@ -29,7 +29,11 @@
  * size at `opacity` — to the arrived one: the name at `nearScale` (the name-tag
  * size) and `minAlpha`. Arrived, a directory keeps a readable name tag instead of
  * vanishing; dial minAlpha or nearScale to 0 for the old yield-to-content. Every
- * write is O(1) per label and made only when its quantized value changes.
+ * write is O(1) per label and made only when its quantized value changes. Rebuilds
+ * DIFF against the outgoing labels (seedLabelPops): an unchanged label carries
+ * through steady, while a changed one (a volume's page line after a turn) or a
+ * newborn one dips in — alpha and scale ease home from turnDip×/turnPop× at
+ * turnEase, so text swaps read as a refresh, never a pop.
  *
  * Color is the family's depth gradient (colorA → colorB over normalized visible depth,
  * the markers' ramp language, lifted brighter) so a label reads as kin to its prism.
@@ -63,6 +67,9 @@ export const LABEL_DEFAULTS = {
     fadeEnd: 110,      // world distance where it completes — you've arrived at the container
     gapY: 1.2,         // lift above the container's top edge, in label row heights
     zLift: 44,         // world units in front of the subtree's front plane
+    turnEase: 9,       // dip-and-settle rate (1/s) for a changed/newborn label — the page-turn ease
+    turnDip: 0.25,     // alpha a changed label RESTARTS from (× its resting alpha); 1 = no dip
+    turnPop: 0.92,     // scale a changed label restarts from (× its resting scale); 1 = no pop
     showCount: 1,      // 1 → a stat line under the name: "N files"
     showFiles: 1,      // 1 → every BOOK wears its file name too (same fit, no stat line)
     plate: 1,          // 1 → a solid backplate behind each label (the page-face treatment)
@@ -197,6 +204,23 @@ export function collectBookLabels(tree, opts, metrics) {
     return items;
 }
 
+/**
+ * Seed each item's `pop` — the dip-and-settle factor — by diffing against the previous
+ * rebuild's items (keyed by path). An unchanged label carries straight through (pop 1,
+ * no flicker across relayouts); a label whose TEXT changed (a volume's page line after
+ * a turn, a chain-compressed rename) or that is newborn (a fresh load) starts at 0 and
+ * eases in. Pure — the field-side update() folds pop into alpha and scale.
+ * @param {Map<string,{text:string,countText:?string}>} prev previous items by path
+ * @param {Array<{path:string,text:string,countText:?string}>} items the fresh collect
+ */
+export function seedLabelPops(prev, items) {
+    for (const it of items) {
+        const p = prev.get(it.path);
+        it.pop = p && p.text === it.text && p.countText === it.countText ? 1 : 0;
+    }
+    return items;
+}
+
 export default class ContentTreeLabels {
     /**
      * @param {import('./ContentTree.js').default} tree
@@ -248,6 +272,9 @@ export default class ContentTreeLabels {
         const cm = computeCellMetrics(this.atlas.getCharSize(), o.worldScale);
         const metrics = { rowH: cm.charHeight, charW: cm.charWidth };
         const items = [...collectDirLabels(this.tree, o, metrics), ...collectBookLabels(this.tree, o, metrics)];
+        // Diff against the outgoing items BEFORE teardown: unchanged labels carry
+        // through steady; changed/newborn ones dip in (update() eases them home).
+        seedLabelPops(new Map(this._items.map((it) => [it.path, it])), items);
         this._teardown();
         this._items = items;
         if (!items.length) return;
@@ -339,11 +366,21 @@ export default class ContentTreeLabels {
         const m = this.tree.root.matrixWorld;
         const span = Math.max(o.fadeStart - o.fadeEnd, 1e-6);
         const ease = Math.min(1, (dt || 1 / 60) * o.hoverEase);
+        const turnEase = Math.min(1, (dt || 1 / 60) * o.turnEase);
         for (const it of this._items) {
+            // The dip-and-settle: a changed/newborn label (pop < 1, seeded at rebuild)
+            // eases home — its alpha climbs from turnDip× and its scale from turnPop×,
+            // so a page turn reads as the line refreshing, not a hard swap.
+            if (it.pop < 1) {
+                it.pop += (1 - it.pop) * turnEase;
+                if (it.pop > 0.999) it.pop = 1;
+            }
+            const popA = o.turnDip + (1 - o.turnDip) * it.pop;
+            const popS = o.turnPop + (1 - o.turnPop) * it.pop;
             const d = this._v.set(it.x, it.y, it.z).applyMatrix4(m).distanceTo(camera.position);
             let t = Math.min(Math.max((d - o.fadeEnd) / span, 0), 1);
             t = t * t * (3 - 2 * t);
-            const a = o.minAlpha + (o.opacity - o.minAlpha) * t;
+            const a = (o.minAlpha + (o.opacity - o.minAlpha) * t) * popA;
             const q = Math.round(a * 255);
             if (this._alphaQ[it.groupId] !== q) {
                 this._alphaQ[it.groupId] = q;
@@ -356,9 +393,9 @@ export default class ContentTreeLabels {
                 if (Math.abs(it.boost - target) < 1e-3) it.boost = target;
             }
             // The scale flow: ×1 (container-fit) far → nearScale/it.scale arrived, the
-            // hover grow riding on top — one group-scale write when it actually moves.
+            // hover grow and the settle riding on top — one write when it actually moves.
             const nearF = o.nearScale / Math.max(it.scale, 1e-6);
-            const s = it.boost * (nearF + (1 - nearF) * t);
+            const s = it.boost * (nearF + (1 - nearF) * t) * popS;
             const sq = Math.round(s * 1024);
             if (it.scaleQ !== sq) {
                 it.scaleQ = sq;

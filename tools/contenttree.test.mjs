@@ -11,7 +11,7 @@ import ContentTree from '../packages/glyph3d-core/src/collections/ContentTree.js
 import { walkTreeLayout, districtLayout, packedLayout, libraryLayout, PACKED_DEFAULTS, LIBRARY_DEFAULTS } from '../packages/glyph3d-core/src/collections/layouts/index.js';
 import ContentTreeMarkers from '../packages/glyph3d-core/src/collections/ContentTreeMarkers.js';
 import Book from '../packages/glyph3d-core/src/collections/Book.js';
-import { collectDirLabels, collectBookLabels, LABEL_DEFAULTS } from '../packages/glyph3d-core/src/collections/ContentTreeLabels.js';
+import { collectDirLabels, collectBookLabels, seedLabelPops, LABEL_DEFAULTS } from '../packages/glyph3d-core/src/collections/ContentTreeLabels.js';
 import ContentTreeMotion from '../packages/glyph3d-core/src/collections/ContentTreeMotion.js';
 import { subtreeContentBounds } from '../packages/glyph3d-core/src/collections/layouts/nodeUtils.js';
 
@@ -920,6 +920,23 @@ const LM = { rowH: 4, charW: 2 };   // mock cell metrics (world units at scale 1
   const shelf = buildLibrary(['d/a.js', 'd/b.js'], { pageW: 20, pageH: 30, stack: 'x' });
   eq(collectBookLabels(shelf, {}, LM).map((i) => i.text).sort(), ['a.js', 'b.js'], 'shelf books keep their own labels');
   eq(collectDirLabels(shelf, {}, LM).find((i) => i.path === 'd')?.countText, '2 files', 'shelf dirs keep the file count');
+}
+
+// 47b. the turn SETTLE diff (seedLabelPops): an unchanged label carries through steady
+//      (pop 1 — no flicker across ordinary relayouts), while a changed page line or a
+//      newborn label dips in (pop 0) — the field-side update() eases them home from
+//      turnDip×/turnPop×.
+{
+  const t = buildLibrary(['d/a.js', 'd/b.js'], { pageW: 20, pageH: 30 });
+  const before = collectDirLabels(t, {}, LM);
+  const prev = new Map(before.map((i) => [i.path, i]));
+  t.volumeAt('d').pageTo(1);                                   // the page line re-writes
+  const after = seedLabelPops(prev, collectDirLabels(t, {}, LM));
+  eq(after.find((i) => i.path === 'd')?.pop, 0, 'settle: a turned page line dips in');
+  const again = seedLabelPops(new Map(after.map((i) => [i.path, i])), collectDirLabels(t, {}, LM));
+  ok(again.every((i) => i.pop === 1), 'settle: an unchanged relayout carries every label steady');
+  const born = seedLabelPops(new Map(), collectDirLabels(t, {}, LM));
+  ok(born.every((i) => i.pop === 0), 'settle: newborn labels dip in');
 }
 
 // 48. relayout MOTION: a re-lay is a glide, not a teleport. The layer snapshots the
