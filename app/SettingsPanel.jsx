@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { stateController } from '@glyph3d/core/services/state';
 import { SETTINGS, getSetting } from './client/settings.js';
 import './SettingsPanel.css';
@@ -97,6 +97,8 @@ const styles = {
     flex: '0 0 auto', font: 'inherit', color: '#08101a', background: '#caa14a',
     border: '1px solid #caa14a', borderRadius: 4, padding: '2px 10px', cursor: 'pointer', fontWeight: 600,
   },
+  // type:'info' — a live readout, not a knob.
+  infoVal: { flex: '0 0 auto', color: '#9aa6ba', fontVariantNumeric: 'tabular-nums' },
 };
 
 export default function SettingsPanel({ client }) {
@@ -113,6 +115,16 @@ export default function SettingsPanel({ client }) {
   });
   const [reloadPending, setReloadPending] = useState(false);
   const [open, setOpen] = useState(() => loadOpenGroups(new Set(groups.map(([g]) => g))));
+
+  // Live 'info' rows (type: 'info' — a read(ctx) readout, not a knob): tick once a
+  // second so counters like the culler's dark-count stay current while visible.
+  const hasInfo = useMemo(() => SETTINGS.some((s) => s.type === 'info'), []);
+  const [, setInfoTick] = useState(0);
+  useEffect(() => {
+    if (!hasInfo) return undefined;
+    const t = setInterval(() => setInfoTick((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, [hasInfo]);
 
   const toggleGroup = (group) => {
     const next = new Set(open);
@@ -193,7 +205,9 @@ export default function SettingsPanel({ client }) {
                           onClick={() => resetOne(def)}
                         >↺</button>
                       )}
-                      {def.type === 'color' ? (
+                      {def.type === 'info' ? (
+                        <span style={styles.infoVal}>{def.read?.(client?.ctx) ?? '—'}</span>
+                      ) : def.type === 'color' ? (
                         <input
                           type="color"
                           style={styles.swatch}

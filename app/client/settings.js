@@ -313,6 +313,15 @@ export const SETTINGS = [
   // Experimental — off by default while the win is being measured (cull.stats).
   { key: 'cull.enabled', label: 'Occlusion culling', group: 'Culling', type: 'bool', default: false, apply: (ctx, v) => ctx.occlusionCuller?.setEnabled?.(v) },
   { key: 'cull.holdFrames', label: 'Cull after (frames dark)', group: 'Culling', type: 'number', default: 8, min: 1, max: 120, step: 1, apply: (ctx, v) => { if (ctx.occlusionCuller) ctx.occlusionCuller.holdFrames = v; } },
+  // Live readout (type 'info' — not a knob): who is dark right now. The pulse that
+  // keeps the feature from being forgotten; cull.stats is the verb-side twin.
+  {
+    key: 'cull.dark', label: 'Dark right now', group: 'Culling', type: 'info',
+    read: (ctx) => {
+      const s = ctx?.occlusionCuller?.stats?.();
+      return s ? `${s.culled.length} / ${s.tracked}${s.enabled ? '' : '  (off)'}` : '—';
+    },
+  },
   // Tree — the ContentTree ownership-line overlay (hub → what it contains). File lines
   // and directory lines toggle independently; layout.arrows is the master on/off verb.
   {
