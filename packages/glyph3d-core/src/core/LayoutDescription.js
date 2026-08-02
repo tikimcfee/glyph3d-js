@@ -37,6 +37,8 @@ export default class LayoutDescription {
      * @param {number} p.zStep  - world z per intra-line wrap segment (charHeight × zWrapSpacing)
      * @param {number} p.advance - nominal per-glyph advance (fallback when sizes is absent)
      * @param {number} [p.scrollOffset] - visual rows the fold is scrolled (Step 3c conveyor)
+     * @param {Float32Array|null} [p.displacements] - arranger displacements, flat [dx,dy,dz]
+     *   per field-global slot — the SAME CPU-authored table the kernel adds post-fold
      */
     constructor(p) {
         this.lineSlotBase = p.lineSlotBase ?? null;
@@ -51,6 +53,7 @@ export default class LayoutDescription {
         this.zStep = p.zStep ?? 0;
         this.advance = p.advance ?? 0;
         this.scrollOffset = p.scrollOffset ?? 0;  // visual rows the fold is scrolled (Step 3c)
+        this.displacements = p.displacements ?? null;
     }
 
     /** @returns {number} number of source lines */
@@ -146,11 +149,22 @@ export default class LayoutDescription {
         // unwrapped cols sit at segRow 0 → z 0, as before.
         const z = -segRow * this.zStep;
 
-        if (!this.geom) return { x, y, z };
-        // Page fold — the SAME paginationShift the builder normalizes by. shiftZ is
-        // additive (axis 'z' pushes pages back; 'xy' leaves z alone), so the staircase
-        // survives pagination exactly as it does in the buffer.
-        const { shiftX, mappedRelY, shiftZ } = paginationShift(this.originY - y, this.geom);
-        return { x: x + shiftX, y: this.originY - mappedRelY, z: z + shiftZ };
+        let px = x, py = y, pz = z;
+        if (this.geom) {
+            // Page fold — the SAME paginationShift the builder normalizes by. shiftZ is
+            // additive (axis 'z' pushes pages back; 'xy' leaves z alone), so the staircase
+            // survives pagination exactly as it does in the buffer.
+            const { shiftX, mappedRelY, shiftZ } = paginationShift(this.originY - y, this.geom);
+            px = x + shiftX; py = this.originY - mappedRelY; pz = z + shiftZ;
+        }
+        // Arranger displacement — the same CPU-authored table the kernel adds post-fold.
+        // An EOL caret rides the LAST glyph's displacement (the glyph whose right edge it
+        // sits on); an empty line has no glyph and no displacement.
+        const D = this.displacements;
+        if (D && base != null && len > 0) {
+            const ds = (base + Math.min(c, len - 1)) * 3;
+            if (ds + 2 < D.length) { px += D[ds]; py += D[ds + 1]; pz += D[ds + 2]; }
+        }
+        return { x: px, y: py, z: pz };
     }
 }

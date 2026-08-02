@@ -224,6 +224,9 @@ export default class GlyphLayoutKernel {
         /** External output attribute (integration mode), or null for an owned buffer. */
         this._externalOut = opts.positionsAttribute || null;
 
+        /** Displacement-table capacity in floats (3 × slots). 0 until first armed — lazy. */
+        this._dispCapacity = 0;
+
         /** Allocated slot capacity. configure() grows this by reallocating. */
         this.maxSlots = Math.max(1, opts.maxSlots ?? DEFAULT_MAX_SLOTS);
         /** Allocated line capacity. */
@@ -240,6 +243,7 @@ export default class GlyphLayoutKernel {
         // never rebuilt just to retune the fold.
         this._u = {
             outBase:         uniform(0, 'uint'),
+            dispEnabled:     uniform(0, 'int'),
             lineCount:       uniform(0, 'uint'),
             wrapWidth:       uniform(0, 'uint'),
             scrollRows:      uniform(0, 'int'),
@@ -297,6 +301,12 @@ export default class GlyphLayoutKernel {
         this.xOffsets     = instancedArray(maxSlots, 'float').setName('GlyphLayoutXOffsets');
         this.lineTable    = instancedArray(maxLines, 'uint').setName('GlyphLayoutLineTable');
         this.lineStartRow = instancedArray(maxLines, 'uint').setName('GlyphLayoutLineStartRow');
+        // Arranger displacements (stage 4): flat xyz per FIELD-GLOBAL slot, added after the
+        // fold. LAZY — 1 float until setDisplacements() first arms it, so unarranged grids
+        // pay nothing (the memory-layout rule). Flat f32 (4-byte stride) dodges vec3's
+        // 16-byte padding: 12B/slot, not 16.
+        this.displacements = instancedArray(Math.max(1, this._dispCapacity | 0), 'float')
+            .setName('GlyphLayoutDisplacements');
 
         this._kernel = this._buildKernel();
         this._dispatched = false;
@@ -372,8 +382,41 @@ export default class GlyphLayoutKernel {
                 });
             });
 
+            // Arranger displacement — CPU-authored per-slot xyz, added AFTER wrap and page
+            // folds (an arranged block moves relative to its laid-out home, exactly as the
+            // CPU arrangers baked it). Indexed field-globally: arrangers think in whole-field
+            // slots, items don't renumber them.
+            If(u.dispEnabled.equal(int(1)), () => {
+                const d = u.outBase.add(slot).mul(uint(3));
+                x.addAssign(this.displacements.element(d));
+                y.addAssign(this.displacements.element(d.add(uint(1))));
+                z.addAssign(this.displacements.element(d.add(uint(2))));
+            });
+
             return vec3(x, y, z);
         });
+    }
+
+    /**
+     * Arm (or clear) the arranger displacement table — flat [dx,dy,dz] per FIELD-GLOBAL
+     * slot, CPU-authored (the arrangers write it, the mirror reads it, this uploads it —
+     * the same one array everywhere, so "I am at this location" stays answerable). Call
+     * BEFORE the per-item configure loop: growth reallocates buffers and rebuilds the
+     * kernel, which drops previously uploaded tables.
+     * @param {?Float32Array} arr - length ≥ 3 × field slot count, or null to disable
+     */
+    setDisplacements(arr) {
+        if (!arr || arr.length === 0) {
+            this._u.dispEnabled.value = 0;
+            return;
+        }
+        if (arr.length > this.displacements.value.array.length) {
+            this._dispCapacity = arr.length;
+            this._allocate(this.maxSlots, this.maxLines);
+        }
+        this.displacements.value.array.set(arr);
+        this.displacements.value.needsUpdate = true;
+        this._u.dispEnabled.value = 1;
     }
 
     /**
@@ -635,7 +678,7 @@ export default class GlyphLayoutKernel {
      */
     _releaseBuffers() {
         const attributes = this.renderer?._attributes;
-        for (const node of [this.xOffsets, this.lineTable, this.lineStartRow]) {
+        for (const node of [this.xOffsets, this.lineTable, this.lineStartRow, this.displacements]) {
             if (node && attributes) attributes.delete(node.value);
         }
         // An owned positions buffer is ours to free; an external attribute is the FIELD's —
@@ -645,6 +688,7 @@ export default class GlyphLayoutKernel {
         this.xOffsets = null;
         this.lineTable = null;
         this.lineStartRow = null;
+        this.displacements = null;
 
         // Drops the compute pipeline, its bind groups and its node cache (Renderer registers this
         // listener the first time the node is dispatched).

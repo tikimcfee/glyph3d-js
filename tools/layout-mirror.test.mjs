@@ -125,6 +125,59 @@ for (const { name, layout: layoutSpec, scroll } of CASES) {
   }
 }
 
+// Arranger displacements (stage 4): positionAt must add the CPU-authored per-slot table
+// exactly as the kernel does post-fold — including the EOL caret riding the LAST glyph's
+// displacement, and empty lines taking none.
+{
+  const layout = resolveLayoutParams({ wrapWidth: 6, zWrapSpacing: 0.15, pageHeight: 0, pagesWide: 1, axis: 'xy' });
+  const buffers = buildBatchBuffers(
+    [{ position: { x: 0, y: 0, z: 0 }, color: { r: 1, g: 1, b: 1 }, scale: 1, groupId: 0, shaped: shape(TEXT) }],
+    { metrics, defaultColor: { r: 1, g: 1, b: 1 }, upem: UPEM, layout, scrollOffset: 0 },
+  );
+  const meta = buffers.itemMeta[0];
+  const lineSlotBase = Int32Array.from(meta.lineSlotOffsets);
+  const lineWrapCols = meta.wrapColsPerLine || srcLines.map(() => []);
+  const lineStartRow = new Int32Array(srcLines.length);
+  let rows = 0;
+  for (let i = 0; i < srcLines.length; i++) { lineStartRow[i] = rows; rows += 1 + (lineWrapCols[i]?.length || 0); }
+  const lineLengths = Int32Array.from(srcLines, cpsOf);
+  const D = new Float32Array(buffers.count * 3);
+  // Displace line 2's glyphs by a distinct offset per axis, line 5's by another.
+  for (let col = 0; col < lineLengths[2]; col++) { const s = (lineSlotBase[2] + col) * 3; D[s] = 7.5; D[s + 1] = -2.25; D[s + 2] = 1.125; }
+  for (let col = 0; col < lineLengths[5]; col++) { const s = (lineSlotBase[5] + col) * 3; D[s] = -3; D[s + 1] = 4; D[s + 2] = -0.5; }
+  const desc = new LayoutDescription({
+    lineSlotBase, lineStartRow, lineWrapCols, lineLengths,
+    sizes: buffers.sizes, geom: null,
+    originX: 0, originY: 0, lineSpacing: metrics.lineSpacing,
+    zStep: metrics.charHeight * layout.zWrapSpacing,
+    advance: metrics.charWidth + metrics.letterSpacing, scrollOffset: 0,
+    displacements: D,
+  });
+  let bad = 0, checked = 0;
+  for (let line = 0; line < srcLines.length; line++) {
+    for (let col = 0; col < lineLengths[line]; col++) {
+      const s = lineSlotBase[line] + col;
+      const p = desc.positionAt(line, col);
+      const d = Math.max(
+        Math.abs(p.x - (buffers.positions[s * 3] + D[s * 3])),
+        Math.abs(p.y - (buffers.positions[s * 3 + 1] + D[s * 3 + 1])),
+        Math.abs(p.z - (buffers.positions[s * 3 + 2] + D[s * 3 + 2])),
+      );
+      if (d > EPS) bad++;
+      checked++;
+    }
+  }
+  ok(bad === 0, `displaced: ${bad}/${checked} slots beyond ${EPS}`);
+  ok(checked > 40, `displaced: vacuous (${checked})`);
+  // EOL rides the LAST glyph's displacement.
+  const L = 2, len = lineLengths[L], last = lineSlotBase[L] + len - 1;
+  const eol = desc.positionAt(L, len);
+  ok(Math.abs(eol.x - (buffers.positions[last * 3] + buffers.sizes[last * 2] + D[last * 3])) < EPS, 'displaced: EOL x follows last glyph');
+  // Empty line takes no displacement (its row comes from the table — line 0 wraps first).
+  const empty = desc.positionAt(1, 0);
+  ok(Math.abs(empty.x - 0) < EPS && Math.abs(empty.y - (-lineStartRow[1] * metrics.lineSpacing)) < EPS, 'displaced: empty line undisplaced');
+}
+
 // Corpus teeth: the inputs actually exercised the sharp edges.
 ok(emojiSlots > 0, `corpus: no double-advance slots seen — emoji path unexercised`);
 ok(wrappedCases >= 4, `corpus: wraps exercised in only ${wrappedCases} cases`);

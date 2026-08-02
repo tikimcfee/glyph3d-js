@@ -86,6 +86,10 @@ export function syncGpuLayout(field, buffers, items, shared, rendererIds) {
             });
         }
         field._gpuKernel = kernel;
+        // Arranger displacements (stage 4 seam): the migrated arrangers will write this
+        // field-level table; null today (arranged grids are engine-ineligible until then).
+        // Armed BEFORE the item loop — growth reallocates and drops uploaded tables.
+        kernel.setDisplacements(field._layoutDisplacements || null);
         const wrap = Math.max(0, Math.trunc(layout.wrapWidth || 0));
         const charAdvance = metrics.charWidth + metrics.letterSpacing;   // paginationGeometry's nominal cell
 
