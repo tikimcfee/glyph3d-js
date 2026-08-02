@@ -968,6 +968,31 @@ const LM = { rowH: 4, charW: 2 };   // mock cell metrics (world units at scale 1
   ok(born.every((i) => i.pop === 0), 'settle: newborn labels dip in');
 }
 
+// 47c. prune sees THROUGH presentation husks: a library volume whose pages were all
+//      removed (or an emptied jellyfish panel) only dissolves at the NEXT relayout —
+//      after the prune moment — so the emptiness test must look inside it, or
+//      clearing a source leaves stub dir chains the markers box forever (the
+//      ghost-prism bug). Durable books are NEVER husks: an away-docked leaf's empty
+//      book is the home the dock re-attaches to.
+{
+  const t = buildLibrary(['d/a.js', 'd/b.js'], { pageW: 20, pageH: 30 });
+  const vol = t.volumeAt('d');
+  ok(!!vol, 'husk-prune: the volume exists pre-removal');
+  t.remove('d/a.js', { prune: true });
+  ok(!!t.getNode('d'), 'husk-prune: the dir survives while a page remains');
+  t.remove('d/b.js', { prune: true });
+  ok(!t.getNode('d'), 'husk-prune: clearing the last page prunes the dir THROUGH its volume husk');
+  ok(vol.cover === null, 'husk-prune: the pruned volume husk is disposed (cover freed)');
+  t.relayout();
+  eq([...t._dirs.keys()], [''], 'husk-prune: only the root node remains after the clear');
+
+  // The guard: a durable book is content even when its leaf is docked away.
+  const t2 = buildLibrary(['f/a.js', 'f/b.js'], { pageW: 20, pageH: 30, stack: 'x' });
+  new THREE.Object3D().add(t2.bookAt('f/a.js').leaf);   // dock the leaf away
+  t2.remove('f/b.js', { prune: true });
+  ok(!!t2.getNode('f'), "husk-prune: an away-docked leaf's empty book keeps its dir alive");
+}
+
 // 48. relayout MOTION: a re-lay is a glide, not a teleport. The layer snapshots the
 //     last-seen transforms (onBeforeRelayout), lets the scheme stamp targets, then on
 //     the first tick rewinds surviving nodes and eases them home — dirs and books

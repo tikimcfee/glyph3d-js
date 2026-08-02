@@ -295,13 +295,32 @@ export default class ContentTree {
     }
 
     /** Drop empty dir nodes from `node` upward, stopping at the first non-empty (or root).
-     *  Markers (bounding prisms etc.) are decorations, not content — a dir holding only
-     *  markers is empty and prunes; its markers go with it. */
+     *  Markers (bounding prisms, ownership traces) are decorations, not content — and so
+     *  are per-pass presentation HUSKS: a library volume whose pages were all just
+     *  removed, a jellyfish panel emptied out, the sheet mounts inside them. Those only
+     *  dissolve at the NEXT relayout — after the prune moment — so without seeing
+     *  through them, clearing a source under a structural scheme left stub dir chains
+     *  that the markers faithfully boxed forever (the ghost-prism bug). Durable BOOKS
+     *  are never husks: an away-docked leaf's empty book is the stable home the dock
+     *  re-attaches to, so its dir must survive. Husks inside a pruned subtree are
+     *  disposed here (page faces, covers, panel surfaces are GPU-backed). */
     _pruneEmptyUp(node) {
-        const isEmpty = (n) => n.children.every((c) => c.userData?.isMarker);
+        const isHusk = (c) => c.userData?.isVolume
+            || (c.userData?.isLayoutGroup && !c.userData?.isBook)
+            || c.userData?.isBookInternal;
+        const isEmpty = (n) => n.children.every((c) =>
+            (c.userData && c.userData.isMarker) || (isHusk(c) && isEmpty(c)));
         let cur = node;
         while (cur && cur !== this.root && isEmpty(cur)) {
             const parent = cur.parent;
+            for (const child of [...cur.children]) {
+                if (child.userData?.isVolume) {
+                    if (cur.userData._volume === child) cur.userData._volume = null;
+                    child.dispose();
+                } else if (child.userData?.isLayoutGroup) {
+                    disposePanelSurfaces(child);
+                }
+            }
             parent?.remove(cur);
             this._dirs.delete(cur.userData.path);
             cur = parent;
