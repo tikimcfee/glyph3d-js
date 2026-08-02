@@ -292,7 +292,7 @@ export const SETTINGS = [
   { key: 'carrel.radius', label: 'Ring radius', group: 'Carrel', type: 'number', default: 240, min: 20, max: 2000, step: 10, apply: carrelParam('radius') },
   { key: 'carrel.boxH', label: 'Seat size', group: 'Carrel', type: 'number', default: 110, min: 20, max: 600, step: 5, apply: carrelParam('boxH') },
   { key: 'carrel.boxAspect', label: 'Seat aspect (w:h)', group: 'Carrel', type: 'number', default: 1.15, min: 0.5, max: 3, step: 0.05, apply: carrelParam('boxAspect') },
-  { key: 'carrel.gapFrac', label: 'Item spacing', group: 'Carrel', type: 'number', default: 0.5, min: 0, max: 2, step: 0.05, apply: carrelParam('gapFrac') },
+  { key: 'carrel.gapFrac', label: 'Item spacing', group: 'Carrel', type: 'number', default: 0.9, min: 0, max: 2, step: 0.05, apply: carrelParam('gapFrac') },
   { key: 'carrel.growCap', label: 'Fit growth cap', group: 'Carrel', type: 'number', default: 1.25, min: 1, max: 4, step: 0.05, apply: carrelParam('growCap') },
   { key: 'carrel.maxArcDeg', label: 'Ring arc span°', group: 'Carrel', type: 'number', default: 300, min: 60, max: 360, step: 5, apply: carrelParam('maxArcDeg') },
   { key: 'carrel.tableFrac', label: 'Tabletop overhang', group: 'Carrel', type: 'number', default: 1.25, min: 1, max: 2, step: 0.05, apply: carrelParam('tableFrac') },

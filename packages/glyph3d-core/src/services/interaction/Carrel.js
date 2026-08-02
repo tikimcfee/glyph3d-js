@@ -93,7 +93,9 @@ export class Carrel extends THREE.Object3D {
      *   (measured), so a ~110-unit slot seats a typical file near 1:1 — a member reads as a
      *   real book on the desk, not a dock-tile icon
      * @param {number} [opts.boxAspect=1.15] - slot-box width/height
-     * @param {number} [opts.gapFrac=0.5]    - gap between slots as a fraction of boxH
+     * @param {number} [opts.gapFrac=0.9]    - gap between slots as a fraction of boxH
+     *   (Ivan-dialed: the 0.9 spacing from the first knob-strip session read right — books
+     *   want air between them)
      * @param {number} [opts.growCap=1.25]   - contain-fit may GROW content at most this much.
      *   Fitting means fitting INSIDE; growing is a courtesy. Without the cap, a nearly-empty
      *   member (a fresh agent book before its first sheet) measures tiny and the fit inflates
@@ -107,7 +109,7 @@ export class Carrel extends THREE.Object3D {
      * @param {number} [opts.animDur=0.167] - member slide/scale duration (s)
      * @param {number} [opts.yawRate=14]    - member face-target slerp rate (×dt)
      */
-    constructor({ name = 'carrel', radius = 240, boxH = 110, boxAspect = 1.15, gapFrac = 0.5,
+    constructor({ name = 'carrel', radius = 240, boxH = 110, boxAspect = 1.15, gapFrac = 0.9,
                   growCap = 1.25, maxArcDeg = 300, facing = 'in', tableFrac = 1.25, auraHeadroom = 40,
                   glowColor = 0x6f9fd0, glowStrength = 0.35,
                   animDur = 0.167, yawRate = 14 } = {}) {
