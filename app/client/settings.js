@@ -307,6 +307,12 @@ export const SETTINGS = [
   { key: 'carrel.tableFrac', label: 'Tabletop overhang', group: 'Carrel', type: 'number', default: 1.25, min: 1, max: 2, step: 0.05, apply: carrelParam('tableFrac') },
   { key: 'carrel.auraHeadroom', label: 'Aura headroom', group: 'Carrel', type: 'number', default: 40, min: 0, max: 300, step: 5, apply: carrelParam('auraHeadroom') },
   { key: 'carrel.glowStrength', label: 'Glow strength', group: 'Carrel', type: 'number', default: 0.35, min: 0, max: 2, step: 0.05, apply: carrelParam('glowStrength') },
+  // Culling — hardware occlusion-query culling (three's native occlusionTest). A candidate
+  // fully behind the OPAQUE occluder set (1.0 page faces, panels) stops drawing after
+  // `hold` consecutive occluded frames; the first visible sample brings it back at once.
+  // Experimental — off by default while the win is being measured (cull.stats).
+  { key: 'cull.enabled', label: 'Occlusion culling', group: 'Culling', type: 'bool', default: false, apply: (ctx, v) => ctx.occlusionCuller?.setEnabled?.(v) },
+  { key: 'cull.holdFrames', label: 'Cull after (frames dark)', group: 'Culling', type: 'number', default: 8, min: 1, max: 120, step: 1, apply: (ctx, v) => { if (ctx.occlusionCuller) ctx.occlusionCuller.holdFrames = v; } },
   // Tree — the ContentTree ownership-line overlay (hub → what it contains). File lines
   // and directory lines toggle independently; layout.arrows is the master on/off verb.
   {

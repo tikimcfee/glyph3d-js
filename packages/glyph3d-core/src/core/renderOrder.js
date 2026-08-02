@@ -70,6 +70,11 @@ export const RENDER_ORDER = Object.freeze({
     // only sorts it above the tile's OWN glyphs (0) and caret (5).
     GRID_CHROME:           6,
 
+    // src/services/visual/OcclusionCuller.js — invisible occlusion-query proxies, drawn at
+    // the END of the opaque pass (after every real opaque has written depth, before any
+    // transparent draws) so a query tests against the TRUE opaque occluder set.
+    OCCLUSION_PROXY:       900,
+
     // src/services/interaction/ReaderCompass.js:65 — compass root group.
     COMPASS_ROOT:          999,
 
