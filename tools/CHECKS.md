@@ -165,6 +165,31 @@ Also: `stats` (store shape), `dump [path]` (VACUUM INTO snapshot, default
   bun tools/contenttree.test.mjs
   ```
 
+- **`layout-mirror.test.mjs`** — the fold-mirror parity CONTRACT: `LayoutDescription.positionAt`
+  and `evaluateFold` against the real builder, per slot, across flat/wrap/scroll/newspaper/
+  z-pages plus arranger displacements (EOL rides the last glyph's D; empty lines take none).
+  Pure node, no GPU. The GPU kernel is bound to the same builder by `layout-kernel-check.mjs`,
+  so all three evaluators of the one fold stay provably equal. Run after touching
+  `LayoutDescription`, `foldEvaluate`, the builder's layout math, or the kernel's fold.
+  ```
+  bun tools/layout-mirror.test.mjs
+  ```
+
+- **`layout-fuzz.test.mjs`** — adversarial randomized parity over the same three evaluators:
+  random texts (empty-line runs, emoji at wrap boundaries, 300-col lines), random params
+  (wrap widths ON line-length boundaries, page heights AT row-count boundaries, both axes),
+  random origins, scroll sequences. Deterministic PRNG — replay any failure with
+  `--seed <n> --seeds 1` (which also dumps forensics: layout, geom, builder-vs-mirror-vs-bulk
+  triplets, the exact relY quotient). STRUCTURAL threshold: it hunts cell/page-stride
+  divergence; tight-epsilon parity is layout-mirror's job (the builder stores f32 — noise
+  scales with |value| and column). Day one it caught the page-boundary ghost machine
+  (applyPagination's raw gate), the absolute-vs-f32-relative nudge, and the unfired-geom
+  caret shift. Run it whenever pixels show residue, stacking, or page-scale misplacement.
+  ```
+  bun tools/layout-fuzz.test.mjs                    # 200 seeds
+  bun tools/layout-fuzz.test.mjs --seeds 300 --seed 77000
+  ```
+
 ## Build / serve
 
 - `cd app && bun run build` — production Vite build (static gate: imports, assets, syntax).
