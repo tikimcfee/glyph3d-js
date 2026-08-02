@@ -24,6 +24,8 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
  *   clear done / ✕     → agent.clear done / agent.clear <id>
  *   click a sheet row  → book.page <agent> <n>   (open that sheet)
  *   ⏮ ◀ ▶ ⏭            → book.page first|prev|next|last
+ *   keep [n] / ↺       → book.limit <agent> <n|default>   (this book's kept-turns cap;
+ *                        0 keeps everything, ↺ follows the shelf default again)
  *   click an archive row → agent.open <session-id>   (page a past session in as a lane)
  *
  * Below the stream sits the ARCHIVE — the relay's stored session transcripts
@@ -102,6 +104,17 @@ const S = {
         color: dim ? '#444b56' : '#9aa6ba', fontSize: 13, userSelect: 'none',
     }),
     pos: { flex: '1 1 auto', textAlign: 'center', color: '#7c8596', fontSize: 11 },
+    // -- retention: the selected book's kept-turns cap (book.limit) --
+    keep: {
+        display: 'flex', alignItems: 'center', gap: 6, padding: '3px 8px', flex: '0 0 auto',
+        borderBottom: '1px solid #1b1f29', color: '#5a616c', fontSize: 11,
+    },
+    keepInput: {
+        width: 46, font: 'inherit', color: '#c8ccd6', background: '#0f141b',
+        border: '1px solid #232b34', borderRadius: 4, padding: '1px 5px', outline: 'none', textAlign: 'right',
+    },
+    keepHint: { flex: '1 1 auto', color: '#444b56', fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+    keepReset: { flex: '0 0 auto', cursor: 'pointer', padding: '0 4px', borderRadius: 3, color: '#7c8596' },
     live: { color: '#7ad79a' },
     list: { padding: '4px 0' },
     msg: { padding: '12px', color: '#7c8596' },
@@ -253,6 +266,20 @@ export default function AgentsPanel({ client }) {
     const page = useCallback((arg) => { if (selected) after(['book.page', selected, String(arg)]); }, [selected, after]);
     const onRow = useCallback((index) => { if (selected) after(['book.page', selected, String(index + 1)]); }, [selected, after]);
 
+    // Kept-turns cap: a draft string while editing (so the 1s poll can't snap the field
+    // mid-keystroke), committed on Enter/blur as `book.limit <id> <n>` — the same verb
+    // the CLI speaks. Escape abandons the draft; ↺ returns the book to the shelf default.
+    const [capDraft, setCapDraft] = useState(null);
+    useEffect(() => setCapDraft(null), [selected]);
+    const commitCap = useCallback((liveCap) => {
+        const t = capDraft?.trim?.();
+        setCapDraft(null);
+        if (!selected || t == null || t === '' || t === String(liveCap)) return;
+        const n = Number(t);
+        if (!Number.isFinite(n) || n < 0) return;   // the field mirrors live state again
+        after(['book.limit', selected, String(Math.floor(n))]);
+    }, [capDraft, selected, after]);
+
     // Open a past session as a lane (fire-and-forget — the book pages in when the
     // adapter feeds it), then re-list so the row flips to its 'open' marker.
     const openSession = useCallback((id) => {
@@ -319,6 +346,31 @@ export default function AgentsPanel({ client }) {
                 </span>
                 <span style={S.nav(atLast)} onClick={() => !atLast && page('next')} title="Newer (book.page next)">▶</span>
                 <span style={S.nav(atLast)} onClick={() => !atLast && page('last')} title="Newest — resume live (book.page last)">⏭</span>
+            </div>}
+
+            {/* retention — this book's kept-turns cap (older sheets shed as new turns land) */}
+            {!folds.detail && sel && <div style={S.keep}
+                title="Turns kept in space for this book — older sheets shed as new ones land. 0 keeps everything; ↺ follows the shelf default (Settings ▸ Agent Books). Fires book.limit.">
+                <span>keep</span>
+                <input
+                    type="number" min={0} step={1} style={S.keepInput}
+                    value={capDraft ?? String(sel.cap)}
+                    onChange={(e) => setCapDraft(e.target.value)}
+                    onBlur={() => commitCap(sel.cap)}
+                    onKeyDown={(e) => {
+                        e.stopPropagation();
+                        if (e.key === 'Enter') e.currentTarget.blur();
+                        else if (e.key === 'Escape') setCapDraft(null);
+                    }}
+                />
+                <span>turns</span>
+                <span style={S.keepHint}>
+                    {sel.limit == null ? 'shelf default' : sel.cap === 0 ? 'this book · keeps everything' : 'this book'}
+                </span>
+                {sel.limit != null && (
+                    <span style={S.keepReset} onClick={() => after(['book.limit', selected, 'default'])}
+                        title="Follow the shelf default again (book.limit default)">↺</span>
+                )}
             </div>}
 
             {!folds.detail && <div style={S.list}>
