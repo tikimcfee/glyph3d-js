@@ -88,21 +88,48 @@ export function getDiskMtime(grid) {
     return grid?._diskMtime ?? null;
 }
 
-function registerFileGrid(ctx, path, body, notRendered, mtime) {
+/** Dedupe + construct the CodeGrid shell for a text path (shared by the sync and
+ *  worker build paths). Returns null when the file is already open. @private */
+function prepFileGrid(ctx, path, notRendered) {
     const uri = `file:///${String(path).replace(/^\/+/, '')}`;
     if ((ctx.registry.findByMeta?.('sourcePath', uri) || []).length) return null;
     const grid = new CodeGrid(ctx.scene, ctx.atlas, { name: path, worldScale: 0.025, ...gridTheme() });
     grid.setSourcePath(uri); // so file.save / fs/didChange refresh can find it
     if (notRendered) grid.userData.notRendered = notRendered;
-    grid.loadFile(path, body);
-    // Real content only: a placeholder/hex grid's text is synthetic, never the file's
-    // bytes, so it carries no disk-sync token (and file.save is disabled for it anyway).
+    return grid;
+}
+
+/** Seat a BUILT grid: disk-sync token, tree insertion, registration (the shared tail
+ *  of both build paths). Real content only carries the mtime — a placeholder/hex
+ *  grid's text is synthetic, never the file's bytes (file.save is disabled for it).
+ *  The single insertion point into the content tree: parent the grid under its
+ *  directory node BEFORE addGrid (so addGrid's `if (!grid.parent) scene.add` skips —
+ *  the tree owns it). The caller relayouts once after a batch. @private */
+function seatFileGrid(ctx, path, grid, notRendered, mtime) {
     if (!notRendered) setDiskMtime(grid, mtime);
-    // The single insertion point into the content tree: parent the grid under its directory
-    // node BEFORE addGrid (so addGrid's `if (!grid.parent) scene.add` skips — the tree owns it).
-    // The caller relayouts once after a batch.
     ctx.contentTree?.insert(grid, path);
     return ctx.addGrid(grid, { id: path, type: 'grid' }); // registers (scene.add skipped — parented)
+}
+
+function registerFileGrid(ctx, path, body, notRendered, mtime) {
+    const grid = prepFileGrid(ctx, path, notRendered);
+    if (!grid) return null;
+    grid.loadFile(path, body);
+    return seatFileGrid(ctx, path, grid, notRendered, mtime);
+}
+
+/**
+ * The WORKER twin of addFileGrid: the same one builder, worker-hosted
+ * (CodeGrid.loadFileAsync — the path agent books already render through), so a fat
+ * file's buffer build never blocks the frame. The grid joins the tree + registry
+ * only once BUILT — layout always measures true sizes, never a half-grid.
+ */
+export async function addFileGridAsync(ctx, path, content, mtime) {
+    const reason = unreadableReason(content);
+    const grid = prepFileGrid(ctx, path, reason);
+    if (!grid) return null;
+    await grid.loadFileAsync(path, reason ? placeholderBody(reason) : content);
+    return seatFileGrid(ctx, path, grid, reason, mtime);
 }
 
 /** Register fetched text content — unreadable content renders as a placeholder card.

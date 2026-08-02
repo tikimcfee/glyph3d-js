@@ -18,9 +18,10 @@
 import { resolveGridByIdOrIndex, WORLD_FLOOR_Y } from './spatialHelpers.js';
 import { table } from '../formatResponse.js';
 import { beginLoad } from '../loadTrace.js';
+import { isWorkersSupported } from '@glyph3d/core/workers';
 import { READABLE_MAX_CHARS } from '@glyph3d/core';
 import { FS_ERROR_CODES } from '@glyph3d/core/services/data';
-import { renderSheetGrid, addFileGrid, addUnfetchedGrid, getDiskMtime, setDiskMtime } from './fileLoader.js';
+import { renderSheetGrid, addFileGrid, addFileGridAsync, addUnfetchedGrid, getDiskMtime, setDiskMtime } from './fileLoader.js';
 import { canonicalPath, toFileUri } from './pathResolve.js';
 
 /**
@@ -229,14 +230,18 @@ export default function registerFileCommands(router) {
             for (const f of oversized) {
                 if (addUnfetchedGrid(ctx, f.path, f.size) != null) { opened++; placeholders++; }
             }
-            // STREAMED build: grid construction is synchronous main-thread work
-            // (~0.6ms/file — a whole repo in one tick reads as a lockup), so the
-            // loop slices under a per-frame budget and yields between slices. The
-            // camera stays live and the field ARRIVES instead of appearing. A
-            // throttled relayout mid-stream lets the glide pour grids into their
-            // slots as they land — under a restore's batch window those are held,
-            // so a launch still settles exactly once. Budget 0 restores the
-            // single-tick build (Settings ▸ Loading).
+            // STREAMED build. Two paths, one builder:
+            //   worker (default) — buffers build OFF-THREAD (CodeGrid.loadFileAsync,
+            //   the same builder agent books render through), a small in-flight pool
+            //   keeps the worker fed while the main thread only seats finished grids
+            //   (~0.1ms each). The frame never blocks — even a fat file's build is
+            //   somebody else's milliseconds. (The sliced sync path capped the AVERAGE
+            //   but a single big file is atomic: measured 78–97ms frame blocks.)
+            //   sync fallback — no worker support: slice under the per-frame budget
+            //   and yield between slices (budget 0 = the old single tick).
+            // Either way: status counts up, and a throttled relayout mid-stream lets
+            // the glide pour grids into their slots — held under a restore's batch
+            // window, so a launch still settles exactly once (Settings ▸ Loading).
             const budget = Number(ctx.loadBuildBudget ?? 12);
             const yieldFrame = () => new Promise((r) => {
                 // rAF is the real frame boundary; the timer keeps a hidden tab
@@ -248,26 +253,56 @@ export default function registerFileCommands(router) {
             });
             let chunks = 1;
             let lastPour = performance.now();
-            let i = 0;
-            while (i < want.length) {
-                const slice0 = performance.now();
-                while (i < want.length && (budget <= 0 || performance.now() - slice0 < budget)) {
-                    const p = want[i++];
-                    const c = contentMap.get(p);
-                    if (c == null) continue;
-                    const id = addFileGrid(ctx, p, c.content); // inserts into the tree
-                    if (id == null) continue;
-                    opened++;
-                    if (ctx.registry.get(id)?.grid?.userData?.notRendered) placeholders++;
-                }
-                if (i >= want.length) break;
-                chunks++;
+            const pour = (i) => {
                 ctx.status?.set(`Opening ${i}/${n}${dir ? ' · ' + dir : ''}…`);
                 if (performance.now() - lastPour > 300) {
                     ctx.contentTree.relayoutAndRest(WORLD_FLOOR_Y);   // held under a batch window
                     lastPour = performance.now();
                 }
-                await yieldFrame();
+            };
+            const seat = (id) => {
+                if (id == null) return;
+                opened++;
+                if (ctx.registry.get(id)?.grid?.userData?.notRendered) placeholders++;
+            };
+            if (budget > 0 && isWorkersSupported()) {
+                let next = 0, done = 0;
+                let lastYield = performance.now();
+                const POOL = 4;   // in-flight builds — keeps the worker pipelined, not swamped
+                await Promise.all(Array.from({ length: POOL }, async () => {
+                    while (next < want.length) {
+                        const p = want[next++];
+                        const c = contentMap.get(p);
+                        if (c == null) { done++; continue; }
+                        seat(await addFileGridAsync(ctx, p, c.content));
+                        done++;
+                        if (done < want.length) pour(done);
+                        // The breather: resolved worker promises stack their main-thread
+                        // continuations (prep ~10ms on a fat file × POOL) into ONE task —
+                        // measured 80–90ms blocks. A shared wall-clock yield breaks the
+                        // stack at frame cadence; when main is idle it costs one frame.
+                        if (performance.now() - lastYield > 32) {
+                            await yieldFrame();
+                            lastYield = performance.now();
+                        }
+                    }
+                }));
+                chunks = 0;   // build never held the thread past a frame's worth
+            } else {
+                let i = 0;
+                while (i < want.length) {
+                    const slice0 = performance.now();
+                    while (i < want.length && (budget <= 0 || performance.now() - slice0 < budget)) {
+                        const p = want[i++];
+                        const c = contentMap.get(p);
+                        if (c == null) continue;
+                        seat(addFileGrid(ctx, p, c.content)); // inserts into the tree
+                    }
+                    if (i >= want.length) break;
+                    chunks++;
+                    pour(i);
+                    await yieldFrame();
+                }
             }
             trace.mark('build', { grids: opened, chunks });
 

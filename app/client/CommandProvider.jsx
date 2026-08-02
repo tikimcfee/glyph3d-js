@@ -25,6 +25,8 @@ import ContentTreeArrows from '@glyph3d/core/collections/ContentTreeArrows.js';
 import ContentTreeProbes from '@glyph3d/core/collections/ContentTreeProbes.js';
 import ContentTreeLabels from '@glyph3d/core/collections/ContentTreeLabels.js';
 import ContentTreeMotion from '@glyph3d/core/collections/ContentTreeMotion.js';
+import CodeGrid from '@glyph3d/core/collections/CodeGrid.js';
+import { installFrameWatch } from '../commands/loadTrace.js';
 import SessionStore from './SessionStore.js';
 import WorkspaceModel from './WorkspaceModel.js';
 import { getSetting, applyGroupSettings } from './settings.js';
@@ -234,8 +236,42 @@ function DockRunner({ stateRef }) {
       s.warmAt = 0;
       warmUpRender(state.gl, state.scene, state.camera, c);
     }
+    // Boot pipeline warm-up: the very first content render pays one-time PIPELINE
+    // COMPILATION (~65–127ms of main-thread blocks, measured landing mid-launch,
+    // exactly where a load already competes for frames). Pay it here instead, on
+    // the empty boot scene: one throwaway grid, one real in-loop render (the real
+    // frame overwrites it before present), disposed before anyone sees it.
+    if (s?.bootWarm && c?.atlas) {
+      s.bootWarm = false;
+      bootWarmRender(state.gl, state.scene, state.camera, c);
+    }
   });
   return null;
+}
+
+/** One small CodeGrid rendered once at boot — forces the glyph + panel PIPELINES to
+ *  compile AND the core codepoint set through the live-encode ladder (blob store →
+ *  static asset → live Slug encode) while nothing else is on screen. Without the
+ *  full printable set, the first real files pay the encode + worker cache resync
+ *  mid-launch (measured as the same-instant block pair at first build). */
+function bootWarmRender(gl, scene, camera, ctx) {
+  try {
+    let printable = '';
+    for (let cp = 33; cp <= 126; cp++) printable += String.fromCharCode(cp);
+    const probe = new CodeGrid(scene, ctx.atlas, { name: '__bootwarm', worldScale: 0.025 });
+    probe.loadFile('__bootwarm', printable);
+    scene.add(probe);
+    const warm = camera.clone();
+    warm.position.set(0, 0, 60);
+    warm.lookAt(0, 0, 0);
+    warm.updateProjectionMatrix();
+    warm.updateMatrixWorld(true);
+    gl.render(scene, warm);
+    scene.remove(probe);
+    probe.dispose?.();
+  } catch (e) {
+    console.warn('[warm] boot pipeline warm-up failed:', e?.message || e);
+  }
 }
 
 /**
@@ -322,11 +358,16 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     const router = new CommandRouter(ctx);
     registerAllCommands(router);
     router.use((name, args) => console.debug(`[cmd] ${name}`, args.length ? args : ''));
-    stateRef.current = { ctx, router, registry: ctx.registry, bridge: null };
+    stateRef.current = { ctx, router, registry: ctx.registry, bridge: null, bootWarm: true };
   }
 
   useEffect(() => {
     const state = stateRef.current;
+
+    // Dropped-frame attribution, always on: main-thread blocks > 50ms land in
+    // ctx.frameTasks tagged with whichever load they interrupted ([frames] lines
+    // → the relay log store; load.stats reports the worst). The chunky decomposer.
+    const offFrameWatch = installFrameWatch(state.ctx);
 
     // GPU glyph picking — one ID-pass system bound to the WebGPU renderer. Canvas
     // hover/click resolves through it (CanvasPicker wires each grid/terminal in
@@ -689,6 +730,7 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     }
 
     return () => {
+      offFrameWatch();
       offConn?.();
       for (const [id, prev] of volumeEntries) {
         try { state.registry.unregister?.(id); } catch (_e) { /* best effort */ }

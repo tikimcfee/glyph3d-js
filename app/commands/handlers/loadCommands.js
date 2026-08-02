@@ -29,7 +29,8 @@ export default function registerLoadCommands(router) {
         if (args[0] === 'clear') {
             const n = ring.length;
             ctx.loadTraces = [];
-            return { text: `OK: load trace ring cleared (${n} dropped)`, data: { cleared: n } };
+            ctx.frameTasks = [];
+            return { text: `OK: load trace + frame rings cleared (${n} traces dropped)`, data: { cleared: n } };
         }
 
         if (!ring.length) {
@@ -65,20 +66,28 @@ export default function registerLoadCommands(router) {
         ]);
 
         const totalMs = ring.reduce((n, t) => n + t.total, 0);
+        // Dropped-frame attribution (installFrameWatch): main-thread blocks > 50ms,
+        // each tagged with the load it interrupted. The chunky-launch decomposer.
+        const frames = Array.isArray(ctx.frameTasks) ? ctx.frameTasks : [];
+        const blockedMs = frames.reduce((n, f) => n + f.ms, 0);
+        const frameRows = [...frames].sort((a, b) => b.ms - a.ms).slice(0, 8)
+            .map((f) => [`${f.ms}ms`, f.during ?? '(outside loads)']);
         return {
             text: [
                 box('LOAD STATS', kvLines({
                     traces: String(ring.length),
                     'total load time': `${totalMs.toFixed(0)}ms`,
                     relayouts: String(relayouts),
+                    'main-thread blocks': `${frames.length} (${blockedMs.toFixed(0)}ms blocked)`,
                 }), 72),
                 'per stage (sum across all traces):',
                 table(['stage', 'total', 'runs', 'max'], stageRows),
+                ...(frameRows.length ? ['worst main-thread blocks (>50ms):', table(['block', 'during'], frameRows)] : []),
                 'recent:',
                 table(['kind', 'target', 'total', 'stages'], traceRows),
                 'OK: load.stats',
             ].join('\n'),
-            data: { traces: ring, relayouts, totalMs },
+            data: { traces: ring, relayouts, totalMs, frames, blockedMs },
         };
     }, {
         description: 'Load-flow metrics: recent staged load traces + per-stage aggregates (fetch vs build vs relayout) and the relayout count',
