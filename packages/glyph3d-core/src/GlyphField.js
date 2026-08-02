@@ -112,6 +112,27 @@ export function getGlyphLodParams() {
     return out;
 }
 
+/**
+ * GLOBAL glyph width-compression dial — condense glyph ink along x, in place, aligned
+ * to leading. k scales every glyph quad's width AND its center-anchor shift by the same
+ * factor, so the glyph's left edge stays at its cell anchor and the shrink happens about
+ * the leading edge. Layout advance (iSize.x, cell anchors, column math, picking targets,
+ * carets) is untouched — only the rendered ink narrows. 1 = off; k > 1 expands.
+ * ONE shared uniform across every glyph material — a feel-test render dial, not per-grid;
+ * driven by `glyph.widthCompress` in app settings. Frame-mode fields (external captures
+ * tiled as cells) are exempt — their quads must stay gapless.
+ */
+export const GLYPH_WIDTH_COMPRESS_DEFAULT = 1;
+const WIDTH_COMPRESS = uniform(GLYPH_WIDTH_COMPRESS_DEFAULT);
+
+/** Set the global width-compression dial live. Ignores non-finite / ≤0 (degenerate quads). */
+export function setGlyphWidthCompress(value) {
+    if (Number.isFinite(value) && value > 0) WIDTH_COMPRESS.value = value;
+}
+
+/** Read the current width-compression dial. */
+export function getGlyphWidthCompress() { return WIDTH_COMPRESS.value; }
+
 // ─── TSL vertex node ─────────────────────────────────────────────────────────
 
 /**
@@ -180,12 +201,18 @@ function _buildVertexNode(uniforms) {
         const isBitmap = vMode.equal(int(RENDER_MODE.BITMAP));
         const quadW    = isBitmap.select(iSize.y, iSize.x); // square for emoji, narrow for slug
 
+        // Width compression (WIDTH_COMPRESS): scale the visual quad's width and its
+        // center-anchor shift by the same k, so the left edge stays at the cell anchor —
+        // a shrink-in-place about the leading edge. Advance is untouched. Frame mode is
+        // exempt: an external capture tiled as cells must stay gapless.
+        const kW = vMode.equal(int(RENDER_MODE.FRAME)).select(float(1), WIDTH_COMPRESS);
+
         // Scale base quad by per-instance size
-        const scaled = positionLocal.mul(vec3(quadW, iSize.y, float(1)));
+        const scaled = positionLocal.mul(vec3(quadW.mul(kW), iSize.y, float(1)));
 
         // Left-align: PlaneGeometry center-anchored → shift right by half the LAYOUT width
         // (iSize.x, not quadW) so the cell anchor is consistent regardless of visual quad size.
-        const alignOffset = vec3(iSize.x.mul(0.5), float(0), float(0));
+        const alignOffset = vec3(iSize.x.mul(0.5).mul(kW), float(0), float(0));
 
         // Group DataTexture lookup (4 columns × maxGroups rows, RGBA32F).
         // textureLoad with exact integer texel coords — NOT normalized .sample():

@@ -1,6 +1,6 @@
 import { stateController } from '@glyph3d/core/services/state';
 import { setPanelStateColorDefaults } from '@glyph3d/core/collections';
-import { setGlyphLodParam, GLYPH_LOD_DEFAULTS } from '@glyph3d/core/GlyphField.js';
+import { setGlyphLodParam, GLYPH_LOD_DEFAULTS, setGlyphWidthCompress, GLYPH_WIDTH_COMPRESS_DEFAULT } from '@glyph3d/core/GlyphField.js';
 import { setStrataParam, STRATA_DEFAULTS } from '@glyph3d/core/collections/StrataLayout.js';
 import { TERMINAL_CURSOR_DEFAULTS } from '@glyph3d/core/collections/TerminalGrid.js';
 import { JELLYFISH_DEFAULTS, LIBRARY_DEFAULTS, schemeNameOf } from '@glyph3d/core/collections/layouts/index.js';
@@ -178,6 +178,15 @@ export const SETTINGS = [
   {
     key: 'atlas.size', label: 'Atlas texture (px)', group: 'Display',
     type: 'number', default: 2048, min: 512, max: 8192, step: 512, reload: true,
+  },
+  // Width compression — condense glyph ink along x, in place, aligned to leading. A
+  // live global shader dial (one uniform across every glyph material): the quad narrows
+  // and re-anchors so its left edge stays at the cell anchor; layout advance, picking,
+  // and carets are untouched. 1 = off. A feel-test knob for condensed reading.
+  {
+    key: 'glyph.widthCompress', label: 'Width compress', group: 'Display',
+    type: 'number', default: GLYPH_WIDTH_COMPRESS_DEFAULT, min: 0.1, max: 3, step: 0.05,
+    apply: (_ctx, v) => setGlyphWidthCompress(v),
   },
   {
     key: 'relay.autoConnect', label: 'Auto-connect to relay on load', group: 'Connection',
