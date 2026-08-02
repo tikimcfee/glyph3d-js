@@ -45,6 +45,7 @@
 import { canonicalPath } from '../commands/handlers/pathResolve.js';
 import { openAgentSession } from '../commands/handlers/agentCommands.js';
 import { pruneDockLayout } from './dockLayoutPrune.js';
+import { beginLoad } from '../commands/loadTrace.js';
 
 const SESSION_URI = 'file:///.glyph3d-session.json';
 // Schema policy: restore is FORWARD-ADDITIVE. Every restored field is guarded/optional, so a
@@ -451,11 +452,15 @@ export default class SessionStore {
     // (data tolerance, not a code shim: old saves keep restoring, capture writes the list).
     const sources = Array.isArray(snap.fieldSources) ? snap.fieldSources
       : (snap.field ? [snap.field] : []);
+    // The STORM trace: one stage per source, so the launch profile reads as a list —
+    // each source's own openDir/repo trace carries the stage breakdown beneath it.
+    const trace = sources.length ? beginLoad(this.ctx, 'restore.field') : null;
     let anyLocal = false;
     for (const src of sources) {
       if (src?.type === 'repo' && src.ref) {
         try { await this.router.execute(['repo.load', src.ref]); }
         catch (e) { console.warn('[session] repo field restore failed:', e?.message || e); }
+        trace?.mark(src.ref);
       } else if (src?.type === 'local') {
         try {
           // Replay the recorded pop exactly (a pre-intent save carries no dir —
@@ -463,18 +468,24 @@ export default class SessionStore {
           await this.router.execute(['file.openDir', src.dir || '']);
           anyLocal = true;
         } catch (e) { console.warn('[session] local field restore failed:', e?.message || e); }
+        trace?.mark(src.dir || '/');
       }
     }
     if (anyLocal) {
       try { await this.router.execute('camera.fitall'); }
       catch (e) { console.warn('[session] fitall after field restore failed:', e?.message || e); }
+      trace?.mark('frame');
     }
+    trace?.end({ sources: sources.length });
   }
 
   // tabs — reopen each saved sheet so the dock/registry are populated before the camera phase
   // (file.open's framing must not fight the restored pose).
   async _restoreTabs(snap) {
     if (!Array.isArray(snap.files)) return;
+    // One stage per tab (file.open runs a FULL relayout per call — the second storm
+    // layer; load.stats holds the per-tab detail, the console line compacts).
+    const trace = snap.files.length ? beginLoad(this.ctx, 'restore.tabs') : null;
     let anyWindowed = false;
     for (const f of snap.files) {
       if (!f?.path) continue;
@@ -506,11 +517,14 @@ export default class SessionStore {
         }
       } catch (e) {
         console.warn(`[session] failed to reopen ${f.path}:`, e?.message || e);
+      } finally {
+        trace?.mark(String(f.path).split('/').pop() || f.path);
       }
     }
     // Windowing changes a grid's footprint → relayout the tree ONCE after all tabs land (the
     // grid.window verb did this per-call; batching is the same end-state, less churn).
     if (anyWindowed) this.ctx.contentTree?.relayoutAndRest?.();
+    trace?.end({ files: snap.files.length });
   }
 
   // surfaces — publish the loaded INTENT (terminal size/placement, 3D dock membership/order/zoom)

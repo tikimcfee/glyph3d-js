@@ -25,6 +25,7 @@ import registerFileCommands from './fileCommands.js';
 import registerBookCommands from './bookCommands.js';
 import registerLayoutCommands from './layoutCommands.js';
 import registerRepoCommands from './repoCommands.js';
+import registerLoadCommands from './loadCommands.js';
 import registerPanelCommands from './panelCommands.js';
 import registerDockCommands from './dockCommands.js';
 import registerCarrelCommands from './carrelCommands.js';
@@ -74,6 +75,7 @@ export function registerAllCommands(router) {
     registerBookCommands(router);
     registerLayoutCommands(router);
     registerRepoCommands(router);
+    registerLoadCommands(router);
     registerPanelCommands(router);
     registerDockCommands(router);
     registerCarrelCommands(router);

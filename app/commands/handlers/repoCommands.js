@@ -27,6 +27,8 @@ function clearScene(ctx) {
     return cleared;
 }
 
+import { beginLoad } from '../loadTrace.js';
+
 /** owner/repo/branch (3+ plain segments) → a /tree/ URL parseGitHubUrl accepts; else pass through. */
 function normalizeRepoRef(ref) {
     const s = String(ref).trim();
@@ -48,6 +50,7 @@ export default function registerRepoCommands(router) {
         const url = normalizeRepoRef(ref);
 
         ctx.status?.set(`Loading ${ref}…`);   // live status; cleared however we return
+        const trace = beginLoad(ctx, 'repo', ref);
         try {
             // 1. Fetch FIRST, commit after. The fetch is provider-local, so a bad
             //    ref or a failed download leaves the current source and the scene
@@ -61,17 +64,22 @@ export default function registerRepoCommands(router) {
             } catch (err) {
                 return { text: `ERR: repo load failed for ${ref}: ${err?.message || err}`, data: null };
             }
+            trace.mark('tree');
 
             // 2. The load is real — now it owns the scene: swap the source, fresh slate.
             ctx.fileProvider = provider;
             const cleared = clearScene(ctx);
+            trace.mark('clear', { cleared });
 
             // 3. Render the whole repo as the field — the same provider-agnostic bulk-open +
-            //    tree layout the relay path uses, now sourcing from GitHub.
+            //    tree layout the relay path uses, now sourcing from GitHub. (It runs its own
+            //    openDir trace — this stage is the envelope.)
             const open = await router.execute(['file.openDir', '']);
+            trace.mark('field', { opened: open?.data?.opened });
 
             // 4. Frame the field.
             await router.execute('camera.fitall');
+            trace.mark('frame').end();
 
             // 5. Record the field source — the ONE decider the session persists. file.openDir (step 3)
             //    just appended {type:'local'}; a repo load owns the whole (freshly cleared) scene, so

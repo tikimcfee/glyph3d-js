@@ -17,6 +17,7 @@
 
 import { resolveGridByIdOrIndex, WORLD_FLOOR_Y } from './spatialHelpers.js';
 import { table } from '../formatResponse.js';
+import { beginLoad } from '../loadTrace.js';
 import { READABLE_MAX_CHARS } from '@glyph3d/core';
 import { FS_ERROR_CODES } from '@glyph3d/core/services/data';
 import { renderSheetGrid, addFileGrid, addUnfetchedGrid, getDiskMtime, setDiskMtime } from './fileLoader.js';
@@ -113,6 +114,7 @@ export default function registerFileCommands(router) {
         }
 
         ctx.status?.set(`Opening ${path}…`);
+        const trace = beginLoad(ctx, 'open', path);
         let id;
         try {
             id = await renderSheetGrid(ctx, path);   // classify + load + create + register (id = path)
@@ -121,6 +123,7 @@ export default function registerFileCommands(router) {
         } finally {
             ctx.status?.clear();
         }
+        trace.mark('render');                        // classify + fetch + build + register, one call
         const grid = id ? ctx.registry.get(id)?.grid : null;
         if (!grid) return { text: `ERR: could not open ${path}`, data: null };   // guard: no deref / no setPanelId(null)
         if (sheet) ctx.workspace.setPanelId(sheet.id, id);
@@ -135,6 +138,7 @@ export default function registerFileCommands(router) {
         // and rest it on the world floor — a single open is the degenerate one-leaf batch of
         // the same machine a repo load uses.
         ctx.contentTree.relayoutAndRest(WORLD_FLOOR_Y);
+        trace.mark('relayout').end();
 
         return {
             text: `OK: opened ${path} (${openedSummary(grid)})`,
@@ -161,6 +165,7 @@ export default function registerFileCommands(router) {
             return { text: 'ERR: no file source — load a repo or connect the relay', data: null };
         }
         const dir = canonicalPath(ctx, args[0] || '');
+        const trace = beginLoad(ctx, 'openDir', dir || '/');
 
         // An absolute dir may sit outside the served root + reach set: register
         // it as a runtime reach root first (the server no-ops when it's already
@@ -172,6 +177,7 @@ export default function registerFileCommands(router) {
             } catch (err) {
                 return { text: `ERR: cannot reach ${dir}: ${err?.message || err}`, data: null };
             }
+            trace.mark('reach');
         }
 
         // The server walks the named directory itself (entries come back
@@ -182,6 +188,7 @@ export default function registerFileCommands(router) {
         } catch (err) {
             return { text: `ERR: listTree failed: ${err?.message || err}`, data: null };
         }
+        trace.mark('list', { entries: listing.entries.length });
         const joinBase = dir === '/' ? '' : dir;
         const entries = dir
             ? listing.entries.map((e) => ({ ...e, path: `${joinBase}/${e.path}` }))
@@ -213,6 +220,9 @@ export default function registerFileCommands(router) {
             } catch (err) {
                 return { text: `ERR: fetch failed: ${err?.message || err}`, data: null };
             }
+            let kb = 0;
+            for (const c of contentMap.values()) kb += c?.content?.length ?? 0;
+            trace.mark('fetch', { files: contentMap.size, kb: Math.round(kb / 1024) });
 
             let opened = 0;
             let placeholders = 0;
@@ -227,11 +237,14 @@ export default function registerFileCommands(router) {
                 opened++;
                 if (ctx.registry.get(id)?.grid?.userData?.notRendered) placeholders++;
             }
+            trace.mark('build', { grids: opened });
 
             // One relayout for the whole batch (the RenderPlan), then rest on the world floor —
             // the directory structure IS the scene graph now (the walk-tree scheme places it).
             ctx.contentTree.relayoutAndRest(WORLD_FLOOR_Y);
             const dirs = ctx.contentTree.dirCount();
+            trace.mark('relayout', { dirs });
+            trace.end({ opened, placeholders });
 
             // Record the pop in the session's field sources — a LIST now: every opened
             // root restores (additive multi-root world). Session capture persists exactly
