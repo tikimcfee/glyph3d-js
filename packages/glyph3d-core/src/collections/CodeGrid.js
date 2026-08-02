@@ -1908,11 +1908,15 @@ class CodeGrid extends FramedGlyphField {
         // metric names.
         const contentWidth = this._getContentItemMeta()?.pageContentWidth || 0;
         const lp = resolveLayoutParams(this._foldLayout());  // SAME normalization the builder applies — geom can't drift
-        const geom = paginationGeometry(
+        // pageContentWidth is the builder's "pagination FIRED" witness — geom arms the
+        // mirror's page shift ONLY when the glyphs actually paginated. Content exactly one
+        // page tall has pageHeight > 0 but never fired; an armed geom would shift its
+        // boundary row a page away from the buffer (found by the fuzz, mirror-only class).
+        const geom = contentWidth > 0 ? paginationGeometry(
             { charWidth: m.charWidth, letterSpacing: m.spacing || 0, lineSpacing: m.lineHeight },
             contentWidth,
             lp,
-        );
+        ) : null;
         this._layout = new LayoutDescription({
             lineSlotBase: this._lineSlotBase,
             lineStartRow: this._lineStartRow,

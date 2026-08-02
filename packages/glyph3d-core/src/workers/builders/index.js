@@ -132,13 +132,17 @@ export function paginationGeometry(metrics, contentWidth, layout = DEFAULT_LAYOU
 export function paginationShift(relY, geom) {
     // pageHeightWorld<=0 means pagination is off (pageHeight:0) — no shift, ever.
     if (geom.pageHeightWorld <= 0) return { shiftX: 0, mappedRelY: relY, shiftZ: 0 };
-    // The quotient is nudged before flooring: relY reaches here as an ACCUMULATED sum
-    // (the builder's repeated y -= lineSpacing), so a row exactly on a page boundary
-    // lands one ulp under the integer and floors a whole page early — ulp-scale input,
-    // page-stride output. Legit rows are quantized ≥ 1/pageHeight apart (≫ 1e-6), so
-    // the nudge can never move a non-boundary row. The GPU kernel divides INTEGER rows
-    // and needs no nudge; this keeps the CPU fold on the same page, literally.
-    const q = relY / geom.pageHeightWorld + 1e-6;
+    // The quotient is nudged before flooring: relY reaches here as an ACCUMULATED sum,
+    // and in the buffer path it has ALSO round-tripped through an f32 store — so a row
+    // exactly on a page boundary can land up to ~relY·1.2e-7 under the integer and floor
+    // a whole page early (ulp-scale input, page-stride output; found at 1e-6 by the fuzz
+    // at tall relY, where f32 ulp outgrows any absolute epsilon). The nudge therefore
+    // SCALES with the quotient: q·3e-7 covers the f32 relative error with margin, and
+    // the absolute 1e-6 floor covers small q. Legit rows are ≥ 1/pageHeight ≈ 6.7e-3
+    // apart — four orders above the nudge at any plausible page count. The GPU kernel
+    // divides INTEGER rows and needs none of this.
+    const q0 = relY / geom.pageHeightWorld;
+    const q = q0 + q0 * 3e-7 + 1e-6;
     if (q < 1) return { shiftX: 0, mappedRelY: relY, shiftZ: 0 };
     const vPage = Math.floor(q);
     const rowOffsetInPage = relY - vPage * geom.pageHeightWorld;
@@ -171,7 +175,11 @@ export function paginationShift(relY, geom) {
 export function applyPagination(positions, startIdx, endIdx, origin, geom) {
     for (let i = startIdx; i < endIdx; i++) {
         const relY = origin.y - positions[i * 3 + 1];  // distance below origin
-        if (relY < geom.pageHeightWorld) continue;      // first page — no transform
+        // NO pre-filter here: paginationShift is THE single source of pagination math,
+        // including the boundary-nudged first-page gate. A raw `relY < H` comparison at
+        // this door once overruled the nudge for rows exactly ON a page boundary (the
+        // f32-stored relY lands ulps under the integer) — those rows stayed on page one
+        // while every evaluator paginated them. Found by the fuzz; never re-add it.
         const { shiftX, mappedRelY, shiftZ } = paginationShift(relY, geom);
         positions[i * 3 + 1] = origin.y - mappedRelY;
         positions[i * 3] += shiftX;
