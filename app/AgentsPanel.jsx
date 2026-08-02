@@ -220,7 +220,9 @@ export default function AgentsPanel({ client }) {
             const list = await p.list();
             if (aliveRef.current) setSessions(Array.isArray(list) ? list : []);
         } catch {
-            if (aliveRef.current) setSessions(null);
+            // A transient list failure (relay reconnecting, a mid-reload window) must not
+            // UNMOUNT the archive — that reads as the section randomly vanishing. Keep the
+            // last-good listing; only an ABSENT provider hides the region.
         }
     }, [client]);
 

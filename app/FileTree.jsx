@@ -249,7 +249,9 @@ export default function FileTree({ client }) {
       setRepoLabel(repo ? `${repo.owner}/${repo.repo}` : null);
       // Track the ACTIVE provider: repo.load swaps in GitHub (no rootInfo →
       // filesystem anchors drop), a relay connect swaps the local one back in.
-      setRootInfo(p?.rootInfo ? { ...p.rootInfo } : null);
+      // A provider that merely LACKS rootInfo right now (reconnect window, boot)
+      // keeps the last-good anchors — a transient must not vaporize the tree.
+      setRootInfo((prev) => (p?.rootInfo ? { ...p.rootInfo } : (repo ? null : prev)));
     };
     const reg = client.ctx?.registry;
     reg?.addChangeListener?.(refresh);
