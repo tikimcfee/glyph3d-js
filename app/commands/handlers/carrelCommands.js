@@ -17,6 +17,11 @@
 import * as THREE from 'three';
 import Carrel from '@glyph3d/core/services/interaction/Carrel.js';
 import { resolveSurface } from './dockCommands.js';
+import { getSetting } from '../../client/settings.js';
+
+/** The knobs Settings ▸ Carrel stores — folded into a NEW desk at birth. */
+const CARREL_KNOBS = ['radius', 'boxH', 'boxAspect', 'gapFrac', 'growCap', 'maxArcDeg',
+                      'tableFrac', 'auraHeadroom', 'glowStrength'];
 
 function carrels(ctx) {
     return ctx.carrels instanceof Map ? ctx.carrels : null;
@@ -83,8 +88,16 @@ export default function registerCarrelCommands(router) {
             name = `carrel-${n}`;
         }
         if (map.has(name)) return { text: `ERR: carrel '${name}' already exists`, data: null };
+        const carrel = new Carrel({ name });
+        // Stored Settings ▸ Carrel knobs are the DEFAULTS for a new desk — folded into
+        // THIS desk only (existing desks keep their per-desk carrel.set tweaks). An
+        // explicit radius argument wins over the stored one.
+        for (const k of CARREL_KNOBS) {
+            const v = getSetting(`carrel.${k}`);
+            if (Number.isFinite(v)) carrel.setParam(k, v);
+        }
         const radius = parseFloat(args[1]);
-        const carrel = new Carrel({ name, ...(Number.isFinite(radius) ? { radius } : {}) });
+        if (Number.isFinite(radius)) carrel.setParam('radius', radius);
 
         // Set the desk down ON the camera's view ray — where you're looking, not a
         // floor projection of it (which parked the desk at y=0 far below an elevated

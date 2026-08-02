@@ -94,7 +94,22 @@ const S = {
     mwhere: { flex: '0 0 auto', color: '#5a616c', fontSize: 10, maxWidth: 80, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
     menuEmpty: { padding: '8px 10px', color: '#7c8596' },
     seat: { flex: '0 0 auto', cursor: 'pointer', color: '#5a616c', padding: '0 2px' },
+
+    // -- per-desk knob strip (⚙): compact sliders driving carrel.set on THIS desk --
+    knobRow: { display: 'flex', alignItems: 'center', gap: 7, padding: '1px 8px 1px 24px', userSelect: 'none' },
+    knobLabel: { flex: '0 0 62px', color: '#5a616c', fontSize: 10 },
+    knobSlider: { flex: '1 1 auto', minWidth: 0, accentColor: '#6c8fc0', height: 12 },
+    knobVal: { flex: '0 0 38px', textAlign: 'right', color: '#7c8596', fontSize: 10 },
 };
+
+/** The per-desk dials the ⚙ strip exposes — same knobs as carrel.set / Settings ▸ Carrel. */
+const KNOB_DEFS = [
+    { k: 'gapFrac', label: 'spacing', min: 0, max: 2, step: 0.05 },
+    { k: 'boxH', label: 'seat size', min: 20, max: 600, step: 5 },
+    { k: 'radius', label: 'radius', min: 20, max: 2000, step: 10 },
+    { k: 'maxArcDeg', label: 'arc°', min: 60, max: 360, step: 5 },
+    { k: 'glowStrength', label: 'glow', min: 0, max: 2, step: 0.05 },
+];
 
 const basename = (p) => {
     const s = String(p || '').replace(/\/+$/, '');
@@ -128,6 +143,8 @@ export default function CarrelsPanel({ client }) {
     const [desks, setDesks] = useState([]);
     /** Open seat menu: { desk, x, y } | null. */
     const [menu, setMenu] = useState(null);
+    /** Desk name whose ⚙ knob strip is unfolded, or null. */
+    const [knobsFor, setKnobsFor] = useState(null);
 
     // Snapshot the live carrels map into plain rows. Small map, cheap read — the
     // 1s tick just re-snapshots (the AgentsPanel liveness pattern).
@@ -141,6 +158,7 @@ export default function CarrelsPanel({ client }) {
             glow: hex(c.glowColor),
             dissolving: !!c._dissolving,
             members: c.list().map((m) => m.id),
+            knobs: Object.fromEntries(KNOB_DEFS.map(({ k }) => [k, c[k]])),
         })));
     }, [client]);
 
@@ -197,12 +215,24 @@ export default function CarrelsPanel({ client }) {
                             {d.dissolving && <span style={S.fading}>folding…</span>}
                             <span style={S.count}>{d.members.length}</span>
                             <span style={S.seat}
+                                onClick={(e) => { e.stopPropagation(); setKnobsFor(knobsFor === d.name ? null : d.name); }}
+                                title={`Tune ${d.name} — spacing, seat size, radius (carrel.set)`}>⚙</span>
+                            <span style={S.seat}
                                 onClick={(e) => openMenu(e, d.name)}
                                 title={`Seat things at ${d.name} — files, terminals, agent books`}>⊕</span>
                             <span style={S.x}
                                 onClick={(e) => { e.stopPropagation(); after(['carrel.dissolve', d.name]); }}
                                 title={`Fold ${d.name} — members slide home (carrel.dissolve)`}>✕</span>
                         </div>
+                        {knobsFor === d.name && KNOB_DEFS.map(({ k, label, min, max, step }) => (
+                            <div key={k} style={S.knobRow}>
+                                <span style={S.knobLabel}>{label}</span>
+                                <input type="range" style={S.knobSlider} min={min} max={max} step={step}
+                                    value={d.knobs[k] ?? min}
+                                    onChange={(e) => after(['carrel.set', d.name, k, e.target.value])} />
+                                <span style={S.knobVal}>{d.knobs[k] ?? '—'}</span>
+                            </div>
+                        ))}
                         {d.members.map((id) => (
                             <div key={id} style={S.memberRow}
                                 onClick={() => { exec(['camera.focus', id]); after(['attention.set', 'primary', id]); }}

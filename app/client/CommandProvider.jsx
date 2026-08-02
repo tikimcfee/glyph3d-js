@@ -418,6 +418,12 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // Fold the persisted Agent Books settings into the freshly-built shelf (its apply()s
     // otherwise fire only on a user change), so tuned sizes hold from boot.
     applyGroupSettings(state.ctx, 'Agent Books');
+    // A seated agent book has no onResize — its extent grows as sheets page in. The
+    // shelf's change event is the growth signal: re-fit every desk so a growing book
+    // re-contains inside its seat instead of spilling over its neighbors.
+    state.ctx.agentBooks.onChange?.(() => {
+      for (const carrel of state.ctx.carrels.values()) carrel.refit();
+    });
 
     // Camera-locked HUD dock: a bar of window tiles that rides the view. Reparents
     // a docked grid/terminal under itself (world-preserving attach) and scales it to

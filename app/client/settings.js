@@ -23,6 +23,13 @@ import { LAYOUT_PRESETS, setDefaultLayout } from '@glyph3d/core/workers/builders
  *  re-packs the live bar. The bare param name (not the `dock.` setting key) goes through. */
 const dockParam = (param) => (ctx, v) => ctx.cameraDock?.setParam?.(param, v);
 
+/** apply() for a carrel knob: push it onto EVERY live desk. New desks pick the stored
+ *  values up at birth (carrel.create runs applyGroupSettings(ctx, 'Carrel')), so these
+ *  are both the live dial and the defaults; carrel.set <name> stays the per-desk verb. */
+const carrelParam = (param) => (ctx, v) => {
+  for (const c of ctx.carrels?.values?.() || []) c.setParam?.(param, v);
+};
+
 /** apply() for a glyph minification/LOD dial: push the bare dial name (not the `glyph.` key) to the
  *  global GlyphField LOD uniform — live across every glyph material, no ctx subsystem needed. */
 const lodParam = (param) => (_ctx, v) => setGlyphLodParam(param, v);
@@ -280,6 +287,17 @@ export const SETTINGS = [
   { key: 'frame.marginTop', label: 'Margin top', group: 'Frame', type: 'number', default: 0.06, min: 0, max: 0.49, step: 0.01, apply: dockParam('frameMarginTop') },
   { key: 'frame.marginBottom', label: 'Margin bottom', group: 'Frame', type: 'number', default: 0.06, min: 0, max: 0.49, step: 0.01, apply: dockParam('frameMarginBottom') },
   { key: 'frame.depth', label: 'Frame pull-in', group: 'Frame', type: 'number', default: 0.7, min: 0.3, max: 1, step: 0.02, apply: dockParam('frameDistFrac') },
+  // Carrel — the world-anchored reading desks. Applied to every live desk AND picked up
+  // as the defaults for new ones (carrel.create); carrel.set <name> tunes one desk.
+  { key: 'carrel.radius', label: 'Ring radius', group: 'Carrel', type: 'number', default: 240, min: 20, max: 2000, step: 10, apply: carrelParam('radius') },
+  { key: 'carrel.boxH', label: 'Seat size', group: 'Carrel', type: 'number', default: 110, min: 20, max: 600, step: 5, apply: carrelParam('boxH') },
+  { key: 'carrel.boxAspect', label: 'Seat aspect (w:h)', group: 'Carrel', type: 'number', default: 1.15, min: 0.5, max: 3, step: 0.05, apply: carrelParam('boxAspect') },
+  { key: 'carrel.gapFrac', label: 'Item spacing', group: 'Carrel', type: 'number', default: 0.5, min: 0, max: 2, step: 0.05, apply: carrelParam('gapFrac') },
+  { key: 'carrel.growCap', label: 'Fit growth cap', group: 'Carrel', type: 'number', default: 1.25, min: 1, max: 4, step: 0.05, apply: carrelParam('growCap') },
+  { key: 'carrel.maxArcDeg', label: 'Ring arc span°', group: 'Carrel', type: 'number', default: 300, min: 60, max: 360, step: 5, apply: carrelParam('maxArcDeg') },
+  { key: 'carrel.tableFrac', label: 'Tabletop overhang', group: 'Carrel', type: 'number', default: 1.25, min: 1, max: 2, step: 0.05, apply: carrelParam('tableFrac') },
+  { key: 'carrel.auraHeadroom', label: 'Aura headroom', group: 'Carrel', type: 'number', default: 40, min: 0, max: 300, step: 5, apply: carrelParam('auraHeadroom') },
+  { key: 'carrel.glowStrength', label: 'Glow strength', group: 'Carrel', type: 'number', default: 0.35, min: 0, max: 2, step: 0.05, apply: carrelParam('glowStrength') },
   // Tree — the ContentTree ownership-line overlay (hub → what it contains). File lines
   // and directory lines toggle independently; layout.arrows is the master on/off verb.
   {

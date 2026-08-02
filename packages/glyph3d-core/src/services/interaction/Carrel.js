@@ -93,7 +93,11 @@ export class Carrel extends THREE.Object3D {
      *   (measured), so a ~110-unit slot seats a typical file near 1:1 — a member reads as a
      *   real book on the desk, not a dock-tile icon
      * @param {number} [opts.boxAspect=1.15] - slot-box width/height
-     * @param {number} [opts.gapFrac=0.35]   - gap between slots as a fraction of boxH
+     * @param {number} [opts.gapFrac=0.5]    - gap between slots as a fraction of boxH
+     * @param {number} [opts.growCap=1.25]   - contain-fit may GROW content at most this much.
+     *   Fitting means fitting INSIDE; growing is a courtesy. Without the cap, a nearly-empty
+     *   member (a fresh agent book before its first sheet) measures tiny and the fit inflates
+     *   it absurdly — the seated-book overlap bug
      * @param {number} [opts.maxArcDeg=300]  - arc span the ring fills; the remainder is the doorway (faces local +z)
      * @param {'in'|'out'} [opts.facing='in'] - members face the center (stand inside) or outward
      * @param {number} [opts.tableFrac=1.25] - tabletop disc radius as a fraction of `radius`
@@ -103,8 +107,8 @@ export class Carrel extends THREE.Object3D {
      * @param {number} [opts.animDur=0.167] - member slide/scale duration (s)
      * @param {number} [opts.yawRate=14]    - member face-target slerp rate (×dt)
      */
-    constructor({ name = 'carrel', radius = 240, boxH = 110, boxAspect = 1.15, gapFrac = 0.35,
-                  maxArcDeg = 300, facing = 'in', tableFrac = 1.25, auraHeadroom = 40,
+    constructor({ name = 'carrel', radius = 240, boxH = 110, boxAspect = 1.15, gapFrac = 0.5,
+                  growCap = 1.25, maxArcDeg = 300, facing = 'in', tableFrac = 1.25, auraHeadroom = 40,
                   glowColor = 0x6f9fd0, glowStrength = 0.35,
                   animDur = 0.167, yawRate = 14 } = {}) {
         super();
@@ -114,6 +118,7 @@ export class Carrel extends THREE.Object3D {
         this.boxH = boxH;
         this.boxAspect = boxAspect;
         this.gapFrac = gapFrac;
+        this.growCap = growCap;
         this.maxArcDeg = maxArcDeg;
         this.facing = facing === 'out' ? 'out' : 'in';
         this.tableFrac = tableFrac;
@@ -322,7 +327,7 @@ export class Carrel extends THREE.Object3D {
      * @param {string} key @param {number} value @returns {boolean}
      */
     setParam(key, value) {
-        if (!['radius', 'boxH', 'boxAspect', 'gapFrac', 'maxArcDeg', 'tableFrac',
+        if (!['radius', 'boxH', 'boxAspect', 'gapFrac', 'growCap', 'maxArcDeg', 'tableFrac',
               'auraHeadroom', 'glowStrength', 'animDur', 'yawRate'].includes(key)) return false;
         if (!Number.isFinite(value)) return false;
         this[key] = value;
@@ -351,11 +356,17 @@ export class Carrel extends THREE.Object3D {
      *  works in RENDERED scale and divides this out of the placement it animates. */
     _userOf(e) { return (e.grid.scaleModel && e.grid.scaleModel.user.x) || 1; }
 
-    /** Contain-fit: the RENDERED scale that sits content inside a slot box (aspect kept). */
+    /** Contain-fit: the RENDERED scale that sits content inside a slot box (aspect kept).
+     *  Growth is capped (growCap): fitting means fitting INSIDE — a nearly-empty member
+     *  (a fresh agent book) must not be inflated to fill its slot. */
     _containScale(e, boxW, boxHt) {
         const ext = this._extentOf(e);
-        return Math.min(boxW / ext.w, boxHt / ext.h);
+        return Math.min(boxW / ext.w, boxHt / ext.h, this.growCap);
     }
+
+    /** Re-seat everyone off current extents — the external content-growth tap (a seated
+     *  agent book pages in sheets; AgentBooks.onChange calls this; Books have no onResize). */
+    refit() { this._relayout(); }
 
     /** Animate one member so its content center lands at carrel-local (sx,sy,sz) at rendered
      *  scale `eff`, yawed to `faceDir` (unit, XZ-plane). Same placement algebra as the dock:
