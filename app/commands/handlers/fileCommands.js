@@ -227,6 +227,11 @@ export default function registerFileCommands(router) {
 
             let opened = 0;
             let placeholders = 0;
+            let chunks = 1;
+            // The whole build runs under a registry HOLD: 350 grids registering means
+            // ONE listener pass per pour beat + one at close — not 350 × the full
+            // suite (projector, workspace reconcile, every mirroring React panel).
+            await ctx.registry.holdChanges(async () => {
             for (const f of oversized) {
                 if (addUnfetchedGrid(ctx, f.path, f.size) != null) { opened++; placeholders++; }
             }
@@ -251,7 +256,6 @@ export default function registerFileCommands(router) {
                 if (typeof requestAnimationFrame === 'function') requestAnimationFrame(settle);
                 setTimeout(settle, 50);
             });
-            let chunks = 1;
             let lastPour = performance.now();
             let lastStatus = 0;
             // Mid-stream pours re-lay the WHOLE growing tree — as it gets big, each
@@ -267,6 +271,10 @@ export default function registerFileCommands(router) {
                     lastStatus = now;
                 }
                 if (now - lastPour > pourInterval) {
+                    // The pour beat is also the registry heartbeat: held change
+                    // notifications flush here, so the projector/panels see the
+                    // batch a few times per load instead of once per grid.
+                    ctx.registry.flushHeld?.();
                     const t0 = performance.now();
                     ctx.contentTree.relayoutAndRest(WORLD_FLOOR_Y);   // held under a batch window
                     lastPour = performance.now();
@@ -317,6 +325,7 @@ export default function registerFileCommands(router) {
                     await yieldFrame();
                 }
             }
+            });   // registry hold closes: one coalesced listener pass for the batch
             trace.mark('build', { grids: opened, chunks });
 
             // One relayout for the whole batch (the RenderPlan), then rest on the world floor —

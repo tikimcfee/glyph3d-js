@@ -121,8 +121,13 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     // each bulk caller must remember. Callers own their scoping (a prefix, everything)
     // and their bookkeeping (sheets, attention, fieldSources); this owns the removal.
     removeGrids(ids) {
-      let removed = 0;
-      for (const id of ids) if (this.removeGrid(id, { relayout: false })) removed++;
+      // Registry hold: N unregistrations → ONE coalesced listener pass (the
+      // removal cascade, the mirroring panels), same shape as the load side.
+      const removed = this.registry.holdChanges(() => {
+        let n = 0;
+        for (const id of ids) if (this.removeGrid(id, { relayout: false })) n++;
+        return n;
+      });
       if (removed) this.contentTree?.relayoutAndRest?.();
       return removed;
     },
@@ -428,7 +433,9 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // Volumes are rebuilt every relayout, so registration reconciles per relayout.
     state.registry.setPickable?.('volume');
     let volumeEntries = new Map();   // id → { vol, mesh } from the previous reconcile
-    const syncVolumeCovers = () => {
+    // The whole reconcile runs under a registry HOLD: V volumes unregistering +
+    // re-registering per relayout is 2V listener passes without it — one with.
+    const syncVolumeCovers = () => state.registry.holdChanges(() => {
       const ps = state.ctx.pickingSystem;
       for (const [id, prev] of volumeEntries) {
         try { state.registry.unregister?.(id); } catch (_e) { /* best effort */ }
@@ -448,7 +455,7 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
         next.set(id, { vol, mesh });
       }
       volumeEntries = next;
-    };
+    });
     contentTree.onRelayout(syncVolumeCovers);
 
     // Agent books: the agent.* verbs sink here — each record an agent produces pages a
@@ -465,7 +472,10 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     applyGroupSettings(state.ctx, 'Agent Books');
     // A seated agent book has no onResize — its extent grows as sheets page in. The
     // shelf's change event is the growth signal: re-fit every desk so a growing book
-    // re-contains inside its seat instead of spilling over its neighbors.
+    // re-contains inside its seat instead of spilling over its neighbors. The same
+    // event announces lane BIRTHS: new books seat at the auto-created 'agents' desk
+    // (grid mode — the semi-grid shelf) by default; the deferred sweep respects pins,
+    // docks, manual seats, and the book.autoShelf setting.
     state.ctx.agentBooks.onChange?.(() => {
       for (const carrel of state.ctx.carrels.values()) carrel.refit();
     });

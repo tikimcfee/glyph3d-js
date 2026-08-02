@@ -45,12 +45,18 @@ try {
         const c = window.__glyphClient;
         await c.router.execute(['scene.clear_grids']);
         await c.router.execute(['load.stats', 'clear']);
+        // Listener-fire counter: the registry hold must coalesce the per-grid
+        // notification storm into a few fires per source (pour beats + close).
+        let listenerFires = 0;
+        const count = () => listenerFires++;
+        c.ctx.registry.addChangeListener(count);
         const t0 = performance.now();
         const results = [];
         for (const d of dirs) results.push((await c.router.execute(['file.openDir', d]))?.text?.slice(0, 60));
         const wall = +(performance.now() - t0).toFixed(0);
+        c.ctx.registry.removeChangeListener(count);
         const stats = await c.router.execute(['load.stats']);
-        return { wall, results, traces: stats.data.traces, relayouts: stats.data.relayouts ?? 0 };
+        return { wall, results, listenerFires, traces: stats.data.traces, relayouts: stats.data.relayouts ?? 0 };
     })()`);
 
     const { wall, traces, relayouts } = setup;
@@ -72,6 +78,12 @@ try {
             `${t.target}: stages cover the total (${sum.toFixed(0)}ms of ${t.total}ms)`);
     }
     ok(relayouts === opens.length, `relayout count == source count (${relayouts} == ${opens.length}) — no hidden re-packs`);
+
+    // The registry hold: ~111 grids must NOT mean ~111 listener passes — a few
+    // fires per source (pour heartbeats + the close), bounded well under grid count.
+    const gridCount = opens.reduce((n, t) => n + (t.stages.find((s) => s.name === 'build')?.grids ?? 0), 0);
+    ok(setup.listenerFires <= dirs.length * 8,
+        `registry notifications coalesce (${setup.listenerFires} fires for ${gridCount} grids across ${dirs.length} sources)`);
 
     // ── numbers: the storm profile (printed, not asserted) ──────────────────
     const agg = new Map();

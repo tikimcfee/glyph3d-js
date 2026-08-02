@@ -49,6 +49,15 @@ export default class SceneRegistry {
          * on every registry mutation → O(N²) over a bulk tree load).
          */
         this._pickable = new Set();
+
+        // The holdChanges window: while > 0, mutations still land (and type caches
+        // still invalidate) but listener notification COALESCES — one fire per
+        // distinct changed type at the outermost close, instead of the full
+        // listener suite (surface projector, workspace reconcile, every mirroring
+        // React panel) running once per grid across a bulk load.
+        this._holdDepth = 0;
+        /** @type {Set<string>} */
+        this._heldTypes = new Set();
     }
 
     // -- Mutation -------------------------------------------------------
@@ -342,6 +351,47 @@ export default class SceneRegistry {
     }
 
     /**
+     * Run `fn` with change notifications HELD: every mutation inside records its
+     * type; the OUTERMOST close fires each distinct type once. Listeners are
+     * state-scanners (they read the registry, not the event), so one coalesced
+     * fire is equivalent to N — this is ContentTree.batchRelayouts' discipline
+     * for the registry. Re-entrant; works for sync and async `fn`; a throw still
+     * closes (and fires what was recorded). Long-running holds (a streamed bulk
+     * load) can flushHeld() at their own cadence so latency-sensitive listeners
+     * (the dock projector) stay fresh without paying the per-grid storm.
+     * @template T @param {() => T|Promise<T>} fn @returns {T|Promise<T>}
+     */
+    holdChanges(fn) {
+        this._holdDepth++;
+        let result;
+        try {
+            result = fn();
+        } catch (e) {
+            this._closeHold();
+            throw e;
+        }
+        if (result && typeof result.then === 'function') {
+            return result.finally(() => this._closeHold());
+        }
+        this._closeHold();
+        return result;
+    }
+
+    /** Fire the types recorded so far WITHOUT closing the hold — the mid-stream
+     *  heartbeat for long windows. No-op when nothing is held. */
+    flushHeld() {
+        if (this._heldTypes.size === 0) return;
+        const types = [...this._heldTypes];
+        this._heldTypes.clear();
+        for (const t of types) this._fire(t);
+    }
+
+    /** @private */
+    _closeHold() {
+        if (--this._holdDepth === 0) this.flushHeld();
+    }
+
+    /**
      * Subscribe to change notifications.
      * @param {Function} fn - called with (type: string)
      */
@@ -360,12 +410,18 @@ export default class SceneRegistry {
     // -- Internal -------------------------------------------------------
 
     /**
-     * Invalidate the cached array for a type and fire the onChange hook.
+     * Invalidate the cached array for a type and fire (or hold) the onChange hook.
      * @param {string} type
      * @private
      */
     _invalidateCache(type) {
         this._typeCache.delete(type);
+        if (this._holdDepth > 0) { this._heldTypes.add(type); return; }
+        this._fire(type);
+    }
+
+    /** @private */
+    _fire(type) {
         for (const cb of this._changeListeners) {
             try { cb(type); } catch (e) {
                 console.error('[registry] onChange error:', e);
