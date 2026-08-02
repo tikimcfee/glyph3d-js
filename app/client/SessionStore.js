@@ -4,17 +4,23 @@
  * Persists "what's loaded" to a SERVER-SIDE file (`.glyph3d-session.json` in the
  * project root, written via the relay's fs/writeFile RPC) so a reload — or a
  * different browser/device — comes back to the same workspace: one versioned
- * snapshot blob, restored by a SEQUENTIAL PHASED LOADER, autosaved on change after.
+ * snapshot blob, restored by a STAGED PHASED LOADER, autosaved on change after.
  *
- * RESTORE = named phases, run in order, each awaited + guarded + timed:
- *   substrate  layout scheme + world-grouping order (direct state, empty scene)
- *   field      replay fieldSources — bulk content fetch (data acquisition, not gesture replay)
- *   tabs       file.open each saved sheet + its viewport (grid.applyView)
- *   surfaces   publish terminal geometry + 3D-dock membership into the WorkspaceModel
- *   panels     2D dockview layout — awaits ctx.dockLayout, prunes orphans, fromJSON
- *   camera     pose, set directly on the controller
- *   settle     one projection pass over surfaces that re-adopted mid-restore
- *   focus      attention primary/key slots, last — the scene is as live as it gets
+ * RESTORE = named phases in STAGES: stages run in order (the real dependencies),
+ * the lanes inside a stage run CONCURRENTLY (independent content families — a
+ * launch overlaps their relay round-trips instead of queueing them). Every phase
+ * stays individually awaited + guarded + timed:
+ *   1  substrate    layout scheme + world-grouping order (direct state, empty scene)
+ *   2  field→tabs   replay fieldSources (bulk fetch, one batch-window settle), then
+ *                   file.open each saved sheet + viewport — chained: tabs dedupe
+ *                   against the field
+ *      ∥ agents     reopen saved session books (its own world grouping + relay reads)
+ *      ∥ surfaces   publish terminal geometry + 3D-dock membership into the model
+ *   3  panels       2D dockview layout — reconciles against the registry every lane
+ *                   above populated (awaits ctx.dockLayout, prunes orphans, fromJSON)
+ *   4  camera       pose, set directly on the controller (after the field's fitall)
+ *      settle       one projection pass over surfaces that re-adopted mid-restore
+ *      focus        attention primary/key slots, last — the scene is as live as it gets
  *
  * A failed phase is REPORTED (console + ctx.status + this.lastRestore; the
  * `session.status` verb reads it) and QUARANTINED, not swallowed: later phases
@@ -365,22 +371,11 @@ export default class SessionStore {
     // both of its sources were empty exactly when the dock restore had failed.)
     this._lastGoodDock = snap.dock || null;
 
-    /** @type {Array<[string, () => any, string[]]>} name, runner, snapshot keys it projects */
-    const phases = [
-      ['substrate', () => this._restoreSubstrate(snap),     ['layout', 'world']],
-      ['field',     () => this._restoreField(snap),         ['fieldSources']],
-      ['tabs',      () => this._restoreTabs(snap),          ['files']],
-      ['agents',    () => this._restoreAgents(snap),        ['agents']],
-      ['surfaces',  () => this._restoreSurfaces(snap),      ['terminals', 'dock3d']],
-      ['panels',    () => this._restorePanels(snap),        ['dock']],
-      ['camera',    () => this._restoreCamera(snap.camera), ['camera']],
-      ['settle',    () => this._projectSurfaces(),          []],
-      ['focus',     () => this._restoreFocus(snap.focus),   ['focus']],
-    ];
-
+    /** @type {(p: [string, () => any, string[]]) => Promise<void>} one phase, guarded +
+     *  timed + quarantined exactly as the serial loader did — concurrency changes the
+     *  SCHEDULE, never the per-phase contract. */
     const report = [];
-    for (const [name, run, keys] of phases) {
-      this.ctx.status?.set(`Restoring: ${name}…`);
+    const runPhase = async ([name, run, keys]) => {
       const t0 = performance.now();
       try {
         await run();
@@ -390,14 +385,51 @@ export default class SessionStore {
         report.push({ name, ok: false, ms: Math.round(performance.now() - t0), error: e?.message || String(e) });
         console.warn(`[session] restore: phase '${name}' failed —`, e?.message || e);
       }
+    };
+
+    /** Stages run IN ORDER; the LANES inside a stage run CONCURRENTLY (each lane is an
+     *  ordered chain of phases). The lanes are independent content families — the wall
+     *  clock overlaps their relay round-trips instead of queueing them:
+     *    1. substrate ALONE — the scheme must exist before any content lands in it.
+     *    2. field→tabs (tabs dedupes against the field, so they chain in one lane)
+     *       ∥ agents (its own world grouping + its own relay reads)
+     *       ∥ surfaces (sync view-intent writes; the projector applies them as
+     *         entities arrive, whichever lane produces them).
+     *       Safe because: the bridge id-correlates concurrent RPCs; the field lane
+     *       holds the tree's batch window; world.relayout is sync + idempotent under
+     *       interleaved settles; registry writes are sync map ops.
+     *    3. panels ALONE — the dockview reconciles against the registry every lane
+     *       above populated.
+     *    4. camera → settle → focus, exactly the old tail (camera after the field
+     *       lane's fitall, focus last).
+     *  @type {Array<Array<Array<[string, () => any, string[]]>>>} stages → lanes → phases */
+    const stages = [
+      [[['substrate', () => this._restoreSubstrate(snap), ['layout', 'world']]]],
+      [
+        [['field', () => this._restoreField(snap), ['fieldSources']],
+         ['tabs', () => this._restoreTabs(snap), ['files']]],
+        [['agents', () => this._restoreAgents(snap), ['agents']]],
+        [['surfaces', () => this._restoreSurfaces(snap), ['terminals', 'dock3d']]],
+      ],
+      [[['panels', () => this._restorePanels(snap), ['dock']]]],
+      [[['camera', () => this._restoreCamera(snap.camera), ['camera']],
+        ['settle', () => this._projectSurfaces(), []],
+        ['focus', () => this._restoreFocus(snap.focus), ['focus']]]],
+    ];
+
+    const t0 = performance.now();
+    for (const stage of stages) {
+      this.ctx.status?.set(`Restoring: ${stage.flat(1).map(([name]) => name).join(' + ')}…`);
+      await Promise.all(stage.map(async (lane) => { for (const p of lane) await runPhase(p); }));
     }
+    const wall = Math.round(performance.now() - t0);
     this.ctx.status?.clear();
 
     const failed = report.filter((p) => !p.ok);
-    this.lastRestore = { at: Date.now(), ok: failed.length === 0, phases: report };
+    this.lastRestore = { at: Date.now(), ok: failed.length === 0, wall, phases: report };
     console.info(
       `[session] restore ${failed.length ? `DEGRADED — failed: ${failed.map((p) => p.name).join(', ')}` : 'complete'} `
-      + `(${report.map((p) => `${p.name} ${p.ms}ms`).join(' · ')})`
+      + `(wall ${wall}ms · ${report.map((p) => `${p.name} ${p.ms}ms`).join(' · ')})`
     );
   }
 
