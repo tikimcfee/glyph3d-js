@@ -87,8 +87,8 @@ export class Carrel extends THREE.Object3D {
     /**
      * @param {Object} [opts]
      * @param {string} [opts.name='carrel']  - registry name (carrel.* verbs address it)
-     * @param {number} [opts.radius=26]      - cylinder radius the member faces sit at (world units)
-     * @param {number} [opts.boxH=9]         - slot-box height (world units); content contain-fits
+     * @param {number} [opts.radius=32]      - cylinder radius the member faces sit at (world units)
+     * @param {number} [opts.boxH=11]        - slot-box height (world units); content contain-fits
      * @param {number} [opts.boxAspect=1.15] - slot-box width/height
      * @param {number} [opts.gapFrac=0.35]   - gap between slots as a fraction of boxH
      * @param {number} [opts.maxArcDeg=300]  - arc span the ring fills; the remainder is the doorway (faces local +z)
@@ -100,7 +100,7 @@ export class Carrel extends THREE.Object3D {
      * @param {number} [opts.animDur=0.167] - member slide/scale duration (s)
      * @param {number} [opts.yawRate=14]    - member face-target slerp rate (×dt)
      */
-    constructor({ name = 'carrel', radius = 26, boxH = 9, boxAspect = 1.15, gapFrac = 0.35,
+    constructor({ name = 'carrel', radius = 32, boxH = 11, boxAspect = 1.15, gapFrac = 0.35,
                   maxArcDeg = 300, facing = 'in', tableFrac = 1.25, auraHeadroom = 6,
                   glowColor = 0x6f9fd0, glowStrength = 0.35,
                   animDur = 0.167, yawRate = 14 } = {}) {

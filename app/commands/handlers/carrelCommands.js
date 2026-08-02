@@ -63,18 +63,18 @@ export default function registerCarrelCommands(router) {
         const radius = parseFloat(args[1]);
         const carrel = new Carrel({ name, ...(Number.isFinite(radius) ? { radius } : {}) });
 
-        // Set the desk down ahead of the camera, ON the world floor, its doorway
-        // (local +z) turned back toward the viewer — you're looking into it.
+        // Set the desk down ON the camera's view ray — where you're looking, not a
+        // floor projection of it (which parked the desk at y=0 far below an elevated
+        // gaze, reading tiny-in-the-distance). The tabletop sits half a slot below
+        // the ray point so row 0 rises into your gaze; it never sinks below the
+        // world floor. Doorway (local +z) turns back toward the viewer.
         const cam = ctx.camera;
         if (cam) {
             const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion);
-            fwd.y = 0;
-            if (fwd.lengthSq() < 1e-9) fwd.set(0, 0, -1); // looking straight down: pick a side
-            fwd.normalize();
             const dist = carrel.radius * 2.2;
-            carrel.position.set(cam.position.x + fwd.x * dist, 0, cam.position.z + fwd.z * dist);
-            carrel.rotation.y = Math.atan2(cam.position.x - carrel.position.x,
-                                           cam.position.z - carrel.position.z);
+            const p = new THREE.Vector3().copy(cam.position).addScaledVector(fwd, dist);
+            carrel.position.set(p.x, Math.max(p.y - carrel.boxH * 0.5, 0), p.z);
+            carrel.rotation.y = Math.atan2(cam.position.x - p.x, cam.position.z - p.z);
         }
 
         ctx.scene.add(carrel);
