@@ -52,6 +52,8 @@ const HEADED = has('--headed');
 const USE_LIVE_RENDERER = has('--use-live-renderer'); // escape hatch if a 2nd GPUDevice can't be had
 const SELFTEST = has('--selftest');   // stand a CPU reference model in for the kernel module
 const ASCII = has('--ascii');         // fold every non-ASCII codepoint to '.' (uniform advance)
+const BENCH = has('--bench');         // decompose timing: configure walk / steady-state dispatch / GPU time / readback
+const BENCH_N = Number(flag('--bench-n', '200'));
 
 // ---- the deterministic torture text ----
 // Empty lines, leading/trailing spaces, tabs, a very long line (> wrap width), an emoji,
@@ -427,7 +429,9 @@ const probe = (opts) => `(async (o) => {
     else if (!store.renderer) {
       const Ctor = client.ctx.renderer && client.ctx.renderer.constructor;
       if (!Ctor) throw new Error('client.ctx.renderer missing — cannot reach the WebGPURenderer class');
-      store.renderer = new Ctor({ antialias: false });
+      // trackTimestamp arms the WebGPU timestamp-query pool so --bench can read PURE GPU
+      // execution time; it costs nothing unless resolveTimestampsAsync is called.
+      store.renderer = new Ctor({ antialias: false, trackTimestamp: true });
       await store.renderer.init();
       R.rendererMode = 'offscreen second WebGPURenderer (' + Ctor.name + ')';
     } else R.rendererMode = 'offscreen second WebGPURenderer (reused)';
@@ -464,7 +468,7 @@ const probe = (opts) => `(async (o) => {
   };
   R.params = Object.assign({}, params, { origin: undefined });
 
-  let gpu;
+  let gpu; let benchKernel = null;
   try {
     const t0 = performance.now();
     const kernel = new Kernel(store.renderer, { maxSlots: slotCount, maxLines: lineTable.length });
@@ -475,7 +479,8 @@ const probe = (opts) => `(async (o) => {
     await kernel.compute();
     gpu = await kernel.readPositions();
     R.kernelMs = Math.round(performance.now() - t0);
-    if (typeof kernel.dispose === 'function') kernel.dispose();
+    if (o.bench && !o.selftest) benchKernel = kernel;
+    else if (typeof kernel.dispose === 'function') kernel.dispose();
   } catch (e) { R.kernelError = (e && e.stack ? String(e.stack).split('\\n').slice(0, 4).join(' | ') : String(e && e.message || e)); return R; }
 
   if (!gpu || typeof gpu.length !== 'number') { R.kernelError = 'readPositions() returned ' + Object.prototype.toString.call(gpu); return R; }
@@ -515,6 +520,42 @@ const probe = (opts) => `(async (o) => {
   R.diff = { compared: n, over, eps: o.eps, maxAbs, argMax, mismatches,
     overFraction: n ? over / n : 0, worstX: wx, perColumnDrift: perCol,
     epsColumnBudget: perCol > 0 ? Math.floor(o.eps / perCol) : null };
+  // ---- bench: decompose where the milliseconds actually live ----
+  // The check's own kernelMs bundles pipeline creation + a full readback fence, neither of
+  // which the render path pays. This separates: the CPU table walk (the offload budget),
+  // amortized steady-state dispatch (submit + GPU execution, no readback — the real per-
+  // relayout cost), pure GPU execution (timestamp queries, when the device grants them),
+  // and the readback round trip (test-only apparatus).
+  if (benchKernel) {
+    try {
+      const K = benchKernel, RD = store.renderer, N = Math.max(10, o.benchN || 200);
+      const B = { n: N };
+      { const REPS = 20; const t0 = performance.now();
+        for (let i = 0; i < REPS; i++) K.configure({ slotCount, lineTable, lineStartRow, advances, params });
+        B.configureMs = (performance.now() - t0) / REPS; }
+      { const t0 = performance.now();
+        for (let i = 0; i < 3; i++) bridge && bridge.fontReady
+          ? bridge.buildBatchBuffersSync(items, { metrics, defaultColor: color, layout, scrollOffset: 0 })
+          : builders.buildBatchBuffers([{ position: origin, color, scale: 1, groupId: 0,
+              shaped: shaping.shapeText(atlas._shapeCache || atlas._shaper, o.text) }],
+              { metrics, defaultColor: color, upem: (atlas._shaper && atlas._shaper.upem) || 0, layout, scrollOffset: 0 });
+        B.cpuBuildMs = (performance.now() - t0) / 3; }
+      const queue = RD.backend && RD.backend.device && RD.backend.device.queue;
+      try { if (RD.resolveTimestampsAsync) await RD.resolveTimestampsAsync('compute'); } catch (e) { /* pool may be empty */ }
+      { const t0 = performance.now();
+        for (let i = 0; i < N; i++) await K.compute();
+        if (queue) await queue.onSubmittedWorkDone();
+        B.dispatchMs = (performance.now() - t0) / N; }
+      try {
+        const total = RD.resolveTimestampsAsync ? await RD.resolveTimestampsAsync('compute') : null;
+        B.gpuMs = typeof total === 'number' && total > 0 ? total / N : null;
+      } catch (e) { B.gpuMs = null; B.gpuNote = String(e && e.message || e); }
+      { const t0 = performance.now(); await K.readPositions(); B.readbackMs = performance.now() - t0; }
+      R.bench = B;
+    } catch (e) { R.benchError = String(e && e.message || e); }
+    if (typeof benchKernel.dispose === 'function') benchKernel.dispose();
+  }
+
   if (o.dump) {
     const cap = Math.min(n, 20000) * 3;
     R.cpuPositions = Array.from(cpu.slice(0, cap));
@@ -609,6 +650,19 @@ function report(r) {
     push(`      Δ   [${m.delta.map(f).join(', ')}]`);
   }
 
+  if (r.bench) {
+    const b = r.bench;
+    const ms = (v) => (typeof v === 'number' ? v.toFixed(3) + 'ms' : 'n/a');
+    push('');
+    push(C.bold(`bench (${b.n} dispatches, ${r.slotCount} slots)`));
+    push(`  cpu full build   ${ms(b.cpuBuildMs)}   ${C.dim('shape+layout+attrs — what the GPU path replaces')}`);
+    push(`  configure walk   ${ms(b.configureMs)}   ${C.dim('CPU tables (lineTable/rowPrefix/xOffsets) — the residual CPU cost per content change')}`);
+    push(`  dispatch steady  ${ms(b.dispatchMs)}   ${C.dim('amortized submit+GPU per relayout, no readback — the real per-fold cost')}`);
+    push(`  gpu execution    ${ms(b.gpuMs)}   ${C.dim(b.gpuMs === null ? 'timestamp-query unavailable' + (b.gpuNote ? ' (' + b.gpuNote + ')' : '') : 'pure kernel time (timestamp query)')}`);
+    push(`  readback         ${ms(b.readbackMs)}   ${C.dim('test-only apparatus — the render path never pays this')}`);
+  }
+  if (r.benchError) push(`  bench ERROR  ${r.benchError}`);
+
   const ok = teethOk && d.over === 0;
   push('');
   push(ok ? C.bold(`✓ PASS  mode ${r.mode}: ${d.compared} slots match within ${d.eps}`)
@@ -634,6 +688,7 @@ try {
       repo: REPO, mode, text: TEXT, eps: EPS, wrapWidth: WRAP, worldScale: WORLD_SCALE,
       dump: !!DUMP, useLiveRenderer: USE_LIVE_RENDERER, selftest: SELFTEST,
       pageHeight: PAGE_HEIGHT, pagesWide: PAGES_WIDE,
+      bench: BENCH, benchN: BENCH_N,
     }));
     raw.push(r);
     results.push(report(r));
