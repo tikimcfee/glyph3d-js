@@ -968,6 +968,29 @@ const LM = { rowH: 4, charW: 2 };   // mock cell metrics (world units at scale 1
   ok(born.every((i) => i.pop === 0), 'settle: newborn labels dip in');
 }
 
+// 47d. batchRelayouts — the load side's RenderPlan: relayoutAndRest calls inside a
+//      window RECORD instead of running; the outermost close settles ONCE (a launch
+//      pays one relayout, not one per source/tab). Re-entrant; an empty window
+//      settles nothing; a throw inside still settles what was requested.
+{
+  const t = build(PATHS);
+  let n = 0;
+  t.onRelayout(() => n++);
+  await t.batchRelayouts(async () => { t.relayoutAndRest(); t.relayoutAndRest(); t.relayoutAndRest(); });
+  eq(n, 1, 'batch: three held rests settle once');
+  await t.batchRelayouts(async () => {
+    await t.batchRelayouts(async () => t.relayoutAndRest());
+    t.relayoutAndRest();
+  });
+  eq(n, 2, 'batch: nested windows settle once at the OUTERMOST close');
+  await t.batchRelayouts(async () => {});
+  eq(n, 2, 'batch: an empty window settles nothing');
+  await t.batchRelayouts(async () => { t.relayoutAndRest(); throw new Error('boom'); }).catch(() => {});
+  eq(n, 3, 'batch: a throw inside still settles the requested rest');
+  t.relayoutAndRest();
+  eq(n, 4, 'batch: outside a window, relayoutAndRest runs immediately');
+}
+
 // 47c. prune sees THROUGH presentation husks: a library volume whose pages were all
 //      removed (or an emptied jellyfish panel) only dissolves at the NEXT relayout —
 //      after the prune moment — so the emptiness test must look inside it, or

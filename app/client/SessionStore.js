@@ -456,12 +456,23 @@ export default class SessionStore {
     // each source's own openDir/repo trace carries the stage breakdown beneath it.
     const trace = sources.length ? beginLoad(this.ctx, 'restore.field') : null;
     let anyLocal = false;
+    // Repo sources first, OUTSIDE any hold — repo.load owns the whole scene (it
+    // clears first) and frames itself, so it must see a settled tree. In practice
+    // a repo source replaces the list entirely; the split just makes mixed lists safe.
     for (const src of sources) {
       if (src?.type === 'repo' && src.ref) {
         try { await this.router.execute(['repo.load', src.ref]); }
         catch (e) { console.warn('[session] repo field restore failed:', e?.message || e); }
         trace?.mark(src.ref);
-      } else if (src?.type === 'local') {
+      }
+    }
+    // Local sources in ONE batch window: every openDir's polite relayoutAndRest
+    // coalesces into a single settle at close — a launch pays one relayout + one
+    // overlay rebuild, not one per source. (fitall stays outside: it frames the
+    // settled tree.)
+    const locals = sources.filter((s) => s?.type === 'local');
+    const runLocals = async () => {
+      for (const src of locals) {
         try {
           // Replay the recorded pop exactly (a pre-intent save carries no dir —
           // that restores as the whole project).
@@ -470,7 +481,10 @@ export default class SessionStore {
         } catch (e) { console.warn('[session] local field restore failed:', e?.message || e); }
         trace?.mark(src.dir || '/');
       }
-    }
+    };
+    const tree = this.ctx.contentTree;
+    if (locals.length && tree?.batchRelayouts) { await tree.batchRelayouts(runLocals); trace?.mark('settle'); }
+    else await runLocals();
     if (anyLocal) {
       try { await this.router.execute('camera.fitall'); }
       catch (e) { console.warn('[session] fitall after field restore failed:', e?.message || e); }
@@ -487,6 +501,9 @@ export default class SessionStore {
     // layer; load.stats holds the per-tab detail, the console line compacts).
     const trace = snap.files.length ? beginLoad(this.ctx, 'restore.tabs') : null;
     let anyWindowed = false;
+    // The tab loop shares the field phase's batch discipline: each genuinely-new
+    // file.open politely relayouts — held, they coalesce into one settle at close.
+    const runTabs = async () => {
     for (const f of snap.files) {
       if (!f?.path) continue;
       try {
@@ -524,6 +541,10 @@ export default class SessionStore {
     // Windowing changes a grid's footprint → relayout the tree ONCE after all tabs land (the
     // grid.window verb did this per-call; batching is the same end-state, less churn).
     if (anyWindowed) this.ctx.contentTree?.relayoutAndRest?.();
+    };
+    const tree = this.ctx.contentTree;
+    if (tree?.batchRelayouts) { await tree.batchRelayouts(runTabs); trace?.mark('settle'); }
+    else await runTabs();
     trace?.end({ files: snap.files.length });
   }
 

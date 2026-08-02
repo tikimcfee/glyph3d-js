@@ -85,6 +85,10 @@ export default class ContentTree {
         // live as long as their leaf — schemes arrange them, never create/destroy them.
         this._books = new Map();
         this._dirty = true;
+        // The batchRelayouts window: while _holdDepth > 0, relayoutAndRest records
+        // instead of running; the outermost close settles once (_heldRest = floorY).
+        this._holdDepth = 0;
+        this._heldRest = undefined;
         // Fired after every full (root) relayout — markers and other tree-decorating
         // systems rebuild from here, so they can never observe a stale layout.
         this._onRelayout = new Set();
@@ -452,12 +456,37 @@ export default class ContentTree {
      * The one relayout entry point callers should use after any content/footprint change
      * (insert, remove, a grid's render-style/window change): re-lay the tree and re-settle
      * it on the world floor. Replaces the old flat `flowLayout(getGrids())` reflows.
+     * Inside a batchRelayouts window the call is RECORDED, not run — the window settles
+     * once at close, so a launch-shaped burst (N sources, K tabs, each politely calling
+     * this) pays one relayout + one overlay rebuild instead of N+K.
      * @param {number} [floorY=0] the world floor to rest content above
      */
     relayoutAndRest(floorY = 0) {
+        if (this._holdDepth > 0) { this._heldRest = floorY; return this; }
         this.relayout();
         this.restAbove(floorY);
         return this;
+    }
+
+    /**
+     * Run `fn` with relayouts HELD: every relayoutAndRest inside the window coalesces
+     * into ONE settle when the outermost window closes (the last floorY wins — callers
+     * agree on the world floor anyway). Re-entrant; a window that never requested a
+     * rest settles nothing. This is removeGrids' batch discipline given to the LOAD
+     * side: session restore wraps its source and tab loops in one window each.
+     * @template T @param {() => Promise<T>|T} fn @returns {Promise<T>}
+     */
+    async batchRelayouts(fn) {
+        this._holdDepth = (this._holdDepth || 0) + 1;
+        try {
+            return await fn();
+        } finally {
+            if (--this._holdDepth === 0 && this._heldRest !== undefined) {
+                const floorY = this._heldRest;
+                this._heldRest = undefined;
+                this.relayoutAndRest(floorY);
+            }
+        }
     }
 
     /**
