@@ -292,6 +292,33 @@ export default function registerFileCommands(router) {
         returns: '{ path, entries: [{name,type,size}], truncated }',
     });
 
+    // file.sources — the field's OWNERS. fieldSources is the session's
+    // source-of-truth intent list ("this world = these roots/repos"), which
+    // nothing on the bus could answer until now: asked "what sources are
+    // loaded?", a driver's best proxy was a census of grids.
+    router.register('file.sources', (_args, ctx) => {
+        const sources = Array.isArray(ctx.fieldSources) ? ctx.fieldSources : [];
+        const grids = ctx.registry?.findByType?.('grid')?.length ?? 0;
+        const dirs = ctx.contentTree?.dirCount?.() ?? 0;
+        if (!sources.length) {
+            return {
+                text: 'OK: no sources loaded — the field is empty (file.openDir <dir> or repo.load <owner/repo>)',
+                data: { sources: [], grids, dirs },
+            };
+        }
+        const rows = sources.map((s) => (s?.type === 'repo'
+            ? ['repo', s.ref]
+            : ['local', s?.dir || '(served root)']));
+        return {
+            text: table(['type', 'source'], rows)
+                + `\nOK: ${sources.length} source(s) — ${grids} grid(s) in ${dirs} dir(s)`,
+            data: { sources, grids, dirs },
+        };
+    }, {
+        description: "List the field's loaded sources — the roots/repos that own the scene (what a session restores)",
+        returns: '{ sources:[{type,dir|ref}], grids, dirs }',
+    });
+
     // file.closeDir <dir-path>
     //
     // The unload half of file.openDir: close every grid under a directory — the
