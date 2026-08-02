@@ -47,6 +47,7 @@ import registerFrameCommands from './frameCommands.js';
 import registerLspCommands from './lspCommands.js';
 import registerStructureCommands from './structureCommands.js';
 import registerViewCommands from './viewCommands.js';
+import registerVerifyCommands from './verifyCommands.js';
 
 /**
  * Register all built-in commands on a router.
@@ -97,6 +98,7 @@ export function registerAllCommands(router) {
     registerLspCommands(router);
     registerStructureCommands(router);
     registerViewCommands(router);
+    registerVerifyCommands(router);
 }
 
 // Dev ergonomics: handlers register imperatively ONCE per page load (CommandProvider's
