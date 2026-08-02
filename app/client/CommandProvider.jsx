@@ -264,6 +264,15 @@ function bootWarmRender(gl, scene, camera, ctx) {
   try {
     let printable = '';
     for (let cp = 33; cp <= 126; cp++) printable += String.fromCharCode(cp);
+    // JIT warm-up: the first real files otherwise run the shaping/build loops
+    // INTERPRETED (measured 60–90ms single-file overshoots early in a launch).
+    // A burst of small varied builds tiers the loops up before content arrives.
+    const jitBody = (printable + '\n').repeat(40);
+    for (let w = 0; w < 12; w++) {
+      const g = new CodeGrid(scene, ctx.atlas, { name: `__jitwarm${w}`, worldScale: 0.025 });
+      g.loadFile(`__jitwarm${w}.js`, jitBody);
+      g.dispose?.();
+    }
     const probe = new CodeGrid(scene, ctx.atlas, { name: '__bootwarm', worldScale: 0.025 });
     probe.loadFile('__bootwarm', printable);
     scene.add(probe);

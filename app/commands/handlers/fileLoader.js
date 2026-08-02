@@ -114,22 +114,12 @@ function seatFileGrid(ctx, path, grid, notRendered, mtime) {
 function registerFileGrid(ctx, path, body, notRendered, mtime) {
     const grid = prepFileGrid(ctx, path, notRendered);
     if (!grid) return null;
+    // Main-thread on purpose: a warm build is 4–5ms even for a fat file (the worker
+    // detour measured 5–8× slower than the work — 23–40ms round-trip for a 4ms
+    // build), and the bulk path slices these under a frame budget. Cold-start cost
+    // lives in bootWarmRender, not here.
     grid.loadFile(path, body);
     return seatFileGrid(ctx, path, grid, notRendered, mtime);
-}
-
-/**
- * The WORKER twin of addFileGrid: the same one builder, worker-hosted
- * (CodeGrid.loadFileAsync — the path agent books already render through), so a fat
- * file's buffer build never blocks the frame. The grid joins the tree + registry
- * only once BUILT — layout always measures true sizes, never a half-grid.
- */
-export async function addFileGridAsync(ctx, path, content, mtime) {
-    const reason = unreadableReason(content);
-    const grid = prepFileGrid(ctx, path, reason);
-    if (!grid) return null;
-    await grid.loadFileAsync(path, reason ? placeholderBody(reason) : content);
-    return seatFileGrid(ctx, path, grid, reason, mtime);
 }
 
 /** Register fetched text content — unreadable content renders as a placeholder card.
