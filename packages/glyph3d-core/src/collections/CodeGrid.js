@@ -18,6 +18,7 @@ import { BOUNDS_Z_PAD } from '../core/constants.js';
 import { computeCellMetrics } from '../core/cellMetrics.js';
 import { paginationGeometry, resolveLayoutParams, DEFAULT_LAYOUT } from '../workers/builders/index.js';
 import { syncGpuLayout, isGpuLayoutEnabled } from '../compute/GlyphLayoutCompute.js';
+import { evaluateFold } from '../core/foldEvaluate.js';
 import LayoutDescription from '../core/LayoutDescription.js';
 import { analyzeGrid, buildGridSemantics, buildGridSemanticsSync } from '../parsing/SyntaxColorizer.js';
 import FramedGlyphField from './FramedGlyphField.js';
@@ -207,7 +208,7 @@ class CodeGrid extends FramedGlyphField {
      */
     _engineEligible(items) {
         return isGpuLayoutEnabled()
-            && this._arrangers.length === 0
+            && this._arrangers.every((a) => a.engineCapable === true)
             && items.every((it) => (it.scale ?? 1) === 1);
     }
 
@@ -256,6 +257,50 @@ class CodeGrid extends FramedGlyphField {
             field._updateGeometryBounds(res.bounds);
         }
         return (res?.dispatched || 0) > 0;
+    }
+
+    /**
+     * Materialize the UNDISPLACED fold for every committed entry into one TRANSIENT
+     * field-wide array — the measurement scratch for engine-mode arrangers (evaluateFold:
+     * call, measure, drop; no persistent position buffer comes back into existence).
+     * @private
+     * @returns {Float32Array|null} count×3 positions, or null when not engine-owned
+     */
+    _engineFoldScratch() {
+        const field = this._renderer;
+        if (!field?.gpuLayout) return null;
+        const sizes = field.instanceMesh?.geometry?.attributes?.instanceSize?.array;
+        if (!sizes) return null;
+        let count = 0;
+        for (const [, e] of field.renderedTexts) count = Math.max(count, e.bufferStartIndex + e.glyphCount);
+        if (!count) return null;
+        const out = new Float32Array(count * 3);
+        const m = this.metrics;
+        const lp = resolveLayoutParams(this.config.layout);
+        for (const [, entry] of field.renderedTexts) {
+            const n = entry.glyphCount;
+            if (!n || !entry.lineSlotOffsets) continue;
+            const base = entry.bufferStartIndex;
+            const committed = this._committedTexts.get(this._reverseIdMap.get(entry.id));
+            const lineTable = new Uint32Array(entry.lineSlotOffsets.length);
+            for (let L = 0; L < lineTable.length; L++) lineTable[L] = entry.lineSlotOffsets[L] - base;
+            const advances = new Float32Array(n);
+            for (let s = 0; s < n; s++) advances[s] = sizes[(base + s) * 2];
+            const geom = entry.pageContentWidth > 0 ? paginationGeometry(
+                { charWidth: m.charWidth, letterSpacing: m.spacing || 0, lineSpacing: m.lineHeight },
+                entry.pageContentWidth, lp,
+            ) : null;
+            evaluateFold({
+                slotCount: n, lineTable, advances,
+                origin: committed?.position || { x: 0, y: 0, z: 0 },
+                scrollOffset: this._scrollOffset || 0,
+                wrapWidth: lp.wrapWidth, lineSpacing: m.lineHeight,
+                zStep: m.charHeight * (lp.zWrapSpacing || 0),
+                geom,
+                out: out.subarray(base * 3, (base + n) * 3),
+            });
+        }
+        return out;
     }
 
     registerArranger(a) { if (a && !this._arrangers.includes(a)) this._arrangers.push(a); }
@@ -1849,6 +1894,9 @@ class CodeGrid extends FramedGlyphField {
             zStep: m.charHeight * (lp.zWrapSpacing || 0),
             advance: m.charWidth + (m.spacing || 0),
             scrollOffset: this._scrollOffset || 0,  // so the mirror matches the scrolled glyphs
+            // Engine-mode arrangers write this table; the caret must ride it (an arranged
+            // glyph's location = fold + displacement, both CPU-authored).
+            displacements: this._renderer?._layoutDisplacements ?? null,
         });
         this._scheduleAnalyze();
     }

@@ -81,6 +81,10 @@ export class StrataLayout {
         this._healing = false;
         this._boxMesh = null;
         this._boxGeo = null;
+        // Engine-capable: arrange() speaks displacement (dz onto the fold) as fluently as
+        // buffer writes, so a strata grid stays eligible for GPU layout — the eligibility
+        // gate reads this flag (CodeGrid._engineEligible).
+        this.engineCapable = true;
         this._boxMat = null;
         this._opacityU = null;
     }
@@ -110,6 +114,10 @@ export class StrataLayout {
         _activeInstances.delete(this);
         this._grid.unregisterArranger?.(this);
         this._clearBoxes();
+        // Engine mode parked its planes in the displacement table — drop it so the re-fold
+        // below re-dispatches flat (the adapter arms setDisplacements(null) at next sync).
+        const r = this._renderer();
+        if (r) r._layoutDisplacements = null;
         if (was) await this._grid._relayoutInPlace?.();
         return { ok: true };
     }
@@ -127,7 +135,13 @@ export class StrataLayout {
         const model = grid.getSemantics?.() || grid.refreshSemanticsSync?.();
         if (!model) { this._healLater(grid); return; }
 
-        const pos = r.getInstancePositions();
+        // Two engines, one arrangement. CPU path: write z into the live position buffer, as
+        // ever. Engine path: no position buffer exists — measure against a TRANSIENT fold
+        // scratch (evaluateFold) and write the DISPLACEMENT table instead (dz = wanted
+        // absolute plane − the fold's own z), then re-dispatch. Either way, the glyphs land
+        // on their AST plane and the caret mirror agrees (it adds the same table).
+        const engine = r.gpuLayout === true;
+        const pos = engine ? grid._engineFoldScratch?.() : r.getInstancePositions();
         if (!pos) return;
         const total = r.instanceMesh?.geometry?.instanceCount ?? 0;
 
@@ -142,20 +156,32 @@ export class StrataLayout {
         //    the parent's for the glyphs they share — each glyph lands on its DEEPEST scope.
         //    The parent's own direct glyphs (its header/footer, the gaps between children)
         //    keep the parent's plane.
+        let D = null;
+        if (engine) {
+            D = (r._layoutDisplacements && r._layoutDisplacements.length >= total * 3)
+                ? r._layoutDisplacements
+                : (r._layoutDisplacements = new Float32Array(total * 3));
+            D.fill(0);   // idempotent per arrange — stale planes never linger
+        }
         const boxes = [];
         for (const { node, depth } of nodes) {
             const range = this._slotRange(node, total);
             if (!range) continue;
             const z = depth * zStep;
-            for (let s = range.start; s < range.end; s++) pos[s * 3 + 2] = z;
+            if (engine) {
+                for (let s = range.start; s < range.end; s++) D[s * 3 + 2] = z - pos[s * 3 + 2];
+            } else {
+                for (let s = range.start; s < range.end; s++) pos[s * 3 + 2] = z;
+            }
             boxes.push({ start: range.start, count: range.end - range.start, depth, z, node });
         }
-        r.markInstanceTransformsDirty();
+        if (engine) grid._resyncEngineLayout?.();
+        else r.markInstanceTransformsDirty();
 
-        // 2) Boxes — measure each node's X/Y bounds from the now-shifted buffer, draw a flat
-        //    rectangle at the node's OWN depth plane (not the measured z-span, which mixes
-        //    the parent header at one plane with child bodies at another).
-        this._rebuildBoxes(r, boxes, pad);
+        // 2) Boxes — measure each node's X/Y bounds from the arranged positions (live buffer
+        //    on CPU; the scratch on the engine — z differs there, but boxes draw at the
+        //    node's OWN plane, so only X/Y are read), a flat rectangle per node.
+        this._rebuildBoxes(r, boxes, pad, pos);
     }
 
     // ---- internals ----
@@ -166,6 +192,26 @@ export class StrataLayout {
      *  boxes are rebuilt fresh, so a live param change applies in place. */
     _reapply() {
         if (this._active) this.arrange(this._grid);
+    }
+
+    /** measureSlotRange's min/max math, read from an explicit position source — the live
+     *  buffer or the engine's fold scratch alike. (Extracted here at its second consumer;
+     *  a third moves it to core.) */
+    _measureRange(pos, siz, startSlot, count) {
+        if (count <= 0) return null;
+        const start = Math.max(0, startSlot | 0);
+        const end = Math.min((pos.length / 3) | 0, start + count);
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (let s = start; s < end; s++) {
+            const px = pos[s * 3], py = pos[s * 3 + 1];
+            const sw = siz[s * 2], sh = siz[s * 2 + 1];
+            if (px < minX) minX = px;
+            if (py < minY) minY = py;
+            if (px + sw > maxX) maxX = px + sw;
+            if (py + sh > maxY) maxY = py + sh;
+        }
+        if (minX === Infinity) return null;
+        return { min: { x: minX, y: minY }, max: { x: maxX, y: maxY } };
     }
 
     /** Pre-order list of every tree node with its depth (roots = 0). */
@@ -230,18 +276,20 @@ export class StrataLayout {
         return minX === Infinity ? null : minX;
     }
 
-    /** Rebuild the batched box LineSegments — 4 edges (8 verts) per node. */
-    _rebuildBoxes(r, boxes, pad) {
+    /** Rebuild the batched box LineSegments — 4 edges (8 verts) per node. `pos` is the
+     *  arranged position source: the live buffer (CPU path) or the fold scratch (engine),
+     *  ONE measurement path for both — measureSlotRange's math, read from `pos`. */
+    _rebuildBoxes(r, boxes, pad, pos) {
         if (!boxes.length) { this._clearBoxes(); return; }
         const bright = this.cfg.boxBrightness;
         const siz = r.getInstanceSizes?.();           // glyph cell heights — for the centering fix
-        const pos = r.getInstancePositions?.();        // for the content-left (whitespace-clip)
+        if (!pos || !siz) { this._clearBoxes(); return; }
         const cap = boxes.length * 8;                 // 4 edges × 2 verts
         const posArr = new Float32Array(cap * 3);
         const colArr = new Float32Array(cap * 3);
         let v = 0;
         for (const b of boxes) {
-            const bb = r.measureSlotRange(b.start, b.count);
+            const bb = this._measureRange(pos, siz, b.start, b.count);
             if (!bb) continue;
             // The glyph quad is CENTER-anchored in Y (worldPos.y = iPos.y ± iSize.y/2), but
             // measureSlotRange reports min.y = iPos.y / max.y = iPos.y + iSize.y (corner-style),
