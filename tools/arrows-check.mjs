@@ -91,12 +91,14 @@ const routed = (children) => 3 + children * 4;
     // own jog, never smeared along a rail.
     const s0 = seg(root, 0);
     ok(s0.a[0] === 0 && s0.a[1] === 0, 'the trace begins at the hub (dir origin)');
+    // Tolerances are f32-aware (buffers store Float32; a chamfer's dx/dy round apart
+    // by ~1e-5) — a genuinely sloped rail is off by whole units, so teeth remain.
     let clean = true;
     for (let i = 0; i < segCount(root); i++) {
         const { a, b } = seg(root, i);
-        const d = [Math.abs(a[0] - b[0]), Math.abs(a[1] - b[1]), Math.abs(a[2] - b[2])].filter((x) => x > 1e-6);
+        const d = [Math.abs(a[0] - b[0]), Math.abs(a[1] - b[1]), Math.abs(a[2] - b[2])].filter((x) => x > 1e-4);
         if (d.length > 2) clean = false;                                   // a 3-axis diagonal
-        if (d.length === 2 && Math.abs(d[0] - d[1]) > 1e-6) clean = false; // a non-45° corner
+        if (d.length === 2 && Math.abs(d[0] - d[1]) > 1e-3) clean = false; // a non-45° corner
     }
     ok(clean, 'every segment is a pure run or an exact 45° chamfer (3D circuit routing)');
 
@@ -129,10 +131,13 @@ const routed = (children) => 3 + children * 4;
     arrows.configure({ pads: 1 });
     ok(linkFor(arrows, '').pads?.count === 5, 'pads 1 restores them');
 
-    // Depth grading: materials pool by quantized stroke — src (depth 1) wires heavier
-    // than src/util (depth 2); two depth-2 dirs SHARE one material (pipeline economy).
+    // Depth grading: materials pool by quantized stroke. The DEFAULT is uniform
+    // (decay 1 — Ivan's field-tested dial), so dial a decay in to test the mechanism:
+    // src (depth 1) wires heavier than src/util (depth 2); two depth-2 dirs SHARE one
+    // material (pipeline economy). configure rebuilds links — fresh lookups only.
+    arrows.configure({ weightDecay: 0.75 });
     const w = (p) => linkFor(arrows, p).mesh.material.linewidth;
-    ok(w('src') > w('src/util'), `stroke decays with depth (${w('src')} > ${w('src/util')})`);
+    ok(w('src') > w('src/util'), `stroke decays with depth when dialed (${w('src')} > ${w('src/util')})`);
     ok(linkFor(arrows, 'src/util').mesh.material === linkFor(arrows, 'src/components').mesh.material,
         'same-depth dirs share ONE pooled material');
 

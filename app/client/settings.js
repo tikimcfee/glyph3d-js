@@ -294,12 +294,12 @@ export const SETTINGS = [
   // depth (shallow trunks heavy, deep leaves fine). 0 = the 1px hairline form.
   {
     key: 'tree.wireWeight', label: 'Wire stroke (world units, 0=hairline)', group: 'Tree',
-    type: 'number', default: ARROW_DEFAULTS.weight, min: 0, max: 50, step: 0.1,
+    type: 'number', default: ARROW_DEFAULTS.weight, min: 0, max: 200, step: 0.1,
     apply: (ctx, v) => ctx.contentTreeArrows?.configure({ weight: v }),
   },
   {
     key: 'tree.wireWeightDecay', label: 'Wire stroke decay (× per depth)', group: 'Tree',
-    type: 'number', default: ARROW_DEFAULTS.weightDecay, min: 0.1, max: 1, step: 0.05,
+    type: 'number', default: ARROW_DEFAULTS.weightDecay, min: 0.1, max: 2, step: 0.05,
     apply: (ctx, v) => ctx.contentTreeArrows?.configure({ weightDecay: v }),
   },
   {
@@ -309,17 +309,17 @@ export const SETTINGS = [
   },
   {
     key: 'tree.wireBusMargin', label: 'Trace bus margin (outside the frame)', group: 'Tree',
-    type: 'number', default: ARROW_DEFAULTS.busMargin, min: 0, max: 200, step: 1,
+    type: 'number', default: ARROW_DEFAULTS.busMargin, min: 0, max: 1000, step: 1,
     apply: (ctx, v) => ctx.contentTreeArrows?.configure({ busMargin: v }),
   },
   {
     key: 'tree.wireRailGap', label: 'Trace rail gap (above each pin)', group: 'Tree',
-    type: 'number', default: ARROW_DEFAULTS.railGap, min: 0, max: 100, step: 0.5,
+    type: 'number', default: ARROW_DEFAULTS.railGap, min: 0, max: 1000, step: 0.5,
     apply: (ctx, v) => ctx.contentTreeArrows?.configure({ railGap: v }),
   },
   {
     key: 'tree.wireChamfer', label: 'Trace corner chamfer (45°, 0=sharp)', group: 'Tree',
-    type: 'number', default: ARROW_DEFAULTS.chamfer, min: 0, max: 100, step: 0.5,
+    type: 'number', default: ARROW_DEFAULTS.chamfer, min: 0, max: 500, step: 0.5,
     apply: (ctx, v) => ctx.contentTreeArrows?.configure({ chamfer: v }),
   },
   {

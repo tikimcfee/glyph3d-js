@@ -47,19 +47,22 @@ import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import { partitionChildren, leafBox, subtreeContentBounds, visibleDepth } from './layouts/nodeUtils.js';
 
+// Ivan's field-tested dials (2026-08-01): a WIDE bus margin and a HIGH rail gap give
+// the traces real clearance — rails ride the frame line, drops read as long clean
+// leads — and a uniform stroke (decay 1) keeps the whole circuit one weight.
 export const ARROW_DEFAULTS = {
     zLift: 0,                   // +z float for flat schemes; 0 for the volumetric jellyfish
     opacity: 0.5,
     colorA: 0x4a8acc,           // FILE ownership traces (bus → file pin)
     colorB: 0xcc7a4a,           // DIRECTORY traces (bus → child dir pin) + the trunk bus itself
-    weight: 2,                  // world-unit stroke of a depth-1 dir's traces; 0 = hairline (1px)
-    weightDecay: 0.75,          // × per visible depth level — deep traces thin toward hairlines
+    weight: 15.1,               // world-unit stroke of a depth-1 dir's traces; 0 = hairline (1px)
+    weightDecay: 1,             // × per visible depth level — 1 = uniform; <1 thins deep traces
     weightMin: 0.3,             // stroke floor, so a deep tree never decays to invisible
-    busMargin: 8,               // how far OUTSIDE the dir's left frame the trunk bus runs
-    railGap: 5,                 // how far above a child's top edge its rail crosses (the gutter run)
-    chamfer: 8,                 // 45° corner cut length (world units) — 0 = sharp 90° corners
+    busMargin: 74,              // how far OUTSIDE the dir's left frame the trunk bus runs
+    railGap: 100,               // how far above a child's top edge its rail crosses (the gutter run)
+    chamfer: 20.5,              // 45° corner cut length (world units) — 0 = sharp 90° corners
     pads: 1,                    // 1 → a disc on every pin + the hub (the visible pin-set)
-    padScale: 2,                // pad radius, × the trace stroke width
+    padScale: 1.3,              // pad radius, × the trace stroke width
 };
 
 // Opts that shape the BUILT line objects (geometry kind, per-depth materials): a
