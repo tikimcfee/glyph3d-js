@@ -11,16 +11,19 @@
  * launch overlaps their relay round-trips instead of queueing them). Every phase
  * stays individually awaited + guarded + timed:
  *   1  substrate    layout scheme + world-grouping order (direct state, empty scene)
- *   2  field→tabs   replay fieldSources (bulk fetch, one batch-window settle), then
+ *   2  panels       2D dockview layout FIRST — the chrome rises while content loads
+ *                   behind it (prunes by component type, never by entity)
+ *      ∥ field→tabs replay fieldSources (bulk fetch, one batch-window settle), then
  *                   file.open each saved sheet + viewport — chained: tabs dedupe
  *                   against the field
  *      ∥ agents     reopen saved session books (its own world grouping + relay reads)
  *      ∥ surfaces   publish terminal geometry + 3D-dock membership into the model
- *   3  panels       2D dockview layout — reconciles against the registry every lane
- *                   above populated (awaits ctx.dockLayout, prunes orphans, fromJSON)
- *   4  camera       pose, set directly on the controller (after the field's fitall)
+ *   3  camera       pose, set directly on the controller (after the field's fitall)
  *      settle       one projection pass over surfaces that re-adopted mid-restore
  *      focus        attention primary/key slots, last — the scene is as live as it gets
+ * The registry PROJECTOR is always on (attached at connect, before restore): an
+ * entity arriving in ANY lane is projected — viewport applied, dock tile adopted —
+ * the moment it registers, so docked windows are born docked, never seen jumping.
  *
  * A failed phase is REPORTED (console + ctx.status + this.lastRestore; the
  * `session.status` verb reads it) and QUARANTINED, not swallowed: later phases
@@ -136,7 +139,12 @@ export default class SessionStore {
     this._periodic = null;
     this._disposed = false;
 
-    this._onRegistryChange = () => { this._projectSurfaces(); this.scheduleSave(); };
+    // Projection and persistence are DIFFERENT concerns on the same event: an entity
+    // arriving must be projected (view intent applied, dock membership adopted)
+    // IMMEDIATELY — during restore too, or a window visibly appears in place and
+    // THEN snaps into its dock tile at the settle phase. Saving stays armed only
+    // after restore (the half-restore autosave hazard).
+    this._onRegistryChange = () => { this._projectSurfaces(); if (this._autosaveOn) this.scheduleSave(); };
     this._onVisibility = () => { if (typeof document !== 'undefined' && document.visibilityState === 'hidden') this.saveNow(); };
   }
 
@@ -391,27 +399,28 @@ export default class SessionStore {
      *  ordered chain of phases). The lanes are independent content families — the wall
      *  clock overlaps their relay round-trips instead of queueing them:
      *    1. substrate ALONE — the scheme must exist before any content lands in it.
-     *    2. field→tabs (tabs dedupes against the field, so they chain in one lane)
+     *    2. panels (the CHROME rises first — its prune needs only the dock bridge's
+     *       component types, never the registry, so the operator watches content load
+     *       into a laid-out workspace instead of a default shell)
+     *       ∥ field→tabs (tabs dedupes against the field, so they chain in one lane)
      *       ∥ agents (its own world grouping + its own relay reads)
-     *       ∥ surfaces (sync view-intent writes; the projector applies them as
-     *         entities arrive, whichever lane produces them).
+     *       ∥ surfaces (sync view-intent writes; the always-on projector applies them
+     *         the moment an entity registers — docked windows are born docked).
      *       Safe because: the bridge id-correlates concurrent RPCs; the field lane
      *       holds the tree's batch window; world.relayout is sync + idempotent under
      *       interleaved settles; registry writes are sync map ops.
-     *    3. panels ALONE — the dockview reconciles against the registry every lane
-     *       above populated.
-     *    4. camera → settle → focus, exactly the old tail (camera after the field
+     *    3. camera → settle → focus, exactly the old tail (camera after the field
      *       lane's fitall, focus last).
      *  @type {Array<Array<Array<[string, () => any, string[]]>>>} stages → lanes → phases */
     const stages = [
       [[['substrate', () => this._restoreSubstrate(snap), ['layout', 'world']]]],
       [
+        [['panels', () => this._restorePanels(snap), ['dock']]],
         [['field', () => this._restoreField(snap), ['fieldSources']],
          ['tabs', () => this._restoreTabs(snap), ['files']]],
         [['agents', () => this._restoreAgents(snap), ['agents']]],
         [['surfaces', () => this._restoreSurfaces(snap), ['terminals', 'dock3d']]],
       ],
-      [[['panels', () => this._restorePanels(snap), ['dock']]]],
       [[['camera', () => this._restoreCamera(snap.camera), ['camera']],
         ['settle', () => this._projectSurfaces(), []],
         ['focus', () => this._restoreFocus(snap.focus), ['focus']]]],
@@ -757,6 +766,7 @@ export default class SessionStore {
   // (new store, same scene) each just re-arm autosave instead of re-restoring — which would
   // bulk-load over the live field and snap the camera back.
   async startOnConnect() {
+    this._attachProjector();               // entities dock the moment they register — restore included
     if (this.ctx._sessionRestored) { this._armAutosave(); return; }
     this.ctx._sessionRestored = true;
     const snap = await this.load();
@@ -765,10 +775,17 @@ export default class SessionStore {
     this._armAutosave();
   }
 
+  /** Attach the registry projection listener (idempotent). Projection is a VIEW
+   *  concern — always on from connect; only SAVING waits for the arm. */
+  _attachProjector() {
+    if (this._disposed || this._projectorOn) return;
+    this._projectorOn = true;
+    this.ctx.registry.addChangeListener(this._onRegistryChange);
+  }
+
   _armAutosave() {
     if (this._disposed || this._autosaveOn) return;
     this._autosaveOn = true;
-    this.ctx.registry.addChangeListener(this._onRegistryChange);
     // A verb writing the model (terminal.resize/move/…) is intent changing — save it. The model
     // emits change:surfaces only on a real change, so this can't churn on idempotent re-pushes.
     this._offSurfaces = this.ctx.workspace?.on?.('change:surfaces', () => this.scheduleSave()) || null;
