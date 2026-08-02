@@ -96,6 +96,23 @@ export default class TerminalEmulator {
         });
     }
 
+    /**
+     * The visible screen as plain text — one string per row, per-line
+     * trailing whitespace trimmed. Same buffer the glyphs render from.
+     * @returns {string[]}
+     */
+    readText() {
+        const term = this._term;
+        const buf = term.buffer.active;
+        const base = buf.baseY;
+        const lines = [];
+        for (let y = 0; y < term.rows; y++) {
+            const line = buf.getLine(base + y);
+            lines.push(line ? line.translateToString(true) : '');
+        }
+        return lines;
+    }
+
     /** @private — project the emulator's visible buffer into a ScreenBuffer. */
     _readScreen() {
         const term = this._term;

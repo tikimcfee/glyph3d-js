@@ -587,6 +587,15 @@ export default class TerminalGrid extends FramedGlyphField {
     }
 
     /**
+     * The terminal's visible screen as plain text lines — read from the
+     * headless emulator's buffer, the same source the glyphs render from.
+     * @returns {string[]}
+     */
+    readText() {
+        return this._emulator ? this._emulator.readText() : [];
+    }
+
+    /**
      * Feed raw VT bytes from the terminal byte stream. The internal headless VT
      * emulator parses them (cursor motion, scroll regions, erase, SGR, …) and drives
      * applyScreen on the next frame. Replaces the retired snapshot write(text).

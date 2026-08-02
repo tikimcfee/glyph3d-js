@@ -286,6 +286,24 @@ export default function registerTerminalCommands(router) {
         return { text: `OK: terminal '${id}' refresh requested`, data: { id } };
     }, { description: 'Repaint the terminal\'s full current screen into the byte stream', usage: '<id>' });
 
+    // terminal.read <id> — the visible screen as plain text, straight from the
+    // headless emulator (the same buffer the glyphs render from). For history
+    // beyond the screen, terminal.scroll pages tmux scrollback first.
+    router.register('terminal.read', (args, ctx) => {
+        const id = args[0];
+        if (!id) return { text: 'ERR: usage: terminal.read <id>', data: null };
+
+        const terminals = getTerminals(ctx);
+        const grid = terminals.get(id);
+        if (!grid) return { text: `ERR: no terminal '${id}'`, data: null };
+
+        const lines = typeof grid.readText === 'function' ? grid.readText() : [];
+        return {
+            text: lines.join('\n') + `\nOK: terminal '${id}' screen ${grid.cols}x${grid.rows}`,
+            data: { id, cols: grid.cols, rows: grid.rows, lines },
+        };
+    }, { description: "Read a terminal's visible screen as plain text", usage: '<id>' });
+
     // ------------------------------------------------------------------
     // terminal.scroll <id> <lines>   (+ = back into history, − = forward to live)
     // ------------------------------------------------------------------

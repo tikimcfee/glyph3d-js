@@ -86,6 +86,34 @@ export default function registerGridCommands(router) {
         };
     }, { description: 'Show grid details', usage: '<id|index>' });
 
+    router.register('grid.read', (args, ctx) => {
+        if (args.length < 1) return { text: 'ERR: usage: grid.read <id|index> [startLine] [lineCount]', data: null };
+
+        const resolved = resolveGridByIdOrIndex(ctx, args[0]);
+        if (resolved.error) return { text: resolved.error, data: null };
+
+        const lines = Array.isArray(resolved.grid.lines) ? resolved.grid.lines : [];
+        const total = lines.length;
+        const start = args.length > 1 ? Math.max(1, parseInt(args[1], 10) || 1) : 1;
+        const count = args.length > 2
+            ? Math.max(1, parseInt(args[2], 10) || 1)
+            : total - (start - 1);
+        const slice = lines.slice(start - 1, start - 1 + count);
+        const end = start - 1 + slice.length;
+
+        return {
+            text: slice.join('\n') + `\nOK: grid #${resolved.idx} lines ${start}-${end} of ${total}`,
+            data: {
+                index: resolved.idx,
+                registryId: resolved.registryId,
+                startLine: start,
+                endLine: end,
+                totalLines: total,
+                text: slice.join('\n'),
+            }
+        };
+    }, { description: "Read a grid's text content (1-based line range; no range = whole buffer)", usage: '<id|index> [startLine] [lineCount]' });
+
     router.register('grid.color', (args, ctx) => {
         if (args.length < 4) return { text: 'ERR: usage: grid.color <id|index> <r> <g> <b> (0-1 floats)', data: null };
 
