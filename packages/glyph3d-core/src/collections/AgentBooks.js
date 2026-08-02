@@ -364,32 +364,53 @@ export default class AgentBooks {
 
     // -- paging (the book.* verbs' engine) --------------------------------------------
 
-    /** Resolve a lane by agent id OR registry group id (the pick/wheel path hands us the
-     *  latter), or the first lane when omitted/unknown — [agentId, lane] or null. */
-    _resolveLane(id) {
-        if (id) {
-            if (this.lanes.has(id)) return [id, this.lanes.get(id)];
-            const byGroup = [...this.lanes.entries()].find(([, l]) => l.groupId === id);
-            if (byGroup) return byGroup;
+    /**
+     * THE lane resolver — every address a lane answers to, resolved by LOOKUP and
+     * FIELD CHECK, never by prefix surgery (the `agent:`/`agent:book:` collision
+     * silently ate the wheel's group ids — a sliced string was trusted as an id):
+     *   - omitted / falsy       → the first lane (the "default book" the verbs page)
+     *   - the live Book OBJECT  → field identity (a pick / a registry entry's .grid)
+     *   - the lane id           → lanes map, exact
+     *   - the registry group id → groupId FIELD compare
+     *   - the display label     → book.list prints `agent:<id>`; accepted back only
+     *                             when the remainder LOOKS UP to a real lane — an
+     *                             alias is a hint to try, never a transform to trust
+     * An UNKNOWN ref is null — a verb naming a book that doesn't exist must say so,
+     * not quietly turn the first one (bus honesty).
+     * @param {string|Object|null|undefined} ref
+     * @returns {[string, Object]|null} [agentId, lane] or null
+     */
+    resolveLane(ref) {
+        if (ref == null || ref === '') return this.lanes.entries().next().value || null;
+        if (typeof ref === 'object') {
+            for (const e of this.lanes.entries()) if (e[1].book === ref) return e;
+            return null;
         }
-        return this.lanes.entries().next().value || null;
+        const id = String(ref);
+        if (this.lanes.has(id)) return [id, this.lanes.get(id)];
+        for (const e of this.lanes.entries()) if (e[1].groupId === id) return e;
+        if (id.startsWith('agent:')) {
+            const rest = id.slice(6);
+            if (this.lanes.has(rest)) return [rest, this.lanes.get(rest)];
+        }
+        return null;
     }
 
     /** Turn a book's head by `delta` sheets (− older / back in time, + newer). */
     scroll(agentId, delta) {
-        const hit = this._resolveLane(agentId);
+        const hit = this.resolveLane(agentId);
         return hit ? hit[1].book.scroll(delta) : false;
     }
 
     /** Open a book at sheet `index` (0 = oldest, clamped). Landing on the newest resumes live-follow. */
     pageTo(agentId, index) {
-        const hit = this._resolveLane(agentId);
+        const hit = this.resolveLane(agentId);
         return hit ? hit[1].book.pageTo(index) : false;
     }
 
     /** A book's head state (for panels/verbs), or null if it has no lane. */
     headState(agentId) {
-        const hit = this._resolveLane(agentId);
+        const hit = this.resolveLane(agentId);
         return hit ? { agentId: hit[0], ...hit[1].book.headState() } : null;
     }
 
@@ -398,7 +419,9 @@ export default class AgentBooks {
      * `_relayout` flows the other books around it instead of re-snapping it to its slot.
      */
     moveGroup(id, x, y, z) {
-        const lane = this.lanes.get(id) || [...this.lanes.values()].find((l) => l.groupId === id);
+        // No default-to-first here: a move must NAME its book (unlike paging, where
+        // the head verb sensibly falls to the default lane).
+        const lane = id != null ? this.resolveLane(id)?.[1] : null;
         if (!lane) return false;
         lane.pinned = true;
         lane.pinnedPos = new THREE.Vector3(x, y, z);
@@ -482,7 +505,7 @@ export default class AgentBooks {
      * @returns {{agentId:string, override:number|null, cap:number, count:number, evicted:number}|null}
      */
     setLimit(agentId, n) {
-        const hit = this._resolveLane(agentId);
+        const hit = this.resolveLane(agentId);
         if (!hit) return null;
         const [id, lane] = hit;
         const v = Number(n);
@@ -496,7 +519,7 @@ export default class AgentBooks {
     /** A book's retention state: its override (null = shelf default), the effective cap
      *  (0 = unbounded), and the sheets on hand. */
     limitOf(agentId) {
-        const hit = this._resolveLane(agentId);
+        const hit = this.resolveLane(agentId);
         if (!hit) return null;
         const [id, lane] = hit;
         const cap = this._capFor(lane);

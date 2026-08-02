@@ -23,21 +23,18 @@ import { box, kvLines } from '../formatResponse.js';
 
 const r2 = (n) => Math.round(n * 100) / 100;
 
-/** An agent lane (by agent id or its registry group id — the wheel hands us the latter —
- *  or the first lane when omitted), a library VOLUME (by its directory path), or a tree
- *  book (by file path) — or null. */
+/** An agent lane (any address it answers to — lane id, registry group id, the
+ *  `agent:<id>` display label, or the first lane when omitted), a library VOLUME
+ *  (by its directory path), or a tree book (by file path) — or null.
+ *
+ *  Every agent form resolves inside AgentBooks.resolveLane by LOOKUP + field
+ *  check — no prefix surgery here. (A blind `agent:` strip once mutilated the
+ *  wheel's `agent:book:<id>` group ids into nonsense and the covers stopped
+ *  turning; the id-space owner is the only party fit to read its own addresses.) */
 function resolveBook(ctx, id) {
-    // book.list labels agent lanes `agent:<id>` — accept that form back, so
-    // the list's own display round-trips into every book verb. (A driver
-    // reading the list SHOULD be able to paste what it sees.)
-    if (typeof id === 'string' && id.startsWith('agent:')) id = id.slice(6);
     const books = ctx.agentBooks;
-    if (books) {
-        const hit = books._resolveLane?.(id);
-        if (hit && (!id || hit[0] === id || hit[1].groupId === id)) {
-            return { kind: 'agent', books, agentId: hit[0], book: hit[1].book };
-        }
-    }
+    const hit = books?.resolveLane?.(id);
+    if (hit) return { kind: 'agent', books, agentId: hit[0], book: hit[1].book };
     const tree = ctx.contentTree;
     const vol = id && tree?.volumeAt?.(id);
     if (vol) return { kind: 'volume', book: vol };
