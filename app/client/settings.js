@@ -6,6 +6,7 @@ import { TERMINAL_CURSOR_DEFAULTS } from '@glyph3d/core/collections/TerminalGrid
 import { JELLYFISH_DEFAULTS, LIBRARY_DEFAULTS, schemeNameOf } from '@glyph3d/core/collections/layouts/index.js';
 import { LABEL_DEFAULTS } from '@glyph3d/core/collections/ContentTreeLabels.js';
 import { MOTION_DEFAULTS } from '@glyph3d/core/collections/ContentTreeMotion.js';
+import { ARROW_DEFAULTS } from '@glyph3d/core/collections/ContentTreeArrows.js';
 import { LAYOUT_PRESETS, setDefaultLayout } from '@glyph3d/core/workers/builders/index.js';
 
 // Settings schema — the SINGLE source for both the Settings panel (renders a row
@@ -288,6 +289,23 @@ export const SETTINGS = [
   {
     key: 'tree.dirLines', label: 'Directory ownership lines', group: 'Tree', type: 'bool', default: true,
     apply: (ctx, v) => ctx.contentTreeArrows?.setShowDirs?.(v),
+  },
+  // Wire stroke: world-unit thickness at the shallowest level, decaying per visible
+  // depth (shallow trunks heavy, deep leaves fine). 0 = the 1px hairline form.
+  {
+    key: 'tree.wireWeight', label: 'Wire stroke (world units, 0=hairline)', group: 'Tree',
+    type: 'number', default: ARROW_DEFAULTS.weight, min: 0, max: 50, step: 0.1,
+    apply: (ctx, v) => ctx.contentTreeArrows?.configure({ weight: v }),
+  },
+  {
+    key: 'tree.wireWeightDecay', label: 'Wire stroke decay (× per depth)', group: 'Tree',
+    type: 'number', default: ARROW_DEFAULTS.weightDecay, min: 0.1, max: 1, step: 0.05,
+    apply: (ctx, v) => ctx.contentTreeArrows?.configure({ weightDecay: v }),
+  },
+  {
+    key: 'tree.wireOpacity', label: 'Wire opacity', group: 'Tree',
+    type: 'number', default: ARROW_DEFAULTS.opacity, min: 0, max: 1, step: 0.02,
+    apply: (ctx, v) => ctx.contentTreeArrows?.configure({ opacity: v }),
   },
   // Labels — the container labels (ContentTreeLabels): every visible directory named in space.
   // The same dials as the layout.labels verb; every change lands live and persists. Sizing is

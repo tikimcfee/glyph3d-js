@@ -37,6 +37,17 @@ export function partitionChildren(node) {
     return { files, dirs };
 }
 
+/** How many non-pass-through dir levels deep a node sits, counting itself — the VISIBLE
+ *  depth: chain compression makes a four-segment path a depth-1 container. The shared
+ *  ruler for every depth-graded overlay treatment (label gradient, wire weight). */
+export function visibleDepth(node, root) {
+    let d = 0;
+    for (let n = node; n && n !== root; n = n.parent) {
+        if (n.userData?.isDir && !n.userData.isPassThrough) d++;
+    }
+    return d;
+}
+
 /** Follow a single-child directory chain (dir → exactly one dir, no file leaves) to its
  *  tail. Layout/label-level ONLY — paths, _dirs bookkeeping, and navigation stay
  *  canonical: the intermediates' transforms are zeroed so the tail composes in space as

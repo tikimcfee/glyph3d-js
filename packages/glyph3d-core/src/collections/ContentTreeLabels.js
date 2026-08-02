@@ -45,7 +45,7 @@ import * as THREE from 'three';
 import GlyphField from '../GlyphField.js';
 import { getWorkerBridge } from '../workers/WorkerBridge.js';
 import { computeCellMetrics } from '../core/cellMetrics.js';
-import { subtreeContentBounds } from './layouts/nodeUtils.js';
+import { subtreeContentBounds, visibleDepth } from './layouts/nodeUtils.js';
 
 export const LABEL_DEFAULTS = {
     fit: 0.65,         // the fraction of its container's width a label's name spans
@@ -89,16 +89,6 @@ function countFiles(node) {
         else n++;
     }
     return n;
-}
-
-/** How many non-pass-through dir levels deep a node sits, counting itself — the
- *  VISIBLE depth: chain compression makes a four-segment path a depth-1 container. */
-function visibleDepth(node, root) {
-    let d = 0;
-    for (let n = node; n && n !== root; n = n.parent) {
-        if (n.userData?.isDir && !n.userData.isPassThrough) d++;
-    }
-    return d;
 }
 
 /**

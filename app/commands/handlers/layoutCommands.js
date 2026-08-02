@@ -161,13 +161,13 @@ export default function registerLayoutCommands(router) {
         usage: '[on|off|toggle] [--opacity N --opacity-decay N --pad N --z-pad N --min-thickness N --edge-opacity N --color-a HEX --color-b HEX]',
     });
 
-    // Ordered arrows: per-directory chains threading the child dirs in canonical order.
+    // Ownership lines: per-directory wires from each hub to everything it owns, with
+    // world-unit stroke that decays by depth (weight 0 = the hairline form).
     registerOverlay({
         verb: 'layout.arrows', noun: 'arrows', ctxKey: 'contentTreeArrows', title: 'LAYOUT ARROWS',
         colorKeys: new Set(['colorA', 'colorB']),
-        enums: { anchor: ['top', 'top-left', 'top-right'] },
-        description: 'Toggle/dial the per-directory ordered-arrow chains (sibling reading-order threads)',
-        usage: '[on|off|toggle] [--anchor top|top-left|top-right --opacity N --z-lift N --arrow-ratio N --arrow-angle N --color-a HEX --color-b HEX]',
+        description: 'Toggle/dial the per-directory ownership lines (hub → files + child dirs; world-unit stroke, depth-decayed — weight 0 = 1px hairlines)',
+        usage: '[on|off|toggle] [--weight N --weight-decay N --weight-min N --opacity N --z-lift N --color-a HEX --color-b HEX]',
     });
 
     // Diagnostic: per-dir origin vs content-anchor dots + link. Color keys here are
