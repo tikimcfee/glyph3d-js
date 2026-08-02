@@ -114,9 +114,10 @@ export default function LayoutPanel({ client }) {
                     the field in place, and every load (a file, a whole directory) arrives
                     in the active scheme. Markers draw a bounding prism per directory,
                     colored by a depth gradient; arrows thread each directory's child
-                    dirs in reading order; labels name every visible directory, sized to
-                    fit their container so deep names resolve as you approach. Dial knobs
-                    from the command bar, e.g.{' '}
+                    dirs in reading order; labels name every container and book, sized to
+                    fit so deep names resolve as you approach — a library volume composes
+                    one title block (name over its open page, &ldquo;b.js · 2/4&rdquo;).
+                    Dial knobs from the command bar, e.g.{' '}
                     <code>layout.scheme --depth-z 150</code> or{' '}
                     <code>layout.labels --fit 0.6 --show-count 0</code>.
                 </div>
