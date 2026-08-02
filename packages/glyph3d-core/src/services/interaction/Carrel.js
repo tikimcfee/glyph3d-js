@@ -351,8 +351,15 @@ export class Carrel extends THREE.Object3D {
     /** Gap between slots in world units. */
     get _gap() { return this.boxH * this.gapFrac; }
 
-    /** The member's content extent, derived LIVE from the grid. */
-    _extentOf(e) { return extentFromBox(e.grid.getLocalBounds?.()) || e._extentFallback; }
+    /** The member's content extent, derived LIVE from the grid. A successful read
+     *  becomes the new fallback, so a TRANSIENT empty read (a book mid-mutation
+     *  between sheets) holds the last-good form instead of flashing the lock-time
+     *  guess — form is continuous even when measurement briefly isn't. */
+    _extentOf(e) {
+        const live = extentFromBox(e.grid.getLocalBounds?.());
+        if (live) e._extentFallback = live;
+        return live || e._extentFallback;
+    }
 
     /** The uniform zoom a member's grid carries (ScaleModel `user`); 1 when absent. The ring
      *  works in RENDERED scale and divides this out of the placement it animates. */
@@ -373,13 +380,24 @@ export class Carrel extends THREE.Object3D {
     /** Animate one member so its content center lands at carrel-local (sx,sy,sz) at rendered
      *  scale `eff`, yawed to `faceDir` (unit, XZ-plane). Same placement algebra as the dock:
      *  the top-anchored origin is offset off the visual center by the rotated extent center,
-     *  and 'scale' drives ScaleModel placement = eff/user so zoom composes back in. */
+     *  and 'scale' drives ScaleModel placement = eff/user so zoom composes back in.
+     *
+     *  SEAT-DIFF: an internal change (a seated book paging in a sheet) refits the whole
+     *  ring, and re-issuing an identical tween RESTARTS its ease (the animator is
+     *  last-write-wins) — every member visibly stuttered on every agent event. So a member
+     *  whose target hasn't moved (beyond a boxH-relative epsilon) is left alone: in-flight
+     *  slides continue undisturbed, resting members rest. Only real motion animates. */
     _animateMember(e, sx, sy, sz, eff, faceDir) {
         e.quatTarget.setFromUnitVectors(_z, faceDir);
         const ext = this._extentOf(e);
         _off.set(ext.cx * eff, ext.cy * eff, ext.cz * eff).applyQuaternion(e.quatTarget);
-        this.animator.animateTo(e.grid, 'position',
-            { x: sx - _off.x, y: sy - _off.y, z: sz - _off.z }, { duration: this.animDur });
+        const tx = sx - _off.x, ty = sy - _off.y, tz = sz - _off.z;
+        const s = e._seat;
+        const eps = this.boxH * 0.01;
+        if (s && Math.abs(s.x - tx) < eps && Math.abs(s.y - ty) < eps && Math.abs(s.z - tz) < eps
+              && Math.abs(s.eff - eff) < eff * 0.01) return;
+        e._seat = { x: tx, y: ty, z: tz, eff };
+        this.animator.animateTo(e.grid, 'position', { x: tx, y: ty, z: tz }, { duration: this.animDur });
         this.animator.animateTo(e.grid, 'scale', eff / this._userOf(e), { duration: this.animDur });
     }
 
@@ -456,12 +474,19 @@ export class Carrel extends THREE.Object3D {
         for (const e of this.entries.values()) {
             if (e.grid.parent !== this) {
                 e._borrowed = true;               // ridden elsewhere — hands off
+                e._seat = null;                   // the rider moved it; its return must re-seat for real
                 continue;
             }
             if (e._borrowed) { e._borrowed = false; returned = true; }
             e.grid.quaternion.slerp(e.quatTarget, rate);
         }
         if (returned) this._relayout();
+
+        // The aura breathes rather than snaps: content growth re-targets its height
+        // (_refreshChrome) and this ease carries it there — a desk that inhales.
+        if (this._auraTargetH != null) {
+            this._aura.scale.y += (this._auraTargetH - this._aura.scale.y) * Math.min(1, dt * 6);
+        }
 
         for (const e of this._releasing.values()) e.grid.quaternion.slerp(e.quatTarget, rate);
 
@@ -545,12 +570,15 @@ export class Carrel extends THREE.Object3D {
         this._aura.material.color.copy(c);
     }
 
-    /** Size the chrome to the current ring: disc radius, aura radius + stack height. */
+    /** Size the chrome to the current ring: disc radius, aura radius + stack height.
+     *  Radii snap (knob gestures read as direct manipulation); HEIGHT only re-targets —
+     *  update() eases the aura there, so a growing stack breathes the shell up. */
     _refreshChrome() {
         const outerR = this.radius * this.tableFrac;
         this._table.scale.set(outerR, outerR, outerR);
         const stackH = this._rows * (this.boxH + this._gap) - this._gap;
-        this._aura.scale.set(outerR, Math.max(stackH + this.auraHeadroom, 1e-3), outerR);
+        this._auraTargetH = Math.max(stackH + this.auraHeadroom, 1e-3);
+        this._aura.scale.x = this._aura.scale.z = outerR;
     }
 
     // ===================== bounds & state =====================

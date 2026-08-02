@@ -25,11 +25,14 @@ const ok = (c, m) => { if (c) pass++; else { fail++; console.log(`  ✗ ${m}`); 
 const near = (a, b, eps, m) => ok(Math.abs(a - b) <= eps, `${m} (got ${a}, want ${b}±${eps})`);
 
 /** A mock window: local content box W wide × H tall, TOP-anchored (origin at content top),
- *  like a CodeGrid. getBounds is the world box. */
+ *  like a CodeGrid. getBounds is the world box. `_dims` is mutable (a growing book);
+ *  `_dims.empty` simulates a transient mid-mutation empty measure. */
 const makeGrid = (w = 10, h = 6) => {
     const g = new THREE.Object3D();
-    g.getLocalBounds = (t = new THREE.Box3()) =>
-        t.set(new THREE.Vector3(-w / 2, -h, 0), new THREE.Vector3(w / 2, 0, 0));
+    g._dims = { w, h, empty: false };
+    g.getLocalBounds = (t = new THREE.Box3()) => g._dims.empty
+        ? t.makeEmpty()
+        : t.set(new THREE.Vector3(-g._dims.w / 2, -g._dims.h, 0), new THREE.Vector3(g._dims.w / 2, 0, 0));
     g.getBounds = (t = new THREE.Box3()) => {
         g.updateWorldMatrix(true, false);
         return g.getLocalBounds(t).applyMatrix4(g.matrixWorld);
@@ -114,6 +117,40 @@ const settle = (c, n = 8) => { for (let i = 0; i < n; i++) c.update(0.05); };
     ok(carrel.entries.size === 0 && carrel._releasing.size === 0, 'dissolve drained');
     ok(carrel._dead && carrel.parent === null, 'desk dead + removed after draining');
     ok(grids[3].parent === treeNode, 'dissolved members went home');
+}
+
+// ---- refit churn: seat-diff, last-good extent hold, aura ease ----
+{
+    const scene = new THREE.Scene();
+    const carrel = new Carrel({ name: 'calm', radius: 20, boxH: 9 });
+    scene.add(carrel);
+    const a = makeGrid(), b = makeGrid();
+    scene.add(a); scene.add(b);
+    carrel.lock('a', a);
+    carrel.lock('b', b);
+    settle(carrel, 12);
+    ok(carrel.animator._active.size === 0, 'settled: no live tweens');
+
+    carrel.refit();
+    ok(carrel.animator._active.size === 0, 'refit with unchanged content re-tweens NOTHING (seat-diff)');
+
+    const posB = b.position.clone();
+    a._dims.h = 9;                        // `a` grows — a book paged in sheets
+    carrel.refit();
+    ok(carrel.animator._active.size === 2, 'only the grown member re-tweens (pos+scale)');
+    settle(carrel, 12);
+    ok(b.position.distanceTo(posB) < 1e-9, 'the neighbor never moved');
+
+    a._dims.empty = true;                 // transient mid-mutation empty measure
+    carrel.refit();
+    ok(carrel.animator._active.size === 0, 'transient empty read holds last-good form (no flash)');
+    a._dims.empty = false;
+
+    const h0 = carrel._aura.scale.y;
+    carrel.setParam('auraHeadroom', 60);  // re-targets the shell height
+    ok(Math.abs(carrel._aura.scale.y - h0) < 1e-9, 'aura height does not snap on retarget');
+    settle(carrel, 40);
+    near(carrel._aura.scale.y, carrel._auraTargetH, 0.5, 'aura eases to its target');
 }
 
 // ---- occupancy handoff: dock → carrel adopts the HOME RECORD, not the bar pose ----
