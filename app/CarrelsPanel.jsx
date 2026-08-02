@@ -100,6 +100,10 @@ const S = {
     knobLabel: { flex: '0 0 62px', color: '#5a616c', fontSize: 10 },
     knobSlider: { flex: '1 1 auto', minWidth: 0, accentColor: '#6c8fc0', height: 12 },
     knobVal: { flex: '0 0 38px', textAlign: 'right', color: '#7c8596', fontSize: 10 },
+    modeToggle: {
+        flex: '0 0 auto', cursor: 'pointer', userSelect: 'none', color: '#c8ccd6', fontSize: 10,
+        background: '#0f141b', border: '1px solid #232b34', borderRadius: 4, padding: '1px 7px',
+    },
 };
 
 /** The per-desk dials the ⚙ strip exposes — same knobs as carrel.set / Settings ▸ Carrel. */
@@ -156,6 +160,7 @@ export default function CarrelsPanel({ client }) {
             name: c.carrelName,
             active: c.carrelName === ctx.activeCarrel,
             glow: hex(c.glowColor),
+            mode: c.mode,
             dissolving: !!c._dissolving,
             members: c.list().map((m) => m.id),
             knobs: Object.fromEntries(KNOB_DEFS.map(({ k }) => [k, c[k]])),
@@ -224,6 +229,16 @@ export default function CarrelsPanel({ client }) {
                                 onClick={(e) => { e.stopPropagation(); after(['carrel.dissolve', d.name]); }}
                                 title={`Fold ${d.name} — members slide home (carrel.dissolve)`}>✕</span>
                         </div>
+                        {knobsFor === d.name && (
+                            <div style={S.knobRow}>
+                                <span style={S.knobLabel}>mode</span>
+                                <span style={S.modeToggle}
+                                    onClick={() => after(['carrel.set', d.name, 'mode', d.mode === 'grid' ? 'ring' : 'grid'])}
+                                    title="Toggle the arrangement — ring wraps the arc, grid flattens it into a shelf wall (carrel.set mode)">
+                                    {d.mode === 'grid' ? '▦ grid' : '◠ ring'}
+                                </span>
+                            </div>
+                        )}
                         {knobsFor === d.name && KNOB_DEFS.map(({ k, label, min, max, step }) => (
                             <div key={k} style={S.knobRow}>
                                 <span style={S.knobLabel}>{label}</span>

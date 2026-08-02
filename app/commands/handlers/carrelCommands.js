@@ -12,6 +12,16 @@
  * Carrel is a projection of it. Moving a window between the dock and a carrel
  * hands the HOME record over (CameraDock.homeOf / Carrel.homeOf) so home always
  * chains residence → residence, never through the vehicle.
+ *
+ * Agent books are born onto the 'agents' shelf — a grid-mode desk auto-created
+ * on first agent sight (scheduleCarrelSweep's auto-shelf pass, driven by
+ * AgentBooks.onChange). Settings ▸ Agent Books `book.autoShelf` turns it off.
+ *
+ * Desks PERSIST: SessionStore captures each carrel's serialize() (pose, knobs,
+ * membership) and restores desks FIRST — restoreCarrel stands them back up at
+ * their saved pose, pre-shaped for their member complement, and the sweep's
+ * manifest pass seats each member IN PLACE as its window materializes. The desk
+ * loads, then loads its elements — content never flies across the room.
  */
 
 import * as THREE from 'three';
@@ -21,7 +31,7 @@ import { getSetting } from '../../client/settings.js';
 
 /** The knobs Settings ▸ Carrel stores — folded into a NEW desk at birth. */
 const CARREL_KNOBS = ['radius', 'boxH', 'boxAspect', 'gapFrac', 'growCap', 'maxArcDeg',
-                      'tableFrac', 'auraHeadroom', 'glowStrength'];
+                      'tableFrac', 'shadowSoft', 'glowStrength'];
 
 function carrels(ctx) {
     return ctx.carrels instanceof Map ? ctx.carrels : null;
@@ -52,6 +62,21 @@ function setFact(ctx, id, value, kind) {
 }
 
 /**
+ * Lift a seated surface out of whichever desk holds it: clear the view fact and
+ * release — optionally re-aimed at a caller-computed pose (`to`, the
+ * Carrel.release re-aim; book.move pins a dragged book at its drop spot). The
+ * one unseat path — the carrel.release verb and the drag-off ride it together.
+ * @returns {Carrel|null} the desk it left, or null if it wasn't seated
+ */
+export function unseat(ctx, id, to = null) {
+    const owner = findCarrelOwner(ctx, id);
+    if (!owner) return null;
+    setFact(ctx, id, null);
+    owner.release(id, to ? { to } : {});
+    return owner;
+}
+
+/**
  * Anything hostable at a desk: a registry surface (grid / terminal / frame) OR an
  * agent's book — the shelf's lanes are not registry surfaces, so they resolve here
  * by lane id. The returned `grid` is always a live Object3D the Carrel can seat;
@@ -79,6 +104,157 @@ function resolveHostable(ctx, arg) {
 }
 
 /**
+ * Construct a desk, dress it, set it down, make it a world citizen — the shared
+ * birth path for carrel.create and the auto-created agent shelf.
+ *
+ * Stored Settings ▸ Carrel knobs are the DEFAULTS for a new desk — folded into
+ * THIS desk only (existing desks keep their per-desk carrel.set tweaks); an
+ * explicit radius wins over the stored one. The desk lands ON the camera's view
+ * ray — where you're looking, not a floor projection of it (which parked the
+ * desk at y=0 far below an elevated gaze, reading tiny-in-the-distance). The
+ * tabletop sits half a slot below the ray point so row 0 rises into your gaze;
+ * it never sinks below the world floor. Doorway (local +z) turns back toward
+ * the viewer. Registered (type 'carrel') so the camera's dynamic-speed /
+ * soft-bounds / fit-all spine (getSurfaces) sees it — a desk is a PLACE, not
+ * cargo; resolveSurface refuses to treat it as one.
+ * @returns {Carrel}
+ */
+function buildCarrel(ctx, name, { radius } = {}) {
+    const carrel = new Carrel({ name });
+    for (const k of CARREL_KNOBS) {
+        const v = getSetting(`carrel.${k}`);
+        if (Number.isFinite(v)) carrel.setParam(k, v);
+    }
+    if (Number.isFinite(radius)) carrel.setParam('radius', radius);
+
+    const cam = ctx.camera;
+    if (cam) {
+        const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion);
+        const dist = carrel.radius * 1.6;
+        const p = new THREE.Vector3().copy(cam.position).addScaledVector(fwd, dist);
+        carrel.position.set(p.x, Math.max(p.y - carrel.boxH * 0.5, 0), p.z);
+        carrel.rotation.y = Math.atan2(cam.position.x - p.x, cam.position.z - p.z);
+    }
+
+    ctx.scene.add(carrel);
+    ctx.registry?.register?.(`carrel:${name}`, carrel, { type: 'carrel' });
+    carrels(ctx)?.set(name, carrel);
+    return carrel;
+}
+
+/** The desk agent books call home by default. */
+const AGENT_SHELF = 'agents';
+
+/**
+ * Rebuild a desk from its serialized record — the restore path (SessionStore's
+ * carrels phase). The saved pose and knobs are authoritative: no camera-ray
+ * placement, no Settings fold — the desk stands back up exactly where it lived,
+ * dressed as it was, and pre-shaped (expect) for the member complement the
+ * restore manifest will seat as windows materialize.
+ * @param {Object} ctx
+ * @param {{name:string, position?:{x,y,z}, yaw?:number, params?:Object, members?:Array}} saved
+ * @returns {Carrel|null}
+ */
+export function restoreCarrel(ctx, saved) {
+    const map = carrels(ctx);
+    if (!map || !ctx.scene || !saved?.name) return null;
+    if (map.has(saved.name)) return map.get(saved.name);
+    const carrel = new Carrel({ name: saved.name, ...(saved.params || {}) });
+    const p = saved.position || {};
+    carrel.position.set(p.x || 0, p.y || 0, p.z || 0);
+    carrel.rotation.y = Number(saved.yaw) || 0;
+    ctx.scene.add(carrel);
+    ctx.registry?.register?.(`carrel:${saved.name}`, carrel, { type: 'carrel' });
+    map.set(saved.name, carrel);
+    carrel.expect((saved.members || []).length);
+    return carrel;
+}
+
+/**
+ * The carrel sweep — two passes, deferred one macrotask and coalesced (AgentBooks
+ * fires onChange mid-mutation, and session restore pins books right AFTER the
+ * hydrate that announces them; the sweep runs after the current job settles).
+ *
+ * 1. MANIFEST (restored membership): ids the saved desks claim seat at their
+ *    recorded desk the moment they materialize — immediately (load-is-not-replay:
+ *    a rebuilt desk re-seats its members in place, nothing flies), order threaded
+ *    through, cluster pins irrelevant (explicit membership outranks them). Claims
+ *    are consumed on seat and otherwise persist as residence memory: a window
+ *    reopened much later still comes home to its desk.
+ * 2. AUTO-SHELF (the default residence): every NEW agent book seats at the
+ *    'agents' desk, a grid-mode desk auto-created on first need. Once per lane
+ *    BIRTH, never a leash — released/re-seated/docked/pinned books stay where the
+ *    user put them. Settings ▸ Agent Books `book.autoShelf` off disarms this pass.
+ */
+export function scheduleCarrelSweep(ctx) {
+    if (ctx._carrelSweepTimer) return;
+    ctx._carrelSweepTimer = setTimeout(() => {
+        ctx._carrelSweepTimer = null;
+        try { carrelSweep(ctx); }
+        catch (e) { console.warn('[carrel] sweep failed', e); }
+    }, 0);
+}
+
+/** The sweep body, callable synchronously (SessionStore runs one last pass at the
+ *  end of restore to catch members that landed after the final change event). */
+export function carrelSweep(ctx) {
+    const map = carrels(ctx);
+    if (!map || !ctx.scene) return;
+    serveManifest(ctx, map);
+    autoShelf(ctx, map);
+}
+
+/** Pass 1 — seat manifest-claimed ids at their recorded desks. @see scheduleCarrelSweep */
+function serveManifest(ctx, map) {
+    const manifest = ctx.carrelManifest;
+    if (!(manifest instanceof Map) || !manifest.size) return;
+    for (const [id, claim] of [...manifest.entries()]) {
+        const desk = map.get(claim.name);
+        if (!desk || desk._dissolving) { manifest.delete(id); continue; }
+        if (desk.has(id)) { manifest.delete(id); continue; }
+        if (ctx.cameraDock?.has?.(id)) { manifest.delete(id); continue; }   // riding — the dock holds it
+        const r = resolveHostable(ctx, id);
+        if (!r) continue;   // not materialized yet — a later change re-offers
+        const prev = findCarrelOwner(ctx, r.id);
+        if (prev && prev !== desk) prev.release(r.id);
+        if (desk.lock(r.id, r.grid, { order: claim.order, immediate: true })) {
+            setFact(ctx, r.id, { name: desk.carrelName, order: desk.entries.get(r.id).order }, r.kind);
+            (ctx._agentShelfSeen ??= new Set()).add(r.id);   // the default pass never re-offers
+        }
+        manifest.delete(id);
+    }
+}
+
+/** Pass 2 — the agents-shelf default for unclaimed newcomers. @see scheduleCarrelSweep */
+function autoShelf(ctx, map) {
+    const lanes = ctx.agentBooks?.lanes;
+    if (!lanes) return;
+    const seen = (ctx._agentShelfSeen ??= new Set());
+    for (const id of [...seen]) if (!lanes.has(id)) seen.delete(id);   // cleared books may be reborn
+    if (getSetting('book.autoShelf') === false) return;
+
+    const manifest = ctx.carrelManifest;
+    const newcomers = [...lanes.entries()].filter(([id, lane]) =>
+        !seen.has(id) && !manifest?.has?.(id) && !lane.pinned
+        && !ctx.cameraDock?.has?.(id) && !findCarrelOwner(ctx, id));
+    if (!newcomers.length) return;
+
+    const shelf = map.get(AGENT_SHELF) ?? (() => {
+        const c = buildCarrel(ctx, AGENT_SHELF);
+        c.setMode('grid');
+        return c;
+    })();
+    if (shelf._dissolving) return;   // folding — the newcomers keep their cluster spots
+
+    for (const [id, lane] of newcomers) {
+        seen.add(id);
+        if (shelf.lock(id, lane.book)) {
+            setFact(ctx, id, { name: AGENT_SHELF, order: shelf.entries.get(id).order }, 'agent-book');
+        }
+    }
+}
+
+/**
  * @param {import('../CommandRouter.js').default} router
  */
 export default function registerCarrelCommands(router) {
@@ -92,37 +268,7 @@ export default function registerCarrelCommands(router) {
             name = `carrel-${n}`;
         }
         if (map.has(name)) return { text: `ERR: carrel '${name}' already exists`, data: null };
-        const carrel = new Carrel({ name });
-        // Stored Settings ▸ Carrel knobs are the DEFAULTS for a new desk — folded into
-        // THIS desk only (existing desks keep their per-desk carrel.set tweaks). An
-        // explicit radius argument wins over the stored one.
-        for (const k of CARREL_KNOBS) {
-            const v = getSetting(`carrel.${k}`);
-            if (Number.isFinite(v)) carrel.setParam(k, v);
-        }
-        const radius = parseFloat(args[1]);
-        if (Number.isFinite(radius)) carrel.setParam('radius', radius);
-
-        // Set the desk down ON the camera's view ray — where you're looking, not a
-        // floor projection of it (which parked the desk at y=0 far below an elevated
-        // gaze, reading tiny-in-the-distance). The tabletop sits half a slot below
-        // the ray point so row 0 rises into your gaze; it never sinks below the
-        // world floor. Doorway (local +z) turns back toward the viewer.
-        const cam = ctx.camera;
-        if (cam) {
-            const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion);
-            const dist = carrel.radius * 1.6;
-            const p = new THREE.Vector3().copy(cam.position).addScaledVector(fwd, dist);
-            carrel.position.set(p.x, Math.max(p.y - carrel.boxH * 0.5, 0), p.z);
-            carrel.rotation.y = Math.atan2(cam.position.x - p.x, cam.position.z - p.z);
-        }
-
-        ctx.scene.add(carrel);
-        // A desk is a world citizen: registered (type 'carrel') so the camera's
-        // dynamic-speed / soft-bounds / fit-all spine (getSurfaces) sees it. It is
-        // a PLACE, not cargo — resolveSurface refuses to treat it as one.
-        ctx.registry?.register?.(`carrel:${name}`, carrel, { type: 'carrel' });
-        map.set(name, carrel);
+        const carrel = buildCarrel(ctx, name, { radius: parseFloat(args[1]) });
         ctx.activeCarrel = name;
         return { text: `OK: carrel '${name}' set down (r=${carrel.radius})`, data: { name, radius: carrel.radius } };
     }, { description: 'Set down a new carrel (world-anchored desk) ahead of the camera', usage: '[name] [radius]', returns: '{ name, radius }' });
@@ -177,10 +323,8 @@ export default function registerCarrelCommands(router) {
     router.register('carrel.release', (args, ctx) => {
         const r = resolveSurface(ctx, args[0]);
         const id = r?.id ?? String(args[0] ?? '');
-        const owner = findCarrelOwner(ctx, id);
+        const owner = unseat(ctx, id);
         if (!owner) return { text: `ERR: '${id}' is not seated at any carrel`, data: null };
-        setFact(ctx, id, null);
-        owner.release(id);
         return { text: `OK: '${id}' sent home from '${owner.carrelName}'`, data: { id, carrel: owner.carrelName } };
     }, { description: 'Send a seated surface home from its carrel', usage: '<id|index>', returns: '{ id, carrel }' });
 
@@ -236,9 +380,14 @@ export default function registerCarrelCommands(router) {
             if (!carrel.setFacing(f)) return { text: 'ERR: carrel.set <name> facing <in|out>', data: null };
             return { text: `OK: carrel '${carrel.carrelName}' facing ${f}`, data: { name: carrel.carrelName, key, value: f } };
         }
+        if (key === 'mode') {
+            const m = String(args[2] ?? '');
+            if (!carrel.setMode(m)) return { text: 'ERR: carrel.set <name> mode <ring|grid>', data: null };
+            return { text: `OK: carrel '${carrel.carrelName}' mode ${m}`, data: { name: carrel.carrelName, key, value: m } };
+        }
         const value = parseFloat(args[2]);
         if (!carrel.setParam(key, value)) {
-            return { text: 'ERR: usage: carrel.set <name> <radius|boxH|boxAspect|gapFrac|maxArcDeg|tableFrac|auraHeadroom|glowStrength|animDur|yawRate|facing> <value>', data: null };
+            return { text: 'ERR: usage: carrel.set <name> <radius|boxH|boxAspect|gapFrac|maxArcDeg|tableFrac|shadowSoft|glowStrength|animDur|yawRate|mode|facing> <value>', data: null };
         }
         return { text: `OK: carrel '${carrel.carrelName}' ${key} = ${value}`, data: { name: carrel.carrelName, key, value } };
     }, { description: 'Tune a carrel layout/chrome parameter live', usage: '<name> <param> <value>', returns: '{ name, key, value }' });

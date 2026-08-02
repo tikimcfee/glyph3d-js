@@ -829,12 +829,19 @@ export default class AgentBooks {
      * Re-lay the cluster (idempotent): pack the books as bounds-leaves via the chosen
      * scheme — the same machinery the file tree uses — re-assert pinned books, rest the
      * cluster on the world floor, size the covers, and notify the world layout.
+     *
+     * A book RIDDEN ELSEWHERE (seated at a carrel — its parent is not the root) is
+     * BORROWED, the Carrel's own word for it: the cluster keeps its lane but takes its
+     * hands off the transform — no pin re-assert (pinnedPos is cluster-local; writing
+     * it into another frame teleports the book), and no say in the floor rest.
      */
     _relayout() {
         const scheme = LAYOUT_SCHEMES[this.cfg.layout] || LAYOUT_SCHEMES.packed;
         scheme(this.root, this.cfg.layoutOpts);
         for (const lane of this.lanes.values()) {
-            if (lane.pinned && lane.pinnedPos) lane.book.position.copy(lane.pinnedPos);
+            if (lane.pinned && lane.pinnedPos && lane.book.parent === this.root) {
+                lane.book.position.copy(lane.pinnedPos);
+            }
         }
         this._restOnFloor();
         this._updateCovers();
@@ -848,11 +855,15 @@ export default class AgentBooks {
         this.root.updateMatrixWorld(true);
     }
 
-    /** World-space AABB of the whole cluster — the union of every book's world box. @private */
+    /** World-space AABB of the RESIDENT cluster — the union of every root-held book's
+     *  world box. Borrowed books (seated at a carrel) are the desk's extent, not the
+     *  cluster's — counting them dragged the floor rest toward wherever the desk
+     *  stands. @private */
     _worldBounds(target = new THREE.Box3()) {
         target.makeEmpty();
         this.root.updateWorldMatrix(true, true);
         for (const lane of this.lanes.values()) {
+            if (lane.book.parent !== this.root) continue;
             const b = lane.book.getBounds();
             if (b && !b.isEmpty()) target.union(b);
         }
@@ -860,11 +871,15 @@ export default class AgentBooks {
     }
 
     /** The cluster's LOCAL content box (root frame) — so the WorldLayout can measure the
-     *  agent shelf as a bounds-leaf beside the file tree. */
+     *  agent shelf as a bounds-leaf beside the file tree. Borrowed books are skipped:
+     *  their matrices are another frame's, and the world must not space groupings
+     *  around a phantom extent (the default shelf seats EVERY book — the cluster is
+     *  usually empty now). */
     localBounds(target = new THREE.Box3()) {
         target.makeEmpty();
         const tmp = new THREE.Box3();
         for (const lane of this.lanes.values()) {
+            if (lane.book.parent !== this.root) continue;
             lane.book.updateMatrix();
             tmp.copy(lane.book.layoutBounds()).applyMatrix4(lane.book.matrix);
             target.union(tmp);

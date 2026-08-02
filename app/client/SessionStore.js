@@ -53,6 +53,7 @@
 
 import { canonicalPath } from '../commands/handlers/pathResolve.js';
 import { openAgentSession } from '../commands/handlers/agentCommands.js';
+import { restoreCarrel, carrelSweep } from '../commands/handlers/carrelCommands.js';
 import { pruneDockLayout } from './dockLayoutPrune.js';
 import { beginLoad } from '../commands/loadTrace.js';
 
@@ -279,6 +280,14 @@ export default class SessionStore {
       agents.push(entry);
     }
 
+    // Carrels: world furniture — each desk's serialize() carries pose, knobs, and
+    // membership (ids + order). Desks restore FIRST (stage 1) standing at their
+    // saved pose, and the sweep's manifest pass re-seats each member in place as
+    // its window materializes — the desk loads, then loads its elements.
+    const carrels = ctx.carrels instanceof Map
+      ? [...ctx.carrels.values()].filter((c) => !c._dissolving).map((c) => c.serialize())
+      : [];
+
     const snap = {
       version: SCHEMA_VERSION,
       savedAt: Date.now(),
@@ -292,6 +301,7 @@ export default class SessionStore {
       dock3d: dock3d || null,
       terminals,
       agents,
+      carrels,
     };
 
     // Quarantine: a section whose restore phase FAILED keeps its loaded blob verbatim — never
@@ -430,7 +440,12 @@ export default class SessionStore {
         // pour into the view they left, not stare at a default pose until every
         // lane lands. The field lane skips its fitall when this succeeds (the
         // fitall only ever existed for pose-less sessions), so nothing stomps it.
-        ['camera', () => { this._cameraRestored = this._restoreCamera(snap.camera) === true; }, ['camera']]]],
+        ['camera', () => { this._cameraRestored = this._restoreCamera(snap.camera) === true; }, ['camera']],
+        // Desks BEFORE content: each saved carrel stands back up at its pose,
+        // pre-shaped for its complement, and files a membership manifest — so
+        // stage 2's windows (books, terminals, grids) seat IN PLACE the moment
+        // they materialize instead of flying to a desk that arrived late.
+        ['carrels', () => this._restoreCarrels(snap), ['carrels']]]],
       [
         [['panels', () => this._restorePanels(snap), ['dock']]],
         [['field', () => this._restoreField(snap), ['fieldSources']],
@@ -447,6 +462,16 @@ export default class SessionStore {
       this.ctx.status?.set(`Restoring: ${stage.flat(1).map(([name]) => name).join(' + ')}…`);
       await Promise.all(stage.map(async (lane) => { for (const p of lane) await runPhase(p); }));
     }
+    // The pour is over: one synchronous sweep catches members that landed after the
+    // last change event, then desks stop pre-shaping for members that never came
+    // (the wall re-wraps to what actually arrived — truth wins). Unserved manifest
+    // claims PERSIST as residence memory: a window reopened later still comes home.
+    try {
+      carrelSweep(this.ctx);
+      if (this.ctx.carrels instanceof Map) {
+        for (const c of this.ctx.carrels.values()) { if (c._expected) c.expect(0); }
+      }
+    } catch (e) { console.warn('[session] carrel close-out failed:', e?.message || e); }
     const wall = Math.round(performance.now() - t0);
     this.ctx.status?.clear();
 
@@ -458,6 +483,22 @@ export default class SessionStore {
     );
   }
 
+  // carrels — world furniture, stage 1: each saved desk stands back up at its saved pose
+  // wearing its saved knobs (restoreCarrel — no camera-ray placement, no Settings fold),
+  // pre-shaped (expect) for its member complement, and files every member id into the
+  // manifest the sweep serves as windows materialize. Direct state, no verbs.
+  _restoreCarrels(snap) {
+    const list = Array.isArray(snap.carrels) ? snap.carrels : [];
+    if (!list.length) return;
+    const manifest = (this.ctx.carrelManifest ??= new Map());
+    for (const c of list) {
+      if (!restoreCarrel(this.ctx, c)) continue;
+      for (const m of c.members || []) {
+        if (m?.id != null) manifest.set(String(m.id), { name: c.name, order: m.order });
+      }
+    }
+  }
+
   // agents — reopen the saved session books BY REFERENCE: each entry re-reads the harness's
   // own record through the adapter (the one open path agent.open rides), then re-applies view
   // intent. A saved retention override rides `limit` straight into the hydration (it becomes
@@ -465,31 +506,43 @@ export default class SessionStore {
   // (a vanished record logs + skips, the rest land — data self-heal); no session provider
   // (client-only baseline) is simply an empty phase. Saved heads index the previous view's
   // sheet list — a tail-capped hydration clamps them (pageTo clamps).
+  //
+  // The pour is CONCURRENT (a bounded worker pool): each book is independent, and its
+  // seat is pre-assigned (the carrel manifest's order + the desk's expect pre-shape),
+  // so arrival order is irrelevant — overlapping the relay reads collapses the
+  // one-book-at-a-time trickle into a few waves. Per-entry hydrate + pin stay one
+  // synchronous block, so the deferred carrel sweep still sees pins before it seats.
   async _restoreAgents(snap) {
     const list = Array.isArray(snap.agents) ? snap.agents : [];
     if (!list.length) return;
     const books = this.ctx.agentBooks;
     const provider = this.ctx.sessionProvider;
     if (!books || !provider) return;
-    let archive = null;   // fetched once, only if a prefix needs resolving
-    for (const a of list) {
+    let archivePromise = null;   // fetched once, only if a prefix needs resolving
+    const open = async (a) => {
       try {
         let sid = a.session || null;
         if (!sid && a.prefix) {
-          archive ??= await provider.list();
+          archivePromise ??= provider.list();
+          const archive = await archivePromise;
           const norm = String(a.prefix).replace(/-/g, '');
           sid = archive.find((s) => s.id.replace(/-/g, '').startsWith(norm))?.id || null;
         }
-        if (!sid) continue;   // nothing on disk answers to this book — it stays closed
+        if (!sid) return;   // nothing on disk answers to this book — it stays closed
         const { agentId } = await openAgentSession(this.ctx, sid, { limit: a.limit });
         const lane = books.lanes.get(agentId);
-        if (!lane) continue;
+        if (!lane) return;
         if (Array.isArray(a.pinned) && a.pinned.length === 3) books.moveGroup(agentId, ...a.pinned);
         if (!a.following && Number.isInteger(a.head)) lane.book.pageTo(a.head);
       } catch (e) {
         console.warn('[session] agent restore failed:', a.session || a.prefix, e?.message || e);
       }
-    }
+    };
+    const POUR_WIDTH = 6;
+    const queue = [...list];
+    await Promise.all(Array.from({ length: Math.min(POUR_WIDTH, queue.length) }, async () => {
+      while (queue.length) await open(queue.shift());
+    }));
   }
 
   // substrate — the field layout scheme, SET directly on the (still-empty) tree so the bulk load

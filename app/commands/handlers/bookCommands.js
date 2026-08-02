@@ -19,9 +19,12 @@
  * shelf's cfg (page dims, deck pitch, card scales, faces, covers).
  */
 
+import * as THREE from 'three';
 import { box, kvLines } from '../formatResponse.js';
+import { findCarrelOwner, unseat } from './carrelCommands.js';
 
 const r2 = (n) => Math.round(n * 100) / 100;
+const _drop = new THREE.Vector3();
 
 /** An agent lane (any address it answers to — lane id, registry group id, the
  *  `agent:<id>` display label, or the first lane when omitted), a library VOLUME
@@ -143,12 +146,26 @@ export default function registerBookCommands(router) {
         const books = ctx.agentBooks;
         if (!books) return { text: 'ERR: agent books not wired', data: null };
         if (args.length < 4) return { text: 'ERR: usage: book.move <id> <x> <y> <z>', data: null };
-        const [id, x, y, z] = args;
-        const ok = books.moveGroup(id, Number(x) || 0, Number(y) || 0, Number(z) || 0);
+        const [id, xs, ys, zs] = args;
+        let x = Number(xs) || 0, y = Number(ys) || 0, z = Number(zs) || 0;
+        // A SEATED book's coords arrive in its desk's frame (the dragger writes the
+        // live position; the verb echoes it back). Convert desk → cluster frame and
+        // lift the book out aimed at that exact spot, then pin: dragging a book off
+        // the shelf leaves it where you dropped it, easing back to natural size.
+        const hit = books.resolveLane(id);
+        const owner = hit ? findCarrelOwner(ctx, hit[0]) : null;
+        if (owner) {
+            owner.updateWorldMatrix(true, false);
+            books.root.updateWorldMatrix(true, false);
+            books.root.worldToLocal(owner.localToWorld(_drop.set(x, y, z)));
+            ({ x, y, z } = _drop);
+            unseat(ctx, hit[0], { parent: books.root, pos: { x, y, z } });
+        }
+        const ok = books.moveGroup(hit ? hit[0] : id, x, y, z);
         return ok
-            ? { text: `OK: moved ${id}`, data: { id, x: Number(x) || 0, y: Number(y) || 0, z: Number(z) || 0 } }
+            ? { text: `OK: moved ${id}`, data: { id, x: r2(x), y: r2(y), z: r2(z) } }
             : { text: `ERR: no agent book '${id}'`, data: null };
-    }, { description: 'Reposition (pin) an agent book — drag-release / CLI', usage: '<id> <x> <y> <z>' });
+    }, { description: 'Reposition (pin) an agent book — drag-release / CLI; a seated book lifts off its desk and stays put', usage: '<id> <x> <y> <z>' });
 
     router.register('book.config', (args, ctx) => {
         const books = ctx.agentBooks;

@@ -5,6 +5,8 @@
 //   - lock captures home and reparents world-preservingly; release restores it
 //   - members ring the cylinder at `radius`; row 0 RESTS on the tabletop (y=0)
 //   - the doorway arc stays open; facing 'in' turns every member toward the axis
+//   - grid mode is the ring's 0-curvature limit: a flat semi-grid wall at z=−R
+//     facing the doorway, centered on the axis; setMode toggles live
 //   - a BORROWED member (parent elsewhere) is never touched; its return re-seats
 //   - dock → carrel adoption hands the HOME RECORD over (homeOf), so release
 //     from the carrel returns to the TREE, never to the bar
@@ -119,6 +121,77 @@ const settle = (c, n = 8) => { for (let i = 0; i < n; i++) c.update(0.05); };
     ok(grids[3].parent === treeNode, 'dissolved members went home');
 }
 
+// ---- grid mode: the 0-curvature shelf — flat wall at z=−R, semi-grid wrap ----
+{
+    const scene = new THREE.Scene();
+    const carrel = new Carrel({ name: 'shelf', radius: 20, boxH: 9, boxAspect: 1.15, mode: 'grid' });
+    scene.add(carrel);
+    const grids = [];
+    for (let i = 0; i < 4; i++) {
+        const g = makeGrid();
+        scene.add(g);
+        grids.push(g);
+        carrel.lock(`g${i}`, g);
+    }
+    settle(carrel);
+
+    const rowPitch = 9 + 9 * 0.9;   // boxH + gap — where row 1 rests
+    for (const g of grids) {
+        near(g.position.z, -20, 0.5, 'grid member stands on the back wall (z=−R)');
+        const f = new THREE.Vector3(0, 0, 1).applyQuaternion(g.quaternion);
+        ok(f.z > 0.99, 'grid member faces the doorway (+z)');
+        const bottom = g.position.y - 6 * g.scale.x;   // content bottom (top-anchored mock)
+        ok(Math.abs(bottom) < 0.5 || Math.abs(bottom - rowPitch) < 0.5,
+           `content rests on the table or the row-1 line (bottom ${bottom.toFixed(2)})`);
+    }
+    // squareWrap balances 4 uniform boxes into 2 columns → 2 rows (the semi-grid)
+    const rows = new Set(grids.map((g) => Math.round(g.position.y * 10)));
+    ok(rows.size === 2, `semi-grid wraps upward (want 2 rows, got ${rows.size})`);
+    // the wall is centered on the carrel axis
+    const xs = grids.map((g) => g.position.x);
+    near(Math.max(...xs) + Math.min(...xs), 0, 0.5, 'wall centered on the axis');
+
+    // live toggle: back to the ring re-seats the arc; to grid flattens again
+    ok(carrel.setMode('ring'), 'setMode ring accepted');
+    settle(carrel);
+    for (const g of grids) near(Math.hypot(g.position.x, g.position.z), 20, 0.5, 'setMode ring re-seats the ring radius');
+    ok(carrel.setMode('grid'), 'setMode grid accepted');
+    settle(carrel);
+    for (const g of grids) near(g.position.z, -20, 0.5, 'setMode grid re-flattens the wall');
+    ok(!carrel.setMode('spiral'), 'unknown mode refused');
+    ok(carrel.serialize().params.mode === 'grid', 'mode serializes');
+}
+
+// ---- restore fill: immediate seating + expected-complement pre-shape ----
+{
+    const scene = new THREE.Scene();
+    const carrel = new Carrel({ name: 'r', radius: 20, boxH: 9, boxAspect: 1.15, mode: 'grid' });
+    scene.add(carrel);
+    carrel.expect(4);                       // the saved membership announces 4
+
+    // First arrival LANDS in its seat — no slide from where the loader built it —
+    // and lands in its FINAL slot (the wall wraps and centers for 4 from the start).
+    const a = makeGrid();
+    a.position.set(500, 500, 500);
+    scene.add(a);
+    carrel.lock('a', a, { order: 0, immediate: true });
+    ok(carrel.animator._active.size === 0, 'immediate lock issues no tweens');
+    near(a.position.z, -20, 1e-6, 'immediate member stands on the wall this tick');
+    const firstSeat = a.position.clone();
+
+    const rest = [];
+    for (let i = 1; i < 4; i++) {
+        const g = makeGrid();
+        scene.add(g);
+        rest.push(g);
+        carrel.lock(`g${i}`, g, { order: i, immediate: true });
+    }
+    ok(a.position.distanceTo(firstSeat) < 1e-9, 'first member never moved as the wall filled');
+    ok(carrel._expected === 0, 'expectation self-clears when the complement arrives');
+    const rows = new Set([a, ...rest].map((g) => Math.round(g.position.y * 10)));
+    ok(rows.size === 2, 'filled wall holds the 2×2 semi-grid it pre-shaped for');
+}
+
 // ---- refit churn: seat-diff, last-good extent hold, aura ease ----
 {
     const scene = new THREE.Scene();
@@ -146,11 +219,14 @@ const settle = (c, n = 8) => { for (let i = 0; i < n; i++) c.update(0.05); };
     ok(carrel.animator._active.size === 0, 'transient empty read holds last-good form (no flash)');
     a._dims.empty = false;
 
-    const h0 = carrel._aura.scale.y;
-    carrel.setParam('auraHeadroom', 60);  // re-targets the shell height
-    ok(Math.abs(carrel._aura.scale.y - h0) < 1e-9, 'aura height does not snap on retarget');
-    settle(carrel, 40);
-    near(carrel._aura.scale.y, carrel._auraTargetH, 0.5, 'aura eases to its target');
+    // chrome: the base-shadow hugs the footprint — the tabletop square under a
+    // ring, a strip under the grid wall (centered where the wall stands)
+    near(carrel._shadow.scale.x, 2 * 20 * carrel.tableFrac, 1e-6, 'ring shadow spans the tabletop square');
+    near(carrel._shadow.position.z, 0, 1e-9, 'ring shadow centers on the axis');
+    carrel.setMode('grid');
+    near(carrel._shadow.position.z, -20, 1e-9, 'grid shadow lies under the wall (z=−R)');
+    ok(carrel._shadow.scale.z < carrel._shadow.scale.x, 'grid shadow is a strip, not the full square');
+    carrel.setMode('ring');
 }
 
 // ---- occupancy handoff: dock → carrel adopts the HOME RECORD, not the bar pose ----

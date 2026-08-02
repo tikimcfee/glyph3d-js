@@ -30,6 +30,7 @@ import { installFrameWatch } from '../commands/loadTrace.js';
 import SessionStore from './SessionStore.js';
 import WorkspaceModel from './WorkspaceModel.js';
 import { getSetting, applyGroupSettings } from './settings.js';
+import { scheduleCarrelSweep } from '../commands/handlers/carrelCommands.js';
 import { wheelScrollCommand, wheelPageCommand } from './surfaceInteractions.js';
 import errorTracker from '@glyph3d/core/utils/ErrorTracker.js';
 import { createStatusChannel } from './statusChannel.js';
@@ -466,19 +467,25 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // (its constructor scene-added its root; register reparents it under the world). It notifies the
     // world as it streams, so new agents/sheets re-space the whole layout.
     world.register('agents', state.ctx.agentBooks.root, () => state.ctx.agentBooks.localBounds());
-    state.ctx.agentBooks.onRelayout(() => world.relayout());
+    // Every extent change funnels through the books' relayout — including the ASYNC
+    // card loads that settle after a book was seated (a hydration burst coalesces
+    // here, never through onChange). Re-space the world AND re-contain seated books,
+    // or a late-settling book keeps the scale of its pre-load measure and overlaps
+    // its shelf neighbors (the giant-spread bug, seen in pixels).
+    state.ctx.agentBooks.onRelayout(() => {
+      world.relayout();
+      for (const carrel of state.ctx.carrels.values()) carrel.refit();
+    });
     // Fold the persisted Agent Books settings into the freshly-built shelf (its apply()s
     // otherwise fire only on a user change), so tuned sizes hold from boot.
     applyGroupSettings(state.ctx, 'Agent Books');
-    // A seated agent book has no onResize — its extent grows as sheets page in. The
-    // shelf's change event is the growth signal: re-fit every desk so a growing book
-    // re-contains inside its seat instead of spilling over its neighbors. The same
-    // event announces lane BIRTHS: new books seat at the auto-created 'agents' desk
-    // (grid mode — the semi-grid shelf) by default; the deferred sweep respects pins,
-    // docks, manual seats, and the book.autoShelf setting.
-    state.ctx.agentBooks.onChange?.(() => {
-      for (const carrel of state.ctx.carrels.values()) carrel.refit();
-    });
+    // The change event announces lane BIRTHS: restored books seat at the desk that
+    // claims them (the manifest pass), new books at the auto-created 'agents' desk
+    // (grid mode — the semi-grid shelf) by default; the deferred sweep respects
+    // pins, docks, manual seats, and the book.autoShelf setting. (Seat
+    // re-containment rides onRelayout above — the one funnel every extent change
+    // passes through; onChange also fires for state/beacon flips that move nothing.)
+    state.ctx.agentBooks.onChange?.(() => scheduleCarrelSweep(state.ctx));
 
     // Camera-locked HUD dock: a bar of window tiles that rides the view. Reparents
     // a docked grid/terminal under itself (world-preserving attach) and scales it to
@@ -530,6 +537,10 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       // is the durable buffer that re-docks/re-sizes them (terminal.kill drops it explicitly).
       for (const s of state.ctx.workspace?.listSurfaces?.() || [])
         if (s.kind !== 'terminal' && !isLive(s.id)) state.ctx.workspace.removeSurface(s.id);
+      // While restored desks hold unserved membership claims, every registration is
+      // a chance a claimed window just materialized (a re-adopted terminal, a
+      // reopened file) — offer it its seat. Coalesced; no-op once claims drain.
+      if (state.ctx.carrelManifest?.size) scheduleCarrelSweep(state.ctx);
     };
     state.ctx.registry.addChangeListener(onRemoval);
 

@@ -15,9 +15,17 @@
  * table and overflow wraps UPWARD in rows — the footprint holds its radius and
  * the stack grows taller, never wider. The arc is centered on the carrel's back
  * (local −z) so the unfilled remainder of the circle is a doorway facing +z —
- * you walk in through the gap. A soft additive glow (tabletop disc + rising
- * aura shell) marks the desk's airspace; it is decoration (userData.isMarker),
- * never picked, never a collider.
+ * you walk in through the gap. A soft BASE-SHADOW (one flat additive rectangle
+ * under the member footprint, falloff edges — the bounding-volume read, but on
+ * the ground and easy on the eyes) marks the desk's place; it is decoration
+ * (userData.isMarker), never picked, never a collider.
+ *
+ * TWO ARRANGEMENTS, one grammar (`mode`): 'ring' wraps the members along the
+ * arc; 'grid' is the ring's 0-curvature limit — a flat wall standing where the
+ * ring's back was (z = −R), facing the doorway, wrapped as a SEMI-GRID
+ * (squareWrap balances rows against columns) so a shelf of books reads at a
+ * glance. Rows climb from the tabletop in both; the table and doorway keep
+ * their meaning.
  *
  * OWNERSHIP LAW (the residence/vehicle distinction): a carrel is a RESIDENCE —
  * where content lives by choice, as the tree is where it lives by structure —
@@ -49,7 +57,7 @@
 
 import * as THREE from 'three';
 import { SpatialAnimator } from '../spatial/SpatialAnimator.js';
-import { flowBoxes } from '../../collections/layouts/flowBoxes.js';
+import { flowBoxes, squareWrap } from '../../collections/layouts/flowBoxes.js';
 import { RENDER_ORDER } from '../../core/renderOrder.js';
 
 const _z = new THREE.Vector3(0, 0, 1);
@@ -101,17 +109,21 @@ export class Carrel extends THREE.Object3D {
      *   member (a fresh agent book before its first sheet) measures tiny and the fit inflates
      *   it absurdly — the seated-book overlap bug
      * @param {number} [opts.maxArcDeg=300]  - arc span the ring fills; the remainder is the doorway (faces local +z)
+     * @param {'ring'|'grid'} [opts.mode='ring'] - member arrangement: the arc, or its 0-curvature
+     *   limit — a flat semi-grid wall at z=−R facing the doorway (the agent shelf's read)
      * @param {'in'|'out'} [opts.facing='in'] - members face the center (stand inside) or outward
-     * @param {number} [opts.tableFrac=1.25] - tabletop disc radius as a fraction of `radius`
-     * @param {number} [opts.auraHeadroom=40] - aura shell rise above the top row (world units)
-     * @param {number} [opts.glowColor=0x6f9fd0] - chrome tint (tabletop + aura)
+     * @param {number} [opts.tableFrac=1.25] - base-shadow overhang: the shadow reaches this
+     *   fraction of `radius` beyond the member footprint (1 = flush)
+     * @param {number} [opts.shadowSoft=0.35] - shadow edge softness, 0..1 fraction of the
+     *   half-extent the falloff band occupies (0 = hard rim, 1 = falls off from the center)
+     * @param {number} [opts.glowColor=0x6f9fd0] - chrome tint (the base-shadow)
      * @param {number} [opts.glowStrength=0.35]  - chrome intensity (0 = chrome invisible)
      * @param {number} [opts.animDur=0.167] - member slide/scale duration (s)
      * @param {number} [opts.yawRate=14]    - member face-target slerp rate (×dt)
      */
     constructor({ name = 'carrel', radius = 240, boxH = 110, boxAspect = 1.15, gapFrac = 0.9,
-                  growCap = 1.25, maxArcDeg = 300, facing = 'in', tableFrac = 1.25, auraHeadroom = 40,
-                  glowColor = 0x6f9fd0, glowStrength = 0.35,
+                  growCap = 1.25, maxArcDeg = 300, mode = 'ring', facing = 'in', tableFrac = 1.25,
+                  shadowSoft = 0.35, glowColor = 0x6f9fd0, glowStrength = 0.35,
                   animDur = 0.167, yawRate = 14 } = {}) {
         super();
         this.name = `carrel:${name}`;
@@ -122,16 +134,19 @@ export class Carrel extends THREE.Object3D {
         this.gapFrac = gapFrac;
         this.growCap = growCap;
         this.maxArcDeg = maxArcDeg;
+        this.mode = mode === 'grid' ? 'grid' : 'ring';
         this.facing = facing === 'out' ? 'out' : 'in';
         this.tableFrac = tableFrac;
-        this.auraHeadroom = auraHeadroom;
+        this.shadowSoft = shadowSoft;
         this.glowColor = glowColor;
         this.glowStrength = glowStrength;
         this.animDur = animDur;
         this.yawRate = yawRate;
 
         this._orderSeq = 0;      // monotonic sort-key source (restore threads saved values past it)
-        this._rows = 1;          // last layout's row count — the aura reads it for its height
+        this._rows = 1;          // last layout's row count — bounds read the stack height off it
+        this._layoutW = 0;       // last layout's shelf width — the grid shadow hugs it
+        this._expected = 0;      // announced incoming complement (expect()) — wrap pre-shapes for it
         this._dissolving = false;
         /** Set once a dissolve has fully drained; the ticking runner sweeps dead carrels. */
         this._dead = false;
@@ -164,6 +179,9 @@ export class Carrel extends THREE.Object3D {
      * @param {Object} grid live Object3D with getBounds()/getLocalBounds()
      * @param {Object} [opts]
      * @param {number} [opts.order] stable sort-key hint (restore passes the saved value; omitted = append)
+     * @param {boolean} [opts.immediate] LAND in the seat this tick — no slide from wherever
+     *   the loader built the object. Load-is-not-replay: a rebuilt desk re-seats restored
+     *   members in place; only live, mid-session seating flies.
      * @param {{parent:Object|null,pos:{x,y,z},scale:number,quat:THREE.Quaternion,bounds:Object|null}} [opts.home]
      *   an ADOPTED home record (CameraDock.homeOf) — the occupancy handoff. Without it the
      *   grid's CURRENT transform is captured, which is only correct when the grid is at rest
@@ -213,6 +231,17 @@ export class Carrel extends THREE.Object3D {
 
         this.entries.set(id, entry);
         this._relayout();
+        // Immediate seating: place the member AT its seat and drop the slide tweens
+        // the relayout just issued for it. With expect() holding the wrap stable
+        // during a restore fill, the rest of the ring has no reason to move either.
+        if (opts.immediate && entry._seat) {
+            this.animator.cancelAll(grid);
+            grid.position.set(entry._seat.x, entry._seat.y, entry._seat.z);
+            const placement = entry._seat.eff / this._userOf(entry);
+            if (grid.scaleModel) { grid.scaleModel.placement = placement; grid.scaleModel.resolve(grid); }
+            else grid.scale.setScalar(placement);
+            grid.quaternion.copy(entry.quatTarget);
+        }
         return true;
     }
 
@@ -312,8 +341,8 @@ export class Carrel extends THREE.Object3D {
      */
     dissolve() {
         this._dissolving = true;
-        if (this._table) this._table.visible = false;
-        if (this._aura) this._aura.visible = false;
+        this._expected = 0;
+        if (this._shadow) this._shadow.visible = false;
         this.releaseAll();
     }
 
@@ -339,15 +368,16 @@ export class Carrel extends THREE.Object3D {
 
     /**
      * Tune a layout/chrome parameter live and re-seat. Keys: radius, boxH, boxAspect,
-     * gapFrac, maxArcDeg, tableFrac, auraHeadroom, glowStrength, animDur, yawRate.
+     * gapFrac, maxArcDeg, tableFrac, shadowSoft, glowStrength, animDur, yawRate.
      * @param {string} key @param {number} value @returns {boolean}
      */
     setParam(key, value) {
         if (!['radius', 'boxH', 'boxAspect', 'gapFrac', 'growCap', 'maxArcDeg', 'tableFrac',
-              'auraHeadroom', 'glowStrength', 'animDur', 'yawRate'].includes(key)) return false;
+              'shadowSoft', 'glowStrength', 'animDur', 'yawRate'].includes(key)) return false;
         if (!Number.isFinite(value)) return false;
         this[key] = value;
         if (key === 'glowStrength') this._tintChrome();
+        if (key === 'shadowSoft') this._paintShadow(this._shadow.geometry);
         this._relayout();
         return true;
     }
@@ -358,6 +388,28 @@ export class Carrel extends THREE.Object3D {
         this.facing = facing;
         this._relayout();
         return true;
+    }
+
+    /** Toggle the arrangement: 'ring' wraps the arc, 'grid' flattens it into the
+     *  semi-grid wall (the 0-curvature limit). @param {'ring'|'grid'} mode */
+    setMode(mode) {
+        if (mode !== 'ring' && mode !== 'grid') return false;
+        this.mode = mode;
+        this._relayout();
+        return true;
+    }
+
+    /**
+     * Announce a KNOWN incoming complement (session restore reads it off the saved
+     * member list): the grid wrap computes for at least `n` members, so a wall
+     * filling one by one wraps for its FINAL shape from the first arrival — every
+     * member lands in its lasting slot, nothing reorganizes mid-pour. Self-clearing:
+     * once the live count reaches it, the live count rules again.
+     * @param {number} n
+     */
+    expect(n) {
+        this._expected = Math.max(0, Math.floor(n) || 0);
+        this._relayout();
     }
 
     // ===================== layout & tick =====================
@@ -416,12 +468,15 @@ export class Carrel extends THREE.Object3D {
     }
 
     /**
-     * Seat the members around the ring. Uniform slot boxes wrap along the arc
-     * (flowBoxes: x → azimuth) and rows stack UPWARD from the tabletop — row 0
-     * rests ON the table, overflow climbs, the footprint never widens. The arc
-     * is centered on local −z so the unfilled remainder faces +z: the doorway.
-     * Content is contain-fit into its box and BOTTOM-anchored (things rest,
-     * they don't float). Borrowed members (parent elsewhere) are skipped.
+     * Seat the members along the shelf. Uniform slot boxes wrap (flowBoxes) and
+     * rows stack UPWARD from the tabletop — row 0 rests ON the table, overflow
+     * climbs. In 'ring' mode the shelf is the arc (x → azimuth, wrapped at the
+     * arc length, centered on local −z so the unfilled remainder faces +z: the
+     * doorway); in 'grid' mode it is the arc's 0-curvature limit — a flat wall
+     * standing at z=−R facing the doorway, wrapped as a semi-grid (squareWrap
+     * balances rows against columns). Content is contain-fit into its box and
+     * BOTTOM-anchored (things rest, they don't float). Borrowed members (parent
+     * elsewhere) are skipped.
      */
     _relayout() {
         const members = [...this.entries.values()].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
@@ -432,24 +487,46 @@ export class Carrel extends THREE.Object3D {
         const boxH = this.boxH;
         const gap = this._gap;
         const R = Math.max(this.radius, 1e-3);
-        const arcLen = Math.max(this.maxArcDeg * DEG2RAD * R, boxW + 1e-3);
+        const grid = this.mode === 'grid';
+        if (this._expected && live.length >= this._expected) this._expected = 0;   // complement arrived
 
         if (live.length) {
-            const { slots, width: W } = flowBoxes(
-                live.map(() => ({ w: boxW, h: boxH })),
-                { margin: gap, wrapWidth: arcLen },
-            );
+            const boxes = live.map(() => ({ w: boxW, h: boxH }));
+            // While a complement is announced (expect()), wrap AND center for it —
+            // a restore fill takes its final shape from the first arrival: every
+            // member lands in its lasting slot, nothing drifts as the wall widens.
+            const wrapN = Math.max(live.length, this._expected);
+            const wrapBoxes = wrapN > live.length
+                ? Array.from({ length: wrapN }, () => ({ w: boxW, h: boxH }))
+                : boxes;
+            const wrapWidth = grid
+                ? squareWrap(wrapBoxes, gap)
+                : Math.max(this.maxArcDeg * DEG2RAD * R, boxW + 1e-3);
+            const { slots, width: liveW } = flowBoxes(boxes, { margin: gap, wrapWidth });
+            // Uniform boxes fill deterministically, so the live slots are an exact
+            // prefix of the full-complement layout — only the WIDTH needs the re-run.
+            const W = wrapN > live.length
+                ? flowBoxes(wrapBoxes, { margin: gap, wrapWidth }).width
+                : liveW;
+            this._layoutW = W;
             let rows = 1;
             live.forEach((e, i) => {
                 const s = slots[i];
                 rows = Math.max(rows, s.row + 1);
-                const th = ((s.x + boxW / 2) - W / 2) / R;      // azimuth, arc centered on −z
+                const cx = (s.x + boxW / 2) - W / 2;            // slot center, shelf centered on the back
                 const bottomY = s.row * (boxH + gap);           // row 0 rests on the table
-                const sx = R * Math.sin(th);
-                const sz = -R * Math.cos(th);
-                // face the axis (stand-at-center reads them like the dock) or outward
-                if (this.facing === 'in') _dir.set(-Math.sin(th), 0, Math.cos(th));
-                else _dir.set(Math.sin(th), 0, -Math.cos(th));
+                let sx, sz;
+                if (grid) {
+                    sx = cx; sz = -R;                           // the wall stands where the ring's back was
+                    _dir.set(0, 0, this.facing === 'in' ? 1 : -1);   // face the doorway (or the far side)
+                } else {
+                    const th = cx / R;                          // azimuth, arc centered on −z
+                    sx = R * Math.sin(th);
+                    sz = -R * Math.cos(th);
+                    // face the axis (stand-at-center reads them like the dock) or outward
+                    if (this.facing === 'in') _dir.set(-Math.sin(th), 0, Math.cos(th));
+                    else _dir.set(Math.sin(th), 0, -Math.cos(th));
+                }
                 const eff = this._containScale(e, boxW, boxH);
                 const ext = this._extentOf(e);
                 const cy = bottomY + (ext.h * eff) / 2;         // bottom-anchored: content RESTS
@@ -458,6 +535,7 @@ export class Carrel extends THREE.Object3D {
             this._rows = rows;
         } else {
             this._rows = 1;
+            this._layoutW = 0;
         }
 
         this._refreshChrome();
@@ -496,12 +574,6 @@ export class Carrel extends THREE.Object3D {
         }
         if (returned) this._relayout();
 
-        // The aura breathes rather than snaps: content growth re-targets its height
-        // (_refreshChrome) and this ease carries it there — a desk that inhales.
-        if (this._auraTargetH != null) {
-            this._aura.scale.y += (this._auraTargetH - this._aura.scale.y) * Math.min(1, dt * 6);
-        }
-
         for (const e of this._releasing.values()) e.grid.quaternion.slerp(e.quatTarget, rate);
 
         if (this._dissolving && !this.entries.size && !this._releasing.size) {
@@ -513,33 +585,26 @@ export class Carrel extends THREE.Object3D {
     // ===================== chrome =====================
 
     /**
-     * The desk's light: a tabletop disc (radial glow, bright center → dark rim)
-     * and an open cylinder aura rising from it (bright base → dark top). Both are
-     * UNIT geometry carrying vertex-color gradients, scaled to size — knob changes
-     * are transform-only, no rebuilds. Additive blending makes "dark" read as
-     * "gone", so plain vertex RGB is the whole gradient — no shader, headless-safe.
-     * Decoration only: isMarker (the tree's decoration convention), raycast
-     * no-op, never registered with picking, depthWrite off, drawn behind content.
+     * The desk's mark: ONE flat base-shadow rectangle on the ground under the
+     * member footprint — the bounding-volume read laid flat, quiet enough to
+     * live under a wall of books. A unit plane carrying a vertex-color falloff
+     * (bright interior, smoothstep to dark over the shadowSoft band), scaled to
+     * the footprint — knob changes are transform-only; only shadowSoft re-bakes
+     * the colors. Additive blending makes "dark" read as "gone", so plain
+     * vertex RGB is the whole gradient — no shader, headless-safe. Decoration
+     * only: isMarker (the tree's decoration convention), raycast no-op, never
+     * registered with picking, depthWrite off, drawn behind content.
      */
     _buildChrome() {
-        const disc = new THREE.CircleGeometry(1, 64);
-        this._paintRadial(disc);
-        disc.rotateX(-Math.PI / 2);
-        this._table = new THREE.Mesh(disc, this._chromeMaterial());
-        this._table.name = 'carrel-table';
-
-        const shell = new THREE.CylinderGeometry(1, 1, 1, 64, 1, true);
-        shell.translate(0, 0.5, 0); // base at y=0, rises to y=1 — scale.y IS the height
-        this._paintRise(shell);
-        this._aura = new THREE.Mesh(shell, this._chromeMaterial(THREE.DoubleSide));
-        this._aura.name = 'carrel-aura';
-
-        for (const m of [this._table, this._aura]) {
-            m.userData.isMarker = true;
-            m.raycast = () => {};
-            m.renderOrder = RENDER_ORDER.CARREL_CHROME;
-            this.add(m);
-        }
+        const geo = new THREE.PlaneGeometry(1, 1, 24, 24);
+        geo.rotateX(-Math.PI / 2);   // flat on the ground; falloff reads x/z
+        this._paintShadow(geo);
+        this._shadow = new THREE.Mesh(geo, this._chromeMaterial());
+        this._shadow.name = 'carrel-shadow';
+        this._shadow.userData.isMarker = true;
+        this._shadow.raycast = () => {};
+        this._shadow.renderOrder = RENDER_ORDER.CARREL_CHROME;
+        this.add(this._shadow);
         this._tintChrome();
         this._refreshChrome();
     }
@@ -554,60 +619,63 @@ export class Carrel extends THREE.Object3D {
         });
     }
 
-    /** Radial gradient on a unit disc: center = white, rim = black (tint scales it). */
-    _paintRadial(geo) {
+    /** Bake the falloff into the unit plane (post-rotate: x/z span ±0.5): interior =
+     *  white, smoothstep to black across the shadowSoft band at the rim — a soft-edged
+     *  rectangle, no hard lines. Re-run when shadowSoft changes. */
+    _paintShadow(geo) {
         const pos = geo.attributes.position;
         const colors = new Float32Array(pos.count * 3);
+        const soft = Math.max(this.shadowSoft, 1e-3) * 0.5;
         for (let i = 0; i < pos.count; i++) {
-            const r = Math.hypot(pos.getX(i), pos.getY(i));
-            const v = Math.max(0, 1 - r);
+            const d = Math.min(0.5 - Math.abs(pos.getX(i)), 0.5 - Math.abs(pos.getZ(i)));
+            const t = Math.min(Math.max(d / soft, 0), 1);
+            const v = t * t * (3 - 2 * t);
             colors[i * 3] = colors[i * 3 + 1] = colors[i * 3 + 2] = v;
         }
         geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     }
 
-    /** Rising gradient on the unit shell: base = white, top = black (fades out upward). */
-    _paintRise(geo) {
-        const pos = geo.attributes.position;
-        const colors = new Float32Array(pos.count * 3);
-        for (let i = 0; i < pos.count; i++) {
-            const v = Math.max(0, 1 - pos.getY(i));
-            colors[i * 3] = colors[i * 3 + 1] = colors[i * 3 + 2] = v;
-        }
-        geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-    }
-
-    /** Push glowColor·glowStrength into the chrome materials (vertex gradient multiplies it). */
+    /** Push glowColor·glowStrength into the chrome material (vertex falloff multiplies it). */
     _tintChrome() {
         const c = new THREE.Color(this.glowColor).multiplyScalar(this.glowStrength);
-        this._table.material.color.copy(c);
-        this._aura.material.color.copy(c);
+        this._shadow.material.color.copy(c);
     }
 
-    /** Size the chrome to the current ring: disc radius, aura radius + stack height.
-     *  Radii snap (knob gestures read as direct manipulation); HEIGHT only re-targets —
-     *  update() eases the aura there, so a growing stack breathes the shell up. */
+    /** Seat the shadow under the current footprint. Ring: the members stand on the
+     *  circle, so the shadow is the tabletop square (±R·tableFrac). Grid: a strip
+     *  hugging the wall at z=−R — the live shelf width plus the tableFrac overhang.
+     *  Snaps with the layout (knob gestures read as direct manipulation). */
     _refreshChrome() {
-        const outerR = this.radius * this.tableFrac;
-        this._table.scale.set(outerR, outerR, outerR);
-        const stackH = this._rows * (this.boxH + this._gap) - this._gap;
-        this._auraTargetH = Math.max(stackH + this.auraHeadroom, 1e-3);
-        this._aura.scale.x = this._aura.scale.z = outerR;
+        const R = Math.max(this.radius, 1e-3);
+        const pad = R * Math.max(this.tableFrac - 1, 0);
+        if (this.mode === 'grid') {
+            const boxW = this.boxH * this.boxAspect;
+            const halfW = (this._layoutW ? this._layoutW / 2 : boxW / 2) + boxW / 2 + pad;
+            const halfD = boxW / 2 + pad;
+            this._shadow.scale.set(halfW * 2, 1, halfD * 2);
+            this._shadow.position.set(0, 0, -R);
+        } else {
+            const r = R * this.tableFrac;
+            this._shadow.scale.set(r * 2, 1, r * 2);
+            this._shadow.position.set(0, 0, 0);
+        }
+        this._stackH = this._rows * (this.boxH + this._gap) - this._gap;
     }
 
     // ===================== bounds & state =====================
 
     /**
-     * World AABB of the desk's airspace (tabletop footprint × aura height) — what
-     * carrel.focus frames and a selection box would draw.
+     * World AABB of the desk's airspace (base-shadow footprint × stack height, plus
+     * a breath of headroom) — what carrel.focus frames and a selection box would draw.
      * @param {Object} [target] THREE.Box3
      * @returns {Object} THREE.Box3
      */
     getBounds(target = new THREE.Box3()) {
         this.updateWorldMatrix(true, false);
-        const r = this.radius * this.tableFrac;
-        target.min.set(-r, 0, -r);
-        target.max.set(r, this._aura.scale.y, r);
+        const hx = this._shadow.scale.x / 2, hz = this._shadow.scale.z / 2;
+        const cz = this._shadow.position.z;
+        target.min.set(-hx, 0, cz - hz);
+        target.max.set(hx, (this._stackH ?? this.boxH) + this.boxH * 0.25, cz + hz);
         return target.applyMatrix4(this.matrixWorld);
     }
 
@@ -623,8 +691,9 @@ export class Carrel extends THREE.Object3D {
             yaw: this.rotation.y,
             params: {
                 radius: this.radius, boxH: this.boxH, boxAspect: this.boxAspect,
-                gapFrac: this.gapFrac, maxArcDeg: this.maxArcDeg, facing: this.facing,
-                tableFrac: this.tableFrac, auraHeadroom: this.auraHeadroom,
+                gapFrac: this.gapFrac, growCap: this.growCap, maxArcDeg: this.maxArcDeg,
+                mode: this.mode, facing: this.facing,
+                tableFrac: this.tableFrac, shadowSoft: this.shadowSoft,
                 glowColor: this.glowColor, glowStrength: this.glowStrength,
             },
             members: this.list(),
@@ -635,10 +704,8 @@ export class Carrel extends THREE.Object3D {
         this.animator.dispose?.();
         this.entries.clear();
         this._releasing.clear();
-        for (const m of [this._table, this._aura]) {
-            m.geometry.dispose();
-            m.material.dispose();
-        }
+        this._shadow.geometry.dispose();
+        this._shadow.material.dispose();
     }
 }
 

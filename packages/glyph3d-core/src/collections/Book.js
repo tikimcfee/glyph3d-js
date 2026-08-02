@@ -328,13 +328,15 @@ export default class Book extends BoundedObject3D {
         return this;
     }
 
-    /** Wrap the cover around the LIVE deck bounds (mid-ease included). Runs from
-     *  update() every frame while bound; call directly after an out-of-band reshape. */
+    /** Wrap the cover around the LIVE deck bounds (mid-ease included) — for a fitted
+     *  sheetless book that's the closed-cover rect (deckBounds), so an empty book
+     *  still shows a spine. Runs from update() every frame while bound; call
+     *  directly after an out-of-band reshape. */
     syncCover() {
         const c = this.cover;
         if (!c) return this;
         const b = this.layoutBounds();
-        if (!this.sheets.length || b.isEmpty()) { c.mesh.visible = false; return this; }
+        if (b.isEmpty()) { c.mesh.visible = false; return this; }
         b.getSize(_coverSize);
         b.getCenter(_coverCenter);
         c.mesh.position.copy(_coverCenter);
@@ -383,7 +385,7 @@ export default class Book extends BoundedObject3D {
      * z its node ACTUALLY occupies — mid-ease included — thickened for content and
      * faces. This is what a cover that binds the whole book must wrap: measuring slot
      * arithmetic instead leaves pages poking out of their own binding while they ease.
-     * Empty for a released or sheetless book.
+     * Empty only for a RELEASED book; a fitted sheetless one reports its closed cover.
      * @returns {THREE.Box3}
      */
     deckBounds() {
@@ -402,6 +404,13 @@ export default class Book extends BoundedObject3D {
             tmpMax.set(hw, hh, z + zPad);
             out.expandByPoint(tmpMin);
             out.expandByPoint(tmpMax);
+        }
+        // A fitted book with nothing in it is CLOSED, not dimensionless: one page
+        // rect — the cover. An empty book on a shelf reads as a blank spine holding
+        // its seat (and measures that way for contain-fits), never as a gap.
+        if (out.isEmpty()) {
+            out.min.set(-o.pageW / 2, -o.pageH / 2, -zPad);
+            out.max.set(o.pageW / 2, o.pageH / 2, zPad);
         }
         return out;
     }
