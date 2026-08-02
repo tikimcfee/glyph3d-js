@@ -9,11 +9,10 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
  *
  * A list (not tabs) because subagents multiply: a dozen books is a scrollable column
  * where tabs would run off the panel's edge. The three regions — open books, the
- * selected book's detail, the archive — are FOLDABLE ACCORDION sections: an open body
- * takes only its content's height (the next header follows immediately — no
- * space-filling voids), and when the column is tight the bodies shrink and scroll
- * internally, the stream yielding last. Fold state is a view preference
- * (localStorage), not workspace state.
+ * selected book's detail, the archive — are a STANDARD LIST WITH SECTIONS (the
+ * SettingsPanel pattern): one scrolling column, a foldable header row per region,
+ * rows at natural height. Fold state is a view preference (localStorage), not
+ * workspace state.
  *
  * It owns no agent state; it reads agents()/getStream() and fires the same command bus
  * the 3D shelf obeys (the [[project_2d_companion_views]] model: the book owns the deck,
@@ -60,9 +59,12 @@ const S = {
     title: { flex: '1 1 auto', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
     btn: { flex: '0 0 auto', cursor: 'pointer', padding: '0 5px', borderRadius: 3, color: '#7c8596', whiteSpace: 'nowrap' },
 
-    // -- section chrome: every region folds; open bodies are an ACCORDION (see roster
-    //    below): content-sized, never space-filling, shrinking + scrolling when tight —
-    //    the stream (shrink 1) yields space LAST; roster/archive (shrink 2) yield first.
+    // -- the ONE scroll: everything below the global header is a standard list with
+    //    sections (the SettingsPanel pattern) — headers and rows flow at natural height
+    //    in a single scrolling column. No per-section scrollboxes, no flex physics.
+    body: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto' },
+
+    // -- section chrome: a header row per region; folding hides the rows below it.
     sect: {
         display: 'flex', alignItems: 'center', gap: 6, padding: '3px 8px', flex: '0 0 auto',
         cursor: 'pointer', userSelect: 'none', color: '#5a616c', fontSize: 10,
@@ -74,11 +76,7 @@ const S = {
     sectHint: { flex: '0 0 auto', color: '#444b56', fontSize: 10 },
 
     // -- master: the agent roster (open books) --
-    // Accordion physics: a body takes ONLY its content height (grow 0) so the next
-    // section header follows immediately — never a space-filling void that exiles the
-    // other headers to the panel's far bottom. When the column is tight, bodies SHRINK
-    // (min-height 0) and scroll internally instead of pushing anything out.
-    roster: { flex: '0 2 auto', minHeight: 0, overflowY: 'auto', padding: '3px 0' },
+    roster: { padding: '3px 0' },
     agentRow: (on) => ({
         display: 'flex', alignItems: 'center', gap: 7, padding: '3px 8px',
         cursor: 'pointer', userSelect: 'none',
@@ -105,7 +103,7 @@ const S = {
     }),
     pos: { flex: '1 1 auto', textAlign: 'center', color: '#7c8596', fontSize: 11 },
     live: { color: '#7ad79a' },
-    list: { flex: '0 1 auto', minHeight: 0, overflowY: 'auto', padding: '4px 0' },
+    list: { padding: '4px 0' },
     msg: { padding: '12px', color: '#7c8596' },
     row: (on) => ({
         display: 'flex', alignItems: 'center', gap: 7, padding: '3px 8px',
@@ -120,7 +118,7 @@ const S = {
     age: { flex: '0 0 auto', color: '#5a616c', fontSize: 11 },
 
     // -- archive: the relay's stored session transcripts --
-    archive: { flex: '0 2 auto', minHeight: 0, overflowY: 'auto', padding: '3px 0 5px' },
+    archive: { padding: '3px 0 5px' },
     sessRow: (open) => ({
         display: 'flex', alignItems: 'center', gap: 7, padding: '2px 8px', userSelect: 'none',
         cursor: open ? 'default' : 'pointer',
@@ -278,6 +276,7 @@ export default function AgentsPanel({ client }) {
                 )}
             </div>
 
+            <div style={S.body}>
             {/* master — the agent roster (open books) */}
             <div style={{ ...S.sect, borderTop: 'none' }} onClick={() => toggleFold('books')}
                 title="Fold / unfold the open books">
@@ -362,6 +361,7 @@ export default function AgentsPanel({ client }) {
                     })}
                 </div>}
             </>)}
+            </div>
         </div>
     );
 }
