@@ -49,42 +49,71 @@ const build = (layout = districtLayout) => {
 };
 
 const linkFor = (arrows, path) => arrows._links.get(path);
-// One counting/reading seam over both line forms: WEIGHTED links are instanced
+// One counting/reading seam over both trace forms: WEIGHTED links are instanced
 // (LineSegmentsGeometry: instanceStart/instanceEnd, one instance per segment),
 // hairlines (weight 0) are native vertex pairs.
-const lineCount = (link) => link.thick
+const segCount = (link) => link.thick
     ? link.geo.attributes.instanceStart.count
     : link.geo.getAttribute('position').count / 2;
-const segStart = (link, i) => {
-    if (link.thick) { const a = link.geo.attributes.instanceStart; return [a.getX(i), a.getY(i), a.getZ(i)]; }
+const seg = (link, i) => {
+    if (link.thick) {
+        const a = link.geo.attributes.instanceStart, b = link.geo.attributes.instanceEnd;
+        return { a: [a.getX(i), a.getY(i), a.getZ(i)], b: [b.getX(i), b.getY(i), b.getZ(i)] };
+    }
     const p = link.geo.getAttribute('position');
-    return [p.getX(i * 2), p.getY(i * 2), p.getZ(i * 2)];
+    return { a: [p.getX(i * 2), p.getY(i * 2), p.getZ(i * 2)], b: [p.getX(i * 2 + 1), p.getY(i * 2 + 1), p.getZ(i * 2 + 1)] };
 };
+// Trace segments per link: trunk (2) + rail + drop per shown child.
+const routed = (children) => 2 + children * 2;
 
 // ───────────────────────── structural invariants ─────────────────────────
 {
     const t = build();
     const arrows = new ContentTreeArrows(t);
 
-    // root owns 1 file (readme's book) + 3 child dirs → 4 lines.
+    // root owns 1 file (readme's book) + 3 child dirs → trunk + 4 rail/drop pairs.
     const root = linkFor(arrows, '');
     ok(!!root, 'root link exists');
     ok(root && root.mesh.parent === t.root, 'root link parented INTO the root node');
-    ok(root && lineCount(root) === 4, `root link = 4 lines, got ${root && lineCount(root)}`);
+    ok(root && segCount(root) === routed(4), `root trace = trunk + 4 pins (${routed(4)} segs), got ${root && segCount(root)}`);
     ok(root && root.mesh.userData.isMarker === true, 'link mesh carries isMarker (schemes/picking ignore it)');
     ok(root && root.thick === true, 'default weight > 0 → the instanced weighted form');
 
-    // src owns 1 file + 2 child dirs → 3 lines. src/util: 1 file + 1 dir → 2 lines.
-    ok(lineCount(linkFor(arrows, 'src')) === 3, 'src link = 3 lines');
-    ok(lineCount(linkFor(arrows, 'src/util')) === 2, 'src/util link = 2 lines');
+    // src owns 1 file + 2 child dirs → 3 pins. src/util: 1 file + 1 dir → 2 pins.
+    ok(segCount(linkFor(arrows, 'src')) === routed(3), 'src trace = trunk + 3 pins');
+    ok(segCount(linkFor(arrows, 'src/util')) === routed(2), 'src/util trace = trunk + 2 pins');
 
-    // Every line starts at the hub (the dir's own origin).
-    let hubbed = true;
-    for (let i = 0; i < lineCount(root); i++) {
-        const [x, y, z] = segStart(root, i);
-        if (x !== 0 || y !== 0 || z !== 0) hubbed = false;
+    // THE CIRCUIT INVARIANTS. (1) The trace begins at the hub (dir origin) and every
+    // segment is axis-aligned in XY — 90° corners, no diagonals, no string art.
+    const s0 = seg(root, 0);
+    ok(s0.a[0] === 0 && s0.a[1] === 0, 'the trace begins at the hub (dir origin)');
+    let ortho = true;
+    for (let i = 0; i < segCount(root); i++) {
+        const { a, b } = seg(root, i);
+        if (Math.abs(a[0] - b[0]) > 1e-6 && Math.abs(a[1] - b[1]) > 1e-6) ortho = false;
     }
-    ok(hubbed, 'every line starts at the hub (dir origin)');
+    ok(ortho, 'every segment is axis-aligned in XY (circuit routing)');
+
+    // (2) The trunk bus runs OUTSIDE the frame: busX sits left of the dir's own
+    // footprint AND left of every pin — no trace ever crosses a face.
+    const busX = s0.b[0];
+    const src = t.getNode('src');
+    const srcLink = linkFor(arrows, 'src');
+    const srcBusX = seg(srcLink, 0).b[0];
+    ok(srcBusX < -src.userData.size.x / 2, `src bus (${srcBusX}) runs outside its footprint (−${src.userData.size.x / 2})`);
+    ok(busX < 0, 'root bus runs left of the hub');
+
+    // (3) Each drop is a vertical pin lead: for a child DIR, it lands exactly on the
+    // child's hub (its top-center origin) from railGap above.
+    const util = t.getNode('src/util');
+    let dirDrop = null;
+    for (let i = 2; i < segCount(srcLink); i++) {
+        const { a, b } = seg(srcLink, i);
+        if (Math.abs(b[0] - util.position.x) < 1e-6 && Math.abs(b[1] - util.position.y) < 1e-6) dirDrop = { a, b };
+    }
+    ok(!!dirDrop, "src/util's drop lands exactly on its hub pin");
+    ok(dirDrop && Math.abs(dirDrop.a[0] - dirDrop.b[0]) < 1e-6 && dirDrop.a[1] > dirDrop.b[1],
+        'the pin lead is vertical and drops DOWN onto the pin');
 
     // Depth grading: materials pool by quantized stroke — src (depth 1) wires heavier
     // than src/util (depth 2); two depth-2 dirs SHARE one material (pipeline economy).
@@ -114,7 +143,7 @@ const segStart = (link, i) => {
     // d's files ride its VOLUME (one body at the dir's own origin) — no file wire; the
     // one child-dir wire (d → sub) remains, because that ownership is real information.
     const d = linkFor(arrows, 'd');
-    ok(!!d && lineCount(d) === 1, `volume'd dir wires only its child dirs, got ${d && lineCount(d)} lines`);
+    ok(!!d && segCount(d) === routed(1), `volume'd dir routes only its child dirs (trunk + 1 pin), got ${d && segCount(d)} segs`);
     // sub's own volume is its whole content → no lines at all.
     ok(!linkFor(arrows, 'd/sub'), "a volume-only dir gets no link mesh");
     arrows.dispose();
@@ -130,13 +159,13 @@ const segStart = (link, i) => {
     t.relayout();
     const src = linkFor(arrows, 'src');
     ok(src && src.mesh.parent === t.getNode('src'), 'src link re-parented after scheme switch');
-    ok(src && lineCount(src) === 3, 'src link still 3 lines after switch');
+    ok(src && segCount(src) === routed(3), 'src trace still trunk + 3 pins after switch');
 
     // The weight dial flips FORM: 0 → native hairlines (vertex pairs, the shared
     // node-material whose alpha rides opacityNode); back up → instanced again.
     arrows.configure({ weight: 0 });
     const thin = linkFor(arrows, 'src');
-    ok(thin && !thin.thick && thin.geo.getAttribute('position').count === 6, 'weight 0 → hairline vertex pairs');
+    ok(thin && !thin.thick && thin.geo.getAttribute('position').count === routed(3) * 2, 'weight 0 → hairline vertex pairs');
     ok(thin.mesh.material === arrows._thinMat, 'hairlines share the one opacityNode material');
     arrows.configure({ opacity: 0.3 });
     ok(Math.abs(arrows._alpha.value - 0.3) < 1e-9, 'opacity dials the live uniform (no rebuild)');

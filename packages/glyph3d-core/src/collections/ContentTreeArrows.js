@@ -1,17 +1,22 @@
 /**
- * ContentTreeArrows — OWNERSHIP lines: each directory's hub wired to everything it owns.
+ * ContentTreeArrows — OWNERSHIP traces: each directory wired to everything it owns,
+ * routed like a circuit, never drawn across a face.
  *
  * Where ContentTreeMarkers gives a directory PRESENCE (a translucent volume) and the
- * scheme gives content its PLACE, this layer makes CONTAINMENT visible: from each
- * directory's hub (its origin) a line runs to every file it holds and to every child
- * directory's hub. Parent ──── file, parent ──── childDir. No sibling order, no
- * arrowheads — just the wires that show what belongs to what, which is the one
- * relationship a code tree must read. (It replaced an earlier sibling-order arrow
- * chain; ownership is the relationship that actually means something.)
+ * scheme gives content its PLACE, this layer makes CONTAINMENT visible — as BOARD
+ * TRACES, not string art. Every child (file book, child dir) exposes a PIN: the
+ * top-center of its frame. From the directory's hub a TRUNK BUS exits along the top
+ * frame edge and runs down the outside gutter (busMargin past the footprint AND past
+ * every pin); per child, a RAIL crosses in the inter-row gutter just above the
+ * child's top edge (railGap) and a short DROP lands on the pin. Every segment is
+ * axis-aligned and every run lives in a gutter or along a frame — the structural
+ * invariant that keeps traces off the content, which is what makes them READABLE.
+ * (Straight hub→center diagonals were tried first: they crossed every face they
+ * connected and stretched with the layout — noise, not information.)
  *
- * The wires have WEIGHT: real world-unit thickness (LineSegments2 + Line2NodeMaterial,
+ * The traces have WEIGHT: real world-unit thickness (LineSegments2 + Line2NodeMaterial,
  * native since r183 — segments as instances, one draw per directory) that decays with
- * visible depth, so a shallow trunk wire reads heavier than a deep leaf's — the same
+ * visible depth, so a shallow trunk reads heavier than a deep leaf's — the same
  * depth language as the marker/label gradient, told in stroke instead of color.
  * Materials pool by QUANTIZED width (depth levels, not dirs), so a thousand
  * directories share a handful of pipelines. `weight 0` is the hairline form: native
@@ -20,18 +25,18 @@
  * under WebGPU (observed on pixels; see reference_webgpu_line_rendering), so the
  * node-material path is the only one that actually blends.
  *
- * Every line of a given parent lives in that parent's LOCAL frame (the hub at the
- * origin, each endpoint a child's local position), so we parent one line object per
+ * Every trace of a given parent lives in that parent's LOCAL frame (the hub at the
+ * origin, pins in child-local positions), so we parent one line object per
  * directory INTO the directory node, exactly like ContentTreeMarkers parents its
  * prism. It rides every transform for free: relayouts, scheme switches, restAbove,
  * live drags — and the relayout GLIDE (ContentTreeMotion): while nodes ease to their
- * slots, update() rewrites endpoints per frame IN PLACE (no buffer realloc — the
- * interleaved instance array is rewritten and flagged, a fresh geometry only on
- * count change). File lines and directory lines keep distinct colors (colorA /
- * colorB) via per-vertex colors, one material either way. Meshes carry
- * userData.isMarker — schemes ignore them (partitionChildren) and GPU picking never
- * sees them. Rebuilds are driven by ContentTree.onRelayout, so the lines can never
- * observe a stale layout.
+ * slots, update() re-routes per frame IN PLACE (no buffer realloc — the interleaved
+ * instance array is rewritten and flagged, a fresh geometry only on count change).
+ * File traces and directory traces keep distinct colors (colorA / colorB, the trunk
+ * in the structural colorB) via per-vertex colors, one material either way. Meshes
+ * carry userData.isMarker — schemes ignore them (partitionChildren) and GPU picking
+ * never sees them. Rebuilds are driven by ContentTree.onRelayout, so the traces can
+ * never observe a stale layout.
  */
 
 import * as THREE from 'three';
@@ -45,16 +50,21 @@ import { partitionChildren, leafBox, subtreeContentBounds, visibleDepth } from '
 export const ARROW_DEFAULTS = {
     zLift: 0,                   // +z float for flat schemes; 0 for the volumetric jellyfish
     opacity: 0.5,
-    colorA: 0x4a8acc,           // FILE ownership lines (hub → file)
-    colorB: 0xcc7a4a,           // DIRECTORY ownership lines (hub → child dir hub)
-    weight: 2,                  // world-unit stroke of a depth-1 dir's wires; 0 = hairline (1px)
-    weightDecay: 0.75,          // × per visible depth level — deep wires thin toward hairlines
+    colorA: 0x4a8acc,           // FILE ownership traces (bus → file pin)
+    colorB: 0xcc7a4a,           // DIRECTORY traces (bus → child dir pin) + the trunk bus itself
+    weight: 2,                  // world-unit stroke of a depth-1 dir's traces; 0 = hairline (1px)
+    weightDecay: 0.75,          // × per visible depth level — deep traces thin toward hairlines
     weightMin: 0.3,             // stroke floor, so a deep tree never decays to invisible
+    busMargin: 8,               // how far OUTSIDE the dir's left frame the trunk bus runs
+    railGap: 5,                 // how far above a child's top edge its rail crosses (the gutter run)
 };
 
 // Opts that shape the BUILT line objects (geometry kind, per-depth materials): a
-// configure() touching one rebuilds every link. opacity/colors just restyle live.
+// configure() touching one rebuilds every link. opacity/colors/routing restyle live.
 const BUILD_OPTS = new Set(['weight', 'weightDecay', 'weightMin']);
+
+/** Clamp helper: a rail may never rise above the hub line (the title edge). */
+const railAbove = (pinY, gap) => Math.min(pinY + gap, 0);
 
 const _v = new THREE.Vector3();
 const _abox = new THREE.Box3();
@@ -131,8 +141,8 @@ export default class ContentTreeArrows {
         return Math.max(o.weight * Math.pow(o.weightDecay, Math.max(depth - 1, 0)), o.weightMin);
     }
 
-    /** Rebuild every directory's ownership lines from the tree's current layout. Safe to
-     *  call per frame while a relayout glide is in flight: unchanged line counts rewrite
+    /** Rebuild every directory's ownership traces from the tree's current layout. Safe to
+     *  call per frame while a relayout glide is in flight: unchanged segment counts rewrite
      *  their buffers in place (no realloc, no new GPU objects). */
     update() {
         const o = this.opts;
@@ -144,12 +154,15 @@ export default class ContentTreeArrows {
 
         for (const [path, node] of this.tree._dirs.entries()) {
             const { files, dirs } = partitionChildren(node);   // markers excluded
-            // A library VOLUME is the dir's own body sitting at its origin — a hub→volume
-            // wire is a line from the dir to itself, pure noise in the title area. The
-            // pages inside are ONE object; ownership is already told by containment.
+            // A library VOLUME is the dir's own body sitting at its origin — a wire from
+            // the dir to itself is pure noise in the title area. The pages inside are ONE
+            // object; ownership is already told by containment.
             const fileLeaves = files.filter((f) => !f.userData?.isVolume);
-            const nF = showF ? fileLeaves.length : 0, nD = showD ? dirs.length : 0;
-            const count = nF + nD;                             // one line per shown child
+            // Every shown child contributes its PIN (top-center of its frame) and color.
+            const pins = [];
+            if (showF) for (const leaf of fileLeaves) pins.push({ p: this._filePin(leaf), c: colFile });
+            if (showD) for (const dir of dirs) pins.push({ p: dir.position.clone(), c: colDir });
+            const count = pins.length ? 2 + pins.length * 2 : 0;   // trunk(2) + rail+drop per pin
             if (count === 0) { this._dropLinks(path); continue; }
             seen.add(path);
 
@@ -165,13 +178,36 @@ export default class ContentTreeArrows {
             }
             if (link.mesh.parent !== node) node.add(link.mesh);
 
+            // The CIRCUIT route (every segment axis-aligned, every run in a gutter):
+            //   trunk: hub → left along the top frame edge → down the outside gutter
+            //   rail : across the inter-row gutter just above the child's top edge
+            //   drop : the short pin lead down onto the child's top-center
+            // The bus hugs the frame — busX sits busMargin OUTSIDE the dir's own
+            // footprint (and outside every pin), so no trace ever crosses a face.
+            const s = node.userData?.size;
+            let busX = s ? -s.x / 2 : 0;
+            let lowestRail = 0;
+            for (const { p } of pins) {
+                if (p.x < busX) busX = p.x;
+                const railY = railAbove(p.y, o.railGap);
+                if (railY < lowestRail) lowestRail = railY;
+            }
+            busX -= o.busMargin;
+
             // One flat [sx,sy,sz,ex,ey,ez]× layout serves both forms: the thin geometry's
             // position attribute IS vertex pairs, the thick geometry's interleaved
             // instance buffer IS segment pairs — same bytes, written in place.
             const pos = link.posArray, col = link.colArray;
+            const z = o.zLift;
             let k = 0;
-            if (showF) for (const leaf of fileLeaves) k = this._writeLine(pos, col, k, this._fileAnchor(leaf), colFile);
-            if (showD) for (const dir of dirs) k = this._writeLine(pos, col, k, dir.position, colDir);
+            k = this._writeSeg(pos, col, k, 0, 0, z, busX, 0, z, colDir);              // trunk: top edge
+            k = this._writeSeg(pos, col, k, busX, 0, z, busX, lowestRail, z, colDir);  // trunk: outside gutter
+            for (const { p, c } of pins) {
+                const railY = railAbove(p.y, o.railGap);
+                const pz = p.z + z;
+                k = this._writeSeg(pos, col, k, busX, railY, z, p.x, railY, pz, c);    // rail: row gutter
+                k = this._writeSeg(pos, col, k, p.x, railY, pz, p.x, p.y, pz, c);      // drop: pin lead
+            }
             link.commit();
             link.mesh.visible = true;
             link.mesh.renderOrder = RENDER_ORDER.CONNECTION;
@@ -212,21 +248,22 @@ export default class ContentTreeArrows {
         };
     }
 
-    /** A file's content-box center in its PARENT's local frame — where its ownership line lands. A
-     *  layout-group panel may sit at the core with its grids warped out onto the arc, so its own
-     *  box/origin no longer marks its content; anchor to where its grids ACTUALLY are instead. */
-    _fileAnchor(leaf) {
+    /** A file's PIN — the top-center of its frame in its PARENT's local frame, where its
+     *  trace lead lands (a component's pin, not its face). A layout-group panel may sit
+     *  at the core with its grids warped out onto the arc, so its own box/origin no
+     *  longer marks its content; pin where its grids ACTUALLY are instead. */
+    _filePin(leaf) {
         leaf.updateMatrix();
         const b = leaf.userData?.isLayoutGroup ? subtreeContentBounds(leaf, _abox, false) : leafBox(leaf);
-        return _v.set((b.min.x + b.max.x) / 2, (b.min.y + b.max.y) / 2, (b.min.z + b.max.z) / 2)
-            .applyMatrix4(leaf.matrix);
+        return _v.set((b.min.x + b.max.x) / 2, b.max.y, (b.min.z + b.max.z) / 2)
+            .applyMatrix4(leaf.matrix).clone();
     }
 
-    /** Write one hub→endpoint line (start+end) at segment index k; returns the next index. @private */
-    _writeLine(pos, col, k, end, color) {
+    /** Write one trace segment (start+end) at segment index k; returns the next index. @private */
+    _writeSeg(pos, col, k, ax, ay, az, bx, by, bz, color) {
         const a = k * 6;
-        pos[a] = 0; pos[a + 1] = 0; pos[a + 2] = this.opts.zLift;       // hub at the dir origin
-        pos[a + 3] = end.x; pos[a + 4] = end.y; pos[a + 5] = end.z + this.opts.zLift;
+        pos[a] = ax; pos[a + 1] = ay; pos[a + 2] = az;
+        pos[a + 3] = bx; pos[a + 4] = by; pos[a + 5] = bz;
         for (let v = 0; v < 2; v++) { col[a + v * 3] = color.r; col[a + v * 3 + 1] = color.g; col[a + v * 3 + 2] = color.b; }
         return k + 1;
     }

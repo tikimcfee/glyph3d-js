@@ -307,6 +307,16 @@ export const SETTINGS = [
     type: 'number', default: ARROW_DEFAULTS.opacity, min: 0, max: 1, step: 0.02,
     apply: (ctx, v) => ctx.contentTreeArrows?.configure({ opacity: v }),
   },
+  {
+    key: 'tree.wireBusMargin', label: 'Trace bus margin (outside the frame)', group: 'Tree',
+    type: 'number', default: ARROW_DEFAULTS.busMargin, min: 0, max: 200, step: 1,
+    apply: (ctx, v) => ctx.contentTreeArrows?.configure({ busMargin: v }),
+  },
+  {
+    key: 'tree.wireRailGap', label: 'Trace rail gap (above each pin)', group: 'Tree',
+    type: 'number', default: ARROW_DEFAULTS.railGap, min: 0, max: 100, step: 0.5,
+    apply: (ctx, v) => ctx.contentTreeArrows?.configure({ railGap: v }),
+  },
   // Labels — the container labels (ContentTreeLabels): every visible directory named in space.
   // The same dials as the layout.labels verb; every change lands live and persists. Sizing is
   // the container FIT (the name spans `fit` of its container's width, clamped by the scale
