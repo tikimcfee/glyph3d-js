@@ -241,10 +241,10 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 				continue
 			}
 
-			// Relay-resident log verbs — answered from the in-relay store, never
+			// Relay-resident verbs (log store, git) — answered here, never
 			// forwarded. (log.tail / log.level stay display verbs and fall through.)
-			if verb, rest, ok := splitLogVerb(raw); ok {
-				r.handleLogCommand(ws, verb, rest)
+			if verb, rest, ok := splitRelayVerb(raw); ok {
+				r.handleRelayCommand(ws, verb, rest)
 				continue
 			}
 
@@ -530,31 +530,33 @@ func (r *Relay) pushLogToFollowers(rec *LogRec) {
 	}
 }
 
-// relayLogVerbs are the controller plain-text commands answered by the relay's
-// log store. log.tail and log.level are NOT here — they forward to the display.
-var relayLogVerbs = map[string]bool{
+// relayVerbs are the controller plain-text commands answered by the relay
+// itself, never forwarded to the display: the log store, and git awareness
+// of the served root. log.tail and log.level are NOT here — display verbs.
+var relayVerbs = map[string]bool{
 	"log.query":  true,
 	"log.search": true,
 	"log.errors": true,
 	"log.stats":  true,
 	"log.dump":   true,
+	"git.recent": true,
 }
 
-// splitLogVerb splits a raw controller command into (verb, rest) when the
-// first token is a relay-resident log verb. rest keeps the argument string
+// splitRelayVerb splits a raw controller command into (verb, rest) when the
+// first token is a relay-resident verb. rest keeps the argument string
 // (for log.query, the SQL).
-func splitLogVerb(raw string) (verb, rest string, ok bool) {
+func splitRelayVerb(raw string) (verb, rest string, ok bool) {
 	verb, rest, _ = strings.Cut(raw, " ")
-	if !relayLogVerbs[verb] {
+	if !relayVerbs[verb] {
 		return "", "", false
 	}
 	return verb, strings.TrimSpace(rest), true
 }
 
-// handleLogCommand answers a relay-resident log verb on the controller's
+// handleRelayCommand answers a relay-resident verb on the controller's
 // socket using the {"response":...,"data":...} shape the CLI expects; errors
 // reply as plain "ERR: ..." text.
-func (r *Relay) handleLogCommand(ws *websocket.Conn, verb, rest string) {
+func (r *Relay) handleRelayCommand(ws *websocket.Conn, verb, rest string) {
 	fail := func(err error) {
 		ws.WriteMessage(websocket.TextMessage, []byte("ERR: "+err.Error()))
 	}
@@ -568,6 +570,24 @@ func (r *Relay) handleLogCommand(ws *websocket.Conn, verb, rest string) {
 	}
 
 	switch verb {
+	case "git.recent":
+		if r.fs == nil {
+			fail(fmt.Errorf("git.recent needs a served root (start relay with a project dir)"))
+			return
+		}
+		n := 5
+		if f := strings.Fields(rest); len(f) > 0 {
+			if v, err := strconv.Atoi(f[0]); err == nil && v > 0 && v <= 50 {
+				n = v
+			}
+		}
+		text, data, err := gitRecent(r.fs.root, n)
+		if err != nil {
+			fail(err)
+			return
+		}
+		reply(text, data)
+
 	case "log.query":
 		cols, rows, err := r.logs.Query(rest)
 		if err != nil {
@@ -978,4 +998,56 @@ func getLANAddresses() []string {
 		}
 	}
 	return addrs
+}
+
+// gitRecent reports the served root's recently-touched files: the working
+// tree's uncommitted paths (git status --porcelain) and the files of the
+// last n commits. Read-only, relay-resident (answers with no display) —
+// built for drivers asking "what changed lately?".
+func gitRecent(root string, n int) (string, map[string]any, error) {
+	run := func(args ...string) (string, error) {
+		cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return "", fmt.Errorf("git %s: %s", args[0], strings.TrimSpace(string(out)))
+		}
+		return string(out), nil
+	}
+	status, err := run("status", "--porcelain")
+	if err != nil {
+		return "", nil, err
+	}
+	logOut, err := run("log", "-n", strconv.Itoa(n), "--name-only", "--pretty=format:@%h %ar · %s")
+	if err != nil {
+		return "", nil, err
+	}
+
+	var b strings.Builder
+	uncommitted := []string{}
+	if s := strings.TrimSpace(status); s != "" {
+		b.WriteString("uncommitted:\n")
+		for _, ln := range strings.Split(s, "\n") {
+			b.WriteString("  " + ln + "\n")
+			if len(ln) > 3 {
+				uncommitted = append(uncommitted, strings.TrimSpace(ln[2:]))
+			}
+		}
+	} else {
+		b.WriteString("uncommitted: (clean)\n")
+	}
+	b.WriteString(fmt.Sprintf("last %d commit(s):\n", n))
+	commits := []map[string]any{}
+	for _, ln := range strings.Split(strings.TrimSpace(logOut), "\n") {
+		if strings.HasPrefix(ln, "@") {
+			head := strings.TrimPrefix(ln, "@")
+			b.WriteString("  " + head + "\n")
+			commits = append(commits, map[string]any{"head": head, "files": []string{}})
+		} else if strings.TrimSpace(ln) != "" && len(commits) > 0 {
+			b.WriteString("    " + ln + "\n")
+			last := commits[len(commits)-1]
+			last["files"] = append(last["files"].([]string), ln)
+		}
+	}
+	b.WriteString("OK: git.recent")
+	return b.String(), map[string]any{"root": root, "uncommitted": uncommitted, "commits": commits}, nil
 }
