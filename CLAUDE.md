@@ -88,6 +88,12 @@ keeps a structured in-memory SQLite store of every browser log record — `log.q
 `log.search` / `log.errors` / `log.stats` / `log.dump` answer relay-side (page-less),
 with live follow via `bun tools/buslog.mjs`.
 
+The LOAD FLOW self-reports: every load runs a staged trace (`[load]` console lines →
+the relay log store; `load.stats` answers with stage aggregates + the worst
+main-thread blocks, which an always-on long-task watcher attributes to the load they
+interrupted as `[frames]` lines). `bun tools/loadstorm-check.mjs` asserts the batching
+invariants headlessly — one relayout per bulk load, coalesced registry notification.
+
 - **AttentionManager** (`services/interaction`) owns three slots: `hover`, `primary`
   (sticky focus), `key` (keyboard target). One writer per slot; `attention.set <slot>
   <id|none>`.
