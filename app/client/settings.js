@@ -1,6 +1,7 @@
 import { stateController } from '@glyph3d/core/services/state';
 import { setPanelStateColorDefaults } from '@glyph3d/core/collections';
 import { setGlyphLodParam, GLYPH_LOD_DEFAULTS, setGlyphWidthCompress, GLYPH_WIDTH_COMPRESS_DEFAULT } from '@glyph3d/core/GlyphField.js';
+import { setGpuLayoutEnabled } from '@glyph3d/core/compute/GlyphLayoutCompute.js';
 import { setStrataParam, STRATA_DEFAULTS } from '@glyph3d/core/collections/StrataLayout.js';
 import { TERMINAL_CURSOR_DEFAULTS } from '@glyph3d/core/collections/TerminalGrid.js';
 import { JELLYFISH_DEFAULTS, LIBRARY_DEFAULTS, schemeNameOf } from '@glyph3d/core/collections/layouts/index.js';
@@ -196,6 +197,16 @@ export const SETTINGS = [
     key: 'atlas.size', label: 'Atlas texture (px)', group: 'Display',
     type: 'number', default: 2048, min: 512, max: 8192, step: 512, reload: true,
   },
+  // GPU layout — run the glyph layout fold on a compute kernel (dual-compute v1: the CPU
+  // builder stays authoritative and every feature reads it; the kernel writes bit-exact
+  // positions into the same storage attribute, a live assertion of the GPU engine). An
+  // ENGINE toggle, never a feature switch: items the kernel can't serve are skipped and
+  // keep CPU values. Takes hold on each grid's next fold/content flush.
+  {
+    key: 'layout.gpu', label: 'GPU layout engine (new folds)', group: 'Grid',
+    type: 'bool', default: false,
+    apply: (_ctx, v) => setGpuLayoutEnabled(v),
+  },
   // Width compression — condense glyph ink along x, in place, aligned to leading. A
   // live global shader dial (one uniform across every glyph material): the quad narrows
   // and re-anchors so its left edge stays at the cell anchor; layout advance, picking,
@@ -337,6 +348,17 @@ export const SETTINGS = [
     read: (ctx) => {
       const s = ctx?.occlusionCuller?.stats?.();
       return s ? `${s.culled.length} / ${s.tracked}${s.enabled ? '' : '  (off)'}` : '—';
+    },
+  },
+  // The A/B instrument: submission cost, live. Toggle culling and watch this number —
+  // if it drops hard and the framerate doesn't, the frame is fragment-bound (translucent
+  // chrome / visible glyph shading), not submission-bound, and the next lever is overdraw.
+  {
+    key: 'cull.calls', label: 'Draw calls / frame', group: 'Culling', type: 'info',
+    read: (ctx) => {
+      const r = ctx?.renderer?.info?.render;
+      const n = r ? (r.drawCalls ?? r.calls) : null;
+      return n != null ? String(n) : '—';
     },
   },
   // Tree — the ContentTree ownership-line overlay (hub → what it contains). File lines

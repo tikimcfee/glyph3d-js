@@ -11,10 +11,11 @@ export default function registerCullCommands(router) {
         const c = ctx.occlusionCuller;
         if (!c) return { text: 'ERR: occlusion culler not ready', data: null };
         const s = c.stats();
-        const names = s.culled.map((id) => String(id).split('/').pop());
+        const r = ctx.renderer?.info?.render;
+        const calls = r ? (r.drawCalls ?? r.calls ?? null) : null;
         return {
-            text: `OK: culling ${s.enabled ? 'ON' : 'off'} — ${s.culled.length}/${s.tracked} dark${names.length ? ` (${names.join(', ')})` : ''}`,
-            data: s,
+            text: `OK: culling ${s.enabled ? 'ON' : 'off'} — ${s.culled.length}/${s.tracked} dark${calls != null ? `, ${calls} draw calls this frame` : ''}`,
+            data: { ...s, drawCalls: calls },
         };
-    }, { description: 'Occlusion-culling stats: tracked candidates and who is dark', returns: '{ enabled, tracked, culled:[ids] }' });
+    }, { description: 'Occlusion-culling stats: dark/tracked + live draw calls (toggle culling and diff this)', returns: '{ enabled, tracked, culled:[ids], drawCalls }' });
 }
