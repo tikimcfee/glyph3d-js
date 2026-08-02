@@ -42,8 +42,25 @@ function findOwner(ctx, id) {
 }
 
 /** Record (or clear, with null) the carrel view fact for a surface. */
-function setFact(ctx, id, value) {
-    ctx.workspace?.setSurfaceView?.(id, ctx.registry?.get?.(id)?.type, { carrel: value });
+function setFact(ctx, id, value, kind) {
+    ctx.workspace?.setSurfaceView?.(id, kind ?? ctx.registry?.get?.(id)?.type, { carrel: value });
+}
+
+/**
+ * Anything hostable at a desk: a registry surface (grid / terminal / frame) OR an
+ * agent's book — the shelf's lanes are not registry surfaces, so they resolve here
+ * by lane id. The returned `grid` is always a live Object3D the Carrel can seat;
+ * a seated agent book keeps streaming (AgentBooks.update eases lanes, not root
+ * children, so its deck stays live while borrowed).
+ * @returns {{id:string, grid:Object, kind:string|undefined}|null}
+ */
+function resolveHostable(ctx, arg) {
+    const surf = resolveSurface(ctx, arg);
+    if (surf) return { ...surf, kind: ctx.registry?.get?.(surf.id)?.type };
+    const key = String(arg ?? '');
+    const lane = ctx.agentBooks?.lanes?.get?.(key);
+    if (lane?.book) return { id: key, grid: lane.book, kind: 'agent-book' };
+    return null;
 }
 
 /**
@@ -86,8 +103,8 @@ export default function registerCarrelCommands(router) {
     router.register('carrel.add', (args, ctx) => {
         const carrel = findCarrel(ctx, args[1]);
         if (!carrel) return { text: 'ERR: no carrel (carrel.create first)', data: null };
-        const r = resolveSurface(ctx, args[0]);
-        if (!r) return { text: `ERR: no surface for "${args[0]}" (registry id or surface index)`, data: null };
+        const r = resolveHostable(ctx, args[0]);
+        if (!r) return { text: `ERR: nothing hostable for "${args[0]}" (registry id, surface index, or agent id)`, data: null };
         if (carrel.has(r.id)) return { text: `OK: '${r.id}' already seated at '${carrel.carrelName}'`, data: { id: r.id, carrel: carrel.carrelName } };
 
         // Occupancy handoff: never capture a vehicle (the dock) or another residence's
@@ -108,9 +125,9 @@ export default function registerCarrelCommands(router) {
         if (!carrel.lock(r.id, r.grid, home ? { home } : {})) {
             return { text: `ERR: could not seat '${r.id}'`, data: null };
         }
-        setFact(ctx, r.id, { name: carrel.carrelName, order: carrel.entries.get(r.id).order });
+        setFact(ctx, r.id, { name: carrel.carrelName, order: carrel.entries.get(r.id).order }, r.kind);
         return { text: `OK: seated '${r.id}' at '${carrel.carrelName}'`, data: { id: r.id, carrel: carrel.carrelName } };
-    }, { description: 'Seat a surface at a carrel (default: the active one); docked windows hand over cleanly', usage: '<id|index> [carrel]', returns: '{ id, carrel }' });
+    }, { description: 'Seat a surface or agent book at a carrel (default: the active one); docked windows hand over cleanly', usage: '<id|index|agent> [carrel]', returns: '{ id, carrel }' });
 
     router.register('carrel.release', (args, ctx) => {
         const r = resolveSurface(ctx, args[0]);

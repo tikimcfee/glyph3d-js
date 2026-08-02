@@ -437,7 +437,10 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // dismisses its tile (orphan lifted, focus cleared, bar re-packed). One cascade, every close
     // path; no closer needs to know the window was focused or docked.
     const onRemoval = () => {
-      const isLive = (id) => state.ctx.registry.has(id);
+      // Agent books are hostable at carrels but live in AgentBooks' lanes, not the
+      // registry — a liveness check that only asks the registry would dismiss a
+      // seated agent book on every unrelated close. A lane is alive until cleared.
+      const isLive = (id) => state.ctx.registry.has(id) || !!state.ctx.agentBooks?.lanes?.has?.(id);
       state.ctx.attentionManager?.pruneGone?.(isLive);
       cameraDock.pruneDismissed(isLive);
       for (const carrel of state.ctx.carrels.values()) carrel.pruneDismissed(isLive);
