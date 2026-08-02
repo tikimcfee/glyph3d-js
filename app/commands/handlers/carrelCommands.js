@@ -60,6 +60,9 @@ function setFact(ctx, id, value, kind) {
  * @returns {{id:string, grid:Object, kind:string|undefined}|null}
  */
 function resolveHostable(ctx, arg) {
+    // book.list labels agent lanes `agent:<id>` — accept the label back here
+    // too (drivers paste what they see; same round-trip rule as resolveBook).
+    if (typeof arg === 'string' && arg.startsWith('agent:')) arg = arg.slice(6);
     const surf = resolveSurface(ctx, arg);
     if (surf) {
         const kind = ctx.registry?.get?.(surf.id)?.type;
@@ -164,7 +167,10 @@ export default function registerCarrelCommands(router) {
             return { text: `ERR: could not seat '${r.id}'`, data: null };
         }
         setFact(ctx, r.id, { name: carrel.carrelName, order: carrel.entries.get(r.id).order }, r.kind);
-        return { text: `OK: seated '${r.id}' at '${carrel.carrelName}'`, data: { id: r.id, carrel: carrel.carrelName } };
+        // Name the species in the receipt: a driver seating "books" by bare
+        // index will read `seated terminal 'term-9'` and catch itself.
+        const kindTag = r.kind ? `${r.kind} ` : '';
+        return { text: `OK: seated ${kindTag}'${r.id}' at '${carrel.carrelName}'`, data: { id: r.id, kind: r.kind ?? null, carrel: carrel.carrelName } };
     }, { description: 'Seat a surface or agent book at a carrel (default: the active one); docked windows hand over cleanly', usage: '<id|index|agent> [carrel]', returns: '{ id, carrel }' });
 
     router.register('carrel.release', (args, ctx) => {
