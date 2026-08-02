@@ -38,6 +38,7 @@ self.onmessage = function(event) {
                     upem: payload.shared.upem,
                     layout: payload.shared.layout,  // per-grid layout params (else builder falls back to defaults)
                     scrollOffset: payload.shared.scrollOffset,  // visual rows scrolled (Step 3c)
+                    emitPositions: payload.shared.emitPositions,  // false = engine build (no position array)
                 };
                 // Shape raw text → glyph arrays here, off the main thread. The
                 // builder reads item.shaped, so attach it before building. (Items
@@ -53,18 +54,12 @@ self.onmessage = function(event) {
                 }
                 const result = buildBatchBuffers(items, shared);
 
-                // Transfer buffers — glyphIds/codepoints alias the same array
+                // Transfer buffers — glyphIds/codepoints alias the same array. An engine
+                // build (emitPositions:false) has no position array to transfer.
                 const glyphIdsBuf = result.glyphIds || result.codepoints;
-                self.postMessage(
-                    { type: 'RESULT', jobId, buffers: result },
-                    [
-                        result.positions.buffer,
-                        result.sizes.buffer,
-                        glyphIdsBuf.buffer,
-                        result.colors.buffer,
-                        result.groupIds.buffer
-                    ]
-                );
+                const transfers = [result.sizes.buffer, glyphIdsBuf.buffer, result.colors.buffer, result.groupIds.buffer];
+                if (result.positions) transfers.unshift(result.positions.buffer);
+                self.postMessage({ type: 'RESULT', jobId, buffers: result }, transfers);
                 break;
             }
 

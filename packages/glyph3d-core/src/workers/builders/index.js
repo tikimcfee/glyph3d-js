@@ -199,6 +199,12 @@ export function buildBatchBuffers(items, shared) {
     const { metrics, defaultColor, upem } = shared;
     const layout = resolveLayoutParams(shared.layout);
     const scrollOffset = shared.scrollOffset || 0;  // visual rows scrolled (Step 3c, the conveyor)
+    // emitPositions:false — the GPU-layout-engine build: the position array is not allocated,
+    // not written, not measured; the inner loop emits only what the CPU alone can produce
+    // (glyph ids, advances, colors, the line/wrap tables). Positions, bounds and
+    // pageContentWidth become the engine's job (kernel + adapter). Default true: every CPU
+    // path is exactly as it always was.
+    const emitPositions = shared.emitPositions !== false;
 
     // Convert HarfBuzz font units to world units.
     //
@@ -241,7 +247,7 @@ export function buildBatchBuffers(items, shared) {
     }
 
     // Allocate combined buffers — one slot per codepoint, exact (no skipping)
-    const positions = new Float32Array(totalGlyphs * 3);
+    const positions = emitPositions ? new Float32Array(totalGlyphs * 3) : null;
     const sizes = new Float32Array(totalGlyphs * 2);
     const glyphIdsArr = new Float32Array(totalGlyphs);
     const colors = new Float32Array(totalGlyphs * 3);
@@ -342,9 +348,11 @@ export function buildBatchBuffers(items, shared) {
                 if (itemMinX === Infinity) itemMinX = x;
                 const idx = bufferOffset;
 
-                positions[idx * 3] = x + dx;
-                positions[idx * 3 + 1] = y + dy;
-                positions[idx * 3 + 2] = z;
+                if (emitPositions) {
+                    positions[idx * 3] = x + dx;
+                    positions[idx * 3 + 1] = y + dy;
+                    positions[idx * 3 + 2] = z;
+                }
 
                 sizes[idx * 2] = advance;
                 sizes[idx * 2 + 1] = charHeight;
@@ -374,8 +382,9 @@ export function buildBatchBuffers(items, shared) {
         // glyphs got — never a second char-count guess.
         let pageContentWidth = 0;
 
-        // Apply page-break pagination if needed
-        if (itemGlyphCount > 0 && layout.pageHeight > 0) {
+        // Apply page-break pagination if needed (position path only — the engine build has
+        // no array to remap; the adapter derives the paginated extent analytically)
+        if (emitPositions && itemGlyphCount > 0 && layout.pageHeight > 0) {
             const totalYSpan = pos.y - itemMinY;
             const pageHeightWorld = layout.pageHeight * metrics.lineSpacing;
             if (totalYSpan > pageHeightWorld) {
@@ -439,7 +448,7 @@ export function buildBatchBuffers(items, shared) {
     } : null;
 
     // Truncate to actual count (some glyphs may have been skipped)
-    const finalPositions = bufferOffset < totalGlyphs ? positions.subarray(0, bufferOffset * 3) : positions;
+    const finalPositions = positions && bufferOffset < totalGlyphs ? positions.subarray(0, bufferOffset * 3) : positions;
     const finalSizes = bufferOffset < totalGlyphs ? sizes.subarray(0, bufferOffset * 2) : sizes;
     const finalGlyphIds = bufferOffset < totalGlyphs ? glyphIdsArr.subarray(0, bufferOffset) : glyphIdsArr;
     const finalColors = bufferOffset < totalGlyphs ? colors.subarray(0, bufferOffset * 3) : colors;

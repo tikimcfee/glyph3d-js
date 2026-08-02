@@ -35,24 +35,34 @@ export function setGpuLayoutEnabled(on) { _enabled = !!on; }
 export function isGpuLayoutEnabled() { return _enabled && _renderer !== null; }
 
 /**
- * Re-derive positions on the GPU for every eligible item just committed to `field`.
+ * Lay out every item just committed to `field` — THE position path for engine fields.
  * Fire-and-forget: dispatches are ENCODED synchronously per item (uniforms are read at
  * encode, so sequential configure→dispatch on one kernel is safe without awaits — the
  * bulk-lane lesson: awaiting between items costs more than the GPU work itself).
  *
+ * The engine build carries no positions, so this walk also derives what the builder's
+ * position walk used to: the pagination gate (rows vs pageHeight, integer-exact), the
+ * measured page width (max row extent — written back to the entry so the caret's geom
+ * matches the glyphs), and, for paginated items, a conservative analytic bounds override
+ * (the builder's scalar bounds are exact for unpaginated content and ride through).
+ *
  * @param {import('../GlyphField.js').default} field
- * @param {Object} buffers - buildBatchBuffers output (positions/sizes/count/itemMeta)
+ * @param {Object} buffers - buildBatchBuffers output (sizes/count/itemMeta; positions null)
  * @param {Array}  items   - the items that produced `buffers` (origin + scale per item)
  * @param {{metrics: Object, layout: Object, scrollOffset?: number}} shared - the SAME bag
  *   the builder consumed; world conversions here mirror paginationGeometry exactly.
- * @returns {number} items dispatched (skipped items keep their CPU positions)
+ * @param {number[]} [rendererIds] - entry ids returned by applyPrebuiltBuffers, parallel
+ *   to items — the write-back path for pageContentWidth.
+ * @returns {{dispatched: number, bounds: ?Object}} bounds is non-null only when a
+ *   paginated item required the analytic override.
  */
-export function syncGpuLayout(field, buffers, items, shared) {
-    if (!isGpuLayoutEnabled() || field?.gpuLayout !== true) return 0;
+export function syncGpuLayout(field, buffers, items, shared, rendererIds) {
+    const NONE = { dispatched: 0, bounds: null };
+    if (!isGpuLayoutEnabled() || field?.gpuLayout !== true) return NONE;
     const attr = field?.instanceMesh?.geometry?.attributes?.instancePosition;
-    if (!attr || attr.isStorageInstancedBufferAttribute !== true) return 0;
+    if (!attr || attr.isStorageInstancedBufferAttribute !== true) return NONE;
     const { metrics, layout } = shared || {};
-    if (!metrics || !layout || !buffers?.itemMeta || !buffers.count) return 0;
+    if (!metrics || !layout || !buffers?.itemMeta || !buffers.count) return NONE;
 
     const itemMeta = buffers.itemMeta;
     let maxLines = 1;
@@ -68,6 +78,7 @@ export function syncGpuLayout(field, buffers, items, shared) {
         kernel = null;
     }
     let dispatched = 0;
+    let boundsOverride = null;
     try {
         if (!kernel) {
             kernel = new GlyphLayoutKernel(_renderer, {
@@ -94,39 +105,105 @@ export function syncGpuLayout(field, buffers, items, shared) {
             const lineTable = new Uint32Array(lso.length);
             for (let L = 0; L < lso.length; L++) lineTable[L] = lso[L] - base;   // global → item-local
 
+            // Fused table walk: lineStartRow (visual-row prefix), the advances copy, and the
+            // per-row extent scan the builder's position walk used to provide — max row
+            // extent (the measured page width) and the deepest wrap segment (the z reach).
             const lineStartRow = new Uint32Array(lineTable.length);
-            let row = 0;
+            const advances = new Float32Array(meta.glyphCount);
+            let row = 0, maxRowExtent = 0, maxSegs = 0;
             for (let L = 0; L < lineTable.length; L++) {
                 lineStartRow[L] = row;
+                const start = lineTable[L];
                 const end = L + 1 < lineTable.length ? lineTable[L + 1] : meta.glyphCount;
-                const n = end - lineTable[L];
-                row += 1 + (wrap > 0 && n > 0 ? Math.floor((n - 1) / wrap) : 0);
+                let acc = 0, onRow = 0, segs = 0;
+                for (let s = start; s < end; s++) {
+                    if (wrap > 0 && onRow >= wrap) {
+                        if (acc > maxRowExtent) maxRowExtent = acc;
+                        acc = 0; onRow = 0; segs++;
+                    }
+                    const a = buffers.sizes[(base + s) * 2];
+                    advances[s] = a;
+                    acc += a; onRow++;
+                }
+                if (acc > maxRowExtent) maxRowExtent = acc;
+                if (segs > maxSegs) maxSegs = segs;
+                row += 1 + segs;
             }
+            const totalRows = row;
 
-            const advances = new Float32Array(meta.glyphCount);
-            for (let s = 0; s < meta.glyphCount; s++) advances[s] = buffers.sizes[(base + s) * 2];
+            // The pagination gate, in INTEGER rows — the builder's totalYSpan > H test with
+            // the float slop removed (spec: totalYSpan = (rows−1−scroll)·ls). The measured
+            // width writes back to the entry so the caret's paginationGeometry matches the
+            // glyphs — the same contract meta.pageContentWidth carried on the CPU path.
+            const scroll = Math.trunc(shared.scrollOffset || 0);
+            const pageRows = Math.max(0, Math.trunc(layout.pageHeight || 0));
+            const paginate = pageRows > 0 && (totalRows - 1 - scroll) > pageRows;
+            const pageWidthWorld = paginate ? maxRowExtent : 0;
+            const entry = rendererIds ? field.renderedTexts.get(rendererIds[i]) : null;
+            if (entry) entry.pageContentWidth = pageWidthWorld;
+
+            const origin = item.position || { x: 0, y: 0, z: 0 };
+            const ls = metrics.lineSpacing;
+            const zStep = metrics.charHeight * (layout.zWrapSpacing || 0);
+            const gapX = (layout.pageGapX || 0) * charAdvance;
+            const gapY = (layout.pageGapY || 0) * ls;
+            const depth = (layout.pageDepth || 0) * ls;
 
             kernel.configure({
                 slotCount: meta.glyphCount, lineTable, lineStartRow, advances, outBase: base,
                 params: {
-                    origin: item.position || { x: 0, y: 0, z: 0 },
-                    scrollOffset: shared.scrollOffset || 0,
+                    origin,
+                    scrollOffset: scroll,
                     wrapWidth: wrap,
-                    lineSpacing: metrics.lineSpacing,
-                    zWrapStep: metrics.charHeight * (layout.zWrapSpacing || 0),
-                    // pageContentWidth is the builder's own "pagination fired" witness — using
-                    // it as the gate keeps exact-boundary parity by construction.
-                    pageHeight: meta.pageContentWidth > 0 ? layout.pageHeight : 0,
+                    lineSpacing: ls,
+                    zWrapStep: zStep,
+                    pageHeight: paginate ? pageRows : 0,
                     pagesWide: layout.pagesWide,
-                    pageWidthWorld: meta.pageContentWidth || 0,
-                    pageGapXWorld: (layout.pageGapX || 0) * charAdvance,
-                    pageGapYWorld: (layout.pageGapY || 0) * metrics.lineSpacing,
-                    pageDepthWorld: (layout.pageDepth || 0) * metrics.lineSpacing,
+                    pageWidthWorld,
+                    pageGapXWorld: gapX,
+                    pageGapYWorld: gapY,
+                    pageDepthWorld: depth,
                     axis: layout.axis || 'xy',
                 },
             });
             kernel.computeSync();
             dispatched++;
+
+            // Paginated items outrun the builder's pre-pagination scalar bounds — override
+            // with the closed-form extent (conservative: cell-height padded both ways, real
+            // max row width). Unpaginated items keep the builder's exact scalar bounds.
+            if (paginate) {
+                const lastRow = totalRows - 1 - scroll;
+                const maxPage = Math.floor(lastRow / pageRows);
+                const H = pageRows * ls;
+                const cellH = metrics.charHeight;
+                let minX = origin.x, maxX = origin.x + maxRowExtent;
+                let minY, maxY = origin.y + Math.max(0, scroll) * ls + cellH;
+                let minZ = origin.z - maxSegs * zStep, maxZ = origin.z;
+                if ((layout.axis || 'xy') === 'z') {
+                    minY = origin.y - H - cellH;
+                    minZ -= maxPage * depth;
+                } else {
+                    const usedCols = Math.min(Math.max(1, Math.trunc(layout.pagesWide || 1)), maxPage + 1);
+                    const bands = Math.floor(maxPage / Math.max(1, Math.trunc(layout.pagesWide || 1))) + 1;
+                    maxX += (usedCols - 1) * (maxRowExtent + gapX);
+                    minY = origin.y - ((bands - 1) * (H + gapY) + H) - cellH;
+                }
+                if (!boundsOverride) {
+                    boundsOverride = { min: { x: minX, y: minY, z: minZ }, max: { x: maxX, y: maxY, z: maxZ } };
+                } else {
+                    const b = boundsOverride;
+                    b.min.x = Math.min(b.min.x, minX); b.min.y = Math.min(b.min.y, minY); b.min.z = Math.min(b.min.z, minZ);
+                    b.max.x = Math.max(b.max.x, maxX); b.max.y = Math.max(b.max.y, maxY); b.max.z = Math.max(b.max.z, maxZ);
+                }
+            }
+        }
+        // A paginated override must still COVER the unpaginated items (one union box culls
+        // the whole field) — fold the builder's scalar bounds in.
+        if (boundsOverride && buffers.bounds) {
+            const b = boundsOverride, w = buffers.bounds;
+            b.min.x = Math.min(b.min.x, w.min.x); b.min.y = Math.min(b.min.y, w.min.y); b.min.z = Math.min(b.min.z, w.min.z);
+            b.max.x = Math.max(b.max.x, w.max.x); b.max.y = Math.max(b.max.y, w.max.y); b.max.z = Math.max(b.max.z, w.max.z);
         }
     } catch (err) {
         // Engine-owned fields have no CPU fallback in the buffer — a failed dispatch is
@@ -136,5 +213,5 @@ export function syncGpuLayout(field, buffers, items, shared) {
         kernel?.dispose();
         field._gpuKernel = null;
     }
-    return dispatched;
+    return { dispatched, bounds: boundsOverride };
 }

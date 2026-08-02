@@ -196,6 +196,21 @@ class CodeGrid extends FramedGlyphField {
      * `foldLayout` constrains the fold (merged over config.layout, not mutating it);
      * optional `clear(grid)`. Idempotent registration.
      */
+    /**
+     * The GPU-engine gate, decided BEFORE the build so the builder can skip the position
+     * array entirely (emitPositions:false); the commit re-reads the same decision from
+     * shared.emitPositions — one choice, two readers, no drift. The kernel serves plain,
+     * unarranged, scale-1 content; anything else takes the CPU path wholesale.
+     * @private
+     * @param {Array} items - the items about to be built
+     * @returns {boolean}
+     */
+    _engineEligible(items) {
+        return isGpuLayoutEnabled()
+            && this._arrangers.length === 0
+            && items.every((it) => (it.scale ?? 1) === 1);
+    }
+
     registerArranger(a) { if (a && !this._arrangers.includes(a)) this._arrangers.push(a); }
     /** Remove a previously-registered arranger. */
     unregisterArranger(a) { const i = this._arrangers.indexOf(a); if (i >= 0) this._arrangers.splice(i, 1); }
@@ -1287,13 +1302,10 @@ class CodeGrid extends FramedGlyphField {
             }
         }
 
-        // Engine choice for THIS commit — all-or-nothing per field, decided fresh every
-        // flush: the kernel serves plain, unarranged, scale-1 content; anything else takes
-        // the CPU path exactly as it always was. Toggling layout.gpu or registering an
-        // arranger re-routes naturally at the next flush. Never a feature switch.
-        const engineOn = !!shared && isGpuLayoutEnabled()
-            && this._arrangers.length === 0
-            && items.every((it) => (it.scale ?? 1) === 1);
+        // Engine choice for THIS commit: decided once, pre-build (_engineEligible), and
+        // carried here as shared.emitPositions === false — the build that skipped the
+        // position array and the commit that routes to the kernel can never disagree.
+        const engineOn = !!shared && shared.emitPositions === false;
         this._renderer.setGpuLayout(engineOn);
 
         const rendererIds = this._renderer.applyPrebuiltBuffers(buffers, items);
@@ -1301,9 +1313,16 @@ class CodeGrid extends FramedGlyphField {
         this._contentBoundsDirty = false;
 
         // Under the engine this dispatch IS the layout: applyPrebuiltBuffers adopted no CPU
-        // positions, and the kernel writes the field's storage attribute directly. (CPU mode
-        // skips it entirely — syncGpuLayout no-ops unless the field is engine-owned.)
-        if (engineOn) syncGpuLayout(this._renderer, buffers, items, shared);
+        // positions, and the kernel writes the field's storage attribute directly. The
+        // builder's scalar-walk bounds are exact for unpaginated content; a paginated
+        // engine item gets its extent from the adapter's analytic override.
+        if (engineOn) {
+            const res = syncGpuLayout(this._renderer, buffers, items, shared, rendererIds);
+            if (res?.bounds) {
+                this._workerBoundsCache = res.bounds;
+                this._renderer._updateGeometryBounds(res.bounds);
+            }
+        }
 
         for (let i = 0; i < items.length; i++) {
             const p          = items[i];
@@ -1346,8 +1365,11 @@ class CodeGrid extends FramedGlyphField {
         // Process adds via the builder (synchronous main-thread build)
         if (this._pendingAdds.length > 0) {
             const { items, metrics, defaultColor, layout, scrollOffset } = this._prepareAddsForBuild();
-            const buffers = getWorkerBridge().buildBatchBuffersSync(items, { metrics, defaultColor, layout, scrollOffset });
-            this._commitBuiltBuffers(buffers, items, [], { metrics, layout, scrollOffset });
+            // Engine grids skip the position array at the SOURCE: the builder emits only
+            // tables + attributes, and the kernel dispatch after commit is the layout.
+            const emitPositions = !this._engineEligible(items);
+            const buffers = getWorkerBridge().buildBatchBuffersSync(items, { metrics, defaultColor, layout, scrollOffset, emitPositions });
+            this._commitBuiltBuffers(buffers, items, [], { metrics, layout, scrollOffset, emitPositions });
         }
 
         if (this._renderer && this._pickingSystem) {
@@ -1380,9 +1402,10 @@ class CodeGrid extends FramedGlyphField {
 
         if (this._pendingAdds.length > 0) {
             const { items, metrics, defaultColor, layout, scrollOffset } = this._prepareAddsForBuild();
+            const emitPositions = !this._engineEligible(items);
             try {
-                const buffers = await getWorkerBridge().buildBatchBuffers(items, { metrics, defaultColor, layout, scrollOffset });
-                this._commitBuiltBuffers(buffers, items, deferredRemovals, { metrics, layout, scrollOffset });
+                const buffers = await getWorkerBridge().buildBatchBuffers(items, { metrics, defaultColor, layout, scrollOffset, emitPositions });
+                this._commitBuiltBuffers(buffers, items, deferredRemovals, { metrics, layout, scrollOffset, emitPositions });
             } catch (error) {
                 console.warn('CodeGrid: Worker flush failed, falling back to sync:', error);
                 // Put the deferred removals back so _flush() applies them.
