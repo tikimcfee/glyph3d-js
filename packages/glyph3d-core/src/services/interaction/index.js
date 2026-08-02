@@ -6,3 +6,4 @@ export { CodeColorManager } from './CodeColorManager.js';
 export { ShortcutManager } from './ShortcutManager.js';
 export { InteractionContext } from './InteractionContext.js';
 export { CameraDock } from './CameraDock.js';
+export { Carrel } from './Carrel.js';

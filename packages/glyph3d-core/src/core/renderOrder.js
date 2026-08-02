@@ -44,6 +44,11 @@ export const RENDER_ORDER = Object.freeze({
     // shared panel surface they mount onto (and in front of dir backdrops).
     PANEL_SURFACE:        -2,
 
+    // src/services/interaction/Carrel.js — the carrel's additive glow chrome
+    // (tabletop disc + aura shell), drawn behind panel surfaces and grid
+    // backgrounds so seated content always paints over its own desk light.
+    CARREL_CHROME:        -3,
+
     // src/collections/CodeGrid.js:982, src/collections/TerminalGrid.js:485 —
     // background plane just behind its glyphs.
     GRID_BACKGROUND:      -1,

@@ -1,0 +1,193 @@
+// carrel.test.mjs — headless, GPU-free unit test for the Carrel (the CameraDock's
+// world-anchored mirror) and the GridVirtualizer's parent-faithful park/seat.
+//
+// The invariants under test are the ownership law and the table grammar:
+//   - lock captures home and reparents world-preservingly; release restores it
+//   - members ring the cylinder at `radius`; row 0 RESTS on the tabletop (y=0)
+//   - the doorway arc stays open; facing 'in' turns every member toward the axis
+//   - a BORROWED member (parent elsewhere) is never touched; its return re-seats
+//   - dock → carrel adoption hands the HOME RECORD over (homeOf), so release
+//     from the carrel returns to the TREE, never to the bar
+//   - dissolve drains homeward slides before the desk dies
+//   - virtualizer culling remembers the true parent (no scene-root stealing)
+//
+//   bun tools/carrel.test.mjs
+//
+// Pure three (Object3D/Box3/Quaternion) — no WebGPU.
+
+import * as THREE from 'three';
+import Carrel from '../packages/glyph3d-core/src/services/interaction/Carrel.js';
+import CameraDock from '../packages/glyph3d-core/src/services/interaction/CameraDock.js';
+import GridVirtualizer from '../packages/glyph3d-core/src/collections/GridVirtualizer.js';
+
+let pass = 0, fail = 0;
+const ok = (c, m) => { if (c) pass++; else { fail++; console.log(`  ✗ ${m}`); } };
+const near = (a, b, eps, m) => ok(Math.abs(a - b) <= eps, `${m} (got ${a}, want ${b}±${eps})`);
+
+/** A mock window: local content box W wide × H tall, TOP-anchored (origin at content top),
+ *  like a CodeGrid. getBounds is the world box. */
+const makeGrid = (w = 10, h = 6) => {
+    const g = new THREE.Object3D();
+    g.getLocalBounds = (t = new THREE.Box3()) =>
+        t.set(new THREE.Vector3(-w / 2, -h, 0), new THREE.Vector3(w / 2, 0, 0));
+    g.getBounds = (t = new THREE.Box3()) => {
+        g.updateWorldMatrix(true, false);
+        return g.getLocalBounds(t).applyMatrix4(g.matrixWorld);
+    };
+    return g;
+};
+
+/** Drive a carrel/dock's animators past animDur. */
+const settle = (c, n = 8) => { for (let i = 0; i < n; i++) c.update(0.05); };
+
+// ---- lock: capture + reparent; ring + rest; contain-fit; doorway; facing ----
+{
+    const scene = new THREE.Scene();
+    const treeNode = new THREE.Group();
+    scene.add(treeNode);
+    const carrel = new Carrel({ name: 't', radius: 20, boxH: 9, boxAspect: 1.15, maxArcDeg: 300 });
+    scene.add(carrel);
+
+    const grids = [];
+    for (let i = 0; i < 5; i++) {
+        const g = makeGrid();
+        g.position.set(100 + i, 7, -30);
+        treeNode.add(g);
+        grids.push(g);
+        ok(carrel.lock(`g${i}`, g), `lock g${i} accepted`);
+    }
+    ok(grids.every((g) => g.parent === carrel), 'members reparented under the carrel');
+    const e0 = carrel.entries.get('g0');
+    ok(e0.homeParent === treeNode, 'home parent captured (the tree node)');
+    near(e0.home.pos.x, 100, 1e-9, 'home position captured');
+
+    settle(carrel);
+
+    const boxW = 9 * 1.15, boxH = 9;
+    const wantEff = Math.min(boxW / 10, boxH / 6);
+    for (const g of grids) {
+        near(Math.hypot(g.position.x, g.position.z), 20, 0.5, 'member sits on the ring radius');
+        near(g.scale.x, wantEff, 1e-6, 'contain-fit scale');
+        // rest: content bottom (origin is content top → bottom = y − h·eff) on the table
+        near(g.position.y - 6 * g.scale.x, 0, 1e-6, 'row-0 content RESTS on the tabletop');
+        // doorway: azimuth measured from the back (−z); the gap (|az| > 150°) stays empty
+        const az = Math.atan2(g.position.x, -g.position.z) * 180 / Math.PI;
+        ok(Math.abs(az) <= 150 + 1e-6, `member inside the 300° arc (az ${az.toFixed(1)}°)`);
+        // facing 'in': the member's +z (after slerp) points at the axis
+        const f = new THREE.Vector3(0, 0, 1).applyQuaternion(g.quaternion);
+        const toAxis = new THREE.Vector3(-g.position.x, 0, -g.position.z).normalize();
+        ok(f.dot(toAxis) > 0.99, 'member faces the center (stand-at-center mirror)');
+    }
+
+    // ---- release: home restored ----
+    carrel.release('g0');
+    settle(carrel);
+    ok(grids[0].parent === treeNode, 'release reparents home');
+    near(grids[0].position.x, 100, 1e-3, 'release restores home position');
+    near(grids[0].scale.x, 1, 1e-3, 'release restores home scale');
+    ok(!carrel.has('g0'), 'entry dropped');
+
+    // ---- borrowed: hands off while ridden; return re-seats ----
+    const rider = new THREE.Group();
+    scene.add(rider);
+    const g1 = grids[1];
+    settle(carrel);
+    rider.attach(g1);                      // stolen (docked, parked — any rider)
+    const frozen = g1.position.clone();
+    carrel.update(0.05);                   // notices the borrow
+    carrel._relayout();                    // survivors re-seat around the hole
+    settle(carrel);
+    ok(g1.position.distanceTo(frozen) < 1e-9, 'borrowed member untouched by the carrel');
+    ok(carrel.has('g1'), 'borrowed member keeps its seat (membership survives the ride)');
+    carrel.attach(g1);                     // the ride ends — it comes home
+    settle(carrel);
+    near(Math.hypot(g1.position.x, g1.position.z), 20, 0.5, 'returned member re-seated on the ring');
+
+    // ---- dismiss: orphan lifted, survivors re-packed ----
+    carrel.dismiss('g2');
+    ok(!carrel.has('g2') && grids[2].parent === null, 'dismiss lifts the orphan out');
+
+    // ---- dissolve: drain, then die ----
+    carrel.dissolve();
+    ok(carrel._dissolving, 'dissolving');
+    settle(carrel, 12);
+    ok(carrel.entries.size === 0 && carrel._releasing.size === 0, 'dissolve drained');
+    ok(carrel._dead && carrel.parent === null, 'desk dead + removed after draining');
+    ok(grids[3].parent === treeNode, 'dissolved members went home');
+}
+
+// ---- occupancy handoff: dock → carrel adopts the HOME RECORD, not the bar pose ----
+{
+    const scene = new THREE.Scene();
+    const treeNode = new THREE.Group();
+    scene.add(treeNode);
+    const g = makeGrid();
+    g.position.set(40, 12, -8);
+    treeNode.add(g);
+
+    const dock = new CameraDock();
+    scene.add(dock);
+    dock.lock('a', g);
+    for (let i = 0; i < 8; i++) dock.update(0.05, null);   // tile slides into the bar
+
+    const carrel = new Carrel({ name: 'h', radius: 15 });
+    scene.add(carrel);
+    const home = dock.homeOf('a');
+    ok(home && home.parent === treeNode, 'homeOf exposes the captured residence');
+    dock.release('a');
+    ok(carrel.lock('a', g, { home }), 'carrel adopts with the handed-over home');
+    settle(carrel); settle(dock);          // both animators run; carrel owns the tweens (last-write-wins)
+    ok(g.parent === carrel, 'adopted member seated at the carrel');
+
+    carrel.release('a');
+    settle(carrel);
+    ok(g.parent === treeNode, 'release from the carrel returns to the TREE, not the bar');
+    near(g.position.x, 40, 1e-3, 'original home position restored through the handoff');
+}
+
+// ---- virtualizer: parent-faithful park/seat ----
+{
+    const scene = new THREE.Scene();
+    const group = new THREE.Group();
+    scene.add(group);
+    const g = makeGrid();
+    g.position.set(0, 0, -200);
+    group.add(g);
+
+    const camera = new THREE.PerspectiveCamera(70, 1.6, 0.1, 2000);
+    const virt = new GridVirtualizer(scene, camera, { hysteresis: 10, enableEviction: false });
+    virt.register(g);
+
+    // look AWAY → parked, but the group remembered
+    camera.position.set(0, 0, 1);
+    camera.lookAt(0, 0, 300);
+    camera.updateMatrixWorld();
+    virt._dirty = true;
+    virt.update();
+    ok(g.parent === null, 'culled grid parked out of the graph');
+
+    // look AT it → reseated under its TRUE parent, not the scene root
+    camera.position.set(0, 0, 2);
+    camera.lookAt(0, 0, -200);
+    camera.updateMatrixWorld();
+    virt._dirty = true;
+    virt.update();
+    ok(g.parent === group, 'reseated under the remembered parent (no scene-root steal)');
+
+    // parent pruned while parked → falls back to the scene (never orphaned)
+    camera.position.set(0, 0, 3);
+    camera.lookAt(0, 0, 300);
+    camera.updateMatrixWorld();
+    virt._dirty = true;
+    virt.update();
+    scene.remove(group);
+    camera.position.set(0, 0, 4);
+    camera.lookAt(0, 0, -200);
+    camera.updateMatrixWorld();
+    virt._dirty = true;
+    virt.update();
+    ok(g.parent === scene, 'pruned park-parent falls back to the scene');
+}
+
+console.log(`\ncarrel.test: ${pass} passed, ${fail} failed`);
+process.exit(fail ? 1 : 0);

@@ -119,6 +119,10 @@ export default class GridVirtualizer {
             active: alreadyInScene,
             distance: Infinity,
             evicted: false,
+            // The grid's TRUE parent at park time (a ContentTree dir node, a Book
+            // mount, a carrel — not necessarily the scene), so reseating restores
+            // it where it lives instead of stealing it to the scene root.
+            parkedParent: null,
             _evictionTimer: null,
             // Timestamp (performance.now()) after which eviction is allowed again.
             // Set to 0 on first registration so newly-registered grids can evict
@@ -132,17 +136,51 @@ export default class GridVirtualizer {
     }
 
     /**
-     * Unregister a grid. Removes from scene if active.
+     * Unregister a grid. Removes from its parent if active.
      * @param {CodeGrid} grid
      */
     unregister(grid) {
         const entry = this._entries.get(grid);
         if (!entry) return;
         if (entry.active) {
-            this.scene.remove(grid);
+            grid.parent?.remove(grid);
             this._active.delete(grid);
         }
         this._entries.delete(grid);
+    }
+
+    /** Does this object's parent chain still reach a live Scene? */
+    _reachesScene(obj) {
+        let o = obj;
+        while (o) {
+            if (o.isScene) return true;
+            o = o.parent;
+        }
+        return false;
+    }
+
+    /**
+     * Cull a grid out of the graph, REMEMBERING its true parent. THREE's add()
+     * detaches from the current parent first, so a plain scene.add() on re-entry
+     * would silently steal a tree-/carrel-parented grid to the scene root —
+     * park/seat keep culling orthogonal to ownership.
+     */
+    _park(grid, entry) {
+        entry.parkedParent = grid.parent && grid.parent !== this.scene ? grid.parent : null;
+        grid.parent?.remove(grid);
+        entry.active = false;
+        this._active.delete(grid);
+    }
+
+    /** Reseat a culled grid under its remembered parent (falling back to the scene
+     *  when that parent was pruned meanwhile). */
+    _seat(grid, entry) {
+        const home = entry.parkedParent && this._reachesScene(entry.parkedParent)
+            ? entry.parkedParent : this.scene;
+        home.add(grid);
+        entry.parkedParent = null;
+        entry.active = true;
+        this._active.add(grid);
     }
 
     /**
@@ -221,21 +259,13 @@ export default class GridVirtualizer {
         for (const [grid, entry] of this._entries) {
             // User-hidden grids (minimized, group.hide) must not be added to scene
             if (grid.userData?._userHidden) {
-                if (entry.active) {
-                    this.scene.remove(grid);
-                    entry.active = false;
-                    this._active.delete(grid);
-                }
+                if (entry.active) this._park(grid, entry);
                 continue;
             }
 
             // Drag-pinned grids stay in scene regardless of frustum
             if (grid.userData?._dragPinned) {
-                if (!entry.active) {
-                    this.scene.add(grid);
-                    entry.active = true;
-                    this._active.add(grid);
-                }
+                if (!entry.active) this._seat(grid, entry);
                 continue;
             }
 
@@ -252,15 +282,11 @@ export default class GridVirtualizer {
                     visible.push({ grid, entry });
                     continue;
                 }
-                // Remove from scene
-                this.scene.remove(grid);
-                entry.active = false;
-                this._active.delete(grid);
+                // Park it (parent-faithful cull)
+                this._park(grid, entry);
             } else if (entry.active) {
-                // No hysteresis, remove immediately
-                this.scene.remove(grid);
-                entry.active = false;
-                this._active.delete(grid);
+                // No hysteresis, park immediately
+                this._park(grid, entry);
             }
         }
 
@@ -275,21 +301,13 @@ export default class GridVirtualizer {
         for (let i = 0; i < limit; i++) {
             const { grid, entry } = visible[i];
             nowActive.add(grid);
-            if (!entry.active) {
-                this.scene.add(grid);
-                entry.active = true;
-                this._active.add(grid);
-            }
+            if (!entry.active) this._seat(grid, entry);
         }
 
-        // Remove grids that exceeded the budget
+        // Park grids that exceeded the budget
         for (let i = limit; i < visible.length; i++) {
             const { grid, entry } = visible[i];
-            if (entry.active) {
-                this.scene.remove(grid);
-                entry.active = false;
-                this._active.delete(grid);
-            }
+            if (entry.active) this._park(grid, entry);
         }
 
         // Memory reclamation: evict GPU buffers for grids far from the camera
@@ -378,15 +396,11 @@ export default class GridVirtualizer {
     }
 
     /**
-     * Force all registered grids into the scene (disable virtualization).
+     * Force all registered grids into the graph (disable virtualization).
      */
     showAll() {
         for (const [grid, entry] of this._entries) {
-            if (!entry.active) {
-                this.scene.add(grid);
-                entry.active = true;
-                this._active.add(grid);
-            }
+            if (!entry.active) this._seat(grid, entry);
         }
     }
 

@@ -336,6 +336,27 @@ export class CameraDock extends THREE.Object3D {
         return e?.homeBounds ? e.homeBounds.clone() : null;
     }
 
+    /**
+     * The FULL captured home of a docked tile — {parent, pos, scale, quat, bounds}
+     * clones. The occupancy-handoff read: a RESIDENCE (a carrel, the tree) adopting
+     * a window straight out of the bar takes over this record via lock(..., {home})
+     * instead of capturing the tile's in-bar transform as "home" — home records
+     * chain residence → residence, never through the vehicle carrying the window.
+     * @param {string} id
+     * @returns {{parent:Object|null,pos:{x:number,y:number,z:number},scale:number,quat:Object,bounds:Object|null}|null}
+     */
+    homeOf(id) {
+        const e = this.entries.get(id);
+        if (!e) return null;
+        return {
+            parent: e.homeParent,
+            pos: { ...e.home.pos },
+            scale: e.home.scale,
+            quat: e.home.quat.clone(),
+            bounds: e.homeBounds ? e.homeBounds.clone() : null,
+        };
+    }
+
     /** Release every docked tile (back to its home). */
     releaseAll() {
         for (const id of [...this.entries.keys()]) this.release(id);

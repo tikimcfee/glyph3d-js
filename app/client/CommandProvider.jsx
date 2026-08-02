@@ -143,6 +143,12 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     // dock.* verbs drive it; distinct from ctx.dock (the DOM dockview).
     cameraDock: null,
 
+    // World-anchored reading desks (Carrel) — the dock's mirror: rings of seated
+    // windows around fixed tabletops. carrel.* verbs create/drive them; the same
+    // runner that parks the dock ticks their animators. Keyed by carrel name.
+    carrels: new Map(),
+    activeCarrel: null,
+
     // Agent books — every agent's run bound as a book of page-pair spreads (description
     // verso, content recto), the one agent-viewing system. The agent.* verbs sink here;
     // book.* pages it. Created in the effect (needs the live ctx); ticked by <AgentRunner/>.
@@ -204,6 +210,14 @@ function DockRunner({ stateRef }) {
     const s = stateRef.current;
     const c = s?.ctx;
     c?.cameraDock?.update(dt, state.camera);
+    // Carrels tick beside the dock (same animator discipline, no camera) — and a
+    // dissolved desk that has drained its homeward slides gets swept out here.
+    if (c?.carrels) {
+      for (const [name, carrel] of c.carrels) {
+        carrel.update(dt);
+        if (carrel._dead) { c.carrels.delete(name); carrel.dispose(); }
+      }
+    }
     c?.contentTreeLabels?.update(state.camera, dt, c?.attentionManager?.state?.hover?.id ?? null);
     if (s?.warmAt && performance.now() >= s.warmAt) {
       s.warmAt = 0;
@@ -411,6 +425,7 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       const isLive = (id) => state.ctx.registry.has(id);
       state.ctx.attentionManager?.pruneGone?.(isLive);
       cameraDock.pruneDismissed(isLive);
+      for (const carrel of state.ctx.carrels.values()) carrel.pruneDismissed(isLive);
       // A gone NON-terminal surface drops its intent (e.g. a closed docked code grid) so capture
       // can't serialize a phantom tile. Terminals are spared — their PTY re-adopts and the surface
       // is the durable buffer that re-docks/re-sizes them (terminal.kill drops it explicitly).
@@ -648,6 +663,12 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
         state.ctx.cameraDock.dispose();
         state.ctx.cameraDock = null;
       }
+      for (const carrel of state.ctx.carrels.values()) {
+        scene.remove(carrel);
+        carrel.dispose();
+      }
+      state.ctx.carrels.clear();
+      state.ctx.activeCarrel = null;
     };
   }, [relay]);
 
