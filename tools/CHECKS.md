@@ -75,6 +75,49 @@ integration-test territory: drive verbs, then assert on the resulting state/buff
 Note: tests that `repo.load` reach GitHub (network). A relay-served local project avoids
 that — prefer it for deterministic CI once wired.
 
+- **`layout-kernel-check.mjs`** — per-slot equivalence gate for the GPU layout kernel
+  (`compute/GlyphLayoutKernel.js`) against the CPU builder. Boots the app **client-only**, runs
+  the REAL `buildBatchBuffers` with the LIVE atlas (metrics via `computeCellMetrics` — no
+  hardcoded character dimensions), runs the kernel on a **second, offscreen WebGPURenderer** so
+  the live scene's renderer is untouched, and diffs every slot: max |Δ| per component, count
+  beyond epsilon, and the first 5 mismatches with codepoint/line/col.
+  Five folds, all run by default: `flat` · `column` (wrapWidth 200) · `wrap4` (wrapWidth 4, the
+  spec's Fixture A shape) · `newspaper` (pagination fanning in x) · `z-pages` (pages receding in z).
+  ```
+  bun tools/layout-kernel-check.mjs                      # all five folds, torture text
+  bun tools/layout-kernel-check.mjs --mode newspaper --ascii
+  bun tools/layout-kernel-check.mjs --text-file <path> --wrap-width 40 --mode column
+  bun tools/layout-kernel-check.mjs --selftest           # prove the HARNESS with no kernel
+  ```
+  The kernel gets `configure({ slotCount, lineTable, lineStartRow, advances, params })` —
+  `lineTable` from `itemMeta[0].lineSlotOffsets`, `advances` the per-slot `sizes[2i]`,
+  `lineStartRow` the exclusive scan the check computes itself (and then checks against the CPU
+  build's y, so the scan formula is under test too).
+
+  Coverage teeth run before the diff (two empty arrays compare equal): slots > 0, lines > 3,
+  finite positions, >1 distinct x AND y, one slot per codepoint, a line table starting at 0 that
+  never decreases, an empty line, cellWidth reproducing line 0, cellHeight being the row pitch,
+  the lineStartRow scan reproducing line y; wrapping folds add "a line exceeds wrapWidth" + a real
+  z-staircase, paginating folds add "pagination fired (`pageContentWidth` > 0)" + pages actually
+  separating. `--selftest` swaps a CPU reference model in for the kernel module through the same
+  constructor/configure/compute/readPositions surface, so the harness proves itself — that model
+  matches the builder **bit-exactly (max |Δ| = 0) on all five folds**, which makes it the
+  executable spec for what the GPU must reproduce, and proves those inputs are *sufficient*.
+
+  Three things it measured that any kernel work has to respect:
+  - **cellWidth is the builder's advance, NOT `metrics.charWidth`.** `getCharSize().width` is
+    CEIL'd to whole pixels; the builder steps by `ax / upem × (worldScale × pixelHeight)`. On the
+    current font those differ by 12.5% — the check takes the modal advance out of the builder's
+    own `sizes` buffer and warns when the metric-derived number disagrees.
+  - **…but the PAGE GAP multiplies `charWidth`, not that advance.** `paginationGeometry` uses
+    `charAdvance = metrics.charWidth + letterSpacing` for `gapXWorld` and for the `pageWidthWorld`
+    fallback. Two different cell widths in one builder; the check passes the gap unit as its own
+    `pageGapUnit` param (plus world-unit `pageGapXWorld` / `pageGapYWorld` / `pageDepthWorld`).
+  - **The builder ACCUMULATES x** (f32 rounding per store), so a closed-form `col × cellWidth`
+    drifts ~3e-7 per column and breaks a 1e-4 epsilon past ~340 columns. A prefix sum over
+    `advances` reproduces it exactly instead. The check reports the per-column rate and the
+    column budget it implies.
+
 ## Log store (relay SQLite)
 
 The relay keeps every browser log record in an in-memory SQLite store (FTS5-indexed).
