@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { LineBasicNodeMaterial } from 'three/webgpu';
 import { uniform } from 'three/tsl';
 import { RENDER_ORDER } from '../core/renderOrder.js';
+import { measureSlotSpan } from '../core/foldEvaluate.js';
 
 /**
  * StrataLayout — a per-grid ARRANGER that renders a file as nested Z-depth STRATA.
@@ -175,8 +176,22 @@ export class StrataLayout {
             }
             boxes.push({ start: range.start, count: range.end - range.start, depth, z, node });
         }
-        if (engine) grid._resyncEngineLayout?.();
-        else r.markInstanceTransformsDirty();
+        if (engine) {
+            grid._resyncEngineLayout?.();
+            // The arranged extent is the flow footprint pushed forward by the planes — set it
+            // directly (there is no buffer to re-walk; see _applyArrangers' engine branch).
+            const flow = measureSlotSpan(pos, r.getInstanceSizes?.(), 0, total);
+            if (flow) {
+                let maxPlane = 0;
+                for (const b of boxes) if (b.z > maxPlane) maxPlane = b.z;
+                grid.setEngineBounds?.({
+                    min: { x: flow.min.x, y: flow.min.y, z: Math.min(flow.min.z, 0) },
+                    max: { x: flow.max.x, y: flow.max.y, z: Math.max(flow.max.z, maxPlane) },
+                });
+            }
+        } else {
+            r.markInstanceTransformsDirty();
+        }
 
         // 2) Boxes — measure each node's X/Y bounds from the arranged positions (live buffer
         //    on CPU; the scratch on the engine — z differs there, but boxes draw at the
@@ -192,26 +207,6 @@ export class StrataLayout {
      *  boxes are rebuilt fresh, so a live param change applies in place. */
     _reapply() {
         if (this._active) this.arrange(this._grid);
-    }
-
-    /** measureSlotRange's min/max math, read from an explicit position source — the live
-     *  buffer or the engine's fold scratch alike. (Extracted here at its second consumer;
-     *  a third moves it to core.) */
-    _measureRange(pos, siz, startSlot, count) {
-        if (count <= 0) return null;
-        const start = Math.max(0, startSlot | 0);
-        const end = Math.min((pos.length / 3) | 0, start + count);
-        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-        for (let s = start; s < end; s++) {
-            const px = pos[s * 3], py = pos[s * 3 + 1];
-            const sw = siz[s * 2], sh = siz[s * 2 + 1];
-            if (px < minX) minX = px;
-            if (py < minY) minY = py;
-            if (px + sw > maxX) maxX = px + sw;
-            if (py + sh > maxY) maxY = py + sh;
-        }
-        if (minX === Infinity) return null;
-        return { min: { x: minX, y: minY }, max: { x: maxX, y: maxY } };
     }
 
     /** Pre-order list of every tree node with its depth (roots = 0). */
@@ -289,7 +284,7 @@ export class StrataLayout {
         const colArr = new Float32Array(cap * 3);
         let v = 0;
         for (const b of boxes) {
-            const bb = this._measureRange(pos, siz, b.start, b.count);
+            const bb = measureSlotSpan(pos, siz, b.start, b.count);
             if (!bb) continue;
             // The glyph quad is CENTER-anchored in Y (worldPos.y = iPos.y ± iSize.y/2), but
             // measureSlotRange reports min.y = iPos.y / max.y = iPos.y + iSize.y (corner-style),

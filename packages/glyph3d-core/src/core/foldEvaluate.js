@@ -15,6 +15,40 @@
 import { paginationShift } from '../workers/builders/index.js';
 
 /**
+ * Min/max extent of a contiguous slot range over an explicit position source — the live
+ * CPU buffer or an evaluateFold scratch alike (both stride 3). The measurement primitive
+ * behind arranger block sizing and strata boxes; GlyphField.measureSlotRange remains the
+ * buffer-backed convenience for CPU-engine fields.
+ * @param {Float32Array} pos - stride-3 positions
+ * @param {Float32Array} sizes - stride-2 [advance, height] per slot
+ * @param {number} startSlot inclusive
+ * @param {number} count
+ * @returns {{min:{x,y,z},max:{x,y,z},width:number,height:number,depth:number}|null}
+ */
+export function measureSlotSpan(pos, sizes, startSlot, count) {
+    if (!pos || !sizes || count <= 0) return null;
+    const start = Math.max(0, startSlot | 0);
+    const end = Math.min((pos.length / 3) | 0, start + count);
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+    for (let s = start; s < end; s++) {
+        const px = pos[s * 3], py = pos[s * 3 + 1], pz = pos[s * 3 + 2];
+        const sw = sizes[s * 2], sh = sizes[s * 2 + 1];
+        if (px < minX) minX = px;
+        if (py < minY) minY = py;
+        if (pz < minZ) minZ = pz;
+        if (px + sw > maxX) maxX = px + sw;
+        if (py + sh > maxY) maxY = py + sh;
+        if (pz > maxZ) maxZ = pz;
+    }
+    if (minX === Infinity) return null;
+    return {
+        min: { x: minX, y: minY, z: minZ }, max: { x: maxX, y: maxY, z: maxZ },
+        width: maxX - minX, height: maxY - minY, depth: maxZ - minZ,
+    };
+}
+
+/**
  * @param {Object} p
  * @param {number} p.slotCount - item-local slot count
  * @param {Uint32Array|Int32Array|number[]} p.lineTable - item-local line-start slot indexes

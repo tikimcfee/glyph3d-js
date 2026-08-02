@@ -2032,7 +2032,9 @@ export default class GlyphField {
     markInstanceTransformsDirty() {
         const geom = this.instanceMesh?.geometry;
         if (!geom) return;
-        if (geom.attributes.instancePosition) geom.attributes.instancePosition.needsUpdate = true;
-        if (geom.attributes.instanceSize)     geom.attributes.instanceSize.needsUpdate     = true;
+        // Engine fields: the position attribute is GPU-written; uploading its CPU-side
+        // array (zeros) would erase the kernel's work. Sizes remain CPU-owned either way.
+        if (!this.gpuLayout && geom.attributes.instancePosition) geom.attributes.instancePosition.needsUpdate = true;
+        if (geom.attributes.instanceSize) geom.attributes.instanceSize.needsUpdate = true;
     }
 }

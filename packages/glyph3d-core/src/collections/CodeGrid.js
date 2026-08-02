@@ -248,7 +248,7 @@ class CodeGrid extends FramedGlyphField {
         const shared = {
             // CodeGrid metric names → builder metric names, same mapping the description uses.
             metrics: { charWidth: m.charWidth, charHeight: m.charHeight, lineSpacing: m.lineHeight, letterSpacing: m.spacing || 0 },
-            layout: resolveLayoutParams(this.config.layout),
+            layout: resolveLayoutParams(this._foldLayout()),
             scrollOffset: this._scrollOffset || 0,
         };
         const res = syncGpuLayout(field, { count, sizes, itemMeta, bounds: null }, items, shared, rendererIds);
@@ -276,7 +276,7 @@ class CodeGrid extends FramedGlyphField {
         if (!count) return null;
         const out = new Float32Array(count * 3);
         const m = this.metrics;
-        const lp = resolveLayoutParams(this.config.layout);
+        const lp = resolveLayoutParams(this._foldLayout());
         for (const [, entry] of field.renderedTexts) {
             const n = entry.glyphCount;
             if (!n || !entry.lineSlotOffsets) continue;
@@ -325,12 +325,37 @@ class CodeGrid extends FramedGlyphField {
         let ran = false;
         for (const a of this._arrangers) { if (a.arrange) { a.arrange(this); ran = true; } }
         if (!ran) return;
+        if (this._renderer.gpuLayout === true) {
+            // Engine grids: the arranger already re-dispatched (_resyncEngineLayout) and set
+            // the arranged bounds itself (it KNOWS the extent — packing box / plane depth —
+            // better than any walk). Nulling the cache here would leave getContentBounds
+            // with nothing: there is no CPU buffer to re-walk.
+            return;
+        }
         // The arrangers rewrote the live positions; the worker's flow-bounds cache is now
         // wrong and the cull bounds were set to the flow extent. Drop the cache, mark dirty
         // (the next _getContentBounds re-walks the arranged buffer), refresh the cull bounds.
         this._workerBoundsCache  = null;
         this._contentBoundsDirty = true;
         this._renderer.refreshBounds(); // re-walk the now-arranged buffer
+    }
+
+    /**
+     * Adopt arranged bounds computed by an engine-mode arranger — the packing box, plane
+     * depths — as this grid's content + cull truth. The arranger calls this after its
+     * re-dispatch; there is no buffer to walk, and the arranger's own extent is exact.
+     * @param {{min:{x,y,z}, max:{x,y,z}}} bounds
+     */
+    setEngineBounds(bounds) {
+        if (!bounds?.min || !bounds?.max) return;
+        this._workerBoundsCache = {
+            min: { ...bounds.min }, max: { ...bounds.max },
+            width: bounds.max.x - bounds.min.x,
+            height: bounds.max.y - bounds.min.y,
+            depth: bounds.max.z - bounds.min.z,
+        };
+        this._contentBoundsDirty = false;
+        this._renderer?._updateGeometryBounds(this._workerBoundsCache);
     }
 
     /**
@@ -1882,7 +1907,7 @@ class CodeGrid extends FramedGlyphField {
         // so the analytic fallback aligns with the glyphs. CodeGrid metrics → builder
         // metric names.
         const contentWidth = this._getContentItemMeta()?.pageContentWidth || 0;
-        const lp = resolveLayoutParams(this.config.layout);  // SAME normalization the builder applies — geom can't drift
+        const lp = resolveLayoutParams(this._foldLayout());  // SAME normalization the builder applies — geom can't drift
         const geom = paginationGeometry(
             { charWidth: m.charWidth, letterSpacing: m.spacing || 0, lineSpacing: m.lineHeight },
             contentWidth,
