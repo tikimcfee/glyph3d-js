@@ -101,6 +101,8 @@ export default function registerSystemCommands(router) {
     router.register('status', (args, ctx) => {
         const cam = ctx.camera.position;
         const gridEntries = ctx.registry.findByType('grid');
+        const looseCount = ctx.registry.findLoose('grid').length;
+        const carriedCount = gridEntries.length - looseCount;
         let totalGlyphs = 0;
         for (const e of gridEntries) totalGlyphs += e.grid.getGlyphCount();
 
@@ -117,7 +119,9 @@ export default function registerSystemCommands(router) {
                 : 'no source loaded';
 
         const data = {
-            'grids': String(gridEntries.length),
+            'grids': carriedCount
+                ? `${looseCount} loose + ${carriedCount} carried`
+                : String(gridEntries.length),
             'glyphs': totalGlyphs.toLocaleString(),
             'registry': String(ctx.registry.size),
             'camera': `${cam.x.toFixed(0)}, ${cam.y.toFixed(0)}, ${cam.z.toFixed(0)}`,
@@ -130,6 +134,8 @@ export default function registerSystemCommands(router) {
             text: box('STATUS', lines, 40) + '\nOK: status',
             data: {
                 gridCount: gridEntries.length,
+                looseGrids: looseCount,
+                carriedGrids: carriedCount,
                 glyphCount: totalGlyphs,
                 registryTotal: ctx.registry.size,
                 camera: { x: cam.x, y: cam.y, z: cam.z },

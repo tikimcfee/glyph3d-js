@@ -17,10 +17,15 @@ export default function registerRegistryCommands(router) {
     // ================================================================
 
     router.register('registry.list', (args, ctx) => {
+        // The filter tries species first, then role — `registry.list grid`
+        // and `registry.list card` both answer.
         const typeFilter = args[0] || null;
-        const entries = typeFilter
+        let entries = typeFilter
             ? ctx.registry.findByType(typeFilter)
             : ctx.registry.list();
+        if (typeFilter && entries.length === 0) {
+            entries = ctx.registry.findByRole?.(typeFilter) || [];
+        }
 
         if (entries.length === 0) {
             const msg = typeFilter
@@ -124,21 +129,32 @@ export default function registerRegistryCommands(router) {
 
     router.register('registry.types', (args, ctx) => {
         const counts = ctx.registry.typeCounts();
+        const roles = ctx.registry.roleCounts?.() || {};
         const types = Object.entries(counts);
 
         if (types.length === 0) {
             return {
                 text: 'OK: registry empty (0 types)',
-                data: { types: {}, total: 0 },
+                data: { types: {}, roles: {}, total: 0 },
             };
         }
 
-        const lines = types.map(([type, count]) => `  ${type}: ${count}`);
+        // Species count, with the role breakdown when a species is carried
+        // in more than one way — e.g. `grid: 709 (416 loose, 293 card)`.
+        const lines = types.map(([type, count]) => {
+            const r = Object.entries(roles[type] || {});
+            const breakdown = r.length > 1
+                ? ` (${r.map(([role, n]) => `${n} ${role}`).join(', ')})`
+                : r.length === 1 && r[0][0] !== 'loose'
+                    ? ` (all ${r[0][0]})`
+                    : '';
+            return `  ${type}: ${count}${breakdown}`;
+        });
         const total = ctx.registry.size;
 
         return {
             text: lines.join('\n') + `\nOK: ${types.length} type(s), ${total} total entries`,
-            data: { types: counts, total },
+            data: { types: counts, roles, total },
         };
     }, {
         description: 'List all registry types with counts',

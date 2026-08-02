@@ -298,7 +298,7 @@ export default function registerFileCommands(router) {
     // loaded?", a driver's best proxy was a census of grids.
     router.register('file.sources', (_args, ctx) => {
         const sources = Array.isArray(ctx.fieldSources) ? ctx.fieldSources : [];
-        const grids = ctx.registry?.findByType?.('grid')?.length ?? 0;
+        const grids = ctx.registry?.findLoose?.('grid')?.length ?? 0;
         const dirs = ctx.contentTree?.dirCount?.() ?? 0;
         if (!sources.length) {
             return {
@@ -331,7 +331,7 @@ export default function registerFileCommands(router) {
         if (!args[0]) return { text: 'ERR: usage: file.closeDir <dir-path>', data: null };
         const dir = canonicalPath(ctx, args[0]);
         const prefix = dir === '/' ? '/' : dir + '/';
-        const doomed = ctx.registry.findByType('grid')
+        const doomed = ctx.registry.findLoose('grid')
             .filter((e) => e.id === dir || String(e.id).startsWith(prefix));
         if (!doomed.length) {
             return { text: `OK: nothing loaded under "${dir}"`, data: { dir, closed: 0 } };

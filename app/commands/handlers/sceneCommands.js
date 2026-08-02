@@ -11,11 +11,14 @@ import { box, kvLines } from '../formatResponse.js';
 export default function registerSceneCommands(router) {
     router.register('scene.info', (args, ctx) => {
         const gridEntries = ctx.registry.findByType('grid');
+        const loose = ctx.registry.findLoose('grid').length;
         let totalGlyphs = 0;
         for (const e of gridEntries) totalGlyphs += e.grid.getGlyphCount();
 
         const data = {
-            'grids': String(gridEntries.length),
+            'grids': gridEntries.length === loose
+                ? String(loose)
+                : `${loose} loose + ${gridEntries.length - loose} carried`,
             'glyphs': totalGlyphs.toLocaleString(),
             'registry total': String(ctx.registry.size),
             'scene children': String(ctx.scene.children.length),
@@ -44,7 +47,9 @@ export default function registerSceneCommands(router) {
     // (the canonical dispose path used by grid.remove): geometry freed, removed from
     // scene, unregistered.
     router.register('scene.clear_grids', (args, ctx) => {
-        const grids = ctx.registry.findByType('grid');
+        // Loose grids only — a grid carried as a book's page is the book's,
+        // and clearing the field must never reach inside a book.
+        const grids = ctx.registry.findLoose('grid');
         if (grids.length === 0) return { text: 'OK: no grids to clear', data: { cleared: 0 } };
         // removeGrids: the canonical bulk-dispose path — zero intermediate re-packs,
         // one world settle at the end.

@@ -4,14 +4,24 @@
  * All grid creation/removal flows through register/unregister.
  * The grids array is a cached derived view via toArray('grid').
  *
- * Types: 'grid', 'window', 'annotation', 'label', 'agent', 'tour-annotation'
+ * SPECIES vs ROLE — one identity, many presentations. `type` says what an
+ * object IS ('grid', 'terminal', 'book', 'carrel', 'frame', ...) and never
+ * changes with presentation. `role` says how it is currently carried
+ * ('card' = a sheet inside an agent book, 'volume' = a directory bound as a
+ * library volume, 'agent' = an agent lane's deck root) and is absent for a
+ * loose world citizen. The machinery keys on the TAG (`role || type`):
+ * pickability, culling, toArray/index spaces — so a role-less world behaves
+ * exactly as before, and identity queries (findByType) see every member of
+ * a species no matter what carries it. IDs are IDs; a grid that becomes a
+ * book page stays findable and readable as the grid it is.
  */
 
 /**
  * @typedef {Object} RegistryEntry
  * @property {string} id - stable string identifier
  * @property {Object} grid - CodeGrid instance (or any scene object)
- * @property {string} type - one of the known types
+ * @property {string} type - SPECIES: what the object is
+ * @property {string|null} role - presentation role, null when loose
  * @property {Object} meta - arbitrary metadata
  */
 
@@ -44,15 +54,16 @@ export default class SceneRegistry {
     // -- Mutation -------------------------------------------------------
 
     /**
-     * Register a scene object with a stable ID and type tag.
+     * Register a scene object with a stable ID, species type, and optional role.
      * @param {string} id - unique identifier (caller-chosen)
      * @param {Object} grid - CodeGrid or scene object
      * @param {Object} opts
-     * @param {string} opts.type
+     * @param {string} opts.type - species (what it IS)
+     * @param {string} [opts.role] - presentation role (how it's carried)
      * @param {Object} [opts.*] - additional metadata fields
      * @returns {RegistryEntry}
      */
-    register(id, grid, { type, ...meta }) {
+    register(id, grid, { type, role = null, ...meta }) {
         if (this._entries.has(id)) {
             const existing = this._entries.get(id);
             this._gridToId.delete(existing.grid);
@@ -62,12 +73,17 @@ export default class SceneRegistry {
             }
         }
 
-        const entry = { id, grid, type, meta };
+        const entry = { id, grid, type, role, meta };
         this._entries.set(id, entry);
         this._gridToId.set(grid, id);
-        if (this._pickableTypes.has(type)) this._pickable.add(entry);
-        this._invalidateCache(type);
+        if (this._pickableTypes.has(this._tag(entry))) this._pickable.add(entry);
+        this._invalidateCache(this._tag(entry));
         return entry;
+    }
+
+    /** The machinery key: presentation role when carried, species when loose. @private */
+    _tag(entry) {
+        return entry.role || entry.type;
     }
 
     /**
@@ -81,7 +97,7 @@ export default class SceneRegistry {
         this._entries.delete(id);
         this._gridToId.delete(entry.grid);
         this._pickable.delete(entry);
-        this._invalidateCache(entry.type);
+        this._invalidateCache(this._tag(entry));
         return entry;
     }
 
@@ -95,16 +111,17 @@ export default class SceneRegistry {
     }
 
     /**
-     * Remove all entries of a given type.
+     * Remove all entries of a given TAG (role||type — lifecycle scope, so
+     * clearing 'tour-annotation' or 'grid' never guts a book's pages).
      * Returns removed entries (caller iterates for disposal).
      * Fires a single cache invalidation after all removals.
-     * @param {string} type
+     * @param {string} tag
      * @returns {RegistryEntry[]}
      */
-    unregisterByType(type) {
+    unregisterByType(tag) {
         const removed = [];
         for (const [id, entry] of this._entries) {
-            if (entry.type === type) {
+            if (this._tag(entry) === tag) {
                 this._entries.delete(id);
                 this._gridToId.delete(entry.grid);
                 this._pickable.delete(entry);
@@ -112,20 +129,20 @@ export default class SceneRegistry {
             }
         }
         if (removed.length > 0) {
-            this._invalidateCache(type);
+            this._invalidateCache(tag);
         }
         return removed;
     }
 
     /**
-     * Re-order entries of a given type according to a comparator.
+     * Re-order entries of a given tag according to a comparator.
      * Compares RegistryEntry objects (access .grid, .meta, .id).
      * Rebuilds Map insertion order via delete + re-insert (ES2015 spec).
-     * @param {string} type
+     * @param {string} tag
      * @param {(a: RegistryEntry, b: RegistryEntry) => number} compareFn
      */
-    sortByType(type, compareFn) {
-        const entries = this.findByType(type);
+    sortByType(tag, compareFn) {
+        const entries = this.list().filter((e) => this._tag(e) === tag);
         entries.sort(compareFn);
         // Rebuild Map insertion order: delete then re-insert in sorted order
         for (const entry of entries) {
@@ -134,7 +151,7 @@ export default class SceneRegistry {
         for (const entry of entries) {
             this._entries.set(entry.id, entry);
         }
-        this._invalidateCache(type);
+        this._invalidateCache(tag);
     }
 
     // -- Queries --------------------------------------------------------
@@ -154,7 +171,9 @@ export default class SceneRegistry {
     }
 
     /**
-     * Find all entries of a given type.
+     * Find all entries of a given SPECIES — every member, however carried
+     * (loose in the field, a card in a book, bound in a volume). The
+     * identity/read query: "all the grids there are".
      * Returns a fresh array each call (not cached -- use toArray for caching).
      * @param {string} type
      * @returns {RegistryEntry[]}
@@ -168,21 +187,51 @@ export default class SceneRegistry {
     }
 
     /**
-     * Cached frozen array of grid objects for a given type.
-     * Rebuilt only when entries of that type change.
-     * Insertion-order stable (Map preserves insertion order).
+     * Find the LOOSE entries of a species — members not carried by anything
+     * (role == null). The lifecycle query: what clear/dispose/census sweeps
+     * may touch without reaching inside a book.
      * @param {string} type
+     * @returns {RegistryEntry[]}
+     */
+    findLoose(type) {
+        const results = [];
+        for (const entry of this._entries.values()) {
+            if (entry.type === type && !entry.role) results.push(entry);
+        }
+        return results;
+    }
+
+    /**
+     * Find all entries carried under a given role, any species.
+     * @param {string} role
+     * @returns {RegistryEntry[]}
+     */
+    findByRole(role) {
+        const results = [];
+        for (const entry of this._entries.values()) {
+            if (entry.role === role) results.push(entry);
+        }
+        return results;
+    }
+
+    /**
+     * Cached frozen array of grid objects for a given TAG (role||type) —
+     * the machinery view: index spaces, culling, camera surfaces. A role-less
+     * world makes tag == type, so toArray('grid') is exactly the loose grids.
+     * Rebuilt only when entries of that tag change.
+     * Insertion-order stable (Map preserves insertion order).
+     * @param {string} tag
      * @returns {Object[]} frozen array of grid/scene objects (not entries)
      */
-    toArray(type) {
-        if (!this._typeCache.has(type)) {
+    toArray(tag) {
+        if (!this._typeCache.has(tag)) {
             const arr = [];
             for (const entry of this._entries.values()) {
-                if (entry.type === type) arr.push(entry.grid);
+                if (this._tag(entry) === tag) arr.push(entry.grid);
             }
-            this._typeCache.set(type, Object.freeze(arr));
+            this._typeCache.set(tag, Object.freeze(arr));
         }
-        return this._typeCache.get(type);
+        return this._typeCache.get(tag);
     }
 
     /**
@@ -214,21 +263,24 @@ export default class SceneRegistry {
     }
 
     /**
-     * Mark a type as pick-eligible (hover / click / drag), back-filling any entries
-     * already registered under it. New entity types (trail groups, overlays) opt in
-     * HERE instead of editing the input layer's hardcoded type list — one seam.
-     * @param {string} type
+     * Mark a TAG (role||type) as pick-eligible (hover / click / drag),
+     * back-filling any entries already registered under it. New entity kinds
+     * (trail cards, volume covers) opt in HERE instead of editing the input
+     * layer's hardcoded list — one seam. Keying on the tag means a deck root
+     * (role 'agent') can pick differently from a loose 'book' without
+     * forking species.
+     * @param {string} tag
      * @param {boolean} [on=true]
      * @returns {this}
      */
-    setPickable(type, on = true) {
+    setPickable(tag, on = true) {
         if (on) {
-            if (this._pickableTypes.has(type)) return this;
-            this._pickableTypes.add(type);
-            for (const e of this._entries.values()) if (e.type === type) this._pickable.add(e);
+            if (this._pickableTypes.has(tag)) return this;
+            this._pickableTypes.add(tag);
+            for (const e of this._entries.values()) if (this._tag(e) === tag) this._pickable.add(e);
         } else {
-            this._pickableTypes.delete(type);
-            for (const e of this._entries.values()) if (e.type === type) this._pickable.delete(e);
+            this._pickableTypes.delete(tag);
+            for (const e of this._entries.values()) if (this._tag(e) === tag) this._pickable.delete(e);
         }
         return this;
     }
@@ -244,14 +296,14 @@ export default class SceneRegistry {
     }
 
     /**
-     * Index into the cached toArray for a given type.
+     * Index into the cached toArray for a given tag.
      * No external array needed -- indexes into registry's own cache.
      * @param {number} index
-     * @param {string} [type='grid']
+     * @param {string} [tag='grid']
      * @returns {RegistryEntry|null}
      */
-    getByIndex(index, type = 'grid') {
-        const arr = this.toArray(type);
+    getByIndex(index, tag = 'grid') {
+        const arr = this.toArray(tag);
         if (index < 0 || index >= arr.length) return null;
         const grid = arr[index];
         const id = this._gridToId.get(grid);
@@ -259,13 +311,27 @@ export default class SceneRegistry {
     }
 
     /**
-     * Get type counts summary.
+     * Get SPECIES counts summary.
      * @returns {Object<string, number>}
      */
     typeCounts() {
         const counts = {};
         for (const entry of this._entries.values()) {
             counts[entry.type] = (counts[entry.type] || 0) + 1;
+        }
+        return counts;
+    }
+
+    /**
+     * Per-species role breakdown: type -> role -> count ('loose' for none).
+     * @returns {Object<string, Object<string, number>>}
+     */
+    roleCounts() {
+        const counts = {};
+        for (const entry of this._entries.values()) {
+            const t = counts[entry.type] ?? (counts[entry.type] = {});
+            const r = entry.role || 'loose';
+            t[r] = (t[r] || 0) + 1;
         }
         return counts;
     }

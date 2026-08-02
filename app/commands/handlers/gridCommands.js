@@ -14,41 +14,55 @@ import { decodeBase64 } from '@glyph3d/core/utils/encoding.js';
  */
 export default function registerGridCommands(router) {
     router.register('grid.list', (args, ctx) => {
-        const entries = ctx.registry.findByType('grid');
-        if (entries.length === 0) {
+        // Every grid there IS \u2014 loose ones indexed (the # column matches the
+        // resolver's index space exactly: both walk the same insertion order),
+        // carried ones (book pages, etc.) listed by id with their role: no
+        // index, because indices address the loose world only.
+        const loose = ctx.registry.findLoose('grid');
+        const carried = ctx.registry.findByType('grid').filter((e) => e.role);
+        if (loose.length === 0 && carried.length === 0) {
             return {
                 text: box('GRIDS', ['(no grids loaded)'], 50) + '\nOK: 0 grids',
-                data: { grids: [], count: 0 }
+                data: { grids: [], carried: [], count: 0 }
             };
         }
 
         const headers = ['#', 'id', 'filename', 'glyphs', 'lines'];
-        const rows = entries.map((e, i) => {
+        const row = (e, tag) => {
             const g = e.grid;
-            const name = g.getFilename() || g.getSourcePath() || '(unnamed)';
+            const name = g.getFilename?.() || g.getSourcePath?.() || '(unnamed)';
             return [
-                String(i),
+                tag,
                 e.id.length > 35 ? '\u2026' + e.id.slice(-34) : e.id,
                 name.length > 25 ? '\u2026' + name.slice(-24) : name,
-                String(g.getGlyphCount()),
-                String(g.getLineCount()),
+                String(g.getGlyphCount?.() ?? ''),
+                String(g.getLineCount?.() ?? ''),
             ];
+        };
+        const rows = [
+            ...loose.map((e, i) => row(e, String(i))),
+            ...carried.map((e) => row(e, e.role)),
+        ];
+
+        const record = (e, i) => ({
+            ...(i != null ? { index: i } : { role: e.role }),
+            id: e.id,
+            filename: e.grid.getFilename?.(),
+            sourcePath: e.grid.getSourcePath?.(),
+            glyphs: e.grid.getGlyphCount?.(),
+            lines: e.grid.getLineCount?.(),
         });
 
-        const gridData = entries.map((e, i) => ({
-            index: i,
-            id: e.id,
-            filename: e.grid.getFilename(),
-            sourcePath: e.grid.getSourcePath(),
-            glyphs: e.grid.getGlyphCount(),
-            lines: e.grid.getLineCount(),
-        }));
-
         return {
-            text: table(headers, rows) + `\nOK: ${entries.length} grids`,
-            data: { grids: gridData, count: entries.length }
+            text: table(headers, rows)
+                + `\nOK: ${loose.length + carried.length} grids (${loose.length} loose, ${carried.length} carried)`,
+            data: {
+                grids: loose.map((e, i) => record(e, i)),
+                carried: carried.map((e) => record(e, null)),
+                count: loose.length + carried.length,
+            }
         };
-    }, { description: 'List all loaded grids' });
+    }, { description: 'List every grid \u2014 loose ones indexed, carried ones (book pages\u2026) by id + role' });
 
     router.register('grid.info', (args, ctx) => {
         if (args.length < 1) return { text: 'ERR: usage: grid.info <id|index>', data: null };

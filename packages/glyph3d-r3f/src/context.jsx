@@ -46,10 +46,12 @@ export function GlyphProvider({ atlas, children }) {
       // ALL bounds-bearing windows so a terminal/capture slows the flythrough and frames like a file.
       // Every bounds-bearing thing in the WORLD — the shared spine for dynamic-speed
       // sampling, soft bounds, fit-all framing, and viewport-relative placement.
-      // Agent books ('book.group') and carrels are world citizens too: without them
-      // the camera's scaled-motion-velocity never brakes near a shelf or a desk.
+      // Agent books (tag 'agent' — deck roots) and carrels are world citizens
+      // too: without them the camera's scaled-motion-velocity never brakes
+      // near a shelf or a desk. toArray is TAG-keyed, so 'grid' here is the
+      // loose grids — cards ride inside their decks' bounds.
       getSurfaces: () => [...registry.toArray('grid'), ...registry.toArray('terminal'),
-                          ...registry.toArray('frame'), ...registry.toArray('book.group'),
+                          ...registry.toArray('frame'), ...registry.toArray('agent'),
                           ...registry.toArray('carrel')],
     };
   }, [atlas]);

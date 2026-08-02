@@ -62,7 +62,7 @@ const RECORDS = {
     },
     moveVerb: 'grid.move',
   },
-  'book.card': {
+  card: {
     // Any page of a book IS the book: SHIFT+wheel turns it from wherever you're
     // reading — no aiming at the cover's margins. A plain wheel stays the camera's
     // (movement and paging are separate gestures). The card's meta names its lane.
@@ -71,7 +71,7 @@ const RECORDS = {
       return id ? ['book.scroll', id, String(dy > 0 ? -1 : 1)] : null;
     },
   },
-  'book.volume': {
+  volume: {
     // A library volume's COVER is the directory's book: SHIFT+wheel anywhere on it
     // turns the pages — one notch, one file, down dives deeper into the deck — the
     // same paging grammar as an agent book's cover. Plain wheel stays the camera's.
@@ -80,7 +80,7 @@ const RECORDS = {
       return p !== undefined ? ['book.scroll', p, String(dy > 0 ? 1 : -1)] : null;
     },
   },
-  'book.group': {
+  agent: {
     // An agent book. SHIFT+wheel over the cover TURNS THE PAGES — down = older
     // (deeper into the run), up = newer; landing on the newest resumes live-follow.
     // One notch = one sheet: a page turn is a discrete act, not a glide.
@@ -101,7 +101,7 @@ const RECORDS = {
  * @returns {string[]|null}
  */
 export function wheelScrollCommand(entry, dy) {
-  const rec = entry ? RECORDS[entry.type] : null;
+  const rec = entry ? RECORDS[entry.role || entry.type] : null;
   return rec?.wheelScroll ? rec.wheelScroll(entry, dy) : null;
 }
 
@@ -115,7 +115,7 @@ export function wheelScrollCommand(entry, dy) {
  * @returns {string[]|null}
  */
 export function wheelPageCommand(entry, dy) {
-  const rec = entry ? RECORDS[entry.type] : null;
+  const rec = entry ? RECORDS[entry.role || entry.type] : null;
   return rec?.wheelPage ? rec.wheelPage(entry, dy) : null;
 }
 

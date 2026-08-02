@@ -65,11 +65,12 @@ function resolveHostable(ctx, arg) {
     if (typeof arg === 'string' && arg.startsWith('agent:')) arg = arg.slice(6);
     const surf = resolveSurface(ctx, arg);
     if (surf) {
-        const kind = ctx.registry?.get?.(surf.id)?.type;
-        // A 'book.group' id aliases a lane's book — seating it would give one live
-        // object two member identities. Books seat by their LANE id, below.
-        if (kind === 'book.group') return null;
-        return { ...surf, kind };
+        const entry = ctx.registry?.get?.(surf.id);
+        // An agent deck root (role 'agent') aliases a lane's book — seating it
+        // would give one live object two member identities. Books seat by
+        // their LANE id, below.
+        if (entry?.role === 'agent') return null;
+        return { ...surf, kind: entry?.type };
     }
     const key = String(arg ?? '');
     const lane = ctx.agentBooks?.lanes?.get?.(key);

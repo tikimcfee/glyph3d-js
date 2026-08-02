@@ -12,6 +12,7 @@ import { installKeyboardRouter } from './keyboardRouter.js';
 import InteractionContext from '@glyph3d/core/services/interaction/InteractionContext.js';
 import LspNavigator from '@glyph3d/core/services/interaction/LspNavigator.js';
 import CameraDock from '@glyph3d/core/services/interaction/CameraDock.js';
+import OcclusionCuller from '@glyph3d/core/services/visual/OcclusionCuller.js';
 import RemoteFileSystemProvider from '@glyph3d/core/services/data/RemoteFileSystemProvider.js';
 import AgentSessionProvider from '@glyph3d/core/services/data/AgentSessionProvider.js';
 import RemoteLspProvider from '@glyph3d/core/services/data/RemoteLspProvider.js';
@@ -211,6 +212,8 @@ function DockRunner({ stateRef }) {
     const s = stateRef.current;
     const c = s?.ctx;
     c?.cameraDock?.update(dt, state.camera);
+    // Apply last pass's occlusion verdicts + refit query proxies for this pass.
+    c?.occlusionCuller?.update();
     // Carrels tick beside the dock (same animator discipline, no camera) — and a
     // dissolved desk that has drained its homeward slides gets swept out here.
     if (c?.carrels) {
@@ -381,7 +384,7 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // the entry's object) and its COVER rides the 'group' pick channel — so the wheel
     // over a cover turns the directory, the same interaction grammar as agent books.
     // Volumes are rebuilt every relayout, so registration reconciles per relayout.
-    state.registry.setPickable?.('book.volume');
+    state.registry.setPickable?.('volume');
     let volumeEntries = new Map();   // id → { vol, mesh } from the previous reconcile
     const syncVolumeCovers = () => {
       const ps = state.ctx.pickingSystem;
@@ -393,7 +396,7 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       for (const vol of contentTree.volumes()) {
         const path = vol.userData.path;
         const id = `vol:${path}`;
-        try { state.registry.register?.(id, vol, { type: 'book.volume', path }); } catch (_e) { /* best effort */ }
+        try { state.registry.register?.(id, vol, { type: 'book', role: 'volume', path }); } catch (_e) { /* best effort */ }
         const mesh = vol.cover?.mesh ?? null;
         if (ps && mesh) {
           Promise.resolve(ps._tslReady).then(() => {
@@ -442,6 +445,26 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // releases focus/keystroke-target from the gone id (else input routes to a corpse); the dock
     // dismisses its tile (orphan lifted, focus cleared, bar re-packed). One cascade, every close
     // path; no closer needs to know the window was focused or docked.
+    // Hardware occlusion-query culling (three's native occlusionTest seam): every world
+    // surface gets an invisible query proxy; candidates fully behind the OPAQUE occluder
+    // set (1.0 page faces, panels) go dark. Registry-driven membership; docked tiles are
+    // exempt (camera chrome is never occluded). Settings ▸ Culling arms it; cull.stats reads it.
+    const occlusionCuller = new OcclusionCuller({ renderer: state.ctx.renderer, scene });
+    occlusionCuller.shouldTest = (id) => !state.ctx.cameraDock?.has?.(id);
+    state.ctx.occlusionCuller = occlusionCuller;
+    // Tags (role||type): loose world citizens + agent deck roots. A card
+    // inside a book is its book's problem — the culler never reaches in.
+    const CULL_TAGS = new Set(['grid', 'terminal', 'frame', 'agent']);
+    const syncCullCandidates = () => {
+      for (const e of state.ctx.registry.list()) {
+        if (CULL_TAGS.has(e.role || e.type)) occlusionCuller.track(e.id, e.grid);
+      }
+      occlusionCuller.pruneMissing((id) => state.ctx.registry.has(id));
+    };
+    state.ctx.registry.addChangeListener(syncCullCandidates);
+    syncCullCandidates();
+    applyGroupSettings(state.ctx, 'Culling');
+
     const onRemoval = () => {
       // Agent books are hostable at carrels but live in AgentBooks' lanes, not the
       // registry — a liveness check that only asks the registry would dismiss a
@@ -693,6 +716,9 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       }
       state.ctx.carrels.clear();
       state.ctx.activeCarrel = null;
+      state.ctx.registry.removeChangeListener(syncCullCandidates);
+      occlusionCuller.dispose();
+      state.ctx.occlusionCuller = null;
     };
   }, [relay]);
 

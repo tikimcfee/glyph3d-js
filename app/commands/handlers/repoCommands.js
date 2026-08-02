@@ -19,7 +19,7 @@ import GitHubFileProvider from '@glyph3d/core/services/data/GitHubFileProvider.j
 function clearScene(ctx) {
     // removeGrids is the canonical bulk-dispose path: geometry freed, unregistered,
     // zero intermediate re-packs, one world settle at the end.
-    const cleared = ctx.removeGrids(ctx.registry.findByType('grid').map((e) => e.id));
+    const cleared = ctx.removeGrids(ctx.registry.findLoose('grid').map((e) => e.id));
     ctx.annotations?.clear?.();
     ctx.workspace?.clear?.();
     ctx._cancelCameraAnimation?.();

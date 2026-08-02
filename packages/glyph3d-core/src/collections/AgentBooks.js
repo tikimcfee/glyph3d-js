@@ -140,10 +140,10 @@ export default class AgentBooks {
 
         /** agentId → lane: the book, its identity, its lifecycle, and its per-sheet card refs. */
         this.lanes = new Map();
-        // Sheet cards register as pickable 'book.card' entries (hover-highlight via the 'grid'
+        // Sheet cards register as pickable role-'card' entries (hover-highlight via the 'grid'
         // pick channel; the cover rides the 'group' channel). Mark the type pickable BEFORE any
         // register() — SceneRegistry only adds an entry to the pickable set if its type is known.
-        this.ctx.registry?.setPickable?.('book.card');
+        this.ctx.registry?.setPickable?.('card');
         this._listeners = new Set();   // change subscribers (the Agents panel)
         this._onRelayout = [];         // fired after each _relayout — the world layout re-spaces the cluster
         this._tmp = new THREE.Vector3();
@@ -433,25 +433,31 @@ export default class AgentBooks {
 
     /**
      * The lanes present, for the panel's roster — everything a row needs in one call:
-     * id, type, lifecycle, beacon, identity color, sheet count, head + live-follow, and
-     * the newest sheet's time. Ordered oldest lane first (creation order).
+     * id, type, lifecycle, beacon, identity color, sheet count, retention (effective
+     * cap + whether it's an override), head + live-follow, and the newest sheet's time.
+     * Ordered oldest lane first (creation order).
      */
     agents() {
         const pal = this.cfg.palette;
-        return [...this.lanes.entries()].map(([id, l]) => ({
-            id,
-            type: l.agentType,
-            state: l.state,
-            beacon: l.beacon,
-            sessionId: l.sessionId,
-            count: l.book.sheets.length,
-            hueIdx: l.hueIdx,
-            color: '#' + ((pal[l.hueIdx % pal.length] >>> 0) & 0xffffff).toString(16).padStart(6, '0'),
-            head: l.book.head,
-            following: l.book.following,
-            lastTs: l.entries.length ? l.entries[l.entries.length - 1].ts : l.lastActivityTs,
-            recent: l.entries.slice(-3).map((e) => fmtEntry(e.record)),
-        }));
+        return [...this.lanes.entries()].map(([id, l]) => {
+            const cap = this._capFor(l);
+            return {
+                id,
+                type: l.agentType,
+                state: l.state,
+                beacon: l.beacon,
+                sessionId: l.sessionId,
+                count: l.book.sheets.length,
+                limit: l.maxSheets,                        // retention override (null → shelf default)
+                cap: Number.isFinite(cap) ? cap : 0,       // effective kept-turns cap (0 = unbounded)
+                hueIdx: l.hueIdx,
+                color: '#' + ((pal[l.hueIdx % pal.length] >>> 0) & 0xffffff).toString(16).padStart(6, '0'),
+                head: l.book.head,
+                following: l.book.following,
+                lastTs: l.entries.length ? l.entries[l.entries.length - 1].ts : l.lastActivityTs,
+                recent: l.entries.slice(-3).map((e) => fmtEntry(e.record)),
+            };
+        });
     }
 
     /**
@@ -580,7 +586,7 @@ export default class AgentBooks {
     }
 
     /** A free CodeGrid card with content; when its async bounds settle, re-fit the sheet it
-     *  rides and re-flow (and, if `pick` given, register it as a pickable 'book.card'). */
+     *  rides and re-flow (and, if `pick` given, register it as a pickable role-'card'). */
     _card(filename, body, opts, pick, lane, sheetId) {
         const grid = this._makeGrid(filename, opts);
         grid.loadFileAsync(filename, body)
@@ -637,7 +643,7 @@ export default class AgentBooks {
     }
 
     /**
-     * Register a LOADED card as a pickable 'book.card' registry entry. Its background panel
+     * Register a LOADED card as a pickable role-'card' registry entry. Its background panel
      * rides the 'grid' pick channel (FramedGlyphField.setPickingSystem, wired by
      * CanvasInteraction's registry-change sweep) → hover-highlight + click-to-focus.
      * MUST run after load: _background (the pick panel) is created lazily, so an earlier
@@ -645,7 +651,9 @@ export default class AgentBooks {
      */
     _wireCardPick(grid, id, meta) {
         if (!grid || typeof grid.setPickingSystem !== 'function') return;
-        try { this.ctx.registry?.register?.(id, grid, { type: 'book.card', ...meta }); }
+        // Species 'grid' (it IS a text grid — findable/readable as one),
+        // role 'card' (carried by a book — pick/cull/index key on the role).
+        try { this.ctx.registry?.register?.(id, grid, { type: 'grid', role: 'card', ...meta }); }
         catch (e) { console.warn('[AgentBooks] card pick register failed', e); }
     }
 
@@ -755,13 +763,13 @@ export default class AgentBooks {
     /**
      * Make a book a draggable GROUP. The cover box is the pick HANDLE: registered on the
      * 'group' channel with the BOOK as its token, and the book is a registry entry of
-     * type 'book.group'. A hover-pick of the cover resolves (getIdByGrid) to this entry →
+     * species 'book', role 'agent'. A hover-pick of the cover resolves (getIdByGrid) to this entry →
      * ObjectDragger Ctrl-drags entry.grid (the book) — the whole deck follows. Release
      * routes through book.move (ephemeral — no workspace persistence). Cards out-pick
      * the cover (cross-channel priority), so it only catches the empty interior.
      */
     _registerGroup(agentId, lane) {
-        this.ctx.registry?.register?.(lane.groupId, lane.book, { type: 'book.group' });
+        this.ctx.registry?.register?.(lane.groupId, lane.book, { type: 'book', role: 'agent' });
         const ps = this.ctx.pickingSystem;
         if (!ps) return;
         Promise.resolve(ps._tslReady).then(() => {

@@ -241,7 +241,7 @@ export default function FileTree({ client }) {
     if (!client) return undefined;
     const refresh = () => {
       const r = client.ctx?.registry;
-      if (r) setLoadedVis(new Map(r.findByType('grid').map((e) => [e.id, e.grid?.visible !== false])));
+      if (r) setLoadedVis(new Map(r.findLoose('grid').map((e) => [e.id, e.grid?.visible !== false])));
       const sources = Array.isArray(client.ctx?.fieldSources) ? client.ctx.fieldSources : [];
       setPinnedRoots(sources.filter((s) => s?.type === 'local' && String(s.dir).startsWith('/')).map((s) => s.dir));
       const p = client.ctx?.fileProvider;
@@ -357,7 +357,7 @@ export default function FileTree({ client }) {
     client.router.execute(['grid.visibility', canonicalPath(client.ctx, path), shown ? 'false' : 'true']);
     // grid.visible mutates without a registry event → refresh the loaded map now.
     const r = client.ctx?.registry;
-    if (r) setLoadedVis(new Map(r.findByType('grid').map((e) => [e.id, e.grid?.visible !== false])));
+    if (r) setLoadedVis(new Map(r.findLoose('grid').map((e) => [e.id, e.grid?.visible !== false])));
   }, [client]);
 
   const hasLoadedUnder = useCallback((path) => {
