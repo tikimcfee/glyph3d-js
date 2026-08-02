@@ -12,6 +12,7 @@ import { walkTreeLayout, districtLayout, packedLayout, libraryLayout, PACKED_DEF
 import ContentTreeMarkers from '../packages/glyph3d-core/src/collections/ContentTreeMarkers.js';
 import Book from '../packages/glyph3d-core/src/collections/Book.js';
 import { collectDirLabels, collectBookLabels, LABEL_DEFAULTS } from '../packages/glyph3d-core/src/collections/ContentTreeLabels.js';
+import ContentTreeMotion from '../packages/glyph3d-core/src/collections/ContentTreeMotion.js';
 import { subtreeContentBounds } from '../packages/glyph3d-core/src/collections/layouts/nodeUtils.js';
 
 let pass = 0, fail = 0;
@@ -919,6 +920,106 @@ const LM = { rowH: 4, charW: 2 };   // mock cell metrics (world units at scale 1
   const shelf = buildLibrary(['d/a.js', 'd/b.js'], { pageW: 20, pageH: 30, stack: 'x' });
   eq(collectBookLabels(shelf, {}, LM).map((i) => i.text).sort(), ['a.js', 'b.js'], 'shelf books keep their own labels');
   eq(collectDirLabels(shelf, {}, LM).find((i) => i.path === 'd')?.countText, '2 files', 'shelf dirs keep the file count');
+}
+
+// 48. relayout MOTION: a re-lay is a glide, not a teleport. The layer snapshots the
+//     last-seen transforms (onBeforeRelayout), lets the scheme stamp targets, then on
+//     the first tick rewinds surviving nodes and eases them home — dirs and books
+//     both. Nothing between relayout and tick ever renders, so the user only sees
+//     the glide.
+{
+  const t = build(PATHS);
+  const motion = new ContentTreeMotion(t);
+  const src = t.getNode('src');
+  const bk = t.bookAt('src/index.js');
+  const before = src.position.clone();
+  t.setLayout(districtLayout);
+  t.relayout();
+  const target = src.position.clone();          // the stamp (pre-tick teleport)
+  const bkTarget = bk.position.clone();
+  ok(before.distanceTo(target) > 0.5, 'motion: the scheme switch actually moves src (fixture sanity)');
+  ok(motion.active, 'motion: armed after a relayout');
+  ok(motion.update(1 / 60) === true, 'motion: ticks true while gliding');
+  ok(src.position.distanceTo(before) < before.distanceTo(target) * 0.4,
+    'motion: first tick starts from the OLD slot, not the stamp');
+  ok(src.position.distanceTo(target) > motion.opts.epsilon, 'motion: not at the target yet');
+  ok(bk.position.distanceTo(bkTarget) > 1e-6 || bkTarget.distanceTo(bk.position) === 0,
+    'motion: books ride the same glide');
+  for (let i = 0; i < 600; i++) motion.update(1 / 60);
+  eq([r2(src.position.x), r2(src.position.y), r2(src.position.z)],
+    [r2(target.x), r2(target.y), r2(target.z)], 'motion: src eases onto the stamped slot and snaps');
+  eq([r2(bk.position.x), r2(bk.position.y), r2(bk.position.z)],
+    [r2(bkTarget.x), r2(bkTarget.y), r2(bkTarget.z)], 'motion: the book lands too');
+  ok(!motion.active, 'motion: settles empty');
+  ok(motion.update(1 / 60) === false, 'motion: a settled tree ticks false');
+  motion.dispose();
+}
+
+// 48b. mid-glide continuity + the levers: a second relayout mid-flight snapshots the
+//      MID-FLIGHT positions (no jump back to a stale endpoint); setEnabled(false)
+//      lands everything; rate 0 degrades to the old teleport; a removed leaf mid-
+//      snapshot never throws.
+{
+  const t = build(PATHS);
+  const motion = new ContentTreeMotion(t);
+  const src = t.getNode('src');
+  t.setLayout(districtLayout);
+  t.relayout();
+  for (let i = 0; i < 6; i++) motion.update(1 / 60);
+  const mid = src.position.clone();             // somewhere between the two layouts
+  t.setLayout(walkTreeLayout);
+  t.relayout();
+  const target2 = src.position.clone();
+  motion.update(1 / 60);
+  ok(src.position.distanceTo(mid) < mid.distanceTo(target2) * 0.4,
+    'motion: a mid-glide relayout continues from MID-FLIGHT, not a stale endpoint');
+  // setEnabled(false) mid-glide: everything lands on its target immediately.
+  motion.setEnabled(false);
+  eq([r2(src.position.x), r2(src.position.y)], [r2(target2.x), r2(target2.y)],
+    'motion: disabling lands the field on the stamp');
+  ok(!motion.active, 'motion: disabled → inactive');
+  // Disabled, a relayout is the old teleport — no snapshot, no glide.
+  t.setLayout(districtLayout);
+  t.relayout();
+  ok(!motion.active && motion.update(1 / 60) === false, 'motion: disabled relayouts stay teleports');
+  // rate 0 degrades to instant: armed, but the first tick just lands everything.
+  motion.setEnabled(true);
+  motion.configure({ rate: 0 });
+  t.setLayout(walkTreeLayout);
+  t.relayout();
+  const t3 = src.position.clone();
+  ok(motion.update(1 / 60) === false, 'motion: rate 0 settles on the first tick');
+  eq(r2(src.position.x), r2(t3.x), 'motion: rate 0 lands on the stamp');
+  // A leaf removed between snapshot and tick: skipped without throwing.
+  motion.configure({ rate: 7 });
+  t.setLayout(districtLayout);
+  t.relayout();                                  // snapshot + stamp
+  t.remove('b/one.js');
+  t.relayout();
+  ok(motion.update(1 / 60) !== undefined, 'motion: a removed leaf mid-flow never throws');
+  motion.dispose();
+  ok(!motion.active, 'motion: dispose settles and clears');
+}
+
+// 48c. rotation glides too: a node turned by one scheme (the jellyfish faces panels
+//      outward) slerps home when the next scheme stamps identity — and with the
+//      rotate dial off, facings jump to the stamp immediately (never frozen stale).
+{
+  const t = build(PATHS);
+  const motion = new ContentTreeMotion(t);
+  const src = t.getNode('src');
+  src.rotation.set(0, 1.2, 0);                  // as if a scheme had turned it
+  t.relayout();                                  // walk stamps identity rotation
+  motion.update(1 / 60);
+  ok(src.rotation.y > 0.5 && src.rotation.y < 1.2, 'motion: rotation rewinds and slerps toward the stamp');
+  for (let i = 0; i < 600; i++) motion.update(1 / 60);
+  ok(Math.abs(src.rotation.y) < 1e-3, 'motion: rotation lands on identity');
+  motion.configure({ rotate: 0 });
+  src.rotation.set(0, 1.2, 0);
+  t.relayout();
+  motion.update(1 / 60);
+  ok(Math.abs(src.rotation.y) < 1e-6, 'motion: rotate 0 → facings take the stamp instantly');
+  motion.dispose();
 }
 
 console.log(`\ncontenttree: ${pass} passed, ${fail} failed`);

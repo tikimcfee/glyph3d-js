@@ -88,12 +88,23 @@ export default class ContentTree {
         // Fired after every full (root) relayout — markers and other tree-decorating
         // systems rebuild from here, so they can never observe a stale layout.
         this._onRelayout = new Set();
+        // Fired at the TOP of every full relayout, before normalize/measure/place —
+        // the seam for anything that needs the OUTGOING state (ContentTreeMotion
+        // snapshots last-seen transforms here so the new layout can be a glide).
+        this._onBeforeRelayout = new Set();
     }
 
     /** Subscribe to full-tree relayouts. Returns an unsubscribe function. */
     onRelayout(cb) {
         this._onRelayout.add(cb);
         return () => this._onRelayout.delete(cb);
+    }
+
+    /** Subscribe to the moment BEFORE a full relayout mutates anything. Returns an
+     *  unsubscribe function. */
+    onBeforeRelayout(cb) {
+        this._onBeforeRelayout.add(cb);
+        return () => this._onBeforeRelayout.delete(cb);
     }
 
     /** The dir node for a directory path ('' → root), or null if it doesn't exist. */
@@ -356,6 +367,7 @@ export default class ContentTree {
      * @returns {{w:number,h:number}} the node's measured footprint
      */
     relayout(node = this.root) {
+        if (node === this.root) for (const cb of this._onBeforeRelayout) cb(this);
         this._normalize(node);
         const size = this.layout(node, this.layoutOpts);
         if (node === this.root) {

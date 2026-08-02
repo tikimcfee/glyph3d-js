@@ -23,6 +23,7 @@ import ContentTreeMarkers from '@glyph3d/core/collections/ContentTreeMarkers.js'
 import ContentTreeArrows from '@glyph3d/core/collections/ContentTreeArrows.js';
 import ContentTreeProbes from '@glyph3d/core/collections/ContentTreeProbes.js';
 import ContentTreeLabels from '@glyph3d/core/collections/ContentTreeLabels.js';
+import ContentTreeMotion from '@glyph3d/core/collections/ContentTreeMotion.js';
 import SessionStore from './SessionStore.js';
 import WorkspaceModel from './WorkspaceModel.js';
 import { getSetting, applyGroupSettings } from './settings.js';
@@ -218,6 +219,13 @@ function DockRunner({ stateRef }) {
         if (carrel._dead) { c.carrels.delete(name); carrel.dispose(); }
       }
     }
+    // The relayout glide: while nodes ease toward their stamped slots, the overlays
+    // that track positions BY VALUE follow along — wire endpoints rewrite, label
+    // anchors re-walk. Everything parented INTO a node (prisms, lines) rides free.
+    if (c?.contentTreeMotion?.update(dt)) {
+      c.contentTreeArrows?.update();
+      c.contentTreeLabels?.reanchor();
+    }
     c?.contentTreeLabels?.update(state.camera, dt, c?.attentionManager?.state?.hover?.id ?? null);
     if (s?.warmAt && performance.now() >= s.warmAt) {
       s.warmAt = 0;
@@ -352,8 +360,15 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // dir it contains, parented into the node and rebuilt on relayout. File lines and dir
     // lines toggle independently (Tree settings); layout.arrows is the master on/off.
     state.ctx.contentTreeArrows = new ContentTreeArrows(contentTree);
+
+    // Relayout motion: every re-lay becomes a glide — durable nodes ease from where
+    // they were to where the scheme stamped them (<DockRunner/> ticks it; while it
+    // reports active, the ownership lines and label anchors refresh so the by-value
+    // overlays track the gliding nodes). layout.motion dials it.
+    state.ctx.contentTreeMotion = new ContentTreeMotion(contentTree);
     applyGroupSettings(state.ctx, 'Tree');   // fold persisted file/dir-line toggles in at boot
     applyGroupSettings(state.ctx, 'Labels'); // fold persisted container-label dials in at boot
+    applyGroupSettings(state.ctx, 'Motion'); // fold the persisted relayout-glide dials in at boot
     applyGroupSettings(state.ctx, 'Appearance'); // set the configured interaction colors as the panel default before any window spawns
     applyGroupSettings(state.ctx, 'Glyph LOD');  // fold persisted minification/LOD dials into the global glyph uniforms at boot
     applyGroupSettings(state.ctx, 'Grid');       // set the configured default fold before any grid spawns (file.open / session restore)

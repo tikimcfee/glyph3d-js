@@ -145,12 +145,16 @@ export function collectDirLabels(tree, opts, metrics) {
         const cps = [...text].length;   // codepoints ≈ cells (labels are path-ish text)
         const w = bounds.max.x - bounds.min.x;
         const scale = Math.min(Math.max((o.fit * w) / Math.max(cps * charW, 1e-6), o.scaleMin), o.scaleMax);
-        p.set(bounds.min.x, bounds.max.y + o.gapY * rowH * scale, bounds.max.z + o.zLift);
+        // The anchor keeps its NODE-LOCAL form alongside the walked root-local one, so
+        // reanchor() can re-walk it through moving ancestor matrices while a relayout
+        // glide is in flight (ContentTreeMotion) — no rebake, O(1) offset writes.
+        const local = { x: bounds.min.x, y: bounds.max.y + o.gapY * rowH * scale, z: bounds.max.z + o.zLift };
+        p.set(local.x, local.y, local.z);
         for (let n = node; n && n !== tree.root; n = n.parent) {
             n.updateMatrix();
             p.applyMatrix4(n.matrix);
         }
-        items.push({ path, depth, text, countText, scale, x: p.x, y: p.y, z: p.z });
+        items.push({ path, depth, text, countText, scale, x: p.x, y: p.y, z: p.z, node, local });
     }
     return items;
 }
@@ -192,12 +196,13 @@ export function collectBookLabels(tree, opts, metrics) {
         const w = b.max.x - b.min.x;
         const scale = Math.min(Math.max((o.fit * w) / Math.max(cps * charW, 1e-6), o.scaleMin), o.scaleMax);
         const depth = visibleDepth(book, tree.root) + 1;
-        p.set(b.min.x, b.max.y + o.gapY * rowH * scale, b.max.z + o.zLift);
+        const local = { x: b.min.x, y: b.max.y + o.gapY * rowH * scale, z: b.max.z + o.zLift };
+        p.set(local.x, local.y, local.z);
         for (let n = book; n && n !== tree.root; n = n.parent) {
             n.updateMatrix();
             p.applyMatrix4(n.matrix);
         }
-        items.push({ path: book.userData.path, depth, text, countText: null, scale, x: p.x, y: p.y, z: p.z });
+        items.push({ path: book.userData.path, depth, text, countText: null, scale, x: p.x, y: p.y, z: p.z, node: book, local });
     }
     return items;
 }
@@ -369,6 +374,29 @@ export default class ContentTreeLabels {
                 it.scaleQ = sq;
                 f.setGroupScale(it.groupId, { x: s, y: s, z: s });
             }
+        }
+    }
+
+    /**
+     * Re-walk every label's node-local anchor through the CURRENT ancestor matrices and
+     * rewrite its group offset — the per-frame companion to a relayout glide
+     * (ContentTreeMotion): while nodes ease toward their stamped slots, labels ride
+     * their containers instead of sitting at the destination. O(1) writes per label;
+     * call only while motion reports active (a settled tree needs none of this).
+     */
+    reanchor() {
+        const f = this._field;
+        if (!this.enabled || !f) return;
+        for (const it of this._items) {
+            if (!it.node || !it.node.parent || !it.local) continue;
+            const p = this._v.set(it.local.x, it.local.y, it.local.z);
+            for (let n = it.node; n && n !== this.tree.root; n = n.parent) {
+                n.updateMatrix();
+                p.applyMatrix4(n.matrix);
+            }
+            if (p.x === it.x && p.y === it.y && p.z === it.z) continue;
+            it.x = p.x; it.y = p.y; it.z = p.z;
+            f.setGroupOffset(it.groupId, { x: p.x, y: p.y, z: p.z });
         }
     }
 

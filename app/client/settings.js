@@ -5,6 +5,7 @@ import { setStrataParam, STRATA_DEFAULTS } from '@glyph3d/core/collections/Strat
 import { TERMINAL_CURSOR_DEFAULTS } from '@glyph3d/core/collections/TerminalGrid.js';
 import { JELLYFISH_DEFAULTS, LIBRARY_DEFAULTS, schemeNameOf } from '@glyph3d/core/collections/layouts/index.js';
 import { LABEL_DEFAULTS } from '@glyph3d/core/collections/ContentTreeLabels.js';
+import { MOTION_DEFAULTS } from '@glyph3d/core/collections/ContentTreeMotion.js';
 import { LAYOUT_PRESETS, setDefaultLayout } from '@glyph3d/core/workers/builders/index.js';
 
 // Settings schema — the SINGLE source for both the Settings panel (renders a row
@@ -259,6 +260,10 @@ export const SETTINGS = [
   { key: 'dock.bottomFrac', label: 'Bar depth', group: 'Dock', type: 'number', default: 0.86, min: 0, max: 1, step: 0.02, apply: dockParam('bottomFrac') },
   { key: 'dock.fillFrac', label: 'Bar fill (linear)', group: 'Dock', type: 'number', default: 0.9, min: 0.5, max: 1, step: 0.02, apply: dockParam('fillFrac') },
   { key: 'dock.animDur', label: 'Animation (s)', group: 'Dock', type: 'number', default: 0.167, min: 0, max: 0.6, step: 0.01, apply: dockParam('animDur') },
+  // The slot placeholder — a framed window's held-open bar slot breathes an outline in the
+  // window's identity hue (the hue itself is auto-generated, not a setting). 0 opacity hides it.
+  { key: 'dock.ghostOpacity', label: 'Ghost opacity', group: 'Dock', type: 'number', default: 0.55, min: 0, max: 1, step: 0.05, apply: dockParam('ghostOpacity') },
+  { key: 'dock.ghostPulseHz', label: 'Ghost breathe (Hz)', group: 'Dock', type: 'number', default: 0.5, min: 0, max: 4, step: 0.1, apply: dockParam('ghostPulseHz') },
   // Frame — the root VIEW-FRAME a pinned/spotlit window contain-fits into (camera-front, the
   // "window-pane" the canvas frames). All frustum-normalized, so the pinned window tracks the
   // drawing-frame size live. Width/height size the pane (1 = full canvas); X/Y offset it
@@ -326,6 +331,23 @@ export const SETTINGS = [
   { key: 'labels.zLift', label: 'Lift toward viewer (z)', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.zLift, min: 0, max: 500, step: 1, apply: labelParam('zLift') },
   { key: 'labels.colorA', label: 'Name color (shallow)', group: 'Labels', type: 'color', default: '#' + LABEL_DEFAULTS.colorA.toString(16).padStart(6, '0'), apply: labelParam('colorA', true) },
   { key: 'labels.colorB', label: 'Name color (deep)', group: 'Labels', type: 'color', default: '#' + LABEL_DEFAULTS.colorB.toString(16).padStart(6, '0'), apply: labelParam('colorB', true) },
+  // Motion — the relayout glide (ContentTreeMotion): every re-lay eases the durable
+  // nodes from where they were to where the scheme stamped them, on the house
+  // exponential. Rate is the whole feel — higher snaps, lower floats; rotation slerps
+  // along unless dialed off. Off restores the instant teleport.
+  {
+    key: 'motion.enabled', label: 'Relayout glide', group: 'Motion', type: 'bool', default: true,
+    apply: (ctx, v) => ctx.contentTreeMotion?.setEnabled?.(v),
+  },
+  {
+    key: 'motion.rate', label: 'Glide rate (1/s)', group: 'Motion',
+    type: 'number', default: MOTION_DEFAULTS.rate, min: 0.2, max: 60, step: 0.2,
+    apply: (ctx, v) => ctx.contentTreeMotion?.configure({ rate: v }),
+  },
+  {
+    key: 'motion.rotate', label: 'Glide rotation too', group: 'Motion', type: 'bool', default: !!MOTION_DEFAULTS.rotate,
+    apply: (ctx, v) => ctx.contentTreeMotion?.configure({ rotate: v ? 1 : 0 }),
+  },
   // Layout — the jellyfish CStack scheme: a directory becomes one TALL cylindrical COLUMN whose
   // surface is tiled by panels (files shelf-packed into bounded tiles). Every dial re-lays the
   // field live while jellyfish is the active scheme (else it persists and seeds on next activation

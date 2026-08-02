@@ -51,6 +51,7 @@ function readField(client) {
         markers: !!client?.ctx?.contentTreeMarkers?.enabled,
         arrows: !!client?.ctx?.contentTreeArrows?.enabled,
         labels: !!client?.ctx?.contentTreeLabels?.enabled,
+        motion: !!client?.ctx?.contentTreeMotion?.enabled,
     };
 }
 
@@ -109,6 +110,14 @@ export default function LayoutPanel({ client }) {
                             title={`layout.labels ${state}`}>{state}</span>
                     ))}
                 </div>
+                <div style={S.section}>relayout glide</div>
+                <div style={S.chips}>
+                    {['on', 'off'].map((state) => (
+                        <span key={state} style={S.chip(field.motion === (state === 'on'))}
+                            onClick={() => fire(['layout.motion', state])}
+                            title={`layout.motion ${state}`}>{state}</span>
+                    ))}
+                </div>
                 <div style={S.hint}>
                     The scheme packs the directory tree into the world — switching re-lays
                     the field in place, and every load (a file, a whole directory) arrives
@@ -117,6 +126,8 @@ export default function LayoutPanel({ client }) {
                     dirs in reading order; labels name every container and book, sized to
                     fit so deep names resolve as you approach — a library volume composes
                     one title block (name over its open page, &ldquo;b.js · 2/4&rdquo;).
+                    The glide makes every re-lay visible motion — nodes ease to their
+                    new slots instead of teleporting.
                     Dial knobs from the command bar, e.g.{' '}
                     <code>layout.scheme --depth-z 150</code> or{' '}
                     <code>layout.labels --fit 0.6 --show-count 0</code>.

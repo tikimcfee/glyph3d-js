@@ -190,4 +190,12 @@ export default function registerLayoutCommands(router) {
         usage: '[on|off|toggle] [--fit N --scale-min N --scale-max N --opacity N --min-alpha N --near-scale N --fade-start N --fade-end N --gap-y N --z-lift N --show-count 0|1 --show-files 0|1 --plate 0|1 --plate-color HEX --plate-opacity N --plate-pad N --color-a HEX --color-b HEX]',
     });
 
+    // Relayout motion: every re-lay is a glide — durable nodes ease from where they
+    // were to where the scheme stamped them; off restores the instant teleport.
+    registerOverlay({
+        verb: 'layout.motion', noun: 'motion', ctxKey: 'contentTreeMotion', title: 'LAYOUT MOTION',
+        description: 'Toggle/dial the relayout glide (nodes ease to their new slots on every re-lay; scheme switches and loads become visible motion)',
+        usage: '[on|off|toggle] [--rate N --epsilon N --rotate 0|1]',
+    });
+
 }
