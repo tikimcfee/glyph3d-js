@@ -34,7 +34,12 @@ export class GitHubFileProvider extends RepositoryAdapter {
      */
     async listTree(uri = 'github:///', _options = {}) {
         const tree = this._currentTree;
-        if (!tree || !Array.isArray(tree.tree)) return { entries: [], truncated: false };
+        // No loaded repo is an ERROR, not an empty directory — a silent
+        // `entries: []` here reads as "this path exists and is empty" to
+        // every browser (human or model) and sends them guessing.
+        if (!tree || !Array.isArray(tree.tree)) {
+            throw new Error('no repository loaded (repo.load first)');
+        }
         const dir = String(uri).replace(/^[a-z]+:\/\//, '').replace(/^\/+|\/+$/g, '');
         const prefix = dir ? dir + '/' : '';
         const entries = [];

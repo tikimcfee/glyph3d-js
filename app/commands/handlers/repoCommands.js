@@ -49,25 +49,22 @@ export default function registerRepoCommands(router) {
 
         ctx.status?.set(`Loading ${ref}…`);   // live status; cleared however we return
         try {
-            // The active source must be GitHub-backed. In the hosted baseline it already is;
-            // if a relay swapped in the local provider, switch back to GitHub for this load.
-            let provider = ctx.fileProvider;
-            if (!(provider instanceof GitHubFileProvider)) {
-                provider = new GitHubFileProvider();
-                ctx.fileProvider = provider;
-            }
-
-            // 1. Fresh slate.
-            const cleared = clearScene(ctx);
-
-            // 2. Client-side GitHub fetch of the tree (sets the provider's _currentTree so
-            //    listTree/filterCodeFiles/getFile resolve against this repo).
+            // 1. Fetch FIRST, commit after. The fetch is provider-local, so a bad
+            //    ref or a failed download leaves the current source and the scene
+            //    exactly as they were. (A failed load once swapped in an EMPTY
+            //    GitHub tree and cleared the field up front — every browse after
+            //    that answered a success-shaped "0 dir(s), 0 file(s)".)
+            const provider = new GitHubFileProvider();
             let info;
             try {
                 info = await provider.loadRepository(url);
             } catch (err) {
                 return { text: `ERR: repo load failed for ${ref}: ${err?.message || err}`, data: null };
             }
+
+            // 2. The load is real — now it owns the scene: swap the source, fresh slate.
+            ctx.fileProvider = provider;
+            const cleared = clearScene(ctx);
 
             // 3. Render the whole repo as the field — the same provider-agnostic bulk-open +
             //    tree layout the relay path uses, now sourcing from GitHub.
