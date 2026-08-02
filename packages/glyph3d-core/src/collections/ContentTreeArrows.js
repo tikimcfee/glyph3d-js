@@ -40,7 +40,7 @@
  */
 
 import * as THREE from 'three';
-import { Line2NodeMaterial, LineBasicNodeMaterial } from 'three/webgpu';
+import { Line2NodeMaterial, LineBasicNodeMaterial, MeshBasicNodeMaterial } from 'three/webgpu';
 import { uniform } from 'three/tsl';
 import { LineSegments2 } from 'three/addons/lines/webgpu/LineSegments2.js';
 import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
@@ -57,6 +57,9 @@ export const ARROW_DEFAULTS = {
     weightMin: 0.3,             // stroke floor, so a deep tree never decays to invisible
     busMargin: 8,               // how far OUTSIDE the dir's left frame the trunk bus runs
     railGap: 5,                 // how far above a child's top edge its rail crosses (the gutter run)
+    chamfer: 8,                 // 45° corner cut length (world units) — 0 = sharp 90° corners
+    pads: 1,                    // 1 → a disc on every pin + the hub (the visible pin-set)
+    padScale: 2,                // pad radius, × the trace stroke width
 };
 
 // Opts that shape the BUILT line objects (geometry kind, per-depth materials): a
@@ -68,6 +71,10 @@ const railAbove = (pinY, gap) => Math.min(pinY + gap, 0);
 
 const _v = new THREE.Vector3();
 const _abox = new THREE.Box3();
+const _m4 = new THREE.Matrix4();
+const _q = new THREE.Quaternion();
+const _p = new THREE.Vector3();
+const _s = new THREE.Vector3();
 
 export default class ContentTreeArrows {
     /**
@@ -88,6 +95,11 @@ export default class ContentTreeArrows {
         // The weighted materials, pooled by QUANTIZED stroke width (≈ one per visible
         // depth level) — never one per directory (pipeline count is the scarce resource).
         this._thickMats = new Map();
+        // Pad hardware: ONE shared unit-disc geometry + material for every pin pad,
+        // instance-colored, fading on the same opacity uniform as the traces.
+        this._padGeo = new THREE.CircleGeometry(1, 16);
+        this._padMat = new MeshBasicNodeMaterial({ transparent: true, depthWrite: false, side: THREE.DoubleSide });
+        this._padMat.opacityNode = this._alpha;
         this._offRelayout = tree.onRelayout(() => this.update());
         this.update();
     }
@@ -162,7 +174,7 @@ export default class ContentTreeArrows {
             const pins = [];
             if (showF) for (const leaf of fileLeaves) pins.push({ p: this._filePin(leaf), c: colFile });
             if (showD) for (const dir of dirs) pins.push({ p: dir.position.clone(), c: colDir });
-            const count = pins.length ? 2 + pins.length * 2 : 0;   // trunk(2) + rail+drop per pin
+            const count = pins.length ? 3 + pins.length * 4 : 0;   // trunk(3) + z-jog/rail/chamfer/drop per pin
             if (count === 0) { this._dropLinks(path); continue; }
             seen.add(path);
 
@@ -178,12 +190,18 @@ export default class ContentTreeArrows {
             }
             if (link.mesh.parent !== node) node.add(link.mesh);
 
-            // The CIRCUIT route (every segment axis-aligned, every run in a gutter):
-            //   trunk: hub → left along the top frame edge → down the outside gutter
-            //   rail : across the inter-row gutter just above the child's top edge
-            //   drop : the short pin lead down onto the child's top-center
-            // The bus hugs the frame — busX sits busMargin OUTSIDE the dir's own
-            // footprint (and outside every pin), so no trace ever crosses a face.
+            // The CIRCUIT route — rectilinear in ALL THREE axes (z never rides along a
+            // rail; it gets its own jog), with 45° chamfered corners:
+            //   trunk : hub → left along the top frame edge, a chamfer, down the
+            //           outside gutter (busMargin past the footprint and every pin)
+            //   z-jog : straight back/forward in z AT THE BUS — through empty gutter
+            //           air, never through the rows standing between (a sloped rail
+            //           was tried: it skewered every volume between two z-rows)
+            //   rail  : across the row gutter IN THE CHILD'S OWN Z-PLANE
+            //   drop  : chamfer, then the vertical pin lead onto the pin
+            // The z-jog blends trunk color → child color, so a trace is followable
+            // from bus to pin. Chamfers are ALWAYS emitted (degenerate → zero-length),
+            // keeping segment counts stable — a glide re-routes without reallocs.
             const s = node.userData?.size;
             let busX = s ? -s.x / 2 : 0;
             let lowestRail = 0;
@@ -199,21 +217,70 @@ export default class ContentTreeArrows {
             // instance buffer IS segment pairs — same bytes, written in place.
             const pos = link.posArray, col = link.colArray;
             const z = o.zLift;
+            const ch = Math.max(0, Math.min(o.chamfer, -busX / 2, -lowestRail / 2));
             let k = 0;
-            k = this._writeSeg(pos, col, k, 0, 0, z, busX, 0, z, colDir);              // trunk: top edge
-            k = this._writeSeg(pos, col, k, busX, 0, z, busX, lowestRail, z, colDir);  // trunk: outside gutter
+            k = this._writeSeg(pos, col, k, 0, 0, z, busX + ch, 0, z, colDir);             // trunk: top edge
+            k = this._writeSeg(pos, col, k, busX + ch, 0, z, busX, -ch, z, colDir);        // trunk: 45° corner
+            k = this._writeSeg(pos, col, k, busX, -ch, z, busX, lowestRail, z, colDir);    // trunk: outside gutter
             for (const { p, c } of pins) {
                 const railY = railAbove(p.y, o.railGap);
                 const pz = p.z + z;
-                k = this._writeSeg(pos, col, k, busX, railY, z, p.x, railY, pz, c);    // rail: row gutter
-                k = this._writeSeg(pos, col, k, p.x, railY, pz, p.x, p.y, pz, c);      // drop: pin lead
+                // The corner cut never eats the whole gap — a real vertical pin lead
+                // (≥40% of the drop) always remains to land on the pad.
+                const cr = Math.max(0, Math.min(o.chamfer, (railY - p.y) * 0.6, (p.x - busX) / 2));
+                k = this._writeSeg(pos, col, k, busX, railY, z, busX, railY, pz, colDir, c);   // z-jog at the bus (color blend)
+                k = this._writeSeg(pos, col, k, busX, railY, pz, p.x - cr, railY, pz, c);      // rail: row gutter, child z-plane
+                k = this._writeSeg(pos, col, k, p.x - cr, railY, pz, p.x, railY - cr, pz, c);  // 45° corner
+                k = this._writeSeg(pos, col, k, p.x, railY - cr, pz, p.x, p.y, pz, c);         // drop: pin lead
             }
             link.commit();
             link.mesh.visible = true;
             link.mesh.renderOrder = RENDER_ORDER.CONNECTION;
+
+            // Pad hardware: an instanced disc on every pin + the hub — the pin-set made
+            // visible. Sized by the trace stroke, colored per trace, fading on the same
+            // opacity uniform as the lines. Matrices rewrite every pass (glide-cheap).
+            this._writePads(link, node, pins, colDir, z);
         }
 
         for (const path of [...this._links.keys()]) if (!seen.has(path)) this._dropLinks(path);
+    }
+
+    /** @private Ensure + rewrite a link's pad InstancedMesh (hub + one per pin). */
+    _writePads(link, node, pins, colDir, z) {
+        const o = this.opts;
+        const count = o.pads ? pins.length + 1 : 0;
+        if (count === 0) { this._dropPads(link); return; }
+        if (!link.pads || link.pads.count !== count) {
+            this._dropPads(link);
+            const m = new THREE.InstancedMesh(this._padGeo, this._padMat, count);
+            m.name = link.mesh.name.replace('owns:', 'pads:');
+            m.userData = { isMarker: true };
+            m.renderOrder = RENDER_ORDER.CONNECTION + 1;
+            link.pads = m;
+        }
+        if (link.pads.parent !== node) node.add(link.pads);
+        const r = o.padScale * (link.thick ? link.mesh.material.linewidth : 1);
+        _s.set(r, r, 1);
+        _p.set(0, 0, z + 0.5);                                   // hub pad, nudged off the trace plane
+        link.pads.setMatrixAt(0, _m4.compose(_p, _q, _s));
+        link.pads.setColorAt(0, colDir);
+        for (let i = 0; i < pins.length; i++) {
+            const { p, c } = pins[i];
+            _p.set(p.x, p.y, p.z + z + 0.5);
+            link.pads.setMatrixAt(i + 1, _m4.compose(_p, _q, _s));
+            link.pads.setColorAt(i + 1, c);
+        }
+        link.pads.instanceMatrix.needsUpdate = true;
+        if (link.pads.instanceColor) link.pads.instanceColor.needsUpdate = true;
+    }
+
+    /** @private */
+    _dropPads(link) {
+        if (!link?.pads) return;
+        link.pads.parent?.remove(link.pads);
+        link.pads.dispose();                                     // instance buffers only — geometry is shared
+        link.pads = null;
     }
 
     /** A hairline link: native 1px LineSegments over vertex pairs. @private */
@@ -259,19 +326,22 @@ export default class ContentTreeArrows {
             .applyMatrix4(leaf.matrix).clone();
     }
 
-    /** Write one trace segment (start+end) at segment index k; returns the next index. @private */
-    _writeSeg(pos, col, k, ax, ay, az, bx, by, bz, color) {
+    /** Write one trace segment (start+end) at segment index k; returns the next index.
+     *  A different end color makes the segment a gradient (the z-jog's takeoff blend). @private */
+    _writeSeg(pos, col, k, ax, ay, az, bx, by, bz, colorA, colorB = colorA) {
         const a = k * 6;
         pos[a] = ax; pos[a + 1] = ay; pos[a + 2] = az;
         pos[a + 3] = bx; pos[a + 4] = by; pos[a + 5] = bz;
-        for (let v = 0; v < 2; v++) { col[a + v * 3] = color.r; col[a + v * 3 + 1] = color.g; col[a + v * 3 + 2] = color.b; }
+        col[a] = colorA.r; col[a + 1] = colorA.g; col[a + 2] = colorA.b;
+        col[a + 3] = colorB.r; col[a + 4] = colorB.g; col[a + 5] = colorB.b;
         return k + 1;
     }
 
-    /** @private — remove a directory's lines + free its geometry. */
+    /** @private — remove a directory's traces + pads, free its geometry. */
     _dropLinks(path) {
         const link = this._links.get(path);
         if (!link) return;
+        this._dropPads(link);
         link.mesh.parent?.remove(link.mesh);
         link.geo.dispose();
         this._links.delete(path);
@@ -283,5 +353,7 @@ export default class ContentTreeArrows {
         this._thinMat.dispose();
         for (const mat of this._thickMats.values()) mat.dispose();
         this._thickMats.clear();
+        this._padGeo.dispose();
+        this._padMat.dispose();
     }
 }

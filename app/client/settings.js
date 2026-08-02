@@ -317,6 +317,20 @@ export const SETTINGS = [
     type: 'number', default: ARROW_DEFAULTS.railGap, min: 0, max: 100, step: 0.5,
     apply: (ctx, v) => ctx.contentTreeArrows?.configure({ railGap: v }),
   },
+  {
+    key: 'tree.wireChamfer', label: 'Trace corner chamfer (45°, 0=sharp)', group: 'Tree',
+    type: 'number', default: ARROW_DEFAULTS.chamfer, min: 0, max: 100, step: 0.5,
+    apply: (ctx, v) => ctx.contentTreeArrows?.configure({ chamfer: v }),
+  },
+  {
+    key: 'tree.wirePads', label: 'Pin pads', group: 'Tree', type: 'bool', default: !!ARROW_DEFAULTS.pads,
+    apply: (ctx, v) => ctx.contentTreeArrows?.configure({ pads: v ? 1 : 0 }),
+  },
+  {
+    key: 'tree.wirePadScale', label: 'Pad size (× stroke)', group: 'Tree',
+    type: 'number', default: ARROW_DEFAULTS.padScale, min: 0.2, max: 20, step: 0.1,
+    apply: (ctx, v) => ctx.contentTreeArrows?.configure({ padScale: v }),
+  },
   // Labels — the container labels (ContentTreeLabels): every visible directory named in space.
   // The same dials as the layout.labels verb; every change lands live and persists. Sizing is
   // the container FIT (the name spans `fit` of its container's width, clamped by the scale

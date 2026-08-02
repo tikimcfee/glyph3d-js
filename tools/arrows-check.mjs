@@ -63,8 +63,10 @@ const seg = (link, i) => {
     const p = link.geo.getAttribute('position');
     return { a: [p.getX(i * 2), p.getY(i * 2), p.getZ(i * 2)], b: [p.getX(i * 2 + 1), p.getY(i * 2 + 1), p.getZ(i * 2 + 1)] };
 };
-// Trace segments per link: trunk (2) + rail + drop per shown child.
-const routed = (children) => 2 + children * 2;
+// Trace segments per link: trunk (3: edge, chamfer, gutter) + z-jog/rail/chamfer/drop
+// per shown child. Chamfers are always emitted (degenerate → zero-length) so the
+// count is stable through a glide.
+const routed = (children) => 3 + children * 4;
 
 // ───────────────────────── structural invariants ─────────────────────────
 {
@@ -84,36 +86,48 @@ const routed = (children) => 2 + children * 2;
     ok(segCount(linkFor(arrows, 'src/util')) === routed(2), 'src/util trace = trunk + 2 pins');
 
     // THE CIRCUIT INVARIANTS. (1) The trace begins at the hub (dir origin) and every
-    // segment is axis-aligned in XY — 90° corners, no diagonals, no string art.
+    // segment is RECTILINEAR IN 3D — one axis moves per run — or an exact 45° chamfer
+    // (two axes, equal magnitude). No sloped rails, no string art: z travels in its
+    // own jog, never smeared along a rail.
     const s0 = seg(root, 0);
     ok(s0.a[0] === 0 && s0.a[1] === 0, 'the trace begins at the hub (dir origin)');
-    let ortho = true;
+    let clean = true;
     for (let i = 0; i < segCount(root); i++) {
         const { a, b } = seg(root, i);
-        if (Math.abs(a[0] - b[0]) > 1e-6 && Math.abs(a[1] - b[1]) > 1e-6) ortho = false;
+        const d = [Math.abs(a[0] - b[0]), Math.abs(a[1] - b[1]), Math.abs(a[2] - b[2])].filter((x) => x > 1e-6);
+        if (d.length > 2) clean = false;                                   // a 3-axis diagonal
+        if (d.length === 2 && Math.abs(d[0] - d[1]) > 1e-6) clean = false; // a non-45° corner
     }
-    ok(ortho, 'every segment is axis-aligned in XY (circuit routing)');
+    ok(clean, 'every segment is a pure run or an exact 45° chamfer (3D circuit routing)');
 
-    // (2) The trunk bus runs OUTSIDE the frame: busX sits left of the dir's own
-    // footprint AND left of every pin — no trace ever crosses a face.
-    const busX = s0.b[0];
+    // (2) The trunk bus runs OUTSIDE the frame: busX (the gutter run's x) sits left of
+    // the dir's own footprint AND left of every pin — no trace ever crosses a face.
+    const busX = seg(root, 2).a[0];                                        // trunk gutter run
     const src = t.getNode('src');
     const srcLink = linkFor(arrows, 'src');
-    const srcBusX = seg(srcLink, 0).b[0];
+    const srcBusX = seg(srcLink, 2).a[0];
     ok(srcBusX < -src.userData.size.x / 2, `src bus (${srcBusX}) runs outside its footprint (−${src.userData.size.x / 2})`);
     ok(busX < 0, 'root bus runs left of the hub');
 
     // (3) Each drop is a vertical pin lead: for a child DIR, it lands exactly on the
-    // child's hub (its top-center origin) from railGap above.
+    // child's hub (its top-center origin) from above.
     const util = t.getNode('src/util');
     let dirDrop = null;
-    for (let i = 2; i < segCount(srcLink); i++) {
+    for (let i = 3; i < segCount(srcLink); i++) {
         const { a, b } = seg(srcLink, i);
         if (Math.abs(b[0] - util.position.x) < 1e-6 && Math.abs(b[1] - util.position.y) < 1e-6) dirDrop = { a, b };
     }
     ok(!!dirDrop, "src/util's drop lands exactly on its hub pin");
     ok(dirDrop && Math.abs(dirDrop.a[0] - dirDrop.b[0]) < 1e-6 && dirDrop.a[1] > dirDrop.b[1],
         'the pin lead is vertical and drops DOWN onto the pin');
+
+    // (4) Pad hardware: a disc on every pin + the hub, marker-tagged; --pads 0 sheds it.
+    ok(root.pads && root.pads.count === 5, `root pads = hub + 4 pins, got ${root.pads?.count}`);
+    ok(root.pads.userData.isMarker === true, 'pads carry isMarker');
+    arrows.configure({ pads: 0 });
+    ok(!linkFor(arrows, '').pads, 'pads 0 sheds the pad meshes');
+    arrows.configure({ pads: 1 });
+    ok(linkFor(arrows, '').pads?.count === 5, 'pads 1 restores them');
 
     // Depth grading: materials pool by quantized stroke — src (depth 1) wires heavier
     // than src/util (depth 2); two depth-2 dirs SHARE one material (pipeline economy).

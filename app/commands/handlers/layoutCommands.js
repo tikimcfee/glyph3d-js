@@ -167,8 +167,8 @@ export default function registerLayoutCommands(router) {
     registerOverlay({
         verb: 'layout.arrows', noun: 'arrows', ctxKey: 'contentTreeArrows', title: 'LAYOUT ARROWS',
         colorKeys: new Set(['colorA', 'colorB']),
-        description: 'Toggle/dial the per-directory ownership traces (circuit-routed: bus → rail → pin, never across a face; world-unit stroke, depth-decayed — weight 0 = 1px hairlines)',
-        usage: '[on|off|toggle] [--weight N --weight-decay N --weight-min N --opacity N --bus-margin N --rail-gap N --z-lift N --color-a HEX --color-b HEX]',
+        description: 'Toggle/dial the per-directory ownership traces (circuit-routed in 3D: bus → z-jog → rail → chamfer → pin pad, never across a face; world-unit stroke, depth-decayed — weight 0 = 1px hairlines)',
+        usage: '[on|off|toggle] [--weight N --weight-decay N --weight-min N --opacity N --bus-margin N --rail-gap N --chamfer N --pads 0|1 --pad-scale N --z-lift N --color-a HEX --color-b HEX]',
     });
 
     // Diagnostic: per-dir origin vs content-anchor dots + link. Color keys here are
