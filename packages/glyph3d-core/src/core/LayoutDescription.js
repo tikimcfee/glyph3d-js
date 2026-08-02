@@ -14,10 +14,13 @@ const EMPTY = Object.freeze([]);
  * and WORLD are derived; BUFFER slot is a cache (invariant: slot offset within a line
  * == codepoint index). Inverse (world→source) is the GPU picking pass, not here.
  *
- * positionAt is **buffer-backed**: for a materialized glyph it returns the glyph's
- * actual laid-out position (wrap + pagination already baked in by the builder), so no
- * layout math is re-run. Empty lines — and, once windowing lands, off-screen lines —
- * fall back to the analytic line table + the SAME paginationShift the builder used.
+ * positionAt is the **fold mirror**: it evaluates the same pure layout function the
+ * compute kernel runs on the GPU — wrap segment from the line tables, x from the REAL
+ * per-slot advances (emoji are double-advance), the z staircase, and the SAME
+ * paginationShift the builder normalizes by. No position buffer exists to read: the GPU
+ * owns the laid-out array, and every input to the fold (tables, advances, params) is
+ * CPU-authored — so any glyph's "I am at this location" is answerable here, exactly,
+ * without readback. Parity with the kernel is a standing test, not a convention.
  */
 export default class LayoutDescription {
     /**
@@ -26,13 +29,13 @@ export default class LayoutDescription {
      * @param {Int32Array} p.lineStartRow   - line → cumulative visual row
      * @param {Array<number[]>} p.lineWrapCols - line → source-cols where it wraps
      * @param {Int32Array|number[]} p.lineLengths - line → codepoint count
-     * @param {Float32Array|null} p.positions - authoritative xyz per slot (renderer attr)
-     * @param {Float32Array|null} p.sizes     - per-slot [advance, height]
+     * @param {Float32Array|null} p.sizes   - per-slot [advance, height]; real advances make x EXACT
      * @param {Object} p.geom   - pagination geometry (paginationGeometry output)
      * @param {number} p.originX
      * @param {number} p.originY
      * @param {number} p.lineSpacing
-     * @param {number} p.advance - fixed per-glyph advance (analytic fallback only)
+     * @param {number} p.zStep  - world z per intra-line wrap segment (charHeight × zWrapSpacing)
+     * @param {number} p.advance - nominal per-glyph advance (fallback when sizes is absent)
      * @param {number} [p.scrollOffset] - visual rows the fold is scrolled (Step 3c conveyor)
      */
     constructor(p) {
@@ -40,12 +43,12 @@ export default class LayoutDescription {
         this.lineStartRow = p.lineStartRow ?? null;
         this.lineWrapCols = p.lineWrapCols ?? null;
         this.lineLengths = p.lineLengths ?? null;
-        this.positions = p.positions ?? null;
         this.sizes = p.sizes ?? null;
         this.geom = p.geom ?? null;
         this.originX = p.originX ?? 0;
         this.originY = p.originY ?? 0;
         this.lineSpacing = p.lineSpacing ?? 0;
+        this.zStep = p.zStep ?? 0;
         this.advance = p.advance ?? 0;
         this.scrollOffset = p.scrollOffset ?? 0;  // visual rows the fold is scrolled (Step 3c)
     }
@@ -96,8 +99,14 @@ export default class LayoutDescription {
     }
 
     /**
-     * SOURCE (line,col) → grid-local {x,y,z}. Buffer-backed for materialized glyphs
-     * (exact; wrap + pagination already applied), analytic fallback for empty lines.
+     * SOURCE (line,col) → grid-local {x,y,z} — THE fold mirror, evaluated per query.
+     *
+     * col ≤ lineLength; col == length is end-of-line (the last glyph's right edge, which
+     * the segment-sum yields with no special case: summing advances over [segStart, col)
+     * walks THROUGH the last glyph). Exact when the sizes table is present — real
+     * advances, so glyphs after a double-advance emoji land where the GPU puts them;
+     * the nominal advance is only a pre-flush fallback. Per-query cost is one bounded
+     * segment sum (≤ wrapWidth adds) — caret-rate, not render-rate work.
      * Returns null when the layout isn't ready.
      * @returns {{x:number,y:number,z:number}|null}
      */
@@ -105,55 +114,43 @@ export default class LayoutDescription {
         if (!this.lineStartRow || line < 0 || line >= this.lineStartRow.length) return null;
         const len = this.lineSlotCount(line);
         const c = Math.max(0, Math.min(col, len));
-        const pos = this.positions, sz = this.sizes;
-        const base = this.lineSlotBase ? this.lineSlotBase[line] : null;
 
-        if (pos && base != null && len > 0) {
-            if (c < len) {
-                // Caret before glyph c → that glyph's left edge.
-                const s = base + c;
-                if (s * 3 + 2 < pos.length) {
-                    return { x: pos[s * 3], y: pos[s * 3 + 1], z: pos[s * 3 + 2] };
-                }
-            } else {
-                // End-of-line → right edge of the last glyph (its x + advance). Require
-                // BOTH buffers — if sizes is missing we'd add advance 0 and place the
-                // caret at the last glyph's LEFT edge; fall through to analytic instead.
-                const s = base + (len - 1);
-                if (s * 3 + 2 < pos.length && sz && s * 2 + 1 < sz.length) {
-                    return { x: pos[s * 3] + sz[s * 2], y: pos[s * 3 + 1], z: pos[s * 3 + 2] };
-                }
-            }
-        }
-        // Empty line, or buffer not ready / off-screen — derive analytically.
-        return this._analyticPosition(line, c);
-    }
-
-    /**
-     * Analytic position from the line table + the SAME pagination map the builder
-     * applied. Used for empty lines (no glyph to read) and, later, off-screen lines.
-     * x uses the fixed advance (approximate) — only reached when no glyph exists.
-     * @private
-     */
-    _analyticPosition(line, col) {
-        if (!this.lineStartRow) return null;
+        // Wrap segment (affinity right — a col AT a wrap boundary starts the next row,
+        // matching the builder's break-before-place trigger).
         const wraps = this.lineWrapCols?.[line] ?? EMPTY;
         let segRow = 0, segStart = 0;
         for (let i = 0; i < wraps.length; i++) {
-            if (wraps[i] > col) break;
+            if (wraps[i] > c) break;
             segRow = i + 1;
             segStart = wraps[i];
         }
+
+        // x: sum the REAL advances across this visual row, segment-local. Falls back to
+        // the nominal advance only when sizes hasn't materialized yet.
+        const base = this.lineSlotBase ? this.lineSlotBase[line] : null;
+        const sz = this.sizes;
+        let x = this.originX;
+        const s1 = base != null ? base + c : 0;
+        if (sz && base != null && s1 * 2 <= sz.length) {
+            for (let s = base + segStart; s < s1; s++) x += sz[s * 2];
+        } else {
+            x += (c - segStart) * this.advance;
+        }
+
+        // Scroll (Step 3c): the builder shifts content up by scrollOffset rows, so
+        // screenRow = visualRow − scrollOffset; the mirror must match or a caret on a
+        // scrolled grid sits at the unscrolled position.
         const visualRow = this.lineStartRow[line] + segRow;
-        const x = this.originX + (col - segStart) * this.advance;
-        // Scroll (Step 3c): the builder shifts materialized glyphs up by scrollOffset rows,
-        // so screenRow = visualRow − scrollOffset; the analytic fallback must match, else an
-        // empty-line caret would sit at the unscrolled position.
         const y = this.originY - (visualRow - this.scrollOffset) * this.lineSpacing;
-        if (!this.geom) return { x, y, z: 0 };
-        // Empty line has no glyph z (no intra-line wrap); the page fold supplies z via shiftZ
-        // (0 for axis 'xy', -page*depth for 'z'), so the caret lands on the right page plane.
+        // The z staircase: each intra-line wrap segment steps back. Empty lines and
+        // unwrapped cols sit at segRow 0 → z 0, as before.
+        const z = -segRow * this.zStep;
+
+        if (!this.geom) return { x, y, z };
+        // Page fold — the SAME paginationShift the builder normalizes by. shiftZ is
+        // additive (axis 'z' pushes pages back; 'xy' leaves z alone), so the staircase
+        // survives pagination exactly as it does in the buffer.
         const { shiftX, mappedRelY, shiftZ } = paginationShift(this.originY - y, this.geom);
-        return { x: x + shiftX, y: this.originY - mappedRelY, z: shiftZ };
+        return { x: x + shiftX, y: this.originY - mappedRelY, z: z + shiftZ };
     }
 }

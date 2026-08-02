@@ -131,8 +131,16 @@ export function paginationGeometry(metrics, contentWidth, layout = DEFAULT_LAYOU
  */
 export function paginationShift(relY, geom) {
     // pageHeightWorld<=0 means pagination is off (pageHeight:0) — no shift, ever.
-    if (geom.pageHeightWorld <= 0 || relY < geom.pageHeightWorld) return { shiftX: 0, mappedRelY: relY, shiftZ: 0 };
-    const vPage = Math.floor(relY / geom.pageHeightWorld);
+    if (geom.pageHeightWorld <= 0) return { shiftX: 0, mappedRelY: relY, shiftZ: 0 };
+    // The quotient is nudged before flooring: relY reaches here as an ACCUMULATED sum
+    // (the builder's repeated y -= lineSpacing), so a row exactly on a page boundary
+    // lands one ulp under the integer and floors a whole page early — ulp-scale input,
+    // page-stride output. Legit rows are quantized ≥ 1/pageHeight apart (≫ 1e-6), so
+    // the nudge can never move a non-boundary row. The GPU kernel divides INTEGER rows
+    // and needs no nudge; this keeps the CPU fold on the same page, literally.
+    const q = relY / geom.pageHeightWorld + 1e-6;
+    if (q < 1) return { shiftX: 0, mappedRelY: relY, shiftZ: 0 };
+    const vPage = Math.floor(q);
     const rowOffsetInPage = relY - vPage * geom.pageHeightWorld;
     if (geom.axis === 'z') {
         // z-pages: every page shares the front page's x,y footprint (top-aligned) and

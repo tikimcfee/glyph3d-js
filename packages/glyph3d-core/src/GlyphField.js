@@ -19,7 +19,7 @@
  */
 
 import * as THREE from 'three';
-import { MeshBasicNodeMaterial, TSL } from 'three/webgpu';
+import { MeshBasicNodeMaterial, StorageInstancedBufferAttribute, TSL } from 'three/webgpu';
 
 const {
     Fn,
@@ -935,8 +935,11 @@ export default class GlyphField {
         const maxCount = this.config.maxInstances;
 
         // Pre-allocate per-instance attributes
+        // Storage-backed so a compute kernel can also WRITE it (GPU layout): WebGPU grants
+        // storage attributes STORAGE|VERTEX usage, and three repacks the vec3 to a 16-byte
+        // stride for both consumers. CPU writes + needsUpdate behave like any attribute.
         geometry.setAttribute('instancePosition',
-            new THREE.InstancedBufferAttribute(new Float32Array(maxCount * 3), 3));
+            new StorageInstancedBufferAttribute(new Float32Array(maxCount * 3), 3));
         geometry.setAttribute('instanceSize',
             new THREE.InstancedBufferAttribute(new Float32Array(maxCount * 2), 2));
         geometry.setAttribute('instanceGlyphId',
@@ -1886,7 +1889,7 @@ export default class GlyphField {
         let { itemMeta } = buffers;
         const geom = this.instanceMesh.geometry;
 
-        geom.setAttribute('instancePosition', new THREE.InstancedBufferAttribute(positions, 3));
+        geom.setAttribute('instancePosition', new StorageInstancedBufferAttribute(positions, 3));
         geom.setAttribute('instanceSize',     new THREE.InstancedBufferAttribute(sizes, 2));
         geom.setAttribute('instanceGlyphId',  new THREE.InstancedBufferAttribute(glyphIds || new Float32Array(count), 1));
         geom.setAttribute('instanceColor',    new THREE.InstancedBufferAttribute(colors, 3));

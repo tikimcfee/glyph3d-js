@@ -49,6 +49,7 @@ const {
     Break,
     uniform,
     instancedArray,
+    storage,
     instanceIndex,
     int,
     uint,
@@ -205,13 +206,23 @@ function resolveParams(params = {}) {
 export default class GlyphLayoutKernel {
     /**
      * @param {THREE.WebGPURenderer} renderer - an initialized WebGPU renderer
-     * @param {{ maxSlots?: number, maxLines?: number }} [opts]
+     * @param {{ maxSlots?: number, maxLines?: number,
+     *           positionsAttribute?: import('three/webgpu').StorageInstancedBufferAttribute }} [opts]
+     *   positionsAttribute: write into an EXTERNAL storage-backed attribute instead of an owned
+     *   buffer — the integration mode, where the target is a GlyphField's own instancePosition
+     *   (vec3; three repacks it to a 16-byte stride, which is also WGSL's vec3-array stride, so
+     *   both sides index identically). With an external target, configure()'s outBase places each
+     *   item at its bufferStartIndex range, and dispose() leaves the attribute alone — the field
+     *   owns it.
      */
     constructor(renderer, opts = {}) {
         if (!renderer) throw new Error('GlyphLayoutKernel: a WebGPU renderer is required');
 
         /** @type {THREE.WebGPURenderer} */
         this.renderer = renderer;
+
+        /** External output attribute (integration mode), or null for an owned buffer. */
+        this._externalOut = opts.positionsAttribute || null;
 
         /** Allocated slot capacity. configure() grows this by reallocating. */
         this.maxSlots = Math.max(1, opts.maxSlots ?? DEFAULT_MAX_SLOTS);
@@ -228,6 +239,7 @@ export default class GlyphLayoutKernel {
         // Uniforms are size-independent, so they outlive buffer reallocation and the kernel is
         // never rebuilt just to retune the fold.
         this._u = {
+            outBase:         uniform(0, 'uint'),
             lineCount:       uniform(0, 'uint'),
             wrapWidth:       uniform(0, 'uint'),
             scrollRows:      uniform(0, 'int'),
@@ -276,7 +288,12 @@ export default class GlyphLayoutKernel {
         this.maxSlots = maxSlots;
         this.maxLines = maxLines;
 
-        this.positions    = instancedArray(maxSlots, 'vec4').setName('GlyphLayoutPositions');
+        // Owned output is vec4 (visible stride); an external target is the field's OWN vec3
+        // attribute wrapped as a storage node — same 16-byte stride either way, but the
+        // element type must match the attribute or the write bindings disagree.
+        this.positions = this._externalOut
+            ? storage(this._externalOut, 'vec3', maxSlots).setName('GlyphLayoutPositionsExt')
+            : instancedArray(maxSlots, 'vec4').setName('GlyphLayoutPositions');
         this.xOffsets     = instancedArray(maxSlots, 'float').setName('GlyphLayoutXOffsets');
         this.lineTable    = instancedArray(maxLines, 'uint').setName('GlyphLayoutLineTable');
         this.lineStartRow = instancedArray(maxLines, 'uint').setName('GlyphLayoutLineStartRow');
@@ -395,9 +412,16 @@ export default class GlyphLayoutKernel {
 
             const p = fold(slot, lo);
 
-            // .w is WGSL stride padding, not a lane we own — write it 0 so a readback is
-            // deterministic rather than whatever the allocation left behind.
-            this.positions.element(slot).assign(vec4(p, float(0)));
+            // outBase places this dispatch at its item's range in a shared output (a field's
+            // bufferStartIndex); owned buffers dispatch at 0. External vec3 writes leave the
+            // stride-padding lane alone (the vertex stage never reads it); the owned vec4
+            // writes zero it so a readback is deterministic.
+            const out = u.outBase.add(slot);
+            if (this._externalOut) {
+                this.positions.element(out).assign(p);
+            } else {
+                this.positions.element(out).assign(vec4(p, float(0)));
+            }
         })().compute(1).setName('GlyphLayoutKernel');
     }
 
@@ -416,7 +440,7 @@ export default class GlyphLayoutKernel {
      * @param {GlyphLayoutParams} [cfg.params] - overrides on LAYOUT_PARAM_DEFAULTS
      * @returns {this}
      */
-    configure({ slotCount, lineTable, lineStartRow, advances, params }) {
+    configure({ slotCount, lineTable, lineStartRow, advances, params, outBase: cfgOutBase }) {
         if (!Number.isInteger(slotCount) || slotCount < 0) {
             throw new Error(`GlyphLayoutKernel: slotCount must be a non-negative integer, got ${slotCount}`);
         }
@@ -459,10 +483,18 @@ export default class GlyphLayoutKernel {
 
         const p = resolveParams(params);
         const axis = resolveAxis(p.axis);
+        const outBase = cfgOutBase ?? 0;
+        if (!Number.isInteger(outBase) || outBase < 0) {
+            throw new Error(`GlyphLayoutKernel: outBase must be a non-negative integer, got ${outBase}`);
+        }
 
         // Grow before writing. Capacity is the one input the kernel is compiled against.
-        if (slotCount > this.maxSlots || lineCount > this.maxLines) {
-            this._allocate(Math.max(slotCount, this.maxSlots), Math.max(lineCount, this.maxLines));
+        // An external output cannot grow — its capacity is the field's buffer, full stop.
+        if (outBase + slotCount > this.maxSlots || lineCount > this.maxLines) {
+            if (this._externalOut) {
+                throw new Error(`GlyphLayoutKernel: outBase ${outBase} + slotCount ${slotCount} exceeds external capacity ${this.maxSlots}`);
+            }
+            this._allocate(Math.max(outBase + slotCount, this.maxSlots), Math.max(lineCount, this.maxLines));
         }
 
         this.slotCount = slotCount;
@@ -507,6 +539,7 @@ export default class GlyphLayoutKernel {
         const pageRows = Math.max(0, Math.trunc(p.pageHeight));
 
         const u = this._u;
+        u.outBase.value = outBase;
         u.lineCount.value = lineCount;
         u.wrapWidth.value = wrapCols;
         u.scrollRows.value = Math.trunc(p.scrollOffset);
@@ -540,6 +573,20 @@ export default class GlyphLayoutKernel {
         if (!this._kernel) throw new Error('GlyphLayoutKernel: disposed');
         if (this.slotCount === 0) return;
         await this.renderer.computeAsync(this._kernel);
+        this._dispatched = true;
+    }
+
+    /**
+     * Encode + submit NOW — the fire-and-forget integration path. Uniforms are read at
+     * encode time, so sequential configure→computeSync per item on ONE kernel is safe with
+     * no awaits between them; the async compute() defers a microtask, which would race the
+     * next configure's uniform writes. Requires an already-initialized renderer (the live
+     * app's always is; a cold one should use compute()).
+     */
+    computeSync() {
+        if (!this._kernel) throw new Error('GlyphLayoutKernel: disposed');
+        if (this.slotCount === 0) return;
+        this.renderer.compute(this._kernel);
         this._dispatched = true;
     }
 
@@ -588,9 +635,12 @@ export default class GlyphLayoutKernel {
      */
     _releaseBuffers() {
         const attributes = this.renderer?._attributes;
-        for (const node of [this.positions, this.xOffsets, this.lineTable, this.lineStartRow]) {
+        for (const node of [this.xOffsets, this.lineTable, this.lineStartRow]) {
             if (node && attributes) attributes.delete(node.value);
         }
+        // An owned positions buffer is ours to free; an external attribute is the FIELD's —
+        // its geometry keeps rendering from it after this kernel is gone.
+        if (this.positions && !this._externalOut && attributes) attributes.delete(this.positions.value);
         this.positions = null;
         this.xOffsets = null;
         this.lineTable = null;

@@ -17,6 +17,7 @@ import { RENDER_ORDER } from '../core/renderOrder.js';
 import { BOUNDS_Z_PAD } from '../core/constants.js';
 import { computeCellMetrics } from '../core/cellMetrics.js';
 import { paginationGeometry, resolveLayoutParams, DEFAULT_LAYOUT } from '../workers/builders/index.js';
+import { syncGpuLayout } from '../compute/GlyphLayoutCompute.js';
 import LayoutDescription from '../core/LayoutDescription.js';
 import { analyzeGrid, buildGridSemantics, buildGridSemanticsSync } from '../parsing/SyntaxColorizer.js';
 import FramedGlyphField from './FramedGlyphField.js';
@@ -1268,8 +1269,10 @@ class CodeGrid extends FramedGlyphField {
      * @param {Object} buffers - output of buildBatchBuffers
      * @param {Array} items - the items that produced `buffers`
      * @param {number[]} [deferredRemovals] - renderer IDs to remove atomically
+     * @param {?{metrics: Object, layout: Object, scrollOffset: number}} [shared] - the bag the
+     *   builder consumed, passed through for the GPU layout engine (dual-compute assertion)
      */
-    _commitBuiltBuffers(buffers, items, deferredRemovals = []) {
+    _commitBuiltBuffers(buffers, items, deferredRemovals = [], shared = null) {
         if (!this._renderer) {
             this._createRendererWithSize(buffers.count, true);
         }
@@ -1287,6 +1290,13 @@ class CodeGrid extends FramedGlyphField {
         const rendererIds = this._renderer.applyPrebuiltBuffers(buffers, items);
         this._workerBoundsCache  = buffers.bounds;
         this._contentBoundsDirty = false;
+
+        // GPU layout (layout.gpu, dual-compute): re-derive eligible items' positions in the
+        // compute kernel, into the SAME storage attribute the CPU just filled — bit-exact per
+        // the layout-kernel gate, so this changes nothing visible when correct and is loudly
+        // wrong when not. Skipped/failed dispatches leave CPU values standing; no feature
+        // rides on this branch. No-op unless the toggle AND an engine renderer are armed.
+        if (shared) syncGpuLayout(this._renderer, buffers, items, shared);
 
         for (let i = 0; i < items.length; i++) {
             const p          = items[i];
@@ -1330,7 +1340,7 @@ class CodeGrid extends FramedGlyphField {
         if (this._pendingAdds.length > 0) {
             const { items, metrics, defaultColor, layout, scrollOffset } = this._prepareAddsForBuild();
             const buffers = getWorkerBridge().buildBatchBuffersSync(items, { metrics, defaultColor, layout, scrollOffset });
-            this._commitBuiltBuffers(buffers, items);
+            this._commitBuiltBuffers(buffers, items, [], { metrics, layout, scrollOffset });
         }
 
         if (this._renderer && this._pickingSystem) {
@@ -1365,7 +1375,7 @@ class CodeGrid extends FramedGlyphField {
             const { items, metrics, defaultColor, layout, scrollOffset } = this._prepareAddsForBuild();
             try {
                 const buffers = await getWorkerBridge().buildBatchBuffers(items, { metrics, defaultColor, layout, scrollOffset });
-                this._commitBuiltBuffers(buffers, items, deferredRemovals);
+                this._commitBuiltBuffers(buffers, items, deferredRemovals, { metrics, layout, scrollOffset });
             } catch (error) {
                 console.warn('CodeGrid: Worker flush failed, falling back to sync:', error);
                 // Put the deferred removals back so _flush() applies them.
@@ -1726,10 +1736,10 @@ class CodeGrid extends FramedGlyphField {
     /**
      * Build the queryable LayoutDescription for the current flush — the ONE source
      * caret / highlight / selection query against (positionAt, slotForChar). positionAt
-     * is buffer-backed: it reads the renderer's authoritative position attribute, so
-     * consumers never re-derive wrap/pagination math. The line tables + geom back the
-     * analytic fallback (empty lines now; off-screen lines once windowing lands).
-     * Rebuilt every flush. @private
+     * is the FOLD MIRROR: it evaluates the same pure layout function the GPU kernel
+     * runs, from the line tables + real advances + pagination geometry — every input
+     * CPU-authored, so any glyph's location is answerable synchronously with no
+     * position buffer and no readback. Rebuilt every flush. @private
      */
     _buildLayoutDescription() {
         if (!this._lineSlotBase || !this._lineStartRow) { this._layout = null; return; }
@@ -1740,24 +1750,25 @@ class CodeGrid extends FramedGlyphField {
         // so the analytic fallback aligns with the glyphs. CodeGrid metrics → builder
         // metric names.
         const contentWidth = this._getContentItemMeta()?.pageContentWidth || 0;
+        const lp = resolveLayoutParams(this.config.layout);  // SAME normalization the builder applies — geom can't drift
         const geom = paginationGeometry(
             { charWidth: m.charWidth, letterSpacing: m.spacing || 0, lineSpacing: m.lineHeight },
             contentWidth,
-            resolveLayoutParams(this.config.layout),  // SAME normalization the builder applies — geom can't drift
+            lp,
         );
         this._layout = new LayoutDescription({
             lineSlotBase: this._lineSlotBase,
             lineStartRow: this._lineStartRow,
             lineWrapCols: this._lineWrapCols,
             lineLengths,
-            positions: this._renderer?.getInstancePositions?.() ?? null,
             sizes: this._renderer?.getInstanceSizes?.() ?? null,
             geom,
             originX: 0,
             originY: this._layoutOriginY ?? 0,
             lineSpacing: m.lineHeight,
+            zStep: m.charHeight * (lp.zWrapSpacing || 0),
             advance: m.charWidth + (m.spacing || 0),
-            scrollOffset: this._scrollOffset || 0,  // so the analytic fallback matches the scrolled glyphs
+            scrollOffset: this._scrollOffset || 0,  // so the mirror matches the scrolled glyphs
         });
         this._scheduleAnalyze();
     }

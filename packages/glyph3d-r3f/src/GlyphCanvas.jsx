@@ -1,6 +1,7 @@
 import React from 'react';
 import { Canvas } from '@react-three/fiber';
 import * as THREE from 'three/webgpu';
+import { setComputeRenderer } from '@glyph3d/core/compute/GlyphLayoutCompute.js';
 import { GlyphProvider } from './context.jsx';
 
 /**
@@ -73,6 +74,9 @@ export default function GlyphCanvas({
         const renderer = new THREE.WebGPURenderer({ ...glProps, antialias: true });
         renderer.toneMapping = toneMapping;
         await renderer.init();
+        // Arm the core's GPU layout engine: core objects (CodeGrid) live below the renderer
+        // and can't reach it through any ctx they own — this is the one registration point.
+        setComputeRenderer(renderer);
         onRenderer?.(renderer, glProps);
         return renderer;
       }}
