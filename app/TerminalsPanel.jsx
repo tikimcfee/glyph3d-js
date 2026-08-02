@@ -37,6 +37,7 @@ const styles = {
   },
   dot: { color: '#7ad7a0', flex: '0 0 auto', fontSize: 10 },
   dims: { flex: '0 0 auto', color: '#5c6675' },
+  drop: { flex: '0 0 auto', padding: '0 2px', borderRadius: 3, color: '#7c8596', cursor: 'pointer' },
   kill: { flex: '0 0 auto', padding: '0 4px', borderRadius: 3, color: '#7c8596', cursor: 'pointer' },
   spawn: {
     display: 'flex', alignItems: 'center', height: '100%', padding: '0 10px',
@@ -84,8 +85,9 @@ export default function TerminalsPanel({ client }) {
       <TerminalView client={clientRef.current} termId={params.termId} panelApi={api} />
     );
 
-    // The tab (titlebar): live id + dims + a × that kills the shell. Clicking the tab body is
-    // dockview's own activate (→ terminal.focus via onDidActivePanelChange); × stops that.
+    // The tab (titlebar): live id + dims + a ⌖ that drops the window camera-front (window.drop —
+    // pulls it out of any dock/carrel holding it) + a × that kills the shell. Clicking the tab
+    // body is dockview's own activate (→ terminal.focus via onDidActivePanelChange); both stop that.
     const Tab = ({ params }) => {
       const id = params.termId;
       const [dims, setDims] = useState(() => readDims(clientRef.current, id));
@@ -101,6 +103,13 @@ export default function TerminalsPanel({ client }) {
           <span style={styles.dot}>●</span>
           <span>{id}</span>
           <span style={styles.dims}>{dims}</span>
+          <span
+            title={`drop ${id} in front of the camera (window.drop)`}
+            onClick={(e) => { e.stopPropagation(); clientRef.current?.router.execute(`window.drop ${id}`); }}
+            style={styles.drop}
+            onMouseEnter={(e) => { e.currentTarget.style.color = '#8ab4f8'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.color = '#7c8596'; }}
+          >⌖</span>
           <span
             title={`kill ${id} (shell + tmux session)`}
             onClick={(e) => { e.stopPropagation(); clientRef.current?.router.execute(`terminal.kill ${id}`); }}

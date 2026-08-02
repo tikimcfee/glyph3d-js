@@ -498,12 +498,27 @@ export class CameraDock extends THREE.Object3D {
     /**
      * Undock a window: reparent it back to its home (world-preserving) and animate
      * it back to its home transform. Re-packs the remaining tiles.
+     *
+     * `opts.to` re-aims THIS release at a caller-computed pose instead of home —
+     * the same slide + slerp, a different destination (window.drop lands the
+     * window camera-front). Release-to-home is the special case where no
+     * override is given. Fields replace the home record: parent (reparent
+     * target), pos (in that parent's space), quat, scale.
      * @param {string} id
+     * @param {{to?:{parent?:Object, pos?:{x:number,y:number,z:number}, quat?:Object, scale?:number}}} [opts]
      * @returns {boolean}
      */
-    release(id) {
+    release(id, opts = {}) {
         const e = this.entries.get(id);
         if (!e) return false;
+
+        const to = opts.to;
+        if (to) {
+            if (to.parent) e.homeParent = to.parent;
+            if (to.pos) e.home.pos = { x: to.pos.x, y: to.pos.y, z: to.pos.z };
+            if (to.quat) e.home.quat.copy(to.quat);
+            if (Number.isFinite(to.scale)) e.home.scale = to.scale;
+        }
 
         e.unsubscribeResize?.(); // stop reacting to its size once it leaves the dock
         e.grid.setBorderFlag?.(BORDER_FLAGS.DOCKED, false); // drop the dock identity — leaving the bar

@@ -571,7 +571,7 @@ export function ResizeDragger() {
       }
     };
 
-    // CLICK chrome controls (pin, close, close-confirm) share the 'handle' channel with the
+    // CLICK chrome controls (pin, drop, close, close-confirm) share the 'handle' channel with the
     // drag grips; a press FIRES instead of starting a drag. 'close' mirrors the terminal-tab ×
     // but ARMS a confirm first: it pops up the red 'close-confirm' "Sure?" button (a pre-built
     // hidden sibling on the same window), which auto-disarms after a few seconds or on any
@@ -586,6 +586,7 @@ export function ResizeDragger() {
     const fireChromeAction = (role, id, grid) => {
       if (role === 'capture') { router.execute(['attention.capture', 'toggle', id]); return; } // settle/unsettle THIS terminal; loop lights the Lock
       if (role === 'pin') { router.execute(['window.pin', id]); return; } // verb lights the Pin button
+      if (role === 'drop') { router.execute(['window.drop', id]); return; } // set down camera-front — mirrors the terminal-tab ⌖
       if (role === 'close') {
         if (armedClose && armedClose.grid !== grid) disarmClose();
         grid.setControlVisible?.('close-confirm', true);

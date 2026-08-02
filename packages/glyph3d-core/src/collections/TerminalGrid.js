@@ -1090,6 +1090,7 @@ export default class TerminalGrid extends FramedGlyphField {
         { role: 'scale',         label: 'Scale',  color: 0xf2787a, grab: true  },                    // red grip:   drag → zoom
         { role: 'capture',       label: 'Lock',   color: 0xff7a18, grab: false },                    // orange:     click → settle/unsettle keyboard capture
         { role: 'pin',           label: 'Pin',    color: 0xf2c14e, grab: false },                    // amber:      click → maximize toggle
+        { role: 'drop',          label: 'Drop',   color: 0x8ab4f8, grab: false },                    // blue:       click → set down camera-front (window.drop)
         { role: 'close',         label: 'Close',  color: 0x8a93a0, grab: false },                    // slate:      click → arm the confirm
         { role: 'close-confirm', label: 'Sure?',  color: 0xe5534b, grab: false, popupOf: 'close' },  // alarm red:  click → terminal.kill
     ];

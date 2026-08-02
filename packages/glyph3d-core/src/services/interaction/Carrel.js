@@ -221,9 +221,15 @@ export class Carrel extends THREE.Object3D {
      * its home transform. A BORROWED member (currently ridden elsewhere — its
      * parent is not this carrel) just drops its entry; the rider's own home
      * record governs where it lands when the ride ends.
-     * @param {string} id @returns {boolean}
+     *
+     * `opts.to` re-aims THIS release at a caller-computed pose instead of home
+     * (window.drop lands the member camera-front) — mirrors CameraDock.release.
+     * A borrowed member ignores it: the rider owns the trip.
+     * @param {string} id
+     * @param {{to?:{parent?:Object, pos?:{x:number,y:number,z:number}, quat?:Object, scale?:number}}} [opts]
+     * @returns {boolean}
      */
-    release(id) {
+    release(id, opts = {}) {
         const e = this.entries.get(id);
         if (!e) return false;
 
@@ -233,6 +239,14 @@ export class Carrel extends THREE.Object3D {
         if (e.grid.parent !== this) {
             this._relayout();
             return true;
+        }
+
+        const to = opts.to;
+        if (to) {
+            if (to.parent) e.homeParent = to.parent;
+            if (to.pos) e.home.pos = { x: to.pos.x, y: to.pos.y, z: to.pos.z };
+            if (to.quat) e.home.quat.copy(to.quat);
+            if (Number.isFinite(to.scale)) e.home.scale = to.scale;
         }
 
         // Home parent may have been pruned (file closed while seated) — fall back

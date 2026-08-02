@@ -38,8 +38,8 @@ function findCarrel(ctx, name) {
     return last;
 }
 
-/** The carrel currently holding a surface id, or null. */
-function findOwner(ctx, id) {
+/** The carrel currently holding a surface id, or null. (window.drop asks too.) */
+export function findCarrelOwner(ctx, id) {
     const map = carrels(ctx);
     if (!map) return null;
     for (const c of map.values()) if (c.has(id)) return c;
@@ -156,7 +156,7 @@ export default function registerCarrelCommands(router) {
             ctx.workspace?.setSurfaceView?.(r.id, undefined, { docked: false });
             ctx.cameraDock.release(r.id);
         } else {
-            const prev = findOwner(ctx, r.id);
+            const prev = findCarrelOwner(ctx, r.id);
             if (prev) {
                 home = prev.homeOf(r.id);
                 prev.release(r.id);
@@ -176,7 +176,7 @@ export default function registerCarrelCommands(router) {
     router.register('carrel.release', (args, ctx) => {
         const r = resolveSurface(ctx, args[0]);
         const id = r?.id ?? String(args[0] ?? '');
-        const owner = findOwner(ctx, id);
+        const owner = findCarrelOwner(ctx, id);
         if (!owner) return { text: `ERR: '${id}' is not seated at any carrel`, data: null };
         setFact(ctx, id, null);
         owner.release(id);
