@@ -27,6 +27,10 @@ const r2 = (n) => Math.round(n * 100) / 100;
  *  or the first lane when omitted), a library VOLUME (by its directory path), or a tree
  *  book (by file path) — or null. */
 function resolveBook(ctx, id) {
+    // book.list labels agent lanes `agent:<id>` — accept that form back, so
+    // the list's own display round-trips into every book verb. (A driver
+    // reading the list SHOULD be able to paste what it sees.)
+    if (typeof id === 'string' && id.startsWith('agent:')) id = id.slice(6);
     const books = ctx.agentBooks;
     if (books) {
         const hit = books._resolveLane?.(id);

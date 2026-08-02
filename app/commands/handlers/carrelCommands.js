@@ -124,10 +124,25 @@ export default function registerCarrelCommands(router) {
     }, { description: 'Set down a new carrel (world-anchored desk) ahead of the camera', usage: '[name] [radius]', returns: '{ name, radius }' });
 
     router.register('carrel.add', (args, ctx) => {
-        const carrel = findCarrel(ctx, args[1]);
-        if (!carrel) return { text: 'ERR: no carrel (carrel.create first)', data: null };
-        const r = resolveHostable(ctx, args[0]);
-        if (!r) return { text: `ERR: nothing hostable for "${args[0]}" (registry id, surface index, or agent id)`, data: null };
+        // Forgiving arg order: `<book> [carrel]` is canon, but container-first
+        // (`carrel.add carrel-1 <book>`) is what English suggests — if the
+        // carrel slot names no carrel and the id slot does, swap. Live
+        // finding: the local-model driver wrote container-first and the old
+        // blanket "no carrel" error convinced it the carrel itself was gone.
+        const map = carrels(ctx);
+        let idArg = args[0], carrelArg = args[1];
+        if (map && args.length >= 2 && !map.has(String(carrelArg)) && map.has(String(idArg))) {
+            [idArg, carrelArg] = [carrelArg, idArg];
+        }
+        const carrel = findCarrel(ctx, carrelArg);
+        if (!carrel) {
+            const have = map && map.size ? [...map.keys()].join(', ') : null;
+            return { text: carrelArg != null && have
+                ? `ERR: no carrel named '${carrelArg}' (have: ${have})`
+                : 'ERR: no carrel (carrel.create first)', data: null };
+        }
+        const r = resolveHostable(ctx, idArg);
+        if (!r) return { text: `ERR: nothing hostable for "${idArg}" (registry id, surface index, or agent id)`, data: null };
         if (carrel.has(r.id)) return { text: `OK: '${r.id}' already seated at '${carrel.carrelName}'`, data: { id: r.id, carrel: carrel.carrelName } };
 
         // Occupancy handoff: never capture a vehicle (the dock) or another residence's
