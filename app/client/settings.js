@@ -197,14 +197,15 @@ export const SETTINGS = [
     key: 'atlas.size', label: 'Atlas texture (px)', group: 'Display',
     type: 'number', default: 2048, min: 512, max: 8192, step: 512, reload: true,
   },
-  // GPU layout — run the glyph layout fold on a compute kernel (dual-compute v1: the CPU
-  // builder stays authoritative and every feature reads it; the kernel writes bit-exact
-  // positions into the same storage attribute, a live assertion of the GPU engine). An
-  // ENGINE toggle, never a feature switch: items the kernel can't serve are skipped and
-  // keep CPU values. Takes hold on each grid's next fold/content flush.
+  // GPU layout — THE engine, on by default: the compute kernel lays out every eligible
+  // grid (engine builds emit no CPU position array; positionAt answers through the fold
+  // mirror; layout.verify asserts the invariant live). Grids the kernel can't yet serve
+  // (non-engineCapable arrangers, scaled items) take the CPU path wholesale — an ENGINE
+  // choice per grid, never a feature switch. This opt-OUT survives only until the
+  // changeover completes; then the engine is simply how layout works.
   {
-    key: 'layout.gpu', label: 'GPU layout engine (new folds)', group: 'Grid',
-    type: 'bool', default: false,
+    key: 'layout.gpu', label: 'GPU layout engine', group: 'Grid',
+    type: 'bool', default: true,
     apply: (_ctx, v) => setGpuLayoutEnabled(v),
   },
   // Width compression — condense glyph ink along x, in place, aligned to leading. A
@@ -332,8 +333,8 @@ export const SETTINGS = [
   { key: 'carrel.gapFrac', label: 'Item spacing', group: 'Carrel', type: 'number', default: 0.9, min: 0, max: 2, step: 0.05, apply: carrelParam('gapFrac') },
   { key: 'carrel.growCap', label: 'Fit growth cap', group: 'Carrel', type: 'number', default: 1.25, min: 1, max: 4, step: 0.05, apply: carrelParam('growCap') },
   { key: 'carrel.maxArcDeg', label: 'Ring arc span°', group: 'Carrel', type: 'number', default: 300, min: 60, max: 360, step: 5, apply: carrelParam('maxArcDeg') },
-  { key: 'carrel.tableFrac', label: 'Tabletop overhang', group: 'Carrel', type: 'number', default: 1.25, min: 1, max: 2, step: 0.05, apply: carrelParam('tableFrac') },
-  { key: 'carrel.auraHeadroom', label: 'Aura headroom', group: 'Carrel', type: 'number', default: 40, min: 0, max: 300, step: 5, apply: carrelParam('auraHeadroom') },
+  { key: 'carrel.tableFrac', label: 'Shadow overhang', group: 'Carrel', type: 'number', default: 1.25, min: 1, max: 2, step: 0.05, apply: carrelParam('tableFrac') },
+  { key: 'carrel.shadowSoft', label: 'Shadow edge softness', group: 'Carrel', type: 'number', default: 0.35, min: 0, max: 1, step: 0.05, apply: carrelParam('shadowSoft') },
   { key: 'carrel.glowStrength', label: 'Glow strength', group: 'Carrel', type: 'number', default: 0.35, min: 0, max: 2, step: 0.05, apply: carrelParam('glowStrength') },
   // Culling — hardware occlusion-query culling (three's native occlusionTest). A candidate
   // fully behind the OPAQUE occluder set (1.0 page faces, panels) stops drawing after
@@ -539,6 +540,10 @@ export const SETTINGS = [
   // re-scale, sheets re-fit, over-cap sheets shed, the cluster re-flows). Ranges are deliberately
   // WIDE — a small positive min just keeps a value off 0/negative; the user, not us, decides
   // what's "too big". Defaults mirror AGENT_BOOKS_DEFAULTS.
+  // No apply: the carrel sweep's auto-shelf pass reads this at each lane birth
+  // (scheduleCarrelSweep) — toggled ON it also gathers existing unseated books on
+  // the next agent event.
+  { key: 'book.autoShelf', label: "Seat new books at the 'agents' desk", group: 'Agent Books', type: 'bool', default: true },
   { key: 'book.maxSheets', label: 'Turns kept per book (0 = all)', group: 'Agent Books', type: 'number', default: 20, min: 0, max: 5000, step: 1, apply: bookParam('maxSheets') },
   { key: 'book.pageW', label: 'Page width', group: 'Agent Books', type: 'number', default: 320, min: 10, max: 5000, step: 10, apply: bookParam('pageW') },
   { key: 'book.pageH', label: 'Page height', group: 'Agent Books', type: 'number', default: 420, min: 10, max: 5000, step: 10, apply: bookParam('pageH') },
