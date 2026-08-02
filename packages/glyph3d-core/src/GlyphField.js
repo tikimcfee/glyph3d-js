@@ -944,11 +944,14 @@ export default class GlyphField {
         const maxCount = this.config.maxInstances;
 
         // Pre-allocate per-instance attributes
-        // Storage-backed so a compute kernel can also WRITE it (GPU layout): WebGPU grants
-        // storage attributes STORAGE|VERTEX usage, and three repacks the vec3 to a 16-byte
-        // stride for both consumers. CPU writes + needsUpdate behave like any attribute.
+        // PLAIN instanced attribute — stride 3, forever. A vec3 STORAGE attribute is a trap
+        // for CPU consumers: three repacks it at first render, REPLACING .array with a
+        // stride-4 padded copy and mutating itemSize — after which every arr[i*3] reader and
+        // writer (arrangers, updatePosition, bounds walks) silently lands on wrong lanes.
+        // The engine path swaps in its own explicit stride-4 storage attribute at commit
+        // (applyPrebuiltBuffers), where no CPU code touches the array by design.
         geometry.setAttribute('instancePosition',
-            new StorageInstancedBufferAttribute(new Float32Array(maxCount * 3), 3));
+            new THREE.InstancedBufferAttribute(new Float32Array(maxCount * 3), 3));
         geometry.setAttribute('instanceSize',
             new THREE.InstancedBufferAttribute(new Float32Array(maxCount * 2), 2));
         geometry.setAttribute('instanceGlyphId',
@@ -1929,8 +1932,11 @@ export default class GlyphField {
             }
             geom.setAttribute('instancePosition', attr);
         } else {
+            // CPU engine: adopt the builder's array under a PLAIN attribute — see
+            // _createInstanceMesh for why a vec3 storage attribute must never carry it
+            // (the first-render repack breaks every stride-3 CPU reader and writer).
             this._gpuPosAttr = null;
-            geom.setAttribute('instancePosition', new StorageInstancedBufferAttribute(positions, 3));
+            geom.setAttribute('instancePosition', new THREE.InstancedBufferAttribute(positions, 3));
         }
         geom.setAttribute('instanceSize',     new THREE.InstancedBufferAttribute(sizes, 2));
         geom.setAttribute('instanceGlyphId',  new THREE.InstancedBufferAttribute(glyphIds || new Float32Array(count), 1));

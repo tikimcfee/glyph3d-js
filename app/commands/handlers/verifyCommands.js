@@ -21,7 +21,26 @@ export default function registerVerifyCommands(router) {
         const field = grid._renderer;
         if (!field?.instanceMesh) return { text: 'ERR: grid has no field', data: null };
         if (field.gpuLayout !== true) {
-            return { text: 'layout.verify: CPU-engine grid — the buffer is authoritative by construction; nothing to cross-check', data: { engine: 'cpu' } };
+            // CPU engine: the buffer is authoritative — but its STRIDE is a contract. A vec3
+            // storage attribute repacked by three (itemSize mutated to 4, array replaced)
+            // silently breaks every arr[i*3] consumer; that exact failure painted glyph
+            // streaks across the sky once. Tripwire it forever.
+            const cpuAttr = field.instanceMesh.geometry.attributes.instancePosition;
+            const n3 = field.instanceMesh.geometry.instanceCount;
+            const arr = cpuAttr.array;
+            const mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
+            for (let i = 0; i < n3; i++) for (let k = 0; k < 3; k++) {
+                const v = arr[i * cpuAttr.itemSize + k];
+                if (v < mn[k]) mn[k] = v; if (v > mx[k]) mx[k] = v;
+            }
+            const strideOk = cpuAttr.itemSize === 3;
+            const sp = (k) => `${mn[k].toFixed(1)}…${mx[k].toFixed(1)}`;
+            return {
+                text: strideOk
+                    ? `layout.verify ✓ cpu-engine: stride 3 intact, buffer authoritative; x ${sp(0)} y ${sp(1)} z ${sp(2)} (${n3} slots)`
+                    : `layout.verify ✗ cpu-engine: instancePosition itemSize is ${cpuAttr.itemSize}, expected 3 — the storage-repack trap; every stride-3 reader/writer is corrupting`,
+                data: { ok: strideOk, engine: 'cpu', itemSize: cpuAttr.itemSize, count: n3, spans: { x: sp(0), y: sp(1), z: sp(2) } },
+            };
         }
         const renderer = ctx.renderer;
         if (!renderer?.getArrayBufferAsync) return { text: 'ERR: no renderer readback available', data: null };
