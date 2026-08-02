@@ -482,6 +482,10 @@ export const SETTINGS = [
   { key: 'book.pageH', label: 'Page height', group: 'Agent Books', type: 'number', default: 420, min: 10, max: 5000, step: 10, apply: bookParam('pageH') },
   { key: 'book.gutter', label: 'Spread gutter (spine gap)', group: 'Agent Books', type: 'number', default: 24, min: 0, max: 500, step: 2, apply: bookParam('gutter') },
   { key: 'book.maxUpscale', label: 'Max content upscale', group: 'Agent Books', type: 'number', default: 3, min: 0.1, max: 100, step: 0.1, apply: bookParam('maxUpscale') },
+  // The page face behind each spread. At 1.0 the page is FULLY OPAQUE — the face material
+  // already depth-writes, so full alpha is a true occluder: nothing bleeds through the page
+  // (the readability A/B this knob exists for). Lower values are the translucent house look.
+  { key: 'book.faceOpacity', label: 'Page opacity', group: 'Agent Books', type: 'number', default: 0.85, min: 0, max: 1, step: 0.05, apply: bookParam('faceOpacity') },
   { key: 'book.zPitch', label: 'Sheet depth spacing (Z)', group: 'Agent Books', type: 'number', default: 90, min: 1, max: 4000, step: 5, apply: bookParam('zPitch') },
   { key: 'book.pagerLerp', label: 'Page-turn speed', group: 'Agent Books', type: 'number', default: 9, min: 0, max: 60, step: 0.5, apply: bookParam('pagerLerp') },
   { key: 'book.callScale', label: 'Headline card size', group: 'Agent Books', type: 'number', default: 3.0, min: 0.05, max: 50, step: 0.1, apply: bookParam('callScale') },
