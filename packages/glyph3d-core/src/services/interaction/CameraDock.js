@@ -22,6 +22,11 @@
  * pane splits (splitPane) grow the tree; the frame's size per pane is a pure function of (frustum,
  * frame rect, live grid extent), refit live as the canvas resizes. See _frameRect / _placePane.
  *
+ * A framed window's bar slot stays RESERVED: its neighbors don't move, and a soft outline in the
+ * window's identity hue breathes in the held-open slot as a placeholder for where it returns. On
+ * unframe/release/dismiss the slot is still open and the grid drops straight back into it — the
+ * bar never reshuffles under a focus change. See _showGhost / _sweepGhosts.
+ *
  * How it rides the camera: this node is itself a THREE.Object3D added to the
  * scene. Each frame `update(dt, camera)` parks it a fixed `distance` ahead of
  * the camera, matching the camera's orientation — the sky-follow trick with an
@@ -66,6 +71,10 @@ const _z = new THREE.Vector3(0, 0, 1);
 const _dir = new THREE.Vector3();
 const _off = new THREE.Vector3();
 const DEG2RAD = Math.PI / 180;
+
+// Slot-placeholder chrome. A framed window leaves a ghost outline breathing in its held-open bar
+// slot — the affordance that says "this is where it lives; it returns here".
+const GHOST_RENDER_ORDER = 1000;     // HUD affordance — drawn over the tiles, depth-test off
 
 // Per-tile identity hue — AUTO-GENERATED per docked window, not a fixed palette. A golden-angle
 // rotation (137.5°) walks the hue circle so successive windows land maximally far apart: distinct for
@@ -127,6 +136,8 @@ export class CameraDock extends THREE.Object3D {
      * @param {number} [opts.yawRate=14]    - tile face-the-eye slerp rate (×dt)
      * @param {number} [opts.borderWidth=1.5] - docked window's panel-border thickness (screen pixels)
      * @param {number} [opts.borderStrength=1] - docked window's border intensity (0 = no border)
+     * @param {number} [opts.ghostOpacity=0.55] - slot placeholder's peak opacity (the breathe stays below it)
+     * @param {number} [opts.ghostPulseHz=0.5]  - placeholder breathe rate (cycles/sec; 0 = steady)
      * @param {'linear'|'radial'} [opts.layout='radial']
      */
     constructor({ attentionManager = null, distance = 10, boxFrac = 0.1, boxAspect = 1.15, gapFrac = 0.4,
@@ -136,6 +147,7 @@ export class CameraDock extends THREE.Object3D {
                   frameDistFrac = 0.7,
                   animDur = 0.167, yawRate = 14,
                   borderWidth = 1.5, borderStrength = 1,
+                  ghostOpacity = 0.55, ghostPulseHz = 0.5,
                   layout = 'radial' } = {}) {
         super();
         this.name = 'camera-dock';
@@ -173,8 +185,17 @@ export class CameraDock extends THREE.Object3D {
         this.layoutMode = layout;     // 'radial' (hemisphere, default) | 'linear'
         this.borderWidth = borderWidth;       // docked window's panel-border thickness (screen pixels)
         this.borderStrength = borderStrength; // docked window's panel-border intensity (0 = off)
+        this.ghostOpacity = ghostOpacity;     // slot placeholder's peak opacity (breathes below this)
+        this.ghostPulseHz = ghostPulseHz;     // placeholder breathe rate (cycles/sec; 0 = steady)
         this._colorCursor = 0;            // golden-angle step counter — each docked window gets a fresh spread hue
         this._orderSeq = 0;               // monotonic sort-key source for interactive locks (restore overrides per-tile)
+
+        /** Slot placeholders, one per FRAMED window — an outline parked in the held-open bar slot,
+         *  wearing the window's identity hue. Built on frame, swept on return (_sweepGhosts).
+         *  @type {Map<string, {box:Object, mat:Object}>} */
+        this._ghosts = new Map();
+        this._ghostGeo = null; // shared unit-rect outline geometry, lazily built, scaled per ghost
+        this._ghostClock = 0;  // seconds, advances each update() to drive the breathe
 
         /** The FRAME's occupancy: a PaneTree tiling the view-frame rect into panes, each leaf a
          *  docked window id. null = nothing framed (all entries are bar tiles). A single-leaf tree
@@ -365,14 +386,16 @@ export class CameraDock extends THREE.Object3D {
     /**
      * Tune a layout parameter live and re-pack. Keys: distance, boxFrac, boxAspect, gapFrac,
      * maxColumns, fillFrac, maxArcDeg, maxRiseDeg, bottomFrac, frameW, frameH, frameX, frameY,
-     * frameMarginLeft, frameMarginRight, frameMarginTop, frameMarginBottom, frameDistFrac, animDur, yawRate.
+     * frameMarginLeft, frameMarginRight, frameMarginTop, frameMarginBottom, frameDistFrac, animDur,
+     * yawRate, ghostOpacity, ghostPulseHz.
      * @param {string} key @param {number} value @returns {boolean}
      */
     setParam(key, value) {
         if (!['distance', 'boxFrac', 'boxAspect', 'gapFrac', 'maxColumns', 'fillFrac', 'maxArcDeg',
               'maxRiseDeg', 'bottomFrac', 'frameW', 'frameH', 'frameX', 'frameY',
               'frameMarginLeft', 'frameMarginRight', 'frameMarginTop', 'frameMarginBottom',
-              'frameDistFrac', 'animDur', 'yawRate', 'borderWidth', 'borderStrength'].includes(key)) return false;
+              'frameDistFrac', 'animDur', 'yawRate', 'borderWidth', 'borderStrength',
+              'ghostOpacity', 'ghostPulseHz'].includes(key)) return false;
         if (!Number.isFinite(value)) return false;
         this[key] = value;
         this._relayout();
@@ -649,6 +672,71 @@ export class CameraDock extends THREE.Object3D {
         if (d) d.offset = { slot: 'frame' };
     }
 
+    /** The shared unit-rectangle outline (XY plane, centered, a closed line loop) every ghost
+     *  scales to its slot box — one geometry serves any box size. Lazily built. @private */
+    _ghostGeometry() {
+        if (!this._ghostGeo) {
+            const r = 0.5;
+            this._ghostGeo = new THREE.BufferGeometry().setFromPoints([
+                new THREE.Vector3(-r, -r, 0), new THREE.Vector3(r, -r, 0),
+                new THREE.Vector3(r, r, 0), new THREE.Vector3(-r, r, 0), new THREE.Vector3(-r, -r, 0),
+            ]);
+        }
+        return this._ghostGeo;
+    }
+
+    /** Get-or-build the slot placeholder for a framed entry: an outline wearing the window's
+     *  identity hue, so the ghost and the pane it stands in for read as the same window by color.
+     *  A HUD affordance — depth-test off, drawn over the tiles, pick-inert (isMarker). @private */
+    _ghostFor(e) {
+        let g = this._ghosts.get(e.id);
+        if (g) return g;
+        const mat = new THREE.LineBasicMaterial({ color: e.identityColor });
+        mat.transparent = true; mat.depthTest = false; mat.depthWrite = false;
+        const box = new THREE.Line(this._ghostGeometry(), mat);
+        box.name = `dock-ghost:${e.id}`;
+        box.renderOrder = GHOST_RENDER_ORDER;
+        box.userData.isMarker = true;
+        this.add(box);
+        g = { box, mat };
+        this._ghosts.set(e.id, g);
+        return g;
+    }
+
+    /** Stand a framed entry's placeholder in its held-open slot. boxW/boxH are the slot-box dims
+     *  (the tile's packing footprint, NOT the content fit); faceDir tilts the outline to face the
+     *  eye like the tile did (null = flat, for the linear row). @private */
+    _showGhost(e, sx, sy, sz, boxW, boxH, faceDir) {
+        const g = this._ghostFor(e);
+        g.box.position.set(sx, sy, sz);
+        g.box.scale.set(boxW, boxH, 1);
+        if (faceDir) g.box.quaternion.setFromUnitVectors(_z, faceDir);
+        else g.box.quaternion.identity();
+    }
+
+    /** Drop the placeholders of windows no longer framed — `keep` is the id set _relayout just
+     *  placed. Each ghost's material is its own (identity-hued); the rect geometry is shared and
+     *  outlives the sweep. @private */
+    _sweepGhosts(keep) {
+        for (const [id, g] of this._ghosts) {
+            if (keep.has(id)) continue;
+            this.remove(g.box);
+            g.mat.dispose();
+            this._ghosts.delete(id);
+        }
+    }
+
+    /** Advance the placeholders' breathe — outlines pulse gently below ghostOpacity, all in step
+     *  (one system, not competing blinkers). Driven here, not by the SpatialAnimator: a steady
+     *  cosmetic cycle, not a one-shot tween. @private */
+    _tickGhosts(dt) {
+        this._ghostClock += dt;
+        if (this._ghosts.size === 0) return;
+        const breathe = 0.6 + 0.4 * (0.5 + 0.5 * Math.sin(this._ghostClock * this.ghostPulseHz * 2 * Math.PI));
+        const opacity = this.ghostOpacity * breathe;
+        for (const g of this._ghosts.values()) g.mat.opacity = opacity;
+    }
+
     /** Animate one tile so its CONTENT CENTER sits at (sx,sy,sz) at the RENDERED scale `eff`.
      *  The top-anchored origin is offset off the visual center by centerOffset·eff (rotated to
      *  match the tile's facing), so the center lands on (sx,sy,sz) at any zoom. `faceDir`
@@ -671,20 +759,22 @@ export class CameraDock extends THREE.Object3D {
         this.animator.animateTo(e.grid, 'scale', eff / this._userOf(e), { duration: this.animDur });
     }
 
-    /** Pack the loose (non-framed) tiles into the bar row/dome, then tile the pane tree over the
-     *  view-frame rect. A window is either a BAR tile (an icon in the strip) or a FRAME pane (tiled,
-     *  reading head-on) — never both, so the bar excludes framed windows and packs only the rest.
-     *  Each bar tile contain-fits its fixed slot box (footprint == box, independent of content/zoom);
-     *  each pane contain-fits its sub-rect of the frame (single leaf == the whole frame). */
+    /** Pack ALL tiles into the bar row/dome, then tile the pane tree over the view-frame rect.
+     *  A framed window's slot stays RESERVED — its neighbors don't shift when it lifts into the
+     *  frame. Every entry takes a bar slot; a framed one renders as a ghost outline (the
+     *  placeholder for where it returns) instead of the live tile, so the bar packs over the FULL
+     *  set and the placement branches per tile. Each bar tile contain-fits its fixed slot box
+     *  (footprint == box, independent of content/zoom); each pane contain-fits its sub-rect of
+     *  the frame (single leaf == the whole frame). */
     _relayout() {
-        // Framed windows live in the frame, not the bar — the bar packs only the loose ones.
         const framed = new Set(this.paneTree ? this.paneTree.leaves() : []);
         // Sort by `order` (stable per-tile key) so a tile that re-adopted late on restore still sits
-        // in its saved position. Slots are dense 0..n-1 LABELS over the BAR set (dock.list order).
-        const bar = [...this.entries.values()]
-            .filter((e) => !framed.has(e.id))
-            .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+        // in its saved position. Slots are dense 0..n-1 LABELS over ALL entries (dock.list order) —
+        // assigned in this ONE place, framed or not, so every tile keeps a UNIQUE label and its
+        // reserved position across frame toggles.
+        const bar = [...this.entries.values()].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
         bar.forEach((e, i) => { e.slot = i; });
+        const ghostsShown = new Set();
 
         const rowY = -this._viewH * 0.5 * this.bottomFrac; // tile-CENTER row
         const gap = (this._viewH * this.boxFrac) * this.gapFrac;
@@ -734,9 +824,14 @@ export class CameraDock extends THREE.Object3D {
                     const sy = R * Math.sin(phi);
                     const sz = R * (1 - Math.cos(th) * cs);
                     _dir.set(-sx, -sy, R - sz).normalize();                          // toward the eye (0,0,R)
-                    this._animateTile(e, sx, sy, sz, scales[i] * f, _dir);
-                    const d = this.attentionManager?.docks?.get(e.id);
-                    if (d) d.offset = { slot: e.slot };
+                    if (framed.has(e.id)) {
+                        this._showGhost(e, sx, sy, sz, boxes[i].w * f, boxes[i].h * f, _dir);
+                        ghostsShown.add(e.id);
+                    } else {
+                        this._animateTile(e, sx, sy, sz, scales[i] * f, _dir);
+                        const d = this.attentionManager?.docks?.get(e.id);
+                        if (d) d.offset = { slot: e.slot };
+                    }
                 });
             } else {
                 // Linear row, centered on x=0. Fit-to-width still guards genuine overflow (too
@@ -755,9 +850,16 @@ export class CameraDock extends THREE.Object3D {
                 bar.forEach((e, i) => {
                     const sx = cx + widths[i] * 0.5;
                     cx += widths[i] + gap;
-                    this._animateTile(e, sx, rowY, 0, scales[i]);
-                    const d = this.attentionManager?.docks?.get(e.id);
-                    if (d) d.offset = { slot: e.slot };
+                    if (framed.has(e.id)) {
+                        // Slot box shrinks with the fit-to-width factor too (widths[i] already has it).
+                        const boxH = boxes[i].h * (widths[i] / Math.max(boxes[i].w, 1e-9));
+                        this._showGhost(e, sx, rowY, 0, widths[i], boxH, null);
+                        ghostsShown.add(e.id);
+                    } else {
+                        this._animateTile(e, sx, rowY, 0, scales[i]);
+                        const d = this.attentionManager?.docks?.get(e.id);
+                        if (d) d.offset = { slot: e.slot };
+                    }
                 });
             }
         }
@@ -769,6 +871,10 @@ export class CameraDock extends THREE.Object3D {
                 if (e) this._placePane(e, r01);
             }
         }
+
+        // Placeholders whose windows returned to the bar (or left the dock) sweep away here —
+        // every membership/frame change funnels through _relayout, so this is the ONE teardown.
+        this._sweepGhosts(ghostsShown);
     }
 
     /**
@@ -818,6 +924,8 @@ export class CameraDock extends THREE.Object3D {
         const rate = Math.min(1, dt * this.yawRate); // crisp yaw to match the curter slide
         for (const e of this.entries.values()) e.grid.quaternion.slerp(e.quatTarget, rate);
         for (const e of this._releasing.values()) e.grid.quaternion.slerp(e.quatTarget, rate);
+
+        this._tickGhosts(dt);
     }
 
     /** Serialize the frame's pane tree for persistence, or null if nothing is framed. */
@@ -825,6 +933,9 @@ export class CameraDock extends THREE.Object3D {
 
     dispose() {
         this.animator.dispose();
+        this._sweepGhosts(new Set());
+        this._ghostGeo?.dispose();
+        this._ghostGeo = null;
         this.entries.clear();
         this._releasing.clear();
         this.tiles.clear();
