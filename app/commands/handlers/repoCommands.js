@@ -46,7 +46,8 @@ function normalizeRepoRef(ref) {
 export default function registerRepoCommands(router) {
     router.register('repo.load', async (args, ctx) => {
         const ref = args[0];
-        if (!ref) return { text: 'ERR: usage: repo.load <owner/repo[/branch] | github-url>', data: null };
+        if (!ref) return { text: 'ERR: usage: repo.load <owner/repo[/branch] | github-url> [--no-frame]', data: null };
+        const noFrame = args.includes('--no-frame');   // session restore: a saved pose already landed
         const url = normalizeRepoRef(ref);
 
         ctx.status?.set(`Loading ${ref}…`);   // live status; cleared however we return
@@ -77,8 +78,8 @@ export default function registerRepoCommands(router) {
             const open = await router.execute(['file.openDir', '']);
             trace.mark('field', { opened: open?.data?.opened });
 
-            // 4. Frame the field.
-            await router.execute('camera.fitall');
+            // 4. Frame the field — unless the caller already owns the pose (restore).
+            if (!noFrame) await router.execute('camera.fitall');
             trace.mark('frame').end();
 
             // 5. Record the field source — the ONE decider the session persists. file.openDir (step 3)
@@ -98,7 +99,7 @@ export default function registerRepoCommands(router) {
         }
     }, {
         description: 'Load a GitHub repo as a 3D field, client-only (no relay needed)',
-        usage: '<owner/repo[/branch] | github-url>',
+        usage: '<owner/repo[/branch] | github-url> [--no-frame]',
         returns: '{ repo, owner, name, branch, cleared, opened, ... }',
     });
 

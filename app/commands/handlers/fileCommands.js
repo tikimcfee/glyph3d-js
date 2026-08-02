@@ -253,11 +253,24 @@ export default function registerFileCommands(router) {
             });
             let chunks = 1;
             let lastPour = performance.now();
+            let lastStatus = 0;
+            // Mid-stream pours re-lay the WHOLE growing tree — as it gets big, each
+            // pour costs more, so the interval backs off adaptively (a pour that took
+            // T earns a ≥8×T quiet period). The status line throttles to ~10Hz —
+            // per-file DOM churn is invisible anyway. Both start from the base
+            // interval; a restore's batch window holds the relayouts entirely.
+            let pourInterval = 300;
             const pour = (i) => {
-                ctx.status?.set(`Opening ${i}/${n}${dir ? ' · ' + dir : ''}…`);
-                if (performance.now() - lastPour > 300) {
+                const now = performance.now();
+                if (now - lastStatus > 100) {
+                    ctx.status?.set(`Opening ${i}/${n}${dir ? ' · ' + dir : ''}…`);
+                    lastStatus = now;
+                }
+                if (now - lastPour > pourInterval) {
+                    const t0 = performance.now();
                     ctx.contentTree.relayoutAndRest(WORLD_FLOOR_Y);   // held under a batch window
                     lastPour = performance.now();
+                    pourInterval = Math.max(pourInterval, (lastPour - t0) * 8);
                 }
             };
             const seat = (id) => {

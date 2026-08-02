@@ -413,7 +413,13 @@ export default class SessionStore {
      *       lane's fitall, focus last).
      *  @type {Array<Array<Array<[string, () => any, string[]]>>>} stages → lanes → phases */
     const stages = [
-      [[['substrate', () => this._restoreSubstrate(snap), ['layout', 'world']]]],
+      [[['substrate', () => this._restoreSubstrate(snap), ['layout', 'world']],
+        // Camera FIRST, not last: the saved pose is ABSOLUTE state — nothing about
+        // it depends on content existing, and the operator should watch the field
+        // pour into the view they left, not stare at a default pose until every
+        // lane lands. The field lane skips its fitall when this succeeds (the
+        // fitall only ever existed for pose-less sessions), so nothing stomps it.
+        ['camera', () => { this._cameraRestored = this._restoreCamera(snap.camera) === true; }, ['camera']]]],
       [
         [['panels', () => this._restorePanels(snap), ['dock']]],
         [['field', () => this._restoreField(snap), ['fieldSources']],
@@ -421,8 +427,7 @@ export default class SessionStore {
         [['agents', () => this._restoreAgents(snap), ['agents']]],
         [['surfaces', () => this._restoreSurfaces(snap), ['terminals', 'dock3d']]],
       ],
-      [[['camera', () => this._restoreCamera(snap.camera), ['camera']],
-        ['settle', () => this._projectSurfaces(), []],
+      [[['settle', () => this._projectSurfaces(), []],
         ['focus', () => this._restoreFocus(snap.focus), ['focus']]]],
     ];
 
@@ -502,7 +507,10 @@ export default class SessionStore {
     // a repo source replaces the list entirely; the split just makes mixed lists safe.
     for (const src of sources) {
       if (src?.type === 'repo' && src.ref) {
-        try { await this.router.execute(['repo.load', src.ref]); }
+        // --no-frame when the saved pose already landed (stage 1): repo.load's
+        // internal fitall would stomp the exact view the operator left.
+        const cmd = this._cameraRestored ? ['repo.load', src.ref, '--no-frame'] : ['repo.load', src.ref];
+        try { await this.router.execute(cmd); }
         catch (e) { console.warn('[session] repo field restore failed:', e?.message || e); }
         trace?.mark(src.ref);
       }
@@ -526,7 +534,9 @@ export default class SessionStore {
     const tree = this.ctx.contentTree;
     if (locals.length && tree?.batchRelayouts) { await tree.batchRelayouts(runLocals); trace?.mark('settle'); }
     else await runLocals();
-    if (anyLocal) {
+    // Frame the field ONLY when no saved pose landed — fitall is the pose-less
+    // session's welcome, never a correction over the view the operator left.
+    if (anyLocal && !this._cameraRestored) {
       try { await this.router.execute('camera.fitall'); }
       catch (e) { console.warn('[session] fitall after field restore failed:', e?.message || e); }
       trace?.mark('frame');
@@ -653,10 +663,13 @@ export default class SessionStore {
   // camera — SET directly on the controller: no camera.move/aim verb replay (which fired async and
   // fought the field-restore fly), no quaternion stomp. applyState cancels any in-flight fly and
   // lands the saved pose exactly. Non-finite data self-heals (drop with a log), it doesn't fail.
+  /** @returns {boolean} true when a saved pose was actually applied — the field
+   *  lane reads this to skip its fitall (framing is only for pose-less sessions). */
   _restoreCamera(cam) {
-    if (!cam?.pos) return;
-    if (!isFinitePos(cam.pos)) { console.warn('[session] dropped non-finite camera position'); return; }
+    if (!cam?.pos) return false;
+    if (!isFinitePos(cam.pos)) { console.warn('[session] dropped non-finite camera position'); return false; }
     this.ctx.cameraController?.applyState?.(cam);
+    return true;
   }
 
   // focus — restore the sticky slots by SETTING them directly (the AttentionManager IS the owner —
