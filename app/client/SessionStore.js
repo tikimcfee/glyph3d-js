@@ -102,6 +102,13 @@ const SURFACE_PROJECTORS = {
     const held = store.ctx.cameraDock?.has?.(s.id)
       || (store.ctx.carrels instanceof Map && [...store.ctx.carrels.values()].some((c) => c.has?.(s.id)));
     const changed = grid.applyView?.(s.view || {}, { skipPosition: held }) || {};
+    // Readability zoom for a LOOSE terminal (held tiles get theirs from the holder's own
+    // reconcile — the dock re-applies zoom + box-fit itself). Guarded like applyView:
+    // already-correct is a no-op, so steady-state projections never touch the grid.
+    const z = (s.view || {}).zoom;
+    if (!held && Number.isFinite(z) && z > 0 && typeof grid.setZoom === 'function' && grid.zoom !== z) {
+      grid.setZoom(z);
+    }
     // The relay PTY is the one external child the grid can't reach. If applyView resized the local
     // grid/emulator, tell the owning adapter to match (pty.Setsize → SIGWINCH → tmux), exactly as
     // terminal.resize does — the bridge lives at THIS layer, not on the grid.
@@ -215,6 +222,10 @@ export default class SessionStore {
         const entry = { id: s.id };
         if (isFinitePos(v.position)) { entry.x = round(v.position.x); entry.y = round(v.position.y); entry.z = round(v.position.z); }
         if (Number.isInteger(v.cols) && Number.isInteger(v.rows)) { entry.cols = v.cols; entry.rows = v.rows; }
+        // Readability zoom (window.scale / the scale grip) — uniform zooms only (a stretch
+        // tuple isn't a number and is skipped). Docked tiles ALSO carry zoom in dock3d;
+        // this entry is what a LOOSE terminal (a dropped billboard) restores from.
+        if (Number.isFinite(v.zoom) && v.zoom > 0 && v.zoom !== 1) entry.zoom = round(v.zoom);
         terminals.push(entry);
       }
     }
@@ -610,6 +621,7 @@ export default class SessionStore {
         const view = {};
         if (isFinitePos(t)) view.position = { x: t.x, y: t.y, z: t.z };
         if (Number.isInteger(t.cols) && Number.isInteger(t.rows)) { view.cols = t.cols; view.rows = t.rows; }
+        if (Number.isFinite(t.zoom) && t.zoom > 0) view.zoom = t.zoom;
         this.ctx.workspace?.setSurfaceView?.(t.id, 'terminal', view);
       }
     }
