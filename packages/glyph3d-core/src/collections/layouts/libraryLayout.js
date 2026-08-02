@@ -59,6 +59,10 @@ export const LIBRARY_DEFAULTS = {
     aspect: 1.5,       // child-tier wrap target (w ≈ aspect × h)
     ...PANEL_SURFACE_DEFAULTS,   // surface* — the page face behind each book's content
     surfacePad: 0,     // the page IS the book's exact bound — no margin past pageW × pageH
+    // ONE page look for every book: the library's page opacity matches the agent
+    // shelf's faceOpacity (and the Settings ▸ Books default) — both shelves are the
+    // same Book carrier and must never drift apart in their page rendering.
+    surfaceOpacity: 0.85,
 };
 
 const byName = (a, b) =>

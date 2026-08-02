@@ -42,6 +42,23 @@ const strataParam = (param) => (_ctx, v) => setStrataParam(param, v);
  *  the `book.` key) and re-apply — live cards re-scale, every sheet re-fits, the shelf re-flows. */
 const bookParam = (param) => (ctx, v) => { const b = ctx.agentBooks; if (!b) return; b.cfg[param] = v; b.applyScales?.(); };
 
+/** apply() for a BOOK PAGE dial — the ONE page-face config every Book shares. Agent books
+ *  and the library's volumes are the same carrier with the same rendering; only their
+ *  state differs — so a page knob fans out to BOTH owners: the agent shelf's cfg (re-fit
+ *  every lane) and the library scheme's layout opts (re-lay live while library shows;
+ *  otherwise the stored value seeds the next activation — these defs carry
+ *  scheme:'library' and their key TAILS are the layout opt names, so
+ *  schemeSettingsOpts folds them in). */
+const bookPageParam = (agentKey, layoutParam) => (ctx, v) => {
+  const b = ctx.agentBooks;
+  if (b) { b.cfg[agentKey] = v; b.applyScales?.(); }
+  const tree = ctx?.contentTree;
+  if (tree && schemeNameOf(tree.layout) === 'library') {
+    tree.setLayout(tree.layout, { ...(tree.layoutOpts || {}), [layoutParam]: v });
+    tree.relayoutAndRest(0);
+  }
+};
+
 /** apply() for a container-label dial: patch the bare param into ContentTreeLabels' opts —
  *  configure() rebuilds the field only for build-shaping opts; spectrum/hover dials just steer
  *  the next frame. Color knobs store '#rrggbb'; the overlay wants a hex int. */
@@ -497,10 +514,15 @@ export const SETTINGS = [
   { key: 'book.pageH', label: 'Page height', group: 'Agent Books', type: 'number', default: 420, min: 10, max: 5000, step: 10, apply: bookParam('pageH') },
   { key: 'book.gutter', label: 'Spread gutter (spine gap)', group: 'Agent Books', type: 'number', default: 24, min: 0, max: 500, step: 2, apply: bookParam('gutter') },
   { key: 'book.maxUpscale', label: 'Max content upscale', group: 'Agent Books', type: 'number', default: 3, min: 0.1, max: 100, step: 0.1, apply: bookParam('maxUpscale') },
-  // The page face behind each spread. At 1.0 the page is FULLY OPAQUE — the face material
-  // already depth-writes, so full alpha is a true occluder: nothing bleeds through the page
-  // (the readability A/B this knob exists for). Lower values are the translucent house look.
-  { key: 'book.faceOpacity', label: 'Page opacity', group: 'Agent Books', type: 'number', default: 0.85, min: 0, max: 1, step: 0.05, apply: bookParam('faceOpacity') },
+  // Books — the SHARED page face, one config for every Book: agent books AND the
+  // library's directory volumes (same carrier, same rendering; owners differ only in
+  // state). At 1.0 a page is FULLY OPAQUE — the face material depth-writes, so full
+  // alpha is a true occluder (the readability A/B AND the occlusion-culling occluder
+  // set — large repos in library mode are where the render time lives). These fan out
+  // to both shelves; the library also seeds them at activation (scheme:'library').
+  { key: 'books.surface', label: 'Page faces', group: 'Books', scheme: 'library', type: 'bool', default: true, apply: bookPageParam('face', 'surface') },
+  { key: 'books.surfaceColor', label: 'Page color', group: 'Books', scheme: 'library', type: 'color', default: '#0a0a1e', apply: bookPageParam('faceColor', 'surfaceColor') },
+  { key: 'books.surfaceOpacity', label: 'Page opacity', group: 'Books', scheme: 'library', type: 'number', default: 0.85, min: 0, max: 1, step: 0.05, apply: bookPageParam('faceOpacity', 'surfaceOpacity') },
   { key: 'book.zPitch', label: 'Sheet depth spacing (Z)', group: 'Agent Books', type: 'number', default: 90, min: 1, max: 4000, step: 5, apply: bookParam('zPitch') },
   { key: 'book.pagerLerp', label: 'Page-turn speed', group: 'Agent Books', type: 'number', default: 9, min: 0, max: 60, step: 0.5, apply: bookParam('pagerLerp') },
   { key: 'book.callScale', label: 'Headline card size', group: 'Agent Books', type: 'number', default: 3.0, min: 0.05, max: 50, step: 0.1, apply: bookParam('callScale') },
