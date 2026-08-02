@@ -1409,6 +1409,13 @@ class CodeGrid extends FramedGlyphField {
         // builder's scalar-walk bounds are exact for unpaginated content; a paginated
         // engine item gets its extent from the adapter's analytic override.
         if (engineOn) {
+            // A commit is a NEW fold — a standing displacement table was computed against
+            // the OLD one (dz = plane − oldFoldZ) and would land glyphs on garbage planes
+            // if dispatched now; on a slot-count change it also misaligns wholesale. Drop
+            // it: arrangers re-derive against the fresh fold immediately after the flush
+            // (_applyArrangers → arrange → _resyncEngineLayout), and until they do the
+            // grid renders honestly FLAT — never scrambled.
+            this._renderer._layoutDisplacements = null;
             const res = syncGpuLayout(this._renderer, buffers, items, shared, rendererIds);
             if (res?.bounds) {
                 this._workerBoundsCache = res.bounds;
