@@ -22,7 +22,10 @@ function getDock(ctx) {
 export function resolveSurface(ctx, arg) {
     const key = String(arg ?? '');
     const entry = ctx.registry?.get?.(key);
-    if (entry) return { id: entry.id, grid: entry.grid };
+    // A carrel is a PLACE things are seated at, never cargo itself — docking a
+    // desk (or seating one at another desk) is refused at the resolver.
+    if (entry && entry.type !== 'carrel') return { id: entry.id, grid: entry.grid };
+    if (entry) return null;
 
     if (/^\d+$/.test(key)) {
         const surfaces = ctx.getSurfaces?.() || ctx.getGrids?.() || [];
@@ -30,7 +33,7 @@ export function resolveSurface(ctx, arg) {
         const grid = surfaces[i];
         if (grid) {
             const id = ctx.registry?.getIdByGrid?.(grid);
-            if (id) return { id, grid };
+            if (id && ctx.registry?.get?.(id)?.type !== 'carrel') return { id, grid };
         }
     }
     return null;

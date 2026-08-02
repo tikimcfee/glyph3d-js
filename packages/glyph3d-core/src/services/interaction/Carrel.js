@@ -87,21 +87,24 @@ export class Carrel extends THREE.Object3D {
     /**
      * @param {Object} [opts]
      * @param {string} [opts.name='carrel']  - registry name (carrel.* verbs address it)
-     * @param {number} [opts.radius=32]      - cylinder radius the member faces sit at (world units)
-     * @param {number} [opts.boxH=11]        - slot-box height (world units); content contain-fits
+     * @param {number} [opts.radius=240]     - cylinder radius the member faces sit at (world units)
+     * @param {number} [opts.boxH=110]       - slot-box height (world units); content contain-fits.
+     *   BOOK SCALE: a file grid at natural reading scale is ~96-100 wide and 100-350 tall
+     *   (measured), so a ~110-unit slot seats a typical file near 1:1 — a member reads as a
+     *   real book on the desk, not a dock-tile icon
      * @param {number} [opts.boxAspect=1.15] - slot-box width/height
      * @param {number} [opts.gapFrac=0.35]   - gap between slots as a fraction of boxH
      * @param {number} [opts.maxArcDeg=300]  - arc span the ring fills; the remainder is the doorway (faces local +z)
      * @param {'in'|'out'} [opts.facing='in'] - members face the center (stand inside) or outward
      * @param {number} [opts.tableFrac=1.25] - tabletop disc radius as a fraction of `radius`
-     * @param {number} [opts.auraHeadroom=6] - aura shell rise above the top row (world units)
+     * @param {number} [opts.auraHeadroom=40] - aura shell rise above the top row (world units)
      * @param {number} [opts.glowColor=0x6f9fd0] - chrome tint (tabletop + aura)
      * @param {number} [opts.glowStrength=0.35]  - chrome intensity (0 = chrome invisible)
      * @param {number} [opts.animDur=0.167] - member slide/scale duration (s)
      * @param {number} [opts.yawRate=14]    - member face-target slerp rate (×dt)
      */
-    constructor({ name = 'carrel', radius = 32, boxH = 11, boxAspect = 1.15, gapFrac = 0.35,
-                  maxArcDeg = 300, facing = 'in', tableFrac = 1.25, auraHeadroom = 6,
+    constructor({ name = 'carrel', radius = 240, boxH = 110, boxAspect = 1.15, gapFrac = 0.35,
+                  maxArcDeg = 300, facing = 'in', tableFrac = 1.25, auraHeadroom = 40,
                   glowColor = 0x6f9fd0, glowStrength = 0.35,
                   animDur = 0.167, yawRate = 14 } = {}) {
         super();

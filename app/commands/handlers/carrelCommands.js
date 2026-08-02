@@ -56,7 +56,13 @@ function setFact(ctx, id, value, kind) {
  */
 function resolveHostable(ctx, arg) {
     const surf = resolveSurface(ctx, arg);
-    if (surf) return { ...surf, kind: ctx.registry?.get?.(surf.id)?.type };
+    if (surf) {
+        const kind = ctx.registry?.get?.(surf.id)?.type;
+        // A 'book.group' id aliases a lane's book — seating it would give one live
+        // object two member identities. Books seat by their LANE id, below.
+        if (kind === 'book.group') return null;
+        return { ...surf, kind };
+    }
     const key = String(arg ?? '');
     const lane = ctx.agentBooks?.lanes?.get?.(key);
     if (lane?.book) return { id: key, grid: lane.book, kind: 'agent-book' };
@@ -88,13 +94,17 @@ export default function registerCarrelCommands(router) {
         const cam = ctx.camera;
         if (cam) {
             const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion);
-            const dist = carrel.radius * 2.2;
+            const dist = carrel.radius * 1.6;
             const p = new THREE.Vector3().copy(cam.position).addScaledVector(fwd, dist);
             carrel.position.set(p.x, Math.max(p.y - carrel.boxH * 0.5, 0), p.z);
             carrel.rotation.y = Math.atan2(cam.position.x - p.x, cam.position.z - p.z);
         }
 
         ctx.scene.add(carrel);
+        // A desk is a world citizen: registered (type 'carrel') so the camera's
+        // dynamic-speed / soft-bounds / fit-all spine (getSurfaces) sees it. It is
+        // a PLACE, not cargo — resolveSurface refuses to treat it as one.
+        ctx.registry?.register?.(`carrel:${name}`, carrel, { type: 'carrel' });
         map.set(name, carrel);
         ctx.activeCarrel = name;
         return { text: `OK: carrel '${name}' set down (r=${carrel.radius})`, data: { name, radius: carrel.radius } };
@@ -167,6 +177,7 @@ export default function registerCarrelCommands(router) {
         if (!map || !carrel) return { text: `ERR: no carrel '${args[0] ?? ''}'`, data: null };
         const members = carrel.list();
         for (const m of members) setFact(ctx, m.id, null);
+        ctx.registry?.unregister?.(`carrel:${carrel.carrelName}`); // out of the world spine now
         carrel.dissolve(); // members slide home; the runner sweeps the desk once drained
         if (ctx.activeCarrel === carrel.carrelName) ctx.activeCarrel = null;
         return { text: `OK: carrel '${carrel.carrelName}' dissolving (${members.length} member(s) sent home)`, data: { name: carrel.carrelName, released: members.length } };

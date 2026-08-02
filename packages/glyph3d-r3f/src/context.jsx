@@ -44,7 +44,13 @@ export function GlyphProvider({ atlas, children }) {
       // getGrids() is grid-INDEX-coupled (focusOnGrid/computeGridFocus read code-grid
       // internals), so it stays grid-only; the camera's distance sampling + fit-all want
       // ALL bounds-bearing windows so a terminal/capture slows the flythrough and frames like a file.
-      getSurfaces: () => [...registry.toArray('grid'), ...registry.toArray('terminal'), ...registry.toArray('frame')],
+      // Every bounds-bearing thing in the WORLD — the shared spine for dynamic-speed
+      // sampling, soft bounds, fit-all framing, and viewport-relative placement.
+      // Agent books ('book.group') and carrels are world citizens too: without them
+      // the camera's scaled-motion-velocity never brakes near a shelf or a desk.
+      getSurfaces: () => [...registry.toArray('grid'), ...registry.toArray('terminal'),
+                          ...registry.toArray('frame'), ...registry.toArray('book.group'),
+                          ...registry.toArray('carrel')],
     };
   }, [atlas]);
 
