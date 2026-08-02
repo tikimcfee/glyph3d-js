@@ -203,11 +203,18 @@ export default function registerWindowCommands(router) {
             if (g.parent && g.parent !== ctx.scene) {
                 g.position.copy(g.parent.worldToLocal(pos.clone()));
                 g.quaternion.copy(g.parent.getWorldQuaternion(new THREE.Quaternion()).invert().multiply(quat));
+            } else if (typeof g.setWorldPosition === 'function') {
+                g.setWorldPosition({ x: pos.x, y: pos.y, z: pos.z }); // terminals move through their one method
+                g.quaternion.copy(quat);
             } else {
                 g.position.copy(pos);
                 g.quaternion.copy(quat);
             }
         }
+        // The landing is a MOVE, so it obeys the mover's law: record the destination in the
+        // model (what terminal.move / drag-end do). Without this the next registry change
+        // re-projects the STALE fact onto the grid — the dropped window teleports back.
+        ctx.workspace?.setSurfaceView?.(id, ctx.registry?.get?.(id)?.type, { position: { x: pos.x, y: pos.y, z: pos.z } });
         ctx.session?.scheduleSave?.();
         return {
             text: `OK: dropped '${id}' before the camera (was ${from})`,

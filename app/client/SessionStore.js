@@ -85,11 +85,13 @@ export function positionIsDerived(ctx, id) {
  */
 const SURFACE_PROJECTORS = {
   terminal(store, s, grid) {
-    // Skip position while docked (the dock owns a docked tile's transform; its home is set by the
-    // pre-dock move, then captured at lock). applyView sets the LOCAL geometry (position + grid +
-    // emulator) directly — no terminal.move / terminal.resize verb replay on the load path.
-    const docked = store.ctx.cameraDock?.has?.(s.id);
-    const changed = grid.applyView?.(s.view || {}, { skipPosition: docked }) || {};
+    // Skip position while HELD — docked or carrel-seated (the holder owns the transform; home is
+    // the captured record it returns to). A seated terminal's .position is carrel-LOCAL, so a
+    // world-space fact applied here would yank it out of the ring. applyView sets the LOCAL
+    // geometry (position + grid + emulator) directly — no verb replay on the load path.
+    const held = store.ctx.cameraDock?.has?.(s.id)
+      || (store.ctx.carrels instanceof Map && [...store.ctx.carrels.values()].some((c) => c.has?.(s.id)));
+    const changed = grid.applyView?.(s.view || {}, { skipPosition: held }) || {};
     // The relay PTY is the one external child the grid can't reach. If applyView resized the local
     // grid/emulator, tell the owning adapter to match (pty.Setsize → SIGWINCH → tmux), exactly as
     // terminal.resize does — the bridge lives at THIS layer, not on the grid.
