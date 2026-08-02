@@ -23,7 +23,7 @@
 //
 // Exit: 0 only when every mode has full teeth AND every slot matches within epsilon.
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchBrowser, openApp } from './itest/driver.mjs';
@@ -54,6 +54,8 @@ const SELFTEST = has('--selftest');   // stand a CPU reference model in for the 
 const ASCII = has('--ascii');         // fold every non-ASCII codepoint to '.' (uniform advance)
 const BENCH = has('--bench');         // decompose timing: configure walk / steady-state dispatch / GPU time / readback
 const BENCH_N = Number(flag('--bench-n', '200'));
+const DIR = flag('--dir', null);      // bulk-load bench: lay out EVERY file under a directory in a tight loop
+const MAX_FILES = Number(flag('--max-files', '150'));
 
 // ---- the deterministic torture text ----
 // Empty lines, leading/trailing spaces, tabs, a very long line (> wrap width), an emoji,
@@ -89,6 +91,23 @@ if (ASCII) {
   // preserved. Isolates the uniform-advance path: every glyph then steps exactly cellWidth.
   TEXT = TEXT.split('\n').map((l) => Array.from(l).map((ch) => (ch.codePointAt(0) > 0x7f ? '.' : ch)).join('')).join('\n');
   TEXT_LABEL += ' [--ascii: non-ASCII folded to .]';
+}
+
+// ---- bulk-load corpus (--dir): every code-ish file under a directory, the tree-load shape ----
+function collectDirCorpus(dir) {
+  const abs = path.isAbsolute(dir) ? dir : path.join(REPO, dir);
+  const exts = new Set(['.js', '.jsx', '.mjs', '.go', '.md', '.json', '.css', '.html', '.metal', '.sh']);
+  const skip = /node_modules|\.git|dist\/|\/web\/|bun\.lock/;
+  const files = [];
+  for (const rel of readdirSync(abs, { recursive: true })) {
+    const p = path.join(abs, String(rel));
+    if (skip.test(p) || !exts.has(path.extname(p))) continue;
+    let st; try { st = statSync(p); } catch { continue; }
+    if (!st.isFile() || st.size > 512 * 1024) continue;   // cap: pathological blobs skew the tail
+    files.push({ name: path.relative(REPO, p), text: readFileSync(p, 'utf8') });
+    if (files.length >= MAX_FILES) break;
+  }
+  return files;
 }
 
 // ---- the in-page probe ----
@@ -564,6 +583,146 @@ const probe = (opts) => `(async (o) => {
   return R;
 })(${JSON.stringify(opts)})`;
 
+// ---- the bulk-load probe (--dir): the tree-load tight loop, three ways ----
+// CPU baseline (today's per-file build), GPU serial (configure + await per file — the naive
+// integration), GPU pipelined (configure + fire per file, ONE fence at the end — the repo-load
+// pattern; queue order makes upload_i precede dispatch_i, so reusing one kernel's buffers is
+// sound). Ends with an exactness spot-check on the LARGEST file so the bench can't quietly
+// diverge from the gate. No backticks in here: this rides a template literal.
+const bulkProbe = (opts) => `(async (o) => {
+  const R = { files: o.files.length, notes: [] };
+  const client = window.__glyphClient;
+  if (!client) return { fatal: 'window.__glyphClient missing — the app did not boot' };
+  const atlas = client.ctx && client.ctx.atlas;
+  if (!atlas) return { fatal: 'client.ctx.atlas missing' };
+  const F = (p) => '/@fs' + o.repo + p;
+
+  let builders, cellMetrics, bridgeMod, kmod;
+  try {
+    builders    = await import(F('/packages/glyph3d-core/src/workers/builders/index.js'));
+    cellMetrics = await import(F('/packages/glyph3d-core/src/core/cellMetrics.js'));
+    bridgeMod   = await import(F('/packages/glyph3d-core/src/workers/WorkerBridge.js'));
+    kmod        = await import(F('/packages/glyph3d-core/src/compute/GlyphLayoutKernel.js'));
+  } catch (e) { return { fatal: 'import failed: ' + (e && e.message || e) }; }
+  const Kernel = kmod.default;
+  const bridge = bridgeMod.getWorkerBridge && bridgeMod.getWorkerBridge();
+  if (!bridge || !bridge.fontReady) return { fatal: 'app WorkerBridge not font-ready — boot incomplete' };
+
+  const charSize = atlas.getCharSize();
+  const metrics = Object.assign(
+    cellMetrics.computeCellMetrics(charSize, o.worldScale),
+    { worldScale: o.worldScale, atlasSize: atlas.getAtlasTexture().width },
+  );
+  const layout = builders.resolveLayoutParams({ wrapWidth: o.wrapWidth, zWrapSpacing: 0.15, pageHeight: 0, pagesWide: 1, axis: 'xy' });
+  const color = { r: 1, g: 1, b: 1 };
+  const origin = { x: 0, y: 0, z: 0 };
+
+  // Atlas growth is a one-time cost of first sight, not a per-layout cost — pay it up front
+  // and report it separately so the loops measure layout, not Slug encoding.
+  { const t0 = performance.now();
+    const fresh = [];
+    for (const file of o.files) for (let i = 0; i < file.text.length;) {
+      const cp = file.text.codePointAt(i); i += cp > 0xFFFF ? 2 : 1; if (cp > 32) fresh.push(cp);
+    }
+    try { if (atlas._live && atlas._shapeCache) atlas._live.ensureCodepoints(fresh, atlas._shapeCache); } catch (e) { R.notes.push('ensureCodepoints: ' + (e && e.message || e)); }
+    R.atlasWarmMs = performance.now() - t0; }
+
+  const shared = { metrics, defaultColor: color, layout, scrollOffset: 0 };
+  const perFileCpu = new Float64Array(o.files.length);
+  const built = new Array(o.files.length);
+
+  // ---- lane 1: today's CPU build, file by file (the tree-load inner loop as it exists) ----
+  { const t0 = performance.now();
+    for (let fi = 0; fi < o.files.length; fi++) {
+      const t1 = performance.now();
+      built[fi] = bridge.buildBatchBuffersSync(
+        [{ text: o.files[fi].text, position: origin, color, scale: 1, groupId: 0 }], shared);
+      perFileCpu[fi] = performance.now() - t1;
+    }
+    R.cpuTotalMs = performance.now() - t0; }
+
+  let totalSlots = 0, maxSlots = 1, maxLines = 1, biggest = 0;
+  const tables = new Array(o.files.length);
+  for (let fi = 0; fi < o.files.length; fi++) {
+    const b = built[fi], meta = b.itemMeta[0];
+    const lineTable = Uint32Array.from(meta.lineSlotOffsets);
+    const lineStartRow = new Uint32Array(lineTable.length);
+    let row = 0;
+    for (let L = 0; L < lineTable.length; L++) {
+      lineStartRow[L] = row;
+      const end = L + 1 < lineTable.length ? lineTable[L + 1] : b.count;
+      const n = end - lineTable[L];
+      row += 1 + (o.wrapWidth > 0 && n > 0 ? Math.floor((n - 1) / o.wrapWidth) : 0);
+    }
+    const advances = new Float32Array(b.count);
+    for (let i = 0; i < b.count; i++) advances[i] = b.sizes[i * 2];
+    tables[fi] = { slotCount: b.count, lineTable, lineStartRow, advances };
+    totalSlots += b.count;
+    if (b.count > maxSlots) { maxSlots = b.count; biggest = fi; }
+    if (lineTable.length > maxLines) maxLines = lineTable.length;
+  }
+  R.totalSlots = totalSlots;
+
+  const store = window.__layoutKernelCheck || (window.__layoutKernelCheck = {});
+  if (!store.renderer) {
+    const Ctor = client.ctx.renderer && client.ctx.renderer.constructor;
+    if (!Ctor) return { fatal: 'no renderer class reachable' };
+    store.renderer = new Ctor({ antialias: false, trackTimestamp: true });
+    await store.renderer.init();
+  }
+  const RD = store.renderer;
+  const queue = RD.backend && RD.backend.device && RD.backend.device.queue;
+  const params = {
+    origin, scrollOffset: 0, wrapWidth: layout.wrapWidth, lineSpacing: metrics.lineSpacing,
+    zWrapStep: metrics.charHeight * layout.zWrapSpacing, pageHeight: 0, pagesWide: 1,
+    pageWidthWorld: 0, pageGapXWorld: 0, pageGapYWorld: 0, pageDepthWorld: 0, axis: 'xy',
+  };
+  const kernel = new Kernel(RD, { maxSlots, maxLines });
+  const cfg = (fi) => { const t = tables[fi]; kernel.configure({ slotCount: t.slotCount,
+    lineTable: t.lineTable, lineStartRow: t.lineStartRow, advances: t.advances, params }); };
+
+  // Warm: first dispatch builds the pipeline; keep it out of both GPU lanes.
+  cfg(0); await kernel.compute();
+  if (queue) await queue.onSubmittedWorkDone();
+
+  // ---- lane 2: GPU serial — configure + await, file by file (naive per-grid integration) ----
+  const perFileGpu = new Float64Array(o.files.length);
+  { const t0 = performance.now();
+    for (let fi = 0; fi < o.files.length; fi++) {
+      const t1 = performance.now();
+      cfg(fi); await kernel.compute();
+      perFileGpu[fi] = performance.now() - t1;
+    }
+    if (queue) await queue.onSubmittedWorkDone();
+    R.gpuSerialTotalMs = performance.now() - t0; }
+
+  // ---- lane 3: GPU pipelined — fire every file, fence ONCE (the repo-load storm) ----
+  try { if (RD.resolveTimestampsAsync) await RD.resolveTimestampsAsync('compute'); } catch (e) { /* pool empty */ }
+  { const t0 = performance.now();
+    for (let fi = 0; fi < o.files.length; fi++) { cfg(fi); RD.compute(kernel._kernel); }
+    if (queue) await queue.onSubmittedWorkDone();
+    R.gpuPipelinedTotalMs = performance.now() - t0; }
+  try {
+    const total = RD.resolveTimestampsAsync ? await RD.resolveTimestampsAsync('compute') : null;
+    R.gpuPureTotalMs = typeof total === 'number' && total > 0 ? total : null;
+  } catch (e) { R.gpuPureTotalMs = null; }
+
+  // ---- exactness spot-check on the LARGEST file (the bench must not outrun the gate) ----
+  { cfg(biggest); await kernel.compute();
+    const gpu = await kernel.readPositions();
+    const cpu = built[biggest].positions; const n = tables[biggest].slotCount;
+    let worst = 0, over = 0;
+    for (let i = 0; i < n * 3; i++) { const d = Math.abs(gpu[i] - cpu[i]); if (d > worst) worst = d; if (d > o.eps) over++; }
+    R.spot = { file: o.files[biggest].name, slots: n, worst, over }; }
+  kernel.dispose();
+
+  const stats = (arr) => { const s = Array.from(arr).sort((a, b) => a - b); const n = s.length;
+    return { mean: s.reduce((a, b) => a + b, 0) / n, p50: s[n >> 1], p95: s[Math.min(n - 1, Math.floor(n * 0.95))], max: s[n - 1] }; };
+  R.cpuPerFile = stats(perFileCpu);
+  R.gpuPerFile = stats(perFileGpu);
+  return R;
+})(${JSON.stringify(opts)})`;
+
 // ---- reporting ----
 const C = { dim: (s) => `\x1b[2m${s}\x1b[0m`, bold: (s) => `\x1b[1m${s}\x1b[0m` };
 const f = (n) => (typeof n === 'number' ? (Math.abs(n) < 1e-3 && n !== 0 ? n.toExponential(3) : n.toFixed(6)) : String(n));
@@ -683,6 +842,30 @@ try {
     if (app.errors.length) console.error('  errors: ' + app.errors.slice(0, 3).map((e) => e.text).join(' | '));
     process.exit(1);
   }
+  if (DIR) {
+    const corpus = collectDirCorpus(DIR);
+    const r = await app.evalPage(bulkProbe({
+      repo: REPO, files: corpus, eps: EPS, wrapWidth: WRAP, worldScale: WORLD_SCALE,
+    }));
+    const ms = (v) => (typeof v === 'number' ? v.toFixed(3) + 'ms' : 'n/a');
+    const st = (s) => `mean ${ms(s.mean)} · p50 ${ms(s.p50)} · p95 ${ms(s.p95)} · max ${ms(s.max)}`;
+    if (r.fatal) { console.error(`✗ FAIL  ${r.fatal}`); process.exit(1); }
+    console.log(C.bold(`\n── bulk load: ${DIR} — ${r.files} files, ${r.totalSlots} slots ──`));
+    for (const n of r.notes || []) console.log(C.dim(`note  ${n}`));
+    console.log(`  atlas warm-up     ${ms(r.atlasWarmMs)}   ${C.dim('one-time Slug growth, excluded from lanes')}`);
+    console.log(`  cpu build total   ${ms(r.cpuTotalMs)}   ${C.dim('per file: ' + st(r.cpuPerFile))}`);
+    console.log(`  gpu serial total  ${ms(r.gpuSerialTotalMs)}   ${C.dim('per file: ' + st(r.gpuPerFile))}`);
+    console.log(`  gpu pipelined     ${ms(r.gpuPipelinedTotalMs)}   ${C.dim('fire all, fence once — the repo-load storm')}`);
+    console.log(`  gpu pure exec     ${ms(r.gpuPureTotalMs)}   ${C.dim('timestamp-query total across the pipelined lane')}`);
+    const teethOk = r.files >= 10 && r.totalSlots >= 10000;
+    const spotOk = r.spot && r.spot.over === 0;
+    console.log(`  spot-check        ${spotOk ? '✓' : '✗ FAIL'} ${r.spot ? `${r.spot.file} (${r.spot.slots} slots, worst |Δ| ${r.spot.worst.toExponential(2)})` : 'missing'}`);
+    if (!teethOk) console.log(`  ✗ FAIL vacuous corpus: ${r.files} files / ${r.totalSlots} slots — point --dir at a real tree`);
+    console.log(C.bold(spotOk && teethOk ? '\n✓ PASS  bulk bench (exactness held on the largest file)' : '\n✗ FAIL  bulk bench'));
+    await browser.close();
+    process.exit(spotOk && teethOk ? 0 : 1);
+  }
+
   for (const mode of MODES) {
     const r = await app.evalPage(probe({
       repo: REPO, mode, text: TEXT, eps: EPS, wrapWidth: WRAP, worldScale: WORLD_SCALE,
