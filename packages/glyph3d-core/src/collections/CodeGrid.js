@@ -211,6 +211,53 @@ class CodeGrid extends FramedGlyphField {
             && items.every((it) => (it.scale ?? 1) === 1);
     }
 
+    /**
+     * Re-dispatch the engine layout from RETAINED state — no builder run, no new arrays.
+     * Everything the kernel needs survives between flushes: line tables on the field's
+     * entries, advances in the sizes attribute, origins in the committed items, params on
+     * this grid. This is the seam post-flush displacement writes (migrated arrangers) and
+     * param-only refolds re-enter through — ~50µs instead of a rebuild.
+     * @private
+     * @returns {boolean} true if a dispatch happened
+     */
+    _resyncEngineLayout() {
+        const field = this._renderer;
+        if (!field?.gpuLayout) return false;
+        const sizes = field.instanceMesh?.geometry?.attributes?.instanceSize?.array;
+        if (!sizes) return false;
+        const items = [], itemMeta = [], rendererIds = [];
+        let count = 0;
+        for (const [, entry] of field.renderedTexts) {
+            const committed = this._committedTexts.get(this._reverseIdMap.get(entry.id));
+            itemMeta.push({
+                bufferStartIndex: entry.bufferStartIndex,
+                glyphCount: entry.glyphCount,
+                lineSlotOffsets: entry.lineSlotOffsets,
+                pageContentWidth: entry.pageContentWidth || 0,
+            });
+            items.push({
+                position: committed?.position || { x: 0, y: 0, z: 0 },
+                scale: committed?.options?.scale ?? 1,
+            });
+            rendererIds.push(entry.id);
+            count = Math.max(count, entry.bufferStartIndex + entry.glyphCount);
+        }
+        if (!count) return false;
+        const m = this.metrics;
+        const shared = {
+            // CodeGrid metric names → builder metric names, same mapping the description uses.
+            metrics: { charWidth: m.charWidth, charHeight: m.charHeight, lineSpacing: m.lineHeight, letterSpacing: m.spacing || 0 },
+            layout: resolveLayoutParams(this.config.layout),
+            scrollOffset: this._scrollOffset || 0,
+        };
+        const res = syncGpuLayout(field, { count, sizes, itemMeta, bounds: null }, items, shared, rendererIds);
+        if (res?.bounds) {
+            this._workerBoundsCache = res.bounds;
+            field._updateGeometryBounds(res.bounds);
+        }
+        return (res?.dispatched || 0) > 0;
+    }
+
     registerArranger(a) { if (a && !this._arrangers.includes(a)) this._arrangers.push(a); }
     /** Remove a previously-registered arranger. */
     unregisterArranger(a) { const i = this._arrangers.indexOf(a); if (i >= 0) this._arrangers.splice(i, 1); }

@@ -498,6 +498,35 @@ const probe = (opts) => `(async (o) => {
     await kernel.compute();
     gpu = await kernel.readPositions();
     R.kernelMs = Math.round(performance.now() - t0);
+
+    // Displacement parity (stage 4): arm a deterministic CPU-authored table, re-dispatch,
+    // and expect EXACTLY builder positions + D. One mode carries it (wrap4 — wraps ensure
+    // the add lands after seg/page math). setDisplacements may reallocate + rebuild the
+    // kernel, so configure again before dispatching.
+    if (o.mode === 'wrap4' && typeof kernel.setDisplacements === 'function') {
+      const D = new Float32Array(slotCount * 3);
+      for (let s = 0; s < slotCount; s++) {
+        D[s * 3] = ((s % 7) - 3) * 0.25;
+        D[s * 3 + 1] = ((s % 5) - 2) * 0.5;
+        D[s * 3 + 2] = ((s % 3) - 1) * 0.125;
+      }
+      kernel.setDisplacements(D);
+      kernel.configure({ slotCount, lineTable, lineStartRow, advances, params });
+      await kernel.compute();
+      const gpuD = await kernel.readPositions();
+      let over = 0, worst = 0;
+      for (let s = 0; s < slotCount * 3; s++) {
+        const d = Math.abs(gpuD[s] - (cpu[s] + D[s]));
+        if (d > worst) worst = d;
+        if (d > o.eps) over++;
+      }
+      R.disp = { over, worst, checked: slotCount * 3 };
+      // Restore the undisplaced state for any later bench reuse.
+      kernel.setDisplacements(null);
+      kernel.configure({ slotCount, lineTable, lineStartRow, advances, params });
+      await kernel.compute();
+    }
+
     if (o.bench && !o.selftest) benchKernel = kernel;
     else if (typeof kernel.dispose === 'function') kernel.dispose();
   } catch (e) { R.kernelError = (e && e.stack ? String(e.stack).split('\\n').slice(0, 4).join(' | ') : String(e && e.message || e)); return R; }
@@ -822,10 +851,14 @@ function report(r) {
   }
   if (r.benchError) push(`  bench ERROR  ${r.benchError}`);
 
-  const ok = teethOk && d.over === 0;
+  if (r.disp) {
+    push(`  displacement ${r.disp.over === 0 ? '✓' : '✗ FAIL'}  ${r.disp.checked} lanes vs builder+D, worst |Δ| ${r.disp.worst.toExponential(2)}`);
+  }
+
+  const ok = teethOk && d.over === 0 && (!r.disp || r.disp.over === 0);
   push('');
   push(ok ? C.bold(`✓ PASS  mode ${r.mode}: ${d.compared} slots match within ${d.eps}`)
-          : C.bold(`✗ FAIL  mode ${r.mode}: ${!teethOk ? 'coverage teeth failed; ' : ''}${d.over} slot(s) beyond ${d.eps}`));
+          : C.bold(`✗ FAIL  mode ${r.mode}: ${!teethOk ? 'coverage teeth failed; ' : ''}${d.over} slot(s) beyond ${d.eps}${r.disp && r.disp.over ? `; displacement ${r.disp.over} lanes off` : ''}`));
   return { text: lines.join('\n'), ok, reason: ok ? null : (!teethOk ? 'coverage teeth failed' : `${d.over} slots beyond eps`) };
 }
 

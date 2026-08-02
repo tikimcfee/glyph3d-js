@@ -12,6 +12,7 @@
 import { buildBatchBuffers, paginationGeometry, resolveLayoutParams } from '../packages/glyph3d-core/src/workers/builders/index.js';
 import { computeCellMetrics } from '../packages/glyph3d-core/src/core/cellMetrics.js';
 import LayoutDescription from '../packages/glyph3d-core/src/core/LayoutDescription.js';
+import { evaluateFold } from '../packages/glyph3d-core/src/core/foldEvaluate.js';
 
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) pass++; else { fail++; console.log(`  ✗ ${m}`); } };
@@ -119,6 +120,26 @@ for (const { name, layout: layoutSpec, scroll } of CASES) {
   }
   ok(bad === 0, `${name}: ${bad}/${checked} slots beyond ${EPS} (worst ${worst.toExponential(2)})`);
   ok(checked > 40, `${name}: vacuous — only ${checked} slots checked`);
+
+  // Third evaluator: evaluateFold (bulk CPU) against the same builder truth, every slot.
+  {
+    const advances = new Float32Array(buffers.count);
+    for (let s = 0; s < buffers.count; s++) advances[s] = buffers.sizes[s * 2];
+    const bulk = evaluateFold({
+      slotCount: buffers.count, lineTable: lineSlotBase, advances,
+      origin: { x: 0, y: 0, z: 0 }, scrollOffset: scroll,
+      wrapWidth: layout.wrapWidth, lineSpacing: metrics.lineSpacing,
+      zStep: metrics.charHeight * layout.zWrapSpacing,
+      geom: meta.pageContentWidth > 0 ? geom : null,
+    });
+    let bulkBad = 0, bulkWorst = 0;
+    for (let s = 0; s < buffers.count * 3; s++) {
+      const d = Math.abs(bulk[s] - buffers.positions[s]);
+      if (d > bulkWorst) bulkWorst = d;
+      if (d > EPS) bulkBad++;
+    }
+    ok(bulkBad === 0, `${name}: evaluateFold ${bulkBad}/${buffers.count * 3} beyond ${EPS} (worst ${bulkWorst.toExponential(2)})`);
+  }
   if (meta.wrapColsPerLine?.some((w) => w.length > 0)) wrappedCases++;
   if (name === 'newspaper' || name === 'z-pages') {
     ok(meta.pageContentWidth > 0, `${name}: pagination fired (pageContentWidth ${meta.pageContentWidth})`);
