@@ -855,6 +855,15 @@ export default class GlyphField {
         this._glyphMapWidth   = 1;
 
         // Build instance mesh
+        // GPU layout engine: when set, the compute kernel is the ONLY position writer —
+        // applyPrebuiltBuffers stops adopting CPU arrays, and the persistent storage
+        // attribute below is what the kernel fills (it closes over the attribute, so
+        // identity is stable across flushes; growth replaces both). CPU consumers answer
+        // position queries through the fold mirror (LayoutDescription.positionAt), never
+        // through this buffer.
+        this.gpuLayout = false;
+        this._gpuPosAttr = null;
+
         this.instanceMesh = this._createInstanceMesh();
         this.scene.add(this.instanceMesh);
     }
@@ -1149,6 +1158,14 @@ export default class GlyphField {
     updatePosition(id, newPosition) {
         const entry = this.renderedTexts.get(id);
         if (!entry || entry.bufferStartIndex === undefined) return;
+        if (this.gpuLayout) {
+            // No CPU position array exists to translate. Under the engine, an entry moves by
+            // re-dispatching with a new origin (a fold param) — a caller that needs this owns
+            // the tables and should re-sync. No live caller hits this (ConnectionRenderer
+            // fields never run the engine); the warn is a tripwire, not a path.
+            console.warn('GlyphField.updatePosition: field is GPU-layout-owned; re-dispatch with a new origin instead');
+            return;
+        }
         const geom = this.instanceMesh.geometry;
         const arr  = geom.attributes.instancePosition.array;
         const base = entry.bufferStartIndex;
@@ -1570,6 +1587,10 @@ export default class GlyphField {
      */
     measureSlotRange(startSlot, count) {
         if (!this.instanceMesh || count <= 0) return null;
+        // Engine-owned fields have no CPU positions to measure — null, honestly. The
+        // consumers that need slot-range extents (structural arrangers) are exactly the
+        // ones eligibility keeps OFF the engine; content bounds ride the builder's cache.
+        if (this.gpuLayout) return null;
         const geom      = this.instanceMesh.geometry;
         const positions = geom.attributes.instancePosition.array;
         const sizes     = geom.attributes.instanceSize.array;
@@ -1851,6 +1872,12 @@ export default class GlyphField {
             // The worker already measured the layout extent during its build — reuse it (O(1)).
             box.min.set(precomputed.min.x, precomputed.min.y, precomputed.min.z);
             box.max.set(precomputed.max.x, precomputed.max.y, precomputed.max.z);
+        } else if (this.gpuLayout) {
+            // Engine-owned: the live buffer is GPU-side; a walk would read zeros and collapse
+            // the cull bounds. Every engine commit passes the builder's precomputed extent
+            // (the branch above), and no CPU writer moves glyphs between commits — so the
+            // standing bounds remain true. Keep them.
+            return;
         } else {
             // No precomputed extent (sync / in-place move) — one O(n) min/max over the live buffer.
             const pos = geom.attributes.instancePosition.array;
@@ -1889,7 +1916,22 @@ export default class GlyphField {
         let { itemMeta } = buffers;
         const geom = this.instanceMesh.geometry;
 
-        geom.setAttribute('instancePosition', new StorageInstancedBufferAttribute(positions, 3));
+        if (this.gpuLayout) {
+            // ENGINE-OWNED positions: buffers.positions is ignored, never uploaded — the
+            // layout kernel writes this attribute GPU-side (syncGpuLayout, right after this
+            // commit). Explicit itemSize 4 = WGSL's own vec3-array stride made visible, so
+            // three never repacks (a repack would silently swap .array/.itemSize). The
+            // shared material's vec3 read is fed legally from the float32x4 format.
+            let attr = this._gpuPosAttr;
+            if (!attr || attr.count < count) {
+                attr = new StorageInstancedBufferAttribute(new Float32Array(count * 4), 4);
+                this._gpuPosAttr = attr;
+            }
+            geom.setAttribute('instancePosition', attr);
+        } else {
+            this._gpuPosAttr = null;
+            geom.setAttribute('instancePosition', new StorageInstancedBufferAttribute(positions, 3));
+        }
         geom.setAttribute('instanceSize',     new THREE.InstancedBufferAttribute(sizes, 2));
         geom.setAttribute('instanceGlyphId',  new THREE.InstancedBufferAttribute(glyphIds || new Float32Array(count), 1));
         geom.setAttribute('instanceColor',    new THREE.InstancedBufferAttribute(colors, 3));
@@ -1939,7 +1981,31 @@ export default class GlyphField {
      * @returns {Float32Array|null}
      */
     getInstancePositions() {
+        // Engine-owned fields have no CPU position array — the honest answer is null, and
+        // every caller either falls back (bounds → builder cache) or is excluded from the
+        // engine by eligibility (arrangers). Position QUERIES go through the fold mirror.
+        if (this.gpuLayout) return null;
         return this.instanceMesh?.geometry?.attributes?.instancePosition?.array ?? null;
+    }
+
+    /**
+     * Choose the position engine for subsequent commits. true = the compute kernel is the
+     * only writer (applyPrebuiltBuffers stops adopting CPU arrays); false = the CPU path
+     * exactly as it always was. An ENGINE choice, never a feature switch — the caller
+     * (CodeGrid) gates eligibility so anything the kernel can't serve stays CPU.
+     * @param {boolean} on
+     */
+    setGpuLayout(on) {
+        const next = !!on;
+        if (next === this.gpuLayout) return;
+        this.gpuLayout = next;
+        if (!next) {
+            this._gpuPosAttr = null;
+            // The adapter parks its kernel on the field; releasing here keeps the pair's
+            // lifecycles joined without a core→adapter import.
+            this._gpuKernel?.dispose?.();
+            this._gpuKernel = null;
+        }
     }
 
     /**

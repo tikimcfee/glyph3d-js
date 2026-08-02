@@ -17,7 +17,7 @@ import { RENDER_ORDER } from '../core/renderOrder.js';
 import { BOUNDS_Z_PAD } from '../core/constants.js';
 import { computeCellMetrics } from '../core/cellMetrics.js';
 import { paginationGeometry, resolveLayoutParams, DEFAULT_LAYOUT } from '../workers/builders/index.js';
-import { syncGpuLayout } from '../compute/GlyphLayoutCompute.js';
+import { syncGpuLayout, isGpuLayoutEnabled } from '../compute/GlyphLayoutCompute.js';
 import LayoutDescription from '../core/LayoutDescription.js';
 import { analyzeGrid, buildGridSemantics, buildGridSemanticsSync } from '../parsing/SyntaxColorizer.js';
 import FramedGlyphField from './FramedGlyphField.js';
@@ -1287,16 +1287,23 @@ class CodeGrid extends FramedGlyphField {
             }
         }
 
+        // Engine choice for THIS commit — all-or-nothing per field, decided fresh every
+        // flush: the kernel serves plain, unarranged, scale-1 content; anything else takes
+        // the CPU path exactly as it always was. Toggling layout.gpu or registering an
+        // arranger re-routes naturally at the next flush. Never a feature switch.
+        const engineOn = !!shared && isGpuLayoutEnabled()
+            && this._arrangers.length === 0
+            && items.every((it) => (it.scale ?? 1) === 1);
+        this._renderer.setGpuLayout(engineOn);
+
         const rendererIds = this._renderer.applyPrebuiltBuffers(buffers, items);
         this._workerBoundsCache  = buffers.bounds;
         this._contentBoundsDirty = false;
 
-        // GPU layout (layout.gpu, dual-compute): re-derive eligible items' positions in the
-        // compute kernel, into the SAME storage attribute the CPU just filled — bit-exact per
-        // the layout-kernel gate, so this changes nothing visible when correct and is loudly
-        // wrong when not. Skipped/failed dispatches leave CPU values standing; no feature
-        // rides on this branch. No-op unless the toggle AND an engine renderer are armed.
-        if (shared) syncGpuLayout(this._renderer, buffers, items, shared);
+        // Under the engine this dispatch IS the layout: applyPrebuiltBuffers adopted no CPU
+        // positions, and the kernel writes the field's storage attribute directly. (CPU mode
+        // skips it entirely — syncGpuLayout no-ops unless the field is engine-owned.)
+        if (engineOn) syncGpuLayout(this._renderer, buffers, items, shared);
 
         for (let i = 0; i < items.length; i++) {
             const p          = items[i];
@@ -1592,8 +1599,11 @@ class CodeGrid extends FramedGlyphField {
      * @private
      */
     _getContentBounds() {
-        // Fast path: worker precomputed bounds are still valid
-        if (!this._contentBoundsDirty && this._workerBoundsCache) {
+        // Fast path: worker precomputed bounds are still valid. Under the GPU engine the
+        // cache is valid regardless of the dirty flag — no CPU writer can move glyphs
+        // between commits (arrangers are engine-ineligible), so the builder's extent from
+        // the last flush IS the truth; the walk below would read a GPU-owned buffer anyway.
+        if (this._workerBoundsCache && (!this._contentBoundsDirty || this._renderer?.gpuLayout)) {
             return this._workerBoundsCache;
         }
         if (!this._contentBoundsDirty && this._contentBoundsCache) {

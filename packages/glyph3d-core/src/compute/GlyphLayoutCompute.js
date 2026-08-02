@@ -1,19 +1,19 @@
 /**
  * GlyphLayoutCompute — the GPU layout engine behind a GlyphField, as an adapter.
  *
- * DUAL-COMPUTE CONTRACT (v1): the CPU builder remains fully authoritative — its positions
- * land in the field's storage-backed instancePosition exactly as always, and every CPU
- * consumer (positionAt, caret, arrangers, bounds) reads that array. What this adapter adds:
- * after each commit, it re-derives every ELIGIBLE item's positions in the compute kernel and
- * writes them into the SAME attribute, GPU-side. The kernel is bit-exact against the builder
- * (tools/layout-kernel-check.mjs is the gate), so the write is invisible when correct and
- * loudly visible when not — a live assertion of the GPU engine against real content.
+ * THE ENGINE CONTRACT: when a field is engine-owned (field.gpuLayout, chosen per commit by
+ * CodeGrid's eligibility gate), the kernel is the ONLY position writer — applyPrebuiltBuffers
+ * adopts no CPU array, and this adapter's dispatch after each commit IS the layout. CPU
+ * consumers answer "where is this glyph" through the fold mirror (LayoutDescription
+ * .positionAt — the same pure function, per query), never through a buffer: every input to
+ * the fold (line tables, advances, params) is CPU-authored, so nothing is stranded GPU-side
+ * and nothing reads back. Parity between mirror, kernel and builder is standing test
+ * coverage (tools/layout-mirror.test.mjs, tools/layout-kernel-check.mjs).
  *
- * That contract is what makes the layout.gpu toggle an ENGINE choice, never a feature
- * switch: an item the kernel can't serve (scaled items, arranged grids) is simply SKIPPED —
- * its CPU values stand, and any later CPU write re-uploads the authoritative array wholesale.
- * Nothing can break; the worst case is a dispatch that didn't happen. v2 starts eliding CPU
- * work per-path (param-only refolds first), leaning on this same seam.
+ * The layout.gpu toggle is an ENGINE choice, never a feature switch: eligibility keeps
+ * anything the kernel can't yet serve (arranged grids, scaled items) on the CPU path
+ * wholesale, per field, re-decided every flush. Dispatches are encoded synchronously with
+ * no awaits between items — the bulk-lane lesson: awaiting costs more than the GPU work.
  *
  * The renderer is registered once at engine boot (setComputeRenderer) because core objects
  * live below the renderer: the two-SceneContext topology means a CodeGrid cannot reach it
@@ -48,7 +48,7 @@ export function isGpuLayoutEnabled() { return _enabled && _renderer !== null; }
  * @returns {number} items dispatched (skipped items keep their CPU positions)
  */
 export function syncGpuLayout(field, buffers, items, shared) {
-    if (!isGpuLayoutEnabled()) return 0;
+    if (!isGpuLayoutEnabled() || field?.gpuLayout !== true) return 0;
     const attr = field?.instanceMesh?.geometry?.attributes?.instancePosition;
     if (!attr || attr.isStorageInstancedBufferAttribute !== true) return 0;
     const { metrics, layout } = shared || {};
@@ -58,12 +58,23 @@ export function syncGpuLayout(field, buffers, items, shared) {
     let maxLines = 1;
     for (const m of itemMeta) maxLines = Math.max(maxLines, (m?.lineSlotOffsets || [0]).length);
 
-    let kernel = null;
+    // Persistent per-field kernel: the compute node closes over the output attribute, so it
+    // lives exactly as long as the attribute does — reused across flushes, replaced only
+    // when the field grew (new attribute) or the line capacity is exceeded. The field
+    // releases it on engine-off (setGpuLayout) without importing this module.
+    let kernel = field._gpuKernel || null;
+    if (kernel && (kernel.positions?.value !== attr || maxLines > kernel.maxLines)) {
+        kernel.dispose();
+        kernel = null;
+    }
     let dispatched = 0;
     try {
-        kernel = new GlyphLayoutKernel(_renderer, {
-            maxSlots: buffers.count, maxLines, positionsAttribute: attr,
-        });
+        if (!kernel) {
+            kernel = new GlyphLayoutKernel(_renderer, {
+                maxSlots: attr.count, maxLines: Math.max(maxLines, 64), positionsAttribute: attr,
+            });
+        }
+        field._gpuKernel = kernel;
         const wrap = Math.max(0, Math.trunc(layout.wrapWidth || 0));
         const charAdvance = metrics.charWidth + metrics.letterSpacing;   // paginationGeometry's nominal cell
 
@@ -71,9 +82,12 @@ export function syncGpuLayout(field, buffers, items, shared) {
             const meta = itemMeta[i];
             const item = items?.[i];
             if (!meta || !item || !meta.glyphCount) continue;
-            // Scaled items: the builder scales advances but not the line pitch — unverified
-            // against the gate, so the CPU values stand until a fixture earns it.
-            if ((item.scale ?? 1) !== 1) continue;
+            // Unreachable under the all-or-nothing eligibility gate (CodeGrid drops the whole
+            // field to CPU when any item is scaled). If it ever fires, a silent skip would
+            // strand the item at the origin — throw into the loud-failure path instead.
+            if ((item.scale ?? 1) !== 1) {
+                throw new Error(`engine-owned field carries a scaled item (scale ${item.scale}) — eligibility gate breached`);
+            }
 
             const base = meta.bufferStartIndex;
             const lso = meta.lineSlotOffsets || [base];
@@ -115,13 +129,12 @@ export function syncGpuLayout(field, buffers, items, shared) {
             dispatched++;
         }
     } catch (err) {
-        // The engine failing is a report, never a regression: CPU positions are already in
-        // the attribute, so rendering is untouched.
-        console.warn('GlyphLayoutCompute: GPU layout dispatch failed (CPU positions stand):', err);
-    } finally {
-        // Submitted work holds its own references — WebGPU defers actual destruction, so
-        // releasing the table buffers right after encode is sound.
-        if (kernel) kernel.dispose();
+        // Engine-owned fields have no CPU fallback in the buffer — a failed dispatch is
+        // VISIBLY wrong (glyphs at the origin), which is the correct failure mode for the
+        // one engine: loud, not silent. Drop the kernel so the next flush rebuilds fresh.
+        console.error('GlyphLayoutCompute: GPU layout dispatch FAILED — field renders unlaid until the next flush:', err);
+        kernel?.dispose();
+        field._gpuKernel = null;
     }
     return dispatched;
 }
