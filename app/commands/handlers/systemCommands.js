@@ -106,12 +106,23 @@ export default function registerSystemCommands(router) {
 
         const wsConnected = ctx.wsbridge ? ctx.wsbridge.connected : false;
 
+        // The path frame: where file.* verbs resolve. Every driver (human,
+        // CLI script, model) gets its bearings from the standard first call.
+        const fp = ctx.fileProvider;
+        const repo = fp?._currentRepo;
+        const filesLine = fp?.rootInfo?.root
+            ? `relay · ${fp.rootInfo.root}`
+            : repo
+                ? `github · ${repo.owner}/${repo.repo}@${repo.branch || 'main'}`
+                : 'no source loaded';
+
         const data = {
             'grids': String(gridEntries.length),
             'glyphs': totalGlyphs.toLocaleString(),
             'registry': String(ctx.registry.size),
             'camera': `${cam.x.toFixed(0)}, ${cam.y.toFixed(0)}, ${cam.z.toFixed(0)}`,
             'websocket': wsConnected ? 'connected' : 'disconnected',
+            'files': filesLine,
         };
 
         const lines = kvLines(data);
@@ -123,6 +134,7 @@ export default function registerSystemCommands(router) {
                 registryTotal: ctx.registry.size,
                 camera: { x: cam.x, y: cam.y, z: cam.z },
                 websocket: wsConnected,
+                files: filesLine,
             }
         };
     }, { description: 'Show scene status' });
