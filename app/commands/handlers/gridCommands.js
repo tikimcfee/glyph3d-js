@@ -106,7 +106,27 @@ export default function registerGridCommands(router) {
         const resolved = resolveGridByIdOrIndex(ctx, args[0]);
         if (resolved.error) return { text: resolved.error, data: null };
 
-        const lines = Array.isArray(resolved.grid.lines) ? resolved.grid.lines : [];
+        // A BOOK reads at its open page — the sheet the world shows is the
+        // sheet the verb reads (recto first, verso fallback). Anything with
+        // no text at all is an ERROR, never an empty success: a hollow
+        // "0 lines" once sent a driver into a 100-call retry spiral.
+        let target = resolved.grid;
+        let note = '';
+        if (!Array.isArray(target.lines)) {
+            const sheet = target.sheets?.[target.head];
+            const page = [sheet?.recto, sheet?.verso].find((p) => Array.isArray(p?.lines));
+            if (page) {
+                note = ` [open sheet ${target.head + 1}/${target.sheets.length} of '${resolved.registryId ?? args[0]}']`;
+                target = page;
+            } else {
+                const kind = ctx.registry.get(resolved.registryId)?.type ?? 'object';
+                return {
+                    text: `ERR: '${args[0]}' (${kind}) has no readable text — grids and book pages read here; terminals read via terminal.read`,
+                    data: null,
+                };
+            }
+        }
+        const lines = target.lines;
         const total = lines.length;
         const start = args.length > 1 ? Math.max(1, parseInt(args[1], 10) || 1) : 1;
         const count = args.length > 2
@@ -116,17 +136,18 @@ export default function registerGridCommands(router) {
         const end = start - 1 + slice.length;
 
         return {
-            text: slice.join('\n') + `\nOK: grid #${resolved.idx} lines ${start}-${end} of ${total}`,
+            text: slice.join('\n') + `\nOK: lines ${start}-${end} of ${total}${note || ` (grid #${resolved.idx})`}`,
             data: {
                 index: resolved.idx,
                 registryId: resolved.registryId,
+                ...(note ? { openSheet: true } : {}),
                 startLine: start,
                 endLine: end,
                 totalLines: total,
                 text: slice.join('\n'),
             }
         };
-    }, { description: "Read a grid's text content (1-based line range; no range = whole buffer)", usage: '<id|index> [startLine] [lineCount]' });
+    }, { description: "Read a grid's text content — a book id reads its OPEN page (1-based line range; no range = whole buffer)", usage: '<id|index> [startLine] [lineCount]' });
 
     router.register('grid.color', (args, ctx) => {
         if (args.length < 4) return { text: 'ERR: usage: grid.color <id|index> <r> <g> <b> (0-1 floats)', data: null };
