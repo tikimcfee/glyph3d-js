@@ -435,6 +435,14 @@ export const SETTINGS = [
   { key: 'labels.zLift', label: 'Lift toward viewer (z)', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.zLift, min: 0, max: 500, step: 1, apply: labelParam('zLift') },
   { key: 'labels.colorA', label: 'Name color (shallow)', group: 'Labels', type: 'color', default: '#' + LABEL_DEFAULTS.colorA.toString(16).padStart(6, '0'), apply: labelParam('colorA', true) },
   { key: 'labels.colorB', label: 'Name color (deep)', group: 'Labels', type: 'color', default: '#' + LABEL_DEFAULTS.colorB.toString(16).padStart(6, '0'), apply: labelParam('colorB', true) },
+  // Loading — the streamed bulk build: a directory pop builds its grids in slices
+  // under this per-frame budget (the camera stays live, the field arrives instead
+  // of freezing); 0 = build everything in one tick (the old lockup, if you want it).
+  {
+    key: 'load.buildBudget', label: 'Load build budget (ms/frame, 0=one tick)', group: 'Loading',
+    type: 'number', default: 12, min: 0, max: 200, step: 1,
+    apply: (ctx, v) => { ctx.loadBuildBudget = v; },
+  },
   // Motion — the relayout glide (ContentTreeMotion): every re-lay eases the durable
   // nodes from where they were to where the scheme stamped them, on the house
   // exponential. Rate is the whole feel — higher snaps, lower floats; rotation slerps

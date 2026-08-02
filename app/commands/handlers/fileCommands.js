@@ -229,15 +229,47 @@ export default function registerFileCommands(router) {
             for (const f of oversized) {
                 if (addUnfetchedGrid(ctx, f.path, f.size) != null) { opened++; placeholders++; }
             }
-            for (const p of want) {
-                const c = contentMap.get(p);
-                if (c == null) continue;
-                const id = addFileGrid(ctx, p, c.content); // inserts into the tree
-                if (id == null) continue;
-                opened++;
-                if (ctx.registry.get(id)?.grid?.userData?.notRendered) placeholders++;
+            // STREAMED build: grid construction is synchronous main-thread work
+            // (~0.6ms/file — a whole repo in one tick reads as a lockup), so the
+            // loop slices under a per-frame budget and yields between slices. The
+            // camera stays live and the field ARRIVES instead of appearing. A
+            // throttled relayout mid-stream lets the glide pour grids into their
+            // slots as they land — under a restore's batch window those are held,
+            // so a launch still settles exactly once. Budget 0 restores the
+            // single-tick build (Settings ▸ Loading).
+            const budget = Number(ctx.loadBuildBudget ?? 12);
+            const yieldFrame = () => new Promise((r) => {
+                // rAF is the real frame boundary; the timer keeps a hidden tab
+                // (no frames) from stalling the load forever.
+                let done = false;
+                const settle = () => { if (!done) { done = true; r(); } };
+                if (typeof requestAnimationFrame === 'function') requestAnimationFrame(settle);
+                setTimeout(settle, 50);
+            });
+            let chunks = 1;
+            let lastPour = performance.now();
+            let i = 0;
+            while (i < want.length) {
+                const slice0 = performance.now();
+                while (i < want.length && (budget <= 0 || performance.now() - slice0 < budget)) {
+                    const p = want[i++];
+                    const c = contentMap.get(p);
+                    if (c == null) continue;
+                    const id = addFileGrid(ctx, p, c.content); // inserts into the tree
+                    if (id == null) continue;
+                    opened++;
+                    if (ctx.registry.get(id)?.grid?.userData?.notRendered) placeholders++;
+                }
+                if (i >= want.length) break;
+                chunks++;
+                ctx.status?.set(`Opening ${i}/${n}${dir ? ' · ' + dir : ''}…`);
+                if (performance.now() - lastPour > 300) {
+                    ctx.contentTree.relayoutAndRest(WORLD_FLOOR_Y);   // held under a batch window
+                    lastPour = performance.now();
+                }
+                await yieldFrame();
             }
-            trace.mark('build', { grids: opened });
+            trace.mark('build', { grids: opened, chunks });
 
             // One relayout for the whole batch (the RenderPlan), then rest on the world floor —
             // the directory structure IS the scene graph now (the walk-tree scheme places it).
