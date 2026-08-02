@@ -421,11 +421,12 @@ export const SETTINGS = [
   { key: 'glyph.density', label: 'Block ink density', group: 'Glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.density, min: 0.005, max: 0.15, step: 0.005, apply: lodParam('density') },
   { key: 'glyph.maxCov', label: 'Block max coverage', group: 'Glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.maxCov, min: 0.1, max: 1, step: 0.02, apply: lodParam('maxCov') },
   { key: 'glyph.lodAxisBias', label: 'Block axis bias (0 best→1 worst)', group: 'Glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.lodAxisBias, min: 0, max: 1, step: 0.05, apply: lodParam('lodAxisBias') },
-  // Agent Books — the agent shelf: page geometry, deck pitch, and card scales (each agent's run
-  // as a book of spreads). Every dial re-fits the live shelf via applyScales (cards re-scale,
-  // sheets re-fit, the cluster re-flows). Ranges are deliberately WIDE — a small positive min
-  // just keeps a value off 0/negative; the user, not us, decides what's "too big". Defaults
-  // mirror AGENT_BOOKS_DEFAULTS.
+  // Agent Books — the agent shelf: page geometry, deck pitch, card scales, and retention (each
+  // agent's run as a book of spreads). Every dial re-fits the live shelf via applyScales (cards
+  // re-scale, sheets re-fit, over-cap sheets shed, the cluster re-flows). Ranges are deliberately
+  // WIDE — a small positive min just keeps a value off 0/negative; the user, not us, decides
+  // what's "too big". Defaults mirror AGENT_BOOKS_DEFAULTS.
+  { key: 'book.maxSheets', label: 'Turns kept per book (0 = all)', group: 'Agent Books', type: 'number', default: 20, min: 0, max: 5000, step: 1, apply: bookParam('maxSheets') },
   { key: 'book.pageW', label: 'Page width', group: 'Agent Books', type: 'number', default: 320, min: 10, max: 5000, step: 10, apply: bookParam('pageW') },
   { key: 'book.pageH', label: 'Page height', group: 'Agent Books', type: 'number', default: 420, min: 10, max: 5000, step: 10, apply: bookParam('pageH') },
   { key: 'book.gutter', label: 'Spread gutter (spine gap)', group: 'Agent Books', type: 'number', default: 24, min: 0, max: 500, step: 2, apply: bookParam('gutter') },

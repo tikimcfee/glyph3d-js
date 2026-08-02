@@ -71,8 +71,10 @@ export const AGENT_BOOKS_DEFAULTS = {
     floorY: 0,                  // world floor the cluster's bottom rests on (the file tree's convention)
     // -- lifecycle -----------------------------------------------------------------
     stallMs: 12000,             // active → stalled after this quiet spell
-    hydrateLimit: 200,          // newest events a session hydration materializes (sheets are GPU
-                                // objects — a monster transcript opens as its tail, not en masse)
+    maxSheets: 20,              // newest turns a book keeps IN SPACE (sheets are GPU objects) —
+                                // live growth sheds its oldest past this, a session hydration
+                                // materializes only this tail; 0 = unbounded. Per-book override:
+                                // book.limit / agent.open's limit arg (lane.maxSheets).
     // -- identity ------------------------------------------------------------------
     cover: true,                // translucent identity box around each book's deck (also the drag handle)
     coverPad: 16,               // XY inflation beyond the deck bounds
@@ -182,6 +184,7 @@ export default class AgentBooks {
                 seq: 0, entries: [],   // one entry per sheet: cards + ids + the record
                 groupId: `agent:book:${agentId}`,
                 sessionId: null,       // the harness session record this book renders (set by hydrate)
+                maxSheets: null,       // per-book retention override: n>0 caps, 0 unbounded, null → cfg.maxSheets
                 pinned: false, pinnedPos: null,
             };
             book.fit(this._pageOpts(lane));   // page form from birth — appended sheets inherit it
@@ -215,17 +218,16 @@ export default class AgentBooks {
         const infoId = `${sheetId}:info`;
         const snapId = `${sheetId}:snap`;
         const meta = { agentId, seq, sheetId, record };
-        const bookIndex = lane.book.sheets.length;   // where this sheet will land
 
         // VERSO — the description page: the action headline, with its numeric meta below.
         const action = this._card(`[${record.action || 'act'}]`, fmtAction(record),
             { gridScale: this.cfg.callScale, textColor: hue },
-            { id: actionId, meta: { ...meta, kind: 'action' } }, lane, bookIndex);
+            { id: actionId, meta: { ...meta, kind: 'action' } }, lane, sheetId);
         const infoText = fmtMeta(record.meta, '\n');
         let info = null;
         if (infoText) {
             info = this._card('info', infoText, { gridScale: this.cfg.infoScale, textColor: hue, showFilename: false },
-                { id: infoId, meta: { ...meta, kind: 'info' } }, lane, bookIndex);
+                { id: infoId, meta: { ...meta, kind: 'info' } }, lane, sheetId);
         }
         const verso = info ? new VStack({ spacing: this.cfg.rowGap, align: 0, children: [action, info] }) : action;
 
@@ -237,25 +239,26 @@ export default class AgentBooks {
         if (record.target) {
             const kind = classifyByExtension(record.target);
             if (kind?.kind === 'image') {
-                recto = this._imageSnapshot(record.target, kind.format, lane, bookIndex);
+                recto = this._imageSnapshot(record.target, kind.format, lane, sheetId);
             } else {
                 recto = this._makeGrid(record.target, { worldScale: this.cfg.artifactWorldScale });
                 snapScaleKey = 'artifactWorldScale';
-                this._loadSnapshot(recto, record, { id: snapId, meta: { ...meta, kind: 'snap' } }, lane, bookIndex);
+                this._loadSnapshot(recto, record, { id: snapId, meta: { ...meta, kind: 'snap' } }, lane, sheetId);
                 hasSnapPick = true;
             }
         } else if (record.result) {
-            recto = this._outputSnapshot(record, { id: snapId, meta: { ...meta, kind: 'snap' } }, lane, bookIndex);
+            recto = this._outputSnapshot(record, { id: snapId, meta: { ...meta, kind: 'snap' } }, lane, sheetId);
             snapScaleKey = (record.action === 'say' || record.action === 'think') ? 'messageScale' : 'artifactWorldScale';
             hasSnapPick = true;
         }
 
         lane.book.addSheet({ verso, recto });
         lane.entries.push({
-            verso, action, info, snapshot: recto, snapScaleKey,
+            sheetId, verso, action, info, snapshot: recto, snapScaleKey,
             actionId, infoId: info ? infoId : null, snapId: hasSnapPick ? snapId : null,
             record, ts: this._now(),
         });
+        this._trimLane(lane);   // past the cap, the oldest turn leaves as the newest lands
         if (!this._batch) { this._relayout(); this._emitChange(); }
         return lane;
     }
@@ -267,18 +270,23 @@ export default class AgentBooks {
      * one lane. One layout pass for the whole read (the batch discipline): per-event
      * relayouts are suppressed while building and a single flow lands at the end.
      *
-     * Only the newest `limit` events materialize (default cfg.hydrateLimit) — sheets are
-     * GPU objects, and a monster transcript opens as its readable tail.
+     * Only the newest turns materialize — the lane's retention cap (its override, else
+     * cfg.maxSheets) bounds hydration exactly as it bounds live growth: sheets are GPU
+     * objects, and a monster transcript opens as its readable tail. An explicit `limit`
+     * BECOMES the book's override (n>0 caps it, 0 unbounded — the whole record), so a
+     * deliberate deep open stays deep as the live stream continues.
      * @param {string} agentId
      * @param {Array<{kind:string, name?:string, input?:Object, response?:Object, mtype?:string, text?:string}>} events
      * @param {{agentType?:string, sessionId?:string|null, cwd?:string, limit?:number}} [opts]
      * @returns {number} sheets added
      */
     hydrate(agentId, events, { agentType = 'claude', sessionId = null, cwd = '', limit } = {}) {
-        const cap = Math.max(1, limit ?? this.cfg.hydrateLimit);
-        const slice = events.length > cap ? events.slice(-cap) : events;
         const lane = this.ensure(agentId, agentType);
         if (sessionId) lane.sessionId = sessionId;
+        const v = Number(limit);
+        if (limit != null && Number.isFinite(v)) lane.maxSheets = Math.max(0, Math.floor(v));
+        const cap = this._capFor(lane);
+        const slice = events.length > cap ? events.slice(-cap) : events;
         this._batch = true;
         let added = 0;
         try {
@@ -465,13 +473,46 @@ export default class AgentBooks {
     // -- scale / config --------------------------------------------------------------
 
     /**
+     * Cap ONE book's kept turns — the book.limit verb's engine (a hydration's explicit
+     * limit sets the same field). n > 0 caps this lane, 0 makes it unbounded, null/NaN
+     * clears the override back to the shelf default (cfg.maxSheets). Over-cap sheets
+     * shed immediately, oldest first.
+     * @param {string} [agentId] agent id / registry group id / first lane when omitted
+     * @param {number|null} n
+     * @returns {{agentId:string, override:number|null, cap:number, count:number, evicted:number}|null}
+     */
+    setLimit(agentId, n) {
+        const hit = this._resolveLane(agentId);
+        if (!hit) return null;
+        const [id, lane] = hit;
+        const v = Number(n);
+        lane.maxSheets = (n == null || !Number.isFinite(v)) ? null : Math.max(0, Math.floor(v));
+        const evicted = this._trimLane(lane);
+        if (evicted) this._relayout();
+        this._emitChange();
+        return { ...this.limitOf(id), evicted };
+    }
+
+    /** A book's retention state: its override (null = shelf default), the effective cap
+     *  (0 = unbounded), and the sheets on hand. */
+    limitOf(agentId) {
+        const hit = this._resolveLane(agentId);
+        if (!hit) return null;
+        const [id, lane] = hit;
+        const cap = this._capFor(lane);
+        return { agentId: id, override: lane.maxSheets, cap: Number.isFinite(cap) ? cap : 0, count: lane.book.sheets.length };
+    }
+
+    /**
      * Re-apply the current cfg SCALES to every live card — the one entry the config verb
      * and the Settings rows both route through. gridScale cards (headline + info) re-scale
      * via setScale; worldScale body cards bake their layout at build, so a uniform
      * transform re-sizes them (desired ÷ built). Then re-fit + re-flow so pages re-read.
+     * A tightened cfg.maxSheets lands here too — each lane sheds to its cap first.
      */
     applyScales() {
         for (const lane of this.lanes.values()) {
+            this._trimLane(lane);
             lane.book.deck.zPitch = this.cfg.zPitch;
             lane.book.deck.lerp = this.cfg.pagerLerp;
             for (const e of lane.entries) {
@@ -517,24 +558,52 @@ export default class AgentBooks {
 
     /** A free CodeGrid card with content; when its async bounds settle, re-fit the sheet it
      *  rides and re-flow (and, if `pick` given, register it as a pickable 'book.card'). */
-    _card(filename, body, opts, pick, lane, bookIndex) {
+    _card(filename, body, opts, pick, lane, sheetId) {
         const grid = this._makeGrid(filename, opts);
         grid.loadFileAsync(filename, body)
-            .then(() => { if (pick) this._wireCardPick(grid, pick.id, pick.meta); this._settle(lane, bookIndex); })
+            .then(() => { if (pick) this._wireCardPick(grid, pick.id, pick.meta); this._settle(lane, sheetId); })
             .catch(() => { /* render best-effort */ });
         return grid;
     }
 
     /** A loaded card's bounds settled: re-lay its verso stack (a bare-card verso has no
      *  stack — and CodeGrid's own `layout` is grid windowing, never called here), re-fit
-     *  its sheet, and request a re-flow. The flow is COALESCED per tick — a hydration
-     *  resolves hundreds of card loads in bursts, and each one re-packing the world
-     *  would be the minutes-not-milliseconds trap. @private */
-    _settle(lane, bookIndex) {
-        const entry = lane.entries[bookIndex];
-        if (entry?.verso?.isStackContainer) entry.verso.layout();
-        lane.book.fitSheet(bookIndex);
+     *  its sheet, and request a re-flow. The sheet resolves by ID, not position — the
+     *  retention cap evicts oldest sheets, so positions shift under a pending load (an
+     *  evicted sheet's late settle is a no-op). The flow is COALESCED per tick — a
+     *  hydration resolves hundreds of card loads in bursts, and each one re-packing the
+     *  world would be the minutes-not-milliseconds trap. @private */
+    _settle(lane, sheetId) {
+        const i = lane.entries.findIndex((e) => e.sheetId === sheetId);
+        if (i < 0) return;   // shed while its content loaded
+        const entry = lane.entries[i];
+        if (entry.verso?.isStackContainer) entry.verso.layout();
+        lane.book.fitSheet(i);
         this._requestRelayout();
+    }
+
+    // -- private: retention ------------------------------------------------------------
+
+    /** The lane's effective sheet cap — its override, else the shelf default; 0 (either
+     *  level) means unbounded. @private */
+    _capFor(lane) {
+        const n = lane.maxSheets ?? this.cfg.maxSheets;
+        return Number.isFinite(n) && n > 0 ? Math.floor(n) : Infinity;
+    }
+
+    /** Shed a lane's oldest sheets past its cap. Entries and deck stay parallel arrays;
+     *  each evicted sheet's cards fully release (registry, picking, GPU) and the deck
+     *  closes up behind them. @private @returns {number} sheets shed */
+    _trimLane(lane) {
+        const cap = this._capFor(lane);
+        let n = 0;
+        while (lane.entries.length > cap) {
+            const e = lane.entries.shift();
+            lane.book.removeSheet(0);
+            this._disposeEntry(e);
+            n++;
+        }
+        return n;
     }
 
     /** Schedule one _relayout for this tick, however many settles ask. @private */
@@ -559,23 +628,23 @@ export default class AgentBooks {
 
     /** A no-target action's OUTPUT as the recto: command result / say-think prose. Ships RAW —
      *  the fit frames it; nothing is truncated here. */
-    _outputSnapshot(record, pick, lane, bookIndex) {
+    _outputSnapshot(record, pick, lane, sheetId) {
         const isMessage = record.action === 'say' || record.action === 'think';
         const name = record.action === 'say' ? 'said' : record.action === 'think' ? 'thinking' : 'output';
         const worldScale = isMessage ? this.cfg.messageScale : this.cfg.artifactWorldScale;
-        return this._card(name, String(record.result ?? ''), { worldScale }, pick, lane, bookIndex);
+        return this._card(name, String(record.result ?? ''), { worldScale }, pick, lane, sheetId);
     }
 
     /** The recto for a file target: its content AS-OF this moment (loaded ONCE), touched
      *  lines lit up; registers as a pickable card after load. @private */
-    _loadSnapshot(grid, record, pick, lane, bookIndex) {
+    _loadSnapshot(grid, record, pick, lane, sheetId) {
         const path = record.target;
         const wire = () => { if (pick) this._wireCardPick(grid, pick.id, pick.meta); };
         Promise.resolve(this.ctx.fileProvider?.getFile?.(path))
             .then((content) => this._resolveSnapshotText(path, String(content ?? '')))
             .then((text) => grid.loadFileAsync(path, text))
-            .then(() => { this._decorateSnapshot(grid, record); wire(); this._settle(lane, bookIndex); })
-            .catch(() => grid.loadFileAsync(path, '(could not load)').then(() => { wire(); this._settle(lane, bookIndex); }).catch(() => {}));
+            .then(() => { this._decorateSnapshot(grid, record); wire(); this._settle(lane, sheetId); })
+            .catch(() => grid.loadFileAsync(path, '(could not load)').then(() => { wire(); this._settle(lane, sheetId); }).catch(() => {}));
     }
 
     /**
@@ -643,7 +712,7 @@ export default class AgentBooks {
      * image path. Image cards are unpickable for now: they're placed without a pick arg,
      * so no registry entry is made (FrameGrid does inherit setPickingSystem — a follow-on).
      */
-    _imageSnapshot(path, format, lane, bookIndex) {
+    _imageSnapshot(path, format, lane, sheetId) {
         const grid = new FrameGrid(this.scene, this.atlas, { name: `agent:${path}`, cols: 1, rows: 1, width: this.cfg.snapshotImageWidth });
         Promise.resolve(this.ctx.fileProvider?.getBytes?.(path))
             .then((bytes) => bytes && FrameGrid.textureFromImageBytes(bytes, format))
@@ -652,9 +721,9 @@ export default class AgentBooks {
                     grid.setFrameTexture(res.texture);
                     if (res.width > 0 && res.height > 0) grid.setAspect(res.width / res.height);
                 }
-                this._settle(lane, bookIndex);
+                this._settle(lane, sheetId);
             })
-            .catch(() => this._settle(lane, bookIndex));
+            .catch(() => this._settle(lane, sheetId));
         return grid;
     }
 
@@ -701,16 +770,20 @@ export default class AgentBooks {
         }
     }
 
+    /** Unregister + dispose ONE sheet's cards (registry ids, pick panels, GPU) —
+     *  the shared teardown for an evicted sheet and a killed lane. @private */
+    _disposeEntry(e) {
+        for (const id of [e.actionId, e.infoId, e.snapId]) { if (id) { try { this.ctx.registry?.unregister?.(id); } catch (_e) { /* best effort */ } } }
+        for (const g of [e.action, e.info, e.snapshot]) {
+            if (!g) continue;
+            try { this.ctx.pickingSystem?.unregister?.('grid', g._background); } catch (_e) { /* best effort */ }
+            try { g.parent?.remove(g); g.dispose?.(); } catch (_e) { /* best effort */ }
+        }
+    }
+
     /** Unregister + dispose everything a lane owns (cards, cover, book). @private */
     _kill(lane) {
-        for (const e of lane.entries) {
-            for (const id of [e.actionId, e.infoId, e.snapId]) { if (id) { try { this.ctx.registry?.unregister?.(id); } catch (_e) { /* best effort */ } } }
-            for (const g of [e.action, e.info, e.snapshot]) {
-                if (!g) continue;
-                try { this.ctx.pickingSystem?.unregister?.('grid', g._background); } catch (_e) { /* best effort */ }
-                try { g.parent?.remove(g); g.dispose?.(); } catch (_e) { /* best effort */ }
-            }
-        }
+        for (const e of lane.entries) this._disposeEntry(e);
         try { this.ctx.registry?.unregister?.(lane.groupId); } catch (_e) { /* best effort */ }
         try { if (lane.book.cover) this.ctx.pickingSystem?.unregister?.('group', lane.book.cover.mesh); } catch (_e) { /* best effort */ }
         try { lane.book.dispose(); } catch (_e) { /* best effort */ }   // drops the cover with the sheets

@@ -9,6 +9,8 @@
  *   book.scroll [id] <delta>                    turn by ±N sheets (− older / + newer)
  *   book.move   <id> <x> <y> <z>                pin an agent book where you put it (drag-release / CLI)
  *   book.config [key value]                     get/set an agent-shelf constant — re-flows live
+ *   book.limit  [id] [n|all|default]            get/set ONE book's kept-turns cap (overrides the
+ *                                               shelf default, cfg.maxSheets; 'all' keeps every turn)
  *
  * Paging resolves an AGENT book first (by agent id, or the first lane when omitted),
  * else a TREE book by path — a one-sheet file book pages trivially today and grows
@@ -160,4 +162,28 @@ export default function registerBookCommands(router) {
         books.applyScales();   // re-scale live cards + re-fit pages + re-flow the shelf
         return { text: `OK: book.${key} = ${books.cfg[key]} (re-flowed)`, data: { [key]: books.cfg[key] } };
     }, { description: 'Get or set an agent-shelf constant — re-fits and re-flows live', usage: '[key value]' });
+
+    router.register('book.limit', (args, ctx) => {
+        const books = ctx.agentBooks;
+        if (!books) return { text: 'ERR: agent books not wired', data: null };
+        // book.limit                → report the default book's cap
+        // book.limit <id>           → report that book's cap
+        // book.limit [id] <n|all|default> → set: n>0 caps it, 'all' (or 0) keeps every
+        //                             turn, 'default' follows the shelf knob again.
+        const isCap = (a) => a === 'all' || a === 'default' || Number.isFinite(Number(a));
+        const [id, arg] = args.length >= 2 ? [args[0], args[1]]
+                        : isCap(args[0]) ? [undefined, args[0]]
+                        : [args[0], undefined];
+        const s = arg === undefined
+            ? books.limitOf(id)
+            : books.setLimit(id, arg === 'default' ? null : arg === 'all' ? 0 : Number(arg));
+        if (!s) return { text: id ? `ERR: no agent book '${id}'` : 'ERR: no agent books', data: null };
+        const keeps = s.cap ? `the last ${s.cap}` : 'every turn';
+        const src = s.override == null ? ' (shelf default)' : '';
+        const shed = s.evicted ? ` — shed ${s.evicted}` : '';
+        return {
+            text: `OK: ${s.agentId} keeps ${keeps}${src} · ${s.count} sheet${s.count === 1 ? '' : 's'} on hand${shed}`,
+            data: s,
+        };
+    }, { description: "One agent book's kept-turns cap — n>0 caps, 'all' keeps everything, 'default' follows the shelf", usage: '[id] [n|all|default]' });
 }

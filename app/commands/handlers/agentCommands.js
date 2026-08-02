@@ -38,7 +38,8 @@ const noBooks = { text: 'ERR: agent books not wired', data: null };
  * the same book. The ONE open path: the agent.open verb and session restore both ride it.
  * @param {Object} ctx
  * @param {string} sessionId full session id (the record's filename stem)
- * @param {{limit?: number}} [opts] cap on materialized events (default cfg.hydrateLimit)
+ * @param {{limit?: number}} [opts] turns to keep (0 = all) — becomes the book's retention
+ *        override; omitted → the book's cap (its override, else cfg.maxSheets)
  * @returns {Promise<{agentId: string, added: number, total: number}>}
  */
 export async function openAgentSession(ctx, sessionId, { limit } = {}) {
@@ -197,7 +198,7 @@ export default function registerAgentCommands(router) {
         } catch (e) {
             return { text: `ERR: ${e?.message || e}`, data: null };
         }
-    }, { description: 'Open a stored session as an agent book (hydrates via the adapter; a live stream converges)', usage: '<sessionId|prefix> [limit]' });
+    }, { description: 'Open a stored session as an agent book (hydrates via the adapter; a live stream converges). limit = turns to keep (0 = all) — sets the book\'s cap', usage: '<sessionId|prefix> [limit]' });
 
     router.register('agent.spawn', (args, ctx) => {
         const books = ctx.agentBooks;

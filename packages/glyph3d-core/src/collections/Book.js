@@ -166,6 +166,40 @@ export default class Book extends BoundedObject3D {
     }
 
     /**
+     * Unbind sheet `i`: its contents detach (returned to the caller's care — the book
+     * never disposes what it carries), its node and page faces free, and the deck closes
+     * up — slots re-derive from the new indices and ease shut in update(dt). While
+     * following the head keeps riding the newest; a held head stays on its sheet,
+     * shifting down when it sat past the removed one.
+     * @param {number} i
+     * @returns {{verso:THREE.Object3D|null, recto:THREE.Object3D|null}|null} the detached sides
+     */
+    removeSheet(i) {
+        const sheet = this.sheets[i];
+        if (!sheet) return null;
+        this._dropFaces(sheet);
+        if (sheet.verso) sheet.versoMount.remove(sheet.verso);
+        if (sheet.recto) sheet.rectoMount.remove(sheet.recto);
+        this.remove(sheet.node);
+        this.sheets.splice(i, 1);
+        const n = this.sheets.length;
+        if (!n) {
+            this.head = 0;
+            this.following = true;
+            this.fitInfo = null;
+        } else {
+            if (this.head > i) this.head -= 1;
+            this.head = Math.min(this.head, n - 1);
+            if (this.following) this.head = n - 1;
+            const primary = this.sheets[this.head].fit.recto || this.sheets[this.head].fit.verso;
+            if (this._fitOpts && primary) {
+                this.fitInfo = { pageW: this._fitOpts.pageW, pageH: this._fitOpts.pageH, ...primary };
+            }
+        }
+        return { verso: sheet.verso, recto: sheet.recto };
+    }
+
+    /**
      * The content box of the OPEN sheet in the BOOK's local frame — each side's layout
      * box carried through its own transform, mount, and sheet node. Released, with a
      * single bare sheet, this is exactly what bounds consumers saw when the leaf sat

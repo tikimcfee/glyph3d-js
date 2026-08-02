@@ -801,6 +801,35 @@ const buildLibrary = (paths, opts = {}, order = paths) => {
   eq(bk.contentLeaves().length, 5, 'deck: contentLeaves lists every side across the sheets');
 }
 
+// 42d. removeSheet — the retention primitive (an agent book sheds its oldest turns past
+//      its cap): the deck closes up (slots re-derive from the new indices), a following
+//      head keeps riding the newest, a held head stays on its sheet, and the detached
+//      contents return to the caller's care (the book never disposes what it carries).
+{
+  const t = buildLibrary(['solo/a.js'], { pageW: 20, pageH: 30 });
+  const bk = t.bookAt('solo/a.js');
+  bk.fit({ pageW: 20, pageH: 30, gutter: 4, surface: false });
+  bk.deck.zPitch = 50;
+  bk.addSheet({ recto: makeLeaf('r1') });
+  bk.addSheet({ recto: makeLeaf('r2') });
+  const oldest = bk.sheets[0].recto;
+  const out = bk.removeSheet(0);
+  ok(out?.recto === oldest && !oldest.parent, 'removeSheet: shed content detaches, returned not disposed');
+  eq(bk.headState(), { head: 1, count: 2, following: true }, 'removeSheet: a following head rides the (new) newest');
+  eq([bk._slotZ(1), bk._slotZ(0)], [0, -50], 'removeSheet: the deck closes up — slots re-derive');
+  bk.addSheet({ recto: makeLeaf('r3') });
+  bk.pageTo(1);
+  const held = bk.sheets[1];
+  bk.removeSheet(0);
+  eq(bk.headState(), { head: 0, count: 2, following: false }, 'removeSheet: a held head shifts down with its sheet');
+  ok(bk.sheets[0] === held, 'removeSheet: the held head still opens the SAME sheet');
+  const solo = new Book(makeLeaf('only'));
+  solo.fit({ pageW: 10, pageH: 10, surface: false });
+  solo.removeSheet(0);
+  eq(solo.headState(), { head: 0, count: 0, following: true }, 'removeSheet: an emptied book resets to follow the next append');
+  ok(solo.fitInfo === null, 'removeSheet: an emptied book drops its fit summary');
+}
+
 // ───────────────────────── container labels ─────────────────────────
 
 const LM = { rowH: 4, charW: 2 };   // mock cell metrics (world units at scale 1)

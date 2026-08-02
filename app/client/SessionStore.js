@@ -233,16 +233,18 @@ export default class SessionStore {
     }
 
     // Agent books: persisted BY REFERENCE — the harness's session record is the durable
-    // state, so we save WHICH sessions are open plus view intent (head, live-follow, pin)
-    // and restore re-derives the content through the adapter. A hydrated lane knows its
-    // full session id; a hook-born lane knows only its 8-hex prefix — saved as `prefix`,
-    // resolved against the archive listing at restore.
+    // state, so we save WHICH sessions are open plus view intent (head, live-follow, pin,
+    // and a per-book retention override when one is set) and restore re-derives the
+    // content through the adapter. A hydrated lane knows its full session id; a hook-born
+    // lane knows only its 8-hex prefix — saved as `prefix`, resolved against the archive
+    // listing at restore.
     const agents = [];
     for (const a of (ctx.agentBooks?.agents?.() || [])) {
       const lane = ctx.agentBooks.lanes.get(a.id);
       const entry = a.sessionId ? { session: a.sessionId } : { prefix: a.id };
       entry.head = a.head;
       entry.following = !!a.following;
+      if (lane?.maxSheets != null) entry.limit = lane.maxSheets;
       if (lane?.pinned && lane.pinnedPos) {
         entry.pinned = [round(lane.pinnedPos.x), round(lane.pinnedPos.y), round(lane.pinnedPos.z)];
       }
@@ -398,9 +400,11 @@ export default class SessionStore {
 
   // agents — reopen the saved session books BY REFERENCE: each entry re-reads the harness's
   // own record through the adapter (the one open path agent.open rides), then re-applies view
-  // intent. Per-entry guarded (a vanished record logs + skips, the rest land — data self-heal);
-  // no session provider (client-only baseline) is simply an empty phase. Saved heads index the
-  // previous view's sheet list — a tail-capped hydration clamps them (pageTo clamps).
+  // intent. A saved retention override rides `limit` straight into the hydration (it becomes
+  // the lane's cap again); books without one follow the settings default. Per-entry guarded
+  // (a vanished record logs + skips, the rest land — data self-heal); no session provider
+  // (client-only baseline) is simply an empty phase. Saved heads index the previous view's
+  // sheet list — a tail-capped hydration clamps them (pageTo clamps).
   async _restoreAgents(snap) {
     const list = Array.isArray(snap.agents) ? snap.agents : [];
     if (!list.length) return;
@@ -417,7 +421,7 @@ export default class SessionStore {
           sid = archive.find((s) => s.id.replace(/-/g, '').startsWith(norm))?.id || null;
         }
         if (!sid) continue;   // nothing on disk answers to this book — it stays closed
-        const { agentId } = await openAgentSession(this.ctx, sid);
+        const { agentId } = await openAgentSession(this.ctx, sid, { limit: a.limit });
         const lane = books.lanes.get(agentId);
         if (!lane) continue;
         if (Array.isArray(a.pinned) && a.pinned.length === 3) books.moveGroup(agentId, ...a.pinned);
