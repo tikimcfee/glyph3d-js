@@ -7,6 +7,7 @@ import RepoPanel from './RepoPanel.jsx';
 import SettingsPanel from './SettingsPanel.jsx';
 import TerminalsPanel from './TerminalsPanel.jsx';
 import AgentsPanel from './AgentsPanel.jsx';
+import CarrelsPanel from './CarrelsPanel.jsx';
 import LayoutPanel from './LayoutPanel.jsx';
 import EditorPanel from './EditorPanel.jsx';
 import LspResultsPanel from './LspResultsPanel.jsx';
@@ -40,6 +41,7 @@ const PANELS = [
   { id: 'files', title: 'Files' },
   { id: 'repo', title: 'Sources', position: { referencePanel: 'files', direction: 'within' } },
   { id: 'agents', title: 'Agents', position: { referencePanel: 'files', direction: 'within' } },
+  { id: 'carrels', title: 'Carrels', position: { referencePanel: 'files', direction: 'within' } },
   { id: 'lspResults', title: 'LSP', position: { referencePanel: 'files', direction: 'within' } },
   { id: 'layout', title: 'Layout', position: { referencePanel: 'files', direction: 'within' } },
   { id: 'settings', title: 'Settings', position: { referencePanel: 'files', direction: 'within' } },
@@ -79,6 +81,7 @@ export default function IdeDock({ client }) {
     settings: () => <SettingsPanel client={clientRef.current} />,
     terminals: () => <TerminalsPanel client={clientRef.current} />,
     agents: () => <AgentsPanel client={clientRef.current} />,
+    carrels: () => <CarrelsPanel client={clientRef.current} />,
     lspResults: () => <LspResultsPanel client={clientRef.current} />,
     layout: () => <LayoutPanel client={clientRef.current} />,
     editor: () => <EditorPanel client={clientRef.current} />,
