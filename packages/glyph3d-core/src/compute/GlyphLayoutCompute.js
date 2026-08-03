@@ -70,10 +70,12 @@ export function syncGpuLayout(field, buffers, items, shared, rendererIds) {
 
     // Persistent per-field kernel: the compute node closes over the output attribute, so it
     // lives exactly as long as the attribute does — reused across flushes, replaced only
-    // when the field grew (new attribute) or the line capacity is exceeded. The field
-    // releases it on engine-off (setGpuLayout) without importing this module.
+    // when the field grew (new attribute), line capacity exceeded, or the kernel version
+    // changed (code updates require rebuild). The field releases it on engine-off (setGpuLayout)
+    // without importing this module.
     let kernel = field._gpuKernel || null;
-    if (kernel && (kernel.positions?.value !== attr || maxLines > kernel.maxLines)) {
+    const KERNEL_VERSION = 2; // increment when kernel code changes invalidate cached kernels
+    if (kernel && (kernel.positions?.value !== attr || maxLines > kernel.maxLines || (kernel._version || 0) !== KERNEL_VERSION)) {
         kernel.dispose();
         kernel = null;
     }
