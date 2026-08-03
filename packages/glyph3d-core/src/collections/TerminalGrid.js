@@ -13,7 +13,6 @@
  *   - Full buffer rewrite per frame (correct for 1920-cell terminals at 2Hz)
  *   - Direct Float32Array writes via _writeToInstanceBuffer(), not addText()
  *   - Group DataTexture for O(1) position changes (one DataTexture write vs. N buffer writes)
- *   - setWorldPosition() mirrors to both group offset AND Object3D.position
  *
  * Differs from CodeGrid:
  *   - No line-buffer history, no ANSI stripping
@@ -248,7 +247,8 @@ export default class TerminalGrid extends FramedGlyphField {
 
         // Apply initial world position if provided.
         if (options.position) {
-            this.setWorldPosition(options.position);
+            const p = options.position;
+            this.position.set(p.x, p.y, p.z);
         }
 
         // Byte→screen source: a headless VT emulator parses the terminal byte stream
@@ -625,16 +625,6 @@ export default class TerminalGrid extends FramedGlyphField {
     // 2D companion xterm follows the PTY-owned size) — is inherited from FramedGlyphField.
 
     /**
-     * Move the terminal in 3D space. O(1): one DataTexture write.
-     * Also mirrors to Object3D.position so scene graph / layout managers work.
-     *
-     * @param {{ x: number, y: number, z: number }} pos
-     */
-    setWorldPosition(pos) {
-        this.position.set(pos.x, pos.y, pos.z);
-    }
-
-    /**
      * Apply a saved view record to this terminal's LOCAL geometry — position + cols/rows — directly.
      * This is the load-path counterpart to the terminal.move / terminal.resize verbs: those verbs
      * AND the session projection both drive this one method, so a reload is `applyView(record)`, not
@@ -642,7 +632,7 @@ export default class TerminalGrid extends FramedGlyphField {
      * `skipPosition` lets a docked tile keep its dock-owned transform.
      *
      * It deliberately touches only what this grid OWNS (grid buffers + emulator, via resize/
-     * setWorldPosition). The relay-backed PTY is an external child this grid has no handle to —
+     * this.position). The relay-backed PTY is an external child this grid has no handle to —
      * applyView reports `resized` so the caller that DOES hold the bridge can match it (SIGWINCH →
      * tmux), exactly as terminal.resize does.
      *
@@ -657,7 +647,7 @@ export default class TerminalGrid extends FramedGlyphField {
         const p = v.position;
         if (!skipPosition && p && Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z)
             && (this.position.x !== p.x || this.position.y !== p.y || this.position.z !== p.z)) {
-            this.setWorldPosition(p);
+            this.position.set(p.x, p.y, p.z);
             moved = true;
         }
         if (Number.isInteger(v.cols) && Number.isInteger(v.rows) && v.cols > 0 && v.rows > 0

@@ -18,7 +18,7 @@ const verb = (key) => ({ kind: 'verb', key });
 const entries = [
     verb('grid.list'), verb('grid.layout'), verb('camera.frame.bounds'),
     { kind: 'file', key: 'app/commands/handlers/paneCommands.js' },
-    { kind: 'file', key: 'packages/glyph3d-core/src/collections/GridVirtualizer.js' },
+    { kind: 'file', key: 'packages/glyph3d-core/src/collections/GridLayoutManager.js' },
     { kind: 'sheet', key: 'app/client/CommandBar.jsx' },
 ];
 

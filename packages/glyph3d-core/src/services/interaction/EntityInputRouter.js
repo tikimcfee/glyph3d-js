@@ -66,15 +66,13 @@ export class EntityInputRouter {
      * @param {THREE.Scene} opts.scene
      * @param {SceneRegistry} opts.registry
      * @param {SpatialWindowManager} [opts.spatialManager]
-     * @param {GridVirtualizer} [opts.virtualizer]
      */
-    constructor({ canvas, camera, scene, registry, spatialManager = null, virtualizer = null }) {
+    constructor({ canvas, camera, scene, registry, spatialManager = null }) {
         this.canvas = canvas;
         this.camera = camera;
         this.scene = scene;
         this.registry = registry;
         this.spatialManager = spatialManager;
-        this.virtualizer = virtualizer;
 
         this._raycaster = new THREE.Raycaster();
 
@@ -216,21 +214,6 @@ export class EntityInputRouter {
 
         if (grid.userData) {
             grid.userData._dragPinned = false;
-        }
-
-        if (this._hasMoved && this.virtualizer) {
-            const groupName = this.spatialManager?.getGroupForGrid(this._dragTarget.registryId);
-            if (groupName) {
-                const group = this.spatialManager.getGroup(groupName);
-                if (group) {
-                    for (const id of group.memberIds) {
-                        const entry = this.registry.get(id);
-                        if (entry?.grid) this.virtualizer.refreshBounds(entry.grid);
-                    }
-                }
-            } else {
-                this.virtualizer.refreshBounds(grid);
-            }
         }
 
         if (!this._hasMoved) {

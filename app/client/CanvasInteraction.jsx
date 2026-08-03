@@ -454,13 +454,7 @@ export function ObjectDragger() {
       const delta = right.multiplyScalar(dx * pixelScale).add(up.multiplyScalar(-dy * pixelScale));
 
       const nx = p.x + delta.x, ny = p.y + delta.y, nz = p.z + delta.z;
-      // Terminals must go through setWorldPosition (mirrors the group DataTexture);
-      // code grids move via the Object3D transform.
-      if (typeof drag.grid.setWorldPosition === 'function') {
-        drag.grid.setWorldPosition({ x: nx, y: ny, z: nz });
-      } else {
-        drag.grid.position.set(nx, ny, nz);
-      }
+      drag.grid.position.set(nx, ny, nz);
     };
 
     const onUp = (e) => {

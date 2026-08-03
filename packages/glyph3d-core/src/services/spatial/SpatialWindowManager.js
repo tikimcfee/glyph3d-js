@@ -331,7 +331,7 @@ export class SpatialWindowManager {
 
     /**
      * Hide all members of a group.
-     * Sets userData._userHidden so GridVirtualizer removes them from scene.
+     * Sets userData._userHidden, the flag a culling pass reads.
      *
      * @param {string} name
      */

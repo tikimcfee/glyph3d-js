@@ -479,8 +479,7 @@ export default function registerTerminalCommands(router) {
             return { text: 'ERR: x, y, z must be numbers', data: null };
         }
 
-        // setWorldPosition mirrors to both group DataTexture and Object3D.position.
-        grid.setWorldPosition({ x, y, z });
+        grid.position.set(x, y, z);
 
         ctx.workspace?.setSurfaceView?.(id, 'terminal', { position: { x, y, z } });
 

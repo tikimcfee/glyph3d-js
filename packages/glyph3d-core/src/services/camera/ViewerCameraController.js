@@ -1061,14 +1061,17 @@ export class ViewerCameraController {
      * distance ahead, and leaves it axis-aligned (+Z toward the viewer) so focusOnObject's
      * head-on framing still squares to it later. Used by terminal.create so a new terminal
      * lands where you're looking instead of at the world origin. The camera does NOT move.
-     * @param {{getBounds:Function,setWorldPosition:Function,position?:Object,getWorldPosition?:Function}} obj
+     * @param {{getBounds:Function,position?:Object,parent?:Object,getWorldPosition?:Function}} obj
      * @param {{fill?:number}} [opts] - fraction of the viewport the panel should fill (default 0.7)
      * @returns {boolean} true if it placed the object
      */
     placeInView(obj, { fill = 0.7 } = {}) {
         const THREE = this.THREE;
         const camera = this.ctx.camera;
-        if (!camera || typeof obj?.getBounds !== 'function') return false;
+        // PLACEABLE = measurable + movable, which is every framed surface: a code grid places
+        // exactly like a terminal. (The gate used to name a terminals-only method, so a grid was
+        // refused here for a reason that had nothing to do with placing it.)
+        if (!camera || typeof obj?.getBounds !== 'function' || !obj?.position) return false;
         const bounds = obj.getBounds();
         if (!bounds || bounds.isEmpty?.()) return false;
 
@@ -1083,11 +1086,16 @@ export class ViewerCameraController {
         const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
         const target = camera.position.clone().addScaledVector(forward, distance);
 
-        // Place the object's ORIGIN so its bounds center sits at target. The center
-        // is at a fixed local offset from the origin; translation preserves the offset.
+        // We move the object's ORIGIN; its bounds center sits at a fixed local offset from that
+        // origin. Translation preserves the offset, so solve for the origin that lands the center
+        // exactly on `target`.
         const origin = obj.getWorldPosition?.(new THREE.Vector3()) ?? obj.position?.clone?.() ?? new THREE.Vector3();
         const offset = center.clone().sub(origin);
         const pos = target.sub(offset);
+        // `pos` is world; `obj.position` is PARENT-local. A scene-parented window makes them the
+        // same, but a tree-resident grid does not — convert, or a world value lands in a local
+        // slot and the grid appears at its parent's offset (window.drop's loose path, same law).
+        if (obj.parent && !obj.parent.isScene) obj.parent.worldToLocal(pos);
         obj.position.set(pos.x, pos.y, pos.z);
         return true;
     }

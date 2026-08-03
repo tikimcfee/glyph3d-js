@@ -15,7 +15,7 @@ import * as THREE from 'three';
  *     (getLocalBounds()), so getBounds() is cheap: copy a box + transform 8 corners.
  *   - World bounds depend on the full matrixWorld chain (every ancestor transform).
  *     A world-bounds cache would have to observe that whole chain to stay correct;
- *     the consumers (e.g. GridVirtualizer culling on demand) already call getBounds
+ *     the consumers (e.g. OcclusionCuller sampling on demand) already call getBounds
  *     exactly when they need a current answer, so recomputing is both correct and
  *     simplest. See CodeGrid.layoutBounds()'s note on why setFromObject is unusable
  *     for instanced content.

@@ -368,11 +368,6 @@ class FrameGrid extends FramedGlyphField {
     //    CodeGrid / TerminalGrid so a capture drags, docks, and scales like any other window.
     //    Duck-typed across the collections; the shared base is the deferred unification work.
 
-    /** Move the capture in 3D. The ObjectDragger (Ctrl-drag) calls this on the picked grid. */
-    setWorldPosition(pos) {
-        this.position.set(pos.x, pos.y, pos.z);
-    }
-
     // setScale(factor) + setZoom(factor) + get zoom — the full scale API — are inherited from
     // FramedGlyphField. FrameGrid keeps no home-scale mirror field, so it uses them unchanged.
 
