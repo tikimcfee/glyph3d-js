@@ -19,7 +19,6 @@ export { default as HierarchicalLayoutManager } from './collections/Hierarchical
 export { default as SpiralLayoutManager } from './collections/SpiralLayoutManager.js';
 export { default as TreemapLayoutManager } from './collections/TreemapLayoutManager.js';
 export { default as StackLayoutManager } from './collections/StackLayoutManager.js';
-export { default as GridVirtualizer } from './collections/GridVirtualizer.js';
 export { default as TerminalGrid } from './collections/TerminalGrid.js';
 export { default as TerminalEmulator } from './collections/TerminalEmulator.js';
 

@@ -277,10 +277,15 @@ export default function registerGridCommands(router) {
         const [x, y, z] = args.slice(1, 4).map(Number);
         if ([x, y, z].some(isNaN)) return { text: 'ERR: x, y, z must be numbers', data: null };
 
-        // Terminals (if ever resolved here) mirror to their group texture; code
-        // grids move via the Object3D transform.
-        if (typeof resolved.grid.setWorldPosition === 'function') resolved.grid.setWorldPosition({ x, y, z });
-        else resolved.grid.position.set(x, y, z);
+        // All grids (terminals and code grids) share the same Object3D position API.
+        // setWorldPosition was a dead alias that blocked CodeGrid from being placed.
+        resolved.grid.position.set(x, y, z);
+
+        // Persist the move — the mover's law: any verb that repositions a grid
+        // must write the model fact and schedule save, or the next registry change
+        // re-projects the stale fact onto the grid (teleport bug).
+        ctx.workspace?.setSurfaceView?.(resolved.registryId, ctx.registry?.get?.(resolved.registryId)?.type, { position: { x, y, z } });
+        ctx.session?.scheduleSave?.();
 
         return {
             text: `OK: moved grid #${resolved.idx} to (${x}, ${y}, ${z})`,

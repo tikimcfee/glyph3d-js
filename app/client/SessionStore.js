@@ -76,17 +76,6 @@ const round = (n) => Math.round(n * 100) / 100;
 const isFinitePos = (p) => p && Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z);
 
 /**
- * A surface's POSITION is derived — never stored, never projected — iff it's a grid laid out by the
- * ContentTree: its xyz comes from `field.layout` + the tree path, recomputed on load. Terminals,
- * captures, and manually-moved/loose grids are NOT tree leaves, so their position is stored intent.
- * The one subtle discriminator the projection and capture paths share (STATE_ARCHITECTURE.md §9).
- * @param {object} ctx @param {string} id registry id
- */
-export function positionIsDerived(ctx, id) {
-  return ctx?.contentTree?.has?.(id) === true;
-}
-
-/**
  * Per-kind PROJECTORS: push a surface's view-intent onto its live object by calling the object's own
  * `applyView(view)` — DIRECT state, not a replay of the verbs that produced it. applyView is guarded
  * (a present, already-correct surface is a no-op), so this re-projects a genuinely-external child
@@ -100,8 +89,7 @@ const SURFACE_PROJECTORS = {
     // the captured record it returns to). A seated terminal's .position is carrel-LOCAL, so a
     // world-space fact applied here would yank it out of the ring. applyView sets the LOCAL
     // geometry (position + grid + emulator) directly — no verb replay on the load path.
-    const held = store.ctx.cameraDock?.has?.(s.id)
-      || (store.ctx.carrels instanceof Map && [...store.ctx.carrels.values()].some((c) => c.has?.(s.id)));
+    const held = !!store.ctx.holderOf?.(s.id);
     const changed = grid.applyView?.(s.view || {}, { skipPosition: held }) || {};
     // Readability zoom for a LOOSE terminal (held tiles get theirs from the holder's own
     // reconcile — the dock re-applies zoom + box-fit itself). Guarded like applyView:
@@ -471,6 +459,7 @@ export default class SessionStore {
       if (this.ctx.carrels instanceof Map) {
         for (const c of this.ctx.carrels.values()) { if (c._expected) c.expect(0); }
       }
+      this.ctx.world?.relayout();   // the row is true at close (footprint-diffed — free if it already is)
     } catch (e) { console.warn('[session] carrel close-out failed:', e?.message || e); }
     const wall = Math.round(performance.now() - t0);
     this.ctx.status?.clear();

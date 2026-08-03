@@ -30,6 +30,7 @@ export default class WorldLayout {
         this.root.name = 'world';
         this.scene.add(this.root);
         this._groups = new Map();   // id -> grouping root Object3D, in arrangement order
+        this._sig = null;           // last-laid footprint signature — unchanged world skips the pass
     }
 
     /**
@@ -44,7 +45,7 @@ export default class WorldLayout {
         if (typeof bounds === 'function') node.layoutBounds = bounds;
         this._groups.set(id, node);
         this.root.add(node);   // reparent scene → world; world-preserving isn't needed (relayout re-places it)
-        this.relayout();
+        this.relayout(true);
         return this;
     }
 
@@ -54,16 +55,29 @@ export default class WorldLayout {
         if (!node) return false;
         this._groups.delete(id);
         this.root.remove(node);
-        this.relayout();
+        this.relayout(true);
         return true;
     }
 
     /**
      * Re-space the groupings along the floor and re-ground the world. Each grouping wires its own onRelayout
-     * to this, so the arrangement re-flows as a tree loads or a trail streams. Idempotent.
+     * to this, so the arrangement re-flows as a tree loads or a trail streams. Idempotent — and CHANGE-DRIVEN:
+     * every grouping's footprint is measured first, and a world where nothing moved beyond epsilon skips the
+     * placement writes and the full-subtree matrix update they drag (the seat-diff discipline, world-sized —
+     * agent settles and stream ticks fire this constantly, and most of them move nothing).
+     * @param {boolean} [force] membership/order changed — lay regardless of the signature
      */
-    relayout() {
+    relayout(force = false) {
         if (this._groups.size === 0) return;
+        const sig = [];
+        for (const node of this._groups.values()) {
+            const b = typeof node.layoutBounds === 'function' ? node.layoutBounds() : null;
+            if (b && !b.isEmpty()) sig.push(b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z);
+            else sig.push(0, 0, 0, 0, 0, 0);
+        }
+        const prev = this._sig;
+        if (!force && prev && prev.length === sig.length && prev.every((v, i) => Math.abs(v - sig[i]) < 0.5)) return;
+        this._sig = sig;
         this.root.layout();     // bottom-aligned HStack: groupings side by side on a shared baseline
         this._restOnFloor();
     }
@@ -90,7 +104,7 @@ export default class WorldLayout {
         const remap = new Map();
         for (const id of ordered) { remap.set(id, this._groups.get(id)); this.root.add(this._groups.get(id)); }
         this._groups = remap;
-        this.relayout();
+        this.relayout(true);
         return true;
     }
 

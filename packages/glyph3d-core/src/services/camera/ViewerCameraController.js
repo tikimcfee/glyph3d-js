@@ -1068,7 +1068,7 @@ export class ViewerCameraController {
     placeInView(obj, { fill = 0.7 } = {}) {
         const THREE = this.THREE;
         const camera = this.ctx.camera;
-        if (!camera || typeof obj?.getBounds !== 'function' || typeof obj?.setWorldPosition !== 'function') return false;
+        if (!camera || typeof obj?.getBounds !== 'function') return false;
         const bounds = obj.getBounds();
         if (!bounds || bounds.isEmpty?.()) return false;
 
@@ -1083,13 +1083,12 @@ export class ViewerCameraController {
         const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
         const target = camera.position.clone().addScaledVector(forward, distance);
 
-        // setWorldPosition moves the object's ORIGIN; its bounds center sits at a fixed local
-        // offset from that origin. Translation preserves the offset, so solve for the origin
-        // that lands the center exactly on `target`.
+        // Place the object's ORIGIN so its bounds center sits at target. The center
+        // is at a fixed local offset from the origin; translation preserves the offset.
         const origin = obj.getWorldPosition?.(new THREE.Vector3()) ?? obj.position?.clone?.() ?? new THREE.Vector3();
         const offset = center.clone().sub(origin);
         const pos = target.sub(offset);
-        obj.setWorldPosition({ x: pos.x, y: pos.y, z: pos.z });
+        obj.position.set(pos.x, pos.y, pos.z);
         return true;
     }
 

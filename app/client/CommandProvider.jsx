@@ -159,6 +159,23 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     carrels: new Map(),
     activeCarrel: null,
 
+    // Holder protocol — unified holder membership. All holders (dock + carrels) join
+    // this set on create/restore; holderOf(id) finds which one holds a surface id.
+    // AgentBooks are excluded (they use inline parent tests at 3 sites).
+    holders: new Set(),
+    get holderOf() {
+      // Return the holder (dock or carrel) currently holding id, or null.
+      // Guarded: checks can fire before a holder exists.
+      return (id) => {
+        const dock = this.cameraDock;
+        if (dock?.has?.(id)) return dock;
+        for (const holder of this.holders) {
+          if (holder !== dock && holder?.has?.(id)) return holder;
+        }
+        return null;
+      };
+    },
+
     // Agent books — every agent's run bound as a book of page-pair spreads (description
     // verso, content recto), the one agent-viewing system. The agent.* verbs sink here;
     // book.* pages it. Created in the effect (needs the live ctx); ticked by <AgentRunner/>.
@@ -478,12 +495,15 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     world.register('agents', state.ctx.agentBooks.root, () => state.ctx.agentBooks.localBounds());
     // Every extent change funnels through the books' relayout — including the ASYNC
     // card loads that settle after a book was seated (a hydration burst coalesces
-    // here, never through onChange). Re-space the world AND re-contain seated books,
-    // or a late-settling book keeps the scale of its pre-load measure and overlaps
-    // its shelf neighbors (the giant-spread bug, seen in pixels).
+    // here, never through onChange). Re-contain seated books FIRST (a late-settling
+    // book otherwise keeps its pre-load scale and overlaps its shelf neighbors —
+    // the giant-spread bug, seen in pixels), THEN re-space the world: the managed
+    // shelf is a world grouping now, and the world must measure its POST-refit
+    // footprint, not the one it just outgrew. (relayout is footprint-diffed — the
+    // frequent nothing-moved case costs one measure and no writes.)
     state.ctx.agentBooks.onRelayout(() => {
-      world.relayout();
       for (const carrel of state.ctx.carrels.values()) carrel.refit();
+      world.relayout();
     });
     // Fold the persisted Agent Books settings into the freshly-built shelf (its apply()s
     // otherwise fire only on a user change), so tuned sizes hold from boot.
@@ -503,6 +523,7 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     const cameraDock = new CameraDock({ attentionManager: state.ctx.attentionManager });
     scene.add(cameraDock);
     state.ctx.cameraDock = cameraDock;
+    state.ctx.holders.add(cameraDock);  // Holder protocol: dock joins on create
     // Fold the persisted Dock settings into the freshly-built dock — its apply()s only
     // fire on a user change, so without this a stored value would wait until next touch.
     applyGroupSettings(state.ctx, 'Dock');

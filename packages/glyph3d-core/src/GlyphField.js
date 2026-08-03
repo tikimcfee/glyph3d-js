@@ -144,7 +144,11 @@ export function getGlyphWidthCompress() { return WIDTH_COMPRESS.value; }
  */
 function _buildVertexNode(uniforms) {
     // Per-instance buffer attributes
-    const iPos     = attribute('instancePosition', 'vec3');
+    // instancePosition uses stride-4 (StorageInstancedBufferAttribute with itemSize=4)
+    // when gpuLayout is enabled, so we read it as vec4 and use .xyz. When gpuLayout is off,
+    // it's a regular InstancedBufferAttribute with itemSize=3, but vec4 reads still work
+    // (the .w component is undefined/ignored).
+    const iPos     = attribute('instancePosition', 'vec4');
     const iSize    = attribute('instanceSize',     'vec2');
     const iGlyphId = attribute('instanceGlyphId',  'float');
     const iColor   = attribute('instanceColor',    'vec3');
@@ -228,7 +232,7 @@ function _buildVertexNode(uniforms) {
         // a group scales as one rigid label/badge about its own origin — bake glyph
         // positions group-LOCAL and put the anchor in the group offset to grow text in
         // place with one O(1) write (identity groups: scale 1, offset 0 — unchanged).
-        const worldPos = scaled.add(alignOffset).add(iPos).mul(gScale.xyz).add(gPos.xyz);
+        const worldPos = scaled.add(alignOffset).add(iPos.xyz).mul(gScale.xyz).add(gPos.xyz);
 
         // Standard MVP projection
         const clipPos = cameraProjectionMatrix.mul(modelViewMatrix.mul(vec4(worldPos, float(1))));
@@ -1172,15 +1176,15 @@ export default class GlyphField {
         const geom = this.instanceMesh.geometry;
         const arr  = geom.attributes.instancePosition.array;
         const base = entry.bufferStartIndex;
-        const dx = newPosition.x - arr[base * 3];
-        const dy = newPosition.y - arr[base * 3 + 1];
-        const dz = newPosition.z - arr[base * 3 + 2];
+        const dx = newPosition.x - arr[base * 4];
+        const dy = newPosition.y - arr[base * 4 + 1];
+        const dz = newPosition.z - arr[base * 4 + 2];
         for (let i = 0; i < entry.glyphCount; i++) {
-            const b = (base + i) * 3;
-            arr[b] += dx; arr[b + 1] += dy; arr[b + 2] += dz;
+            const b = (base + i) * 4;
+            arr[b] += dx; arr[b + 1] += dy; arr[b + 2] += dz;  // .w padding lane left alone
         }
         const attr = geom.attributes.instancePosition;
-        attr.addUpdateRange(base * 3, entry.glyphCount * 3);
+        attr.addUpdateRange(base * 4, entry.glyphCount * 4);
         attr.needsUpdate = true;
         this._updateGeometryBounds();   // glyphs moved in place (no rebuild) — resync the cull bounds
     }
@@ -1922,9 +1926,7 @@ export default class GlyphField {
         if (this.gpuLayout) {
             // ENGINE-OWNED positions: buffers.positions is ignored, never uploaded — the
             // layout kernel writes this attribute GPU-side (syncGpuLayout, right after this
-            // commit). Explicit itemSize 4 = WGSL's own vec3-array stride made visible, so
-            // three never repacks (a repack would silently swap .array/.itemSize). The
-            // shared material's vec3 read is fed legally from the float32x4 format.
+            // commit). Use StorageInstancedBufferAttribute with itemSize=4 (stride-4).
             let attr = this._gpuPosAttr;
             if (!attr || attr.count < count) {
                 attr = new StorageInstancedBufferAttribute(new Float32Array(count * 4), 4);
@@ -1932,11 +1934,17 @@ export default class GlyphField {
             }
             geom.setAttribute('instancePosition', attr);
         } else {
-            // CPU engine: adopt the builder's array under a PLAIN attribute — see
-            // _createInstanceMesh for why a vec3 storage attribute must never carry it
-            // (the first-render repack breaks every stride-3 CPU reader and writer).
+            // CPU path (terminals, annotations): adopt the builder's array under a PLAIN
+            // attribute with itemSize=4 to match the shader's vec4 read. Pad with zeros.
             this._gpuPosAttr = null;
-            geom.setAttribute('instancePosition', new THREE.InstancedBufferAttribute(positions, 3));
+            const cpuPos = new Float32Array(count * 4);
+            for (let i = 0; i < count; i++) {
+                cpuPos[i * 4 + 0] = positions[i * 3 + 0];
+                cpuPos[i * 4 + 1] = positions[i * 3 + 1];
+                cpuPos[i * 4 + 2] = positions[i * 3 + 2];
+                cpuPos[i * 4 + 3] = 0; // padding
+            }
+            geom.setAttribute('instancePosition', new THREE.InstancedBufferAttribute(cpuPos, 4));
         }
         geom.setAttribute('instanceSize',     new THREE.InstancedBufferAttribute(sizes, 2));
         geom.setAttribute('instanceGlyphId',  new THREE.InstancedBufferAttribute(glyphIds || new Float32Array(count), 1));

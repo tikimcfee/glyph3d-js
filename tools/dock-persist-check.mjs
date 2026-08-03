@@ -8,7 +8,7 @@
 //
 // Graduated from a one-off probe per the debug-into-tools practice.
 
-import SessionStore, { positionIsDerived } from '../app/client/SessionStore.js';
+import SessionStore from '../app/client/SessionStore.js';
 import WorkspaceModel from '../app/client/WorkspaceModel.js';
 
 let failures = 0;
@@ -153,18 +153,7 @@ function makeRouter() {
   eq(ctx.workspace.getSurface('term-9')?.view.cols, 121, 'restore: model retains the terminal intent (not consumed)');
 }
 
-// ---- 5. positionIsDerived discriminator: a tree-laid grid's position is derived (never
-// stored/projected); terminals + loose grids + captures are stored intent. The one subtle helper
-// Slice 3's code-grid projector hangs on, tested in isolation here. ----
-{
-  const treeCtx = { contentTree: { has: (id) => id === 'src/a.js' } };
-  ok(positionIsDerived(treeCtx, 'src/a.js') === true, 'positionIsDerived: tree leaf → derived (omit)');
-  ok(positionIsDerived(treeCtx, 'term-1') === false, 'positionIsDerived: terminal → stored intent');
-  ok(positionIsDerived(treeCtx, 'screen-1') === false, 'positionIsDerived: capture → stored intent');
-  ok(positionIsDerived({}, 'x') === false, 'positionIsDerived: no tree → stored');
-}
-
-// ---- 6. field layout scheme round-trips as DIRECT STATE: capture reads the tree's layout state
+// ---- 5. field layout scheme round-trips as DIRECT STATE: capture reads the tree's layout state
 // synchronously (NOT an async bus round-trip — that was the bug that silently saved no scheme);
 // restore SETS it straight back onto the tree via applyLayoutState. No verb replay. ----
 {

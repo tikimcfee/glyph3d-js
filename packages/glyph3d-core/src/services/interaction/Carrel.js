@@ -20,12 +20,15 @@
  * the ground and easy on the eyes) marks the desk's place; it is decoration
  * (userData.isMarker), never picked, never a collider.
  *
- * TWO ARRANGEMENTS, one grammar (`mode`): 'ring' wraps the members along the
- * arc; 'grid' is the ring's 0-curvature limit — a flat wall standing where the
- * ring's back was (z = −R), facing the doorway, wrapped as a SEMI-GRID
- * (squareWrap balances rows against columns) so a shelf of books reads at a
- * glance. Rows climb from the tabletop in both; the table and doorway keep
- * their meaning.
+ * TWO ARRANGEMENTS, two grammars (`mode`): 'ring' wraps the members along the
+ * arc as UNIFORM contain-fit seats — the dock's grammar, a carousel of tiles.
+ * 'grid' is the ring's 0-curvature limit — a flat wall standing where the
+ * ring's back was (z = −R), facing the doorway — and it speaks the TREE's
+ * grammar instead: members keep their NATURAL scale and the wall packs their
+ * REAL bounds (flowBoxes over actual extents, per-row heights, squareWrap
+ * balancing rows against columns). A shelf shows things the size they are;
+ * text reads at one physical size across the whole world. Rows climb from the
+ * tabletop in both; the table and doorway keep their meaning.
  *
  * OWNERSHIP LAW (the residence/vehicle distinction): a carrel is a RESIDENCE —
  * where content lives by choice, as the tree is where it lives by structure —
@@ -85,6 +88,7 @@ function extentFromBox(lb) {
     return {
         w: Math.max(lb.max.x - lb.min.x, 1e-3),
         h: Math.max(lb.max.y - lb.min.y, 1e-3),
+        d: Math.max(lb.max.z - lb.min.z, 1e-3),
         cx: (lb.min.x + lb.max.x) * 0.5,
         cy: (lb.min.y + lb.max.y) * 0.5,
         cz: (lb.min.z + lb.max.z) * 0.5,
@@ -146,7 +150,11 @@ export class Carrel extends THREE.Object3D {
         this._orderSeq = 0;      // monotonic sort-key source (restore threads saved values past it)
         this._rows = 1;          // last layout's row count — bounds read the stack height off it
         this._layoutW = 0;       // last layout's shelf width — the grid shadow hugs it
+        this._layoutD = 0;       // last layout's deepest member — the grid shadow strip depth
+        this._stackH = boxH;     // last layout's stack height — bounds read it
         this._expected = 0;      // announced incoming complement (expect()) — wrap pre-shapes for it
+        this._expectShape = null; // frozen synthetic box + wrap while a complement fills (stable slots)
+        this.worldManaged = false; // placed by a WorldLayout grouping, not a hand (the app flips it)
         this._dissolving = false;
         /** Set once a dissolve has fully drained; the ticking runner sweeps dead carrels. */
         this._dead = false;
@@ -215,6 +223,7 @@ export class Carrel extends THREE.Object3D {
             _extentFallback: extentFromBox(grid.getLocalBounds?.()) || {
                 w: hasBounds ? Math.max((b.max.x - b.min.x) / resolvedScale, 1e-3) : 10,
                 h: hasBounds ? Math.max((b.max.y - b.min.y) / resolvedScale, 1e-3) : 10,
+                d: hasBounds ? Math.max((b.max.z - b.min.z) / resolvedScale, 1e-3) : 10,
                 cx: 0, cy: 0, cz: 0,
             },
             unsubscribeResize: null,
@@ -409,6 +418,7 @@ export class Carrel extends THREE.Object3D {
      */
     expect(n) {
         this._expected = Math.max(0, Math.floor(n) || 0);
+        this._expectShape = null;   // re-derive the fill shape for the new complement
         this._relayout();
     }
 
@@ -468,15 +478,22 @@ export class Carrel extends THREE.Object3D {
     }
 
     /**
-     * Seat the members along the shelf. Uniform slot boxes wrap (flowBoxes) and
-     * rows stack UPWARD from the tabletop — row 0 rests ON the table, overflow
-     * climbs. In 'ring' mode the shelf is the arc (x → azimuth, wrapped at the
-     * arc length, centered on local −z so the unfilled remainder faces +z: the
-     * doorway); in 'grid' mode it is the arc's 0-curvature limit — a flat wall
-     * standing at z=−R facing the doorway, wrapped as a semi-grid (squareWrap
-     * balances rows against columns). Content is contain-fit into its box and
-     * BOTTOM-anchored (things rest, they don't float). Borrowed members (parent
-     * elsewhere) are skipped.
+     * Seat the members along the shelf. Boxes wrap (flowBoxes) and rows stack
+     * UPWARD from the tabletop — row 0 rests ON the table, overflow climbs
+     * (bottomY = −slot.y: flowBoxes' descending rows read as cumulative shelf
+     * lines, per-row heights included). Two grammars:
+     *   ring — the arc (x → azimuth, wrapped at the arc length, centered on
+     *     local −z so the unfilled remainder faces +z: the doorway); UNIFORM
+     *     slot boxes, content contain-fit into its seat — the dock's grammar.
+     *   grid — the arc's 0-curvature limit: a flat wall at z=−R facing the
+     *     doorway; members keep their NATURAL scale and the wall packs their
+     *     REAL rendered bounds, wrapped as a semi-grid (squareWrap) — the
+     *     tree's grammar.
+     * Content is BOTTOM-anchored (things rest, they don't float). Borrowed
+     * members (parent elsewhere) are skipped. While a complement is announced
+     * (expect()), wrap AND centering compute for it — frozen at first derive
+     * (_expectShape) so a restore fill takes its final shape from the first
+     * arrival and every member lands in its lasting slot.
      */
     _relayout() {
         const members = [...this.entries.values()].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
@@ -488,33 +505,60 @@ export class Carrel extends THREE.Object3D {
         const gap = this._gap;
         const R = Math.max(this.radius, 1e-3);
         const grid = this.mode === 'grid';
-        if (this._expected && live.length >= this._expected) this._expected = 0;   // complement arrived
+        if (this._expected && live.length >= this._expected) {   // complement arrived
+            this._expected = 0;
+            this._expectShape = null;
+        }
 
         if (live.length) {
-            const boxes = live.map(() => ({ w: boxW, h: boxH }));
-            // While a complement is announced (expect()), wrap AND center for it —
-            // a restore fill takes its final shape from the first arrival: every
-            // member lands in its lasting slot, nothing drifts as the wall widens.
+            // The measured boxes: real rendered extents on the grid shelf, uniform
+            // seats on the ring. eff is decided here once per member — natural scale
+            // (the user zoom passes through) vs contain-fit into the seat box.
+            const effs = live.map((e) => (grid ? this._userOf(e) : this._containScale(e, boxW, boxH)));
+            const boxes = grid
+                ? live.map((e, i) => {
+                    const ext = this._extentOf(e);
+                    return { w: Math.max(ext.w * effs[i], 1e-3), h: Math.max(ext.h * effs[i], 1e-3) };
+                })
+                : live.map(() => ({ w: boxW, h: boxH }));
+
             const wrapN = Math.max(live.length, this._expected);
-            const wrapBoxes = wrapN > live.length
-                ? Array.from({ length: wrapN }, () => ({ w: boxW, h: boxH }))
-                : boxes;
-            const wrapWidth = grid
-                ? squareWrap(wrapBoxes, gap)
-                : Math.max(this.maxArcDeg * DEG2RAD * R, boxW + 1e-3);
-            const { slots, width: liveW } = flowBoxes(boxes, { margin: gap, wrapWidth });
-            // Uniform boxes fill deterministically, so the live slots are an exact
-            // prefix of the full-complement layout — only the WIDTH needs the re-run.
-            const W = wrapN > live.length
-                ? flowBoxes(wrapBoxes, { margin: gap, wrapWidth }).width
-                : liveW;
+            let wrapWidth, W;
+            if (wrapN > live.length) {
+                // Fill in progress: synthesize the absentees at the FROZEN average box
+                // and wrap for the whole complement — stable slots while the pour runs.
+                this._expectShape ??= (() => {
+                    const avgW = boxes.reduce((s, b) => s + b.w, 0) / boxes.length;
+                    const avgH = boxes.reduce((s, b) => s + b.h, 0) / boxes.length;
+                    const synth = boxes.concat(Array.from({ length: wrapN - boxes.length }, () => ({ w: avgW, h: avgH })));
+                    return {
+                        avgW, avgH,
+                        wrapWidth: grid ? squareWrap(synth, gap) : Math.max(this.maxArcDeg * DEG2RAD * R, boxW + 1e-3),
+                    };
+                })();
+                const shape = this._expectShape;
+                wrapWidth = shape.wrapWidth;
+                const synth = boxes.concat(Array.from({ length: wrapN - boxes.length }, () => ({ w: shape.avgW, h: shape.avgH })));
+                W = flowBoxes(synth, { margin: gap, wrapWidth }).width;
+            } else {
+                wrapWidth = grid
+                    ? squareWrap(boxes, gap)
+                    : Math.max(this.maxArcDeg * DEG2RAD * R, boxW + 1e-3);
+                W = 0;   // filled below from the live run
+            }
+
+            const { slots, width: liveW, height: liveH } = flowBoxes(boxes, { margin: gap, wrapWidth });
+            if (!W) W = liveW;
             this._layoutW = W;
-            let rows = 1;
+            let rows = 1, deepest = 0;
             live.forEach((e, i) => {
                 const s = slots[i];
                 rows = Math.max(rows, s.row + 1);
-                const cx = (s.x + boxW / 2) - W / 2;            // slot center, shelf centered on the back
-                const bottomY = s.row * (boxH + gap);           // row 0 rests on the table
+                const eff = effs[i];
+                const ext = this._extentOf(e);
+                deepest = Math.max(deepest, ext.d * eff);
+                const cx = (s.x + boxes[i].w / 2) - W / 2;      // slot center, shelf centered on the back
+                const bottomY = -s.y;                           // rows climb; each rests on its shelf line
                 let sx, sz;
                 if (grid) {
                     sx = cx; sz = -R;                           // the wall stands where the ring's back was
@@ -527,15 +571,19 @@ export class Carrel extends THREE.Object3D {
                     if (this.facing === 'in') _dir.set(-Math.sin(th), 0, Math.cos(th));
                     else _dir.set(Math.sin(th), 0, -Math.cos(th));
                 }
-                const eff = this._containScale(e, boxW, boxH);
-                const ext = this._extentOf(e);
                 const cy = bottomY + (ext.h * eff) / 2;         // bottom-anchored: content RESTS
                 this._animateMember(e, sx, cy, sz, eff, _dir);
             });
             this._rows = rows;
+            this._layoutD = deepest;
+            // Real-size rows: the stack height reads straight off the flow (uniform
+            // rows reduce to the old rows·(boxH+gap)−gap).
+            this._stackH = Math.max(liveH, 1e-3);
         } else {
             this._rows = 1;
             this._layoutW = 0;
+            this._layoutD = 0;
+            this._stackH = boxH;
         }
 
         this._refreshChrome();
@@ -643,15 +691,16 @@ export class Carrel extends THREE.Object3D {
 
     /** Seat the shadow under the current footprint. Ring: the members stand on the
      *  circle, so the shadow is the tabletop square (±R·tableFrac). Grid: a strip
-     *  hugging the wall at z=−R — the live shelf width plus the tableFrac overhang.
-     *  Snaps with the layout (knob gestures read as direct manipulation). */
+     *  hugging the wall at z=−R — the live shelf width and the deepest member,
+     *  plus the tableFrac overhang. Snaps with the layout (knob gestures read as
+     *  direct manipulation). */
     _refreshChrome() {
         const R = Math.max(this.radius, 1e-3);
         const pad = R * Math.max(this.tableFrac - 1, 0);
         if (this.mode === 'grid') {
             const boxW = this.boxH * this.boxAspect;
-            const halfW = (this._layoutW ? this._layoutW / 2 : boxW / 2) + boxW / 2 + pad;
-            const halfD = boxW / 2 + pad;
+            const halfW = (this._layoutW ? this._layoutW / 2 : boxW / 2) + pad;
+            const halfD = Math.max(this._layoutD, boxW) / 2 + pad;
             this._shadow.scale.set(halfW * 2, 1, halfD * 2);
             this._shadow.position.set(0, 0, -R);
         } else {
@@ -659,24 +708,34 @@ export class Carrel extends THREE.Object3D {
             this._shadow.scale.set(r * 2, 1, r * 2);
             this._shadow.position.set(0, 0, 0);
         }
-        this._stackH = this._rows * (this.boxH + this._gap) - this._gap;
     }
 
     // ===================== bounds & state =====================
 
     /**
-     * World AABB of the desk's airspace (base-shadow footprint × stack height, plus
-     * a breath of headroom) — what carrel.focus frames and a selection box would draw.
+     * The desk's airspace in its OWN frame (base-shadow footprint × stack height,
+     * plus a breath of headroom) — what a WorldLayout grouping measures (the
+     * bounds-fn it registers) and the local half of getBounds.
+     * @param {Object} [target] THREE.Box3
+     * @returns {Object} THREE.Box3
+     */
+    localBounds(target = new THREE.Box3()) {
+        const hx = this._shadow.scale.x / 2, hz = this._shadow.scale.z / 2;
+        const cz = this._shadow.position.z;
+        target.min.set(-hx, 0, cz - hz);
+        target.max.set(hx, (this._stackH ?? this.boxH) + this.boxH * 0.25, cz + hz);
+        return target;
+    }
+
+    /**
+     * World AABB of the desk's airspace — what carrel.focus frames and a selection
+     * box would draw.
      * @param {Object} [target] THREE.Box3
      * @returns {Object} THREE.Box3
      */
     getBounds(target = new THREE.Box3()) {
         this.updateWorldMatrix(true, false);
-        const hx = this._shadow.scale.x / 2, hz = this._shadow.scale.z / 2;
-        const cz = this._shadow.position.z;
-        target.min.set(-hx, 0, cz - hz);
-        target.max.set(hx, (this._stackH ?? this.boxH) + this.boxH * 0.25, cz + hz);
-        return target.applyMatrix4(this.matrixWorld);
+        return this.localBounds(target).applyMatrix4(this.matrixWorld);
     }
 
     /**
@@ -687,6 +746,7 @@ export class Carrel extends THREE.Object3D {
     serialize() {
         return {
             name: this.carrelName,
+            managed: this.worldManaged,   // placed by a world grouping — restore re-registers, pose is the layout's
             position: { x: this.position.x, y: this.position.y, z: this.position.z },
             yaw: this.rotation.y,
             params: {

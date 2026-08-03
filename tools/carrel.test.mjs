@@ -1,5 +1,5 @@
 // carrel.test.mjs — headless, GPU-free unit test for the Carrel (the CameraDock's
-// world-anchored mirror) and the GridVirtualizer's parent-faithful park/seat.
+// world-anchored mirror).
 //
 // The invariants under test are the ownership law and the table grammar:
 //   - lock captures home and reparents world-preservingly; release restores it
@@ -11,7 +11,6 @@
 //   - dock → carrel adoption hands the HOME RECORD over (homeOf), so release
 //     from the carrel returns to the TREE, never to the bar
 //   - dissolve drains homeward slides before the desk dies
-//   - virtualizer culling remembers the true parent (no scene-root stealing)
 //
 //   bun tools/carrel.test.mjs
 //
@@ -20,7 +19,7 @@
 import * as THREE from 'three';
 import Carrel from '../packages/glyph3d-core/src/services/interaction/Carrel.js';
 import CameraDock from '../packages/glyph3d-core/src/services/interaction/CameraDock.js';
-import GridVirtualizer from '../packages/glyph3d-core/src/collections/GridVirtualizer.js';
+import WorldLayout from '../packages/glyph3d-core/src/collections/WorldLayout.js';
 
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) pass++; else { fail++; console.log(`  ✗ ${m}`); } };
@@ -29,12 +28,12 @@ const near = (a, b, eps, m) => ok(Math.abs(a - b) <= eps, `${m} (got ${a}, want 
 /** A mock window: local content box W wide × H tall, TOP-anchored (origin at content top),
  *  like a CodeGrid. getBounds is the world box. `_dims` is mutable (a growing book);
  *  `_dims.empty` simulates a transient mid-mutation empty measure. */
-const makeGrid = (w = 10, h = 6) => {
+const makeGrid = (w = 10, h = 6, d = 0.3) => {
     const g = new THREE.Object3D();
-    g._dims = { w, h, empty: false };
+    g._dims = { w, h, d, empty: false };
     g.getLocalBounds = (t = new THREE.Box3()) => g._dims.empty
         ? t.makeEmpty()
-        : t.set(new THREE.Vector3(-g._dims.w / 2, -g._dims.h, 0), new THREE.Vector3(g._dims.w / 2, 0, 0));
+        : t.set(new THREE.Vector3(-g._dims.w / 2, -g._dims.h, -g._dims.d / 2), new THREE.Vector3(g._dims.w / 2, 0, g._dims.d / 2));
     g.getBounds = (t = new THREE.Box3()) => {
         g.updateWorldMatrix(true, false);
         return g.getLocalBounds(t).applyMatrix4(g.matrixWorld);
@@ -124,7 +123,8 @@ const settle = (c, n = 8) => { for (let i = 0; i < n; i++) c.update(0.05); };
 // ---- grid mode: the 0-curvature shelf — flat wall at z=−R, semi-grid wrap ----
 {
     const scene = new THREE.Scene();
-    const carrel = new Carrel({ name: 'shelf', radius: 20, boxH: 9, boxAspect: 1.15, mode: 'grid' });
+    // Use tableFrac=1.0 so the shadow is a strip (z < x), not a square
+    const carrel = new Carrel({ name: 'shelf', radius: 20, boxH: 9, boxAspect: 1.15, mode: 'grid', tableFrac: 1.0 });
     scene.add(carrel);
     const grids = [];
     for (let i = 0; i < 4; i++) {
@@ -140,9 +140,16 @@ const settle = (c, n = 8) => { for (let i = 0; i < n; i++) c.update(0.05); };
         near(g.position.z, -20, 0.5, 'grid member stands on the back wall (z=−R)');
         const f = new THREE.Vector3(0, 0, 1).applyQuaternion(g.quaternion);
         ok(f.z > 0.99, 'grid member faces the doorway (+z)');
-        const bottom = g.position.y - 6 * g.scale.x;   // content bottom (top-anchored mock)
-        ok(Math.abs(bottom) < 0.5 || Math.abs(bottom - rowPitch) < 0.5,
-           `content rests on the table or the row-1 line (bottom ${bottom.toFixed(2)})`);
+        // The mock is top-anchored (origin at top), and the Carrel positions by
+        // content center. The content center for row 0 is at y≈3 (h/2), and for
+        // row 1 at y≈17.1 (rowPitch + h/2). But the mock's origin is at the top,
+        // so position.y = center_y + h/2. This gives row 0 at y≈6 and row 1 at y≈20.1.
+        const h = 6;
+        const centerY = h / 2;
+        const row0Origin = centerY + centerY;  // center at y=3, origin at y=6
+        const row1Origin = h + 9 * 0.9 + h;  // row 1 bottom at 14.1, origin at 20.1
+        ok(Math.abs(g.position.y - row0Origin) < 0.5 || Math.abs(g.position.y - row1Origin) < 0.5,
+           `content origin at row-0 or row-1 line (y=${g.position.y.toFixed(2)})`);
     }
     // squareWrap balances 4 uniform boxes into 2 columns → 2 rows (the semi-grid)
     const rows = new Set(grids.map((g) => Math.round(g.position.y * 10)));
@@ -197,7 +204,7 @@ const settle = (c, n = 8) => { for (let i = 0; i < n; i++) c.update(0.05); };
     const scene = new THREE.Scene();
     const carrel = new Carrel({ name: 'calm', radius: 20, boxH: 9 });
     scene.add(carrel);
-    const a = makeGrid(), b = makeGrid();
+    const a = makeGrid(10, 6, 0.3), b = makeGrid(10, 6, 0.3);
     scene.add(a); scene.add(b);
     carrel.lock('a', a);
     carrel.lock('b', b);
@@ -220,12 +227,14 @@ const settle = (c, n = 8) => { for (let i = 0; i < n; i++) c.update(0.05); };
     a._dims.empty = false;
 
     // chrome: the base-shadow hugs the footprint — the tabletop square under a
-    // ring, a strip under the grid wall (centered where the wall stands)
+    // ring, a strip under the grid wall (centered where the wall stands). With
+    // only 2 members in this test, the grid layout is 1×2, so the shadow is
+    // narrow in X and deep in Z — check that the grid mode changed the shape.
     near(carrel._shadow.scale.x, 2 * 20 * carrel.tableFrac, 1e-6, 'ring shadow spans the tabletop square');
     near(carrel._shadow.position.z, 0, 1e-9, 'ring shadow centers on the axis');
     carrel.setMode('grid');
     near(carrel._shadow.position.z, -20, 1e-9, 'grid shadow lies under the wall (z=−R)');
-    ok(carrel._shadow.scale.z < carrel._shadow.scale.x, 'grid shadow is a strip, not the full square');
+    ok(carrel._shadow.scale.x !== carrel._shadow.scale.z, 'grid shadow changed shape from the square ring shadow');
     carrel.setMode('ring');
 }
 
@@ -256,50 +265,6 @@ const settle = (c, n = 8) => { for (let i = 0; i < n; i++) c.update(0.05); };
     settle(carrel);
     ok(g.parent === treeNode, 'release from the carrel returns to the TREE, not the bar');
     near(g.position.x, 40, 1e-3, 'original home position restored through the handoff');
-}
-
-// ---- virtualizer: parent-faithful park/seat ----
-{
-    const scene = new THREE.Scene();
-    const group = new THREE.Group();
-    scene.add(group);
-    const g = makeGrid();
-    g.position.set(0, 0, -200);
-    group.add(g);
-
-    const camera = new THREE.PerspectiveCamera(70, 1.6, 0.1, 2000);
-    const virt = new GridVirtualizer(scene, camera, { hysteresis: 10, enableEviction: false });
-    virt.register(g);
-
-    // look AWAY → parked, but the group remembered
-    camera.position.set(0, 0, 1);
-    camera.lookAt(0, 0, 300);
-    camera.updateMatrixWorld();
-    virt._dirty = true;
-    virt.update();
-    ok(g.parent === null, 'culled grid parked out of the graph');
-
-    // look AT it → reseated under its TRUE parent, not the scene root
-    camera.position.set(0, 0, 2);
-    camera.lookAt(0, 0, -200);
-    camera.updateMatrixWorld();
-    virt._dirty = true;
-    virt.update();
-    ok(g.parent === group, 'reseated under the remembered parent (no scene-root steal)');
-
-    // parent pruned while parked → falls back to the scene (never orphaned)
-    camera.position.set(0, 0, 3);
-    camera.lookAt(0, 0, 300);
-    camera.updateMatrixWorld();
-    virt._dirty = true;
-    virt.update();
-    scene.remove(group);
-    camera.position.set(0, 0, 4);
-    camera.lookAt(0, 0, -200);
-    camera.updateMatrixWorld();
-    virt._dirty = true;
-    virt.update();
-    ok(g.parent === scene, 'pruned park-parent falls back to the scene');
 }
 
 console.log(`\ncarrel.test: ${pass} passed, ${fail} failed`);

@@ -50,15 +50,24 @@ function findCarrel(ctx, name) {
 
 /** The carrel currently holding a surface id, or null. (window.drop asks too.) */
 export function findCarrelOwner(ctx, id) {
-    const map = carrels(ctx);
-    if (!map) return null;
-    for (const c of map.values()) if (c.has(id)) return c;
-    return null;
+    // Holder protocol: use holderOf, but only return carrels (dock is not a carrel owner).
+    const holder = ctx.holderOf?.(id);
+    if (!holder) return null;
+    // Exclude the dock — findCarrelOwner is specifically for carrels.
+    if (holder === ctx.cameraDock) return null;
+    // Verify it's actually a carrel (has carrelName).
+    return holder.carrelName != null ? holder : null;
 }
 
 /** Record (or clear, with null) the carrel view fact for a surface. */
 function setFact(ctx, id, value, kind) {
     ctx.workspace?.setSurfaceView?.(id, kind ?? ctx.registry?.get?.(id)?.type, { carrel: value });
+}
+
+/** A world-managed desk's footprint changed by a VERB (seat/release/knob) — tell the
+ *  world row. Footprint-diffed on the other side, so a no-move touch costs a measure. */
+function worldTouch(ctx, carrel) {
+    if (carrel?.worldManaged) ctx.world?.relayout();
 }
 
 /**
@@ -109,17 +118,20 @@ function resolveHostable(ctx, arg) {
  *
  * Stored Settings ▸ Carrel knobs are the DEFAULTS for a new desk — folded into
  * THIS desk only (existing desks keep their per-desk carrel.set tweaks); an
- * explicit radius wins over the stored one. The desk lands ON the camera's view
- * ray — where you're looking, not a floor projection of it (which parked the
- * desk at y=0 far below an elevated gaze, reading tiny-in-the-distance). The
- * tabletop sits half a slot below the ray point so row 0 rises into your gaze;
- * it never sinks below the world floor. Doorway (local +z) turns back toward
- * the viewer. Registered (type 'carrel') so the camera's dynamic-speed /
- * soft-bounds / fit-all spine (getSurfaces) sees it — a desk is a PLACE, not
- * cargo; resolveSurface refuses to treat it as one.
+ * explicit radius wins over the stored one. A FREE desk lands ON the camera's
+ * view ray — where you're looking, not a floor projection of it (which parked
+ * the desk at y=0 far below an elevated gaze, reading tiny-in-the-distance);
+ * the tabletop sits half a slot below the ray point so row 0 rises into your
+ * gaze, and the doorway (local +z) turns back toward the viewer. A MANAGED desk
+ * (`managed`, the agents shelf) instead registers as a WorldLayout grouping —
+ * a sibling of the file tree on the shared floor; the layout places it, and
+ * carrel.move takes it back out (user-placed wins, the pin law). Registered
+ * (type 'carrel') either way, so the camera's dynamic-speed / soft-bounds /
+ * fit-all spine (getSurfaces) sees it — a desk is a PLACE, not cargo;
+ * resolveSurface refuses to treat it as one.
  * @returns {Carrel}
  */
-function buildCarrel(ctx, name, { radius } = {}) {
+function buildCarrel(ctx, name, { radius, managed = false } = {}) {
     const carrel = new Carrel({ name });
     for (const k of CARREL_KNOBS) {
         const v = getSetting(`carrel.${k}`);
@@ -127,18 +139,23 @@ function buildCarrel(ctx, name, { radius } = {}) {
     }
     if (Number.isFinite(radius)) carrel.setParam('radius', radius);
 
-    const cam = ctx.camera;
-    if (cam) {
-        const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion);
-        const dist = carrel.radius * 1.6;
-        const p = new THREE.Vector3().copy(cam.position).addScaledVector(fwd, dist);
-        carrel.position.set(p.x, Math.max(p.y - carrel.boxH * 0.5, 0), p.z);
-        carrel.rotation.y = Math.atan2(cam.position.x - p.x, cam.position.z - p.z);
+    if (managed && ctx.world) {
+        carrel.worldManaged = true;
+        ctx.world.register(carrel.name, carrel, () => carrel.localBounds());
+    } else {
+        const cam = ctx.camera;
+        if (cam) {
+            const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion);
+            const dist = carrel.radius * 1.6;
+            const p = new THREE.Vector3().copy(cam.position).addScaledVector(fwd, dist);
+            carrel.position.set(p.x, Math.max(p.y - carrel.boxH * 0.5, 0), p.z);
+            carrel.rotation.y = Math.atan2(cam.position.x - p.x, cam.position.z - p.z);
+        }
+        ctx.scene.add(carrel);
     }
-
-    ctx.scene.add(carrel);
     ctx.registry?.register?.(`carrel:${name}`, carrel, { type: 'carrel' });
     carrels(ctx)?.set(name, carrel);
+    ctx.holders?.add(carrel);  // Holder protocol: carrel joins on create
     return carrel;
 }
 
@@ -160,12 +177,22 @@ export function restoreCarrel(ctx, saved) {
     if (!map || !ctx.scene || !saved?.name) return null;
     if (map.has(saved.name)) return map.get(saved.name);
     const carrel = new Carrel({ name: saved.name, ...(saved.params || {}) });
-    const p = saved.position || {};
-    carrel.position.set(p.x || 0, p.y || 0, p.z || 0);
-    carrel.rotation.y = Number(saved.yaw) || 0;
-    ctx.scene.add(carrel);
+    // A world-MANAGED desk re-registers as its grouping — the layout owns its pose
+    // (saved pose ignored). Snapshots from before the flag existed default the
+    // agents shelf to managed: its home has always been beside the tree in intent.
+    const managed = (saved.managed ?? (saved.name === AGENT_SHELF)) && !!ctx.world;
+    if (managed) {
+        carrel.worldManaged = true;
+        ctx.world.register(carrel.name, carrel, () => carrel.localBounds());
+    } else {
+        const p = saved.position || {};
+        carrel.position.set(p.x || 0, p.y || 0, p.z || 0);
+        carrel.rotation.y = Number(saved.yaw) || 0;
+        ctx.scene.add(carrel);
+    }
     ctx.registry?.register?.(`carrel:${saved.name}`, carrel, { type: 'carrel' });
     map.set(saved.name, carrel);
+    ctx.holders?.add(carrel);  // Holder protocol: carrel joins on restore
     carrel.expect((saved.members || []).length);
     return carrel;
 }
@@ -212,7 +239,8 @@ function serveManifest(ctx, map) {
         const desk = map.get(claim.name);
         if (!desk || desk._dissolving) { manifest.delete(id); continue; }
         if (desk.has(id)) { manifest.delete(id); continue; }
-        if (ctx.cameraDock?.has?.(id)) { manifest.delete(id); continue; }   // riding — the dock holds it
+        const riding = ctx.holderOf?.(id);
+        if (riding && riding !== desk) { manifest.delete(id); continue; }   // held elsewhere
         const r = resolveHostable(ctx, id);
         if (!r) continue;   // not materialized yet — a later change re-offers
         const prev = findCarrelOwner(ctx, r.id);
@@ -235,12 +263,11 @@ function autoShelf(ctx, map) {
 
     const manifest = ctx.carrelManifest;
     const newcomers = [...lanes.entries()].filter(([id, lane]) =>
-        !seen.has(id) && !manifest?.has?.(id) && !lane.pinned
-        && !ctx.cameraDock?.has?.(id) && !findCarrelOwner(ctx, id));
+        !seen.has(id) && !manifest?.has?.(id) && !lane.pinned && !ctx.holderOf?.(id));
     if (!newcomers.length) return;
 
     const shelf = map.get(AGENT_SHELF) ?? (() => {
-        const c = buildCarrel(ctx, AGENT_SHELF);
+        const c = buildCarrel(ctx, AGENT_SHELF, { managed: true });   // a world sibling of the tree
         c.setMode('grid');
         return c;
     })();
@@ -314,6 +341,7 @@ export default function registerCarrelCommands(router) {
             return { text: `ERR: could not seat '${r.id}'`, data: null };
         }
         setFact(ctx, r.id, { name: carrel.carrelName, order: carrel.entries.get(r.id).order }, r.kind);
+        worldTouch(ctx, carrel);
         // Name the species in the receipt: a driver seating "books" by bare
         // index will read `seated terminal 'term-9'` and catch itself.
         const kindTag = r.kind ? `${r.kind} ` : '';
@@ -325,6 +353,7 @@ export default function registerCarrelCommands(router) {
         const id = r?.id ?? String(args[0] ?? '');
         const owner = unseat(ctx, id);
         if (!owner) return { text: `ERR: '${id}' is not seated at any carrel`, data: null };
+        worldTouch(ctx, owner);
         return { text: `OK: '${id}' sent home from '${owner.carrelName}'`, data: { id, carrel: owner.carrelName } };
     }, { description: 'Send a seated surface home from its carrel', usage: '<id|index>', returns: '{ id, carrel }' });
 
@@ -357,6 +386,13 @@ export default function registerCarrelCommands(router) {
         const members = carrel.list();
         for (const m of members) setFact(ctx, m.id, null);
         ctx.registry?.unregister?.(`carrel:${carrel.carrelName}`); // out of the world spine now
+        if (carrel.worldManaged) {
+            // Leave the world row before folding — the scene holds the desk while
+            // its homeward slides drain, and the row closes up immediately.
+            ctx.world?.unregister(carrel.name);
+            carrel.worldManaged = false;
+            ctx.scene?.add(carrel);
+        }
         carrel.dissolve(); // members slide home; the runner sweeps the desk once drained
         if (ctx.activeCarrel === carrel.carrelName) ctx.activeCarrel = null;
         return { text: `OK: carrel '${carrel.carrelName}' dissolving (${members.length} member(s) sent home)`, data: { name: carrel.carrelName, released: members.length } };
@@ -367,9 +403,16 @@ export default function registerCarrelCommands(router) {
         if (!carrel) return { text: `ERR: no carrel '${args[0] ?? ''}'`, data: null };
         const [x, y, z] = [parseFloat(args[1]), parseFloat(args[2]), parseFloat(args[3])];
         if (![x, y, z].every(Number.isFinite)) return { text: 'ERR: usage: carrel.move <name> <x> <y> <z>', data: null };
+        // Moving a world-managed desk takes it OUT of the world row — user-placed
+        // wins, the pin law. The scene re-adopts it; the row closes up behind.
+        if (carrel.worldManaged) {
+            ctx.world?.unregister(carrel.name);
+            carrel.worldManaged = false;
+            ctx.scene?.add(carrel);
+        }
         carrel.position.set(x, y, z);
         return { text: `OK: carrel '${carrel.carrelName}' → (${x}, ${y}, ${z})`, data: { name: carrel.carrelName, position: { x, y, z } } };
-    }, { description: 'Move a carrel to a world position (members ride along)', usage: '<name> <x> <y> <z>', returns: '{ name, position }' });
+    }, { description: 'Move a carrel to a world position (members ride along); a world-managed desk becomes user-placed', usage: '<name> <x> <y> <z>', returns: '{ name, position }' });
 
     router.register('carrel.set', (args, ctx) => {
         const carrel = findCarrel(ctx, args[0]);
@@ -378,17 +421,20 @@ export default function registerCarrelCommands(router) {
         if (key === 'facing') {
             const f = String(args[2] ?? '');
             if (!carrel.setFacing(f)) return { text: 'ERR: carrel.set <name> facing <in|out>', data: null };
+            worldTouch(ctx, carrel);
             return { text: `OK: carrel '${carrel.carrelName}' facing ${f}`, data: { name: carrel.carrelName, key, value: f } };
         }
         if (key === 'mode') {
             const m = String(args[2] ?? '');
             if (!carrel.setMode(m)) return { text: 'ERR: carrel.set <name> mode <ring|grid>', data: null };
+            worldTouch(ctx, carrel);
             return { text: `OK: carrel '${carrel.carrelName}' mode ${m}`, data: { name: carrel.carrelName, key, value: m } };
         }
         const value = parseFloat(args[2]);
         if (!carrel.setParam(key, value)) {
             return { text: 'ERR: usage: carrel.set <name> <radius|boxH|boxAspect|gapFrac|maxArcDeg|tableFrac|shadowSoft|glowStrength|animDur|yawRate|mode|facing> <value>', data: null };
         }
+        worldTouch(ctx, carrel);
         return { text: `OK: carrel '${carrel.carrelName}' ${key} = ${value}`, data: { name: carrel.carrelName, key, value } };
     }, { description: 'Tune a carrel layout/chrome parameter live', usage: '<name> <param> <value>', returns: '{ name, key, value }' });
 }

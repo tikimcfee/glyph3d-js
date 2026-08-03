@@ -899,94 +899,6 @@ class CodeGrid extends FramedGlyphField {
         // Future: add hover effects, selection highlights, etc.
     }
 
-    /**
-     * Release GPU buffers while preserving source reference for reload.
-     * Called by GridVirtualizer when a grid exits the eviction threshold.
-     * Preserves: position, metadata, bounding box, source text, config.
-     * Releases: GlyphField (InstancedBufferGeometry, highlight texture,
-     *   group DataTexture, all instance attribute buffers).
-     *
-     * After this call `isContentLoaded` returns false. The grid remains in
-     * whatever scene-graph state the caller left it; the virtualizer keeps
-     * its cached bounds so re-entry detection still works.
-     */
-    unloadContent() {
-        if (!this._renderer) return; // already unloaded or fully disposed
-
-        // Leave the glyph channel cleanly. _pickingSystem survives unload, and
-        // reloadContent() builds a NEW renderer that re-registers; without this,
-        // register (which de-dups only by mesh identity) can't drop the old block,
-        // so a stale entry pointing at the disposed renderer leaks per evict→reload
-        // cycle. The grid channel (background panel) persists — the grid stays
-        // pickable while its content is unloaded.
-        if (this._pickingSystem && this._renderer) {
-            this._pickingSystem.unregister('glyph', this._renderer);
-        }
-
-        this._renderer.dispose();
-        this._renderer = null;
-
-        // Remove renderer group children (the instanceMesh was in the scene directly,
-        // added via this._rendererGroup when the renderer was created)
-        while (this._rendererGroup.children.length > 0) {
-            this._rendererGroup.remove(this._rendererGroup.children[0]);
-        }
-
-        // Clear derived state that references the now-dead renderer/buffers
-        this._resetBatchState();
-        this._filenameTextId = null;
-        this._contentTextIds = [];
-        this._lineSlotBase = null;
-        this._layout = null; // drop the LayoutDescription's refs to the now-dead buffers
-
-        // Mark as unloaded — reloadContent() checks this flag
-        this._contentUnloaded = true;
-    }
-
-    /**
-     * Whether GPU content is currently loaded.
-     * @returns {boolean}
-     */
-    get isContentLoaded() {
-        return !this._contentUnloaded;
-    }
-
-    /**
-     * Reload content from the stored source text and filename.
-     * Called by GridVirtualizer when an evicted grid re-enters the frustum.
-     * Uses the async worker path (flushAsync) since this is non-urgent and
-     * may involve large files. The grid renders on the next frame after the
-     * worker completes — one blank frame is acceptable.
-     *
-     * No-op if content is already loaded or there is no source text to restore.
-     *
-     * @param {GlyphAtlas} atlas - The atlas instance (may differ from construction
-     *   time if the atlas was regenerated; pass the current live atlas).
-     * @returns {Promise<void>}
-     */
-    async reloadContent(atlas) {
-        if (!this._contentUnloaded) return;
-        if (!this.content) {
-            // Nothing to restore — mark loaded so we don't retry on every frame
-            this._contentUnloaded = false;
-            return;
-        }
-
-        // If caller provides a fresh atlas (e.g. after regeneration), swap it in
-        // before _ensureRenderer() reads this.atlas.
-        if (atlas && atlas !== this.atlas) {
-            this.atlas = atlas;
-        }
-
-        // Reconstruct the renderer (also marks _contentUnloaded = false)
-        this._ensureRenderer();
-
-        // Re-run the full layout pipeline using the worker path
-        await this._layoutContentAsync();
-
-        // Re-fit the background to the rebuilt content bounds
-        this._updateBackground();
-    }
 
     /**
      * Re-fold the grid in place from current state (layout params + scroll offset). Source
@@ -1222,7 +1134,6 @@ class CodeGrid extends FramedGlyphField {
         this.content = '';
         this.lines = [];
         this._contentTextIds = [];
-        this._contentUnloaded = false;
     }
 
     // ============ Private Methods ============
@@ -1260,8 +1171,6 @@ class CodeGrid extends FramedGlyphField {
 
         // Re-derive metrics in case atlas changed
         this.metrics = this._computeMetrics();
-
-        this._contentUnloaded = false;
     }
 
     /**

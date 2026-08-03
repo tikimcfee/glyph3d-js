@@ -174,9 +174,10 @@ export default function registerWindowCommands(router) {
         const frac = Number.isFinite(fillArg) && fillArg > 0 ? fillArg : DROP_FILL;
 
         const dock = ctx.cameraDock;
-        const docked = !!dock?.has?.(id);
-        const carrel = findCarrelOwner(ctx, id);
-        const holderHome = docked ? dock.homeOf(id) : (carrel ? carrel.homeOf(id) : null);
+        const holder = ctx.holderOf?.(id);
+        const docked = holder === dock;
+        const carrel = docked ? null : holder;
+        const holderHome = holder ? holder.homeOf(id) : null;
         const { pos, quat } = dropPose(cam, r.grid, holderHome, frac);
         const to = { parent: ctx.scene || null, pos: { x: pos.x, y: pos.y, z: pos.z }, quat };
 

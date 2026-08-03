@@ -145,7 +145,7 @@ export function resolveGesture(gesture, env) {
     // so click ≡ CLI ≡ RPC (no UI-composed fork). Pre-empts the responder chain (its
     // flyIfChanged would move the camera); ejecting a tile back to the world stays
     // dock.focus / dock.toggle (verbs). dblclick falls through to normal handling.
-    if (gesture.type === 'click' && gesture.target && env.cameraDock?.has?.(gesture.target.id)) {
+    if (gesture.type === 'click' && gesture.target && env.ctx?.holderOf?.(gesture.target.id) === env.ctx?.cameraDock) {
         env.exec(['dock.spotlight', gesture.target.id]);
         return true;
     }

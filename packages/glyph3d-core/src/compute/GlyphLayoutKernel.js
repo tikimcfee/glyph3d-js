@@ -293,10 +293,10 @@ export default class GlyphLayoutKernel {
         this.maxLines = maxLines;
 
         // Owned output is vec4 (visible stride); an external target is the field's OWN vec3
-        // attribute wrapped as a storage node — same 16-byte stride either way, but the
-        // element type must match the attribute or the write bindings disagree.
+        // attribute wrapped as a storage node — same 16-byte stride either way.
+        // External attribute uses itemSize=4 (shader reads as vec4), owned buffer also uses vec4.
         this.positions = this._externalOut
-            ? storage(this._externalOut, 'vec3', maxSlots).setName('GlyphLayoutPositionsExt')
+            ? storage(this._externalOut, 'vec4', maxSlots).setName('GlyphLayoutPositionsExt')
             : instancedArray(maxSlots, 'vec4').setName('GlyphLayoutPositions');
         this.xOffsets     = instancedArray(maxSlots, 'float').setName('GlyphLayoutXOffsets');
         this.lineTable    = instancedArray(maxLines, 'uint').setName('GlyphLayoutLineTable');
@@ -457,14 +457,10 @@ export default class GlyphLayoutKernel {
 
             // outBase places this dispatch at its item's range in a shared output (a field's
             // bufferStartIndex); owned buffers dispatch at 0. External vec3 writes leave the
-            // stride-padding lane alone (the vertex stage never reads it); the owned vec4
-            // writes zero it so a readback is deterministic.
+            // stride-padding lane alone (WGSL pads vec3 arrays to 16 bytes); the owned vec4
+            // Both paths write vec4 with zero padding to match the stride-4 buffer.
             const out = u.outBase.add(slot);
-            if (this._externalOut) {
-                this.positions.element(out).assign(p);
-            } else {
-                this.positions.element(out).assign(vec4(p, float(0)));
-            }
+            this.positions.element(out).assign(vec4(p, float(0)));
         })().compute(1).setName('GlyphLayoutKernel');
     }
 
