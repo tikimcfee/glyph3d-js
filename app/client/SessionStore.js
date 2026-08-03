@@ -268,12 +268,18 @@ export default class SessionStore {
       agents.push(entry);
     }
 
-    // Carrels: world furniture — each desk's serialize() carries pose, knobs, and
-    // membership (ids + order). Desks restore FIRST (stage 1) standing at their
-    // saved pose, and the sweep's manifest pass re-seats each member in place as
-    // its window materializes — the desk loads, then loads its elements.
+    // Carrels: world furniture — each desk's serialize() carries pose and knobs
+    // (NO members — residence is the MODEL's authority via view.carrel).
     const carrels = ctx.carrels instanceof Map
       ? [...ctx.carrels.values()].filter((c) => !c._dissolving).map((c) => c.serialize())
+      : [];
+
+    // Carrel membership: read from the MODEL (listCarreled), not a live-object
+    // scrape. The model is the durable buffer — it holds residence whether or not
+    // the grid is currently live — so a save mid-re-adopt reads a consistent state.
+    // Order threads members back into their saved ring position on restore.
+    const carrelMembers = ws?.listCarreled
+      ? ws.listCarreled().map((s) => ({ id: s.id, name: s.view.carrel.name, order: s.view.carrel.order ?? 0 }))
       : [];
 
     const snap = {
@@ -290,6 +296,7 @@ export default class SessionStore {
       terminals,
       agents,
       carrels,
+      carrelMembers,
     };
 
     // Quarantine: a section whose restore phase FAILED keeps its loaded blob verbatim — never
@@ -473,19 +480,28 @@ export default class SessionStore {
   }
 
   // carrels — world furniture, stage 1: each saved desk stands back up at its saved pose
-  // wearing its saved knobs (restoreCarrel — no camera-ray placement, no Settings fold),
-  // pre-shaped (expect) for its member complement, and files every member id into the
-  // manifest the sweep serves as windows materialize. Direct state, no verbs.
+  // wearing its saved knobs (restoreCarrel — no camera-ray placement, no Settings fold).
+  // Carrel membership (view.carrel) is written to the MODEL here, so the sweep seats
+  // members from model authority as windows materialize — no manifest, no parallel pipeline.
   _restoreCarrels(snap) {
     const list = Array.isArray(snap.carrels) ? snap.carrels : [];
     if (!list.length) return;
-    const manifest = (this.ctx.carrelManifest ??= new Map());
+    let memberCount = 0;
     for (const c of list) {
       if (!restoreCarrel(this.ctx, c)) continue;
-      for (const m of c.members || []) {
-        if (m?.id != null) manifest.set(String(m.id), { name: c.name, order: m.order });
+      memberCount += (c.members?.length ?? 0);  // pre-Slice-1 snapshots carry members inline
+    }
+    // Write carrel residence into the model from carrelMembers (the model-based path).
+    // Pre-Slice-1 snapshots without carrelMembers but with inline c.members fall back
+    // to those — forward-additive restore, no migration shim needed.
+    const members = Array.isArray(snap.carrelMembers) ? snap.carrelMembers
+      : list.flatMap((c) => (c.members || []).map((m) => ({ id: m.id, name: c.name, order: m.order ?? 0 })));
+    for (const m of members) {
+      if (m?.id != null && m.name != null) {
+        this.ctx.workspace?.setSurfaceView?.(String(m.id), undefined, { carrel: { name: m.name, order: m.order ?? 0 } });
       }
     }
+    if (memberCount) { /* migrated from inline members — noted for the expect() pre-shape */ }
   }
 
   // agents — reopen the saved session books BY REFERENCE: each entry re-reads the harness's

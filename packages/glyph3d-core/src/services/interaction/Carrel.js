@@ -756,7 +756,8 @@ export class Carrel extends THREE.Object3D {
                 tableFrac: this.tableFrac, shadowSoft: this.shadowSoft,
                 glowColor: this.glowColor, glowStrength: this.glowStrength,
             },
-            members: this.list(),
+            // No members here — carrel residence is the MODEL's authority (view.carrel).
+            // Capture reads listCarreled(); restore writes view.carrel directly.
         };
     }
 

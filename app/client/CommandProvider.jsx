@@ -567,10 +567,14 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       // is the durable buffer that re-docks/re-sizes them (terminal.kill drops it explicitly).
       for (const s of state.ctx.workspace?.listSurfaces?.() || [])
         if (s.kind !== 'terminal' && !isLive(s.id)) state.ctx.workspace.removeSurface(s.id);
-      // While restored desks hold unserved membership claims, every registration is
-      // a chance a claimed window just materialized (a re-adopted terminal, a
-      // reopened file) — offer it its seat. Coalesced; no-op once claims drain.
-      if (state.ctx.carrelManifest?.size) scheduleCarrelSweep(state.ctx);
+      // While restored desks have unseated members in the model, every registration is
+      // a chance a claimed window just materialized (a re-adopted terminal, a reopened
+      // file) — offer it its seat. Idempotent; no-op once all are seated.
+      const unseated = (state.ctx.workspace?.listCarreled?.() ?? []).some((s) => {
+        const desk = state.ctx.carrels?.get(s.view.carrel.name);
+        return desk && !desk.has(s.id);
+      });
+      if (unseated) scheduleCarrelSweep(state.ctx);
     };
     state.ctx.registry.addChangeListener(onRemoval);
 

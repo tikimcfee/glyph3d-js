@@ -227,20 +227,25 @@ export function scheduleCarrelSweep(ctx) {
 export function carrelSweep(ctx) {
     const map = carrels(ctx);
     if (!map || !ctx.scene) return;
-    serveManifest(ctx, map);
+    serveResidence(ctx, map);
     autoShelf(ctx, map);
 }
 
-/** Pass 1 — seat manifest-claimed ids at their recorded desks. @see scheduleCarrelSweep */
-function serveManifest(ctx, map) {
-    const manifest = ctx.carrelManifest;
-    if (!(manifest instanceof Map) || !manifest.size) return;
-    for (const [id, claim] of [...manifest.entries()]) {
+/** Pass 1 — seat model-claimed members at their recorded desks. Reads view.carrel
+ *  from the MODEL (the single authority), not a manifest. Idempotent: a member already
+ *  seated at the right desk is skipped; one held elsewhere is left alone. A member that
+ *  hasn't materialized yet stays in the model and is re-offered on the next sweep.
+ *  @see scheduleCarrelSweep */
+function serveResidence(ctx, map) {
+    const claimed = ctx.workspace?.listCarreled?.() ?? [];
+    for (const s of claimed) {
+        const id = s.id;
+        const claim = s.view.carrel;
         const desk = map.get(claim.name);
-        if (!desk || desk._dissolving) { manifest.delete(id); continue; }
-        if (desk.has(id)) { manifest.delete(id); continue; }
+        if (!desk || desk._dissolving) continue;
+        if (desk.has(id)) continue;                          // already seated — idempotent
         const riding = ctx.holderOf?.(id);
-        if (riding && riding !== desk) { manifest.delete(id); continue; }   // held elsewhere
+        if (riding && riding !== desk) continue;             // held elsewhere (dock/other carrel)
         const r = resolveHostable(ctx, id);
         if (!r) continue;   // not materialized yet — a later change re-offers
         const prev = findCarrelOwner(ctx, r.id);
@@ -249,7 +254,6 @@ function serveManifest(ctx, map) {
             setFact(ctx, r.id, { name: desk.carrelName, order: desk.entries.get(r.id).order }, r.kind);
             (ctx._agentShelfSeen ??= new Set()).add(r.id);   // the default pass never re-offers
         }
-        manifest.delete(id);
     }
 }
 
@@ -261,9 +265,9 @@ function autoShelf(ctx, map) {
     for (const id of [...seen]) if (!lanes.has(id)) seen.delete(id);   // cleared books may be reborn
     if (getSetting('book.autoShelf') === false) return;
 
-    const manifest = ctx.carrelManifest;
     const newcomers = [...lanes.entries()].filter(([id, lane]) =>
-        !seen.has(id) && !manifest?.has?.(id) && !lane.pinned && !ctx.holderOf?.(id));
+        !seen.has(id) && !lane.pinned && !ctx.holderOf?.(id)
+        && !ctx.workspace?.getSurface?.(id)?.view?.carrel);
     if (!newcomers.length) return;
 
     const shelf = map.get(AGENT_SHELF) ?? (() => {

@@ -19,6 +19,50 @@
  * thin verb additions, not model surgery.
  */
 
+// ════════════════════════════════════════════════════════════════════════════
+// LAW 1 — TWO TABLES, ONE KEY (ECS Study §3, Slice A)
+//
+// Every entity (a surface) has a string id. That id joins TWO component tables:
+//
+//   entity id (string: "src/a.js" · "term-3" · "carrel:agents")
+//     ├─ SceneRegistry entry ........ LIVE components    (dies with the object)
+//     └─ WorkspaceModel.surfaces .... DURABLE components (outlives it; serialized)
+//
+// This split is LOAD-BEARING: the model holds a terminal's geometry whether or not
+// its grid is in the scene, which is the only reason async PTY re-adoption works.
+//
+// A component's schema declares its TABLE — durable or live — and which `view` keys
+// it owns. Today the DURABLE table is this surfaces Map; the LIVE table is
+// SceneRegistry. Slice B+ will grow the component API; for now, naming them here
+// is the foundation.
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Component schema — declares every named component, its table (durable/live),
+ * and the `view` keys it owns. A component is DURABLE iff an operator gesture set
+ * it and nothing recomputes it (Study §3: "STATE_ARCHITECTURE.md §48-77 with a
+ * place to live"). Unknown keys (not in any component) pass through ungrouped.
+ *
+ * @type {Record<string, {table:'durable'|'live', keys:string[]}>}
+ */
+export const COMPONENT_SCHEMA = {
+  // ── durable: serialized with the session ──
+  Residence:       { table: 'durable', keys: ['docked', 'dockOrder', 'carrel', 'pinAutoDocked'] },
+  Position:        { table: 'durable', keys: ['position'] },
+  Orientation:     { table: 'durable', keys: ['orientation'] },
+  Zoom:            { table: 'durable', keys: ['zoom'] },
+  TerminalGeometry:{ table: 'durable', keys: ['cols', 'rows'] },
+
+  // ── live: measured/derived, never serialized (declared for documentation; Slice B+ grows these) ──
+  // Object3D handle, Home, Extent, Tags, Chrome, Controls, PickTarget
+  // — these live on the SceneRegistry entry and the live Object3D, not in `view`.
+};
+
+/** Reverse index: view key → component name (built from COMPONENT_SCHEMA). */
+const _KEY_TO_COMPONENT = {};
+for (const [name, spec] of Object.entries(COMPONENT_SCHEMA))
+  for (const k of spec.keys) _KEY_TO_COMPONENT[k] = name;
+
 const basename = (p) => {
   const s = String(p || '').replace(/\/+$/, '');
   const i = s.lastIndexOf('/');
@@ -176,6 +220,47 @@ export default class WorkspaceModel {
     return [...this.surfaces.values()]
       .filter((s) => s.view?.docked)
       .sort((a, b) => (a.view.dockOrder ?? 0) - (b.view.dockOrder ?? 0));
+  }
+
+  /** Carrel-seated surfaces, sorted by their persisted ring/grid order. */
+  listCarreled() {
+    return [...this.surfaces.values()]
+      .filter((s) => s.view?.carrel)
+      .sort((a, b) => (a.view.carrel.order ?? 0) - (b.view.carrel.order ?? 0));
+  }
+
+  // ── component-aware accessors (Slice A: naming the components behind `view`) ──
+  // `view` stays the flat store (byte-identical capture); these accessors return the
+  // slice of `view` owned by a named component. A component is PRESENT iff any of its
+  // keys has a non-nullish value. This is the seam Slice B grows into real components.
+
+  /**
+   * Read a named component's data from a surface's view. Returns a fresh object
+   * containing only the keys that component owns (and that are present in view).
+   * Returns null if the surface or component doesn't exist.
+   * @param {string} id @param {string} name component name from COMPONENT_SCHEMA
+   * @returns {object|null}
+   */
+  getComponent(id, name) {
+    const s = this.surfaces.get(id);
+    if (!s) return null;
+    const spec = COMPONENT_SCHEMA[name];
+    if (!spec) return null;
+    const slice = {};
+    let hasAny = false;
+    for (const k of spec.keys) {
+      if (s.view?.[k] != null) { slice[k] = s.view[k]; hasAny = true; }
+    }
+    return hasAny ? slice : null;
+  }
+
+  /**
+   * Whether a surface has a named component present (any of its keys are set).
+   * @param {string} id @param {string} name
+   * @returns {boolean}
+   */
+  hasComponent(id, name) {
+    return this.getComponent(id, name) != null;
   }
 
   /** The next slot order for an interactive dock — one past the current max (append to the bar). */

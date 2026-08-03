@@ -293,8 +293,8 @@ export default class GlyphLayoutKernel {
         this.maxLines = maxLines;
 
         // Owned output is vec4 (visible stride); an external target is the field's OWN vec3
-        // attribute wrapped as a storage node — same 16-byte stride either way.
-        // External attribute uses itemSize=4 (shader reads as vec4), owned buffer also uses vec4.
+        // attribute wrapped as a storage node. instancedArray() and storage() both create a
+        // StorageInstancedBufferAttribute under the hood, so both paths work the same way.
         this.positions = this._externalOut
             ? storage(this._externalOut, 'vec4', maxSlots).setName('GlyphLayoutPositionsExt')
             : instancedArray(maxSlots, 'vec4').setName('GlyphLayoutPositions');
