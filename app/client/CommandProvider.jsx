@@ -25,7 +25,6 @@ import ContentTreeArrows from '@glyph3d/core/collections/ContentTreeArrows.js';
 import ContentTreeProbes from '@glyph3d/core/collections/ContentTreeProbes.js';
 import ContentTreeLabels from '@glyph3d/core/collections/ContentTreeLabels.js';
 import ContentTreeMotion from '@glyph3d/core/collections/ContentTreeMotion.js';
-import CodeGrid from '@glyph3d/core/collections/CodeGrid.js';
 import { installFrameWatch } from '../commands/loadTrace.js';
 import SessionStore from './SessionStore.js';
 import WorkspaceModel from './WorkspaceModel.js';
@@ -229,7 +228,7 @@ function AgentRunner({ stateRef }) {
  * DockRunner — the camera-coupled per-frame systems: parks the camera-locked dock
  * ahead of the active camera and advances its tile animations, drives the
  * container labels' approach fade + hover grow (the hovered entity's ancestor
- * containers swell their names), and consumes any pending first-draw warm-up.
+ * containers swell their names), and advances the relayout glide.
  * Logic-only (returns null); guarded so it's a no-op until the effect wires the ctx.
  */
 function DockRunner({ stateRef }) {
@@ -255,88 +254,8 @@ function DockRunner({ stateRef }) {
       c.contentTreeLabels?.reanchor();
     }
     c?.contentTreeLabels?.update(state.camera, dt, c?.attentionManager?.state?.hover?.id ?? null);
-    if (s?.warmAt && performance.now() >= s.warmAt) {
-      s.warmAt = 0;
-      warmUpRender(state.gl, state.scene, state.camera, c);
-    }
-    // Boot pipeline warm-up: the very first content render pays one-time PIPELINE
-    // COMPILATION (~65–127ms of main-thread blocks, measured landing mid-launch,
-    // exactly where a load already competes for frames). Pay it here instead, on
-    // the empty boot scene: one throwaway grid, one real in-loop render (the real
-    // frame overwrites it before present), disposed before anyone sees it.
-    if (s?.bootWarm && c?.atlas) {
-      s.bootWarm = false;
-      bootWarmRender(state.gl, state.scene, state.camera, c);
-    }
   });
   return null;
-}
-
-/** One small CodeGrid rendered once at boot — forces the glyph + panel PIPELINES to
- *  compile AND the core codepoint set through the live-encode ladder (blob store →
- *  static asset → live Slug encode) while nothing else is on screen. Without the
- *  full printable set, the first real files pay the encode + worker cache resync
- *  mid-launch (measured as the same-instant block pair at first build). */
-function bootWarmRender(gl, scene, camera, ctx) {
-  try {
-    let printable = '';
-    for (let cp = 33; cp <= 126; cp++) printable += String.fromCharCode(cp);
-    // JIT warm-up: the first real files otherwise run the shaping/build loops
-    // INTERPRETED (measured 60–90ms single-file overshoots early in a launch).
-    // A burst of small varied builds tiers the loops up before content arrives.
-    const jitBody = (printable + '\n').repeat(40);
-    for (let w = 0; w < 12; w++) {
-      const g = new CodeGrid(scene, ctx.atlas, { name: `__jitwarm${w}`, worldScale: 0.025 });
-      g.loadFile(`__jitwarm${w}.js`, jitBody);
-      g.dispose?.();
-    }
-    const probe = new CodeGrid(scene, ctx.atlas, { name: '__bootwarm', worldScale: 0.025 });
-    probe.loadFile('__bootwarm', printable);
-    scene.add(probe);
-    const warm = camera.clone();
-    warm.position.set(0, 0, 60);
-    warm.lookAt(0, 0, 0);
-    warm.updateProjectionMatrix();
-    warm.updateMatrixWorld(true);
-    gl.render(scene, warm);
-    scene.remove(probe);
-    probe.dispose?.();
-  } catch (e) {
-    console.warn('[warm] boot pipeline warm-up failed:', e?.message || e);
-  }
-}
-
-/**
- * One REAL render through a throwaway camera that contains the whole field, with the
- * far plane pushed past all of it. The WebGPU backend creates each object's draw
- * resources (bind groups, attribute buffers) only at its first actual draw — content
- * loaded outside the view (or beyond the far plane) pays that cost en masse the frame
- * it first appears, a measured ~75ms hitch per ~180 fields that scales with count.
- * Precompiling (renderer.compileAsync) does not cover it — only a draw does. This
- * frame draws to the canvas inside the normal loop, BEFORE the frame's real render,
- * so the real view overwrites it prior to present: the cost lands at load time, where
- * latency already reads as loading, and first fly-in stays smooth.
- */
-function warmUpRender(gl, scene, camera, ctx) {
-  const bounds = new THREE.Box3();
-  for (const e of ctx?.registry?.list?.() ?? []) {
-    const b = e.grid?.getBounds?.();
-    if (b && !b.isEmpty()) bounds.union(b);
-  }
-  if (bounds.isEmpty()) return;
-  const center = bounds.getCenter(new THREE.Vector3());
-  const size = bounds.getSize(new THREE.Vector3());
-  // Back off far enough that the default fov contains the widest axis; far covers the
-  // stand-off plus the field's own depth, with headroom. Containment is all that
-  // matters here — nothing about this pose is seen.
-  const d = Math.max(size.x, size.y, 100);
-  const warm = camera.clone();
-  warm.position.set(center.x, center.y, bounds.max.z + d);
-  warm.far = (d + size.z) * 4;
-  warm.lookAt(center);
-  warm.updateProjectionMatrix();
-  warm.updateMatrixWorld(true);
-  gl.render(scene, warm);
 }
 
 /** Access the wired command client: { ctx, router, registry, bridge }. */
@@ -390,7 +309,7 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     const router = new CommandRouter(ctx);
     registerAllCommands(router);
     router.use((name, args) => console.debug(`[cmd] ${name}`, args.length ? args : ''));
-    stateRef.current = { ctx, router, registry: ctx.registry, bridge: null, bootWarm: true };
+    stateRef.current = { ctx, router, registry: ctx.registry, bridge: null };
   }
 
   useEffect(() => {
@@ -760,18 +679,6 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     const reconcileWorkspace = () => state.ctx.workspace?.reconcile(state.registry);
     state.registry.addChangeListener(reconcileWorkspace);
 
-    // First-draw warm-up scheduling: any registry GROWTH (a load, a restore, a spawned
-    // terminal) re-arms a short debounce; when it lapses, <DockRunner/> renders one warm
-    // frame (warmUpRender) so freshly-loaded fields never pay their GPU first-draw burst
-    // at first sight. Growth-only — removals free resources, nothing to warm.
-    let warmGridCount = state.registry.list().length;
-    const scheduleWarmUp = () => {
-      const n = state.registry.list().length;
-      if (n > warmGridCount) state.warmAt = performance.now() + 400;
-      warmGridCount = n;
-    };
-    state.registry.addChangeListener(scheduleWarmUp);
-
     // Hand the wired client to the app (for DOM chrome outside the Canvas).
     onReady?.(state);
 
@@ -792,7 +699,6 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
         if (prev.mesh) { try { state.ctx.pickingSystem?.unregister?.('group', prev.mesh); } catch (_e) { /* best effort */ } }
       }
       state.registry.removeChangeListener(reconcileWorkspace);
-      state.registry.removeChangeListener(scheduleWarmUp);
       session.dispose();
       keystrokes();   // installKeyboardRouter returns its uninstall fn
       bridge.disconnect();

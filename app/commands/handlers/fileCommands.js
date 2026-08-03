@@ -238,11 +238,10 @@ export default function registerFileCommands(router) {
             // between slices (budget 0 = one tick). A warm build is 4–5ms even for a
             // fat file — it fits the frame budget — and the worker detour measured
             // 5–8× SLOWER than the work itself (23–40ms round-trip for a 4ms build;
-            // the 78–97ms blocks that once justified it were the cold-start stack,
-            // fixed at the root by bootWarmRender). Status counts up, and a throttled
-            // relayout mid-stream lets the glide pour grids into their slots — held
-            // under a restore's batch window, so a launch still settles exactly once
-            // (Settings ▸ Loading).
+            // the 78–97ms blocks that once justified it were cold-start cost). Status
+            // counts up, and a throttled relayout mid-stream lets the glide pour grids
+            // into their slots — held under a restore's batch window, so a launch
+            // still settles exactly once (Settings ▸ Loading).
             const budget = Number(ctx.loadBuildBudget ?? 12);
             const yieldFrame = () => new Promise((r) => {
                 // rAF is the real frame boundary; the timer keeps a hidden tab

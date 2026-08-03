@@ -116,8 +116,7 @@ function registerFileGrid(ctx, path, body, notRendered, mtime) {
     if (!grid) return null;
     // Main-thread on purpose: a warm build is 4–5ms even for a fat file (the worker
     // detour measured 5–8× slower than the work — 23–40ms round-trip for a 4ms
-    // build), and the bulk path slices these under a frame budget. Cold-start cost
-    // lives in bootWarmRender, not here.
+    // build), and the bulk path slices these under a frame budget.
     grid.loadFile(path, body);
     return seatFileGrid(ctx, path, grid, notRendered, mtime);
 }
