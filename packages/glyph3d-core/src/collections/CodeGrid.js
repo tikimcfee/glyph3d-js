@@ -144,9 +144,6 @@ class CodeGrid extends FramedGlyphField {
         // the current matrix), so there is no world-bounds cache to hold here.
         // Bounds from the worker path (raw plain-object bounds from buffer builder)
         this._workerBoundsCache = null;
-        // Whether the renderer-side content bounds should be recomputed
-        this._contentBoundsDirty = true;
-        this._contentBoundsCache = null;
 
         // ── Windowing (opt-in scrollable viewport over the full source) ──────
         // Off by default → the grid renders the whole file. setWindow() switches
@@ -197,21 +194,6 @@ class CodeGrid extends FramedGlyphField {
      * `foldLayout` constrains the fold (merged over config.layout, not mutating it);
      * optional `clear(grid)`. Idempotent registration.
      */
-    /**
-     * The GPU-engine gate, decided BEFORE the build so the builder can skip the position
-     * array entirely (emitPositions:false); the commit re-reads the same decision from
-     * shared.emitPositions — one choice, two readers, no drift. The kernel serves plain,
-     * unarranged, scale-1 content; anything else takes the CPU path wholesale.
-     * @private
-     * @param {Array} items - the items about to be built
-     * @returns {boolean}
-     */
-    _engineEligible(items) {
-        return isGpuLayoutEnabled()
-            && this._arrangers.every((a) => a.engineCapable === true)
-            && items.every((it) => (it.scale ?? 1) === 1);
-    }
-
     /**
      * Re-dispatch the engine layout from RETAINED state — no builder run, no new arrays.
      * Everything the kernel needs survives between flushes: line tables on the field's
@@ -303,7 +285,15 @@ class CodeGrid extends FramedGlyphField {
         return out;
     }
 
-    registerArranger(a) { if (a && !this._arrangers.includes(a)) this._arrangers.push(a); }
+    /** Register an arranger. Engine-only: it must serve the displacement-table path —
+     *  there is no CPU layout path to fall back to. Idempotent registration. */
+    registerArranger(a) {
+        if (!a) return;
+        if (a.engineCapable !== true) {
+            throw new Error('CodeGrid.registerArranger: arranger is not engineCapable — no CPU layout path exists to serve it');
+        }
+        if (!this._arrangers.includes(a)) this._arrangers.push(a);
+    }
     /** Remove a previously-registered arranger. */
     unregisterArranger(a) { const i = this._arrangers.indexOf(a); if (i >= 0) this._arrangers.splice(i, 1); }
 
@@ -313,31 +303,17 @@ class CodeGrid extends FramedGlyphField {
     unregisterDecoration(d) { const i = this._decorations.indexOf(d); if (i >= 0) this._decorations.splice(i, 1); }
 
     /**
-     * The ARRANGE stage. After the fold has materialized the buffer + LayoutDescription,
-     * run each arranger (it re-derives positions from anchors and writes the live instance
-     * buffer). Because this runs before bounds, the footprint walk sees the arranged shape —
-     * no override needed. Invalidates the bounds caches + refreshes the frustum-cull bounds.
+     * The ARRANGE stage. After the fold has dispatched + the LayoutDescription is built,
+     * run each arranger (it re-derives glyph transforms from stable anchors and writes the
+     * displacement table, then re-dispatches via _resyncEngineLayout). Engine grids: the
+     * arranger sets the arranged bounds itself (setEngineBounds — it KNOWS the extent,
+     * packing box / plane depth, better than any walk); there is no CPU buffer to re-walk.
      * No-op (and zero cost) when nothing is registered.
      * @private
      */
     _applyArrangers() {
         if (!this._arrangers.length || !this._renderer) return;
-        let ran = false;
-        for (const a of this._arrangers) { if (a.arrange) { a.arrange(this); ran = true; } }
-        if (!ran) return;
-        if (this._renderer.gpuLayout === true) {
-            // Engine grids: the arranger already re-dispatched (_resyncEngineLayout) and set
-            // the arranged bounds itself (it KNOWS the extent — packing box / plane depth —
-            // better than any walk). Nulling the cache here would leave getContentBounds
-            // with nothing: there is no CPU buffer to re-walk.
-            return;
-        }
-        // The arrangers rewrote the live positions; the worker's flow-bounds cache is now
-        // wrong and the cull bounds were set to the flow extent. Drop the cache, mark dirty
-        // (the next _getContentBounds re-walks the arranged buffer), refresh the cull bounds.
-        this._workerBoundsCache  = null;
-        this._contentBoundsDirty = true;
-        this._renderer.refreshBounds(); // re-walk the now-arranged buffer
+        for (const a of this._arrangers) a.arrange?.(this);
     }
 
     /**
@@ -354,7 +330,6 @@ class CodeGrid extends FramedGlyphField {
             height: bounds.max.y - bounds.min.y,
             depth: bounds.max.z - bounds.min.z,
         };
-        this._contentBoundsDirty = false;
         this._renderer?._updateGeometryBounds(this._workerBoundsCache);
     }
 
@@ -1212,8 +1187,6 @@ class CodeGrid extends FramedGlyphField {
         this._reverseIdMap.clear();
         this._committedTexts.clear();
         this._dirty = false;
-        this._contentBoundsDirty = true;
-        this._contentBoundsCache = null;
         this._workerBoundsCache  = null;
     }
 
@@ -1226,7 +1199,6 @@ class CodeGrid extends FramedGlyphField {
         const id = this._nextLocalId++;
         this._pendingAdds.push({ id, text, position: { ...position }, options: { ...options } });
         this._dirty = true;
-        this._contentBoundsDirty = true;
         return id;
     }
 
@@ -1242,7 +1214,6 @@ class CodeGrid extends FramedGlyphField {
             this._pendingRemovals.push(this._idMap.get(id));
         }
         this._dirty = true;
-        this._contentBoundsDirty = true;
     }
 
     /**
@@ -1328,33 +1299,31 @@ class CodeGrid extends FramedGlyphField {
             }
         }
 
-        // Engine choice for THIS commit: decided once, pre-build (_engineEligible), and
-        // carried here as shared.emitPositions === false — the build that skipped the
-        // position array and the commit that routes to the kernel can never disagree.
-        const engineOn = !!shared && shared.emitPositions === false;
-        this._renderer.setGpuLayout(engineOn);
+        // Every commit is an engine build (emitPositions:false at the source): the kernel
+        // dispatch below IS the layout — applyPrebuiltBuffers adopts no CPU positions.
+        // The builder's scalar-walk bounds are exact for unpaginated content; a paginated
+        // item gets its extent from the adapter's analytic override.
+        this._renderer.setGpuLayout(true);
 
         const rendererIds = this._renderer.applyPrebuiltBuffers(buffers, items);
         this._workerBoundsCache  = buffers.bounds;
-        this._contentBoundsDirty = false;
 
-        // Under the engine this dispatch IS the layout: applyPrebuiltBuffers adopted no CPU
-        // positions, and the kernel writes the field's storage attribute directly. The
-        // builder's scalar-walk bounds are exact for unpaginated content; a paginated
-        // engine item gets its extent from the adapter's analytic override.
-        if (engineOn) {
-            // A commit is a NEW fold — a standing displacement table was computed against
-            // the OLD one (dz = plane − oldFoldZ) and would land glyphs on garbage planes
-            // if dispatched now; on a slot-count change it also misaligns wholesale. Drop
-            // it: arrangers re-derive against the fresh fold immediately after the flush
-            // (_applyArrangers → arrange → _resyncEngineLayout), and until they do the
-            // grid renders honestly FLAT — never scrambled.
-            this._renderer._layoutDisplacements = null;
-            const res = syncGpuLayout(this._renderer, buffers, items, shared, rendererIds);
-            if (res?.bounds) {
-                this._workerBoundsCache = res.bounds;
-                this._renderer._updateGeometryBounds(res.bounds);
-            }
+        // A commit is a NEW fold — a standing displacement table was computed against
+        // the OLD one (dz = plane − oldFoldZ) and would land glyphs on garbage planes
+        // if dispatched now; on a slot-count change it also misaligns wholesale. Drop
+        // it: arrangers re-derive against the fresh fold immediately after the flush
+        // (_applyArrangers → arrange → _resyncEngineLayout), and until they do the
+        // grid renders honestly FLAT — never scrambled.
+        this._renderer._layoutDisplacements = null;
+        if (!isGpuLayoutEnabled()) {
+            // Loud, not silent: no compute renderer registered (boot-order breach) means
+            // the kernel can't dispatch and this grid renders unlaid at the origin.
+            console.error('CodeGrid: engine commit with no compute renderer registered — grid renders unlaid (boot-order breach)');
+        }
+        const res = syncGpuLayout(this._renderer, buffers, items, shared, rendererIds);
+        if (res?.bounds) {
+            this._workerBoundsCache = res.bounds;
+            this._renderer._updateGeometryBounds(res.bounds);
         }
 
         for (let i = 0; i < items.length; i++) {
@@ -1398,11 +1367,10 @@ class CodeGrid extends FramedGlyphField {
         // Process adds via the builder (synchronous main-thread build)
         if (this._pendingAdds.length > 0) {
             const { items, metrics, defaultColor, layout, scrollOffset } = this._prepareAddsForBuild();
-            // Engine grids skip the position array at the SOURCE: the builder emits only
-            // tables + attributes, and the kernel dispatch after commit is the layout.
-            const emitPositions = !this._engineEligible(items);
-            const buffers = getWorkerBridge().buildBatchBuffersSync(items, { metrics, defaultColor, layout, scrollOffset, emitPositions });
-            this._commitBuiltBuffers(buffers, items, [], { metrics, layout, scrollOffset, emitPositions });
+            // Engine-only: the builder skips the position array at the SOURCE (tables +
+            // attributes only), and the kernel dispatch after commit is the layout.
+            const buffers = getWorkerBridge().buildBatchBuffersSync(items, { metrics, defaultColor, layout, scrollOffset, emitPositions: false });
+            this._commitBuiltBuffers(buffers, items, [], { metrics, layout, scrollOffset });
         }
 
         if (this._renderer && this._pickingSystem) {
@@ -1410,7 +1378,6 @@ class CodeGrid extends FramedGlyphField {
         }
 
         this._dirty = false;
-        this._contentBoundsDirty = true;
     }
 
     /**
@@ -1435,10 +1402,9 @@ class CodeGrid extends FramedGlyphField {
 
         if (this._pendingAdds.length > 0) {
             const { items, metrics, defaultColor, layout, scrollOffset } = this._prepareAddsForBuild();
-            const emitPositions = !this._engineEligible(items);
             try {
-                const buffers = await getWorkerBridge().buildBatchBuffers(items, { metrics, defaultColor, layout, scrollOffset, emitPositions });
-                this._commitBuiltBuffers(buffers, items, deferredRemovals, { metrics, layout, scrollOffset, emitPositions });
+                const buffers = await getWorkerBridge().buildBatchBuffers(items, { metrics, defaultColor, layout, scrollOffset, emitPositions: false });
+                this._commitBuiltBuffers(buffers, items, deferredRemovals, { metrics, layout, scrollOffset });
             } catch (error) {
                 console.warn('CodeGrid: Worker flush failed, falling back to sync:', error);
                 // Put the deferred removals back so _flush() applies them.
@@ -1650,59 +1616,14 @@ class CodeGrid extends FramedGlyphField {
     }
 
     /**
-     * Compute the plain-object content bounds over all committed renderer entries.
-     * Returns { min, max, width, height, depth } or null.
+     * The content bounds over all committed renderer entries, or null.
+     * Engine-owned fields have no CPU position buffer to walk — the builder/kernel extent
+     * from the last flush, or an arranger's setEngineBounds, IS the truth, and no CPU
+     * writer can move glyphs between commits, so the cache never goes stale.
      * @private
      */
     _getContentBounds() {
-        // Fast path: worker precomputed bounds are still valid. Under the GPU engine the
-        // cache is valid regardless of the dirty flag — no CPU writer can move glyphs
-        // between commits (arrangers are engine-ineligible), so the builder's extent from
-        // the last flush IS the truth; the walk below would read a GPU-owned buffer anyway.
-        if (this._workerBoundsCache && (!this._contentBoundsDirty || this._renderer?.gpuLayout)) {
-            return this._workerBoundsCache;
-        }
-        if (!this._contentBoundsDirty && this._contentBoundsCache) {
-            return this._contentBoundsCache;
-        }
-
-        if (!this._renderer) {
-            this._contentBoundsCache = null;
-            return null;
-        }
-
-        // Walk all committed renderedTexts entries and union their bounds
-        let minX = Infinity, minY = Infinity, minZ = Infinity;
-        let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-        let found = false;
-
-        for (const [, entry] of this._renderer.renderedTexts) {
-            const b = this._renderer._getTextBounds(entry);
-            if (!b) continue;
-            found = true;
-            if (b.min.x < minX) minX = b.min.x;
-            if (b.min.y < minY) minY = b.min.y;
-            if (b.min.z < minZ) minZ = b.min.z;
-            if (b.max.x > maxX) maxX = b.max.x;
-            if (b.max.y > maxY) maxY = b.max.y;
-            if (b.max.z > maxZ) maxZ = b.max.z;
-        }
-
-        if (!found) {
-            this._contentBoundsCache = null;
-            this._contentBoundsDirty = false;
-            return null;
-        }
-
-        this._contentBoundsCache = {
-            min: { x: minX, y: minY, z: minZ },
-            max: { x: maxX, y: maxY, z: maxZ },
-            width:  maxX - minX,
-            height: maxY - minY,
-            depth:  maxZ - minZ,
-        };
-        this._contentBoundsDirty = false;
-        return this._contentBoundsCache;
+        return this._workerBoundsCache ?? null;
     }
 
     // ============ Line → Buffer Slot Mapping ============
@@ -2306,9 +2227,8 @@ class CodeGrid extends FramedGlyphField {
      * @private
      */
     _updateBackground() {
-        // Content changed — the local content bounds must be recomputed (getBounds
-        // re-derives the world box from them each call).
-        this._contentBoundsDirty = true;
+        // Content changed — getBounds re-derives the world box from the cached local
+        // content bounds each call, so the panel just re-fits to them.
         this._sizeBackgroundTo(this._getContentBounds());
     }
 

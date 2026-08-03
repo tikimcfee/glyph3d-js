@@ -1644,11 +1644,6 @@ export default class GlyphField {
         };
     }
 
-    _getTextBounds(entry) {
-        if (!entry || entry.glyphCount === 0) return null;
-        return this.measureSlotRange(entry.bufferStartIndex, entry.glyphCount);
-    }
-
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
     /**
@@ -1924,16 +1919,6 @@ export default class GlyphField {
         geom.boundingBox = box;
         box.getBoundingSphere(sphere);
         geom.boundingSphere = sphere;
-    }
-
-    /**
-     * Public: refresh the geometry's frustum-cull bounds (boundingBox + Sphere) by
-     * walking the live instance buffer. A structural arranger bakes its glyph moves
-     * straight into instancePosition, so a plain walk sees the arranged footprint —
-     * no precomputed extent needed.
-     */
-    refreshBounds() {
-        this._updateGeometryBounds();
     }
 
     /**
