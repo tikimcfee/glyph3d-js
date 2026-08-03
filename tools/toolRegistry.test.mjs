@@ -110,6 +110,23 @@ const CWD = '/home/ivan/dev/glyph3d-js/';
   eq(normalizeToolCall('WebSearch', { query: 'q' }, { content: 'hits' }, CWD).action, 'search', 'search: action');
 }
 
+// ── kimi-only names: same registry, adapter-translated shapes ─────────────────────────
+{
+  eq(normalizeToolCall('TodoList', {}, {}, CWD), null, 'TodoList → null (noise)');
+  eq(normalizeToolCall('EnterPlanMode', {}, {}, CWD), null, 'EnterPlanMode → null (noise)');
+  const sw = normalizeToolCall('AgentSwarm', { description: 'review each file' }, { output: 'done' }, CWD);
+  eq(sw.action, 'task', 'AgentSwarm → task');
+  eq(sw.detail, 'review each file', 'AgentSwarm: detail is the description');
+  eq(sw.result, 'done', 'AgentSwarm: output kept as result (no target)');
+  const f = normalizeToolCall('FetchURL', { url: 'http://x' }, { output: 'page text' }, CWD);
+  eq(f.action, 'fetch', 'FetchURL → fetch');
+  eq(f.detail, 'http://x', 'FetchURL: detail url');
+  eq(f.result, 'page text', 'FetchURL: result from .output');
+  const sk = normalizeToolCall('Skill', { skill: 'pdf' }, null, CWD);
+  eq(sk.action, 'skill', 'Skill → skill');
+  eq(sk.detail, 'pdf', 'Skill: detail is the skill name');
+}
+
 // ── noise tools drop entirely (null → caller skips) ───────────────────────────────────
 {
   eq(normalizeToolCall('TodoWrite', {}, {}, CWD), null, 'TodoWrite → null (noise)');

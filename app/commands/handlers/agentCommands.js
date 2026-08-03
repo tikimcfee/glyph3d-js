@@ -27,25 +27,39 @@
 
 import { resolveGridByIdOrIndex } from './spatialHelpers.js';
 import { normalizeToolCall, normalizeMessage } from '@glyph3d/core/collections/toolRegistry.js';
-import { parseClaudeSession, agentIdForSession } from '@glyph3d/core/collections/sessionAdapter.js';
+import { parseClaudeSession, parseKimiSession, agentIdForSession, kimiAgentIdForSession }
+    from '@glyph3d/core/collections/sessionAdapter.js';
 
 const noBooks = { text: 'ERR: agent books not wired', data: null };
 
+/** The lane id an archive entry opens under — per-harness derivation (the kimi ids'
+ *  `session_` prefix would collapse every kimi lane to one id under the claude rule). */
+const agentIdForEntry = (s) => (s.harness === 'kimi' ? kimiAgentIdForSession(s.id) : agentIdForSession(s.id));
+
 /**
  * Open a stored agent session as a book: fetch the harness's own record (the durable
- * state), parse it through the adapter, and bulk-hydrate a lane whose id matches the
- * live hook's derivation — so if the session is still running, its stream converges on
- * the same book. The ONE open path: the agent.open verb and session restore both ride it.
+ * state), parse it through the harness's adapter, and bulk-hydrate a lane whose id matches
+ * the harness's derivation — for claude that's the live hook's, so a still-running
+ * session's stream converges on the same book. The ONE open path: the agent.open verb and
+ * session restore both ride it.
  * @param {Object} ctx
  * @param {string} sessionId full session id (the record's filename stem)
- * @param {{limit?: number}} [opts] turns to keep (0 = all) — becomes the book's retention
- *        override; omitted → the book's cap (its override, else cfg.maxSheets)
+ * @param {{limit?: number, harness?: string}} [opts] limit = turns to keep (0 = all) —
+ *        becomes the book's retention override; omitted → the book's cap (its override,
+ *        else cfg.maxSheets). harness = which archive/adapter ('claude' default | 'kimi').
  * @returns {Promise<{agentId: string, added: number, total: number}>}
  */
-export async function openAgentSession(ctx, sessionId, { limit } = {}) {
+export async function openAgentSession(ctx, sessionId, { limit, harness = 'claude' } = {}) {
     const provider = ctx.sessionProvider;
     if (!provider) throw new Error('no session provider (relay offline — the archive is a relay feature)');
     if (!ctx.agentBooks) throw new Error('agent books not wired');
+    if (harness === 'kimi') {
+        const { content, cwd: indexCwd } = await provider.read(sessionId, { harness: 'kimi' });
+        const { events, cwd } = parseKimiSession(content, indexCwd);
+        const agentId = kimiAgentIdForSession(sessionId);
+        const added = ctx.agentBooks.hydrate(agentId, events, { agentType: 'kimi', sessionId, cwd, limit });
+        return { agentId, added, total: events.length };
+    }
     const { content } = await provider.read(sessionId);
     const { events, cwd } = parseClaudeSession(content);
     const agentId = agentIdForSession(sessionId);
@@ -53,13 +67,15 @@ export async function openAgentSession(ctx, sessionId, { limit } = {}) {
     return { agentId, added, total: events.length };
 }
 
-/** Resolve a session id or unique prefix against the archive listing (dash-insensitive). */
-async function resolveSessionId(provider, idOrPrefix) {
+/** Resolve a session id or unique prefix against the archive listing (dash-insensitive).
+ *  Returns the full entry {id, harness} — the harness tags which adapter opens it. */
+async function resolveSessionEntry(provider, idOrPrefix) {
     const sessions = await provider.list();
-    if (sessions.some((s) => s.id === idOrPrefix)) return idOrPrefix;
+    const exact = sessions.find((s) => s.id === idOrPrefix);
+    if (exact) return exact;
     const norm = String(idOrPrefix).replace(/-/g, '');
     const hits = sessions.filter((s) => s.id.replace(/-/g, '').startsWith(norm));
-    if (hits.length === 1) return hits[0].id;
+    if (hits.length === 1) return hits[0];
     if (hits.length > 1) throw new Error(`ambiguous session '${idOrPrefix}' (${hits.length} matches)`);
     throw new Error(`no session '${idOrPrefix}'`);
 }
@@ -171,12 +187,13 @@ export default function registerAgentCommands(router) {
         catch (e) { return { text: `ERR: archive list failed — ${e?.message || e}`, data: null }; }
         const open = new Set([...(ctx.agentBooks?.lanes.keys() ?? [])]);
         const rows = sessions.map((s) => {
-            const isOpen = open.has(agentIdForSession(s.id));
-            return `${s.id.replace(/-/g, '').slice(0, 8)}  ${fmtAge(s.mtime).padStart(4)}  ${fmtSize(s.size).padStart(6)}${isOpen ? '  · open' : ''}`;
+            const isOpen = open.has(agentIdForEntry(s));
+            const tag = s.harness === 'kimi' ? 'kimi   ' : '';
+            return `${s.id.replace(/-/g, '').slice(0, 8)}  ${tag}${fmtAge(s.mtime).padStart(4)}  ${fmtSize(s.size).padStart(6)}${isOpen ? '  · open' : ''}`;
         });
         return {
             text: `ARCHIVE (${sessions.length} session${sessions.length === 1 ? '' : 's'})\n` + (rows.length ? rows.join('\n') : '(none)'),
-            data: { sessions: sessions.map((s) => ({ id: s.id, mtime: s.mtime, size: s.size, open: open.has(agentIdForSession(s.id)) })) },
+            data: { sessions: sessions.map((s) => ({ id: s.id, mtime: s.mtime, size: s.size, harness: s.harness || 'claude', open: open.has(agentIdForEntry(s)) })) },
         };
     }, { description: 'List the stored agent session records (the archive)', returns: '{ sessions:[{id,mtime,size,open}] }' });
 
@@ -187,13 +204,13 @@ export default function registerAgentCommands(router) {
         const [idArg, limitArg] = args;
         if (!idArg) return { text: 'ERR: usage: agent.open <sessionId|prefix> [limit]', data: null };
         try {
-            const sessionId = await resolveSessionId(provider, idArg);
+            const entry = await resolveSessionEntry(provider, idArg);
             const limit = limitArg != null ? Number(limitArg) : undefined;
-            const r = await openAgentSession(ctx, sessionId, { limit });
+            const r = await openAgentSession(ctx, entry.id, { limit, harness: entry.harness });
             const capped = r.added < r.total ? ` (of ${r.total} — tail)` : '';
             return {
-                text: `OK: opened ${sessionId.slice(0, 8)} as ${r.agentId} — ${r.added} sheet${r.added === 1 ? '' : 's'}${capped}`,
-                data: { sessionId, ...r },
+                text: `OK: opened ${entry.id.slice(0, 8)} as ${r.agentId} — ${r.added} sheet${r.added === 1 ? '' : 's'}${capped}`,
+                data: { sessionId: entry.id, harness: entry.harness || 'claude', ...r },
             };
         } catch (e) {
             return { text: `ERR: ${e?.message || e}`, data: null };

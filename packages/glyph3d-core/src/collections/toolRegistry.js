@@ -1,7 +1,9 @@
 /**
- * toolRegistry — the ONE home for per-tool-call knowledge, keyed by the RAW tool name Claude Code
- * emits (Read, Edit, Bash, …). It turns a raw tool event into the normalized record the agent
- * books render, plus the highlight directives that decorate a snapshot:
+ * toolRegistry — the ONE home for per-tool-call knowledge, keyed by the RAW tool name the harness
+ * adapter emits (Read, Edit, Bash, … — Claude-shaped; a second harness's adapter translates its
+ * dialect into these names/arg shapes, so this file stays harness-agnostic). It turns a raw tool
+ * event into the normalized record the agent books render, plus the highlight directives that
+ * decorate a snapshot:
  *
  *   normalizeToolCall(name, input, response, cwd) → { action, target, detail, result, meta } | null
  *   decorateForAction(action, meta)               → [{ startLine, endLine, color }] (0-based, incl.) | null
@@ -151,13 +153,18 @@ const TOOLS = {
     Glob:         { action: 'glob',  detail: (i) => i.pattern },
     Task:         { action: 'task',  detail: (i) => i.subagent_type || i.description, meta: taskMeta },
     Agent:        { action: 'task',  detail: (i) => i.subagent_type || i.description, meta: taskMeta },
+    AgentSwarm:   { action: 'task',  detail: (i) => i.description,   meta: taskMeta },   // kimi's parallel-Task
     Workflow:     { action: 'task',  detail: (i) => 'workflow: ' + (i.name || '') },
     // result holds the chosen answer (the tool response carries it as output text); detail is the question.
     AskUserQuestion: { action: 'ask', detail: askDetail },
     WebFetch:     { action: 'fetch',  detail: (i) => i.url },
+    FetchURL:     { action: 'fetch',  detail: (i) => i.url },        // kimi's WebFetch
     WebSearch:    { action: 'search', detail: (i) => i.query },
+    Skill:        { action: 'skill',  detail: (i) => i.skill },      // kimi-only ('other' kind bucket)
     // noise — high-frequency bookkeeping not worth a card (dropped at normalize).
     TodoWrite:    { noise: true },
+    TodoList:     { noise: true },   // kimi's TodoWrite
+    EnterPlanMode: { noise: true },  // kimi-only
     ToolSearch:   { noise: true },
     TaskGet:      { noise: true },
     TaskOutput:   { noise: true },
@@ -176,7 +183,7 @@ const ACTION_DECORATORS = {
 /**
  * Normalize a RAW tool event into the trail's record fields. The single seam both the live hook and
  * the replay funnel through; pure, so it's the unit-test surface too.
- * @param {string} name      raw Claude Code tool name (Read/Edit/Bash/…)
+ * @param {string} name      raw tool name (Read/Edit/Bash/… — adapter-translated, Claude-shaped)
  * @param {Object} [input]   the tool's input (file_path, command, pattern, …)
  * @param {Object|string} [response] the tool's result (toolUseResult / hook tool_response)
  * @param {string} [cwd]     working dir, to relativize an absolute target path

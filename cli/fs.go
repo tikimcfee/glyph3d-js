@@ -372,6 +372,12 @@ type FSHandler struct {
 	// agentSessions/* methods treat an absent dir as empty, never an error.
 	sessionsDir string
 
+	// kimiIndex is the Kimi Code session index path (~/.kimi-code/
+	// session_index.jsonl) — the second harness's archive, matched to the
+	// served root by workDir. "" when home is unknown; a missing file is an
+	// empty archive, same philosophy as sessionsDir.
+	kimiIndex string
+
 	// extraRoots are additional absolute, symlink-resolved directories the
 	// handler may reach OUTSIDE the project root. Seeded at construction from
 	// the temp dirs (/tmp, /var/tmp, $TMPDIR) plus the --reach flag, and widened
@@ -433,7 +439,7 @@ func NewFSHandler(root string, reach []string) (*FSHandler, error) {
 		extra = append(extra, r)
 	}
 
-	return &FSHandler{root: resolved, extraRoots: extra, sessionsDir: agentSessionsDir(resolved)}, nil
+	return &FSHandler{root: resolved, extraRoots: extra, sessionsDir: agentSessionsDir(resolved), kimiIndex: kimiSessionIndexPath()}, nil
 }
 
 // evalRootOrEmpty resolves a candidate reach directory to its absolute,

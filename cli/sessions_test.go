@@ -80,6 +80,156 @@ func readSession(t *testing.T, h *FSHandler, params string) (*agentSessionsReadR
 	return &r, c
 }
 
+// newKimiFixture builds a temp Kimi Code archive: an index file plus one
+// agents/main/wire.jsonl per session, all under one temp "kimi home" (the
+// read path's containment check requires the wire file under the index's
+// dir). Entries for other roots ride along unfiltered — the handler's
+// workDir match is what's under test. Points h.kimiIndex at the index.
+func newKimiFixture(t *testing.T, h *FSHandler, sessions map[string]string, mtime time.Time) {
+	t.Helper()
+	home := t.TempDir()
+	var index []byte
+	for sid, body := range sessions {
+		dir := filepath.Join(home, "sessions", sid)
+		wire := kimiWirePath(dir)
+		if err := os.MkdirAll(filepath.Dir(wire), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(wire, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(wire, mtime, mtime); err != nil {
+			t.Fatal(err)
+		}
+		line, _ := json.Marshal(map[string]string{
+			"sessionId": sid, "sessionDir": dir, "workDir": h.root,
+		})
+		index = append(index, line...)
+		index = append(index, '\n')
+	}
+	// An entry for a DIFFERENT root must never leak into this root's archive.
+	stray, _ := json.Marshal(map[string]string{
+		"sessionId": "session_stray", "sessionDir": home, "workDir": "/some/other/root",
+	})
+	index = append(index, stray...)
+	index = append(index, '\n')
+	indexPath := filepath.Join(home, "session_index.jsonl")
+	if err := os.WriteFile(indexPath, index, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.kimiIndex = indexPath
+}
+
+func TestAgentSessionsList_KimiMergedNewestFirst(t *testing.T) {
+	h, dir := newSessionsHandler(t)
+	older := time.Now().Add(-2 * time.Hour).Truncate(time.Second)
+	newer := time.Now().Add(-1 * time.Hour).Truncate(time.Second)
+	writeSession(t, dir, "aaaa-1111.jsonl", "{}\n", older)
+	newKimiFixture(t, h, map[string]string{
+		"session_bbbb-2222": "{\"type\":\"metadata\"}\n",
+	}, newer)
+
+	r := listSessions(t, h)
+	if len(r.Sessions) != 2 {
+		t.Fatalf("got %d sessions, want 2: %+v", len(r.Sessions), r.Sessions)
+	}
+	if r.Sessions[0].ID != "session_bbbb-2222" || r.Sessions[0].Harness != "kimi" {
+		t.Errorf("kimi first (newer): got %+v", r.Sessions[0])
+	}
+	if r.Sessions[1].ID != "aaaa-1111" || r.Sessions[1].Harness != "claude" {
+		t.Errorf("claude second: got %+v", r.Sessions[1])
+	}
+}
+
+func TestAgentSessionsList_KimiMissingWireSkipped(t *testing.T) {
+	h, _ := newSessionsHandler(t)
+	home := t.TempDir()
+	// Index entry whose agents/main/wire.jsonl was never written — unlistable.
+	line, _ := json.Marshal(map[string]string{
+		"sessionId": "session_ghost", "sessionDir": filepath.Join(home, "sessions", "session_ghost"), "workDir": h.root,
+	})
+	if err := os.WriteFile(filepath.Join(home, "session_index.jsonl"), append(line, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.kimiIndex = filepath.Join(home, "session_index.jsonl")
+
+	r := listSessions(t, h)
+	if len(r.Sessions) != 0 {
+		t.Errorf("missing wire file must not list: got %+v", r.Sessions)
+	}
+}
+
+func TestAgentSessionsList_KimiAbsentIndex(t *testing.T) {
+	h, _ := newSessionsHandler(t)
+	h.kimiIndex = filepath.Join(t.TempDir(), "no-such-index.jsonl")
+
+	r := listSessions(t, h)
+	if len(r.Sessions) != 0 {
+		t.Errorf("absent index: got %d sessions, want 0", len(r.Sessions))
+	}
+}
+
+func TestAgentSessionsRead_Kimi(t *testing.T) {
+	h, _ := newSessionsHandler(t)
+	body := "{\"type\":\"metadata\"}\n{\"type\":\"turn.prompt\"}\n"
+	mt := time.Now().Add(-time.Hour).Truncate(time.Second)
+	newKimiFixture(t, h, map[string]string{"session_abc-123": body}, mt)
+
+	r, c := readSession(t, h, `{"id":"session_abc-123","harness":"kimi"}`)
+	if r == nil {
+		t.Fatalf("read error: %+v", c.Error)
+	}
+	if r.Content != body {
+		t.Errorf("content: got %q, want %q", r.Content, body)
+	}
+	if r.Truncated {
+		t.Error("full read must not report truncated")
+	}
+	if r.Size != int64(len(body)) || r.Mtime != mt.UnixMilli() {
+		t.Errorf("stat: got size=%d mtime=%d, want size=%d mtime=%d", r.Size, r.Mtime, len(body), mt.UnixMilli())
+	}
+	if r.Cwd != h.root {
+		t.Errorf("cwd: got %q, want the index workDir %q", r.Cwd, h.root)
+	}
+}
+
+func TestAgentSessionsRead_KimiTailAlignsToLine(t *testing.T) {
+	h, _ := newSessionsHandler(t)
+	newKimiFixture(t, h, map[string]string{"session_abc-123": "aaaa\nbbbb\ncccc\n"}, time.Now())
+
+	r, c := readSession(t, h, `{"id":"session_abc-123","harness":"kimi","tailBytes":8}`)
+	if r == nil {
+		t.Fatalf("read error: %+v", c.Error)
+	}
+	if r.Content != "cccc\n" || !r.Truncated {
+		t.Errorf("kimi tail: got content=%q truncated=%v, want %q+truncated", r.Content, r.Truncated, "cccc\n")
+	}
+}
+
+func TestAgentSessionsRead_KimiNotFoundAndDefaultHarness(t *testing.T) {
+	h, _ := newSessionsHandler(t)
+	newKimiFixture(t, h, map[string]string{"session_abc-123": "{}\n"}, time.Now())
+
+	// Unknown kimi id → not found.
+	if r, c := readSession(t, h, `{"id":"session_nope","harness":"kimi"}`); r != nil {
+		t.Fatalf("unknown kimi id: expected not-found, got %+v", r)
+	} else if c.Error.Code != errFileNotFound {
+		t.Errorf("unknown kimi id: got code %d, want %d", c.Error.Code, errFileNotFound)
+	}
+	// No harness param → claude — the kimi id must NOT resolve there.
+	if r, c := readSession(t, h, `{"id":"session_abc-123"}`); r != nil {
+		t.Fatalf("default harness must be claude: got %+v", r)
+	} else if c.Error.Code != errFileNotFound {
+		t.Errorf("default harness: got code %d, want %d", c.Error.Code, errFileNotFound)
+	}
+	// A nonsense harness is a params error.
+	if r, c := readSession(t, h, `{"id":"session_abc-123","harness":"gpt"}`); r != nil {
+		t.Fatalf("unknown harness: expected rejection, got %+v", r)
+	} else if c.Error.Code != -32602 {
+		t.Errorf("unknown harness: got code %d, want -32602", c.Error.Code)
+	}
+}
+
 func TestEncodeClaudeProjectDir(t *testing.T) {
 	// Pairs verified against real ~/.claude/projects entries: every character
 	// outside [A-Za-z0-9] becomes '-' (slashes, underscores, dots alike).

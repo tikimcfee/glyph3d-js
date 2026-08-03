@@ -259,6 +259,7 @@ export default class SessionStore {
     for (const a of (ctx.agentBooks?.agents?.() || [])) {
       const lane = ctx.agentBooks.lanes.get(a.id);
       const entry = a.sessionId ? { session: a.sessionId } : { prefix: a.id };
+      if (a.type && a.type !== 'claude') entry.harness = a.type;   // non-default harness rides along (kimi)
       entry.head = a.head;
       entry.following = !!a.following;
       if (lane?.maxSheets != null) entry.limit = lane.maxSheets;
@@ -531,10 +532,11 @@ export default class SessionStore {
           archivePromise ??= provider.list();
           const archive = await archivePromise;
           const norm = String(a.prefix).replace(/-/g, '');
-          sid = archive.find((s) => s.id.replace(/-/g, '').startsWith(norm))?.id || null;
+          sid = archive.find((s) => (!a.harness || (s.harness || 'claude') === a.harness)
+            && s.id.replace(/-/g, '').startsWith(norm))?.id || null;
         }
         if (!sid) return;   // nothing on disk answers to this book — it stays closed
-        const { agentId } = await openAgentSession(this.ctx, sid, { limit: a.limit });
+        const { agentId } = await openAgentSession(this.ctx, sid, { limit: a.limit, harness: a.harness });
         const lane = books.lanes.get(agentId);
         if (!lane) return;
         if (Array.isArray(a.pinned) && a.pinned.length === 3) books.moveGroup(agentId, ...a.pinned);
