@@ -1,37 +1,34 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { kimiAgentIdForSession } from '@glyph3d/core/collections/sessionAdapter.js';
 
 /**
- * AgentsPanel — the one 2D browser onto AgentBooks. A master-detail view: the agent
- * ROSTER up top (who's on the field: identity color, lifecycle state, raised-hand
- * beacon, sheet count, liveness), and underneath it a detail pane for the selected
- * agent — a scrub bar plus the scrollable stream of its book's sheets (oldest →
- * newest). Picking a roster row selects that book.
+ * AgentsPanel — the one 2D browser onto AgentBooks. ONE list of agent sessions, no
+ * master-detail split: every OPEN book is a single row (identity color, lifecycle
+ * state, raised-hand beacon, sheet count, liveness) that EXPANDS IN PLACE to its
+ * detail — the scrub bar, the kept-turns cap, and the scrollable stream of its
+ * sheets (oldest → newest) — and CLOSES via its ✕. One lane expanded at a time;
+ * expanding a row folds whichever was open.
  *
- * A list (not tabs) because subagents multiply: a dozen books is a scrollable column
- * where tabs would run off the panel's edge. The three regions — open books, the
- * selected book's detail, the archive — are a STANDARD LIST WITH SECTIONS (the
- * SettingsPanel pattern): one scrolling column, a foldable header row per region,
- * rows at natural height. Fold state is a view preference (localStorage), not
- * workspace state.
+ * Below the open books, separated by a slim divider, sit the relay's ARCHIVED
+ * session transcripts (ctx.sessionProvider — both harnesses, kimi tagged): id
+ * prefix, age, size. Clicking one pages it in as a lane (agent.open) and expands
+ * it; sessions already open are not listed twice — their lane row above IS their
+ * row. The archive group exists only when a session provider is connected.
  *
  * It owns no agent state; it reads agents()/getStream() and fires the same command bus
  * the 3D shelf obeys (the [[project_2d_companion_views]] model: the book owns the deck,
  * the panel turns it). Each book live-follows its newest sheet until you page back;
  * NOTHING here moves the camera.
  *
- *   click a roster row → select that agent's book (detail pane follows)
+ *   click a lane row   → expand / collapse its sheet stream
+ *   ✕ on a lane row    → agent.clear <id>
  *   + summon           → agent.spawn (an empty book — request an instance)
- *   clear done / ✕     → agent.clear done / agent.clear <id>
+ *   clear done         → agent.clear done
  *   click a sheet row  → book.page <agent> <n>   (open that sheet)
  *   ⏮ ◀ ▶ ⏭            → book.page first|prev|next|last
  *   keep [n] / ↺       → book.limit <agent> <n|default>   (this book's kept-turns cap;
  *                        0 keeps everything, ↺ follows the shelf default again)
  *   click an archive row → agent.open <session-id>   (page a past session in as a lane)
- *
- * Below the stream sits the ARCHIVE — the relay's stored session transcripts
- * (ctx.sessionProvider), a collapsed strip of past runs: id prefix, age, size.
- * Rows whose id matches an open lane show an 'open' marker instead of a click
- * target. The region exists only when a session provider is connected.
  *
  * Identity dots come from getStream()'s per-row `color` — the live hue table in
  * AgentBooks.cfg.hues (seeded from the tool registry's ONE action-hue home), so the 2D
@@ -61,32 +58,21 @@ const S = {
     title: { flex: '1 1 auto', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
     btn: { flex: '0 0 auto', cursor: 'pointer', padding: '0 5px', borderRadius: 3, color: '#7c8596', whiteSpace: 'nowrap' },
 
-    // -- the ONE scroll: everything below the global header is a standard list with
-    //    sections (the SettingsPanel pattern) — headers and rows flow at natural height
-    //    in a single scrolling column. No per-section scrollboxes, no flex physics.
+    // -- the ONE scroll: lane rows (each with its expandable detail) and archive rows
+    //    flow at natural height in a single scrolling column. No nested scrollboxes.
     body: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto' },
 
-    // -- section chrome: a header row per region; folding hides the rows below it.
-    sect: {
-        display: 'flex', alignItems: 'center', gap: 6, padding: '3px 8px', flex: '0 0 auto',
-        cursor: 'pointer', userSelect: 'none', color: '#5a616c', fontSize: 10,
-        letterSpacing: '0.08em', textTransform: 'uppercase',
-        borderTop: '1px solid #1b1f29',
-    },
-    sectCaret: { width: 10, textAlign: 'center', fontSize: 9 },
-    sectLabel: { flex: '1 1 auto', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-    sectHint: { flex: '0 0 auto', color: '#444b56', fontSize: 10 },
-
-    // -- master: the agent roster (open books) --
-    roster: { padding: '3px 0' },
+    // -- lane rows: an open book, collapsed to one line --
     agentRow: (on) => ({
         display: 'flex', alignItems: 'center', gap: 7, padding: '3px 8px',
         cursor: 'pointer', userSelect: 'none',
         borderLeft: `2px solid ${on ? '#6c8fc0' : 'transparent'}`,
         background: on ? 'rgba(120,150,200,0.12)' : 'transparent',
     }),
+    acaret: { flex: '0 0 auto', width: 10, textAlign: 'center', fontSize: 9, color: '#5a616c' },
     adot: { flex: '0 0 auto', fontSize: 9 },
     aid: { flex: '1 1 auto', minWidth: 0, color: '#dfe3ea', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+    aharness: { flex: '0 0 auto', color: '#5a616c', fontSize: 10 },
     astate: (c) => ({ flex: '0 0 auto', color: c, fontSize: 10 }),
     abeacon: { flex: '0 0 auto', color: '#f2a25c', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '35%', whiteSpace: 'nowrap' },
     acount: { flex: '0 0 auto', color: '#7c8596', fontSize: 11 },
@@ -94,7 +80,8 @@ const S = {
     aage: { flex: '0 0 auto', color: '#5a616c', fontSize: 11, minWidth: 26, textAlign: 'right' },
     ax: { flex: '0 0 auto', cursor: 'pointer', color: '#5a616c', padding: '0 2px' },
 
-    // -- detail: scrub bar + the selected book's sheet stream --
+    // -- a lane's expanded detail: scrub bar + kept-turns cap + the sheet stream --
+    detail: { borderBottom: '1px solid #1b1f29', background: 'rgba(255,255,255,0.015)' },
     scrub: {
         display: 'flex', alignItems: 'center', gap: 2, padding: '4px 8px', flex: '0 0 auto',
         borderBottom: '1px solid #1b1f29',
@@ -104,7 +91,6 @@ const S = {
         color: dim ? '#444b56' : '#9aa6ba', fontSize: 13, userSelect: 'none',
     }),
     pos: { flex: '1 1 auto', textAlign: 'center', color: '#7c8596', fontSize: 11 },
-    // -- retention: the selected book's kept-turns cap (book.limit) --
     keep: {
         display: 'flex', alignItems: 'center', gap: 6, padding: '3px 8px', flex: '0 0 auto',
         borderBottom: '1px solid #1b1f29', color: '#5a616c', fontSize: 11,
@@ -130,14 +116,19 @@ const S = {
     label: { flex: '1 1 auto', minWidth: 0, color: '#8a92a0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
     age: { flex: '0 0 auto', color: '#5a616c', fontSize: 11 },
 
-    // -- archive: the relay's stored session transcripts --
-    archive: { padding: '3px 0 5px' },
-    sessRow: (open) => ({
+    // -- archive: stored session transcripts, dimmer rows under a slim divider --
+    divider: {
+        display: 'flex', alignItems: 'center', gap: 6, padding: '3px 8px',
+        color: '#5a616c', fontSize: 10, letterSpacing: '0.08em', textTransform: 'uppercase',
+        borderTop: '1px solid #1b1f29', marginTop: 2,
+    },
+    dividerHint: { color: '#444b56', fontSize: 10, textTransform: 'none', letterSpacing: 0 },
+    sessRow: {
         display: 'flex', alignItems: 'center', gap: 7, padding: '2px 8px', userSelect: 'none',
-        cursor: open ? 'default' : 'pointer',
-    }),
-    sessId: { flex: '0 0 auto', color: '#aeb6c4', minWidth: 70 },
-    sessOpen: { flex: '0 0 auto', color: '#7ad79a', fontSize: 10 },
+        cursor: 'pointer',
+    },
+    sessId: { flex: '0 0 auto', color: '#8a92a0', minWidth: 70 },
+    sessHarness: { flex: '0 0 auto', color: '#5a616c', fontSize: 10 },
     sessAge: { flex: '1 1 auto', textAlign: 'right', color: '#5a616c', fontSize: 11 },
     sessSize: { flex: '0 0 auto', color: '#5a616c', fontSize: 11, minWidth: 38, textAlign: 'right' },
 };
@@ -177,41 +168,27 @@ function humanSize(n) {
 // (dashes stripped). Normalizing both sides makes the open-lane match symmetric.
 const sessPrefix = (id) => String(id).replace(/-/g, '').slice(0, 8);
 
-// Fold state survives reloads (a panel-view preference, not workspace state).
-const FOLDS_KEY = 'glyph3d.agentsPanel.folds';
-const loadFolds = () => {
-    try { return { books: false, detail: false, archive: false, ...JSON.parse(localStorage.getItem(FOLDS_KEY) || '{}') }; }
-    catch { return { books: false, detail: false, archive: false }; }
-};
+// The lane id an archive entry opens under — per harness (a kimi id's `session_`
+// prefix would otherwise show/match as "session_x"; its derivation strips it).
+const sessLaneId = (s) => (s.harness === 'kimi' ? kimiAgentIdForSession(s.id) : sessPrefix(s.id));
 
 export default function AgentsPanel({ client }) {
     const books = () => client?.ctx?.agentBooks || null;
     const [agents, setAgents] = useState([]);
-    const [selected, setSelected] = useState(null);
+    const [expanded, setExpanded] = useState(null);   // the ONE lane whose detail is open
     const [stream, setStream] = useState([]);
-    const [sessions, setSessions] = useState(null);   // null = no provider (region absent), [] = provider + empty
-    const [folds, setFolds] = useState(loadFolds);
+    const [sessions, setSessions] = useState(null);   // null = no provider (group absent), [] = provider + empty
     const focusRef = useRef(null);
     const aliveRef = useRef(true);
 
-    const toggleFold = useCallback((key) => {
-        setFolds((f) => {
-            const next = { ...f, [key]: !f[key] };
-            try { localStorage.setItem(FOLDS_KEY, JSON.stringify(next)); } catch { /* view pref only */ }
-            return next;
-        });
-    }, []);
-
-    // Roster + selection: sticky to the user's pick, else the newest lane. Recomputed each refresh.
+    // Roster + expansion: sticky to the user's open row, collapsing when its lane goes
+    // away (cleared). Recomputed each refresh.
     const refresh = useCallback(() => {
         const b = books();
         if (!b) { setAgents([]); setStream([]); return; }
         const list = b.agents?.() || [];
         setAgents(list);   // new array ref each poll → the stream effect below re-reads, staying live
-        setSelected((cur) => {
-            const has = (id) => id && list.some((a) => a.id === id);
-            return has(cur) ? cur : (list.length ? list[list.length - 1].id : null);
-        });
+        setExpanded((cur) => (cur && list.some((a) => a.id === cur)) ? cur : null);
     }, [client]);
 
     useEffect(() => {
@@ -221,12 +198,12 @@ export default function AgentsPanel({ client }) {
         return () => { off?.(); clearInterval(t); };
     }, [client, refresh]);
 
-    // Re-read the selected book's stream whenever the selection or roster moves (the poll hands
+    // Re-read the expanded book's stream whenever the expansion or roster moves (the poll hands
     // us a fresh `agents` array, so this also re-reads on every tick — stream + head stay live).
     useEffect(() => {
         const b = books();
-        setStream(selected && b ? (b.getStream?.(selected) || []) : []);
-    }, [selected, agents, client]);
+        setStream(expanded && b ? (b.getStream?.(expanded) || []) : []);
+    }, [expanded, agents, client]);
 
     // Archive: the relay's stored session list. Its own slow poll — the 1s roster tick
     // above is liveness for in-memory lanes; this one is a disk listing over RPC.
@@ -238,8 +215,8 @@ export default function AgentsPanel({ client }) {
             if (aliveRef.current) setSessions(Array.isArray(list) ? list : []);
         } catch {
             // A transient list failure (relay reconnecting, a mid-reload window) must not
-            // UNMOUNT the archive — that reads as the section randomly vanishing. Keep the
-            // last-good listing; only an ABSENT provider hides the region.
+            // UNMOUNT the archive — that reads as the group randomly vanishing. Keep the
+            // last-good listing; only an ABSENT provider hides it.
         }
     }, [client]);
 
@@ -250,10 +227,10 @@ export default function AgentsPanel({ client }) {
         return () => { aliveRef.current = false; clearInterval(t); };
     }, [refreshArchive]);
 
-    const sel = agents.find((a) => a.id === selected) || null;
+    const sel = agents.find((a) => a.id === expanded) || null;
 
     // Keep the open sheet in view as the head turns.
-    useEffect(() => { focusRef.current?.scrollIntoView?.({ block: 'nearest' }); }, [sel?.head, selected]);
+    useEffect(() => { focusRef.current?.scrollIntoView?.({ block: 'nearest' }); }, [sel?.head, expanded]);
 
     const exec = useCallback((cmd) => client?.router?.execute(cmd), [client]);
     const after = useCallback((cmd) => { const r = exec(cmd); refresh(); return r; }, [exec, refresh]);
@@ -262,35 +239,38 @@ export default function AgentsPanel({ client }) {
         after(['agent.spawn', `visitor-${Math.random().toString(36).slice(2, 6)}`]);
     }, [after]);
 
-    // Turn the selected book (keyword or 1-based index). No camera, no dock — just paging.
-    const page = useCallback((arg) => { if (selected) after(['book.page', selected, String(arg)]); }, [selected, after]);
-    const onRow = useCallback((index) => { if (selected) after(['book.page', selected, String(index + 1)]); }, [selected, after]);
+    // Turn the expanded book (keyword or 1-based index). No camera, no dock — just paging.
+    const page = useCallback((arg) => { if (expanded) after(['book.page', expanded, String(arg)]); }, [expanded, after]);
+    const onRow = useCallback((index) => { if (expanded) after(['book.page', expanded, String(index + 1)]); }, [expanded, after]);
 
     // Kept-turns cap: a draft string while editing (so the 1s poll can't snap the field
     // mid-keystroke), committed on Enter/blur as `book.limit <id> <n>` — the same verb
     // the CLI speaks. Escape abandons the draft; ↺ returns the book to the shelf default.
     const [capDraft, setCapDraft] = useState(null);
-    useEffect(() => setCapDraft(null), [selected]);
+    useEffect(() => setCapDraft(null), [expanded]);
     const commitCap = useCallback((liveCap) => {
         const t = capDraft?.trim?.();
         setCapDraft(null);
-        if (!selected || t == null || t === '' || t === String(liveCap)) return;
+        if (!expanded || t == null || t === '' || t === String(liveCap)) return;
         const n = Number(t);
         if (!Number.isFinite(n) || n < 0) return;   // the field mirrors live state again
-        after(['book.limit', selected, String(Math.floor(n))]);
-    }, [capDraft, selected, after]);
+        after(['book.limit', expanded, String(Math.floor(n))]);
+    }, [capDraft, expanded, after]);
 
-    // Open a past session as a lane (fire-and-forget — the book pages in when the
-    // adapter feeds it), then re-list so the row flips to its 'open' marker.
-    const openSession = useCallback((id) => {
-        exec(['agent.open', id]);
+    // Page a past session in as a lane (fire-and-forget — the book arrives when the
+    // adapter feeds it), expand its row, and re-list so it leaves the archive group.
+    const openSession = useCallback((s) => {
+        exec(['agent.open', s.id]);
+        setExpanded(sessLaneId(s));
         refreshArchive();
     }, [exec, refreshArchive]);
 
     const atFirst = !sel || sel.head <= 0;
     const atLast = !sel || sel.head >= (sel.count - 1);
     const anyDone = agents.some((a) => a.state === 'done');
+    // Sessions already open as lanes are not listed again — their lane row IS their row.
     const openLanes = new Set(agents.map((a) => sessPrefix(a.id)));
+    const archived = (sessions || []).filter((s) => !openLanes.has(sessLaneId(s)));
 
     return (
         <div style={S.content}>
@@ -304,115 +284,107 @@ export default function AgentsPanel({ client }) {
             </div>
 
             <div style={S.body}>
-            {/* master — the agent roster (open books) */}
-            <div style={{ ...S.sect, borderTop: 'none' }} onClick={() => toggleFold('books')}
-                title="Fold / unfold the open books">
-                <span style={S.sectCaret}>{folds.books ? '▸' : '▾'}</span>
-                <span style={S.sectLabel}>open books{agents.length ? ` (${agents.length})` : ''}</span>
-            </div>
-            {!folds.books && <div style={S.roster}>
-                {agents.length === 0 && <div style={S.msg}>No agents yet. Activity pages a book in here.</div>}
+                {agents.length === 0 && archived.length === 0 && (
+                    <div style={S.msg}>No agents yet. Activity pages a book in here.</div>
+                )}
+
+                {/* open books — one row per lane, expanding in place to its sheet stream */}
                 {agents.map((a) => {
                     const st = STATE_STYLE[a.state] || STATE_STYLE.active;
+                    const on = a.id === expanded;
                     return (
-                        <div key={a.id} style={S.agentRow(a.id === selected)} onClick={() => setSelected(a.id)}
-                            title={`${a.type}:${a.id} — ${a.count} sheet(s)${a.recent?.length ? '\n' + a.recent.join('\n') : ''}`}>
-                            <span style={{ ...S.adot, color: a.color }}>●</span>
-                            <span style={S.aid}>{a.id}</span>
-                            {a.beacon && <span style={S.abeacon} title={a.beacon}>(!) {a.beacon}</span>}
-                            <span style={S.astate(st.color)}>{st.label}</span>
-                            <span style={S.acount}>{a.count}</span>
-                            {a.following && <span style={S.alive}>live</span>}
-                            <span style={S.aage}>{ago(a.lastTs)}</span>
-                            <span style={S.ax} onClick={(e) => { e.stopPropagation(); after(['agent.clear', a.id]); }}
-                                title={`Clear ${a.id} (agent.clear)`}>✕</span>
-                        </div>
+                        <React.Fragment key={a.id}>
+                            <div style={S.agentRow(on)} onClick={() => setExpanded(on ? null : a.id)}
+                                title={`${a.type}:${a.id} — ${a.count} sheet(s)${a.recent?.length ? '\n' + a.recent.join('\n') : ''}`}>
+                                <span style={S.acaret}>{on ? '▾' : '▸'}</span>
+                                <span style={{ ...S.adot, color: a.color }}>●</span>
+                                <span style={S.aid}>{a.id}</span>
+                                {a.type && a.type !== 'claude' && <span style={S.aharness}>{a.type}</span>}
+                                {a.beacon && <span style={S.abeacon} title={a.beacon}>(!) {a.beacon}</span>}
+                                <span style={S.astate(st.color)}>{st.label}</span>
+                                <span style={S.acount}>{a.count}</span>
+                                {a.following && <span style={S.alive}>live</span>}
+                                <span style={S.aage}>{ago(a.lastTs)}</span>
+                                <span style={S.ax} onClick={(e) => { e.stopPropagation(); after(['agent.clear', a.id]); }}
+                                    title={`Clear ${a.id} (agent.clear)`}>✕</span>
+                            </div>
+
+                            {on && sel && (
+                                <div style={S.detail}>
+                                    <div style={S.scrub}>
+                                        <span style={S.nav(atFirst)} onClick={() => !atFirst && page('first')} title="Oldest (book.page first)">⏮</span>
+                                        <span style={S.nav(atFirst)} onClick={() => !atFirst && page('prev')} title="Older (book.page prev)">◀</span>
+                                        <span style={S.pos}>
+                                            sheet {sel.head + 1} / {sel.count}{sel.following && <span style={S.live}> · live</span>}
+                                        </span>
+                                        <span style={S.nav(atLast)} onClick={() => !atLast && page('next')} title="Newer (book.page next)">▶</span>
+                                        <span style={S.nav(atLast)} onClick={() => !atLast && page('last')} title="Newest — resume live (book.page last)">⏭</span>
+                                    </div>
+
+                                    {/* retention — this book's kept-turns cap (older sheets shed as new turns land) */}
+                                    <div style={S.keep}
+                                        title="Turns kept in space for this book — older sheets shed as new ones land. 0 keeps everything; ↺ follows the shelf default (Settings ▸ Agent Books). Fires book.limit.">
+                                        <span>keep</span>
+                                        <input
+                                            type="number" min={0} step={1} style={S.keepInput}
+                                            value={capDraft ?? String(sel.cap)}
+                                            onChange={(e) => setCapDraft(e.target.value)}
+                                            onBlur={() => commitCap(sel.cap)}
+                                            onKeyDown={(e) => {
+                                                e.stopPropagation();
+                                                if (e.key === 'Enter') e.currentTarget.blur();
+                                                else if (e.key === 'Escape') setCapDraft(null);
+                                            }}
+                                        />
+                                        <span>turns</span>
+                                        <span style={S.keepHint}>
+                                            {sel.limit == null ? 'shelf default' : sel.cap === 0 ? 'this book · keeps everything' : 'this book'}
+                                        </span>
+                                        {sel.limit != null && (
+                                            <span style={S.keepReset} onClick={() => after(['book.limit', expanded, 'default'])}
+                                                title="Follow the shelf default again (book.limit default)">↺</span>
+                                        )}
+                                    </div>
+
+                                    <div style={S.list}>
+                                        {stream.length === 0 && (
+                                            <div style={S.msg}>No sheets yet. An agent's tool calls and replies page in here as they arrive.</div>
+                                        )}
+                                        {stream.map((m) => (
+                                            <div key={m.index} ref={m.focused ? focusRef : null} style={S.row(m.focused)}
+                                                onClick={() => onRow(m.index)} title={m.label}>
+                                                <span style={S.seq}>{m.index + 1}</span>
+                                                <span style={{ ...S.dot, color: m.color }}>●</span>
+                                                <span style={S.verb}>{m.action}</span>
+                                                <span style={S.label}>{m.label || '—'}</span>
+                                                <span style={S.age}>{ago(m.ts)}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+                        </React.Fragment>
                     );
                 })}
-            </div>}
 
-            {/* detail — the selected book: scrub bar + sheet stream, folded as one */}
-            <div style={S.sect} onClick={() => toggleFold('detail')}
-                title="Fold / unfold the selected book's sheet stream">
-                <span style={S.sectCaret}>{folds.detail ? '▸' : '▾'}</span>
-                <span style={S.sectLabel}>book{sel ? ` — ${sel.id}` : ''}</span>
-                {folds.detail && sel && <span style={S.sectHint}>{sel.head + 1}/{sel.count}{sel.following ? ' · live' : ''}</span>}
-            </div>
-            {!folds.detail && <div style={S.scrub}>
-                <span style={S.nav(atFirst)} onClick={() => !atFirst && page('first')} title="Oldest (book.page first)">⏮</span>
-                <span style={S.nav(atFirst)} onClick={() => !atFirst && page('prev')} title="Older (book.page prev)">◀</span>
-                <span style={S.pos}>
-                    {sel ? <>sheet {sel.head + 1} / {sel.count}{sel.following && <span style={S.live}> · live</span>}</> : '—'}
-                </span>
-                <span style={S.nav(atLast)} onClick={() => !atLast && page('next')} title="Newer (book.page next)">▶</span>
-                <span style={S.nav(atLast)} onClick={() => !atLast && page('last')} title="Newest — resume live (book.page last)">⏭</span>
-            </div>}
-
-            {/* retention — this book's kept-turns cap (older sheets shed as new turns land) */}
-            {!folds.detail && sel && <div style={S.keep}
-                title="Turns kept in space for this book — older sheets shed as new ones land. 0 keeps everything; ↺ follows the shelf default (Settings ▸ Agent Books). Fires book.limit.">
-                <span>keep</span>
-                <input
-                    type="number" min={0} step={1} style={S.keepInput}
-                    value={capDraft ?? String(sel.cap)}
-                    onChange={(e) => setCapDraft(e.target.value)}
-                    onBlur={() => commitCap(sel.cap)}
-                    onKeyDown={(e) => {
-                        e.stopPropagation();
-                        if (e.key === 'Enter') e.currentTarget.blur();
-                        else if (e.key === 'Escape') setCapDraft(null);
-                    }}
-                />
-                <span>turns</span>
-                <span style={S.keepHint}>
-                    {sel.limit == null ? 'shelf default' : sel.cap === 0 ? 'this book · keeps everything' : 'this book'}
-                </span>
-                {sel.limit != null && (
-                    <span style={S.keepReset} onClick={() => after(['book.limit', selected, 'default'])}
-                        title="Follow the shelf default again (book.limit default)">↺</span>
-                )}
-            </div>}
-
-            {!folds.detail && <div style={S.list}>
-                {stream.length === 0 && (
-                    <div style={S.msg}>No sheets yet. An agent's tool calls and replies page in here as they arrive.</div>
-                )}
-                {stream.map((m) => (
-                    <div key={m.index} ref={m.focused ? focusRef : null} style={S.row(m.focused)}
-                        onClick={() => onRow(m.index)} title={m.label}>
-                        <span style={S.seq}>{m.index + 1}</span>
-                        <span style={{ ...S.dot, color: m.color }}>●</span>
-                        <span style={S.verb}>{m.action}</span>
-                        <span style={S.label}>{m.label || '—'}</span>
-                        <span style={S.age}>{ago(m.ts)}</span>
+                {/* archive — past session transcripts on the relay (only when a provider is
+                    connected and something isn't already open) */}
+                {sessions && archived.length > 0 && (<>
+                    <div style={S.divider}>
+                        <span>archive</span>
+                        <span style={S.dividerHint}>click to open</span>
                     </div>
-                ))}
-            </div>}
-
-            {/* archive — past session transcripts on the relay (only when a provider is connected) */}
-            {sessions && (<>
-                <div style={S.sect} onClick={() => toggleFold('archive')}
-                    title="Fold / unfold the session archive">
-                    <span style={S.sectCaret}>{folds.archive ? '▸' : '▾'}</span>
-                    <span style={S.sectLabel}>archive{sessions.length ? ` (${sessions.length})` : ''}</span>
-                </div>
-                {!folds.archive && <div style={S.archive}>
-                    {sessions.map((s) => {
-                        const pid = sessPrefix(s.id);
-                        const isOpen = openLanes.has(pid);
-                        return (
-                            <div key={s.id} style={S.sessRow(isOpen)}
-                                onClick={isOpen ? undefined : () => openSession(s.id)}
-                                title={isOpen ? `${s.id} — already open as a lane` : `${s.id} — open as a lane (agent.open)`}>
-                                <span style={S.sessId}>{pid}</span>
-                                {isOpen && <span style={S.sessOpen}>open</span>}
-                                <span style={S.sessAge}>{wallAgo(s.mtime)}</span>
-                                <span style={S.sessSize}>{humanSize(s.size)}</span>
-                            </div>
-                        );
-                    })}
-                </div>}
-            </>)}
+                    {archived.map((s) => (
+                        <div key={s.id} style={S.sessRow}
+                            onClick={() => openSession(s)}
+                            title={`${s.id} — open as a lane (agent.open)`}>
+                            <span style={S.sessId}>{sessLaneId(s)}</span>
+                            {s.harness === 'kimi' && <span style={S.sessHarness}>kimi</span>}
+                            <span style={S.sessAge}>{wallAgo(s.mtime)}</span>
+                            <span style={S.sessSize}>{humanSize(s.size)}</span>
+                        </div>
+                    ))}
+                </>)}
             </div>
         </div>
     );
