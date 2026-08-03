@@ -20,8 +20,8 @@ import { measureSlotSpan } from '../core/foldEvaluate.js';
  * only moves Z — it's a depth reading of the whole file, not a selection.
  *
  * The boxes are one batched THREE.LineSegments parented to the glyph instanceMesh, so they
- * live in the exact same local space as the per-glyph instancePositions measureSlotRange
- * reads — no transform bookkeeping, they track the grid for free. The line material is a
+ * live in the exact same local space as the per-glyph fold positions — no transform
+ * bookkeeping, they track the grid for free. The line material is a
  * NodeMaterial with an explicit opacityNode (the plain LineBasicMaterial, auto-converted by
  * the WebGPU backend, rendered opaque and occluded the glyphs) so the borders truly blend.
  *
@@ -82,9 +82,8 @@ export class StrataLayout {
         this._healing = false;
         this._boxMesh = null;
         this._boxGeo = null;
-        // Engine-capable: arrange() speaks displacement (dz onto the fold) as fluently as
-        // buffer writes, so a strata grid stays eligible for GPU layout — the eligibility
-        // gate reads this flag (CodeGrid._engineEligible).
+        // Engine-capable (the only kind there is): arrange() speaks displacement
+        // (dz onto the fold) — CodeGrid.registerArranger rejects anything that can't.
         this.engineCapable = true;
         this._boxMat = null;
         this._opacityU = null;
@@ -136,13 +135,11 @@ export class StrataLayout {
         const model = grid.getSemantics?.() || grid.refreshSemanticsSync?.();
         if (!model) { this._healLater(grid); return; }
 
-        // Two engines, one arrangement. CPU path: write z into the live position buffer, as
-        // ever. Engine path: no position buffer exists — measure against a TRANSIENT fold
-        // scratch (evaluateFold) and write the DISPLACEMENT table instead (dz = wanted
-        // absolute plane − the fold's own z), then re-dispatch. Either way, the glyphs land
-        // on their AST plane and the caret mirror agrees (it adds the same table).
-        const engine = r.gpuLayout === true;
-        const pos = engine ? grid._engineFoldScratch?.() : r.getInstancePositions();
+        // One engine, one arrangement. No CPU position buffer exists — measure against a
+        // TRANSIENT fold scratch (evaluateFold) and write the DISPLACEMENT table instead
+        // (dz = wanted absolute plane − the fold's own z), then re-dispatch. The glyphs
+        // land on their AST plane and the caret mirror agrees (it adds the same table).
+        const pos = grid._engineFoldScratch?.();
         if (!pos) return;
         const total = r.instanceMesh?.geometry?.instanceCount ?? 0;
 
@@ -157,45 +154,34 @@ export class StrataLayout {
         //    the parent's for the glyphs they share — each glyph lands on its DEEPEST scope.
         //    The parent's own direct glyphs (its header/footer, the gaps between children)
         //    keep the parent's plane.
-        let D = null;
-        if (engine) {
-            D = (r._layoutDisplacements && r._layoutDisplacements.length >= total * 3)
-                ? r._layoutDisplacements
-                : (r._layoutDisplacements = new Float32Array(total * 3));
-            D.fill(0);   // idempotent per arrange — stale planes never linger
-        }
+        const D = (r._layoutDisplacements && r._layoutDisplacements.length >= total * 3)
+            ? r._layoutDisplacements
+            : (r._layoutDisplacements = new Float32Array(total * 3));
+        D.fill(0);   // idempotent per arrange — stale planes never linger
         const boxes = [];
         for (const { node, depth } of nodes) {
             const range = this._slotRange(node, total);
             if (!range) continue;
             const z = depth * zStep;
-            if (engine) {
-                for (let s = range.start; s < range.end; s++) D[s * 3 + 2] = z - pos[s * 3 + 2];
-            } else {
-                for (let s = range.start; s < range.end; s++) pos[s * 3 + 2] = z;
-            }
+            for (let s = range.start; s < range.end; s++) D[s * 3 + 2] = z - pos[s * 3 + 2];
             boxes.push({ start: range.start, count: range.end - range.start, depth, z, node });
         }
-        if (engine) {
-            grid._resyncEngineLayout?.();
-            // The arranged extent is the flow footprint pushed forward by the planes — set it
-            // directly (there is no buffer to re-walk; see _applyArrangers' engine branch).
-            const flow = measureSlotSpan(pos, r.getInstanceSizes?.(), 0, total);
-            if (flow) {
-                let maxPlane = 0;
-                for (const b of boxes) if (b.z > maxPlane) maxPlane = b.z;
-                grid.setEngineBounds?.({
-                    min: { x: flow.min.x, y: flow.min.y, z: Math.min(flow.min.z, 0) },
-                    max: { x: flow.max.x, y: flow.max.y, z: Math.max(flow.max.z, maxPlane) },
-                });
-            }
-        } else {
-            r.markInstanceTransformsDirty();
+        grid._resyncEngineLayout?.();
+        // The arranged extent is the flow footprint pushed forward by the planes — set it
+        // directly (there is no buffer to re-walk; see _applyArrangers).
+        const flow = measureSlotSpan(pos, r.getInstanceSizes?.(), 0, total);
+        if (flow) {
+            let maxPlane = 0;
+            for (const b of boxes) if (b.z > maxPlane) maxPlane = b.z;
+            grid.setEngineBounds?.({
+                min: { x: flow.min.x, y: flow.min.y, z: Math.min(flow.min.z, 0) },
+                max: { x: flow.max.x, y: flow.max.y, z: Math.max(flow.max.z, maxPlane) },
+            });
         }
 
-        // 2) Boxes — measure each node's X/Y bounds from the arranged positions (live buffer
-        //    on CPU; the scratch on the engine — z differs there, but boxes draw at the
-        //    node's OWN plane, so only X/Y are read), a flat rectangle per node.
+        // 2) Boxes — measure each node's X/Y bounds from the fold scratch (z differs from
+        //    the arranged planes there, but boxes draw at the node's OWN plane, so only
+        //    X/Y are read), a flat rectangle per node.
         this._rebuildBoxes(r, boxes, pad, pos);
     }
 
@@ -203,8 +189,8 @@ export class StrataLayout {
 
     _renderer() { return this._grid.getRenderer?.() ?? this._grid._renderer ?? null; }
 
-    /** Re-derive on the current buffer without a full re-fold — z is set by assignment and
-     *  boxes are rebuilt fresh, so a live param change applies in place. */
+    /** Re-derive on the current fold without a full re-fold — the displacement table is
+     *  rewritten and boxes rebuilt fresh, so a live param change applies in place. */
     _reapply() {
         if (this._active) this.arrange(this._grid);
     }
@@ -272,8 +258,7 @@ export class StrataLayout {
     }
 
     /** Rebuild the batched box LineSegments — 4 edges (8 verts) per node. `pos` is the
-     *  arranged position source: the live buffer (CPU path) or the fold scratch (engine),
-     *  ONE measurement path for both — measureSlotRange's math, read from `pos`. */
+     *  fold scratch (evaluateFold, stride 3) — one measurement path, read from `pos`. */
     _rebuildBoxes(r, boxes, pad, pos) {
         if (!boxes.length) { this._clearBoxes(); return; }
         const bright = this.cfg.boxBrightness;

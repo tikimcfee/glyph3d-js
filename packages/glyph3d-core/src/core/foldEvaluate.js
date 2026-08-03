@@ -15,10 +15,11 @@
 import { paginationShift } from '../workers/builders/index.js';
 
 /**
- * Min/max extent of a contiguous slot range over an explicit position source — the live
- * CPU buffer or an evaluateFold scratch alike (both stride 3). The measurement primitive
- * behind arranger block sizing and strata boxes; GlyphField.measureSlotRange remains the
- * buffer-backed convenience for CPU-engine fields.
+ * Min/max extent of a contiguous slot range over an explicit position source — an
+ * evaluateFold scratch (stride 3). This is the measurement primitive behind arranger
+ * block sizing and strata boxes. Never feed it a live instancePosition attribute array:
+ * those are stride-4 post-commit (CPU-padded or GPU-owned) — measureSlotRange remains
+ * the buffer-backed convenience for non-engine fields (terminals).
  * @param {Float32Array} pos - stride-3 positions
  * @param {Float32Array} sizes - stride-2 [advance, height] per slot
  * @param {number} startSlot inclusive

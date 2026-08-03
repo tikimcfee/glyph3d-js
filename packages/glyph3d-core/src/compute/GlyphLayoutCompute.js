@@ -1,18 +1,17 @@
 /**
  * GlyphLayoutCompute — the GPU layout engine behind a GlyphField, as an adapter.
  *
- * THE ENGINE CONTRACT: when a field is engine-owned (field.gpuLayout, chosen per commit by
- * CodeGrid's eligibility gate), the kernel is the ONLY position writer — applyPrebuiltBuffers
- * adopts no CPU array, and this adapter's dispatch after each commit IS the layout. CPU
- * consumers answer "where is this glyph" through the fold mirror (LayoutDescription
- * .positionAt — the same pure function, per query), never through a buffer: every input to
- * the fold (line tables, advances, params) is CPU-authored, so nothing is stranded GPU-side
- * and nothing reads back. Parity between mirror, kernel and builder is standing test
- * coverage (tools/layout-mirror.test.mjs, tools/layout-kernel-check.mjs).
+ * THE ENGINE CONTRACT: a grid's field is always engine-owned (CodeGrid commits are
+ * engine builds, emitPositions:false), the kernel is the ONLY position writer —
+ * applyPrebuiltBuffers adopts no CPU array, and this adapter's dispatch after each
+ * commit IS the layout. CPU consumers answer "where is this glyph" through the fold
+ * mirror (LayoutDescription.positionAt — the same pure function, per query), never
+ * through a buffer: every input to the fold (line tables, advances, params) is
+ * CPU-authored, so nothing is stranded GPU-side and nothing reads back. Parity between
+ * mirror, kernel and builder is standing test coverage (tools/layout-mirror.test.mjs,
+ * tools/layout-kernel-check.mjs).
  *
- * The layout.gpu toggle is an ENGINE choice, never a feature switch: eligibility keeps
- * anything the kernel can't yet serve (arranged grids, scaled items) on the CPU path
- * wholesale, per field, re-decided every flush. Dispatches are encoded synchronously with
+ * There is no opt-out and no CPU fallback: dispatches are encoded synchronously with
  * no awaits between items — the bulk-lane lesson: awaiting costs more than the GPU work.
  *
  * The renderer is registered once at engine boot (setComputeRenderer) because core objects
@@ -23,16 +22,12 @@
 import GlyphLayoutKernel from './GlyphLayoutKernel.js';
 
 let _renderer = null;
-let _enabled = false;
 
 /** Register the app's initialized WebGPURenderer (engine boot). Null unregisters. */
 export function setComputeRenderer(renderer) { _renderer = renderer || null; }
 
-/** The layout.gpu toggle — an engine choice; content and features are identical either way. */
-export function setGpuLayoutEnabled(on) { _enabled = !!on; }
-
-/** On only when both the toggle is set AND a renderer is registered. */
-export function isGpuLayoutEnabled() { return _enabled && _renderer !== null; }
+/** On when a renderer is registered — the engine is the only layout path for grids. */
+export function isGpuLayoutEnabled() { return _renderer !== null; }
 
 /**
  * Lay out every item just committed to `field` — THE position path for engine fields.
@@ -101,11 +96,11 @@ export function syncGpuLayout(field, buffers, items, shared, rendererIds) {
             const meta = itemMeta[i];
             const item = items?.[i];
             if (!meta || !item || !meta.glyphCount) continue;
-            // Unreachable under the all-or-nothing eligibility gate (CodeGrid drops the whole
-            // field to CPU when any item is scaled). If it ever fires, a silent skip would
-            // strand the item at the origin — throw into the loud-failure path instead.
+            // The kernel serves scale-1 items only — CodeGrid has no CPU path to drop to.
+            // A silent skip would strand the item at the origin; throw into the
+            // loud-failure path instead.
             if ((item.scale ?? 1) !== 1) {
-                throw new Error(`engine-owned field carries a scaled item (scale ${item.scale}) — eligibility gate breached`);
+                throw new Error(`engine-owned field carries a scaled item (scale ${item.scale}) — the kernel serves scale-1 items only`);
             }
 
             const base = meta.bufferStartIndex;

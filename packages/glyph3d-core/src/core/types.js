@@ -46,8 +46,10 @@
  *
  * @typedef {Object} GlyphBufferItemMeta
  * @property {number} bufferStartIndex - first slot index in the combined buffer for this item.
- *   Multiply by attribute stride (3 for positions, 2 for sizes, 1 for codepoints/groupIds/colors)
- *   to get the Float32Array offset.
+ *   Multiply by the BUILDER's attribute stride (3 for builder positions, 2 for sizes, 1 for
+ *   codepoints/groupIds/colors) to get the Float32Array offset. NOTE: the INSTALLED
+ *   instancePosition attribute is stride-4 post-commit (padded or storage) — CPU readers
+ *   of the live attribute must use attr.itemSize, never a hardcoded stride.
  * @property {number} glyphCount       - number of glyph slots occupied by this item
  * @property {Object|null} bounds      - item-local bounding box, or null if item had no renderable glyphs.
  *   Shape: {min: {x,y,z}, max: {x,y,z}, width: number, height: number, depth: number}
@@ -72,7 +74,7 @@
  * Hard requirements:
  * - Instanced drawing with gl_InstanceID (ES 3.0 / WebGL 2 hard floor)
  * - 5 instance attributes:
- *     instancePosition  vec3  (x, y, z world position)
+ *     instancePosition  vec4  (x, y, z world position + padding lane; stride-4 as bound)
  *     instanceSize      vec2  (width, height of the quad)
  *     instanceGlyphId   float (HarfBuzz glyph ID, indexes glyphMapTexture)
  *     instanceColor     vec3  (r, g, b, 0-1)

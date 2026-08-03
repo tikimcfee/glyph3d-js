@@ -191,9 +191,9 @@ export default class TerminalGrid extends FramedGlyphField {
         // All cells (live + history) share this terminal's groupId.
         this._groupIds = new Float32Array(this._totalCount).fill(this._groupId);
 
-        // Push the initial empty buffer to the renderer (swaps in our typed arrays).
-        // After this call, geometry.attributes.* point directly at our arrays, so
-        // _writeToInstanceBuffer() can write in place without allocation.
+        // Push the initial empty buffer to the renderer. After this call the non-position
+        // geometry attributes wrap our typed arrays (zero-copy in-place updates); positions
+        // are the exception — applyPrebuiltBuffers pads them into its own stride-4 array.
         this._applyToRenderer();
 
         // Background plane — dark panel behind the terminal for readability. The _panel/
@@ -1174,8 +1174,10 @@ export default class TerminalGrid extends FramedGlyphField {
 
     /**
      * Initial push: swap all five attribute arrays into the renderer via
-     * applyPrebuiltBuffers(). After this call, geometry.attributes.* point
-     * directly at our typed arrays, enabling zero-copy in-place updates.
+     * applyPrebuiltBuffers(). After this call the non-position geometry attributes wrap
+     * our typed arrays, enabling zero-copy in-place updates. Positions are copied out:
+     * the CPU branch of applyPrebuiltBuffers pads them into its own stride-4 array
+     * (they only change on resize, which re-applies everything anyway).
      *
      * Must be called on construction and after resize (when arrays are reallocated).
      * @private

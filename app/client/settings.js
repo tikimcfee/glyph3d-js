@@ -1,7 +1,6 @@
 import { stateController } from '@glyph3d/core/services/state';
 import { setPanelStateColorDefaults } from '@glyph3d/core/collections';
 import { setGlyphLodParam, GLYPH_LOD_DEFAULTS, setGlyphWidthCompress, GLYPH_WIDTH_COMPRESS_DEFAULT } from '@glyph3d/core/GlyphField.js';
-import { setGpuLayoutEnabled } from '@glyph3d/core/compute/GlyphLayoutCompute.js';
 import { setStrataParam, STRATA_DEFAULTS } from '@glyph3d/core/collections/StrataLayout.js';
 import { TERMINAL_CURSOR_DEFAULTS } from '@glyph3d/core/collections/TerminalGrid.js';
 import { JELLYFISH_DEFAULTS, LIBRARY_DEFAULTS, schemeNameOf } from '@glyph3d/core/collections/layouts/index.js';
@@ -196,17 +195,6 @@ export const SETTINGS = [
   {
     key: 'atlas.size', label: 'Atlas texture (px)', group: 'Display',
     type: 'number', default: 2048, min: 512, max: 8192, step: 512, reload: true,
-  },
-  // GPU layout — THE engine, on by default: the compute kernel lays out every eligible
-  // grid (engine builds emit no CPU position array; positionAt answers through the fold
-  // mirror; layout.verify asserts the invariant live). Grids the kernel can't yet serve
-  // (non-engineCapable arrangers, scaled items) take the CPU path wholesale — an ENGINE
-  // choice per grid, never a feature switch. This opt-OUT survives only until the
-  // changeover completes; then the engine is simply how layout works.
-  {
-    key: 'layout.gpu', label: 'GPU layout engine', group: 'Grid',
-    type: 'bool', default: true,
-    apply: (_ctx, v) => setGpuLayoutEnabled(v),
   },
   // Width compression — condense glyph ink along x, in place, aligned to leading. A
   // live global shader dial (one uniform across every glyph material): the quad narrows

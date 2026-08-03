@@ -114,7 +114,10 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   ranges, a windowing/framing layout, and a caret overlay. The edit path funnels
   through `_relayoutPreservingCursor()`.
 - **Layout** flows through the `LayoutDescription` seam (`core/LayoutDescription.js`):
-  modes are params, set via `grid.layout` / `grid.frame` / `grid.scroll`.
+  modes are params, set via `grid.layout` / `grid.frame` / `grid.scroll`. Glyph positions
+  are computed by the GPU compute engine (`compute/GlyphLayoutKernel.js`) — one fold over
+  CPU-authored tables + params + displacements, with no CPU fallback; `layout.verify
+  <grid>` asserts the live scene.
 - **GPU picking** (`picking/`) is a multi-channel ID render pass (separate glyph and
   grid channels) — the single source of truth for hover/click resolution.
 - **Frustum culling** (`GridVirtualizer`) adds/removes grids from the scene by camera

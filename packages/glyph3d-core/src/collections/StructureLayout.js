@@ -19,12 +19,13 @@ const SINGLE_COLUMN = Object.freeze({ pageHeight: 0, pagesWide: 1 });
  * SEMANTIC ENTITY (the AST), registered into the grid's relayout pipeline.
  *
  * Each AST node of a chosen kind is a contiguous glyph slot range (slots are
- * source-order). The arranger measures each block's bounds, packs the blocks with the
- * shared box-packer, and BAKES the move straight into the live instance buffer —
- * instancePosition for the move, instanceSize=0 (parked inside the arranged extent) to
- * hide everything else. Because the move lives in the buffer, the footprint walk, the
- * frustum-cull bounds, and the buffer-backed `positionAt` (caret, picking, future LSP
- * arrows) all agree for free — the buffer is the single source of truth.
+ * source-order). The arranger measures each block's bounds against the transient fold
+ * scratch, packs the blocks with the shared box-packer, and writes the move into the
+ * DISPLACEMENT table (deltas onto the fold) — instanceSize height=0 parks everything
+ * else inside the arranged extent (a height-0 glyph renders + picks nothing). The
+ * kernel re-dispatches with the table, and the footprint, the frustum-cull bounds, and
+ * the fold-mirror `positionAt` (caret, picking) all agree — the fold + table is the
+ * single source of truth.
  *
  * Crucially, `arrange` runs INSIDE every fold (CodeGrid._applyArrangers), re-deriving
  * from stable anchors (the SemanticModel's node ranges). So an arrangement can never go
@@ -48,8 +49,8 @@ export class StructureLayout {
         /** @type {{kind:string, scheme:string, count:number}|null} */
         this._scheme = null;
         this._healing = false;
-        // Engine-capable: arrange() speaks displacement (block moves + park as deltas onto
-        // the fold) as fluently as buffer writes — the eligibility gate reads this flag.
+        // Engine-capable (the only kind there is): arrange() speaks displacement
+        // (block moves + park as deltas onto the fold) — registerArranger rejects less.
         this.engineCapable = true;
     }
 
@@ -73,8 +74,7 @@ export class StructureLayout {
         // Probe for matching blocks up front, so an empty result is a clean error (with
         // the available kinds) rather than a silently-flat grid. Engine fields have no
         // buffer to measure — probe against the transient fold scratch.
-        const probe = this._blocks(model, kind, r,
-            r.gpuLayout === true ? this._grid._engineFoldScratch?.() : null);
+        const probe = this._blocks(model, kind, r, this._grid._engineFoldScratch?.());
         if (!probe.length) {
             const available = [...new Set((model.flat ?? []).map((n) => n.kind))].filter(Boolean);
             return { ok: false, reason: kind ? `no ${kind} blocks` : 'no functions or methods', available };
@@ -105,8 +105,9 @@ export class StructureLayout {
 
     /**
      * The ARRANGE stage hook (called by CodeGrid._applyArrangers inside every fold).
-     * Re-derives the packing from the AST and bakes it into the freshly-folded buffer.
-     * Idempotent: each fold rebuilds flow positions first, then this re-measures + re-packs.
+     * Re-derives the packing from the AST and writes it into the displacement table on
+     * the fresh fold. Idempotent: each fold re-dispatches flow first, then this
+     * re-measures + re-packs.
      * @param {import('./CodeGrid.js').default} grid
      */
     arrange(grid) {
@@ -119,12 +120,11 @@ export class StructureLayout {
         const model = grid.getSemantics?.() || grid.refreshSemanticsSync?.();
         if (!model) { this._healLater(grid); return; }
 
-        // Two engines, one arrangement (the strata pattern): CPU measures + bakes into the
-        // live buffer; the GPU engine measures against the TRANSIENT fold scratch and writes
-        // the displacement table, then re-dispatches. The caret mirror rides the same table.
-        const engine = r.gpuLayout === true;
-        const scratch = engine ? grid._engineFoldScratch?.() : null;
-        if (engine && !scratch) return;
+        // One engine, one arrangement (the strata pattern): measure against the TRANSIENT
+        // fold scratch and write the displacement table, then re-dispatch. The caret
+        // mirror rides the same table.
+        const scratch = grid._engineFoldScratch?.();
+        if (!scratch) return;
 
         const blocks = this._blocks(model, this._kind, r, scratch);
         if (!blocks.length) return; // nothing matches in the new content → leave this fold as flow
@@ -140,26 +140,23 @@ export class StructureLayout {
     }
 
     /**
-     * Bake the packing into the live instance buffer: move each block's slot range by a
-     * per-block offset (instancePosition), then hide every other glyph by zeroing its size
-     * and parking it inside the arranged extent (a size-0 glyph renders + picks nothing,
-     * and parked inside the box it never inflates the footprint walk).
+     * Bake the packing into the displacement table: each block's slot range moves by a
+     * per-block offset (a delta onto the fold), and every other glyph is hidden by
+     * zeroing its size height and parking it inside the arranged extent (a height-0
+     * glyph renders + picks nothing, and parked inside the box it never inflates the
+     * footprint).
      * @private
      */
     _bake(r, blocks, slots, grid, scratch) {
-        const engine = !!scratch;
-        const pos = engine ? scratch : r.getInstancePositions();
+        const pos = scratch;
         const siz = r.getInstanceSizes();
         if (!pos || !siz) return;
         const total = this._glyphCount(r);
         const isBlock = new Uint8Array(total);
-        let D = null;
-        if (engine) {
-            D = (r._layoutDisplacements && r._layoutDisplacements.length >= total * 3)
-                ? r._layoutDisplacements
-                : (r._layoutDisplacements = new Float32Array(total * 3));
-            D.fill(0);
-        }
+        const D = (r._layoutDisplacements && r._layoutDisplacements.length >= total * 3)
+            ? r._layoutDisplacements
+            : (r._layoutDisplacements = new Float32Array(total * 3));
+        D.fill(0);
 
         let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
         let minZ = 0, maxZ = 0;   // blocks keep their fold z (the wrap staircase)
@@ -170,8 +167,7 @@ export class StructureLayout {
             const oy = slot.y - b.bounds.max.y; // slot.y = box top (y descends); bounds.max.y = block top
             const end = Math.min(total, b.startSlot + b.count);
             for (let s = b.startSlot; s < end; s++) {
-                if (engine) { D[s * 3] = ox; D[s * 3 + 1] = oy; }
-                else { pos[s * 3] += ox; pos[s * 3 + 1] += oy; }
+                D[s * 3] = ox; D[s * 3 + 1] = oy;
                 isBlock[s] = 1;
             }
             if (b.bounds.min.z < minZ) minZ = b.bounds.min.z;
@@ -187,34 +183,25 @@ export class StructureLayout {
         const parkY = maxY === -Infinity ? 0 : maxY;
         for (let s = 0; s < total; s++) {
             if (isBlock[s]) continue;
-            if (engine) {
-                // Park = a displacement to the box corner; hide = HEIGHT-only zero. The
-                // advance lane must stay pristine — the kernel's xOffsets rebuild reads it,
-                // and the fold the displacements were computed against must remain the fold
-                // that dispatches. (The CPU path zeroes both lanes; its fold never re-runs.)
-                D[s * 3]     = parkX - pos[s * 3];
-                D[s * 3 + 1] = parkY - pos[s * 3 + 1];
-                D[s * 3 + 2] = -pos[s * 3 + 2];
-                siz[s * 2 + 1] = 0;
-            } else {
-                pos[s * 3] = parkX; pos[s * 3 + 1] = parkY; pos[s * 3 + 2] = 0;
-                siz[s * 2] = 0; siz[s * 2 + 1] = 0;
-            }
+            // Park = a displacement to the box corner; hide = HEIGHT-only zero. The
+            // advance lane must stay pristine — the kernel's xOffsets rebuild reads it,
+            // and the fold the displacements were computed against must remain the fold
+            // that dispatches.
+            D[s * 3]     = parkX - pos[s * 3];
+            D[s * 3 + 1] = parkY - pos[s * 3 + 1];
+            D[s * 3 + 2] = -pos[s * 3 + 2];
+            siz[s * 2 + 1] = 0;
         }
 
-        if (engine) {
-            r.markInstanceTransformsDirty();   // sizes upload (positions skipped on engine fields)
-            grid._resyncEngineLayout?.();
-            // The packing box IS the arranged extent — exact, no walk. Parked glyphs sit at
-            // its corner by construction; z spans the blocks' own fold staircase.
-            if (minX !== Infinity) {
-                grid.setEngineBounds?.({
-                    min: { x: minX, y: minY, z: minZ },
-                    max: { x: maxX, y: maxY, z: maxZ },
-                });
-            }
-        } else {
-            r.markInstanceTransformsDirty();
+        r.markInstanceTransformsDirty();   // sizes upload (positions are GPU-owned)
+        grid._resyncEngineLayout?.();
+        // The packing box IS the arranged extent — exact, no walk. Parked glyphs sit at
+        // its corner by construction; z spans the blocks' own fold staircase.
+        if (minX !== Infinity) {
+            grid.setEngineBounds?.({
+                min: { x: minX, y: minY, z: minZ },
+                max: { x: maxX, y: maxY, z: maxZ },
+            });
         }
     }
 
@@ -247,8 +234,7 @@ export class StructureLayout {
             const c = this._grid.getCharForSlot?.(slot);
             return c ? { at: `${c.line}:${c.col}`, ch: (lines[c.line] ?? '')[c.col] ?? '' } : null;
         };
-        const blocks = this._blocks(model, kind, r,
-            r.gpuLayout === true ? this._grid._engineFoldScratch?.() : null).map((b) => {
+        const blocks = this._blocks(model, kind, r, this._grid._engineFoldScratch?.()).map((b) => {
             const s = b.node.start, e = b.node.end;
             return {
                 kind: b.node.kind, name: b.node.name,
@@ -287,12 +273,11 @@ export class StructureLayout {
         };
         visit(model.roots ?? (model.outline ? model.outline() : []));
 
-        // Measurement source: the live buffer (CPU engine) or the transient fold scratch
-        // (GPU engine — no buffer exists; measureSlotSpan is the same math either way).
-        const sizes = scratch ? r.getInstanceSizes?.() : null;
-        const measure = scratch
-            ? (start, count) => measureSlotSpan(scratch, sizes, start, count)
-            : (start, count) => r.measureSlotRange(start, count);
+        // Measurement source: the transient fold scratch (engine fields have no CPU
+        // buffer — measureSlotSpan over the stride-3 scratch is the math).
+        if (!scratch) return [];
+        const sizes = r.getInstanceSizes?.();
+        const measure = (start, count) => measureSlotSpan(scratch, sizes, start, count);
 
         const out = [];
         for (const n of picked) {

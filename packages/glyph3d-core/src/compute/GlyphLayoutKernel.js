@@ -210,10 +210,9 @@ export default class GlyphLayoutKernel {
      *           positionsAttribute?: import('three/webgpu').StorageInstancedBufferAttribute }} [opts]
      *   positionsAttribute: write into an EXTERNAL storage-backed attribute instead of an owned
      *   buffer — the integration mode, where the target is a GlyphField's own instancePosition
-     *   (vec3; three repacks it to a 16-byte stride, which is also WGSL's vec3-array stride, so
-     *   both sides index identically). With an external target, configure()'s outBase places each
-     *   item at its bufferStartIndex range, and dispose() leaves the attribute alone — the field
-     *   owns it.
+     *   (stride-4 vec4, installed by applyPrebuiltBuffers' engine branch). With an external
+     *   target, configure()'s outBase places each item at its bufferStartIndex range, and
+     *   dispose() leaves the attribute alone — the field owns it.
      */
     constructor(renderer, opts = {}) {
         if (!renderer) throw new Error('GlyphLayoutKernel: a WebGPU renderer is required');
@@ -456,9 +455,8 @@ export default class GlyphLayoutKernel {
             const p = fold(slot, lo);
 
             // outBase places this dispatch at its item's range in a shared output (a field's
-            // bufferStartIndex); owned buffers dispatch at 0. External vec3 writes leave the
-            // stride-padding lane alone (WGSL pads vec3 arrays to 16 bytes); the owned vec4
-            // Both paths write vec4 with zero padding to match the stride-4 buffer.
+            // bufferStartIndex); owned buffers dispatch at 0. Both modes write vec4 with a
+            // zero padding lane, matching the stride-4 buffer.
             const out = u.outBase.add(slot);
             this.positions.element(out).assign(vec4(p, float(0)));
         })().compute(1).setName('GlyphLayoutKernel');
