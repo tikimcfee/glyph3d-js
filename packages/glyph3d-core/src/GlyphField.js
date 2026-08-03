@@ -144,10 +144,11 @@ export function getGlyphWidthCompress() { return WIDTH_COMPRESS.value; }
  */
 function _buildVertexNode(uniforms) {
     // Per-instance buffer attributes
-    // instancePosition uses stride-4 (StorageInstancedBufferAttribute with itemSize=4)
-    // when gpuLayout is enabled, so we read it as vec4 and use .xyz. When gpuLayout is off,
-    // it's a regular InstancedBufferAttribute with itemSize=3, but vec4 reads still work
-    // (the .w component is undefined/ignored).
+    // instancePosition is stride-4 on EVERY path: the pre-allocated mesh-construction
+    // attribute, the CPU path's zero-padded commit attribute (terminals/frames/labels),
+    // and the engine's StorageInstancedBufferAttribute all carry itemSize=4. Read it as
+    // vec4 and use .xyz — the .w lane is padding. (A stride-3 initial attribute bakes a
+    // stride-3 vertex layout into the pipeline that the stride-4 swap then mis-reads.)
     const iPos     = attribute('instancePosition', 'vec4');
     const iSize    = attribute('instanceSize',     'vec2');
     const iGlyphId = attribute('instanceGlyphId',  'float');
@@ -948,14 +949,21 @@ export default class GlyphField {
         const maxCount = this.config.maxInstances;
 
         // Pre-allocate per-instance attributes
-        // PLAIN instanced attribute — stride 3, forever. A vec3 STORAGE attribute is a trap
-        // for CPU consumers: three repacks it at first render, REPLACING .array with a
-        // stride-4 padded copy and mutating itemSize — after which every arr[i*3] reader and
-        // writer (arrangers, updatePosition, bounds walks) silently lands on wrong lanes.
-        // The engine path swaps in its own explicit stride-4 storage attribute at commit
-        // (applyPrebuiltBuffers), where no CPU code touches the array by design.
+        // instancePosition is stride-4 from BIRTH. The shader reads it as vec4, and every
+        // commit path (the engine's StorageInstancedBufferAttribute AND the CPU path's padded
+        // InstancedBufferAttribute) installs a stride-4 attribute — so the INITIAL attribute
+        // must be stride-4 too. A stride-3 initial gets its vertex-input layout baked into the
+        // render pipeline at the first frame an async-loaded grid spends in the scene BEFORE its
+        // worker build resolves (agent book cards are addSheet'd before loadFileAsync settles,
+        // unlike regular grids which loadFile synchronously before seatFileGrid). When the
+        // engine then swaps in the stride-4 storage attribute, the stride-3 pipeline reads every
+        // other instance's X from the wrong lane → glyphs splay horizontally. This is the
+        // "buffer verifies correct, shader renders wrong" paradox: layout.verify reads the GPU
+        // storage buffer (correct), but the vertex fetch runs through the stale stride-3 layout.
+        // The storage-repack trap (a vec3 STORAGE attribute repacked by three) does not apply
+        // here: this is a PLAIN InstancedBufferAttribute, which three never repacks.
         geometry.setAttribute('instancePosition',
-            new THREE.InstancedBufferAttribute(new Float32Array(maxCount * 3), 3));
+            new THREE.InstancedBufferAttribute(new Float32Array(maxCount * 4), 4));
         geometry.setAttribute('instanceSize',
             new THREE.InstancedBufferAttribute(new Float32Array(maxCount * 2), 2));
         geometry.setAttribute('instanceGlyphId',
@@ -1174,17 +1182,18 @@ export default class GlyphField {
             return;
         }
         const geom = this.instanceMesh.geometry;
-        const arr  = geom.attributes.instancePosition.array;
-        const base = entry.bufferStartIndex;
-        const dx = newPosition.x - arr[base * 4];
-        const dy = newPosition.y - arr[base * 4 + 1];
-        const dz = newPosition.z - arr[base * 4 + 2];
-        for (let i = 0; i < entry.glyphCount; i++) {
-            const b = (base + i) * 4;
-            arr[b] += dx; arr[b + 1] += dy; arr[b + 2] += dz;  // .w padding lane left alone
-        }
         const attr = geom.attributes.instancePosition;
-        attr.addUpdateRange(base * 4, entry.glyphCount * 4);
+        const arr  = attr.array;
+        const pStride = attr.itemSize;   // stride-4 on every live path; read it, never assume
+        const base = entry.bufferStartIndex;
+        const dx = newPosition.x - arr[base * pStride];
+        const dy = newPosition.y - arr[base * pStride + 1];
+        const dz = newPosition.z - arr[base * pStride + 2];
+        for (let i = 0; i < entry.glyphCount; i++) {
+            const b = (base + i) * pStride;
+            arr[b] += dx; arr[b + 1] += dy; arr[b + 2] += dz;  // .w padding lane (stride-4) left alone
+        }
+        attr.addUpdateRange(base * pStride, entry.glyphCount * pStride);
         attr.needsUpdate = true;
         this._updateGeometryBounds();   // glyphs moved in place (no rebuild) — resync the cull bounds
     }
@@ -1537,7 +1546,9 @@ export default class GlyphField {
         const geom  = this.instanceMesh?.geometry;
         if (!geom) return box;
 
-        const positions = geom.attributes.instancePosition?.array;
+        const posAttr   = geom.attributes.instancePosition;
+        const positions = posAttr?.array;
+        const pStride   = posAttr?.itemSize ?? 3;
         const sizes     = geom.attributes.instanceSize?.array;
         if (!positions || !sizes) return box;
 
@@ -1549,9 +1560,9 @@ export default class GlyphField {
 
         for (let i = 0; i < count; i++) {
             const buf = start + i;
-            const px  = positions[buf * 3];
-            const py  = positions[buf * 3 + 1];
-            const pz  = positions[buf * 3 + 2];
+            const px  = positions[buf * pStride];
+            const py  = positions[buf * pStride + 1];
+            const pz  = positions[buf * pStride + 2];
             const sw  = sizes[buf * 2];
             const sh  = sizes[buf * 2 + 1];
             if (px      < minX) minX = px;
@@ -1599,18 +1610,20 @@ export default class GlyphField {
         // ones eligibility keeps OFF the engine; content bounds ride the builder's cache.
         if (this.gpuLayout) return null;
         const geom      = this.instanceMesh.geometry;
-        const positions = geom.attributes.instancePosition.array;
+        const posAttr   = geom.attributes.instancePosition;
+        const positions = posAttr.array;
+        const pStride   = posAttr.itemSize;   // 4 for stride-4; never assume 3
         const sizes     = geom.attributes.instanceSize.array;
         const start     = Math.max(0, startSlot | 0);
-        const end       = Math.min((positions.length / 3) | 0, start + count);
+        const end       = Math.min((positions.length / pStride) | 0, start + count);
 
         let minX = Infinity, minY = Infinity, minZ = Infinity;
         let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
 
         for (let buf = start; buf < end; buf++) {
-            const px = positions[buf * 3];
-            const py = positions[buf * 3 + 1];
-            const pz = positions[buf * 3 + 2];
+            const px = positions[buf * pStride];
+            const py = positions[buf * pStride + 1];
+            const pz = positions[buf * pStride + 2];
             const sw = sizes[buf * 2];
             const sh = sizes[buf * 2 + 1];
             if (px      < minX) minX = px;
@@ -1780,7 +1793,9 @@ export default class GlyphField {
 
         // Compaction path
         const geom = this.instanceMesh.geometry;
-        const oldPos = geom.attributes.instancePosition.array;
+        const posAttr = geom.attributes.instancePosition;
+        const oldPos = posAttr.array;
+        const pStride = posAttr.itemSize;   // 4 for stride-4; never assume 3
         const oldSiz = geom.attributes.instanceSize.array;
         const oldGid = geom.attributes.instanceGlyphId.array;
         const oldCol = geom.attributes.instanceColor.array;
@@ -1794,7 +1809,7 @@ export default class GlyphField {
             const r = entry.bufferStartIndex, n = entry.glyphCount;
             entry.bufferStartIndex = w;
             if (r !== w && n > 0) {
-                oldPos.copyWithin(w * 3, r * 3, (r + n) * 3);
+                oldPos.copyWithin(w * pStride, r * pStride, (r + n) * pStride);
                 oldSiz.copyWithin(w * 2, r * 2, (r + n) * 2);
                 oldGid.copyWithin(w,     r,     r + n);
                 oldCol.copyWithin(w * 3, r * 3, (r + n) * 3);
@@ -1804,6 +1819,9 @@ export default class GlyphField {
         }
 
         for (const name of Object.keys(geom.attributes)) {
+            // Engine-owned positions are GPU-written; flagging the storage attribute
+            // would schedule an upload of its zeroed CPU array over the kernel's work.
+            if (name === 'instancePosition' && this.gpuLayout) continue;
             geom.attributes[name].needsUpdate = true;
         }
         this._ensureHighlightTexture(total);
@@ -1815,7 +1833,9 @@ export default class GlyphField {
     _writeGlyphsToGeometry(glyphs) {
         const count = Math.min(glyphs.length, this.config.maxInstances);
         const geom  = this.instanceMesh.geometry;
-        const pos   = geom.attributes.instancePosition.array;
+        const posAttr = geom.attributes.instancePosition;
+        const pos   = posAttr.array;
+        const pStride = posAttr.itemSize;   // 4 for stride-4 (engine + CPU-padded); never assume 3
         const siz   = geom.attributes.instanceSize.array;
         const gids  = geom.attributes.instanceGlyphId.array;
         const col   = geom.attributes.instanceColor.array;
@@ -1823,9 +1843,9 @@ export default class GlyphField {
 
         for (let i = 0; i < count; i++) {
             const g = glyphs[i];
-            pos[i * 3]     = g.position.x;
-            pos[i * 3 + 1] = g.position.y;
-            pos[i * 3 + 2] = g.position.z;
+            pos[i * pStride]     = g.position.x;
+            pos[i * pStride + 1] = g.position.y;
+            pos[i * pStride + 2] = g.position.z;
             siz[i * 2]     = g.size.width;
             siz[i * 2 + 1] = g.size.height;
             gids[i]        = g.charCode || 0;
@@ -1887,11 +1907,13 @@ export default class GlyphField {
             return;
         } else {
             // No precomputed extent (sync / in-place move) — one O(n) min/max over the live buffer.
-            const pos = geom.attributes.instancePosition.array;
+            const posAttr = geom.attributes.instancePosition;
+            const pos = posAttr.array;
+            const pStride = posAttr.itemSize;   // 4 for stride-4; never assume 3
             const siz = geom.attributes.instanceSize.array;
             let minX = Infinity, minY = Infinity, minZ = Infinity, maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
             for (let i = 0; i < n; i++) {
-                const px = pos[i * 3], py = pos[i * 3 + 1], pz = pos[i * 3 + 2];
+                const px = pos[i * pStride], py = pos[i * pStride + 1], pz = pos[i * pStride + 2];
                 const sw = siz[i * 2], sh = siz[i * 2 + 1];
                 if (px < minX) minX = px; if (py < minY) minY = py; if (pz < minZ) minZ = pz;
                 if (px + sw > maxX) maxX = px + sw; if (py + sh > maxY) maxY = py + sh; if (pz > maxZ) maxZ = pz;
@@ -1988,25 +2010,22 @@ export default class GlyphField {
     }
 
     /**
-     * The authoritative per-glyph position buffer (xyz per slot) as bound to the
-     * instanced geometry. The LayoutDescription reads this for buffer-backed
-     * positionAt — the glyph's exact laid-out position (wrap + pagination already
-     * applied), so the caret never re-derives layout math. Null before first flush.
+     * The raw per-glyph position array as bound to the instanced geometry — stride is
+     * attr.itemSize (stride-4 on every live path), NOT packed xyz. For CPU-buffered
+     * fields only (terminals, frames, labels): engine-owned fields have no CPU position
+     * array, so this returns null — position queries there go through the fold mirror
+     * (LayoutDescription).
      * @returns {Float32Array|null}
      */
     getInstancePositions() {
-        // Engine-owned fields have no CPU position array — the honest answer is null, and
-        // every caller either falls back (bounds → builder cache) or is excluded from the
-        // engine by eligibility (arrangers). Position QUERIES go through the fold mirror.
         if (this.gpuLayout) return null;
         return this.instanceMesh?.geometry?.attributes?.instancePosition?.array ?? null;
     }
 
     /**
      * Choose the position engine for subsequent commits. true = the compute kernel is the
-     * only writer (applyPrebuiltBuffers stops adopting CPU arrays); false = the CPU path
-     * exactly as it always was. An ENGINE choice, never a feature switch — the caller
-     * (CodeGrid) gates eligibility so anything the kernel can't serve stays CPU.
+     * only writer (applyPrebuiltBuffers stops adopting CPU arrays) — every CodeGrid field;
+     * false = CPU-buffered placement (terminals, frames, labels), which never flips on.
      * @param {boolean} on
      */
     setGpuLayout(on) {
@@ -2034,8 +2053,9 @@ export default class GlyphField {
 
     /**
      * Flag the position + size instance attributes for GPU re-upload after an external
-     * in-place write to the live arrays (getInstancePositions/getInstanceSizes) — e.g. a
-     * structural arranger baking glyph moves into the buffer. Caller refreshes bounds.
+     * in-place write to the live arrays (getInstancePositions/getInstanceSizes) — e.g. an
+     * arranger zeroing size heights to hide glyphs. Positions are skipped on engine
+     * fields (GPU-owned); sizes remain CPU-owned either way.
      */
     markInstanceTransformsDirty() {
         const geom = this.instanceMesh?.geometry;
