@@ -1,13 +1,15 @@
 import * as THREE from 'three';
 
+const _origin = new THREE.Vector3(0, 0, 0);
+
 /**
  * BoundedObject3D — the on-demand bounds contract for grid primitives.
  *
  * One thin base that lifts the (previously triplicated) world-bounds derivation
- * into a single place. It is deliberately stateless about the world box:
+ * into a single place. It is deliberately stateless about the WORLD box:
  * getBounds() recomputes the world AABB FRESH on every call (local content box ×
  * current matrixWorld). There is NO validity cache, NO dirty flag, and NO
- * transform observation here — by design.
+ * transform observation for the world box — by design.
  *
  * Why on-demand rather than cached/observed (the conclusion of a long design arc,
  * proved against the real consumers and the codebase's own rationale):
@@ -30,6 +32,17 @@ import * as THREE from 'three';
  *   - layoutBounds()    → local box suited to composable layout containers. Optional;
  *                         subclass-provided where layout needs it.
  *
+ * The Extent — a Three.js-standard `boundingBox` + `boundingSphere` in LOCAL space,
+ * the single source of truth for the object's size:
+ *   - The renderer culls off-screen DRAWS via the field mesh's geometry.boundingSphere
+ *     (the per-instance extent, written in GlyphField). THIS is the OBJECT-level
+ *     Extent — the bound the layout measures, picking/occlusion frames, and (under
+ *     ECS) the `Extent` component IS. Every bounded object is a Three.js bounding-
+ *     volume citizen: one bound, sourced from getLocalBounds(), refreshed on read.
+ *   - `refreshExtent()` derives it from getLocalBounds(); getBounds() refreshes it
+ *     alongside the world box so the consumers that already poll getBounds (the
+ *     occlusion culler, the layout's measure pass) keep it current for free.
+ *
  * @abstract getLocalBounds
  */
 export default class BoundedObject3D extends THREE.Object3D {
@@ -46,6 +59,26 @@ export default class BoundedObject3D extends THREE.Object3D {
     }
 
     /**
+     * Refresh the object's Three.js-standard Extent (`boundingBox` + `boundingSphere`)
+     * from getLocalBounds(). Local space — matching Three.js's geometry.boundingSphere
+     * convention (consumers apply matrixWorld for a world result, as getBounds does).
+     * Kept fresh on every getBounds() read; callable directly when a caller needs the
+     * Extent without a world box. Returns the local box so getBounds reuses it (one
+     * getLocalBounds() call, not two).
+     * @returns {THREE.Box3} the local Extent box (reused; do not hold across calls)
+     */
+    refreshExtent() {
+        const box = this._extentBox || (this._extentBox = new THREE.Box3());
+        box.copy(this.getLocalBounds());
+        const sphere = this._extentSphere || (this._extentSphere = new THREE.Sphere());
+        if (box.isEmpty()) sphere.set(_origin, 0);
+        else box.getBoundingSphere(sphere);
+        this.boundingBox = box;
+        this.boundingSphere = sphere;
+        return box;
+    }
+
+    /**
      * World-space AABB of this object's content, recomputed fresh on every call.
      *
      * Formula (behavior-preserving — the box the old per-grid getBounds produced):
@@ -53,7 +86,9 @@ export default class BoundedObject3D extends THREE.Object3D {
      *
      * matrixWorld is refreshed first because getBounds is called from pointer /
      * useFrame paths that run before r3f renders, so the matrix can otherwise lag a
-     * just-applied move.
+     * just-applied move. The local Extent (boundingBox/Sphere) is refreshed here too,
+     * so every consumer that polls the world box keeps the object-level Extent current
+     * for free.
      *
      * The default target is a reusable scratch Box3 — that is an output buffer, NOT a
      * cache of the world box: it is overwritten from scratch every call. Callers must
@@ -64,7 +99,8 @@ export default class BoundedObject3D extends THREE.Object3D {
      */
     getBounds(target = this._worldBoundsScratch || (this._worldBoundsScratch = new THREE.Box3())) {
         this.updateWorldMatrix(true, false);
-        target.copy(this.getLocalBounds());
+        const local = this.refreshExtent();          // keep the object Extent fresh alongside
+        target.copy(local);
         if (target.isEmpty()) return target;
         target.applyMatrix4(this.matrixWorld); // world box re-derived from current matrix
         return target;
