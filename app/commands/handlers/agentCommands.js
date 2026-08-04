@@ -29,9 +29,10 @@
 
 import { resolveGridByIdOrIndex } from './spatialHelpers.js';
 import { normalizeToolCall, normalizeMessage } from '@glyph3d/core/collections/toolRegistry.js';
-import { parseClaudeSessionAsync, parseKimiSessionAsync, agentIdForSession, kimiAgentIdForSession,
+import { agentIdForSession, kimiAgentIdForSession,
          createKimiWireState, kimiWireLineToEvents }
     from '@glyph3d/core/collections/sessionAdapter.js';
+import { parseSessionOffThread } from '@glyph3d/core/workers/SessionParsePool.js';
 import { decodeBase64 } from '@glyph3d/core/utils/encoding.js';
 
 const noBooks = { text: 'ERR: agent books not wired', data: null };
@@ -42,11 +43,13 @@ const agentIdForEntry = (s) => (s.harness === 'kimi' ? kimiAgentIdForSession(s.i
 
 /**
  * Open a stored agent session as a book: fetch the harness's own record (the durable
- * state), parse it through the harness's adapter, and bulk-hydrate a lane whose id matches
- * the harness's derivation — for claude that's the live hook's, so a still-running
- * session's stream converges on the same book. The ONE open path: the agent.open verb and
- * session restore both ride it. Parse AND hydrate are frame-sliced (the ...Async adapters,
- * AgentBooks.hydrate) — a deep history streams in over a few frames instead of one long task.
+ * state — raw BYTES over the binary result plane), decode + parse it through the
+ * codec stage (the session parse pool — OFF the main thread, one dialect
+ * implementation), and bulk-hydrate a lane whose id matches the harness's
+ * derivation — for claude that's the live hook's, so a still-running session's
+ * stream converges on the same book. The ONE open path: the agent.open verb and
+ * session restore both ride it. Hydrate itself is frame-sliced, so a deep history
+ * streams in over a few frames instead of one long task.
  * @param {Object} ctx
  * @param {string} sessionId full session id (the record's filename stem)
  * @param {{limit?: number, harness?: string}} [opts] limit = turns to keep (0 = all) —
@@ -65,25 +68,23 @@ export async function openAgentSession(ctx, sessionId, { limit, harness = 'claud
     if (!ctx.agentBooks) throw new Error('agent books not wired');
     const r1 = (n) => Math.round(n * 10) / 10;
     const t0 = performance.now();
-    if (harness === 'kimi') {
-        const { content, cwd: indexCwd } = await provider.read(sessionId, { harness: 'kimi' });
-        const t1 = performance.now();
-        const { events, cwd, meta } = await parseKimiSessionAsync(content, indexCwd);
-        const t2 = performance.now();
-        const agentId = kimiAgentIdForSession(sessionId);
-        const added = await ctx.agentBooks.hydrate(agentId, events, { agentType: 'kimi', sessionId, cwd, meta, limit });
-        const t3 = performance.now();
-        return { agentId, added, total: events.length, bytes: content.length,
-                 ms: { read: r1(t1 - t0), parse: r1(t2 - t1), hydrate: r1(t3 - t2) } };
-    }
-    const { content } = await provider.read(sessionId);
+    const isKimi = harness === 'kimi';
+    const agentId = isKimi ? kimiAgentIdForSession(sessionId) : agentIdForSession(sessionId);
+    const agentType = isKimi ? 'kimi' : 'claude';
+
+    // Transport: raw transcript bytes (the binary result plane). Codec: the parse
+    // pool — decode + dialect + cap-slice OFF the main thread, so only the event
+    // tail the book will materialize clones back. The cap mirrors hydrate's rule,
+    // which re-derives and re-slices identically.
+    const { bytes, cwd: indexCwd } = await provider.read(sessionId, isKimi ? { harness: 'kimi' } : undefined);
     const t1 = performance.now();
-    const { events, cwd, meta } = await parseClaudeSessionAsync(content);
+    const byteLen = bytes.byteLength;   // the parse TRANSFERS the buffer — measure first
+    const cap = ctx.agentBooks.capForHydration(agentId, limit);
+    const { events, cwd, meta, total } = await parseSessionOffThread(bytes, { harness: agentType, cwd: indexCwd, cap });
     const t2 = performance.now();
-    const agentId = agentIdForSession(sessionId);
-    const added = await ctx.agentBooks.hydrate(agentId, events, { agentType: 'claude', sessionId, cwd, meta, limit });
+    const added = await ctx.agentBooks.hydrate(agentId, events, { agentType, sessionId, cwd, meta, limit });
     const t3 = performance.now();
-    return { agentId, added, total: events.length, bytes: content.length,
+    return { agentId, added, total, bytes: byteLen,
              ms: { read: r1(t1 - t0), parse: r1(t2 - t1), hydrate: r1(t3 - t2) } };
 }
 
