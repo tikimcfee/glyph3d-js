@@ -174,7 +174,7 @@ export function syncGpuLayout(field, buffers, items, shared, rendererIds) {
                 origin,
                 lineSpacing: ls,
                 zStep: params.zWrapStep,
-                cellHeight: metrics.charHeight,
+                cellHeight: s.maxGlyphHeight || metrics.charHeight,
                 scrollOffset: scroll,
                 page: pageFold(layout, metrics, s.maxRowExtent),
             });

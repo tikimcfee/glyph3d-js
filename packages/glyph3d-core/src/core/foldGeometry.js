@@ -101,9 +101,13 @@ export function pageShift(screenRow, page) {
  *   maxX  the widest row, plus the fan of however many columns the content actually
  *         reached (`usedCols`, not the configured `pagesWide` — a two-page file in a
  *         five-wide layout is two columns wide, not five).
- *   maxY  the shallowest row's top edge. Rows above page 0 — including the negative
- *         screen rows a scroll lifts above the origin — never page-shift, so the
- *         shallowest row is simply the first one.
+ *   maxY  the shallowest row's top edge, where "top edge" is that row's y plus the
+ *         TALLEST glyph in the item — NOT a nominal cell height. Rows sit at a uniform
+ *         pitch but a glyph is not required to fit it, and one that exceeds the pitch
+ *         overhangs the row above rather than the top of the item, so taking the global
+ *         tallest over-covers by at most (tallest − tallest-on-the-top-row) and can never
+ *         clip. Rows above page 0 — including the negative screen rows a scroll lifts
+ *         above the origin — never page-shift, so the shallowest row is the first one.
  *   minY  the deepest row. Unpaginated that is the last row; paginated it is the last
  *         BAND's deepest row, which is a full page's last row whenever that band holds
  *         more than one page, and the final page's own last row when it holds one.
@@ -131,7 +135,8 @@ export function pageShift(screenRow, page) {
  * @param {{x:number,y:number,z:number}} p.origin
  * @param {number} p.lineSpacing
  * @param {number} [p.zStep] - world z per wrap segment
- * @param {number} [p.cellHeight] - a row's height (position is the cell's BOTTOM edge)
+ * @param {number} [p.cellHeight] - the TALLEST glyph's height (layoutScan.maxGlyphHeight).
+ *   A glyph's position is its cell's BOTTOM edge, so this is what the top edge adds.
  * @param {number} [p.scrollOffset] - visual rows the conveyor has shifted content up by
  * @param {?ReturnType<typeof pageFold>} [p.page]
  * @returns {{min:{x,y,z}, max:{x,y,z}, width:number, height:number, depth:number}|null}
@@ -207,7 +212,11 @@ export function foldExtent(p) {
  * @param {number} [p.xBase] - slot offset into `xOffsets`
  * @param {Uint32Array|Int32Array} [p.lineStartRow] - destination for the per-line row prefix
  * @param {number} [p.lineRowBase] - line offset into `lineStartRow`
- * @returns {{maxRowExtent:number, totalRows:number, maxSegs:number}}
+ * @returns {{maxRowExtent:number, totalRows:number, maxSegs:number, maxGlyphHeight:number}}
+ *   maxGlyphHeight is the TALLEST glyph. Rows sit at a uniform pitch, but a glyph is not
+ *   required to fit that pitch — an arranger zeroes heights to hide glyphs, and the CPU
+ *   glyph-list path writes a height per glyph — so the top edge cannot assume a nominal
+ *   cell height. The height lane shares a cache line with the advance, so this is free.
  */
 export function layoutScan(p) {
     const { slotCount, lineTable, sizes } = p;
@@ -219,7 +228,7 @@ export function layoutScan(p) {
     const lsr = p.lineStartRow || null;
     const lineN = lineTable.length;
 
-    let row = 0, maxRowExtent = 0, maxSegs = 0;
+    let row = 0, maxRowExtent = 0, maxSegs = 0, maxGlyphHeight = 0;
     for (let L = 0; L < lineN; L++) {
         if (lsr) lsr[lineRowBase + L] = row;
         const end = L + 1 < lineN ? lineTable[L + 1] : slotCount;
@@ -230,14 +239,16 @@ export function layoutScan(p) {
                 acc = 0; onSegment = 0; segs++;
             }
             if (xo) xo[xBase + s] = acc;
-            acc += sizes[(sizeBase + s) * 2];
+            const si = (sizeBase + s) * 2;
+            acc += sizes[si];
+            if (sizes[si + 1] > maxGlyphHeight) maxGlyphHeight = sizes[si + 1];
             onSegment++;
         }
         if (acc > maxRowExtent) maxRowExtent = acc;
         if (segs > maxSegs) maxSegs = segs;
         row += 1 + segs;
     }
-    return { maxRowExtent, totalRows: row, maxSegs };
+    return { maxRowExtent, totalRows: row, maxSegs, maxGlyphHeight };
 }
 
 /**

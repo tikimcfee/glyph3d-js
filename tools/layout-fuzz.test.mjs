@@ -143,7 +143,7 @@ for (let k = 0; k < SEEDS; k++) {
       originX: origin.x, originY: origin.y, originZ: origin.z,
       lineSpacing: metrics.lineSpacing,
       zStep: metrics.charHeight * layout.zWrapSpacing,
-      cellHeight: metrics.charHeight,
+      cellHeight: scan.maxGlyphHeight || metrics.charHeight,
       advance: metrics.charWidth + metrics.letterSpacing,
       scrollOffset: scroll,
       totalRows: scan.totalRows, maxRowExtent: scan.maxRowExtent, maxSegs: scan.maxSegs,

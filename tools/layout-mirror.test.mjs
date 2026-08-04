@@ -106,7 +106,7 @@ function describe(buffers, layout, scroll, displacements = null) {
     originX: ORIGIN.x, originY: ORIGIN.y, originZ: ORIGIN.z,
     lineSpacing: metrics.lineSpacing,
     zStep: metrics.charHeight * (layout.zWrapSpacing || 0),
-    cellHeight: metrics.charHeight,
+    cellHeight: scan.maxGlyphHeight || metrics.charHeight,
     advance: metrics.charWidth + metrics.letterSpacing,
     scrollOffset: scroll,
     totalRows: scan.totalRows, maxRowExtent: scan.maxRowExtent, maxSegs: scan.maxSegs,

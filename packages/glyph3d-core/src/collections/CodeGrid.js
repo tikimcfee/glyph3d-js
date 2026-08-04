@@ -1692,7 +1692,7 @@ class CodeGrid extends FramedGlyphField {
             originY: this._layoutOriginY ?? 0,
             lineSpacing: m.lineHeight,
             zStep: m.charHeight * (lp.zWrapSpacing || 0),
-            cellHeight: m.charHeight,
+            cellHeight: fold?.maxGlyphHeight || m.charHeight,
             advance: m.charWidth + (m.spacing || 0),
             scrollOffset: this._scrollOffset || 0,  // so the mirror matches the scrolled glyphs
             totalRows: fold?.totalRows || 0,
