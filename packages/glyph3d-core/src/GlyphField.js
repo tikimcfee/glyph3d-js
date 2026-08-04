@@ -49,20 +49,9 @@ const {
 /** Upper bound on quadratic beziers per glyph (TSL loop cap). */
 const MAX_CURVES = 256;
 
-/**
- * Render modes. These integers cross the JS→GPU boundary as a numeric uniform
- * (WGSL has no enums — a uniform is a scalar), so the value itself must stay a
- * small int; the shader casts the uniform with int() and compares with .equal().
- *
- * Used in two places with the SAME numbers:
- *   - the per-instance `vMode` varying (the fragment branch selector), and
- *   - the field-level `_renderMode` uniform, where GLYPH lets the per-glyph map
- *     pick SLUG vs BITMAP, and FRAME forces every instance to the frame branch.
- */
-const RENDER_MODE = Object.freeze({ GLYPH: 0, BITMAP: 1, FRAME: 2 });
-
 import { PERF_THRESHOLDS } from './core/constants.js';
 import { computeCellMetrics } from './core/cellMetrics.js';
+import { RENDER_MODE, buildGlyphVertexTransform } from './core/glyphVertex.js';
 
 const MAX_GROUPS_DEFAULT = PERF_THRESHOLDS.defaultMaxGroups ?? 64;
 const MAX_GROUPS_DIM     = 16000;
@@ -112,48 +101,31 @@ export function getGlyphLodParams() {
     return out;
 }
 
-/**
- * GLOBAL glyph width-compression dial — condense glyph ink along x, in place, aligned
- * to leading. k scales every glyph quad's width AND its center-anchor shift by the same
- * factor, so the glyph's left edge stays at its cell anchor and the shrink happens about
- * the leading edge. Layout advance (iSize.x, cell anchors, column math, picking targets,
- * carets) is untouched — only the rendered ink narrows. 1 = off; k > 1 expands.
- * ONE shared uniform across every glyph material — a feel-test render dial, not per-grid;
- * driven by `glyph.widthCompress` in app settings. Frame-mode fields (external captures
- * tiled as cells) are exempt — their quads must stay gapless.
- */
-export const GLYPH_WIDTH_COMPRESS_DEFAULT = 1;
-const WIDTH_COMPRESS = uniform(GLYPH_WIDTH_COMPRESS_DEFAULT);
-
-/** Set the global width-compression dial live. Ignores non-finite / ≤0 (degenerate quads). */
-export function setGlyphWidthCompress(value) {
-    if (Number.isFinite(value) && value > 0) WIDTH_COMPRESS.value = value;
-}
-
-/** Read the current width-compression dial. */
-export function getGlyphWidthCompress() { return WIDTH_COMPRESS.value; }
+// The glyph width-compression dial (GLYPH_WIDTH_COMPRESS_DEFAULT / setGlyphWidthCompress
+// / getGlyphWidthCompress) lives in core/glyphVertex.js now — it is a position input, so
+// it must be ONE node shared by the render AND pick paths (a shared-equation with two
+// values would still drift). Import it from there.
 
 // ─── TSL vertex node ─────────────────────────────────────────────────────────
 
 /**
- * Build TSL vertex node for instanced glyph rendering.
- * The instanced vertex shader logic, in TSL.
+ * Build the TSL vertex node for instanced glyph RENDERING. The instance → clip
+ * position transform (quad sizing, group transform, culls) is shared with the
+ * GPU picking material via buildGlyphVertexTransform (core/glyphVertex.js), so
+ * the two can't drift; this node layers the render-only varyings (color blend,
+ * highlight, glyph UV) on top of the transform's byproducts.
  *
- * @param {Object} uniforms - { groupTex, groupTexHeight, highlightTex }
- * @returns {Object} { vertexFn, vColor, vGroupAlpha, vAddedColor }
+ * @param {Object} uniforms - per-object nodes (groupTex, highlightTex, glyphMapTex,
+ *   glyphMapWidth, clipEnabled, clipTop, clipBottom, renderMode) — forwarded to the
+ *   shared transform; highlightTex is consumed here for the per-glyph highlight.
+ * @returns {Object} { vertexFn, vColor, vGroupAlpha, vAddedColor, vFillAmount,
+ *   vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell }
  */
 function _buildVertexNode(uniforms) {
-    // Per-instance buffer attributes
-    // instancePosition is stride-4 on EVERY path: the pre-allocated mesh-construction
-    // attribute, the CPU path's zero-padded commit attribute (terminals/frames/labels),
-    // and the engine's StorageInstancedBufferAttribute all carry itemSize=4. Read it as
-    // vec4 and use .xyz — the .w lane is padding. (A stride-3 initial attribute bakes a
-    // stride-3 vertex layout into the pipeline that the stride-4 swap then mis-reads.)
-    const iPos     = attribute('instancePosition', 'vec4');
-    const iSize    = attribute('instanceSize',     'vec2');
-    const iGlyphId = attribute('instanceGlyphId',  'float');
-    const iColor   = attribute('instanceColor',    'vec3');
-    const iGroup   = attribute('instanceGroupId',  'float');
+    // instanceColor is the one instance attribute the position transform does NOT own
+    // (it drives the fragment color blend); declare it here. The position attributes
+    // (instancePosition/Size/GlyphId/GroupId) are declared inside the shared transform.
+    const iColor = attribute('instanceColor', 'vec3');
 
     // Varyings passed to fragment
     const vColor      = varying(vec3(0),  'vColor');
@@ -167,85 +139,31 @@ function _buildVertexNode(uniforms) {
     const vMode       = varying(int(0),   'vMode');
     const vEmojiCell  = varying(int(0),   'vEmojiCell');
 
-    const { groupTex, groupTexHeight, highlightTex, glyphMapTex, glyphMapWidth, clipEnabled, clipTop, clipBottom, renderMode } = uniforms;
+    const { highlightTex } = uniforms;
 
     const vertexFn = Fn(() => {
-        // Glyph-map lookup: glyphId → curve range + mode (RGBA32Uint, 1 texel/glyph).
-        // Done first so glyphInfo.z (mode) is available for quad-size selection below.
-        const gid       = int(iGlyphId);
-        const mapW      = int(glyphMapWidth);
-        const glyphInfo = textureLoad(glyphMapTex, ivec2(gid.mod(mapW), gid.div(mapW)));
-        vCurveStart.assign(int(glyphInfo.x));
-        vCurveCount.assign(int(glyphInfo.y));
-        // Channels .z/.w added by FontChain: mode (0=slug, 1=bitmap) and emoji cell index.
-        vMode.assign(int(glyphInfo.z));
-        vEmojiCell.assign(int(glyphInfo.w));
+        // The ONE transform graph — shared with PickingSystem, so the rendered glyph
+        // and its pick target can never drift (group scale, width compress, emoji quad,
+        // and the visibility + frame-clip culls all live there). Returns clip position
+        // plus the byproducts this material needs for its varyings.
+        const t = buildGlyphVertexTransform(uniforms);
 
-        // Frame mode (field-level): the WHOLE field samples an external frame texture
-        // (screen capture / video / image) as an NxM grid. The cell index comes
-        // straight from instanceGlyphId — no glyph-map, no Slug, no atlas — and vMode
-        // is forced to FRAME so the fragment takes the frame branch. renderMode is a
-        // numeric uniform; cast to int and compare exactly (0/2 are exact in float).
-        If(int(renderMode).equal(int(RENDER_MODE.FRAME)), () => {
-            vMode.assign(int(RENDER_MODE.FRAME));
-            vEmojiCell.assign(int(iGlyphId));
-        });
-
-        // For bitmap (emoji) glyphs the atlas cell is square, but a monospace glyph quad
-        // is narrow (iSize.x ≈ 0.5·iSize.y). Sampling a square emoji into a narrow quad
-        // squishes it horizontally. Fix: use iSize.y for the quad width when mode == 1,
-        // making the quad square. alignOffset stays at iSize.x.mul(0.5) so the center of
-        // the wider square quad sits at the cell center (PlaneGeometry is center-anchored),
-        // overflowing symmetrically left and right. Layout advance is UNCHANGED — iSize is
-        // not modified — so columns stay aligned. Dense emoji runs will visually overlap;
-        // the proper terminal-correct fix (double-width advance) is deferred.
-        // .select(trueValue, falseValue) on a bool node — ConditionalNode API.
-        // Read the RESOLVED vMode (not glyphInfo.z): in frame mode vMode is FRAME, so
-        // isBitmap is false and the quad keeps its real cell width (iSize.x) instead of
-        // being forced square like an emoji cell.
-        const isBitmap = vMode.equal(int(RENDER_MODE.BITMAP));
-        const quadW    = isBitmap.select(iSize.y, iSize.x); // square for emoji, narrow for slug
-
-        // Width compression (WIDTH_COMPRESS): scale the visual quad's width and its
-        // center-anchor shift by the same k, so the left edge stays at the cell anchor —
-        // a shrink-in-place about the leading edge. Advance is untouched. Frame mode is
-        // exempt: an external capture tiled as cells must stay gapless.
-        const kW = vMode.equal(int(RENDER_MODE.FRAME)).select(float(1), WIDTH_COMPRESS);
-
-        // Scale base quad by per-instance size
-        const scaled = positionLocal.mul(vec3(quadW.mul(kW), iSize.y, float(1)));
-
-        // Left-align: PlaneGeometry center-anchored → shift right by half the LAYOUT width
-        // (iSize.x, not quadW) so the cell anchor is consistent regardless of visual quad size.
-        const alignOffset = vec3(iSize.x.mul(0.5).mul(kW), float(0), float(0));
-
-        // Group DataTexture lookup (4 columns × maxGroups rows, RGBA32F).
-        // textureLoad with exact integer texel coords — NOT normalized .sample():
-        // rgba32float is not filterable under WebGPU, and a half-texel rounding on
-        // the column UV silently picks the wrong column (washing color to white).
-        const grow   = int(iGroup);
-        const gPos   = textureLoad(groupTex, ivec2(int(0), grow)); // col 0: offset + visibility
-        const gColor = textureLoad(groupTex, ivec2(int(2), grow)); // col 2: color multiplier
-        const gScale = textureLoad(groupTex, ivec2(int(3), grow)); // col 3: scale + colorBlend (w)
-
-        // World position = (aligned quad + instancePos) * groupScale + groupOffset.
-        // The group scale multiplies the WHOLE glyph (quad size and position alike), so
-        // a group scales as one rigid label/badge about its own origin — bake glyph
-        // positions group-LOCAL and put the anchor in the group offset to grow text in
-        // place with one O(1) write (identity groups: scale 1, offset 0 — unchanged).
-        const worldPos = scaled.add(alignOffset).add(iPos.xyz).mul(gScale.xyz).add(gPos.xyz);
-
-        // Standard MVP projection
-        const clipPos = cameraProjectionMatrix.mul(modelViewMatrix.mul(vec4(worldPos, float(1))));
+        // Resolved mode + glyph-map byproducts → varyings. The frame-mode override
+        // (vMode forced to FRAME, cell = instanceGlyphId) already happened inside the
+        // transform; these forward its results to the fragment's branch selectors.
+        vMode.assign(t.vMode);
+        vEmojiCell.assign(t.vEmojiCell);
+        vCurveStart.assign(int(t.glyphInfo.x));
+        vCurveCount.assign(int(t.glyphInfo.y));
 
         // Blend instanceColor*groupColor (multiply, colorBlend=0) toward pure
         // groupColor (replace, colorBlend=1). Explicit lerp a+(b-a)*t — TSL's
         // .mix() method returned the wrong operand at t=0 here (handed back the
         // group color instead of the multiplied base), washing text to white.
-        const colorBlend = gScale.w;
-        const baseColor  = iColor.mul(gColor.rgb);
-        vColor.assign(baseColor.add(gColor.rgb.sub(baseColor).mul(colorBlend)));
-        vGroupAlpha.assign(gColor.a);
+        const colorBlend = t.gScale.w;
+        const baseColor  = iColor.mul(t.gColor.rgb);
+        vColor.assign(baseColor.add(t.gColor.rgb.sub(baseColor).mul(colorBlend)));
+        vGroupAlpha.assign(t.gColor.a);
 
         // Per-glyph highlight from RGBA8 DataTexture (1024 wide, 2D wrapped)
         const hx = int(instanceIndex).mod(int(1024));
@@ -259,16 +177,7 @@ function _buildVertexNode(uniforms) {
         // PlaneGeometry's uv attribute is [0,1] across the quad → glyph-space [0,1]².
         vGlyphUV.assign(uv());
 
-        // Frame clip (Step 3c.2): cull this instance when its anchor y is outside the window
-        // [clipBottom, clipTop]. iPos.y is per-instance (identical for all 4 quad verts) so
-        // quads cull whole — no torn triangles at the edge. clipEnabled 0 = off. Degenerate
-        // to outside-NDC (z/w = 2 > 1) so the GPU discards the triangles.
-        const culled = clipEnabled.greaterThan(0.5).and(
-            iPos.y.greaterThan(clipTop).or(iPos.y.lessThan(clipBottom))
-        );
-        const outClip = clipPos.toVar();
-        If(culled, () => { outClip.assign(vec4(float(2), float(2), float(2), float(1))); });
-        return outClip;
+        return t.clipPos;
     });
 
     return { vertexFn, vColor, vGroupAlpha, vAddedColor, vFillAmount, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell };
@@ -304,8 +213,10 @@ function _buildOutputNode(varyings, uniforms) {
     const SOFTEN    = LOD_UNIFORMS.soften;
 
     return Fn(() => {
-        // Invisible group — applies to both slug and bitmap paths.
-        Discard(vGroupAlpha.lessThan(0.01));
+        // Invisible groups (alpha ≤ 0.01) are already culled in the shared vertex
+        // transform — degenerated to off-screen NDC, so they never rasterize and this
+        // fragment never runs for them. Partial alpha in (0.01, 1) still blends here
+        // via vGroupAlpha.
 
         // Output color accumulator; filled by whichever branch executes.
         const outColor = vec4(0).toVar();

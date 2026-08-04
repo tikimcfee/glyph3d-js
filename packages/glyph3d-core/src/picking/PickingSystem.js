@@ -38,6 +38,10 @@ let _tslLoaded = false;
 let _MeshBasicNodeMaterial, _Fn, _attribute, _uniform, _texture, _textureLoad,
     _vec2, _vec3, _vec4, _ivec2, _float, _int, _instanceIndex,
     _modelViewMatrix, _cameraProjectionMatrix, _positionLocal, _If, _Return, _select;
+// The shared instance→clip transform — the SAME graph GlyphField's render material
+// uses, so the pick ID pass can't drift from the visible glyph. Resolved lazily with
+// the rest (dynamic-imported) to keep three/tsl out of the WebGL-only path.
+let _buildGlyphVertexTransform;
 
 async function _loadTSL() {
     if (_tslLoaded) return;
@@ -63,6 +67,11 @@ async function _loadTSL() {
     _If                       = tsl.If;
     _Return                   = tsl.Return;
     _select                   = tsl.select;
+    // Shared with the render material (core/glyphVertex). Its top-level
+    // `import 'three/tsl'` only fires here — inside the WebGPU-only lazy path —
+    // so the lazy/WebGL contract holds.
+    ({ buildGlyphVertexTransform: _buildGlyphVertexTransform } =
+        await import('../core/glyphVertex.js'));
     _tslLoaded = true;
 }
 
@@ -442,50 +451,43 @@ export class PickingSystem {
     _getTSLGlyphMaterial() {
         if (this._sharedGlyphPickMaterial) return this._sharedGlyphPickMaterial;
 
-        // instancePosition is stride-4 (itemSize=4) on every field now — read it as vec4
-        // and use .xyz, matching GlyphField's vertex node. Declaring vec3 against a
-        // stride-4 buffer bakes a wrong vertex-fetch stride into the pick pipeline: the
-        // main pass renders glyphs correctly but the ID pass reads positions off the wrong
-        // lanes, so picks land on nothing. (.w is padding.)
-        const iPos   = _attribute('instancePosition', 'vec4');
-        const iSize  = _attribute('instanceSize',     'vec2');
-        const iGroup = _attribute('instanceGroupId',  'float');
+        // Per-object nodes the shared vertex transform reads — each resolves at draw
+        // from the mesh's userData.glyphField (mirrors GlyphField's _fieldTexture /
+        // _fieldUniform). Picking now binds the SAME inputs the render material does,
+        // so a non-unit group scale, width compress, emoji square quad, and the clip
+        // window all match the glyph the user sees — the drift this builder exists to kill.
+        const floatPh = new THREE.DataTexture(new Float32Array(4), 1, 1, THREE.RGBAFormat, THREE.FloatType);
+        floatPh.minFilter = floatPh.magFilter = THREE.NearestFilter;
+        floatPh.generateMipmaps = false; floatPh.needsUpdate = true;
+        const uintPh = new THREE.DataTexture(new Uint32Array(4), 1, 1, THREE.RGBAIntegerFormat, THREE.UnsignedIntType);
+        uintPh.minFilter = uintPh.magFilter = THREE.NearestFilter;
+        uintPh.generateMipmaps = false; uintPh.needsUpdate = true;
 
-        // 1×1 float placeholder fixes the sample type; real group textures match.
-        const placeholder = new THREE.DataTexture(
-            new Float32Array(4), 1, 1, THREE.RGBAFormat, THREE.FloatType);
-        placeholder.minFilter = THREE.NearestFilter;
-        placeholder.magFilter = THREE.NearestFilter;
-        placeholder.generateMipmaps = false;
-        placeholder.needsUpdate = true;
+        const fTex = (prop, ph) => _texture(ph).onObjectUpdate(({ object }, self) =>
+            (object && object.userData.glyphField && object.userData.glyphField[prop]) || self.value);
+        const fUni = (prop, init) => _uniform(init).onObjectUpdate(({ object }, self) =>
+            (object && object.userData.glyphField) ? (object.userData.glyphField[prop] ?? init) : self.value);
 
-        const groupTex = _texture(placeholder).onObjectUpdate(({ object }, self) =>
-            (object && object.userData.glyphField && object.userData.glyphField._groupTexture) || self.value);
-        const groupTexHeight = _uniform(1).onObjectUpdate(({ object }, self) =>
-            (object && object.userData.glyphField) ? object.userData.glyphField._maxGroups : self.value);
+        const groupTex      = fTex('_groupTexture', floatPh);
+        const glyphMapTex   = fTex('_glyphMapTexture', uintPh);
+        const glyphMapWidth = fUni('_glyphMapWidth', 1);
+        const renderMode    = fUni('_renderMode', 0 /* RENDER_MODE.GLYPH */);
+        const clipEnabled   = fUni('_clipEnabledVal', 0);
+        const clipTop       = fUni('_clipTopVal', 0);
+        const clipBottom    = fUni('_clipBottomVal', 0);
+
+        // Per-mesh ID-block start (read straight off userData — set by register()).
         const baseId = _uniform(0).onObjectUpdate(({ object }, self) =>
             (object && object.userData.pickStartId != null) ? object.userData.pickStartId : self.value);
 
         const vertexFn = _Fn(() => {
-            const scaled      = _positionLocal.mul(_vec3(iSize, _float(1)));
-            const alignOffset = _vec3(iSize.x.mul(0.5), _float(0), _float(0));
-
-            // Group DataTexture lookup — MUST mirror GlyphField's vertex node:
-            // textureLoad with exact integer texel coords (4 columns × maxGroups
-            // rows, RGBA32F). rgba32float is NOT filterable under WebGPU, so a
-            // normalized .sample() returns garbage and collapses every glyph to a
-            // degenerate position — making the pick resolve to one stuck id.
-            const grow   = _int(iGroup);
-            const gPos   = _textureLoad(groupTex, _ivec2(_int(0), grow)); // col 0: offset + visibility
-            const gColor = _textureLoad(groupTex, _ivec2(_int(2), grow)); // col 2: color multiplier
-            const gScale = _textureLoad(groupTex, _ivec2(_int(3), grow)); // col 3: scale + colorBlend (w)
-
-            const worldPos = scaled.add(alignOffset).add(iPos.xyz.mul(gScale.xyz)).add(gPos.xyz);
-            const normalClip = _cameraProjectionMatrix.mul(_modelViewMatrix.mul(_vec4(worldPos, 1)));
-
-            // Invisible group → send off-screen (can't Discard in a vertex).
-            const visible = gColor.a.greaterThan(0.01);
-            return _select(visible, normalClip, _vec4(2, 2, 2, 1));
+            // The ONE transform graph — shared with the render material via
+            // core/glyphVertex. The instance attributes (instancePosition/Size/
+            // GlyphId/GroupId) are declared inside it by name and bind to this mesh.
+            const { clipPos } = _buildGlyphVertexTransform({
+                glyphMapTex, glyphMapWidth, renderMode, groupTex, clipEnabled, clipTop, clipBottom,
+            });
+            return clipPos;
         });
 
         const fragmentFn = _Fn(() => {
