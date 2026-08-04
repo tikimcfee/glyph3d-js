@@ -6,8 +6,15 @@
 //
 // Codepoints the font chain doesn't cover resolve to .notdef (glyph 0) and are skipped by the
 // encoder, so this list is generous without waste — only font-covered glyphs cost anything.
-// Deliberately bounded: NO full CJK (DejaVu doesn't cover it) and NO giant Nerd-Font icon PUA
-// (thousands of rarely-used icons — those stay cheap live-encodes).
+// Deliberately bounded: NO full CJK / kana (no chain font covers them — they render through
+// the color-bitmap branch, and priming 27k dead codepoints would only tax boot) and NO giant
+// Nerd-Font icon PUA (thousands of rarely-used icons — those stay cheap live-encodes).
+//
+// The tail entries are CORPUS-COMPUTED (2026-08-04): the codepoint universe of this repo's
+// real workload (source tree + claude/kimi transcripts, 260MB) minus the prior ranges,
+// intersected with font-chain coverage — 62 codepoints, the complete set that could fire a
+// live growth on this corpus. Chief among them: the zero-width VARIATION SELECTORS that ride
+// every emoji (the recurring '+1 [.blank]' growths) and DejaVu's monochrome emoji spans.
 export const LARGE_CORE_RANGES = [
   [0x0020, 0x007e], // ASCII printable
   [0x00a0, 0x024f], // Latin-1 Supplement + Latin Extended-A/B
@@ -17,6 +24,7 @@ export const LARGE_CORE_RANGES = [
   [0x0400, 0x04ff], // Cyrillic
   [0x0590, 0x05ff], // Hebrew
   [0x0600, 0x06ff], // Arabic
+  [0x1680, 0x1680], // ogham space mark (corpus-computed)
   [0x1e00, 0x1eff], // Latin Extended Additional
   [0x2000, 0x206f], // general punctuation
   [0x2070, 0x20cf], // super/subscripts + currency
@@ -35,5 +43,7 @@ export const LARGE_CORE_RANGES = [
   [0x2a00, 0x2aff], // supplemental mathematical operators
   [0x2b00, 0x2bff], // misc symbols & arrows
   [0xe0a0, 0xe0d4], // powerline (private use)
+  [0xfe00, 0xfe0f], // variation selectors — zero-width, ride every emoji (corpus-computed)
   [0xfff0, 0xffff], // specials (replacement char U+FFFD)
+  [0x1f400, 0x1f64f], // font-covered emoji: animal faces + the emoticons block (corpus-computed)
 ];
