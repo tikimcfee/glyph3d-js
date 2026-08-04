@@ -494,7 +494,7 @@ const probe = (opts) => `(async (o) => {
     // lineStartRow + advances are the inputs the interface grew (spec §7). A kernel that still
     // destructures only {slotCount, lineTable, params} ignores them harmlessly — which is itself
     // reported below, since it's exactly what the wide-glyph divergence hangs on.
-    kernel.configure({ slotCount, lineTable, lineStartRow, advances, params });
+    kernel.configure({ items: [{ slotCount, lineTable, lineStartRow, advances, outBase: 0, params }], totalSlots: slotCount });
     await kernel.compute();
     gpu = await kernel.readPositions();
     R.kernelMs = Math.round(performance.now() - t0);
@@ -511,7 +511,7 @@ const probe = (opts) => `(async (o) => {
         D[s * 3 + 2] = ((s % 3) - 1) * 0.125;
       }
       kernel.setDisplacements(D);
-      kernel.configure({ slotCount, lineTable, lineStartRow, advances, params });
+      kernel.configure({ items: [{ slotCount, lineTable, lineStartRow, advances, outBase: 0, params }], totalSlots: slotCount });
       await kernel.compute();
       const gpuD = await kernel.readPositions();
       let over = 0, worst = 0;
@@ -523,7 +523,7 @@ const probe = (opts) => `(async (o) => {
       R.disp = { over, worst, checked: slotCount * 3 };
       // Restore the undisplaced state for any later bench reuse.
       kernel.setDisplacements(null);
-      kernel.configure({ slotCount, lineTable, lineStartRow, advances, params });
+      kernel.configure({ items: [{ slotCount, lineTable, lineStartRow, advances, outBase: 0, params }], totalSlots: slotCount });
       await kernel.compute();
     }
 
@@ -579,7 +579,7 @@ const probe = (opts) => `(async (o) => {
       const K = benchKernel, RD = store.renderer, N = Math.max(10, o.benchN || 200);
       const B = { n: N };
       { const REPS = 20; const t0 = performance.now();
-        for (let i = 0; i < REPS; i++) K.configure({ slotCount, lineTable, lineStartRow, advances, params });
+        for (let i = 0; i < REPS; i++) K.configure({ items: [{ slotCount, lineTable, lineStartRow, advances, outBase: 0, params }], totalSlots: slotCount });
         B.configureMs = (performance.now() - t0) / REPS; }
       { const t0 = performance.now();
         for (let i = 0; i < 3; i++) bridge && bridge.fontReady
@@ -707,8 +707,8 @@ const bulkProbe = (opts) => `(async (o) => {
     pageWidthWorld: 0, pageGapXWorld: 0, pageGapYWorld: 0, pageDepthWorld: 0, axis: 'xy',
   };
   const kernel = new Kernel(RD, { maxSlots, maxLines });
-  const cfg = (fi) => { const t = tables[fi]; kernel.configure({ slotCount: t.slotCount,
-    lineTable: t.lineTable, lineStartRow: t.lineStartRow, advances: t.advances, params }); };
+  const cfg = (fi) => { const t = tables[fi]; kernel.configure({ items: [{ slotCount: t.slotCount,
+    lineTable: t.lineTable, lineStartRow: t.lineStartRow, advances: t.advances, outBase: 0, params }], totalSlots: t.slotCount }); };
 
   // Warm: first dispatch builds the pipeline; keep it out of both GPU lanes.
   cfg(0); await kernel.compute();
@@ -869,7 +869,7 @@ const raw = [];
 let app = null;
 try {
   // relayPort intentionally omitted → CLIENT-ONLY. Dialing the relay arms workspace autosave.
-  app = await openApp(browser, { wait: 6000 });
+  app = await openApp(browser, { url: flag('--url', 'http://localhost:5173/'), wait: 6000 });
   if (!app.booted) {
     console.error('✗ FAIL  the app never exposed window.__glyphClient (is `tools/dev.sh` up on :5173?)');
     if (app.errors.length) console.error('  errors: ' + app.errors.slice(0, 3).map((e) => e.text).join(' | '));
