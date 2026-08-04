@@ -3,24 +3,38 @@ import * as THREE from 'three';
 const _origin = new THREE.Vector3(0, 0, 0);
 
 /**
+ * Exact 16-element equality of two Matrix4s. Three.js mutates `matrixWorld` IN PLACE
+ * (multiplyMatrices writes into the same Float32Array), so a reference compare is
+ * always-true and useless — only a value sweep detects a real move. No epsilon: the
+ * matrix multiply is deterministic, so an unchanged chain reproduces identical bits.
+ * @param {THREE.Matrix4} a @param {THREE.Matrix4} b
+ */
+function _matrixEquals(a, b) {
+    const ae = a.elements, be = b.elements;
+    for (let i = 0; i < 16; i++) if (ae[i] !== be[i]) return false;
+    return true;
+}
+
+/**
  * BoundedObject3D — the on-demand bounds contract for grid primitives.
  *
  * One thin base that lifts the (previously triplicated) world-bounds derivation
- * into a single place. It is deliberately stateless about the WORLD box:
- * getBounds() recomputes the world AABB FRESH on every call (local content box ×
- * current matrixWorld). There is NO validity cache, NO dirty flag, and NO
- * transform observation for the world box — by design.
+ * into a single place. The WORLD box is CACHED, keyed on two INTERNAL validity
+ * signals — no external dirty wiring, no observation of the parent chain:
+ *   - content: `_extentVersion`, bumped inside refreshExtent() when the local box
+ *     actually changes (its dirtiness gate already detects that moment);
+ *   - transform: a value snapshot of `matrixWorld` (Three.js mutates it in place, so
+ *     a reference check is useless — see _matrixEquals).
+ * getBounds() recomputes the world AABB only when one of those moved; otherwise it
+ * returns the cache. matrixWorld reflects the WHOLE ancestor chain, so any move —
+ * self or a parent — changes its 16 values and invalidates the cache, without the
+ * cache having to observe that chain.
  *
- * Why on-demand rather than cached/observed (the conclusion of a long design arc,
- * proved against the real consumers and the codebase's own rationale):
- *   - The local content box is already content-cached by the subclass
- *     (getLocalBounds()), so getBounds() is cheap: copy a box + transform 8 corners.
- *   - World bounds depend on the full matrixWorld chain (every ancestor transform).
- *     A world-bounds cache would have to observe that whole chain to stay correct;
- *     the consumers (e.g. OcclusionCuller sampling on demand) already call getBounds
- *     exactly when they need a current answer, so recomputing is both correct and
- *     simplest. See CodeGrid.layoutBounds()'s note on why setFromObject is unusable
- *     for instanced content.
+ * Why a cache now, after "on-demand beat the cache": that held because nothing
+ * tracked WHEN the world box went stale. The two keys are both internal to this
+ * object and complete (content version + own matrix), so the cache cannot lie — it
+ * recomputes the instant either input changes. See CodeGrid.layoutBounds()'s note on
+ * why setFromObject is unusable for instanced content.
  *
  * The Measurable contract — three boxes, three frames:
  *   - getLocalBounds()  → local content AABB (in the object's OWN frame, no world
@@ -71,6 +85,9 @@ export default class BoundedObject3D extends THREE.Object3D {
      * soft-bounds sweep calls it per surface per frame), so the full work fires only
      * on actual content change. `boundingBox`/`boundingSphere` are (re)assigned every
      * call — cheap pointer writes that keep the properties current for any reader.
+     *
+     * Bumps `_extentVersion` on a real change — the CONTENT half of getBounds()'s
+     * world-box cache key (the transform half is the matrixWorld snapshot).
      * @returns {THREE.Box3} the local Extent box (reused; do not hold across calls)
      */
     refreshExtent() {
@@ -90,34 +107,45 @@ export default class BoundedObject3D extends THREE.Object3D {
         if (box.isEmpty()) sphere.set(_origin, 0);
         else box.getBoundingSphere(sphere);
         this._extentValid = true;
+        this._extentVersion = (this._extentVersion || 0) + 1;   // content changed → invalidate getBounds' world-box cache
         return box;
     }
 
     /**
-     * World-space AABB of this object's content, recomputed fresh on every call.
+     * World-space AABB of this object's content.
      *
-     * Formula (behavior-preserving — the box the old per-grid getBounds produced):
-     *   updateWorldMatrix(true, false); getLocalBounds().applyMatrix4(matrixWorld)
+     * CACHED on two internal validity keys — recomputed only when one moved:
+     *   - content: `this._extentVersion` (bumped by refreshExtent on a real box change),
+     *   - transform: a value snapshot of `matrixWorld` (any move — self or ancestor —
+     *     changes its 16 values; compared by _matrixEquals, since Three.js mutates it
+     *     in place and a reference check would always pass).
+     * On a still/flight frame getBounds() is O(1): updateWorldMatrix (so the matrix is
+     * current to compare), an int compare, a 16-float compare, then return the cache —
+     * the 8-corner box transform is skipped. matrixWorld is refreshed first because
+     * getBounds is called from pointer / useFrame paths that run before r3f renders.
      *
-     * matrixWorld is refreshed first because getBounds is called from pointer /
-     * useFrame paths that run before r3f renders, so the matrix can otherwise lag a
-     * just-applied move. The local Extent (boundingBox/Sphere) is refreshed here too,
-     * so every consumer that polls the world box keeps the object-level Extent current
-     * for free.
+     * The local Extent (boundingBox/Sphere) is refreshed here too, so consumers that
+     * poll the world box keep the object-level Extent current for free.
      *
-     * The default target is a reusable scratch Box3 — that is an output buffer, NOT a
-     * cache of the world box: it is overwritten from scratch every call. Callers must
-     * not hold the returned box across calls. Pass your own `target` to opt out.
+     * The default target is a reusable scratch Box3 — an OUTPUT buffer, not the cache
+     * (the cache lives in _worldBoxCache). Callers must not hold the returned box
+     * across calls. Pass your own `target` to opt out.
      *
      * @param {THREE.Box3} [target] - Box to write into (default: shared scratch)
      * @returns {THREE.Box3} Bounding box in world coordinates
      */
     getBounds(target = this._worldBoundsScratch || (this._worldBoundsScratch = new THREE.Box3())) {
         this.updateWorldMatrix(true, false);
-        const local = this.refreshExtent();          // keep the object Extent fresh alongside
-        target.copy(local);
-        if (target.isEmpty()) return target;
-        target.applyMatrix4(this.matrixWorld); // world box re-derived from current matrix
-        return target;
+        const local = this.refreshExtent();          // refreshes the Extent; bumps _extentVersion on a content change
+        const cache = this._worldBoxCache || (this._worldBoxCache = new THREE.Box3());
+        if (this._worldBoxExtentVersion === this._extentVersion
+            && this._worldBoxMatrix && _matrixEquals(this._worldBoxMatrix, this.matrixWorld)) {
+            return target.copy(cache);               // both inputs unchanged → cache valid, skip the box transform
+        }
+        cache.copy(local);
+        if (!cache.isEmpty()) cache.applyMatrix4(this.matrixWorld);
+        (this._worldBoxMatrix || (this._worldBoxMatrix = new THREE.Matrix4())).copy(this.matrixWorld);
+        this._worldBoxExtentVersion = this._extentVersion;
+        return target.copy(cache);
     }
 }
