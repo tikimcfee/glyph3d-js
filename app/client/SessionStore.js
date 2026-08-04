@@ -488,10 +488,12 @@ export default class SessionStore {
     const list = Array.isArray(snap.carrels) ? snap.carrels : [];
     if (!list.length) return;
     let memberCount = 0;
+    let failed = 0;
     for (const c of list) {
-      if (!restoreCarrel(this.ctx, c)) continue;
+      if (!restoreCarrel(this.ctx, c)) { failed++; continue; }
       memberCount += (c.members?.length ?? 0);  // pre-Slice-1 snapshots carry members inline
     }
+    if (failed) this._failedSections.add('carrels');   // quarantine — don't save a partial desk set over the record
     // Write carrel residence into the model from carrelMembers (the model-based path).
     // Pre-Slice-1 snapshots without carrelMembers but with inline c.members fall back
     // to those — forward-additive restore, no migration shim needed.
@@ -508,10 +510,13 @@ export default class SessionStore {
   // agents — reopen the saved session books BY REFERENCE: each entry re-reads the harness's
   // own record through the adapter (the one open path agent.open rides), then re-applies view
   // intent. A saved retention override rides `limit` straight into the hydration (it becomes
-  // the lane's cap again); books without one follow the settings default. Per-entry guarded
-  // (a vanished record logs + skips, the rest land — data self-heal); no session provider
-  // (client-only baseline) is simply an empty phase. Saved heads index the previous view's
-  // sheet list — a tail-capped hydration clamps them (pageTo clamps).
+  // the lane's cap again); books without one follow the settings default. Per-entry guarded:
+  // a VANISHED record logs + skips (data self-heal), but an entry-level THROW quarantines the
+  // section — autosave keeps the loaded blob rather than persisting a half-restored roster
+  // over it (the 2026-08-04 wipe: 12 entry failures, phase "OK", empty agents saved).
+  // No session provider with content saved quarantines too (relay offline at launch).
+  // Saved heads index the previous view's sheet list — a tail-capped hydration clamps them
+  // (pageTo clamps).
   //
   // The pour is CONCURRENT (a bounded worker pool): each book is independent, and its
   // seat is pre-assigned (the carrel manifest's order + the desk's expect pre-shape),
@@ -525,8 +530,15 @@ export default class SessionStore {
     if (!list.length) return;
     const books = this.ctx.agentBooks;
     const provider = this.ctx.sessionProvider;
-    if (!books || !provider) return;
+    if (!books || !provider) {
+      // Can't even attempt the phase with content saved — quarantine the section
+      // (autosave must NOT overwrite the record with an empty roster; the classic
+      // case is the relay being offline at launch).
+      if (list.length) this._failedSections.add('agents');
+      return;
+    }
     const opened = [];            // per-book {agentId, added, total, bytes, ms} — the lane's cost breakdown
+    let failed = 0;               // entry-level throws — clean skips (a vanished record) self-heal, these don't
     let archivePromise = null;   // fetched once, only if a prefix needs resolving
     const open = async (a) => {
       try {
@@ -546,6 +558,7 @@ export default class SessionStore {
         if (Array.isArray(a.pinned) && a.pinned.length === 3) books.moveGroup(r.agentId, ...a.pinned);
         if (!a.following && Number.isInteger(a.head)) lane.book.pageTo(a.head);
       } catch (e) {
+        failed++;
         console.warn('[session] agent restore failed:', a.session || a.prefix, e?.message || e);
       }
     };
@@ -555,6 +568,11 @@ export default class SessionStore {
     await Promise.all(Array.from({ length: Math.min(POUR_WIDTH, queue.length) }, async () => {
       while (queue.length) await open(queue.shift());
     }));
+
+    // QUARANTINE on entry-level failure: the phase "completed" with books missing
+    // from the scene — autosave must keep the loaded blob for the section instead
+    // of persisting the half-restored (or empty) roster over it.
+    if (failed) this._failedSections.add('agents');
 
     // One cost line for the lane: the Σ columns are WORK time across books (the 6-wide
     // pour overlaps them — they don't sum to wall), so a fat lane decomposes into WHICH
@@ -595,6 +613,7 @@ export default class SessionStore {
     // each source's own openDir/repo trace carries the stage breakdown beneath it.
     const trace = sources.length ? beginLoad(this.ctx, 'restore.field') : null;
     let anyLocal = false;
+    let failed = 0;   // source-level throws — quarantine the list rather than save a partial world over it
     // Repo sources first, OUTSIDE any hold — repo.load owns the whole scene (it
     // clears first) and frames itself, so it must see a settled tree. In practice
     // a repo source replaces the list entirely; the split just makes mixed lists safe.
@@ -604,7 +623,7 @@ export default class SessionStore {
         // internal fitall would stomp the exact view the operator left.
         const cmd = this._cameraRestored ? ['repo.load', src.ref, '--no-frame'] : ['repo.load', src.ref];
         try { await this.router.execute(cmd); }
-        catch (e) { console.warn('[session] repo field restore failed:', e?.message || e); }
+        catch (e) { failed++; console.warn('[session] repo field restore failed:', e?.message || e); }
         trace?.mark(src.ref);
       }
     }
@@ -620,13 +639,14 @@ export default class SessionStore {
           // that restores as the whole project).
           await this.router.execute(['file.openDir', src.dir || '']);
           anyLocal = true;
-        } catch (e) { console.warn('[session] local field restore failed:', e?.message || e); }
+        } catch (e) { failed++; console.warn('[session] local field restore failed:', e?.message || e); }
         trace?.mark(src.dir || '/');
       }
     };
     const tree = this.ctx.contentTree;
     if (locals.length && tree?.batchRelayouts) { await tree.batchRelayouts(runLocals); trace?.mark('settle'); }
     else await runLocals();
+    if (failed) this._failedSections.add('fieldSources');   // quarantine — don't save a partial field over the record
     // Frame the field ONLY when no saved pose landed — fitall is the pose-less
     // session's welcome, never a correction over the view the operator left.
     if (anyLocal && !this._cameraRestored) {
@@ -645,6 +665,7 @@ export default class SessionStore {
     // layer; load.stats holds the per-tab detail, the console line compacts).
     const trace = snap.files.length ? beginLoad(this.ctx, 'restore.tabs') : null;
     let anyWindowed = false;
+    let failed = 0;   // reopen throws (a deliberately-dropped MISSING file self-heals — not a failure)
     // The tab loop shares the field phase's batch discipline: each genuinely-new
     // file.open politely relayouts — held, they coalesce into one settle at close.
     const runTabs = async () => {
@@ -677,6 +698,7 @@ export default class SessionStore {
           }
         }
       } catch (e) {
+        failed++;
         console.warn(`[session] failed to reopen ${f.path}:`, e?.message || e);
       } finally {
         trace?.mark(String(f.path).split('/').pop() || f.path);
@@ -689,6 +711,7 @@ export default class SessionStore {
     const tree = this.ctx.contentTree;
     if (tree?.batchRelayouts) { await tree.batchRelayouts(runTabs); trace?.mark('settle'); }
     else await runTabs();
+    if (failed) this._failedSections.add('files');   // quarantine — don't save a partial tab list over the record
     trace?.end({ files: snap.files.length });
   }
 
