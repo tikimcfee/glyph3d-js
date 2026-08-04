@@ -8,6 +8,7 @@
 // Sibling of dock-refresh-check / panetree-check. Per the debug-into-tools practice.
 
 import './headless-canvas.mjs';
+import { HEADLESS_ATLAS } from './headless-atlas.mjs';
 import * as THREE from 'three';
 import { CameraDock } from '../packages/glyph3d-core/src/services/interaction/CameraDock.js';
 import { ScaleModel } from '../packages/glyph3d-core/src/collections/ScaleModel.js';
@@ -30,7 +31,7 @@ function makeGrid(cols, rows) {
     return g;
 }
 function rig() {
-    const d = new CameraDock({ attentionManager: { docks: new Map() }, layout: 'linear' });
+    const d = new CameraDock({ atlas: HEADLESS_ATLAS, attentionManager: { docks: new Map() }, layout: 'linear' });
     new THREE.Scene().add(d);
     d._viewH = 100; d._viewW = 160;
     d.settle = () => { for (let i = 0; i < 8; i++) d.animator.update(10); d._viewH = 100; d._viewW = 160; };

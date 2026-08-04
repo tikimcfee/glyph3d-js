@@ -58,7 +58,7 @@
  *   (terminals re-adopt async, in arrival order — order is what keeps the bar from scrambling).
  * @property {number} slot - dense 0..n-1 DISPLAY rank, derived from `order` every _relayout.
  * @property {THREE.Quaternion} quatTarget - orientation the tile slerps toward
- * @property {Label3D|null} label - the tile nameplate (name + live info, identity-hued);
+ * @property {FieldLabel|null} label - the tile nameplate (name + live info, identity-hued);
  *   a dock child parked under the tile's content, hidden while the window is framed.
  */
 
@@ -66,7 +66,7 @@ import * as THREE from 'three';
 import { SpatialAnimator } from '../spatial/SpatialAnimator.js';
 import { flowBoxes } from '../../collections/layouts/flowBoxes.js';
 import { BORDER_FLAGS } from '../../collections/panelMaterial.js';
-import Label3D from '../../components/Label3D.js';
+import FieldLabel from '../../collections/FieldLabel.js';
 import PaneTree from './PaneTree.js';
 
 const _forward = new THREE.Vector3();
@@ -130,6 +130,7 @@ export class CameraDock extends THREE.Object3D {
     /**
      * @param {Object} [opts]
      * @param {Object} [opts.attentionManager] - shared AttentionManager (its .docks map is the record of truth)
+     * @param {Object} opts.atlas - GlyphAtlas for the tile nameplates (FieldLabel text)
      * @param {number} [opts.distance=10]   - world units ahead of the camera the bar sits
      * @param {number} [opts.boxFrac=0.1]   - slot-box height as a fraction of the visible height
      * @param {number} [opts.boxAspect=1.15] - slot-box width/height; content contain-fits inside
@@ -161,7 +162,7 @@ export class CameraDock extends THREE.Object3D {
      * @param {'name+dims'|'name'|'dims'|'off'} [opts.labelFormat='name+dims'] - plate text ('off' hides nameplates)
      * @param {'linear'|'radial'} [opts.layout='radial']
      */
-    constructor({ attentionManager = null, distance = 10, boxFrac = 0.1, boxAspect = 1.15, gapFrac = 0.4,
+    constructor({ attentionManager = null, atlas = null, distance = 10, boxFrac = 0.1, boxAspect = 1.15, gapFrac = 0.4,
                   maxColumns = 0, fillFrac = 0.9, maxArcDeg = 80, maxRiseDeg = 80, bottomFrac = 0.86,
                   frameW = 1, frameH = 1, frameX = 0, frameY = 0,
                   frameMarginLeft = 0.06, frameMarginRight = 0.06, frameMarginTop = 0.06, frameMarginBottom = 0.06,
@@ -175,6 +176,7 @@ export class CameraDock extends THREE.Object3D {
         super();
         this.name = 'camera-dock';
         this.attentionManager = attentionManager;
+        this.atlas = atlas;                   // nameplate text source (FieldLabel)
         this.distance = distance;
         this.boxFrac = boxFrac;       // slot-box height as a fraction of the visible height
         this.boxAspect = boxAspect;   // slot-box width/height; content contain-fits inside
@@ -430,9 +432,9 @@ export class CameraDock extends THREE.Object3D {
         } else return false;
 
         if (key === 'labelOpacity') {
-            for (const e of this.entries.values()) if (e.label) e.label.material.opacity = value;
+            for (const e of this.entries.values()) e.label?.setOpacity(value);
         } else if (key === 'labelFormat') {
-            for (const e of this.entries.values()) e.label?.setLabel(this._labelText(e));
+            for (const e of this.entries.values()) e.label?.setText(this._labelText(e));
         }
         this._relayout();
         return true;
@@ -527,14 +529,15 @@ export class CameraDock extends THREE.Object3D {
         grid.setBorder?.({ color: entry.identityColor, width: this.borderWidth, intensity: this.borderStrength });
         grid.setBorderFlag?.(BORDER_FLAGS.DOCKED, true);
 
-        // The tile nameplate: a Label3D wearing the SAME identity hue as the border/ghost, so
-        // "which tiny tile is which" is answered by name, not just color. A direct child of the
-        // dock (dock-local placement, like the ghost); pick-inert (Label3D is an isMarker).
-        entry.label = new Label3D({
-            label: this._labelText(entry),
-            height: this._labelHeight(entry, 1, this._boxFor(entry).h),
-            color: entry.identityColor,
-            opacity: this.labelOpacity,
+        // The tile nameplate: a FieldLabel (editable glyph-field text over an identity-hue
+        // plate — the SAME hue as the border/ghost), so "which tiny tile is which" is answered
+        // by name, not just color. A direct child of the dock (dock-local placement, like the
+        // ghost); pick-inert. lineHeight sizes the text in cell rows (the labelLines rule).
+        entry.label = new FieldLabel({
+            atlas: this.atlas,
+            text: this._labelText(entry),
+            lineHeight: this._labelHeight(entry, 1, this._boxFor(entry).h),
+            plate: { color: entry.identityColor, opacity: this.labelOpacity },
         });
         entry.label.name = `dock-label:${id}`;
         this.add(entry.label);
@@ -1009,7 +1012,7 @@ export class CameraDock extends THREE.Object3D {
     reflowTile(id) {
         const e = this.entries.get(id);
         if (!e) return false;
-        e.label?.setLabel(this._labelText(e)); // live info (cols×rows) tracks the new size
+        e.label?.setText(this._labelText(e)); // live info (cols×rows) tracks the new size
         if (this.paneTree?.has(id)) this._placePane(e, this.paneTree.rects().get(id));
         else this._relayout();
         return true;

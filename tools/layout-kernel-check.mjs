@@ -223,6 +223,31 @@ const probe = (opts) => `(async (o) => {
     }
   }
 
+  // ---- the layout scan: the per-slot advance prefix sum + the visual-row prefix, plus the
+  //      three scalars the page stride and the extent are closed forms on. The SHARED
+  //      implementation (core/foldGeometry.layoutScan) — the same one configure() runs, so
+  //      "widest row" cannot mean two different things across the wire.
+  const advances = new Float32Array(slotCount);
+  for (let i = 0; i < slotCount; i++) advances[i] = sizes[i * 2];
+  const wrapCols = entry.kernelMode === 'flat' ? 0 : Math.max(0, Math.trunc(layout.wrapWidth));
+  const lineStartRow = new Uint32Array(lineTable.length);
+  const scan = foldGeom.layoutScan({
+    slotCount, lineTable, sizes, wrapWidth: wrapCols, lineStartRow,
+  });
+  R.totalRows = scan.totalRows;
+  R.maxRowExtent = scan.maxRowExtent;
+
+  // THE CPU REFERENCE: the fold, longhand, one glyph at a time — from the builder's own line
+  // table and real advances. Everything below diffs the GPU against this.
+  const page = foldGeom.pageFold(
+    Object.assign({}, layout, { wrapWidth: wrapCols }), metrics, scan.maxRowExtent);
+  const cpu = foldEval.evaluateFold({
+    slotCount, lineTable, advances, origin, scrollOffset: 0,
+    wrapWidth: wrapCols, lineSpacing: metrics.lineSpacing,
+    zStep: metrics.charHeight * layout.zWrapSpacing,
+    page,
+  });
+
   // ---- COVERAGE TEETH (before any comparison — an empty-vs-empty diff is vacuous) ----
   const xs = new Set(), ys = new Set(), zs = new Set();
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, finite = true;
@@ -250,30 +275,6 @@ const probe = (opts) => `(async (o) => {
   tooth('lineTable[0] === 0 and never decreases', ascending, 'len ' + lineTable.length);
   tooth('lineTable length === source line count', lineTable.length === srcLines.length, lineTable.length + ' vs ' + srcLines.length);
   tooth('an EMPTY line is present (repeated offset)', emptyLines);
-  // ---- the layout scan: the per-slot advance prefix sum + the visual-row prefix, plus the
-  //      three scalars the page stride and the extent are closed forms on. The SHARED
-  //      implementation (core/foldGeometry.layoutScan) — the same one configure() runs, so
-  //      "widest row" cannot mean two different things across the wire.
-  const advances = new Float32Array(slotCount);
-  for (let i = 0; i < slotCount; i++) advances[i] = sizes[i * 2];
-  const wrapCols = entry.kernelMode === 'flat' ? 0 : Math.max(0, Math.trunc(layout.wrapWidth));
-  const lineStartRow = new Uint32Array(lineTable.length);
-  const scan = foldGeom.layoutScan({
-    slotCount, lineTable, sizes, wrapWidth: wrapCols, lineStartRow,
-  });
-  R.totalRows = scan.totalRows;
-  R.maxRowExtent = scan.maxRowExtent;
-
-  // THE CPU REFERENCE: the fold, longhand, one glyph at a time — from the builder's own line
-  // table and real advances. Everything below diffs the GPU against this.
-  const page = foldGeom.pageFold(
-    Object.assign({}, layout, { wrapWidth: wrapCols }), metrics, scan.maxRowExtent);
-  const cpu = foldEval.evaluateFold({
-    slotCount, lineTable, advances, origin, scrollOffset: 0,
-    wrapWidth: wrapCols, lineSpacing: metrics.lineSpacing,
-    zStep: metrics.charHeight * layout.zWrapSpacing,
-    page,
-  });
   // y = origin.y − lineStartRow[L] × lineSpacing. Pagination remaps y wholesale, but only PAST
   // the first page — rows inside it are untouched — so restricting to those keeps one tooth
   // valid in every mode, wrapped or paginated.

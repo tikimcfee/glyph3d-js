@@ -13,6 +13,8 @@
 
 import './headless-canvas.mjs';
 import * as THREE from 'three';
+import './headless-canvas.mjs';
+import { HEADLESS_ATLAS } from './headless-atlas.mjs';
 
 globalThis.window ??= { addEventListener() {} };
 
@@ -26,7 +28,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const handlers = {};
 registerAgentCommands({ register: (name, fn) => { handlers[name] = fn; } });
-const books = new AgentBooks({ scene: new THREE.Scene(), atlas: null, registry: null });
+const books = new AgentBooks({ scene: new THREE.Scene(), atlas: HEADLESS_ATLAS, registry: null });
 const ctx = { agentBooks: books, sessionProvider: null };
 
 // ── agent.meta ──
@@ -37,8 +39,8 @@ const ctx = { agentBooks: books, sessionProvider: null };
     ok(!!lane, 'agent.meta ensured the lane');
     ok(lane.agentType === 'claude', `lane type from meta.harness (got "${lane.agentType}")`);
     ok(lane.meta?.slug === 'crispy-seeking-taco' && lane.meta?.model === 'glm-4.7', 'meta merged onto the lane');
-    ok(lane.label.label.includes('crispy-seeking-taco') && lane.label.label.includes('glm-4.7'),
-        `nameplate rebaked with provenance (got "${lane.label.label}")`);
+    ok(lane.label.text.includes('crispy-seeking-taco') && lane.label.text.includes('glm-4.7'),
+        `nameplate rebaked with provenance (got "${lane.label.text}")`);
     const bad = handlers['agent.meta'](['abc123', 'not json'], ctx);
     ok(bad.text.startsWith('ERR'), 'agent.meta rejects malformed json');
 }
@@ -78,8 +80,8 @@ const ctx = { agentBooks: books, sessionProvider: null };
     ok(sunk.some((s) => s.rec.action === 'say'), 'content.part sunk as a say record');
     ok(lane.meta?.model === 'k3' && lane.meta?.title === 'fix the pairing bug' && lane.meta?.cwd === '/home/ivan/dev/glyph3d-js',
         `live provenance forwarded (model=${lane.meta?.model} title=${lane.meta?.title})`);
-    ok(lane.label.label.includes('k3') && lane.label.label.includes('fix the pairing bug'),
-        `nameplate shows live provenance (got "${lane.label.label}")`);
+    ok(lane.label.text.includes('k3') && lane.label.text.includes('fix the pairing bug'),
+        `nameplate shows live provenance (got "${lane.label.text}")`);
     const bad = handlers['agent.kimi-wire']([id, '!!!notb64!!!'], ctx);
     ok(bad.text.startsWith('OK') && bad.text.includes('dropped'), 'malformed wire line drops quietly');
 }

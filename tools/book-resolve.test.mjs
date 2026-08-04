@@ -16,8 +16,9 @@
 
 import * as THREE from 'three';
 
-// ensure() bakes each lane's Label3D nameplate at construction — needs the 2d stub.
+// ensure() builds each lane's FieldLabel nameplate at construction — needs the atlas stub.
 import './headless-canvas.mjs';
+import { HEADLESS_ATLAS } from './headless-atlas.mjs';
 
 // Module-scope telemetry (ErrorTracker) wants a window with addEventListener.
 globalThis.window ??= { addEventListener() {} };
@@ -27,7 +28,7 @@ const { default: AgentBooks } = await import('../packages/glyph3d-core/src/colle
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) pass++; else { fail++; console.log(`  ✗ ${m}`); } };
 
-const books = new AgentBooks({ scene: new THREE.Scene(), atlas: null, registry: null });
+const books = new AgentBooks({ scene: new THREE.Scene(), atlas: HEADLESS_ATLAS, registry: null });
 const laneA = books.ensure('scribe');
 const laneB = books.ensure('sentry');
 

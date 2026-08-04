@@ -39,8 +39,8 @@ import {
 import { BLOCK_SHIFT, BLOCK_MASK, ENTRY_STRIDE, LANE_GLYPH_ID, LANE_ADVANCE, LANE_HEIGHT, LANE_FLAGS, FLAG_MISSING } from './GlyphTrie.js';
 
 const {
-    Fn, If, Loop, Break, uniform, instancedArray, instanceIndex,
-    int, uint, float, vec3, atomicMin, atomicMax, atomicAdd,
+    Fn, If, Loop, Break, Return, uniform, instancedArray, instanceIndex,
+    int, uint, float, vec3, atomicMin, atomicMax, atomicAdd, bitcast,
 } = TSL;
 
 /**
@@ -75,7 +75,7 @@ export function packBytes(bytes) {
  * magnitude ordering — negatives sort descending in raw bits, ascending once inverted.
  */
 const floatToOrderedKey = /*#__PURE__*/ Fn(([f]) => {
-    const bits = f.bitcast('uint').toVar('bits');
+    const bits = bitcast(f, 'uint').toVar('bits');
     return bits.bitAnd(uint(0x80000000)).equal(uint(0))
         .select(bits.bitOr(uint(0x80000000)), bits.bitNot());
 });
@@ -176,10 +176,10 @@ export default class GlyphPipelineKernels {
         const slots = this.slots;
         return Fn(() => {
             const id = instanceIndex;
-            If(id.greaterThanEqual(u.byteLength), () => { Break(); });
+            If(id.greaterThanEqual(u.byteLength), () => { Return(); });
 
             const n = this._sequenceLength(id).toVar('n');
-            If(n.equal(int(0)), () => { Break(); });   // continuation byte — stays a non-leader
+            If(n.equal(int(0)), () => { Return(); });   // continuation byte — stays a non-leader
 
             const b0 = this._byteAt(id).toVar('b0');
             const b1 = this._byteAt(id.add(uint(1))).toVar('b1');
@@ -263,9 +263,9 @@ export default class GlyphPipelineKernels {
 
         return Fn(() => {
             const id = instanceIndex;
-            If(id.greaterThanEqual(u.byteLength), () => { Break(); });
+            If(id.greaterThanEqual(u.byteLength), () => { Return(); });
             const myFlags = int(lane(id, S_FLAGS)).toVar('mf');
-            If(myFlags.bitAnd(int(F_LEADER)).equal(int(0)), () => { Break(); });
+            If(myFlags.bitAnd(int(F_LEADER)).equal(int(0)), () => { Return(); });
 
             const wrap = u.wrapWidth.toVar('wrap');
             const wrapping = wrap.greaterThan(int(0)).toVar('wrapping');
@@ -376,8 +376,8 @@ export default class GlyphPipelineKernels {
 
         return Fn(() => {
             const id = instanceIndex;
-            If(id.greaterThanEqual(u.byteLength), () => { Break(); });
-            If(int(lane(id, S_FLAGS)).bitAnd(int(F_LEADER)).equal(int(0)), () => { Break(); });
+            If(id.greaterThanEqual(u.byteLength), () => { Return(); });
+            If(int(lane(id, S_FLAGS)).bitAnd(int(F_LEADER)).equal(int(0)), () => { Return(); });
 
             const o = id.mul(uint(SLOT_STRIDE)).toVar('o');
             const row = int(lane(id, S_ROW)).toVar('row');

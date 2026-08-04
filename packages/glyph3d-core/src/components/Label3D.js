@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { RENDER_ORDER } from '../core/renderOrder.js';
+import { roundRectPath, bakePillCanvas } from './plateBake.js';
 
 /**
  * Label3D — a small baked-text plate for in-canvas identification (the interaction-free
@@ -78,26 +79,19 @@ export default class Label3D extends THREE.Mesh {
      *  and the at-rest translucency comes from material.opacity, so subclasses can fade it up.
      *  Multi-line: '\n' splits into rows — the pill is as wide as the widest line and stacks one
      *  fillText row per line, vertically centered. A single-line label bakes exactly as before.
+     *  The pill itself is the shared plateBake (same plate FieldLabel wears).
      *  @returns {{texture:THREE.CanvasTexture, aspect:number}} */
     static _bake(label, color, fontPx) {
-        const canvas = document.createElement('canvas');
-        const ctx = canvas.getContext('2d');
+        const measure = document.createElement('canvas').getContext('2d');
         const font = `600 ${fontPx}px ui-sans-serif, system-ui, sans-serif`;
-        ctx.font = font;
+        measure.font = font;
         const padX = Math.round(fontPx * 0.72), padY = Math.round(fontPx * 0.42);
         const lines = String(label ?? '').split('\n');
         const lineStep = Math.round(fontPx * 1.2);    // per-row advance (multi-line plates only)
-        const textW = Math.ceil(Math.max(...lines.map((l) => ctx.measureText(l || ' ').width)));
+        const textW = Math.ceil(Math.max(...lines.map((l) => measure.measureText(l || ' ').width)));
         const w = Math.max(textW + padX * 2, fontPx + padY * 2); // never narrower than tall (round "+"/"−")
         const h = (lines.length > 1 ? lines.length * lineStep : fontPx) + padY * 2;
-        canvas.width = w; canvas.height = h;          // resizing resets the 2d context state
-        ctx.clearRect(0, 0, w, h);
-        const r = Math.min(h * 0.34, 22);
-        const col = new THREE.Color(color);
-        ctx.fillStyle = `rgb(${(col.r * 255) | 0},${(col.g * 255) | 0},${(col.b * 255) | 0})`;
-        Label3D._roundRect(ctx, 1.5, 1.5, w - 3, h - 3, r); ctx.fill();
-        ctx.lineWidth = 2; ctx.strokeStyle = 'rgba(255,255,255,0.22)';
-        Label3D._roundRect(ctx, 1.5, 1.5, w - 3, h - 3, r); ctx.stroke();
+        const { canvas, ctx } = bakePillCanvas(w, h, color);
         ctx.font = font; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
         ctx.fillStyle = 'rgba(8,10,16,0.95)';         // dark label on the bright pill
         const y0 = h / 2 + 1 - ((lines.length - 1) * lineStep) / 2;
@@ -107,17 +101,6 @@ export default class Label3D extends THREE.Mesh {
         texture.anisotropy = 4;
         texture.needsUpdate = true;
         return { texture, aspect: w / h };
-    }
-
-    /** Path a rounded rectangle onto `ctx` (no fill/stroke — caller does). @private */
-    static _roundRect(ctx, x, y, w, h, r) {
-        ctx.beginPath();
-        ctx.moveTo(x + r, y);
-        ctx.arcTo(x + w, y, x + w, y + h, r);
-        ctx.arcTo(x + w, y + h, x, y + h, r);
-        ctx.arcTo(x, y + h, x, y, r);
-        ctx.arcTo(x, y, x + w, y, r);
-        ctx.closePath();
     }
 
     dispose() {

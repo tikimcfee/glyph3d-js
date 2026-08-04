@@ -38,7 +38,7 @@ import * as THREE from 'three';
 import Book from './Book.js';
 import CodeGrid from './CodeGrid.js';
 import FrameGrid from './FrameGrid.js';
-import Label3D from '../components/Label3D.js';
+import FieldLabel from './FieldLabel.js';
 import { VStack } from './layouts/StackContainer.js';
 import { LAYOUT_SCHEMES } from './layouts/index.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
@@ -189,19 +189,24 @@ export default class AgentBooks {
                 sessionId: null,       // the harness session record this book renders (set by hydrate)
                 meta: null,            // session provenance (title/slug/cwd/model/gitBranch…) — hydrate/setLaneMeta
                 cwd: null,             // the session's working dir (meta.cwd), kept beside sessionId
-                label: null,           // the nameplate (Label3D) above the cover, in the lane's hue
+                label: null,           // the nameplate (FieldLabel) above the cover, in the lane's hue
                 maxSheets: null,       // per-book retention override: n>0 caps, 0 unbounded, null → cfg.maxSheets
                 pinned: false, pinnedPos: null,
             };
             book.fit(this._pageOpts(lane));   // page form from birth — appended sheets inherit it
-            // The nameplate: a Label3D in the lane's palette hue, parked above the cover
-            // (Book.syncCover owns the per-frame placement). Born as '~<id> · <type>';
-            // rebaked to full provenance as metadata lands (hydrate / setLaneMeta).
-            lane.label = new Label3D({
-                label: `~${agentId} · ${lane.agentType}`,
-                height: this.cfg.pageH * 0.05,
-                color: this.cfg.palette[hueIdx % this.cfg.palette.length],
-                opacity: 0.85,
+            // The nameplate: a FieldLabel (glyph-field text over an identity-hue plate) in the
+            // lane's palette hue, parked above the cover (Book.syncCover owns the per-frame
+            // placement). Born as '~<id> · <type>'; rebuilt to full provenance as metadata
+            // lands (hydrate / setLaneMeta). A field, not a baked texture — so a long session
+            // title instances glyphs instead of breaching the GPU max-texture limit.
+            lane.label = new FieldLabel({
+                atlas: this.atlas,
+                text: `~${agentId} · ${lane.agentType}`,
+                lineHeight: (this.cfg.pageH * 0.05) / 3,   // per-row; full 3-line provenance ≈ the old plate height
+                plate: {
+                    color: this.cfg.palette[hueIdx % this.cfg.palette.length],
+                    opacity: 0.85,
+                },
             });
             lane.label.name = `agent-label:${agentId}`;
             book.setNameplate(lane.label);
@@ -310,7 +315,7 @@ export default class AgentBooks {
         if (meta) {
             lane.meta = { ...(lane.meta || {}), ...meta };
             if (meta.cwd) lane.cwd = meta.cwd;
-            lane.label?.setLabel(this.provenanceText(lane));
+            lane.label?.setText(this.provenanceText(lane));
         }
         const v = Number(limit);
         if (limit != null && Number.isFinite(v)) lane.maxSheets = Math.max(0, Math.floor(v));
@@ -356,7 +361,7 @@ export default class AgentBooks {
         if (!lane || !meta || typeof meta !== 'object') return false;
         lane.meta = { ...(lane.meta || {}), ...meta };
         if (lane.meta.cwd) lane.cwd = lane.meta.cwd;
-        lane.label?.setLabel(this.provenanceText(lane));
+        lane.label?.setText(this.provenanceText(lane));
         this._emitChange();
         return true;
     }
@@ -688,6 +693,21 @@ export default class AgentBooks {
      *  level) means unbounded. @private */
     _capFor(lane) {
         const n = lane.maxSheets ?? this.cfg.maxSheets;
+        return Number.isFinite(n) && n > 0 ? Math.floor(n) : Infinity;
+    }
+
+    /**
+     * The cap a hydration of this lane WOULD apply — hydrate's rule (an explicit
+     * limit wins, else the lane's override, else the shelf default) without
+     * mutating anything. The parse pool pre-slices the event tail in the worker
+     * to this count, so only what the book will materialize clones back to the
+     * main thread. hydrate re-derives + re-slices identically — the slice here
+     * is transport hygiene, not semantics.
+     * @param {string} agentId @param {number} [limit] @returns {number} cap (Infinity = unbounded)
+     */
+    capForHydration(agentId, limit) {
+        const lane = this.lanes.get(agentId);
+        const n = limit ?? lane?.maxSheets ?? this.cfg.maxSheets;
         return Number.isFinite(n) && n > 0 ? Math.floor(n) : Infinity;
     }
 

@@ -1,29 +1,32 @@
-// agent-book-labels.test.mjs — behavior lock for agent book NAMEPLATES: the Label3D
-// plate each lane's book wears above its cover, and the provenance metadata flow that
-// fills it (hydrate opts.meta / setLaneMeta → provenanceText → rebake).
+// agent-book-labels.test.mjs — behavior lock for agent book NAMEPLATES: the FieldLabel
+// (glyph-field text over a palette-hue plate) each lane's book wears above its cover, and
+// the provenance metadata flow that fills it (hydrate opts.meta / setLaneMeta →
+// provenanceText → setText).
 //
 //   bun tools/agent-book-labels.test.mjs
 //
 // Locks:
 //   - ensure() creates a nameplate in the lane's palette hue, parented to the book,
 //     initial text '~<id> · <agentType>'
-//   - Label3D._bake multi-line: '\n' stacks rows; single-line output is byte-identical
-//     to before (dock-labels.test.mjs stays green as the regression net)
-//   - hydrate(..., {meta}) stores lane.meta/lane.cwd and rebakes the plate
-//   - setLaneMeta(id, meta) merges and rebakes; unknown id → false
+//   - Label3D._bake multi-line: '\n' stacks rows (Button3D chrome keeps the baked path;
+//     dock-labels.test.mjs stays green as the regression net)
+//   - hydrate(..., {meta}) stores lane.meta/lane.cwd and rebuilds the plate text
+//   - setLaneMeta(id, meta) merges and rebuilds; unknown id → false
 //   - provenanceText: title/slug/~id · basename(cwd)+type · model+branch, lines omitted
 //   - remove()/_kill disposes the plate with the book
 //
-// Headless: the shared 2d-canvas stub stands in for the DOM (the bake runs at
-// construction); AgentBooks runs on a scene-only mock ctx, same as book-resolve.test.
+// Headless: the shared 2d-canvas stub stands in for the DOM (the plate bake), the
+// shaper-less atlas stub feeds the field's mono fallback (real positions, no ink).
 
 import './headless-canvas.mjs';
+import { HEADLESS_ATLAS } from './headless-atlas.mjs';
 import * as THREE from 'three';
 
 // Module-scope telemetry (ErrorTracker) wants a window with addEventListener.
 globalThis.window ??= { addEventListener() {} };
 
 const { default: Label3D } = await import('../packages/glyph3d-core/src/components/Label3D.js');
+const { default: FieldLabel } = await import('../packages/glyph3d-core/src/collections/FieldLabel.js');
 const { default: AgentBooks } = await import('../packages/glyph3d-core/src/collections/AgentBooks.js');
 
 let pass = 0, fail = 0;
@@ -56,12 +59,12 @@ const ok = (c, m) => { if (c) pass++; else { fail++; console.log(`  ✗ ${m}`); 
 }
 
 // ── nameplate on ensure ──
-const books = new AgentBooks({ scene: new THREE.Scene(), atlas: null, registry: null });
+const books = new AgentBooks({ scene: new THREE.Scene(), atlas: HEADLESS_ATLAS, registry: null });
 {
     const lane = books.ensure('abc123', 'claude');
-    ok(lane.label instanceof Label3D, 'ensure creates a Label3D nameplate');
-    ok(lane.label.label === '~abc123 · claude', `initial text is '~<id> · <type>' (got "${lane.label.label}")`);
-    ok(lane.label.color === books.cfg.palette[0], 'nameplate wears the lane palette hue');
+    ok(lane.label instanceof FieldLabel, 'ensure creates a FieldLabel nameplate');
+    ok(lane.label.text === '~abc123 · claude', `initial text is '~<id> · <type>' (got "${lane.label.text}")`);
+    ok(lane.label._plateCfg.color === books.cfg.palette[0], 'nameplate wears the lane palette hue');
     ok(lane.book.nameplate === lane.label && lane.label.parent === lane.book,
         'nameplate is parented to the book (book.setNameplate)');
     ok(lane.label.userData.isMarker === true, 'nameplate is pick-inert');
@@ -89,8 +92,8 @@ const books = new AgentBooks({ scene: new THREE.Scene(), atlas: null, registry: 
     ok(lane.sessionId === 'sess-1', 'hydrate still stores sessionId');
     ok(lane.meta?.title === 'Fix the flurbit' && lane.meta?.model === 'claude-opus-4', 'hydrate stores lane.meta');
     ok(lane.cwd === '/home/ivan/dev/glyph3d-js', 'hydrate stores lane.cwd from meta.cwd');
-    ok(lane.label.label === 'Fix the flurbit\nglyph3d-js · claude\nclaude-opus-4 · main',
-        `hydrate rebakes the full provenance (got ${JSON.stringify(lane.label.label)})`);
+    ok(lane.label.text === 'Fix the flurbit\nglyph3d-js · claude\nclaude-opus-4 · main',
+        `hydrate rebakes the full provenance (got ${JSON.stringify(lane.label.text)})`);
     const row = books.agents().find((a) => a.id === 'abc123');
     ok(row?.meta?.title === 'Fix the flurbit', 'agents() exposes meta per lane');
 }
@@ -100,16 +103,16 @@ const books = new AgentBooks({ scene: new THREE.Scene(), atlas: null, registry: 
     ok(books.setLaneMeta('abc123', { model: 'kimi-k2' }) === true, 'setLaneMeta returns true for a live lane');
     const lane = books.lanes.get('abc123');
     ok(lane.meta.model === 'kimi-k2' && lane.meta.title === 'Fix the flurbit', 'setLaneMeta merges over existing meta');
-    ok(lane.label.label === 'Fix the flurbit\nglyph3d-js · claude\nkimi-k2 · main',
-        `setLaneMeta rebakes the plate (got ${JSON.stringify(lane.label.label)})`);
+    ok(lane.label.text === 'Fix the flurbit\nglyph3d-js · claude\nkimi-k2 · main',
+        `setLaneMeta rebakes the plate (got ${JSON.stringify(lane.label.text)})`);
     ok(books.setLaneMeta('phantom', { model: 'x' }) === false, 'setLaneMeta on an unknown lane is false');
 
     // A sparse lane: only a slug — no cwd line, no model/branch line.
     const lane2 = books.ensure('def456', 'kimi');
     books.setLaneMeta('def456', { slug: 'quiet-session' });
-    ok(lane2.label.label === 'quiet-session\nkimi',
-        `provenance omits absent lines (got ${JSON.stringify(lane2.label.label)})`);
-    ok(books.provenanceText(lane2) === lane2.label.label, 'provenanceText is the plate\'s source of truth');
+    ok(lane2.label.text === 'quiet-session\nkimi',
+        `provenance omits absent lines (got ${JSON.stringify(lane2.label.text)})`);
+    ok(books.provenanceText(lane2) === lane2.label.text, 'provenanceText is the plate\'s source of truth');
 
     // A bare lane falls back to '~<id>' on line 1.
     const lane3 = books.ensure('zzz', 'agent');

@@ -13,6 +13,7 @@
 //   bun tools/dock-ghost-check.mjs
 
 import './headless-canvas.mjs';
+import { HEADLESS_ATLAS } from './headless-atlas.mjs';
 import * as THREE from 'three';
 import CameraDock from '../packages/glyph3d-core/src/services/interaction/CameraDock.js';
 
@@ -33,7 +34,7 @@ const posOf = (g) => ({ x: g.position.x, y: g.position.y, z: g.position.z });
 const same = (a, b) => near(a.x, b.x) && near(a.y, b.y) && near(a.z, b.z);
 
 const scene = new THREE.Scene();
-const dock = new CameraDock({ attentionManager: { docks: new Map() } });
+const dock = new CameraDock({ atlas: HEADLESS_ATLAS, attentionManager: { docks: new Map() } });
 scene.add(dock);
 dock.update(0.016, camera); // prime _viewH from the camera BEFORE locking, so lock-time layout is final
 

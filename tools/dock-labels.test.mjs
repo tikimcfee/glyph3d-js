@@ -14,6 +14,7 @@
 // construction, not import, so the stub is live before any Label3D is made).
 
 import './headless-canvas.mjs';
+import { HEADLESS_ATLAS } from './headless-atlas.mjs';
 import * as THREE from 'three';
 import Label3D from '../packages/glyph3d-core/src/components/Label3D.js';
 import Button3D from '../packages/glyph3d-core/src/components/Button3D.js';
@@ -67,14 +68,14 @@ const fakeTerminal = (name, cols, rows) => {
 };
 
 {
-    const dock = new CameraDock();
+    const dock = new CameraDock({ atlas: HEADLESS_ATLAS });
     const term = fakeTerminal('term-1', 80, 24);
     dock.lock('term-1', term);
 
     const e = dock.entries.get('term-1');
     ok(!!e.label, 'lock creates a nameplate');
-    ok(e.label.label === 'term-1 · 80×24', `nameplate reads name + dims (got "${e.label.label}")`);
-    ok(e.label.color === e.identityColor, 'nameplate wears the identity hue');
+    ok(e.label.text === 'term-1 · 80×24', `nameplate reads name + dims (got "${e.label.text}")`);
+    ok(e.label._plateCfg.color === e.identityColor, 'nameplate wears the identity hue');
     ok(e.label.parent === dock, 'nameplate is a dock child (dock-local placement)');
     ok(e.label.visible === true, 'bar tile nameplate is visible');
 
@@ -97,7 +98,7 @@ const fakeTerminal = (name, cols, rows) => {
     // Resize → reflowTile rebakes the live info.
     term.cols = 120; term.rows = 40;
     dock.reflowTile('term-1');
-    ok(e.label.label === 'term-1 · 120×40', `resize rebakes the nameplate (got "${e.label.label}")`);
+    ok(e.label.text === 'term-1 · 120×40', `resize rebakes the nameplate (got "${e.label.text}")`);
 
     // Release tears the nameplate down.
     const lbl = e.label;
@@ -118,7 +119,7 @@ const fakeTerminal = (name, cols, rows) => {
     grid.getBounds = () => new THREE.Box3(new THREE.Vector3(0, -10, 0), new THREE.Vector3(20, 0, 0));
     grid.getLocalBounds = () => new THREE.Box3(new THREE.Vector3(0, -10, 0), new THREE.Vector3(20, 0, 0));
     dock.lock('file-1', grid);
-    ok(dock.entries.get('file-1').label.label === 'src/main.js', 'plain window gets a bare-name plate');
+    ok(dock.entries.get('file-1').label.text === 'src/main.js', 'plain window gets a bare-name plate');
 
     dock.dispose();
     ok(!dock.children.some((c) => c.name?.startsWith('dock-label:')), 'dock.dispose leaves no nameplates');
@@ -126,7 +127,7 @@ const fakeTerminal = (name, cols, rows) => {
 
 // ── placement: the plate hugs the CONTENT bottom edge, close under the tile ──
 {
-    const dock = new CameraDock({ layout: 'linear' });
+    const dock = new CameraDock({ atlas: HEADLESS_ATLAS, layout: 'linear' });
     const term = fakeTerminal('term-9', 80, 24);
     dock.lock('term-9', term);
     const e = dock.entries.get('term-9');
@@ -146,7 +147,7 @@ const fakeTerminal = (name, cols, rows) => {
 
 // ── setParam: the nameplate knobs behind the Settings panel's Dock dials ──
 {
-    const dock = new CameraDock({ layout: 'linear' });
+    const dock = new CameraDock({ atlas: HEADLESS_ATLAS, layout: 'linear' });
     const term = fakeTerminal('term-cfg', 80, 24);
     dock.lock('term-cfg', term);
     const e = dock.entries.get('term-cfg');
@@ -177,17 +178,17 @@ const fakeTerminal = (name, cols, rows) => {
 
     // opacity pushes to the live plate
     ok(dock.setParam('labelOpacity', 0.4), 'setParam labelOpacity accepted');
-    ok(Math.abs(e.label.material.opacity - 0.4) < 1e-9, 'opacity pushes to the live plate');
+    ok(Math.abs(e.label._plate.mesh.material.opacity - 0.4) < 1e-9, 'opacity pushes to the live plate');
 
     // format rebakes live; 'off' hides; restoring brings it back
     ok(dock.setParam('labelFormat', 'name'), 'setParam labelFormat name accepted');
-    ok(e.label.label === 'term-cfg', `format name rebakes (got "${e.label.label}")`);
+    ok(e.label.text === 'term-cfg', `format name rebakes (got "${e.label.text}")`);
     dock.setParam('labelFormat', 'dims');
-    ok(e.label.label === '80×24', `format dims rebakes (got "${e.label.label}")`);
+    ok(e.label.text === '80×24', `format dims rebakes (got "${e.label.text}")`);
     dock.setParam('labelFormat', 'off');
     ok(e.label.visible === false, 'format off hides the plate');
     dock.setParam('labelFormat', 'name+dims');
-    ok(e.label.visible === true && e.label.label === 'term-cfg · 80×24', 'format restored');
+    ok(e.label.visible === true && e.label.text === 'term-cfg · 80×24', 'format restored');
 
     // rejects: bad enum, NaN, unknown key
     ok(!dock.setParam('labelPosition', 'left'), 'bad enum rejected');

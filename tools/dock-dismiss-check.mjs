@@ -9,6 +9,7 @@
 //   bun tools/dock-dismiss-check.mjs
 
 import './headless-canvas.mjs';
+import { HEADLESS_ATLAS } from './headless-atlas.mjs';
 import * as THREE from 'three';
 import CameraDock from '../packages/glyph3d-core/src/services/interaction/CameraDock.js';
 import { AttentionManager } from '../packages/glyph3d-core/src/services/interaction/AttentionManager.js';
@@ -27,7 +28,7 @@ function mockWindow() {
 }
 
 const scene = new THREE.Scene();
-const dock = new CameraDock({ attentionManager: { docks: new Map() } });
+const dock = new CameraDock({ atlas: HEADLESS_ATLAS, attentionManager: { docks: new Map() } });
 scene.add(dock);
 
 const g1 = mockWindow(), g2 = mockWindow();

@@ -17,6 +17,7 @@
 // Pure three (Object3D/Box3/Quaternion) — no WebGPU.
 
 import './headless-canvas.mjs';
+import { HEADLESS_ATLAS } from './headless-atlas.mjs';
 import * as THREE from 'three';
 import Carrel from '../packages/glyph3d-core/src/services/interaction/Carrel.js';
 import CameraDock from '../packages/glyph3d-core/src/services/interaction/CameraDock.js';
@@ -248,7 +249,7 @@ const settle = (c, n = 8) => { for (let i = 0; i < n; i++) c.update(0.05); };
     g.position.set(40, 12, -8);
     treeNode.add(g);
 
-    const dock = new CameraDock();
+    const dock = new CameraDock({ atlas: HEADLESS_ATLAS });
     scene.add(dock);
     dock.lock('a', g);
     for (let i = 0; i < 8; i++) dock.update(0.05, null);   // tile slides into the bar

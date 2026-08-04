@@ -1,15 +1,17 @@
 /**
- * Annotation commands: label.create, label.remove, label.list,
+ * Annotation commands: label.create, label.set, label.append, label.remove, label.list,
  * highlight.grid, highlight.clear,
  * camera.animate, camera.lookat.grid,
  * scene.annotate, scene.clear_annotations, scene.reset
  *
- * Labels and annotations are lightweight CodeGrids tracked in ctx.annotations.
- * Highlights use shared gridVisualState for save/restore.
+ * Labels are FieldLabels — editable glyph-field text entities tracked in ctx.annotations
+ * (setText is live: label.set / label.append rewrite them in place, no rebake). Annotations
+ * (scene.annotate) are lightweight CodeGrids. Highlights use shared gridVisualState.
  */
 
 import { box, table } from '../formatResponse.js';
 import CodeGrid from '@glyph3d/core/collections/CodeGrid.js';
+import FieldLabel from '@glyph3d/core/collections/FieldLabel.js';
 import { COLORS } from './colorConstants.js';
 import { saveGridState, restoreGridState, restoreAllGridStates } from './gridVisualState.js';
 import { animateCamera, getWorldBounds, resolveGridByIdOrIndex } from './spatialHelpers.js';
@@ -50,15 +52,13 @@ export default function registerAnnotationCommands(router) {
 
         const id = `label-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
-        const grid = new CodeGrid(ctx.scene, ctx.atlas, {
-            name: id,
-            showBackground: false,
-            showFilename: false,
+        const grid = new FieldLabel({
+            atlas: ctx.atlas,
+            text,
+            lineHeight: 1.0,
             textColor: color,
-            gridScale: 1.0,
         });
-
-        void grid.loadText(text);
+        grid.name = id;
         grid.position.set(x, y, z);
 
         // Add to scene directly (not to ctx grids -- these are annotations, not content)
@@ -82,6 +82,74 @@ export default function registerAnnotationCommands(router) {
     }, {
         description: 'Create a floating text label at a position',
         usage: '<base64-text> <x> <y> <z> [r g b]'
+    });
+
+    // ================================================================
+    //  label.set <id> <base64-text> — rewrite a label's text live
+    // ================================================================
+
+    router.register('label.set', (args, ctx) => {
+        if (args.length < 2) {
+            return { text: 'ERR: usage: label.set <id> <base64-text>', data: null };
+        }
+
+        const id = args[0];
+        const entry = ctx.annotations.get(id);
+        if (!entry || entry.type !== 'label') {
+            return { text: `ERR: no label with id "${id}"`, data: null };
+        }
+
+        let text;
+        try { text = decodeBase64(args[1]); } catch {
+            return { text: 'ERR: invalid base64 content', data: null };
+        }
+
+        entry.grid.setText(text); // the field rebuilds synchronously — the edit is live NOW
+        entry.text = text;
+        // Re-register: same id/grid/type overwrites the metadata (text) without a warn.
+        ctx.registry.register(id, entry.grid, { type: 'label', text, position: entry.position, color: entry.color });
+
+        return {
+            text: `OK: label "${id}" set (${text.length} chars)`,
+            data: { id, text }
+        };
+    }, {
+        description: 'Rewrite a label\'s text live — the agent/dev scratchpad write path',
+        usage: '<id> <base64-text>'
+    });
+
+    // ================================================================
+    //  label.append <id> <base64-text> — add line(s) to a label
+    // ================================================================
+
+    router.register('label.append', (args, ctx) => {
+        if (args.length < 2) {
+            return { text: 'ERR: usage: label.append <id> <base64-text>', data: null };
+        }
+
+        const id = args[0];
+        const entry = ctx.annotations.get(id);
+        if (!entry || entry.type !== 'label') {
+            return { text: `ERR: no label with id "${id}"`, data: null };
+        }
+
+        let text;
+        try { text = decodeBase64(args[1]); } catch {
+            return { text: 'ERR: invalid base64 content', data: null };
+        }
+
+        const next = entry.text ? `${entry.text}\n${text}` : text;
+        entry.grid.setText(next);
+        entry.text = next;
+        ctx.registry.register(id, entry.grid, { type: 'label', text: next, position: entry.position, color: entry.color });
+
+        return {
+            text: `OK: label "${id}" appended (${next.split('\n').length} lines)`,
+            data: { id, text: next }
+        };
+    }, {
+        description: 'Append line(s) to a label — notes accumulate in place',
+        usage: '<id> <base64-text>'
     });
 
     // ================================================================
