@@ -233,6 +233,14 @@ export function syncGpuLayout(field, buffers, items, shared, rendererIds) {
             b.min.x = Math.min(b.min.x, w.min.x); b.min.y = Math.min(b.min.y, w.min.y); b.min.z = Math.min(b.min.z, w.min.z);
             b.max.x = Math.max(b.max.x, w.max.x); b.max.y = Math.max(b.max.y, w.max.y); b.max.z = Math.max(b.max.z, w.max.z);
         }
+        // The override needs the derived extent fields the builder's bounds carry —
+        // _sizeBackgroundTo reads bounds.width/height, and other consumers read depth.
+        // Without these, the panel sizes to NaN and disappears on a paginated switch.
+        if (boundsOverride) {
+            boundsOverride.width  = boundsOverride.max.x - boundsOverride.min.x;
+            boundsOverride.height = boundsOverride.max.y - boundsOverride.min.y;
+            boundsOverride.depth  = boundsOverride.max.z - boundsOverride.min.z;
+        }
     } catch (err) {
         // Engine-owned fields have no CPU fallback in the buffer — a failed dispatch is
         // VISIBLY wrong (glyphs at the origin), which is the correct failure mode for the
