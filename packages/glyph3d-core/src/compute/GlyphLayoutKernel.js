@@ -555,7 +555,12 @@ export default class GlyphLayoutKernel {
         const p = resolveParams(items[0].params);
         const axis = resolveAxis(p.axis);
         const wrapCols = Math.max(0, Math.trunc(p.wrapWidth));
-        const pageRows = Math.max(0, Math.trunc(p.pageHeight));
+        // pageHeight is PER-ITEM-MODIFIED (paginate ? pageRows : 0) — items[0] might be the
+        // filename (short, never paginates → 0). The FIELD-LEVEL pageRows is the max across
+        // items: the paginating item carries the real value; non-paginating items carry 0.
+        // A single uniform serves all items; the per-item `paginated` flag gates the fold.
+        let pageRows = 0;
+        for (const it of items) pageRows = Math.max(pageRows, Math.max(0, Math.trunc(it.params?.pageHeight || 0)));
         const fieldGapX = p.pageGapXWorld;
 
         // Grow before writing. Capacity is the one input the kernel is compiled against.
