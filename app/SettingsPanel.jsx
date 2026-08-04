@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { stateController } from '@glyph3d/core/services/state';
-import { SETTINGS, getSetting } from './client/settings.js';
+import { SETTINGS, GROUPS, getSetting } from './client/settings.js';
 import './SettingsPanel.css';
 
 // SettingsPanel — the IDE's settings surface. Renders the shared SETTINGS schema
@@ -62,7 +62,12 @@ const styles = {
     letterSpacing: '0.08em',
   },
   caret: { flex: '0 0 auto', width: 10, fontSize: 8 },
-  groupName: { flex: '1 1 auto', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  groupNameWrap: { flex: '1 1 auto', minWidth: 0, display: 'flex', flexDirection: 'column', lineHeight: 1.3 },
+  groupName: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  // Subtitle: a brief sample of the section's contents — the legibility hack for
+  // the big merged sections. Prose, so NOT uppercased (the header's uppercase
+  // transform is overridden here) and dimmer than the name.
+  groupSubtitle: { fontSize: 9, letterSpacing: '0.02em', textTransform: 'none', color: '#5c6675', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   // Closed-section cue: some knob inside is off-default (the open rows show ↺ instead).
   groupDot: { flex: '0 0 auto', fontSize: 8, color: '#9aa3b2' },
   groupCount: { flex: '0 0 auto', fontSize: 9, color: '#3d4450', fontVariantNumeric: 'tabular-nums' },
@@ -102,10 +107,19 @@ const styles = {
 };
 
 export default function SettingsPanel({ client }) {
+  // Section order + subtitles come from GROUPS (settings.js) — the panel lists
+  // sections in that registry's order, NOT the SETTINGS array order. Entries are
+  // gathered by group name, so a group whose entries aren't contiguous in SETTINGS
+  // still renders as one section.
   const groups = useMemo(() => {
-    const m = new Map();
-    for (const s of SETTINGS) { if (!m.has(s.group)) m.set(s.group, []); m.get(s.group).push(s); }
-    return [...m.entries()];
+    const byGroup = new Map();
+    for (const s of SETTINGS) {
+      if (!byGroup.has(s.group)) byGroup.set(s.group, []);
+      byGroup.get(s.group).push(s);
+    }
+    return GROUPS
+      .map((g) => ({ name: g.name, subtitle: g.subtitle, defs: byGroup.get(g.name) || [] }))
+      .filter((g) => g.defs.length);
   }, []);
 
   // Controlled values, seeded from the store. Numbers are kept as strings so the
@@ -114,7 +128,7 @@ export default function SettingsPanel({ client }) {
     const o = {}; for (const s of SETTINGS) o[s.key] = getSetting(s.key); return o;
   });
   const [reloadPending, setReloadPending] = useState(false);
-  const [open, setOpen] = useState(() => loadOpenGroups(new Set(groups.map(([g]) => g))));
+  const [open, setOpen] = useState(() => loadOpenGroups(new Set(groups.map((g) => g.name))));
 
   // Live 'info' rows (type: 'info' — a read(ctx) readout, not a knob): tick once a
   // second so counters like the culler's dark-count stay current while visible.
@@ -174,7 +188,7 @@ export default function SettingsPanel({ client }) {
         <button type="button" style={styles.reset} onClick={reset} title="reset all settings to defaults">reset</button>
       </div>
       <div style={styles.body}>
-        {groups.map(([group, defs], gi) => {
+        {groups.map(({ name: group, subtitle, defs }, gi) => {
           const isOpen = open.has(group);
           return (
           <div key={group} style={gi === 0 ? undefined : styles.sectionSep}>
@@ -186,7 +200,10 @@ export default function SettingsPanel({ client }) {
               title={`${isOpen ? 'collapse' : 'expand'} ${group}`}
             >
               <span style={styles.caret}>{isOpen ? '▾' : '▸'}</span>
-              <span style={styles.groupName}>{group}</span>
+              <span style={styles.groupNameWrap}>
+                <span style={styles.groupName}>{group}</span>
+                {subtitle && <span style={styles.groupSubtitle}>{subtitle}</span>}
+              </span>
               {!isOpen && defs.some(isModified) && <span style={styles.groupDot} title="has modified settings">●</span>}
               <span style={styles.groupCount}>{defs.length}</span>
             </button>

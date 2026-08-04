@@ -79,6 +79,29 @@ const schemeParam = (scheme, param) => (ctx, v) => {
 const jellyfishParam = (param) => schemeParam('jellyfish', param);
 const libraryParam = (param) => schemeParam('library', param);
 
+// GROUPS — the ordered registry of sections: the order the Settings panel lists
+// them in, plus a one-line subtitle (a brief sample of what's inside) shown under
+// the uppercased name. The subtitle is the legibility hack for the big merged
+// sections (Tree & labels, Dock & frame) until real sub-headers arrive — it tells
+// you what's in a section before you open it. Every name must match a `group` on
+// some SETTINGS entry, or the panel skips it.
+export const GROUPS = [
+  { name: 'Camera',             subtitle: 'flight speed · proximity auto-slow · soft bounds · draw distance' },
+  { name: 'Environment',        subtitle: 'sky, grid floor, axes · minimap overview' },
+  { name: 'Theme & appearance', subtitle: 'code & terminal backgrounds · cursor · focus / hover / input colors' },
+  { name: 'Display & glyph LOD', subtitle: 'font, atlas, width compress · minify / flicker control' },
+  { name: 'Code grids',         subtitle: 'the layout preset new grids are born with' },
+  { name: 'Layout',             subtitle: 'jellyfish column · library page-scheme' },
+  { name: 'Tree & labels',      subtitle: 'ownership wires · container-name plates & approach fade' },
+  { name: 'Dock & frame',       subtitle: 'pinned-window tile bar · ghost slots · nameplates · view-pane' },
+  { name: 'Carrel',             subtitle: 'world-anchored reading desks' },
+  { name: 'Agent Books',        subtitle: 'the agent shelf · shared page face' },
+  { name: 'Strata',             subtitle: 'nested Z-depth structure view' },
+  { name: 'Motion',             subtitle: 'relayout glide' },
+  { name: 'Culling & loading',  subtitle: 'occlusion culling · build budget · draw-call readout' },
+  { name: 'Connection',         subtitle: 'auto-connect to relay on load' },
+];
+
 export const SETTINGS = [
   {
     key: 'camera.speed', label: 'Move speed', group: 'Camera',
@@ -173,7 +196,7 @@ export const SETTINGS = [
   // View — high-level view primitives (HUD overlays). No live apply(): main.jsx mounts/
   // unmounts the widget off the persisted value via StateController's state-changed event.
   {
-    key: 'view.minimap', label: 'Minimap overview', group: 'View',
+    key: 'view.minimap', label: 'Minimap overview', group: 'Environment',
     type: 'bool', default: true,
   },
   // Environment — the world: the gradient sky + the infinite grid floor. No live apply():
@@ -190,11 +213,11 @@ export const SETTINGS = [
   { key: 'env.majorCell', label: 'Major cell size', group: 'Environment', type: 'number', default: 2000, min: 100, max: 20000, step: 100 },
   { key: 'env.fadeFar', label: 'Grid extent (fade)', group: 'Environment', type: 'number', default: 7000, min: 500, max: 30000, step: 500 },
   {
-    key: 'atlas.fontSize', label: 'Font size (px)', group: 'Display',
+    key: 'atlas.fontSize', label: 'Font size (px)', group: 'Display & glyph LOD',
     type: 'number', default: 48, min: 16, max: 96, step: 1, reload: true,
   },
   {
-    key: 'atlas.size', label: 'Atlas texture (px)', group: 'Display',
+    key: 'atlas.size', label: 'Atlas texture (px)', group: 'Display & glyph LOD',
     type: 'number', default: 2048, min: 512, max: 8192, step: 512, reload: true,
   },
   // Width compression — condense glyph ink along x, in place, aligned to leading. A
@@ -202,7 +225,7 @@ export const SETTINGS = [
   // and re-anchors so its left edge stays at the cell anchor; layout advance, picking,
   // and carets are untouched. 1 = off. A feel-test knob for condensed reading.
   {
-    key: 'glyph.widthCompress', label: 'Width compress', group: 'Display',
+    key: 'glyph.widthCompress', label: 'Width compress', group: 'Display & glyph LOD',
     type: 'number', default: GLYPH_WIDTH_COMPRESS_DEFAULT, min: 0.1, max: 3, step: 0.05,
     apply: (_ctx, v) => setGlyphWidthCompress(v),
   },
@@ -216,7 +239,7 @@ export const SETTINGS = [
   // grid.layout refolds them one at a time. Presets are the same bundles the
   // grid.layout verb speaks (LAYOUT_PRESETS, the canonical core table).
   {
-    key: 'grid.defaultLayout', label: 'Default fold (new grids)', group: 'Grid',
+    key: 'grid.defaultLayout', label: 'Default fold (new grids)', group: 'Code grids',
     type: 'enum', options: Object.keys(LAYOUT_PRESETS), default: 'long-column',
     apply: (_ctx, v) => setDefaultLayout(LAYOUT_PRESETS[v]),
   },
@@ -224,22 +247,22 @@ export const SETTINGS = [
   // directly); opacity drives stacked-tile readability in a dock. apply() restyles
   // every live grid/terminal; new ones inherit via gridTheme()/terminalTheme().
   {
-    key: 'grid.backgroundColor', label: 'Code background', group: 'Theme',
+    key: 'grid.backgroundColor', label: 'Code background', group: 'Theme & appearance',
     type: 'color', default: '#1a1a2e',
     apply: (ctx, v) => themeAll(ctx, 'grid', { color: v }),
   },
   {
-    key: 'grid.backgroundOpacity', label: 'Code background opacity', group: 'Theme',
+    key: 'grid.backgroundOpacity', label: 'Code background opacity', group: 'Theme & appearance',
     type: 'number', default: 0.92, min: 0, max: 1, step: 0.01,
     apply: (ctx, v) => themeAll(ctx, 'grid', { opacity: v }),
   },
   {
-    key: 'terminal.backgroundColor', label: 'Terminal background', group: 'Theme',
+    key: 'terminal.backgroundColor', label: 'Terminal background', group: 'Theme & appearance',
     type: 'color', default: '#0a0a1e',
     apply: (ctx, v) => themeAll(ctx, 'terminal', { color: v }),
   },
   {
-    key: 'terminal.backgroundOpacity', label: 'Terminal background opacity', group: 'Theme',
+    key: 'terminal.backgroundOpacity', label: 'Terminal background opacity', group: 'Theme & appearance',
     type: 'number', default: 0.96, min: 0, max: 1, step: 0.01,
     apply: (ctx, v) => themeAll(ctx, 'terminal', { opacity: v }),
   },
@@ -247,17 +270,17 @@ export const SETTINGS = [
   // the unfocused (hollow) outline width, each pushed live to every terminal. Defaults shared with
   // the TerminalGrid constructor (TERMINAL_CURSOR_DEFAULTS) so the panel and a fresh terminal agree.
   {
-    key: 'terminal.cursorColor', label: 'Terminal cursor', group: 'Theme',
+    key: 'terminal.cursorColor', label: 'Terminal cursor', group: 'Theme & appearance',
     type: 'color', default: TERMINAL_CURSOR_DEFAULTS.color,
     apply: (ctx, v) => cursorStyleAll(ctx, { color: v }),
   },
   {
-    key: 'terminal.cursorFill', label: 'Terminal cursor fill (focused)', group: 'Theme',
+    key: 'terminal.cursorFill', label: 'Terminal cursor fill (focused)', group: 'Theme & appearance',
     type: 'number', default: TERMINAL_CURSOR_DEFAULTS.fillOpacity, min: 0, max: 1, step: 0.01,
     apply: (ctx, v) => cursorStyleAll(ctx, { fillOpacity: v }),
   },
   {
-    key: 'terminal.cursorOutline', label: 'Terminal cursor outline (px)', group: 'Theme',
+    key: 'terminal.cursorOutline', label: 'Terminal cursor outline (px)', group: 'Theme & appearance',
     type: 'number', default: TERMINAL_CURSOR_DEFAULTS.borderWidth, min: 0.5, max: 6, step: 0.1,
     apply: (ctx, v) => cursorStyleAll(ctx, { borderWidth: v }),
   },
@@ -266,64 +289,64 @@ export const SETTINGS = [
   // never drift. apply() restyles every live panel + sets the default new panels are born with; the
   // overlay reads the same values via interactionTheme().
   {
-    key: 'appearance.focusColor', label: 'Focus', group: 'Appearance',
+    key: 'appearance.focusColor', label: 'Focus', group: 'Theme & appearance',
     type: 'color', default: '#6ee7a0', apply: (ctx) => applyStateColors(ctx),
   },
   {
-    key: 'appearance.hoverColor', label: 'Hover', group: 'Appearance',
+    key: 'appearance.hoverColor', label: 'Hover', group: 'Theme & appearance',
     type: 'color', default: '#9fd2ff', apply: (ctx) => applyStateColors(ctx),
   },
   {
-    key: 'appearance.inputColor', label: 'Edit / input', group: 'Appearance',
+    key: 'appearance.inputColor', label: 'Edit / input', group: 'Theme & appearance',
     type: 'color', default: '#f0b45a', apply: (ctx) => applyStateColors(ctx),
   },
   {
-    key: 'appearance.captureColor', label: 'Capture (locked)', group: 'Appearance',
+    key: 'appearance.captureColor', label: 'Capture (locked)', group: 'Theme & appearance',
     type: 'color', default: '#ff7a18', apply: (ctx) => applyStateColors(ctx),
   },
   // Dock — the camera-locked tile bar (CameraDock). Every knob here was a baked
   // constant; setParam re-packs the live dock and the value persists client-side.
   // maxColumns + the dome arc/rise only bite in the RADIAL layout; fillFrac only in
   // LINEAR. Layout itself stays the `dock.layout` verb + session state, not a setting.
-  { key: 'dock.distance', label: 'Distance', group: 'Dock', type: 'number', default: 10, min: 5, max: 120, step: 1, apply: dockParam('distance') },
-  { key: 'dock.boxFrac', label: 'Tile size', group: 'Dock', type: 'number', default: 0.1, min: 0.05, max: 0.5, step: 0.01, apply: dockParam('boxFrac') },
-  { key: 'dock.boxAspect', label: 'Tile aspect (w:h)', group: 'Dock', type: 'number', default: 1.15, min: 0.5, max: 3, step: 0.05, apply: dockParam('boxAspect') },
-  { key: 'dock.gapFrac', label: 'Tile gap', group: 'Dock', type: 'number', default: 0.4, min: 0, max: 1.5, step: 0.05, apply: dockParam('gapFrac') },
-  { key: 'dock.maxColumns', label: 'Max tiles/row (0=auto)', group: 'Dock', type: 'number', default: 0, min: 0, max: 24, step: 1, apply: dockParam('maxColumns') },
-  { key: 'dock.maxArcDeg', label: 'Dome arc span°', group: 'Dock', type: 'number', default: 80, min: 30, max: 180, step: 5, apply: dockParam('maxArcDeg') },
-  { key: 'dock.maxRiseDeg', label: 'Dome height span°', group: 'Dock', type: 'number', default: 80, min: 20, max: 110, step: 5, apply: dockParam('maxRiseDeg') },
-  { key: 'dock.bottomFrac', label: 'Bar depth', group: 'Dock', type: 'number', default: 0.86, min: 0, max: 1, step: 0.02, apply: dockParam('bottomFrac') },
-  { key: 'dock.fillFrac', label: 'Bar fill (linear)', group: 'Dock', type: 'number', default: 0.9, min: 0.5, max: 1, step: 0.02, apply: dockParam('fillFrac') },
-  { key: 'dock.animDur', label: 'Animation (s)', group: 'Dock', type: 'number', default: 0.167, min: 0, max: 0.6, step: 0.01, apply: dockParam('animDur') },
+  { key: 'dock.distance', label: 'Distance', group: 'Dock & frame', type: 'number', default: 10, min: 5, max: 120, step: 1, apply: dockParam('distance') },
+  { key: 'dock.boxFrac', label: 'Tile size', group: 'Dock & frame', type: 'number', default: 0.1, min: 0.05, max: 0.5, step: 0.01, apply: dockParam('boxFrac') },
+  { key: 'dock.boxAspect', label: 'Tile aspect (w:h)', group: 'Dock & frame', type: 'number', default: 1.15, min: 0.5, max: 3, step: 0.05, apply: dockParam('boxAspect') },
+  { key: 'dock.gapFrac', label: 'Tile gap', group: 'Dock & frame', type: 'number', default: 0.4, min: 0, max: 1.5, step: 0.05, apply: dockParam('gapFrac') },
+  { key: 'dock.maxColumns', label: 'Max tiles/row (0=auto)', group: 'Dock & frame', type: 'number', default: 0, min: 0, max: 24, step: 1, apply: dockParam('maxColumns') },
+  { key: 'dock.maxArcDeg', label: 'Dome arc span°', group: 'Dock & frame', type: 'number', default: 80, min: 30, max: 180, step: 5, apply: dockParam('maxArcDeg') },
+  { key: 'dock.maxRiseDeg', label: 'Dome height span°', group: 'Dock & frame', type: 'number', default: 80, min: 20, max: 110, step: 5, apply: dockParam('maxRiseDeg') },
+  { key: 'dock.bottomFrac', label: 'Bar depth', group: 'Dock & frame', type: 'number', default: 0.86, min: 0, max: 1, step: 0.02, apply: dockParam('bottomFrac') },
+  { key: 'dock.fillFrac', label: 'Bar fill (linear)', group: 'Dock & frame', type: 'number', default: 0.9, min: 0.5, max: 1, step: 0.02, apply: dockParam('fillFrac') },
+  { key: 'dock.animDur', label: 'Animation (s)', group: 'Dock & frame', type: 'number', default: 0.167, min: 0, max: 0.6, step: 0.01, apply: dockParam('animDur') },
   // The slot placeholder — a framed window's held-open bar slot breathes an outline in the
   // window's identity hue (the hue itself is auto-generated, not a setting). 0 opacity hides it.
-  { key: 'dock.ghostOpacity', label: 'Ghost opacity', group: 'Dock', type: 'number', default: 0.55, min: 0, max: 1, step: 0.05, apply: dockParam('ghostOpacity') },
-  { key: 'dock.ghostPulseHz', label: 'Ghost breathe (Hz)', group: 'Dock', type: 'number', default: 0.5, min: 0, max: 4, step: 0.1, apply: dockParam('ghostPulseHz') },
+  { key: 'dock.ghostOpacity', label: 'Ghost opacity', group: 'Dock & frame', type: 'number', default: 0.55, min: 0, max: 1, step: 0.05, apply: dockParam('ghostOpacity') },
+  { key: 'dock.ghostPulseHz', label: 'Ghost breathe (Hz)', group: 'Dock & frame', type: 'number', default: 0.5, min: 0, max: 4, step: 0.1, apply: dockParam('ghostPulseHz') },
   // The tile nameplate — an identity-hued Label3D parked past the tile's content edge, answering
   // "which tiny tile is which" by name. Sized in CELL ROWS of the tile's own text (the window's
   // chrome buttons are 1.5), so it scales with the content, not the slot box. labelFormat 'off'
   // hides nameplates outright; 'dims' shows only cols×rows (grids without dimensions fall back
   // to the name). Opacity/format push to every live plate; a format change rebakes them.
-  { key: 'dock.labelLines', label: 'Label size (cell rows)', group: 'Dock', type: 'number', default: 3, min: 1, max: 8, step: 0.5, apply: dockParam('labelLines') },
-  { key: 'dock.labelGap', label: 'Label gap (plate heights)', group: 'Dock', type: 'number', default: 0.3, min: 0, max: 2, step: 0.05, apply: dockParam('labelGap') },
-  { key: 'dock.labelOpacity', label: 'Label opacity', group: 'Dock', type: 'number', default: 0.85, min: 0, max: 1, step: 0.05, apply: dockParam('labelOpacity') },
-  { key: 'dock.labelPosition', label: 'Label position', group: 'Dock', type: 'enum', options: ['below', 'above'], default: 'below', apply: dockParam('labelPosition') },
-  { key: 'dock.labelFormat', label: 'Label text', group: 'Dock', type: 'enum', options: ['name+dims', 'name', 'dims', 'off'], default: 'name+dims', apply: dockParam('labelFormat') },
+  { key: 'dock.labelLines', label: 'Label size (cell rows)', group: 'Dock & frame', type: 'number', default: 3, min: 1, max: 8, step: 0.5, apply: dockParam('labelLines') },
+  { key: 'dock.labelGap', label: 'Label gap (plate heights)', group: 'Dock & frame', type: 'number', default: 0.3, min: 0, max: 2, step: 0.05, apply: dockParam('labelGap') },
+  { key: 'dock.labelOpacity', label: 'Label opacity', group: 'Dock & frame', type: 'number', default: 0.85, min: 0, max: 1, step: 0.05, apply: dockParam('labelOpacity') },
+  { key: 'dock.labelPosition', label: 'Label position', group: 'Dock & frame', type: 'enum', options: ['below', 'above'], default: 'below', apply: dockParam('labelPosition') },
+  { key: 'dock.labelFormat', label: 'Label text', group: 'Dock & frame', type: 'enum', options: ['name+dims', 'name', 'dims', 'off'], default: 'name+dims', apply: dockParam('labelFormat') },
   // Frame — the root VIEW-FRAME a pinned/spotlit window contain-fits into (camera-front, the
   // "window-pane" the canvas frames). All frustum-normalized, so the pinned window tracks the
   // drawing-frame size live. Width/height size the pane (1 = full canvas); X/Y offset it
   // (left/right/2-3 panes); the four per-side margins inset it — asymmetric margins shrink AND
   // re-center the pane (hand-placement); pull-in draws it toward the eye so it renders over the
   // bar. (Subframes will partition this same rect later.)
-  { key: 'frame.width', label: 'Frame width', group: 'Frame', type: 'number', default: 1, min: 0.2, max: 1, step: 0.02, apply: dockParam('frameW') },
-  { key: 'frame.height', label: 'Frame height', group: 'Frame', type: 'number', default: 1, min: 0.2, max: 1, step: 0.02, apply: dockParam('frameH') },
-  { key: 'frame.x', label: 'Frame X offset', group: 'Frame', type: 'number', default: 0, min: -1, max: 1, step: 0.02, apply: dockParam('frameX') },
-  { key: 'frame.y', label: 'Frame Y offset', group: 'Frame', type: 'number', default: 0, min: -1, max: 1, step: 0.02, apply: dockParam('frameY') },
-  { key: 'frame.marginLeft', label: 'Margin left', group: 'Frame', type: 'number', default: 0.06, min: 0, max: 0.49, step: 0.01, apply: dockParam('frameMarginLeft') },
-  { key: 'frame.marginRight', label: 'Margin right', group: 'Frame', type: 'number', default: 0.06, min: 0, max: 0.49, step: 0.01, apply: dockParam('frameMarginRight') },
-  { key: 'frame.marginTop', label: 'Margin top', group: 'Frame', type: 'number', default: 0.06, min: 0, max: 0.49, step: 0.01, apply: dockParam('frameMarginTop') },
-  { key: 'frame.marginBottom', label: 'Margin bottom', group: 'Frame', type: 'number', default: 0.06, min: 0, max: 0.49, step: 0.01, apply: dockParam('frameMarginBottom') },
-  { key: 'frame.depth', label: 'Frame pull-in', group: 'Frame', type: 'number', default: 0.7, min: 0.3, max: 1, step: 0.02, apply: dockParam('frameDistFrac') },
+  { key: 'frame.width', label: 'Frame width', group: 'Dock & frame', type: 'number', default: 1, min: 0.2, max: 1, step: 0.02, apply: dockParam('frameW') },
+  { key: 'frame.height', label: 'Frame height', group: 'Dock & frame', type: 'number', default: 1, min: 0.2, max: 1, step: 0.02, apply: dockParam('frameH') },
+  { key: 'frame.x', label: 'Frame X offset', group: 'Dock & frame', type: 'number', default: 0, min: -1, max: 1, step: 0.02, apply: dockParam('frameX') },
+  { key: 'frame.y', label: 'Frame Y offset', group: 'Dock & frame', type: 'number', default: 0, min: -1, max: 1, step: 0.02, apply: dockParam('frameY') },
+  { key: 'frame.marginLeft', label: 'Margin left', group: 'Dock & frame', type: 'number', default: 0.06, min: 0, max: 0.49, step: 0.01, apply: dockParam('frameMarginLeft') },
+  { key: 'frame.marginRight', label: 'Margin right', group: 'Dock & frame', type: 'number', default: 0.06, min: 0, max: 0.49, step: 0.01, apply: dockParam('frameMarginRight') },
+  { key: 'frame.marginTop', label: 'Margin top', group: 'Dock & frame', type: 'number', default: 0.06, min: 0, max: 0.49, step: 0.01, apply: dockParam('frameMarginTop') },
+  { key: 'frame.marginBottom', label: 'Margin bottom', group: 'Dock & frame', type: 'number', default: 0.06, min: 0, max: 0.49, step: 0.01, apply: dockParam('frameMarginBottom') },
+  { key: 'frame.depth', label: 'Frame pull-in', group: 'Dock & frame', type: 'number', default: 0.7, min: 0.3, max: 1, step: 0.02, apply: dockParam('frameDistFrac') },
   // Carrel — the world-anchored reading desks. Applied to every live desk AND picked up
   // as the defaults for new ones (carrel.create); carrel.set <name> tunes one desk.
   { key: 'carrel.radius', label: 'Ring radius', group: 'Carrel', type: 'number', default: 240, min: 20, max: 2000, step: 10, apply: carrelParam('radius') },
@@ -339,12 +362,12 @@ export const SETTINGS = [
   // fully behind the OPAQUE occluder set (1.0 page faces, panels) stops drawing after
   // `hold` consecutive occluded frames; the first visible sample brings it back at once.
   // Experimental — off by default while the win is being measured (cull.stats).
-  { key: 'cull.enabled', label: 'Occlusion culling', group: 'Culling', type: 'bool', default: false, apply: (ctx, v) => ctx.occlusionCuller?.setEnabled?.(v) },
-  { key: 'cull.holdFrames', label: 'Cull after (frames dark)', group: 'Culling', type: 'number', default: 8, min: 1, max: 120, step: 1, apply: (ctx, v) => { if (ctx.occlusionCuller) ctx.occlusionCuller.holdFrames = v; } },
+  { key: 'cull.enabled', label: 'Occlusion culling', group: 'Culling & loading', type: 'bool', default: false, apply: (ctx, v) => ctx.occlusionCuller?.setEnabled?.(v) },
+  { key: 'cull.holdFrames', label: 'Cull after (frames dark)', group: 'Culling & loading', type: 'number', default: 8, min: 1, max: 120, step: 1, apply: (ctx, v) => { if (ctx.occlusionCuller) ctx.occlusionCuller.holdFrames = v; } },
   // Live readout (type 'info' — not a knob): who is dark right now. The pulse that
   // keeps the feature from being forgotten; cull.stats is the verb-side twin.
   {
-    key: 'cull.dark', label: 'Dark right now', group: 'Culling', type: 'info',
+    key: 'cull.dark', label: 'Dark right now', group: 'Culling & loading', type: 'info',
     read: (ctx) => {
       const s = ctx?.occlusionCuller?.stats?.();
       return s ? `${s.culled.length} / ${s.tracked}${s.enabled ? '' : '  (off)'}` : '—';
@@ -354,7 +377,7 @@ export const SETTINGS = [
   // if it drops hard and the framerate doesn't, the frame is fragment-bound (translucent
   // chrome / visible glyph shading), not submission-bound, and the next lever is overdraw.
   {
-    key: 'cull.calls', label: 'Draw calls / frame', group: 'Culling', type: 'info',
+    key: 'cull.calls', label: 'Draw calls / frame', group: 'Culling & loading', type: 'info',
     read: (ctx) => {
       const r = ctx?.renderer?.info?.render;
       const n = r ? (r.drawCalls ?? r.calls) : null;
@@ -364,51 +387,51 @@ export const SETTINGS = [
   // Tree — the ContentTree ownership-line overlay (hub → what it contains). File lines
   // and directory lines toggle independently; layout.arrows is the master on/off verb.
   {
-    key: 'tree.fileLines', label: 'File ownership lines', group: 'Tree', type: 'bool', default: true,
+    key: 'tree.fileLines', label: 'File ownership lines', group: 'Tree & labels', type: 'bool', default: true,
     apply: (ctx, v) => ctx.contentTreeArrows?.setShowFiles?.(v),
   },
   {
-    key: 'tree.dirLines', label: 'Directory ownership lines', group: 'Tree', type: 'bool', default: true,
+    key: 'tree.dirLines', label: 'Directory ownership lines', group: 'Tree & labels', type: 'bool', default: true,
     apply: (ctx, v) => ctx.contentTreeArrows?.setShowDirs?.(v),
   },
   // Wire stroke: world-unit thickness at the shallowest level, decaying per visible
   // depth (shallow trunks heavy, deep leaves fine). 0 = the 1px hairline form.
   {
-    key: 'tree.wireWeight', label: 'Wire stroke (world units, 0=hairline)', group: 'Tree',
+    key: 'tree.wireWeight', label: 'Wire stroke (world units, 0=hairline)', group: 'Tree & labels',
     type: 'number', default: ARROW_DEFAULTS.weight, min: 0, max: 200, step: 0.1,
     apply: (ctx, v) => ctx.contentTreeArrows?.configure({ weight: v }),
   },
   {
-    key: 'tree.wireWeightDecay', label: 'Wire stroke decay (× per depth)', group: 'Tree',
+    key: 'tree.wireWeightDecay', label: 'Wire stroke decay (× per depth)', group: 'Tree & labels',
     type: 'number', default: ARROW_DEFAULTS.weightDecay, min: 0.1, max: 2, step: 0.05,
     apply: (ctx, v) => ctx.contentTreeArrows?.configure({ weightDecay: v }),
   },
   {
-    key: 'tree.wireOpacity', label: 'Wire opacity', group: 'Tree',
+    key: 'tree.wireOpacity', label: 'Wire opacity', group: 'Tree & labels',
     type: 'number', default: ARROW_DEFAULTS.opacity, min: 0, max: 1, step: 0.02,
     apply: (ctx, v) => ctx.contentTreeArrows?.configure({ opacity: v }),
   },
   {
-    key: 'tree.wireBusMargin', label: 'Trace bus margin (outside the frame)', group: 'Tree',
+    key: 'tree.wireBusMargin', label: 'Trace bus margin (outside the frame)', group: 'Tree & labels',
     type: 'number', default: ARROW_DEFAULTS.busMargin, min: 0, max: 1000, step: 1,
     apply: (ctx, v) => ctx.contentTreeArrows?.configure({ busMargin: v }),
   },
   {
-    key: 'tree.wireRailGap', label: 'Trace rail gap (above each pin)', group: 'Tree',
+    key: 'tree.wireRailGap', label: 'Trace rail gap (above each pin)', group: 'Tree & labels',
     type: 'number', default: ARROW_DEFAULTS.railGap, min: 0, max: 1000, step: 0.5,
     apply: (ctx, v) => ctx.contentTreeArrows?.configure({ railGap: v }),
   },
   {
-    key: 'tree.wireChamfer', label: 'Trace corner chamfer (45°, 0=sharp)', group: 'Tree',
+    key: 'tree.wireChamfer', label: 'Trace corner chamfer (45°, 0=sharp)', group: 'Tree & labels',
     type: 'number', default: ARROW_DEFAULTS.chamfer, min: 0, max: 500, step: 0.5,
     apply: (ctx, v) => ctx.contentTreeArrows?.configure({ chamfer: v }),
   },
   {
-    key: 'tree.wirePads', label: 'Pin pads', group: 'Tree', type: 'bool', default: !!ARROW_DEFAULTS.pads,
+    key: 'tree.wirePads', label: 'Pin pads', group: 'Tree & labels', type: 'bool', default: !!ARROW_DEFAULTS.pads,
     apply: (ctx, v) => ctx.contentTreeArrows?.configure({ pads: v ? 1 : 0 }),
   },
   {
-    key: 'tree.wirePadScale', label: 'Pad size (× stroke)', group: 'Tree',
+    key: 'tree.wirePadScale', label: 'Pad size (× stroke)', group: 'Tree & labels',
     type: 'number', default: ARROW_DEFAULTS.padScale, min: 0.2, max: 20, step: 0.1,
     apply: (ctx, v) => ctx.contentTreeArrows?.configure({ padScale: v }),
   },
@@ -421,47 +444,47 @@ export const SETTINGS = [
   // the ancestor-chain grow. Ranges are deliberately wide — the operator decides what's
   // "too big". Defaults mirror LABEL_DEFAULTS.
   {
-    key: 'labels.enabled', label: 'Container labels', group: 'Labels', type: 'bool', default: true,
+    key: 'labels.enabled', label: 'Container labels', group: 'Tree & labels', type: 'bool', default: true,
     apply: (ctx, v) => ctx.contentTreeLabels?.setEnabled?.(v),
   },
-  { key: 'labels.fit', label: 'Name fit (× container width)', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.fit, min: 0.05, max: 2, step: 0.05, apply: labelParam('fit') },
-  { key: 'labels.scaleMin', label: 'Glyph scale floor', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.scaleMin, min: 0.05, max: 100, step: 0.05, apply: labelParam('scaleMin') },
-  { key: 'labels.scaleMax', label: 'Glyph scale cap', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.scaleMax, min: 0.5, max: 500, step: 0.5, apply: labelParam('scaleMax') },
+  { key: 'labels.fit', label: 'Name fit (× container width)', group: 'Tree & labels', type: 'number', default: LABEL_DEFAULTS.fit, min: 0.05, max: 2, step: 0.05, apply: labelParam('fit') },
+  { key: 'labels.scaleMin', label: 'Glyph scale floor', group: 'Tree & labels', type: 'number', default: LABEL_DEFAULTS.scaleMin, min: 0.05, max: 100, step: 0.05, apply: labelParam('scaleMin') },
+  { key: 'labels.scaleMax', label: 'Glyph scale cap', group: 'Tree & labels', type: 'number', default: LABEL_DEFAULTS.scaleMax, min: 0.5, max: 500, step: 0.5, apply: labelParam('scaleMax') },
   {
-    key: 'labels.showCount', label: 'Stat line (N files)', group: 'Labels', type: 'bool', default: !!LABEL_DEFAULTS.showCount,
+    key: 'labels.showCount', label: 'Stat line (N files)', group: 'Tree & labels', type: 'bool', default: !!LABEL_DEFAULTS.showCount,
     apply: (ctx, v) => ctx.contentTreeLabels?.configure({ showCount: v ? 1 : 0 }),
   },
-  { key: 'labels.countScale', label: 'Stat line size (× name)', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.countScale, min: 0.05, max: 2, step: 0.05, apply: labelParam('countScale') },
+  { key: 'labels.countScale', label: 'Stat line size (× name)', group: 'Tree & labels', type: 'number', default: LABEL_DEFAULTS.countScale, min: 0.05, max: 2, step: 0.05, apply: labelParam('countScale') },
   {
-    key: 'labels.showFiles', label: 'Book labels (file names)', group: 'Labels', type: 'bool', default: !!LABEL_DEFAULTS.showFiles,
+    key: 'labels.showFiles', label: 'Book labels (file names)', group: 'Tree & labels', type: 'bool', default: !!LABEL_DEFAULTS.showFiles,
     apply: (ctx, v) => ctx.contentTreeLabels?.configure({ showFiles: v ? 1 : 0 }),
   },
   {
-    key: 'labels.plate', label: 'Backplate', group: 'Labels', type: 'bool', default: !!LABEL_DEFAULTS.plate,
+    key: 'labels.plate', label: 'Backplate', group: 'Tree & labels', type: 'bool', default: !!LABEL_DEFAULTS.plate,
     apply: (ctx, v) => ctx.contentTreeLabels?.configure({ plate: v ? 1 : 0 }),
   },
-  { key: 'labels.plateColor', label: 'Backplate color', group: 'Labels', type: 'color', default: '#' + LABEL_DEFAULTS.plateColor.toString(16).padStart(6, '0'), apply: labelParam('plateColor', true) },
-  { key: 'labels.plateOpacity', label: 'Backplate opacity', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.plateOpacity, min: 0, max: 1, step: 0.02, apply: labelParam('plateOpacity') },
-  { key: 'labels.platePad', label: 'Backplate margin (× row)', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.platePad, min: 0, max: 3, step: 0.05, apply: labelParam('platePad') },
-  { key: 'labels.turnEase', label: 'Turn settle rate (1/s)', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.turnEase, min: 0.5, max: 60, step: 0.5, apply: labelParam('turnEase') },
-  { key: 'labels.turnDip', label: 'Turn dip (× alpha, 1=off)', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.turnDip, min: 0, max: 1, step: 0.05, apply: labelParam('turnDip') },
-  { key: 'labels.turnPop', label: 'Turn pop (× scale, 1=off)', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.turnPop, min: 0.2, max: 1, step: 0.02, apply: labelParam('turnPop') },
-  { key: 'labels.hoverBoost', label: 'Hover grow (×)', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.hoverBoost, min: 0.1, max: 10, step: 0.1, apply: labelParam('hoverBoost') },
-  { key: 'labels.hoverEase', label: 'Hover grow rate (1/s)', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.hoverEase, min: 0.5, max: 60, step: 0.5, apply: labelParam('hoverEase') },
-  { key: 'labels.opacity', label: 'Opacity (resting)', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.opacity, min: 0, max: 1, step: 0.02, apply: labelParam('opacity') },
-  { key: 'labels.minAlpha', label: 'Opacity (arrived)', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.minAlpha, min: 0, max: 1, step: 0.02, apply: labelParam('minAlpha') },
-  { key: 'labels.nearScale', label: 'Text size (arrived)', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.nearScale, min: 0, max: 48, step: 0.1, apply: labelParam('nearScale') },
-  { key: 'labels.fadeStart', label: 'Approach fade starts (dist)', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.fadeStart, min: 0, max: 4000, step: 10, apply: labelParam('fadeStart') },
-  { key: 'labels.fadeEnd', label: 'Approach fade full (dist)', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.fadeEnd, min: 0, max: 2000, step: 10, apply: labelParam('fadeEnd') },
-  { key: 'labels.gapY', label: 'Lift above container (× row)', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.gapY, min: 0, max: 10, step: 0.05, apply: labelParam('gapY') },
-  { key: 'labels.zLift', label: 'Lift toward viewer (z)', group: 'Labels', type: 'number', default: LABEL_DEFAULTS.zLift, min: 0, max: 500, step: 1, apply: labelParam('zLift') },
-  { key: 'labels.colorA', label: 'Name color (shallow)', group: 'Labels', type: 'color', default: '#' + LABEL_DEFAULTS.colorA.toString(16).padStart(6, '0'), apply: labelParam('colorA', true) },
-  { key: 'labels.colorB', label: 'Name color (deep)', group: 'Labels', type: 'color', default: '#' + LABEL_DEFAULTS.colorB.toString(16).padStart(6, '0'), apply: labelParam('colorB', true) },
+  { key: 'labels.plateColor', label: 'Backplate color', group: 'Tree & labels', type: 'color', default: '#' + LABEL_DEFAULTS.plateColor.toString(16).padStart(6, '0'), apply: labelParam('plateColor', true) },
+  { key: 'labels.plateOpacity', label: 'Backplate opacity', group: 'Tree & labels', type: 'number', default: LABEL_DEFAULTS.plateOpacity, min: 0, max: 1, step: 0.02, apply: labelParam('plateOpacity') },
+  { key: 'labels.platePad', label: 'Backplate margin (× row)', group: 'Tree & labels', type: 'number', default: LABEL_DEFAULTS.platePad, min: 0, max: 3, step: 0.05, apply: labelParam('platePad') },
+  { key: 'labels.turnEase', label: 'Turn settle rate (1/s)', group: 'Tree & labels', type: 'number', default: LABEL_DEFAULTS.turnEase, min: 0.5, max: 60, step: 0.5, apply: labelParam('turnEase') },
+  { key: 'labels.turnDip', label: 'Turn dip (× alpha, 1=off)', group: 'Tree & labels', type: 'number', default: LABEL_DEFAULTS.turnDip, min: 0, max: 1, step: 0.05, apply: labelParam('turnDip') },
+  { key: 'labels.turnPop', label: 'Turn pop (× scale, 1=off)', group: 'Tree & labels', type: 'number', default: LABEL_DEFAULTS.turnPop, min: 0.2, max: 1, step: 0.02, apply: labelParam('turnPop') },
+  { key: 'labels.hoverBoost', label: 'Hover grow (×)', group: 'Tree & labels', type: 'number', default: LABEL_DEFAULTS.hoverBoost, min: 0.1, max: 10, step: 0.1, apply: labelParam('hoverBoost') },
+  { key: 'labels.hoverEase', label: 'Hover grow rate (1/s)', group: 'Tree & labels', type: 'number', default: LABEL_DEFAULTS.hoverEase, min: 0.5, max: 60, step: 0.5, apply: labelParam('hoverEase') },
+  { key: 'labels.opacity', label: 'Opacity (resting)', group: 'Tree & labels', type: 'number', default: LABEL_DEFAULTS.opacity, min: 0, max: 1, step: 0.02, apply: labelParam('opacity') },
+  { key: 'labels.minAlpha', label: 'Opacity (arrived)', group: 'Tree & labels', type: 'number', default: LABEL_DEFAULTS.minAlpha, min: 0, max: 1, step: 0.02, apply: labelParam('minAlpha') },
+  { key: 'labels.nearScale', label: 'Text size (arrived)', group: 'Tree & labels', type: 'number', default: LABEL_DEFAULTS.nearScale, min: 0, max: 48, step: 0.1, apply: labelParam('nearScale') },
+  { key: 'labels.fadeStart', label: 'Approach fade starts (dist)', group: 'Tree & labels', type: 'number', default: LABEL_DEFAULTS.fadeStart, min: 0, max: 4000, step: 10, apply: labelParam('fadeStart') },
+  { key: 'labels.fadeEnd', label: 'Approach fade full (dist)', group: 'Tree & labels', type: 'number', default: LABEL_DEFAULTS.fadeEnd, min: 0, max: 2000, step: 10, apply: labelParam('fadeEnd') },
+  { key: 'labels.gapY', label: 'Lift above container (× row)', group: 'Tree & labels', type: 'number', default: LABEL_DEFAULTS.gapY, min: 0, max: 10, step: 0.05, apply: labelParam('gapY') },
+  { key: 'labels.zLift', label: 'Lift toward viewer (z)', group: 'Tree & labels', type: 'number', default: LABEL_DEFAULTS.zLift, min: 0, max: 500, step: 1, apply: labelParam('zLift') },
+  { key: 'labels.colorA', label: 'Name color (shallow)', group: 'Tree & labels', type: 'color', default: '#' + LABEL_DEFAULTS.colorA.toString(16).padStart(6, '0'), apply: labelParam('colorA', true) },
+  { key: 'labels.colorB', label: 'Name color (deep)', group: 'Tree & labels', type: 'color', default: '#' + LABEL_DEFAULTS.colorB.toString(16).padStart(6, '0'), apply: labelParam('colorB', true) },
   // Loading — the streamed bulk build: a directory pop builds its grids in slices
   // under this per-frame budget (the camera stays live, the field arrives instead
   // of freezing); 0 = build everything in one tick (the old lockup, if you want it).
   {
-    key: 'load.buildBudget', label: 'Load build budget (ms/frame, 0=one tick)', group: 'Loading',
+    key: 'load.buildBudget', label: 'Load build budget (ms/frame, 0=one tick)', group: 'Culling & loading',
     type: 'number', default: 12, min: 0, max: 200, step: 1,
     apply: (ctx, v) => { ctx.loadBuildBudget = v; },
   },
@@ -525,15 +548,15 @@ export const SETTINGS = [
   // sub-pixel strokes). Footprints are fwidth(glyphUV): bigger = smaller on screen. Pull the lod*
   // band DOWN to hand off to the flicker-free block sooner (trades mid-distance crispness for
   // stability); raise it to keep exact curves longer. Tune live in motion; defaults mirror the shader.
-  { key: 'glyph.dilatePx', label: 'Minify dilate (px)', group: 'Glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.dilatePx, min: 0, max: 3, step: 0.05, apply: lodParam('dilatePx') },
-  { key: 'glyph.soften', label: 'Minify soften', group: 'Glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.soften, min: 0, max: 1, step: 0.05, apply: lodParam('soften') },
-  { key: 'glyph.minLo', label: 'Fuzz onset (footprint)', group: 'Glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.minLo, min: 0.01, max: 0.5, step: 0.01, apply: lodParam('minLo') },
-  { key: 'glyph.minHi', label: 'Fuzz full (footprint)', group: 'Glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.minHi, min: 0.02, max: 0.6, step: 0.01, apply: lodParam('minHi') },
-  { key: 'glyph.lodLo', label: 'Block fade-in (footprint)', group: 'Glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.lodLo, min: 0.05, max: 0.9, step: 0.01, apply: lodParam('lodLo') },
-  { key: 'glyph.lodHi', label: 'Block full (footprint)', group: 'Glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.lodHi, min: 0.1, max: 1.2, step: 0.01, apply: lodParam('lodHi') },
-  { key: 'glyph.density', label: 'Block ink density', group: 'Glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.density, min: 0.005, max: 0.15, step: 0.005, apply: lodParam('density') },
-  { key: 'glyph.maxCov', label: 'Block max coverage', group: 'Glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.maxCov, min: 0.1, max: 1, step: 0.02, apply: lodParam('maxCov') },
-  { key: 'glyph.lodAxisBias', label: 'Block axis bias (0 best→1 worst)', group: 'Glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.lodAxisBias, min: 0, max: 1, step: 0.05, apply: lodParam('lodAxisBias') },
+  { key: 'glyph.dilatePx', label: 'Minify dilate (px)', group: 'Display & glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.dilatePx, min: 0, max: 3, step: 0.05, apply: lodParam('dilatePx') },
+  { key: 'glyph.soften', label: 'Minify soften', group: 'Display & glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.soften, min: 0, max: 1, step: 0.05, apply: lodParam('soften') },
+  { key: 'glyph.minLo', label: 'Fuzz onset (footprint)', group: 'Display & glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.minLo, min: 0.01, max: 0.5, step: 0.01, apply: lodParam('minLo') },
+  { key: 'glyph.minHi', label: 'Fuzz full (footprint)', group: 'Display & glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.minHi, min: 0.02, max: 0.6, step: 0.01, apply: lodParam('minHi') },
+  { key: 'glyph.lodLo', label: 'Block fade-in (footprint)', group: 'Display & glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.lodLo, min: 0.05, max: 0.9, step: 0.01, apply: lodParam('lodLo') },
+  { key: 'glyph.lodHi', label: 'Block full (footprint)', group: 'Display & glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.lodHi, min: 0.1, max: 1.2, step: 0.01, apply: lodParam('lodHi') },
+  { key: 'glyph.density', label: 'Block ink density', group: 'Display & glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.density, min: 0.005, max: 0.15, step: 0.005, apply: lodParam('density') },
+  { key: 'glyph.maxCov', label: 'Block max coverage', group: 'Display & glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.maxCov, min: 0.1, max: 1, step: 0.02, apply: lodParam('maxCov') },
+  { key: 'glyph.lodAxisBias', label: 'Block axis bias (0 best→1 worst)', group: 'Display & glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.lodAxisBias, min: 0, max: 1, step: 0.05, apply: lodParam('lodAxisBias') },
   // Agent Books — the agent shelf: page geometry, deck pitch, card scales, and retention (each
   // agent's run as a book of spreads). Every dial re-fits the live shelf via applyScales (cards
   // re-scale, sheets re-fit, over-cap sheets shed, the cluster re-flows). Ranges are deliberately
@@ -554,9 +577,9 @@ export const SETTINGS = [
   // alpha is a true occluder (the readability A/B AND the occlusion-culling occluder
   // set — large repos in library mode are where the render time lives). These fan out
   // to both shelves; the library also seeds them at activation (scheme:'library').
-  { key: 'books.surface', label: 'Page faces', group: 'Books', scheme: 'library', type: 'bool', default: true, apply: bookPageParam('face', 'surface') },
-  { key: 'books.surfaceColor', label: 'Page color', group: 'Books', scheme: 'library', type: 'color', default: '#0a0a1e', apply: bookPageParam('faceColor', 'surfaceColor') },
-  { key: 'books.surfaceOpacity', label: 'Page opacity', group: 'Books', scheme: 'library', type: 'number', default: 0.85, min: 0, max: 1, step: 0.05, apply: bookPageParam('faceOpacity', 'surfaceOpacity') },
+  { key: 'books.surface', label: 'Page faces', group: 'Agent Books', scheme: 'library', type: 'bool', default: true, apply: bookPageParam('face', 'surface') },
+  { key: 'books.surfaceColor', label: 'Page color', group: 'Agent Books', scheme: 'library', type: 'color', default: '#0a0a1e', apply: bookPageParam('faceColor', 'surfaceColor') },
+  { key: 'books.surfaceOpacity', label: 'Page opacity', group: 'Agent Books', scheme: 'library', type: 'number', default: 0.85, min: 0, max: 1, step: 0.05, apply: bookPageParam('faceOpacity', 'surfaceOpacity') },
   { key: 'book.zPitch', label: 'Sheet depth spacing (Z)', group: 'Agent Books', type: 'number', default: 90, min: 1, max: 4000, step: 5, apply: bookParam('zPitch') },
   { key: 'book.pagerLerp', label: 'Page-turn speed', group: 'Agent Books', type: 'number', default: 9, min: 0, max: 60, step: 0.5, apply: bookParam('pagerLerp') },
   { key: 'book.callScale', label: 'Headline card size', group: 'Agent Books', type: 'number', default: 3.0, min: 0.05, max: 50, step: 0.1, apply: bookParam('callScale') },
