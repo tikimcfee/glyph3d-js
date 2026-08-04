@@ -29,7 +29,7 @@ const field = { gpuLayout: true };   // engine-owned; no mesh needed — the gat
     const r3 = syncGpuLayout(field, {}, [], {});
     console.warn = origWarn;
 
-    ok(r1.dispatched === 0 && r1.bounds === null, 'flush 1: no dispatch on a dead device');
+    ok(r1.dispatched === 0 && r1.extent === null, 'flush 1: no dispatch on a dead device');
     ok(r2.dispatched === 0 && r3.dispatched === 0, 'flushes 2-3: still suspended');
     ok(warns === 1, `exactly one suspension warning across 3 flushes (got ${warns})`);
 }

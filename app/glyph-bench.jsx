@@ -119,13 +119,14 @@ function MapGrid({ text, position, textColor, onStatus, quiet }) {
       const buffers = buildBatchBuffers(items, {
         metrics, defaultColor: grid.config.textColor,
         upem: atlas._shaper.upem, layout: resolveLayoutParams(grid.config.layout), scrollOffset: 0,
-        emitPositions: true,
       });
-      const P = buffers.positions, S = buffers.sizes;
+      // The builder emits attributes + the line table; positions and the extent come from
+      // the kernel dispatch inside _commitBuiltBuffers below.
+      const S = buffers.sizes;
       log('buildBatchBuffers', {
-        count: buffers.count, posLen: P.length,
-        pos0: [P[0], P[1], P[2]], size0: [S[0], S[1]], glyph0: buffers.glyphIds?.[0],
-        anyNaN: Array.from(P.slice(0, 30)).some(Number.isNaN), bounds: buffers.bounds,
+        count: buffers.count, lines: buffers.itemMeta?.[0]?.lineSlotOffsets?.length,
+        size0: [S[0], S[1]], glyph0: buffers.glyphIds?.[0],
+        anyNaN: Array.from(S.slice(0, 30)).some(Number.isNaN),
       });
 
       const ensured = atlas._live ? atlas._live.ensureGlyphsEncoded(buffers.glyphIds) : null;

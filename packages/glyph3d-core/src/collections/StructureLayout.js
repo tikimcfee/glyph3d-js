@@ -97,8 +97,7 @@ export class StructureLayout {
         this._grid.unregisterArranger?.(this);
         // Engine mode parked the lens in the displacement table — drop it so the re-fold
         // dispatches flow (the adapter arms setDisplacements(null) at the next sync).
-        const r = this._renderer();
-        if (r) r._layoutDisplacements = null;
+        this._grid.setDisplacements?.(null);
         if (wasActive) await this._grid._relayoutInPlace?.(); // fold with config.layout → flow
         return { ok: true };
     }
@@ -153,9 +152,8 @@ export class StructureLayout {
         if (!pos || !siz) return;
         const total = this._glyphCount(r);
         const isBlock = new Uint8Array(total);
-        const D = (r._layoutDisplacements && r._layoutDisplacements.length >= total * 3)
-            ? r._layoutDisplacements
-            : (r._layoutDisplacements = new Float32Array(total * 3));
+        const prev = r._layoutDisplacements;
+        const D = (prev && prev.length >= total * 3) ? prev : new Float32Array(total * 3);
         D.fill(0);
 
         let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -194,15 +192,14 @@ export class StructureLayout {
         }
 
         r.markInstanceTransformsDirty();   // sizes upload (positions are GPU-owned)
-        grid._resyncEngineLayout?.();
-        // The packing box IS the arranged extent — exact, no walk. Parked glyphs sit at
-        // its corner by construction; z spans the blocks' own fold staircase.
-        if (minX !== Infinity) {
-            grid.setEngineBounds?.({
-                min: { x: minX, y: minY, z: minZ },
-                max: { x: maxX, y: maxY, z: maxZ },
-            });
-        }
+        // The packing box IS the arranged extent — exact, no walk. Parked glyphs sit at its
+        // corner by construction; z spans the blocks' own fold staircase. Stated with the
+        // table, in one call, because this arranger AUTHORED both.
+        if (minX === Infinity) return;
+        grid.setDisplacements(D, {
+            min: { x: minX, y: minY, z: minZ },
+            max: { x: maxX, y: maxY, z: maxZ },
+        });
     }
 
     /**

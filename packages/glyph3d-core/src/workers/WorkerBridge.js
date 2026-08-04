@@ -221,7 +221,6 @@ export class WorkerBridge {
                         upem: this._upem,
                         layout: shared.layout,  // per-grid layout params (structured-clone-safe)
                         scrollOffset: shared.scrollOffset,  // visual rows scrolled (Step 3c)
-                        emitPositions: shared.emitPositions,  // false = engine build (no position array)
                     }
                 }
             });
@@ -295,7 +294,6 @@ export class WorkerBridge {
             upem: this._upem,
             layout: shared.layout,  // per-grid layout params
             scrollOffset: shared.scrollOffset,  // visual rows scrolled (Step 3c)
-            emitPositions: shared.emitPositions,  // false = engine build (no position array)
         });
     }
 

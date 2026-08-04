@@ -1198,9 +1198,41 @@ export default class TerminalGrid extends FramedGlyphField {
             count,
         });
 
+        // State the cull box. A terminal is a uniform cell grid plus a page-quantized
+        // history deck, so its glyph extent is arithmetic on cols/rows/metrics — see
+        // _glyphExtent. Cell positions only change on resize, which re-enters here.
+        this._renderer.setLayoutExtent(this._glyphExtent());
+
         // After applyPrebuiltBuffers the geometry owns new InstancedBufferAttribute objects
         // wrapping the arrays we passed. On subsequent frames, _writeToInstanceBuffer()
         // writes into geometry.attributes.*.array in place.
+    }
+
+    /**
+     * The glyph extent in local space — closed form over cols/rows/metrics, mirroring
+     * _computePositions exactly: the live screen runs right and down from the origin, and
+     * the depth-history deck adds `pages` steps of rise (+Y) and recession (−Z) behind it.
+     * This is the CULL box (glyphs only); getLocalBounds adds the panel padding on top.
+     * @private
+     * @returns {{min:{x,y,z}, max:{x,y,z}}}
+     */
+    _glyphExtent() {
+        const m = this._metrics;
+        const strideX = m.charWidth + m.letterSpacing;
+        const strideY = m.lineSpacing;
+        const pages = this._depthMax > 0 ? Math.ceil(this._depthMax / this.rows) : 0;
+        return {
+            min: {
+                x: 0,
+                y: -(this.rows - 1) * strideY,
+                z: -pages * this._depthZStep,
+            },
+            max: {
+                x: (this.cols - 1) * strideX + m.charWidth,
+                y: pages * this._depthYStep + m.charHeight,
+                z: 0,
+            },
+        };
     }
 
     /**

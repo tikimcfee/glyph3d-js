@@ -16,7 +16,8 @@ import { getWorkerBridge } from '../workers/WorkerBridge.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import { BOUNDS_Z_PAD } from '../core/constants.js';
 import { computeCellMetrics } from '../core/cellMetrics.js';
-import { paginationGeometry, resolveLayoutParams, DEFAULT_LAYOUT } from '../workers/builders/index.js';
+import { resolveLayoutParams, DEFAULT_LAYOUT } from '../workers/builders/index.js';
+import { pageFold, lineSegments } from '../core/foldGeometry.js';
 import { syncGpuLayout, isGpuLayoutEnabled } from '../compute/GlyphLayoutCompute.js';
 import { evaluateFold } from '../core/foldEvaluate.js';
 import LayoutDescription from '../core/LayoutDescription.js';
@@ -26,7 +27,6 @@ import { createPanelMaterial } from './panelMaterial.js';
 
 // Reused for lines without wraps — most lines, in the common case.
 // Frozen so accidental mutation surfaces immediately.
-const EMPTY_WRAPS = Object.freeze([]);
 
 // The cursor `col` is a CODEPOINT index — the same model the render/slot path uses (1 emoji =
 // 1 col = 1 buffer slot). JS strings are UTF-16, so a surrogate-pair emoji (😀 = 2 code units)
@@ -139,11 +139,11 @@ class CodeGrid extends FramedGlyphField {
         // with this grid's home placement and writes the initial transform.
         this._initScale(this.config.gridScale);
 
-        // World box (getBounds) is owned by BoundedObject3D: it recomputes fresh
-        // every call (cheap 8-corner transform of the cached LOCAL content bounds by
-        // the current matrix), so there is no world-bounds cache to hold here.
-        // Bounds from the worker path (raw plain-object bounds from buffer builder)
-        this._workerBoundsCache = null;
+        // Content bounds are NOT stored: they are the fold's extent, a closed form the
+        // LayoutDescription answers in O(1) (_getContentBounds). The one exception is an
+        // arranger's displacement table, whose extent the arranger AUTHORS — see
+        // setDisplacements. World box (getBounds) is BoundedObject3D's, derived per call.
+        this._displacementExtent = null;
 
         // ── Windowing (opt-in scrollable viewport over the full source) ──────
         // Off by default → the grid renders the whole file. setWindow() switches
@@ -169,9 +169,10 @@ class CodeGrid extends FramedGlyphField {
         // ── Relayout pipeline participants ───────────────────────────────────────
         // A fold (text → buffer) is destructive: it rebuilds the instance buffer from
         // scratch, so anything derived from it must be re-established after. The pipeline
-        // runs in order: fold → ARRANGE → bounds → DECORATE. Two extension seams:
+        // runs in order: fold → ARRANGE → DECORATE. Two extension seams:
         //   • Arrangers (footprint-CHANGING) re-derive glyph positions from stable anchors
-        //     and run INSIDE the fold (before bounds), so the footprint stays honest — the
+        //     and run INSIDE the fold, stating their own extent as they go, so the footprint
+        //     stays honest — the
         //     structural sub-layout is one. They may also constrain the fold's layout
         //     (foldLayout) without mutating config.layout.
         //   • Decorations (footprint-NEUTRAL) re-project after bounds settle — the caret is
@@ -216,7 +217,6 @@ class CodeGrid extends FramedGlyphField {
                 bufferStartIndex: entry.bufferStartIndex,
                 glyphCount: entry.glyphCount,
                 lineSlotOffsets: entry.lineSlotOffsets,
-                pageContentWidth: entry.pageContentWidth || 0,
             });
             items.push({
                 position: committed?.position || { x: 0, y: 0, z: 0 },
@@ -233,11 +233,8 @@ class CodeGrid extends FramedGlyphField {
             layout: resolveLayoutParams(this._foldLayout()),
             scrollOffset: this._scrollOffset || 0,
         };
-        const res = syncGpuLayout(field, { count, sizes, itemMeta, bounds: null }, items, shared, rendererIds);
-        if (res?.bounds) {
-            this._workerBoundsCache = res.bounds;
-            field._updateGeometryBounds(res.bounds);
-        }
+        const res = syncGpuLayout(field, { count, sizes, itemMeta }, items, shared, rendererIds);
+        field.setLayoutExtent(this._getContentBounds());
         return (res?.dispatched || 0) > 0;
     }
 
@@ -268,17 +265,15 @@ class CodeGrid extends FramedGlyphField {
             for (let L = 0; L < lineTable.length; L++) lineTable[L] = entry.lineSlotOffsets[L] - base;
             const advances = new Float32Array(n);
             for (let s = 0; s < n; s++) advances[s] = sizes[(base + s) * 2];
-            const geom = entry.pageContentWidth > 0 ? paginationGeometry(
-                { charWidth: m.charWidth, letterSpacing: m.spacing || 0, lineSpacing: m.lineHeight },
-                entry.pageContentWidth, lp,
-            ) : null;
             evaluateFold({
                 slotCount: n, lineTable, advances,
                 origin: committed?.position || { x: 0, y: 0, z: 0 },
                 scrollOffset: this._scrollOffset || 0,
                 wrapWidth: lp.wrapWidth, lineSpacing: m.lineHeight,
                 zStep: m.charHeight * (lp.zWrapSpacing || 0),
-                geom,
+                page: pageFold(lp,
+                    { charWidth: m.charWidth, letterSpacing: m.spacing || 0, lineSpacing: m.lineHeight },
+                    entry.fold?.maxRowExtent || 0),
                 out: out.subarray(base * 3, (base + n) * 3),
             });
         }
@@ -306,8 +301,8 @@ class CodeGrid extends FramedGlyphField {
      * The ARRANGE stage. After the fold has dispatched + the LayoutDescription is built,
      * run each arranger (it re-derives glyph transforms from stable anchors and writes the
      * displacement table, then re-dispatches via _resyncEngineLayout). Engine grids: the
-     * arranger sets the arranged bounds itself (setEngineBounds — it KNOWS the extent,
-     * packing box / plane depth, better than any walk); there is no CPU buffer to re-walk.
+     * arranger arms its table and its extent together (setDisplacements — it KNOWS the
+     * extent, packing box / plane depth, better than any walk could recover it).
      * No-op (and zero cost) when nothing is registered.
      * @private
      */
@@ -317,20 +312,38 @@ class CodeGrid extends FramedGlyphField {
     }
 
     /**
-     * Adopt arranged bounds computed by an engine-mode arranger — the packing box, plane
-     * depths — as this grid's content + cull truth. The arranger calls this after its
-     * re-dispatch; there is no buffer to walk, and the arranger's own extent is exact.
-     * @param {{min:{x,y,z}, max:{x,y,z}}} bounds
+     * Arm an arranger's displacement table together with the extent it produces, then
+     * re-dispatch. ONE call, because the two are one fact: an arranger AUTHORS the
+     * displacements, so it already knows the packing box exactly — better than any walk
+     * over the glyphs it just placed. Making the extent a parameter rather than a separate
+     * optional call is what keeps an arranged grid's bounds from silently lagging its
+     * glyphs; there is no path that writes displacements without stating where they land.
+     *
+     * @param {?Float32Array} table - flat [dx,dy,dz] per field-global slot, or null to clear
+     * @param {?{min:{x,y,z}, max:{x,y,z}}} [extent] - the arranged extent; required with a
+     *   table, ignored when clearing (bounds revert to the fold's own extent).
      */
-    setEngineBounds(bounds) {
-        if (!bounds?.min || !bounds?.max) return;
-        this._workerBoundsCache = {
-            min: { ...bounds.min }, max: { ...bounds.max },
-            width: bounds.max.x - bounds.min.x,
-            height: bounds.max.y - bounds.min.y,
-            depth: bounds.max.z - bounds.min.z,
+    setDisplacements(table, extent = null) {
+        const field = this._renderer;
+        if (!table) {
+            this._displacementExtent = null;
+            if (field) field._layoutDisplacements = null;
+            this._resyncEngineLayout();
+            field?.setLayoutExtent(this._getContentBounds());
+            return;
+        }
+        if (!extent?.min || !extent?.max) {
+            throw new Error('CodeGrid.setDisplacements: a displacement table must state its extent — the fold extent no longer describes these glyphs');
+        }
+        this._displacementExtent = {
+            min: { ...extent.min }, max: { ...extent.max },
+            width: extent.max.x - extent.min.x,
+            height: extent.max.y - extent.min.y,
+            depth: extent.max.z - extent.min.z,
         };
-        this._renderer?._updateGeometryBounds(this._workerBoundsCache);
+        if (field) field._layoutDisplacements = table;
+        this._resyncEngineLayout();
+        field?.setLayoutExtent(this._displacementExtent);
     }
 
     /**
@@ -885,11 +898,12 @@ class CodeGrid extends FramedGlyphField {
                 if (!this.content) continue;               // nothing to lay out (loop exits unless pending)
                 this._ensureRenderer();                    // reconstruct if content was evicted
                 this._clearRenderedText();                 // drop the prior render's glyphs
-                // The staged pipeline: FOLD (+ ARRANGE, inside _layoutContent) → BOUNDS →
-                // clamp → DECORATE. Arrangers already re-derived inside the fold, so the bounds
-                // walk below sees the arranged footprint; decorations re-project on top of it.
-                await this._layoutContent();          // FOLD: re-add + re-flush + line tables + _layout (+ arrange)
-                this._updateBackground();                  // BOUNDS: re-walk the (arranged) footprint, re-fit the panel
+                // The staged pipeline: FOLD (+ ARRANGE, inside _layoutContent) → FIT →
+                // clamp → DECORATE. There is no bounds STAGE any more: the extent is a closed
+                // form the fold already determined (_getContentBounds), so the panel just reads
+                // it. Arrangers ran inside the fold, so what it reads is the arranged footprint.
+                await this._layoutContent();               // FOLD: re-add + re-flush + line tables + _layout (+ arrange)
+                this._updateBackground();                  // FIT: re-fit the panel to the settled extent
                 // Clamp the edit caret into the fresh content before the decorate stage paints it.
                 if (this._cursor) {
                     const ln = Math.max(0, Math.min(this._cursor.line, this.lines.length - 1));
@@ -955,9 +969,7 @@ class CodeGrid extends FramedGlyphField {
      * @returns {number}
      */
     getTotalVisualRows() {
-        if (!this._lineStartRow || this._lineStartRow.length === 0) return 0;
-        const last = this._lineStartRow.length - 1;
-        return this._lineStartRow[last] + 1 + (this._lineWrapCols?.[last]?.length || 0);
+        return this._totalVisualRows || 0;
     }
 
     /**
@@ -1162,7 +1174,7 @@ class CodeGrid extends FramedGlyphField {
         this._reverseIdMap.clear();
         this._committedTexts.clear();
         this._dirty = false;
-        this._workerBoundsCache  = null;
+        this._displacementExtent = null;
     }
 
     /**
@@ -1281,25 +1293,24 @@ class CodeGrid extends FramedGlyphField {
         this._renderer.setGpuLayout(true);
 
         const rendererIds = this._renderer.applyPrebuiltBuffers(buffers, items);
-        this._workerBoundsCache  = buffers.bounds;
 
         // A commit is a NEW fold — a standing displacement table was computed against
         // the OLD one (dz = plane − oldFoldZ) and would land glyphs on garbage planes
         // if dispatched now; on a slot-count change it also misaligns wholesale. Drop
-        // it: arrangers re-derive against the fresh fold immediately after the flush
-        // (_applyArrangers → arrange → _resyncEngineLayout), and until they do the
-        // grid renders honestly FLAT — never scrambled.
+        // it, and its extent with it: arrangers re-derive against the fresh fold
+        // immediately after the flush (_applyArrangers → arrange → setDisplacements),
+        // and until they do the grid renders honestly FLAT — never scrambled.
         this._renderer._layoutDisplacements = null;
+        this._displacementExtent = null;
         if (!isGpuLayoutEnabled()) {
             // Loud, not silent: no compute renderer registered (boot-order breach) means
             // the kernel can't dispatch and this grid renders unlaid at the origin.
             console.error('CodeGrid: engine commit with no compute renderer registered — grid renders unlaid (boot-order breach)');
         }
+        // The dispatch records each item's fold scalars + extent on its entry; the union
+        // it returns IS the field's cull box. Nothing measured, nothing read back.
         const res = syncGpuLayout(this._renderer, buffers, items, shared, rendererIds);
-        if (res?.bounds) {
-            this._workerBoundsCache = res.bounds;
-            this._renderer._updateGeometryBounds(res.bounds);
-        }
+        this._renderer.setLayoutExtent(res?.extent ?? null);
 
         for (let i = 0; i < items.length; i++) {
             const p          = items[i];
@@ -1477,7 +1488,7 @@ class CodeGrid extends FramedGlyphField {
         // and harvest the per-line wrap data needed for cursor positioning.
         const contentItemMeta = this._getContentItemMeta();
         this._buildLineSlotBase(contentItemMeta?.lineSlotOffsets);
-        this._buildLayoutWrapIndex(contentItemMeta?.wrapColsPerLine);
+        this._buildLineRowIndex(contentItemMeta);
         // Record the layout origin (where the worker anchored the content
         // text). Caret math derives y from origin.y - visualRow * lineSpacing.
         this._layoutOriginY = (this.config.showFilename && this.filename)
@@ -1520,14 +1531,31 @@ class CodeGrid extends FramedGlyphField {
     }
 
     /**
-     * The content bounds over all committed renderer entries, or null.
-     * Engine-owned fields have no CPU position buffer to walk — the builder/kernel extent
-     * from the last flush, or an arranger's setEngineBounds, IS the truth, and no CPU
-     * writer can move glyphs between commits, so the cache never goes stale.
+     * The content bounds in this grid's local frame — the union of every committed item's
+     * FOLD EXTENT, or the arranged extent when an arranger has displaced the glyphs.
+     *
+     * Closed form and derived on read: each entry's extent was computed at dispatch from
+     * the layout scan's three scalars (core/foldGeometry.foldExtent) and costs nothing to
+     * union. Nothing is cached because nothing needs to be — there is no walk to amortize
+     * and therefore no staleness to reason about.
      * @private
+     * @returns {{min:{x,y,z}, max:{x,y,z}, width:number, height:number, depth:number}|null}
      */
     _getContentBounds() {
-        return this._workerBoundsCache ?? null;
+        if (this._displacementExtent) return this._displacementExtent;
+        const field = this._renderer;
+        if (!field) return null;
+        let min = null, max = null;
+        for (const [, entry] of field.renderedTexts) {
+            const e = entry.extent;
+            if (!e) continue;
+            if (!min) { min = { ...e.min }; max = { ...e.max }; continue; }
+            min.x = Math.min(min.x, e.min.x); max.x = Math.max(max.x, e.max.x);
+            min.y = Math.min(min.y, e.min.y); max.y = Math.max(max.y, e.max.y);
+            min.z = Math.min(min.z, e.min.z); max.z = Math.max(max.z, e.max.z);
+        }
+        if (!min) return null;
+        return { min, max, width: max.x - min.x, height: max.y - min.y, depth: max.z - min.z };
     }
 
     // ============ Line → Buffer Slot Mapping ============
@@ -1584,86 +1612,92 @@ class CodeGrid extends FramedGlyphField {
         this._lineSlotBase = lineSlotBase;
     }
 
-    /**
-     * Build the per-line wrap index that backs cursor positioning.
-     *
-     * Stores:
-     *   _lineWrapCols    — Array<number[]>, parallel to this.lines.
-     *                      Each entry is the sorted source-col indices where
-     *                      the worker wrapped this line into a new visual
-     *                      row. Empty for lines that fit (the common case).
-     *   _lineStartRow    — Int32Array, length = this.lines.length.
-     *                      Cumulative visual-row index where each line
-     *                      starts. lineStartRow[N] = sum of (1 + wrapCols[i].length)
-     *                      for i in [0, N). O(1) lookup of "first row of line N".
-     *
-     * Together with metrics + paginate config, these give caret y/x
-     * deterministically — no slot reads, no neighbor walks.
-     *
-     * For sync paths (loadText), the worker emits one item per source line,
-     * so wrapColsPerLine is just [[]] per item — no wrap. The fallback
-     * builds an all-empty wrap table.
-     *
-     * @private
-     * @param {number[][]|undefined} wrapColsPerLine - per-line wrap col arrays from worker meta
-     */
-    _buildLayoutWrapIndex(wrapColsPerLine) {
-        const lineCount = this.lines.length;
-        const wraps = new Array(lineCount);
-        const lineStartRow = new Int32Array(lineCount);
-
-        let cumulativeRows = 0;
-        for (let i = 0; i < lineCount; i++) {
-            const w = wrapColsPerLine?.[i];
-            wraps[i] = (w && w.length > 0) ? w.slice() : EMPTY_WRAPS;
-            lineStartRow[i] = cumulativeRows;
-            cumulativeRows += 1 + (w?.length || 0);
-        }
-
-        this._lineWrapCols = wraps;
-        this._lineStartRow = lineStartRow;
+    /** The wrap width the CURRENT fold uses (arranger overrides included). @private */
+    _foldWrapWidth() {
+        return Math.max(0, Math.trunc(resolveLayoutParams(this._foldLayout()).wrapWidth || 0));
     }
 
     /**
-     * Build the queryable LayoutDescription for the current flush — the ONE source
-     * caret / highlight / selection query against (positionAt, slotForChar). positionAt
-     * is the FOLD MIRROR: it evaluates the same pure layout function the GPU kernel
-     * runs, from the line tables + real advances + pagination geometry — every input
-     * CPU-authored, so any glyph's location is answerable synchronously with no
-     * position buffer and no readback. Rebuilt every flush. @private
+     * Build _lineStartRow — line → cumulative visual row, the O(1) "first row of line N"
+     * lookup the caret reads and the fold's extent counts.
+     *
+     * A line occupies 1 + lineSegments(slots, wrapWidth) rows, closed form, because wrapWidth
+     * counts SLOTS: wrap points land on exact multiples of it. The per-line array of wrap
+     * COLUMNS this used to carry alongside was that arithmetic sequence, materialized per line
+     * per flush so positionAt could linear-search it back into the division that produced it.
+     * positionAt does the division instead (LayoutDescription.positionAt).
+     *
+     * Slot counts come from the LINE TABLE, not from re-counting codepoints in `this.lines`.
+     * The two agree — the builder emits one slot per codepoint — but the kernel's own scan
+     * reads the line table, and two derivations that agree by invariant are one invariant away
+     * from a caret that points at the wrong row. Reading the same table the GPU reads removes
+     * the question.
+     * @private
+     * @param {?{lineSlotOffsets:number[], bufferStartIndex:number, glyphCount:number}} entry
+     *   the content item's renderer entry; falls back to codepoint counts when absent
+     *   (pre-flush, or the per-line sync path).
+     */
+    _buildLineRowIndex(entry) {
+        const lineCount = this.lines.length;
+        const wrap = this._foldWrapWidth();
+        const lso = entry?.lineSlotOffsets;
+        const usable = lso && lso.length === lineCount;
+        const endSlot = usable ? entry.bufferStartIndex + entry.glyphCount : 0;
+        const lineStartRow = new Int32Array(lineCount);
+        let cumulativeRows = 0;
+        for (let i = 0; i < lineCount; i++) {
+            lineStartRow[i] = cumulativeRows;
+            const slots = usable
+                ? (i + 1 < lineCount ? lso[i + 1] : endSlot) - lso[i]
+                : this.getLineSlotCount(i);
+            cumulativeRows += 1 + lineSegments(slots, wrap);
+        }
+        this._lineStartRow = lineStartRow;
+        this._totalVisualRows = cumulativeRows;
+    }
+
+    /**
+     * Build the queryable LayoutDescription for the current flush — the ONE source the
+     * caret / highlight / selection query against (positionAt, slotForChar) AND the source
+     * of the content's own extent (extent()).
+     *
+     * positionAt is the FOLD MIRROR: it evaluates the same pure layout function the GPU
+     * kernel runs, from the line tables + real advances + the same integer-row page fold —
+     * every input CPU-authored, so any glyph's location is answerable synchronously with no
+     * position buffer and no readback. The three scalars the extent needs (totalRows,
+     * maxRowExtent, maxSegs) come off the kernel's layout scan and ride on the entry.
+     * Rebuilt every flush. @private
      */
     _buildLayoutDescription() {
         if (!this._lineSlotBase || !this._lineStartRow) { this._layout = null; return; }
         const m = this.metrics;
         const lineLengths = new Int32Array(this.lines.length);
         for (let i = 0; i < this.lines.length; i++) lineLengths[i] = this.getLineSlotCount(i);
-        // Same page geometry the builder used (pageContentWidth threaded through meta),
-        // so the analytic fallback aligns with the glyphs. CodeGrid metrics → builder
-        // metric names.
-        const contentWidth = this._getContentItemMeta()?.pageContentWidth || 0;
-        const lp = resolveLayoutParams(this._foldLayout());  // SAME normalization the builder applies — geom can't drift
-        // pageContentWidth is the builder's "pagination FIRED" witness — geom arms the
-        // mirror's page shift ONLY when the glyphs actually paginated. Content exactly one
-        // page tall has pageHeight > 0 but never fired; an armed geom would shift its
-        // boundary row a page away from the buffer (found by the fuzz, mirror-only class).
-        const geom = contentWidth > 0 ? paginationGeometry(
-            { charWidth: m.charWidth, letterSpacing: m.spacing || 0, lineSpacing: m.lineHeight },
-            contentWidth,
-            lp,
-        ) : null;
+        const lp = resolveLayoutParams(this._foldLayout());   // the SAME normalization the dispatch applies
+        const entry = this._getContentItemMeta();
+        const fold = entry?.fold || null;
+        // The page fold, from the same measured row extent the kernel wrote into its item
+        // table. No "did pagination fire" witness: pageShift's own screenRow >= rows gate
+        // is the only test, on the GPU and here alike, so content that fits a page is
+        // unpaginated by arithmetic rather than by a second opinion.
+        const builderMetrics = { charWidth: m.charWidth, letterSpacing: m.spacing || 0, lineSpacing: m.lineHeight };
         this._layout = new LayoutDescription({
             lineSlotBase: this._lineSlotBase,
             lineStartRow: this._lineStartRow,
-            lineWrapCols: this._lineWrapCols,
             lineLengths,
             sizes: this._renderer?.getInstanceSizes?.() ?? null,
-            geom,
+            wrapWidth: lp.wrapWidth,
+            page: pageFold(lp, builderMetrics, fold?.maxRowExtent || 0),
             originX: 0,
             originY: this._layoutOriginY ?? 0,
             lineSpacing: m.lineHeight,
             zStep: m.charHeight * (lp.zWrapSpacing || 0),
+            cellHeight: m.charHeight,
             advance: m.charWidth + (m.spacing || 0),
             scrollOffset: this._scrollOffset || 0,  // so the mirror matches the scrolled glyphs
+            totalRows: fold?.totalRows || 0,
+            maxRowExtent: fold?.maxRowExtent || 0,
+            maxSegs: fold?.maxSegs || 0,
             // Engine-mode arrangers write this table; the caret must ride it (an arranged
             // glyph's location = fold + displacement, both CPU-authored).
             displacements: this._renderer?._layoutDisplacements ?? null,
@@ -2128,8 +2162,8 @@ class CodeGrid extends FramedGlyphField {
      * @private
      */
     _updateBackground() {
-        // Content changed — getBounds re-derives the world box from the cached local
-        // content bounds each call, so the panel just re-fits to them.
+        // Content changed — _getContentBounds derives the extent fresh (closed form, O(1)),
+        // so the panel just re-fits to it. Nothing is cached and nothing can be stale.
         this._sizeBackgroundTo(this._getContentBounds());
     }
 

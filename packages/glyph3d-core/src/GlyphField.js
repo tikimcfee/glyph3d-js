@@ -907,7 +907,7 @@ export default class GlyphField {
         // Glyphs are placed by in-shader instance attributes (instancePosition) that three can't
         // see, so the unit-quad geometry's auto-bounds are meaningless and three would mis-cull.
         // We instead write the REAL instance extent into geometry.boundingBox/Sphere on every
-        // position change (_updateGeometryBounds), so three's built-in per-object frustum cull
+        // position change (setLayoutExtent), so three's built-in per-object frustum cull
         // works: off-screen grids skip their draw for free, every render — no virtualizer needed.
         // That extent still covers instance positions ONLY — a field whose glyphs ride group
         // offsets (GPU texture state) has a false sphere and constructs with frustumCulled: false.
@@ -1106,7 +1106,6 @@ export default class GlyphField {
         }
         attr.addUpdateRange(base * pStride, entry.glyphCount * pStride);
         attr.needsUpdate = true;
-        this._updateGeometryBounds();   // glyphs moved in place (no rebuild) — resync the cull bounds
     }
 
     /**
@@ -1436,62 +1435,6 @@ export default class GlyphField {
         };
     }
 
-    // ── Bounds query ─────────────────────────────────────────────────────────
-
-    /**
-     * Compute the axis-aligned bounding box for all glyphs belonging to a
-     * given textId. Walks instancePosition + instanceSize for the contiguous
-     * buffer range recorded in renderedTexts.
-     *
-     * Returns an empty Box3 (isEmpty() === true) when the textId is unknown,
-     * has no glyphs, or the geometry is not yet built.
-     *
-     * @param {number} textId - ID returned by render() or applyPrebuiltBuffers()
-     * @returns {THREE.Box3}
-     */
-    getTextBounds(textId) {
-        const box = new THREE.Box3();
-        const entry = this.renderedTexts.get(textId);
-        if (!entry || !entry.glyphCount || entry.bufferStartIndex === undefined) return box;
-
-        const geom  = this.instanceMesh?.geometry;
-        if (!geom) return box;
-
-        const posAttr   = geom.attributes.instancePosition;
-        const positions = posAttr?.array;
-        const pStride   = posAttr?.itemSize ?? 3;
-        const sizes     = geom.attributes.instanceSize?.array;
-        if (!positions || !sizes) return box;
-
-        const start = entry.bufferStartIndex;
-        const count = entry.glyphCount;
-
-        let minX = Infinity, minY = Infinity, minZ = Infinity;
-        let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-
-        for (let i = 0; i < count; i++) {
-            const buf = start + i;
-            const px  = positions[buf * pStride];
-            const py  = positions[buf * pStride + 1];
-            const pz  = positions[buf * pStride + 2];
-            const sw  = sizes[buf * 2];
-            const sh  = sizes[buf * 2 + 1];
-            if (px      < minX) minX = px;
-            if (py      < minY) minY = py;
-            if (pz      < minZ) minZ = pz;
-            if (px + sw > maxX) maxX = px + sw;
-            if (py + sh > maxY) maxY = py + sh;
-            if (pz      > maxZ) maxZ = pz;
-        }
-
-        if (minX === Infinity) return box; // zero-glyph entry
-        box.set(
-            new THREE.Vector3(minX, minY, minZ),
-            new THREE.Vector3(maxX, maxY, maxZ)
-        );
-        return box;
-    }
-
     /**
      * Total glyph count. O(1) — cached counter maintained by every
      * add/remove/clear/applyPrebuiltBuffers path.
@@ -1499,60 +1442,6 @@ export default class GlyphField {
      */
     getGlyphCount() {
         return this._cachedGlyphCount;
-    }
-
-    /**
-     * World-space bounds for a renderedTexts entry, read from the typed arrays.
-     * @param {Object} entry - renderedTexts value with bufferStartIndex + glyphCount
-     * @returns {{min,max,width,height,depth}|null}
-     */
-    /**
-     * Local-space bounds of a contiguous slot range — min/max over its glyph quads
-     * (position + per-glyph [advance, height]). The measurement behind structural
-     * sub-layouts (an AST block's extents) and the per-text bounds below.
-     * @param {number} startSlot inclusive
-     * @param {number} count number of consecutive slots
-     * @returns {{min:{x,y,z},max:{x,y,z},width:number,height:number,depth:number}|null}
-     */
-    measureSlotRange(startSlot, count) {
-        if (!this.instanceMesh || count <= 0) return null;
-        // Engine-owned fields have no CPU positions to measure — null, honestly. The
-        // consumers that need slot-range extents (structural arrangers) are exactly the
-        // ones eligibility keeps OFF the engine; content bounds ride the builder's cache.
-        if (this.gpuLayout) return null;
-        const geom      = this.instanceMesh.geometry;
-        const posAttr   = geom.attributes.instancePosition;
-        const positions = posAttr.array;
-        const pStride   = posAttr.itemSize;   // 4 for stride-4; never assume 3
-        const sizes     = geom.attributes.instanceSize.array;
-        const start     = Math.max(0, startSlot | 0);
-        const end       = Math.min((positions.length / pStride) | 0, start + count);
-
-        let minX = Infinity, minY = Infinity, minZ = Infinity;
-        let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-
-        for (let buf = start; buf < end; buf++) {
-            const px = positions[buf * pStride];
-            const py = positions[buf * pStride + 1];
-            const pz = positions[buf * pStride + 2];
-            const sw = sizes[buf * 2];
-            const sh = sizes[buf * 2 + 1];
-            if (px      < minX) minX = px;
-            if (py      < minY) minY = py;
-            if (pz      < minZ) minZ = pz;
-            if (px + sw > maxX) maxX = px + sw;
-            if (py + sh > maxY) maxY = py + sh;
-            if (pz      > maxZ) maxZ = pz;
-        }
-        if (minX === Infinity) return null;
-
-        return {
-            min: { x: minX, y: minY, z: minZ },
-            max: { x: maxX, y: maxY, z: maxZ },
-            width:  maxX - minX,
-            height: maxY - minY,
-            depth:  maxZ - minZ,
-        };
     }
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -1572,7 +1461,7 @@ export default class GlyphField {
     clear() {
         this.renderedTexts.clear();
         this._cachedGlyphCount = 0;
-        if (this.instanceMesh) { this.instanceMesh.geometry.instanceCount = 0; this._updateGeometryBounds(); }
+        if (this.instanceMesh) { this.instanceMesh.geometry.instanceCount = 0; this.setLayoutExtent(null); }
     }
 
     dispose() {
@@ -1732,7 +1621,6 @@ export default class GlyphField {
         }
         this._ensureHighlightTexture(total);
         geom.instanceCount = total;
-        this._updateGeometryBounds();
     }
 
     /** @private */
@@ -1769,64 +1657,39 @@ export default class GlyphField {
 
         this._ensureHighlightTexture(count);
         geom.instanceCount = count;
-        this._updateGeometryBounds();
     }
 
     /**
-     * Write geometry.boundingBox + boundingSphere so three's built-in per-object frustum cull
-     * (mesh.frustumCulled = true) tests the REAL extent — our glyphs are placed by in-shader
-     * instance attributes three can't see, so the unit-quad auto-bounds are meaningless.
+     * State this field's content extent — the box three's per-object frustum cull tests
+     * (`mesh.frustumCulled = true`). Our glyphs are placed by in-shader instance attributes
+     * three cannot see, so the unit-quad geometry's auto-bounds are meaningless and the
+     * extent has to come from whoever owns the layout.
      *
-     * The worker ALREADY computes this extent during layout (builders/index.js returns `bounds`),
-     * so the async/bulk path passes it straight in — O(1), no second pass. The sync / in-place
-     * paths have no precomputed bounds, so they fall back to one O(n) min/max over the live buffer.
+     * STATED, NEVER MEASURED. Every field that is culled knows its own extent in closed form:
+     * a CodeGrid's is the fold's extent (core/foldGeometry.foldExtent, from the layout scan's
+     * scalars), a TerminalGrid's and a FrameGrid's are their cell dimensions. So there is no
+     * walk here and nothing to keep in sync — a caller that changes the layout states the new
+     * box in the same breath. Fields whose glyphs ride group offsets (dynamic GPU texture
+     * state no CPU box can describe) construct with `frustumCulled: false` instead and never
+     * call this.
      *
-     * INVARIANT: call after ANY mutation of instancePosition / instanceCount. Known callers:
-     * _writeGlyphsToGeometry, _rebuildAllInstances, applyPrebuiltBuffers (worker bounds),
-     * updatePosition, clear. A NEW path that moves glyphs WITHOUT a rebuild must call this too, or
-     * the cull will test stale bounds and wrongly drop a grid whose glyphs moved. (Clip is safe —
-     * it discards in-shader without moving positions, leaving these bounds conservative; scroll
-     * folds into positions at build time, so a rebuild already covers it.)
-     *
-     * LIMITATION: these bounds see instance positions only, never group offsets (dynamic GPU
-     * texture state) — a field that anchors its glyphs via group offsets must construct with
-     * frustumCulled: false, since its sphere here is false by construction.
-     * @param {{min:{x,y,z},max:{x,y,z}}} [precomputed] - layout extent from the worker, if available
-     * @private
+     * @param {?{min:{x:number,y:number,z:number}, max:{x:number,y:number,z:number}}} extent
+     *   local-space content box, or null for "no content" (nothing to cull against).
      */
-    _updateGeometryBounds(precomputed) {
+    setLayoutExtent(extent) {
         const geom = this.instanceMesh?.geometry;
         if (!geom) return;
-        const n = geom.instanceCount || 0;
         const sphere = (this._boundsSphere ||= new THREE.Sphere());
-        if (n === 0) { geom.boundingBox = null; sphere.center.set(0, 0, 0); sphere.radius = 0; geom.boundingSphere = sphere; return; }
-        const box = (this._boundsBox ||= new THREE.Box3());
-        if (precomputed?.min && precomputed?.max) {
-            // The worker already measured the layout extent during its build — reuse it (O(1)).
-            box.min.set(precomputed.min.x, precomputed.min.y, precomputed.min.z);
-            box.max.set(precomputed.max.x, precomputed.max.y, precomputed.max.z);
-        } else if (this.gpuLayout) {
-            // Engine-owned: the live buffer is GPU-side; a walk would read zeros and collapse
-            // the cull bounds. Every engine commit passes the builder's precomputed extent
-            // (the branch above), and no CPU writer moves glyphs between commits — so the
-            // standing bounds remain true. Keep them.
+        if (!extent?.min || !extent?.max || !(geom.instanceCount > 0)) {
+            geom.boundingBox = null;
+            sphere.center.set(0, 0, 0);
+            sphere.radius = 0;
+            geom.boundingSphere = sphere;
             return;
-        } else {
-            // No precomputed extent (sync / in-place move) — one O(n) min/max over the live buffer.
-            const posAttr = geom.attributes.instancePosition;
-            const pos = posAttr.array;
-            const pStride = posAttr.itemSize;   // 4 for stride-4; never assume 3
-            const siz = geom.attributes.instanceSize.array;
-            let minX = Infinity, minY = Infinity, minZ = Infinity, maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-            for (let i = 0; i < n; i++) {
-                const px = pos[i * pStride], py = pos[i * pStride + 1], pz = pos[i * pStride + 2];
-                const sw = siz[i * 2], sh = siz[i * 2 + 1];
-                if (px < minX) minX = px; if (py < minY) minY = py; if (pz < minZ) minZ = pz;
-                if (px + sw > maxX) maxX = px + sw; if (py + sh > maxY) maxY = py + sh; if (pz > maxZ) maxZ = pz;
-            }
-            box.min.set(minX, minY, minZ);
-            box.max.set(maxX, maxY, maxZ);
         }
+        const box = (this._boundsBox ||= new THREE.Box3());
+        box.min.set(extent.min.x, extent.min.y, extent.min.z);
+        box.max.set(extent.max.x, extent.max.y, extent.max.z);
         geom.boundingBox = box;
         box.getBoundingSphere(sphere);
         geom.boundingSphere = sphere;
@@ -1875,7 +1738,8 @@ export default class GlyphField {
         this._ensureHighlightTexture(count);
         geom.instanceCount = count;
         this.config.maxInstances = Math.max(this.config.maxInstances, count);
-        this._updateGeometryBounds(buffers.bounds);   // reuse the worker's already-measured extent (O(1))
+        // The extent is STATED by the layout owner right after this commit (CodeGrid from the
+        // fold's extent, TerminalGrid/FrameGrid from their cell dimensions) — see setLayoutExtent.
 
         this.renderedTexts.clear();
         this._cachedGlyphCount = 0;
@@ -1890,13 +1754,10 @@ export default class GlyphField {
                     id,
                     bufferStartIndex:  meta.bufferStartIndex,
                     glyphCount:        meta.glyphCount,
+                    // The line table the LayoutDescription and the kernel both read. The
+                    // dispatch adds `fold` (the layout scan's scalars) and `extent` (the
+                    // fold's box) to this entry right after — see GlyphLayoutCompute.
                     lineSlotOffsets:   meta.lineSlotOffsets || null,
-                    // Preserve the layout tables the LayoutDescription / caret need.
-                    // These were being DROPPED here — _buildLayoutWrapIndex then got
-                    // undefined and built an all-empty wrap table, so the caret ignored
-                    // intra-line wraps on long (>wrapWidth) lines. Carry them through.
-                    wrapColsPerLine:   meta.wrapColsPerLine || null,
-                    pageContentWidth:  meta.pageContentWidth || 0,
                 });
                 this._cachedGlyphCount += meta.glyphCount;
                 rendererIds.push(id);

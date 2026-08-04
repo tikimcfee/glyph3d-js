@@ -114,10 +114,9 @@ export class StrataLayout {
         _activeInstances.delete(this);
         this._grid.unregisterArranger?.(this);
         this._clearBoxes();
-        // Engine mode parked its planes in the displacement table — drop it so the re-fold
-        // below re-dispatches flat (the adapter arms setDisplacements(null) at next sync).
-        const r = this._renderer();
-        if (r) r._layoutDisplacements = null;
+        // Engine mode parked its planes in the displacement table — drop it (and the
+        // arranged extent with it) so the re-fold below re-dispatches flat.
+        this._grid.setDisplacements?.(null);
         if (was) await this._grid._relayoutInPlace?.();
         return { ok: true };
     }
@@ -154,9 +153,8 @@ export class StrataLayout {
         //    the parent's for the glyphs they share — each glyph lands on its DEEPEST scope.
         //    The parent's own direct glyphs (its header/footer, the gaps between children)
         //    keep the parent's plane.
-        const D = (r._layoutDisplacements && r._layoutDisplacements.length >= total * 3)
-            ? r._layoutDisplacements
-            : (r._layoutDisplacements = new Float32Array(total * 3));
+        const prev = r._layoutDisplacements;
+        const D = (prev && prev.length >= total * 3) ? prev : new Float32Array(total * 3);
         D.fill(0);   // idempotent per arrange — stale planes never linger
         const boxes = [];
         for (const { node, depth } of nodes) {
@@ -166,18 +164,15 @@ export class StrataLayout {
             for (let s = range.start; s < range.end; s++) D[s * 3 + 2] = z - pos[s * 3 + 2];
             boxes.push({ start: range.start, count: range.end - range.start, depth, z, node });
         }
-        grid._resyncEngineLayout?.();
-        // The arranged extent is the flow footprint pushed forward by the planes — set it
-        // directly (there is no buffer to re-walk; see _applyArrangers).
+        // The arranged extent is the flow footprint pushed forward by the planes — stated
+        // with the table, in one call, because this arranger AUTHORED both.
         const flow = measureSlotSpan(pos, r.getInstanceSizes?.(), 0, total);
-        if (flow) {
-            let maxPlane = 0;
-            for (const b of boxes) if (b.z > maxPlane) maxPlane = b.z;
-            grid.setEngineBounds?.({
-                min: { x: flow.min.x, y: flow.min.y, z: Math.min(flow.min.z, 0) },
-                max: { x: flow.max.x, y: flow.max.y, z: Math.max(flow.max.z, maxPlane) },
-            });
-        }
+        let maxPlane = 0;
+        for (const b of boxes) if (b.z > maxPlane) maxPlane = b.z;
+        grid.setDisplacements(D, flow ? {
+            min: { x: flow.min.x, y: flow.min.y, z: Math.min(flow.min.z, 0) },
+            max: { x: flow.max.x, y: flow.max.y, z: Math.max(flow.max.z, maxPlane) },
+        } : grid.getContentBounds());
 
         // 2) Boxes — measure each node's X/Y bounds from the fold scratch (z differs from
         //    the arranged planes there, but boxes draw at the node's OWN plane, so only
@@ -272,7 +267,7 @@ export class StrataLayout {
             const bb = measureSlotSpan(pos, siz, b.start, b.count);
             if (!bb) continue;
             // The glyph quad is CENTER-anchored in Y (worldPos.y = iPos.y ± iSize.y/2), but
-            // measureSlotRange reports min.y = iPos.y / max.y = iPos.y + iSize.y (corner-style),
+            // measureSlotSpan reports min.y = iPos.y / max.y = iPos.y + iSize.y (corner-style),
             // so its Y reads half a glyph too HIGH — the box floats up into the node above (the
             // overlap). Shift down by half a cell to hug the actual glyphs. (X is left-aligned via
             // alignOffset = iSize.x/2, so its corner-style bounds already match the visible cell.)

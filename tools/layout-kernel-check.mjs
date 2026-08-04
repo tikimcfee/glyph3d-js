@@ -1,10 +1,15 @@
 // layout-kernel-check.mjs — per-slot equivalence harness: GPU glyph layout vs the CPU builder.
 //
 // The compute kernel (packages/glyph3d-core/src/compute/GlyphLayoutKernel.js) is meant to
-// reproduce, on the GPU, the positions `buildBatchBuffers` computes on the CPU. This is the
-// gate: boot the app CLIENT-ONLY, run the REAL builder with the LIVE atlas (never a
-// reimplementation, never hardcoded metrics — project law), run the kernel against a SECOND
+// reproduce, on the GPU, the fold `core/foldEvaluate.evaluateFold` computes on the CPU. This is
+// the gate: boot the app CLIENT-ONLY, run the REAL builder with the LIVE atlas for the glyph
+// attributes + line table (never a reimplementation, never hardcoded metrics — project law),
+// evaluate the fold longhand on the CPU from those tables, run the kernel against a SECOND
 // offscreen WebGPURenderer (the live scene's renderer is untouched), and diff every slot.
+//
+// The builder does NOT lay anything out any more, so it is not the reference: evaluateFold is —
+// the same evaluator layout-mirror.test.mjs and layout-fuzz.test.mjs check positionAt against,
+// so a green mirror plus a green kernel-check chains GPU → mirror with one shared oracle.
 //
 //   bun tools/layout-kernel-check.mjs                          # flat + column modes, torture text
 //   bun tools/layout-kernel-check.mjs --mode flat               # one mode
@@ -125,12 +130,14 @@ const probe = (opts) => `(async (o) => {
   if (!atlas) return { fatal: 'client.ctx.atlas missing — the glyph engine did not boot' };
 
   // ---- the REAL builder + the LIVE atlas, through the app's own module graph (/@fs) ----
-  let builders, cellMetrics, shaping, bridgeMod = null;
+  let builders, cellMetrics, shaping, bridgeMod = null, foldEval = null, foldGeom = null;
   try {
     builders    = await import(F('/packages/glyph3d-core/src/workers/builders/index.js'));
     cellMetrics = await import(F('/packages/glyph3d-core/src/core/cellMetrics.js'));
     shaping     = await import(F('/packages/glyph3d-core/src/shaping/shapeText.js'));
     bridgeMod   = await import(F('/packages/glyph3d-core/src/workers/WorkerBridge.js'));
+    foldEval    = await import(F('/packages/glyph3d-core/src/core/foldEvaluate.js'));
+    foldGeom    = await import(F('/packages/glyph3d-core/src/core/foldGeometry.js'));
   } catch (e) { return { fatal: 'builder import failed: ' + (e && e.message || e) }; }
 
   // Metrics EXACTLY as CodeGrid._prepareAddsForBuild assembles them (computeCellMetrics off the
@@ -179,7 +186,7 @@ const probe = (opts) => `(async (o) => {
   if (bridge && bridge.fontReady) {
     // Same module instance as the app (the singleton already carries the booted shaper) —
     // this is the exact call CodeGrid._flush() makes.
-    buffers = bridge.buildBatchBuffersSync(items, { metrics, defaultColor: color, layout, scrollOffset: 0, emitPositions: true });
+    buffers = bridge.buildBatchBuffersSync(items, { metrics, defaultColor: color, layout, scrollOffset: 0 });
     buildPath = 'WorkerBridge.buildBatchBuffersSync (app singleton — same module graph)';
   } else {
     // The /@fs import landed on a SEPARATE module instance (fresh singleton, no shaper).
@@ -189,13 +196,12 @@ const probe = (opts) => `(async (o) => {
     const shapedItems = items.map((it) => ({ position: it.position, color: it.color, scale: it.scale,
       groupId: it.groupId, shaped: shaping.shapeText(shaperOrCache, it.text) }));
     buffers = builders.buildBatchBuffers(shapedItems, { metrics, defaultColor: color,
-      upem: atlas._shaper ? atlas._shaper.upem : 0, layout, scrollOffset: 0, emitPositions: true });
+      upem: atlas._shaper ? atlas._shaper.upem : 0, layout, scrollOffset: 0 });
     buildPath = 'buildBatchBuffers (direct — /@fs import is a separate module instance)';
     R.notes.push('WorkerBridge singleton not shared with the app (fontReady=false); used the direct builder call');
   }
   R.buildPath = buildPath;
 
-  const cpu = buffers.positions;
   const sizes = buffers.sizes;
   const meta = buffers.itemMeta[0];
   const slotCount = buffers.count;
@@ -244,26 +250,30 @@ const probe = (opts) => `(async (o) => {
   tooth('lineTable[0] === 0 and never decreases', ascending, 'len ' + lineTable.length);
   tooth('lineTable length === source line count', lineTable.length === srcLines.length, lineTable.length + ' vs ' + srcLines.length);
   tooth('an EMPTY line is present (repeated offset)', emptyLines);
-  // ---- the two per-slot inputs the kernel's interface grew (spec §7) ----
-  // advances: the CPU output's own sizes[2i]. This is what makes a wide (emoji) glyph
-  // representable at all — the row/col model alone cannot express a double advance.
+  // ---- the layout scan: the per-slot advance prefix sum + the visual-row prefix, plus the
+  //      three scalars the page stride and the extent are closed forms on. The SHARED
+  //      implementation (core/foldGeometry.layoutScan) — the same one configure() runs, so
+  //      "widest row" cannot mean two different things across the wire.
   const advances = new Float32Array(slotCount);
   for (let i = 0; i < slotCount; i++) advances[i] = sizes[i * 2];
-
-  // lineStartRow: the exclusive scan over lines of rowsForLine(n, wrapCols). Computed HERE from
-  // the line table alone (never read off the kernel) so it can be checked against the CPU output.
   const wrapCols = entry.kernelMode === 'flat' ? 0 : Math.max(0, Math.trunc(layout.wrapWidth));
   const lineStartRow = new Uint32Array(lineTable.length);
-  {
-    let row = 0;
-    for (let L = 0; L < lineTable.length; L++) {
-      lineStartRow[L] = row;
-      const end = L + 1 < lineTable.length ? lineTable[L + 1] : slotCount;
-      const nL = end - lineTable[L];
-      row += 1 + (wrapCols > 0 && nL > 0 ? Math.floor((nL - 1) / wrapCols) : 0);
-    }
-    R.totalRows = row;
-  }
+  const scan = foldGeom.layoutScan({
+    slotCount, lineTable, sizes, wrapWidth: wrapCols, lineStartRow,
+  });
+  R.totalRows = scan.totalRows;
+  R.maxRowExtent = scan.maxRowExtent;
+
+  // THE CPU REFERENCE: the fold, longhand, one glyph at a time — from the builder's own line
+  // table and real advances. Everything below diffs the GPU against this.
+  const page = foldGeom.pageFold(
+    Object.assign({}, layout, { wrapWidth: wrapCols }), metrics, scan.maxRowExtent);
+  const cpu = foldEval.evaluateFold({
+    slotCount, lineTable, advances, origin, scrollOffset: 0,
+    wrapWidth: wrapCols, lineSpacing: metrics.lineSpacing,
+    zStep: metrics.charHeight * layout.zWrapSpacing,
+    page,
+  });
   // y = origin.y − lineStartRow[L] × lineSpacing. Pagination remaps y wholesale, but only PAST
   // the first page — rows inside it are untouched — so restricting to those keeps one tooth
   // valid in every mode, wrapped or paginated.
@@ -295,11 +305,11 @@ const probe = (opts) => `(async (o) => {
       zs.size > 1 ? (zs.size >= 64 ? '64+' : zs.size) : 'only 1 z plane — no wrap occurred');
   }
   if (layout.pageHeight > 0) {
-    // pageContentWidth is non-zero only when the builder ACTUALLY paginated (it is set inside the
-    // totalYSpan > pageHeightWorld branch), so it doubles as the "pagination fired" witness.
-    const paged = meta.pageContentWidth > 0;
-    tooth('pagination fired (itemMeta.pageContentWidth > 0)', paged,
-      paged ? 'pageContentWidth ' + meta.pageContentWidth.toFixed(6)
+    // Pagination fires when the content reaches past one page — the one gate, the same
+    // comparison the shader makes per slot. No separate "did it fire" witness exists.
+    const paged = scan.totalRows - 1 >= layout.pageHeight;
+    tooth('pagination fired (rows past one page)', paged,
+      paged ? scan.totalRows + ' rows vs pageHeight ' + layout.pageHeight
             : 'content never exceeded pageHeight ' + layout.pageHeight + ' rows — lower --page-height');
     if (layout.axis === 'z') tooth('> 1 distinct z (pages recede in depth)', zs.size > 1, zs.size);
     else tooth('> 1 page column in x (pages fan right)', xs.size > 1, xs.size >= 64 ? '64+' : xs.size);
@@ -386,9 +396,22 @@ const probe = (opts) => `(async (o) => {
         if (!renderer) throw new Error('selftest: no renderer handed to the kernel');
         this._renderer = renderer; this._maxSlots = opts && opts.maxSlots;
       }
-      configure(cfg) { this._cfg = cfg; }
+      configure(cfg) {
+        this._cfg = cfg;
+        // The real kernel derives lineStartRow + the row extents from its own layoutScan;
+        // mirror that here so the self-test exercises the same interface, not a richer one.
+        const it = cfg.items[0];
+        const wrap = it.params.mode === 'flat' ? 0 : Math.max(0, Math.trunc(it.params.wrapWidth));
+        this._lsr = new Uint32Array(it.lineTable.length);
+        this._scan = foldGeom.layoutScan({
+          slotCount: it.slotCount, lineTable: it.lineTable, sizes: it.sizes,
+          sizeBase: it.sizeBase || 0, wrapWidth: wrap, lineStartRow: this._lsr,
+        });
+        return [this._scan];
+      }
       async compute() {
-        const { slotCount: n, lineTable: lt, lineStartRow: lsr, advances: adv, params: p } = this._cfg;
+        const { slotCount: n, lineTable: lt, sizes: sz, sizeBase, params: p } = this._cfg.items[0];
+        const lsr = this._lsr, base = sizeBase || 0;
         const out = new Float32Array(n * 3);
         const wrap = p.mode === 'flat' ? 0 : Math.max(0, Math.trunc(p.wrapWidth));
         const ls = p.cellHeight;
@@ -400,7 +423,7 @@ const probe = (opts) => `(async (o) => {
           for (let i = start; i < end; i++) {
             if (wrap && seg >= wrap) { row++; seg = 0; x = p.originX; z -= p.zWrapStep; }
             out[i * 3] = x; out[i * 3 + 1] = p.originY - row * ls; out[i * 3 + 2] = z;
-            x += adv ? adv[i] : p.cellWidth;
+            x += sz ? sz[(base + i) * 2] : p.cellWidth;
             seg++;
           }
         }
@@ -411,7 +434,7 @@ const probe = (opts) => `(async (o) => {
           // pixel metric — NOT the real glyph advance the x-step uses. Two different cell widths
           // in one builder; paginationGeometry() is where they part.
           const unit = p.pageGapUnit > 0 ? p.pageGapUnit : p.cellWidth;
-          const Wp = p.contentWidth > 0 ? p.contentWidth : wrap * unit;
+          const Wp = this._scan.maxRowExtent > 0 ? this._scan.maxRowExtent : wrap * unit;
           const gapX = p.pageGapX * unit, gapY = p.pageGapY * ls;
           const pagesWide = Math.max(1, Math.trunc(p.pagesWide)), depth = p.pageDepth * ls;
           for (let i = 0; i < n; i++) {
@@ -474,16 +497,16 @@ const probe = (opts) => `(async (o) => {
     pageGapXWorld: layout.pageGapX * (metrics.charWidth + metrics.letterSpacing),
     pageGapYWorld: layout.pageGapY * metrics.lineSpacing,
     pageDepthWorld: layout.pageDepth * metrics.lineSpacing,
-    // The hardest impurity (spec §5.4): the x page stride depends on the widest laid-out row, a
-    // reduction over the item's OWN output. Handed to the kernel from the CPU build.
-    contentWidth: meta.pageContentWidth || 0,
+    // The x page stride depends on the widest laid-out row. configure() measures it in its own
+    // layout scan and writes it into the item table, so it is NOT an input — it is reported here
+    // only so a divergence can be read against the CPU scan's value.
+    contentWidth: scan.maxRowExtent,
     axis: layout.axis, scrollOffset: 0,
     // Derived conveniences under the spec's other vocabulary — a superset, since resolveParams
     // reads per-key with ?? and ignores what it doesn't know.
     charWidth: metrics.charWidth, charHeight: metrics.charHeight,
     lineSpacing: metrics.lineSpacing, letterSpacing: metrics.letterSpacing,
     linePitch: cellMetrics.LINE_PITCH, worldScale: metrics.worldScale, scale: 1,
-    pageWidthWorld: meta.pageContentWidth || 0,
   };
   R.params = Object.assign({}, params, { origin: undefined });
 
@@ -491,10 +514,10 @@ const probe = (opts) => `(async (o) => {
   try {
     const t0 = performance.now();
     const kernel = new Kernel(store.renderer, { maxSlots: slotCount, maxLines: lineTable.length });
-    // lineStartRow + advances are the inputs the interface grew (spec §7). A kernel that still
-    // destructures only {slotCount, lineTable, params} ignores them harmlessly — which is itself
-    // reported below, since it's exactly what the wide-glyph divergence hangs on.
-    kernel.configure({ items: [{ slotCount, lineTable, lineStartRow, advances, outBase: 0, params }], totalSlots: slotCount });
+    // The kernel takes the field's own sizes array directly and runs its own layoutScan — no
+    // advance copy crosses the boundary, and the row extent it paginates by is the one it
+    // measured itself.
+    kernel.configure({ items: [{ slotCount, lineTable, sizes, sizeBase: 0, outBase: 0, params }], totalSlots: slotCount });
     await kernel.compute();
     gpu = await kernel.readPositions();
     R.kernelMs = Math.round(performance.now() - t0);
@@ -511,7 +534,7 @@ const probe = (opts) => `(async (o) => {
         D[s * 3 + 2] = ((s % 3) - 1) * 0.125;
       }
       kernel.setDisplacements(D);
-      kernel.configure({ items: [{ slotCount, lineTable, lineStartRow, advances, outBase: 0, params }], totalSlots: slotCount });
+      kernel.configure({ items: [{ slotCount, lineTable, sizes, sizeBase: 0, outBase: 0, params }], totalSlots: slotCount });
       await kernel.compute();
       const gpuD = await kernel.readPositions();
       let over = 0, worst = 0;
@@ -523,7 +546,7 @@ const probe = (opts) => `(async (o) => {
       R.disp = { over, worst, checked: slotCount * 3 };
       // Restore the undisplaced state for any later bench reuse.
       kernel.setDisplacements(null);
-      kernel.configure({ items: [{ slotCount, lineTable, lineStartRow, advances, outBase: 0, params }], totalSlots: slotCount });
+      kernel.configure({ items: [{ slotCount, lineTable, sizes, sizeBase: 0, outBase: 0, params }], totalSlots: slotCount });
       await kernel.compute();
     }
 
@@ -579,14 +602,14 @@ const probe = (opts) => `(async (o) => {
       const K = benchKernel, RD = store.renderer, N = Math.max(10, o.benchN || 200);
       const B = { n: N };
       { const REPS = 20; const t0 = performance.now();
-        for (let i = 0; i < REPS; i++) K.configure({ items: [{ slotCount, lineTable, lineStartRow, advances, outBase: 0, params }], totalSlots: slotCount });
+        for (let i = 0; i < REPS; i++) K.configure({ items: [{ slotCount, lineTable, sizes, sizeBase: 0, outBase: 0, params }], totalSlots: slotCount });
         B.configureMs = (performance.now() - t0) / REPS; }
       { const t0 = performance.now();
         for (let i = 0; i < 3; i++) bridge && bridge.fontReady
-          ? bridge.buildBatchBuffersSync(items, { metrics, defaultColor: color, layout, scrollOffset: 0, emitPositions: true })
+          ? bridge.buildBatchBuffersSync(items, { metrics, defaultColor: color, layout, scrollOffset: 0 })
           : builders.buildBatchBuffers([{ position: origin, color, scale: 1, groupId: 0,
               shaped: shaping.shapeText(atlas._shapeCache || atlas._shaper, o.text) }],
-              { metrics, defaultColor: color, upem: (atlas._shaper && atlas._shaper.upem) || 0, layout, scrollOffset: 0, emitPositions: true });
+              { metrics, defaultColor: color, upem: (atlas._shaper && atlas._shaper.upem) || 0, layout, scrollOffset: 0 });
         B.cpuBuildMs = (performance.now() - t0) / 3; }
       const queue = RD.backend && RD.backend.device && RD.backend.device.queue;
       try { if (RD.resolveTimestampsAsync) await RD.resolveTimestampsAsync('compute'); } catch (e) { /* pool may be empty */ }
@@ -656,7 +679,7 @@ const bulkProbe = (opts) => `(async (o) => {
     try { if (atlas._live && atlas._shapeCache) atlas._live.ensureCodepoints(fresh, atlas._shapeCache); } catch (e) { R.notes.push('ensureCodepoints: ' + (e && e.message || e)); }
     R.atlasWarmMs = performance.now() - t0; }
 
-  const shared = { metrics, defaultColor: color, layout, scrollOffset: 0, emitPositions: true };
+  const shared = { metrics, defaultColor: color, layout, scrollOffset: 0 };
   const perFileCpu = new Float64Array(o.files.length);
   const built = new Array(o.files.length);
 
@@ -675,17 +698,7 @@ const bulkProbe = (opts) => `(async (o) => {
   for (let fi = 0; fi < o.files.length; fi++) {
     const b = built[fi], meta = b.itemMeta[0];
     const lineTable = Uint32Array.from(meta.lineSlotOffsets);
-    const lineStartRow = new Uint32Array(lineTable.length);
-    let row = 0;
-    for (let L = 0; L < lineTable.length; L++) {
-      lineStartRow[L] = row;
-      const end = L + 1 < lineTable.length ? lineTable[L + 1] : b.count;
-      const n = end - lineTable[L];
-      row += 1 + (o.wrapWidth > 0 && n > 0 ? Math.floor((n - 1) / o.wrapWidth) : 0);
-    }
-    const advances = new Float32Array(b.count);
-    for (let i = 0; i < b.count; i++) advances[i] = b.sizes[i * 2];
-    tables[fi] = { slotCount: b.count, lineTable, lineStartRow, advances };
+    tables[fi] = { slotCount: b.count, lineTable, sizes: b.sizes };
     totalSlots += b.count;
     if (b.count > maxSlots) { maxSlots = b.count; biggest = fi; }
     if (lineTable.length > maxLines) maxLines = lineTable.length;
@@ -704,11 +717,11 @@ const bulkProbe = (opts) => `(async (o) => {
   const params = {
     origin, scrollOffset: 0, wrapWidth: layout.wrapWidth, lineSpacing: metrics.lineSpacing,
     zWrapStep: metrics.charHeight * layout.zWrapSpacing, pageHeight: 0, pagesWide: 1,
-    pageWidthWorld: 0, pageGapXWorld: 0, pageGapYWorld: 0, pageDepthWorld: 0, axis: 'xy',
+    pageGapXWorld: 0, pageGapYWorld: 0, pageDepthWorld: 0, axis: 'xy',
   };
   const kernel = new Kernel(RD, { maxSlots, maxLines });
   const cfg = (fi) => { const t = tables[fi]; kernel.configure({ items: [{ slotCount: t.slotCount,
-    lineTable: t.lineTable, lineStartRow: t.lineStartRow, advances: t.advances, outBase: 0, params }], totalSlots: t.slotCount }); };
+    lineTable: t.lineTable, sizes: t.sizes, sizeBase: 0, outBase: 0, params }], totalSlots: t.slotCount }); };
 
   // Warm: first dispatch builds the pipeline; keep it out of both GPU lanes.
   cfg(0); await kernel.compute();

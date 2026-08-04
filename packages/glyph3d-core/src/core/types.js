@@ -23,8 +23,9 @@
  * value equals the number of populated slots across all five arrays.
  *
  * @typedef {Object} GlyphBufferSet
- * @property {Float32Array} positions  - vec3 per glyph (x, y, z). Length: count * 3
- * @property {Float32Array} sizes      - vec2 per glyph (width, height from atlas metrics). Length: count * 2
+ * @property {Float32Array} sizes      - vec2 per glyph (advance, height). Length: count * 2.
+ *   The advance lane is also the layout scan's input: x offsets are the running sum of these
+ *   REAL advances, never a column times a nominal cell width.
  * @property {Float32Array} codepoints - numeric DataTexture ID per glyph for GPU-side UV lookup
  *   via atlasMapTexture. For single-codepoint graphemes this equals the Unicode codepoint;
  *   for multi-codepoint graphemes (ZWJ sequences) it is a synthetic ID assigned by GlyphAtlas.
@@ -33,8 +34,6 @@
  * @property {Float32Array} groupIds   - group texture row per glyph. Length: count
  * @property {number} count            - number of populated glyph slots (excludes spaces and
  *   control characters — codepoint <= 32 advances cursor but does not emit a buffer slot)
- * @property {Object|null} bounds      - combined bounding box, or null if no glyphs were emitted.
- *   Shape: {min: {x,y,z}, max: {x,y,z}, width: number, height: number, depth: number}
  * @property {GlyphBufferItemMeta[]} itemMeta - per-text-entry metadata, one entry per input item.
  *   Only present on output of buildBatchBuffers(); absent from buildGlyphBuffers() output.
  */
@@ -46,24 +45,21 @@
  *
  * @typedef {Object} GlyphBufferItemMeta
  * @property {number} bufferStartIndex - first slot index in the combined buffer for this item.
- *   Multiply by the BUILDER's attribute stride (3 for builder positions, 2 for sizes, 1 for
- *   codepoints/groupIds/colors) to get the Float32Array offset. NOTE: the INSTALLED
- *   instancePosition attribute is stride-4 post-commit (padded or storage) — CPU readers
- *   of the live attribute must use attr.itemSize, never a hardcoded stride.
+ *   Multiply by the attribute's stride (2 for sizes, 1 for codepoints/groupIds, 3 for colors)
+ *   to get the Float32Array offset. NOTE: the INSTALLED instancePosition attribute is stride-4
+ *   (a storage buffer the layout kernel writes) — CPU readers of the live attribute must use
+ *   attr.itemSize, never a hardcoded stride.
  * @property {number} glyphCount       - number of glyph slots occupied by this item
- * @property {Object|null} bounds      - item-local bounding box, or null if item had no renderable glyphs.
- *   Shape: {min: {x,y,z}, max: {x,y,z}, width: number, height: number, depth: number}
  * @property {number[]} lineSlotOffsets - maps line index → absolute buffer slot of the first glyph
- *   on that line. lineSlotOffsets[0] equals bufferStartIndex. Built in the same pass as the buffer
- *   fill; used by CodeGrid.highlightRange() to map source line numbers to highlight texture slots.
- *   Stored as a plain Array (not Int32Array) in the builder output.
- * @property {number[][]} wrapColsPerLine - per source line, the source-col indices where the
- *   builder wrapped that line into a new visual row (empty for lines that fit). Backs the
- *   LayoutDescription's visual-row mapping for the caret. REQUIRED for cursor-accurate layout —
- *   must be preserved through applyPrebuiltBuffers, not dropped.
- * @property {number} pageContentWidth - the page column width (world units) used when this item
- *   paginated, or 0 if unpaginated. The LayoutDescription/caret pass the SAME width to pagination
- *   so the caret aligns with glyphs (never a second char-count guess).
+ *   on that line. lineSlotOffsets[0] equals bufferStartIndex. THE layout table: the kernel binary-
+ *   searches it to resolve a slot's source line, the layout scan derives the visual-row prefix and
+ *   the row extents from it, and CodeGrid.highlightRange() maps source lines to highlight slots
+ *   through it. Stored as a plain Array (not Int32Array) in the builder output.
+ *
+ * There is no `bounds` and no positional metadata here. The builder does not lay anything out:
+ * positions are the kernel's (compute/GlyphLayoutKernel) and the extent is a closed form on the
+ * line table (core/foldGeometry.foldExtent), recorded onto the renderedTexts entry at dispatch
+ * as `fold` (the scan's scalars) + `extent` (the box).
  */
 
 /**

@@ -95,109 +95,31 @@ export function resolveLayoutParams(layout) {
     };
 }
 
-/**
- * Page geometry in world units, derived from metrics + the ACTUAL content width
- * (the widest laid-out line's extent). pageWidthWorld is the column spacing; using
- * the real extent — not `wrapWidth * charAdvance` — is what keeps fanned columns
- * from overlapping: the char-count guess drifts against summed HarfBuzz advances and
- * the error accumulates over a column's width. See LAYOUT_PLAN.md.
- *
- * @param {Object} metrics - {charWidth, charHeight, letterSpacing, lineSpacing}
- * @param {number} contentWidth - widest line's world extent (itemMaxX - origin.x)
- * @param {typeof DEFAULT_LAYOUT} [layout] - resolved layout params (defaults applied if omitted)
- */
-export function paginationGeometry(metrics, contentWidth, layout = DEFAULT_LAYOUT) {
-    const charAdvance = metrics.charWidth + metrics.letterSpacing;
-    return {
-        pageHeightWorld: layout.pageHeight * metrics.lineSpacing,
-        pageWidthWorld: contentWidth > 0 ? contentWidth : layout.wrapWidth * charAdvance,
-        gapXWorld: layout.pageGapX * charAdvance,
-        gapYWorld: layout.pageGapY * metrics.lineSpacing,
-        pagesWide: Math.max(1, layout.pagesWide),  // clamp: pagesWide<1 would break the % in paginationShift
-        axis: layout.axis,                          // 'xy' = fan in X | 'z' = stack in depth
-        pageDepthWorld: layout.pageDepth * metrics.lineSpacing,  // z-gap between page planes (axis:'z')
-    };
-}
 
 /**
- * THE single source of pagination math: given a glyph's distance below the item
- * origin (relY) and the page geometry, return how to remap it. newY = origin.y -
- * mappedRelY; newX = x + shiftX. Shared by the buffer fill (applyPagination) and —
- * in Step 2 — the caret/selection queries, so the two can never diverge.
+ * Build the per-glyph ATTRIBUTES and the line table for a batch of texts.
  *
- * @param {number} relY - origin.y - glyphY (distance below origin, ≥ 0)
- * @param {{pageHeightWorld,pageWidthWorld,gapXWorld,gapYWorld,pagesWide,axis,pageDepthWorld}} geom
- * @returns {{shiftX:number, mappedRelY:number, shiftZ:number}}
- */
-export function paginationShift(relY, geom) {
-    // pageHeightWorld<=0 means pagination is off (pageHeight:0) — no shift, ever.
-    if (geom.pageHeightWorld <= 0) return { shiftX: 0, mappedRelY: relY, shiftZ: 0 };
-    // The quotient is nudged before flooring: relY reaches here as an ACCUMULATED sum,
-    // and in the buffer path it has ALSO round-tripped through an f32 store — so a row
-    // exactly on a page boundary can land up to ~relY·1.2e-7 under the integer and floor
-    // a whole page early (ulp-scale input, page-stride output; found at 1e-6 by the fuzz
-    // at tall relY, where f32 ulp outgrows any absolute epsilon). The nudge therefore
-    // SCALES with the quotient: q·3e-7 covers the f32 relative error with margin, and
-    // the absolute 1e-6 floor covers small q. Legit rows are ≥ 1/pageHeight ≈ 6.7e-3
-    // apart — four orders above the nudge at any plausible page count. The GPU kernel
-    // divides INTEGER rows and needs none of this.
-    const q0 = relY / geom.pageHeightWorld;
-    const q = q0 + q0 * 3e-7 + 1e-6;
-    if (q < 1) return { shiftX: 0, mappedRelY: relY, shiftZ: 0 };
-    const vPage = Math.floor(q);
-    const rowOffsetInPage = relY - vPage * geom.pageHeightWorld;
-    if (geom.axis === 'z') {
-        // z-pages: every page shares the front page's x,y footprint (top-aligned) and
-        // recedes in depth by its page index — later content sits behind earlier content.
-        return { shiftX: 0, mappedRelY: rowOffsetInPage, shiftZ: -vPage * geom.pageDepthWorld };
-    }
-    // newspaper (axis 'xy'): pages fan right (X) up to pagesWide, then wrap down (Y).
-    const hSlot = vPage % geom.pagesWide;
-    const yRow = Math.floor(vPage / geom.pagesWide);
-    return {
-        shiftX: hSlot * (geom.pageWidthWorld + geom.gapXWorld),
-        mappedRelY: rowOffsetInPage + yRow * (geom.pageHeightWorld + geom.gapYWorld),
-        shiftZ: 0,
-    };
-}
-
-/**
- * Apply page-break pagination to glyph positions in-place. axis 'xy' fans pages right
- * then wraps down; axis 'z' stacks them in depth (shiftZ). Pure transform via
- * paginationShift — see paginationGeometry for why the width is the real content extent.
+ * This is not a layout pass. Shaping decides which glyphs exist and how wide each one
+ * is; the fold decides where they go, and the fold runs on the GPU (compute/GlyphLayoutKernel)
+ * from the tables emitted here. So this walk touches every glyph exactly once to fill
+ * `sizes` / `glyphIds` / `colors` / `groupIds` and to record where each source line starts —
+ * and nothing else. No positions, no bounds, no pagination: those were all the same CPU
+ * fold, computed in registers and thrown away, and the fold's extent is a closed form on
+ * the line table (core/foldGeometry.js).
  *
- * @param {Float32Array} positions - Position buffer (mutated in place)
- * @param {number} startIdx - First glyph index for this item
- * @param {number} endIdx - One past last glyph index
- * @param {{x,y,z}} origin - Item's starting position
- * @param {ReturnType<typeof paginationGeometry>} geom - page geometry
- */
-export function applyPagination(positions, startIdx, endIdx, origin, geom) {
-    for (let i = startIdx; i < endIdx; i++) {
-        const relY = origin.y - positions[i * 3 + 1];  // distance below origin
-        // NO pre-filter here: paginationShift is THE single source of pagination math,
-        // including the boundary-nudged first-page gate. A raw `relY < H` comparison at
-        // this door once overruled the nudge for rows exactly ON a page boundary (the
-        // f32-stored relY lands ulps under the integer) — those rows stayed on page one
-        // while every evaluator paginated them. Found by the fuzz; never re-add it.
-        const { shiftX, mappedRelY, shiftZ } = paginationShift(relY, geom);
-        positions[i * 3 + 1] = origin.y - mappedRelY;
-        positions[i * 3] += shiftX;
-        positions[i * 3 + 2] += shiftZ;
-    }
-}
-
-/**
- * Build buffers for multiple texts using pre-shaped HarfBuzz glyph data.
- *
- * Each item must have item.shaped set by the main thread before being posted
- * to a worker. This eliminates per-worker WASM instances — shaping runs once
- * on the main thread, workers only do buffer math.
+ * Each item must have item.shaped set by the main thread before being posted to a worker.
+ * This eliminates per-worker WASM instances — shaping runs once on the main thread, workers
+ * only do buffer math.
  *
  * Outputs HarfBuzz glyph IDs that index directly into SlugEncoder's glyphMapTexture.
- * One slot per codepoint — invisible glyphs (space, tab, .notdef) get a slot
- * too and render to nothing via 0-curve fragment discard, so the slot offset
- * within a line equals the codepoint index.
+ * One slot per codepoint — invisible glyphs (space, tab, .notdef) get a slot too and
+ * render to nothing via 0-curve fragment discard, so the slot offset within a line
+ * equals the codepoint index. That identity is what lets the kernel resolve a slot to
+ * its line with a binary search and lets the caret resolve a column with an addition.
+ *
+ * `shaped.dx`/`dy` are not read: the live shapers emit them as 0 (FontChain,
+ * MonospaceShapeCache), and a shaper that didn't would need a per-slot table the kernel
+ * could add post-fold, not a CPU pre-offset.
  *
  * @param {Array<{text, position, color?, scale?, groupId?, shaped: {lines, totalGlyphs}}>} items
  * @param {Object} shared - {metrics, defaultColor, upem}
@@ -205,15 +127,6 @@ export function applyPagination(positions, startIdx, endIdx, origin, geom) {
  */
 export function buildBatchBuffers(items, shared) {
     const { metrics, defaultColor, upem } = shared;
-    const layout = resolveLayoutParams(shared.layout);
-    const scrollOffset = shared.scrollOffset || 0;  // visual rows scrolled (Step 3c, the conveyor)
-    // emitPositions:true — the CPU-reference build: the position array IS allocated and
-    // written (the builder's own fold, for test/check tools that verify the kernel against it).
-    // Default false: the GPU layout engine is THE path — the builder emits only what the CPU
-    // alone can produce (glyph ids, advances, colors, the line/wrap tables). Positions, bounds
-    // and pageContentWidth are the engine's job (kernel + adapter). Tests that need a reference
-    // pass emitPositions:true explicitly.
-    const emitPositions = shared.emitPositions === true;
 
     // Convert HarfBuzz font units to world units.
     //
@@ -229,13 +142,8 @@ export function buildBatchBuffers(items, shared) {
     const pixelHeight = metrics.pixelHeight || metrics.charHeight / worldScale;
     const ws = worldScale * pixelHeight;
 
-    // Z-depth wrapping settings (per-grid layout params; wrapWidth 0 = no wrap)
-    const maxLineWidth = layout.wrapWidth;
-    const zWrapSpacing = metrics.charHeight * layout.zWrapSpacing;
-
     // First pass: read pre-shaped data from items to count total glyphs (worst-case)
     let totalGlyphs = 0;
-
     for (let i = 0; i < items.length; i++) {
         const shaped = items[i].shaped;
         if (shaped) totalGlyphs += shaped.totalGlyphs;
@@ -243,34 +151,27 @@ export function buildBatchBuffers(items, shared) {
 
     if (totalGlyphs === 0) {
         return {
-            positions: new Float32Array(0),
             sizes: new Float32Array(0),
             glyphIds: new Float32Array(0),
             codepoints: new Float32Array(0),
             colors: new Float32Array(0),
             groupIds: new Float32Array(0),
             count: 0,
-            bounds: null,
-            itemMeta: items.map(() => ({ bufferStartIndex: 0, glyphCount: 0, bounds: null }))
+            itemMeta: items.map(() => ({ bufferStartIndex: 0, glyphCount: 0, lineSlotOffsets: [0] })),
         };
     }
 
     // Allocate combined buffers — one slot per codepoint, exact (no skipping)
-    const positions = emitPositions ? new Float32Array(totalGlyphs * 3) : null;
     const sizes = new Float32Array(totalGlyphs * 2);
     const glyphIdsArr = new Float32Array(totalGlyphs);
     const colors = new Float32Array(totalGlyphs * 3);
     const groupIds = new Float32Array(totalGlyphs);
     const itemMeta = new Array(items.length);
 
-    let minX = Infinity, minY = Infinity, minZ = Infinity;
-    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-
     let bufferOffset = 0;
 
     for (let itemIdx = 0; itemIdx < items.length; itemIdx++) {
         const item = items[itemIdx];
-        const pos = item.position;
         const color = item.color || defaultColor;
         const scale = item.scale || 1.0;
         const itemGroupId = item.groupId || 0;
@@ -282,197 +183,53 @@ export function buildBatchBuffers(items, shared) {
             itemMeta[itemIdx] = {
                 bufferStartIndex: itemStartOffset,
                 glyphCount: 0,
-                bounds: null,
                 lineSlotOffsets: [itemStartOffset],
-                wrapColsPerLine: [[]],
             };
             continue;
         }
 
+        // line → first buffer slot. The kernel binary-searches this to resolve a slot's
+        // source line; the caret adds a column to it. Empty lines repeat the previous
+        // offset (they own no slots), which both readers handle by construction.
         const itemLineSlotOffsets = [bufferOffset];
-
-        // Per-line wrap cols: for each source line, the source-col indices
-        // where the worker wrapped to a new visual row. Empty for lines
-        // that fit. Consumed downstream by CodeGrid's cursor positioning
-        // (the "wrap ruler" pattern: enough info to derive any cursor's
-        // visual row + x without storing per-char data).
-        const itemWrapColsPerLine = [[]];
-        let lineColIdx = 0;  // source col within current line (advances per sg)
-
-        let x = pos.x;
-        // Step 3c (the conveyor): shift content up by scrollOffset visual rows, so the fold
-        // operates on screenRow = visualRow − scrollOffset. Pagination uses relY = pos.y −
-        // glyphY (origin stays at pos), which then equals screenRow*lineSpacing — content
-        // flows up and, in folded modes, hops between columns/planes at page boundaries.
-        let y = pos.y + scrollOffset * metrics.lineSpacing;
-        let z = pos.z;
-        const startZ = pos.z;
-        let glyphsOnSegment = 0;
-
-        let itemMinX = Infinity, itemMaxX = -Infinity;
-        let itemMinY = y, itemMaxY = y + metrics.charHeight;
-        let itemMinZ = z, itemMaxZ = z;
+        const charHeight = metrics.charHeight * scale;
 
         for (let lineIdx = 0; lineIdx < shaped.lines.length; lineIdx++) {
-            if (lineIdx > 0) {
-                // Newline
-                if (x > pos.x) itemMaxX = Math.max(itemMaxX, x);
-                x = pos.x;
-                y -= metrics.lineSpacing;
-                z = startZ;
-                itemMinY = y;
-                glyphsOnSegment = 0;
-                itemLineSlotOffsets.push(bufferOffset);
-                itemWrapColsPerLine.push([]);
-                lineColIdx = 0;
-            }
-
-            const line = shaped.lines[lineIdx];
-            const currentLineWraps = itemWrapColsPerLine[itemWrapColsPerLine.length - 1];
-            for (const sg of line.shaped) {
-                const glyphId = sg.g;
-                const advance = sg.ax / upem * ws * scale;
-                const charHeight = metrics.charHeight * scale;
-                const dx = sg.dx / upem * ws * scale;
-                const dy = sg.dy / upem * ws * scale;
-
-                // Z-depth + Y-drop wrap
-                if (maxLineWidth > 0 && glyphsOnSegment >= maxLineWidth) {
-                    if (x > pos.x) itemMaxX = Math.max(itemMaxX, x);
-                    x = pos.x;
-                    y -= metrics.lineSpacing;
-                    z -= zWrapSpacing;
-                    itemMinY = y;
-                    itemMinZ = Math.min(itemMinZ, z);
-                    glyphsOnSegment = 0;
-                    // Affinity=right at wrap: this char (and cursors at
-                    // its source-col) belong on the new visual row.
-                    currentLineWraps.push(lineColIdx);
-                }
-
-                // One slot per codepoint — invisible glyphs (space, tab,
-                // .notdef) get a slot too and render to nothing via 0-curve
-                // fragment discard. This makes the column→slot mapping a plain
-                // identity: slot offset within a line == codepoint index.
-                if (itemMinX === Infinity) itemMinX = x;
+            if (lineIdx > 0) itemLineSlotOffsets.push(bufferOffset);
+            for (const sg of shaped.lines[lineIdx].shaped) {
                 const idx = bufferOffset;
-
-                if (emitPositions) {
-                    positions[idx * 3] = x + dx;
-                    positions[idx * 3 + 1] = y + dy;
-                    positions[idx * 3 + 2] = z;
-                }
-
-                sizes[idx * 2] = advance;
+                sizes[idx * 2]     = sg.ax / upem * ws * scale;   // the REAL advance — emoji are double
                 sizes[idx * 2 + 1] = charHeight;
-
-                glyphIdsArr[idx] = glyphId;
-
-                colors[idx * 3] = color.r;
+                glyphIdsArr[idx]   = sg.g;
+                colors[idx * 3]     = color.r;
                 colors[idx * 3 + 1] = color.g;
                 colors[idx * 3 + 2] = color.b;
-
                 groupIds[idx] = itemGroupId;
-
                 bufferOffset++;
-                x += advance;
-                glyphsOnSegment++;
-                lineColIdx++;
-            }
-        }
-
-        if (x > pos.x) itemMaxX = Math.max(itemMaxX, x);
-        itemMaxZ = Math.max(itemMaxZ, startZ);
-
-        const itemGlyphCount = bufferOffset - itemStartOffset;
-
-        // Page column width actually used (0 = unpaginated). Threaded into itemMeta so
-        // the LayoutDescription / caret query pagination with the SAME geometry the
-        // glyphs got — never a second char-count guess.
-        let pageContentWidth = 0;
-
-        // Apply page-break pagination if needed (position path only — the engine build has
-        // no array to remap; the adapter derives the paginated extent analytically)
-        if (emitPositions && itemGlyphCount > 0 && layout.pageHeight > 0) {
-            const totalYSpan = pos.y - itemMinY;
-            const pageHeightWorld = layout.pageHeight * metrics.lineSpacing;
-            if (totalYSpan > pageHeightWorld) {
-                // Column spacing = the ACTUAL widest-line extent (itemMaxX is still the
-                // pre-pagination max here, before the recompute below overwrites it), not
-                // maxLineWidth*charAdvance — fixes the fanned-column edge overlap.
-                const contentWidth = itemMaxX > pos.x ? itemMaxX - pos.x : 0;
-                pageContentWidth = contentWidth;
-                applyPagination(positions, itemStartOffset, bufferOffset, pos, paginationGeometry(metrics, contentWidth, layout));
-                // Recompute bounds
-                itemMinX = Infinity; itemMaxX = -Infinity;
-                itemMinY = Infinity; itemMaxY = -Infinity;
-                itemMinZ = Infinity; itemMaxZ = -Infinity;
-                for (let i = itemStartOffset; i < bufferOffset; i++) {
-                    const px = positions[i * 3];
-                    const py = positions[i * 3 + 1];
-                    const pz = positions[i * 3 + 2];
-                    if (px < itemMinX) itemMinX = px;
-                    if (px > itemMaxX) itemMaxX = px;
-                    if (py < itemMinY) itemMinY = py;
-                    if (py > itemMaxY) itemMaxY = py;
-                    if (pz < itemMinZ) itemMinZ = pz;
-                    if (pz > itemMaxZ) itemMaxZ = pz;
-                }
-                itemMaxX += metrics.charWidth;
-                itemMaxY += metrics.charHeight;
             }
         }
 
         itemMeta[itemIdx] = {
             bufferStartIndex: itemStartOffset,
-            glyphCount: itemGlyphCount,
+            glyphCount: bufferOffset - itemStartOffset,
             lineSlotOffsets: itemLineSlotOffsets,
-            wrapColsPerLine: itemWrapColsPerLine,  // [line][i] = wrap col i within that source line
-            pageContentWidth,                      // page column width used (0 = unpaginated)
-            bounds: itemGlyphCount > 0 ? {
-                min: { x: itemMinX, y: itemMinY, z: itemMinZ },
-                max: { x: itemMaxX, y: itemMaxY, z: itemMaxZ },
-                width: itemMaxX - itemMinX,
-                height: itemMaxY - itemMinY,
-                depth: itemMaxZ - itemMinZ
-            } : null
         };
-
-        if (itemMinX !== Infinity) {
-            minX = Math.min(minX, itemMinX);
-            maxX = Math.max(maxX, itemMaxX);
-            minY = Math.min(minY, itemMinY);
-            maxY = Math.max(maxY, itemMaxY);
-            minZ = Math.min(minZ, itemMinZ);
-            maxZ = Math.max(maxZ, itemMaxZ);
-        }
     }
 
-    const bounds = bufferOffset > 0 ? {
-        min: { x: minX, y: minY, z: minZ },
-        max: { x: maxX, y: maxY, z: maxZ },
-        width: maxX - minX,
-        height: maxY - minY,
-        depth: maxZ - minZ
-    } : null;
-
-    // Truncate to actual count (some glyphs may have been skipped)
-    const finalPositions = positions && bufferOffset < totalGlyphs ? positions.subarray(0, bufferOffset * 3) : positions;
+    // Truncate to actual count (defensive — shaped.totalGlyphs is the exact count)
     const finalSizes = bufferOffset < totalGlyphs ? sizes.subarray(0, bufferOffset * 2) : sizes;
     const finalGlyphIds = bufferOffset < totalGlyphs ? glyphIdsArr.subarray(0, bufferOffset) : glyphIdsArr;
     const finalColors = bufferOffset < totalGlyphs ? colors.subarray(0, bufferOffset * 3) : colors;
     const finalGroupIds = bufferOffset < totalGlyphs ? groupIds.subarray(0, bufferOffset) : groupIds;
 
     return {
-        positions: finalPositions,
         sizes: finalSizes,
         glyphIds: finalGlyphIds,
         codepoints: finalGlyphIds,
         colors: finalColors,
         groupIds: finalGroupIds,
         count: bufferOffset,
-        bounds,
-        itemMeta
+        itemMeta,
     };
 }
 

@@ -1,15 +1,20 @@
 /**
  * GlyphLayoutCompute — the GPU layout engine behind a GlyphField, as an adapter.
  *
- * THE ENGINE CONTRACT: a grid's field is always engine-owned (CodeGrid commits are
- * engine builds, emitPositions:false), the kernel is the ONLY position writer —
- * applyPrebuiltBuffers adopts no CPU array, and this adapter's dispatch after each
- * commit IS the layout. CPU consumers answer "where is this glyph" through the fold
- * mirror (LayoutDescription.positionAt — the same pure function, per query), never
- * through a buffer: every input to the fold (line tables, advances, params) is
- * CPU-authored, so nothing is stranded GPU-side and nothing reads back. Parity between
- * mirror, kernel and builder is standing test coverage (tools/layout-mirror.test.mjs,
+ * THE ENGINE CONTRACT: a grid's field is always engine-owned, the kernel is the ONLY
+ * position writer — applyPrebuiltBuffers adopts no CPU position array, and this adapter's
+ * dispatch after each commit IS the layout. CPU consumers answer "where is this glyph"
+ * through the fold mirror (LayoutDescription.positionAt — the same pure function, per query)
+ * and "how big is this" through the fold's extent (LayoutDescription.extent — closed form),
+ * never through a buffer: every input to the fold is CPU-authored, so nothing is stranded
+ * GPU-side and nothing reads back. Parity between mirror, kernel and evaluator is standing
+ * test coverage (tools/layout-mirror.test.mjs, tools/layout-extent.test.mjs,
  * tools/layout-kernel-check.mjs).
+ *
+ * This adapter does not measure anything. It marshals each item's line table and origin into
+ * the kernel; the kernel's own layout scan returns the three scalars a fold's extent is a
+ * closed form on, and foldExtent turns them into the box. There is no second walk here and
+ * no analytic special case for paginated content — one path, one formula.
  *
  * There is no opt-out and no CPU fallback: dispatches are encoded synchronously with
  * no awaits between items — the bulk-lane lesson: awaiting costs more than the GPU work.
@@ -20,6 +25,7 @@
  */
 
 import GlyphLayoutKernel from './GlyphLayoutKernel.js';
+import { pageFold, foldExtent } from '../core/foldGeometry.js';
 
 let _renderer = null;
 let _deviceLostNoted = false;
@@ -30,30 +36,31 @@ export function setComputeRenderer(renderer) { _renderer = renderer || null; _de
 /** On when a renderer is registered — the engine is the only layout path for grids. */
 export function isGpuLayoutEnabled() { return _renderer !== null; }
 
+/** Increment when kernel code changes invalidate cached kernels. */
+const KERNEL_VERSION = 3;
+
 /**
  * Lay out every item just committed to `field` — THE position path for engine fields.
- * Fire-and-forget: dispatches are ENCODED synchronously per item (uniforms are read at
- * encode, so sequential configure→dispatch on one kernel is safe without awaits — the
- * bulk-lane lesson: awaiting between items costs more than the GPU work itself).
+ * Fire-and-forget: the dispatch is ENCODED synchronously (uniforms are read at encode, so
+ * configure→computeSync is safe without awaits — the bulk-lane lesson: awaiting between
+ * items costs more than the GPU work itself).
  *
- * The engine build carries no positions, so this walk also derives what the builder's
- * position walk used to: the pagination gate (rows vs pageHeight, integer-exact), the
- * measured page width (max row extent — written back to the entry so the caret's geom
- * matches the glyphs), and, for paginated items, a conservative analytic bounds override
- * (the builder's scalar bounds are exact for unpaginated content and ride through).
+ * Each item's extent is recorded on its renderedTexts entry (`entry.fold` = the scan's
+ * scalars, `entry.extent` = the box) and the union is returned, so the caller can hand the
+ * field its cull box without walking anything.
  *
  * @param {import('../GlyphField.js').default} field
- * @param {Object} buffers - buildBatchBuffers output (sizes/count/itemMeta; positions null)
+ * @param {Object} buffers - buildBatchBuffers output (sizes/count/itemMeta)
  * @param {Array}  items   - the items that produced `buffers` (origin + scale per item)
  * @param {{metrics: Object, layout: Object, scrollOffset?: number}} shared - the SAME bag
- *   the builder consumed; world conversions here mirror paginationGeometry exactly.
+ *   the builder consumed.
  * @param {number[]} [rendererIds] - entry ids returned by applyPrebuiltBuffers, parallel
- *   to items — the write-back path for pageContentWidth.
- * @returns {{dispatched: number, bounds: ?Object}} bounds is non-null only when a
- *   paginated item required the analytic override.
+ *   to items — the write-back path for each item's fold scalars + extent.
+ * @returns {{dispatched: number, extent: ?Object}} extent is the union of every item's
+ *   fold extent, in the field's local frame; null when nothing was laid out.
  */
 export function syncGpuLayout(field, buffers, items, shared, rendererIds) {
-    const NONE = { dispatched: 0, bounds: null };
+    const NONE = { dispatched: 0, extent: null };
     if (!isGpuLayoutEnabled() || field?.gpuLayout !== true) return NONE;
     // A lost device (VRAM exhaustion, driver reset) can never dispatch again — every
     // flush would re-throw createBuffer failures per field forever (the 2026-08-04
@@ -69,7 +76,7 @@ export function syncGpuLayout(field, buffers, items, shared, rendererIds) {
     const attr = field?.instanceMesh?.geometry?.attributes?.instancePosition;
     if (!attr || attr.isStorageInstancedBufferAttribute !== true) return NONE;
     const { metrics, layout } = shared || {};
-    if (!metrics || !layout || !buffers?.itemMeta || !buffers.count) return NONE;
+    if (!metrics || !layout || !buffers?.itemMeta || !buffers.count || !buffers.sizes) return NONE;
 
     const itemMeta = buffers.itemMeta;
     let maxLines = 1;
@@ -81,42 +88,46 @@ export function syncGpuLayout(field, buffers, items, shared, rendererIds) {
     // changed (code updates require rebuild). The field releases it on engine-off (setGpuLayout)
     // without importing this module.
     let kernel = field._gpuKernel || null;
-    const KERNEL_VERSION = 2; // increment when kernel code changes invalidate cached kernels
     if (kernel && (kernel.positions?.value !== attr || maxLines > kernel.maxLines || (kernel._version || 0) !== KERNEL_VERSION)) {
         kernel.dispose();
         kernel = null;
     }
-    let dispatched = 0;
-    let boundsOverride = null;
     try {
         if (!kernel) {
             kernel = new GlyphLayoutKernel(_renderer, {
                 maxSlots: attr.count, maxLines: Math.max(maxLines, 64), positionsAttribute: attr,
             });
+            kernel._version = KERNEL_VERSION;
         }
         field._gpuKernel = kernel;
-        // Arranger displacements: armed BEFORE the item loop (growth reallocates and drops
+        // Arranger displacements: armed BEFORE configure (growth reallocates and drops
         // uploaded tables). The size guard is the misalignment fuse — a table that doesn't
         // cover the field (stale after a content change) must never dispatch; the arranger
         // re-derives at full size on its next arrange.
         const disp = field._layoutDisplacements;
         kernel.setDisplacements(disp && disp.length >= buffers.count * 3 ? disp : null);
-        const wrap = Math.max(0, Math.trunc(layout.wrapWidth || 0));
-        const charAdvance = metrics.charWidth + metrics.letterSpacing;   // paginationGeometry's nominal cell
 
-        // ── Collect every item's tables + params in ONE pass, then a single dispatch. ──
-        // The per-item table/advance/param BUILD is unchanged; only configure+computeSync
-        // moved out of the loop (one call for the whole field — the item-table kernel).
-        const kernelItems = [];
-        let totalSlots = 0;
         const scroll = Math.trunc(shared.scrollOffset || 0);
-        const pageRows = Math.max(0, Math.trunc(layout.pageHeight || 0));
+        const charAdvance = metrics.charWidth + (metrics.letterSpacing || 0);
         const ls = metrics.lineSpacing;
-        const zStep = metrics.charHeight * (layout.zWrapSpacing || 0);
-        const gapX = (layout.pageGapX || 0) * charAdvance;
-        const gapY = (layout.pageGapY || 0) * ls;
-        const depth = (layout.pageDepth || 0) * ls;
+        const params = {
+            scrollOffset: scroll,
+            wrapWidth: Math.max(0, Math.trunc(layout.wrapWidth || 0)),
+            lineSpacing: ls,
+            zWrapStep: metrics.charHeight * (layout.zWrapSpacing || 0),
+            pageHeight: Math.max(0, Math.trunc(layout.pageHeight || 0)),
+            pagesWide: layout.pagesWide,
+            pageGapXWorld: (layout.pageGapX || 0) * charAdvance,
+            pageGapYWorld: (layout.pageGapY || 0) * ls,
+            pageDepthWorld: (layout.pageDepth || 0) * ls,
+            axis: layout.axis || 'xy',
+        };
 
+        // ── Marshal every item's line table + origin. No measuring: the kernel's scan
+        //    produces the scalars, and foldExtent turns them into a box. ──
+        const kernelItems = [];
+        const origins = [];
+        let totalSlots = 0;
         for (let i = 0; i < itemMeta.length; i++) {
             const meta = itemMeta[i];
             const item = items?.[i];
@@ -127,120 +138,63 @@ export function syncGpuLayout(field, buffers, items, shared, rendererIds) {
             if ((item.scale ?? 1) !== 1) {
                 throw new Error(`engine-owned field carries a scaled item (scale ${item.scale}) — the kernel serves scale-1 items only`);
             }
-
             const base = meta.bufferStartIndex;
             const lso = meta.lineSlotOffsets || [base];
             const lineTable = new Uint32Array(lso.length);
             for (let L = 0; L < lso.length; L++) lineTable[L] = lso[L] - base;   // global → item-local
-
-            // Fused table walk: lineStartRow (visual-row prefix), the advances copy, and the
-            // per-row extent scan the builder's position walk used to provide — max row
-            // extent (the measured page width) and the deepest wrap segment (the z reach).
-            const lineStartRow = new Uint32Array(lineTable.length);
-            const advances = new Float32Array(meta.glyphCount);
-            let row = 0, maxRowExtent = 0, maxSegs = 0;
-            for (let L = 0; L < lineTable.length; L++) {
-                lineStartRow[L] = row;
-                const start = lineTable[L];
-                const end = L + 1 < lineTable.length ? lineTable[L + 1] : meta.glyphCount;
-                let acc = 0, onRow = 0, segs = 0;
-                for (let s = start; s < end; s++) {
-                    if (wrap > 0 && onRow >= wrap) {
-                        if (acc > maxRowExtent) maxRowExtent = acc;
-                        acc = 0; onRow = 0; segs++;
-                    }
-                    const a = buffers.sizes[(base + s) * 2];
-                    advances[s] = a;
-                    acc += a; onRow++;
-                }
-                if (acc > maxRowExtent) maxRowExtent = acc;
-                if (segs > maxSegs) maxSegs = segs;
-                row += 1 + segs;
-            }
-            const totalRows = row;
-
-            // The pagination gate, in INTEGER rows — the builder's totalYSpan > H test with
-            // the float slop removed (spec: totalYSpan = (rows−1−scroll)·ls). The measured
-            // width writes back to the entry so the caret's paginationGeometry matches the
-            // glyphs — the same contract meta.pageContentWidth carried on the CPU path.
-            const paginate = pageRows > 0 && (totalRows - 1 - scroll) > pageRows;
-            const pageWidthWorld = paginate ? maxRowExtent : 0;
-            const entry = rendererIds ? field.renderedTexts.get(rendererIds[i]) : null;
-            if (entry) entry.pageContentWidth = pageWidthWorld;
-
             const origin = item.position || { x: 0, y: 0, z: 0 };
-
+            origins.push({ origin, rendererId: rendererIds ? rendererIds[i] : undefined });
             kernelItems.push({
-                slotCount: meta.glyphCount, lineTable, lineStartRow, advances, outBase: base,
-                params: {
-                    origin,
-                    scrollOffset: scroll,
-                    wrapWidth: wrap,
-                    lineSpacing: ls,
-                    zWrapStep: zStep,
-                    pageHeight: paginate ? pageRows : 0,
-                    pagesWide: layout.pagesWide,
-                    pageWidthWorld,
-                    pageGapXWorld: gapX,
-                    pageGapYWorld: gapY,
-                    pageDepthWorld: depth,
-                    axis: layout.axis || 'xy',
-                },
+                slotCount: meta.glyphCount,
+                lineTable,
+                sizes: buffers.sizes,
+                sizeBase: base,
+                outBase: base,
+                params: { ...params, origin },
             });
             totalSlots += meta.glyphCount;
-
-            // Paginated items outrun the builder's pre-pagination scalar bounds — override
-            // with the closed-form extent (conservative: cell-height padded both ways, real
-            // max row width). Unpaginated items keep the builder's exact scalar bounds.
-            if (paginate) {
-                const lastRow = totalRows - 1 - scroll;
-                const maxPage = Math.floor(lastRow / pageRows);
-                const H = pageRows * ls;
-                const cellH = metrics.charHeight;
-                let minX = origin.x, maxX = origin.x + maxRowExtent;
-                let minY, maxY = origin.y + Math.max(0, scroll) * ls + cellH;
-                let minZ = origin.z - maxSegs * zStep, maxZ = origin.z;
-                if ((layout.axis || 'xy') === 'z') {
-                    minY = origin.y - H - cellH;
-                    minZ -= maxPage * depth;
-                } else {
-                    const usedCols = Math.min(Math.max(1, Math.trunc(layout.pagesWide || 1)), maxPage + 1);
-                    const bands = Math.floor(maxPage / Math.max(1, Math.trunc(layout.pagesWide || 1))) + 1;
-                    maxX += (usedCols - 1) * (maxRowExtent + gapX);
-                    minY = origin.y - ((bands - 1) * (H + gapY) + H) - cellH;
-                }
-                if (!boundsOverride) {
-                    boundsOverride = { min: { x: minX, y: minY, z: minZ }, max: { x: maxX, y: maxY, z: maxZ } };
-                } else {
-                    const b = boundsOverride;
-                    b.min.x = Math.min(b.min.x, minX); b.min.y = Math.min(b.min.y, minY); b.min.z = Math.min(b.min.z, minZ);
-                    b.max.x = Math.max(b.max.x, maxX); b.max.y = Math.max(b.max.y, maxY); b.max.z = Math.max(b.max.z, maxZ);
-                }
-            }
         }
+        if (kernelItems.length === 0) return NONE;
 
         // ONE configure + ONE dispatch for the whole field — the item table carries per-item
-        // params; the kernel resolves each thread's item by binary search.
-        if (kernelItems.length > 0) {
-            kernel.configure({ items: kernelItems, totalSlots });
-            kernel.computeSync();
-            dispatched = kernelItems.length;
+        // params; the kernel resolves each thread's item by binary search. configure returns
+        // the layout scan's scalars, parallel to kernelItems.
+        const scan = kernel.configure({ items: kernelItems, totalSlots });
+        kernel.computeSync();
+
+        // ── Extents: closed form on the scan's scalars, per item, unioned for the field. ──
+        let union = null;
+        for (let i = 0; i < kernelItems.length; i++) {
+            const s = scan[i];
+            const { origin, rendererId } = origins[i];
+            const ext = foldExtent({
+                totalRows: s.totalRows,
+                maxRowExtent: s.maxRowExtent,
+                maxSegs: s.maxSegs,
+                origin,
+                lineSpacing: ls,
+                zStep: params.zWrapStep,
+                cellHeight: metrics.charHeight,
+                scrollOffset: scroll,
+                page: pageFold(layout, metrics, s.maxRowExtent),
+            });
+            const entry = rendererId !== undefined ? field.renderedTexts.get(rendererId) : null;
+            if (entry) { entry.fold = s; entry.extent = ext; }
+            if (!ext) continue;
+            if (!union) {
+                union = { min: { ...ext.min }, max: { ...ext.max } };
+            } else {
+                union.min.x = Math.min(union.min.x, ext.min.x); union.max.x = Math.max(union.max.x, ext.max.x);
+                union.min.y = Math.min(union.min.y, ext.min.y); union.max.y = Math.max(union.max.y, ext.max.y);
+                union.min.z = Math.min(union.min.z, ext.min.z); union.max.z = Math.max(union.max.z, ext.max.z);
+            }
         }
-        // A paginated override must still COVER the unpaginated items (one union box culls
-        // the whole field) — fold the builder's scalar bounds in.
-        if (boundsOverride && buffers.bounds) {
-            const b = boundsOverride, w = buffers.bounds;
-            b.min.x = Math.min(b.min.x, w.min.x); b.min.y = Math.min(b.min.y, w.min.y); b.min.z = Math.min(b.min.z, w.min.z);
-            b.max.x = Math.max(b.max.x, w.max.x); b.max.y = Math.max(b.max.y, w.max.y); b.max.z = Math.max(b.max.z, w.max.z);
+        if (union) {
+            union.width = union.max.x - union.min.x;
+            union.height = union.max.y - union.min.y;
+            union.depth = union.max.z - union.min.z;
         }
-        // The override needs the derived extent fields the builder's bounds carry —
-        // _sizeBackgroundTo reads bounds.width/height, and other consumers read depth.
-        // Without these, the panel sizes to NaN and disappears on a paginated switch.
-        if (boundsOverride) {
-            boundsOverride.width  = boundsOverride.max.x - boundsOverride.min.x;
-            boundsOverride.height = boundsOverride.max.y - boundsOverride.min.y;
-            boundsOverride.depth  = boundsOverride.max.z - boundsOverride.min.z;
-        }
+        return { dispatched: kernelItems.length, extent: union };
     } catch (err) {
         // Engine-owned fields have no CPU fallback in the buffer — a failed dispatch is
         // VISIBLY wrong (glyphs at the origin), which is the correct failure mode for the
@@ -248,6 +202,6 @@ export function syncGpuLayout(field, buffers, items, shared, rendererIds) {
         console.error('GlyphLayoutCompute: GPU layout dispatch FAILED — field renders unlaid until the next flush:', err);
         kernel?.dispose();
         field._gpuKernel = null;
+        return NONE;
     }
-    return { dispatched, bounds: boundsOverride };
 }

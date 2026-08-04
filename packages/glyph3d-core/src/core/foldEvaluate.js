@@ -12,14 +12,16 @@
  * Worker-safe: no DOM, no three.
  */
 
-import { paginationShift } from '../workers/builders/index.js';
+import { pageShift } from './foldGeometry.js';
 
 /**
  * Min/max extent of a contiguous slot range over an explicit position source — an
- * evaluateFold scratch (stride 3). This is the measurement primitive behind arranger
- * block sizing and strata boxes. Never feed it a live instancePosition attribute array:
- * those are stride-4 post-commit (CPU-padded or GPU-owned) — measureSlotRange remains
- * the buffer-backed convenience for non-engine fields (terminals).
+ * evaluateFold scratch (stride 3). This is the measurement primitive behind arranger block
+ * sizing and strata boxes: an arranger measuring the SUB-RANGE it is about to move is
+ * authoring, not bounds-of-the-scene, so a walk is the right tool here and only here.
+ * A whole item's extent is never measured — it is closed form (core/foldGeometry.foldExtent).
+ * Never feed this a live instancePosition attribute array: those are stride-4 and, on an
+ * engine field, GPU-owned (the CPU copy stays zero).
  * @param {Float32Array} pos - stride-3 positions
  * @param {Float32Array} sizes - stride-2 [advance, height] per slot
  * @param {number} startSlot inclusive
@@ -59,7 +61,7 @@ export function measureSlotSpan(pos, sizes, startSlot, count) {
  * @param {number} [p.wrapWidth] - slots per visual row, 0 = no wrap
  * @param {number} p.lineSpacing
  * @param {number} [p.zStep] - world z per wrap segment
- * @param {?Object} [p.geom] - paginationGeometry output, null/pageHeightWorld<=0 = off
+ * @param {?Object} [p.page] - pageFold output, null/rows<=0 = pagination off
  * @param {?Float32Array} [p.displacements] - flat [dx,dy,dz] per slot (ITEM-LOCAL here;
  *   field-global callers pass a subarray at the item's base)
  * @param {Float32Array} [p.out] - reuse a scratch array (length ≥ slotCount*3)
@@ -70,12 +72,11 @@ export function evaluateFold(p) {
         slotCount, lineTable, advances,
         origin = { x: 0, y: 0, z: 0 },
         scrollOffset = 0, wrapWidth = 0, lineSpacing, zStep = 0,
-        geom = null, displacements = null,
+        page = null, displacements = null,
     } = p;
     const out = p.out && p.out.length >= slotCount * 3 ? p.out : new Float32Array(slotCount * 3);
     const wrap = Math.max(0, Math.trunc(wrapWidth));
     const lines = lineTable.length;
-    const paged = !!(geom && geom.pageHeightWorld > 0);
 
     let row0 = 0;   // visual row of the current line's first row
     for (let L = 0; L < lines; L++) {
@@ -84,14 +85,12 @@ export function evaluateFold(p) {
         let x = 0, seg = 0, onRow = 0;
         for (let s = start; s < end; s++) {
             if (wrap > 0 && onRow >= wrap) { x = 0; onRow = 0; seg++; }
-            const screenRow = row0 + seg - scrollOffset;
-            let px = origin.x + x;
-            let py = origin.y - screenRow * lineSpacing;
-            let pz = origin.z - seg * zStep;
-            if (paged) {
-                const { shiftX, mappedRelY, shiftZ } = paginationShift(origin.y - py, geom);
-                px += shiftX; py = origin.y - mappedRelY; pz += shiftZ;
-            }
+            // Integer screen row into the page fold — the same gate and division the
+            // kernel runs, so a boundary row can never land a page apart.
+            const shift = pageShift(row0 + seg - scrollOffset, page);
+            let px = origin.x + x + shift.dx;
+            let py = origin.y - shift.relY;
+            let pz = origin.z - seg * zStep + shift.dz;
             if (displacements) {
                 const d = s * 3;
                 px += displacements[d]; py += displacements[d + 1]; pz += displacements[d + 2];

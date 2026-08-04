@@ -1,59 +1,71 @@
-import { paginationShift } from '../workers/builders/index.js';
-
-const EMPTY = Object.freeze([]);
+import { pageShift, foldExtent, lineSegments } from './foldGeometry.js';
 
 /**
  * LayoutDescription — the authoritative, queryable product of a layout pass.
  *
- * Centralizes the forward layout queries (SOURCE (line,col) → WORLD x,y,z, and →
- * BUFFER slot) so the caret, highlight and selection share ONE source instead of
- * each re-deriving wrap/pagination math (the divergence that kept breaking the
- * caret). See LAYOUT_PLAN.md.
+ * Centralizes the forward layout queries (SOURCE (line,col) → WORLD x,y,z, → BUFFER slot,
+ * and the fold's own EXTENT) so the caret, highlight, selection, panel and cull box share
+ * ONE source instead of each re-deriving wrap/pagination math.
  *
- * Coordinate systems: SOURCE (srcLine,srcCol) is authoritative; VISUAL (visual row)
- * and WORLD are derived; BUFFER slot is a cache (invariant: slot offset within a line
- * == codepoint index). Inverse (world→source) is the GPU picking pass, not here.
+ * Coordinate systems: SOURCE (srcLine,srcCol) is authoritative; VISUAL (visual row) and
+ * WORLD are derived; BUFFER slot is a cache (invariant: slot offset within a line ==
+ * codepoint index). Inverse (world→source) is the GPU picking pass, not here.
  *
- * positionAt is the **fold mirror**: it evaluates the same pure layout function the
- * compute kernel runs on the GPU — wrap segment from the line tables, x from the REAL
- * per-slot advances (emoji are double-advance), the z staircase, and the SAME
- * paginationShift the builder normalizes by. No position buffer exists to read: the GPU
- * owns the laid-out array, and every input to the fold (tables, advances, params) is
- * CPU-authored — so any glyph's "I am at this location" is answerable here, exactly,
- * without readback. Parity with the kernel is a standing test, not a convention.
+ * positionAt is the **fold mirror**: it evaluates the same pure layout function the compute
+ * kernel runs on the GPU — wrap segment from the line's slot count, x from the REAL per-slot
+ * advances (emoji are double-advance), the z staircase, and the SAME integer-row `pageShift`.
+ * No position buffer exists to read: the GPU owns the laid-out array, and every input to the
+ * fold is CPU-authored, so any glyph's "I am at this location" is answerable here, exactly,
+ * without readback.
+ *
+ * extent() is the same story one level up — the fold's AABB, closed form on the three scalars
+ * the layout scan produces (`totalRows`, `maxRowExtent`, `maxSegs`). Bounds are a property of
+ * the description, not a measurement of the buffer it describes; see core/foldGeometry.js.
  */
 export default class LayoutDescription {
     /**
      * @param {Object} p
      * @param {Int32Array} p.lineSlotBase   - line → first buffer slot (slot = base + col)
      * @param {Int32Array} p.lineStartRow   - line → cumulative visual row
-     * @param {Array<number[]>} p.lineWrapCols - line → source-cols where it wraps
      * @param {Int32Array|number[]} p.lineLengths - line → codepoint count
      * @param {Float32Array|null} p.sizes   - per-slot [advance, height]; real advances make x EXACT
-     * @param {Object} p.geom   - pagination geometry (paginationGeometry output)
-     * @param {number} p.originX
-     * @param {number} p.originY
+     * @param {number} [p.wrapWidth] - slots per visual row, 0 = no wrap
+     * @param {?Object} [p.page]     - pageFold output; null / rows<=0 = pagination off
+     * @param {number} [p.originX]
+     * @param {number} [p.originY]
+     * @param {number} [p.originZ]
      * @param {number} p.lineSpacing
-     * @param {number} p.zStep  - world z per intra-line wrap segment (charHeight × zWrapSpacing)
-     * @param {number} p.advance - nominal per-glyph advance (fallback when sizes is absent)
-     * @param {number} [p.scrollOffset] - visual rows the fold is scrolled (Step 3c conveyor)
+     * @param {number} [p.zStep]  - world z per intra-line wrap segment (charHeight × zWrapSpacing)
+     * @param {number} [p.cellHeight] - a row's height (position is the cell's BOTTOM edge)
+     * @param {number} [p.advance] - nominal per-glyph advance (fallback when sizes is absent)
+     * @param {number} [p.scrollOffset] - visual rows the fold is scrolled (the conveyor)
      * @param {Float32Array|null} [p.displacements] - arranger displacements, flat [dx,dy,dz]
      *   per field-global slot — the SAME CPU-authored table the kernel adds post-fold
+     * @param {number} [p.totalRows]    - visual rows the item occupies (layout scan output)
+     * @param {number} [p.maxRowExtent] - widest visual row's world width (layout scan output)
+     * @param {number} [p.maxSegs]      - deepest wrap segment index (layout scan output)
      */
     constructor(p) {
         this.lineSlotBase = p.lineSlotBase ?? null;
         this.lineStartRow = p.lineStartRow ?? null;
-        this.lineWrapCols = p.lineWrapCols ?? null;
         this.lineLengths = p.lineLengths ?? null;
         this.sizes = p.sizes ?? null;
-        this.geom = p.geom ?? null;
+        this.wrapWidth = Math.max(0, Math.trunc(p.wrapWidth ?? 0));
+        this.page = p.page ?? null;
         this.originX = p.originX ?? 0;
         this.originY = p.originY ?? 0;
+        this.originZ = p.originZ ?? 0;
         this.lineSpacing = p.lineSpacing ?? 0;
         this.zStep = p.zStep ?? 0;
+        this.cellHeight = p.cellHeight ?? 0;
         this.advance = p.advance ?? 0;
-        this.scrollOffset = p.scrollOffset ?? 0;  // visual rows the fold is scrolled (Step 3c)
+        this.scrollOffset = p.scrollOffset ?? 0;
         this.displacements = p.displacements ?? null;
+        this.totalRows = p.totalRows ?? 0;
+        this.maxRowExtent = p.maxRowExtent ?? 0;
+        this.maxSegs = p.maxSegs ?? 0;
+        /** @private memoized extent — the description is immutable once built */
+        this._extent = undefined;
     }
 
     /** @returns {number} number of source lines */
@@ -63,6 +75,37 @@ export default class LayoutDescription {
     lineSlotCount(line) {
         if (!this.lineLengths || line < 0 || line >= this.lineLengths.length) return 0;
         return this.lineLengths[line];
+    }
+
+    /**
+     * The fold's AABB in the item's own frame — closed form, memoized.
+     *
+     * This is the ONE bounds source for laid-out glyph content: the cull box, the background
+     * panel, camera framing and the layout containers all resolve here. It costs the same
+     * whether the file is ten lines or a million, and it is exact — no walk, no readback,
+     * no cache to invalidate, because nothing it reads can go stale without the description
+     * itself being rebuilt.
+     *
+     * Arranger displacements are NOT folded in: an arranger AUTHORS its displacement table
+     * and therefore states its own extent (CodeGrid.setDisplacements) rather than having it
+     * measured back out.
+     *
+     * @returns {{min:{x,y,z}, max:{x,y,z}, width:number, height:number, depth:number}|null}
+     */
+    extent() {
+        if (this._extent !== undefined) return this._extent;
+        this._extent = foldExtent({
+            totalRows: this.totalRows,
+            maxRowExtent: this.maxRowExtent,
+            maxSegs: this.maxSegs,
+            origin: { x: this.originX, y: this.originY, z: this.originZ },
+            lineSpacing: this.lineSpacing,
+            zStep: this.zStep,
+            cellHeight: this.cellHeight,
+            scrollOffset: this.scrollOffset,
+            page: this.page,
+        });
+        return this._extent;
     }
 
     /**
@@ -118,15 +161,14 @@ export default class LayoutDescription {
         const len = this.lineSlotCount(line);
         const c = Math.max(0, Math.min(col, len));
 
-        // Wrap segment (affinity right — a col AT a wrap boundary starts the next row,
-        // matching the builder's break-before-place trigger).
-        const wraps = this.lineWrapCols?.[line] ?? EMPTY;
-        let segRow = 0, segStart = 0;
-        for (let i = 0; i < wraps.length; i++) {
-            if (wraps[i] > c) break;
-            segRow = i + 1;
-            segStart = wraps[i];
-        }
+        // Wrap segment. Affinity right — a col AT a wrap boundary starts the next row,
+        // matching the fold's break-before-place trigger — and clamped to the segments the
+        // line actually HAS: an end-of-line caret on a line whose length is an exact
+        // multiple of wrapWidth sits at the end of the last real row, not on a phantom
+        // row past it (the line never wrapped a final time; there was nothing left to place).
+        const w = this.wrapWidth;
+        const segRow = w > 0 ? Math.min(Math.floor(c / w), lineSegments(len, w)) : 0;
+        const segStart = segRow * w;
 
         // x: sum the REAL advances across this visual row, segment-local. Falls back to
         // the nominal advance only when sizes hasn't materialized yet.
@@ -140,23 +182,17 @@ export default class LayoutDescription {
             x += (c - segStart) * this.advance;
         }
 
-        // Scroll (Step 3c): the builder shifts content up by scrollOffset rows, so
-        // screenRow = visualRow − scrollOffset; the mirror must match or a caret on a
-        // scrolled grid sits at the unscrolled position.
-        const visualRow = this.lineStartRow[line] + segRow;
-        const y = this.originY - (visualRow - this.scrollOffset) * this.lineSpacing;
-        // The z staircase: each intra-line wrap segment steps back. Empty lines and
-        // unwrapped cols sit at segRow 0 → z 0, as before.
-        const z = -segRow * this.zStep;
+        // The conveyor: content shifts up by scrollOffset rows, so screenRow = visualRow −
+        // scrollOffset. The page fold then reads that integer row — the SAME gate and the
+        // SAME division the kernel runs, so a boundary row can't land a page apart.
+        const screenRow = this.lineStartRow[line] + segRow - this.scrollOffset;
+        const shift = pageShift(screenRow, this.page);
+        let px = x + shift.dx;
+        let py = this.originY - shift.relY;
+        // The z staircase: each intra-line wrap segment steps back. Page depth (axis 'z')
+        // is additive on top, so the staircase survives pagination exactly as in the buffer.
+        let pz = this.originZ - segRow * this.zStep + shift.dz;
 
-        let px = x, py = y, pz = z;
-        if (this.geom) {
-            // Page fold — the SAME paginationShift the builder normalizes by. shiftZ is
-            // additive (axis 'z' pushes pages back; 'xy' leaves z alone), so the staircase
-            // survives pagination exactly as it does in the buffer.
-            const { shiftX, mappedRelY, shiftZ } = paginationShift(this.originY - y, this.geom);
-            px = x + shiftX; py = this.originY - mappedRelY; pz = z + shiftZ;
-        }
         // Arranger displacement — the same CPU-authored table the kernel adds post-fold.
         // An EOL caret rides the LAST glyph's displacement (the glyph whose right edge it
         // sits on); an empty line has no glyph and no displacement.

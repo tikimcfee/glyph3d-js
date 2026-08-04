@@ -206,6 +206,9 @@ class FrameGrid extends FramedGlyphField {
         this._renderer.applyPrebuiltBuffers({
             positions, sizes, glyphIds, colors, groupIds, count,
         });
+        // State the cull box: the cell grid's own dimensions, the same closed form
+        // getLocalBounds answers with. Nothing walks the buffer we just wrote.
+        this._renderer.setLayoutExtent(this.getLocalBounds());
     }
 
     /**

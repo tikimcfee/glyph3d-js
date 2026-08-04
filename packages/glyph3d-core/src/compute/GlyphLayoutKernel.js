@@ -16,10 +16,10 @@
  * The tables are the whole trick. Two quantities in that fold are prefix sums, and a prefix sum
  * is not per-slot pure (spec §5.4): `lineStartRow[L]` — the visual rows every earlier line
  * consumed, wraps included — and the x offset, the running sum of the real advances of every
- * earlier glyph on the visual row. The CPU already walks both, so it hands the first in
- * (`CodeGrid._buildLayoutWrapIndex`'s output) and derives the second in `configure()` from the
- * builder's own per-slot `sizes.x` advances. Everything the shader does around those two lookups
- * is arithmetic on uniforms, which is why a thread never looks at another thread.
+ * earlier glyph on the visual row. `configure()` derives BOTH in one scan over the field's
+ * `sizes` attribute; nothing upstream walks glyphs to supply them. Everything the shader does
+ * around those two lookups is arithmetic on uniforms, which is why a thread never looks at
+ * another thread.
  *
  * X IS A LOOKUP, NOT A MULTIPLY. A color-emoji codepoint occupies ONE slot but advances TWO cells
  * (`FontChain.shape` doubles `ax` for bitmap slots), so `col × cellWidth` is wrong for every glyph
@@ -27,10 +27,11 @@
  * the summed truth instead. Moving that scan onto the GPU is a later optimization that changes
  * nothing in this shader.
  *
- * Ported from the CPU builder (`workers/builders/index.js`: the newline/wrap loop at :248-357
- * and `paginationShift` at :132-150). `dx`/`dy` are not applied: the live shapers emit them as 0
- * (`FontChain.js:227,255`, `MonospaceShapeCache.js:115`), and a shaper that didn't would need a
- * second per-slot table.
+ * The fold this shader runs and the one `core/foldGeometry.pageShift` runs are the same function
+ * on the same integer rows, and `configure()` and the CPU evaluators share one `layoutScan` — so
+ * "which row is this glyph on" has a single answer, not a GPU answer and a CPU answer that agree
+ * by convention. `dx`/`dy` are not applied: the live shapers emit them as 0 (`FontChain.js:227,255`,
+ * `MonospaceShapeCache.js:115`), and a shaper that didn't would need a second per-slot table.
  *
  * Standalone: this module owns its buffers and its kernel and touches nothing in the render path.
  * `positions` is the seam — `positions.toAttribute()` feeds a render material with no readback at
@@ -41,6 +42,7 @@
 
 import * as THREE from 'three';
 import { TSL } from 'three/webgpu';
+import { layoutScan } from '../core/foldGeometry.js';
 
 const {
     Fn,
@@ -77,11 +79,14 @@ export const POSITION_STRIDE = 4;
  * Floats per item in the item table — the per-item params that VARY across items in a
  * field (everything else is field-level, set once as a uniform). Layout:
  *   [0] originX   [1] originY   [2] originZ
- *   [3] outBase (uint as float)  [4] lineCount  [5] lineTableOffset
- *   [6] pageStrideX  [7] paginated (0|1)
- * Small integers (outBase, lineCount, lineTableOffset) are exactly representable as f32.
+ *   [3] lineCount [4] lineTableOffset  [5] pageStrideX
+ * Small integers (lineCount, lineTableOffset) are exactly representable as f32.
+ *
+ * `pageStrideX` is the only page param that varies per item — it carries that item's
+ * measured row extent. Whether an item paginates is NOT a lane: `screenRow >= pageRows`
+ * decides it per slot, and an item shorter than a page never trips it.
  */
-export const ITEM_STRIDE = 8;
+export const ITEM_STRIDE = 6;
 
 /** Item capacity a kernel is born with. A field's items are few (filename + content = 2). */
 export const DEFAULT_MAX_ITEMS = 8;
@@ -109,12 +114,13 @@ export const LAYOUT_AXIS = Object.freeze({ xy: 0, z: 1 });
  *
  * Counts are counts and world units are world units, and nothing here is re-derived from
  * anything else. That split matters: the builder's z step multiplies `charHeight` while every
- * page gap multiplies `lineSpacing` (they coincide only while `LINE_PITCH === 1.0`), and
- * `paginationGeometry`'s gap unit is the CEIL'd `charWidth + letterSpacing`, ~12% under the real
- * glyph advance. Passing each world quantity outright is what keeps those apart.
+ * page gap multiplies `lineSpacing` (they coincide only while `LINE_PITCH === 1.0`), and the
+ * page gap's unit is the CEIL'd `charWidth + letterSpacing`, ~12% under the real glyph advance.
+ * Passing each world quantity outright is what keeps those apart.
  *
- * `pageWidthWorld` is the widest laid-out row — a reduction over the kernel's own output, and the
- * one genuine impurity in the fold. v1 takes it as a param; the CPU measures it.
+ * The page column stride is NOT here: it is the widest laid-out row, which only the layout
+ * scan knows, so `configure()` measures it in the same pass that builds `xOffsets` and writes
+ * it straight into the item table.
  */
 export const LAYOUT_PARAM_DEFAULTS = Object.freeze({
     /** World position of the item origin. x is a cell's LEFT edge, y its VERTICAL CENTER. */
@@ -133,19 +139,14 @@ export const LAYOUT_PARAM_DEFAULTS = Object.freeze({
     zWrapStep: 0,
 
     /**
-     * Visual ROWS per page before a page break. 0 = pagination off, and the only switch there is
-     * — matching the builder's own `layout.pageHeight` gate. (The builder additionally skips the
-     * whole pass unless `totalYSpan > pageHeightWorld`, a reduction over the item; that gate is
-     * redundant with the per-slot `screenRow >= pageHeight` test except when the content is
-     * exactly one page tall, where the builder leaves the last row unshifted.)
+     * Visual ROWS per page before a page break. 0 = pagination off, and the ONLY switch there
+     * is: `screenRow >= pageHeight` decides per slot whether a row pages, so content that fits
+     * inside one page never trips it and needs no separate "did pagination fire" gate.
      */
     pageHeight: 0,
 
     /** P — horizontal pages before wrapping down. Clamped to ≥ 1: it divides. */
     pagesWide: 1,
-
-    /** Wp — world width of a page: the MEASURED widest row extent, not a char-count guess. */
-    pageWidthWorld: 0,
 
     /** Gx — world x gap between pages (`pageGapX × charAdvance`). */
     pageGapXWorld: 0,
@@ -169,7 +170,6 @@ export const LAYOUT_PARAM_DEFAULTS = Object.freeze({
  * @property {number} [zWrapStep]
  * @property {number} [pageHeight]
  * @property {number} [pagesWide]
- * @property {number} [pageWidthWorld]
  * @property {number} [pageGapXWorld]
  * @property {number} [pageGapYWorld]
  * @property {number} [pageDepthWorld]
@@ -208,7 +208,6 @@ function resolveParams(params = {}) {
         zWrapStep:      params.zWrapStep      ?? d.zWrapStep,
         pageHeight:     params.pageHeight     ?? d.pageHeight,
         pagesWide:      params.pagesWide      ?? d.pagesWide,
-        pageWidthWorld: params.pageWidthWorld ?? d.pageWidthWorld,
         pageGapXWorld:  params.pageGapXWorld  ?? d.pageGapXWorld,
         pageGapYWorld:  params.pageGapYWorld  ?? d.pageGapYWorld,
         pageDepthWorld: params.pageDepthWorld ?? d.pageDepthWorld,
@@ -386,16 +385,16 @@ export default class GlyphLayoutKernel {
 
             const z = originZ.sub(seg.toFloat().mul(u.zStep)).toVar('z');
 
-            // Page fold — per-item gate + stride (pageWidthWorld varies by item's row extent),
-            // field-level pageRows/pageStrideY/depth. Integer-row pagination (WGSL f32 division
-            // is 2.5-ULP loose; see the original note in git history).
-            const paginated = it.element(ib.add(uint(7))).toVar('pag');
-            If(paginated.greaterThan(float(0.5)), () => {
+            // Page fold — ONE gate, the same one the CPU mirror runs: pagination is armed by
+            // pageRows > 0 and fires at screenRow >= pageRows. Content that fits in a page
+            // never trips it, so there is no second "did it fire" test anywhere. Integer-row
+            // division throughout (WGSL f32 division is 2.5-ULP loose).
+            If(u.pageRows.greaterThan(int(0)), () => {
                 If(screenRow.greaterThanEqual(u.pageRows), () => {
                     const page = screenRow.div(u.pageRows).toVar('page');
                     const rowOff = screenRow.sub(page.mul(u.pageRows))
                         .toFloat().mul(u.lineSpacing).toVar('rowOff');
-                    const strideX = it.element(ib.add(uint(6))).toVar('strideX');
+                    const strideX = it.element(ib.add(uint(5))).toVar('strideX');
 
                     If(u.pagAxis.equal(int(LAYOUT_AXIS.z)), () => {
                         y.assign(originY.sub(rowOff));
@@ -483,8 +482,8 @@ export default class GlyphLayoutKernel {
             }
             const localSlot = globalSlot.sub(starts.element(item)).toVar('localSlot');
             const itemBase = item.mul(uint(ITEM_STRIDE)).toVar('itemBase');
-            const lineOff = uint(it.element(itemBase.add(uint(5)))).toVar('lineOff');   // lineTableOffset
-            const lineCnt = uint(it.element(itemBase.add(uint(4)))).toVar('lineCnt');   // lineCount
+            const lineOff = uint(it.element(itemBase.add(uint(4)))).toVar('lineOff');   // lineTableOffset
+            const lineCnt = uint(it.element(itemBase.add(uint(3)))).toVar('lineCnt');   // lineCount
 
             // ── Line search within the item's range [lineOff, lineOff+lineCnt). ──
             // Largest L with lineTable[lineOff+L] ≤ localSlot. The result is an ABSOLUTE index
@@ -514,18 +513,36 @@ export default class GlyphLayoutKernel {
     }
 
     /**
-     * Reconfigure inputs for ALL items in a field — one configure, one dispatch.
+     * Reconfigure inputs for ALL items in a field — one configure, one dispatch — and
+     * return each item's LAYOUT SCALARS.
      *
-     * Field-level params (wrap, scroll, lineSpacing, zStep, pagination geometry) come from
-     * `items[0].params` — they are identical across items (the adapter builds them from the same
-     * shared metrics/layout bag). Per-item params (origin, outBase, pagination stride) go into the
-     * item table.
+     * This method owns the layout scan, which is the reason the CPU touches glyphs at all:
+     * the x offset of a slot is a segmented prefix sum of real advances (not a column times
+     * a cell width — a color emoji occupies one slot and advances two cells), and a prefix
+     * sum is not per-slot pure. The scan runs once here and yields, as byproducts of the
+     * same pass, the three scalars the fold's EXTENT is a closed form on:
+     *
+     *   maxRowExtent  the widest visual row — also the page column stride, so this is
+     *                 measured BEFORE the item table is written rather than passed in
+     *                 (the caller cannot know it; only the scan does)
+     *   totalRows     visual rows the item occupies, wrap segments included
+     *   maxSegs       the deepest wrap segment — the item's z reach
+     *
+     * `lineStartRow` is derived here too, closed form from the line table: wrapWidth counts
+     * SLOTS, so a line's segment count is floor((len−1)/wrapWidth) and no caller needs to
+     * walk anything to supply it.
+     *
+     * Field-level params (wrap, scroll, lineSpacing, zStep, page geometry) come from
+     * `items[0].params` — identical across items, since the adapter builds them from one
+     * shared metrics/layout bag. Only origin and the measured page stride vary per item.
      *
      * @param {Object} cfg
-     * @param {Array<{slotCount:number, lineTable:Uint32Array, lineStartRow:Uint32Array,
-     *   advances:Float32Array, outBase:number, params:GlyphLayoutParams}>} cfg.items
+     * @param {Array<{slotCount:number, lineTable:Uint32Array, sizes:Float32Array,
+     *   sizeBase?:number, outBase:number, params:GlyphLayoutParams}>} cfg.items
+     *   `sizes` is the field's stride-2 [advance, height] attribute array, read at
+     *   `(sizeBase + localSlot) * 2` — no per-item advance copy is made.
      * @param {number} cfg.totalSlots - Σ items' slotCount (the dispatch width)
-     * @returns {this}
+     * @returns {Array<{maxRowExtent:number, totalRows:number, maxSegs:number}>} parallel to items
      */
     configure({ items, totalSlots }) {
         if (!Array.isArray(items) || items.length === 0) {
@@ -534,12 +551,11 @@ export default class GlyphLayoutKernel {
         const itemCount = items.length;
         let sumSlots = 0, sumLines = 0;
         for (const it of items) {
-            if (!(it.lineTable instanceof Uint32Array) || !(it.lineStartRow instanceof Uint32Array) ||
-                !(it.advances instanceof Float32Array)) {
-                throw new Error('GlyphLayoutKernel: each item needs lineTable/lineStartRow (Uint32Array) + advances (Float32Array)');
+            if (!(it.lineTable instanceof Uint32Array)) {
+                throw new Error('GlyphLayoutKernel: each item needs a lineTable (Uint32Array)');
             }
-            if (it.lineTable.length !== it.lineStartRow.length) {
-                throw new Error(`GlyphLayoutKernel: item lineTable/lineStartRow length mismatch (${it.lineTable.length} vs ${it.lineStartRow.length})`);
+            if (!(it.sizes instanceof Float32Array)) {
+                throw new Error('GlyphLayoutKernel: each item needs the field sizes array (Float32Array)');
             }
             if (it.lineTable[0] !== 0) {
                 throw new Error(`GlyphLayoutKernel: item lineTable[0] must be 0, got ${it.lineTable[0]}`);
@@ -555,12 +571,7 @@ export default class GlyphLayoutKernel {
         const p = resolveParams(items[0].params);
         const axis = resolveAxis(p.axis);
         const wrapCols = Math.max(0, Math.trunc(p.wrapWidth));
-        // pageHeight is PER-ITEM-MODIFIED (paginate ? pageRows : 0) — items[0] might be the
-        // filename (short, never paginates → 0). The FIELD-LEVEL pageRows is the max across
-        // items: the paginating item carries the real value; non-paginating items carry 0.
-        // A single uniform serves all items; the per-item `paginated` flag gates the fold.
-        let pageRows = 0;
-        for (const it of items) pageRows = Math.max(pageRows, Math.max(0, Math.trunc(it.params?.pageHeight || 0)));
+        const pageRows = Math.max(0, Math.trunc(p.pageHeight));
         const fieldGapX = p.pageGapXWorld;
 
         // Grow before writing. Capacity is the one input the kernel is compiled against.
@@ -581,53 +592,46 @@ export default class GlyphLayoutKernel {
         this.itemCount = itemCount;
         this.params = p;
 
-        // ── Concatenate tables + write field-global xOffsets + populate item table ──
+        // ── Concatenate tables + run the layout scan + populate the item table ──
         const lt = this.lineTable.value.array;
         const lsr = this.lineStartRow.value.array;
         const xo = this.xOffsets.value.array;
         const itBuf = this.itemTable.value.array;
         const starts = this.itemStarts.value.array;
+        const metrics = new Array(itemCount);
         let lineOff = 0;
 
         for (let i = 0; i < itemCount; i++) {
             const it = items[i];
-            const { slotCount, lineTable, lineStartRow, advances, outBase, params } = it;
+            const { slotCount, lineTable, sizes, outBase, params } = it;
+            const sizeBase = it.sizeBase ?? outBase;
+            const lineN = lineTable.length;
 
-            // Concatenate this item's line tables at the running line offset.
             lt.set(lineTable, lineOff);
-            lsr.set(lineStartRow, lineOff);
 
-            // Field-global xOffsets: the prefix-sum scan at GLOBAL slot indices (base + localSlot).
-            // Reset at every line start AND every wrap — the running sum of REAL advances, exactly
-            // as the builder's inner loop computes it. See the prior configure's note on why this
-            // is a lookup, not a multiply, and why the reset-at-wrap keeps it exact.
-            for (let L = 0; L < lineTable.length; L++) {
-                const end = L + 1 < lineTable.length ? lineTable[L + 1] : slotCount;
-                let acc = 0, onSegment = 0;
-                for (let s = lineTable[L]; s < end; s++) {
-                    if (wrapCols > 0 && onSegment >= wrapCols) { acc = 0; onSegment = 0; }
-                    xo[outBase + s] = acc;
-                    acc += advances[s];
-                    onSegment++;
-                }
-            }
+            // THE LAYOUT SCAN — core/foldGeometry.layoutScan, writing straight into this
+            // kernel's concatenated buffers at the item's offsets. Shared with the CPU
+            // evaluators so "widest row" means the same thing on both sides of the wire.
+            const scan = layoutScan({
+                slotCount, lineTable, sizes, sizeBase, wrapWidth: wrapCols,
+                xOffsets: xo, xBase: outBase,
+                lineStartRow: lsr, lineRowBase: lineOff,
+            });
+            metrics[i] = scan;
+            const { maxRowExtent } = scan;
 
-            // Item table: per-item params that vary across items.
-            const pageStrideX = (params?.pageWidthWorld || 0) + fieldGapX;
-            const paginated = (params?.pageHeight || 0) > 0 ? 1 : 0;
+            // Item table: origin + the item's line-table window + its measured page stride.
             const o = params?.origin || { x: 0, y: 0, z: 0 };
             const ib = i * ITEM_STRIDE;
             itBuf[ib + 0] = o.x;  itBuf[ib + 1] = o.y;  itBuf[ib + 2] = o.z;
-            itBuf[ib + 3] = outBase;
-            itBuf[ib + 4] = lineTable.length;
-            itBuf[ib + 5] = lineOff;
-            itBuf[ib + 6] = pageStrideX;
-            itBuf[ib + 7] = paginated;
+            itBuf[ib + 3] = lineN;
+            itBuf[ib + 4] = lineOff;
+            itBuf[ib + 5] = maxRowExtent + fieldGapX;
 
             // Item starts: bufferStartIndex per item (the item-search key).
             starts[i] = outBase;
 
-            lineOff += lineTable.length;
+            lineOff += lineN;
         }
 
         this.lineTable.value.needsUpdate = true;
@@ -653,7 +657,7 @@ export default class GlyphLayoutKernel {
         // workgroup count when it changes, so this is not a recompile.
         this._kernel.count = totalSlots;
 
-        return this;
+        return metrics;
     }
 
     /**
