@@ -62,19 +62,34 @@ export default class BoundedObject3D extends THREE.Object3D {
      * Refresh the object's Three.js-standard Extent (`boundingBox` + `boundingSphere`)
      * from getLocalBounds(). Local space — matching Three.js's geometry.boundingSphere
      * convention (consumers apply matrixWorld for a world result, as getBounds does).
-     * Kept fresh on every getBounds() read; callable directly when a caller needs the
-     * Extent without a world box. Returns the local box so getBounds reuses it (one
-     * getLocalBounds() call, not two).
+     *
+     * DIRTINESS-GATED: the Extent is LOCAL, so it changes ONLY when the content box
+     * changes — a transform move (the common per-frame case) leaves it untouched.
+     * So if the local box hasn't moved since the last refresh, the sphere is still
+     * valid and we skip the `getBoundingSphere` recompute: a 6-float equality check,
+     * not a fresh sphere derivation. getBounds() runs on a hot path (the camera
+     * soft-bounds sweep calls it per surface per frame), so the full work fires only
+     * on actual content change. `boundingBox`/`boundingSphere` are (re)assigned every
+     * call — cheap pointer writes that keep the properties current for any reader.
      * @returns {THREE.Box3} the local Extent box (reused; do not hold across calls)
      */
     refreshExtent() {
+        const local = this.getLocalBounds();
         const box = this._extentBox || (this._extentBox = new THREE.Box3());
-        box.copy(this.getLocalBounds());
         const sphere = this._extentSphere || (this._extentSphere = new THREE.Sphere());
-        if (box.isEmpty()) sphere.set(_origin, 0);
-        else box.getBoundingSphere(sphere);
         this.boundingBox = box;
         this.boundingSphere = sphere;
+        // Unchanged local box ⇒ sphere still valid. Skip the recompute (value-equality
+        // on the 6 extents; robust whether or not the subclass reuses its box object).
+        if (this._extentValid
+            && local.min.x === box.min.x && local.min.y === box.min.y && local.min.z === box.min.z
+            && local.max.x === box.max.x && local.max.y === box.max.y && local.max.z === box.max.z) {
+            return box;
+        }
+        box.copy(local);
+        if (box.isEmpty()) sphere.set(_origin, 0);
+        else box.getBoundingSphere(sphere);
+        this._extentValid = true;
         return box;
     }
 
