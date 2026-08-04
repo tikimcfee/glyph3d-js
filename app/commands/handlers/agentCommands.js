@@ -80,9 +80,9 @@ export async function openAgentSession(ctx, sessionId, { limit, harness = 'claud
     const t1 = performance.now();
     const byteLen = bytes.byteLength;   // the parse TRANSFERS the buffer — measure first
     const cap = ctx.agentBooks.capForHydration(agentId, limit);
-    const { events, cwd, meta, total } = await parseSessionOffThread(bytes, { harness: agentType, cwd: indexCwd, cap });
+    const { records, total, cwd, meta } = await parseSessionOffThread(bytes, { harness: agentType, cwd: indexCwd, cap });
     const t2 = performance.now();
-    const added = await ctx.agentBooks.hydrate(agentId, events, { agentType, sessionId, cwd, meta, limit });
+    const added = await ctx.agentBooks.hydrate(agentId, records, { agentType, sessionId, cwd, meta, limit });
     const t3 = performance.now();
     return { agentId, added, total, bytes: byteLen,
              ms: { read: r1(t1 - t0), parse: r1(t2 - t1), hydrate: r1(t3 - t2) } };

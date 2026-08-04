@@ -44,6 +44,7 @@ import { LAYOUT_SCHEMES } from './layouts/index.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import { classifyByExtension } from '../core/fileKind.js';
 import { decorateForAction, kindForAction, ACTION_HUES, cssHue, normalizeToolCall, normalizeMessage } from './toolRegistry.js';
+import { eventsToRecords } from '../workers/sessionParseJob.js';
 import { yieldToFrame } from '../utils/frameYield.js';
 
 export const AGENT_BOOKS_DEFAULTS = {
@@ -305,7 +306,10 @@ export default class AgentBooks {
      * yields: no mid-build relayout, no half-built book visible — and a live hook event
      * landing mid-hydrate just batches into the same closing relayout.
      * @param {string} agentId
-     * @param {Array<{kind:string, name?:string, input?:Object, response?:Object, mtype?:string, text?:string}>} events
+     * @param {Array} events - raw adapter events ({kind:'tool'|'message', …}) OR
+     *        pre-normalized records ({action, target, …}) — the codec normalizes in the
+     *        worker, so what arrives here is usually records already; either way
+     *        eventsToRecords interprets each entry in exactly one place
      * @param {{agentType?:string, sessionId?:string|null, cwd?:string, meta?:Object|null, limit?:number, budgetMs?:number}} [opts]
      * @returns {Promise<number>} sheets added
      */
@@ -321,15 +325,12 @@ export default class AgentBooks {
         if (limit != null && Number.isFinite(v)) lane.maxSheets = Math.max(0, Math.floor(v));
         const cap = this._capFor(lane);
         const slice = events.length > cap ? events.slice(-cap) : events;
+        const records = eventsToRecords(slice, cwd);   // records pass through; noise drops
         this._batch = true;
         let added = 0;
         let slice0 = performance.now();
         try {
-            for (const ev of slice) {
-                const rec = ev.kind === 'message'
-                    ? normalizeMessage(ev.mtype, ev.text)
-                    : normalizeToolCall(ev.name, ev.input, ev.response, ev.cwd ?? cwd);
-                if (!rec) continue;   // noise tools / empty blocks drop, same as live
+            for (const rec of records) {
                 this.activity(agentId, agentType, rec);
                 added++;
                 if (performance.now() - slice0 > budgetMs) {

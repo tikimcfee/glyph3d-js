@@ -2,17 +2,18 @@
 //
 //   bun tools/session-parse.test.mjs
 //
-//   - runSessionParseJob (pure): bytes → { events, total, cwd, meta } matches the
-//     sync dialect exactly (claude + kimi), cap pre-slices the tail while total
-//     keeps the FULL count
-//   - SessionParsePool end-to-end: same result through whichever backend runs
-//     (worker in a browser-ish runtime, sliced main-thread fallback otherwise),
-//     and consecutive jobs stay FIFO-correct
-//   - the pool reports which backend served (offThread) so the lock can see it
+//   - eventsToRecords: raw events → normalized records through the ONE registry
+//     (noise drops, cwd relativizes); pre-normalized records pass through
+//   - runSessionParseJob (pure): bytes → { records, total, cwd, meta } — records
+//     equal manual normalization of the sync dialect's events; cap slices the
+//     event tail BEFORE normalizing (hydrate's exact order); total stays full
+//   - SessionParsePool end-to-end: same result through whichever backend runs,
+//     concurrent jobs don't cross-talk, and a real pool (>1 worker) serves them
 
-import { runSessionParseJob } from '../packages/glyph3d-core/src/workers/sessionParseJob.js';
+import { runSessionParseJob, eventsToRecords } from '../packages/glyph3d-core/src/workers/sessionParseJob.js';
 import { SessionParsePool } from '../packages/glyph3d-core/src/workers/SessionParsePool.js';
 import { parseClaudeSession, parseKimiSession } from '../packages/glyph3d-core/src/collections/sessionAdapter.js';
+import { normalizeToolCall, normalizeMessage } from '../packages/glyph3d-core/src/collections/toolRegistry.js';
 
 let pass = 0, fail = 0;
 const ok = (cond, msg) => { if (cond) { pass++; } else { fail++; console.error(`  ✗ ${msg}`); } };
@@ -41,58 +42,73 @@ const kimiText = [
 
 const enc = (s) => new TextEncoder().encode(s);
 
-// ── runSessionParseJob: claude, uncapped — identical to the sync dialect ──────
+// ── eventsToRecords: the ONE registry, noise drops, records pass through ──────
+{
+  const events = parseClaudeSession(claudeText).events;
+  const records = eventsToRecords(events, '/main/repo');
+  const want = events.map((ev) => ev.kind === 'message'
+    ? normalizeMessage(ev.mtype, ev.text)
+    : normalizeToolCall(ev.name, ev.input, ev.response, '/main/repo')).filter(Boolean);
+  eq(records, want, 'records === manual per-event normalization');
+  const rec = { action: 'say', target: '', detail: '', result: 'hi', meta: null };
+  eq(eventsToRecords([rec]), [rec], 'a pre-normalized record passes through untouched');
+  eq(eventsToRecords([{ kind: 'tool', name: 'TodoWrite', input: {}, response: null, ts: null }]), [],
+    'noise tools drop here');
+}
+
+// ── runSessionParseJob: claude — records/meta/total against the sync dialect ──
 {
   const job = runSessionParseJob({ bytes: enc(claudeText), harness: 'claude' });
   const want = parseClaudeSession(claudeText);
-  eq(job.events, want.events, 'claude events identical to sync parse');
+  eq(job.records, eventsToRecords(want.events, want.cwd), 'job records === sync parse + normalize');
   eq(job.total, want.events.length, 'total = full event count');
   eq(job.cwd, want.cwd, 'cwd harvested');
   eq(job.meta, want.meta, 'meta harvested');
-  eq(job.firstTs, want.firstTs, 'firstTs');
-  eq(job.lastTs, want.lastTs, 'lastTs');
 }
 
-// ── cap pre-slices the tail; total stays full; pairing survives the slice ─────
+// ── cap slices EVENTS first, then normalize (hydrate's exact order) ───────────
 {
   const job = runSessionParseJob({ bytes: enc(claudeText), harness: 'claude', cap: 2 });
-  eq(job.events.length, 2, 'cap keeps exactly the newest 2 events');
-  eq(job.events.map((e) => e.text), ['two', 'three'], 'the tail slice, in order');
+  eq(job.records.map((r) => r.result), ['two', 'three'], 'cap keeps the newest 2 events, normalized');
   eq(job.total, 4, 'total still reports the whole record');
   const sliced = runSessionParseJob({ bytes: enc(claudeText), harness: 'claude', cap: 3 });
-  eq(sliced.events[0].response, { stdout: 'out\n' }, 'tool_use inside the window keeps its paired response');
+  eq(sliced.records[0].result, 'out\n', 'tool_use inside the window keeps its paired response');
 }
 
 // ── runSessionParseJob: kimi — dialect + index-cwd fallback ───────────────────
 {
   const job = runSessionParseJob({ bytes: enc(kimiText), harness: 'kimi', cwd: '/index/cwd' });
-  const want = parseKimiSession(kimiText, '/index/cwd');
-  eq(job.events, want.events, 'kimi events identical to sync parse');
+  eq(job.records, eventsToRecords(parseKimiSession(kimiText, '/index/cwd').events, '/kimi/repo'),
+    'kimi records === sync parse + normalize');
   eq(job.cwd, '/kimi/repo', 'display.cwd wins over the index fallback');
   eq(job.meta.model, 'kimi-k2', 'kimi meta harvested');
 }
 
-// ── the pool: same result through whichever backend runs ──────────────────────
+// ── the pool: same result through whichever backend runs; jobs fan out ────────
 {
   const pool = new SessionParsePool();
   const r = await pool.parse(enc(claudeText), { harness: 'claude' });
-  eq(r.events, parseClaudeSession(claudeText).events, `pool result matches dialect (backend: ${pool.offThread ? 'worker' : 'main-thread'})`);
-  eq(r.total, 4, 'pool total');
+  eq(r.records, eventsToRecords(parseClaudeSession(claudeText).events, '/main/repo'),
+    `pool result matches dialect (workers: ${pool.workerCount})`);
+  ok(pool.workerCount <= 1, `a single job spawns AT MOST one worker (count: ${pool.workerCount})`);
 
-  // Consecutive jobs, mixed caps/harnesses — no cross-talk.
+  // Consecutive + concurrent jobs, mixed caps/harnesses — no cross-talk, pool grows on demand.
   const [a, b] = await Promise.all([
     pool.parse(enc(claudeText), { harness: 'claude', cap: 1 }),
     pool.parse(enc(kimiText), { harness: 'kimi', cwd: '/index/cwd' }),
   ]);
-  eq(a.events.map((e) => e.text), ['three'], 'concurrent job A: cap 1 tail');
-  eq(b.events.length, 2, 'concurrent job B: kimi full');
+  eq(a.records.map((x) => x.result), ['three'], 'concurrent job A: cap 1 tail');
+  eq(b.records.length, 2, 'concurrent job B: kimi full');
+  ok(pool.workerCount === 0 || pool.workerCount >= 2, `concurrent jobs grew the pool (count: ${pool.workerCount})`);
+  const c = await pool.parse(enc(claudeText), { harness: 'claude', cap: 2 });
+  eq(c.records.map((x) => x.result), ['two', 'three'], 'a later job after concurrent ones');
   pool.dispose();
 }
 
 // ── degenerate inputs ─────────────────────────────────────────────────────────
 {
   const job = runSessionParseJob({ bytes: enc(''), harness: 'claude' });
-  eq(job.events, [], 'empty bytes → no events');
+  eq(job.records, [], 'empty bytes → no records');
   eq(job.total, 0, 'empty bytes → total 0');
 }
 

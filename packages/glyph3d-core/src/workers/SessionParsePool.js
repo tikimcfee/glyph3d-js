@@ -1,96 +1,159 @@
 /**
  * SessionParsePool — the main-thread handle on the transcript codec.
  *
- * parseSessionOffThread(bytes, { harness, cwd, cap }) → { events, total, cwd, meta, … }.
+ * parseSessionOffThread(bytes, { harness, cwd, cap }) → { records, total, cwd, meta, … }.
  *
  * Two backends behind the ONE result shape:
- *   - a dedicated parse worker (production): the transcript's ArrayBuffer is
- *     TRANSFERRED in (zero-copy), the sync parser crunches on the worker
- *     thread (no slicing needed there), only the capped event tail clones back.
+ *   - a POOL of dedicated parse workers (production): jobs are idempotent pure
+ *     functions (bytes + harness + cap in, records out — no shared state), so
+ *     any worker can take any job. The transcript's ArrayBuffer is TRANSFERRED
+ *     in (zero-copy); parse AND normalize run off-thread; only the capped,
+ *     noise-filtered record tail clones back. A restore's 6-wide book pour fans
+ *     out across the pool instead of serializing on one thread.
  *   - the main-thread sliced parsers (fallback: no Worker — tests, headless):
- *     parseClaudeSessionAsync / parseKimiSessionAsync, frame-budgeted.
- *
- * One worker, FIFO: restore's 6-wide book pour queues its parses on the port;
- * the win is keeping megabyte JSON.parse + pairing off the main thread, not
- * parallel books (Σparse measured ~0.5s across a whole 12-book restore).
+ *     parseClaudeSessionAsync / parseKimiSessionAsync, frame-budgeted, then the
+ *     same eventsToRecords.
  */
 
-import { runSessionParseJob } from './sessionParseJob.js';
+import { runSessionParseJob, eventsToRecords } from './sessionParseJob.js';
 import { parseClaudeSessionAsync, parseKimiSessionAsync } from '../collections/sessionAdapter.js';
+
+// The pool is DEMAND-DRIVEN: one worker at first job, spawning another whenever
+// work queues behind busy workers, capped at the project's hardware convention
+// (WorkerBridge: hardwareConcurrency - 1). A single agent.open costs one worker;
+// a restore's 12-book pour grows the pool to its wave width. The usual worker
+// restraint — per-worker WASM heaps — does NOT apply (pure JS workers), and
+// idle workers sleep, so grown workers stay for reuse rather than churning.
+const POOL_MAX = Math.max(1, (globalThis.navigator?.hardwareConcurrency || 4) - 1);
 
 export class SessionParsePool {
     constructor() {
-        /** @private */ this._worker = null;
-        /** @private */ this._workerFailed = false;
+        /** @private */ this._workers = null;      // [{ w, busy }] — null until first job
+        /** @private */ this._spawnFailed = false;
         /** @private */ this._nextJobId = 0;
-        /** @private */ this._pending = new Map();   // jobId -> { resolve, reject }
+        /** @private */ this._byJobId = new Map(); // jobId -> { worker, resolve, reject }
+        /** @private */ this._queue = [];          // jobs waiting on a free worker
     }
 
-    /** @returns {boolean} worker backend live (false = main-thread fallback) */
-    get offThread() { return !!this._worker; }
+    /** @returns {number} live worker count (0 = main-thread fallback) */
+    get workerCount() { return this._workers?.length ?? 0; }
 
     /**
-     * Parse a transcript's raw bytes into the event stream.
+     * Parse a transcript's raw bytes into normalized book records.
      * @param {Uint8Array} bytes - raw JSONL transcript (its buffer is TRANSFERRED
-     *        to the worker when the worker path runs — read byteLength BEFORE calling)
+     *        to a worker when the pool path runs — read byteLength BEFORE calling)
      * @param {{ harness?: string, cwd?: string|null, cap?: number }} [opts]
-     * @returns {Promise<{ events: Array, total: number, cwd: string|null, meta: Object,
+     * @returns {Promise<{ records: Array, total: number, cwd: string|null, meta: Object,
      *           firstTs: number|null, lastTs: number|null }>}
      */
     async parse(bytes, { harness = 'claude', cwd = null, cap = Infinity } = {}) {
-        if (this._ensureWorker()) {
-            const jobId = ++this._nextJobId;
+        if (this._ensureWorkers()) {
             return new Promise((resolve, reject) => {
-                this._pending.set(jobId, { resolve, reject });
-                const parcel = { buffer: bytes.buffer, byteOffset: bytes.byteOffset, byteLength: bytes.byteLength };
-                this._worker.postMessage({ jobId, bytes: parcel, harness, cwd, cap }, [bytes.buffer]);
+                this._queue.push({
+                    msg: {
+                        jobId: ++this._nextJobId,
+                        bytes: { buffer: bytes.buffer, byteOffset: bytes.byteOffset, byteLength: bytes.byteLength },
+                        harness, cwd, cap,
+                    },
+                    transfer: [bytes.buffer],
+                    resolve, reject,
+                });
+                this._pump();
             });
         }
-        // Fallback: decode + slice on the main thread, frame-budgeted.
+        // Fallback: decode + parse on the main thread, frame-budgeted; the
+        // normalize pass over the capped tail is trivial at any sane cap.
         const text = new TextDecoder().decode(bytes);
         const out = harness === 'kimi'
             ? await parseKimiSessionAsync(text, cwd)
             : await parseClaudeSessionAsync(text);
         const total = out.events.length;
-        const events = Number.isFinite(cap) && total > cap ? out.events.slice(-cap) : out.events;
-        return { events, total, cwd: out.cwd, meta: out.meta, firstTs: out.firstTs, lastTs: out.lastTs };
+        const slice = Number.isFinite(cap) && total > cap ? out.events.slice(-cap) : out.events;
+        const records = eventsToRecords(slice, out.cwd ?? cwd ?? '');
+        return { records, total, cwd: out.cwd, meta: out.meta, firstTs: out.firstTs, lastTs: out.lastTs };
     }
 
-    /** Lazily spawn the singleton worker; false when workers are unavailable/broken. @private */
-    _ensureWorker() {
-        if (this._worker) return true;
-        if (this._workerFailed || typeof Worker === 'undefined') return false;
-        try {
-            const w = new Worker(new URL('./SessionParseWorker.js', import.meta.url), { type: 'module' });
-            w.onmessage = (e) => {
-                const { jobId, type, message, ...result } = e.data || {};
-                const p = this._pending.get(jobId);
-                if (!p) return;
-                this._pending.delete(jobId);
-                type === 'ERROR' ? p.reject(new Error(message)) : p.resolve(result);
-            };
-            w.onerror = (err) => {
-                // A dead worker rejects its queue once and retires — the next
-                // parse falls back to the main thread instead of hanging.
-                console.warn('[SessionParsePool] worker error — falling back to main thread:', err?.message || err);
-                this._worker = null;
-                this._workerFailed = true;
-                for (const [, p] of this._pending) p.reject(new Error('parse worker died'));
-                this._pending.clear();
-            };
-            this._worker = w;
-            return true;
-        } catch {
-            this._workerFailed = true;
-            return false;
+    /**
+     * Feed queued jobs to idle workers, GROWING the pool while work queues
+     * behind busy ones (bounded by POOL_MAX and the queue itself — a 3-job
+     * burst never wants a 4th worker).
+     * @private
+     */
+    _pump() {
+        while (this._queue.length > 0) {
+            let entry = this._workers.find((e) => !e.busy);
+            if (!entry) {
+                if (this._workers.length >= Math.min(POOL_MAX, this._queue.length + this._byJobId.size)) break;
+                entry = this._spawnWorker();
+                if (!entry) break;
+            }
+            const job = this._queue.shift();
+            entry.busy = true;
+            this._byJobId.set(job.msg.jobId, { worker: entry, resolve: job.resolve, reject: job.reject });
+            entry.w.postMessage(job.msg, job.transfer);
         }
     }
 
-    /** Terminate the worker (app teardown). */
+    /** Spawn one pool worker; null when spawning is broken. @private */
+    _spawnWorker() {
+        try {
+            const w = new Worker(new URL('./SessionParseWorker.js', import.meta.url), { type: 'module' });
+            const entry = { w, busy: false };
+            w.onmessage = (e) => this._onResult(entry, e.data || {});
+            w.onerror = (err) => this._retireWorker(entry, err);
+            this._workers.push(entry);
+            return entry;
+        } catch (err) {
+            console.warn('[SessionParsePool] worker spawn failed:', err?.message || err);
+            this._spawnFailed = true;
+            return null;
+        }
+    }
+
+    /** Lazily create the pool shell (workers themselves spawn on demand). @private */
+    _ensureWorkers() {
+        if (this._workers) return true;
+        if (this._spawnFailed || typeof Worker === 'undefined') return false;
+        this._workers = [];
+        return true;
+    }
+
+    /** A finished job frees its worker and settles its promise. @private */
+    _onResult(entry, data) {
+        const { jobId, type, message, ...result } = data;
+        entry.busy = false;
+        const p = this._byJobId.get(jobId);
+        if (p) {
+            this._byJobId.delete(jobId);
+            type === 'ERROR' ? p.reject(new Error(message)) : p.resolve(result);
+        }
+        this._pump();
+    }
+
+    /**
+     * A dead worker rejects its in-flight job and retires — the pool shrinks
+     * instead of hanging; with none left, parses fall back to the main thread.
+     * @private
+     */
+    _retireWorker(entry, err) {
+        console.warn('[SessionParsePool] worker died — retiring it:', err?.message || err);
+        const i = this._workers.indexOf(entry);
+        if (i >= 0) this._workers.splice(i, 1);
+        for (const [jobId, p] of this._byJobId) {
+            if (p.worker === entry) {
+                this._byJobId.delete(jobId);
+                p.reject(new Error('parse worker died'));
+            }
+        }
+        this._pump();
+    }
+
+    /** Terminate the pool (app teardown). */
     dispose() {
-        this._worker?.terminate();
-        this._worker = null;
-        this._pending.clear();
+        for (const { w } of this._workers ?? []) w.terminate();
+        this._workers = null;
+        this._byJobId.clear();
+        this._queue = [];
     }
 }
 

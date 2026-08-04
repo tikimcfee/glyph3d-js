@@ -98,6 +98,18 @@ const books = new AgentBooks({ scene: new THREE.Scene(), atlas: HEADLESS_ATLAS, 
     ok(row?.meta?.title === 'Fix the flurbit', 'agents() exposes meta per lane');
 }
 
+// ── hydrate accepts pre-normalized records (the codec's output shape) ──
+{
+    const added = await books.hydrate('rec999', [
+        { action: 'say', target: '', detail: '', result: 'already normalized prose', meta: null },
+        { action: 'bash', target: '', detail: 'ls', result: 'out\n', meta: { lines: 1 } },
+    ], {});
+    ok(added === 2, `hydrate builds sheets straight from records (added ${added})`);
+    const lane = books.lanes.get('rec999');
+    ok(lane?.entries.length === 2, 'record sheets landed in the lane');
+    ok(lane?.entries[1]?.record?.action === 'bash', 'the record rides the entry verbatim');
+}
+
 // ── setLaneMeta merges + rebakes; provenance omits absent lines ──
 {
     ok(books.setLaneMeta('abc123', { model: 'kimi-k2' }) === true, 'setLaneMeta returns true for a live lane');
