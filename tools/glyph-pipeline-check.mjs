@@ -77,20 +77,18 @@ const PAGE_NEWS = { pageRows: 8, pageCols: 0, colWidth: 0, pageStrideX: 50, page
 const PAGE_Z = { pageRows: 8, pageCols: 0, colWidth: 0, pageStrideX: 0, pagesWide: 1, depthPerBand: 20, depthPerColumn: 0 };
 // MetalLink's max-page-width fold: an over-wide line breaks into depth pages
 // (xPages = floor(col / pageCols), z recedes per column — Compute.metal:396).
-const PAGE_COLS = { pageRows: 0, pageCols: 200, colWidth: 240, pageStrideX: 0, pagesWide: 1, depthPerBand: 0, depthPerColumn: 4 };
+const PAGE_COLS = { pageRows: 0, pageCols: 200, pageStrideX: 0, pagesWide: 1, depthPerBand: 0, depthPerColumn: 4 };
 const lanes = [
   { wrapWidth: 0, window: 128, page: PAGE_OFF,
     expectFailOn: 'single-line-40k',
-    expectFail: 'MAX_WALK_STEPS (4096) truncates loop 2 on an unwrapped line > 4096 glyphs: x caps at 4096×advance for every later slot. The cap is deliberate (wrong-but-visible beats device loss), but wrap=0 + a minified-scale line is a REAL input — a limitation to design around, not noise' },
+    expectFail: 'no fold unit at all (wrap=0, pageCols=0): MAX_WALK_STEPS (4096) is the operative bound and x caps at 4096×advance past slot 4096. The designed answer to a line this long is a fold unit — pageCols (see the cols lane) — the cap stays as the device-loss fuse' },
   { wrapWidth: 24, window: 128, page: PAGE_OFF },
   { wrapWidth: 200, window: 128, page: PAGE_OFF },
   { wrapWidth: 200, window: 0, page: PAGE_OFF },
   { wrapWidth: 200, window: 128, page: PAGE_NEWS },
   { wrapWidth: 200, window: 128, page: PAGE_Z },
-  { wrapWidth: 200, window: 128, page: PAGE_NEWS, repaginateTo: PAGE_Z,
-    expectFail: 'repaginate() double-applies the remap — kernel 3 mutates x/y/z in place, so it is not idempotent; a mode switch needs base-position reconstruction (base-x lane or a kernel-2 re-run)' },
-  { wrapWidth: 0, window: 128, page: PAGE_COLS, onlyOn: 'single-line-40k',
-    expectFail: 'the walk\'s loop 2 does not know pageCols, so its advance sum is still unbounded with wrap=0 and MAX_WALK_STEPS truncates it past 4096 glyphs — the page assignment (integer floor(col/pageCols)) is exact, but within-page x caps. The fix: bound loop 2 by the fold unit (col % pageCols) when pageCols is set — then the cap never operates and the long line folds into depth pages exactly as Compute.metal\'s calculatePageOffsets did' },
+  { wrapWidth: 200, window: 128, page: PAGE_NEWS, repaginateTo: PAGE_Z },  // kernel 3 alone re-folds, from base
+  { wrapWidth: 0, window: 128, page: PAGE_COLS, onlyOn: 'single-line-40k' },  // the long line folds into depth pages
 ];
 
 // ---- the in-page probe ----
@@ -133,7 +131,7 @@ const probe = (opts) => `(async (o) => {
   } catch (e) { return { fatal: 'offscreen renderer init failed: ' + (e && e.message || e) }; }
   R.renderer = store.renderer.constructor.name;
 
-  const { SLOT_STRIDE, S_CODEPOINT, S_ADVANCE, S_HEIGHT, S_X, S_Y, S_Z, S_ROW, S_COL, S_FLAGS, F_LEADER } = refMod;
+  const { SLOT_STRIDE, S_CODEPOINT, S_ADVANCE, S_HEIGHT, S_X, S_Y, S_Z, S_ROW, S_COL, S_FLAGS, S_BASE_X, F_LEADER } = refMod;
   const enc = new TextEncoder();
   const LINE_H = CELL_H;
 
@@ -180,7 +178,7 @@ const probe = (opts) => `(async (o) => {
           if (gpu[b + S_ROW] !== ref.slots[b + S_ROW]) { fail('slot ' + id + ' ROW ' + gpu[b + S_ROW] + ' != ' + ref.slots[b + S_ROW]); if (firstBad < 0) firstBad = id; }
           if (gpu[b + S_COL] !== ref.slots[b + S_COL]) { fail('slot ' + id + ' COL ' + gpu[b + S_COL] + ' != ' + ref.slots[b + S_COL]); if (firstBad < 0) firstBad = id; }
           if (gpu[b + S_ADVANCE] !== ref.slots[b + S_ADVANCE] || gpu[b + S_HEIGHT] !== ref.slots[b + S_HEIGHT]) { fail('slot ' + id + ' metrics mismatch'); if (firstBad < 0) firstBad = id; }
-          for (const [lane2, name] of [[S_X, 'x'], [S_Y, 'y'], [S_Z, 'z']]) {
+          for (const [lane2, name] of [[S_X, 'x'], [S_Y, 'y'], [S_Z, 'z'], [S_BASE_X, 'baseX']]) {
             const d = Math.abs(gpu[b + lane2] - ref.slots[b + lane2]);
             if (d > L.maxDelta) L.maxDelta = d;
             // f32 accumulation is order-free but not bit-exact: the walk sums ~hundreds of

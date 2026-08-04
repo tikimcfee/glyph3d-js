@@ -40,7 +40,7 @@ export const NEWLINE = 0x0A;
  * That is the same instability the old CPU path papered over with a scaled epsilon nudge.
  * Integers do not wobble, so the nudge has nothing to fix.
  */
-export const SLOT_STRIDE = 10;
+export const SLOT_STRIDE = 11;
 export const S_CODEPOINT = 0;
 export const S_GLYPH_ID = 1;
 export const S_ADVANCE = 2;
@@ -51,6 +51,9 @@ export const S_Z = 6;
 export const S_ROW = 7;    // exact: newlines before this glyph
 export const S_COL = 8;    // exact: glyphs since the last newline
 export const S_FLAGS = 9;
+export const S_BASE_X = 10; // the walk's x, written ONCE by layout and never mutated —
+                            // paginate reads it, so the page remap is a pure function of
+                            // base positions and re-running it accumulates nothing
 
 export const F_LEADER = 1;        // this byte begins a codepoint
 export const F_RENDERED = 2;      // this slot's absolute position is published
@@ -225,12 +228,16 @@ export function layout(slots, id, params = {}) {
     const wrapRow = wrap > 0 ? Math.floor(col / wrap) : 0;
     row += wrapRow;
 
-    // ── LOOP 2 (advance sum): x. Now that loop 1 has `col`, the visual row is known to have
-    //    started exactly `col % wrapWidth` glyphs back — walk that far and sum. With wrap off
-    //    this walks to the line start instead, which is the unbounded case wrap removes.
-    //    Note it re-walks rather than inheriting a float: that is why x came out
-    //    order-independent to within f32 representation.
-    const backTo = wrap > 0 ? (col % wrap) : col;
+    // ── LOOP 2 (advance sum): x. Now that loop 1 has `col`, the fold unit is known to have
+    //    started exactly `col % fold` glyphs back — walk that far and sum. The fold unit is
+    //    the wrap width when wrapping, else the page width (pageCols) when x-paginating: a
+    //    within-page x only needs the advances of the col % pageCols predecessors, and no
+    //    newline can intervene (col counts from one). With neither, this walks to the line
+    //    start — the unbounded case a fold unit removes. Note it re-walks rather than
+    //    inheriting a float: that is why x came out order-independent to within f32
+    //    representation.
+    const fold = wrap > 0 ? wrap : Math.max(0, Math.trunc(params.pageCols || 0));
+    const backTo = fold > 0 ? (col % fold) : col;
     let x = 0, k = 0, q = leaderBefore(slots, id);
     while (k < backTo && q !== id) {
         const qo = q * SLOT_STRIDE;
@@ -243,6 +250,7 @@ export function layout(slots, id, params = {}) {
     }
 
     slots[o + S_X] = x;
+    slots[o + S_BASE_X] = x;
     slots[o + S_Y] = -row * (params.lineHeight ?? slots[o + S_HEIGHT]);
     slots[o + S_Z] = 0;
     slots[o + S_ROW] = row;
@@ -256,7 +264,9 @@ export function layout(slots, id, params = {}) {
  * @property {number} pageRows    - ROWS per page before breaking. 0 = no vertical paging.
  * @property {number} lineHeight  - world y per row (the page's world height is rows x this)
  * @property {number} pageCols    - COLUMNS per page before breaking. 0 = no horizontal paging.
- * @property {number} colWidth    - world x per column
+ *   When set (and wrap is off), it is ALSO the walk's fold unit: loop 2 sums only the
+ *   within-page advances, so S_BASE_X is already the within-page x and there is nothing
+ *   nominal to subtract. Changing it changes the walk — a full re-run, not a repaginate.
  * @property {number} pageStrideX - world x between fanned page columns (0 = no fan). An
  *   explicit distance rather than a measured content width: the fan must not depend on a
  *   reduction this kernel cannot see. Feed it from the bounds pass when you want it snug.
@@ -266,11 +276,16 @@ export function layout(slots, id, params = {}) {
  */
 
 /**
- * KERNEL 3 — thread per byte. Pagination as a PURE per-slot remap.
+ * KERNEL 3 — thread per byte. Pagination as a PURE per-slot remap OF THE BASE POSITION.
  *
  * A separate dispatch on purpose: the layout kernel stays one job, and a layout MODE is a
  * different kernel here rather than another branch inside the walk. Nothing here reads
  * another slot.
+ *
+ * The remap is RECONSTRUCTIVE, never accumulative: x reads the walk's untouched S_BASE_X,
+ * and y/z are rebuilt from the exact integer lanes (base y = −row × lineHeight, base z = 0).
+ * Running it again with new params re-derives from base — there is no "re-paginate", the
+ * remap cannot double-apply.
  *
  * EVERY PAGE DECISION READS THE INTEGER row/col, NEVER THE FLOAT POSITION. `floor(y /
  * pageHeight)` on an f32 y that was accumulated by a racing walk is not stable: two valid
@@ -294,29 +309,22 @@ export function paginate(slots, id, p) {
     if (rows === 0 && cols === 0) return;
 
     const row = slots[o + S_ROW], col = slots[o + S_COL];
-    let x = slots[o + S_X], y = slots[o + S_Y], z = slots[o + S_Z];
 
     let yPage = 0;
-    if (rows > 0) {
-        yPage = Math.floor(row / rows);                       // exact
-        y += yPage * rows * p.lineHeight;                     // lift back to this page's top
-    }
+    if (rows > 0) yPage = Math.floor(row / rows);             // exact
     let xPage = 0;
-    if (cols > 0) {
-        xPage = Math.floor(col / cols);                       // exact
-        x -= xPage * cols * p.colWidth;                       // and back to its left edge
-    }
+    if (cols > 0) xPage = Math.floor(col / cols);             // exact
 
     // Fan the vertical pages across `pagesWide` columns, then wrap down into the next band.
     // Both the column slot and the band index come from the exact page number.
     const wide = Math.max(1, Math.trunc(p.pagesWide || 1));
-    x += (yPage % wide) * (p.pageStrideX || 0);
     const band = Math.floor(yPage / wide);
-    z += band * (p.depthPerBand || 0) + xPage * (p.depthPerColumn || 0);
 
-    slots[o + S_X] = x;
-    slots[o + S_Y] = y;
-    slots[o + S_Z] = z;
+    // From BASE: the walk's x (already within the fold unit) plus the fan; y rebuilt from
+    // the integer row so the page's top is its own row 0; z is pure page assignment.
+    slots[o + S_X] = slots[o + S_BASE_X] + (yPage % wide) * (p.pageStrideX || 0);
+    slots[o + S_Y] = -(row - yPage * rows) * p.lineHeight;
+    slots[o + S_Z] = band * (p.depthPerBand || 0) + xPage * (p.depthPerColumn || 0);
 }
 
 /**
@@ -362,11 +370,18 @@ export function runPipeline(bytes, trie, opts = {}) {
     for (let id = 0; id < bytes.length; id++) decodeAndResolve(bytes, slots, trie, id, misses);
 
     const order = opts.order || null;
-    const lp = { window: opts.window ?? 128, wrapWidth: opts.wrapWidth ?? 0, lineHeight: opts.lineHeight };
+    // pageCols is the walk's fold unit when wrap is off (loop 2 sums within-page advances),
+    // so the walk sees it too; lineHeight is shared so paginate's y reconstruction matches
+    // the walk's y exactly.
+    const lp = { window: opts.window ?? 128, wrapWidth: opts.wrapWidth ?? 0,
+        lineHeight: opts.lineHeight, pageCols: opts.page?.pageCols || 0 };
     if (order) for (const id of order) layout(slots, id, lp);
     else for (let id = 0; id < bytes.length; id++) layout(slots, id, lp);
 
-    if (opts.page) for (let id = 0; id < bytes.length; id++) paginate(slots, id, opts.page);
+    if (opts.page) {
+        const page = { ...opts.page, lineHeight: lp.lineHeight ?? opts.page.lineHeight };
+        for (let id = 0; id < bytes.length; id++) paginate(slots, id, page);
+    }
 
     const box = new Float64Array([Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity]);
     for (let id = 0; id < bytes.length; id++) boundsReduce(slots, id, box);

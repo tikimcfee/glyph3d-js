@@ -21,19 +21,20 @@
  * newspaper/column/z-page, or scrolling, re-runs ONLY kernel 3 over positions that already
  * exist. No decode, no walk, no reparse.
  *
- * ── UNVERIFIED ON HARDWARE ─────────────────────────────────────────────────────────────
- * This has never executed. It needs a WebGPU device, and the three things it will decide:
- *   · whether TSL's Loop/Break expresses the walk without falling back to wgslFn
- *   · the coherence WINDOW for this hardware (Apple's answer was ~128; ours is unknown)
- *   · the real per-thread walk cost, which the CPU sim can only guess at
- * Diff it against runPipeline() from the reference on the same bytes. Any mismatch is this
- * file's bug.
+ * ── VERIFIED ON HARDWARE (tools/glyph-pipeline-check.mjs) ────────────────────────────────
+ * GPU output diffs against runPipeline() from the reference on the same bytes, over torture /
+ * 40k-single-line / real-file corpora at wrap 0/24/200, window 0/128, and page modes. The
+ * walk expresses in TSL Loop/Break; row/col are bit-exact on every lane; x/y/z sit within
+ * f32 accumulation noise; the coherence race has not surfaced at any window. Two design bugs
+ * the first run caught and fixed: kernel 3 now remaps from the BASE position (S_BASE_X + the
+ * integer lanes) so it is idempotent, and loop 2's bound is the fold unit (wrap, else
+ * pageCols) so MAX_WALK_STEPS never operates on real inputs.
  */
 
 import { TSL } from 'three/webgpu';
 import {
     SLOT_STRIDE, S_CODEPOINT, S_GLYPH_ID, S_ADVANCE, S_HEIGHT,
-    S_X, S_Y, S_Z, S_ROW, S_COL, S_FLAGS,
+    S_X, S_Y, S_Z, S_ROW, S_COL, S_FLAGS, S_BASE_X,
     F_LEADER, F_RENDERED, F_MISSING, NEWLINE,
 } from './glyphPipelineReference.js';
 import { BLOCK_SHIFT, BLOCK_MASK, ENTRY_STRIDE, LANE_GLYPH_ID, LANE_ADVANCE, LANE_HEIGHT, LANE_FLAGS, FLAG_MISSING } from './GlyphTrie.js';
@@ -138,7 +139,6 @@ export default class GlyphPipelineKernels {
             // page
             pageRows:     uniform(0, 'int'),
             pageCols:     uniform(0, 'int'),
-            colWidth:     uniform(0, 'float'),
             pageStrideX:  uniform(0, 'float'),
             pagesWide:    uniform(1, 'int'),
             depthPerBand: uniform(0, 'float'),
@@ -330,11 +330,16 @@ export default class GlyphPipelineKernels {
             If(col.lessThan(int(0)), () => { col.assign(run); });
             row.addAssign(wrapping.select(col.div(wrap), int(0)));
 
-            // ── loop 2: the advance sum, bounded by wrapWidth ───────────────────────────
-            // Now col is known, so the visual row is known to have started exactly
-            // (col % wrap) glyphs back. Re-walking rather than inheriting a float is what
-            // makes x independent of where the inherit landed.
-            const backTo = wrapping.select(col.mod(wrap), col).toVar('backTo');
+            // ── loop 2: the advance sum, bounded by the fold unit ───────────────────────
+            // Now col is known, so the fold unit is known to have started exactly
+            // (col % fold) glyphs back. The fold unit is the wrap width when wrapping, else
+            // pageCols when x-paginating: a within-page x only needs the advances of the
+            // col % pageCols predecessors, and no newline can intervene. Re-walking rather
+            // than inheriting a float is what makes x independent of where the inherit
+            // landed. With neither wrap nor pageCols this walks to the line start — the
+            // unbounded case MAX_WALK_STEPS fuses against (visibly wrong, never a hang).
+            const fold = wrapping.select(wrap, u.pageCols).toVar('fold');
+            const backTo = fold.greaterThan(int(0)).select(col.mod(fold), col).toVar('backTo');
             const x = float(0).toVar('x');
             const k = int(0).toVar('k');
             const q = this._leaderBefore(id).toVar('q');
@@ -350,6 +355,9 @@ export default class GlyphPipelineKernels {
 
             const o = id.mul(uint(SLOT_STRIDE)).toVar('o');
             S.element(o.add(uint(S_X))).assign(x.add(u.origin.x));
+            // The walk's x, frozen: paginate reads THIS lane, so its remap is a pure
+            // function of the base position and re-running it accumulates nothing.
+            S.element(o.add(uint(S_BASE_X))).assign(x.add(u.origin.x));
             S.element(o.add(uint(S_Y))).assign(row.toFloat().negate().mul(u.lineHeight).add(u.origin.y));
             S.element(o.add(uint(S_Z))).assign(u.origin.z);
             S.element(o.add(uint(S_ROW))).assign(row.toFloat());
@@ -382,9 +390,12 @@ export default class GlyphPipelineKernels {
             const o = id.mul(uint(SLOT_STRIDE)).toVar('o');
             const row = int(lane(id, S_ROW)).toVar('row');
             const col = int(lane(id, S_COL)).toVar('col');
-            const x = lane(id, S_X).toVar('x');
-            const y = lane(id, S_Y).toVar('y');
-            const z = lane(id, S_Z).toVar('z');
+            // RECONSTRUCTIVE, never accumulative: x reads the walk's untouched base lane
+            // (already within the fold unit — loop 2 was bounded by wrap or pageCols), and
+            // y/z are rebuilt from the exact integer lanes (base y = origin.y −
+            // row×lineHeight, base z = origin.z). Re-running with new params re-derives from
+            // base — there is no "re-paginate", the remap cannot double-apply.
+            const x = lane(id, S_BASE_X).toVar('x');
 
             // EVERY page decision reads the integer lanes. Keying this off the float position
             // put 119 glyphs on the wrong page in the reference's own tests, because f32
@@ -392,31 +403,30 @@ export default class GlyphPipelineKernels {
             const yPage = int(0).toVar('yPage');
             If(u.pageRows.greaterThan(int(0)), () => {
                 yPage.assign(row.div(u.pageRows));
-                y.addAssign(yPage.toFloat().mul(u.pageRows.toFloat()).mul(u.lineHeight));
             });
             const xPage = int(0).toVar('xPage');
             If(u.pageCols.greaterThan(int(0)), () => {
                 xPage.assign(col.div(u.pageCols));
-                x.subAssign(xPage.toFloat().mul(u.pageCols.toFloat()).mul(u.colWidth));
             });
             const wide = u.pagesWide.max(int(1)).toVar('wide');
-            x.addAssign(yPage.mod(wide).toFloat().mul(u.pageStrideX));
-            z.addAssign(yPage.div(wide).toFloat().mul(u.depthPerBand))
-                .addAssign(xPage.toFloat().mul(u.depthPerCol));
 
-            S.element(o.add(uint(S_X))).assign(x);
-            S.element(o.add(uint(S_Y))).assign(y);
-            S.element(o.add(uint(S_Z))).assign(z);
+            const xf = x.add(yPage.mod(wide).toFloat().mul(u.pageStrideX)).toVar('xf');
+            const yf = u.origin.y.sub(row.sub(yPage.mul(u.pageRows)).toFloat().mul(u.lineHeight)).toVar('yf');
+            const zf = u.origin.z.add(yPage.div(wide).toFloat().mul(u.depthPerBand))
+                .add(xPage.toFloat().mul(u.depthPerCol)).toVar('zf');
+            S.element(o.add(uint(S_X))).assign(xf);
+            S.element(o.add(uint(S_Y))).assign(yf);
+            S.element(o.add(uint(S_Z))).assign(zf);
 
-            // ── bounds, fused ───────────────────────────────────────────────────────────
+            // ── bounds, fused (over the FINAL positions) ────────────────────────────────
             const w = lane(id, S_ADVANCE).toVar('w');
             const h = lane(id, S_HEIGHT).toVar('h');
-            atomicMin(this.bounds.element(uint(0)), floatToOrderedKey(x));
-            atomicMin(this.bounds.element(uint(1)), floatToOrderedKey(y));
-            atomicMin(this.bounds.element(uint(2)), floatToOrderedKey(z));
-            atomicMax(this.bounds.element(uint(3)), floatToOrderedKey(x.add(w)));
-            atomicMax(this.bounds.element(uint(4)), floatToOrderedKey(y.add(h)));
-            atomicMax(this.bounds.element(uint(5)), floatToOrderedKey(z));
+            atomicMin(this.bounds.element(uint(0)), floatToOrderedKey(xf));
+            atomicMin(this.bounds.element(uint(1)), floatToOrderedKey(yf));
+            atomicMin(this.bounds.element(uint(2)), floatToOrderedKey(zf));
+            atomicMax(this.bounds.element(uint(3)), floatToOrderedKey(xf.add(w)));
+            atomicMax(this.bounds.element(uint(4)), floatToOrderedKey(yf.add(h)));
+            atomicMax(this.bounds.element(uint(5)), floatToOrderedKey(zf));
         })().compute(1).setName('glyphPaginateAndBounds');
     }
 
@@ -456,13 +466,14 @@ export default class GlyphPipelineKernels {
 
     /**
      * Retune ONLY the page params. Kernel 3 alone re-runs — the mode switch that costs no
-     * decode and no walk.
+     * decode and no walk. CAVEAT: pageCols is also the walk's fold unit (loop 2 bounds its
+     * advance sum by it), so changing pageCols changes the walk's output — that needs a full
+     * run(), not a repaginate(). Row-paging, fan, and depth changes are repaginate-safe.
      */
     setPage(p = {}) {
         const u = this._u;
         u.pageRows.value = Math.max(0, Math.trunc(p.pageRows || 0));
         u.pageCols.value = Math.max(0, Math.trunc(p.pageCols || 0));
-        u.colWidth.value = p.colWidth || 0;
         u.pageStrideX.value = p.pageStrideX || 0;
         u.pagesWide.value = Math.max(1, Math.trunc(p.pagesWide || 1));
         u.depthPerBand.value = p.depthPerBand || 0;
@@ -478,7 +489,9 @@ export default class GlyphPipelineKernels {
         return this;
     }
 
-    /** Page/mode change only — kernel 3 over the positions that already exist. */
+    /** Page/mode change only — kernel 3 over the base positions that already exist.
+     *  The remap is reconstructive (it reads S_BASE_X and the integer lanes), so this is
+     *  safe to call repeatedly with any fold-unit-preserving params. */
     repaginate() {
         this.bounds.value.array.set(armedBoundsKeys());
         this.bounds.value.needsUpdate = true;
