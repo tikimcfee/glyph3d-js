@@ -12,7 +12,7 @@
 
 import * as THREE from 'three';
 import GlyphField from '../GlyphField.js';
-import { getWorkerBridge, isWorkersSupported } from '../workers/WorkerBridge.js';
+import { getWorkerBridge } from '../workers/WorkerBridge.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import { BOUNDS_Z_PAD } from '../core/constants.js';
 import { computeCellMetrics } from '../core/cellMetrics.js';
@@ -381,10 +381,9 @@ class CodeGrid extends FramedGlyphField {
      * @returns {this} For chaining
      */
     /**
-     * Shared load preamble for BOTH render paths: stash content + lines, reconstruct an evicted
-     * renderer, and queue the clear. loadText (sync) and loadTextAsync (worker) differ ONLY in
-     * their one layout call, so everything up to it lives here once — content and lines are always
-     * set together, on every load.
+     * Shared load preamble: stash content + lines, reconstruct an evicted renderer, and queue
+     * the clear. Everything up to the one layout call lives here once — content and lines are
+     * always set together, on every load.
      *
      * TODO(load+normalize): content is stored RAW. A future "load & normalize data" pass belongs
      * here — normalize line endings (\r\n, \r → \n), strip BOM, settle encoding — ONCE at the load
@@ -402,36 +401,16 @@ class CodeGrid extends FramedGlyphField {
     }
 
     /**
-     * Load text content into the grid (synchronous render path).
-     * @param {string} text - Text content to display
-     * @returns {this} For chaining
-     */
-    loadText(text) {
-        this._beginLoad(text);
-        this._layoutContent();
-        this._updateBackground();
-        return this;
-    }
-
-    /**
-     * Load file content with filename
-     * @param {string} filename - Name of the file
-     * @param {string} content - File content
-     * @returns {this} For chaining
-     */
-    loadFile(filename, content) {
-        this.filename = filename;
-        return this.loadText(content);
-    }
-
-    /**
-     * Load text content using Web Workers (async)
+     * Load text content into the grid (worker pipeline — the ONE load path).
+     * The grid is fully laid out when the promise resolves: buffers committed,
+     * line→slot tables built, background sized — highlights/caret may be applied
+     * immediately after the await.
      * @param {string} text - Text content to display
      * @returns {Promise<this>} For chaining
      */
-    async loadTextAsync(text) {
+    async loadText(text) {
         this._beginLoad(text);
-        await this._layoutContentAsync();
+        await this._layoutContent();
         this._updateBackground();
         return this;
     }
@@ -512,19 +491,19 @@ class CodeGrid extends FramedGlyphField {
             .slice(first, first + this._winRows)
             .map((line) => line.slice(0, this._winCols))
             .join('\n');
-        await this.loadTextAsync(slice);
+        await this.loadText(slice);
         return this;
     }
 
     /**
-     * Load file content with filename (async worker path)
+     * Load file content with filename
      * @param {string} filename - Name of the file
      * @param {string} content - File content
      * @returns {Promise<this>} For chaining
      */
-    async loadFileAsync(filename, content) {
+    async loadFile(filename, content) {
         this.filename = filename;
-        return this.loadTextAsync(content);
+        return this.loadText(content);
     }
 
     /**
@@ -584,9 +563,7 @@ class CodeGrid extends FramedGlyphField {
         this.filename = name;
         // Re-layout to update filename
         if (this.content) {
-            this._clearRenderedText();
-            this._layoutContent();
-            this._updateBackground();
+            this._relayout();
         }
     }
 
@@ -597,9 +574,7 @@ class CodeGrid extends FramedGlyphField {
     showFilename(visible) {
         this.config.showFilename = visible;
         if (this.content) {
-            this._clearRenderedText();
-            this._layoutContent();
-            this._updateBackground();
+            this._relayout();
         }
     }
 
@@ -683,7 +658,7 @@ class CodeGrid extends FramedGlyphField {
     // (instanceCount changes) via this._pickingSystem directly.
 
     /**
-     * Add text (deferred until flush / flushAsync).
+     * Add text (deferred until flush).
      * Public entry point for callers like DiffController that bypass the normal
      * loadText() flow in order to supply per-text color options.
      *
@@ -698,12 +673,12 @@ class CodeGrid extends FramedGlyphField {
     }
 
     /**
-     * Flush pending text additions to the GPU via Web Workers (async).
-     * Falls back to synchronous flush if workers are unavailable.
+     * Flush pending text additions to the GPU via the worker pipeline.
+     * Falls back to a main-thread build if the worker job fails.
      * @returns {Promise<void>}
      */
-    async flushAsync() {
-        return this._flushAsync();
+    async flush() {
+        return this._flush();
     }
 
     /**
@@ -888,7 +863,7 @@ class CodeGrid extends FramedGlyphField {
      * THE single relayout pipeline — re-fold the grid from current state (this.lines/content,
      * scrollOffset, layout params) and repaint the edit caret. ONE mutex (_relayoutBusy /
      * _relayoutPending) serializes ALL relayouts — scroll, layout, frame, AND edit — so two
-     * pipelines can never interleave _clearRenderedText/_flushAsync on the shared deferred-batch
+     * pipelines can never interleave _clearRenderedText/_flush on the shared deferred-batch
      * state (_pendingAdds/_idMap/_contentTextIds), which would corrupt the buffers. Rapid calls
      * coalesce: the in-flight pass loops once more with the LATEST state. Edit callers set
      * _linesDirty so content re-syncs from the edit-mutated line array; scroll/layout/frame
@@ -910,10 +885,10 @@ class CodeGrid extends FramedGlyphField {
                 if (!this.content) continue;               // nothing to lay out (loop exits unless pending)
                 this._ensureRenderer();                    // reconstruct if content was evicted
                 this._clearRenderedText();                 // drop the prior render's glyphs
-                // The staged pipeline: FOLD (+ ARRANGE, inside _layoutContentAsync) → BOUNDS →
+                // The staged pipeline: FOLD (+ ARRANGE, inside _layoutContent) → BOUNDS →
                 // clamp → DECORATE. Arrangers already re-derived inside the fold, so the bounds
                 // walk below sees the arranged footprint; decorations re-project on top of it.
-                await this._layoutContentAsync();          // FOLD: re-add + re-flush + line tables + _layout (+ arrange)
+                await this._layoutContent();          // FOLD: re-add + re-flush + line tables + _layout (+ arrange)
                 this._updateBackground();                  // BOUNDS: re-walk the (arranged) footprint, re-fit the panel
                 // Clamp the edit caret into the fresh content before the decorate stage paints it.
                 if (this._cursor) {
@@ -1127,8 +1102,8 @@ class CodeGrid extends FramedGlyphField {
 
     /**
      * Ensure the GlyphField renderer exists, reconstructing it from the stored atlas
-     * if content was previously evicted. Called at the top of loadText() and
-     * loadTextAsync() so those methods are safe to use on evicted grids.
+     * if content was previously evicted. Called at the top of
+     * loadText() so that method is safe to use on evicted grids.
      * @private
      */
     _ensureRenderer() {
@@ -1191,7 +1166,7 @@ class CodeGrid extends FramedGlyphField {
     }
 
     /**
-     * Enqueue a text add (deferred until flush / flushAsync).
+     * Enqueue a text add (deferred until flush).
      * @private
      * @returns {number} local ID
      */
@@ -1343,75 +1318,48 @@ class CodeGrid extends FramedGlyphField {
     }
 
     /**
-     * Flush pending changes synchronously — same builder as the worker path,
-     * run on the main thread (no postMessage). loadText needs this: highlights
-     * are applied immediately after, so the buffers + line→slot table must
-     * exist by the time _flush() returns.
-     * @private
-     */
-    _flush() {
-        if (!this._dirty) return;
-
-        // Process removals
-        for (const rendererId of this._pendingRemovals) {
-            this._renderer?.remove(rendererId);
-            const ourId = this._reverseIdMap.get(rendererId);
-            if (ourId !== undefined) {
-                this._idMap.delete(ourId);
-                this._reverseIdMap.delete(rendererId);
-                this._committedTexts.delete(ourId);
-            }
-        }
-        this._pendingRemovals = [];
-
-        // Process adds via the builder (synchronous main-thread build)
-        if (this._pendingAdds.length > 0) {
-            const { items, metrics, defaultColor, layout, scrollOffset } = this._prepareAddsForBuild();
-            // Engine-only: the builder emits tables + attributes only (positions are the
-            // kernel's job); the default is emitPositions:false since the engine is THE path.
-            const buffers = getWorkerBridge().buildBatchBuffersSync(items, { metrics, defaultColor, layout, scrollOffset });
-            this._commitBuiltBuffers(buffers, items, [], { metrics, layout, scrollOffset });
-        }
-
-        if (this._renderer && this._pickingSystem) {
-            this._pickingSystem.register('glyph', this._renderer, this._renderer);
-        }
-
-        this._dirty = false;
-    }
-
-    /**
-     * Flush pending changes via Web Workers (async).
-     * Falls back to sync _flush() if workers unavailable.
+     * Flush pending changes via the worker pipeline — the ONE flush. The buffers +
+     * line→slot table exist by the time the promise resolves, so callers may apply
+     * highlights immediately after the await. A failed worker job falls back to a
+     * main-thread build of the same items (same builder, no postMessage); an empty
+     * worker pool already degrades the same way inside buildBatchBuffers.
      * @private
      * @returns {Promise<void>}
      */
-    async _flushAsync() {
+    async _flush() {
         if (!this._dirty) return;
 
-        if (!isWorkersSupported() || this._pendingAdds.length === 0) {
-            return this._flush();
-        }
-
-        // Defer removals until the worker returns. Applying them now would
-        // empty the GPU buffer while we wait ~5-20ms for the new content to
-        // build, flashing the grid. _commitBuiltBuffers applies them in the
-        // same synchronous block as the buffer swap, so old→new is atomic.
-        const deferredRemovals = this._pendingRemovals;
-        this._pendingRemovals = [];
-
-        if (this._pendingAdds.length > 0) {
-            const { items, metrics, defaultColor, layout, scrollOffset } = this._prepareAddsForBuild();
-            try {
-                const buffers = await getWorkerBridge().buildBatchBuffers(items, { metrics, defaultColor, layout, scrollOffset });
-                this._commitBuiltBuffers(buffers, items, deferredRemovals, { metrics, layout, scrollOffset });
-            } catch (error) {
-                console.warn('CodeGrid: Worker flush failed, falling back to sync:', error);
-                // Put the deferred removals back so _flush() applies them.
-                this._pendingRemovals = deferredRemovals.concat(this._pendingRemovals);
-                this._flush();
-                return;
+        if (this._pendingAdds.length === 0) {
+            // No build needed — apply removals directly (nothing to defer them against).
+            for (const rendererId of this._pendingRemovals) {
+                this._renderer?.remove(rendererId);
+                const ourId = this._reverseIdMap.get(rendererId);
+                if (ourId !== undefined) {
+                    this._idMap.delete(ourId);
+                    this._reverseIdMap.delete(rendererId);
+                    this._committedTexts.delete(ourId);
+                }
             }
+            this._pendingRemovals = [];
+        } else {
+            // Defer removals until the build returns. Applying them now would
+            // empty the GPU buffer while we wait ~5-20ms for the new content to
+            // build, flashing the grid. _commitBuiltBuffers applies them in the
+            // same synchronous block as the buffer swap, so old→new is atomic.
+            const deferredRemovals = this._pendingRemovals;
+            this._pendingRemovals = [];
+
+            const { items, metrics, defaultColor, layout, scrollOffset } = this._prepareAddsForBuild();
+            let buffers;
+            try {
+                buffers = await getWorkerBridge().buildBatchBuffers(items, { metrics, defaultColor, layout, scrollOffset });
+            } catch (error) {
+                console.warn('CodeGrid: Worker flush failed, falling back to main-thread build:', error);
+                // Same items, same builder, main thread — the commit below still
+                // applies the deferred removals atomically with the buffer swap.
+                buffers = getWorkerBridge().buildBatchBuffersSync(items, { metrics, defaultColor, layout, scrollOffset });
+            }
+            this._commitBuiltBuffers(buffers, items, deferredRemovals, { metrics, layout, scrollOffset });
         }
 
         if (this._renderer && this._pickingSystem) {
@@ -1488,62 +1436,18 @@ class CodeGrid extends FramedGlyphField {
         }
         this._contentTextIds = [];
 
-        // Removals stay pending. Callers (loadText → _layoutContent,
-        // loadTextAsync → _layoutContentAsync) flush afterwards — doing it
-        // here would push an empty GPU frame and flash the grid.
+        // Removals stay pending. Callers (loadText → _layoutContent) flush
+        // afterwards — doing it here would push an empty GPU frame and flash
+        // the grid.
     }
 
     /**
-     * Layout content synchronously. Identical to _layoutContentAsync except
-     * it builds on the main thread (loadText must finish before the caller
-     * applies highlights). Adds the whole content as ONE item — the builder
-     * lays out the lines and emits the authoritative line→slot offsets.
+     * Layout content via the worker pipeline. Adds the whole content as ONE
+     * item — the builder lays out the lines and emits the authoritative
+     * line→slot offsets.
      * @private
      */
-    _layoutContent() {
-        let currentY = 0;
-
-        // Add filename if enabled
-        if (this.config.showFilename && this.filename) {
-            this._filenameTextId = this._addText(
-                this.filename,
-                { x: 0, y: currentY, z: 0 },
-                { color: this.config.filenameColor }
-            );
-            currentY -= this.metrics.lineHeight * 1.5;
-        }
-
-        // Add ENTIRE content as a single text item (builder handles newlines)
-        if (this.content.length > 0) {
-            const id = this._addText(
-                this.content,
-                { x: 0, y: currentY, z: 0 },
-                { color: this.config.textColor }
-            );
-            this._contentTextIds.push(id);
-        }
-
-        this._flush();
-
-        // Build line→slot index from the builder's authoritative line offsets,
-        // plus the per-line wrap data + layout origin used by cursor math.
-        const contentItemMeta = this._getContentItemMeta();
-        this._buildLineSlotBase(contentItemMeta?.lineSlotOffsets);
-        this._buildLayoutWrapIndex(contentItemMeta?.wrapColsPerLine);
-        this._layoutOriginY = (this.config.showFilename && this.filename)
-            ? -this.metrics.lineHeight * 1.5
-            : 0;
-        this._buildLayoutDescription();
-        this._applyClip();
-        this._applyArrangers(); // ARRANGE stage (see _applyArrangers) — runs every fold
-    }
-
-    /**
-     * Layout content using Web Workers (async path).
-     * Sends entire content as ONE text item (worker handles newlines).
-     * @private
-     */
-    async _layoutContentAsync() {
+    async _layoutContent() {
         let currentY = 0;
 
         // Add filename if enabled
@@ -1566,8 +1470,8 @@ class CodeGrid extends FramedGlyphField {
             this._contentTextIds.push(id);
         }
 
-        // Flush using worker pipeline
-        await this._flushAsync();
+        // Flush using the worker pipeline
+        await this._flush();
 
         // Build line→slot index from builder's authoritative line offsets,
         // and harvest the per-line wrap data needed for cursor positioning.
@@ -1591,7 +1495,7 @@ class CodeGrid extends FramedGlyphField {
             this._scrollClampGuard = true;
             this._scrollOffset = this.getMaxScroll();
             this._clearRenderedText();
-            await this._layoutContentAsync();
+            await this._layoutContent();
             this._scrollClampGuard = false;
             return; // the re-entrant fold already arranged on the clamped buffer
         }
@@ -1924,7 +1828,7 @@ class CodeGrid extends FramedGlyphField {
     // ============ In-grid Editing ============
     //
     // The grid is the editor: edit ops mutate `this.lines` then trigger an
-    // async loadTextAsync rebuild via _relayoutPreservingCursor (the worker
+    // async loadText rebuild via _relayoutPreservingCursor (the worker
     // pipeline right-sizes the GPU buffers; the sync path doesn't grow on
     // overflow). Concurrent flushes are coalesced.
     //
@@ -2200,13 +2104,10 @@ class CodeGrid extends FramedGlyphField {
      * Rebuild glyphs after a content mutation, clearing stale highlights and
      * re-painting the caret.
      *
-     * Routes through loadTextAsync (the worker pipeline) because that path
-     * calls applyPrebuiltBuffers which swaps in fresh, exactly-sized
-     * InstancedBufferAttributes. The sync loadText path reuses the existing
-     * renderer with its original maxInstances cap and overflows the moment
-     * an edit grows the content past the initial buffer (WebGL warns about
-     * "instance fetch requires N, attribs only supply M" and rendering
-     * silently breaks).
+     * Routes through the worker pipeline because that path calls
+     * applyPrebuiltBuffers which swaps in fresh, exactly-sized
+     * InstancedBufferAttributes, so an edit can grow the content past the
+     * initial buffer.
      *
      * Edit ops fire-and-forget the returned promise. Routes through the SHARED _relayout mutex
      * (not a separate guard) so edit and scroll/layout relayouts serialize and never trample the

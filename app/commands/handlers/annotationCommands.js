@@ -58,7 +58,7 @@ export default function registerAnnotationCommands(router) {
             gridScale: 1.0,
         });
 
-        grid.loadText(text);
+        void grid.loadText(text);
         grid.position.set(x, y, z);
 
         // Add to scene directly (not to ctx grids -- these are annotations, not content)
@@ -350,7 +350,7 @@ export default function registerAnnotationCommands(router) {
             gridScale: 1.0,
         });
 
-        grid.loadText(text);
+        void grid.loadText(text);
         grid.position.set(x, y, z);
 
         ctx.scene.add(grid);

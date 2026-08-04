@@ -279,7 +279,7 @@ export class DiffController {
         });
 
         // Bypass CodeGrid's normal loadFile flow — we need per-line color control.
-        // CodeGrid now exposes addText() / flushAsync() directly (no GlyphCollection wrapper).
+        // CodeGrid now exposes addText() / flush() directly (no GlyphCollection wrapper).
         const metrics = grid.metrics;
         let currentY = 0;
 
@@ -299,7 +299,7 @@ export class DiffController {
         }
 
         // Flush to GPU via worker pipeline
-        await grid.flushAsync();
+        await grid.flush();
 
         // Update the background to fit content
         grid._updateBackground();

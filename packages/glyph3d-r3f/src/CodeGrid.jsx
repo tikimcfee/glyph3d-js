@@ -80,7 +80,7 @@ const CodeGrid = forwardRef(function CodeGrid({
   useEffect(() => {
     const grid = gridRef.current;
     if (!grid) return;
-    grid.loadFile(filename, text);
+    void grid.loadFile(filename, text);
   }, [text, filename]);
 
   // Reactive position.

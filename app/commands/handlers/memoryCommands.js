@@ -50,15 +50,14 @@ export default function registerMemoryCommands(router) {
             // lets byteColor read true while keeping address/ascii gutters legible.
             textColor: { r: 0.22, g: 0.26, b: 0.32 },
         });
-        grid.loadText(dump);
+        await grid.loadText(dump);
 
         const registryId = ctx.addGrid(grid, { id: `mem:${path}:${offset}` });
         ctx.attentionManager?.set('primary', registryId, { registry: ctx.registry });
 
-        // No frame defer: loadText populates the instancePosition CPU array
-        // synchronously, so positionAt resolves immediately (saves ~16ms/call
-        // latency that would otherwise compound per window-fault in the pager).
-        // decorateMemoryGrid draws its own grid-parented edges, so no renderer arg.
+        // The awaited load guarantees buffers + the LayoutDescription exist, so
+        // positionAt resolves immediately. decorateMemoryGrid draws its own
+        // grid-parented edges, so no renderer arg.
         const viz = decorateMemoryGrid(grid, res.bytes, { cols, windowOffset: res.offset });
 
         // Companion legend grid: color/accent/edge key + window stats + an
@@ -70,7 +69,7 @@ export default function registerMemoryCommands(router) {
             name: 'mem-legend', showBackground: true, showFilename: false,
             textColor: { r: 0.55, g: 0.6, b: 0.66 },
         });
-        legendGrid.loadText(legend.text);
+        await legendGrid.loadText(legend.text);
         for (const c of legend.colorings) {
             legendGrid.highlightRange(c.line, c.startCol, c.line, c.endCol, c.color);
         }

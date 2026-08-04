@@ -227,21 +227,25 @@ export default function registerFileCommands(router) {
             let opened = 0;
             let placeholders = 0;
             let chunks = 1;
+            const pending = [];   // every grid's load promise — settled before the final relayout
+            const settleWarn = (err) => console.warn('file.openDir: a grid load failed (grid stays, unlaid):', err);
             // The whole build runs under a registry HOLD: 350 grids registering means
             // ONE listener pass per pour beat + one at close — not 350 × the full
             // suite (projector, workspace reconcile, every mirroring React panel).
             await ctx.registry.holdChanges(async () => {
             for (const f of oversized) {
-                if (addUnfetchedGrid(ctx, f.path, f.size) != null) { opened++; placeholders++; }
+                const pr = addUnfetchedGrid(ctx, f.path, f.size);
+                pending.push(pr);
+                pr.then((id) => { if (id != null) { opened++; placeholders++; } }).catch(settleWarn);
             }
-            // STREAMED build: main-thread, sliced under the per-frame budget, yielding
-            // between slices (budget 0 = one tick). A warm build is 4–5ms even for a
-            // fat file — it fits the frame budget — and the worker detour measured
-            // 5–8× SLOWER than the work itself (23–40ms round-trip for a 4ms build;
-            // the 78–97ms blocks that once justified it were cold-start cost). Status
-            // counts up, and a throttled relayout mid-stream lets the glide pour grids
-            // into their slots — held under a restore's batch window, so a launch
-            // still settles exactly once (Settings ▸ Loading).
+            // STREAMED build: grids are SEATED synchronously in walk order (tree insert +
+            // registration) while their content loads fan out on the worker pool. The slice
+            // loop just fires loads, so it drains fast; the pours remain the registry
+            // heartbeat + status beat, and the batch settles (Promise.allSettled) before
+            // the final relayout so every grid measures laid. Status counts up, and a
+            // throttled relayout mid-stream lets the glide pour grids into their slots —
+            // held under a restore's batch window, so a launch still settles exactly once
+            // (Settings ▸ Loading).
             const budget = Number(ctx.loadBuildBudget ?? 12);
             const yieldFrame = () => new Promise((r) => {
                 // rAF is the real frame boundary; the timer keeps a hidden tab
@@ -294,7 +298,9 @@ export default function registerFileCommands(router) {
                     const p = want[i++];
                     const c = contentMap.get(p);
                     if (c == null) continue;
-                    seat(addFileGrid(ctx, p, c.content)); // inserts into the tree
+                    const pr = addFileGrid(ctx, p, c.content); // seats synchronously; load resolves later
+                    pending.push(pr);
+                    pr.then(seat).catch(settleWarn);
                 }
                 if (i >= want.length) break;
                 chunks++;
@@ -305,7 +311,12 @@ export default function registerFileCommands(router) {
                 slice = frameLag < 22 ? Math.min(slice * 1.5, budget * 4) : Math.max(budget, slice / 2);
             }
             });   // registry hold closes: one coalesced listener pass for the batch
-            trace.mark('build', { grids: opened, chunks });
+
+            // Every grid's content laid before the final relayout — an unlaid grid has
+            // empty bounds and would measure wrong in the tree.
+            const tSettle = performance.now();
+            await Promise.allSettled(pending);
+            trace.mark('build', { grids: opened, chunks, settleMs: Math.round(performance.now() - tSettle) });
 
             // One relayout for the whole batch (the RenderPlan), then rest on the world floor —
             // the directory structure IS the scene graph now (the walk-tree scheme places it).

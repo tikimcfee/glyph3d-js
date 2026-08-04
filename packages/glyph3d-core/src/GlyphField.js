@@ -865,7 +865,7 @@ export default class GlyphField {
         // InstancedBufferAttribute) installs a stride-4 attribute — so the INITIAL attribute
         // must be stride-4 too. A stride-3 initial gets its vertex-input layout baked into the
         // render pipeline at the first frame an async-loaded grid spends in the scene BEFORE its
-        // worker build resolves (agent book cards are addSheet'd before loadFileAsync settles,
+        // worker build resolves (agent book cards are addSheet'd before loadFile settles,
         // unlike regular grids which loadFile synchronously before seatFileGrid). When the
         // engine then swaps in the stride-4 storage attribute, the stride-3 pipeline reads every
         // other instance's X from the wrong lane → glyphs splay horizontally. This is the

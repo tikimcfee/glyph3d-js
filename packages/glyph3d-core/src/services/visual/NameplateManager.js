@@ -175,8 +175,9 @@ export class NameplateManager {
             gridScale: this.config.scale,
         });
 
-        // Load the nameplate text (synchronous is fine for short strings)
-        grid.loadText(text);
+        // Load the nameplate text (fire-and-forget — nothing here reads the grid's
+        // own buffers; wrapper positioning uses the directory node's position)
+        void grid.loadText(text);
 
         // Add grid to wrapper (local position 0,0,0 within wrapper)
         wrapper.add(grid);

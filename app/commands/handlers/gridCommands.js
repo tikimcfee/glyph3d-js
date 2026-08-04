@@ -185,7 +185,7 @@ export default function registerGridCommands(router) {
 
     // ============ Grid CRUD ============
 
-    router.register('grid.create', (args, ctx) => {
+    router.register('grid.create', async (args, ctx) => {
         if (args.length < 1) {
             return { text: 'ERR: usage: grid.create <base64-text> [name]', data: null };
         }
@@ -208,7 +208,7 @@ export default function registerGridCommands(router) {
                 grid.userData.sourcePath = name;
             }
         }
-        grid.loadText(text);
+        await grid.loadText(text);
 
         // Single registration via addGrid -- no double-register
         const registryId = ctx.addGrid(grid, { id: name || undefined });
@@ -293,7 +293,7 @@ export default function registerGridCommands(router) {
         };
     }, { description: 'Move a grid in 3D space', usage: '<id|index> <x> <y> <z>' });
 
-    router.register('grid.text', (args, ctx) => {
+    router.register('grid.text', async (args, ctx) => {
         if (args.length < 2) return { text: 'ERR: usage: grid.text <id|index> <base64-text>', data: null };
 
         const resolved = resolveGridByIdOrIndex(ctx, args[0]);
@@ -301,7 +301,7 @@ export default function registerGridCommands(router) {
 
         let text;
         try { text = decodeBase64(args[1]); } catch { return { text: 'ERR: invalid base64 content', data: null }; }
-        resolved.grid.loadText(text);
+        await resolved.grid.loadText(text);
         return {
             text: `OK: grid #${resolved.idx} text updated (${resolved.grid.getGlyphCount()} glyphs, ${resolved.grid.getLineCount()} lines)`,
             data: { index: resolved.idx, glyphs: resolved.grid.getGlyphCount(), lines: resolved.grid.getLineCount() }

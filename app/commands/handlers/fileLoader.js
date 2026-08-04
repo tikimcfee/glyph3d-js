@@ -88,8 +88,8 @@ export function getDiskMtime(grid) {
     return grid?._diskMtime ?? null;
 }
 
-/** Dedupe + construct the CodeGrid shell for a text path (shared by the sync and
- *  worker build paths). Returns null when the file is already open. @private */
+/** Dedupe + construct the CodeGrid shell for a text path (shared by every text
+ *  build path). Returns null when the file is already open. @private */
 function prepFileGrid(ctx, path, notRendered) {
     const uri = `file:///${String(path).replace(/^\/+/, '')}`;
     if ((ctx.registry.findByMeta?.('sourcePath', uri) || []).length) return null;
@@ -111,28 +111,44 @@ function seatFileGrid(ctx, path, grid, notRendered, mtime) {
     return ctx.addGrid(grid, { id: path, type: 'grid' }); // registers (scene.add skipped — parented)
 }
 
+/**
+ * Create, load, and seat a text grid. Seating (tree insert + registration) is
+ * SYNCHRONOUS — the tree grows in walk order and the bulk path's mid-stream pours
+ * see the grid immediately — while the content load runs on the worker pipeline.
+ * The returned `load` resolves when the grid is fully laid out: single-file open
+ * awaits it (the caller positions by the grid's bounds); the bulk path settles the
+ * whole batch before its final relayout, because an unlaid grid has empty bounds
+ * and would measure wrong.
+ * @private
+ * @returns {{id: string, load: Promise}|null}
+ */
 function registerFileGrid(ctx, path, body, notRendered, mtime) {
     const grid = prepFileGrid(ctx, path, notRendered);
     if (!grid) return null;
-    // Main-thread on purpose: a warm build is 4–5ms even for a fat file (the worker
-    // detour measured 5–8× slower than the work — 23–40ms round-trip for a 4ms
-    // build), and the bulk path slices these under a frame budget.
-    grid.loadFile(path, body);
-    return seatFileGrid(ctx, path, grid, notRendered, mtime);
+    const load = grid.loadFile(path, body);
+    const id = seatFileGrid(ctx, path, grid, notRendered, mtime);
+    return { id, load };
 }
 
 /** Register fetched text content — unreadable content renders as a placeholder card.
+ *  Resolves once the grid is seated AND fully laid out (null if already open).
  *  `mtime` (optional) is the disk mtime the content was read at, stashed for the
  *  save-time stale-write check; omit it for content with no disk identity (GitHub). */
-export function addFileGrid(ctx, path, content, mtime) {
+export async function addFileGrid(ctx, path, content, mtime) {
     const reason = unreadableReason(content);
-    return registerFileGrid(ctx, path, reason ? placeholderBody(reason) : content, reason, mtime);
+    const r = registerFileGrid(ctx, path, reason ? placeholderBody(reason) : content, reason, mtime);
+    if (!r) return null;
+    await r.load;
+    return r.id;
 }
 
 /** Register a placeholder from tree metadata alone — the file was never fetched (oversize). */
-export function addUnfetchedGrid(ctx, path, bytes) {
+export async function addUnfetchedGrid(ctx, path, bytes) {
     const reason = { bytes };
-    return registerFileGrid(ctx, path, placeholderBody(reason), reason);
+    const r = registerFileGrid(ctx, path, placeholderBody(reason), reason);
+    if (!r) return null;
+    await r.load;
+    return r.id;
 }
 
 // ── image grids ─────────────────────────────────────────────────────────────────────────
@@ -154,10 +170,13 @@ function registerImageGrid(ctx, path, texture, width, height, kind) {
 // ── binary grids (hex) ──────────────────────────────────────────────────────────────────
 
 /** Create + register a binary file as a hex BLOCK in a CodeGrid — "can't read it, here are the bytes". */
-function registerBinaryGrid(ctx, path, bytes) {
+async function registerBinaryGrid(ctx, path, bytes) {
     const size = bytes.length >= SNIFF_BYTES ? ` (first ${bytes.length.toLocaleString()} bytes)` : ` (${bytes.length.toLocaleString()} bytes)`;
     const body = `binary — no text or image signature${size}\n\n` + bytesToHexView(bytes, { cols: HEX_COLS });
-    return registerFileGrid(ctx, path, body, { binary: true });
+    const r = registerFileGrid(ctx, path, body, { binary: true });
+    if (!r) return null;
+    await r.load;
+    return r.id;
 }
 
 // ── the classify → render entry ─────────────────────────────────────────────────────────
@@ -189,7 +208,7 @@ export async function renderSheetGrid(ctx, path) {
         if (head) {
             const bk = classifyBytes(head);
             if (bk.kind === 'image')  return renderImageSheet(ctx, path, uri, bk);
-            if (bk.kind === 'binary') return registerBinaryGrid(ctx, path, head) ?? racedId(ctx, uri);
+            if (bk.kind === 'binary') return (await registerBinaryGrid(ctx, path, head)) ?? racedId(ctx, uri);
             // bk.kind === 'text' → fall through to the text path
         }
     }
@@ -204,10 +223,10 @@ async function renderTextSheet(ctx, path, uri) {
     // plain content fetch — those grids carry no mtime and skip the stale check.
     if (typeof fp.getFileWithStat === 'function') {
         const { content, mtime } = await fp.getFileWithStat(path);
-        return addFileGrid(ctx, path, content, mtime) ?? racedId(ctx, uri);
+        return (await addFileGrid(ctx, path, content, mtime)) ?? racedId(ctx, uri);
     }
     const content = await fp.getFile(path);
-    return addFileGrid(ctx, path, content) ?? racedId(ctx, uri);
+    return (await addFileGrid(ctx, path, content)) ?? racedId(ctx, uri);
 }
 
 /** Image path — fetch bytes, decode to a texture, render as a single-cell FrameGrid sized to aspect. */

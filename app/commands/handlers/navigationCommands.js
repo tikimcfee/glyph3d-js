@@ -74,7 +74,7 @@ function createTourAnnotation(ctx, gridIndex, text) {
         gridScale: 1.0,
     });
 
-    annotGrid.loadText(text);
+    void annotGrid.loadText(text);
     annotGrid.position.set(x, y, z);
 
     ctx.scene.add(annotGrid);

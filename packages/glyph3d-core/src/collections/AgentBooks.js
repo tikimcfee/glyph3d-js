@@ -660,7 +660,7 @@ export default class AgentBooks {
      *  rides and re-flow (and, if `pick` given, register it as a pickable role-'card'). */
     _card(filename, body, opts, pick, lane, sheetId) {
         const grid = this._makeGrid(filename, opts);
-        grid.loadFileAsync(filename, body)
+        grid.loadFile(filename, body)
             .then(() => { if (pick) this._wireCardPick(grid, pick.id, pick.meta); this._settle(lane, sheetId); })
             .catch(() => { /* render best-effort */ });
         return grid;
@@ -744,9 +744,9 @@ export default class AgentBooks {
         const wire = () => { if (pick) this._wireCardPick(grid, pick.id, pick.meta); };
         Promise.resolve(this.ctx.fileProvider?.getFile?.(path))
             .then((content) => this._resolveSnapshotText(path, String(content ?? '')))
-            .then((text) => grid.loadFileAsync(path, text))
+            .then((text) => grid.loadFile(path, text))
             .then(() => { this._decorateSnapshot(grid, record); wire(); this._settle(lane, sheetId); })
-            .catch(() => grid.loadFileAsync(path, '(could not load)').then(() => { wire(); this._settle(lane, sheetId); }).catch(() => {}));
+            .catch(() => grid.loadFile(path, '(could not load)').then(() => { wire(); this._settle(lane, sheetId); }).catch(() => {}));
     }
 
     /**

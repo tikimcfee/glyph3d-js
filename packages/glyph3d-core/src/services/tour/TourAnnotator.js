@@ -120,7 +120,7 @@ export default class TourAnnotator {
             gridScale: 0.8,
         });
 
-        grid.loadText(text);
+        void grid.loadText(text);
 
         // Position label above the referenced grid
         const bounds = resolved.grid.getBounds?.();
