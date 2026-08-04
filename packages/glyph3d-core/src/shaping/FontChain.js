@@ -306,6 +306,22 @@ export default class FontChain {
         return `${this._fonts[fontIdx].name}:${n}`;
     }
 
+    /**
+     * A slot's debug identity for logs: which FONT it came from, the per-font glyph
+     * id, and that glyph's name — bitmap (emoji) slots name their atlas cell instead.
+     * A glyph literally named '.blank' is a font's empty placeholder (zero-width/format
+     * codepoints map there); seeing one appended means "renders as nothing".
+     * @param {number} slot
+     * @returns {{ font: string, gid: number, name: string }}
+     */
+    describeSlot(slot) {
+        const m = this._resolve(slot);
+        if (m.fontIdx === BITMAP_FONT) return { font: '<emoji-atlas>', gid: m.gid, name: `cell ${m.cell}` };
+        const f = this._fonts[m.fontIdx];
+        if (!f) return { font: `#${m.fontIdx}`, gid: m.gid, name: '.blank' };
+        return { font: f.name, gid: m.gid, name: f.shaper.glyphName(m.gid) };
+    }
+
     /** Destroy every font's HarfBuzz objects. */
     destroy() {
         for (const f of this._fonts) f.shaper.destroy();
