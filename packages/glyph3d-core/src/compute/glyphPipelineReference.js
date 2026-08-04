@@ -146,14 +146,20 @@ export function rowsForLine(len, wrap) {
  * line of millions of glyphs: nothing severs the accumulation, the layout is one absurd row,
  * and every thread that cannot inherit walks the whole file. `wrapWidth` cuts the line into
  * visual rows every N glyphs, and because x RESETS at each row start, the float sum can
- * never reach back further than one wrap. That is why the walk is split in two:
+ * never reach back further than one wrap.
  *
- *   Phase A — row and col, as exact INTEGERS. Bounded by the inherit. Integer adds are
- *             cheap, so walking far here is survivable, and being exact is what lets every
- *             downstream decision (wrap, page, cursor) avoid float boundaries entirely.
- *   Phase B — x, the float sum of advances. Bounded UNCONDITIONALLY by `wrapWidth`, because
- *             the row start is at most `col % wrapWidth` glyphs back. This is the phase that
- *             would otherwise be unbounded, and wrap is what bounds it.
+ * ONE DISPATCH. ONE THREAD. TWO LOOPS, BACK TO BACK — not two passes, not two kernels, and
+ * nothing between them but a local variable:
+ *
+ *   loop 1 (integer walk)  resolves `row` and `col` as exact integers. Bounded by the
+ *                          inherit. Integer adds are cheap, so walking far here is
+ *                          survivable, and being exact is what lets every downstream
+ *                          decision — wrap, page, cursor — avoid float boundaries entirely.
+ *   loop 2 (advance sum)   sums `x`. It exists as a separate loop for exactly one reason:
+ *                          it cannot know how far to walk until loop 1 has produced `col`.
+ *                          Bounded UNCONDITIONALLY at `col % wrapWidth` steps, because the
+ *                          visual row starts there. This is the sum that would otherwise
+ *                          be unbounded, and wrap is what bounds it.
  *
  * A newline severs both. It does NOT zero an accumulation already made past it — that bug is
  * what tools/backtrack-layout.test.mjs keeps out, and it only reproduces when the inherit
@@ -172,9 +178,9 @@ export function layout(slots, id, params = {}) {
     const o = id * SLOT_STRIDE;
     if ((slots[o + S_FLAGS] & F_LEADER) === 0) return;
 
-    // ── Phase A: exact integers. `run` counts glyphs back to the previous newline; the
-    //    first newline crossed closes MY column, each one after that closes a whole line
-    //    above me and contributes its wrapped row count.
+    // ── LOOP 1 (integer walk): resolve row + col. `run` counts glyphs back to the previous
+    //    newline; the first newline crossed closes MY column, each one after that closes a
+    //    whole line above me and contributes its wrapped row count.
     let run = 0, col = -1, row = 0, steps = 0;
     let prev = leaderBefore(slots, id);
     while (prev !== id) {
@@ -219,9 +225,11 @@ export function layout(slots, id, params = {}) {
     const wrapRow = wrap > 0 ? Math.floor(col / wrap) : 0;
     row += wrapRow;
 
-    // ── Phase B: x. The row started at most `col % wrapWidth` glyphs back — walk exactly
-    //    that far and sum. With wrap off this walks to the line start instead, which is the
-    //    unbounded case wrap exists to remove.
+    // ── LOOP 2 (advance sum): x. Now that loop 1 has `col`, the visual row is known to have
+    //    started exactly `col % wrapWidth` glyphs back — walk that far and sum. With wrap off
+    //    this walks to the line start instead, which is the unbounded case wrap removes.
+    //    Note it re-walks rather than inheriting a float: that is why x came out
+    //    order-independent to within f32 representation.
     const backTo = wrap > 0 ? (col % wrap) : col;
     let x = 0, k = 0, q = leaderBefore(slots, id);
     while (k < backTo && q !== id) {
