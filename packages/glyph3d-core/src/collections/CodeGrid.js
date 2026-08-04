@@ -13,6 +13,7 @@
 import * as THREE from 'three';
 import GlyphField from '../GlyphField.js';
 import { getWorkerBridge } from '../workers/WorkerBridge.js';
+import { loadStats } from '../core/loadStats.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import { BOUNDS_Z_PAD } from '../core/constants.js';
 import { computeCellMetrics } from '../core/cellMetrics.js';
@@ -1272,6 +1273,8 @@ class CodeGrid extends FramedGlyphField {
      *   builder consumed, passed through for the GPU layout engine (dual-compute assertion)
      */
     _commitBuiltBuffers(buffers, items, deferredRemovals = [], shared = null) {
+        const tc0 = performance.now();
+        try {
         if (!this._renderer) {
             this._createRendererWithSize(buffers.count, true);
         }
@@ -1326,6 +1329,11 @@ class CodeGrid extends FramedGlyphField {
             });
         }
         this._pendingAdds = [];
+        } finally {
+            // The load path's commit cost, counted for the load trace (core/loadStats.js).
+            loadStats.commits++;
+            loadStats.commitMs += performance.now() - tc0;
+        }
     }
 
     /**

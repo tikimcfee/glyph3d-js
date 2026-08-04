@@ -19,6 +19,7 @@ import { resolveGridByIdOrIndex, WORLD_FLOOR_Y } from './spatialHelpers.js';
 import { table } from '../formatResponse.js';
 import { beginLoad } from '../loadTrace.js';
 import { READABLE_MAX_CHARS } from '@glyph3d/core';
+import { snapshotLoadStats, diffLoadStats, loadStats } from '@glyph3d/core/core/loadStats.js';
 import { FS_ERROR_CODES } from '@glyph3d/core/services/data';
 import { renderSheetGrid, addFileGrid, addUnfetchedGrid, getDiskMtime, setDiskMtime } from './fileLoader.js';
 import { canonicalPath, toFileUri } from './pathResolve.js';
@@ -223,10 +224,12 @@ export default function registerFileCommands(router) {
             let kb = 0;
             for (const c of contentMap.values()) kb += c?.content?.length ?? 0;
             trace.mark('fetch', { files: contentMap.size, kb: Math.round(kb / 1024) });
+            const stats0 = snapshotLoadStats();   // kernel-dispatch + atlas costs accrue from here
 
             let opened = 0;
             let placeholders = 0;
             let chunks = 1;
+            let pours = 0, pourMs = 0;
             const pending = [];   // every grid's load promise — settled before the final relayout
             const settleWarn = (err) => console.warn('file.openDir: a grid load failed (grid stays, unlaid):', err);
             // The whole build runs under a registry HOLD: 350 grids registering means
@@ -250,8 +253,9 @@ export default function registerFileCommands(router) {
             const yieldFrame = () => new Promise((r) => {
                 // rAF is the real frame boundary; the timer keeps a hidden tab
                 // (no frames) from stalling the load forever.
+                const y0 = performance.now();
                 let done = false;
-                const settle = () => { if (!done) { done = true; r(); } };
+                const settle = () => { if (!done) { done = true; loadStats.yields++; loadStats.yieldMs += performance.now() - y0; r(); } };
                 if (typeof requestAnimationFrame === 'function') requestAnimationFrame(settle);
                 setTimeout(settle, 50);
             });
@@ -277,6 +281,7 @@ export default function registerFileCommands(router) {
                     const t0 = performance.now();
                     ctx.contentTree.relayoutAndRest(WORLD_FLOOR_Y);   // held under a batch window
                     lastPour = performance.now();
+                    pours++; pourMs += lastPour - t0;
                     pourInterval = Math.max(pourInterval, (lastPour - t0) * 8);
                 }
             };
@@ -311,12 +316,25 @@ export default function registerFileCommands(router) {
                 slice = frameLag < 22 ? Math.min(slice * 1.5, budget * 4) : Math.max(budget, slice / 2);
             }
             });   // registry hold closes: one coalesced listener pass for the batch
+            trace.mark('seat', { pours, pourMs: Math.round(pourMs) });
 
             // Every grid's content laid before the final relayout — an unlaid grid has
             // empty bounds and would measure wrong in the tree.
             const tSettle = performance.now();
             await Promise.allSettled(pending);
-            trace.mark('build', { grids: opened, chunks, settleMs: Math.round(performance.now() - tSettle) });
+            // The load-path counters (core/loadStats.js): kernel dispatches and atlas
+            // growths accrued during seat+settle — the build stage's hidden costs.
+            const d = diffLoadStats(stats0);
+            trace.mark('build', {
+                grids: opened, chunks, settleMs: Math.round(performance.now() - tSettle),
+                kernels: d.kernelDispatches, kernelMs: Math.round(d.kernelMs),
+                atlasGrows: d.atlasGrows, atlasMs: Math.round(d.atlasMs),
+                atlasSwaps: d.atlasFieldsSwapped, atlasBlanks: d.atlasBlanks,
+                commits: d.commits, commitMs: Math.round(d.commitMs),
+                parses: d.analyzeParses, parseMs: Math.round(d.analyzeMs),
+                parseSyncMs: Math.round(d.parseSyncMs),
+                yields: d.yields, yieldMs: Math.round(d.yieldMs),
+            });
 
             // One relayout for the whole batch (the RenderPlan), then rest on the world floor —
             // the directory structure IS the scene graph now (the walk-tree scheme places it).

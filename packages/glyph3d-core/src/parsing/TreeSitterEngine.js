@@ -26,6 +26,8 @@
 
 const RUNTIME_WASM_URL = new URL('./vendor/web-tree-sitter.wasm', import.meta.url).href;
 
+import { loadStats } from '../core/loadStats.js';
+
 let _initPromise = null;            // Promise<{Parser,Language,Query}>
 let _ts = null;                     // resolved {Parser,Language,Query}
 const _languages = new Map();       // key -> Promise<Language>
@@ -135,7 +137,9 @@ export async function parseDocument(text, descriptor, spec = null, opts = {}) {
     let tree = null;
     try {
         parser.setLanguage(language);
+        const tSync = performance.now();
         tree = parser.parse(text);
+        loadStats.parseSyncMs += performance.now() - tSync;   // the true WASM parse cost
 
         let captures = [];
         if (query) {

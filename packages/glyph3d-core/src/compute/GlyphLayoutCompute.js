@@ -26,6 +26,7 @@
 
 import GlyphLayoutKernel from './GlyphLayoutKernel.js';
 import { pageFold, foldExtent } from '../core/foldGeometry.js';
+import { loadStats } from '../core/loadStats.js';
 
 let _renderer = null;
 let _deviceLostNoted = false;
@@ -159,8 +160,11 @@ export function syncGpuLayout(field, buffers, items, shared, rendererIds) {
         // ONE configure + ONE dispatch for the whole field — the item table carries per-item
         // params; the kernel resolves each thread's item by binary search. configure returns
         // the layout scan's scalars, parallel to kernelItems.
+        const t0 = performance.now();
         const scan = kernel.configure({ items: kernelItems, totalSlots });
         kernel.computeSync();
+        loadStats.kernelDispatches++;
+        loadStats.kernelMs += performance.now() - t0;
 
         // ── Extents: closed form on the scan's scalars, per item, unioned for the field. ──
         let union = null;

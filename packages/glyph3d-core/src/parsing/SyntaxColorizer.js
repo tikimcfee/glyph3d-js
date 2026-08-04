@@ -30,6 +30,7 @@ import { resolveScopeColor, FOREGROUND } from './syntaxTheme.js';
 import { structureSpecFor } from './semanticKinds.js';
 import SemanticModel from './SemanticModel.js';
 import { unreadableReason } from '../core/readability.js';
+import { loadStats } from '../core/loadStats.js';
 
 const SURROGATE_RE = /[\uD800-\uDFFF]/;
 
@@ -109,7 +110,12 @@ export async function analyzeGrid(grid) {
         const { descriptor, text, lines } = src;
 
         const gen = grid._analyzeGen;                 // snapshot before the async parse
+        const tp = performance.now();
         const { captures } = await parseDocument(text, descriptor);  // colors only — structure is lazy
+        // The parse is main-thread WASM — during a bulk load these stack up against the
+        // seat loop. Counted for the load trace (core/loadStats.js).
+        loadStats.analyzeParses++;
+        loadStats.analyzeMs += performance.now() - tp;
         if (grid._analyzeGen !== gen) return;         // superseded by a newer layout — abort
 
         // Stash the captures on the grid as render-neutral highlight state, so a 2D

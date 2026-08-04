@@ -28,6 +28,7 @@
  */
 
 import SlugEncoder from './SlugEncoder.js';
+import { loadStats } from '../core/loadStats.js';
 
 export default class LiveSlugAtlas {
     /**
@@ -99,6 +100,7 @@ export default class LiveSlugAtlas {
         // The encoder skips .notdef + already-encoded internally and APPENDS only the new glyphs
         // (each extracted exactly once — no full re-encode). It returns the rebuilt textures and
         // whether anything grew.
+        const t0 = performance.now();
         const res = this._encoder.appendGlyphs(glyphIds);
         if (!res.grew) return { grew: false, added: 0, total: this._encoder.size };
 
@@ -132,9 +134,18 @@ export default class LiveSlugAtlas {
         const ids = res.addedIds || [];
         const names = ids.slice(0, 24).map((id) => (this._shaper.glyphName?.(id)) || id).join(', ');
         const more = ids.length > 24 ? ` …+${ids.length - 24}` : '';
+        const blanks = ids.filter((id) => (this._shaper.glyphName?.(id)) === '.blank').length;
+        const ms = performance.now() - t0;
+        // The load path's atlas cost, counted for the load trace (core/loadStats.js).
+        loadStats.atlasGrows++;
+        loadStats.atlasMs += ms;
+        loadStats.atlasFieldsSwapped += updated;
+        loadStats.atlasBlanks += blanks;
+        loadStats.atlasGlyphsAdded += res.added;
         console.log(
             `[LiveSlugAtlas] grew v${this._version}: +${res.added} → ${this._encoder.size} glyphs ` +
-            `[${names}${more}], ${updated}/${this._fields.size} fields hot-swapped`
+            `[${names}${more}]${blanks ? ` (${blanks} blank)` : ''}, ` +
+            `${updated}/${this._fields.size} fields hot-swapped in ${ms.toFixed(1)}ms`
         );
         return { grew: true, added: res.added, total: this._encoder.size };
     }
