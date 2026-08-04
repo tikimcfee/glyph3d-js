@@ -2,11 +2,36 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { execSync } from 'node:child_process';
 import path from 'node:path';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '..'); // app → repo root
 const require = createRequire(import.meta.url);
+
+// The boot stamp — the page's answer to "what code am I running?". In DEV the tree moves
+// under a long-lived server (hot reloads, shared checkouts), so the stamp is fetched live
+// per page load from the middleware below; a baked-at-server-start value would lie. In the
+// PRODUCTION build there is no server — the stamp is baked via define (build time IS the
+// version for the embedded binary).
+const gitStamp = () => {
+  const run = (cmd) => execSync(cmd, { cwd: repoRoot, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+  try {
+    return { hash: run('git rev-parse --short HEAD'), branch: run('git rev-parse --abbrev-ref HEAD'),
+      dirty: run('git status --porcelain').length > 0, at: new Date().toISOString() };
+  } catch {
+    return { hash: 'unknown', branch: 'unknown', dirty: true, at: new Date().toISOString() };
+  }
+};
+const bootStampPlugin = {
+  name: 'glyph-boot-stamp',
+  configureServer(server) {
+    server.middlewares.use('/__glyph-boot.json', (req, res) => {
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify(gitStamp()));
+    });
+  },
+};
 
 // The ONE intentional alias: serve the WebGPU build of three for BOTH `three`
 // and `three/webgpu`. The webgpu build is a superset (it carries WebGPURenderer
@@ -24,7 +49,10 @@ export default defineConfig({
   // build (binary serves at root); the hosted IDE lives under glyph3d.dev/ide/,
   // so its deploy builds with GLYPH_BASE=/ide/ (see `make deploy-ide`).
   base: process.env.GLYPH_BASE || '/',
-  plugins: [react()],
+  plugins: [react(), bootStampPlugin],
+  define: {
+    __GLYPH_BOOT_BUILD__: JSON.stringify(gitStamp()),
+  },
   resolve: {
     alias: [
       { find: /^three$/, replacement: threeWebGPU },

@@ -25,6 +25,17 @@ const FONT_CHAIN = [
   { url: dejavuUrl, name: 'DejaVu Sans' },
 ];
 
+// Boot stamp — "what code am I running?", answered by the page itself and kept by the
+// relay's log store (so `log.search boot` answers page-less from the CLI). Dev fetches the
+// LIVE stamp from the vite middleware (the tree moves under a long-lived dev server — a
+// server-start value would lie); the production bundle has no middleware and falls back to
+// the define-baked stamp (build time is the version there).
+fetch('/__glyph-boot.json').then((r) => (r.ok ? r.json() : null)).catch(() => null)
+  .then((live) => {
+    const s = live || (typeof __GLYPH_BOOT_BUILD__ !== 'undefined' ? __GLYPH_BOOT_BUILD__ : null);
+    if (s) console.info(`[boot] glyph3d ${s.hash}${s.dirty ? '+dirty' : ''} (${s.branch}) — ${s.at}${live ? ' · live tree' : ' · baked'}`);
+  });
+
 // ?relay=PORT pins the relay to a specific port (dev: vite serves the page, the Go
 // relay is on another port). Absent → fall back to the last port the connection chip
 // used (persisted in g3d.* localStorage), so a dev reload re-dials it without retyping;
