@@ -432,7 +432,7 @@ const probe = (opts) => `(async (o) => {
         if (H > 0) {
           // The page gap multiplies charAdvance (metrics.charWidth + letterSpacing) — the CEIL'd
           // pixel metric — NOT the real glyph advance the x-step uses. Two different cell widths
-          // in one builder; paginationGeometry() is where they part.
+          // in one builder; the page-fold geometry is where they part.
           const unit = p.pageGapUnit > 0 ? p.pageGapUnit : p.cellWidth;
           const Wp = this._scan.maxRowExtent > 0 ? this._scan.maxRowExtent : wrap * unit;
           const gapX = p.pageGapX * unit, gapY = p.pageGapY * ls;
@@ -490,7 +490,7 @@ const probe = (opts) => `(async (o) => {
     zWrapStep: metrics.charHeight * layout.zWrapSpacing,
     pageHeight: layout.pageHeight, pagesWide: layout.pagesWide,
     pageGapX: layout.pageGapX, pageGapY: layout.pageGapY, pageDepth: layout.pageDepth,
-    // paginationGeometry() multiplies the page gap by charAdvance = metrics.charWidth +
+    // The page gap multiplies charAdvance = metrics.charWidth +
     // letterSpacing — the CEIL'd pixel metric — while x steps by the REAL advance. They differ
     // by ~12%, so the gap unit is its own param; the world-unit forms are handed over too.
     pageGapUnit: metrics.charWidth + metrics.letterSpacing,
