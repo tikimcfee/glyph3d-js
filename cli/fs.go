@@ -239,7 +239,8 @@ type dirEntry struct {
 }
 
 type readFileParams struct {
-	URI string `json:"uri"`
+	URI    string `json:"uri"`
+	Binary bool   `json:"binary"` // answer on the binary result plane (raw content bytes)
 }
 
 // readRangeParams is the body of fs/readRange — a raw, binary-safe byte tap.
@@ -251,6 +252,7 @@ type readRangeParams struct {
 	URI    string `json:"uri"`
 	Offset int64  `json:"offset"`
 	Length int64  `json:"length"`
+	Binary bool   `json:"binary"` // answer with raw bytes (no base64) on the binary result plane
 }
 
 // rangeContent is the fs/readRange result. Content is base64; TotalSize is the
@@ -361,6 +363,43 @@ type writeFileResult struct {
 
 // writeFn sends a serialized message to the display. Set by the Relay.
 type writeFn func(data []byte)
+
+// writeBinFn sends a BINARY frame to the display — the RPC binary result plane.
+// Content-bearing RPCs (fs/readFile, fs/readRange, agentSessions/read) answer
+// binary-opted requests with one raw frame instead of a JSON-escaped string:
+// no base64, no 30MB json.Marshal walk server-side, no 31MB JSON.parse in the
+// browser — the payload crosses as bytes and decodes client-side via TextDecoder.
+type writeBinFn func(data []byte)
+
+// frameRPCResult is the type byte of an RPC binary result frame (relay → display):
+//
+//	[frameRPCResult:u8][idLen:u8][id:utf8][hdrLen:u32 BE][hdr JSON][raw payload]
+//
+// The id is the JSON-RPC request id verbatim (the bridge sends small integers);
+// the hdr carries every result field EXCEPT the content payload (uri, stat, size,
+// mtime, truncated, …), so the header stays small and the payload stays raw.
+const frameRPCResult = 0x02
+
+// sendRPCBinaryResult frames a content result as ONE binary message (see
+// frameRPCResult). hdr marshals to JSON (small); payload is appended untouched.
+func sendRPCBinaryResult(writeBin writeBinFn, id json.RawMessage, hdr any, payload []byte) {
+	hdrData, err := json.Marshal(hdr)
+	if err != nil {
+		log.Printf("[fs] marshal binary-result header error: %v", err)
+		return
+	}
+	if len(id) > 255 {
+		log.Printf("[fs] binary result: id too long (%d bytes)", len(id))
+		return
+	}
+	frame := make([]byte, 0, 2+len(id)+4+len(hdrData)+len(payload))
+	frame = append(frame, frameRPCResult, byte(len(id)))
+	frame = append(frame, id...)
+	frame = append(frame, byte(len(hdrData)>>24), byte(len(hdrData)>>16), byte(len(hdrData)>>8), byte(len(hdrData)))
+	frame = append(frame, hdrData...)
+	frame = append(frame, payload...)
+	writeBin(frame)
+}
 
 // FSHandler serves filesystem requests over JSON-RPC 2.0.
 type FSHandler struct {
@@ -527,17 +566,18 @@ func evalSymlinksOrSelf(p string) string {
 
 // Handle dispatches a JSON-RPC request to the appropriate method.
 // Runs the handler in a goroutine with a timeout so it never blocks
-// the WebSocket read loop. Writes go through the provided writeFn.
-func (h *FSHandler) Handle(method string, rawID json.RawMessage, params json.RawMessage, write writeFn) {
+// the WebSocket read loop. Text writes go through write; content-bearing
+// methods may answer binary-opted requests through writeBin instead.
+func (h *FSHandler) Handle(method string, rawID json.RawMessage, params json.RawMessage, write writeFn, writeBin writeBinFn) {
 	go func() {
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
 			switch method {
 			case "fs/readFile":
-				h.handleReadFile(write, rawID, params)
+				h.handleReadFile(write, writeBin, rawID, params)
 			case "fs/readRange":
-				h.handleReadRange(write, rawID, params)
+				h.handleReadRange(write, writeBin, rawID, params)
 			case "fs/listTree":
 				h.handleListTree(write, rawID, params)
 			case "fs/readDir":
@@ -555,7 +595,7 @@ func (h *FSHandler) Handle(method string, rawID json.RawMessage, params json.Raw
 			case "agentSessions/list":
 				h.handleAgentSessionsList(write, rawID, params)
 			case "agentSessions/read":
-				h.handleAgentSessionsRead(write, rawID, params)
+				h.handleAgentSessionsRead(write, writeBin, rawID, params)
 			default:
 				h.sendRPCError(write, rawID, -32601, "method not found: "+method, nil)
 			}
@@ -571,7 +611,7 @@ func (h *FSHandler) Handle(method string, rawID json.RawMessage, params json.Raw
 
 // ---- Method Handlers ----
 
-func (h *FSHandler) handleReadFile(write writeFn, id json.RawMessage, raw json.RawMessage) {
+func (h *FSHandler) handleReadFile(write writeFn, writeBin writeBinFn, id json.RawMessage, raw json.RawMessage) {
 	var p readFileParams
 	if err := json.Unmarshal(raw, &p); err != nil {
 		h.sendRPCError(write, id, -32602, "invalid params", nil)
@@ -610,6 +650,17 @@ func (h *FSHandler) handleReadFile(write writeFn, id json.RawMessage, raw json.R
 		return
 	}
 
+	// Binary opt-in: the content rides the frame payload raw; the header carries
+	// everything else the JSON result would. The client decodes via TextDecoder —
+	// no JSON string escaping on either side, however big the file.
+	if p.Binary {
+		sendRPCBinaryResult(writeBin, id, map[string]any{
+			"uri": p.URI,
+			"stat": fileStat{Type: "file", Size: info.Size(), Mtime: info.ModTime().UnixMilli()},
+		}, data)
+		return
+	}
+
 	result := fileContent{
 		URI:     p.URI,
 		Content: string(data),
@@ -629,7 +680,7 @@ func (h *FSHandler) handleReadFile(write writeFn, id json.RawMessage, raw json.R
 // reads [offset, offset+length) (capped at maxRangeLen per call) via ReadAt,
 // so a 1GB file is windowed, never slurped. EOF short-reads are not an error —
 // the returned Length reflects how many bytes actually landed.
-func (h *FSHandler) handleReadRange(write writeFn, id json.RawMessage, raw json.RawMessage) {
+func (h *FSHandler) handleReadRange(write writeFn, writeBin writeBinFn, id json.RawMessage, raw json.RawMessage) {
 	var p readRangeParams
 	if err := json.Unmarshal(raw, &p); err != nil {
 		h.sendRPCError(write, id, -32602, "invalid params", nil)
@@ -674,6 +725,15 @@ func (h *FSHandler) handleReadRange(write writeFn, id json.RawMessage, raw json.
 	// error is real.
 	if err != nil && err != io.EOF {
 		h.sendRPCError(write, id, errFileNotFound, "read error: "+err.Error(), map[string]string{"uri": p.URI})
+		return
+	}
+
+	// Binary opt-in: the window rides the frame payload RAW — no base64 inflation
+	// (+33%) and no atob/decode loop client-side.
+	if p.Binary {
+		sendRPCBinaryResult(writeBin, id, map[string]any{
+			"uri": p.URI, "offset": p.Offset, "length": int64(got), "totalSize": info.Size(),
+		}, buf[:got])
 		return
 	}
 

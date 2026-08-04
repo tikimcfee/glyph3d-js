@@ -19,6 +19,16 @@ import { RepositoryAdapter } from './RepositoryAdapter.js';
 // Shared filter logic — reuse RepositoryAdapter's blacklist
 const _filterProto = RepositoryAdapter.prototype.filterCodeFiles;
 
+// Content arrives on the binary result plane as raw bytes (providers opt in per
+// request); one decoder for every text payload. Legacy JSON responses (an older
+// relay, or an error path) still carry string content — callers branch on `bytes`.
+const _utf8 = new TextDecoder();
+
+/** Decode a binary-plane result to its content string; legacy results pass through. */
+function contentOf(r) {
+    return r?.bytes ? _utf8.decode(r.bytes) : (r?.content ?? '');
+}
+
 export class RemoteFileSystemProvider {
     /**
      * @param {import('../orchestration/WebSocketBridge.js').default} bridge
@@ -49,54 +59,62 @@ export class RemoteFileSystemProvider {
      * @returns {Promise<import('./types.js').FileContent>}
      */
     async readFile(uri) {
-        return this._rpc('fs/readFile', { uri });
+        const r = await this._rpc('fs/readFile', { uri, binary: true });
+        return { ...r, content: contentOf(r) };
     }
 
     /**
      * Read a raw byte window from a file — the memory-viewer / demand-paging tap.
      * Binary-safe (no UTF-8 gate) and large-file-safe (only the window is read,
-     * capped server-side at 4MB/call). Decodes the base64 payload to bytes here
-     * so callers get a Uint8Array directly.
+     * capped server-side at 4MB/call). Rides the binary result plane: the payload
+     * arrives as bytes (an older relay falls back to base64-in-JSON — decoded here,
+     * same return shape either way).
      * @param {string} uri - e.g. "file:///vmlinux"
      * @param {number} offset - byte offset into the file (the "address")
      * @param {number} length - bytes requested (actual may be fewer at EOF)
      * @returns {Promise<{ uri: string, offset: number, length: number, totalSize: number, bytes: Uint8Array }>}
      */
     async readRange(uri, offset, length) {
-        const r = await this._rpc('fs/readRange', { uri, offset, length });
-        const bin = atob(r.content || '');
-        const bytes = new Uint8Array(bin.length);
-        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        const r = await this._rpc('fs/readRange', { uri, offset, length, binary: true });
+        let bytes = r.bytes;
+        if (!bytes) {
+            const bin = atob(r.content || '');
+            bytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        }
         return { uri: r.uri, offset: r.offset, length: r.length, totalSize: r.totalSize, bytes };
     }
 
     /**
-     * Read a whole file as bytes — the image / binary transport. Loops readRange until
-     * EOF, so a large file is fetched in server-capped windows rather than one slurp.
-     * Mirrors getFile()'s path→uri convention. Pass { maxBytes } to stop early (a head
-     * sniff for magic bytes); reads stop at the cap or EOF, whichever comes first.
+     * Read a whole file as bytes — the image / binary transport. The first window
+     * establishes totalSize; the rest of the file then reads as PARALLEL windows
+     * (6 in flight) instead of a serial walk — whole-file slurps scale with the
+     * pipe, not the chunk count. Pass { maxBytes } to stop early (a head sniff for
+     * magic bytes); reads stop at the cap or EOF, whichever comes first.
      * @param {string} path
      * @param {{ maxBytes?: number, chunk?: number }} [opts]
      * @returns {Promise<Uint8Array>}
      */
     async getBytes(path, { maxBytes = Infinity, chunk = 1 << 20 } = {}) {
         const uri = `file:///${String(path).replace(/^\/+/, '')}`;   // strip leading slashes → canonical (matches file.open)
-        const parts = [];
-        let offset = 0, total = Infinity, size = 0;
-        while (offset < total && size < maxBytes) {
-            const want = Math.min(chunk, maxBytes - size);
-            const r = await this.readRange(uri, offset, want);
-            total = r.totalSize;
-            if (!r.bytes.length) break;          // EOF / empty
-            parts.push(r.bytes);
-            offset += r.bytes.length;
-            size += r.bytes.length;
-            if (r.bytes.length < want) break;    // short read = EOF
+        const size = Math.min(chunk, maxBytes);
+        const first = await this.readRange(uri, 0, size);
+        const total = Math.min(first.totalSize, maxBytes);
+        if (!first.bytes.length || first.bytes.length >= total) return first.bytes.subarray(0, total);
+
+        const out = new Uint8Array(total);
+        out.set(first.bytes, 0);
+        const CONCURRENCY = 6;
+        for (let off = first.bytes.length; off < total;) {
+            const windows = [];
+            for (let i = 0; i < CONCURRENCY && off < total; i++, off += chunk) {
+                windows.push({ off, len: Math.min(chunk, total - off) });
+            }
+            const parts = await Promise.all(windows.map((w) => this.readRange(uri, w.off, w.len)));
+            for (let i = 0; i < parts.length; i++) {
+                out.set(parts[i].bytes.subarray(0, windows[i].len), windows[i].off);
+            }
         }
-        if (parts.length === 1) return parts[0];
-        const out = new Uint8Array(size);
-        let p = 0;
-        for (const b of parts) { out.set(b, p); p += b.length; }
         return out;
     }
 

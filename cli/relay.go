@@ -26,9 +26,9 @@ import (
 type Relay struct {
 	mu           sync.RWMutex
 	display      *websocket.Conn
-	displayWrite chan []byte   // control/JSON write queue (non-blocking, drop-OK — self-correcting)
-	displayBytes chan []byte   // terminal OUTPUT binary frames (blocking send = lossless backpressure)
-	displayDone  chan struct{} // closed on display teardown — unblocks writer + blocked byte senders
+	displayWrite chan displayMsg   // control/JSON + RPC-binary write queue (text non-blocking/drop-OK, binary blocking — self-correcting)
+	displayBytes chan []byte       // terminal OUTPUT binary frames (blocking send = lossless backpressure)
+	displayDone  chan struct{}     // closed on display teardown — unblocks writer + blocked byte senders
 	controllers  map[string]*websocket.Conn
 	nextID       atomic.Int64
 	termSeq      atomic.Int64 // monotonic id source for relay-spawned terminal adapters
@@ -38,6 +38,13 @@ type Relay struct {
 	port         int             // port this relay serves on (spawned adapters connect back here)
 	logs         *LogStore       // relay-resident browser-log store (SQLite :memory: + FTS5)
 	logSubs      map[string]bool // controller ids subscribed via log.follow (guarded by mu)
+}
+
+// displayMsg is one queued write to the display WebSocket. binary marks RPC binary
+// result frames (fs/sessions content) as opposed to the usual JSON text control.
+type displayMsg struct {
+	data   []byte
+	binary bool
 }
 
 func NewRelay() *Relay {
@@ -55,7 +62,7 @@ func NewRelay() *Relay {
 	}
 }
 
-// sendToDisplay enqueues a message for the display WebSocket writer goroutine.
+// sendToDisplay enqueues a text message for the display WebSocket writer goroutine.
 // Safe to call from any goroutine. Non-blocking if channel has capacity.
 func (r *Relay) sendToDisplay(data []byte) {
 	r.mu.RLock()
@@ -65,9 +72,27 @@ func (r *Relay) sendToDisplay(data []byte) {
 		return
 	}
 	select {
-	case ch <- data:
+	case ch <- displayMsg{data: data}:
 	default:
 		log.Printf("[relay] display write queue full, dropping message")
+	}
+}
+
+// sendBinToDisplay enqueues a BINARY frame for the display writer — the RPC binary
+// result plane (fs/sessions content). Unlike text control this is a BLOCKING send:
+// a dropped RPC response hangs the client's promise until timeout, so the handler
+// goroutine briefly backpressures instead. Cancellable on display teardown.
+func (r *Relay) sendBinToDisplay(data []byte) {
+	r.mu.RLock()
+	ch := r.displayWrite
+	done := r.displayDone
+	r.mu.RUnlock()
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- displayMsg{data: data, binary: true}:
+	case <-done:
 	}
 }
 
@@ -93,19 +118,29 @@ func (r *Relay) sendBytesToDisplay(data []byte) {
 }
 
 // startDisplayWriter serializes all writes to the one display WebSocket, draining two
-// queues with CONTROL PRIORITY: control/JSON (responses, FS-RPC, notifications) is
+// queues with CONTROL PRIORITY: control (JSON responses + RPC binary result frames) is
 // always flushed before bulk terminal bytes, so a flood of output never head-of-line
 // blocks interactive control traffic. Exits when the display tears down (`done`) or a
 // write fails. The data channels are never closed (abandoned to GC) so a controller
 // blocked in sendBytesToDisplay can't hit a send-on-closed panic.
-func (r *Relay) startDisplayWriter(ws *websocket.Conn, control, bytesCh chan []byte, done chan struct{}) {
+func (r *Relay) startDisplayWriter(ws *websocket.Conn, control chan displayMsg, bytesCh chan []byte, done chan struct{}) {
+	write := func(m displayMsg) bool {
+		mt := websocket.TextMessage
+		if m.binary {
+			mt = websocket.BinaryMessage
+		}
+		if err := ws.WriteMessage(mt, m.data); err != nil {
+			log.Printf("[relay] display write error: %v", err)
+			return false
+		}
+		return true
+	}
 	go func() {
 		for {
 			// Priority pass: drain all available control messages first.
 			select {
-			case data := <-control:
-				if err := ws.WriteMessage(websocket.TextMessage, data); err != nil {
-					log.Printf("[relay] display write error: %v", err)
+			case m := <-control:
+				if !write(m) {
 					return
 				}
 				continue
@@ -113,9 +148,8 @@ func (r *Relay) startDisplayWriter(ws *websocket.Conn, control, bytesCh chan []b
 			}
 			// Nothing pending on control — block until either queue or teardown.
 			select {
-			case data := <-control:
-				if err := ws.WriteMessage(websocket.TextMessage, data); err != nil {
-					log.Printf("[relay] display write error: %v", err)
+			case m := <-control:
+				if !write(m) {
 					return
 				}
 			case data := <-bytesCh:
@@ -180,8 +214,8 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 					return
 				}
 				r.display = ws
-				ch := make(chan []byte, 64)       // control/JSON
-				bytesCh := make(chan []byte, 256) // terminal OUTPUT (deeper: ~16ms coalesced frames)
+				ch := make(chan displayMsg, 64)     // control: JSON text + RPC binary results
+				bytesCh := make(chan []byte, 256)   // terminal OUTPUT (deeper: ~16ms coalesced frames)
 				done := make(chan struct{})
 				r.displayWrite = ch
 				r.displayBytes = bytesCh
@@ -306,7 +340,7 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 						r.sendJSONRPCError(rpc.ID, -32003, "LSP not enabled (start relay with --root)")
 					}
 				case r.fs != nil:
-					r.fs.Handle(rpc.Method, rpc.ID, rpc.Params, r.sendToDisplay)
+					r.fs.Handle(rpc.Method, rpc.ID, rpc.Params, r.sendToDisplay, r.sendBinToDisplay)
 				default:
 					r.sendJSONRPCError(rpc.ID, -32003, "filesystem not enabled (start relay with --root)")
 				}

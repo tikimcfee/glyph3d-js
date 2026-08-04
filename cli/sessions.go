@@ -156,6 +156,7 @@ type agentSessionsReadParams struct {
 	ID        string `json:"id"`
 	TailBytes int64  `json:"tailBytes"`
 	Harness   string `json:"harness"`
+	Binary    bool   `json:"binary"` // answer on the binary result plane (raw transcript bytes)
 }
 
 // agentSessionsReadResult is the agentSessions/read response. Content is the
@@ -238,13 +239,16 @@ func (h *FSHandler) handleAgentSessionsList(write writeFn, id json.RawMessage, r
 
 // handleAgentSessionsRead serves one transcript's raw bytes.
 //
-// Shape:  { id, tailBytes?, harness? }  ->  { id, content, size, mtime, truncated, cwd? }
+// Shape:  { id, tailBytes?, harness?, binary? }  ->  { id, content, size, mtime, truncated, cwd? }
 // The window is the whole file, narrowed to the final tailBytes when given,
 // and bounded by maxSessionReadSize either way. A window that starts mid-file
 // advances past its first newline so content begins on a JSONL line boundary
 // (which is also a UTF-8 boundary); truncated=true marks any such tail.
 // Harness (default "claude") picks the archive the id resolves against.
-func (h *FSHandler) handleAgentSessionsRead(write writeFn, id json.RawMessage, raw json.RawMessage) {
+// binary=true answers on the binary result plane: the header carries every
+// field but content, and the transcript crosses as raw bytes — a 30MB
+// transcript skips the JSON escaping + giant-message parse entirely.
+func (h *FSHandler) handleAgentSessionsRead(write writeFn, writeBin writeBinFn, id json.RawMessage, raw json.RawMessage) {
 	var p agentSessionsReadParams
 	if err := json.Unmarshal(raw, &p); err != nil {
 		h.sendRPCError(write, id, -32602, "invalid params", nil)
@@ -354,6 +358,17 @@ func (h *FSHandler) handleAgentSessionsRead(write writeFn, id json.RawMessage, r
 		} else {
 			buf = nil
 		}
+	}
+
+	if p.Binary {
+		hdr := map[string]any{
+			"id": p.ID, "size": size, "mtime": info.ModTime().UnixMilli(), "truncated": truncated,
+		}
+		if cwd != "" {
+			hdr["cwd"] = cwd
+		}
+		sendRPCBinaryResult(writeBin, id, hdr, buf)
+		return
 	}
 
 	h.sendRPCResult(write, id, agentSessionsReadResult{

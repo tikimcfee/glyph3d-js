@@ -69,7 +69,7 @@ func listSessions(t *testing.T, h *FSHandler) agentSessionsListResult {
 func readSession(t *testing.T, h *FSHandler, params string) (*agentSessionsReadResult, *rpcCapture) {
 	t.Helper()
 	write, c := captureRPC(t)
-	h.handleAgentSessionsRead(write, json.RawMessage("1"), json.RawMessage(params))
+	h.handleAgentSessionsRead(write, func([]byte) {}, json.RawMessage("1"), json.RawMessage(params))
 	if c.Error != nil {
 		return nil, c
 	}
@@ -411,5 +411,44 @@ func TestAgentSessionsRead_NegativeTailRejected(t *testing.T) {
 	}
 	if c.Error.Code != -32602 {
 		t.Errorf("got code %d, want -32602", c.Error.Code)
+	}
+}
+
+// The binary plane carries the transcript raw — the 30MB-restoration path that
+// JSON string escaping made expensive. Header holds the metadata, payload the
+// bytes; tail windows stay line-aligned exactly like the JSON path.
+func TestAgentSessionsRead_BinaryPlane(t *testing.T) {
+	h, dir := newSessionsHandler(t)
+	mtime := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	body := "{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n"
+	writeSession(t, dir, "abcdef01-2345-6789-abcd-ef0123456789.jsonl", body, mtime)
+	sid := "abcdef01-2345-6789-abcd-ef0123456789"
+
+	// Whole file, binary.
+	writeBin, bc := captureBin(t)
+	h.handleAgentSessionsRead(func([]byte) { t.Error("binary-opted read wrote a text frame") },
+		writeBin, json.RawMessage("9"), json.RawMessage(`{"id":"`+sid+`","binary":true}`))
+	if bc.id != "9" {
+		t.Errorf("id: got %q, want %q", bc.id, "9")
+	}
+	if bc.hdr["id"] != sid || bc.hdr["truncated"] != false {
+		t.Errorf("hdr: got %v", bc.hdr)
+	}
+	if int(bc.hdr["size"].(float64)) != len(body) {
+		t.Errorf("hdr size: got %v, want %d", bc.hdr["size"], len(body))
+	}
+	if string(bc.payload) != body {
+		t.Errorf("payload: got %q, want %q", bc.payload, body)
+	}
+
+	// Tail window, binary — same line alignment as the JSON path.
+	writeBin2, bc2 := captureBin(t)
+	h.handleAgentSessionsRead(func([]byte) { t.Error("binary-opted read wrote a text frame") },
+		writeBin2, json.RawMessage("10"), json.RawMessage(`{"id":"`+sid+`","tailBytes":15,"binary":true}`))
+	if bc2.hdr["truncated"] != true {
+		t.Errorf("tail hdr truncated: got %v", bc2.hdr)
+	}
+	if string(bc2.payload) != "{\"c\":3}\n" {
+		t.Errorf("tail payload: got %q, want %q", bc2.payload, "{\"c\":3}\n")
 	}
 }

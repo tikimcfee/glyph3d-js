@@ -28,11 +28,16 @@ func newTestHandler(t *testing.T) (*FSHandler, string, string) {
 
 func writeFile(t *testing.T, dir, rel, body string) string {
 	t.Helper()
+	return writeFileBytes(t, dir, rel, []byte(body))
+}
+
+func writeFileBytes(t *testing.T, dir, rel string, body []byte) string {
+	t.Helper()
 	full := filepath.Join(dir, rel)
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(full, []byte(body), 0o644); err != nil {
+	if err := os.WriteFile(full, body, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return full
@@ -163,7 +168,7 @@ func TestHandleReadFile_TmpEndToEnd(t *testing.T) {
 	f.Close()
 
 	var captured []byte
-	h.handleReadFile(func(data []byte) { captured = data }, json.RawMessage(`1`),
+	h.handleReadFile(func(data []byte) { captured = data }, func([]byte) {}, json.RawMessage(`1`),
 		mustJSON(t, readFileParams{URI: "file://" + f.Name()}))
 
 	var resp struct {
@@ -882,5 +887,95 @@ func TestUriToPath(t *testing.T) {
 	got, err = uriToPath("/var/log")
 	if err != nil || got != filepath.FromSlash("/var/log") {
 		t.Errorf("bare: got %q, %v", got, err)
+	}
+}
+
+// ---- Binary result plane (frameRPCResult) ----
+
+// binCapture decodes the single binary result frame a handler writes through
+// its writeBinFn: [type][idLen][id][hdrLen u32 BE][hdr JSON][payload].
+type binCapture struct {
+	id      string
+	hdr     map[string]any
+	payload []byte
+}
+
+// captureBin returns a writeBinFn that decodes the handler's binary frame into
+// the returned capture. t.Fatalf on a malformed frame — a binary-path handler
+// must produce exactly one well-formed frame.
+func captureBin(t *testing.T) (writeBinFn, *binCapture) {
+	t.Helper()
+	c := &binCapture{}
+	return func(data []byte) {
+		if len(data) < 2 || data[0] != frameRPCResult {
+			t.Fatalf("bad binary frame type: %x", data[:1])
+		}
+		idLen := int(data[1])
+		if len(data) < 2+idLen+4 {
+			t.Fatalf("short binary frame: %d bytes", len(data))
+		}
+		c.id = string(data[2 : 2+idLen])
+		hdrLen := int(data[2+idLen])<<24 | int(data[3+idLen])<<16 | int(data[4+idLen])<<8 | int(data[5+idLen])
+		if len(data) < 2+idLen+4+hdrLen {
+			t.Fatalf("binary frame header overruns: hdrLen %d, frame %d", hdrLen, len(data))
+		}
+		if err := json.Unmarshal(data[2+idLen+4:2+idLen+4+hdrLen], &c.hdr); err != nil {
+			t.Fatalf("bad binary header: %v", err)
+		}
+		c.payload = data[2+idLen+4+hdrLen:]
+	}, c
+}
+
+func TestHandleReadFile_BinaryPlane(t *testing.T) {
+	h, root, _ := newTestHandler(t)
+	const body = "package main // raw bytes, no JSON string escaping\n"
+	writeFile(t, root, "main.go", body)
+
+	writeBin, bc := captureBin(t)
+	textWritten := false
+	h.handleReadFile(func([]byte) { textWritten = true }, writeBin, json.RawMessage(`7`),
+		mustJSON(t, readFileParams{URI: "file:///main.go", Binary: true}))
+
+	if textWritten {
+		t.Fatal("binary-opted readFile wrote a text frame")
+	}
+	if bc.id != "7" {
+		t.Errorf("id: got %q, want %q", bc.id, "7")
+	}
+	if bc.hdr["uri"] != "file:///main.go" {
+		t.Errorf("hdr uri: got %v", bc.hdr["uri"])
+	}
+	stat, ok := bc.hdr["stat"].(map[string]any)
+	if !ok || int(stat["size"].(float64)) != len(body) {
+		t.Errorf("hdr stat: got %v", bc.hdr["stat"])
+	}
+	if string(bc.payload) != body {
+		t.Errorf("payload: got %q, want %q", bc.payload, body)
+	}
+}
+
+func TestHandleReadRange_BinaryPlane(t *testing.T) {
+	h, root, _ := newTestHandler(t)
+	// Non-UTF-8 bytes are legal on the range path — the frame must carry them
+	// RAW (the JSON path's base64 is exactly what the binary plane replaces).
+	raw := []byte{'a', 0x00, 0xff, 0xfe, 'b', '\n', 0x01, 'z'}
+	writeFileBytes(t, root, "bin.dat", raw)
+
+	writeBin, bc := captureBin(t)
+	h.handleReadRange(func([]byte) { t.Error("binary-opted readRange wrote a text frame") }, writeBin,
+		json.RawMessage(`3`), mustJSON(t, readRangeParams{URI: "file:///bin.dat", Offset: 1, Length: 5, Binary: true}))
+
+	if bc.id != "3" {
+		t.Errorf("id: got %q, want %q", bc.id, "3")
+	}
+	if int(bc.hdr["offset"].(float64)) != 1 || int(bc.hdr["length"].(float64)) != 5 ||
+		int(bc.hdr["totalSize"].(float64)) != len(raw) {
+		t.Errorf("hdr window fields: got %v", bc.hdr)
+	}
+	if _, hasContent := bc.hdr["content"]; hasContent {
+		t.Errorf("binary header carries no content field: %v", bc.hdr)
+	}
+	if string(bc.payload) != string(raw[1:6]) {
+		t.Errorf("payload: got %v, want %v", bc.payload, raw[1:6])
 	}
 }

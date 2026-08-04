@@ -235,22 +235,53 @@ export default class WebSocketBridge {
         return () => this._binaryHandlers.delete(type);
     }
 
-    /** @private — parse a binary frame and dispatch to its type handler. */
+    /** @private — parse a binary frame and dispatch by its type byte. */
     _handleBinary(buf) {
         const view = new Uint8Array(buf);
         if (view.length < 2) return;
         const type = view[0];
         const idLen = view[1];
+        if (view.length < 2 + idLen) return;
+        const id = new TextDecoder().decode(view.subarray(2, 2 + idLen));
+
+        // RPC binary result (relay → display, fs/sessions content plane):
+        // [0x02][idLen][id][hdrLen:u32 BE][hdr JSON][raw payload] — the header carries
+        // every result field except the content, the payload is the raw file bytes.
+        if (type === 0x02) {
+            this._handleRPCBinary(id, view.subarray(2 + idLen));
+            return;
+        }
+
         // OUTPUT frames carry the size the payload was drawn at, right after the id:
         // [type][idLen][id][cols:u16 BE][rows:u16 BE][payload]. See attach_unix.go (frameOutput).
         if (view.length < 2 + idLen + 4) return;
-        const id = new TextDecoder().decode(view.subarray(2, 2 + idLen));
         const off = 2 + idLen;
         const cols = (view[off] << 8) | view[off + 1];
         const rows = (view[off + 2] << 8) | view[off + 3];
         const payload = view.subarray(off + 4);
         const handler = this._binaryHandlers.get(type);
         if (handler) handler(id, payload, cols, rows);
+    }
+
+    /**
+     * Resolve a pending rpcRequest from a binary result frame. The promise settles
+     * with { ...headerFields, bytes: Uint8Array } — the provider decodes (`bytes`
+     * for readRange, TextDecoder→content for readFile / agentSessions). Errors never
+     * ride this plane: they stay small JSON text responses on the regular path.
+     * @param {string} idStr @param {Uint8Array} rest @private
+     */
+    _handleRPCBinary(idStr, rest) {
+        if (rest.length < 4) return;
+        const hdrLen = new DataView(rest.buffer, rest.byteOffset, 4).getUint32(0);
+        if (rest.length < 4 + hdrLen) return;
+        let hdr;
+        try { hdr = JSON.parse(new TextDecoder().decode(rest.subarray(4, 4 + hdrLen))); }
+        catch { return; }
+        const pending = this._rpcPending.get(Number(idStr));
+        if (!pending) return;
+        this._rpcPending.delete(Number(idStr));
+        clearTimeout(pending.timer);
+        pending.resolve({ ...hdr, bytes: rest.subarray(4 + hdrLen) });
     }
 
     // ============ LAN Detection ============
