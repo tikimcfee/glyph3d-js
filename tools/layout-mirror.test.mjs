@@ -65,7 +65,7 @@ for (const { name, layout: layoutSpec, scroll } of CASES) {
   const layout = resolveLayoutParams(layoutSpec);
   const buffers = buildBatchBuffers(
     [{ position: { x: 0, y: 0, z: 0 }, color: { r: 1, g: 1, b: 1 }, scale: 1, groupId: 0, shaped: shape(TEXT) }],
-    { metrics, defaultColor: { r: 1, g: 1, b: 1 }, upem: UPEM, layout, scrollOffset: scroll },
+    { metrics, defaultColor: { r: 1, g: 1, b: 1 }, upem: UPEM, layout, scrollOffset: scroll, emitPositions: true },
   );
   const meta = buffers.itemMeta[0];
 
@@ -153,7 +153,7 @@ for (const { name, layout: layoutSpec, scroll } of CASES) {
   const layout = resolveLayoutParams({ wrapWidth: 6, zWrapSpacing: 0.15, pageHeight: 0, pagesWide: 1, axis: 'xy' });
   const buffers = buildBatchBuffers(
     [{ position: { x: 0, y: 0, z: 0 }, color: { r: 1, g: 1, b: 1 }, scale: 1, groupId: 0, shaped: shape(TEXT) }],
-    { metrics, defaultColor: { r: 1, g: 1, b: 1 }, upem: UPEM, layout, scrollOffset: 0 },
+    { metrics, defaultColor: { r: 1, g: 1, b: 1 }, upem: UPEM, layout, scrollOffset: 0, emitPositions: true },
   );
   const meta = buffers.itemMeta[0];
   const lineSlotBase = Int32Array.from(meta.lineSlotOffsets);

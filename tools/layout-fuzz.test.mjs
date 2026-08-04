@@ -108,7 +108,7 @@ for (let k = 0; k < SEEDS; k++) {
   for (const scroll of scrolls) {
     const buffers = buildBatchBuffers(
       [{ position: origin, color: { r: 1, g: 1, b: 1 }, scale: 1, groupId: 0, shaped: shape(text) }],
-      { metrics, defaultColor: { r: 1, g: 1, b: 1 }, upem: UPEM, layout, scrollOffset: scroll },
+      { metrics, defaultColor: { r: 1, g: 1, b: 1 }, upem: UPEM, layout, scrollOffset: scroll, emitPositions: true },
     );
     const meta = buffers.itemMeta[0];
     if (!meta || !buffers.count) { pass++; continue; }
@@ -171,7 +171,7 @@ for (let k = 0; k < SEEDS; k++) {
         // Pre-pagination rebuild: recover the builder's exact relY input for this slot.
         const pre = buildBatchBuffers(
           [{ position: origin, color: { r: 1, g: 1, b: 1 }, scale: 1, groupId: 0, shaped: shape(text) }],
-          { metrics, defaultColor: { r: 1, g: 1, b: 1 }, upem: UPEM, layout: { ...layout, pageHeight: 0 }, scrollOffset: scroll },
+          { metrics, defaultColor: { r: 1, g: 1, b: 1 }, upem: UPEM, layout: { ...layout, pageHeight: 0 }, scrollOffset: scroll, emitPositions: true },
         );
         const relY = origin.y - pre.positions[s * 3 + 1];
         const H = geom.pageHeightWorld;

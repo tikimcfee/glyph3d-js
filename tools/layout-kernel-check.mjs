@@ -179,7 +179,7 @@ const probe = (opts) => `(async (o) => {
   if (bridge && bridge.fontReady) {
     // Same module instance as the app (the singleton already carries the booted shaper) —
     // this is the exact call CodeGrid._flush() makes.
-    buffers = bridge.buildBatchBuffersSync(items, { metrics, defaultColor: color, layout, scrollOffset: 0 });
+    buffers = bridge.buildBatchBuffersSync(items, { metrics, defaultColor: color, layout, scrollOffset: 0, emitPositions: true });
     buildPath = 'WorkerBridge.buildBatchBuffersSync (app singleton — same module graph)';
   } else {
     // The /@fs import landed on a SEPARATE module instance (fresh singleton, no shaper).
@@ -189,7 +189,7 @@ const probe = (opts) => `(async (o) => {
     const shapedItems = items.map((it) => ({ position: it.position, color: it.color, scale: it.scale,
       groupId: it.groupId, shaped: shaping.shapeText(shaperOrCache, it.text) }));
     buffers = builders.buildBatchBuffers(shapedItems, { metrics, defaultColor: color,
-      upem: atlas._shaper ? atlas._shaper.upem : 0, layout, scrollOffset: 0 });
+      upem: atlas._shaper ? atlas._shaper.upem : 0, layout, scrollOffset: 0, emitPositions: true });
     buildPath = 'buildBatchBuffers (direct — /@fs import is a separate module instance)';
     R.notes.push('WorkerBridge singleton not shared with the app (fontReady=false); used the direct builder call');
   }
@@ -583,10 +583,10 @@ const probe = (opts) => `(async (o) => {
         B.configureMs = (performance.now() - t0) / REPS; }
       { const t0 = performance.now();
         for (let i = 0; i < 3; i++) bridge && bridge.fontReady
-          ? bridge.buildBatchBuffersSync(items, { metrics, defaultColor: color, layout, scrollOffset: 0 })
+          ? bridge.buildBatchBuffersSync(items, { metrics, defaultColor: color, layout, scrollOffset: 0, emitPositions: true })
           : builders.buildBatchBuffers([{ position: origin, color, scale: 1, groupId: 0,
               shaped: shaping.shapeText(atlas._shapeCache || atlas._shaper, o.text) }],
-              { metrics, defaultColor: color, upem: (atlas._shaper && atlas._shaper.upem) || 0, layout, scrollOffset: 0 });
+              { metrics, defaultColor: color, upem: (atlas._shaper && atlas._shaper.upem) || 0, layout, scrollOffset: 0, emitPositions: true });
         B.cpuBuildMs = (performance.now() - t0) / 3; }
       const queue = RD.backend && RD.backend.device && RD.backend.device.queue;
       try { if (RD.resolveTimestampsAsync) await RD.resolveTimestampsAsync('compute'); } catch (e) { /* pool may be empty */ }
@@ -656,7 +656,7 @@ const bulkProbe = (opts) => `(async (o) => {
     try { if (atlas._live && atlas._shapeCache) atlas._live.ensureCodepoints(fresh, atlas._shapeCache); } catch (e) { R.notes.push('ensureCodepoints: ' + (e && e.message || e)); }
     R.atlasWarmMs = performance.now() - t0; }
 
-  const shared = { metrics, defaultColor: color, layout, scrollOffset: 0 };
+  const shared = { metrics, defaultColor: color, layout, scrollOffset: 0, emitPositions: true };
   const perFileCpu = new Float64Array(o.files.length);
   const built = new Array(o.files.length);
 

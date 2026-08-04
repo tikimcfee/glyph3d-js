@@ -1299,10 +1299,10 @@ class CodeGrid extends FramedGlyphField {
             }
         }
 
-        // Every commit is an engine build (emitPositions:false at the source): the kernel
-        // dispatch below IS the layout — applyPrebuiltBuffers adopts no CPU positions.
-        // The builder's scalar-walk bounds are exact for unpaginated content; a paginated
-        // item gets its extent from the adapter's analytic override.
+        // Every commit is an engine build: the builder emits tables + attributes only (no
+        // positions), and the kernel dispatch below IS the layout. The builder's scalar-walk
+        // bounds are exact for unpaginated content; a paginated item gets its extent from
+        // the adapter's analytic override.
         this._renderer.setGpuLayout(true);
 
         const rendererIds = this._renderer.applyPrebuiltBuffers(buffers, items);
@@ -1367,9 +1367,9 @@ class CodeGrid extends FramedGlyphField {
         // Process adds via the builder (synchronous main-thread build)
         if (this._pendingAdds.length > 0) {
             const { items, metrics, defaultColor, layout, scrollOffset } = this._prepareAddsForBuild();
-            // Engine-only: the builder skips the position array at the SOURCE (tables +
-            // attributes only), and the kernel dispatch after commit is the layout.
-            const buffers = getWorkerBridge().buildBatchBuffersSync(items, { metrics, defaultColor, layout, scrollOffset, emitPositions: false });
+            // Engine-only: the builder emits tables + attributes only (positions are the
+            // kernel's job); the default is emitPositions:false since the engine is THE path.
+            const buffers = getWorkerBridge().buildBatchBuffersSync(items, { metrics, defaultColor, layout, scrollOffset });
             this._commitBuiltBuffers(buffers, items, [], { metrics, layout, scrollOffset });
         }
 
@@ -1403,7 +1403,7 @@ class CodeGrid extends FramedGlyphField {
         if (this._pendingAdds.length > 0) {
             const { items, metrics, defaultColor, layout, scrollOffset } = this._prepareAddsForBuild();
             try {
-                const buffers = await getWorkerBridge().buildBatchBuffers(items, { metrics, defaultColor, layout, scrollOffset, emitPositions: false });
+                const buffers = await getWorkerBridge().buildBatchBuffers(items, { metrics, defaultColor, layout, scrollOffset });
                 this._commitBuiltBuffers(buffers, items, deferredRemovals, { metrics, layout, scrollOffset });
             } catch (error) {
                 console.warn('CodeGrid: Worker flush failed, falling back to sync:', error);

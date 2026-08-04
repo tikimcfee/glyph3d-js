@@ -21,7 +21,6 @@ export { parsePatchAligned, buildAlignedDiff, getDiffColor } from './state/DiffP
 // Visual services
 export { BackdropManager } from './visual/BackdropManager.js';
 export { NameplateManager } from './visual/NameplateManager.js';
-export { TreemapLabelManager } from './visual/TreemapLabelManager.js';
 
 // Interaction services
 export { SelectionManager } from './interaction/SelectionManager.js';

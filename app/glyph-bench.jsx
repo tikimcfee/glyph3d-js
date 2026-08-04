@@ -119,6 +119,7 @@ function MapGrid({ text, position, textColor, onStatus, quiet }) {
       const buffers = buildBatchBuffers(items, {
         metrics, defaultColor: grid.config.textColor,
         upem: atlas._shaper.upem, layout: resolveLayoutParams(grid.config.layout), scrollOffset: 0,
+        emitPositions: true,
       });
       const P = buffers.positions, S = buffers.sizes;
       log('buildBatchBuffers', {

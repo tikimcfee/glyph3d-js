@@ -1112,7 +1112,7 @@ export class ViewerCameraController {
 
         // Prefer a layout manager's cached total bounds; otherwise (e.g. the r3f
         // client, which has no managers) union the surfaces' own world bounds.
-        const mgr = this.ctx.stackManager || this.ctx.treemapManager
+        const mgr = this.ctx.stackManager
             || this.ctx.spiralManager || this.ctx.hierarchicalManager || this.ctx.layoutManager;
         let bounds;
         if (mgr && typeof mgr.getTotalBounds === 'function') {

@@ -207,12 +207,13 @@ export function buildBatchBuffers(items, shared) {
     const { metrics, defaultColor, upem } = shared;
     const layout = resolveLayoutParams(shared.layout);
     const scrollOffset = shared.scrollOffset || 0;  // visual rows scrolled (Step 3c, the conveyor)
-    // emitPositions:false — the GPU-layout-engine build: the position array is not allocated,
-    // not written, not measured; the inner loop emits only what the CPU alone can produce
-    // (glyph ids, advances, colors, the line/wrap tables). Positions, bounds and
-    // pageContentWidth become the engine's job (kernel + adapter). Default true: every CPU
-    // path is exactly as it always was.
-    const emitPositions = shared.emitPositions !== false;
+    // emitPositions:true — the CPU-reference build: the position array IS allocated and
+    // written (the builder's own fold, for test/check tools that verify the kernel against it).
+    // Default false: the GPU layout engine is THE path — the builder emits only what the CPU
+    // alone can produce (glyph ids, advances, colors, the line/wrap tables). Positions, bounds
+    // and pageContentWidth are the engine's job (kernel + adapter). Tests that need a reference
+    // pass emitPositions:true explicitly.
+    const emitPositions = shared.emitPositions === true;
 
     // Convert HarfBuzz font units to world units.
     //
