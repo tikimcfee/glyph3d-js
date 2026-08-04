@@ -51,6 +51,7 @@ import BoundedObject3D from './BoundedObject3D.js';
 import { leafBox } from './layouts/nodeUtils.js';
 import { addPanelSurface, ownSurfaceMaterial } from './layouts/panelSurface.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
+import Tab3D from '../components/Tab3D.js';
 
 /** Page-face fallbacks when fit() is driven directly (a scheme passes its full merged
  *  opts; a bare verb may pass only page dims). */
@@ -108,6 +109,9 @@ export default class Book extends BoundedObject3D {
         this.cover = null;       // the identity/interaction body while bound (bindCover)
         /** @type {Object|null} a nameplate plate (Label3D) parked above the cover box (setNameplate) */
         this.nameplate = null;
+        /** @type {Array<{sheet:Object, tab:Tab3D, key:string}>|null} per-sheet edge tabs (null until bindTabs) */
+        this.tabs = null;
+        this._tabOpts = null;
         if (leaf) this.addSheet({ recto: leaf });
     }
 
@@ -161,6 +165,7 @@ export default class Book extends BoundedObject3D {
         };
         this.add(node);
         this.sheets.push(sheet);
+        if (this._tabOpts) this.tabs?.push(this._makeTab(sheet));   // keep tabs parallel to sheets
         if (this.following) this.head = this.sheets.length - 1;
         if (this._fitOpts) this._fitSheet(sheet, this._fitOpts);
         this._seat(this.sheets.length - 1);
@@ -184,6 +189,7 @@ export default class Book extends BoundedObject3D {
         if (sheet.recto) sheet.rectoMount.remove(sheet.recto);
         this.remove(sheet.node);
         this.sheets.splice(i, 1);
+        if (this.tabs) { const tt = this.tabs.splice(i, 1)[0]; if (tt) { this.remove(tt.tab); tt.tab.dispose(); } }
         const n = this.sheets.length;
         if (!n) {
             this.head = 0;
@@ -396,6 +402,118 @@ export default class Book extends BoundedObject3D {
         return this;
     }
 
+    // -- tabs: per-sheet edge labels, banded by a content key ------------------------
+    //    One Tab3D per sheet (exact page navigation), staggered along the deck's own
+    //    Z-recede — each tab rides its sheet's LIVE slot (mid-ease), so the deck's
+    //    rolodex cascade IS the thumb-index stagger for free — and banded UP the cover
+    //    edge by a per-book content key (files → first letter, agent moments → action
+    //    kind) so the deck reads as stable groups. syncTabs() repositions every frame
+    //    like syncCover does for the nameplate. Picking stays the wrapper's job (it
+    //    registers each tab.pickMesh on the 'handle' channel); Book owns build/sync only.
+
+    /** Bind one pickable tab per sheet. `keyOf`/`labelOf`/`hueOf` default to the
+     *  basename-first-letter idiom; wrappers override (agent → action kind, etc.).
+     *  `placement` is 'top' (file-folder tabs: a plate extending UP off the top edge
+     *  in the page plane, label facing +Z — front-legible, protrudes past the cover,
+     *  the default) or 'fore' (face +X off the right edge, the side thumb-index). */
+    bindTabs({ atlas, keyOf = null, labelOf = null, hueOf = null,
+              lineHeight = 7, protrusion = 0, placement = 'top',
+              plateOpacity = 0.85, activeColor = 0x6ee7a0 } = {}) {
+        this.dropTabs();
+        this._tabOpts = { atlas, keyOf, labelOf, hueOf, lineHeight, protrusion, placement, plateOpacity, activeColor };
+        this.tabs = this.sheets.map((sheet) => this._makeTab(sheet));
+        return this;
+    }
+
+    /** One tab for an existing sheet (used at bind + by addSheet's maintenance). @private */
+    _makeTab(sheet) {
+        const o = this._tabOpts;
+        const i = this.sheets.indexOf(sheet);
+        const key = this._tabKeyOf(sheet);
+        const label = this._tabLabelOf(sheet);
+        const tab = new Tab3D({
+            atlas: o.atlas,
+            text: label,
+            lineHeight: o.lineHeight,
+            plate: { color: this._tabHueOf(key), opacity: o.plateOpacity },
+            activeColor: o.activeColor,
+        });
+        tab.name = `tab:${i}:${label}`;
+        this.add(tab);
+        return { sheet, tab, key };
+    }
+
+    /** Default band key: the recto content's basename first letter ('#' otherwise). */
+    _tabKeyOf(sheet) {
+        if (this._tabOpts.keyOf) return this._tabOpts.keyOf(sheet);
+        const name = sheet.recto?.userData?.name ?? sheet.verso?.userData?.name ?? '';
+        const c = String(name).trim()[0]?.toUpperCase();
+        return c && /[A-Z0-9]/.test(c) ? c : '#';
+    }
+
+    /** Default tab text: the recto content's basename (no truncation). */
+    _tabLabelOf(sheet) {
+        if (this._tabOpts.labelOf) return this._tabOpts.labelOf(sheet);
+        return String(sheet.recto?.userData?.name ?? sheet.verso?.userData?.name ?? '');
+    }
+
+    /** Default band color: a stable hue from the key's hash (wrappers pass a real palette). */
+    _tabHueOf(key) {
+        if (this._tabOpts.hueOf) return this._tabOpts.hueOf(key);
+        let h = 0;
+        for (let k = 0; k < key.length; k++) h = (h * 31 + key.charCodeAt(k)) >>> 0;
+        return Math.floor(((h % 360) / 360) * 0xffffff);
+    }
+
+    /** Re-position every tab each frame. Each tab rides its sheet's LIVE Z slot
+     *  (the deck's cascade = the shuffle); bands stagger across the edge by key.
+     *  The head's tab is marked active. @see bindTabs for the placement shapes. */
+    syncTabs() {
+        if (!this.tabs) return;
+        const o = this._tabOpts;
+        const b = this.layoutBounds();
+        if (b.isEmpty()) { for (const t of this.tabs) t.tab.visible = false; return; }
+        const cx = (b.min.x + b.max.x) / 2, cy = (b.min.y + b.max.y) / 2;
+        const sx = b.max.x - b.min.x, sy = b.max.y - b.min.y;
+        // Distinct keys → band ranks (sorted, stable).
+        const keys = Array.from(new Set(this.tabs.map((t) => t.key))).sort();
+        const bandOf = new Map(keys.map((k, idx) => [k, idx]));
+        const kB = keys.length;
+        const tabH = o.lineHeight;
+        // Band pitch: center-packed, CLUSTERED when few (a capped pitch so 3 tabs
+        // don't stretch a wide edge), filling when many.
+        const pitch = Math.min(sx / Math.max(kB, 1), tabH * 6);
+        for (const t of this.tabs) {
+            const idx = this.sheets.indexOf(t.sheet);
+            if (idx < 0) { t.tab.visible = false; continue; }
+            const band = bandOf.get(t.key) ?? 0;
+            const z = t.sheet.node.position.z;                       // live slot — the cascade
+            let x, y, rotY = 0;
+            if (o.placement === 'fore') {                            // +X side, facing +X
+                x = cx + sx / 2 + o.protrusion + tabH * 0.5;
+                y = kB > 1 ? cy + sy / 2 - tabH - (band / (kB - 1)) * (sy - tabH * 2) : cy;
+                rotY = Math.PI / 2;
+            } else {                                                 // 'top' — file-folder tabs off the top edge
+                x = cx + (band - (kB - 1) / 2) * pitch;              // staggered across the top by band
+                y = cy + sy / 2 + tabH / 2 + o.protrusion;           // attached to the top edge, sticking up
+            }
+            t.tab.position.set(x, y, z);
+            t.tab.rotation.set(0, rotY, 0);
+            t.tab.visible = true;
+            t.tab.setActive(idx === this.head);
+        }
+    }
+
+    /** Drop all tabs (dispose). Idempotent. */
+    dropTabs() {
+        if (this.tabs) {
+            for (const t of this.tabs) { this.remove(t.tab); t.tab.dispose(); }
+        }
+        this.tabs = null;
+        this._tabOpts = null;
+        return this;
+    }
+
     /** The deck's nav state — for panels and verbs. */
     headState() { return { head: this.head, count: this.sheets.length, following: this.following }; }
 
@@ -404,6 +522,7 @@ export default class Book extends BoundedObject3D {
      *  One-sheet books settle at 0 and stay a no-op. */
     update(dt) {
         if (this.cover) this.syncCover();
+        this.syncTabs();
         const n = this.sheets.length;
         if (n < 2) return;
         const rate = this.deck.lerp;
@@ -482,6 +601,7 @@ export default class Book extends BoundedObject3D {
     dispose() {
         const single = this.leaf;
         this.dropCover();
+        this.dropTabs();
         for (const sheet of this.sheets) {
             this._dropFaces(sheet);
             if (sheet.verso) sheet.versoMount.remove(sheet.verso);

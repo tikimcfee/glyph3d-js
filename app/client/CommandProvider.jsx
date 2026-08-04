@@ -398,6 +398,12 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
             try { ps.register('group', mesh, vol); } catch (_e) { /* best effort */ }
           });
         }
+        // Per-sheet edge tabs — one per file, banded up the cover by first letter,
+        // each riding its sheet's deck slot (the thumb-index stagger). Render-only
+        // for now (picking/click wired next); rebuilt with the volume each relayout.
+        if (vol.sheets.length >= 2 && state.ctx.atlas) {
+          vol.bindTabs({ atlas: state.ctx.atlas, lineHeight: Math.max(8, (vol.fitInfo?.pageH ?? 1000) * 0.018) });
+        }
         next.set(id, { vol, mesh });
       }
       volumeEntries = next;
