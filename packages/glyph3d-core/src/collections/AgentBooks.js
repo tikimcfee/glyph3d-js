@@ -38,11 +38,13 @@ import * as THREE from 'three';
 import Book from './Book.js';
 import CodeGrid from './CodeGrid.js';
 import FrameGrid from './FrameGrid.js';
+import Label3D from '../components/Label3D.js';
 import { VStack } from './layouts/StackContainer.js';
 import { LAYOUT_SCHEMES } from './layouts/index.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import { classifyByExtension } from '../core/fileKind.js';
 import { decorateForAction, kindForAction, ACTION_HUES, cssHue, normalizeToolCall, normalizeMessage } from './toolRegistry.js';
+import { yieldToFrame } from '../utils/frameYield.js';
 
 export const AGENT_BOOKS_DEFAULTS = {
     // -- the page ------------------------------------------------------------------
@@ -179,15 +181,30 @@ export default class AgentBooks {
             book.bindCover(this._coverOpts(this.cfg.palette[hueIdx % this.cfg.palette.length]));
             lane = {
                 book, hueIdx,
+                agentId,
                 agentType: agentType || 'agent',
                 state: 'active', beacon: null, lastActivityTs: this._now(),
                 seq: 0, entries: [],   // one entry per sheet: cards + ids + the record
                 groupId: `agent:book:${agentId}`,
                 sessionId: null,       // the harness session record this book renders (set by hydrate)
+                meta: null,            // session provenance (title/slug/cwd/model/gitBranch…) — hydrate/setLaneMeta
+                cwd: null,             // the session's working dir (meta.cwd), kept beside sessionId
+                label: null,           // the nameplate (Label3D) above the cover, in the lane's hue
                 maxSheets: null,       // per-book retention override: n>0 caps, 0 unbounded, null → cfg.maxSheets
                 pinned: false, pinnedPos: null,
             };
             book.fit(this._pageOpts(lane));   // page form from birth — appended sheets inherit it
+            // The nameplate: a Label3D in the lane's palette hue, parked above the cover
+            // (Book.syncCover owns the per-frame placement). Born as '~<id> · <type>';
+            // rebaked to full provenance as metadata lands (hydrate / setLaneMeta).
+            lane.label = new Label3D({
+                label: `~${agentId} · ${lane.agentType}`,
+                height: this.cfg.pageH * 0.05,
+                color: this.cfg.palette[hueIdx % this.cfg.palette.length],
+                opacity: 0.85,
+            });
+            lane.label.name = `agent-label:${agentId}`;
+            book.setNameplate(lane.label);
             this.lanes.set(agentId, lane);
             this._registerGroup(agentId, lane);
             this._emitChange();
@@ -275,20 +292,33 @@ export default class AgentBooks {
      * objects, and a monster transcript opens as its readable tail. An explicit `limit`
      * BECOMES the book's override (n>0 caps it, 0 unbounded — the whole record), so a
      * deliberate deep open stays deep as the live stream continues.
+     *
+     * ASYNC, frame-sliced: the event loop runs in budgeted slices (budgetMs per slice),
+     * yielding a frame between them — a deep history no longer lands as one long task that
+     * starves every await queued behind it (the restore lanes run CONCURRENTLY, so one
+     * lane's block inflates the others' wall times). The batch flag stays HELD across the
+     * yields: no mid-build relayout, no half-built book visible — and a live hook event
+     * landing mid-hydrate just batches into the same closing relayout.
      * @param {string} agentId
      * @param {Array<{kind:string, name?:string, input?:Object, response?:Object, mtype?:string, text?:string}>} events
-     * @param {{agentType?:string, sessionId?:string|null, cwd?:string, limit?:number}} [opts]
-     * @returns {number} sheets added
+     * @param {{agentType?:string, sessionId?:string|null, cwd?:string, meta?:Object|null, limit?:number, budgetMs?:number}} [opts]
+     * @returns {Promise<number>} sheets added
      */
-    hydrate(agentId, events, { agentType = 'claude', sessionId = null, cwd = '', limit } = {}) {
+    async hydrate(agentId, events, { agentType = 'claude', sessionId = null, cwd = '', meta = null, limit, budgetMs = 8 } = {}) {
         const lane = this.ensure(agentId, agentType);
         if (sessionId) lane.sessionId = sessionId;
+        if (meta) {
+            lane.meta = { ...(lane.meta || {}), ...meta };
+            if (meta.cwd) lane.cwd = meta.cwd;
+            lane.label?.setLabel(this.provenanceText(lane));
+        }
         const v = Number(limit);
         if (limit != null && Number.isFinite(v)) lane.maxSheets = Math.max(0, Math.floor(v));
         const cap = this._capFor(lane);
         const slice = events.length > cap ? events.slice(-cap) : events;
         this._batch = true;
         let added = 0;
+        let slice0 = performance.now();
         try {
             for (const ev of slice) {
                 const rec = ev.kind === 'message'
@@ -297,6 +327,10 @@ export default class AgentBooks {
                 if (!rec) continue;   // noise tools / empty blocks drop, same as live
                 this.activity(agentId, agentType, rec);
                 added++;
+                if (performance.now() - slice0 > budgetMs) {
+                    await yieldToFrame();
+                    slice0 = performance.now();
+                }
             }
         } finally {
             this._batch = false;
@@ -307,6 +341,42 @@ export default class AgentBooks {
         this._relayout();
         this._emitChange();
         return added;
+    }
+
+    /**
+     * agent.meta / agent.kimi-wire: merge session metadata onto a lane and rebake its
+     * nameplate to the new provenance. Live lanes learn their title/cwd/model this way
+     * (archived ones get it through hydrate's opts.meta). Unknown lane → false.
+     * @param {string} id lane id
+     * @param {Object} meta partial metadata — merged over what the lane already holds
+     * @returns {boolean}
+     */
+    setLaneMeta(id, meta) {
+        const lane = this.lanes.get(id);
+        if (!lane || !meta || typeof meta !== 'object') return false;
+        lane.meta = { ...(lane.meta || {}), ...meta };
+        if (lane.meta.cwd) lane.cwd = lane.meta.cwd;
+        lane.label?.setLabel(this.provenanceText(lane));
+        this._emitChange();
+        return true;
+    }
+
+    /**
+     * The nameplate's provenance text for a lane — up to three lines, each omitted
+     * when its data is absent:
+     *   1. the session name — meta.title ?? meta.slug ?? '~<id>'
+     *   2. basename(meta.cwd) · agentType
+     *   3. meta.model (· meta.gitBranch)
+     */
+    provenanceText(lane) {
+        const meta = lane.meta || {};
+        const lines = [meta.title ?? meta.slug ?? `~${lane.agentId}`];
+        const base = meta.cwd ? String(meta.cwd).split('/').filter(Boolean).pop() : null;
+        const line2 = [base, lane.agentType].filter(Boolean).join(' · ');
+        if (line2) lines.push(line2);
+        const line3 = [meta.model, meta.gitBranch].filter(Boolean).join(' · ');
+        if (line3) lines.push(line3);
+        return lines.join('\n');
     }
 
     /** agent.state — set a lane's lifecycle by hand. */
@@ -447,6 +517,7 @@ export default class AgentBooks {
                 state: l.state,
                 beacon: l.beacon,
                 sessionId: l.sessionId,
+                meta: l.meta || null,
                 count: l.book.sheets.length,
                 limit: l.maxSheets,                        // retention override (null → shelf default)
                 cap: Number.isFinite(cap) ? cap : 0,       // effective kept-turns cap (0 = unbounded)
@@ -812,12 +883,13 @@ export default class AgentBooks {
         }
     }
 
-    /** Unregister + dispose everything a lane owns (cards, cover, book). @private */
+    /** Unregister + dispose everything a lane owns (cards, cover, nameplate, book). @private */
     _kill(lane) {
         for (const e of lane.entries) this._disposeEntry(e);
         try { this.ctx.registry?.unregister?.(lane.groupId); } catch (_e) { /* best effort */ }
         try { if (lane.book.cover) this.ctx.pickingSystem?.unregister?.('group', lane.book.cover.mesh); } catch (_e) { /* best effort */ }
-        try { lane.book.dispose(); } catch (_e) { /* best effort */ }   // drops the cover with the sheets
+        try { lane.book.dispose(); } catch (_e) { /* best effort */ }   // drops the cover + nameplate with the sheets
+        lane.label = null;
         this.root.remove(lane.book);
     }
 

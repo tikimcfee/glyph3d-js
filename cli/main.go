@@ -3,6 +3,7 @@
 // Modes:
 //
 //	Relay:     glyph3d-cli serve [--port 8080] [--listen 0.0.0.0]
+//	Hook:      glyph3d-cli hook [--kimi] [--debug]     (harness hook ingress: claude default, --kimi for Kimi Code)
 //	One-shot:  glyph3d-cli [--host url] <command...>
 //	REPL:      glyph3d-cli [--host url]
 //	Pipe:      echo "grid.list" | glyph3d-cli

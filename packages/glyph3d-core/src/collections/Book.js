@@ -106,6 +106,8 @@ export default class Book extends BoundedObject3D {
         this._faceMat = null;    // per-book face material (ownFace) — shared singleton otherwise
         /** @type {{mesh:THREE.Mesh, edges:THREE.LineSegments, fill:THREE.Material, edge:THREE.Material, opts:Object}|null} */
         this.cover = null;       // the identity/interaction body while bound (bindCover)
+        /** @type {Object|null} a nameplate plate (Label3D) parked above the cover box (setNameplate) */
+        this.nameplate = null;
         if (leaf) this.addSheet({ recto: leaf });
     }
 
@@ -336,18 +338,56 @@ export default class Book extends BoundedObject3D {
         const c = this.cover;
         if (!c) return this;
         const b = this.layoutBounds();
-        if (b.isEmpty()) { c.mesh.visible = false; return this; }
+        if (b.isEmpty()) {
+            c.mesh.visible = false;
+            if (this.nameplate) this.nameplate.visible = false;
+            return this;
+        }
         b.getSize(_coverSize);
         b.getCenter(_coverCenter);
         c.mesh.position.copy(_coverCenter);
         c.mesh.scale.set(_coverSize.x + 2 * c.opts.pad, _coverSize.y + 2 * c.opts.pad, _coverSize.z + 2 * c.opts.zPad);
         c.mesh.visible = true;
         c.edges.visible = c.opts.edgeOpacity > 0;
+        // The nameplate rides the cover's top edge (the dock's tile-label idiom:
+        // edge + small gap + half the plate), re-anchored every sync.
+        const np = this.nameplate;
+        if (np) {
+            np.visible = true;
+            np.position.set(
+                _coverCenter.x,
+                _coverCenter.y + (_coverSize.y + 2 * c.opts.pad) / 2 + np.height * 0.8,
+                _coverCenter.z);
+        }
         return this;
     }
 
-    /** Drop the cover (materials freed; the shared unit geometry stays alive). */
+    /** Give the book a nameplate (a Label3D): parented in (rides every transform),
+     *  parked just above the cover box by syncCover() each frame, and disposed with
+     *  the cover. Replacing an existing plate disposes it; null detaches without
+     *  disposing (the caller keeps it). */
+    setNameplate(label) {
+        if (this.nameplate && this.nameplate !== label) {
+            this.remove(this.nameplate);
+            this.nameplate.dispose?.();
+        }
+        this.nameplate = label || null;
+        if (this.nameplate) {
+            this.add(this.nameplate);
+            this.syncCover();
+        }
+        return this;
+    }
+
+    /** Drop the cover (materials freed; the shared unit geometry stays alive).
+     *  The nameplate goes with it — the cover owns the plate's placement, so its
+     *  lifetime ends here too. */
     dropCover() {
+        if (this.nameplate) {
+            this.remove(this.nameplate);
+            this.nameplate.dispose?.();
+            this.nameplate = null;
+        }
         if (!this.cover) return this;
         this.remove(this.cover.mesh);
         this.cover.fill.dispose();

@@ -14,6 +14,7 @@
 //
 // Graduated from a one-off probe per the debug-into-tools practice. Sibling of dock-persist-check.mjs.
 
+import './headless-canvas.mjs';
 import * as THREE from 'three';
 import { CameraDock } from '../packages/glyph3d-core/src/services/interaction/CameraDock.js';
 import { ScaleModel } from '../packages/glyph3d-core/src/collections/ScaleModel.js';

@@ -9,7 +9,8 @@
 // think/text, tool.call/tool.result pairing across distance, the path→file_path dialect
 // rename, the Bash stdout + Read file-meta enrichments, and the bookkeeping-line skips.
 
-import { parseKimiSession, kimiAgentIdForSession } from '../packages/glyph3d-core/src/collections/sessionAdapter.js';
+import { parseKimiSession, parseKimiSessionAsync, kimiAgentIdForSession, createKimiWireState, kimiWireLineToEvents }
+  from '../packages/glyph3d-core/src/collections/sessionAdapter.js';
 
 let pass = 0, fail = 0;
 const ok = (cond, msg) => { if (cond) { pass++; } else { fail++; console.error(`  ✗ ${msg}`); } };
@@ -19,11 +20,14 @@ const eq = (a, b, msg) => ok(J(a) === J(b), `${msg}\n      got  ${J(a)}\n      w
 const loop = (event, time) => J({ type: 'context.append_loop_event', event, time });
 
 const fixture = [
-  // metadata + bookkeeping lines → no events (the Claude adapter's non-message skips mirror)
+  // metadata + bookkeeping lines → no events (the Claude adapter's non-message skips mirror);
+  // metadata / turn.prompt / llm.request emit nothing but ARE harvested into meta
   J({ type: 'metadata', protocol_version: '1.4', created_at: 999 }),
-  J({ type: 'turn.prompt', time: 1000, prompt: 'do the thing' }),
+  J({ type: 'turn.prompt', time: 1000, input: [{ type: 'text', text: 'do the thing' }] }),
+  J({ type: 'turn.prompt', time: 1000, input: [{ type: 'text', text: 'second prompt does not override' }] }),
   J({ type: 'context.append_message', time: 1000, message: { role: 'user', content: 'user prose' } }),
-  J({ type: 'llm.request', time: 1000 }),
+  J({ type: 'llm.request', time: 1000, provider: 'kimi', model: 'k3', modelAlias: 'kimi-code/k3' }),
+  J({ type: 'llm.request', time: 1000, provider: 'other', model: 'k4', modelAlias: 'kimi-code/k4' }),
   J({ type: 'usage.record', time: 1000 }),
   loop({ type: 'step.begin' }, 1000),
   // malformed + non-object lines → skipped, parse survives
@@ -48,7 +52,7 @@ const fixture = [
   loop({ type: 'tool.result', toolCallId: 'tc-read', result: { output: '40\tfoo\n41\tbar\n' } }, 1006),
 ].join('\n') + '\n';
 
-const { events, cwd, firstTs, lastTs } = parseKimiSession(fixture, '/index/cwd');
+const { events, cwd, firstTs, lastTs, meta } = parseKimiSession(fixture, '/index/cwd');
 
 // ── stream shape: 6 events, transcript order, tools at their call positions ──────────
 eq(events.length, 6, 'event count (skips: metadata, turn.prompt, user prose, llm/usage, step.*, malformed, non-object, blank part)');
@@ -96,6 +100,81 @@ eq(kimiAgentIdForSession('session_474cf46e-c317-40eb-ae0e-e02cd9aaa074'), '474cf
 eq(kimiAgentIdForSession('474cf46e-c317'), '474cf46e', 'id without the prefix still derives');
 eq(kimiAgentIdForSession('session_'), 'kimi', 'empty after strip → kimi');
 eq(kimiAgentIdForSession(null), 'kimi', 'null → kimi');
+
+// ── meta: provenance harvested from the bookkeeping lines (first-seen wins) ───────────
+eq(meta, {
+  harness: 'kimi', cwd: '/repo',
+  title: 'do the thing', createdAt: 999,
+  model: 'k3', modelAlias: 'kimi-code/k3', provider: 'kimi',
+  firstTs: 1000, lastTs: 1003,
+}, 'meta: harness/cwd/title fallback/createdAt/model/alias/provider/span');
+ok(meta.cwd === cwd && meta.firstTs === firstTs && meta.lastTs === lastTs,
+  'meta span/cwd mirror the top-level fields');
+
+// empty / meta-less transcripts → null fields, harness still set
+const bareMeta = parseKimiSession(noCwdFixture).meta;
+eq(bareMeta, { harness: 'kimi', cwd: null, title: null, createdAt: null, model: null, modelAlias: null, provider: null, firstTs: 1000, lastTs: 1000 },
+  'no meta lines → null fields (cwd parameter fallback applies to meta too when given)');
+eq(parseKimiSession(noCwdFixture, '/from/index').meta.cwd, '/from/index', 'meta.cwd falls back to the parameter');
+eq(parseKimiSession('').meta, { harness: 'kimi', cwd: null, title: null, createdAt: null, model: null, modelAlias: null, provider: null, firstTs: null, lastTs: null },
+  'empty text → all-null meta');
+
+// turn.prompt accepts the old string shape too
+eq(parseKimiSession(J({ type: 'turn.prompt', prompt: 'string shape' }) + '\n').meta.title, 'string shape',
+  'turn.prompt: plain `prompt` string also harvested');
+
+// ── incremental parity: one line at a time through kimiWireLineToEvents ≡ full parse ──
+{
+  const state = createKimiWireState();
+  const live = [];
+  for (const line of fixture.split('\n')) {
+    if (!line.trim()) continue;
+    let obj;
+    try { obj = JSON.parse(line); } catch { continue; }
+    live.push(...kimiWireLineToEvents(obj, state));
+  }
+  eq(live, events, 'live==archive: line-by-line translation yields the SAME events (late results fill in place)');
+  eq({
+    harness: 'kimi', cwd: state.cwd ?? '/index/cwd',
+    title: state.title, createdAt: state.createdAt,
+    model: state.model, modelAlias: state.modelAlias, provider: state.provider,
+    firstTs: state.firstTs, lastTs: state.lastTs,
+  }, meta, 'live==archive: the state accumulators yield the SAME meta');
+  eq(state.calls.size, 2, 'pairing map drains to the calls whose results never arrived (edit, glob)');
+  eq(state.results.size, 0, 'no orphan results left pending');
+}
+
+// result BEFORE its call across batches — pairing still lands
+{
+  const flipped = [
+    loop({ type: 'tool.result', toolCallId: 'tc-x', result: { output: 'early\n' } }, 2000),
+    loop({ type: 'tool.call', toolCallId: 'tc-x', name: 'Bash', args: { command: 'echo' } }, 2001),
+  ].join('\n') + '\n';
+  eq(parseKimiSession(flipped).events[0].response, { output: 'early\n', stdout: 'early\n' },
+    'result-before-call pairs in the full parse');
+  const st = createKimiWireState();
+  const out = [];
+  for (const line of flipped.split('\n')) {
+    if (!line.trim()) continue;
+    out.push(...kimiWireLineToEvents(JSON.parse(line), st));
+  }
+  eq(out, parseKimiSession(flipped).events, 'result-before-call pairs incrementally too');
+  eq(st.calls.size + st.results.size, 0, 'consumed pairing leaves both maps empty');
+}
+
+// late result mutates the ALREADY-EMITTED event object (live lanes see the pair complete)
+{
+  const st = createKimiWireState();
+  const [callEv] = kimiWireLineToEvents(JSON.parse(loop({ type: 'tool.call', toolCallId: 'tc-late', name: 'Bash', args: {} }, 3000)), st);
+  eq(callEv.response, null, 'call emits with null response before the result');
+  const resOut = kimiWireLineToEvents(JSON.parse(loop({ type: 'tool.result', toolCallId: 'tc-late', result: { output: 'done\n' } }, 3001)), st);
+  eq(resOut, [], 'tool.result emits no event of its own');
+  eq(callEv.response, { output: 'done\n', stdout: 'done\n' }, 'the emitted call event is filled in place');
+}
+
+// async driver lockstep: the frame-sliced surface parses IDENTICALLY (budget 0 = yield at every check)
+eq(await parseKimiSessionAsync(fixture, '/index/cwd', { budgetMs: 0 }), parseKimiSession(fixture, '/index/cwd'),
+  'parseKimiSessionAsync output === sync output (budget 0)');
 
 console.log(`\nkimiSessionAdapter: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

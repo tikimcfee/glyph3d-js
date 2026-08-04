@@ -8,6 +8,8 @@
  *
  *   agent.tool     <id> <type> <ToolName> [inputJSON] [responseJSON] [cwd]  raw tool event → normalized record
  *   agent.message  <id> <type> <kind> <text>         a conversation block (text/thinking) → say/think sheet
+ *   agent.meta     <id> <json>                      provenance metadata (slug/title/model/cwd/…) → lane + nameplate
+ *   agent.kimi-wire <id> <b64line>                  one raw kimi wire.jsonl line → shared dialect → tool/message events
  *   agent.activity <id> <type> <action> [target] [detail] [result]   the normalized record directly (manual/CLI/tests)
  *       (detail/result/text with spaces ride the `call` base64 hatch)
  *   agent.spawn    <id> [type]                      summon an empty book (request an instance)
@@ -27,8 +29,10 @@
 
 import { resolveGridByIdOrIndex } from './spatialHelpers.js';
 import { normalizeToolCall, normalizeMessage } from '@glyph3d/core/collections/toolRegistry.js';
-import { parseClaudeSession, parseKimiSession, agentIdForSession, kimiAgentIdForSession }
+import { parseClaudeSessionAsync, parseKimiSessionAsync, agentIdForSession, kimiAgentIdForSession,
+         createKimiWireState, kimiWireLineToEvents }
     from '@glyph3d/core/collections/sessionAdapter.js';
+import { decodeBase64 } from '@glyph3d/core/utils/encoding.js';
 
 const noBooks = { text: 'ERR: agent books not wired', data: null };
 
@@ -41,7 +45,8 @@ const agentIdForEntry = (s) => (s.harness === 'kimi' ? kimiAgentIdForSession(s.i
  * state), parse it through the harness's adapter, and bulk-hydrate a lane whose id matches
  * the harness's derivation — for claude that's the live hook's, so a still-running
  * session's stream converges on the same book. The ONE open path: the agent.open verb and
- * session restore both ride it.
+ * session restore both ride it. Parse AND hydrate are frame-sliced (the ...Async adapters,
+ * AgentBooks.hydrate) — a deep history streams in over a few frames instead of one long task.
  * @param {Object} ctx
  * @param {string} sessionId full session id (the record's filename stem)
  * @param {{limit?: number, harness?: string}} [opts] limit = turns to keep (0 = all) —
@@ -55,15 +60,15 @@ export async function openAgentSession(ctx, sessionId, { limit, harness = 'claud
     if (!ctx.agentBooks) throw new Error('agent books not wired');
     if (harness === 'kimi') {
         const { content, cwd: indexCwd } = await provider.read(sessionId, { harness: 'kimi' });
-        const { events, cwd } = parseKimiSession(content, indexCwd);
+        const { events, cwd, meta } = await parseKimiSessionAsync(content, indexCwd);
         const agentId = kimiAgentIdForSession(sessionId);
-        const added = ctx.agentBooks.hydrate(agentId, events, { agentType: 'kimi', sessionId, cwd, limit });
+        const added = await ctx.agentBooks.hydrate(agentId, events, { agentType: 'kimi', sessionId, cwd, meta, limit });
         return { agentId, added, total: events.length };
     }
     const { content } = await provider.read(sessionId);
-    const { events, cwd } = parseClaudeSession(content);
+    const { events, cwd, meta } = await parseClaudeSessionAsync(content);
     const agentId = agentIdForSession(sessionId);
-    const added = ctx.agentBooks.hydrate(agentId, events, { agentType: 'claude', sessionId, cwd, limit });
+    const added = await ctx.agentBooks.hydrate(agentId, events, { agentType: 'claude', sessionId, cwd, meta, limit });
     return { agentId, added, total: events.length };
 }
 
@@ -104,6 +109,33 @@ function parseJSONArg(a) {
     if (a && typeof a === 'object') return a;
     if (typeof a === 'string' && a.trim()) { try { return JSON.parse(a); } catch { /* malformed */ } }
     return null;
+}
+
+/** Live kimi ingress state per lane. Entries are tiny and bounded by session count; a
+ *  cleared lane's entry just goes quiet (the Go-side cursor is the real memory). */
+const kimiWireLanes = new Map();   // laneId -> { state, pending: [], timer, metaSent: {} }
+
+/** Sink a kimi lane's translated batch: normalize each event through the ONE registry and
+ *  page it in, then forward any newly-appeared provenance (llm.request model, first
+ *  turn.prompt title, cwd…) to the lane — setLaneMeta merges and rebakes the nameplate. */
+function flushKimiWireLane(ctx, books, id, lane) {
+    lane.timer = null;
+    const events = lane.pending;
+    lane.pending = [];
+    for (const ev of events) {
+        if (ev.kind === 'tool') {
+            const rec = normalizeToolCall(ev.name, ev.input, ev.response, lane.state.cwd || '');
+            if (rec) emitActivity(ctx, books, id, 'kimi', rec);
+        } else if (ev.kind === 'message') {
+            const rec = normalizeMessage(ev.mtype, ev.text);
+            if (rec) emitActivity(ctx, books, id, 'kimi', rec);
+        }
+    }
+    const s = lane.state, meta = {};
+    for (const k of ['cwd', 'title', 'model', 'modelAlias', 'provider', 'createdAt', 'firstTs', 'lastTs']) {
+        if (s[k] != null && lane.metaSent[k] !== s[k]) { meta[k] = s[k]; lane.metaSent[k] = s[k]; }
+    }
+    if (Object.keys(meta).length) books.setLaneMeta(id, { harness: 'kimi', ...meta });
 }
 
 /**
@@ -178,6 +210,50 @@ export default function registerAgentCommands(router) {
             data: { id, action: rec.action },
         };
     }, { description: 'Agent conversation turn (text/thinking) → a say/think sheet in its book', usage: '<id> <type> <kind> <text>' });
+
+    router.register('agent.meta', (args, ctx) => {
+        const books = ctx.agentBooks;
+        if (!books) return noBooks;
+        if (args.length < 2) return { text: 'ERR: usage: agent.meta <id> <json>', data: null };
+        // Provenance push from the Go hook (claude) — slug/title/model/cwd/gitBranch, sent
+        // once per session on the first transcript flush. Merges onto the lane and rebakes
+        // its nameplate. The lane may not exist yet (meta can beat the first tool event).
+        const [id] = args;
+        const meta = parseJSONArg(args[1]);
+        if (!meta) return { text: 'ERR: agent.meta needs a JSON object', data: null };
+        books.ensure(id, typeof meta.harness === 'string' ? meta.harness : 'agent');
+        const ok = books.setLaneMeta(id, meta);
+        return ok
+            ? { text: `OK: ${id} meta`, data: { id, meta } }
+            : { text: `ERR: no agent '${id}'`, data: null };
+    }, { description: 'Agent provenance metadata (slug/title/model/cwd/…) → lane + nameplate', usage: '<id> <json>' });
+
+    router.register('agent.kimi-wire', (args, ctx) => {
+        const books = ctx.agentBooks;
+        if (!books) return noBooks;
+        if (args.length < 2) return { text: 'ERR: usage: agent.kimi-wire <id> <b64line>', data: null };
+        // Live kimi ingress: the Go hook (--kimi) tails the session's wire.jsonl on each
+        // harness poke and ships RAW lines here — the ONE dialect implementation
+        // (kimiWireLineToEvents, shared with the archive parse) translates them, so live
+        // and archive can never drift. The lane id was derived Go-side (lockstep mirror
+        // of kimiAgentIdForSession); the lane is ensured with the kimi type.
+        const [id, b64] = args;
+        let obj;
+        try { obj = JSON.parse(decodeBase64(b64)); }
+        catch { return { text: 'OK: wire line dropped (malformed)', data: null }; }
+        books.ensure(id, 'kimi');
+        let lane = kimiWireLanes.get(id);
+        if (!lane) {
+            lane = { state: createKimiWireState(), pending: [], timer: null, metaSent: {} };
+            kimiWireLanes.set(id, lane);
+        }
+        lane.pending.push(...kimiWireLineToEvents(obj, lane.state));
+        // Sink on a 0ms debounce: a tool.call emits with response null and its tool.result
+        // (a later line in the SAME poke's flush) fills it in place — translating the whole
+        // batch before normalizing means live sheets carry the responses the archive would.
+        if (!lane.timer) lane.timer = setTimeout(() => flushKimiWireLane(ctx, books, id, lane), 0);
+        return { text: `OK: ${id} wire`, data: { id } };
+    }, { description: 'One raw kimi wire.jsonl line → shared dialect → tool/message events (live kimi ingress)', usage: '<id> <b64line>' });
 
     router.register('agent.sessions', async (_args, ctx) => {
         const provider = ctx.sessionProvider;

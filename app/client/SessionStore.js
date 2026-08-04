@@ -516,8 +516,10 @@ export default class SessionStore {
   // The pour is CONCURRENT (a bounded worker pool): each book is independent, and its
   // seat is pre-assigned (the carrel manifest's order + the desk's expect pre-shape),
   // so arrival order is irrelevant — overlapping the relay reads collapses the
-  // one-book-at-a-time trickle into a few waves. Per-entry hydrate + pin stay one
-  // synchronous block, so the deferred carrel sweep still sees pins before it seats.
+  // one-book-at-a-time trickle into a few waves. Per-entry pin stays synchronous with
+  // its (awaited) hydrate, so the deferred carrel sweep still sees pins before it seats;
+  // the hydrate itself is frame-sliced (AgentBooks.hydrate), so a deep history yields
+  // the main thread to the sibling lanes instead of long-tasking through them.
   async _restoreAgents(snap) {
     const list = Array.isArray(snap.agents) ? snap.agents : [];
     if (!list.length) return;

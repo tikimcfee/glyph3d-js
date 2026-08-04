@@ -58,18 +58,22 @@
  *   (terminals re-adopt async, in arrival order — order is what keeps the bar from scrambling).
  * @property {number} slot - dense 0..n-1 DISPLAY rank, derived from `order` every _relayout.
  * @property {THREE.Quaternion} quatTarget - orientation the tile slerps toward
+ * @property {Label3D|null} label - the tile nameplate (name + live info, identity-hued);
+ *   a dock child parked under the tile's content, hidden while the window is framed.
  */
 
 import * as THREE from 'three';
 import { SpatialAnimator } from '../spatial/SpatialAnimator.js';
 import { flowBoxes } from '../../collections/layouts/flowBoxes.js';
 import { BORDER_FLAGS } from '../../collections/panelMaterial.js';
+import Label3D from '../../components/Label3D.js';
 import PaneTree from './PaneTree.js';
 
 const _forward = new THREE.Vector3();
 const _z = new THREE.Vector3(0, 0, 1);
 const _dir = new THREE.Vector3();
 const _off = new THREE.Vector3();
+const _lq = new THREE.Quaternion();
 const DEG2RAD = Math.PI / 180;
 
 // Slot-placeholder chrome. A framed window leaves a ghost outline breathing in its held-open bar
@@ -86,6 +90,17 @@ const IDENTITY_GOLDEN = 137.508 / 360; // golden-angle as a hue fraction — the
 const IDENTITY_HUE0 = 0.58;            // start hue (~blue) — continuity with the old ghost color
 const IDENTITY_SAT = 0.72;             // quiet but present — distinct as a hairline on a small tile
 const IDENTITY_LIGHT = 0.68;           // light — reads on the dark background, not washed out
+
+// setParam's accepted keys — numeric dials (Number.isFinite-checked) and enums (value-checked).
+const DOCK_NUMERIC_PARAMS = ['distance', 'boxFrac', 'boxAspect', 'gapFrac', 'maxColumns', 'fillFrac', 'maxArcDeg',
+    'maxRiseDeg', 'bottomFrac', 'frameW', 'frameH', 'frameX', 'frameY',
+    'frameMarginLeft', 'frameMarginRight', 'frameMarginTop', 'frameMarginBottom',
+    'frameDistFrac', 'animDur', 'yawRate', 'borderWidth', 'borderStrength',
+    'ghostOpacity', 'ghostPulseHz', 'labelLines', 'labelGap', 'labelOpacity'];
+const DOCK_ENUM_PARAMS = {
+    labelPosition: ['above', 'below'],
+    labelFormat: ['name+dims', 'name', 'dims', 'off'],
+};
 
 /** Walk up the parent chain to confirm an object still reaches a live Scene. */
 function reachesScene(obj) {
@@ -138,6 +153,12 @@ export class CameraDock extends THREE.Object3D {
      * @param {number} [opts.borderStrength=1] - docked window's border intensity (0 = no border)
      * @param {number} [opts.ghostOpacity=0.55] - slot placeholder's peak opacity (the breathe stays below it)
      * @param {number} [opts.ghostPulseHz=0.5]  - placeholder breathe rate (cycles/sec; 0 = steady)
+     * @param {number} [opts.labelLines=3]  - tile nameplate height in CELL ROWS of the tile's own text
+     *   (the window's chrome buttons are 1.5) — the plate scales with the content, not the slot box
+     * @param {number} [opts.labelGap=0.3]  - gap between the tile's content edge and the plate, in plate heights
+     * @param {number} [opts.labelOpacity=0.85] - nameplate material opacity
+     * @param {'above'|'below'} [opts.labelPosition='below'] - which content edge the plate parks on
+     * @param {'name+dims'|'name'|'dims'|'off'} [opts.labelFormat='name+dims'] - plate text ('off' hides nameplates)
      * @param {'linear'|'radial'} [opts.layout='radial']
      */
     constructor({ attentionManager = null, distance = 10, boxFrac = 0.1, boxAspect = 1.15, gapFrac = 0.4,
@@ -148,6 +169,8 @@ export class CameraDock extends THREE.Object3D {
                   animDur = 0.167, yawRate = 14,
                   borderWidth = 1.5, borderStrength = 1,
                   ghostOpacity = 0.55, ghostPulseHz = 0.5,
+                  labelLines = 3, labelGap = 0.3, labelOpacity = 0.85,
+                  labelPosition = 'below', labelFormat = 'name+dims',
                   layout = 'radial' } = {}) {
         super();
         this.name = 'camera-dock';
@@ -187,6 +210,11 @@ export class CameraDock extends THREE.Object3D {
         this.borderStrength = borderStrength; // docked window's panel-border intensity (0 = off)
         this.ghostOpacity = ghostOpacity;     // slot placeholder's peak opacity (breathes below this)
         this.ghostPulseHz = ghostPulseHz;     // placeholder breathe rate (cycles/sec; 0 = steady)
+        this.labelLines = labelLines;         // nameplate height in cell rows of the tile's own text
+        this.labelGap = labelGap;             // gap between content edge and plate, in plate heights
+        this.labelOpacity = labelOpacity;     // nameplate material opacity
+        this.labelPosition = labelPosition;   // 'above' | 'below' — which content edge the plate parks on
+        this.labelFormat = labelFormat;       // 'name+dims' | 'name' | 'dims' | 'off' (hidden)
         this._colorCursor = 0;            // golden-angle step counter — each docked window gets a fresh spread hue
         this._orderSeq = 0;               // monotonic sort-key source for interactive locks (restore overrides per-tile)
 
@@ -384,20 +412,28 @@ export class CameraDock extends THREE.Object3D {
     }
 
     /**
-     * Tune a layout parameter live and re-pack. Keys: distance, boxFrac, boxAspect, gapFrac,
-     * maxColumns, fillFrac, maxArcDeg, maxRiseDeg, bottomFrac, frameW, frameH, frameX, frameY,
-     * frameMarginLeft, frameMarginRight, frameMarginTop, frameMarginBottom, frameDistFrac, animDur,
-     * yawRate, ghostOpacity, ghostPulseHz.
-     * @param {string} key @param {number} value @returns {boolean}
+     * Tune a layout parameter live and re-pack. Numeric keys: distance, boxFrac, boxAspect,
+     * gapFrac, maxColumns, fillFrac, maxArcDeg, maxRiseDeg, bottomFrac, frameW, frameH, frameX,
+     * frameY, frameMarginLeft, frameMarginRight, frameMarginTop, frameMarginBottom, frameDistFrac,
+     * animDur, yawRate, borderWidth, borderStrength, ghostOpacity, ghostPulseHz, labelLines,
+     * labelGap, labelOpacity. Enum keys: labelPosition ('above'|'below'), labelFormat
+     * ('name+dims'|'name'|'dims'|'off'). Opacity pushes to every live plate; format rebakes them.
+     * @param {string} key @param {number|string} value @returns {boolean}
      */
     setParam(key, value) {
-        if (!['distance', 'boxFrac', 'boxAspect', 'gapFrac', 'maxColumns', 'fillFrac', 'maxArcDeg',
-              'maxRiseDeg', 'bottomFrac', 'frameW', 'frameH', 'frameX', 'frameY',
-              'frameMarginLeft', 'frameMarginRight', 'frameMarginTop', 'frameMarginBottom',
-              'frameDistFrac', 'animDur', 'yawRate', 'borderWidth', 'borderStrength',
-              'ghostOpacity', 'ghostPulseHz'].includes(key)) return false;
-        if (!Number.isFinite(value)) return false;
-        this[key] = value;
+        if (DOCK_NUMERIC_PARAMS.includes(key)) {
+            if (!Number.isFinite(value)) return false;
+            this[key] = value;
+        } else if (DOCK_ENUM_PARAMS[key]) {
+            if (!DOCK_ENUM_PARAMS[key].includes(value)) return false;
+            this[key] = value;
+        } else return false;
+
+        if (key === 'labelOpacity') {
+            for (const e of this.entries.values()) if (e.label) e.label.material.opacity = value;
+        } else if (key === 'labelFormat') {
+            for (const e of this.entries.values()) e.label?.setLabel(this._labelText(e));
+        }
         this._relayout();
         return true;
     }
@@ -491,6 +527,18 @@ export class CameraDock extends THREE.Object3D {
         grid.setBorder?.({ color: entry.identityColor, width: this.borderWidth, intensity: this.borderStrength });
         grid.setBorderFlag?.(BORDER_FLAGS.DOCKED, true);
 
+        // The tile nameplate: a Label3D wearing the SAME identity hue as the border/ghost, so
+        // "which tiny tile is which" is answered by name, not just color. A direct child of the
+        // dock (dock-local placement, like the ghost); pick-inert (Label3D is an isMarker).
+        entry.label = new Label3D({
+            label: this._labelText(entry),
+            height: this._labelHeight(entry, 1, this._boxFor(entry).h),
+            color: entry.identityColor,
+            opacity: this.labelOpacity,
+        });
+        entry.label.name = `dock-label:${id}`;
+        this.add(entry.label);
+
         this._relayout();
         return true;
     }
@@ -522,6 +570,7 @@ export class CameraDock extends THREE.Object3D {
 
         e.unsubscribeResize?.(); // stop reacting to its size once it leaves the dock
         e.grid.setBorderFlag?.(BORDER_FLAGS.DOCKED, false); // drop the dock identity — leaving the bar
+        this._disposeLabel(e);
         this.entries.delete(id);
         this.tiles.delete(e.grid); // back to world content for the camera the moment it heads home
         if (this.paneTree?.has(id)) {
@@ -561,6 +610,7 @@ export class CameraDock extends THREE.Object3D {
         if (!e) return false;
 
         e.unsubscribeResize?.();
+        this._disposeLabel(e);
         this.entries.delete(id);
         this._releasing.delete(id);            // abandon any in-flight release of the same id
         this.tiles.delete(e.grid);
@@ -685,6 +735,57 @@ export class CameraDock extends THREE.Object3D {
         this._animateTile(e, subCx * fd, subCy * fd, this.distance * (1 - fd), eff);
         const d = this.attentionManager?.docks?.get(e.id);
         if (d) d.offset = { slot: 'frame' };
+    }
+
+    /** The nameplate text for an entry, per labelFormat: the window's name, its live dimensions
+     *  (grids that expose cols/rows — terminals), or both. The ONE place the rule lives —
+     *  reflowTile and a format change rebake it. @private */
+    _labelText(e) {
+        const g = e.grid;
+        const name = g?.name || e.id;
+        const dims = (Number.isFinite(g?.cols) && Number.isFinite(g?.rows)) ? `${g.cols}×${g.rows}` : null;
+        if (this.labelFormat === 'dims' && dims) return dims;
+        if (this.labelFormat === 'name' || !dims) return name;
+        return `${name} · ${dims}`;
+    }
+
+    /** The nameplate's rendered height: a few CELL ROWS of the tile's own text — the same
+     *  sizing the window's chrome buttons use (they're 1.5 lineSpacing tall), so the plate
+     *  scales with the CONTENT (eff = the tile's rendered contain-fit scale), not the slot
+     *  box. Grids without text metrics fall back to a small box fraction. @private */
+    _labelHeight(e, eff, boxH) {
+        const line = e.grid?._metrics?.lineSpacing ?? e.grid?.metrics?.lineSpacing ?? e.grid?.metrics?.lineHeight;
+        return line ? this.labelLines * line * eff : 0.2 * boxH;
+    }
+
+    /** Tear down an entry's nameplate (release / dismiss / dispose). @private */
+    _disposeLabel(e) {
+        if (!e.label) return;
+        this.animator.cancelAll(e.label);
+        this.remove(e.label);
+        e.label.dispose();
+        e.label = null;
+    }
+
+    /** Park an entry's nameplate just past the tile's CONTENT edge (labelPosition picks above
+     *  or below; the slot box's edge would leave it drifting far off letterboxed content),
+     *  tilted to face the eye like the tile (faceDir null = flat, the linear row). Position
+     *  slides with the tile's own animation; scale snaps (it only changes on a resize/refit).
+     *  labelFormat 'off' hides every plate. @private */
+    _placeLabel(e, sx, sy, sz, eff, faceDir, boxH) {
+        const label = e.label;
+        if (!label) return;
+        if (this.labelFormat === 'off') { label.visible = false; return; }
+        const lh = this._labelHeight(e, eff, boxH);
+        const edge = (this._extentOf(e).h * eff) / 2 + lh * (0.5 + this.labelGap); // content edge + gap + half the plate
+        const dy = this.labelPosition === 'above' ? edge : -edge;
+        if (faceDir) _lq.setFromUnitVectors(_z, faceDir);
+        else _lq.identity();
+        _off.set(0, dy, 0).applyQuaternion(_lq);
+        label.quaternion.copy(_lq);
+        label.visible = true;
+        label.scale.setScalar(lh / Math.max(label.height, 1e-9));
+        this.animator.animateTo(label, 'position', { x: sx + _off.x, y: sy + _off.y, z: sz + _off.z }, { duration: this.animDur });
     }
 
     /** The shared unit-rectangle outline (XY plane, centered, a closed line loop) every ghost
@@ -842,8 +943,10 @@ export class CameraDock extends THREE.Object3D {
                     if (framed.has(e.id)) {
                         this._showGhost(e, sx, sy, sz, boxes[i].w * f, boxes[i].h * f, _dir);
                         ghostsShown.add(e.id);
+                        if (e.label) e.label.visible = false; // the ghost holds the slot — no nameplate
                     } else {
                         this._animateTile(e, sx, sy, sz, scales[i] * f, _dir);
+                        this._placeLabel(e, sx, sy, sz, scales[i] * f, _dir, boxes[i].h * f);
                         const d = this.attentionManager?.docks?.get(e.id);
                         if (d) d.offset = { slot: e.slot };
                     }
@@ -865,13 +968,15 @@ export class CameraDock extends THREE.Object3D {
                 bar.forEach((e, i) => {
                     const sx = cx + widths[i] * 0.5;
                     cx += widths[i] + gap;
+                    // Slot box shrinks with the fit-to-width factor too (widths[i] already has it).
+                    const boxH = boxes[i].h * (widths[i] / Math.max(boxes[i].w, 1e-9));
                     if (framed.has(e.id)) {
-                        // Slot box shrinks with the fit-to-width factor too (widths[i] already has it).
-                        const boxH = boxes[i].h * (widths[i] / Math.max(boxes[i].w, 1e-9));
                         this._showGhost(e, sx, rowY, 0, widths[i], boxH, null);
                         ghostsShown.add(e.id);
+                        if (e.label) e.label.visible = false; // the ghost holds the slot — no nameplate
                     } else {
                         this._animateTile(e, sx, rowY, 0, scales[i]);
+                        this._placeLabel(e, sx, rowY, 0, scales[i], null, boxH);
                         const d = this.attentionManager?.docks?.get(e.id);
                         if (d) d.offset = { slot: e.slot };
                     }
@@ -904,6 +1009,7 @@ export class CameraDock extends THREE.Object3D {
     reflowTile(id) {
         const e = this.entries.get(id);
         if (!e) return false;
+        e.label?.setLabel(this._labelText(e)); // live info (cols×rows) tracks the new size
         if (this.paneTree?.has(id)) this._placePane(e, this.paneTree.rects().get(id));
         else this._relayout();
         return true;
@@ -951,6 +1057,7 @@ export class CameraDock extends THREE.Object3D {
         this._sweepGhosts(new Set());
         this._ghostGeo?.dispose();
         this._ghostGeo = null;
+        for (const e of this.entries.values()) this._disposeLabel(e);
         this.entries.clear();
         this._releasing.clear();
         this.tiles.clear();

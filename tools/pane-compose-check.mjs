@@ -7,6 +7,7 @@
 //
 // Sibling of dock-refresh-check / panetree-check. Per the debug-into-tools practice.
 
+import './headless-canvas.mjs';
 import * as THREE from 'three';
 import { CameraDock } from '../packages/glyph3d-core/src/services/interaction/CameraDock.js';
 import { ScaleModel } from '../packages/glyph3d-core/src/collections/ScaleModel.js';

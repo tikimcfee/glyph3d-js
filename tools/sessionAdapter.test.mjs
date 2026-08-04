@@ -8,7 +8,7 @@
 // transcript that exercises the real shapes: tool_use/tool_result pairing across distance, the
 // three response-merge branches, assistant prose blocks, sidechain/malformed/non-message skips.
 
-import { parseClaudeSession } from '../packages/glyph3d-core/src/collections/sessionAdapter.js';
+import { parseClaudeSession, parseClaudeSessionAsync } from '../packages/glyph3d-core/src/collections/sessionAdapter.js';
 
 let pass = 0, fail = 0;
 const ok = (cond, msg) => { if (cond) { pass++; } else { fail++; console.error(`  ✗ ${msg}`); } };
@@ -95,6 +95,11 @@ eq(lastTs, Date.parse(T(9)), 'lastTs = last timestamped event');
 eq(parseClaudeSession('').events, [], 'empty text → no events');
 eq(parseClaudeSession('').cwd, null, 'empty text → null cwd');
 eq(parseClaudeSession('null\n42\n"str"\n').events, [], 'non-object JSON lines skipped');
+
+// ── async driver lockstep: the frame-sliced surface parses IDENTICALLY ─────────────────
+// budgetMs 0 forces a yield at every clock check, so the sliced path is fully exercised.
+const asyncOut = await parseClaudeSessionAsync(fixture, { budgetMs: 0 });
+eq(asyncOut, parseClaudeSession(fixture), 'parseClaudeSessionAsync output === sync output (budget 0)');
 
 console.log(`\nsessionAdapter: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

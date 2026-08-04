@@ -1,7 +1,14 @@
 # App State — One Serializable Tree, One `apply()`
 
-**Status:** plan — Ivan Lugo
+**Status:** in flight — Ivan Lugo
 **Date:** 2026-06-13
+**Landed (2026-08-03):** slice 0 (schema-tolerant restore + `WorkspaceModel.clear()`), slice 1
+(terminal geometry intent in the model), dock membership/order as `dock = f(model)`, layout-scheme
+and camera `getState()/applyState()`, loose-terminal zoom, and `view.carrel` (carrel authority in
+the model, via the ECS lane). Components are named: `COMPONENT_SCHEMA` =
+Residence/Position/Orientation/Zoom/TerminalGeometry over the byte-identical flat view.
+**Remaining:** code-grid viewport (window/frame/scroll/fold), dock spotlight, field source + focus,
+then `SessionStore` → serialize/deserialize.
 **Supersedes** the earlier reconciler-heavy draft of this file. Same destination, honest framing: the concept is "set app state from the saved blob"; the only real work is collapsing today's duplicate copies into one home and writing the function that pushes state onto the (deliberately non-React) live objects.
 
 ---

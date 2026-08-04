@@ -299,6 +299,16 @@ export const SETTINGS = [
   // window's identity hue (the hue itself is auto-generated, not a setting). 0 opacity hides it.
   { key: 'dock.ghostOpacity', label: 'Ghost opacity', group: 'Dock', type: 'number', default: 0.55, min: 0, max: 1, step: 0.05, apply: dockParam('ghostOpacity') },
   { key: 'dock.ghostPulseHz', label: 'Ghost breathe (Hz)', group: 'Dock', type: 'number', default: 0.5, min: 0, max: 4, step: 0.1, apply: dockParam('ghostPulseHz') },
+  // The tile nameplate — an identity-hued Label3D parked past the tile's content edge, answering
+  // "which tiny tile is which" by name. Sized in CELL ROWS of the tile's own text (the window's
+  // chrome buttons are 1.5), so it scales with the content, not the slot box. labelFormat 'off'
+  // hides nameplates outright; 'dims' shows only cols×rows (grids without dimensions fall back
+  // to the name). Opacity/format push to every live plate; a format change rebakes them.
+  { key: 'dock.labelLines', label: 'Label size (cell rows)', group: 'Dock', type: 'number', default: 3, min: 1, max: 8, step: 0.5, apply: dockParam('labelLines') },
+  { key: 'dock.labelGap', label: 'Label gap (plate heights)', group: 'Dock', type: 'number', default: 0.3, min: 0, max: 2, step: 0.05, apply: dockParam('labelGap') },
+  { key: 'dock.labelOpacity', label: 'Label opacity', group: 'Dock', type: 'number', default: 0.85, min: 0, max: 1, step: 0.05, apply: dockParam('labelOpacity') },
+  { key: 'dock.labelPosition', label: 'Label position', group: 'Dock', type: 'enum', options: ['below', 'above'], default: 'below', apply: dockParam('labelPosition') },
+  { key: 'dock.labelFormat', label: 'Label text', group: 'Dock', type: 'enum', options: ['name+dims', 'name', 'dims', 'off'], default: 'name+dims', apply: dockParam('labelFormat') },
   // Frame — the root VIEW-FRAME a pinned/spotlit window contain-fits into (camera-front, the
   // "window-pane" the canvas frames). All frustum-normalized, so the pinned window tracks the
   // drawing-frame size live. Width/height size the pane (1 = full canvas); X/Y offset it

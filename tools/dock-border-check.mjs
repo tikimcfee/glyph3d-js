@@ -8,6 +8,7 @@
 //
 //   bun tools/dock-border-check.mjs
 
+import './headless-canvas.mjs';
 import * as THREE from 'three';
 import CameraDock from '../packages/glyph3d-core/src/services/interaction/CameraDock.js';
 import { BORDER_FLAGS } from '../packages/glyph3d-core/src/collections/panelMaterial.js';

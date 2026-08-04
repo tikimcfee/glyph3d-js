@@ -16,6 +16,7 @@
 //
 // Pure three (Object3D/Box3/Quaternion) — no WebGPU.
 
+import './headless-canvas.mjs';
 import * as THREE from 'three';
 import Carrel from '../packages/glyph3d-core/src/services/interaction/Carrel.js';
 import CameraDock from '../packages/glyph3d-core/src/services/interaction/CameraDock.js';

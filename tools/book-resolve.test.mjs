@@ -16,6 +16,9 @@
 
 import * as THREE from 'three';
 
+// ensure() bakes each lane's Label3D nameplate at construction — needs the 2d stub.
+import './headless-canvas.mjs';
+
 // Module-scope telemetry (ErrorTracker) wants a window with addEventListener.
 globalThis.window ??= { addEventListener() {} };
 

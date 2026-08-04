@@ -134,10 +134,14 @@ The performance story is structural rather than a fast path:
 - **Prebaked glyph core** — the Slug bezier encoding for the common glyph set
   is baked headlessly and served as a static asset; boot hydrates it instead of
   re-encoding, and new glyphs append incrementally.
-- **Work scales with what you see** — frustum culling adds and removes grids
-  from the scene, distance LOD thins far fields, and grid reloads are budgeted
-  per frame so a camera move can't stampede the main thread.
-- **Workers** — instance buffers build off the main thread.
+- **GPU layout engine** — glyph positions are computed by a persistent per-field
+  compute kernel from CPU-authored tables, so relayouts don't stampede the main
+  thread; `layout.verify` asserts kernel parity on the live scene.
+- **Work scales with what you see** — three's per-object frustum culling runs on the
+  real instance extent (geometry bounds resync after every position/count mutation),
+  so off-screen grids skip their draw entirely.
+- **Workers** — instance buffers can build off the main thread; bulk loads build
+  in sliced passes under a per-frame budget.
 
 In practice the ceiling is grid count (GPU objects), not glyph count: whole
 repositories load as hundreds of complete, editable files, and the measured
