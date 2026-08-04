@@ -526,6 +526,7 @@ export default class SessionStore {
     const books = this.ctx.agentBooks;
     const provider = this.ctx.sessionProvider;
     if (!books || !provider) return;
+    const opened = [];            // per-book {agentId, added, total, bytes, ms} — the lane's cost breakdown
     let archivePromise = null;   // fetched once, only if a prefix needs resolving
     const open = async (a) => {
       try {
@@ -538,10 +539,11 @@ export default class SessionStore {
             && s.id.replace(/-/g, '').startsWith(norm))?.id || null;
         }
         if (!sid) return;   // nothing on disk answers to this book — it stays closed
-        const { agentId } = await openAgentSession(this.ctx, sid, { limit: a.limit, harness: a.harness });
-        const lane = books.lanes.get(agentId);
+        const r = await openAgentSession(this.ctx, sid, { limit: a.limit, harness: a.harness });
+        opened.push(r);
+        const lane = books.lanes.get(r.agentId);
         if (!lane) return;
-        if (Array.isArray(a.pinned) && a.pinned.length === 3) books.moveGroup(agentId, ...a.pinned);
+        if (Array.isArray(a.pinned) && a.pinned.length === 3) books.moveGroup(r.agentId, ...a.pinned);
         if (!a.following && Number.isInteger(a.head)) lane.book.pageTo(a.head);
       } catch (e) {
         console.warn('[session] agent restore failed:', a.session || a.prefix, e?.message || e);
@@ -549,9 +551,27 @@ export default class SessionStore {
     };
     const POUR_WIDTH = 6;
     const queue = [...list];
+    const t0 = performance.now();
     await Promise.all(Array.from({ length: Math.min(POUR_WIDTH, queue.length) }, async () => {
       while (queue.length) await open(queue.shift());
     }));
+
+    // One cost line for the lane: the Σ columns are WORK time across books (the 6-wide
+    // pour overlaps them — they don't sum to wall), so a fat lane decomposes into WHICH
+    // stage eats it: read/parse scale with the transcript FILE, hydrate with the cap.
+    if (opened.length) {
+      const wall = Math.round(performance.now() - t0);
+      const sum = (k) => Math.round(opened.reduce((acc, b) => acc + (b.ms?.[k] || 0), 0));
+      const mb = opened.reduce((acc, b) => acc + (b.bytes || 0), 0) / 1048576;
+      const cost = (b) => (b.ms?.read || 0) + (b.ms?.parse || 0) + (b.ms?.hydrate || 0);
+      const slowest = [...opened].sort((x, y) => cost(y) - cost(x)).slice(0, 3)
+        .map((b) => `${b.agentId} r${Math.round(b.ms.read)}/p${Math.round(b.ms.parse)}/h${Math.round(b.ms.hydrate)}ms `
+          + `${b.added}/${b.total} ev ${(b.bytes / 1048576).toFixed(1)}MB`)
+        .join(' · ');
+      console.info(`[load] restore.agents · books ${opened.length} · wall ${wall}ms · `
+        + `Σread ${sum('read')}ms · Σparse ${sum('parse')}ms · Σhydrate ${sum('hydrate')}ms · `
+        + `parsed ${mb.toFixed(1)}MB · slowest: ${slowest}`);
+    }
   }
 
   // substrate — the field layout scheme, SET directly on the (still-empty) tree so the bulk load

@@ -52,24 +52,39 @@ const agentIdForEntry = (s) => (s.harness === 'kimi' ? kimiAgentIdForSession(s.i
  * @param {{limit?: number, harness?: string}} [opts] limit = turns to keep (0 = all) —
  *        becomes the book's retention override; omitted → the book's cap (its override,
  *        else cfg.maxSheets). harness = which archive/adapter ('claude' default | 'kimi').
- * @returns {Promise<{agentId: string, added: number, total: number}>}
+ * @returns {Promise<{agentId: string, added: number, total: number, bytes: number,
+ *   ms: {read: number, parse: number, hydrate: number}}>}
+ * `bytes` is the transcript size parsed; `ms` splits the open into its three stages so
+ * the restore lane (and agent.open's data) can answer "why is this slow" — a deep
+ * history's parse dwarfs the tail its cap keeps (read/parse scale with the FILE,
+ * hydrate with the cap).
  */
 export async function openAgentSession(ctx, sessionId, { limit, harness = 'claude' } = {}) {
     const provider = ctx.sessionProvider;
     if (!provider) throw new Error('no session provider (relay offline — the archive is a relay feature)');
     if (!ctx.agentBooks) throw new Error('agent books not wired');
+    const r1 = (n) => Math.round(n * 10) / 10;
+    const t0 = performance.now();
     if (harness === 'kimi') {
         const { content, cwd: indexCwd } = await provider.read(sessionId, { harness: 'kimi' });
+        const t1 = performance.now();
         const { events, cwd, meta } = await parseKimiSessionAsync(content, indexCwd);
+        const t2 = performance.now();
         const agentId = kimiAgentIdForSession(sessionId);
         const added = await ctx.agentBooks.hydrate(agentId, events, { agentType: 'kimi', sessionId, cwd, meta, limit });
-        return { agentId, added, total: events.length };
+        const t3 = performance.now();
+        return { agentId, added, total: events.length, bytes: content.length,
+                 ms: { read: r1(t1 - t0), parse: r1(t2 - t1), hydrate: r1(t3 - t2) } };
     }
     const { content } = await provider.read(sessionId);
+    const t1 = performance.now();
     const { events, cwd, meta } = await parseClaudeSessionAsync(content);
+    const t2 = performance.now();
     const agentId = agentIdForSession(sessionId);
     const added = await ctx.agentBooks.hydrate(agentId, events, { agentType: 'claude', sessionId, cwd, meta, limit });
-    return { agentId, added, total: events.length };
+    const t3 = performance.now();
+    return { agentId, added, total: events.length, bytes: content.length,
+             ms: { read: r1(t1 - t0), parse: r1(t2 - t1), hydrate: r1(t3 - t2) } };
 }
 
 /** Resolve a session id or unique prefix against the archive listing (dash-insensitive).
