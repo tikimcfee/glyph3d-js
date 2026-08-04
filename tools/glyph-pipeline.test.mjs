@@ -22,8 +22,8 @@ import { readFileSync } from 'node:fs';
 import { buildGlyphTrie, trieLookup, BLOCK_INDEX_LENGTH } from '../packages/glyph3d-core/src/compute/GlyphTrie.js';
 import {
   runPipeline, decodeAndResolve, layout, paginate, boundsReduce, allocSlots,
-  sequenceLength, SLOT_STRIDE, S_CODEPOINT, S_X, S_Y, S_Z, S_ROW, S_COL, S_ADVANCE, S_HEIGHT, S_FLAGS,
-  F_LEADER, NEWLINE,
+  sequenceLength, rowsForLine, SLOT_STRIDE, S_CODEPOINT, S_X, S_Y, S_Z, S_ROW, S_COL,
+  S_ADVANCE, S_HEIGHT, S_FLAGS, F_LEADER, NEWLINE,
 } from '../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
 
 const arg = (n, d) => { const i = process.argv.indexOf(n); return i >= 0 && process.argv[i + 1] ? Number(process.argv[i + 1]) : d; };
@@ -153,55 +153,89 @@ for (const { name, bytes } of CORPORA) {
 }
 
 // ── layout: matches a sequential fold, under every dispatch order ──
-function sequentialFold(bytes, slots) {
-  const out = new Float64Array(bytes.length * 2);
-  let x = 0, y = 0;
+/**
+ * The oracle: one forward pass, wrap-aware, in f64. Row and col are exact; x is the running
+ * sum of advances since the current visual row started.
+ */
+function sequentialFold(bytes, slots, wrap = 0) {
+  const row = new Float64Array(bytes.length), col = new Float64Array(bytes.length);
+  const xs = new Float64Array(bytes.length);
+  let rowBase = 0, c = 0, x = 0;
   for (let id = 0; id < bytes.length; id++) {
     const o = id * SLOT_STRIDE;
     if ((slots[o + S_FLAGS] & F_LEADER) === 0) continue;
-    out[id * 2] = x; out[id * 2 + 1] = y;
-    if (slots[o + S_CODEPOINT] === NEWLINE) { y -= slots[o + S_HEIGHT]; x = 0; }
-    else x += slots[o + S_ADVANCE];
+    if (wrap > 0 && c > 0 && c % wrap === 0) x = 0;        // this glyph starts a new visual row
+    row[id] = rowBase + (wrap > 0 ? Math.floor(c / wrap) : 0);
+    col[id] = c;
+    xs[id] = x;
+    if (slots[o + S_CODEPOINT] === NEWLINE) { rowBase += rowsForLine(c, wrap); c = 0; x = 0; }
+    else { x += slots[o + S_ADVANCE]; c += 1; }
   }
-  return out;
+  return { row, col, xs };
 }
 const ids = (n) => Array.from({ length: n }, (_, i) => i);
 const shuffled = (r, n) => { const a = ids(n); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
 
-// f32 tolerance. x is a running sum of advances in f32, and f32 addition is NOT
-// associative — inheriting at step 129 versus step 400 sums the same numbers in different
-// groupings. The result is order-independent as MATHEMATICS, not bit-for-bit. This is the
-// bound on that, and the reason every discrete decision reads row/col instead.
+// f32 tolerance. x is a running sum of advances in f32, and f32 addition is NOT associative
+// — inheriting at step 129 versus step 400 sums the same numbers in different groupings, so
+// the result is order-independent as MATHEMATICS, not bit-for-bit. This is the bound on that,
+// and the reason every discrete decision reads the exact row/col lanes instead.
 const ftol = (v) => 1e-3 + Math.abs(v) * 1e-5;
 const spreads = [];
 
-for (const { name, bytes } of CORPORA) {
-  const base = runPipeline(bytes, trie, { window: 128 });
-  const want = sequentialFold(bytes, base.slots);
+for (const wrapWidth of [0, 24, 200]) {
+  for (const { name, bytes } of CORPORA) {
+    const base = runPipeline(bytes, trie, { window: 128, wrapWidth, lineHeight: CELL_H });
+    const want = sequentialFold(bytes, base.slots, wrapWidth);
 
-  const orders = [ids(bytes.length), ids(bytes.length).reverse()];
-  for (let k = 0; k < N_ORDERS; k++) orders.push(shuffled(rng(4000 + k), bytes.length));
+    const orders = [ids(bytes.length), ids(bytes.length).reverse()];
+    for (let k = 0; k < N_ORDERS; k++) orders.push(shuffled(rng(4000 + k), bytes.length));
 
-  let posWorst = 0, posBad = 0, exactBad = 0;
-  for (const order of orders) {
-    const run = runPipeline(bytes, trie, { window: 128, order });
-    for (let id = 0; id < bytes.length; id++) {
-      const o = id * SLOT_STRIDE;
-      if ((run.slots[o + S_FLAGS] & F_LEADER) === 0) continue;
-      // THE EXACT LANES: integers, and therefore bit-identical under every order. If these
-      // ever wobble the whole design is unsound, because every page/wrap decision reads them.
-      if (run.slots[o + S_ROW] !== base.slots[o + S_ROW]
-       || run.slots[o + S_COL] !== base.slots[o + S_COL]) exactBad++;
-      // Placement: mathematically equal, f32-close.
-      const dx = Math.abs(run.slots[o + S_X] - want[id * 2]);
-      const dy = Math.abs(run.slots[o + S_Y] - want[id * 2 + 1]);
-      posWorst = Math.max(posWorst, dx, dy);
-      if (dx > ftol(want[id * 2]) || dy > ftol(want[id * 2 + 1])) posBad++;
+    let rowBad = 0, colBad = 0, xBad = 0, xWorst = 0, driftBad = 0;
+    for (const order of orders) {
+      const run = runPipeline(bytes, trie, { window: 128, wrapWidth, lineHeight: CELL_H, order });
+      for (let id = 0; id < bytes.length; id++) {
+        const o = id * SLOT_STRIDE;
+        if ((run.slots[o + S_FLAGS] & F_LEADER) === 0) continue;
+        if (run.slots[o + S_ROW] !== want.row[id]) rowBad++;
+        if (run.slots[o + S_COL] !== want.col[id]) colBad++;
+        // exact lanes must also be bit-identical ORDER TO ORDER, not merely correct
+        if (run.slots[o + S_ROW] !== base.slots[o + S_ROW]
+         || run.slots[o + S_COL] !== base.slots[o + S_COL]) driftBad++;
+        const dx = Math.abs(run.slots[o + S_X] - want.xs[id]);
+        xWorst = Math.max(xWorst, dx);
+        if (dx > ftol(want.xs[id])) xBad++;
+      }
     }
+    const tag = `${name} wrap=${wrapWidth}`;
+    ok(rowBad === 0, `${tag}: ${rowBad} visual rows differ from the forward oracle`);
+    ok(colBad === 0, `${tag}: ${colBad} columns differ from the forward oracle`);
+    ok(driftBad === 0, `${tag}: ${driftBad} exact lanes drifted across dispatch orders`);
+    ok(xBad === 0, `${tag}: ${xBad} x positions beyond f32 tolerance (worst ${xWorst.toExponential(2)})`);
+    if (wrapWidth === 200) spreads.push({ name, worst: xWorst });
   }
-  ok(exactBad === 0, `${name}: ${exactBad} row/col lanes differ across dispatch orders — the exact lanes must be exact`);
-  ok(posBad === 0, `${name}: ${posBad} positions beyond f32 tolerance across ${orders.length} orders (worst ${posWorst.toExponential(2)})`);
-  spreads.push({ name, worst: posWorst });
+}
+
+// THE COST BOUND wrap exists for: one line of a million glyphs. Without wrap the float sum
+// reaches back to the line start; with it, never further than one wrap.
+{
+  const bytes = new TextEncoder().encode('{"k":' + '0123456789'.repeat(4000) + '}');
+  const wrapped = runPipeline(bytes, trie, { wrapWidth: 200, lineHeight: CELL_H });
+  const flat = runPipeline(bytes, trie, { wrapWidth: 0, lineHeight: CELL_H });
+  let wrappedRows = 0, flatRows = 0, maxX = 0, wrappedMaxX = 0;
+  for (let id = 0; id < bytes.length; id++) {
+    const o = id * SLOT_STRIDE;
+    if ((wrapped.slots[o + S_FLAGS] & F_LEADER) === 0) continue;
+    wrappedRows = Math.max(wrappedRows, wrapped.slots[o + S_ROW]);
+    flatRows = Math.max(flatRows, flat.slots[o + S_ROW]);
+    maxX = Math.max(maxX, flat.slots[o + S_X]);
+    wrappedMaxX = Math.max(wrappedMaxX, wrapped.slots[o + S_X]);
+  }
+  ok(flatRows === 0, `single-line unwrapped: ${flatRows} rows (expected 1 absurd row)`);
+  ok(wrappedRows > 190, `single-line wrapped: only ${wrappedRows} rows`);
+  ok(wrappedMaxX <= 200 * CELL_W + 1e-3, `single-line wrapped: x reaches ${wrappedMaxX.toFixed(1)}, past one wrap`);
+  ok(maxX > 40000, `single-line unwrapped: x only reaches ${maxX.toFixed(0)} — corpus too small to show the problem`);
+  console.log(`  single-line 40k: unwrapped x reaches ${maxX.toFixed(0)}; wrapped caps at ${wrappedMaxX.toFixed(1)} over ${wrappedRows + 1} rows`);
 }
 
 // ── pagination is pure: same input, any order, identical output ──

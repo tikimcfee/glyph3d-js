@@ -124,66 +124,122 @@ function leaderBefore(slots, id) {
 }
 
 /**
+ * Visual rows a line occupies under `wrap`. `len` counts the line's non-newline glyphs; the
+ * newline itself rides at column `len`, so a line whose length is an exact multiple of the
+ * wrap width ends with a row holding only the (invisible) newline. Taking that literally
+ * rather than special-casing it is what keeps the walk free of edge cases: EVERY glyph,
+ * newline included, is at `floor(col / wrap)` of its line.
+ */
+export function rowsForLine(len, wrap) {
+    if (!(wrap > 0)) return 1;
+    return Math.floor(len / wrap) + 1;
+}
+
+/**
  * KERNEL 2 — thread per byte. THE LAYOUT WALK.
  *
- * Walk backward accumulating advances until finding a predecessor that has already
- * published its absolute position, then inherit it and stop. Find none, and you walk to
- * the start and compute the whole prefix yourself — so a miss costs redundant work, never
- * a stall, and the kernel needs no forward-progress guarantee.
+ * Walk backward until finding a predecessor that has already published, then inherit and
+ * stop. Find none and you walk to the start and compute the prefix yourself — a miss costs
+ * redundant work, never a stall, so this needs no forward-progress guarantee.
  *
- * A newline SEVERS the x chain (everything before it is on another line) but not the y
- * chain. It does NOT zero what has already been accumulated past it — that bug is what
- * `tools/backtrack-layout.test.mjs` exists to keep out; it only reproduces when the inherit
- * point varies, which is precisely what a real GPU schedule does.
+ * WRAP IS THE COST BOUND, NOT A FEATURE. Without it a minified JSON blob or a binary is one
+ * line of millions of glyphs: nothing severs the accumulation, the layout is one absurd row,
+ * and every thread that cannot inherit walks the whole file. `wrapWidth` cuts the line into
+ * visual rows every N glyphs, and because x RESETS at each row start, the float sum can
+ * never reach back further than one wrap. That is why the walk is split in two:
  *
- * `window` is a coherence dial, not a correctness one: the walk refuses to inherit until it
- * is at least that far back, so it reads slots written by much earlier workgroups, which are
- * far likelier to be visible. Correctness holds at window 0 (proven by that test); the right
- * value is whatever the target hardware actually needs.
+ *   Phase A — row and col, as exact INTEGERS. Bounded by the inherit. Integer adds are
+ *             cheap, so walking far here is survivable, and being exact is what lets every
+ *             downstream decision (wrap, page, cursor) avoid float boundaries entirely.
+ *   Phase B — x, the float sum of advances. Bounded UNCONDITIONALLY by `wrapWidth`, because
+ *             the row start is at most `col % wrapWidth` glyphs back. This is the phase that
+ *             would otherwise be unbounded, and wrap is what bounds it.
  *
- * @param {Float32Array} slots @param {number} id @param {number} [window]
+ * A newline severs both. It does NOT zero an accumulation already made past it — that bug is
+ * what tools/backtrack-layout.test.mjs keeps out, and it only reproduces when the inherit
+ * point varies, which is exactly what a real GPU schedule does.
+ *
+ * `window` is a coherence dial, not a correctness one: refusing to inherit until that far
+ * back means reading slots written by much earlier workgroups, which are likelier to be
+ * visible. Correctness holds at window 0; the value is whatever the hardware needs.
+ *
+ * @param {Float32Array} slots @param {number} id
+ * @param {{window?:number, wrapWidth?:number}} [params]
  */
-export function layout(slots, id, window = 128) {
+export function layout(slots, id, params = {}) {
+    const window = params.window ?? 128;
+    const wrap = Math.max(0, Math.trunc(params.wrapWidth || 0));
     const o = id * SLOT_STRIDE;
     if ((slots[o + S_FLAGS] & F_LEADER) === 0) return;
 
-    let x = 0, y = 0, row = 0, col = 0, lineStart = false, steps = 0;
+    // ── Phase A: exact integers. `run` counts glyphs back to the previous newline; the
+    //    first newline crossed closes MY column, each one after that closes a whole line
+    //    above me and contributes its wrapped row count.
+    let run = 0, col = -1, row = 0, steps = 0;
     let prev = leaderBefore(slots, id);
-
     while (prev !== id) {
         const po = prev * SLOT_STRIDE;
-        const pFlags = slots[po + S_FLAGS];
-        if ((pFlags & F_RENDERED) !== 0 && steps > window) {
-            if (slots[po + S_CODEPOINT] === NEWLINE) {
-                y -= slots[po + S_HEIGHT];
-                row += 1;
-                lineStart = true;
+        const ready = (slots[po + S_FLAGS] & F_RENDERED) !== 0 && steps > window;
+
+        if (slots[po + S_CODEPOINT] === NEWLINE) {
+            // Close whatever run was open: the first newline crossed ends MY line and fixes
+            // my column; every later one closes a complete line above me.
+            if (col < 0) col = run; else row += rowsForLine(run, wrap);
+            run = 0;
+            // Inheriting FROM a newline is its own case, and conflating it with the glyph
+            // case is what broke wrap=200: a newline's `col` is its LINE's length, not a
+            // position inside the run we just counted. Its row is the last visual row of the
+            // line it terminates, so content after it starts exactly one row below.
+            if (ready) { row += slots[po + S_ROW] + 1; break; }
+        } else {
+            if (ready) {
+                // A normal glyph. Strip its own wrapped row off to recover its line's base,
+                // then re-add from my side.
+                const pCol = slots[po + S_COL];
+                const pBase = slots[po + S_ROW] - (wrap > 0 ? Math.floor(pCol / wrap) : 0);
+                if (col < 0) col = run + pCol + 1;               // same line as the predecessor
+                else row += rowsForLine(run + pCol + 1, wrap);   // its line, completed by my run
+                row += pBase;
+                break;
             }
-            y += slots[po + S_Y];
-            row += slots[po + S_ROW];
-            if (!lineStart) {
-                x += slots[po + S_X] + slots[po + S_ADVANCE];
-                col += slots[po + S_COL] + 1;
-            }
-            lineStart = lineStart || (pFlags & F_LINE_START) !== 0;
-            break;
+            run += 1;
         }
-        if (slots[po + S_CODEPOINT] === NEWLINE) { y -= slots[po + S_HEIGHT]; row += 1; lineStart = true; }
-        if (!lineStart) { x += slots[po + S_ADVANCE]; col += 1; }
 
         steps++;
         const cur = prev;
         prev = leaderBefore(slots, prev);
-        if (prev === cur) break;                 // reached the first leader in the buffer
+        if (prev === cur) {                          // reached the first leader in the buffer
+            if (col < 0) col = run; else row += rowsForLine(run, wrap);
+            break;
+        }
+    }
+    if (col < 0) col = run;
+
+    // My own wrapped row within my line.
+    const wrapRow = wrap > 0 ? Math.floor(col / wrap) : 0;
+    row += wrapRow;
+
+    // ── Phase B: x. The row started at most `col % wrapWidth` glyphs back — walk exactly
+    //    that far and sum. With wrap off this walks to the line start instead, which is the
+    //    unbounded case wrap exists to remove.
+    const backTo = wrap > 0 ? (col % wrap) : col;
+    let x = 0, k = 0, q = leaderBefore(slots, id);
+    while (k < backTo && q !== id) {
+        const qo = q * SLOT_STRIDE;
+        if (slots[qo + S_CODEPOINT] === NEWLINE) break;
+        x += slots[qo + S_ADVANCE];
+        k++;
+        const cur = q;
+        q = leaderBefore(slots, q);
+        if (q === cur) break;
     }
 
     slots[o + S_X] = x;
-    slots[o + S_Y] = y;
+    slots[o + S_Y] = -row * (params.lineHeight ?? slots[o + S_HEIGHT]);
     slots[o + S_Z] = 0;
     slots[o + S_ROW] = row;
     slots[o + S_COL] = col;
-    // Position first, THEN publish — the ordering the walk's inherit branch depends on.
-    slots[o + S_FLAGS] |= (lineStart ? F_LINE_START : 0);
+    // Position first, THEN publish — the ordering the inherit branch depends on.
     slots[o + S_FLAGS] |= F_RENDERED;
 }
 
@@ -298,9 +354,9 @@ export function runPipeline(bytes, trie, opts = {}) {
     for (let id = 0; id < bytes.length; id++) decodeAndResolve(bytes, slots, trie, id, misses);
 
     const order = opts.order || null;
-    const window = opts.window ?? 128;
-    if (order) for (const id of order) layout(slots, id, window);
-    else for (let id = 0; id < bytes.length; id++) layout(slots, id, window);
+    const lp = { window: opts.window ?? 128, wrapWidth: opts.wrapWidth ?? 0, lineHeight: opts.lineHeight };
+    if (order) for (const id of order) layout(slots, id, lp);
+    else for (let id = 0; id < bytes.length; id++) layout(slots, id, lp);
 
     if (opts.page) for (let id = 0; id < bytes.length; id++) paginate(slots, id, opts.page);
 
