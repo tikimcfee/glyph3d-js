@@ -2,6 +2,7 @@ import { stateController } from '@glyph3d/core/services/state';
 import { setPanelStateColorDefaults } from '@glyph3d/core/collections';
 import { setGlyphLodParam, GLYPH_LOD_DEFAULTS } from '@glyph3d/core/GlyphField.js';
 import { setGlyphWidthCompress, GLYPH_WIDTH_COMPRESS_DEFAULT } from '@glyph3d/core/core/glyphVertex.js';
+import { setTabParam, TAB_DEFAULTS } from '@glyph3d/core/components/Tab3D.js';
 import { setStrataParam, STRATA_DEFAULTS } from '@glyph3d/core/collections/StrataLayout.js';
 import { TERMINAL_CURSOR_DEFAULTS } from '@glyph3d/core/collections/TerminalGrid.js';
 import { JELLYFISH_DEFAULTS, LIBRARY_DEFAULTS, schemeNameOf } from '@glyph3d/core/collections/layouts/index.js';
@@ -96,6 +97,7 @@ export const GROUPS = [
   { name: 'Dock & frame',       subtitle: 'pinned-window tile bar · ghost slots · nameplates · view-pane' },
   { name: 'Carrel',             subtitle: 'world-anchored reading desks' },
   { name: 'Agent Books',        subtitle: 'the agent shelf · shared page face' },
+  { name: 'Book tabs',          subtitle: 'edge tabs · stagger mode · lift off edge' },
   { name: 'Strata',             subtitle: 'nested Z-depth structure view' },
   { name: 'Motion',             subtitle: 'relayout glide' },
   { name: 'Culling & loading',  subtitle: 'occlusion culling · build budget · draw-call readout' },
@@ -103,6 +105,10 @@ export const GROUPS = [
 ];
 
 export const SETTINGS = [
+  // Book tabs — live edge-tab geometry (Book.syncTabs re-reads these every frame).
+  { key: 'tab.steps', label: 'Stagger (0 = left-to-right, ≥2 = slots)', group: 'Book tabs', type: 'number', default: TAB_DEFAULTS.steps, min: 0, max: 12, step: 1, apply: (_ctx, v) => setTabParam({ steps: v }) },
+  { key: 'tab.placement', label: 'Edge', group: 'Book tabs', type: 'enum', options: ['top', 'fore'], default: TAB_DEFAULTS.placement, apply: (_ctx, v) => setTabParam({ placement: v }) },
+  { key: 'tab.protrusion', label: 'Lift off edge', group: 'Book tabs', type: 'number', default: TAB_DEFAULTS.protrusion, min: 0, max: 60, step: 1, apply: (_ctx, v) => setTabParam({ protrusion: v }) },
   {
     key: 'camera.speed', label: 'Move speed', group: 'Camera',
     type: 'number', default: 500, min: 1, max: 1000, step: 1,

@@ -1,6 +1,21 @@
 import FieldLabel from '../collections/FieldLabel.js';
 
 /**
+ * GLOBAL tab-layout dials — live-tunable via the `tab.*` app settings (Book.syncTabs
+ * re-reads them every frame, so they move without a rebuild). lineHeight is bind-time
+ * (a relayout re-binds with a new glyph size); these three are geometry the per-frame
+ * sync can shift on its own.
+ *   steps     0 = fully left-to-right (each sheet one step over by index — the front
+ *              tab's X marks deck progress); ≥2 = that many cut positions cycled.
+ *   placement 'top' (file-folder tabs off the top edge) | 'fore' (off the +X side).
+ *   protrusion how far a tab lifts off its edge, in world units.
+ */
+export const TAB_DEFAULTS = Object.freeze({ steps: 0, placement: 'top', protrusion: 0 });
+export const TAB_CONFIG = { ...TAB_DEFAULTS };
+/** Set one global tab dial live (keys: steps, placement, protrusion). */
+export function setTabParam(vals) { Object.assign(TAB_CONFIG, vals); }
+
+/**
  * Tab3D — a pickable, live-glyph edge label: the fourth cell of the label system.
  *
  *   Label3D   — baked text, inert   (fixed chrome: nameplates, dock tiles)

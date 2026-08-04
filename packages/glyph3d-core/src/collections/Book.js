@@ -51,7 +51,7 @@ import BoundedObject3D from './BoundedObject3D.js';
 import { leafBox } from './layouts/nodeUtils.js';
 import { addPanelSurface, ownSurfaceMaterial } from './layouts/panelSurface.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
-import Tab3D from '../components/Tab3D.js';
+import Tab3D, { TAB_CONFIG } from '../components/Tab3D.js';
 
 /** Page-face fallbacks when fit() is driven directly (a scheme passes its full merged
  *  opts; a bare verb may pass only page dims). */
@@ -413,14 +413,13 @@ export default class Book extends BoundedObject3D {
 
     /** Bind one pickable tab per sheet. `keyOf`/`labelOf`/`hueOf` default to the
      *  basename-first-letter idiom; wrappers override (agent → action kind, etc.).
-     *  `placement` is 'top' (file-folder tabs: a plate extending UP off the top edge
-     *  in the page plane, label facing +Z — front-legible, protrudes past the cover,
-     *  the default) or 'fore' (face +X off the right edge, the side thumb-index). */
+     *  `lineHeight` is bind-time (a relayout re-binds with a new glyph size). The
+     *  geometry dials — stagger, edge, lift — are the GLOBAL live `tab.*` settings
+     *  (Tab3D's TAB_CONFIG), re-read by syncTabs every frame; see TAB_DEFAULTS. */
     bindTabs({ atlas, keyOf = null, labelOf = null, hueOf = null,
-              lineHeight = 7, protrusion = 0, placement = 'top',
-              plateOpacity = 0.85, activeColor = 0x6ee7a0 } = {}) {
+              lineHeight = 7, plateOpacity = 0.85, activeColor = 0x6ee7a0 } = {}) {
         this.dropTabs();
-        this._tabOpts = { atlas, keyOf, labelOf, hueOf, lineHeight, protrusion, placement, plateOpacity, activeColor };
+        this._tabOpts = { atlas, keyOf, labelOf, hueOf, lineHeight, plateOpacity, activeColor };
         this.tabs = this.sheets.map((sheet) => this._makeTab(sheet));
         return this;
     }
@@ -471,31 +470,36 @@ export default class Book extends BoundedObject3D {
     syncTabs() {
         if (!this.tabs) return;
         const o = this._tabOpts;
+        const { steps, placement, protrusion } = TAB_CONFIG;        // live `tab.*` dials (re-read each frame)
         const b = this.layoutBounds();
         if (b.isEmpty()) { for (const t of this.tabs) t.tab.visible = false; return; }
         const cx = (b.min.x + b.max.x) / 2, cy = (b.min.y + b.max.y) / 2;
         const sx = b.max.x - b.min.x, sy = b.max.y - b.min.y;
-        // Distinct keys → band ranks (sorted, stable).
+        // Distinct keys → band ranks (sorted, stable) — used by the 'fore' side banding.
         const keys = Array.from(new Set(this.tabs.map((t) => t.key))).sort();
         const bandOf = new Map(keys.map((k, idx) => [k, idx]));
         const kB = keys.length;
         const tabH = o.lineHeight;
-        // Band pitch: center-packed, CLUSTERED when few (a capped pitch so 3 tabs
-        // don't stretch a wide edge), filling when many.
-        const pitch = Math.min(sx / Math.max(kB, 1), tabH * 6);
+        const N = steps;                                            // 0 = left-to-right; ≥2 = cycled slots
+        const innerW = Math.max(sx - 2 * tabH, tabH);               // step range across the top (margin each end)
+        const bandPitch = Math.min(sx / Math.max(kB, 1), tabH * 6); // 'fore' band pitch (clustered when few)
+        const count = this.sheets.length;
         for (const t of this.tabs) {
             const idx = this.sheets.indexOf(t.sheet);
             if (idx < 0) { t.tab.visible = false; continue; }
             const band = bandOf.get(t.key) ?? 0;
-            const z = t.sheet.node.position.z;                       // live slot — the cascade
+            const z = t.sheet.node.position.z;                      // live slot — the cascade
             let x, y, rotY = 0;
-            if (o.placement === 'fore') {                            // +X side, facing +X
-                x = cx + sx / 2 + o.protrusion + tabH * 0.5;
+            if (placement === 'fore') {                             // +X side, facing +X
+                x = cx + sx / 2 + protrusion + tabH * 0.5;
                 y = kB > 1 ? cy + sy / 2 - tabH - (band / (kB - 1)) * (sy - tabH * 2) : cy;
                 rotY = Math.PI / 2;
-            } else {                                                 // 'top' — file-folder tabs off the top edge
-                x = cx + (band - (kB - 1) / 2) * pitch;              // staggered across the top by band
-                y = cy + sy / 2 + tabH / 2 + o.protrusion;           // attached to the top edge, sticking up
+            } else if (N > 1) {                                     // 'top' + slots: cycle N cut positions
+                x = (cx - innerW / 2) + (idx % N) * (innerW / (N - 1));
+                y = cy + sy / 2 + tabH / 2 + protrusion;
+            } else {                                                // 'top' + left-to-right: one step per sheet
+                x = count > 1 ? (cx - innerW / 2) + (idx / (count - 1)) * innerW : cx;
+                y = cy + sy / 2 + tabH / 2 + protrusion;            // attached to the top edge, sticking up
             }
             t.tab.position.set(x, y, z);
             t.tab.rotation.set(0, rotY, 0);
