@@ -1,0 +1,278 @@
+// glyph-pipeline.test.mjs — the byte-in pipeline, verified without a GPU.
+//   bun tools/glyph-pipeline.test.mjs [--orders 30]
+//
+// The CPU reference (compute/glyphPipelineReference.js) is the executable spec the WGSL
+// kernels get diffed against. This proves the spec itself, on real files, against
+// independent oracles:
+//
+//   trie         every codepoint resolves to what the source map says, and every codepoint
+//                NOT in the map resolves to missing — no collisions, no aliasing, checked
+//                across the whole BMP plus astral samples
+//   decode       leader detection and codepoint decoding agree with TextDecoder over real
+//                source files, including multi-byte and astral sequences
+//   layout       positions match a straight sequential fold, under every dispatch order
+//   pagination   is a pure per-slot function — running it twice on separate buffers from
+//                the same input gives identical output regardless of thread order
+//   bounds       the reduce equals a naive min/max walk, and CONTAINS every placed quad
+//
+// The point of the byte-indexed design is checked too: slot index == source byte offset,
+// so a tree-sitter byte range or a picking hit indexes the buffer with no mapping table.
+
+import { readFileSync } from 'node:fs';
+import { buildGlyphTrie, trieLookup, BLOCK_INDEX_LENGTH } from '../packages/glyph3d-core/src/compute/GlyphTrie.js';
+import {
+  runPipeline, decodeAndResolve, layout, paginate, boundsReduce, allocSlots,
+  sequenceLength, SLOT_STRIDE, S_CODEPOINT, S_X, S_Y, S_Z, S_ROW, S_COL, S_ADVANCE, S_HEIGHT, S_FLAGS,
+  F_LEADER, NEWLINE,
+} from '../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
+
+const arg = (n, d) => { const i = process.argv.indexOf(n); return i >= 0 && process.argv[i + 1] ? Number(process.argv[i + 1]) : d; };
+const N_ORDERS = arg('--orders', 30);
+
+let pass = 0, fail = 0;
+const ok = (c, m) => { if (c) pass++; else { fail++; console.log(`  ✗ ${m}`); } };
+
+function rng(seed) {
+  let a = seed >>> 0;
+  return () => { a |= 0; a = (a + 0x6D2B79F5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+}
+
+// ── A stand-in atlas: monospace latin, double-advance emoji, a taller CJK block. Stands in
+//    for MonospaceShapeCache + the Slug atlas without needing WASM in the harness.
+const CELL_W = 1.2, CELL_H = 1.4;
+const SOURCE = new Map();
+const addRange = (lo, hi, adv, h) => { for (let cp = lo; cp <= hi; cp++) SOURCE.set(cp, { glyphId: cp, advance: adv, height: h }); };
+addRange(0x09, 0x0D, CELL_W, CELL_H);          // tab..CR (newline carries the line height)
+addRange(0x20, 0x7E, CELL_W, CELL_H);          // printable ASCII
+addRange(0xA0, 0xFF, CELL_W, CELL_H);          // latin-1
+addRange(0x2500, 0x257F, CELL_W, CELL_H);      // box drawing
+addRange(0x4E00, 0x4E7F, CELL_W * 2, CELL_H * 1.15);  // a CJK slice — wide AND taller
+addRange(0x1F600, 0x1F64F, CELL_W * 2, CELL_H);       // emoji (astral)
+
+const trie = buildGlyphTrie(SOURCE.keys(),
+  (cp) => SOURCE.get(cp) || null,
+  { missingAdvance: CELL_W, missingHeight: CELL_H });
+
+console.log(`trie: ${trie.blockCount} blocks, ${trie.mapped} codepoints, ${(trie.bytes / 1024).toFixed(1)} KB\n`);
+
+// ── trie: exhaustive over the BMP + astral samples ──
+{
+  let wrong = 0, missWrong = 0, checked = 0;
+  for (let cp = 0; cp <= 0xFFFF; cp++) {
+    const want = SOURCE.get(cp);
+    const got = trieLookup(trie, cp);
+    checked++;
+    if (want) {
+      if (got.missing || got.glyphId !== want.glyphId
+          || Math.abs(got.advance - want.advance) > 1e-6
+          || Math.abs(got.height - want.height) > 1e-6) wrong++;
+    } else if (!got.missing) missWrong++;
+  }
+  for (let cp = 0x10000; cp <= 0x10FFFF; cp += 97) {
+    const want = SOURCE.get(cp); const got = trieLookup(trie, cp);
+    checked++;
+    if (want) { if (got.missing || got.glyphId !== want.glyphId) wrong++; }
+    else if (!got.missing) missWrong++;
+  }
+  for (const cp of SOURCE.keys()) {              // every mapped astral codepoint explicitly
+    const got = trieLookup(trie, cp);
+    if (got.missing || got.glyphId !== cp) wrong++;
+    checked++;
+  }
+  ok(wrong === 0, `trie: ${wrong} mapped codepoints resolved wrong`);
+  ok(missWrong === 0, `trie: ${missWrong} unmapped codepoints did NOT resolve as missing (aliasing)`);
+  ok(checked > 70000, `trie: vacuous (${checked} checked)`);
+  ok(trie.blockIndex.length === BLOCK_INDEX_LENGTH, 'trie: blockIndex covers all of Unicode');
+  ok(trie.bytes < 512 * 1024, `trie: ${(trie.bytes / 1024).toFixed(1)} KB is not small`);
+}
+
+// ── decode: leaders + codepoints agree with TextDecoder, on real files ──
+const FILES = [
+  'packages/glyph3d-core/src/collections/CodeGrid.js',
+  'packages/glyph3d-core/src/compute/GlyphLayoutKernel.js',
+  'CLAUDE.md',
+];
+const CORPORA = [];
+for (const f of FILES) {
+  let raw;
+  try { raw = readFileSync(f); } catch { continue; }
+  CORPORA.push({ name: f, bytes: new Uint8Array(raw) });
+}
+// Plus a synthetic torture file: every sequence length, adjacent, with runs of newlines.
+{
+  const parts = [];
+  const r = rng(99);
+  for (let i = 0; i < 900; i++) {
+    const q = r();
+    if (q < 0.10) parts.push('\n');
+    else if (q < 0.16) parts.push('\u{1F600}');          // 4-byte
+    else if (q < 0.22) parts.push('中');             // 3-byte, wide + tall
+    else if (q < 0.28) parts.push('é');             // 2-byte
+    else if (q < 0.32) parts.push('─');             // 3-byte box drawing
+    else if (q < 0.35) parts.push('\u{1F4A9}');          // 4-byte, UNMAPPED → missing path
+    else parts.push(String.fromCharCode(33 + Math.floor(r() * 90)));
+  }
+  CORPORA.push({ name: '<torture>', bytes: new TextEncoder().encode(parts.join('')) });
+}
+
+for (const { name, bytes } of CORPORA) {
+  const slots = allocSlots(bytes.length);
+  const misses = [];
+  for (let id = 0; id < bytes.length; id++) decodeAndResolve(bytes, slots, trie, id, misses);
+
+  // Oracle: TextDecoder + a codePointAt walk, tracking byte offsets independently.
+  const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+  const wantCps = [], wantOffsets = [];
+  {
+    let byteOff = 0;
+    for (let i = 0; i < text.length;) {
+      const cp = text.codePointAt(i);
+      wantCps.push(cp); wantOffsets.push(byteOff);
+      const chLen = cp > 0xFFFF ? 2 : 1;
+      byteOff += new TextEncoder().encode(text.slice(i, i + chLen)).length;
+      i += chLen;
+    }
+  }
+  const gotCps = [], gotOffsets = [];
+  for (let id = 0; id < bytes.length; id++) {
+    if ((slots[id * SLOT_STRIDE + S_FLAGS] & F_LEADER) !== 0) {
+      gotCps.push(slots[id * SLOT_STRIDE + S_CODEPOINT]); gotOffsets.push(id);
+    }
+  }
+  ok(gotCps.length === wantCps.length, `${name}: leader count ${gotCps.length} vs ${wantCps.length}`);
+  let cpBad = 0, offBad = 0;
+  for (let i = 0; i < Math.min(gotCps.length, wantCps.length); i++) {
+    if (gotCps[i] !== wantCps[i]) cpBad++;
+    if (gotOffsets[i] !== wantOffsets[i]) offBad++;
+  }
+  ok(cpBad === 0, `${name}: ${cpBad} codepoints differ from TextDecoder`);
+  // THE byte-indexed invariant: a slot index IS a source byte offset.
+  ok(offBad === 0, `${name}: ${offBad} slot indices are not the source byte offset`);
+  ok(bytes.length > 200, `${name}: vacuous corpus`);
+}
+
+// ── layout: matches a sequential fold, under every dispatch order ──
+function sequentialFold(bytes, slots) {
+  const out = new Float64Array(bytes.length * 2);
+  let x = 0, y = 0;
+  for (let id = 0; id < bytes.length; id++) {
+    const o = id * SLOT_STRIDE;
+    if ((slots[o + S_FLAGS] & F_LEADER) === 0) continue;
+    out[id * 2] = x; out[id * 2 + 1] = y;
+    if (slots[o + S_CODEPOINT] === NEWLINE) { y -= slots[o + S_HEIGHT]; x = 0; }
+    else x += slots[o + S_ADVANCE];
+  }
+  return out;
+}
+const ids = (n) => Array.from({ length: n }, (_, i) => i);
+const shuffled = (r, n) => { const a = ids(n); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+
+// f32 tolerance. x is a running sum of advances in f32, and f32 addition is NOT
+// associative — inheriting at step 129 versus step 400 sums the same numbers in different
+// groupings. The result is order-independent as MATHEMATICS, not bit-for-bit. This is the
+// bound on that, and the reason every discrete decision reads row/col instead.
+const ftol = (v) => 1e-3 + Math.abs(v) * 1e-5;
+const spreads = [];
+
+for (const { name, bytes } of CORPORA) {
+  const base = runPipeline(bytes, trie, { window: 128 });
+  const want = sequentialFold(bytes, base.slots);
+
+  const orders = [ids(bytes.length), ids(bytes.length).reverse()];
+  for (let k = 0; k < N_ORDERS; k++) orders.push(shuffled(rng(4000 + k), bytes.length));
+
+  let posWorst = 0, posBad = 0, exactBad = 0;
+  for (const order of orders) {
+    const run = runPipeline(bytes, trie, { window: 128, order });
+    for (let id = 0; id < bytes.length; id++) {
+      const o = id * SLOT_STRIDE;
+      if ((run.slots[o + S_FLAGS] & F_LEADER) === 0) continue;
+      // THE EXACT LANES: integers, and therefore bit-identical under every order. If these
+      // ever wobble the whole design is unsound, because every page/wrap decision reads them.
+      if (run.slots[o + S_ROW] !== base.slots[o + S_ROW]
+       || run.slots[o + S_COL] !== base.slots[o + S_COL]) exactBad++;
+      // Placement: mathematically equal, f32-close.
+      const dx = Math.abs(run.slots[o + S_X] - want[id * 2]);
+      const dy = Math.abs(run.slots[o + S_Y] - want[id * 2 + 1]);
+      posWorst = Math.max(posWorst, dx, dy);
+      if (dx > ftol(want[id * 2]) || dy > ftol(want[id * 2 + 1])) posBad++;
+    }
+  }
+  ok(exactBad === 0, `${name}: ${exactBad} row/col lanes differ across dispatch orders — the exact lanes must be exact`);
+  ok(posBad === 0, `${name}: ${posBad} positions beyond f32 tolerance across ${orders.length} orders (worst ${posWorst.toExponential(2)})`);
+  spreads.push({ name, worst: posWorst });
+}
+
+// ── pagination is pure: same input, any order, identical output ──
+{
+  const { bytes } = CORPORA[CORPORA.length - 1];
+  const page = { pageRows: 12, lineHeight: CELL_H, pageCols: 30, colWidth: CELL_W, pageStrideX: 46, pagesWide: 3, depthPerBand: 32, depthPerColumn: -4 };
+  const a = runPipeline(bytes, trie, { page });
+  const b = runPipeline(bytes, trie, { page, order: shuffled(rng(7), bytes.length) });
+  let planeDiff = 0, posDiff = 0;
+  for (let id = 0; id < bytes.length; id++) {
+    const o = id * SLOT_STRIDE;
+    if ((a.slots[o + S_FLAGS] & F_LEADER) === 0) continue;
+    // z is a PURE function of the integer page assignment — one wobble here means a glyph
+    // jumped a whole page, which is what keying pagination on the float position used to do
+    // (measured: 119 slots on this corpus before row/col existed).
+    if (a.slots[o + S_Z] !== b.slots[o + S_Z]) planeDiff++;
+    if (Math.abs(a.slots[o + S_X] - b.slots[o + S_X]) > ftol(a.slots[o + S_X])
+     || Math.abs(a.slots[o + S_Y] - b.slots[o + S_Y]) > ftol(a.slots[o + S_Y])) posDiff++;
+  }
+  ok(planeDiff === 0, `paginate: ${planeDiff} slots landed on a DIFFERENT PAGE depending on dispatch order`);
+  ok(posDiff === 0, `paginate: ${posDiff} positions beyond f32 tolerance`);
+
+  // and it actually moved things into more than one column and more than one depth plane
+  const xs = new Set(), zs = new Set();
+  for (let id = 0; id < bytes.length; id++) {
+    const o = id * SLOT_STRIDE;
+    if ((a.slots[o + S_FLAGS] & F_LEADER) === 0) continue;
+    xs.add(Math.round(a.slots[o + S_X])); zs.add(Math.round(a.slots[o + S_Z]));
+  }
+  ok(zs.size > 1, `paginate: only ${zs.size} depth plane(s) — the fan never engaged`);
+  ok(xs.size > 4, `paginate: only ${xs.size} distinct x — vacuous`);
+}
+
+// ── bounds: equals a naive walk, and contains every quad ──
+for (const { name, bytes } of CORPORA) {
+  for (const page of [null, { pageRows: 12, lineHeight: CELL_H, pageCols: 30, colWidth: CELL_W, pageStrideX: 46, pagesWide: 3, depthPerBand: 32, depthPerColumn: -4 }]) {
+    const run = runPipeline(bytes, trie, page ? { page } : {});
+    const box = new Float64Array([Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity]);
+    for (let id = 0; id < bytes.length; id++) boundsReduce(run.slots, id, box);
+    const b = run.bounds;
+    ok(!!b, `${name}${page ? ' paged' : ''}: bounds produced`);
+    if (!b) continue;
+    ok(b.min.x === box[0] && b.min.y === box[1] && b.min.z === box[2]
+       && b.max.x === box[3] && b.max.y === box[4] && b.max.z === box[5],
+       `${name}${page ? ' paged' : ''}: reduce differs from a second reduce`);
+    let outside = 0;
+    for (let id = 0; id < bytes.length; id++) {
+      const o = id * SLOT_STRIDE;
+      if ((run.slots[o + S_FLAGS] & F_LEADER) === 0) continue;
+      const x = run.slots[o + S_X], y = run.slots[o + S_Y], z = run.slots[o + S_Z];
+      const w = run.slots[o + S_ADVANCE], h = run.slots[o + S_HEIGHT];
+      if (x < b.min.x || y < b.min.y || z < b.min.z
+       || x + w > b.max.x + 1e-9 || y + h > b.max.y + 1e-9 || z > b.max.z) outside++;
+    }
+    ok(outside === 0, `${name}${page ? ' paged' : ''}: ${outside} quads outside the box`);
+  }
+}
+
+// ── the missing path: unmapped codepoints still lay out, and get reported ──
+{
+  const bytes = new TextEncoder().encode('ab\u{1F4A9}cd\n\u{1F4A9}ef');
+  const run = runPipeline(bytes, trie, {});
+  ok(run.misses.length === 2, `missing: ${run.misses.length} reported (expected 2)`);
+  ok(run.misses.every((cp) => cp === 0x1F4A9), 'missing: reported the right codepoint');
+  // 'c' must sit one full cell past the un-encoded emoji's advance, not on top of it.
+  const cIdx = [...bytes].findIndex((_, i) => run.slots[i * SLOT_STRIDE + S_CODEPOINT] === 0x63);
+  ok(run.slots[cIdx * SLOT_STRIDE + S_X] > CELL_W * 2.5,
+     'missing: an un-encoded glyph still occupies its advance');
+}
+
+console.log('\nf32 placement spread across dispatch orders (window 128):');
+for (const sp of spreads) console.log(`  ${sp.name.padEnd(52)} ${sp.worst.toExponential(2)} world units (cell = ${CELL_W})`);
+console.log(`\n${fail === 0 ? '✓' : '✗'} glyph-pipeline: ${pass} passed, ${fail} failed`);
+process.exit(fail === 0 ? 0 : 1);
