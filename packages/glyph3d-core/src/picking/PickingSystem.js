@@ -90,7 +90,7 @@ const DEFAULT_CHANNELS = {
 const PICKING_VERTEX_CORE = `
 precision highp float;
 
-in vec3 instancePosition;
+in vec4 instancePosition;   // stride-4 (.w padding) — matches the WebGPU/TSL attribute
 in vec2 instanceSize;
 in float instanceGroupId;
 
@@ -115,7 +115,7 @@ void main() {
     float visible = step(0.01, gColor.a);
     if (visible < 0.5) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
 
-    vec3 worldPos = scaled + alignOffset + instancePosition * gScale.xyz + gPos.xyz;
+    vec3 worldPos = scaled + alignOffset + instancePosition.xyz * gScale.xyz + gPos.xyz;
     gl_Position = projectionMatrix * modelViewMatrix * vec4(worldPos, 1.0);
     vPickingId = uBasePickingId + gl_InstanceID;
 }
@@ -159,7 +159,7 @@ void main() {
     float visible = step(0.01, gColor.a);
     if (visible < 0.5) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
 
-    vec3 worldPos = scaled + alignOffset + instancePosition * gScale.xyz + gPos.xyz;
+    vec3 worldPos = scaled + alignOffset + instancePosition.xyz * gScale.xyz + gPos.xyz;
     gl_Position = projectionMatrix * modelViewMatrix * vec4(worldPos, 1.0);
     vPickingId = uBasePickingId + gl_InstanceID;
 
@@ -442,7 +442,12 @@ export class PickingSystem {
     _getTSLGlyphMaterial() {
         if (this._sharedGlyphPickMaterial) return this._sharedGlyphPickMaterial;
 
-        const iPos   = _attribute('instancePosition', 'vec3');
+        // instancePosition is stride-4 (itemSize=4) on every field now — read it as vec4
+        // and use .xyz, matching GlyphField's vertex node. Declaring vec3 against a
+        // stride-4 buffer bakes a wrong vertex-fetch stride into the pick pipeline: the
+        // main pass renders glyphs correctly but the ID pass reads positions off the wrong
+        // lanes, so picks land on nothing. (.w is padding.)
+        const iPos   = _attribute('instancePosition', 'vec4');
         const iSize  = _attribute('instanceSize',     'vec2');
         const iGroup = _attribute('instanceGroupId',  'float');
 
@@ -475,7 +480,7 @@ export class PickingSystem {
             const gColor = _textureLoad(groupTex, _ivec2(_int(2), grow)); // col 2: color multiplier
             const gScale = _textureLoad(groupTex, _ivec2(_int(3), grow)); // col 3: scale + colorBlend (w)
 
-            const worldPos = scaled.add(alignOffset).add(iPos.mul(gScale.xyz)).add(gPos.xyz);
+            const worldPos = scaled.add(alignOffset).add(iPos.xyz.mul(gScale.xyz)).add(gPos.xyz);
             const normalClip = _cameraProjectionMatrix.mul(_modelViewMatrix.mul(_vec4(worldPos, 1)));
 
             // Invisible group → send off-screen (can't Discard in a vertex).
