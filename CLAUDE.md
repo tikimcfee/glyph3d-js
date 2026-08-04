@@ -40,7 +40,7 @@ packages/
   glyph3d-core/src/        @glyph3d/core
     GlyphField.js          WebGPU / TSL renderer
     GlyphAtlas.js          font atlas (shaping → glyph metrics)
-    collections/           CodeGrid, TerminalGrid, layout managers, GridVirtualizer
+    collections/           CodeGrid, TerminalGrid, layout managers
     core/                  LayoutDescription (layout seam), constants, renderOrder, types
     services/              interaction (AttentionManager, keyEncoding),
                            camera (ViewerCameraController), data, orchestration
@@ -52,7 +52,7 @@ app/
   client/                CommandProvider, CanvasInteraction, HudPanel, CommandBar,
                          SessionStore, WorkspaceModel
   commands/handlers/     command verbs (file.*, grid.*, edit.*, terminal.*, camera.*, …)
-  ButtonBar IdeDock FileTree TerminalsPanel AgentsPanel   dockview panels
+  ButtonBar IdeDock FileTree TerminalsPanel AgentsPanel CarrelsPanel   dockview panels
 cli/
   main.go relay.go fs.go embed.go attach_unix.go   serve + relay + fs-RPC + terminals
 Makefile  tools/dev.sh
@@ -86,7 +86,16 @@ Every action is a verb. `CommandRouter.execute(input)` dispatches to a handler i
 truth). The relay forwards CLI commands to the browser display over WebSocket, and
 keeps a structured in-memory SQLite store of every browser log record — `log.query` /
 `log.search` / `log.errors` / `log.stats` / `log.dump` answer relay-side (page-less),
-with live follow via `bun tools/buslog.mjs`.
+with live follow via `bun tools/buslog.mjs`. Page-side, `emitLogRecord` runs a storm
+brake: an identical error/warn signature past 5 is dropped + counted, with a
+`log-brake` summary warn every 500 (locked by `tools/log-storm-brake.test.mjs`). The
+occlusion culler carries the matching fault guard: a failed GPU query resolve logs
+once and disables culling instead of storming unhandled rejections per frame
+(`tools/occlusion-resolve-guard.test.mjs`). Device loss itself (VRAM exhaustion —
+a bulk load + resize churn can OOM the device) is a queued-reload recovery:
+`onDeviceLost` stops the loop, the layout engine suspends dispatches
+(`tools/device-loss-recovery.test.mjs`), and the page reloads once a minute at most
+(the loop guard lives in sessionStorage) so the substrate can re-seat the session.
 
 The LOAD FLOW self-reports: every load runs a staged trace (`[load]` console lines →
 the relay log store; `load.stats` answers with stage aggregates + the worst
@@ -120,8 +129,10 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   <grid>` asserts the live scene.
 - **GPU picking** (`picking/`) is a multi-channel ID render pass (separate glyph and
   grid channels) — the single source of truth for hover/click resolution.
-- **Frustum culling** (`GridVirtualizer`) adds/removes grids from the scene by camera
-  frustum, so only visible grids draw.
+- **Frustum culling** is three's built-in per-object cull fed the real instance extent —
+  `GlyphField._updateGeometryBounds` writes `geometry.boundingBox/Sphere` after every
+  position/count mutation, so `frustumCulled = true` is safe. (The old `GridVirtualizer`
+  class is deleted; culling covers draws, not GPU memory.)
 - **Terminals** are tmux-backed (socket `tmux -L glyphd`, sessions `glyph-<id>`) via
   forked adapter subprocesses; they render as `TerminalGrid`s and re-adopt across
   reloads. See the `saved-state` and `terminal-control-subsystem` memories.

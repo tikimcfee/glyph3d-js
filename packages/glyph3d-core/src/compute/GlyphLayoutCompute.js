@@ -22,9 +22,10 @@
 import GlyphLayoutKernel from './GlyphLayoutKernel.js';
 
 let _renderer = null;
+let _deviceLostNoted = false;
 
 /** Register the app's initialized WebGPURenderer (engine boot). Null unregisters. */
-export function setComputeRenderer(renderer) { _renderer = renderer || null; }
+export function setComputeRenderer(renderer) { _renderer = renderer || null; _deviceLostNoted = false; }
 
 /** On when a renderer is registered — the engine is the only layout path for grids. */
 export function isGpuLayoutEnabled() { return _renderer !== null; }
@@ -54,6 +55,17 @@ export function isGpuLayoutEnabled() { return _renderer !== null; }
 export function syncGpuLayout(field, buffers, items, shared, rendererIds) {
     const NONE = { dispatched: 0, bounds: null };
     if (!isGpuLayoutEnabled() || field?.gpuLayout !== true) return NONE;
+    // A lost device (VRAM exhaustion, driver reset) can never dispatch again — every
+    // flush would re-throw createBuffer failures per field forever (the 2026-08-04
+    // storm). Go quiet in one log; the app's device-lost handler queues a reload,
+    // which is the only real recovery (three can't re-request a device mid-page).
+    if (_renderer._isDeviceLost === true) {
+        if (!_deviceLostNoted) {
+            _deviceLostNoted = true;
+            console.warn('GlyphLayoutCompute: GPU device lost — layout dispatches suspended until reload');
+        }
+        return NONE;
+    }
     const attr = field?.instanceMesh?.geometry?.attributes?.instancePosition;
     if (!attr || attr.isStorageInstancedBufferAttribute !== true) return NONE;
     const { metrics, layout } = shared || {};

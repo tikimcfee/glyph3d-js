@@ -102,6 +102,7 @@ export default class LiveSlugAtlas {
         const res = this._encoder.appendGlyphs(glyphIds);
         if (!res.grew) return { grew: false, added: 0, total: this._encoder.size };
 
+        const prev = this._slugData;   // orphaned by the swap — disposed after it lands
         this._slugData = res;            // { curveTexture, glyphMapTexture, stats }
         this._version++;
         if (this._atlas) this._atlas._slugData = this._slugData;
@@ -115,6 +116,16 @@ export default class LiveSlugAtlas {
                 if (typeof field.setEmojiTexture === 'function') field.setEmojiTexture();
                 updated++;
             }
+        }
+
+        // Every live field now reads the NEW pair (registration is construction-time
+        // and unregister is dispose-time, so nothing live still points at the old
+        // one). The old pair's GPUTextures only die on texture.dispose() — without
+        // this, each growth leaks a pair until page unload (VRAM pressure on the
+        // bulk-load path: 7 growths in 2s preceded the 2026-08-04 device OOM).
+        if (prev && prev.curveTexture && prev.curveTexture !== res.curveTexture) {
+            prev.curveTexture.dispose();
+            prev.glyphMapTexture?.dispose();
         }
 
         // Name the new glyphs so it's visible WHAT grew (→ decide if it belongs in the boot core).

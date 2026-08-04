@@ -58,6 +58,32 @@ export class OcclusionCuller {
         this.holdFrames = holdFrames;
         this.enabled = false;
 
+        // Fault guard. three's finishRender calls backend.resolveOccludedAsync()
+        // UN-AWAITED and its mapAsync has no catch — once the GPU device/instance
+        // dies (device.destroy, driver reset), that becomes an unhandled rejection
+        // EVERY FRAME, forever (the 2026-08-04 storm: ~8k error records in minutes,
+        // page dead at the end). Wrap the backend method once: a rejection logs once
+        // and drops the culler to disabled, which stops arming query sets — the
+        // storm's fuel. Instance-scoped own property, removed again by dispose().
+        this._resolveFaulted = false;
+        this._unpatchResolve = null;
+        const backend = renderer?.backend;
+        if (backend && typeof backend.resolveOccludedAsync === 'function' && !backend.__occlGuarded) {
+            const original = backend.resolveOccludedAsync.bind(backend);
+            backend.resolveOccludedAsync = (...args) => {
+                let p;
+                try { p = original(...args); } catch (err) { this._onResolveFault(err); return; }
+                // .catch swallows the rejection AND returns a resolved promise —
+                // nothing upstream is awaiting this, so nothing else changes.
+                if (p && typeof p.catch === 'function') p.catch((err) => this._onResolveFault(err));
+            };
+            backend.__occlGuarded = true;
+            this._unpatchResolve = () => {
+                delete backend.resolveOccludedAsync;   // restores the prototype method
+                delete backend.__occlGuarded;
+            };
+        }
+
         /** Optional gate: return false to exempt an id (e.g. docked tiles — camera
          *  chrome is never occluded and must never flicker). @type {(id:string)=>boolean|null} */
         this.shouldTest = null;
@@ -122,6 +148,14 @@ export class OcclusionCuller {
         if (!this.enabled) {
             for (const e of this.entries.values()) { this._show(e); e.streak = 0; e.sampled = false; }
         }
+    }
+
+    /** @private first resolve fault: log once, then stop arming queries. */
+    _onResolveFault(err) {
+        if (this._resolveFaulted) return;
+        this._resolveFaulted = true;
+        console.warn('[OcclusionCuller] query resolve failed — disabling culling (GPU device lost?):', err?.message || err);
+        this.setEnabled(false);
     }
 
     /** @private un-cull if WE culled it. */
@@ -189,6 +223,8 @@ export class OcclusionCuller {
         this.setEnabled(false);
         for (const id of [...this.entries.keys()]) this.untrack(id);
         this.group.parent?.remove(this.group);
+        this._unpatchResolve?.();
+        this._unpatchResolve = null;
     }
 }
 

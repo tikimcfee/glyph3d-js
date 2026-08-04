@@ -29,6 +29,21 @@ const RING_MAX = 500;
 const MSG_MAX = 4096;
 const ATTRS_MAX = 4096;
 
+// Storm brake. A single fault can emit an identical error/warn record per FRAME,
+// unbounded (the 2026-08-04 WebGPU storm: a dead device turned three's occlusion
+// readback into ~8k unhandled rejections in minutes, burying the ring, the wire,
+// and the relay store until the page died). Brake per signature (level+scope+msg —
+// storms interleave scopes, so a consecutive-run brake never trips): the first
+// BRAKE_PASS of each signature go through, the rest are dropped and counted, and
+// every BRAKE_HEARTBEAT drops a single summary warn carries the count. No timer —
+// the heartbeat rides the flood itself.
+const BRAKE_LEVELS = new Set(['error', 'warn']);
+const BRAKE_PASS = 5;
+const BRAKE_HEARTBEAT = 500;
+const BRAKE_SIG_MAX = 256;
+const _brakeCounts = new Map();   // sig → records seen (passed + suppressed)
+let _brakeSuppressed = 0;         // suppressed since the last heartbeat
+
 /** Short page-load id, minted once per page so the relay can group records by load. */
 const PAGE_ID = Math.random().toString(36).slice(2, 10);
 
@@ -102,6 +117,26 @@ export function emitLogRecord(level, scope, msg, attrs) {
         record.msg = msg.slice(0, MSG_MAX);
         record.trunc = true;
     }
+
+    // Storm brake (see the constants above): pass the first few of each error/warn
+    // signature, drop the rest, heartbeat the count.
+    if (BRAKE_LEVELS.has(level)) {
+        const sig = `${level}\n${record.scope ?? ''}\n${record.msg}`;
+        if (!_brakeCounts.has(sig) && _brakeCounts.size >= BRAKE_SIG_MAX) _brakeCounts.clear();
+        const seen = (_brakeCounts.get(sig) ?? 0) + 1;
+        _brakeCounts.set(sig, seen);
+        if (seen > BRAKE_PASS) {
+            _brakeSuppressed++;
+            if (_brakeSuppressed >= BRAKE_HEARTBEAT) {
+                const n = _brakeSuppressed;
+                _brakeSuppressed = 0;
+                emitLogRecord('warn', 'log-brake',
+                    `suppressed ${n} repeated error/warn records (latest: ${record.msg.slice(0, 160)})`, null);
+            }
+            return;
+        }
+    }
+
     ring.push(record);
     if (ring.length > RING_MAX) ring.shift();
     _pushed++;

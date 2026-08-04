@@ -186,6 +186,28 @@ function App() {
               // touch scene state to keep its ID buffer clean (a set background
               // would bleed into the pick target as a stray low id).
               onCreated={({ gl }) => { gl.setClearColor(new THREE.Color(0x050608), 1); }}
+              // Device loss (VRAM exhaustion, driver reset): three's default handler
+              // freezes the render loop and leaves a live-but-frozen page whose GPU
+              // readbacks storm (the 2026-08-04 mapAsync flood) and whose layout
+              // engine fails every flush — the "munged layout" state. three can't
+              // re-request a device mid-page, and the session substrate restores in
+              // ~2s, so queue a reload: the only real recovery. Loop-guarded — the
+              // load that OOM'd the device replays on restore, so a second loss
+              // within a minute must NOT reload again (a reload loop never settles).
+              onRenderer={(renderer) => {
+                renderer.onDeviceLost = (info) => {
+                  renderer._isDeviceLost = true;  // the default handler's one useful act
+                  console.error(`[glyph3d] WebGPU device lost — ${info?.message || 'unknown reason'}`);
+                  const last = Number(sessionStorage.getItem('g3d.deviceLostReload') || 0);
+                  if (Date.now() - last < 60_000) {
+                    console.error('[glyph3d] device lost again within a minute of a reload — staying put (loop guard); reload manually with a lighter scene');
+                    return;
+                  }
+                  sessionStorage.setItem('g3d.deviceLostReload', String(Date.now()));
+                  console.error('[glyph3d] reloading in 300ms to re-create the GPU device (session restores from the substrate)…');
+                  setTimeout(() => window.location.reload(), 300);
+                };
+              }}
               style={{ position: 'absolute', inset: 0 }}
             >
               <ViewerCamera ref={cameraRef} />
