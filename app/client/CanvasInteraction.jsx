@@ -178,6 +178,11 @@ export function CanvasPicker() {
     // would freeze it as undefined and every gesture would fall to the ROOT tier.
     const gestureEnv = {
       exec: (cmd) => router.execute(cmd),
+      // resolveGesture's dock.spotlight pre-empt reads the unified holder protocol
+      // (holderOf) + cameraDock off ctx. Lazy like its siblings — this child effect
+      // mounts before the parent effect creates interactionContext/cameraDock, so a
+      // captured reference would freeze as undefined and every click would mis-route.
+      get ctx() { return client.ctx; },
       get attention() { return client.ctx.attentionManager; },
       get context() { return client.ctx.interactionContext; },
       get cameraDock() { return client.ctx.cameraDock; },
