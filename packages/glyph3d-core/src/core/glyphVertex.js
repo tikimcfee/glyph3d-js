@@ -23,11 +23,13 @@
 
 import {
     attribute, uniform, textureLoad,
-    positionLocal,
-    vec3, vec4, float, int, ivec2,
+    positionLocal, instanceIndex, storage,
+    vec2, vec3, vec4, float, int, ivec2,
     modelViewMatrix, cameraProjectionMatrix,
     If,
 } from 'three/tsl';
+
+import { SLOT_STRIDE, S_GLYPH_ID, S_ADVANCE, S_HEIGHT, S_X } from '../compute/glyphPipelineReference.js';
 
 /**
  * Render modes. Used in two places with the SAME numbers: the per-instance
@@ -84,13 +86,28 @@ export function getGlyphWidthCompress() { return glyphWidthCompress.value; }
  *   clipPos is the vertex return (culled); the rest are byproducts the render
  *   material uses for its varyings (picking ignores them).
  */
-export function buildGlyphVertexTransform({ glyphMapTex, glyphMapWidth, renderMode, groupTex, clipEnabled, clipTop, clipBottom }) {
+export function buildGlyphVertexTransform({ glyphMapTex, glyphMapWidth, renderMode, groupTex, clipEnabled, clipTop, clipBottom, byteSlots = null, byteSlotBase = null }) {
     // instancePosition is stride-4 (itemSize=4) on every field — read it as vec4
     // and use .xyz (.w is padding). A stride-3 declaration bakes a wrong
     // vertex-fetch stride into the pipeline.
-    const iPos     = attribute('instancePosition', 'vec4');
-    const iSize    = attribute('instanceSize',     'vec2');
-    const iGlyphId = attribute('instanceGlyphId',  'float');
+    //
+    // BYTE-PIPELINE FIELDS (byteSlots set): positions/sizes/glyphIds are read from the
+    // pipeline's stride-11 slot buffer instead of per-instance attributes — one storage
+    // read at (byteSlotBase + instanceIndex) × SLOT_STRIDE. The buffer is per-grid today;
+    // slotBase is the seam the multi-file hoist (one buffer per load) plugs into.
+    // Read-only storage in the vertex stage is core WebGPU. Non-leader byte slots carry
+    // zeroed lanes: size (0,0) collapses the quad to a point — invisible, unpickable.
+    let iPos, iSize, iGlyphId;
+    if (byteSlots) {
+        const base = int(byteSlotBase).add(int(instanceIndex)).mul(int(SLOT_STRIDE));
+        iPos     = vec4(byteSlots.element(base.add(int(S_X))), byteSlots.element(base.add(int(S_X + 1))), byteSlots.element(base.add(int(S_X + 2))), float(0));
+        iSize    = vec2(byteSlots.element(base.add(int(S_ADVANCE))), byteSlots.element(base.add(int(S_HEIGHT))));
+        iGlyphId = byteSlots.element(base.add(int(S_GLYPH_ID)));
+    } else {
+        iPos     = attribute('instancePosition', 'vec4');
+        iSize    = attribute('instanceSize',     'vec2');
+        iGlyphId = attribute('instanceGlyphId',  'float');
+    }
     const iGroup   = attribute('instanceGroupId',  'float');
 
     // Glyph-map lookup: glyphId → curve range + mode (RGBA32Uint, 1 texel/glyph).

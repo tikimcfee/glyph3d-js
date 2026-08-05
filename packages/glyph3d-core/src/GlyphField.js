@@ -44,6 +44,7 @@ const {
     Break,
     fwidth,
     Discard,
+    storage,
 } = TSL;
 
 /** Upper bound on quadratic beziers per glyph (TSL loop cap). */
@@ -604,6 +605,21 @@ function _fieldUniform(initial, read) {
     });
 }
 
+/**
+ * Storage-buffer node whose value resolves per rendered object from its field — the
+ * byte-pipeline seam. A byte-mode field carries NO position/size/glyphId instance
+ * attributes; the vertex transform reads the pipeline's stride-11 slot buffer instead
+ * (see core/glyphVertex.js). The placeholder keeps the node valid before any pipeline
+ * attaches. Read-only: vertex-stage storage is core WebGPU only as read-only.
+ */
+function _fieldSlots() {
+    const placeholder = new StorageInstancedBufferAttribute(new Float32Array(4), 1);
+    return storage(placeholder, 'float', 1).toReadOnly().onObjectUpdate(({ object }, self) => {
+        const f = object && object.userData && object.userData.glyphField;
+        return (f && f._byteSlots) || self.value;
+    });
+}
+
 /** The one material all fields of a kind share — built (and TSL-compiled) once. */
 function _getSharedFieldMaterial(kind) {
     let material = _sharedFieldMaterials.get(kind);
@@ -626,6 +642,11 @@ function _getSharedFieldMaterial(kind) {
     const frameTexNode     = _fieldTexture(_makePlaceholderRGBATexture(), '_frameTexture');
     const frameColsNode    = _fieldUniform(1, (f) => f._frameCols || 1);
     const frameRowsNode    = _fieldUniform(1, (f) => f._frameRows || 1);
+    // Byte-pipeline kind: position/size/glyphId come from the pipeline's slot buffer,
+    // resolved per field (see _fieldSlots); slotBase is the multi-file hoist seam.
+    const isByte = kind === 'byteGlyph';
+    const byteSlotsNode    = isByte ? _fieldSlots() : null;
+    const byteSlotBaseNode = isByte ? _fieldUniform(0, (f) => f._byteSlotBase || 0) : null;
 
     const { vertexFn, vColor, vGroupAlpha, vAddedColor, vFillAmount, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell } =
         _buildVertexNode({
@@ -638,6 +659,8 @@ function _getSharedFieldMaterial(kind) {
             clipTop:        clipTopNode,
             clipBottom:     clipBottomNode,
             renderMode:     renderModeNode,
+            byteSlots:      byteSlotsNode,
+            byteSlotBase:   byteSlotBaseNode,
         });
 
     const outputNode = kind === 'occluder'
@@ -699,6 +722,15 @@ export default class GlyphField {
 
         // Opaque occluder LOD mode (dense distant scenes) — see _createInstanceMesh.
         this._occluder = !!options.occluder;
+
+        // Byte-pipeline mode: the byte-in GPU pipeline owns this field's positions/sizes/
+        // glyphIds — the vertex transform reads the pipeline's stride-11 slot buffer (see
+        // _fieldSlots / core/glyphVertex.js), so this field never carries those instance
+        // attributes. _byteSlots attaches at first load; _byteSlotBase is the multi-file
+        // hoist seam (0 while the buffer is per-grid).
+        this._bytePipeline = !!options.bytePipeline;
+        this._byteSlots = null;
+        this._byteSlotBase = 0;
 
         // Frustum-cull opt-out (see _createInstanceMesh): the CPU-side geometry bounds cover
         // instance positions only, so a field anchored via group offsets has a false bounding
@@ -859,7 +891,9 @@ export default class GlyphField {
 
         const maxCount = this.config.maxInstances;
 
-        // Pre-allocate per-instance attributes
+        // Pre-allocate per-instance attributes. Byte-pipeline fields read position/size/
+        // glyphId from the pipeline's slot buffer — only color/group/picking are per-instance.
+        if (!this._bytePipeline) {
         // instancePosition is stride-4 from BIRTH. The shader reads it as vec4, and every
         // commit path (the engine's StorageInstancedBufferAttribute AND the CPU path's padded
         // InstancedBufferAttribute) installs a stride-4 attribute — so the INITIAL attribute
@@ -879,6 +913,7 @@ export default class GlyphField {
             new THREE.InstancedBufferAttribute(new Float32Array(maxCount * 2), 2));
         geometry.setAttribute('instanceGlyphId',
             new THREE.InstancedBufferAttribute(new Float32Array(maxCount), 1));
+        }
         geometry.setAttribute('instanceColor',
             new THREE.InstancedBufferAttribute(new Float32Array(maxCount * 3), 3));
         geometry.setAttribute('instanceGroupId',
@@ -899,7 +934,7 @@ export default class GlyphField {
         this._emojiCols    = emojiAtlas ? emojiAtlas.cols : 16;
         this._emojiRows    = emojiAtlas ? emojiAtlas.rows : 16;
 
-        const material = _getSharedFieldMaterial(this._occluder ? 'occluder' : 'glyph');
+        const material = _getSharedFieldMaterial(this._occluder ? 'occluder' : this._bytePipeline ? 'byteGlyph' : 'glyph');
         this._material = material;
 
         const mesh = new THREE.Mesh(geometry, material);
@@ -1655,6 +1690,32 @@ export default class GlyphField {
         geom.attributes.instanceColor.needsUpdate    = true;
         geom.attributes.instanceGroupId.needsUpdate  = true;
 
+        this._ensureHighlightTexture(count);
+        geom.instanceCount = count;
+    }
+
+    /**
+     * Attach a byte-in pipeline (compute/GlyphPipelineKernels.js) as this field's layout
+     * engine: positions/sizes/glyphIds are read by the vertex transform straight from the
+     * pipeline's slot buffer (see _fieldSlots). Sets the instance count to the byte length
+     * and fills the per-byte color attribute with the field's default color (continuation
+     * slots are never leaders — their zeroed size lanes render nothing, so their color is
+     * irrelevant but the array must span the buffer). Only for bytePipeline-constructed
+     * fields.
+     * @param {import('./compute/GlyphPipelineKernels.js').default} pipeline
+     * @param {number} byteLength - the live byte count (instance count)
+     */
+    attachBytePipeline(pipeline, byteLength) {
+        if (!this._bytePipeline) throw new Error('attachBytePipeline on a non-bytePipeline field');
+        this._byteSlots = pipeline.slots.value;
+        this._byteSlotBase = 0;
+        const geom = this.instanceMesh.geometry;
+        const count = Math.min(byteLength, this.config.maxInstances);
+        // (Re)fill the default color across the live range — the colorizer overwrites after.
+        const col = geom.attributes.instanceColor;
+        const d = this.config.defaultColor;
+        for (let i = 0; i < count; i++) { col.array[i * 3] = d.r; col.array[i * 3 + 1] = d.g; col.array[i * 3 + 2] = d.b; }
+        col.needsUpdate = true;
         this._ensureHighlightTexture(count);
         geom.instanceCount = count;
     }

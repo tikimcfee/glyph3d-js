@@ -37,7 +37,8 @@ import * as THREE from 'three';
 let _tslLoaded = false;
 let _MeshBasicNodeMaterial, _Fn, _attribute, _uniform, _texture, _textureLoad,
     _vec2, _vec3, _vec4, _ivec2, _float, _int, _instanceIndex,
-    _modelViewMatrix, _cameraProjectionMatrix, _positionLocal, _If, _Return, _select;
+    _modelViewMatrix, _cameraProjectionMatrix, _positionLocal, _If, _Return, _select,
+    _storage, _StorageInstancedBufferAttribute;
 // The shared instance→clip transform — the SAME graph GlyphField's render material
 // uses, so the pick ID pass can't drift from the visible glyph. Resolved lazily with
 // the rest (dynamic-imported) to keep three/tsl out of the WebGL-only path.
@@ -47,6 +48,7 @@ async function _loadTSL() {
     if (_tslLoaded) return;
     const m = await import('three/webgpu');
     _MeshBasicNodeMaterial    = m.MeshBasicNodeMaterial;
+    _StorageInstancedBufferAttribute = m.StorageInstancedBufferAttribute;
     // TSL symbols live on m.TSL, not directly on the module
     const tsl                 = m.TSL;
     _Fn                       = tsl.Fn;
@@ -67,6 +69,7 @@ async function _loadTSL() {
     _If                       = tsl.If;
     _Return                   = tsl.Return;
     _select                   = tsl.select;
+    _storage                  = tsl.storage;
     // Shared with the render material (core/glyphVertex). Its top-level
     // `import 'three/tsl'` only fires here — inside the WebGPU-only lazy path —
     // so the lazy/WebGL contract holds.
@@ -302,6 +305,7 @@ export class PickingSystem {
 
         // The shared WebGPU pick materials (one TSL build each, per-object IDs).
         this._sharedGlyphPickMaterial = null;
+        this._sharedGlyphPickMaterialByte = null;
         this._sharedFlatPickMaterial  = null;
 
         // Eagerly start loading TSL if on WebGPU (async, resolves from module
@@ -448,8 +452,9 @@ export class PickingSystem {
      * collide, which the channel design never does).
      * @private
      */
-    _getTSLGlyphMaterial() {
-        if (this._sharedGlyphPickMaterial) return this._sharedGlyphPickMaterial;
+    _getTSLGlyphMaterial(byteMode = false) {
+        const cacheKey = byteMode ? '_sharedGlyphPickMaterialByte' : '_sharedGlyphPickMaterial';
+        if (this[cacheKey]) return this[cacheKey];
 
         // Per-object nodes the shared vertex transform reads — each resolves at draw
         // from the mesh's userData.glyphField (mirrors GlyphField's _fieldTexture /
@@ -476,6 +481,17 @@ export class PickingSystem {
         const clipTop       = fUni('_clipTopVal', 0);
         const clipBottom    = fUni('_clipBottomVal', 0);
 
+        // Byte-pipeline fields read position/size/glyphId from the pipeline's slot buffer
+        // (GlyphField._fieldSlots does the same for the render material — one buffer, per
+        // field swap; slotBase is the multi-file hoist seam).
+        let byteSlots = null, byteSlotBase = null;
+        if (byteMode) {
+            const placeholder = new _StorageInstancedBufferAttribute(new Float32Array(4), 1);
+            byteSlots = _storage(placeholder, 'float', 1).toReadOnly().onObjectUpdate(({ object }, self) =>
+                (object && object.userData.glyphField && object.userData.glyphField._byteSlots) || self.value);
+            byteSlotBase = fUni('_byteSlotBase', 0);
+        }
+
         // Per-mesh ID-block start (read straight off userData — set by register()).
         const baseId = _uniform(0).onObjectUpdate(({ object }, self) =>
             (object && object.userData.pickStartId != null) ? object.userData.pickStartId : self.value);
@@ -486,6 +502,7 @@ export class PickingSystem {
             // GlyphId/GroupId) are declared inside it by name and bind to this mesh.
             const { clipPos } = _buildGlyphVertexTransform({
                 glyphMapTex, glyphMapWidth, renderMode, groupTex, clipEnabled, clipTop, clipBottom,
+                byteSlots, byteSlotBase,
             });
             return clipPos;
         });
@@ -509,7 +526,7 @@ export class PickingSystem {
         // pixel — picking the wrong (back) grid.
         mat.depthWrite = true;
 
-        this._sharedGlyphPickMaterial = mat;
+        this[cacheKey] = mat;
         return mat;
     }
 
@@ -645,7 +662,7 @@ export class PickingSystem {
             // Shared pick materials read the ID block per object from here.
             mesh.userData.pickStartId = startId;
             material = ch.kind === 'glyph'
-                ? this._getTSLGlyphMaterial()
+                ? this._getTSLGlyphMaterial(!!mesh.userData.glyphField?._bytePipeline)
                 : this._getTSLFlatMaterial();
         } else {
             material = ch.kind === 'glyph'
