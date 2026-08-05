@@ -49,6 +49,9 @@ export default class GlyphFieldPipeline {
         this._params = null;
     }
 
+    /** The CPU oracle (runPipeline output) from the last setText — slots + bounds. */
+    get mirror() { return this._mirror; }
+
     /**
      * Load text: encode → mirror → dispatch → attach. The mirror runs FIRST so its
      * maxRowExtent can feed a snug pageStrideX in the same breath.
@@ -71,8 +74,11 @@ export default class GlyphFieldPipeline {
         }
         const pageIn = p.page || {};
         const mirrorOpts = {
-            window: p.window ?? 128, wrapWidth: p.wrapWidth || 0, lineHeight: p.lineHeight,
-            zStep: p.zStep || 0, scrollRows: pageIn.scrollRows || 0,
+            // The mirror is SERIAL — the race it simulates on the GPU doesn't exist here,
+            // so the coherence window is pure cost: window 0 inherits from the immediate
+            // predecessor (provably the same result — every order converges, tested).
+            window: 0, wrapWidth: p.wrapWidth || 0, lineHeight: p.lineHeight,
+            zStep: p.zStep || 0, scrollRows: pageIn.scrollRows || 0, origin: p.origin,
             page: p.page ? { ...pageIn } : null,
         };
         // The mirror first: the walk's widest row is the page column stride (plus the gap),
@@ -95,22 +101,26 @@ export default class GlyphFieldPipeline {
         // FINAL page params (the remap is reconstructive — exact) so mirror == GPU.
         this.field.setLayoutExtent(this.getExtent(page));
 
-        // Miss flow: encode what the trie didn't know, then rebuild + re-run so the
-        // glyphs actually show. Layout was already correct on the first pass (missing
-        // entries occupy their advance), so this is a paint-level refinement.
-        const misses = await this._kernels.readMisses();
-        if (misses.length) {
-            const res = encodeMisses(this.atlas, misses);
-            if (res?.grew) {
+        // Miss flow, OFF the load path: the readback stalls on the GPU queue, and the
+        // layout is already correct (missing entries occupy their advance) — so encode +
+        // re-run happens as a background continuation that paints the new glyphs in. The
+        // generation guard drops the continuation if a newer setText already ran.
+        const gen = (this._missGen = (this._missGen || 0) + 1);
+        Promise.resolve()
+            .then(() => this._kernels.readMisses())
+            .then((misses) => {
+                if (gen !== this._missGen || !misses.length || !this._kernels) return;
+                const res = encodeMisses(this.atlas, misses);
+                if (!res?.grew || gen !== this._missGen) return;
                 this._trie = buildLiveTrie(this.atlas, this.worldScale);
                 this._kernels.dispose();
                 this._kernels = new GlyphPipelineKernels(this.renderer, { maxBytes: this.maxBytes, trie: this._trie });
-                this._kernels.setFile(bytes, this._params);
+                this._kernels.setFile(this._bytes, this._params);
                 this._kernels.run();
-                this.field.attachBytePipeline(this._kernels, bytes.length);
-            }
-        }
-        return { bounds: this._mirror.bounds, misses };
+                this.field.attachBytePipeline(this._kernels, this.byteLength);
+            })
+            .catch(() => {});
+        return { bounds: this._mirror.bounds, misses: [] };
     }
 
     /**
@@ -138,7 +148,7 @@ export default class GlyphFieldPipeline {
     getExtent(pageOverride) {
         if (!this._mirror) return null;
         if (pageOverride !== undefined) {
-            const page = { ...pageOverride, wrap: this._params.wrapWidth,
+            const page = { ...pageOverride, wrap: this._params.wrapWidth, origin: this._params.origin,
                 zStep: this._params.zStep, lineHeight: this._params.lineHeight };
             const { slots } = this._mirror;
             const n = this.byteLength;

@@ -12,16 +12,14 @@
 
 import * as THREE from 'three';
 import GlyphField from '../GlyphField.js';
-import { getWorkerBridge } from '../workers/WorkerBridge.js';
 import { loadStats } from '../core/loadStats.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import { BOUNDS_Z_PAD } from '../core/constants.js';
 import { computeCellMetrics } from '../core/cellMetrics.js';
 import { resolveLayoutParams, DEFAULT_LAYOUT } from '../workers/builders/index.js';
-import { pageFold, lineSegments } from '../core/foldGeometry.js';
-import { syncGpuLayout, isGpuLayoutEnabled } from '../compute/GlyphLayoutCompute.js';
-import { evaluateFold } from '../core/foldEvaluate.js';
-import LayoutDescription from '../core/LayoutDescription.js';
+import { getComputeRenderer } from '../compute/GlyphLayoutCompute.js';
+import GlyphFieldPipeline from '../compute/GlyphFieldPipeline.js';
+import ByteLayoutDescription, { buildByteLineIndex } from '../core/ByteLayoutDescription.js';
 import { analyzeGrid, buildGridSemantics, buildGridSemanticsSync } from '../parsing/SyntaxColorizer.js';
 import FramedGlyphField from './FramedGlyphField.js';
 import { createPanelMaterial } from './panelMaterial.js';
@@ -29,11 +27,11 @@ import { createPanelMaterial } from './panelMaterial.js';
 // Reused for lines without wraps — most lines, in the common case.
 // Frozen so accidental mutation surfaces immediately.
 
-// The cursor `col` is a CODEPOINT index — the same model the render/slot path uses (1 emoji =
-// 1 col = 1 buffer slot). JS strings are UTF-16, so a surrogate-pair emoji (😀 = 2 code units)
-// makes codepoint indices diverge from String.slice/.length. These convert, so edits never land
-// inside a surrogate pair (which splits/corrupts an emoji) nor at the wrong offset (inserting
-// before the caret). For ASCII they're identity, so the common path is unaffected.
+// The cursor `col` is a CODEPOINT index — the same model the editor verbs use. JS strings
+// are UTF-16, so a surrogate-pair emoji (😀 = 2 code units) makes codepoint indices diverge
+// from String.slice/.length. These convert, so edits never land inside a surrogate pair
+// (which splits/corrupts an emoji) nor at the wrong offset (inserting before the caret).
+// For ASCII they're identity, so the common path is unaffected.
 /** Codepoint index → UTF-16 offset within `str`. */
 function cpToU16(str, cp) {
     let u = 0;
@@ -46,6 +44,9 @@ function cpLen(str) {
     for (let u = 0; u < str.length; n++) u += str.codePointAt(u) > 0xFFFF ? 2 : 1;
     return n;
 }
+
+/** The byte pipeline's encoder (one per module — TextEncoder is stateless). */
+const _textEncoder = new TextEncoder();
 
 class CodeGrid extends FramedGlyphField {
     /**
@@ -99,15 +100,8 @@ class CodeGrid extends FramedGlyphField {
         this._semantics = null;         // SemanticModel — structural tree (lazy, built on demand)
         this._semanticsContent = null;  // the content string the cached model was built from
 
-        // ── Deferred-batch state (was GlyphCollection._pendingAdds etc.) ────────
-        this._pendingAdds    = [];  // { id, text, position, options }
-        this._pendingRemovals = []; // renderer IDs to remove
-        this._pendingUpdates = [];  // { type, id, ... }
-        this._idMap          = new Map(); // our ID → renderer ID
-        this._reverseIdMap   = new Map(); // renderer ID → our ID
-        this._committedTexts = new Map(); // our ID → { id, rendererId, textLength, position, options }
-        this._nextLocalId    = 1;
-        this._dirty          = false;   // GPU buffer needs flush (render dirty)
+        // ── Load state ────────────────────────────────────────────────────────
+        this._dirty          = false;   // content changed since last layout
         this._modified       = false;   // content edited since load / last save (the UNSAVED state)
         this._bufferHeadroom = 1.1; // 10% extra
         this._bufferSize     = 0;
@@ -119,14 +113,10 @@ class CodeGrid extends FramedGlyphField {
         this.scene.add(this._rendererGroup);
 
         // Lazy GPU renderer — the _renderer slot is declared by FramedGlyphField; CodeGrid
-        // creates it on first flush() with a right-sized buffer, so it stays null until then.
+        // creates it on first load with a right-sized buffer, so it stays null until then.
 
         // Derive metrics from atlas directly (no renderer needed)
         this.metrics = this._computeMetrics();
-
-        // Track text IDs for content management
-        this._filenameTextId = null;
-        this._contentTextIds = [];
 
         // Background panel — the _panel/_background slots are declared by FramedGlyphField;
         // _initBackground builds the mesh + panel material for this grid.
@@ -140,11 +130,16 @@ class CodeGrid extends FramedGlyphField {
         // with this grid's home placement and writes the initial transform.
         this._initScale(this.config.gridScale);
 
-        // Content bounds are NOT stored: they are the fold's extent, a closed form the
-        // LayoutDescription answers in O(1) (_getContentBounds). The one exception is an
-        // arranger's displacement table, whose extent the arranger AUTHORS — see
-        // setDisplacements. World box (getBounds) is BoundedObject3D's, derived per call.
-        this._displacementExtent = null;
+        // Content bounds are NOT stored: they are the layout's extent, derived from the
+        // pipeline's CPU mirror in O(1) (_getContentBounds). World box (getBounds) is
+        // BoundedObject3D's, derived per call.
+        // The byte-pipeline engine state: one GlyphFieldPipeline per grid (plus one for
+        // the filename), the file's bytes, and the newline byte-offset index.
+        this._pipeline = null;
+        this._filenamePipeline = null;
+        this._filenameField = null;
+        this._bytes = null;
+        this._byteLineIndex = null;
 
         // ── Windowing (opt-in scrollable viewport over the full source) ──────
         // Off by default → the grid renders the whole file. setWindow() switches
@@ -191,104 +186,16 @@ class CodeGrid extends FramedGlyphField {
 
     /**
      * Register an arranger — a footprint-changing participant re-applied INSIDE every
-     * fold (before bounds). Contract: `arrange(grid)` re-derives glyph transforms from
-     * stable anchors (idempotent — it runs again on the next fold); optional
-     * `foldLayout` constrains the fold (merged over config.layout, not mutating it);
-     * optional `clear(grid)`. Idempotent registration.
+     * fold (before bounds). NOT SUPPORTED on the byte pipeline yet — displacement tables
+     * are indexed by codepoint slot and the byte pipeline is byte-indexed; until arrangers
+     * are re-based, registration throws loudly rather than arranging wrong.
      */
-    /**
-     * Re-dispatch the engine layout from RETAINED state — no builder run, no new arrays.
-     * Everything the kernel needs survives between flushes: line tables on the field's
-     * entries, advances in the sizes attribute, origins in the committed items, params on
-     * this grid. This is the seam post-flush displacement writes (migrated arrangers) and
-     * param-only refolds re-enter through — ~50µs instead of a rebuild.
-     * @private
-     * @returns {boolean} true if a dispatch happened
-     */
-    _resyncEngineLayout() {
-        const field = this._renderer;
-        if (!field?.gpuLayout) return false;
-        const sizes = field.instanceMesh?.geometry?.attributes?.instanceSize?.array;
-        if (!sizes) return false;
-        const items = [], itemMeta = [], rendererIds = [];
-        let count = 0;
-        for (const [, entry] of field.renderedTexts) {
-            const committed = this._committedTexts.get(this._reverseIdMap.get(entry.id));
-            itemMeta.push({
-                bufferStartIndex: entry.bufferStartIndex,
-                glyphCount: entry.glyphCount,
-                lineSlotOffsets: entry.lineSlotOffsets,
-            });
-            items.push({
-                position: committed?.position || { x: 0, y: 0, z: 0 },
-                scale: committed?.options?.scale ?? 1,
-            });
-            rendererIds.push(entry.id);
-            count = Math.max(count, entry.bufferStartIndex + entry.glyphCount);
-        }
-        if (!count) return false;
-        const m = this.metrics;
-        const shared = {
-            // CodeGrid metric names → builder metric names, same mapping the description uses.
-            metrics: { charWidth: m.charWidth, charHeight: m.charHeight, lineSpacing: m.lineHeight, letterSpacing: m.spacing || 0 },
-            layout: resolveLayoutParams(this._foldLayout()),
-            scrollOffset: this._scrollOffset || 0,
-        };
-        const res = syncGpuLayout(field, { count, sizes, itemMeta }, items, shared, rendererIds);
-        field.setLayoutExtent(this._getContentBounds());
-        return (res?.dispatched || 0) > 0;
-    }
 
-    /**
-     * Materialize the UNDISPLACED fold for every committed entry into one TRANSIENT
-     * field-wide array — the measurement scratch for engine-mode arrangers (evaluateFold:
-     * call, measure, drop; no persistent position buffer comes back into existence).
-     * @private
-     * @returns {Float32Array|null} count×3 positions, or null when not engine-owned
-     */
-    _engineFoldScratch() {
-        const field = this._renderer;
-        if (!field?.gpuLayout) return null;
-        const sizes = field.instanceMesh?.geometry?.attributes?.instanceSize?.array;
-        if (!sizes) return null;
-        let count = 0;
-        for (const [, e] of field.renderedTexts) count = Math.max(count, e.bufferStartIndex + e.glyphCount);
-        if (!count) return null;
-        const out = new Float32Array(count * 3);
-        const m = this.metrics;
-        const lp = resolveLayoutParams(this._foldLayout());
-        for (const [, entry] of field.renderedTexts) {
-            const n = entry.glyphCount;
-            if (!n || !entry.lineSlotOffsets) continue;
-            const base = entry.bufferStartIndex;
-            const committed = this._committedTexts.get(this._reverseIdMap.get(entry.id));
-            const lineTable = new Uint32Array(entry.lineSlotOffsets.length);
-            for (let L = 0; L < lineTable.length; L++) lineTable[L] = entry.lineSlotOffsets[L] - base;
-            const advances = new Float32Array(n);
-            for (let s = 0; s < n; s++) advances[s] = sizes[(base + s) * 2];
-            evaluateFold({
-                slotCount: n, lineTable, advances,
-                origin: committed?.position || { x: 0, y: 0, z: 0 },
-                scrollOffset: this._scrollOffset || 0,
-                wrapWidth: lp.wrapWidth, lineSpacing: m.lineHeight,
-                zStep: m.charHeight * (lp.zWrapSpacing || 0),
-                page: pageFold(lp,
-                    { charWidth: m.charWidth, letterSpacing: m.spacing || 0, lineSpacing: m.lineHeight },
-                    entry.fold?.maxRowExtent || 0),
-                out: out.subarray(base * 3, (base + n) * 3),
-            });
-        }
-        return out;
-    }
-
-    /** Register an arranger. Engine-only: it must serve the displacement-table path —
-     *  there is no CPU layout path to fall back to. Idempotent registration. */
+    /** Register an arranger. NOT SUPPORTED on the byte pipeline yet — displacement tables
+     *  are indexed by codepoint slot and the byte pipeline is byte-indexed; until arrangers
+     *  are re-based, registration throws loudly rather than arranging wrong. */
     registerArranger(a) {
-        if (!a) return;
-        if (a.engineCapable !== true) {
-            throw new Error('CodeGrid.registerArranger: arranger is not engineCapable — no CPU layout path exists to serve it');
-        }
-        if (!this._arrangers.includes(a)) this._arrangers.push(a);
+        throw new Error('CodeGrid.registerArranger: arrangers are not on the byte pipeline yet (deferred — see the Layer 2 wiring plan, M5)');
     }
     /** Remove a previously-registered arranger. */
     unregisterArranger(a) { const i = this._arrangers.indexOf(a); if (i >= 0) this._arrangers.splice(i, 1); }
@@ -299,52 +206,13 @@ class CodeGrid extends FramedGlyphField {
     unregisterDecoration(d) { const i = this._decorations.indexOf(d); if (i >= 0) this._decorations.splice(i, 1); }
 
     /**
-     * The ARRANGE stage. After the fold has dispatched + the LayoutDescription is built,
-     * run each arranger (it re-derives glyph transforms from stable anchors and writes the
-     * displacement table, then re-dispatches via _resyncEngineLayout). Engine grids: the
-     * arranger arms its table and its extent together (setDisplacements — it KNOWS the
-     * extent, packing box / plane depth, better than any walk could recover it).
-     * No-op (and zero cost) when nothing is registered.
+     * The ARRANGE stage. No-op (and zero cost) when nothing is registered — and nothing can
+     * register until arrangers are byte-native (registerArranger throws).
      * @private
      */
     _applyArrangers() {
         if (!this._arrangers.length || !this._renderer) return;
         for (const a of this._arrangers) a.arrange?.(this);
-    }
-
-    /**
-     * Arm an arranger's displacement table together with the extent it produces, then
-     * re-dispatch. ONE call, because the two are one fact: an arranger AUTHORS the
-     * displacements, so it already knows the packing box exactly — better than any walk
-     * over the glyphs it just placed. Making the extent a parameter rather than a separate
-     * optional call is what keeps an arranged grid's bounds from silently lagging its
-     * glyphs; there is no path that writes displacements without stating where they land.
-     *
-     * @param {?Float32Array} table - flat [dx,dy,dz] per field-global slot, or null to clear
-     * @param {?{min:{x,y,z}, max:{x,y,z}}} [extent] - the arranged extent; required with a
-     *   table, ignored when clearing (bounds revert to the fold's own extent).
-     */
-    setDisplacements(table, extent = null) {
-        const field = this._renderer;
-        if (!table) {
-            this._displacementExtent = null;
-            if (field) field._layoutDisplacements = null;
-            this._resyncEngineLayout();
-            field?.setLayoutExtent(this._getContentBounds());
-            return;
-        }
-        if (!extent?.min || !extent?.max) {
-            throw new Error('CodeGrid.setDisplacements: a displacement table must state its extent — the fold extent no longer describes these glyphs');
-        }
-        this._displacementExtent = {
-            min: { ...extent.min }, max: { ...extent.max },
-            width: extent.max.x - extent.min.x,
-            height: extent.max.y - extent.min.y,
-            depth: extent.max.z - extent.min.z,
-        };
-        if (field) field._layoutDisplacements = table;
-        this._resyncEngineLayout();
-        field?.setLayoutExtent(this._displacementExtent);
     }
 
     /**
@@ -410,6 +278,18 @@ class CodeGrid extends FramedGlyphField {
     _beginLoad(text) {
         this.content = text;                 // the new data (content + lines set together)
         this.lines = text.split('\n');
+        // The byte pipeline's input: UTF-8 bytes + the newline index (the only line
+        // structure — the GPU walk derives row/col itself).
+        this._bytes = _textEncoder.encode(text);
+        this._byteLineIndex = buildByteLineIndex(this._bytes);
+        // Growth: a bigger file than the buffers hold recreates field + pipeline (the
+        // same "right-size on load" contract the worker path had).
+        if (this._renderer && this._bytes.length > this._bufferSize) {
+            this._pipeline?.dispose();
+            this._renderer?.dispose?.();
+            this._renderer = null;
+            this._pipeline = null;
+        }
         this._ensureRenderer();              // reconstruct if content was evicted
         this._clearRenderedText();           // drop the PRIOR render's glyphs; the layout below adds the new ones
     }
@@ -527,11 +407,13 @@ class CodeGrid extends FramedGlyphField {
         this.content = '';
         this.lines = [];
         this.filename = '';
+        this._bytes = null;
+        this._byteLineIndex = null;
+        this._layout = null;
 
         if (this._renderer) this._renderer.clear();
+        if (this._filenameField) this._filenameField.clear();
         this._resetBatchState();
-        this._filenameTextId = null;
-        this._contentTextIds = [];
 
         this._updateBackground();
     }
@@ -670,30 +552,6 @@ class CodeGrid extends FramedGlyphField {
     // getRenderer() + setPickingSystem() (the glyph + grid channels) are inherited from
     // FramedGlyphField. The flush path re-registers the glyph channel after each rebuild
     // (instanceCount changes) via this._pickingSystem directly.
-
-    /**
-     * Add text (deferred until flush).
-     * Public entry point for callers like DiffController that bypass the normal
-     * loadText() flow in order to supply per-text color options.
-     *
-     * @param {string} text
-     * @param {{x,y,z}} [position]
-     * @param {Object} [options] - { color, scale, groupId }
-     * @returns {number} local text ID (for future updateColor / removeText calls)
-     */
-    addText(text, position = { x: 0, y: 0, z: 0 }, options = {}) {
-        this._ensureRenderer();
-        return this._addText(text, position, options);
-    }
-
-    /**
-     * Flush pending text additions to the GPU via the worker pipeline.
-     * Falls back to a main-thread build if the worker job fails.
-     * @returns {Promise<void>}
-     */
-    async flush() {
-        return this._flush();
-    }
 
     /**
      * Get glyph count
@@ -876,9 +734,8 @@ class CodeGrid extends FramedGlyphField {
     /**
      * THE single relayout pipeline — re-fold the grid from current state (this.lines/content,
      * scrollOffset, layout params) and repaint the edit caret. ONE mutex (_relayoutBusy /
-     * _relayoutPending) serializes ALL relayouts — scroll, layout, frame, AND edit — so two
-     * pipelines can never interleave _clearRenderedText/_flush on the shared deferred-batch
-     * state (_pendingAdds/_idMap/_contentTextIds), which would corrupt the buffers. Rapid calls
+     * _relayoutPending) serializes ALL relayouts — layout, frame, AND edit — so two
+     * pipelines can never interleave on the shared load state. Rapid calls
      * coalesce: the in-flight pass loops once more with the LATEST state. Edit callers set
      * _linesDirty so content re-syncs from the edit-mutated line array; scroll/layout/frame
      * callers leave this.content untouched (no per-tick join cost).
@@ -950,8 +807,17 @@ class CodeGrid extends FramedGlyphField {
      * @returns {Promise<this>}
      */
     async setScrollOffset(rows) {
-        this._scrollOffset = Math.max(0, Math.min(Math.round(rows), this.getMaxScroll()));
-        return this._relayoutInPlace();
+        const clamped = Math.max(0, Math.min(Math.round(rows), this.getMaxScroll()));
+        if (clamped === this._scrollOffset) return this;
+        this._scrollOffset = clamped;
+        // The conveyor is kernel 3 only: re-arm the page params with the new scroll and
+        // repaginate — no decode, no walk, no reload. The mirror re-paginates in place, so
+        // the panel, caret and extent read the scrolled state synchronously.
+        const lp = resolveLayoutParams(this._foldLayout());
+        this._pipeline?.setPage(this._pageParams(lp, this.metrics));
+        this._updateBackground();
+        this._applyDecorations();
+        return this;
     }
 
     /** Scroll by a delta in visual rows (positive = scroll down, content flows up). */
@@ -966,11 +832,12 @@ class CodeGrid extends FramedGlyphField {
 
     /**
      * Total VISUAL rows in the current fold (source lines + intra-line wraps). Scroll-stable
-     * (independent of scrollOffset) — derived from the macro line table built each layout.
+     * (independent of scrollOffset) — the pipeline's bounds lane 6, reduced on-GPU and read
+     * off the CPU mirror.
      * @returns {number}
      */
     getTotalVisualRows() {
-        return this._totalVisualRows || 0;
+        return Math.round(this._pipeline?.mirror?.bounds?.totalRows || 0);
     }
 
     /**
@@ -1122,14 +989,9 @@ class CodeGrid extends FramedGlyphField {
     _ensureRenderer() {
         if (this._renderer) return; // already present
 
-        // Size the initial buffers to the actual content, not the maxChars ceiling
-        // (default 50,000). Every load/reload ends in applyPrebuiltBuffers, which
-        // REPLACES these attributes at the exact glyph count — so a maxChars prealloc
-        // was ~2.2MB of allocate-then-discard per reload (e.g. a 50-line file got
-        // 50k-instance buffers). content.length is a safe upper bound on glyph count
-        // (≤, since multi-byte codepoints collapse); _createRendererWithSize floors
-        // it at 100. Big files still get the capacity they need.
-        const sizeHint = Math.min(this.content ? this.content.length : 0, this.config.maxChars);
+        // Size the buffers to the actual byte count, not the maxChars ceiling — one slot
+        // per byte in the byte pipeline, so bytes are the capacity unit.
+        const sizeHint = Math.min(this._bytes ? this._bytes.length : 0, this.config.maxChars * 4);
         this._createRendererWithSize(sizeHint, false);
 
         // Re-derive metrics in case atlas changed
@@ -1153,6 +1015,13 @@ class CodeGrid extends FramedGlyphField {
             slugData:      this.config.slugData,
             shaper:        this.config.shaper,
             occluder:      this.config.occluder,
+            bytePipeline:  true,
+        });
+        // The byte-in GPU pipeline IS this grid's layout engine: bytes in, three dispatches,
+        // the field reads the slot buffer in the vertex shader (no CPU layout, no worker).
+        this._pipeline = new GlyphFieldPipeline(getComputeRenderer(), this._renderer, this.atlas, {
+            maxBytes: bufferSize,
+            worldScale: this.config.worldScale,
         });
 
         if (this._pickingSystem) {
@@ -1168,223 +1037,6 @@ class CodeGrid extends FramedGlyphField {
      * @private
      */
     _resetBatchState() {
-        this._pendingAdds     = [];
-        this._pendingRemovals = [];
-        this._pendingUpdates  = [];
-        this._idMap.clear();
-        this._reverseIdMap.clear();
-        this._committedTexts.clear();
-        this._dirty = false;
-        this._displacementExtent = null;
-    }
-
-    /**
-     * Enqueue a text add (deferred until flush).
-     * @private
-     * @returns {number} local ID
-     */
-    _addText(text, position = { x: 0, y: 0, z: 0 }, options = {}) {
-        const id = this._nextLocalId++;
-        this._pendingAdds.push({ id, text, position: { ...position }, options: { ...options } });
-        this._dirty = true;
-        return id;
-    }
-
-    /**
-     * Enqueue a text removal (deferred until flush).
-     * @private
-     */
-    _removeText(id) {
-        const pendingIdx = this._pendingAdds.findIndex(p => p.id === id);
-        if (pendingIdx !== -1) {
-            this._pendingAdds.splice(pendingIdx, 1);
-        } else if (this._idMap.has(id)) {
-            this._pendingRemovals.push(this._idMap.get(id));
-        }
-        this._dirty = true;
-    }
-
-    /**
-     * Normalize pending adds and compute the shared build inputs (metrics,
-     * default color) used by both the sync and worker builder paths. Also
-     * ensures any missing graphemes are in the atlas (legacy non-shaper path).
-     * @private
-     * @returns {{items: Array, metrics: Object, defaultColor: Object}}
-     */
-    _prepareAddsForBuild() {
-        const defaultColor = this.config.textColor;
-        const items = this._pendingAdds;
-
-        for (const p of items) {
-            if (!p.color)                p.color   = p.options?.color   || defaultColor;
-            if (!p.scale)                p.scale   = p.options?.scale   || 1.0;
-            if (p.groupId === undefined) p.groupId = p.options?.groupId || 0;
-        }
-
-        const atlasCharSize = this.atlas.getCharSize();
-        const scale = this.config.worldScale;
-        const metrics = {
-            ...computeCellMetrics(atlasCharSize, scale),
-            worldScale: scale,
-            atlasSize:  this.atlas.getAtlasTexture().width,
-        };
-
-        // Live Slug path: ensure every codepoint's curves are
-        // encoded before the builder maps text → slots. First sighting of a glyph
-        // (box-drawing, stars, …) allocates its slot in the shared shape cache and
-        // re-encodes the GPU textures; a per-grid "seen" set keeps this O(new).
-        // The worker build path uses a transferred COPY of the cache, so on growth
-        // we resync it to the workers before they shape (resync postMessage is
-        // FIFO-ordered ahead of the build job → no stale-cache misses).
-        const live = this.atlas && this.atlas._live;
-        if (this.config.shaper && live && this.atlas._shapeCache) {
-            if (!this._liveEnsured) this._liveEnsured = new Set();
-            const seen = this._liveEnsured;
-            let fresh = null;
-            for (const it of items) {
-                if (!it.text) continue;
-                const t = it.text;
-                for (let i = 0; i < t.length;) {
-                    const cp = t.codePointAt(i);
-                    i += cp > 0xFFFF ? 2 : 1;
-                    if (cp > 32 && !seen.has(cp)) { seen.add(cp); (fresh ?? (fresh = [])).push(cp); }
-                }
-            }
-            if (fresh) {
-                const before = live.size;
-                live.ensureCodepoints(fresh, this.atlas._shapeCache);
-                if (live.size !== before) getWorkerBridge().resyncShapeCache();
-            }
-        }
-
-        return { items, metrics, defaultColor, layout: this._foldLayout(), scrollOffset: this._scrollOffset };
-    }
-
-    /**
-     * Commit builder output to the GPU: create/size the renderer, apply any
-     * deferred removals in the same synchronous block as the buffer swap (so
-     * old→new is atomic with no intermediate paint), swap in the prebuilt
-     * buffers, and record the id maps + bounds. Shared by both flush paths.
-     * @private
-     * @param {Object} buffers - output of buildBatchBuffers
-     * @param {Array} items - the items that produced `buffers`
-     * @param {number[]} [deferredRemovals] - renderer IDs to remove atomically
-     * @param {?{metrics: Object, layout: Object, scrollOffset: number}} [shared] - the bag the
-     *   builder consumed, passed through for the GPU layout engine (dual-compute assertion)
-     */
-    _commitBuiltBuffers(buffers, items, deferredRemovals = [], shared = null) {
-        const tc0 = performance.now();
-        try {
-        if (!this._renderer) {
-            this._createRendererWithSize(buffers.count, true);
-        }
-
-        for (const rendererId of deferredRemovals) {
-            this._renderer.remove(rendererId);
-            const ourId = this._reverseIdMap.get(rendererId);
-            if (ourId !== undefined) {
-                this._idMap.delete(ourId);
-                this._reverseIdMap.delete(rendererId);
-                this._committedTexts.delete(ourId);
-            }
-        }
-
-        // Every commit is an engine build: the builder emits tables + attributes only (no
-        // positions), and the kernel dispatch below IS the layout. The builder's scalar-walk
-        // bounds are exact for unpaginated content; a paginated item gets its extent from
-        // the adapter's analytic override.
-        this._renderer.setGpuLayout(true);
-
-        const rendererIds = this._renderer.applyPrebuiltBuffers(buffers, items);
-
-        // A commit is a NEW fold — a standing displacement table was computed against
-        // the OLD one (dz = plane − oldFoldZ) and would land glyphs on garbage planes
-        // if dispatched now; on a slot-count change it also misaligns wholesale. Drop
-        // it, and its extent with it: arrangers re-derive against the fresh fold
-        // immediately after the flush (_applyArrangers → arrange → setDisplacements),
-        // and until they do the grid renders honestly FLAT — never scrambled.
-        this._renderer._layoutDisplacements = null;
-        this._displacementExtent = null;
-        if (!isGpuLayoutEnabled()) {
-            // Loud, not silent: no compute renderer registered (boot-order breach) means
-            // the kernel can't dispatch and this grid renders unlaid at the origin.
-            console.error('CodeGrid: engine commit with no compute renderer registered — grid renders unlaid (boot-order breach)');
-        }
-        // The dispatch records each item's fold scalars + extent on its entry; the union
-        // it returns IS the field's cull box. Nothing measured, nothing read back.
-        const res = syncGpuLayout(this._renderer, buffers, items, shared, rendererIds);
-        this._renderer.setLayoutExtent(res?.extent ?? null);
-
-        for (let i = 0; i < items.length; i++) {
-            const p          = items[i];
-            const rendererId = rendererIds[i];
-            this._idMap.set(p.id, rendererId);
-            this._reverseIdMap.set(rendererId, p.id);
-            this._committedTexts.set(p.id, {
-                id: p.id,
-                rendererId,
-                textLength: p.text.length,
-                position:   p.position,
-                options:    p.options,
-            });
-        }
-        this._pendingAdds = [];
-        } finally {
-            // The load path's commit cost, counted for the load trace (core/loadStats.js).
-            loadStats.commits++;
-            loadStats.commitMs += performance.now() - tc0;
-        }
-    }
-
-    /**
-     * Flush pending changes via the worker pipeline — the ONE flush. The buffers +
-     * line→slot table exist by the time the promise resolves, so callers may apply
-     * highlights immediately after the await. A failed worker job falls back to a
-     * main-thread build of the same items (same builder, no postMessage); an empty
-     * worker pool already degrades the same way inside buildBatchBuffers.
-     * @private
-     * @returns {Promise<void>}
-     */
-    async _flush() {
-        if (!this._dirty) return;
-
-        if (this._pendingAdds.length === 0) {
-            // No build needed — apply removals directly (nothing to defer them against).
-            for (const rendererId of this._pendingRemovals) {
-                this._renderer?.remove(rendererId);
-                const ourId = this._reverseIdMap.get(rendererId);
-                if (ourId !== undefined) {
-                    this._idMap.delete(ourId);
-                    this._reverseIdMap.delete(rendererId);
-                    this._committedTexts.delete(ourId);
-                }
-            }
-            this._pendingRemovals = [];
-        } else {
-            // Defer removals until the build returns. Applying them now would
-            // empty the GPU buffer while we wait ~5-20ms for the new content to
-            // build, flashing the grid. _commitBuiltBuffers applies them in the
-            // same synchronous block as the buffer swap, so old→new is atomic.
-            const deferredRemovals = this._pendingRemovals;
-            this._pendingRemovals = [];
-
-            const { items, metrics, defaultColor, layout, scrollOffset } = this._prepareAddsForBuild();
-            let buffers;
-            try {
-                buffers = await getWorkerBridge().buildBatchBuffers(items, { metrics, defaultColor, layout, scrollOffset });
-            } catch (error) {
-                console.warn('CodeGrid: Worker flush failed, falling back to main-thread build:', error);
-                // Same items, same builder, main thread — the commit below still
-                // applies the deferred removals atomically with the buffer swap.
-                buffers = getWorkerBridge().buildBatchBuffersSync(items, { metrics, defaultColor, layout, scrollOffset });
-            }
-            this._commitBuiltBuffers(buffers, items, deferredRemovals, { metrics, layout, scrollOffset });
-        }
-
-        if (this._renderer && this._pickingSystem) {
-            this._pickingSystem.register('glyph', this._renderer, this._renderer);
-        }
-
         this._dirty = false;
     }
 
@@ -1437,73 +1089,50 @@ class CodeGrid extends FramedGlyphField {
     }
 
     /**
-     * Drop the PREVIOUSLY-RENDERED text items (the filename + content glyph instances) from the
-     * renderer, so a re-layout can add the new ones. Does NOT touch this.content / this.lines — the
-     * data is set separately at the load seam (_beginLoad); this only clears the prior render.
+     * Reset the prior render before a re-layout. Does NOT touch this.content / this.lines —
+     * the data is set separately at the load seam (_beginLoad). Byte pipeline: the next
+     * setText re-attaches the field's buffers wholesale, so clearing is state-only.
      * @private
      */
     _clearRenderedText() {
-        // Remove filename text if exists
-        if (this._filenameTextId !== null) {
-            this._removeText(this._filenameTextId);
-            this._filenameTextId = null;
-        }
-
-        // Remove all content texts
-        for (const id of this._contentTextIds) {
-            this._removeText(id);
-        }
-        this._contentTextIds = [];
-
-        // Removals stay pending. Callers (loadText → _layoutContent) flush
-        // afterwards — doing it here would push an empty GPU frame and flash
-        // the grid.
+        this._resetBatchState();
     }
 
     /**
-     * Layout content via the worker pipeline. Adds the whole content as ONE
-     * item — the builder lays out the lines and emits the authoritative
-     * line→slot offsets.
+     * Layout content — the byte-in GPU pipeline IS the layout: encode (done in _beginLoad)
+     * → setText → three dispatches. No worker, no builder, no CPU fold. The filename rides
+     * its own tiny pipeline field above the content.
      * @private
      */
     async _layoutContent() {
-        let currentY = 0;
-
-        // Add filename if enabled
+        // The filename: its own field + pipeline at y=0; the content sits 1.5 rows below.
         if (this.config.showFilename && this.filename) {
-            this._filenameTextId = this._addText(
-                this.filename,
-                { x: 0, y: currentY, z: 0 },
-                { color: this.config.filenameColor }
-            );
-            currentY -= this.metrics.lineHeight * 1.5;
+            await this._layoutFilename();
+        } else if (this._filenameField) {
+            this._filenameField.instanceMesh.visible = false;
         }
-
-        // Add ENTIRE content as single text item (worker handles newlines)
-        if (this.content.length > 0) {
-            const id = this._addText(
-                this.content,
-                { x: 0, y: currentY, z: 0 },
-                { color: this.config.textColor }
-            );
-            this._contentTextIds.push(id);
-        }
-
-        // Flush using the worker pipeline
-        await this._flush();
-
-        // Build line→slot index from builder's authoritative line offsets,
-        // and harvest the per-line wrap data needed for cursor positioning.
-        const contentItemMeta = this._getContentItemMeta();
-        this._buildLineSlotBase(contentItemMeta?.lineSlotOffsets);
-        this._buildLineRowIndex(contentItemMeta);
-        // Record the layout origin (where the worker anchored the content
-        // text). Caret math derives y from origin.y - visualRow * lineSpacing.
         this._layoutOriginY = (this.config.showFilename && this.filename)
             ? -this.metrics.lineHeight * 1.5
             : 0;
+
+        if (this.content.length > 0) {
+            const m = this.metrics;
+            const lp = resolveLayoutParams(this._foldLayout());
+            await this._pipeline.setText(this.content, {
+                wrapWidth: lp.wrapWidth,
+                lineHeight: m.lineHeight,
+                zStep: m.charHeight * (lp.zWrapSpacing || 0),
+                origin: { x: 0, y: this._layoutOriginY, z: 0 },
+                page: this._pageParams(lp, m),
+            });
+        }
         this._buildLayoutDescription();
         this._applyClip();
+        // Re-register the pick block with the live instance count (the birth registration
+        // saw count 0 — register-in-place reclaims the same ID range).
+        if (this._renderer && this._pickingSystem) {
+            this._pickingSystem.register('glyph', this._renderer, this._renderer);
+        }
 
         // If content shrank below the scroll position (e.g. an edit deleted lines while a
         // frame was active), the conveyor shifted past the end and the framed window would be
@@ -1516,109 +1145,74 @@ class CodeGrid extends FramedGlyphField {
             this._clearRenderedText();
             await this._layoutContent();
             this._scrollClampGuard = false;
-            return; // the re-entrant fold already arranged on the clamped buffer
+            return;
         }
-        this._applyArrangers(); // ARRANGE stage (see _applyArrangers) — runs every fold
+        this._applyArrangers(); // ARRANGE stage — empty until arrangers are byte-native
     }
 
     /**
-     * Get the renderer's itemMeta for the content text entry.
+     * Layout params → the pipeline's page params. One gate (screenRow >= pageRows, in the
+     * kernel), so pageRows flows straight through; the strides mirror the Layer 1 fold:
+     * newspaper bands step DOWN in y, z-pages recede per page, and the x stride is the
+     * mirror's measured widest row + the gap (computed by the adapter, never nominal).
      * @private
-     * @returns {Object|null} itemMeta with lineSlotOffsets if available
      */
-    _getContentItemMeta() {
-        if (this._contentTextIds.length === 0) return null;
-        if (!this._renderer) return null;
-
-        const collId   = this._contentTextIds[0];
-        const rendId   = this._idMap.get(collId);
-        if (rendId === undefined) return null;
-
-        const entry = this._renderer.renderedTexts.get(rendId);
-        return entry ?? null;
+    _pageParams(lp, m) {
+        const rows = Math.max(0, Math.trunc(lp.pageHeight || 0));
+        if (rows === 0) return { scrollRows: this._scrollOffset || 0 };
+        const charAdvance = m.charWidth + (m.spacing || 0);
+        if ((lp.axis || 'xy') === 'z') {
+            return {
+                pageRows: rows, pagesWide: 1,
+                depthPerBand: (lp.pageDepth || 0) * m.lineHeight,
+                scrollRows: this._scrollOffset || 0,
+            };
+        }
+        return {
+            pageRows: rows,
+            pagesWide: Math.max(1, Math.trunc(lp.pagesWide || 1)),
+            pageGapX: (lp.pageGapX || 0) * charAdvance,
+            bandStrideY: rows * m.lineHeight + (lp.pageGapY || 0) * m.lineHeight,
+            scrollRows: this._scrollOffset || 0,
+        };
     }
 
     /**
-     * The content bounds in this grid's local frame — the union of every committed item's
-     * FOLD EXTENT, or the arranged extent when an arranger has displaced the glyphs.
-     *
-     * Closed form and derived on read: each entry's extent was computed at dispatch from
-     * the layout scan's three scalars (core/foldGeometry.foldExtent) and costs nothing to
-     * union. Nothing is cached because nothing needs to be — there is no walk to amortize
-     * and therefore no staleness to reason about.
+     * The filename's own field + pipeline (byte mode), laid at y=0 above the content.
+     * @private
+     */
+    async _layoutFilename() {
+        if (!this._filenameField) {
+            this._filenameField = new GlyphField(this._rendererGroup, this.atlas, {
+                maxInstances: 4096,
+                defaultColor: this.config.filenameColor,
+                worldScale: this.config.worldScale,
+                bytePipeline: true,
+            });
+            this._filenamePipeline = new GlyphFieldPipeline(getComputeRenderer(), this._filenameField, this.atlas, {
+                maxBytes: 4096,
+                worldScale: this.config.worldScale,
+            });
+        }
+        this._filenameField.instanceMesh.visible = true;
+        await this._filenamePipeline.setText(this.filename, {
+            wrapWidth: 0, lineHeight: this.metrics.lineHeight, origin: { x: 0, y: 0, z: 0 },
+        });
+    }
+
+    /**
+     * The content bounds in this grid's local frame — the pipeline's extent, derived from
+     * the CPU mirror (the oracle the GPU slots are gate-checked against). Synchronous by
+     * construction: the mirror paginates in place on scroll/mode changes, so there is no
+     * readback and nothing to invalidate.
      * @private
      * @returns {{min:{x,y,z}, max:{x,y,z}, width:number, height:number, depth:number}|null}
      */
     _getContentBounds() {
-        if (this._displacementExtent) return this._displacementExtent;
-        const field = this._renderer;
-        if (!field) return null;
-        let min = null, max = null;
-        for (const [, entry] of field.renderedTexts) {
-            const e = entry.extent;
-            if (!e) continue;
-            if (!min) { min = { ...e.min }; max = { ...e.max }; continue; }
-            min.x = Math.min(min.x, e.min.x); max.x = Math.max(max.x, e.max.x);
-            min.y = Math.min(min.y, e.min.y); max.y = Math.max(max.y, e.max.y);
-            min.z = Math.min(min.z, e.min.z); max.z = Math.max(max.z, e.max.z);
-        }
-        if (!min) return null;
-        return { min, max, width: max.x - min.x, height: max.y - min.y, depth: max.z - min.z };
+        return this._layout?.extent() ?? null;
     }
 
-    // ============ Line → Buffer Slot Mapping ============
-
-    /**
-     * Build _lineSlotBase: maps each line index to the buffer slot index of
-     * its first codepoint. The builder emits one slot per codepoint (spaces
-     * and other invisible glyphs included), so within a line the slot offset
-     * equals the codepoint index — getSlotForChar just adds col to the base.
-     *
-     * Must be called after every flush that rebuilds geometry.
-     * @private
-     */
-    _buildLineSlotBase(builderLineSlotOffsets) {
-        const content = this.content;
-        if (!content) {
-            this._lineSlotBase = null;
-            return;
-        }
-
-        // Ensure this.lines is populated (async path doesn't split upfront)
-        if (this.lines.length === 0 && content.length > 0) {
-            this.lines = content.split('\n');
-        }
-
-        // If the builder provided line→slot offsets, use those directly.
-        // These are authoritative — computed in the same pass that built the buffers.
-        if (builderLineSlotOffsets) {
-            this._lineSlotBase = new Int32Array(builderLineSlotOffsets);
-            return;
-        }
-
-        // Fallback for sync path: derive from renderer's renderedTexts
-        if (!this._renderer) {
-            this._lineSlotBase = null;
-            return;
-        }
-
-        // Sync path: one text entry per non-empty line
-        const lineSlotBase = new Int32Array(this.lines.length);
-        let textIdCursor = 0;
-        for (let i = 0; i < this.lines.length; i++) {
-            if (this.lines[i].length === 0 || textIdCursor >= this._contentTextIds.length) {
-                // Empty line or past entries — use previous line's end
-                lineSlotBase[i] = i > 0 ? lineSlotBase[i - 1] : 0;
-                continue;
-            }
-            const collId = this._contentTextIds[textIdCursor++];
-            const rendId = this._idMap.get(collId);
-            const entry  = rendId !== undefined ? this._renderer.renderedTexts.get(rendId) : null;
-            lineSlotBase[i] = entry ? (entry.bufferStartIndex ?? 0) : 0;
-        }
-
-        this._lineSlotBase = lineSlotBase;
-    }
+    // ============ Line → Byte-Slot Mapping ============
 
     /** The wrap width the CURRENT fold uses (arranger overrides included). @private */
     _foldWrapWidth() {
@@ -1626,90 +1220,22 @@ class CodeGrid extends FramedGlyphField {
     }
 
     /**
-     * Build _lineStartRow — line → cumulative visual row, the O(1) "first row of line N"
-     * lookup the caret reads and the fold's extent counts.
-     *
-     * A line occupies 1 + lineSegments(slots, wrapWidth) rows, closed form, because wrapWidth
-     * counts SLOTS: wrap points land on exact multiples of it. The per-line array of wrap
-     * COLUMNS this used to carry alongside was that arithmetic sequence, materialized per line
-     * per flush so positionAt could linear-search it back into the division that produced it.
-     * positionAt does the division instead (LayoutDescription.positionAt).
-     *
-     * Slot counts come from the LINE TABLE, not from re-counting codepoints in `this.lines`.
-     * The two agree — the builder emits one slot per codepoint — but the kernel's own scan
-     * reads the line table, and two derivations that agree by invariant are one invariant away
-     * from a caret that points at the wrong row. Reading the same table the GPU reads removes
-     * the question.
-     * @private
-     * @param {?{lineSlotOffsets:number[], bufferStartIndex:number, glyphCount:number}} entry
-     *   the content item's renderer entry; falls back to codepoint counts when absent
-     *   (pre-flush, or the per-line sync path).
-     */
-    _buildLineRowIndex(entry) {
-        const lineCount = this.lines.length;
-        const wrap = this._foldWrapWidth();
-        const lso = entry?.lineSlotOffsets;
-        const usable = lso && lso.length === lineCount;
-        const endSlot = usable ? entry.bufferStartIndex + entry.glyphCount : 0;
-        const lineStartRow = new Int32Array(lineCount);
-        let cumulativeRows = 0;
-        for (let i = 0; i < lineCount; i++) {
-            lineStartRow[i] = cumulativeRows;
-            const slots = usable
-                ? (i + 1 < lineCount ? lso[i + 1] : endSlot) - lso[i]
-                : this.getLineSlotCount(i);
-            cumulativeRows += 1 + lineSegments(slots, wrap);
-        }
-        this._lineStartRow = lineStartRow;
-        this._totalVisualRows = cumulativeRows;
-    }
-
-    /**
-     * Build the queryable LayoutDescription for the current flush — the ONE source the
-     * caret / highlight / selection query against (positionAt, slotForChar) AND the source
-     * of the content's own extent (extent()).
-     *
-     * positionAt is the FOLD MIRROR: it evaluates the same pure layout function the GPU
-     * kernel runs, from the line tables + real advances + the same integer-row page fold —
-     * every input CPU-authored, so any glyph's location is answerable synchronously with no
-     * position buffer and no readback. The three scalars the extent needs (totalRows,
-     * maxRowExtent, maxSegs) come off the kernel's layout scan and ride on the entry.
-     * Rebuilt every flush. @private
+     * Build the queryable description for the current layout — the ONE source the caret /
+     * highlight / selection query against (positionAt, slotForChar) AND the source of the
+     * content's own extent (extent()). Byte-backed: slot == source byte offset, positions
+     * read the pipeline's CPU mirror (the oracle the GPU is gate-checked against).
+     * Rebuilt every load. @private
      */
     _buildLayoutDescription() {
-        if (!this._lineSlotBase || !this._lineStartRow) { this._layout = null; return; }
-        const m = this.metrics;
-        const lineLengths = new Int32Array(this.lines.length);
-        for (let i = 0; i < this.lines.length; i++) lineLengths[i] = this.getLineSlotCount(i);
-        const lp = resolveLayoutParams(this._foldLayout());   // the SAME normalization the dispatch applies
-        const entry = this._getContentItemMeta();
-        const fold = entry?.fold || null;
-        // The page fold, from the same measured row extent the kernel wrote into its item
-        // table. No "did pagination fire" witness: pageShift's own screenRow >= rows gate
-        // is the only test, on the GPU and here alike, so content that fits a page is
-        // unpaginated by arithmetic rather than by a second opinion.
-        const builderMetrics = { charWidth: m.charWidth, letterSpacing: m.spacing || 0, lineSpacing: m.lineHeight };
-        this._layout = new LayoutDescription({
-            lineSlotBase: this._lineSlotBase,
-            lineStartRow: this._lineStartRow,
-            lineLengths,
-            sizes: this._renderer?.getInstanceSizes?.() ?? null,
-            wrapWidth: lp.wrapWidth,
-            page: pageFold(lp, builderMetrics, fold?.maxRowExtent || 0),
-            originX: 0,
-            originY: this._layoutOriginY ?? 0,
-            lineSpacing: m.lineHeight,
-            zStep: m.charHeight * (lp.zWrapSpacing || 0),
-            cellHeight: fold?.maxGlyphHeight || m.charHeight,
-            advance: m.charWidth + (m.spacing || 0),
-            scrollOffset: this._scrollOffset || 0,  // so the mirror matches the scrolled glyphs
-            totalRows: fold?.totalRows || 0,
-            maxRowExtent: fold?.maxRowExtent || 0,
-            maxSegs: fold?.maxSegs || 0,
-            // Engine-mode arrangers write this table; the caret must ride it (an arranged
-            // glyph's location = fold + displacement, both CPU-authored).
-            displacements: this._renderer?._layoutDisplacements ?? null,
-        });
+        const idx = this._byteLineIndex;
+        const mirror = this._pipeline?.mirror;
+        this._layout = (idx && mirror) ? new ByteLayoutDescription({
+            bytes: this._bytes,
+            lineByteStart: idx.lineByteStart,
+            lineLengths: idx.lineLengths,
+            mirror,
+            scrollOffset: this._scrollOffset || 0,
+        }) : null;
         this._scheduleAnalyze();
     }
 
@@ -2146,15 +1672,13 @@ class CodeGrid extends FramedGlyphField {
      * Rebuild glyphs after a content mutation, clearing stale highlights and
      * re-painting the caret.
      *
-     * Routes through the worker pipeline because that path calls
-     * applyPrebuiltBuffers which swaps in fresh, exactly-sized
-     * InstancedBufferAttributes, so an edit can grow the content past the
-     * initial buffer.
+     * Routes through the byte pipeline: the edit re-encodes and re-runs the three
+     * dispatches, and _beginLoad right-sizes the buffers when the content grew.
      *
      * Edit ops fire-and-forget the returned promise. Routes through the SHARED _relayout mutex
-     * (not a separate guard) so edit and scroll/layout relayouts serialize and never trample the
-     * shared _pendingAdds / _pendingRemovals / _idMap state. _linesDirty tells _relayout to
-     * re-sync content from the edit-mutated line array (cursor clamp + repaint live in _relayout).
+     * (not a separate guard) so edit and scroll/layout relayouts serialize. _linesDirty tells
+     * _relayout to re-sync content from the edit-mutated line array (cursor clamp + repaint
+     * live in _relayout).
      *
      * @private
      * @returns {Promise<this>}

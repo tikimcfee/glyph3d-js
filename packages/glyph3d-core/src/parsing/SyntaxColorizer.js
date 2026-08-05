@@ -144,9 +144,12 @@ export async function analyzeGrid(grid) {
                 const c0 = toCp(row, lineText, u0);
                 const c1 = toCp(row, lineText, u1);
                 if (c1 <= c0) continue;
-                const startSlot = grid.getSlotForChar(row, c0);
+                // Slots are byte offsets, so a range's span is a byte count — codepoint
+                // counts undershoot on multibyte lines. byteOffsetOf clamps to EOL.
+                const startSlot = grid._layout.byteOffsetOf(row, c0);
                 if (startSlot < 0) continue;
-                renderer.setGlyphColorRange(startSlot, c1 - c0, color);
+                const endSlot = grid._layout.byteOffsetOf(row, c1);
+                renderer.setGlyphColorRange(startSlot, Math.max(0, endSlot - startSlot), color);
             }
         }
     } catch (e) {

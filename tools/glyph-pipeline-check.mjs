@@ -73,7 +73,7 @@ const corpora = [
 
 // ---- lanes: wrap × window × page. window 0 is a correctness lane, not a perf one. ----
 const PAGE_OFF = null;
-const PAGE_NEWS = { pageRows: 8, pageCols: 0, colWidth: 0, pageStrideX: 50, pagesWide: 2, depthPerBand: 5, depthPerColumn: 0 };
+const PAGE_NEWS = { pageRows: 8, pageCols: 0, colWidth: 0, pageStrideX: 50, pagesWide: 2, depthPerBand: 5, depthPerColumn: 0, bandStrideY: 13.2 };
 const PAGE_Z = { pageRows: 8, pageCols: 0, colWidth: 0, pageStrideX: 0, pagesWide: 1, depthPerBand: 20, depthPerColumn: 0 };
 // MetalLink's max-page-width fold: an over-wide line breaks into depth pages
 // (xPages = floor(col / pageCols), z recedes per column — Compute.metal:396).

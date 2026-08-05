@@ -76,7 +76,7 @@ export function packBytes(bytes) {
  * magnitude ordering — negatives sort descending in raw bits, ascending once inverted.
  */
 const floatToOrderedKey = /*#__PURE__*/ Fn(([f]) => {
-    const bits = bitcast(f, 'uint').toVar('bits');
+    const bits = bitcast(f, 'uint').toVar();
     return bits.bitAnd(uint(0x80000000)).equal(uint(0))
         .select(bits.bitOr(uint(0x80000000)), bits.bitNot());
 });
@@ -143,6 +143,7 @@ export default class GlyphPipelineKernels {
             pageRows:     uniform(0, 'int'),
             pageCols:     uniform(0, 'int'),
             pageStrideX:  uniform(0, 'float'),
+            bandStrideY:  uniform(0, 'float'),
             pagesWide:    uniform(1, 'int'),
             depthPerBand: uniform(0, 'float'),
             depthPerCol:  uniform(0, 'float'),
@@ -161,8 +162,8 @@ export default class GlyphPipelineKernels {
 
     /** Sequence length of the byte at `i`: 1..4, or 0 for a continuation byte. */
     _sequenceLength(i) {
-        const b = this._byteAt(i).toVar('b');
-        const n = int(0).toVar('n');
+        const b = this._byteAt(i).toVar();
+        const n = int(0).toVar();
         If(b.bitAnd(uint(0x80)).equal(uint(0)), () => { n.assign(int(1)); })
             .ElseIf(b.bitAnd(uint(0xE0)).equal(uint(0xC0)), () => { n.assign(int(2)); })
             .ElseIf(b.bitAnd(uint(0xF0)).equal(uint(0xE0)), () => { n.assign(int(3)); })
@@ -238,8 +239,8 @@ export default class GlyphPipelineKernels {
 
     /** Nearest leader strictly before `from`, or `from` when none. Bounded by MAX_WALK_STEPS. */
     _leaderBefore(from) {
-        const j = from.toVar('lb_j');
-        const found = from.toVar('lb_found');
+        const j = from.toVar();
+        const found = from.toVar();
         Loop(MAX_WALK_STEPS, () => {
             If(j.equal(uint(0)), () => { Break(); });
             j.assign(j.sub(uint(1)));
@@ -422,7 +423,8 @@ export default class GlyphPipelineKernels {
             const seg = wrapping.select(col.div(u.wrapWidth), int(0)).toVar('seg');
 
             const xf = x.add(yPage.mod(wide).toFloat().mul(u.pageStrideX)).toVar('xf');
-            const yf = u.origin.y.sub(screenRow.sub(yPage.mul(u.pageRows)).toFloat().mul(u.lineHeight)).toVar('yf');
+            const yf = u.origin.y.sub(screenRow.sub(yPage.mul(u.pageRows)).toFloat().mul(u.lineHeight))
+                .sub(yPage.div(wide).toFloat().mul(u.bandStrideY)).toVar('yf');
             const zf = u.origin.z.sub(seg.toFloat().mul(u.zWrapStep))
                 .add(yPage.div(wide).toFloat().mul(u.depthPerBand))
                 .add(xPage.toFloat().mul(u.depthPerCol)).toVar('zf');
@@ -493,6 +495,7 @@ export default class GlyphPipelineKernels {
         u.pageRows.value = Math.max(0, Math.trunc(p.pageRows || 0));
         u.pageCols.value = Math.max(0, Math.trunc(p.pageCols || 0));
         u.pageStrideX.value = p.pageStrideX || 0;
+        u.bandStrideY.value = p.bandStrideY || 0;
         u.pagesWide.value = Math.max(1, Math.trunc(p.pagesWide || 1));
         u.depthPerBand.value = p.depthPerBand || 0;
         u.depthPerCol.value = p.depthPerColumn || 0;

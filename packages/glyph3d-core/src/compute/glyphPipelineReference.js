@@ -249,12 +249,12 @@ export function layout(slots, id, params = {}) {
         if (q === cur) break;
     }
 
-    slots[o + S_X] = x;
-    slots[o + S_BASE_X] = x;
-    slots[o + S_Y] = -row * (params.lineHeight ?? slots[o + S_HEIGHT]);
+    slots[o + S_X] = x + (params.origin?.x || 0);
+    slots[o + S_BASE_X] = x + (params.origin?.x || 0);
+    slots[o + S_Y] = -row * (params.lineHeight ?? slots[o + S_HEIGHT]) + (params.origin?.y || 0);
     // Wrapped segments step back in depth (the long-column z-fan): seg is the glyph's own
     // wrap segment within its line. Exact — col and wrap are integers.
-    slots[o + S_Z] = -wrapRow * (params.zStep || 0);
+    slots[o + S_Z] = -wrapRow * (params.zStep || 0) + (params.origin?.z || 0);
     slots[o + S_ROW] = row;
     slots[o + S_COL] = col;
     // Position first, THEN publish — the ordering the inherit branch depends on.
@@ -278,6 +278,9 @@ export function layout(slots, id, params = {}) {
  *   explicit distance rather than a measured content width: the fan must not depend on a
  *   reduction this kernel cannot see. Feed it from the bounds pass when you want it snug.
  * @property {number} pagesWide   - page columns before wrapping down into the next band
+ * @property {number} bandStrideY  - world y between bands (newspaper rows of pages step
+ *   DOWN: pageRows×lineHeight + the inter-band gap). 0 for z-axis paging (bands recede
+ *   instead).
  * @property {number} depthPerBand   - z recession per completed band of pages
  * @property {number} depthPerColumn - z recession per horizontal page
  */
@@ -338,9 +341,10 @@ export function paginate(slots, id, p) {
     // walk computed, plus the pure page-assignment depths.
     const wrap = Math.max(0, Math.trunc(p.wrap || 0));
     const seg = wrap > 0 ? Math.floor(col / wrap) : 0;
+    const oy = p.origin?.y || 0, oz = p.origin?.z || 0;
     slots[o + S_X] = slots[o + S_BASE_X] + (yPage % wide) * (p.pageStrideX || 0);
-    slots[o + S_Y] = -(screenRow - yPage * rows) * p.lineHeight;
-    slots[o + S_Z] = -seg * (p.zStep || 0) + band * (p.depthPerBand || 0) + xPage * (p.depthPerColumn || 0);
+    slots[o + S_Y] = oy - (screenRow - yPage * rows) * p.lineHeight - band * (p.bandStrideY || 0);
+    slots[o + S_Z] = oz - seg * (p.zStep || 0) + band * (p.depthPerBand || 0) + xPage * (p.depthPerColumn || 0);
 }
 
 /**
@@ -399,7 +403,8 @@ export function runPipeline(bytes, trie, opts = {}) {
     // so the walk sees it too; zStep the walk applies itself. lineHeight is shared so
     // paginate's y reconstruction matches the walk's y exactly.
     const lp = { window: opts.window ?? 128, wrapWidth: opts.wrapWidth ?? 0,
-        lineHeight: opts.lineHeight, pageCols: opts.page?.pageCols || 0, zStep: opts.zStep || 0 };
+        lineHeight: opts.lineHeight, pageCols: opts.page?.pageCols || 0, zStep: opts.zStep || 0,
+        origin: opts.origin };
     if (order) for (const id of order) layout(slots, id, lp);
     else for (let id = 0; id < bytes.length; id++) layout(slots, id, lp);
 
@@ -407,7 +412,7 @@ export function runPipeline(bytes, trie, opts = {}) {
     const scrollRows = Math.max(0, Math.trunc(opts.scrollRows ?? opts.page?.scrollRows ?? 0));
     if (opts.page || scrollRows > 0) {
         const page = { ...opts.page, scrollRows, wrap: lp.wrapWidth, zStep: lp.zStep,
-            lineHeight: lp.lineHeight ?? opts.page?.lineHeight };
+            origin: opts.origin, lineHeight: lp.lineHeight ?? opts.page?.lineHeight };
         for (let id = 0; id < bytes.length; id++) paginate(slots, id, page);
     }
 

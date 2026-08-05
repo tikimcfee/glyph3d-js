@@ -278,31 +278,21 @@ export class DiffController {
             textColor: { r: 0.65, g: 0.65, b: 0.65 },
         });
 
-        // Bypass CodeGrid's normal loadFile flow — we need per-line color control.
-        // CodeGrid now exposes addText() / flush() directly (no GlyphCollection wrapper).
-        const metrics = grid.metrics;
-        let currentY = 0;
+        // Per-line color control rides the normal load + a byte-range paint: the slot IS
+        // the byte offset, so each line's span is one contiguous range.
+        const text = lines.map((line) => line.text || ' ').join('\n'); // space keeps vertical rhythm
+        await grid.loadFile(label, text);
 
-        // Add filename label
-        grid.addText(label, { x: 0, y: currentY, z: 0 }, {
-            color: options.filenameColor || { r: 0.6, g: 0.8, b: 1.0 }
-        });
-        currentY -= metrics.lineHeight * 1.5;
-
-        // Add each line with its diff color
-        for (const line of lines) {
-            const color = getDiffColor(line.type);
-            const displayText = line.text || ' '; // space for spacer lines to maintain vertical rhythm
-
-            grid.addText(displayText, { x: 0, y: currentY, z: 0 }, { color });
-            currentY -= metrics.lineHeight;
+        const desc = grid._layout;
+        if (desc) {
+            const renderer = grid.getRenderer();
+            for (let i = 0; i < lines.length; i++) {
+                const color = getDiffColor(lines[i].type);
+                const start = desc.byteOffsetOf(i, 0);
+                const end = desc.byteOffsetOf(i, desc.lineSlotCount(i));
+                if (start >= 0 && end > start) renderer.setGlyphColorRange(start, end - start, color);
+            }
         }
-
-        // Flush to GPU via worker pipeline
-        await grid.flush();
-
-        // Update the background to fit content
-        grid._updateBackground();
 
         return grid;
     }

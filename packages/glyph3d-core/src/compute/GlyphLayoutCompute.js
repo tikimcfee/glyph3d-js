@@ -34,6 +34,9 @@ let _deviceLostNoted = false;
 /** Register the app's initialized WebGPURenderer (engine boot). Null unregisters. */
 export function setComputeRenderer(renderer) { _renderer = renderer || null; _deviceLostNoted = false; }
 
+/** The registered compute renderer (byte-pipeline adapters take it). */
+export function getComputeRenderer() { return _renderer; }
+
 /** On when a renderer is registered — the engine is the only layout path for grids. */
 export function isGpuLayoutEnabled() { return _renderer !== null; }
 
