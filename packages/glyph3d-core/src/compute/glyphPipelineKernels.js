@@ -91,13 +91,14 @@ export function orderedKeyToFloat(key) {
 }
 
 /**
- * The six bounds cells, pre-armed so the first atomic always wins.
- * Layout: [minX, minY, minZ, maxX, maxY, maxZ] as ordered keys.
+ * The bounds cells, pre-armed so the first atomic always wins.
+ * Layout: [minX, minY, minZ, maxX, maxY, maxZ, totalRows, maxRowExtent] as ordered keys.
+ * Lanes 6/7 arm to the minimum key — any real value wins the max.
  */
 export function armedBoundsKeys() {
-    const a = new Uint32Array(6);
+    const a = new Uint32Array(8);
     a[0] = a[1] = a[2] = 0xFFFFFFFF;   // min lanes start at +inf's key
-    a[3] = a[4] = a[5] = 0x00000000;   // max lanes start at -inf's key
+    a[3] = a[4] = a[5] = a[6] = a[7] = 0x00000000;   // max lanes start at -inf's key
     return a;
 }
 
@@ -119,7 +120,7 @@ export default class GlyphPipelineKernels {
         this.slots = instancedArray(this.maxBytes * SLOT_STRIDE, 'float').setName('GlyphSlots');
         this.trieIndex = instancedArray(trie.blockIndex.length, 'uint').setName('GlyphTrieIndex');
         this.trieBlocks = instancedArray(trie.blocks.length, 'float').setName('GlyphTrieBlocks');
-        this.bounds = instancedArray(6, 'uint').setName('GlyphBounds').toAtomic();
+        this.bounds = instancedArray(8, 'uint').setName('GlyphBounds').toAtomic();
         this.misses = instancedArray(maxMisses, 'uint').setName('GlyphMisses');
         this.missCount = instancedArray(1, 'uint').setName('GlyphMissCount').toAtomic();
 
@@ -135,8 +136,10 @@ export default class GlyphPipelineKernels {
             window:       uniform(128, 'int'),
             wrapWidth:    uniform(0, 'int'),
             lineHeight:   uniform(1, 'float'),
+            zWrapStep:    uniform(0, 'float'),
             origin:       uniform(vec3(0, 0, 0)),
             // page
+            scrollRows:   uniform(0, 'int'),
             pageRows:     uniform(0, 'int'),
             pageCols:     uniform(0, 'int'),
             pageStrideX:  uniform(0, 'float'),
@@ -328,7 +331,8 @@ export default class GlyphPipelineKernels {
                 });
             });
             If(col.lessThan(int(0)), () => { col.assign(run); });
-            row.addAssign(wrapping.select(col.div(wrap), int(0)));
+            const wrapRow = wrapping.select(col.div(wrap), int(0)).toVar('wrapRow');
+            row.addAssign(wrapRow);
 
             // ── loop 2: the advance sum, bounded by the fold unit ───────────────────────
             // Now col is known, so the fold unit is known to have started exactly
@@ -359,7 +363,8 @@ export default class GlyphPipelineKernels {
             // function of the base position and re-running it accumulates nothing.
             S.element(o.add(uint(S_BASE_X))).assign(x.add(u.origin.x));
             S.element(o.add(uint(S_Y))).assign(row.toFloat().negate().mul(u.lineHeight).add(u.origin.y));
-            S.element(o.add(uint(S_Z))).assign(u.origin.z);
+            // Wrapped segments step back in depth (the long-column z-fan); wrapRow is exact.
+            S.element(o.add(uint(S_Z))).assign(u.origin.z.sub(wrapRow.toFloat().mul(u.zWrapStep)));
             S.element(o.add(uint(S_ROW))).assign(row.toFloat());
             S.element(o.add(uint(S_COL))).assign(col.toFloat());
             // Position first, THEN publish. The inherit branch above reads F_RENDERED and then
@@ -390,29 +395,36 @@ export default class GlyphPipelineKernels {
             const o = id.mul(uint(SLOT_STRIDE)).toVar('o');
             const row = int(lane(id, S_ROW)).toVar('row');
             const col = int(lane(id, S_COL)).toVar('col');
+            // The conveyor: scroll shifts content up; rows scrolled above the origin
+            // (negative screenRow) stay in flow — the page gate leaves them untouched.
+            const screenRow = row.sub(u.scrollRows).toVar('screenRow');
             // RECONSTRUCTIVE, never accumulative: x reads the walk's untouched base lane
             // (already within the fold unit — loop 2 was bounded by wrap or pageCols), and
             // y/z are rebuilt from the exact integer lanes (base y = origin.y −
-            // row×lineHeight, base z = origin.z). Re-running with new params re-derives from
-            // base — there is no "re-paginate", the remap cannot double-apply.
+            // screenRow×lineHeight, base z = origin.z − seg×zWrapStep). Re-running with new
+            // params re-derives from base — there is no "re-paginate", the remap cannot
+            // double-apply.
             const x = lane(id, S_BASE_X).toVar('x');
 
             // EVERY page decision reads the integer lanes. Keying this off the float position
             // put 119 glyphs on the wrong page in the reference's own tests, because f32
             // addition is not associative and a boundary row wobbles by a ULP.
             const yPage = int(0).toVar('yPage');
-            If(u.pageRows.greaterThan(int(0)), () => {
-                yPage.assign(row.div(u.pageRows));
+            If(u.pageRows.greaterThan(int(0)).and(screenRow.greaterThanEqual(u.pageRows)), () => {
+                yPage.assign(screenRow.div(u.pageRows));
             });
             const xPage = int(0).toVar('xPage');
             If(u.pageCols.greaterThan(int(0)), () => {
                 xPage.assign(col.div(u.pageCols));
             });
             const wide = u.pagesWide.max(int(1)).toVar('wide');
+            const wrapping = u.wrapWidth.greaterThan(int(0)).toVar('wrapping');
+            const seg = wrapping.select(col.div(u.wrapWidth), int(0)).toVar('seg');
 
             const xf = x.add(yPage.mod(wide).toFloat().mul(u.pageStrideX)).toVar('xf');
-            const yf = u.origin.y.sub(row.sub(yPage.mul(u.pageRows)).toFloat().mul(u.lineHeight)).toVar('yf');
-            const zf = u.origin.z.add(yPage.div(wide).toFloat().mul(u.depthPerBand))
+            const yf = u.origin.y.sub(screenRow.sub(yPage.mul(u.pageRows)).toFloat().mul(u.lineHeight)).toVar('yf');
+            const zf = u.origin.z.sub(seg.toFloat().mul(u.zWrapStep))
+                .add(yPage.div(wide).toFloat().mul(u.depthPerBand))
                 .add(xPage.toFloat().mul(u.depthPerCol)).toVar('zf');
             S.element(o.add(uint(S_X))).assign(xf);
             S.element(o.add(uint(S_Y))).assign(yf);
@@ -427,6 +439,10 @@ export default class GlyphPipelineKernels {
             atomicMax(this.bounds.element(uint(3)), floatToOrderedKey(xf.add(w)));
             atomicMax(this.bounds.element(uint(4)), floatToOrderedKey(yf.add(h)));
             atomicMax(this.bounds.element(uint(5)), floatToOrderedKey(zf));
+            // The scroll/page scalars: total visual rows (scroll-independent — row is
+            // pre-conveyor) and the widest fold-unit row (what a snug pageStrideX feeds).
+            atomicMax(this.bounds.element(uint(6)), floatToOrderedKey(row.toFloat().add(1)));
+            atomicMax(this.bounds.element(uint(7)), floatToOrderedKey(x));
         })().compute(1).setName('glyphPaginateAndBounds');
     }
 
@@ -454,6 +470,7 @@ export default class GlyphPipelineKernels {
         u.window.value = params.window ?? 128;
         u.wrapWidth.value = Math.max(0, Math.trunc(params.wrapWidth || 0));
         u.lineHeight.value = params.lineHeight ?? 1;
+        u.zWrapStep.value = params.zStep || 0;
         if (params.origin) u.origin.value.set(params.origin.x || 0, params.origin.y || 0, params.origin.z || 0);
         this.setPage(params.page || {});
 
@@ -472,6 +489,7 @@ export default class GlyphPipelineKernels {
      */
     setPage(p = {}) {
         const u = this._u;
+        u.scrollRows.value = Math.max(0, Math.trunc(p.scrollRows || 0));
         u.pageRows.value = Math.max(0, Math.trunc(p.pageRows || 0));
         u.pageCols.value = Math.max(0, Math.trunc(p.pageCols || 0));
         u.pageStrideX.value = p.pageStrideX || 0;
@@ -499,13 +517,15 @@ export default class GlyphPipelineKernels {
         return this;
     }
 
-    /** @returns {Promise<{min:{x,y,z}, max:{x,y,z}}>} the reduced box, 24 bytes off the GPU. */
+    /** @returns {Promise<{min:{x,y,z}, max:{x,y,z}, totalRows:number, maxRowExtent:number}>} the reduced box + scalars, 32 bytes off the GPU. */
     async readBounds() {
         const raw = await this.renderer.getArrayBufferAsync(this.bounds.value);
-        const k = new Uint32Array(raw, 0, 6);
+        const k = new Uint32Array(raw, 0, 8);
         return {
             min: { x: orderedKeyToFloat(k[0]), y: orderedKeyToFloat(k[1]), z: orderedKeyToFloat(k[2]) },
             max: { x: orderedKeyToFloat(k[3]), y: orderedKeyToFloat(k[4]), z: orderedKeyToFloat(k[5]) },
+            totalRows: orderedKeyToFloat(k[6]),
+            maxRowExtent: orderedKeyToFloat(k[7]),
         };
     }
 

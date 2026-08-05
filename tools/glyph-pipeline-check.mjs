@@ -89,7 +89,12 @@ const lanes = [
   { wrapWidth: 200, window: 128, page: PAGE_Z },
   { wrapWidth: 200, window: 128, page: PAGE_NEWS, repaginateTo: PAGE_Z },  // kernel 3 alone re-folds, from base
   { wrapWidth: 0, window: 128, page: PAGE_COLS, onlyOn: 'single-line-40k' },  // the long line folds into depth pages
+  { wrapWidth: 200, window: 128, page: PAGE_NEWS, scrollRows: 12 },   // the conveyor, paginated
+  { wrapWidth: 200, window: 128, page: null, scrollRows: 12 },        // scroll without pagination
+  { wrapWidth: 200, window: 128, page: PAGE_NEWS, onlyOn: 'GlyphTrie.js', liveTrie: true },  // the REAL atlas's trie
+  { wrapWidth: 200, window: 128, page: PAGE_Z, onlyOn: 'GlyphTrie.js', liveTrie: true },
 ];
+const ZSTEP = 0.21;   // 0.15 × CELL_H — the app's long-column zWrapSpacing, in world units
 
 // ---- the in-page probe ----
 const probe = (opts) => `(async (o) => {
@@ -98,11 +103,12 @@ const probe = (opts) => `(async (o) => {
   const client = window.__glyphClient;
   if (!client) return { fatal: 'window.__glyphClient missing — the app did not boot' };
 
-  let trieMod, refMod, kernMod;
+  let trieMod, refMod, kernMod, liveTrieMod;
   try {
     trieMod = await import(F('/packages/glyph3d-core/src/compute/GlyphTrie.js'));
     refMod  = await import(F('/packages/glyph3d-core/src/compute/glyphPipelineReference.js'));
     kernMod = await import(F('/packages/glyph3d-core/src/compute/glyphPipelineKernels.js'));
+    liveTrieMod = await import(F('/packages/glyph3d-core/src/compute/liveTrie.js'));
   } catch (e) { return { fatal: 'import failed: ' + (e && e.message || e) }; }
 
   // The fixture atlas — identical to glyph-pipeline.test.mjs's, so a green headless spec and
@@ -116,8 +122,13 @@ const probe = (opts) => `(async (o) => {
   addRange(0x2500, 0x257F, CELL_W, CELL_H);
   addRange(0x4E00, 0x4E7F, CELL_W * 2, CELL_H * 1.15);
   addRange(0x1F600, 0x1F64F, CELL_W * 2, CELL_H);
-  const trie = trieMod.buildGlyphTrie(SOURCE.keys(), (cp) => SOURCE.get(cp) || null,
+  const fixtureTrie = trieMod.buildGlyphTrie(SOURCE.keys(), (cp) => SOURCE.get(cp) || null,
     { missingAdvance: CELL_W, missingHeight: CELL_H });
+  // The live trie: built from the app's real atlas (FontChain slots, real advances). Used by
+  // liveTrie lanes; reference and GPU share the same trie object, so the comparison is
+  // self-consistent regardless of the metrics in it.
+  let liveTrie = null, liveErr = null;
+  try { liveTrie = liveTrieMod.buildLiveTrie(client.ctx.atlas, 0.025); } catch (e) { liveErr = e && e.message || String(e); }
 
   // Offscreen renderer, reused across lanes (the live scene's is untouched).
   const store = window.__glyphPipelineCheck || (window.__glyphPipelineCheck = {});
@@ -141,21 +152,26 @@ const probe = (opts) => `(async (o) => {
       if (lane.onlyOn && lane.onlyOn !== corpus.name) continue;
       const L = { corpus: corpus.name, wrapWidth: lane.wrapWidth, window: lane.window,
         page: lane.page ? (lane.page.depthPerBand === 20 ? 'z' : lane.page.pageCols > 0 ? 'cols' : 'news') : 'off',
-        repaginate: !!lane.repaginateTo,
+        repaginate: !!lane.repaginateTo, scrollRows: lane.scrollRows || 0,
         expectFail: (lane.expectFail && (!lane.expectFailOn || lane.expectFailOn === corpus.name)) ? lane.expectFail : null,
         failures: [], exactChecked: 0, posChecked: 0, maxDelta: 0 };
       const fail = (m) => { if (L.failures.length < 6) L.failures.push(m); L.ok = false; };
       L.ok = true;
       try {
+        if (lane.liveTrie && !liveTrie) throw new Error('live trie build failed: ' + liveErr);
+        const trie = lane.liveTrie ? liveTrie : fixtureTrie;
         const pageParams = (p) => p ? Object.assign({}, p, { lineHeight: LINE_H }) : undefined;
         const refOpts = { window: lane.window, wrapWidth: lane.wrapWidth, lineHeight: LINE_H,
+          zStep: o.zStep, scrollRows: lane.scrollRows || 0,
           page: pageParams(lane.repaginateTo || lane.page) };
         const ref = refMod.runPipeline(bytes, trie, refOpts);
 
         const K = new kernMod.default(store.renderer, { maxBytes: Math.max(1024, bytes.length), trie });
         const t0 = performance.now();
+        const pageBag = Object.assign({}, lane.page || {});
+        if (lane.scrollRows) pageBag.scrollRows = lane.scrollRows;
         K.setFile(bytes, { window: lane.window, wrapWidth: lane.wrapWidth, lineHeight: LINE_H,
-          origin: { x: 0, y: 0, z: 0 }, page: lane.page || {} });
+          zStep: o.zStep, origin: { x: 0, y: 0, z: 0 }, page: pageBag });
         K.run();
         if (lane.repaginateTo) { K.setPage(lane.repaginateTo); K.repaginate(); }
         const t1 = performance.now();
@@ -202,6 +218,11 @@ const probe = (opts) => `(async (o) => {
             const tol = o.eps + Math.max(Math.abs(ref.bounds.min[k]), Math.abs(ref.bounds.max[k])) * 5e-5;
             if (dMin > tol || dMax > tol) fail('bounds.' + k + ' gpu [' + gpuBounds.min[k] + ', ' + gpuBounds.max[k] + '] vs ref [' + ref.bounds.min[k] + ', ' + ref.bounds.max[k] + ']');
           }
+          // The scroll/page scalars: totalRows is an integer count — exact. maxRowExtent
+          // is a float sum — the same magnitude-scaled tolerance as positions.
+          if (gpuBounds.totalRows !== ref.bounds.totalRows) fail('totalRows gpu ' + gpuBounds.totalRows + ' vs ref ' + ref.bounds.totalRows);
+          const eTol = o.eps + Math.abs(ref.bounds.maxRowExtent) * 5e-5;
+          if (Math.abs(gpuBounds.maxRowExtent - ref.bounds.maxRowExtent) > eTol) fail('maxRowExtent gpu ' + gpuBounds.maxRowExtent + ' vs ref ' + ref.bounds.maxRowExtent);
         }
 
         // misses — same set, order-free
@@ -225,13 +246,13 @@ const app = await openApp(browser, { wait: WAIT });
 let failed = 0;
 try {
   if (!app.booted) { console.error('app did not boot'); process.exit(1); }
-  const report = await app.page.evaluate(probe({ repo: REPO, corpora, lanes, eps: EPS }));
+  const report = await app.page.evaluate(probe({ repo: REPO, corpora, lanes, eps: EPS, zStep: ZSTEP }));
   if (report.fatal) { console.error('FATAL: ' + report.fatal); process.exit(1); }
   if (AS_JSON) { console.log(JSON.stringify(report, null, 2)); }
   else {
     console.log(`glyph-pipeline-check — GPU vs executable spec (renderer: ${report.renderer}, eps ${EPS})\n`);
     for (const L of report.lanes) {
-      const head = `  ${L.ok ? '✓' : '✗'} ${L.corpus}  wrap=${L.wrapWidth} window=${L.window} page=${L.page}${L.repaginate ? ' (repaginate)' : ''}`;
+      const head = `  ${L.ok ? '✓' : '✗'} ${L.corpus}  wrap=${L.wrapWidth} window=${L.window} page=${L.page}${L.repaginate ? ' (repaginate)' : ''}${L.scrollRows ? ` scroll=${L.scrollRows}` : ''}`;
       if (L.expectFail) {
         // A documented kernel bug lives here. Green while reality matches the note —
         // an unexpected PASS means someone fixed it and the marker should go.

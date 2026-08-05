@@ -36,6 +36,9 @@ export default class MonospaceShapeCache {
     /** @returns {number} Number of cached codepoints */
     get size() { return this._map.size; }
 
+    /** @returns {Iterable<number>} the cached working set (primed + encountered so far) */
+    codepoints() { return this._map.keys(); }
+
     /**
      * Prime the cache by shaping a representative string once.
      *

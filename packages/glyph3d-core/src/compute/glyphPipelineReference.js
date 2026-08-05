@@ -252,7 +252,9 @@ export function layout(slots, id, params = {}) {
     slots[o + S_X] = x;
     slots[o + S_BASE_X] = x;
     slots[o + S_Y] = -row * (params.lineHeight ?? slots[o + S_HEIGHT]);
-    slots[o + S_Z] = 0;
+    // Wrapped segments step back in depth (the long-column z-fan): seg is the glyph's own
+    // wrap segment within its line. Exact — col and wrap are integers.
+    slots[o + S_Z] = -wrapRow * (params.zStep || 0);
     slots[o + S_ROW] = row;
     slots[o + S_COL] = col;
     // Position first, THEN publish — the ordering the inherit branch depends on.
@@ -267,6 +269,11 @@ export function layout(slots, id, params = {}) {
  *   When set (and wrap is off), it is ALSO the walk's fold unit: loop 2 sums only the
  *   within-page advances, so S_BASE_X is already the within-page x and there is nothing
  *   nominal to subtract. Changing it changes the walk — a full re-run, not a repaginate.
+ * @property {number} scrollRows  - the conveyor: visual rows scrolled off the top. screenRow
+ *   = row − scrollRows; negative rows stay in flow above the origin (they never paginate).
+ * @property {number} zStep       - depth step per WRAP SEGMENT (the long-column z-fan). The
+ *   segment index is floor(col / wrap) — exact, from the integer lanes.
+ * @property {number} wrap        - the wrap width the walk ran with (for the segment index).
  * @property {number} pageStrideX - world x between fanned page columns (0 = no fan). An
  *   explicit distance rather than a measured content width: the fan must not depend on a
  *   reduction this kernel cannot see. Feed it from the bounds pass when you want it snug.
@@ -306,14 +313,20 @@ export function paginate(slots, id, p) {
 
     const rows = Math.max(0, Math.trunc(p.pageRows || 0));
     const cols = Math.max(0, Math.trunc(p.pageCols || 0));
-    if (rows === 0 && cols === 0) return;
+    const scroll = Math.max(0, Math.trunc(p.scrollRows || 0));
+    if (rows === 0 && cols === 0 && scroll === 0) return;
 
     const row = slots[o + S_ROW], col = slots[o + S_COL];
+    // The conveyor: scroll shifts content up; rows scrolled above the origin (negative
+    // screenRow) stay in flow — the page gate is screenRow >= rows, so they never paginate.
+    const screenRow = row - scroll;
 
+    // The gate, in INTEGER rows — content shorter than one page never paginates, and a row
+    // exactly on the boundary starts a new page (one gate, no epsilon anywhere).
     let yPage = 0;
-    if (rows > 0) yPage = Math.floor(row / rows);             // exact
+    if (rows > 0 && screenRow >= rows) yPage = Math.floor(screenRow / rows);   // exact
     let xPage = 0;
-    if (cols > 0) xPage = Math.floor(col / cols);             // exact
+    if (cols > 0) xPage = Math.floor(col / cols);                              // exact
 
     // Fan the vertical pages across `pagesWide` columns, then wrap down into the next band.
     // Both the column slot and the band index come from the exact page number.
@@ -321,10 +334,13 @@ export function paginate(slots, id, p) {
     const band = Math.floor(yPage / wide);
 
     // From BASE: the walk's x (already within the fold unit) plus the fan; y rebuilt from
-    // the integer row so the page's top is its own row 0; z is pure page assignment.
+    // the integer row so the page's top is its own row 0; z = the wrap-segment step the
+    // walk computed, plus the pure page-assignment depths.
+    const wrap = Math.max(0, Math.trunc(p.wrap || 0));
+    const seg = wrap > 0 ? Math.floor(col / wrap) : 0;
     slots[o + S_X] = slots[o + S_BASE_X] + (yPage % wide) * (p.pageStrideX || 0);
-    slots[o + S_Y] = -(row - yPage * rows) * p.lineHeight;
-    slots[o + S_Z] = band * (p.depthPerBand || 0) + xPage * (p.depthPerColumn || 0);
+    slots[o + S_Y] = -(screenRow - yPage * rows) * p.lineHeight;
+    slots[o + S_Z] = -seg * (p.zStep || 0) + band * (p.depthPerBand || 0) + xPage * (p.depthPerColumn || 0);
 }
 
 /**
@@ -334,7 +350,10 @@ export function paginate(slots, id, p) {
  * loads once and leaves, so contention collapses almost immediately instead of every thread
  * doing a compare-exchange. Here it is the same reduction written serially.
  *
- * `box` is [minX, minY, minZ, maxX, maxY, maxZ], pre-armed to ±Infinity.
+ * `box` is [minX, minY, minZ, maxX, maxY, maxZ], pre-armed to ±Infinity. When it has two
+ * more lanes (length 8), they collect the scroll/page scalars: [6] = max(row+1) — the
+ * content's total visual rows, scroll-independent (row is pre-conveyor) — and [7] = max
+ * base x, the widest fold-unit row (what a snug pageStrideX feeds from).
  * @param {Float32Array} slots @param {number} id @param {Float64Array|number[]} box
  */
 export function boundsReduce(slots, id, box) {
@@ -348,6 +367,12 @@ export function boundsReduce(slots, id, box) {
     if (x + w > box[3]) box[3] = x + w;
     if (y + h > box[4]) box[4] = y + h;
     if (z > box[5]) box[5] = z;
+    if (box.length > 6) {
+        const rowPlus1 = slots[o + S_ROW] + 1;
+        if (rowPlus1 > box[6]) box[6] = rowPlus1;
+        const bx = slots[o + S_BASE_X];
+        if (bx > box[7]) box[7] = bx;
+    }
 }
 
 /**
@@ -371,19 +396,22 @@ export function runPipeline(bytes, trie, opts = {}) {
 
     const order = opts.order || null;
     // pageCols is the walk's fold unit when wrap is off (loop 2 sums within-page advances),
-    // so the walk sees it too; lineHeight is shared so paginate's y reconstruction matches
-    // the walk's y exactly.
+    // so the walk sees it too; zStep the walk applies itself. lineHeight is shared so
+    // paginate's y reconstruction matches the walk's y exactly.
     const lp = { window: opts.window ?? 128, wrapWidth: opts.wrapWidth ?? 0,
-        lineHeight: opts.lineHeight, pageCols: opts.page?.pageCols || 0 };
+        lineHeight: opts.lineHeight, pageCols: opts.page?.pageCols || 0, zStep: opts.zStep || 0 };
     if (order) for (const id of order) layout(slots, id, lp);
     else for (let id = 0; id < bytes.length; id++) layout(slots, id, lp);
 
-    if (opts.page) {
-        const page = { ...opts.page, lineHeight: lp.lineHeight ?? opts.page.lineHeight };
+    // Scroll without pagination still needs the remap pass (the conveyor is a y shift).
+    const scrollRows = Math.max(0, Math.trunc(opts.scrollRows ?? opts.page?.scrollRows ?? 0));
+    if (opts.page || scrollRows > 0) {
+        const page = { ...opts.page, scrollRows, wrap: lp.wrapWidth, zStep: lp.zStep,
+            lineHeight: lp.lineHeight ?? opts.page?.lineHeight };
         for (let id = 0; id < bytes.length; id++) paginate(slots, id, page);
     }
 
-    const box = new Float64Array([Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity]);
+    const box = new Float64Array([Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity, 0, 0]);
     for (let id = 0; id < bytes.length; id++) boundsReduce(slots, id, box);
 
     let leaders = 0;
@@ -396,6 +424,8 @@ export function runPipeline(bytes, trie, opts = {}) {
         bounds: box[0] === Infinity ? null : {
             min: { x: box[0], y: box[1], z: box[2] },
             max: { x: box[3], y: box[4], z: box[5] },
+            totalRows: box[6],
+            maxRowExtent: box[7],
         },
         misses,
         leaders,
