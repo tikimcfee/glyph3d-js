@@ -650,12 +650,14 @@ const bulkProbe = (opts) => `(async (o) => {
   if (!atlas) return { fatal: 'client.ctx.atlas missing' };
   const F = (p) => '/@fs' + o.repo + p;
 
-  let builders, cellMetrics, bridgeMod, kmod;
+  let builders, cellMetrics, bridgeMod, kmod, foldEval, foldGeom;
   try {
     builders    = await import(F('/packages/glyph3d-core/src/workers/builders/index.js'));
     cellMetrics = await import(F('/packages/glyph3d-core/src/core/cellMetrics.js'));
     bridgeMod   = await import(F('/packages/glyph3d-core/src/workers/WorkerBridge.js'));
     kmod        = await import(F('/packages/glyph3d-core/src/compute/GlyphLayoutKernel.js'));
+    foldEval    = await import(F('/packages/glyph3d-core/src/core/foldEvaluate.js'));
+    foldGeom    = await import(F('/packages/glyph3d-core/src/core/foldGeometry.js'));
   } catch (e) { return { fatal: 'import failed: ' + (e && e.message || e) }; }
   const Kernel = kmod.default;
   const bridge = bridgeMod.getWorkerBridge && bridgeMod.getWorkerBridge();
@@ -721,7 +723,7 @@ const bulkProbe = (opts) => `(async (o) => {
     pageGapXWorld: 0, pageGapYWorld: 0, pageDepthWorld: 0, axis: 'xy',
   };
   const kernel = new Kernel(RD, { maxSlots, maxLines });
-  const cfg = (fi) => { const t = tables[fi]; kernel.configure({ items: [{ slotCount: t.slotCount,
+  const cfg = (fi) => { const t = tables[fi]; return kernel.configure({ items: [{ slotCount: t.slotCount,
     lineTable: t.lineTable, sizes: t.sizes, sizeBase: 0, outBase: 0, params }], totalSlots: t.slotCount }); };
 
   // Warm: first dispatch builds the pipeline; keep it out of both GPU lanes.
@@ -739,6 +741,91 @@ const bulkProbe = (opts) => `(async (o) => {
     if (queue) await queue.onSubmittedWorkDone();
     R.gpuSerialTotalMs = performance.now() - t0; }
 
+  // ---- lane 2b: GPU serial, FRESH KERNEL PER FILE — the real per-grid shape (each field
+  //      owns its kernel, so each first dispatch pays pipeline creation) ----
+  // o.sharePipeline: EXPERIMENT — key three's compute-pipeline cache by the PROGRAM alone
+  // (stageCompute.id) instead of (node.id, stage.id). Identical WGSL + identical bind-group
+  // layout = the same driver pipeline; per-node keying is what makes each field pay ~1.1ms.
+  if (o.sharePipeline) {
+    const P = RD._pipelines;
+    if (P && !P.__sharePatched) {
+      P._getComputeCacheKey = (computeNode, stageCompute) => 'shared:' + stageCompute.id;
+      P.__sharePatched = true;
+    }
+  }
+  const perFileFresh = new Float64Array(o.files.length);
+  { const t0 = performance.now();
+    for (let fi = 0; fi < o.files.length; fi++) {
+      const t1 = performance.now();
+      const t = tables[fi];
+      const k = new Kernel(RD, { maxSlots: t.slotCount, maxLines: t.lineTable.length });
+      k.configure({ items: [{ slotCount: t.slotCount, lineTable: t.lineTable, sizes: t.sizes,
+        sizeBase: 0, outBase: 0, params }], totalSlots: t.slotCount });
+      await k.compute();
+      perFileFresh[fi] = performance.now() - t1;
+      k.dispose();
+    }
+    if (queue) await queue.onSubmittedWorkDone();
+    R.gpuFreshKernelTotalMs = performance.now() - t0; }
+
+  // ---- lane 2c: fresh kernel + configure, NO dispatch — isolates JS-side allocation
+  //      from pipeline creation (which happens at first compute) ----
+  { const t0 = performance.now();
+    for (let fi = 0; fi < o.files.length; fi++) {
+      const t = tables[fi];
+      const k = new Kernel(RD, { maxSlots: t.slotCount, maxLines: t.lineTable.length });
+      k.configure({ items: [{ slotCount: t.slotCount, lineTable: t.lineTable, sizes: t.sizes,
+        sizeBase: 0, outBase: 0, params }], totalSlots: t.slotCount });
+      k.dispose();
+    }
+    R.gpuFreshNoDispatchMs = performance.now() - t0; }
+
+  // ---- lane 2d: fresh FIELD per file — the commit path in isolation (GlyphField
+  //      construction + applyPrebuiltBuffers + setLayoutExtent, no render) ----
+  let fieldMod;
+  try { fieldMod = await import(F('/packages/glyph3d-core/src/GlyphField.js')); } catch (e) { return { fatal: 'GlyphField import failed: ' + (e && e.message || e) }; }
+  { const scene = client.ctx.scene;
+    const t0 = performance.now();
+    for (let fi = 0; fi < o.files.length; fi++) {
+      const b = built[fi];
+      const field = new fieldMod.default(scene, atlas, { maxInstances: Math.max(64, b.count) });
+      field.setGpuLayout(true);   // engine branch — positions are the kernel's, not the builder's
+      field.applyPrebuiltBuffers(b, [{}]);
+      field.setLayoutExtent(null);
+      // do NOT add to the scene — construction + buffer adoption is the measured path
+    }
+    R.fieldCommitMs = performance.now() - t0; }
+
+  // ---- lane 2e: WHERE does a fresh kernel's first dispatch spend 1.1ms? Phase split:
+  //      nodes.updateForCompute (WGSL codegen) / bindings / pipelines.getForCompute /
+  //      backend.compute. Runs on a slice of the corpus — the phases don't scale with file. ----
+  {
+    const pipelines = RD._pipelines, bindings = RD._bindings, nodes = RD._nodes;
+    R.sharePatched = !!(pipelines && pipelines.__sharePatched);
+    const ph = { updateNodes: 0, updateBindings: 0, getPipeline: 0, backendCompute: 0, n: 0 };
+    const N = Math.min(30, o.files.length);
+    for (let fi = 0; fi < N; fi++) {
+      const t = tables[fi];
+      const k = new Kernel(RD, { maxSlots: t.slotCount, maxLines: t.lineTable.length });
+      k.configure({ items: [{ slotCount: t.slotCount, lineTable: t.lineTable, sizes: t.sizes,
+        sizeBase: 0, outBase: 0, params }], totalSlots: t.slotCount });
+      let t1 = performance.now();
+      nodes.updateForCompute(k._kernel);                     ph.updateNodes += performance.now() - t1;
+      t1 = performance.now();
+      bindings.updateForCompute(k._kernel);                  ph.updateBindings += performance.now() - t1;
+      t1 = performance.now();
+      const b = bindings.getForCompute(k._kernel);
+      pipelines.getForCompute(k._kernel, b);                 ph.getPipeline += performance.now() - t1;
+      t1 = performance.now();
+      RD.backend.beginCompute(k._kernel);
+      RD.backend.compute(k._kernel, k._kernel, b, pipelines.getForCompute(k._kernel, b), null);
+      RD.backend.finishCompute(k._kernel);                   ph.backendCompute += performance.now() - t1;
+      ph.n++;
+      k.dispose();
+    }
+    R.phaseMs = ph;
+  }
+
   // ---- lane 3: GPU pipelined — fire every file, fence ONCE (the repo-load storm) ----
   try { if (RD.resolveTimestampsAsync) await RD.resolveTimestampsAsync('compute'); } catch (e) { /* pool empty */ }
   { const t0 = performance.now();
@@ -751,9 +838,19 @@ const bulkProbe = (opts) => `(async (o) => {
   } catch (e) { R.gpuPureTotalMs = null; }
 
   // ---- exactness spot-check on the LARGEST file (the bench must not outrun the gate) ----
-  { cfg(biggest); await kernel.compute();
+  // The builder no longer emits positions — the reference is evaluateFold, the same oracle
+  // the mirror/fuzz gates chain to.
+  { const scan = cfg(biggest); await kernel.compute();
     const gpu = await kernel.readPositions();
-    const cpu = built[biggest].positions; const n = tables[biggest].slotCount;
+    const n = tables[biggest].slotCount;
+    const advances = new Float32Array(n);
+    for (let i = 0; i < n; i++) advances[i] = tables[biggest].sizes[i * 2];
+    const cpu = foldEval.evaluateFold({
+      slotCount: n, lineTable: tables[biggest].lineTable, advances, origin, scrollOffset: 0,
+      wrapWidth: layout.wrapWidth, lineSpacing: metrics.lineSpacing,
+      zStep: metrics.charHeight * layout.zWrapSpacing,
+      page: foldGeom.pageFold(layout, metrics, scan[0].maxRowExtent),
+    });
     let worst = 0, over = 0;
     for (let i = 0; i < n * 3; i++) { const d = Math.abs(gpu[i] - cpu[i]); if (d > worst) worst = d; if (d > o.eps) over++; }
     R.spot = { file: o.files[biggest].name, slots: n, worst, over }; }
@@ -763,6 +860,7 @@ const bulkProbe = (opts) => `(async (o) => {
     return { mean: s.reduce((a, b) => a + b, 0) / n, p50: s[n >> 1], p95: s[Math.min(n - 1, Math.floor(n * 0.95))], max: s[n - 1] }; };
   R.cpuPerFile = stats(perFileCpu);
   R.gpuPerFile = stats(perFileGpu);
+  R.gpuFreshPerFile = stats(perFileFresh);
   return R;
 })(${JSON.stringify(opts)})`;
 
@@ -893,6 +991,7 @@ try {
     const corpus = collectDirCorpus(DIR);
     const r = await app.evalPage(bulkProbe({
       repo: REPO, files: corpus, eps: EPS, wrapWidth: WRAP, worldScale: WORLD_SCALE,
+      sharePipeline: has('--share-pipeline'),
     }));
     const ms = (v) => (typeof v === 'number' ? v.toFixed(3) + 'ms' : 'n/a');
     const st = (s) => `mean ${ms(s.mean)} · p50 ${ms(s.p50)} · p95 ${ms(s.p95)} · max ${ms(s.max)}`;
@@ -902,6 +1001,13 @@ try {
     console.log(`  atlas warm-up     ${ms(r.atlasWarmMs)}   ${C.dim('one-time Slug growth, excluded from lanes')}`);
     console.log(`  cpu build total   ${ms(r.cpuTotalMs)}   ${C.dim('per file: ' + st(r.cpuPerFile))}`);
     console.log(`  gpu serial total  ${ms(r.gpuSerialTotalMs)}   ${C.dim('per file: ' + st(r.gpuPerFile))}`);
+    console.log(`  gpu fresh-kernel  ${ms(r.gpuFreshKernelTotalMs)}   ${C.dim('per file: ' + st(r.gpuFreshPerFile) + ' — the REAL per-grid shape (pipeline creation per field)')}`);
+    console.log(`  fresh no-dispatch ${ms(r.gpuFreshNoDispatchMs)}   ${C.dim('create+configure only — pipeline cost = fresh-kernel − this − serial')}`);
+    console.log(`  field commit      ${ms(r.fieldCommitMs)}   ${C.dim('fresh GlyphField + applyPrebuiltBuffers per file — the commit path')}`);
+    if (r.phaseMs) {
+      const p = r.phaseMs;
+      console.log(`  first-dispatch split (n=${p.n}, patched=${r.sharePatched}): codegen ${ms(p.updateNodes)} · bindings ${ms(p.updateBindings)} · pipeline ${ms(p.getPipeline)} · backend ${ms(p.backendCompute)}`);
+    }
     console.log(`  gpu pipelined     ${ms(r.gpuPipelinedTotalMs)}   ${C.dim('fire all, fence once — the repo-load storm')}`);
     console.log(`  gpu pure exec     ${ms(r.gpuPureTotalMs)}   ${C.dim('timestamp-query total across the pipelined lane')}`);
     const teethOk = r.files >= 10 && r.totalSlots >= 10000;
