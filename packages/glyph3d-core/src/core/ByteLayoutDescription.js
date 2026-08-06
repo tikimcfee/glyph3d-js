@@ -24,9 +24,12 @@ export default class ByteLayoutDescription {
      * @param {Uint8Array} p.bytes        - the file's UTF-8 bytes (one slot per byte)
      * @param {Int32Array} p.lineByteStart - line → first byte offset
      * @param {Int32Array} p.lineLengths   - line → codepoint count
-     * @param {Object} p.mirror            - the pipeline adapter's mirror (runPipeline
-     *   output: {slots, bounds}); read LAZILY — a repaginate mutates slots in place and
-     *   replaces bounds, so queries always see the current page/scroll state.
+     * @param {Object} p.pipeline          - the arena HANDLE: `.bounds` is the GPU's
+     *   per-item record (extent queries never touch the oracle), `.mirror` MATERIALIZES
+     *   the CPU oracle on first touch — so only slot-position queries (caret/edit) pay
+     *   for it, one grid at a time, never a load storm. Both read lazily: a repaginate
+     *   mutates the oracle in place and refreshes the record, so queries always see the
+     *   current page/scroll state.
      * @param {number} [p.scrollOffset]    - visual rows the fold is scrolled (informational;
      *   the slots are already scrolled — queries read final positions)
      */
@@ -34,12 +37,14 @@ export default class ByteLayoutDescription {
         this.bytes = p.bytes;
         this.lineByteStart = p.lineByteStart;
         this.lineLengths = p.lineLengths;
-        this._mirror = p.mirror;
+        this._pipeline = p.pipeline;
         this.scrollOffset = p.scrollOffset ?? 0;
     }
 
-    get slots() { return this._mirror?.slots ?? null; }
-    get bounds() { return this._mirror?.bounds ?? null; }
+    /** The oracle's slot buffer — MATERIALIZES it on first touch (caret/edit rate). */
+    get slots() { return this._pipeline?.mirror?.slots ?? null; }
+    /** The GPU's per-item bounds record — extent queries never wake the oracle. */
+    get bounds() { return this._pipeline?.bounds ?? null; }
 
     /** @returns {number} number of source lines */
     get lineCount() { return this.lineByteStart ? this.lineByteStart.length : 0; }

@@ -846,7 +846,7 @@ class CodeGrid extends FramedGlyphField {
      * @returns {number}
      */
     getTotalVisualRows() {
-        return Math.round(this._pipeline?.mirror?.bounds?.totalRows || 0);
+        return Math.round(this._pipeline?.bounds?.totalRows || 0);
     }
 
     /**
@@ -1155,6 +1155,11 @@ class CodeGrid extends FramedGlyphField {
                 field: this._renderer,
             });
             await arena.requestFlush();
+            // The extent gate: the GPU's per-item bounds land off ONE coalesced readback;
+            // waiting here means the load's settle sees a MEASURED grid (tree layout,
+            // scroll clamps and culling all read the record). Resolves even on device
+            // loss — a load never hangs on it.
+            await this._pipeline.laid;
         }
         this._buildLayoutDescription();
         this._applyClip();
@@ -1265,12 +1270,14 @@ class CodeGrid extends FramedGlyphField {
      */
     _buildLayoutDescription() {
         const idx = this._byteLineIndex;
-        const mirror = this._pipeline?.mirror;
-        this._layout = (idx && mirror) ? new ByteLayoutDescription({
+        // The HANDLE, not the mirror: touching .mirror here would materialize the CPU
+        // oracle for every loaded grid — extent() reads the GPU bounds record instead,
+        // and the oracle materializes on the first actual slot query (caret/edit).
+        this._layout = (idx && this._pipeline) ? new ByteLayoutDescription({
             bytes: this._bytes,
             lineByteStart: idx.lineByteStart,
             lineLengths: idx.lineLengths,
-            mirror,
+            pipeline: this._pipeline,
             scrollOffset: this._scrollOffset || 0,
         }) : null;
         this._scheduleAnalyze();

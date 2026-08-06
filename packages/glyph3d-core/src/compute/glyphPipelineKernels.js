@@ -25,7 +25,7 @@
  * One pipeline instance serves N files concatenated in ONE byte buffer: the multi-file
  * hoist — one set of dispatches for a whole load storm, not one per file. Per file (item):
  * a uint in itemStarts (its byteStart — the binary-search key) and ITEM_STRIDE floats in
- * itemTable (origin + the page params: pageRows, pageCols, pagesWide, pageStrideX,
+ * itemTable (origin + the page params: pageRows, pageCols, pagesWide, pageGapX,
  * bandStrideY, depthPerBand, depthPerColumn, scrollRows — the same packing pattern as
  * GlyphLayoutKernel's item table), plus the per-item fold metrics (wrap/zStep/lineHeight).
  * Only `window` — the GPU coherence dial — stays a field-level uniform.
@@ -45,11 +45,11 @@
  *      unit rides the item, not a uniform. Only `window` (the coherence dial) stays
  *      field-level. They are LOAD-TIME lanes: changing them changes the walk, so they are
  *      not setItemPage/repaginate-tunable.
- *   5. BOUNDS stay a GLOBAL fused reduce — one box for the whole batch (the whole-batch
- *      cull). Per-file scalars (totalRows, maxRowExtent, per-file boxes) come from the CPU
- *      mirror: runPipeline() already runs per file and returns `itemBounds`. Lanes 6/7 of
- *      the GPU bounds buffer are the batch-wide max, NOT a per-file answer.
- *      (Brief option (b): chosen to keep the kernel to one atomic set.)
+ *   5. BOUNDS ARE PER-ITEM, GPU-owned: kernel 2 reduces the walk scalars (totalRows +
+ *      the item-relative widest row) into walkScalars, kernel 2.5 derives each item's
+ *      page-fan stride from them (+ pageGapX) into itemStrides, and kernel 3 reduces
+ *      each item's FINAL box into itemBoxes. readItemBounds() is ONE readback handing
+ *      every staged field its extent — the CPU never re-lays a file to learn its size.
  *
  * ── VERIFIED ON HARDWARE (tools/glyph-pipeline-check.mjs) ────────────────────────────────
  * GPU output diffs against runPipeline() from the reference on the same bytes, over torture /
@@ -67,7 +67,7 @@ import {
     S_X, S_Y, S_Z, S_ROW, S_COL, S_FLAGS, S_BASE_X,
     F_LEADER, F_RENDERED, F_MISSING, NEWLINE,
     ITEM_STRIDE, I_ORIGIN_X, I_ORIGIN_Y, I_ORIGIN_Z,
-    I_PAGE_ROWS, I_PAGE_COLS, I_PAGES_WIDE, I_PAGE_STRIDE_X,
+    I_PAGE_ROWS, I_PAGE_COLS, I_PAGES_WIDE, I_PAGE_GAP_X,
     I_BAND_STRIDE_Y, I_DEPTH_PER_BAND, I_DEPTH_PER_COL, I_SCROLL_ROWS,
     I_WRAP_WIDTH, I_Z_STEP, I_LINE_HEIGHT,
 } from './glyphPipelineReference.js';
@@ -75,7 +75,7 @@ import { BLOCK_SHIFT, BLOCK_MASK, ENTRY_STRIDE, LANE_GLYPH_ID, LANE_ADVANCE, LAN
 
 const {
     Fn, If, Loop, Break, Return, uniform, instancedArray, instanceIndex,
-    int, uint, float, atomicMin, atomicMax, atomicAdd, bitcast,
+    int, uint, float, atomicMin, atomicMax, atomicAdd, atomicLoad, bitcast,
 } = TSL;
 
 /**
@@ -127,6 +127,14 @@ const floatToOrderedKey = /*#__PURE__*/ Fn(([f]) => {
         .select(bits.bitOr(uint(0x80000000)), bits.bitNot());
 });
 
+/** Inverse of floatToOrderedKey, in-shader — the stride kernel decodes the walk's
+ *  reduced extent. An ARMED key (0 — no glyph ever reduced) decodes to 0, not NaN. */
+const orderedKeyToFloatGPU = /*#__PURE__*/ Fn(([k]) => {
+    const bits = k.bitAnd(uint(0x80000000)).notEqual(uint(0))
+        .select(k.bitXor(uint(0x80000000)), k.bitNot());
+    return k.equal(uint(0)).select(float(0), bitcast(bits, 'float'));
+});
+
 /** Inverse of floatToOrderedKey — applied CPU-side after the readback. */
 export function orderedKeyToFloat(key) {
     const u = key >>> 0;
@@ -137,14 +145,16 @@ export function orderedKeyToFloat(key) {
 }
 
 /**
- * The bounds cells, pre-armed so the first atomic always wins.
- * Layout: [minX, minY, minZ, maxX, maxY, maxZ, totalRows, maxRowExtent] as ordered keys.
- * Lanes 6/7 arm to the minimum key — any real value wins the max.
+ * Armed PER-ITEM box cells (6 lanes each), so the first atomic always wins.
+ * Row layout: [minX, minY, minZ, maxX, maxY, maxZ] as ordered keys.
  */
-export function armedBoundsKeys() {
-    const a = new Uint32Array(8);
-    a[0] = a[1] = a[2] = 0xFFFFFFFF;   // min lanes start at +inf's key
-    a[3] = a[4] = a[5] = a[6] = a[7] = 0x00000000;   // max lanes start at -inf's key
+export function armedBoxKeys(count = 1) {
+    const a = new Uint32Array(count * 6);
+    for (let i = 0; i < count; i++) {
+        const b = i * 6;
+        a[b] = a[b + 1] = a[b + 2] = 0xFFFFFFFF;   // min lanes start at +inf's key
+        a[b + 3] = a[b + 4] = a[b + 5] = 0x00000000;   // max lanes start at -inf's key
+    }
     return a;
 }
 
@@ -168,7 +178,16 @@ export default class GlyphPipelineKernels {
         this.slots = instancedArray(this.maxBytes * SLOT_STRIDE, 'float').setName('GlyphSlots');
         this.trieIndex = instancedArray(trie.blockIndex.length, 'uint').setName('GlyphTrieIndex');
         this.trieBlocks = instancedArray(trie.blocks.length, 'float').setName('GlyphTrieBlocks');
-        this.bounds = instancedArray(8, 'uint').setName('GlyphBounds').toAtomic();
+        // Per-item bounds, split by WRITER so re-arming one never clobbers the other:
+        // itemBoxes (6 lanes/item — final positions, kernel 3, re-armed every repaginate)
+        // and walkScalars (2 lanes/item — totalRows + ITEM-RELATIVE widest row, kernel 2,
+        // armed only at setFiles: repaginates don't re-walk, so the scalars persist and
+        // the stride kernel can read them).
+        this.itemBoxes = instancedArray(this.maxItems * 6, 'uint').setName('GlyphItemBoxes').toAtomic();
+        this.walkScalars = instancedArray(this.maxItems * 2, 'uint').setName('GlyphWalkScalars').toAtomic();
+        // The derived page-fan stride per item — GPU-written (walk extent + gap), read by
+        // kernel 3. Its own buffer so item-table uploads never clobber it.
+        this.itemStrides = instancedArray(this.maxItems, 'float').setName('GlyphItemStrides');
         this.misses = instancedArray(maxMisses, 'uint').setName('GlyphMisses');
         this.missCount = instancedArray(1, 'uint').setName('GlyphMissCount').toAtomic();
         // The item table: per-item params that VARY across files (origin + page params +
@@ -179,7 +198,8 @@ export default class GlyphPipelineKernels {
         // Node names don't reach the GPU; ATTRIBUTE names do (three passes attribute.name
         // as the GPUBuffer label) — so Dawn errors name the buffer instead of "(unlabeled)".
         for (const node of [this.byteWords, this.slots, this.trieIndex, this.trieBlocks,
-            this.bounds, this.misses, this.missCount, this.itemTable, this.itemStarts]) {
+            this.itemBoxes, this.walkScalars, this.itemStrides,
+            this.misses, this.missCount, this.itemTable, this.itemStarts]) {
             node.value.name = node.name;
         }
 
@@ -201,6 +221,7 @@ export default class GlyphPipelineKernels {
 
         this._kDecode = this._buildDecode();
         this._kLayout = this._buildLayout();
+        this._kStrides = this._buildDeriveStrides();
         this._kPaginate = this._buildPaginateAndBounds();
     }
 
@@ -469,14 +490,47 @@ export default class GlyphPipelineKernels {
             // release store; the coherence WINDOW is what makes the race practically safe, and
             // finding its value on real hardware is the whole point of the harness.
             S.element(o.add(uint(S_FLAGS))).assign(float(myFlags.bitOr(int(F_RENDERED))));
+
+            // ── walk scalars, fused per ITEM: total visual rows + the widest row. `x` here
+            //    is the walk sum BEFORE the origin add — item-relative by construction, which
+            //    is what makes it a content WIDTH the stride kernel can fan pages by.
+            const ws = item.mul(uint(2)).toVar('ws');
+            atomicMax(this.walkScalars.element(ws), floatToOrderedKey(row.toFloat().add(1)));
+            atomicMax(this.walkScalars.element(ws.add(uint(1))), floatToOrderedKey(x));
         })().compute(1).setName('glyphLayoutWalk');
     }
 
     /**
-     * KERNEL 3 — thread per byte. Page remap on the EXACT integer lanes, with the bounds
-     * reduce fused on: six atomics riding a pass that already touches every glyph, exactly
-     * as blitGlyphsIntoConstants does. atomicMin/Max early-out in hardware, so contention
-     * collapses after the box converges instead of every thread doing a CAS.
+     * KERNEL 2.5 — thread per ITEM (a few thousand threads at most). The stride derivation:
+     * a row-paged item's page-fan stride is its widest walk row (walkScalars lane 1,
+     * item-relative) + its pageGapX. GPU-owned so the CPU never measures content — the
+     * dispatch barrier after kernel 2 makes the reduced scalar safe to read here, and
+     * kernel 3 keeps its pure-remap contract by reading the RESOLVED stride buffer.
+     * Mirror: deriveStride() in the reference — the one shared formula.
+     * @private
+     */
+    _buildDeriveStrides() {
+        const u = this._u;
+        const it = this.itemTable;
+        return Fn(() => {
+            const item = instanceIndex;
+            If(item.greaterThanEqual(u.itemCount), () => { Return(); });
+            const ib = item.mul(uint(ITEM_STRIDE)).toVar('ib');
+            const pageRows = int(it.element(ib.add(uint(I_PAGE_ROWS)))).toVar('pageRows');
+            const stride = float(0).toVar('stride');
+            If(pageRows.greaterThan(int(0)), () => {
+                const key = atomicLoad(this.walkScalars.element(item.mul(uint(2)).add(uint(1)))).toVar('wkey');
+                stride.assign(orderedKeyToFloatGPU(key).add(it.element(ib.add(uint(I_PAGE_GAP_X)))));
+            });
+            this.itemStrides.element(item).assign(stride);
+        })().compute(1).setName('glyphDeriveStrides');
+    }
+
+    /**
+     * KERNEL 3 — thread per byte. Page remap on the EXACT integer lanes, with the PER-ITEM
+     * box reduce fused on: six atomics riding a pass that already touches every glyph.
+     * atomicMin/Max early-out in hardware, so contention collapses after each item's box
+     * converges instead of every thread doing a CAS.
      * @private
      */
     _buildPaginateAndBounds() {
@@ -501,7 +555,8 @@ export default class GlyphPipelineKernels {
             const pageRows = int(it.element(ib.add(uint(I_PAGE_ROWS)))).toVar('pageRows');
             const pageCols = int(it.element(ib.add(uint(I_PAGE_COLS)))).toVar('pageCols');
             const pagesWide = int(it.element(ib.add(uint(I_PAGES_WIDE)))).toVar('pagesWide');
-            const pageStrideX = it.element(ib.add(uint(I_PAGE_STRIDE_X))).toVar('pageStrideX');
+            // The DERIVED stride (kernel 2.5) — never a CPU input, never measured here.
+            const pageStrideX = this.itemStrides.element(item).toVar('pageStrideX');
             const bandStrideY = it.element(ib.add(uint(I_BAND_STRIDE_Y))).toVar('bandStrideY');
             const depthPerBand = it.element(ib.add(uint(I_DEPTH_PER_BAND))).toVar('depthPerBand');
             const depthPerCol = it.element(ib.add(uint(I_DEPTH_PER_COL))).toVar('depthPerCol');
@@ -549,19 +604,17 @@ export default class GlyphPipelineKernels {
             S.element(o.add(uint(S_Y))).assign(yf);
             S.element(o.add(uint(S_Z))).assign(zf);
 
-            // ── bounds, fused (over the FINAL positions) ────────────────────────────────
+            // ── the item's box, fused (over the FINAL positions; the walk scalars live in
+            //    kernel 2's fused reduce — they don't change under a repaginate) ──────────
             const w = lane(id, S_ADVANCE).toVar('w');
             const h = lane(id, S_HEIGHT).toVar('h');
-            atomicMin(this.bounds.element(uint(0)), floatToOrderedKey(xf));
-            atomicMin(this.bounds.element(uint(1)), floatToOrderedKey(yf));
-            atomicMin(this.bounds.element(uint(2)), floatToOrderedKey(zf));
-            atomicMax(this.bounds.element(uint(3)), floatToOrderedKey(xf.add(w)));
-            atomicMax(this.bounds.element(uint(4)), floatToOrderedKey(yf.add(h)));
-            atomicMax(this.bounds.element(uint(5)), floatToOrderedKey(zf));
-            // The scroll/page scalars: total visual rows (scroll-independent — row is
-            // pre-conveyor) and the widest fold-unit row (what a snug pageStrideX feeds).
-            atomicMax(this.bounds.element(uint(6)), floatToOrderedKey(row.toFloat().add(1)));
-            atomicMax(this.bounds.element(uint(7)), floatToOrderedKey(x));
+            const bb = item.mul(uint(6)).toVar('bb');
+            atomicMin(this.itemBoxes.element(bb), floatToOrderedKey(xf));
+            atomicMin(this.itemBoxes.element(bb.add(uint(1))), floatToOrderedKey(yf));
+            atomicMin(this.itemBoxes.element(bb.add(uint(2))), floatToOrderedKey(zf));
+            atomicMax(this.itemBoxes.element(bb.add(uint(3))), floatToOrderedKey(xf.add(w)));
+            atomicMax(this.itemBoxes.element(bb.add(uint(4))), floatToOrderedKey(yf.add(h)));
+            atomicMax(this.itemBoxes.element(bb.add(uint(5))), floatToOrderedKey(zf));
         })().compute(1).setName('glyphPaginateAndBounds');
     }
 
@@ -583,8 +636,8 @@ export default class GlyphPipelineKernels {
      *
      * @param {Array<{bytes:Uint8Array, origin?:{x,y,z}, page?:Object}>} items
      *   Each item's page bag takes pageRows, pageCols (also the walk's fold unit when wrap
-     *   is off — changing it changes the walk's output), pagesWide, pageStrideX,
-     *   bandStrideY, depthPerBand, depthPerColumn, scrollRows.
+     *   is off — changing it changes the walk's output), pagesWide, pageGapX (the stride
+     *   itself is GPU-derived), bandStrideY, depthPerBand, depthPerColumn, scrollRows.
      * @param {Object} params - field-level DEFAULTS an item can override per item:
      *   window (the only true uniform), wrapWidth, lineHeight, zStep.
      */
@@ -628,14 +681,19 @@ export default class GlyphPipelineKernels {
         this.byteWords.value.needsUpdate = true;
         this.slots.value.array.fill(0);
         this.slots.value.needsUpdate = true;
-        this.bounds.value.array.set(armedBoundsKeys());
-        this.bounds.value.needsUpdate = true;
+        // Arm BOTH bounds buffers: a full run re-walks, so the walk scalars re-reduce too
+        // (repaginate() re-arms only the boxes — the walk persists there).
+        this.itemBoxes.value.array.set(armedBoxKeys(this.maxItems));
+        this.itemBoxes.value.needsUpdate = true;
+        this.walkScalars.value.array.fill(0);   // max lanes arm at -inf's key (0)
+        this.walkScalars.value.needsUpdate = true;
         this.missCount.value.array[0] = 0;
         this.missCount.value.needsUpdate = true;
         this.itemTable.value.needsUpdate = true;
         this.itemStarts.value.needsUpdate = true;
 
         this.byteLength = total;
+        this.itemCount = items.length;
         const u = this._u;
         u.byteLength.value = total;
         u.itemCount.value = items.length;
@@ -644,6 +702,7 @@ export default class GlyphPipelineKernels {
         const count = Math.max(1, total);
         this._kDecode.count = count;
         this._kLayout.count = count;
+        this._kStrides.count = items.length;
         this._kPaginate.count = count;
         return this;
     }
@@ -655,7 +714,7 @@ export default class GlyphPipelineKernels {
         tbl[b + I_PAGE_ROWS] = Math.max(0, Math.trunc(p.pageRows || 0));
         tbl[b + I_PAGE_COLS] = Math.max(0, Math.trunc(p.pageCols || 0));
         tbl[b + I_PAGES_WIDE] = Math.max(1, Math.trunc(p.pagesWide || 1));
-        tbl[b + I_PAGE_STRIDE_X] = p.pageStrideX || 0;
+        tbl[b + I_PAGE_GAP_X] = p.pageGapX || 0;
         tbl[b + I_BAND_STRIDE_Y] = p.bandStrideY || 0;
         tbl[b + I_DEPTH_PER_BAND] = p.depthPerBand || 0;
         tbl[b + I_DEPTH_PER_COL] = p.depthPerColumn || 0;
@@ -680,34 +739,58 @@ export default class GlyphPipelineKernels {
         return this.setItemPage(0, p);
     }
 
-    /** Full load: three dispatches, encoded back to back with no awaits between them. */
+    /** Full load: four dispatches (decode, walk, per-item strides, paginate), encoded
+     *  back to back with no awaits between them. The stride dispatch is thread-per-item —
+     *  microscopic next to the per-byte three. */
     run() {
         this.renderer.compute(this._kDecode);
         this.renderer.compute(this._kLayout);
+        this.renderer.compute(this._kStrides);
         this.renderer.compute(this._kPaginate);
         return this;
     }
 
-    /** Page/mode change only — kernel 3 over the base positions that already exist.
-     *  The remap is reconstructive (it reads S_BASE_X and the integer lanes), so this is
-     *  safe to call repeatedly with any fold-unit-preserving params. */
+    /** Page/mode change only — strides + kernel 3 over the base positions that already
+     *  exist (a page retune can change pageGapX, so the stride re-derives; the walk
+     *  scalars it reads persist — repaginate re-arms only the boxes). The remap is
+     *  reconstructive (S_BASE_X + integer lanes): safe to call repeatedly with any
+     *  fold-unit-preserving params. */
     repaginate() {
-        this.bounds.value.array.set(armedBoundsKeys());
-        this.bounds.value.needsUpdate = true;
+        this.itemBoxes.value.array.set(armedBoxKeys(this.maxItems));
+        this.itemBoxes.value.needsUpdate = true;
+        this.renderer.compute(this._kStrides);
         this.renderer.compute(this._kPaginate);
         return this;
     }
 
-    /** @returns {Promise<{min:{x,y,z}, max:{x,y,z}, totalRows:number, maxRowExtent:number}>} the reduced box + scalars, 32 bytes off the GPU. */
-    async readBounds() {
-        const raw = await this.renderer.getArrayBufferAsync(this.bounds.value);
-        const k = new Uint32Array(raw, 0, 8);
-        return {
-            min: { x: orderedKeyToFloat(k[0]), y: orderedKeyToFloat(k[1]), z: orderedKeyToFloat(k[2]) },
-            max: { x: orderedKeyToFloat(k[3]), y: orderedKeyToFloat(k[4]), z: orderedKeyToFloat(k[5]) },
-            totalRows: orderedKeyToFloat(k[6]),
-            maxRowExtent: orderedKeyToFloat(k[7]),
-        };
+    /**
+     * The per-item bounds table off the GPU — ONE readback hands every staged field its
+     * extent (box lanes from kernel 3's reduce, scalars from kernel 2's). An item no
+     * glyph ever reduced (armed keys intact) reports null.
+     * @returns {Promise<Array<?{min:{x,y,z}, max:{x,y,z}, totalRows:number, maxRowExtent:number}>>}
+     *   one entry per live item, parallel to the setFiles order.
+     */
+    async readItemBounds() {
+        const n = this.itemCount || 0;
+        if (n === 0) return [];
+        const [boxRaw, wsRaw] = await Promise.all([
+            this.renderer.getArrayBufferAsync(this.itemBoxes.value, null, 0, n * 6 * 4),
+            this.renderer.getArrayBufferAsync(this.walkScalars.value, null, 0, n * 2 * 4),
+        ]);
+        const box = new Uint32Array(boxRaw, 0, n * 6);
+        const ws = new Uint32Array(wsRaw, 0, n * 2);
+        const out = new Array(n);
+        for (let i = 0; i < n; i++) {
+            const b = i * 6;
+            if (box[b] === 0xFFFFFFFF) { out[i] = null; continue; }   // armed — no glyphs
+            out[i] = {
+                min: { x: orderedKeyToFloat(box[b]), y: orderedKeyToFloat(box[b + 1]), z: orderedKeyToFloat(box[b + 2]) },
+                max: { x: orderedKeyToFloat(box[b + 3]), y: orderedKeyToFloat(box[b + 4]), z: orderedKeyToFloat(box[b + 5]) },
+                totalRows: ws[i * 2] === 0 ? 0 : orderedKeyToFloat(ws[i * 2]),
+                maxRowExtent: ws[i * 2 + 1] === 0 ? 0 : orderedKeyToFloat(ws[i * 2 + 1]),
+            };
+        }
+        return out;
     }
 
     /** @returns {Promise<Float32Array>} the whole slot buffer — the parity path, not a render path.
@@ -735,11 +818,13 @@ export default class GlyphPipelineKernels {
     dispose() {
         const attrs = this.renderer?._attributes;
         for (const node of [this.byteWords, this.slots, this.trieIndex, this.trieBlocks,
-            this.bounds, this.misses, this.missCount, this.itemTable, this.itemStarts]) {
+            this.itemBoxes, this.walkScalars, this.itemStrides,
+            this.misses, this.missCount, this.itemTable, this.itemStarts]) {
             if (node && attrs) attrs.delete(node.value);
         }
         this._kDecode?.dispose();
         this._kLayout?.dispose();
+        this._kStrides?.dispose();
         this._kPaginate?.dispose();
     }
 }

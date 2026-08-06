@@ -8,22 +8,26 @@
  * The flow:
  *
  *   stage({ bytes, origin, page, wrapWidth, lineHeight, zStep, field })
- *       synchronously appends the file's bytes to the arena, registers the item, runs the
- *       CPU mirror for THAT file (reference runPipeline, window 0 — serial, so the
- *       coherence window is pure cost), attaches the field at the item's byteStart, and
- *       returns a thin per-grid HANDLE. NO dispatch here.
+ *       synchronously appends the file's bytes to the arena, registers the item and
+ *       attaches the field at the item's byteStart, and returns a thin per-grid HANDLE.
+ *       NO dispatch here — and NO CPU layout: the GPU is the one layout engine, and a
+ *       load storm pays zero per-byte CPU cost at stage time.
  *   requestFlush()
  *       coalesces every stage in the same macrotask window into ONE flush: setFiles(all
- *       live items) + run — three dispatches for the whole storm. Resolves once encoded
- *       (the readback isn't needed on the load path).
+ *       live items) + run — four dispatches for the whole storm. Resolves once ENCODED;
+ *       ONE per-item bounds readback then lands every staged field's extent (handle.laid
+ *       resolves as each item's extent arrives — the load path's "measures laid" gate).
  *   handle.setPage(page) / arena.setItemPage + requestRepaginate()
- *       the conveyor: kernel 3 alone re-runs. Scroll ticks across grids coalesce into one
- *       repaginate the same way.
+ *       the conveyor: strides + kernel 3 re-run. Scroll ticks across grids coalesce into
+ *       one repaginate, and the extents refresh off the same coalesced readback.
  *
  * THE HANDLE is what a grid keeps as `_pipeline`: { itemIndex, byteStart, byteLength,
- * mirror, setPage, verify, dispose } — the shape layout.verify (verifyCommands) and the
- * grid's extent/scroll paths read. The mirror is the grid's CPU oracle (extents, caret,
- * highlight queries never touch the GPU).
+ * mirror, bounds, laid, setPage, verify, dispose } — the shape layout.verify
+ * (verifyCommands) and the grid's extent/scroll paths read. `bounds` is the GPU's
+ * per-item record (extent/rows/widest-row — the readback truth); `mirror` is the CPU
+ * ORACLE, MATERIALIZED LAZILY on first touch (caret/edit/verify — interaction-rate, one
+ * grid at a time), never on the load path: the reference pipeline runs once for the one
+ * file being queried, not 450 times for a storm.
  *
  * GROWTH: exceeding byte capacity reallocates the kernels (×2, or ×1.25 past a single
  * oversized file), re-uploads every live item and re-dispatches — rare and loud, never a
@@ -45,13 +49,12 @@
  */
 
 import GlyphPipelineKernels from './glyphPipelineKernels.js';
-import { runPipeline, paginate as refPaginate, boundsReduce as refBoundsReduce } from './glyphPipelineReference.js';
+import { runPipeline, paginate as refPaginate, boundsReduce as refBoundsReduce, deriveStride } from './glyphPipelineReference.js';
 import { buildLiveTrie, encodeMisses } from './liveTrie.js';
 import { loadStats } from '../core/loadStats.js';
 
-/** Bounds box → the {min, max} shape GlyphField.setLayoutExtent states. */
-function extentOf(mirror) {
-    const b = mirror?.bounds;
+/** A bounds record → the {min, max} shape GlyphField.setLayoutExtent states. */
+function extentOf(b) {
     return b ? { min: b.min, max: b.max } : null;
 }
 
@@ -92,6 +95,7 @@ export default class GlyphPipelineArena {
         this._flushPromise = null;       // the coalescing flush gate
         this._repaginatePromise = null;  // the coalescing repaginate gate
         this._missGen = 0;
+        this._boundsGen = 0;
         this._deviceLostNoted = false;
     }
 
@@ -127,60 +131,66 @@ export default class GlyphPipelineArena {
             this._realloc(Math.max(this.maxBytes * 2, Math.ceil(need * 1.25)), this.maxItems);
         }
 
-        // The mirror FIRST (serial — window 0: the race it simulates on the GPU doesn't
-        // exist here): the walk's widest row is the page column stride, measured, never
-        // nominal. It paginates with pageStrideX unset; the FINAL page re-paginates it in
-        // place below (the remap is reconstructive — exact).
-        const page0 = pageIn ? { ...pageIn } : null;
-        const mirror = runPipeline(bytes, this._trie, {
-            window: 0, wrapWidth, lineHeight, zStep, origin, page: page0,
-        });
-        const page = page0 ? { ...page0 } : {};
-        if (page.pageRows > 0) {
-            page.pageStrideX = (mirror.bounds?.maxRowExtent ?? 0) + (page.pageGapX || 0);
-        }
-        delete page.pageGapX;
-
         const item = {
-            bytes, origin, page, wrapWidth, lineHeight, zStep, mirror, field,
+            bytes, origin, page: pageIn ? { ...pageIn } : {},
+            wrapWidth, lineHeight, zStep, field,
+            mirror: null,      // the CPU oracle — materialized on first query, never here
+            gpuBounds: null,   // the per-item readback record — lands after the flush
             byteStart: this._byteTotal, byteCount: bytes.length, dead: false,
         };
+        item.laid = new Promise((resolve) => { item._laidResolve = resolve; });
         const itemIndex = this._items.length;
         this._items.push(item);
         this._byteTotal += bytes.length;
         this._stagedSinceFlush++;
 
         if (field) field.attachBytePipeline(this._kernels, bytes.length, item.byteStart);
-        this._repaginateMirror(item, page);
-        if (field) field.setLayoutExtent(extentOf(mirror));
 
         const arena = this;
         return {
             itemIndex,
             byteStart: item.byteStart,
             byteLength: item.byteCount,
-            get mirror() { return item.mirror; },
+            /** The CPU oracle, materialized ON TOUCH (caret/edit/verify — one file, once). */
+            get mirror() { return arena._ensureMirror(item); },
+            /** The GPU's per-item bounds record (extent/totalRows/maxRowExtent), or null
+             *  until the post-flush readback lands. */
+            get bounds() { return item.gpuBounds; },
+            /** Resolves when this item's extent has landed from the GPU — the load path's
+             *  "measures laid" gate. */
+            get laid() { return item.laid; },
             /**
-             * Page/scroll retune — kernel 3 alone re-runs (batched via requestRepaginate).
+             * Page/scroll retune — strides + kernel 3 re-run (batched via
+             * requestRepaginate; the extent refreshes off the same coalesced readback).
              * NOT for pageCols/wrap changes (those change the walk — restage).
              */
             setPage(pageIn2) {
-                const p = { ...pageIn2 };
-                if (p.pageRows > 0 && p.pageStrideX == null) {
-                    p.pageStrideX = (item.mirror?.bounds?.maxRowExtent ?? 0) + (p.pageGapX || 0);
-                }
-                delete p.pageGapX;
-                item.page = p;
-                arena._repaginateMirror(item, p);
-                arena.setItemPage(itemIndex, p);
-                if (item.field) item.field.setLayoutExtent(extentOf(item.mirror));
+                item.page = { ...pageIn2 };
+                if (item.mirror) arena._repaginateMirror(item, item.page);
+                arena.setItemPage(itemIndex, item.page);
                 return arena.requestRepaginate();
             },
             verify: (eps) => arena.verifyItem(itemIndex, eps),
             /** The item's arena space leaks (v1 — see the header); this detaches the field
              *  so a realloc never re-attaches a disposed grid's field. */
-            dispose() { item.field = null; item.dead = true; },
+            dispose() { item.field = null; item.dead = true; item._laidResolve?.(); },
         };
+    }
+
+    /**
+     * Materialize the item's CPU oracle: the reference pipeline over THIS file alone, in
+     * the item's current page state. Interaction-rate (first caret/edit/verify touch on a
+     * grid), never load-rate — the whole point of the lazy split.
+     * @private
+     */
+    _ensureMirror(item) {
+        if (item.mirror) return item.mirror;
+        const r = runPipeline(item.bytes, this._trie, {
+            window: 0, wrapWidth: item.wrapWidth, lineHeight: item.lineHeight,
+            zStep: item.zStep, origin: item.origin, page: { ...item.page },
+        });
+        item.mirror = { slots: r.slots, bounds: r.itemBounds[0] };
+        return item.mirror;
     }
 
     /**
@@ -224,11 +234,16 @@ export default class GlyphPipelineArena {
         this._kernels.run();
         const dt = performance.now() - t0;
         // The [load] trace's build-stage decomposition (fileCommands snapshots the deltas).
-        loadStats.kernelDispatches += 3;
+        loadStats.kernelDispatches += 4;
         loadStats.kernelMs += dt;
         loadStats.commits += this._stagedSinceFlush;
         loadStats.commitMs += dt;
         this._stagedSinceFlush = 0;
+
+        // Extents: ONE per-item bounds readback lands every staged field's cull box and
+        // resolves handle.laid. "Just read from it" — one small readback per coalesced
+        // flush is imperceptible; what was expensive was re-laying every file on the CPU.
+        this._requestBoundsSync();
 
         // Miss flow, OFF the load path: the readback stalls on the GPU queue and the layout
         // is already correct (missing entries occupy their advance) — encode + re-run is a
@@ -256,7 +271,8 @@ export default class GlyphPipelineArena {
         return this;
     }
 
-    /** The coalescing repaginate gate — one kernel-3 dispatch per macrotask window. */
+    /** The coalescing repaginate gate — one strides+paginate dispatch pair per macrotask
+     *  window, with the extents refreshed off the same coalesced readback. */
     requestRepaginate() {
         if (!this._repaginatePromise) {
             this._repaginatePromise = new Promise((resolve) => {
@@ -265,14 +281,40 @@ export default class GlyphPipelineArena {
                     if (this.renderer._isDeviceLost !== true) {
                         const t0 = performance.now();
                         this._kernels.repaginate();
-                        loadStats.kernelDispatches += 1;
+                        loadStats.kernelDispatches += 2;
                         loadStats.kernelMs += performance.now() - t0;
+                        this._requestBoundsSync();
                     }
                     resolve();
                 }, 0);
             });
         }
         return this._repaginatePromise;
+    }
+
+    /**
+     * The extent lane: read the per-item bounds table once and distribute — every live
+     * field's cull box, every item's `bounds` record, every pending `laid` gate. A newer
+     * sync supersedes an in-flight one (generation guard); a failed readback (device
+     * loss, dispose) still resolves the gates so no load ever hangs on it.
+     * @private
+     */
+    _requestBoundsSync() {
+        const gen = ++this._boundsGen;
+        const items = this._items;
+        this._kernels.readItemBounds()
+            .then((list) => {
+                if (gen !== this._boundsGen) return;
+                for (let i = 0; i < list.length && i < items.length; i++) {
+                    const item = items[i];
+                    item.gpuBounds = list[i];
+                    if (!item.dead && item.field) item.field.setLayoutExtent(extentOf(list[i]));
+                    item._laidResolve?.();
+                }
+            })
+            .catch(() => {
+                for (const item of items) item._laidResolve?.();
+            });
     }
 
     /**
@@ -286,7 +328,8 @@ export default class GlyphPipelineArena {
         if (this._flushPromise) await this._flushPromise;
         if (this._repaginatePromise) await this._repaginatePromise;
         const item = this._items[itemIndex];
-        const ref = item?.mirror?.slots;
+        if (!item) return { ok: false, reason: 'no item' };
+        const ref = this._ensureMirror(item)?.slots;
         if (!ref) return { ok: false, reason: 'no mirror' };
         const gpu = await this._kernels.readSlots();
         let worst = 0, badRows = 0;
@@ -331,20 +374,25 @@ export default class GlyphPipelineArena {
     }
 
     /**
-     * Re-paginate the item's mirror IN PLACE with new page params and re-reduce its
-     * bounds — the remap is reconstructive, so this is exact and needs no walk, no decode.
-     * Keeps the mirror (the CPU oracle: extents, caret, verify) in the same page state as
-     * the GPU. @private
+     * Re-paginate a MATERIALIZED mirror IN PLACE with new page params (derived stride —
+     * the same formula the GPU's stride kernel runs) and re-reduce its box. The walk
+     * scalars (totalRows/maxRowExtent) persist — a repaginate never re-walks. Keeps the
+     * oracle in the same page state as the GPU for caret/verify. @private
      */
     _repaginateMirror(item, page) {
-        const p = { ...page, wrap: item.wrapWidth, origin: item.origin,
+        const m = item.mirror;
+        if (!m) return;
+        const p = { ...page, pageStrideX: deriveStride(m.bounds, page),
+            wrap: item.wrapWidth, origin: item.origin,
             zStep: item.zStep, lineHeight: item.lineHeight };
-        const { slots } = item.mirror;
+        const { slots } = m;
         const n = item.byteCount;
         for (let id = 0; id < n; id++) refPaginate(slots, id, p);
-        const box = new Float64Array([Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity, 0, 0]);
-        for (let id = 0; id < n; id++) refBoundsReduce(slots, id, box);
-        item.mirror.bounds = box[0] === Infinity ? null : {
+        const ox = item.origin?.x || 0;
+        const box = new Float64Array([Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity,
+            m.bounds?.totalRows || 0, m.bounds?.maxRowExtent || 0]);
+        for (let id = 0; id < n; id++) refBoundsReduce(slots, id, box, ox);
+        m.bounds = box[0] === Infinity ? null : {
             min: { x: box[0], y: box[1], z: box[2] },
             max: { x: box[3], y: box[4], z: box[5] },
             totalRows: box[6], maxRowExtent: box[7],

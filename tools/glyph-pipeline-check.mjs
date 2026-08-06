@@ -11,16 +11,17 @@
 //   3. real dispatch cost on real scheduling
 //
 // The check, per lane: same bytes through runPipeline() (CPU spec) and through
-// setFile/run/readSlots/readBounds/readMisses (GPU), then diff every slot. row/col/flags/
-// codepoint must be EXACT (the integer-lane law); x/y/z within eps (f32, order-free).
-// A repaginate lane proves kernel 3 alone re-folds a mode switch.
+// setFile/run/readSlots/readItemBounds/readMisses (GPU), then diff every slot. row/col/
+// flags/codepoint must be EXACT (the integer-lane law); x/y/z within eps (f32,
+// order-free). A repaginate lane proves strides+kernel-3 alone re-fold a mode switch.
 //
 // MULTI-FILE lanes (the hoist): 2-3 corpora concatenated into ONE buffer as items with
 // different origins + page params, through setFiles/run vs runPipeline({items}). Asserts
-// row/col are file-relative (every item's first glyph is row 0, col 0), the batch-wide
-// bounds box matches (per-file scalars stay with the CPU mirror — itemBounds), and ITEM
-// ISOLATION: re-running with one item's origin+page changed must leave every other item's
-// slots bit-identical.
+// row/col are file-relative (every item's first glyph is row 0, col 0), the PER-ITEM
+// bounds table matches itemBounds (box + totalRows + maxRowExtent, per item — the
+// records the arena's one post-flush readback distributes), and ITEM ISOLATION:
+// re-running with one item's origin+page changed must leave every other item's slots
+// bit-identical.
 //
 //   bun tools/glyph-pipeline-check.mjs                     # all lanes
 //   bun tools/glyph-pipeline-check.mjs --eps 1e-4 --json
@@ -80,11 +81,11 @@ const corpora = [
 
 // ---- lanes: wrap × window × page. window 0 is a correctness lane, not a perf one. ----
 const PAGE_OFF = null;
-const PAGE_NEWS = { pageRows: 8, pageCols: 0, colWidth: 0, pageStrideX: 50, pagesWide: 2, depthPerBand: 5, depthPerColumn: 0, bandStrideY: 13.2 };
-const PAGE_Z = { pageRows: 8, pageCols: 0, colWidth: 0, pageStrideX: 0, pagesWide: 1, depthPerBand: 20, depthPerColumn: 0 };
+const PAGE_NEWS = { pageRows: 8, pageCols: 0, colWidth: 0, pageGapX: 3, pagesWide: 2, depthPerBand: 5, depthPerColumn: 0, bandStrideY: 13.2 };
+const PAGE_Z = { pageRows: 8, pageCols: 0, pagesWide: 1, depthPerBand: 20, depthPerColumn: 0 };
 // MetalLink's max-page-width fold: an over-wide line breaks into depth pages
 // (xPages = floor(col / pageCols), z recedes per column — Compute.metal:396).
-const PAGE_COLS = { pageRows: 0, pageCols: 200, pageStrideX: 0, pagesWide: 1, depthPerBand: 0, depthPerColumn: 4 };
+const PAGE_COLS = { pageRows: 0, pageCols: 200, pagesWide: 1, depthPerBand: 0, depthPerColumn: 4 };
 const lanes = [
   { wrapWidth: 0, window: 128, page: PAGE_OFF,
     expectFailOn: 'single-line-40k',
@@ -115,7 +116,7 @@ const MULTI = [
       { corpus: path.basename(REAL_FILE), origin: { x: 120, y: 6, z: -4 }, page: PAGE_Z },
     ],
     isolateChange: { itemIndex: 1, origin: { x: -55, y: 2.5, z: 9 },
-      page: { pageRows: 5, pageCols: 0, pageStrideX: 71, pagesWide: 3, depthPerBand: 8, depthPerColumn: 0, bandStrideY: 21 } } },
+      page: { pageRows: 5, pageCols: 0, pageGapX: 5, pagesWide: 3, depthPerBand: 8, depthPerColumn: 0, bandStrideY: 21 } } },
   { name: 'multi: 3 items (scroll|cols|z)', wrapWidth: 24, window: 128,
     items: [
       { corpus: 'torture', origin: { x: 3, y: 0, z: 0 }, page: { scrollRows: 4 } },
@@ -204,23 +205,23 @@ const probe = (opts) => `(async (o) => {
     }
     return firstBad;
   };
-  const diffBounds = (fail, ref, gpuBounds) => {
-    if (!ref.bounds) {
-      if (gpuBounds.min.x !== Infinity && isFinite(gpuBounds.min.x)) fail('ref has no bounds but GPU does');
-      return;
-    }
+  // PER-ITEM: the GPU's bounds table entry vs the reference's itemBounds — box lanes
+  // magnitude-scaled like positions, totalRows exact (integer count), maxRowExtent the
+  // same float tolerance. The batch box is just the union, so per-item is the stronger
+  // assert and the only one kept.
+  const diffBounds = (fail, refB, gpuB, tag) => {
+    const t = tag ? tag + ' ' : '';
+    if (!refB) { if (gpuB) fail(t + 'ref has no bounds but GPU does'); return; }
+    if (!gpuB) { fail(t + 'GPU bounds null where ref has bounds'); return; }
     for (const k of ['x', 'y', 'z']) {
-      const dMin = Math.abs(gpuBounds.min[k] - ref.bounds.min[k]);
-      const dMax = Math.abs(gpuBounds.max[k] - ref.bounds.max[k]);
-      const tol = o.eps + Math.max(Math.abs(ref.bounds.min[k]), Math.abs(ref.bounds.max[k])) * 5e-5;
-      if (dMin > tol || dMax > tol) fail('bounds.' + k + ' gpu [' + gpuBounds.min[k] + ', ' + gpuBounds.max[k] + '] vs ref [' + ref.bounds.min[k] + ', ' + ref.bounds.max[k] + ']');
+      const dMin = Math.abs(gpuB.min[k] - refB.min[k]);
+      const dMax = Math.abs(gpuB.max[k] - refB.max[k]);
+      const tol = o.eps + Math.max(Math.abs(refB.min[k]), Math.abs(refB.max[k])) * 5e-5;
+      if (dMin > tol || dMax > tol) fail(t + 'bounds.' + k + ' gpu [' + gpuB.min[k] + ', ' + gpuB.max[k] + '] vs ref [' + refB.min[k] + ', ' + refB.max[k] + ']');
     }
-    // The scroll/page scalars: totalRows is an integer count — exact. maxRowExtent
-    // is a float sum — the same magnitude-scaled tolerance as positions. With items
-    // these are BATCH-WIDE maxes; per-file scalars come from the CPU mirror (itemBounds).
-    if (gpuBounds.totalRows !== ref.bounds.totalRows) fail('totalRows gpu ' + gpuBounds.totalRows + ' vs ref ' + ref.bounds.totalRows);
-    const eTol = o.eps + Math.abs(ref.bounds.maxRowExtent) * 5e-5;
-    if (Math.abs(gpuBounds.maxRowExtent - ref.bounds.maxRowExtent) > eTol) fail('maxRowExtent gpu ' + gpuBounds.maxRowExtent + ' vs ref ' + ref.bounds.maxRowExtent);
+    if (gpuB.totalRows !== refB.totalRows) fail(t + 'totalRows gpu ' + gpuB.totalRows + ' vs ref ' + refB.totalRows);
+    const eTol = o.eps + Math.abs(refB.maxRowExtent) * 5e-5;
+    if (Math.abs(gpuB.maxRowExtent - refB.maxRowExtent) > eTol) fail(t + 'maxRowExtent gpu ' + gpuB.maxRowExtent + ' vs ref ' + refB.maxRowExtent);
   };
   const diffMisses = (fail, ref, gpuMisses) => {
     const a = Array.from(gpuMisses).sort((p, q) => p - q), b2 = Array.from(ref.misses).sort((p, q) => p - q);
@@ -257,7 +258,7 @@ const probe = (opts) => `(async (o) => {
         if (lane.repaginateTo) { K.setPage(lane.repaginateTo); K.repaginate(); }
         const t1 = performance.now();
         const gpu = await K.readSlots();
-        const gpuBounds = await K.readBounds();
+        const gpuItemBounds = await K.readItemBounds();
         const gpuMisses = await K.readMisses();
         L.dispatchMs = +(t1 - t0).toFixed(2);
 
@@ -265,8 +266,8 @@ const probe = (opts) => `(async (o) => {
         const firstBad = diffSlots(L, fail, ref, gpu, 0, bytes.length);
         if (firstBad >= 0) L.firstBadSlot = firstBad;
 
-        // bounds — same magnitude-scaled tolerance as positions
-        diffBounds(fail, ref, gpuBounds);
+        // bounds — the GPU's per-item record vs the reference's
+        diffBounds(fail, ref.itemBounds[0], gpuItemBounds[0]);
 
         // misses — same set, order-free
         diffMisses(fail, ref, gpuMisses);
@@ -323,13 +324,15 @@ const probe = (opts) => `(async (o) => {
       K.run();
       const t1 = performance.now();
       const gpu = await K.readSlots();
-      const gpuBounds = await K.readBounds();
+      const gpuItemBounds = await K.readItemBounds();
       L.dispatchMs = +(t1 - t0).toFixed(2);
 
       const ref = refMod.runPipeline(concat, fixtureTrie, Object.assign({}, fieldParams, { items: refItems(null) }));
       const firstBad = diffSlots(L, fail, ref, gpu, 0, total);
       if (firstBad >= 0) L.firstBadSlot = firstBad;
-      diffBounds(fail, ref, gpuBounds);
+      for (let i = 0; i < ref.itemBounds.length; i++) {
+        diffBounds(fail, ref.itemBounds[i], gpuItemBounds[i], 'item ' + i);
+      }
 
       // File-relative lanes: every item's first glyph is row 0, col 0 — the walk floored
       // at the file's first byte and never crossed into the previous file.

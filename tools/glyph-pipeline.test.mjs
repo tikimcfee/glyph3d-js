@@ -23,7 +23,7 @@ import { buildGlyphTrie, trieLookup, BLOCK_INDEX_LENGTH } from '../packages/glyp
 import {
   runPipeline, decodeAndResolve, layout, paginate, boundsReduce, allocSlots,
   sequenceLength, rowsForLine, SLOT_STRIDE, S_CODEPOINT, S_X, S_Y, S_Z, S_ROW, S_COL,
-  S_ADVANCE, S_HEIGHT, S_FLAGS, F_LEADER, NEWLINE,
+  S_ADVANCE, S_HEIGHT, S_FLAGS, S_BASE_X, F_LEADER, NEWLINE,
 } from '../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
 
 const arg = (n, d) => { const i = process.argv.indexOf(n); return i >= 0 && process.argv[i + 1] ? Number(process.argv[i + 1]) : d; };
@@ -241,7 +241,7 @@ for (const wrapWidth of [0, 24, 200]) {
 // ── pagination is pure: same input, any order, identical output ──
 {
   const { bytes } = CORPORA[CORPORA.length - 1];
-  const page = { pageRows: 12, lineHeight: CELL_H, pageCols: 30, colWidth: CELL_W, pageStrideX: 46, pagesWide: 3, depthPerBand: 32, depthPerColumn: -4 };
+  const page = { pageRows: 12, lineHeight: CELL_H, pageCols: 30, colWidth: CELL_W, pageGapX: 4, pagesWide: 3, depthPerBand: 32, depthPerColumn: -4 };
   const a = runPipeline(bytes, trie, { page });
   const b = runPipeline(bytes, trie, { page, order: shuffled(rng(7), bytes.length) });
   let planeDiff = 0, posDiff = 0;
@@ -267,11 +267,27 @@ for (const wrapWidth of [0, 24, 200]) {
   }
   ok(zs.size > 1, `paginate: only ${zs.size} depth plane(s) — the fan never engaged`);
   ok(xs.size > 4, `paginate: only ${xs.size} distinct x — vacuous`);
+
+  // The DERIVED stride law: pageStrideX is never a CPU input — it is the item's widest
+  // walk row + pageGapX. A fan-column-1 glyph therefore sits EXACTLY that far right of
+  // its own base x.
+  const expectStride = a.itemBounds[0].maxRowExtent + page.pageGapX;
+  let strideBad = 0, strideChecked = 0;
+  for (let id = 0; id < bytes.length; id++) {
+    const o = id * SLOT_STRIDE;
+    if ((a.slots[o + S_FLAGS] & F_LEADER) === 0) continue;
+    const yPage = Math.floor(a.slots[o + S_ROW] / page.pageRows);
+    if (yPage % page.pagesWide !== 1) continue;   // fan column 1: offset = stride × 1
+    strideChecked++;
+    if (Math.abs((a.slots[o + S_X] - a.slots[o + S_BASE_X]) - expectStride) > 1e-3) strideBad++;
+  }
+  ok(strideChecked > 50 && strideBad === 0,
+    `derived stride: ${strideBad} of ${strideChecked} column-1 glyphs off the maxRowExtent+gap law`);
 }
 
 // ── bounds: equals a naive walk, and contains every quad ──
 for (const { name, bytes } of CORPORA) {
-  for (const page of [null, { pageRows: 12, lineHeight: CELL_H, pageCols: 30, colWidth: CELL_W, pageStrideX: 46, pagesWide: 3, depthPerBand: 32, depthPerColumn: -4 }]) {
+  for (const page of [null, { pageRows: 12, lineHeight: CELL_H, pageCols: 30, colWidth: CELL_W, pageGapX: 4, pagesWide: 3, depthPerBand: 32, depthPerColumn: -4 }]) {
     const run = runPipeline(bytes, trie, page ? { page } : {});
     const box = new Float64Array([Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity]);
     for (let id = 0; id < bytes.length; id++) boundsReduce(run.slots, id, box);
@@ -300,7 +316,7 @@ for (const { name, bytes } of CORPORA) {
 // positions within the f32 tolerance — under any layout dispatch order. Plus the
 // file-relative invariant: every item's first glyph is row 0, col 0.
 {
-  const PAGE_NEWS = { pageRows: 12, lineHeight: CELL_H, pageStrideX: 46, pagesWide: 3, depthPerBand: 32, depthPerColumn: -4 };
+  const PAGE_NEWS = { pageRows: 12, lineHeight: CELL_H, pageGapX: 4, pagesWide: 3, depthPerBand: 32, depthPerColumn: -4 };
   const defs = [
     { corpus: CORPORA[0], origin: { x: 0, y: 0, z: 0 }, page: PAGE_NEWS },
     { corpus: CORPORA[CORPORA.length - 1], origin: { x: 120, y: 6, z: -4 }, page: { scrollRows: 5 } },

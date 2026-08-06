@@ -33,11 +33,13 @@
  * to content at wrap 200 — so one pipeline can only serve a storm if the fold unit rides
  * the item). Only `window` (the GPU coherence dial) stays field-level.
  *
- * BOUNDS: the fused atomic reduce stays GLOBAL — one box for the whole batch, which is
- * what the whole-batch cull wants. Per-file scalars (totalRows, maxRowExtent, per-file
- * boxes) come from the CPU mirror, which is serial anyway: runPipeline returns
- * `itemBounds` parallel to `items`. The GPU bounds buffer's lanes 6/7 are the batch-wide
- * max, not a per-file answer.
+ * BOUNDS ARE PER-ITEM: the GPU carries a maxItems×8 bounds table — the walk kernel
+ * reduces the scroll/page scalars (lanes 6/7: totalRows + the ITEM-RELATIVE widest row)
+ * and the paginate kernel reduces the final box (lanes 0-5) — so ONE post-flush readback
+ * hands every field its extent and no CPU pass re-lays anything. This mirror computes the
+ * same per-item table (`itemBounds`); the batch box is the union. The page-fan stride is
+ * DERIVED from lane 7 (+ the item's pageGapX) by a per-item kernel between walk and
+ * paginate — `deriveStride` is the shared formula.
  *
  * A single file is the one-item case: opts.origin/opts.page/opts.scrollRows are wrapped
  * into one item spanning the buffer and every number is bit-identical to the pre-items
@@ -97,7 +99,8 @@ export const I_ORIGIN_Z = 2;
 export const I_PAGE_ROWS = 3;
 export const I_PAGE_COLS = 4;    // also the walk's fold unit when wrap is off — per item
 export const I_PAGES_WIDE = 5;
-export const I_PAGE_STRIDE_X = 6;
+export const I_PAGE_GAP_X = 6;   // world x gap between fanned page columns — the stride is
+                                 // DERIVED (widest walk row + this gap), never a CPU input
 export const I_BAND_STRIDE_Y = 7;
 export const I_DEPTH_PER_BAND = 8;
 export const I_DEPTH_PER_COL = 9;
@@ -342,9 +345,10 @@ export function layout(slots, id, params = {}) {
  * @property {number} zStep       - depth step per WRAP SEGMENT (the long-column z-fan). The
  *   segment index is floor(col / wrap) — exact, from the integer lanes.
  * @property {number} wrap        - the wrap width the walk ran with (for the segment index).
- * @property {number} pageStrideX - world x between fanned page columns (0 = no fan). An
- *   explicit distance rather than a measured content width: the fan must not depend on a
- *   reduction this kernel cannot see. Feed it from the bounds pass when you want it snug.
+ * @property {number} pageStrideX - world x between fanned page columns (0 = no fan). At
+ *   THIS function's boundary it is explicit (the kernel reads no reduction mid-remap);
+ *   it is fed by `deriveStride` — the walk's widest item-relative row + pageGapX — which
+ *   the GPU computes in its own per-item dispatch between walk and paginate.
  * @property {number} pagesWide   - page columns before wrapping down into the next band
  * @property {number} bandStrideY  - world y between bands (newspaper rows of pages step
  *   DOWN: pageRows×lineHeight + the inter-band gap). 0 for z-axis paging (bands recede
@@ -428,7 +432,7 @@ export function paginate(slots, id, p) {
  * base x, the widest fold-unit row (what a snug pageStrideX feeds from).
  * @param {Float32Array} slots @param {number} id @param {Float64Array|number[]} box
  */
-export function boundsReduce(slots, id, box) {
+export function boundsReduce(slots, id, box, baseXOffset = 0) {
     const o = id * SLOT_STRIDE;
     if ((slots[o + S_FLAGS] & F_LEADER) === 0) return;
     const x = slots[o + S_X], y = slots[o + S_Y], z = slots[o + S_Z];
@@ -442,9 +446,24 @@ export function boundsReduce(slots, id, box) {
     if (box.length > 6) {
         const rowPlus1 = slots[o + S_ROW] + 1;
         if (rowPlus1 > box[6]) box[6] = rowPlus1;
-        const bx = slots[o + S_BASE_X];
+        // ITEM-RELATIVE widest row (pass the item's originX): the stride this feeds is a
+        // content WIDTH — an origin-shifted max would fan pages by the item's world x too.
+        const bx = slots[o + S_BASE_X] - baseXOffset;
         if (bx > box[7]) box[7] = bx;
     }
+}
+
+/**
+ * THE stride formula, shared by this mirror and the GPU's per-item stride kernel: a
+ * row-paged item fans its page columns at (widest item-relative walk row + pageGapX).
+ * Not fanning (pageRows 0) derives 0 — paginate's fan term is inert either way.
+ * @param {?{maxRowExtent:number}} walkScalars - the item's lane-6/7 reduce (pre-paginate)
+ * @param {?Object} page - the item's page bag (pageRows + pageGapX read)
+ * @returns {number} the resolved pageStrideX
+ */
+export function deriveStride(walkScalars, page) {
+    if (!(page && Math.trunc(page.pageRows || 0) > 0)) return 0;
+    return (walkScalars?.maxRowExtent ?? 0) + (page.pageGapX || 0);
 }
 
 /**
@@ -503,25 +522,46 @@ export function runPipeline(bytes, trie, opts = {}) {
     if (order) for (const id of order) layout(slots, id, walkParams[itemForByte(items, id)]);
     else for (let id = 0; id < bytes.length; id++) layout(slots, id, walkParams[itemForByte(items, id)]);
 
-    // Kernel 3, per slot on its item's params. The remap is reconstructive (reads S_BASE_X
-    // + the integer lanes), so an all-zero page is an identity remap — called
-    // unconditionally, paginate() early-returns on it.
+    // The stride kernel's mirror: per-item WALK scalars (totalRows + item-relative widest
+    // row) reduced BEFORE paginate — the GPU does this in kernel 2's fused lanes — then
+    // the page-fan stride derives from them (deriveStride, the one shared formula).
+    const walkScalars = items.map((it) => {
+        let rows = 0, maxX = 0;
+        const ox = it.origin?.x || 0;
+        for (let id = it.byteStart; id < it.byteStart + it.byteCount; id++) {
+            const o = id * SLOT_STRIDE;
+            if ((slots[o + S_FLAGS] & F_LEADER) === 0) continue;
+            if (slots[o + S_ROW] + 1 > rows) rows = slots[o + S_ROW] + 1;
+            if (slots[o + S_BASE_X] - ox > maxX) maxX = slots[o + S_BASE_X] - ox;
+        }
+        return { totalRows: rows, maxRowExtent: maxX };
+    });
+
+    // Kernel 3, per slot on its item's params (the derived stride included). The remap is
+    // reconstructive (reads S_BASE_X + the integer lanes), so an all-zero page is an
+    // identity remap — called unconditionally, paginate() early-returns on it.
     const pageParams = items.map((it, i) => ({
-        ...it.page, wrap: resolved[i].wrapWidth, zStep: resolved[i].zStep, origin: it.origin,
+        ...it.page, pageStrideX: deriveStride(walkScalars[i], it.page),
+        wrap: resolved[i].wrapWidth, zStep: resolved[i].zStep, origin: it.origin,
         lineHeight: resolved[i].lineHeight ?? it.page?.lineHeight,
     }));
     for (let id = 0; id < bytes.length; id++) {
         paginate(slots, id, pageParams[itemForByte(items, id)]);
     }
 
-    // Bounds: the batch-wide box (the GPU's fused atomic reduce answers exactly this)…
+    // Per-item boxes over the FINAL positions (lanes 0-5; lanes 6/7 stay the walk
+    // scalars) — the mirror of the GPU's per-item bounds table. The batch box is the
+    // union, computed here rather than reduced separately.
     const box = new Float64Array([Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity, 0, 0]);
-    for (let id = 0; id < bytes.length; id++) boundsReduce(slots, id, box);
-    // …and the per-file boxes, which the GPU leaves to this mirror by design (the kernel
-    // header documents the choice): consumers need per-file totalRows/maxRowExtent.
-    const itemBounds = items.map((it) => {
-        const b = new Float64Array([Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity, 0, 0]);
-        for (let id = it.byteStart; id < it.byteStart + it.byteCount; id++) boundsReduce(slots, id, b);
+    const itemBounds = items.map((it, i) => {
+        const b = new Float64Array([Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity,
+            walkScalars[i].totalRows, walkScalars[i].maxRowExtent]);
+        for (let id = it.byteStart; id < it.byteStart + it.byteCount; id++) {
+            boundsReduce(slots, id, b, it.origin?.x || 0);
+        }
+        for (let l = 0; l < 3; l++) if (b[l] < box[l]) box[l] = b[l];
+        for (let l = 3; l < 6; l++) if (b[l] > box[l]) box[l] = b[l];
+        for (let l = 6; l < 8; l++) if (b[l] > box[l]) box[l] = b[l];
         return shapeBounds(b);
     });
 
