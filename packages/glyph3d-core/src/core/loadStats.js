@@ -19,7 +19,6 @@ export const loadStats = {
     atlasBlanks: 0,
     atlasGlyphsAdded: 0,
     analyzeParses: 0,
-    analyzeMs: 0,
     parseSyncMs: 0,
     commits: 0,
     commitMs: 0,

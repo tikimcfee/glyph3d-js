@@ -110,12 +110,11 @@ export async function analyzeGrid(grid) {
         const { descriptor, text, lines } = src;
 
         const gen = grid._analyzeGen;                 // snapshot before the async parse
-        const tp = performance.now();
         const { captures } = await parseDocument(text, descriptor);  // colors only — structure is lazy
-        // The parse is main-thread WASM — during a bulk load these stack up against the
-        // seat loop. Counted for the load trace (core/loadStats.js).
+        // Count only — the parse COST is parseSyncMs, timed inside parseDocument. A span
+        // taken across this await once summed every concurrent analyzer's queue-wait
+        // (450 overlapping intervals → a "31 minutes of parse" trace line).
         loadStats.analyzeParses++;
-        loadStats.analyzeMs += performance.now() - tp;
         if (grid._analyzeGen !== gen) return;         // superseded by a newer layout — abort
 
         // Stash the captures on the grid as render-neutral highlight state, so a 2D

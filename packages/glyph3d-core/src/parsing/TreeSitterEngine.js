@@ -139,7 +139,6 @@ export async function parseDocument(text, descriptor, spec = null, opts = {}) {
         parser.setLanguage(language);
         const tSync = performance.now();
         tree = parser.parse(text);
-        loadStats.parseSyncMs += performance.now() - tSync;   // the true WASM parse cost
 
         let captures = [];
         if (query) {
@@ -164,6 +163,10 @@ export async function parseDocument(text, descriptor, spec = null, opts = {}) {
             structure = [];
             walkStructure(tree.rootNode, spec, structure);
         }
+        // The whole sync WASM block — parse AND query captures AND structure walk — is
+        // the true main-thread cost a bulk load pays per file (the profile puts the
+        // query on par with the parse; timing only parser.parse() undercounted).
+        loadStats.parseSyncMs += performance.now() - tSync;
 
         return { captures, structure };
     } finally {

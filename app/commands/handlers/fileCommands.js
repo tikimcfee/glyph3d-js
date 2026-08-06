@@ -329,8 +329,7 @@ export default function registerFileCommands(router) {
                 atlasGrows: d.atlasGrows, atlasMs: Math.round(d.atlasMs),
                 atlasSwaps: d.atlasFieldsSwapped, atlasBlanks: d.atlasBlanks,
                 commits: d.commits, commitMs: Math.round(d.commitMs),
-                parses: d.analyzeParses, parseMs: Math.round(d.analyzeMs),
-                parseSyncMs: Math.round(d.parseSyncMs),
+                parses: d.analyzeParses, parseMs: Math.round(d.parseSyncMs),
                 yields: d.yields, yieldMs: Math.round(d.yieldMs),
             });
 
