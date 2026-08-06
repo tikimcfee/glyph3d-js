@@ -48,6 +48,9 @@ const EPS = Number(flag('--eps', '1e-3'));
 const AS_JSON = has('--json');
 const HEADED = has('--headed');
 const WAIT = Number(flag('--wait', '8000'));
+// A worktree runs its own Vite on its own port — point the gate at it (the default
+// stays the normal checkout's dev loop).
+const URL_ = flag('--url', 'http://localhost:5173/');
 
 // ---- corpora (strings cross the boundary; bytes are TextEncoder-encoded in-page) ----
 // The fixture atlas covers: 0x09-0x0D, 0x20-0x7E, 0xA0-0xFF, 0x2500-0x257F,
@@ -383,7 +386,7 @@ const probe = (opts) => `(async (o) => {
 
 // ---- drive ----
 const browser = await launchBrowser({ headed: HEADED });
-const app = await openApp(browser, { wait: WAIT });
+const app = await openApp(browser, { url: URL_, wait: WAIT });
 let failed = 0;
 try {
   if (!app.booted) { console.error('app did not boot'); process.exit(1); }

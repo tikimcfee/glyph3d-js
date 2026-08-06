@@ -558,7 +558,9 @@ export default class GlyphPipelineKernels {
         return Fn(() => {
             const c = instanceIndex;
             If(c.greaterThanEqual(u.chunkCount), () => { Return(); });
-            const from = c.mul(uint(CHUNK_SIZE)).toVar('from');
+            // 'rFrom', not 'from' — `from` is a WGSL reserved keyword and Dawn rejects
+            // the module (caught on first hardware run; the name reaches WGSL verbatim).
+            const from = c.mul(uint(CHUNK_SIZE)).toVar('rFrom');
             const cur = this._cursorInit(itemSearch, from);
             const acc = this._elemIdentity('r');
             const id = from.toVar('rId');

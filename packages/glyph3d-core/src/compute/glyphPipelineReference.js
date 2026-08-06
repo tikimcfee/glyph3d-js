@@ -265,7 +265,13 @@ export function layoutItem(slots, itemStart, byteCount, params = {}, ordToByte =
             segAdv = 0;
         } else {
             col++;
-            lineAdv = Math.fround(lineAdv + slots[o + S_ADVANCE]);
+            // lineAdv accumulates in f64: the oracle is the TRUTH layer, and on a long
+            // foldless line the f64 prefix sits between the two f32 groupings (CPU
+            // serial drifts ~linearly with a systematic bias; the GPU's chunked tree
+            // stays log-bounded, near this value). segAdv stays fround-per-add — it is
+            // the fold>0 x, and matching the GPU's f32 order is what makes those lanes
+            // bit-exact.
+            lineAdv += slots[o + S_ADVANCE];
             segAdv = (fold > 0 && col % fold === 0) ? 0
                 : Math.fround(segAdv + slots[o + S_ADVANCE]);
         }

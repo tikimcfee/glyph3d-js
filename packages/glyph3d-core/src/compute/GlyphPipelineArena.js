@@ -333,7 +333,7 @@ export default class GlyphPipelineArena {
         const ref = this._ensureMirror(item)?.slots;
         if (!ref) return { ok: false, reason: 'no mirror' };
         const gpu = await this._kernels.readSlots();
-        let worst = 0, badRows = 0;
+        let worst = 0, badRows = 0, badPos = 0;
         const STRIDE = SLOT_STRIDE;
         for (let id = 0; id < item.byteCount; id++) {
             const b = id * STRIDE;                    // mirror slot (file-relative)
@@ -341,11 +341,15 @@ export default class GlyphPipelineArena {
             if ((ref[b + 9] & 1) === 0) continue;
             if (gpu[g + 7] !== ref[b + 7] || gpu[g + 8] !== ref[b + 8]) badRows++;
             for (const l of [4, 5, 6, 10]) {
+                // Magnitude-scaled: a foldless line prefix is an f32 sum whose valid
+                // groupings differ by ~|x|·5e-5 — absolute eps at world scale would
+                // flag legitimate f32 grouping on any long line.
                 const d = Math.abs(gpu[g + l] - ref[b + l]);
                 if (d > worst) worst = d;
+                if (d > eps + Math.abs(ref[b + l]) * 5e-5) badPos++;
             }
         }
-        return { ok: badRows === 0 && worst <= eps, worst, badRows };
+        return { ok: badRows === 0 && badPos === 0, worst, badRows, badPos };
     }
 
     /**

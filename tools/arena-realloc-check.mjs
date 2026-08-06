@@ -24,7 +24,9 @@ try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
     const destroyedErrs = [];
     page.on('console', (m) => { if (m.text().includes('used in submit while destroyed')) destroyedErrs.push(m.text()); });
-    await page.goto('http://localhost:5173/', { waitUntil: 'domcontentloaded' });
+    // --url: a worktree runs its own Vite on its own port (default: the normal dev loop).
+    const ui = process.argv.indexOf('--url');
+    await page.goto(ui >= 0 ? process.argv[ui + 1] : 'http://localhost:5173/', { waitUntil: 'domcontentloaded' });
     await page.waitForFunction('!!window.__glyphClient && !!window.__glyphClient.ctx.renderer', null, { timeout: 20000 });
     await page.waitForTimeout(4000);
 

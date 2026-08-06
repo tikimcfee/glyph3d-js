@@ -59,8 +59,9 @@ after editing core, `make dev-status` to check.
   `device.uncapturederror`, then `verifyItem` (exact) + a pixel non-blank assert.
   Client-only (fake in-page provider, no relay).
   ```
-  bun tools/arena-realloc-check.mjs
+  bun tools/arena-realloc-check.mjs [--url http://localhost:5273/]
   ```
+  (`--url` on this and `glyph-pipeline-check.mjs` points a gate at a worktree's own Vite.)
 
 ## Integration tests
 
@@ -162,6 +163,18 @@ Also: `stats` (store shape), `dump [path]` (VACUUM INTO snapshot, default
   errors, and zero-capture regressions.
   ```
   bun tools/verify-tree-sitter.mjs
+  ```
+
+- **`scan-layout.test.mjs`** — the byte pipeline's ALGEBRA gate: the segmented monoid scan
+  (`compute/glyphPipelineScan.js`, the GPU's dispatch structure in JS) against the serial
+  oracle (`compute/glyphPipelineReference.js`). Associativity fuzz over random leaf cuts,
+  chunk/group-size invariance (integer lanes bit-exact at every grouping; fold>0 x
+  bit-exact — resolveX re-sums in the oracle's f32 order), the item-reset law (every
+  item's first leader is row0/col0/ord0 even when chunks straddle boundaries), content
+  isolation, and a randomized corpora sweep. Run after touching the monoid, the scan
+  spec, or the fold semantics.
+  ```
+  bun tools/scan-layout.test.mjs
   ```
 
 - **`contenttree.test.mjs`** — unit-tests the directory recursion in `ContentTree`
