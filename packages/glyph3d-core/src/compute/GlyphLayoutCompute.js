@@ -30,12 +30,23 @@ import { loadStats } from '../core/loadStats.js';
 
 let _renderer = null;
 let _deviceLostNoted = false;
+let _pipelineArena = null;
 
 /** Register the app's initialized WebGPURenderer (engine boot). Null unregisters. */
 export function setComputeRenderer(renderer) { _renderer = renderer || null; _deviceLostNoted = false; }
 
 /** The registered compute renderer (byte-pipeline adapters take it). */
 export function getComputeRenderer() { return _renderer; }
+
+/**
+ * Register the app's shared GlyphPipelineArena (engine boot, right after
+ * setComputeRenderer). THE byte-pipeline path for grids — one pipeline per app, every
+ * file an item. Null unregisters.
+ */
+export function setPipelineArena(arena) { _pipelineArena = arena || null; }
+
+/** The registered pipeline arena. CodeGrid stages every load into it. */
+export function getPipelineArena() { return _pipelineArena; }
 
 /** On when a renderer is registered — the engine is the only layout path for grids. */
 export function isGpuLayoutEnabled() { return _renderer !== null; }

@@ -294,7 +294,84 @@ for (const { name, bytes } of CORPORA) {
   }
 }
 
-// ── the missing path: unmapped codepoints still lay out, and get reported ──
+// ── multi-file: N items in ONE buffer, the walk never crosses a file boundary ──
+// The hoist's spec: a multi-item runPipeline must reproduce, per item, exactly what a
+// single-file run of that file produces (same origin + page params) — row/col exact,
+// positions within the f32 tolerance — under any layout dispatch order. Plus the
+// file-relative invariant: every item's first glyph is row 0, col 0.
+{
+  const PAGE_NEWS = { pageRows: 12, lineHeight: CELL_H, pageStrideX: 46, pagesWide: 3, depthPerBand: 32, depthPerColumn: -4 };
+  const defs = [
+    { corpus: CORPORA[0], origin: { x: 0, y: 0, z: 0 }, page: PAGE_NEWS },
+    { corpus: CORPORA[CORPORA.length - 1], origin: { x: 120, y: 6, z: -4 }, page: { scrollRows: 5 } },
+    { corpus: CORPORA[Math.min(1, CORPORA.length - 1)], origin: { x: -30, y: -2, z: 9 }, page: null },
+  ];
+  const wrapWidth = 24, zStep = 0.21;
+  let off = 0;
+  const starts = defs.map((d) => { const s = off; off += d.corpus.bytes.length; return s; });
+  const total = off;
+  const concat = new Uint8Array(total);
+  defs.forEach((d, i) => concat.set(d.corpus.bytes, starts[i]));
+  const items = defs.map((d, i) => ({ byteStart: starts[i], byteCount: d.corpus.bytes.length, origin: d.origin, page: d.page }));
+
+  const base = runPipeline(concat, trie, { wrapWidth, lineHeight: CELL_H, zStep, items });
+  let relBad = 0, driftBad = 0, posBad = 0, isoBad = 0;
+
+  // file-relative row/col: the walk floored at each file's first byte
+  for (let i = 1; i < defs.length; i++) {
+    const b = starts[i] * SLOT_STRIDE;
+    if (base.slots[b + S_ROW] !== 0 || base.slots[b + S_COL] !== 0) relBad++;
+  }
+
+  // per-item equality with the single-file runs, under dispatch orders
+  const singles = defs.map((d) => runPipeline(d.corpus.bytes, trie,
+    { wrapWidth, lineHeight: CELL_H, zStep, origin: d.origin, page: d.page }));
+  const orders = [ids(total)];
+  for (let k = 0; k < 6; k++) orders.push(shuffled(rng(9000 + k), total));
+  for (const order of orders) {
+    const multi = runPipeline(concat, trie, { wrapWidth, lineHeight: CELL_H, zStep, items, order });
+    for (let i = 0; i < defs.length; i++) {
+      const single = singles[i];
+      for (let id = 0; id < defs[i].corpus.bytes.length; id++) {
+        const gm = (starts[i] + id) * SLOT_STRIDE, gs = id * SLOT_STRIDE;
+        if ((multi.slots[gm + S_FLAGS] & F_LEADER) === 0) continue;
+        if (multi.slots[gm + S_ROW] !== single.slots[gs + S_ROW]
+         || multi.slots[gm + S_COL] !== single.slots[gs + S_COL]) driftBad++;
+        if (multi.slots[gm + S_ROW] !== base.slots[gm + S_ROW]
+         || multi.slots[gm + S_COL] !== base.slots[gm + S_COL]) driftBad++;
+        for (const l of [S_X, S_Y, S_Z]) {
+          if (Math.abs(multi.slots[gm + l] - single.slots[gs + l]) > ftol(single.slots[gs + l])) posBad++;
+        }
+      }
+    }
+  }
+
+  // item isolation: re-run with item 1's origin + page changed — items 0 and 2 must not move
+  {
+    const items2 = defs.map((d, i) => ({ byteStart: starts[i], byteCount: d.corpus.bytes.length,
+      origin: i === 1 ? { x: -400, y: 20, z: 3 } : d.origin,
+      page: i === 1 ? PAGE_NEWS : d.page }));
+    const re = runPipeline(concat, trie, { wrapWidth, lineHeight: CELL_H, zStep, items: items2 });
+    for (const i of [0, 2]) {
+      for (let id = 0; id < defs[i].corpus.bytes.length; id++) {
+        const b = (starts[i] + id) * SLOT_STRIDE;
+        for (const l of [S_X, S_Y, S_Z, S_ROW, S_COL]) {
+          if (re.slots[b + l] !== base.slots[b + l]) { isoBad++; break; }
+        }
+      }
+    }
+  }
+
+  // per-item bounds from the mirror: parallel to items, and each item's scalars are its own
+  ok(base.itemBounds && base.itemBounds.length === defs.length, 'multi: itemBounds missing or wrong length');
+  ok(base.itemBounds.every((b) => b && isFinite(b.min.x)), 'multi: an item has no bounds');
+  ok(relBad === 0, `multi: ${relBad} items' first glyph not at row 0, col 0 (walk crossed a boundary)`);
+  ok(driftBad === 0, `multi: ${driftBad} row/col lanes differ from the single-file runs (or drifted across orders)`);
+  ok(posBad === 0, `multi: ${posBad} positions differ from the single-file runs beyond f32 tolerance`);
+  ok(isoBad === 0, `multi: ${isoBad} slots outside item 1 moved when item 1's params changed (isolation broken)`);
+}
+
+
 {
   const bytes = new TextEncoder().encode('ab\u{1F4A9}cd\n\u{1F4A9}ef');
   const run = runPipeline(bytes, trie, {});

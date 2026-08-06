@@ -251,13 +251,12 @@ export default function registerFileCommands(router) {
             // (Settings ▸ Loading).
             const budget = Number(ctx.loadBuildBudget ?? 12);
             const yieldFrame = () => new Promise((r) => {
-                // rAF is the real frame boundary; the timer keeps a hidden tab
-                // (no frames) from stalling the load forever.
+                // A macrotask yield, NOT rAF: the byte pipeline's loads resolve as promise
+                // continuations, so the yield exists to let those breathe — and rAF makes
+                // wall-clock hostage to frame cadence (a backgrounded tab stretched a root
+                // restore to 54s once, measured 2026-08-05).
                 const y0 = performance.now();
-                let done = false;
-                const settle = () => { if (!done) { done = true; loadStats.yields++; loadStats.yieldMs += performance.now() - y0; r(); } };
-                if (typeof requestAnimationFrame === 'function') requestAnimationFrame(settle);
-                setTimeout(settle, 50);
+                setTimeout(() => { loadStats.yields++; loadStats.yieldMs += performance.now() - y0; r(); }, 0);
             });
             let lastPour = performance.now();
             let lastStatus = 0;
@@ -290,11 +289,10 @@ export default function registerFileCommands(router) {
                 opened++;
                 if (ctx.registry.get(id)?.grid?.userData?.notRendered) placeholders++;
             };
-            // ADAPTIVE slicing: the budget is the floor, not the ceiling. Fixed
-            // 12ms slices stretch 450ms of build work across ~1s of yield pacing —
-            // so while the frames between slices stay clean (the yield returned
-            // near frame cadence), the slice grows (×1.5 up to 4× budget) and the
-            // stream drains in a handful of frames; one late frame halves it back.
+            // ADAPTIVE slicing: the budget is the floor, not the ceiling. The yield is a
+            // macrotask hop (not rAF — frame cadence throttles under backgrounded tabs), so
+            // slices drain as fast as the main thread allows; a laggy slice halves the
+            // budget, a fast one grows it (×1.5 up to 4×).
             let slice = budget;
             let i = 0;
             while (i < want.length) {

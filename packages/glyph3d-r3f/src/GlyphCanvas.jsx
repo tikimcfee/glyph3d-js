@@ -1,8 +1,34 @@
 import React from 'react';
 import { Canvas } from '@react-three/fiber';
 import * as THREE from 'three/webgpu';
-import { setComputeRenderer } from '@glyph3d/core/compute/GlyphLayoutCompute.js';
+import { setComputeRenderer, setPipelineArena } from '@glyph3d/core/compute/GlyphLayoutCompute.js';
+import GlyphPipelineArena from '@glyph3d/core/compute/GlyphPipelineArena.js';
 import { GlyphProvider } from './context.jsx';
+
+/**
+ * The shared pipeline arena's slot buffer is capacity-sized (44B per source byte) and
+ * GROWS with the load — past the default maxStorageBufferBindingSize (128MB) at ~3MB of
+ * source. Request the adapter's REAL limits (capped at 2GB). Probing the adapter first is
+ * the WebGPU-recommended pattern: requestDevice fails if a required limit exceeds what
+ * the adapter can provide. Returns {} (default limits) when probing is unavailable.
+ */
+async function _pipelineLimits(glProps) {
+  try {
+    const pp = glProps && glProps.powerPreference;
+    const adapter = await navigator.gpu?.requestAdapter(pp ? { powerPreference: pp } : undefined);
+    const lim = adapter?.limits;
+    if (!lim) return {};
+    const cap = 1 << 31;   // 2GB
+    return {
+      requiredLimits: {
+        maxBufferSize: Math.min(lim.maxBufferSize, cap),
+        maxStorageBufferBindingSize: Math.min(lim.maxStorageBufferBindingSize, cap),
+      },
+    };
+  } catch {
+    return {};
+  }
+}
 
 /**
  * GlyphCanvas — an r3f <Canvas> wired for the WebGPU GlyphField stack.
@@ -71,12 +97,28 @@ export default function GlyphCanvas({
             canvas.style.height = h + 'px';
           }
         }
-        const renderer = new THREE.WebGPURenderer({ ...glProps, antialias: true });
+        const renderer = new THREE.WebGPURenderer({ ...glProps, antialias: true, ...(await _pipelineLimits(glProps)) });
         renderer.toneMapping = toneMapping;
         await renderer.init();
         // Arm the core's GPU layout engine: core objects (CodeGrid) live below the renderer
         // and can't reach it through any ctx they own — this is the one registration point.
         setComputeRenderer(renderer);
+        // THE byte-pipeline path: ONE shared pipeline arena per app (the multi-file
+        // hoist) — a load storm stages every file as an item and flushes in three
+        // dispatches, instead of one kernels instance (3 codegens) per grid. Also
+        // reachable off the renderer: itests importing core modules via /@fs get a
+        // DIFFERENT module instance than the app's, so the module singleton alone
+        // would be invisible to them.
+        // WebGPU-less boot (WebGL2 fallback): the arena can't exist — compute is
+        // WebGPU-only. Log ONE clear error and boot without it; grids stay empty
+        // (CodeGrid fails loud-once at load) instead of a shader-error storm.
+        try {
+          const arena = new GlyphPipelineArena(renderer, atlas, { worldScale: 0.025 });
+          setPipelineArena(arena);
+          renderer.glyphPipelineArena = arena;
+        } catch (err) {
+          console.error('[glyph3d] BYTE PIPELINE UNAVAILABLE — grids will not lay out:', err?.message || err);
+        }
         onRenderer?.(renderer, glProps);
         return renderer;
       }}

@@ -726,8 +726,8 @@ export default class GlyphField {
         // Byte-pipeline mode: the byte-in GPU pipeline owns this field's positions/sizes/
         // glyphIds — the vertex transform reads the pipeline's stride-11 slot buffer (see
         // _fieldSlots / core/glyphVertex.js), so this field never carries those instance
-        // attributes. _byteSlots attaches at first load; _byteSlotBase is the multi-file
-        // hoist seam (0 while the buffer is per-grid).
+        // attributes. _byteSlots attaches at first load; _byteSlotBase is the field's
+        // byteStart inside the shared pipeline arena (0 for a single-file pipeline).
         this._bytePipeline = !!options.bytePipeline;
         this._byteSlots = null;
         this._byteSlotBase = 0;
@@ -1704,11 +1704,14 @@ export default class GlyphField {
      * fields.
      * @param {import('./compute/GlyphPipelineKernels.js').default} pipeline
      * @param {number} byteLength - the live byte count (instance count)
+     * @param {number} [slotBase=0] - this field's first byte IN the pipeline's buffer.
+     *   The multi-file hoist: when the pipeline is an arena serving many files, the field
+     *   reads its slots at (slotBase + instanceIndex) × SLOT_STRIDE.
      */
-    attachBytePipeline(pipeline, byteLength) {
+    attachBytePipeline(pipeline, byteLength, slotBase = 0) {
         if (!this._bytePipeline) throw new Error('attachBytePipeline on a non-bytePipeline field');
         this._byteSlots = pipeline.slots.value;
-        this._byteSlotBase = 0;
+        this._byteSlotBase = slotBase;
         const geom = this.instanceMesh.geometry;
         const count = Math.min(byteLength, this.config.maxInstances);
         // (Re)fill the default color across the live range — the colorizer overwrites after.

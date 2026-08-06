@@ -15,6 +15,13 @@
 // codepoint must be EXACT (the integer-lane law); x/y/z within eps (f32, order-free).
 // A repaginate lane proves kernel 3 alone re-folds a mode switch.
 //
+// MULTI-FILE lanes (the hoist): 2-3 corpora concatenated into ONE buffer as items with
+// different origins + page params, through setFiles/run vs runPipeline({items}). Asserts
+// row/col are file-relative (every item's first glyph is row 0, col 0), the batch-wide
+// bounds box matches (per-file scalars stay with the CPU mirror — itemBounds), and ITEM
+// ISOLATION: re-running with one item's origin+page changed must leave every other item's
+// slots bit-identical.
+//
 //   bun tools/glyph-pipeline-check.mjs                     # all lanes
 //   bun tools/glyph-pipeline-check.mjs --eps 1e-4 --json
 //   bun tools/glyph-pipeline-check.mjs --headed            # watch it
@@ -96,6 +103,27 @@ const lanes = [
 ];
 const ZSTEP = 0.21;   // 0.15 × CELL_H — the app's long-column zWrapSpacing, in world units
 
+// ---- MULTI-FILE lanes: N items concatenated in ONE buffer, ONE set of dispatches (the
+// multi-file hoist). Each item carries its own origin + page params; the walk must floor
+// at each file's first byte (row/col file-relative) and no item's params may leak into
+// another. isolateChange re-runs the batch with one item's origin+page replaced and
+// asserts every OTHER item's slots are bit-identical (item isolation).
+const MULTI = [
+  { name: 'multi: torture+GlyphTrie (news|z)', wrapWidth: 200, window: 128,
+    items: [
+      { corpus: 'torture', origin: { x: 0, y: 0, z: 0 }, page: PAGE_NEWS },
+      { corpus: path.basename(REAL_FILE), origin: { x: 120, y: 6, z: -4 }, page: PAGE_Z },
+    ],
+    isolateChange: { itemIndex: 1, origin: { x: -55, y: 2.5, z: 9 },
+      page: { pageRows: 5, pageCols: 0, pageStrideX: 71, pagesWide: 3, depthPerBand: 8, depthPerColumn: 0, bandStrideY: 21 } } },
+  { name: 'multi: 3 items (scroll|cols|z)', wrapWidth: 24, window: 128,
+    items: [
+      { corpus: 'torture', origin: { x: 3, y: 0, z: 0 }, page: { scrollRows: 4 } },
+      { corpus: path.basename(REAL_FILE), origin: { x: 0, y: -10, z: 2 }, page: PAGE_COLS },
+      { corpus: 'torture', origin: { x: -30, y: 4, z: -7 }, page: PAGE_Z },
+    ] },
+];
+
 // ---- the in-page probe ----
 const probe = (opts) => `(async (o) => {
   const R = { lanes: [], notes: [] };
@@ -146,6 +174,59 @@ const probe = (opts) => `(async (o) => {
   const enc = new TextEncoder();
   const LINE_H = CELL_H;
 
+  // ── The GPU-vs-reference diffs, shared by the single-file lanes and the multi-file
+  //    lanes. row/col/flags/codepoint are EXACT (the integer-lane law); x/y/z sit within
+  //    the magnitude-scaled f32 tolerance.
+  const diffSlots = (L, fail, ref, gpu, lo, hi) => {
+    let firstBad = -1;
+    for (let id = lo; id < hi; id++) {
+      const b = id * SLOT_STRIDE;
+      const leaderRef = (ref.slots[b + S_FLAGS] & F_LEADER) !== 0;
+      const leaderGpu = (gpu[b + S_FLAGS] & F_LEADER) !== 0;
+      if (leaderRef !== leaderGpu) { fail('slot ' + id + ' leader mismatch ref=' + leaderRef + ' gpu=' + leaderGpu); if (firstBad < 0) firstBad = id; continue; }
+      if (!leaderRef) continue;
+      L.exactChecked++;
+      if (gpu[b + S_CODEPOINT] !== ref.slots[b + S_CODEPOINT]) { fail('slot ' + id + ' codepoint ' + gpu[b + S_CODEPOINT] + ' != ' + ref.slots[b + S_CODEPOINT]); if (firstBad < 0) firstBad = id; }
+      if (gpu[b + S_ROW] !== ref.slots[b + S_ROW]) { fail('slot ' + id + ' ROW ' + gpu[b + S_ROW] + ' != ' + ref.slots[b + S_ROW]); if (firstBad < 0) firstBad = id; }
+      if (gpu[b + S_COL] !== ref.slots[b + S_COL]) { fail('slot ' + id + ' COL ' + gpu[b + S_COL] + ' != ' + ref.slots[b + S_COL]); if (firstBad < 0) firstBad = id; }
+      if (gpu[b + S_ADVANCE] !== ref.slots[b + S_ADVANCE] || gpu[b + S_HEIGHT] !== ref.slots[b + S_HEIGHT]) { fail('slot ' + id + ' metrics mismatch'); if (firstBad < 0) firstBad = id; }
+      for (const [lane2, name] of [[S_X, 'x'], [S_Y, 'y'], [S_Z, 'z'], [S_BASE_X, 'baseX']]) {
+        const d = Math.abs(gpu[b + lane2] - ref.slots[b + lane2]);
+        if (d > L.maxDelta) L.maxDelta = d;
+        // f32 accumulation is order-free but not bit-exact: the walk sums ~hundreds of
+        // advances in a scheduling-dependent grouping, so the tolerance scales with
+        // magnitude (same shape as layout-fuzz, 5e-5 for the unbounded wrap=0 sums).
+        // row/col above stay EXACT — integers don't wobble.
+        const tol = o.eps + Math.abs(ref.slots[b + lane2]) * 5e-5;
+        if (d > tol) { fail('slot ' + id + ' ' + name + ' delta ' + d.toExponential(2) + ' (gpu ' + gpu[b + lane2] + ' vs ref ' + ref.slots[b + lane2] + ')'); if (firstBad < 0) firstBad = id; }
+        L.posChecked++;
+      }
+    }
+    return firstBad;
+  };
+  const diffBounds = (fail, ref, gpuBounds) => {
+    if (!ref.bounds) {
+      if (gpuBounds.min.x !== Infinity && isFinite(gpuBounds.min.x)) fail('ref has no bounds but GPU does');
+      return;
+    }
+    for (const k of ['x', 'y', 'z']) {
+      const dMin = Math.abs(gpuBounds.min[k] - ref.bounds.min[k]);
+      const dMax = Math.abs(gpuBounds.max[k] - ref.bounds.max[k]);
+      const tol = o.eps + Math.max(Math.abs(ref.bounds.min[k]), Math.abs(ref.bounds.max[k])) * 5e-5;
+      if (dMin > tol || dMax > tol) fail('bounds.' + k + ' gpu [' + gpuBounds.min[k] + ', ' + gpuBounds.max[k] + '] vs ref [' + ref.bounds.min[k] + ', ' + ref.bounds.max[k] + ']');
+    }
+    // The scroll/page scalars: totalRows is an integer count — exact. maxRowExtent
+    // is a float sum — the same magnitude-scaled tolerance as positions. With items
+    // these are BATCH-WIDE maxes; per-file scalars come from the CPU mirror (itemBounds).
+    if (gpuBounds.totalRows !== ref.bounds.totalRows) fail('totalRows gpu ' + gpuBounds.totalRows + ' vs ref ' + ref.bounds.totalRows);
+    const eTol = o.eps + Math.abs(ref.bounds.maxRowExtent) * 5e-5;
+    if (Math.abs(gpuBounds.maxRowExtent - ref.bounds.maxRowExtent) > eTol) fail('maxRowExtent gpu ' + gpuBounds.maxRowExtent + ' vs ref ' + ref.bounds.maxRowExtent);
+  };
+  const diffMisses = (fail, ref, gpuMisses) => {
+    const a = Array.from(gpuMisses).sort((p, q) => p - q), b2 = Array.from(ref.misses).sort((p, q) => p - q);
+    if (a.length !== b2.length || a.some((v, i) => v !== b2[i])) fail('misses gpu [' + a + '] vs ref [' + b2 + ']');
+  };
+
   for (const corpus of o.corpora) {
     const bytes = enc.encode(corpus.text);
     for (const lane of o.lanes) {
@@ -181,53 +262,14 @@ const probe = (opts) => `(async (o) => {
         L.dispatchMs = +(t1 - t0).toFixed(2);
 
         // per-slot diff
-        const n = bytes.length;
-        let firstBad = -1;
-        for (let id = 0; id < n; id++) {
-          const b = id * SLOT_STRIDE;
-          const leaderRef = (ref.slots[b + S_FLAGS] & F_LEADER) !== 0;
-          const leaderGpu = (gpu[b + S_FLAGS] & F_LEADER) !== 0;
-          if (leaderRef !== leaderGpu) { fail('slot ' + id + ' leader mismatch ref=' + leaderRef + ' gpu=' + leaderGpu); if (firstBad < 0) firstBad = id; continue; }
-          if (!leaderRef) continue;
-          L.exactChecked++;
-          if (gpu[b + S_CODEPOINT] !== ref.slots[b + S_CODEPOINT]) { fail('slot ' + id + ' codepoint ' + gpu[b + S_CODEPOINT] + ' != ' + ref.slots[b + S_CODEPOINT]); if (firstBad < 0) firstBad = id; }
-          if (gpu[b + S_ROW] !== ref.slots[b + S_ROW]) { fail('slot ' + id + ' ROW ' + gpu[b + S_ROW] + ' != ' + ref.slots[b + S_ROW]); if (firstBad < 0) firstBad = id; }
-          if (gpu[b + S_COL] !== ref.slots[b + S_COL]) { fail('slot ' + id + ' COL ' + gpu[b + S_COL] + ' != ' + ref.slots[b + S_COL]); if (firstBad < 0) firstBad = id; }
-          if (gpu[b + S_ADVANCE] !== ref.slots[b + S_ADVANCE] || gpu[b + S_HEIGHT] !== ref.slots[b + S_HEIGHT]) { fail('slot ' + id + ' metrics mismatch'); if (firstBad < 0) firstBad = id; }
-          for (const [lane2, name] of [[S_X, 'x'], [S_Y, 'y'], [S_Z, 'z'], [S_BASE_X, 'baseX']]) {
-            const d = Math.abs(gpu[b + lane2] - ref.slots[b + lane2]);
-            if (d > L.maxDelta) L.maxDelta = d;
-            // f32 accumulation is order-free but not bit-exact: the walk sums ~hundreds of
-            // advances in a scheduling-dependent grouping, so the tolerance scales with
-            // magnitude (same shape as layout-fuzz, 5e-5 for the unbounded wrap=0 sums).
-            // row/col above stay EXACT — integers don't wobble.
-            const tol = o.eps + Math.abs(ref.slots[b + lane2]) * 5e-5;
-            if (d > tol) { fail('slot ' + id + ' ' + name + ' delta ' + d.toExponential(2) + ' (gpu ' + gpu[b + lane2] + ' vs ref ' + ref.slots[b + lane2] + ')'); if (firstBad < 0) firstBad = id; }
-            L.posChecked++;
-          }
-        }
+        const firstBad = diffSlots(L, fail, ref, gpu, 0, bytes.length);
         if (firstBad >= 0) L.firstBadSlot = firstBad;
 
         // bounds — same magnitude-scaled tolerance as positions
-        if (!ref.bounds) {
-          if (gpuBounds.min.x !== Infinity && isFinite(gpuBounds.min.x)) fail('ref has no bounds but GPU does');
-        } else {
-          for (const k of ['x', 'y', 'z']) {
-            const dMin = Math.abs(gpuBounds.min[k] - ref.bounds.min[k]);
-            const dMax = Math.abs(gpuBounds.max[k] - ref.bounds.max[k]);
-            const tol = o.eps + Math.max(Math.abs(ref.bounds.min[k]), Math.abs(ref.bounds.max[k])) * 5e-5;
-            if (dMin > tol || dMax > tol) fail('bounds.' + k + ' gpu [' + gpuBounds.min[k] + ', ' + gpuBounds.max[k] + '] vs ref [' + ref.bounds.min[k] + ', ' + ref.bounds.max[k] + ']');
-          }
-          // The scroll/page scalars: totalRows is an integer count — exact. maxRowExtent
-          // is a float sum — the same magnitude-scaled tolerance as positions.
-          if (gpuBounds.totalRows !== ref.bounds.totalRows) fail('totalRows gpu ' + gpuBounds.totalRows + ' vs ref ' + ref.bounds.totalRows);
-          const eTol = o.eps + Math.abs(ref.bounds.maxRowExtent) * 5e-5;
-          if (Math.abs(gpuBounds.maxRowExtent - ref.bounds.maxRowExtent) > eTol) fail('maxRowExtent gpu ' + gpuBounds.maxRowExtent + ' vs ref ' + ref.bounds.maxRowExtent);
-        }
+        diffBounds(fail, ref, gpuBounds);
 
         // misses — same set, order-free
-        const a = Array.from(gpuMisses).sort((p, q) => p - q), b2 = Array.from(ref.misses).sort((p, q) => p - q);
-        if (a.length !== b2.length || a.some((v, i) => v !== b2[i])) fail('misses gpu [' + a + '] vs ref [' + b2 + ']');
+        diffMisses(fail, ref, gpuMisses);
 
         K.dispose();
       } catch (e) {
@@ -236,6 +278,103 @@ const probe = (opts) => `(async (o) => {
       }
       R.lanes.push(L);
     }
+  }
+
+  // ── MULTI-FILE lanes: N items in ONE buffer, ONE set of dispatches ────────────────────
+  // The multi-file hoist: the walk must floor at each file's first byte (row/col are
+  // file-relative), each item's origin + page params apply to its own bytes only, and
+  // changing one item's params must not move another item's glyphs (item isolation).
+  const corpusByName = {};
+  for (const c of o.corpora) corpusByName[c.name] = c;
+
+  for (const mf of o.multi) {
+    const L = { corpus: mf.name, wrapWidth: mf.wrapWidth, window: mf.window, page: 'multi',
+      repaginate: false, scrollRows: 0, expectFail: null,
+      failures: [], exactChecked: 0, posChecked: 0, maxDelta: 0, ok: true };
+    const fail = (m) => { if (L.failures.length < 6) L.failures.push(m); L.ok = false; };
+    try {
+      const parts = mf.items.map((it) => ({
+        bytes: enc.encode(corpusByName[it.corpus].text), origin: it.origin, page: it.page || undefined,
+      }));
+      const starts = [];
+      {
+        let off = 0;
+        for (const p of parts) { starts.push(off); off += p.bytes.length; }
+      }
+      const total = starts[starts.length - 1] + parts[parts.length - 1].bytes.length;
+      const concat = new Uint8Array(total);
+      parts.forEach((p, i) => concat.set(p.bytes, starts[i]));
+      // mods: optional per-item { origin, page } overrides (the isolation re-run).
+      const refItems = (mods) => parts.map((p, i) => ({
+        byteStart: starts[i], byteCount: p.bytes.length,
+        origin: (mods && mods[i] && mods[i].origin) || p.origin,
+        page: (mods && mods[i] && mods[i].page) || p.page,
+      }));
+      const gpuItems = (mods) => parts.map((p, i) => ({
+        bytes: p.bytes,
+        origin: (mods && mods[i] && mods[i].origin) || p.origin,
+        page: (mods && mods[i] && mods[i].page) || p.page,
+      }));
+      const fieldParams = { window: mf.window, wrapWidth: mf.wrapWidth, lineHeight: LINE_H, zStep: o.zStep };
+
+      const K = new kernMod.default(store.renderer, { maxBytes: Math.max(1024, total), trie: fixtureTrie });
+      const t0 = performance.now();
+      K.setFiles(gpuItems(null), fieldParams);
+      K.run();
+      const t1 = performance.now();
+      const gpu = await K.readSlots();
+      const gpuBounds = await K.readBounds();
+      L.dispatchMs = +(t1 - t0).toFixed(2);
+
+      const ref = refMod.runPipeline(concat, fixtureTrie, Object.assign({}, fieldParams, { items: refItems(null) }));
+      const firstBad = diffSlots(L, fail, ref, gpu, 0, total);
+      if (firstBad >= 0) L.firstBadSlot = firstBad;
+      diffBounds(fail, ref, gpuBounds);
+
+      // File-relative lanes: every item's first glyph is row 0, col 0 — the walk floored
+      // at the file's first byte and never crossed into the previous file.
+      for (let i = 1; i < parts.length; i++) {
+        const b = starts[i] * SLOT_STRIDE;
+        if (ref.slots[b + S_ROW] !== 0 || ref.slots[b + S_COL] !== 0) {
+          fail('item ' + i + ' REF first glyph at row ' + ref.slots[b + S_ROW] + ' col ' + ref.slots[b + S_COL] + ' (not file-relative)');
+        }
+        if (gpu[b + S_ROW] !== 0 || gpu[b + S_COL] !== 0) {
+          fail('item ' + i + ' GPU first glyph at row ' + gpu[b + S_ROW] + ' col ' + gpu[b + S_COL] + ' (not file-relative)');
+        }
+      }
+      // Per-item bounds come from the CPU mirror — the documented split (the GPU bounds
+      // buffer keeps only the batch-wide box).
+      if (!ref.itemBounds || ref.itemBounds.length !== parts.length) fail('ref itemBounds missing or wrong length');
+
+      // ── ITEM ISOLATION: change one item's origin + page; every OTHER item's slots must
+      //    be bit-identical, and the changed item must match the reference under its new
+      //    params.
+      if (mf.isolateChange) {
+        const ci = mf.isolateChange.itemIndex;
+        const mods = [];
+        mods[ci] = { origin: mf.isolateChange.origin, page: mf.isolateChange.page };
+        K.setFiles(gpuItems(mods), fieldParams);
+        K.run();
+        const gpu2 = await K.readSlots();
+        let isoBad = 0, isoFirst = -1;
+        for (let id = 0; id < total; id++) {
+          if (id >= starts[ci] && id < starts[ci] + parts[ci].bytes.length) continue;
+          const b = id * SLOT_STRIDE;
+          for (let l = 0; l < SLOT_STRIDE; l++) {
+            if (gpu2[b + l] !== gpu[b + l]) { isoBad++; if (isoFirst < 0) isoFirst = id; break; }
+          }
+        }
+        if (isoBad > 0) fail('isolation: ' + isoBad + ' slots OUTSIDE item ' + ci + ' moved when its params changed (first at byte ' + isoFirst + ')');
+        const ref2 = refMod.runPipeline(concat, fixtureTrie, Object.assign({}, fieldParams, { items: refItems(mods) }));
+        diffSlots(L, fail, ref2, gpu2, starts[ci], starts[ci] + parts[ci].bytes.length);
+      }
+
+      K.dispose();
+    } catch (e) {
+      L.ok = false;
+      L.failures.push('EXCEPTION: ' + (e && e.message || e));
+    }
+    R.lanes.push(L);
   }
   return R;
 })(${JSON.stringify(opts)})`;
@@ -246,7 +385,7 @@ const app = await openApp(browser, { wait: WAIT });
 let failed = 0;
 try {
   if (!app.booted) { console.error('app did not boot'); process.exit(1); }
-  const report = await app.page.evaluate(probe({ repo: REPO, corpora, lanes, eps: EPS, zStep: ZSTEP }));
+  const report = await app.page.evaluate(probe({ repo: REPO, corpora, lanes, multi: MULTI, eps: EPS, zStep: ZSTEP }));
   if (report.fatal) { console.error('FATAL: ' + report.fatal); process.exit(1); }
   if (AS_JSON) { console.log(JSON.stringify(report, null, 2)); }
   else {

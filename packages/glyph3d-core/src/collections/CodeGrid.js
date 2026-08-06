@@ -17,8 +17,7 @@ import { RENDER_ORDER } from '../core/renderOrder.js';
 import { BOUNDS_Z_PAD } from '../core/constants.js';
 import { computeCellMetrics } from '../core/cellMetrics.js';
 import { resolveLayoutParams, DEFAULT_LAYOUT } from '../workers/builders/index.js';
-import { getComputeRenderer } from '../compute/GlyphLayoutCompute.js';
-import GlyphFieldPipeline from '../compute/GlyphFieldPipeline.js';
+import { getPipelineArena } from '../compute/GlyphLayoutCompute.js';
 import ByteLayoutDescription, { buildByteLineIndex } from '../core/ByteLayoutDescription.js';
 import { analyzeGrid, buildGridSemantics, buildGridSemanticsSync } from '../parsing/SyntaxColorizer.js';
 import FramedGlyphField from './FramedGlyphField.js';
@@ -133,8 +132,10 @@ class CodeGrid extends FramedGlyphField {
         // Content bounds are NOT stored: they are the layout's extent, derived from the
         // pipeline's CPU mirror in O(1) (_getContentBounds). World box (getBounds) is
         // BoundedObject3D's, derived per call.
-        // The byte-pipeline engine state: one GlyphFieldPipeline per grid (plus one for
-        // the filename), the file's bytes, and the newline byte-offset index.
+        // The byte-pipeline engine state: this grid's ITEM HANDLES into the shared
+        // GlyphPipelineArena (one pipeline per app — the multi-file hoist), the file's
+        // bytes, and the newline byte-offset index. A handle carries { itemIndex,
+        // byteStart, byteLength, mirror, setPage, verify, dispose }.
         this._pipeline = null;
         this._filenamePipeline = null;
         this._filenameField = null;
@@ -410,6 +411,12 @@ class CodeGrid extends FramedGlyphField {
         this._bytes = null;
         this._byteLineIndex = null;
         this._layout = null;
+        // Detach from the arena items (their space leaks — v1; see the arena header) so a
+        // later realloc never re-attaches this field at a stale byteStart.
+        this._pipeline?.dispose?.();
+        this._pipeline = null;
+        this._filenamePipeline?.dispose?.();
+        this._filenamePipeline = null;
 
         if (this._renderer) this._renderer.clear();
         if (this._filenameField) this._filenameField.clear();
@@ -810,11 +817,13 @@ class CodeGrid extends FramedGlyphField {
         const clamped = Math.max(0, Math.min(Math.round(rows), this.getMaxScroll()));
         if (clamped === this._scrollOffset) return this;
         this._scrollOffset = clamped;
-        // The conveyor is kernel 3 only: re-arm the page params with the new scroll and
-        // repaginate — no decode, no walk, no reload. The mirror re-paginates in place, so
-        // the panel, caret and extent read the scrolled state synchronously.
+        // The conveyor is kernel 3 only: re-arm the item's page params with the new scroll
+        // and repaginate — no decode, no walk, no reload. Scroll ticks across grids
+        // coalesce into ONE repaginate dispatch (the arena's repaginate gate). The mirror
+        // re-paginates in place, so the panel, caret and extent read the scrolled state
+        // synchronously.
         const lp = resolveLayoutParams(this._foldLayout());
-        this._pipeline?.setPage(this._pageParams(lp, this.metrics));
+        await this._pipeline?.setPage(this._pageParams(lp, this.metrics));
         this._updateBackground();
         this._applyDecorations();
         return this;
@@ -941,6 +950,11 @@ class CodeGrid extends FramedGlyphField {
             this._renderer.dispose();
             this._renderer = null;
         }
+        // Detach the arena handles BEFORE any realloc could re-attach the dead fields.
+        this._pipeline?.dispose?.();
+        this._pipeline = null;
+        this._filenamePipeline?.dispose?.();
+        this._filenamePipeline = null;
 
         // Remove renderer group from scene
         if (this._rendererGroup) {
@@ -1017,12 +1031,9 @@ class CodeGrid extends FramedGlyphField {
             occluder:      this.config.occluder,
             bytePipeline:  true,
         });
-        // The byte-in GPU pipeline IS this grid's layout engine: bytes in, three dispatches,
-        // the field reads the slot buffer in the vertex shader (no CPU layout, no worker).
-        this._pipeline = new GlyphFieldPipeline(getComputeRenderer(), this._renderer, this.atlas, {
-            maxBytes: bufferSize,
-            worldScale: this.config.worldScale,
-        });
+        // No per-grid pipeline: the grid stages its bytes into the SHARED pipeline arena
+        // at layout time (_layoutContent) — one kernels instance per app, this grid an
+        // item in its item table. The arena handle lands on this._pipeline there.
 
         if (this._pickingSystem) {
             this._pickingSystem.register('glyph', this._renderer, this._renderer);
@@ -1099,13 +1110,15 @@ class CodeGrid extends FramedGlyphField {
     }
 
     /**
-     * Layout content — the byte-in GPU pipeline IS the layout: encode (done in _beginLoad)
-     * → setText → three dispatches. No worker, no builder, no CPU fold. The filename rides
-     * its own tiny pipeline field above the content.
+     * Layout content — the byte-in GPU pipeline IS the layout: stage the bytes into the
+     * SHARED pipeline arena (this grid is one item) → the coalesced flush dispatches the
+     * whole storm in three dispatches. No worker, no builder, no CPU fold, no per-grid
+     * kernels. The filename rides its own tiny field as another arena item above the
+     * content.
      * @private
      */
     async _layoutContent() {
-        // The filename: its own field + pipeline at y=0; the content sits 1.5 rows below.
+        // The filename: its own field + arena item at y=0; the content sits 1.5 rows below.
         if (this.config.showFilename && this.filename) {
             await this._layoutFilename();
         } else if (this._filenameField) {
@@ -1118,13 +1131,30 @@ class CodeGrid extends FramedGlyphField {
         if (this.content.length > 0) {
             const m = this.metrics;
             const lp = resolveLayoutParams(this._foldLayout());
-            await this._pipeline.setText(this.content, {
-                wrapWidth: lp.wrapWidth,
-                lineHeight: m.lineHeight,
-                zStep: m.charHeight * (lp.zWrapSpacing || 0),
+            const arena = getPipelineArena();
+            if (!arena) {
+                // Loud once, not per grid: no arena means no WebGPU compute — the grid
+                // stays empty rather than storming shader errors.
+                if (!CodeGrid._noArenaNoted) {
+                    CodeGrid._noArenaNoted = true;
+                    console.error('CodeGrid: no pipeline arena — the byte pipeline needs WebGPU; this grid renders EMPTY (boot log has the reason)');
+                }
+                if (this._renderer) this._renderer.instanceMesh.visible = false;   // no storage reads under WebGL2
+                return;
+            }
+            // The prior item's arena space leaks (v1 — see the arena header); dispose just
+            // detaches this field from the old item so a realloc never re-attaches it stale.
+            this._pipeline?.dispose?.();
+            this._pipeline = arena.stage({
+                bytes: this._bytes,
                 origin: { x: 0, y: this._layoutOriginY, z: 0 },
                 page: this._pageParams(lp, m),
+                wrapWidth: lp.wrapWidth || 0,
+                lineHeight: m.lineHeight,
+                zStep: m.charHeight * (lp.zWrapSpacing || 0),
+                field: this._renderer,
             });
+            await arena.requestFlush();
         }
         this._buildLayoutDescription();
         this._applyClip();
@@ -1178,7 +1208,8 @@ class CodeGrid extends FramedGlyphField {
     }
 
     /**
-     * The filename's own field + pipeline (byte mode), laid at y=0 above the content.
+     * The filename's own field (byte mode), staged into the SAME arena as the content —
+     * its own item at y=0 above the content (wrap 0: a label never folds).
      * @private
      */
     async _layoutFilename() {
@@ -1189,15 +1220,21 @@ class CodeGrid extends FramedGlyphField {
                 worldScale: this.config.worldScale,
                 bytePipeline: true,
             });
-            this._filenamePipeline = new GlyphFieldPipeline(getComputeRenderer(), this._filenameField, this.atlas, {
-                maxBytes: 4096,
-                worldScale: this.config.worldScale,
-            });
         }
         this._filenameField.instanceMesh.visible = true;
-        await this._filenamePipeline.setText(this.filename, {
-            wrapWidth: 0, lineHeight: this.metrics.lineHeight, origin: { x: 0, y: 0, z: 0 },
+        const arena = getPipelineArena();
+        if (!arena) return;   // the content path already logged the loud-once error
+        this._filenamePipeline?.dispose?.();
+        this._filenamePipeline = arena.stage({
+            bytes: _textEncoder.encode(this.filename),
+            origin: { x: 0, y: 0, z: 0 },
+            page: null,
+            wrapWidth: 0,
+            lineHeight: this.metrics.lineHeight,
+            zStep: 0,
+            field: this._filenameField,
         });
+        await arena.requestFlush();
     }
 
     /**

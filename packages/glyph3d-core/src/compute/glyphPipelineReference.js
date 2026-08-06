@@ -21,6 +21,28 @@
  * slot index identical to a source byte offset, so picking, tree-sitter ranges, and the
  * cursor all address the same space with no mapping table anywhere.
  *
+ * ── MULTI-FILE (the item table) ─────────────────────────────────────────────────────────
+ * One pipeline run can serve N files concatenated in ONE byte buffer. Each file is an
+ * ITEM: { byteStart, byteCount, origin, page, wrapWidth?, zStep?, lineHeight? }. A thread
+ * resolves its item by binary search over the byteStarts (the GPU does the same search
+ * over the itemStarts buffer), and THE WALK NEVER CROSSES A FILE BOUNDARY: leaderBefore
+ * stops at the item's first byte, so row/col are FILE-RELATIVE (a file's first glyph is
+ * row 0, col 0) and the inherit race can never leak F_RENDERED across files. Pagination
+ * reads the item's own origin + page params; wrap/zStep/lineHeight are per-item LANES
+ * with field-level defaults (the app's grids wrap differently — a filename at wrap 0 next
+ * to content at wrap 200 — so one pipeline can only serve a storm if the fold unit rides
+ * the item). Only `window` (the GPU coherence dial) stays field-level.
+ *
+ * BOUNDS: the fused atomic reduce stays GLOBAL — one box for the whole batch, which is
+ * what the whole-batch cull wants. Per-file scalars (totalRows, maxRowExtent, per-file
+ * boxes) come from the CPU mirror, which is serial anyway: runPipeline returns
+ * `itemBounds` parallel to `items`. The GPU bounds buffer's lanes 6/7 are the batch-wide
+ * max, not a per-file answer.
+ *
+ * A single file is the one-item case: opts.origin/opts.page/opts.scrollRows are wrapped
+ * into one item spanning the buffer and every number is bit-identical to the pre-items
+ * behavior.
+ *
  * Worker-safe: no DOM, no three.
  */
 
@@ -59,6 +81,30 @@ export const F_LEADER = 1;        // this byte begins a codepoint
 export const F_RENDERED = 2;      // this slot's absolute position is published
 export const F_LINE_START = 4;    // the walk found a line break before finding a position
 export const F_MISSING = 8;       // no atlas entry yet — blank, but correctly spaced
+
+/**
+ * The GPU item table's lane layout (glyphPipelineKernels.js packs the same strides). One
+ * item = one file in the concatenated buffer. byteStart is NOT here — it lives in the
+ * separate itemStarts uint buffer, because it is the binary-search key. `window` (the
+ * coherence dial) is the only field-level param left; everything the walk or the remap
+ * reads per file rides the item — wrap/zStep/lineHeight included, because one arena
+ * serves grids with different fold units (a filename at wrap 0 beside content at 200).
+ */
+export const ITEM_STRIDE = 14;
+export const I_ORIGIN_X = 0;
+export const I_ORIGIN_Y = 1;
+export const I_ORIGIN_Z = 2;
+export const I_PAGE_ROWS = 3;
+export const I_PAGE_COLS = 4;    // also the walk's fold unit when wrap is off — per item
+export const I_PAGES_WIDE = 5;
+export const I_PAGE_STRIDE_X = 6;
+export const I_BAND_STRIDE_Y = 7;
+export const I_DEPTH_PER_BAND = 8;
+export const I_DEPTH_PER_COL = 9;
+export const I_SCROLL_ROWS = 10;
+export const I_WRAP_WIDTH = 11;  // the walk's fold unit — load-time only (re-walks change it)
+export const I_Z_STEP = 12;      // depth per wrap segment — load-time only
+export const I_LINE_HEIGHT = 13; // world y per row — load-time only
 
 /** Allocate the slot buffer for a file of `byteLength` bytes. */
 export function allocSlots(byteLength) {
@@ -118,12 +164,31 @@ export function decodeAndResolve(bytes, slots, trie, id, misses) {
     if (g.missing && misses) misses.push(cp);    // atomic append on the GPU
 }
 
-/** Nearest leader slot strictly before `id`, or `id` when there is none. */
-function leaderBefore(slots, id) {
-    for (let j = id - 1; j >= 0; j--) {
+/**
+ * Nearest leader slot strictly before `id`, or `id` when there is none AT OR ABOVE
+ * `floor`. The floor is the item's first byte: the walk never crosses a file boundary,
+ * so a file's first leader finds no predecessor and computes its own prefix (row 0,
+ * col 0 — file-relative).
+ */
+function leaderBefore(slots, id, floor = 0) {
+    for (let j = id - 1; j >= floor; j--) {
         if ((slots[j * SLOT_STRIDE + S_FLAGS] & F_LEADER) !== 0) return j;
     }
     return id;
+}
+
+/**
+ * Which item owns byte `id`: the largest item whose byteStart ≤ id. The GPU runs this
+ * exact binary search per thread over the itemStarts buffer.
+ * @param {Array<{byteStart:number}>} items @param {number} id @returns {number} item index
+ */
+export function itemForByte(items, id) {
+    let lo = 0, hi = items.length - 1;
+    while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1;
+        if (items[mid].byteStart <= id) lo = mid; else hi = mid - 1;
+    }
+    return lo;
 }
 
 /**
@@ -173,11 +238,14 @@ export function rowsForLine(len, wrap) {
  * visible. Correctness holds at window 0; the value is whatever the hardware needs.
  *
  * @param {Float32Array} slots @param {number} id
- * @param {{window?:number, wrapWidth?:number}} [params]
+ * @param {{window?:number, wrapWidth?:number, itemStart?:number}} [params]
+ *   itemStart: the item's first byte — the walk's floor. 0 (default) is the
+ *   single-file case: the whole buffer is one item.
  */
 export function layout(slots, id, params = {}) {
     const window = params.window ?? 128;
     const wrap = Math.max(0, Math.trunc(params.wrapWidth || 0));
+    const floor = Math.max(0, Math.trunc(params.itemStart || 0));
     const o = id * SLOT_STRIDE;
     if ((slots[o + S_FLAGS] & F_LEADER) === 0) return;
 
@@ -185,7 +253,7 @@ export function layout(slots, id, params = {}) {
     //    newline; the first newline crossed closes MY column, each one after that closes a
     //    whole line above me and contributes its wrapped row count.
     let run = 0, col = -1, row = 0, steps = 0;
-    let prev = leaderBefore(slots, id);
+    let prev = leaderBefore(slots, id, floor);
     while (prev !== id) {
         const po = prev * SLOT_STRIDE;
         const ready = (slots[po + S_FLAGS] & F_RENDERED) !== 0 && steps > window;
@@ -216,8 +284,8 @@ export function layout(slots, id, params = {}) {
 
         steps++;
         const cur = prev;
-        prev = leaderBefore(slots, prev);
-        if (prev === cur) {                          // reached the first leader in the buffer
+        prev = leaderBefore(slots, prev, floor);
+        if (prev === cur) {                          // reached the item's first leader
             if (col < 0) col = run; else row += rowsForLine(run, wrap);
             break;
         }
@@ -238,14 +306,14 @@ export function layout(slots, id, params = {}) {
     //    representation.
     const fold = wrap > 0 ? wrap : Math.max(0, Math.trunc(params.pageCols || 0));
     const backTo = fold > 0 ? (col % fold) : col;
-    let x = 0, k = 0, q = leaderBefore(slots, id);
+    let x = 0, k = 0, q = leaderBefore(slots, id, floor);
     while (k < backTo && q !== id) {
         const qo = q * SLOT_STRIDE;
         if (slots[qo + S_CODEPOINT] === NEWLINE) break;
         x += slots[qo + S_ADVANCE];
         k++;
         const cur = q;
-        q = leaderBefore(slots, q);
+        q = leaderBefore(slots, q, floor);
         if (q === cur) break;
     }
 
@@ -385,39 +453,77 @@ export function boundsReduce(slots, id, box) {
  * `order` lets a test dispatch the layout kernel in any thread order; the walk is a
  * deliberate race and every order must converge (tools/backtrack-layout.test.mjs).
  *
+ * MULTI-FILE: `opts.items` is an array of { byteStart, byteCount, origin?, page? } —
+ * sorted, contiguous, covering [0, bytes.length) (validated, throws otherwise). The walk
+ * floors at the item's first byte, so every glyph's row/col is file-relative; paginate
+ * reads the item's own origin + page params. Without opts.items the top-level
+ * origin/page/scrollRows are wrapped into a single item — today's call shape, unchanged.
+ *
  * @param {Uint8Array} bytes
  * @param {{blockIndex:Uint32Array, blocks:Float32Array}} trie
  * @param {Object} [opts]
+ * @param {Array<{byteStart:number, byteCount:number, origin?:{x,y,z}, page?:PageParams,
+ *   wrapWidth?:number, zStep?:number, lineHeight?:number}>} [opts.items]
  * @param {PageParams} [opts.page]
  * @param {number} [opts.window]
  * @param {number[]} [opts.order] - layout dispatch order (default: ascending)
- * @returns {{slots:Float32Array, bounds:?{min:{x,y,z},max:{x,y,z}}, misses:number[], leaders:number}}
+ * @returns {{slots:Float32Array, bounds:?{min:{x,y,z},max:{x,y,z}}, itemBounds:Array, misses:number[], leaders:number}}
+ *   bounds is the BATCH-WIDE box (what the GPU's fused reduce produces); itemBounds[i] is
+ *   the same shape for item i alone (the per-file scalars consumers want — the GPU leaves
+ *   those to this CPU mirror by design).
  */
 export function runPipeline(bytes, trie, opts = {}) {
     const slots = allocSlots(bytes.length);
     const misses = [];
     for (let id = 0; id < bytes.length; id++) decodeAndResolve(bytes, slots, trie, id, misses);
 
-    const order = opts.order || null;
-    // pageCols is the walk's fold unit when wrap is off (loop 2 sums within-page advances),
-    // so the walk sees it too; zStep the walk applies itself. lineHeight is shared so
-    // paginate's y reconstruction matches the walk's y exactly.
-    const lp = { window: opts.window ?? 128, wrapWidth: opts.wrapWidth ?? 0,
-        lineHeight: opts.lineHeight, pageCols: opts.page?.pageCols || 0, zStep: opts.zStep || 0,
-        origin: opts.origin };
-    if (order) for (const id of order) layout(slots, id, lp);
-    else for (let id = 0; id < bytes.length; id++) layout(slots, id, lp);
+    // ── The item table. A single file wraps its top-level opts into one item; with
+    //    opts.items, each file carries its own origin + page params. wrap/zStep/
+    //    lineHeight resolve PER ITEM (item lane, else the field-level default) — one
+    //    pipeline serves grids with different fold units. window stays field-level.
+    const items = normalizeItems(bytes, opts);
+    const window = opts.window ?? 128;
+    const resolved = items.map((it) => ({
+        wrapWidth: it.wrapWidth ?? opts.wrapWidth ?? 0,
+        zStep: it.zStep ?? opts.zStep ?? 0,
+        lineHeight: it.lineHeight ?? opts.lineHeight,
+    }));
 
-    // Scroll without pagination still needs the remap pass (the conveyor is a y shift).
-    const scrollRows = Math.max(0, Math.trunc(opts.scrollRows ?? opts.page?.scrollRows ?? 0));
-    if (opts.page || scrollRows > 0) {
-        const page = { ...opts.page, scrollRows, wrap: lp.wrapWidth, zStep: lp.zStep,
-            origin: opts.origin, lineHeight: lp.lineHeight ?? opts.page?.lineHeight };
-        for (let id = 0; id < bytes.length; id++) paginate(slots, id, page);
+    // pageCols is the walk's fold unit when wrap is off (loop 2 sums within-page advances),
+    // so the walk sees it too — PER ITEM; zStep the walk applies itself. lineHeight is
+    // shared so paginate's y reconstruction matches the walk's y exactly. itemStart floors
+    // the walk at the file's first byte: row/col are file-relative and no inherit can
+    // cross a boundary.
+    const walkParams = items.map((it, i) => ({
+        window, wrapWidth: resolved[i].wrapWidth, lineHeight: resolved[i].lineHeight,
+        pageCols: it.page?.pageCols || 0, zStep: resolved[i].zStep,
+        origin: it.origin, itemStart: it.byteStart,
+    }));
+    const order = opts.order || null;
+    if (order) for (const id of order) layout(slots, id, walkParams[itemForByte(items, id)]);
+    else for (let id = 0; id < bytes.length; id++) layout(slots, id, walkParams[itemForByte(items, id)]);
+
+    // Kernel 3, per slot on its item's params. The remap is reconstructive (reads S_BASE_X
+    // + the integer lanes), so an all-zero page is an identity remap — called
+    // unconditionally, paginate() early-returns on it.
+    const pageParams = items.map((it, i) => ({
+        ...it.page, wrap: resolved[i].wrapWidth, zStep: resolved[i].zStep, origin: it.origin,
+        lineHeight: resolved[i].lineHeight ?? it.page?.lineHeight,
+    }));
+    for (let id = 0; id < bytes.length; id++) {
+        paginate(slots, id, pageParams[itemForByte(items, id)]);
     }
 
+    // Bounds: the batch-wide box (the GPU's fused atomic reduce answers exactly this)…
     const box = new Float64Array([Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity, 0, 0]);
     for (let id = 0; id < bytes.length; id++) boundsReduce(slots, id, box);
+    // …and the per-file boxes, which the GPU leaves to this mirror by design (the kernel
+    // header documents the choice): consumers need per-file totalRows/maxRowExtent.
+    const itemBounds = items.map((it) => {
+        const b = new Float64Array([Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity, 0, 0]);
+        for (let id = it.byteStart; id < it.byteStart + it.byteCount; id++) boundsReduce(slots, id, b);
+        return shapeBounds(b);
+    });
 
     let leaders = 0;
     for (let id = 0; id < bytes.length; id++) {
@@ -426,13 +532,52 @@ export function runPipeline(bytes, trie, opts = {}) {
 
     return {
         slots,
-        bounds: box[0] === Infinity ? null : {
-            min: { x: box[0], y: box[1], z: box[2] },
-            max: { x: box[3], y: box[4], z: box[5] },
-            totalRows: box[6],
-            maxRowExtent: box[7],
-        },
+        bounds: shapeBounds(box),
+        itemBounds,
         misses,
         leaders,
     };
+}
+
+/** Box lanes → the public bounds shape, or null when no glyph contributed. */
+function shapeBounds(box) {
+    return box[0] === Infinity ? null : {
+        min: { x: box[0], y: box[1], z: box[2] },
+        max: { x: box[3], y: box[4], z: box[5] },
+        totalRows: box[6],
+        maxRowExtent: box[7],
+    };
+}
+
+/**
+ * Resolve the item list for a run. No opts.items → one item from the top-level opts (the
+ * single-file case, byte-identical to the pre-items behavior). With opts.items, validate
+ * the table: sorted, contiguous, covering the whole buffer — the binary search per thread
+ * is only honest when every byte has exactly one owner.
+ */
+function normalizeItems(bytes, opts) {
+    if (!opts.items) {
+        const scrollRows = Math.max(0, Math.trunc(opts.scrollRows ?? opts.page?.scrollRows ?? 0));
+        const page = (opts.page || scrollRows > 0) ? { ...opts.page, scrollRows } : null;
+        return [{ byteStart: 0, byteCount: bytes.length, origin: opts.origin, page }];
+    }
+    const items = opts.items;
+    if (!Array.isArray(items) || items.length === 0) {
+        throw new Error('runPipeline: opts.items must be a non-empty array');
+    }
+    let at = 0;
+    for (let i = 0; i < items.length; i++) {
+        const it = items[i];
+        if (it.byteStart !== at) {
+            throw new Error(`runPipeline: item ${i} starts at ${it.byteStart}, expected ${at} — items must be contiguous from 0`);
+        }
+        if (!(it.byteCount > 0)) {
+            throw new Error(`runPipeline: item ${i} has no bytes`);
+        }
+        at += it.byteCount;
+    }
+    if (at !== bytes.length) {
+        throw new Error(`runPipeline: items cover ${at} bytes, buffer is ${bytes.length}`);
+    }
+    return items;
 }

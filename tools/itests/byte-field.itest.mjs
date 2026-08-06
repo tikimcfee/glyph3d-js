@@ -1,7 +1,8 @@
-// byte-field — the Layer 2 render bridge: a bytePipeline-mode GlyphField fed by
-// GlyphFieldPipeline (bytes in, three dispatches, field reads the slot buffer in the
-// vertex shader). Asserts the app path renders it with zero errors; the screenshot
-// (artifacts dir) is the pixel check — glyphs at the right place, nothing splayed.
+// byte-field — the Layer 2 render bridge: a bytePipeline-mode GlyphField fed by the
+// SHARED pipeline arena (bytes staged as an item, one coalesced flush, field reads the
+// arena's slot buffer in the vertex shader at its byteStart). Asserts the app path
+// renders it with zero errors; the screenshot (artifacts dir) is the pixel check —
+// glyphs at the right place, nothing splayed.
 
 export default async ({ app, assert }) => {
   assert.ok(app.booted, 'booted');
@@ -9,13 +10,14 @@ export default async ({ app, assert }) => {
   const r = await app.evalPage(`(async () => {
     const c = window.__glyphClient;
     const F = (p) => '/@fs' + ${JSON.stringify(process.cwd())} + p;
-    const [gfMod, fpMod] = await Promise.all([
-      import(F('/packages/glyph3d-core/src/GlyphField.js')),
-      import(F('/packages/glyph3d-core/src/compute/GlyphFieldPipeline.js')),
-    ]);
-    const renderer = c.ctx.renderer;
+    const gfMod = await import(F('/packages/glyph3d-core/src/GlyphField.js'));
     const atlas = c.ctx.atlas;
     const scene = c.ctx.scene;
+    // The arena off the RENDERER, not the module singleton: this itest imports core
+    // modules via /@fs, a different module instance than the app's — the registry
+    // singleton would read null here.
+    const arena = c.ctx.renderer.glyphPipelineArena;
+    if (!arena) return { error: 'no pipeline arena on the renderer (GlyphCanvas boot)' };
 
     // Real app metrics — same worldScale + cell metrics CodeGrid uses.
     const worldScale = 0.025;
@@ -26,18 +28,23 @@ export default async ({ app, assert }) => {
     const TEXT = 'Hello, byte pipeline.\\nsecond line — wrapped segments, page lanes.\\n\\nthird';
     const LAYOUT = { wrapWidth: 24 };
 
-    // LEFT: the byte-pipeline field.
+    // LEFT: the byte-pipeline field, one item in the shared arena.
     const field = new gfMod.default(scene, atlas, {
       maxInstances: 1 << 16, worldScale, bytePipeline: true,
       defaultColor: { r: 0.9, g: 0.9, b: 0.95 },
     });
     field.instanceMesh.position.set(-1.5, 0, 0);
     scene.add(field.instanceMesh);
-    const pipe = new fpMod.default(renderer, field, atlas, { maxBytes: 1 << 16, worldScale });
-    const res = await pipe.setText(TEXT, {
-      wrapWidth: LAYOUT.wrapWidth, lineHeight: metrics.lineSpacing,
-      zStep: metrics.charHeight * 0.15, origin: { x: 0, y: 0, z: 0 },
+    const handle = arena.stage({
+      bytes: new TextEncoder().encode(TEXT),
+      origin: { x: 0, y: 0, z: 0 },
+      page: null,
+      wrapWidth: LAYOUT.wrapWidth,
+      lineHeight: metrics.lineSpacing,
+      zStep: metrics.charHeight * 0.15,
+      field,
     });
+    await arena.requestFlush();
 
     // RIGHT: a CodeGrid with the same text + wrap — the parity reference.
     const grid = new cgMod.default(scene, atlas, { name: 'parity-ref', showBackground: false, showFilename: false, worldScale, gridScale: 1.0 });
@@ -50,8 +57,9 @@ export default async ({ app, assert }) => {
     const cam = c.ctx.camera;
     cam.position.set(-0.9, -0.7, 4.5);
     cam.lookAt(-0.9, -0.7, 0);
-    const v = await pipe.verify();
-    return { misses: res.misses, verify: v, extent: pipe.getExtent(), count: field.instanceMesh.geometry.instanceCount,
+    const v = await arena.verifyItem(handle.itemIndex);
+    return { verify: v, extent: handle.mirror?.bounds, count: field.instanceMesh.geometry.instanceCount,
+      byteStart: handle.byteStart,
       metrics: { lineSpacing: metrics.lineSpacing, charHeight: metrics.charHeight } };
   })()`);
 

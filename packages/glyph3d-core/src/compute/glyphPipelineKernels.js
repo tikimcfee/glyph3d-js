@@ -21,6 +21,36 @@
  * newspaper/column/z-page, or scrolling, re-runs ONLY kernel 3 over positions that already
  * exist. No decode, no walk, no reparse.
  *
+ * ── MULTI-FILE (the item table) ──────────────────────────────────────────────────────────
+ * One pipeline instance serves N files concatenated in ONE byte buffer: the multi-file
+ * hoist — one set of dispatches for a whole load storm, not one per file. Per file (item):
+ * a uint in itemStarts (its byteStart — the binary-search key) and ITEM_STRIDE floats in
+ * itemTable (origin + the page params: pageRows, pageCols, pagesWide, pageStrideX,
+ * bandStrideY, depthPerBand, depthPerColumn, scrollRows — the same packing pattern as
+ * GlyphLayoutKernel's item table), plus the per-item fold metrics (wrap/zStep/lineHeight).
+ * Only `window` — the GPU coherence dial — stays a field-level uniform.
+ *
+ *   1. The walk NEVER CROSSES A FILE BOUNDARY. Kernels 2/3 resolve their item by binary
+ *      search over itemStarts; leaderBefore floors at the item's first byte, so row/col
+ *      are FILE-RELATIVE (a file's first glyph is row 0, col 0) and no inherit can leak
+ *      F_RENDERED across files.
+ *   2. Kernel 3 applies the ITEM's origin + page params from the table; the reconstructive
+ *      math is unchanged — base lanes + item origin/params.
+ *   3. ORIGIN IS PER-ITEM, full stop — the field-level origin uniform is GONE (simpler
+ *      than two origins: one adder, one source of truth). setFile() wraps its params into
+ *      a single item, so the one-item case is byte-identical to before.
+ *   4. WRAP/zStep/lineHeight ARE PER-ITEM LANES (I_WRAP_WIDTH/I_Z_STEP/I_LINE_HEIGHT),
+ *      with the setFiles field-level params as defaults. One arena must serve grids that
+ *      fold differently — a filename at wrap 0 beside content at wrap 200 — so the fold
+ *      unit rides the item, not a uniform. Only `window` (the coherence dial) stays
+ *      field-level. They are LOAD-TIME lanes: changing them changes the walk, so they are
+ *      not setItemPage/repaginate-tunable.
+ *   5. BOUNDS stay a GLOBAL fused reduce — one box for the whole batch (the whole-batch
+ *      cull). Per-file scalars (totalRows, maxRowExtent, per-file boxes) come from the CPU
+ *      mirror: runPipeline() already runs per file and returns `itemBounds`. Lanes 6/7 of
+ *      the GPU bounds buffer are the batch-wide max, NOT a per-file answer.
+ *      (Brief option (b): chosen to keep the kernel to one atomic set.)
+ *
  * ── VERIFIED ON HARDWARE (tools/glyph-pipeline-check.mjs) ────────────────────────────────
  * GPU output diffs against runPipeline() from the reference on the same bytes, over torture /
  * 40k-single-line / real-file corpora at wrap 0/24/200, window 0/128, and page modes. The
@@ -36,12 +66,16 @@ import {
     SLOT_STRIDE, S_CODEPOINT, S_GLYPH_ID, S_ADVANCE, S_HEIGHT,
     S_X, S_Y, S_Z, S_ROW, S_COL, S_FLAGS, S_BASE_X,
     F_LEADER, F_RENDERED, F_MISSING, NEWLINE,
+    ITEM_STRIDE, I_ORIGIN_X, I_ORIGIN_Y, I_ORIGIN_Z,
+    I_PAGE_ROWS, I_PAGE_COLS, I_PAGES_WIDE, I_PAGE_STRIDE_X,
+    I_BAND_STRIDE_Y, I_DEPTH_PER_BAND, I_DEPTH_PER_COL, I_SCROLL_ROWS,
+    I_WRAP_WIDTH, I_Z_STEP, I_LINE_HEIGHT,
 } from './glyphPipelineReference.js';
 import { BLOCK_SHIFT, BLOCK_MASK, ENTRY_STRIDE, LANE_GLYPH_ID, LANE_ADVANCE, LANE_HEIGHT, LANE_FLAGS, FLAG_MISSING } from './GlyphTrie.js';
 
 const {
     Fn, If, Loop, Break, Return, uniform, instancedArray, instanceIndex,
-    int, uint, float, vec3, atomicMin, atomicMax, atomicAdd, bitcast,
+    int, uint, float, atomicMin, atomicMax, atomicAdd, bitcast,
 } = TSL;
 
 /**
@@ -52,6 +86,18 @@ const {
  * correct failure mode: visibly wrong beats unrecoverable.
  */
 export const MAX_WALK_STEPS = 4096;
+
+/**
+ * Binary-search iteration cap for the per-thread item resolution (same reasoning as
+ * GlyphLayoutKernel: 32 halvings address 2^32 items; the cap exists because an unbounded
+ * loop that fails to converge is a device loss). Break() exits as soon as the range
+ * collapses.
+ */
+const BINARY_SEARCH_STEPS = 32;
+
+/** Item capacity a pipeline is born with — files per load storm. Memory is trivial
+ *  (ITEM_STRIDE floats + one uint per item), so the default is sized for the storm. */
+export const DEFAULT_MAX_ITEMS = 1024;
 
 /**
  * Bytes are packed 4-per-u32 because WGSL cannot index a u8 array. `byteAt` unpacks.
@@ -106,14 +152,16 @@ export default class GlyphPipelineKernels {
     /**
      * @param {import('three/webgpu').WebGPURenderer} renderer
      * @param {Object} opts
-     * @param {number} opts.maxBytes - slot capacity (one slot per byte)
+     * @param {number} opts.maxBytes - slot capacity (one slot per byte, summed over ALL items)
      * @param {{blockIndex:Uint32Array, blocks:Float32Array}} opts.trie
      * @param {number} [opts.maxMisses]
+     * @param {number} [opts.maxItems] - item-table capacity (files per run)
      */
-    constructor(renderer, { maxBytes, trie, maxMisses = 4096 }) {
+    constructor(renderer, { maxBytes, trie, maxMisses = 4096, maxItems = DEFAULT_MAX_ITEMS }) {
         if (!renderer) throw new Error('GlyphPipelineKernels: a WebGPU renderer is required');
         this.renderer = renderer;
         this.maxBytes = Math.max(1, maxBytes | 0);
+        this.maxItems = Math.max(1, maxItems | 0);
 
         // ── Buffers ────────────────────────────────────────────────────────────────────
         this.byteWords = instancedArray(Math.ceil(this.maxBytes / 4), 'uint').setName('GlyphBytes');
@@ -123,6 +171,10 @@ export default class GlyphPipelineKernels {
         this.bounds = instancedArray(8, 'uint').setName('GlyphBounds').toAtomic();
         this.misses = instancedArray(maxMisses, 'uint').setName('GlyphMisses');
         this.missCount = instancedArray(1, 'uint').setName('GlyphMissCount').toAtomic();
+        // The item table: per-item params that VARY across files (origin + page params +
+        // the fold metrics wrap/zStep/lineHeight). itemStarts is the search key buffer.
+        this.itemTable = instancedArray(this.maxItems * ITEM_STRIDE, 'float').setName('GlyphItemTable');
+        this.itemStarts = instancedArray(this.maxItems, 'uint').setName('GlyphItemStarts');
 
         this.trieIndex.value.array.set(trie.blockIndex);
         this.trieBlocks.value.array.set(trie.blocks);
@@ -130,23 +182,14 @@ export default class GlyphPipelineKernels {
         this.trieBlocks.value.needsUpdate = true;
         this.maxMisses = maxMisses;
 
-        // ── Uniforms ───────────────────────────────────────────────────────────────────
+        // ── Uniforms — FIELD-LEVEL only: the dispatch width, the item count, and the
+        //    coherence window. Origin, every page param, AND wrap/zStep/lineHeight are
+        //    per-item lanes (grids in one arena fold differently — the item table is the
+        //    single source of truth).
         this._u = {
             byteLength:   uniform(0, 'uint'),
+            itemCount:    uniform(1, 'uint'),
             window:       uniform(128, 'int'),
-            wrapWidth:    uniform(0, 'int'),
-            lineHeight:   uniform(1, 'float'),
-            zWrapStep:    uniform(0, 'float'),
-            origin:       uniform(vec3(0, 0, 0)),
-            // page
-            scrollRows:   uniform(0, 'int'),
-            pageRows:     uniform(0, 'int'),
-            pageCols:     uniform(0, 'int'),
-            pageStrideX:  uniform(0, 'float'),
-            bandStrideY:  uniform(0, 'float'),
-            pagesWide:    uniform(1, 'int'),
-            depthPerBand: uniform(0, 'float'),
-            depthPerCol:  uniform(0, 'float'),
         };
 
         this._kDecode = this._buildDecode();
@@ -237,12 +280,43 @@ export default class GlyphPipelineKernels {
         })().compute(1).setName('glyphDecodeAndResolve');
     }
 
-    /** Nearest leader strictly before `from`, or `from` when none. Bounded by MAX_WALK_STEPS. */
-    _leaderBefore(from) {
+    /**
+     * Item resolution: the largest item whose byteStart ≤ id — the reference's itemForByte,
+     * as a TSL binary search over itemStarts. Shared by kernels 2 and 3 (kernel 1's decode
+     * is item-agnostic).
+     * @private
+     * @returns {Function} TSL fn (id:uint) → uint item index
+     */
+    _buildItemSearch() {
+        const u = this._u;
+        const starts = this.itemStarts;
+        return Fn(([id]) => {
+            const lo = uint(0).toVar('ilo');
+            const hi = u.itemCount.sub(uint(1)).toVar('ihi');
+            Loop(BINARY_SEARCH_STEPS, () => {
+                If(lo.greaterThanEqual(hi), () => { Break(); });
+                const mid = lo.add(hi).add(uint(1)).div(uint(2)).toVar('imid');
+                If(starts.element(mid).lessThanEqual(id), () => {
+                    lo.assign(mid);
+                }).Else(() => {
+                    hi.assign(mid.sub(uint(1)));
+                });
+            });
+            return lo;
+        });
+    }
+
+    /**
+     * Nearest leader strictly before `from`, or `from` when none AT OR ABOVE `floor`.
+     * The floor is the item's first byte — the walk never crosses a file boundary, so a
+     * file's first leader finds no predecessor and computes its own prefix. Bounded by
+     * MAX_WALK_STEPS.
+     */
+    _leaderBefore(from, floor) {
         const j = from.toVar();
         const found = from.toVar();
         Loop(MAX_WALK_STEPS, () => {
-            If(j.equal(uint(0)), () => { Break(); });
+            If(j.lessThanEqual(floor), () => { Break(); });
             j.assign(j.sub(uint(1)));
             const f = this.slots.element(j.mul(uint(SLOT_STRIDE)).add(uint(S_FLAGS)));
             If(int(f).bitAnd(int(F_LEADER)).notEqual(int(0)), () => {
@@ -263,6 +337,9 @@ export default class GlyphPipelineKernels {
     _buildLayout() {
         const u = this._u;
         const S = this.slots;
+        const it = this.itemTable;
+        const starts = this.itemStarts;
+        const itemSearch = this._buildItemSearch();
         const lane = (slot, l) => S.element(slot.mul(uint(SLOT_STRIDE)).add(uint(l)));
 
         return Fn(() => {
@@ -271,7 +348,18 @@ export default class GlyphPipelineKernels {
             const myFlags = int(lane(id, S_FLAGS)).toVar('mf');
             If(myFlags.bitAnd(int(F_LEADER)).equal(int(0)), () => { Return(); });
 
-            const wrap = u.wrapWidth.toVar('wrap');
+            // ── Item resolution: this thread's file. The walk floors at the item's first
+            //    byte and the origin + fold unit + metrics come from the item's table row.
+            const item = itemSearch(id).toVar('item');
+            const ib = item.mul(uint(ITEM_STRIDE)).toVar('ib');
+            const itemStart = starts.element(item).toVar('itemStart');
+            const originX = it.element(ib.add(uint(I_ORIGIN_X))).toVar('originX');
+            const originY = it.element(ib.add(uint(I_ORIGIN_Y))).toVar('originY');
+            const originZ = it.element(ib.add(uint(I_ORIGIN_Z))).toVar('originZ');
+            const pageCols = int(it.element(ib.add(uint(I_PAGE_COLS)))).toVar('pageCols');
+            const wrap = int(it.element(ib.add(uint(I_WRAP_WIDTH)))).toVar('wrap');
+            const lineHeight = it.element(ib.add(uint(I_LINE_HEIGHT))).toVar('lineHeight');
+            const zWrapStep = it.element(ib.add(uint(I_Z_STEP))).toVar('zWrapStep');
             const wrapping = wrap.greaterThan(int(0)).toVar('wrapping');
 
             // ── loop 1: exact integers ──────────────────────────────────────────────────
@@ -279,7 +367,7 @@ export default class GlyphPipelineKernels {
             const col = int(-1).toVar('col');
             const row = int(0).toVar('row');
             const steps = int(0).toVar('steps');
-            const prev = this._leaderBefore(id).toVar('prev');
+            const prev = this._leaderBefore(id, itemStart).toVar('prev');
 
             Loop(MAX_WALK_STEPS, () => {
                 If(prev.equal(id), () => { Break(); });
@@ -322,8 +410,8 @@ export default class GlyphPipelineKernels {
 
                 steps.addAssign(int(1));
                 const cur = prev.toVar('cur');
-                prev.assign(this._leaderBefore(prev));
-                If(prev.equal(cur), () => {          // reached the first leader in the buffer
+                prev.assign(this._leaderBefore(prev, itemStart));
+                If(prev.equal(cur), () => {          // reached the item's first leader
                     If(col.lessThan(int(0)), () => { col.assign(run); })
                         .Else(() => {
                             row.addAssign(wrapping.select(run.div(wrap).add(int(1)), int(1)));
@@ -338,34 +426,35 @@ export default class GlyphPipelineKernels {
             // ── loop 2: the advance sum, bounded by the fold unit ───────────────────────
             // Now col is known, so the fold unit is known to have started exactly
             // (col % fold) glyphs back. The fold unit is the wrap width when wrapping, else
-            // pageCols when x-paginating: a within-page x only needs the advances of the
-            // col % pageCols predecessors, and no newline can intervene. Re-walking rather
-            // than inheriting a float is what makes x independent of where the inherit
-            // landed. With neither wrap nor pageCols this walks to the line start — the
-            // unbounded case MAX_WALK_STEPS fuses against (visibly wrong, never a hang).
-            const fold = wrapping.select(wrap, u.pageCols).toVar('fold');
+            // the ITEM's pageCols when x-paginating: a within-page x only needs the
+            // advances of the col % pageCols predecessors, and no newline can intervene.
+            // Re-walking rather than inheriting a float is what makes x independent of
+            // where the inherit landed. With neither wrap nor pageCols this walks to the
+            // line start — the unbounded case MAX_WALK_STEPS fuses against (visibly wrong,
+            // never a hang).
+            const fold = wrapping.select(wrap, pageCols).toVar('fold');
             const backTo = fold.greaterThan(int(0)).select(col.mod(fold), col).toVar('backTo');
             const x = float(0).toVar('x');
             const k = int(0).toVar('k');
-            const q = this._leaderBefore(id).toVar('q');
+            const q = this._leaderBefore(id, itemStart).toVar('q');
             Loop(MAX_WALK_STEPS, () => {
                 If(k.greaterThanEqual(backTo).or(q.equal(id)), () => { Break(); });
                 If(lane(q, S_CODEPOINT).equal(float(NEWLINE)), () => { Break(); });
                 x.addAssign(lane(q, S_ADVANCE));
                 k.addAssign(int(1));
                 const cur = q.toVar('qcur');
-                q.assign(this._leaderBefore(q));
+                q.assign(this._leaderBefore(q, itemStart));
                 If(q.equal(cur), () => { Break(); });
             });
 
             const o = id.mul(uint(SLOT_STRIDE)).toVar('o');
-            S.element(o.add(uint(S_X))).assign(x.add(u.origin.x));
+            S.element(o.add(uint(S_X))).assign(x.add(originX));
             // The walk's x, frozen: paginate reads THIS lane, so its remap is a pure
             // function of the base position and re-running it accumulates nothing.
-            S.element(o.add(uint(S_BASE_X))).assign(x.add(u.origin.x));
-            S.element(o.add(uint(S_Y))).assign(row.toFloat().negate().mul(u.lineHeight).add(u.origin.y));
+            S.element(o.add(uint(S_BASE_X))).assign(x.add(originX));
+            S.element(o.add(uint(S_Y))).assign(row.toFloat().negate().mul(lineHeight).add(originY));
             // Wrapped segments step back in depth (the long-column z-fan); wrapRow is exact.
-            S.element(o.add(uint(S_Z))).assign(u.origin.z.sub(wrapRow.toFloat().mul(u.zWrapStep)));
+            S.element(o.add(uint(S_Z))).assign(originZ.sub(wrapRow.toFloat().mul(zWrapStep)));
             S.element(o.add(uint(S_ROW))).assign(row.toFloat());
             S.element(o.add(uint(S_COL))).assign(col.toFloat());
             // Position first, THEN publish. The inherit branch above reads F_RENDERED and then
@@ -386,6 +475,8 @@ export default class GlyphPipelineKernels {
     _buildPaginateAndBounds() {
         const u = this._u;
         const S = this.slots;
+        const it = this.itemTable;
+        const itemSearch = this._buildItemSearch();
         const lane = (slot, l) => S.element(slot.mul(uint(SLOT_STRIDE)).add(uint(l)));
 
         return Fn(() => {
@@ -393,12 +484,31 @@ export default class GlyphPipelineKernels {
             If(id.greaterThanEqual(u.byteLength), () => { Return(); });
             If(int(lane(id, S_FLAGS)).bitAnd(int(F_LEADER)).equal(int(0)), () => { Return(); });
 
+            // ── Item resolution: this thread's file — its origin + page params + fold
+            //    metrics come from the item table (only the coherence window stays
+            //    field-level).
+            const item = itemSearch(id).toVar('item');
+            const ib = item.mul(uint(ITEM_STRIDE)).toVar('ib');
+            const originY = it.element(ib.add(uint(I_ORIGIN_Y))).toVar('originY');
+            const originZ = it.element(ib.add(uint(I_ORIGIN_Z))).toVar('originZ');
+            const pageRows = int(it.element(ib.add(uint(I_PAGE_ROWS)))).toVar('pageRows');
+            const pageCols = int(it.element(ib.add(uint(I_PAGE_COLS)))).toVar('pageCols');
+            const pagesWide = int(it.element(ib.add(uint(I_PAGES_WIDE)))).toVar('pagesWide');
+            const pageStrideX = it.element(ib.add(uint(I_PAGE_STRIDE_X))).toVar('pageStrideX');
+            const bandStrideY = it.element(ib.add(uint(I_BAND_STRIDE_Y))).toVar('bandStrideY');
+            const depthPerBand = it.element(ib.add(uint(I_DEPTH_PER_BAND))).toVar('depthPerBand');
+            const depthPerCol = it.element(ib.add(uint(I_DEPTH_PER_COL))).toVar('depthPerCol');
+            const scrollRows = int(it.element(ib.add(uint(I_SCROLL_ROWS)))).toVar('scrollRows');
+            const wrapWidth = int(it.element(ib.add(uint(I_WRAP_WIDTH)))).toVar('wrapWidth');
+            const lineHeight = it.element(ib.add(uint(I_LINE_HEIGHT))).toVar('lineHeight');
+            const zWrapStep = it.element(ib.add(uint(I_Z_STEP))).toVar('zWrapStep');
+
             const o = id.mul(uint(SLOT_STRIDE)).toVar('o');
             const row = int(lane(id, S_ROW)).toVar('row');
             const col = int(lane(id, S_COL)).toVar('col');
             // The conveyor: scroll shifts content up; rows scrolled above the origin
             // (negative screenRow) stay in flow — the page gate leaves them untouched.
-            const screenRow = row.sub(u.scrollRows).toVar('screenRow');
+            const screenRow = row.sub(scrollRows).toVar('screenRow');
             // RECONSTRUCTIVE, never accumulative: x reads the walk's untouched base lane
             // (already within the fold unit — loop 2 was bounded by wrap or pageCols), and
             // y/z are rebuilt from the exact integer lanes (base y = origin.y −
@@ -411,23 +521,23 @@ export default class GlyphPipelineKernels {
             // put 119 glyphs on the wrong page in the reference's own tests, because f32
             // addition is not associative and a boundary row wobbles by a ULP.
             const yPage = int(0).toVar('yPage');
-            If(u.pageRows.greaterThan(int(0)).and(screenRow.greaterThanEqual(u.pageRows)), () => {
-                yPage.assign(screenRow.div(u.pageRows));
+            If(pageRows.greaterThan(int(0)).and(screenRow.greaterThanEqual(pageRows)), () => {
+                yPage.assign(screenRow.div(pageRows));
             });
             const xPage = int(0).toVar('xPage');
-            If(u.pageCols.greaterThan(int(0)), () => {
-                xPage.assign(col.div(u.pageCols));
+            If(pageCols.greaterThan(int(0)), () => {
+                xPage.assign(col.div(pageCols));
             });
-            const wide = u.pagesWide.max(int(1)).toVar('wide');
-            const wrapping = u.wrapWidth.greaterThan(int(0)).toVar('wrapping');
-            const seg = wrapping.select(col.div(u.wrapWidth), int(0)).toVar('seg');
+            const wide = pagesWide.max(int(1)).toVar('wide');
+            const wrapping = wrapWidth.greaterThan(int(0)).toVar('wrapping');
+            const seg = wrapping.select(col.div(wrapWidth), int(0)).toVar('seg');
 
-            const xf = x.add(yPage.mod(wide).toFloat().mul(u.pageStrideX)).toVar('xf');
-            const yf = u.origin.y.sub(screenRow.sub(yPage.mul(u.pageRows)).toFloat().mul(u.lineHeight))
-                .sub(yPage.div(wide).toFloat().mul(u.bandStrideY)).toVar('yf');
-            const zf = u.origin.z.sub(seg.toFloat().mul(u.zWrapStep))
-                .add(yPage.div(wide).toFloat().mul(u.depthPerBand))
-                .add(xPage.toFloat().mul(u.depthPerCol)).toVar('zf');
+            const xf = x.add(yPage.mod(wide).toFloat().mul(pageStrideX)).toVar('xf');
+            const yf = originY.sub(screenRow.sub(yPage.mul(pageRows)).toFloat().mul(lineHeight))
+                .sub(yPage.div(wide).toFloat().mul(bandStrideY)).toVar('yf');
+            const zf = originZ.sub(seg.toFloat().mul(zWrapStep))
+                .add(yPage.div(wide).toFloat().mul(depthPerBand))
+                .add(xPage.toFloat().mul(depthPerCol)).toVar('zf');
             S.element(o.add(uint(S_X))).assign(xf);
             S.element(o.add(uint(S_Y))).assign(yf);
             S.element(o.add(uint(S_Z))).assign(zf);
@@ -449,15 +559,65 @@ export default class GlyphPipelineKernels {
     }
 
     /**
-     * Upload a file's bytes and arm the uniforms. Bytes are the ONLY per-load upload.
+     * Upload ONE file's bytes and arm the uniforms — the one-item case of setFiles().
+     * Bytes + the item table are the ONLY per-load uploads.
      * @param {Uint8Array} bytes
-     * @param {Object} params - window, wrapWidth, lineHeight, origin, and the page params
+     * @param {Object} params - window, wrapWidth, lineHeight, zStep, origin, page
      */
     setFile(bytes, params = {}) {
-        if (bytes.length > this.maxBytes) {
-            throw new Error(`GlyphPipelineKernels: ${bytes.length} bytes exceeds capacity ${this.maxBytes}`);
+        const page = { ...(params.page || {}) };
+        if (params.scrollRows != null) page.scrollRows = params.scrollRows;
+        return this.setFiles([{ bytes, origin: params.origin, page }], params);
+    }
+
+    /**
+     * Upload N files as ONE concatenated buffer with one item-table row each — the
+     * multi-file hoist: one set of dispatches serves the whole load storm.
+     *
+     * @param {Array<{bytes:Uint8Array, origin?:{x,y,z}, page?:Object}>} items
+     *   Each item's page bag takes pageRows, pageCols (also the walk's fold unit when wrap
+     *   is off — changing it changes the walk's output), pagesWide, pageStrideX,
+     *   bandStrideY, depthPerBand, depthPerColumn, scrollRows.
+     * @param {Object} params - field-level DEFAULTS an item can override per item:
+     *   window (the only true uniform), wrapWidth, lineHeight, zStep.
+     */
+    setFiles(items, params = {}) {
+        if (!Array.isArray(items) || items.length === 0) {
+            throw new Error('GlyphPipelineKernels: setFiles needs a non-empty items array');
         }
-        this.byteWords.value.array.set(packBytes(bytes));
+        if (items.length > this.maxItems) {
+            throw new Error(`GlyphPipelineKernels: ${items.length} items exceeds capacity ${this.maxItems}`);
+        }
+        let total = 0;
+        for (const it of items) total += it.bytes.length;
+        if (total > this.maxBytes) {
+            throw new Error(`GlyphPipelineKernels: ${total} bytes exceeds capacity ${this.maxBytes}`);
+        }
+
+        // Concatenate the bytes and pack the item table. byteStart goes in itemStarts (the
+        // search key); origin + page params + the fold metrics go in itemTable at the
+        // ITEM_STRIDE lanes (item value, else the field-level default from `params`).
+        const all = new Uint8Array(total);
+        const starts = this.itemStarts.value.array;
+        const tbl = this.itemTable.value.array;
+        let off = 0;
+        for (let i = 0; i < items.length; i++) {
+            const it = items[i];
+            all.set(it.bytes, off);
+            starts[i] = off;
+            this._packItemPage(i, it.page || {});
+            const o = it.origin || {};
+            const b = i * ITEM_STRIDE;
+            tbl[b + I_ORIGIN_X] = o.x || 0;
+            tbl[b + I_ORIGIN_Y] = o.y || 0;
+            tbl[b + I_ORIGIN_Z] = o.z || 0;
+            tbl[b + I_WRAP_WIDTH] = Math.max(0, Math.trunc(it.wrapWidth ?? params.wrapWidth ?? 0));
+            tbl[b + I_Z_STEP] = it.zStep ?? params.zStep ?? 0;
+            tbl[b + I_LINE_HEIGHT] = it.lineHeight ?? params.lineHeight ?? 1;
+            off += it.bytes.length;
+        }
+
+        this.byteWords.value.array.set(packBytes(all));
         this.byteWords.value.needsUpdate = true;
         this.slots.value.array.fill(0);
         this.slots.value.needsUpdate = true;
@@ -465,41 +625,52 @@ export default class GlyphPipelineKernels {
         this.bounds.value.needsUpdate = true;
         this.missCount.value.array[0] = 0;
         this.missCount.value.needsUpdate = true;
+        this.itemTable.value.needsUpdate = true;
+        this.itemStarts.value.needsUpdate = true;
 
-        this.byteLength = bytes.length;
+        this.byteLength = total;
         const u = this._u;
-        u.byteLength.value = bytes.length;
+        u.byteLength.value = total;
+        u.itemCount.value = items.length;
         u.window.value = params.window ?? 128;
-        u.wrapWidth.value = Math.max(0, Math.trunc(params.wrapWidth || 0));
-        u.lineHeight.value = params.lineHeight ?? 1;
-        u.zWrapStep.value = params.zStep || 0;
-        if (params.origin) u.origin.value.set(params.origin.x || 0, params.origin.y || 0, params.origin.z || 0);
-        this.setPage(params.page || {});
 
-        const count = Math.max(1, bytes.length);
+        const count = Math.max(1, total);
         this._kDecode.count = count;
         this._kLayout.count = count;
         this._kPaginate.count = count;
         return this;
     }
 
+    /** Pack one item's page params into its item-table row (lanes 3..10). @private */
+    _packItemPage(i, p) {
+        const tbl = this.itemTable.value.array;
+        const b = i * ITEM_STRIDE;
+        tbl[b + I_PAGE_ROWS] = Math.max(0, Math.trunc(p.pageRows || 0));
+        tbl[b + I_PAGE_COLS] = Math.max(0, Math.trunc(p.pageCols || 0));
+        tbl[b + I_PAGES_WIDE] = Math.max(1, Math.trunc(p.pagesWide || 1));
+        tbl[b + I_PAGE_STRIDE_X] = p.pageStrideX || 0;
+        tbl[b + I_BAND_STRIDE_Y] = p.bandStrideY || 0;
+        tbl[b + I_DEPTH_PER_BAND] = p.depthPerBand || 0;
+        tbl[b + I_DEPTH_PER_COL] = p.depthPerColumn || 0;
+        tbl[b + I_SCROLL_ROWS] = Math.max(0, Math.trunc(p.scrollRows || 0));
+    }
+
     /**
-     * Retune ONLY the page params. Kernel 3 alone re-runs — the mode switch that costs no
-     * decode and no walk. CAVEAT: pageCols is also the walk's fold unit (loop 2 bounds its
-     * advance sum by it), so changing pageCols changes the walk's output — that needs a full
-     * run(), not a repaginate(). Row-paging, fan, and depth changes are repaginate-safe.
+     * Retune ONE item's page params. Kernel 3 alone re-runs (repaginate) — the mode switch
+     * that costs no decode and no walk. CAVEAT: pageCols is also the walk's fold unit
+     * (loop 2 bounds its advance sum by it), so changing pageCols changes the walk's
+     * output — that needs a full run(), not a repaginate(). Row-paging, fan, depth, and
+     * scroll changes are repaginate-safe.
      */
-    setPage(p = {}) {
-        const u = this._u;
-        u.scrollRows.value = Math.max(0, Math.trunc(p.scrollRows || 0));
-        u.pageRows.value = Math.max(0, Math.trunc(p.pageRows || 0));
-        u.pageCols.value = Math.max(0, Math.trunc(p.pageCols || 0));
-        u.pageStrideX.value = p.pageStrideX || 0;
-        u.bandStrideY.value = p.bandStrideY || 0;
-        u.pagesWide.value = Math.max(1, Math.trunc(p.pagesWide || 1));
-        u.depthPerBand.value = p.depthPerBand || 0;
-        u.depthPerCol.value = p.depthPerColumn || 0;
+    setItemPage(i, p = {}) {
+        this._packItemPage(i, p);
+        this.itemTable.value.needsUpdate = true;
         return this;
+    }
+
+    /** Single-item retune — the pre-items call shape; item 0's page params. */
+    setPage(p = {}) {
+        return this.setItemPage(0, p);
     }
 
     /** Full load: three dispatches, encoded back to back with no awaits between them. */
@@ -532,9 +703,13 @@ export default class GlyphPipelineKernels {
         };
     }
 
-    /** @returns {Promise<Float32Array>} the whole slot buffer — the parity path, not a render path. */
+    /** @returns {Promise<Float32Array>} the whole slot buffer — the parity path, not a render path.
+     *  The readback is bounded to the LIVE byte range: under the arena the slots buffer is
+     *  capacity-sized (16M bytes × stride — over the default maxBufferSize), so an
+     *  unbounded readback buffer allocation fails before a byte is copied. */
     async readSlots() {
-        const raw = await this.renderer.getArrayBufferAsync(this.slots.value);
+        const bytes = this.byteLength * SLOT_STRIDE * Float32Array.BYTES_PER_ELEMENT;
+        const raw = await this.renderer.getArrayBufferAsync(this.slots.value, null, 0, bytes);
         return new Float32Array(raw, 0, this.byteLength * SLOT_STRIDE);
     }
 
@@ -550,7 +725,7 @@ export default class GlyphPipelineKernels {
     dispose() {
         const attrs = this.renderer?._attributes;
         for (const node of [this.byteWords, this.slots, this.trieIndex, this.trieBlocks,
-            this.bounds, this.misses, this.missCount]) {
+            this.bounds, this.misses, this.missCount, this.itemTable, this.itemStarts]) {
             if (node && attrs) attrs.delete(node.value);
         }
         this._kDecode?.dispose();
