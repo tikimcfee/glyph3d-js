@@ -25,7 +25,9 @@ const TEXT = 'ab\n\nhéllo 你 xy😀z\ntail';
 const bytes = new TextEncoder().encode(TEXT);
 const { lineByteStart, lineLengths } = buildByteLineIndex(bytes);
 const mirror = runPipeline(bytes, trie, { wrapWidth: 0, lineHeight: CELL_H });
-const desc = new ByteLayoutDescription({ bytes, lineByteStart, lineLengths, mirror });
+// The arena-handle shape the description reads: lazy mirror + the per-item bounds record.
+const pipeline = { mirror: { slots: mirror.slots, bounds: mirror.itemBounds[0] }, bounds: mirror.itemBounds[0] };
+const desc = new ByteLayoutDescription({ bytes, lineByteStart, lineLengths, pipeline });
 
 // ── line index ──
 ok(desc.lineCount === 4, `lineCount ${desc.lineCount} != 4`);

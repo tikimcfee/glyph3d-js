@@ -1,77 +1,83 @@
 /**
  * glyphPipelineKernels — the byte-in glyph pipeline as WebGPU compute, in TSL.
  *
- * A transcription of `glyphPipelineReference.js`. That module is the spec and is proven
- * headlessly (tools/glyph-pipeline.test.mjs, tools/backtrack-layout.test.mjs); this is the
- * same logic addressed to the GPU. Keep them line-comparable — when they diverge, the
- * reference is right until a test says otherwise.
+ * A transcription of the SCAN SPEC (`glyphPipelineScan.js`), whose semantics are the
+ * oracle (`glyphPipelineReference.js`). Both are proven headlessly
+ * (tools/scan-layout.test.mjs, tools/glyph-pipeline.test.mjs); this is the same
+ * algorithm addressed to the GPU. Keep them dispatch-for-dispatch comparable — when
+ * they diverge, the spec is right until a test says otherwise.
  *
- * THREE DISPATCHES PER LOAD, not per frame:
+ * THE FOLD IS A SEGMENTED MONOID SCAN, not a walk. Every byte contributes a small
+ * summary (newlines, closed rows, head/tail run lengths, tail advance, ordinal; item
+ * starts are ABSORBING RESETS); a leader's exclusive prefix yields its exact
+ * row/col/ord in O(1). The shape is a RAKING reduce-then-scan, chosen for what it
+ * does NOT need:
  *
- *   1. decodeAndResolve   bytes → codepoint → trie → glyphId/advance/height. Pure per-slot.
- *   2. layout             the backward walk. Reads slot 1's output for its predecessors.
- *   3. paginateAndBounds  pure per-slot page remap, with the bounds reduce fused on.
+ *   - no cross-thread read of anything a sibling wrote in the same dispatch
+ *     (every dispatch's read set is a PREVIOUS dispatch's write set)
+ *   - no workgroup shared memory, no barriers, no forward-progress assumption
+ *   - no coherence window, no publish race, no schedule-dependent cost
+ *   - every loop bounded by a compile-time constant
  *
- * Decode does NOT fuse into layout even though the walk could re-decode its predecessors:
- * re-decoding costs the decode plus two trie loads per step, against one load to read a
- * pre-decoded `advance` lane. At window 128 + wrap 200 that is ~328 re-decodes per thread —
- * strictly more memory traffic than the dispatch it would save.
+ * Work is O(n); the result is bit-deterministic under every schedule.
  *
- * Pagination stays its own dispatch because that is what makes a mode switch cheap: changing
- * newspaper/column/z-page, or scrolling, re-runs ONLY kernel 3 over positions that already
- * exist. No decode, no walk, no reparse.
+ * NINE DISPATCHES PER LOAD, not per frame (the five scan stages are the walk's
+ * replacement; per-storm dispatch overhead is microseconds):
  *
- * ── MULTI-FILE (the item table) ──────────────────────────────────────────────────────────
- * One pipeline instance serves N files concatenated in ONE byte buffer: the multi-file
- * hoist — one set of dispatches for a whole load storm, not one per file. Per file (item):
- * a uint in itemStarts (its byteStart — the binary-search key) and ITEM_STRIDE floats in
- * itemTable (origin + the page params: pageRows, pageCols, pagesWide, pageGapX,
- * bandStrideY, depthPerBand, depthPerColumn, scrollRows — the same packing pattern as
- * GlyphLayoutKernel's item table), plus the per-item fold metrics (wrap/zStep/lineHeight).
- * Only `window` — the GPU coherence dial — stays a field-level uniform.
+ *   1. decodeAndResolve   bytes → codepoint → trie → glyphId/advance/height. Per byte.
+ *   2. chunkReduce        serial fold of CHUNK_SIZE leaves → partials.   Per chunk.
+ *   3. spineReduce        serial fold of GROUP_SIZE partials → supers.   Per group.
+ *   4. spineScan          exclusive scan of supers.                      ONE thread.
+ *   5. partialScan        group-seeded exclusive scan → partialPrefix.   Per group.
+ *   6. apply              prefix through the chunk's leaves → the exact lanes
+ *                         (row/col/lineAdv/ord) + the ordinal map.       Per chunk.
+ *   7. resolveX           fold-relative x by re-summing ≤ fold advances through the
+ *                         ordinal map (forward from the segment start — the exact f32
+ *                         order the oracle accumulates, so fold > 0 x is bit-identical
+ *                         to the CPU); foldless x is the line prefix. Writes the
+ *                         unpaginated position + the per-item FOLD SCALARS reduce
+ *                         (totalRows, item-relative widest row).         Per byte.
+ *   8. deriveStrides      page-fan stride = widest row + pageGapX.       Per item.
+ *   9. paginateAndBounds  pure per-slot remap from base + integer lanes, with the
+ *                         per-item BOX reduce fused on.                  Per byte.
  *
- *   1. The walk NEVER CROSSES A FILE BOUNDARY. Kernels 2/3 resolve their item by binary
- *      search over itemStarts; leaderBefore floors at the item's first byte, so row/col
- *      are FILE-RELATIVE (a file's first glyph is row 0, col 0) and no inherit can leak
- *      F_RENDERED across files.
- *   2. Kernel 3 applies the ITEM's origin + page params from the table; the reconstructive
- *      math is unchanged — base lanes + item origin/params.
- *   3. ORIGIN IS PER-ITEM, full stop — the field-level origin uniform is GONE (simpler
- *      than two origins: one adder, one source of truth). setFile() wraps its params into
- *      a single item, so the one-item case is byte-identical to before.
- *   4. WRAP/zStep/lineHeight ARE PER-ITEM LANES (I_WRAP_WIDTH/I_Z_STEP/I_LINE_HEIGHT),
- *      with the setFiles field-level params as defaults. One arena must serve grids that
- *      fold differently — a filename at wrap 0 beside content at wrap 200 — so the fold
- *      unit rides the item, not a uniform. Only `window` (the coherence dial) stays
- *      field-level. They are LOAD-TIME lanes: changing them changes the walk, so they are
- *      not setItemPage/repaginate-tunable.
- *   5. BOUNDS ARE PER-ITEM, GPU-owned: kernel 2 reduces the walk scalars (totalRows +
- *      the item-relative widest row) into walkScalars, kernel 2.5 derives each item's
- *      page-fan stride from them (+ pageGapX) into itemStrides, and kernel 3 reduces
- *      each item's FINAL box into itemBoxes. readItemBounds() is ONE readback handing
- *      every staged field its extent — the CPU never re-lays a file to learn its size.
+ * Pagination (with strides) stays separately dispatchable: a mode switch or scroll
+ * re-runs ONLY 8+9 over positions that already exist. And because resolveX reads the
+ * fold unit from the ITEM TABLE at its own dispatch, a pageCols change re-runs 7-9 —
+ * no re-scan, no re-decode (the scan never sees the fold unit's width, only wrap).
  *
- * ── VERIFIED ON HARDWARE (tools/glyph-pipeline-check.mjs) ────────────────────────────────
- * GPU output diffs against runPipeline() from the reference on the same bytes, over torture /
- * 40k-single-line / real-file corpora at wrap 0/24/200, window 0/128, and page modes. The
- * walk expresses in TSL Loop/Break; row/col are bit-exact on every lane; x/y/z sit within
- * f32 accumulation noise; the coherence race has not surfaced at any window. Two design bugs
- * the first run caught and fixed: kernel 3 now remaps from the BASE position (S_BASE_X + the
- * integer lanes) so it is idempotent, and loop 2's bound is the fold unit (wrap, else
- * pageCols) so MAX_WALK_STEPS never operates on real inputs.
+ * ── MULTI-FILE (the item table) ────────────────────────────────────────────────────
+ * One pipeline instance serves N files concatenated in ONE byte buffer. Per item: a
+ * uint in itemStarts (the binary-search key) and ITEM_STRIDE floats in itemTable
+ * (origin + page params + wrap/zStep/lineHeight — per-item lanes with setFiles
+ * defaults). Item isolation is ALGEBRAIC: an item start is a reset element that
+ * absorbs everything left of it under any grouping — row/col are file-relative and no
+ * state can leak across files, structurally.
+ *
+ * BOUNDS ARE PER-ITEM, GPU-owned: resolveX reduces the fold scalars into foldScalars,
+ * deriveStrides turns lane 1 (+ pageGapX) into itemStrides, and paginate reduces each
+ * item's final box into itemBoxes. readItemBounds() is ONE readback handing every
+ * staged field its extent — the CPU never re-lays a file to learn its size.
+ *
+ * ── VERIFIED ON HARDWARE (tools/glyph-pipeline-check.mjs) ──────────────────────────
+ * GPU output diffs against runPipeline() (the oracle) on the same bytes, over
+ * torture / 40k-single-line / real-file corpora at wrap 0/24/200 and every page mode.
+ * Integer lanes must be BIT-EXACT everywhere — the scan is deterministic, so unlike
+ * the old walk there is no "within f32 accumulation noise" carve-out for fold > 0 x.
  */
 
 import { TSL } from 'three/webgpu';
 import {
     SLOT_STRIDE, S_CODEPOINT, S_GLYPH_ID, S_ADVANCE, S_HEIGHT,
-    S_X, S_Y, S_Z, S_ROW, S_COL, S_FLAGS, S_BASE_X,
+    S_X, S_Y, S_Z, S_ROW, S_COL, S_FLAGS, S_BASE_X, S_LINE_ADV, S_ORD,
     F_LEADER, F_RENDERED, F_MISSING, NEWLINE,
     ITEM_STRIDE, I_ORIGIN_X, I_ORIGIN_Y, I_ORIGIN_Z,
     I_PAGE_ROWS, I_PAGE_COLS, I_PAGES_WIDE, I_PAGE_GAP_X,
     I_BAND_STRIDE_Y, I_DEPTH_PER_BAND, I_DEPTH_PER_COL, I_SCROLL_ROWS,
     I_WRAP_WIDTH, I_Z_STEP, I_LINE_HEIGHT,
 } from './glyphPipelineReference.js';
-import { BLOCK_SHIFT, BLOCK_MASK, ENTRY_STRIDE, LANE_GLYPH_ID, LANE_ADVANCE, LANE_HEIGHT, LANE_FLAGS, FLAG_MISSING } from './GlyphTrie.js';
+import { CHUNK_SIZE, GROUP_SIZE } from './glyphPipelineScan.js';
+import { BLOCK_SHIFT, BLOCK_MASK, ENTRY_STRIDE, LANE_GLYPH_ID, LANE_ADVANCE, LANE_HEIGHT, LANE_FLAGS } from './GlyphTrie.js';
 
 const {
     Fn, If, Loop, Break, Return, uniform, instancedArray, instanceIndex,
@@ -79,25 +85,33 @@ const {
 } = TSL;
 
 /**
- * Walk-loop iteration cap. This is a SAFETY BOUND, not the algorithm's bound — an unbounded
- * loop in a compute shader that fails to converge is a device loss, not a wrong pixel. The
- * real bound is the inherit (loop 1) and wrapWidth (loop 2). A thread that somehow burns
- * this many steps produces a wrong position rather than hanging the device, which is the
- * correct failure mode: visibly wrong beats unrecoverable.
+ * resolveX's re-sum cap. This is a SAFETY BOUND for ABSURD FOLD UNITS ONLY — the loop's
+ * real bound is `col % fold < fold`, so the cap can only bite when an item declares a
+ * wrap/pageCols wider than 4096 glyphs. Foldless content (the case the old walk's
+ * MAX_WALK_STEPS fuse silently corrupted) never enters this loop at all: its x is the
+ * line prefix, exact at any length. A bitten cap produces a wrong x, never a hang.
  */
-export const MAX_WALK_STEPS = 4096;
+export const MAX_FOLD_RESUM = 4096;
 
 /**
- * Binary-search iteration cap for the per-thread item resolution (same reasoning as
- * GlyphLayoutKernel: 32 halvings address 2^32 items; the cap exists because an unbounded
- * loop that fails to converge is a device loss). Break() exits as soon as the range
- * collapses.
+ * Binary-search iteration cap for the per-thread item resolution (32 halvings address
+ * 2^32 items; the cap exists because an unbounded loop that fails to converge is a
+ * device loss). Break() exits as soon as the range collapses.
  */
 const BINARY_SEARCH_STEPS = 32;
 
 /** Item capacity a pipeline is born with — files per load storm. Memory is trivial
  *  (ITEM_STRIDE floats + one uint per item), so the default is sized for the storm. */
 export const DEFAULT_MAX_ITEMS = 1024;
+
+/**
+ * The packed monoid element — one row of the partials/supers/prefix buffers. All-uint
+ * (counts are exact; TAILADV is an f32 bitcast into its lane). Mirrors the spec's
+ * {reset, nl, glyphs, rows, headLen, tailLen, wrap, tailAdv} object.
+ */
+export const P_STRIDE = 8;
+const P_RESET = 0, P_NL = 1, P_GLYPHS = 2, P_ROWS = 3,
+    P_HEAD = 4, P_TAIL = 5, P_WRAP = 6, P_TAILADV = 7;
 
 /**
  * Bytes are packed 4-per-u32 because WGSL cannot index a u8 array. `byteAt` unpacks.
@@ -127,8 +141,8 @@ const floatToOrderedKey = /*#__PURE__*/ Fn(([f]) => {
         .select(bits.bitOr(uint(0x80000000)), bits.bitNot());
 });
 
-/** Inverse of floatToOrderedKey, in-shader — the stride kernel decodes the walk's
- *  reduced extent. An ARMED key (0 — no glyph ever reduced) decodes to 0, not NaN. */
+/** Inverse of floatToOrderedKey, in-shader — the stride kernel decodes the fold
+ *  scalars' reduced extent. An ARMED key (0 — no glyph ever reduced) decodes to 0, not NaN. */
 const orderedKeyToFloatGPU = /*#__PURE__*/ Fn(([k]) => {
     const bits = k.bitAnd(uint(0x80000000)).notEqual(uint(0))
         .select(k.bitXor(uint(0x80000000)), k.bitNot());
@@ -172,21 +186,36 @@ export default class GlyphPipelineKernels {
         this.renderer = renderer;
         this.maxBytes = Math.max(1, maxBytes | 0);
         this.maxItems = Math.max(1, maxItems | 0);
+        if (this.maxBytes > 2 ** 24) {
+            // S_ORD (and every count lane) must stay exact in an f32 slot lane.
+            throw new Error(`GlyphPipelineKernels: maxBytes ${this.maxBytes} exceeds 2^24 — ordinals would lose exactness in f32`);
+        }
+        this.maxChunks = Math.ceil(this.maxBytes / CHUNK_SIZE);
+        this.maxSupers = Math.ceil(this.maxChunks / GROUP_SIZE);
+        this.byteLength = 0;
+        this.itemCount = 0;
 
         // ── Buffers ────────────────────────────────────────────────────────────────────
         this.byteWords = instancedArray(Math.ceil(this.maxBytes / 4), 'uint').setName('GlyphBytes');
         this.slots = instancedArray(this.maxBytes * SLOT_STRIDE, 'float').setName('GlyphSlots');
         this.trieIndex = instancedArray(trie.blockIndex.length, 'uint').setName('GlyphTrieIndex');
         this.trieBlocks = instancedArray(trie.blocks.length, 'float').setName('GlyphTrieBlocks');
+        // The scan's ladder: chunk partials, their group reduces, the two exclusive-prefix
+        // levels, and the ordinal map (leader ordinal → byte index, per item's byte range).
+        this.partials = instancedArray(this.maxChunks * P_STRIDE, 'uint').setName('GlyphScanPartials');
+        this.partialPrefix = instancedArray(this.maxChunks * P_STRIDE, 'uint').setName('GlyphScanPartialPrefix');
+        this.supers = instancedArray(this.maxSupers * P_STRIDE, 'uint').setName('GlyphScanSupers');
+        this.superPrefix = instancedArray(this.maxSupers * P_STRIDE, 'uint').setName('GlyphScanSuperPrefix');
+        this.ordToByte = instancedArray(this.maxBytes, 'uint').setName('GlyphOrdToByte');
         // Per-item bounds, split by WRITER so re-arming one never clobbers the other:
-        // itemBoxes (6 lanes/item — final positions, kernel 3, re-armed every repaginate)
-        // and walkScalars (2 lanes/item — totalRows + ITEM-RELATIVE widest row, kernel 2,
-        // armed only at setFiles: repaginates don't re-walk, so the scalars persist and
+        // itemBoxes (6 lanes/item — final positions, paginate, re-armed every repaginate)
+        // and foldScalars (2 lanes/item — totalRows + ITEM-RELATIVE widest row, resolveX,
+        // armed only at setFiles: repaginates don't re-fold, so the scalars persist and
         // the stride kernel can read them).
         this.itemBoxes = instancedArray(this.maxItems * 6, 'uint').setName('GlyphItemBoxes').toAtomic();
-        this.walkScalars = instancedArray(this.maxItems * 2, 'uint').setName('GlyphWalkScalars').toAtomic();
-        // The derived page-fan stride per item — GPU-written (walk extent + gap), read by
-        // kernel 3. Its own buffer so item-table uploads never clobber it.
+        this.foldScalars = instancedArray(this.maxItems * 2, 'uint').setName('GlyphFoldScalars').toAtomic();
+        // The derived page-fan stride per item — GPU-written (fold extent + gap), read by
+        // paginate. Its own buffer so item-table uploads never clobber it.
         this.itemStrides = instancedArray(this.maxItems, 'float').setName('GlyphItemStrides');
         this.misses = instancedArray(maxMisses, 'uint').setName('GlyphMisses');
         this.missCount = instancedArray(1, 'uint').setName('GlyphMissCount').toAtomic();
@@ -197,11 +226,7 @@ export default class GlyphPipelineKernels {
 
         // Node names don't reach the GPU; ATTRIBUTE names do (three passes attribute.name
         // as the GPUBuffer label) — so Dawn errors name the buffer instead of "(unlabeled)".
-        for (const node of [this.byteWords, this.slots, this.trieIndex, this.trieBlocks,
-            this.itemBoxes, this.walkScalars, this.itemStrides,
-            this.misses, this.missCount, this.itemTable, this.itemStarts]) {
-            node.value.name = node.name;
-        }
+        for (const node of this._allNodes()) node.value.name = node.name;
 
         this.trieIndex.value.array.set(trie.blockIndex);
         this.trieBlocks.value.array.set(trie.blocks);
@@ -209,20 +234,40 @@ export default class GlyphPipelineKernels {
         this.trieBlocks.value.needsUpdate = true;
         this.maxMisses = maxMisses;
 
-        // ── Uniforms — FIELD-LEVEL only: the dispatch width, the item count, and the
-        //    coherence window. Origin, every page param, AND wrap/zStep/lineHeight are
-        //    per-item lanes (grids in one arena fold differently — the item table is the
-        //    single source of truth).
+        // ── Uniforms — the dispatch widths ONLY. Origin, every page param, AND
+        //    wrap/zStep/lineHeight are per-item lanes (grids in one arena fold
+        //    differently — the item table is the single source of truth). The old
+        //    coherence `window` is gone WITH the race it dialed.
         this._u = {
-            byteLength:   uniform(0, 'uint'),
-            itemCount:    uniform(1, 'uint'),
-            window:       uniform(128, 'int'),
+            byteLength: uniform(0, 'uint'),
+            itemCount:  uniform(1, 'uint'),
+            chunkCount: uniform(1, 'uint'),
+            superCount: uniform(1, 'uint'),
         };
 
         this._kDecode = this._buildDecode();
-        this._kLayout = this._buildLayout();
+        this._kChunkReduce = this._buildChunkReduce();
+        this._kSpineReduce = this._buildSpineReduce();
+        this._kSpineScan = this._buildSpineScan();
+        this._kPartialScan = this._buildPartialScan();
+        this._kApply = this._buildApply();
+        this._kResolveX = this._buildResolveX();
         this._kStrides = this._buildDeriveStrides();
         this._kPaginate = this._buildPaginateAndBounds();
+    }
+
+    /** @private */
+    _allNodes() {
+        return [this.byteWords, this.slots, this.trieIndex, this.trieBlocks,
+            this.partials, this.partialPrefix, this.supers, this.superPrefix, this.ordToByte,
+            this.itemBoxes, this.foldScalars, this.itemStrides,
+            this.misses, this.missCount, this.itemTable, this.itemStarts];
+    }
+
+    /** @private */
+    _allKernels() {
+        return [this._kDecode, this._kChunkReduce, this._kSpineReduce, this._kSpineScan,
+            this._kPartialScan, this._kApply, this._kResolveX, this._kStrides, this._kPaginate];
     }
 
     /** byteAt(i) — unpack from the 4-per-word packing. */
@@ -310,8 +355,8 @@ export default class GlyphPipelineKernels {
 
     /**
      * Item resolution: the largest item whose byteStart ≤ id — the reference's itemForByte,
-     * as a TSL binary search over itemStarts. Shared by kernels 2 and 3 (kernel 1's decode
-     * is item-agnostic).
+     * as a TSL binary search over itemStarts. Used once per thread (resolveX/paginate) or
+     * once per CHUNK (the serial scan loops advance a cursor instead).
      * @private
      * @returns {Function} TSL fn (id:uint) → uint item index
      */
@@ -334,35 +379,338 @@ export default class GlyphPipelineKernels {
         });
     }
 
-    /**
-     * Nearest leader strictly before `from`, or `from` when none AT OR ABOVE `floor`.
-     * The floor is the item's first byte — the walk never crosses a file boundary, so a
-     * file's first leader finds no predecessor and computes its own prefix. Bounded by
-     * MAX_WALK_STEPS.
-     */
-    _leaderBefore(from, floor) {
-        const j = from.toVar();
-        const found = from.toVar();
-        Loop(MAX_WALK_STEPS, () => {
-            If(j.lessThanEqual(floor), () => { Break(); });
-            j.assign(j.sub(uint(1)));
-            const f = this.slots.element(j.mul(uint(SLOT_STRIDE)).add(uint(S_FLAGS)));
-            If(int(f).bitAnd(int(F_LEADER)).notEqual(int(0)), () => {
-                found.assign(j);
-                Break();
-            });
-        });
-        return found;
+    // ── The monoid, in registers ───────────────────────────────────────────────────────
+    // An element is 7 int vars + 1 float var, mirroring the spec's object. Lanes stay
+    // int (counts are far below 2^31); only the packed buffers are uint.
+
+    /** Fresh identity element as named toVars. @private */
+    _elemIdentity(tag) {
+        return {
+            reset: int(0).toVar(`${tag}Reset`),
+            nl: int(0).toVar(`${tag}Nl`),
+            glyphs: int(0).toVar(`${tag}Glyphs`),
+            rows: int(0).toVar(`${tag}Rows`),
+            headLen: int(0).toVar(`${tag}Head`),
+            tailLen: int(0).toVar(`${tag}Tail`),
+            wrap: int(0).toVar(`${tag}Wrap`),
+            tailAdv: float(0).toVar(`${tag}Adv`),
+        };
+    }
+
+    /** e := identity (wrap preserved by caller if wanted). @private */
+    _elemClear(e) {
+        e.reset.assign(int(0)); e.nl.assign(int(0)); e.glyphs.assign(int(0));
+        e.rows.assign(int(0)); e.headLen.assign(int(0)); e.tailLen.assign(int(0));
+        e.tailAdv.assign(float(0));
+    }
+
+    /** Load a packed element row into fresh vars. @private */
+    _elemLoad(buf, idx, tag) {
+        const b = idx.mul(uint(P_STRIDE));
+        return {
+            reset: int(buf.element(b.add(uint(P_RESET)))).toVar(`${tag}Reset`),
+            nl: int(buf.element(b.add(uint(P_NL)))).toVar(`${tag}Nl`),
+            glyphs: int(buf.element(b.add(uint(P_GLYPHS)))).toVar(`${tag}Glyphs`),
+            rows: int(buf.element(b.add(uint(P_ROWS)))).toVar(`${tag}Rows`),
+            headLen: int(buf.element(b.add(uint(P_HEAD)))).toVar(`${tag}Head`),
+            tailLen: int(buf.element(b.add(uint(P_TAIL)))).toVar(`${tag}Tail`),
+            wrap: int(buf.element(b.add(uint(P_WRAP)))).toVar(`${tag}Wrap`),
+            tailAdv: bitcast(buf.element(b.add(uint(P_TAILADV))), 'float').toVar(`${tag}Adv`),
+        };
+    }
+
+    /** Store an element into a packed row. @private */
+    _elemStore(buf, idx, e) {
+        const b = idx.mul(uint(P_STRIDE));
+        buf.element(b.add(uint(P_RESET))).assign(uint(e.reset));
+        buf.element(b.add(uint(P_NL))).assign(uint(e.nl));
+        buf.element(b.add(uint(P_GLYPHS))).assign(uint(e.glyphs));
+        buf.element(b.add(uint(P_ROWS))).assign(uint(e.rows));
+        buf.element(b.add(uint(P_HEAD))).assign(uint(e.headLen));
+        buf.element(b.add(uint(P_TAIL))).assign(uint(e.tailLen));
+        buf.element(b.add(uint(P_WRAP))).assign(uint(e.wrap));
+        buf.element(b.add(uint(P_TAILADV))).assign(bitcast(e.tailAdv, 'uint'));
     }
 
     /**
-     * KERNEL 2 — thread per byte. THE WALK. See the reference for the full argument; the
-     * shape is two loops back to back inside ONE thread:
-     *   loop 1  integer walk → row, col   (bounded by the inherit)
-     *   loop 2  advance sum  → x          (bounded by wrapWidth)
+     * a := combine(a, b) — the spec's scanCombine, in registers. b.reset absorbs a;
+     * otherwise head/tail runs merge and the junction line (closed by b's first
+     * newline) joins `rows` wrap-aware. rowsForLine(len, wrap) = wrap>0 ? len/wrap+1 : 1.
      * @private
      */
-    _buildLayout() {
+    _combineInto(a, b) {
+        If(b.reset.notEqual(int(0)), () => {
+            a.reset.assign(int(1));
+            a.nl.assign(b.nl); a.glyphs.assign(b.glyphs); a.rows.assign(b.rows);
+            a.headLen.assign(b.headLen); a.tailLen.assign(b.tailLen);
+            a.wrap.assign(b.wrap); a.tailAdv.assign(b.tailAdv);
+        }).Else(() => {
+            a.wrap.assign(b.wrap);
+            If(b.nl.equal(int(0)), () => {
+                a.tailLen.addAssign(b.tailLen);
+                a.tailAdv.addAssign(b.tailAdv);
+                If(a.nl.equal(int(0)), () => { a.headLen.assign(a.tailLen); });
+            }).Else(() => {
+                If(a.nl.equal(int(0)), () => {
+                    a.headLen.addAssign(b.headLen);
+                    a.rows.assign(b.rows);
+                }).Else(() => {
+                    const len = a.tailLen.add(b.headLen).toVar('jLen');
+                    const rl = b.wrap.greaterThan(int(0))
+                        .select(len.div(b.wrap).add(int(1)), int(1)).toVar('jRows');
+                    a.rows.assign(a.rows.add(rl).add(b.rows));
+                });
+                a.tailLen.assign(b.tailLen);
+                a.tailAdv.assign(b.tailAdv);
+            });
+            a.nl.addAssign(b.nl);
+            a.glyphs.addAssign(b.glyphs);
+        });
+    }
+
+    /**
+     * The serial ITEM CURSOR the chunk loops advance: byte ids ascend one at a time, and
+     * an item is ≥ 1 byte, so at most one boundary crossing per step. Returns the vars
+     * the loop body reads (item, itemStartByte, wrap, nextStart).
+     * @private
+     */
+    _cursorInit(itemSearch, fromByte) {
+        const u = this._u;
+        const starts = this.itemStarts;
+        const it = this.itemTable;
+        const item = itemSearch(fromByte).toVar('curItem');
+        const itemStartByte = starts.element(item).toVar('curItemStart');
+        const wrap = int(it.element(item.mul(uint(ITEM_STRIDE)).add(uint(I_WRAP_WIDTH)))).toVar('curWrap');
+        const nextStart = uint(0xFFFFFFFF).toVar('curNext');
+        If(item.add(uint(1)).lessThan(u.itemCount), () => {
+            nextStart.assign(starts.element(item.add(uint(1))));
+        });
+        return { item, itemStartByte, wrap, nextStart };
+    }
+
+    /** Advance the cursor at byte `id` (call once per loop step, before use). @private */
+    _cursorAdvance(cur, id) {
+        const u = this._u;
+        const starts = this.itemStarts;
+        const it = this.itemTable;
+        If(id.greaterThanEqual(cur.nextStart), () => {
+            cur.item.addAssign(uint(1));
+            cur.itemStartByte.assign(cur.nextStart);
+            cur.wrap.assign(int(it.element(cur.item.mul(uint(ITEM_STRIDE)).add(uint(I_WRAP_WIDTH)))));
+            If(cur.item.add(uint(1)).lessThan(u.itemCount), () => {
+                cur.nextStart.assign(starts.element(cur.item.add(uint(1))));
+            }).Else(() => {
+                cur.nextStart.assign(uint(0xFFFFFFFF));
+            });
+        });
+    }
+
+    /**
+     * Fold byte `id`'s LEAF into `acc` — the spec's scanLeaf + scanCombine specialized
+     * for a leaf on the right (no allocation of a leaf element: the leaf's lanes are
+     * scalars). isStart = id == its item's first byte (the absorbing reset).
+     * @private
+     */
+    _leafInto(acc, id, cur) {
+        const S = this.slots;
+        const o = id.mul(uint(SLOT_STRIDE)).toVar('lfO');
+        const flags = int(S.element(o.add(uint(S_FLAGS)))).toVar('lfFlags');
+        const isStart = id.equal(cur.itemStartByte).toVar('lfStart');
+
+        If(isStart, () => {
+            // reset leaf: acc := (reset identity) ⊗ leaf-content
+            this._elemClear(acc);
+            acc.reset.assign(int(1));
+        });
+        acc.wrap.assign(cur.wrap);
+        If(flags.bitAnd(int(F_LEADER)).notEqual(int(0)), () => {
+            acc.glyphs.addAssign(int(1));
+            If(S.element(o.add(uint(S_CODEPOINT))).equal(float(NEWLINE)), () => {
+                // A newline closes acc's open tail run: if lines were already closed, the
+                // run is a whole interior line (rows += rowsForLine); if not, it fixes head.
+                If(acc.nl.equal(int(0)), () => {
+                    acc.headLen.assign(acc.tailLen);
+                }).Else(() => {
+                    const rl = acc.wrap.greaterThan(int(0))
+                        .select(acc.tailLen.div(acc.wrap).add(int(1)), int(1)).toVar('lfRows');
+                    acc.rows.addAssign(rl);
+                });
+                acc.nl.addAssign(int(1));
+                acc.tailLen.assign(int(0));
+                acc.tailAdv.assign(float(0));
+            }).Else(() => {
+                acc.tailLen.addAssign(int(1));
+                acc.tailAdv.addAssign(S.element(o.add(uint(S_ADVANCE))));
+                If(acc.nl.equal(int(0)), () => { acc.headLen.assign(acc.tailLen); });
+            });
+        });
+    }
+
+    /**
+     * KERNEL 2 — thread per CHUNK. Serial fold of the chunk's CHUNK_SIZE leaves into one
+     * partial. Reads decode's lanes only; writes its own partials row. No cross-thread
+     * dependency.
+     * @private
+     */
+    _buildChunkReduce() {
+        const u = this._u;
+        const itemSearch = this._buildItemSearch();
+        return Fn(() => {
+            const c = instanceIndex;
+            If(c.greaterThanEqual(u.chunkCount), () => { Return(); });
+            const from = c.mul(uint(CHUNK_SIZE)).toVar('from');
+            const cur = this._cursorInit(itemSearch, from);
+            const acc = this._elemIdentity('r');
+            const id = from.toVar('rId');
+            Loop(CHUNK_SIZE, () => {
+                If(id.greaterThanEqual(u.byteLength), () => { Break(); });
+                this._cursorAdvance(cur, id);
+                this._leafInto(acc, id, cur);
+                id.addAssign(uint(1));
+            });
+            this._elemStore(this.partials, c, acc);
+        })().compute(1).setName('glyphScanChunkReduce');
+    }
+
+    /**
+     * KERNEL 3 — thread per GROUP. Serial fold of GROUP_SIZE partials into one super.
+     * @private
+     */
+    _buildSpineReduce() {
+        const u = this._u;
+        return Fn(() => {
+            const g = instanceIndex;
+            If(g.greaterThanEqual(u.superCount), () => { Return(); });
+            const acc = this._elemIdentity('s');
+            const c = g.mul(uint(GROUP_SIZE)).toVar('sC');
+            Loop(GROUP_SIZE, () => {
+                If(c.greaterThanEqual(u.chunkCount), () => { Break(); });
+                const p = this._elemLoad(this.partials, c, 'sp');
+                this._combineInto(acc, p);
+                c.addAssign(uint(1));
+            });
+            this._elemStore(this.supers, g, acc);
+        })().compute(1).setName('glyphScanSpineReduce');
+    }
+
+    /**
+     * KERNEL 4 — ONE thread. Exclusive scan of the supers, in order. maxSupers is a
+     * construction-time constant (maxBytes / CHUNK_SIZE / GROUP_SIZE — a few dozen to a
+     * few hundred); the serial combine chain is microscopic next to any per-byte pass.
+     * @private
+     */
+    _buildSpineScan() {
+        const u = this._u;
+        return Fn(() => {
+            If(instanceIndex.notEqual(uint(0)), () => { Return(); });
+            const acc = this._elemIdentity('x');
+            const g = uint(0).toVar('xG');
+            Loop(this.maxSupers, () => {
+                If(g.greaterThanEqual(u.superCount), () => { Break(); });
+                this._elemStore(this.superPrefix, g, acc);
+                const s = this._elemLoad(this.supers, g, 'xs');
+                this._combineInto(acc, s);
+                g.addAssign(uint(1));
+            });
+        })().compute(1).setName('glyphScanSpine');
+    }
+
+    /**
+     * KERNEL 5 — thread per GROUP. Seed from the super prefix, serially scan the group's
+     * partials into partialPrefix — each chunk's exclusive prefix, ready for apply.
+     * @private
+     */
+    _buildPartialScan() {
+        const u = this._u;
+        return Fn(() => {
+            const g = instanceIndex;
+            If(g.greaterThanEqual(u.superCount), () => { Return(); });
+            const acc = this._elemLoad(this.superPrefix, g, 'q');
+            const c = g.mul(uint(GROUP_SIZE)).toVar('qC');
+            Loop(GROUP_SIZE, () => {
+                If(c.greaterThanEqual(u.chunkCount), () => { Break(); });
+                this._elemStore(this.partialPrefix, c, acc);
+                const p = this._elemLoad(this.partials, c, 'qp');
+                this._combineInto(acc, p);
+                c.addAssign(uint(1));
+            });
+        })().compute(1).setName('glyphScanPartialScan');
+    }
+
+    /**
+     * KERNEL 6 — thread per CHUNK. APPLY: run the chunk's exclusive prefix through its
+     * leaves; at every leader, the prefix IS the answer:
+     *
+     *   col = tailLen · ord = glyphs · lineAdv = tailAdv
+     *   row = (nl > 0 ? rowsForLine(headLen, wrap) + rows : 0) + col/wrap
+     *
+     * Writes the exact lanes + the ordinal map (ordToByte[itemStart + ord] = id — the
+     * scatter resolveX gathers through). An item-start byte queries the IDENTITY (its
+     * prefix must not see the previous item), which _leafInto's reset then makes true
+     * for every later byte too.
+     * @private
+     */
+    _buildApply() {
+        const u = this._u;
+        const S = this.slots;
+        const itemSearch = this._buildItemSearch();
+        return Fn(() => {
+            const c = instanceIndex;
+            If(c.greaterThanEqual(u.chunkCount), () => { Return(); });
+            const from = c.mul(uint(CHUNK_SIZE)).toVar('aFrom');
+            const cur = this._cursorInit(itemSearch, from);
+            const acc = this._elemLoad(this.partialPrefix, c, 'a');
+            const id = from.toVar('aId');
+            Loop(CHUNK_SIZE, () => {
+                If(id.greaterThanEqual(u.byteLength), () => { Break(); });
+                this._cursorAdvance(cur, id);
+
+                // The item's first byte folds from identity — clear BEFORE the query.
+                If(id.equal(cur.itemStartByte), () => { this._elemClear(acc); });
+
+                const o = id.mul(uint(SLOT_STRIDE)).toVar('aO');
+                const flags = int(S.element(o.add(uint(S_FLAGS)))).toVar('aFlags');
+                If(flags.bitAnd(int(F_LEADER)).notEqual(int(0)), () => {
+                    const col = acc.tailLen.toVar('aCol');
+                    const closed = int(0).toVar('aClosed');
+                    If(acc.nl.greaterThan(int(0)), () => {
+                        const headRows = cur.wrap.greaterThan(int(0))
+                            .select(acc.headLen.div(cur.wrap).add(int(1)), int(1)).toVar('aHeadRows');
+                        closed.assign(headRows.add(acc.rows));
+                    });
+                    const wrapRow = cur.wrap.greaterThan(int(0))
+                        .select(col.div(cur.wrap), int(0)).toVar('aWrapRow');
+                    const row = closed.add(wrapRow).toVar('aRow');
+
+                    S.element(o.add(uint(S_ROW))).assign(row.toFloat());
+                    S.element(o.add(uint(S_COL))).assign(col.toFloat());
+                    S.element(o.add(uint(S_LINE_ADV))).assign(acc.tailAdv);
+                    S.element(o.add(uint(S_ORD))).assign(acc.glyphs.toFloat());
+                    S.element(o.add(uint(S_FLAGS))).assign(float(flags.bitOr(int(F_RENDERED))));
+                    this.ordToByte.element(cur.itemStartByte.add(uint(acc.glyphs))).assign(id);
+                });
+
+                this._leafInto(acc, id, cur);
+                id.addAssign(uint(1));
+            });
+        })().compute(1).setName('glyphScanApply');
+    }
+
+    /**
+     * KERNEL 7 — thread per byte. RESOLVE X + the unpaginated placement + the per-item
+     * fold-scalar reduce (the spec's resolveX, verbatim).
+     *
+     * Fold unit (item's wrap, else pageCols): x re-sums the glyph's col % fold same-row
+     * predecessors through the ordinal map, FORWARD from the segment start — the exact
+     * f32 order the oracle's serial fold accumulates, so the bits match the CPU.
+     * Foldless: x is the line prefix (S_LINE_ADV), exact at any line length — the case
+     * the old walk's fuse corrupted is simply a load now.
+     *
+     * Cross-thread reads (slots integer lanes, ordToByte) are apply's writes — previous
+     * dispatch, safe. This dispatch writes only its own slot + the atomic scalars.
+     * @private
+     */
+    _buildResolveX() {
         const u = this._u;
         const S = this.slots;
         const it = this.itemTable;
@@ -373,139 +721,61 @@ export default class GlyphPipelineKernels {
         return Fn(() => {
             const id = instanceIndex;
             If(id.greaterThanEqual(u.byteLength), () => { Return(); });
-            const myFlags = int(lane(id, S_FLAGS)).toVar('mf');
-            If(myFlags.bitAnd(int(F_LEADER)).equal(int(0)), () => { Return(); });
+            If(int(lane(id, S_FLAGS)).bitAnd(int(F_LEADER)).equal(int(0)), () => { Return(); });
 
-            // ── Item resolution: this thread's file. The walk floors at the item's first
-            //    byte and the origin + fold unit + metrics come from the item's table row.
             const item = itemSearch(id).toVar('item');
             const ib = item.mul(uint(ITEM_STRIDE)).toVar('ib');
             const itemStart = starts.element(item).toVar('itemStart');
             const originX = it.element(ib.add(uint(I_ORIGIN_X))).toVar('originX');
             const originY = it.element(ib.add(uint(I_ORIGIN_Y))).toVar('originY');
             const originZ = it.element(ib.add(uint(I_ORIGIN_Z))).toVar('originZ');
-            const pageCols = int(it.element(ib.add(uint(I_PAGE_COLS)))).toVar('pageCols');
             const wrap = int(it.element(ib.add(uint(I_WRAP_WIDTH)))).toVar('wrap');
+            const pageCols = int(it.element(ib.add(uint(I_PAGE_COLS)))).toVar('pageCols');
             const lineHeight = it.element(ib.add(uint(I_LINE_HEIGHT))).toVar('lineHeight');
             const zWrapStep = it.element(ib.add(uint(I_Z_STEP))).toVar('zWrapStep');
-            const wrapping = wrap.greaterThan(int(0)).toVar('wrapping');
 
-            // ── loop 1: exact integers ──────────────────────────────────────────────────
-            const run = int(0).toVar('run');
-            const col = int(-1).toVar('col');
-            const row = int(0).toVar('row');
-            const steps = int(0).toVar('steps');
-            const prev = this._leaderBefore(id, itemStart).toVar('prev');
+            const col = int(lane(id, S_COL)).toVar('col');
+            const ord = int(lane(id, S_ORD)).toVar('ord');
+            const row = lane(id, S_ROW).toVar('row');
+            const fold = wrap.greaterThan(int(0)).select(wrap, pageCols).toVar('fold');
 
-            Loop(MAX_WALK_STEPS, () => {
-                If(prev.equal(id), () => { Break(); });
-                const pFlags = int(lane(prev, S_FLAGS)).toVar('pf');
-                const ready = pFlags.bitAnd(int(F_RENDERED)).notEqual(int(0))
-                    .and(steps.greaterThan(u.window)).toVar('ready');
-                const isNL = lane(prev, S_CODEPOINT).equal(float(NEWLINE)).toVar('isNL');
-
-                If(isNL, () => {
-                    // Close the open run: the first newline fixes MY column, later ones close
-                    // whole lines above me and contribute their wrapped row counts.
-                    If(col.lessThan(int(0)), () => { col.assign(run); })
-                        .Else(() => {
-                            row.addAssign(wrapping.select(run.div(wrap).add(int(1)), int(1)));
-                        });
-                    run.assign(int(0));
-                    // Inheriting FROM a newline is its own case: its `col` is its LINE's length,
-                    // not a position in the run just counted, and its row is the last visual row
-                    // of the line it ends — so content after it starts exactly one row below.
-                    If(ready, () => {
-                        row.addAssign(int(lane(prev, S_ROW)).add(int(1)));
-                        Break();
-                    });
-                }).Else(() => {
-                    If(ready, () => {
-                        const pCol = int(lane(prev, S_COL)).toVar('pCol');
-                        const pWrapRow = wrapping.select(pCol.div(wrap), int(0)).toVar('pwr');
-                        const pBase = int(lane(prev, S_ROW)).sub(pWrapRow).toVar('pBase');
-                        If(col.lessThan(int(0)), () => {
-                            col.assign(run.add(pCol).add(int(1)));
-                        }).Else(() => {
-                            const len = run.add(pCol).add(int(1)).toVar('len');
-                            row.addAssign(wrapping.select(len.div(wrap).add(int(1)), int(1)));
-                        });
-                        row.addAssign(pBase);
-                        Break();
-                    });
-                    run.addAssign(int(1));
-                });
-
-                steps.addAssign(int(1));
-                const cur = prev.toVar('cur');
-                prev.assign(this._leaderBefore(prev, itemStart));
-                If(prev.equal(cur), () => {          // reached the item's first leader
-                    If(col.lessThan(int(0)), () => { col.assign(run); })
-                        .Else(() => {
-                            row.addAssign(wrapping.select(run.div(wrap).add(int(1)), int(1)));
-                        });
-                    Break();
-                });
-            });
-            If(col.lessThan(int(0)), () => { col.assign(run); });
-            const wrapRow = wrapping.select(col.div(wrap), int(0)).toVar('wrapRow');
-            row.addAssign(wrapRow);
-
-            // ── loop 2: the advance sum, bounded by the fold unit ───────────────────────
-            // Now col is known, so the fold unit is known to have started exactly
-            // (col % fold) glyphs back. The fold unit is the wrap width when wrapping, else
-            // the ITEM's pageCols when x-paginating: a within-page x only needs the
-            // advances of the col % pageCols predecessors, and no newline can intervene.
-            // Re-walking rather than inheriting a float is what makes x independent of
-            // where the inherit landed. With neither wrap nor pageCols this walks to the
-            // line start — the unbounded case MAX_WALK_STEPS fuses against (visibly wrong,
-            // never a hang).
-            const fold = wrapping.select(wrap, pageCols).toVar('fold');
-            const backTo = fold.greaterThan(int(0)).select(col.mod(fold), col).toVar('backTo');
             const x = float(0).toVar('x');
-            const k = int(0).toVar('k');
-            const q = this._leaderBefore(id, itemStart).toVar('q');
-            Loop(MAX_WALK_STEPS, () => {
-                If(k.greaterThanEqual(backTo).or(q.equal(id)), () => { Break(); });
-                If(lane(q, S_CODEPOINT).equal(float(NEWLINE)), () => { Break(); });
-                x.addAssign(lane(q, S_ADVANCE));
-                k.addAssign(int(1));
-                const cur = q.toVar('qcur');
-                q.assign(this._leaderBefore(q, itemStart));
-                If(q.equal(cur), () => { Break(); });
+            If(fold.greaterThan(int(0)), () => {
+                const back = col.mod(fold).toVar('back');
+                const k = back.toVar('k');
+                Loop(MAX_FOLD_RESUM, () => {
+                    If(k.lessThan(int(1)), () => { Break(); });
+                    const q = this.ordToByte.element(itemStart.add(uint(ord.sub(k)))).toVar('q');
+                    x.addAssign(lane(q, S_ADVANCE));
+                    k.subAssign(int(1));
+                });
+            }).Else(() => {
+                x.assign(lane(id, S_LINE_ADV));
             });
 
+            const wrapping = wrap.greaterThan(int(0)).toVar('wrapping');
+            const wrapRow = wrapping.select(col.div(wrap), int(0)).toVar('wrapRow');
             const o = id.mul(uint(SLOT_STRIDE)).toVar('o');
-            S.element(o.add(uint(S_X))).assign(x.add(originX));
-            // The walk's x, frozen: paginate reads THIS lane, so its remap is a pure
-            // function of the base position and re-running it accumulates nothing.
             S.element(o.add(uint(S_BASE_X))).assign(x.add(originX));
-            S.element(o.add(uint(S_Y))).assign(row.toFloat().negate().mul(lineHeight).add(originY));
-            // Wrapped segments step back in depth (the long-column z-fan); wrapRow is exact.
+            S.element(o.add(uint(S_X))).assign(x.add(originX));
+            S.element(o.add(uint(S_Y))).assign(row.negate().mul(lineHeight).add(originY));
             S.element(o.add(uint(S_Z))).assign(originZ.sub(wrapRow.toFloat().mul(zWrapStep)));
-            S.element(o.add(uint(S_ROW))).assign(row.toFloat());
-            S.element(o.add(uint(S_COL))).assign(col.toFloat());
-            // Position first, THEN publish. The inherit branch above reads F_RENDERED and then
-            // reads x/y/row/col, so this write must not be reordered ahead of them. WGSL has no
-            // release store; the coherence WINDOW is what makes the race practically safe, and
-            // finding its value on real hardware is the whole point of the harness.
-            S.element(o.add(uint(S_FLAGS))).assign(float(myFlags.bitOr(int(F_RENDERED))));
 
-            // ── walk scalars, fused per ITEM: total visual rows + the widest row. `x` here
-            //    is the walk sum BEFORE the origin add — item-relative by construction, which
-            //    is what makes it a content WIDTH the stride kernel can fan pages by.
+            // ── fold scalars, fused per ITEM: total visual rows + the widest row. `x` is
+            //    the pre-origin sum — item-relative by construction, which is what makes
+            //    it a content WIDTH the stride kernel can fan pages by.
             const ws = item.mul(uint(2)).toVar('ws');
-            atomicMax(this.walkScalars.element(ws), floatToOrderedKey(row.toFloat().add(1)));
-            atomicMax(this.walkScalars.element(ws.add(uint(1))), floatToOrderedKey(x));
-        })().compute(1).setName('glyphLayoutWalk');
+            atomicMax(this.foldScalars.element(ws), floatToOrderedKey(row.add(1)));
+            atomicMax(this.foldScalars.element(ws.add(uint(1))), floatToOrderedKey(x));
+        })().compute(1).setName('glyphResolveX');
     }
 
     /**
-     * KERNEL 2.5 — thread per ITEM (a few thousand threads at most). The stride derivation:
-     * a row-paged item's page-fan stride is its widest walk row (walkScalars lane 1,
+     * KERNEL 8 — thread per ITEM (a few thousand threads at most). The stride derivation:
+     * a row-paged item's page-fan stride is its widest fold row (foldScalars lane 1,
      * item-relative) + its pageGapX. GPU-owned so the CPU never measures content — the
-     * dispatch barrier after kernel 2 makes the reduced scalar safe to read here, and
-     * kernel 3 keeps its pure-remap contract by reading the RESOLVED stride buffer.
+     * dispatch barrier after resolveX makes the reduced scalar safe to read here, and
+     * paginate keeps its pure-remap contract by reading the RESOLVED stride buffer.
      * Mirror: deriveStride() in the reference — the one shared formula.
      * @private
      */
@@ -519,7 +789,7 @@ export default class GlyphPipelineKernels {
             const pageRows = int(it.element(ib.add(uint(I_PAGE_ROWS)))).toVar('pageRows');
             const stride = float(0).toVar('stride');
             If(pageRows.greaterThan(int(0)), () => {
-                const key = atomicLoad(this.walkScalars.element(item.mul(uint(2)).add(uint(1)))).toVar('wkey');
+                const key = atomicLoad(this.foldScalars.element(item.mul(uint(2)).add(uint(1)))).toVar('wkey');
                 stride.assign(orderedKeyToFloatGPU(key).add(it.element(ib.add(uint(I_PAGE_GAP_X)))));
             });
             this.itemStrides.element(item).assign(stride);
@@ -527,7 +797,7 @@ export default class GlyphPipelineKernels {
     }
 
     /**
-     * KERNEL 3 — thread per byte. Page remap on the EXACT integer lanes, with the PER-ITEM
+     * KERNEL 9 — thread per byte. Page remap on the EXACT integer lanes, with the PER-ITEM
      * box reduce fused on: six atomics riding a pass that already touches every glyph.
      * atomicMin/Max early-out in hardware, so contention collapses after each item's box
      * converges instead of every thread doing a CAS.
@@ -546,8 +816,7 @@ export default class GlyphPipelineKernels {
             If(int(lane(id, S_FLAGS)).bitAnd(int(F_LEADER)).equal(int(0)), () => { Return(); });
 
             // ── Item resolution: this thread's file — its origin + page params + fold
-            //    metrics come from the item table (only the coherence window stays
-            //    field-level).
+            //    metrics come from the item table.
             const item = itemSearch(id).toVar('item');
             const ib = item.mul(uint(ITEM_STRIDE)).toVar('ib');
             const originY = it.element(ib.add(uint(I_ORIGIN_Y))).toVar('originY');
@@ -555,7 +824,7 @@ export default class GlyphPipelineKernels {
             const pageRows = int(it.element(ib.add(uint(I_PAGE_ROWS)))).toVar('pageRows');
             const pageCols = int(it.element(ib.add(uint(I_PAGE_COLS)))).toVar('pageCols');
             const pagesWide = int(it.element(ib.add(uint(I_PAGES_WIDE)))).toVar('pagesWide');
-            // The DERIVED stride (kernel 2.5) — never a CPU input, never measured here.
+            // The DERIVED stride (kernel 8) — never a CPU input, never measured here.
             const pageStrideX = this.itemStrides.element(item).toVar('pageStrideX');
             const bandStrideY = it.element(ib.add(uint(I_BAND_STRIDE_Y))).toVar('bandStrideY');
             const depthPerBand = it.element(ib.add(uint(I_DEPTH_PER_BAND))).toVar('depthPerBand');
@@ -571,12 +840,10 @@ export default class GlyphPipelineKernels {
             // The conveyor: scroll shifts content up; rows scrolled above the origin
             // (negative screenRow) stay in flow — the page gate leaves them untouched.
             const screenRow = row.sub(scrollRows).toVar('screenRow');
-            // RECONSTRUCTIVE, never accumulative: x reads the walk's untouched base lane
-            // (already within the fold unit — loop 2 was bounded by wrap or pageCols), and
-            // y/z are rebuilt from the exact integer lanes (base y = origin.y −
-            // screenRow×lineHeight, base z = origin.z − seg×zWrapStep). Re-running with new
-            // params re-derives from base — there is no "re-paginate", the remap cannot
-            // double-apply.
+            // RECONSTRUCTIVE, never accumulative: x reads resolveX's untouched base lane
+            // (already within the fold unit), and y/z are rebuilt from the exact integer
+            // lanes. Re-running with new params re-derives from base — there is no
+            // "re-paginate", the remap cannot double-apply.
             const x = lane(id, S_BASE_X).toVar('x');
 
             // EVERY page decision reads the integer lanes. Keying this off the float position
@@ -604,8 +871,8 @@ export default class GlyphPipelineKernels {
             S.element(o.add(uint(S_Y))).assign(yf);
             S.element(o.add(uint(S_Z))).assign(zf);
 
-            // ── the item's box, fused (over the FINAL positions; the walk scalars live in
-            //    kernel 2's fused reduce — they don't change under a repaginate) ──────────
+            // ── the item's box, fused (over the FINAL positions; the fold scalars live in
+            //    resolveX's fused reduce — they don't change under a repaginate) ──────────
             const w = lane(id, S_ADVANCE).toVar('w');
             const h = lane(id, S_HEIGHT).toVar('h');
             const bb = item.mul(uint(6)).toVar('bb');
@@ -622,7 +889,7 @@ export default class GlyphPipelineKernels {
      * Upload ONE file's bytes and arm the uniforms — the one-item case of setFiles().
      * Bytes + the item table are the ONLY per-load uploads.
      * @param {Uint8Array} bytes
-     * @param {Object} params - window, wrapWidth, lineHeight, zStep, origin, page
+     * @param {Object} params - wrapWidth, lineHeight, zStep, origin, page
      */
     setFile(bytes, params = {}) {
         const page = { ...(params.page || {}) };
@@ -635,11 +902,12 @@ export default class GlyphPipelineKernels {
      * multi-file hoist: one set of dispatches serves the whole load storm.
      *
      * @param {Array<{bytes:Uint8Array, origin?:{x,y,z}, page?:Object}>} items
-     *   Each item's page bag takes pageRows, pageCols (also the walk's fold unit when wrap
-     *   is off — changing it changes the walk's output), pagesWide, pageGapX (the stride
-     *   itself is GPU-derived), bandStrideY, depthPerBand, depthPerColumn, scrollRows.
+     *   Each item's page bag takes pageRows, pageCols (also resolveX's fold unit when
+     *   wrap is off — retunable at resolveX rate, not scan rate), pagesWide, pageGapX
+     *   (the stride itself is GPU-derived), bandStrideY, depthPerBand, depthPerColumn,
+     *   scrollRows.
      * @param {Object} params - field-level DEFAULTS an item can override per item:
-     *   window (the only true uniform), wrapWidth, lineHeight, zStep.
+     *   wrapWidth, lineHeight, zStep.
      */
     setFiles(items, params = {}) {
         if (!Array.isArray(items) || items.length === 0) {
@@ -681,12 +949,12 @@ export default class GlyphPipelineKernels {
         this.byteWords.value.needsUpdate = true;
         this.slots.value.array.fill(0);
         this.slots.value.needsUpdate = true;
-        // Arm BOTH bounds buffers: a full run re-walks, so the walk scalars re-reduce too
-        // (repaginate() re-arms only the boxes — the walk persists there).
+        // Arm BOTH bounds buffers: a full run re-folds, so the fold scalars re-reduce too
+        // (repaginate() re-arms only the boxes — the fold persists there).
         this.itemBoxes.value.array.set(armedBoxKeys(this.maxItems));
         this.itemBoxes.value.needsUpdate = true;
-        this.walkScalars.value.array.fill(0);   // max lanes arm at -inf's key (0)
-        this.walkScalars.value.needsUpdate = true;
+        this.foldScalars.value.array.fill(0);   // max lanes arm at -inf's key (0)
+        this.foldScalars.value.needsUpdate = true;
         this.missCount.value.array[0] = 0;
         this.missCount.value.needsUpdate = true;
         this.itemTable.value.needsUpdate = true;
@@ -694,14 +962,22 @@ export default class GlyphPipelineKernels {
 
         this.byteLength = total;
         this.itemCount = items.length;
+        const chunks = Math.max(1, Math.ceil(total / CHUNK_SIZE));
+        const supers = Math.max(1, Math.ceil(chunks / GROUP_SIZE));
         const u = this._u;
         u.byteLength.value = total;
         u.itemCount.value = items.length;
-        u.window.value = params.window ?? 128;
+        u.chunkCount.value = chunks;
+        u.superCount.value = supers;
 
         const count = Math.max(1, total);
         this._kDecode.count = count;
-        this._kLayout.count = count;
+        this._kChunkReduce.count = chunks;
+        this._kSpineReduce.count = supers;
+        this._kSpineScan.count = 1;
+        this._kPartialScan.count = supers;
+        this._kApply.count = chunks;
+        this._kResolveX.count = count;
         this._kStrides.count = items.length;
         this._kPaginate.count = count;
         return this;
@@ -722,11 +998,11 @@ export default class GlyphPipelineKernels {
     }
 
     /**
-     * Retune ONE item's page params. Kernel 3 alone re-runs (repaginate) — the mode switch
-     * that costs no decode and no walk. CAVEAT: pageCols is also the walk's fold unit
-     * (loop 2 bounds its advance sum by it), so changing pageCols changes the walk's
-     * output — that needs a full run(), not a repaginate(). Row-paging, fan, depth, and
-     * scroll changes are repaginate-safe.
+     * Retune ONE item's page params. Row-paging, fan, depth, and scroll changes are
+     * repaginate-safe (strides + paginate re-run). A pageCols change additionally
+     * changes resolveX's fold unit — that needs refold() (resolveX + strides +
+     * paginate), still never a re-scan. Only wrap changes re-run the scan (a full
+     * run()), because wrap shapes row/col themselves.
      */
     setItemPage(i, p = {}) {
         this._packItemPage(i, p);
@@ -739,19 +1015,24 @@ export default class GlyphPipelineKernels {
         return this.setItemPage(0, p);
     }
 
-    /** Full load: four dispatches (decode, walk, per-item strides, paginate), encoded
-     *  back to back with no awaits between them. The stride dispatch is thread-per-item —
-     *  microscopic next to the per-byte three. */
+    /** Full load: the nine dispatches, encoded back to back with no awaits between
+     *  them (each dispatch's reads are a previous dispatch's writes — the pass
+     *  boundary is the only synchronization the algorithm needs). */
     run() {
         this.renderer.compute(this._kDecode);
-        this.renderer.compute(this._kLayout);
+        this.renderer.compute(this._kChunkReduce);
+        this.renderer.compute(this._kSpineReduce);
+        this.renderer.compute(this._kSpineScan);
+        this.renderer.compute(this._kPartialScan);
+        this.renderer.compute(this._kApply);
+        this.renderer.compute(this._kResolveX);
         this.renderer.compute(this._kStrides);
         this.renderer.compute(this._kPaginate);
         return this;
     }
 
-    /** Page/mode change only — strides + kernel 3 over the base positions that already
-     *  exist (a page retune can change pageGapX, so the stride re-derives; the walk
+    /** Page/mode change only — strides + paginate over the base positions that already
+     *  exist (a page retune can change pageGapX, so the stride re-derives; the fold
      *  scalars it reads persist — repaginate re-arms only the boxes). The remap is
      *  reconstructive (S_BASE_X + integer lanes): safe to call repeatedly with any
      *  fold-unit-preserving params. */
@@ -763,9 +1044,23 @@ export default class GlyphPipelineKernels {
         return this;
     }
 
+    /** Fold-unit retune (pageCols) — resolveX + strides + paginate re-run over the scan's
+     *  exact lanes. The fold scalars re-reduce (widest ROW depends on the fold unit), so
+     *  they re-arm here; no decode, no scan. */
+    refold() {
+        this.foldScalars.value.array.fill(0);
+        this.foldScalars.value.needsUpdate = true;
+        this.itemBoxes.value.array.set(armedBoxKeys(this.maxItems));
+        this.itemBoxes.value.needsUpdate = true;
+        this.renderer.compute(this._kResolveX);
+        this.renderer.compute(this._kStrides);
+        this.renderer.compute(this._kPaginate);
+        return this;
+    }
+
     /**
      * The per-item bounds table off the GPU — ONE readback hands every staged field its
-     * extent (box lanes from kernel 3's reduce, scalars from kernel 2's). An item no
+     * extent (box lanes from paginate's reduce, scalars from resolveX's). An item no
      * glyph ever reduced (armed keys intact) reports null.
      * @returns {Promise<Array<?{min:{x,y,z}, max:{x,y,z}, totalRows:number, maxRowExtent:number}>>}
      *   one entry per live item, parallel to the setFiles order.
@@ -775,7 +1070,7 @@ export default class GlyphPipelineKernels {
         if (n === 0) return [];
         const [boxRaw, wsRaw] = await Promise.all([
             this.renderer.getArrayBufferAsync(this.itemBoxes.value, null, 0, n * 6 * 4),
-            this.renderer.getArrayBufferAsync(this.walkScalars.value, null, 0, n * 2 * 4),
+            this.renderer.getArrayBufferAsync(this.foldScalars.value, null, 0, n * 2 * 4),
         ]);
         const box = new Uint32Array(boxRaw, 0, n * 6);
         const ws = new Uint32Array(wsRaw, 0, n * 2);
@@ -795,8 +1090,8 @@ export default class GlyphPipelineKernels {
 
     /** @returns {Promise<Float32Array>} the whole slot buffer — the parity path, not a render path.
      *  The readback is bounded to the LIVE byte range: under the arena the slots buffer is
-     *  capacity-sized (16M bytes × stride — over the default maxBufferSize), so an
-     *  unbounded readback buffer allocation fails before a byte is copied. */
+     *  capacity-sized, so an unbounded readback buffer allocation could fail before a
+     *  byte is copied. */
     async readSlots() {
         // Snapshot ONCE: a coalesced flush can land during the readback await and grow
         // byteLength, and a view sized by the post-await value overruns the pre-await
@@ -817,14 +1112,9 @@ export default class GlyphPipelineKernels {
 
     dispose() {
         const attrs = this.renderer?._attributes;
-        for (const node of [this.byteWords, this.slots, this.trieIndex, this.trieBlocks,
-            this.itemBoxes, this.walkScalars, this.itemStrides,
-            this.misses, this.missCount, this.itemTable, this.itemStarts]) {
+        for (const node of this._allNodes()) {
             if (node && attrs) attrs.delete(node.value);
         }
-        this._kDecode?.dispose();
-        this._kLayout?.dispose();
-        this._kStrides?.dispose();
-        this._kPaginate?.dispose();
+        for (const k of this._allKernels()) k?.dispose();
     }
 }

@@ -1,33 +1,35 @@
-// glyph-pipeline.test.mjs — the byte-in pipeline, verified without a GPU.
-//   bun tools/glyph-pipeline.test.mjs [--orders 30]
+// glyph-pipeline.test.mjs — the byte-in pipeline's ORACLE, verified without a GPU.
+//   bun tools/glyph-pipeline.test.mjs
 //
-// The CPU reference (compute/glyphPipelineReference.js) is the executable spec the WGSL
-// kernels get diffed against. This proves the spec itself, on real files, against
-// independent oracles:
+// The CPU reference (compute/glyphPipelineReference.js) is the semantic oracle the scan
+// spec (compute/glyphPipelineScan.js, tools/scan-layout.test.mjs) and the TSL kernels
+// reproduce. This proves the oracle itself, on real files, against independent checks:
 //
 //   trie         every codepoint resolves to what the source map says, and every codepoint
 //                NOT in the map resolves to missing — no collisions, no aliasing, checked
 //                across the whole BMP plus astral samples
 //   decode       leader detection and codepoint decoding agree with TextDecoder over real
 //                source files, including multi-byte and astral sequences
-//   layout       positions match a straight sequential fold, under every dispatch order
-//   pagination   is a pure per-slot function — running it twice on separate buffers from
-//                the same input gives identical output regardless of thread order
+//   layout       positions match an INDEPENDENT forward fold written here in f64
+//   pagination   is a reconstructive remap: applying it twice from the same base lanes
+//                is bit-identical to applying it once (no accumulation, ever)
+//   stride       the page fan's stride is DERIVED — widest row + pageGapX, never an input
 //   bounds       the reduce equals a naive min/max walk, and CONTAINS every placed quad
+//   multi-file   a multi-item run reproduces each file's single-file run exactly, items
+//                are file-relative (row 0/col 0 at every byteStart) and isolated
 //
 // The point of the byte-indexed design is checked too: slot index == source byte offset,
 // so a tree-sitter byte range or a picking hit indexes the buffer with no mapping table.
+// (The old dispatch-ORDER fuzz died with the walk: the fold is serial here and a
+// deterministic scan on the GPU — grouping invariance lives in scan-layout.test.mjs.)
 
 import { readFileSync } from 'node:fs';
 import { buildGlyphTrie, trieLookup, BLOCK_INDEX_LENGTH } from '../packages/glyph3d-core/src/compute/GlyphTrie.js';
 import {
-  runPipeline, decodeAndResolve, layout, paginate, boundsReduce, allocSlots,
-  sequenceLength, rowsForLine, SLOT_STRIDE, S_CODEPOINT, S_X, S_Y, S_Z, S_ROW, S_COL,
+  runPipeline, decodeAndResolve, paginate, boundsReduce, allocSlots, rowsForLine,
+  deriveStride, SLOT_STRIDE, S_CODEPOINT, S_X, S_Y, S_Z, S_ROW, S_COL,
   S_ADVANCE, S_HEIGHT, S_FLAGS, S_BASE_X, F_LEADER, NEWLINE,
 } from '../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
-
-const arg = (n, d) => { const i = process.argv.indexOf(n); return i >= 0 && process.argv[i + 1] ? Number(process.argv[i + 1]) : d; };
-const N_ORDERS = arg('--orders', 30);
 
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) pass++; else { fail++; console.log(`  ✗ ${m}`); } };
@@ -72,7 +74,7 @@ console.log(`trie: ${trie.blockCount} blocks, ${trie.mapped} codepoints, ${(trie
   for (let cp = 0x10000; cp <= 0x10FFFF; cp += 97) {
     const want = SOURCE.get(cp); const got = trieLookup(trie, cp);
     checked++;
-    if (want) { if (got.missing || got.glyphId !== want.glyphId) wrong++; }
+    if (want) { if (got.missing || got.glyphId !== cp) wrong++; }
     else if (!got.missing) missWrong++;
   }
   for (const cp of SOURCE.keys()) {              // every mapped astral codepoint explicitly
@@ -152,10 +154,11 @@ for (const { name, bytes } of CORPORA) {
   ok(bytes.length > 200, `${name}: vacuous corpus`);
 }
 
-// ── layout: matches a sequential fold, under every dispatch order ──
+// ── layout: matches an INDEPENDENT forward fold, written here in f64 ──
 /**
- * The oracle: one forward pass, wrap-aware, in f64. Row and col are exact; x is the running
- * sum of advances since the current visual row started.
+ * One forward pass, wrap-aware, in f64. Row and col are exact; x is the running sum of
+ * advances since the current visual row started. Written from the layout LAW, not from
+ * the reference's code — an independent derivation, so agreement means something.
  */
 function sequentialFold(bytes, slots, wrap = 0) {
   const row = new Float64Array(bytes.length), col = new Float64Array(bytes.length);
@@ -173,90 +176,75 @@ function sequentialFold(bytes, slots, wrap = 0) {
   }
   return { row, col, xs };
 }
-const ids = (n) => Array.from({ length: n }, (_, i) => i);
-const shuffled = (r, n) => { const a = ids(n); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
 
-// f32 tolerance. x is a running sum of advances in f32, and f32 addition is NOT associative
-// — inheriting at step 129 versus step 400 sums the same numbers in different groupings, so
-// the result is order-independent as MATHEMATICS, not bit-for-bit. This is the bound on that,
-// and the reason every discrete decision reads the exact row/col lanes instead.
+// f32 tolerance: the reference accumulates x in f32 (the GPU's arithmetic), the fold
+// here in f64 — the difference is representation, not semantics.
 const ftol = (v) => 1e-3 + Math.abs(v) * 1e-5;
-const spreads = [];
 
 for (const wrapWidth of [0, 24, 200]) {
   for (const { name, bytes } of CORPORA) {
-    const base = runPipeline(bytes, trie, { window: 128, wrapWidth, lineHeight: CELL_H });
-    const want = sequentialFold(bytes, base.slots, wrapWidth);
-
-    const orders = [ids(bytes.length), ids(bytes.length).reverse()];
-    for (let k = 0; k < N_ORDERS; k++) orders.push(shuffled(rng(4000 + k), bytes.length));
-
-    let rowBad = 0, colBad = 0, xBad = 0, xWorst = 0, driftBad = 0;
-    for (const order of orders) {
-      const run = runPipeline(bytes, trie, { window: 128, wrapWidth, lineHeight: CELL_H, order });
-      for (let id = 0; id < bytes.length; id++) {
-        const o = id * SLOT_STRIDE;
-        if ((run.slots[o + S_FLAGS] & F_LEADER) === 0) continue;
-        if (run.slots[o + S_ROW] !== want.row[id]) rowBad++;
-        if (run.slots[o + S_COL] !== want.col[id]) colBad++;
-        // exact lanes must also be bit-identical ORDER TO ORDER, not merely correct
-        if (run.slots[o + S_ROW] !== base.slots[o + S_ROW]
-         || run.slots[o + S_COL] !== base.slots[o + S_COL]) driftBad++;
-        const dx = Math.abs(run.slots[o + S_X] - want.xs[id]);
-        xWorst = Math.max(xWorst, dx);
-        if (dx > ftol(want.xs[id])) xBad++;
-      }
+    const run = runPipeline(bytes, trie, { wrapWidth, lineHeight: CELL_H });
+    const want = sequentialFold(bytes, run.slots, wrapWidth);
+    let rowBad = 0, colBad = 0, xBad = 0, xWorst = 0;
+    for (let id = 0; id < bytes.length; id++) {
+      const o = id * SLOT_STRIDE;
+      if ((run.slots[o + S_FLAGS] & F_LEADER) === 0) continue;
+      if (run.slots[o + S_ROW] !== want.row[id]) rowBad++;
+      if (run.slots[o + S_COL] !== want.col[id]) colBad++;
+      const dx = Math.abs(run.slots[o + S_X] - want.xs[id]);
+      xWorst = Math.max(xWorst, dx);
+      if (dx > ftol(want.xs[id])) xBad++;
     }
     const tag = `${name} wrap=${wrapWidth}`;
     ok(rowBad === 0, `${tag}: ${rowBad} visual rows differ from the forward oracle`);
     ok(colBad === 0, `${tag}: ${colBad} columns differ from the forward oracle`);
-    ok(driftBad === 0, `${tag}: ${driftBad} exact lanes drifted across dispatch orders`);
     ok(xBad === 0, `${tag}: ${xBad} x positions beyond f32 tolerance (worst ${xWorst.toExponential(2)})`);
-    if (wrapWidth === 200) spreads.push({ name, worst: xWorst });
   }
 }
 
-// THE COST BOUND wrap exists for: one line of a million glyphs. Without wrap the float sum
-// reaches back to the line start; with it, never further than one wrap.
+// THE 40k SINGLE LINE — no longer the fuse's victim. Foldless x is the line prefix,
+// exact to f32 representation at ANY length; wrap still caps the row extent.
 {
   const bytes = new TextEncoder().encode('{"k":' + '0123456789'.repeat(4000) + '}');
   const wrapped = runPipeline(bytes, trie, { wrapWidth: 200, lineHeight: CELL_H });
   const flat = runPipeline(bytes, trie, { wrapWidth: 0, lineHeight: CELL_H });
-  let wrappedRows = 0, flatRows = 0, maxX = 0, wrappedMaxX = 0;
+  let wrappedRows = 0, flatRows = 0, maxX = 0, wrappedMaxX = 0, flatXBad = 0;
+  let x64 = 0;
   for (let id = 0; id < bytes.length; id++) {
     const o = id * SLOT_STRIDE;
     if ((wrapped.slots[o + S_FLAGS] & F_LEADER) === 0) continue;
     wrappedRows = Math.max(wrappedRows, wrapped.slots[o + S_ROW]);
     flatRows = Math.max(flatRows, flat.slots[o + S_ROW]);
+    // foldless x must TRACK the true f64 prefix — 5e-3 relative allows serial f32
+    // summation's systematic rounding bias (~1e-3 at 40k constant increments; adjacent
+    // spacing stays exact), while the old walk's fuse capped x at 4096 × advance —
+    // a 90% relative error at the tail this lane exists to keep out.
+    if (Math.abs(flat.slots[o + S_X] - x64) > Math.max(1e-3, Math.abs(x64) * 5e-3)) flatXBad++;
     maxX = Math.max(maxX, flat.slots[o + S_X]);
     wrappedMaxX = Math.max(wrappedMaxX, wrapped.slots[o + S_X]);
+    x64 += flat.slots[o + S_ADVANCE];
   }
   ok(flatRows === 0, `single-line unwrapped: ${flatRows} rows (expected 1 absurd row)`);
   ok(wrappedRows > 190, `single-line wrapped: only ${wrappedRows} rows`);
   ok(wrappedMaxX <= 200 * CELL_W + 1e-3, `single-line wrapped: x reaches ${wrappedMaxX.toFixed(1)}, past one wrap`);
-  ok(maxX > 40000, `single-line unwrapped: x only reaches ${maxX.toFixed(0)} — corpus too small to show the problem`);
-  console.log(`  single-line 40k: unwrapped x reaches ${maxX.toFixed(0)}; wrapped caps at ${wrappedMaxX.toFixed(1)} over ${wrappedRows + 1} rows`);
+  ok(maxX > 40000, `single-line unwrapped: x only reaches ${maxX.toFixed(0)} — corpus too small`);
+  ok(flatXBad === 0, `single-line unwrapped: ${flatXBad} x positions off the true prefix (the old fuse's corruption)`);
+  console.log(`  single-line 40k: unwrapped x tracks the prefix to ${maxX.toFixed(0)}; wrapped caps at ${wrappedMaxX.toFixed(1)} over ${wrappedRows + 1} rows`);
 }
 
-// ── pagination is pure: same input, any order, identical output ──
+// ── pagination is RECONSTRUCTIVE: a second application is bit-identical ──
 {
   const { bytes } = CORPORA[CORPORA.length - 1];
-  const page = { pageRows: 12, lineHeight: CELL_H, pageCols: 30, colWidth: CELL_W, pageGapX: 4, pagesWide: 3, depthPerBand: 32, depthPerColumn: -4 };
+  const page = { pageRows: 12, lineHeight: CELL_H, pageCols: 30, pageGapX: 4, pagesWide: 3, depthPerBand: 32, depthPerColumn: -4 };
   const a = runPipeline(bytes, trie, { page });
-  const b = runPipeline(bytes, trie, { page, order: shuffled(rng(7), bytes.length) });
-  let planeDiff = 0, posDiff = 0;
-  for (let id = 0; id < bytes.length; id++) {
-    const o = id * SLOT_STRIDE;
-    if ((a.slots[o + S_FLAGS] & F_LEADER) === 0) continue;
-    // z is a PURE function of the integer page assignment — one wobble here means a glyph
-    // jumped a whole page, which is what keying pagination on the float position used to do
-    // (measured: 119 slots on this corpus before row/col existed).
-    if (a.slots[o + S_Z] !== b.slots[o + S_Z]) planeDiff++;
-    if (Math.abs(a.slots[o + S_X] - b.slots[o + S_X]) > ftol(a.slots[o + S_X])
-     || Math.abs(a.slots[o + S_Y] - b.slots[o + S_Y]) > ftol(a.slots[o + S_Y])) posDiff++;
-  }
-  ok(planeDiff === 0, `paginate: ${planeDiff} slots landed on a DIFFERENT PAGE depending on dispatch order`);
-  ok(posDiff === 0, `paginate: ${posDiff} positions beyond f32 tolerance`);
+  // Re-apply kernel 9's remap over the finished slots with the same derived params —
+  // reconstructive means NOTHING moves (it re-derives from S_BASE_X + integers).
+  const again = a.slots.slice();
+  const p = { ...page, pageStrideX: deriveStride(a.itemBounds[0], page), wrap: 0, lineHeight: CELL_H };
+  for (let id = 0; id < bytes.length; id++) paginate(again, id, p);
+  let moved = 0;
+  for (let i = 0; i < again.length; i++) if (again[i] !== a.slots[i]) moved++;
+  ok(moved === 0, `paginate: ${moved} lanes moved on a second application (remap accumulated)`);
 
   // and it actually moved things into more than one column and more than one depth plane
   const xs = new Set(), zs = new Set();
@@ -269,7 +257,7 @@ for (const wrapWidth of [0, 24, 200]) {
   ok(xs.size > 4, `paginate: only ${xs.size} distinct x — vacuous`);
 
   // The DERIVED stride law: pageStrideX is never a CPU input — it is the item's widest
-  // walk row + pageGapX. A fan-column-1 glyph therefore sits EXACTLY that far right of
+  // fold row + pageGapX. A fan-column-1 glyph therefore sits EXACTLY that far right of
   // its own base x.
   const expectStride = a.itemBounds[0].maxRowExtent + page.pageGapX;
   let strideBad = 0, strideChecked = 0;
@@ -287,7 +275,7 @@ for (const wrapWidth of [0, 24, 200]) {
 
 // ── bounds: equals a naive walk, and contains every quad ──
 for (const { name, bytes } of CORPORA) {
-  for (const page of [null, { pageRows: 12, lineHeight: CELL_H, pageCols: 30, colWidth: CELL_W, pageGapX: 4, pagesWide: 3, depthPerBand: 32, depthPerColumn: -4 }]) {
+  for (const page of [null, { pageRows: 12, lineHeight: CELL_H, pageCols: 30, pageGapX: 4, pagesWide: 3, depthPerBand: 32, depthPerColumn: -4 }]) {
     const run = runPipeline(bytes, trie, page ? { page } : {});
     const box = new Float64Array([Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity]);
     for (let id = 0; id < bytes.length; id++) boundsReduce(run.slots, id, box);
@@ -310,11 +298,11 @@ for (const { name, bytes } of CORPORA) {
   }
 }
 
-// ── multi-file: N items in ONE buffer, the walk never crosses a file boundary ──
+// ── multi-file: N items in ONE buffer, the fold resets at every file boundary ──
 // The hoist's spec: a multi-item runPipeline must reproduce, per item, exactly what a
 // single-file run of that file produces (same origin + page params) — row/col exact,
-// positions within the f32 tolerance — under any layout dispatch order. Plus the
-// file-relative invariant: every item's first glyph is row 0, col 0.
+// positions within the f32 tolerance. Plus the file-relative invariant: every item's
+// first glyph is row 0, col 0.
 {
   const PAGE_NEWS = { pageRows: 12, lineHeight: CELL_H, pageGapX: 4, pagesWide: 3, depthPerBand: 32, depthPerColumn: -4 };
   const defs = [
@@ -333,31 +321,24 @@ for (const { name, bytes } of CORPORA) {
   const base = runPipeline(concat, trie, { wrapWidth, lineHeight: CELL_H, zStep, items });
   let relBad = 0, driftBad = 0, posBad = 0, isoBad = 0;
 
-  // file-relative row/col: the walk floored at each file's first byte
+  // file-relative row/col: the fold reset at each file's first byte
   for (let i = 1; i < defs.length; i++) {
     const b = starts[i] * SLOT_STRIDE;
     if (base.slots[b + S_ROW] !== 0 || base.slots[b + S_COL] !== 0) relBad++;
   }
 
-  // per-item equality with the single-file runs, under dispatch orders
+  // per-item equality with the single-file runs
   const singles = defs.map((d) => runPipeline(d.corpus.bytes, trie,
     { wrapWidth, lineHeight: CELL_H, zStep, origin: d.origin, page: d.page }));
-  const orders = [ids(total)];
-  for (let k = 0; k < 6; k++) orders.push(shuffled(rng(9000 + k), total));
-  for (const order of orders) {
-    const multi = runPipeline(concat, trie, { wrapWidth, lineHeight: CELL_H, zStep, items, order });
-    for (let i = 0; i < defs.length; i++) {
-      const single = singles[i];
-      for (let id = 0; id < defs[i].corpus.bytes.length; id++) {
-        const gm = (starts[i] + id) * SLOT_STRIDE, gs = id * SLOT_STRIDE;
-        if ((multi.slots[gm + S_FLAGS] & F_LEADER) === 0) continue;
-        if (multi.slots[gm + S_ROW] !== single.slots[gs + S_ROW]
-         || multi.slots[gm + S_COL] !== single.slots[gs + S_COL]) driftBad++;
-        if (multi.slots[gm + S_ROW] !== base.slots[gm + S_ROW]
-         || multi.slots[gm + S_COL] !== base.slots[gm + S_COL]) driftBad++;
-        for (const l of [S_X, S_Y, S_Z]) {
-          if (Math.abs(multi.slots[gm + l] - single.slots[gs + l]) > ftol(single.slots[gs + l])) posBad++;
-        }
+  for (let i = 0; i < defs.length; i++) {
+    const single = singles[i];
+    for (let id = 0; id < defs[i].corpus.bytes.length; id++) {
+      const gm = (starts[i] + id) * SLOT_STRIDE, gs = id * SLOT_STRIDE;
+      if ((base.slots[gm + S_FLAGS] & F_LEADER) === 0) continue;
+      if (base.slots[gm + S_ROW] !== single.slots[gs + S_ROW]
+       || base.slots[gm + S_COL] !== single.slots[gs + S_COL]) driftBad++;
+      for (const l of [S_X, S_Y, S_Z]) {
+        if (Math.abs(base.slots[gm + l] - single.slots[gs + l]) > ftol(single.slots[gs + l])) posBad++;
       }
     }
   }
@@ -381,8 +362,8 @@ for (const { name, bytes } of CORPORA) {
   // per-item bounds from the mirror: parallel to items, and each item's scalars are its own
   ok(base.itemBounds && base.itemBounds.length === defs.length, 'multi: itemBounds missing or wrong length');
   ok(base.itemBounds.every((b) => b && isFinite(b.min.x)), 'multi: an item has no bounds');
-  ok(relBad === 0, `multi: ${relBad} items' first glyph not at row 0, col 0 (walk crossed a boundary)`);
-  ok(driftBad === 0, `multi: ${driftBad} row/col lanes differ from the single-file runs (or drifted across orders)`);
+  ok(relBad === 0, `multi: ${relBad} items' first glyph not at row 0, col 0 (the fold crossed a boundary)`);
+  ok(driftBad === 0, `multi: ${driftBad} row/col lanes differ from the single-file runs`);
   ok(posBad === 0, `multi: ${posBad} positions differ from the single-file runs beyond f32 tolerance`);
   ok(isoBad === 0, `multi: ${isoBad} slots outside item 1 moved when item 1's params changed (isolation broken)`);
 }
@@ -399,7 +380,5 @@ for (const { name, bytes } of CORPORA) {
      'missing: an un-encoded glyph still occupies its advance');
 }
 
-console.log('\nf32 placement spread across dispatch orders (window 128):');
-for (const sp of spreads) console.log(`  ${sp.name.padEnd(52)} ${sp.worst.toExponential(2)} world units (cell = ${CELL_W})`);
 console.log(`\n${fail === 0 ? '✓' : '✗'} glyph-pipeline: ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

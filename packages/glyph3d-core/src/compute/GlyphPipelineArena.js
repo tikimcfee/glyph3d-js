@@ -3,7 +3,8 @@
  * wired in: where each grid used to build its own GlyphPipelineKernels (3 ComputeNode
  * codegens per grid, ~2.7ms × hundreds of grids per cold load), the arena owns ONE
  * kernels instance and every grid's file is an ITEM in its item table. A load storm is
- * stage() × N + ONE batched flush — one set of three dispatches serves every grid.
+ * stage() × N + ONE batched flush — one set of nine dispatches (decode, the five scan
+ * stages, resolveX, strides, paginate) serves every grid.
  *
  * The flow:
  *
@@ -14,7 +15,7 @@
  *       load storm pays zero per-byte CPU cost at stage time.
  *   requestFlush()
  *       coalesces every stage in the same macrotask window into ONE flush: setFiles(all
- *       live items) + run — four dispatches for the whole storm. Resolves once ENCODED;
+ *       live items) + run — nine dispatches for the whole storm. Resolves once ENCODED;
  *       ONE per-item bounds readback then lands every staged field's extent (handle.laid
  *       resolves as each item's extent arrives — the load path's "measures laid" gate).
  *   handle.setPage(page) / arena.setItemPage + requestRepaginate()
@@ -49,7 +50,7 @@
  */
 
 import GlyphPipelineKernels from './glyphPipelineKernels.js';
-import { runPipeline, paginate as refPaginate, boundsReduce as refBoundsReduce, deriveStride } from './glyphPipelineReference.js';
+import { runPipeline, paginate as refPaginate, boundsReduce as refBoundsReduce, deriveStride, SLOT_STRIDE } from './glyphPipelineReference.js';
 import { buildLiveTrie, encodeMisses } from './liveTrie.js';
 import { loadStats } from '../core/loadStats.js';
 
@@ -186,7 +187,7 @@ export default class GlyphPipelineArena {
     _ensureMirror(item) {
         if (item.mirror) return item.mirror;
         const r = runPipeline(item.bytes, this._trie, {
-            window: 0, wrapWidth: item.wrapWidth, lineHeight: item.lineHeight,
+            wrapWidth: item.wrapWidth, lineHeight: item.lineHeight,
             zStep: item.zStep, origin: item.origin, page: { ...item.page },
         });
         item.mirror = { slots: r.slots, bounds: r.itemBounds[0] };
@@ -195,7 +196,7 @@ export default class GlyphPipelineArena {
 
     /**
      * The coalescing flush gate: every stage in the same macrotask window shares ONE
-     * flush — one setFiles + one run (three dispatches) for the whole storm. Resolves
+     * flush — one setFiles + one run (nine dispatches) for the whole storm. Resolves
      * once the dispatches are ENCODED (encode-time is the load path's guarantee).
      * @returns {Promise<void>}
      */
@@ -230,11 +231,11 @@ export default class GlyphPipelineArena {
         this._kernels.setFiles(this._items.map((it) => ({
             bytes: it.bytes, origin: it.origin, page: it.page,
             wrapWidth: it.wrapWidth, lineHeight: it.lineHeight, zStep: it.zStep,
-        })), { window: 128 });
+        })));
         this._kernels.run();
         const dt = performance.now() - t0;
         // The [load] trace's build-stage decomposition (fileCommands snapshots the deltas).
-        loadStats.kernelDispatches += 4;
+        loadStats.kernelDispatches += 9;
         loadStats.kernelMs += dt;
         loadStats.commits += this._stagedSinceFlush;
         loadStats.commitMs += dt;
@@ -333,7 +334,7 @@ export default class GlyphPipelineArena {
         if (!ref) return { ok: false, reason: 'no mirror' };
         const gpu = await this._kernels.readSlots();
         let worst = 0, badRows = 0;
-        const STRIDE = 11;
+        const STRIDE = SLOT_STRIDE;
         for (let id = 0; id < item.byteCount; id++) {
             const b = id * STRIDE;                    // mirror slot (file-relative)
             const g = (item.byteStart + id) * STRIDE; // arena slot
@@ -388,10 +389,9 @@ export default class GlyphPipelineArena {
         const { slots } = m;
         const n = item.byteCount;
         for (let id = 0; id < n; id++) refPaginate(slots, id, p);
-        const ox = item.origin?.x || 0;
         const box = new Float64Array([Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity,
             m.bounds?.totalRows || 0, m.bounds?.maxRowExtent || 0]);
-        for (let id = 0; id < n; id++) refBoundsReduce(slots, id, box, ox);
+        for (let id = 0; id < n; id++) refBoundsReduce(slots, id, box);
         m.bounds = box[0] === Infinity ? null : {
             min: { x: box[0], y: box[1], z: box[2] },
             max: { x: box[3], y: box[4], z: box[5] },

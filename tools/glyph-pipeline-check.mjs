@@ -79,7 +79,7 @@ const corpora = [
   { name: path.basename(REAL_FILE), text: readFileSync(path.join(REPO, REAL_FILE), 'utf8') },
 ];
 
-// ---- lanes: wrap × window × page. window 0 is a correctness lane, not a perf one. ----
+// ---- lanes: wrap × page × scroll. ----
 const PAGE_OFF = null;
 const PAGE_NEWS = { pageRows: 8, pageCols: 0, colWidth: 0, pageGapX: 3, pagesWide: 2, depthPerBand: 5, depthPerColumn: 0, bandStrideY: 13.2 };
 const PAGE_Z = { pageRows: 8, pageCols: 0, pagesWide: 1, depthPerBand: 20, depthPerColumn: 0 };
@@ -87,20 +87,21 @@ const PAGE_Z = { pageRows: 8, pageCols: 0, pagesWide: 1, depthPerBand: 20, depth
 // (xPages = floor(col / pageCols), z recedes per column — Compute.metal:396).
 const PAGE_COLS = { pageRows: 0, pageCols: 200, pagesWide: 1, depthPerBand: 0, depthPerColumn: 4 };
 const lanes = [
-  { wrapWidth: 0, window: 128, page: PAGE_OFF,
-    expectFailOn: 'single-line-40k',
-    expectFail: 'no fold unit at all (wrap=0, pageCols=0): MAX_WALK_STEPS (4096) is the operative bound and x caps at 4096×advance past slot 4096. The designed answer to a line this long is a fold unit — pageCols (see the cols lane) — the cap stays as the device-loss fuse' },
-  { wrapWidth: 24, window: 128, page: PAGE_OFF },
-  { wrapWidth: 200, window: 128, page: PAGE_OFF },
-  { wrapWidth: 200, window: 0, page: PAGE_OFF },
-  { wrapWidth: 200, window: 128, page: PAGE_NEWS },
-  { wrapWidth: 200, window: 128, page: PAGE_Z },
-  { wrapWidth: 200, window: 128, page: PAGE_NEWS, repaginateTo: PAGE_Z },  // kernel 3 alone re-folds, from base
-  { wrapWidth: 0, window: 128, page: PAGE_COLS, onlyOn: 'single-line-40k' },  // the long line folds into depth pages
-  { wrapWidth: 200, window: 128, page: PAGE_NEWS, scrollRows: 12 },   // the conveyor, paginated
-  { wrapWidth: 200, window: 128, page: null, scrollRows: 12 },        // scroll without pagination
-  { wrapWidth: 200, window: 128, page: PAGE_NEWS, onlyOn: 'GlyphTrie.js', liveTrie: true },  // the REAL atlas's trie
-  { wrapWidth: 200, window: 128, page: PAGE_Z, onlyOn: 'GlyphTrie.js', liveTrie: true },
+  // The old walk's expectFail lane, now a PASS: with no fold unit, x IS the line prefix
+  // — exact at any length. The 40k single line is the lane that proves the fuse is gone.
+  { wrapWidth: 0, page: PAGE_OFF },
+  { wrapWidth: 24, page: PAGE_OFF },
+  { wrapWidth: 200, page: PAGE_OFF },
+  { wrapWidth: 200, page: PAGE_NEWS },
+  { wrapWidth: 200, page: PAGE_Z },
+  { wrapWidth: 200, page: PAGE_NEWS, repaginateTo: PAGE_Z },  // strides+paginate alone re-fold, from base
+  { wrapWidth: 0, page: PAGE_COLS, onlyOn: 'single-line-40k' },  // the long line folds into depth pages
+  { wrapWidth: 0, page: PAGE_COLS, onlyOn: 'single-line-40k',    // fold-unit retune: resolveX+strides+paginate,
+    refoldTo: { pageRows: 0, pageCols: 120, pageStrideX: 0, pagesWide: 1, depthPerBand: 0, depthPerColumn: 4 } }, // NO re-scan
+  { wrapWidth: 200, page: PAGE_NEWS, scrollRows: 12 },   // the conveyor, paginated
+  { wrapWidth: 200, page: null, scrollRows: 12 },        // scroll without pagination
+  { wrapWidth: 200, page: PAGE_NEWS, onlyOn: 'GlyphTrie.js', liveTrie: true },  // the REAL atlas's trie
+  { wrapWidth: 200, page: PAGE_Z, onlyOn: 'GlyphTrie.js', liveTrie: true },
 ];
 const ZSTEP = 0.21;   // 0.15 × CELL_H — the app's long-column zWrapSpacing, in world units
 
@@ -110,14 +111,14 @@ const ZSTEP = 0.21;   // 0.15 × CELL_H — the app's long-column zWrapSpacing, 
 // another. isolateChange re-runs the batch with one item's origin+page replaced and
 // asserts every OTHER item's slots are bit-identical (item isolation).
 const MULTI = [
-  { name: 'multi: torture+GlyphTrie (news|z)', wrapWidth: 200, window: 128,
+  { name: 'multi: torture+GlyphTrie (news|z)', wrapWidth: 200,
     items: [
       { corpus: 'torture', origin: { x: 0, y: 0, z: 0 }, page: PAGE_NEWS },
       { corpus: path.basename(REAL_FILE), origin: { x: 120, y: 6, z: -4 }, page: PAGE_Z },
     ],
     isolateChange: { itemIndex: 1, origin: { x: -55, y: 2.5, z: 9 },
       page: { pageRows: 5, pageCols: 0, pageGapX: 5, pagesWide: 3, depthPerBand: 8, depthPerColumn: 0, bandStrideY: 21 } } },
-  { name: 'multi: 3 items (scroll|cols|z)', wrapWidth: 24, window: 128,
+  { name: 'multi: 3 items (scroll|cols|z)', wrapWidth: 24,
     items: [
       { corpus: 'torture', origin: { x: 3, y: 0, z: 0 }, page: { scrollRows: 4 } },
       { corpus: path.basename(REAL_FILE), origin: { x: 0, y: -10, z: 2 }, page: PAGE_COLS },
@@ -194,10 +195,10 @@ const probe = (opts) => `(async (o) => {
       for (const [lane2, name] of [[S_X, 'x'], [S_Y, 'y'], [S_Z, 'z'], [S_BASE_X, 'baseX']]) {
         const d = Math.abs(gpu[b + lane2] - ref.slots[b + lane2]);
         if (d > L.maxDelta) L.maxDelta = d;
-        // f32 accumulation is order-free but not bit-exact: the walk sums ~hundreds of
-        // advances in a scheduling-dependent grouping, so the tolerance scales with
-        // magnitude (same shape as layout-fuzz, 5e-5 for the unbounded wrap=0 sums).
-        // row/col above stay EXACT — integers don't wobble.
+        // The scan is deterministic, so the only float slack is representation, not
+        // schedule: fold > 0 lanes re-sum in the oracle's own f32 order (expected
+        // bit-exact — watch maxDelta report 0), and foldless lanes carry serial-f32
+        // rounding bias that scales with magnitude. row/col/ord stay EXACT.
         const tol = o.eps + Math.abs(ref.slots[b + lane2]) * 5e-5;
         if (d > tol) { fail('slot ' + id + ' ' + name + ' delta ' + d.toExponential(2) + ' (gpu ' + gpu[b + lane2] + ' vs ref ' + ref.slots[b + lane2] + ')'); if (firstBad < 0) firstBad = id; }
         L.posChecked++;
@@ -232,10 +233,9 @@ const probe = (opts) => `(async (o) => {
     const bytes = enc.encode(corpus.text);
     for (const lane of o.lanes) {
       if (lane.onlyOn && lane.onlyOn !== corpus.name) continue;
-      const L = { corpus: corpus.name, wrapWidth: lane.wrapWidth, window: lane.window,
+      const L = { corpus: corpus.name, wrapWidth: lane.wrapWidth,
         page: lane.page ? (lane.page.depthPerBand === 20 ? 'z' : lane.page.pageCols > 0 ? 'cols' : 'news') : 'off',
-        repaginate: !!lane.repaginateTo, scrollRows: lane.scrollRows || 0,
-        expectFail: (lane.expectFail && (!lane.expectFailOn || lane.expectFailOn === corpus.name)) ? lane.expectFail : null,
+        repaginate: !!lane.repaginateTo, refold: !!lane.refoldTo, scrollRows: lane.scrollRows || 0,
         failures: [], exactChecked: 0, posChecked: 0, maxDelta: 0 };
       const fail = (m) => { if (L.failures.length < 6) L.failures.push(m); L.ok = false; };
       L.ok = true;
@@ -243,19 +243,20 @@ const probe = (opts) => `(async (o) => {
         if (lane.liveTrie && !liveTrie) throw new Error('live trie build failed: ' + liveErr);
         const trie = lane.liveTrie ? liveTrie : fixtureTrie;
         const pageParams = (p) => p ? Object.assign({}, p, { lineHeight: LINE_H }) : undefined;
-        const refOpts = { window: lane.window, wrapWidth: lane.wrapWidth, lineHeight: LINE_H,
+        const refOpts = { wrapWidth: lane.wrapWidth, lineHeight: LINE_H,
           zStep: o.zStep, scrollRows: lane.scrollRows || 0,
-          page: pageParams(lane.repaginateTo || lane.page) };
+          page: pageParams(lane.refoldTo || lane.repaginateTo || lane.page) };
         const ref = refMod.runPipeline(bytes, trie, refOpts);
 
         const K = new kernMod.default(store.renderer, { maxBytes: Math.max(1024, bytes.length), trie });
         const t0 = performance.now();
         const pageBag = Object.assign({}, lane.page || {});
         if (lane.scrollRows) pageBag.scrollRows = lane.scrollRows;
-        K.setFile(bytes, { window: lane.window, wrapWidth: lane.wrapWidth, lineHeight: LINE_H,
+        K.setFile(bytes, { wrapWidth: lane.wrapWidth, lineHeight: LINE_H,
           zStep: o.zStep, origin: { x: 0, y: 0, z: 0 }, page: pageBag });
         K.run();
         if (lane.repaginateTo) { K.setPage(lane.repaginateTo); K.repaginate(); }
+        if (lane.refoldTo) { K.setPage(lane.refoldTo); K.refold(); }
         const t1 = performance.now();
         const gpu = await K.readSlots();
         const gpuItemBounds = await K.readItemBounds();
@@ -289,8 +290,8 @@ const probe = (opts) => `(async (o) => {
   for (const c of o.corpora) corpusByName[c.name] = c;
 
   for (const mf of o.multi) {
-    const L = { corpus: mf.name, wrapWidth: mf.wrapWidth, window: mf.window, page: 'multi',
-      repaginate: false, scrollRows: 0, expectFail: null,
+    const L = { corpus: mf.name, wrapWidth: mf.wrapWidth, page: 'multi',
+      repaginate: false, refold: false, scrollRows: 0,
       failures: [], exactChecked: 0, posChecked: 0, maxDelta: 0, ok: true };
     const fail = (m) => { if (L.failures.length < 6) L.failures.push(m); L.ok = false; };
     try {
@@ -316,7 +317,7 @@ const probe = (opts) => `(async (o) => {
         origin: (mods && mods[i] && mods[i].origin) || p.origin,
         page: (mods && mods[i] && mods[i].page) || p.page,
       }));
-      const fieldParams = { window: mf.window, wrapWidth: mf.wrapWidth, lineHeight: LINE_H, zStep: o.zStep };
+      const fieldParams = { wrapWidth: mf.wrapWidth, lineHeight: LINE_H, zStep: o.zStep };
 
       const K = new kernMod.default(store.renderer, { maxBytes: Math.max(1024, total), trie: fixtureTrie });
       const t0 = performance.now();
@@ -345,8 +346,6 @@ const probe = (opts) => `(async (o) => {
           fail('item ' + i + ' GPU first glyph at row ' + gpu[b + S_ROW] + ' col ' + gpu[b + S_COL] + ' (not file-relative)');
         }
       }
-      // Per-item bounds come from the CPU mirror — the documented split (the GPU bounds
-      // buffer keeps only the batch-wide box).
       if (!ref.itemBounds || ref.itemBounds.length !== parts.length) fail('ref itemBounds missing or wrong length');
 
       // ── ITEM ISOLATION: change one item's origin + page; every OTHER item's slots must
@@ -394,13 +393,8 @@ try {
   else {
     console.log(`glyph-pipeline-check — GPU vs executable spec (renderer: ${report.renderer}, eps ${EPS})\n`);
     for (const L of report.lanes) {
-      const head = `  ${L.ok ? '✓' : '✗'} ${L.corpus}  wrap=${L.wrapWidth} window=${L.window} page=${L.page}${L.repaginate ? ' (repaginate)' : ''}${L.scrollRows ? ` scroll=${L.scrollRows}` : ''}`;
-      if (L.expectFail) {
-        // A documented kernel bug lives here. Green while reality matches the note —
-        // an unexpected PASS means someone fixed it and the marker should go.
-        if (!L.ok) { console.log(`${head}  — EXPECTED FAIL: ${L.expectFail}`); }
-        else { failed++; console.log(`${head}  — UNEXPECTED PASS (fixed? remove the expectFail marker)`); }
-      } else if (L.ok) {
+      const head = `  ${L.ok ? '✓' : '✗'} ${L.corpus}  wrap=${L.wrapWidth} page=${L.page}${L.repaginate ? ' (repaginate)' : ''}${L.refold ? ' (refold)' : ''}${L.scrollRows ? ` scroll=${L.scrollRows}` : ''}`;
+      if (L.ok) {
         console.log(`${head}  — ${L.exactChecked} leaders exact, max |Δ| ${L.maxDelta.toExponential(2)}, dispatch ${L.dispatchMs}ms`);
       } else {
         failed++;
