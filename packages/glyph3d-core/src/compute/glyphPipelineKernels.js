@@ -299,7 +299,14 @@ export default class GlyphPipelineKernels {
             If(id.greaterThanEqual(u.byteLength), () => { Return(); });
 
             const n = this._sequenceLength(id).toVar('n');
-            If(n.equal(int(0)), () => { Return(); });   // continuation byte — stays a non-leader
+            // Continuation byte: write the non-leader EXPLICITLY. This is what lets the
+            // CPU never touch the slots buffer (no capacity-sized zero-fill/upload per
+            // setFiles — the old lockup at scale): every byte's flags lane is GPU-written
+            // every run, so stale content from a previous, larger load can't ghost.
+            If(n.equal(int(0)), () => {
+                slots.element(id.mul(uint(SLOT_STRIDE)).add(uint(S_FLAGS))).assign(float(0));
+                Return();
+            });
 
             const b0 = this._byteAt(id).toVar('b0');
             const b1 = this._byteAt(id.add(uint(1))).toVar('b1');
@@ -949,8 +956,9 @@ export default class GlyphPipelineKernels {
 
         this.byteWords.value.array.set(packBytes(all));
         this.byteWords.value.needsUpdate = true;
-        this.slots.value.array.fill(0);
-        this.slots.value.needsUpdate = true;
+        // NO slots touch: decode writes every byte's flags lane (leaders AND continuation
+        // zeros), so stale slots beyond/within the live range can never ghost — the
+        // capacity-sized fill(0)+upload this replaces was seconds per flush at scale.
         // Arm BOTH bounds buffers: a full run re-folds, so the fold scalars re-reduce too
         // (repaginate() re-arms only the boxes — the fold persists there).
         this.itemBoxes.value.array.set(armedBoxKeys(this.maxItems));
@@ -972,7 +980,15 @@ export default class GlyphPipelineKernels {
         u.chunkCount.value = chunks;
         u.superCount.value = supers;
 
+        this._setDispatchCounts(total, items.length);
+        return this;
+    }
+
+    /** Size every dispatch to the live byte/item counts. @private */
+    _setDispatchCounts(total, itemCount) {
         const count = Math.max(1, total);
+        const chunks = Math.max(1, Math.ceil(total / CHUNK_SIZE));
+        const supers = Math.max(1, Math.ceil(chunks / GROUP_SIZE));
         this._kDecode.count = count;
         this._kChunkReduce.count = chunks;
         this._kSpineReduce.count = supers;
@@ -980,8 +996,71 @@ export default class GlyphPipelineKernels {
         this._kPartialScan.count = supers;
         this._kApply.count = chunks;
         this._kResolveX.count = count;
-        this._kStrides.count = items.length;
+        this._kStrides.count = itemCount;
         this._kPaginate.count = count;
+        return this;
+    }
+
+    /**
+     * APPEND new items to an already-uploaded set — the arena's steady-state flush. The
+     * arena is append-only (bytes never move once staged), so a flush that only added
+     * files uploads ONLY the delta: new bytes packed in place at their word offsets
+     * (masking the boundary word), new item rows, counts. No concat of the whole
+     * buffer, no repack, no slots touch, no re-arming — the box/fold reduces are
+     * idempotent over unchanged items, so old rows re-max to their own values.
+     * @param {Array<{bytes:Uint8Array, origin?:{x,y,z}, page?:Object}>} items - NEW items only
+     * @param {Object} params - same field-level defaults as setFiles
+     */
+    appendFiles(items, params = {}) {
+        if (!Array.isArray(items) || items.length === 0) return this;
+        let add = 0;
+        for (const it of items) add += it.bytes.length;
+        if (this.byteLength + add > this.maxBytes) {
+            throw new Error(`GlyphPipelineKernels: append to ${this.byteLength + add} bytes exceeds capacity ${this.maxBytes}`);
+        }
+        if (this.itemCount + items.length > this.maxItems) {
+            throw new Error(`GlyphPipelineKernels: append to ${this.itemCount + items.length} items exceeds capacity ${this.maxItems}`);
+        }
+        const words = this.byteWords.value.array;
+        const starts = this.itemStarts.value.array;
+        const tbl = this.itemTable.value.array;
+        let off = this.byteLength;
+        for (let i = 0; i < items.length; i++) {
+            const it = items[i];
+            const bytes = it.bytes;
+            for (let j = 0; j < bytes.length; j++) {
+                const a = off + j;
+                const w = a >> 2, sh = (a & 3) * 8;
+                words[w] = (words[w] & ~(0xFF << sh)) | (bytes[j] << sh);
+            }
+            const row = this.itemCount + i;
+            starts[row] = off;
+            this._packItemPage(row, it.page || {});
+            const o = it.origin || {};
+            const b = row * ITEM_STRIDE;
+            tbl[b + I_ORIGIN_X] = o.x || 0;
+            tbl[b + I_ORIGIN_Y] = o.y || 0;
+            tbl[b + I_ORIGIN_Z] = o.z || 0;
+            tbl[b + I_WRAP_WIDTH] = Math.max(0, Math.trunc(it.wrapWidth ?? params.wrapWidth ?? 0));
+            tbl[b + I_Z_STEP] = it.zStep ?? params.zStep ?? 0;
+            tbl[b + I_LINE_HEIGHT] = it.lineHeight ?? params.lineHeight ?? 1;
+            off += bytes.length;
+        }
+        this.byteWords.value.needsUpdate = true;
+        this.itemStarts.value.needsUpdate = true;
+        this.itemTable.value.needsUpdate = true;
+        this.missCount.value.array[0] = 0;   // decode re-reports misses every run
+        this.missCount.value.needsUpdate = true;
+
+        this.byteLength = off;
+        this.itemCount += items.length;
+        const chunks = Math.max(1, Math.ceil(off / CHUNK_SIZE));
+        const u = this._u;
+        u.byteLength.value = off;
+        u.itemCount.value = this.itemCount;
+        u.chunkCount.value = chunks;
+        u.superCount.value = Math.max(1, Math.ceil(chunks / GROUP_SIZE));
+        this._setDispatchCounts(off, this.itemCount);
         return this;
     }
 

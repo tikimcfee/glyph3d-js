@@ -97,6 +97,7 @@ export default class GlyphPipelineArena {
         this._repaginatePromise = null;  // the coalescing repaginate gate
         this._missGen = 0;
         this._boundsGen = 0;
+        this._syncedItems = 0;   // items already uploaded to the CURRENT kernels (append watermark)
         this._deviceLostNoted = false;
     }
 
@@ -228,10 +229,20 @@ export default class GlyphPipelineArena {
             return;
         }
         const t0 = performance.now();
-        this._kernels.setFiles(this._items.map((it) => ({
+        // INCREMENTAL: the arena is append-only, so a steady-state flush uploads ONLY the
+        // items staged since the last sync (appendFiles — no whole-arena concat/repack, no
+        // capacity-sized uploads: the per-interaction lockup at scale). The full setFiles
+        // runs only when the kernels are FRESH (boot, realloc, trie rebuild).
+        const toItem = (it) => ({
             bytes: it.bytes, origin: it.origin, page: it.page,
             wrapWidth: it.wrapWidth, lineHeight: it.lineHeight, zStep: it.zStep,
-        })));
+        });
+        if (this._syncedItems === 0) {
+            this._kernels.setFiles(this._items.map(toItem));
+        } else if (this._items.length > this._syncedItems) {
+            this._kernels.appendFiles(this._items.slice(this._syncedItems).map(toItem));
+        }
+        this._syncedItems = this._items.length;
         this._kernels.run();
         const dt = performance.now() - t0;
         // The [load] trace's build-stage decomposition (fileCommands snapshots the deltas).
@@ -371,6 +382,7 @@ export default class GlyphPipelineArena {
         this._kernels = new GlyphPipelineKernels(this.renderer, {
             maxBytes: this.maxBytes, maxItems: this.maxItems, trie: this._trie,
         });
+        this._syncedItems = 0;   // fresh kernels — the next flush is a full setFiles
         for (const item of this._items) {
             if (item.field && !item.dead) {
                 item.field.attachBytePipeline(this._kernels, item.byteCount, item.byteStart);
