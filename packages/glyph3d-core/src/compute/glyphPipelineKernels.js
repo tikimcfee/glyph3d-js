@@ -176,6 +176,13 @@ export default class GlyphPipelineKernels {
         this.itemTable = instancedArray(this.maxItems * ITEM_STRIDE, 'float').setName('GlyphItemTable');
         this.itemStarts = instancedArray(this.maxItems, 'uint').setName('GlyphItemStarts');
 
+        // Node names don't reach the GPU; ATTRIBUTE names do (three passes attribute.name
+        // as the GPUBuffer label) — so Dawn errors name the buffer instead of "(unlabeled)".
+        for (const node of [this.byteWords, this.slots, this.trieIndex, this.trieBlocks,
+            this.bounds, this.misses, this.missCount, this.itemTable, this.itemStarts]) {
+            node.value.name = node.name;
+        }
+
         this.trieIndex.value.array.set(trie.blockIndex);
         this.trieBlocks.value.array.set(trie.blocks);
         this.trieIndex.value.needsUpdate = true;
@@ -708,9 +715,12 @@ export default class GlyphPipelineKernels {
      *  capacity-sized (16M bytes × stride — over the default maxBufferSize), so an
      *  unbounded readback buffer allocation fails before a byte is copied. */
     async readSlots() {
-        const bytes = this.byteLength * SLOT_STRIDE * Float32Array.BYTES_PER_ELEMENT;
-        const raw = await this.renderer.getArrayBufferAsync(this.slots.value, null, 0, bytes);
-        return new Float32Array(raw, 0, this.byteLength * SLOT_STRIDE);
+        // Snapshot ONCE: a coalesced flush can land during the readback await and grow
+        // byteLength, and a view sized by the post-await value overruns the pre-await
+        // readback ("Invalid typed array length" — the byte-field itest race).
+        const n = this.byteLength * SLOT_STRIDE;
+        const raw = await this.renderer.getArrayBufferAsync(this.slots.value, null, 0, n * Float32Array.BYTES_PER_ELEMENT);
+        return new Float32Array(raw, 0, n);
     }
 
     /** @returns {Promise<number[]>} codepoints with no atlas entry, for the CPU to encode. */

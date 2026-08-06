@@ -42,7 +42,7 @@ let _MeshBasicNodeMaterial, _Fn, _attribute, _uniform, _texture, _textureLoad,
 // The shared instance→clip transform — the SAME graph GlyphField's render material
 // uses, so the pick ID pass can't drift from the visible glyph. Resolved lazily with
 // the rest (dynamic-imported) to keep three/tsl out of the WebGL-only path.
-let _buildGlyphVertexTransform;
+let _buildGlyphVertexTransform, _registerByteSlotsNode, _registerByteSlotsMaterial;
 
 async function _loadTSL() {
     if (_tslLoaded) return;
@@ -73,7 +73,9 @@ async function _loadTSL() {
     // Shared with the render material (core/glyphVertex). Its top-level
     // `import 'three/tsl'` only fires here — inside the WebGPU-only lazy path —
     // so the lazy/WebGL contract holds.
-    ({ buildGlyphVertexTransform: _buildGlyphVertexTransform } =
+    ({ buildGlyphVertexTransform: _buildGlyphVertexTransform,
+        registerByteSlotsNode: _registerByteSlotsNode,
+        registerByteSlotsMaterial: _registerByteSlotsMaterial } =
         await import('../core/glyphVertex.js'));
     _tslLoaded = true;
 }
@@ -487,8 +489,8 @@ export class PickingSystem {
         let byteSlots = null, byteSlotBase = null;
         if (byteMode) {
             const placeholder = new _StorageInstancedBufferAttribute(new Float32Array(4), 1);
-            byteSlots = _storage(placeholder, 'float', 1).toReadOnly().onObjectUpdate(({ object }, self) =>
-                (object && object.userData.glyphField && object.userData.glyphField._byteSlots) || self.value);
+            byteSlots = _registerByteSlotsNode(_storage(placeholder, 'float', 1).toReadOnly().onObjectUpdate(({ object }, self) =>
+                (object && object.userData.glyphField && object.userData.glyphField._byteSlots) || self.value));
             byteSlotBase = fUni('_byteSlotBase', 0);
         }
 
@@ -526,6 +528,7 @@ export class PickingSystem {
         // pixel — picking the wrong (back) grid.
         mat.depthWrite = true;
 
+        if (byteMode) _registerByteSlotsMaterial(mat);
         this[cacheKey] = mat;
         return mat;
     }

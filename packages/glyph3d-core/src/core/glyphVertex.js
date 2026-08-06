@@ -41,6 +41,57 @@ import { SLOT_STRIDE, S_GLYPH_ID, S_ADVANCE, S_HEIGHT, S_X } from '../compute/gl
 export const RENDER_MODE = Object.freeze({ GLYPH: 0, BITMAP: 1, FRAME: 2 });
 
 /**
+ * The byte-slots rebind seam. Every material that reads the pipeline's slot buffer
+ * (render byteGlyph, picking) registers its storage node + material here;
+ * rebindByteSlots points them all at a new attribute when the arena reallocates.
+ *
+ * WHY THIS EXISTS: three's WebGPU backend caches GPUBindGroups keyed ONLY by the
+ * bound TEXTURES (WebGPUBindingUtils.createBindings: cacheIndex/version accumulate
+ * texture.id/version — storage-buffer identity is not in the key). So when the arena
+ * grows (or rebuilds around a new trie) and its old slot buffer is DESTROYED, every
+ * already-built bind group keeps handing the render pass the destroyed buffer:
+ * "[Buffer "GlyphSlots"] used in submit while destroyed", once per frame, forever
+ * (reproduced by tools/arena-realloc-check.mjs; unfixed upstream as of r185.1 — on
+ * each three bump, re-check WebGPUBindingUtils.createBindings' cache key; if storage
+ * identity joins it, this seam goes redundant-but-harmless). The one
+ * app-side lever that reaches that cache is material.dispose(): render objects for
+ * the material drop, Bindings.deleteForRender clears each bind group's backend data
+ * (including the poisoned texture-keyed GPUBindGroup cache), and the next frame
+ * re-creates them from the node's CURRENT value. (material.needsUpdate is NOT
+ * enough — an unchanged node graph means an unchanged cache key, and three then
+ * just syncs the version without rebuilding anything.) Realloc is rare and loud;
+ * the one-off re-init is the accepted cost.
+ */
+const _byteSlotsNodes = new Set();
+const _byteSlotsMaterials = new Set();
+
+/** Register a byte-slots storage node (returns it, for inline use at build sites). */
+export function registerByteSlotsNode(node) {
+    _byteSlotsNodes.add(node);
+    return node;
+}
+
+/** Register a material whose program reads a byte-slots node (returns it). */
+export function registerByteSlotsMaterial(material) {
+    _byteSlotsMaterials.add(material);
+    return material;
+}
+
+/** Point every registered byte-slots node at `attribute` and rebuild their bind groups. */
+export function rebindByteSlots(attribute) {
+    let changed = false;
+    for (const node of _byteSlotsNodes) {
+        if (node.value !== attribute) {
+            node.value = attribute;
+            changed = true;
+        }
+    }
+    if (changed) {
+        for (const material of _byteSlotsMaterials) material.dispose();
+    }
+}
+
+/**
  * GLOBAL glyph width-compression dial — condense glyph ink along x, in place,
  * aligned to leading. k scales every glyph quad's width AND its center-anchor
  * shift by the same factor, so the glyph's left edge stays at its cell anchor

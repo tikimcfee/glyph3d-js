@@ -52,7 +52,7 @@ const MAX_CURVES = 256;
 
 import { PERF_THRESHOLDS } from './core/constants.js';
 import { computeCellMetrics } from './core/cellMetrics.js';
-import { RENDER_MODE, buildGlyphVertexTransform } from './core/glyphVertex.js';
+import { RENDER_MODE, buildGlyphVertexTransform, registerByteSlotsNode, registerByteSlotsMaterial, rebindByteSlots } from './core/glyphVertex.js';
 
 const MAX_GROUPS_DEFAULT = PERF_THRESHOLDS.defaultMaxGroups ?? 64;
 const MAX_GROUPS_DIM     = 16000;
@@ -614,10 +614,10 @@ function _fieldUniform(initial, read) {
  */
 function _fieldSlots() {
     const placeholder = new StorageInstancedBufferAttribute(new Float32Array(4), 1);
-    return storage(placeholder, 'float', 1).toReadOnly().onObjectUpdate(({ object }, self) => {
+    return registerByteSlotsNode(storage(placeholder, 'float', 1).toReadOnly().onObjectUpdate(({ object }, self) => {
         const f = object && object.userData && object.userData.glyphField;
         return (f && f._byteSlots) || self.value;
-    });
+    }));
 }
 
 /** The one material all fields of a kind share — built (and TSL-compiled) once. */
@@ -689,6 +689,7 @@ function _getSharedFieldMaterial(kind) {
         material.depthWrite  = true;
     }
 
+    if (isByte) registerByteSlotsMaterial(material);
     _sharedFieldMaterials.set(kind, material);
     return material;
 }
@@ -1711,6 +1712,10 @@ export default class GlyphField {
     attachBytePipeline(pipeline, byteLength, slotBase = 0) {
         if (!this._bytePipeline) throw new Error('attachBytePipeline on a non-bytePipeline field');
         this._byteSlots = pipeline.slots.value;
+        // Re-point the shared slots nodes (render + pick) and wake their bind groups —
+        // after an arena realloc the old buffer is destroyed, and without this every
+        // frame's submit would reference it (see rebindByteSlots in core/glyphVertex).
+        rebindByteSlots(this._byteSlots);
         this._byteSlotBase = slotBase;
         const geom = this.instanceMesh.geometry;
         const count = Math.min(byteLength, this.config.maxInstances);

@@ -52,6 +52,16 @@ after editing core, `make dev-status` to check.
 - **`cdp-shot.mjs`** + **`web-preview.sh`** — attach to an already-running browser via
   CDP and grab a PNG (works headed on a busy desktop). See `PREVIEW.md`.
 
+- **`arena-realloc-check.mjs`** — the arena-realloc render gate: kernels realloc (growth /
+  trie rebuild) must not strand render bind groups on the destroyed `GlyphSlots` buffer
+  (three's bind-group cache is texture-keyed; the `rebindByteSlots` seam in
+  `core/glyphVertex.js` re-inits the byte materials). Lanes watched via
+  `device.uncapturederror`, then `verifyItem` (exact) + a pixel non-blank assert.
+  Client-only (fake in-page provider, no relay).
+  ```
+  bun tools/arena-realloc-check.mjs
+  ```
+
 ## Integration tests
 
 As panels and startup push command-bus verbs and mutate state, that's headless-browser

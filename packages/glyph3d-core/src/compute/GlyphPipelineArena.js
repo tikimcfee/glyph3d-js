@@ -281,6 +281,10 @@ export default class GlyphPipelineArena {
      * the arena's slot buffer; the mirror is file-relative.
      */
     async verifyItem(itemIndex, eps = 1e-3) {
+        // Verify asserts the LIVE scene — let any coalesced flush/repaginate land first,
+        // so the readback and the item table describe the same state.
+        if (this._flushPromise) await this._flushPromise;
+        if (this._repaginatePromise) await this._repaginatePromise;
         const item = this._items[itemIndex];
         const ref = item?.mirror?.slots;
         if (!ref) return { ok: false, reason: 'no mirror' };
@@ -307,6 +311,12 @@ export default class GlyphPipelineArena {
      * @private
      */
     _realloc(maxBytes, maxItems) {
+        // The header's "rare and loud" promise, delivered: every realloc names itself, so
+        // a realloc-adjacent GPU symptom (destroyed-buffer submit, VRAM step) has a
+        // timestamped cause in the relay log store.
+        console.info(`GlyphPipelineArena: realloc ${this.maxBytes}B/${this.maxItems} items → `
+            + `${Math.max(1024, Math.ceil(maxBytes))}B/${Math.max(16, Math.ceil(maxItems))} items `
+            + `(${this._items.length} staged, ${this._byteTotal}B live)`);
         this._kernels.dispose();
         this.maxBytes = Math.max(1024, Math.ceil(maxBytes));
         this.maxItems = Math.max(16, Math.ceil(maxItems));
