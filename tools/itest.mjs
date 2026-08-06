@@ -20,7 +20,7 @@ const argv = process.argv.slice(2);
 const headed = argv.includes('--headed');
 const urlIdx = argv.indexOf('--url');
 const url = urlIdx >= 0 ? argv[urlIdx + 1] : 'http://localhost:5173/';
-const filter = argv.find((a, i) => !a.startsWith('--') && i !== urlIdx + 1);
+const filter = argv.find((a, i) => !a.startsWith('--') && (urlIdx < 0 || i !== urlIdx + 1));
 
 const dir = new URL('./itests/', import.meta.url);
 let files;

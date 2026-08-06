@@ -142,13 +142,36 @@ export default async ({ app, assert }) => {
   // 6) Layout independence: frame the grid (shader clip) and click a glyph that's
   // still visible — same slot math, caret exact.
   await app.cmd(`grid.frame ${FILE} 8`);
-  await app.waitFor(1200);
-  const t4 = { line: 2, col: 4 };
-  const lineOk = await app.evalPage(`(() => {
-    const g = window.__glyphClient.ctx.registry.get(${JSON.stringify(FILE)}).grid;
-    return { ok: (g.lines[${t4.line}] || '').length > ${t4.col} };
+  // Refocus on the framed grid, then derive a glyph INSIDE the frame whose
+  // projection lands on OPEN CANVAS — dock panels overlay the full-window canvas,
+  // so a corner point can park the pointer on chrome where no pick ever fires
+  // (elementFromPoint is the arbiter, not geometry assumptions).
+  await app.cmd(`camera.focus ${FILE}`);
+  await app.waitFor(2500);
+  const t4 = await app.evalPage(`(() => {
+    const c = window.__glyphClient;
+    const g = c.ctx.registry.get(${JSON.stringify(FILE)}).grid;
+    const V = Object.getPrototypeOf(g.position).constructor;
+    const rect = c.ctx.renderer.domElement.getBoundingClientRect();
+    for (let line = 0; line < Math.min(8, g.lines.length); line++) {
+      const len = (g.lines[line] || '').length;
+      for (const frac of [0.5, 0.75, 0.25, 0.9]) {
+        const col = Math.floor(len * frac);
+        if (col < 1 || col >= len) continue;
+        const p = g._layout?.positionAt(line, col);
+        if (!p) continue;
+        const w = new V(p.x + g.metrics.charWidth * 0.5, p.y, p.z ?? 0);
+        g.localToWorld(w);
+        w.project(c.ctx.camera);
+        if (Math.abs(w.x) > 0.95 || Math.abs(w.y) > 0.95) continue;
+        const x = rect.left + (w.x + 1) / 2 * rect.width;
+        const y = rect.top + (1 - w.y) / 2 * rect.height;
+        if (document.elementFromPoint(x, y)?.tagName === 'CANVAS') return { line, col, ok: true };
+      }
+    }
+    return { ok: false };
   })()`);
-  if (lineOk.ok) {
+  if (t4.ok) {
     const pt4 = await hoverAt(t4.line, t4.col);
     assert.ok(pt4, 'pointer settled for the framed-layout click');
     await page.mouse.click(pt4.x, pt4.y);
