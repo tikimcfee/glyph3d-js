@@ -58,6 +58,20 @@ const MAX_GROUPS_DEFAULT = PERF_THRESHOLDS.defaultMaxGroups ?? 64;
 const MAX_GROUPS_DIM     = 16000;
 
 /**
+ * Group DataTexture layout: GROUP_COLS RGBA32F texels per group (one texture row).
+ *   col 0: offset.xyz            (w free)
+ *   col 1: rotation quaternion   (xyzw; identity 0,0,0,1)
+ *   col 2: color.rgb + alpha     (alpha ≤ 0.01 = invisible — the vertex cull)
+ *   col 3: scale.xyz + colorBlend
+ *   col 4: clipTop, clipBottom, clipEnabled (grid-local y window; w free)
+ * A group texel is a full pose + style — the shared vertex transform
+ * (core/glyphVertex.js) reads all five columns; the WebGL picking shaders in
+ * PickingSystem.js sample columns 0–4 at (col + 0.5) / GROUP_COLS and must
+ * change in the same breath as this layout.
+ */
+export const GROUP_COLS = 5;
+
+/**
  * GLOBAL minification / LOD dials — the exact-curve ↔ stable-block handoff that governs how minified
  * text degrades. These were baked float() literals (labelled "tune live in Firefox" but NOT actually
  * live — each change needed an edit + rebuild). Promoted to uniforms so the handoff can be dialed IN
@@ -117,8 +131,8 @@ export function getGlyphLodParams() {
  * highlight, glyph UV) on top of the transform's byproducts.
  *
  * @param {Object} uniforms - per-object nodes (groupTex, highlightTex, glyphMapTex,
- *   glyphMapWidth, clipEnabled, clipTop, clipBottom, renderMode) — forwarded to the
- *   shared transform; highlightTex is consumed here for the per-glyph highlight.
+ *   glyphMapWidth, renderMode) — forwarded to the shared transform; highlightTex is
+ *   consumed here for the per-glyph highlight. (Clip rides the group texture now.)
  * @returns {Object} { vertexFn, vColor, vGroupAlpha, vAddedColor, vFillAmount,
  *   vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell }
  */
@@ -631,9 +645,6 @@ function _getSharedFieldMaterial(kind) {
     const curveTexNode     = _fieldTexture(_makePlaceholderUintTexture(), '_curveTexture');
     const glyphMapTexNode  = _fieldTexture(_makePlaceholderUintTexture(), '_glyphMapTexture');
     const glyphMapWNode    = _fieldUniform(1, (f) => f._glyphMapWidth);
-    const clipEnabledNode  = _fieldUniform(0, (f) => f._clipEnabledVal);
-    const clipTopNode      = _fieldUniform(0, (f) => f._clipTopVal);
-    const clipBottomNode   = _fieldUniform(0, (f) => f._clipBottomVal);
     const emojiTexNode     = _fieldTexture(_makePlaceholderRGBATexture(), '_emojiTexture');
     const emojiColsNode    = _fieldUniform(16, (f) => f._emojiCols);
     const emojiRowsNode    = _fieldUniform(16, (f) => f._emojiRows);
@@ -655,9 +666,6 @@ function _getSharedFieldMaterial(kind) {
             highlightTex:   highlightTexNode,
             glyphMapTex:    glyphMapTexNode,
             glyphMapWidth:  glyphMapWNode,
-            clipEnabled:    clipEnabledNode,
-            clipTop:        clipTopNode,
-            clipBottom:     clipBottomNode,
             renderMode:     renderModeNode,
             byteSlots:      byteSlotsNode,
             byteSlotBase:   byteSlotBaseNode,
@@ -760,7 +768,7 @@ export default class GlyphField {
         // Group DataTexture
         const requestedGroups = options.maxGroups || MAX_GROUPS_DEFAULT;
         this._maxGroups  = Math.min(requestedGroups, MAX_GROUPS_DIM);
-        this._groupData  = new Float32Array(this._maxGroups * 4 * 4);
+        this._groupData  = new Float32Array(this._maxGroups * GROUP_COLS * 4);
         this._groupCount = 1; // group 0 = identity
         this._initGroupDefaults();
         this._groupTexture = null; // created in _createInstanceMesh
@@ -783,9 +791,7 @@ export default class GlyphField {
         // Per-field shader state, resolved PER OBJECT by the shared material (the
         // mesh's userData.glyphField points back here; the material's nodes read
         // these fields in onObjectUpdate callbacks — no per-field uniform nodes).
-        this._clipEnabledVal = 0;
-        this._clipTopVal     = 0;
-        this._clipBottomVal  = 0;
+        // (Clip is per-GROUP texel state now — setGroupClipY — not per-field.)
         this._emojiTexture   = null;
         this._emojiCols      = 16;
         this._emojiRows      = 16;
@@ -822,9 +828,8 @@ export default class GlyphField {
     /** @private */
     _initGroupDefaults() {
         for (let g = 0; g < this._maxGroups; g++) {
-            const base = g * 4 * 4;
-            this._groupData[base + 3]      = 1.0; // col 0 w: visibility
-            this._groupData[base + 4 + 3]  = 1.0; // col 1 w: quat.w
+            const base = g * GROUP_COLS * 4;
+            this._groupData[base + 4 + 3]  = 1.0; // col 1 w: quat.w (identity rotation)
             this._groupData[base + 8]      = 1.0; // col 2 r: color.r
             this._groupData[base + 8 + 1]  = 1.0; // col 2 g: color.g
             this._groupData[base + 8 + 2]  = 1.0; // col 2 b: color.b
@@ -832,13 +837,14 @@ export default class GlyphField {
             this._groupData[base + 12]     = 1.0; // col 3 x: scale.x
             this._groupData[base + 12 + 1] = 1.0; // col 3 y: scale.y
             this._groupData[base + 12 + 2] = 1.0; // col 3 z: scale.z
+            // col 4 (clip) stays zero: clipEnabled 0 = no clip.
         }
     }
 
     /** @private */
     _createGroupTexture() {
         const tex = new THREE.DataTexture(
-            this._groupData, 4, this._maxGroups,
+            this._groupData, GROUP_COLS, this._maxGroups,
             THREE.RGBAFormat, THREE.FloatType
         );
         tex.minFilter = THREE.NearestFilter;
@@ -1001,19 +1007,15 @@ export default class GlyphField {
     }
 
     /**
-     * Set the frame clip window in GRID-LOCAL y (Step 3c.2). Instances whose anchor y is
-     * outside [bottom, top] are culled in the vertex stage. Pass null/non-finite (either arg)
-     * to disable the clip (show everything). Pure render-side uniform update — no re-fold.
+     * Set the whole-field clip window in GRID-LOCAL y (Step 3c.2) — writes group 0's
+     * clip lanes (the group every glyph of a single-group field belongs to). Fields
+     * that scatter glyphs across groups clip per group via setGroupClipY directly.
+     * Pass null/non-finite (either arg) to disable. Pure texel update — no re-fold.
      * @param {number|null} top
      * @param {number|null} bottom
      */
     setClipYRange(top, bottom) {
-        const on = Number.isFinite(top) && Number.isFinite(bottom);
-        this._clipEnabledVal = on ? 1 : 0;
-        if (on) {
-            this._clipTopVal    = top;
-            this._clipBottomVal = bottom;
-        }
+        this.setGroupClipY(0, top, bottom);
     }
 
     /**
@@ -1330,7 +1332,7 @@ export default class GlyphField {
 
     setGroupOffset(groupId, offset) {
         if (groupId < 0 || groupId >= this._maxGroups) return;
-        const base = (groupId * 4 + 0) * 4;
+        const base = (groupId * GROUP_COLS + 0) * 4;
         this._groupData[base]     = offset.x;
         this._groupData[base + 1] = offset.y;
         this._groupData[base + 2] = offset.z;
@@ -1339,8 +1341,51 @@ export default class GlyphField {
 
     getGroupOffset(groupId) {
         if (groupId < 0 || groupId >= this._maxGroups) return { x: 0, y: 0, z: 0 };
-        const base = (groupId * 4 + 0) * 4;
+        const base = (groupId * GROUP_COLS + 0) * 4;
         return { x: this._groupData[base], y: this._groupData[base + 1], z: this._groupData[base + 2] };
+    }
+
+    /**
+     * Set a group's rotation quaternion (col 1). The shared vertex transform applies it
+     * between the group scale and the group offset — a group texel is a full TRS pose,
+     * so a set of glyphs can face any way without carrying its own mesh (the mega-field's
+     * per-view rotation; a billboarding label's turn). Identity (0,0,0,1) = no rotation.
+     * @param {number} groupId
+     * @param {{x:number,y:number,z:number,w:number}} q - unit quaternion
+     */
+    setGroupQuaternion(groupId, q) {
+        if (groupId < 0 || groupId >= this._maxGroups) return;
+        const base = (groupId * GROUP_COLS + 1) * 4;
+        this._groupData[base]     = q.x;
+        this._groupData[base + 1] = q.y;
+        this._groupData[base + 2] = q.z;
+        this._groupData[base + 3] = q.w;
+        this._syncGroupTexture();
+    }
+
+    getGroupQuaternion(groupId) {
+        if (groupId < 0 || groupId >= this._maxGroups) return { x: 0, y: 0, z: 0, w: 1 };
+        const base = (groupId * GROUP_COLS + 1) * 4;
+        return { x: this._groupData[base], y: this._groupData[base + 1], z: this._groupData[base + 2], w: this._groupData[base + 3] };
+    }
+
+    /**
+     * Set a group's clip window (col 4) in GRID-LOCAL y — the pre-transform frame the
+     * layout laid the glyphs in. Instances whose anchor y is outside [bottom, top] are
+     * culled in the vertex stage. Pass null/non-finite (either bound) to disable.
+     * Per-group so independent views/windows clip independently in one shared field.
+     * @param {number} groupId
+     * @param {number|null} top
+     * @param {number|null} bottom
+     */
+    setGroupClipY(groupId, top, bottom) {
+        if (groupId < 0 || groupId >= this._maxGroups) return;
+        const base = (groupId * GROUP_COLS + 4) * 4;
+        const on = Number.isFinite(top) && Number.isFinite(bottom);
+        this._groupData[base]     = on ? top : 0;
+        this._groupData[base + 1] = on ? bottom : 0;
+        this._groupData[base + 2] = on ? 1 : 0;
+        this._syncGroupTexture();
     }
 
     /**
@@ -1368,7 +1413,7 @@ export default class GlyphField {
 
     setGroupColor(groupId, color) {
         if (groupId < 0 || groupId >= this._maxGroups) return;
-        const base = (groupId * 4 + 2) * 4;
+        const base = (groupId * GROUP_COLS + 2) * 4;
         this._groupData[base]     = color.r;
         this._groupData[base + 1] = color.g;
         this._groupData[base + 2] = color.b;
@@ -1378,13 +1423,13 @@ export default class GlyphField {
 
     getGroupColor(groupId) {
         if (groupId < 0 || groupId >= this._maxGroups) return { r: 1, g: 1, b: 1, a: 1 };
-        const base = (groupId * 4 + 2) * 4;
+        const base = (groupId * GROUP_COLS + 2) * 4;
         return { r: this._groupData[base], g: this._groupData[base + 1], b: this._groupData[base + 2], a: this._groupData[base + 3] };
     }
 
     setGroupVisibility(groupId, visible) {
         if (groupId < 0 || groupId >= this._maxGroups) return;
-        const base = (groupId * 4 + 2) * 4;
+        const base = (groupId * GROUP_COLS + 2) * 4;
         this._groupData[base + 3] = visible ? 1.0 : 0.0;
         this._syncGroupTexture();
     }
@@ -1400,14 +1445,14 @@ export default class GlyphField {
      */
     setGroupAlpha(groupId, alpha) {
         if (groupId < 0 || groupId >= this._maxGroups) return;
-        const base = (groupId * 4 + 2) * 4;
+        const base = (groupId * GROUP_COLS + 2) * 4;
         this._groupData[base + 3] = alpha;
         this._syncGroupTexture();
     }
 
     setGroupScale(groupId, scale) {
         if (groupId < 0 || groupId >= this._maxGroups) return;
-        const base = (groupId * 4 + 3) * 4;
+        const base = (groupId * GROUP_COLS + 3) * 4;
         this._groupData[base]     = scale.x;
         this._groupData[base + 1] = scale.y;
         this._groupData[base + 2] = scale.z;
@@ -1416,13 +1461,13 @@ export default class GlyphField {
 
     getGroupScale(groupId) {
         if (groupId < 0 || groupId >= this._maxGroups) return { x: 1, y: 1, z: 1 };
-        const base = (groupId * 4 + 3) * 4;
+        const base = (groupId * GROUP_COLS + 3) * 4;
         return { x: this._groupData[base], y: this._groupData[base + 1], z: this._groupData[base + 2] };
     }
 
     setGroupColorBlend(groupId, blend) {
         if (groupId < 0 || groupId >= this._maxGroups) return;
-        const base = (groupId * 4 + 3) * 4;
+        const base = (groupId * GROUP_COLS + 3) * 4;
         this._groupData[base + 3] = blend;
         this._syncGroupTexture();
     }
@@ -1437,13 +1482,12 @@ export default class GlyphField {
         const oldMax = this._maxGroups;
         if (oldMax >= MAX_GROUPS_DIM) return;
         this._maxGroups = Math.min(oldMax * 2, MAX_GROUPS_DIM);
-        const newData = new Float32Array(this._maxGroups * 4 * 4);
+        const newData = new Float32Array(this._maxGroups * GROUP_COLS * 4);
         newData.set(this._groupData);
         this._groupData = newData;
         for (let g = oldMax; g < this._maxGroups; g++) {
-            const base = g * 4 * 4;
-            this._groupData[base + 3]      = 1.0;
-            this._groupData[base + 4 + 3]  = 1.0;
+            const base = g * GROUP_COLS * 4;
+            this._groupData[base + 4 + 3]  = 1.0; // quat.w (identity)
             this._groupData[base + 8]      = 1.0;
             this._groupData[base + 8 + 1]  = 1.0;
             this._groupData[base + 8 + 2]  = 1.0;

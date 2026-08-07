@@ -26,7 +26,7 @@ import {
     positionLocal, instanceIndex, storage,
     vec2, vec3, vec4, float, int, ivec2,
     modelViewMatrix, cameraProjectionMatrix,
-    If,
+    If, cross,
 } from 'three/tsl';
 
 import { SLOT_STRIDE, S_GLYPH_ID, S_ADVANCE, S_HEIGHT, S_X } from '../compute/glyphPipelineReference.js';
@@ -122,22 +122,23 @@ export function getGlyphWidthCompress() { return glyphWidthCompress.value; }
  *
  * Owns the full drift-prone chain: glyph-map lookup → resolved mode (+ frame
  * override) → quad sizing (emoji square, width compress) → group transform
- * (rigid scale about the group origin) → MVP, then BOTH culls in the vertex:
- * invisible group (alpha ≤ 0.01) and the frame-clip window. Culls degenerate to
- * outside-NDC (z/w = 2 > 1) so the GPU clips the triangles (a vertex can't
- * Discard). iPos.y and gColor.a are per-instance/per-group — identical for all
- * 4 quad verts — so quads cull whole with no torn edges.
+ * (full rigid TRS: scale → quat rotation → offset, all from the group texel —
+ * a group is a complete pose, so a view/label can face any way without its own
+ * mesh) → MVP, then BOTH culls in the vertex: invisible group (alpha ≤ 0.01)
+ * and the per-group clip window. Culls degenerate to outside-NDC (z/w = 2 > 1)
+ * so the GPU clips the triangles (a vertex can't Discard). iPos.y and gColor.a
+ * are per-instance/per-group — identical for all 4 quad verts — so quads cull
+ * whole with no torn edges.
  *
  * @param {Object} nodes - already-built per-object nodes (uniform/texture),
  *   resolving at draw from the mesh's `userData.glyphField` (exactly as
  *   GlyphField's _fieldTexture/_fieldUniform build them):
- *   glyphMapTex, glyphMapWidth, renderMode, groupTex,
- *   clipEnabled, clipTop, clipBottom.
+ *   glyphMapTex, glyphMapWidth, renderMode, groupTex.
  * @returns {{ clipPos, vMode, glyphInfo, vEmojiCell, gColor, gScale }}
  *   clipPos is the vertex return (culled); the rest are byproducts the render
  *   material uses for its varyings (picking ignores them).
  */
-export function buildGlyphVertexTransform({ glyphMapTex, glyphMapWidth, renderMode, groupTex, clipEnabled, clipTop, clipBottom, byteSlots = null, byteSlotBase = null }) {
+export function buildGlyphVertexTransform({ glyphMapTex, glyphMapWidth, renderMode, groupTex, byteSlots = null, byteSlotBase = null }) {
     // instancePosition is stride-4 (itemSize=4) on every field — read it as vec4
     // and use .xyz (.w is padding). A stride-3 declaration bakes a wrong
     // vertex-fetch stride into the pipeline.
@@ -189,31 +190,39 @@ export function buildGlyphVertexTransform({ glyphMapTex, glyphMapWidth, renderMo
     const alignOffset = vec3(iSize.x.mul(0.5).mul(kW), float(0), float(0));
 
     // Group DataTexture lookup — textureLoad with exact integer texel coords
-    // (4 columns × maxGroups rows, RGBA32F). rgba32float is NOT filterable under
-    // WebGPU; a normalized .sample() returns garbage and collapses every glyph
+    // (GROUP_COLS columns × maxGroups rows, RGBA32F). rgba32float is NOT filterable
+    // under WebGPU; a normalized .sample() returns garbage and collapses every glyph
     // to a degenerate position.
     const grow   = int(iGroup);
-    const gPos   = textureLoad(groupTex, ivec2(int(0), grow)); // col 0: offset + visibility
+    const gPos   = textureLoad(groupTex, ivec2(int(0), grow)); // col 0: offset (w free)
+    const gQuat  = textureLoad(groupTex, ivec2(int(1), grow)); // col 1: rotation quaternion
     const gColor = textureLoad(groupTex, ivec2(int(2), grow)); // col 2: color multiplier
     const gScale = textureLoad(groupTex, ivec2(int(3), grow)); // col 3: scale + colorBlend (w)
+    const gClip  = textureLoad(groupTex, ivec2(int(4), grow)); // col 4: clipTop, clipBottom, clipEnabled
 
-    // World position = (aligned quad + instancePos) * groupScale + groupOffset.
-    // The group scale multiplies the WHOLE glyph (quad size and position alike),
-    // so a group scales as one rigid label/badge about its own origin — bake
-    // glyph positions group-LOCAL and put the anchor in the group offset.
+    // World position = rotate(quat, (aligned quad + instancePos) * groupScale) + groupOffset
+    // — the T·R·S a decomposed matrixWorld yields, so a group texel can carry a whole
+    // entity's pose (the mega-field's per-view transform). Scale multiplies the WHOLE
+    // glyph (quad size and position alike) about the group origin; identity quat
+    // (0,0,0,1 — the texel default) reduces to the old scale+offset path exactly.
+    const local   = scaled.add(alignOffset).add(iPos.xyz).mul(gScale.xyz);
+    // v' = v + 2·q.xyz × (q.xyz × v + q.w·v) — the standard quat sandwich, cross-form.
+    const qc      = cross(gQuat.xyz, local).add(local.mul(gQuat.w));
+    const posed   = local.add(cross(gQuat.xyz, qc).mul(2));
     const clipPos = cameraProjectionMatrix.mul(modelViewMatrix.mul(vec4(
-        scaled.add(alignOffset).add(iPos.xyz).mul(gScale.xyz).add(gPos.xyz),
+        posed.add(gPos.xyz),
         float(1),
     )));
 
     // Apply both culls by degenerating clipPos to outside-NDC. Sequential Ifs
-    // mutating one toVar — same pattern the render material used for the
-    // frame-clip cull alone, now shared and extended to group visibility.
+    // mutating one toVar. The clip window is PER GROUP (gClip lanes) and tests the
+    // raw grid-local anchor y — pre-scale, pre-rotation — so clip values are stated
+    // in the same frame the layout laid the glyphs in.
     const outClip = clipPos.toVar();
     const OFF = () => vec4(float(2), float(2), float(2), float(1));
     If(gColor.a.lessThan(0.01), () => { outClip.assign(OFF()); });            // invisible group
-    If(clipEnabled.greaterThan(0.5).and(                                     // frame-clip window
-        iPos.y.greaterThan(clipTop).or(iPos.y.lessThan(clipBottom))),
+    If(gClip.z.greaterThan(0.5).and(                                         // per-group clip window
+        iPos.y.greaterThan(gClip.x).or(iPos.y.lessThan(gClip.y))),
         () => { outClip.assign(OFF()); });
 
     return { clipPos: outClip, vMode, glyphInfo, vEmojiCell, gColor, gScale };

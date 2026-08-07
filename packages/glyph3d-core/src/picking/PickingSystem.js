@@ -113,23 +113,41 @@ uniform float groupTextureHeight;
 uniform int uBasePickingId;
 `;
 
+// Shared group-pose helper: sample the GROUP_COLS(=5)-texel group row (cols at
+// (col + 0.5)/5) and apply the same scale → quat-rotate → offset chain + culls the
+// TSL transform (core/glyphVertex.js) runs. Changes to the group texture layout
+// land HERE in the same breath.
+const PICKING_GROUP_POSE = `
+vec3 quatRotate(vec4 q, vec3 v) {
+    return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v);
+}
+// Returns the posed world position; sets culled=true for invisible/clipped instances.
+vec3 groupPose(float groupId, vec3 localPos, float anchorY, out bool culled) {
+    float v = (groupId + 0.5) / groupTextureHeight;
+    vec4 gPos   = texture(groupTexture, vec2(0.1, v)); // col 0: offset
+    vec4 gQuat  = texture(groupTexture, vec2(0.3, v)); // col 1: quaternion
+    vec4 gColor = texture(groupTexture, vec2(0.5, v)); // col 2: color (a = visibility)
+    vec4 gScale = texture(groupTexture, vec2(0.7, v)); // col 3: scale
+    vec4 gClip  = texture(groupTexture, vec2(0.9, v)); // col 4: clipTop, clipBottom, clipEnabled
+    culled = (gColor.a < 0.01)
+        || (gClip.z > 0.5 && (anchorY > gClip.x || anchorY < gClip.y));
+    return quatRotate(gQuat, localPos * gScale.xyz) + gPos.xyz;
+}
+`;
+
 // Cell mode: solid quads, no atlas sampling
-const PICKING_VERTEX_CELL = PICKING_VERTEX_CORE + `
+const PICKING_VERTEX_CELL = PICKING_VERTEX_CORE + PICKING_GROUP_POSE + `
 flat out int vPickingId;
 
 void main() {
     vec3 scaled = position * vec3(instanceSize, 1.0);
     vec3 alignOffset = vec3(instanceSize.x * 0.5, 0.0, 0.0);
 
-    float v = (instanceGroupId + 0.5) / groupTextureHeight;
-    vec4 gPos   = texture(groupTexture, vec2(0.125, v));
-    vec4 gColor = texture(groupTexture, vec2(0.625, v));
-    vec4 gScale = texture(groupTexture, vec2(0.875, v));
+    bool culled;
+    vec3 worldPos = groupPose(instanceGroupId, scaled + alignOffset + instancePosition.xyz,
+        instancePosition.y, culled);
+    if (culled) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
 
-    float visible = step(0.01, gColor.a);
-    if (visible < 0.5) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
-
-    vec3 worldPos = scaled + alignOffset + instancePosition.xyz * gScale.xyz + gPos.xyz;
     gl_Position = projectionMatrix * modelViewMatrix * vec4(worldPos, 1.0);
     vPickingId = uBasePickingId + gl_InstanceID;
 }
@@ -149,7 +167,7 @@ void main() {
 `;
 
 // Glyph mode: Slug vector coverage test — only rendered strokes pick
-const PICKING_VERTEX_GLYPH = PICKING_VERTEX_CORE + `
+const PICKING_VERTEX_GLYPH = PICKING_VERTEX_CORE + PICKING_GROUP_POSE + `
 in float instanceGlyphId;
 
 uniform highp usampler2D glyphMapTexture;
@@ -165,15 +183,11 @@ void main() {
     vec3 scaled = position * vec3(instanceSize, 1.0);
     vec3 alignOffset = vec3(instanceSize.x * 0.5, 0.0, 0.0);
 
-    float v = (instanceGroupId + 0.5) / groupTextureHeight;
-    vec4 gPos   = texture(groupTexture, vec2(0.125, v));
-    vec4 gColor = texture(groupTexture, vec2(0.625, v));
-    vec4 gScale = texture(groupTexture, vec2(0.875, v));
+    bool culled;
+    vec3 worldPos = groupPose(instanceGroupId, scaled + alignOffset + instancePosition.xyz,
+        instancePosition.y, culled);
+    if (culled) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
 
-    float visible = step(0.01, gColor.a);
-    if (visible < 0.5) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
-
-    vec3 worldPos = scaled + alignOffset + instancePosition.xyz * gScale.xyz + gPos.xyz;
     gl_Position = projectionMatrix * modelViewMatrix * vec4(worldPos, 1.0);
     vPickingId = uBasePickingId + gl_InstanceID;
 
@@ -479,9 +493,8 @@ export class PickingSystem {
         const glyphMapTex   = fTex('_glyphMapTexture', uintPh);
         const glyphMapWidth = fUni('_glyphMapWidth', 1);
         const renderMode    = fUni('_renderMode', 0 /* RENDER_MODE.GLYPH */);
-        const clipEnabled   = fUni('_clipEnabledVal', 0);
-        const clipTop       = fUni('_clipTopVal', 0);
-        const clipBottom    = fUni('_clipBottomVal', 0);
+        // Clip is per-GROUP texel state (group texture col 4) — read inside the
+        // shared transform, no per-object uniforms.
 
         // Byte-pipeline fields read position/size/glyphId from the pipeline's slot buffer
         // (GlyphField._fieldSlots does the same for the render material — one buffer, per
@@ -503,7 +516,7 @@ export class PickingSystem {
             // core/glyphVertex. The instance attributes (instancePosition/Size/
             // GlyphId/GroupId) are declared inside it by name and bind to this mesh.
             const { clipPos } = _buildGlyphVertexTransform({
-                glyphMapTex, glyphMapWidth, renderMode, groupTex, clipEnabled, clipTop, clipBottom,
+                glyphMapTex, glyphMapWidth, renderMode, groupTex,
                 byteSlots, byteSlotBase,
             });
             return clipPos;
