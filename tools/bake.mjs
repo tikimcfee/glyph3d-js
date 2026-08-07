@@ -7,35 +7,29 @@
  * For each file, bakeFile (glyphBake.js) streams the bytes once through the REAL
  * font-chain metrics (tools/headlessFontChain.mjs — the same HarfBuzz + FontChain the
  * runtime boots, so baked advances are bit-identical to the live trie's) and the
- * shared index lands in <dir>/.glyph3d/bake/:
- *
- *   index.json        header (metricsHash, interval, lineHeight, …) + one scalar
- *                     record per file (rows, widest row, box, total summary, blob
- *                     offsets) + the repo codepoint census
- *   checkpoints.bin   every file's monoid checkpoints, f64 LE — random access into
- *                     any file's layout without folding it from byte 0
- *   hist.bin          every file's sparse line-length histogram, u32 LE pairs —
- *                     exact row counts under any wrap width
+ * shared index lands as ONE binary file, <dir>/.glyph3d/bake/index.bin
+ * (glyphBakeIndex.js: header + census + records + hashes + paths + checkpoint/hist
+ * blobs — the consumer fetches once and reads typed views, no JSON anywhere).
  *
  * IDEMPOTENT at every level: a record is keyed by (contentHash, metricsHash,
- * BAKE_VERSION, interval) — unchanged files carry their records forward without
- * re-reading them; an unchanged repo produces byte-identical output and writes
- * nothing. No timestamps anywhere.
+ * BAKE_VERSION, interval) — unchanged files carry forward by re-slicing the previous
+ * index through the same decoder the browser uses; an unchanged repo produces
+ * byte-identical output and writes nothing. No timestamps anywhere.
  *
  * What it skips, it skips the way the RUNTIME does (core/fileKind + core/readability
  * — the same partition file.openDir applies), and every skip is counted and printed:
  * a file without a record is a file the runtime never stages as glyphs.
  */
 
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, lstatSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, lstatSync, rmSync, existsSync } from 'fs';
 import { execFileSync } from 'child_process';
 import { createHash } from 'crypto';
 import { join, resolve, relative, sep } from 'path';
 import { ROOT, FONTS, bootHeadlessFontChain } from './headlessFontChain.mjs';
 
 const core = `${ROOT}/packages/glyph3d-core/src`;
-const { bakeFile, collectCensus, BAKE_VERSION, CHECKPOINT_INTERVAL, CK_STRIDE } =
-    await import(`${core}/compute/glyphBake.js`);
+const { bakeFile, collectCensus, CHECKPOINT_INTERVAL } = await import(`${core}/compute/glyphBake.js`);
+const { encodeBakeIndex, decodeBakeIndex } = await import(`${core}/compute/glyphBakeIndex.js`);
 const { buildLiveTrie } = await import(`${core}/compute/liveTrie.js`);
 const { computeCellMetrics, deriveCharSize } = await import(`${core}/core/cellMetrics.js`);
 const { classifyByExtension, classifyBytes } = await import(`${core}/core/fileKind.js`);
@@ -85,29 +79,30 @@ function listFiles(dir) {
     }
 }
 
-const sha256 = (buf) => createHash('sha256').update(buf).digest('hex');
+const sha256 = (buf) => createHash('sha256').update(buf).digest();
 
 // ── metrics identity: the fonts' bytes + the two config scalars ARE the advances ──
 const metricsHash = sha256(JSON.stringify({
-    fonts: FONTS.map((f) => ({ name: f.name, sha256: sha256(readFileSync(join(ROOT, f.file))) })),
+    fonts: FONTS.map((f) => ({ name: f.name, sha256: sha256(readFileSync(join(ROOT, f.file))).toString('hex') })),
     fontSize, worldScale,
-})).slice(0, 16);
+})).toString('hex').slice(0, 16);
 
-// ── previous index: carry unchanged records forward ──
-let prev = null, prevCk = null, prevHist = null;
+// ── previous index: carry unchanged records forward through the SAME decoder ──
+let prev = null;
 if (!force) {
     try {
-        const p = JSON.parse(readFileSync(join(outDir, 'index.json'), 'utf8'));
-        const headerMatches = p.version === BAKE_VERSION && p.metricsHash === metricsHash
-            && p.checkpointInterval === interval && p.fontSize === fontSize && p.worldScale === worldScale;
-        if (headerMatches) {
-            prev = p;
-            prevCk = readFileSync(join(outDir, 'checkpoints.bin'));
-            prevHist = readFileSync(join(outDir, 'hist.bin'));
+        const bytes = new Uint8Array(readFileSync(join(outDir, 'index.bin')));
+        const d = decodeBakeIndex(bytes);           // throws on magic/version mismatch
+        const h = d.header;
+        if (h.metricsHash === metricsHash && h.checkpointInterval === interval
+            && h.fontSize === fontSize && h.worldScale === worldScale) {
+            prev = d;
         } else {
-            console.log(`[bake] previous index header differs (version/metrics/interval) — full rebake`);
+            console.log(`[bake] previous index metrics/interval differ — full rebake`);
         }
-    } catch { /* no previous index */ }
+    } catch (err) {
+        if (existsSync(join(outDir, 'index.bin'))) console.log(`[bake] previous index unreadable (${err.message}) — full rebake`);
+    }
 }
 
 // ── pass 1: classify + hash + census; decide keep-vs-bake per file ──
@@ -116,10 +111,12 @@ const paths = listFiles(repoDir).sort();
 const outPrefix = relative(repoDir, outDir).split(sep).join('/');
 const decoder = new TextDecoder();
 const census = new Set();
-const keep = new Map();   // path → prev record (carried)
+const keep = new Map();   // path → index into prev
 const toBake = [];        // { path, hash }
 const counts = { image: 0, binary: 0, oversize: 0, unreadable: 0, unreadFile: 0 };
 let totalBytes = 0;
+
+const hashEq = (a, b) => { for (let i = 0; i < 32; i++) if (a[i] !== b[i]) return false; return true; };
 
 for (const path of paths) {
     if (outPrefix && !outPrefix.startsWith('..') && path.startsWith(outPrefix + '/')) continue;
@@ -144,8 +141,8 @@ for (const path of paths) {
     totalBytes += bytes.byteLength;
     collectCensus(u8, census);
     const hash = sha256(bytes);
-    const prevRec = prev?.files?.[path];
-    if (prevRec && prevRec.hash === hash) keep.set(path, prevRec);
+    const pi = prev?.pathIndex.get(path);
+    if (pi !== undefined && hashEq(prev.hashAt(pi), hash)) keep.set(path, pi);
     else toBake.push({ path, hash });
 }
 
@@ -172,95 +169,48 @@ const trie = buildLiveTrie(atlasDuck, worldScale);
 const lineHeight = computeCellMetrics(charSize, worldScale).lineSpacing;
 
 // ── pass 2: bake what changed ──
-const records = new Map();  // path → { rec } | { carried }
+const baked = new Map();  // path → { record, hash }
 const missingUnion = new Set();
 for (const { path, hash } of toBake) {
     const bytes = readFileSync(join(repoDir, path));
-    const rec = bakeFile(new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength), trie,
+    const record = bakeFile(new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength), trie,
         { lineHeight, checkpointInterval: interval });
-    for (const cp of rec.missing) missingUnion.add(cp);
-    records.set(path, { rec, hash });
+    for (const cp of record.missing) missingUnion.add(cp);
+    baked.set(path, { record, hash });
 }
 if (missingUnion.size > 0) {
     // Should be structurally impossible: the trie was built from the full census.
     console.warn(`[bake] ${missingUnion.size} codepoints missed the trie DESPITE census priming — their advances are the missing fallback. First: ${[...missingUnion].slice(0, 8).map((c) => 'U+' + c.toString(16)).join(' ')}`);
 }
 
-// ── assemble, sorted by path: blobs + index, deterministically ──
-const allPaths = [...new Set([...keep.keys(), ...records.keys()])].sort();
-const ckParts = [], histParts = [];
-let ckOff = 0, histOff = 0;
-const files = {};
-for (const path of allPaths) {
-    const carried = keep.get(path);
-    if (carried) {
-        // Slice the carried blobs out of the previous files; offsets renumber below.
-        const ckBytes = prevCk.subarray(carried.ck[0], carried.ck[0] + carried.ck[1] * CK_STRIDE * 8);
-        const histBytes = prevHist.subarray(carried.hist[0], carried.hist[0] + carried.hist[1] * 8);
-        ckParts.push(ckBytes); histParts.push(histBytes);
-        files[path] = { ...carried, ck: [ckOff, carried.ck[1]], hist: [histOff, carried.hist[1]] };
-        ckOff += ckBytes.byteLength; histOff += histBytes.byteLength;
-        continue;
-    }
-    const { rec, hash } = records.get(path);
-    const ckBytes = new Uint8Array(rec.checkpoints.buffer, 0, rec.checkpoints.byteLength);
-    const histPairs = [...rec.lineHist.entries()].sort((a, b) => a[0] - b[0]);
-    const histU32 = new Uint32Array(histPairs.length * 2);
-    histPairs.forEach(([len, count], i) => { histU32[i * 2] = len; histU32[i * 2 + 1] = count; });
-    const histBytes = new Uint8Array(histU32.buffer);
-    ckParts.push(ckBytes); histParts.push(histBytes);
-    files[path] = {
-        hash,
-        bytes: rec.byteLength,
-        leaders: rec.leaders,
-        newlines: rec.newlines,
-        rows: rec.totalRows,
-        maxRowExtent: rec.maxRowExtent,
-        maxLineWidth: rec.maxLineWidth,
-        maxHeight: rec.maxHeight,
-        box: rec.box,
-        total: {
-            nl: rec.total.nl, glyphs: rec.total.glyphs, rows: rec.total.rows,
-            headLen: rec.total.headLen, tailLen: rec.total.tailLen, tailAdv: rec.total.tailAdv,
-        },
-        ck: [ckOff, rec.checkpoints.length / CK_STRIDE],
-        hist: [histOff, histPairs.length],
-    };
-    ckOff += ckBytes.byteLength; histOff += histBytes.byteLength;
-}
-
-const concat = (parts, size) => {
-    const out = new Uint8Array(size);
-    let at = 0;
-    for (const p of parts) { out.set(p, at); at += p.byteLength; }
-    return out;
-};
-const index = {
-    version: BAKE_VERSION,
-    metricsHash,
-    checkpointInterval: interval,
-    fontSize, worldScale, lineHeight,
-    charSize,
-    fonts: FONTS.map((f) => f.name),
-    census: [...census].sort((a, b) => a - b),
-    files,
-};
+// ── assemble, sorted by path, and encode the ONE file ──
+const allPaths = [...new Set([...keep.keys(), ...baked.keys()])].sort();
+const entries = allPaths.map((path) => {
+    const pi = keep.get(path);
+    if (pi !== undefined) return { path, hash: prev.hashAt(pi), record: prev.recordAt(pi) };
+    const b = baked.get(path);
+    return { path, hash: new Uint8Array(b.hash), record: b.record };
+});
+const out = encodeBakeIndex(
+    { fontSize, worldScale, lineHeight, charSize, checkpointInterval: interval, metricsHash },
+    Uint32Array.from([...census].sort((a, b) => a - b)),
+    entries,
+);
 
 // ── write only what changed (an unchanged repo writes nothing) ──
 mkdirSync(outDir, { recursive: true });
-const writeIfChanged = (name, bytes) => {
-    try {
-        const old = readFileSync(join(outDir, name));
-        if (old.byteLength === bytes.byteLength && old.equals(Buffer.from(bytes))) return false;
-    } catch { /* absent */ }
-    writeFileSync(join(outDir, name), bytes);
-    return true;
-};
-const wroteIndex = writeIfChanged('index.json', Buffer.from(JSON.stringify(index)));
-const wroteCk = writeIfChanged('checkpoints.bin', concat(ckParts, ckOff));
-const wroteHist = writeIfChanged('hist.bin', concat(histParts, histOff));
+let wrote = true;
+try {
+    const old = readFileSync(join(outDir, 'index.bin'));
+    if (old.byteLength === out.byteLength && old.equals(Buffer.from(out))) wrote = false;
+} catch { /* absent */ }
+if (wrote) writeFileSync(join(outDir, 'index.bin'), out);
+// The v1 three-file layout is dead — prune it loudly rather than leave a stale twin.
+for (const stale of ['index.json', 'checkpoints.bin', 'hist.bin']) {
+    if (existsSync(join(outDir, stale))) { rmSync(join(outDir, stale)); console.log(`[bake] pruned v1 artifact ${stale}`); }
+}
 
 const ms = performance.now() - t0;
-console.log(`[bake] index: ${allPaths.length} records, checkpoints ${(ckOff / 1024).toFixed(0)}KB, hist ${(histOff / 1024).toFixed(0)}KB`
-    + ` — ${wroteIndex || wroteCk || wroteHist ? 'written to' : 'UNCHANGED at'} ${outDir}`);
+console.log(`[bake] index.bin: ${allPaths.length} records, ${(out.byteLength / 1024).toFixed(0)}KB`
+    + ` — ${wrote ? 'written to' : 'UNCHANGED at'} ${outDir}`);
 console.log(`[bake] ${ms.toFixed(0)}ms (${(totalBytes / 1e6 / (ms / 1000)).toFixed(1)}MB/s incl. shaping boot)`);

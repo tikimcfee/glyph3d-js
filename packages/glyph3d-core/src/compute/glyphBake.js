@@ -39,7 +39,7 @@ import { scanIdentity, scanCombine, scanLeafValue } from './glyphPipelineScan.js
 import { trieLookup } from './GlyphTrie.js';
 
 /** Bumping this invalidates every baked record (the fold or the format changed). */
-export const BAKE_VERSION = 1;
+export const BAKE_VERSION = 2;
 
 /** Bytes folded between checkpoints. 4096 ⇒ the index is ~1.2% of the source. */
 export const CHECKPOINT_INTERVAL = 4096;
@@ -75,7 +75,7 @@ export function checkpointAt(checkpoints, i) {
  * decodeAndResolve, without a slot buffer to land in. Caller has already
  * established `n = sequenceLength(bytes, id) > 0`.
  */
-function decodeAt(bytes, id, n) {
+export function decodeCodepointAt(bytes, id, n) {
     const at = (i) => (i < bytes.length ? bytes[i] : 0);
     const b0 = bytes[id], b1 = at(id + 1), b2 = at(id + 2), b3 = at(id + 3);
     if (n === 1) return b0;
@@ -94,7 +94,7 @@ export function collectCensus(bytes, census) {
     for (let id = 0; id < bytes.length; id++) {
         const n = sequenceLength(bytes, id);
         if (n === 0) continue;
-        census.add(decodeAt(bytes, id, n));
+        census.add(decodeCodepointAt(bytes, id, n));
     }
     return census;
 }
@@ -112,7 +112,7 @@ export function foldBytes(bytes, trie, from, to, acc) {
     for (let id = from; id < to; id++) {
         const n = sequenceLength(bytes, id);
         if (n === 0) continue;                    // continuation byte: identity leaf
-        const cp = decodeAt(bytes, id, n);
+        const cp = decodeCodepointAt(bytes, id, n);
         const g = trieLookup(trie, cp);
         scanCombine(acc, scanLeafValue(cp, g.advance, true, 0, id === 0));
     }
@@ -181,7 +181,7 @@ export function bakeFile(bytes, trie, opts = {}) {
 
         const seq = sequenceLength(bytes, id);
         if (seq === 0) continue;                  // continuation byte: identity leaf
-        const cp = decodeAt(bytes, id, seq);
+        const cp = decodeCodepointAt(bytes, id, seq);
         const g = trieLookup(trie, cp);
         census.add(cp);
         if (g.missing) missing.add(cp);
@@ -206,6 +206,8 @@ export function bakeFile(bytes, trie, opts = {}) {
     }
 
     const totalRows = maxRow + 1;
+    let maxLineLen = acc.tailLen;
+    for (const len of lineHist.keys()) if (len > maxLineLen) maxLineLen = len;
     return {
         version: BAKE_VERSION,
         byteLength: n,
@@ -215,6 +217,7 @@ export function bakeFile(bytes, trie, opts = {}) {
         maxRowExtent,
         maxLineWidth,
         maxHeight,
+        maxLineLen,
         box: leaders === 0 ? null : {
             min: { x: 0, y: -maxRow * L, z: 0 },
             max: { x: maxLineWidth, y: maxTop, z: 0 },

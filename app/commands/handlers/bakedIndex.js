@@ -1,6 +1,10 @@
 /**
- * bakedIndex — fetch + validate a repo's baked layout index (.glyph3d/bake/, written
- * by `bun tools/bake.mjs`) and hand each file's record to its grid.
+ * bakedIndex — fetch + validate a repo's baked layout index (.glyph3d/bake/index.bin,
+ * written by `bun tools/bake.mjs`) and hand each file's record to its grid.
+ *
+ * ONE fetch, zero JSON: the index is a single binary file (glyphBakeIndex.js) and
+ * records are typed-array views over the fetched buffer — a file that is never
+ * opened costs only its row in the path table.
  *
  * PURE ADDITIVE: no index (the normal state of most dirs) means the load path runs
  * exactly as before — absence is silent. A PRESENT index that disagrees with the
@@ -12,83 +16,89 @@
  * are the whole advance expression (ax/upem × worldScale × height), so equality
  * here means baked advances are the live trie's advances. The per-file gate
  * (CodeGrid, post-laid) then proves each record against the GPU's actual bounds.
+ *
+ * A valid index also PRE-ARMS THE ATLAS: the repo census primes the shape cache and
+ * Slug-encodes every glyph the repo will need BEFORE the storm stages a byte — the
+ * mid-storm miss → trie-rebuild → re-dispatch-everything loop never fires for a
+ * baked repo.
  */
 
-import { BAKE_VERSION } from '@glyph3d/core/compute/glyphBake.js';
+import { decodeBakeIndex } from '@glyph3d/core/compute/glyphBakeIndex.js';
+import { encodeMisses } from '@glyph3d/core/compute/liveTrie.js';
 import { computeCellMetrics } from '@glyph3d/core';
 
 /** The worldScale every file grid boots with (prepFileGrid) — the arena's scale. */
 const GRID_WORLD_SCALE = 0.025;
 
-const INDEX_PATH = '.glyph3d/bake/index.json';
-const HIST_PATH = '.glyph3d/bake/hist.bin';
+const INDEX_PATH = '.glyph3d/bake/index.bin';
 
 /**
  * Load the baked index for `dir`, or null. Null is NORMAL (no index baked); only a
  * present-but-unusable index warns.
  * @param {Object} ctx - command context (fileProvider + atlas)
  * @param {string} dir - the openDir root ('' = the served root)
- * @returns {Promise<Map<string, Object>|null>} absolute-path → per-file record
+ * @returns {Promise<{get:(path:string)=>Object|undefined, size:number}|null>}
  */
 export async function loadBakedIndex(ctx, dir) {
     const fp = ctx.fileProvider;
-    if (!fp?.getFile || typeof fp.getBytes !== 'function' || !ctx.atlas) return null;
+    if (typeof fp?.getBytes !== 'function' || !ctx.atlas) return null;
     const base = dir && dir !== '/' ? `${dir}/` : dir === '/' ? '/' : '';
 
-    let index;
+    let bytes;
     try {
-        index = JSON.parse(await fp.getFile(`${base}${INDEX_PATH}`));
+        bytes = await fp.getBytes(`${base}${INDEX_PATH}`);
     } catch {
         return null;                                   // no index — the normal state
     }
 
-    // ── the metrics identity, against THIS session ──
-    if (index.version !== BAKE_VERSION) {
-        console.warn(`[bake] index at ${base}${INDEX_PATH} is version ${index.version}, runtime is ${BAKE_VERSION} — rebake (ignored)`);
+    let decoded;
+    try {
+        decoded = decodeBakeIndex(bytes);
+    } catch (err) {
+        console.warn(`[bake] index at ${base}${INDEX_PATH} unusable: ${err?.message || err} — rebake with tools/bake.mjs (ignored)`);
         return null;
     }
+    const h = decoded.header;
+
+    // ── the metrics identity, against THIS session ──
     const live = ctx.atlas.getCharSize();
     const m = computeCellMetrics(live, GRID_WORLD_SCALE);
-    const ok = index.worldScale === GRID_WORLD_SCALE
-        && index.charSize?.width === live.width && index.charSize?.height === live.height
-        && index.lineHeight === m.lineSpacing;
+    const ok = h.worldScale === GRID_WORLD_SCALE
+        && h.charSize.width === live.width && h.charSize.height === live.height
+        && h.lineHeight === m.lineSpacing;
     if (!ok) {
         console.warn(`[bake] index metrics differ from the live session — ignored. `
-            + `baked {charSize ${index.charSize?.width}×${index.charSize?.height}, scale ${index.worldScale}, lh ${index.lineHeight}} `
+            + `baked {charSize ${h.charSize.width}×${h.charSize.height}, scale ${h.worldScale}, lh ${h.lineHeight}} `
             + `vs live {${live.width}×${live.height}, ${GRID_WORLD_SCALE}, ${m.lineSpacing}} — rebake with tools/bake.mjs`);
         return null;
     }
 
-    let hist;
+    // ── pre-arm the atlas from the census: prime + encode BEFORE the storm ──
     try {
-        const bytes = await fp.getBytes(`${base}${HIST_PATH}`);
-        hist = new Uint32Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.byteLength / 4));
+        const cache = ctx.atlas._shapeCache;
+        if (cache?.prime && decoded.census.length > 0) {
+            const t0 = performance.now();
+            let s = '';
+            for (const cp of decoded.census) s += String.fromCodePoint(cp);
+            cache.prime(s);
+            const grew = encodeMisses(ctx.atlas, [...decoded.census]);
+            console.info(`[bake] census pre-armed the atlas: ${decoded.census.length} codepoints, `
+                + `${grew.grew ? 'encoded new glyphs' : 'already covered'} (${Math.round(performance.now() - t0)}ms)`);
+        }
     } catch (err) {
-        console.warn(`[bake] index present but ${HIST_PATH} unreadable (${err?.message || err}) — ignored`);
-        return null;
+        console.warn('[bake] census pre-arm failed (load continues without it):', err);
     }
 
-    const map = new Map();
-    for (const [rel, r] of Object.entries(index.files)) {
-        const lineHist = new Map();
-        let maxLineLen = r.total.tailLen;
-        const off = r.hist[0] / 4;                     // u32 index into the blob
-        for (let i = 0; i < r.hist[1]; i++) {
-            const len = hist[off + i * 2], count = hist[off + i * 2 + 1];
-            lineHist.set(len, count);
-            if (len > maxLineLen) maxLineLen = len;
-        }
-        map.set(`${base}${rel}`, {
-            leaders: r.leaders,
-            rows: r.rows,
-            maxRowExtent: r.maxRowExtent,
-            maxLineWidth: r.maxLineWidth,
-            maxLineLen,
-            box: r.box,
-            total: r.total,
-            lineHist,
-        });
-    }
-    console.info(`[bake] index: ${map.size} records for ${dir || '/'} (metrics ${index.metricsHash})`);
-    return map;
+    // Absolute-path lookup over lazy records — decode work happens per OPENED file.
+    const { pathIndex, recordAt } = decoded;
+    const prefix = base;
+    console.info(`[bake] index: ${pathIndex.size} records for ${dir || '/'} (metrics ${h.metricsHash})`);
+    return {
+        size: pathIndex.size,
+        get(path) {
+            const rel = prefix && path.startsWith(prefix) ? path.slice(prefix.length) : path;
+            const i = pathIndex.get(rel);
+            return i === undefined ? undefined : recordAt(i);
+        },
+    };
 }

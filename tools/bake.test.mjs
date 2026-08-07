@@ -27,6 +27,11 @@ import { scanIdentity, lanesFromPrefix } from '../packages/glyph3d-core/src/comp
 import {
   bakeFile, foldBytes, prefixAt, rowsUnderWrap, checkpointAt, CK_STRIDE,
 } from '../packages/glyph3d-core/src/compute/glyphBake.js';
+import { encodeBakeIndex, decodeBakeIndex } from '../packages/glyph3d-core/src/compute/glyphBakeIndex.js';
+import {
+  windowSeedable, windowSeedAt, byteRangeForRows, runWindow,
+} from '../packages/glyph3d-core/src/compute/glyphPipelineWindow.js';
+import { deriveStride, S_X, S_Y, S_Z, S_BASE_X, S_ADVANCE, S_HEIGHT, S_GLYPH_ID } from '../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
 
 const arg = (n, d) => { const i = process.argv.indexOf(n); return i >= 0 && process.argv[i + 1] ? Number(process.argv[i + 1]) : d; };
 const SEEDS = arg('--seeds', 60);
@@ -245,6 +250,158 @@ for (const [name, text] of CORPORA) {
     }
   }
   ok(bad === 0, `checkpoint round-trip: ${bad} mismatches over ${nCk} checkpoints`);
+}
+
+// ── 8. binary index round-trip: encode → decode ≡ the records that went in ──
+{
+  const fakeHash = (seed) => { const h = new Uint8Array(32); for (let i = 0; i < 32; i++) h[i] = (seed * 31 + i * 7) & 0xFF; return h; };
+  const paths = CORPORA.map(([name]) => `dir/${name}.txt`);
+  const entries = CORPORA.map(([name, text], i) => ({
+    path: paths[i],
+    hash: fakeHash(i),
+    record: bakeFile(enc.encode(text), trie, { lineHeight: CELL_H, checkpointInterval: 64 }),
+  }));
+  const census = new Set();
+  for (const e of entries) for (const cp of e.record.census) census.add(cp);
+  const header = {
+    fontSize: 48, worldScale: 0.025, lineHeight: CELL_H,
+    charSize: { width: 29, height: 54.375 }, checkpointInterval: 64, metricsHash: '0123456789abcdef',
+  };
+  const bin = encodeBakeIndex(header, Uint32Array.from([...census].sort((a, b) => a - b)), entries);
+  const d = decodeBakeIndex(bin);
+
+  ok(d.header.metricsHash === header.metricsHash && d.header.lineHeight === CELL_H
+    && d.header.charSize.width === 29 && d.header.charSize.height === 54.375
+    && d.header.checkpointInterval === 64 && d.header.fileCount === entries.length,
+    'binary: header round-trips');
+  ok(d.census.length === census.size, 'binary: census round-trips');
+
+  let bad = 0;
+  for (let i = 0; i < entries.length; i++) {
+    const want = entries[i].record, got = d.recordAt(d.pathIndex.get(paths[i]));
+    for (const k of ['byteLength', 'leaders', 'newlines', 'totalRows', 'maxRowExtent', 'maxLineWidth', 'maxHeight', 'maxLineLen']) {
+      if (got[k] !== want[k]) { bad++; console.log(`  binary ${paths[i]}: ${k} ${got[k]} vs ${want[k]}`); }
+    }
+    for (const k of ['nl', 'glyphs', 'rows', 'headLen', 'tailLen', 'tailAdv']) {
+      if (got.total[k] !== want.total[k]) bad++;
+    }
+    if (got.checkpoints.length !== want.checkpoints.length) bad++;
+    else for (let c = 0; c < want.checkpoints.length; c++) if (got.checkpoints[c] !== want.checkpoints[c]) bad++;
+    if (JSON.stringify([...got.lineHist].sort((a, b) => a[0] - b[0])) !== JSON.stringify([...want.lineHist].sort((a, b) => a[0] - b[0]))) bad++;
+    if (!!got.box !== !!want.box) bad++;
+    else if (got.box && (Math.abs(got.box.min.y - want.box.min.y) > 1e-12 || got.box.max.y !== want.box.max.y || got.box.max.x !== want.box.max.x)) bad++;
+    const hh = d.hashAt(i);
+    for (let b = 0; b < 32; b++) if (hh[b] !== entries[i].hash[b]) bad++;
+    // rowsUnderWrap through the decoded record — the consumer's actual query.
+    for (const w of [0, 3, 24]) if (rowsUnderWrap(got, w) !== rowsUnderWrap(want, w)) bad++;
+  }
+  ok(bad === 0, `binary: ${bad} record lanes diverged through the round-trip`);
+
+  // Deterministic: encoding the same entries twice is byte-identical.
+  const bin2 = encodeBakeIndex(header, Uint32Array.from([...census].sort((a, b) => a - b)), entries);
+  let diff = bin.length === bin2.length ? 0 : 1;
+  for (let i = 0; i < bin.length && !diff; i++) if (bin[i] !== bin2[i]) diff = 1;
+  ok(diff === 0, 'binary: encode is deterministic');
+
+  // Unaligned fetch: decode must survive a buffer whose byteOffset % 8 ≠ 0.
+  const shifted = new Uint8Array(bin.length + 4);
+  shifted.set(bin, 4);
+  const d2 = decodeBakeIndex(shifted.subarray(4));
+  ok(d2.header.fileCount === entries.length && d2.recordAt(0).leaders === entries[0].record.leaders,
+    'binary: unaligned buffer decodes');
+}
+
+// ── 9. THE WINDOW: seeded materialization ≡ the full run, lane for lane ──
+{
+  const winDiff = (name, fullSlots, winSlots, from, to, fold) => {
+    let bad = null;
+    const EXACT = [S_CODEPOINT, S_GLYPH_ID, S_ADVANCE, S_HEIGHT, S_ROW, S_COL, S_FLAGS, S_ORD];
+    for (let id = from; id < to && !bad; id++) {
+      const o = id * SLOT_STRIDE;
+      if ((fullSlots[o + S_FLAGS] & F_LEADER) === 0) continue;
+      for (const l of EXACT) if (winSlots[o + l] !== fullSlots[o + l]) bad = { id, l, why: 'exact lane' };
+      for (const l of [S_X, S_Y, S_Z, S_BASE_X, S_LINE_ADV]) {
+        const a = fullSlots[o + l], b = winSlots[o + l];
+        if (fold > 0 && l !== S_LINE_ADV) {
+          if (a !== b) bad = { id, l, why: 'fold>0 float lane must be bit-exact' };
+        } else if (Math.abs(a - b) / Math.max(1, Math.abs(a)) > 1e-4) {
+          bad = { id, l, why: `rel ${(Math.abs(a - b) / Math.max(1, Math.abs(a))).toExponential(2)}` };
+        }
+      }
+    }
+    ok(!bad, `${name}: window slot ${bad?.id} lane ${bad?.l} — ${bad?.why}`);
+  };
+
+  const PAGE = { pageRows: 6, pagesWide: 2, pageGapX: 3, bandStrideY: 11, depthPerBand: 2 };
+  const lanes = [
+    { wrapWidth: 0, lineHeight: CELL_H },
+    { wrapWidth: 100, lineHeight: CELL_H, zStep: 0.21 },
+    { wrapWidth: 0, page: { ...PAGE, pageCols: 40 }, lineHeight: CELL_H },
+    { wrapWidth: 100, page: PAGE, lineHeight: CELL_H },
+  ];
+  let windows = 0, nulls = 0;
+  for (let s = 0; s < SEEDS; s++) {
+    const r = rng(9000 + s);
+    const bytes = enc.encode(randomText(r, 10 + Math.floor(r() * 40)));
+    if (bytes.length < 8) continue;
+    const rec = bakeFile(bytes, trie, { lineHeight: CELL_H, checkpointInterval: 1 + Math.floor(r() * 150) });
+    const lane = lanes[s % lanes.length];
+    const wrap = lane.wrapWidth || 0;
+    const fold = wrap > 0 ? wrap : (lane.page?.pageCols || 0);
+    if (!windowSeedable(rec, wrap)) { nulls++; continue; }   // randomText lines < 91 < wrap 100 — all lanes seedable
+
+    const full = runPipeline(bytes, trie, lane);
+    const stride = deriveStride({ maxRowExtent: full.itemBounds[0]?.maxRowExtent ?? 0 }, lane.page);
+
+    // seed check: windowSeedAt's prefix is the true prefix at `from`, bit for bit.
+    const target = Math.floor(r() * bytes.length);
+    const ws = windowSeedAt(bytes, trie, rec, target, wrap, fold);
+    ok(!!ws && ws.from <= target, `seed ${9000 + s}: windowSeedAt found a start`);
+    if (ws) {
+      const truth = foldBytes(bytes, trie, 0, ws.from, scanIdentity());
+      let sBad = 0;
+      for (const k of ['nl', 'glyphs', 'rows', 'headLen', 'tailLen', 'tailAdv']) if (ws.seed[k] !== truth[k]) sBad++;
+      ok(sBad === 0, `seed ${9000 + s}: windowSeedAt seed ≡ full fold`);
+    }
+
+    // rows → byte range → materialize → compare against the full run.
+    const totalRows = full.itemBounds[0]?.totalRows ?? 0;
+    if (totalRows < 2) continue;
+    const r0 = Math.floor(r() * (totalRows - 1));
+    const r1 = Math.min(totalRows, r0 + 1 + Math.floor(r() * 10));
+    const win = byteRangeForRows(bytes, trie, rec, r0, r1, wrap);
+    ok(!!win, `seed ${9000 + s}: byteRangeForRows(${r0},${r1})`);
+    if (!win) continue;
+
+    const wres = runWindow(bytes, trie, {
+      origin: undefined, page: lane.page, wrapWidth: lane.wrapWidth,
+      lineHeight: lane.lineHeight, zStep: lane.zStep || 0, pageStrideX: stride,
+    }, win);
+    winDiff(`seed ${9000 + s} fold=${fold} rows[${r0},${r1})`, full.slots, wres.slots, win.from, win.to, fold);
+
+    // Coverage: every leader in rows [r0, r1) lies inside the window.
+    let missed = 0;
+    for (let id = 0; id < bytes.length; id++) {
+      const o = id * SLOT_STRIDE;
+      if ((full.slots[o + S_FLAGS] & F_LEADER) === 0) continue;
+      const row = full.slots[o + S_ROW];
+      if (row >= r0 && row < r1 && (id < win.from || id >= win.to)) missed++;
+    }
+    ok(missed === 0, `seed ${9000 + s}: ${missed} leaders of rows [${r0},${r1}) fell outside the window`);
+    windows++;
+  }
+  console.log(`  window sweep: ${windows} windows proven, ${nulls} unseedable folds refused`);
+
+  // The refusal contract: a WRAP narrower than the longest line returns null —
+  // but the same file stays seedable unwrapped, pageCols fold or not.
+  const longLine = enc.encode('x'.repeat(300) + '\nshort\n');
+  const rec = bakeFile(longLine, trie, { lineHeight: CELL_H });
+  ok(!windowSeedable(rec, 100) && windowSeedAt(longLine, trie, rec, 50, 100) === null
+    && byteRangeForRows(longLine, trie, rec, 0, 2, 100) === null,
+    'window: wrapping lines refuse wrap-0 seeds (null, caller falls back loud)');
+  ok(windowSeedable(rec, 0) && !!byteRangeForRows(longLine, trie, rec, 0, 2, 0)
+    && !!windowSeedAt(longLine, trie, rec, 250, 0, 40),
+    'window: the same file is seedable unwrapped — pageCols fold included');
 }
 
 console.log(`\n${fail === 0 ? '✓' : '✗'} bake: ${pass} passed, ${fail} failed`);
