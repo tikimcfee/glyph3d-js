@@ -9,7 +9,7 @@
 // independent: GlyphAtlas is a plain handle, the shaper is WASM, SlugEncoder is
 // data — so it can run before any WebGPU device exists.
 
-import { GlyphAtlas, EmojiAtlas, collectUniqueGlyphIds } from '@glyph3d/core';
+import { GlyphAtlas, EmojiAtlas, collectUniqueGlyphIds, deriveCharSize } from '@glyph3d/core';
 import { MonospaceShapeCache, shapeText, LiveSlugAtlas, FontChain,
          slugCoreKey, loadSlugCore, loadServedSlugCore, saveSlugCore, discardSlugCore } from '@glyph3d/core/shaping';
 import { getWorkerBridge } from '@glyph3d/core/workers';
@@ -58,20 +58,8 @@ const codepointsFromRanges = (ranges) => {
   return s;
 };
 
-/** Monospace cell size FROM THE SHAPER — the single metrics source. width = the 'M' advance
- *  (the forced monospace column the builder lays out to); height = the PRIMARY font's REAL
- *  vertical em (ascender − descender from fontExtents), the SAME range encodeGlyph normalizes
- *  each glyph's Y into. Anchoring the cell on the real metric — not the old fontSize × 1.15
- *  guess — makes a glyph fill its cell, so full-height box-drawing tiles row-to-row and a
- *  highlight hugs the text instead of carrying a dead band. */
-const deriveCharSize = (shaper, fontSize) => {
-  const upem = shaper.upem || 2048;
-  const shaped = shaper.shape ? shaper.shape('M') : null;
-  const ax = (shaped && shaped[0]) ? shaped[0].ax : upem * 0.6;
-  const ext = shaper.fontExtents ? shaper.fontExtents() : null;        // primary font's hExtents
-  const emHeight = ext ? (ext.ascender - ext.descender) / upem : 1.15; // real em, fallback to the old guess
-  return { width: Math.ceil(ax / upem * fontSize), height: emHeight * fontSize };
-};
+// deriveCharSize lives in @glyph3d/core cellMetrics — one expression shared with the
+// headless bake, so baked advances are bit-identical to what this boot derives.
 
 /**
  * Boot the glyph pipeline.

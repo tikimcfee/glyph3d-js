@@ -122,9 +122,14 @@ function seatFileGrid(ctx, path, grid, notRendered, mtime) {
  * @private
  * @returns {{id: string, load: Promise}|null}
  */
-function registerFileGrid(ctx, path, body, notRendered, mtime) {
+function registerFileGrid(ctx, path, body, notRendered, mtime, baked) {
     const grid = prepFileGrid(ctx, path, notRendered);
     if (!grid) return null;
+    // The baked record (repo layout index) rides in BEFORE the load: the grid
+    // measures at its real footprint from the first pour, and the post-laid gate
+    // checks the GPU bounds against the prediction. Real content only — a
+    // placeholder's synthetic text has nothing to do with the file's bake.
+    if (baked && !notRendered) grid.setBakedRecord(baked);
     const load = grid.loadFile(path, body);
     const id = seatFileGrid(ctx, path, grid, notRendered, mtime);
     return { id, load };
@@ -134,9 +139,9 @@ function registerFileGrid(ctx, path, body, notRendered, mtime) {
  *  Resolves once the grid is seated AND fully laid out (null if already open).
  *  `mtime` (optional) is the disk mtime the content was read at, stashed for the
  *  save-time stale-write check; omit it for content with no disk identity (GitHub). */
-export async function addFileGrid(ctx, path, content, mtime) {
+export async function addFileGrid(ctx, path, content, mtime, baked) {
     const reason = unreadableReason(content);
-    const r = registerFileGrid(ctx, path, reason ? placeholderBody(reason) : content, reason, mtime);
+    const r = registerFileGrid(ctx, path, reason ? placeholderBody(reason) : content, reason, mtime, baked);
     if (!r) return null;
     await r.load;
     return r.id;

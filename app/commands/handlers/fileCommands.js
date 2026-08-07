@@ -22,6 +22,7 @@ import { READABLE_MAX_CHARS } from '@glyph3d/core';
 import { snapshotLoadStats, diffLoadStats, loadStats } from '@glyph3d/core/core/loadStats.js';
 import { FS_ERROR_CODES } from '@glyph3d/core/services/data';
 import { renderSheetGrid, addFileGrid, addUnfetchedGrid, getDiskMtime, setDiskMtime } from './fileLoader.js';
+import { loadBakedIndex } from './bakedIndex.js';
 import { canonicalPath, toFileUri } from './pathResolve.js';
 
 /**
@@ -190,6 +191,11 @@ export default function registerFileCommands(router) {
             return { text: `ERR: listTree failed: ${err?.message || err}`, data: null };
         }
         trace.mark('list', { entries: listing.entries.length });
+        // The baked layout index (.glyph3d/bake/, tools/bake.mjs) — absent for most
+        // dirs (null, zero cost); present + valid, every record measures its grid
+        // before bytes lay and arms the post-laid GPU gate.
+        const baked = await loadBakedIndex(ctx, dir).catch(() => null);
+
         const joinBase = dir === '/' ? '' : dir;
         const entries = dir
             ? listing.entries.map((e) => ({ ...e, path: `${joinBase}/${e.path}` }))
@@ -301,7 +307,7 @@ export default function registerFileCommands(router) {
                     const p = want[i++];
                     const c = contentMap.get(p);
                     if (c == null) continue;
-                    const pr = addFileGrid(ctx, p, c.content); // seats synchronously; load resolves later
+                    const pr = addFileGrid(ctx, p, c.content, undefined, baked?.get(p)); // seats synchronously; load resolves later
                     pending.push(pr);
                     pr.then(seat).catch(settleWarn);
                 }

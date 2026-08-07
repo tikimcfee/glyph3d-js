@@ -47,6 +47,8 @@ var maxReadDirEntries = 10000
 // Directories to skip during tree walk.
 var skipDirs = map[string]bool{
 	".git":         true,
+	".glyph3d":     true, // the baked layout index (tools/bake.mjs) — data, not source
+
 	"node_modules": true,
 	"__pycache__":  true,
 	".cache":       true,

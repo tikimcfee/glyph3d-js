@@ -53,3 +53,4 @@ app/public/slug-core/
 # Browser console capture (dev aid)
 console.log
 .claude/
+.glyph3d/

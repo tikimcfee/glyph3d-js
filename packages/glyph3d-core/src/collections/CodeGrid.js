@@ -16,6 +16,7 @@ import { loadStats } from '../core/loadStats.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import { BOUNDS_Z_PAD } from '../core/constants.js';
 import { computeCellMetrics } from '../core/cellMetrics.js';
+import { rowsUnderWrap } from '../compute/glyphBake.js';
 import { resolveLayoutParams, DEFAULT_LAYOUT } from '../workers/builders/index.js';
 import { getPipelineArena } from '../compute/GlyphLayoutCompute.js';
 import ByteLayoutDescription, { buildByteLineIndex } from '../core/ByteLayoutDescription.js';
@@ -1165,6 +1166,27 @@ class CodeGrid extends FramedGlyphField {
             // scroll clamps and culling all read the record). Resolves even on device
             // loss — a load never hangs on it.
             await this._pipeline.laid;
+
+            // The bake gate: the GPU's bounds vs the index's prediction, once per load.
+            // Rows are integer-exact under any wrap; the widest row compares only when
+            // nothing folds (a folded line's segments aren't derivable from the record).
+            // A mismatch means a stale record or fold drift — loud, never corrected
+            // silently (the GPU extent is the truth either way).
+            if (this._bakedRecord && !this._bakedChecked && this._pipeline.bounds) {
+                this._bakedChecked = true;
+                const rec = this._bakedRecord;
+                const wrap = Math.max(0, Math.trunc(lp.wrapWidth || 0));
+                const got = this._pipeline.bounds;
+                const wantRows = rowsUnderWrap(rec, wrap);
+                if (got.totalRows !== wantRows) {
+                    console.warn(`[bake] ${this.filename || this.name}: baked rows(wrap ${wrap}) = ${wantRows} ≠ GPU ${got.totalRows} — stale record or fold drift`);
+                } else if (wrap === 0 || rec.maxLineLen <= wrap) {
+                    const rel = Math.abs(got.maxRowExtent - rec.maxRowExtent) / Math.max(1, rec.maxRowExtent);
+                    if (rel > 1e-4) {
+                        console.warn(`[bake] ${this.filename || this.name}: baked widest row ${rec.maxRowExtent} vs GPU ${got.maxRowExtent} (rel ${rel.toExponential(2)}) — metrics drift?`);
+                    }
+                }
+            }
         }
         this._buildLayoutDescription();
         this._applyClip();
@@ -1253,7 +1275,50 @@ class CodeGrid extends FramedGlyphField {
      * @returns {{min:{x,y,z}, max:{x,y,z}, width:number, height:number, depth:number}|null}
      */
     _getContentBounds() {
-        return this._layout?.extent() ?? null;
+        return this._layout?.extent() ?? this._bakedPriorExtent();
+    }
+
+    /**
+     * Attach this file's BAKED record (the repo's layout index — glyphBake.js). Two
+     * consumers: _bakedPriorExtent measures the grid before its bytes are laid (the
+     * load storm's mid-stream pours place a real footprint instead of a unit box),
+     * and the post-laid gate checks the GPU's bounds against the baked prediction.
+     * @param {{leaders:number, maxLineWidth:number, maxLineLen:number, total:Object,
+     *          lineHist:Map<number,number>}} record
+     */
+    setBakedRecord(record) {
+        this._bakedRecord = record || null;
+        this._bakedChecked = false;
+    }
+
+    /**
+     * The measure PRIOR from the baked record, under this grid's CURRENT fold — used
+     * only while the pipeline hasn't laid (then the GPU extent takes over). Rows are
+     * EXACT for any wrap (the record's line histogram); width is exact when no line
+     * folds and a bounded overestimate when one does (a segment is never wider than
+     * its whole line). Pagination is ignored — the boot fold is unpaged (pageHeight
+     * 0); a paged grid just measures by its unpaged column until laid.
+     * @private
+     * @returns {{min:Object, max:Object, width:number, height:number, depth:number}|null}
+     */
+    _bakedPriorExtent() {
+        const rec = this._bakedRecord;
+        if (!rec || !(rec.leaders > 0) || this.content.length === 0) return null;
+        const m = this.metrics;
+        const lp = resolveLayoutParams(this._foldLayout());
+        const wrap = Math.max(0, Math.trunc(lp.wrapWidth || 0));
+        const rows = rowsUnderWrap(rec, wrap);
+        const originY = (this.config.showFilename && this.filename)
+            ? -m.lineHeight * 1.5
+            : 0;
+        const zStep = m.charHeight * (lp.zWrapSpacing || 0);
+        const segs = wrap > 0 ? Math.max(1, Math.ceil(rec.maxLineLen / wrap)) : 1;
+        const min = { x: 0, y: originY - (rows - 1) * m.lineHeight, z: -(segs - 1) * zStep };
+        const max = { x: rec.maxLineWidth, y: m.charHeight, z: 0 };
+        return {
+            min, max,
+            width: max.x - min.x, height: max.y - min.y, depth: max.z - min.z,
+        };
     }
 
     // ============ Line → Byte-Slot Mapping ============

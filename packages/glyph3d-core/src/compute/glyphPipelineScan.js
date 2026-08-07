@@ -72,25 +72,36 @@ export function scanIdentity() {
 }
 
 /**
- * The leaf for byte `id`, read from the decoded slots. `wrap` is the owning item's
- * fold unit; `isItemStart` marks the absorbing reset.
+ * The leaf as a pure value — one byte's monoid element from its decoded facts alone.
+ * The slots-reading scanLeaf below and the bake's streaming fold (glyphBake.js, which
+ * never allocates slots) both build their leaves HERE, so the element can't drift.
+ * `wrap` is the owning item's fold unit; `isItemStart` marks the absorbing reset.
  */
-export function scanLeaf(slots, id, wrap, isItemStart) {
-    const o = id * SLOT_STRIDE;
-    const flags = slots[o + S_FLAGS];
+export function scanLeafValue(codepoint, advance, isLeader, wrap, isItemStart) {
     const e = scanIdentity();
     e.reset = isItemStart ? 1 : 0;
     e.wrap = wrap;
-    if ((flags & F_LEADER) === 0) return e;      // continuation byte: reset/wrap only
+    if (!isLeader) return e;                      // continuation byte: reset/wrap only
     e.glyphs = 1;
-    if (slots[o + S_CODEPOINT] === NEWLINE) {
+    if (codepoint === NEWLINE) {
         e.nl = 1;                                 // head/tail stay 0: the line it closes
     } else {                                      // started before this interval
         e.headLen = 1;
         e.tailLen = 1;
-        e.tailAdv = slots[o + S_ADVANCE];
+        e.tailAdv = advance;
     }
     return e;
+}
+
+/** The leaf for byte `id`, read from the decoded slots. */
+export function scanLeaf(slots, id, wrap, isItemStart) {
+    const o = id * SLOT_STRIDE;
+    return scanLeafValue(
+        slots[o + S_CODEPOINT],
+        slots[o + S_ADVANCE],
+        (slots[o + S_FLAGS] & F_LEADER) !== 0,
+        wrap, isItemStart,
+    );
 }
 
 /**

@@ -4,7 +4,8 @@
  *
  *   bun tools/bake-slug-core.mjs
  *
- * Headless (HarfBuzz + FontChain run in bun). Encodes the LARGE_CORE for the app's font
+ * Headless (HarfBuzz + FontChain run in bun, via tools/headlessFontChain.mjs — the
+ * same harness the layout bake uses). Encodes the LARGE_CORE for the app's font
  * chain and writes a gzipped blob to app/public/slug-core/<key>.bin — Vite copies public/
  * into the build, and `make build` stages that into the binary, so the asset ships with
  * both the web app and the CLI. At runtime the boot ladder fetches `/slug-core/<key>.bin`,
@@ -15,73 +16,27 @@
  * would encode+cache, and the key is the same name-based key the runtime computes.
  *
  * Re-run this when the font files, LARGE_CORE_RANGES, or SLUG_BUFFER_FORMAT change (the key
- * changes too; the old asset is simply never requested). If the names below or the ranges
- * drift from the app, the worst case is a runtime 404 → live encode (fail-safe, not broken).
+ * changes too; the old asset is simply never requested). If the names in headlessFontChain
+ * or the ranges drift from the app, the worst case is a runtime 404 → live encode
+ * (fail-safe, not broken).
  */
 
-import { readFileSync, mkdirSync, writeFileSync, readdirSync, rmSync } from 'fs';
-import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
+import { mkdirSync, writeFileSync, readdirSync, rmSync } from 'fs';
+import { join } from 'path';
+import { ROOT, bootHeadlessFontChain } from './headlessFontChain.mjs';
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const { chain, fonts } = await bootHeadlessFontChain();
 
-// Disk-backed fetch so FontChain (and emscripten's wasm load) read from the filesystem.
-const realFetch = globalThis.fetch;
-globalThis.fetch = async (input, init) => {
-    const url = String(input?.url ?? input);
-    if (url.startsWith('file://') || url.startsWith('/')) {
-        try {
-            const p = url.startsWith('file://') ? fileURLToPath(url) : url;
-            const buf = readFileSync(p);
-            return { ok: true, status: 200, arrayBuffer: async () => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) };
-        } catch { return { ok: false, status: 404 }; }
-    }
-    return realFetch(input, init);
-};
-
-const { FontChain, MonospaceShapeCache, shapeText, collectUniqueGlyphIds, SlugEncoder,
+const { MonospaceShapeCache, shapeText, collectUniqueGlyphIds, SlugEncoder,
         slugCoreKey, saveSlugCore } = await import(`${ROOT}/packages/glyph3d-core/src/shaping/index.js`);
 const { blobStore } = await import(`${ROOT}/packages/glyph3d-core/src/services/state/index.js`);
 const { LARGE_CORE_RANGES } = await import(`${ROOT}/packages/glyph3d-r3f/src/coreRanges.js`);
-
-// MUST match app/main.jsx FONT_CHAIN names (the key is name-based). A mismatch only costs a
-// runtime 404 → live encode; it can't render wrong glyphs.
-const FONTS = [
-    { name: 'Cousine',          file: 'packages/glyph3d-core/src/fonts/Cousine-Regular.ttf' },
-    { name: 'MesloLGS NF Mono', file: 'packages/glyph3d-core/src/fonts/MesloLGS-NF-Mono.ttf' },
-    { name: 'DejaVu Sans',      file: 'packages/glyph3d-core/src/fonts/DejaVuSans.ttf' },
-];
 
 const codepointsFromRanges = (ranges) => {
     let s = '';
     for (const [lo, hi] of ranges) for (let cp = lo; cp <= hi; cp++) s += String.fromCodePoint(cp);
     return s;
 };
-
-const fonts = FONTS.map((f) => ({ url: `file://${ROOT}/${f.file}`, name: f.name }));
-const chain = new FontChain();
-await chain.init(fonts);
-
-// CRITICAL: the runtime sets an EmojiAtlas, and FontChain allocates a BITMAP slot for any
-// emoji-presentable codepoint (0x2600–0x27BF, 0x2B00–0x2BFF) that no outline font covers —
-// from the SAME dense slot counter as outline glyphs. Without it the bake would skip those
-// slots and every later slot would shift, so the hydrated textures would be keyed wrong
-// (common text fine, symbols garbled). This stub replicates EmojiAtlas.ensure() — a per-cp-
-// cached monotonic counter — so the bake's slot+cell allocation matches the runtime's. It
-// draws nothing (the runtime redraws cells via prime); only the allocation ORDER matters.
-// The real atlas now GROWS (no fixed cap), and the count of uncovered emoji-symbols in the
-// core is far below its ceiling, so the stub is uncapped — both allocate every one.
-const stubEmojiAtlas = {
-    _byCp: new Map(), _next: 0,
-    ensure(cp) {
-        const c = this._byCp.get(cp);
-        if (c !== undefined) return c;
-        const idx = this._next++;
-        this._byCp.set(cp, idx);
-        return idx;
-    },
-};
-chain.setEmojiAtlas(stubEmojiAtlas);
 
 const text = codepointsFromRanges(LARGE_CORE_RANGES);
 const shapeCache = new MonospaceShapeCache(chain);
