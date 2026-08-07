@@ -497,14 +497,13 @@ export class PickingSystem {
         // shared transform, no per-object uniforms.
 
         // Byte-pipeline fields read position/size/glyphId from the pipeline's slot buffer
-        // (GlyphField._fieldSlots does the same for the render material — one buffer, per
-        // field swap; slotBase is the multi-file hoist seam).
-        let byteSlots = null, byteSlotBase = null;
+        // (GlyphField._fieldSlots does the same for the render material — one buffer,
+        // instance index == arena slot).
+        let byteSlots = null;
         if (byteMode) {
             const placeholder = new _StorageInstancedBufferAttribute(new Float32Array(4), 1);
             byteSlots = _registerByteSlotsNode(_storage(placeholder, 'float', 1).toReadOnly().onObjectUpdate(({ object }, self) =>
                 (object && object.userData.glyphField && object.userData.glyphField._byteSlots) || self.value));
-            byteSlotBase = fUni('_byteSlotBase', 0);
         }
 
         // Per-mesh ID-block start (read straight off userData — set by register()).
@@ -517,7 +516,7 @@ export class PickingSystem {
             // GlyphId/GroupId) are declared inside it by name and bind to this mesh.
             const { clipPos } = _buildGlyphVertexTransform({
                 glyphMapTex, glyphMapWidth, renderMode, groupTex,
-                byteSlots, byteSlotBase,
+                byteSlots,
             });
             return clipPos;
         });
@@ -632,9 +631,16 @@ export class PickingSystem {
      * @param {string} channelName
      * @param {*} target - renderer ('glyph') or mesh ('flat')
      * @param {*} token  - what a hit resolves to
+     * @param {Object} [opts]
+     * @param {number} [opts.count] - explicit ID-block size for a 'glyph' channel,
+     *   overriding the live instanceCount. The mega-field registers ONCE at its
+     *   CAPACITY: unoccupied slots are vertex-culled (dead group) so they can never
+     *   be picked, and a stable block means no per-attach re-registration (a
+     *   re-register per load rewrote the capacity-sized ID mirror per file — the
+     *   O(storm × arena) microtask burn).
      * @returns {number} the startId assigned (0 if nothing to register)
      */
-    register(channelName, target, token) {
+    register(channelName, target, token, opts) {
         const ch = this._channel(channelName);
         const mesh = this._meshOf(ch, target);
         if (!mesh?.geometry) return 0;
@@ -643,7 +649,7 @@ export class PickingSystem {
         // first-fit reuse below (re-register-in-place on flush/resize).
         this.unregister(channelName, target);
 
-        const count = ch.kind === 'glyph' ? (mesh.geometry.instanceCount || 0) : 1;
+        const count = ch.kind === 'glyph' ? (opts?.count || mesh.geometry.instanceCount || 0) : 1;
         if (count === 0) return 0;
 
         // First-fit over this channel's LIVE entries: lowest startId >= 1 whose

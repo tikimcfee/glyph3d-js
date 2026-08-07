@@ -7,10 +7,12 @@
  * @license MIT
  */
 
-// Core rendering — GlyphField is the WebGPU/TSL renderer (the one renderer).
+// Core rendering — GlyphField is the WebGPU/TSL renderer (the one renderer);
+// MegaGlyphField is the arena-backed field every byte grid is a VIEW into.
 export { default as GlyphAtlas } from './GlyphAtlas.js';
 export { default as EmojiAtlas } from './EmojiAtlas.js';
 export { default as GlyphField } from './GlyphField.js';
+export { MegaGlyphField, MegaFieldView, ensureMegaField } from './MegaGlyphField.js';
 
 // Collections - batched text abstractions
 export { default as CodeGrid } from './collections/CodeGrid.js';

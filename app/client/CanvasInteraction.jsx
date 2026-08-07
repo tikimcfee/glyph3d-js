@@ -28,6 +28,21 @@ const _pickWorld = new THREE.Vector3(); // scratch for cross-channel camera-dist
 // Caret-preview tint for the glyph under the pointer (additive over syntax color,
 // via the highlight texture). Mid-tone cool lift — pure white blows out light glyphs.
 const HOVER_GLYPH_TINT = { r: 0.18, g: 0.25, b: 0.38 };
+// Map a glyph-channel hit to a GRID-LOCAL slot, or null when the hit isn't this
+// grid's glyph. Byte grids are VIEWS sharing one mega-field mesh — the hit token is
+// the mega-field and slotIndex is the ABSOLUTE arena slot, resolved to (view,
+// view-local slot) by its range table; classic fields (terminals) keep token ===
+// the grid's own renderer with field-local slots.
+const resolveGlyphHitFor = (grid, hit) => {
+  if (!hit) return null;
+  const r = grid?.getRenderer?.();
+  if (!r) return null;
+  if (typeof hit.token?.resolveSlot === 'function') {
+    const m = hit.token.resolveSlot(hit.slotIndex);
+    return (m && m.view === r) ? m.localSlot : null;
+  }
+  return hit.token === r ? hit.slotIndex : null;
+};
 // Hover outline inflation. Small — the box hugs the panel edge (getLocalBounds
 // already carries the background padding), so a hover on an UNfocused grid reads as
 // a tight halo, not a fat frame floating out in space. When hover lands on the
@@ -161,8 +176,9 @@ export function CanvasPicker() {
       ps.setMousePosition(s.x - rect.left, s.y - rect.top);
       ps.markDirty(); // channels share one _needsPick latch — mandatory before this pass
       return ps.pickAsync('glyph', camera, scene).then((hit) => {
-        if (!hit || hit.token !== entry.grid.getRenderer?.()) return false; // missed, or another grid's glyphs
-        const pos = entry.grid.getCharForSlot?.(hit.slotIndex);
+        const slot = resolveGlyphHitFor(entry.grid, hit);
+        if (slot == null) return false; // missed, or another grid's glyphs
+        const pos = entry.grid.getCharForSlot?.(slot);
         if (!pos) return false;
         router.execute(['edit.goto', entry.id, String(pos.line), String(pos.col)]);
         return true;
@@ -375,8 +391,8 @@ export function CanvasPicker() {
               }
               ps.markDirty();
               return ps.pickAsync('glyph', c, scene).then((gh) => {
-                const renderer = entry.grid.getRenderer?.();
-                if (s.in && gh && gh.token === renderer) applyGlyphHover(renderer, gh.slotIndex);
+                const slot = s.in ? resolveGlyphHitFor(entry.grid, gh) : null;
+                if (slot != null) applyGlyphHover(entry.grid.getRenderer(), slot);
                 else applyGlyphHover(null, null);
               }, () => applyGlyphHover(null, null));
             });

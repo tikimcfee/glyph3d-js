@@ -6,8 +6,10 @@
 // renderer attribute. Returns { distinct, colors } or { err }.
 const GRID = `const c=window.__glyphClient;const gs=c.ctx.getGrids?c.ctx.getGrids():[];const g=gs.find(x=>((x.getFilename&&x.getFilename())||x.filename||"").includes("package.json"))||gs[gs.length-1];`;
 
-// Distinct instanceColor RGBs (the 3D render target).
-const INSPECT = `(()=>{${GRID}if(!g)return{err:"no grid"};const r=g.getRenderer&&g.getRenderer();const attr=r&&r.instanceMesh&&r.instanceMesh.geometry.attributes.instanceColor;if(!attr)return{err:"no instanceColor"};const a=attr.array;const n=Math.min(a.length/3,(r.getGlyphCount&&r.getGlyphCount())||a.length/3);const m=new Map();for(let i=0;i<n;i++){const k=a[i*3].toFixed(2)+","+a[i*3+1].toFixed(2)+","+a[i*3+2].toFixed(2);m.set(k,1);}return{distinct:m.size,colors:[...m.keys()]};})()`;
+// Distinct instanceColor RGBs (the 3D render target). The renderer is a mega-field
+// VIEW: the shared instanceColor attribute is addressed by ABSOLUTE arena slot, so
+// the probe reads the view's [slotBase, slotBase+count) range.
+const INSPECT = `(()=>{${GRID}if(!g)return{err:"no grid"};const r=g.getRenderer&&g.getRenderer();const attr=r&&r.mega&&r.mega.field.instanceMesh.geometry.attributes.instanceColor;if(!attr)return{err:"no instanceColor"};const a=attr.array;const base=r.slotBase;const n=r.getGlyphCount();const m=new Map();for(let i=base;i<base+n;i++){const k=a[i*3].toFixed(2)+","+a[i*3+1].toFixed(2)+","+a[i*3+2].toFixed(2);m.set(k,1);}return{distinct:m.size,colors:[...m.keys()]};})()`;
 
 // The render-neutral highlight product a 2D companion view will consume (one parse, reused).
 const HILITE = `(()=>{${GRID}if(!g||!g.getHighlights)return{err:"no getHighlights"};const h=g.getHighlights();if(!h)return{err:"no highlights"};const caps=h.captures||[];const c0=caps[0];return{count:caps.length,lang:h.lang,hasOffsets:!!c0&&Number.isInteger(c0.startIndex)&&Number.isInteger(c0.endIndex)};})()`;

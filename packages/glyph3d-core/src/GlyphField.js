@@ -654,10 +654,9 @@ function _getSharedFieldMaterial(kind) {
     const frameColsNode    = _fieldUniform(1, (f) => f._frameCols || 1);
     const frameRowsNode    = _fieldUniform(1, (f) => f._frameRows || 1);
     // Byte-pipeline kind: position/size/glyphId come from the pipeline's slot buffer,
-    // resolved per field (see _fieldSlots); slotBase is the multi-file hoist seam.
+    // resolved per field (see _fieldSlots); slot index == instance index.
     const isByte = kind === 'byteGlyph';
     const byteSlotsNode    = isByte ? _fieldSlots() : null;
-    const byteSlotBaseNode = isByte ? _fieldUniform(0, (f) => f._byteSlotBase || 0) : null;
 
     const { vertexFn, vColor, vGroupAlpha, vAddedColor, vFillAmount, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell } =
         _buildVertexNode({
@@ -668,7 +667,6 @@ function _getSharedFieldMaterial(kind) {
             glyphMapWidth:  glyphMapWNode,
             renderMode:     renderModeNode,
             byteSlots:      byteSlotsNode,
-            byteSlotBase:   byteSlotBaseNode,
         });
 
     const outputNode = kind === 'occluder'
@@ -735,11 +733,10 @@ export default class GlyphField {
         // Byte-pipeline mode: the byte-in GPU pipeline owns this field's positions/sizes/
         // glyphIds — the vertex transform reads the pipeline's stride-11 slot buffer (see
         // _fieldSlots / core/glyphVertex.js), so this field never carries those instance
-        // attributes. _byteSlots attaches at first load; _byteSlotBase is the field's
-        // byteStart inside the shared pipeline arena (0 for a single-file pipeline).
+        // attributes. _byteSlots attaches at first load; slot index == instance index ==
+        // arena byte offset (the mega-field is the one byte field, spanning the arena).
         this._bytePipeline = !!options.bytePipeline;
         this._byteSlots = null;
-        this._byteSlotBase = 0;
 
         // Frustum-cull opt-out (see _createInstanceMesh): the CPU-side geometry bounds cover
         // instance positions only, so a field anchored via group offsets has a false bounding
@@ -1742,32 +1739,29 @@ export default class GlyphField {
     /**
      * Attach a byte-in pipeline (compute/GlyphPipelineKernels.js) as this field's layout
      * engine: positions/sizes/glyphIds are read by the vertex transform straight from the
-     * pipeline's slot buffer (see _fieldSlots). Sets the instance count to the byte length
-     * and fills the per-byte color attribute with the field's default color (continuation
-     * slots are never leaders — their zeroed size lanes render nothing, so their color is
-     * irrelevant but the array must span the buffer). Only for bytePipeline-constructed
-     * fields.
+     * pipeline's slot buffer (see _fieldSlots), one slot per instance, slot index ==
+     * arena byte offset. Sets the instance count and sizes the highlight texture; the
+     * per-byte color/group lanes are the CALLER's (the mega-field fills each view's
+     * range with that view's color — see MegaGlyphField._attachView). Only for
+     * bytePipeline-constructed fields.
      * @param {import('./compute/GlyphPipelineKernels.js').default} pipeline
      * @param {number} byteLength - the live byte count (instance count)
-     * @param {number} [slotBase=0] - this field's first byte IN the pipeline's buffer.
-     *   The multi-file hoist: when the pipeline is an arena serving many files, the field
-     *   reads its slots at (slotBase + instanceIndex) × SLOT_STRIDE.
      */
     attachBytePipeline(pipeline, byteLength, slotBase = 0) {
         if (!this._bytePipeline) throw new Error('attachBytePipeline on a non-bytePipeline field');
+        if (slotBase !== 0) {
+            // Fail loud at the seam: this field reads slots at instanceIndex — an
+            // arena item at a nonzero byteStart needs a MegaGlyphField VIEW, or its
+            // glyphs would silently render some other file's bytes.
+            throw new Error(`GlyphField.attachBytePipeline: nonzero slotBase (${slotBase}) — stage through a MegaGlyphField view`);
+        }
         this._byteSlots = pipeline.slots.value;
         // Re-point the shared slots nodes (render + pick) and wake their bind groups —
         // after an arena realloc the old buffer is destroyed, and without this every
         // frame's submit would reference it (see rebindByteSlots in core/glyphVertex).
         rebindByteSlots(this._byteSlots);
-        this._byteSlotBase = slotBase;
         const geom = this.instanceMesh.geometry;
         const count = Math.min(byteLength, this.config.maxInstances);
-        // (Re)fill the default color across the live range — the colorizer overwrites after.
-        const col = geom.attributes.instanceColor;
-        const d = this.config.defaultColor;
-        for (let i = 0; i < count; i++) { col.array[i * 3] = d.r; col.array[i * 3 + 1] = d.g; col.array[i * 3 + 2] = d.b; }
-        col.needsUpdate = true;
         this._ensureHighlightTexture(count);
         geom.instanceCount = count;
     }

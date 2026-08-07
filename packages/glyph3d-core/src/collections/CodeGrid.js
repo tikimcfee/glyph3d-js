@@ -11,7 +11,7 @@
  */
 
 import * as THREE from 'three';
-import GlyphField from '../GlyphField.js';
+import { ensureMegaField } from '../MegaGlyphField.js';
 import { loadStats } from '../core/loadStats.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import { BOUNDS_Z_PAD } from '../core/constants.js';
@@ -102,8 +102,6 @@ class CodeGrid extends FramedGlyphField {
         // ── Load state ────────────────────────────────────────────────────────
         this._dirty          = false;   // content changed since last layout
         this._modified       = false;   // content edited since load / last save (the UNSAVED state)
-        this._bufferHeadroom = 1.1; // 10% extra
-        this._bufferSize     = 0;
         // ─────────────────────────────────────────────────────────────────────────
 
         // Group — the renderer's instanceMesh will be added to the scene through
@@ -283,14 +281,8 @@ class CodeGrid extends FramedGlyphField {
         // structure — the GPU walk derives row/col itself).
         this._bytes = _textEncoder.encode(text);
         this._byteLineIndex = buildByteLineIndex(this._bytes);
-        // Growth: a bigger file than the buffers hold recreates field + pipeline (the
-        // same "right-size on load" contract the worker path had).
-        if (this._renderer && this._bytes.length > this._bufferSize) {
-            this._pipeline?.dispose();
-            this._renderer?.dispose?.();
-            this._renderer = null;
-            this._pipeline = null;
-        }
+        // No growth path: the view is unsized — capacity is the ARENA's (it grows
+        // itself); a bigger file just stages a bigger item.
         this._ensureRenderer();              // reconstruct if content was evicted
         this._clearRenderedText();           // drop the PRIOR render's glyphs; the layout below adds the new ones
     }
@@ -556,9 +548,21 @@ class CodeGrid extends FramedGlyphField {
         );
     }
 
-    // getRenderer() + setPickingSystem() (the glyph + grid channels) are inherited from
-    // FramedGlyphField. The flush path re-registers the glyph channel after each rebuild
-    // (instanceCount changes) via this._pickingSystem directly.
+    // getRenderer() is inherited from FramedGlyphField (returns the mega-field VIEW —
+    // canvas picking maps a resolved glyph hit back to this grid through it).
+
+    /**
+     * Wire the PickingSystem. Overrides FramedGlyphField: the glyph channel is the
+     * MEGA-FIELD's one registration (every byte view shares it — a view has no mesh
+     * to register); only the 'grid' channel (the background panel) is per-grid.
+     * @param {import('../picking/PickingSystem.js').PickingSystem} pickingSystem
+     */
+    setPickingSystem(pickingSystem) {
+        this._pickingSystem = pickingSystem;
+        if (!pickingSystem) return;
+        if (this._background) pickingSystem.register('grid', this._background, this);
+        getPipelineArena()?.megaField?.setPickingSystem(pickingSystem);
+    }
 
     /**
      * Get glyph count
@@ -938,19 +942,23 @@ class CodeGrid extends FramedGlyphField {
      * Dispose of all resources
      */
     dispose() {
-        // Leave both picking channels cleanly before the renderer + panel are
-        // torn down, or the passes would swap materials onto a disposed mesh.
-        if (this._pickingSystem) {
-            if (this._renderer)   this._pickingSystem.unregister('glyph', this._renderer);
-            if (this._background) this._pickingSystem.unregister('grid', this._background);
+        // Leave the grid picking channel cleanly before the panel is torn down, or the
+        // pass would swap materials onto a disposed mesh. (The glyph channel is the
+        // mega-field's ONE registration — a view dispose just tombstones its range.)
+        if (this._pickingSystem && this._background) {
+            this._pickingSystem.unregister('grid', this._background);
         }
 
-        // Dispose renderer
+        // Dispose the views (range → dead group; the mega mesh lives on)
         if (this._renderer) {
             this._renderer.dispose();
             this._renderer = null;
         }
-        // Detach the arena handles BEFORE any realloc could re-attach the dead fields.
+        if (this._filenameField) {
+            this._filenameField.dispose();
+            this._filenameField = null;
+        }
+        // Detach the arena handles BEFORE any realloc could re-attach the dead views.
         this._pipeline?.dispose?.();
         this._pipeline = null;
         this._filenamePipeline?.dispose?.();
@@ -995,51 +1003,54 @@ class CodeGrid extends FramedGlyphField {
     }
 
     /**
-     * Ensure the GlyphField renderer exists, reconstructing it from the stored atlas
-     * if content was previously evicted. Called at the top of
-     * loadText() so that method is safe to use on evicted grids.
+     * Ensure the grid's render presence exists — a VIEW into the app's ONE
+     * mega-field (the arena's render face), not a per-grid GlyphField: the view is
+     * unsized (the arena owns capacity), so there is nothing to reconstruct after
+     * eviction beyond re-creating the facade. Called at the top of loadText() so
+     * that method is safe to use on evicted grids.
      * @private
      */
     _ensureRenderer() {
         if (this._renderer) return; // already present
-
-        // Size the buffers to the actual byte count, not the maxChars ceiling — one slot
-        // per byte in the byte pipeline, so bytes are the capacity unit.
-        const sizeHint = Math.min(this._bytes ? this._bytes.length : 0, this.config.maxChars * 4);
-        this._createRendererWithSize(sizeHint, false);
+        this._createRendererView();
 
         // Re-derive metrics in case atlas changed
         this.metrics = this._computeMetrics();
     }
 
     /**
-     * Create a GlyphField with a specific buffer size and wire it up.
+     * Create this grid's mega-field VIEW and wire it up. The view facade speaks the
+     * GlyphField surface (colors, highlight, alpha, clip) offset into the shared
+     * field; the grid itself is the view's pose node (its matrixWorld is the view's
+     * group texel). No per-grid GPU objects — the whole point of the mega-field.
      * @private
-     * @param {number} size - Max instance count for the renderer
-     * @param {boolean} [skipPrealloc=false]
      */
-    _createRendererWithSize(size, skipPrealloc = false) {
-        const bufferSize = Math.max(size, 100);
-        this._bufferSize = bufferSize;
-
-        this._renderer = new GlyphField(this._rendererGroup, this.atlas, {
-            maxInstances:  bufferSize,
-            defaultColor:  this.config.textColor,
+    _createRendererView() {
+        const arena = getPipelineArena();
+        if (!arena) {
+            // Loud once, not per grid: no arena means no WebGPU compute — the byte
+            // pipeline (and so the mega-field) cannot exist; the grid stays empty.
+            if (!CodeGrid._noArenaNoted) {
+                CodeGrid._noArenaNoted = true;
+                console.error('CodeGrid: no pipeline arena — the byte pipeline needs WebGPU; this grid renders EMPTY (boot log has the reason)');
+            }
+            this._renderer = null;
+            return;
+        }
+        if (this.config.occluder && !CodeGrid._occluderByteNoted) {
+            CodeGrid._occluderByteNoted = true;
+            console.warn('CodeGrid: occluder LOD is not byte-native yet — rendering via the mega-field glyph path');
+        }
+        this._renderer = ensureMegaField(arena, {
+            scene:         this.scene,
+            atlas:         this.atlas,
             worldScale:    this.config.worldScale,
             slugData:      this.config.slugData,
             shaper:        this.config.shaper,
-            occluder:      this.config.occluder,
-            bytePipeline:  true,
-        });
-        // No per-grid pipeline: the grid stages its bytes into the SHARED pipeline arena
-        // at layout time (_layoutContent) — one kernels instance per app, this grid an
-        // item in its item table. The arena handle lands on this._pipeline there.
-
-        if (this._pickingSystem) {
-            this._pickingSystem.register('glyph', this._renderer, this._renderer);
-        }
-        // Fade glyphs to match the panel from the start (group 0 = all this grid's
-        // glyphs), so a translucent grid reads as one coherent sheet.
+            pickingSystem: this._pickingSystem,
+        }).createView({ node: this, color: this.config.textColor });
+        // Fade glyphs to match the panel from the start, so a translucent grid reads
+        // as one coherent sheet.
         this._applyGlyphAlpha();
     }
 
@@ -1118,11 +1129,11 @@ class CodeGrid extends FramedGlyphField {
      * @private
      */
     async _layoutContent() {
-        // The filename: its own field + arena item at y=0; the content sits 1.5 rows below.
+        // The filename: its own VIEW + arena item at y=0; the content sits 1.5 rows below.
         if (this.config.showFilename && this.filename) {
             await this._layoutFilename();
         } else if (this._filenameField) {
-            this._filenameField.instanceMesh.visible = false;
+            this._filenameField.setVisible(false);
         }
         this._layoutOriginY = (this.config.showFilename && this.filename)
             ? -this.metrics.lineHeight * 1.5
@@ -1132,18 +1143,12 @@ class CodeGrid extends FramedGlyphField {
             const m = this.metrics;
             const lp = resolveLayoutParams(this._foldLayout());
             const arena = getPipelineArena();
-            if (!arena) {
-                // Loud once, not per grid: no arena means no WebGPU compute — the grid
-                // stays empty rather than storming shader errors.
-                if (!CodeGrid._noArenaNoted) {
-                    CodeGrid._noArenaNoted = true;
-                    console.error('CodeGrid: no pipeline arena — the byte pipeline needs WebGPU; this grid renders EMPTY (boot log has the reason)');
-                }
-                if (this._renderer) this._renderer.instanceMesh.visible = false;   // no storage reads under WebGL2
-                return;
-            }
+            // No arena → no view either (_createRendererView logged the loud-once
+            // error); the grid stays empty rather than storming shader errors.
+            if (!arena || !this._renderer) return;
             // The prior item's arena space leaks (v1 — see the arena header); dispose just
-            // detaches this field from the old item so a realloc never re-attaches it stale.
+            // detaches this view from the old item so a realloc never re-attaches it stale.
+            // The view tombstones its old slot range on re-attach (the dead group).
             this._pipeline?.dispose?.();
             this._pipeline = arena.stage({
                 bytes: this._bytes,
@@ -1163,11 +1168,8 @@ class CodeGrid extends FramedGlyphField {
         }
         this._buildLayoutDescription();
         this._applyClip();
-        // Re-register the pick block with the live instance count (the birth registration
-        // saw count 0 — register-in-place reclaims the same ID range).
-        if (this._renderer && this._pickingSystem) {
-            this._pickingSystem.register('glyph', this._renderer, this._renderer);
-        }
+        // (No per-grid pick registration: the mega-field holds the ONE glyph-channel
+        // entry and re-registers itself as its instance count grows.)
 
         // If content shrank below the scroll position (e.g. an edit deleted lines while a
         // frame was active), the conveyor shifted past the end and the framed window would be
@@ -1213,22 +1215,22 @@ class CodeGrid extends FramedGlyphField {
     }
 
     /**
-     * The filename's own field (byte mode), staged into the SAME arena as the content —
-     * its own item at y=0 above the content (wrap 0: a label never folds).
+     * The filename's own VIEW (its own group: independent color + visibility toggle),
+     * staged into the SAME arena as the content — its own item at y=0 above the
+     * content (wrap 0: a label never folds). Poses off the same grid node.
      * @private
      */
     async _layoutFilename() {
-        if (!this._filenameField) {
-            this._filenameField = new GlyphField(this._rendererGroup, this.atlas, {
-                maxInstances: 4096,
-                defaultColor: this.config.filenameColor,
-                worldScale: this.config.worldScale,
-                bytePipeline: true,
-            });
-        }
-        this._filenameField.instanceMesh.visible = true;
         const arena = getPipelineArena();
         if (!arena) return;   // the content path already logged the loud-once error
+        if (!this._filenameField) {
+            this._filenameField = ensureMegaField(arena, {
+                scene: this.scene, atlas: this.atlas,
+                worldScale: this.config.worldScale,
+                pickingSystem: this._pickingSystem,
+            }).createView({ node: this, color: this.config.filenameColor });
+        }
+        this._filenameField.setVisible(true);
         this._filenamePipeline?.dispose?.();
         this._filenamePipeline = arena.stage({
             bytes: _textEncoder.encode(this.filename),

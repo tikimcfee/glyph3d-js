@@ -1,0 +1,360 @@
+/**
+ * MegaGlyphField — ONE render field for every byte-pipeline grid: the render face
+ * of the GlyphPipelineArena. Where each CodeGrid used to build its own GlyphField
+ * (geometry + capacity-sized attributes + highlight/group textures + pick
+ * registration + mesh + render object + bind groups — ×2 with the filename, the
+ * last per-file construction cost), the app now has ONE arena-capacity field and
+ * a grid's render presence is a VIEW into it:
+ *
+ *   view = { groupId, slotBase, byteCount, node }
+ *
+ * - The slot RANGE is the item's bytes in the arena (slot index == arena byte
+ *   offset — the address space picking, highlight and color already speak).
+ * - The view's whole pose (position/rotation/scale) is its GROUP TEXEL: one
+ *   onBeforeRender sweep decomposes each view node's matrixWorld into the group
+ *   texture (the transform commit 9e5ea9e taught the shared vertex path to
+ *   apply). A grid keeps its Object3D identity — panels, caret, overlays — and
+ *   only the glyph mesh unifies.
+ * - Group 0 is the permanent DEAD group (alpha 0): a restaged view tombstones
+ *   its old slot range there, so the arena's v1 space leak is invisible.
+ * - Picking is ONE registration: ID = base + absolute slot; resolveSlot() maps
+ *   a hit back to (view, view-local slot) by binary search over live ranges.
+ *
+ * The MegaFieldView facade speaks the GlyphField surface its consumers already
+ * use (setGlyphColorRange / setGlyphHighlight / setGroupAlpha / setClipYRange /
+ * getGlyphCount / setLayoutExtent / attachBytePipeline), offset by slotBase —
+ * CodeGrid, SyntaxColorizer, DiffController and the arena's re-attach loop all
+ * run unchanged against it.
+ *
+ * One per arena: ensureMegaField(arena, opts) parks the instance on
+ * arena.megaField (the same reachability contract as renderer.glyphPipelineArena
+ * — /@fs itest imports get a different module instance, so a module singleton
+ * alone would be invisible to them).
+ */
+
+import * as THREE from 'three';
+import GlyphField from './GlyphField.js';
+
+const _pos = new THREE.Vector3();
+const _quat = new THREE.Quaternion();
+const _scl = new THREE.Vector3();
+
+export class MegaGlyphField {
+    /**
+     * @param {import('./compute/GlyphPipelineArena.js').default} arena
+     * @param {Object} opts
+     * @param {THREE.Scene} opts.scene - the scene every byte grid lives in
+     * @param {Object} opts.atlas - the booted GlyphAtlas
+     * @param {number} [opts.worldScale]
+     * @param {Object} [opts.slugData]
+     * @param {Object} [opts.shaper]
+     * @param {import('./picking/PickingSystem.js').PickingSystem} [opts.pickingSystem]
+     */
+    constructor(arena, { scene, atlas, worldScale, slugData, shaper, pickingSystem } = {}) {
+        if (!arena) throw new Error('MegaGlyphField: an arena is required (it is the field\'s content)');
+        if (!scene || !atlas) throw new Error('MegaGlyphField: scene + atlas are required');
+        this.arena = arena;
+        this.scene = scene;
+        this.atlas = atlas;
+
+        this.field = new GlyphField(scene, atlas, {
+            maxInstances: arena.maxBytes,
+            worldScale, slugData, shaper,
+            bytePipeline: true,
+            // One mesh spanning every grid: no meaningful CPU bounds exist (per-view
+            // culling is the visibility lane, a later milestone).
+            frustumCulled: false,
+        });
+        // Group 0 = THE dead group. Tombstoned (restaged/disposed) slot ranges point
+        // here and the vertex cull drops them — the arena's append-only leak stays
+        // invisible until compaction reclaims it.
+        this.field.setGroupAlpha(0, 0);
+        // Pre-size the shared highlight texture to CAPACITY (one 4MB-scale alloc):
+        // growing it per attach re-copied an arena-sized texture per file — a
+        // storm-shaped O(N × arena) burn for a fixed-size resource.
+        this.field.highlightBuffer(arena.maxBytes);
+
+        /** Live views, unordered (dispose splices). @type {MegaFieldView[]} */
+        this.views = [];
+        /** Attached ranges sorted by slotBase for resolveSlot. [{base, end, view}] */
+        this._ranges = [];
+
+        this._pickingSystem = pickingSystem || null;
+        this._pickRegisteredKey = null;   // `${capacity}` once registered — stable across a storm
+
+        // The pose sweep: before each render, any view whose node moved re-poses its
+        // group texel. matrixWorld is current here (three's updateMatrixWorld runs at
+        // render start); an unchanged 16-float compare is the whole per-view cost.
+        this.field.instanceMesh.onBeforeRender = () => this._syncPoses();
+    }
+
+    get instanceMesh() { return this.field.instanceMesh; }
+
+    /**
+     * Create a view. `node` is the Object3D whose matrixWorld poses the view's
+     * glyphs (the grid itself); `color` is the range's default per-byte color.
+     * @param {{node: THREE.Object3D, color?: {r,g,b}}} p
+     * @returns {MegaFieldView}
+     */
+    createView({ node, color }) {
+        if (node && node.scene && node.scene !== this.scene) {
+            // Fail loud at the seam: a view in another scene would silently never render.
+            console.error('MegaGlyphField: view node lives in a different scene than the mega mesh');
+        }
+        const view = new MegaFieldView(this, node, color);
+        this.views.push(view);
+        return view;
+    }
+
+    /** Late picking wire-up (idempotent). The one glyph-channel registration. */
+    setPickingSystem(ps) {
+        if (!ps || this._pickingSystem === ps) return;
+        this._pickingSystem = ps;
+        this._pickRegisteredKey = null;
+        this._registerPicking();
+    }
+
+    /**
+     * Resolve an absolute arena slot (a glyph-channel hit's slotIndex) to its view.
+     * @param {number} absSlot
+     * @returns {{view: MegaFieldView, localSlot: number}|null}
+     */
+    resolveSlot(absSlot) {
+        const r = this._ranges;
+        let lo = 0, hi = r.length - 1;
+        while (lo <= hi) {
+            const mid = (lo + hi) >> 1;
+            if (absSlot < r[mid].base) hi = mid - 1;
+            else if (absSlot >= r[mid].end) lo = mid + 1;
+            else return { view: r[mid].view, localSlot: absSlot - r[mid].base };
+        }
+        return null;
+    }
+
+    /**
+     * Attach/re-attach a view's slot range — the arena's field seam (stage() and
+     * every realloc re-attach call the view's attachBytePipeline, which lands here).
+     * @private
+     */
+    _attachView(view, pipeline, byteLength, slotBase) {
+        // Realloc re-attach of the SAME range: only the slots buffer changed — rebind
+        // it and keep the attribute state (colors carry the colorizer's work).
+        const sameRange = view.slotBase === slotBase && view.byteCount === byteLength;
+
+        this._ensureCapacity(this.arena.maxBytes);
+
+        const geom = this.field.instanceMesh.geometry;
+        const count = Math.max(geom.instanceCount, slotBase + byteLength);
+        this.field.attachBytePipeline(pipeline, count);
+
+        if (!sameRange) {
+            if (view.byteCount > 0) this._tombstone(view);
+            view.slotBase = slotBase;
+            view.byteCount = byteLength;
+            this.field.setGlyphGroupRange(slotBase, byteLength, view.groupId);
+            this.field.setGlyphColorRange(slotBase, byteLength, view.color);
+            this._reindexRanges();
+        }
+        this._registerPicking();
+    }
+
+    /** Point a view's current range at the dead group (group 0). @private */
+    _tombstone(view) {
+        if (view.byteCount > 0 && view.slotBase >= 0) {
+            this.field.setGlyphGroupRange(view.slotBase, view.byteCount, 0);
+        }
+        view.slotBase = -1;
+        view.byteCount = 0;
+        this._reindexRanges();
+    }
+
+    /** @private */
+    _reindexRanges() {
+        this._ranges = this.views
+            .filter((v) => !v.dead && v.byteCount > 0)
+            .map((v) => ({ base: v.slotBase, end: v.slotBase + v.byteCount, view: v }))
+            .sort((a, b) => a.base - b.base);
+    }
+
+    /**
+     * Grow the per-byte attributes to the arena's (possibly reallocated) capacity,
+     * preserving existing lanes — slot indices never move (append-only arena).
+     * @private
+     */
+    _ensureCapacity(n) {
+        const geom = this.field.instanceMesh.geometry;
+        if ((geom._maxInstanceCount || 0) >= n) return;
+        console.info(`MegaGlyphField: capacity ${geom._maxInstanceCount} → ${n} instances (arena growth)`);
+        for (const [name, itemSize] of [['instanceColor', 3], ['instanceGroupId', 1], ['instancePickingId', 1]]) {
+            const old = geom.attributes[name];
+            const arr = new Float32Array(n * itemSize);
+            if (old) arr.set(old.array.subarray(0, Math.min(old.array.length, arr.length)));
+            geom.setAttribute(name, new THREE.InstancedBufferAttribute(arr, itemSize));
+        }
+        geom._maxInstanceCount = n;
+        this.field.config.maxInstances = n;
+        // Highlight texture tracks capacity too (one grow per realloc, not per attach);
+        // the pick block re-registers at the new capacity on the next attach.
+        this.field.highlightBuffer(n);
+    }
+
+    /**
+     * The ONE glyph-channel registration, at CAPACITY: ID = base + absolute slot for
+     * every possible slot, so the block is stable across a whole storm (no per-attach
+     * re-registration) — unoccupied slots are dead-group-culled and can never be
+     * picked. Re-runs only when the picking system or the capacity changes.
+     * @private
+     */
+    _registerPicking() {
+        const ps = this._pickingSystem;
+        if (!ps) return;
+        const cap = this.field.instanceMesh.geometry._maxInstanceCount || 0;
+        const key = `${cap}`;
+        if (cap === 0 || this._pickRegisteredKey === key) return;
+        ps.register('glyph', this, this, { count: cap });
+        this._pickRegisteredKey = key;
+    }
+
+    /** @private */
+    _syncPoses() {
+        for (const view of this.views) {
+            const node = view.node;
+            if (!node || view.dead || view.byteCount <= 0) continue;
+            const el = node.matrixWorld.elements;
+            const m = view._mat;
+            let same = true;
+            for (let i = 0; i < 16; i++) if (m[i] !== el[i]) { same = false; break; }
+            if (same) continue;
+            m.set(el);
+            node.matrixWorld.decompose(_pos, _quat, _scl);
+            this.field.setGroupOffset(view.groupId, _pos);
+            this.field.setGroupQuaternion(view.groupId, _quat);
+            this.field.setGroupScale(view.groupId, _scl);
+        }
+    }
+}
+
+/**
+ * A grid's render presence in the mega-field — speaks the GlyphField surface its
+ * consumers use, offset into the shared slot space. One group per view; the
+ * group texel carries pose + alpha + clip.
+ */
+export class MegaFieldView {
+    constructor(mega, node, color) {
+        this.mega = mega;
+        this.node = node || null;
+        this.groupId = mega.field.createGroup();
+        this.color = color || { r: 0, g: 1, b: 0 };
+        this.slotBase = -1;
+        this.byteCount = 0;
+        this.bounds = null;      // the GPU's per-item extent (the visibility lane reads this later)
+        this.dead = false;
+        this._visible = true;
+        this._alpha = 1;
+        this._mat = new Float32Array(16).fill(NaN); // NaN ≠ anything → first sweep always poses
+    }
+
+    /** The arena's attach seam — stage() and realloc re-attach call this. */
+    attachBytePipeline(pipeline, byteLength, slotBase = 0) {
+        this.mega._attachView(this, pipeline, byteLength, slotBase);
+    }
+
+    /** View-local slot range → shared color attribute (the colorizer's write path). */
+    setGlyphColorRange(startSlot, count, color) {
+        if (this.byteCount <= 0) return;
+        const start = Math.max(0, startSlot | 0);
+        const n = Math.min(count, this.byteCount - start);
+        if (n > 0) this.mega.field.setGlyphColorRange(this.slotBase + start, n, color);
+    }
+
+    /** View-local slot → shared highlight texture (hover tint, highlight.* verbs). */
+    setGlyphHighlight(slot, color, fillOpacity = 0) {
+        if (this.byteCount <= 0 || slot < 0 || slot >= this.byteCount) return;
+        this.mega.field.setGlyphHighlight(this.slotBase + slot, color, fillOpacity);
+    }
+
+    /**
+     * Whole-view alpha (glyphs fade with the panel). The groupId argument is the
+     * caller's field-local group 0 — a view IS one group, so it maps here.
+     */
+    setGroupAlpha(_groupId, alpha) {
+        this._alpha = alpha;
+        this._applyAlpha();
+    }
+
+    /**
+     * Whole-view color multiplier/replace (grid.color verbs) — same group mapping.
+     * The alpha lane stays the VIEW's (visibility/fade authority) — GlyphField's
+     * setGroupColor would otherwise reset it to 1 and resurrect a hidden view.
+     */
+    setGroupColor(_groupId, color) {
+        const a = (this.dead || !this._visible) ? 0 : this._alpha;
+        this.mega.field.setGroupColor(this.groupId, { r: color.r, g: color.g, b: color.b, a });
+    }
+
+    setGroupColorBlend(_groupId, blend) {
+        this.mega.field.setGroupColorBlend(this.groupId, blend);
+    }
+
+    /** Show/hide the whole view (the filename toggle). */
+    setVisible(v) {
+        this._visible = !!v;
+        this._applyAlpha();
+    }
+
+    /** @private */
+    _applyAlpha() {
+        this.mega.field.setGroupAlpha(this.groupId, (this.dead || !this._visible) ? 0 : this._alpha);
+    }
+
+    /** Grid-local clip window → this view's group clip lanes. */
+    setClipYRange(top, bottom) {
+        this.mega.field.setGroupClipY(this.groupId, top, bottom);
+    }
+
+    /** Slug hot-swap — one shared field, forwarded once. */
+    setSlugData(slugData, shaper) {
+        this.mega.field.setSlugData(slugData, shaper);
+    }
+
+    getGlyphCount() { return this.byteCount; }
+
+    /**
+     * The arena's bounds-sync seam: the per-item GPU extent lands here. Stored for
+     * the per-view visibility lane (the mega mesh itself is never frustum-culled).
+     */
+    setLayoutExtent(extent) {
+        this.bounds = extent || null;
+    }
+
+    /** Drop this view's content (eviction) — the range tombstones to the dead group. */
+    clear() {
+        this.mega._tombstone(this);
+    }
+
+    dispose() {
+        this.dead = true;
+        this._applyAlpha();
+        this.mega._tombstone(this);
+        const i = this.mega.views.indexOf(this);
+        if (i >= 0) this.mega.views.splice(i, 1);
+        // The group id retires with the view (never reused — a reused id would
+        // resurrect tombstoned slots). Compaction reclaims both, later.
+    }
+}
+
+/**
+ * The one mega-field per arena, created on first need and parked on the arena
+ * (reachable across module instances — the itest /@fs contract).
+ * @param {import('./compute/GlyphPipelineArena.js').default} arena
+ * @param {Object} opts - see MegaGlyphField constructor
+ * @returns {MegaGlyphField}
+ */
+export function ensureMegaField(arena, opts = {}) {
+    if (!arena.megaField) {
+        arena.megaField = new MegaGlyphField(arena, opts);
+    } else if (opts.pickingSystem) {
+        arena.megaField.setPickingSystem(opts.pickingSystem);
+    }
+    return arena.megaField;
+}
