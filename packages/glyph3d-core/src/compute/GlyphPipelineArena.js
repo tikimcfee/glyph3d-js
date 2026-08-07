@@ -50,6 +50,11 @@
  */
 
 import GlyphPipelineKernels from './glyphPipelineKernels.js';
+
+/** The kernels' f32-ordinal exactness wall: total arena bytes must stay ≤ 2^24
+ *  (S_ORD and every count lane are f32 slots). The kernels constructor enforces it;
+ *  the arena refuses growth past it BEFORE touching live state. */
+const ORDINAL_EXACT_BYTES = 2 ** 24;
 import { runPipeline, paginate as refPaginate, boundsReduce as refBoundsReduce, deriveStride, SLOT_STRIDE } from './glyphPipelineReference.js';
 import { buildLiveTrie, encodeMisses } from './liveTrie.js';
 import { loadStats } from '../core/loadStats.js';
@@ -129,8 +134,16 @@ export default class GlyphPipelineArena {
             this._realloc(this.maxBytes, this.maxItems * 2);
         }
         const need = this._byteTotal + bytes.length;
+        if (need > ORDINAL_EXACT_BYTES) {
+            // The kernels' hard wall: slot ordinals are f32 lanes, exact only to 2^24.
+            // Refuse THIS stage loudly (the load path logs it per grid, the rest of the
+            // storm continues) instead of attempting a growth the kernels must reject.
+            // Raising the wall = u32 ordinal lanes (kernel surgery); compaction keeps
+            // live bytes under it meanwhile.
+            throw new Error(`GlyphPipelineArena: staging ${bytes.length}B would put the arena at ${need}B, past the f32-ordinal wall (${ORDINAL_EXACT_BYTES}B) — this file stays unlaid (compaction/u32 ordinals are the lift)`);
+        }
         if (need > this.maxBytes) {
-            this._realloc(Math.max(this.maxBytes * 2, Math.ceil(need * 1.25)), this.maxItems);
+            this._realloc(Math.min(ORDINAL_EXACT_BYTES, Math.max(this.maxBytes * 2, Math.ceil(need * 1.25))), this.maxItems);
         }
 
         const item = {
@@ -370,18 +383,26 @@ export default class GlyphPipelineArena {
      * @private
      */
     _realloc(maxBytes, maxItems) {
+        const nextBytes = Math.max(1024, Math.ceil(maxBytes));
+        const nextItems = Math.max(16, Math.ceil(maxItems));
         // The header's "rare and loud" promise, delivered: every realloc names itself, so
         // a realloc-adjacent GPU symptom (destroyed-buffer submit, VRAM step) has a
         // timestamped cause in the relay log store.
         console.info(`GlyphPipelineArena: realloc ${this.maxBytes}B/${this.maxItems} items → `
-            + `${Math.max(1024, Math.ceil(maxBytes))}B/${Math.max(16, Math.ceil(maxItems))} items `
+            + `${nextBytes}B/${nextItems} items `
             + `(${this._items.length} staged, ${this._byteTotal}B live)`);
-        this._kernels.dispose();
-        this.maxBytes = Math.max(1024, Math.ceil(maxBytes));
-        this.maxItems = Math.max(16, Math.ceil(maxItems));
-        this._kernels = new GlyphPipelineKernels(this.renderer, {
-            maxBytes: this.maxBytes, maxItems: this.maxItems, trie: this._trie,
+        // TRANSACTIONAL: build the replacement BEFORE destroying the live kernels. A
+        // construction failure here (the f32-ordinal wall, device OOM) must leave the
+        // arena exactly as it was — the first version disposed first, and a throw then
+        // stranded a destroyed slots buffer in every bind group (a permanent
+        // per-frame Dawn error storm) with maxBytes lying about real capacity.
+        const fresh = new GlyphPipelineKernels(this.renderer, {
+            maxBytes: nextBytes, maxItems: nextItems, trie: this._trie,
         });
+        this._kernels.dispose();
+        this._kernels = fresh;
+        this.maxBytes = nextBytes;
+        this.maxItems = nextItems;
         this._syncedItems = 0;   // fresh kernels — the next flush is a full setFiles
         for (const item of this._items) {
             if (item.field && !item.dead) {

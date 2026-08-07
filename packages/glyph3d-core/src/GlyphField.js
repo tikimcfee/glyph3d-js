@@ -146,7 +146,7 @@ function _buildVertexNode(uniforms) {
     const vColor      = varying(vec3(0),  'vColor');
     const vGroupAlpha = varying(float(1), 'vGroupAlpha');
     const vAddedColor = varying(vec3(0),  'vAddedColor');
-    const vFillAmount = varying(float(0), 'vFillAmount');   // highlight texel alpha: 0=tint (additive), >0=background-fill opacity
+    const vFillAmount = varying(float(0), 'vFillAmount');   // highlight alpha: 0=tint (additive), >0=background-fill opacity
     const vGlyphUV    = varying(vec2(0),  'vGlyphUV');
     const vCurveStart = varying(int(0),   'vCurveStart');
     const vCurveCount = varying(int(0),   'vCurveCount');
@@ -154,7 +154,7 @@ function _buildVertexNode(uniforms) {
     const vMode       = varying(int(0),   'vMode');
     const vEmojiCell  = varying(int(0),   'vEmojiCell');
 
-    const { highlightTex } = uniforms;
+    const { highlightTex, byteHighlight } = uniforms;
 
     const vertexFn = Fn(() => {
         // The ONE transform graph — shared with PickingSystem, so the rendered glyph
@@ -180,14 +180,25 @@ function _buildVertexNode(uniforms) {
         vColor.assign(baseColor.add(t.gColor.rgb.sub(baseColor).mul(colorBlend)));
         vGroupAlpha.assign(t.gColor.a);
 
-        // Per-glyph highlight from RGBA8 DataTexture (1024 wide, 2D wrapped)
-        const hx = int(instanceIndex).mod(int(1024));
-        const hy = int(instanceIndex).div(int(1024));
-        const highlight = textureLoad(highlightTex, ivec2(hx, hy));
-        vAddedColor.assign(highlight.rgb);
-        // The alpha byte (was unused) is the MODE/opacity carrier: 0 → additive tint (legacy),
-        // >0 → background-fill opacity. RGBA8 unorm samples to [0,1], so this IS the opacity.
-        vFillAmount.assign(highlight.a);
+        // Per-glyph highlight. BYTE kind: a normalized RGBA8 INSTANCE ATTRIBUTE — a
+        // texture cannot span the mega-field (arena-capacity rows blow
+        // maxTextureDimension2D, and any texel write re-uploads the whole thing);
+        // an attribute has no dimension limit and uploads by update-range. Classic
+        // kinds keep their small per-field RGBA8 DataTexture (1024 wide, 2D wrapped).
+        // Either way RGBA8 unorm reads as [0,1] — identical downstream math.
+        if (byteHighlight) {
+            const highlight = attribute('instanceHighlight', 'vec4');
+            vAddedColor.assign(highlight.rgb);
+            vFillAmount.assign(highlight.a);
+        } else {
+            const hx = int(instanceIndex).mod(int(1024));
+            const hy = int(instanceIndex).div(int(1024));
+            const highlight = textureLoad(highlightTex, ivec2(hx, hy));
+            vAddedColor.assign(highlight.rgb);
+            // The alpha byte is the MODE/opacity carrier: 0 → additive tint (legacy),
+            // >0 → background-fill opacity.
+            vFillAmount.assign(highlight.a);
+        }
 
         // PlaneGeometry's uv attribute is [0,1] across the quad → glyph-space [0,1]².
         vGlyphUV.assign(uv());
@@ -639,9 +650,14 @@ function _getSharedFieldMaterial(kind) {
     let material = _sharedFieldMaterials.get(kind);
     if (material) return material;
 
+    // Byte-pipeline kind: position/size/glyphId come from the pipeline's slot buffer,
+    // resolved per field (see _fieldSlots); slot index == instance index. Highlight is
+    // an instance attribute on the byte kind (see _buildVertexNode) — no texture node.
+    const isByte = kind === 'byteGlyph';
+
     const groupTexNode     = _fieldTexture(_makePlaceholderFloatTexture(), '_groupTexture');
     const groupTexHNode    = _fieldUniform(1, (f) => f._maxGroups);
-    const highlightTexNode = _fieldTexture(_makePlaceholderRGBATexture(), '_highlightTexture');
+    const highlightTexNode = isByte ? null : _fieldTexture(_makePlaceholderRGBATexture(), '_highlightTexture');
     const curveTexNode     = _fieldTexture(_makePlaceholderUintTexture(), '_curveTexture');
     const glyphMapTexNode  = _fieldTexture(_makePlaceholderUintTexture(), '_glyphMapTexture');
     const glyphMapWNode    = _fieldUniform(1, (f) => f._glyphMapWidth);
@@ -653,9 +669,6 @@ function _getSharedFieldMaterial(kind) {
     const frameTexNode     = _fieldTexture(_makePlaceholderRGBATexture(), '_frameTexture');
     const frameColsNode    = _fieldUniform(1, (f) => f._frameCols || 1);
     const frameRowsNode    = _fieldUniform(1, (f) => f._frameRows || 1);
-    // Byte-pipeline kind: position/size/glyphId come from the pipeline's slot buffer,
-    // resolved per field (see _fieldSlots); slot index == instance index.
-    const isByte = kind === 'byteGlyph';
     const byteSlotsNode    = isByte ? _fieldSlots() : null;
 
     const { vertexFn, vColor, vGroupAlpha, vAddedColor, vFillAmount, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell } =
@@ -663,6 +676,7 @@ function _getSharedFieldMaterial(kind) {
             groupTex:       groupTexNode,
             groupTexHeight: groupTexHNode,
             highlightTex:   highlightTexNode,
+            byteHighlight:  isByte,
             glyphMapTex:    glyphMapTexNode,
             glyphMapWidth:  glyphMapWNode,
             renderMode:     renderModeNode,
@@ -890,14 +904,21 @@ export default class GlyphField {
         geometry.attributes.uv       = base.attributes.uv;
 
         this._groupTexture = this._createGroupTexture();
-        // Ensure a minimal (1-slot) highlight texture at construction
-        this._ensureHighlightTexture(1);
+        // Highlight storage: byte fields carry it as a per-instance RGBA8 attribute
+        // (allocated below with the others — a capacity-sized texture blows
+        // maxTextureDimension2D and re-uploads whole per write); classic fields keep
+        // the small per-field DataTexture.
+        if (!this._bytePipeline) this._ensureHighlightTexture(1);
 
         const maxCount = this.config.maxInstances;
 
         // Pre-allocate per-instance attributes. Byte-pipeline fields read position/size/
-        // glyphId from the pipeline's slot buffer — only color/group/picking are per-instance.
-        if (!this._bytePipeline) {
+        // glyphId from the pipeline's slot buffer — only color/group/picking/highlight
+        // are per-instance.
+        if (this._bytePipeline) {
+        geometry.setAttribute('instanceHighlight',
+            new THREE.InstancedBufferAttribute(new Uint8Array(maxCount * 4), 4, true));
+        } else {
         // instancePosition is stride-4 from BIRTH. The shader reads it as vec4, and every
         // commit path (the engine's StorageInstancedBufferAttribute AND the CPU path's padded
         // InstancedBufferAttribute) installs a stride-4 attribute — so the INITIAL attribute
@@ -1177,6 +1198,21 @@ export default class GlyphField {
      * @param {number} [fillOpacity=0] - 0 = additive tint; >0 = background-fill opacity (0–1)
      */
     setGlyphHighlight(absoluteSlot, color, fillOpacity = 0) {
+        if (this._bytePipeline) {
+            // Byte kind: the highlight rides the instanceHighlight attribute —
+            // a 4-byte update range, not a whole-texture re-upload.
+            const attr = this.instanceMesh?.geometry?.attributes?.instanceHighlight;
+            if (!attr) return;
+            const i = absoluteSlot * 4;
+            if (i < 0 || i + 3 >= attr.array.length) return;
+            attr.array[i]     = color ? ((color.r * 255 + 0.5) | 0) : 0;
+            attr.array[i + 1] = color ? ((color.g * 255 + 0.5) | 0) : 0;
+            attr.array[i + 2] = color ? ((color.b * 255 + 0.5) | 0) : 0;
+            attr.array[i + 3] = color ? GlyphField.encodeHighlightAlpha(fillOpacity) : 0;
+            attr.addUpdateRange(i, 4);
+            attr.needsUpdate = true;
+            return;
+        }
         if (!this._highlightTexture) {
             // Silent no-op was a debugging black hole (highlights "applied" but invisible). Announce
             // it once per renderer: a highlight was requested before the highlight texture existed.
@@ -1217,12 +1253,25 @@ export default class GlyphField {
      * @returns {Uint8Array|Uint8ClampedArray|null} the texel data, or null if not allocatable
      */
     highlightBuffer(count) {
+        if (this._bytePipeline) {
+            // Byte kind: the raw instanceHighlight attribute bytes — same 4-byte/slot
+            // RGBA layout the texture path uses. Capacity-sized at construction.
+            const attr = this.instanceMesh?.geometry?.attributes?.instanceHighlight;
+            return attr && attr.array.length >= count * 4 ? attr.array : null;
+        }
         this._ensureHighlightTexture(count);
         return this._highlightTexture ? this._highlightTexture.image.data : null;
     }
 
-    /** Flag the highlight texture for GPU re-upload after a batch of highlightBuffer() writes. */
+    /** Flag the highlight storage for GPU re-upload after a batch of highlightBuffer() writes.
+     *  NOTE (byte kind): a range-less flag re-uploads the WHOLE capacity-sized attribute —
+     *  bulk byte-kind writers should addUpdateRange on the attribute instead. */
     markHighlightDirty() {
+        if (this._bytePipeline) {
+            const attr = this.instanceMesh?.geometry?.attributes?.instanceHighlight;
+            if (attr) attr.needsUpdate = true;
+            return;
+        }
         if (this._highlightTexture) this._highlightTexture.needsUpdate = true;
     }
 
@@ -1761,9 +1810,8 @@ export default class GlyphField {
         // frame's submit would reference it (see rebindByteSlots in core/glyphVertex).
         rebindByteSlots(this._byteSlots);
         const geom = this.instanceMesh.geometry;
-        const count = Math.min(byteLength, this.config.maxInstances);
-        this._ensureHighlightTexture(count);
-        geom.instanceCount = count;
+        // Highlight is the capacity-sized instanceHighlight attribute — nothing to grow here.
+        geom.instanceCount = Math.min(byteLength, this.config.maxInstances);
     }
 
     /**

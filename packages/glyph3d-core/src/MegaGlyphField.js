@@ -69,10 +69,9 @@ export class MegaGlyphField {
         // here and the vertex cull drops them — the arena's append-only leak stays
         // invisible until compaction reclaims it.
         this.field.setGroupAlpha(0, 0);
-        // Pre-size the shared highlight texture to CAPACITY (one 4MB-scale alloc):
-        // growing it per attach re-copied an arena-sized texture per file — a
-        // storm-shaped O(N × arena) burn for a fixed-size resource.
-        this.field.highlightBuffer(arena.maxBytes);
+        // (Highlight rides the capacity-sized instanceHighlight ATTRIBUTE — allocated
+        // with the other per-byte lanes; a capacity-sized texture blew
+        // maxTextureDimension2D at real-workspace scale and re-uploaded whole per write.)
 
         /** Live views, unordered (dispose splices). @type {MegaFieldView[]} */
         this.views = [];
@@ -185,17 +184,20 @@ export class MegaGlyphField {
         const geom = this.field.instanceMesh.geometry;
         if ((geom._maxInstanceCount || 0) >= n) return;
         console.info(`MegaGlyphField: capacity ${geom._maxInstanceCount} → ${n} instances (arena growth)`);
-        for (const [name, itemSize] of [['instanceColor', 3], ['instanceGroupId', 1], ['instancePickingId', 1]]) {
+        for (const [name, itemSize, Ctor, normalized] of [
+            ['instanceColor', 3, Float32Array, false],
+            ['instanceGroupId', 1, Float32Array, false],
+            ['instancePickingId', 1, Float32Array, false],
+            ['instanceHighlight', 4, Uint8Array, true],
+        ]) {
             const old = geom.attributes[name];
-            const arr = new Float32Array(n * itemSize);
+            const arr = new Ctor(n * itemSize);
             if (old) arr.set(old.array.subarray(0, Math.min(old.array.length, arr.length)));
-            geom.setAttribute(name, new THREE.InstancedBufferAttribute(arr, itemSize));
+            geom.setAttribute(name, new THREE.InstancedBufferAttribute(arr, itemSize, normalized));
         }
         geom._maxInstanceCount = n;
         this.field.config.maxInstances = n;
-        // Highlight texture tracks capacity too (one grow per realloc, not per attach);
-        // the pick block re-registers at the new capacity on the next attach.
-        this.field.highlightBuffer(n);
+        // The pick block re-registers at the new capacity on the next attach.
     }
 
     /**
@@ -208,7 +210,17 @@ export class MegaGlyphField {
     _registerPicking() {
         const ps = this._pickingSystem;
         if (!ps) return;
-        const cap = this.field.instanceMesh.geometry._maxInstanceCount || 0;
+        let cap = this.field.instanceMesh.geometry._maxInstanceCount || 0;
+        // Picking IDs are 24-bit RGB: slots past the ceiling cannot encode. Clamp the
+        // block — glyphs beyond ~16.7M arena bytes render but never pick — and say so
+        // loudly ONCE (compaction is the real fix: it keeps live bytes small).
+        if (cap > 0xFFFFFF) {
+            if (!this._pickCeilingNoted) {
+                this._pickCeilingNoted = true;
+                console.warn(`MegaGlyphField: arena capacity ${cap} exceeds the 24-bit pick ID space — slots past ${0xFFFFFF} are unpickable until compaction`);
+            }
+            cap = 0xFFFFFF;
+        }
         const key = `${cap}`;
         if (cap === 0 || this._pickRegisteredKey === key) return;
         ps.register('glyph', this, this, { count: cap });

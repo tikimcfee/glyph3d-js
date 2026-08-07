@@ -63,6 +63,16 @@ after editing core, `make dev-status` to check.
   ```
   (`--url` on this and `glyph-pipeline-check.mjs` points a gate at a worktree's own Vite.)
 
+- **`storm-probe.mjs`** — N-file synthetic storm with full forensics: real device limits,
+  per-second heartbeat (arena live/capacity/items, mega capacity/views, GPU error count +
+  first sample, JS heap), page-crash detection, notable console tail. THE tool for
+  "loads N files then wedges" — it caught the highlight-texture dimension storm at
+  arena > 8MB and the corrupt half-realloc at the f32-ordinal wall (2^24 bytes), both
+  invisible to the fixed-size gates. Client-only (fake provider, no relay).
+  ```
+  bun tools/storm-probe.mjs 1000
+  ```
+
 ## Integration tests
 
 As panels and startup push command-bus verbs and mutate state, that's headless-browser
