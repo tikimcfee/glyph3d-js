@@ -198,6 +198,9 @@ export default function registerAgentCommands(router) {
         const cwd = typeof args[5] === 'string' ? args[5] : '';
         const rec = normalizeToolCall(name, input, response, cwd);
         if (!rec) return { text: `OK: ${name} dropped (noise)`, data: { dropped: name } };   // TodoWrite/ToolSearch/…
+        // The delta lane taps the SAME normalized record (before the label rewrite —
+        // it needs the cwd-relative target to key files on disk); unwatched ids fall through.
+        ctx.deltaBooks?.ingestTool?.(id, rec, cwd);
         const label = emitActivity(ctx, books, id, type, rec);
         return {
             text: `OK: ${id} ${rec.action}${label ? ' ' + label : ''}`,

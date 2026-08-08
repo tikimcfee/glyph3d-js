@@ -44,7 +44,9 @@ const CWD = '/home/ivan/dev/glyph3d-js/';
   const sp = [{ newStart: 10, lines: [' a', '+b', '+c', ' d', '-e', '+f'] }];
   const r = normalizeToolCall('Edit', { file_path: CWD + 'a.js' }, { structuredPatch: sp }, CWD);
   eq(r.action, 'edit', 'edit: action');
-  eq(r.meta, { added: 3, removed: 1, ranges: [[11, 12], [14, 14]] }, 'edit: counts + added runs');
+  // The hunks ride WHOLE on meta.patch — the delta books' watch lane reconstructs
+  // a file's pre-edit base from them (deltaSource.reconstructBase).
+  eq(r.meta, { added: 3, removed: 1, ranges: [[11, 12], [14, 14]], patch: sp }, 'edit: counts + added runs + retained hunks');
   const d = decorateForAction('edit', r.meta);
   eq(d.map(({ startLine, endLine }) => [startLine, endLine]), [[10, 11], [13, 13]], 'edit: decorate 0-based runs');
   ok(d[0].color.g === 1.0, 'edit: decoration is the ADDED (green) color');

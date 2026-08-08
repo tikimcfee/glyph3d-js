@@ -17,6 +17,7 @@ export { isMac, isLinux, primaryMod, secondaryMod } from './utils/platform.js';
 // State
 export { FileStateManager } from './state/FileStateManager.js';
 export { parsePatchAligned, buildAlignedDiff, getDiffColor } from './state/DiffParser.js';
+export { splitUnifiedDiff, alignPatch, alignTexts, reconstructBase, alignedStats, hunksToPatch } from './state/deltaSource.js';
 
 // Visual services
 export { BackdropManager } from './visual/BackdropManager.js';
@@ -40,7 +41,6 @@ export { RepositoryContentCache } from './data/RepositoryContentCache.js';
 export { HeatmapProvider } from './data/HeatmapProvider.js';
 
 // Orchestration
-export { DiffController } from './orchestration/DiffController.js';
 export { HandGestureAdapter } from './orchestration/HandGestureAdapter.js';
 export { default as CommandRouter } from './orchestration/CommandRouter.js';
 export { default as ViewerAPI } from './orchestration/ViewerAPI.js';

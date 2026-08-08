@@ -24,7 +24,7 @@
  * The MegaFieldView facade speaks the GlyphField surface its consumers already
  * use (setGlyphColorRange / setGlyphHighlight / setGroupAlpha / setClipYRange /
  * getGlyphCount / setLayoutExtent / attachBytePipeline), offset by slotBase —
- * CodeGrid, SyntaxColorizer, DiffController and the arena's re-attach loop all
+ * CodeGrid, SyntaxColorizer and the arena's re-attach loop all
  * run unchanged against it.
  *
  * One per arena: ensureMegaField(arena, opts) parks the instance on

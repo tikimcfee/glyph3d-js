@@ -112,8 +112,11 @@ function readMeta(r) {
 }
 
 function editMeta(r) {
-    const { added, removed } = countPatch(r && r.structuredPatch);
-    return { added, removed, ranges: addedRanges(r && r.structuredPatch) };
+    const p = (r && r.structuredPatch) || null;
+    const { added, removed } = countPatch(p);
+    // The hunks ride WHOLE on the record (meta.patch) — the delta books' watch lane
+    // reconstructs a file's pre-edit base from them; fmtMeta ignores unknown keys.
+    return { added, removed, ranges: addedRanges(p), ...(p ? { patch: p } : {}) };
 }
 
 function writeMeta(r) {

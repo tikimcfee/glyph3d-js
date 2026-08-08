@@ -6,6 +6,7 @@ import { useGridRegistry } from '@glyph3d/r3f';
 import CommandRouter from '@glyph3d/core/services/orchestration/CommandRouter.js';
 import WebSocketBridge from '@glyph3d/core/services/orchestration/WebSocketBridge.js';
 import AgentBooks from '@glyph3d/core/collections/AgentBooks.js';
+import DeltaBooks from '@glyph3d/core/collections/DeltaBooks.js';
 import { installConsoleForwarder } from '@glyph3d/core/services/orchestration/consoleForwarder.js';
 import AttentionManager from '@glyph3d/core/services/interaction/AttentionManager.js';
 import { installKeyboardRouter } from './keyboardRouter.js';
@@ -181,6 +182,10 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     // book.* pages it. Created in the effect (needs the live ctx); ticked by <AgentRunner/>.
     agentBooks: null,
 
+    // Delta books — before/after change sets (delta.* verbs): one sheet per changed
+    // file, base verso / head recto. Created in the effect; ticked by <AgentRunner/>.
+    deltaBooks: null,
+
     // GPU glyph-picking system (material-swap ID pass on a dedicated render
     // layer). Created in the effect below once gl exists; canvas hover/click
     // resolves pixel-perfect picks through it. Null until then.
@@ -219,6 +224,7 @@ function AgentRunner({ stateRef }) {
   useFrame((_, dt) => {
     const c = stateRef.current?.ctx;
     c?.agentBooks?.update(dt);
+    c?.deltaBooks?.update(dt);
     const volumes = c?.contentTree?.volumes?.();
     if (volumes) for (const v of volumes) v.update(dt);
   });
@@ -441,6 +447,13 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // re-containment rides onRelayout above — the one funnel every extent change
     // passes through; onChange also fires for state/beacon flips that move nothing.)
     state.ctx.agentBooks.onChange?.(() => scheduleCarrelSweep(state.ctx));
+
+    // Delta books: the delta.* verbs sink here — a changeset (a watched agent's live
+    // edits, a git diff, a file pair) becomes a book of before/after spreads, one
+    // sheet per changed file. A third world grouping on the shared floor.
+    state.ctx.deltaBooks = new DeltaBooks(state.ctx);
+    world.register('deltas', state.ctx.deltaBooks.root, () => state.ctx.deltaBooks.localBounds());
+    state.ctx.deltaBooks.onRelayout(() => world.relayout());
 
     // Camera-locked HUD dock: a bar of window tiles that rides the view. Reparents
     // a docked grid/terminal under itself (world-preserving attach) and scales it to

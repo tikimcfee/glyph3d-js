@@ -59,6 +59,7 @@
   },
   "dependencies": {
     "@xterm/headless": "^6.0.0",
+    "diff": "^8.0.2",
     "web-tree-sitter": "^0.26.9"
   },
   "devDependencies": {
