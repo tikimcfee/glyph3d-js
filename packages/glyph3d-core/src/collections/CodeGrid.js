@@ -828,6 +828,12 @@ class CodeGrid extends FramedGlyphField {
                 this.getLineCount();                       // ensure this.lines is populated
                 if (this._linesDirty) {                    // edits mutate this.lines → resync content
                     this.content = this.lines.join('\n');
+                    // …and the BYTES: the pipeline stages this._bytes, so the resync
+                    // must reach them or the fold re-stages the pre-edit text (the
+                    // caret moves — it reads lines — while the glyphs stand still).
+                    // A fossil from the builder era, when the fold consumed content.
+                    this._bytes = _textEncoder.encode(this.content);
+                    this._byteLineIndex = buildByteLineIndex(this._bytes);
                     this._linesDirty = false;
                 }
                 // Empty CONTENT still lays out when there's a filename: the label is
