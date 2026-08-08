@@ -490,6 +490,10 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       occlusionCuller.pruneMissing((id) => state.ctx.registry.has(id));
     };
     state.ctx.registry.addChangeListener(syncCullCandidates);
+    // Exposed for the cull.enabled setting: proxies exist only while culling is ON
+    // (a disabled culler's ~N proxy meshes were pure scene-walk cost), so flipping
+    // it on must re-track the current registry.
+    state.ctx.syncCullCandidates = syncCullCandidates;
     syncCullCandidates();
     applyGroupSettings(state.ctx, 'Culling');
 

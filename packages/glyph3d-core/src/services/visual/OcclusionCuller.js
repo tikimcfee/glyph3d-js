@@ -104,6 +104,7 @@ export class OcclusionCuller {
     /** Track a candidate (idempotent). The proxy is built once and follows the
      *  candidate's LIVE world bounds every frame it draws. */
     track(id, target) {
+        if (!this.enabled) return;   // no proxies while culling is off (see setEnabled)
         if (!target || this.entries.has(id)) return;
         const { geo, mat } = proxyResources();
         const proxy = new THREE.Mesh(geo, mat);
@@ -146,7 +147,12 @@ export class OcclusionCuller {
         this.enabled = !!v;
         this.group.visible = this.enabled;
         if (!this.enabled) {
-            for (const e of this.entries.values()) { this._show(e); e.streak = 0; e.sampled = false; }
+            // Culling off: show everything AND drop the query proxies — a disabled
+            // culler kept ~N proxy meshes in the scene graph (matrix updates +
+            // render-walk cost every frame, measured at fit-all scale). track()
+            // no-ops while disabled; the registry sync re-tracks on re-enable.
+            for (const e of this.entries.values()) this._show(e);
+            for (const id of [...this.entries.keys()]) this.untrack(id);
         }
     }
 
