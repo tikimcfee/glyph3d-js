@@ -642,7 +642,12 @@ export class PickingSystem {
      *   CAPACITY: unoccupied slots are vertex-culled (dead group) so they can never
      *   be picked, and a stable block means no per-attach re-registration (a
      *   re-register per load rewrote the capacity-sized ID mirror per file — the
-     *   O(storm × arena) microtask burn).
+     *   O(storm × arena) microtask burn). Also honored for a 'flat' channel WITH
+     *   opts.material — an instanced flat pickable (the panel field) spans a block.
+     * @param {THREE.Material} [opts.material] - a caller-built ID material (its
+     *   vertex transform shared with the caller's render material — the no-drift
+     *   law). The block start still lands on mesh.userData.pickStartId. WebGPU
+     *   NodeMaterials only; never disposed by unregister (caller-owned).
      * @returns {number} the startId assigned (0 if nothing to register)
      */
     register(channelName, target, token, opts) {
@@ -654,7 +659,9 @@ export class PickingSystem {
         // first-fit reuse below (re-register-in-place on flush/resize).
         this.unregister(channelName, target);
 
-        const count = ch.kind === 'glyph' ? (opts?.count || mesh.geometry.instanceCount || 0) : 1;
+        const count = ch.kind === 'glyph'
+            ? (opts?.count || mesh.geometry.instanceCount || 0)
+            : (opts?.material ? (opts?.count || 1) : 1);
         if (count === 0) return 0;
 
         // First-fit over this channel's LIVE entries: lowest startId >= 1 whose
@@ -682,7 +689,12 @@ export class PickingSystem {
         }
 
         let material;
-        if (this._isWebGPU) {
+        if (opts?.material) {
+            // Bring-your-own ID material (instanced flat pickables). The shared
+            // per-object pattern still applies: the block start rides userData.
+            mesh.userData.pickStartId = startId;
+            material = opts.material;
+        } else if (this._isWebGPU) {
             if (!_tslLoaded) {
                 throw new Error('[PickingSystem] TSL not loaded. Await pickingSystem._tslReady before register() on WebGPU.');
             }
@@ -702,7 +714,7 @@ export class PickingSystem {
         // registry membership — disabled in unregister.
         mesh.layers.enable(ch.layer);
 
-        ch.entries.push({ mesh, material, startId, endId, token });
+        ch.entries.push({ mesh, material, startId, endId, token, callerOwned: !!opts?.material });
         return startId;
     }
 
@@ -719,9 +731,10 @@ export class PickingSystem {
         if (idx === -1) return;
         const entry = ch.entries[idx];
         entry.mesh?.layers.disable(ch.layer);
-        // WebGPU pick materials are SHARED (never disposed per entry); the WebGL
-        // path still builds one per mesh.
-        if (!this._isWebGPU) entry.material.dispose();
+        // WebGPU pick materials are SHARED and caller-supplied ones are
+        // caller-OWNED (never disposed per entry); the WebGL path still builds
+        // one per mesh.
+        if (!this._isWebGPU && !entry.callerOwned) entry.material.dispose();
         ch.entries.splice(idx, 1);
     }
 

@@ -330,7 +330,12 @@ export function CanvasPicker() {
         s.pickPending = true;
         ps.pickAsync('grid', c, scene).then((hit) => {
           // Guard on s.in: a pick resolving AFTER the cursor left must clear hover.
-          const gridEntry = (s.in && hit) ? entryForGrid(client.ctx.registry, hit.token) : null;
+          // An instanced panel-field hit resolves through ownerOf(slot) — the grid
+          // channel's mirror of the glyph channel's resolveSlot convention.
+          const hitToken = (hit && typeof hit.token?.ownerOf === 'function')
+            ? hit.token.ownerOf(hit.slotIndex)
+            : hit?.token;
+          const gridEntry = (s.in && hitToken) ? entryForGrid(client.ctx.registry, hitToken) : null;
           if (gridEntry && !s.gpuOk) {
             s.gpuOk = true;
             console.log(`[CanvasPicker] grid picking confirmed → ${gridEntry.id}`);

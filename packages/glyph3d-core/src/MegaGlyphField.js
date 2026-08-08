@@ -35,6 +35,7 @@
 
 import * as THREE from 'three';
 import GlyphField from './GlyphField.js';
+import PanelField from './collections/PanelField.js';
 
 const _pos = new THREE.Vector3();
 const _quat = new THREE.Quaternion();
@@ -82,10 +83,18 @@ export class MegaGlyphField {
         this._pickingSystem = pickingSystem || null;
         this._pickRegisteredKey = null;   // `${capacity}` once registered — stable across a storm
 
+        // The panel field: every view's background panel as one instanced draw,
+        // posed by the same group texels (see collections/PanelField.js).
+        this.panels = new PanelField({ scene, field: this.field });
+        if (this._pickingSystem) this.panels.registerPicking(this._pickingSystem);
+
         // The pose sweep: before each render, any view whose node moved re-poses its
         // group texel. matrixWorld is current here (three's updateMatrixWorld runs at
         // render start); an unchanged 16-float compare is the whole per-view cost.
+        // Hooked on BOTH meshes — panels draw first (background renderOrder), so the
+        // sweep must land before whichever draw the pass reaches first.
         this.field.instanceMesh.onBeforeRender = () => this._syncPoses();
+        this.panels.mesh.onBeforeRender = () => this._syncPoses();
     }
 
     get instanceMesh() { return this.field.instanceMesh; }
@@ -106,12 +115,14 @@ export class MegaGlyphField {
         return view;
     }
 
-    /** Late picking wire-up (idempotent). The one glyph-channel registration. */
+    /** Late picking wire-up (idempotent). The one glyph-channel registration
+     *  (+ the panel field's one grid-channel registration). */
     setPickingSystem(ps) {
         if (!ps || this._pickingSystem === ps) return;
         this._pickingSystem = ps;
         this._pickRegisteredKey = null;
         this._registerPicking();
+        this.panels.registerPicking(ps);
     }
 
     /**

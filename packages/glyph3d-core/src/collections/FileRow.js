@@ -13,8 +13,9 @@
  *   - a second item + view for the filename label (same shape as CodeGrid's),
  *   - a measure served from the BAKED record (rows/widest exact before the GPU
  *     answers — MEASURES v3's "leaves declare intrinsic" made literal),
- *   - a panel mesh on SHARED geometry + a SHARED fill material (one per theme
- *     style app-wide, not one TSL compile per file),
+ *   - a panel SLOT in the mega-field's PanelField (one instanced draw for every
+ *     panel, posed by the same group texel that poses this row's glyphs — no
+ *     per-row mesh, no per-row material, no first-draw cost),
  *   - the colorizer contract (content + _layout + getRenderer), so rows paint
  *     syntax eagerly like grids always did.
  *
@@ -23,17 +24,14 @@
  * row answers everything the ITERATED surfaces read (bounds, names, counts,
  * pose, color/highlight writes); anything interactive belongs to the actor.
  *
- * Border flags (hover) ride ONE shared border-capable panel material: the app
- * hovers one row at a time, so a single instance swaps onto the hovered row's
- * mesh and back off. A second simultaneously-flagged row steals it — visually
- * a non-event under the one-hover invariant.
+ * Border flags (hover/focus) are a per-instance LANE in the panel field — every
+ * row has live border capability, no material travels.
  */
 
 import * as THREE from 'three';
 import BoundedObject3D from './BoundedObject3D.js';
 import { ensureMegaField } from '../MegaGlyphField.js';
 import { loadStats } from '../core/loadStats.js';
-import { RENDER_ORDER } from '../core/renderOrder.js';
 import { BOUNDS_Z_PAD } from '../core/constants.js';
 import { computeCellMetrics } from '../core/cellMetrics.js';
 import { rowsUnderWrap, bakeFile } from '../compute/glyphBake.js';
@@ -42,48 +40,8 @@ import { resolveLayoutParams, DEFAULT_LAYOUT } from '../workers/builders/index.j
 import { getPipelineArena } from '../compute/GlyphLayoutCompute.js';
 import ByteLayoutDescription, { buildByteLineIndex } from '../core/ByteLayoutDescription.js';
 import { analyzeGrid } from '../parsing/SyntaxColorizer.js';
-import { createPanelMaterial } from './panelMaterial.js';
 
 const _textEncoder = new TextEncoder();
-
-// ── Shared panel resources ──────────────────────────────────────────────────
-// One unit-plane geometry for every row panel, and one plain fill material per
-// distinct (color, opacity) style — the theme is uniform across a load, so this
-// is one material app-wide instead of one TSL node-material compile per file.
-let _sharedPanelGeometry = null;
-const _sharedFills = new Map();   // `${color}|${opacity}` -> THREE.MeshBasicMaterial
-
-function sharedPanelGeometry() {
-    if (!_sharedPanelGeometry) _sharedPanelGeometry = new THREE.PlaneGeometry(1, 1);
-    return _sharedPanelGeometry;
-}
-
-function sharedFillMaterial(color, opacity) {
-    const key = `${color}|${opacity}`;
-    let m = _sharedFills.get(key);
-    if (!m) {
-        m = new THREE.MeshBasicMaterial({
-            color,
-            opacity,
-            transparent: opacity < 1,
-            side: THREE.DoubleSide,
-            depthWrite: true,
-        });
-        _sharedFills.set(key, m);
-    }
-    return m;
-}
-
-// The ONE border-capable panel (hover/flag feedback): a single createPanelMaterial
-// instance whose mesh-of-residence is whichever row currently holds flags.
-let _borderPanel = null;      // { handle, owner: FileRow|null }
-
-function borderPanel() {
-    if (!_borderPanel) {
-        _borderPanel = { handle: null, owner: null };
-    }
-    return _borderPanel;
-}
 
 export default class FileRow extends BoundedObject3D {
     /**
@@ -143,14 +101,10 @@ export default class FileRow extends BoundedObject3D {
         this._filenameField = null;   // filename MegaFieldView
         this._pickingSystem = null;
 
-        // Panel: shared geometry + shared fill material; sized from the measure.
-        this._background = new THREE.Mesh(
-            sharedPanelGeometry(),
-            sharedFillMaterial(this.config.backgroundColor, this.config.backgroundOpacity),
-        );
-        this._background.renderOrder = RENDER_ORDER.GRID_BACKGROUND;
-        this._background.visible = false;   // shown once measured
-        this.add(this._background);
+        // Panel: an instance SLOT in the mega-field's PanelField, claimed at
+        // load (it needs the view's groupId); sized from the measure.
+        this._panelField = null;
+        this._panelSlot = null;
 
         this._borderFlags = 0;
         this._localBoundsCache = null;
@@ -214,6 +168,10 @@ export default class FileRow extends BoundedObject3D {
             pickingSystem: this._pickingSystem,
         });
         if (!this._renderer) this._renderer = mega.createView({ node: this, color: this.config.textColor });
+        if (this._panelSlot == null) {
+            this._panelField = mega.panels;
+            this._panelSlot = mega.panels.alloc(this, this._renderer.groupId);
+        }
 
         if (this.content.length > 0) {
             this._byteWindow = this._resolveWindow(lp, arena);
@@ -383,23 +341,26 @@ export default class FileRow extends BoundedObject3D {
         return box;
     }
 
-    /** Size + place the shared-geometry panel from the measure. @private */
+    /** Size + place the panel-field instance from the measure. @private */
     _updateBackground() {
-        const b = this._background;
-        if (!this.config.showBackground) { b.visible = false; return; }
+        const pf = this._panelField;
+        const slot = this._panelSlot;
+        if (pf == null || slot == null) return;
+        if (!this.config.showBackground) { pf.setVisible(slot, false); return; }
         const cb = this._recordExtent();
-        if (!cb) { b.visible = false; return; }
+        if (!cb) { pf.setVisible(slot, false); return; }
         const padding = this.config.backgroundPadding;
         const width = cb.width + padding * 2;
         const height = cb.height + padding * 2;
-        if (!(width > 0 && height > 0)) { b.visible = false; return; }
-        b.scale.set(width, height, 1);
-        b.position.set(
+        if (!(width > 0 && height > 0)) { pf.setVisible(slot, false); return; }
+        pf.setRect(slot,
             cb.min.x + cb.width / 2,
             cb.min.y + cb.height / 2,
+            width, height,
             (cb.min.z ?? 0) - 0.5,
         );
-        b.visible = true;
+        pf.setFill(slot, this.config.backgroundColor, this.config.backgroundOpacity);
+        pf.setVisible(slot, true);
     }
 
     // ── The data surface (what iterated consumers read) ─────────────────────
@@ -415,79 +376,44 @@ export default class FileRow extends BoundedObject3D {
     getHighlights() { return this._highlights; }
     update(_dt) { /* rows animate nothing */ }
 
-    /** The picking wire: panel → 'grid' channel, mega-field → the one glyph channel. */
+    /** The picking wire: one registration each for the panel field ('grid'
+     *  channel) and the mega-field ('glyph' channel) — nothing per row. */
     setPickingSystem(ps) {
         if (!ps || this._pickingSystem === ps) return;
         this._pickingSystem = ps;
-        if (this._background) ps.register('grid', this._background, this);
         const arena = getPipelineArena();
         arena?.megaField?.setPickingSystem?.(ps);
     }
 
-    // ── Border flags: the one shared border material ─────────────────────────
+    // ── Border flags: a per-instance lane in the panel field ─────────────────
 
-    /**
-     * Hover/flag feedback on a shared border-capable panel material — the app
-     * flags one row at a time, so a single instance travels to the flagged
-     * row's mesh. Lazy: the TSL material compiles on the first hover ever.
-     */
+    /** Hover/focus/input feedback — writes this row's flag byte in the field. */
     setBorderFlag(mask, on) {
         this._borderFlags = on ? (this._borderFlags | mask) : (this._borderFlags & ~mask);
-        const bp = borderPanel();
-        if (this._borderFlags !== 0) {
-            if (!bp.handle) {
-                bp.handle = createPanelMaterial({
-                    color: this.config.backgroundColor,
-                    opacity: this.config.backgroundOpacity,
-                    side: THREE.DoubleSide,
-                    depthWrite: true,
-                });
-            }
-            if (bp.owner !== this) {
-                if (bp.owner) bp.owner._dropBorderMaterial();
-                bp.owner = this;
-                bp.handle.setFill(this.config.backgroundColor, this.config.backgroundOpacity);
-                this._background.material = bp.handle.material;
-            }
-            // Mirror this row's exact flag set onto the shared uniforms.
-            bp.handle.setBorderFlag(~0, false);
-            bp.handle.setBorderFlag(this._borderFlags, true);
-        } else if (bp.owner === this) {
-            bp.owner = null;
-            this._dropBorderMaterial();
-        }
+        if (this._panelSlot != null) this._panelField.setFlags(this._panelSlot, this._borderFlags);
     }
 
-    /** @private */
-    _dropBorderMaterial() {
-        this._borderFlags = 0;
-        this._background.material = sharedFillMaterial(this.config.backgroundColor, this.config.backgroundOpacity);
-    }
-
-    /** State colors land on the shared border material (idempotent across rows). */
+    /** State colors are FIELD-wide uniforms (idempotent across rows). */
     setStateColors(colors) {
-        const bp = borderPanel();
-        bp.stateColors = { ...(bp.stateColors || {}), ...(colors || {}) };
-        bp.handle?.setStateColors(colors);
+        this._panels()?.setStateColors(colors);
     }
 
-    /** Border identity (color/width/intensity) — same shared-material seam. */
+    /** Border identity (color/width/intensity) — same field-wide seam. */
     setBorder(opts) {
-        const bp = borderPanel();
-        bp.borderStyle = { ...(bp.borderStyle || {}), ...(opts || {}) };
-        bp.handle?.setBorder(opts);
+        this._panels()?.setBorder(opts);
     }
 
-    /**
-     * Theme restyle (settings fanout runs this per registered grid). The row's
-     * config updates; the SHARED material for the new style is fetched/created,
-     * so N rows converge on one material either way.
-     */
+    /** @private the panel field, before or after this row's own load. */
+    _panels() {
+        return this._panelField ?? getPipelineArena()?.megaField?.panels ?? null;
+    }
+
+    /** Theme restyle (settings fanout runs this per registered grid). */
     setBackgroundStyle({ color, opacity } = {}) {
         if (color != null) this.config.backgroundColor = color;
         if (opacity != null) this.config.backgroundOpacity = opacity;
-        if (this._borderFlags === 0) {
-            this._background.material = sharedFillMaterial(this.config.backgroundColor, this.config.backgroundOpacity);
+        if (this._panelSlot != null) {
+            this._panelField.setFill(this._panelSlot, this.config.backgroundColor, this.config.backgroundOpacity);
         }
     }
 
@@ -499,16 +425,14 @@ export default class FileRow extends BoundedObject3D {
     // ── Lifecycle ────────────────────────────────────────────────────────────
 
     /**
-     * Release the row's arena items + views + panel. Shared resources (geometry,
-     * fill materials, the border material) stay — they are app-wide by design.
+     * Release the row's arena items + views + panel slot. Shared resources
+     * (the panel field, its materials) stay — they are app-wide by design.
      */
     dispose() {
-        const bp = borderPanel();
-        if (bp.owner === this) bp.owner = null;
-        // Release the 'grid'-channel pick registration — a disposed row's mesh left
-        // registered keeps a dead entry in every pick pass and can win hover hits.
-        if (this._pickingSystem && this._background) {
-            this._pickingSystem.unregister?.('grid', this._background);
+        if (this._panelSlot != null) {
+            this._panelField.free(this._panelSlot);
+            this._panelSlot = null;
+            this._panelField = null;
         }
         this._pipeline?.dispose?.();
         this._pipeline = null;
@@ -518,10 +442,6 @@ export default class FileRow extends BoundedObject3D {
         this._renderer = null;
         this._filenameField?.dispose?.();
         this._filenameField = null;
-        if (this._background) {
-            this.remove(this._background);
-            this._background = null;
-        }
         this._layout = null;
         this._bytes = null;
         this._byteLineIndex = null;
