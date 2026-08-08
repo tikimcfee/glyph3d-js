@@ -505,6 +505,11 @@ export default class FileRow extends BoundedObject3D {
     dispose() {
         const bp = borderPanel();
         if (bp.owner === this) bp.owner = null;
+        // Release the 'grid'-channel pick registration — a disposed row's mesh left
+        // registered keeps a dead entry in every pick pass and can win hover hits.
+        if (this._pickingSystem && this._background) {
+            this._pickingSystem.unregister?.('grid', this._background);
+        }
         this._pipeline?.dispose?.();
         this._pipeline = null;
         this._filenamePipeline?.dispose?.();

@@ -312,6 +312,11 @@ class CodeGrid extends FramedGlyphField {
         // itself); a bigger file just stages a bigger item.
         this._ensureRenderer();              // reconstruct if content was evicted
         this._clearRenderedText();           // drop the PRIOR render's glyphs; the layout below adds the new ones
+        // Size the panel NOW from whatever measure exists (the baked record's prior
+        // when nothing is staged): the background otherwise sat as a visible 1×1
+        // unit plane until the fold's FIT stage — the "tiny panel" flash a
+        // materializing row's click made user-facing.
+        this._updateBackground();
     }
 
     /**
@@ -1523,7 +1528,11 @@ class CodeGrid extends FramedGlyphField {
      */
     _getContentBounds() {
         const w = this._byteWindow;
-        if (!w) return this._layout?.extent() ?? null;    // nothing staged yet
+        // Nothing staged yet: the RECORD still measures the file (a materialized
+        // row hands its record over before the first fold) — without this, the
+        // click-to-focus camera fit ran against an empty box for the one beat
+        // between materialize and laid, and flew to a degenerate frame.
+        if (!w) return this._layout?.extent() ?? this._bakedPriorExtent();
         // ONE rule: the pipeline measures what it STAGED; the record measures the
         // FILE; the grid's footprint is the file's. A degenerate window staged the
         // whole file, so its live extent is the sharpest answer (exact under
