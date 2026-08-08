@@ -1269,14 +1269,17 @@ class CodeGrid extends FramedGlyphField {
             // as the scrollRows bias (_windowScroll, 0 when degenerate); sourceBase
             // keeps every consumer in file-byte space (0 when degenerate).
             //
-            // Stage the NEW item BEFORE disposing the old: if the arena refuses (the
-            // f32-ordinal wall — window churn is append-only until compaction), the
-            // grid keeps its previous window rendering instead of wedging on a dead
-            // pipeline. An INITIAL load still fails loud (nothing previous to keep).
+            // Stage the NEW item WITHOUT attaching the view (field: null): the view
+            // keeps rendering the OLD item's glyphs through the whole flush — the
+            // attach happens at the SWAP below, once the new slots are laid. (The
+            // empty-frame flash on edit/crossing was the synchronous attach pointing
+            // the view at a not-yet-laid range.) If the arena refuses (the
+            // f32-ordinal wall — churn is append-only until compaction), the grid
+            // keeps its previous window untouched — nothing was re-pointed. An
+            // INITIAL load still fails loud (nothing previous to keep).
             const prevPipeline = this._pipeline;
             const prevWindow = this._byteWindow;
             this._byteWindow = this._resolveWindow(lp, arena);
-            if (this._renderer) this._renderer.sourceBase = this._byteWindow.from;
             let staged;
             try {
                 staged = arena.stage({
@@ -1286,12 +1289,11 @@ class CodeGrid extends FramedGlyphField {
                     wrapWidth: lp.wrapWidth || 0,
                     lineHeight: m.lineHeight,
                     zStep: m.charHeight * (lp.zWrapSpacing || 0),
-                    field: this._renderer,
+                    field: null,
                 });
             } catch (err) {
                 if (!prevPipeline) throw err;
                 this._byteWindow = prevWindow;
-                if (this._renderer) this._renderer.sourceBase = prevWindow?.from || 0;
                 console.error(`[window] ${this.filename || this.name}: re-stage refused (${err?.message || err}) — keeping the previous window (compaction is the lift)`);
                 return;
             }
@@ -1303,10 +1305,6 @@ class CodeGrid extends FramedGlyphField {
                     console.info(`[window] ${this.filename || this.name}: restage #${this._windowRestages} rows[${this._byteWindow.startRow},${this._byteWindow.endRow}) bytes[${this._byteWindow.from},${this._byteWindow.to}) scroll ${this._scrollOffset}`);
                 }
             }
-            // The prior item's arena space leaks (v1 — see the arena header); dispose just
-            // detaches this view from the old item so a realloc never re-attaches it stale.
-            // The view already tombstoned its old slot range on the re-attach above.
-            prevPipeline?.dispose?.();
             this._pipeline = staged;
             await arena.requestFlush();
             // The extent gate: the GPU's per-item bounds land off ONE coalesced readback;
@@ -1314,6 +1312,14 @@ class CodeGrid extends FramedGlyphField {
             // scroll clamps and culling all read the record). Resolves even on device
             // loss — a load never hangs on it.
             await this._pipeline.laid;
+
+            // THE SWAP — one beat: the view re-points to the LAID item (tombstoning
+            // the old range) and only then does the old item retire. Every frame
+            // until this line rendered the previous content; none renders an empty
+            // grid. (The arena space still leaks per restage — compaction's job.)
+            if (this._renderer) this._renderer.sourceBase = this._byteWindow.from;
+            staged.adoptField(this._renderer);
+            prevPipeline?.dispose?.();
 
             // The bake gate: the GPU's bounds vs the index's prediction, once per load.
             // Rows are integer-exact under any wrap; the widest row compares only when

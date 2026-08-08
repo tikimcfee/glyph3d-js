@@ -190,6 +190,23 @@ export default class GlyphPipelineArena {
                 arena.setItemPage(itemIndex, item.page);
                 return arena.requestRepaginate();
             },
+            /**
+             * Late field attach — the FLASH-FREE swap. A restage stages with
+             * `field: null` (the view keeps rendering its OLD item), awaits `laid`,
+             * then adopts: ONE attach re-points the view — tombstoning the old
+             * range — in the same beat the new slots are valid, so no frame renders
+             * an attached-but-unlaid range. Also delivers the extent the bounds
+             * sync skipped while the field was null, and registers the item for
+             * future realloc re-attaches (item.field).
+             */
+            adoptField(field2) {
+                if (item.dead || !field2) return;
+                item.field = field2;
+                field2.attachBytePipeline(arena._kernels, item.byteCount, item.byteStart);
+                if (item.gpuBounds && typeof field2.setLayoutExtent === 'function') {
+                    field2.setLayoutExtent(extentOf(item.gpuBounds));
+                }
+            },
             verify: (eps) => arena.verifyItem(itemIndex, eps),
             /** The item's arena space leaks (v1 — see the header); this detaches the field
              *  so a realloc never re-attaches a disposed grid's field. */
