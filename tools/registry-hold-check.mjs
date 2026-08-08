@@ -85,5 +85,40 @@ const grid = () => ({});
     eq(reg.size, 0, 'removal hold: entries gone');
 }
 
+// The meta index: findByMeta answers from a maintained index (armed on first
+// query of a key), matching the old linear scan's semantics exactly — including
+// re-register, unregister, unregisterByType, and the undefined-value match.
+{
+    const { reg } = mk();
+    const a = grid(), b = grid(), c = grid();
+    reg.register('a', a, { type: 'grid', sourcePath: 'file:///x/a.js' });
+    reg.register('b', b, { type: 'grid', sourcePath: 'file:///x/b.js' });
+    reg.register('c', c, { type: 'terminal' });   // no sourcePath at all
+    eq(reg.findByMeta('sourcePath', 'file:///x/a.js').map((e) => e.id), ['a'], 'meta: exact match');
+    eq(reg.findByMeta('sourcePath', 'file:///x/nope.js').length, 0, 'meta: miss is empty');
+    // The scan matched entries LACKING the key when value is undefined — the index must too.
+    eq(reg.findByMeta('sourcePath', undefined).map((e) => e.id), ['c'], 'meta: undefined matches keyless');
+
+    // Registrations AFTER the index armed still land in it.
+    reg.register('d', grid(), { type: 'grid', sourcePath: 'file:///x/d.js' });
+    eq(reg.findByMeta('sourcePath', 'file:///x/d.js').map((e) => e.id), ['d'], 'meta: post-arm register indexed');
+
+    // Re-register under the same id with a DIFFERENT sourcePath: old value unindexed.
+    reg.register('a', a, { type: 'grid', sourcePath: 'file:///y/a.js' });
+    eq(reg.findByMeta('sourcePath', 'file:///x/a.js').length, 0, 'meta: re-register drops the old value');
+    eq(reg.findByMeta('sourcePath', 'file:///y/a.js').map((e) => e.id), ['a'], 'meta: re-register indexes the new value');
+
+    // unregister + unregisterByType both unindex.
+    reg.unregister('b');
+    eq(reg.findByMeta('sourcePath', 'file:///x/b.js').length, 0, 'meta: unregister unindexes');
+    reg.unregisterByType('grid');
+    eq(reg.findByMeta('sourcePath', 'file:///y/a.js').length, 0, 'meta: unregisterByType unindexes');
+    eq(reg.findByMeta('sourcePath', undefined).map((e) => e.id), ['c'], 'meta: survivors still answer');
+
+    // A second key arms independently.
+    reg.register('e', grid(), { type: 'grid', owner: 'client-1' });
+    eq(reg.findByMeta('owner', 'client-1').map((e) => e.id), ['e'], 'meta: second key arms on demand');
+}
+
 console.log(`\n${fail === 0 ? '✓ PASS' : '✗ FAIL'} — ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

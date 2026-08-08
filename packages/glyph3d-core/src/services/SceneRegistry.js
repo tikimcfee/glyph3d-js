@@ -58,6 +58,19 @@ export default class SceneRegistry {
         this._holdDepth = 0;
         /** @type {Set<string>} */
         this._heldTypes = new Set();
+
+        /**
+         * Meta lookup index: key -> (value -> Set<entry>). Built lazily the first
+         * time a key is queried (one O(N) scan), maintained on register/unregister
+         * after that — findByMeta('sourcePath', uri) runs three times per file
+         * during a bulk load, and the linear scan made that O(N²) before any
+         * object was even built. Entries index under their meta[key] value
+         * INCLUDING undefined, so lookup semantics match the scan exactly.
+         * Safe because entry.meta is never mutated after register (verified —
+         * a meta change must go through re-register).
+         * @type {Map<string, Map<*, Set<RegistryEntry>>>}
+         */
+        this._metaIndex = new Map();
     }
 
     // -- Mutation -------------------------------------------------------
@@ -77,6 +90,7 @@ export default class SceneRegistry {
             const existing = this._entries.get(id);
             this._gridToId.delete(existing.grid);
             this._pickable.delete(existing);
+            this._metaUnindex(existing);
             if (existing.grid !== grid || existing.type !== type) {
                 console.warn(`[registry] overwriting "${id}" (type: ${existing.type} -> ${type})`);
             }
@@ -86,6 +100,7 @@ export default class SceneRegistry {
         this._entries.set(id, entry);
         this._gridToId.set(grid, id);
         if (this._pickableTypes.has(this._tag(entry))) this._pickable.add(entry);
+        this._metaIndexAdd(entry);
         this._invalidateCache(this._tag(entry));
         return entry;
     }
@@ -106,6 +121,7 @@ export default class SceneRegistry {
         this._entries.delete(id);
         this._gridToId.delete(entry.grid);
         this._pickable.delete(entry);
+        this._metaUnindex(entry);
         this._invalidateCache(this._tag(entry));
         return entry;
     }
@@ -134,6 +150,7 @@ export default class SceneRegistry {
                 this._entries.delete(id);
                 this._gridToId.delete(entry.grid);
                 this._pickable.delete(entry);
+                this._metaUnindex(entry);
                 removed.push(entry);
             }
         }
@@ -244,17 +261,49 @@ export default class SceneRegistry {
     }
 
     /**
-     * Find entries by a metadata key-value match.
+     * Find entries by a metadata key-value match. O(matches) after the first
+     * query of a key arms its index (one O(N) build) — the bulk-load dedupe
+     * runs this per file, and the old linear scan was the load's first O(N²).
      * @param {string} key
      * @param {*} value
      * @returns {RegistryEntry[]}
      */
     findByMeta(key, value) {
-        const results = [];
-        for (const entry of this._entries.values()) {
-            if (entry.meta[key] === value) results.push(entry);
+        let byValue = this._metaIndex.get(key);
+        if (!byValue) {
+            byValue = new Map();
+            for (const entry of this._entries.values()) {
+                const v = entry.meta[key];
+                let set = byValue.get(v);
+                if (!set) byValue.set(v, (set = new Set()));
+                set.add(entry);
+            }
+            this._metaIndex.set(key, byValue);
         }
-        return results;
+        const set = byValue.get(value);
+        return set ? [...set] : [];
+    }
+
+    /** Add an entry to every armed meta-key index (under meta[key], incl. undefined). @private */
+    _metaIndexAdd(entry) {
+        for (const [key, byValue] of this._metaIndex) {
+            const v = entry.meta[key];
+            let set = byValue.get(v);
+            if (!set) byValue.set(v, (set = new Set()));
+            set.add(entry);
+        }
+    }
+
+    /** Remove an entry from every armed meta-key index. @private */
+    _metaUnindex(entry) {
+        for (const [key, byValue] of this._metaIndex) {
+            const v = entry.meta[key];
+            const set = byValue.get(v);
+            if (set) {
+                set.delete(entry);
+                if (set.size === 0) byValue.delete(v);
+            }
+        }
     }
 
     /** @returns {RegistryEntry[]} all entries in insertion order */
