@@ -404,5 +404,51 @@ for (const [name, text] of CORPORA) {
     'window: the same file is seedable unwrapped — pageCols fold included');
 }
 
+// ── 10. window-AS-ITEM: the runtime's windowed staging trick. A window staged as
+//        its own arena item (fresh fold, reset at start) + the scrollRows bias
+//        (scroll − startRow) reproduces the full fold's POSITIONS bit-for-bit —
+//        which is why windowed staging needs NO seeded GPU dispatch: the item
+//        reset IS the seed, because windows snap to row starts where every fold
+//        counter is zero. (In the seedable regime no line wraps, so wrap-segment
+//        z is uniform too — nothing off-window can move a position.) ──
+{
+  let checked = 0;
+  for (let t = 0; t < SEEDS; t++) {
+    const r = rng(11000 + t);
+    const bytes = enc.encode(randomText(r, 20 + Math.floor(r() * 40)));
+    if (bytes.length < 16) continue;
+    const wrap = [0, 0, 100][t % 3];
+    const lane = { wrapWidth: wrap, lineHeight: CELL_H, zStep: wrap ? 0.21 : 0 };
+    const rec = bakeFile(bytes, trie, { lineHeight: CELL_H, checkpointInterval: 1 + Math.floor(r() * 100) });
+    if (!windowSeedable(rec, wrap)) continue;
+    const full0 = runPipeline(bytes, trie, { ...lane });
+    const totalRows = full0.itemBounds[0]?.totalRows ?? 0;
+    if (totalRows < 4) continue;
+
+    const scroll = Math.floor(r() * totalRows);
+    const r0 = Math.max(0, scroll - Math.floor(r() * 5));           // startRow ≤ scroll
+    const r1 = Math.min(totalRows, scroll + 1 + Math.floor(r() * 12));
+    if (r1 <= r0) continue;
+    const win = byteRangeForRows(bytes, trie, rec, r0, r1, wrap);
+    ok(!!win, `window-item seed ${11000 + t}: byteRangeForRows`);
+    if (!win) continue;
+
+    const full = runPipeline(bytes, trie, { ...lane, scrollRows: scroll });
+    const winRun = runPipeline(bytes.subarray(win.from, win.to), trie, { ...lane, scrollRows: scroll - r0 });
+    let bad = 0;
+    for (let id = win.from; id < win.to; id++) {
+      const fo = id * SLOT_STRIDE, wo = (id - win.from) * SLOT_STRIDE;
+      if ((full.slots[fo + S_FLAGS] & F_LEADER) === 0) continue;
+      if (full.slots[fo + S_CODEPOINT] !== winRun.slots[wo + S_CODEPOINT]) bad++;
+      for (const l of [S_X, S_Y, S_Z]) {
+        if (full.slots[fo + l] !== winRun.slots[wo + l]) bad++;     // BIT-exact, no eps
+      }
+    }
+    ok(bad === 0, `window-item seed ${11000 + t} wrap=${wrap} scroll=${scroll} rows[${r0},${r1}): ${bad} position lanes differ`);
+    checked++;
+  }
+  console.log(`  window-as-item sweep: ${checked} staged windows position-identical, bit for bit`);
+}
+
 console.log(`\n${fail === 0 ? '✓' : '✗'} bake: ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

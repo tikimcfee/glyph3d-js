@@ -17,6 +17,7 @@ import { RENDER_ORDER } from '../core/renderOrder.js';
 import { BOUNDS_Z_PAD } from '../core/constants.js';
 import { computeCellMetrics } from '../core/cellMetrics.js';
 import { rowsUnderWrap } from '../compute/glyphBake.js';
+import { windowSeedable, byteRangeForRows } from '../compute/glyphPipelineWindow.js';
 import { resolveLayoutParams, DEFAULT_LAYOUT } from '../workers/builders/index.js';
 import { getPipelineArena } from '../compute/GlyphLayoutCompute.js';
 import ByteLayoutDescription, { buildByteLineIndex } from '../core/ByteLayoutDescription.js';
@@ -87,6 +88,16 @@ class CodeGrid extends FramedGlyphField {
             // through the build's `shared` channel AND read by _buildLayoutDescription's geom,
             // so the glyphs and the caret/highlight queries can never fold differently.
             layout: { ...DEFAULT_LAYOUT, ...(options.layout || {}) },
+            // Windowed staging (slots are a CACHE): a file at/above windowMinBytes with a
+            // baked record stages only rows [scroll − margin, scroll + span + margin) as
+            // its arena item — the index seeds the window, the item-reset fold computes it
+            // exactly, the record supplies the full-file measure. 0 disables.
+            windowMinBytes: options.windowMinBytes ?? 256 * 1024,
+            // Window span in visual rows when no clip frame is set (a frame's rows win).
+            windowRows: options.windowRows ?? 600,
+            // Hysteresis: rows staged beyond the view on each side — scroll inside the
+            // margin is a repaginate; crossing it re-stages one window.
+            windowMarginRows: options.windowMarginRows ?? 200,
         };
 
         // Content state
@@ -94,6 +105,10 @@ class CodeGrid extends FramedGlyphField {
         this.sourcePath = null;
         this.content = '';
         this.lines = [];
+
+        /** Windowed staging state: {from, to, startRow, endRow, totalRows} when only a
+         *  byte window of this file is staged (see _resolveByteWindow), else null. */
+        this._byteWindow = null;
 
         // Render-neutral analysis products (built off-critical-path).
         this._highlights = null;        // { gen, lang, captures } — syntax colors / 2D decorations (eager)
@@ -822,6 +837,19 @@ class CodeGrid extends FramedGlyphField {
         const clamped = Math.max(0, Math.min(Math.round(rows), this.getMaxScroll()));
         if (clamped === this._scrollOffset) return this;
         this._scrollOffset = clamped;
+        // WINDOWED grid leaving its staged rows: one re-stage of a fresh window around
+        // the new position (the hysteresis margin makes this a crossing cost, not a
+        // per-tick cost — ticks inside the margin take the repaginate path below).
+        const w = this._byteWindow;
+        if (w) {
+            const span = Math.max(1, this._frameRows || this.config.windowRows);
+            if (clamped < w.startRow || clamped + span > w.endRow) {
+                await this._layoutContent();
+                this._updateBackground();
+                this._applyDecorations();
+                return this;
+            }
+        }
         // The conveyor is kernel 3 only: re-arm the item's page params with the new scroll
         // and repaginate — no decode, no walk, no reload. Scroll ticks across grids
         // coalesce into ONE repaginate dispatch (the arena's repaginate gate). The mirror
@@ -851,6 +879,9 @@ class CodeGrid extends FramedGlyphField {
      * @returns {number}
      */
     getTotalVisualRows() {
+        // Windowed: the pipeline's rows are the WINDOW's — the file's total comes from
+        // the baked record (exact: rowsUnderWrap, resolved when the window was).
+        if (this._byteWindow) return this._byteWindow.totalRows;
         return Math.round(this._pipeline?.bounds?.totalRows || 0);
     }
 
@@ -1151,8 +1182,17 @@ class CodeGrid extends FramedGlyphField {
             // detaches this view from the old item so a realloc never re-attaches it stale.
             // The view tombstones its old slot range on re-attach (the dead group).
             this._pipeline?.dispose?.();
+            // WINDOWED staging: a large baked file stages only its viewed rows. The
+            // window snaps to a row start, so the arena's fresh per-item fold computes
+            // it exactly — the only cross-window fact is the start row, carried as the
+            // scrollRows bias (_windowScroll). The view keeps speaking file bytes
+            // through slotOffset; the record supplies the full-file measure.
+            this._byteWindow = this._resolveByteWindow(lp, arena);
+            if (this._renderer) this._renderer.slotOffset = this._byteWindow?.from || 0;
             this._pipeline = arena.stage({
-                bytes: this._bytes,
+                bytes: this._byteWindow
+                    ? this._bytes.subarray(this._byteWindow.from, this._byteWindow.to)
+                    : this._bytes,
                 origin: { x: 0, y: this._layoutOriginY, z: 0 },
                 page: this._pageParams(lp, m),
                 wrapWidth: lp.wrapWidth || 0,
@@ -1177,10 +1217,15 @@ class CodeGrid extends FramedGlyphField {
                 const rec = this._bakedRecord;
                 const wrap = Math.max(0, Math.trunc(lp.wrapWidth || 0));
                 const got = this._pipeline.bounds;
-                const wantRows = rowsUnderWrap(rec, wrap);
+                // Windowed: the GPU folded rows [startRow, endRow) — every row in a
+                // window holds a leader, so the item's row count is the span exactly.
+                const wantRows = this._byteWindow
+                    ? this._byteWindow.endRow - this._byteWindow.startRow
+                    : rowsUnderWrap(rec, wrap);
                 if (got.totalRows !== wantRows) {
                     console.warn(`[bake] ${this.filename || this.name}: baked rows(wrap ${wrap}) = ${wantRows} ≠ GPU ${got.totalRows} — stale record or fold drift`);
-                } else if (wrap === 0 || rec.maxLineLen <= wrap) {
+                } else if (!this._byteWindow && (wrap === 0 || rec.maxLineLen <= wrap)) {
+                    // Full stage only: a window's widest row is the window's, not the file's.
                     const rel = Math.abs(got.maxRowExtent - rec.maxRowExtent) / Math.max(1, rec.maxRowExtent);
                     if (rel > 1e-4) {
                         console.warn(`[bake] ${this.filename || this.name}: baked widest row ${rec.maxRowExtent} vs GPU ${got.maxRowExtent} (rel ${rel.toExponential(2)}) — metrics drift?`);
@@ -1218,13 +1263,13 @@ class CodeGrid extends FramedGlyphField {
      */
     _pageParams(lp, m) {
         const rows = Math.max(0, Math.trunc(lp.pageHeight || 0));
-        if (rows === 0) return { scrollRows: this._scrollOffset || 0 };
+        if (rows === 0) return { scrollRows: this._windowScroll() };
         const charAdvance = m.charWidth + (m.spacing || 0);
         if ((lp.axis || 'xy') === 'z') {
             return {
                 pageRows: rows, pagesWide: 1,
                 depthPerBand: (lp.pageDepth || 0) * m.lineHeight,
-                scrollRows: this._scrollOffset || 0,
+                scrollRows: this._windowScroll(),
             };
         }
         return {
@@ -1232,8 +1277,56 @@ class CodeGrid extends FramedGlyphField {
             pagesWide: Math.max(1, Math.trunc(lp.pagesWide || 1)),
             pageGapX: (lp.pageGapX || 0) * charAdvance,
             bandStrideY: rows * m.lineHeight + (lp.pageGapY || 0) * m.lineHeight,
-            scrollRows: this._scrollOffset || 0,
+            scrollRows: this._windowScroll(),
         };
+    }
+
+    /**
+     * The kernel-facing scroll: window-relative. A windowed item's rows count from its
+     * own start, so the absolute scroll carries the window's start row as a bias —
+     * screenRow = (row − startRow) − (scroll − startRow) = absolute row − absolute
+     * scroll, the identical remap. Non-negative by construction: the window never
+     * starts below the scroll position (startRow = scroll − margin, clamped).
+     * @private
+     */
+    _windowScroll() {
+        return Math.max(0, (this._scrollOffset || 0) - (this._byteWindow?.startRow || 0));
+    }
+
+    /**
+     * Should this load stage a WINDOW instead of the whole file? Yes when the file is
+     * large, its baked record can seed exactly (no wrapping lines — windowSeedable),
+     * and the view is unpaged (a paged item derives its fan stride from its OWN widest
+     * row, which for a window is the window's, not the file's — paged windowing waits
+     * on carrying the baked stride in). Returns the byte range + rows, or null = full.
+     * @private
+     * @returns {?{from:number, to:number, startRow:number, endRow:number, totalRows:number}}
+     */
+    _resolveByteWindow(lp, arena) {
+        const rec = this._bakedRecord;
+        const cfg = this.config;
+        if (!rec || !(cfg.windowMinBytes > 0) || this._bytes.length < cfg.windowMinBytes) return null;
+        if (Math.trunc(lp.pageHeight || 0) > 0) return null;
+        const wrap = Math.max(0, Math.trunc(lp.wrapWidth || 0));
+        if (!windowSeedable(rec, wrap)) {
+            if (!this._windowRefusedNoted) {
+                this._windowRefusedNoted = true;
+                console.info(`[bake] ${this.filename || this.name}: lines wrap at ${wrap} — windowed staging off, full fold`);
+            }
+            return null;
+        }
+        const trie = arena?.trie;
+        if (!trie) return null;
+        const totalRows = rowsUnderWrap(rec, wrap);
+        const span = Math.max(1, this._frameRows || cfg.windowRows);
+        const margin = Math.max(0, cfg.windowMarginRows);
+        const s = Math.min(this._scrollOffset || 0, Math.max(0, totalRows - 1));
+        const r0 = Math.max(0, s - margin);
+        const r1 = Math.min(totalRows, s + span + margin);
+        if (r0 <= 0 && r1 >= totalRows) return null;      // the window IS the file
+        const w = byteRangeForRows(this._bytes, trie, rec, r0, r1, wrap);
+        if (!w || (w.from === 0 && w.to >= this._bytes.length)) return null;
+        return { from: w.from, to: w.to, startRow: r0, endRow: r1, totalRows };
     }
 
     /**
@@ -1253,6 +1346,10 @@ class CodeGrid extends FramedGlyphField {
             }).createView({ node: this, color: this.config.filenameColor });
         }
         this._filenameField.setVisible(true);
+        // Same name already staged → keep its item (a windowed grid re-runs
+        // _layoutContent on every window crossing; the label hasn't moved).
+        if (this._filenamePipeline && this._filenameStagedText === this.filename) return;
+        this._filenameStagedText = this.filename;
         this._filenamePipeline?.dispose?.();
         this._filenamePipeline = arena.stage({
             bytes: _textEncoder.encode(this.filename),
@@ -1275,6 +1372,10 @@ class CodeGrid extends FramedGlyphField {
      * @returns {{min:{x,y,z}, max:{x,y,z}, width:number, height:number, depth:number}|null}
      */
     _getContentBounds() {
+        // Windowed: the pipeline's extent is the WINDOW's box; the grid's real footprint
+        // is the file's, and in the windowed regime (no wrapping lines) the record's
+        // derivation is exact — rows from the histogram, width the true widest line.
+        if (this._byteWindow) return this._bakedPriorExtent() ?? this._layout?.extent() ?? null;
         return this._layout?.extent() ?? this._bakedPriorExtent();
     }
 
@@ -1346,6 +1447,7 @@ class CodeGrid extends FramedGlyphField {
             lineLengths: idx.lineLengths,
             pipeline: this._pipeline,
             scrollOffset: this._scrollOffset || 0,
+            slotBase: this._byteWindow?.from || 0,
         }) : null;
         this._scheduleAnalyze();
     }
@@ -1797,6 +1899,15 @@ class CodeGrid extends FramedGlyphField {
     async _relayoutPreservingCursor() {
         this._linesDirty = true;
         this._modified = true;   // a content edit (insert/delete/split) happened → unsaved until file.save
+        // An edit invalidates the BAKED record (checkpoints/rows describe the disk
+        // content) — the grid leaves the windowed regime and folds full from here on.
+        // One divergence path: edited files pay the full cost, read views stay windowed.
+        if (this._bakedRecord) {
+            this._bakedRecord = null;
+            this._byteWindow = null;
+            if (this._renderer) this._renderer.slotOffset = 0;
+            console.info(`[bake] ${this.filename || this.name}: edited — record dropped, full fold from here`);
+        }
         return this._relayout();
     }
 

@@ -109,6 +109,11 @@ export default class GlyphPipelineArena {
     /** The kernels (a field attaches to their slot buffer). Rebuilt on growth/trie change. */
     get kernels() { return this._kernels; }
 
+    /** The live trie (codepoint → glyph metrics) — the same advances every dispatch
+     *  resolves through. Windowed staging's CPU queries (byteRangeForRows) fold with
+     *  it so a window's seed is exact against what the GPU will compute. */
+    get trie() { return this._trie; }
+
     /**
      * Append a file to the arena and return its handle. Synchronous: mirror + item-table
      * entry + field attach. The GPU sees it at the next flush.

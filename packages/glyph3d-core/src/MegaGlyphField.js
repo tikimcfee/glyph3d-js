@@ -259,6 +259,12 @@ export class MegaFieldView {
         this.color = color || { r: 0, g: 1, b: 0 };
         this.slotBase = -1;
         this.byteCount = 0;
+        /** SOURCE-byte base of this view's range: a WINDOWED grid stages only bytes
+         *  [slotOffset, slotOffset + byteCount) of its file, but every caller keeps
+         *  speaking FILE byte offsets (the canonical ruler). This is the view's ONE
+         *  translation: writes subtract it (clamped to the staged range), pick hits
+         *  add it back. 0 = the whole file is staged (every classic grid). */
+        this.slotOffset = 0;
         this.bounds = null;      // the GPU's per-item extent (the visibility lane reads this later)
         this.dead = false;
         this._visible = true;
@@ -271,18 +277,21 @@ export class MegaFieldView {
         this.mega._attachView(this, pipeline, byteLength, slotBase);
     }
 
-    /** View-local slot range → shared color attribute (the colorizer's write path). */
+    /** FILE-byte slot range → shared color attribute (the colorizer's write path).
+     *  Clamped to the staged window — a range outside it is simply not visible. */
     setGlyphColorRange(startSlot, count, color) {
         if (this.byteCount <= 0) return;
-        const start = Math.max(0, startSlot | 0);
-        const n = Math.min(count, this.byteCount - start);
+        const local = (startSlot | 0) - this.slotOffset;
+        const start = Math.max(0, local);
+        const n = Math.min(local + count, this.byteCount) - start;
         if (n > 0) this.mega.field.setGlyphColorRange(this.slotBase + start, n, color);
     }
 
-    /** View-local slot → shared highlight texture (hover tint, highlight.* verbs). */
+    /** FILE-byte slot → shared highlight texture (hover tint, highlight.* verbs). */
     setGlyphHighlight(slot, color, fillOpacity = 0) {
-        if (this.byteCount <= 0 || slot < 0 || slot >= this.byteCount) return;
-        this.mega.field.setGlyphHighlight(this.slotBase + slot, color, fillOpacity);
+        const local = slot - this.slotOffset;
+        if (this.byteCount <= 0 || local < 0 || local >= this.byteCount) return;
+        this.mega.field.setGlyphHighlight(this.slotBase + local, color, fillOpacity);
     }
 
     /**
