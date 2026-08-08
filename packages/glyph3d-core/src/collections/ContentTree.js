@@ -276,6 +276,43 @@ export default class ContentTree {
     }
 
     /**
+     * Swap the leaf at `path` IN PLACE — same Book, same mount, same parent chain
+     * (dir node or a structural scheme's layout group), same pose. The seam the
+     * actor-materialize swap uses: re-inserting created a NEW book under the DIR,
+     * and any pose copied from the old book was local to a DIFFERENT parent frame
+     * (a jellyfish panel, a stack group) — the actor landed kilometers off-field.
+     * The OLD leaf is detached but NOT disposed (the caller overlaps it until the
+     * new leaf's glyphs are laid). Returns the old leaf, or null if path unknown.
+     */
+    replaceLeaf(path, leaf) {
+        const full = keyOf(path);
+        const old = this._leaves.get(full);
+        const book = this._books.get(full);
+        if (!old || !book) return null;
+        leaf.userData = { ...(leaf.userData || {}), path: full, name: old.userData?.name, isDir: false };
+        // Same parent frame as the old leaf, so its LOCAL pose transfers verbatim
+        // (schemes may pose the leaf, not the book). Scale stays the new leaf's own
+        // (a CodeGrid's ScaleModel is its scale authority).
+        leaf.position.copy(old.position);
+        leaf.quaternion.copy(old.quaternion);
+        leaf.updateMatrix();
+        const mount = book.sheets?.[0]?.rectoMount ?? null;
+        if (mount) {
+            if (old.parent === mount) mount.remove(old);
+            mount.add(leaf);
+        } else {
+            // No mount (never the plain-carrier shape, but stay honest): seat the
+            // leaf where the old one was parented.
+            old.parent?.add(leaf);
+            old.parent?.remove(old);
+        }
+        if (book.sheets?.[0]) book.sheets[0].recto = leaf;
+        this._leaves.set(full, leaf);
+        this._dirty = true;
+        return old;
+    }
+
+    /**
      * Remove the file leaf at `path` (no-op if absent). Empty directory nodes are KEPT by
      * default (they measure to zero); pass {prune:true} to also drop now-empty ancestor
      * dir nodes up to (not including) the root. Returns the removed leaf or null.

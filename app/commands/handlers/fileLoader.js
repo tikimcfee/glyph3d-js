@@ -184,8 +184,6 @@ export function materializeActor(ctx, id) {
     const uri = row.getSourcePath();
     const mtime = getDiskMtime(row);
     const notRendered = row.userData?.notRendered ?? null;
-    const oldBook = ctx.contentTree?.bookAt?.(path);
-    const pose = oldBook ? { pos: oldBook.position.clone(), quat: oldBook.quaternion.clone() } : null;
 
     const grid = new CodeGrid(ctx.scene, ctx.atlas, { name: path, worldScale: 0.025, ...gridTheme() });
     grid.setSourcePath(uri);
@@ -197,13 +195,13 @@ export function materializeActor(ctx, id) {
     if (row._highlights) grid._highlights = row._highlights;
 
     ctx.registry.holdChanges(() => {
-        ctx.contentTree?.insert(grid, path);          // replaces the row's book in place
-        const newBook = ctx.contentTree?.bookAt?.(path);
-        if (newBook && pose) {
-            newBook.position.copy(pose.pos);
-            newBook.quaternion.copy(pose.quat);
-            newBook.updateMatrix();
-        }
+        // The SURGICAL swap: same Book, same mount, same parent chain, the old
+        // leaf's own local pose — zero pose arithmetic across frames. (Re-insert
+        // built a NEW book under the DIR; a pose copied from the old book was
+        // local to a different parent — a scheme's layout group — and the actor
+        // landed off-field, which is where the click-focus camera then flew.)
+        const swapped = ctx.contentTree?.replaceLeaf?.(path, grid);
+        if (!swapped) ctx.contentTree?.insert(grid, path);   // row never made the tree (bare registry entry)
         ctx.registry.unregister(id);                  // then re-register: no overwrite warn
         ctx.addGrid(grid, { id, type: 'grid' });
     });
