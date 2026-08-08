@@ -324,12 +324,24 @@ export default class FileRow extends BoundedObject3D {
      * The row's content extent from the baked record — rows exact under any
      * wrap (the line histogram), width exact when nothing folds. Same math as
      * CodeGrid._bakedPriorExtent; for a row it is not a prior, it is THE measure.
+     *
+     * CACHED: a row's record, metrics and layout are immutable after load()
+     * (anything that would change them materializes the actor first), while
+     * the per-frame iterators (occlusion culler, minimap, camera soft-bounds)
+     * call getBounds → here once per row per frame — the recompute was a
+     * resolveLayoutParams + histogram walk × 1500 rows × 60Hz.
      * @private
      * @returns {{min:Object, max:Object, width:number, height:number, depth:number}|null}
      */
     _recordExtent() {
+        if (this._extentCache !== undefined) return this._extentCache;
         const rec = this._bakedRecord;
-        if (!rec || !(rec.leaders > 0) || this.content.length === 0) return null;
+        if (!rec || !(rec.leaders > 0) || this.content.length === 0) {
+            // Null only becomes final once content is loaded; before that, stay uncached.
+            if (this.content.length === 0) return null;
+            this._extentCache = null;
+            return null;
+        }
         const m = this.metrics;
         const lp = resolveLayoutParams(this.config.layout);
         const wrap = Math.max(0, Math.trunc(lp.wrapWidth || 0));
@@ -339,10 +351,11 @@ export default class FileRow extends BoundedObject3D {
         const segs = wrap > 0 ? Math.max(1, Math.ceil(rec.maxLineLen / wrap)) : 1;
         const min = { x: 0, y: originY - (rows - 1) * m.lineHeight, z: -(segs - 1) * zStep };
         const max = { x: rec.maxLineWidth, y: originY + m.charHeight, z: 0 };
-        return {
+        this._extentCache = {
             min, max,
             width: max.x - min.x, height: max.y - min.y, depth: max.z - min.z,
         };
+        return this._extentCache;
     }
 
     /** Plain-object content bounds (the CodeGrid-shaped accessor). */
