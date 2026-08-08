@@ -135,6 +135,31 @@ export default class GlyphPipelineArena {
     /** The kernels (a field attaches to their slot buffer). Rebuilt on growth/trie change. */
     get kernels() { return this._kernels; }
 
+    /** The high-water mark — one past the highest allocated byte. Pre-sizing adds
+     *  an announced load's total on top of this, never on top of maxBytes. */
+    get byteWatermark() { return this._byteTotal; }
+
+    /**
+     * PRE-SIZE the arena for a load whose total bytes are KNOWN (the bake index
+     * carries per-file byteLength — a baked openDir can announce the storm before
+     * staging a byte). One realloc while cheap — ideally while the arena is small —
+     * instead of a doubling ladder mid-storm: each mid-storm realloc is a whole-world
+     * event (9 kernel re-codegens, full re-upload, every capacity-sized render lane
+     * reallocated + re-uploaded, every live view re-attached) that lands as a
+     * multi-second main-thread block at the 8→16M steps. Clamped to the f32-ordinal
+     * wall; refusing more than the wall is not this method's job (stage() already
+     * fails loud per item).
+     * @param {number} bytes - expected TOTAL live bytes (content + slack headroom)
+     * @returns {boolean} whether a realloc happened
+     */
+    ensureCapacity(bytes) {
+        const want = Math.min(ORDINAL_EXACT_BYTES, Math.ceil(Math.max(0, bytes)));
+        if (want <= this.maxBytes) return false;
+        console.info(`GlyphPipelineArena: pre-sizing ${this.maxBytes}B → ${want}B ahead of an announced load (${this._items.length} items staged)`);
+        this._realloc(want, this.maxItems);
+        return true;
+    }
+
     /** The live trie (codepoint → glyph metrics) — the same advances every dispatch
      *  resolves through. Windowed staging's CPU queries (byteRangeForRows) fold with
      *  it so a window's seed is exact against what the GPU will compute. */
