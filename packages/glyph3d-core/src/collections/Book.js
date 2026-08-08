@@ -49,7 +49,7 @@
 import * as THREE from 'three';
 import BoundedObject3D from './BoundedObject3D.js';
 import { leafBox } from './layouts/nodeUtils.js';
-import { addPanelSurface, ownSurfaceMaterial } from './layouts/panelSurface.js';
+import { addPanelSurface, ownSurfaceMaterial, releasePanelPose } from './layouts/panelSurface.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import Tab3D, { TAB_CONFIG } from '../components/Tab3D.js';
 
@@ -185,6 +185,7 @@ export default class Book extends BoundedObject3D {
         const sheet = this.sheets[i];
         if (!sheet) return null;
         this._dropFaces(sheet);
+        releasePanelPose(sheet.node);
         if (sheet.verso) sheet.versoMount.remove(sheet.verso);
         if (sheet.recto) sheet.rectoMount.remove(sheet.recto);
         this.remove(sheet.node);
@@ -608,6 +609,7 @@ export default class Book extends BoundedObject3D {
         this.dropTabs();
         for (const sheet of this.sheets) {
             this._dropFaces(sheet);
+            releasePanelPose(sheet.node);
             if (sheet.verso) sheet.versoMount.remove(sheet.verso);
             if (sheet.recto) sheet.rectoMount.remove(sheet.recto);
             this.remove(sheet.node);
@@ -694,9 +696,14 @@ export default class Book extends BoundedObject3D {
         if (face) sheet.faces.push(face);
     }
 
-    /** @private drop a sheet's page faces (shared plane geometry stays alive). */
+    /** @private drop a sheet's page faces — panel-field slot handles release,
+     *  meshes detach (shared plane geometry stays alive). The sheet node's pose
+     *  RENTAL survives here on purpose: faces re-create per fit, and a released
+     *  group id retires forever — the rental dies with the sheet (removeSheet /
+     *  dispose call releasePanelPose). */
     _dropFaces(sheet) {
         for (const face of sheet.faces) {
+            if (face.isPanelFace) { face.release(); continue; }
             sheet.node.remove(face);
             if (face.userData.disposeGeometry) face.geometry.dispose();
         }

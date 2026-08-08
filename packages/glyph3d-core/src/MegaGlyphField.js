@@ -77,6 +77,9 @@ export class MegaGlyphField {
 
         /** Live views, unordered (dispose splices). @type {MegaFieldView[]} */
         this.views = [];
+        /** Pose-only group rentals (panel faces etc.) — swept like view nodes.
+         *  @type {Array<{node, groupId, _mat: Float32Array, dead: boolean}>} */
+        this._poseGroups = [];
         /** Attached ranges sorted by slotBase for resolveSlot. [{base, end, view}] */
         this._ranges = [];
 
@@ -266,21 +269,53 @@ export class MegaGlyphField {
         this._pickRegisteredKey = key;
     }
 
+    /**
+     * Rent a pose-only group: a texel that tracks `node.matrixWorld` through the
+     * same sweep that poses views, with no slot range attached. This is how a
+     * flat panel-field instance (a Book page face, a layout backing face) rides
+     * a node that has no mega view of its own — a group texel IS a pose, and
+     * anything flat can rent one. Group ids retire on release (never reused —
+     * the view discipline), so rent per node LIFETIME, not per relayout.
+     * @param {THREE.Object3D} node
+     * @returns {{groupId: number, release: () => void}}
+     */
+    createPoseGroup(node) {
+        const entry = { node, groupId: this.field.createGroup(), _mat: new Float32Array(16).fill(NaN), dead: false };
+        this._poseGroups.push(entry);
+        const mega = this;
+        return {
+            groupId: entry.groupId,
+            release() {
+                if (entry.dead) return;
+                entry.dead = true;
+                const i = mega._poseGroups.indexOf(entry);
+                if (i >= 0) mega._poseGroups.splice(i, 1);
+            },
+        };
+    }
+
+    /** @private write one node's decomposed matrixWorld to its group texel (16-float compare gate). */
+    _poseFromNode(node, groupId, m) {
+        const el = node.matrixWorld.elements;
+        let same = true;
+        for (let i = 0; i < 16; i++) if (m[i] !== el[i]) { same = false; break; }
+        if (same) return;
+        m.set(el);
+        node.matrixWorld.decompose(_pos, _quat, _scl);
+        this.field.setGroupOffset(groupId, _pos);
+        this.field.setGroupQuaternion(groupId, _quat);
+        this.field.setGroupScale(groupId, _scl);
+    }
+
     /** @private */
     _syncPoses() {
         for (const view of this.views) {
-            const node = view.node;
-            if (!node || view.dead || view.byteCount <= 0) continue;
-            const el = node.matrixWorld.elements;
-            const m = view._mat;
-            let same = true;
-            for (let i = 0; i < 16; i++) if (m[i] !== el[i]) { same = false; break; }
-            if (same) continue;
-            m.set(el);
-            node.matrixWorld.decompose(_pos, _quat, _scl);
-            this.field.setGroupOffset(view.groupId, _pos);
-            this.field.setGroupQuaternion(view.groupId, _quat);
-            this.field.setGroupScale(view.groupId, _scl);
+            if (!view.node || view.dead || view.byteCount <= 0) continue;
+            this._poseFromNode(view.node, view.groupId, view._mat);
+        }
+        for (const pg of this._poseGroups) {
+            if (!pg.node || pg.dead) continue;
+            this._poseFromNode(pg.node, pg.groupId, pg._mat);
         }
     }
 }

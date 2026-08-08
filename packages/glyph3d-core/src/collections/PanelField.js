@@ -142,8 +142,10 @@ export default class PanelField {
     /**
      * Claim a panel slot. Born hidden with zeroed lanes — setRect/setFill/
      * setVisible light it up.
-     * @param {*} owner - what a pick hit resolves to (ownerOf)
-     * @param {number} groupId - the owner view's group in the field's texture
+     * @param {*} owner - what a pick hit resolves to (ownerOf); null for a
+     *   non-interactive surface (a backing face) — its pick hits resolve to
+     *   nothing, exactly like the un-pickable mesh it replaces.
+     * @param {number} groupId - the posing group in the field's texture
      * @returns {number} slot
      */
     alloc(owner, groupId) {
@@ -161,10 +163,11 @@ export default class PanelField {
         return slot;
     }
 
-    /** Release a slot: hidden, pointed at the dead group, owner dropped. */
+    /** Release a slot: hidden, pointed at the dead group, owner dropped.
+     *  Idempotent — a double-free must not hand the slot out twice. */
     free(slot) {
-        if (slot == null || this._owners[slot] === undefined) return;
-        this._owners[slot] = null;
+        if (slot == null || !(slot in this._owners)) return;
+        delete this._owners[slot];
         this._writeAux(slot, 0, 0, 0);
         this._write('panelFlags', slot, 0);
         this._freeSlots.push(slot);

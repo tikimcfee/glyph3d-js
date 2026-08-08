@@ -27,6 +27,7 @@
 import * as THREE from 'three';
 import { createPanelMaterial, BORDER_FLAGS } from '../panelMaterial.js';
 import { RENDER_ORDER } from '../../core/renderOrder.js';
+import { getPipelineArena } from '../../compute/GlyphLayoutCompute.js';
 
 export const PANEL_SURFACE_DEFAULTS = {
     surface: true,            // master toggle — give each panel a rendered backing face
@@ -119,10 +120,23 @@ function curvedSegment(r, thetaC, half, yTop, yBot, seg) {
  *   (topY, ≤ 0 down the face), and the panel's width/height
  * @param {object} opts merged JELLYFISH opts (surface* fields), plus optional `material` — a
  *   caller-owned face material (ownSurfaceMaterial) used instead of the shared singleton
- * @returns {THREE.Mesh|null}
+ * @returns {THREE.Mesh|{isPanelFace: true, slot: number, release: () => void}|null}
+ *   A FLAT face on the mega-field's PanelField comes back as a slot HANDLE, not a
+ *   mesh — release() frees the instance. Warp faces (curved geometry) and
+ *   caller-owned-material faces stay meshes.
  */
 export function addPanelSurface(panel, spec, opts) {
     if (!opts.surface) return null;
+    // FLAT faces ride the instanced PanelField when the mega-field exists (the
+    // booted app always; headless/bun object tests have no arena and keep the
+    // mesh path). One instance instead of one Mesh — a bulk load's ~N sheet
+    // faces were the largest surviving first-draw/scene-walk population.
+    // ownFace callers (opts.material — a bespoke per-book rim/fill wrapper)
+    // keep meshes: the field's rim identity is a shared uniform by design.
+    if (spec.mode !== 'warp' && !opts.material) {
+        const mega = getPipelineArena()?.megaField;
+        if (mega) return addFieldFace(panel, spec.box, opts, mega);
+    }
     const pad = opts.surfacePad, depth = opts.surfaceDepth;
     let mesh;
     if (spec.mode === 'warp') {
@@ -148,11 +162,58 @@ export function addPanelSurface(panel, spec, opts) {
     return mesh;
 }
 
-/** Free the per-panel (curved) face geometries under `root` before its panels are dropped
- *  (ContentTree._flattenGroups). The shared unit plane + shared material are module singletons that
- *  outlive any one layout, so they're intentionally left intact. */
+/** @private A flat face as a PanelField instance: rect in the panel node's own frame, posed by a
+ *  rented group texel tracking the node's matrixWorld. Owner is null — a backing face is not
+ *  interactive, so its pick hits resolve to nothing (exactly the un-registered mesh's behavior).
+ *  The pose rental is cached on the NODE and reused across face re-creates (group ids retire,
+ *  never recycle — renting per relayout would grow the group texture without bound). */
+function addFieldFace(panel, b, opts, mega) {
+    if (!b || b.isEmpty()) return null;
+    const pf = mega.panels;
+    const pose = (panel.userData._panelPose ??= mega.createPoseGroup(panel));
+    const slot = pf.alloc(null, pose.groupId);
+    const pad = opts.surfacePad, depth = opts.surfaceDepth;
+    pf.setRect(slot,
+        (b.min.x + b.max.x) / 2, (b.min.y + b.max.y) / 2,
+        (b.max.x - b.min.x) + 2 * pad, (b.max.y - b.min.y) + 2 * pad,
+        b.min.z - depth);
+    pf.setFill(slot, opts.surfaceColor, opts.surfaceOpacity);
+    pf.setFlags(slot, opts.surfaceBorder ? BORDER_FLAGS.DOCKED : 0);
+    // Rim identity is field-wide (last-writer, the same semantics the shared
+    // surface material singleton always had).
+    pf.setBorder({ color: opts.surfaceBorderColor });
+    pf.setVisible(slot, true);
+    let released = false;
+    const face = {
+        isPanelFace: true,
+        slot,
+        release() {
+            if (released) return;
+            released = true;
+            pf.free(slot);
+            const list = panel.userData._panelFaces;
+            const i = list ? list.indexOf(face) : -1;
+            if (i >= 0) list.splice(i, 1);
+        },
+    };
+    (panel.userData._panelFaces ??= []).push(face);
+    return face;
+}
+
+/** Release a node's pose-group rental (call when the NODE dies — a released id retires forever). */
+export function releasePanelPose(node) {
+    node.userData._panelPose?.release?.();
+    node.userData._panelPose = null;
+}
+
+/** Free the per-panel (curved) face geometries + panel-field face slots + pose rentals under `root`
+ *  before its panels are dropped (ContentTree._flattenGroups, subtree disposal). The shared unit
+ *  plane + shared material are module singletons that outlive any one layout, left intact. */
 export function disposePanelSurfaces(root) {
     root.traverse((o) => {
         if (o.userData?.isPanelSurface && o.userData?.disposeGeometry) o.geometry.dispose();
+        const faces = o.userData?._panelFaces;
+        if (faces) for (const f of [...faces]) f.release();
+        if (o.userData?._panelPose) releasePanelPose(o);
     });
 }
