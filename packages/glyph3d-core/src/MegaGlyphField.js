@@ -317,6 +317,14 @@ export class MegaFieldView {
         if (n > 0) this.mega.field.setGlyphColorRange(this.slotBase + start, n, color);
     }
 
+    /** The whole view's colors from a FILE-byte palette in ONE write: palette[i]
+     *  colors file byte i; the staged window reads its slice [sourceBase, …). */
+    setGlyphPaletteRange(palette, lut) {
+        if (this.byteCount <= 0) return;
+        const n = Math.min(this.byteCount, palette.length - this.sourceBase);
+        if (n > 0) this.mega.field.setGlyphPaletteRange(this.slotBase, palette, this.sourceBase, n, lut);
+    }
+
     /** FILE-byte slot → shared highlight texture (hover tint, highlight.* verbs). */
     setGlyphHighlight(slot, color, fillOpacity = 0) {
         const local = slot - this.sourceBase;

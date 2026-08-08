@@ -1347,6 +1347,37 @@ export default class GlyphField {
         }
     }
 
+    /**
+     * Palette write — the colorizer's ONE color pass per file: paint `count`
+     * glyphs from `startSlot` by looking per-byte palette indices up in a flat
+     * [(N+1)×3] LUT (syntaxPaletteJob.paletteLUT). Replaces the base coat + a
+     * setGlyphColorRange per capture-row with a single loop + one update range.
+     * @param {number} startSlot     absolute slot the palette byte at `paletteOffset` colors
+     * @param {Uint8Array} palette   per-byte palette indices (0 = foreground)
+     * @param {number} paletteOffset first palette byte to read
+     * @param {number} count
+     * @param {Float32Array} lut
+     */
+    setGlyphPaletteRange(startSlot, palette, paletteOffset, count, lut) {
+        const attr = this.instanceMesh?.geometry?.attributes?.instanceColor;
+        if (!attr || count <= 0) return;
+        const arr = attr.array;
+        let start = startSlot | 0;
+        let off = paletteOffset | 0;
+        if (start < 0) { off -= start; count += start; start = 0; }
+        const n = Math.min(count, palette.length - off);
+        const end = Math.min((arr.length / 3) | 0, start + n);
+        for (let s = start, o = off; s < end; s++, o++) {
+            const p = palette[o] * 3;
+            const b = s * 3;
+            arr[b] = lut[p]; arr[b + 1] = lut[p + 1]; arr[b + 2] = lut[p + 2];
+        }
+        if (end > start) {
+            attr.addUpdateRange(start * 3, (end - start) * 3);
+            attr.needsUpdate = true;
+        }
+    }
+
     // ── Batch mode ────────────────────────────────────────────────────────────
 
     beginBatchUpdate() {

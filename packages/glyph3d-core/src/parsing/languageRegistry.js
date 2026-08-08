@@ -11,7 +11,12 @@
  * last write wins per glyph). They are not the exhaustive nvim-treesitter sets.
  */
 
-const grammar = (name) => new URL(`./vendor/tree-sitter-${name}.wasm`, import.meta.url).href;
+const grammar = (name) => {
+    const url = new URL(`./vendor/tree-sitter-${name}.wasm`, import.meta.url);
+    // file: → plain path (emscripten's node branch reads via fs — bun tests /
+    // headless); browser keeps the href. Posix pathname; the harness is linux.
+    return url.protocol === 'file:' ? url.pathname : url.href;
+};
 
 // ── Queries ─────────────────────────────────────────────────────────────────
 

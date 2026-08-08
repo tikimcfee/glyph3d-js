@@ -24,7 +24,11 @@
  *   indexes by these absolute offsets for decorations. One parse feeds both.
  */
 
-const RUNTIME_WASM_URL = new URL('./vendor/web-tree-sitter.wasm', import.meta.url).href;
+// file: URLs become plain paths — emscripten's node branch (bun tests, the
+// headless harness) reads wasm via fs, which takes paths, not URL strings;
+// browser (http/https) keeps the href. (Posix pathname — the harness is linux.)
+const _wasmRef = (url) => (url.protocol === 'file:' ? url.pathname : url.href);
+const RUNTIME_WASM_URL = _wasmRef(new URL('./vendor/web-tree-sitter.wasm', import.meta.url));
 
 import { loadStats } from '../core/loadStats.js';
 

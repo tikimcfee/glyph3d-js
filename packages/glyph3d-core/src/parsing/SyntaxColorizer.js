@@ -26,7 +26,9 @@
 
 import { detectLanguage } from './languageRegistry.js';
 import { parseDocument, parseStructureSync } from './TreeSitterEngine.js';
-import { resolveScopeColor, FOREGROUND } from './syntaxTheme.js';
+import { FOREGROUND } from './syntaxTheme.js';
+import { getSyntaxParsePool } from './SyntaxParsePool.js';
+import { paletteLUT, decodePackedCaptures } from './syntaxPaletteJob.js';
 import { structureSpecFor } from './semanticKinds.js';
 
 /**
@@ -132,69 +134,55 @@ export function analyzeGrid(grid) {
     }
 }
 
-/** The actual pass — parse (content-cached) + paint. @private */
+/** The actual pass — parse OFF-THREAD (content-cached) + ONE palette write. @private */
 async function runAnalyze(grid) {
     try {
         const renderer = grid.getRenderer?.();
         if (!renderer || typeof renderer.setGlyphColorRange !== 'function') return;
-        if (!grid._layout) return;
         const src = readableSource(grid);
         if (!src) return;
-        const { descriptor, text, lines } = src;
+        const { descriptor, text } = src;
 
         const gen = grid._analyzeGen;                 // snapshot before the async parse
         const prev = grid._highlights;
-        let captures;
-        if (prev?.captures && prev.lang === descriptor.key && prev.content === text) {
+        let palette, packed;
+        if (prev?.palette && prev.lang === descriptor.key && prev.content === text) {
             // Same content, same language — a re-layout that didn't edit (a windowed
-            // grid's margin crossing, a refold): the parse would reproduce these
-            // captures byte for byte. Repaint from them; never re-parse a large file
-            // per scroll crossing.
-            captures = prev.captures;
+            // grid's margin crossing, a refold): the job would reproduce this palette
+            // byte for byte. Repaint from it; never re-parse per scroll crossing.
+            ({ palette, packed } = prev);
         } else {
-            ({ captures } = await parseDocument(text, descriptor));  // colors only — structure is lazy
-            // Count only — the parse COST is parseSyncMs, timed inside parseDocument. A span
-            // taken across this await once summed every concurrent analyzer's queue-wait
-            // (450 overlapping intervals → a "31 minutes of parse" trace line).
+            // The worker pool: parse + capture→palette run OFF the main thread (the
+            // ~1.4s/1500-file wasm block the load profile measured); the main thread
+            // gets palette bytes back by transfer. parseWorkerMs sums worker wall —
+            // the main-thread cost of this pass is the LUT write below.
+            const r = await getSyntaxParsePool().colorize(text, descriptor);
+            ({ palette, packed } = r);
             loadStats.analyzeParses++;
+            loadStats.parseWorkerMs += r.parseMs || 0;
             if (grid._analyzeGen !== gen) return;     // superseded by a newer layout — abort
         }
 
-        // Stash the captures on the grid as render-neutral highlight state, so a 2D
-        // companion view consumes the SAME parse (via getHighlights()) instead of
-        // re-parsing. _setHighlights also notifies subscribers (the 2D editor panel)
-        // so they refresh on each (re)parse. The 3D apply below reads the same array.
-        const hl = { gen, lang: descriptor.key, captures, content: text };
+        // Stash render-neutral highlight state: the palette (3D repaints), the packed
+        // captures (the 2D editor decodes LAZILY via the getter — one file at a time,
+        // never a bulk-load's worth of little objects). _setHighlights notifies the
+        // 2D subscribers on each (re)parse.
+        const hl = { gen, lang: descriptor.key, content: text, palette, packed };
+        Object.defineProperty(hl, 'captures', {
+            configurable: true,
+            get() { return this._caps || (this._caps = decodePackedCaptures(this.packed)); },
+        });
         if (typeof grid._setHighlights === 'function') grid._setHighlights(hl);
         else grid._highlights = hl;
 
-        // Cohesive base: paint every STAGED glyph FOREGROUND first so the builder's
-        // default color doesn't show through between tokens. setGlyphColorRange
-        // speaks FILE bytes — a windowed view stages [sourceBase, sourceBase+count),
-        // so the base coat starts there (0 for every full-staged field).
-        const total = renderer.getGlyphCount?.() ?? 0;
-        if (total > 0) renderer.setGlyphColorRange(renderer.sourceBase || 0, total, FOREGROUND);
-
-        const toCp = makeColConverter(lines);
-
-        for (let k = 0; k < captures.length; k++) {
-            const cap = captures[k];
-            const color = resolveScopeColor(cap.scope);
-            if (!color) continue;
-            for (let row = cap.startRow; row <= cap.endRow; row++) {
-                const lineText = lines[row] ?? '';
-                const u0 = (row === cap.startRow) ? cap.startCol : 0;
-                const u1 = (row === cap.endRow) ? cap.endCol : lineText.length;
-                const c0 = toCp(row, lineText, u0);
-                const c1 = toCp(row, lineText, u1);
-                if (c1 <= c0) continue;
-                // Slots are byte offsets, so a range's span is a byte count — codepoint
-                // counts undershoot on multibyte lines. byteOffsetOf clamps to EOL.
-                const startSlot = grid._layout.byteOffsetOf(row, c0);
-                if (startSlot < 0) continue;
-                const endSlot = grid._layout.byteOffsetOf(row, c1);
-                renderer.setGlyphColorRange(startSlot, Math.max(0, endSlot - startSlot), color);
-            }
+        // THE write: base coat + every capture in one pass (palette 0 = FOREGROUND),
+        // one update range. The view clamps to its staged window internally.
+        if (typeof renderer.setGlyphPaletteRange === 'function') {
+            renderer.setGlyphPaletteRange(palette, paletteLUT());
+        } else {
+            // A non-view renderer (older field surface): base coat only.
+            const total = renderer.getGlyphCount?.() ?? 0;
+            if (total > 0) renderer.setGlyphColorRange(renderer.sourceBase || 0, total, FOREGROUND);
         }
     } catch (e) {
         console.warn('[tree-sitter] analyzeGrid failed:', e?.message ?? e);

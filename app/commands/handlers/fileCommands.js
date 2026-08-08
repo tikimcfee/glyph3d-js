@@ -361,6 +361,7 @@ export default function registerFileCommands(router) {
                 selfBakes: d.selfBakes, selfBakeMs: Math.round(d.selfBakeMs),
                 commits: d.commits, commitMs: Math.round(d.commitMs),
                 parses: d.analyzeParses, parseMs: Math.round(d.parseSyncMs),
+                parseWorkerMs: Math.round(d.parseWorkerMs),
                 yields: d.yields, yieldMs: Math.round(d.yieldMs),
             });
 

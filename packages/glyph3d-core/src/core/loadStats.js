@@ -20,6 +20,7 @@ export const loadStats = {
     atlasGlyphsAdded: 0,
     analyzeParses: 0,
     parseSyncMs: 0,
+    parseWorkerMs: 0,  // colorize parse time OFF-thread (worker wall, summed across the pool)
     commits: 0,
     commitMs: 0,
     yields: 0,
