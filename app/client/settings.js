@@ -10,6 +10,7 @@ import { LABEL_DEFAULTS } from '@glyph3d/core/collections/ContentTreeLabels.js';
 import { MOTION_DEFAULTS } from '@glyph3d/core/collections/ContentTreeMotion.js';
 import { ARROW_DEFAULTS } from '@glyph3d/core/collections/ContentTreeArrows.js';
 import { LAYOUT_PRESETS, setDefaultLayout } from '@glyph3d/core/workers/builders/index.js';
+import { setAnalyzeDebounce } from '@glyph3d/core/parsing/SyntaxColorizer.js';
 
 // Settings schema — the SINGLE source for both the Settings panel (renders a row
 // per entry) and the settings.* verbs (validate + apply). Only WIRED knobs live
@@ -264,6 +265,11 @@ export const SETTINGS = [
   {
     key: 'grid.windowMarginRows', label: 'Window margin (rows each side)', group: 'Code grids',
     type: 'number', default: 200, min: 0, max: 10000, step: 10,
+  },
+  {
+    key: 'grid.analyzeDebounceMs', label: 'Syntax re-color pause (ms, 0 = every fold)', group: 'Code grids',
+    type: 'number', default: 180, min: 0, max: 2000, step: 20,
+    apply: (_ctx, v) => setAnalyzeDebounce(v),
   },
   // Theme — surface backgrounds. Color is a '#rrggbb' string (THREE.Color eats it
   // directly); opacity drives stacked-tile readability in a dock. apply() restyles

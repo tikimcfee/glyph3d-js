@@ -28,6 +28,19 @@ import { detectLanguage } from './languageRegistry.js';
 import { parseDocument, parseStructureSync } from './TreeSitterEngine.js';
 import { resolveScopeColor, FOREGROUND } from './syntaxTheme.js';
 import { structureSpecFor } from './semanticKinds.js';
+
+/**
+ * The analyzer's OWN scheduling policy: rapid repeat generations for one grid
+ * (typing — every fold announces one) coalesce into a leading pass plus ONE
+ * trailing pass. Layout announces; the analyzer decides when parsing is due —
+ * the coalesce window is a parsing concern and lives here, not on the grid.
+ * Settings ▸ Code grids dials it through setAnalyzeDebounce. 0 = parse every call.
+ */
+let _analyzeDebounceMs = 180;
+export function setAnalyzeDebounce(ms) { _analyzeDebounceMs = Math.max(0, Number(ms) || 0); }
+
+/** grid → { last, timer } — per-grid coalesce state, GC'd with the grid. */
+const _analyzeClock = new WeakMap();
 import SemanticModel from './SemanticModel.js';
 import { unreadableReason } from '../core/readability.js';
 import { loadStats } from '../core/loadStats.js';
@@ -100,7 +113,27 @@ function readableSource(grid) {
  * fire-and-forget; never throws.
  * @param {import('../collections/CodeGrid.js').default} grid
  */
-export async function analyzeGrid(grid) {
+export function analyzeGrid(grid) {
+    const wait = _analyzeDebounceMs;
+    const st = _analyzeClock.get(grid) || {};
+    const now = performance.now();
+    if (!wait || !st.last || now - st.last > wait) {
+        st.last = now;                                // leading edge: a load parses NOW
+        _analyzeClock.set(grid, st);
+        return runAnalyze(grid);
+    }
+    if (!st.timer) {                                  // trailing: one pass when typing pauses
+        st.timer = setTimeout(() => {
+            st.timer = null;
+            st.last = performance.now();
+            runAnalyze(grid);                         // reads the CURRENT gen — never stale
+        }, wait);
+        _analyzeClock.set(grid, st);
+    }
+}
+
+/** The actual pass — parse (content-cached) + paint. @private */
+async function runAnalyze(grid) {
     try {
         const renderer = grid.getRenderer?.();
         if (!renderer || typeof renderer.setGlyphColorRange !== 'function') return;

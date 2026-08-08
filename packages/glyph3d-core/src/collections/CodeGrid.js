@@ -1307,19 +1307,24 @@ class CodeGrid extends FramedGlyphField {
             }
             this._pipeline = staged;
             await arena.requestFlush();
-            // The extent gate: the GPU's per-item bounds land off ONE coalesced readback;
-            // waiting here means the load's settle sees a MEASURED grid (tree layout,
-            // scroll clamps and culling all read the record). Resolves even on device
-            // loss — a load never hangs on it.
-            await this._pipeline.laid;
 
-            // THE SWAP — one beat: the view re-points to the LAID item (tombstoning
-            // the old range) and only then does the old item retire. Every frame
-            // until this line rendered the previous content; none renders an empty
-            // grid. (The arena space still leaks per restage — compaction's job.)
+            // THE SWAP — right after the flush ENCODES: GPU submission order puts
+            // those compute dispatches before any later render pass, so the slots
+            // are valid for every frame that can see the new range. The view
+            // re-points here (tombstoning the old range) and the old item retires;
+            // every frame until this line rendered the previous content — none
+            // renders an empty grid, and none WAITS on a readback to show a typed
+            // character. (The arena space still leaks per restage — compaction.)
             if (this._renderer) this._renderer.sourceBase = this._byteWindow.from;
             staged.adoptField(this._renderer);
             prevPipeline?.dispose?.();
+
+            // The extent gate: the GPU's per-item bounds land off ONE coalesced
+            // readback; waiting here means the load's settle sees a MEASURED grid
+            // (tree layout, scroll clamps and culling all read the record) — but
+            // VISIBILITY never waited for it: the swap above already happened.
+            // Resolves even on device loss — a load never hangs on it.
+            await this._pipeline.laid;
 
             // The bake gate: the GPU's bounds vs the index's prediction, once per load.
             // Rows are integer-exact under any wrap; the widest row compares only when
@@ -1578,6 +1583,9 @@ class CodeGrid extends FramedGlyphField {
      * @private
      */
     _scheduleAnalyze() {
+        // The fold ANNOUNCES a new generation; WHEN parsing is due is the analyzer's
+        // own policy (SyntaxColorizer coalesces rapid generations itself) — layout
+        // owns no consumer's timing.
         this._analyzeGen = (this._analyzeGen || 0) + 1;
         analyzeGrid(this);
     }
