@@ -786,6 +786,43 @@ class CodeGrid extends FramedGlyphField {
         if (this._relayoutBusy) { this._relayoutPending = true; return this; }
         this._relayoutBusy = true;
         try {
+            await this._relayoutLoop();
+        } finally {
+            this._relayoutBusy = false;
+        }
+        return this;
+    }
+
+    /**
+     * The view-state fold: scroll/frame changed, CONTENT did not. Same gate as
+     * _relayout — callers write state and enter; the fold itself decides (inside
+     * the hold, so the decision can't go stale under a racing restage): a staged
+     * window that still covers the view repaginates (kernel 3 only); one that
+     * doesn't restages through the full loop. `repaginate` false = coverage check
+     * only (setFrameRows: the clip is already applied; covered means done).
+     * @private
+     */
+    async _foldView(repaginate) {
+        if (this._relayoutBusy) { this._relayoutPending = true; return this; }
+        this._relayoutBusy = true;
+        try {
+            if (!this._windowCovers(this._scrollOffset)) {
+                await this._relayoutLoop();
+            } else if (repaginate) {
+                const lp = resolveLayoutParams(this._foldLayout());
+                await this._pipeline?.setPage(this._pageParams(lp, this.metrics));
+                this._updateBackground();
+                this._applyDecorations();
+                if (this._relayoutPending) await this._relayoutLoop();   // a fold queued mid-repaginate
+            }
+        } finally {
+            this._relayoutBusy = false;
+        }
+        return this;
+    }
+
+    /** The fold body — assumes the _relayoutBusy gate is HELD by the caller. @private */
+    async _relayoutLoop() {
             do {
                 this._relayoutPending = false;
                 this.getLineCount();                       // ensure this.lines is populated
@@ -813,10 +850,6 @@ class CodeGrid extends FramedGlyphField {
                 }
                 this._applyDecorations();                  // DECORATE: caret + external overlays, re-projected onto the new fold
             } while (this._relayoutPending);
-        } finally {
-            this._relayoutBusy = false;
-        }
-        return this;
     }
 
     /** Scroll / layout / frame relayout (reuses this.content). @private @returns {Promise<this>} */
@@ -855,22 +888,10 @@ class CodeGrid extends FramedGlyphField {
         // WINDOWED grid leaving its staged rows: one re-stage of a fresh window around
         // the new position (the hysteresis margin makes this a crossing cost, not a
         // per-tick cost — ticks inside the margin take the repaginate path below).
-        if (!this._windowCovers(clamped)) {
-            // Crossing: one re-stage of a fresh window — through the relayout MUTEX
-            // (a raw _layoutContent here could interleave with an edit's relayout and
-            // double-stage). _relayout re-resolves the window, refits, redecorates.
-            return this._relayout();
-        }
-        // The conveyor is kernel 3 only: re-arm the item's page params with the new scroll
-        // and repaginate — no decode, no walk, no reload. Scroll ticks across grids
-        // coalesce into ONE repaginate dispatch (the arena's repaginate gate). The mirror
-        // re-paginates in place, so the panel, caret and extent read the scrolled state
-        // synchronously.
-        const lp = resolveLayoutParams(this._foldLayout());
-        await this._pipeline?.setPage(this._pageParams(lp, this.metrics));
-        this._updateBackground();
-        this._applyDecorations();
-        return this;
+        // The fold decides from here (inside its gate): a covering window repaginates
+        // (kernel 3 only — scroll ticks across grids still coalesce on the arena's
+        // repaginate gate); a crossing restages a fresh window through the full loop.
+        return this._foldView(true);
     }
 
     /** Scroll by a delta in visual rows (positive = scroll down, content flows up). */
@@ -921,9 +942,9 @@ class CodeGrid extends FramedGlyphField {
         if (clamped !== this._scrollOffset) return this.setScrollOffset(clamped);
         // The frame is a footprint input to the staged WINDOW (span = frameRows when
         // set): growing it can expose rows the window never staged — blank glyphs no
-        // scroll would heal. Re-stage when the staged rows no longer cover the view.
-        if (!this._windowCovers(this._scrollOffset)) await this._relayout();
-        return this;
+        // scroll would heal. The fold checks coverage inside its gate; covered = done
+        // (the clip is already applied above).
+        return this._foldView(false);
     }
 
     /**
