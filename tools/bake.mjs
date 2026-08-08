@@ -38,7 +38,11 @@ const { unreadableReason } = await import(`${core}/core/readability.js`);
 // ── args ──
 const argv = process.argv.slice(2);
 const VALUE_FLAGS = new Set(['--out', '--interval', '--font-size', '--world-scale']);
-const flag = (n, d) => { const i = argv.indexOf(n); return i >= 0 && argv[i + 1] ? argv[i + 1] : d; };
+const flag = (n, d) => {
+    const i = argv.indexOf(n);
+    const v = i >= 0 ? argv[i + 1] : undefined;
+    return v && !v.startsWith('--') ? v : d;   // `--out --force` is a missing value, not "--force"
+};
 let positional = null;
 for (let i = 0; i < argv.length; i++) {
     if (VALUE_FLAGS.has(argv[i])) { i++; continue; }

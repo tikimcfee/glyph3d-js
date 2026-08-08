@@ -110,25 +110,37 @@ export async function analyzeGrid(grid) {
         const { descriptor, text, lines } = src;
 
         const gen = grid._analyzeGen;                 // snapshot before the async parse
-        const { captures } = await parseDocument(text, descriptor);  // colors only — structure is lazy
-        // Count only — the parse COST is parseSyncMs, timed inside parseDocument. A span
-        // taken across this await once summed every concurrent analyzer's queue-wait
-        // (450 overlapping intervals → a "31 minutes of parse" trace line).
-        loadStats.analyzeParses++;
-        if (grid._analyzeGen !== gen) return;         // superseded by a newer layout — abort
+        const prev = grid._highlights;
+        let captures;
+        if (prev?.captures && prev.lang === descriptor.key && prev.content === text) {
+            // Same content, same language — a re-layout that didn't edit (a windowed
+            // grid's margin crossing, a refold): the parse would reproduce these
+            // captures byte for byte. Repaint from them; never re-parse a large file
+            // per scroll crossing.
+            captures = prev.captures;
+        } else {
+            ({ captures } = await parseDocument(text, descriptor));  // colors only — structure is lazy
+            // Count only — the parse COST is parseSyncMs, timed inside parseDocument. A span
+            // taken across this await once summed every concurrent analyzer's queue-wait
+            // (450 overlapping intervals → a "31 minutes of parse" trace line).
+            loadStats.analyzeParses++;
+            if (grid._analyzeGen !== gen) return;     // superseded by a newer layout — abort
+        }
 
         // Stash the captures on the grid as render-neutral highlight state, so a 2D
         // companion view consumes the SAME parse (via getHighlights()) instead of
         // re-parsing. _setHighlights also notifies subscribers (the 2D editor panel)
         // so they refresh on each (re)parse. The 3D apply below reads the same array.
-        const hl = { gen, lang: descriptor.key, captures };
+        const hl = { gen, lang: descriptor.key, captures, content: text };
         if (typeof grid._setHighlights === 'function') grid._setHighlights(hl);
         else grid._highlights = hl;
 
-        // Cohesive base: paint every glyph FOREGROUND first so the builder's
-        // default color doesn't show through between tokens.
+        // Cohesive base: paint every STAGED glyph FOREGROUND first so the builder's
+        // default color doesn't show through between tokens. setGlyphColorRange
+        // speaks FILE bytes — a windowed view stages [sourceBase, sourceBase+count),
+        // so the base coat starts there (0 for every full-staged field).
         const total = renderer.getGlyphCount?.() ?? 0;
-        if (total > 0) renderer.setGlyphColorRange(0, total, FOREGROUND);
+        if (total > 0) renderer.setGlyphColorRange(renderer.sourceBase || 0, total, FOREGROUND);
 
         const toCp = makeColConverter(lines);
 

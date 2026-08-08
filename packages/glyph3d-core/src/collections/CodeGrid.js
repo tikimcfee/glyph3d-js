@@ -297,6 +297,15 @@ class CodeGrid extends FramedGlyphField {
         // structure — the GPU walk derives row/col itself).
         this._bytes = _textEncoder.encode(text);
         this._byteLineIndex = buildByteLineIndex(this._bytes);
+        // The baked record describes the DISK file — a load of different content
+        // (grid.window slices, hex views, any non-file text) must not keep it: its
+        // checkpoints would seed garbage windows and its measure would lie.
+        if (this._bakedRecord && this._bakedRecord.byteLength !== this._bytes.length) {
+            this._bakedRecord = null;
+            this._byteWindow = null;
+            if (this._renderer) this._renderer.sourceBase = 0;
+            console.info(`[bake] ${this.filename || this.name}: loaded text is not the baked content — record dropped`);
+        }
         // No growth path: the view is unsized — capacity is the ARENA's (it grows
         // itself); a bigger file just stages a bigger item.
         this._ensureRenderer();              // reconstruct if content was evicted
@@ -419,6 +428,9 @@ class CodeGrid extends FramedGlyphField {
         this._bytes = null;
         this._byteLineIndex = null;
         this._layout = null;
+        this._bakedRecord = null;
+        this._byteWindow = null;
+        if (this._renderer) this._renderer.sourceBase = 0;
         // Detach from the arena items (their space leaks — v1; see the arena header) so a
         // later realloc never re-attaches this field at a stale byteStart.
         this._pipeline?.dispose?.();
@@ -840,15 +852,11 @@ class CodeGrid extends FramedGlyphField {
         // WINDOWED grid leaving its staged rows: one re-stage of a fresh window around
         // the new position (the hysteresis margin makes this a crossing cost, not a
         // per-tick cost — ticks inside the margin take the repaginate path below).
-        const w = this._byteWindow;
-        if (w) {
-            const span = Math.max(1, this._frameRows || this.config.windowRows);
-            if (clamped < w.startRow || clamped + span > w.endRow) {
-                await this._layoutContent();
-                this._updateBackground();
-                this._applyDecorations();
-                return this;
-            }
+        if (!this._windowCovers(clamped)) {
+            // Crossing: one re-stage of a fresh window — through the relayout MUTEX
+            // (a raw _layoutContent here could interleave with an edit's relayout and
+            // double-stage). _relayout re-resolves the window, refits, redecorates.
+            return this._relayout();
         }
         // The conveyor is kernel 3 only: re-arm the item's page params with the new scroll
         // and repaginate — no decode, no walk, no reload. Scroll ticks across grids
@@ -909,7 +917,28 @@ class CodeGrid extends FramedGlyphField {
         this._updateBackground();  // panel tracks the frame even when no scroll re-clamp/relayout is needed
         const clamped = Math.max(0, Math.min(this._scrollOffset, this.getMaxScroll()));
         if (clamped !== this._scrollOffset) return this.setScrollOffset(clamped);
+        // The frame is a footprint input to the staged WINDOW (span = frameRows when
+        // set): growing it can expose rows the window never staged — blank glyphs no
+        // scroll would heal. Re-stage when the staged rows no longer cover the view.
+        if (!this._windowCovers(this._scrollOffset)) await this._relayout();
         return this;
+    }
+
+    /**
+     * Do the staged window's rows cover the view at `scroll`? True for full-staged
+     * grids. The bottom check is inert once the window already reaches the file's
+     * last row — near EOF there is nothing more to stage, and without this escape
+     * every tick in the last `span` rows would re-stage (getMaxScroll allows
+     * scrolling to the last row when frameless).
+     * @private
+     */
+    _windowCovers(scroll) {
+        const w = this._byteWindow;
+        if (!w) return true;
+        const span = Math.max(1, this._frameRows || this.config.windowRows);
+        if (scroll < w.startRow) return false;
+        if (scroll + span > w.endRow && w.endRow < w.totalRows) return false;
+        return true;
     }
 
     /** @returns {number} current clip-frame height in visual rows (0 = no frame) */
@@ -1178,28 +1207,45 @@ class CodeGrid extends FramedGlyphField {
             // No arena → no view either (_createRendererView logged the loud-once
             // error); the grid stays empty rather than storming shader errors.
             if (!arena || !this._renderer) return;
-            // The prior item's arena space leaks (v1 — see the arena header); dispose just
-            // detaches this view from the old item so a realloc never re-attaches it stale.
-            // The view tombstones its old slot range on re-attach (the dead group).
-            this._pipeline?.dispose?.();
             // WINDOWED staging: a large baked file stages only its viewed rows. The
             // window snaps to a row start, so the arena's fresh per-item fold computes
             // it exactly — the only cross-window fact is the start row, carried as the
             // scrollRows bias (_windowScroll). The view keeps speaking file bytes
             // through sourceBase; the record supplies the full-file measure.
+            //
+            // Stage the NEW item BEFORE disposing the old: if the arena refuses (the
+            // f32-ordinal wall — window churn is append-only until compaction), the
+            // grid keeps its previous window rendering instead of wedging on a dead
+            // pipeline. An INITIAL load still fails loud (nothing previous to keep).
+            const prevPipeline = this._pipeline;
+            const prevWindow = this._byteWindow;
             this._byteWindow = this._resolveByteWindow(lp, arena);
             if (this._renderer) this._renderer.sourceBase = this._byteWindow?.from || 0;
-            this._pipeline = arena.stage({
-                bytes: this._byteWindow
-                    ? this._bytes.subarray(this._byteWindow.from, this._byteWindow.to)
-                    : this._bytes,
-                origin: { x: 0, y: this._layoutOriginY, z: 0 },
-                page: this._pageParams(lp, m),
-                wrapWidth: lp.wrapWidth || 0,
-                lineHeight: m.lineHeight,
-                zStep: m.charHeight * (lp.zWrapSpacing || 0),
-                field: this._renderer,
-            });
+            let staged;
+            try {
+                staged = arena.stage({
+                    bytes: this._byteWindow
+                        ? this._bytes.subarray(this._byteWindow.from, this._byteWindow.to)
+                        : this._bytes,
+                    origin: { x: 0, y: this._layoutOriginY, z: 0 },
+                    page: this._pageParams(lp, m),
+                    wrapWidth: lp.wrapWidth || 0,
+                    lineHeight: m.lineHeight,
+                    zStep: m.charHeight * (lp.zWrapSpacing || 0),
+                    field: this._renderer,
+                });
+            } catch (err) {
+                if (!prevPipeline) throw err;
+                this._byteWindow = prevWindow;
+                if (this._renderer) this._renderer.sourceBase = prevWindow?.from || 0;
+                console.error(`[window] ${this.filename || this.name}: re-stage refused (${err?.message || err}) — keeping the previous window (compaction is the lift)`);
+                return;
+            }
+            // The prior item's arena space leaks (v1 — see the arena header); dispose just
+            // detaches this view from the old item so a realloc never re-attaches it stale.
+            // The view already tombstoned its old slot range on the re-attach above.
+            prevPipeline?.dispose?.();
+            this._pipeline = staged;
             await arena.requestFlush();
             // The extent gate: the GPU's per-item bounds land off ONE coalesced readback;
             // waiting here means the load's settle sees a MEASURED grid (tree layout,
@@ -1222,7 +1268,7 @@ class CodeGrid extends FramedGlyphField {
                 const wantRows = this._byteWindow
                     ? this._byteWindow.endRow - this._byteWindow.startRow
                     : rowsUnderWrap(rec, wrap);
-                if (got.totalRows !== wantRows) {
+                if (Math.round(got.totalRows) !== wantRows) {
                     console.warn(`[bake] ${this.filename || this.name}: baked rows(wrap ${wrap}) = ${wantRows} ≠ GPU ${got.totalRows} — stale record or fold drift`);
                 } else if (!this._byteWindow && (wrap === 0 || rec.maxLineLen <= wrap)) {
                     // Full stage only: a window's widest row is the window's, not the file's.
@@ -1415,7 +1461,9 @@ class CodeGrid extends FramedGlyphField {
         const zStep = m.charHeight * (lp.zWrapSpacing || 0);
         const segs = wrap > 0 ? Math.max(1, Math.ceil(rec.maxLineLen / wrap)) : 1;
         const min = { x: 0, y: originY - (rows - 1) * m.lineHeight, z: -(segs - 1) * zStep };
-        const max = { x: rec.maxLineWidth, y: m.charHeight, z: 0 };
+        // Top edge follows the layout origin: with a filename shown, content starts
+        // 1.5 rows down — a charHeight-at-zero top would slab the panel over the label.
+        const max = { x: rec.maxLineWidth, y: originY + m.charHeight, z: 0 };
         return {
             min, max,
             width: max.x - min.x, height: max.y - min.y, depth: max.z - min.z,
