@@ -127,7 +127,12 @@ export default class GlyphPipelineArena {
      * @param {number} [p.wrapWidth] - the fold unit (0 = no wrap)
      * @param {number} [p.lineHeight] - world y per row
      * @param {number} [p.zStep] - depth per wrap segment
-     * @param {import('../GlyphField.js').default} [p.field] - the byte-mode field to attach
+     * @param {import('../GlyphField.js').default} [p.field] - the byte-mode field to
+     *   attach EAGERLY (first loads: nothing is rendering yet, attach-at-stage is
+     *   free). RESTAGES pass null and call handle.adoptField(field) after `laid` —
+     *   the two-phase, flash-free swap: the field keeps rendering its old item until
+     *   the new slots are valid. A null field is a first-class item state the arena
+     *   already honors everywhere (bounds sync, realloc re-attach, dispose)
      * @returns {{itemIndex:number, byteStart:number, byteLength:number, mirror:Object,
      *   setPage:Function, verify:Function, dispose:Function}} the per-grid handle
      */
@@ -200,7 +205,11 @@ export default class GlyphPipelineArena {
              * future realloc re-attaches (item.field).
              */
             adoptField(field2) {
-                if (item.dead || !field2) return;
+                if (!field2) return;
+                // A grid closed while its fold awaited `laid` disposed this item —
+                // legitimate lifecycle, not a seam failure: silent no-op.
+                if (item.dead) return;
+                if (item.field === field2) return;   // idempotent: already adopted
                 item.field = field2;
                 field2.attachBytePipeline(arena._kernels, item.byteCount, item.byteStart);
                 if (item.gpuBounds && typeof field2.setLayoutExtent === 'function') {
