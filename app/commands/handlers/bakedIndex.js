@@ -25,9 +25,12 @@
 
 import { decodeBakeIndex } from '@glyph3d/core/compute/glyphBakeIndex.js';
 import { encodeMisses } from '@glyph3d/core/compute/liveTrie.js';
+import { getPipelineArena } from '@glyph3d/core/compute/GlyphLayoutCompute.js';
 import { computeCellMetrics } from '@glyph3d/core';
 
-/** The worldScale every file grid boots with (prepFileGrid) — the arena's scale. */
+/** Fallback when no arena exists yet — mirrors GlyphCanvas's construction value.
+ *  The LIVE arena's scale is the truth whenever it's up (the validation below
+ *  compares baked advances against what the trie actually baked at). */
 const GRID_WORLD_SCALE = 0.025;
 
 const INDEX_PATH = '.glyph3d/bake/index.bin';
@@ -60,16 +63,17 @@ export async function loadBakedIndex(ctx, dir) {
     }
     const h = decoded.header;
 
-    // ── the metrics identity, against THIS session ──
+    // ── the metrics identity, against THIS session (the LIVE arena's scale) ──
+    const liveScale = getPipelineArena()?.worldScale ?? GRID_WORLD_SCALE;
     const live = ctx.atlas.getCharSize();
-    const m = computeCellMetrics(live, GRID_WORLD_SCALE);
-    const ok = h.worldScale === GRID_WORLD_SCALE
+    const m = computeCellMetrics(live, liveScale);
+    const ok = h.worldScale === liveScale
         && h.charSize.width === live.width && h.charSize.height === live.height
         && h.lineHeight === m.lineSpacing;
     if (!ok) {
         console.warn(`[bake] index metrics differ from the live session — ignored. `
             + `baked {charSize ${h.charSize.width}×${h.charSize.height}, scale ${h.worldScale}, lh ${h.lineHeight}} `
-            + `vs live {${live.width}×${live.height}, ${GRID_WORLD_SCALE}, ${m.lineSpacing}} — rebake with tools/bake.mjs`);
+            + `vs live {${live.width}×${live.height}, ${liveScale}, ${m.lineSpacing}} — rebake with tools/bake.mjs`);
         return null;
     }
 

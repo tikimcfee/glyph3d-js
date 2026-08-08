@@ -39,9 +39,9 @@ const resolveGlyphHitFor = (grid, hit) => {
   if (!r) return null;
   if (typeof hit.token?.resolveSlot === 'function') {
     const m = hit.token.resolveSlot(hit.slotIndex);
-    // slotOffset: a WINDOWED view stages only part of its file — local slot + offset
+    // sourceBase: a WINDOWED view stages only part of its file — local slot + offset
     // is the FILE byte offset every consumer speaks (the canonical ruler).
-    return (m && m.view === r) ? m.localSlot + (r.slotOffset || 0) : null;
+    return (m && m.view === r) ? m.localSlot + (r.sourceBase || 0) : null;
   }
   return hit.token === r ? hit.slotIndex : null;
 };

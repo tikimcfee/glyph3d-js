@@ -40,9 +40,9 @@ export default class ByteLayoutDescription {
         this._pipeline = p.pipeline;
         this.scrollOffset = p.scrollOffset ?? 0;
         /** First FILE byte the pipeline staged: a WINDOWED grid's mirror covers only
-         *  bytes [slotBase, slotBase + staged length). Queries stay file-byte-space;
+         *  bytes [sourceBase, sourceBase + staged length). Queries stay file-byte-space;
          *  mirror reads subtract this, and a byte outside the window answers null. */
-        this.slotBase = p.slotBase ?? 0;
+        this.sourceBase = p.sourceBase ?? 0;
     }
 
     /** The oracle's slot buffer — MATERIALIZES it on first touch (caret/edit rate). */
@@ -130,7 +130,7 @@ export default class ByteLayoutDescription {
         if (off >= this.bytes.length) {
             // EOL col on a final line with no trailing newline: the caret sits on the last
             // glyph's right edge (its x + its advance).
-            const lastLocal = this.bytes.length - 1 - this.slotBase;
+            const lastLocal = this.bytes.length - 1 - this.sourceBase;
             if (lastLocal < 0 || lastLocal >= mirrorLen) return null;   // outside the window
             const last = lastLocal * SLOT_STRIDE;
             return {
@@ -138,7 +138,7 @@ export default class ByteLayoutDescription {
                 y: this.slots[last + S_Y], z: this.slots[last + S_Z],
             };
         }
-        const local = off - this.slotBase;
+        const local = off - this.sourceBase;
         if (local < 0 || local >= mirrorLen) return null;               // outside the window
         const o = local * SLOT_STRIDE;
         return { x: this.slots[o + S_X], y: this.slots[o + S_Y], z: this.slots[o + S_Z] };

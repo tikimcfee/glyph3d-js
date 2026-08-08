@@ -249,6 +249,22 @@ export const SETTINGS = [
     type: 'enum', options: Object.keys(LAYOUT_PRESETS), default: 'long-column',
     apply: (_ctx, v) => setDefaultLayout(LAYOUT_PRESETS[v]),
   },
+  // Windowed staging — a file at/above the threshold with a baked record stages only
+  // its viewed rows (CodeGrid._resolveByteWindow). Like the default fold, these are
+  // birth options: grids already on screen keep theirs; re-open to apply. 0 bytes
+  // disables windowing entirely.
+  {
+    key: 'grid.windowMinBytes', label: 'Windowed staging threshold (bytes, 0 = off)', group: 'Code grids',
+    type: 'number', default: 256 * 1024, min: 0, max: 16 * 1024 * 1024, step: 1024,
+  },
+  {
+    key: 'grid.windowRows', label: 'Window span (rows, sans frame)', group: 'Code grids',
+    type: 'number', default: 600, min: 10, max: 100000, step: 10,
+  },
+  {
+    key: 'grid.windowMarginRows', label: 'Window margin (rows each side)', group: 'Code grids',
+    type: 'number', default: 200, min: 0, max: 10000, step: 10,
+  },
   // Theme — surface backgrounds. Color is a '#rrggbb' string (THREE.Color eats it
   // directly); opacity drives stacked-tile readability in a dock. apply() restyles
   // every live grid/terminal; new ones inherit via gridTheme()/terminalTheme().
@@ -648,6 +664,9 @@ export function gridTheme() {
   return {
     backgroundColor: getSetting('grid.backgroundColor'),
     backgroundOpacity: getSetting('grid.backgroundOpacity'),
+    windowMinBytes: getSetting('grid.windowMinBytes'),
+    windowRows: getSetting('grid.windowRows'),
+    windowMarginRows: getSetting('grid.windowMarginRows'),
   };
 }
 

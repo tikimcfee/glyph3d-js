@@ -1186,9 +1186,9 @@ class CodeGrid extends FramedGlyphField {
             // window snaps to a row start, so the arena's fresh per-item fold computes
             // it exactly — the only cross-window fact is the start row, carried as the
             // scrollRows bias (_windowScroll). The view keeps speaking file bytes
-            // through slotOffset; the record supplies the full-file measure.
+            // through sourceBase; the record supplies the full-file measure.
             this._byteWindow = this._resolveByteWindow(lp, arena);
-            if (this._renderer) this._renderer.slotOffset = this._byteWindow?.from || 0;
+            if (this._renderer) this._renderer.sourceBase = this._byteWindow?.from || 0;
             this._pipeline = arena.stage({
                 bytes: this._byteWindow
                     ? this._bytes.subarray(this._byteWindow.from, this._byteWindow.to)
@@ -1447,7 +1447,7 @@ class CodeGrid extends FramedGlyphField {
             lineLengths: idx.lineLengths,
             pipeline: this._pipeline,
             scrollOffset: this._scrollOffset || 0,
-            slotBase: this._byteWindow?.from || 0,
+            sourceBase: this._byteWindow?.from || 0,
         }) : null;
         this._scheduleAnalyze();
     }
@@ -1905,7 +1905,7 @@ class CodeGrid extends FramedGlyphField {
         if (this._bakedRecord) {
             this._bakedRecord = null;
             this._byteWindow = null;
-            if (this._renderer) this._renderer.slotOffset = 0;
+            if (this._renderer) this._renderer.sourceBase = 0;
             console.info(`[bake] ${this.filename || this.name}: edited — record dropped, full fold from here`);
         }
         return this._relayout();
