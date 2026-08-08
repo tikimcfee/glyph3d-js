@@ -47,6 +47,8 @@ packages/
                            (CommandRouter, WebSocketBridge), state, visual
     picking/  shaping/  workers/  annotations/  parsing/  hand/  fonts/
   glyph3d-r3f/src/         GlyphCanvas, ViewerCamera, useGlyphEngine, useGridRegistry
+  glyph3d-multica/src/     @glyph3d/multica — MulticaClient (REST), MulticaSocket (WS),
+                           MulticaBridge (their events → our agent.* verbs)
 app/
   main.jsx index.html vite.config.js   the IDE entry (Vite)
   client/                CommandProvider, CanvasInteraction, HudPanel, CommandBar,
@@ -113,6 +115,34 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   Terminal/grid byte+edit translation comes from `keyEncoding` (`services/interaction`).
 - **HUD is one-way state→view** — it reflects attention/registry/edit state and issues
   verbs; it owns no behavior.
+
+## Multica binding
+
+`@glyph3d/multica` binds a [Multica](https://github.com/multica-ai/multica) board onto
+the field. Their model already matches ours, so the binding adds no rendering primitive:
+**an agent is a book**, **an issue is a page**, **a chat is an attached input**, and a
+**pipeline is a parent issue whose sub-issues carry a 1-based `stage`** — siblings in one
+stage form a barrier group, and the parent only advances when the group finishes.
+
+`MulticaBridge` subscribes to their one WebSocket and replays it onto `agent.spawn` /
+`agent.meta` / `agent.state` / `agent.activity` / `agent.message`, dispatching commands as
+**arrays** (`router.execute([name, ...args])`) so titles and message bodies with spaces
+need no quoting. Normalization happens in the bridge and nowhere else. Unmapped event
+types are tallied on `bridge.unhandled`, never logged per frame — a busy board would storm.
+
+Wire facts that cost a round-trip if you guess: list endpoints answer `{ issues: [...] }`;
+issue updates are **PUT** (PATCH → 405); `stage` is **1-based** (0 → 400); a same-titled
+active issue is **409** unless `allow_duplicate: true`; entity frames are wrapped
+(`{ issue: … }`, `{ comment: … }`) while task frames are bare; `task:progress` carries only
+`{ task_id, summary, step, total }`, so the bridge keeps a task→book ledger to route it;
+comments name their writer `author_id`/`author_type`, not `actor_*`.
+
+`tools/multica-up.sh up` brings up a local backend from source — **postgres + backend
+only**, never their frontend. `bun tools/multica-flow.test.mjs` locks the event→verb
+mapping headlessly; set `MULTICA_URL` / `MULTICA_TOKEN` / `MULTICA_WORKSPACE` to also run
+the live round trip. **Read `NOTICE.md` before touching this**: Multica is not plain
+Apache-2.0, and the reason we consume the backend rather than fork the UI is a licensing
+constraint, not a preference.
 
 ## Key concepts
 

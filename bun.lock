@@ -16,6 +16,7 @@
         "@codemirror/state": "^6.6.0",
         "@codemirror/view": "^6.43.0",
         "@glyph3d/core": "workspace:*",
+        "@glyph3d/multica": "workspace:*",
         "@glyph3d/r3f": "workspace:*",
         "@react-three/fiber": "^9.0.0",
         "@uiw/react-codemirror": "^4.25.10",
@@ -33,7 +34,7 @@
     },
     "packages/glyph3d-core": {
       "name": "@glyph3d/core",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "dependencies": {
         "@xterm/headless": "^6.0.0",
         "web-tree-sitter": "^0.26.9",
@@ -49,11 +50,15 @@
         "three": ">=0.150.0",
       },
     },
+    "packages/glyph3d-multica": {
+      "name": "@glyph3d/multica",
+      "version": "0.1.0",
+    },
     "packages/glyph3d-r3f": {
       "name": "@glyph3d/r3f",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "dependencies": {
-        "@glyph3d/core": "^0.1.0",
+        "@glyph3d/core": "^0.2.0",
       },
       "peerDependencies": {
         "@react-three/fiber": ">=9",
@@ -167,6 +172,8 @@
     "@esbuild/win32-x64": ["@esbuild/win32-x64@0.21.5", "", { "os": "win32", "cpu": "x64" }, "sha512-tQd/1efJuzPC6rCFwEvLtci/xNFcTZknmXs98FYDfGE4wP9ClFV98nyKrzJKVPMhdDnjzLhdUyMX4PsQAPjwIw=="],
 
     "@glyph3d/core": ["@glyph3d/core@workspace:packages/glyph3d-core"],
+
+    "@glyph3d/multica": ["@glyph3d/multica@workspace:packages/glyph3d-multica"],
 
     "@glyph3d/r3f": ["@glyph3d/r3f@workspace:packages/glyph3d-r3f"],
 

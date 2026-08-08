@@ -1,0 +1,33 @@
+{
+  "name": "@glyph3d/multica",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Multica client for glyph3d — REST + WebSocket bindings that feed agent books, issue pages, and chat terminals",
+  "main": "src/index.js",
+  "module": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./bridge": "./src/MulticaBridge.js"
+  },
+  "files": [
+    "src"
+  ],
+  "keywords": [
+    "multica",
+    "agents",
+    "glyph3d",
+    "3d"
+  ],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "author": "tikimcfee (https://github.com/tikimcfee)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tikimcfee/glyph3d-js.git",
+    "directory": "packages/glyph3d-multica"
+  },
+  "homepage": "https://github.com/tikimcfee/glyph3d-js#readme",
+  "bugs": "https://github.com/tikimcfee/glyph3d-js/issues"
+}
