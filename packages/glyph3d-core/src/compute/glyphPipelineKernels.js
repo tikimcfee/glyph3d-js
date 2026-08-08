@@ -1095,6 +1095,39 @@ export default class GlyphPipelineKernels {
         return this;
     }
 
+    /**
+     * REWRITE one item's bytes IN PLACE — the edit fast path. Nothing moves: the
+     * item's staged range (its capacity) is fixed; content bytes land at its word
+     * offsets and 0x80 fills the tail. A bare continuation byte is a STRUCTURAL
+     * non-leader (sequenceLength 0): decode, fold, resolveX, paginate, bounds and
+     * ordinals all skip it — the pad is invisible to every pass by the same UTF-8
+     * rule the whole pipeline is proven on. Same masked-word discipline as
+     * writeBytes; the next run() re-folds the arena and the item lays out as its
+     * new content.
+     * @param {number} byteStart - the item's staged offset
+     * @param {Uint8Array} bytes - new content, ≤ capacity
+     * @param {number} capacity - the item's staged byteCount
+     */
+    rewriteItemBytes(byteStart, bytes, capacity) {
+        if (bytes.length > capacity) {
+            throw new Error(`GlyphPipelineKernels: rewrite of ${bytes.length}B exceeds the item's ${capacity}B capacity`);
+        }
+        if (byteStart < 0 || byteStart + capacity > this.byteLength) {
+            throw new Error(`GlyphPipelineKernels: rewrite range [${byteStart}, ${byteStart + capacity}) is not a staged item range (byteLength ${this.byteLength})`);
+        }
+        const words = this.byteWords.value.array;
+        for (let j = 0; j < capacity; j++) {
+            const v = j < bytes.length ? bytes[j] : 0x80;
+            const a = byteStart + j;
+            const w = a >> 2, sh = (a & 3) * 8;
+            words[w] = (words[w] & ~(0xFF << sh)) | (v << sh);
+        }
+        this.byteWords.value.needsUpdate = true;
+        this.missCount.value.array[0] = 0;   // decode re-reports misses every run
+        this.missCount.value.needsUpdate = true;
+        return this;
+    }
+
     /** Pack one item's page params into its item-table row (lanes 3..10). @private */
     _packItemPage(i, p) {
         const tbl = this.itemTable.value.array;
