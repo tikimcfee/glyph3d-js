@@ -322,8 +322,10 @@ class CodeGrid extends FramedGlyphField {
      */
     async loadText(text) {
         this._beginLoad(text);
-        await this._layoutContent();
-        this._updateBackground();
+        // Through the ONE mutex: a load racing an edit's relayout (or a windowed
+        // grid's scroll crossing) must serialize on the same _relayoutBusy gate —
+        // a raw _layoutContent here was the second door around it.
+        await this._relayout();
         return this;
     }
 
@@ -792,7 +794,9 @@ class CodeGrid extends FramedGlyphField {
                     this.content = this.lines.join('\n');
                     this._linesDirty = false;
                 }
-                if (!this.content) continue;               // nothing to lay out (loop exits unless pending)
+                // Empty CONTENT still lays out when there's a filename: the label is
+                // its own arena item, and an empty file in a tree keeps its nameplate.
+                if (!this.content && !this.filename) continue;   // nothing at all (loop exits unless pending)
                 this._ensureRenderer();                    // reconstruct if content was evicted
                 this._clearRenderedText();                 // drop the prior render's glyphs
                 // The staged pipeline: FOLD (+ ARRANGE, inside _layoutContent) → FIT →
