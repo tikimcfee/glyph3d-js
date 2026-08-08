@@ -158,9 +158,25 @@ Terminals were the wrong primitive here: ours are tmux-backed through the relay,
 there is no process on the other end of a chat — just an HTTP call.
 
 `multica.board` points the agent shelf at **boardLayout**, a roster scheme that arranges
-books into ordered columns by lane state (or any `userData` path via `groupBy`). Lane
-state and meta are mirrored onto `book.userData` by AgentBooks because a layout scheme
-only ever sees the Object3D, never the lane.
+books into ordered columns by lane state (or any `userData` path via `groupBy`;
+`columns: 'auto'` derives them from the data, sorted, for axes with no natural order).
+Lane state and meta are mirrored onto `book.userData` by AgentBooks because a layout
+scheme only ever sees the Object3D, never the lane.
+
+**Many CLIs, one board.** The daemon probes the box for ~23 agent CLIs (claude, codex,
+cursor, copilot, kimi, qwen, grok, opencode, …) and registers **one runtime per CLI per
+device**; an agent binds to exactly one `runtime_id`, so a workspace mixes CLIs freely.
+A CLI outside that probe list gets in as a **custom runtime profile**
+(`multica runtime profile create --command-name glm --protocol-family claude`), which is
+the GLM route. The bridge resolves agent → runtime → CLI and stamps both `provider` and
+`runtimeName` into `agent.meta`; the book's *type* (nameplate + hue) becomes the provider.
+
+Mind the difference, because it is not cosmetic: **`provider` is the protocol family, not
+the CLI's identity.** A custom GLM profile routes through `claude`, so `multica.board
+provider` merges GLM into Claude Code — right if you're asking how work is driven, wrong
+if you're asking which CLI. `multica.board runtime` separates them. `multica.runtimes`
+lists what's available and `multica.spawn <name> <provider>` binds a new agent to one
+(it refuses to guess when several CLIs are present).
 
 **One-pass setup**: `tools/multica-up.sh up`, pair a daemon, then `bun tools/multica-seed.mjs`
 — it authenticates, makes a workspace, creates agents and a staged pipeline (idempotent on

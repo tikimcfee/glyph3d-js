@@ -34,22 +34,23 @@ class FakeSocket {
 }
 
 /** A client stand-in returning fixed rosters. */
-const fakeClient = (agents = [], issues = [], sessions = []) => ({
+const fakeClient = (agents = [], issues = [], sessions = [], runtimes = []) => ({
     listAgents: async () => agents,
     listIssues: async () => issues,
     listChildren: async () => [],
     listChatSessions: async () => sessions,
+    listRuntimes: async () => runtimes,
 });
 
 const AGENT = { id: 'aaaaaaaa-1111-2222-3333-444444444444', name: 'Cartographer', status: 'idle', runtime_id: 'rt-1' };
 const BOOK = bookIdForAgent(AGENT.id);
 
 /** Build a started bridge over fakes, recording every dispatched command. */
-async function harness({ agents = [AGENT], issues = [], sessions = [] } = {}) {
+async function harness({ agents = [AGENT], issues = [], sessions = [], runtimes = [] } = {}) {
     const calls = [];
     const socket = new FakeSocket();
     const bridge = new MulticaBridge({
-        client: fakeClient(agents, issues, sessions),
+        client: fakeClient(agents, issues, sessions, runtimes),
         socket,
         execute: async (input) => { calls.push(input); return { text: 'ok', data: null }; },
     });
@@ -67,12 +68,53 @@ const find = (calls, verb) => calls.filter(c => c[0] === verb);
     ok(verbs(calls).includes('agent.spawn'), 'hydration spawns a book');
 
     const spawn = find(calls, 'agent.spawn')[0];
-    ok(spawn[1] === BOOK && spawn[2] === 'multica', `book id + source stamped (got ${spawn.slice(1).join(' ')})`);
+    // The book's type is the CLI behind the agent — that's what the nameplate and the
+    // lane hue key off. With no runtime roster to resolve it, 'unknown' is correct:
+    // binding must not fail because a lookup did.
+    ok(spawn[1] === BOOK && spawn[2] === 'unknown', `book id + provider stamped (got ${spawn.slice(1).join(' ')})`);
 
     const meta = find(calls, 'agent.meta')[0];
     const parsed = JSON.parse(meta[2]);
     ok(parsed.title === 'Cartographer', 'meta carries the display name for the nameplate');
     ok(parsed.multica_agent_id === AGENT.id, 'meta keeps the full agent id for round-tripping');
+}
+
+// ── provider resolution: agent → runtime → CLI ───────────────────────────────
+// An agent carries only runtime_id; which CLI actually runs it lives on the runtime.
+// Resolving it is what lets a book say what it is and lets the board column by CLI.
+{
+    const RUNTIMES = [
+        { id: 'rt-1', name: 'Claude (box)', provider: 'claude' },
+        { id: 'rt-2', name: 'Kimi (box)', provider: 'kimi' },
+    ];
+    const { calls, bridge } = await harness({ runtimes: RUNTIMES });
+    ok(bridge.runtimes.size === 2, 'the runtime roster loads before agents bind');
+
+    const spawn = find(calls, 'agent.spawn')[0];
+    ok(spawn[2] === 'claude', `the book's type is its CLI (got ${spawn[2]})`);
+
+    const meta = JSON.parse(find(calls, 'agent.meta')[0][2]);
+    ok(meta.provider === 'claude', 'provider reaches meta, and so book.userData');
+    ok(meta.runtimeName === 'Claude (box)', 'the device name rides along for the nameplate');
+}
+{
+    // several CLIs in one workspace: each agent resolves its own
+    const RUNTIMES = [
+        { id: 'rt-1', name: 'Claude (box)', provider: 'claude' },
+        { id: 'rt-2', name: 'Kimi (box)', provider: 'kimi' },
+    ];
+    const AGENTS = [
+        { id: 'aaaaaaaa-1111-2222-3333-444444444444', name: 'Cartographer', runtime_id: 'rt-1' },
+        { id: 'bbbbbbbb-1111-2222-3333-444444444444', name: 'Scout', runtime_id: 'rt-2' },
+    ];
+    const { calls } = await harness({ agents: AGENTS, runtimes: RUNTIMES });
+    const providers = find(calls, 'agent.spawn').map(c => c[2]);
+    ok(providers.join(',') === 'claude,kimi', `one book per CLI (got ${providers})`);
+}
+{
+    // an agent pointing at a runtime that no longer exists must still bind
+    const { calls } = await harness({ runtimes: [{ id: 'rt-other', name: 'X', provider: 'codex' }] });
+    ok(find(calls, 'agent.spawn')[0][2] === 'unknown', 'an unresolvable runtime binds as unknown, not not-at-all');
 }
 
 // ── status → book lifecycle state ────────────────────────────────────────────
@@ -164,6 +206,7 @@ const SESSION = { id: 'sess-1', agent_id: AGENT.id };
             listIssues: async () => [],
             listChildren: async () => [],
             listChatSessions: async () => served,
+            listRuntimes: async () => [],
         },
         socket,
         execute: async (input) => { calls.push(input); return {}; },

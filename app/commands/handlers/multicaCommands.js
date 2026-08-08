@@ -19,7 +19,9 @@
  *   multica.attach     <agent>                    float an input field on an agent, take the keyboard
  *   multica.detach     [agent|all]                remove attached input(s)
  *   multica.prompts                               list the attached inputs
- *   multica.board      [groupBy]                  arrange the shelf as columns of work
+ *   multica.runtimes                              the CLIs a paired daemon found (claude, kimi, …)
+ *   multica.spawn      <name> [provider]          create an agent bound to a CLI runtime
+ *   multica.board      [state|provider|runtime|agent]  arrange the shelf as columns of work
  *
  * The interaction loop is: connect → board (see who's there) → attach (talk to one) →
  * type → Enter. The reply lands as a say-sheet on that agent's book, because the bridge
@@ -315,26 +317,113 @@ export default function registerMulticaCommands(router) {
         returns: 'string[]',
     });
 
+    router.register('multica.runtimes', async () => {
+        if (!session) return notConnected();
+        const runtimes = await session.client.listRuntimes();
+        if (!runtimes.length) {
+            return {
+                text: 'no runtimes — pair a daemon (`multica daemon start`); agents cannot be created without one',
+                data: [],
+            };
+        }
+        const lines = runtimes.map(r =>
+            `  ${(r.provider || '?').padEnd(12)} ${(r.mode || '-').padEnd(6)} ${(r.status || '-').padEnd(8)} ${r.name}`);
+        return { text: [`${runtimes.length} runtime(s)  [provider / mode / status / device]:`, ...lines].join('\n'), data: runtimes };
+    }, {
+        description: 'List runtimes — one per CLI the paired daemon found (claude, kimi, codex, …)',
+        returns: 'MulticaRuntime[]',
+    });
+
+    router.register('multica.spawn', async (args) => {
+        if (!session) return notConnected();
+        const [name, provider] = args;
+        if (!name) return { text: 'ERR: usage: multica.spawn <name> [provider]', data: null };
+
+        const runtimes = await session.client.listRuntimes();
+        if (!runtimes.length) return { text: 'ERR: no runtime — pair a daemon first', data: null };
+
+        // With no provider named, take the only runtime if there is exactly one; refuse
+        // to guess when several CLIs are available, since which one runs the agent is
+        // the whole point of the choice.
+        let runtime;
+        if (provider) {
+            runtime = runtimes.find(r => (r.provider || '').toLowerCase() === provider.toLowerCase());
+            if (!runtime) {
+                const have = runtimes.map(r => r.provider).join(', ');
+                return { text: `ERR: no runtime for '${provider}' — available: ${have}`, data: null };
+            }
+        } else if (runtimes.length === 1) {
+            runtime = runtimes[0];
+        } else {
+            const have = runtimes.map(r => r.provider).join(', ');
+            return { text: `ERR: several runtimes available (${have}) — name one: multica.spawn ${name} <provider>`, data: null };
+        }
+
+        const agent = await session.client.createAgent({
+            name,
+            description: `${name} on ${runtime.provider}`,
+            instructions: `You are ${name}.`,
+            runtime_id: runtime.id,
+            visibility: 'workspace',
+        });
+        // agent:created arrives on the socket and the bridge binds the book, so this
+        // verb does not bind one itself — one path in, no double-spawn.
+        return { text: `OK: ${agent.name} on ${runtime.provider} (${bookIdForAgent(agent.id)})`, data: agent };
+    }, {
+        description: 'Create an agent bound to a given CLI runtime',
+        usage: '<name> [provider]',
+        returns: 'MulticaAgent',
+    });
+
     router.register('multica.board', (args, ctx) => {
         if (!ctx.agentBooks) return { text: 'ERR: agent books not wired', data: null };
-        const [groupBy] = args;
+        // Friendly axis names — an operator should not have to know the userData path.
+        // `provider` is the PROTOCOL FAMILY, not the CLI's identity: a custom runtime
+        // profile (the way a CLI outside the built-in probe list — GLM, say — gets in)
+        // reports the family it routes through, so GLM and Claude Code both read
+        // `claude`. Group by `runtime` to separate them; by `provider` to see how the
+        // work is actually being driven. Both are true, they answer different questions.
+        const AXES = {
+            state: 'state',
+            provider: 'meta.provider',
+            runtime: 'meta.runtimeName',
+            agent: 'meta.title',
+        };
+        const raw = args[0];
+        const groupBy = raw ? (AXES[raw] || raw) : null;
+        // Lane state has a declared order worth keeping; any other axis has none, so let
+        // the scheme derive its columns from what's actually on the shelf.
+        const columns = (raw && raw !== 'state') ? 'auto' : undefined;
         // The board scheme is a normal layout scheme — this verb just points the agent
         // shelf at it, so `layout.scheme` semantics and the shelf's own relayout apply.
         ctx.agentBooks.cfg.layout = 'board';
         if (groupBy) {
-            ctx.agentBooks.cfg.layoutOpts = { ...(ctx.agentBooks.cfg.layoutOpts || {}), groupBy };
+            ctx.agentBooks.cfg.layoutOpts = {
+                ...(ctx.agentBooks.cfg.layoutOpts || {}),
+                groupBy,
+                ...(columns ? { columns } : {}),
+            };
         }
         ctx.agentBooks._relayout();
-        const states = {};
-        for (const lane of ctx.agentBooks.lanes.values()) states[lane.state] = (states[lane.state] || 0) + 1;
+
+        // Report the actual occupancy of whichever axis was chosen, so the verb answers
+        // "what does the board look like now" rather than just "ok".
+        const tally = {};
+        for (const lane of ctx.agentBooks.lanes.values()) {
+            const key = raw === 'provider' ? (lane.meta?.provider ?? 'unknown')
+                : raw === 'runtime' ? (lane.meta?.runtimeName ?? 'unknown')
+                : raw === 'agent' ? (lane.meta?.title ?? lane.agentId)
+                : lane.state;
+            tally[key] = (tally[key] || 0) + 1;
+        }
         return {
-            text: `OK: board layout — ${ctx.agentBooks.lanes.size} book(s) ${JSON.stringify(states)}`,
-            data: { books: ctx.agentBooks.lanes.size, states },
+            text: `OK: board by ${raw || 'state'} — ${ctx.agentBooks.lanes.size} book(s) ${JSON.stringify(tally)}`,
+            data: { books: ctx.agentBooks.lanes.size, groupBy: groupBy || 'state', tally },
         };
     }, {
-        description: 'Arrange the agent shelf as a board: columns by lane state (or a userData path)',
-        usage: '[groupBy]',
-        returns: '{ books, states }',
+        description: 'Arrange the agent shelf as a board — columns by state | provider | runtime | agent, or a raw userData path',
+        usage: '[state|provider|runtime|agent|<userData.path>]',
+        returns: '{ books, groupBy, tally }',
     });
 
     router.register('multica.say', async (args) => {

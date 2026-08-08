@@ -25,7 +25,12 @@ import { leafBox } from './nodeUtils.js';
 export const BOARD_DEFAULTS = {
     /** userData path the column key is read from. Dotted paths are walked. */
     groupBy: 'state',
-    /** Column order. Keys outside this list collect in a trailing column. */
+    /**
+     * Column order. Keys outside this list collect in a trailing column.
+     * `'auto'` derives the columns from the data instead, sorted — for an axis with no
+     * natural order (provider, agent name) where a fixed list would send everything to
+     * overflow.
+     */
     columns: ['active', 'stalled', 'idle', 'done'],
     /** Label for the trailing catch-all column. */
     overflowColumn: 'other',
@@ -68,9 +73,17 @@ export default function boardLayout(root, opts = {}) {
     if (!books.length) return { columns: [] };
 
     // Bucket by key. Order of the buckets is cfg.columns, then overflow — NOT insertion
-    // order, so a column doesn't move under the operator as agents change state.
+    // order, so a column doesn't move under the operator as agents change state. With
+    // 'auto', the sorted distinct keys ARE that stable order.
+    const order = cfg.columns === 'auto'
+        ? [...new Set(books.map((b) => {
+            const k = at(b.userData, cfg.groupBy);
+            return k == null ? cfg.overflowColumn : String(k);
+        }))].sort()
+        : cfg.columns;
+
     /** @type {Map<string, THREE.Object3D[]>} */
-    const buckets = new Map(cfg.columns.map((k) => [k, []]));
+    const buckets = new Map(order.map((k) => [k, []]));
     const overflow = [];
     for (const book of books) {
         const key = at(book.userData, cfg.groupBy);

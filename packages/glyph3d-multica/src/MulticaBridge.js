@@ -84,6 +84,13 @@ export default class MulticaBridge {
          * entry) before the reply is published. The session roster is the stable key.
          */
         this.chatSessions = new Map();
+        /**
+         * runtime id → { name, provider }. An agent carries only `runtime_id`; the
+         * provider (which CLI actually runs it — claude, kimi, codex…) lives on the
+         * runtime. Resolving it here is what lets a book say what it is, and what lets
+         * the board column by CLI.
+         */
+        this.runtimes = new Map();
         /** Unsubscribe thunks from every socket binding. */
         this._unsubs = [];
         /** Frames seen but not mapped — a newer backend, surfaced on demand not per-frame. */
@@ -100,6 +107,9 @@ export default class MulticaBridge {
     async start() {
         if (this.started) return { agents: this.books.size, issues: 0 };
         this.started = true;
+
+        // Runtimes before agents: a book's provider is looked up as it binds.
+        await this._loadRuntimes();
 
         const agents = await this.client.listAgents();
         for (const agent of agents) await this._bindAgent(agent);
@@ -139,13 +149,22 @@ export default class MulticaBridge {
         const bookId = bookIdForAgent(agent.id);
         this.books.set(agent.id, bookId);
 
-        await this.execute(['agent.spawn', bookId, 'multica']);
+        const runtime = this.runtimes.get(agent.runtime_id) || null;
+        // `provider` is the CLI behind the agent (claude / kimi / codex / a custom
+        // profile). It rides in meta so it reaches book.userData, which is what a layout
+        // scheme can group on — `multica.board provider` gives a column per CLI.
+        const provider = runtime?.provider || 'unknown';
+
+        await this.execute(['agent.spawn', bookId, provider]);
         await this.execute(['agent.meta', bookId, JSON.stringify({
             title: agent.name,
             slug: agent.name,
             source: 'multica',
             multica_agent_id: agent.id,
             runtime: agent.runtime_id || null,
+            runtimeName: runtime?.name || null,
+            provider,
+            model: provider,        // the nameplate's third line — "what is this agent"
             description: agent.description || '',
         })]);
         if (agent.status) await this._setState(bookId, agent.status);
@@ -291,6 +310,21 @@ export default class MulticaBridge {
         if (this.chatSessions.has(sessionId)) return this.chatSessions.get(sessionId);
         await this._loadChatSessions();
         return this.chatSessions.get(sessionId);
+    }
+
+    /**
+     * Load the runtime roster (device × CLI). Non-fatal: an agent whose provider can't be
+     * resolved still binds, as `unknown` — a book you can see beats a book that never
+     * appeared because a lookup failed.
+     */
+    async _loadRuntimes() {
+        try {
+            for (const rt of await this.client.listRuntimes()) {
+                this.runtimes.set(rt.id, { name: rt.name, provider: rt.provider || 'unknown' });
+            }
+        } catch (err) {
+            this._warn(`multica: runtime roster unavailable — ${err?.message || err}`);
+        }
     }
 
     /** Refresh session id → book from the roster. Failures are non-fatal: no reply routing is

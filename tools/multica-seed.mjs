@@ -54,8 +54,7 @@ if (!runtimes.length) {
     say('    multica daemon start');
     process.exit(1);
 }
-const runtime = runtimes[0];
-say(`✓ runtime ${runtime.name} (${runtime.provider || 'unknown'})`);
+say(`✓ ${runtimes.length} runtime(s): ${runtimes.map(r => `${r.name} [${r.provider}]`).join(', ')}`);
 
 // -- agents -------------------------------------------------------------------
 const ROLES = [
@@ -65,7 +64,11 @@ const ROLES = [
 ];
 const existing = await client.listAgents();
 const agents = [];
-for (const [name, description] of ROLES) {
+// Spread the roles across whatever CLIs this box actually has, round-robin. With one
+// runtime that's the old behavior; with several it seeds a genuinely mixed board, which
+// is the interesting case — `multica.board runtime` then gives a column per CLI.
+for (const [i, [name, description]] of ROLES.entries()) {
+    const runtime = runtimes[i % runtimes.length];
     const found = existing.find(a => a.name === name);
     agents.push(found || await client.createAgent({
         name, description, instructions: `You are ${name}. ${description}.`,
@@ -106,7 +109,7 @@ say('─'.repeat(72));
 say('Paste into the command bar (or ./glyph3d-cli):');
 say('');
 say(`  multica.connect ${url} ${token} ${workspace.id} ${workspace.slug}`);
-say('  multica.board');
+say(runtimes.length > 1 ? '  multica.board runtime      # a column per CLI' : '  multica.board');
 say(`  multica.pipeline ${parent.identifier}`);
 say(`  multica.attach ${agents[0].name}`);
 say('');

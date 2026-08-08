@@ -162,5 +162,67 @@ const book = (name, state, w = 100, h = 200) => ({
     ok(columns.length === 2 && columns[0].key === 's1', 'groupBy walks a dotted userData path');
 }
 
+// ── columns:'auto' — the multi-CLI board ─────────────────────────────────────
+// One runtime per CLI the daemon found, one provider per agent: a workspace mixing
+// Claude, Kimi and a custom GLM profile wants a column each, and there is no natural
+// order to declare up front.
+{
+    const withProvider = (name, provider) => ({
+        ...book(name, 'idle'),
+        userData: { name, meta: { provider } },
+    });
+    const root = {
+        children: [
+            withProvider('scout', 'kimi'),
+            withProvider('cart', 'claude'),
+            withProvider('arch', 'glm'),
+            withProvider('surv', 'claude'),
+        ],
+    };
+    const { columns } = boardLayout(root, { groupBy: 'meta.provider', columns: 'auto' });
+    ok(columns.length === 3, `a column per CLI (got ${columns.length})`);
+    ok(columns.map(c => c.key).join(',') === 'claude,glm,kimi',
+        `auto columns are sorted, so they don't reshuffle between relayouts (got ${columns.map(c => c.key)})`);
+    ok(columns.find(c => c.key === 'claude').count === 2, 'both claude agents share a column');
+
+    const xs = new Set(columns.map(c => c.x));
+    ok(xs.size === 3, 'each provider column gets its own x');
+}
+{
+    // an agent whose provider never resolved must still get a column, not vanish
+    const root = { children: [{ ...book('x', 'idle'), userData: { name: 'x', meta: {} } }] };
+    const { columns } = boardLayout(root, { groupBy: 'meta.provider', columns: 'auto' });
+    ok(columns.length === 1 && columns[0].count === 1, 'a missing key still lands somewhere visible');
+}
+{
+    // provider vs runtime answer DIFFERENT questions, and both are right.
+    //
+    // `provider` is the protocol family. A custom runtime profile — the way a CLI
+    // outside the built-in probe list gets in — routes through an existing family, so a
+    // GLM profile registers with provider "claude". Grouping by provider therefore
+    // merges GLM into Claude Code, which is correct if you're asking "how is this being
+    // driven" and wrong if you're asking "which CLI is this". Runtime name separates
+    // them. Verified against a live backend with claude + a GLM profile + kimi.
+    const agent = (name, provider, runtimeName) => ({
+        ...book(name, 'idle'),
+        userData: { name, meta: { provider, runtimeName } },
+    });
+    const root = {
+        children: [
+            agent('Cartographer', 'claude', 'Claude (box)'),
+            agent('Zhipu', 'claude', 'GLM (box)'),
+            agent('Moonshot', 'kimi', 'Kimi (box)'),
+        ],
+    };
+    const byProvider = boardLayout(root, { groupBy: 'meta.provider', columns: 'auto' }).columns;
+    ok(byProvider.length === 2 && byProvider.find(c => c.key === 'claude').count === 2,
+        'by provider: a GLM profile shares the claude family column');
+
+    const byRuntime = boardLayout(root, { groupBy: 'meta.runtimeName', columns: 'auto' }).columns;
+    ok(byRuntime.length === 3, `by runtime: one column per CLI (got ${byRuntime.length})`);
+    ok(byRuntime.map(c => c.key).join('|') === 'Claude (box)|GLM (box)|Kimi (box)',
+        'runtime columns are the three distinct CLIs, sorted');
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
