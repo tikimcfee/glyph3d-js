@@ -1274,9 +1274,9 @@ class CodeGrid extends FramedGlyphField {
             // attach happens at the SWAP below, once the new slots are laid. (The
             // empty-frame flash on edit/crossing was the synchronous attach pointing
             // the view at a not-yet-laid range.) If the arena refuses (the
-            // f32-ordinal wall — churn is append-only until compaction), the grid
-            // keeps its previous window untouched — nothing was re-pointed. An
-            // INITIAL load still fails loud (nothing previous to keep).
+            // f32-ordinal wall — live bytes past 2^24 even after free-list reuse),
+            // the grid keeps its previous window untouched — nothing was re-pointed.
+            // An INITIAL load still fails loud (nothing previous to keep).
             const prevPipeline = this._pipeline;
             const prevWindow = this._byteWindow;
             this._byteWindow = this._resolveWindow(lp, arena);
@@ -1294,7 +1294,7 @@ class CodeGrid extends FramedGlyphField {
             } catch (err) {
                 if (!prevPipeline) throw err;
                 this._byteWindow = prevWindow;
-                console.error(`[window] ${this.filename || this.name}: re-stage refused (${err?.message || err}) — keeping the previous window (compaction is the lift)`);
+                console.error(`[window] ${this.filename || this.name}: re-stage refused (${err?.message || err}) — keeping the previous window (u32 ordinal lanes are the lift)`);
                 return;
             }
             // Sampled lifecycle log: one line per 10 partial-window restages per grid —

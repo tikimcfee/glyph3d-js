@@ -73,6 +73,15 @@ after editing core, `make dev-status` to check.
   bun tools/storm-probe.mjs 1000
   ```
 
+- **`arena-compaction-check.mjs`** — the free-list gate: a 150×120KB adopt-restage
+  storm (18MB staged — past the f32-ordinal wall that killed it pre-compaction) must
+  complete with the high-water mark pinned at ~2× the window, plus size-churn
+  split/coalesce lanes, an exact tail-recede assert, `verifyItem` teeth over recycled
+  ranges, resolveSlot coherence, and 0 GPU errors. Client-only (fake provider).
+  ```
+  bun tools/arena-compaction-check.mjs [--url http://localhost:5273/]
+  ```
+
 ## Integration tests
 
 As panels and startup push command-bus verbs and mutate state, that's headless-browser

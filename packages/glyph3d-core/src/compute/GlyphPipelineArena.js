@@ -9,15 +9,18 @@
  * The flow:
  *
  *   stage({ bytes, origin, page, wrapWidth, lineHeight, zStep, field })
- *       synchronously appends the file's bytes to the arena, registers the item and
- *       attaches the field at the item's byteStart, and returns a thin per-grid HANDLE.
+ *       synchronously allocates the file's byte range (best-fit from the free-list of
+ *       reclaimed ranges, else the high-water mark), registers the item and attaches
+ *       the field at the item's byteStart, and returns a thin per-grid HANDLE.
  *       NO dispatch here — and NO CPU layout: the GPU is the one layout engine, and a
  *       load storm pays zero per-byte CPU cost at stage time.
  *   requestFlush()
- *       coalesces every stage in the same macrotask window into ONE flush: setFiles(all
- *       live items) + run — nine dispatches for the whole storm. Resolves once ENCODED;
- *       ONE per-item bounds readback then lands every staged field's extent (handle.laid
- *       resolves as each item's extent arrives — the load path's "measures laid" gate).
+ *       coalesces every stage in the same macrotask window into ONE flush: the item
+ *       table re-syncs to the live set (setItems), the newly staged ranges upload
+ *       (writeBytes), one run — nine dispatches for the whole storm. Resolves once
+ *       ENCODED; ONE per-item bounds readback then lands every staged field's extent
+ *       (handle.laid resolves as each item's extent arrives — the load path's
+ *       "measures laid" gate).
  *   handle.setPage(page) / arena.setItemPage + requestRepaginate()
  *       the conveyor: strides + kernel 3 re-run. Scroll ticks across grids coalesce into
  *       one repaginate, and the extents refresh off the same coalesced readback.
@@ -34,10 +37,16 @@
  * oversized file), re-uploads every live item and re-dispatches — rare and loud, never a
  * silent fallback. Item capacity overflow likewise (×2).
  *
- * DISPOSE LEAKS (v1, documented): a disposed/restaged grid's item stays in the arena —
- * byteStarts are the fields' read offsets, so splicing the buffer would invalidate every
- * later item. The arena grows monotonically per page load; a page reload resets it.
- * Compaction is a later milestone.
+ * COMPACTION (the free-list): a disposed/restaged item's byte range is RECLAIMED —
+ * `_reclaim` returns it to a coalescing free-list, stage() satisfies new items
+ * best-fit from dead space before extending the high-water mark, and a freed TAIL
+ * recedes the mark outright. An item's byteStart never moves once staged (slot ==
+ * byte-address identity holds; no view ever re-points outside the adopt path), so
+ * reuse needs no GPU moves and no view invalidation — the kernels simply treat the
+ * table as explicit [byteStart, byteStart+byteCount) ranges sorted by byteStart, with
+ * dead gaps inert. The arena grows with LIVE bytes, not with churn: a restage storm
+ * (window crossings, edits) holds the watermark at ~2× the churned range instead of
+ * burning the f32-ordinal wall budget on tombstones.
  *
  * The miss flow is the arena's one background continuation: after a flush, readMisses →
  * encodeMisses → if the atlas grew, rebuild the shared trie, rebuild the kernels around
@@ -62,6 +71,14 @@ import { loadStats } from '../core/loadStats.js';
 /** A bounds record → the {min, max} shape GlyphField.setLayoutExtent states. */
 function extentOf(b) {
     return b ? { min: b.min, max: b.max } : null;
+}
+
+/** An arena item → the kernels' item shape (explicit byte range + per-item params). */
+function toKernelItem(it) {
+    return {
+        bytes: it.bytes, byteStart: it.byteStart, origin: it.origin, page: it.page,
+        wrapWidth: it.wrapWidth, lineHeight: it.lineHeight, zStep: it.zStep,
+    };
 }
 
 export default class GlyphPipelineArena {
@@ -96,13 +113,22 @@ export default class GlyphPipelineArena {
 
         /** Every staged item, live or dead. The index IS the itemIndex — never spliced. */
         this._items = [];
+        /** The HIGH-WATER mark: one past the highest byte ever allocated, minus tail
+         *  recedes. Free-list reuse keeps it tracking LIVE bytes, not cumulative churn. */
         this._byteTotal = 0;
+        /** Dead byte ranges available for reuse — sorted by start, coalesced,
+         *  non-overlapping. [{start, length}] */
+        this._free = [];
+        this._liveCount = 0;
+        /** The kernels' item table mirrors `_sorted` (live items by byteStart) — rebuilt
+         *  whenever membership changed since the last sync (stage/dispose sets this). */
+        this._sorted = [];
+        this._tableDirty = false;
         this._stagedSinceFlush = 0;
         this._flushPromise = null;       // the coalescing flush gate
         this._repaginatePromise = null;  // the coalescing repaginate gate
         this._missGen = 0;
         this._boundsGen = 0;
-        this._syncedItems = 0;   // items already uploaded to the CURRENT kernels (append watermark)
         this._deviceLostNoted = false;
     }
 
@@ -115,8 +141,9 @@ export default class GlyphPipelineArena {
     get trie() { return this._trie; }
 
     /**
-     * Append a file to the arena and return its handle. Synchronous: mirror + item-table
-     * entry + field attach. The GPU sees it at the next flush.
+     * Stage a file into the arena and return its handle. Synchronous: range allocation
+     * (free-list reuse or high-water growth) + item-table entry + field attach. The
+     * GPU sees it at the next flush.
      *
      * @param {Object} p
      * @param {Uint8Array} p.bytes - the file's UTF-8 bytes (non-empty)
@@ -140,20 +167,28 @@ export default class GlyphPipelineArena {
         if (!(bytes?.length > 0)) {
             throw new Error('GlyphPipelineArena.stage: empty file — an item owns at least one byte');
         }
-        if (this._items.length >= this.maxItems) {
+        if (this._liveCount >= this.maxItems) {
             this._realloc(this.maxBytes, this.maxItems * 2);
         }
-        const need = this._byteTotal + bytes.length;
-        if (need > ORDINAL_EXACT_BYTES) {
+        // COMPACTION: dead space first — best-fit from the free-list, the high-water
+        // mark only when nothing fits. The two-phase adopt keeps the OLD item live
+        // while its replacement stages, so a restage can never scribble on a range a
+        // view is still rendering (the free-list only ever holds disposed items).
+        const byteStart = this._alloc(bytes.length);
+        const end = byteStart + bytes.length;
+        if (end > ORDINAL_EXACT_BYTES) {
             // The kernels' hard wall: slot ordinals are f32 lanes, exact only to 2^24.
-            // Refuse THIS stage loudly (the load path logs it per grid, the rest of the
-            // storm continues) instead of attempting a growth the kernels must reject.
-            // Raising the wall = u32 ordinal lanes (kernel surgery); compaction keeps
-            // live bytes under it meanwhile.
-            throw new Error(`GlyphPipelineArena: staging ${bytes.length}B would put the arena at ${need}B, past the f32-ordinal wall (${ORDINAL_EXACT_BYTES}B) — this file stays unlaid (compaction/u32 ordinals are the lift)`);
+            // Undo the allocation (a refusal must not leak the range) and refuse THIS
+            // stage loudly (the load path logs it per grid, the rest of the storm
+            // continues) instead of attempting a growth the kernels must reject.
+            // Raising the wall = u32 ordinal lanes (kernel surgery); the free-list
+            // keeps the live-byte watermark under it meanwhile.
+            this._insertFree(byteStart, bytes.length);
+            const live = this._byteTotal - this._free.reduce((s, r) => s + r.length, 0);
+            throw new Error(`GlyphPipelineArena: staging ${bytes.length}B needs address ${end}B, past the f32-ordinal wall (${ORDINAL_EXACT_BYTES}B) with ${live}B live — this file stays unlaid (u32 ordinal lanes are the lift)`);
         }
-        if (need > this.maxBytes) {
-            this._realloc(Math.min(ORDINAL_EXACT_BYTES, Math.max(this.maxBytes * 2, Math.ceil(need * 1.25))), this.maxItems);
+        if (end > this.maxBytes) {
+            this._realloc(Math.min(ORDINAL_EXACT_BYTES, Math.max(this.maxBytes * 2, Math.ceil(end * 1.25))), this.maxItems);
         }
 
         const item = {
@@ -161,12 +196,15 @@ export default class GlyphPipelineArena {
             wrapWidth, lineHeight, zStep, field,
             mirror: null,      // the CPU oracle — materialized on first query, never here
             gpuBounds: null,   // the per-item readback record — lands after the flush
-            byteStart: this._byteTotal, byteCount: bytes.length, dead: false,
+            byteStart, byteCount: bytes.length, dead: false,
+            _synced: false,    // bytes not yet uploaded to the CURRENT kernels
+            _row: undefined,   // row in the kernels' CURRENT item table — set at _syncTable
         };
         item.laid = new Promise((resolve) => { item._laidResolve = resolve; });
         const itemIndex = this._items.length;
         this._items.push(item);
-        this._byteTotal += bytes.length;
+        this._liveCount++;
+        this._tableDirty = true;
         this._stagedSinceFlush++;
 
         if (field) field.attachBytePipeline(this._kernels, bytes.length, item.byteStart);
@@ -219,10 +257,80 @@ export default class GlyphPipelineArena {
                 }
             },
             verify: (eps) => arena.verifyItem(itemIndex, eps),
-            /** The item's arena space leaks (v1 — see the header); this detaches the field
-             *  so a realloc never re-attaches a disposed grid's field. */
-            dispose() { item.field = null; item.dead = true; item._laidResolve?.(); },
+            /** Tombstones the item: detaches the field (a realloc never re-attaches a
+             *  disposed grid's field) and RECLAIMS the byte range into the free-list —
+             *  the next stage of a fitting size reuses it. Idempotent. */
+            dispose() {
+                if (item.dead) return;
+                item.field = null;
+                item.dead = true;
+                item._laidResolve?.();
+                arena._reclaim(item);
+            },
         };
+    }
+
+    /**
+     * Allocate `n` bytes: best-fit from the free-list (the smallest dead range that
+     * holds them — exact fits split least), else extend the high-water mark. The
+     * returned range never overlaps a live item by construction.
+     * @private
+     */
+    _alloc(n) {
+        let best = -1;
+        for (let i = 0; i < this._free.length; i++) {
+            const r = this._free[i];
+            if (r.length < n) continue;
+            if (best < 0 || r.length < this._free[best].length) best = i;
+        }
+        if (best >= 0) {
+            const r = this._free[best];
+            const start = r.start;
+            if (r.length === n) this._free.splice(best, 1);
+            else { r.start += n; r.length -= n; }
+            return start;
+        }
+        const start = this._byteTotal;
+        this._byteTotal += n;
+        return start;
+    }
+
+    /**
+     * Return a range to the free-list, coalescing with adjacent dead ranges; a freed
+     * TAIL recedes the high-water mark outright (the mark is what the f32-ordinal
+     * wall and the growth checks read). @private
+     */
+    _insertFree(start, length) {
+        const f = this._free;
+        let end = start + length;
+        let i = 0;
+        while (i < f.length && f[i].start + f[i].length < start) i++;
+        // Merge every range TOUCHING [start, end): adjacency coalesces, a strict
+        // overlap is a double-free and refuses loud (the free-list invariant broken).
+        while (i < f.length && f[i].start <= end) {
+            const r = f[i];
+            if (r.start < end && r.start + r.length > start) {
+                throw new Error(`GlyphPipelineArena: double-free/overlap at [${start},${end}) vs [${r.start},${r.start + r.length}) — the free-list invariant is broken`);
+            }
+            if (r.start < start) start = r.start;
+            if (r.start + r.length > end) end = r.start + r.length;
+            f.splice(i, 1);
+        }
+        f.splice(i, 0, { start, length: end - start });
+        // Tail recede: the last range ending exactly at the mark drops the mark to its
+        // start. One check suffices — anything contiguous with it coalesced above.
+        const last = f[f.length - 1];
+        if (last && last.start + last.length === this._byteTotal) {
+            this._byteTotal = last.start;
+            f.pop();
+        }
+    }
+
+    /** Reclaim a disposed item's byte range. @private */
+    _reclaim(item) {
+        this._liveCount--;
+        this._insertFree(item.byteStart, item.byteCount);
+        this._tableDirty = true;
     }
 
     /**
@@ -243,7 +351,8 @@ export default class GlyphPipelineArena {
 
     /**
      * The coalescing flush gate: every stage in the same macrotask window shares ONE
-     * flush — one setFiles + one run (nine dispatches) for the whole storm. Resolves
+     * flush — the table re-syncs to the live set, new ranges upload, one run (nine
+     * dispatches) for the whole storm. Resolves
      * once the dispatches are ENCODED (encode-time is the load path's guarantee).
      * @returns {Promise<void>}
      */
@@ -261,12 +370,12 @@ export default class GlyphPipelineArena {
     }
 
     /**
-     * One batched dispatch of EVERYTHING live (the buffer is one concatenated arena — a
-     * flush is setFiles over all items + run). Fire-and-forget variant of requestFlush's
-     * gate body.
+     * One batched dispatch of EVERYTHING live (the buffer is one byte arena of explicit
+     * item ranges — a flush syncs the table to the live set, uploads the newly staged
+     * ranges, runs). Fire-and-forget variant of requestFlush's gate body.
      */
     _flushNow() {
-        if (this._items.length === 0) return;
+        if (this._liveCount === 0) return;
         if (this.renderer._isDeviceLost === true) {
             if (!this._deviceLostNoted) {
                 this._deviceLostNoted = true;
@@ -275,20 +384,21 @@ export default class GlyphPipelineArena {
             return;
         }
         const t0 = performance.now();
-        // INCREMENTAL: the arena is append-only, so a steady-state flush uploads ONLY the
-        // items staged since the last sync (appendFiles — no whole-arena concat/repack, no
-        // capacity-sized uploads: the per-interaction lockup at scale). The full setFiles
-        // runs only when the kernels are FRESH (boot, realloc, trie rebuild).
-        const toItem = (it) => ({
-            bytes: it.bytes, origin: it.origin, page: it.page,
-            wrapWidth: it.wrapWidth, lineHeight: it.lineHeight, zStep: it.zStep,
-        });
-        if (this._syncedItems === 0) {
-            this._kernels.setFiles(this._items.map(toItem));
-        } else if (this._items.length > this._syncedItems) {
-            this._kernels.appendFiles(this._items.slice(this._syncedItems).map(toItem));
+        // INCREMENTAL: only the TABLE syncs wholesale (membership permutes rows under
+        // free-list reuse — maxItems floats, trivial) and only the items staged since
+        // the last sync upload their BYTES (masked word writes at their explicit
+        // offsets — no whole-arena concat/repack, no capacity-sized uploads: the
+        // per-interaction lockup at scale). After a realloc every live item is
+        // unsynced, so the fresh kernels get the full upload through the same path.
+        if (this._tableDirty) this._syncTable();
+        const pending = [];
+        for (const item of this._sorted) {
+            if (!item._synced) pending.push(item);
         }
-        this._syncedItems = this._items.length;
+        if (pending.length > 0) {
+            this._kernels.writeBytes(pending.map(toKernelItem));
+            for (const item of pending) item._synced = true;
+        }
         this._kernels.run();
         const dt = performance.now() - t0;
         // The [load] trace's build-stage decomposition (fileCommands snapshots the deltas).
@@ -321,11 +431,31 @@ export default class GlyphPipelineArena {
     }
 
     /**
+     * Repack the kernels' item table to the LIVE set, sorted by byteStart (the binary
+     * search's invariant), and hand each item its CURRENT row. `_row` always describes
+     * the GPU's table as it stands — membership changes only materialize here, so a
+     * setItemPage between syncs writes a row that is still that item's own.
+     * @private
+     */
+    _syncTable() {
+        this._sorted = this._items.filter((it) => !it.dead)
+            .sort((a, b) => a.byteStart - b.byteStart);
+        this._kernels.setItems(this._sorted.map(toKernelItem));
+        this._sorted.forEach((it, row) => { it._row = row; });
+        this._tableDirty = false;
+    }
+
+    /**
      * Retune ONE item's page params (the item-table write). The dispatch is separate:
      * requestRepaginate() — scroll ticks across grids coalesce into ONE kernel-3 run.
+     * An item with no row yet (staged since the last sync) skips the kernel write —
+     * the next flush packs its CURRENT page from the item record.
      */
     setItemPage(itemIndex, page) {
-        this._kernels.setItemPage(itemIndex, page);
+        const item = this._items[itemIndex];
+        if (item && item._row !== undefined) {
+            this._kernels.setItemPage(item._row, page);
+        }
         return this;
     }
 
@@ -359,19 +489,21 @@ export default class GlyphPipelineArena {
      */
     _requestBoundsSync() {
         const gen = ++this._boundsGen;
-        const items = this._items;
+        // The readback is parallel to the kernels' item table — `_sorted` mirrors it
+        // exactly (both only change at _syncTable, which precedes every readback).
+        const rows = this._sorted;
         this._kernels.readItemBounds()
             .then((list) => {
                 if (gen !== this._boundsGen) return;
-                for (let i = 0; i < list.length && i < items.length; i++) {
-                    const item = items[i];
+                for (let i = 0; i < list.length && i < rows.length; i++) {
+                    const item = rows[i];
                     item.gpuBounds = list[i];
                     if (!item.dead && item.field) item.field.setLayoutExtent(extentOf(list[i]));
                     item._laidResolve?.();
                 }
             })
             .catch(() => {
-                for (const item of items) item._laidResolve?.();
+                for (const item of rows) item._laidResolve?.();
             });
     }
 
@@ -387,6 +519,9 @@ export default class GlyphPipelineArena {
         if (this._repaginatePromise) await this._repaginatePromise;
         const item = this._items[itemIndex];
         if (!item) return { ok: false, reason: 'no item' };
+        // A disposed item's range is free-list space — recycled bytes would diff as a
+        // layout error against the mirror, misdirecting the hunt. Say what it is.
+        if (item.dead) return { ok: false, reason: 'item disposed (range reclaimed)' };
         const ref = this._ensureMirror(item)?.slots;
         if (!ref) return { ok: false, reason: 'no mirror' };
         const gpu = await this._kernels.readSlots();
@@ -412,7 +547,9 @@ export default class GlyphPipelineArena {
     /**
      * Rebuild the kernels at a new capacity (or around a rebuilt trie) and re-attach every
      * live field — the slots attribute is NEW, so fields holding the old one would read a
-     * dead buffer. Content re-uploads at the next flush (setFiles covers all items).
+     * dead buffer. Byte ranges are untouched (an item's byteStart never moves), so every
+     * attach is the same-range rebind; content re-uploads at the next flush (every live
+     * item is marked unsynced — the full upload rides the incremental writeBytes path).
      * @private
      */
     _realloc(maxBytes, maxItems) {
@@ -423,7 +560,7 @@ export default class GlyphPipelineArena {
         // timestamped cause in the relay log store.
         console.info(`GlyphPipelineArena: realloc ${this.maxBytes}B/${this.maxItems} items → `
             + `${nextBytes}B/${nextItems} items `
-            + `(${this._items.length} staged, ${this._byteTotal}B live)`);
+            + `(${this._liveCount} live/${this._items.length} staged, ${this._byteTotal}B watermark)`);
         // TRANSACTIONAL: build the replacement BEFORE destroying the live kernels. A
         // construction failure here (the f32-ordinal wall, device OOM) must leave the
         // arena exactly as it was — the first version disposed first, and a throw then
@@ -436,8 +573,13 @@ export default class GlyphPipelineArena {
         this._kernels = fresh;
         this.maxBytes = nextBytes;
         this.maxItems = nextItems;
-        this._syncedItems = 0;   // fresh kernels — the next flush is a full setFiles
+        // Fresh kernels: the next flush re-syncs the table and re-uploads every live
+        // item's bytes. Rows drop with the old table — a setItemPage before that flush
+        // skips the kernel write (the flush packs the item's current page).
+        this._tableDirty = true;
         for (const item of this._items) {
+            item._synced = false;
+            item._row = undefined;
             if (item.field && !item.dead) {
                 item.field.attachBytePipeline(this._kernels, item.byteCount, item.byteStart);
             }
@@ -474,5 +616,9 @@ export default class GlyphPipelineArena {
         this._kernels = null;
         this._items = [];
         this._byteTotal = 0;
+        this._free = [];
+        this._liveCount = 0;
+        this._sorted = [];
+        this._tableDirty = false;
     }
 }

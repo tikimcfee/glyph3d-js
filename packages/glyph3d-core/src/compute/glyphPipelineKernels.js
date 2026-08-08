@@ -47,12 +47,18 @@
  * no re-scan, no re-decode (the scan never sees the fold unit's width, only wrap).
  *
  * ── MULTI-FILE (the item table) ────────────────────────────────────────────────────
- * One pipeline instance serves N files concatenated in ONE byte buffer. Per item: a
- * uint in itemStarts (the binary-search key) and ITEM_STRIDE floats in itemTable
- * (origin + page params + wrap/zStep/lineHeight — per-item lanes with setFiles
- * defaults). Item isolation is ALGEBRAIC: an item start is a reset element that
- * absorbs everything left of it under any grouping — row/col are file-relative and no
- * state can leak across files, structurally.
+ * One pipeline instance serves N files in ONE byte buffer. An item owns an EXPLICIT
+ * byte range [byteStart, byteStart + byteCount): byteStart goes in itemStarts (the
+ * binary-search key — the table is always packed sorted by byteStart) and byteCount in
+ * the I_BYTE_COUNT item-table lane. Items are sorted but need NOT be contiguous: the
+ * arena's free-list recycles tombstoned ranges, so dead gaps sit between live ranges.
+ * A gap byte attributes to the preceding item under the search, but apply kills its
+ * leader flag (out of its item's range), so resolveX/paginate skip it — no fold-scalar
+ * or box reduce can ever be polluted by dead content. Contiguous layouts (the spec's
+ * and the reference oracle's domain) are the degenerate case: every byte is in range
+ * and the guard never fires. Item isolation stays ALGEBRAIC: an item start is a reset
+ * element that absorbs everything left of it under any grouping — row/col are
+ * file-relative and no state can leak across files, structurally.
  *
  * BOUNDS ARE PER-ITEM, GPU-owned: resolveX reduces the fold scalars into foldScalars,
  * deriveStrides turns lane 1 (+ pageGapX) into itemStrides, and paginate reduces each
@@ -74,7 +80,7 @@ import {
     ITEM_STRIDE, I_ORIGIN_X, I_ORIGIN_Y, I_ORIGIN_Z,
     I_PAGE_ROWS, I_PAGE_COLS, I_PAGES_WIDE, I_PAGE_GAP_X,
     I_BAND_STRIDE_Y, I_DEPTH_PER_BAND, I_DEPTH_PER_COL, I_SCROLL_ROWS,
-    I_WRAP_WIDTH, I_Z_STEP, I_LINE_HEIGHT,
+    I_WRAP_WIDTH, I_Z_STEP, I_LINE_HEIGHT, I_BYTE_COUNT,
 } from './glyphPipelineReference.js';
 import { CHUNK_SIZE, GROUP_SIZE } from './glyphPipelineScan.js';
 import { BLOCK_SHIFT, BLOCK_MASK, ENTRY_STRIDE, LANE_GLYPH_ID, LANE_ADVANCE, LANE_HEIGHT, LANE_FLAGS } from './GlyphTrie.js';
@@ -210,7 +216,8 @@ export default class GlyphPipelineKernels {
         // Per-item bounds, split by WRITER so re-arming one never clobbers the other:
         // itemBoxes (6 lanes/item — final positions, paginate, re-armed every repaginate)
         // and foldScalars (2 lanes/item — totalRows + ITEM-RELATIVE widest row, resolveX,
-        // armed only at setFiles: repaginates don't re-fold, so the scalars persist and
+        // armed only when the table packs (setItems/setFiles): repaginates don't
+        // re-fold, so the scalars persist and
         // the stride kernel can read them).
         this.itemBoxes = instancedArray(this.maxItems * 6, 'uint').setName('GlyphItemBoxes').toAtomic();
         this.foldScalars = instancedArray(this.maxItems * 2, 'uint').setName('GlyphFoldScalars').toAtomic();
@@ -487,12 +494,13 @@ export default class GlyphPipelineKernels {
         const it = this.itemTable;
         const item = itemSearch(fromByte).toVar('curItem');
         const itemStartByte = starts.element(item).toVar('curItemStart');
+        const itemEnd = itemStartByte.add(uint(it.element(item.mul(uint(ITEM_STRIDE)).add(uint(I_BYTE_COUNT))))).toVar('curItemEnd');
         const wrap = int(it.element(item.mul(uint(ITEM_STRIDE)).add(uint(I_WRAP_WIDTH)))).toVar('curWrap');
         const nextStart = uint(0xFFFFFFFF).toVar('curNext');
         If(item.add(uint(1)).lessThan(u.itemCount), () => {
             nextStart.assign(starts.element(item.add(uint(1))));
         });
-        return { item, itemStartByte, wrap, nextStart };
+        return { item, itemStartByte, itemEnd, wrap, nextStart };
     }
 
     /** Advance the cursor at byte `id` (call once per loop step, before use). @private */
@@ -503,6 +511,7 @@ export default class GlyphPipelineKernels {
         If(id.greaterThanEqual(cur.nextStart), () => {
             cur.item.addAssign(uint(1));
             cur.itemStartByte.assign(cur.nextStart);
+            cur.itemEnd.assign(cur.nextStart.add(uint(it.element(cur.item.mul(uint(ITEM_STRIDE)).add(uint(I_BYTE_COUNT))))));
             cur.wrap.assign(int(it.element(cur.item.mul(uint(ITEM_STRIDE)).add(uint(I_WRAP_WIDTH)))));
             If(cur.item.add(uint(1)).lessThan(u.itemCount), () => {
                 cur.nextStart.assign(starts.element(cur.item.add(uint(1))));
@@ -680,6 +689,15 @@ export default class GlyphPipelineKernels {
                 const o = id.mul(uint(SLOT_STRIDE)).toVar('aO');
                 const flags = int(S.element(o.add(uint(S_FLAGS)))).toVar('aFlags');
                 If(flags.bitAnd(int(F_LEADER)).notEqual(int(0)), () => {
+                    // THE GAP GUARD: a byte outside its resolved item's [start, end)
+                    // range is DEAD SPACE (a tombstoned range the arena's free-list
+                    // hasn't recycled yet, or a split remainder). It attributes to the
+                    // preceding live item under the search — kill its leader flag so
+                    // resolveX/paginate skip it: its fold-scalar/box reduces must never
+                    // pollute that item (a stale widest-row is a wrong page-fan stride).
+                    const inItem = id.greaterThanEqual(cur.itemStartByte)
+                        .and(id.lessThan(cur.itemEnd)).toVar('aInItem');
+                    If(inItem, () => {
                     const col = acc.tailLen.toVar('aCol');
                     const closed = int(0).toVar('aClosed');
                     If(acc.nl.greaterThan(int(0)), () => {
@@ -697,6 +715,9 @@ export default class GlyphPipelineKernels {
                     S.element(o.add(uint(S_ORD))).assign(acc.glyphs.toFloat());
                     S.element(o.add(uint(S_FLAGS))).assign(float(flags.bitOr(int(F_RENDERED))));
                     this.ordToByte.element(cur.itemStartByte.add(uint(acc.glyphs))).assign(id);
+                    }).Else(() => {
+                        S.element(o.add(uint(S_FLAGS))).assign(float(0));
+                    });
                 });
 
                 this._leafInto(acc, id, cur);
@@ -907,11 +928,16 @@ export default class GlyphPipelineKernels {
     }
 
     /**
-     * Upload N files as ONE concatenated buffer with one item-table row each — the
-     * multi-file hoist: one set of dispatches serves the whole load storm.
+     * Upload N items with one item-table row each — the multi-file hoist: one set of
+     * dispatches serves the whole load storm. Table + bytes together (the fresh-kernels
+     * case: boot, realloc, trie rebuild); the arena's steady-state flush splits it into
+     * setItems (table) + writeBytes (only the newly staged ranges).
      *
-     * @param {Array<{bytes:Uint8Array, origin?:{x,y,z}, page?:Object}>} items
-     *   Each item's page bag takes pageRows, pageCols (also resolveX's fold unit when
+     * @param {Array<{bytes:Uint8Array, byteStart?:number, origin?:{x,y,z}, page?:Object}>} items
+     *   byteStart is the item's EXPLICIT arena offset (sorted ascending, ranges never
+     *   overlapping — gaps between items are dead space the scan treats as inert);
+     *   omitted, items pack contiguously from 0 (the spec/reference layout). Each
+     *   item's page bag takes pageRows, pageCols (also resolveX's fold unit when
      *   wrap is off — retunable at resolveX rate, not scan rate), pagesWide, pageGapX
      *   (the stride itself is GPU-derived), bandStrideY, depthPerBand, depthPerColumn,
      *   scrollRows.
@@ -919,29 +945,86 @@ export default class GlyphPipelineKernels {
      *   wrapWidth, lineHeight, zStep.
      */
     setFiles(items, params = {}) {
+        const laid = this._layoutItems(items, 'setFiles');
+        this._packItems(laid, params);
+        this._writeRanges(laid);
+        return this;
+    }
+
+    /**
+     * Repack the item table to EXACTLY this live set — sorted by byteStart, explicit
+     * ranges, no bytes touched. The arena's table seam: rows permute as items die and
+     * new ones recycle dead ranges, so BOTH per-item reduce buffers re-arm here (a
+     * stale row's old max would otherwise survive the idempotent re-max and hand the
+     * stride kernel a dead item's widest row). The miss ring resets with the table —
+     * decode re-reports every run.
+     * @param {Array<{bytes:Uint8Array, byteStart?:number, origin?:{x,y,z}, page?:Object}>} items
+     * @param {Object} params - same field-level defaults as setFiles
+     */
+    setItems(items, params = {}) {
+        this._packItems(this._layoutItems(items, 'setItems'), params);
+        return this;
+    }
+
+    /**
+     * Upload item bytes at their EXPLICIT offsets — the incremental flush's bytes
+     * lane. Masked word writes (the boundary word keeps its neighbors), no slots
+     * touch, no counts moved: setItems owns the table + dispatch widths.
+     * @param {Array<{bytes:Uint8Array, byteStart:number}>} items - the newly staged items
+     */
+    writeBytes(items) {
+        this._writeRanges(this._layoutItems(items, 'writeBytes'));
+        return this;
+    }
+
+    /**
+     * Resolve + validate the item layout: every item gets an explicit {start, len}.
+     * Fail loud at the seam — an unsorted/overlapping/over-capacity table would be a
+     * silent layout corruption on the GPU, not a JS exception. @private
+     * @returns {Array<{it:Object, start:number, len:number}>}
+     */
+    _layoutItems(items, op) {
         if (!Array.isArray(items) || items.length === 0) {
-            throw new Error('GlyphPipelineKernels: setFiles needs a non-empty items array');
+            throw new Error(`GlyphPipelineKernels: ${op} needs a non-empty items array`);
         }
         if (items.length > this.maxItems) {
             throw new Error(`GlyphPipelineKernels: ${items.length} items exceeds capacity ${this.maxItems}`);
         }
-        let total = 0;
-        for (const it of items) total += it.bytes.length;
-        if (total > this.maxBytes) {
-            throw new Error(`GlyphPipelineKernels: ${total} bytes exceeds capacity ${this.maxBytes}`);
-        }
-
-        // Concatenate the bytes and pack the item table. byteStart goes in itemStarts (the
-        // search key); origin + page params + the fold metrics go in itemTable at the
-        // ITEM_STRIDE lanes (item value, else the field-level default from `params`).
-        const all = new Uint8Array(total);
-        const starts = this.itemStarts.value.array;
-        const tbl = this.itemTable.value.array;
-        let off = 0;
+        const laid = [];
+        let hi = 0;
         for (let i = 0; i < items.length; i++) {
             const it = items[i];
-            all.set(it.bytes, off);
-            starts[i] = off;
+            if (!(it.bytes?.length > 0)) {
+                throw new Error(`GlyphPipelineKernels: ${op} item ${i} has no bytes`);
+            }
+            const start = it.byteStart ?? hi;
+            if (!Number.isInteger(start) || start < hi) {
+                throw new Error(`GlyphPipelineKernels: ${op} item ${i} byteStart ${it.byteStart} is unsorted or overlaps — items must be sorted, non-overlapping ranges (hi ${hi})`);
+            }
+            const len = it.bytes.length;
+            if (start + len > this.maxBytes) {
+                throw new Error(`GlyphPipelineKernels: ${op} item ${i} ends at ${start + len} bytes, exceeds capacity ${this.maxBytes}`);
+            }
+            laid.push({ it, start, len });
+            hi = start + len;
+        }
+        return laid;
+    }
+
+    /**
+     * Pack the item table (starts + ITEM_STRIDE lanes, byteCount included), re-arm
+     * the reduces, and size every dispatch to the high-water byte end + item count.
+     * NO slots touch: decode writes every byte's flags lane (leaders AND continuation
+     * zeros), and apply kills leaders outside their item's range, so stale slots
+     * beyond/within the live ranges can never ghost. @private
+     */
+    _packItems(laid, params = {}) {
+        const starts = this.itemStarts.value.array;
+        const tbl = this.itemTable.value.array;
+        let hi = 0;
+        for (let i = 0; i < laid.length; i++) {
+            const { it, start, len } = laid[i];
+            starts[i] = start;
             this._packItemPage(i, it.page || {});
             const o = it.origin || {};
             const b = i * ITEM_STRIDE;
@@ -951,14 +1034,10 @@ export default class GlyphPipelineKernels {
             tbl[b + I_WRAP_WIDTH] = Math.max(0, Math.trunc(it.wrapWidth ?? params.wrapWidth ?? 0));
             tbl[b + I_Z_STEP] = it.zStep ?? params.zStep ?? 0;
             tbl[b + I_LINE_HEIGHT] = it.lineHeight ?? params.lineHeight ?? 1;
-            off += it.bytes.length;
+            tbl[b + I_BYTE_COUNT] = len;
+            hi = start + len;
         }
 
-        this.byteWords.value.array.set(packBytes(all));
-        this.byteWords.value.needsUpdate = true;
-        // NO slots touch: decode writes every byte's flags lane (leaders AND continuation
-        // zeros), so stale slots beyond/within the live range can never ghost — the
-        // capacity-sized fill(0)+upload this replaces was seconds per flush at scale.
         // Arm BOTH bounds buffers: a full run re-folds, so the fold scalars re-reduce too
         // (repaginate() re-arms only the boxes — the fold persists there).
         this.itemBoxes.value.array.set(armedBoxKeys(this.maxItems));
@@ -970,17 +1049,32 @@ export default class GlyphPipelineKernels {
         this.itemTable.value.needsUpdate = true;
         this.itemStarts.value.needsUpdate = true;
 
-        this.byteLength = total;
-        this.itemCount = items.length;
-        const chunks = Math.max(1, Math.ceil(total / CHUNK_SIZE));
+        this.byteLength = hi;
+        this.itemCount = laid.length;
+        const chunks = Math.max(1, Math.ceil(hi / CHUNK_SIZE));
         const supers = Math.max(1, Math.ceil(chunks / GROUP_SIZE));
         const u = this._u;
-        u.byteLength.value = total;
-        u.itemCount.value = items.length;
+        u.byteLength.value = hi;
+        u.itemCount.value = laid.length;
         u.chunkCount.value = chunks;
         u.superCount.value = supers;
 
-        this._setDispatchCounts(total, items.length);
+        this._setDispatchCounts(hi, laid.length);
+        return this;
+    }
+
+    /** Masked word writes of every laid range into byteWords. @private */
+    _writeRanges(laid) {
+        const words = this.byteWords.value.array;
+        for (const { it, start, len } of laid) {
+            const bytes = it.bytes;
+            for (let j = 0; j < len; j++) {
+                const a = start + j;
+                const w = a >> 2, sh = (a & 3) * 8;
+                words[w] = (words[w] & ~(0xFF << sh)) | (bytes[j] << sh);
+            }
+        }
+        this.byteWords.value.needsUpdate = true;
         return this;
     }
 
@@ -998,69 +1092,6 @@ export default class GlyphPipelineKernels {
         this._kResolveX.count = count;
         this._kStrides.count = itemCount;
         this._kPaginate.count = count;
-        return this;
-    }
-
-    /**
-     * APPEND new items to an already-uploaded set — the arena's steady-state flush. The
-     * arena is append-only (bytes never move once staged), so a flush that only added
-     * files uploads ONLY the delta: new bytes packed in place at their word offsets
-     * (masking the boundary word), new item rows, counts. No concat of the whole
-     * buffer, no repack, no slots touch, no re-arming — the box/fold reduces are
-     * idempotent over unchanged items, so old rows re-max to their own values.
-     * @param {Array<{bytes:Uint8Array, origin?:{x,y,z}, page?:Object}>} items - NEW items only
-     * @param {Object} params - same field-level defaults as setFiles
-     */
-    appendFiles(items, params = {}) {
-        if (!Array.isArray(items) || items.length === 0) return this;
-        let add = 0;
-        for (const it of items) add += it.bytes.length;
-        if (this.byteLength + add > this.maxBytes) {
-            throw new Error(`GlyphPipelineKernels: append to ${this.byteLength + add} bytes exceeds capacity ${this.maxBytes}`);
-        }
-        if (this.itemCount + items.length > this.maxItems) {
-            throw new Error(`GlyphPipelineKernels: append to ${this.itemCount + items.length} items exceeds capacity ${this.maxItems}`);
-        }
-        const words = this.byteWords.value.array;
-        const starts = this.itemStarts.value.array;
-        const tbl = this.itemTable.value.array;
-        let off = this.byteLength;
-        for (let i = 0; i < items.length; i++) {
-            const it = items[i];
-            const bytes = it.bytes;
-            for (let j = 0; j < bytes.length; j++) {
-                const a = off + j;
-                const w = a >> 2, sh = (a & 3) * 8;
-                words[w] = (words[w] & ~(0xFF << sh)) | (bytes[j] << sh);
-            }
-            const row = this.itemCount + i;
-            starts[row] = off;
-            this._packItemPage(row, it.page || {});
-            const o = it.origin || {};
-            const b = row * ITEM_STRIDE;
-            tbl[b + I_ORIGIN_X] = o.x || 0;
-            tbl[b + I_ORIGIN_Y] = o.y || 0;
-            tbl[b + I_ORIGIN_Z] = o.z || 0;
-            tbl[b + I_WRAP_WIDTH] = Math.max(0, Math.trunc(it.wrapWidth ?? params.wrapWidth ?? 0));
-            tbl[b + I_Z_STEP] = it.zStep ?? params.zStep ?? 0;
-            tbl[b + I_LINE_HEIGHT] = it.lineHeight ?? params.lineHeight ?? 1;
-            off += bytes.length;
-        }
-        this.byteWords.value.needsUpdate = true;
-        this.itemStarts.value.needsUpdate = true;
-        this.itemTable.value.needsUpdate = true;
-        this.missCount.value.array[0] = 0;   // decode re-reports misses every run
-        this.missCount.value.needsUpdate = true;
-
-        this.byteLength = off;
-        this.itemCount += items.length;
-        const chunks = Math.max(1, Math.ceil(off / CHUNK_SIZE));
-        const u = this._u;
-        u.byteLength.value = off;
-        u.itemCount.value = this.itemCount;
-        u.chunkCount.value = chunks;
-        u.superCount.value = Math.max(1, Math.ceil(chunks / GROUP_SIZE));
-        this._setDispatchCounts(off, this.itemCount);
         return this;
     }
 
@@ -1144,7 +1175,7 @@ export default class GlyphPipelineKernels {
      * extent (box lanes from paginate's reduce, scalars from resolveX's). An item no
      * glyph ever reduced (armed keys intact) reports null.
      * @returns {Promise<Array<?{min:{x,y,z}, max:{x,y,z}, totalRows:number, maxRowExtent:number}>>}
-     *   one entry per live item, parallel to the setFiles order.
+     *   one entry per live item, parallel to the item-table (sorted) order.
      */
     async readItemBounds() {
         const n = this.itemCount || 0;

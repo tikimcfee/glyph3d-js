@@ -16,7 +16,8 @@
  *   apply). A grid keeps its Object3D identity — panels, caret, overlays — and
  *   only the glyph mesh unifies.
  * - Group 0 is the permanent DEAD group (alpha 0): a restaged view tombstones
- *   its old slot range there, so the arena's v1 space leak is invisible.
+ *   its old slot range there, so a reclaimed/recycled arena range never ghosts
+ *   on screen.
  * - Picking is ONE registration: ID = base + absolute slot; resolveSlot() maps
  *   a hit back to (view, view-local slot) by binary search over live ranges.
  *
@@ -66,8 +67,8 @@ export class MegaGlyphField {
             frustumCulled: false,
         });
         // Group 0 = THE dead group. Tombstoned (restaged/disposed) slot ranges point
-        // here and the vertex cull drops them — the arena's append-only leak stays
-        // invisible until compaction reclaims it.
+        // here and the vertex cull drops them — a range the arena's free-list hands
+        // to a NEW item only ever lights up through that item's own view attach.
         this.field.setGroupAlpha(0, 0);
         // (Highlight rides the capacity-sized instanceHighlight ATTRIBUTE — allocated
         // with the other per-byte lanes; a capacity-sized texture blew
@@ -197,7 +198,8 @@ export class MegaGlyphField {
 
     /**
      * Grow the per-byte attributes to the arena's (possibly reallocated) capacity,
-     * preserving existing lanes — slot indices never move (append-only arena).
+     * preserving existing lanes — a staged item's slot range never moves (the
+     * free-list recycles whole DEAD ranges; live indices are stable).
      * @private
      */
     _ensureCapacity(n) {
@@ -233,7 +235,7 @@ export class MegaGlyphField {
         let cap = this.field.instanceMesh.geometry._maxInstanceCount || 0;
         // Picking IDs are 24-bit RGB: slots past the ceiling cannot encode. Clamp the
         // block — glyphs beyond ~16.7M arena bytes render but never pick — and say so
-        // loudly ONCE (compaction is the real fix: it keeps live bytes small).
+        // loudly ONCE (the free-list keeps live bytes small; u32 ordinal lanes raise it).
         if (cap > 0xFFFFFF) {
             if (!this._pickCeilingNoted) {
                 this._pickCeilingNoted = true;
@@ -382,7 +384,8 @@ export class MegaFieldView {
         const i = this.mega.views.indexOf(this);
         if (i >= 0) this.mega.views.splice(i, 1);
         // The group id retires with the view (never reused — a reused id would
-        // resurrect tombstoned slots). Compaction reclaims both, later.
+        // resurrect tombstoned slots). The arena range IS reclaimed (free-list);
+        // group-id reuse is the remaining, much smaller follow-up.
     }
 }
 

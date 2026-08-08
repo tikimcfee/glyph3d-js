@@ -104,7 +104,7 @@ export const F_MISSING = 8;       // no atlas entry yet — blank, but correctly
  * byteStart is NOT here — it lives in the separate itemStarts uint buffer, because it
  * is the binary-search key. Everything a pass reads per file rides the item.
  */
-export const ITEM_STRIDE = 14;
+export const ITEM_STRIDE = 15;
 export const I_ORIGIN_X = 0;
 export const I_ORIGIN_Y = 1;
 export const I_ORIGIN_Z = 2;
@@ -121,6 +121,12 @@ export const I_SCROLL_ROWS = 10;
 export const I_WRAP_WIDTH = 11;  // the fold unit — load-time (changing it re-folds)
 export const I_Z_STEP = 12;      // depth per wrap segment
 export const I_LINE_HEIGHT = 13; // world y per row
+export const I_BYTE_COUNT = 14;  // the item's byte length — ownership is EXPLICIT:
+                                 // [byteStart, byteStart + byteCount). Bytes between one
+                                 // item's end and the next start are DEAD SPACE (the
+                                 // arena's free-list recycles tombstoned ranges); the
+                                 // kernels treat them as inert (apply kills their leader
+                                 // flag, so no reduce ever attributes them to a live item)
 
 /** Allocate the slot buffer for a file of `byteLength` bytes. */
 export function allocSlots(byteLength) {
