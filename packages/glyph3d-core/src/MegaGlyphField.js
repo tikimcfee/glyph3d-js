@@ -120,6 +120,7 @@ export class MegaGlyphField {
      * @returns {{view: MegaFieldView, localSlot: number}|null}
      */
     resolveSlot(absSlot) {
+        if (this._rangesDirty) this._reindexRanges();
         const r = this._ranges;
         let lo = 0, hi = r.length - 1;
         while (lo <= hi) {
@@ -173,7 +174,7 @@ export class MegaGlyphField {
                     );
                 }
             }
-            this._reindexRanges();
+            this._rangesDirty = true;
         }
         this._registerPicking();
     }
@@ -185,11 +186,14 @@ export class MegaGlyphField {
         }
         view.slotBase = -1;
         view.byteCount = 0;
-        this._reindexRanges();
+        this._rangesDirty = true;
     }
 
-    /** @private */
+    /** Rebuild the sorted range index. LAZY — attach/tombstone mark dirty and the
+     *  one reader (resolveSlot, hover-rate) rebuilds: an eager rebuild per attach
+     *  was O(views log views) × 2 items × N files across a bulk load. @private */
     _reindexRanges() {
+        this._rangesDirty = false;
         this._ranges = this.views
             .filter((v) => !v.dead && v.byteCount > 0)
             .map((v) => ({ base: v.slotBase, end: v.slotBase + v.byteCount, view: v }))

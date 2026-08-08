@@ -23,6 +23,7 @@ import { snapshotLoadStats, diffLoadStats, loadStats } from '@glyph3d/core/core/
 import { FS_ERROR_CODES } from '@glyph3d/core/services/data';
 import { renderSheetGrid, addFileRow, addUnfetchedRow, materializeActor, getDiskMtime, setDiskMtime } from './fileLoader.js';
 import { loadBakedIndex } from './bakedIndex.js';
+import { getPipelineArena } from '@glyph3d/core/compute/GlyphLayoutCompute.js';
 import { canonicalPath, toFileUri } from './pathResolve.js';
 
 /**
@@ -218,6 +219,26 @@ export default function registerFileCommands(router) {
             .filter((f) => (f.size ?? 0) <= READABLE_MAX_CHARS)
             .map((f) => f.path)
             .filter(notOpen);
+
+        // THE ARENA PRE-SIZE, from the LISTING: the walker's sizes are in hand for
+        // EVERY file before a byte is fetched, so the arena reaches final capacity in
+        // one step and the growth ladder never runs mid-storm. (Each rung reallocs
+        // the arena AND re-creates + re-uploads the mega field's four capacity-sized
+        // attribute lanes while re-attaching every live view — measured at ~1.3s of
+        // WebGPU churn per 1500-file load when a stale bake index undershot.)
+        // Bytes ≈ chars for source; placeholders stage ~0.5KB of synthetic text;
+        // filename labels stage the path bytes. ×1.15 covers multibyte + slack.
+        try {
+            const arena = getPipelineArena();
+            if (arena) {
+                let total = 0;
+                for (const f of under) total += (f.size ?? 0) > READABLE_MAX_CHARS ? 512 : (f.size ?? 0);
+                for (const f of under) total += f.path.length + 64;
+                arena.ensureCapacity((arena.byteWatermark ?? 0) + total * 1.15);
+            }
+        } catch (err) {
+            console.warn('[load] arena pre-size failed (load continues, growth is the fallback):', err);
+        }
 
         // Live status — the only activity signal on the local (relay) path, which has no
         // getProgress counts; cleared no matter how we return.

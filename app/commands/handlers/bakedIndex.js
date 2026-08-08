@@ -97,17 +97,10 @@ export async function loadBakedIndex(ctx, dir) {
     // total is known BEFORE a byte stages — one cheap realloc now (ideally while
     // the arena is near-empty) instead of a mid-storm doubling ladder whose top
     // steps land as multi-second main-thread blocks. Headroom covers filenames,
-    // edit slack, and already-staged content.
-    try {
-        const arena = getPipelineArena();
-        if (arena) {
-            let total = 0;
-            for (let i = 0; i < decoded.header.fileCount; i++) total += decoded.recordAt(i).byteLength;
-            arena.ensureCapacity((arena.byteWatermark ?? 0) + total * 1.2);
-        }
-    } catch (err) {
-        console.warn('[bake] arena pre-size failed (load continues, growth is the fallback):', err);
-    }
+    // (The arena pre-size moved to the LISTING seam in file.openDir — the walker's
+    // sizes cover EVERY file, where the index covers only baked ones: a stale index
+    // undershot and the growth ladder re-uploaded the mega-field's capacity-sized
+    // lanes mid-storm anyway.)
 
     // Absolute-path lookup over lazy records — decode work happens per OPENED file.
     const { pathIndex, recordAt } = decoded;
