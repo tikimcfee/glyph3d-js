@@ -234,14 +234,16 @@ export class MegaGlyphField {
         if (!ps) return;
         let cap = this.field.instanceMesh.geometry._maxInstanceCount || 0;
         // Picking IDs are 24-bit RGB: slots past the ceiling cannot encode. Clamp the
-        // block — glyphs beyond ~16.7M arena bytes render but never pick — and say so
-        // loudly ONCE (the free-list keeps live bytes small; u32 ordinal lanes raise it).
-        if (cap > 0xFFFFFF) {
+        // block — glyphs beyond the pick space render but never pick — and say so
+        // loudly ONCE. The pick target carries 32-bit IDs (RGBA8, alpha = bits
+        // 24..31), bounded at 2^31−1 by the shaders' i32 math — 128× the arena's
+        // f32-ordinal wall, so the ORDINAL wall is the binding constraint again.
+        if (cap > 0x7FFFFFFF) {
             if (!this._pickCeilingNoted) {
                 this._pickCeilingNoted = true;
-                console.warn(`MegaGlyphField: arena capacity ${cap} exceeds the 24-bit pick ID space — slots past ${0xFFFFFF} are unpickable until compaction`);
+                console.warn(`MegaGlyphField: arena capacity ${cap} exceeds the 31-bit pick ID space — slots past ${0x7FFFFFFF} are unpickable`);
             }
-            cap = 0xFFFFFF;
+            cap = 0x7FFFFFFF;
         }
         const key = `${cap}`;
         if (cap === 0 || this._pickRegisteredKey === key) return;

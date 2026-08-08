@@ -162,7 +162,8 @@ void main() {
     int r = (id >> 16) & 0xFF;
     int g = (id >> 8) & 0xFF;
     int b = id & 0xFF;
-    fragColor = vec4(float(r) / 255.0, float(g) / 255.0, float(b) / 255.0, 1.0);
+    int a = (id >> 24) & 0xFF;
+    fragColor = vec4(float(r) / 255.0, float(g) / 255.0, float(b) / 255.0, float(a) / 255.0);
 }
 `;
 
@@ -273,7 +274,8 @@ void main() {
     int r = (id >> 16) & 0xFF;
     int g = (id >> 8) & 0xFF;
     int b = id & 0xFF;
-    fragColor = vec4(float(r) / 255.0, float(g) / 255.0, float(b) / 255.0, 1.0);
+    int a = (id >> 24) & 0xFF;
+    fragColor = vec4(float(r) / 255.0, float(g) / 255.0, float(b) / 255.0, float(a) / 255.0);
 }
 `;
 
@@ -296,7 +298,8 @@ void main() {
     int r = (id >> 16) & 0xFF;
     int g = (id >> 8) & 0xFF;
     int b = id & 0xFF;
-    fragColor = vec4(float(r) / 255.0, float(g) / 255.0, float(b) / 255.0, 1.0);
+    int a = (id >> 24) & 0xFF;
+    fragColor = vec4(float(r) / 255.0, float(g) / 255.0, float(b) / 255.0, float(a) / 255.0);
 }
 `;
 
@@ -527,7 +530,8 @@ export class PickingSystem {
             const r  = id.shiftRight(16).bitAnd(0xFF);
             const g  = id.shiftRight(8).bitAnd(0xFF);
             const b  = id.bitAnd(0xFF);
-            return _vec4(_float(r).div(255.0), _float(g).div(255.0), _float(b).div(255.0), _float(1));
+            const a  = id.shiftRight(24).bitAnd(0xFF);
+            return _vec4(_float(r).div(255.0), _float(g).div(255.0), _float(b).div(255.0), _float(a).div(255.0));
         });
 
         const mat = new _MeshBasicNodeMaterial();
@@ -563,7 +567,8 @@ export class PickingSystem {
             const r = id.shiftRight(16).bitAnd(0xFF);
             const g = id.shiftRight(8).bitAnd(0xFF);
             const b = id.bitAnd(0xFF);
-            return _vec4(_float(r).div(255.0), _float(g).div(255.0), _float(b).div(255.0), _float(1));
+            const a = id.shiftRight(24).bitAnd(0xFF);
+            return _vec4(_float(r).div(255.0), _float(g).div(255.0), _float(b).div(255.0), _float(a).div(255.0));
         });
         const mat = new _MeshBasicNodeMaterial();
         mat.outputNode = fragmentFn();
@@ -662,8 +667,8 @@ export class PickingSystem {
             if (e > startId) startId = e;        // else move past this block
         }
         const endId = startId + count;
-        if (endId > 0xFFFFFF) {
-            console.warn(`[PickingSystem] channel '${channelName}' ID ${endId} exceeds 24-bit encoding; picks may mis-resolve`);
+        if (endId > 0x7FFFFFFF) {
+            console.warn(`[PickingSystem] channel '${channelName}' ID ${endId} exceeds the 31-bit shader-int ID space; picks may mis-resolve`);
         }
 
         // Glyph channel: write instancePickingId so test harnesses can validate
@@ -762,7 +767,7 @@ export class PickingSystem {
             // mutation needed here.
             camera.layers.set(channel.layer);
             this._renderer.setRenderTarget(this._target);
-            this._renderer.setClearColor(0x000000, 1);
+            this._renderer.setClearColor(0x000000, 0);   // a=0: background decodes to id 0 (miss)
             this._renderer.clear();
             this._renderer.render(scene, camera);
             this._lastRenderMs = performance.now() - t0;
@@ -830,7 +835,7 @@ export class PickingSystem {
 
         const t0 = this._renderChannelPass(ch, camera, scene);
         const pixel = await this.readPixelAsync(t0);
-        const id = (pixel[0] << 16) | (pixel[1] << 8) | pixel[2];
+        const id = pixel[3] * 0x1000000 + ((pixel[0] << 16) | (pixel[1] << 8) | pixel[2]);
         const hit = this.resolve(channelName, id);
         this._lastResult.set(channelName, hit);
         return hit;
@@ -876,7 +881,7 @@ export class PickingSystem {
     }
 
     static decodePickingId(pixel) {
-        return (pixel[0] << 16) | (pixel[1] << 8) | pixel[2];
+        return pixel[3] * 0x1000000 + ((pixel[0] << 16) | (pixel[1] << 8) | pixel[2]);
     }
 
     // -------------------------------------------------------------------------
