@@ -178,6 +178,11 @@ if you're asking which CLI. `multica.board runtime` separates them. `multica.run
 lists what's available and `multica.spawn <name> <provider>` binds a new agent to one
 (it refuses to guess when several CLIs are present).
 
+**The runbook is `tools/MULTICA.md`** — bring-up, filing a ticket as a staged pipeline
+(`multica-ticket.mjs`), and watching it drive **headlessly** (`multica-watch.mjs`, which
+runs the real bridge with a recording `execute` and lays the snapshot out through the same
+`boardLayout`, so if the board reads right there the only thing left is rendering).
+
 **One-pass setup**: `tools/multica-up.sh up`, pair a daemon, then `bun tools/multica-seed.mjs`
 — it authenticates, makes a workspace, creates agents and a staged pipeline (idempotent on
 re-run), and prints the exact `multica.connect` line to paste. `bun tools/multica-input.test.mjs`

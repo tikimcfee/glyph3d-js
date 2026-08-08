@@ -152,6 +152,15 @@ const book = (name, state, w = 100, h = 200) => ({
     ok(columns.length === 0, 'an empty shelf lays out to nothing');
 }
 {
+    // An explicit `undefined` must not clobber a default — `{columns: cond ? 'auto' :
+    // undefined}` is a natural thing to write, and spread happily overwrites with it.
+    // The watcher hit exactly this and threw on order.map.
+    const root = { children: [book('a', 'active')] };
+    const { columns } = boardLayout(root, { columns: undefined, groupBy: undefined });
+    ok(columns.length === 1 && columns[0].key === 'active',
+        'an explicitly-undefined option falls back to the default instead of throwing');
+}
+{
     // grouping is data: a binding can supply its own axis
     const withGroup = (name, group) => ({
         ...book(name, 'idle'),

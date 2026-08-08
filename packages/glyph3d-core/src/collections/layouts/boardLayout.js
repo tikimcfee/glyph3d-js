@@ -68,7 +68,12 @@ function at(obj, path) {
  *   so a caller can label the columns or frame one without re-deriving the maths
  */
 export default function boardLayout(root, opts = {}) {
+    // Spread lets an explicit `undefined` clobber a default — `{columns: cond ? 'auto' :
+    // undefined}` is a natural thing for a caller to write, and it silently produced a
+    // cfg with no columns at all. Re-assert the defaults for the keys that must exist.
     const cfg = { ...BOARD_DEFAULTS, ...(opts || {}) };
+    if (cfg.columns == null) cfg.columns = BOARD_DEFAULTS.columns;
+    if (cfg.groupBy == null) cfg.groupBy = BOARD_DEFAULTS.groupBy;
     const books = root.children.filter((c) => c.visible !== false);
     if (!books.length) return { columns: [] };
 
