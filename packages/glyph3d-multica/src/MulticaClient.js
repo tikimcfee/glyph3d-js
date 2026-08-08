@@ -189,11 +189,41 @@ export default class MulticaClient {
     async listChatSessions() { return unwrap(await this.request('GET', '/api/chat/sessions'), 'sessions'); }
 
     /**
-     * @param {string} sessionId
-     * @returns {Promise<Object[]>} the thread's messages
+     * Open a conversation with an agent. Sending is a two-step protocol: a session
+     * first, then messages onto it — there is no one-shot "message this agent" route.
+     * @param {{agent_id: string, title?: string, project_id?: string}} input
+     * @returns {Promise<{id: string}>}
      */
-    async chatThread(sessionId) {
-        return unwrap(await this.request('GET', `/api/chat/thread?session_id=${encodeURIComponent(sessionId)}`), 'messages');
+    createChatSession(input) { return this.request('POST', '/api/chat/sessions', input); }
+
+    /**
+     * Post a message into a session. The reply is asynchronous: this answers with the
+     * ids, and the agent's actual response arrives later as `chat:message` on the
+     * socket — which is what makes an attached terminal the right shape for this.
+     * @param {string} sessionId
+     * @param {string} content
+     * @param {string[]} [attachmentIds]
+     * @returns {Promise<{message_id: string, task_id: string, queued: boolean}>}
+     */
+    sendChatMessage(sessionId, content, attachmentIds) {
+        return this.request('POST', `/api/chat/sessions/${sessionId}/messages`, {
+            content,
+            attachment_ids: attachmentIds || [],
+        });
+    }
+
+    /**
+     * Messages on a session.
+     *
+     * Note this is the *member* read. `/api/chat/thread` and `/api/chat/history` look
+     * similar but are agent-facing: they resolve the conversation from a task-scoped
+     * token rather than taking a session id, so an agent can only ever read its own.
+     * They are not the route a client like ours wants.
+     * @param {string} sessionId
+     * @returns {Promise<Object[]>}
+     */
+    async listChatMessages(sessionId) {
+        return unwrap(await this.request('GET', `/api/chat/sessions/${sessionId}/messages`), 'messages');
     }
 }
 

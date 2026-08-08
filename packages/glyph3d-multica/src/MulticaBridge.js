@@ -78,6 +78,12 @@ export default class MulticaBridge {
         this.taskOwners = new Map();
         /** task id → issue id, so a progress frame can still name the work. */
         this.taskIssues = new Map();
+        /**
+         * chat session id → book id. `chat:done` names its session but not its agent,
+         * and the task ledger can't cover it — the task may terminate (releasing its
+         * entry) before the reply is published. The session roster is the stable key.
+         */
+        this.chatSessions = new Map();
         /** Unsubscribe thunks from every socket binding. */
         this._unsubs = [];
         /** Frames seen but not mapped — a newer backend, surfaced on demand not per-frame. */
@@ -109,6 +115,8 @@ export default class MulticaBridge {
                 placed += 1;
             }
         }
+
+        await this._loadChatSessions();
 
         this._bindSocket();
         return { agents: this.books.size, issues: placed };
@@ -202,17 +210,27 @@ export default class MulticaBridge {
             });
         }
 
-        // A task's own narration and a chat reply are both conversation — they become
-        // say-sheets, which is what makes a book readable rather than a status list.
-        for (const type of ['task:message', 'chat:message']) {
-            bind(type, async (payload) => {
-                const msg = asObject(payload);
-                const bookId = this._bookForTask(msg);
-                const text = String(msg.content || msg.text || msg.message || '');
-                if (!bookId || !text) return;
-                await this.execute(['agent.message', bookId, 'multica', 'say', text]);
-            });
-        }
+        // A task's own narration is the agent speaking.
+        bind('task:message', async (payload) => {
+            const msg = asObject(payload);
+            const bookId = this._bookForTask(msg);
+            const text = String(msg.content || msg.text || msg.message || '');
+            if (bookId && text) await this.execute(['agent.message', bookId, 'multica', 'say', text]);
+        });
+
+        // `chat:done` — NOT `chat:message` — is the agent's reply.
+        //
+        // `chat:message` is published with actor "member" at both of its sites: it is
+        // the operator's own input, echoed so other clients can render it. Mapping it
+        // to a say-sheet put the operator's words in the agent's mouth. The assistant's
+        // completed turn arrives here instead, carrying the content directly.
+        bind('chat:done', async (payload) => {
+            const done = asObject(payload);
+            const text = String(done.content || '');
+            if (!text) return;  // a turn can complete with no reply (message_kind "no_response")
+            const bookId = await this._bookForChatSession(done.chat_session_id);
+            if (bookId) await this.execute(['agent.message', bookId, 'multica', 'say', text]);
+        });
 
         for (const type of ['issue:created', 'issue:updated']) {
             bind(type, async (payload) => {
@@ -259,6 +277,33 @@ export default class MulticaBridge {
             String(issue.title || ''),
             [issue.status, stage].filter(Boolean).join(' · '),
         ]);
+    }
+
+    /**
+     * Resolve a chat session to its agent's book, refetching the roster once if the
+     * session is unknown — a conversation opened after we hydrated is the common case,
+     * and it would otherwise silently drop every reply on that session.
+     * @param {string} sessionId
+     * @returns {Promise<string|undefined>}
+     */
+    async _bookForChatSession(sessionId) {
+        if (!sessionId) return undefined;
+        if (this.chatSessions.has(sessionId)) return this.chatSessions.get(sessionId);
+        await this._loadChatSessions();
+        return this.chatSessions.get(sessionId);
+    }
+
+    /** Refresh session id → book from the roster. Failures are non-fatal: no reply routing is
+     *  worse than a crashed handler on a socket callback. */
+    async _loadChatSessions() {
+        try {
+            for (const s of await this.client.listChatSessions()) {
+                const bookId = this.books.get(s.agent_id);
+                if (bookId) this.chatSessions.set(s.id, bookId);
+            }
+        } catch (err) {
+            this._warn(`multica: chat session roster unavailable — ${err?.message || err}`);
+        }
     }
 
     /**

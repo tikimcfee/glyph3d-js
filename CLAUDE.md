@@ -137,6 +137,16 @@ active issue is **409** unless `allow_duplicate: true`; entity frames are wrappe
 `{ task_id, summary, step, total }`, so the bridge keeps a task→book ledger to route it;
 comments name their writer `author_id`/`author_type`, not `actor_*`.
 
+**Chat is two steps and two events.** Sending is `POST /api/chat/sessions` then
+`POST /api/chat/sessions/{id}/messages` — there is no one-shot "message this agent" route.
+And the agent's reply is **`chat:done`**, not `chat:message`: `chat:message` is published
+with actor `"member"` at both of its server-side sites, i.e. it's the operator's own input
+echoed to other clients. Mapping it to a say-sheet puts the operator's words in the agent's
+mouth. `chat:done` names its session but not its agent, so the bridge keeps a
+session→book map (refetched once on an unknown session). Also note `/api/chat/thread` and
+`/api/chat/history` are *agent-facing*: they resolve the conversation from a task-scoped
+token instead of taking a session id, so they're not the read a client like ours wants.
+
 `tools/multica-up.sh up` brings up a local backend from source — **postgres + backend
 only**, never their frontend. `bun tools/multica-flow.test.mjs` locks the event→verb
 mapping headlessly; set `MULTICA_URL` / `MULTICA_TOKEN` / `MULTICA_WORKSPACE` to also run

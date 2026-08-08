@@ -34,21 +34,22 @@ class FakeSocket {
 }
 
 /** A client stand-in returning fixed rosters. */
-const fakeClient = (agents = [], issues = []) => ({
+const fakeClient = (agents = [], issues = [], sessions = []) => ({
     listAgents: async () => agents,
     listIssues: async () => issues,
     listChildren: async () => [],
+    listChatSessions: async () => sessions,
 });
 
 const AGENT = { id: 'aaaaaaaa-1111-2222-3333-444444444444', name: 'Cartographer', status: 'idle', runtime_id: 'rt-1' };
 const BOOK = bookIdForAgent(AGENT.id);
 
 /** Build a started bridge over fakes, recording every dispatched command. */
-async function harness({ agents = [AGENT], issues = [] } = {}) {
+async function harness({ agents = [AGENT], issues = [], sessions = [] } = {}) {
     const calls = [];
     const socket = new FakeSocket();
     const bridge = new MulticaBridge({
-        client: fakeClient(agents, issues),
+        client: fakeClient(agents, issues, sessions),
         socket,
         execute: async (input) => { calls.push(input); return { text: 'ok', data: null }; },
     });
@@ -120,10 +121,58 @@ const find = (calls, verb) => calls.filter(c => c[0] === verb);
 {
     const { calls, socket } = await harness();
     const text = 'mapped 41 endpoints — issues, agents, chat';
-    await socket.emit('chat:message', { agent_id: AGENT.id, content: text });
+    await socket.emit('task:message', { agent_id: AGENT.id, content: text });
     const msg = find(calls, 'agent.message').at(-1);
-    ok(msg && msg[1] === BOOK && msg[3] === 'say', 'chat:message → agent.message say');
+    ok(msg && msg[1] === BOOK && msg[3] === 'say', 'task:message → agent.message say');
     ok(msg && msg[4] === text, 'message body survives verbatim (array dispatch, no quoting)');
+}
+
+// ── chat: the reply is chat:done, NOT chat:message ───────────────────────────
+// chat:message is published with actor "member" at both of its server-side sites —
+// it is the operator's own input echoed back. Treating it as agent speech put the
+// operator's words in the agent's mouth, which renders wrong rather than erroring.
+const SESSION = { id: 'sess-1', agent_id: AGENT.id };
+{
+    const { calls, socket } = await harness({ sessions: [SESSION] });
+    await socket.emit('chat:message', {
+        chat_session_id: SESSION.id, role: 'user', content: 'what did you map?', task_id: 't-3',
+    });
+    ok(find(calls, 'agent.message').length === 0,
+        'chat:message (the operator\'s own input) does NOT become an agent say-sheet');
+}
+{
+    const { calls, socket } = await harness({ sessions: [SESSION] });
+    const reply = 'I mapped 41 endpoints across issues, agents and chat.';
+    await socket.emit('chat:done', { chat_session_id: SESSION.id, task_id: 't-3', content: reply });
+    const msg = find(calls, 'agent.message').at(-1);
+    ok(msg?.[1] === BOOK && msg?.[4] === reply, 'chat:done carries the agent\'s reply to its book');
+}
+{
+    // a turn can complete with no reply at all (message_kind "no_response")
+    const { calls, socket } = await harness({ sessions: [SESSION] });
+    await socket.emit('chat:done', { chat_session_id: SESSION.id, content: '' });
+    ok(find(calls, 'agent.message').length === 0, 'an empty chat:done adds no sheet');
+}
+{
+    // a session opened after hydration must still route — the roster is refetched once
+    let served = [];
+    const calls = [];
+    const socket = new FakeSocket();
+    const bridge = new MulticaBridge({
+        client: {
+            listAgents: async () => [AGENT],
+            listIssues: async () => [],
+            listChildren: async () => [],
+            listChatSessions: async () => served,
+        },
+        socket,
+        execute: async (input) => { calls.push(input); return {}; },
+    });
+    await bridge.start();                       // roster empty at hydration
+    served = [{ id: 'sess-late', agent_id: AGENT.id }];   // conversation opened after
+    await socket.emit('chat:done', { chat_session_id: 'sess-late', content: 'late reply' });
+    ok(find(calls, 'agent.message').at(-1)?.[4] === 'late reply',
+        'an unknown session triggers one roster refetch and still routes');
 }
 
 // ── issues assigned to an agent become lines; stage is carried ───────────────

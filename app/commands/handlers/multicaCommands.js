@@ -212,11 +212,23 @@ export default function registerMulticaCommands(router) {
             || session.bridge.books.get(a.id) === agentRef);
         if (!agent) return { text: `ERR: no agent '${agentRef}'`, data: null };
 
-        const out = await session.client.request('POST', '/api/chat/thread', {
+        // Sending is two steps: a session, then a message onto it. Reuse this agent's
+        // existing session so a conversation accumulates in one place instead of
+        // fragmenting into a new session per utterance.
+        const sessions = await session.client.listChatSessions();
+        const existing = sessions.find(s => s.agent_id === agent.id && !s.archived_at);
+        const chat = existing || await session.client.createChatSession({
             agent_id: agent.id,
-            content: text,
+            title: `glyph3d · ${agent.name}`,
         });
-        return { text: `OK: sent to ${agent.name}`, data: out };
+
+        const out = await session.client.sendChatMessage(chat.id, text);
+        // The reply is asynchronous — it lands on the socket as chat:message and the
+        // bridge turns it into a say-sheet on the agent's book.
+        return {
+            text: `OK: sent to ${agent.name} (task ${out.task_id || '—'}${out.queued ? ', queued' : ''})`,
+            data: { ...out, session_id: chat.id },
+        };
     }, {
         description: 'Send chat input to a Multica agent',
         usage: '<agent> <text...>',
