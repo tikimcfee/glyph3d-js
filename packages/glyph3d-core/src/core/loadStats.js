@@ -24,6 +24,8 @@ export const loadStats = {
     commitMs: 0,
     yields: 0,
     yieldMs: 0,
+    selfBakes: 0,      // grids that folded their OWN layout record (no disk index)
+    selfBakeMs: 0,
 };
 
 /** Snapshot the counters (for delta-ing around a stage). */
