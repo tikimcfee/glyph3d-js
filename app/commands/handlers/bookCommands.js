@@ -42,7 +42,11 @@ function resolveBook(ctx, id) {
     const vol = id && tree?.volumeAt?.(id);
     if (vol) return { kind: 'volume', book: vol };
     const bk = id && tree?.bookAt?.(id);
-    return bk ? { kind: 'tree', book: bk } : null;
+    if (bk) return { kind: 'tree', book: bk };
+    // Delta sets answer LAST and only by their own addresses (`delta:<id>` / the set
+    // id / the group id) — DeltaBooks.resolveSet is the same lookup-not-surgery law.
+    const dhit = id && ctx.deltaBooks?.resolveSet?.(id);
+    return dhit ? { kind: 'delta', deltas: ctx.deltaBooks, setId: dhit[0], book: dhit[1].book } : null;
 }
 
 /** A volume's page turn changes which file fronts the deck — the open-page label's TEXT
@@ -72,7 +76,9 @@ export default function registerBookCommands(router) {
             const b = bk.getBounds();
             const h = bk.headState();
             const record = {
-                ...(hit.kind === 'agent' ? { agent: hit.agentId } : { path: bk.userData.path }),
+                ...(hit.kind === 'agent' ? { agent: hit.agentId }
+                  : hit.kind === 'delta' ? { delta: hit.setId }
+                  : { path: bk.userData.path }),
                 form: f ? 'fitted' : 'natural',
                 sheets: h.count,
                 head: `${h.head + 1}/${h.count}${h.following ? ' (live)' : ''}`,
@@ -95,12 +101,18 @@ export default function registerBookCommands(router) {
         for (const a of agentRows) {
             lines.push(`${a.count} sheet${a.count === 1 ? '' : 's'} [${a.state}]  agent:${a.id}`);
         }
+        const deltaRows = ctx.deltaBooks ? ctx.deltaBooks.list() : [];
+        for (const d of deltaRows) {
+            lines.push(`${d.files} file${d.files === 1 ? '' : 's'} +${d.added} −${d.removed} [${d.kind}]  delta:${d.id}`);
+        }
+        const total = treeBooks.length + agentRows.length + deltaRows.length;
         return {
-            text: box('BOOKS', lines.length ? lines : ['(none)'], 56) + `\nOK: book.list (${treeBooks.length + agentRows.length})`,
+            text: box('BOOKS', lines.length ? lines : ['(none)'], 56) + `\nOK: book.list (${total})`,
             data: {
-                count: treeBooks.length + agentRows.length,
+                count: total,
                 books: treeBooks.map((bk) => ({ path: bk.userData.path, fitted: bk.fitted })),
                 agents: agentRows.map((a) => ({ id: a.id, sheets: a.count, state: a.state })),
+                deltas: deltaRows.map((d) => ({ id: d.id, files: d.files, added: d.added, removed: d.removed, kind: d.kind })),
             },
         };
     }, {
@@ -161,10 +173,13 @@ export default function registerBookCommands(router) {
             ({ x, y, z } = _drop);
             unseat(ctx, hit[0], { parent: books.root, pos: { x, y, z } });
         }
-        const ok = books.moveGroup(hit ? hit[0] : id, x, y, z);
+        // The agent shelf first (its books can be carrel-seated), else a delta set —
+        // both pin in their own cluster frame; the resolvers keep the address spaces honest.
+        const ok = hit ? books.moveGroup(hit[0], x, y, z)
+                       : !!ctx.deltaBooks?.moveGroup?.(ctx.deltaBooks.resolveSet(id)?.[0], x, y, z);
         return ok
             ? { text: `OK: moved ${id}`, data: { id, x: r2(x), y: r2(y), z: r2(z) } }
-            : { text: `ERR: no agent book '${id}'`, data: null };
+            : { text: `ERR: no agent or delta book '${id}'`, data: null };
     }, { description: 'Reposition (pin) an agent book — drag-release / CLI; a seated book lifts off its desk and stays put', usage: '<id> <x> <y> <z>' });
 
     router.register('book.config', (args, ctx) => {

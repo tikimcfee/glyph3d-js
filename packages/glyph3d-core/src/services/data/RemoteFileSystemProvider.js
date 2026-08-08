@@ -141,6 +141,18 @@ export class RemoteFileSystemProvider {
         return this._rpc('fs/stat', { uri });
     }
 
+    /**
+     * Raw `git diff` text over the served root — the delta books' git lane
+     * (delta.git). Both refs empty = working tree vs HEAD; base only = vs that
+     * ref; base+head = ref..ref. The per-file split happens client-side
+     * (services/state/deltaSource.js splitUnifiedDiff) — the relay stays transport.
+     * @param {{ base?: string, head?: string, path?: string }} [opts]
+     * @returns {Promise<{ root: string, base: string, head: string, diff: string, truncated: boolean }>}
+     */
+    async gitDiff({ base = '', head = '', path = '' } = {}) {
+        return this._rpc('fs/gitDiff', { base, head, path });
+    }
+
     // ---- Browse surface (relay-only) ----
 
     /**

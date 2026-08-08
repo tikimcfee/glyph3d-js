@@ -91,6 +91,25 @@ const RECORDS = {
     // move verb pins it in-place (no workspace persistence).
     moveVerb: 'book.move',
   },
+  delta: {
+    // A delta set's cover — same recency grammar as an agent book: down = earlier
+    // files, up = fresher; landing on the newest resumes follow-the-change.
+    // The book address is the DELTA form (a watch set's id is also an agent id —
+    // the bare id would page the agent's run book instead).
+    wheelPage(entry, dy) {
+      const id = entry.meta?.deltaId;
+      return id ? ['book.scroll', `delta:${id}`, String(dy > 0 ? -1 : 1)] : null;
+    },
+    moveVerb: 'book.move',
+  },
+  'delta-page': {
+    // Any page of a delta book IS the book — SHIFT+wheel over a base/head grid turns
+    // the file sheets from wherever you're reading.
+    wheelPage(entry, dy) {
+      const id = entry.meta?.deltaId;
+      return id ? ['book.scroll', `delta:${id}`, String(dy > 0 ? -1 : 1)] : null;
+    },
+  },
 };
 
 /**

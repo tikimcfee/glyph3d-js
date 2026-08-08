@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -594,6 +595,8 @@ func (h *FSHandler) Handle(method string, rawID json.RawMessage, params json.Raw
 				h.handleSetFilter(write, rawID, params)
 			case "fs/writeFile":
 				h.handleWriteFile(write, rawID, params)
+			case "fs/gitDiff":
+				h.handleGitDiff(write, rawID, params)
 			case "agentSessions/list":
 				h.handleAgentSessionsList(write, rawID, params)
 			case "agentSessions/read":
@@ -1177,6 +1180,105 @@ func (h *FSHandler) handleWriteFile(write writeFn, id json.RawMessage, raw json.
 	}
 
 	log.Printf("[fs] wrote %d bytes to %s", len(data), p.URI)
+}
+
+// ---- fs/gitDiff ----
+
+// maxDiffBytes caps one fs/gitDiff response — a whole-repo diff against an old
+// ref can outgrow any sane frame; the response carries a truncated flag when
+// the cap trips (cut at the last whole line, so the tail parses).
+const maxDiffBytes = 2 * 1024 * 1024
+
+// gitDiffParams is the fs/gitDiff request. Both refs empty = the working tree
+// (plus index) vs HEAD; base only = vs that ref; base+head = ref..ref. Path is
+// an optional root-relative filter.
+type gitDiffParams struct {
+	Base string `json:"base"`
+	Head string `json:"head"`
+	Path string `json:"path"`
+}
+
+// gitDiffResult carries RAW `git diff` text — the client's delta parser
+// (services/state/deltaSource.js splitUnifiedDiff) owns the per-file split, so
+// the relay stays transport, not semantics.
+type gitDiffResult struct {
+	Root      string `json:"root"`
+	Base      string `json:"base"`
+	Head      string `json:"head"`
+	Diff      string `json:"diff"`
+	Truncated bool   `json:"truncated"`
+}
+
+// validGitRef admits the ref grammar the delta verbs need (names, slashes,
+// ~ ^ @ { } steps) and refuses anything that could read as a git OPTION (a
+// leading '-') or carry shell-relevant characters. Validation, not
+// sanitization: a bad ref is an error the caller hears, never a silently
+// altered request.
+func validGitRef(s string) bool {
+	if s == "" || strings.HasPrefix(s, "-") {
+		return false
+	}
+	for _, r := range s {
+		ok := r == '.' || r == '_' || r == '/' || r == '~' || r == '^' || r == '@' ||
+			r == '{' || r == '}' || r == '-' ||
+			(r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// handleGitDiff shells `git -C root diff` for the delta books' git lane.
+// Read-only; failures surface git's own stderr (fail loud at the seam).
+func (h *FSHandler) handleGitDiff(write writeFn, id json.RawMessage, raw json.RawMessage) {
+	var p gitDiffParams
+	if err := json.Unmarshal(raw, &p); err != nil {
+		h.sendRPCError(write, id, -32602, "invalid params", nil)
+		return
+	}
+	args := []string{"-C", h.root, "diff", "--no-color", "-U3"}
+	if p.Base == "" && p.Head == "" {
+		args = append(args, "HEAD")
+	} else {
+		for _, ref := range []string{p.Base, p.Head} {
+			if ref == "" {
+				continue
+			}
+			if !validGitRef(ref) {
+				h.sendRPCError(write, id, -32602, "invalid git ref: "+ref, nil)
+				return
+			}
+			args = append(args, ref)
+		}
+	}
+	if p.Path != "" {
+		if strings.HasPrefix(p.Path, "-") {
+			h.sendRPCError(write, id, -32602, "invalid path filter: "+p.Path, nil)
+			return
+		}
+		args = append(args, "--", p.Path)
+	}
+	out, err := exec.Command("git", args...).Output()
+	if err != nil {
+		msg := err.Error()
+		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
+			msg = strings.TrimSpace(string(ee.Stderr))
+		}
+		h.sendRPCError(write, id, -32000, "git diff: "+msg, map[string]string{"base": p.Base, "head": p.Head})
+		return
+	}
+	diff := string(out)
+	truncated := false
+	if len(diff) > maxDiffBytes {
+		cut := diff[:maxDiffBytes]
+		if i := strings.LastIndexByte(cut, '\n'); i > 0 {
+			cut = cut[:i]
+		}
+		diff, truncated = cut, true
+		log.Printf("[fs] git diff truncated (%d bytes > %d cap)", len(out), maxDiffBytes)
+	}
+	h.sendRPCResult(write, id, gitDiffResult{Root: h.root, Base: p.Base, Head: p.Head, Diff: diff, Truncated: truncated})
 }
 
 // ---- Path Security ----
