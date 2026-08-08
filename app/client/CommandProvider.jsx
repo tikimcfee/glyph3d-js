@@ -26,6 +26,7 @@ import ContentTreeProbes from '@glyph3d/core/collections/ContentTreeProbes.js';
 import ContentTreeLabels from '@glyph3d/core/collections/ContentTreeLabels.js';
 import ContentTreeMotion from '@glyph3d/core/collections/ContentTreeMotion.js';
 import { installFrameWatch } from '../commands/loadTrace.js';
+import { materializeActor } from '../commands/handlers/fileLoader.js';
 import SessionStore from './SessionStore.js';
 import WorkspaceModel from './WorkspaceModel.js';
 import { getSetting, applyGroupSettings } from './settings.js';
@@ -502,6 +503,24 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       if (unseated) scheduleCarrelSweep(state.ctx);
     };
     state.ctx.registry.addChangeListener(onRemoval);
+
+    // ROWS → ACTORS at the attention seam: focus (primary) or keyboard target (key)
+    // landing on a FileRow materializes its CodeGrid actor. This listener is the
+    // net under EVERY slot writer (clicks, nav verbs, mode/workspace restores —
+    // most call am.set directly, not the attention.set verb); handlers that hold a
+    // grid reference across this boundary resolve with { actor: true } instead.
+    // Hover never materializes — sweeping over a thousand rows stays free.
+    const materializeOnAttention = (value) => {
+      if (!value?.id) return;
+      if (state.ctx.registry.get(value.id)?.grid?.isFileRow) {
+        materializeActor(state.ctx, value.id);
+      }
+    };
+    state.ctx.attentionManager.on('change:primary', materializeOnAttention);
+    state.ctx.attentionManager.on('change:key', materializeOnAttention);
+    // The resolver-side seam: resolveGridByIdOrIndex({ actor: true }) upgrades
+    // through this hook (spatialHelpers stays a pure-math layer, no app imports).
+    state.ctx.materializeActor = (id) => materializeActor(state.ctx, id);
 
     // The composable "what is the user locked into" projection — focus/edit/key
     // nodes derived from attention + cursor state (owns nothing). The breadcrumb

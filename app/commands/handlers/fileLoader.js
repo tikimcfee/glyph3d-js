@@ -20,13 +20,20 @@
  *   unknown   → sniff a head window: magic signature → image (even with no extension),
  *               else a UTF-8 probe splits text from binary.
  *
+ * ROWS, NOT ACTORS (docs/perf-swarm/landing-plan.md move 1): the load unit is the
+ * FileRow — bytes staged + measured + colorized, no interaction machinery. The
+ * CodeGrid ACTOR materializes at the interaction seam (materializeActor): focus,
+ * edit, save, and the single-file open paths that end in interaction.
+ *
  * Public surface (kept deliberately small — a shared Surface protocol is the eventual home):
- *   renderSheetGrid(ctx, path)          classify + fetch + build + register one file → id
- *   addFileGrid(ctx, path, content, mtime?)  register already-fetched text (openDir's batch path)
- *   addUnfetchedGrid(ctx, path, bytes)  register an oversize file as a placeholder from metadata
+ *   renderSheetGrid(ctx, path)          classify + fetch + register + MATERIALIZE one file → id
+ *   addFileRow(ctx, path, content, mtime?, baked?)  register already-fetched text (openDir's batch path)
+ *   addUnfetchedRow(ctx, path, bytes)   register an oversize file as a placeholder from metadata
+ *   materializeActor(ctx, id)           row → CodeGrid actor swap (idempotent)
  */
 
 import CodeGrid from '@glyph3d/core/collections/CodeGrid.js';
+import FileRow from '@glyph3d/core/collections/FileRow.js';
 import FrameGrid from '@glyph3d/core/collections/FrameGrid.js';
 import { gridTheme } from '../../client/settings.js';
 import { unreadableReason, READABLE_MAX_CHARS, READABLE_MAX_LINE_CHARS } from '@glyph3d/core';
@@ -88,72 +95,123 @@ export function getDiskMtime(grid) {
     return grid?._diskMtime ?? null;
 }
 
-/** Dedupe + construct the CodeGrid shell for a text path (shared by every text
+/** Dedupe + construct the FileRow shell for a text path (shared by every text
  *  build path). Returns null when the file is already open. @private */
-function prepFileGrid(ctx, path, notRendered) {
+function prepFileRow(ctx, path, notRendered) {
     const uri = `file:///${String(path).replace(/^\/+/, '')}`;
     if ((ctx.registry.findByMeta?.('sourcePath', uri) || []).length) return null;
-    const grid = new CodeGrid(ctx.scene, ctx.atlas, { name: path, worldScale: 0.025, ...gridTheme() });
-    grid.setSourcePath(uri); // so file.save / fs/didChange refresh can find it
-    if (notRendered) grid.userData.notRendered = notRendered;
-    return grid;
+    const row = new FileRow(ctx.scene, ctx.atlas, { name: path, worldScale: 0.025, ...gridTheme() });
+    row.setSourcePath(uri); // so file.save / fs/didChange refresh can find it
+    if (notRendered) row.userData.notRendered = notRendered;
+    return row;
 }
 
-/** Seat a BUILT grid: disk-sync token, tree insertion, registration (the shared tail
+/** Seat a BUILT row: disk-sync token, tree insertion, registration (the shared tail
  *  of both build paths). Real content only carries the mtime — a placeholder/hex
- *  grid's text is synthetic, never the file's bytes (file.save is disabled for it).
- *  The single insertion point into the content tree: parent the grid under its
+ *  row's text is synthetic, never the file's bytes (file.save is disabled for it).
+ *  The single insertion point into the content tree: parent the row under its
  *  directory node BEFORE addGrid (so addGrid's `if (!grid.parent) scene.add` skips —
  *  the tree owns it). The caller relayouts once after a batch. @private */
-function seatFileGrid(ctx, path, grid, notRendered, mtime) {
-    if (!notRendered) setDiskMtime(grid, mtime);
-    ctx.contentTree?.insert(grid, path);
-    return ctx.addGrid(grid, { id: path, type: 'grid' }); // registers (scene.add skipped — parented)
+function seatFileRow(ctx, path, row, notRendered, mtime) {
+    if (!notRendered) setDiskMtime(row, mtime);
+    ctx.contentTree?.insert(row, path);
+    return ctx.addGrid(row, { id: path, type: 'grid' }); // registers (scene.add skipped — parented)
 }
 
 /**
- * Create, load, and seat a text grid. Seating (tree insert + registration) is
- * SYNCHRONOUS — the tree grows in walk order and the bulk path's mid-stream pours
- * see the grid immediately — while the content load runs on the worker pipeline.
- * The returned `load` resolves when the grid is fully laid out: single-file open
- * awaits it (the caller positions by the grid's bounds); the bulk path settles the
- * whole batch before its final relayout, because an unlaid grid has empty bounds
- * and would measure wrong.
+ * Create, load, and seat a text ROW — the load unit of rows-not-actors. Seating
+ * (tree insert + registration) is SYNCHRONOUS — the tree grows in walk order and
+ * the bulk path's mid-stream pours see the row immediately — while the bytes
+ * stage on the shared arena. The returned `load` resolves when the row is staged,
+ * adopted, and MEASURED — the baked record answers before the GPU does, so the
+ * bulk settle never waits on a per-file bounds readback.
  * @private
  * @returns {{id: string, load: Promise}|null}
  */
-function registerFileGrid(ctx, path, body, notRendered, mtime, baked) {
-    const grid = prepFileGrid(ctx, path, notRendered);
-    if (!grid) return null;
-    // The baked record (repo layout index) rides in BEFORE the load: the grid
-    // measures at its real footprint from the first pour, and the post-laid gate
-    // checks the GPU bounds against the prediction. Real content only — a
-    // placeholder's synthetic text has nothing to do with the file's bake.
-    if (baked && !notRendered) grid.setBakedRecord(baked);
-    const load = grid.loadFile(path, body);
-    const id = seatFileGrid(ctx, path, grid, notRendered, mtime);
+function registerFileRow(ctx, path, body, notRendered, mtime, baked) {
+    const row = prepFileRow(ctx, path, notRendered);
+    if (!row) return null;
+    // The baked record (repo layout index) warm-starts the row's measure; real
+    // content only — a placeholder's synthetic text has nothing to do with the
+    // file's bake, so the row self-bakes it.
+    const load = row.load(path, body, { baked: notRendered ? null : baked });
+    const id = seatFileRow(ctx, path, row, notRendered, mtime);
     return { id, load };
 }
 
-/** Register fetched text content — unreadable content renders as a placeholder card.
- *  Resolves once the grid is seated AND fully laid out (null if already open).
- *  `mtime` (optional) is the disk mtime the content was read at, stashed for the
- *  save-time stale-write check; omit it for content with no disk identity (GitHub). */
-export async function addFileGrid(ctx, path, content, mtime, baked) {
+/** Register fetched text content as a ROW — unreadable content renders as a
+ *  placeholder card. Resolves once the row is seated + staged (null if already
+ *  open). `mtime` (optional) is the disk mtime the content was read at, stashed
+ *  for the save-time stale-write check; omit it for content with no disk identity
+ *  (GitHub). */
+export async function addFileRow(ctx, path, content, mtime, baked) {
     const reason = unreadableReason(content);
-    const r = registerFileGrid(ctx, path, reason ? placeholderBody(reason) : content, reason, mtime, baked);
+    const r = registerFileRow(ctx, path, reason ? placeholderBody(reason) : content, reason, mtime, baked);
     if (!r) return null;
     await r.load;
     return r.id;
 }
 
-/** Register a placeholder from tree metadata alone — the file was never fetched (oversize). */
-export async function addUnfetchedGrid(ctx, path, bytes) {
+/** Register a placeholder row from tree metadata alone — the file was never fetched (oversize). */
+export async function addUnfetchedRow(ctx, path, bytes) {
     const reason = { bytes };
-    const r = registerFileGrid(ctx, path, placeholderBody(reason), reason);
+    const r = registerFileRow(ctx, path, placeholderBody(reason), reason);
     if (!r) return null;
     await r.load;
     return r.id;
+}
+
+// ── Materialization: row → actor ────────────────────────────────────────────
+
+/**
+ * Swap a FileRow for its CodeGrid ACTOR — the interaction seam of rows-not-actors.
+ * Idempotent: an entry already holding an actor (or a FrameGrid, or nothing)
+ * returns it untouched. The swap is SYNCHRONOUS — the registry entry, the tree
+ * book, and the pose are the actor's when this returns — while the actor's
+ * content load runs behind it; the detached row keeps rendering its glyphs
+ * (frozen pose) until the actor's are laid, so the upgrade overlaps instead of
+ * flashing blank.
+ *
+ * Callers: attention focus (primary/key), edit/save/semantic/grid verbs — any
+ * path about to exercise the interactive surface a row doesn't carry.
+ * @returns {Object|null} the actor grid (or whatever the entry holds)
+ */
+export function materializeActor(ctx, id) {
+    const entry = ctx.registry.get(id);
+    const row = entry?.grid;
+    if (!row?.isFileRow) return row ?? null;
+    const path = entry.id;
+    const uri = row.getSourcePath();
+    const mtime = getDiskMtime(row);
+    const notRendered = row.userData?.notRendered ?? null;
+    const oldBook = ctx.contentTree?.bookAt?.(path);
+    const pose = oldBook ? { pos: oldBook.position.clone(), quat: oldBook.quaternion.clone() } : null;
+
+    const grid = new CodeGrid(ctx.scene, ctx.atlas, { name: path, worldScale: 0.025, ...gridTheme() });
+    grid.setSourcePath(uri);
+    if (notRendered) grid.userData.notRendered = notRendered;
+    else setDiskMtime(grid, mtime);
+    if (row._bakedRecord) grid.setBakedRecord(row._bakedRecord);
+    // Hand the actor the row's parse: content is identical, so the colorizer's
+    // content-cache repaints from these captures instead of re-parsing the file.
+    if (row._highlights) grid._highlights = row._highlights;
+
+    ctx.registry.holdChanges(() => {
+        ctx.contentTree?.insert(grid, path);          // replaces the row's book in place
+        const newBook = ctx.contentTree?.bookAt?.(path);
+        if (newBook && pose) {
+            newBook.position.copy(pose.pos);
+            newBook.quaternion.copy(pose.quat);
+            newBook.updateMatrix();
+        }
+        ctx.registry.unregister(id);                  // then re-register: no overwrite warn
+        ctx.addGrid(grid, { id, type: 'grid' });
+    });
+
+    const load = grid.loadFile(path, row.content);
+    load.catch((err) => console.warn(`materializeActor: ${path} load failed:`, err))
+        .finally(() => row.dispose());
+    return grid;
 }
 
 // ── image grids ─────────────────────────────────────────────────────────────────────────
@@ -174,11 +232,11 @@ function registerImageGrid(ctx, path, texture, width, height, kind) {
 
 // ── binary grids (hex) ──────────────────────────────────────────────────────────────────
 
-/** Create + register a binary file as a hex BLOCK in a CodeGrid — "can't read it, here are the bytes". */
+/** Create + register a binary file as a hex BLOCK row — "can't read it, here are the bytes". */
 async function registerBinaryGrid(ctx, path, bytes) {
     const size = bytes.length >= SNIFF_BYTES ? ` (first ${bytes.length.toLocaleString()} bytes)` : ` (${bytes.length.toLocaleString()} bytes)`;
     const body = `binary — no text or image signature${size}\n\n` + bytesToHexView(bytes, { cols: HEX_COLS });
-    const r = registerFileGrid(ctx, path, body, { binary: true });
+    const r = registerFileRow(ctx, path, body, { binary: true });
     if (!r) return null;
     await r.load;
     return r.id;
@@ -188,9 +246,10 @@ async function registerBinaryGrid(ctx, path, bytes) {
 
 /**
  * Render core shared by file.open and the workspace's sheet.render: ensure a grid exists for
- * `path`. Returns the registry id (= path) — the existing one if already rendered, else a
- * freshly classified + loaded + registered grid. Does NOT position/flow (the caller decides).
- * Throws if the read fails.
+ * `path` AND that it is the ACTOR — every caller (file.open, LSP jump, workspace sheet
+ * restore) is a path where the user is about to interact, so a row poured by a bulk load
+ * materializes here. Returns the registry id (= path). Does NOT position/flow (the caller
+ * decides). Throws if the read fails.
  *
  * Extension is the confident hint (image / known-text route with no extra fetch); anything
  * unknown asks the bytes — a magic-signature sniff names an image even with no extension,
@@ -198,6 +257,15 @@ async function registerBinaryGrid(ctx, path, bytes) {
  */
 export async function renderSheetGrid(ctx, path) {
     const uri = `file:///${String(path).replace(/^\/+/, '')}`;
+    const id = await classifySheetGrid(ctx, path, uri);
+    // The one materialize boundary for single-file opens: rows upgrade, actors
+    // and FrameGrids pass through untouched (materializeActor is idempotent).
+    if (id != null) materializeActor(ctx, id);
+    return id;
+}
+
+/** The classify + ensure-registered core (returns an id that may be a ROW). @private */
+async function classifySheetGrid(ctx, path, uri) {
     const existing = ctx.registry.findByMeta?.('sourcePath', uri) || [];
     if (existing.length) return existing[0].id;          // already rendered
     if (!ctx.fileProvider) throw new Error('no file source — load a repo or connect the relay');
@@ -220,7 +288,7 @@ export async function renderSheetGrid(ctx, path) {
     return renderTextSheet(ctx, path, uri);
 }
 
-/** Text path — fetch UTF-8, render as a CodeGrid (placeholder if oversize). */
+/** Text path — fetch UTF-8, render as a row (placeholder if oversize). */
 async function renderTextSheet(ctx, path, uri) {
     const fp = ctx.fileProvider;
     // Prefer the stat-aware read so the grid learns the disk mtime it's synced to
@@ -228,10 +296,10 @@ async function renderTextSheet(ctx, path, uri) {
     // plain content fetch — those grids carry no mtime and skip the stale check.
     if (typeof fp.getFileWithStat === 'function') {
         const { content, mtime } = await fp.getFileWithStat(path);
-        return (await addFileGrid(ctx, path, content, mtime)) ?? racedId(ctx, uri);
+        return (await addFileRow(ctx, path, content, mtime)) ?? racedId(ctx, uri);
     }
     const content = await fp.getFile(path);
-    return (await addFileGrid(ctx, path, content)) ?? racedId(ctx, uri);
+    return (await addFileRow(ctx, path, content)) ?? racedId(ctx, uri);
 }
 
 /** Image path — fetch bytes, decode to a texture, render as a single-cell FrameGrid sized to aspect. */

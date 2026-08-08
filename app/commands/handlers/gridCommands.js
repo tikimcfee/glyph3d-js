@@ -296,7 +296,7 @@ export default function registerGridCommands(router) {
     router.register('grid.text', async (args, ctx) => {
         if (args.length < 2) return { text: 'ERR: usage: grid.text <id|index> <base64-text>', data: null };
 
-        const resolved = resolveGridByIdOrIndex(ctx, args[0]);
+        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { actor: true });
         if (resolved.error) return { text: resolved.error, data: null };
 
         let text;
@@ -341,7 +341,7 @@ export default function registerGridCommands(router) {
     router.register('grid.scale', (args, ctx) => {
         if (args.length < 2) return { text: 'ERR: usage: grid.scale <id|index> <factor>', data: null };
 
-        const resolved = resolveGridByIdOrIndex(ctx, args[0]);
+        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { actor: true });
         if (resolved.error) return { text: resolved.error, data: null };
 
         const scale = parseFloat(args[1]);
@@ -364,7 +364,7 @@ export default function registerGridCommands(router) {
     router.register('grid.window', async (args, ctx) => {
         if (args.length < 3) return { text: 'ERR: usage: grid.window <id|index> <cols> <rows> [firstLine]', data: null };
 
-        const resolved = resolveGridByIdOrIndex(ctx, args[0]);
+        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { actor: true });
         if (resolved.error) return { text: resolved.error, data: null };
         if (!(resolved.grid instanceof CodeGrid) || typeof resolved.grid.setWindow !== 'function') {
             return { text: 'ERR: grid.window applies only to code grids', data: null };
@@ -410,7 +410,7 @@ export default function registerGridCommands(router) {
         if (args.length < 1) {
             return { text: `ERR: usage: grid.layout <id|index> [${presetNames}] [--wrap N --page-height H --pages-wide W --z-spacing Z --gap-x X --gap-y Y --page-depth D --axis xy|z]`, data: null };
         }
-        const resolved = resolveGridByIdOrIndex(ctx, args[0]);
+        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { actor: true });
         if (resolved.error) return { text: resolved.error, data: null };
         if (!(resolved.grid instanceof CodeGrid) || typeof resolved.grid.setLayout !== 'function') {
             return { text: 'ERR: grid.layout applies only to code grids', data: null };
@@ -472,7 +472,7 @@ export default function registerGridCommands(router) {
     // No 2nd arg → report. Re-folds in place; no neighbor reflow (scroll is a frame op).
     router.register('grid.scroll', async (args, ctx) => {
         if (args.length < 1) return { text: 'ERR: usage: grid.scroll <id|index> <±rows|top|bottom>', data: null };
-        const resolved = resolveGridByIdOrIndex(ctx, args[0]);
+        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { actor: true });
         if (resolved.error) return { text: resolved.error, data: null };
         const g = resolved.grid;
         if (!(g instanceof CodeGrid) || typeof g.setScrollOffset !== 'function') {
@@ -502,7 +502,7 @@ export default function registerGridCommands(router) {
     // grid.scroll then flows content THROUGH it (the "monitor"). 0/off = no frame (full content).
     router.register('grid.frame', async (args, ctx) => {
         if (args.length < 2) return { text: 'ERR: usage: grid.frame <id|index> <rows|off>', data: null };
-        const resolved = resolveGridByIdOrIndex(ctx, args[0]);
+        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { actor: true });
         if (resolved.error) return { text: resolved.error, data: null };
         const g = resolved.grid;
         if (!(g instanceof CodeGrid) || typeof g.setFrameRows !== 'function') {

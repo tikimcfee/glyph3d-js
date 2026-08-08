@@ -86,7 +86,7 @@ export default function registerSemanticCommands(router) {
         if (args.length < 1) {
             return { text: 'ERR: usage: semantic.outline <grid> [kind|all]', data: null };
         }
-        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { byName: true });
+        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { byName: true, actor: true });
         if (resolved.error) return { text: resolved.error, data: null };
         const { grid } = resolved;
 
@@ -147,7 +147,7 @@ export default function registerSemanticCommands(router) {
         if (args.length < 3) {
             return { text: 'ERR: usage: semantic.at <grid> <line> <col>', data: null };
         }
-        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { byName: true });
+        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { byName: true, actor: true });
         if (resolved.error) return { text: resolved.error, data: null };
         const { grid } = resolved;
 
@@ -178,7 +178,7 @@ export default function registerSemanticCommands(router) {
         if (args.length < 2) {
             return { text: 'ERR: usage: semantic.highlight <grid> <name> [color]', data: null };
         }
-        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { byName: true });
+        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { byName: true, actor: true });
         if (resolved.error) return { text: resolved.error, data: null };
         const { grid } = resolved;
 

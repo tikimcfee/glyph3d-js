@@ -21,7 +21,7 @@ import { beginLoad } from '../loadTrace.js';
 import { READABLE_MAX_CHARS } from '@glyph3d/core';
 import { snapshotLoadStats, diffLoadStats, loadStats } from '@glyph3d/core/core/loadStats.js';
 import { FS_ERROR_CODES } from '@glyph3d/core/services/data';
-import { renderSheetGrid, addFileGrid, addUnfetchedGrid, getDiskMtime, setDiskMtime } from './fileLoader.js';
+import { renderSheetGrid, addFileRow, addUnfetchedRow, materializeActor, getDiskMtime, setDiskMtime } from './fileLoader.js';
 import { loadBakedIndex } from './bakedIndex.js';
 import { canonicalPath, toFileUri } from './pathResolve.js';
 
@@ -50,7 +50,10 @@ function resolveSaveTarget(ctx, args) {
     if (!target) {
         return { error: 'ERR: no grid specified and no current primary attention target' };
     }
-    const resolved = resolveGridByIdOrIndex(ctx, String(target));
+    // actor: save reads/writes the edit-side surface (_savedTextHash, markSaved,
+    // setDiskMtime) — a row target materializes here. (file.dirty stays row-served:
+    // a never-edited row is never dirty, and its reads are all optional-chained.)
+    const resolved = resolveGridByIdOrIndex(ctx, String(target), 'grid', { actor: true });
     if (resolved.error) return resolved;
 
     const grid = resolved.grid;
@@ -208,7 +211,7 @@ export default function registerFileCommands(router) {
 
         // Partition by the walker's size metadata: an oversized file becomes a placeholder card
         // straight from its tree entry — never fetched. (Bytes ≈ chars for source; the post-fetch
-        // line check in addFileGrid catches the under-limit long-line artifacts.) Skip already-open.
+        // line check in addFileRow catches the under-limit long-line artifacts.) Skip already-open.
         const notOpen = (p) => !(ctx.registry.findByMeta?.('sourcePath', toFileUri(p)) || []).length;
         const oversized = under.filter((f) => (f.size ?? 0) > READABLE_MAX_CHARS && notOpen(f.path));
         const want = under
@@ -243,7 +246,7 @@ export default function registerFileCommands(router) {
             // suite (projector, workspace reconcile, every mirroring React panel).
             await ctx.registry.holdChanges(async () => {
             for (const f of oversized) {
-                const pr = addUnfetchedGrid(ctx, f.path, f.size);
+                const pr = addUnfetchedRow(ctx, f.path, f.size);
                 pending.push(pr);
                 pr.then((id) => { if (id != null) { opened++; placeholders++; } }).catch(settleWarn);
             }
@@ -307,7 +310,7 @@ export default function registerFileCommands(router) {
                     const p = want[i++];
                     const c = contentMap.get(p);
                     if (c == null) continue;
-                    const pr = addFileGrid(ctx, p, c.content, undefined, baked?.get(p)); // seats synchronously; load resolves later
+                    const pr = addFileRow(ctx, p, c.content, undefined, baked?.get(p)); // seats synchronously; load resolves later
                     pending.push(pr);
                     pr.then(seat).catch(settleWarn);
                 }

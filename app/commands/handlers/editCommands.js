@@ -44,7 +44,7 @@ export default function registerEditCommands(router) {
                 data: null,
             };
         }
-        const resolved = resolveGridByIdOrIndex(ctx, String(target));
+        const resolved = resolveGridByIdOrIndex(ctx, String(target), 'grid', { actor: true });
         if (resolved.error) return { text: resolved.error, data: null };
 
         const grid = resolved.grid;
@@ -97,7 +97,7 @@ export default function registerEditCommands(router) {
         if (!target) {
             return { text: 'ERR: no grid specified and no current key/primary attention target', data: null };
         }
-        const resolved = resolveGridByIdOrIndex(ctx, String(target));
+        const resolved = resolveGridByIdOrIndex(ctx, String(target), 'grid', { actor: true });
         if (resolved.error) return { text: resolved.error, data: null };
 
         const grid = resolved.grid;

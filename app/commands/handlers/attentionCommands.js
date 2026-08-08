@@ -17,6 +17,8 @@
  * (glyph3d-cli) can script focus changes for tests.
  */
 
+import { materializeActor } from './fileLoader.js';
+
 const VALID_SLOTS = ['hover', 'primary', 'key'];
 
 /**
@@ -54,6 +56,16 @@ export default function registerAttentionCommands(router) {
             entity = ctx.registry.get(String(rawId)) || null;
             if (!entity) {
                 console.debug(`[attention.set] no registry entry for id='${rawId}' — setting anyway`);
+            }
+            // Focus (primary) or keyboard target (key) on a ROW is an interaction
+            // moment: materialize BEFORE the slot write so the slot record and every
+            // downstream consumer (HUD, editor panel) see the actor entry. (The
+            // change-listener in CommandProvider is the net for direct am.set
+            // writers; materializeActor is idempotent, so both firing is free.)
+            // Hover never materializes — sweeping over a thousand rows stays free.
+            if (entity?.grid?.isFileRow && slot !== 'hover') {
+                materializeActor(ctx, entity.id);
+                entity = ctx.registry.get(String(rawId)) || entity;
             }
         }
 

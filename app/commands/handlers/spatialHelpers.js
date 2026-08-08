@@ -55,19 +55,32 @@ export function resolveGrid(grids, arg, label = 'grid') {
  * @param {Object} ctx - command context bag (must have .registry and .getGrids)
  * @param {string} arg - registry ID, numeric index, or (with byName) name/path
  * @param {string} [label='grid'] - label for error messages
- * @param {{ byName?: boolean }} [opts] - enable the name/path fallback (step 3)
+ * @param {{ byName?: boolean, actor?: boolean }} [opts] - byName enables the
+ *   name/path fallback (step 3); actor materializes a resolved FileRow into its
+ *   CodeGrid before returning — for verbs that exercise the interactive surface
+ *   (edit, save, semantics, window/frame/scroll) and hold the grid ref after.
  * @returns {{ grid: Object, idx: number, registryId: string|null } | { error: string }}
  */
-export function resolveGridByIdOrIndex(ctx, arg, label = 'grid', { byName = false } = {}) {
+export function resolveGridByIdOrIndex(ctx, arg, label = 'grid', { byName = false, actor = false } = {}) {
     const grids = ctx.getGrids();
     const isPureInteger = /^\d+$/.test(arg);
+
+    // Rows → actors at the resolver, so every return path below hands back a live
+    // reference (materializeActor swaps the registry entry in place; idempotent).
+    const deliver = (grid, idx, registryId) => {
+        if (actor && grid?.isFileRow && registryId != null) {
+            const upgraded = ctx.materializeActor?.(registryId);
+            if (upgraded) return { grid: upgraded, idx, registryId };
+        }
+        return { grid, idx, registryId };
+    };
 
     // 1. Pure integer -> numeric index first
     if (isPureInteger) {
         const idx = parseInt(arg);
         if (idx >= 0 && idx < grids.length) {
             const registryId = ctx.registry ? ctx.registry.getIdByGrid(grids[idx]) : null;
-            return { grid: grids[idx], idx, registryId };
+            return deliver(grids[idx], idx, registryId);
         }
         // Integer but out of range -- fall through to registry as last resort
         // (handles case where someone deliberately used a numeric registry ID)
@@ -78,7 +91,7 @@ export function resolveGridByIdOrIndex(ctx, arg, label = 'grid', { byName = fals
         const entry = ctx.registry.get(arg);
         if (entry) {
             const idx = grids.indexOf(entry.grid);
-            return { grid: entry.grid, idx, registryId: entry.id };
+            return deliver(entry.grid, idx, entry.id);
         }
     }
 
@@ -95,7 +108,7 @@ export function resolveGridByIdOrIndex(ctx, arg, label = 'grid', { byName = fals
         }
         if (idx >= 0) {
             const registryId = ctx.registry ? ctx.registry.getIdByGrid(grids[idx]) : null;
-            return { grid: grids[idx], idx, registryId };
+            return deliver(grids[idx], idx, registryId);
         }
     }
 
