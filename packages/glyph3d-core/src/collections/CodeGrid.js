@@ -1311,12 +1311,12 @@ class CodeGrid extends FramedGlyphField {
             // THE SWAP — right after the flush ENCODES: GPU submission order puts
             // those compute dispatches before any later render pass, so the slots
             // are valid for every frame that can see the new range. The view
-            // re-points here (tombstoning the old range) and the old item retires;
-            // every frame until this line rendered the previous content — none
-            // renders an empty grid, and none WAITS on a readback to show a typed
-            // character. (The arena space still leaks per restage — compaction.)
-            if (this._renderer) this._renderer.sourceBase = this._byteWindow.from;
-            staged.adoptField(this._renderer);
+            // re-points here in ONE beat — range + sourceBase atomically, paint
+            // lanes carried across the file-space overlap (no green flash while
+            // the analyzer coalesces) — and the old item retires. Every frame
+            // until this line rendered the previous content; none renders empty,
+            // none waits on a readback to show a typed character.
+            staged.adoptField(this._renderer, this._byteWindow.from);
             prevPipeline?.dispose?.();
 
             // The extent gate: the GPU's per-item bounds land off ONE coalesced

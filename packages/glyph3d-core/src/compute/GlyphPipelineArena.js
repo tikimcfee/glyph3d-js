@@ -204,14 +204,16 @@ export default class GlyphPipelineArena {
              * sync skipped while the field was null, and registers the item for
              * future realloc re-attaches (item.field).
              */
-            adoptField(field2) {
+            adoptField(field2, sourceBase = 0) {
                 if (!field2) return;
                 // A grid closed while its fold awaited `laid` disposed this item —
                 // legitimate lifecycle, not a seam failure: silent no-op.
                 if (item.dead) return;
                 if (item.field === field2) return;   // idempotent: already adopted
                 item.field = field2;
-                field2.attachBytePipeline(arena._kernels, item.byteCount, item.byteStart);
+                // sourceBase (the range's first FILE byte) re-points atomically with
+                // the range; the view carries its paint lanes across by the overlap.
+                field2.attachBytePipeline(arena._kernels, item.byteCount, item.byteStart, sourceBase);
                 if (item.gpuBounds && typeof field2.setLayoutExtent === 'function') {
                     field2.setLayoutExtent(extentOf(item.gpuBounds));
                 }

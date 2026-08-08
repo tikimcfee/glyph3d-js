@@ -1185,6 +1185,33 @@ export default class GlyphField {
     }
 
     /**
+     * Copy the PAINT lanes (instanceColor + instanceHighlight) from one slot range to
+     * another — the LANE CARRY. When a view's range moves (a restage swap today; the
+     * compaction mover tomorrow), the colorizer's and highlight state's finished work
+     * lives only in these arrays at the old offsets — carrying them keeps color
+     * continuous by construction instead of flashing default until a re-parse
+     * repaints. Group/picking lanes are NOT copied: group is the view's identity
+     * (set by the attach), picking is identity-at-capacity.
+     * @param {number} srcSlot @param {number} dstSlot @param {number} count
+     */
+    copyGlyphLanes(srcSlot, dstSlot, count) {
+        if (!(count > 0) || srcSlot === dstSlot) return;
+        const geom = this.instanceMesh?.geometry;
+        const color = geom?.attributes?.instanceColor;
+        const highlight = geom?.attributes?.instanceHighlight;
+        if (color) {
+            color.array.copyWithin(dstSlot * 3, srcSlot * 3, (srcSlot + count) * 3);
+            color.addUpdateRange(dstSlot * 3, count * 3);
+            color.needsUpdate = true;
+        }
+        if (highlight) {
+            highlight.array.copyWithin(dstSlot * 4, srcSlot * 4, (srcSlot + count) * 4);
+            highlight.addUpdateRange(dstSlot * 4, count * 4);
+            highlight.needsUpdate = true;
+        }
+    }
+
+    /**
      * Set a per-glyph highlight by absolute buffer slot. The highlight texel's RGB is the
      * highlight color; its ALPHA byte selects the MODE the shader applies:
      *   fillOpacity 0  → TINT  (additive: the glyph ink brightened by `color`) — default/legacy.

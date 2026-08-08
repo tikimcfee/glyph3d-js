@@ -135,7 +135,7 @@ export class MegaGlyphField {
      * every realloc re-attach call the view's attachBytePipeline, which lands here).
      * @private
      */
-    _attachView(view, pipeline, byteLength, slotBase) {
+    _attachView(view, pipeline, byteLength, slotBase, sourceBase) {
         // Realloc re-attach of the SAME range: only the slots buffer changed — rebind
         // it and keep the attribute state (colors carry the colorizer's work).
         const sameRange = view.slotBase === slotBase && view.byteCount === byteLength;
@@ -147,11 +147,31 @@ export class MegaGlyphField {
         this.field.attachBytePipeline(pipeline, count);
 
         if (!sameRange) {
+            // The old range's paint lanes hold the colorizer's + highlights' finished
+            // work — remember where before tombstoning, to CARRY it (below).
+            const oldBase = view.slotBase, oldCount = view.byteCount, oldSource = view.sourceBase;
             if (view.byteCount > 0) this._tombstone(view);
             view.slotBase = slotBase;
             view.byteCount = byteLength;
+            if (sourceBase !== undefined) view.sourceBase = sourceBase;
             this.field.setGlyphGroupRange(slotBase, byteLength, view.groupId);
             this.field.setGlyphColorRange(slotBase, byteLength, view.color);
+            // THE LANE CARRY, file-byte aligned: the overlap of the old and new
+            // ranges IN FILE SPACE keeps its colors — a restage stops flashing the
+            // default until the analyzer repaints. Stale by at most one edit's byte
+            // shift for ≤ a coalesce window; never blank. (This is the first brick
+            // of the compaction mover's remapRanges: same copy, N views at once.)
+            if (oldCount > 0 && oldBase >= 0) {
+                const ovStart = Math.max(oldSource, view.sourceBase);
+                const ovEnd = Math.min(oldSource + oldCount, view.sourceBase + byteLength);
+                if (ovEnd > ovStart) {
+                    this.field.copyGlyphLanes(
+                        oldBase + (ovStart - oldSource),
+                        slotBase + (ovStart - view.sourceBase),
+                        ovEnd - ovStart,
+                    );
+                }
+            }
             this._reindexRanges();
         }
         this._registerPicking();
@@ -272,9 +292,11 @@ export class MegaFieldView {
         this._mat = new Float32Array(16).fill(NaN); // NaN ≠ anything → first sweep always poses
     }
 
-    /** The arena's attach seam — stage() and realloc re-attach call this. */
-    attachBytePipeline(pipeline, byteLength, slotBase = 0) {
-        this.mega._attachView(this, pipeline, byteLength, slotBase);
+    /** The arena's attach seam — stage()/adoptField and realloc re-attach call this.
+     *  `sourceBase` (the range's first FILE byte) re-points ATOMICALLY with the range;
+     *  omitted (realloc's same-range rebind) it keeps its value. */
+    attachBytePipeline(pipeline, byteLength, slotBase = 0, sourceBase = undefined) {
+        this.mega._attachView(this, pipeline, byteLength, slotBase, sourceBase);
     }
 
     /** FILE-byte slot range → shared color attribute (the colorizer's write path).
