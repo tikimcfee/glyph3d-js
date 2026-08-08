@@ -271,6 +271,10 @@ export const SETTINGS = [
     type: 'number', default: 180, min: 0, max: 2000, step: 20,
     apply: (_ctx, v) => setAnalyzeDebounce(v),
   },
+  {
+    key: 'grid.editSlackBytes', label: 'Edit slack (bytes staged past content)', group: 'Code grids',
+    type: 'number', default: 4096, min: 0, max: 1024 * 1024, step: 512,
+  },
   // Theme — surface backgrounds. Color is a '#rrggbb' string (THREE.Color eats it
   // directly); opacity drives stacked-tile readability in a dock. apply() restyles
   // every live grid/terminal; new ones inherit via gridTheme()/terminalTheme().
@@ -673,6 +677,7 @@ export function gridTheme() {
     windowMinBytes: getSetting('grid.windowMinBytes'),
     windowRows: getSetting('grid.windowRows'),
     windowMarginRows: getSetting('grid.windowMarginRows'),
+    editSlackBytes: getSetting('grid.editSlackBytes'),
   };
 }
 

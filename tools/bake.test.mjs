@@ -450,5 +450,43 @@ for (const [name, text] of CORPORA) {
   console.log(`  window-as-item sweep: ${checked} staged windows position-identical, bit for bit`);
 }
 
+// ── 11. THE PAD INVARIANT (the edit fast path rests on this): a 0x80-padded
+//        buffer lays out IDENTICALLY to its bare content. Bare continuation
+//        bytes are structural non-leaders — decode, fold, resolveX, paginate,
+//        bounds and ordinals all skip them — so an item staged with edit slack
+//        renders its content and NOTHING else, and an in-place rewrite that
+//        moves the content/pad boundary can never disturb layout. ──
+{
+  let checked = 0;
+  for (let t = 0; t < SEEDS; t++) {
+    const r = rng(13000 + t);
+    const content = enc.encode(randomText(r, 4 + Math.floor(r() * 20)));
+    if (content.length === 0) continue;
+    const slack = 1 + Math.floor(r() * 300);
+    const padded = new Uint8Array(content.length + slack);
+    padded.set(content);
+    padded.fill(0x80, content.length);
+    const lane = { wrapWidth: [0, 3, 40][t % 3], lineHeight: CELL_H, scrollRows: Math.floor(r() * 8) };
+    const bare = runPipeline(content, trie, lane);
+    const pad = runPipeline(padded, trie, lane);
+    let bad = 0;
+    for (let id = 0; id < content.length; id++) {
+      for (let l = 0; l < SLOT_STRIDE; l++) {
+        if (bare.slots[id * SLOT_STRIDE + l] !== pad.slots[id * SLOT_STRIDE + l]) bad++;
+      }
+    }
+    for (let id = content.length; id < padded.length; id++) {
+      if (pad.slots[id * SLOT_STRIDE + S_FLAGS] & F_LEADER) bad++;   // pad must stay inert
+    }
+    const bb = bare.itemBounds[0], pb = pad.itemBounds[0];
+    if (!!bb !== !!pb || (bb && (bb.totalRows !== pb.totalRows
+      || bb.max.x !== pb.max.x || bb.min.y !== pb.min.y || bb.maxRowExtent !== pb.maxRowExtent))) bad++;
+    if (bare.leaders !== pad.leaders) bad++;
+    ok(bad === 0, `pad seed ${13000 + t} slack=${slack}: ${bad} divergences`);
+    checked++;
+  }
+  console.log(`  pad-invariant sweep: ${checked} padded buffers bit-identical to bare content`);
+}
+
 console.log(`\n${fail === 0 ? '✓' : '✗'} bake: ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

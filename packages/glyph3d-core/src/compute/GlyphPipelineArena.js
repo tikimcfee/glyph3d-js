@@ -136,9 +136,20 @@ export default class GlyphPipelineArena {
      * @returns {{itemIndex:number, byteStart:number, byteLength:number, mirror:Object,
      *   setPage:Function, verify:Function, dispose:Function}} the per-grid handle
      */
-    stage({ bytes, origin, page: pageIn, wrapWidth = 0, lineHeight = 1, zStep = 0, field = null }) {
+    stage({ bytes, origin, page: pageIn, wrapWidth = 0, lineHeight = 1, zStep = 0, field = null, capacity = 0 }) {
         if (!(bytes?.length > 0)) {
             throw new Error('GlyphPipelineArena.stage: empty file — an item owns at least one byte');
+        }
+        // EDIT SLACK: capacity > length stages the item with a 0x80 pad (bare
+        // continuation bytes — structural non-leaders every pass skips). Edits that
+        // fit the capacity then REWRITE in place (handle.rewrite): zero arena growth
+        // per keystroke, instead of a whole-item restage into the append-only arena.
+        const cap = Math.max(bytes.length, Math.trunc(capacity) || 0);
+        if (cap > bytes.length) {
+            const padded = new Uint8Array(cap);
+            padded.set(bytes);
+            padded.fill(0x80, bytes.length);
+            bytes = padded;
         }
         if (this._items.length >= this.maxItems) {
             this._realloc(this.maxBytes, this.maxItems * 2);
@@ -176,6 +187,35 @@ export default class GlyphPipelineArena {
             itemIndex,
             byteStart: item.byteStart,
             byteLength: item.byteCount,
+            /** The item's staged range — content + edit slack. rewrite() fits in it. */
+            get capacity() { return item.byteCount; },
+            /**
+             * REWRITE the item's bytes in place — the edit fast path (terminal-style:
+             * write, don't restage). No new item, no attach, no arena growth; the
+             * coalesced flush re-folds and the same slots repaint (paint lanes were
+             * never touched — colors stay put). Throws loud past capacity: that edit
+             * takes the restage path with fresh slack.
+             * @param {Uint8Array} bytes2 - new content, ≤ capacity
+             * @param {Object} [page] - refreshed page params (scroll etc.)
+             * @returns {Promise<void>} the coalesced flush
+             */
+            rewrite(bytes2, page) {
+                if (item.dead) return Promise.resolve();
+                if (bytes2.length > item.byteCount) {
+                    throw new Error(`GlyphPipelineArena.rewrite: ${bytes2.length}B exceeds the item's ${item.byteCount}B capacity — restage with fresh slack`);
+                }
+                const padded = new Uint8Array(item.byteCount);
+                padded.set(bytes2);
+                padded.fill(0x80, bytes2.length);
+                item.bytes = padded;             // a later realloc re-uploads the EDITED content
+                item.mirror = null;              // the oracle re-materializes on next touch
+                if (page) {
+                    item.page = { ...page };
+                    arena.setItemPage(itemIndex, item.page);
+                }
+                arena._kernels.rewriteItemBytes(item.byteStart, bytes2, item.byteCount);
+                return arena.requestFlush();
+            },
             /** The CPU oracle, materialized ON TOUCH (caret/edit/verify — one file, once). */
             get mirror() { return arena._ensureMirror(item); },
             /** The GPU's per-item bounds record (extent/totalRows/maxRowExtent), or null

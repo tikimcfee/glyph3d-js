@@ -98,6 +98,9 @@ class CodeGrid extends FramedGlyphField {
             // Hysteresis: rows staged beyond the view on each side — scroll inside the
             // margin is a repaginate; crossing it re-stages one window.
             windowMarginRows: options.windowMarginRows ?? 200,
+            // Bytes of 0x80 pad staged past an EDITED grid's content, so keystrokes
+            // rewrite in place (zero arena growth) instead of restaging the file.
+            editSlackBytes: options.editSlackBytes ?? 4096,
         };
 
         // Content state
@@ -1280,6 +1283,32 @@ class CodeGrid extends FramedGlyphField {
             const prevPipeline = this._pipeline;
             const prevWindow = this._byteWindow;
             this._byteWindow = this._resolveWindow(lp, arena);
+
+            // THE EDIT FAST PATH — terminal-style: write, don't restage. When the
+            // content still FITS the staged item's capacity (its 0x80 edit slack)
+            // and the fold's shape is unchanged, the bytes REWRITE in place: no new
+            // item, no attach, no lane copy, ZERO arena growth per keystroke — the
+            // coalesced flush re-folds and the same slots repaint. Typing burns
+            // slack only at stage time, never the arena; a session of edits costs
+            // one slack restage per ~editSlackBytes of net growth. (This is the fix
+            // for typing hitting the f32 wall mid-sentence: 54KB × keystrokes.)
+            const foldSig = `${lp.wrapWidth || 0}|${m.lineHeight}|${m.charHeight * (lp.zWrapSpacing || 0)}|${this._layoutOriginY}`;
+            if (prevPipeline && this._byteWindow.degenerate
+                    && foldSig === this._foldSig
+                    && this._bytes.length <= (prevPipeline.capacity ?? 0)
+                    && (this._renderer?.sourceBase || 0) === 0) {
+                await prevPipeline.rewrite(this._bytes, this._pageParams(lp, m));
+                // The gate waits for a restage's fresh readback — this fold's bounds
+                // record can be one coalesced readback stale.
+                this._bakedChecked = true;
+                // The fold's tail, same as the restage path below: fresh caret/query
+                // tables over the edited bytes, clip re-applied.
+                this._buildLayoutDescription();
+                this._applyClip();
+                this._applyArrangers();
+                return;
+            }
+
             let staged;
             try {
                 staged = arena.stage({
@@ -1290,6 +1319,12 @@ class CodeGrid extends FramedGlyphField {
                     lineHeight: m.lineHeight,
                     zStep: m.charHeight * (lp.zWrapSpacing || 0),
                     field: null,
+                    // Edit slack: a grid being EDITED stages room to grow, so the
+                    // keystrokes that follow take the rewrite path above.
+                    capacity: (this._byteWindow.degenerate && (this._cursor || this._modified))
+                        ? (this._byteWindow.to - this._byteWindow.from)
+                            + Math.max(this.config.editSlackBytes, (this._byteWindow.to - this._byteWindow.from) >> 3)
+                        : 0,
                 });
             } catch (err) {
                 if (!prevPipeline) throw err;
@@ -1297,6 +1332,7 @@ class CodeGrid extends FramedGlyphField {
                 console.error(`[window] ${this.filename || this.name}: re-stage refused (${err?.message || err}) — keeping the previous window (compaction is the lift)`);
                 return;
             }
+            this._foldSig = foldSig;
             // Sampled lifecycle log: one line per 10 partial-window restages per grid —
             // enough to watch crossings live (log.search window) without a scroll storm.
             if (!this._byteWindow.degenerate) {
