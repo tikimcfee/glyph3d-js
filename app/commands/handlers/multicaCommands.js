@@ -16,15 +16,47 @@
  *   multica.issues     [status]                   issues, optionally filtered
  *   multica.pipeline   <identifier|id>            a parent's sub-issues as a stage ladder
  *   multica.say        <agent> <text...>          send input to an agent's chat
+ *   multica.attach     <agent>                    float an input field on an agent, take the keyboard
+ *   multica.detach     [agent|all]                remove attached input(s)
+ *   multica.prompts                               list the attached inputs
+ *   multica.board      [groupBy]                  arrange the shelf as columns of work
+ *
+ * The interaction loop is: connect → board (see who's there) → attach (talk to one) →
+ * type → Enter. The reply lands as a say-sheet on that agent's book, because the bridge
+ * routes chat:done back through agent.message. Esc releases the keyboard.
  *
  * The backend is a plain HTTP origin — `tools/multica-up.sh` brings one up locally
  * from source (postgres + backend only, no Multica frontend).
  */
 
-import { MulticaClient, MulticaSocket, MulticaBridge } from '@glyph3d/multica';
+import * as THREE from 'three';
+import { MulticaClient, MulticaSocket, MulticaBridge, bookIdForAgent } from '@glyph3d/multica';
+import { AgentPrompt } from '@glyph3d/core/collections';
 
 /** The one live binding. A second connect replaces it rather than stacking streams. */
 let session = null;
+
+/** registry id → AgentPrompt, for every attached input currently on the field. */
+const prompts = new Map();
+
+/** The registry/attention id for an agent's prompt. */
+const promptIdFor = (agentId) => `multica:prompt:${bookIdForAgent(agentId)}`;
+
+/**
+ * Resolve an agent by id, name, or book id — the three things an operator actually has
+ * to hand. Names are matched case-insensitively so `multica.attach cartographer` works.
+ * @param {Object} client
+ * @param {string} ref
+ * @returns {Promise<Object|null>}
+ */
+async function resolveAgent(client, ref) {
+    const agents = await client.listAgents();
+    const needle = String(ref).toLowerCase();
+    return agents.find(a =>
+        a.id === ref
+        || a.name.toLowerCase() === needle
+        || bookIdForAgent(a.id) === ref) || null;
+}
 
 /** @returns {{text: string, data: null}} */
 const notConnected = () => ({ text: 'ERR: not connected — multica.connect <url> <token> <workspaceId>', data: null });
@@ -198,6 +230,111 @@ export default function registerMulticaCommands(router) {
         description: 'Show a parent issue\'s sub-issues as a stage ladder (the pipeline)',
         usage: '<identifier|id>',
         returns: '{ parent, stages }',
+    });
+
+    router.register('multica.attach', async (args, ctx) => {
+        if (!session) return notConnected();
+        const [ref] = args;
+        if (!ref) return { text: 'ERR: usage: multica.attach <agent>', data: null };
+        if (!ctx.scene || !ctx.atlas) return { text: 'ERR: no scene — attach needs the canvas', data: null };
+
+        const agent = await resolveAgent(session.client, ref);
+        if (!agent) return { text: `ERR: no agent '${ref}'`, data: null };
+
+        const id = promptIdFor(agent.id);
+        if (prompts.has(id)) {
+            // Already attached — re-focusing is the useful behavior, not an error.
+            await router.execute(['attention.set', 'key', id]);
+            return { text: `OK: ${agent.name} already attached — focused`, data: { id } };
+        }
+
+        const prompt = new AgentPrompt(ctx, {
+            id,
+            agentId: agent.id,
+            label: agent.name,
+            // The prompt knows nothing about Multica: it hands text to a verb, and the
+            // verb owns the transport. Swap this callback and the same field drives
+            // anything else.
+            onSubmit: (text) => router.execute(['multica.say', agent.id, text]),
+        });
+        await prompt.ready;
+
+        // Park it below the agent's book so the field reads as belonging to that agent.
+        const book = ctx.agentBooks?.lanes?.get(bookIdForAgent(agent.id))?.book;
+        if (book) {
+            const p = book.getWorldPosition(new THREE.Vector3());
+            prompt.setPosition({ x: p.x, y: p.y - 260, z: p.z + 40 });
+        }
+        ctx.scene.add(prompt.object3d);
+        ctx.registry.register(id, prompt.object3d, { type: 'prompt', prompt, agentId: agent.id });
+        prompts.set(id, prompt);
+
+        // Hand it the keyboard through the bus, not by reaching into AttentionManager.
+        await router.execute(['attention.set', 'key', id]);
+        return {
+            text: `OK: attached to ${agent.name} — type and press Enter (Shift+Enter for a newline, Esc to release)`,
+            data: { id, agent: agent.name },
+        };
+    }, {
+        description: 'Attach a floating input field to an agent and give it the keyboard',
+        usage: '<agent>',
+        returns: '{ id, agent }',
+    });
+
+    router.register('multica.detach', async (args, ctx) => {
+        const [ref] = args;
+        const targets = (!ref || ref === 'all')
+            ? [...prompts.keys()]
+            : [promptIdFor((await resolveAgent(session?.client, ref))?.id ?? ref)];
+
+        let removed = 0;
+        for (const id of targets) {
+            const prompt = prompts.get(id);
+            if (!prompt) continue;
+            // Release the keyboard before the target stops existing, or the key slot
+            // points at a disposed object until something else claims it.
+            if (ctx.attention?.key?.id === id) await router.execute(['attention.set', 'key', 'none']);
+            ctx.scene?.remove(prompt.object3d);
+            ctx.registry?.unregister(id);
+            prompt.dispose();
+            prompts.delete(id);
+            removed += 1;
+        }
+        return { text: removed ? `OK: detached ${removed} input(s)` : 'OK: nothing attached', data: { removed } };
+    }, {
+        description: 'Remove an attached input (no arg or "all" removes every one)',
+        usage: '[agent|all]',
+        returns: '{ removed }',
+    });
+
+    router.register('multica.prompts', () => {
+        const lines = [...prompts.values()].map(p => `  ${p.id}  → ${p.label}  ${p.sending ? '(sending)' : ''}`);
+        return { text: lines.length ? [`${lines.length} attached:`, ...lines].join('\n') : 'no attached inputs', data: [...prompts.keys()] };
+    }, {
+        description: 'List the attached input fields',
+        returns: 'string[]',
+    });
+
+    router.register('multica.board', (args, ctx) => {
+        if (!ctx.agentBooks) return { text: 'ERR: agent books not wired', data: null };
+        const [groupBy] = args;
+        // The board scheme is a normal layout scheme — this verb just points the agent
+        // shelf at it, so `layout.scheme` semantics and the shelf's own relayout apply.
+        ctx.agentBooks.cfg.layout = 'board';
+        if (groupBy) {
+            ctx.agentBooks.cfg.layoutOpts = { ...(ctx.agentBooks.cfg.layoutOpts || {}), groupBy };
+        }
+        ctx.agentBooks._relayout();
+        const states = {};
+        for (const lane of ctx.agentBooks.lanes.values()) states[lane.state] = (states[lane.state] || 0) + 1;
+        return {
+            text: `OK: board layout — ${ctx.agentBooks.lanes.size} book(s) ${JSON.stringify(states)}`,
+            data: { books: ctx.agentBooks.lanes.size, states },
+        };
+    }, {
+        description: 'Arrange the agent shelf as a board: columns by lane state (or a userData path)',
+        usage: '[groupBy]',
+        returns: '{ books, states }',
     });
 
     router.register('multica.say', async (args) => {

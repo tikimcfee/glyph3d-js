@@ -362,6 +362,9 @@ export default class AgentBooks {
         if (!lane || !meta || typeof meta !== 'object') return false;
         lane.meta = { ...(lane.meta || {}), ...meta };
         if (lane.meta.cwd) lane.cwd = lane.meta.cwd;
+        // Mirrored for the same reason as state: schemes see the book, not the lane, so a
+        // binding's grouping key (meta.group) has to reach the Object3D to be arrangeable.
+        lane.book.userData = { ...lane.book.userData, meta: lane.meta };
         lane.label?.setText(this.provenanceText(lane));
         this._emitChange();
         return true;
@@ -914,7 +917,14 @@ export default class AgentBooks {
         this.root.remove(lane.book);
     }
 
-    _setState(lane, state) { if (lane.state !== state) lane.state = state; }
+    /** Lane state is mirrored onto the book's userData because a LAYOUT SCHEME only ever
+     *  sees the Object3D, never the lane. Schemes that arrange the shelf by what an agent
+     *  is doing (boardLayout's columns) read it there. @private */
+    _setState(lane, state) {
+        if (lane.state === state) return;
+        lane.state = state;
+        lane.book.userData = { ...lane.book.userData, state };
+    }
 
     // -- private: cluster layout -------------------------------------------------------
 

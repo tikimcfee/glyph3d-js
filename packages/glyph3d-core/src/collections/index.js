@@ -5,6 +5,7 @@
 export { default as CodeGrid } from './CodeGrid.js';
 export { default as Book } from './Book.js';
 export { default as AgentBooks } from './AgentBooks.js';
+export { default as AgentPrompt, AGENT_PROMPT_DEFAULTS } from './AgentPrompt.js';
 export { default as GridLayoutManager } from './GridLayoutManager.js';
 export { default as HierarchicalLayoutManager } from './HierarchicalLayoutManager.js';
 export { default as SpiralLayoutManager } from './SpiralLayoutManager.js';

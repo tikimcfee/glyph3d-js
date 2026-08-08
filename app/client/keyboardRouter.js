@@ -109,11 +109,49 @@ function gridKeyHandler(e, grid) {
     return false;
 }
 
+/** AgentPrompt: a controller input, not a document. Same edit ops as a grid, except Enter
+ *  SENDS — Shift+Enter is how you get a literal newline — and up/down walk submission
+ *  history instead of moving the caret between lines. Escape falls through to the context
+ *  tier as everywhere else, so the field is left the same way edit mode is. */
+function promptKeyHandler(e, prompt) {
+    if (!prompt || typeof prompt.insert !== 'function') return false;
+    if (e.key === 'Shift' || e.key === 'Control' || e.key === 'Alt' || e.key === 'Meta') return false;
+    if (e.ctrlKey || e.altKey || e.metaKey) return false;  // reserved combos
+    if (e.key === 'Escape') return false;
+
+    switch (e.key) {
+        case 'Enter':
+            // The send is async; claim the key either way so the keystroke never leaks
+            // to the camera tier while the request is in flight.
+            if (e.shiftKey) prompt.newline();
+            else Promise.resolve(prompt.submit()).catch((err) => console.error('[prompt] submit failed:', err));
+            return true;
+        case 'ArrowUp':    prompt.recall(-1); return true;
+        case 'ArrowDown':  prompt.recall(1); return true;
+        case 'ArrowLeft':  prompt.moveCursor(-1, 0); return true;
+        case 'ArrowRight': prompt.moveCursor(1, 0); return true;
+        case 'Home':       prompt.home(); return true;
+        case 'End':        prompt.end(); return true;
+        case 'Backspace':  prompt.deleteBackward(); return true;
+        case 'Delete':     prompt.deleteForward(); return true;
+        case 'Tab':        return false;  // leave tab to the host — a one-line field has nowhere to indent
+    }
+
+    if (e.key.length === 1) {
+        prompt.insert(e.key);
+        return true;
+    }
+    return false;
+}
+
 // One entry per keystroke-target entity type. Adding a type is a one-liner here — the chain
 // above is unchanged. (Composable like gestureResolver's POLICIES.)
 const ENTITY_HANDLERS = {
     terminal: (e, entity, slot, captured) => terminalKeyHandler(e, entity.grid, slot.id, captured),
     grid:     (e, entity)                 => gridKeyHandler(e, entity.grid),
+    // The registry entry carries the CodeGrid as `grid`, so spatial/highlight verbs work
+    // on a prompt like any other surface; the AgentPrompt controller rides in meta.
+    prompt:   (e, entity)                 => promptKeyHandler(e, entity.meta?.prompt),
 };
 
 /** Tier 1 — deliver the key to whichever entity holds the 'key' slot (greedily when captured). */

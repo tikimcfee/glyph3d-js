@@ -147,6 +147,26 @@ session→book map (refetched once on an unknown session). Also note `/api/chat/
 `/api/chat/history` are *agent-facing*: they resolve the conversation from a task-scoped
 token instead of taking a session id, so they're not the read a client like ours wants.
 
+**Driving it.** `multica.attach <agent>` floats an **AgentPrompt** — an editable CodeGrid
+used as a controller input, not a document — beside that agent's book and hands it the
+`key` attention slot. Typing arrives through the keyboard responder chain's new `prompt`
+tier: Enter **submits** (Shift+Enter is a literal newline), ↑/↓ walk submission history,
+Esc releases. The prompt holds no transport — it calls `onSubmit`, which dispatches
+`multica.say`, so the same field drives anything else by swapping one callback. A send in
+flight blocks a second one, because a held Enter must not fan out duplicate messages.
+Terminals were the wrong primitive here: ours are tmux-backed through the relay, and
+there is no process on the other end of a chat — just an HTTP call.
+
+`multica.board` points the agent shelf at **boardLayout**, a roster scheme that arranges
+books into ordered columns by lane state (or any `userData` path via `groupBy`). Lane
+state and meta are mirrored onto `book.userData` by AgentBooks because a layout scheme
+only ever sees the Object3D, never the lane.
+
+**One-pass setup**: `tools/multica-up.sh up`, pair a daemon, then `bun tools/multica-seed.mjs`
+— it authenticates, makes a workspace, creates agents and a staged pipeline (idempotent on
+re-run), and prints the exact `multica.connect` line to paste. `bun tools/multica-input.test.mjs`
+locks the prompt and layout behavior.
+
 `tools/multica-up.sh up` brings up a local backend from source — **postgres + backend
 only**, never their frontend. `bun tools/multica-flow.test.mjs` locks the event→verb
 mapping headlessly; set `MULTICA_URL` / `MULTICA_TOKEN` / `MULTICA_WORKSPACE` to also run
