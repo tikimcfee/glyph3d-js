@@ -14,7 +14,13 @@
  *   stack 'z' — the VOLUME: the directory BOUND as one pageable Book — its files ride
  *               as recto sheets on Book's rolodex deck (the same engine agent books
  *               run), `gap` deep per page. The wheel and book.page turn it; the open
- *               page survives relayouts on the dir node.
+ *               page survives relayouts on the dir node. A volume additionally carries
+ *               a per-dir FORM (node.userData.volumeForm, set by book.form): 'deck'
+ *               (the closed rolodex) or 'splay' — the book laid open as an m×n page
+ *               grid (Book.splayGrid), the overview of a many-file directory. The
+ *               footprint honestly changes with the form, so a form flip re-lays the
+ *               tree; the head stays the bookmark (lifted forward while splayed), and
+ *               pages GLIDE between forms (sheetPoses/seedPoses across the rebuild).
  *   stack 'x' — a SHELF: books abreast left→right, each fitted individually,
  *   stack 'y' — a PILE: books descending one below the other.
  *
@@ -54,6 +60,11 @@ export const LIBRARY_DEFAULTS = {
     coverEdgeOpacity: 0.22, // wireframe frame line (0 = no edges)
     coverPad: 16,      // XY inflation beyond the deck bounds
     coverZPad: 24,     // Z inflation (front of the open page / behind the last)
+    splayCols: 0,      // splayed volume: fixed column count (0 = derive from splayAspect)
+    splayGapX: 60,     // splayed volume: horizontal gap between grid pages
+    splayGapY: 80,     // splayed volume: vertical gap between grid rows
+    splayAspect: 1.5,  // splayed volume: grid shape target (w ≈ aspect × h) when cols=0
+    splayLift: 30,     // splayed volume: the head page's forward float — the visible bookmark
     dirGap: 80,        // gap between a node's own stack and its child-directory tier
     depthZ: 500,       // per-level z step for child dirs (packed's proven readable value)
     aspect: 1.5,       // child-tier wrap target (w ≈ aspect × h)
@@ -84,11 +95,19 @@ function sortBooks(books, o) {
 }
 
 /** The stack's bounding extent: pages are uniform, so this is pure arithmetic. The deck
- *  overlaps on z (gap IS the step); shelf/pile step by a full page plus the gap. */
-function stackExtent(n, o) {
+ *  overlaps on z (gap IS the step); shelf/pile step by a full page plus the gap; a
+ *  SPLAYED volume spans its grid (the same splayGrid the slot law places by). */
+function stackExtent(n, o, form) {
     if (n === 0) return { w: 0, h: 0, d: 0 };
     if (o.stack === 'x') return { w: n * o.pageW + (n - 1) * o.gap, h: o.pageH, d: 0 };
     if (o.stack === 'y') return { w: o.pageW, h: n * o.pageH + (n - 1) * o.gap, d: 0 };
+    if (form === 'splay') {
+        const g = Book.splayGrid(n, {
+            cols: o.splayCols, aspect: o.splayAspect,
+            pageW: o.pageW, pageH: o.pageH, gapX: o.splayGapX, gapY: o.splayGapY,
+        });
+        return { w: g.w, h: g.h, d: o.splayLift };
+    }
     return { w: o.pageW, h: o.pageH, d: (n - 1) * o.gap };
 }
 
@@ -116,12 +135,22 @@ function buildVolume(node, books, o) {
     vol.deck.zPitch = o.gap;
     vol.deck.lerp = o.deckLerp;
     vol.deck.order = 1;      // page order: 1, 2, 3 recede in sequence (not agent recency)
+    vol.setForm(node.userData.volumeForm === 'splay' ? 'splay' : 'deck', {
+        cols: o.splayCols, gapX: o.splayGapX, gapY: o.splayGapY,
+        aspect: o.splayAspect, lift: o.splayLift,
+    });
     node.add(vol);
     for (const bk of books) vol.addSheet({ recto: bk });
     vol.pageTo(Math.min(Math.max(node.userData.volumeHead ?? 0, 0), books.length - 1));
     vol.following = !!node.userData.volumeFollowing;   // pageTo flags the last page; restore intent
     vol.fit({ ...o, gutter: 0 });
-    vol.seatAll();
+    // Pages START where the user last saw them (_normalize captured the dissolved
+    // volume's live sheet poses) and GLIDE to this form's slots — a same-form rebuild
+    // seeds zero-distance glides, a form flip becomes pages flying between forms.
+    // First build (no capture) seats settled. Poses are a one-pass hand-off.
+    const poses = node.userData.volumePoses;
+    if (poses) vol.seedPoses(poses); else vol.seatAll();
+    node.userData.volumePoses = null;
     vol.bindCover({
         color: o.coverColor, opacity: o.coverOpacity, edgeOpacity: o.coverEdgeOpacity,
         pad: o.coverPad, zPad: o.coverZPad,
@@ -148,7 +177,7 @@ function measure(node, o) {
     } else {
         for (const b of books) b.fit(o);
     }
-    const ext = stackExtent(books.length, o);
+    const ext = stackExtent(books.length, o, volume?.form);
 
     const dirSizes = dirs.map((d) => measure(d, o));
     const childPack = dirs.length ? orderedPack(dirSizes, o.dirGap, o.aspect) : null;

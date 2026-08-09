@@ -631,7 +631,10 @@ const buildLibrary = (paths, opts = {}, order = paths) => {
   const vol2 = t.volumeAt('d');
   ok(vol2 && vol2 !== vol, 'volume: relayout rebuilds a fresh volume');
   eq(vol2.headState().head, 1, 'volume: the open page survives the relayout');
-  eq(vol2.sheets[1].node.position.z, 0, 'volume: the restored open page fronts the deck');
+  // The rebuild SEEDS the dissolved volume's live poses (pages glide, never teleport) —
+  // the restored open page starts where it last sat and settles at the front.
+  for (let s = 0; s < 40; s++) vol2.update(1);
+  eq(r2(vol2.sheets[1].node.position.z), 0, 'volume: the restored open page settles fronting the deck');
   // Dissolution: another scheme sees the canonical structure, no volume, books re-homed.
   t.setLayout(walkTreeLayout, {});
   t.relayout();
@@ -640,6 +643,58 @@ const buildLibrary = (paths, opts = {}, order = paths) => {
   ok(['a.js', 'b.js', 'c.js'].every((n) => d.children.some((c) => c.userData.isBook && c.userData.name === n)),
     'volume: every book re-homed onto its dir');
   ok(!d.children.some((c) => c.userData.isVolume), 'volume: no volume child remains');
+}
+
+// 36c. the SPLAY form: the volume laid open as an m×n page grid. The form is per-dir
+//      state (node.userData.volumeForm) worn by the rebuilt volume each pass; the
+//      footprint honestly widens to the grid; head stays the bookmark (lifted); pages
+//      GLIDE across the rebuild (poses captured at dissolve, seeded at build).
+{
+  // The grid arithmetic — one home (Book.splayGrid), scheme and slot law both use it.
+  eq(Book.splayGrid(6, { cols: 3, pageW: 20, pageH: 30, gapX: 4, gapY: 6 }),
+    { cols: 3, rows: 2, w: 3 * 24 - 4, h: 2 * 36 - 6 }, 'splay: fixed cols — rows cover, extent exact');
+  const auto = Book.splayGrid(9, { aspect: 1, pageW: 10, pageH: 10 });
+  eq([auto.cols, auto.rows], [3, 3], 'splay: auto cols from the aspect target (9 squares → 3×3)');
+  eq(Book.splayGrid(1, { pageW: 10, pageH: 10 }), { cols: 1, rows: 1, w: 10, h: 10 }, 'splay: one page is a 1×1 grid');
+
+  const opts = { pageW: 20, pageH: 30, gap: 10, splayGapX: 4, splayGapY: 6, splayCols: 2, splayLift: 8 };
+  const t = buildLibrary(['d/a.js', 'd/b.js', 'd/c.js'], opts);
+  const node = t.getNode('d');
+  node.userData.volumeForm = 'splay';
+  t.relayout();
+  const vol = t.volumeAt('d');
+  eq(vol.form, 'splay', 'splay: the rebuilt volume wears the dir\'s persisted form');
+  // The rebuild seeded the DECK's captured poses — pages fly to the grid; settle first.
+  for (let s = 0; s < 60; s++) vol.update(1);
+  // Slots: 2 cols → a(0,0) b(1,0) c(0,1), columns centered on x, rows descending,
+  // head (a, restored 0) lifted forward.
+  const at = (i) => { const p = vol.sheets[i].node.position; return [r2(p.x), r2(p.y), r2(p.z)]; };
+  eq(at(0), [-12, 0, 8], 'splay: page 1 at col 0 row 0, lifted as the head');
+  eq(at(1), [12, 0, 0], 'splay: page 2 one column step right');
+  eq(at(2), [-12, -36, 0], 'splay: page 3 wraps to row 1');
+  // Footprint: the dir's measured size IS the grid extent (the relayout was honest).
+  eq([r2(node.userData.size.x), r2(node.userData.size.y)], [2 * 24 - 4, 2 * 36 - 6],
+    'splay: the dir footprint spans the m×n grid');
+  const lb = vol.layoutBounds();
+  eq(r2(lb.max.x - lb.min.x), 2 * 24 - 4, 'splay: layoutBounds spans the grid (the cover binds it all)');
+  // The wheel is unchanged: paging moves the BOOKMARK — the lift glides to the new head.
+  vol.pageTo(2);
+  for (let s = 0; s < 40; s++) vol.update(1);
+  eq([r2(vol.sheets[0].node.position.z), r2(vol.sheets[2].node.position.z)], [0, 8],
+    'splay: paging moves only the lift — the bookmark crosses the grid');
+  // The glide across a rebuild: poses captured at dissolve seed the next build's easing.
+  t.relayout();
+  const vol2 = t.volumeAt('d');
+  eq(vol2.form, 'splay', 'splay: the form survives every relayout');
+  eq(r2(vol2.sheets[2].node.position.z), 8, 'splay: the seeded rebuild keeps the bookmark lifted on the head');
+  node.userData.volumeForm = 'deck';
+  t.relayout();
+  const vol3 = t.volumeAt('d');
+  eq(vol3.form, 'deck', 'splay: the form flips back to deck');
+  const c0 = vol3.sheets[0].node.position;
+  ok(Math.abs(c0.x - (-12)) < 0.01, 'splay→deck: pages START at their splayed spots (seeded poses)…');
+  for (let s = 0; s < 60; s++) vol3.update(1);
+  ok(Math.abs(c0.x) < 0.1 && Math.abs(c0.y) < 0.1, 'splay→deck: …and GLIDE home to the deck slots');
 }
 
 // 37. sort orders are real questions: size (content area, big first) and ext (genre)
@@ -784,10 +839,11 @@ const buildLibrary = (paths, opts = {}, order = paths) => {
   bk.addSheet({ verso: makeLeaf('v1'), recto: makeLeaf('r1') });
   bk.addSheet({ verso: makeLeaf('v2'), recto: makeLeaf('r2') });
   eq(bk.headState(), { head: 2, count: 3, following: true }, 'deck: following rides each append to the front');
-  eq([bk._slotZ(2), bk._slotZ(1), bk._slotZ(0)], [0, -50, -100], 'deck: older sheets recede by zPitch');
+  const slotZ = (b, i) => b._slotFor(i, {}).z;
+  eq([slotZ(bk, 2), slotZ(bk, 1), slotZ(bk, 0)], [0, -50, -100], 'deck: older sheets recede by zPitch');
   bk.pageTo(1);
   eq(bk.headState(), { head: 1, count: 3, following: false }, 'deck: paging back holds (live-follow off)');
-  eq([bk._slotZ(1), bk._slotZ(0), bk._slotZ(2)], [0, -50, -100], 'deck: scrolled-past newest wraps to the back');
+  eq([slotZ(bk, 1), slotZ(bk, 0), slotZ(bk, 2)], [0, -50, -100], 'deck: scrolled-past newest wraps to the back');
   bk.scroll(+1);
   ok(bk.following, 'deck: landing on the newest resumes live-follow');
   // The deck animator eases nodes toward their slots (dt clamps at 0.1 per step).
@@ -816,7 +872,7 @@ const buildLibrary = (paths, opts = {}, order = paths) => {
   const out = bk.removeSheet(0);
   ok(out?.recto === oldest && !oldest.parent, 'removeSheet: shed content detaches, returned not disposed');
   eq(bk.headState(), { head: 1, count: 2, following: true }, 'removeSheet: a following head rides the (new) newest');
-  eq([bk._slotZ(1), bk._slotZ(0)], [0, -50], 'removeSheet: the deck closes up — slots re-derive');
+  eq([bk._slotFor(1, {}).z, bk._slotFor(0, {}).z], [0, -50], 'removeSheet: the deck closes up — slots re-derive');
   bk.addSheet({ recto: makeLeaf('r3') });
   bk.pageTo(1);
   const held = bk.sheets[1];

@@ -31,11 +31,19 @@
  *     face behind each page. layoutBounds reports the page (or spread) rect, so bounds
  *     consumers (markers, arrows, framing) see the bound form.
  *
- * Multi-sheet books read as a ROLODEX DECK: the sheet at `head` fronts the book at
- * z = 0 and the rest recede by deck.zPitch — scrolled-past newer sheets wrap to the
- * back. Paging only moves the head; update(dt) eases each sheet to its slot. The book
- * live-follows its newest sheet (`following`) until paged back; landing on the newest
- * resumes following. A one-sheet book's deck is a no-op.
+ * A multi-sheet book presents in one of two FORMS — the form is a slot law (where does
+ * sheet i rest?), and update(dt) eases every sheet toward its slot either way:
+ *
+ *   'deck' (default) — the ROLODEX: the sheet at `head` fronts the book at z = 0 and
+ *     the rest recede by deck.zPitch — scrolled-past newer sheets wrap to the back.
+ *   'splay' — the book LAID OPEN: every page at once in an m×n grid in PAGE ORDER
+ *     (cols from an aspect target unless fixed), the head floating `lift` forward as
+ *     the visible bookmark. The overview form: "a lot of files here — show me all
+ *     of them."
+ *
+ * Paging only moves the head in both forms; in splay that means the lift glides
+ * across the grid. The book live-follows its newest sheet (`following`) until paged
+ * back; landing on the newest resumes following. A one-sheet deck is a no-op.
  *
  * ContentTree._normalize releases every tree book before a layout pass, so each scheme
  * starts from the canonical natural form and switching lenses stays lossless.
@@ -63,6 +71,14 @@ const PAGE_FACE_DEFAULTS = { surface: true, surfacePad: 0, surfaceDepth: 8 };
  *  ORDER (a library volume — page 1, 2, 3 recede in sequence; turned pages wrap to
  *  the back in turn order). */
 const DECK_DEFAULTS = { zPitch: 90, lerp: 9, order: -1 };
+
+/** Splay (m×n grid) defaults. cols 0 derives the column count from the aspect target
+ *  (grid w/h ≈ aspect); lift is the head page's forward float — the bookmark you can
+ *  see across the whole grid. */
+const SPLAY_DEFAULTS = { cols: 0, gapX: 60, gapY: 80, aspect: 1.5, lift: 30 };
+
+/** Scratch for the slot law — one caller at a time (main-thread only). */
+const _slotOut = { x: 0, y: 0, z: 0 };
 
 /** Cover styling defaults — bindCover merges over these. */
 const COVER_DEFAULTS = { color: 0x8090b0, opacity: 0.06, edgeOpacity: 0.22, pad: 16, zPad: 24 };
@@ -92,7 +108,7 @@ export default class Book extends BoundedObject3D {
         this.userData = { isBook: true };   // path/name mirrored on insert by ContentTree
         /** @type {Array<{node:THREE.Group, verso:THREE.Object3D|null, recto:THREE.Object3D|null,
          *               versoMount:THREE.Group, rectoMount:THREE.Group,
-         *               faces:THREE.Mesh[], fit:Object, _z:number|null}>} */
+         *               faces:THREE.Mesh[], fit:Object, _at:THREE.Vector3|null}>} */
         this.sheets = [];
         /** @type {number} the open sheet's index (fronts the deck) */
         this.head = 0;
@@ -100,6 +116,10 @@ export default class Book extends BoundedObject3D {
         this.following = true;
         /** @type {{zPitch:number, lerp:number}} rolodex knobs (multi-sheet books) */
         this.deck = { ...DECK_DEFAULTS };
+        /** @type {'deck'|'splay'} the presentation form — the slot law sheets ease to */
+        this.form = 'deck';
+        /** @type {{cols:number,gapX:number,gapY:number,aspect:number,lift:number}} splay knobs */
+        this.splay = { ...SPLAY_DEFAULTS };
         /** @type {{pageW:number,pageH:number,scale:number,contentW:number,contentH:number}|null}
          *  the OPEN sheet's primary-side fit summary while fitted (recto, else verso) */
         this.fitInfo = null;
@@ -161,7 +181,7 @@ export default class Book extends BoundedObject3D {
             node, verso, recto,
             versoMount: mountFor(verso, 'verso'),
             rectoMount: mountFor(recto, 'recto'),
-            faces: [], fit: {}, _z: null,
+            faces: [], fit: {}, _at: null,
         };
         this.add(node);
         this.sheets.push(sheet);
@@ -261,7 +281,7 @@ export default class Book extends BoundedObject3D {
             this._dropFaces(sheet);
             sheet.node.position.set(0, 0, 0);
             sheet.node.rotation.set(0, 0, 0);
-            sheet._z = null;
+            sheet._at = null;
             for (const [mount, content] of [[sheet.versoMount, sheet.verso], [sheet.rectoMount, sheet.recto]]) {
                 mount.position.set(0, 0, 0);
                 mount.rotation.set(0, 0, 0);
@@ -277,8 +297,61 @@ export default class Book extends BoundedObject3D {
         return this;
     }
 
-    // -- rolodex deck: head is the only nav state; each sheet's depth is a derived slot ------------
-    //    slot(i) = (head - i) mod n — older sheets recede, scrolled-past newer ones wrap to the back.
+    // -- forms: head is the only nav state; each sheet's pose is a derived slot --------------------
+    //    deck: slot(i) = (order · (i − head)) mod n along z. splay: page-order m×n grid,
+    //    head lifted. One easer (update) serves both — a form change is slot reassignment.
+
+    /** The splay's grid shape for `n` pages: cols from the aspect target (grid w/h ≈
+     *  aspect) unless fixed, rows to cover. The ONE home for the arithmetic — the slot
+     *  law places by it and the library scheme sizes directory footprints by it. */
+    static splayGrid(n, { cols = 0, aspect = 1.5, pageW = 1, pageH = 1, gapX = 0, gapY = 0 } = {}) {
+        const stepX = pageW + gapX, stepY = pageH + gapY;
+        let c = Math.round(cols) > 0 ? Math.round(cols)
+            : Math.round(Math.sqrt((Math.max(n, 1) * aspect * stepY) / stepX));
+        c = Math.min(Math.max(c, 1), Math.max(n, 1));
+        const rows = Math.max(Math.ceil(n / c), n > 0 ? 1 : 0);
+        return { cols: c, rows, w: Math.max(c * stepX - gapX, 0), h: Math.max(rows * stepY - gapY, 0) };
+    }
+
+    /** Take a presentation form ('deck' | 'splay'), optionally tuning the splay knobs.
+     *  Sheets EASE to the new form's slots in update(dt) — pages fly between forms. */
+    setForm(form, opts = {}) {
+        this.form = form === 'splay' ? 'splay' : 'deck';
+        Object.assign(this.splay, opts);
+        return this;
+    }
+
+    /** Every sheet's LIVE pose (mid-ease included), keyed by its content path — captured
+     *  at volume dissolve so the next build's pages can START where the user last saw
+     *  them. @returns {Map<string,{x:number,y:number,z:number}>} */
+    sheetPoses() {
+        const out = new Map();
+        for (const s of this.sheets) {
+            const key = s.recto?.userData?.path ?? s.verso?.userData?.path;
+            if (key != null) {
+                const p = s.node.position;
+                out.set(key, { x: p.x, y: p.y, z: p.z });
+            }
+        }
+        return out;
+    }
+
+    /** Seed the easing state from prior poses (a rebuilt volume): known pages start at
+     *  their last-seen position and GLIDE to this form's slots; unknown pages seat
+     *  directly. A same-form rebuild seeds zero-distance glides — indistinguishable
+     *  from seatAll. @param {Map<string,{x,y,z}>|null} poses */
+    seedPoses(poses) {
+        for (let i = 0; i < this.sheets.length; i++) {
+            const s = this.sheets[i];
+            const key = s.recto?.userData?.path ?? s.verso?.userData?.path;
+            const p = key != null ? poses?.get?.(key) : null;
+            if (p) {
+                s._at = (s._at ?? new THREE.Vector3()).set(p.x, p.y, p.z);
+                s.node.position.copy(s._at);
+            } else this._seat(i);
+        }
+        return this;
+    }
 
     /** Move the head to a sheet index (0 = oldest, clamped). Landing on the newest resumes
      *  live-following; anywhere else holds. The sheets ease to their new slots in update(dt). */
@@ -538,25 +611,31 @@ export default class Book extends BoundedObject3D {
     /** The deck's nav state — for panels and verbs. */
     headState() { return { head: this.head, count: this.sheets.length, following: this.following }; }
 
-    /** Ease every sheet toward its deck slot — frame-rate-independent (`1 − e^(−rate·dt)`).
-     *  A settled deck skips the write; the cover re-wraps the live bounds either way.
-     *  One-sheet books settle at 0 and stay a no-op. */
+    /** Ease every sheet toward its form's slot — frame-rate-independent
+     *  (`1 − e^(−rate·dt)`). A settled book skips the writes; the cover re-wraps the
+     *  live bounds either way. A one-sheet DECK settles at 0 and stays a no-op (the
+     *  tree's file books ride this fast path); any splayed book keeps easing — its
+     *  single page still carries the head lift. */
     update(dt) {
         if (this.cover) this.syncCover();
         this.syncTabs();
         const n = this.sheets.length;
-        if (n < 2) return;
+        if (n < 2 && this.form === 'deck') return;
         const rate = this.deck.lerp;
         const k = rate > 0 ? 1 - Math.exp(-rate * Math.min(Math.max(dt || 0, 0), 0.1)) : 1;
         for (let i = 0; i < n; i++) {
             const sheet = this.sheets[i];
-            const target = this._slotZ(i);
-            if (sheet._z == null) sheet._z = target;
-            else if (Math.abs(target - sheet._z) < 0.05) {
-                if (sheet._z !== target) { sheet._z = target; sheet.node.position.z = target; }
+            const t = this._slotFor(i, _slotOut);
+            const at = sheet._at;
+            if (!at) { this._seat(i); continue; }
+            const dx = t.x - at.x, dy = t.y - at.y, dz = t.z - at.z;
+            const d = Math.max(Math.abs(dx), Math.abs(dy), Math.abs(dz));
+            if (d < 0.05) {
+                if (d > 0) { at.set(t.x, t.y, t.z); sheet.node.position.copy(at); }
                 continue;
-            } else sheet._z += (target - sheet._z) * k;
-            sheet.node.position.z = sheet._z;
+            }
+            at.x += dx * k; at.y += dy * k; at.z += dz * k;
+            sheet.node.position.copy(at);
         }
     }
 
@@ -579,9 +658,9 @@ export default class Book extends BoundedObject3D {
             if (!sides) continue;
             const hw = sides === 2 ? o.pageW + (o.gutter ?? 0) / 2 : o.pageW / 2;
             const hh = o.pageH / 2;
-            const z = sheet.node.position.z;
-            tmpMin.set(-hw, -hh, z - zPad);
-            tmpMax.set(hw, hh, z + zPad);
+            const p = sheet.node.position;   // the LIVE slot — splay spreads x/y, deck only z
+            tmpMin.set(p.x - hw, p.y - hh, p.z - zPad);
+            tmpMax.set(p.x + hw, p.y + hh, p.z + zPad);
             out.expandByPoint(tmpMin);
             out.expandByPoint(tmpMax);
         }
@@ -638,20 +717,39 @@ export default class Book extends BoundedObject3D {
 
     // -- private --------------------------------------------------------
 
-    /** slot(i) = (order · (i − head)) mod n, front = 0 — the local z a sheet rests at.
-     *  order −1 recovers the recency rolodex (head − i); +1 reads in page order. @private */
-    _slotZ(i) {
+    /** Where sheet `i` RESTS in the book's local frame — the form IS the slot law.
+     *  deck: slot(i) = (order · (i − head)) mod n along −z; order −1 recovers the
+     *    recency rolodex (head − i), +1 reads in page order.
+     *  splay: page-order m×n grid — columns centered on x, the first row's page
+     *    centers at y = 0 and rows descend; the head floats `lift` forward. Splay
+     *    needs the fitted page dims; an unfitted book falls back to the deck law.
+     *  @private @param {{x:number,y:number,z:number}} out @returns {typeof out} */
+    _slotFor(i, out) {
         const n = this.sheets.length;
+        const o = this._fitOpts;
+        if (this.form === 'splay' && o) {
+            const sp = this.splay;
+            const g = Book.splayGrid(n, {
+                cols: sp.cols, aspect: sp.aspect,
+                pageW: o.pageW, pageH: o.pageH, gapX: sp.gapX, gapY: sp.gapY,
+            });
+            out.x = ((i % g.cols) - (g.cols - 1) / 2) * (o.pageW + sp.gapX);
+            out.y = -Math.floor(i / g.cols) * (o.pageH + sp.gapY);
+            out.z = i === this.head ? sp.lift : 0;
+            return out;
+        }
         const head = Math.min(Math.max(0, this.head), n - 1);
-        const slot = (((this.deck.order ?? -1) * (i - head)) % n + n) % n;
-        return -slot * this.deck.zPitch;
+        const slot = n ? (((this.deck.order ?? -1) * (i - head)) % n + n) % n : 0;
+        out.x = 0; out.y = 0; out.z = -slot * this.deck.zPitch;
+        return out;
     }
 
     /** Seat sheet `i` directly at its slot (no easing) — a new sheet appears in place. @private */
     _seat(i) {
         const sheet = this.sheets[i];
-        sheet._z = this._slotZ(i);
-        sheet.node.position.z = sheet._z;
+        const t = this._slotFor(i, _slotOut);
+        sheet._at = (sheet._at ?? new THREE.Vector3()).set(t.x, t.y, t.z);
+        sheet.node.position.copy(sheet._at);
     }
 
     /** Contain-fit one sheet's sides onto their page rects and rebuild its faces. @private */

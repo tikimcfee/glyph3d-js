@@ -673,6 +673,13 @@ export const SETTINGS = [
   { key: 'layout.gap', label: 'Book spacing (stack step)', group: 'Layout', scheme: 'library', type: 'number', default: LIBRARY_DEFAULTS.gap, min: 2, max: 600, step: 2, apply: libraryParam('gap') },
   { key: 'layout.maxUpscale', label: 'Max fit upscale (small files)', group: 'Layout', scheme: 'library', type: 'number', default: LIBRARY_DEFAULTS.maxUpscale, min: 1, max: 20, step: 0.5, apply: libraryParam('maxUpscale') },
   { key: 'layout.reverse', label: 'Reverse stack order', group: 'Layout', scheme: 'library', type: 'bool', default: LIBRARY_DEFAULTS.reverse, apply: libraryParam('reverse') },
+  // The SPLAY form — a volume laid open as an m×n page grid (book.form <dir> splay).
+  // These dials shape every splayed volume; the form itself is per-dir state on the verb.
+  { key: 'layout.splayCols', label: 'Splay columns (0 = auto)', group: 'Layout', scheme: 'library', type: 'number', default: LIBRARY_DEFAULTS.splayCols, min: 0, max: 24, step: 1, apply: libraryParam('splayCols') },
+  { key: 'layout.splayGapX', label: 'Splay column gap', group: 'Layout', scheme: 'library', type: 'number', default: LIBRARY_DEFAULTS.splayGapX, min: 0, max: 600, step: 4, apply: libraryParam('splayGapX') },
+  { key: 'layout.splayGapY', label: 'Splay row gap', group: 'Layout', scheme: 'library', type: 'number', default: LIBRARY_DEFAULTS.splayGapY, min: 0, max: 600, step: 4, apply: libraryParam('splayGapY') },
+  { key: 'layout.splayAspect', label: 'Splay grid shape (w ≈ a×h)', group: 'Layout', scheme: 'library', type: 'number', default: LIBRARY_DEFAULTS.splayAspect, min: 0.2, max: 6, step: 0.1, apply: libraryParam('splayAspect') },
+  { key: 'layout.splayLift', label: 'Splay head lift (bookmark)', group: 'Layout', scheme: 'library', type: 'number', default: LIBRARY_DEFAULTS.splayLift, min: 0, max: 400, step: 5, apply: libraryParam('splayLift') },
   // Glyph LOD — the exact-curve ↔ stable-block handoff for minified text (kills the moiré/flicker of
   // sub-pixel strokes). Footprints are fwidth(glyphUV): bigger = smaller on screen. Pull the lod*
   // band DOWN to hand off to the flicker-free block sooner (trades mid-distance crispness for

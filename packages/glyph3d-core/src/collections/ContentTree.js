@@ -471,9 +471,13 @@ export default class ContentTree {
                     for (const unit of units) dir.add(unit);   // THREE.add re-parents (row → dir)
                     if (child.userData.isVolume) {
                         // The open page survives the pass on the dir node; the volume itself
-                        // is a per-pass presentation object — dispose, don't keep.
+                        // is a per-pass presentation object — dispose, don't keep. The live
+                        // sheet poses (mid-ease included) ride along so the REBUILT volume's
+                        // pages start where the user last saw them and glide to their new
+                        // slots — a deck⇄splay flip reads as pages flying between forms.
                         dir.userData.volumeHead = child.head;
                         dir.userData.volumeFollowing = child.following;
+                        dir.userData.volumePoses = child.sheetPoses();
                         if (dir.userData._volume === child) dir.userData._volume = null;
                         child.dispose();
                     } else {

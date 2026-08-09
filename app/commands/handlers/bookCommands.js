@@ -7,6 +7,12 @@
  *   book.list <path|id>  → one book's full record (form, page, sheets, head, world position)
  *   book.page   [id] <next|prev|first|last|N>   turn a book's head (1-based index; N of M)
  *   book.scroll [id] <delta>                    turn by ±N sheets (− older / + newer)
+ *   book.form   [id] <deck|splay|toggle>        the presentation form: rolodex deck, or the
+ *                                               book laid OPEN as an m×n page grid (the
+ *                                               many-file overview). A library volume's form
+ *                                               persists on its dir node and re-lays the tree
+ *                                               (the footprint honestly changes); the head
+ *                                               stays the bookmark in both forms.
  *   book.move   <id> <x> <y> <z>                pin an agent book where you put it (drag-release / CLI)
  *   book.config [key value]                     get/set an agent-shelf constant — re-flows live
  *   book.limit  [id] [n|all|default]            get/set ONE book's kept-turns cap (overrides the
@@ -153,6 +159,32 @@ export default function registerBookCommands(router) {
             ? { text: `OK: ${fmtHead(s)}`, data: { ...(hit.agentId ? { agentId: hit.agentId } : {}), ...s } }
             : { text: 'ERR: could not page', data: null };
     }, { description: 'Turn a book\'s head — next|prev|first|last or a 1-based sheet index', usage: '[id] <next|prev|first|last|N>' });
+
+    router.register('book.form', (args, ctx) => {
+        const [id, arg] = splitTarget(args);
+        const hit = resolveBook(ctx, id);
+        if (!hit) return { text: id ? `ERR: no book '${id}'` : 'ERR: no book to form', data: null };
+        const bk = hit.book;
+        const a = String(arg ?? '').toLowerCase();
+        if (!['deck', 'splay', 'toggle'].includes(a)) {
+            return { text: `ERR: usage: book.form [id] <deck|splay|toggle> (current: ${bk.form})`, data: { form: bk.form } };
+        }
+        const form = a === 'toggle' ? (bk.form === 'splay' ? 'deck' : 'splay') : a;
+        if (hit.kind === 'volume') {
+            // A volume is a per-pass husk — the form lives on the DIR NODE (beside
+            // volumeHead) and the re-lay rebuilds the volume wearing it. The footprint
+            // change is real, so the whole tree honestly re-lays; _normalize captures
+            // the live sheet poses on the way down, and the rebuilt pages glide.
+            bk.parent.userData.volumeForm = form;
+            ctx.contentTree.relayoutAndRest(0);
+            ctx.contentTreeLabels?.rebuild?.();
+        } else {
+            // A shelf book (agent/delta) owns its own frame — setForm now; its update()
+            // eases the pages and the cover re-wraps live. No relayout to run.
+            bk.setForm(form);
+        }
+        return { text: `OK: ${hit.kind === 'volume' ? bk.userData.path : id ?? 'book'} → ${form}`, data: { form } };
+    }, { description: 'Set a book\'s presentation form — rolodex deck or the laid-open m×n page grid', usage: '[id] <deck|splay|toggle>' });
 
     router.register('book.move', (args, ctx) => {
         const books = ctx.agentBooks;
