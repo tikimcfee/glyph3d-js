@@ -377,6 +377,20 @@ export default class DeltaBooks {
 
     update(dt) { for (const set of this.sets.values()) set.book.update(dt); }
 
+    /**
+     * Re-apply the current cfg to every live set — the entry the Settings rows and the
+     * config verb route through (mirrors AgentBooks.applyScales). Deck knobs re-seat,
+     * every book re-fits its pages (new page geometry / face), and the cluster re-flows.
+     */
+    applyScales() {
+        for (const set of this.sets.values()) {
+            set.book.deck.zPitch = this.cfg.zPitch;
+            set.book.deck.lerp = this.cfg.pagerLerp;
+            set.book.fit(this._pageOpts(set));
+        }
+        this._relayout();
+    }
+
     dispose() {
         this.clear();
         this.scene.remove(this.root);

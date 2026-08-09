@@ -455,6 +455,14 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     world.register('deltas', state.ctx.deltaBooks.root, () => state.ctx.deltaBooks.localBounds());
     state.ctx.deltaBooks.onRelayout(() => world.relayout());
 
+    // Fold the persisted Books (shared face + cover base) and Delta Books (page geometry
+    // + deck) settings into both shelves now that agent + delta both exist — their
+    // apply()s otherwise fire only on a user change. 'Books' fans to agent + delta +
+    // library; 'Delta Books' is delta-only. (The agent-only page geometry + deck knobs
+    // were already folded above by the 'Agent Books' pass.)
+    applyGroupSettings(state.ctx, 'Books');
+    applyGroupSettings(state.ctx, 'Delta Books');
+
     // Camera-locked HUD dock: a bar of window tiles that rides the view. Reparents
     // a docked grid/terminal under itself (world-preserving attach) and scales it to
     // a tile. Shares the AttentionManager so its .docks map is the record of truth.

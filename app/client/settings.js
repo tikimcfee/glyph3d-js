@@ -8,6 +8,9 @@ import { setLabelPillStyle, LABEL_PILL_DEFAULTS } from '@glyph3d/core/MegaGlyphF
 import { setStrataParam, STRATA_DEFAULTS } from '@glyph3d/core/collections/StrataLayout.js';
 import { TERMINAL_CURSOR_DEFAULTS } from '@glyph3d/core/collections/TerminalGrid.js';
 import { JELLYFISH_DEFAULTS, LIBRARY_DEFAULTS, schemeNameOf } from '@glyph3d/core/collections/layouts/index.js';
+import { LAYER_BAND, getLayerBandOffset, setLayerBandOffset, setBandDistance, getBandDistance } from '@glyph3d/core/core/layerBands.js';
+import { AGENT_BOOKS_DEFAULTS } from '@glyph3d/core/collections/AgentBooks.js';
+import { DELTA_BOOKS_DEFAULTS } from '@glyph3d/core/collections/DeltaBooks.js';
 import { LABEL_DEFAULTS } from '@glyph3d/core/collections/ContentTreeLabels.js';
 import { MOTION_DEFAULTS } from '@glyph3d/core/collections/ContentTreeMotion.js';
 import { ARROW_DEFAULTS } from '@glyph3d/core/collections/ContentTreeArrows.js';
@@ -50,20 +53,44 @@ const farInkParam = (param) => (ctx, v) => {
  *  StrataLayout params — re-applies live to every on-screen strata view, no ctx needed. */
 const strataParam = (param) => (_ctx, v) => setStrataParam(param, v);
 
-/** apply() for an agent-books knob: push the value to AgentBooks.cfg (the bare param name, not
- *  the `book.` key) and re-apply — live cards re-scale, every sheet re-fits, the shelf re-flows. */
-const bookParam = (param) => (ctx, v) => { const b = ctx.agentBooks; if (!b) return; b.cfg[param] = v; b.applyScales?.(); };
+/** apply() for a layer-band offset dial: restyle the band's polygonOffset — every material
+ *  registered to the band (page faces / grid walls / the shared glyph material) re-biases
+ *  live, no ctx needed (see core/layerBands.js). */
+const bandParam = (band, prop) => (_ctx, v) => setLayerBandOffset(band, { [prop]: v });
+
+/** apply() for the grid-background set-back dial: store the new band distance and nudge
+ *  every live grid/terminal background by the z delta (no relayout). */
+const gridBgGapParam = (ctx, v) => {
+  setBandDistance(LAYER_BAND.GRID_BACKGROUND, v);
+  for (const t of ['grid', 'terminal'])
+    for (const e of ctx?.registry?.findByType?.(t) ?? []) e.grid?.refreshBackground?.(v);
+};
+
+/** apply() for an AGENT-book knob: push the value to AgentBooks.cfg (the bare param name,
+ *  not the `book.` key) and re-apply — live cards re-scale, every sheet re-fits, the shelf
+ *  re-flows. Agent-ONLY: the page face + cover are the shared Books base (bookPageParam /
+ *  coverParam, fanned to every owner); delta books and library volumes carry their OWN page
+ *  geometry. An agent book is a SUBSET of the Books base (it inherits face + cover) plus
+ *  these additive agent-specific knobs. */
+const agentBookParam = (param) => (ctx, v) => { const b = ctx.agentBooks; if (!b) return; b.cfg[param] = v; b.applyScales?.(); };
+
+/** apply() for a DELTA-book knob: push the value to DeltaBooks.cfg (the bare param name,
+ *  not the `delta.` key) and re-apply — every sheet re-fits, the shelf re-flows. Mirrors
+ *  agentBookParam; delta's page face + cover ride the shared Books base. */
+const deltaBookParam = (param) => (ctx, v) => { const d = ctx.deltaBooks; if (!d) return; d.cfg[param] = v; d.applyScales?.(); };
 
 /** apply() for a BOOK PAGE dial — the ONE page-face config every Book shares. Agent books
- *  and the library's volumes are the same carrier with the same rendering; only their
- *  state differs — so a page knob fans out to BOTH owners: the agent shelf's cfg (re-fit
- *  every lane) and the library scheme's layout opts (re-lay live while library shows;
- *  otherwise the stored value seeds the next activation — these defs carry
- *  scheme:'library' and their key TAILS are the layout opt names, so
- *  schemeSettingsOpts folds them in). */
+ *  and delta books are the same carrier with the same rendering (cfg key identical); the
+ *  library's volumes are too, but their page-face opts live on the layout scheme. So a page
+ *  knob fans out to ALL THREE owners: the agent shelf's cfg + the delta shelf's cfg (re-fit
+ *  every lane/set) and the library scheme's layout opts (re-lay live while library shows;
+ *  otherwise the stored value seeds the next activation — these defs carry scheme:'library'
+ *  and their key TAILS are the layout opt names, so schemeSettingsOpts folds them in). */
 const bookPageParam = (agentKey, layoutParam) => (ctx, v) => {
-  const b = ctx.agentBooks;
-  if (b) { b.cfg[agentKey] = v; b.applyScales?.(); }
+  const a = ctx.agentBooks;
+  if (a) { a.cfg[agentKey] = v; a.applyScales?.(); }
+  const d = ctx.deltaBooks;
+  if (d) { d.cfg[agentKey] = v; d.applyScales?.(); }
   const tree = ctx?.contentTree;
   if (tree && schemeNameOf(tree.layout) === 'library') {
     tree.setLayout(tree.layout, { ...(tree.layoutOpts || {}), [layoutParam]: v });
@@ -116,13 +143,15 @@ export const GROUPS = [
   { name: 'Theme & appearance', subtitle: 'code & terminal backgrounds · cursor · focus / hover / input colors' },
   { name: 'Display & glyph LOD', subtitle: 'font, atlas, width compress · minify / flicker control' },
   { name: 'Far texture (text mass)', subtitle: 'minified text-mass tier · farMode debug · mip ceiling · ink exposure' },
+  { name: 'Layer bands',        subtitle: 'z-fight control — polygon offset per layer · background set-backs' },
   { name: 'Code grids',         subtitle: 'the layout preset new grids are born with' },
   { name: 'Layout',             subtitle: 'jellyfish column · library page-scheme' },
   { name: 'Tree & labels',      subtitle: 'ownership wires · container-name plates & approach fade' },
   { name: 'Dock & frame',       subtitle: 'pinned-window tile bar · ghost slots · nameplates · view-pane' },
   { name: 'Carrel',             subtitle: 'world-anchored reading desks' },
-  { name: 'Agent Books',        subtitle: 'the agent shelf · shared page face' },
-  { name: 'Books',              subtitle: 'covers / directory boxes · page faces · page geometry' },
+  { name: 'Agent Books',        subtitle: 'the agent shelf · page geometry · deck · card scales · retention' },
+  { name: 'Books',              subtitle: 'the shared base · page faces (all shelves) · covers / directory boxes' },
+  { name: 'Delta Books',        subtitle: 'the delta shelf · page geometry · deck' },
   { name: 'Book tabs',          subtitle: 'edge tabs · stagger mode · lift off edge' },
   { name: 'Strata',             subtitle: 'nested Z-depth structure view' },
   { name: 'Motion',             subtitle: 'relayout glide' },
@@ -633,45 +662,86 @@ export const SETTINGS = [
   { key: 'far.inkPerCurve', label: 'Ink per curve', group: 'Far texture (text mass)', type: 'number', default: farInkParams.perCurve, min: 0.005, max: 0.15, step: 0.005, apply: farInkParam('perCurve') },
   { key: 'far.inkMax', label: 'Ink cap', group: 'Far texture (text mass)', type: 'number', default: farInkParams.maxCov, min: 0.1, max: 1, step: 0.02, apply: farInkParam('maxCov') },
   { key: 'far.inkBitmap', label: 'Ink (bitmap glyphs)', group: 'Far texture (text mass)', type: 'number', default: farInkParams.bitmap, min: 0.1, max: 1, step: 0.05, apply: farInkParam('bitmap') },
-  // Agent Books — the agent shelf: page geometry, deck pitch, card scales, and retention (each
-  // agent's run as a book of spreads). Every dial re-fits the live shelf via applyScales (cards
-  // re-scale, sheets re-fit, over-cap sheets shed, the cluster re-flows). Ranges are deliberately
-  // WIDE — a small positive min just keeps a value off 0/negative; the user, not us, decides
-  // what's "too big". Defaults mirror AGENT_BOOKS_DEFAULTS.
-  // No apply: the carrel sweep's auto-shelf pass reads this at each lane birth
-  // (scheduleCarrelSweep) — toggled ON it also gathers existing unseated books on
+
+  // Layer bands — the z-fight playground (docs/plans/z-order-transparency-reorg.md). The
+  // stacked translucent layers (page face → grid wall → glyphs) sit close enough that at a
+  // library vantage their geometric gaps fall under one depth-buffer step; polygonOffset
+  // biases depth in BUFFER units, so a front band wins the depth test deterministically at
+  // any distance. NEGATIVE pulls toward the camera; units are absolute buffer steps, factor
+  // scales with the quad's depth slope (matters for angled views). Defaults keep the order
+  // glyph (−2) < grid wall (−1) < page face (0); zero a band to watch the fighting return.
+  { key: 'band.faceFactor', label: 'Page face — offset slope', group: 'Layer bands', type: 'number', default: getLayerBandOffset(LAYER_BAND.PANEL_FACE).factor, min: -10, max: 10, step: 0.5, apply: bandParam(LAYER_BAND.PANEL_FACE, 'factor') },
+  { key: 'band.faceUnits', label: 'Page face — offset units', group: 'Layer bands', type: 'number', default: getLayerBandOffset(LAYER_BAND.PANEL_FACE).units, min: -10, max: 10, step: 1, apply: bandParam(LAYER_BAND.PANEL_FACE, 'units') },
+  { key: 'band.gridBgFactor', label: 'Grid wall — offset slope', group: 'Layer bands', type: 'number', default: getLayerBandOffset(LAYER_BAND.GRID_BACKGROUND).factor, min: -10, max: 10, step: 0.5, apply: bandParam(LAYER_BAND.GRID_BACKGROUND, 'factor') },
+  { key: 'band.gridBgUnits', label: 'Grid wall — offset units', group: 'Layer bands', type: 'number', default: getLayerBandOffset(LAYER_BAND.GRID_BACKGROUND).units, min: -10, max: 10, step: 1, apply: bandParam(LAYER_BAND.GRID_BACKGROUND, 'units') },
+  { key: 'band.glyphFactor', label: 'Glyphs — offset slope', group: 'Layer bands', type: 'number', default: getLayerBandOffset(LAYER_BAND.GLYPH).factor, min: -10, max: 10, step: 0.5, apply: bandParam(LAYER_BAND.GLYPH, 'factor') },
+  { key: 'band.glyphUnits', label: 'Glyphs — offset units', group: 'Layer bands', type: 'number', default: getLayerBandOffset(LAYER_BAND.GLYPH).units, min: -10, max: 10, step: 1, apply: bandParam(LAYER_BAND.GLYPH, 'units') },
+  // The geometric set-back the offset bands complement: how far a grid's background wall
+  // sits behind its text. Live-nudges every on-screen grid/terminal (no relayout).
+  { key: 'band.gridBgGap', label: 'Grid wall set-back (behind text)', group: 'Layer bands', type: 'number', default: getBandDistance(LAYER_BAND.GRID_BACKGROUND), min: 0, max: 50, step: 0.1, apply: gridBgGapParam },
+  // Agent Books — the agent shelf (each agent's run as a book of spreads). An agent book
+  // is a SUBSET of the Books base below (it inherits the shared page face + cover) plus
+  // these ADDITIVE agent-only knobs: page geometry, the deck, the card scales, and retention.
+  // Every dial re-fits the live shelf via applyScales (cards re-scale, sheets re-fit,
+  // over-cap sheets shed, the cluster re-flows). Ranges are deliberately WIDE — a small
+  // positive min just keeps a value off 0/negative; the user, not us, decides what's "too
+  // big". Defaults mirror AGENT_BOOKS_DEFAULTS.
+  // autoShelf has no apply: the carrel sweep's auto-shelf pass reads this at each lane
+  // birth (scheduleCarrelSweep) — toggled ON it also gathers existing unseated books on
   // the next agent event.
   { key: 'book.autoShelf', label: "Seat new books at the 'agents' desk", group: 'Agent Books', type: 'bool', default: true },
-  { key: 'book.maxSheets', label: 'Turns kept per book (0 = all)', group: 'Agent Books', type: 'number', default: 20, min: 0, max: 5000, step: 1, apply: bookParam('maxSheets') },
-  // Books — everything every Book shares: page geometry, the page face, and the COVER
-  // (the translucent bounding box — on library volumes that's the "directory box";
-  // on agent/delta books it's the identity + drag body). Cover dials fan out to all
-  // three cover owners (agent shelf, delta books, library volumes) and re-style live.
-  { key: 'book.pageW', label: 'Page width', group: 'Books', type: 'number', default: 320, min: 10, max: 5000, step: 10, apply: bookParam('pageW') },
-  { key: 'book.pageH', label: 'Page height', group: 'Books', type: 'number', default: 420, min: 10, max: 5000, step: 10, apply: bookParam('pageH') },
-  { key: 'book.gutter', label: 'Spread gutter (spine gap)', group: 'Books', type: 'number', default: 24, min: 0, max: 500, step: 2, apply: bookParam('gutter') },
-  { key: 'book.maxUpscale', label: 'Max content upscale', group: 'Books', type: 'number', default: 3, min: 0.1, max: 100, step: 0.1, apply: bookParam('maxUpscale') },
-  { key: 'book.zPitch', label: 'Sheet depth spacing (Z)', group: 'Books', type: 'number', default: 90, min: 1, max: 4000, step: 5, apply: bookParam('zPitch') },
-  { key: 'book.pagerLerp', label: 'Page-turn speed', group: 'Books', type: 'number', default: 9, min: 0, max: 60, step: 0.5, apply: bookParam('pagerLerp') },
-  // The page face: at 1.0 a page is FULLY OPAQUE — the face material depth-writes, so
-  // full alpha is a true occluder (the readability A/B AND the occlusion-culling occluder
-  // set — large repos in library mode are where the render time lives).
+  { key: 'book.maxSheets', label: 'Turns kept per book (0 = all)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.maxSheets, min: 0, max: 5000, step: 1, apply: agentBookParam('maxSheets') },
+  // Page geometry + deck — the AGENT card's page rect, spread spine, contain-fit cap, and
+  // the rolodex deck pitch / page-turn easing. These are the agent card's dims (delta books
+  // and library volumes carry their OWN page geometry); they live here, not in Books, so a
+  // shared-base dial isn't mistaken for one that resizes every shelf at once.
+  { key: 'book.pageW', label: 'Page width', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.pageW, min: 10, max: 5000, step: 10, apply: agentBookParam('pageW') },
+  { key: 'book.pageH', label: 'Page height', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.pageH, min: 10, max: 5000, step: 10, apply: agentBookParam('pageH') },
+  { key: 'book.gutter', label: 'Spread gutter (spine gap)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.gutter, min: 0, max: 500, step: 2, apply: agentBookParam('gutter') },
+  { key: 'book.maxUpscale', label: 'Max content upscale', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.maxUpscale, min: 0.1, max: 100, step: 0.1, apply: agentBookParam('maxUpscale') },
+  { key: 'book.zPitch', label: 'Sheet depth spacing (Z)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.zPitch, min: 1, max: 4000, step: 5, apply: agentBookParam('zPitch') },
+  { key: 'book.pagerLerp', label: 'Page-turn speed', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.pagerLerp, min: 0, max: 60, step: 0.5, apply: agentBookParam('pagerLerp') },
+  // Card scales — pre-fit proportions inside an agent page (the readable HEADLINE, the
+  // subordinate info card, the fine-print snapshot / output / prose, and the image recto).
+  { key: 'book.callScale', label: 'Headline card size', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.callScale, min: 0.05, max: 50, step: 0.1, apply: agentBookParam('callScale') },
+  { key: 'book.infoScale', label: 'Info card size', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.infoScale, min: 0.05, max: 50, step: 0.05, apply: agentBookParam('infoScale') },
+  { key: 'book.artifactWorldScale', label: 'Snapshot / output size', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.artifactWorldScale, min: 0.001, max: 5, step: 0.005, apply: agentBookParam('artifactWorldScale') },
+  { key: 'book.messageScale', label: 'Message (say / think) size', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.messageScale, min: 0.001, max: 5, step: 0.005, apply: agentBookParam('messageScale') },
+  { key: 'book.snapshotImageWidth', label: 'Image page width', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.snapshotImageWidth, min: 1, max: 2000, step: 5, apply: agentBookParam('snapshotImageWidth') },
+  // Books — the SHARED base every Book carrier wears, fanned to ALL THREE owners (agent
+  // shelf, delta shelf, library volumes): the page face + the COVER (the translucent
+  // bounding box — on library volumes that's the "directory box"; on agent/delta books
+  // it's the identity + drag body). Face + cover restyle live across every shelf at once;
+  // the scheme:'library' tag also seeds the library layout opts (re-lay live while library
+  // shows, otherwise folded in on activation — schemeSettingsOpts). coverColor is
+  // LIBRARY-ONLY: agent + delta covers carry per-lane palette hues (identity) a global tint
+  // must not clobber.
+  // The page face: at 1.0 a page is FULLY OPAQUE — the face material depth-writes, so full
+  // alpha is a true occluder (the readability A/B AND the occlusion-culling occluder set —
+  // large repos in library mode are where the render time lives).
   { key: 'books.surface', label: 'Page faces', group: 'Books', scheme: 'library', type: 'bool', default: true, apply: bookPageParam('face', 'surface') },
   { key: 'books.surfaceColor', label: 'Page color', group: 'Books', scheme: 'library', type: 'color', default: '#0a0a1e', apply: bookPageParam('faceColor', 'surfaceColor') },
   { key: 'books.surfaceOpacity', label: 'Page opacity', group: 'Books', scheme: 'library', type: 'number', default: 0.85, min: 0, max: 1, step: 0.05, apply: bookPageParam('faceOpacity', 'surfaceOpacity') },
-  // The cover / directory box. coverColor is LIBRARY-ONLY: agent + delta covers carry
-  // per-lane palette hues (identity) that a global tint must not clobber.
+  // The face's geometric set-back behind its content — the gap the Layer bands offsets
+  // complement. Fans out like the other page dials (agent cfg faceDepth + library layout opt).
+  { key: 'books.surfaceDepth', label: 'Page face set-back', group: 'Books', scheme: 'library', type: 'number', default: 8, min: 0, max: 200, step: 1, apply: bookPageParam('faceDepth', 'surfaceDepth') },
   { key: 'books.cover', label: 'Directory boxes (covers)', group: 'Books', scheme: 'library', type: 'bool', default: true, apply: coverParam('cover', 'cover') },
   { key: 'books.coverColor', label: 'Box tint (library)', group: 'Books', scheme: 'library', type: 'color', default: '#5a7ea8', apply: libraryParam('coverColor') },
   { key: 'books.coverOpacity', label: 'Box fill opacity', group: 'Books', scheme: 'library', type: 'number', default: 0.06, min: 0, max: 1, step: 0.01, apply: coverParam('coverOpacity', 'coverOpacity') },
   { key: 'books.coverEdgeOpacity', label: 'Box edge opacity', group: 'Books', scheme: 'library', type: 'number', default: 0.22, min: 0, max: 1, step: 0.01, apply: coverParam('coverEdgeOpacity', 'coverEdgeOpacity') },
   { key: 'books.coverPad', label: 'Box padding (XY)', group: 'Books', scheme: 'library', type: 'number', default: 16, min: 0, max: 400, step: 1, apply: coverParam('coverPad', 'coverPad') },
   { key: 'books.coverZPad', label: 'Box padding (Z / depth)', group: 'Books', scheme: 'library', type: 'number', default: 24, min: 0, max: 800, step: 2, apply: coverParam('coverZPad', 'coverZPad') },
-  { key: 'book.callScale', label: 'Headline card size', group: 'Agent Books', type: 'number', default: 3.0, min: 0.05, max: 50, step: 0.1, apply: bookParam('callScale') },
-  { key: 'book.infoScale', label: 'Info card size', group: 'Agent Books', type: 'number', default: 1.5, min: 0.05, max: 50, step: 0.05, apply: bookParam('infoScale') },
-  { key: 'book.artifactWorldScale', label: 'Snapshot / output size', group: 'Agent Books', type: 'number', default: 0.025, min: 0.001, max: 5, step: 0.005, apply: bookParam('artifactWorldScale') },
-  { key: 'book.messageScale', label: 'Message (say / think) size', group: 'Agent Books', type: 'number', default: 0.05, min: 0.001, max: 5, step: 0.005, apply: bookParam('messageScale') },
-  { key: 'book.snapshotImageWidth', label: 'Image page width', group: 'Agent Books', type: 'number', default: 40, min: 1, max: 2000, step: 5, apply: bookParam('snapshotImageWidth') },
+  // Delta Books — the delta shelf (each changeset as a book of before/after spreads). A
+  // delta book is the same SUBSET relationship: it inherits the Books base (page face +
+  // cover) plus these ADDITIVE delta-only knobs — its OWN page geometry + deck (wider code
+  // pages, beside the agent card's). Every dial re-fits the live shelf via applyScales.
+  // Defaults mirror DELTA_BOOKS_DEFAULTS.
+  { key: 'delta.pageW', label: 'Page width', group: 'Delta Books', type: 'number', default: DELTA_BOOKS_DEFAULTS.pageW, min: 10, max: 5000, step: 10, apply: deltaBookParam('pageW') },
+  { key: 'delta.pageH', label: 'Page height', group: 'Delta Books', type: 'number', default: DELTA_BOOKS_DEFAULTS.pageH, min: 10, max: 5000, step: 10, apply: deltaBookParam('pageH') },
+  { key: 'delta.gutter', label: 'Spread gutter (spine gap)', group: 'Delta Books', type: 'number', default: DELTA_BOOKS_DEFAULTS.gutter, min: 0, max: 500, step: 2, apply: deltaBookParam('gutter') },
+  { key: 'delta.maxUpscale', label: 'Max content upscale', group: 'Delta Books', type: 'number', default: DELTA_BOOKS_DEFAULTS.maxUpscale, min: 0.1, max: 100, step: 0.1, apply: deltaBookParam('maxUpscale') },
+  { key: 'delta.zPitch', label: 'Sheet depth spacing (Z)', group: 'Delta Books', type: 'number', default: DELTA_BOOKS_DEFAULTS.zPitch, min: 1, max: 4000, step: 5, apply: deltaBookParam('zPitch') },
+  { key: 'delta.pagerLerp', label: 'Page-turn speed', group: 'Delta Books', type: 'number', default: DELTA_BOOKS_DEFAULTS.pagerLerp, min: 0, max: 60, step: 0.5, apply: deltaBookParam('pagerLerp') },
   // Strata — the nested Z-depth structure view (structure.strata). Every dial is LIVE: a
   // change re-applies to the on-screen strata immediately (boxOpacity rides a shader uniform;
   // the rest re-derive positions/boxes). Borders should recede behind the glyphs — drop
