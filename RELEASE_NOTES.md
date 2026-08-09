@@ -1,3 +1,25 @@
+## What's new on main (unreleased)
+
+**Minified text is prefiltered mass, not strobing strokes.** The far LOD is no
+longer a content-blind block: every file gets a small GPU-generated texture —
+average syntax color × ink density per texel, computed by two new pipeline
+kernels from the byte lanes the layout already owns — that the fragment samples
+with an explicit mip level in place of the old impostor. Distant text stops
+fuzzing, moiré-ing, and blinking in and out; it dims physically (colors are
+linearized before averaging, so mips conserve ink energy) and keeps its syntax
+pattern. Per-glyph color became a stride-4 storage lane so compute and vertex
+fetch share one buffer. New `glyph.farBias` dial; `tools/far-texels-check.mjs`
+gates the kernels bit-exact against their oracles.
+
+**Emoji handling, three ways healed.** Runtime-sighted emoji finally get their
+glyph-map entries (they were structurally invisible before), the emoji atlas
+re-creates its GPU texture when it grows (cells past the old size garbled),
+and the pipeline's trie now heals whenever shaping outruns it — an encoded-
+but-unknown codepoint no longer sticks `F_MISSING` for the whole session.
+Slug-core cache bumps to format v2 so stale cores rebuild clean. And a subtle
+one: decode re-zeroes the edit slack's size lanes every run, so backspaced
+content can't ghost at its old position.
+
 ## What's new in v0.2.1
 
 v0.2.0 served one directory; v0.2.1 makes the whole filesystem selectable —

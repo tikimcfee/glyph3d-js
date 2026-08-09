@@ -29,7 +29,7 @@ import {
     If, cross,
 } from 'three/tsl';
 
-import { SLOT_STRIDE, S_GLYPH_ID, S_ADVANCE, S_HEIGHT, S_X } from '../compute/glyphPipelineReference.js';
+import { SLOT_STRIDE, S_GLYPH_ID, S_ADVANCE, S_HEIGHT, S_X, S_ROW, S_COL } from '../compute/glyphPipelineReference.js';
 
 /**
  * Render modes. Used in two places with the SAME numbers: the per-instance
@@ -148,17 +148,24 @@ export function buildGlyphVertexTransform({ glyphMapTex, glyphMapWidth, renderMo
     // read at instanceIndex × SLOT_STRIDE (the mega-field spans the whole arena, so
     // instance index == arena byte offset == slot index; a grid's presence is a group).
     // Read-only storage in the vertex stage is core WebGPU. Non-leader byte slots carry
-    // zeroed lanes: size (0,0) collapses the quad to a point — invisible, unpickable.
-    let iPos, iSize, iGlyphId;
+    // zeroed size lanes — decode re-zeroes S_ADVANCE/S_HEIGHT every run (a rewritten
+    // range's edit slack was a real glyph last run) — so size (0,0) collapses the quad
+    // to a point: invisible, unpickable.
+    let iPos, iSize, iGlyphId, iRowCol;
     if (byteSlots) {
         const base = int(instanceIndex).mul(int(SLOT_STRIDE));
         iPos     = vec4(byteSlots.element(base.add(int(S_X))), byteSlots.element(base.add(int(S_X + 1))), byteSlots.element(base.add(int(S_X + 2))), float(0));
         iSize    = vec2(byteSlots.element(base.add(int(S_ADVANCE))), byteSlots.element(base.add(int(S_HEIGHT))));
         iGlyphId = byteSlots.element(base.add(int(S_GLYPH_ID)));
+        // The glyph's exact grid position (apply's integer lanes) — the fragment's
+        // far-texture UV rides this. Non-byte fields have no grid truth → (0,0),
+        // which their hasSlab=0 far-group texel turns back into the impostor path.
+        iRowCol  = vec2(byteSlots.element(base.add(int(S_ROW))), byteSlots.element(base.add(int(S_COL))));
     } else {
         iPos     = attribute('instancePosition', 'vec4');
         iSize    = attribute('instanceSize',     'vec2');
         iGlyphId = attribute('instanceGlyphId',  'float');
+        iRowCol  = vec2(0);
     }
     const iGroup   = attribute('instanceGroupId',  'float');
 
@@ -225,5 +232,5 @@ export function buildGlyphVertexTransform({ glyphMapTex, glyphMapWidth, renderMo
         iPos.y.greaterThan(gClip.x).or(iPos.y.lessThan(gClip.y))),
         () => { outClip.assign(OFF()); });
 
-    return { clipPos: outClip, vMode, glyphInfo, vEmojiCell, gColor, gScale };
+    return { clipPos: outClip, vMode, glyphInfo, vEmojiCell, gColor, gScale, iRowCol, iGroup };
 }

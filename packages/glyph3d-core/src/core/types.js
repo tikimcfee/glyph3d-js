@@ -73,7 +73,8 @@
  *     instancePosition  vec4  (x, y, z world position + padding lane; stride-4 as bound)
  *     instanceSize      vec2  (width, height of the quad)
  *     instanceGlyphId   float (HarfBuzz glyph ID, indexes glyphMapTexture)
- *     instanceColor     vec3  (r, g, b, 0-1)
+ *     instanceColor     vec4  (r, g, b, 0-1 + padding lane; stride-4 storage class —
+ *                              the far-scatter kernel binds it as a compute view)
  *     instanceGroupId   float (row index into group DataTexture)
  * - 4 texture bindings:
  *     curveTexture     RGBA16UI nearest  — quadratic bezier control points (2 texels/curve)

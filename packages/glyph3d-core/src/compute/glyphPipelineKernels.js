@@ -72,11 +72,13 @@
  * the old walk there is no "within f32 accumulation noise" carve-out for fold > 0 x.
  */
 
-import { TSL } from 'three/webgpu';
+import { TSL, StorageInstancedBufferAttribute } from 'three/webgpu';
 import {
     SLOT_STRIDE, S_CODEPOINT, S_GLYPH_ID, S_ADVANCE, S_HEIGHT,
     S_X, S_Y, S_Z, S_ROW, S_COL, S_FLAGS, S_BASE_X, S_LINE_ADV, S_ORD,
     F_LEADER, F_RENDERED, F_MISSING, NEWLINE,
+    FAR_TEX, FAR_SLAB, FAR_ITEM_STRIDE, FAR_FIXED,
+    FI_SLAB_X, FI_SLAB_Y, FI_ROWS_PER_TEXEL, FI_COLS_PER_TEXEL, FI_DIRTY,
     ITEM_STRIDE, I_ORIGIN_X, I_ORIGIN_Y, I_ORIGIN_Z,
     I_PAGE_ROWS, I_PAGE_COLS, I_PAGES_WIDE, I_PAGE_GAP_X,
     I_BAND_STRIDE_Y, I_DEPTH_PER_BAND, I_DEPTH_PER_COL, I_SCROLL_ROWS,
@@ -87,7 +89,8 @@ import { BLOCK_SHIFT, BLOCK_MASK, ENTRY_STRIDE, LANE_GLYPH_ID, LANE_ADVANCE, LAN
 
 const {
     Fn, If, Loop, Break, Return, uniform, instancedArray, instanceIndex,
-    int, uint, float, atomicMin, atomicMax, atomicAdd, atomicLoad, bitcast,
+    int, uint, float, atomicMin, atomicMax, atomicAdd, atomicLoad, atomicStore, bitcast,
+    storage, vec3,
 } = TSL;
 
 /**
@@ -231,6 +234,23 @@ export default class GlyphPipelineKernels {
         this.itemTable = instancedArray(this.maxItems * ITEM_STRIDE, 'float').setName('GlyphItemTable');
         this.itemStarts = instancedArray(this.maxItems, 'uint').setName('GlyphItemStarts');
 
+        // ── Far-texture (the minified text-mass LOD) — see the FAR block in ────────
+        // glyphPipelineReference.js. farItems/farDirtyList are CPU-ARMED per regen batch
+        // (slab origin, rows/cols per texel, dirty flag); farAccum is the fixed-point
+        // uint atomic the scatter adds into; farPacked is the normalize's RGBA8 output
+        // the CPU reads back and blits into the sampled atlas texture. farInk (gid →
+        // ink density) and farColors (a storage view of the mega-field's instanceColor
+        // attribute) are EXTERNAL sources handed in post-construction — so the two far
+        // kernels build LAZILY at the first runFar, closing over the REAL nodes.
+        this.farItems = instancedArray(this.maxItems * FAR_ITEM_STRIDE, 'float').setName('GlyphFarItems');
+        this.farDirtyList = instancedArray(this.maxItems, 'uint').setName('GlyphFarDirtyList');
+        this.farAccum = instancedArray(FAR_TEX * FAR_TEX * 4, 'uint').setName('GlyphFarAccum').toAtomic();
+        this.farPacked = instancedArray(FAR_TEX * FAR_TEX, 'uint').setName('GlyphFarPacked');
+        this.farInk = instancedArray(1, 'float').setName('GlyphFarInk');
+        this._farColorAttr = new StorageInstancedBufferAttribute(new Float32Array(4), 4);
+        this._kFarScatter = null;
+        this._kFarNormalize = null;
+
         // Node names don't reach the GPU; ATTRIBUTE names do (three passes attribute.name
         // as the GPUBuffer label) — so Dawn errors name the buffer instead of "(unlabeled)".
         for (const node of this._allNodes()) node.value.name = node.name;
@@ -250,6 +270,10 @@ export default class GlyphPipelineKernels {
             itemCount:  uniform(1, 'uint'),
             chunkCount: uniform(1, 'uint'),
             superCount: uniform(1, 'uint'),
+            // Far-texture: dirty items this regen batch (× FAR_SLAB² = normalize width)
+            // and the ink table's live size (the scatter's gid guard).
+            farDirtyCount: uniform(0, 'uint'),
+            farInkCount:  uniform(0, 'uint'),
         };
 
         this._kDecode = this._buildDecode();
@@ -268,13 +292,15 @@ export default class GlyphPipelineKernels {
         return [this.byteWords, this.slots, this.trieIndex, this.trieBlocks,
             this.partials, this.partialPrefix, this.supers, this.superPrefix, this.ordToByte,
             this.itemBoxes, this.foldScalars, this.itemStrides,
-            this.misses, this.missCount, this.itemTable, this.itemStarts];
+            this.misses, this.missCount, this.itemTable, this.itemStarts,
+            this.farItems, this.farDirtyList, this.farAccum, this.farPacked, this.farInk];
     }
 
     /** @private */
     _allKernels() {
         return [this._kDecode, this._kChunkReduce, this._kSpineReduce, this._kSpineScan,
-            this._kPartialScan, this._kApply, this._kResolveX, this._kStrides, this._kPaginate];
+            this._kPartialScan, this._kApply, this._kResolveX, this._kStrides, this._kPaginate,
+            this._kFarScatter, this._kFarNormalize].filter(Boolean);
     }
 
     /** byteAt(i) — unpack from the 4-per-word packing. */
@@ -311,7 +337,15 @@ export default class GlyphPipelineKernels {
             // setFiles — the old lockup at scale): every byte's flags lane is GPU-written
             // every run, so stale content from a previous, larger load can't ghost.
             If(n.equal(int(0)), () => {
-                slots.element(id.mul(uint(SLOT_STRIDE)).add(uint(S_FLAGS))).assign(float(0));
+                const o0 = id.mul(uint(SLOT_STRIDE));
+                slots.element(o0.add(uint(S_FLAGS))).assign(float(0));
+                // Zero the SIZE lanes too, making the non-leader invariant EXPLICIT:
+                // the vertex culls by size (0,0) without checking flags, and a
+                // rewritten range's 0x80 edit slack was a real glyph last run. (The
+                // invariant already held via buffer refresh, but it held silently —
+                // these writes make it true by construction, not by side effect.)
+                slots.element(o0.add(uint(S_ADVANCE))).assign(float(0));
+                slots.element(o0.add(uint(S_HEIGHT))).assign(float(0));
                 Return();
             });
 
@@ -1076,6 +1110,208 @@ export default class GlyphPipelineKernels {
         }
         this.byteWords.value.needsUpdate = true;
         return this;
+    }
+
+    /**
+     * KERNEL 10a — thread per byte. FAR SCATTER: add each rendered glyph's (linearized
+     * color × ink density, ink density) into its slab texel's fixed-point accumulators.
+     * Reads apply's S_ROW/S_COL + decode's S_GLYPH_ID (previous dispatches — the race
+     * invariant), plus three CPU-written sources: the farItems lanes (slab origin,
+     * rows/cols per texel, dirty flag — unarmed items return), the gid→ink table, and a
+     * storage view of the mega-field's instanceColor. Writes ONLY atomics — texels
+     * receive from many threads, so fixed-point atomicAdd (WGSL has no atomic f32);
+     * bounded: even a pathological 1M-row file sums ≤ ~2²⁵ per channel ≪ 2³².
+     * @private
+     */
+    _buildFarScatter() {
+        const u = this._u;
+        const S = this.slots;
+        const fi = this.farItems;
+        const itemSearch = this._buildItemSearch();
+        return Fn(() => {
+            const id = instanceIndex;
+            If(id.greaterThanEqual(u.byteLength), () => { Return(); });
+            const o = id.mul(uint(SLOT_STRIDE)).toVar('fO');
+            const flags = int(S.element(o.add(uint(S_FLAGS))));
+            If(flags.bitAnd(int(F_LEADER | F_RENDERED)).notEqual(int(F_LEADER | F_RENDERED)), () => { Return(); });
+
+            const item = itemSearch(id).toVar('fItem');
+            const fb = item.mul(uint(FAR_ITEM_STRIDE)).toVar('fB');
+            const slabX = int(fi.element(fb.add(uint(FI_SLAB_X)))).toVar('fSlabX');
+            If(slabX.lessThan(int(0)), () => { Return(); });
+            If(fi.element(fb.add(uint(FI_DIRTY))).lessThan(float(0.5)), () => { Return(); });
+
+            const gid = uint(S.element(o.add(uint(S_GLYPH_ID)))).toVar('fGid');
+            const d = float(0).toVar('fD');
+            If(gid.lessThan(u.farInkCount), () => { d.assign(this.farInk.element(gid)); });
+
+            const slabY = int(fi.element(fb.add(uint(FI_SLAB_Y)))).toVar('fSlabY');
+            const rpt = fi.element(fb.add(uint(FI_ROWS_PER_TEXEL)));
+            const cpt = fi.element(fb.add(uint(FI_COLS_PER_TEXEL)));
+            const tx = int(S.element(o.add(uint(S_COL))).div(cpt)).clamp(int(0), int(FAR_SLAB - 1));
+            const ty = int(S.element(o.add(uint(S_ROW))).div(rpt)).clamp(int(0), int(FAR_SLAB - 1));
+            const texel = slabY.add(ty).mul(int(FAR_TEX)).add(slabX).add(tx);
+            const ab = uint(texel).mul(uint(4)).toVar('fAB');
+
+            // Linearize BEFORE accumulating (the reference oracle mirrors this): colors
+            // are authored sRGB, and energy-correct sums are what lets the mip chain dim
+            // minified text physically instead of gamma-crushing it to black.
+            const c = this._farColorsNode.element(id).xyz.pow(vec3(2.2));
+            const fixed = float(FAR_FIXED);
+            atomicAdd(this.farAccum.element(ab.add(uint(0))), uint(c.x.mul(d).mul(fixed)));
+            atomicAdd(this.farAccum.element(ab.add(uint(1))), uint(c.y.mul(d).mul(fixed)));
+            atomicAdd(this.farAccum.element(ab.add(uint(2))), uint(c.z.mul(d).mul(fixed)));
+            atomicAdd(this.farAccum.element(ab.add(uint(3))), uint(d.mul(fixed)));
+        })().compute(1).setName('glyphFarScatter');
+    }
+
+    /**
+     * KERNEL 10b — thread per dirty slab texel (dirtyCount × FAR_SLAB²). FAR NORMALIZE:
+     * fixed-point sums → packed RGBA8 in farPacked (the CPU blits it into the sampled
+     * atlas). rgb = ink-weighted average color (Σc·d / Σd); alpha = ink mass per GRID
+     * cell (Σd / (rowsPerTexel·colsPerTexel)) — empty cells (short lines, blank space)
+     * correctly dilute coverage. Then RESETS the accumulator: slabs are always
+     * regenerated whole, so the next batch starts from zero (the self-cleaning
+     * invariant — scatter and normalize gate on the SAME dirty flags/list).
+     * @private
+     */
+    _buildFarNormalize() {
+        const u = this._u;
+        const fi = this.farItems;
+        const acc = this.farAccum;
+        return Fn(() => {
+            const slot = instanceIndex;
+            If(slot.greaterThanEqual(u.farDirtyCount.mul(uint(FAR_SLAB * FAR_SLAB))), () => { Return(); });
+            const di = slot.div(uint(FAR_SLAB * FAR_SLAB));
+            const t = slot.mod(uint(FAR_SLAB * FAR_SLAB));
+            const ty = t.div(uint(FAR_SLAB));
+            const tx = t.mod(uint(FAR_SLAB));
+
+            const item = this.farDirtyList.element(di);
+            const fb = item.mul(uint(FAR_ITEM_STRIDE));
+            const slabX = uint(int(fi.element(fb.add(uint(FI_SLAB_X)))));
+            const slabY = uint(int(fi.element(fb.add(uint(FI_SLAB_Y)))));
+            const rpt = fi.element(fb.add(uint(FI_ROWS_PER_TEXEL)));
+            const cpt = fi.element(fb.add(uint(FI_COLS_PER_TEXEL)));
+            const texel = slabY.add(ty).mul(uint(FAR_TEX)).add(slabX).add(tx);
+            const ab = texel.mul(uint(4)).toVar('nAB');
+
+            const rS = atomicLoad(acc.element(ab.add(uint(0)))).toFloat();
+            const gS = atomicLoad(acc.element(ab.add(uint(1)))).toFloat();
+            const bS = atomicLoad(acc.element(ab.add(uint(2)))).toFloat();
+            const dS = atomicLoad(acc.element(ab.add(uint(3)))).toFloat();
+            // Self-clean: the pass boundary ordered us after this batch's scatter and
+            // before the next batch's, so a plain atomicStore reset is race-free.
+            atomicStore(acc.element(ab.add(uint(0))), uint(0));
+            atomicStore(acc.element(ab.add(uint(1))), uint(0));
+            atomicStore(acc.element(ab.add(uint(2))), uint(0));
+            atomicStore(acc.element(ab.add(uint(3))), uint(0));
+
+            const alpha = dS.div(rpt.mul(cpt).mul(float(FAR_FIXED)));
+            const inv = dS.greaterThan(float(0)).select(float(1).div(dS), float(0));
+            const pack = (v) => uint(v.clamp(0, 1).mul(255).add(0.5));
+            this.farPacked.element(texel).assign(
+                pack(rS.mul(inv))
+                    .bitOr(pack(gS.mul(inv)).shiftLeft(uint(8)))
+                    .bitOr(pack(bS.mul(inv)).shiftLeft(uint(16)))
+                    .bitOr(pack(alpha).shiftLeft(uint(24)))
+            );
+        })().compute(1).setName('glyphFarNormalize');
+    }
+
+    /**
+     * The gid → ink-density table (Float32Array, indexed by glyphId). Replaces the
+     * buffer wholesale — CONSTRUCTION-TIME ONLY: the far kernels close over the node
+     * at their lazy first build, so after that point this must not be called again
+     * (atlas growth rebuilds the whole kernel set — the arena's realloc path).
+     * @param {Float32Array} table
+     */
+    setFarInk(table) {
+        const n = Math.max(1, table?.length | 0);
+        this.farInk = instancedArray(n, 'float').setName('GlyphFarInk');
+        if (table) this.farInk.value.array.set(table.subarray(0, n));
+        this.farInk.value.needsUpdate = true;
+        this._u.farInkCount.value = table ? n : 0;
+        return this;
+    }
+
+    /**
+     * Hand the far scatter a compute-readable view of the mega-field's instanceColor
+     * attribute (a StorageInstancedBufferAttribute — vertex fetch keeps working, both
+     * bind the same buffer). Idempotent; identity only changes at arena realloc, where
+     * the whole kernel set (and its bind groups) is rebuilt anyway.
+     * @param {StorageInstancedBufferAttribute} attr
+     */
+    setFarColorSource(attr) {
+        if (attr) this._farColorAttr = attr;
+        return this;
+    }
+
+    /**
+     * Arm a regen batch: the full farItems lane array (itemCount × FAR_ITEM_STRIDE —
+     * slab origin, rows/cols per texel, dirty flag), the dirty item rows, and their
+     * count. Scatter and normalize both read THIS state, so a batch always scatters
+     * exactly the slabs it normalizes (the self-cleaning invariant).
+     * @param {Float32Array} farItems @param {Uint32Array} dirtyList @param {number} dirtyCount
+     */
+    setFarItems(farItems, dirtyList, dirtyCount) {
+        this.farItems.value.array.set(farItems.subarray(0, this.maxItems * FAR_ITEM_STRIDE));
+        this.farItems.value.needsUpdate = true;
+        this.farDirtyList.value.array.set(dirtyList.subarray(0, this.maxItems));
+        this.farDirtyList.value.needsUpdate = true;
+        this._u.farDirtyCount.value = Math.max(0, dirtyCount | 0);
+        return this;
+    }
+
+    /** Build the far kernels on first use — they close over the EXTERNAL sources
+     *  (ink table, color attribute) handed in post-construction. @private */
+    _ensureFarKernels() {
+        if (this._kFarScatter) return;
+        this._farColorsNode = storage(this._farColorAttr, 'vec4', this.maxBytes)
+            .toReadOnly().setName('GlyphFarColors');
+        this._kFarScatter = this._buildFarScatter();
+        this._kFarNormalize = this._buildFarNormalize();
+    }
+
+    /**
+     * The far-texture regen batch: scatter every rendered glyph of every dirty item,
+     * then normalize (and reset) each dirty slab. No-op when nothing is armed.
+     * Dispatches back to back — normalize reads only scatter's writes (pass boundary).
+     */
+    runFar() {
+        if (this._u.farDirtyCount.value === 0) return this;
+        this.runFarScatter();
+        this.runFarNormalize();
+        return this;
+    }
+
+    /** Far scatter only (the parity path — the accum must be read BEFORE normalize
+     *  resets it; production calls runFar). */
+    runFarScatter() {
+        this._ensureFarKernels();
+        this._kFarScatter.count = Math.max(1, this.byteLength);
+        this.renderer.compute(this._kFarScatter);
+        return this;
+    }
+
+    /** Far normalize only (see runFarScatter). */
+    runFarNormalize() {
+        this._ensureFarKernels();
+        this._kFarNormalize.count = Math.max(1, this._u.farDirtyCount.value * FAR_SLAB * FAR_SLAB);
+        this.renderer.compute(this._kFarNormalize);
+        return this;
+    }
+
+    /** @returns {Promise<Uint32Array>} the full fixed-point far accumulator (the parity path). */
+    async readFarAccum() {
+        const raw = await this.renderer.getArrayBufferAsync(this.farAccum.value, null, 0, FAR_TEX * FAR_TEX * 4 * 4);
+        return new Uint32Array(raw, 0, FAR_TEX * FAR_TEX * 4);
+    }
+
+    /** @returns {Promise<Uint32Array>} the full packed RGBA8 far atlas (the blit source). */
+    async readFarPacked() {
+        const raw = await this.renderer.getArrayBufferAsync(this.farPacked.value, null, 0, FAR_TEX * FAR_TEX * 4);
+        return new Uint32Array(raw, 0, FAR_TEX * FAR_TEX);
     }
 
     /** Size every dispatch to the live byte/item counts. @private */
