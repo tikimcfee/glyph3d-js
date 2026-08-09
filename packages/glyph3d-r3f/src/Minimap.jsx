@@ -4,6 +4,8 @@ import * as THREE from 'three/webgpu';
 import { worldBounds } from '@glyph3d/core/services';
 import { useGridRegistry } from './context.jsx';
 
+const _rsize = new THREE.Vector2();
+
 /**
  * <Minimap> — a 3D overview HUD: a schematic of the whole space in a corner, with the
  * user's camera drawn as a moving frustum-cone so position + heading read at a glance.
@@ -205,10 +207,16 @@ export default function Minimap({
       M.apex.scale.setScalar(cs * 0.06);
 
       // 2) minimap pass — scissored corner viewport (logical px, y from bottom).
-      const w = Math.round(size.width * fraction);
-      const h = Math.round(size.height * fraction);
-      const x = size.width - w - margin;
+      // Measured off the RENDERER's live size, not r3f's store: resizes apply at
+      // the frame boundary (GlyphCanvas defers them), so the store can lead the
+      // actual targets by a frame — a scissor computed from it lands out of
+      // bounds (validation error). Degenerate sizes (dock transients) skip.
+      const rsize = gl.getSize(_rsize);
+      const w = Math.round(rsize.width * fraction);
+      const h = Math.round(rsize.height * fraction);
+      const x = rsize.width - w - margin;
       const y = margin;
+      if (!(w > 4) || !(h > 4)) return;
       M.mcam.aspect = w / h;
       M.mcam.updateProjectionMatrix();
 
@@ -217,10 +225,10 @@ export default function Minimap({
       gl.setScissor(x, y, w, h);
       gl.render(M.mscene, M.mcam);            // autoClear clears just this region to bg
       gl.setScissorTest(false);
-      gl.setViewport(0, 0, size.width, size.height);
+      gl.setViewport(0, 0, gl.getSize(_rsize).width, _rsize.height);
     } catch (err) {
       gl.setScissorTest(false);
-      gl.setViewport(0, 0, size.width, size.height);
+      gl.setViewport(0, 0, gl.getSize(_rsize).width, _rsize.height);
       if (!M._warned) { M._warned = true; console.warn('[Minimap] render skipped:', err); }
     }
   }, 1); // positive priority → we own the render loop while mounted

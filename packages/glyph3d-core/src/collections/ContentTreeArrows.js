@@ -45,6 +45,26 @@ import { uniform } from 'three/tsl';
 import { LineSegments2 } from 'three/addons/lines/webgpu/LineSegments2.js';
 import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
+
+/**
+ * Line2NodeMaterial's transparent branch composites against
+ * viewportOpaqueMipTexture() — a full-canvas framebuffer COPY + mip chain
+ * EVERY frame, and in three r185 that FramebufferTexture's binding goes stale
+ * on a canvas resize: "Destroyed texture … used in a submit", a validation
+ * storm per resize with wires in the scene (the relay log 2026-08-08).
+ * Thin translucent wires want plain alpha blending, not opaque-pass
+ * transmission — mask the flag DURING THE NODE-GRAPH BUILD ONLY, so the
+ * material keeps its transparent-pass sorting and blend state but never
+ * builds the framebuffer-grab branch. Re-check on every three bump.
+ */
+class WireLineMaterial extends Line2NodeMaterial {
+    setupDiffuseColor(builder) {
+        const wasTransparent = this.transparent;
+        this.transparent = false;
+        try { super.setupDiffuseColor(builder); }
+        finally { this.transparent = wasTransparent; }
+    }
+}
 import { partitionChildren, leafBox, subtreeContentBounds, visibleDepth } from './layouts/nodeUtils.js';
 
 // Ivan's field-tested dials (2026-08-01, refined same day): a WIDE bus margin and a
@@ -140,10 +160,10 @@ export default class ContentTreeArrows {
         const key = Math.round(width * 100) / 100;
         let mat = this._thickMats.get(key);
         if (!mat) {
-            mat = new Line2NodeMaterial({ vertexColors: true });
+            mat = new WireLineMaterial({ vertexColors: true });
             mat.worldUnits = true;
             mat.linewidth = key;
-            mat.transparent = true;       // r184 composites against the opaque pass
+            mat.transparent = true;       // transparent-pass sort/blend; the grab branch is masked (see WireLineMaterial)
             mat.opacity = this.opts.opacity;
             mat.depthWrite = false;
             this._thickMats.set(key, mat);

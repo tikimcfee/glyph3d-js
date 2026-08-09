@@ -1,5 +1,5 @@
 import React from 'react';
-import { Canvas } from '@react-three/fiber';
+import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three/webgpu';
 import { setComputeRenderer, setPipelineArena } from '@glyph3d/core/compute/GlyphLayoutCompute.js';
 import GlyphPipelineArena from '@glyph3d/core/compute/GlyphPipelineArena.js';
@@ -49,6 +49,55 @@ async function _pipelineLimits(glProps) {
   } catch {
     return {};
   }
+}
+
+/**
+ * Defer out-of-frame renderer resizes to the START of the next frame.
+ *
+ * A WebGPU canvas resize DESTROYS the canvas-sized color/depth targets and
+ * recreates them — and r3f applies `gl.setSize` from a React effect (its
+ * ResizeObserver → store → effect), i.e. mid-task, outside the render loop.
+ * Under a dock-divider drag that lands between frames whose encoded command
+ * buffers still reference the old texture: "Destroyed texture … used in a
+ * submit", a validation-error burst per resize (a continuous drag = an
+ * every-frame storm; see the relay log 2026-08-08). Queuing the size and
+ * applying it as the FIRST thing in the frame makes destroy → recreate →
+ * render one synchronous run that no in-flight command buffer can straddle —
+ * the ecosystem-standard shape for WebGPU resize.
+ *
+ * The wrap installs once per renderer instance (gl factory). One frame of
+ * stale size during a drag is invisible; the initial r3f setSize defers to
+ * the first frame, which is a no-op because the canvas backing was already
+ * baked to that exact size at construction (see the component note below).
+ */
+function _deferResizeToFrame(renderer) {
+  const applySize = renderer.setSize.bind(renderer);
+  let pending = null;
+  renderer.setSize = (w, h, updateStyle) => {
+    // A dock layout transition can measure the canvas host at 0 for a beat —
+    // applying that would destroy the canvas targets and recreate them
+    // DEGENERATE (the destroyed-texture / zero-scissor storm). Drop it loudly;
+    // the next real measurement lands normally.
+    if (!(w > 0) || !(h > 0)) {
+      console.warn(`[glyph3d] ignoring degenerate canvas resize ${w}×${h} (dock layout transient)`);
+      return;
+    }
+    pending = [w, h, updateStyle];
+  };
+  renderer.__flushPendingResize = () => {
+    if (!pending) return;
+    const p = pending;
+    pending = null;
+    applySize(...p);
+  };
+}
+
+/** Runs before everything else in the frame (most-negative priority) — the
+ *  one place a deferred resize is safe to land. */
+function ResizeFrameGate() {
+  const { gl } = useThree();
+  useFrame(() => { gl.__flushPendingResize?.(); }, -10000);
+  return null;
 }
 
 /**
@@ -155,11 +204,13 @@ export default function GlyphCanvas({
         } catch (err) {
           console.error('[glyph3d] BYTE PIPELINE UNAVAILABLE — grids will not lay out:', err?.message || err);
         }
+        _deferResizeToFrame(renderer);
         onRenderer?.(renderer, glProps);
         return renderer;
       }}
     >
       <GlyphProvider atlas={atlas}>
+        <ResizeFrameGate />
         {children}
       </GlyphProvider>
     </Canvas>
