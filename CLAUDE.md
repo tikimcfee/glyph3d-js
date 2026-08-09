@@ -136,6 +136,18 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
 - **Terminals** are tmux-backed (socket `tmux -L glyphd`, sessions `glyph-<id>`) via
   forked adapter subprocesses; they render as `TerminalGrid`s and re-adopt across
   reloads. See the `saved-state` and `terminal-control-subsystem` memories.
+- **Sensor plane** — capture devices (an iPhone running the `motion-source-ios`
+  MotionSource app) connect to the relay with a `SOURCE <kind>` handshake, a third
+  client role beside `DISPLAY` and controllers. **Many may attach at once**, each
+  with its own id (`src-hand-0`). The relay is schema-blind: it stamps provenance
+  and forwards `{event:'source.frame', source, kind, data}` on the display's
+  existing socket, with **drop-oldest** backpressure (frames are perishable — queue
+  depth is a latency ceiling, not a buffer). Browser side, `SourceStream`
+  (`services/orchestration`) owns presence + decode + liveness, and `HandPresence`
+  (`hand/`) draws one `HandRenderer` per device, sampled **pull-style** once per
+  rendered frame. Verbs: `hand.list` / `hand.status` / `hand.show` / `hand.hide` /
+  `hand.place`, plus relay-resident `source.list` (answers with no display
+  connected). Gesture→verb binding is not built yet.
 - **All glyph metrics come from the atlas at runtime** — never hardcode character
   dimensions.
 

@@ -41,7 +41,7 @@ export { RepositoryContentCache } from './data/RepositoryContentCache.js';
 export { HeatmapProvider } from './data/HeatmapProvider.js';
 
 // Orchestration
-export { HandGestureAdapter } from './orchestration/HandGestureAdapter.js';
 export { default as CommandRouter } from './orchestration/CommandRouter.js';
+export { default as SourceStream } from './orchestration/SourceStream.js';
 export { default as ViewerAPI } from './orchestration/ViewerAPI.js';
 export { default as WebSocketBridge } from './orchestration/WebSocketBridge.js';

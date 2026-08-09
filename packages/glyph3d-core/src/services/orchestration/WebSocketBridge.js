@@ -80,6 +80,11 @@ export default class WebSocketBridge {
         // is transport-only — byte/terminal semantics register here (terminal OUTPUT).
         this._binaryHandlers = new Map();
 
+        // Sensor plane: device attach/detach + frames. Same transport-only stance
+        // as the binary handlers — SourceStream registers here to give the
+        // envelopes meaning.
+        this._sourceListeners = new Set();
+
         if (options.autoConnect !== false) {
             this.connect();
         }
@@ -216,6 +221,26 @@ export default class WebSocketBridge {
         this._lastEmitted = state;
         for (const fn of this._connectionListeners) {
             try { fn(state); } catch (e) { console.error('[ws-bridge] connection listener threw:', e); }
+        }
+    }
+
+    /**
+     * Subscribe to the sensor plane: `source_connected`, `source_disconnected`,
+     * and `source.frame` envelopes from the relay. The bridge stays schema-blind
+     * here exactly as the relay does — it delivers envelopes and lets SourceStream
+     * decide what a `handFrame` means.
+     * @param {(envelope: {event: string, sourceId?: string, source?: string, kind?: string, data?: Object}) => void} fn
+     * @returns {() => void} unsubscribe
+     */
+    onSourceEvent(fn) {
+        this._sourceListeners.add(fn);
+        return () => this._sourceListeners.delete(fn);
+    }
+
+    /** @private */
+    _emitSource(envelope) {
+        for (const fn of this._sourceListeners) {
+            try { fn(envelope); } catch (e) { console.error('[ws-bridge] source listener threw:', e); }
         }
     }
 
@@ -576,9 +601,24 @@ export default class WebSocketBridge {
             return;
         }
 
-        // Registration ack from relay
+        // Registration ack from relay. `sources` lists sensor devices that were
+        // already streaming before this page loaded — replayed as connect events
+        // so a reload re-adopts them without the device knowing anything happened.
         if (envelope.ok !== undefined) {
             console.log('[ws-bridge] registered as display');
+            for (const src of envelope.sources || []) {
+                this._emitSource({ event: 'source_connected', sourceId: src.id, kind: src.kind });
+            }
+            return;
+        }
+
+        // Sensor plane: device attach/detach and the frames themselves. Frames are
+        // high-rate (~30fps per device) and land before the command path so they
+        // never pay for command dispatch.
+        if (envelope.event === 'source.frame' ||
+            envelope.event === 'source_connected' ||
+            envelope.event === 'source_disconnected') {
+            this._emitSource(envelope);
             return;
         }
 

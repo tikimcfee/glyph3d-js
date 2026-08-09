@@ -162,3 +162,59 @@ export function landmarkDistance(a, b) {
     const dz = a.z - b.z;
     return Math.sqrt(dx * dx + dy * dy + dz * dz);
 }
+
+/**
+ * Decode a device `handFrame` payload into canonical HandFrames.
+ *
+ * This is the wire contract with the capture device (MotionSource on iOS today):
+ * landmarks arrive as `[x, y, z]` tuples, and the ARKit `scene` block rides along
+ * on the same message. Decoding is a pure function of the payload so it can be
+ * unit-tested without a socket and reused by any transport — the network side
+ * owns delivery, this owns meaning.
+ *
+ * `scene` is optional per-message: a device may send it once and omit it after,
+ * so callers pass the last-known scene as `carriedScene` to keep every frame
+ * self-contained for downstream consumers.
+ *
+ * @param {Object} payload - The device message (must be type `handFrame`)
+ * @param {SceneContext|null} [carriedScene] - Last-known scene, used when the payload omits one
+ * @returns {{frames: HandFrame[], scene: SceneContext|null}|null} null if not a hand frame
+ */
+export function decodeHandFrame(payload, carriedScene = null) {
+    if (!payload || payload.type !== 'handFrame' || !Array.isArray(payload.hands)) return null;
+
+    const scene = payload.scene || carriedScene || null;
+    const timestamp = typeof payload.timestamp === 'number' ? payload.timestamp : 0;
+
+    const frames = payload.hands.map((hand) => {
+        const raw = Array.isArray(hand?.landmarks) ? hand.landmarks : [];
+        const landmarks = raw.map((lm) => (
+            Array.isArray(lm)
+                ? { x: lm[0] || 0, y: lm[1] || 0, z: lm[2] || 0 }
+                : { x: lm?.x || 0, y: lm?.y || 0, z: lm?.z || 0 }
+        ));
+        const frame = { handedness: hand?.handedness || 'right', landmarks, timestamp };
+        if (scene) frame.scene = scene;
+        return frame;
+    });
+
+    return { frames, scene };
+}
+
+/**
+ * Decode a device `cameraFrame` payload — the low-rate JPEG preview that rides
+ * the same stream as hand data.
+ *
+ * @param {Object} payload
+ * @returns {CameraFrame|null} null if not a camera frame
+ */
+export function decodeCameraFrame(payload) {
+    if (!payload || payload.type !== 'cameraFrame' || !payload.image) return null;
+    return {
+        image: payload.image,
+        width: payload.width || 0,
+        height: payload.height || 0,
+        timestamp: typeof payload.timestamp === 'number' ? payload.timestamp : 0,
+        orientation: payload.orientation || null,
+    };
+}

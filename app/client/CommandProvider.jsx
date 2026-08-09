@@ -5,6 +5,8 @@ import { useGridRegistry } from '@glyph3d/r3f';
 
 import CommandRouter from '@glyph3d/core/services/orchestration/CommandRouter.js';
 import WebSocketBridge from '@glyph3d/core/services/orchestration/WebSocketBridge.js';
+import SourceStream from '@glyph3d/core/services/orchestration/SourceStream.js';
+import HandPresence from '@glyph3d/core/hand/HandPresence.js';
 import AgentBooks from '@glyph3d/core/collections/AgentBooks.js';
 import DeltaBooks from '@glyph3d/core/collections/DeltaBooks.js';
 import { installConsoleForwarder } from '@glyph3d/core/services/orchestration/consoleForwarder.js';
@@ -261,6 +263,10 @@ function DockRunner({ stateRef }) {
       c.contentTreeLabels?.reanchor();
     }
     c?.contentTreeLabels?.update(state.camera, dt, c?.attentionManager?.state?.hover?.id ?? null);
+    // Sample each capture device's latest pose and park the hand rig on the live
+    // camera. Pull, not push: devices stream at their own rate and the scene
+    // samples once per rendered frame.
+    c?.handPresence?.update(state.camera);
   });
   return null;
 }
@@ -562,6 +568,22 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       showStatus: false,
     });
     state.ctx.wsbridge = bridge;
+
+    // Sensor plane: capture devices (an iPhone running MotionSource) connect to the
+    // relay with a `SOURCE hand` handshake and push landmark frames on the display's
+    // existing socket. SourceStream gives the frames meaning; HandPresence draws one
+    // skeleton per device — many devices can stream at once, so hands are keyed by
+    // source id rather than assuming a single global hand.
+    //
+    // Both are created unconditionally: they're inert with no device attached, and
+    // building them eagerly means a phone that connects mid-session is picked up
+    // without any further wiring.
+    state.ctx.sourceStream = new SourceStream({ bridge });
+    state.ctx.handPresence = new HandPresence({
+      stream: state.ctx.sourceStream,
+      camera: state.ctx.camera,
+      scene,
+    });
     // LSP client: present whenever the bridge is, but only functional against a
     // relay started with a project root (the relay gates lsp/* on --root).
     state.ctx.lsp = new RemoteLspProvider(bridge);
@@ -754,6 +776,12 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       state.ctx.pickingSystem = null;
       state.ctx.agentBooks?.dispose();
       state.ctx.agentBooks = null;
+      // Presence first: it detaches hand groups from the camera, which must
+      // happen before the stream that feeds it goes away.
+      state.ctx.handPresence?.dispose();
+      state.ctx.handPresence = null;
+      state.ctx.sourceStream?.dispose();
+      state.ctx.sourceStream = null;
       state.ctx.interactionContext?.dispose();
       state.ctx.interactionContext = null;
       if (state.ctx.cameraDock) {

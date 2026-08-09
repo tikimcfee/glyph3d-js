@@ -74,11 +74,16 @@ class ViewportRenderer {
     set scale(v) { this._scale = v; this._applyGroupTransform(); }
 
     /**
-     * Attach as child of camera
-     * @param {THREE.Camera} camera
+     * Parent under `parent`, whose space is treated as camera-local.
+     *
+     * NOT the camera itself: `render(scene, camera)` traverses only the scene, so
+     * a camera outside the scene graph never has its children drawn. Pass a
+     * scene-resident rig that follows the camera (see HandPresence).
+     *
+     * @param {THREE.Object3D} parent
      */
-    attachToCamera(camera) {
-        camera.add(this.group);
+    attachTo(parent) {
+        parent.add(this.group);
     }
 
     /**

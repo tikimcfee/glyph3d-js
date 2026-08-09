@@ -194,11 +194,18 @@ class HandRenderer {
     set scale(v) { this._scale = v; this._applyGroupTransform(); }
 
     /**
-     * Attach as a child of the camera
-     * @param {THREE.Camera} camera
+     * Parent the hand under `parent`, whose space is treated as camera-local:
+     * `depth` places the hand along -Z from the parent's origin.
+     *
+     * NOT the camera itself. `renderer.render(scene, camera)` only traverses the
+     * SCENE, so anything parented to a camera that isn't in the scene graph
+     * updates every frame and is never drawn — invisible with no error. Pass a
+     * rig that lives in the scene and follows the camera (see HandPresence).
+     *
+     * @param {THREE.Object3D} parent
      */
-    attachToCamera(camera) {
-        camera.add(this.group);
+    attachTo(parent) {
+        parent.add(this.group);
     }
 
     /**
@@ -229,9 +236,21 @@ class HandRenderer {
         hand.group.visible = true;
 
         const landmarks = frame.landmarks;
-        if (!landmarks || landmarks.length < JOINT_COUNT) return;
+        if (!landmarks || landmarks.length < JOINT_COUNT) {
+            // Silent-drop guard. A short frame renders nothing at all, which looks
+            // identical to "no device connected" — the single most confusing
+            // failure in this pipeline. Warn once per renderer rather than per
+            // frame, since a mismatched source would storm at 30fps.
+            if (!this._warnedShortFrame) {
+                this._warnedShortFrame = true;
+                console.warn(`[hand] frames carry ${landmarks?.length ?? 0} landmarks, need ${JOINT_COUNT} — nothing will draw`);
+            }
+            return;
+        }
 
+        this._lastFrame = frame;
         const mapped = this._mapLandmarks(landmarks);
+        this._lastMapped = mapped;
 
         // Build validity mask — landmark at default (0,0,0) means untracked
         const valid = new Uint8Array(JOINT_COUNT);

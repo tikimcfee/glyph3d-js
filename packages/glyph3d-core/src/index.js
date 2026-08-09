@@ -79,10 +79,12 @@ export {
     Finger,
     createEmptyFrame,
     landmarkDistance,
+    decodeHandFrame,
+    decodeCameraFrame,
     HandRenderer,
+    HandPresence,
     GestureDetector,
     WebcamHandSource,
-    WebSocketHandSource,
     MockHandSource,
     ViewportRenderer,
 } from './hand/index.js';
