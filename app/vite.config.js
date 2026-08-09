@@ -73,6 +73,10 @@ export default defineConfig({
     exclude: ['@glyph3d/core', '@glyph3d/r3f'],
     include: ['@xterm/headless/lib-headless/xterm-headless.mjs'],
   },
+  // Workers bundle as ES modules, matching how they're spawned ({ type: 'module' }).
+  // The default 'iife' can't code-split, and the parse worker's graph code-splits by
+  // design: TreeSitterEngine lazy-loads web-tree-sitter via dynamic import.
+  worker: { format: 'es' },
   server: {
     // Port is env-overridable so an isolated worktree (e.g. experiment/gpu-sweep)
     // can run its own dev server alongside main's without colliding. Defaults to
