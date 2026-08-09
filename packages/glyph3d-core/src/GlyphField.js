@@ -45,6 +45,8 @@ const {
     fwidth,
     Discard,
     storage,
+    hash,
+    screenCoordinate,
 } = TSL;
 
 /** Upper bound on quadratic beziers per glyph (TSL loop cap). */
@@ -102,6 +104,12 @@ export const FAR_GROUP_COLS = 2;
  *                     blurrier), − sharpens. The sample's explicit level comes from the far-UV
  *                     footprint in uniform flow — never implicit LOD inside a branch (the
  *                     atlas-map lesson: non-uniform flow clamps to mip 0 → the same moiré).
+ *   ditherSpan      — below this alpha, glyphs fade out as a stable screen-door STIPPLE
+ *                     (density ∝ alpha) instead of hitting a binary discard cliff. The cliff
+ *                     is a hard verdict on camera-float noise: whole glyphs (or coherent
+ *                     stripes of them) blink in/out at sub-pixel footprints and grazing
+ *                     angles. The hash is screen-space and frame-stable, so a still camera
+ *                     gives a still pattern; 0 disables the fade band entirely (cliff at 0).
  */
 export const GLYPH_LOD_DEFAULTS = Object.freeze({
     dilatePx: 0.75, soften: 0.45,
@@ -110,6 +118,7 @@ export const GLYPH_LOD_DEFAULTS = Object.freeze({
     density: 0.035, maxCov: 0.72,
     lodAxisBias: 0,
     farBias: 0,
+    ditherSpan: 0.02,
 });
 
 const LOD_UNIFORMS = Object.fromEntries(
@@ -478,14 +487,21 @@ function _buildOutputNode(varyings, uniforms) {
             // into a seamless bar. One draw, analytic composite, no extra pass.
             const isFill = vFillAmount.greaterThan(float(0));
 
-            // A TINT cell with no ink is empty → discard (the legacy cov<0.01 cull). A FILL cell
-            // is never coverage-empty (the bar IS the point) → only cull when even the fill is clear.
-            Discard(isFill.select(vFillAmount, cov).lessThan(0.01));
-
-            // alpha: a FILL cell is opaque to at least its fill opacity even ink-free; a TINT cell
-            // (vFillAmount=0) reduces to cov, since max(cov,0)=cov. Then × group visibility.
+            // ── The alpha gate is a hashed STIPPLE, not a cliff ─────────────────────
+            // A hard `alpha < 0.01` discard is a binary verdict on a signal that, at
+            // sub-pixel footprints and grazing angles, IS camera-float noise: whole
+            // glyphs (or a coherent stripe of them — same row, same footprint, same
+            // flip) blank in and out frame to frame. Below ditherSpan, alpha now fades
+            // as a screen-door stipple whose density tracks alpha (a 0.005 glyph keeps
+            // ~25% of its pixels, stably) instead of blinking; at/above the span every
+            // fragment renders exactly as before. Screen-space hash → a still camera
+            // gives a still pattern; exact zero still hard-drops (the empty-cell and
+            // invisible-group fast paths).
+            const dither = hash(screenCoordinate.x.add(screenCoordinate.y.mul(4096)));
+            const DITHER_SPAN = LOD_UNIFORMS.ditherSpan;
             const outAlpha = cov.max(vFillAmount).mul(vGroupAlpha);
-            Discard(outAlpha.lessThan(0.01));
+            Discard(outAlpha.equal(float(0)));
+            Discard(outAlpha.lessThan(dither.mul(DITHER_SPAN)));
 
             // vAddedColor coefficient: TINT adds it fully (k=1); FILL lerps fill→ink by coverage,
             // i.e. k=(1−cov) so cov=0 is pure fill and cov=1 is pure ink. Explicit lerp — NOT TSL

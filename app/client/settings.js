@@ -589,6 +589,8 @@ export const SETTINGS = [
   { key: 'glyph.density', label: 'Block ink density', group: 'Display & glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.density, min: 0.005, max: 0.15, step: 0.005, apply: lodParam('density') },
   { key: 'glyph.maxCov', label: 'Block max coverage', group: 'Display & glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.maxCov, min: 0.1, max: 1, step: 0.02, apply: lodParam('maxCov') },
   { key: 'glyph.lodAxisBias', label: 'Block axis bias (0 best→1 worst)', group: 'Display & glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.lodAxisBias, min: 0, max: 1, step: 0.05, apply: lodParam('lodAxisBias') },
+  { key: 'glyph.farBias', label: 'Far-texture mip bias', group: 'Display & glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.farBias, min: -2, max: 4, step: 0.1, apply: lodParam('farBias') },
+  { key: 'glyph.ditherSpan', label: 'Stipple fade span (alpha)', group: 'Display & glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.ditherSpan, min: 0, max: 0.2, step: 0.005, apply: lodParam('ditherSpan') },
   // Agent Books — the agent shelf: page geometry, deck pitch, card scales, and retention (each
   // agent's run as a book of spreads). Every dial re-fits the live shelf via applyScales (cards
   // re-scale, sheets re-fit, over-cap sheets shed, the cluster re-flows). Ranges are deliberately
