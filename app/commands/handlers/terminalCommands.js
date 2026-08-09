@@ -5,7 +5,9 @@
  * terminal.bytes push to the owning adapter. These verbs manage lifecycle + layout.
  *
  * Control verbs:
- *   terminal.spawn  [cols] [rows]            (ask relay to fork an adapter)
+ *   terminal.spawn  [cols] [rows]            (ask relay to fork an adapter; the new
+ *                                             terminal docks, pins into the focus
+ *                                             pane, and takes keyboard focus)
  *   terminal.create <id> [cols] [rows] [--scale N]
  *   terminal.resize <id> <cols> <rows>       (grid + emulator + adapter PTY in lockstep)
  *   terminal.ping   <id>                     (liveness probe → re-adopt trigger)
@@ -24,6 +26,31 @@ import { encodeBase64, decodeBase64 } from '@glyph3d/core/utils/encoding.js';
 import { createLogger } from '@glyph3d/core/utils/Logger.js';
 
 const log = createLogger('terminal');
+
+/**
+ * Await a terminal's arrival in the registry — the "added and ready" callback for
+ * terminal.spawn. The registry fires its change listeners synchronously on register,
+ * and terminal.create wires the grid + input BEFORE registering, so the awaited
+ * terminal is fully manipulable when this resolves. One-shot: the listener removes
+ * itself on arrival or timeout, so a never-created terminal can't leak it.
+ * @param {Object} registry - SceneRegistry (get/addChangeListener/removeChangeListener)
+ * @param {string} id
+ * @param {number} [timeoutMs=15000]
+ * @returns {Promise<boolean>} true when the terminal arrived, false on timeout
+ */
+function waitForTerminal(registry, id, timeoutMs = 15000) {
+    if (registry.get(id)) return Promise.resolve(true);
+    return new Promise((resolve) => {
+        const done = (arrived) => {
+            clearTimeout(timer);
+            registry.removeChangeListener(onChange);
+            resolve(arrived);
+        };
+        const onChange = () => { if (registry.get(id)) done(true); };
+        const timer = setTimeout(() => done(false), timeoutMs);
+        registry.addChangeListener(onChange);
+    });
+}
 
 /**
  * Lazily initialise the terminal registry map on ctx.
@@ -49,8 +76,14 @@ export default function registerTerminalCommands(router) {
     //   host process, so this sends a {relay:"terminal.spawn"} message the relay
     //   handles server-side; the terminal appears once the forked adapter connects
     //   and runs terminal.create + frames. (This is the "+ terminal" button's verb.)
+    //   The verb then AWAITS its own terminal — the relay's `terminal.spawning` ack
+    //   hands back the id, the registry's change event is the "added and ready"
+    //   callback — and docks + pins (spotlights) + focuses it. Per-spawn promises,
+    //   no shared state:
+    //   parallel spawns each pair with their own ack, and a restore-time re-adopt
+    //   (terminal.create with no spawn) never docks or steals focus.
     // ------------------------------------------------------------------
-    router.register('terminal.spawn', (args, ctx) => {
+    router.register('terminal.spawn', async (args, ctx) => {
         const bridge = ctx.wsbridge;
         if (!bridge || !bridge.connected || typeof bridge.send !== 'function') {
             return { text: 'ERR: not connected to the relay — terminal.spawn needs the Go server to fork an adapter', data: null };
@@ -60,12 +93,47 @@ export default function registerTerminalCommands(router) {
         const rows = parseInt(args[1], 10);
         if (!isNaN(cols) && cols > 0) msg.cols = cols;
         if (!isNaN(rows) && rows > 0) msg.rows = rows;
+
+        // Full spawn flow: await the ack (the id), await the terminal, dock + focus.
+        if (typeof bridge.waitForEvent === 'function' && ctx.registry) {
+            const ackPromise = bridge.waitForEvent('terminal.spawning', 5000);
+            bridge.send(JSON.stringify(msg));
+            const ack = await ackPromise;
+            if (!ack?.id) {
+                return {
+                    text: 'OK: requested terminal spawn (no ack from the relay — it will appear undocked)',
+                    data: { requested: true, cols: msg.cols ?? null, rows: msg.rows ?? null },
+                };
+            }
+            const arrived = await waitForTerminal(ctx.registry, ack.id);
+            if (!arrived) {
+                return {
+                    text: `OK: terminal '${ack.id}' spawning — the adapter hasn't connected yet; it will appear undocked`,
+                    data: { requested: true, id: ack.id },
+                };
+            }
+            // Compose the verbs (don't reach into dock/attention internals) so spawn
+            // behaves exactly like typing them at the CLI: lock into the dock, then
+            // PIN it — spotlight raises the tile into the dock's focus pane (the
+            // modal "new terminal tab": centered, enlarged, keyboard-live; its verb
+            // sets primary + key itself). terminal.focus is the no-dock fallback
+            // (headless), an idempotent re-set of the same slots otherwise.
+            await router.execute(`dock.lock ${ack.id}`);
+            await router.execute(`dock.spotlight ${ack.id}`);
+            await router.execute(`terminal.focus ${ack.id}`);
+            return {
+                text: `OK: terminal '${ack.id}' spawned — pinned in the dock + focused`,
+                data: { id: ack.id, docked: true, pinned: true, focused: true },
+            };
+        }
+
+        // A bridge without event waiters (mocks) — fire and forget, undocked.
         bridge.send(JSON.stringify(msg));
         return {
             text: 'OK: requested terminal spawn (relay is forking an adapter)',
             data: { requested: true, cols: msg.cols ?? null, rows: msg.rows ?? null },
         };
-    }, { description: 'Ask the relay to fork a terminal adapter — a real shell in the canvas', usage: '[cols] [rows]' });
+    }, { description: 'Ask the relay to fork a terminal adapter — a real shell in the canvas, pinned in the dock + focused when it lands', usage: '[cols] [rows]' });
 
     // ------------------------------------------------------------------
     // terminal.recover

@@ -52,6 +52,12 @@ export default class WebSocketBridge {
         this._rpcPending = new Map();  // id -> { resolve, reject, timer }
         this._rpcNotificationHandler = null;
 
+        // One-shot relay-event waiters: event name → FIFO queue of { resolve, timer }.
+        // terminal.spawn awaits its `terminal.spawning` ack through here — a promise
+        // per spawn instead of shared intent state. FIFO matches the relay's serial
+        // per-socket message processing, so parallel spawns pair with their acks.
+        this._eventWaiters = new Map();
+
         // Stats
         this._commandsReceived = 0;
         this._commandsSent = 0;
@@ -220,6 +226,40 @@ export default class WebSocketBridge {
      */
     setRpcNotificationHandler(fn) {
         this._rpcNotificationHandler = fn;
+    }
+
+    /**
+     * Await the next relay event of a given name — one-shot, FIFO per name. Resolves
+     * with the event envelope, or null on timeout (the waiter removes itself either
+     * way, so a never-fired event can't leak). `client_connected`/`client_disconnected`
+     * are reserved for the bridge's own bookkeeping and never reach waiters.
+     * @param {string} event
+     * @param {number} [timeoutMs=10000]
+     * @returns {Promise<Object|null>}
+     */
+    waitForEvent(event, timeoutMs = 10000) {
+        return new Promise((resolve) => {
+            const entry = { resolve: (payload) => { clearTimeout(entry.timer); resolve(payload); }, timer: null };
+            entry.timer = setTimeout(() => {
+                const q = this._eventWaiters.get(event);
+                if (q) {
+                    const i = q.indexOf(entry);
+                    if (i !== -1) q.splice(i, 1);
+                }
+                resolve(null);
+            }, timeoutMs);
+            let q = this._eventWaiters.get(event);
+            if (!q) this._eventWaiters.set(event, (q = []));
+            q.push(entry);
+        });
+    }
+
+    /** @private — hand an event envelope to its oldest waiter. True when consumed. */
+    _dispatchEvent(envelope) {
+        const waiter = this._eventWaiters.get(envelope.event)?.shift();
+        if (!waiter) return false;
+        waiter.resolve(envelope);
+        return true;
     }
 
     /**
@@ -563,6 +603,11 @@ export default class WebSocketBridge {
             console.log(`[ws-bridge] controller disconnected: ${envelope.clientId}`);
             return;
         }
+
+        // One-shot event waiters (terminal.spawn awaiting its `terminal.spawning`
+        // ack, carrying the id the forked adapter will register under) — resolved
+        // FIFO, matching the relay's serial per-socket processing.
+        if (envelope.event && this._dispatchEvent(envelope)) return;
 
         // Command from a controller
         if (envelope.from && envelope.cmd) {
