@@ -18,9 +18,11 @@
  *   book.limit  [id] [n|all|default]            get/set ONE book's kept-turns cap (overrides the
  *                                               shelf default, cfg.maxSheets; 'all' keeps every turn)
  *
- * Paging resolves an AGENT book first (by agent id, or the first lane when omitted),
- * else a TREE book by path — a one-sheet file book pages trivially today and grows
- * into real page-turning as file books gain sheets. The file library's page dims stay
+ * Addressed paging resolves an AGENT book first (by agent id), else a TREE book by
+ * path — a one-sheet file book pages trivially today and grows into real page-turning
+ * as file books gain sheets. A BARE verb acts on what you're LOOKING AT (the strata
+ * idiom): the focused volume — the selected file's parent volume, or the cover you
+ * clicked — else the first agent lane. The file library's page dims stay
  * layout-scheme opts (`layout.scheme library --page-w …`); book.config dials the agent
  * shelf's cfg (page dims, deck pitch, card scales, faces, covers).
  */
@@ -32,15 +34,35 @@ import { findCarrelOwner, unseat } from './carrelCommands.js';
 const r2 = (n) => Math.round(n * 100) / 100;
 const _drop = new THREE.Vector3();
 
+/** The FOCUSED volume — the strata idiom for books: a bare book verb acts on what
+ *  you're looking at. attention.primary resolves through the owners' LOOKUPS (never
+ *  id surgery): a volume's own registry entry carries the volume as its object; a
+ *  focused file's durable book may be riding a volume right now — walk up to it. */
+function focusedVolume(ctx) {
+    const id = ctx.attentionManager?.get?.('primary')?.id;
+    if (!id) return null;
+    const entry = ctx.registry?.get?.(id);
+    if (entry?.grid?.userData?.isVolume) return entry.grid;
+    for (let n = ctx.contentTree?.bookAt?.(id); n; n = n.parent) {
+        if (n.userData?.isVolume) return n;
+    }
+    return null;
+}
+
 /** An agent lane (any address it answers to — lane id, registry group id, the
- *  `agent:<id>` display label, or the first lane when omitted), a library VOLUME
- *  (by its directory path), or a tree book (by file path) — or null.
+ *  `agent:<id>` display label), a library VOLUME (by its directory path), or a tree
+ *  book (by file path) — or null. BARE (no id): the FOCUSED volume first (the file
+ *  or cover you've selected — the strata idiom), else the first agent lane.
  *
  *  Every agent form resolves inside AgentBooks.resolveLane by LOOKUP + field
  *  check — no prefix surgery here. (A blind `agent:` strip once mutilated the
  *  wheel's `agent:book:<id>` group ids into nonsense and the covers stopped
  *  turning; the id-space owner is the only party fit to read its own addresses.) */
 function resolveBook(ctx, id) {
+    if (!id) {
+        const vol = focusedVolume(ctx);
+        if (vol) return { kind: 'volume', book: vol };
+    }
     const books = ctx.agentBooks;
     const hit = books?.resolveLane?.(id);
     if (hit) return { kind: 'agent', books, agentId: hit[0], book: hit[1].book };

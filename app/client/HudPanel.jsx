@@ -7,7 +7,8 @@ import { DEFAULT_LAYOUT } from '@glyph3d/core/workers/builders/index.js';
  * (bottom-right by default, draggable), it shows controls for the ONE grid that currently holds attention.primary
  * — the genuinely dynamic, contextual bit that doesn't fit a static panel:
  *
- *   focus / reset / cam-lock · layout mode · edit toggle (lit = editing) · scroll/frame readout · close
+ *   focus / reset / cam-lock · dir-volume splay⇄collapse (when one is in play) ·
+ *   layout mode · edit toggle (lit = editing) · scroll/frame readout · close
  *
  * It is NOT the open-file list — that's the FileTree (loaded rows + ✕ + the focused accent).
  * The HUD owns no behavior: each control is a thin binding of { fire: a bus verb, reflect: live
@@ -45,11 +46,24 @@ function readFocus(client) {
   const { id, grid, type } = entry;
   const isGrid = typeof grid.getLayout === 'function';   // duck-type: terminals lack getLayout
   const cc = client.ctx.cameraController;
+  // The VOLUME in play — the same resolution a bare book verb runs (the strata idiom):
+  // the focused entity itself, or the volume the focused file's book is riding.
+  const tree = client.ctx.contentTree;
+  let volume = grid.userData?.isVolume ? grid : null;
+  if (!volume && tree?.bookAt) {
+    for (let n = tree.bookAt(id); n; n = n.parent) {
+      if (n.userData?.isVolume) { volume = n; break; }
+    }
+  }
   return {
     id,
     type: type || (isGrid ? 'grid' : 'window'),
-    name: grid.getFilename?.() || id,
+    name: grid.getFilename?.() || grid.userData?.name || id,
     isGrid,
+    volume: volume ? {
+      path: volume.userData.path, name: volume.userData.name,
+      form: volume.form, head: volume.head, count: volume.sheets.length,
+    } : null,
     layoutMode: isGrid ? inferMode(grid.getLayout?.()) : null,
     scroll: isGrid ? (grid.getScrollOffset?.() ?? 0) : 0,
     total: isGrid ? (grid.getTotalVisualRows?.() ?? 0) : 0,
@@ -145,6 +159,19 @@ export default function HudPanel({ client }) {
                 onClick={() => fire('grid.close', f.id)}>close ✕</button>
             )}
           </div>
+          {/* The dir volume in play (the focused file's, or the focused cover itself):
+              deck ⇄ splay — the button names the ACTION, the lit state means splayed. */}
+          {f.volume && (
+            <div style={S.row}>
+              <Toggle on={f.volume.form === 'splay'}
+                onClick={() => fire('book.form', f.volume.path, f.volume.form === 'splay' ? 'deck' : 'splay')}>
+                {f.volume.form === 'splay' ? 'collapse ▧' : 'splay ▦'}
+              </Toggle>
+              <span style={S.readout} title={f.volume.path}>
+                {short(f.volume.name, 14)} · page {f.volume.head + 1}/{f.volume.count}
+              </span>
+            </div>
+          )}
           {f.isGrid && (
             <>
               <div style={S.row}>

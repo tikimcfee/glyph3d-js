@@ -53,5 +53,55 @@ ok(books.headState('agent:scribe')?.agentId === 'scribe', 'headState accepts the
 ok(books.moveGroup(undefined, 0, 0, 0) === false, 'moveGroup refuses an unnamed book (no default-to-first)');
 ok(books.moveGroup('agent:book:sentry', 1, 2, 3) === true, 'moveGroup accepts a group id');
 
+// ── the BARE verb acts on what you're LOOKING AT (the strata idiom) ──────────────
+// book.form with no id resolves the FOCUSED volume: the selected file's parent
+// volume (walk up the book's parents), or the focused cover's own registry entry —
+// else the first agent lane. Locked at the handler level with the real registration.
+{
+    const { default: registerBookCommands } = await import('../app/commands/handlers/bookCommands.js');
+    const handlers = {};
+    registerBookCommands({ register: (name, fn) => { handlers[name] = fn; } });
+
+    const dirNode = { userData: {} };
+    const volume = {
+        userData: { isVolume: true, isBook: true, path: '/repo/tools' },
+        form: 'deck', head: 0, sheets: [{}, {}], following: false,
+        parent: dirNode,
+        setForm(f) { this.form = f; return this; },
+        headState() { return { head: this.head, count: this.sheets.length, following: this.following }; },
+    };
+    const fileBook = { userData: { isBook: true, path: '/repo/tools/a.js' }, parent: { userData: { isBookInternal: true }, parent: volume } };
+    let relaid = 0;
+    const mkCtx = (primaryId, entry) => ({
+        agentBooks: books,
+        attentionManager: { get: (slot) => (slot === 'primary' && primaryId ? { id: primaryId } : null) },
+        registry: { get: (id) => (entry && id === primaryId ? entry : null) },
+        contentTree: {
+            volumeAt: (p) => (p === '/repo/tools' ? volume : null),
+            bookAt: (p) => (p === '/repo/tools/a.js' ? fileBook : null),
+            relayoutAndRest: () => { relaid++; },
+        },
+    });
+
+    // A focused FILE inside a volume: bare book.form targets the parent volume.
+    let r = handlers['book.form'](['splay'], mkCtx('/repo/tools/a.js'));
+    ok(r.text.startsWith('OK') && dirNode.userData.volumeForm === 'splay' && relaid === 1,
+        'bare book.form: the focused file resolves its PARENT volume (persist + relayout)');
+    // A focused COVER (the volume's own registry entry) resolves itself.
+    dirNode.userData.volumeForm = undefined;
+    r = handlers['book.form'](['deck'], mkCtx('vol:/repo/tools', { grid: volume }));
+    ok(r.text.startsWith('OK') && dirNode.userData.volumeForm === 'deck' && relaid === 2,
+        'bare book.form: a focused cover resolves its own volume');
+    // Nothing focused: falls to the first agent lane — a shelf book setForms live, no relayout.
+    r = handlers['book.form'](['splay'], mkCtx(null));
+    ok(r.text.startsWith('OK') && laneA.book.form === 'splay' && relaid === 2,
+        'bare book.form: no focus falls to the first agent lane (live setForm, no relayout)');
+    laneA.book.setForm('deck');
+    // The addressed form is untouched by focus: an explicit dir path wins regardless.
+    r = handlers['book.form'](['/repo/tools', 'toggle'], mkCtx('/repo/tools/a.js'));
+    ok(r.text.startsWith('OK') && dirNode.userData.volumeForm === 'splay' && relaid === 3,
+        'addressed book.form: an explicit path resolves by volumeAt, toggle flips');
+}
+
 console.log(`\nbook-resolve.test: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
