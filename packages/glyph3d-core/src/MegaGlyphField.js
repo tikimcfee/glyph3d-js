@@ -34,13 +34,16 @@
  */
 
 import * as THREE from 'three';
-import { StorageInstancedBufferAttribute } from 'three/webgpu';
+import { StorageInstancedBufferAttribute, IndirectStorageBufferAttribute } from 'three/webgpu';
 import GlyphField from './GlyphField.js';
 import PanelField from './collections/PanelField.js';
 
 const _pos = new THREE.Vector3();
 const _quat = new THREE.Quaternion();
 const _scl = new THREE.Vector3();
+const _frustum = new THREE.Frustum();
+const _projScreen = new THREE.Matrix4();
+const _cullBox = new THREE.Box3();
 
 export class MegaGlyphField {
     /**
@@ -96,12 +99,29 @@ export class MegaGlyphField {
         this.panels = new PanelField({ scene, field: this.field });
         if (this._pickingSystem) this.panels.registerPicking(this._pickingSystem);
 
+        // RANGE CULLING (the visibility lane): the mega mesh submits one indirect
+        // draw RECORD per live view range — {indexCount:6, instanceCount:len,
+        // firstIndex:0, baseVertex:0, firstInstance:slotBase}. instance_index
+        // starts at firstInstance, so the slot==index address space survives with
+        // ZERO shader changes; per frame a CPU frustum test of each view's AABB
+        // picks which records to submit (geometry.indirectOffset — read live at
+        // draw-encode time, so an onBeforeRender write lands the same frame).
+        // Without this, every staged byte ran the full vertex fold every frame
+        // (15.5M instances × ~7 loads × 4 verts at workspace scale) — degenerate
+        // culling happens AFTER the vertex shader, so off-screen cost ≈ on-screen.
+        this._indirect = null;            // { attr, capacity } — 5-uint records
+        this._indirectOffsets = [];       // reused per frame (byte offsets)
+        this._indirectState = null;       // null=undetected, true=armed, false=unsupported (loud)
+
         // The pose sweep: before each render, any view whose node moved re-poses its
         // group texel. matrixWorld is current here (three's updateMatrixWorld runs at
         // render start); an unchanged 16-float compare is the whole per-view cost.
         // Hooked on BOTH meshes — panels draw first (background renderOrder), so the
         // sweep must land before whichever draw the pass reaches first.
-        this.field.instanceMesh.onBeforeRender = () => this._syncPoses();
+        this.field.instanceMesh.onBeforeRender = (renderer, _scene, camera) => {
+            this._syncPoses();
+            this._cullRanges(renderer, camera);
+        };
         this.panels.mesh.onBeforeRender = () => this._syncPoses();
     }
 
@@ -308,29 +328,136 @@ export class MegaGlyphField {
         };
     }
 
-    /** @private write one node's decomposed matrixWorld to its group texel (16-float compare gate). */
+    /** @private write one node's decomposed matrixWorld to its group texel (16-float compare gate).
+     *  @returns {boolean} whether the matrix changed this sweep */
     _poseFromNode(node, groupId, m) {
         const el = node.matrixWorld.elements;
         let same = true;
         for (let i = 0; i < 16; i++) if (m[i] !== el[i]) { same = false; break; }
-        if (same) return;
+        if (same) return false;
         m.set(el);
         node.matrixWorld.decompose(_pos, _quat, _scl);
         this.field.setGroupOffset(groupId, _pos);
         this.field.setGroupQuaternion(groupId, _quat);
         this.field.setGroupScale(groupId, _scl);
+        return true;
     }
 
     /** @private */
     _syncPoses() {
         for (const view of this.views) {
             if (!view.node || view.dead || view.byteCount <= 0) continue;
-            this._poseFromNode(view.node, view.groupId, view._mat);
+            // A moved node also moves the view's world box (the cull input).
+            if (this._poseFromNode(view.node, view.groupId, view._mat)) view._worldBoxDirty = true;
         }
         for (const pg of this._poseGroups) {
             if (!pg.node || pg.dead) continue;
             this._poseFromNode(pg.node, pg.groupId, pg._mat);
         }
+    }
+
+    // ── Range culling ────────────────────────────────────────────────────────
+
+    /** @private one-time capability check at the substrate seam. Indirect draws
+     *  with nonzero firstInstance need the `indirect-first-instance` device
+     *  feature — WITHOUT it the GPU silently no-op's the draw (spec behavior),
+     *  so absence must fail LOUD and fall back to the full-range instanced draw
+     *  (yesterday's behavior), never a quietly empty screen. */
+    _detectIndirect(renderer) {
+        const device = renderer?.backend?.device ?? null;
+        const ok = !!device?.features?.has?.('indirect-first-instance');
+        if (!ok) {
+            console.error(
+                'MegaGlyphField: range culling disabled — device lacks indirect-first-instance '
+                + '(indirect draws would silently no-op). Drawing the FULL field every frame. '
+                + `device features: ${device ? [...device.features].join(', ') : 'no device (WebGL backend?)'}`,
+            );
+            this._indirectState = false;
+            return;
+        }
+        this._indirectState = true;
+    }
+
+    /**
+     * Per pass: frustum-test each live range's AABB (the GPU bounds lane's
+     * per-item extent, taken through the view node's matrixWorld) and submit
+     * only the visible slots — as RUN records: adjacent visible ranges coalesce
+     * into one indirect draw (gap-tolerant: a small dead gap between them is
+     * cheaper to draw degenerate than to pay another encoder call — the
+     * all-visible case collapses from ~2k draws to a handful). Records are
+     * rewritten per pass; a view with no bounds yet is drawn unconditionally —
+     * culling is an optimization, never a correctness gate.
+     * geometry.indirect/indirectOffset are read at draw-encode time, so this
+     * runs in onBeforeRender with the PASS's camera (main render and the pick
+     * pass each cull with the camera that draws them).
+     * @private
+     */
+    _cullRanges(renderer, camera) {
+        if (this._indirectState === null) this._detectIndirect(renderer);
+        if (!this._indirectState || !camera?.projectionMatrix) return;
+        if (this._rangesDirty) this._reindexRanges();
+
+        const r = this._ranges;
+        const need = Math.max(1, r.length);
+        if (!this._indirect || this._indirect.capacity < need) {
+            let cap = Math.max(64, this._indirect?.capacity ?? 0);
+            while (cap < need) cap *= 2;
+            this._indirect = { attr: new IndirectStorageBufferAttribute(new Uint32Array(cap * 5), 5), capacity: cap };
+        }
+
+        _projScreen.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+        _frustum.setFromProjectionMatrix(_projScreen, renderer.coordinateSystem);
+
+        const MERGE_GAP = 4096;                 // dead slots worth drawing to save a draw call
+        const a = this._indirect.attr.array;
+        const offsets = this._indirectOffsets;
+        offsets.length = 0;
+        let rec = -1;                           // current run's record index
+        let runEnd = -1;
+        let visibleRanges = 0;
+        for (let i = 0; i < r.length; i++) {
+            const view = r[i].view;
+            // World box CACHED per view — recomputed only when the pose sweep saw
+            // the node move or the GPU bounds landed (a per-frame applyMatrix4
+            // across every range was ~1ms of pure overhead at ~2k ranges).
+            if (view._worldBoxDirty !== false) {
+                const b = view.bounds;
+                if (b && view.node && Number.isFinite(b.min?.x) && Number.isFinite(b.max?.x)) {
+                    const wb = view._worldBox ?? (view._worldBox = new THREE.Box3());
+                    wb.min.set(b.min.x, b.min.y, b.min.z ?? 0);
+                    wb.max.set(b.max.x, b.max.y, b.max.z ?? 0);
+                    wb.applyMatrix4(view.node.matrixWorld);
+                } else {
+                    view._worldBox = null;      // no bounds yet → drawn unconditionally
+                }
+                view._worldBoxDirty = false;
+            }
+            if (view._worldBox && !_frustum.intersectsBox(view._worldBox)) continue;
+            visibleRanges++;
+            if (rec >= 0 && r[i].base - runEnd <= MERGE_GAP) {
+                a[rec * 5 + 1] = r[i].end - a[rec * 5 + 4];   // extend: count = end − firstInstance
+            } else {
+                rec = offsets.length;
+                const base = rec * 5;
+                a[base] = 6;                      // indexCount (the quad's index buffer)
+                a[base + 1] = r[i].end - r[i].base;
+                a[base + 2] = 0;                  // firstIndex
+                a[base + 3] = 0;                  // baseVertex
+                a[base + 4] = r[i].base;          // firstInstance — slot address space intact
+                offsets.push(rec * 20);           // 5 uints × 4 bytes per record
+            }
+            runEnd = r[i].end;
+        }
+        if (offsets.length > 0) {
+            this._indirect.attr.addUpdateRange(0, offsets.length * 5);
+            this._indirect.attr.needsUpdate = true;
+        }
+        // Empty offsets array ⇒ the backend's offset loop issues zero draws —
+        // exactly right when nothing is on screen. (geometry.instanceCount stays
+        // at high-water: an instanceCount of 0 would skip the draw path entirely.)
+        this.field.instanceMesh.geometry.setIndirect(this._indirect.attr, offsets);
+        this._culledRanges = r.length - visibleRanges;
+        this._drawRuns = offsets.length;
     }
 }
 
@@ -353,7 +480,9 @@ export class MegaFieldView {
          *  translation: writes subtract it (clamped to the staged range), pick hits
          *  add it back. 0 = the whole file is staged (every classic grid). */
         this.sourceBase = 0;
-        this.bounds = null;      // the GPU's per-item extent (the visibility lane reads this later)
+        this.bounds = null;      // the GPU's per-item extent (the range-culling AABB)
+        this._worldBox = null;   // cached world-space box (bounds × matrixWorld)
+        this._worldBoxDirty = true;
         this.dead = false;
         this._visible = true;
         this._alpha = 1;
@@ -441,11 +570,12 @@ export class MegaFieldView {
     getGlyphCount() { return this.byteCount; }
 
     /**
-     * The arena's bounds-sync seam: the per-item GPU extent lands here. Stored for
-     * the per-view visibility lane (the mega mesh itself is never frustum-culled).
+     * The arena's bounds-sync seam: the per-item GPU extent lands here — the
+     * range-culling AABB (world box recomputed lazily on the next cull pass).
      */
     setLayoutExtent(extent) {
         this.bounds = extent || null;
+        this._worldBoxDirty = true;
     }
 
     /** The arena's far-slab arm — this view's group row in the far carrier texture
