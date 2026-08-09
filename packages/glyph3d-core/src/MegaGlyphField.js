@@ -350,6 +350,10 @@ export class MegaGlyphField {
                 entry.dead = true;
                 const i = mega._poseGroups.indexOf(entry);
                 if (i >= 0) mega._poseGroups.splice(i, 1);
+                // The texel recycles — any panel slot still pointing here must
+                // already be freed/re-pointed (the face/slot release contract).
+                mega.field.releaseGroup(entry.groupId);
+                entry.groupId = 0;
             },
         };
     }
@@ -357,6 +361,7 @@ export class MegaGlyphField {
     /** @private write one node's decomposed matrixWorld to its group texel (16-float compare gate).
      *  @returns {boolean} whether the matrix changed this sweep */
     _poseFromNode(node, groupId, m) {
+        if (!groupId) return false;   // the dead group is nobody's pose sink
         const el = node.matrixWorld.elements;
         let same = true;
         for (let i = 0; i < 16; i++) if (m[i] !== el[i]) { same = false; break; }
@@ -583,11 +588,13 @@ export class MegaFieldView {
      * setGroupColor would otherwise reset it to 1 and resurrect a hidden view.
      */
     setGroupColor(_groupId, color) {
+        if (!this.groupId) return;
         const a = (this.dead || !this._visible || !this._nodeVisible) ? 0 : this._alpha;
         this.mega.field.setGroupColor(this.groupId, { r: color.r, g: color.g, b: color.b, a });
     }
 
     setGroupColorBlend(_groupId, blend) {
+        if (!this.groupId) return;
         this.mega.field.setGroupColorBlend(this.groupId, blend);
     }
 
@@ -597,13 +604,16 @@ export class MegaFieldView {
         this._applyAlpha();
     }
 
-    /** @private */
+    /** @private (group 0 = the dead group — an exhausted or disposed view's
+     *  writes MUST no-op there; resurrecting 0 lights every tombstoned range) */
     _applyAlpha() {
+        if (!this.groupId) return;
         this.mega.field.setGroupAlpha(this.groupId, (this.dead || !this._visible || !this._nodeVisible) ? 0 : this._alpha);
     }
 
     /** Grid-local clip window → this view's group clip lanes. */
     setClipYRange(top, bottom) {
+        if (!this.groupId) return;
         this.mega.field.setGroupClipY(this.groupId, top, bottom);
     }
 
@@ -626,11 +636,13 @@ export class MegaFieldView {
     /** The arena's far-slab arm — this view's group row in the far carrier texture
      *  (the fragment's far-UV lanes). */
     setFarSlab(u0, v0, rowsPerTexel, colsPerTexel) {
+        if (!this.groupId) return;
         this.mega.field.setGroupFarSlab(this.groupId, u0, v0, rowsPerTexel, colsPerTexel);
     }
 
     /** The far slab is gone (dispose/atlas release) → the impostor fallback. */
     clearFarSlab() {
+        if (!this.groupId) return;
         this.mega.field.clearGroupFarSlab(this.groupId);
     }
 
@@ -642,13 +654,15 @@ export class MegaFieldView {
     dispose() {
         this.dead = true;
         this._applyAlpha();
-        this.mega._tombstone(this);
+        this.mega._tombstone(this);   // ranges point at DEAD group 0 before the id recycles
         this.clearFarSlab();
         const i = this.mega.views.indexOf(this);
         if (i >= 0) this.mega.views.splice(i, 1);
-        // The group id retires with the view (never reused — a reused id would
-        // resurrect tombstoned slots). The arena range IS reclaimed (free-list);
-        // group-id reuse is the remaining, much smaller follow-up.
+        // The group id RECYCLES (GlyphField free-list): safe because the range
+        // above is already tombstoned to 0, and this view's own writers no-op
+        // from here (groupId 0 is the universal dead sink).
+        this.mega.field.releaseGroup(this.groupId);
+        this.groupId = 0;
     }
 }
 

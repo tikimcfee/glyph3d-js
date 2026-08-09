@@ -902,7 +902,9 @@ export default class GlyphField {
         const requestedGroups = options.maxGroups || MAX_GROUPS_DEFAULT;
         this._maxGroups  = Math.min(requestedGroups, MAX_GROUPS_DIM);
         this._groupData  = new Float32Array(this._maxGroups * GROUP_COLS * 4);
-        this._groupCount = 1; // group 0 = identity
+        this._groupCount = 1; // group 0 = identity (the permanent dead group — never handed out live)
+        this._freeGroups = [];            // released ids, reused before the counter advances
+        this._groupExhaustionNoted = false;
         this._initGroupDefaults();
         this._groupTexture = null; // created in _createInstanceMesh
 
@@ -1609,10 +1611,65 @@ export default class GlyphField {
 
     // ── Group transform API ───────────────────────────────────────────────────
 
+    /**
+     * Claim a group texel. Released ids are REUSED (their row reset to the fresh
+     * defaults) — a long session's create/dispose churn must not march the id
+     * space to the wall. True exhaustion (maxGroups LIVE groups) fails LOUD and
+     * returns 0, THE DEAD GROUP: writers treat 0 as a no-op sink, so saturated
+     * content degrades to invisible — it can never resurrect tombstoned ranges
+     * or fight over a shared texel (the silent `return 0` here was exactly that
+     * corruption: pages/covers flapping 0↔1, dead glyph masses popping in).
+     */
     createGroup() {
+        const reused = this._freeGroups.pop();
+        if (reused !== undefined) {
+            this._resetGroupRow(reused);
+            return reused;
+        }
         const id = this._groupCount++;
         if (id >= this._maxGroups) this._growGroupTexture();
-        return id < this._maxGroups ? id : 0;
+        if (id >= this._maxGroups) {
+            if (!this._groupExhaustionNoted) {
+                this._groupExhaustionNoted = true;
+                console.error(`GlyphField: group texture EXHAUSTED (${this._maxGroups} live groups) — new content renders INVISIBLE (dead group 0). This is a leak or a churn storm: something creates groups without releasing them.`);
+            }
+            this._groupCount = this._maxGroups;   // stop the counter marching to Infinity
+            return 0;
+        }
+        return id;
+    }
+
+    /**
+     * Retire a group id back to the free list. The row goes dark (alpha 0) while
+     * free so any stale pointer at it cannot ghost; createGroup re-lights it on
+     * reuse. Group 0 (the permanent dead group) is never releasable.
+     */
+    releaseGroup(groupId) {
+        if (!(groupId > 0) || groupId >= this._maxGroups) return;
+        if (this._freeGroups.includes(groupId)) return;   // double-release must not double-hand-out
+        const base = groupId * GROUP_COLS * 4;
+        this._groupData.fill(0, base, base + GROUP_COLS * 4);
+        this._groupData[base + 4 + 3] = 1.0;   // quat.w — keep the row a valid pose
+        this._syncGroupTexture();
+        this._freeGroups.push(groupId);
+    }
+
+    /** @private a reused row starts exactly like a freshly grown one. */
+    _resetGroupRow(g) {
+        const base = g * GROUP_COLS * 4;
+        this._groupData.fill(0, base, base + GROUP_COLS * 4);
+        this._groupData[base + 4 + 3]  = 1.0;  // quat identity
+        this._groupData[base + 8]      = 1.0;  // color 1,1,1,1
+        this._groupData[base + 8 + 1]  = 1.0;
+        this._groupData[base + 8 + 2]  = 1.0;
+        this._groupData[base + 8 + 3]  = 1.0;
+        this._groupData[base + 12]     = 1.0;  // scale 1,1,1
+        this._groupData[base + 12 + 1] = 1.0;
+        this._groupData[base + 12 + 2] = 1.0;
+        this._syncGroupTexture();
+        const fb = g * FAR_GROUP_COLS * 4;
+        this._farGroupData.fill(0, fb, fb + FAR_GROUP_COLS * 4);
+        if (this._farGroupTexture) this._farGroupTexture.needsUpdate = true;
     }
 
     setGroupOffset(groupId, offset) {
