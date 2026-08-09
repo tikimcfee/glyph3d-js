@@ -152,31 +152,39 @@ const libraryParam = (param) => schemeParam('library', param);
 // A group without `subs` renders flat, exactly as before. The Books/Layout split is the
 // pilot: Layout's jellyfish + library knobs are mutually-exclusive schemes, so 'tabs'
 // collapses the 25-row wall to the scheme you're on.
+//
+// COLUMNS (optional): `columns: <n>` lays a section's rows out in an n-wide CSS grid
+// instead of the flat single-column stack, so the numerous sections (Camera, Dock &
+// frame, Tree & labels …) read as a compact block instead of a tall wall. A row and its
+// slider travel together as one grid cell; labels ellipsis if a column narrows (hover
+// shows the key). Omit (or 1) for the classic full-width rows — the small sections stay
+// flat so they aren't over-fragmented. The grid only wraps a section's knob rows; a
+// tabbed group's chip strip + blurb stay full-width above it.
 export const GROUPS = [
-  { name: 'Camera',             subtitle: 'flight speed · proximity auto-slow · soft bounds · draw distance' },
-  { name: 'Environment',        subtitle: 'sky, grid floor, axes · minimap overview' },
-  { name: 'Theme & appearance', subtitle: 'code & terminal backgrounds · cursor · focus / hover / input colors' },
-  { name: 'Display & glyph LOD', subtitle: 'font, atlas, width compress · minify / flicker control' },
-  { name: 'Far texture (text mass)', subtitle: 'minified text-mass tier · farMode debug · mip ceiling · ink exposure' },
+  { name: 'Camera',             subtitle: 'flight speed · proximity auto-slow · soft bounds · draw distance', columns: 2 },
+  { name: 'Environment',        subtitle: 'sky, grid floor, axes · minimap overview', columns: 2 },
+  { name: 'Theme & appearance', subtitle: 'code & terminal backgrounds · cursor · focus / hover / input colors', columns: 2 },
+  { name: 'Display & glyph LOD', subtitle: 'font, atlas, width compress · minify / flicker control', columns: 2 },
+  { name: 'Far texture (text mass)', subtitle: 'minified text-mass tier · farMode debug · mip ceiling · ink exposure', columns: 2 },
   { name: 'Layer bands',        subtitle: 'z-fight control — depth bias per layer · background set-backs' },
-  { name: 'Code grids',         subtitle: 'the layout preset new grids are born with' },
-  { name: 'Layout',             subtitle: 'the scheme in view',
+  { name: 'Code grids',         subtitle: 'the layout preset new grids are born with', columns: 2 },
+  { name: 'Layout',             subtitle: 'the scheme in view', columns: 2,
     mode: 'tabs',
     subs: [
       { name: 'Jellyfish', scheme: 'jellyfish', subtitle: 'a directory as one tall faceted column' },
       { name: 'Library',   scheme: 'library',   subtitle: 'every file as a uniform page (a book)' },
     ],
   },
-  { name: 'Tree & labels',      subtitle: 'ownership wires · container-name plates & approach fade' },
-  { name: 'Dock & frame',       subtitle: 'pinned-window tile bar · ghost slots · nameplates · view-pane' },
-  { name: 'Carrel',             subtitle: 'world-anchored reading desks' },
-  { name: 'Agent Books',        subtitle: 'the agent shelf · page geometry · deck · card scales · retention' },
-  { name: 'Books',              subtitle: 'the shared base · page faces (all shelves) · covers / directory boxes' },
-  { name: 'Delta Books',        subtitle: 'the delta shelf · page geometry · deck' },
+  { name: 'Tree & labels',      subtitle: 'ownership wires · container-name plates & approach fade', columns: 2 },
+  { name: 'Dock & frame',       subtitle: 'pinned-window tile bar · ghost slots · nameplates · view-pane', columns: 2 },
+  { name: 'Carrel',             subtitle: 'world-anchored reading desks', columns: 2 },
+  { name: 'Agent Books',        subtitle: 'the agent shelf · page geometry · deck · card scales · retention', columns: 2 },
+  { name: 'Books',              subtitle: 'the shared base · page faces (all shelves) · covers / directory boxes', columns: 2 },
+  { name: 'Delta Books',        subtitle: 'the delta shelf · page geometry · deck', columns: 2 },
   { name: 'Book tabs',          subtitle: 'edge tabs · stagger mode · lift off edge' },
-  { name: 'Strata',             subtitle: 'nested Z-depth structure view' },
+  { name: 'Strata',             subtitle: 'nested Z-depth structure view', columns: 2 },
   { name: 'Motion',             subtitle: 'relayout glide' },
-  { name: 'Culling & loading',  subtitle: 'occlusion culling · build budget · draw-call readout' },
+  { name: 'Culling & loading',  subtitle: 'occlusion culling · build budget · draw-call readout', columns: 2 },
   { name: 'Connection',         subtitle: 'auto-connect to relay on load' },
 ];
 

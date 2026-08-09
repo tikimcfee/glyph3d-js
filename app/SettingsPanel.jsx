@@ -75,6 +75,14 @@ const styles = {
   // Hairline separator above each section after the first (the chrome divider color).
   sectionSep: { borderTop: '1px solid #1b1f29' },
   sectionBody: { padding: '0 0 8px' },
+  // A multi-column section lays its knob rows in an n-wide CSS grid (driven by `columns`
+  // on the GROUP entry). Grid, not flex, so each column is exactly 1fr — no wrap or
+  // sub-pixel rounding surprises; row tracks size to content and top-align, so a number
+  // row + its slider travel together as one cell. columnGap is the only gutter (rowGap 0
+  // — the rows carry their own vertical padding). Null when columns ≤ 1 = flat stack.
+  gridCols: (columns) => (columns && columns > 1
+    ? { display: 'grid', gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`, columnGap: '12px', rowGap: 0, alignItems: 'start' }
+    : null),
   // Sub-section tabs — a chip strip that partitions a section by scheme (Layout is the
   // pilot: Jellyfish vs Library). The active chip brightens; a ● marks the live scheme's
   // chip so the "auto-follow" default reads at a glance. The blurb under the strip is the
@@ -134,7 +142,7 @@ export default function SettingsPanel({ client }) {
     return GROUPS
       .map((g) => {
         const defs = byGroup.get(g.name) || [];
-        const out = { name: g.name, subtitle: g.subtitle, mode: g.mode, subs: g.subs, defs };
+        const out = { name: g.name, subtitle: g.subtitle, mode: g.mode, subs: g.subs, columns: g.columns, defs };
         // Partition rows into sub-sections when the group declares them. A row joins the
         // sub whose `scheme` matches the row's `scheme`, or whose `name` matches a row's
         // `sub` field (for non-scheme groupings). Rows matching no sub land in `general`,
@@ -337,7 +345,7 @@ export default function SettingsPanel({ client }) {
             </button>
             {isOpen && (
               <div style={styles.sectionBody}>
-                {/* Catch-all rows that matched no sub render above the strip. */}
+                {/* Catch-all rows that matched no sub render above the strip, flat. */}
                 {g.general?.map(renderRow)}
                 {tabbed ? (
                   <>
@@ -359,9 +367,15 @@ export default function SettingsPanel({ client }) {
                       })}
                     </div>
                     {activeSub.subtitle && <div style={styles.tabBlurb}>{activeSub.subtitle}</div>}
-                    {activeSub.defs.map(renderRow)}
+                    <div style={styles.gridCols(g.columns)}>
+                      {activeSub.defs.map(renderRow)}
+                    </div>
                   </>
-                ) : defs.map(renderRow)}
+                ) : (
+                  <div style={styles.gridCols(g.columns)}>
+                    {defs.map(renderRow)}
+                  </div>
+                )}
               </div>
             )}
           </div>
