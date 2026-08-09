@@ -246,7 +246,10 @@ export default class GlyphPipelineKernels {
         this.farDirtyList = instancedArray(this.maxItems, 'uint').setName('GlyphFarDirtyList');
         this.farAccum = instancedArray(FAR_TEX * FAR_TEX * 4, 'uint').setName('GlyphFarAccum').toAtomic();
         this.farPacked = instancedArray(FAR_TEX * FAR_TEX, 'uint').setName('GlyphFarPacked');
-        this.farInk = instancedArray(1, 'float').setName('GlyphFarInk');
+        // The ink table is born at FULL glyph-space size (65k × 4B = 256 KB — trivial):
+        // the kernels close over this node at their lazy build, so a live refresh
+        // (refreshFarInk's exposure dial) can only ever write the PREFIX in place.
+        this.farInk = instancedArray(1 << 16, 'float').setName('GlyphFarInk');
         this._farColorAttr = new StorageInstancedBufferAttribute(new Float32Array(4), 4);
         this._kFarScatter = null;
         this._kFarNormalize = null;
@@ -1220,19 +1223,27 @@ export default class GlyphPipelineKernels {
     }
 
     /**
-     * The gid → ink-density table (Float32Array, indexed by glyphId). Replaces the
-     * buffer wholesale — CONSTRUCTION-TIME ONLY: the far kernels close over the node
-     * at their lazy first build, so after that point this must not be called again
-     * (atlas growth rebuilds the whole kernel set — the arena's realloc path).
+     * Write the gid → ink-density table (Float32Array, indexed by glyphId) into the
+     * prefix of the full-size buffer. Safe at construction AND live (the buffer is
+     * born at full glyph-space size precisely so this never has to rebind).
      * @param {Float32Array} table
      */
     setFarInk(table) {
-        const n = Math.max(1, table?.length | 0);
-        this.farInk = instancedArray(n, 'float').setName('GlyphFarInk');
-        if (table) this.farInk.value.array.set(table.subarray(0, n));
+        const arr = this.farInk.value.array;   // born at 2^16 — the full glyph space
+        if (table) arr.set(table.subarray(0, arr.length));
         this.farInk.value.needsUpdate = true;
-        this._u.farInkCount.value = table ? n : 0;
+        this._u.farInkCount.value = Math.min(table?.length | 0, arr.length);
         return this;
+    }
+
+    /**
+     * Rewrite the ink table's live prefix IN PLACE (the far kernels close over the
+     * node at their lazy build — this is the live refresh path; the buffer is born
+     * at full glyph-space size, so any table fits).
+     * @param {Float32Array} table
+     */
+    updateFarInk(table) {
+        return this.setFarInk(table);
     }
 
     /**

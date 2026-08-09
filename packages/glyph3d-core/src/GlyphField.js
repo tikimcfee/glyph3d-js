@@ -110,6 +110,14 @@ export const FAR_GROUP_COLS = 2;
  *                     stripes of them) blink in/out at sub-pixel footprints and grazing
  *                     angles. The hash is screen-space and frame-stable, so a still camera
  *                     gives a still pattern; 0 disables the fade band entirely (cliff at 0).
+ *   farLodMax       — the far sample's mip ceiling. The atlas mip chain is atlas-wide:
+ *                     past log2(FAR_SLAB) a sample averages ACROSS slabs (every file's mass
+ *                     mixed, diluted by empty space — grazing angles reach it fast). Lower
+ *                     toward 3-4 to watch the bleed; raise past 6 to re-admit it.
+ *   farMode         — debug tri-state: 0 = crossfade (normal), 1 = far-only (the mass
+ *                     texture drives coverage+color at EVERY distance — see exactly what
+ *                     the far tier contributes), 2 = legacy (far tier disabled — the
+ *                     pre-far impostor path, for A/B).
  */
 export const GLYPH_LOD_DEFAULTS = Object.freeze({
     dilatePx: 0.75, soften: 0.45,
@@ -119,6 +127,8 @@ export const GLYPH_LOD_DEFAULTS = Object.freeze({
     lodAxisBias: 0,
     farBias: 0,
     ditherSpan: 0.02,
+    farLodMax: 6,     // = log2(FAR_SLAB) at the stock 64-texel slab
+    farMode: 0,
 });
 
 const LOD_UNIFORMS = Object.fromEntries(
@@ -354,7 +364,11 @@ function _buildOutputNode(varyings, uniforms) {
             // rgb and avg ink coverage in a (see compute/glyphPipelineReference's
             // FAR block); slab-less groups (classic fields, atlas exhaustion) read
             // hasFar=0 and take the impostor fallback below, unchanged.
-            const hasFar = vFarMeta.x.greaterThan(float(0.5));
+            // farMode (debug): 2 = LEGACY — the far tier is masked off (impostor path,
+            // the pre-far behavior for A/B); 1 = far-only — fwLod is forced past LOD_HI
+            // below so the mass texture drives coverage+color at every distance.
+            const hasFar = vFarMeta.x.greaterThan(float(0.5))
+                .and(int(LOD_UNIFORMS.farMode).notEqual(int(2)));
             const farRpt = vFarSlab.z.max(float(1e-6));
             const farCpt = vFarSlab.w.max(float(1e-6));
             // Slab-local UV of this fragment: the glyph's grid (row, col) + its
@@ -366,14 +380,14 @@ function _buildOutputNode(varyings, uniforms) {
             ).div(float(FAR_SLAB)).clamp(vec2(0), vec2(1));
             const farUV = vFarSlab.xy.add(farLocal.mul(float(FAR_SLAB / FAR_TEX)));
             const fwFar = fwidth(farUV).mul(float(FAR_TEX));   // atlas texels per pixel
-            // CLAMP the level to the slab's own mip floor (log2(FAR_SLAB)): the mip
-            // chain is atlas-wide, so anything past that averages ACROSS slabs —
-            // every file's mass mixed and diluted by empty space, and the grid
-            // blanks to a faint smear. Grazing angles drive fwFar off the end of
-            // the chain (foreshortening ~1/cos), which is why angled walls blinked
+            // CLAMP the level to the slab's own mip floor (farLodMax = log2(FAR_SLAB)
+            // by default): the mip chain is atlas-wide, so anything past that averages
+            // ACROSS slabs — every file's mass mixed and diluted by empty space, and
+            // the grid blanks to a faint smear. Grazing angles drive fwFar off the end
+            // of the chain (foreshortening ~1/cos), which is why angled walls blinked
             // out entirely; a file's coarsest valid sample is its own 1-texel mass.
             const farLod = fwFar.x.max(fwFar.y).max(float(1)).log2().add(LOD_UNIFORMS.farBias)
-                .min(float(Math.log2(FAR_SLAB)));
+                .min(LOD_UNIFORMS.farLodMax);
             const farTexel = farTex.sample(farUV).level(farLod).toVar('farTexel');
 
             // Empty glyph (space / .notdef = 0 curves) → no ink, so the fast path discards it…
@@ -454,7 +468,10 @@ function _buildOutputNode(varyings, uniforms) {
             const vColorFar = hasFar.select(farTexel.rgb.pow(vec3(0.4545)), vColor);
             const cov = float(0).toVar();
             const colSel = vColor.toVar('colSel');
-            If(fwLod.greaterThan(LOD_HI), () => {
+            // farMode 1 (far-only): force the far branch at every footprint — the debug
+            // view of exactly what the mass texture contributes.
+            const fwLodEff = int(LOD_UNIFORMS.farMode).equal(int(1)).select(float(1e9), fwLod);
+            If(fwLodEff.greaterThan(LOD_HI), () => {
                 cov.assign(farCov);        // far: strokes unresolvable → prefiltered mass
                 colSel.assign(vColorFar);  // …in the mass's average color
             }).Else(() => {
@@ -481,7 +498,7 @@ function _buildOutputNode(varyings, uniforms) {
                 // switch has no hard seam (the diagonal line that otherwise sweeps an
                 // angled wall). smoothstep ramp; manual mix to avoid extra imports.
                 // Color rides the same ramp: per-glyph hue → the mass's average hue.
-                const t = fwLod.sub(LOD_LO).div(LOD_HI.sub(LOD_LO)).clamp(0, 1).toVar();
+                const t = fwLodEff.sub(LOD_LO).div(LOD_HI.sub(LOD_LO)).clamp(0, 1).toVar();
                 t.assign(t.mul(t).mul(float(3).sub(t.mul(2))));
                 cov.assign(exactCov.add(farCov.sub(exactCov).mul(t)));
                 colSel.assign(vColor.add(vColorFar.sub(vColor).mul(t)));

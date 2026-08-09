@@ -630,6 +630,24 @@ export default class GlyphPipelineArena {
         }
     }
 
+    /**
+     * Rebuild the gid→ink table from the CURRENT dials (FarTextAtlas.farInkParams),
+     * push it to the kernels, and regen every armed slab — the far mass's exposure
+     * dial, live. No-op when nothing is armed.
+     */
+    refreshFarInk() {
+        const table = buildFarInkTable(this.atlas._live?._slugData?.glyphMapTexture);
+        this._kernels.updateFarInk(table);
+        for (let row = 0; row < this._sorted.length; row++) {
+            const item = this._sorted[row];
+            if (item.dead || item._farSlab === undefined || item._farSlab < 0) continue;
+            this._farItemsCPU[row * FAR_ITEM_STRIDE + FI_DIRTY] = 1;
+            this._farDirtySet.add(row);
+        }
+        if (this._farDirtySet.size > 0) this.requestFarRegen();
+        return this;
+    }
+
     /** Release an item's far slab (dispose/restage) — the group carrier retires with
      *  the view itself (its own dispose clears it; a dead group's texel is never
      *  sampled, since the vertex cull drops the group first). @private */

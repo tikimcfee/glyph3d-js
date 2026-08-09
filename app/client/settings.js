@@ -1,6 +1,7 @@
 import { stateController } from '@glyph3d/core/services/state';
 import { setPanelStateColorDefaults } from '@glyph3d/core/collections';
 import { setGlyphLodParam, GLYPH_LOD_DEFAULTS } from '@glyph3d/core/GlyphField.js';
+import { setFarInkParam, farInkParams } from '@glyph3d/core/core/FarTextAtlas.js';
 import { setGlyphWidthCompress, GLYPH_WIDTH_COMPRESS_DEFAULT } from '@glyph3d/core/core/glyphVertex.js';
 import { setTabParam, TAB_DEFAULTS } from '@glyph3d/core/components/Tab3D.js';
 import { setLabelPillStyle, LABEL_PILL_DEFAULTS } from '@glyph3d/core/MegaGlyphField.js';
@@ -37,6 +38,13 @@ const carrelParam = (param) => (ctx, v) => {
 /** apply() for a glyph minification/LOD dial: push the bare dial name (not the `glyph.` key) to the
  *  global GlyphField LOD uniform — live across every glyph material, no ctx subsystem needed. */
 const lodParam = (param) => (_ctx, v) => setGlyphLodParam(param, v);
+
+/** apply() for a far-ink dial: set the param, rebuild the gid→ink table in the arena's
+ *  kernels, and regen every armed slab — the far mass's exposure, live. */
+const farInkParam = (param) => (ctx, v) => {
+  setFarInkParam(param, v);
+  ctx.renderer?.glyphPipelineArena?.refreshFarInk?.();
+};
 
 /** apply() for a strata dial: push the bare param name (not the `strata.` key) to the global
  *  StrataLayout params — re-applies live to every on-screen strata view, no ctx needed. */
@@ -596,6 +604,19 @@ export const SETTINGS = [
   { key: 'glyph.lodAxisBias', label: 'Block axis bias (0 best→1 worst)', group: 'Display & glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.lodAxisBias, min: 0, max: 1, step: 0.05, apply: lodParam('lodAxisBias') },
   { key: 'glyph.farBias', label: 'Far-texture mip bias', group: 'Display & glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.farBias, min: -2, max: 4, step: 0.1, apply: lodParam('farBias') },
   { key: 'glyph.ditherSpan', label: 'Stipple fade span (alpha)', group: 'Display & glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.ditherSpan, min: 0, max: 0.2, step: 0.005, apply: lodParam('ditherSpan') },
+
+  // Far texture (text mass) — the content-derived minified-text tier: its own playground.
+  // farMode is the anti-bias tool: far-only shows EXACTLY what the mass contributes at
+  // every distance; legacy is the pre-far impostor for A/B. farLodMax moves the slab
+  // clamp — dip below 6 to watch cross-slab bleed. The ink dials rebuild the gid→ink
+  // table and regen every slab live (the mass's exposure).
+  { key: 'glyph.farMode', label: 'Far mode', group: 'Far texture (text mass)', type: 'enum',
+    options: ['crossfade', 'far-only', 'legacy'], default: 'crossfade',
+    apply: (_ctx, v) => setGlyphLodParam('farMode', ['crossfade', 'far-only', 'legacy'].indexOf(v)) },
+  { key: 'glyph.farLodMax', label: 'Far mip ceiling (slab floor)', group: 'Far texture (text mass)', type: 'number', default: GLYPH_LOD_DEFAULTS.farLodMax, min: 0, max: 10, step: 0.5, apply: lodParam('farLodMax') },
+  { key: 'far.inkPerCurve', label: 'Ink per curve', group: 'Far texture (text mass)', type: 'number', default: farInkParams.perCurve, min: 0.005, max: 0.15, step: 0.005, apply: farInkParam('perCurve') },
+  { key: 'far.inkMax', label: 'Ink cap', group: 'Far texture (text mass)', type: 'number', default: farInkParams.maxCov, min: 0.1, max: 1, step: 0.02, apply: farInkParam('maxCov') },
+  { key: 'far.inkBitmap', label: 'Ink (bitmap glyphs)', group: 'Far texture (text mass)', type: 'number', default: farInkParams.bitmap, min: 0.1, max: 1, step: 0.05, apply: farInkParam('bitmap') },
   // Agent Books — the agent shelf: page geometry, deck pitch, card scales, and retention (each
   // agent's run as a book of spreads). Every dial re-fits the live shelf via applyScales (cards
   // re-scale, sheets re-fit, over-cap sheets shed, the cluster re-flows). Ranges are deliberately

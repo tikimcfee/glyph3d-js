@@ -32,11 +32,16 @@ import {
 
 /** The impostor's ink-density calibration, reused: curveCount × K, capped. The ink
  *  table is CPU-built, so a truer density (a GPU coverage bake over the curve data)
- *  drops in HERE later without touching a shader or a kernel. */
-const FAR_INK_PER_CURVE = 0.035;
-const FAR_INK_MAX = 0.72;
-/** Bitmap (emoji) glyphs carry no curves — a flat mid-density so they read as ink. */
-const FAR_INK_BITMAP = 0.5;
+ *  drops in HERE later without touching a shader or a kernel. LIVE-DIALABLE (the
+ *  settings panel drives setFarInkParam → arena.refreshFarInk): the scatter's
+ *  per-glyph darkness is the far mass's whole exposure. */
+export const farInkParams = { perCurve: 0.035, maxCov: 0.72, bitmap: 0.5 };
+
+/** Live-set one far-ink dial (perCurve / maxCov / bitmap). Takes effect on the next
+ *  refreshFarInk() — the arena rebuilds the table and regens every slab. */
+export function setFarInkParam(key, value) {
+    if (key in farInkParams && Number.isFinite(value)) farInkParams[key] = value;
+}
 
 export default class FarTextAtlas {
     constructor() {
@@ -115,12 +120,13 @@ export function buildFarInkTable(glyphMapTexture) {
     if (!data || data.length < 4) return new Float32Array(1);
     const entries = (data.length / 4) | 0;
     const table = new Float32Array(entries);
+    const { perCurve, maxCov, bitmap } = farInkParams;
     for (let gid = 1; gid < entries; gid++) {          // gid 0 = .notdef — no ink
         const curveCount = data[gid * 4 + 1];
         const mode = data[gid * 4 + 2];
         table[gid] = mode === 1
-            ? FAR_INK_BITMAP
-            : Math.min(curveCount * FAR_INK_PER_CURVE, FAR_INK_MAX);
+            ? bitmap
+            : Math.min(curveCount * perCurve, maxCov);
     }
     return table;
 }
