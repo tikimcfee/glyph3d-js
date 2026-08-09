@@ -366,7 +366,14 @@ function _buildOutputNode(varyings, uniforms) {
             ).div(float(FAR_SLAB)).clamp(vec2(0), vec2(1));
             const farUV = vFarSlab.xy.add(farLocal.mul(float(FAR_SLAB / FAR_TEX)));
             const fwFar = fwidth(farUV).mul(float(FAR_TEX));   // atlas texels per pixel
-            const farLod = fwFar.x.max(fwFar.y).max(float(1)).log2().add(LOD_UNIFORMS.farBias);
+            // CLAMP the level to the slab's own mip floor (log2(FAR_SLAB)): the mip
+            // chain is atlas-wide, so anything past that averages ACROSS slabs —
+            // every file's mass mixed and diluted by empty space, and the grid
+            // blanks to a faint smear. Grazing angles drive fwFar off the end of
+            // the chain (foreshortening ~1/cos), which is why angled walls blinked
+            // out entirely; a file's coarsest valid sample is its own 1-texel mass.
+            const farLod = fwFar.x.max(fwFar.y).max(float(1)).log2().add(LOD_UNIFORMS.farBias)
+                .min(float(Math.log2(FAR_SLAB)));
             const farTexel = farTex.sample(farUV).level(farLod).toVar('farTexel');
 
             // Empty glyph (space / .notdef = 0 curves) → no ink, so the fast path discards it…
