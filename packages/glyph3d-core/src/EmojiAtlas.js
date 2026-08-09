@@ -16,8 +16,9 @@
  * standardized emoji + symbols with room to spare. Each emoji's cell INDEX is stable
  * (the monotonic counter), so the encoded core never changes; only its on-canvas
  * (col,row) layout moves on growth. The shader divides U by cols and V by rows. Growth
- * re-uploads the backing texture (rare — only on first sighting of an emoji past
- * capacity), mirroring the live Slug atlas.
+ * RE-CREATES the backing texture (the canvas resized — a needsUpdate re-copy into the
+ * old-size GPUTexture garbles every cell past the old side), and the fields' next
+ * setEmojiTexture re-fetches it, mirroring the live Slug atlas.
  *
  * Renderer-independent: the canvas + cell map are built with no Three.js; the
  * texture is created lazily once a THREE namespace is handed in.
@@ -119,7 +120,18 @@ export default class EmojiAtlas {
         this._ctx.textAlign = 'center';
         this._ctx.textBaseline = 'middle';
         for (const [cp, idx] of this._byCp) this._draw(cp, idx);   // re-lay-out + repaint at the new cols
-        if (this._texture) this._texture.needsUpdate = true;
+        // The canvas RESIZED, so the GPUTexture must be BORN again, not updated:
+        // three's WebGPU backend creates the texture once (at first-bind size) and
+        // needsUpdate only re-copies into it — a copy from a larger canvas into a
+        // smaller GPUTexture clips/garbles every cell past the old side (the
+        // "wrong emoji everywhere after the 1024th sighting" bug). Dispose + null
+        // forces the next getTexture() to create a fresh CanvasTexture at the new
+        // size; every field re-fetches it in setEmojiTexture (the miss-flow's
+        // _refreshEmojiTextures reaches all registered fields).
+        if (this._texture) {
+            this._texture.dispose();
+            this._texture = null;
+        }
         console.log(`[EmojiAtlas] grew ${prev}²→${side}² grid (${this.capacity} cells)`);
         return true;
     }
