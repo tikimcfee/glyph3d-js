@@ -168,7 +168,10 @@ export default function registerHandCommands(router) {
             mapped: renderer._lastMapped
                 ? { x: range(renderer._lastMapped, 'x'), y: range(renderer._lastMapped, 'y'), z: range(renderer._lastMapped, 'z') }
                 : null,
-            placement: { spread: renderer.spread, depth: renderer.depth, scale: renderer.scale },
+            placement: {
+                spread: renderer.spread, depth: renderer.depth,
+                scale: renderer.scale, yaw: renderer.yaw,
+            },
             worldScale: r3(worldScale.x),
             groupVisible: renderer.group.visible,
             // The invisible-hand trap: geometry parented to a camera that isn't in
@@ -188,7 +191,7 @@ export default function registerHandCommands(router) {
             `${id}  frames=${data.frames} ${data.fps ? `${data.fps.toFixed(1)}fps` : 'fps=—'}${data.stalled ? ' STALLED' : ''}`,
             `landmarks=${data.landmarkCount}  raw x=${JSON.stringify(data.raw.x)} y=${JSON.stringify(data.raw.y)} z=${JSON.stringify(data.raw.z)}`,
             data.mapped ? `mapped   x=${JSON.stringify(data.mapped.x)} y=${JSON.stringify(data.mapped.y)} z=${JSON.stringify(data.mapped.z)}` : 'mapped   (no frame reached the renderer)',
-            `placement spread=${data.placement.spread} depth=${data.placement.depth} scale=${data.placement.scale} → worldScale=${data.worldScale}`,
+            `placement spread=${data.placement.spread} depth=${data.placement.depth} scale=${data.placement.scale} yaw=${data.placement.yaw}° → worldScale=${data.worldScale}`,
             `visible=${data.groupVisible} onRig=${data.onRig} rigInScene=${data.rigInScene} hands=[${data.handsBuilt}]`,
             data.geometry
                 ? `geometry size=${JSON.stringify(data.geometry.sizeWorld)} center=${JSON.stringify(data.geometry.centerWorld)} ≈${data.geometry.approxScreenHeightPx}px tall, joints ≈${data.geometry.approxJointDiameterPx}px`
@@ -266,7 +269,7 @@ export default function registerHandCommands(router) {
         if (!presence) return { text: 'ERR: hand presence not ready', data: null };
 
         const [key, raw] = args;
-        const allowed = ['spread', 'depth', 'scale', 'jointSize', 'boneRadius'];
+        const allowed = ['spread', 'depth', 'scale', 'yaw', 'jointSize', 'boneRadius'];
         if (!key || !allowed.includes(key)) {
             return { text: `ERR: hand.place <${allowed.join('|')}> <value>`, data: null };
         }
@@ -280,7 +283,7 @@ export default function registerHandCommands(router) {
             data: { ...presence.rendererOptions },
         };
     }, {
-        description: 'Tune hands live: spread (width), depth (negative = in front), scale, jointSize, boneRadius',
-        returns: '{ spread, depth, scale, jointSize, boneRadius }',
+        description: 'Tune hands live: spread, depth (negative = in front), scale, yaw (degrees; 180 = palms away), jointSize, boneRadius',
+        returns: '{ spread, depth, scale, yaw, jointSize, boneRadius }',
     });
 }

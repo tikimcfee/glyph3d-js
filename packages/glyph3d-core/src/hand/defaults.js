@@ -18,6 +18,12 @@ export const HAND_RENDERER_DEFAULTS = {
     spread:     0.4,    // base visual spread multiplier
     depth:      -0.8,   // z position in camera-local space
     scale:      0.5,    // combined with spread for uniform group scale
+    // Yaw about the hand's own Y axis, in DEGREES (a human-tuned dial, so human
+    // units). 180 turns the palms away from the viewer: the device sees your palm,
+    // so unrotated hands face you like someone else's. Rotated, they read as your
+    // own hands reaching into the scene — a spatial proxy rather than a mirror.
+    // A rotation, not a mirror, so chirality is preserved.
+    yaw:        180,
 };
 
 export const WEBCAM_SOURCE_DEFAULTS = {

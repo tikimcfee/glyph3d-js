@@ -102,7 +102,7 @@ class HandPresence {
      * Apply a placement or sizing parameter to all current and future renderers.
      * Stored on rendererOptions too, so a device that attaches later inherits
      * tuning already done rather than appearing at the old settings.
-     * @param {'spread'|'depth'|'scale'|'jointSize'|'boneRadius'} key
+     * @param {'spread'|'depth'|'scale'|'yaw'|'jointSize'|'boneRadius'} key
      * @param {number} value
      */
     setPlacement(key, value) {

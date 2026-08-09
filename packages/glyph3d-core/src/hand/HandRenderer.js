@@ -67,6 +67,7 @@ class HandRenderer {
         this._spread = o.spread;
         this._depth  = o.depth;
         this._scale  = o.scale;
+        this._yaw    = o.yaw;
 
         this.group = new THREE.Group();
         this._applyGroupTransform();
@@ -177,6 +178,11 @@ class HandRenderer {
      */
     _applyGroupTransform() {
         this.group.position.set(0, 0, this._depth);
+        // Yaw is a ROTATION, never a mirror: the skeleton keeps its chirality, we
+        // just view it from the other side. At 180° the palms face away from the
+        // viewer — the hands read as your own, reaching into the scene, rather
+        // than as someone else's hands facing you.
+        this.group.rotation.y = (this._yaw * Math.PI) / 180;
         const s = this._spread * this._scale;
         this.group.scale.set(s, s, s);
     }
@@ -184,6 +190,10 @@ class HandRenderer {
     /** @type {number} */
     get spread() { return this._spread; }
     set spread(v) { this._spread = v; this._applyGroupTransform(); }
+
+    /** Yaw about the hand's own Y axis, in DEGREES. @type {number} */
+    get yaw() { return this._yaw; }
+    set yaw(v) { this._yaw = v; this._applyGroupTransform(); }
 
     /** @type {number} */
     get depth() { return this._depth; }

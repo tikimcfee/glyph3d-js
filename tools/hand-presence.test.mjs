@@ -184,6 +184,48 @@ console.log('visibility + placement');
     eq(presence.renderers.get('src-hand-1').depth, -1.5, 'a later device inherits current placement');
 }
 
+console.log('yaw');
+{
+    const { bridge, presence } = rig();
+    attach(bridge, 'src-hand-0');
+    const renderer = presence.renderers.get('src-hand-0');
+    sendFrame(bridge, 'src-hand-0', 0.45);
+    presence.update();
+
+    // Default turns the palms away from the viewer: the device sees your palm, so
+    // unrotated hands face you like someone else's.
+    eq(renderer.yaw, 180, 'hands default to a half turn');
+
+    // The property that must never break: yaw is a ROTATION, not a mirror. A
+    // negative determinant would silently turn left hands into right ones.
+    const det = (y) => {
+        renderer.yaw = y;
+        renderer.group.updateMatrixWorld(true);
+        return new THREE.Matrix4().extractRotation(renderer.group.matrixWorld).determinant();
+    };
+    ok(Math.abs(det(0) - 1) < 1e-6, 'yaw 0 preserves chirality');
+    ok(Math.abs(det(180) - 1) < 1e-6, 'yaw 180 preserves chirality — a rotation, never a mirror');
+
+    // And it actually turns the hand over: the palm normal flips sign.
+    const normal = (y) => {
+        renderer.yaw = y;
+        presence.update();
+        renderer.group.updateMatrixWorld(true);
+        const j = renderer.hands.get('right').joints;
+        const w = j[0].getWorldPosition(new THREE.Vector3());
+        const a = j[4].getWorldPosition(new THREE.Vector3()).sub(w);
+        const b = j[20].getWorldPosition(new THREE.Vector3()).sub(w);
+        return a.cross(b).normalize().z;
+    };
+    const n0 = normal(0), n180 = normal(180);
+    ok(Math.sign(n0) === -Math.sign(n180), 'a half turn reverses which way the palm faces');
+
+    presence.setPlacement('yaw', 90);
+    eq(renderer.yaw, 90, 'yaw is tunable through setPlacement');
+    attach(bridge, 'src-hand-9');
+    eq(presence.renderers.get('src-hand-9').yaw, 90, 'a later device inherits the tuned yaw');
+}
+
 console.log('dispose');
 {
     const { bridge, scene, presence } = rig();
