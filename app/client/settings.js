@@ -8,7 +8,7 @@ import { setLabelPillStyle, LABEL_PILL_DEFAULTS } from '@glyph3d/core/MegaGlyphF
 import { setStrataParam, STRATA_DEFAULTS } from '@glyph3d/core/collections/StrataLayout.js';
 import { TERMINAL_CURSOR_DEFAULTS } from '@glyph3d/core/collections/TerminalGrid.js';
 import { JELLYFISH_DEFAULTS, LIBRARY_DEFAULTS, schemeNameOf } from '@glyph3d/core/collections/layouts/index.js';
-import { LAYER_BAND, getLayerBandOffset, setLayerBandOffset, setBandDistance, getBandDistance } from '@glyph3d/core/core/layerBands.js';
+import { LAYER_BAND, getLayerBandBias, setLayerBandBias, setBandDistance, getBandDistance } from '@glyph3d/core/core/layerBands.js';
 import { AGENT_BOOKS_DEFAULTS } from '@glyph3d/core/collections/AgentBooks.js';
 import { DELTA_BOOKS_DEFAULTS } from '@glyph3d/core/collections/DeltaBooks.js';
 import { LABEL_DEFAULTS } from '@glyph3d/core/collections/ContentTreeLabels.js';
@@ -53,10 +53,10 @@ const farInkParam = (param) => (ctx, v) => {
  *  StrataLayout params — re-applies live to every on-screen strata view, no ctx needed. */
 const strataParam = (param) => (_ctx, v) => setStrataParam(param, v);
 
-/** apply() for a layer-band offset dial: restyle the band's polygonOffset — every material
- *  registered to the band (page faces / grid walls / the shared glyph material) re-biases
- *  live, no ctx needed (see core/layerBands.js). */
-const bandParam = (band, prop) => (_ctx, v) => setLayerBandOffset(band, { [prop]: v });
+/** apply() for a layer-band bias dial: write the band's shared clip-z bias uniform —
+ *  every material wearing the band (page faces / grid walls / the shared glyph
+ *  material) renders with it next frame, no ctx needed (see core/layerBands.js). */
+const bandParam = (band) => (_ctx, v) => setLayerBandBias(band, v);
 
 /** apply() for the grid-background set-back dial: store the new band distance and nudge
  *  every live grid/terminal background by the z delta (no relayout). */
@@ -134,18 +134,39 @@ const libraryParam = (param) => schemeParam('library', param);
 // GROUPS — the ordered registry of sections: the order the Settings panel lists
 // them in, plus a one-line subtitle (a brief sample of what's inside) shown under
 // the uppercased name. The subtitle is the legibility hack for the big merged
-// sections (Tree & labels, Dock & frame) until real sub-headers arrive — it tells
-// you what's in a section before you open it. Every name must match a `group` on
-// some SETTINGS entry, or the panel skips it.
+// sections until real sub-headers arrive — it tells you what's in a section before
+// you open it. Every name must match a `group` on some SETTINGS entry, or the panel
+// skips it.
+//
+// SUB-SECTIONS (optional): a group may declare `subs: [{ name, scheme?, subtitle? }]`
+// and a render `mode` to partition its rows inside the panel:
+//   mode: 'tabs'  — a chip strip; one sub's rows visible at a time. The default tab
+//                   auto-follows the LIVE layout scheme (matched on sub.scheme), so the
+//                   section opens on whatever scheme the field is showing; a click pins
+//                   the choice until the section is closed. A row joins the sub whose
+//                   `scheme` matches the row's `scheme` (or whose `name` matches a row's
+//                   `sub` field — for non-scheme groupings later). Rows matching no sub
+//                   render above the strip (a catch-all), so none are ever lost.
+//   mode: 'subs'  — (reserved) every sub visible under a light sub-header, for
+//                   coexisting sub-groupings (e.g. labels vs wires). Same partition.
+// A group without `subs` renders flat, exactly as before. The Books/Layout split is the
+// pilot: Layout's jellyfish + library knobs are mutually-exclusive schemes, so 'tabs'
+// collapses the 25-row wall to the scheme you're on.
 export const GROUPS = [
   { name: 'Camera',             subtitle: 'flight speed · proximity auto-slow · soft bounds · draw distance' },
   { name: 'Environment',        subtitle: 'sky, grid floor, axes · minimap overview' },
   { name: 'Theme & appearance', subtitle: 'code & terminal backgrounds · cursor · focus / hover / input colors' },
   { name: 'Display & glyph LOD', subtitle: 'font, atlas, width compress · minify / flicker control' },
   { name: 'Far texture (text mass)', subtitle: 'minified text-mass tier · farMode debug · mip ceiling · ink exposure' },
-  { name: 'Layer bands',        subtitle: 'z-fight control — polygon offset per layer · background set-backs' },
+  { name: 'Layer bands',        subtitle: 'z-fight control — depth bias per layer · background set-backs' },
   { name: 'Code grids',         subtitle: 'the layout preset new grids are born with' },
-  { name: 'Layout',             subtitle: 'jellyfish column · library page-scheme' },
+  { name: 'Layout',             subtitle: 'the scheme in view',
+    mode: 'tabs',
+    subs: [
+      { name: 'Jellyfish', scheme: 'jellyfish', subtitle: 'a directory as one tall faceted column' },
+      { name: 'Library',   scheme: 'library',   subtitle: 'every file as a uniform page (a book)' },
+    ],
+  },
   { name: 'Tree & labels',      subtitle: 'ownership wires · container-name plates & approach fade' },
   { name: 'Dock & frame',       subtitle: 'pinned-window tile bar · ghost slots · nameplates · view-pane' },
   { name: 'Carrel',             subtitle: 'world-anchored reading desks' },
@@ -257,6 +278,16 @@ export const SETTINGS = [
     key: 'camera.drawDistance', label: 'Draw distance (far plane)', group: 'Camera',
     type: 'number', default: 20000, min: 1000, max: 10000000, step: 1000,
     apply: (ctx, v) => { const cam = ctx.camera; if (cam) { cam.far = v; cam.updateProjectionMatrix?.(); } },
+  },
+  // Near plane — the depth-PRECISION dial: eye-space depth resolution at distance z is
+  // ~z²/(near·2²⁴), so near owns whether stacked panels/sheets z-fight at library
+  // vantages (near 0.1 → ~134-unit steps at 15k, the sheet pitch ties and rear text
+  // bleeds through front panels). Raise for cleaner occlusion at range; lower only if
+  // close-up clipping bites. Docs: docs/plans/z-order-transparency-reorg.md.
+  {
+    key: 'camera.nearPlane', label: 'Near plane (depth precision)', group: 'Camera',
+    type: 'number', default: 1.0, min: 0.01, max: 100, step: 0.01,
+    apply: (ctx, v) => { const cam = ctx.camera; if (cam) { cam.near = v; cam.updateProjectionMatrix?.(); } },
   },
   // View — high-level view primitives (HUD overlays). No live apply(): main.jsx mounts/
   // unmounts the widget off the persisted value via StateController's state-changed event.
@@ -665,18 +696,17 @@ export const SETTINGS = [
 
   // Layer bands — the z-fight playground (docs/plans/z-order-transparency-reorg.md). The
   // stacked translucent layers (page face → grid wall → glyphs) sit close enough that at a
-  // library vantage their geometric gaps fall under one depth-buffer step; polygonOffset
-  // biases depth in BUFFER units, so a front band wins the depth test deterministically at
-  // any distance. NEGATIVE pulls toward the camera; units are absolute buffer steps, factor
-  // scales with the quad's depth slope (matters for angled views). Defaults keep the order
-  // glyph (−2) < grid wall (−1) < page face (0); zero a band to watch the fighting return.
-  { key: 'band.faceFactor', label: 'Page face — offset slope', group: 'Layer bands', type: 'number', default: getLayerBandOffset(LAYER_BAND.PANEL_FACE).factor, min: -10, max: 10, step: 0.5, apply: bandParam(LAYER_BAND.PANEL_FACE, 'factor') },
-  { key: 'band.faceUnits', label: 'Page face — offset units', group: 'Layer bands', type: 'number', default: getLayerBandOffset(LAYER_BAND.PANEL_FACE).units, min: -10, max: 10, step: 1, apply: bandParam(LAYER_BAND.PANEL_FACE, 'units') },
-  { key: 'band.gridBgFactor', label: 'Grid wall — offset slope', group: 'Layer bands', type: 'number', default: getLayerBandOffset(LAYER_BAND.GRID_BACKGROUND).factor, min: -10, max: 10, step: 0.5, apply: bandParam(LAYER_BAND.GRID_BACKGROUND, 'factor') },
-  { key: 'band.gridBgUnits', label: 'Grid wall — offset units', group: 'Layer bands', type: 'number', default: getLayerBandOffset(LAYER_BAND.GRID_BACKGROUND).units, min: -10, max: 10, step: 1, apply: bandParam(LAYER_BAND.GRID_BACKGROUND, 'units') },
-  { key: 'band.glyphFactor', label: 'Glyphs — offset slope', group: 'Layer bands', type: 'number', default: getLayerBandOffset(LAYER_BAND.GLYPH).factor, min: -10, max: 10, step: 0.5, apply: bandParam(LAYER_BAND.GLYPH, 'factor') },
-  { key: 'band.glyphUnits', label: 'Glyphs — offset units', group: 'Layer bands', type: 'number', default: getLayerBandOffset(LAYER_BAND.GLYPH).units, min: -10, max: 10, step: 1, apply: bandParam(LAYER_BAND.GLYPH, 'units') },
-  // The geometric set-back the offset bands complement: how far a grid's background wall
+  // library vantage their geometric gaps fall under one depth-buffer step; the band bias
+  // shifts each layer's clip-z by a CONSTANT NDC fraction (clip.z += bias·w in the vertex
+  // stage), so the order holds at any camera distance. NEGATIVE pulls toward the camera.
+  // Defaults keep glyph (−2e-4) < grid wall (−1e-4) < page face (0). The biases are
+  // microscopic on purpose: tie-breakers, not geometry — they must never cross a real gap
+  // (the ~90-unit sheet pitch). Zero a band to watch the fighting return. Live by
+  // construction (one shared uniform per band — see core/layerBands.js).
+  { key: 'band.faceBias', label: 'Page face — depth bias (NDC)', group: 'Layer bands', type: 'number', default: getLayerBandBias(LAYER_BAND.PANEL_FACE), min: -0.005, max: 0.005, step: 0.00005, apply: bandParam(LAYER_BAND.PANEL_FACE) },
+  { key: 'band.gridBgBias', label: 'Grid wall — depth bias (NDC)', group: 'Layer bands', type: 'number', default: getLayerBandBias(LAYER_BAND.GRID_BACKGROUND), min: -0.005, max: 0.005, step: 0.00005, apply: bandParam(LAYER_BAND.GRID_BACKGROUND) },
+  { key: 'band.glyphBias', label: 'Glyphs — depth bias (NDC)', group: 'Layer bands', type: 'number', default: getLayerBandBias(LAYER_BAND.GLYPH), min: -0.005, max: 0.005, step: 0.00005, apply: bandParam(LAYER_BAND.GLYPH) },
+  // The geometric set-back the bias bands complement: how far a grid's background wall
   // sits behind its text. Live-nudges every on-screen grid/terminal (no relayout).
   { key: 'band.gridBgGap', label: 'Grid wall set-back (behind text)', group: 'Layer bands', type: 'number', default: getBandDistance(LAYER_BAND.GRID_BACKGROUND), min: 0, max: 50, step: 0.1, apply: gridBgGapParam },
   // Agent Books — the agent shelf (each agent's run as a book of spreads). An agent book
