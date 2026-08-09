@@ -501,11 +501,10 @@ export default class DeltaBooks {
 
     _updateCovers() {
         for (const set of this.sets.values()) {
-            if (!this.cfg.cover) {
-                if (set.book.cover) set.book.cover.mesh.visible = false;
-            } else {
-                set.book.bindCover(this._coverOpts(this.cfg.palette[set.hueIdx % this.cfg.palette.length]));
-            }
+            set.book.bindCover({
+                ...this._coverOpts(this.cfg.palette[set.hueIdx % this.cfg.palette.length]),
+                visible: !!this.cfg.cover,
+            });
         }
     }
 

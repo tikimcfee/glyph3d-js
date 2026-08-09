@@ -354,8 +354,10 @@ export default class Book extends BoundedObject3D {
         b.getCenter(_coverCenter);
         c.mesh.position.copy(_coverCenter);
         c.mesh.scale.set(_coverSize.x + 2 * c.opts.pad, _coverSize.y + 2 * c.opts.pad, _coverSize.z + 2 * c.opts.zPad);
-        c.mesh.visible = true;
-        c.edges.visible = c.opts.edgeOpacity > 0;
+        // The visible opt is the honored hide (syncCover runs every frame — a bare
+        // mesh.visible=false write would be re-asserted here next update).
+        c.mesh.visible = c.opts.visible !== false;
+        c.edges.visible = c.opts.visible !== false && c.opts.edgeOpacity > 0;
         // The nameplate rides the cover's top edge (the dock's tile-label idiom:
         // edge + small gap + half the plate), re-anchored every sync.
         const np = this.nameplate;

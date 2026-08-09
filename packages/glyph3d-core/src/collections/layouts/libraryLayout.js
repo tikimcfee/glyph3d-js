@@ -122,12 +122,13 @@ function buildVolume(node, books, o) {
     vol.following = !!node.userData.volumeFollowing;   // pageTo flags the last page; restore intent
     vol.fit({ ...o, gutter: 0 });
     vol.seatAll();
-    if (o.cover) {
-        vol.bindCover({
-            color: o.coverColor, opacity: o.coverOpacity, edgeOpacity: o.coverEdgeOpacity,
-            pad: o.coverPad, zPad: o.coverZPad,
-        });
-    }
+    vol.bindCover({
+        color: o.coverColor, opacity: o.coverOpacity, edgeOpacity: o.coverEdgeOpacity,
+        pad: o.coverPad, zPad: o.coverZPad,
+        // The box hide is a VISIBLE opt, not an unbind: the cover also owns the
+        // nameplate's placement, so the directory label survives boxes-off.
+        visible: o.cover !== false,
+    });
     node.userData._volume = vol;
     return vol;
 }

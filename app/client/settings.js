@@ -71,6 +71,20 @@ const bookPageParam = (agentKey, layoutParam) => (ctx, v) => {
   }
 };
 
+/** apply() for a BOOK COVER dial (the translucent box = the directory bounding volume on
+ *  library volumes, the identity/drag body on agent + delta books). Fans out to all three
+ *  cover owners: AgentBooks.cfg + DeltaBooks.cfg (their _updateCovers restyles live) and
+ *  the library scheme's layout opts (re-lay live while library shows; otherwise the stored
+ *  value seeds the next activation — these defs carry scheme:'library' and their key TAILS
+ *  are the layout opt names, so schemeSettingsOpts folds them in). */
+const coverParam = (agentKey, layoutParam) => (ctx, v) => {
+  const b = ctx.agentBooks;
+  if (b) { b.cfg[agentKey] = v; b._updateCovers?.(); }
+  const d = ctx.deltaBooks;
+  if (d) { d.cfg[agentKey] = v; d._updateCovers?.(); }
+  libraryParam(layoutParam)(ctx, v);
+};
+
 /** apply() for a container-label dial: patch the bare param into ContentTreeLabels' opts —
  *  configure() rebuilds the field only for build-shaping opts; spectrum/hover dials just steer
  *  the next frame. Color knobs store '#rrggbb'; the overlay wants a hex int. */
@@ -108,6 +122,7 @@ export const GROUPS = [
   { name: 'Dock & frame',       subtitle: 'pinned-window tile bar · ghost slots · nameplates · view-pane' },
   { name: 'Carrel',             subtitle: 'world-anchored reading desks' },
   { name: 'Agent Books',        subtitle: 'the agent shelf · shared page face' },
+  { name: 'Books',              subtitle: 'covers / directory boxes · page faces · page geometry' },
   { name: 'Book tabs',          subtitle: 'edge tabs · stagger mode · lift off edge' },
   { name: 'Strata',             subtitle: 'nested Z-depth structure view' },
   { name: 'Motion',             subtitle: 'relayout glide' },
@@ -628,21 +643,30 @@ export const SETTINGS = [
   // the next agent event.
   { key: 'book.autoShelf', label: "Seat new books at the 'agents' desk", group: 'Agent Books', type: 'bool', default: true },
   { key: 'book.maxSheets', label: 'Turns kept per book (0 = all)', group: 'Agent Books', type: 'number', default: 20, min: 0, max: 5000, step: 1, apply: bookParam('maxSheets') },
-  { key: 'book.pageW', label: 'Page width', group: 'Agent Books', type: 'number', default: 320, min: 10, max: 5000, step: 10, apply: bookParam('pageW') },
-  { key: 'book.pageH', label: 'Page height', group: 'Agent Books', type: 'number', default: 420, min: 10, max: 5000, step: 10, apply: bookParam('pageH') },
-  { key: 'book.gutter', label: 'Spread gutter (spine gap)', group: 'Agent Books', type: 'number', default: 24, min: 0, max: 500, step: 2, apply: bookParam('gutter') },
-  { key: 'book.maxUpscale', label: 'Max content upscale', group: 'Agent Books', type: 'number', default: 3, min: 0.1, max: 100, step: 0.1, apply: bookParam('maxUpscale') },
-  // Books — the SHARED page face, one config for every Book: agent books AND the
-  // library's directory volumes (same carrier, same rendering; owners differ only in
-  // state). At 1.0 a page is FULLY OPAQUE — the face material depth-writes, so full
-  // alpha is a true occluder (the readability A/B AND the occlusion-culling occluder
-  // set — large repos in library mode are where the render time lives). These fan out
-  // to both shelves; the library also seeds them at activation (scheme:'library').
-  { key: 'books.surface', label: 'Page faces', group: 'Agent Books', scheme: 'library', type: 'bool', default: true, apply: bookPageParam('face', 'surface') },
-  { key: 'books.surfaceColor', label: 'Page color', group: 'Agent Books', scheme: 'library', type: 'color', default: '#0a0a1e', apply: bookPageParam('faceColor', 'surfaceColor') },
-  { key: 'books.surfaceOpacity', label: 'Page opacity', group: 'Agent Books', scheme: 'library', type: 'number', default: 0.85, min: 0, max: 1, step: 0.05, apply: bookPageParam('faceOpacity', 'surfaceOpacity') },
-  { key: 'book.zPitch', label: 'Sheet depth spacing (Z)', group: 'Agent Books', type: 'number', default: 90, min: 1, max: 4000, step: 5, apply: bookParam('zPitch') },
-  { key: 'book.pagerLerp', label: 'Page-turn speed', group: 'Agent Books', type: 'number', default: 9, min: 0, max: 60, step: 0.5, apply: bookParam('pagerLerp') },
+  // Books — everything every Book shares: page geometry, the page face, and the COVER
+  // (the translucent bounding box — on library volumes that's the "directory box";
+  // on agent/delta books it's the identity + drag body). Cover dials fan out to all
+  // three cover owners (agent shelf, delta books, library volumes) and re-style live.
+  { key: 'book.pageW', label: 'Page width', group: 'Books', type: 'number', default: 320, min: 10, max: 5000, step: 10, apply: bookParam('pageW') },
+  { key: 'book.pageH', label: 'Page height', group: 'Books', type: 'number', default: 420, min: 10, max: 5000, step: 10, apply: bookParam('pageH') },
+  { key: 'book.gutter', label: 'Spread gutter (spine gap)', group: 'Books', type: 'number', default: 24, min: 0, max: 500, step: 2, apply: bookParam('gutter') },
+  { key: 'book.maxUpscale', label: 'Max content upscale', group: 'Books', type: 'number', default: 3, min: 0.1, max: 100, step: 0.1, apply: bookParam('maxUpscale') },
+  { key: 'book.zPitch', label: 'Sheet depth spacing (Z)', group: 'Books', type: 'number', default: 90, min: 1, max: 4000, step: 5, apply: bookParam('zPitch') },
+  { key: 'book.pagerLerp', label: 'Page-turn speed', group: 'Books', type: 'number', default: 9, min: 0, max: 60, step: 0.5, apply: bookParam('pagerLerp') },
+  // The page face: at 1.0 a page is FULLY OPAQUE — the face material depth-writes, so
+  // full alpha is a true occluder (the readability A/B AND the occlusion-culling occluder
+  // set — large repos in library mode are where the render time lives).
+  { key: 'books.surface', label: 'Page faces', group: 'Books', scheme: 'library', type: 'bool', default: true, apply: bookPageParam('face', 'surface') },
+  { key: 'books.surfaceColor', label: 'Page color', group: 'Books', scheme: 'library', type: 'color', default: '#0a0a1e', apply: bookPageParam('faceColor', 'surfaceColor') },
+  { key: 'books.surfaceOpacity', label: 'Page opacity', group: 'Books', scheme: 'library', type: 'number', default: 0.85, min: 0, max: 1, step: 0.05, apply: bookPageParam('faceOpacity', 'surfaceOpacity') },
+  // The cover / directory box. coverColor is LIBRARY-ONLY: agent + delta covers carry
+  // per-lane palette hues (identity) that a global tint must not clobber.
+  { key: 'books.cover', label: 'Directory boxes (covers)', group: 'Books', scheme: 'library', type: 'bool', default: true, apply: coverParam('cover', 'cover') },
+  { key: 'books.coverColor', label: 'Box tint (library)', group: 'Books', scheme: 'library', type: 'color', default: '#5a7ea8', apply: libraryParam('coverColor') },
+  { key: 'books.coverOpacity', label: 'Box fill opacity', group: 'Books', scheme: 'library', type: 'number', default: 0.06, min: 0, max: 1, step: 0.01, apply: coverParam('coverOpacity', 'coverOpacity') },
+  { key: 'books.coverEdgeOpacity', label: 'Box edge opacity', group: 'Books', scheme: 'library', type: 'number', default: 0.22, min: 0, max: 1, step: 0.01, apply: coverParam('coverEdgeOpacity', 'coverEdgeOpacity') },
+  { key: 'books.coverPad', label: 'Box padding (XY)', group: 'Books', scheme: 'library', type: 'number', default: 16, min: 0, max: 400, step: 1, apply: coverParam('coverPad', 'coverPad') },
+  { key: 'books.coverZPad', label: 'Box padding (Z / depth)', group: 'Books', scheme: 'library', type: 'number', default: 24, min: 0, max: 800, step: 2, apply: coverParam('coverZPad', 'coverZPad') },
   { key: 'book.callScale', label: 'Headline card size', group: 'Agent Books', type: 'number', default: 3.0, min: 0.05, max: 50, step: 0.1, apply: bookParam('callScale') },
   { key: 'book.infoScale', label: 'Info card size', group: 'Agent Books', type: 'number', default: 1.5, min: 0.05, max: 50, step: 0.05, apply: bookParam('infoScale') },
   { key: 'book.artifactWorldScale', label: 'Snapshot / output size', group: 'Agent Books', type: 'number', default: 0.025, min: 0.001, max: 5, step: 0.005, apply: bookParam('artifactWorldScale') },

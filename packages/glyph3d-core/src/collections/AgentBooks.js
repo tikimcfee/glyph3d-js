@@ -882,14 +882,13 @@ export default class AgentBooks {
     }
 
     /** Re-style every book's cover from the live cfg (the config verb tunes live);
-     *  cfg.cover false hides them (Book.update re-wraps whatever stays bound). */
+     *  cfg.cover false hides them (the visible opt — syncCover honors it every frame). */
     _updateCovers() {
         for (const lane of this.lanes.values()) {
-            if (!this.cfg.cover) {
-                if (lane.book.cover) lane.book.cover.mesh.visible = false;
-            } else {
-                lane.book.bindCover(this._coverOpts(this.cfg.palette[lane.hueIdx % this.cfg.palette.length]));
-            }
+            lane.book.bindCover({
+                ...this._coverOpts(this.cfg.palette[lane.hueIdx % this.cfg.palette.length]),
+                visible: !!this.cfg.cover,
+            });
         }
     }
 
