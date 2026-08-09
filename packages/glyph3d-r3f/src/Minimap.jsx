@@ -49,31 +49,44 @@ export default function Minimap({
   const { registry } = useGridRegistry();
   const mm = useRef(null);
 
-  // ── build the minimap scene once (proxy pool + camera-cone + camera) ──
+  // ── build the minimap scene once (instanced proxies + camera-cone + camera) ──
   useEffect(() => {
     const mscene = new THREE.Scene();
     mscene.background = new THREE.Color(0x0a0c12);
 
     const mcam = new THREE.PerspectiveCamera(fov, 1, 1, 100000);
 
-    // Shared geometry for the surface proxies — a unit box, scaled per surface.
+    // The proxy skyline as TWO draws total, any surface count: one InstancedMesh
+    // of unit boxes (per-instance matrix + color) and one LineSegments whose
+    // positions are the boxes' 12 edges written per frame into a preallocated
+    // buffer. The old pool was a Mesh + LineSegments PER surface — ~3000 draw
+    // calls per frame at workspace scale, all encoder overhead.
     const boxGeo = new THREE.BoxGeometry(1, 1, 1);
-    const edgeGeo = new THREE.EdgesGeometry(boxGeo);
+    // A unit box's 12 edges as segment endpoints (24 verts), transformed per
+    // surface on write. Derived once from EdgesGeometry so the shape can't drift.
+    const edgeTemplate = new THREE.EdgesGeometry(boxGeo).getAttribute('position').array.slice();
 
-    // Fill (translucent → overlaps read as depth) + crisp edges, keyed by surface type.
-    const mat = (color, opacity, line = false) => line
-      ? new THREE.LineBasicMaterial({ color, transparent: true, opacity, depthWrite: false })
-      : new THREE.MeshBasicMaterial({ color, transparent: true, opacity, depthWrite: false });
-    const fill = {
-      grid:     mat(0x4f7fff, 0.42), terminal: mat(0x3fbf8f, 0.42), frame: mat(0xbf8f3f, 0.42),
-    };
-    const edge = {
-      grid:     mat(0x9fc0ff, 0.9, true), terminal: mat(0x8ff0c8, 0.9, true), frame: mat(0xf0c884, 0.9, true),
-    };
+    const FILL_COLORS = { grid: 0x4f7fff, terminal: 0x3fbf8f, frame: 0xbf8f3f };
+    const EDGE_COLORS = { grid: 0x9fc0ff, terminal: 0x8ff0c8, frame: 0xf0c884 };
+
+    let capacity = 512;
+    const fills = new THREE.InstancedMesh(boxGeo,
+      new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.42, depthWrite: false }), capacity);
+    fills.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    fills.count = 0;
+    fills.frustumCulled = false;
+
+    const edgeGeo = new THREE.BufferGeometry();
+    const edgeVerts = edgeTemplate.length;           // 72 floats (24 verts) per box
+    edgeGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(capacity * edgeVerts), 3));
+    edgeGeo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(capacity * edgeVerts), 3));
+    const edges = new THREE.LineSegments(edgeGeo,
+      new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.9, depthWrite: false }));
+    edges.frustumCulled = false;
 
     const proxies = new THREE.Group();
+    proxies.add(fills, edges);
     mscene.add(proxies);
-    const pool = []; // [{ node, box, edges }]
 
     // The user camera: a translucent frustum-cone (apex at the eye, flaring along view)
     // + a bright apex dot. Hot color so it pops against the cool boxes.
@@ -87,17 +100,34 @@ export default function Minimap({
       new THREE.MeshBasicMaterial({ color: 0xff6ea0 }));
     mscene.add(cone, apex);
 
-    mm.current = { mscene, mcam, proxies, pool, cone, apex, boxGeo, edgeGeo, fill, edge,
-                   _box: new THREE.Box3(), _v: new THREE.Vector3(), _c: new THREE.Vector3(), _list: [] };
+    mm.current = { mscene, mcam, proxies, fills, edges, edgeGeo, edgeTemplate, edgeVerts,
+                   capacity, FILL_COLORS, EDGE_COLORS, cone, apex, boxGeo,
+                   _box: new THREE.Box3(), _v: new THREE.Vector3(), _c: new THREE.Vector3(),
+                   _col: new THREE.Color(), _m4: new THREE.Matrix4(), _list: [] };
 
     return () => {
       boxGeo.dispose(); edgeGeo.dispose(); coneGeo.dispose();
+      fills.material.dispose(); fills.dispose();
+      edges.material.dispose();
       cone.material.dispose(); apex.geometry.dispose(); apex.material.dispose();
-      Object.values(fill).forEach(m => m.dispose());
-      Object.values(edge).forEach(m => m.dispose());
       mm.current = null;
     };
   }, [fov]);
+
+  // ── grow the instanced proxy buffers (×2) preserving nothing — refilled per frame ──
+  const ensureCapacity = (M, n) => {
+    if (n <= M.capacity) return;
+    while (M.capacity < n) M.capacity *= 2;
+    const fills = new THREE.InstancedMesh(M.fills.geometry, M.fills.material, M.capacity);
+    fills.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    fills.frustumCulled = false;
+    M.proxies.remove(M.fills);
+    M.fills.dispose();
+    M.fills = fills;
+    M.proxies.add(fills);
+    M.edgeGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(M.capacity * M.edgeVerts), 3));
+    M.edgeGeo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(M.capacity * M.edgeVerts), 3));
+  };
 
   // ── per-frame: sync proxies + cone, frame the minimap camera, render both passes ──
   useFrame(() => {
@@ -113,30 +143,43 @@ export default function Minimap({
       for (const t of ['grid', 'terminal', 'frame'])
         for (const s of registry.toArray(t)) tagged.push([s, t]);
 
-      // sync the proxy pool to the current surfaces; collect them for the framing extent.
+      // write the proxy skyline: per-surface instance matrix + color, and the
+      // 12 box edges into the shared line buffer. Two draws total.
+      ensureCapacity(M, tagged.length);
+      const posAttr = M.edgeGeo.getAttribute('position');
+      const colAttr = M.edgeGeo.getAttribute('color');
+      const et = M.edgeTemplate, ev = M.edgeVerts;
       M._list.length = 0;
+      let n = 0;
       for (let i = 0; i < tagged.length; i++) {
         const [s, type] = tagged[i];
         M._list.push(s);
         const b = s.getBounds?.();
-        let node = M.pool[i];
-        if (!node) {                                  // grow the pool lazily
-          const box = new THREE.Mesh(M.boxGeo, M.fill[type]);
-          const edges = new THREE.LineSegments(M.edgeGeo, M.edge[type]);
-          const g = new THREE.Group(); g.add(box, edges); M.proxies.add(g);
-          node = { node: g, box, edges }; M.pool[i] = node;
+        if (!b || b.isEmpty?.()) continue;
+        b.getCenter(M._c);
+        b.getSize(M._v);
+        const sx = Math.max(M._v.x, 0.01), sy = Math.max(M._v.y, 0.01), sz = Math.max(M._v.z, 0.01);
+        M._m4.makeScale(sx, sy, sz).setPosition(M._c);
+        M.fills.setMatrixAt(n, M._m4);
+        M.fills.setColorAt(n, M._col.set(M.FILL_COLORS[type]));
+        M._col.set(M.EDGE_COLORS[type]);
+        const base = n * ev;
+        for (let v = 0; v < ev; v += 3) {
+          posAttr.array[base + v]     = et[v]     * sx + M._c.x;
+          posAttr.array[base + v + 1] = et[v + 1] * sy + M._c.y;
+          posAttr.array[base + v + 2] = et[v + 2] * sz + M._c.z;
+          colAttr.array[base + v]     = M._col.r;
+          colAttr.array[base + v + 1] = M._col.g;
+          colAttr.array[base + v + 2] = M._col.b;
         }
-        if (!b || b.isEmpty?.()) { node.node.visible = false; continue; }
-        node.node.visible = true;
-        node.box.material = M.fill[type];
-        node.edges.material = M.edge[type];
-        b.getCenter(node.node.position);
-        b.getSize(node.node.scale);
-        node.node.scale.set(Math.max(node.node.scale.x, 0.01),
-                            Math.max(node.node.scale.y, 0.01),
-                            Math.max(node.node.scale.z, 0.01));
+        n++;
       }
-      for (let i = tagged.length; i < M.pool.length; i++) M.pool[i].node.visible = false;
+      M.fills.count = n;
+      M.fills.instanceMatrix.needsUpdate = true;
+      if (M.fills.instanceColor) M.fills.instanceColor.needsUpdate = true;
+      M.edgeGeo.setDrawRange(0, n * (ev / 3));
+      posAttr.needsUpdate = true;
+      colAttr.needsUpdate = true;
 
       // the shared world extent (+ the eye, so the cone never leaves the map). One canonical
       // computation — worldBounds — that the grounding arena + soft camera bounds will share.

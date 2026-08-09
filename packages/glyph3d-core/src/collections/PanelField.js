@@ -345,6 +345,7 @@ export default class PanelField {
         material.transparent = true;      // fills are translucent by theme; depth still writes
         material.side = THREE.DoubleSide;
         material.depthWrite = true;
+        material.forceSinglePass = true;  // transparent+DoubleSide double-pass: no (see GlyphField)
         material.vertexNode = vertexFn();
         // The fill lane carries display (sRGB) bytes — decode to working space so
         // the output encode round-trips it; the border uniforms are already managed.

@@ -782,6 +782,13 @@ function _getSharedFieldMaterial(kind) {
     } else {
         material.transparent = true;
         material.depthWrite  = true;
+        // Transparent + DoubleSide makes three render the mesh TWICE (back faces,
+        // then front — r155+ behavior, WebGPU included). For the mega field that
+        // is the WHOLE ARENA's instances twice per frame — measured as 62M
+        // triangles/frame at a 15.5M-byte staging, half of it this. Glyph quads
+        // never relied on back/front intra-mesh ordering (the WebGL era was
+        // always single-pass), so opt out.
+        material.forceSinglePass = true;
     }
 
     if (isByte) registerByteSlotsMaterial(material);

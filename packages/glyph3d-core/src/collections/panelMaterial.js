@@ -125,6 +125,7 @@ export function createPanelMaterial({ color = 0x000000, opacity = 1,
     material.transparent = opacity < 1;
     material.side = side;
     material.depthWrite = depthWrite;
+    material.forceSinglePass = true;   // transparent+DoubleSide double-pass: no (see GlyphField)
     material.colorNode = mix(uFill, borderCol, rim);
     material.opacityNode = max(uOpacity, rim);
 
