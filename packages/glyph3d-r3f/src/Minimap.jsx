@@ -41,6 +41,22 @@ const _rsize = new THREE.Vector2();
  * @param {number} [props.fov=35]         minimap camera field of view
  * @param {[number,number,number]} [props.viewDir]  external vantage direction (toward content)
  */
+/**
+ * An InstancedMesh whose instance matrices ride a STORAGE attribute. Three's
+ * WebGPU instancing puts a small mesh's matrices (≤1024) in a uniform buffer
+ * that re-uploads WHOLE every frame regardless of changes; a
+ * StorageInstancedBufferAttribute flips it onto the version-gated path with
+ * addUpdateRange support, so a still skyline uploads nothing.
+ */
+function makeFills(geo, material, capacity) {
+  const fills = new THREE.InstancedMesh(geo, material, capacity);
+  const im = new THREE.StorageInstancedBufferAttribute(fills.instanceMatrix.array, 16);
+  im.name = 'MinimapProxyMatrices';
+  fills.instanceMatrix = im;
+  fills.frustumCulled = false;
+  return fills;
+}
+
 export default function Minimap({
   fraction = 0.26,
   margin = 12,
@@ -72,11 +88,9 @@ export default function Minimap({
     const EDGE_COLORS = { grid: 0x9fc0ff, terminal: 0x8ff0c8, frame: 0xf0c884 };
 
     let capacity = 512;
-    const fills = new THREE.InstancedMesh(boxGeo,
+    const fills = makeFills(boxGeo,
       new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.42, depthWrite: false }), capacity);
-    fills.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     fills.count = 0;
-    fills.frustumCulled = false;
 
     const edgeGeo = new THREE.BufferGeometry();
     const edgeVerts = edgeTemplate.length;           // 72 floats (24 verts) per box
@@ -104,6 +118,11 @@ export default function Minimap({
 
     mm.current = { mscene, mcam, proxies, fills, edges, edgeGeo, edgeTemplate, edgeVerts,
                    capacity, FILL_COLORS, EDGE_COLORS, cone, apex, boxGeo,
+                   // Per-slot change stamps (center.xyz + size.xyz) — FLOAT64: matrix/bounds
+                   // math is f64, and an f32 stamp truncates on store so the exact compare
+                   // fails forever (the group-table lesson). NaN ≠ anything → first frame writes.
+                   stamps: new Float64Array(capacity * 6).fill(NaN),
+                   typeStamps: new Array(capacity).fill(null),
                    _box: new THREE.Box3(), _v: new THREE.Vector3(), _c: new THREE.Vector3(),
                    _col: new THREE.Color(), _m4: new THREE.Matrix4(), _list: [] };
 
@@ -116,19 +135,20 @@ export default function Minimap({
     };
   }, [fov]);
 
-  // ── grow the instanced proxy buffers (×2) preserving nothing — refilled per frame ──
+  // ── grow the instanced proxy buffers (×2) preserving nothing — the NaN stamps
+  //    make every slot read as changed, so the next frame rewrites the lot ──
   const ensureCapacity = (M, n) => {
     if (n <= M.capacity) return;
     while (M.capacity < n) M.capacity *= 2;
-    const fills = new THREE.InstancedMesh(M.fills.geometry, M.fills.material, M.capacity);
-    fills.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    fills.frustumCulled = false;
+    const fills = makeFills(M.fills.geometry, M.fills.material, M.capacity);
     M.proxies.remove(M.fills);
     M.fills.dispose();
     M.fills = fills;
     M.proxies.add(fills);
     M.edgeGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(M.capacity * M.edgeVerts), 3));
     M.edgeGeo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(M.capacity * M.edgeVerts), 3));
+    M.stamps = new Float64Array(M.capacity * 6).fill(NaN);
+    M.typeStamps = new Array(M.capacity).fill(null);
   };
 
   // ── per-frame: sync proxies + cone, frame the minimap camera, render both passes ──
@@ -146,13 +166,18 @@ export default function Minimap({
         for (const s of registry.toArray(t)) tagged.push([s, t]);
 
       // write the proxy skyline: per-surface instance matrix + color, and the
-      // 12 box edges into the shared line buffer. Two draws total.
+      // 12 box edges into the shared line buffer. Two draws total. CHANGE-STAMPED:
+      // each slot rewrites only when its bounds/type moved (f64 center+size
+      // compare), and the GPU upload covers just the changed slot span — a
+      // static workspace uploads ZERO bytes (this loop once re-uploaded the
+      // full capacity-sized buffers every frame: ~650KB/f for a still map).
       ensureCapacity(M, tagged.length);
       const posAttr = M.edgeGeo.getAttribute('position');
       const colAttr = M.edgeGeo.getAttribute('color');
       const et = M.edgeTemplate, ev = M.edgeVerts;
       M._list.length = 0;
       let n = 0;
+      let lo = Infinity, hi = -1;   // changed slot span
       for (let i = 0; i < tagged.length; i++) {
         const [s, type] = tagged[i];
         M._list.push(s);
@@ -160,6 +185,15 @@ export default function Minimap({
         if (!b || b.isEmpty?.()) continue;
         b.getCenter(M._c);
         b.getSize(M._v);
+        const sb = n * 6;
+        if (M.stamps[sb] === M._c.x && M.stamps[sb + 1] === M._c.y && M.stamps[sb + 2] === M._c.z
+            && M.stamps[sb + 3] === M._v.x && M.stamps[sb + 4] === M._v.y && M.stamps[sb + 5] === M._v.z
+            && M.typeStamps[n] === type) { n++; continue; }
+        M.stamps[sb] = M._c.x; M.stamps[sb + 1] = M._c.y; M.stamps[sb + 2] = M._c.z;
+        M.stamps[sb + 3] = M._v.x; M.stamps[sb + 4] = M._v.y; M.stamps[sb + 5] = M._v.z;
+        M.typeStamps[n] = type;
+        if (n < lo) lo = n;
+        if (n > hi) hi = n;
         const sx = Math.max(M._v.x, 0.01), sy = Math.max(M._v.y, 0.01), sz = Math.max(M._v.z, 0.01);
         M._m4.makeScale(sx, sy, sz).setPosition(M._c);
         M.fills.setMatrixAt(n, M._m4);
@@ -177,11 +211,20 @@ export default function Minimap({
         n++;
       }
       M.fills.count = n;
-      M.fills.instanceMatrix.needsUpdate = true;
-      if (M.fills.instanceColor) M.fills.instanceColor.needsUpdate = true;
       M.edgeGeo.setDrawRange(0, n * (ev / 3));
-      posAttr.needsUpdate = true;
-      colAttr.needsUpdate = true;
+      if (hi >= 0) {
+        const span = hi - lo + 1;
+        M.fills.instanceMatrix.addUpdateRange(lo * 16, span * 16);
+        M.fills.instanceMatrix.needsUpdate = true;
+        if (M.fills.instanceColor) {
+          M.fills.instanceColor.addUpdateRange(lo * 3, span * 3);
+          M.fills.instanceColor.needsUpdate = true;
+        }
+        posAttr.addUpdateRange(lo * ev, span * ev);
+        posAttr.needsUpdate = true;
+        colAttr.addUpdateRange(lo * ev, span * ev);
+        colAttr.needsUpdate = true;
+      }
 
       // the shared world extent (+ the eye, so the cone never leaves the map). One canonical
       // computation — worldBounds — that the grounding arena + soft camera bounds will share.
