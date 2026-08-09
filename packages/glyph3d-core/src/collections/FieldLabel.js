@@ -1,53 +1,76 @@
 import * as THREE from 'three';
-import GlyphField from '../GlyphField.js';
-import { bakePillTexture } from '../components/plateBake.js';
+import { getPipelineArena } from '../compute/GlyphLayoutCompute.js';
+import { ensureMegaField } from '../MegaGlyphField.js';
+import { bakeFile } from '../compute/glyphBake.js';
+import { computeCellMetrics } from '../core/cellMetrics.js';
 
-// Plate bake resolution (pixels). Resolution only — world size comes from the plate geometry.
-const PLATE_PX_H = 96;
 // Plate overhang around the text block, in text-row units (a pill needs breathing room).
 const PLATE_PAD_X = 0.72, PLATE_PAD_Y = 0.42;
+// Corner radius as a fraction of plate height — the bakePillCanvas look (r = min(0.34h, 22px)
+// at the 96px bake ≈ 0.23h).
+const PLATE_RADIUS = 0.23;
+
+const _encoder = new TextEncoder();
 
 /**
- * FieldLabel — an editable, addressable text label: a GlyphField text layer (the same
- * instanced pipeline as grid content) over an optional baked pill plate. The special case of
- * a CodeGrid with labeling primitives instead of code primitives: no file backing, no syntax
- * colorizer, no caret — just setText().
+ * FieldLabel — an editable, addressable text label on the SHARED substrates: the
+ * text is an arena item + mega-field view (the FileRow filename pattern, wrap 0),
+ * the optional pill plate is a PanelField slot riding the same group texel. A
+ * label costs attribute writes, not meshes — no private GlyphField, no baked
+ * CanvasTexture, no draw calls of its own.
  *
- * Why a field and not a baked texture (Label3D): edits are LIVE (setText rebuilds the
- * label's handful of glyphs synchronously — sub-ms, no worker round trip) and the label is
- * an ordinary entity — registered under an id, moved/docked/deleted by the same verbs as
- * anything else. The plate stays baked (it only changes with color/size); the TEXT is what
- * needed the field.
+ * Measure is CPU truth, synchronous: `bakeFile` folds the label's bytes through
+ * the arena's trie — the exact advances the GPU lays (the bake gate proves them
+ * bit-identical) — so `.width`/`.height` answer in the construction tick even
+ * though glyph staging lands on the next arena flush. Shaper-less (headless)
+ * the mono cell advance stands in, mirroring the trie's own missing-block rule.
  *
- * Layout: the label's ORIGIN is the center of its block (text + plate), so callers place it
- * like the baked plates did. `lineHeight` is the world-unit row pitch at scale 1 — callers
- * size text in cell rows of a related grid (the dock's labelLines rule). Multi-line text
- * ('\n') stacks natively. Pick-inert (isMarker): addressability is registry/verbs, not
- * clicks. Frustum culling works — the label states its own extent in closed form.
+ * Layout: the label's ORIGIN is the center of its block (text + plate), so
+ * callers place it like the baked plates did. `lineHeight` is the world-unit row
+ * pitch at scale 1 — an internal anchor node scales the staged metrics-pitch
+ * rows to it, and the anchor IS the view's pose source (label moves/scales/
+ * billboards are ordinary Object3D transforms the pose sweep mirrors; node
+ * visibility mirrors into the view's alpha the same way). Multi-line ('\n')
+ * stacks natively. Pick-inert (isMarker): addressability is registry/verbs.
  */
 export default class FieldLabel extends THREE.Object3D {
     /**
      * @param {Object} o
-     * @param {Object} o.atlas            GlyphAtlas (shaper optional — mono fallback without it)
+     * @param {Object} o.atlas            GlyphAtlas (metrics + the substrate's shaping identity)
      * @param {string} [o.text='']        label text ('\n' stacks lines)
      * @param {number} [o.lineHeight=1]   world-unit row pitch at scale 1
      * @param {Object} [o.textColor={r,g,b}] glyph color (dark reads on the bright pill)
      * @param {Object|null} [o.plate]     { color:hex, opacity:0..1 } — the backing pill; null = bare text
-     * @param {number} [o.maxInstances=512] field capacity; the field is recreated on overflow
      */
-    constructor({ atlas, text = '', lineHeight = 1, textColor = { r: 0.03, g: 0.04, b: 0.06 }, plate = null, maxInstances = 512 } = {}) {
+    constructor({ atlas, text = '', lineHeight = 1, textColor = { r: 0.03, g: 0.04, b: 0.06 }, plate = null } = {}) {
         super();
         this.atlas = atlas;
         this.textColor = textColor;
         this.lineHeight = lineHeight;
         this._plateCfg = plate;
-        this._maxInstances = maxInstances;
-        this._field = null;
-        this._plate = null;      // { mesh, key } — key tracks color+aspect to skip idle rebakes
+        this._plateAlpha = plate?.opacity ?? 0.85;
         this._text = '';
-        this._textBlock = { w: 0, h: 0 }; // measured text extent at scale 1
-        this.userData.isMarker = true;    // pick-inert: addressability is registry/verbs, not clicks
+        this._block = { wu: 0, rows: 1 };   // text block in STAGE units (metrics pitch)
+        this._plateDims = null;             // { w, h } in stage units, when plated
+        this._mLine = 1;                    // metrics row pitch (stage-unit lineHeight)
+        this._view = null;                  // MegaFieldView (created on first staging)
+        this._pipeline = null;              // the staged arena item
+        this._panelSlot = null;             // PanelField slot, when plated
+        this._panels = null;                // the panel field the slot came from
+        this._staged = false;
+        this.userData.isMarker = true;      // pick-inert: addressability is registry/verbs, not clicks
         this.name = 'FieldLabel';
+
+        // The staged rows live under a scaled anchor: stage-space (metrics pitch,
+        // rows down from y=0) → block-centered label space at `lineHeight` pitch.
+        this._anchor = new THREE.Object3D();
+        this._anchor.name = 'FieldLabel:anchor';
+        this.add(this._anchor);
+
+        // A label is usually built BEFORE it is parented — the substrate needs a
+        // scene root, so staging retries when the label lands in one.
+        this.addEventListener('added', () => { if (!this._staged) this._restage(); });
+
         this.setText(text);
     }
 
@@ -56,29 +79,44 @@ export default class FieldLabel extends THREE.Object3D {
 
     /** Plate width/height at scale 1 (the text block's when plateless) — the placement
      *  contract baked-plate callers (CameraDock._placeLabel) already use. */
-    get width() { return this._plate ? this._plate.mesh.geometry.parameters.width : this._textBlock.w; }
-    get height() { return this._plate ? this._plate.mesh.geometry.parameters.height : this._textBlock.h; }
+    get width() {
+        const s = this.lineHeight / this._mLine;
+        return (this._plateDims ? this._plateDims.w : this._block.wu) * s;
+    }
+    get height() {
+        const s = this.lineHeight / this._mLine;
+        return (this._plateDims ? this._plateDims.h : this._block.rows * this._mLine) * s;
+    }
 
-    /** Replace the text — a synchronous rebuild of the label's few glyphs. Live-editable:
-     *  this is THE labeling primitive the verbs (label.set / label.append) drive. */
+    /** Replace the text — measure is synchronous (the CPU fold); the glyphs land
+     *  on the next arena flush. THE labeling primitive label.set/append drive. */
     setText(text) {
         text = String(text ?? '');
-        if (text === this._text && this._field) return;
+        if (text === this._text && this._staged) return;
         this._text = text;
-        this._rebuildField();
+        this._restage();
+    }
+
+    /** Re-pitch the label (rebind path). Pure geometry: the staged bytes live at
+     *  the metrics pitch and only the anchor/plate transforms carry lineHeight. */
+    setLineHeight(lh) {
+        if (!(lh > 0) || lh === this.lineHeight) return;
+        this.lineHeight = lh;
+        this._applyGeometry();
     }
 
     /** Repaint the plate in a new color (no-op when plateless or unchanged). */
     setPlateColor(hex) {
         if (!this._plateCfg || hex === this._plateCfg.color) return;
         this._plateCfg.color = hex;
-        this._refreshPlate(true);
+        this._applyPlateStyle();
     }
 
-    /** Fade the whole label (plate opacity + text group alpha). */
+    /** Fade the whole label: the view's alpha lane fades glyphs AND the plate
+     *  (the plate's fill alpha resets to 1 so the net plate opacity IS v). */
     setOpacity(v) {
-        if (this._plate) this._plate.mesh.material.opacity = v;
-        this._field?.setGroupAlpha(0, v);
+        this._view?.setGroupAlpha(0, v);
+        if (this._plateCfg) { this._plateAlpha = v > 0 ? 1 : 0; this._applyPlateStyle(); }
     }
 
     /** Local-space bounds of the whole label (plate, or the text block when plateless). */
@@ -88,122 +126,133 @@ export default class FieldLabel extends THREE.Object3D {
     }
 
     dispose() {
-        this._disposeField();
-        if (this._plate) {
-            this.remove(this._plate.mesh);
-            this._plate.mesh.geometry.dispose();
-            this._plate.mesh.material.map?.dispose();
-            this._plate.mesh.material.dispose();
-            this._plate = null;
+        this._pipeline?.dispose?.();
+        this._pipeline = null;
+        if (this._panelSlot != null) {
+            this._panels?.free(this._panelSlot);
+            this._panelSlot = null;
+            this._panels = null;
         }
+        this._view?.dispose();
+        this._view = null;
+        this._staged = false;
     }
 
     // ============ Private ============
 
-    /** (Re)build the text field from scratch: dispose + recreate + render + measure + center
-     *  + state the cull extent. Wholesale rebuild is the architecture's honest edit path
-     *  (ContentTreeLabels does the same) — at label scale it's sub-millisecond. @private */
-    _rebuildField() {
-        this._disposeField();
-        const lineCount = Math.max(this._text.split('\n').length, 1);
-        const needed = Math.max(this._text.length + 16, 64); // grows past maxInstances on overflow
-        this._field = new GlyphField(this, this.atlas, {
-            maxInstances: Math.max(needed, this._maxInstances),
-            defaultColor: this.textColor,
-            worldScale: 1,
-            frustumCulled: true,
-        });
-
-        if (this._text) {
-            const scale = this.lineHeight / this._rowPitch();
-            this._field.render(this._text, { x: 0, y: 0, z: 0 }, { color: this.textColor, scale });
-        }
-
-        // Measure the text block from the instance buffers (exact for the shaped AND mono paths),
-        // then center the block on the origin by offsetting the mesh — no buffer rewrites.
-        const { minX, maxX, count } = this._measureGlyphs();
-        const blockW = count ? maxX - minX : 0;
-        const blockH = lineCount * this.lineHeight;
-        const mesh = this._field.instanceMesh;
-        mesh.position.set(
-            count ? -(minX + maxX) / 2 : 0,
-            (lineCount - 1) * this.lineHeight / 2, // lines advance DOWN from y=0 → recenter the stack
-            0,
-        );
-        this._textBlock = { w: blockW, h: blockH };
-
-        // State the cull extent in field-local space (positions only — the mesh offset above
-        // is an ordinary Object3D transform three sees on its own).
-        if (count) {
-            this._field.setLayoutExtent({
-                min: { x: minX, y: -blockH + this.lineHeight / 2, z: -0.01 },
-                max: { x: maxX, y: this.lineHeight / 2, z: 0.01 },
-            });
-        }
-        this._refreshPlate(false);
-    }
-
-    /** The field's row pitch at scale 1, mirroring GlyphField's own line math (shaped when a
-     *  shaper is live, the mono metric otherwise) — so scale = lineHeight / pitch is exact. @private */
-    _rowPitch() {
-        const shaper = this._field._shaper;
-        if (shaper) {
-            const fe = shaper.fontExtents();
-            return ((fe.ascender - fe.descender + fe.lineGap) / shaper.upem) * this._field.metrics.pixelHeight;
-        }
-        return this._field.metrics.lineSpacing;
-    }
-
-    /** Min/max glyph X (left edges + advance widths) over the live instance buffers. @private */
-    _measureGlyphs() {
-        const geom = this._field.instanceMesh.geometry;
-        const pos = geom.attributes.instancePosition, siz = geom.attributes.instanceSize;
-        const stride = pos.itemSize;
-        let minX = Infinity, maxX = -Infinity;
-        for (let i = 0; i < geom.instanceCount; i++) {
-            const x = pos.array[i * stride];
-            minX = Math.min(minX, x);
-            maxX = Math.max(maxX, x + siz.array[i * 2]);
-        }
-        return { minX, maxX, count: geom.instanceCount };
-    }
-
-    /** Size/rebake the plate around the measured text block (origin-centered, behind the
-     *  glyphs). Rebakes the texture only when color or rounded pixel dims change. @private */
-    _refreshPlate(force) {
-        if (!this._plateCfg) return;
-        const w = Math.max(this._textBlock.w + PLATE_PAD_X * this.lineHeight * 2, this.lineHeight);
-        const h = this._textBlock.h + PLATE_PAD_Y * this.lineHeight * 2;
-        const pxW = Math.max(Math.round((w / h) * PLATE_PX_H), 8);
-        const key = `${pxW}x${PLATE_PX_H}:${this._plateCfg.color}`;
-        if (!this._plate) {
-            const texture = bakePillTexture(pxW, PLATE_PX_H, this._plateCfg.color);
-            const mesh = new THREE.Mesh(
-                new THREE.PlaneGeometry(w, h),
-                new THREE.MeshBasicMaterial({ map: texture, transparent: true, opacity: this._plateCfg.opacity ?? 0.85, depthTest: true, depthWrite: false }),
-            );
-            mesh.position.z = -0.01; // behind the glyphs
-            mesh.userData.isMarker = true;
-            this.add(mesh);
-            this._plate = { mesh, key };
-            return;
-        }
-        const mesh = this._plate.mesh;
-        mesh.geometry.dispose();
-        mesh.geometry = new THREE.PlaneGeometry(w, h);
-        if (force || key !== this._plate.key) {
-            mesh.material.map?.dispose();
-            mesh.material.map = bakePillTexture(pxW, PLATE_PX_H, this._plateCfg.color);
-            mesh.material.needsUpdate = true;
-            this._plate.key = key;
-        }
+    /** The plate's fill write (Tab3D's hover/active opacity rides this). @protected */
+    _setPlateAlpha(a) {
+        this._plateAlpha = a;
+        this._applyPlateStyle();
     }
 
     /** @private */
-    _disposeField() {
-        if (!this._field) return;
-        this.remove(this._field.instanceMesh);
-        this._field.dispose();
-        this._field = null;
+    _applyPlateStyle() {
+        if (this._panelSlot == null) return;
+        this._panels.setFill(this._panelSlot, this._plateCfg.color, this._plateAlpha);
+    }
+
+    /**
+     * The substrate seam: the arena's one mega field, created here only when the
+     * label is already scene-rooted (the mesh needs a scene). @private
+     * @returns {import('../MegaGlyphField.js').default|null}
+     */
+    _substrate() {
+        const arena = getPipelineArena();
+        if (!arena) {
+            if (!FieldLabel._noArenaNoted) {
+                FieldLabel._noArenaNoted = true;
+                console.error('FieldLabel: no pipeline arena — labels need the byte pipeline (WebGPU); text renders EMPTY');
+            }
+            return null;
+        }
+        if (!arena.megaField) {
+            let root = this;
+            while (root.parent) root = root.parent;
+            if (!root.isScene) return null;   // not in a scene yet — the 'added' listener retries
+            ensureMegaField(arena, {
+                scene: root, atlas: this.atlas, worldScale: arena.worldScale,
+                slugData: this.atlas?._slugData, shaper: this.atlas?._shaper,
+            });
+        }
+        return arena.megaField;
+    }
+
+    /** Measure the block in stage units — the trie fold (exact GPU advances) or,
+     *  shaper-less, the mono cell advance the trie's missing block would use. @private */
+    _measure() {
+        const arena = getPipelineArena();
+        const ws = arena?.worldScale ?? 0.025;
+        const cm = computeCellMetrics(this.atlas.getCharSize(), ws);
+        this._mLine = cm.lineSpacing;
+        const rows = Math.max(this._text.split('\n').length, 1);
+        let wu = 0;
+        if (this._text) {
+            if (arena?.trie) {
+                wu = bakeFile(_encoder.encode(this._text), arena.trie, { lineHeight: cm.lineSpacing }).maxLineWidth;
+            } else {
+                for (const line of this._text.split('\n')) {
+                    wu = Math.max(wu, [...line].length * cm.charWidth);
+                }
+            }
+        }
+        this._block = { wu, rows };
+        this._plateDims = this._plateCfg
+            ? { w: Math.max(wu + 2 * PLATE_PAD_X * this._mLine, this._mLine), h: rows * this._mLine + 2 * PLATE_PAD_Y * this._mLine }
+            : null;
+    }
+
+    /** Land the anchor transform + the plate's geometry lanes from the current
+     *  measure. Stage space: rows hang DOWN from y=0, row k cell = [-kL, -kL+L),
+     *  x ∈ [0, wu]; the anchor maps the block's center onto the label origin at
+     *  `lineHeight` pitch. @private */
+    _applyGeometry() {
+        const { wu, rows } = this._block;
+        const L = this._mLine;
+        const s = this.lineHeight / L;
+        const cx = wu / 2, cy = L * (2 - rows) / 2;
+        this._anchor.scale.setScalar(s);
+        this._anchor.position.set(-cx * s, -cy * s, 0);
+        if (this._panelSlot != null && this._plateDims) {
+            const p = this._plateDims;
+            this._panels.setRect(this._panelSlot, cx, cy, p.w, p.h, -0.01 / s);
+            this._panels.setRadius(this._panelSlot, p.h * PLATE_RADIUS);
+        }
+    }
+
+    /** Measure + re-anchor + (re)stage text and plate. Measure always lands (the
+     *  sync contract); staging lands when the substrate is reachable. @private */
+    _restage() {
+        this._measure();
+        const mega = this._substrate();
+        if (!mega) {
+            this._applyGeometry();   // the anchor is still true — only staging waits
+            return;
+        }
+        const arena = mega.arena;
+        if (!this._view) this._view = mega.createView({ node: this._anchor, color: this.textColor });
+
+        this._pipeline?.dispose?.();
+        this._pipeline = null;
+        if (this._text) {
+            this._pipeline = arena.stage({
+                bytes: _encoder.encode(this._text),
+                origin: { x: 0, y: 0, z: 0 },
+                page: null, wrapWidth: 0, lineHeight: this._mLine, zStep: 0,
+                field: this._view,
+            });
+            arena.requestFlush();
+        } else {
+            this._view.clear();
+        }
+
+        if (this._plateCfg && this._panelSlot == null) {
+            this._panels = mega.labelPanels ?? mega.panels;
+            this._panelSlot = this._panels.alloc(null, this._view.groupId);
+            this._panels.setVisible(this._panelSlot, true);
+        }
+        this._applyGeometry();
+        if (this._plateCfg) this._applyPlateStyle();
+        this._staged = true;
     }
 }

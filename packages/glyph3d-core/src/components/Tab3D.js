@@ -23,35 +23,30 @@ export function setTabParam(vals) { Object.assign(TAB_CONFIG, vals); }
  *   FieldLabel— live glyphs, inert  (dynamic addressable text: lane labels)
  *   Tab3D     — live glyphs, picks  (THIS: book edge tabs)
  *
- * FieldLabel (real glyphs over a baked plate — minifies through the LOD system
- * instead of blurring on a tilted edge) + Button3D's interaction role: the plate
- * re-enters picking (FieldLabel marks it isMarker/inert), carries a role + onClick,
- * and owns default/hover/active visual states. The shared glyph-vertex transform
- * means a scaled tab (tilted edge, hover pop) picks correctly.
+ * FieldLabel (real glyphs on the shared substrates — the plate is a PanelField
+ * slot, the text an arena item) + Button3D's interaction role: a role + onClick
+ * and default/hover/active visual states, all of which are lane writes (hover
+ * pop = node scale through the pose sweep, opacity boost = the plate's fill
+ * alpha byte, active recolor = a fill write). No meshes, no draw calls.
  *
- * Not an r3f component; clicks/hover resolve through the GPU picking pass — the
- * host registers `pickMesh` (the plate) on the 'handle' channel and the central
- * press router (CanvasInteraction) fires onClick + drives setHovered, exactly as
- * it does for Button3D.
- *
- * The plate mesh is reused across FieldLabel's live rebakes (only its geometry +
- * texture swap), so the isMarker deletion from the constructor persists for the
- * tab's life. setActive marks the head sheet's tab — the "you are here" tab.
+ * Picking is not wired yet (it never was): the panel block's future 'handle'
+ * registration resolves a hit to this tab via ownerOf(slot), and the central
+ * press router (CanvasInteraction) fires onClick + drives setHovered, exactly
+ * as it does for Button3D. setActive marks the head sheet's tab — the "you are
+ * here" tab.
  */
 export default class Tab3D extends FieldLabel {
     /**
      * @param {Object} o - all FieldLabel options ({ atlas, text, lineHeight,
-     *   textColor, plate, maxInstances }) plus:
+     *   textColor, plate }) plus:
      * @param {string}  [o.role='tab']       carried in the pick token for the dispatcher
      * @param {Function} [o.onClick=null]    (token) => … ; the wrapper wires this to `book.page`
      * @param {number}  [o.activeColor]      hex — the head tab's plate color (null = keep resting)
      */
     constructor({ role = 'tab', onClick = null, activeColor = null, plate, ...fieldLabelArgs } = {}) {
-        // A tab is always a plated label (the plate is the pick surface + the
-        // thumb-tab body); default one if the caller (book banding) didn't.
+        // A tab is always a plated label (the plate is the thumb-tab body);
+        // default one if the caller (book banding) didn't.
         super({ plate: plate ?? { color: 0x8899aa, opacity: 0.85 }, ...fieldLabelArgs });
-        // The plate is the pick surface — undo FieldLabel's inert-marker flag.
-        if (this._plate?.mesh) delete this._plate.mesh.userData.isMarker;
         this.userData.isTab = true;
         this.role = role;
         this.onClick = onClick;
@@ -62,9 +57,6 @@ export default class Tab3D extends FieldLabel {
         this._active = false;
         this.name = `Tab3D:${this._text || ''}`;
     }
-
-    /** The mesh a host registers for picking — the backing plate (a flat plane). */
-    get pickMesh() { return this._plate?.mesh ?? null; }
 
     /** Cursor-over: fade the plate up + a small pop (mirrors Button3D). The TEXT
      *  stays full-alpha so a hovered tab stays legible. Idempotent. */
@@ -84,10 +76,21 @@ export default class Tab3D extends FieldLabel {
         this._refreshOpacity();
     }
 
+    /** Rebind-time re-true of the resting facts (bindTabs diffs tabs in place —
+     *  a tab rents substrate texels for its sheet's LIFETIME, never per relayout). */
+    retune({ plateColor, activeColor, plateOpacity } = {}) {
+        if (activeColor !== undefined) this._activeColor = activeColor;
+        if (plateOpacity !== undefined) this._baseOpacity = plateOpacity;
+        if (plateColor !== undefined) {
+            this._restColor = plateColor;
+            if (!this._active || this._activeColor == null) this.setPlateColor(plateColor);
+        }
+        this._refreshOpacity();
+    }
+
     /** @private — plate opacity from the active/hover flags (text untouched). */
     _refreshOpacity() {
-        if (!this._plate) return;
         const boost = this._active ? 0.25 : (this._hovered ? 0.2 : 0);
-        this._plate.mesh.material.opacity = Math.min(1, this._baseOpacity + boost);
+        this._setPlateAlpha(Math.min(1, this._baseOpacity + boost));
     }
 }

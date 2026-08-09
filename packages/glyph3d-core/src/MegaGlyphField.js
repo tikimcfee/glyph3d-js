@@ -97,6 +97,11 @@ export class MegaGlyphField {
         // The panel field: every view's background panel as one instanced draw,
         // posed by the same group texels (see collections/PanelField.js).
         this.panels = new PanelField({ scene, field: this.field });
+        // Label pills (tabs, nameplates) — their own instanced draw: translucent
+        // plates that never depth-punch neighboring text (the baked-plate look),
+        // and the future 'handle' pick block for tab clicks.
+        this.labelPanels = new PanelField({ scene, field: this.field, channel: 'handle', depthWrite: false });
+        this.labelPanels.mesh.name = 'label-panel-field';
         if (this._pickingSystem) this.panels.registerPicking(this._pickingSystem);
 
         // RANGE CULLING (the visibility lane): the mega mesh submits one indirect
@@ -123,6 +128,7 @@ export class MegaGlyphField {
             this._cullRanges(renderer, camera);
         };
         this.panels.mesh.onBeforeRender = () => this._syncPoses();
+        this.labelPanels.mesh.onBeforeRender = () => this._syncPoses();
     }
 
     get instanceMesh() { return this.field.instanceMesh; }
@@ -343,11 +349,29 @@ export class MegaGlyphField {
         return true;
     }
 
+    /** @private effective scene-graph visibility — a node hidden anywhere up its
+     *  chain (or detached from the scene) must not draw, exactly as a mesh
+     *  wouldn't. The sweep mirrors this into the view's alpha lane, which is
+     *  what makes `label.visible = false` real for substrate-rendered content. */
+    _effectiveVisible(node) {
+        for (let n = node; n; n = n.parent) {
+            if (!n.visible) return false;
+            if (n.isScene) return true;
+        }
+        return false;
+    }
+
     /** @private */
     _syncPoses() {
         for (const view of this.views) {
-            if (!view.node || view.dead || view.byteCount <= 0) continue;
+            if (!view.node || view.dead) continue;
+            const vis = this._effectiveVisible(view.node);
+            if (vis !== view._nodeVisible) {
+                view._nodeVisible = vis;
+                view._applyAlpha();
+            }
             // A moved node also moves the view's world box (the cull input).
+            // Empty views still pose: a plated label with no text rides this texel.
             if (this._poseFromNode(view.node, view.groupId, view._mat)) view._worldBoxDirty = true;
         }
         for (const pg of this._poseGroups) {
@@ -485,6 +509,7 @@ export class MegaFieldView {
         this._worldBoxDirty = true;
         this.dead = false;
         this._visible = true;
+        this._nodeVisible = true;   // scene-graph visibility, mirrored by the pose sweep
         this._alpha = 1;
         this._mat = new Float32Array(16).fill(NaN); // NaN ≠ anything → first sweep always poses
     }
@@ -538,7 +563,7 @@ export class MegaFieldView {
      * setGroupColor would otherwise reset it to 1 and resurrect a hidden view.
      */
     setGroupColor(_groupId, color) {
-        const a = (this.dead || !this._visible) ? 0 : this._alpha;
+        const a = (this.dead || !this._visible || !this._nodeVisible) ? 0 : this._alpha;
         this.mega.field.setGroupColor(this.groupId, { r: color.r, g: color.g, b: color.b, a });
     }
 
@@ -554,7 +579,7 @@ export class MegaFieldView {
 
     /** @private */
     _applyAlpha() {
-        this.mega.field.setGroupAlpha(this.groupId, (this.dead || !this._visible) ? 0 : this._alpha);
+        this.mega.field.setGroupAlpha(this.groupId, (this.dead || !this._visible || !this._nodeVisible) ? 0 : this._alpha);
     }
 
     /** Grid-local clip window → this view's group clip lanes. */

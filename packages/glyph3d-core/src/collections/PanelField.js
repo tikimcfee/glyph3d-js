@@ -48,7 +48,7 @@ const _fillColor = new THREE.Color();
  *
  * Instance lanes (declared by name, bound to the field's geometry):
  *   panelRect vec4 — center x, center y, width, height (owner-node local)
- *   panelAux  vec4 — z, groupId, visible, reserved
+ *   panelAux  vec4 — z, groupId, visible, cornerRadius (owner-local units)
  *
  * Culls (degenerate to outside-NDC — a vertex can't Discard): the visible bit,
  * and the group's alpha lane (a hidden/dead view hides its panel). The glyph
@@ -56,7 +56,7 @@ const _fillColor = new THREE.Color();
  *
  * @param {Object} p
  * @param {Object} p.groupTex - texture node resolving to the field's group DataTexture
- * @returns {{ clipPos, gColor }}
+ * @returns {{ clipPos, gColor, rect, aux }}
  */
 export function buildPanelVertexTransform({ groupTex }) {
     const rect = attribute('panelRect', 'vec4');
@@ -79,7 +79,7 @@ export function buildPanelVertexTransform({ groupTex }) {
     const OFF = () => vec4(float(2), float(2), float(2), float(1));
     If(aux.z.lessThan(0.5).or(gColor.a.lessThan(0.01)), () => { outClip.assign(OFF()); });
 
-    return { clipPos: outClip, gColor };
+    return { clipPos: outClip, gColor, rect, aux };
 }
 
 export default class PanelField {
@@ -88,11 +88,18 @@ export default class PanelField {
      * @param {THREE.Scene} p.scene - the mesh lives at the scene root (pose is all texel)
      * @param {import('../GlyphField.js').default} p.field - the group-texture owner (the mega glyph field)
      * @param {number} [p.capacity=2048] - initial instance capacity (grows ×2)
+     * @param {string} [p.channel='grid'] - the pick channel this field's block registers on
+     *   (window panels resolve as grids; tab/handle surfaces as chrome)
+     * @param {boolean} [p.depthWrite=true] - window panels occlude content behind them
+     *   (true); label pills must not depth-punch neighboring text (false — the baked-
+     *   plate look: translucent pills blend, never carve holes in the glyph pass)
      */
-    constructor({ scene, field, capacity = 2048 }) {
+    constructor({ scene, field, capacity = 2048, channel = 'grid', depthWrite = true }) {
         if (!scene || !field) throw new Error('PanelField: scene + field (group-texture owner) are required');
         this.isPanelField = true;
         this.field = field;
+        this.channel = channel;
+        this._depthWrite = depthWrite;
 
         /** slot → owner (the FileRow/grid a pick hit resolves to). */
         this._owners = [];
@@ -219,6 +226,14 @@ export default class PanelField {
         this._write('panelFlags', slot, flags & 0xFF);
     }
 
+    /** Corner radius in owner-local units (0 = square; min(w,h)/2 = a full pill).
+     *  The fragment clamps to the half-extent, so "pill" is safe to over-ask. */
+    setRadius(slot, r) {
+        const aux = this._geometry.attributes.panelAux;
+        aux.array[slot * 4 + 3] = Math.max(r, 0);
+        this._touch(aux, slot, 4);
+    }
+
     // ── Field-wide style (the panelMaterial handle surface, shared) ──────────
 
     /** Identity border color / width(px) / master intensity. */
@@ -249,7 +264,7 @@ export default class PanelField {
         const key = `${this._capacity}`;
         if (!sys || this._pickKey === key) return;
         if (!this._pickMaterial) this._pickMaterial = this._buildPickMaterial();
-        sys.register('grid', this.mesh, this, { count: this._capacity, material: this._pickMaterial });
+        sys.register(this.channel, this.mesh, this, { count: this._capacity, material: this._pickMaterial });
         this._pickKey = key;
     }
 
@@ -308,15 +323,19 @@ export default class PanelField {
     /** @private the fill + border fragment (panelMaterial's shader, per-instance state). */
     _buildRenderMaterial() {
         const groupTex = this._groupTexNode();
-        const vFill  = varying(vec4(0), 'vPanelFill');
-        const vFlags = varying(float(0), 'vPanelFlags');
-        const vAlpha = varying(float(1), 'vPanelAlpha');
+        const vFill   = varying(vec4(0), 'vPanelFill');
+        const vFlags  = varying(float(0), 'vPanelFlags');
+        const vAlpha  = varying(float(1), 'vPanelAlpha');
+        const vSize   = varying(vec2(0, 0), 'vPanelSize');
+        const vRadius = varying(float(0), 'vPanelRadius');
 
         const vertexFn = Fn(() => {
-            const { clipPos, gColor } = buildPanelVertexTransform({ groupTex });
+            const { clipPos, gColor, rect, aux } = buildPanelVertexTransform({ groupTex });
             vFill.assign(attribute('panelFill', 'vec4'));
             vFlags.assign(attribute('panelFlags', 'float'));
             vAlpha.assign(gColor.a);
+            vSize.assign(rect.zw);
+            vRadius.assign(aux.w);
             return clipPos;
         });
 
@@ -335,22 +354,30 @@ export default class PanelField {
         const borderCol = select(anyState, stateCol, u.borderColor).mul(pulse);
 
         const w = u.borderWidth.mul(select(has(F.CAPTURED), float(2.6), select(accent, float(1.6), float(1))));
-        const edge = vec2(0.5, 0.5).sub(uv().sub(0.5).abs());
-        const px = edge.div(max(fwidth(edge), float(1e-6)));
-        const d = min(px.x, px.y);
-        const band = smoothstep(w.sub(float(0.5)), w.add(float(0.5)), d).oneMinus();
+
+        // Rounded-rect SDF in owner-local units (radius 0 = an exact rectangle):
+        // negative inside. Border band + edge coverage both derive from it, so
+        // the rim follows the rounded corner instead of the quad's edge.
+        const p = uv().sub(vec2(0.5, 0.5)).mul(vSize);
+        const r = min(vRadius, min(vSize.x, vSize.y).mul(0.5));
+        const q = p.abs().sub(vSize.mul(0.5).sub(r));
+        const sdf = max(q, vec2(0, 0)).length().add(min(max(q.x, q.y), float(0))).sub(r);
+        const dPx = sdf.div(max(fwidth(sdf), float(1e-6)));   // signed px to the edge
+        const band = smoothstep(w.sub(float(0.5)), w.add(float(0.5)), dPx.negate()).oneMinus();
+        const coverage = smoothstep(float(-0.5), float(0.5), dPx).oneMinus();
         const rim = band.mul(select(on, u.borderIntensity, float(0)));
 
         const material = new MeshBasicNodeMaterial();
-        material.transparent = true;      // fills are translucent by theme; depth still writes
+        material.transparent = true;      // fills are translucent by theme
         material.side = THREE.DoubleSide;
-        material.depthWrite = true;
+        material.depthWrite = this._depthWrite;
         material.forceSinglePass = true;  // transparent+DoubleSide double-pass: no (see GlyphField)
+        material.alphaTest = 1 / 255;     // rounded corners must not depth-punch what's behind
         material.vertexNode = vertexFn();
         // The fill lane carries display (sRGB) bytes — decode to working space so
         // the output encode round-trips it; the border uniforms are already managed.
         material.colorNode = mix(vFill.rgb.pow(vec3(2.2, 2.2, 2.2)), borderCol, rim);
-        material.opacityNode = max(vFill.a, rim).mul(vAlpha);
+        material.opacityNode = max(vFill.a, rim).mul(coverage).mul(vAlpha);
         return material;
     }
 
@@ -379,7 +406,7 @@ export default class PanelField {
     }
 
     dispose() {
-        if (this._pickingSystem) this._pickingSystem.unregister?.('grid', this.mesh);
+        if (this._pickingSystem) this._pickingSystem.unregister?.(this.channel, this.mesh);
         this.mesh.parent?.remove(this.mesh);
         this._geometry.dispose();
         this.mesh.material.dispose();

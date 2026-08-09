@@ -64,6 +64,11 @@ const field = { _groupTexture: null };   // the group-texture owner (resolved pe
     pf.setGroup(b, 3);
     check('group re-points', aux.array[b * 4 + 1] === 3);
 
+    pf.setRadius(b, 2.5);
+    check('radius lands in aux.w', aux.array[b * 4 + 3] === 2.5);
+    pf.setRadius(b, -1);
+    check('radius clamps at zero', aux.array[b * 4 + 3] === 0);
+
     // ── Free + reuse ────────────────────────────────────────────────────────
     pf.free(b);
     check('freed slot hides + points at the dead group',
@@ -115,6 +120,12 @@ const field = { _groupTexture: null };   // the group-texture owner (resolved pe
         calls.length === 2 && calls[1].opts.count === 4);
     check('pick material is stable across re-registration',
         calls[0].opts.material === calls[1].opts.material);
+
+    // A second field on another channel — the tab/handle population's block.
+    const pf2 = new PanelField({ scene, field, capacity: 2, channel: 'handle', depthWrite: false });
+    pf2.registerPicking(ps);
+    check('channel is a constructor fact', calls[2].channel === 'handle' && pf2.channel === 'handle');
+    check('label field renders without depth writes', pf2.mesh.material.depthWrite === false);
 }
 
 console.log(`\npanel-field: ${passed} passed, ${failed} failed`);

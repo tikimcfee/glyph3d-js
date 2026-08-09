@@ -409,19 +409,33 @@ export default class Book extends BoundedObject3D {
     //    rolodex cascade IS the thumb-index stagger for free — and banded UP the cover
     //    edge by a per-book content key (files → first letter, agent moments → action
     //    kind) so the deck reads as stable groups. syncTabs() repositions every frame
-    //    like syncCover does for the nameplate. Picking stays the wrapper's job (it
-    //    registers each tab.pickMesh on the 'handle' channel); Book owns build/sync only.
+    //    like syncCover does for the nameplate. Picking stays the wrapper's job (a
+    //    'handle'-channel panel block resolving hits to tabs); Book owns build/sync only.
 
     /** Bind one pickable tab per sheet. `keyOf`/`labelOf`/`hueOf` default to the
      *  basename-first-letter idiom; wrappers override (agent → action kind, etc.).
-     *  `lineHeight` is bind-time (a relayout re-binds with a new glyph size). The
-     *  geometry dials — stagger, edge, lift — are the GLOBAL live `tab.*` settings
-     *  (Tab3D's TAB_CONFIG), re-read by syncTabs every frame; see TAB_DEFAULTS. */
+     *  A re-bind is a DIFF, not a rebuild: existing sheets keep their Tab3D (its
+     *  text/pitch/hue re-true in place) — tabs rent substrate group texels, and
+     *  ids retire on dispose, so per-relayout rebuilds would burn the texel space.
+     *  The geometry dials — stagger, edge, lift — are the GLOBAL live `tab.*`
+     *  settings (Tab3D's TAB_CONFIG), re-read by syncTabs every frame. */
     bindTabs({ atlas, keyOf = null, labelOf = null, hueOf = null,
               lineHeight = 7, plateOpacity = 0.85, activeColor = 0x6ee7a0 } = {}) {
-        this.dropTabs();
+        const prev = new Map((this.tabs ?? []).map((t) => [t.sheet, t]));
         this._tabOpts = { atlas, keyOf, labelOf, hueOf, lineHeight, plateOpacity, activeColor };
-        this.tabs = this.sheets.map((sheet) => this._makeTab(sheet));
+        this.tabs = this.sheets.map((sheet, i) => {
+            const t = prev.get(sheet);
+            if (!t) return this._makeTab(sheet);
+            prev.delete(sheet);
+            t.key = this._tabKeyOf(sheet);
+            const label = this._tabLabelOf(sheet);
+            t.tab.setText(label);
+            t.tab.setLineHeight(lineHeight);
+            t.tab.retune({ plateColor: this._tabHueOf(t.key), activeColor, plateOpacity });
+            t.tab.name = `tab:${i}:${label}`;
+            return t;
+        });
+        for (const t of prev.values()) { this.remove(t.tab); t.tab.dispose(); }
         return this;
     }
 

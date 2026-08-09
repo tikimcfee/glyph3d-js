@@ -16,9 +16,16 @@
 import './headless-canvas.mjs';
 import { HEADLESS_ATLAS } from './headless-atlas.mjs';
 import * as THREE from 'three';
+import { setPipelineArena } from '../packages/glyph3d-core/src/compute/GlyphLayoutCompute.js';
+import { makeSubstrate } from './label-substrate-mock.mjs';
 import Label3D from '../packages/glyph3d-core/src/components/Label3D.js';
 import Button3D from '../packages/glyph3d-core/src/components/Button3D.js';
 import CameraDock from '../packages/glyph3d-core/src/services/interaction/CameraDock.js';
+
+// The tile nameplates are FieldLabels on the shared substrates — give the dock a
+// headless substrate so plate writes (fill bytes) and view alpha are observable.
+const SUB = makeSubstrate();
+setPipelineArena(SUB.arena);
 
 let pass = 0, fail = 0;
 const ok = (cond, msg) => { if (cond) pass++; else { fail++; console.log(`  ✗ ${msg}`); } };
@@ -176,9 +183,13 @@ const fakeTerminal = (name, cols, rows) => {
     const wantGap = rowY + (10 * eff) / 2 + lh5 * (0.5 + 1.0);
     ok(Math.abs(e.label.position.y - wantGap) < 1e-6, `labelGap widens the standoff (got ${e.label.position.y.toFixed(3)}, want ${wantGap.toFixed(3)})`);
 
-    // opacity pushes to the live plate
+    // opacity pushes to the live label: the view alpha carries v, the fill resets
+    // to 1 so the NET plate opacity is exactly v (the substrate contract)
     ok(dock.setParam('labelOpacity', 0.4), 'setParam labelOpacity accepted');
-    ok(Math.abs(e.label._plate.mesh.material.opacity - 0.4) < 1e-9, 'opacity pushes to the live plate');
+    const labelView = SUB.mega.views.find((v) => v.node === e.label._anchor);
+    ok(labelView && Math.abs(labelView.alpha - 0.4) < 1e-9, 'opacity pushes to the view alpha lane');
+    const fillA = SUB.panels.mesh.geometry.attributes.panelFill.array[e.label._panelSlot * 4 + 3];
+    ok(fillA === 255, 'plate fill alpha resets to 1 (net plate = v)');
 
     // format rebakes live; 'off' hides; restoring brings it back
     ok(dock.setParam('labelFormat', 'name'), 'setParam labelFormat name accepted');
