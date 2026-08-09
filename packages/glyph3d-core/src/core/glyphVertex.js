@@ -32,6 +32,26 @@ import {
 import { SLOT_STRIDE, S_GLYPH_ID, S_ADVANCE, S_HEIGHT, S_X, S_ROW, S_COL } from '../compute/glyphPipelineReference.js';
 
 /**
+ * The group-table row schema — ONE storage buffer, GROUP_STRIDE vec4s per group.
+ * Lives here because this file is the primary reader; every consumer (GlyphField
+ * render/occluder materials, PickingSystem, PanelField) indexes rows by these
+ * constants, so a layout change lands in every shader in the same breath.
+ *   col 0: offset.xyz            (w free)
+ *   col 1: rotation quaternion   (xyzw; identity 0,0,0,1)
+ *   col 2: color.rgb + alpha     (alpha ≤ 0.01 = invisible — the vertex cull)
+ *   col 3: scale.xyz + colorBlend
+ *   col 4: clipTop, clipBottom, clipEnabled (grid-local y window; w free)
+ *   col 5: far slab [u0, v0, rowsPerTexel, colsPerTexel]
+ *   col 6: far meta [hasSlab, …]
+ * A row is a full pose + style + far carrier: ~112B, written whole-row via
+ * addUpdateRange (partial uploads — the reason this is a buffer, not a texture).
+ */
+export const GROUP_COLS    = 5;   // pose/style cols (0-4)
+export const FAR_COL_SLAB  = 5;
+export const FAR_COL_META  = 6;
+export const GROUP_STRIDE  = 7;   // vec4s per group row
+
+/**
  * Render modes. Used in two places with the SAME numbers: the per-instance
  * resolved mode (drives quad sizing here + the fragment branch selector in the
  * render material's varying) and the field-level `_renderMode` uniform, where
@@ -92,6 +112,35 @@ export function rebindByteSlots(attribute) {
 }
 
 /**
+ * The group-buffer growth seam — same disease, same cure as byte slots. A field's
+ * group-table growth replaces its storage attribute; the nodes re-resolve per
+ * object (they read field._groupAttr by property), but every already-built bind
+ * group keeps the OLD GPUBuffer (the texture-keyed cache — see the byte-slots
+ * comment above). Every material whose program reads the group buffer registers
+ * here; growth calls disposeGroupMaterials() and the next frame rebuilds from
+ * the current attribute. Growth is rare (capacity doubling) and loud.
+ * Per-instance materials (PanelField) UNREGISTER on their own dispose so the
+ * set tracks live materials, not history.
+ */
+const _groupMaterials = new Set();
+
+/** Register a material whose program reads the group buffer (returns it). */
+export function registerGroupMaterial(material) {
+    _groupMaterials.add(material);
+    return material;
+}
+
+/** Drop a dead material from the growth seam (call from its owner's dispose). */
+export function unregisterGroupMaterial(material) {
+    _groupMaterials.delete(material);
+}
+
+/** Rebuild every group-buffer reader's bind groups (call after an attribute swap). */
+export function disposeGroupMaterials() {
+    for (const material of _groupMaterials) material.dispose();
+}
+
+/**
  * GLOBAL glyph width-compression dial — condense glyph ink along x, in place,
  * aligned to leading. k scales every glyph quad's width AND its center-anchor
  * shift by the same factor, so the glyph's left edge stays at its cell anchor
@@ -130,15 +179,15 @@ export function getGlyphWidthCompress() { return glyphWidthCompress.value; }
  * are per-instance/per-group — identical for all 4 quad verts — so quads cull
  * whole with no torn edges.
  *
- * @param {Object} nodes - already-built per-object nodes (uniform/texture),
+ * @param {Object} nodes - already-built per-object nodes (uniform/texture/storage),
  *   resolving at draw from the mesh's `userData.glyphField` (exactly as
- *   GlyphField's _fieldTexture/_fieldUniform build them):
- *   glyphMapTex, glyphMapWidth, renderMode, groupTex.
+ *   GlyphField's _fieldTexture/_fieldUniform/_fieldGroups build them):
+ *   glyphMapTex, glyphMapWidth, renderMode, groups, maxGroups.
  * @returns {{ clipPos, vMode, glyphInfo, vEmojiCell, gColor, gScale }}
  *   clipPos is the vertex return (culled); the rest are byproducts the render
  *   material uses for its varyings (picking ignores them).
  */
-export function buildGlyphVertexTransform({ glyphMapTex, glyphMapWidth, renderMode, groupTex, byteSlots = null }) {
+export function buildGlyphVertexTransform({ glyphMapTex, glyphMapWidth, renderMode, groups, maxGroups, byteSlots = null }) {
     // instancePosition is stride-4 (itemSize=4) on every field — read it as vec4
     // and use .xyz (.w is padding). A stride-3 declaration bakes a wrong
     // vertex-fetch stride into the pipeline.
@@ -196,16 +245,18 @@ export function buildGlyphVertexTransform({ glyphMapTex, glyphMapWidth, renderMo
     const scaled      = positionLocal.mul(vec3(quadW.mul(kW), iSize.y, float(1)));
     const alignOffset = vec3(iSize.x.mul(0.5).mul(kW), float(0), float(0));
 
-    // Group DataTexture lookup — textureLoad with exact integer texel coords
-    // (GROUP_COLS columns × maxGroups rows, RGBA32F). rgba32float is NOT filterable
-    // under WebGPU; a normalized .sample() returns garbage and collapses every glyph
-    // to a degenerate position.
+    // Group-buffer lookup — vec4 element reads at row × GROUP_STRIDE. OOB is a
+    // REAL hazard here where it wasn't for textureLoad: robust storage access
+    // CLAMPS the index (textureLoad returned zeros → alpha 0 → cull), so a stale
+    // group id past capacity would ghost-render wearing the last row's pose.
+    // The explicit bound check below joins the culls.
     const grow   = int(iGroup);
-    const gPos   = textureLoad(groupTex, ivec2(int(0), grow)); // col 0: offset (w free)
-    const gQuat  = textureLoad(groupTex, ivec2(int(1), grow)); // col 1: rotation quaternion
-    const gColor = textureLoad(groupTex, ivec2(int(2), grow)); // col 2: color multiplier
-    const gScale = textureLoad(groupTex, ivec2(int(3), grow)); // col 3: scale + colorBlend (w)
-    const gClip  = textureLoad(groupTex, ivec2(int(4), grow)); // col 4: clipTop, clipBottom, clipEnabled
+    const gBase  = grow.mul(int(GROUP_STRIDE));
+    const gPos   = groups.element(gBase.add(int(0))); // col 0: offset (w free)
+    const gQuat  = groups.element(gBase.add(int(1))); // col 1: rotation quaternion
+    const gColor = groups.element(gBase.add(int(2))); // col 2: color multiplier
+    const gScale = groups.element(gBase.add(int(3))); // col 3: scale + colorBlend (w)
+    const gClip  = groups.element(gBase.add(int(4))); // col 4: clipTop, clipBottom, clipEnabled
 
     // World position = rotate(quat, (aligned quad + instancePos) * groupScale) + groupOffset
     // — the T·R·S a decomposed matrixWorld yields, so a group texel can carry a whole
@@ -221,12 +272,13 @@ export function buildGlyphVertexTransform({ glyphMapTex, glyphMapWidth, renderMo
         float(1),
     )));
 
-    // Apply both culls by degenerating clipPos to outside-NDC. Sequential Ifs
+    // Apply the culls by degenerating clipPos to outside-NDC. Sequential Ifs
     // mutating one toVar. The clip window is PER GROUP (gClip lanes) and tests the
     // raw grid-local anchor y — pre-scale, pre-rotation — so clip values are stated
     // in the same frame the layout laid the glyphs in.
     const outClip = clipPos.toVar();
     const OFF = () => vec4(float(2), float(2), float(2), float(1));
+    If(grow.greaterThanEqual(int(maxGroups)), () => { outClip.assign(OFF()); }); // OOB group id (clamped read above)
     If(gColor.a.lessThan(0.01), () => { outClip.assign(OFF()); });            // invisible group
     If(gClip.z.greaterThan(0.5).and(                                         // per-group clip window
         iPos.y.greaterThan(gClip.x).or(iPos.y.lessThan(gClip.y))),

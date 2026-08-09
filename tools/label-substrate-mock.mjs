@@ -7,7 +7,7 @@ import PanelField from '../packages/glyph3d-core/src/collections/PanelField.js';
 
 export function makeSubstrate() {
     const scene = new THREE.Scene();
-    const panels = new PanelField({ scene, field: { _groupTexture: null }, capacity: 8 });
+    const panels = new PanelField({ scene, field: { _groupAttr: null }, capacity: 8 });
     const arena = {
         worldScale: 0.025,
         trie: null,               // mono measure path (the headless atlas is shaper-less)

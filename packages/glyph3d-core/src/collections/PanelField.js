@@ -9,7 +9,7 @@
  * one bind group, one draw — a panel appearing costs an attribute write.
  *
  * Pose comes from the SAME group texels that pose the glyphs (GlyphField's
- * group DataTexture, GROUP_COLS layout): each instance carries its owner view's
+ * group storage buffer, core/glyphVertex.js row schema): each instance carries its owner view's
  * groupId and the vertex shader applies the identical scale → quat → offset
  * chain, so a panel physically cannot drift from the glyphs it backs, fades
  * with the view's alpha lane for free, and a freed slot pointed at group 0
@@ -28,15 +28,16 @@
  */
 
 import * as THREE from 'three';
-import { MeshBasicNodeMaterial } from 'three/webgpu';
+import { MeshBasicNodeMaterial, StorageInstancedBufferAttribute } from 'three/webgpu';
 import {
-    Fn, attribute, uniform, texture, textureLoad, varying,
-    uv, vec2, vec3, vec4, float, int, uint, ivec2,
+    Fn, attribute, uniform, storage, varying,
+    uv, vec2, vec3, vec4, float, int, uint,
     positionLocal, instanceIndex, modelViewMatrix, cameraProjectionMatrix,
     If, cross, bitAnd, select, mix, smoothstep, min, max, fwidth, time, sin,
 } from 'three/tsl';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import { BORDER_FLAGS, PANEL_BORDER_WIDTH } from './panelMaterial.js';
+import { GROUP_STRIDE, registerGroupMaterial, unregisterGroupMaterial } from '../core/glyphVertex.js';
 
 const TAU = Math.PI * 2;
 const _fillColor = new THREE.Color();
@@ -55,18 +56,22 @@ const _fillColor = new THREE.Color();
  * clip WINDOW is deliberately not applied — a panel spans the whole window.
  *
  * @param {Object} p
- * @param {Object} p.groupTex - texture node resolving to the field's group DataTexture
+ * @param {Object} p.groups - storage node resolving to the field's group buffer
+ * @param {Object} p.maxGroups - uniform node: the field's row count (OOB cull —
+ *   robust storage access CLAMPS an out-of-range index, so an unstated bound
+ *   would ghost-render a stale id wearing the last row's pose)
  * @returns {{ clipPos, gColor, rect, aux }}
  */
-export function buildPanelVertexTransform({ groupTex }) {
+export function buildPanelVertexTransform({ groups, maxGroups }) {
     const rect = attribute('panelRect', 'vec4');
     const aux  = attribute('panelAux', 'vec4');
 
     const grow   = int(aux.y);
-    const gPos   = textureLoad(groupTex, ivec2(int(0), grow)); // col 0: offset
-    const gQuat  = textureLoad(groupTex, ivec2(int(1), grow)); // col 1: quaternion
-    const gColor = textureLoad(groupTex, ivec2(int(2), grow)); // col 2: color (a = visibility)
-    const gScale = textureLoad(groupTex, ivec2(int(3), grow)); // col 3: scale
+    const gBase  = grow.mul(int(GROUP_STRIDE));
+    const gPos   = groups.element(gBase.add(int(0))); // col 0: offset
+    const gQuat  = groups.element(gBase.add(int(1))); // col 1: quaternion
+    const gColor = groups.element(gBase.add(int(2))); // col 2: color (a = visibility)
+    const gScale = groups.element(gBase.add(int(3))); // col 3: scale
 
     // Owner-local quad → the group's full TRS (the exact glyph chain, minus the
     // per-glyph sizing): scale about the group origin, quat sandwich, offset.
@@ -77,7 +82,10 @@ export function buildPanelVertexTransform({ groupTex }) {
 
     const outClip = clipPos.toVar();
     const OFF = () => vec4(float(2), float(2), float(2), float(1));
-    If(aux.z.lessThan(0.5).or(gColor.a.lessThan(0.01)), () => { outClip.assign(OFF()); });
+    If(aux.z.lessThan(0.5)
+        .or(gColor.a.lessThan(0.01))
+        .or(grow.greaterThanEqual(int(maxGroups))),
+        () => { outClip.assign(OFF()); });
 
     return { clipPos: outClip, gColor, rect, aux };
 }
@@ -308,21 +316,23 @@ export default class PanelField {
         attr.needsUpdate = true;
     }
 
-    /** @private texture node resolving the field's LIVE group texture per draw. */
-    _groupTexNode() {
-        const placeholder = new THREE.DataTexture(new Float32Array(4), 1, 1, THREE.RGBAFormat, THREE.FloatType);
-        placeholder.minFilter = placeholder.magFilter = THREE.NearestFilter;
-        placeholder.generateMipmaps = false;
-        placeholder.needsUpdate = true;
-        return texture(placeholder).onObjectUpdate(({ object }, self) => {
+    /** @private nodes resolving the field's LIVE group buffer + bound per draw. */
+    _groupNodes() {
+        const placeholder = new StorageInstancedBufferAttribute(new Float32Array(GROUP_STRIDE * 4), 4);
+        const groups = storage(placeholder, 'vec4', GROUP_STRIDE).toReadOnly().onObjectUpdate(({ object }, self) => {
             const f = object && object.userData && object.userData.glyphField;
-            return (f && f._groupTexture) || self.value;
+            return (f && f._groupAttr) || self.value;
         });
+        const maxGroups = uniform(1).onObjectUpdate(({ object }, self) => {
+            const f = object && object.userData && object.userData.glyphField;
+            return f ? (f._maxGroups ?? 1) : self.value;
+        });
+        return { groups, maxGroups };
     }
 
     /** @private the fill + border fragment (panelMaterial's shader, per-instance state). */
     _buildRenderMaterial() {
-        const groupTex = this._groupTexNode();
+        const { groups, maxGroups } = this._groupNodes();
         const vFill   = varying(vec4(0), 'vPanelFill');
         const vFlags  = varying(float(0), 'vPanelFlags');
         const vAlpha  = varying(float(1), 'vPanelAlpha');
@@ -330,7 +340,7 @@ export default class PanelField {
         const vRadius = varying(float(0), 'vPanelRadius');
 
         const vertexFn = Fn(() => {
-            const { clipPos, gColor, rect, aux } = buildPanelVertexTransform({ groupTex });
+            const { clipPos, gColor, rect, aux } = buildPanelVertexTransform({ groups, maxGroups });
             vFill.assign(attribute('panelFill', 'vec4'));
             vFlags.assign(attribute('panelFlags', 'float'));
             vAlpha.assign(gColor.a);
@@ -380,16 +390,16 @@ export default class PanelField {
         // the output encode round-trips it; the border uniforms are already managed.
         material.colorNode = mix(vFill.rgb.pow(vec3(2.2, 2.2, 2.2)), borderCol, rim);
         material.opacityNode = max(vFill.a, rim).mul(coverage).mul(vAlpha);
-        return material;
+        return registerGroupMaterial(material);
     }
 
     /** @private same vertex transform, ID = block base + instanceIndex. */
     _buildPickMaterial() {
-        const groupTex = this._groupTexNode();
+        const { groups, maxGroups } = this._groupNodes();
         const baseId = uniform(0).onObjectUpdate(({ object }, self) =>
             (object && object.userData.pickStartId != null) ? object.userData.pickStartId : self.value);
 
-        const vertexFn = Fn(() => buildPanelVertexTransform({ groupTex }).clipPos);
+        const vertexFn = Fn(() => buildPanelVertexTransform({ groups, maxGroups }).clipPos);
         const fragmentFn = Fn(() => {
             const id = int(baseId).add(int(instanceIndex));
             const r = id.shiftRight(16).bitAnd(0xFF);
@@ -404,13 +414,17 @@ export default class PanelField {
         material.outputNode = fragmentFn();
         material.side = THREE.DoubleSide;
         material.depthWrite = true;   // nearest panel wins in an overlap
-        return material;
+        return registerGroupMaterial(material);
     }
 
     dispose() {
         if (this._pickingSystem) this._pickingSystem.unregister?.(this.channel, this.mesh);
         this.mesh.parent?.remove(this.mesh);
         this._geometry.dispose();
+        // Per-instance materials leave the group-growth seam with their owner —
+        // the registry tracks live readers, not history.
+        unregisterGroupMaterial(this.mesh.material);
+        unregisterGroupMaterial(this._pickMaterial);
         this.mesh.material.dispose();
         this._pickMaterial?.dispose();
         this._owners = [];

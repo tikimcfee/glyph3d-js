@@ -14,7 +14,8 @@
 import './headless-canvas.mjs';
 import * as THREE from 'three';
 import { HEADLESS_ATLAS } from './headless-atlas.mjs';
-import GlyphField, { GROUP_COLS } from '../packages/glyph3d-core/src/GlyphField.js';
+import GlyphField from '../packages/glyph3d-core/src/GlyphField.js';
+import { GROUP_STRIDE } from '../packages/glyph3d-core/src/core/glyphVertex.js';
 import { MegaFieldView } from '../packages/glyph3d-core/src/MegaGlyphField.js';
 
 let pass = 0, fail = 0;
@@ -22,7 +23,7 @@ const ok = (cond, msg) => { if (cond) pass++; else { fail++; console.log(`  ✗ 
 
 const host = new THREE.Object3D();
 const field = new GlyphField(host, HEADLESS_ATLAS, { maxInstances: 64, maxGroups: 8 });
-const row = (g, col, lane) => field._groupData[(g * GROUP_COLS + col) * 4 + lane];
+const row = (g, col, lane) => field._groupData[(g * GROUP_STRIDE + col) * 4 + lane];
 
 // ── release → reuse, reset, dark-while-free ──
 {
@@ -53,7 +54,7 @@ const row = (g, col, lane) => field._groupData[(g * GROUP_COLS + col) * 4 + lane
 // ── exhaustion: loud, returns the dead group, counter stops marching ──
 {
     const f2 = new GlyphField(new THREE.Object3D(), HEADLESS_ATLAS, { maxInstances: 64, maxGroups: 4 });
-    f2._growGroupTexture = () => {};   // pin the wall where it stands
+    f2._growGroupBuffer = () => {};   // pin the wall where it stands
     const got = [];
     for (let i = 0; i < 8; i++) got.push(f2.createGroup());
     ok(got.slice(0, 3).every((g) => g > 0 && g < 4), 'ids hand out to the wall');
@@ -91,6 +92,65 @@ const row = (g, col, lane) => field._groupData[(g * GROUP_COLS + col) * 4 + lane
     const v2 = new MegaFieldView(mega, new THREE.Object3D(), { r: 1, g: 1, b: 1 });
     ok(v2.groupId === id1, "the disposed view's id serves the next view");
     ok(row(v2.groupId, 2, 3) === 1, 'and its row is fresh, not the corpse');
+}
+
+// ── partial uploads: whole dirty rows, deduped per upload cycle ──
+{
+    const f3 = new GlyphField(new THREE.Object3D(), HEADLESS_ATLAS, { maxInstances: 64, maxGroups: 8 });
+    const attr = f3._groupAttr;
+    ok(attr.itemSize === 4 && attr.name === 'GlyphGroups',
+        'the group buffer is vec4-stride (no repack) and labeled for GPU errors');
+    ok(attr.updateRanges.length === 0, 'a fresh buffer carries no ranges (full upload at creation)');
+
+    const g = f3.createGroup();
+    f3.setGroupOffset(g, { x: 1, y: 2, z: 3 });
+    ok(attr.updateRanges.length === 1
+        && attr.updateRanges[0].start === g * GROUP_STRIDE * 4
+        && attr.updateRanges[0].count === GROUP_STRIDE * 4,
+        'a setter marks exactly ONE whole-row range (the upload path never merges)');
+
+    f3.setGroupAlpha(g, 0.5);
+    f3.setGroupQuaternion(g, { x: 0, y: 0, z: 0, w: 1 });
+    ok(attr.updateRanges.length === 1, 'repeat touches of one row dedupe within an upload cycle');
+
+    const g2 = f3.createGroup();
+    f3.setGroupScale(g2, { x: 2, y: 2, z: 2 });
+    ok(attr.updateRanges.length === 2, 'a second row adds a second range');
+
+    attr.clearUpdateRanges();               // what three does after uploading
+    f3.setGroupOffset(g, { x: 9, y: 9, z: 9 });
+    ok(attr.updateRanges.length === 1, 'after the upload clears ranges, the next touch re-marks');
+
+    f3.setGroupFarSlab(g, 0.25, 0.5, 2, 3);
+    ok(attr.updateRanges.length === 1, 'far-slab writes ride the SAME row range (fused cols 5-6)');
+    const fb = (g * GROUP_STRIDE + 5) * 4;
+    ok(f3._groupData[fb] === 0.25 && f3._groupData[fb + 4] === 1,
+        'far lanes land in cols 5-6 (slab uv + hasSlab)');
+    f3.clearGroupFarSlab(g);
+    ok(f3._groupData[fb + 4] === 0, 'clearGroupFarSlab disarms hasSlab');
+
+    // The version bump is UNCONDITIONAL — an already-dirty row still advances the
+    // version. Buffer creation consumes ranges without an upload, so a version
+    // gated on set membership deadlocks: marked rows block their own future
+    // updates forever (the frozen-mid-glide bug).
+    const vBefore = attr.version;
+    f3.setGroupOffset(g, { x: 1, y: 1, z: 1 });   // row g is already in the dirty set
+    ok(attr.version > vBefore && attr.updateRanges.length === attr.updateRanges.length,
+        'touching an already-dirty row still bumps the version (no deadlock)');
+}
+
+// ── the pose cache is f64: an f32 cache truncates and the exact compare fails forever ──
+{
+    const mega = {
+        field,
+        views: [],
+        arena: { markFarDirty() {} },
+        _tombstone() {},
+    };
+    const v = new MegaFieldView(mega, new THREE.Object3D(), { r: 1, g: 1, b: 1 });
+    ok(v._mat instanceof Float64Array,
+        'view pose cache is Float64Array (f32 truncation made every sweep re-pose every group)');
+    v.dispose();
 }
 
 console.log(`\ngroup-reuse: ${pass} passed, ${fail} failed`);

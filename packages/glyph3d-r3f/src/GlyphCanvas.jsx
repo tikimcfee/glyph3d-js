@@ -31,9 +31,8 @@ async function _pipelineLimits(glProps) {
     const requiredLimits = {
       maxBufferSize: Math.min(lim.maxBufferSize, cap),
       maxStorageBufferBindingSize: Math.min(lim.maxStorageBufferBindingSize, cap),
-      // The WebGPU DEFAULT is 8192 regardless of hardware — the mega-field's group
-      // texture (one row per view/group) legitimately outgrows that in a long
-      // session, so ask for the adapter's real ceiling.
+      // The WebGPU DEFAULT is 8192 regardless of hardware; large sampled surfaces
+      // (frame captures, far atlas growth) want the adapter's real ceiling.
       maxTextureDimension2D: lim.maxTextureDimension2D,
     };
     for (const [name, value] of Object.entries(requiredLimits)) {

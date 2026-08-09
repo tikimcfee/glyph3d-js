@@ -39,6 +39,8 @@ import {
     buildGlyphVertexTransform,
     registerByteSlotsNode,
     registerByteSlotsMaterial,
+    registerGroupMaterial,
+    GROUP_STRIDE,
 } from '../core/glyphVertex.js';
 
 const { Fn, uniform, texture, storage, float, int, vec4, instanceIndex } = TSL;
@@ -201,12 +203,10 @@ export class PickingSystem {
 
         // Per-object nodes the shared vertex transform reads — each resolves at draw
         // from the mesh's userData.glyphField (mirrors GlyphField's _fieldTexture /
-        // _fieldUniform). Picking binds the SAME inputs the render material does,
-        // so a non-unit group scale, width compress, emoji square quad, and the clip
-        // window all match the glyph the user sees — the drift this builder exists to kill.
-        const floatPh = new THREE.DataTexture(new Float32Array(4), 1, 1, THREE.RGBAFormat, THREE.FloatType);
-        floatPh.minFilter = floatPh.magFilter = THREE.NearestFilter;
-        floatPh.generateMipmaps = false; floatPh.needsUpdate = true;
+        // _fieldUniform / _fieldGroups). Picking binds the SAME inputs the render
+        // material does, so a non-unit group scale, width compress, emoji square
+        // quad, and the clip window all match the glyph the user sees — the drift
+        // this builder exists to kill.
         const uintPh = new THREE.DataTexture(new Uint32Array(4), 1, 1, THREE.RGBAIntegerFormat, THREE.UnsignedIntType);
         uintPh.minFilter = uintPh.magFilter = THREE.NearestFilter;
         uintPh.generateMipmaps = false; uintPh.needsUpdate = true;
@@ -216,12 +216,16 @@ export class PickingSystem {
         const fUni = (prop, init) => uniform(init).onObjectUpdate(({ object }, self) =>
             (object && object.userData.glyphField) ? (object.userData.glyphField[prop] ?? init) : self.value);
 
-        const groupTex      = fTex('_groupTexture', floatPh);
+        // The group-table storage node — the field's row buffer, resolved per object.
+        const groupsPh = new StorageInstancedBufferAttribute(new Float32Array(GROUP_STRIDE * 4), 4);
+        const groups   = storage(groupsPh, 'vec4', GROUP_STRIDE).toReadOnly().onObjectUpdate(({ object }, self) =>
+            (object && object.userData.glyphField && object.userData.glyphField._groupAttr) || self.value);
+        const maxGroups     = fUni('_maxGroups', 1);
         const glyphMapTex   = fTex('_glyphMapTexture', uintPh);
         const glyphMapWidth = fUni('_glyphMapWidth', 1);
         const renderMode    = fUni('_renderMode', 0 /* RENDER_MODE.GLYPH */);
-        // Clip is per-GROUP texel state (group texture col 4) — read inside the
-        // shared transform, no per-object uniforms.
+        // Clip is per-GROUP row state (col 4) — read inside the shared transform,
+        // no per-object uniforms.
 
         // Byte-pipeline fields read position/size/glyphId from the pipeline's slot buffer
         // (GlyphField._fieldSlots does the same for the render material — one buffer,
@@ -242,7 +246,7 @@ export class PickingSystem {
             // core/glyphVertex. The instance attributes (instancePosition/Size/
             // GlyphId/GroupId) are declared inside it by name and bind to this mesh.
             const { clipPos } = buildGlyphVertexTransform({
-                glyphMapTex, glyphMapWidth, renderMode, groupTex,
+                glyphMapTex, glyphMapWidth, renderMode, groups, maxGroups,
                 byteSlots,
             });
             return clipPos;
@@ -269,6 +273,7 @@ export class PickingSystem {
         mat.depthWrite = true;
 
         if (byteMode) registerByteSlotsMaterial(mat);
+        registerGroupMaterial(mat);
         this[cacheKey] = mat;
         return mat;
     }

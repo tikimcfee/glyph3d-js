@@ -340,7 +340,10 @@ export class MegaGlyphField {
      * @returns {{groupId: number, release: () => void}}
      */
     createPoseGroup(node) {
-        const entry = { node, groupId: this.field.createGroup(), _mat: new Float32Array(16).fill(NaN), dead: false };
+        // Float64 cache — matrixWorld.elements are f64; an f32 cache truncates on
+        // set and the exact compare then fails FOREVER on any non-f32 value,
+        // re-posing every group every sweep (the every-frame full-upload bug).
+        const entry = { node, groupId: this.field.createGroup(), _mat: new Float64Array(16).fill(NaN), dead: false };
         this._poseGroups.push(entry);
         const mega = this;
         return {
@@ -536,7 +539,10 @@ export class MegaFieldView {
         this._visible = true;
         this._nodeVisible = true;   // scene-graph visibility, mirrored by the pose sweep
         this._alpha = 1;
-        this._mat = new Float32Array(16).fill(NaN); // NaN ≠ anything → first sweep always poses
+        // Float64: matrixWorld.elements are f64 — an f32 cache truncates on set and
+        // the exact compare fails forever (every-frame reposing). NaN ≠ anything →
+        // the first sweep always poses.
+        this._mat = new Float64Array(16).fill(NaN);
     }
 
     /** The arena's attach seam — stage()/adoptField and realloc re-attach call this.

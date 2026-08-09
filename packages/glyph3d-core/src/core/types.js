@@ -75,11 +75,12 @@
  *     instanceGlyphId   float (HarfBuzz glyph ID, indexes glyphMapTexture)
  *     instanceColor     vec4  (r, g, b, 0-1 + padding lane; stride-4 storage class —
  *                              the far-scatter kernel binds it as a compute view)
- *     instanceGroupId   float (row index into group DataTexture)
- * - 4 texture bindings:
+ *     instanceGroupId   float (row index into the group storage buffer)
+ * - Read-only vertex-stage storage buffer: the group table (GROUP_STRIDE vec4
+ *   rows — pose/color/scale/clip/far, schema in core/glyphVertex.js)
+ * - 3 texture bindings:
  *     curveTexture     RGBA16UI nearest  — quadratic bezier control points (2 texels/curve)
  *     glyphMapTexture  RGBA16UI nearest  — glyph ID → curve range (start, count)
- *     groupTexture     RGBA32F  nearest  — per-group offset/color/scale
  *     highlightTexture RGBA8    nearest  — per-glyph additive highlight color
  * - RGBA32F textures with NearestFilter only (no OES_texture_float_linear dependency)
  * - Offscreen RGBA8 render target for the picking pass

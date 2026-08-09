@@ -22,7 +22,7 @@ function check(name, cond, detail = '') {
 }
 
 const scene = new THREE.Scene();
-const field = { _groupTexture: null };   // the group-texture owner (resolved per draw)
+const field = { _groupAttr: null };   // the group-buffer owner (resolved per draw)
 
 // ── Allocation ──────────────────────────────────────────────────────────────
 {

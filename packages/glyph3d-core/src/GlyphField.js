@@ -7,13 +7,14 @@
  *
  * - Material: MeshBasicNodeMaterial with TSL vertexNode + outputNode
  * - Per-instance: position, size, codepoint, color, group id; highlight via an
- *   RGBA texture; group visibility/transforms via a group DataTexture
- * - Picking: registers with PickingSystem (instanceMesh, _groupTexture,
+ *   RGBA texture; group pose/style/far via the group STORAGE BUFFER (_groupAttr,
+ *   whole-row partial uploads — schema in core/glyphVertex.js)
+ * - Picking: registers with PickingSystem (instanceMesh, _groupAttr,
  *   _maxGroups, renderedTexts, instancePickingId attribute)
  *
  * Public surface: render(), setGlyphHighlight(), getMemoryStats(),
  * beginBatchUpdate(), endBatchUpdate(), instanceMesh, renderedTexts,
- * _groupTexture, _maxGroups
+ * _groupAttr, _maxGroups
  *
  * instancePickingId is populated by PickingSystem.register() after render().
  */
@@ -54,31 +55,21 @@ const MAX_CURVES = 256;
 
 import { PERF_THRESHOLDS } from './core/constants.js';
 import { computeCellMetrics } from './core/cellMetrics.js';
-import { RENDER_MODE, buildGlyphVertexTransform, registerByteSlotsNode, registerByteSlotsMaterial, rebindByteSlots } from './core/glyphVertex.js';
+import {
+    RENDER_MODE, buildGlyphVertexTransform,
+    registerByteSlotsNode, registerByteSlotsMaterial, rebindByteSlots,
+    registerGroupMaterial, disposeGroupMaterials,
+    GROUP_STRIDE, FAR_COL_SLAB, FAR_COL_META,
+} from './core/glyphVertex.js';
 import { FAR_TEX, FAR_SLAB } from './compute/glyphPipelineReference.js';
 import { LAYER_BAND, withBandBias } from './core/layerBands.js';
 
 const MAX_GROUPS_DEFAULT = PERF_THRESHOLDS.defaultMaxGroups ?? 64;
-const MAX_GROUPS_DIM     = 16000;
-
-/**
- * Group DataTexture layout: GROUP_COLS RGBA32F texels per group (one texture row).
- *   col 0: offset.xyz            (w free)
- *   col 1: rotation quaternion   (xyzw; identity 0,0,0,1)
- *   col 2: color.rgb + alpha     (alpha ≤ 0.01 = invisible — the vertex cull)
- *   col 3: scale.xyz + colorBlend
- *   col 4: clipTop, clipBottom, clipEnabled (grid-local y window; w free)
- * A group texel is a full pose + style — the shared vertex transform
- * (core/glyphVertex.js) reads all five columns for render AND pick, so this
- * layout has exactly one GPU reader per consumer kind (glyph, panel).
- */
-export const GROUP_COLS = 5;
-
-/** Far-slab group carrier: a PARALLEL per-group texture (2 RGBA32F cols) so the
- *  far lanes never touch the pose texture's layout (PickingSystem samples cols
- *  0-4 of THAT one in lockstep). col 0 = [u0, v0, rowsPerTexel, colsPerTexel],
- *  col 1 = [hasSlab, …]. Nearest + textureLoad — RGBA32F is not filterable. */
-export const FAR_GROUP_COLS = 2;
+// The group table is a storage buffer (GROUP_STRIDE vec4s = 112B/group — the row
+// schema lives in core/glyphVertex.js, the primary reader). This cap is a leak
+// backstop, not a hardware wall: 2^20 rows ≈ 117MB, far under the storage-binding
+// limit the app requests. Exhaustion past it stays loud + degrades to invisible.
+const MAX_GROUPS_CAP = 1 << 20;
 
 /**
  * GLOBAL minification / LOD dials — the exact-curve ↔ stable-block handoff that governs how minified
@@ -162,9 +153,10 @@ export function getGlyphLodParams() {
  * the two can't drift; this node layers the render-only varyings (color blend,
  * highlight, glyph UV) on top of the transform's byproducts.
  *
- * @param {Object} uniforms - per-object nodes (groupTex, highlightTex, glyphMapTex,
- *   glyphMapWidth, renderMode) — forwarded to the shared transform; highlightTex is
- *   consumed here for the per-glyph highlight. (Clip rides the group texture now.)
+ * @param {Object} uniforms - per-object nodes (groups, maxGroups, highlightTex,
+ *   glyphMapTex, glyphMapWidth, renderMode) — forwarded to the shared transform;
+ *   highlightTex is consumed here for the per-glyph highlight; groups also feeds
+ *   the far-lane varyings below. (Clip rides the group row.)
  * @returns {Object} { vertexFn, vColor, vGroupAlpha, vAddedColor, vFillAmount,
  *   vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell }
  */
@@ -194,7 +186,7 @@ function _buildVertexNode(uniforms) {
     const vFarSlab    = varying(vec4(0),  'vFarSlab');      // [u0, v0, rowsPerTexel, colsPerTexel]
     const vFarMeta    = varying(vec4(0),  'vFarMeta');      // [hasSlab, …]
 
-    const { highlightTex, byteHighlight, farGroupTex } = uniforms;
+    const { highlightTex, byteHighlight, groups } = uniforms;
 
     const vertexFn = Fn(() => {
         // The ONE transform graph — shared with PickingSystem, so the rendered glyph
@@ -212,15 +204,13 @@ function _buildVertexNode(uniforms) {
         vCurveCount.assign(int(t.glyphInfo.y));
 
         // Far-texture: the glyph's grid position (the transform's S_ROW/S_COL read;
-        // (0,0) on classic fields, whose far-group texel stays hasSlab=0) and the
-        // group's slab lanes — the fragment builds its far UV from these. RGBA32F
-        // nearest, textureLoad (NOT filterable — the group texture's own caveat).
+        // (0,0) on classic fields, whose far-meta lane stays hasSlab=0) and the
+        // group's slab lanes — the fragment builds its far UV from these. The far
+        // cols ride the SAME group row the transform already reads (cols 5-6).
         vRowCol.assign(t.iRowCol);
-        if (farGroupTex) {
-            const fGrow = int(t.iGroup);
-            vFarSlab.assign(textureLoad(farGroupTex, ivec2(int(0), fGrow)));
-            vFarMeta.assign(textureLoad(farGroupTex, ivec2(int(1), fGrow)));
-        }
+        const fBase = int(t.iGroup).mul(int(GROUP_STRIDE));
+        vFarSlab.assign(groups.element(fBase.add(int(FAR_COL_SLAB))));
+        vFarMeta.assign(groups.element(fBase.add(int(FAR_COL_META))));
 
         // Blend instanceColor*groupColor (multiply, colorBlend=0) toward pure
         // groupColor (replace, colorBlend=1). Explicit lerp a+(b-a)*t — TSL's
@@ -710,19 +700,6 @@ function _makePlaceholderRGBATexture() {
 
 const _sharedFieldMaterials = new Map(); // 'glyph' | 'occluder' → MeshBasicNodeMaterial
 
-/** 1×1 RGBA float placeholder matching the group DataTexture's sample type. */
-function _makePlaceholderFloatTexture() {
-    const tex = new THREE.DataTexture(
-        new Float32Array(4), 1, 1,
-        THREE.RGBAFormat, THREE.FloatType
-    );
-    tex.minFilter       = THREE.NearestFilter;
-    tex.magFilter       = THREE.NearestFilter;
-    tex.generateMipmaps = false;
-    tex.needsUpdate     = true;
-    return tex;
-}
-
 /** Texture node whose value resolves per rendered object from its field. */
 function _fieldTexture(placeholder, prop) {
     return texture(placeholder).onObjectUpdate(({ object }, self) => {
@@ -754,6 +731,21 @@ function _fieldSlots() {
     }));
 }
 
+/**
+ * The group-table storage node — vec4 rows, resolved per rendered object from
+ * the field (same per-object discipline as _fieldSlots). Growth swaps the
+ * field's attribute; the node re-resolves next draw, and the growth path
+ * disposes every registered group material to purge stale bind groups (the
+ * texture-keyed cache — see core/glyphVertex.js).
+ */
+function _fieldGroups() {
+    const placeholder = new StorageInstancedBufferAttribute(new Float32Array(GROUP_STRIDE * 4), 4);
+    return storage(placeholder, 'vec4', GROUP_STRIDE).toReadOnly().onObjectUpdate(({ object }, self) => {
+        const f = object && object.userData && object.userData.glyphField;
+        return (f && f._groupAttr) || self.value;
+    });
+}
+
 /** The one material all fields of a kind share — built (and TSL-compiled) once. */
 function _getSharedFieldMaterial(kind) {
     let material = _sharedFieldMaterials.get(kind);
@@ -764,8 +756,8 @@ function _getSharedFieldMaterial(kind) {
     // an instance attribute on the byte kind (see _buildVertexNode) — no texture node.
     const isByte = kind === 'byteGlyph';
 
-    const groupTexNode     = _fieldTexture(_makePlaceholderFloatTexture(), '_groupTexture');
-    const groupTexHNode    = _fieldUniform(1, (f) => f._maxGroups);
+    const groupsNode       = _fieldGroups();
+    const maxGroupsNode    = _fieldUniform(1, (f) => f._maxGroups);
     const highlightTexNode = isByte ? null : _fieldTexture(_makePlaceholderRGBATexture(), '_highlightTexture');
     const curveTexNode     = _fieldTexture(_makePlaceholderUintTexture(), '_curveTexture');
     const glyphMapTexNode  = _fieldTexture(_makePlaceholderUintTexture(), '_glyphMapTexture');
@@ -779,22 +771,20 @@ function _getSharedFieldMaterial(kind) {
     const frameColsNode    = _fieldUniform(1, (f) => f._frameCols || 1);
     const frameRowsNode    = _fieldUniform(1, (f) => f._frameRows || 1);
     const byteSlotsNode    = isByte ? _fieldSlots() : null;
-    // Far-texture nodes: the sampled slab atlas (filterable, mipped — set by the
-    // mega-field from the arena's FarTextAtlas) and the per-group slab lanes.
+    // The sampled far slab atlas (filterable, mipped — set by the mega-field from
+    // the arena's FarTextAtlas). The per-group slab LANES ride the group buffer.
     const farTexNode       = _fieldTexture(_makePlaceholderRGBATexture(), '_farAtlasTexture');
-    const farGroupTexNode  = _fieldTexture(_makePlaceholderFloatTexture(), '_farGroupTexture');
 
     const { vertexFn, vColor, vGroupAlpha, vAddedColor, vFillAmount, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell, vRowCol, vFarSlab, vFarMeta } =
         _buildVertexNode({
-            groupTex:       groupTexNode,
-            groupTexHeight: groupTexHNode,
+            groups:         groupsNode,
+            maxGroups:      maxGroupsNode,
             highlightTex:   highlightTexNode,
             byteHighlight:  isByte,
             glyphMapTex:    glyphMapTexNode,
             glyphMapWidth:  glyphMapWNode,
             renderMode:     renderModeNode,
             byteSlots:      byteSlotsNode,
-            farGroupTex:    farGroupTexNode,
         });
 
     const outputNode = kind === 'occluder'
@@ -838,6 +828,7 @@ function _getSharedFieldMaterial(kind) {
     // (The bias itself rides material.vertexNode above — one shared uniform, live.)
 
     if (isByte) registerByteSlotsMaterial(material);
+    registerGroupMaterial(material);
     _sharedFieldMaterials.set(kind, material);
     return material;
 }
@@ -904,27 +895,29 @@ export default class GlyphField {
             worldScale: scale,
         };
 
-        // Group DataTexture
+        // Group storage buffer: GROUP_STRIDE vec4 rows (pose cols 0-4 + far cols
+        // 5-6 — schema in core/glyphVertex.js). Setters mark whole dirty rows via
+        // _touchGroup → addUpdateRange, so a moved group uploads ~112B, never the
+        // table.
         const requestedGroups = options.maxGroups || MAX_GROUPS_DEFAULT;
-        this._maxGroups  = Math.min(requestedGroups, MAX_GROUPS_DIM);
-        this._groupData  = new Float32Array(this._maxGroups * GROUP_COLS * 4);
+        this._maxGroups  = Math.min(requestedGroups, MAX_GROUPS_CAP);
+        this._groupData  = new Float32Array(this._maxGroups * GROUP_STRIDE * 4);
         this._groupCount = 1; // group 0 = identity (the permanent dead group — never handed out live)
         this._freeGroups = [];            // released ids, reused before the counter advances
         this._groupExhaustionNoted = false;
         this._initGroupDefaults();
-        this._groupTexture = null; // created in _createInstanceMesh
+        this._groupAttr   = this._createGroupBuffer();
+        this._dirtyGroups = new Set();    // rows already range-marked since the last upload
 
         // Highlight texture
         this._highlightTexture  = null;
         this._highlightSize     = 0;
         this._highlightTexWidth = 1024;
 
-        // Far-texture state: the SAMPLED slab atlas is external (the arena's
-        // FarTextAtlas, handed to the mega-field — shared across every view);
-        // the per-group slab lanes are this field's own parallel texture.
+        // The SAMPLED far slab atlas is external (the arena's FarTextAtlas, handed
+        // to the mega-field — shared across every view); per-group slab lanes ride
+        // the group buffer rows above.
         this._farAtlasTexture = null;
-        this._farGroupData    = new Float32Array(this._maxGroups * FAR_GROUP_COLS * 4);
-        this._farGroupTexture = null;   // created in _createInstanceMesh
 
         // Text registry (the shape PickingSystem.resolveGlyph reads)
         this.renderedTexts     = new Map();
@@ -971,12 +964,12 @@ export default class GlyphField {
         this.scene.add(this.instanceMesh);
     }
 
-    // ── Group DataTexture ─────────────────────────────────────────────────────
+    // ── Group storage buffer ──────────────────────────────────────────────────
 
     /** @private */
     _initGroupDefaults() {
         for (let g = 0; g < this._maxGroups; g++) {
-            const base = g * GROUP_COLS * 4;
+            const base = g * GROUP_STRIDE * 4;
             this._groupData[base + 4 + 3]  = 1.0; // col 1 w: quat.w (identity rotation)
             this._groupData[base + 8]      = 1.0; // col 2 r: color.r
             this._groupData[base + 8 + 1]  = 1.0; // col 2 g: color.g
@@ -985,34 +978,36 @@ export default class GlyphField {
             this._groupData[base + 12]     = 1.0; // col 3 x: scale.x
             this._groupData[base + 12 + 1] = 1.0; // col 3 y: scale.y
             this._groupData[base + 12 + 2] = 1.0; // col 3 z: scale.z
-            // col 4 (clip) stays zero: clipEnabled 0 = no clip.
+            // col 4 (clip) + cols 5-6 (far) stay zero: no clip, hasSlab 0.
         }
     }
 
-    /** @private */
-    _createGroupTexture() {
-        const tex = new THREE.DataTexture(
-            this._groupData, GROUP_COLS, this._maxGroups,
-            THREE.RGBAFormat, THREE.FloatType
-        );
-        tex.minFilter = THREE.NearestFilter;
-        tex.magFilter = THREE.NearestFilter;
-        tex.generateMipmaps = false;
-        tex.needsUpdate = true;
-        return tex;
+    /** @private — the name becomes the GPUBuffer label, so GPU errors name it. */
+    _createGroupBuffer() {
+        const attr = new StorageInstancedBufferAttribute(this._groupData, 4);
+        attr.name = 'GlyphGroups';
+        return attr;
     }
 
-    /** @private */
-    _createFarGroupTexture() {
-        const tex = new THREE.DataTexture(
-            this._farGroupData, FAR_GROUP_COLS, this._maxGroups,
-            THREE.RGBAFormat, THREE.FloatType
-        );
-        tex.minFilter = THREE.NearestFilter;
-        tex.magFilter = THREE.NearestFilter;
-        tex.generateMipmaps = false;
-        tex.needsUpdate = true;
-        return tex;
+    /**
+     * @private — mark a group's row dirty: one whole-row update range (the upload
+     * path issues one writeBuffer per range with NO merging, so per-column slivers
+     * would fan out into extra submits). The dirty set dedupes RANGE-adds for a
+     * row within one upload cycle; three clears updateRanges after uploading, and
+     * an empty range list is the signal to reset the set. The version bump is
+     * UNCONDITIONAL: ranges can be consumed without an upload (buffer creation
+     * uploads the whole array and leaves stale ranges behind), and a version
+     * gated on set membership deadlocks — marked rows block their own future
+     * updates forever.
+     */
+    _touchGroup(groupId) {
+        const attr = this._groupAttr;
+        if (attr.updateRanges.length === 0) this._dirtyGroups.clear();
+        if (!this._dirtyGroups.has(groupId)) {
+            this._dirtyGroups.add(groupId);
+            attr.addUpdateRange(groupId * GROUP_STRIDE * 4, GROUP_STRIDE * 4);
+        }
+        attr.needsUpdate = true;
     }
 
     /**
@@ -1022,20 +1017,22 @@ export default class GlyphField {
      * arena's arming pass writes both) — the mapping only has to be consistent.
      */
     setGroupFarSlab(groupId, u0, v0, rowsPerTexel, colsPerTexel) {
-        const b = (groupId | 0) * FAR_GROUP_COLS * 4;
-        const d = this._farGroupData;
-        if (b < 0 || b + 7 >= d.length) return;
+        const g = groupId | 0;
+        if (g < 0 || g >= this._maxGroups) return;
+        const b = (g * GROUP_STRIDE + FAR_COL_SLAB) * 4;
+        const d = this._groupData;
         d[b] = u0; d[b + 1] = v0; d[b + 2] = rowsPerTexel; d[b + 3] = colsPerTexel;
-        d[b + 4] = 1;   // hasSlab
-        if (this._farGroupTexture) this._farGroupTexture.needsUpdate = true;
+        d[b + 4] = 1;   // col 6 lane 0: hasSlab
+        this._touchGroup(g);
     }
 
     /** Disarm a group's far slab (dispose / atlas release) → the impostor fallback. */
     clearGroupFarSlab(groupId) {
-        const b = (groupId | 0) * FAR_GROUP_COLS * 4;
-        if (b < 0 || b + 7 >= this._farGroupData.length) return;
-        this._farGroupData.fill(0, b, b + FAR_GROUP_COLS * 4);
-        if (this._farGroupTexture) this._farGroupTexture.needsUpdate = true;
+        const g = groupId | 0;
+        if (g < 0 || g >= this._maxGroups) return;
+        const b = (g * GROUP_STRIDE + FAR_COL_SLAB) * 4;
+        this._groupData.fill(0, b, b + 8);   // cols 5-6
+        this._touchGroup(g);
     }
 
     /** Single-group fields: the whole field's far slab rides group 0 (the arena arms
@@ -1087,8 +1084,6 @@ export default class GlyphField {
         geometry.attributes.position = base.attributes.position;
         geometry.attributes.uv       = base.attributes.uv;
 
-        this._groupTexture = this._createGroupTexture();
-        this._farGroupTexture = this._createFarGroupTexture();
         // Highlight storage: byte fields carry it as a per-instance RGBA8 attribute
         // (allocated below with the others — a capacity-sized texture blows
         // maxTextureDimension2D and re-uploads whole per write); classic fields keep
@@ -1608,9 +1603,9 @@ export default class GlyphField {
             allocatedBytes,
             usedBytes,
             wasteBytes:            allocatedBytes - usedBytes,
-            groupTextureBytes:     groupBytes * 2,
+            groupBufferBytes:      groupBytes,
             highlightTextureBytes: this._highlightSize * 4,
-            totalBytes:            allocatedBytes + groupBytes * 2 + this._highlightSize * 4,
+            totalBytes:            allocatedBytes + groupBytes + this._highlightSize * 4,
             textEntryCount:        this.renderedTexts.size,
         };
     }
@@ -1633,11 +1628,11 @@ export default class GlyphField {
             return reused;
         }
         const id = this._groupCount++;
-        if (id >= this._maxGroups) this._growGroupTexture();
+        if (id >= this._maxGroups) this._growGroupBuffer();
         if (id >= this._maxGroups) {
             if (!this._groupExhaustionNoted) {
                 this._groupExhaustionNoted = true;
-                console.error(`GlyphField: group texture EXHAUSTED (${this._maxGroups} live groups) — new content renders INVISIBLE (dead group 0). This is a leak or a churn storm: something creates groups without releasing them.`);
+                console.error(`GlyphField: group table EXHAUSTED (${this._maxGroups} live groups) — new content renders INVISIBLE (dead group 0). This is a leak or a churn storm: something creates groups without releasing them.`);
             }
             this._groupCount = this._maxGroups;   // stop the counter marching to Infinity
             return 0;
@@ -1653,17 +1648,17 @@ export default class GlyphField {
     releaseGroup(groupId) {
         if (!(groupId > 0) || groupId >= this._maxGroups) return;
         if (this._freeGroups.includes(groupId)) return;   // double-release must not double-hand-out
-        const base = groupId * GROUP_COLS * 4;
-        this._groupData.fill(0, base, base + GROUP_COLS * 4);
+        const base = groupId * GROUP_STRIDE * 4;
+        this._groupData.fill(0, base, base + GROUP_STRIDE * 4);   // whole row: pose dark + far disarmed
         this._groupData[base + 4 + 3] = 1.0;   // quat.w — keep the row a valid pose
-        this._syncGroupTexture();
+        this._touchGroup(groupId);
         this._freeGroups.push(groupId);
     }
 
     /** @private a reused row starts exactly like a freshly grown one. */
     _resetGroupRow(g) {
-        const base = g * GROUP_COLS * 4;
-        this._groupData.fill(0, base, base + GROUP_COLS * 4);
+        const base = g * GROUP_STRIDE * 4;
+        this._groupData.fill(0, base, base + GROUP_STRIDE * 4);   // clears clip + far lanes too
         this._groupData[base + 4 + 3]  = 1.0;  // quat identity
         this._groupData[base + 8]      = 1.0;  // color 1,1,1,1
         this._groupData[base + 8 + 1]  = 1.0;
@@ -1672,24 +1667,21 @@ export default class GlyphField {
         this._groupData[base + 12]     = 1.0;  // scale 1,1,1
         this._groupData[base + 12 + 1] = 1.0;
         this._groupData[base + 12 + 2] = 1.0;
-        this._syncGroupTexture();
-        const fb = g * FAR_GROUP_COLS * 4;
-        this._farGroupData.fill(0, fb, fb + FAR_GROUP_COLS * 4);
-        if (this._farGroupTexture) this._farGroupTexture.needsUpdate = true;
+        this._touchGroup(g);
     }
 
     setGroupOffset(groupId, offset) {
         if (groupId < 0 || groupId >= this._maxGroups) return;
-        const base = (groupId * GROUP_COLS + 0) * 4;
+        const base = (groupId * GROUP_STRIDE + 0) * 4;
         this._groupData[base]     = offset.x;
         this._groupData[base + 1] = offset.y;
         this._groupData[base + 2] = offset.z;
-        this._syncGroupTexture();
+        this._touchGroup(groupId);
     }
 
     getGroupOffset(groupId) {
         if (groupId < 0 || groupId >= this._maxGroups) return { x: 0, y: 0, z: 0 };
-        const base = (groupId * GROUP_COLS + 0) * 4;
+        const base = (groupId * GROUP_STRIDE + 0) * 4;
         return { x: this._groupData[base], y: this._groupData[base + 1], z: this._groupData[base + 2] };
     }
 
@@ -1703,17 +1695,17 @@ export default class GlyphField {
      */
     setGroupQuaternion(groupId, q) {
         if (groupId < 0 || groupId >= this._maxGroups) return;
-        const base = (groupId * GROUP_COLS + 1) * 4;
+        const base = (groupId * GROUP_STRIDE + 1) * 4;
         this._groupData[base]     = q.x;
         this._groupData[base + 1] = q.y;
         this._groupData[base + 2] = q.z;
         this._groupData[base + 3] = q.w;
-        this._syncGroupTexture();
+        this._touchGroup(groupId);
     }
 
     getGroupQuaternion(groupId) {
         if (groupId < 0 || groupId >= this._maxGroups) return { x: 0, y: 0, z: 0, w: 1 };
-        const base = (groupId * GROUP_COLS + 1) * 4;
+        const base = (groupId * GROUP_STRIDE + 1) * 4;
         return { x: this._groupData[base], y: this._groupData[base + 1], z: this._groupData[base + 2], w: this._groupData[base + 3] };
     }
 
@@ -1728,12 +1720,12 @@ export default class GlyphField {
      */
     setGroupClipY(groupId, top, bottom) {
         if (groupId < 0 || groupId >= this._maxGroups) return;
-        const base = (groupId * GROUP_COLS + 4) * 4;
+        const base = (groupId * GROUP_STRIDE + 4) * 4;
         const on = Number.isFinite(top) && Number.isFinite(bottom);
         this._groupData[base]     = on ? top : 0;
         this._groupData[base + 1] = on ? bottom : 0;
         this._groupData[base + 2] = on ? 1 : 0;
-        this._syncGroupTexture();
+        this._touchGroup(groupId);
     }
 
     /**
@@ -1761,25 +1753,25 @@ export default class GlyphField {
 
     setGroupColor(groupId, color) {
         if (groupId < 0 || groupId >= this._maxGroups) return;
-        const base = (groupId * GROUP_COLS + 2) * 4;
+        const base = (groupId * GROUP_STRIDE + 2) * 4;
         this._groupData[base]     = color.r;
         this._groupData[base + 1] = color.g;
         this._groupData[base + 2] = color.b;
         this._groupData[base + 3] = color.a !== undefined ? color.a : 1.0;
-        this._syncGroupTexture();
+        this._touchGroup(groupId);
     }
 
     getGroupColor(groupId) {
         if (groupId < 0 || groupId >= this._maxGroups) return { r: 1, g: 1, b: 1, a: 1 };
-        const base = (groupId * GROUP_COLS + 2) * 4;
+        const base = (groupId * GROUP_STRIDE + 2) * 4;
         return { r: this._groupData[base], g: this._groupData[base + 1], b: this._groupData[base + 2], a: this._groupData[base + 3] };
     }
 
     setGroupVisibility(groupId, visible) {
         if (groupId < 0 || groupId >= this._maxGroups) return;
-        const base = (groupId * GROUP_COLS + 2) * 4;
+        const base = (groupId * GROUP_STRIDE + 2) * 4;
         this._groupData[base + 3] = visible ? 1.0 : 0.0;
-        this._syncGroupTexture();
+        this._touchGroup(groupId);
     }
 
     /**
@@ -1793,48 +1785,52 @@ export default class GlyphField {
      */
     setGroupAlpha(groupId, alpha) {
         if (groupId < 0 || groupId >= this._maxGroups) return;
-        const base = (groupId * GROUP_COLS + 2) * 4;
+        const base = (groupId * GROUP_STRIDE + 2) * 4;
         this._groupData[base + 3] = alpha;
-        this._syncGroupTexture();
+        this._touchGroup(groupId);
     }
 
     setGroupScale(groupId, scale) {
         if (groupId < 0 || groupId >= this._maxGroups) return;
-        const base = (groupId * GROUP_COLS + 3) * 4;
+        const base = (groupId * GROUP_STRIDE + 3) * 4;
         this._groupData[base]     = scale.x;
         this._groupData[base + 1] = scale.y;
         this._groupData[base + 2] = scale.z;
-        this._syncGroupTexture();
+        this._touchGroup(groupId);
     }
 
     getGroupScale(groupId) {
         if (groupId < 0 || groupId >= this._maxGroups) return { x: 1, y: 1, z: 1 };
-        const base = (groupId * GROUP_COLS + 3) * 4;
+        const base = (groupId * GROUP_STRIDE + 3) * 4;
         return { x: this._groupData[base], y: this._groupData[base + 1], z: this._groupData[base + 2] };
     }
 
     setGroupColorBlend(groupId, blend) {
         if (groupId < 0 || groupId >= this._maxGroups) return;
-        const base = (groupId * GROUP_COLS + 3) * 4;
+        const base = (groupId * GROUP_STRIDE + 3) * 4;
         this._groupData[base + 3] = blend;
-        this._syncGroupTexture();
+        this._touchGroup(groupId);
     }
 
-    /** @private — mark group DataTexture dirty (the shared material reads it per object) */
-    _syncGroupTexture() {
-        this._groupTexture.needsUpdate = true;
-    }
-
-    /** @private */
-    _growGroupTexture() {
+    /**
+     * @private — double the group table (far lanes ride the same rows). The new
+     * attribute uploads whole at creation; the nodes re-resolve it per object,
+     * but every built bind group still holds the OLD GPUBuffer (three's cache is
+     * texture-keyed), so every registered group material disposes and rebuilds
+     * next frame. Rare (capacity doublings only) — the accepted re-init cost,
+     * same as the byte-slots realloc seam. The old buffer is dropped, not
+     * destroyed: the backend releases it with the attribute (no in-flight-submit
+     * hazard).
+     */
+    _growGroupBuffer() {
         const oldMax = this._maxGroups;
-        if (oldMax >= MAX_GROUPS_DIM) return;
-        this._maxGroups = Math.min(oldMax * 2, MAX_GROUPS_DIM);
-        const newData = new Float32Array(this._maxGroups * GROUP_COLS * 4);
+        if (oldMax >= MAX_GROUPS_CAP) return;
+        this._maxGroups = Math.min(oldMax * 2, MAX_GROUPS_CAP);
+        const newData = new Float32Array(this._maxGroups * GROUP_STRIDE * 4);
         newData.set(this._groupData);
         this._groupData = newData;
         for (let g = oldMax; g < this._maxGroups; g++) {
-            const base = g * GROUP_COLS * 4;
+            const base = g * GROUP_STRIDE * 4;
             this._groupData[base + 4 + 3]  = 1.0; // quat.w (identity)
             this._groupData[base + 8]      = 1.0;
             this._groupData[base + 8 + 1]  = 1.0;
@@ -1844,29 +1840,9 @@ export default class GlyphField {
             this._groupData[base + 12 + 1] = 1.0;
             this._groupData[base + 12 + 2] = 1.0;
         }
-        if (this._groupTexture) this._groupTexture.dispose();
-        this._groupTexture = this._createGroupTexture();
-        // The far group carrier grows in lockstep (same row space).
-        const newFar = new Float32Array(this._maxGroups * FAR_GROUP_COLS * 4);
-        newFar.set(this._farGroupData);
-        this._farGroupData = newFar;
-        if (this._farGroupTexture) this._farGroupTexture.dispose();
-        this._farGroupTexture = this._createFarGroupTexture();
-        // The shared material reads _groupTexture/_maxGroups per object — nothing to poke.
-    }
-
-    // ── Picking seam ──────────────────────────────────────────────────────────
-
-    /**
-     * Descriptor for PickingSystem.register().
-     */
-    getPickingDescriptor() {
-        return {
-            instanceMesh:  this.instanceMesh,
-            _groupTexture: this._groupTexture,
-            _maxGroups:    this._maxGroups,
-            renderedTexts: this.renderedTexts,
-        };
+        this._groupAttr = this._createGroupBuffer();
+        this._dirtyGroups.clear();
+        disposeGroupMaterials();
     }
 
     /**
@@ -1907,8 +1883,7 @@ export default class GlyphField {
             this.instanceMesh.geometry.dispose();
             // material is the SHARED field material — never disposed per field.
         }
-        if (this._groupTexture)    this._groupTexture.dispose();
-        if (this._farGroupTexture) this._farGroupTexture.dispose();
+        // The group storage buffer releases with its attribute (GC) — no dispose seam.
         if (this._highlightTexture) this._highlightTexture.dispose();
         this.renderedTexts.clear();
     }
