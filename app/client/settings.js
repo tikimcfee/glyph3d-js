@@ -101,6 +101,7 @@ export const GROUPS = [
   { name: 'Environment',        subtitle: 'sky, grid floor, axes · minimap overview' },
   { name: 'Theme & appearance', subtitle: 'code & terminal backgrounds · cursor · focus / hover / input colors' },
   { name: 'Display & glyph LOD', subtitle: 'font, atlas, width compress · minify / flicker control' },
+  { name: 'Far texture (text mass)', subtitle: 'minified text-mass tier · farMode debug · mip ceiling · ink exposure' },
   { name: 'Code grids',         subtitle: 'the layout preset new grids are born with' },
   { name: 'Layout',             subtitle: 'jellyfish column · library page-scheme' },
   { name: 'Tree & labels',      subtitle: 'ownership wires · container-name plates & approach fade' },
