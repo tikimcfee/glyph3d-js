@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,15 +23,18 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// Relay routes WebSocket messages between one display (browser) and N controllers (CLIs).
+// Relay routes WebSocket messages between one display (browser), N controllers
+// (CLIs), and N sources (sensor devices pushing perishable frames upstream).
 type Relay struct {
-	mu           sync.RWMutex
-	display      *websocket.Conn
-	displayWrite chan displayMsg   // control/JSON + RPC-binary write queue (text non-blocking/drop-OK, binary blocking — self-correcting)
-	displayBytes chan []byte       // terminal OUTPUT binary frames (blocking send = lossless backpressure)
-	displayDone  chan struct{}     // closed on display teardown — unblocks writer + blocked byte senders
-	controllers  map[string]*websocket.Conn
-	nextID       atomic.Int64
+	mu            sync.RWMutex
+	display       *websocket.Conn
+	displayWrite  chan displayMsg   // control/JSON + RPC-binary write queue (text non-blocking/drop-OK, binary blocking — self-correcting)
+	displayBytes  chan []byte       // terminal OUTPUT binary frames (blocking send = lossless backpressure)
+	displayFrames chan []byte       // sensor frames (drop-oldest — freshness beats completeness)
+	displayDone   chan struct{}     // closed on display teardown — unblocks writer + blocked byte senders
+	controllers   map[string]*websocket.Conn
+	sources       map[string]*sourceConn
+	nextID        atomic.Int64
 	termSeq      atomic.Int64 // monotonic id source for relay-spawned terminal adapters
 	upgrader     websocket.Upgrader
 	fs           *FSHandler      // nil if --root not provided
@@ -47,6 +51,26 @@ type displayMsg struct {
 	binary bool
 }
 
+// sourceConn is one connected sensor device — an upstream-only client that pushes
+// perishable frames (hand landmarks, camera previews) rather than issuing commands.
+// Many may be connected at once; each is addressed by its own id so the display can
+// tell two hands-on-a-desk apart from a phone across the room.
+//
+// ws/id/kind/since are write-once at construction and safe to read freely. The
+// counters are ATOMIC: they're written on this source's own read goroutine but
+// read from a controller's goroutine via `source.list`, which holds Relay.mu —
+// a lock the frame path deliberately never takes (a per-frame mutex on the hot
+// path would serialize every device through one lock at 30fps each).
+type sourceConn struct {
+	ws      *websocket.Conn
+	id      string
+	kind    string // "hand", "camera", … — declared in the SOURCE handshake
+	since   time.Time
+	frames  atomic.Int64 // frames accepted from this source
+	dropped atomic.Int64 // frames discarded because the display queue was saturated
+	lastTS  atomic.Int64 // unix millis of the most recent frame
+}
+
 func NewRelay() *Relay {
 	logs, err := NewLogStore()
 	if err != nil {
@@ -54,6 +78,7 @@ func NewRelay() *Relay {
 	}
 	return &Relay{
 		controllers: make(map[string]*websocket.Conn),
+		sources:     make(map[string]*sourceConn),
 		logs:        logs,
 		logSubs:     make(map[string]bool),
 		upgrader: websocket.Upgrader{
@@ -117,13 +142,47 @@ func (r *Relay) sendBytesToDisplay(data []byte) {
 	}
 }
 
-// startDisplayWriter serializes all writes to the one display WebSocket, draining two
+// sendFrameToDisplay forwards one sensor frame to the display on the perishable
+// plane. Unlike control (drop-newest with a log line) and terminal bytes (blocking,
+// lossless), sensor frames are DROP-OLDEST: at 30fps a queued frame is already stale
+// by the time it drains, so when the queue is full we evict the oldest and enqueue
+// the newest. That keeps latency bounded at the queue depth rather than letting a
+// slow display accumulate an ever-growing lag behind the user's actual hand.
+//
+// Never blocks: a source must not be able to backpressure into its own read loop
+// (that would stall the device's capture pipeline for a frame nobody will see).
+// Returns true if the frame was enqueued without evicting, false if it displaced one.
+func (r *Relay) sendFrameToDisplay(data []byte) bool {
+	r.mu.RLock()
+	ch := r.displayFrames
+	r.mu.RUnlock()
+	if ch == nil {
+		return false // no display — the frame has nowhere to go
+	}
+	select {
+	case ch <- data:
+		return true
+	default:
+	}
+	// Queue saturated: evict the oldest frame to make room for this fresher one.
+	select {
+	case <-ch:
+	default: // drained concurrently by the writer — room may exist now
+	}
+	select {
+	case ch <- data:
+	default: // writer refilled it; this frame is the one we drop
+	}
+	return false
+}
+
+// startDisplayWriter serializes all writes to the one display WebSocket, draining three
 // queues with CONTROL PRIORITY: control (JSON responses + RPC binary result frames) is
-// always flushed before bulk terminal bytes, so a flood of output never head-of-line
-// blocks interactive control traffic. Exits when the display tears down (`done`) or a
-// write fails. The data channels are never closed (abandoned to GC) so a controller
-// blocked in sendBytesToDisplay can't hit a send-on-closed panic.
-func (r *Relay) startDisplayWriter(ws *websocket.Conn, control chan displayMsg, bytesCh chan []byte, done chan struct{}) {
+// always flushed before bulk terminal bytes or sensor frames, so a flood of output never
+// head-of-line blocks interactive control traffic. Exits when the display tears down
+// (`done`) or a write fails. The data channels are never closed (abandoned to GC) so a
+// controller blocked in sendBytesToDisplay can't hit a send-on-closed panic.
+func (r *Relay) startDisplayWriter(ws *websocket.Conn, control chan displayMsg, bytesCh chan []byte, framesCh chan []byte, done chan struct{}) {
 	write := func(m displayMsg) bool {
 		mt := websocket.TextMessage
 		if m.binary {
@@ -155,6 +214,11 @@ func (r *Relay) startDisplayWriter(ws *websocket.Conn, control chan displayMsg, 
 			case data := <-bytesCh:
 				if err := ws.WriteMessage(websocket.BinaryMessage, data); err != nil {
 					log.Printf("[relay] display byte-write error: %v", err)
+					return
+				}
+			case data := <-framesCh:
+				if err := ws.WriteMessage(websocket.TextMessage, data); err != nil {
+					log.Printf("[relay] display frame-write error: %v", err)
 					return
 				}
 			case <-done:
@@ -214,11 +278,16 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 					return
 				}
 				r.display = ws
-				ch := make(chan displayMsg, 64)     // control: JSON text + RPC binary results
-				bytesCh := make(chan []byte, 256)   // terminal OUTPUT (deeper: ~16ms coalesced frames)
+				ch := make(chan displayMsg, 64)   // control: JSON text + RPC binary results
+				bytesCh := make(chan []byte, 256) // terminal OUTPUT (deeper: ~16ms coalesced frames)
+				// Sensor frames stay SHALLOW on purpose: the queue depth is the
+				// worst-case lag between a real hand and its rendered pose. Four
+				// frames at 30fps is ~130ms; deeper would just buffer staleness.
+				framesCh := make(chan []byte, 4)
 				done := make(chan struct{})
 				r.displayWrite = ch
 				r.displayBytes = bytesCh
+				r.displayFrames = framesCh
 				r.displayDone = done
 				role = "display"
 
@@ -227,19 +296,44 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 				for id := range r.controllers {
 					ids = append(ids, id)
 				}
+				srcs := r.sourceSummariesLocked()
 				r.mu.Unlock()
 
 				// Start the single writer goroutine for this display connection
-				r.startDisplayWriter(ws, ch, bytesCh, done)
+				r.startDisplayWriter(ws, ch, bytesCh, framesCh, done)
 
 				log.Printf("[relay] display connected from %s", ws.RemoteAddr())
 				// Initial ack goes through the channel
+				// Sources are included so a display that reloads re-adopts sensors
+				// that stayed connected across the page's lifetime — the device
+				// keeps streaming and never has to know the browser restarted.
 				ack, _ := json.Marshal(map[string]any{
 					"ok":          true,
 					"role":        "display",
 					"controllers": ids,
+					"sources":     srcs,
 				})
 				r.sendToDisplay(ack)
+				continue
+			} else if kind, isSource := parseSourceHandshake(raw); isSource {
+				// A sensor device: upstream-only, many allowed. Unlike DISPLAY there
+				// is no singleton check — two phones, a webcam bridge, and a mock
+				// generator can all stream at once, each addressable by its own id.
+				id := r.nextID.Add(1) - 1
+				clientID = fmt.Sprintf("src-%s-%d", kind, id)
+				src := &sourceConn{ws: ws, id: clientID, kind: kind, since: time.Now()}
+				r.mu.Lock()
+				r.sources[clientID] = src
+				r.mu.Unlock()
+				role = "source"
+				log.Printf("[relay] source '%s' (kind=%s) connected from %s", clientID, kind, ws.RemoteAddr())
+				// The device is told its own id so its frames can be correlated
+				// with what the display renders, and so an operator can name it.
+				hello, _ := json.Marshal(map[string]any{
+					"ok": true, "role": "source", "sourceId": clientID, "kind": kind,
+				})
+				ws.WriteMessage(websocket.TextMessage, hello)
+				r.notifySourceChange("source_connected", src)
 				continue
 			} else {
 				id := r.nextID.Add(1) - 1
@@ -253,6 +347,44 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 				r.notifyDisplay("client_connected", clientID)
 				// Fall through to process first message as command
 			}
+		}
+
+		if role == "source" {
+			if raw == "" {
+				continue
+			}
+			if raw == "ping" {
+				ws.WriteMessage(websocket.TextMessage, []byte("pong"))
+				continue
+			}
+			// Frames are opaque to the relay: it stamps provenance and forwards.
+			// The wire schema (handFrame / cameraFrame / whatever a future device
+			// sends) is a contract between the device and the browser-side source
+			// adapter — teaching the relay to parse it would make every new sensor
+			// a Go change. Validity is only checked far enough to reject garbage.
+			if !json.Valid(msg) {
+				log.Printf("[relay] source '%s' sent non-JSON frame, ignoring: %.60s", clientID, raw)
+				continue
+			}
+			r.mu.RLock()
+			src := r.sources[clientID]
+			r.mu.RUnlock()
+			envelope, err := json.Marshal(map[string]any{
+				"event":  "source.frame",
+				"source": clientID,
+				"kind":   src.kind,
+				"data":   json.RawMessage(msg),
+			})
+			if err != nil {
+				continue
+			}
+			if r.sendFrameToDisplay(envelope) {
+				src.frames.Add(1)
+			} else {
+				src.dropped.Add(1)
+			}
+			src.lastTS.Store(time.Now().UnixMilli())
+			continue
 		}
 
 		if role == "controller" {
@@ -407,6 +539,7 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 		done := r.displayDone
 		r.displayWrite = nil
 		r.displayBytes = nil
+		r.displayFrames = nil
 		r.displayDone = nil
 		r.mu.Unlock()
 		// Close `done` (never sent on) to stop the writer and unblock any controller
@@ -423,7 +556,76 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 		r.mu.Unlock()
 		log.Printf("[relay] controller '%s' disconnected", clientID)
 		r.notifyDisplay("client_disconnected", clientID)
+	} else if role == "source" && clientID != "" {
+		r.mu.Lock()
+		src := r.sources[clientID]
+		delete(r.sources, clientID)
+		r.mu.Unlock()
+		if src != nil {
+			log.Printf("[relay] source '%s' disconnected (%d frames, %d dropped)",
+				clientID, src.frames.Load(), src.dropped.Load())
+			r.notifySourceChange("source_disconnected", src)
+		}
 	}
+}
+
+// parseSourceHandshake recognizes the sensor greeting `SOURCE [kind]`, the
+// upstream-only sibling of `DISPLAY`. The kind is a free-form device class the
+// browser routes on ("hand", "camera"); it defaults to "hand" so the simplest
+// possible client is a one-word greeting. Anything else is not a source, and the
+// caller falls through to treating the connection as a controller.
+func parseSourceHandshake(raw string) (kind string, ok bool) {
+	head, rest, _ := strings.Cut(raw, " ")
+	if head != "SOURCE" {
+		return "", false
+	}
+	kind = strings.TrimSpace(rest)
+	if kind == "" {
+		return "hand", true
+	}
+	// Keep ids filesystem- and log-safe; a device shouldn't be able to inject
+	// separators into the `src-<kind>-<n>` id it gets addressed by.
+	for _, c := range kind {
+		if !(c >= 'a' && c <= 'z') && !(c >= 'A' && c <= 'Z') && !(c >= '0' && c <= '9') {
+			return "hand", true
+		}
+	}
+	return kind, true
+}
+
+// sourceSummary is the display/CLI-facing view of one connected sensor.
+type sourceSummary struct {
+	ID      string `json:"id"`
+	Kind    string `json:"kind"`
+	Frames  int64  `json:"frames"`
+	Dropped int64  `json:"dropped"`
+	Uptime  int64  `json:"uptimeMs"`
+	LastTS  int64  `json:"lastFrameTs"`
+}
+
+// sourceSummariesLocked snapshots every connected source. Caller holds r.mu.
+func (r *Relay) sourceSummariesLocked() []sourceSummary {
+	out := make([]sourceSummary, 0, len(r.sources))
+	for _, s := range r.sources {
+		out = append(out, sourceSummary{
+			ID:     s.id,
+			Kind:   s.kind,
+			Frames: s.frames.Load(), Dropped: s.dropped.Load(),
+			Uptime: time.Since(s.since).Milliseconds(),
+			LastTS: s.lastTS.Load(),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// notifySourceChange tells the display a sensor arrived or left, so the page can
+// spin up (or tear down) the matching browser-side source adapter without polling.
+func (r *Relay) notifySourceChange(event string, src *sourceConn) {
+	msg, _ := json.Marshal(map[string]any{
+		"event": event, "sourceId": src.id, "kind": src.kind,
+	})
+	r.sendToDisplay(msg)
 }
 
 // atlasCacheDir returns ~/.glyph3d/cache/, creating it on demand for writes.
@@ -574,6 +776,9 @@ var relayVerbs = map[string]bool{
 	"log.stats":  true,
 	"log.dump":   true,
 	"git.recent": true,
+	// Answered relay-side: sources are relay state, and asking about them must
+	// work with no display connected (that's exactly when you're debugging one).
+	"source.list": true,
 }
 
 // splitRelayVerb splits a raw controller command into (verb, rest) when the
@@ -604,6 +809,21 @@ func (r *Relay) handleRelayCommand(ws *websocket.Conn, verb, rest string) {
 	}
 
 	switch verb {
+	case "source.list":
+		r.mu.RLock()
+		srcs := r.sourceSummariesLocked()
+		r.mu.RUnlock()
+		if len(srcs) == 0 {
+			reply("no sources connected", srcs)
+			return
+		}
+		lines := make([]string, 0, len(srcs))
+		for _, s := range srcs {
+			lines = append(lines, fmt.Sprintf("%s  kind=%s  frames=%d dropped=%d  up=%ds",
+				s.ID, s.Kind, s.Frames, s.Dropped, s.Uptime/1000))
+		}
+		reply(strings.Join(lines, "\n"), srcs)
+
 	case "git.recent":
 		if r.fs == nil {
 			fail(fmt.Errorf("git.recent needs a served root (start relay with a project dir)"))
