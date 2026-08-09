@@ -92,6 +92,17 @@ const LH = 3, CHAR = 1.5, PAD_X = 0.72 * LH * 2, PAD_Y = 0.42 * LH * 2;
     l.setPlateColor(0xff0000);
     ok(fill.array[slot * 4] === 255 && fill.array[slot * 4 + 2] === 0, 'setPlateColor rewrites the fill bytes');
 
+    // The resting hairline: plated labels carry the EDGE border flag.
+    const flagsAttr = panels.mesh.geometry.attributes.panelFlags;
+    ok(flagsAttr.array[slot] === 32, 'plate carries the EDGE hairline flag');
+
+    // setTextColor: live recolor — view default + a repaint of the staged range.
+    mega.views[0].byteCount = 5;
+    l.setTextColor({ r: 0.9, g: 0.1, b: 0.1 });
+    ok(mega.views[0].color.r === 0.9, 'setTextColor re-points the view default');
+    const paint = mega.views[0].paints.at(-1);
+    ok(paint && paint.start === 0 && paint.count === 5 && paint.c.r === 0.9, 'setTextColor repaints the staged range');
+
     // Empty text keeps the pill (min width), clears the view range.
     l.setText('');
     ok(mega.views[0].cleared === 1, 'empty text clears the view');
@@ -101,6 +112,15 @@ const LH = 3, CHAR = 1.5, PAD_X = 0.72 * LH * 2, PAD_Y = 0.42 * LH * 2;
     ok(arena.staged[1].disposed, 'dispose releases the arena item');
     ok(mega.views[0].dead, 'dispose retires the view');
     ok(l._panelSlot === null, 'dispose frees the plate slot');
+    setPipelineArena(null);
+}
+
+// ── hairline opt-out ──
+{
+    const { arena, panels } = makeSubstrate();
+    setPipelineArena(arena);
+    const l = new FieldLabel({ atlas: HEADLESS_ATLAS, text: 'plain', lineHeight: LH, plate: { color: 0x333333, opacity: 0.8, hairline: false } });
+    ok(panels.mesh.geometry.attributes.panelFlags.array[l._panelSlot] === 0, 'hairline: false leaves the flags clear');
     setPipelineArena(null);
 }
 

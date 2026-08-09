@@ -365,7 +365,9 @@ export default class PanelField {
         const dPx = sdf.div(max(fwidth(sdf), float(1e-6)));   // signed px to the edge
         const band = smoothstep(w.sub(float(0.5)), w.add(float(0.5)), dPx.negate()).oneMinus();
         const coverage = smoothstep(float(-0.5), float(0.5), dPx).oneMinus();
-        const rim = band.mul(select(on, u.borderIntensity, float(0)));
+        // Interaction states always read at full strength; the resting rim (EDGE
+        // hairline, DOCKED) rides the field-wide intensity dial.
+        const rim = band.mul(select(anyState, float(1), select(on, u.borderIntensity, float(0))));
 
         const material = new MeshBasicNodeMaterial();
         material.transparent = true;      // fills are translucent by theme

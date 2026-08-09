@@ -3,6 +3,7 @@ import { getPipelineArena } from '../compute/GlyphLayoutCompute.js';
 import { ensureMegaField } from '../MegaGlyphField.js';
 import { bakeFile } from '../compute/glyphBake.js';
 import { computeCellMetrics } from '../core/cellMetrics.js';
+import { BORDER_FLAGS } from './panelMaterial.js';
 
 // Plate overhang around the text block, in text-row units (a pill needs breathing room).
 const PLATE_PAD_X = 0.72, PLATE_PAD_Y = 0.42;
@@ -40,7 +41,9 @@ export default class FieldLabel extends THREE.Object3D {
      * @param {string} [o.text='']        label text ('\n' stacks lines)
      * @param {number} [o.lineHeight=1]   world-unit row pitch at scale 1
      * @param {Object} [o.textColor={r,g,b}] glyph color (dark reads on the bright pill)
-     * @param {Object|null} [o.plate]     { color:hex, opacity:0..1 } — the backing pill; null = bare text
+     * @param {Object|null} [o.plate]     { color:hex, opacity:0..1, hairline:true } — the backing
+     *   pill; null = bare text. `hairline` draws the resting identity rim (the baked-plate
+     *   stroke) via the EDGE border flag — the label field's border dials style it.
      */
     constructor({ atlas, text = '', lineHeight = 1, textColor = { r: 0.03, g: 0.04, b: 0.06 }, plate = null } = {}) {
         super();
@@ -110,6 +113,16 @@ export default class FieldLabel extends THREE.Object3D {
         if (!this._plateCfg || hex === this._plateCfg.color) return;
         this._plateCfg.color = hex;
         this._applyPlateStyle();
+    }
+
+    /** Recolor the text live — the view's default color plus a repaint of the
+     *  staged range (colors are per-slot lanes; a restage isn't needed). */
+    setTextColor(color) {
+        this.textColor = color;
+        if (this._view) {
+            this._view.color = color;
+            if (this._view.byteCount > 0) this._view.setGlyphColorRange(0, this._view.byteCount, color);
+        }
     }
 
     /** Fade the whole label: the view's alpha lane fades glyphs AND the plate
@@ -249,6 +262,7 @@ export default class FieldLabel extends THREE.Object3D {
         if (this._plateCfg && this._panelSlot == null) {
             this._panels = mega.labelPanels ?? mega.panels;
             this._panelSlot = this._panels.alloc(null, this._view.groupId);
+            this._panels.setFlags(this._panelSlot, this._plateCfg.hairline === false ? 0 : BORDER_FLAGS.EDGE);
             this._panels.setVisible(this._panelSlot, true);
         }
         this._applyGeometry();

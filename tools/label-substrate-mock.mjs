@@ -27,8 +27,9 @@ export function makeSubstrate() {
         createView({ node, color }) {
             const view = {
                 mega, node, color, groupId: nextGroup++,
-                alpha: 1, cleared: 0, dead: false,
+                alpha: 1, cleared: 0, dead: false, byteCount: 0, paints: [],
                 setGroupAlpha(_g, a) { view.alpha = a; },
+                setGlyphColorRange(start, count, c) { view.paints.push({ start, count, c }); },
                 clear() { view.cleared++; },
                 dispose() { view.dead = true; },
             };

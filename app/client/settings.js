@@ -3,6 +3,7 @@ import { setPanelStateColorDefaults } from '@glyph3d/core/collections';
 import { setGlyphLodParam, GLYPH_LOD_DEFAULTS } from '@glyph3d/core/GlyphField.js';
 import { setGlyphWidthCompress, GLYPH_WIDTH_COMPRESS_DEFAULT } from '@glyph3d/core/core/glyphVertex.js';
 import { setTabParam, TAB_DEFAULTS } from '@glyph3d/core/components/Tab3D.js';
+import { setLabelPillStyle, LABEL_PILL_DEFAULTS } from '@glyph3d/core/MegaGlyphField.js';
 import { setStrataParam, STRATA_DEFAULTS } from '@glyph3d/core/collections/StrataLayout.js';
 import { TERMINAL_CURSOR_DEFAULTS } from '@glyph3d/core/collections/TerminalGrid.js';
 import { JELLYFISH_DEFAULTS, LIBRARY_DEFAULTS, schemeNameOf } from '@glyph3d/core/collections/layouts/index.js';
@@ -110,6 +111,10 @@ export const SETTINGS = [
   { key: 'tab.steps', label: 'Stagger (0 = left-to-right, ≥2 = slots)', group: 'Book tabs', type: 'number', default: TAB_DEFAULTS.steps, min: 0, max: 12, step: 1, apply: (_ctx, v) => setTabParam({ steps: v }) },
   { key: 'tab.placement', label: 'Edge', group: 'Book tabs', type: 'enum', options: ['top', 'fore'], default: TAB_DEFAULTS.placement, apply: (_ctx, v) => setTabParam({ placement: v }) },
   { key: 'tab.protrusion', label: 'Lift off edge', group: 'Book tabs', type: 'number', default: TAB_DEFAULTS.protrusion, min: 0, max: 60, step: 1, apply: (_ctx, v) => setTabParam({ protrusion: v }) },
+  // Label pills (tabs + nameplates share the label panel field) — the resting
+  // hairline rim; interaction-state borders render full-strength regardless.
+  { key: 'label.hairline', label: 'Pill hairline strength', group: 'Tree & labels', type: 'number', default: LABEL_PILL_DEFAULTS.hairline, min: 0, max: 1, step: 0.01, apply: (_ctx, v) => setLabelPillStyle({ hairline: v }) },
+  { key: 'label.hairlineWidth', label: 'Pill hairline width (px)', group: 'Tree & labels', type: 'number', default: LABEL_PILL_DEFAULTS.hairlineWidth, min: 0, max: 8, step: 0.25, apply: (_ctx, v) => setLabelPillStyle({ hairlineWidth: v }) },
   {
     key: 'camera.speed', label: 'Move speed', group: 'Camera',
     type: 'number', default: 500, min: 1, max: 1000, step: 1,

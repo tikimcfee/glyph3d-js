@@ -44,6 +44,7 @@ export const BORDER_FLAGS = Object.freeze({
     FOCUSED:  1 << 2,
     INPUT:    1 << 3,
     CAPTURED: 1 << 4,   // greedy keyboard capture settled on this window (Esc + all keys flow here)
+    EDGE:     1 << 5,   // a constant identity hairline (label pills) — no state semantics, no pulse
 });
 
 const TAU = Math.PI * 2;

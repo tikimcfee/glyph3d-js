@@ -37,6 +37,20 @@ import * as THREE from 'three';
 import { StorageInstancedBufferAttribute, IndirectStorageBufferAttribute } from 'three/webgpu';
 import GlyphField from './GlyphField.js';
 import PanelField from './collections/PanelField.js';
+import { getPipelineArena } from './compute/GlyphLayoutCompute.js';
+
+/** Label-pill resting style — the bakePillCanvas hairline (2px white @ 0.22) as
+ *  live dials. Module state so a persisted setting lands whether the mega field
+ *  exists yet or not (the setTabParam pattern). */
+export const LABEL_PILL_DEFAULTS = Object.freeze({ hairline: 0.22, hairlineWidth: 1.5 });
+const LABEL_PILL_STYLE = { ...LABEL_PILL_DEFAULTS };
+export function setLabelPillStyle({ hairline, hairlineWidth } = {}) {
+    if (hairline != null) LABEL_PILL_STYLE.hairline = hairline;
+    if (hairlineWidth != null) LABEL_PILL_STYLE.hairlineWidth = hairlineWidth;
+    getPipelineArena()?.megaField?.labelPanels?.setBorder({
+        intensity: LABEL_PILL_STYLE.hairline, width: LABEL_PILL_STYLE.hairlineWidth,
+    });
+}
 
 const _pos = new THREE.Vector3();
 const _quat = new THREE.Quaternion();
@@ -102,6 +116,12 @@ export class MegaGlyphField {
         // and the future 'handle' pick block for tab clicks.
         this.labelPanels = new PanelField({ scene, field: this.field, channel: 'handle', depthWrite: false });
         this.labelPanels.mesh.name = 'label-panel-field';
+        // The pill hairline at rest — this field's resting border; interaction
+        // states render full-strength regardless (the fragment's intensity
+        // split). Dials: label.hairline / label.hairlineWidth.
+        this.labelPanels.setBorder({
+            color: 0xffffff, width: LABEL_PILL_STYLE.hairlineWidth, intensity: LABEL_PILL_STYLE.hairline,
+        });
         if (this._pickingSystem) this.panels.registerPicking(this._pickingSystem);
 
         // RANGE CULLING (the visibility lane): the mega mesh submits one indirect
