@@ -3,20 +3,35 @@ import { stateController } from '@glyph3d/core/services/state';
 import { DEFAULT_LAYOUT } from '@glyph3d/core/workers/builders/index.js';
 
 /**
- * HudPanel — the focused-window control helper. A small companion overlay on the canvas
- * (bottom-right by default, draggable), it shows controls for the ONE grid that currently holds attention.primary
- * — the genuinely dynamic, contextual bit that doesn't fit a static panel:
+ * HudPanel — THE one floating helper over the canvas: what you're locked into, and
+ * what you can do about it. The old pair (a bottom-center context breadcrumb that
+ * REFLECTED focus/edit/key state, a bottom-right panel that CONTROLLED the focused
+ * window) merged into one deterministic window — bottom-right by default, draggable,
+ * collapsible, position + toggles persisted as hud.*.
  *
- *   focus / reset / cam-lock · dir-volume splay⇄collapse (when one is in play) ·
- *   layout mode · edit toggle (lit = editing) · scroll/frame readout · close
+ * Top-down, each row earning its place only when its subject is in play:
  *
- * It is NOT the open-file list — that's the FileTree (loaded rows + ✕ + the focused accent).
- * The HUD owns no behavior: each control is a thin binding of { fire: a bus verb, reflect: live
- * state }. State flows ONE WAY — subscribe to AttentionManager (primary/key) + registry changes
- * for instant retarget, plus a light poll for readouts that don't emit (scroll/frame/layout/edit).
+ *   header        grip · focused name (the FOCUS accent) · address toggle · collapse
+ *   context chips AST scope · EDIT caret · KEY target — rendered 1:1 from the
+ *                 InteractionContext's composable nodes, SUBSCRIPTION-driven (the
+ *                 itests assert cursor moves land without polling)
+ *   address bar   the focus path as clickable segments → focus.path (the same
+ *                 absolute focus the keyboard walk lands on)
+ *   LSP row       def + references at the caret (LspNavigator) → lsp.goto / panel
+ *   controls      camera row · dir-volume splay⇄collapse · layout modes · edit + readout
+ *
+ * The HUD owns no behavior: every control is a thin { fire: a bus verb, reflect:
+ * live state } binding. Reflection subscribes to InteractionContext + LspNavigator +
+ * AttentionManager + registry, and polls only the readouts that don't emit
+ * (scroll/frame/layout/edit).
  */
 
 const LAYOUT_MODES = ['long-column', 'newspaper', 'no-wrap', 'z-pages'];
+
+// kind → chip accent. FOCUS pale blue (hover/selection family), AST violet (the
+// semantic family), EDIT caret yellow (CodeGrid.CARET_COLOR), KEY green (live
+// capture), LSP teal (the navigator). Future kinds add a row here and a renderer.
+const ACCENT = { focus: '#9fd2ff', ast: '#c8a9ff', edit: '#ffd84d', key: '#7fe0a0', lsp: '#6fe0c8' };
 
 // Best-guess the active preset from the grid's layout params (modes are param bundles, so this is
 // an inference for the highlight, not authoritative). Missing params read as DEFAULT_LAYOUT.
@@ -34,7 +49,25 @@ function short(s, n = 26) {
   return s.length <= n ? s : '…' + s.slice(-(n - 1));
 }
 
-// The focused window's live state (attention.primary). Pure read.
+const tailName = (s, n = 24) => {
+  const t = String(s || '').split('/').pop();
+  return t.length > n ? '…' + t.slice(-(n - 1)) : t;
+};
+
+// Split a flattened path into its address-bar segments (drop empties so a
+// leading/trailing slash doesn't render a blank chip).
+const segmentsOf = (p) => String(p || '').split('/').filter(Boolean);
+
+// The FOCUS node dedupes into the header title; every other kind renders a chip.
+function chipLabel(n) {
+  if (n.kind === 'edit') return `EDIT ${n.cursor.line}:${n.cursor.col}`;
+  if (n.kind === 'ast') return n.label;
+  if (n.kind === 'key') return `KEY ${n.entityType || tailName(n.id)}`;
+  return `${n.kind.toUpperCase()} ${tailName(n.id)}`;
+}
+
+// The focused window's control state (attention.primary). Pure read — polled, since
+// scroll/frame/layout/edit don't emit.
 function readFocus(client) {
   const am = client?.ctx?.attentionManager;
   const reg = client?.ctx?.registry;
@@ -75,7 +108,11 @@ function readFocus(client) {
 
 export default function HudPanel({ client }) {
   const [f, setF] = useState(() => readFocus(client));
+  const [nodes, setNodes] = useState([]);       // InteractionContext — subscription, no poll
+  const [lsp, setLsp] = useState(null);         // LspNavigator state
   const [collapsed, setCollapsed] = useState(() => !!stateController.get('hud.collapsed', false));
+  const [addr, setAddr] = useState(() => !!stateController.get('hud.addr', false)); // address bar open
+  const [hoverSeg, setHoverSeg] = useState(-1); // address-bar segment under the cursor
   const [pos, setPos] = useState(() => stateController.get('hud.pos', null)); // {x,y} once dragged
   const posRef = useRef(pos);
   const rootRef = useRef(null);
@@ -85,9 +122,13 @@ export default function HudPanel({ client }) {
     const refresh = () => setF(readFocus(client));
     const am = client.ctx?.attentionManager;
     const reg = client.ctx?.registry;
+    const ic = client.ctx?.interactionContext;
+    const nav = client.ctx?.lspNavigator;
     const unsubs = [
       am?.on?.('change:primary', refresh), am?.on?.('change:key', refresh),
     ].filter(Boolean);
+    if (ic) { setNodes(ic.nodes()); unsubs.push(ic.on(setNodes)); }
+    if (nav) { setLsp(nav.state()); unsubs.push(nav.on(setLsp)); }
     reg?.addChangeListener?.(refresh);                 // window removed/retargeted → restate
     const iv = setInterval(refresh, 150);              // scroll/frame/layout/edit don't emit — poll
     refresh();
@@ -102,7 +143,7 @@ export default function HudPanel({ client }) {
 
   // Drag by the grip: fixed-position move clamped to the viewport; position
   // persists on release. Until first drag it anchors bottom-right above the
-  // status bar. Mirrors the focus bar (ContextBreadcrumb) frame.
+  // status bar.
   const onGripDown = (e) => {
     e.preventDefault();
     const el = rootRef.current;
@@ -130,7 +171,27 @@ export default function HudPanel({ client }) {
     return !c;
   });
 
-  if (!f) return null;  // nothing focused → no helper
+  const toggleAddr = () => setAddr((a) => {
+    stateController.set('hud.addr', !a);
+    return !a;
+  });
+
+  // Jump to an ancestor directory (or the focused entity itself) by its full
+  // path — the same absolute focus the keyboard walk lands on, via the bus.
+  const focusPath = (p) => { if (p) fire('focus.path', p); };
+
+  // Jump to a known LSP location (a def/ref chip) via the bus.
+  const jumpLoc = (l) => fire('lsp.goto', l.uri, String(l.sL), String(l.sC), String(l.eL), String(l.eC));
+
+  const focusNode = nodes.find((n) => n.kind === 'focus') || null;
+  const chips = nodes.filter((n) => n.kind !== 'focus');   // FOCUS lives in the title
+  if (!f && nodes.length === 0) return null;               // truly free → no helper
+
+  const title = f?.name || (focusNode ? tailName(focusNode.path) : 'free');
+  const segs = focusNode ? segmentsOf(focusNode.path) : [];
+  const showChips = !collapsed && chips.length > 0;
+  const showAddr = !collapsed && addr && segs.length > 0;
+  const showLsp = !collapsed && lsp?.status === 'ready' && (lsp.def || lsp.refs.length > 0);
 
   // Until first drag: bottom-right over the canvas, raised to clear the inline
   // status bar. A drag switches to explicit x/y.
@@ -141,11 +202,64 @@ export default function HudPanel({ client }) {
       onPointerDown={(e) => e.stopPropagation()} onWheel={(e) => e.stopPropagation()}>
       <div style={S.header}>
         <span onPointerDown={onGripDown} title="drag to move" style={S.grip}>⠿</span>
-        <span style={S.htitle} title={f.name}>{short(f.name)}</span>
+        <span style={S.htitle} title={focusNode?.path || f?.id || title}>{short(title)}</span>
+        {segs.length > 0 && (
+          <button type="button" style={S.collapse} title={addr ? 'hide path' : 'show full path'}
+            onClick={toggleAddr}>{addr ? '▾' : '▸'}</button>
+        )}
         <button type="button" style={S.collapse} title={collapsed ? 'expand' : 'collapse'}
-          onClick={toggle}>{collapsed ? '▸' : '▾'}</button>
+          onClick={toggle}>{collapsed ? '◂' : '▾'}</button>
       </div>
-      {!collapsed && (
+      {/* Context chips — the locked-in state (AST scope, caret, key target), 1:1 from
+          the InteractionContext. data-g3d-context is the itests' ground-truth probe. */}
+      {showChips && (
+        <div style={S.chips} data-g3d-context>
+          {chips.map((n, i) => (
+            <span key={`${n.kind}:${n.id}:${i}`} data-kind={n.kind} title={n.id}
+              style={{ ...S.chip, borderLeft: `2px solid ${ACCENT[n.kind] || '#4a5468'}` }}>
+              {chipLabel(n)}
+            </span>
+          ))}
+        </div>
+      )}
+      {showAddr && (
+        <div style={S.addr} data-g3d-address onMouseLeave={() => setHoverSeg(-1)}>
+          <span style={{ color: '#4a5468' }}>⌂</span>
+          {segs.map((s, i) => {
+            const prefix = segs.slice(0, i + 1).join('/');
+            const isTail = i === segs.length - 1;
+            const hot = hoverSeg === i;
+            return (
+              <React.Fragment key={i}>
+                <span style={{ color: '#39424f' }}>›</span>
+                <span onClick={() => focusPath(prefix)} onMouseEnter={() => setHoverSeg(i)}
+                  title={`focus ${prefix}`}
+                  style={{
+                    cursor: 'pointer', whiteSpace: 'nowrap',
+                    color: isTail ? ACCENT.focus : (hot ? '#cdd6e2' : '#8893a3'),
+                    textDecoration: hot ? 'underline' : 'none',
+                  }}>{s}</span>
+              </React.Fragment>
+            );
+          })}
+        </div>
+      )}
+      {showLsp && (
+        <div style={S.lspRow} data-g3d-lsp>
+          <span style={{ color: '#4a5468' }} title="LSP — definition & references">⌖</span>
+          {lsp.def && (
+            <span onClick={() => jumpLoc(lsp.def)}
+              title={`definition\n${lsp.def.uri}\n${lsp.def.preview}`}
+              style={S.lspBtn(ACCENT.lsp)}>def {lsp.def.label}</span>
+          )}
+          {lsp.refsTotal > 0 && (
+            <span onClick={() => fire('panel.open', 'lspResults')}
+              title="open the LSP results panel"
+              style={S.lspBtn(ACCENT.ast)}>{lsp.refsTotal} ref{lsp.refsTotal === 1 ? '' : 's'} ▸</span>
+          )}
+        </div>
+      )}
+      {!collapsed && f && (
         <div style={S.controls}>
           <div style={S.row}>
             <Btn onClick={() => fire('camera.focus', f.id)}>focus</Btn>
@@ -213,11 +327,22 @@ const S = {
     font: '12px ui-monospace, Menlo, Consolas, monospace',
     background: 'rgba(10,12,16,0.82)', color: '#aebccb',
     border: '1px solid #283341', borderRadius: 7, padding: '8px 10px',
-    display: 'flex', flexDirection: 'column', gap: 8, minWidth: 210, maxWidth: 320,
+    display: 'flex', flexDirection: 'column', gap: 6, minWidth: 210, maxWidth: 340,
     userSelect: 'none', backdropFilter: 'blur(6px)', boxShadow: '0 4px 18px rgba(0,0,0,0.35)',
   },
-  controls: { display: 'flex', flexDirection: 'column', gap: 6 },
+  controls: { display: 'flex', flexDirection: 'column', gap: 6, borderTop: '1px solid #1c222c', paddingTop: 6 },
   row: { display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' },
+  chips: { display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 4, fontSize: 11 },
+  chip: { padding: '0 5px', whiteSpace: 'nowrap', color: '#aeb8c6' },
+  addr: {
+    display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 3,
+    fontSize: 11, borderTop: '1px solid #1c222c', paddingTop: 5,
+  },
+  lspRow: {
+    display: 'flex', alignItems: 'center', gap: 4, fontSize: 11,
+    borderTop: '1px solid #1c222c', paddingTop: 5,
+  },
+  lspBtn: (color) => ({ cursor: 'pointer', color, padding: '0 4px', whiteSpace: 'nowrap' }),
   btn: {
     font: 'inherit', color: '#aebccb', background: '#1a212b',
     border: '1px solid #2a3340', borderRadius: 4, padding: '2px 8px', cursor: 'pointer',
@@ -235,6 +360,6 @@ const S = {
   readout: { color: '#6b7785', fontSize: 11, marginLeft: 'auto', whiteSpace: 'nowrap' },
   header: { display: 'flex', alignItems: 'center', gap: 6 },
   grip: { cursor: 'grab', color: '#4a5468', letterSpacing: -1, padding: '0 2px' },
-  htitle: { color: '#6cf', fontWeight: 600, fontSize: 11, letterSpacing: 0.4, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  htitle: { color: '#9fd2ff', fontWeight: 600, fontSize: 11, letterSpacing: 0.4, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   collapse: { font: 'inherit', color: '#9ab', background: 'transparent', border: 'none', cursor: 'pointer', padding: '0 2px', lineHeight: 1 },
 };

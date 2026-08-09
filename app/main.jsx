@@ -10,7 +10,6 @@ import TouchAdapter from './client/TouchAdapter.jsx';
 import HudPanel from './client/HudPanel.jsx';
 import CommandBar from './client/CommandBar.jsx';
 import StatusBar from './StatusBar.jsx';
-import ContextBreadcrumb from './ContextBreadcrumb.jsx';
 import { getSetting } from './client/settings.js';
 import { stateController } from '@glyph3d/core/services/state';
 // Font fallback chain, priority order: clean code monospace first, then fonts
@@ -285,11 +284,9 @@ function App() {
       {/* inline status bar — the bottom strip (a real flex row, not a floating pill):
           activity/load narration on the left, relay state on the right */}
       <StatusBar client={client} hint={hint} />
-      {/* control HUD — fixed overlay on the canvas (raised to clear the status bar) */}
+      {/* the HUD — the ONE floating helper: locked-in context (focus/AST/edit/key
+          chips, address bar, LSP row) + focused-window controls in one window */}
       <HudPanel client={client} />
-      {/* context breadcrumb — the vim-like "what am I locked into" chips
-          (focus/edit/key nodes); collapsible + draggable, position persists */}
-      <ContextBreadcrumb client={client} />
       {/* command palette — summoned modal (⌘K) to drive bus verbs; stays open per command */}
       <CommandBar client={client} open={paletteOpen} onClose={() => setPaletteOpen(false)} />
     </div>
