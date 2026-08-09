@@ -69,7 +69,7 @@ class HandGestureAdapter {
     /**
      * @param {Object} opts
      * @param {THREE.Camera}      opts.camera           - Scene camera (hand attaches here)
-     * @param {HTMLCanvasElement} opts.canvas           - WebGL canvas for click events
+     * @param {HTMLCanvasElement} opts.canvas           - Renderer canvas for click events
      * @param {Object}            opts.cameraController - CameraController instance
      * @param {Object}            [opts.handRendererOptions] - Overrides for HandRenderer
      */

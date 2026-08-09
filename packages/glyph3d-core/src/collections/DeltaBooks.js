@@ -499,10 +499,8 @@ export default class DeltaBooks {
         this.ctx.registry?.register?.(set.groupId, set.book, { type: 'book', role: 'delta', deltaId: set.setId });
         const ps = this.ctx.pickingSystem;
         if (!ps) return;
-        Promise.resolve(ps._tslReady).then(() => {
-            try { if (set.book.cover) ps.register('group', set.book.cover.mesh, set.book); }
-            catch (e) { console.warn('[DeltaBooks] group pick register failed', e); }
-        });
+        try { if (set.book.cover) ps.register('group', set.book.cover.mesh, set.book); }
+        catch (e) { console.warn('[DeltaBooks] group pick register failed', e); }
     }
 
     _coverOpts(colorHex) {

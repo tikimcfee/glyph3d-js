@@ -68,9 +68,8 @@ const MAX_GROUPS_DIM     = 16000;
  *   col 3: scale.xyz + colorBlend
  *   col 4: clipTop, clipBottom, clipEnabled (grid-local y window; w free)
  * A group texel is a full pose + style — the shared vertex transform
- * (core/glyphVertex.js) reads all five columns; the WebGL picking shaders in
- * PickingSystem.js sample columns 0–4 at (col + 0.5) / GROUP_COLS and must
- * change in the same breath as this layout.
+ * (core/glyphVertex.js) reads all five columns for render AND pick, so this
+ * layout has exactly one GPU reader per consumer kind (glyph, panel).
  */
 export const GROUP_COLS = 5;
 

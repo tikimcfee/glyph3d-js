@@ -419,7 +419,7 @@ export class MegaGlyphField {
             console.error(
                 'MegaGlyphField: range culling disabled — device lacks indirect-first-instance '
                 + '(indirect draws would silently no-op). Drawing the FULL field every frame. '
-                + `device features: ${device ? [...device.features].join(', ') : 'no device (WebGL backend?)'}`,
+                + `device features: ${device ? [...device.features].join(', ') : 'no device'}`,
             );
             this._indirectState = false;
             return;

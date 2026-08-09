@@ -116,30 +116,20 @@ export function CanvasPicker() {
     if (!client) return;
     const { ctx, registry } = client;
     const wired = new WeakSet();
-    let cancelled = false;
-    let tslWarned = false;
     const wire = () => {
       const ps = ctx.pickingSystem;
       if (!ps) return;
-      ps._tslReady.then(() => {
-        if (cancelled) return;
-        for (const entry of registry.pickables()) {
-          const grid = entry.grid;
-          if (grid && !wired.has(grid) && typeof grid.setPickingSystem === 'function') {
-            wired.add(grid);
-            grid.setPickingSystem(ps);
-          }
+      for (const entry of registry.pickables()) {
+        const grid = entry.grid;
+        if (grid && !wired.has(grid) && typeof grid.setPickingSystem === 'function') {
+          wired.add(grid);
+          grid.setPickingSystem(ps);
         }
-      }).catch((e) => {
-        // TSL failed to load (e.g. the dynamic three/webgpu import rejected): no
-        // grid gets wired and the ID pass stays empty (hover/click won't resolve).
-        // Warn once so it isn't silent.
-        if (!tslWarned) { tslWarned = true; console.warn('[CanvasPicker] TSL picking unavailable; hover/select disabled', e); }
-      });
+      }
     };
     wire();
     registry.addChangeListener(wire);
-    return () => { cancelled = true; registry.removeChangeListener(wire); };
+    return () => { registry.removeChangeListener(wire); };
   }, [client]);
 
   useEffect(() => {

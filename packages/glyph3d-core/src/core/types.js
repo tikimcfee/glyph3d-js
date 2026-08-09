@@ -68,7 +68,7 @@
  * Use as a checklist when implementing a new backend (wgpu, Metal, etc.)
  *
  * Hard requirements:
- * - Instanced drawing with gl_InstanceID (ES 3.0 / WebGL 2 hard floor)
+ * - Instanced drawing with a vertex-stage instance index
  * - 5 instance attributes:
  *     instancePosition  vec4  (x, y, z world position + padding lane; stride-4 as bound)
  *     instanceSize      vec2  (width, height of the quad)

@@ -11,6 +11,7 @@
  * Built-in channels:
  *   - 'glyph' (layer 7, kind 'glyph') — instanced glyph quads, ID = base +
  *     instanceIndex, resolves to { token: renderer, slotIndex } → char-level.
+ *     The full glyph cell quad is pickable.
  *   - 'grid'  (layer 8, kind 'flat')  — one solid quad per grid (the background
  *     panel), ID = base, resolves to { token: grid } → whole-panel grid-level.
  *   - 'handle' (layer 9, kind 'flat') — small per-viewport control meshes (terminal
@@ -26,59 +27,21 @@
  * pickable's block is reclaimed when it unregisters (every flush/resize
  * re-registers) — bounded by the sum of live counts, never leaking toward the
  * 24-bit ceiling.
+ *
+ * The pick materials are TSL NodeMaterials sharing the render material's vertex
+ * transform (core/glyphVertex.js) — render and pick physically cannot drift.
+ * WebGPU only: the constructor rejects any other renderer.
  */
 
 import * as THREE from 'three';
+import { MeshBasicNodeMaterial, StorageInstancedBufferAttribute, TSL } from 'three/webgpu';
+import {
+    buildGlyphVertexTransform,
+    registerByteSlotsNode,
+    registerByteSlotsMaterial,
+} from '../core/glyphVertex.js';
 
-// TSL imports for WebGPU picking materials — loaded lazily so PickingSystem
-// works with both WebGLRenderer (no TSL needed) and WebGPURenderer.
-// We import directly from three/webgpu because the importmap maps 'three' to
-// the webgpu build at runtime; this bare specifier works in browser ES modules.
-let _tslLoaded = false;
-let _MeshBasicNodeMaterial, _Fn, _attribute, _uniform, _texture, _textureLoad,
-    _vec2, _vec3, _vec4, _ivec2, _float, _int, _instanceIndex,
-    _modelViewMatrix, _cameraProjectionMatrix, _positionLocal, _If, _Return, _select,
-    _storage, _StorageInstancedBufferAttribute;
-// The shared instance→clip transform — the SAME graph GlyphField's render material
-// uses, so the pick ID pass can't drift from the visible glyph. Resolved lazily with
-// the rest (dynamic-imported) to keep three/tsl out of the WebGL-only path.
-let _buildGlyphVertexTransform, _registerByteSlotsNode, _registerByteSlotsMaterial;
-
-async function _loadTSL() {
-    if (_tslLoaded) return;
-    const m = await import('three/webgpu');
-    _MeshBasicNodeMaterial    = m.MeshBasicNodeMaterial;
-    _StorageInstancedBufferAttribute = m.StorageInstancedBufferAttribute;
-    // TSL symbols live on m.TSL, not directly on the module
-    const tsl                 = m.TSL;
-    _Fn                       = tsl.Fn;
-    _attribute                = tsl.attribute;
-    _uniform                  = tsl.uniform;
-    _texture                  = tsl.texture;
-    _textureLoad              = tsl.textureLoad;
-    _vec2                     = tsl.vec2;
-    _vec3                     = tsl.vec3;
-    _vec4                     = tsl.vec4;
-    _ivec2                    = tsl.ivec2;
-    _float                    = tsl.float;
-    _int                      = tsl.int;
-    _instanceIndex            = tsl.instanceIndex;
-    _modelViewMatrix          = tsl.modelViewMatrix;
-    _cameraProjectionMatrix   = tsl.cameraProjectionMatrix;
-    _positionLocal            = tsl.positionLocal;
-    _If                       = tsl.If;
-    _Return                   = tsl.Return;
-    _select                   = tsl.select;
-    _storage                  = tsl.storage;
-    // Shared with the render material (core/glyphVertex). Its top-level
-    // `import 'three/tsl'` only fires here — inside the WebGPU-only lazy path —
-    // so the lazy/WebGL contract holds.
-    ({ buildGlyphVertexTransform: _buildGlyphVertexTransform,
-        registerByteSlotsNode: _registerByteSlotsNode,
-        registerByteSlotsMaterial: _registerByteSlotsMaterial } =
-        await import('../core/glyphVertex.js'));
-    _tslLoaded = true;
-}
+const { Fn, uniform, texture, storage, float, int, vec4, instanceIndex } = TSL;
 
 // Built-in channels. Each gets a distinct THREE render layer so the picking
 // camera can isolate it (renders ONLY that layer → the ID buffer is free of
@@ -92,244 +55,23 @@ const DEFAULT_CHANNELS = {
     group:  { layer: 10, kind: 'flat' }, // container volumes (agent-trail corridor boxes) — LOWEST pick precedence; a grid/card hover beats it
 };
 
-// ---------------------------------------------------------------------------
-// WebGL (GLSL) picking shaders. Two glyph modes + a flat (solid-quad) mode.
-//   glyph 'cell'  — solid quad, entire glyph cell is pickable
-//   glyph 'glyph' — Slug winding number coverage, only rendered strokes pick
-//   flat          — one constant ID over a plain mesh (grid panels, buttons)
-// (WebGPU uses TSL NodeMaterials built below; these are the WebGLRenderer path.)
-// ---------------------------------------------------------------------------
-
-// Shared vertex core — position + group visibility
-const PICKING_VERTEX_CORE = `
-precision highp float;
-
-in vec4 instancePosition;   // stride-4 (.w padding) — matches the WebGPU/TSL attribute
-in vec2 instanceSize;
-in float instanceGroupId;
-
-uniform sampler2D groupTexture;
-uniform float groupTextureHeight;
-uniform int uBasePickingId;
-`;
-
-// Shared group-pose helper: sample the GROUP_COLS(=5)-texel group row (cols at
-// (col + 0.5)/5) and apply the same scale → quat-rotate → offset chain + culls the
-// TSL transform (core/glyphVertex.js) runs. Changes to the group texture layout
-// land HERE in the same breath.
-const PICKING_GROUP_POSE = `
-vec3 quatRotate(vec4 q, vec3 v) {
-    return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v);
-}
-// Returns the posed world position; sets culled=true for invisible/clipped instances.
-vec3 groupPose(float groupId, vec3 localPos, float anchorY, out bool culled) {
-    float v = (groupId + 0.5) / groupTextureHeight;
-    vec4 gPos   = texture(groupTexture, vec2(0.1, v)); // col 0: offset
-    vec4 gQuat  = texture(groupTexture, vec2(0.3, v)); // col 1: quaternion
-    vec4 gColor = texture(groupTexture, vec2(0.5, v)); // col 2: color (a = visibility)
-    vec4 gScale = texture(groupTexture, vec2(0.7, v)); // col 3: scale
-    vec4 gClip  = texture(groupTexture, vec2(0.9, v)); // col 4: clipTop, clipBottom, clipEnabled
-    culled = (gColor.a < 0.01)
-        || (gClip.z > 0.5 && (anchorY > gClip.x || anchorY < gClip.y));
-    return quatRotate(gQuat, localPos * gScale.xyz) + gPos.xyz;
-}
-`;
-
-// Cell mode: solid quads, no atlas sampling
-const PICKING_VERTEX_CELL = PICKING_VERTEX_CORE + PICKING_GROUP_POSE + `
-flat out int vPickingId;
-
-void main() {
-    vec3 scaled = position * vec3(instanceSize, 1.0);
-    vec3 alignOffset = vec3(instanceSize.x * 0.5, 0.0, 0.0);
-
-    bool culled;
-    vec3 worldPos = groupPose(instanceGroupId, scaled + alignOffset + instancePosition.xyz,
-        instancePosition.y, culled);
-    if (culled) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
-
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(worldPos, 1.0);
-    vPickingId = uBasePickingId + gl_InstanceID;
-}
-`;
-
-const PICKING_FRAGMENT_CELL = `
-precision highp float;
-flat in int vPickingId;
-out vec4 fragColor;
-void main() {
-    int id = vPickingId;
-    int r = (id >> 16) & 0xFF;
-    int g = (id >> 8) & 0xFF;
-    int b = id & 0xFF;
-    int a = (id >> 24) & 0xFF;
-    fragColor = vec4(float(r) / 255.0, float(g) / 255.0, float(b) / 255.0, float(a) / 255.0);
-}
-`;
-
-// Glyph mode: Slug vector coverage test — only rendered strokes pick
-const PICKING_VERTEX_GLYPH = PICKING_VERTEX_CORE + PICKING_GROUP_POSE + `
-in float instanceGlyphId;
-
-uniform highp usampler2D glyphMapTexture;
-uniform float glyphMapWidth;
-uniform float glyphMapHeight;
-
-flat out int vPickingId;
-flat out int vCurveStart;
-flat out int vCurveCount;
-out vec2 vGlyphUV;
-
-void main() {
-    vec3 scaled = position * vec3(instanceSize, 1.0);
-    vec3 alignOffset = vec3(instanceSize.x * 0.5, 0.0, 0.0);
-
-    bool culled;
-    vec3 worldPos = groupPose(instanceGroupId, scaled + alignOffset + instancePosition.xyz,
-        instancePosition.y, culled);
-    if (culled) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
-
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(worldPos, 1.0);
-    vPickingId = uBasePickingId + gl_InstanceID;
-
-    int gid = int(instanceGlyphId);
-    int mapCol = gid % int(glyphMapWidth);
-    int mapRow = gid / int(glyphMapWidth);
-    uvec4 glyphInfo = texelFetch(glyphMapTexture, ivec2(mapCol, mapRow), 0);
-    vCurveStart      = int(glyphInfo.x);
-    vCurveCount      = int(glyphInfo.y);
-    vGlyphUV = uv;
-}
-`;
-
-const PICKING_FRAGMENT_GLYPH = `
-precision highp float;
-precision highp int;
-
-#define MAX_CURVES 256
-
-uniform highp usampler2D curveTexture;
-
-flat in int vPickingId;
-flat in int vCurveStart;
-flat in int vCurveCount;
-in vec2 vGlyphUV;
-
-out vec4 fragColor;
-
-float unpackCoord(uint bits) { return float(bits) / 65535.0; }
-
-// Binary winding contribution of one quadratic Bezier against a +X ray from p.
-int windingContrib(vec2 p, vec2 p0, vec2 p1, vec2 p2) {
-    vec2 a = p0 - p, b = p1 - p, c = p2 - p;
-    float A = a.y - 2.0 * b.y + c.y;
-    float B = a.y - b.y;
-    float C = a.y;
-    int w = 0;
-    if (abs(A) < 1e-7) {
-        if (abs(B) < 1e-7) return 0;
-        float t = C / (2.0 * B);
-        if (t < 0.0 || t > 1.0) return 0;
-        float x = (1.0-t)*(1.0-t)*a.x + 2.0*t*(1.0-t)*b.x + t*t*c.x;
-        if (x < 0.0) return 0;
-        float dy = 2.0*((b.y-a.y)*(1.0-t) + (c.y-b.y)*t);
-        return (dy > 0.0) ? 1 : -1;
-    }
-    float disc = B*B - A*C;
-    if (disc < 0.0) return 0;
-    float sqrtDisc = sqrt(disc);
-    for (int k = 0; k < 2; k++) {
-        float t = (k == 0) ? (B - sqrtDisc)/A : (B + sqrtDisc)/A;
-        if (t < 0.0 || t > 1.0) continue;
-        float x = (1.0-t)*(1.0-t)*a.x + 2.0*t*(1.0-t)*b.x + t*t*c.x;
-        if (x < 0.0) continue;
-        float dy = 2.0*((b.y-a.y)*(1.0-t) + (c.y-b.y)*t);
-        w += (dy > 0.0) ? 1 : -1;
-    }
-    return w;
-}
-
-void main() {
-    if (vCurveCount == 0) discard;
-
-    // Hit test: non-zero winding rule over all of the glyph's curves.
-    // Binary (no anti-aliasing) is correct for a per-pixel pick — matches
-    // the main shader's direct curve iteration, no band structure.
-    vec2 p = vGlyphUV;
-    int winding = 0;
-    for (int i = 0; i < MAX_CURVES; i++) {
-        if (i >= vCurveCount) break;
-        int ci = (vCurveStart + i) * 2;
-        uvec4 t0 = texelFetch(curveTexture, ivec2(ci % 1024, ci / 1024), 0);
-        uvec4 t1 = texelFetch(curveTexture, ivec2((ci+1) % 1024, (ci+1) / 1024), 0);
-        vec2 cp0 = vec2(unpackCoord(t0.x), unpackCoord(t0.y));
-        vec2 cp1 = vec2(unpackCoord(t0.z), unpackCoord(t0.w));
-        vec2 cp2 = vec2(unpackCoord(t1.x), unpackCoord(t1.y));
-        winding += windingContrib(p, cp0, cp1, cp2);
-    }
-
-    if (winding == 0) discard;
-
-    int id = vPickingId;
-    int r = (id >> 16) & 0xFF;
-    int g = (id >> 8) & 0xFF;
-    int b = id & 0xFF;
-    int a = (id >> 24) & 0xFF;
-    fragColor = vec4(float(r) / 255.0, float(g) / 255.0, float(b) / 255.0, float(a) / 255.0);
-}
-`;
-
-// Flat mode: a plain mesh (grid panel, button) projected normally, every fragment
-// emitting one constant ID. Covers the whole surface — the grid-level pickable.
-const PICKING_VERTEX_FLAT = `
-precision highp float;
-void main() {
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-}
-`;
-
-const PICKING_FRAGMENT_FLAT = `
-precision highp float;
-precision highp int;
-uniform int uPickId;
-out vec4 fragColor;
-void main() {
-    int id = uPickId;
-    int r = (id >> 16) & 0xFF;
-    int g = (id >> 8) & 0xFF;
-    int b = id & 0xFF;
-    int a = (id >> 24) & 0xFF;
-    fragColor = vec4(float(r) / 255.0, float(g) / 255.0, float(b) / 255.0, float(a) / 255.0);
-}
-`;
-
-// ---------------------------------------------------------------------------
-
 export class PickingSystem {
     /**
-     * @param {THREE.WebGLRenderer|THREE.WebGPURenderer} threeRenderer
+     * @param {THREE.WebGPURenderer} threeRenderer
      * @param {Object} [options]
      * @param {number} [options.resolutionScale=1.0]
-     * @param {'cell'|'glyph'} [options.mode='cell'] - glyph-channel hit shape:
-     *   'cell' picks the full glyph quad, 'glyph' alpha-tests against the atlas so
-     *   only rendered strokes pick.
      */
     constructor(threeRenderer, options = {}) {
+        if (threeRenderer?.isWebGPURenderer !== true) {
+            throw new Error('[PickingSystem] requires a WebGPURenderer — the ID pass is TSL NodeMaterials only');
+        }
         this._renderer = threeRenderer;
         this._scale = options.resolutionScale ?? 1.0;
-        this._mode = options.mode ?? 'cell';
 
-        // Detect WebGPU renderer — ShaderMaterial doesn't work there.
-        this._isWebGPU = threeRenderer.isWebGPURenderer === true;
-
-        // The shared WebGPU pick materials (one TSL build each, per-object IDs).
+        // The shared pick materials (one TSL build each, per-object IDs).
         this._sharedGlyphPickMaterial = null;
         this._sharedGlyphPickMaterialByte = null;
         this._sharedFlatPickMaterial  = null;
-
-        // Eagerly start loading TSL if on WebGPU (async, resolves from module
-        // cache when GlyphField has already been imported by the caller).
-        this._tslReady = this._isWebGPU ? _loadTSL() : Promise.resolve();
 
         // Channels: name -> { layer, kind, entries: [{ mesh, material, startId, endId, token }] }
         this._channels = new Map();
@@ -337,9 +79,8 @@ export class PickingSystem {
             this.defineChannel(name, def);
         }
 
-        // Picking target and readback buffer
+        // Picking target
         this._target = null;
-        this._readBuffer = new Uint8Array(4);
         this._sizeVec = new THREE.Vector2(); // reusable for getSize()
 
         // Mouse position in target-pixel coordinates
@@ -386,21 +127,6 @@ export class PickingSystem {
     // Target management
     // -------------------------------------------------------------------------
 
-    /**
-     * Recreate the offscreen render target after a WebGL context restore.
-     * Call this from the renderer's contextrestored handler.
-     */
-    onContextRestored() {
-        if (this._target) {
-            this._target.dispose();
-            this._target = null;
-        }
-        this._createTarget();
-        // Invalidate so the next frame forces a fresh read.
-        this._needsPick = true;
-        this._lastResult.clear();
-    }
-
     /** @private */
     _createTarget() {
         // Match the main canvas drawing buffer dimensions (CSS size × DPR)
@@ -412,9 +138,7 @@ export class PickingSystem {
         const w = Math.max(1, Math.floor(size.x * dpr * this._scale));
         const h = Math.max(1, Math.floor(size.y * dpr * this._scale));
         if (this._target) this._target.dispose();
-        // THREE.RenderTarget works for both WebGL and WebGPU (WebGLRenderTarget
-        // is a subclass alias that also works with WebGPURenderer in r183).
-        this._target = new THREE.WebGLRenderTarget(w, h, {
+        this._target = new THREE.RenderTarget(w, h, {
             minFilter: THREE.NearestFilter,
             magFilter: THREE.NearestFilter,
             type: THREE.UnsignedByteType
@@ -460,8 +184,8 @@ export class PickingSystem {
     // -------------------------------------------------------------------------
 
     /**
-     * WebGPU 'glyph' material: TSL NodeMaterial mirroring GlyphField's vertex
-     * (instanced group-DataTexture worldPos), emitting ID = base + instanceIndex.
+     * The 'glyph' pick material: a TSL NodeMaterial mirroring GlyphField's vertex
+     * (instanced group-texture worldPos), emitting ID = base + instanceIndex.
      *
      * SHARED across every registered field — one TSL build total (a build per mesh
      * made the FIRST pick pass pay ~269 graph builds at once). Per-mesh state
@@ -471,13 +195,13 @@ export class PickingSystem {
      * collide, which the channel design never does).
      * @private
      */
-    _getTSLGlyphMaterial(byteMode = false) {
+    _getGlyphPickMaterial(byteMode = false) {
         const cacheKey = byteMode ? '_sharedGlyphPickMaterialByte' : '_sharedGlyphPickMaterial';
         if (this[cacheKey]) return this[cacheKey];
 
         // Per-object nodes the shared vertex transform reads — each resolves at draw
         // from the mesh's userData.glyphField (mirrors GlyphField's _fieldTexture /
-        // _fieldUniform). Picking now binds the SAME inputs the render material does,
+        // _fieldUniform). Picking binds the SAME inputs the render material does,
         // so a non-unit group scale, width compress, emoji square quad, and the clip
         // window all match the glyph the user sees — the drift this builder exists to kill.
         const floatPh = new THREE.DataTexture(new Float32Array(4), 1, 1, THREE.RGBAFormat, THREE.FloatType);
@@ -487,9 +211,9 @@ export class PickingSystem {
         uintPh.minFilter = uintPh.magFilter = THREE.NearestFilter;
         uintPh.generateMipmaps = false; uintPh.needsUpdate = true;
 
-        const fTex = (prop, ph) => _texture(ph).onObjectUpdate(({ object }, self) =>
+        const fTex = (prop, ph) => texture(ph).onObjectUpdate(({ object }, self) =>
             (object && object.userData.glyphField && object.userData.glyphField[prop]) || self.value);
-        const fUni = (prop, init) => _uniform(init).onObjectUpdate(({ object }, self) =>
+        const fUni = (prop, init) => uniform(init).onObjectUpdate(({ object }, self) =>
             (object && object.userData.glyphField) ? (object.userData.glyphField[prop] ?? init) : self.value);
 
         const groupTex      = fTex('_groupTexture', floatPh);
@@ -504,37 +228,37 @@ export class PickingSystem {
         // instance index == arena slot).
         let byteSlots = null;
         if (byteMode) {
-            const placeholder = new _StorageInstancedBufferAttribute(new Float32Array(4), 1);
-            byteSlots = _registerByteSlotsNode(_storage(placeholder, 'float', 1).toReadOnly().onObjectUpdate(({ object }, self) =>
+            const placeholder = new StorageInstancedBufferAttribute(new Float32Array(4), 1);
+            byteSlots = registerByteSlotsNode(storage(placeholder, 'float', 1).toReadOnly().onObjectUpdate(({ object }, self) =>
                 (object && object.userData.glyphField && object.userData.glyphField._byteSlots) || self.value));
         }
 
         // Per-mesh ID-block start (read straight off userData — set by register()).
-        const baseId = _uniform(0).onObjectUpdate(({ object }, self) =>
+        const baseId = uniform(0).onObjectUpdate(({ object }, self) =>
             (object && object.userData.pickStartId != null) ? object.userData.pickStartId : self.value);
 
-        const vertexFn = _Fn(() => {
+        const vertexFn = Fn(() => {
             // The ONE transform graph — shared with the render material via
             // core/glyphVertex. The instance attributes (instancePosition/Size/
             // GlyphId/GroupId) are declared inside it by name and bind to this mesh.
-            const { clipPos } = _buildGlyphVertexTransform({
+            const { clipPos } = buildGlyphVertexTransform({
                 glyphMapTex, glyphMapWidth, renderMode, groupTex,
                 byteSlots,
             });
             return clipPos;
         });
 
-        const fragmentFn = _Fn(() => {
+        const fragmentFn = Fn(() => {
             // int-cast the (float) per-object uniform so the bit ops stay exact.
-            const id = _int(baseId).add(_int(_instanceIndex));
+            const id = int(baseId).add(int(instanceIndex));
             const r  = id.shiftRight(16).bitAnd(0xFF);
             const g  = id.shiftRight(8).bitAnd(0xFF);
             const b  = id.bitAnd(0xFF);
             const a  = id.shiftRight(24).bitAnd(0xFF);
-            return _vec4(_float(r).div(255.0), _float(g).div(255.0), _float(b).div(255.0), _float(a).div(255.0));
+            return vec4(float(r).div(255.0), float(g).div(255.0), float(b).div(255.0), float(a).div(255.0));
         });
 
-        const mat = new _MeshBasicNodeMaterial();
+        const mat = new MeshBasicNodeMaterial();
         mat.vertexNode = vertexFn();
         mat.outputNode = fragmentFn();
         mat.side = THREE.DoubleSide;
@@ -544,81 +268,39 @@ export class PickingSystem {
         // pixel — picking the wrong (back) grid.
         mat.depthWrite = true;
 
-        if (byteMode) _registerByteSlotsMaterial(mat);
+        if (byteMode) registerByteSlotsMaterial(mat);
         this[cacheKey] = mat;
         return mat;
     }
 
     /**
-     * WebGPU 'flat' material: a plain mesh (grid panel / button) projected
+     * The 'flat' pick material: a plain mesh (grid panel / button) projected
      * normally, every fragment emitting one constant ID. The default NodeMaterial
      * vertex handles projection from the mesh's own world matrix.
      *
      * SHARED across every flat pickable — the ID rides mesh.userData.pickStartId.
      * @private
      */
-    _getTSLFlatMaterial() {
+    _getFlatPickMaterial() {
         if (this._sharedFlatPickMaterial) return this._sharedFlatPickMaterial;
 
-        const baseId = _uniform(0).onObjectUpdate(({ object }, self) =>
+        const baseId = uniform(0).onObjectUpdate(({ object }, self) =>
             (object && object.userData.pickStartId != null) ? object.userData.pickStartId : self.value);
-        const fragmentFn = _Fn(() => {
-            const id = _int(baseId);
+        const fragmentFn = Fn(() => {
+            const id = int(baseId);
             const r = id.shiftRight(16).bitAnd(0xFF);
             const g = id.shiftRight(8).bitAnd(0xFF);
             const b = id.bitAnd(0xFF);
             const a = id.shiftRight(24).bitAnd(0xFF);
-            return _vec4(_float(r).div(255.0), _float(g).div(255.0), _float(b).div(255.0), _float(a).div(255.0));
+            return vec4(float(r).div(255.0), float(g).div(255.0), float(b).div(255.0), float(a).div(255.0));
         });
-        const mat = new _MeshBasicNodeMaterial();
+        const mat = new MeshBasicNodeMaterial();
         mat.outputNode = fragmentFn();
         mat.side = THREE.DoubleSide;
         mat.depthWrite = true; // nearest panel wins in an overlap (front grid)
 
         this._sharedFlatPickMaterial = mat;
         return mat;
-    }
-
-    /**
-     * WebGL 'glyph' material: classic ShaderMaterial (cell or Slug-winding mode).
-     * @private
-     */
-    _createGLSLGlyphMaterial(glyphRenderer, mesh, startId) {
-        const uniforms = {
-            groupTexture:       { value: glyphRenderer._groupTexture },
-            groupTextureHeight: { value: glyphRenderer._maxGroups },
-            uBasePickingId:     { value: startId },
-        };
-        let vertexShader, fragmentShader;
-        if (this._mode === 'glyph') {
-            const mainUniforms = mesh.material.uniforms;
-            uniforms.curveTexture    = mainUniforms.curveTexture;
-            uniforms.glyphMapTexture = mainUniforms.glyphMapTexture;
-            uniforms.glyphMapWidth   = mainUniforms.glyphMapWidth;
-            uniforms.glyphMapHeight  = mainUniforms.glyphMapHeight;
-            vertexShader   = PICKING_VERTEX_GLYPH;
-            fragmentShader = PICKING_FRAGMENT_GLYPH;
-        } else {
-            vertexShader   = PICKING_VERTEX_CELL;
-            fragmentShader = PICKING_FRAGMENT_CELL;
-        }
-        return new THREE.ShaderMaterial({
-            glslVersion: THREE.GLSL3, uniforms, vertexShader, fragmentShader, side: THREE.DoubleSide,
-        });
-    }
-
-    /**
-     * WebGL 'flat' material: solid-quad ShaderMaterial emitting one constant ID.
-     * @private
-     */
-    _createGLSLFlatMaterial(id) {
-        return new THREE.ShaderMaterial({
-            glslVersion: THREE.GLSL3,
-            uniforms: { uPickId: { value: id } },
-            vertexShader: PICKING_VERTEX_FLAT,
-            fragmentShader: PICKING_FRAGMENT_FLAT,
-            side: THREE.DoubleSide,
-        });
     }
 
     // -------------------------------------------------------------------------
@@ -646,8 +328,8 @@ export class PickingSystem {
      *   opts.material — an instanced flat pickable (the panel field) spans a block.
      * @param {THREE.Material} [opts.material] - a caller-built ID material (its
      *   vertex transform shared with the caller's render material — the no-drift
-     *   law). The block start still lands on mesh.userData.pickStartId. WebGPU
-     *   NodeMaterials only; never disposed by unregister (caller-owned).
+     *   law). The block start still lands on mesh.userData.pickStartId. Never
+     *   disposed by unregister (caller-owned).
      * @returns {number} the startId assigned (0 if nothing to register)
      */
     register(channelName, target, token, opts) {
@@ -688,26 +370,12 @@ export class PickingSystem {
             }
         }
 
-        let material;
-        if (opts?.material) {
-            // Bring-your-own ID material (instanced flat pickables). The shared
-            // per-object pattern still applies: the block start rides userData.
-            mesh.userData.pickStartId = startId;
-            material = opts.material;
-        } else if (this._isWebGPU) {
-            if (!_tslLoaded) {
-                throw new Error('[PickingSystem] TSL not loaded. Await pickingSystem._tslReady before register() on WebGPU.');
-            }
-            // Shared pick materials read the ID block per object from here.
-            mesh.userData.pickStartId = startId;
-            material = ch.kind === 'glyph'
-                ? this._getTSLGlyphMaterial(!!mesh.userData.glyphField?._bytePipeline)
-                : this._getTSLFlatMaterial();
-        } else {
-            material = ch.kind === 'glyph'
-                ? this._createGLSLGlyphMaterial(target, mesh, startId)
-                : this._createGLSLFlatMaterial(startId);
-        }
+        // Shared pick materials read the ID block per object from here; a
+        // caller-built material (opts.material) follows the same contract.
+        mesh.userData.pickStartId = startId;
+        const material = opts?.material ?? (ch.kind === 'glyph'
+            ? this._getGlyphPickMaterial(!!mesh.userData.glyphField?._bytePipeline)
+            : this._getFlatPickMaterial());
 
         // Enable the channel's layer so its isolated pass renders this mesh (it
         // stays on layer 0 too, so the main pass is unaffected). Paired with
@@ -719,7 +387,8 @@ export class PickingSystem {
     }
 
     /**
-     * Remove a pickable from a channel.
+     * Remove a pickable from a channel. Materials are shared (or caller-owned)
+     * and survive the entry.
      * @param {string} channelName
      * @param {*} target - the same renderer ('glyph') or mesh ('flat') passed to register
      */
@@ -731,10 +400,6 @@ export class PickingSystem {
         if (idx === -1) return;
         const entry = ch.entries[idx];
         entry.mesh?.layers.disable(ch.layer);
-        // WebGPU pick materials are SHARED and caller-supplied ones are
-        // caller-OWNED (never disposed per entry); the WebGL path still builds
-        // one per mesh.
-        if (!this._isWebGPU && !entry.callerOwned) entry.material.dispose();
         ch.entries.splice(idx, 1);
     }
 
@@ -801,6 +466,7 @@ export class PickingSystem {
 
     /**
      * Read the pixel at the current mouse position from the picking target.
+     * Async GPU readback — Y=0 is top (same as CSS), no flip.
      * @private
      * @returns {Promise<Uint8Array>} Four-byte RGBA pixel, or all-zeros if out of bounds.
      */
@@ -808,16 +474,9 @@ export class PickingSystem {
         const { x, y } = this._mousePixel;
         const pixel = new Uint8Array(4);
         if (this._target && x >= 0 && y >= 0 && x < this._target.width && y < this._target.height) {
-            if (this._isWebGPU && this._renderer.readRenderTargetPixelsAsync) {
-                // WebGPU: async readback — Y=0 is top (same as CSS), no flip needed.
-                const buf = await this._renderer.readRenderTargetPixelsAsync(this._target, x, y, 1, 1);
-                const view = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
-                pixel.set(view.subarray(0, 4));
-            } else {
-                // WebGL: synchronous readback (Y flipped).
-                this._renderer.readRenderTargetPixels(this._target, x, this._target.height - 1 - y, 1, 1, this._readBuffer);
-                pixel.set(this._readBuffer);
-            }
+            const buf = await this._renderer.readRenderTargetPixelsAsync(this._target, x, y, 1, 1);
+            const view = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+            pixel.set(view.subarray(0, 4));
         }
         if (t0 !== undefined) {
             const tRead = performance.now();
@@ -935,9 +594,17 @@ export class PickingSystem {
 
     dispose() {
         for (const ch of this._channels.values()) {
-            for (const entry of ch.entries) entry.material.dispose();
+            for (const entry of ch.entries) entry.mesh?.layers.disable(ch.layer);
             ch.entries = [];
         }
+        // The shared pick materials are system-owned; caller-owned materials
+        // (opts.material) are never touched.
+        this._sharedGlyphPickMaterial?.dispose();
+        this._sharedGlyphPickMaterialByte?.dispose();
+        this._sharedFlatPickMaterial?.dispose();
+        this._sharedGlyphPickMaterial = null;
+        this._sharedGlyphPickMaterialByte = null;
+        this._sharedFlatPickMaterial = null;
         if (this._target) {
             this._target.dispose();
             this._target = null;

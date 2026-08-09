@@ -123,7 +123,7 @@ export class SelectionManager {
      *
      * @param {number} clientX - Mouse clientX from the click event
      * @param {number} clientY - Mouse clientY from the click event
-     * @param {HTMLCanvasElement} canvas - The WebGL canvas
+     * @param {HTMLCanvasElement} canvas - The renderer canvas
      * @param {THREE.Camera} camera
      * @param {Array} grids - Current CodeGrid array
      * @param {boolean} additive - True when Cmd/Ctrl held

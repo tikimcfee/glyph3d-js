@@ -870,10 +870,8 @@ export default class AgentBooks {
         this.ctx.registry?.register?.(lane.groupId, lane.book, { type: 'book', role: 'agent' });
         const ps = this.ctx.pickingSystem;
         if (!ps) return;
-        Promise.resolve(ps._tslReady).then(() => {
-            try { if (lane.book.cover) ps.register('group', lane.book.cover.mesh, lane.book); }
-            catch (e) { console.warn('[AgentBooks] group pick register failed', e); }
-        });
+        try { if (lane.book.cover) ps.register('group', lane.book.cover.mesh, lane.book); }
+        catch (e) { console.warn('[AgentBooks] group pick register failed', e); }
     }
 
     /** The cfg-derived cover styling for a lane's book — Book owns the cover itself

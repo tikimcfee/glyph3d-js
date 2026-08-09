@@ -329,8 +329,8 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
 
     // GPU glyph picking — one ID-pass system bound to the WebGPU renderer. Canvas
     // hover/click resolves through it (CanvasPicker wires each grid/terminal in
-    // via setPickingSystem). 'cell' mode: the whole glyph quad is pickable.
-    const pickingSystem = new PickingSystem(gl, { mode: 'cell' });
+    // via setPickingSystem).
+    const pickingSystem = new PickingSystem(gl);
     state.ctx.pickingSystem = pickingSystem;
 
     // The world layout — the top-level spatial system. The major groupings (file tree, agent-trail
@@ -401,9 +401,7 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
         try { state.registry.register?.(id, vol, { type: 'book', role: 'volume', path }); } catch (_e) { /* best effort */ }
         const mesh = vol.cover?.mesh ?? null;
         if (ps && mesh) {
-          Promise.resolve(ps._tslReady).then(() => {
-            try { ps.register('group', mesh, vol); } catch (_e) { /* best effort */ }
-          });
+          try { ps.register('group', mesh, vol); } catch (_e) { /* best effort */ }
         }
         // Per-sheet edge tabs — one per file, banded up the cover by first letter,
         // each riding its sheet's deck slot (the thumb-index stagger). Render-only

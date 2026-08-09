@@ -15,7 +15,7 @@ export class SceneContext {
      * @param {Object} refs.THREE - Three.js module
      * @param {THREE.Scene} refs.scene
      * @param {THREE.PerspectiveCamera} refs.camera
-     * @param {THREE.WebGLRenderer} refs.renderer
+     * @param {THREE.WebGPURenderer} refs.renderer
      * @param {HTMLCanvasElement} refs.canvas
      * @param {GlyphAtlas} refs.atlas
      * @param {Function} refs.getGrids - () => CodeGrid[], returns live grids array
