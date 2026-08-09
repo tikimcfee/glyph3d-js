@@ -14,13 +14,22 @@
  * behind, not your change.
  */
 
+import { chromium } from 'playwright';
 import { launchBrowser, openApp } from './itest/driver.mjs';
 
 const URL = process.env.ANATOMY_URL || 'http://localhost:5173/';
 const DIR = process.env.ANATOMY_DIR || null;
 const CLEAN = process.env.ANATOMY_CLEAN === '1';
+const UNCAPPED = process.env.ANATOMY_UNCAPPED === '1';
 
-const browser = await launchBrowser({});
+// Uncapped: no vsync ceiling — the only way to see a floor below 16.6ms.
+const browser = UNCAPPED
+    ? await chromium.launch({ headless: true, args: [
+        '--enable-unsafe-webgpu', '--enable-features=Vulkan', '--ignore-gpu-blocklist',
+        '--use-angle=vulkan', '--use-gl=angle',
+        '--disable-gpu-vsync', '--disable-frame-rate-limit',
+    ] })
+    : await launchBrowser({});
 try {
     let app;
     if (CLEAN) {
@@ -42,6 +51,12 @@ try {
         const gl = c.ctx.renderer ?? c.ctx.sceneContext?.renderer ?? c.ctx.gl;
         const scene = c.ctx.scene ?? c.ctx.sceneContext?.scene;
 
+        // GPU timestamps (armed for this run only — the pool overflows if armed
+        // and never resolved). backend.trackTimestamp is a plain per-pass gate.
+        const tsOK = gl.backend?.hasFeature?.('timestamp-query') === true;
+        if (tsOK) gl.backend.trackTimestamp = true;
+        let gpuRenderMs = 0, gpuComputeMs = 0, gpuResolves = 0;
+
         // Per-render-call attribution over ~1s (wrap render, read info deltas).
         const calls = [];
         const orig = gl.render.bind(gl);
@@ -51,14 +66,27 @@ try {
             calls.push({ tris: gl.info.render.triangles - t0, calls: gl.info.render.drawCalls - c0 });
             return r;
         };
-        // FPS percentiles over 3s (concurrent with the wrap).
+        // FPS percentiles over 3s (concurrent with the wrap), with GPU-time
+        // resolves every ~250ms (each resolve returns the summed pass ms since
+        // the last — divide by frames for per-frame GPU cost).
         const gaps = [];
         let last = performance.now(), on = true;
         const tick = () => { const n = performance.now(); gaps.push(n - last); last = n; if (on) requestAnimationFrame(tick); };
         requestAnimationFrame(tick);
-        await new Promise(r => setTimeout(r, 3000));
+        const tEnd = performance.now() + 3000;
+        while (performance.now() < tEnd) {
+            await new Promise(r => setTimeout(r, 250));
+            if (tsOK) {
+                await gl.resolveTimestampsAsync('render');
+                await gl.resolveTimestampsAsync('compute').catch(() => {});
+                gpuRenderMs += gl.info.render.timestamp || 0;
+                gpuComputeMs += gl.info.compute?.timestamp || 0;
+                gpuResolves++;
+            }
+        }
         on = false;
         gl.render = orig;
+        if (tsOK) gl.backend.trackTimestamp = false;
         gaps.sort((a, b) => a - b);
 
         // Group identical per-frame pass shapes (main pass, minimap pass, ...).
@@ -102,6 +130,10 @@ try {
                 p95: +gaps[(gaps.length * 0.95) | 0].toFixed(1),
                 worst: +gaps[gaps.length - 1].toFixed(1),
             },
+            gpu: tsOK ? {
+                renderMsPerFrame: +(gpuRenderMs / Math.max(1, gaps.length)).toFixed(2),
+                computeMsPerFrame: +(gpuComputeMs / Math.max(1, gaps.length)).toFixed(2),
+            } : 'timestamp-query unavailable',
             passes: [...shape.values()].map(e => ({ perFrame: e.calls, tris: e.tris, frames: e.n })),
             objects, meshes,
             topMeshFamilies: Object.entries(fam).sort((a, b) => b[1] - a[1]).slice(0, 8),
