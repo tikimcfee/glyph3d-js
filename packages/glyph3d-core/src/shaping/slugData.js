@@ -21,8 +21,14 @@ import {
  * On-the-wire format version for {@link SlugBuffer#serialize}. Bump on ANY layout
  * change to the descriptor (field add/remove, packing change) — the cache layer
  * folds this into its key so a stale blob misses → falls back to live encode.
+ *
+ * v2 (2026-08-08): bitmap (emoji) slots now carry map entries (mode 1 + cell) from
+ * RUNTIME sightings too, and a stale hydrated entry suppresses exactly the encode
+ * that would teach the pipeline's trie the codepoint (the stuck-invisible-emoji
+ * hole). Pre-v2 descriptors hit that hole on the glyphs they already encoded —
+ * invalidate them so every boot re-derives a consistent core.
  */
-export const SLUG_BUFFER_FORMAT = 1;
+export const SLUG_BUFFER_FORMAT = 2;
 
 /**
  * SlugBuffer — growable backing for the two Slug textures (RGBA32Uint, 4 channels/texel).
@@ -93,6 +99,36 @@ export class SlugBuffer {
             );
         }
         return { added, addedIds };
+    }
+
+    /**
+     * Write glyph-MAP entries for BITMAP (color-emoji) slots: [0, 0, mode 1, emojiCell].
+     * No curves exist — the bitmap branch samples the emoji atlas instead — so this is
+     * a map-only append. The outline append path never receives these slots
+     * (LiveSlugAtlas partitions them out), and without an entry a runtime-sighted emoji
+     * has an all-zero texel: mode 0, curveCount 0 → the slug branch discards it as an
+     * empty glyph and the emoji is INVISIBLE. Skips non-bitmap slots (the outline path
+     * owns them) and anything already encoded.
+     * @param {Object} shaper - FontChain-compatible (isBitmapSlot, emojiCellOf)
+     * @param {Iterable<number>} slots
+     * @returns {{ added: number, addedIds: number[] }}
+     */
+    addBitmapSlots(shaper, slots) {
+        const addedIds = [];
+        for (const slot of slots) {
+            if (slot <= 0 || this._encoded.has(slot)) continue;
+            if (typeof shaper.isBitmapSlot !== 'function' || !shaper.isBitmapSlot(slot)) continue;
+            this._growMap(slot);
+            const gm = slot * 4;
+            this._map[gm + 0] = 0;
+            this._map[gm + 1] = 0;
+            this._map[gm + 2] = 1;   // mode 1 = color-emoji bitmap
+            this._map[gm + 3] = shaper.emojiCellOf(slot);
+            if (slot > this._maxGlyphId) this._maxGlyphId = slot;
+            this._encoded.add(slot);
+            addedIds.push(slot);
+        }
+        return { added: addedIds.length, addedIds };
     }
 
     /** @private Pack one glyph's curves at the cursor + write its glyph-map entry. */

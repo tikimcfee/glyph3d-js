@@ -1274,7 +1274,10 @@ export default class TerminalGrid extends FramedGlyphField {
         for (let i = 0; i < count; i++) {
             cpArr[i] = this._glyphId(this._codepoints[i]);
 
-            const c = i * 3;
+            // STRIDE-4: instanceColor is a storage-class vec4 lane now (the far
+            // kernel's compute view; the 4th float is padding) — same contract as
+            // applyPrebuiltBuffers' padded array.
+            const c = i * 4;
             colorArr[c]     = this._cellR[i];
             colorArr[c + 1] = this._cellG[i];
             colorArr[c + 2] = this._cellB[i];

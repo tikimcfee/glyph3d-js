@@ -118,15 +118,23 @@ export default class LiveSlugAtlas {
         }
         if (emojiSlots.length) this._refreshEmojiTextures(emojiSlots, provenance);
 
+        // Bitmap slots ALSO need their glyph-MAP entries (mode 1 + cell): without one
+        // the texel is all-zero — mode 0, curveCount 0 — and the slug branch discards
+        // the glyph as empty (the invisible-emoji bug). Map-only append; the outline
+        // append below rebuilds the full map from the same accumulator when IT grows.
+        const bitmapRes = emojiSlots.length ? this._encoder.appendBitmapSlots(emojiSlots) : null;
+
         // The encoder skips .notdef + already-encoded internally and APPENDS only the new glyphs
         // (each extracted exactly once — no full re-encode). It returns the rebuilt textures and
         // whether anything grew.
         const t0 = performance.now();
         const res = this._encoder.appendGlyphs(outlineIds);
-        if (!res.grew) return { grew: false, added: 0, total: this._encoder.size };
+        if (!res.grew && !bitmapRes?.grew) return { grew: false, added: 0, total: this._encoder.size };
 
         const prev = this._slugData;   // orphaned by the swap — disposed after it lands
-        this._slugData = res;            // { curveTexture, glyphMapTexture, stats }
+        this._slugData = res.grew
+            ? res            // full rebuild — includes the bitmap entries from the accumulator
+            : { ...this._slugData, glyphMapTexture: bitmapRes.glyphMapTexture };
         this._version++;
         if (this._atlas) this._atlas._slugData = this._slugData;
 
@@ -145,9 +153,13 @@ export default class LiveSlugAtlas {
         // one). The old pair's GPUTextures only die on texture.dispose() — without
         // this, each growth leaks a pair until page unload (VRAM pressure on the
         // bulk-load path: 7 growths in 2s preceded the 2026-08-04 device OOM).
-        if (prev && prev.curveTexture && prev.curveTexture !== res.curveTexture) {
-            prev.curveTexture.dispose();
-            prev.glyphMapTexture?.dispose();
+        if (prev) {
+            if (res.grew && prev.curveTexture && prev.curveTexture !== this._slugData.curveTexture) {
+                prev.curveTexture.dispose();
+            }
+            if (prev.glyphMapTexture && prev.glyphMapTexture !== this._slugData.glyphMapTexture) {
+                prev.glyphMapTexture.dispose();
+            }
         }
 
         // Name the new glyphs WITH their source so a growth is readable (and bakeable):

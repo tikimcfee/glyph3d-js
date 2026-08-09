@@ -80,6 +80,31 @@ export default class SlugEncoder {
     }
 
     /**
+     * Map-only append for BITMAP (color-emoji) slots: writes their [0, 0, 1, cell]
+     * glyph-map entries (see SlugBuffer.addBitmapSlots — runtime-sighted emoji are
+     * invisible without one) and rebuilds ONLY the glyph-map texture. The curve
+     * texture is untouched (bitmap slots have no curves). A later outline
+     * appendGlyphs rebuilds the full map from the same accumulator, so these
+     * entries persist through outline growths.
+     * @param {Iterable<number>} slots
+     * @returns {{ curveTexture, glyphMapTexture, stats, added: number, addedIds: number[], grew: boolean }}
+     */
+    appendBitmapSlots(slots) {
+        const { added, addedIds } = this._buffer.addBitmapSlots(this._shaper, slots);
+        if (added === 0) {
+            return { ...(this._lastTextures || this._buildTextures()), added: 0, addedIds: [], grew: false };
+        }
+        const g = this._buffer.glyphMapTexture();
+        const glyphMapTexture = this._createSlugTexture(g.data, g.width, g.height);
+        const out = {
+            ...(this._lastTextures || this._buildTextures()),
+            glyphMapTexture, added, addedIds, grew: true,
+        };
+        this._lastTextures = out;
+        return out;
+    }
+
+    /**
      * Hydrate from a serialized descriptor (SKIP the encode) and build textures.
      * Symmetric with {@link encode}: replaces the buffer, returns the same
      * { curveTexture, glyphMapTexture, stats }. The buffer stays live (it can still

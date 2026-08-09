@@ -82,6 +82,18 @@ after editing core, `make dev-status` to check.
   bun tools/arena-compaction-check.mjs [--url http://localhost:5273/]
   ```
 
+- **`far-texels-check.mjs`** — the far-texture (minified text-mass LOD) gate: the
+  farScatter/farNormalize kernels (`glyphPipelineKernels.js`) vs their CPU oracles
+  (`farScatterOracle`/`farNormalizeOracle` in `compute/glyphPipelineReference.js`)
+  on a real dispatch — scatter accumulator (bit-exact expected), packed RGBA8 per
+  slab texel, the accumulator's self-cleaning reset, item isolation, and
+  content-truth teeth (a painted color run must survive into the slab). Harness
+  shape mirrors `layout-kernel-check.mjs` (client-only boot, live trie, second
+  offscreen renderer).
+  ```
+  bun tools/far-texels-check.mjs
+  ```
+
 ## Integration tests
 
 As panels and startup push command-bus verbs and mutate state, that's headless-browser

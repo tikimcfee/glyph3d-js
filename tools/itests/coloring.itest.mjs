@@ -8,8 +8,9 @@ const GRID = `const c=window.__glyphClient;const gs=c.ctx.getGrids?c.ctx.getGrid
 
 // Distinct instanceColor RGBs (the 3D render target). The renderer is a mega-field
 // VIEW: the shared instanceColor attribute is addressed by ABSOLUTE arena slot, so
-// the probe reads the view's [slotBase, slotBase+count) range.
-const INSPECT = `(()=>{${GRID}if(!g)return{err:"no grid"};const r=g.getRenderer&&g.getRenderer();const attr=r&&r.mega&&r.mega.field.instanceMesh.geometry.attributes.instanceColor;if(!attr)return{err:"no instanceColor"};const a=attr.array;const base=r.slotBase;const n=r.getGlyphCount();const m=new Map();for(let i=base;i<base+n;i++){const k=a[i*3].toFixed(2)+","+a[i*3+1].toFixed(2)+","+a[i*3+2].toFixed(2);m.set(k,1);}return{distinct:m.size,colors:[...m.keys()]};})()`;
+// the probe reads the view's [slotBase, slotBase+count) range. STRIDE-4: the lane is
+// a storage-class vec4 (the far-scatter kernel binds it as a compute view).
+const INSPECT = `(()=>{${GRID}if(!g)return{err:"no grid"};const r=g.getRenderer&&g.getRenderer();const attr=r&&r.mega&&r.mega.field.instanceMesh.geometry.attributes.instanceColor;if(!attr)return{err:"no instanceColor"};const a=attr.array;const base=r.slotBase;const n=r.getGlyphCount();const m=new Map();for(let i=base;i<base+n;i++){const k=a[i*4].toFixed(2)+","+a[i*4+1].toFixed(2)+","+a[i*4+2].toFixed(2);m.set(k,1);}return{distinct:m.size,colors:[...m.keys()]};})()`;
 
 // The render-neutral highlight product a 2D companion view will consume (one parse, reused).
 const HILITE = `(()=>{${GRID}if(!g||!g.getHighlights)return{err:"no getHighlights"};const h=g.getHighlights();if(!h)return{err:"no highlights"};const caps=h.captures||[];const c0=caps[0];return{count:caps.length,lang:h.lang,hasOffsets:!!c0&&Number.isInteger(c0.startIndex)&&Number.isInteger(c0.endIndex)};})()`;

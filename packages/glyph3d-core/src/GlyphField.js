@@ -53,6 +53,7 @@ const MAX_CURVES = 256;
 import { PERF_THRESHOLDS } from './core/constants.js';
 import { computeCellMetrics } from './core/cellMetrics.js';
 import { RENDER_MODE, buildGlyphVertexTransform, registerByteSlotsNode, registerByteSlotsMaterial, rebindByteSlots } from './core/glyphVertex.js';
+import { FAR_TEX, FAR_SLAB } from './compute/glyphPipelineReference.js';
 
 const MAX_GROUPS_DEFAULT = PERF_THRESHOLDS.defaultMaxGroups ?? 64;
 const MAX_GROUPS_DIM     = 16000;
@@ -70,6 +71,12 @@ const MAX_GROUPS_DIM     = 16000;
  * change in the same breath as this layout.
  */
 export const GROUP_COLS = 5;
+
+/** Far-slab group carrier: a PARALLEL per-group texture (2 RGBA32F cols) so the
+ *  far lanes never touch the pose texture's layout (PickingSystem samples cols
+ *  0-4 of THAT one in lockstep). col 0 = [u0, v0, rowsPerTexel, colsPerTexel],
+ *  col 1 = [hasSlab, …]. Nearest + textureLoad — RGBA32F is not filterable. */
+export const FAR_GROUP_COLS = 2;
 
 /**
  * GLOBAL minification / LOD dials — the exact-curve ↔ stable-block handoff that governs how minified
@@ -90,6 +97,11 @@ export const GROUP_COLS = 5;
  *   lodAxisBias     — 0 = switch on the BEST-resolved axis (today: angled text stays exact longer);
  *                     1 = switch on the WORST axis (engage the block on the foreshortened axis that
  *                     actually flickers). The research-flagged lever for angled-surface flicker.
+ *   farBias         — mip-LOD bias on the FAR TEXTURE sample (the content-derived text-mass
+ *                     that replaces the impostor for slabbed groups). + coarsens (more stable,
+ *                     blurrier), − sharpens. The sample's explicit level comes from the far-UV
+ *                     footprint in uniform flow — never implicit LOD inside a branch (the
+ *                     atlas-map lesson: non-uniform flow clamps to mip 0 → the same moiré).
  */
 export const GLYPH_LOD_DEFAULTS = Object.freeze({
     dilatePx: 0.75, soften: 0.45,
@@ -97,6 +109,7 @@ export const GLYPH_LOD_DEFAULTS = Object.freeze({
     lodLo: 0.30, lodHi: 0.60,
     density: 0.035, maxCov: 0.72,
     lodAxisBias: 0,
+    farBias: 0,
 });
 
 const LOD_UNIFORMS = Object.fromEntries(
@@ -140,7 +153,11 @@ function _buildVertexNode(uniforms) {
     // instanceColor is the one instance attribute the position transform does NOT own
     // (it drives the fragment color blend); declare it here. The position attributes
     // (instancePosition/Size/GlyphId/GroupId) are declared inside the shared transform.
-    const iColor = attribute('instanceColor', 'vec3');
+    // STRIDE-4 (itemSize 4 — a StorageInstancedBufferAttribute, so the far-scatter
+    // kernel can ALSO bind it as a compute-readable storage view; a vec3 storage
+    // attribute would get repacked by three and silently move every writer's lanes).
+    // Read as vec4/.xyz — same precedent as instancePosition (glyphVertex.js).
+    const iColor = attribute('instanceColor', 'vec4');
 
     // Varyings passed to fragment
     const vColor      = varying(vec3(0),  'vColor');
@@ -153,8 +170,12 @@ function _buildVertexNode(uniforms) {
     // Bitmap/emoji branch varyings
     const vMode       = varying(int(0),   'vMode');
     const vEmojiCell  = varying(int(0),   'vEmojiCell');
+    // Far-texture varyings: the glyph's grid (row,col) + the group's slab lanes
+    const vRowCol     = varying(vec2(0),  'vRowCol');
+    const vFarSlab    = varying(vec4(0),  'vFarSlab');      // [u0, v0, rowsPerTexel, colsPerTexel]
+    const vFarMeta    = varying(vec4(0),  'vFarMeta');      // [hasSlab, …]
 
-    const { highlightTex, byteHighlight } = uniforms;
+    const { highlightTex, byteHighlight, farGroupTex } = uniforms;
 
     const vertexFn = Fn(() => {
         // The ONE transform graph — shared with PickingSystem, so the rendered glyph
@@ -171,12 +192,23 @@ function _buildVertexNode(uniforms) {
         vCurveStart.assign(int(t.glyphInfo.x));
         vCurveCount.assign(int(t.glyphInfo.y));
 
+        // Far-texture: the glyph's grid position (the transform's S_ROW/S_COL read;
+        // (0,0) on classic fields, whose far-group texel stays hasSlab=0) and the
+        // group's slab lanes — the fragment builds its far UV from these. RGBA32F
+        // nearest, textureLoad (NOT filterable — the group texture's own caveat).
+        vRowCol.assign(t.iRowCol);
+        if (farGroupTex) {
+            const fGrow = int(t.iGroup);
+            vFarSlab.assign(textureLoad(farGroupTex, ivec2(int(0), fGrow)));
+            vFarMeta.assign(textureLoad(farGroupTex, ivec2(int(1), fGrow)));
+        }
+
         // Blend instanceColor*groupColor (multiply, colorBlend=0) toward pure
         // groupColor (replace, colorBlend=1). Explicit lerp a+(b-a)*t — TSL's
         // .mix() method returned the wrong operand at t=0 here (handed back the
         // group color instead of the multiplied base), washing text to white.
         const colorBlend = t.gScale.w;
-        const baseColor  = iColor.mul(t.gColor.rgb);
+        const baseColor  = iColor.xyz.mul(t.gColor.rgb);
         vColor.assign(baseColor.add(t.gColor.rgb.sub(baseColor).mul(colorBlend)));
         vGroupAlpha.assign(t.gColor.a);
 
@@ -206,7 +238,7 @@ function _buildVertexNode(uniforms) {
         return t.clipPos;
     });
 
-    return { vertexFn, vColor, vGroupAlpha, vAddedColor, vFillAmount, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell };
+    return { vertexFn, vColor, vGroupAlpha, vAddedColor, vFillAmount, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell, vRowCol, vFarSlab, vFarMeta };
 }
 
 /**
@@ -229,8 +261,8 @@ function _buildVertexNode(uniforms) {
  * @param {Object} uniforms - { curveTex, emojiTex, emojiCols }
  */
 function _buildOutputNode(varyings, uniforms) {
-    const { vColor, vGroupAlpha, vAddedColor, vFillAmount, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell } = varyings;
-    const { curveTex, emojiTex, emojiCols, emojiRows, frameTex, frameCols, frameRows } = uniforms;
+    const { vColor, vGroupAlpha, vAddedColor, vFillAmount, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell, vRowCol, vFarSlab, vFarMeta } = varyings;
+    const { curveTex, emojiTex, emojiCols, emojiRows, frameTex, frameCols, frameRows, farTex } = uniforms;
 
     // Minification tuning knobs — now LIVE uniforms (GLYPH_LOD_DEFAULTS / setGlyphLodParam), dialable
     // via app settings. DILATE_PX = half-width, in pixels, of the stroke fattening applied at full
@@ -303,12 +335,38 @@ function _buildOutputNode(varyings, uniforms) {
             outColor.assign(vec4(texel.rgb.pow(vec3(2.2)), texel.a.mul(vGroupAlpha)));
 
         }).Else(() => {
-            // ── Slug bezier-coverage branch (existing path, unchanged) ───────────
+            // ── Slug bezier-coverage branch ─────────────────────────────────────
+            // FAR-TEXTURE SAMPLE — HOISTED to uniform flow, before every branch.
+            // The explicit mip level is derived from the far-UV footprint (fwidth)
+            // and fwidth is only valid in uniform control flow: sampled inside the
+            // fwLod If below, the implicit LOD would clamp to mip 0 and point-sample
+            // the atlas — reproducing the exact moiré this texture exists to kill
+            // (the atlas-map lesson). The texel carries avg LINEAR syntax color in
+            // rgb and avg ink coverage in a (see compute/glyphPipelineReference's
+            // FAR block); slab-less groups (classic fields, atlas exhaustion) read
+            // hasFar=0 and take the impostor fallback below, unchanged.
+            const hasFar = vFarMeta.x.greaterThan(float(0.5));
+            const farRpt = vFarSlab.z.max(float(1e-6));
+            const farCpt = vFarSlab.w.max(float(1e-6));
+            // Slab-local UV of this fragment: the glyph's grid (row, col) + its
+            // sub-cell fraction (the quad's top maps toward the row's start, so the
+            // v fraction runs inverted), texels normalized to [0,1] within the slab.
+            const farLocal = vec2(
+                vRowCol.y.add(vGlyphUV.x).div(farCpt),
+                vRowCol.x.add(float(1).sub(vGlyphUV.y)).div(farRpt),
+            ).div(float(FAR_SLAB)).clamp(vec2(0), vec2(1));
+            const farUV = vFarSlab.xy.add(farLocal.mul(float(FAR_SLAB / FAR_TEX)));
+            const fwFar = fwidth(farUV).mul(float(FAR_TEX));   // atlas texels per pixel
+            const farLod = fwFar.x.max(fwFar.y).max(float(1)).log2().add(LOD_UNIFORMS.farBias);
+            const farTexel = farTex.sample(farUV).level(farLod).toVar('farTexel');
+
             // Empty glyph (space / .notdef = 0 curves) → no ink, so the fast path discards it…
             // EXCEPT when it carries a background FILL (vFillAmount>0): a space inside a highlight
-            // bar must paint its cell, or the bar gaps at every whitespace. So keep empty glyphs
-            // that fill (cov stays 0 → the fill code paints pure fill), discard the rest.
-            Discard(vCurveCount.equal(int(0)).and(vFillAmount.equal(float(0))));
+            // bar must paint its cell, or the bar gaps at every whitespace. And except under a far
+            // slab: the text MASS is continuous there — a discarded space is a hole in the mass,
+            // so zero-curve glyphs survive to sample the far texture (its near-zero coverage still
+            // culls truly empty texels at the outAlpha discard below).
+            Discard(vCurveCount.equal(int(0)).and(vFillAmount.equal(float(0))).and(hasFar.not()));
 
             // Pixel footprint in glyph-UV space, per axis. fwidth is the screen-space
             // derivative magnitude, so AA is resolution-independent.
@@ -370,10 +428,19 @@ function _buildOutputNode(varyings, uniforms) {
             // an entire repo render at once — distant files become cheap colored
             // text-mass, and the exact analytic path returns as the camera approaches.
             // Impostor coverage (cheap, no loop): curve count as an ink-density proxy.
+            // Now the FALLBACK for slab-less groups — a slabbed group's far coverage
+            // comes from the prefiltered texture instead of this content-blind constant.
             const impostorCov = float(vCurveCount).mul(LOD_DENSITY).clamp(0, LOD_MAXCOV);
+            const farCov = hasFar.select(farTexel.a, impostorCov);
+            // The far texel's rgb is LINEAR (the scatter linearizes before averaging) —
+            // re-encode to the authored-sRGB space the downstream composite speaks
+            // (its final pow(2.2) round-trips it back). Fallback: the glyph's own color.
+            const vColorFar = hasFar.select(farTexel.rgb.pow(vec3(0.4545)), vColor);
             const cov = float(0).toVar();
+            const colSel = vColor.toVar('colSel');
             If(fwLod.greaterThan(LOD_HI), () => {
-                cov.assign(impostorCov);   // far: strokes unresolvable → pure impostor, loop skipped
+                cov.assign(farCov);        // far: strokes unresolvable → prefiltered mass
+                colSel.assign(vColorFar);  // …in the mass's average color
             }).Else(() => {
                 const coverage = float(0).toVar();
                 Loop(MAX_CURVES, ({ i }) => {
@@ -394,12 +461,14 @@ function _buildOutputNode(varyings, uniforms) {
                 });
                 // Average the two rays; fills accumulate positive under y-up normalization.
                 const exactCov = coverage.mul(0.5).clamp(0, 1);
-                // Cross-fade exact → impostor across [LOD_LO, LOD_HI] so the quality
+                // Cross-fade exact → far across [LOD_LO, LOD_HI] so the quality
                 // switch has no hard seam (the diagonal line that otherwise sweeps an
                 // angled wall). smoothstep ramp; manual mix to avoid extra imports.
+                // Color rides the same ramp: per-glyph hue → the mass's average hue.
                 const t = fwLod.sub(LOD_LO).div(LOD_HI.sub(LOD_LO)).clamp(0, 1).toVar();
                 t.assign(t.mul(t).mul(float(3).sub(t.mul(2))));
-                cov.assign(exactCov.add(impostorCov.sub(exactCov).mul(t)));
+                cov.assign(exactCov.add(farCov.sub(exactCov).mul(t)));
+                colSel.assign(vColor.add(vColorFar.sub(vColor).mul(t)));
             });
             // Highlight has two modes, carried by the highlight texel's alpha (vFillAmount):
             //   TINT (alpha 0, legacy): an additive glyph tint — vColor·cov + vAddedColor.
@@ -422,7 +491,7 @@ function _buildOutputNode(varyings, uniforms) {
             // i.e. k=(1−cov) so cov=0 is pure fill and cov=1 is pure ink. Explicit lerp — NOT TSL
             // .mix() (it returns the wrong operand at t=0; see the vertex colorBlend note).
             const addK = isFill.select(float(1).sub(cov), float(1));
-            const finalColor = vColor.mul(cov).add(vAddedColor.mul(addK)).clamp(0, 1);
+            const finalColor = colSel.mul(cov).add(vAddedColor.mul(addK)).clamp(0, 1);
             // Glyph colors are authored as display (sRGB) values; decode to linear so
             // the renderer's default sRGB output-encode returns them to the authored
             // value — consistent with the THREE.Color-managed rest of the scene
@@ -670,8 +739,12 @@ function _getSharedFieldMaterial(kind) {
     const frameColsNode    = _fieldUniform(1, (f) => f._frameCols || 1);
     const frameRowsNode    = _fieldUniform(1, (f) => f._frameRows || 1);
     const byteSlotsNode    = isByte ? _fieldSlots() : null;
+    // Far-texture nodes: the sampled slab atlas (filterable, mipped — set by the
+    // mega-field from the arena's FarTextAtlas) and the per-group slab lanes.
+    const farTexNode       = _fieldTexture(_makePlaceholderRGBATexture(), '_farAtlasTexture');
+    const farGroupTexNode  = _fieldTexture(_makePlaceholderFloatTexture(), '_farGroupTexture');
 
-    const { vertexFn, vColor, vGroupAlpha, vAddedColor, vFillAmount, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell } =
+    const { vertexFn, vColor, vGroupAlpha, vAddedColor, vFillAmount, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell, vRowCol, vFarSlab, vFarMeta } =
         _buildVertexNode({
             groupTex:       groupTexNode,
             groupTexHeight: groupTexHNode,
@@ -681,15 +754,17 @@ function _getSharedFieldMaterial(kind) {
             glyphMapWidth:  glyphMapWNode,
             renderMode:     renderModeNode,
             byteSlots:      byteSlotsNode,
+            farGroupTex:    farGroupTexNode,
         });
 
     const outputNode = kind === 'occluder'
         ? _buildOccluderOutputNode({ vColor, vGroupAlpha, vCurveCount })
         : _buildOutputNode(
-            { vColor, vGroupAlpha, vAddedColor, vFillAmount, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell },
+            { vColor, vGroupAlpha, vAddedColor, vFillAmount, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell, vRowCol, vFarSlab, vFarMeta },
             {
                 curveTex: curveTexNode, emojiTex: emojiTexNode, emojiCols: emojiColsNode, emojiRows: emojiRowsNode,
                 frameTex: frameTexNode, frameCols: frameColsNode, frameRows: frameRowsNode,
+                farTex: farTexNode,
             }
         );
 
@@ -789,6 +864,13 @@ export default class GlyphField {
         this._highlightSize     = 0;
         this._highlightTexWidth = 1024;
 
+        // Far-texture state: the SAMPLED slab atlas is external (the arena's
+        // FarTextAtlas, handed to the mega-field — shared across every view);
+        // the per-group slab lanes are this field's own parallel texture.
+        this._farAtlasTexture = null;
+        this._farGroupData    = new Float32Array(this._maxGroups * FAR_GROUP_COLS * 4);
+        this._farGroupTexture = null;   // created in _createInstanceMesh
+
         // Text registry (the shape PickingSystem.resolveGlyph reads)
         this.renderedTexts     = new Map();
         this.nextId            = 1;
@@ -803,9 +885,9 @@ export default class GlyphField {
         // mesh's userData.glyphField points back here; the material's nodes read
         // these fields in onObjectUpdate callbacks — no per-field uniform nodes).
         // (Clip is per-GROUP texel state now — setGroupClipY — not per-field.)
-        this._emojiTexture   = null;
-        this._emojiCols      = 16;
-        this._emojiRows      = 16;
+        // (The emoji texture + dims are GETTERS on this class — they delegate to the
+        // live atlas per draw, so a growth re-creation can never strand the field on
+        // a disposed texture and dims never go stale. See setEmojiTexture.)
 
         // Frame mode: render the whole field as an NxM grid sampled from an external
         // texture (screen capture / video / image) instead of glyphs. Defaults to the
@@ -865,6 +947,53 @@ export default class GlyphField {
         return tex;
     }
 
+    /** @private */
+    _createFarGroupTexture() {
+        const tex = new THREE.DataTexture(
+            this._farGroupData, FAR_GROUP_COLS, this._maxGroups,
+            THREE.RGBAFormat, THREE.FloatType
+        );
+        tex.minFilter = THREE.NearestFilter;
+        tex.magFilter = THREE.NearestFilter;
+        tex.generateMipmaps = false;
+        tex.needsUpdate = true;
+        return tex;
+    }
+
+    /**
+     * Arm a group's far slab — the fragment's far-UV lanes. u0/v0 are the slab's
+     * NORMALIZED atlas origin; rowsPerTexel/colsPerTexel map the file's grid into
+     * the 64×64 slab. These are the SAME values the far kernels scattered by (the
+     * arena's arming pass writes both) — the mapping only has to be consistent.
+     */
+    setGroupFarSlab(groupId, u0, v0, rowsPerTexel, colsPerTexel) {
+        const b = (groupId | 0) * FAR_GROUP_COLS * 4;
+        const d = this._farGroupData;
+        if (b < 0 || b + 7 >= d.length) return;
+        d[b] = u0; d[b + 1] = v0; d[b + 2] = rowsPerTexel; d[b + 3] = colsPerTexel;
+        d[b + 4] = 1;   // hasSlab
+        if (this._farGroupTexture) this._farGroupTexture.needsUpdate = true;
+    }
+
+    /** Disarm a group's far slab (dispose / atlas release) → the impostor fallback. */
+    clearGroupFarSlab(groupId) {
+        const b = (groupId | 0) * FAR_GROUP_COLS * 4;
+        if (b < 0 || b + 7 >= this._farGroupData.length) return;
+        this._farGroupData.fill(0, b, b + FAR_GROUP_COLS * 4);
+        if (this._farGroupTexture) this._farGroupTexture.needsUpdate = true;
+    }
+
+    /** Single-group fields: the whole field's far slab rides group 0 (the arena arms
+     *  through this facade — MegaFieldView forwards to its own groupId instead). */
+    setFarSlab(u0, v0, rowsPerTexel, colsPerTexel) {
+        this.setGroupFarSlab(0, u0, v0, rowsPerTexel, colsPerTexel);
+    }
+
+    /** The single-group disarm (see setFarSlab). */
+    clearFarSlab() {
+        this.clearGroupFarSlab(0);
+    }
+
     // ── Highlight texture ─────────────────────────────────────────────────────
 
     /** @private */
@@ -904,6 +1033,7 @@ export default class GlyphField {
         geometry.attributes.uv       = base.attributes.uv;
 
         this._groupTexture = this._createGroupTexture();
+        this._farGroupTexture = this._createFarGroupTexture();
         // Highlight storage: byte fields carry it as a per-instance RGBA8 attribute
         // (allocated below with the others — a capacity-sized texture blows
         // maxTextureDimension2D and re-uploads whole per write); classic fields keep
@@ -939,8 +1069,14 @@ export default class GlyphField {
         geometry.setAttribute('instanceGlyphId',
             new THREE.InstancedBufferAttribute(new Float32Array(maxCount), 1));
         }
+        // instanceColor is stride-4 AND a StorageInstancedBufferAttribute from BIRTH,
+        // for every kind: the shared material declares it vec4 (the vertex-fetch stride
+        // is baked into the pipeline — a stride-3 attribute would splay colors exactly
+        // like the stride-3 instancePosition paradox above), and the STORAGE class is
+        // what lets the far-scatter kernel read the same buffer as a storage view
+        // (createStorageAttribute binds STORAGE|VERTEX — see FarTextAtlas/far kernels).
         geometry.setAttribute('instanceColor',
-            new THREE.InstancedBufferAttribute(new Float32Array(maxCount * 3), 3));
+            new StorageInstancedBufferAttribute(new Float32Array(maxCount * 4), 4));
         geometry.setAttribute('instanceGroupId',
             new THREE.InstancedBufferAttribute(new Float32Array(maxCount), 1));
         // instancePickingId — written by PickingSystem.register() after flush
@@ -954,10 +1090,7 @@ export default class GlyphField {
         // per-field shader state lives on `this` and resolves per object at draw via
         // mesh.userData.glyphField (see _getSharedFieldMaterial above).
         this._ensureSlugTextures();
-        const emojiAtlas = this.atlas && this.atlas._emojiAtlas;
-        this._emojiTexture = emojiAtlas ? emojiAtlas.getTexture(THREE) : null;
-        this._emojiCols    = emojiAtlas ? emojiAtlas.cols : 16;
-        this._emojiRows    = emojiAtlas ? emojiAtlas.rows : 16;
+        // (Emoji texture + dims resolve through the class GETTERS — nothing to wire here.)
 
         const material = _getSharedFieldMaterial(this._occluder ? 'occluder' : this._bytePipeline ? 'byteGlyph' : 'glyph');
         this._material = material;
@@ -992,19 +1125,20 @@ export default class GlyphField {
     }
 
     /**
-     * Refresh the emoji atlas texture node after the atlas has grown or changed.
-     * Call this whenever EmojiAtlas re-packs (e.g. after new emoji are encoded).
-     * Safe to call before the emoji atlas exists — no-op in that case.
+     * Flag the emoji texture for re-upload after new cells were drawn (the miss
+     * flow's _refreshEmojiTextures calls this per registered field). The texture
+     * OBJECT and the grid dims are no longer state this class holds — they're
+     * getters that delegate to the live atlas per draw — so a square-growth
+     * re-creation (dispose+null in EmojiAtlas._grow) can never strand this field
+     * on a disposed texture, and cols/rows never go stale between refreshes.
      */
+    get _emojiTexture() { return this.atlas?._emojiAtlas?.getTexture?.(THREE) ?? null; }
+    get _emojiCols()    { return this.atlas?._emojiAtlas?.cols ?? 16; }
+    get _emojiRows()    { return this.atlas?._emojiAtlas?.rows ?? 16; }
+
     setEmojiTexture() {
-        if (!this.atlas || !this.atlas._emojiAtlas) return;
-        const tex = this.atlas._emojiAtlas.getTexture(THREE);
-        if (tex) {
-            tex.needsUpdate = true;
-            this._emojiTexture = tex;
-            this._emojiCols   = this.atlas._emojiAtlas.cols;
-            this._emojiRows   = this.atlas._emojiAtlas.rows;
-        }
+        const tex = this.atlas?._emojiAtlas?.getTexture?.(THREE);
+        if (tex) tex.needsUpdate = true;
     }
 
     /**
@@ -1176,11 +1310,11 @@ export default class GlyphField {
         const arr  = geom.attributes.instanceColor.array;
         const base = entry.bufferStartIndex;
         for (let i = 0; i < entry.glyphCount; i++) {
-            const b = (base + i) * 3;
+            const b = (base + i) * 4;
             arr[b] = newColor.r; arr[b + 1] = newColor.g; arr[b + 2] = newColor.b;
         }
         const attr = geom.attributes.instanceColor;
-        attr.addUpdateRange(base * 3, entry.glyphCount * 3);
+        attr.addUpdateRange(base * 4, entry.glyphCount * 4);
         attr.needsUpdate = true;
     }
 
@@ -1200,8 +1334,8 @@ export default class GlyphField {
         const color = geom?.attributes?.instanceColor;
         const highlight = geom?.attributes?.instanceHighlight;
         if (color) {
-            color.array.copyWithin(dstSlot * 3, srcSlot * 3, (srcSlot + count) * 3);
-            color.addUpdateRange(dstSlot * 3, count * 3);
+            color.array.copyWithin(dstSlot * 4, srcSlot * 4, (srcSlot + count) * 4);
+            color.addUpdateRange(dstSlot * 4, count * 4);
             color.needsUpdate = true;
         }
         if (highlight) {
@@ -1315,10 +1449,10 @@ export default class GlyphField {
     setGlyphColor(absoluteSlot, color) {
         const attr = this.instanceMesh?.geometry?.attributes?.instanceColor;
         if (!attr) return;
-        const b = absoluteSlot * 3;
+        const b = absoluteSlot * 4;
         if (b < 0 || b + 2 >= attr.array.length) return;
         attr.array[b] = color.r; attr.array[b + 1] = color.g; attr.array[b + 2] = color.b;
-        attr.addUpdateRange(b, 3);
+        attr.addUpdateRange(b, 4);
         attr.needsUpdate = true;
     }
 
@@ -1336,13 +1470,13 @@ export default class GlyphField {
         if (!attr || count <= 0) return;
         const arr = attr.array;
         const start = Math.max(0, startSlot | 0);
-        const end = Math.min((arr.length / 3) | 0, start + count);
+        const end = Math.min((arr.length / 4) | 0, start + count);
         for (let s = start; s < end; s++) {
-            const b = s * 3;
+            const b = s * 4;
             arr[b] = color.r; arr[b + 1] = color.g; arr[b + 2] = color.b;
         }
         if (end > start) {
-            attr.addUpdateRange(start * 3, (end - start) * 3);
+            attr.addUpdateRange(start * 4, (end - start) * 4);
             attr.needsUpdate = true;
         }
     }
@@ -1366,14 +1500,14 @@ export default class GlyphField {
         let off = paletteOffset | 0;
         if (start < 0) { off -= start; count += start; start = 0; }
         const n = Math.min(count, palette.length - off);
-        const end = Math.min((arr.length / 3) | 0, start + n);
+        const end = Math.min((arr.length / 4) | 0, start + n);
         for (let s = start, o = off; s < end; s++, o++) {
             const p = palette[o] * 3;
-            const b = s * 3;
+            const b = s * 4;
             arr[b] = lut[p]; arr[b + 1] = lut[p + 1]; arr[b + 2] = lut[p + 2];
         }
         if (end > start) {
-            attr.addUpdateRange(start * 3, (end - start) * 3);
+            attr.addUpdateRange(start * 4, (end - start) * 4);
             attr.needsUpdate = true;
         }
     }
@@ -1602,6 +1736,12 @@ export default class GlyphField {
         }
         if (this._groupTexture) this._groupTexture.dispose();
         this._groupTexture = this._createGroupTexture();
+        // The far group carrier grows in lockstep (same row space).
+        const newFar = new Float32Array(this._maxGroups * FAR_GROUP_COLS * 4);
+        newFar.set(this._farGroupData);
+        this._farGroupData = newFar;
+        if (this._farGroupTexture) this._farGroupTexture.dispose();
+        this._farGroupTexture = this._createFarGroupTexture();
         // The shared material reads _groupTexture/_maxGroups per object — nothing to poke.
     }
 
@@ -1658,6 +1798,7 @@ export default class GlyphField {
             // material is the SHARED field material — never disposed per field.
         }
         if (this._groupTexture)    this._groupTexture.dispose();
+        if (this._farGroupTexture) this._farGroupTexture.dispose();
         if (this._highlightTexture) this._highlightTexture.dispose();
         this.renderedTexts.clear();
     }
@@ -1791,7 +1932,7 @@ export default class GlyphField {
                 oldPos.copyWithin(w * pStride, r * pStride, (r + n) * pStride);
                 oldSiz.copyWithin(w * 2, r * 2, (r + n) * 2);
                 oldGid.copyWithin(w,     r,     r + n);
-                oldCol.copyWithin(w * 3, r * 3, (r + n) * 3);
+                oldCol.copyWithin(w * 4, r * 4, (r + n) * 4);
                 oldGrp.copyWithin(w,     r,     r + n);
             }
             w += n;
@@ -1827,9 +1968,9 @@ export default class GlyphField {
             siz[i * 2]     = g.size.width;
             siz[i * 2 + 1] = g.size.height;
             gids[i]        = g.charCode || 0;
-            col[i * 3]     = g.color.r;
-            col[i * 3 + 1] = g.color.g;
-            col[i * 3 + 2] = g.color.b;
+            col[i * 4]     = g.color.r;
+            col[i * 4 + 1] = g.color.g;
+            col[i * 4 + 2] = g.color.b;
             grp[i]         = g.groupId || 0;
         }
 
@@ -1942,7 +2083,16 @@ export default class GlyphField {
         }
         geom.setAttribute('instanceSize',     new THREE.InstancedBufferAttribute(sizes, 2));
         geom.setAttribute('instanceGlyphId',  new THREE.InstancedBufferAttribute(glyphIds || new Float32Array(count), 1));
-        geom.setAttribute('instanceColor',    new THREE.InstancedBufferAttribute(colors, 3));
+        // Colors ship stride-3 from the worker; the shared material declares vec4
+        // (the far kernel's storage view needs the stride-4 storage class on the byte
+        // field) — pad to stride-4 here, same discipline as cpuPos above.
+        const col4 = new Float32Array(count * 4);
+        for (let i = 0; i < count; i++) {
+            col4[i * 4 + 0] = colors[i * 3 + 0];
+            col4[i * 4 + 1] = colors[i * 3 + 1];
+            col4[i * 4 + 2] = colors[i * 3 + 2];
+        }
+        geom.setAttribute('instanceColor',    new THREE.InstancedBufferAttribute(col4, 4));
         geom.setAttribute('instanceGroupId',  new THREE.InstancedBufferAttribute(groupIds || new Float32Array(count), 1));
         if (!geom.attributes.instancePickingId || geom.attributes.instancePickingId.array.length < count) {
             geom.setAttribute('instancePickingId', new THREE.InstancedBufferAttribute(new Float32Array(count), 1));
