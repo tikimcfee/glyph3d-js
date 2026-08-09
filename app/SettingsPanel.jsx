@@ -64,11 +64,17 @@ const styles = {
   },
   caret: { flex: '0 0 auto', width: 10, fontSize: 8 },
   groupNameWrap: { flex: '1 1 auto', minWidth: 0, display: 'flex', flexDirection: 'column', lineHeight: 1.3 },
-  groupName: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  // The section name wraps (not truncates) — a narrow panel folds "Theme &
+  // appearance" / "Culling & loading" to two lines instead of cutting at the
+  // ellipsis. The wrap column carries the line height; the header row stays
+  // vertically centered, so the caret + count track a wrapped title.
+  groupName: { whiteSpace: 'normal', overflowWrap: 'break-word' },
   // Subtitle: a brief sample of the section's contents — the legibility hack for
   // the big merged sections. Prose, so NOT uppercased (the header's uppercase
-  // transform is overridden here) and dimmer than the name.
-  groupSubtitle: { fontSize: 9, letterSpacing: '0.02em', textTransform: 'none', color: '#5c6675', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  // transform is overridden here) and dimmer than the name. Wraps (not truncates)
+  // alongside the name — a narrow panel reads the full preview instead of an
+  // ellipsis; the wrap column carries the line height so the row stays balanced.
+  groupSubtitle: { fontSize: 9, letterSpacing: '0.02em', textTransform: 'none', color: '#5c6675', whiteSpace: 'normal', overflowWrap: 'break-word' },
   // Closed-section cue: some knob inside is off-default (the open rows show ↺ instead).
   groupDot: { flex: '0 0 auto', fontSize: 8, color: '#9aa3b2' },
   groupCount: { flex: '0 0 auto', fontSize: 9, color: '#3d4450', fontVariantNumeric: 'tabular-nums' },
@@ -97,7 +103,13 @@ const styles = {
   tabLive: { fontSize: 7, color: '#6ee7a0' },
   tabBlurb: { fontSize: 9, color: '#5c6675', padding: '0 2px 4px', lineHeight: 1.4 },
   row: { display: 'flex', alignItems: 'center', gap: 8, padding: '3px 2px' },
-  label: { flex: '1 1 auto', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  // The knob label wraps (not truncates) so the multi-column grid reads the full
+  // name — "Auto-slow floor at (dist)" folds instead of cutting at the ellipsis.
+  // minWidth:0 is the load-bearing piece: a flex item defaults to min-width:auto
+  // (its longest word), which blocks wrapping — 0 lets it shrink and engage the
+  // wrap. The control + reset cluster stays flush right, vertically centered
+  // against the (possibly multi-line) label.
+  label: { flex: '1 1 auto', minWidth: 0, whiteSpace: 'normal', overflowWrap: 'break-word' },
   reload: { color: '#caa14a', fontSize: 10, flex: '0 0 auto' },
   num: {
     width: 64, font: 'inherit', color: '#c8ccd6', background: '#0f141b',
