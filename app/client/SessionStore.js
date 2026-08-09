@@ -576,7 +576,8 @@ export default class SessionStore {
 
     // One cost line for the lane: the Σ columns are WORK time across books (the 6-wide
     // pour overlaps them — they don't sum to wall), so a fat lane decomposes into WHICH
-    // stage eats it: read/parse scale with the transcript FILE, hydrate with the cap.
+    // stage eats it: read/parse scale with the tail WINDOW (tail-grow reads only what
+    // the quota needs), hydrate with the cap.
     if (opened.length) {
       const wall = Math.round(performance.now() - t0);
       const sum = (k) => Math.round(opened.reduce((acc, b) => acc + (b.ms?.[k] || 0), 0));

@@ -78,6 +78,12 @@ export const AGENT_BOOKS_DEFAULTS = {
                                 // live growth sheds its oldest past this, a session hydration
                                 // materializes only this tail; 0 = unbounded. Per-book override:
                                 // book.limit / agent.open's limit arg (lane.maxSheets).
+    tailReadBytes: 512 * 1024,  // first transcript tail window a hydration requests (bytes);
+                                // doubles until the window holds maxSheets events (tail-grow —
+                                // a transcript costs its readable tail, not its full history)
+    headMetaBytes: 64 * 1024,   // head window re-harvesting the provenance a tail can't see
+                                // (ai-title/agent-name/turn.prompt sit near the file's start);
+                                // read only when the tail's meta lacks a title. 0 disables.
     // -- identity ------------------------------------------------------------------
     cover: true,                // translucent identity box around each book's deck (also the drag handle)
     coverPad: 16,               // XY inflation beyond the deck bounds

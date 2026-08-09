@@ -150,26 +150,35 @@ type agentSessionsListResult struct {
 
 // agentSessionsReadParams is the body of agentSessions/read. TailBytes = 0
 // reads the whole transcript (bounded by maxSessionReadSize); > 0 reads only
-// the final TailBytes bytes, advanced to the first line boundary. Harness
-// selects the archive (default "claude").
+// the final TailBytes bytes, advanced to the first line boundary. FromOffset
+// (a pointer — 0 is a meaningful start) selects a cursor window instead:
+// [fromOffset, fromOffset+maxBytes) (maxBytes 0 = to EOF), same boundary
+// advance — the client pages BACK through a transcript by minting the next
+// cursor from the previous response's offset. TailBytes and FromOffset are
+// mutually exclusive. Harness selects the archive (default "claude").
 type agentSessionsReadParams struct {
-	ID        string `json:"id"`
-	TailBytes int64  `json:"tailBytes"`
-	Harness   string `json:"harness"`
-	Binary    bool   `json:"binary"` // answer on the binary result plane (raw transcript bytes)
+	ID         string `json:"id"`
+	TailBytes  int64  `json:"tailBytes"`
+	FromOffset *int64 `json:"fromOffset"`
+	MaxBytes   int64  `json:"maxBytes"`
+	Harness    string `json:"harness"`
+	Binary     bool   `json:"binary"` // answer on the binary result plane (raw transcript bytes)
 }
 
 // agentSessionsReadResult is the agentSessions/read response. Content is the
 // transcript's raw JSONL text — unparsed; Size and Mtime describe the whole
 // file on disk, so a poller can diff them against its last read; Truncated
-// reports that Content is a line-aligned tail, not the whole file. Cwd is the
-// session's working directory when the harness's index knows it (kimi — the
-// wire transcript doesn't reliably carry one); claude leaves it empty.
+// reports that Content is a line-aligned window, not the whole file. Offset
+// is the ABSOLUTE byte position Content starts at (after the line-boundary
+// advance) — the client's next backward cursor. Cwd is the session's working
+// directory when the harness's index knows it (kimi — the wire transcript
+// doesn't reliably carry one); claude leaves it empty.
 type agentSessionsReadResult struct {
 	ID        string `json:"id"`
 	Content   string `json:"content"`
 	Size      int64  `json:"size"`
 	Mtime     int64  `json:"mtime"` // UnixMilli
+	Offset    int64  `json:"offset"`
 	Truncated bool   `json:"truncated"`
 	Cwd       string `json:"cwd,omitempty"`
 }
@@ -239,11 +248,17 @@ func (h *FSHandler) handleAgentSessionsList(write writeFn, id json.RawMessage, r
 
 // handleAgentSessionsRead serves one transcript's raw bytes.
 //
-// Shape:  { id, tailBytes?, harness?, binary? }  ->  { id, content, size, mtime, truncated, cwd? }
+// Shape:  { id, tailBytes?, fromOffset?, maxBytes?, harness?, binary? }
+//
+//	->  { id, content, size, mtime, offset, truncated, cwd? }
+//
 // The window is the whole file, narrowed to the final tailBytes when given,
-// and bounded by maxSessionReadSize either way. A window that starts mid-file
-// advances past its first newline so content begins on a JSONL line boundary
-// (which is also a UTF-8 boundary); truncated=true marks any such tail.
+// or to the cursor window [fromOffset, fromOffset+maxBytes) — and bounded by
+// maxSessionReadSize any way (the bound keeps the window's END: the newest
+// bytes are the useful ones). A window that starts mid-file advances past its
+// first newline so content begins on a JSONL line boundary (which is also a
+// UTF-8 boundary); truncated=true marks any such window, and offset reports
+// the absolute byte the content starts at — the next backward cursor.
 // Harness (default "claude") picks the archive the id resolves against.
 // binary=true answers on the binary result plane: the header carries every
 // field but content, and the transcript crosses as raw bytes — a 30MB
@@ -260,6 +275,18 @@ func (h *FSHandler) handleAgentSessionsRead(write writeFn, writeBin writeBinFn, 
 	}
 	if p.TailBytes < 0 {
 		h.sendRPCError(write, id, -32602, "tailBytes must be non-negative", map[string]string{"id": p.ID})
+		return
+	}
+	if p.FromOffset != nil && *p.FromOffset < 0 {
+		h.sendRPCError(write, id, -32602, "fromOffset must be non-negative", map[string]string{"id": p.ID})
+		return
+	}
+	if p.FromOffset != nil && p.TailBytes > 0 {
+		h.sendRPCError(write, id, -32602, "tailBytes and fromOffset are mutually exclusive", map[string]string{"id": p.ID})
+		return
+	}
+	if p.MaxBytes < 0 || (p.MaxBytes > 0 && p.FromOffset == nil) {
+		h.sendRPCError(write, id, -32602, "maxBytes must be non-negative and requires fromOffset", map[string]string{"id": p.ID})
 		return
 	}
 	harness := p.Harness
@@ -322,13 +349,20 @@ func (h *FSHandler) handleAgentSessionsRead(write writeFn, writeBin writeBinFn, 
 	size := info.Size()
 
 	// Window selection: whole file by default, the final tailBytes on request,
-	// maxSessionReadSize as the ceiling for both.
-	start := int64(0)
-	if p.TailBytes > 0 && p.TailBytes < size {
+	// or the cursor window [fromOffset, fromOffset+maxBytes). maxSessionReadSize
+	// is the ceiling for all three; it keeps the window's END (newest bytes).
+	start, end := int64(0), size
+	switch {
+	case p.FromOffset != nil:
+		start = min(*p.FromOffset, size)
+		if p.MaxBytes > 0 {
+			end = min(size, start+p.MaxBytes)
+		}
+	case p.TailBytes > 0 && p.TailBytes < size:
 		start = size - p.TailBytes
 	}
-	if size-start > maxSessionReadSize {
-		start = size - maxSessionReadSize
+	if end-start > maxSessionReadSize {
+		start = end - maxSessionReadSize
 	}
 
 	f, err := os.Open(path)
@@ -338,8 +372,21 @@ func (h *FSHandler) handleAgentSessionsRead(write writeFn, writeBin writeBinFn, 
 	}
 	defer f.Close()
 
-	buf := make([]byte, size-start)
-	got, err := f.ReadAt(buf, start)
+	// A mid-file window reads from one byte EARLIER than requested: a '\n' at
+	// start-1 means the window already begins on a record boundary (a cursor
+	// minted from a previous response's offset) — advancing again would drop a
+	// whole record. Anything else is an arbitrary landing — advance to the byte
+	// after the first newline; a window with no newline is one partial line:
+	// return nothing rather than a torn line. offset tracks where the returned
+	// content actually begins — the client's next backward cursor.
+	truncated := start > 0 || end < size
+	offset := start
+	readStart := start
+	if start > 0 {
+		readStart = start - 1
+	}
+	buf := make([]byte, end-readStart)
+	got, err := f.ReadAt(buf, readStart)
 	// A live transcript can move under us between Stat and ReadAt; a short
 	// read at EOF is a consistent smaller snapshot, not a failure.
 	if err != nil && err != io.EOF {
@@ -347,22 +394,21 @@ func (h *FSHandler) handleAgentSessionsRead(write writeFn, writeBin writeBinFn, 
 		return
 	}
 	buf = buf[:got]
-
-	// A mid-file window starts at an arbitrary byte — advance to the byte
-	// after the first newline. A window with no newline is one partial line:
-	// return nothing rather than a torn line.
-	truncated := start > 0
-	if truncated {
-		if nl := bytes.IndexByte(buf, '\n'); nl >= 0 {
+	if start > 0 {
+		if len(buf) > 0 && buf[0] == '\n' {
+			buf = buf[1:]
+		} else if nl := bytes.IndexByte(buf, '\n'); nl >= 0 {
 			buf = buf[nl+1:]
+			offset = readStart + int64(nl) + 1
 		} else {
+			offset = readStart + int64(len(buf))
 			buf = nil
 		}
 	}
 
 	if p.Binary {
 		hdr := map[string]any{
-			"id": p.ID, "size": size, "mtime": info.ModTime().UnixMilli(), "truncated": truncated,
+			"id": p.ID, "size": size, "mtime": info.ModTime().UnixMilli(), "offset": offset, "truncated": truncated,
 		}
 		if cwd != "" {
 			hdr["cwd"] = cwd
@@ -376,6 +422,7 @@ func (h *FSHandler) handleAgentSessionsRead(write writeFn, writeBin writeBinFn, 
 		Content:   string(buf),
 		Size:      size,
 		Mtime:     info.ModTime().UnixMilli(),
+		Offset:    offset,
 		Truncated: truncated,
 		Cwd:       cwd,
 	})

@@ -355,6 +355,94 @@ func TestAgentSessionsRead_TailNoNewlineIsEmpty(t *testing.T) {
 	}
 }
 
+func TestAgentSessionsRead_TailReportsOffset(t *testing.T) {
+	h, dir := newSessionsHandler(t)
+	writeSession(t, dir, "abc-123.jsonl", "aaaa\nbbbb\ncccc\n", time.Now())
+
+	// tailBytes=8 → window starts at byte 7 (mid-"bbbb"), advances to byte 10.
+	r, c := readSession(t, h, `{"id":"abc-123","tailBytes":8}`)
+	if r == nil {
+		t.Fatalf("read error: %+v", c.Error)
+	}
+	if r.Offset != 10 {
+		t.Errorf("offset: got %d, want 10", r.Offset)
+	}
+	// A whole-file read starts at 0.
+	r, c = readSession(t, h, `{"id":"abc-123"}`)
+	if r == nil {
+		t.Fatalf("read error: %+v", c.Error)
+	}
+	if r.Offset != 0 {
+		t.Errorf("whole-file offset: got %d, want 0", r.Offset)
+	}
+}
+
+func TestAgentSessionsRead_FromOffsetWindow(t *testing.T) {
+	h, dir := newSessionsHandler(t)
+	writeSession(t, dir, "abc-123.jsonl", "aaaa\nbbbb\ncccc\ndddd\n", time.Now())
+
+	// A cursor window landing mid-"aaaa": advances past its newline, ends at maxBytes.
+	r, c := readSession(t, h, `{"id":"abc-123","fromOffset":2,"maxBytes":13}`)
+	if r == nil {
+		t.Fatalf("read error: %+v", c.Error)
+	}
+	if r.Content != "bbbb\ncccc\n" || !r.Truncated {
+		t.Errorf("cursor window: got content=%q truncated=%v, want %q+truncated", r.Content, r.Truncated, "bbbb\ncccc\n")
+	}
+	if r.Offset != 5 {
+		t.Errorf("offset: got %d, want 5", r.Offset)
+	}
+
+	// fromOffset 0 reads from the file's start — no boundary advance, but a
+	// window ending before EOF still reports truncated.
+	r, c = readSession(t, h, `{"id":"abc-123","fromOffset":0,"maxBytes":10}`)
+	if r == nil {
+		t.Fatalf("read error: %+v", c.Error)
+	}
+	if r.Content != "aaaa\nbbbb\n" || r.Offset != 0 || !r.Truncated {
+		t.Errorf("from-start window: got content=%q offset=%d truncated=%v", r.Content, r.Offset, r.Truncated)
+	}
+
+	// maxBytes absent → to EOF.
+	r, c = readSession(t, h, `{"id":"abc-123","fromOffset":10}`)
+	if r == nil {
+		t.Fatalf("read error: %+v", c.Error)
+	}
+	if r.Content != "cccc\ndddd\n" || r.Offset != 10 {
+		t.Errorf("to-EOF window: got content=%q offset=%d", r.Content, r.Offset)
+	}
+
+	// Past-EOF cursor clamps to an empty window at size.
+	r, c = readSession(t, h, `{"id":"abc-123","fromOffset":9999}`)
+	if r == nil {
+		t.Fatalf("read error: %+v", c.Error)
+	}
+	if r.Content != "" || r.Offset != 20 {
+		t.Errorf("past-EOF window: got content=%q offset=%d, want empty at 20", r.Content, r.Offset)
+	}
+}
+
+func TestAgentSessionsRead_FromOffsetParamErrors(t *testing.T) {
+	h, dir := newSessionsHandler(t)
+	writeSession(t, dir, "abc-123.jsonl", "{}\n", time.Now())
+
+	for _, params := range []string{
+		`{"id":"abc-123","fromOffset":-1}`,              // negative cursor
+		`{"id":"abc-123","fromOffset":0,"tailBytes":8}`, // ambiguous window
+		`{"id":"abc-123","fromOffset":0,"maxBytes":-1}`, // negative length
+		`{"id":"abc-123","maxBytes":8}`,                 // length without a cursor
+	} {
+		r, c := readSession(t, h, params)
+		if r != nil {
+			t.Errorf("params %s: expected rejection, got content %q", params, r.Content)
+			continue
+		}
+		if c.Error.Code != -32602 {
+			t.Errorf("params %s: got code %d, want -32602", params, c.Error.Code)
+		}
+	}
+}
+
 func TestAgentSessionsRead_CapBoundsFullRead(t *testing.T) {
 	h, dir := newSessionsHandler(t)
 	writeSession(t, dir, "abc-123.jsonl", "aaaa\nbbbb\ncccc\n", time.Now())
@@ -363,12 +451,14 @@ func TestAgentSessionsRead_CapBoundsFullRead(t *testing.T) {
 	maxSessionReadSize = 10
 	defer func() { maxSessionReadSize = saved }()
 
+	// The 10-byte cap lands exactly on the "bbbb" boundary — the final 10 bytes
+	// ARE line-aligned, so the whole window returns (nothing to advance past).
 	r, c := readSession(t, h, `{"id":"abc-123"}`)
 	if r == nil {
 		t.Fatalf("read error: %+v", c.Error)
 	}
-	if r.Content != "cccc\n" || !r.Truncated {
-		t.Errorf("capped read: got content=%q truncated=%v, want %q+truncated", r.Content, r.Truncated, "cccc\n")
+	if r.Content != "bbbb\ncccc\n" || !r.Truncated {
+		t.Errorf("capped read: got content=%q truncated=%v, want %q+truncated", r.Content, r.Truncated, "bbbb\ncccc\n")
 	}
 }
 
@@ -447,6 +537,9 @@ func TestAgentSessionsRead_BinaryPlane(t *testing.T) {
 		writeBin2, json.RawMessage("10"), json.RawMessage(`{"id":"`+sid+`","tailBytes":15,"binary":true}`))
 	if bc2.hdr["truncated"] != true {
 		t.Errorf("tail hdr truncated: got %v", bc2.hdr)
+	}
+	if int(bc2.hdr["offset"].(float64)) != 16 {
+		t.Errorf("tail hdr offset: got %v, want 16", bc2.hdr["offset"])
 	}
 	if string(bc2.payload) != "{\"c\":3}\n" {
 		t.Errorf("tail payload: got %q, want %q", bc2.payload, "{\"c\":3}\n")

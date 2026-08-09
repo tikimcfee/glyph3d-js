@@ -33,6 +33,7 @@ import { agentIdForSession, kimiAgentIdForSession,
          createKimiWireState, kimiWireLineToEvents }
     from '@glyph3d/core/collections/sessionAdapter.js';
 import { parseSessionOffThread } from '@glyph3d/core/workers/SessionParsePool.js';
+import { readSessionTail } from '@glyph3d/core/services/data/sessionTailRead.js';
 import { decodeBase64 } from '@glyph3d/core/utils/encoding.js';
 
 const noBooks = { text: 'ERR: agent books not wired', data: null };
@@ -56,36 +57,39 @@ const agentIdForEntry = (s) => (s.harness === 'kimi' ? kimiAgentIdForSession(s.i
  *        becomes the book's retention override; omitted → the book's cap (its override,
  *        else cfg.maxSheets). harness = which archive/adapter ('claude' default | 'kimi').
  * @returns {Promise<{agentId: string, added: number, total: number, bytes: number,
- *   ms: {read: number, parse: number, hydrate: number}}>}
- * `bytes` is the transcript size parsed; `ms` splits the open into its three stages so
- * the restore lane (and agent.open's data) can answer "why is this slow" — a deep
- * history's parse dwarfs the tail its cap keeps (read/parse scale with the FILE,
- * hydrate with the cap).
+ *   offset: number, ms: {read: number, parse: number, hydrate: number}}>}
+ * `bytes` is the window size parsed, `total` the events in it, `offset` the absolute
+ * byte the window starts at (0 = the whole record was read); `ms` splits the open into
+ * its three stages so the restore lane (and agent.open's data) can answer "why is this
+ * slow" — read/parse scale with the WINDOW, hydrate with the cap.
  */
 export async function openAgentSession(ctx, sessionId, { limit, harness = 'claude' } = {}) {
     const provider = ctx.sessionProvider;
     if (!provider) throw new Error('no session provider (relay offline — the archive is a relay feature)');
     if (!ctx.agentBooks) throw new Error('agent books not wired');
     const r1 = (n) => Math.round(n * 10) / 10;
-    const t0 = performance.now();
     const isKimi = harness === 'kimi';
     const agentId = isKimi ? kimiAgentIdForSession(sessionId) : agentIdForSession(sessionId);
     const agentType = isKimi ? 'kimi' : 'claude';
 
-    // Transport: raw transcript bytes (the binary result plane). Codec: the parse
-    // pool — decode + dialect + cap-slice OFF the main thread, so only the event
-    // tail the book will materialize clones back. The cap mirrors hydrate's rule,
-    // which re-derives and re-slices identically.
-    const { bytes, cwd: indexCwd } = await provider.read(sessionId, isKimi ? { harness: 'kimi' } : undefined);
-    const t1 = performance.now();
-    const byteLen = bytes.byteLength;   // the parse TRANSFERS the buffer — measure first
+    // Transport: TAIL-GROW over the binary result plane — the relay line-aligns
+    // the final tailReadBytes, and the window doubles until it holds the book's
+    // quota (a monster transcript costs its readable tail, not its history).
+    // Codec: the parse pool — decode + dialect + cap-slice OFF the main thread,
+    // so only the event tail the book will materialize clones back. The cap
+    // mirrors hydrate's rule, which re-derives and re-slices identically.
     const cap = ctx.agentBooks.capForHydration(agentId, limit);
-    const { records, total, cwd, meta } = await parseSessionOffThread(bytes, { harness: agentType, cwd: indexCwd, cap });
+    const r = await readSessionTail(provider, sessionId, {
+        harness: agentType, cap,
+        startBytes: ctx.agentBooks.cfg.tailReadBytes,
+        headMetaBytes: ctx.agentBooks.cfg.headMetaBytes,
+        parse: (bytes, opts) => parseSessionOffThread(bytes, opts),
+    });
     const t2 = performance.now();
-    const added = await ctx.agentBooks.hydrate(agentId, records, { agentType, sessionId, cwd, meta, limit });
+    const added = await ctx.agentBooks.hydrate(agentId, r.records, { agentType, sessionId, cwd: r.cwd, meta: r.meta, limit });
     const t3 = performance.now();
-    return { agentId, added, total, bytes: byteLen,
-             ms: { read: r1(t1 - t0), parse: r1(t2 - t1), hydrate: r1(t3 - t2) } };
+    return { agentId, added, total: r.total, bytes: r.bytes, offset: r.offset,
+             ms: { read: r1(r.readMs), parse: r1(r.parseMs), hydrate: r1(t3 - t2) } };
 }
 
 /** Resolve a session id or unique prefix against the archive listing (dash-insensitive).
@@ -302,7 +306,9 @@ export default function registerAgentCommands(router) {
             const entry = await resolveSessionEntry(provider, idArg);
             const limit = limitArg != null ? Number(limitArg) : undefined;
             const r = await openAgentSession(ctx, entry.id, { limit, harness: entry.harness });
-            const capped = r.added < r.total ? ` (of ${r.total} — tail)` : '';
+            // offset > 0 = a tail window (the record is deeper than what was read);
+            // an offset-0 open can still be capped by the book's quota.
+            const capped = r.offset > 0 ? ' (tail)' : r.added < r.total ? ` (of ${r.total} — tail)` : '';
             return {
                 text: `OK: opened ${entry.id.slice(0, 8)} as ${r.agentId} — ${r.added} sheet${r.added === 1 ? '' : 's'}${capped}`,
                 data: { sessionId: entry.id, harness: entry.harness || 'claude', ...r },

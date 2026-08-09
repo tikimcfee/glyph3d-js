@@ -36,18 +36,34 @@ export class AgentSessionProvider {
      * @param {string} id - session id as returned by list()
      * @param {Object} [opts]
      * @param {number} [opts.tailBytes] - read only the trailing byte window
+     * @param {number} [opts.fromOffset] - cursor window: read from this absolute byte
+     *        (exclusive with tailBytes) — book paging back through older records
+     * @param {number} [opts.maxBytes] - cursor window length (requires fromOffset; 0/absent = to EOF)
      * @param {string} [opts.harness] - which archive the id resolves against (default 'claude')
-     * @returns {Promise<{ bytes: Uint8Array, truncated: boolean, mtime: number|null, cwd: string|null }>}
-     *          cwd is the index's workDir for kimi sessions (their transcript doesn't
-     *          reliably carry one), null otherwise
+     * @returns {Promise<{ bytes: Uint8Array, offset: number, size: number|null,
+     *          truncated: boolean, mtime: number|null, cwd: string|null }>}
+     *          offset is the ABSOLUTE byte the payload starts at (the next backward
+     *          cursor; 0 = the file's start). cwd is the index's workDir for kimi
+     *          sessions (their transcript doesn't reliably carry one), null otherwise
      */
     async read(id, opts = {}) {
         const params = { id, binary: true };
         if (opts.tailBytes != null) params.tailBytes = opts.tailBytes;
+        if (opts.fromOffset != null) params.fromOffset = opts.fromOffset;
+        if (opts.maxBytes != null) params.maxBytes = opts.maxBytes;
         if (opts.harness != null) params.harness = opts.harness;
-        const r = await this._bridge.rpcRequest('agentSessions/read', params);
+        let r;
+        try {
+            r = await this._bridge.rpcRequest('agentSessions/read', params);
+        } catch (e) {
+            // Fail loud at the seam: the exact request, so a relay-side window bug
+            // reads as itself instead of as a silently empty book.
+            console.error('[sessions] agentSessions/read failed', params, e?.message || e);
+            throw e;
+        }
         const bytes = r?.bytes ?? new TextEncoder().encode(r?.content ?? '');
-        return { bytes, truncated: !!r?.truncated, mtime: r?.mtime ?? null, cwd: r?.cwd ?? null };
+        return { bytes, offset: r?.offset ?? 0, size: r?.size ?? null,
+                 truncated: !!r?.truncated, mtime: r?.mtime ?? null, cwd: r?.cwd ?? null };
     }
 }
 
