@@ -74,30 +74,32 @@ export const NEWLINE = 0x0A;
  * pass's cross-thread read set is the PREVIOUS pass's write set — no pass reads a lane
  * written by a racing sibling, which is what makes every dispatch deterministic.
  */
-export const SLOT_STRIDE = 13;
-export const S_CODEPOINT = 0;
-export const S_GLYPH_ID = 1;
-export const S_ADVANCE = 2;
-export const S_HEIGHT = 3;
-export const S_X = 4;
-export const S_Y = 5;
-export const S_Z = 6;
-export const S_ROW = 7;      // exact: the glyph's visual row (wrap segments included)
-export const S_COL = 8;      // exact: glyphs since the last newline
-export const S_FLAGS = 9;
-export const S_BASE_X = 10;  // resolveX's fold-relative x (+ item origin), written once —
+export const SLOT_STRIDE = 12;
+export const S_GLYPH_ID = 0;
+export const S_ADVANCE = 1;
+export const S_HEIGHT = 2;
+export const S_X = 3;
+export const S_Y = 4;
+export const S_Z = 5;
+export const S_ROW = 6;      // exact: the glyph's visual row (wrap segments included)
+export const S_COL = 7;      // exact: glyphs since the last newline
+export const S_FLAGS = 8;
+export const S_BASE_X = 9;   // resolveX's fold-relative x (+ item origin), written once —
                              // paginate reads THIS, so the page remap is a pure function
                              // of base position and re-running it accumulates nothing
-export const S_LINE_ADV = 11; // exact fold: f32 advance sum since line start (exclusive).
+export const S_LINE_ADV = 10; // exact fold: f32 advance sum since line start (exclusive).
                               // The foldless x, and resolveX's gather-free source.
-export const S_ORD = 12;      // exact fold: item-relative leader ordinal (newlines
+export const S_ORD = 11;      // exact fold: item-relative leader ordinal (newlines
                               // included). ≤ byteCount, so exact in f32 ≤ 2^24.
 
+// There is NO codepoint lane: a slot index IS its source byte offset, so the codepoint
+// is always re-derivable from the byte buffer. The one downstream decision it fed —
+// "is this a newline?" — is a decode-time fact and rides S_FLAGS as F_NEWLINE.
 export const F_LEADER = 1;        // this byte begins a codepoint
 export const F_RENDERED = 2;      // layout completed this slot (a truth marker, not a
                                   // publish protocol — no pass ever waits on it)
+export const F_NEWLINE = 4;       // the codepoint is 0x0A — the fold's one content test
 export const F_MISSING = 8;       // no atlas entry yet — blank, but correctly spaced
-                                  // (4 is retired: F_LINE_START, never consumed)
 
 /**
  * The GPU item table's lane layout (glyphPipelineKernels.js packs the same strides).
@@ -187,11 +189,12 @@ export function decodeAndResolve(bytes, slots, trie, id, misses) {
 
     const g = trieLookup(trie, cp);
     const o = id * SLOT_STRIDE;
-    slots[o + S_CODEPOINT] = cp;
     slots[o + S_GLYPH_ID] = g.glyphId;
     slots[o + S_ADVANCE] = g.advance;
     slots[o + S_HEIGHT] = g.height;
-    slots[o + S_FLAGS] = F_LEADER | (g.missing ? F_MISSING : 0);
+    slots[o + S_FLAGS] = F_LEADER
+        | (cp === NEWLINE ? F_NEWLINE : 0)
+        | (g.missing ? F_MISSING : 0);
     if (g.missing && misses) misses.push(cp);    // atomic append on the GPU
 }
 
@@ -273,7 +276,7 @@ export function layoutItem(slots, itemStart, byteCount, params = {}, ordToByte =
             if (x > scalars[7]) scalars[7] = x;               // widest row, ITEM-RELATIVE
         }
         ord++;
-        if (slots[o + S_CODEPOINT] === NEWLINE) {
+        if ((flags & F_NEWLINE) !== 0) {
             baseRow += rowsForLine(col, wrap);
             col = 0;
             lineAdv = 0;

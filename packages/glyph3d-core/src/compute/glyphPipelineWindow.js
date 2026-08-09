@@ -45,7 +45,7 @@
  */
 
 import {
-    SLOT_STRIDE, S_ROW, S_COL, S_FLAGS, S_LINE_ADV, S_ORD, F_LEADER, F_RENDERED,
+    SLOT_STRIDE, S_ROW, S_COL, S_FLAGS, S_LINE_ADV, S_ORD, F_LEADER, F_RENDERED, NEWLINE,
     allocSlots, decodeAndResolve, resolveX, paginate, boundsReduce, sequenceLength,
 } from './glyphPipelineReference.js';
 import { scanIdentity, scanCombine, scanLeaf, scanLeafValue, lanesFromPrefix } from './glyphPipelineScan.js';
@@ -71,7 +71,7 @@ function walk(bytes, trie, from, to, acc, visit) {
         const cp = decodeCodepointAt(bytes, id, n);
         const g = trieLookup(trie, cp);
         if (visit) visit(id, cp, g.advance, acc);
-        scanCombine(acc, scanLeafValue(cp, g.advance, true, 0, id === 0));
+        scanCombine(acc, scanLeafValue(cp === NEWLINE, g.advance, true, 0, id === 0));
     }
     return acc;
 }

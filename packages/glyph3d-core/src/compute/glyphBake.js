@@ -114,7 +114,7 @@ export function foldBytes(bytes, trie, from, to, acc) {
         if (n === 0) continue;                    // continuation byte: identity leaf
         const cp = decodeCodepointAt(bytes, id, n);
         const g = trieLookup(trie, cp);
-        scanCombine(acc, scanLeafValue(cp, g.advance, true, 0, id === 0));
+        scanCombine(acc, scanLeafValue(cp === NEWLINE, g.advance, true, 0, id === 0));
     }
     return acc;
 }
@@ -202,7 +202,7 @@ export function bakeFile(bytes, trie, opts = {}) {
             lineHist.set(acc.tailLen, (lineHist.get(acc.tailLen) || 0) + 1);
         }
 
-        scanCombine(acc, scanLeafValue(cp, g.advance, true, 0, id === 0));
+        scanCombine(acc, scanLeafValue(cp === NEWLINE, g.advance, true, 0, id === 0));
     }
 
     const totalRows = maxRow + 1;

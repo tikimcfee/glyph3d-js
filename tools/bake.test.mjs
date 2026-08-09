@@ -21,7 +21,7 @@
 
 import { buildGlyphTrie } from '../packages/glyph3d-core/src/compute/GlyphTrie.js';
 import {
-  runPipeline, SLOT_STRIDE, S_CODEPOINT, S_ROW, S_COL, S_ORD, S_LINE_ADV, S_FLAGS, F_LEADER,
+  runPipeline, SLOT_STRIDE, S_ROW, S_COL, S_ORD, S_LINE_ADV, S_FLAGS, F_LEADER,
 } from '../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
 import { scanIdentity, lanesFromPrefix } from '../packages/glyph3d-core/src/compute/glyphPipelineScan.js';
 import {
@@ -185,12 +185,10 @@ for (const [name, text] of CORPORA) {
   const oracle = runPipeline(bytes, trie, {});
   const census = new Set(rec.census);
   let absent = 0;
-  for (let id = 0; id < bytes.length; id++) {
-    const o = id * SLOT_STRIDE;
-    if ((oracle.slots[o + S_FLAGS] & F_LEADER) === 0) continue;
-    if (!census.has(oracle.slots[o + S_CODEPOINT])) absent++;
+  for (const ch of TORTURE) {                      // string iteration = one codepoint per step
+    if (!census.has(ch.codePointAt(0))) absent++;
   }
-  ok(absent === 0, `census: ${absent} leader codepoints absent`);
+  ok(absent === 0, `census: ${absent} source codepoints absent`);
   ok(new Set(oracle.misses).size === rec.missing.length,
     `misses: bake reports ${rec.missing.length}, oracle saw ${new Set(oracle.misses).size} unique`);
 }
@@ -315,7 +313,7 @@ for (const [name, text] of CORPORA) {
 {
   const winDiff = (name, fullSlots, winSlots, from, to, fold) => {
     let bad = null;
-    const EXACT = [S_CODEPOINT, S_GLYPH_ID, S_ADVANCE, S_HEIGHT, S_ROW, S_COL, S_FLAGS, S_ORD];
+    const EXACT = [S_GLYPH_ID, S_ADVANCE, S_HEIGHT, S_ROW, S_COL, S_FLAGS, S_ORD];
     for (let id = from; id < to && !bad; id++) {
       const o = id * SLOT_STRIDE;
       if ((fullSlots[o + S_FLAGS] & F_LEADER) === 0) continue;
@@ -439,7 +437,7 @@ for (const [name, text] of CORPORA) {
     for (let id = win.from; id < win.to; id++) {
       const fo = id * SLOT_STRIDE, wo = (id - win.from) * SLOT_STRIDE;
       if ((full.slots[fo + S_FLAGS] & F_LEADER) === 0) continue;
-      if (full.slots[fo + S_CODEPOINT] !== winRun.slots[wo + S_CODEPOINT]) bad++;
+      if (full.slots[fo + S_GLYPH_ID] !== winRun.slots[wo + S_GLYPH_ID]) bad++;
       for (const l of [S_X, S_Y, S_Z]) {
         if (full.slots[fo + l] !== winRun.slots[wo + l]) bad++;     // BIT-exact, no eps
       }

@@ -55,8 +55,8 @@
  */
 
 import {
-    SLOT_STRIDE, S_CODEPOINT, S_ADVANCE, S_ROW, S_COL, S_FLAGS, S_LINE_ADV, S_ORD,
-    F_LEADER, F_RENDERED, NEWLINE,
+    SLOT_STRIDE, S_ADVANCE, S_ROW, S_COL, S_FLAGS, S_LINE_ADV, S_ORD,
+    F_LEADER, F_NEWLINE, F_RENDERED,
     allocSlots, decodeAndResolve, itemForByte, rowsForLine, resolveX, paginate,
     boundsReduce, deriveStride, normalizeItems,
 } from './glyphPipelineReference.js';
@@ -77,13 +77,13 @@ export function scanIdentity() {
  * never allocates slots) both build their leaves HERE, so the element can't drift.
  * `wrap` is the owning item's fold unit; `isItemStart` marks the absorbing reset.
  */
-export function scanLeafValue(codepoint, advance, isLeader, wrap, isItemStart) {
+export function scanLeafValue(isNewline, advance, isLeader, wrap, isItemStart) {
     const e = scanIdentity();
     e.reset = isItemStart ? 1 : 0;
     e.wrap = wrap;
     if (!isLeader) return e;                      // continuation byte: reset/wrap only
     e.glyphs = 1;
-    if (codepoint === NEWLINE) {
+    if (isNewline) {
         e.nl = 1;                                 // head/tail stay 0: the line it closes
     } else {                                      // started before this interval
         e.headLen = 1;
@@ -97,7 +97,7 @@ export function scanLeafValue(codepoint, advance, isLeader, wrap, isItemStart) {
 export function scanLeaf(slots, id, wrap, isItemStart) {
     const o = id * SLOT_STRIDE;
     return scanLeafValue(
-        slots[o + S_CODEPOINT],
+        (slots[o + S_FLAGS] & F_NEWLINE) !== 0,
         slots[o + S_ADVANCE],
         (slots[o + S_FLAGS] & F_LEADER) !== 0,
         wrap, isItemStart,

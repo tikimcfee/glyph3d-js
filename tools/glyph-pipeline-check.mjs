@@ -175,12 +175,12 @@ const probe = (opts) => `(async (o) => {
   } catch (e) { return { fatal: 'offscreen renderer init failed: ' + (e && e.message || e) }; }
   R.renderer = store.renderer.constructor.name;
 
-  const { SLOT_STRIDE, S_CODEPOINT, S_ADVANCE, S_HEIGHT, S_X, S_Y, S_Z, S_ROW, S_COL, S_FLAGS, S_BASE_X, F_LEADER } = refMod;
+  const { SLOT_STRIDE, S_GLYPH_ID, S_ADVANCE, S_HEIGHT, S_X, S_Y, S_Z, S_ROW, S_COL, S_FLAGS, S_BASE_X, F_LEADER } = refMod;
   const enc = new TextEncoder();
   const LINE_H = CELL_H;
 
   // ── The GPU-vs-reference diffs, shared by the single-file lanes and the multi-file
-  //    lanes. row/col/flags/codepoint are EXACT (the integer-lane law); x/y/z sit within
+  //    lanes. row/col/flags/glyphId are EXACT (the integer-lane law); x/y/z sit within
   //    the magnitude-scaled f32 tolerance.
   const diffSlots = (L, fail, ref, gpu, lo, hi) => {
     let firstBad = -1;
@@ -191,7 +191,7 @@ const probe = (opts) => `(async (o) => {
       if (leaderRef !== leaderGpu) { fail('slot ' + id + ' leader mismatch ref=' + leaderRef + ' gpu=' + leaderGpu); if (firstBad < 0) firstBad = id; continue; }
       if (!leaderRef) continue;
       L.exactChecked++;
-      if (gpu[b + S_CODEPOINT] !== ref.slots[b + S_CODEPOINT]) { fail('slot ' + id + ' codepoint ' + gpu[b + S_CODEPOINT] + ' != ' + ref.slots[b + S_CODEPOINT]); if (firstBad < 0) firstBad = id; }
+      if (gpu[b + S_GLYPH_ID] !== ref.slots[b + S_GLYPH_ID]) { fail('slot ' + id + ' glyphId ' + gpu[b + S_GLYPH_ID] + ' != ' + ref.slots[b + S_GLYPH_ID]); if (firstBad < 0) firstBad = id; }
       if (gpu[b + S_ROW] !== ref.slots[b + S_ROW]) { fail('slot ' + id + ' ROW ' + gpu[b + S_ROW] + ' != ' + ref.slots[b + S_ROW]); if (firstBad < 0) firstBad = id; }
       if (gpu[b + S_COL] !== ref.slots[b + S_COL]) { fail('slot ' + id + ' COL ' + gpu[b + S_COL] + ' != ' + ref.slots[b + S_COL]); if (firstBad < 0) firstBad = id; }
       if (gpu[b + S_ADVANCE] !== ref.slots[b + S_ADVANCE] || gpu[b + S_HEIGHT] !== ref.slots[b + S_HEIGHT]) { fail('slot ' + id + ' metrics mismatch'); if (firstBad < 0) firstBad = id; }

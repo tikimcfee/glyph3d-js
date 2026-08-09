@@ -27,7 +27,7 @@ import { readFileSync } from 'node:fs';
 import { buildGlyphTrie, trieLookup, BLOCK_INDEX_LENGTH } from '../packages/glyph3d-core/src/compute/GlyphTrie.js';
 import {
   runPipeline, decodeAndResolve, paginate, boundsReduce, allocSlots, rowsForLine,
-  deriveStride, SLOT_STRIDE, S_CODEPOINT, S_X, S_Y, S_Z, S_ROW, S_COL,
+  deriveStride, SLOT_STRIDE, S_GLYPH_ID, S_X, S_Y, S_Z, S_ROW, S_COL,
   S_ADVANCE, S_HEIGHT, S_FLAGS, S_BASE_X, F_LEADER, NEWLINE,
 } from '../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
 
@@ -136,16 +136,19 @@ for (const { name, bytes } of CORPORA) {
       i += chLen;
     }
   }
-  const gotCps = [], gotOffsets = [];
+  // The codepoint lane is gone (slot index == byte offset is the codepoint truth), so
+  // the decode check compares through the trie: each leader's RESOLVED glyph id must
+  // match the id the wanted codepoint resolves to.
+  const gotGids = [], gotOffsets = [];
   for (let id = 0; id < bytes.length; id++) {
     if ((slots[id * SLOT_STRIDE + S_FLAGS] & F_LEADER) !== 0) {
-      gotCps.push(slots[id * SLOT_STRIDE + S_CODEPOINT]); gotOffsets.push(id);
+      gotGids.push(slots[id * SLOT_STRIDE + S_GLYPH_ID]); gotOffsets.push(id);
     }
   }
-  ok(gotCps.length === wantCps.length, `${name}: leader count ${gotCps.length} vs ${wantCps.length}`);
+  ok(gotGids.length === wantCps.length, `${name}: leader count ${gotGids.length} vs ${wantCps.length}`);
   let cpBad = 0, offBad = 0;
-  for (let i = 0; i < Math.min(gotCps.length, wantCps.length); i++) {
-    if (gotCps[i] !== wantCps[i]) cpBad++;
+  for (let i = 0; i < Math.min(gotGids.length, wantCps.length); i++) {
+    if (gotGids[i] !== trieLookup(trie, wantCps[i]).glyphId) cpBad++;
     if (gotOffsets[i] !== wantOffsets[i]) offBad++;
   }
   ok(cpBad === 0, `${name}: ${cpBad} codepoints differ from TextDecoder`);
@@ -171,7 +174,7 @@ function sequentialFold(bytes, slots, wrap = 0) {
     row[id] = rowBase + (wrap > 0 ? Math.floor(c / wrap) : 0);
     col[id] = c;
     xs[id] = x;
-    if (slots[o + S_CODEPOINT] === NEWLINE) { rowBase += rowsForLine(c, wrap); c = 0; x = 0; }
+    if (bytes[id] === NEWLINE) { rowBase += rowsForLine(c, wrap); c = 0; x = 0; }
     else { x += slots[o + S_ADVANCE]; c += 1; }
   }
   return { row, col, xs };
@@ -375,7 +378,7 @@ for (const { name, bytes } of CORPORA) {
   ok(run.misses.length === 2, `missing: ${run.misses.length} reported (expected 2)`);
   ok(run.misses.every((cp) => cp === 0x1F4A9), 'missing: reported the right codepoint');
   // 'c' must sit one full cell past the un-encoded emoji's advance, not on top of it.
-  const cIdx = [...bytes].findIndex((_, i) => run.slots[i * SLOT_STRIDE + S_CODEPOINT] === 0x63);
+  const cIdx = bytes.indexOf(0x63);   // 'c' — ASCII, so byte == codepoint
   ok(run.slots[cIdx * SLOT_STRIDE + S_X] > CELL_W * 2.5,
      'missing: an un-encoded glyph still occupies its advance');
 }

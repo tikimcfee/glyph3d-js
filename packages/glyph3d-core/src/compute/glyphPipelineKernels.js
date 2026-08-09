@@ -74,8 +74,8 @@
 
 import { TSL, StorageInstancedBufferAttribute } from 'three/webgpu';
 import {
-    SLOT_STRIDE, S_CODEPOINT, S_GLYPH_ID, S_ADVANCE, S_HEIGHT,
-    S_X, S_Y, S_Z, S_ROW, S_COL, S_FLAGS, S_BASE_X, S_LINE_ADV, S_ORD,
+    SLOT_STRIDE, S_GLYPH_ID, S_ADVANCE, S_HEIGHT,
+    S_X, S_Y, S_Z, S_ROW, S_COL, S_FLAGS, S_BASE_X, S_LINE_ADV, S_ORD, F_NEWLINE,
     F_LEADER, F_RENDERED, F_MISSING, NEWLINE,
     FAR_TEX, FAR_SLAB, FAR_ITEM_STRIDE, FAR_FIXED,
     FI_SLAB_X, FI_SLAB_Y, FI_ROWS_PER_TEXEL, FI_COLS_PER_TEXEL, FI_DIRTY,
@@ -384,14 +384,16 @@ export default class GlyphPipelineKernels {
             const tflags = this.trieBlocks.element(eo.add(uint(LANE_FLAGS))).toVar('tf');
 
             const o = id.mul(uint(SLOT_STRIDE)).toVar('o');
-            slots.element(o.add(uint(S_CODEPOINT))).assign(cp.toFloat());
             slots.element(o.add(uint(S_GLYPH_ID))).assign(glyphId);
             slots.element(o.add(uint(S_ADVANCE))).assign(advance);
             slots.element(o.add(uint(S_HEIGHT))).assign(height);
 
             const missing = tflags.greaterThan(float(0.5)).toVar('missing');
+            // Newline-ness is decided HERE, once — the scan reads the flag bit, never
+            // a codepoint lane (there is none; the byte buffer is the codepoint truth).
+            const nlBit = cp.equal(uint(NEWLINE)).select(float(F_NEWLINE), float(0)).toVar('nlBit');
             slots.element(o.add(uint(S_FLAGS)))
-                .assign(missing.select(float(F_LEADER | F_MISSING), float(F_LEADER)));
+                .assign(missing.select(float(F_LEADER | F_MISSING), float(F_LEADER)).add(nlBit));
 
             // Report the codepoint so the CPU can encode it and grow the atlas. Bounded ring:
             // dropping an overflow miss costs a blank glyph this pass, not a wrong layout.
@@ -578,7 +580,7 @@ export default class GlyphPipelineKernels {
         acc.wrap.assign(cur.wrap);
         If(flags.bitAnd(int(F_LEADER)).notEqual(int(0)), () => {
             acc.glyphs.addAssign(int(1));
-            If(S.element(o.add(uint(S_CODEPOINT))).equal(float(NEWLINE)), () => {
+            If(flags.bitAnd(int(F_NEWLINE)).notEqual(int(0)), () => {
                 // A newline closes acc's open tail run: if lines were already closed, the
                 // run is a whole interior line (rows += rowsForLine); if not, it fixes head.
                 If(acc.nl.equal(int(0)), () => {

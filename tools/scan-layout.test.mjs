@@ -20,7 +20,7 @@
 
 import { buildGlyphTrie } from '../packages/glyph3d-core/src/compute/GlyphTrie.js';
 import {
-  runPipeline, SLOT_STRIDE, S_CODEPOINT, S_GLYPH_ID, S_ADVANCE, S_HEIGHT,
+  runPipeline, SLOT_STRIDE, S_GLYPH_ID, S_ADVANCE, S_HEIGHT,
   S_X, S_Y, S_Z, S_ROW, S_COL, S_FLAGS, S_BASE_X, S_LINE_ADV, S_ORD, F_LEADER,
 } from '../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
 import {
@@ -79,7 +79,7 @@ function randomText(r, lines = 40) {
 
 // ── comparator: exact where the algebra promises exact, eps where f32 grouping may differ ──
 function diffSlots(name, refSlots, gotSlots, n, foldPerByte) {
-  const EXACT = [S_CODEPOINT, S_GLYPH_ID, S_ADVANCE, S_HEIGHT, S_ROW, S_COL, S_FLAGS, S_ORD];
+  const EXACT = [S_GLYPH_ID, S_ADVANCE, S_HEIGHT, S_ROW, S_COL, S_FLAGS, S_ORD];
   let bad = null, worstRel = 0;
   for (let id = 0; id < n && !bad; id++) {
     const o = id * SLOT_STRIDE;
