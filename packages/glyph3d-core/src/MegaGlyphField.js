@@ -281,7 +281,7 @@ export class MegaGlyphField {
         if ((geom._maxInstanceCount || 0) >= n) return;
         console.info(`MegaGlyphField: capacity ${geom._maxInstanceCount} → ${n} instances (arena growth)`);
         for (const [name, itemSize, Ctor, normalized] of [
-            ['instanceColor', 4, Float32Array, false],
+            ['instanceColor', 4, Uint8Array, true],
             ['instanceGroupId', 1, Float32Array, false],
             ['instancePickingId', 1, Float32Array, false],
             ['instanceHighlight', 4, Uint8Array, true],
@@ -290,10 +290,14 @@ export class MegaGlyphField {
             const arr = new Ctor(n * itemSize);
             if (old) arr.set(old.array.subarray(0, Math.min(old.array.length, arr.length)));
             // instanceColor keeps its STORAGE class through growth — the far-scatter
-            // kernel binds it as a compute-readable view (see GlyphField's creation note).
-            geom.setAttribute(name, name === 'instanceColor'
-                ? new StorageInstancedBufferAttribute(arr, itemSize)
-                : new THREE.InstancedBufferAttribute(arr, itemSize, normalized));
+            // kernel binds it as a compute-readable u32 view (see GlyphField's creation note).
+            if (name === 'instanceColor') {
+                const colorAttr = new StorageInstancedBufferAttribute(arr, itemSize);
+                colorAttr.normalized = true;
+                geom.setAttribute(name, colorAttr);
+            } else {
+                geom.setAttribute(name, new THREE.InstancedBufferAttribute(arr, itemSize, normalized));
+            }
         }
         geom._maxInstanceCount = n;
         this.field.config.maxInstances = n;

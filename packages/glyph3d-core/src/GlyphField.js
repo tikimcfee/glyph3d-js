@@ -1119,14 +1119,18 @@ export default class GlyphField {
         geometry.setAttribute('instanceGlyphId',
             new THREE.InstancedBufferAttribute(new Float32Array(maxCount), 1));
         }
-        // instanceColor is stride-4 AND a StorageInstancedBufferAttribute from BIRTH,
-        // for every kind: the shared material declares it vec4 (the vertex-fetch stride
-        // is baked into the pipeline — a stride-3 attribute would splay colors exactly
-        // like the stride-3 instancePosition paradox above), and the STORAGE class is
-        // what lets the far-scatter kernel read the same buffer as a storage view
-        // (createStorageAttribute binds STORAGE|VERTEX — see FarTextAtlas/far kernels).
-        geometry.setAttribute('instanceColor',
-            new StorageInstancedBufferAttribute(new Float32Array(maxCount * 4), 4));
+        // instanceColor is RGBA8 UNORM, stride-4, and a StorageInstancedBufferAttribute
+        // from BIRTH, for every kind: the shared material declares it vec4 and unorm8x4
+        // reads as the same normalized vec4 (4B/glyph instead of 16 — colors are
+        // display-space 0-1, 256 steps is their native precision), and the STORAGE
+        // class is what lets the far-scatter kernel read the same buffer as a u32
+        // storage view (createStorageAttribute binds STORAGE|VERTEX — see far kernels).
+        // API stays {r,g,b} 0-1: write sites scale ×255.
+        {
+            const colorAttr = new StorageInstancedBufferAttribute(new Uint8Array(maxCount * 4), 4);
+            colorAttr.normalized = true;
+            geometry.setAttribute('instanceColor', colorAttr);
+        }
         geometry.setAttribute('instanceGroupId',
             new THREE.InstancedBufferAttribute(new Float32Array(maxCount), 1));
         // instancePickingId — written by PickingSystem.register() after flush
@@ -1359,9 +1363,10 @@ export default class GlyphField {
         const geom = this.instanceMesh.geometry;
         const arr  = geom.attributes.instanceColor.array;
         const base = entry.bufferStartIndex;
+        const cr = (newColor.r * 255 + 0.5) | 0, cg = (newColor.g * 255 + 0.5) | 0, cb = (newColor.b * 255 + 0.5) | 0;
         for (let i = 0; i < entry.glyphCount; i++) {
             const b = (base + i) * 4;
-            arr[b] = newColor.r; arr[b + 1] = newColor.g; arr[b + 2] = newColor.b;
+            arr[b] = cr; arr[b + 1] = cg; arr[b + 2] = cb;
         }
         const attr = geom.attributes.instanceColor;
         attr.addUpdateRange(base * 4, entry.glyphCount * 4);
@@ -1501,7 +1506,9 @@ export default class GlyphField {
         if (!attr) return;
         const b = absoluteSlot * 4;
         if (b < 0 || b + 2 >= attr.array.length) return;
-        attr.array[b] = color.r; attr.array[b + 1] = color.g; attr.array[b + 2] = color.b;
+        attr.array[b]     = (color.r * 255 + 0.5) | 0;
+        attr.array[b + 1] = (color.g * 255 + 0.5) | 0;
+        attr.array[b + 2] = (color.b * 255 + 0.5) | 0;
         attr.addUpdateRange(b, 4);
         attr.needsUpdate = true;
     }
@@ -1521,9 +1528,10 @@ export default class GlyphField {
         const arr = attr.array;
         const start = Math.max(0, startSlot | 0);
         const end = Math.min((arr.length / 4) | 0, start + count);
+        const cr = (color.r * 255 + 0.5) | 0, cg = (color.g * 255 + 0.5) | 0, cb = (color.b * 255 + 0.5) | 0;
         for (let s = start; s < end; s++) {
             const b = s * 4;
-            arr[b] = color.r; arr[b + 1] = color.g; arr[b + 2] = color.b;
+            arr[b] = cr; arr[b + 1] = cg; arr[b + 2] = cb;
         }
         if (end > start) {
             attr.addUpdateRange(start * 4, (end - start) * 4);
@@ -1554,7 +1562,9 @@ export default class GlyphField {
         for (let s = start, o = off; s < end; s++, o++) {
             const p = palette[o] * 3;
             const b = s * 4;
-            arr[b] = lut[p]; arr[b + 1] = lut[p + 1]; arr[b + 2] = lut[p + 2];
+            arr[b]     = (lut[p]     * 255 + 0.5) | 0;
+            arr[b + 1] = (lut[p + 1] * 255 + 0.5) | 0;
+            arr[b + 2] = (lut[p + 2] * 255 + 0.5) | 0;
         }
         if (end > start) {
             attr.addUpdateRange(start * 4, (end - start) * 4);
@@ -1593,7 +1603,7 @@ export default class GlyphField {
                 if (!name.startsWith('instance')) continue;
                 const attr = geom.attributes[name];
                 allocatedBytes += attr.array.byteLength;
-                usedBytes      += instanceCount * attr.itemSize * 4;
+                usedBytes      += instanceCount * attr.itemSize * attr.array.BYTES_PER_ELEMENT;
             }
         }
         const groupBytes = this._groupData?.byteLength ?? 0;
@@ -2053,9 +2063,9 @@ export default class GlyphField {
             siz[i * 2]     = g.size.width;
             siz[i * 2 + 1] = g.size.height;
             gids[i]        = g.charCode || 0;
-            col[i * 4]     = g.color.r;
-            col[i * 4 + 1] = g.color.g;
-            col[i * 4 + 2] = g.color.b;
+            col[i * 4]     = (g.color.r * 255 + 0.5) | 0;
+            col[i * 4 + 1] = (g.color.g * 255 + 0.5) | 0;
+            col[i * 4 + 2] = (g.color.b * 255 + 0.5) | 0;
             grp[i]         = g.groupId || 0;
         }
 
@@ -2171,13 +2181,13 @@ export default class GlyphField {
         // Colors ship stride-3 from the worker; the shared material declares vec4
         // (the far kernel's storage view needs the stride-4 storage class on the byte
         // field) — pad to stride-4 here, same discipline as cpuPos above.
-        const col4 = new Float32Array(count * 4);
+        const col4 = new Uint8Array(count * 4);
         for (let i = 0; i < count; i++) {
-            col4[i * 4 + 0] = colors[i * 3 + 0];
-            col4[i * 4 + 1] = colors[i * 3 + 1];
-            col4[i * 4 + 2] = colors[i * 3 + 2];
+            col4[i * 4 + 0] = (colors[i * 3 + 0] * 255 + 0.5) | 0;
+            col4[i * 4 + 1] = (colors[i * 3 + 1] * 255 + 0.5) | 0;
+            col4[i * 4 + 2] = (colors[i * 3 + 2] * 255 + 0.5) | 0;
         }
-        geom.setAttribute('instanceColor',    new THREE.InstancedBufferAttribute(col4, 4));
+        geom.setAttribute('instanceColor',    new THREE.InstancedBufferAttribute(col4, 4, true));
         geom.setAttribute('instanceGroupId',  new THREE.InstancedBufferAttribute(groupIds || new Float32Array(count), 1));
         if (!geom.attributes.instancePickingId || geom.attributes.instancePickingId.array.length < count) {
             geom.setAttribute('instancePickingId', new THREE.InstancedBufferAttribute(new Float32Array(count), 1));

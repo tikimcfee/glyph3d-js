@@ -250,7 +250,7 @@ export default class GlyphPipelineKernels {
         // the kernels close over this node at their lazy build, so a live refresh
         // (refreshFarInk's exposure dial) can only ever write the PREFIX in place.
         this.farInk = instancedArray(1 << 16, 'float').setName('GlyphFarInk');
-        this._farColorAttr = new StorageInstancedBufferAttribute(new Float32Array(4), 4);
+        this._farColorAttr = new StorageInstancedBufferAttribute(new Uint8Array(4), 4);
         this._kFarScatter = null;
         this._kFarNormalize = null;
 
@@ -1159,7 +1159,14 @@ export default class GlyphPipelineKernels {
             // Linearize BEFORE accumulating (the reference oracle mirrors this): colors
             // are authored sRGB, and energy-correct sums are what lets the mip chain dim
             // minified text physically instead of gamma-crushing it to black.
-            const c = this._farColorsNode.element(id).xyz.pow(vec3(2.2));
+            // instanceColor is RGBA8 packed — one u32 per glyph, unpacked by hand
+            // (TSL has no unpack4x8unorm as of r185).
+            const cw = this._farColorsNode.element(id);
+            const c = vec3(
+                cw.bitAnd(uint(0xFF)).toFloat(),
+                cw.shiftRight(uint(8)).bitAnd(uint(0xFF)).toFloat(),
+                cw.shiftRight(uint(16)).bitAnd(uint(0xFF)).toFloat(),
+            ).div(255).pow(vec3(2.2));
             const fixed = float(FAR_FIXED);
             atomicAdd(this.farAccum.element(ab.add(uint(0))), uint(c.x.mul(d).mul(fixed)));
             atomicAdd(this.farAccum.element(ab.add(uint(1))), uint(c.y.mul(d).mul(fixed)));
@@ -1278,7 +1285,9 @@ export default class GlyphPipelineKernels {
      *  (ink table, color attribute) handed in post-construction. @private */
     _ensureFarKernels() {
         if (this._kFarScatter) return;
-        this._farColorsNode = storage(this._farColorAttr, 'vec4', this.maxBytes)
+        // The RGBA8 color attribute viewed as one u32 per glyph — same GPUBuffer the
+        // vertex stage reads as unorm8x4; the scatter unpacks by hand.
+        this._farColorsNode = storage(this._farColorAttr, 'uint', this.maxBytes)
             .toReadOnly().setName('GlyphFarColors');
         this._kFarScatter = this._buildFarScatter();
         this._kFarNormalize = this._buildFarNormalize();
