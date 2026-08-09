@@ -32,8 +32,9 @@ const HOVER_GLYPH_TINT = { r: 0.18, g: 0.25, b: 0.38 };
 // grid's glyph. Byte grids are VIEWS sharing one mega-field mesh — the hit token is
 // the mega-field and slotIndex is the ABSOLUTE arena slot, resolved to (view,
 // view-local slot) by its range table; classic fields (terminals) keep token ===
-// the grid's own renderer with field-local slots.
-const resolveGlyphHitFor = (grid, hit) => {
+// the grid's own renderer with field-local slots. Exported: TouchAdapter reuses it
+// for caret placement at the tap point (no duplicated slot math).
+export const resolveGlyphHitFor = (grid, hit) => {
   if (!hit) return null;
   const r = grid?.getRenderer?.();
   if (!r) return null;
@@ -86,8 +87,9 @@ const MIN_COLS = 8;
 const MIN_ROWS = 3;
 
 // Map a grid object (the token a 'grid'-channel pick resolves to) back to its
-// registry entry { id, type, grid }.
-function entryForGrid(registry, grid) {
+// registry entry { id, type, grid }. Exported: TouchAdapter reuses it to resolve
+// a tap pick to the same entry shape the mouse hover loop produces.
+export function entryForGrid(registry, grid) {
   if (!grid) return null;
   const id = registry.getIdByGrid(grid);
   return id ? registry.get(id) : null;
@@ -149,10 +151,23 @@ export function CanvasPicker() {
     };
     client.ctx.isGripPress = isGripPress;
 
-    const onMove = (e) => { s.x = e.clientX; s.y = e.clientY; s.in = true; };
-    const onEnter = () => { s.in = true; };
-    const onLeave = () => { s.in = false; };
-    const onDown = (e) => { s.downX = e.clientX; s.downY = e.clientY; };
+    // Touch yields here. TouchAdapter owns ALL finger-on-screen input on the
+    // canvas (pan/pinch/scroll/tap); the mouse path (this component, ObjectDragger,
+    // ResizeDragger, and ViewerCameraController's raw mouse bindings) must never
+    // double-handle a finger. Pointer Events fire for touch, so each handler
+    // early-returns on `pointerType === 'touch'` and lets TouchAdapter drive.
+    // (touch-action:none + preventDefault on the touch listeners suppress the
+    // compatibility mouse events, so the camera substrate sees nothing of touch.)
+    const onMove = (e) => {
+      if (e.pointerType === 'touch') return;
+      s.x = e.clientX; s.y = e.clientY; s.in = true;
+    };
+    const onEnter = (e) => { if (e.pointerType !== 'touch') s.in = true; };
+    const onLeave = (e) => { if (e.pointerType !== 'touch') s.in = false; };
+    const onDown = (e) => {
+      if (e.pointerType === 'touch') return;
+      s.downX = e.clientX; s.downY = e.clientY;
+    };
 
     // Glyph-level pick at the current pointer → caret. The glyph channel returns
     // the instance index; instance order == buffer-slot order, so the grid inverts
@@ -198,6 +213,7 @@ export function CanvasPicker() {
     };
 
     const onUp = (e) => {
+      if (e.pointerType === 'touch') return; // TouchAdapter owns tap-to-select
       // A resize drag (ResizeDragger) owns this release — never treat its tiny
       // sub-DRAG_PX nudges as a click that would re-select / refocus.
       if (client.ctx.resizing) return;
@@ -438,6 +454,7 @@ export function ObjectDragger() {
     let drag = null; // { grid, id, type, lastX, lastY }
 
     const onDown = (e) => {
+      if (e.pointerType === 'touch') return; // touch move-object is a TouchAdapter follow-up
       if (e.button !== 0 || !(e.ctrlKey || e.metaKey)) return; // Ctrl/Cmd + LMB only
       // Grab whatever's highlighted — the grid-channel hover result, in the
       // attention bus. Consistent with the outline the user sees.
@@ -622,6 +639,7 @@ export function ResizeDragger() {
       // Plain LMB on a grip. Ctrl/Cmd is the MOVE gesture (ObjectDragger owns it),
       // so a modifier here is not a resize — bail and let that path run. The press
       // authority is isGripPress() (freshness-gated), NOT the raw async hover flag.
+      if (e.pointerType === 'touch') return; // touch resize/scale drag is a TouchAdapter follow-up
       if (e.button !== 0 || e.ctrlKey || e.metaKey) return;
       if (!ctx.isGripPress?.(e.clientX, e.clientY)) return;
       const token = ctx.handleHover;       // { grid, edge, role }; isGripPress ⇒ non-null

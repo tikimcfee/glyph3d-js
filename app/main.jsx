@@ -6,6 +6,7 @@ import CommandProvider from './client/CommandProvider.jsx';
 import ButtonBar from './ButtonBar.jsx';
 import IdeDock from './IdeDock.jsx';
 import { CanvasPicker, ObjectDragger, ResizeDragger, SelectionIndicator } from './client/CanvasInteraction.jsx';
+import TouchAdapter from './client/TouchAdapter.jsx';
 import HudPanel from './client/HudPanel.jsx';
 import CommandBar from './client/CommandBar.jsx';
 import StatusBar from './StatusBar.jsx';
@@ -260,6 +261,11 @@ function App() {
                 <ObjectDragger />
                 <ResizeDragger />
                 <SelectionIndicator />
+                {/* Touch input — owns all finger-on-screen gestures (pan/pinch/
+                    scroll/tap) on the canvas, driving the camera + gesture seams
+                    the mouse path uses. The mouse components above yield on
+                    `pointerType === 'touch'`; see TouchAdapter.jsx. */}
+                <TouchAdapter />
               </CommandProvider>
             </GlyphCanvas>
           )}
