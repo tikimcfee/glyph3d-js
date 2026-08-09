@@ -26,6 +26,7 @@ import GlyphField from '../GlyphField.js';
 import TerminalEmulator from './TerminalEmulator.js';
 import { detectVerticalScroll, captureScrolledRows, depthFade, reflowHistoryRows } from './terminalDepthHistory.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
+import { LAYER_BAND, getBandDistance } from '../core/layerBands.js';
 import MonospaceShapeCache from '../shaping/MonospaceShapeCache.js';
 import FramedGlyphField from './FramedGlyphField.js';
 import Button3D from '../components/Button3D.js';
@@ -1430,6 +1431,7 @@ export default class TerminalGrid extends FramedGlyphField {
             opacity: this._bgOpacity,
             side: THREE.DoubleSide,
             depthWrite: true,
+            layerBand: LAYER_BAND.GRID_BACKGROUND,   // one depth step in front of the page face
         });
 
         this._background = new THREE.Mesh(geometry, this._panel.material);
@@ -1458,6 +1460,16 @@ export default class TerminalGrid extends FramedGlyphField {
         if (opacity != null) this._applyGlyphAlpha();
     }
 
+    /**
+     * Live nudge of the background's set-back behind the text (the `band.gridBgGap`
+     * dial) — a pure z shift by the delta; no relayout. See CodeGrid.refreshBackground.
+     */
+    refreshBackground(gap) {
+        if (!this._background) return;
+        this._background.position.z += (this._bgGap ?? 0) - gap;
+        this._bgGap = gap;
+    }
+
     // setBorder / setStateColors / setBorderFlag — the in-shader border delegators (this._panel?.x)
     // — are inherited from FramedGlyphField. setBackgroundStyle stays below (terminal-specific _bg*).
 
@@ -1477,10 +1489,11 @@ export default class TerminalGrid extends FramedGlyphField {
         const height = this.rows * strideY + pad * 2;
 
         this._background.scale.set(width, height, 1);
+        this._bgGap ??= getBandDistance(LAYER_BAND.GRID_BACKGROUND);
         this._background.position.set(
             (this.cols * strideX) / 2 - m.charWidth / 2,
             -(this.rows * strideY) / 2 + strideY / 2,
-            -0.1  // just behind text — minimal float
+            -this._bgGap  // just behind text — the live band distance (was hard-coded -0.1)
         );
     }
 }

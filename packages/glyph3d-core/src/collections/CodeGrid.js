@@ -14,6 +14,7 @@ import * as THREE from 'three';
 import { ensureMegaField } from '../MegaGlyphField.js';
 import { loadStats } from '../core/loadStats.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
+import { LAYER_BAND, getBandDistance } from '../core/layerBands.js';
 import { BOUNDS_Z_PAD } from '../core/constants.js';
 import { computeCellMetrics } from '../core/cellMetrics.js';
 import { rowsUnderWrap, bakeFile } from '../compute/glyphBake.js';
@@ -1175,11 +1176,15 @@ class CodeGrid extends FramedGlyphField {
             opacity: this.config.backgroundOpacity,
             side: THREE.DoubleSide,
             depthWrite: true,
+            layerBand: LAYER_BAND.GRID_BACKGROUND,   // one depth step in front of the page face
         });
 
         this._background = new THREE.Mesh(geometry, this._panel.material);
         this._background.renderOrder = RENDER_ORDER.GRID_BACKGROUND; // Draw backgrounds before glyphs
-        this._background.position.z = -0.1; // Just behind text — minimal float
+        // Behind the text by the live band distance (was hard-coded -0.1; the polygonOffset
+        // band above is what actually guarantees the order — this keeps geometric parallax).
+        this._bgGap = getBandDistance(LAYER_BAND.GRID_BACKGROUND);
+        this._background.position.z = -this._bgGap;
         this._background.visible = this.config.showBackground;
         this.add(this._background);
     }
@@ -1196,6 +1201,18 @@ class CodeGrid extends FramedGlyphField {
         if (!this._panel) return;
         this._panel.setFill(color, opacity);
         if (opacity != null) this._applyGlyphAlpha();
+    }
+
+    /**
+     * Live nudge of the background's set-back behind the text (the `band.gridBgGap`
+     * dial). The plane always sits at (base − gap) — base 0 for the fixed path, the
+     * content zMin for the auto-sized path — so a gap change is a pure z shift by the
+     * delta; no relayout.
+     */
+    refreshBackground(gap) {
+        if (!this._background) return;
+        this._background.position.z += (this._bgGap ?? 0) - gap;
+        this._bgGap = gap;
     }
 
     /**
@@ -2127,7 +2144,7 @@ class CodeGrid extends FramedGlyphField {
             // Position background at the BACK of the bounding box (Z min) so it sits behind
             // all Z-wrapped / z-paged text layers.
             const zMin = bounds.min.z !== undefined ? bounds.min.z : 0;
-            const backgroundZ = zMin - 0.5;  // Slightly behind the furthest text
+            const backgroundZ = zMin - (this._bgGap ?? getBandDistance(LAYER_BAND.GRID_BACKGROUND));
 
             // Vertical center: the fixed frame band when framed (scroll-independent — the
             // window stays put while content flows through it), else the content center.

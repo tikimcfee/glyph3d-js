@@ -56,6 +56,7 @@ import { PERF_THRESHOLDS } from './core/constants.js';
 import { computeCellMetrics } from './core/cellMetrics.js';
 import { RENDER_MODE, buildGlyphVertexTransform, registerByteSlotsNode, registerByteSlotsMaterial, rebindByteSlots } from './core/glyphVertex.js';
 import { FAR_TEX, FAR_SLAB } from './compute/glyphPipelineReference.js';
+import { LAYER_BAND, withBandBias } from './core/layerBands.js';
 
 const MAX_GROUPS_DEFAULT = PERF_THRESHOLDS.defaultMaxGroups ?? 64;
 const MAX_GROUPS_DIM     = 16000;
@@ -808,7 +809,7 @@ function _getSharedFieldMaterial(kind) {
         );
 
     material = new MeshBasicNodeMaterial();
-    material.vertexNode  = vertexFn();
+    material.vertexNode  = withBandBias(vertexFn(), LAYER_BAND.GLYPH);   // live band depth bias — core/layerBands.js
     material.outputNode  = outputNode;
     material.side        = THREE.DoubleSide;
     if (kind === 'occluder') {
@@ -829,6 +830,12 @@ function _getSharedFieldMaterial(kind) {
         // always single-pass), so opt out.
         material.forceSinglePass = true;
     }
+
+    // The front-most band: glyphs win the depth test over their own background wall
+    // and the page face behind it at ANY camera distance (the z-fight fix — see
+    // core/layerBands.js). The occluder kind wears the same bias so the opaque
+    // occluder set stays depth-consistent with the glyphs it stands in for.
+    // (The bias itself rides material.vertexNode above — one shared uniform, live.)
 
     if (isByte) registerByteSlotsMaterial(material);
     _sharedFieldMaterials.set(kind, material);

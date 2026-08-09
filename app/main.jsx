@@ -191,7 +191,11 @@ function App() {
           {atlas && !error && (
             <GlyphCanvas
               atlas={atlas}
-              camera={{ position: [0, 0, 300], fov: 70, near: 0.1, far: 20000 }}
+              // near 0.1 → 1.0: depth precision scales linearly with near — at a 15k-unit
+              // library vantage, near 0.1 makes one depth step ~134 world units (the whole
+              // sheet pitch z-fights; rear text bleeds through front panels). near 1 is
+              // 10× that; see docs/plans/z-order-transparency-reorg.md. Live: camera.nearPlane.
+              camera={{ position: [0, 0, 300], fov: 70, near: 1.0, far: 20000 }}
               // Backdrop is the renderer's clear color, NOT scene.background —
               // a null scene.background means the GPU pick pass never has to
               // touch scene state to keep its ID buffer clean (a set background

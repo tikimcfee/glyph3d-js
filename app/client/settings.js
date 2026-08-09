@@ -694,15 +694,15 @@ export const SETTINGS = [
   { key: 'far.inkMax', label: 'Ink cap', group: 'Far texture (text mass)', type: 'number', default: farInkParams.maxCov, min: 0.1, max: 1, step: 0.02, apply: farInkParam('maxCov') },
   { key: 'far.inkBitmap', label: 'Ink (bitmap glyphs)', group: 'Far texture (text mass)', type: 'number', default: farInkParams.bitmap, min: 0.1, max: 1, step: 0.05, apply: farInkParam('bitmap') },
 
-  // Layer bands — the z-fight playground (docs/plans/z-order-transparency-reorg.md). The
-  // stacked translucent layers (page face → grid wall → glyphs) sit close enough that at a
-  // library vantage their geometric gaps fall under one depth-buffer step; the band bias
-  // shifts each layer's clip-z by a CONSTANT NDC fraction (clip.z += bias·w in the vertex
-  // stage), so the order holds at any camera distance. NEGATIVE pulls toward the camera.
-  // Defaults keep glyph (−2e-4) < grid wall (−1e-4) < page face (0). The biases are
-  // microscopic on purpose: tie-breakers, not geometry — they must never cross a real gap
-  // (the ~90-unit sheet pitch). Zero a band to watch the fighting return. Live by
-  // construction (one shared uniform per band — see core/layerBands.js).
+  // Layer bands — the z-fight playground (docs/plans/z-order-transparency-reorg.md).
+  // Each band's bias shifts its clip-z by a constant NDC fraction (clip.z += bias·w in
+  // the vertex stage); NEGATIVE pulls toward the camera. DEFAULTS ARE ZERO on purpose:
+  // a fixed NDC bias is distance-independent but the layer gaps aren't — at library
+  // vantages the cross-stack gaps shrink below any useful bias and rear text starts
+  // outranking front faces. With camera.nearPlane ≥ ~4 geometry resolves the order
+  // alone. The biases are a debugging PROBE: nudge one to force an ordering and watch
+  // a layer win/lose. Live by construction (one shared uniform per band — see
+  // core/layerBands.js).
   { key: 'band.faceBias', label: 'Page face — depth bias (NDC)', group: 'Layer bands', type: 'number', default: getLayerBandBias(LAYER_BAND.PANEL_FACE), min: -0.005, max: 0.005, step: 0.00005, apply: bandParam(LAYER_BAND.PANEL_FACE) },
   { key: 'band.gridBgBias', label: 'Grid wall — depth bias (NDC)', group: 'Layer bands', type: 'number', default: getLayerBandBias(LAYER_BAND.GRID_BACKGROUND), min: -0.005, max: 0.005, step: 0.00005, apply: bandParam(LAYER_BAND.GRID_BACKGROUND) },
   { key: 'band.glyphBias', label: 'Glyphs — depth bias (NDC)', group: 'Layer bands', type: 'number', default: getLayerBandBias(LAYER_BAND.GLYPH), min: -0.005, max: 0.005, step: 0.00005, apply: bandParam(LAYER_BAND.GLYPH) },

@@ -32,7 +32,8 @@
 
 import * as THREE from 'three';
 import { MeshBasicNodeMaterial } from 'three/webgpu';
-import { uv, vec2, float, uint, uniform, mix, smoothstep, min, max, fwidth, bitAnd, select, time, sin } from 'three/tsl';
+import { uv, vec2, float, uint, uniform, mix, smoothstep, min, max, fwidth, bitAnd, select, time, sin, modelViewProjection } from 'three/tsl';
+import { withBandBias } from '../core/layerBands.js';
 
 /** Default border thickness in SCREEN PIXELS. */
 export const PANEL_BORDER_WIDTH = 1.5;
@@ -79,10 +80,13 @@ export function setPanelStateColorDefaults({ hover, focus, input, capture } = {}
  * @param {number} [opts.opacity=1] - fill opacity (transparent flag tracks opacity<1)
  * @param {number} [opts.side=THREE.DoubleSide]
  * @param {boolean} [opts.depthWrite=true] - the panel occludes content behind it (dock stacks)
+ * @param {string} [opts.layerBand] - a LAYER_BAND name: the vertex stage wears the band's
+ *        live clip-z depth bias (the `band.*` settings dials — see core/layerBands.js), so
+ *        stacked translucent layers keep a deterministic depth order at any camera distance
  * @returns {{ material: MeshBasicNodeMaterial, setFill, setBorder, setBorderFlag, getBorderFlags }}
  */
 export function createPanelMaterial({ color = 0x000000, opacity = 1,
-                                      side = THREE.DoubleSide, depthWrite = true } = {}) {
+                                      side = THREE.DoubleSide, depthWrite = true, layerBand = null } = {}) {
     const uFill = uniform(new THREE.Color(color));
     const uOpacity = uniform(opacity);
     const uBorderColor = uniform(new THREE.Color(0xffffff)); // identity hue (DOCKED)
@@ -129,6 +133,10 @@ export function createPanelMaterial({ color = 0x000000, opacity = 1,
     material.forceSinglePass = true;   // transparent+DoubleSide double-pass: no (see GlyphField)
     material.colorNode = mix(uFill, borderCol, rim);
     material.opacityNode = max(uOpacity, rim);
+    // The layer-band depth bias rides the vertex stage (a live shared uniform — see
+    // core/layerBands.js): clip.z += bias·w. modelViewProjection IS the standard clip
+    // output, so this replaces nothing but the depth the fragment lands at.
+    if (layerBand) material.vertexNode = withBandBias(modelViewProjection, layerBand);
 
     let flags = 0;
     return {

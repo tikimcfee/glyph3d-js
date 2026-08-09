@@ -27,6 +27,7 @@
 import * as THREE from 'three';
 import { createPanelMaterial, BORDER_FLAGS } from '../panelMaterial.js';
 import { RENDER_ORDER } from '../../core/renderOrder.js';
+import { LAYER_BAND } from '../../core/layerBands.js';
 import { getPipelineArena } from '../../compute/GlyphLayoutCompute.js';
 
 export const PANEL_SURFACE_DEFAULTS = {
@@ -61,6 +62,7 @@ function surfaceMaterial(opts) {
     _mat ??= createPanelMaterial({
         color: opts.surfaceColor, opacity: opts.surfaceOpacity,
         side: THREE.DoubleSide, depthWrite: true,
+        layerBand: LAYER_BAND.PANEL_FACE,   // rearmost wall — see core/layerBands.js
     });
     return applySurfaceOpts(_mat, opts).material;
 }
@@ -77,6 +79,7 @@ export function ownSurfaceMaterial(opts) {
     const mat = createPanelMaterial({
         color: opts.surfaceColor, opacity: opts.surfaceOpacity,
         side: THREE.DoubleSide, depthWrite: true,
+        layerBand: LAYER_BAND.PANEL_FACE,
     });
     applySurfaceOpts(mat, opts);
     return {
