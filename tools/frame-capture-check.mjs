@@ -8,13 +8,12 @@
 //   bun tools/frame-capture-check.mjs   →   /tmp/frame-capture-check.png + a state dump
 
 import { chromium } from 'playwright';
-import { openApp } from './itest/driver.mjs';
+import { openApp, webgpuArgs } from './itest/driver.mjs';
 
 const browser = await chromium.launch({
   headless: true,
   args: [
-    '--enable-unsafe-webgpu', '--enable-features=Vulkan', '--ignore-gpu-blocklist',
-    '--use-angle=vulkan', '--use-gl=angle',
+    ...webgpuArgs(),
     // Auto-grant getDisplayMedia with a synthetic moving pattern.
     '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream',
     '--auto-select-desktop-capture-source=Entire screen',

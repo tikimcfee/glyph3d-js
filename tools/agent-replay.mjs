@@ -46,9 +46,12 @@ const flags = {};
   }
 }
 
-const PROJ = path.join(os.homedir(), '.claude/projects/-home-ivan-dev-glyph3d-js');
+// The repo is wherever this script lives; the Claude project dir derives from that
+// path by the harness's naming convention (separators → dashes) — machine-portable.
+const REPO = new URL('..', import.meta.url).pathname;
+const PROJ = path.join(os.homedir(), '.claude/projects',
+  REPO.replace(/\/$/, '').replace(/[/.]/g, '-'));
 const KIMI_INDEX = path.join(os.homedir(), '.kimi-code/session_index.jsonl');
-const REPO = '/home/ivan/dev/glyph3d-js/';
 const PORT = Number(flags.port ?? 8080);
 const RATE = Number(flags.rate ?? 0);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

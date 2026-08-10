@@ -20,11 +20,11 @@
 // Client-only (fake in-page file provider — no relay, like glyph-pipeline-check).
 //   bun tools/arena-compaction-check.mjs [--url http://localhost:5173/]
 import { chromium } from 'playwright';
+import { webgpuArgs } from './itest/driver.mjs';
 
 const browser = await chromium.launch({
     headless: true,
-    args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--ignore-gpu-blocklist',
-        '--use-angle=vulkan', '--use-gl=angle'],
+    args: webgpuArgs(),
 });
 let pass = 0, fail = 0;
 const ok = (cond, msg) => { if (cond) { pass++; console.log(`  ✓ ${msg}`); } else { fail++; console.log(`  ✗ ${msg}`); } };

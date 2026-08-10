@@ -9,21 +9,28 @@ import { chromium } from 'playwright';
 const isGpuNoise = (s) =>
   /webgpu|gpuadapter|gpudevice|requestadapter|gpu process|fallback to|swiftshader/i.test(s);
 
-// WebGPU on the REAL GPU. The two ANGLE flags are load-bearing for HEADLESS: without
-// them, headless Chromium has no display/Vulkan surface and silently falls back to the
-// SwiftShader SOFTWARE adapter (google/swiftshader). The minimal page survives that, but
-// the full GlyphField workload (compute + big int textures + Slug coverage) overwhelms it
-// and the device is dropped mid-run ("Instance dropped in popErrorScope"). With
-// --use-angle=vulkan + --use-gl=angle, headless gets the actual GPU (nvidia/...), matching
-// headed — verified via the wgpu adapter probe. Harmless in headed mode (already on-GPU).
+// WebGPU on the REAL GPU — the ONE home for the launch flags (every self-launching
+// tool imports webgpuArgs; per-tool copies drifted and were Linux-only).
+//
+// Linux: the two ANGLE flags are load-bearing for HEADLESS — without them, headless
+// Chromium has no display/Vulkan surface and silently falls back to the SwiftShader
+// SOFTWARE adapter (google/swiftshader). The minimal page survives that, but the full
+// GlyphField workload (compute + big int textures + Slug coverage) overwhelms it and
+// the device is dropped mid-run ("Instance dropped in popErrorScope"). With
+// --use-angle=vulkan + --use-gl=angle, headless gets the actual GPU (nvidia/...),
+// matching headed — verified via the wgpu adapter probe. Harmless headed (already on-GPU).
+//
+// macOS: ANGLE's default backend IS Metal — forcing --use-angle=vulkan there would do
+// the opposite of its Linux job (no Vulkan surface → software fallback), so darwin
+// gets only the enable + blocklist flags and rides Metal.
+export function webgpuArgs() {
+  const base = ['--enable-unsafe-webgpu', '--ignore-gpu-blocklist'];
+  if (process.platform === 'darwin') return base;
+  return [...base, '--enable-features=Vulkan', '--use-angle=vulkan', '--use-gl=angle'];
+}
+
 export async function launchBrowser({ headed = false } = {}) {
-  return chromium.launch({
-    headless: !headed,
-    args: [
-      '--enable-unsafe-webgpu', '--enable-features=Vulkan', '--ignore-gpu-blocklist',
-      '--use-angle=vulkan', '--use-gl=angle',
-    ],
-  });
+  return chromium.launch({ headless: !headed, args: webgpuArgs() });
 }
 
 // Open the app in a fresh page, wire error capture BEFORE navigating, wait for boot

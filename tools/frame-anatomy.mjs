@@ -15,7 +15,7 @@
  */
 
 import { chromium } from 'playwright';
-import { launchBrowser, openApp } from './itest/driver.mjs';
+import { launchBrowser, openApp, webgpuArgs } from './itest/driver.mjs';
 
 const URL = process.env.ANATOMY_URL || 'http://localhost:5173/';
 const DIR = process.env.ANATOMY_DIR || null;
@@ -25,8 +25,7 @@ const UNCAPPED = process.env.ANATOMY_UNCAPPED === '1';
 // Uncapped: no vsync ceiling — the only way to see a floor below 16.6ms.
 const browser = UNCAPPED
     ? await chromium.launch({ headless: true, args: [
-        '--enable-unsafe-webgpu', '--enable-features=Vulkan', '--ignore-gpu-blocklist',
-        '--use-angle=vulkan', '--use-gl=angle',
+        ...webgpuArgs(),
         '--disable-gpu-vsync', '--disable-frame-rate-limit',
     ] })
     : await launchBrowser({});

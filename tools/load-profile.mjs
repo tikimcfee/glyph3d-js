@@ -7,7 +7,7 @@
 import { launchBrowser, openApp } from './itest/driver.mjs';
 
 const RELAY = Number(process.env.STORM_RELAY || 8099);
-const DIR = process.env.STORM_DIR || '/home/ivan/dev/glyph3d-js';
+const DIR = process.env.STORM_DIR || new URL('..', import.meta.url).pathname.replace(/\/$/, '');
 
 const browser = await launchBrowser({});
 try {

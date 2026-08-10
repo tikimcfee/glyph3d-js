@@ -38,9 +38,14 @@ VITE_LOG="$LOG_DIR/vite.log"
 RELAY_LOG="$LOG_DIR/relay.log"
 
 # pid_on_port PORT -> the listening pid (empty if none). Filters by source port
-# directly so nothing but a real listener on that port can match.
+# directly so nothing but a real listener on that port can match. ss on Linux;
+# macOS has no ss, so lsof answers the same question there.
 pid_on_port() {
-  ss -ltnpH "sport = :$1" 2>/dev/null | grep -oE 'pid=[0-9]+' | head -n1 | cut -d= -f2 || true
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltnpH "sport = :$1" 2>/dev/null | grep -oE 'pid=[0-9]+' | head -n1 | cut -d= -f2 || true
+  else
+    lsof -tiTCP:"$1" -sTCP:LISTEN 2>/dev/null | head -n1 || true
+  fi
 }
 
 kill_port() {

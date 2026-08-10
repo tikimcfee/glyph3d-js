@@ -11,6 +11,7 @@
 // SAFETY: client-only (no relay). --synthetic N injects a fake provider with N
 // generated ~9KB files under 'fake/' so file.openDir storms deterministically.
 import { chromium } from 'playwright';
+import { webgpuArgs } from './itest/driver.mjs';
 
 const argv = process.argv.slice(2);
 const flag = (name, def = null) => {
@@ -33,8 +34,7 @@ const CATEGORIES = [
 
 const browser = await chromium.launch({
     headless: true,
-    args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--ignore-gpu-blocklist',
-        '--use-angle=vulkan', '--use-gl=angle'],
+    args: webgpuArgs(),
 });
 try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });

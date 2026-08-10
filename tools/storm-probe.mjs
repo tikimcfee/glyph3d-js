@@ -3,12 +3,12 @@
 // staged progress heartbeat, and crash detection. Client-only fake provider.
 //   bun tools/storm-probe.mjs [N]     (client-only; no relay)
 import { chromium } from 'playwright';
+import { webgpuArgs } from './itest/driver.mjs';
 
 const N = Number(process.argv[2] || 1000);
 const browser = await chromium.launch({
     headless: true,
-    args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--ignore-gpu-blocklist',
-        '--use-angle=vulkan', '--use-gl=angle'],
+    args: webgpuArgs(),
 });
 try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });

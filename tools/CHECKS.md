@@ -94,6 +94,70 @@ after editing core, `make dev-status` to check.
   bun tools/far-texels-check.mjs
   ```
 
+## Performance armory
+
+The measurement stack, cheapest first. The standing law: **pixels and wire-level
+measurement over code reasoning** — a change gate that "reads correct" can still be
+re-uploading megabytes per frame (it did, for months). Run these before AND after a
+perf change; the numbers are the review.
+
+- **`gpu-traffic.mjs`** — per-frame GPU upload attribution: wraps
+  `device.queue.writeBuffer`/`writeTexture`, counts display frames, reports a
+  per-label bytes/frame histogram plus a greppable verdict line. The law it enforces:
+  **a still scene uploads ~0 bytes/frame** (current baseline: ~70B/frame — the
+  camera/time binding uniforms). Found the group-table 1.28MB/frame silent re-upload
+  and the minimap's 652KB/frame.
+  ```
+  bun tools/gpu-traffic.mjs                                # boot, settle, sample idle
+  bun tools/gpu-traffic.mjs --cmd 'file.openDir app' --seconds 6
+  bun tools/gpu-traffic.mjs --stacks GlyphGroups           # who WRITES a label (stack histogram)
+  ```
+  Deeper probes when the histogram isn't enough (run via `smoke.mjs --eval` or devtools):
+  - who MARKS an attribute dirty → `Object.defineProperty(attr, 'needsUpdate', { set(v){ console.log(new Error().stack); } })`
+  - which MESH owns an unlabeled attr → wrap `renderer._geometries.updateForRender(renderObject)` and log `renderObject.object.name`
+  - big uniform bindings → wrap `renderer.backend.updateBinding`
+  - which SCENES render each frame → wrap `renderer.render` and collect `scene.name` (the minimap lives in a second scene)
+
+- **`frame-anatomy.mjs`** — attribute a steady-state frame: FPS percentiles, per-render-
+  call triangle/draw-call deltas, scene/mesh census, mega-field instance census, and the
+  CPU/GPU split (the floor has a name). Found the transparent+DoubleSide double pass
+  (62M→31M tris) and the minimap's ~3000-draw proxy pool.
+  ```
+  bun tools/frame-anatomy.mjs                    # against :5173 + scratch relay :8099
+  ANATOMY_URL=http://localhost:5174/ bun tools/frame-anatomy.mjs
+  ```
+
+- **`loadstorm-check.mjs`** — the LOAD STORM invariant gate: a launch-shaped burst of
+  sequential `file.openDir`s must hold the batching laws (one relayout per bulk load,
+  coalesced registry notification). `STORM_RELAY=<port>` to point it elsewhere —
+  NEVER the live display's relay (autosave).
+  ```
+  bun tools/loadstorm-check.mjs                  # relay :8099, the scratch fixture
+  ```
+
+- **`load-profile.mjs`** / **`profile-bulkload.mjs`** — CDP sampling profile of a bulk
+  load, aggregated self-time by function and module. `load-profile` is the whole-repo
+  one-shot; `profile-bulkload` takes `--relay/--dir/--top/--out`. Pair with the app's
+  own staged trace: every load prints `[load]` stage lines + `[frames]` long-task
+  attribution into the relay log store — `./glyph3d-cli load.stats` aggregates them.
+  ```
+  bun tools/load-profile.mjs                     # STORM_DIR / STORM_RELAY to redirect
+  bun tools/profile-bulkload.mjs --relay 8099 --dir packages --top 30
+  ```
+
+- **`perf-hover.mjs`** — CPU-profile the hover/picking path: synthetic pointer sweep
+  across loaded grids, reports hot functions + worst long task.
+- **`perf-attach.mjs`** — attach to the RUNNING browser (page-level CDP socket) and
+  profile a hover window on the LIVE display — the exact lagging scene, not a repro.
+- **`prof-tree.mjs`** — summarize any `.cpuprofile` by CALL TREE (total time rolled up,
+  heaviest root→leaf spines): `bun tools/prof-tree.mjs out.cpuprofile --depth 4`.
+- **`trace-capture.mjs`** — full Chrome trace (CPU stacks + GPU process + the app's
+  `performance.measure` stage marks) around any bus command; open the artifact in
+  DevTools Performance or ui.perfetto.dev.
+  ```
+  bun tools/trace-capture.mjs --cmd 'file.openDir fake' --synthetic 450
+  ```
+
 ## Integration tests
 
 As panels and startup push command-bus verbs and mutate state, that's headless-browser
@@ -251,3 +315,34 @@ Also: `stats` (store shape), `dump [path]` (VACUUM INTO snapshot, default
   refresh vendored WASM after dep upgrades.
 - Verify Vite serves a fresh module (the stale-transform trap):
   `curl -s http://localhost:5173/@fs/<abspath> | rg <token>`
+
+## Second machine setup (the macOS perf testbed)
+
+The whole harness is machine-portable; a second box (different GPU, smaller memory,
+its own filesets) runs the same tools and compares numbers.
+
+Prereqs: `bun` · `bunx playwright install chromium` (the drive-loop browser) · Go +
+`make` for the relay (or grab a released `glyph3d-cli` darwin binary — `tools/install.sh`
+detects the platform) · `tmux` (terminals; `brew install tmux`).
+
+Boot: `bun install` at the repo root, then `tools/dev.sh` (Vite :5173 + relay :8080 —
+`pid_on_port` uses `lsof` where `ss` doesn't exist). For measurement runs prefer the
+BUILT app on a scratch relay: `make build && ./glyph3d-cli serve --local --port 8099 .`
+(dev mode retains ~17x more heap and reloads on Vite restarts).
+
+Platform notes:
+- **GPU flags are centralized** in `itest/driver.mjs` `webgpuArgs()` — Linux forces
+  ANGLE onto Vulkan (headless would otherwise fall to SwiftShader); macOS rides
+  ANGLE's native Metal backend and must NOT get the Vulkan flags. Every
+  self-launching tool imports this — never inline browser args in a new tool.
+- `tools/dev-firefox.sh` / `dev-gpu.sh` are Linux/NVIDIA-specific (driver pinning);
+  irrelevant on macOS — Chrome/Chromium there has WebGPU on Metal out of the box.
+- Filesets are parameters everywhere (`--dir`, `--url`, `STORM_DIR`, `--text-file`);
+  defaults derive from the repo location, not a hardcoded home.
+- Expect DIFFERENT baselines (that's the point of the testbed): re-measure
+  `gpu-traffic` idle, `frame-anatomy` FPS/floor, and `storm-probe`/`loadcurve`
+  ceilings on the new hardware before judging any regression, and record them in the
+  comparison notes rather than assuming this box's numbers.
+- The relay is single-operator and unauthenticated — scratch relays on a laptop are
+  fine; the shared-socket terminal hazard (two relays adopting each other's tmux
+  terminals) applies per-machine exactly as documented in the repo memory.

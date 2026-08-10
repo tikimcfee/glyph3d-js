@@ -16,6 +16,7 @@
 // Needs system ffmpeg (full codecs); Playwright's bundled ffmpeg is VP8-only.
 
 import { chromium } from 'playwright';
+import { webgpuArgs } from './itest/driver.mjs';
 import { mkdir, rm } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 
@@ -31,7 +32,7 @@ await mkdir(framesDir, { recursive: true });
 
 const browser = await chromium.launch({
   headless: false,
-  args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--ignore-gpu-blocklist'],
+  args: webgpuArgs(),
 });
 const page = await browser.newPage({ viewport: { width: W, height: H } });
 await page.goto(url, { waitUntil: 'load' });
