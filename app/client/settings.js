@@ -184,6 +184,7 @@ export const GROUPS = [
   { name: 'Book tabs',          subtitle: 'edge tabs · stagger mode · lift off edge' },
   { name: 'Strata',             subtitle: 'nested Z-depth structure view', columns: 2 },
   { name: 'Motion',             subtitle: 'relayout glide' },
+  { name: 'Hands',              subtitle: 'sensor-plane skeletons — canvas coverage · depth · size · yaw', columns: 2 },
   { name: 'Culling & loading',  subtitle: 'occlusion culling · build budget · draw-call readout', columns: 2 },
   { name: 'Connection',         subtitle: 'auto-connect to relay on load' },
 ];
@@ -296,6 +297,49 @@ export const SETTINGS = [
     key: 'camera.nearPlane', label: 'Near plane (depth precision)', group: 'Camera',
     type: 'number', default: 1.0, min: 0.01, max: 100, step: 0.01,
     apply: (ctx, v) => { const cam = ctx.camera; if (cam) { cam.near = v; cam.updateProjectionMatrix?.(); } },
+  },
+  // Hands — the sensor-plane skeletons (an iPhone running MotionSource streaming
+  // landmarks). Placement is NEAR-RELATIVE: the rig scales by camera.near each
+  // frame, so depth is in near-plane multiples (< -1 clears the plane at any
+  // near setting) and apparent size is invariant to the near dial. The wrist
+  // anchor traverses the visible canvas rect × coverage; spread × scale sizes
+  // the skeleton around its anchor — reach and size are separate dials. All
+  // apply live through hand.place semantics (setPlacement), so a device that
+  // attaches later inherits them too.
+  {
+    key: 'hand.coverage', label: 'Canvas coverage (1 = edge to edge)', group: 'Hands',
+    type: 'number', default: 1.0, min: 0, max: 3, step: 0.05,
+    apply: (ctx, v) => ctx.handPresence?.setPlacement('coverage', v),
+  },
+  {
+    key: 'hand.depth', label: 'Depth (× camera.near; < -1 clears the plane)', group: 'Hands',
+    type: 'number', default: -1.6, min: -50, max: 0, step: 0.05,
+    apply: (ctx, v) => ctx.handPresence?.setPlacement('depth', v),
+  },
+  {
+    key: 'hand.spread', label: 'Hand spread', group: 'Hands',
+    type: 'number', default: 0.4, min: 0.01, max: 5, step: 0.01,
+    apply: (ctx, v) => ctx.handPresence?.setPlacement('spread', v),
+  },
+  {
+    key: 'hand.scale', label: 'Hand scale', group: 'Hands',
+    type: 'number', default: 1.0, min: 0.01, max: 10, step: 0.05,
+    apply: (ctx, v) => ctx.handPresence?.setPlacement('scale', v),
+  },
+  {
+    key: 'hand.yaw', label: 'Yaw (°; 180 = palms away)', group: 'Hands',
+    type: 'number', default: 180, min: -360, max: 360, step: 5,
+    apply: (ctx, v) => ctx.handPresence?.setPlacement('yaw', v),
+  },
+  {
+    key: 'hand.jointSize', label: 'Joint size', group: 'Hands',
+    type: 'number', default: 0.018, min: 0.001, max: 0.3, step: 0.001,
+    apply: (ctx, v) => ctx.handPresence?.setPlacement('jointSize', v),
+  },
+  {
+    key: 'hand.boneRadius', label: 'Bone radius', group: 'Hands',
+    type: 'number', default: 0.009, min: 0.001, max: 0.2, step: 0.001,
+    apply: (ctx, v) => ctx.handPresence?.setPlacement('boneRadius', v),
   },
   // View — high-level view primitives (HUD overlays). No live apply(): main.jsx mounts/
   // unmounts the widget off the persisted value via StateController's state-changed event.

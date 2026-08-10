@@ -93,6 +93,15 @@ class HandPresence {
         }
 
         for (const [id, renderer] of this.renderers) {
+            // Visible frustum half-extents at this renderer's depth plane, in
+            // rig-local units (the rig's near-scale already normalizes them).
+            // Fed live because fov/aspect are: the wrist anchor maps the
+            // device's tracking range onto this rect × coverage, so the hand
+            // traverses the canvas at any window shape or zoom.
+            if (camera?.isPerspectiveCamera) {
+                const halfH = Math.tan((camera.fov * Math.PI) / 360) * Math.abs(renderer.depth);
+                renderer.viewExtent = { halfW: halfH * (camera.aspect || 1), halfH };
+            }
             const frames = this.stream.latestHands(id);
             if (!frames.length) continue;
             for (const frame of frames) renderer.updateFromFrame(frame);

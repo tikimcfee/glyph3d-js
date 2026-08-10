@@ -584,6 +584,11 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       camera: state.ctx.camera,
       scene,
     });
+    // Fold the persisted Hands dials in now that the presence exists — apply()s
+    // only fire on a user change, so a stored value would otherwise wait until
+    // the next touch. setPlacement stores on rendererOptions too: devices that
+    // attach later inherit the tuning.
+    applyGroupSettings(state.ctx, 'Hands');
     // LSP client: present whenever the bridge is, but only functional against a
     // relay started with a project root (the relay gates lsp/* on --root).
     state.ctx.lsp = new RemoteLspProvider(bridge);

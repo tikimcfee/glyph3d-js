@@ -275,7 +275,10 @@ export default function registerHandCommands(router) {
         const center = empty ? null : box.getCenter(new THREE.Vector3());
 
         const camera = ctx.camera;
-        const worldScale = renderer.group.getWorldScale(new THREE.Vector3());
+        // Hand size lives on the per-hand group (the renderer group only holds
+        // the depth plane); fall back to the renderer group pre-first-frame.
+        const scaleCarrier = renderer.hands.values().next().value?.group || renderer.group;
+        const worldScale = scaleCarrier.getWorldScale(new THREE.Vector3());
 
         // Rough on-screen size: how many pixels tall the hand's bounding box is.
         // A number in the single digits means it IS rendering and you can't see it.
@@ -334,7 +337,14 @@ export default function registerHandCommands(router) {
             placement: {
                 spread: renderer.spread, depth: renderer.depth,
                 scale: renderer.scale, yaw: renderer.yaw,
+                coverage: renderer.coverage,
             },
+            anchor: renderer._lastAnchor
+                ? { x: r3(renderer._lastAnchor.x), y: r3(renderer._lastAnchor.y) }
+                : null,
+            viewExtent: renderer.viewExtent
+                ? { halfW: r3(renderer.viewExtent.halfW), halfH: r3(renderer.viewExtent.halfH) }
+                : null,
             worldScale: r3(worldScale.x),
             groupVisible: renderer.group.visible,
             // The invisible-hand trap: geometry parented to a camera that isn't in
@@ -355,7 +365,10 @@ export default function registerHandCommands(router) {
             `${id}  frames=${data.frames} ${data.fps ? `${data.fps.toFixed(1)}fps` : 'fps=—'}${data.stalled ? ' STALLED' : ''}`,
             `landmarks=${data.landmarkCount}  raw x=${JSON.stringify(data.raw.x)} y=${JSON.stringify(data.raw.y)} z=${JSON.stringify(data.raw.z)}`,
             data.mapped ? `mapped   x=${JSON.stringify(data.mapped.x)} y=${JSON.stringify(data.mapped.y)} z=${JSON.stringify(data.mapped.z)}` : 'mapped   (no frame reached the renderer)',
-            `placement spread=${data.placement.spread} depth=${data.placement.depth} scale=${data.placement.scale} yaw=${data.placement.yaw}° → worldScale=${data.worldScale}`,
+            `placement spread=${data.placement.spread} depth=${data.placement.depth} scale=${data.placement.scale} yaw=${data.placement.yaw}° coverage=${data.placement.coverage} → worldScale=${data.worldScale}`,
+            data.anchor
+                ? `anchor (${data.anchor.x}, ${data.anchor.y}) of ±0.5 → view extent ±(${data.viewExtent?.halfW}, ${data.viewExtent?.halfH}) rig units`
+                : 'anchor (no frame yet)',
             `visible=${data.groupVisible} onRig=${data.onRig} rigInScene=${data.rigInScene} hands=[${data.handsBuilt}]`,
             data.geometry
                 ? `geometry size=${JSON.stringify(data.geometry.sizeWorld)} center=${JSON.stringify(data.geometry.centerWorld)} ≈${data.geometry.approxScreenHeightPx}px tall, joints ≈${data.geometry.approxJointDiameterPx}px`
@@ -436,7 +449,7 @@ export default function registerHandCommands(router) {
         if (!presence) return { text: 'ERR: hand presence not ready', data: null };
 
         const [key, raw] = args;
-        const allowed = ['spread', 'depth', 'scale', 'yaw', 'jointSize', 'boneRadius'];
+        const allowed = ['spread', 'depth', 'scale', 'yaw', 'jointSize', 'boneRadius', 'coverage'];
         if (!key || !allowed.includes(key)) {
             return { text: `ERR: hand.place <${allowed.join('|')}> <value>`, data: null };
         }
@@ -450,7 +463,7 @@ export default function registerHandCommands(router) {
             data: { ...presence.rendererOptions },
         };
     }, {
-        description: 'Tune hands live: spread, depth (near-plane multiples; negative = in front, must exceed -1 to clear the plane), scale, yaw (degrees; 180 = palms away), jointSize, boneRadius',
+        description: 'Tune hands live: spread, depth (near-plane multiples; negative = in front, must exceed -1 to clear the plane), scale, yaw (degrees; 180 = palms away), jointSize, boneRadius, coverage (fraction of the canvas the wrist traverses; 1 = edge to edge)',
         returns: '{ spread, depth, scale, yaw, jointSize, boneRadius }',
     });
 }

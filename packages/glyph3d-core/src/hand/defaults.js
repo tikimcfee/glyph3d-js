@@ -14,13 +14,20 @@ export const HAND_RENDERER_DEFAULTS = {
     // as a skeleton on arrival; tune live with `hand.place jointSize <n>`.
     jointSize:  0.018,
     boneRadius: 0.009,
-    // Placement — applied to group transform (uniform, no per-axis distortion).
+    // Placement — anchor and shape are separate dials.
     // Units are NEAR-PLANE multiples: HandPresence scales the camera rig by
     // camera.near each frame, so |depth| must exceed 1 to clear the near plane
     // (with margin for the hand's own extent), at ANY near setting.
+    //
+    // TRAVERSAL: the wrist anchor maps the device's tracking range onto the
+    // visible canvas rect at `depth` (HandPresence feeds the frustum extent per
+    // frame). `coverage` multiplies that rect — 1 sweeps edge to edge, below 1
+    // underwraps (hand stays inside the frame), above 1 overwraps (reaches past
+    // the edges). SIZE: spread × scale governs the skeleton around its anchor.
     spread:     0.4,    // base visual spread multiplier
     depth:      -1.6,   // z position in camera-local space, in units of camera.near
-    scale:      1.0,    // combined with spread for uniform group scale
+    scale:      1.0,    // combined with spread for uniform hand size
+    coverage:   1.0,    // fraction of the visible canvas the anchor traverses
     // Yaw about the hand's own Y axis, in DEGREES (a human-tuned dial, so human
     // units). 180 turns the palms away from the viewer: the device sees your palm,
     // so unrotated hands face you like someone else's. Rotated, they read as your

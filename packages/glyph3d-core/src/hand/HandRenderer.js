@@ -64,10 +64,18 @@ class HandRenderer {
 
         // Placement params — applied to the group transform, NOT per-landmark.
         // This preserves the hand's raw proportions in all axes.
-        this._spread = o.spread;
-        this._depth  = o.depth;
-        this._scale  = o.scale;
-        this._yaw    = o.yaw;
+        this._spread   = o.spread;
+        this._depth    = o.depth;
+        this._scale    = o.scale;
+        this._yaw      = o.yaw;
+        this._coverage = o.coverage;
+
+        // Visible frustum half-extents at `depth`, in rig-local units — fed per
+        // frame by HandPresence (fov/aspect are live). The wrist anchor maps the
+        // device's 0..1 tracking range onto this rect × coverage, so the hand
+        // traverses the canvas regardless of its own size. Null until a camera
+        // owner feeds it; the fallback keeps headless/demo use sane.
+        this.viewExtent = null;
 
         this.group = new THREE.Group();
         this._applyGroupTransform();
@@ -171,29 +179,23 @@ class HandRenderer {
     }
 
     /**
-     * Apply spread/depth/scale to the group transform.
-     * This positions and scales the hand as a whole without
-     * distorting the raw landmark proportions.
+     * Place the group on the depth plane. Yaw and size apply PER HAND in
+     * `updateFromFrame` — each hand turns and scales about its own anchor, so
+     * traversal across the canvas never mirrors or displaces through a shared
+     * group rotation.
      * @private
      */
     _applyGroupTransform() {
         this.group.position.set(0, 0, this._depth);
-        // Yaw is a ROTATION, never a mirror: the skeleton keeps its chirality, we
-        // just view it from the other side. At 180° the palms face away from the
-        // viewer — the hands read as your own, reaching into the scene, rather
-        // than as someone else's hands facing you.
-        this.group.rotation.y = (this._yaw * Math.PI) / 180;
-        const s = this._spread * this._scale;
-        this.group.scale.set(s, s, s);
     }
 
     /** @type {number} */
     get spread() { return this._spread; }
-    set spread(v) { this._spread = v; this._applyGroupTransform(); }
+    set spread(v) { this._spread = v; }
 
     /** Yaw about the hand's own Y axis, in DEGREES. @type {number} */
     get yaw() { return this._yaw; }
-    set yaw(v) { this._yaw = v; this._applyGroupTransform(); }
+    set yaw(v) { this._yaw = v; }
 
     /** @type {number} */
     get depth() { return this._depth; }
@@ -201,7 +203,11 @@ class HandRenderer {
 
     /** @type {number} */
     get scale() { return this._scale; }
-    set scale(v) { this._scale = v; this._applyGroupTransform(); }
+    set scale(v) { this._scale = v; }
+
+    /** Fraction of the visible canvas the wrist anchor traverses. @type {number} */
+    get coverage() { return this._coverage; }
+    set coverage(v) { this._coverage = v; }
 
     /**
      * Parent the hand under `parent`, whose space is treated as camera-local:
@@ -259,8 +265,37 @@ class HandRenderer {
         }
 
         this._lastFrame = frame;
-        const mapped = this._mapLandmarks(landmarks);
+
+        // Anchor and shape are separate: the WRIST maps the device's 0..1
+        // tracking range onto the visible canvas rect at `depth` (× coverage),
+        // while the skeleton is wrist-relative and sized by spread × scale.
+        // Traversal reaches entities anywhere on screen; hand size stays a
+        // taste dial that no longer shrinks the reachable region with it.
+        const wrist = landmarks[Joint.WRIST] || landmarks[0];
+        if (!wrist || (wrist.x === 0 && wrist.y === 0 && wrist.z === 0)) {
+            // No wrist, no anchor — an untracked wrist would slam the hand into
+            // a corner. Hiding reads as "lost tracking", which is the truth.
+            hand.group.visible = false;
+            return;
+        }
+        const { anchor, shape } = this._splitLandmarks(landmarks, wrist);
+        const mapped = shape;
         this._lastMapped = mapped;
+        this._lastAnchor = anchor;
+
+        const ext = this.viewExtent || { halfW: 0.5, halfH: 0.5 };
+        hand.group.position.set(
+            anchor.x * 2 * ext.halfW * this._coverage,
+            anchor.y * 2 * ext.halfH * this._coverage,
+            0,
+        );
+        // Yaw is a ROTATION, never a mirror: the skeleton keeps its chirality, we
+        // just view it from the other side. At 180° the palms face away from the
+        // viewer — the hands read as your own, reaching into the scene, rather
+        // than as someone else's hands facing you. Applied about the hand's own
+        // anchor, so it never displaces the hand across the canvas.
+        hand.group.rotation.y = (this._yaw * Math.PI) / 180;
+        hand.group.scale.setScalar(this._spread * this._scale);
 
         // Build validity mask — landmark at default (0,0,0) means untracked
         const valid = new Uint8Array(JOINT_COUNT);
@@ -334,12 +369,22 @@ class HandRenderer {
      * @param {Array<{x,y,z}>} landmarks
      * @returns {Array<{x,y,z}>}
      */
-    _mapLandmarks(landmarks) {
-        return landmarks.map(lm => ({
-            x: lm.x - 0.5,
-            y: 0.5 - lm.y,
+    _splitLandmarks(landmarks, wrist) {
+        // Anchor: wrist in centered normalized device coords, ±0.5 at the
+        // tracking edges. Y flips (device y grows downward); z stays in the
+        // shape so depth wiggle scales with the hand, not the canvas.
+        const anchor = {
+            x: wrist.x - 0.5,
+            y: 0.5 - wrist.y,
+            z: 0,
+        };
+        // Shape: wrist-relative skeleton, raw proportions preserved.
+        const shape = landmarks.map(lm => ({
+            x: lm.x - wrist.x,
+            y: wrist.y - lm.y,
             z: -(lm.z || 0),
         }));
+        return { anchor, shape };
     }
 
     /**
