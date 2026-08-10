@@ -109,6 +109,24 @@ its adapter (`[gpu] apple/metal-3`); if you don't see that line, you're reading
 something else's output. `GLYPH_ALLOW_SOFTWARE=1` overrides, loudly, for a
 GPU-less CI box checking that a tool still runs at all.
 
+**The clean-boot law: measurement pages carry no session.** Every tool here opens
+with `?session=off` — no restore, no autosave (`isEphemeralSession` in
+`app/client/SessionStore.js`). Both halves are load-bearing:
+
+- **Restore poisons the baseline.** The saved roster lives in `fieldSources`, and
+  any run that opens a directory re-arms it on autosave — so clearing the field
+  does not make the NEXT page boot clean. A load test then measures its corpus on
+  top of a restored one, and a clean boot and a doubled boot are indistinguishable
+  from outside. Measured here: an armed session restores 219 grids before a single
+  verb runs; the same URL with `?session=off` boots 0. That doubling is what drove
+  a whole-repo load past the f32-ordinal wall (2²⁴ B) into ~3GB of heap and locked
+  the browser.
+- **Autosave destroys the human's workspace.** A headless run that opens 500 files
+  otherwise writes that roster over the session a person left behind.
+
+If you drive a page by hand for measurement, add `?session=off` yourself — and if a
+number looks impossible, check the grid count at boot BEFORE blaming the change.
+
 Corollary — **headless is platform-dependent, and macOS headless is software.**
 Linux headless reaches the real GPU *because of* the ANGLE/Vulkan flags in
 `webgpuArgs()`; macOS has no equivalent (the headless shell has no Metal surface)

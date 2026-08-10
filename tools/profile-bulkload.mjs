@@ -26,7 +26,7 @@ const args = parseArgs(process.argv.slice(2));
 // Platform-resolved: headed wherever headless is software, so these numbers
 // describe this machine rather than a CPU rasterizer.
 const browser = await launchGpuBrowser({});
-const app = await openApp(browser, { url: 'http://localhost:5173/', wait: 8000, relayPort: args.relayPort });
+const app = await openApp(browser, { url: 'http://localhost:5173/', wait: 8000, relayPort: args.relayPort, session: 'off' });
 const gpu = await assertRealGpu(app, { tool: 'profile-bulkload' });
 console.log(`[gpu] ${gpu.vendor}/${gpu.architecture}`);
 

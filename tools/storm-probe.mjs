@@ -19,7 +19,8 @@ try {
     });
     page.on('crash', () => console.log('!! PAGE CRASHED (renderer process died)'));
     page.on('pageerror', (e) => logs.push(`[pageerror] ${String(e).slice(0, 300)}`));
-    await page.goto('http://localhost:5173/', { waitUntil: 'domcontentloaded' });
+    // Ephemeral page: no restore under the storm, no autosave over the human's session.
+    await page.goto('http://localhost:5173/?session=off', { waitUntil: 'domcontentloaded' });
     await page.waitForFunction('!!window.__glyphClient && !!window.__glyphClient.ctx.renderer', null, { timeout: 20000 });
     await page.waitForTimeout(3000);
     // The guard needs only evalPage; these tools drive a raw page, not openApp.

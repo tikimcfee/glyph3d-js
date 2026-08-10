@@ -41,7 +41,7 @@ const human = (n) => n >= 1 << 20 ? (n / (1 << 20)).toFixed(2) + 'MB'
 // --headed forces it; otherwise resolve by platform (macOS headless = software).
 const browser = await launchGpuBrowser({ headed: HEADED || null });
 try {
-  const app = await openApp(browser, { url: URL_, relayPort: RELAY, wait: 6000 });
+  const app = await openApp(browser, { url: URL_, relayPort: RELAY, wait: 6000, session: 'off' });
   const gpu = await assertRealGpu(app, { tool: 'gpu-traffic' });
   console.log(`[gpu] ${gpu.vendor}/${gpu.architecture}`);
   if (!app.booted) { console.error('app did not boot'); process.exit(1); }

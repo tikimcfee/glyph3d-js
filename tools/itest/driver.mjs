@@ -140,6 +140,7 @@ export async function launchGpuBrowser({ headed = null, extraArgs = [] } = {}) {
 // headless runs stay useful.
 export async function openApp(browser, {
   url = 'http://localhost:5173/', relayPort = null, wait = 5000, bootTimeout = 20000,
+  session = null,
   viewport = { width: 1280, height: 800 },
 } = {}) {
   const errors = [], gpuErrors = [], failedResources = [], warnings = [];
@@ -164,7 +165,16 @@ export async function openApp(browser, {
   // tests drive via the command bus and don't need it, and connecting swaps the file provider
   // + races GitHub repo.load (nondeterministic). Opt in (relayPort: 8080) only when a test
   // actually exercises the relay's local project.
-  const target = relayPort && !url.includes('?') ? `${url}?relay=${relayPort}` : url;
+  // Compose query params on the real URL rather than string-appending — the old
+  // `?relay=` concat silently dropped the param whenever the url already had a
+  // query, which is exactly when a second one is being added.
+  const target = (() => {
+    const u = new URL(url);
+    if (relayPort && !u.searchParams.has('relay')) u.searchParams.set('relay', String(relayPort));
+    // session=off → ephemeral page: no restore, no autosave (see SessionStore).
+    if (session) u.searchParams.set('session', session);
+    return u.toString();
+  })();
   await page.goto(target, { waitUntil: 'load', timeout: 30000 });
   try { await page.waitForFunction(() => !!window.__glyphClient, { timeout: bootTimeout }); booted = true; } catch { /* caller checks .booted */ }
   await page.waitForTimeout(wait); // atlas gen + async content + first frames

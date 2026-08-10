@@ -21,7 +21,7 @@ const url = get('--url', 'http://localhost:8099/');
 // Platform-resolved: headed wherever headless is software, so these numbers
 // describe this machine rather than a CPU rasterizer.
 const browser = await launchGpuBrowser({});
-const app = await openApp(browser, { url, relayPort, wait: 8000 });
+const app = await openApp(browser, { url, relayPort, wait: 8000, session: 'off' });
 const gpu = await assertRealGpu(app, { tool: 'loadcurve' });
 console.log(`[gpu] ${gpu.vendor}/${gpu.architecture}`);
 if (!app.booted) { console.error('app did not boot'); process.exit(1); }

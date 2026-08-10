@@ -30,12 +30,12 @@ const browser = UNCAPPED
 try {
     let app;
     if (CLEAN) {
-        app = await openApp(browser, { url: URL, relayPort: 8099, wait: 5000 });
+        app = await openApp(browser, { url: URL, relayPort: 8099, wait: 5000, session: 'off' });
         await app.cmd('scene.clear_grids');
         await app.cmd('session.save');
         await app.page.close();
     }
-    app = await openApp(browser, { url: URL, relayPort: 8099, wait: 6000 });
+    app = await openApp(browser, { url: URL, relayPort: 8099, wait: 6000, session: 'off' });
     const gpu = await assertRealGpu(app, { tool: 'frame-anatomy' });
     console.log(`[gpu] ${gpu.vendor}/${gpu.architecture}`);
     if (!app.booted) { console.log('✗ app did not boot'); process.exit(1); }

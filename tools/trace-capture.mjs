@@ -36,7 +36,9 @@ const CATEGORIES = [
 const browser = await launchGpuBrowser({});
 try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
-    await page.goto(URL, { waitUntil: 'domcontentloaded' });
+    // Ephemeral page: no restore under the trace, no autosave over the human's session.
+    const target = new URL(URL); target.searchParams.set('session', 'off');
+    await page.goto(target.toString(), { waitUntil: 'domcontentloaded' });
     await page.waitForFunction('!!window.__glyphClient && !!window.__glyphClient.ctx.renderer', null, { timeout: 20000 });
     await page.waitForTimeout(4000);
     // The guard needs only evalPage; these tools drive a raw page, not openApp.
