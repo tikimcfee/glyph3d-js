@@ -13,7 +13,7 @@
 //
 // The headless browser gets the real GPU via driver.mjs's angle flags (see dev-loop gotchas #6).
 
-import { launchBrowser, openApp } from './itest/driver.mjs';
+import { launchGpuBrowser, openApp, assertRealGpu } from './itest/driver.mjs';
 
 function parseArgs(argv) {
   const a = { relayPort: 8099, dir: 'packages/glyph3d-core/src/collections', sweeps: 60, step: 35, top: 30, out: null };
@@ -30,8 +30,12 @@ function parseArgs(argv) {
 }
 
 const args = parseArgs(process.argv.slice(2));
-const browser = await launchBrowser({ headed: false });
+// Platform-resolved: headed wherever headless is software, so these numbers
+// describe this machine rather than a CPU rasterizer.
+const browser = await launchGpuBrowser({});
 const app = await openApp(browser, { url: 'http://localhost:5173/', wait: 8000, relayPort: args.relayPort });
+const gpu = await assertRealGpu(app, { tool: 'perf-hover' });
+console.log(`[gpu] ${gpu.vendor}/${gpu.architecture}`);
 
 try {
   if (!app.booted) throw new Error('app did not boot (is Vite on :5173 and a relay on :' + args.relayPort + ' up?)');

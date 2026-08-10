@@ -14,8 +14,7 @@
  * behind, not your change.
  */
 
-import { chromium } from 'playwright';
-import { launchBrowser, openApp, webgpuArgs } from './itest/driver.mjs';
+import { launchGpuBrowser, openApp, assertRealGpu } from './itest/driver.mjs';
 
 const URL = process.env.ANATOMY_URL || 'http://localhost:5173/';
 const DIR = process.env.ANATOMY_DIR || null;
@@ -23,12 +22,11 @@ const CLEAN = process.env.ANATOMY_CLEAN === '1';
 const UNCAPPED = process.env.ANATOMY_UNCAPPED === '1';
 
 // Uncapped: no vsync ceiling — the only way to see a floor below 16.6ms.
+// Both paths resolve headed-vs-headless by platform: on macOS headless is
+// SwiftShader at ~1 rAF/s, which would make every FPS number here fiction.
 const browser = UNCAPPED
-    ? await chromium.launch({ headless: true, args: [
-        ...webgpuArgs(),
-        '--disable-gpu-vsync', '--disable-frame-rate-limit',
-    ] })
-    : await launchBrowser({});
+    ? await launchGpuBrowser({ extraArgs: ['--disable-gpu-vsync', '--disable-frame-rate-limit'] })
+    : await launchGpuBrowser({});
 try {
     let app;
     if (CLEAN) {
@@ -38,6 +36,8 @@ try {
         await app.page.close();
     }
     app = await openApp(browser, { url: URL, relayPort: 8099, wait: 6000 });
+    const gpu = await assertRealGpu(app, { tool: 'frame-anatomy' });
+    console.log(`[gpu] ${gpu.vendor}/${gpu.architecture}`);
     if (!app.booted) { console.log('✗ app did not boot'); process.exit(1); }
     if (DIR) {
         console.log((await app.cmd(`file.openDir ${DIR}`)).text?.slice(0, 80));
