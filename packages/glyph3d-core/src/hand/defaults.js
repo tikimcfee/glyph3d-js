@@ -14,10 +14,13 @@ export const HAND_RENDERER_DEFAULTS = {
     // as a skeleton on arrival; tune live with `hand.place jointSize <n>`.
     jointSize:  0.018,
     boneRadius: 0.009,
-    // Placement — applied to group transform (uniform, no per-axis distortion):
+    // Placement — applied to group transform (uniform, no per-axis distortion).
+    // Units are NEAR-PLANE multiples: HandPresence scales the camera rig by
+    // camera.near each frame, so |depth| must exceed 1 to clear the near plane
+    // (with margin for the hand's own extent), at ANY near setting.
     spread:     0.4,    // base visual spread multiplier
-    depth:      -0.8,   // z position in camera-local space
-    scale:      0.5,    // combined with spread for uniform group scale
+    depth:      -1.6,   // z position in camera-local space, in units of camera.near
+    scale:      1.0,    // combined with spread for uniform group scale
     // Yaw about the hand's own Y axis, in DEGREES (a human-tuned dial, so human
     // units). 180 turns the palms away from the viewer: the device sees your palm,
     // so unrotated hands face you like someone else's. Rotated, they read as your

@@ -77,10 +77,19 @@ class HandPresence {
         // Park the rig on the camera so rig-local space IS camera space. Done
         // every frame rather than on a change event: the camera is driven by
         // controllers, animations, and commands, with no single mutation hook.
+        //
+        // The rig is also SCALED by camera.near each frame: the near plane is
+        // dynamic (a live depth-precision setting, plus controllers adapt it),
+        // and any fixed depth eventually lands inside it — clipped invisible
+        // with every scene-graph probe reading healthy. Scaling the whole rig
+        // makes placement near-relative: depth/spread are in near-plane units,
+        // a hand placed beyond -1 always clears the plane, and its apparent
+        // on-screen size is invariant to the near setting.
         if (camera) {
             camera.updateMatrixWorld();
             camera.getWorldPosition(this.rig.position);
             camera.getWorldQuaternion(this.rig.quaternion);
+            this.rig.scale.setScalar(camera.near || 1);
         }
 
         for (const [id, renderer] of this.renderers) {
