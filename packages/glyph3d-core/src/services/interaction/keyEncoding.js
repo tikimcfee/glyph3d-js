@@ -19,6 +19,23 @@ function modParam(e) {
     return 1 + (e.shiftKey ? 1 : 0) + (e.altKey ? 2 : 0) + (e.ctrlKey ? 4 : 0);
 }
 
+/**
+ * The chords that mean "paste", which a terminal must NOT encode to bytes.
+ *
+ *   Cmd+V         — the macOS clipboard chord.
+ *   Ctrl+Shift+V  — the terminal-emulator convention everywhere else, and the reason it isn't
+ *                   plain Ctrl+V: that one is a real terminal byte (\x16, readline's
+ *                   quoted-insert) and stays one.
+ *
+ * Exported because it names a policy, not a detail — a keybindings UI should be able to read
+ * and rebind it rather than rediscover the literal.
+ */
+export function isPasteChord(e) {
+    if (e.key !== 'v' && e.key !== 'V') return false;
+    if (e.metaKey && !e.ctrlKey && !e.altKey) return true;         // Cmd+V
+    return e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey;     // Ctrl+Shift+V
+}
+
 /** Cursor/edit key (final letter A/B/C/D/H/F): `ESC [ 1 ; <mod> <L>` when modified, else `ESC [ <L>`. */
 function csiCursor(mod, finalChar) {
     return mod > 1 ? `\x1b[1;${mod}${finalChar}` : `\x1b[${finalChar}`;
@@ -43,6 +60,13 @@ function csiTilde(mod, num) {
 export function keyToTerminalBytes(e, { captureEscape = false } = {}) {
     const k = e.key;
     if (k === 'Shift' || k === 'Control' || k === 'Alt' || k === 'Meta') return null;
+
+    // A paste chord means NO BYTES. Returning null is what makes paste work at all: the
+    // responder chain only suppresses an event a tier CLAIMED, so declining here lets the
+    // keystroke reach the browser, which then fires the native `paste` event carrying the
+    // clipboard (see the paste tier in keyboardRouter.js). Claiming it instead — which is
+    // what the catch-all below would do — both eats the clipboard and types a literal 'v'.
+    if (isPasteChord(e)) return null;
 
     // Ctrl+<letter> → C0 control byte (Ctrl+A..Z → 1..26). Bare ctrl+letter only; ctrl+arrow
     // and friends fall to the modifier-encoded switch below.

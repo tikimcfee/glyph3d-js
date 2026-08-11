@@ -25,6 +25,12 @@
  *     captureToggle,  optional chord override for the settle/unsettle key (default CAPTURE_TOGGLE)
  *   }
  *
+ * PASTE rides alongside as a second listener on the same env: the browser's native `paste` event
+ * dispatched through PASTE_HANDLERS, the entity table's clipboard twin. It is a separate event
+ * rather than a tier because the clipboard is only readable from inside a real paste event — the
+ * keydown chain's job there is the opposite of claiming: keyEncoding declines the paste chord so
+ * the keystroke survives to become one.
+ *
  * Tiers (top = highest priority): captureToggle → entityTyping → contextEsc → navKeymap, then the
  * camera (WASD, in VCC) as the implicit fallthrough. The DOM-input guard sits above all of them:
  * when a real <input>/<textarea>/<select>/contenteditable holds focus the whole chain yields, so
@@ -68,14 +74,13 @@ function captureToggle(e, env) {
 
 // ---- Entity-typing tier: deliver to whatever holds the 'key' slot ----
 
-/** Terminal: KeyboardEvent → ANSI bytes → grid.onInput (the canvas→shell leg). When `captured`,
+/** Terminal: KeyboardEvent → ANSI bytes → grid.sendInput (the canvas→shell leg). When `captured`,
  *  the encoder also sends Esc (otherwise Esc returns null here and falls to the context tier). */
-function terminalKeyHandler(e, grid, slotId, captured) {
-    if (!grid || typeof grid.onInput !== 'function') return false;
+function terminalKeyHandler(e, grid, captured) {
+    if (!grid || typeof grid.sendInput !== 'function') return false;
     const bytes = keyToTerminalBytes(e, { captureEscape: captured });
     if (bytes == null) return false;
-    grid.onInput(bytes, slotId);
-    return true;
+    return grid.sendInput(bytes);
 }
 
 /** Grid in edit mode: printable / navigation / editing keys → CodeGrid L2 edit ops. Bails on
@@ -112,9 +117,31 @@ function gridKeyHandler(e, grid) {
 // One entry per keystroke-target entity type. Adding a type is a one-liner here — the chain
 // above is unchanged. (Composable like gestureResolver's POLICIES.)
 const ENTITY_HANDLERS = {
-    terminal: (e, entity, slot, captured) => terminalKeyHandler(e, entity.grid, slot.id, captured),
+    terminal: (e, entity, slot, captured) => terminalKeyHandler(e, entity.grid, captured),
     grid:     (e, entity)                 => gridKeyHandler(e, entity.grid),
 };
+
+/**
+ * PASTE delivery, the same dispatch shape one tier up: clipboard TEXT → whichever entity holds
+ * the 'key' slot. Each entry hands the text to the entity and lets IT decide the encoding — the
+ * terminal frames a bracketed-paste burst, the grid runs edit ops. This chain never speaks VT.
+ */
+const PASTE_HANDLERS = {
+    terminal: (text, entity) => entity.grid?.paste?.(text) === true,
+    grid:     (text, entity) => gridPasteHandler(text, entity.grid),
+};
+
+/** Grid in edit mode: insert pasted text as ONE edit — lines split at newlines, so a multi-line
+ *  paste lands as multi-line source rather than a literal \n glyph. */
+function gridPasteHandler(text, grid) {
+    if (!grid || typeof grid.editInsert !== 'function' || !grid._cursor) return false;
+    const lines = text.replace(/\r\n?/g, '\n').split('\n');
+    lines.forEach((line, i) => {
+        if (i > 0) grid.editSplitLine();
+        if (line) grid.editInsert(line);
+    });
+    return true;
+}
 
 /** Tier 1 — deliver the key to whichever entity holds the 'key' slot (greedily when captured). */
 function entityTyping(e, env) {
@@ -197,6 +224,26 @@ export function installKeyboardRouter(env) {
     };
     doc.addEventListener('keydown', onKeyDown, { capture: true });
 
+    // PASTE: the browser's own clipboard event, which is why keyEncoding declines the paste
+    // chord — a claimed keystroke is a suppressed one, and a suppressed one never becomes a
+    // `paste`. Reading e.clipboardData inside the event needs no permission and no async
+    // navigator.clipboard call, so the text is in hand synchronously. Same DOM-input guard as
+    // the keydown chain: a focused <input> keeps its own paste.
+    const onPaste = (e) => {
+        if (domInputFocused(doc)) return;
+        const entity = env.am?.get?.('key')?.entity;
+        const handler = entity && PASTE_HANDLERS[entity.type];
+        if (!handler) return;
+        const text = e.clipboardData?.getData('text/plain');
+        if (!text) return;
+        try {
+            if (handler(text, entity)) e.preventDefault();
+        } catch (err) {
+            console.error(`[keyboard] ${entity.type} paste handler threw:`, err);
+        }
+    };
+    doc.addEventListener('paste', onPaste);
+
     // Keyboard-target lifecycle: when the key slot leaves a grid (Esc-LIFO clear, edit.stop,
     // or attention moved elsewhere), tell the prior grid to exit edit mode so the caret hides
     // and the cursor model is forgotten — the keyboard-target lifecycle hook.
@@ -209,6 +256,7 @@ export function installKeyboardRouter(env) {
 
     return () => {
         doc.removeEventListener('keydown', onKeyDown, { capture: true });
+        doc.removeEventListener('paste', onPaste);
         if (typeof offChangeKey === 'function') offChangeKey();
     };
 }

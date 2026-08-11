@@ -8,7 +8,7 @@ import '@xterm/xterm/css/xterm.css';
 // that regime cleanly isolated rather than conditionally toggled against CodeMirror.
 //
 // One PTY stream, two projections: OUTPUT mirrors grid.onBytes → xterm.write; INPUT goes
-// xterm.onData → grid.onInput (the exact path the 3D terminal uses, so both surfaces drive the
+// xterm.onData → grid.sendInput (the exact path the 3D terminal uses, so both surfaces drive the
 // same shell). The keyboard router yields while the xterm DOM is focused, so keys aren't
 // double-delivered.
 //
@@ -54,7 +54,7 @@ export default function TerminalView({ client, termId, panelApi }) {
     // before open(), so output streamed while a tab is hidden renders once it's shown.)
     const offBytes = grid.onBytes?.((payload) => { try { term.write(payload); } catch { /* disposed */ } });
     // INPUT: xterm emits the correct terminal bytes (as a string) → the grid's input hook.
-    const onData = term.onData((data) => { grid.onInput?.(data, termId); });
+    const onData = term.onData((data) => { grid.sendInput(data); });
     // SIZE: follow the grid (the size owner) so the xterm re-interprets the shared byte stream at
     // the new dimensions whenever the 3D grid is resized. Never the reverse — no fit-to-panel.
     const offResize = grid.onResize?.((cols, rows) => { try { term.resize(cols, rows); } catch { /* disposed */ } });
