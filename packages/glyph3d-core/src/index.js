@@ -31,7 +31,7 @@ export { WorkerBridge, getWorkerBridge, isWorkersSupported } from './workers/Wor
 export { PERF_THRESHOLDS, shouldDebugLog } from './core/constants.js';
 export { computeCellMetrics, deriveCharSize, LINE_PITCH, LETTER_SPACING } from './core/cellMetrics.js';
 export { READABLE_MAX_CHARS, READABLE_MAX_LINE_CHARS, unreadableReason } from './core/readability.js';
-export { extOf, mimeForFormat, classifyByExtension, sniffMagic, isProbablyUtf8, classifyBytes } from './core/fileKind.js';
+export { extOf, mimeForFormat, classifyByExtension, sniffMagic, isProbablyUtf8, classifyBytes, partitionDirEntries } from './core/fileKind.js';
 
 // Observability
 export {

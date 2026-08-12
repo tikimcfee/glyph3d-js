@@ -16,6 +16,7 @@
  *     detail  — small annotation ('open — jump', 'layout scheme', verb description)
  */
 import { LAYOUT_SCHEMES } from '@glyph3d/core/collections/layouts/index.js';
+import { getSetting } from '../settings.js';
 
 /** Verbs from the router registry — selecting one inserts `name ` for arg entry. */
 export function verbEntries(client) {
@@ -62,7 +63,9 @@ export async function nounEntries(client) {
     // file.open stays the no-camera-yank primitive for bulk/scripted opens.
     try {
         const { entries } = await ctx.fileProvider.listTree('file:///');
-        for (const f of ctx.fileProvider.filterCodeFiles({ tree: entries })) {
+        // All-files mode (Settings ▸ Files): the roster lists every type, same as openDir.
+        const filterOpts = getSetting('files.showAll') ? { excludeExtensions: [] } : {};
+        for (const f of ctx.fileProvider.filterCodeFiles({ tree: entries }, filterOpts)) {
             if (openPaths.has(f.path)) continue;
             out.push({ kind: 'file', key: f.path, command: ['sheet.focus', f.path], detail: '' });
         }

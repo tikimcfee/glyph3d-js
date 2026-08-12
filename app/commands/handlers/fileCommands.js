@@ -18,10 +18,11 @@
 import { resolveGridByIdOrIndex, WORLD_FLOOR_Y } from './spatialHelpers.js';
 import { table } from '../formatResponse.js';
 import { beginLoad } from '../loadTrace.js';
-import { READABLE_MAX_CHARS } from '@glyph3d/core';
+import { READABLE_MAX_CHARS, partitionDirEntries } from '@glyph3d/core';
+import { getSetting } from '../../client/settings.js';
 import { snapshotLoadStats, diffLoadStats, loadStats } from '@glyph3d/core/core/loadStats.js';
 import { FS_ERROR_CODES } from '@glyph3d/core/services/data';
-import { renderSheetGrid, addFileRow, addUnfetchedRow, materializeActor, getDiskMtime, setDiskMtime } from './fileLoader.js';
+import { renderSheetGrid, addClassifiedRow, addFileRow, addUnfetchedRow, materializeActor, getDiskMtime, setDiskMtime } from './fileLoader.js';
 import { loadBakedIndex } from './bakedIndex.js';
 import { getPipelineArena } from '@glyph3d/core/compute/GlyphLayoutCompute.js';
 import { canonicalPath, toFileUri } from './pathResolve.js';
@@ -205,20 +206,24 @@ export default function registerFileCommands(router) {
             ? listing.entries.map((e) => ({ ...e, path: `${joinBase}/${e.path}` }))
             : listing.entries;
         const truncated = !!listing.truncated;
-        const under = ctx.fileProvider.filterCodeFiles({ tree: entries });
+        // All-files mode (Settings ▸ Files): bypass the extension blacklist — path-noise
+        // excludes (node_modules/, .git/, dist/…) and the 10MB size cap stay on either way.
+        const showAll = !!getSetting('files.showAll');
+        const under = ctx.fileProvider.filterCodeFiles({ tree: entries }, showAll ? { excludeExtensions: [] } : {});
         if (under.length === 0) {
             return { text: `OK: no code files under "${dir || '/'}"`, data: { dir, opened: 0, truncated } };
         }
 
-        // Partition by the walker's size metadata: an oversized file becomes a placeholder card
-        // straight from its tree entry — never fetched. (Bytes ≈ chars for source; the post-fetch
-        // line check in addFileRow catches the under-limit long-line artifacts.) Skip already-open.
+        // Partition by the walker's size metadata + the all-files lanes: an oversized file
+        // becomes a placeholder card straight from its tree entry — never fetched. (Bytes ≈
+        // chars for source; the post-fetch line check in addFileRow catches the under-limit
+        // long-line artifacts.) Images never take the size lane — byte size isn't a char
+        // count. Skip already-open.
         const notOpen = (p) => !(ctx.registry.findByMeta?.('sourcePath', toFileUri(p)) || []).length;
-        const oversized = under.filter((f) => (f.size ?? 0) > READABLE_MAX_CHARS && notOpen(f.path));
-        const want = under
-            .filter((f) => (f.size ?? 0) <= READABLE_MAX_CHARS)
-            .map((f) => f.path)
-            .filter(notOpen);
+        const lanes = partitionDirEntries(under.filter((f) => notOpen(f.path)), { showAll, readableMax: READABLE_MAX_CHARS });
+        const oversized = lanes.oversized;
+        const want = lanes.texty.map((f) => f.path);
+        const images = lanes.images.map((f) => f.path);
 
         // THE ARENA PRE-SIZE, from the LISTING: the walker's sizes are in hand for
         // EVERY file before a byte is fetched, so the arena reaches final capacity in
@@ -234,6 +239,10 @@ export default function registerFileCommands(router) {
                 let total = 0;
                 for (const f of under) total += (f.size ?? 0) > READABLE_MAX_CHARS ? 512 : (f.size ?? 0);
                 for (const f of under) total += f.path.length + 64;
+                // All-files mode: image pixels live in the texture, NOT the arena — a small
+                // quad + label slack each. (Hex rows from failed text fetches undershoot the
+                // ×1.15 estimate at worst; the growth ladder is the fallback either way.)
+                if (showAll) total += images.length * 512;
                 arena.ensureCapacity((arena.byteWatermark ?? 0) + total * 1.15);
             }
         } catch (err) {
@@ -242,7 +251,7 @@ export default function registerFileCommands(router) {
 
         // Live status — the only activity signal on the local (relay) path, which has no
         // getProgress counts; cleared no matter how we return.
-        const n = want.length + oversized.length;
+        const n = want.length + oversized.length + images.length;
         ctx.status?.set(`Opening ${n} file${n === 1 ? '' : 's'}${dir ? ' · ' + dir : ''}…`);
         try {
             let contentMap;
@@ -258,6 +267,7 @@ export default function registerFileCommands(router) {
 
             let opened = 0;
             let placeholders = 0;
+            let imagesBuilt = 0;
             let chunks = 1;
             let pours = 0, pourMs = 0;
             const pending = [];   // every grid's load promise — settled before the final relayout
@@ -270,6 +280,13 @@ export default function registerFileCommands(router) {
                 const pr = addUnfetchedRow(ctx, f.path, f.size);
                 pending.push(pr);
                 pr.then((id) => { if (id != null) { opened++; placeholders++; } }).catch(settleWarn);
+            }
+            // Images (all-files mode): the classified lane — fetch bytes, decode to a
+            // texture, seat a single-cell FrameGrid. Async builds; pending covers the settle.
+            for (const p of images) {
+                const pr = addClassifiedRow(ctx, p);
+                pending.push(pr);
+                pr.then((id) => { if (id != null) { opened++; imagesBuilt++; } }).catch(settleWarn);
             }
             // STREAMED build: grids are SEATED synchronously in walk order (tree insert +
             // registration) while their content loads fan out on the worker pool. The slice
@@ -330,7 +347,16 @@ export default function registerFileCommands(router) {
                 while (i < want.length && (budget <= 0 || performance.now() - slice0 < slice)) {
                     const p = want[i++];
                     const c = contentMap.get(p);
-                    if (c == null) continue;
+                    if (c == null) {
+                        // Text fetch failed (the relay rejects non-UTF-8) — in all-files
+                        // mode let the bytes decide: magic sniff → image, else hex block.
+                        if (showAll) {
+                            const pr = addClassifiedRow(ctx, p);
+                            pending.push(pr);
+                            pr.then(seat).catch(settleWarn);
+                        }
+                        continue;
+                    }
                     const pr = addFileRow(ctx, p, c.content, undefined, baked?.get(p)); // seats synchronously; load resolves later
                     pending.push(pr);
                     pr.then(seat).catch(settleWarn);
@@ -383,13 +409,14 @@ export default function registerFileCommands(router) {
 
             let text = `OK: opened ${opened} file(s) under "${dir || '/'}" → content tree (${dirs} dirs)`;
             if (placeholders) text += `; ${placeholders} as not-rendered placeholder${placeholders === 1 ? '' : 's'}`;
+            if (imagesBuilt) text += `; ${imagesBuilt} as image${imagesBuilt === 1 ? '' : 's'}`;
             if (truncated) text += `; LISTING TRUNCATED at the server entry cap — deeper content not loaded`;
-            return { text, data: { dir, opened, placeholders, dirs, truncated } };
+            return { text, data: { dir, opened, placeholders, images: imagesBuilt, dirs, truncated } };
         } finally {
             ctx.status?.clear();
         }
     }, {
-        description: 'Open all code files under a directory (recursive) and lay them out as a 3D tree',
+        description: 'Open all code files under a directory (recursive) and lay them out as a 3D tree — Settings ▸ Files ▸ all-files mode admits every type (images render, binaries hex-dump)',
         usage: '<dir-path>   (empty path = whole project)',
         returns: '{ dir, opened, placeholders, dirs, truncated }',
     });

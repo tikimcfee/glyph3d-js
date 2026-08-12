@@ -27,6 +27,8 @@
  *
  * Public surface (kept deliberately small — a shared Surface protocol is the eventual home):
  *   renderSheetGrid(ctx, path)          classify + fetch + register + MATERIALIZE one file → id
+ *   addClassifiedRow(ctx, path)         the bulk twin: same cascade, result may stay a ROW
+ *                                       (file.openDir's lane for images + failed text fetches)
  *   addFileRow(ctx, path, content, mtime?, baked?)  register already-fetched text (openDir's batch path)
  *   addUnfetchedRow(ctx, path, bytes)   register an oversize file as a placeholder from metadata
  *   materializeActor(ctx, id)           row → CodeGrid actor swap (idempotent)
@@ -35,7 +37,7 @@
 import CodeGrid from '@glyph3d/core/collections/CodeGrid.js';
 import FileRow from '@glyph3d/core/collections/FileRow.js';
 import FrameGrid from '@glyph3d/core/collections/FrameGrid.js';
-import { gridTheme } from '../../client/settings.js';
+import { gridTheme, getSetting } from '../../client/settings.js';
 import { unreadableReason, READABLE_MAX_CHARS, READABLE_MAX_LINE_CHARS } from '@glyph3d/core';
 import { classifyByExtension, classifyBytes } from '@glyph3d/core';
 import { bytesToHexView } from '@glyph3d/core/memory/hexView.js';
@@ -243,6 +245,18 @@ async function registerBinaryGrid(ctx, path, bytes) {
 // ── the classify → render entry ─────────────────────────────────────────────────────────
 
 /**
+ * The bulk twin of renderSheetGrid: the same classify → fetch → register cascade, but the
+ * result may stay a ROW — no materializeActor at the boundary. file.openDir's lane for
+ * images and for files whose batch text fetch failed (real binaries fall to the hex block
+ * here). A later interactive open upgrades the row through renderSheetGrid/materializeActor.
+ * Returns the registry id (= path), or null when already registered. Throws if the read fails.
+ */
+export async function addClassifiedRow(ctx, path) {
+    const uri = `file:///${String(path).replace(/^\/+/, '')}`;
+    return classifySheetGrid(ctx, path, uri);
+}
+
+/**
  * Render core shared by file.open and the workspace's sheet.render: ensure a grid exists for
  * `path` AND that it is the ACTOR — every caller (file.open, LSP jump, workspace sheet
  * restore) is a path where the user is about to interact, so a row poured by a bulk load
@@ -279,7 +293,16 @@ async function classifySheetGrid(ctx, path, uri) {
         if (head) {
             const bk = classifyBytes(head);
             if (bk.kind === 'image')  return renderImageSheet(ctx, path, uri, bk);
-            if (bk.kind === 'binary') return (await registerBinaryGrid(ctx, path, head)) ?? racedId(ctx, uri);
+            if (bk.kind === 'binary') {
+                // Confirmed binary — the 4KB head did its classifying; re-fetch at the
+                // hex-dump depth (files.hexBytes) so the block shows more than the sniff.
+                let dump = head;
+                const depth = Math.max(SNIFF_BYTES, Number(getSetting('files.hexBytes')) || SNIFF_BYTES);
+                if (depth > SNIFF_BYTES) {
+                    try { dump = await ctx.fileProvider.getBytes(path, { maxBytes: depth }); } catch { /* keep the head */ }
+                }
+                return (await registerBinaryGrid(ctx, path, dump)) ?? racedId(ctx, uri);
+            }
             // bk.kind === 'text' → fall through to the text path
         }
     }

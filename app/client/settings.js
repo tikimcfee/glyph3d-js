@@ -186,6 +186,7 @@ export const GROUPS = [
   { name: 'Motion',             subtitle: 'relayout glide' },
   { name: 'Hands',              subtitle: 'sensor-plane skeletons — canvas coverage · depth · size · yaw', columns: 2 },
   { name: 'Culling & loading',  subtitle: 'occlusion culling · build budget · draw-call readout', columns: 2 },
+  { name: 'Files',              subtitle: 'all-files browsing · hex dump depth', columns: 2 },
   { name: 'Connection',         subtitle: 'auto-connect to relay on load' },
 ];
 
@@ -660,6 +661,21 @@ export const SETTINGS = [
     key: 'load.buildBudget', label: 'Load build budget (ms/frame, 0=one tick)', group: 'Culling & loading',
     type: 'number', default: 12, min: 0, max: 200, step: 1,
     apply: (ctx, v) => { ctx.loadBuildBudget = v; },
+  },
+  // Files — all-files mode relaxes directory opens from "known code files" to every file:
+  // extension stays the fast-path hint, unknown types sniff magic bytes / UTF-8, binaries
+  // render as a hex block, images as images (fileLoader's classify cascade). No apply —
+  // the open paths read these via getSetting at call time.
+  {
+    key: 'files.showAll', label: 'All-files mode (open any file type)', group: 'Files',
+    type: 'bool', default: false,
+  },
+  // Hex dump depth: the byte cap a binary file renders as a hex block. The view expands
+  // ~4.4× (offset + hex + ascii per 16-byte row), so 256KB ≈ 1.15M chars — right at the
+  // readability ceiling; 1MB is the sane max.
+  {
+    key: 'files.hexBytes', label: 'Hex dump depth (bytes)', group: 'Files',
+    type: 'number', default: 262144, min: 4096, max: 1048576, step: 4096,
   },
   // Motion — the relayout glide (ContentTreeMotion): every re-lay eases the durable
   // nodes from where they were to where the scheme stamped them, on the house

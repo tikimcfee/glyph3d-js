@@ -17,6 +17,9 @@
  *
  * Pure + worker-safe: no DOM, no THREE. The caller owns the byte fetch and the decode.
  *
+ * Also home to partitionDirEntries — the pure listing split a bulk open makes between
+ * its image / text / oversized build lanes (all-files mode).
+ *
  * @typedef {Object} FileKind
  * @property {'text'|'image'|'binary'} kind   - the renderable family
  * @property {string} format  - image: 'png'|'jpeg'|'gif'|'webp'|'bmp'; text: 'utf8'; binary: 'unknown'
@@ -140,4 +143,29 @@ export function classifyBytes(head) {
     return sniffMagic(head) || (isProbablyUtf8(head)
         ? { kind: 'text', format: 'utf8', source: 'utf8' }
         : { kind: 'binary', format: 'unknown', source: 'fallback' });
+}
+
+/**
+ * Partition a directory listing (entries with { path, size }) into the three build lanes
+ * of a bulk open — the all-files-mode split:
+ *   images    — extension says image (showAll only). An image's byte size is NOT a char
+ *               count, so images must never fall into the size-based placeholder lane.
+ *   oversized — too big to fetch; renders as a placeholder card from metadata alone.
+ *   texty     — batch-fetched as text (known-text ext, unknown, extensionless). Real
+ *               binaries hiding here fail the text fetch and fall to the byte-classify
+ *               route at build time.
+ * With showAll off, images is always empty and the oversized/texty split is exactly the
+ * historical behavior.
+ * @param {Array<{path: string, size?: number}>} entries
+ * @param {{ showAll?: boolean, readableMax?: number }} [opts]
+ * @returns {{ images: Array, texty: Array, oversized: Array }}
+ */
+export function partitionDirEntries(entries, { showAll = false, readableMax = Infinity } = {}) {
+    const images = [], texty = [], oversized = [];
+    for (const e of entries || []) {
+        if (showAll && classifyByExtension(e.path)?.kind === 'image') { images.push(e); continue; }
+        if ((e.size ?? 0) > readableMax) { oversized.push(e); continue; }
+        texty.push(e);
+    }
+    return { images, texty, oversized };
 }
