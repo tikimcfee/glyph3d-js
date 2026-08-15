@@ -8,6 +8,7 @@ import IdeDock from './IdeDock.jsx';
 import { CanvasPicker, ObjectDragger, ResizeDragger, SelectionIndicator } from './client/CanvasInteraction.jsx';
 import TouchAdapter from './client/TouchAdapter.jsx';
 import HudPanel from './client/HudPanel.jsx';
+import AgentWaitPanel from './client/AgentWaitPanel.jsx';
 import CommandBar from './client/CommandBar.jsx';
 import StatusBar from './StatusBar.jsx';
 import { getSetting } from './client/settings.js';
@@ -157,8 +158,11 @@ function App() {
   // both modes — only these style objects change — so the GlyphCanvas is never
   // remounted (no GPU-context churn) on a toggle.
   const inlineDock = dockMode === 'inline';
+  // `position: relative` in BOTH modes: the row is the frame the absolutely-placed
+  // chrome (the overlay dock, the agent wait panel's right half) measures itself
+  // against, so those land over the canvas area and never over the bars.
   const rowStyle = inlineDock
-    ? { display: 'flex', flex: '1 1 auto', minHeight: 0 }
+    ? { position: 'relative', display: 'flex', flex: '1 1 auto', minHeight: 0 }
     : { position: 'relative', flex: '1 1 auto', minHeight: 0 };
   const canvasWrapStyle = inlineDock
     ? { position: 'relative', flex: '1 1 auto', minWidth: 0, order: 2 }
@@ -280,6 +284,10 @@ function App() {
           </div>
           <DockResizer width={dockW} setWidth={setDockW} />
         </div>
+        {/* intent-driven chrome: an agent waiting on you docks its message over the
+            right half of the canvas until you answer. Renders nothing when no hand
+            is up — see AgentWaitPanel.jsx. */}
+        <AgentWaitPanel client={client} />
       </div>
       {/* inline status bar — the bottom strip (a real flex row, not a floating pill):
           activity/load narration on the left, relay state on the right */}

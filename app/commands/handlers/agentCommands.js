@@ -7,6 +7,8 @@
  * agents by typing them, which is how this whole spine is verified.
  *
  *   agent.tool     <id> <type> <ToolName> [inputJSON] [responseJSON] [cwd]  raw tool event → normalized record
+ *   agent.pretool  <id> <type> <ToolName> [inputJSON] [cwd]  a tool is ABOUT to run — raises the
+ *       hand when the registry says it blocks on a human (AskUserQuestion/ExitPlanMode); else a no-op
  *   agent.message  <id> <type> <kind> <text>         a conversation block (text/thinking) → say/think sheet
  *   agent.meta     <id> <json>                      provenance metadata (slug/title/model/cwd/…) → lane + nameplate
  *   agent.kimi-wire <id> <b64line>                  one raw kimi wire.jsonl line → shared dialect → tool/message events
@@ -16,7 +18,9 @@
  *   agent.state    <id> <active|idle|stalled|done>  set lifecycle state
  *   agent.stop     <id>                             mark finished ('done' — PERSISTS)
  *   agent.clear    <id|all|done>                    remove agent book(s) from the field
- *   agent.request  <id> [message...]                raise a hand ("needs you")
+ *   agent.request  <id> [message...]                raise a hand ("needs you") by hand
+ *   agent.waiting                                   who is waiting on YOU (the raised hands)
+ *   agent.answered <id>                             lower that hand (you replied / dismissed it)
  *
  * Paging/tuning the books themselves is the book.* family (bookCommands) — paging is a
  * BOOK capability, not an agent one. Framing a book is the ordinary camera verb on its
@@ -29,6 +33,7 @@
 
 import { resolveGridByIdOrIndex } from './spatialHelpers.js';
 import { normalizeToolCall, normalizeMessage } from '@glyph3d/core/collections/toolRegistry.js';
+import { waitFromPreTool } from '@glyph3d/core/collections/agentWaiting.js';
 import { agentIdForSession, kimiAgentIdForSession,
          createKimiWireState, kimiWireLineToEvents }
     from '@glyph3d/core/collections/sessionAdapter.js';
@@ -212,6 +217,31 @@ export default function registerAgentCommands(router) {
         };
     }, { description: 'Agent tool call (raw event) — normalized via the tool registry, then paged in', usage: '<id> <type> <ToolName> [inputJSON] [responseJSON] [cwd]' });
 
+    router.register('agent.pretool', (args, ctx) => {
+        const books = ctx.agentBooks;
+        if (!books) return noBooks;
+        if (args.length < 3) {
+            return { text: 'ERR: usage: agent.pretool <id> <type> <ToolName> [inputJSON] [cwd]', data: null };
+        }
+        // The PRE-execution twin of agent.tool, and the ONE moment the "waiting on a
+        // human" state is visible live: between this event and the tool's result, the
+        // agent is stopped. The hook forwards EVERY pre-tool event (pure transport —
+        // it holds no opinion about which tools block); the registry decides here, so
+        // the overwhelming majority answer 'passes' and page nothing. No sheet is built:
+        // the answered call pages its own on the way back out (agent.tool), whole.
+        const [id, type, name] = args;
+        const input = parseJSONArg(args[3]) || {};
+        const cwd = typeof args[4] === 'string' ? args[4] : '';
+        const w = waitFromPreTool(name, input, cwd);
+        if (!w) return { text: `OK: ${name} passes (not blocking)`, data: { id, blocking: false } };
+        books.ensure(id, type || 'agent');
+        books.raiseWait(id, w.reason, w.message);
+        return {
+            text: `OK: ${id} waiting (${w.reason}) — ${w.message.split('\n')[0]}`,
+            data: { id, blocking: true, reason: w.reason, message: w.message },
+        };
+    }, { description: 'A tool is about to run — raises the hand if it blocks on a human answer', usage: '<id> <type> <ToolName> [inputJSON] [cwd]', returns: '{ id, blocking, reason, message }' });
+
     router.register('agent.message', (args, ctx) => {
         const books = ctx.agentBooks;
         if (!books) return noBooks;
@@ -373,4 +403,28 @@ export default function registerAgentCommands(router) {
             ? { text: `OK: ${id} raised a hand: "${msg}"`, data: { id, msg } }
             : { text: `ERR: no agent '${id}'`, data: null };
     }, { description: 'Agent raises a hand ("needs you") for input/advice', usage: '<id> [message]' });
+
+    router.register('agent.waiting', (_args, ctx) => {
+        const books = ctx.agentBooks;
+        if (!books) return noBooks;
+        // The raised hands, longest wait first — the same feed the wait panel projects,
+        // so "why is that panel up?" is answerable from the CLI with no page open.
+        const rows = books.waiting();
+        const lines = rows.map((w) => `${w.id}  [${w.reason}]  ${w.message.split('\n')[0]}`);
+        return {
+            text: rows.length ? `WAITING (${rows.length})\n` + lines.join('\n') : 'OK: nobody is waiting on you',
+            data: { count: rows.length, waiting: rows },
+        };
+    }, { description: 'Which agents are waiting on YOU (a blocking question, or a turn that ended on prose)', returns: '{ count, waiting:[{id,reason,message,ts}] }' });
+
+    router.register('agent.answered', (args, ctx) => {
+        const books = ctx.agentBooks;
+        if (!books) return noBooks;
+        const [id] = args;
+        if (!id) return { text: 'ERR: usage: agent.answered <id>', data: null };
+        const ok = books.lowerWait(id);
+        return ok
+            ? { text: `OK: ${id} hand lowered`, data: { id, waiting: false } }
+            : { text: `ERR: '${id}' is not waiting`, data: null };
+    }, { description: 'Lower an agent\'s raised hand — you replied (its next action lowers it too)', usage: '<id>' });
 }

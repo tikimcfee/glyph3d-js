@@ -30,8 +30,16 @@
  *
  * Lifecycle rides the lane, not the scene: active → stalled after a quiet spell
  * (cfg.stallMs), done on agent.stop — and PERSISTS until agent.clear (small fast
- * helpers you never looked at stay on the shelf, viewable). agent.request raises a
- * beacon the panel surfaces. Nothing here ever moves the camera.
+ * helpers you never looked at stay on the shelf, viewable). Nothing here ever moves
+ * the camera.
+ *
+ * THE RAISED HAND (lane.waiting) is the one "this agent needs you" state, and it is
+ * DERIVED, not announced: agentWaiting.js reads it off the same records the sheets
+ * render — a blocking question in flight (`ask`), or a turn that ended on the agent's
+ * prose (`say`) — with `agent.request` as the by-hand third source. Any new activity
+ * lowers it (the agent is working again), and `waiting()` is the feed the 2D panels
+ * project. A hydration deliberately raises NOTHING: opening an archived session is
+ * reading a record, not being asked a question.
  */
 
 import * as THREE from 'three';
@@ -44,6 +52,7 @@ import { LAYOUT_SCHEMES } from './layouts/index.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import { classifyByExtension } from '../core/fileKind.js';
 import { decorateForAction, kindForAction, ACTION_HUES, cssHue, normalizeToolCall, normalizeMessage } from './toolRegistry.js';
+import { WAIT_REQUEST, waitFromRecord, waitFromTurnEnd } from './agentWaiting.js';
 import { eventsToRecords } from '../workers/sessionParseJob.js';
 import { yieldToFrame } from '../utils/frameYield.js';
 
@@ -190,7 +199,9 @@ export default class AgentBooks {
                 book, hueIdx,
                 agentId,
                 agentType: agentType || 'agent',
-                state: 'active', beacon: null, lastActivityTs: this._now(),
+                state: 'active',
+                waiting: null,         // the raised hand: { reason, message, ts } — see agentWaiting.js
+                lastActivityTs: this._now(),
                 seq: 0, entries: [],   // one entry per sheet: cards + ids + the record
                 groupId: `agent:book:${agentId}`,
                 sessionId: null,       // the harness session record this book renders (set by hydrate)
@@ -237,7 +248,7 @@ export default class AgentBooks {
         if (!this._rootPlaced) this._placeRootInView();
         const lane = this.ensure(agentId, agentType);
         this._setState(lane, 'active');
-        lane.beacon = null;   // it's acting → hand lowered
+        lane.waiting = null;   // it's acting → hand lowered
         lane.lastActivityTs = this._now();
 
         const hue = this.cfg.hues[kindForAction(record.action)] || this.cfg.hues.other;
@@ -288,6 +299,12 @@ export default class AgentBooks {
             record, ts: this._now(),
         });
         this._trimLane(lane);   // past the cap, the oldest turn leaves as the newest lands
+        // A record can BE the wait: an `ask` that carries no answer yet (a question
+        // parsed from a live tail, a replay). The live hook doesn't reach here for that
+        // case — its pre-tool event raises the hand before the call blocks — so this is
+        // the record-side reading of the same state.
+        const w = waitFromRecord(record);
+        if (w) this._raiseWait(lane, w.reason, w.message);
         if (!this._batch) { this._relayout(); this._emitChange(); }
         return lane;
     }
@@ -348,8 +365,12 @@ export default class AgentBooks {
             this._batch = false;
         }
         // A hydrated book renders a RECORD, not a live process — it rests at 'idle'
-        // (never stall-demoted) until a live hook event lands and marks it active.
+        // (never stall-demoted) until a live hook event lands and marks it active, and
+        // it raises NO hand: a transcript's last question was asked (and usually
+        // answered) long ago, and restoring a session must not open a wall of panels.
+        // A still-running session's next live event raises the hand honestly.
         this._setState(lane, 'idle');
+        lane.waiting = null;
         this._relayout();
         this._emitChange();
         return added;
@@ -400,23 +421,76 @@ export default class AgentBooks {
         return true;
     }
 
-    /** agent.stop — the agent finished. 'done' PERSISTS until cleared: small fast helpers
-     *  you never looked at stay on the shelf, viewable, instead of vanishing on a timer. */
+    /**
+     * agent.stop — the TURN ended (the harness Stop hook fires at every one; 'done'
+     * PERSISTS until cleared, so small fast helpers you never looked at stay on the
+     * shelf, viewable, instead of vanishing on a timer). A turn that ended on the
+     * agent's PROSE ended on YOU: the records it just paged in say so, and the hand
+     * goes up carrying those exact words.
+     */
     stop(agentId) {
         const lane = this.lanes.get(agentId);
         if (!lane) return false;
         this._setState(lane, 'done');
+        const w = waitFromTurnEnd(lane.entries.map((e) => e.record));
+        if (w) this._raiseWait(lane, w.reason, w.message);
         this._emitChange();
         return true;
     }
 
-    /** agent.request — the agent raises a hand for input/advice. The panel surfaces it. */
+    /** agent.request — a hand raised BY HAND (the verb), reason 'request'. */
     request(agentId, msg) {
+        return this.raiseWait(agentId, WAIT_REQUEST, msg || 'needs you');
+    }
+
+    /**
+     * Raise the hand on a lane: it is waiting on YOU. The derived sources (a blocking
+     * question in flight, a turn that ended on prose) and the by-hand verb all land here.
+     * @param {string} agentId
+     * @param {string} reason 'ask' | 'say' | 'request' (agentWaiting.js's WAIT_*)
+     * @param {string} message the agent's own words — whole, never truncated here
+     * @returns {boolean} false = no such lane
+     */
+    raiseWait(agentId, reason, message) {
         const lane = this.lanes.get(agentId);
         if (!lane) return false;
-        lane.beacon = msg || 'needs you';
+        this._raiseWait(lane, reason, message);
         this._emitChange();
         return true;
+    }
+
+    /** agent.answered — lower the hand (you replied, or dismissed the panel). New
+     *  activity lowers it on its own; this is the "seen it" path. */
+    lowerWait(agentId) {
+        const lane = this.lanes.get(agentId);
+        if (!lane || !lane.waiting) return false;
+        lane.waiting = null;
+        this._emitChange();
+        return true;
+    }
+
+    /**
+     * Every lane waiting on you, longest-waiting first — the feed the 2D wait panel
+     * projects and `agent.waiting` prints: identity, why, the words, when the hand went
+     * up, and how deep the book is.
+     * @returns {Array<{id:string, type:string, color:string, reason:string, message:string, ts:number, sheets:number}>}
+     */
+    waiting() {
+        const pal = this.cfg.palette;
+        const out = [];
+        for (const [id, l] of this.lanes) {
+            if (!l.waiting) continue;
+            out.push({
+                id,
+                type: l.agentType,
+                color: '#' + ((pal[l.hueIdx % pal.length] >>> 0) & 0xffffff).toString(16).padStart(6, '0'),
+                reason: l.waiting.reason,
+                message: l.waiting.message,
+                ts: l.waiting.ts,
+                sheets: l.book.sheets.length,
+            });
+        }
+        return out.sort((a, b) => a.ts - b.ts);
     }
 
     /** Remove ONE agent's book (any state) — `agent.clear <id>` / the panel ✕. */
@@ -515,7 +589,7 @@ export default class AgentBooks {
 
     /**
      * The lanes present, for the panel's roster — everything a row needs in one call:
-     * id, type, lifecycle, beacon, identity color, sheet count, retention (effective
+     * id, type, lifecycle, the raised hand, identity color, sheet count, retention (effective
      * cap + whether it's an override), head + live-follow, and the newest sheet's time.
      * Ordered oldest lane first (creation order).
      */
@@ -527,7 +601,7 @@ export default class AgentBooks {
                 id,
                 type: l.agentType,
                 state: l.state,
-                beacon: l.beacon,
+                waiting: l.waiting,                        // { reason, message, ts } | null
                 sessionId: l.sessionId,
                 meta: l.meta || null,
                 count: l.book.sheets.length,
@@ -918,6 +992,16 @@ export default class AgentBooks {
     }
 
     _setState(lane, state) { if (lane.state !== state) lane.state = state; }
+
+    /** Stamp the raised hand on a lane. The TIMESTAMP is the hand's, not the turn's —
+     *  the wait panel orders by who has been waiting longest, and a re-raise with the
+     *  same words keeps its place in that queue rather than jumping the line. @private */
+    _raiseWait(lane, reason, message) {
+        const text = String(message ?? '').trim();
+        if (!text) return;
+        if (lane.waiting && lane.waiting.reason === reason && lane.waiting.message === text) return;
+        lane.waiting = { reason, message: text, ts: this._now() };
+    }
 
     // -- private: cluster layout -------------------------------------------------------
 

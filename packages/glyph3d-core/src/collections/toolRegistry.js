@@ -22,6 +22,9 @@
  *   detail(input)   the one meaningful input arg (command, pattern, url, question).
  *   meta(response)  normalized numeric details (lines, +/−, ranges, tokens…) for the info column.
  *   noise: true     drop entirely (TodoWrite/ToolSearch/… — not worth a card).
+ *   blocking: true  the call BLOCKS on a human answer (AskUserQuestion/ExitPlanMode) — the
+ *                   agent stops here until you reply. `blocksOnUser` reads it, and
+ *                   agentWaiting.js turns it into the raised hand the wait panel shows.
  * The RESULT text is generic: a file IS its own snapshot (target → no result), everything else
  * keeps its output via `pickText`. DECORATION is keyed by ACTION (which raw tool produced an edit
  * doesn't change how it lights up), so the edit-shaped tools share one decorator for free.
@@ -159,7 +162,10 @@ const TOOLS = {
     AgentSwarm:   { action: 'task',  detail: (i) => i.description,   meta: taskMeta },   // kimi's parallel-Task
     Workflow:     { action: 'task',  detail: (i) => 'workflow: ' + (i.name || '') },
     // result holds the chosen answer (the tool response carries it as output text); detail is the question.
-    AskUserQuestion: { action: 'ask', detail: askDetail },
+    // BLOCKING: between the call and that answer the agent is stopped, waiting on you.
+    AskUserQuestion: { action: 'ask', detail: askDetail, blocking: true },
+    // The plan handed over for approval — the other call that stops dead until a human answers.
+    ExitPlanMode:    { action: 'ask', detail: (i) => i.plan, blocking: true },
     WebFetch:     { action: 'fetch',  detail: (i) => i.url },
     FetchURL:     { action: 'fetch',  detail: (i) => i.url },        // kimi's WebFetch
     WebSearch:    { action: 'search', detail: (i) => i.query },
@@ -233,6 +239,17 @@ export function normalizeMessage(kind, text) {
     const action = String(kind).toLowerCase() === 'thinking' ? 'think' : 'say';
     // result = the whole block, verbatim; no detail/headline preview (that was a truncation seam).
     return { action, target: '', detail: '', result: full, meta: null };
+}
+
+/**
+ * Does this raw tool name BLOCK on a human answer? The one home for that fact (the
+ * TOOLS entry's `blocking` flag) — the pre-tool ingress asks here before the call runs,
+ * which is the only moment the answer isn't in the record yet.
+ * @param {string} name raw tool name
+ * @returns {boolean}
+ */
+export function blocksOnUser(name) {
+    return !!(TOOLS[name] && TOOLS[name].blocking);
 }
 
 /**

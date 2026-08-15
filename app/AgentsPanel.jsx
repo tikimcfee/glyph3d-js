@@ -4,7 +4,7 @@ import { kimiAgentIdForSession } from '@glyph3d/core/collections/sessionAdapter.
 /**
  * AgentsPanel — the one 2D browser onto AgentBooks. ONE list of agent sessions, no
  * master-detail split: every OPEN book is a single row (identity color, lifecycle
- * state, raised-hand beacon, sheet count, liveness) that EXPANDS IN PLACE to its
+ * state, the raised hand, sheet count, liveness) that EXPANDS IN PLACE to its
  * detail — the scrub bar, the kept-turns cap, and the scrollable stream of its
  * sheets (oldest → newest) — and CLOSES via its ✕. One lane expanded at a time;
  * expanding a row folds whichever was open.
@@ -300,7 +300,11 @@ export default function AgentsPanel({ client }) {
                                 <span style={{ ...S.adot, color: a.color }}>●</span>
                                 <span style={S.aid}>{a.id}</span>
                                 {a.type && a.type !== 'claude' && <span style={S.aharness}>{a.type}</span>}
-                                {a.beacon && <span style={S.abeacon} title={a.beacon}>(!) {a.beacon}</span>}
+                                {a.waiting && (
+                                    <span style={S.abeacon} title={`waiting (${a.waiting.reason})\n${a.waiting.message}`}>
+                                        (!) {a.waiting.message}
+                                    </span>
+                                )}
                                 <span style={S.astate(st.color)}>{st.label}</span>
                                 <span style={S.acount}>{a.count}</span>
                                 {a.following && <span style={S.alive}>live</span>}

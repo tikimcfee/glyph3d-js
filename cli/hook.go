@@ -143,8 +143,16 @@ func handlePostToolUse(conn *websocket.Conn, event *HookEvent) {
 	sendTool(conn, id, typ, event.ToolName, event.ToolInput, event.ToolResponse, event.CWD)
 }
 
+// handlePreToolUse forwards the about-to-run tool. This is the ONE moment "the agent is
+// waiting on a human" is visible live: a blocking call (AskUserQuestion, ExitPlanMode)
+// has not returned, so no transcript line and no PostToolUse event exist yet — by the
+// time they do, the answer is already in them. Pure transport, like every other handler
+// here: EVERY pre-tool event ships, and the JS registry decides which ones block
+// (toolRegistry's `blocking` flag, read by agentWaiting.js behind agent.pretool). The
+// non-blocking majority is a page-side no-op that builds nothing.
 func handlePreToolUse(conn *websocket.Conn, event *HookEvent) {
-	// Quiet for now — PostToolUse covers everything
+	id, typ := agentIdentity(event)
+	sendPreTool(conn, id, typ, event.ToolName, event.ToolInput, event.CWD)
 }
 
 func handleStop(conn *websocket.Conn, event *HookEvent) {
@@ -202,6 +210,29 @@ func sendTool(conn *websocket.Conn, id, typ, name string, input, response json.R
 	payload, err := json.Marshal(argv)
 	if err != nil {
 		dbg("tool marshal error: %v", err)
+		return
+	}
+	sendCmd(conn, "call "+base64.StdEncoding.EncodeToString(payload))
+}
+
+// sendPreTool ships the about-to-run tool event to the viewer:
+//
+//	agent.pretool <id> <type> <ToolName> [inputJSON] [cwd]
+//
+// Same `call` framing and trailing-empty trim as sendTool; there is no response yet (that
+// is the whole point of the event), so the argv is one field shorter.
+func sendPreTool(conn *websocket.Conn, id, typ, name string, input json.RawMessage, cwd string) {
+	inStr := ""
+	if len(input) > 0 {
+		inStr = string(input)
+	}
+	argv := []string{"agent.pretool", id, typ, name, inStr, cwd}
+	for len(argv) > 4 && argv[len(argv)-1] == "" {
+		argv = argv[:len(argv)-1]
+	}
+	payload, err := json.Marshal(argv)
+	if err != nil {
+		dbg("pretool marshal error: %v", err)
 		return
 	}
 	sendCmd(conn, "call "+base64.StdEncoding.EncodeToString(payload))
