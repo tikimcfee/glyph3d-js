@@ -197,3 +197,50 @@ What's bound to a display is what was always bound to a display — photons, fin
 and the locale of the person touching it — and the repo's own math (the fold, the
 bake, the bus) makes that residue a consumer kernel plus two host adapters (IME,
 a11y) instead of an application.
+
+## The state split
+
+The cleanup that makes the whole model quotable: clients — browser, native, whatever
+comes later — are **consumers of state**, and they own their rendering outright. The
+server ships bytes and offsets as necessary; the app is responsible for the rest.
+Compute stays on bare metal; UI and (as little as possible) interpretation stay at
+the client. One rule draws the boundary everywhere:
+
+> **Compute owns functions of the content. Clients own functions of the viewpoint.**
+
+A bake is `f(bytes)` — content function, server, cache it forever. Shaping and curve
+extraction are `f(bytes, fonts)` — content, server. Semantic analysis, gesture
+recognition, placement solving — content (in the broad sense), server. The fold is
+`f(tables, params)` and cheap — the client runs it when it needs positions. Coverage
+raster, picking, camera — `f(viewpoint)`, per-frame, per-client, never on the wire.
+Content functions are cacheable and shared; viewpoint functions are ephemeral and
+private. Nothing ever needs to cross the wire per-frame in either direction.
+
+"As little interpretation as possible" has a concrete meaning here: state ships
+**already in renderable form** — slots, rows, offsets, checkpoint records, curve
+tables. A client's job is *projection*, not parsing. No client re-derives semantics
+from bytes; no server ever renders.
+
+Three consequences fall out unforced:
+
+- **Document state vs. view state.** Shared, server-authoritative: bytes, bakes,
+  edits, grid placement, what's open. Per-client, never shared: camera, hover,
+  attention, key focus. This is the multi-display answer — N clients on one
+  workspace share document state and own their view state — and it retroactively
+  explains why AttentionManager never felt like it belonged on the server: it's view
+  state, and each pane of glass gets its own.
+- **The whole client becomes what the HUD already is.** "One-way state→view; issues
+  verbs; owns no behavior" stops being the HUD's doctrine and becomes the definition
+  of a glyph3d client, browser and native alike. Clients render state and speak
+  verbs. That's the entire client contract.
+- **The relay is the sequencer.** Verbs already serialize through it; that ordering
+  *is* the consistency model — server-authoritative document state, no CRDT
+  machinery, matching the single-operator doctrine. The relay's SQLite log store is
+  the precedent: it already holds relay-resident state that outlives any client. The
+  relay grows from message router to the home of document state; compute peers
+  publish derived state into it; clients subscribe.
+
+The stack, final form: **bare metal computes content functions → the relay sequences
+verbs and holds document state → each client projects that state through its own
+viewpoint onto its own silicon.** The browser was never the app. The app is the
+state; everything with a framebuffer is just a way of looking at it.
