@@ -55,6 +55,10 @@ app/
   ButtonBar IdeDock FileTree TerminalsPanel AgentsPanel CarrelsPanel   dockview panels
 cli/
   main.go relay.go fs.go embed.go attach_unix.go   serve + relay + fs-RPC + terminals
+engine/
+  glyph_pipeline.mojo conformance.mojo fixtures/   native (Mojo) pipeline port — the
+                         4th layer of the pipeline contract, proven bit-exact against
+                         the JS oracle (see engine/README.md + docs/plans/)
 Makefile  tools/dev.sh
 ```
 
