@@ -137,3 +137,63 @@ The through-line: nothing in this plan is a rewrite of glyph3d. The pipeline spe
 the command bus, the relay, the attention model, the responder chain — all of it
 carries over untouched, because none of it was ever web-specific. The only thing that
 gets rewritten is the one layer that was always rented: the host.
+
+## The residue: what stays bound to the display
+
+If rendering becomes a consumer, what — if anything — remains genuinely bound to the
+browser or to a display at all? Interrogating every candidate leaves four real
+residues and one latent binding. None of them is the render pipeline.
+
+**1. The millisecond loop is bound to display-adjacent silicon. Physics, not
+architecture.** Photons come off the GPU wired to the panel, and the interactions
+that must close in ~10ms — hover, caret, camera, pick — must close *there*. If a
+display consumed rendered frames from remote compute, every hover would ride a
+network round trip and the instrument would die. The repo already holds the answer,
+and it's the sharpest consequence of "rendering is a consumer": **ship seeds, not
+scenes.** `glyphBake` proves the entire layout is recoverable from bytes + trie +
+checkpoint records — kilobytes of monoid summaries standing in for megabytes of
+positions — and the fold is cheap and pure enough to re-run on *any* display's
+silicon. The wire protocol is bytes + bakes + verbs, which is what the relay already
+carries; the browser display already works this way (loads bytes, folds locally).
+So the residue at each display is small and fixed: the fold, the coverage raster, the
+pick, the present. Everything upstream — bake, semantics, orchestration, recognition,
+placement — runs on whatever silicon is lying around. Any silicon, exactly: the fold
+was designed to not care.
+
+**2. Text composition (IME) — the one surrendered subsystem.** `keyboardRouter`'s own
+header confesses it: "when a real `<input>`/`<textarea>` holds focus the whole chain
+yields." Raw keys are solved (`keyEncoding`), but *composition* — dead keys, CJK
+IMEs, the emoji picker, voice input — is a conversation with the host OS's input
+method, conducted in the host's locale, rendered near the caret. The browser provides
+it through DOM inputs; a native glyph-rendered CommandBar must either re-own it
+(per-platform IME APIs: serious, unglamorous work) or keep delegating it (a host text
+field floated over the scene during composition — the same yield, made explicit).
+This is the single biggest thing the browser still does for us that nothing in the
+repo replaces.
+
+**3. Accessibility — pixels carry no semantics.** A glyph-particle UI has no a11y
+tree; the DOM's broken-but-present one is a browser service we'd silently lose.
+The honest fix is the same reframe again: the engine already *is* the semantic tree —
+registry, attention slots, cursor ranges, verbs — so a11y becomes an exporter from
+engine state to each host's accessibility API, a presentation adapter beside the
+raster consumer, not a redesign. It has to be chosen, though; it will not fall out.
+
+**4. The URL as installer.** The browser's one unassailable property is social, not
+technical: zero-install reach. `make build` hands anyone a workspace at a link. That
+argues for keeping the web build alive as the reach display — never as the reference
+implementation.
+
+**The latent binding: rAF is currently the only scheduler.** Everything beats at the
+render loop's rate today — layout dispatches, attention, `HandPresence` sampling all
+ride vsync because the browser gives one clock. Unbinding rendering means the engine
+owns its own tick and *vsync demotes to each consumer's sampling rate*. The codebase
+already models the right shape in miniature: `HandPresence` samples sources
+"pull-style once per rendered frame" — presentation pulling from state, never state
+pushed by presentation. Generalize that and the frame clock stops being the system's
+heartbeat and becomes what it always should have been: one subscriber's refresh rate.
+
+Answer to the question, compressed: nothing of the *system* is bound to the browser.
+What's bound to a display is what was always bound to a display — photons, fingers,
+and the locale of the person touching it — and the repo's own math (the fold, the
+bake, the bus) makes that residue a consumer kernel plus two host adapters (IME,
+a11y) instead of an application.
