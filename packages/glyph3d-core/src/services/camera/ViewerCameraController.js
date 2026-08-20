@@ -10,16 +10,22 @@
  *   - shift+wheel → page (turn the book under the cursor — paging intent, never camera motion)
  *   - WASD/QE     → strafe / dolly / rise
  *
- * Movement scales to the distance down your forward axis to whatever you're looking at
- * (`_lookDistance()`). PAN holds a STILL anchor — it SAMPLES that distance once when the
- * drag starts (clamped to the engagement band by `_panDistance()`) and holds it for the
- * stroke, so a drag covers consistent on-screen distance start to finish (the Blender
- * lesson; a drag has an anchor, the thing under your cursor). WASD and dolly read it LIVE:
- * a flight's speed follows the `_flightSpeedScale()` valley — slow as it nears a file, snap
- * back to cruise once it's too close — and a dolly is a smooth approach while zooming.
- * Reading a file head-on → fine; sweeping the void → coarse. Nothing scales off the cursor
- * or a content centroid — the RTS-style refs that made the same gesture behave differently
- * over a grid vs. empty space are gone.
+ * Movement is SCALE-FREE (docs/plans/scale-free-flight.md): text has a legibility band,
+ * so near content the camera's Z axis is a font-size slider and X/Y is scrolling — and the
+ * one law that keeps on-screen text velocity constant (the terminal invariant: a 5000-line
+ * file scrolls exactly like a 5-line one) is v = k·d, speed proportional to the distance
+ * of the content you're FACING. `_lookDistance()` is that distance — an angle-gated field
+ * over pose (angle decides who votes, distance is what they vote on), not a focused
+ * object: flight focus is ephemeral, and any discrete selection in the loop would surface
+ * as a lurch in the hand. PAN holds a STILL anchor — it SAMPLES the distance once when the
+ * drag starts and holds it for the stroke, so a drag covers consistent on-screen distance
+ * start to finish (the Blender lesson; a drag has an anchor, the thing under your cursor).
+ * WASD reads it LIVE through an asymmetric log-space slew (brake fast, throttle lazy — the
+ * accommodation beat), and the wheel dolly is the same law in discrete form (each tick
+ * steps a fraction of the live distance). Nothing scales off the cursor or a content
+ * centroid — the RTS-style refs that made the same gesture behave differently over a grid
+ * vs. empty space are gone, and no absolute-unit speed band exists to be right in one
+ * scale regime and wrong in every other.
  *
  * Architecture: single-drain input state machine.
  *   - Event handlers are pure state updaters — they record intent into
@@ -46,24 +52,26 @@ const CAMERA_DEFAULTS = {
     invertDragY: false,
     invertScroll: false,
     dynamicSpeed: true,
-    // Proximity auto-slow. The speed is a relevance VALLEY over distance-to-content,
-    // decoupling WHERE the slow happens (the distance knobs) from HOW slow/fast it gets
-    // (the × knobs — multiples of base move speed). See _flightSpeedScale for the curve.
-    //   min/max   — floor (closest) and ceiling (far/cruise) speed multipliers.
-    //   near/far  — distances bounding the ramp: floor reached at nearDist, cruise at farDist.
-    //   release   — TOO-close cutoff: inside it you snap back to cruise (you've passed through
-    //               the content). 0 disables the snap-back.
-    //   smoothing — seconds: exponential damping of the live speed scale so the valley (and the
-    //               snap-back) arrive as a smooth surge, not a per-frame step. 0 = off/instant.
-    // Values below are hand-tuned by feel (not derived): a gentle ramp to a 2× cruise that
-    // tops out by 800 units, with an early 40-unit punch-through. Keep in lockstep with the
-    // settings-schema defaults (app/client/settings.js) so a fresh controller + panel agree.
-    dynamicSpeedMin: 0.15,
-    dynamicSpeedMax: 2,
-    dynamicNearDist: 30,
-    dynamicFarDist: 800,
-    dynamicReleaseDist: 40,
-    dynamicSpeedSmoothing: 0.12,
+    // Scale-free flight (docs/plans/scale-free-flight.md). Speed is the pure law
+    // v = cameraSpeed × d / DEFAULT_LOOK_DIST — at the reference distance (200) you fly at
+    // exactly cameraSpeed (same as the void / dynamicSpeed-off), nearer is proportionally
+    // slower, farther proportionally faster. No floor/ceiling band, no ramp distances:
+    // the law is derived from the screen invariant (constant on-screen text velocity),
+    // so there is nothing to hand-tune per scale regime.
+    //   release       — punch-through escape: closer than this, run at reference speed
+    //                   (you've passed through it). DELIBERATELY scale-broken (absolute
+    //                   units — any nonzero value makes reading below that distance
+    //                   impossible), so it defaults OFF; the scale-free exit is a glance
+    //                   (look away and the angle gate frees you instantly).
+    //   brake/throttle — seconds: asymmetric log-space slew of the live look distance.
+    //                   Something near swings into view → the short constant (decelerate
+    //                   fast, comfort); the view opens onto distance → the long one (no
+    //                   speed spike mid-yaw). The accommodation beat.
+    // Keep in lockstep with the settings-schema defaults (app/client/settings.js) so a
+    // fresh controller + panel agree.
+    dynamicReleaseDist: 0,
+    dynamicBrakeSlew: 0.06,
+    dynamicThrottleSlew: 0.3,
     // Soft bounds — a gentle leash so a dropped frame (a dev hot-reload stalls, dt balloons,
     // one WASD step flings you miles) can't strand the camera in the void with the content out
     // of sight. The content's world AABB padded by `softBoundsPadding` × the world's max
@@ -80,17 +88,31 @@ const CAMERA_DEFAULTS = {
 
 const CLICK_THRESHOLD_PX = 5;
 
-// Movement scale (world units): the flat constant when dynamicSpeed is off / no content
-// exists, and the floor & ceiling that clamp the dynamic look-distance so a glance at
-// empty space can never make dolly/zoom run away (nor freeze it nose-against a panel).
+// Movement scale (world units): DEFAULT is both the flat constant when dynamicSpeed is
+// off / no content exists AND the reference distance of the speed law (speedScale =
+// d / DEFAULT_LOOK_DIST — engaged at 200 units ≡ the void ≡ 1× cameraSpeed). MIN/MAX
+// clamp the look distance so a glance at empty space can never make dolly/zoom run away
+// (nor freeze it nose-against a panel); between them the law runs pure — three decades
+// of scale-freeness.
 const DEFAULT_LOOK_DIST = 200;
 const MIN_LOOK_DIST = 2;
 const MAX_LOOK_DIST = 2000;
 
-// A2 — the look-ray is a small CONE: forward + 4 rays tilted by ±CONE_TAN in the screen
-// right/up axes. A single thin ray threads through gaps to a far hit and misses near
-// content just off the view axis that you're actually flying toward; the cone catches it.
+// The look-distance FIELD probe: a 9-ray cone — the view ray + rings at ±CONE_TAN/2 and
+// ±CONE_TAN in the screen right/up axes. Each ray keeps its NEAREST hit (occlusion-
+// correct: you can't read what you can't see); rays are combined by a weighted soft-min
+// in LOG-distance space (see _lookDistance). Cone membership is the hard angular gate —
+// content outside it does not vote, however near (angle beats proximity: off-shoulder
+// content never leashes you) — and the Gaussian weights (σ = CONE_TAN/2 in tan-space)
+// shape the votes within. A poor-man's 9-pixel depth buffer; the upgrade path, if ray
+// granularity ever shows through, is a real low-res depth probe of the frame.
 const CONE_TAN = 0.25;   // tan of the cone half-angle (~14°)
+const CONE_TILTS = [0, CONE_TAN / 2, CONE_TAN];              // ring tilts (ring 0 = view ray)
+const CONE_WEIGHTS = CONE_TILTS.map((t) => Math.exp(-((t / (CONE_TAN / 2)) ** 2) / 2));
+// Soft-min temperature in log-distance units: → 0 is a hard min, larger blends toward the
+// weighted geometric mean. 0.2 keeps "the page corner beats the wall behind it" decisive
+// while letting a surface enter/leave the cone as a glide, not a step.
+const FIELD_TEMP = 0.2;
 
 // Soft-bounds scale floor (world units): the world's max dimension is clamped up to this before
 // the leash margins are derived from it, so a tiny or near-empty world still leaves a sane amount
@@ -127,12 +149,9 @@ export class ViewerCameraController {
             invertDragY:       stateController.get('camera.invertDragY', CAMERA_DEFAULTS.invertDragY),
             invertScroll:      stateController.get('camera.invertScroll', CAMERA_DEFAULTS.invertScroll),
             dynamicSpeed:      stateController.get('camera.dynamicSpeed', CAMERA_DEFAULTS.dynamicSpeed),
-            dynamicSpeedMin:   stateController.get('camera.dynamicSpeedMin', CAMERA_DEFAULTS.dynamicSpeedMin),
-            dynamicSpeedMax:   stateController.get('camera.dynamicSpeedMax', CAMERA_DEFAULTS.dynamicSpeedMax),
-            dynamicNearDist:   stateController.get('camera.dynamicNearDist', CAMERA_DEFAULTS.dynamicNearDist),
-            dynamicFarDist:    stateController.get('camera.dynamicFarDist', CAMERA_DEFAULTS.dynamicFarDist),
             dynamicReleaseDist: stateController.get('camera.dynamicReleaseDist', CAMERA_DEFAULTS.dynamicReleaseDist),
-            dynamicSpeedSmoothing: stateController.get('camera.dynamicSpeedSmoothing', CAMERA_DEFAULTS.dynamicSpeedSmoothing),
+            dynamicBrakeSlew:  stateController.get('camera.dynamicBrakeSlew', CAMERA_DEFAULTS.dynamicBrakeSlew),
+            dynamicThrottleSlew: stateController.get('camera.dynamicThrottleSlew', CAMERA_DEFAULTS.dynamicThrottleSlew),
             softBounds:        stateController.get('camera.softBounds', CAMERA_DEFAULTS.softBounds),
             softBoundsPadding: stateController.get('camera.softBoundsPadding', CAMERA_DEFAULTS.softBoundsPadding),
             softBoundsHardCap: stateController.get('camera.softBoundsHardCap', CAMERA_DEFAULTS.softBoundsHardCap),
@@ -162,10 +181,13 @@ export class ViewerCameraController {
         //    here so a pan begun right after a flight/dolly inherits the live distance.
         this._moveScale = DEFAULT_LOOK_DIST;
 
-        // A1 — the exponentially-damped flight speed scale, carried across frames so the
-        // valley transitions surge smoothly. null = unlatched (next flight frame snaps);
-        // reset to null whenever movement stops, so takeoff stays crisp.
-        this._dampedSpeedScale = null;
+        // The slewed look DISTANCE — the field read, damped asymmetrically in log space
+        // (brake fast, throttle lazy) and carried across frames so a yaw's re-engagement
+        // arrives as a glide, not a step. Damping lives on the DISTANCE (the input),
+        // never on the speed scale downstream — that would launder flutter, not remove
+        // it. null = unlatched (next flight frame snaps); reset whenever movement stops,
+        // so takeoff stays crisp.
+        this._slewedLookDist = null;
 
         // camera.lock: when true, applyCamera applies NO camera transform (drag / WASD /
         // rotation / zoom frozen) — but the wheel still routes to a focused framed surface
@@ -539,29 +561,37 @@ export class ViewerCameraController {
         if (keys.has('KeyE')) moveDir.y -= 1;
 
         const moving = moveDir.lengthSq() > 0;
-        if (!moving) { this._dampedSpeedScale = null; return; } // unlatch → next takeoff snaps
+        if (!moving) { this._slewedLookDist = null; return; } // unlatch → next takeoff snaps
 
-        // LIVE, re-sampled every frame: the flight visibly DECELERATES as it nears content
-        // and re-accelerates as it clears it (or punches back to cruise once it's too close
-        // — the release zone) — the auto-slow you feel mid-flight, not only after a stop-
-        // and-restart. One distance read drives both the speed curve and the held pan
-        // distance, so a pan begun right after a flight inherits the live distance. (Pan
-        // itself HOLDS its sample — a drag has an on-screen anchor a flight doesn't.)
-        const dist = this._lookDistance();
-        this._moveScale = this._panDistance(dist);
+        // LIVE, re-sampled every frame: the field read is the flight's whole speed
+        // authority — v = cameraSpeed × d / DEFAULT_LOOK_DIST, so on-screen text velocity
+        // is constant at every scale regime (the terminal invariant). One distance read
+        // drives both the speed law and the held pan distance, so a pan begun right after
+        // a flight inherits the live distance. (Pan itself HOLDS its sample — a drag has
+        // an on-screen anchor a flight doesn't.)
+        const target = this._flightTargetDist(this._lookDistance());
 
-        // A1 — frame-rate-independent exponential damping of the speed scale: the valley and
-        // the snap-back arrive as a smooth surge, not a per-frame step. alpha = 1−exp(−dt/τ),
-        // τ = dynamicSpeedSmoothing seconds. The first frame of a flight (null latch) or
-        // smoothing off (τ≤0) snaps, so takeoff is crisp; only in-flight changes are damped.
-        const target = this._flightSpeedScale(dist);
-        const tau = this.settings.dynamicSpeedSmoothing;
-        if (this._dampedSpeedScale == null || !(tau > 0)) {
-            this._dampedSpeedScale = target;
+        // Asymmetric LOG-space slew of the distance (frame-rate independent): the field
+        // is 9 rays, so a surface enters/leaves the cone in finite steps — the slew turns
+        // those into a glide. Log space is the scale-free choice (the rate is decades/s,
+        // identical feel at every scale). Brake (target below current) rides the short
+        // constant; throttle (target above) the long one — decelerate fast, accelerate
+        // gently, so a near thing swinging into view slows you promptly while a view
+        // opening onto distance never spikes mid-yaw. First moving frame (null latch)
+        // snaps, so takeoff is crisp; τ≤0 snaps that direction outright.
+        const cur = this._slewedLookDist;
+        let dist;
+        if (cur == null) {
+            dist = target;
         } else {
-            this._dampedSpeedScale += (target - this._dampedSpeedScale) * (1 - Math.exp(-dt / tau));
+            const tau = target < cur ? this.settings.dynamicBrakeSlew : this.settings.dynamicThrottleSlew;
+            dist = tau > 0
+                ? Math.exp(Math.log(cur) + (Math.log(target) - Math.log(cur)) * (1 - Math.exp(-dt / tau)))
+                : target;
         }
-        const speedScale = this._dampedSpeedScale;
+        this._slewedLookDist = dist;
+        this._moveScale = this._panDistance(dist);
+        const speedScale = this._flightSpeedScale(dist);
 
         moveDir.normalize();
         moveDir.applyQuaternion(camera.quaternion);
@@ -684,11 +714,11 @@ export class ViewerCameraController {
 
     /**
      * Dolly: move the camera along its OWN forward axis — no pivot, no anchor. Unlike
-     * pan/WASD (which hold a sampled scale), dolly reads the LIVE look distance each
-     * tick: the step is a geometric fraction of it, so you approach smoothly and
-     * brake as you near what you're pointed at — the one motion where a continuously-
-     * updating distance is the right feel, and your manual granularity knob. It also
-     * refreshes `_moveScale`, so a pan right after a dolly inherits the new distance.
+     * pan (which holds a sampled scale), dolly reads the LIVE look distance each
+     * tick: the step is a geometric fraction of it — the scale-free flight law in
+     * discrete form (constant multiplicative zoom per tick), so you approach smoothly
+     * and brake as you near what you're pointed at. Your manual granularity knob. It
+     * also refreshes `_moveScale`, so a pan right after a dolly inherits the new distance.
      *
      *   Positive deltaY = "scroll away" = dolly back (camera retreats).
      *   Negative deltaY = "scroll toward" = dolly in (camera advances).
@@ -726,26 +756,30 @@ export class ViewerCameraController {
     }
 
     /**
-     * Look distance: how far away the content is that you're navigating relative to.
-     * The SAMPLING PRIMITIVE — pan/WASD read it once at gesture start (then hold in
-     * `_moveScale`); dolly reads it live. Depends only on the camera, never on the
-     * cursor or a content centroid.
+     * Look distance: how far away the content is that you're FACING — the scalar the
+     * speed law consumes (docs/plans/scale-free-flight.md). The SAMPLING PRIMITIVE —
+     * pan/WASD read it once at gesture start (then hold in `_moveScale`); WASD and dolly
+     * read it live. Depends only on the camera pose, never on the cursor or a content
+     * centroid — flight focus is emergent from pose, not an object.
      *
-     * Two samples, one robust answer (the cheap version of multiscale-nav's depth
-     * cubemap — see [[reference_camera_navigation_prior_art]]):
-     *   1. `fwd`  — nearest hit within a small forward CONE (the view ray + 4 rays tilted
-     *      ±CONE_TAN in screen right/up), each hit projected onto the view axis. "What I'm
-     *      flying toward" — the cone catches near content just off-axis that a single thin
-     *      ray would thread past on its way to a far hit.
-     *   2. `near` — distance to the nearest surface AABB that ISN'T fully behind the eye
-     *      (any direction you could be moving into). No raycast, so no forward blind spot;
-     *      the behind-cull keeps content you've already flown past from braking you — no
-     *      reason to slow for what you're not looking at.
+     * An angle-gated FIELD, not a first hit. Angle decides who votes; distance is what
+     * they vote on:
+     *   1. The 9-ray cone probe (view ray + rings at ±CONE_TAN/2, ±CONE_TAN in screen
+     *      right/up) is the HARD angular gate — content outside it does not vote, however
+     *      near, so off-shoulder content never leashes you. Each ray keeps its NEAREST
+     *      hit projected onto the view axis (occlusion-correct: you can't read what you
+     *      can't see), and the hitting rays combine by a Gaussian-weighted soft-min in
+     *      LOG-distance space — min-like ("the page corner beats the wall behind it"),
+     *      smooth in pose, and scale-free (scale the scene by c and the answer scales by
+     *      exactly c).
+     *   2. `near` — distance to the nearest surface AABB that ISN'T fully behind the eye —
+     *      is the VOID fallback only (every ray missed): nothing is in view, so there is
+     *      no screen invariant to hold, but a stale hold is what let dolly run away off
+     *      the top of the tree. The behind-cull keeps content you've flown past from
+     *      braking you.
      * Samples EVERY framed surface (code grids AND terminals — getSurfaces, not the
-     * grid-only getGrids), so flying toward a terminal slows you down exactly as flying
-     * toward a file does; a terminal is content too.
-     * Prefer `fwd`; fall back to `near` when the ray misses (looking at empty space)
-     * — NOT a stale hold, which is what let dolly run away off the top of the tree.
+     * grid-only getGrids): participation is by bounds, not by type — anything readable
+     * is content. The exclusions are the instruments you read WITH (dock tiles today).
      * Clamp to [MIN, MAX] so a glance at the void can never blow the scale up (nor a
      * nose-against-panel pin it to zero). dynamicSpeed off → flat constant.
      * @private @returns {number} distance in world units, in [MIN_LOOK_DIST, MAX_LOOK_DIST]
@@ -768,19 +802,25 @@ export class ViewerCameraController {
         const forward = (this._lookFwd ??= new THREE.Vector3()).set(0, 0, -1).applyQuaternion(q);
         const right   = (this._lookRight ??= new THREE.Vector3()).set(1, 0, 0).applyQuaternion(q);
         const up      = (this._lookUp ??= new THREE.Vector3()).set(0, 1, 0).applyQuaternion(q);
-        // The forward cone: view ray + 4 tilted rays (±CONE_TAN in right/up), renormalized.
-        const dirs = (this._coneDirs ??= [0, 0, 0, 0, 0].map(() => new THREE.Vector3()));
+        // The probe: ring 0 is the view ray; each further ring is 4 rays tilted ±tilt in
+        // right/up, renormalized. dirs[i] carries CONE_WEIGHTS[ring(i)] via _coneRayRing.
+        const dirs = (this._coneDirs ??= Array.from({ length: 1 + 4 * (CONE_TILTS.length - 1) }, () => new THREE.Vector3()));
+        const ring = (this._coneRayRing ??= dirs.map((_, i) => (i === 0 ? 0 : 1 + ((i - 1) >> 2))));
         dirs[0].copy(forward);
-        dirs[1].copy(forward).addScaledVector(right,  CONE_TAN).normalize();
-        dirs[2].copy(forward).addScaledVector(right, -CONE_TAN).normalize();
-        dirs[3].copy(forward).addScaledVector(up,     CONE_TAN).normalize();
-        dirs[4].copy(forward).addScaledVector(up,    -CONE_TAN).normalize();
+        for (let r = 1, i = 1; r < CONE_TILTS.length; r++) {
+            const t = CONE_TILTS[r];
+            dirs[i++].copy(forward).addScaledVector(right,  t).normalize();
+            dirs[i++].copy(forward).addScaledVector(right, -t).normalize();
+            dirs[i++].copy(forward).addScaledVector(up,     t).normalize();
+            dirs[i++].copy(forward).addScaledVector(up,    -t).normalize();
+        }
+        const hits = (this._coneHits ??= new Float64Array(dirs.length));
+        hits.fill(Infinity);
         const ray = (this._ray ??= new THREE.Ray());
         ray.origin.copy(origin);
-        const hit = new THREE.Vector3();
+        const hit = (this._coneHitPt ??= new THREE.Vector3());
         const center = (this._lookCenter ??= new THREE.Vector3());
         const half = (this._lookHalf ??= new THREE.Vector3());
-        let fwd = Infinity;   // nearest forward hit — precise "what I'm aimed at"
         let near = Infinity;  // nearest content you could move into — behind-eye excluded
         for (const g of surfaces) {
             if (dockTiles?.has(g)) continue; // camera-locked chrome, not world content
@@ -812,57 +852,72 @@ export class ViewerCameraController {
                 const d = (hit.x - origin.x) * forward.x
                         + (hit.y - origin.y) * forward.y
                         + (hit.z - origin.z) * forward.z;
-                if (d > 0 && d < fwd) fwd = d;
+                if (d > 0 && d < hits[i]) hits[i] = d;
             }
         }
 
-        const d = Number.isFinite(fwd) ? fwd
+        // Weighted soft-min over the hitting rays, in log-distance space:
+        //   d = exp(−T · ln( Σ wᵢ·e^(−ln dᵢ / T) / Σ wᵢ ))
+        // T → 0 recovers the hard min; misses simply don't vote (a void pixel holds no
+        // text to keep steady). All rays missing → the void fallback below.
+        let sum = 0, sumW = 0;
+        for (let i = 0; i < hits.length; i++) {
+            if (!Number.isFinite(hits[i])) continue;
+            const w = CONE_WEIGHTS[ring[i]];
+            sum += w * Math.exp(-Math.log(Math.max(hits[i], MIN_LOOK_DIST)) / FIELD_TEMP);
+            sumW += w;
+        }
+        const d = sumW > 0 ? Math.exp(-FIELD_TEMP * Math.log(sum / sumW))
                 : Number.isFinite(near) ? near
                 : DEFAULT_LOOK_DIST;
         return Math.min(Math.max(d, MIN_LOOK_DIST), MAX_LOOK_DIST);
     }
 
     /**
-     * The PAN move distance — the held look distance, clamped to the engagement band
-     * [nearDist, farDist]. Pan needs a real DISTANCE (it drives worldPerPixel, so a drag
-     * covers consistent on-screen distance), not a speed multiplier — so it just bounds
-     * the raw look distance: a nose-against-a-panel floors at nearDist instead of crawling
-     * to ~0, a sweep of the void caps at farDist. dynamicSpeed off → flat DEFAULT.
-     * @private @param {number} [dist] the look distance to clamp (defaults to a fresh read)
-     * @returns {number} pan distance in world units, in [nearDist, farDist]
+     * The PAN move distance — the held look distance, bounded only by the global look
+     * band. Pan needs a real DISTANCE (it drives worldPerPixel, so a drag covers
+     * consistent on-screen distance) — and under the scale-free law that distance is the
+     * field read itself: a drag while nose-close to a page moves at page-scroll speed
+     * (the page under your cursor stays under your cursor — the invariant, not a bug).
+     * The old [nearDist, farDist] band clamp was the absolute-unit regime leaking in.
+     * dynamicSpeed off → flat DEFAULT.
+     * @private @param {number} [dist] the look distance to bound (defaults to a fresh read)
+     * @returns {number} pan distance in world units, in [MIN_LOOK_DIST, MAX_LOOK_DIST]
      */
     _panDistance(dist = this._lookDistance()) {
         if (!this.settings.dynamicSpeed) return DEFAULT_LOOK_DIST;
-        const lo = this.settings.dynamicNearDist;
-        const hi = this.settings.dynamicFarDist;
-        return Math.min(Math.max(dist, lo), hi);
+        return Math.min(Math.max(dist, MIN_LOOK_DIST), MAX_LOOK_DIST);
     }
 
     /**
-     * The WASD flight SPEED multiplier (× cameraSpeed) for a given content distance — the
-     * decoupled remap that splits WHERE the slow happens (nearDist/farDist) from HOW slow
-     * it gets (min/max). A relevance valley as you fly at a file:
-     *   - dist ≥ farDist            → ceiling (max): far content, cruise.
-     *   - nearDist ≤ dist < farDist → lerp(ceiling, floor): natural deceleration approaching.
-     *   - releaseDist ≤ dist < near → floor (min): the slow reading plateau.
-     *   - dist < releaseDist        → ceiling: TOO close — you've effectively passed through
-     *                                 it, so it stops braking you (same idea as the behind-
-     *                                 the-eye cull). releaseDist = 0 disables the snap-back.
-     * Distances are decoupled from the speeds: floor/ceiling no longer ride
-     * DEFAULT_LOOK_DIST, so the default near/far/release are hand-tuned by feel, not
-     * derived from the multipliers. dynamicSpeed off → flat 1×.
+     * The flight's TARGET distance for a raw field read — the release remap, applied
+     * BEFORE the slew so a punch-through arrives throttle-slewed, not as a step.
+     * releaseDist > 0 and closer than it → you've passed through the content, so run at
+     * reference (void) speed. Deliberately scale-broken (absolute units) and default OFF:
+     * the scale-free exit is a glance — look away and the angle gate frees you instantly.
+     * @private @param {number} raw the raw look distance
+     * @returns {number} the slew target distance
+     */
+    _flightTargetDist(raw) {
+        const release = this.settings.dynamicReleaseDist;
+        return (release > 0 && raw < release) ? DEFAULT_LOOK_DIST : raw;
+    }
+
+    /**
+     * The WASD flight SPEED multiplier (× cameraSpeed) for a given content distance —
+     * the pure law: dist / DEFAULT_LOOK_DIST. At the reference distance you fly at
+     * exactly cameraSpeed (same as the void and dynamicSpeed-off); nearer is
+     * proportionally slower, farther proportionally faster — which is precisely constant
+     * on-screen text velocity (worldPerPixel is linear in distance), the terminal
+     * invariant. No floor/ceiling band: the input distance is already clamped to
+     * [MIN_LOOK_DIST, MAX_LOOK_DIST], so the multiplier spans [0.01, 10] and the law
+     * runs pure across three decades of scale. dynamicSpeed off → flat 1×.
      * @private @param {number} [dist] content distance (defaults to a fresh read)
-     * @returns {number} speed multiplier in [min, max]
+     * @returns {number} speed multiplier
      */
     _flightSpeedScale(dist = this._lookDistance()) {
-        const s = this.settings;
-        if (!s.dynamicSpeed) return 1;
-        const { dynamicNearDist: near, dynamicFarDist: far, dynamicSpeedMin: floor, dynamicSpeedMax: ceil, dynamicReleaseDist: release } = s;
-        if (release > 0 && dist < release) return ceil;  // too close → snap back to cruise
-        if (dist >= far) return ceil;
-        if (dist <= near) return floor;
-        const t = (far - dist) / (far - near);           // 0 at far, 1 at near
-        return ceil + t * (floor - ceil);                // lerp(ceil, floor, t)
+        if (!this.settings.dynamicSpeed) return 1;
+        return dist / DEFAULT_LOOK_DIST;
     }
 
     /** @private */
@@ -875,12 +930,9 @@ export class ViewerCameraController {
         stateController.set('camera.invertDragY', s.invertDragY);
         stateController.set('camera.invertScroll', s.invertScroll);
         stateController.set('camera.dynamicSpeed', s.dynamicSpeed);
-        stateController.set('camera.dynamicSpeedMin', s.dynamicSpeedMin);
-        stateController.set('camera.dynamicSpeedMax', s.dynamicSpeedMax);
-        stateController.set('camera.dynamicNearDist', s.dynamicNearDist);
-        stateController.set('camera.dynamicFarDist', s.dynamicFarDist);
         stateController.set('camera.dynamicReleaseDist', s.dynamicReleaseDist);
-        stateController.set('camera.dynamicSpeedSmoothing', s.dynamicSpeedSmoothing);
+        stateController.set('camera.dynamicBrakeSlew', s.dynamicBrakeSlew);
+        stateController.set('camera.dynamicThrottleSlew', s.dynamicThrottleSlew);
         stateController.set('camera.softBounds', s.softBounds);
         stateController.set('camera.softBoundsPadding', s.softBoundsPadding);
         stateController.set('camera.softBoundsHardCap', s.softBoundsHardCap);

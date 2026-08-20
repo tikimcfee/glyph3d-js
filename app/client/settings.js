@@ -204,47 +204,37 @@ export const SETTINGS = [
     type: 'number', default: 500, min: 1, max: 1000, step: 1,
     apply: (ctx, v) => ctx.cameraController?.setSpeed?.(v),
   },
-  // Proximity auto-slow: a WASD flight slows as it nears content and speeds back up as it
-  // clears it. A relevance VALLEY over distance — the × knobs set how slow/fast the ends
-  // are, the distance knobs set where the ramp sits. Off → flat speed everywhere.
-  //   floor/ceiling (×) — slowest (closest) and cruise (far) speed, × base move speed.
-  //   slow start / floor (dist) — ramp begins (cruise→slow) at 'slow start', bottoms out at 'floor at'.
-  //   snap-back (dist) — get closer than this and you punch back to cruise (you've passed
-  //                      through it); 0 disables it.
+  // Scale-free flight (docs/plans/scale-free-flight.md): flight speed is proportional to
+  // the distance of the content you're FACING (v = speed × d/200), so on-screen text
+  // velocity is constant in every scale regime — a 0.1× fitted volume flies exactly like
+  // a natural-scale grid. 'Move speed' above is your speed at the reference distance
+  // (200) and in the void. Off → flat speed everywhere.
+  //   punch-through (dist) — closer than this, run at reference speed (you've passed
+  //                          through it). Absolute units, so it breaks small-scale
+  //                          reading below that distance; 0 (default) disables — the
+  //                          scale-free exit is a glance away.
+  //   brake/throttle (s)   — asymmetric settle of the live distance: brake when something
+  //                          near swings into view, throttle when the view opens onto
+  //                          distance. Decelerate fast, accelerate gently.
   {
-    key: 'camera.dynamicSpeed', label: 'Proximity auto-slow', group: 'Camera',
+    key: 'camera.dynamicSpeed', label: 'Scale-free flight (speed ∝ distance)', group: 'Camera',
     type: 'bool', default: true,
     apply: (ctx, v) => { if (ctx.cameraController) ctx.cameraController.settings.dynamicSpeed = v; },
   },
   {
-    key: 'camera.dynamicSpeedMin', label: 'Auto-slow floor (×)', group: 'Camera',
-    type: 'number', default: 0.15, min: 0.02, max: 1, step: 0.01,
-    apply: (ctx, v) => { if (ctx.cameraController) ctx.cameraController.settings.dynamicSpeedMin = v; },
-  },
-  {
-    key: 'camera.dynamicSpeedMax', label: 'Auto-slow ceiling (×)', group: 'Camera',
-    type: 'number', default: 2, min: 1, max: 20, step: 0.5,
-    apply: (ctx, v) => { if (ctx.cameraController) ctx.cameraController.settings.dynamicSpeedMax = v; },
-  },
-  {
-    key: 'camera.dynamicNearDist', label: 'Auto-slow floor at (dist)', group: 'Camera',
-    type: 'number', default: 30, min: 1, max: 500, step: 1,
-    apply: (ctx, v) => { if (ctx.cameraController) ctx.cameraController.settings.dynamicNearDist = v; },
-  },
-  {
-    key: 'camera.dynamicFarDist', label: 'Auto-slow starts at (dist)', group: 'Camera',
-    type: 'number', default: 800, min: 50, max: 4000, step: 50,
-    apply: (ctx, v) => { if (ctx.cameraController) ctx.cameraController.settings.dynamicFarDist = v; },
-  },
-  {
-    key: 'camera.dynamicReleaseDist', label: 'Auto-slow snap-back (dist, 0=off)', group: 'Camera',
-    type: 'number', default: 40, min: 0, max: 200, step: 1,
+    key: 'camera.dynamicReleaseDist', label: 'Punch-through (dist, 0=off)', group: 'Camera',
+    type: 'number', default: 0, min: 0, max: 200, step: 1,
     apply: (ctx, v) => { if (ctx.cameraController) ctx.cameraController.settings.dynamicReleaseDist = v; },
   },
   {
-    key: 'camera.dynamicSpeedSmoothing', label: 'Auto-slow smoothing (s, 0=off)', group: 'Camera',
-    type: 'number', default: 0.12, min: 0, max: 0.6, step: 0.01,
-    apply: (ctx, v) => { if (ctx.cameraController) ctx.cameraController.settings.dynamicSpeedSmoothing = v; },
+    key: 'camera.dynamicBrakeSlew', label: 'Brake settle (s, 0=snap)', group: 'Camera',
+    type: 'number', default: 0.06, min: 0, max: 0.6, step: 0.01,
+    apply: (ctx, v) => { if (ctx.cameraController) ctx.cameraController.settings.dynamicBrakeSlew = v; },
+  },
+  {
+    key: 'camera.dynamicThrottleSlew', label: 'Throttle settle (s, 0=snap)', group: 'Camera',
+    type: 'number', default: 0.3, min: 0, max: 1.2, step: 0.01,
+    apply: (ctx, v) => { if (ctx.cameraController) ctx.cameraController.settings.dynamicThrottleSlew = v; },
   },
   // Soft bounds — a gentle anti-lost leash. The content's world box, padded by 'room' × the world
   // size, is the free zone; stray past it and — once you let go of the controls — a spring eases

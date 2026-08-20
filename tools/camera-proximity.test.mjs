@@ -1,15 +1,20 @@
-// camera-proximity.test.mjs — headless behavior lock for the proximity auto-slow:
-//   • _lookDistance()  — the distance scan: the forward CONE (A2) + the behind-the-eye cull.
-//   • _flightSpeedScale(dist) — the WASD speed VALLEY: cruise far, ramp down approaching,
-//     floor plateau at reading distance, snap back to cruise once too close (release).
-//   • _panDistance(dist)      — pan's held DISTANCE, clamped to the [near,far] band.
-//   • _applyKeyboardMotion()  — live WASD + the exponential speed-scale damping (A1).
+// camera-proximity.test.mjs — headless behavior lock for SCALE-FREE FLIGHT
+// (docs/plans/scale-free-flight.md):
+//   • _lookDistance()  — the angle-gated distance FIELD: the 9-ray cone probe, per-ray
+//     nearest hit, weighted log-space soft-min, behind-the-eye cull, void fallback.
+//   • _flightSpeedScale(dist) — the pure law: dist / DEFAULT_LOOK_DIST (constant
+//     on-screen text velocity — the terminal invariant).
+//   • _flightTargetDist(raw)  — the punch-through remap (release), applied pre-slew.
+//   • _panDistance(dist)      — pan's held DISTANCE, bounded only by the global look band.
+//   • _applyKeyboardMotion()  — live WASD + the asymmetric log-space slew of the distance,
+//     and the marquee lock: scale the whole scene by c → the per-frame step scales by
+//     exactly c (on-screen motion identical in every scale regime).
 //   bun tools/camera-proximity.test.mjs
 //
 // Drives the REAL controller methods via the prototype (Object.create skips the ctor,
 // which wants a canvas + event targets) with a mocked ctx. The camera looks down -Z
-// (identity quaternion), so "behind" is +Z. The curve methods take an explicit distance,
-// so the speed/pan shapes are unit-tested directly; the scan is tested through boxes.
+// (identity quaternion), so "behind" is +Z. The law methods take an explicit distance,
+// so the curve is unit-tested directly; the field is tested through boxes.
 
 import * as THREE from 'three';
 import { ViewerCameraController } from '../packages/glyph3d-core/src/services/camera/ViewerCameraController.js';
@@ -18,9 +23,11 @@ let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) pass++; else { fail++; console.log(`  ✗ ${m}`); } };
 const eq = (a, b, m, eps = 1e-6) => ok(Math.abs(a - b) <= eps, `${m} (got ${a} want ${b})`);
 
-// A framed surface: just the getBounds() the look-distance scan reads. (cx,cy,cz) center,
-// (hx,hy,hz) half-extents — an axis-aligned box.
-const surf = (cx, cy, cz, hx = 10, hy = 10, hz = 10) => {
+// A framed surface: just the getBounds() the field scan reads. (cx,cy,cz) center,
+// (hx,hy,hz) half-extents — an axis-aligned box. Faces in the ahead tests are WIDE
+// (hx=hy=50) so all 9 probe rays land on the same near face — a plane at fixed z
+// projects to the same forward distance on every ray, making the soft-min exact.
+const surf = (cx, cy, cz, hx = 50, hy = 50, hz = 10) => {
   const box = new THREE.Box3(
     new THREE.Vector3(cx - hx, cy - hy, cz - hz),
     new THREE.Vector3(cx + hx, cy + hy, cz + hz),
@@ -28,15 +35,14 @@ const surf = (cx, cy, cz, hx = 10, hy = 10, hz = 10) => {
   return { getBounds: () => box };
 };
 
-// Controller with only the fields the methods read — no ctor, no canvas. release defaults
-// to 0 here (clean ramp) — the product default is 10; the release tests set it explicitly.
+// Controller with only the fields the methods read — no ctor, no canvas. Slews default
+// to 0 here (deterministic snap); the slew tests set them explicitly.
 const make = (surfaces, { settings = {}, dock = null, camPos = [0, 0, 0] } = {}) => {
   const cc = Object.create(ViewerCameraController.prototype);
   cc.THREE = THREE;
   cc.settings = {
-    dynamicSpeed: true, dynamicSpeedMin: 0.15, dynamicSpeedMax: 8,
-    dynamicNearDist: 30, dynamicFarDist: 1600, dynamicReleaseDist: 0,
-    dynamicSpeedSmoothing: 0, ...settings,   // smoothing off by default → deterministic
+    dynamicSpeed: true, dynamicReleaseDist: 0,
+    dynamicBrakeSlew: 0, dynamicThrottleSlew: 0, ...settings,
   };
   cc.ctx = {
     camera: { position: new THREE.Vector3(...camPos), quaternion: new THREE.Quaternion() },
@@ -47,178 +53,225 @@ const make = (surfaces, { settings = {}, dock = null, camPos = [0, 0, 0] } = {})
 };
 const curve = (settings = {}) => make([], { settings });   // surfaces unused when passing dist
 
-const DEFAULT = 200;   // DEFAULT_LOOK_DIST (module-private) — the no-content / off scale
+const DEFAULT = 200;   // DEFAULT_LOOK_DIST (module-private) — reference distance AND the void scale
+const MIN = 2, MAX = 2000;   // the global look band
 
-// ════════ _lookDistance: the scan + behind-the-eye cull ════════
+// ════════ _lookDistance: the angle-gated field ════════
 
-// ── 1. a box dead ahead sets the look distance to the near face (you slow toward it) ──
-eq(make([surf(0, 0, -100)])._lookDistance(), 90, 'ahead: look distance = forward hit on the near face');
+// ── 1. a wide face dead ahead reads exactly its near-face distance (all rays agree,
+//       and a soft-min of identical votes is exact) ──
+eq(make([surf(0, 0, -100)])._lookDistance(), 90, 'ahead: a face all rays land on reads its near-face distance exactly');
 
 // ── 2. a box fully BEHIND the eye is ignored (no braking for what you've flown past) ──
 eq(make([surf(0, 0, 100)])._lookDistance(), DEFAULT, 'behind: a box wholly behind the eye is culled → default');
 
 // ── 3. ahead + behind together: the behind box must not undercut the ahead distance ──
-eq(make([surf(0, 0, -100), surf(0, 0, 40, 5, 5, 5)])._lookDistance(), 90, 'mixed: behind box ignored, ahead drives it');
+eq(make([surf(0, 0, -100), surf(0, 0, 40, 5, 5, 5)])._lookDistance(), 90, 'mixed: behind box ignored, ahead face drives it');
 
 // ── 4. a box straddling the eye plane (you're nosing into it) still counts ──
 ok(make([surf(0, 0, -5, 10, 10, 20)])._lookDistance() < DEFAULT, 'straddle: a box you sit inside still brakes you');
 
-// ── 5. dock tiles are skipped (camera-locked chrome isn't world content) ──
+// ── 5. dock tiles are skipped (instruments you read WITH, not content you read) ──
 {
   const tile = surf(0, 0, -100);
   eq(make([tile], { dock: new Set([tile]) })._lookDistance(), DEFAULT, 'dock: a camera-locked tile never brakes you');
 }
 
-// ── 6. CONE (A2): off-axis content you're flying toward is caught, not threaded past ──
+// ── 6. ANGLE GATES: near content wholly outside the cone does not vote, however near —
+//       what you FACE governs (the turn-your-head-while-close invariant) ──
 {
-  // Box A far dead-ahead (the lone forward ray hits it); Box B closer but off to the right.
-  // The old single ray missed B and returned A's far distance — the cone's tilted ray catches B.
-  const A = surf(0, 0, -500);            // forward ray → 490
-  const B = surf(20, 0, -100);           // +right, inside the cone → 90
-  eq(make([A])._lookDistance(), 490, 'cone: a lone dead-ahead box still reads its near face (forward ray)');
-  eq(make([A, B])._lookDistance(), 90, 'cone: a closer off-axis box you fly toward wins (caught by a tilted ray)');
+  const far  = surf(0, 0, -500, 200, 200, 10);   // dead ahead, wide → all rays, 490
+  const shoulder = surf(60, 0, -20, 10, 10, 10); // ~70° off-axis, 40 units away — outside the cone
+  eq(make([far])._lookDistance(), 490, 'gate: the faced wall alone reads 490');
+  eq(make([far, shoulder])._lookDistance(), 490, 'gate: off-shoulder near content casts no vote — no leash');
 }
 
-// ════════ _flightSpeedScale: the WASD speed valley ════════
+// ── 7. DISTANCE ANSWERS within the cone: an off-axis near edge caught by peripheral
+//       rays pulls the answer near-ward (soft-min), but weighted — it doesn't own it ──
+{
+  const far  = surf(0, 0, -500, 200, 200, 10);   // all rays → 490
+  const edge = surf(20, 0, -100, 10, 10, 10);    // right-side rays → 90
+  const d = make([far, edge])._lookDistance();
+  ok(d > 90 && d < DEFAULT, `soft-min: near edge in the cone pulls the field near-ward, weighted (got ${d})`);
+}
 
-// ── 6. ends of the band: far → ceiling, near → floor ──
+// ── 8. SCALE-FREE: scale the whole scene (content + eye) by c and the field scales by
+//       exactly c — the log-space aggregation has no absolute unit in it ──
+{
+  const at1 = make([surf(0, 0, -500, 200, 200, 10), surf(20, 0, -100, 10, 10, 10)],
+    { camPos: [0, 0, 0] })._lookDistance();
+  const c = 0.1;
+  const at01 = make([surf(0, 0, -50, 20, 20, 1), surf(2, 0, -10, 1, 1, 1)],
+    { camPos: [0, 0, 0] })._lookDistance();
+  eq(at01, at1 * c, 'scale-free: scene ×0.1 → field ×0.1 exactly', 1e-9);
+}
+
+// ── 9. void: no surfaces → default; all rays missing but content off-axis → nearest
+//       non-behind AABB (the anti-runaway fallback, not part of the law) ──
+{
+  eq(make([])._lookDistance(), DEFAULT, 'void: no content → default');
+  const shoulder = surf(60, 0, -20, 10, 10, 10);   // outside the cone, 40ish away
+  const d = make([shoulder])._lookDistance();
+  ok(Number.isFinite(d) && d < DEFAULT, 'void fallback: rays all miss → nearest non-behind AABB, not a runaway');
+}
+
+// ════════ _flightSpeedScale: the pure law ════════
+
+// ── 10. scale = dist / DEFAULT: 1× at the reference, proportional everywhere else ──
 {
   const c = curve();
-  eq(c._flightSpeedScale(5000), 8, 'far beyond farDist → ceiling (cruise)');
-  eq(c._flightSpeedScale(1600), 8, 'at farDist → ceiling');
-  eq(c._flightSpeedScale(30), 0.15, 'at nearDist → floor');
-  eq(c._flightSpeedScale(10), 0.15, 'below nearDist (release off) → floor plateau, all the way in');
+  eq(c._flightSpeedScale(DEFAULT), 1, 'law: at the reference distance → exactly 1× (the speed slider keeps its meaning)');
+  eq(c._flightSpeedScale(100), 0.5, 'law: half the reference → half speed');
+  eq(c._flightSpeedScale(MAX), 10, 'law: at the far clamp → 10×');
+  eq(c._flightSpeedScale(MIN), 0.01, 'law: at the near clamp → 0.01× — no floor band, the law runs pure');
 }
 
-// ── 7. the ramp is the lerp — and with default near/far it reproduces the old dist/200 ──
-{
-  const c = curve();
-  eq(c._flightSpeedScale(90), 0.45, 'mid-ramp 90 → lerp = 0.45 (== old 90/200)');
-  eq(c._flightSpeedScale(800), 4.0, 'mid-ramp 800 → lerp = 4.0 (== old 800/200)');
-}
-
-// ── 8. DECOUPLING: floor speed is independent of the floor distance ──
-{
-  const c = curve({ dynamicSpeedMin: 0.5, dynamicNearDist: 50 });
-  eq(c._flightSpeedScale(50), 0.5, 'decoupled: floor speed honored at a custom nearDist (0.5 ≠ 50/200)');
-  eq(c._flightSpeedScale(5), 0.5, 'decoupled: below nearDist holds the custom floor');
-}
-
-// ── 9. RELEASE (snap-back): get closer than releaseDist and you punch back to cruise ──
-{
-  const c = curve({ dynamicReleaseDist: 10 });
-  eq(c._flightSpeedScale(5), 8, 'release on: inside releaseDist → snap to ceiling (passed through it)');
-  eq(c._flightSpeedScale(10), 0.15, 'release boundary: AT releaseDist → still floor (snap is strictly inside)');
-  eq(c._flightSpeedScale(20), 0.15, 'release on: between release and near → floor plateau preserved');
-}
-
-// ── 10. dynamicSpeed OFF: flat full speed, no valley ──
+// ── 11. dynamicSpeed OFF: flat full speed, flat pan default ──
 {
   const c = curve({ dynamicSpeed: false });
   eq(c._flightSpeedScale(2), 1, 'off: flight scale is a flat 1× (full speed)');
   eq(c._panDistance(2), DEFAULT, 'off: pan distance is the flat default');
 }
 
-// ════════ _panDistance: pan's held distance band ════════
+// ════════ _flightTargetDist: the punch-through escape (default OFF) ════════
 
-// ── 11. pan clamps the look distance to [near, far] (real distance, not a multiplier) ──
+// ── 12. release 0 (default) → identity; release on remaps only strictly inside it ──
 {
   const c = curve();
-  eq(c._panDistance(2), 30, 'pan: clamps up to nearDist (no nose-against-panel crawl)');
-  eq(c._panDistance(5000), 1600, 'pan: clamps down to farDist (no void runaway)');
-  eq(c._panDistance(300), 300, 'pan: passes a distance already inside the band through untouched');
+  eq(c._flightTargetDist(5), 5, 'release off (default): raw passes through — no absolute-unit escape');
+  const r = curve({ dynamicReleaseDist: 10 });
+  eq(r._flightTargetDist(5), DEFAULT, 'release on: inside releaseDist → reference distance (void speed)');
+  eq(r._flightTargetDist(10), 10, 'release boundary: AT releaseDist → untouched (strictly inside)');
+  eq(r._flightTargetDist(15), 15, 'release on: outside releaseDist → untouched');
+}
+
+// ════════ _panDistance: pan's held distance ════════
+
+// ── 13. pan bounds by the GLOBAL look band only — a nose-close drag moves at page-
+//        scroll speed (the invariant), no absolute engagement band ──
+{
+  const c = curve();
+  eq(c._panDistance(0.5), MIN, 'pan: floors at the global MIN (anti-zero, not an engagement band)');
+  eq(c._panDistance(5000), MAX, 'pan: caps at the global MAX (no void runaway)');
+  eq(c._panDistance(8), 8, 'pan: a near-page distance passes through — the drag IS the scroll');
+  eq(c._panDistance(300), 300, 'pan: mid-band distance untouched');
 }
 
 // ════════ live WASD through _applyKeyboardMotion ════════
 
-// ── 12. LIVE deceleration: a sustained flight re-samples each frame, so the per-frame
-//        step SHRINKS as you near content (no stop/restart needed) ──
-{
-  const cc = make([surf(0, 0, -100)]);          // near face z=-90
-  cc.cameraSpeed = 100;
-  cc.input = { keys: new Set(['KeyW']) };        // W = forward (−Z)
-
-  const z0 = cc.ctx.camera.position.z;           // 0 — far: dist 90, mid-ramp
-  cc._applyKeyboardMotion(1 / 60);
-  const stepFar = z0 - cc.ctx.camera.position.z;
-
-  cc.ctx.camera.position.set(0, 0, -80);         // dist 10 → floor
-  const z1 = cc.ctx.camera.position.z;
-  cc._applyKeyboardMotion(1 / 60);
-  const stepNear = z1 - cc.ctx.camera.position.z;
-
-  ok(stepFar > 0, 'live WASD: the flight actually advances each frame');
-  ok(stepNear < stepFar, 'live WASD: per-frame step shrinks as you near content (live deceleration)');
-  ok(stepNear > 0, 'live WASD: the floor keeps the near step moving (not frozen to ~0)');
-}
-
-// ── 13. LIVE snap-back: punch inside releaseDist and the step jumps back up to cruise ──
-{
-  const cc = make([surf(0, 0, -100)], { settings: { dynamicReleaseDist: 10 } });
-  cc.cameraSpeed = 100;
-  cc.input = { keys: new Set(['KeyW']) };
-
-  cc.ctx.camera.position.set(0, 0, -50);         // dist 40 → deep in the slow ramp
-  const zA = cc.ctx.camera.position.z;
-  cc._applyKeyboardMotion(1 / 60);
-  const stepSlow = zA - cc.ctx.camera.position.z;
-
-  cc.ctx.camera.position.set(0, 0, -85);         // dist 5 (< release) → snapped to cruise
-  const zB = cc.ctx.camera.position.z;
-  cc._applyKeyboardMotion(1 / 60);
-  const stepSnap = zB - cc.ctx.camera.position.z;
-
-  ok(stepSnap > stepSlow, 'release: punching inside releaseDist jumps the step back up to cruise');
-}
-
-// ════════ A1 · exponential damping of the live speed scale ════════
-// A flier set to hold W, with one box dead-ahead at z=-100 (cone = forward-only here).
-const flyer = (settings, camZ) => {
-  const cc = make([surf(0, 0, -100)], { settings, camPos: [0, 0, camZ] });
+// A flier set to hold W, with one wide box dead-ahead at z=-100.
+const flyer = (settings, camZ, surfaces = [surf(0, 0, -100)]) => {
+  const cc = make(surfaces, { settings, camPos: [0, 0, camZ] });
   cc.cameraSpeed = 100;
   cc.input = { keys: new Set(['KeyW']) };
   return cc;
 };
 
-// ── A1.1 first moving frame SNAPS to target (null latch) — crisp takeoff, no ramp-from-0 ──
+// ── 14. LIVE deceleration: v ∝ d, so the per-frame step SHRINKS as you near content ──
 {
-  const cc = flyer({ dynamicSpeedSmoothing: 0.1 }, 0);   // dist 90 → target 0.45 (harness band)
+  const cc = flyer({}, 0);                        // near face z=-90 → d 90
+  const z0 = cc.ctx.camera.position.z;
   cc._applyKeyboardMotion(1 / 60);
-  eq(cc._dampedSpeedScale, 0.45, 'A1: first frame snaps the damped scale to target (crisp takeoff)');
+  const stepFar = z0 - cc.ctx.camera.position.z;
+
+  cc._slewedLookDist = null;                      // fresh takeoff at the new pose
+  cc.ctx.camera.position.set(0, 0, -80);          // d 10
+  const z1 = cc.ctx.camera.position.z;
+  cc._applyKeyboardMotion(1 / 60);
+  const stepNear = z1 - cc.ctx.camera.position.z;
+
+  ok(stepFar > 0, 'live WASD: the flight actually advances each frame');
+  eq(stepNear / stepFar, 10 / 90, 'live WASD: steps are in exact proportion to distance (v = k·d)', 1e-9);
 }
 
-// ── A1.2 an in-flight target jump is DAMPED — lands strictly between, by the exact formula ──
+// ── 15. THE MARQUEE LOCK: scale the whole scene by c and the per-frame step scales by
+//        exactly c — flying a 0.1× fitted volume is kinesthetically identical to flying
+//        the natural-scale world (body scale is unobservable) ──
 {
-  const cc = flyer({ dynamicSpeedSmoothing: 0.1, dynamicReleaseDist: 10 }, -85); // dist 5 (<release) → ceiling 8
-  cc._dampedSpeedScale = 0.15;                            // pretend we were down at the floor
+  const a = flyer({}, 0, [surf(0, 0, -100, 50, 50, 10)]);
+  a._applyKeyboardMotion(1 / 60);
+  const step1 = -a.ctx.camera.position.z;
+
+  const b = flyer({}, 0, [surf(0, 0, -10, 5, 5, 1)]);   // the same scene at 0.1×
+  b._applyKeyboardMotion(1 / 60);
+  const step01 = -b.ctx.camera.position.z;
+
+  eq(step01, step1 * 0.1, 'scale-free flight: scene ×0.1 → per-frame step ×0.1 exactly', 1e-9);
+}
+
+// ── 16. punch-through (opt-in): inside releaseDist the step jumps to reference speed ──
+{
+  const slow = flyer({ dynamicReleaseDist: 10 }, -50);   // d 40 → 0.2×
+  slow._applyKeyboardMotion(1 / 60);
+  const stepSlow = -50 - slow.ctx.camera.position.z;
+
+  const snap = flyer({ dynamicReleaseDist: 10 }, -85);   // d 5 (< release) → reference → 1×
+  snap._applyKeyboardMotion(1 / 60);
+  const stepSnap = -85 - snap.ctx.camera.position.z;
+
+  ok(stepSnap > stepSlow, 'release: punching inside releaseDist jumps the step to reference speed');
+}
+
+// ════════ the asymmetric log-space slew ════════
+
+// ── S1. first moving frame SNAPS to target (null latch) — crisp takeoff ──
+{
+  const cc = flyer({ dynamicBrakeSlew: 0.1, dynamicThrottleSlew: 0.4 }, 0);   // d 90
   cc._applyKeyboardMotion(1 / 60);
-  ok(cc._dampedSpeedScale > 0.15 && cc._dampedSpeedScale < 8, 'A1: a jump to ceiling is damped (between floor and ceiling)');
+  eq(cc._slewedLookDist, 90, 'slew: first frame snaps the distance to target (crisp takeoff)');
+}
+
+// ── S2. a DROP in target rides the BRAKE constant, by the exact log-space formula ──
+{
+  const cc = flyer({ dynamicBrakeSlew: 0.1, dynamicThrottleSlew: 0.4 }, 0);   // target 90
+  cc._slewedLookDist = 200;                       // pretend we were cruising at reference
+  cc._applyKeyboardMotion(1 / 60);
   const alpha = 1 - Math.exp(-(1 / 60) / 0.1);
-  eq(cc._dampedSpeedScale, 0.15 + (8 - 0.15) * alpha, 'A1: damp = cur + (target-cur)·(1-exp(-dt/τ))');
+  eq(cc._slewedLookDist, Math.exp(Math.log(200) + (Math.log(90) - Math.log(200)) * alpha),
+    'slew: brake = exp(ln cur + (ln target − ln cur)·(1−e^(−dt/τ_brake)))');
 }
 
-// ── A1.3 smoothing OFF (τ=0) snaps instantly — identical to pre-A1 behavior ──
+// ── S3. a RISE in target rides the THROTTLE constant — lazier than the brake ──
 {
-  const cc = flyer({ dynamicSpeedSmoothing: 0, dynamicReleaseDist: 10 }, -85);   // target ceiling 8
-  cc._dampedSpeedScale = 0.15;
+  const mk = () => {
+    const cc = flyer({ dynamicBrakeSlew: 0.1, dynamicThrottleSlew: 0.4 }, 0);
+    cc._slewedLookDist = 30;                      // below target 90 → rising
+    cc._applyKeyboardMotion(1 / 60);
+    return cc._slewedLookDist;
+  };
+  const rose = mk();
+  const alpha = 1 - Math.exp(-(1 / 60) / 0.4);
+  eq(rose, Math.exp(Math.log(30) + (Math.log(90) - Math.log(30)) * alpha),
+    'slew: throttle uses its own (longer) constant');
+  // and asymmetry is real: the same-size log-gap closes further under the brake
+  const cc2 = flyer({ dynamicBrakeSlew: 0.1, dynamicThrottleSlew: 0.4 }, 0);
+  cc2._slewedLookDist = 270;                      // above target 90 → braking, same |log gap| as 30→90
+  cc2._applyKeyboardMotion(1 / 60);
+  const brakeClosed = Math.abs(Math.log(cc2._slewedLookDist) - Math.log(90));
+  const throttleClosed = Math.abs(Math.log(rose) - Math.log(90));
+  ok(brakeClosed < throttleClosed, 'slew: decelerate fast, accelerate gently (brake closes the gap faster)');
+}
+
+// ── S4. slews at 0 snap instantly; a giant frame asymptotes without overshoot ──
+{
+  const cc = flyer({}, 0);                        // both slews 0
+  cc._slewedLookDist = 500;
   cc._applyKeyboardMotion(1 / 60);
-  eq(cc._dampedSpeedScale, 8, 'A1: smoothing 0 → instant snap (no damping)');
+  eq(cc._slewedLookDist, 90, 'slew: τ=0 snaps to target instantly');
+
+  const cd = flyer({ dynamicBrakeSlew: 0.1, dynamicThrottleSlew: 0.4 }, 0);
+  cd._slewedLookDist = 500;
+  cd._applyKeyboardMotion(1.0);                   // a giant 1s frame
+  ok(cd._slewedLookDist >= 90 - 1e-9 && cd._slewedLookDist < 91, 'slew: a 1s frame closes the gap without overshoot');
 }
 
-// ── A1.4 frame-rate independence: a huge frame asymptotes to target, never overshoots ──
+// ── S5. releasing the keys UNLATCHES (null) so the next takeoff snaps fresh ──
 {
-  const cc = flyer({ dynamicSpeedSmoothing: 0.1 }, 0); cc._dampedSpeedScale = 0;  // target 0.45
-  cc._applyKeyboardMotion(1.0);                          // a giant 1s frame
-  ok(cc._dampedSpeedScale <= 0.45 + 1e-9 && cc._dampedSpeedScale > 0.44, 'A1: a 1s frame closes the gap without overshoot');
-}
-
-// ── A1.5 releasing the keys UNLATCHES (null) so the next takeoff snaps fresh ──
-{
-  const cc = flyer({ dynamicSpeedSmoothing: 0.1 }, 0);
-  cc._dampedSpeedScale = 5;
-  cc.input = { keys: new Set() };                        // not moving
+  const cc = flyer({ dynamicBrakeSlew: 0.1, dynamicThrottleSlew: 0.4 }, 0);
+  cc._slewedLookDist = 500;
+  cc.input = { keys: new Set() };                 // not moving
   cc._applyKeyboardMotion(1 / 60);
-  ok(cc._dampedSpeedScale === null, 'A1: releasing keys unlatches the damp → next flight snaps');
+  ok(cc._slewedLookDist === null, 'slew: releasing keys unlatches → next flight snaps');
 }
 
 console.log(`\ncamera-proximity: ${pass} passed, ${fail} failed`);
