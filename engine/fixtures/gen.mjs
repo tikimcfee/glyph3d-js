@@ -34,7 +34,7 @@
  *     maxRowExtent; an item with no leaders is +inf/+inf/+inf/-inf/-inf/-inf/0/0)
  *   f64[8] batch bounds row (same shape/sentinel)
  *
- * Run: bun engine/fixtures/gen.mjs   (writes *.bin beside this file)
+ * Run: bun engine/fixtures/gen.mjs   (writes *.pipe.bin beside this file)
  */
 
 import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
@@ -236,7 +236,7 @@ for (const c of CASES) {
     for (const b of r.itemBounds) for (const v of boundsRow(b)) w.f64(v);
     for (const v of boundsRow(r.bounds)) w.f64(v);
 
-    const path = join(HERE, `${c.name}.bin`);
+    const path = join(HERE, `${c.name}.pipe.bin`);
     writeFileSync(path, w.done());
     console.log(`${c.name}: ${c.bytes.length} bytes, ${items.length} item(s), ` +
         `${r.leaders} leaders, ${r.misses.length} misses → ${w.len} B fixture`);

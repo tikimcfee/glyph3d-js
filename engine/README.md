@@ -24,8 +24,10 @@ headless frame: bytes → native curve cache → compute raster → PNG) builds 
 Fixtures are the oracle's own answers, serialized:
 
 ```sh
-bun engine/fixtures/gen.mjs                                    # regenerate *.bin
-mojo run -I engine engine/conformance.mojo engine/fixtures/*.bin
+bun engine/fixtures/gen.mjs        # regenerate *.pipe.bin (pipeline cases)
+bun engine/fixtures/gen-bake.mjs   # regenerate *.bake.bin (bake + seed queries)
+mojo run -I engine engine/conformance.mojo      engine/fixtures/*.pipe.bin
+mojo run -I engine engine/conformance_bake.mojo engine/fixtures/*.bake.bin
 ```
 
 Every f32 lane is compared as a u32 bit pattern, every f64 bounds lane as u64.
@@ -34,8 +36,23 @@ rows, page/band/depth fans, the scroll conveyor, malformed UTF-8, a leaderless i
 a 5K-glyph foldless line (the f64-prefix case), a real repo file, and a multi-item
 arena. Mutation-tested: a 1-ULP perturbation of `segAdv` fails 2 fixtures loudly.
 
-Regenerate fixtures whenever the oracle changes; the fixture format is documented in
-`fixtures/gen.mjs`.
+Regenerate fixtures whenever the oracle changes; the fixture formats are documented
+in `fixtures/gen.mjs` and `fixtures/gen-bake.mjs`.
+
+## The bake (the seed format)
+
+`glyph_bake.mojo` ports `glyphBake.js` plus the scan monoid it rides
+(`scanIdentity` / `scanLeafValue` / `scanCombine` / `lanesFromPrefix` from
+`glyphPipelineScan.js`) — the streaming fold that emits everything layout can know
+about a file before the GPU sees it: the total monoid summary, checkpoint records
+(random access into a layout never materialized), the intrinsic scalars and exact
+wrap-0 box, the line histogram (`rows_under_wrap` answers ANY wrap from it), and the
+codepoint census. This is the seed format of the state split: bytes + trie + this
+record is what a client consumes to materialize layout locally. The bake suite also
+proves the query side — checkpoint-seeded `prefix_at` at boundaries ±1 and
+`lanes_from_prefix` across wraps — so seed-and-fold agrees with the streaming pass
+bit-for-bit. Mutation-tested the same way (a 5e-8 nudge in `scan_combine`'s tailAdv
+fails checkpoints, scalars, and box loudly).
 
 ## Toolchain
 
@@ -47,5 +64,5 @@ conformance; that is the point of the serial layer.
 - `resolveX` (the gather-free x kernel) — arrives with the scan/GPU backend, which is
   its reason to exist; the serial fold computes the same lanes here.
 - The far-texture LOD oracles (`farScatterOracle` / `farNormalizeOracle`).
-- `glyphBake` (checkpoints / census / line histogram) — next after M0: same fold,
-  streaming form, and the seed format the state split ships to clients.
+- The scan's dispatch-shaped driver (chunkReduce → spineReduce → spineScan →
+  partialScan → apply) — the GPU backend's skeleton; kernels are already shared.

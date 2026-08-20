@@ -6,7 +6,7 @@
 # a tolerance would hide exactly the grouping-dependent float drift this rig
 # exists to catch.
 #
-# Run: mojo run -I engine engine/conformance.mojo engine/fixtures/*.bin
+# Run: mojo run -I engine engine/conformance.mojo engine/fixtures/*.pipe.bin
 
 from std.sys import argv
 from std.memory import bitcast
