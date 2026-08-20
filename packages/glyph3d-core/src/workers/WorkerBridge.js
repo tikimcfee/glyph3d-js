@@ -341,6 +341,19 @@ export function getWorkerBridge() {
 }
 
 /**
+ * The shared instance IF one exists — never creates it.
+ *
+ * getWorkerBridge() allocates the pool on first call (hardwareConcurrency - 1
+ * workers). Observers must not pay that: a monitor that spawns seven workers by
+ * asking whether seven workers exist is reporting its own footprint. Returns null
+ * when the pool has not been built yet.
+ * @returns {WorkerBridge|null}
+ */
+export function peekWorkerBridge() {
+    return _instance;
+}
+
+/**
  * Dispose shared instance
  */
 export function disposeWorkerBridge() {
