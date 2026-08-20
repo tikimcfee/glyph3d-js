@@ -73,6 +73,27 @@ fails checkpoints, scalars, and box loudly).
 Mojo ≥ 1.0 (`pip install modular` provides `mojo`). CPU-only — no GPU required for
 conformance; that is the point of the serial layer.
 
+## First numbers (honest ones)
+
+`engine/bench/` runs the same work over the same corpus (every .js under
+`packages/`, 2.4MB, one trie) in both worlds — checksums cross-check that both
+computed identical answers. First measurement, single-threaded, naive transcription
+vs Bun's JIT on typed arrays:
+
+| work | js/bun | mojo (native, -O) |
+|---|---|---|
+| bake | 15.6 MB/s | 28.0 MB/s (1.8×) |
+| pipeline (serial) | 15.4 MB/s | 13.4 MB/s (0.9×) |
+| pipeline (scan form) | 4.2 MB/s | 5.0 MB/s (1.2×) |
+
+The lesson, stated plainly: a line-for-line port does not beat a good JIT on serial
+scalar code — the native headroom is structural (threads across files, SIMD in the
+fold, the GPU for the scan), not automatic. That is exactly the claim the docs made:
+the fold is cheap everywhere; the win is where it can run, not how fast one core
+runs it. `bun engine/bench/gen-bench.mjs` regenerates the corpus;
+`mojo build -I engine engine/bench/bench.mojo -o engine/bench/bench` builds the
+native side (bench.bin and the binary are gitignored).
+
 ## Not ported yet
 
 - The far-texture LOD oracles (`farScatterOracle` / `farNormalizeOracle`).
