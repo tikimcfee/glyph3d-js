@@ -363,7 +363,7 @@ need no dirty management at all — inputs are read live.
 - **[BACKGROUND]** — `CodeGrid._sizeBackgroundTo` (`:2177`) only; already owns padding.
   TerminalGrid/FrameGrid backgrounds already independent.
 - **[WORLD-EXTENT]** — camera soft-bounds (`ViewerCameraController.js:605`), minimap
-  (`Minimap.jsx:143` + `:121`), `MinimapOverlay`, `getTotalBounds` on the layout
+  (`Minimap.jsx:143` + `:121`), `getTotalBounds` on the layout
   managers + diff framing. **Source under Measures: the same
   `sceneBounds.worldBounds(surfaces, opts)` helper, unchanged — see §6.**
 
