@@ -55,3 +55,6 @@ console.log
 .claude/*
 !.claude/skills/
 .glyph3d/
+
+# Mojo toolchain venv (see engine/README.md setup)
+.venv-mojo/

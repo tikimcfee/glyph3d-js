@@ -137,6 +137,35 @@ contracts, same checksums as the JS — only faster. The scan form's 9× is the
 architecture's claim made concrete: it parallelizes because it was *designed* to,
 and the same sharding is the GPU dispatch structure.
 
+### Second machine: Apple M2, 8 cores (2026-08-20)
+
+The whole suite was brought up from a fresh clone on an M2 MacBook — a different
+CPU architecture from the x86 container the numbers above came from. All three
+conformance suites passed **on the first run, unchanged**: bit-exact serial,
+tiered scan at both tunings, bit-exact bake. The float discipline is genuinely
+portable, not accidentally x86-shaped.
+
+| work | js/bun (M2) | mojo, sharded (M2, 8 cores) |
+|---|---|---|
+| bake | **35.1 MB/s** | 27.5 MB/s (0.78×) |
+| pipeline (serial oracle) | 46.0 MB/s | **122.2 MB/s (2.7×)** |
+| pipeline (scan form) | 8.7 MB/s | **70.2 MB/s (8.1×)** |
+
+Both sides got much faster on real hardware, and the *ratios held* — 2.7× and
+~8×, the same as on 4 cores. That is the useful signal: the win is structural,
+not a one-machine artifact.
+
+The exception is honest and points at the next job. **Bake is now slower than
+JS.** It is the only stage still single-threaded, and JavaScriptCore's JIT on
+Apple silicon is genuinely excellent at that serial loop. Native doesn't lose
+because it's native; it loses because it isn't spending the cores. Bake is
+per-file embarrassingly parallel — fanning it out across a `TaskGroup` the way
+the pipeline drivers already do is the obvious next commit.
+
+Checksums matched JS on every run, and eight consecutive runs produced identical
+checksums — the ASAP-destruction keep-alive anchors hold under 8-way parallelism,
+not just 4.
+
 `bun engine/bench/gen-bench.mjs` regenerates the corpus;
 `mojo build -I engine engine/bench/bench.mojo -o engine/bench/bench` builds the
 native side (bench.bin and the binary are gitignored).
