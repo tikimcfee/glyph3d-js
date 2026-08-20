@@ -59,7 +59,7 @@ struct PipeFixture(Movable):
     var exp_leaders: Int
     var exp_misses: List[UInt32]
     var exp_ord: List[UInt32]
-    var exp_slot_bits: List[UInt32]
+    var exp_slots: List[Float64]  # VALUES (v2 carrier), not buffer bits
     var exp_item_bounds: List[UInt64]
     var exp_batch: List[UInt64]
 
@@ -72,7 +72,7 @@ struct PipeFixture(Movable):
         self.exp_leaders = 0
         self.exp_misses = List[UInt32]()
         self.exp_ord = List[UInt32]()
-        self.exp_slot_bits = List[UInt32]()
+        self.exp_slots = List[Float64]()
         self.exp_item_bounds = List[UInt64]()
         self.exp_batch = List[UInt64]()
 
@@ -85,8 +85,8 @@ def load_pipe_fixture(path: String) raises -> PipeFixture:
 
     if Int(r.u32()) != PIPE_MAGIC:
         raise Error(path + ": bad magic (not a .pipe.bin fixture)")
-    if Int(r.u32()) != 1:
-        raise Error(path + ": unknown fixture version")
+    if Int(r.u32()) != 2:
+        raise Error(path + ": unknown fixture version (expected v2 — regenerate)")
 
     var fx = PipeFixture()
     fx.byte_len = Int(r.u32())
@@ -100,7 +100,9 @@ def load_pipe_fixture(path: String) raises -> PipeFixture:
         block_index.append(r.u32())
     var blocks = List[Float32](capacity=blocks_len)
     for _ in range(blocks_len):
-        blocks.append(r.f32())
+        # v2 stores trie blocks as f64 VALUES; the trie's own representation is
+        # f32, and f64 -> f32 is exact for anything that was an f32 to begin with.
+        blocks.append(Float32(r.f64()))
     fx.trie = Trie(block_index^, blocks^)
 
     for _ in range(fx.item_count):
@@ -132,7 +134,7 @@ def load_pipe_fixture(path: String) raises -> PipeFixture:
     for _ in range(fx.byte_len):
         fx.exp_ord.append(r.u32())
     for _ in range(fx.byte_len * SLOT_STRIDE):
-        fx.exp_slot_bits.append(r.u32())
+        fx.exp_slots.append(r.f64())
     for _ in range(fx.item_count * 8):
         fx.exp_item_bounds.append(r.u64())
     for _ in range(8):

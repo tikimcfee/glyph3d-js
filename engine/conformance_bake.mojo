@@ -103,7 +103,7 @@ def check_case(path: String) raises -> Int:
     if Int(r.u32()) != MAGIC:
         print(path, ": bad magic")
         return 1
-    if Int(r.u32()) != 1:
+    if Int(r.u32()) != 2:
         print(path, ": unknown version")
         return 1
     var byte_len = Int(r.u32())
@@ -118,7 +118,7 @@ def check_case(path: String) raises -> Int:
         block_index.append(r.u32())
     var blocks = List[Float32](capacity=blocks_len)
     for _ in range(blocks_len):
-        blocks.append(r.f32())
+        blocks.append(Float32(r.f64()))  # v2 carrier
     var trie = Trie(block_index^, blocks^)
 
     var got = bake_file(bytes, trie, line_height, interval)

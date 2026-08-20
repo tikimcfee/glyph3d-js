@@ -13,7 +13,14 @@
  * the class of bug (grouping-dependent float drift) this rig exists to catch.
  *
  * Format (all little-endian, packed, no alignment):
- *   u32 magic 'G3DF' (0x46443347)   u32 version=1
+ *   u32 magic 'G3DF' (0x46443347)   u32 version=2
+ *
+ * v2 CARRIER NOTE: float payloads (trie blocks, slots) are stored as f64 VALUES,
+ * not as the buffer's current representation. f64 holds every f32 exactly (and
+ * every u32, with 2^53 headroom), so the corpus survives a change of slot-lane
+ * representation without regenerating. Which lanes are counts and which are
+ * genuine floats is a property of the PIPELINE, so it lives in the differ, not
+ * in this file. v1 stored raw f32 bits and was hostage to the buffer's type.
  *   u32 byteLen  u32 itemCount  u32 blockIndexLen  u32 blocksFloatLen
  *   u8[byteLen] bytes
  *   u32[blockIndexLen] blockIndex
@@ -29,7 +36,7 @@
  *   u32 leaders
  *   u32 missCount  u32[missCount] misses (codepoints, byte order, dups kept)
  *   u32[byteLen] ordToByte
- *   f32[byteLen*12] slots
+ *   f64[byteLen*12] slots   (VALUES, not the buffer's representation)
  *   itemCount × f64[8] item bounds row (minX minY minZ maxX maxY maxZ totalRows
  *     maxRowExtent; an item with no leaders is +inf/+inf/+inf/-inf/-inf/-inf/0/0)
  *   f64[8] batch bounds row (same shape/sentinel)
@@ -189,6 +196,7 @@ class Writer {
     bytes(arr) { this._push(arr.buffer ? arr.slice().buffer : arr); }
     u32array(arr) { for (const v of arr) this.u32(v); }
     f32array(arr) { for (const v of arr) this.f32(v); }
+    f64array(arr) { for (const v of arr) this.f64(v); }
     done() {
         const out = new Uint8Array(this.len);
         let at = 0;
@@ -212,12 +220,12 @@ for (const c of CASES) {
     const r = runPipeline(c.bytes, trie, { items });
 
     const w = new Writer();
-    w.u32(0x46443347); w.u32(1);
+    w.u32(0x46443347); w.u32(2);
     w.u32(c.bytes.length); w.u32(items.length);
     w.u32(trie.blockIndex.length); w.u32(trie.blocks.length);
     w.bytes(c.bytes);
     w.u32array(trie.blockIndex);
-    w.f32array(trie.blocks);
+    w.f64array(trie.blocks);
     for (const it of items) {
         w.u32(it.byteStart); w.u32(it.byteCount);
         w.f64(it.origin?.x || 0); w.f64(it.origin?.y || 0); w.f64(it.origin?.z || 0);
@@ -232,7 +240,7 @@ for (const c of CASES) {
     w.u32(r.leaders);
     w.u32(r.misses.length); w.u32array(r.misses);
     w.u32array(r.ordToByte);
-    w.f32array(r.slots);
+    w.f64array(r.slots);
     for (const b of r.itemBounds) for (const v of boundsRow(b)) w.f64(v);
     for (const v of boundsRow(r.bounds)) w.f64(v);
 

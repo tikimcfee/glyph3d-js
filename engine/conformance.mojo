@@ -65,7 +65,11 @@ def check_case(path: String) raises -> Int:
         for lane in range(SLOT_STRIDE):
             var idx = slot * SLOT_STRIDE + lane
             var g = UInt32(got.slots[idx].to_bits())
-            var e = fx.exp_slot_bits[idx]
+            # THE CLASSIFICATION SITE. The fixture carries values; this line
+            # says how the slot buffer represents them. Every lane is f32 today,
+            # so every expected value narrows to f32 and compares as bits. When a
+            # lane's representation changes, it changes HERE — not in the corpus.
+            var e = UInt32(Float32(fx.exp_slots[idx]).to_bits())
             if g != e:
                 bad += 1
                 if printed < MAX_PRINTED:

@@ -81,12 +81,12 @@ def check_case(path: String, chunk_size: Int, group_size: Int) raises -> Int:
 
     for slot in range(fx.byte_len):
         var o = slot * SLOT_STRIDE
-        var is_leader = (Int(bitcast[DType.float32](fx.exp_slot_bits[o + S_FLAGS])) & F_LEADER) != 0
+        var is_leader = (Int(Float32(fx.exp_slots[o + S_FLAGS])) & F_LEADER) != 0
         for lane in range(SLOT_STRIDE):
             var idx = o + lane
             var g32 = got.slots[idx]
-            var e32 = bitcast[DType.float32](fx.exp_slot_bits[idx])
-            var bits_equal = UInt32(g32.to_bits()) == fx.exp_slot_bits[idx]
+            var e32 = Float32(fx.exp_slots[idx])  # see conformance.mojo: classification site
+            var bits_equal = UInt32(g32.to_bits()) == UInt32(e32.to_bits())
             var lane_ok: Bool
             if not is_leader:
                 lane_ok = bits_equal  # non-leader lanes never differ

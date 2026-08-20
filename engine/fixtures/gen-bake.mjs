@@ -9,7 +9,7 @@
  *   - rowsUnderWrap: exact visual rows under arbitrary wrap, from the histogram
  *
  * Format 'G3DB' v1 (little-endian, packed):
- *   u32 magic 0x42443347  u32 version=1
+ *   u32 magic 0x42443347  u32 version=2   (v2: trie blocks are f64 VALUES — see gen.mjs)
  *   u32 byteLen  u32 blockIndexLen  u32 blocksFloatLen
  *   f64 lineHeight  u32 checkpointInterval
  *   u8[byteLen] bytes   u32[] blockIndex   f32[] blocks
@@ -119,12 +119,12 @@ for (const c of CASES) {
     }));
 
     const w = new Writer();
-    w.u32(0x42443347); w.u32(1);
+    w.u32(0x42443347); w.u32(2);
     w.u32(n); w.u32(trie.blockIndex.length); w.u32(trie.blocks.length);
     w.f64(c.lineHeight); w.u32(K);
     w.bytes(c.bytes);
     for (const v of trie.blockIndex) w.u32(v);
-    for (const v of trie.blocks) w.f32(v);
+    for (const v of trie.blocks) w.f64(v);
 
     w.u32(r.leaders); w.u32(r.newlines); w.u32(r.totalRows); w.u32(r.maxLineLen);
     w.f64(r.maxRowExtent); w.f64(r.maxLineWidth); w.f64(r.maxHeight);
