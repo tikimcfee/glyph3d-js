@@ -19,6 +19,7 @@
 # Mirrors (never diverge): packages/glyph3d-core/src/compute/glyphBake.js
 #                          packages/glyph3d-core/src/compute/glyphPipelineScan.js
 
+from std.collections import Set, Dict
 from glyph_pipeline import (
     Trie,
     NEWLINE,
@@ -206,37 +207,6 @@ struct BakeRecord(Copyable, Movable):
         self.line_height = 0
 
 
-def _sorted_insert_unique(mut xs: List[Int], v: Int):
-    """Keep `xs` sorted-unique — census sets are small (a file's distinct codepoints)."""
-    var lo = 0
-    var hi = len(xs)
-    while lo < hi:
-        var mid = (lo + hi) // 2
-        if xs[mid] < v:
-            lo = mid + 1
-        else:
-            hi = mid
-    if lo < len(xs) and xs[lo] == v:
-        return
-    xs.insert(lo, v)
-
-
-def _hist_bump(mut lens: List[Int], mut counts: List[Int], length: Int):
-    var lo = 0
-    var hi = len(lens)
-    while lo < hi:
-        var mid = (lo + hi) // 2
-        if lens[mid] < length:
-            lo = mid + 1
-        else:
-            hi = mid
-    if lo < len(lens) and lens[lo] == length:
-        counts[lo] += 1
-        return
-    lens.insert(lo, length)
-    counts.insert(lo, 1)
-
-
 def bake_file(
     bytes: List[UInt8], trie: Trie, line_height: Float64, checkpoint_interval: Int
 ) raises -> BakeRecord:
@@ -253,6 +223,13 @@ def bake_file(
 
     var ck_count = ((n - 1) // k) if n > 0 else 0
     r.checkpoints = List[Float64](length=ck_count * CK_STRIDE, fill=0)
+
+    # Census/missing/histogram accumulate in hash containers and are sorted ONCE
+    # at the end (what glyphBake.js does with Set/Map). The old sorted-insert
+    # cost a binary search + a possible memmove PER LEADER — millions of them.
+    var census_set = Set[Int]()
+    var missing_set = Set[Int]()
+    var hist = Dict[Int, Int]()
 
     var acc = scan_identity()
     var max_row = -1
@@ -278,9 +255,9 @@ def bake_file(
         var advance = trie.blocks[tb + LANE_ADVANCE]
         var height = trie.blocks[tb + LANE_HEIGHT]
         var is_missing = (Int(trie.blocks[tb + LANE_FLAGS]) & FLAG_MISSING) != 0
-        _sorted_insert_unique(r.census, cp)
+        census_set.add(cp)
         if is_missing:
-            _sorted_insert_unique(r.missing, cp)
+            missing_set.add(cp)
         r.leaders += 1
 
         # The exclusive prefix IS the accumulator right now — read the leader's
@@ -300,11 +277,24 @@ def bake_file(
         if Float64(height) > r.max_height:
             r.max_height = Float64(height)
         if cp == NEWLINE:
-            _hist_bump(r.hist_lens, r.hist_counts, acc.tail_len)
+            hist[acc.tail_len] = hist.get(acc.tail_len, 0) + 1
 
         var leaf = scan_leaf_value(cp == NEWLINE, advance, True, 0, id == 0)
         scan_combine(acc, leaf)
         id += 1
+
+    # Materialize the sorted-unique output contract exactly as before.
+    for cp in census_set:
+        r.census.append(cp)
+    sort(r.census)
+    for cp in missing_set:
+        r.missing.append(cp)
+    sort(r.missing)
+    for e in hist.items():
+        r.hist_lens.append(e.key)
+    sort(r.hist_lens)
+    for ln in r.hist_lens:
+        r.hist_counts.append(hist[ln])
 
     r.newlines = acc.nl
     r.total_rows = max_row + 1
