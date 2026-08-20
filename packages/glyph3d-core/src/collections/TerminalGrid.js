@@ -53,11 +53,20 @@ export const TERMINAL_CURSOR_DEFAULTS = Object.freeze({
 // same band CodeGrid's caret uses. A compositing constant, not a taste knob, so it stays baked.
 const CURSOR_RENDER_ORDER = 5;
 
+// Bracketed-paste framing (DECSET 2004). A pasted burst arrives wrapped in these so the
+// receiving application can tell "the human pasted this" from "the human typed this" — which
+// is how a shell declines to execute a multi-line paste and an editor declines to auto-indent
+// it. See TerminalGrid.paste().
+const PASTE_START = '\x1b[200~';
+const PASTE_END   = '\x1b[201~';
+
 export default class TerminalGrid extends FramedGlyphField {
     /**
      * @param {THREE.Scene} scene
      * @param {import('../GlyphAtlas.js').default} atlas
      * @param {Object} [options]
+     * @param {string} [options.id]             Terminal id — the identity every input the grid
+     *   emits is stamped with. Set it at construction so callers never re-supply it per call.
      * @param {number} [options.cols=80]        Terminal width in columns
      * @param {number} [options.rows=24]        Terminal height in rows
      * @param {number} [options.worldScale=0.025] World units per atlas pixel
@@ -72,6 +81,13 @@ export default class TerminalGrid extends FramedGlyphField {
 
         this.scene = scene;
         this.atlas = atlas;
+
+        // This terminal's id — the one the registry, the WorkspaceModel surface record and the
+        // owning adapter all know it by. Held here so INPUT the grid emits carries its own
+        // identity: callers say WHAT to send, never WHO is sending (see onInput / paste).
+        // NOT `this.id`: Object3D defines that as a non-writable numeric instance id
+        // (Object.defineProperty, writable:false), so assigning it throws in strict mode.
+        this.terminalId = options.id ?? null;
 
         // The GPU attribute is `instanceGlyphId` (a font glyph index used to index
         // the Slug glyphMapTexture), NOT a Unicode codepoint. The normal render
@@ -117,9 +133,11 @@ export default class TerminalGrid extends FramedGlyphField {
         this._depthZStep = 0;     // world recede per page (set once metrics exist)
 
         /**
-         * Input callback -- set by the owning agent or process.
-         * When set, `terminal.input` routes decoded plaintext through this callback.
-         * Signature: (text: string, terminalId: string) => void
+         * Input callback -- set by the owning agent or process. When set, every input this
+         * terminal emits (keystroke bytes from the responder chain, `terminal.input`, paste)
+         * leaves through here, bound for the owning adapter's PTY.
+         * Signature: (bytes: string, terminalId: string) => void — the id is THIS grid's
+         * `this.terminalId`, supplied by the grid, not by the caller.
          * @type {Function|null}
          */
         this.onInput = null;
@@ -610,6 +628,45 @@ export default class TerminalGrid extends FramedGlyphField {
         if (this._byteListeners) {
             for (const cb of this._byteListeners) { try { cb(payload); } catch (e) { /* ignore tap errors */ } }
         }
+    }
+
+    /**
+     * INPUT entry — the twin of writeBytes. Hand the terminal bytes and it emits them through
+     * its owner's callback, stamped with its own id. Every input surface (the keyboard
+     * responder chain, a 2D companion xterm, the `terminal.input` verb) funnels through here,
+     * so identity is the grid's business and callers only decide WHAT to send.
+     *
+     * @param {string} bytes - raw terminal input bytes
+     * @returns {boolean} true if an owner was listening and took them
+     */
+    sendInput(bytes) {
+        if (typeof this.onInput !== 'function' || !bytes) return false;
+        this.onInput(bytes, this.terminalId);
+        return true;
+    }
+
+    /**
+     * Paste text as a single bracketed-paste burst. Terminal semantics live HERE, not in the
+     * app shell: callers pass plain clipboard text and the grid frames it.
+     *
+     * Framing is UNCONDITIONAL because tmux — which owns the far side of every terminal here
+     * (cli/attach_unix.go writes into a `tmux attach-client` PTY) — normalizes it: it strips
+     * the brackets when the inner application has NOT enabled DECSET 2004, and re-emits them
+     * when it has. Verified both ways against a live tmux. tmux also converts LF inside the
+     * burst, so newlines need no rewriting. If a NON-tmux adapter ever writes straight to a
+     * bare PTY, gate the framing on this._emulator's bracketedPasteMode here — inside this
+     * method, where the mode already is; no caller would change.
+     *
+     * The one payload transform is stripping the end-marker: clipboard text containing
+     * `ESC [ 201 ~` would otherwise close the bracket early and let its remainder run as
+     * keystrokes (paste injection).
+     *
+     * @param {string} text - plain clipboard text
+     * @returns {boolean} true if it was sent
+     */
+    paste(text) {
+        if (typeof text !== 'string' || text === '') return false;
+        return this.sendInput(PASTE_START + text.replaceAll(PASTE_END, '') + PASTE_END);
     }
 
     /**

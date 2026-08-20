@@ -101,6 +101,43 @@ measurement over code reasoning** — a change gate that "reads correct" can sti
 re-uploading megabytes per frame (it did, for months). Run these before AND after a
 perf change; the numbers are the review.
 
+**The adapter law: a number from a software adapter is not a measurement.** Every
+tool here calls `assertRealGpu` (`itest/driver.mjs`) after boot and refuses to
+report if the page landed on SwiftShader — the failure is otherwise silent, because
+the page boots, the scene renders, and every probe reads healthy. Each run prints
+its adapter (`[gpu] apple/metal-3`); if you don't see that line, you're reading
+something else's output. `GLYPH_ALLOW_SOFTWARE=1` overrides, loudly, for a
+GPU-less CI box checking that a tool still runs at all.
+
+**The clean-boot law: measurement pages carry no session.** Every tool here opens
+with `?session=off` — no restore, no autosave (`isEphemeralSession` in
+`app/client/SessionStore.js`). Both halves are load-bearing:
+
+- **Restore poisons the baseline.** The saved roster lives in `fieldSources`, and
+  any run that opens a directory re-arms it on autosave — so clearing the field
+  does not make the NEXT page boot clean. A load test then measures its corpus on
+  top of a restored one, and a clean boot and a doubled boot are indistinguishable
+  from outside. Measured here: an armed session restores 219 grids before a single
+  verb runs; the same URL with `?session=off` boots 0. That doubling is what drove
+  a whole-repo load past the f32-ordinal wall (2²⁴ B) into ~3GB of heap and locked
+  the browser.
+- **Autosave destroys the human's workspace.** A headless run that opens 500 files
+  otherwise writes that roster over the session a person left behind.
+
+If you drive a page by hand for measurement, add `?session=off` yourself — and if a
+number looks impossible, check the grid count at boot BEFORE blaming the change.
+
+Corollary — **headless is platform-dependent, and macOS headless is software.**
+Linux headless reaches the real GPU *because of* the ANGLE/Vulkan flags in
+`webgpuArgs()`; macOS has no equivalent (the headless shell has no Metal surface)
+and ANGLE falls to `--use-angle=swiftshader-webgl`. Measured on an M-series box,
+same build minutes apart: headless `google/swiftshader` at **~1 rAF/s**, headed
+`apple/metal-3` at **61**. So measurement tools launch through
+`launchGpuBrowser()`, which resolves headed-vs-headless **by platform** — you do
+not pass a flag, and a tool author cannot forget the rule. Correctness gates
+(kernel-vs-oracle, does-it-boot) keep using `launchBrowser()` and stay headless
+everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
+
 - **`gpu-traffic.mjs`** — per-frame GPU upload attribution: wraps
   `device.queue.writeBuffer`/`writeTexture`, counts display frames, reports a
   per-label bytes/frame histogram plus a greppable verdict line. The law it enforces:
@@ -252,6 +289,30 @@ Also: `stats` (store shape), `dump [path]` (VACUUM INTO snapshot, default
 
 ## Headless checks (no browser)
 
+- **`hand-source-check.mjs`** — the SENSOR PLANE end to end: a real relay binary, a
+  real `SOURCE hand` handshake, real ARKit-shaped frames on the wire, feeding the
+  real SourceStream → HandPresence → HandRenderer chain. No browser (the render path
+  is CPU-side three), so it runs in bun in a few seconds. Needs a relay up:
+  `./glyph3d-cli serve --local --port 8099 .`
+  ```
+  bun tools/hand-source-check.mjs [--relay 8099]
+  ```
+  The unit tests (`source-stream.test.mjs`, `hand-presence.test.mjs`) stub the bridge;
+  this covers what only exists BETWEEN the parts, each of which has actually bitten:
+  a device classed as a controller because its greeting wasn't first on the wire;
+  frames arriving but decoding to nothing; geometry that updates forever and never
+  draws (parented to a camera, and `render(scene, camera)` walks only the scene); a
+  hand inside the near plane, clipped while every probe reads healthy; a hand drawing
+  at 2px and read as "not rendering". Two teeth worth keeping:
+  - **near-invariance** — placement is in near-plane units, so the check sweeps
+    `camera.near` 0.5 → 12 and asserts apparent size doesn't move (and clears the
+    plane at both ends). The test camera uses **near=4**, the app's dial, not three's
+    0.1 — an earlier version passed at 0.1 while the real app showed nothing.
+  - **cross-wire frame accounting** — drop counts live on the RELAY, arrivals on the
+    display, so it asks `source.list` and reconciles the two. Frames vanishing between
+    them would otherwise be invisible from either side alone.
+
+
 - **`verify-tree-sitter.mjs`** — load each vendored grammar, compile its highlight
   query, parse a snippet, report captures. Run after upgrading web-tree-sitter / a
   grammar, adding a language, or editing a query. Catches ABI mismatches, query-compile
@@ -335,6 +396,14 @@ Platform notes:
   ANGLE onto Vulkan (headless would otherwise fall to SwiftShader); macOS rides
   ANGLE's native Metal backend and must NOT get the Vulkan flags. Every
   self-launching tool imports this — never inline browser args in a new tool.
+- **Headless on macOS is SwiftShader, and that is not fixable with flags** — the
+  headless shell has no Metal surface, so ANGLE falls to software (`google/
+  swiftshader`, ~1 rAF/s) while headed gets `apple/metal-3` at 61. This is why
+  measurement tools launch via `launchGpuBrowser()` (platform-resolved: headless
+  on Linux, headed on macOS) and assert `assertRealGpu()` before printing. A
+  headed run opens a real window on your desktop — that is the cost of a real
+  number here, not a bug. `bunx playwright install chromium` installs BOTH the
+  full browser and the headless shell; headed needs the former.
 - `tools/dev-firefox.sh` / `dev-gpu.sh` are Linux/NVIDIA-specific (driver pinning);
   irrelevant on macOS — Chrome/Chromium there has WebGPU on Metal out of the box.
 - Filesets are parameters everywhere (`--dir`, `--url`, `STORM_DIR`, `--text-file`);

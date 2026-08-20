@@ -245,12 +245,18 @@ export default class WebSocketBridge {
     }
 
     /**
-     * Register a handler for JSON-RPC notifications (messages with method but no id).
-     * Used for fs/didChange push notifications from the relay.
-     * @param {Function} fn - (method, params) => void
+     * Subscribe to JSON-RPC notifications (messages with method but no id) — the relay's
+     * push channel: fs/didChange, fs/searchMatch, fs/searchDone, LSP diagnostics.
+     * MANY subscribers: the stream carries unrelated subsystems, and each one owns its
+     * own method filter. Returns an unsubscribe fn — a controller that disposes must
+     * stop receiving, or a dead run's late matches would land in a freed cache.
+     * @param {(method: string, params: Object) => void} fn
+     * @returns {() => void} unsubscribe
      */
-    setRpcNotificationHandler(fn) {
-        this._rpcNotificationHandler = fn;
+    onRpcNotification(fn) {
+        if (!this._rpcNotificationHandlers) this._rpcNotificationHandlers = new Set();
+        this._rpcNotificationHandlers.add(fn);
+        return () => { this._rpcNotificationHandlers?.delete(fn); };
     }
 
     /**
@@ -593,9 +599,13 @@ export default class WebSocketBridge {
                     }
                 }
             } else if (envelope.method) {
-                // Notification (no id) — e.g. fs/didChange
-                if (this._rpcNotificationHandler) {
-                    this._rpcNotificationHandler(envelope.method, envelope.params);
+                // Notification (no id) — e.g. fs/didChange, fs/searchMatch.
+                // One subscriber's throw must not swallow the rest of the fan-out.
+                if (this._rpcNotificationHandlers) {
+                    for (const fn of this._rpcNotificationHandlers) {
+                        try { fn(envelope.method, envelope.params); }
+                        catch (e) { console.warn(`[bridge] notification handler failed for ${envelope.method}:`, e?.message ?? e); }
+                    }
                 }
             }
             return;

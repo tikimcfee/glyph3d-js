@@ -435,6 +435,16 @@ type FSHandler struct {
 	// / RunRelay to relay.NotifyDisplayRPC — this is the save-confirm round
 	// trip (file.save → didChange → the browser reloads the affected grid).
 	notify func(method string, params any)
+
+	// searches are the in-flight fs/search walks, by caller-supplied run id.
+	// A walk outlives its RPC (the result is an ack; matches stream as
+	// notifications), so its cancel func has to be reachable from a later
+	// fs/searchCancel — or from the display disconnecting, which cancels the
+	// lot. searchGen stamps each run so a run retiring can tell whether the
+	// registry entry is still its own. See fssearch.go.
+	searchMu  sync.Mutex
+	searches  map[string]searchRun
+	searchGen uint64
 }
 
 // SetNotifyHook wires the FSHandler to the relay's display push channel.
@@ -597,6 +607,10 @@ func (h *FSHandler) Handle(method string, rawID json.RawMessage, params json.Raw
 				h.handleWriteFile(write, rawID, params)
 			case "fs/gitDiff":
 				h.handleGitDiff(write, rawID, params)
+			case "fs/search":
+				h.handleSearch(write, rawID, params)
+			case "fs/searchCancel":
+				h.handleSearchCancel(write, rawID, params)
 			case "agentSessions/list":
 				h.handleAgentSessionsList(write, rawID, params)
 			case "agentSessions/read":

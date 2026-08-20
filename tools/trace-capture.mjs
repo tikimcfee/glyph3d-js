@@ -10,8 +10,7 @@
 //
 // SAFETY: client-only (no relay). --synthetic N injects a fake provider with N
 // generated ~9KB files under 'fake/' so file.openDir storms deterministically.
-import { chromium } from 'playwright';
-import { webgpuArgs } from './itest/driver.mjs';
+import { launchGpuBrowser, assertRealGpu } from './itest/driver.mjs';
 
 const argv = process.argv.slice(2);
 const flag = (name, def = null) => {
@@ -32,15 +31,19 @@ const CATEGORIES = [
     'gpu', 'disabled-by-default-gpu.dawn',
 ];
 
-const browser = await chromium.launch({
-    headless: true,
-    args: webgpuArgs(),
-});
+// Headed wherever headless would be software — a trace of the software
+// rasterizer's stacks is not a trace of this machine.
+const browser = await launchGpuBrowser({});
 try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
-    await page.goto(URL, { waitUntil: 'domcontentloaded' });
+    // Ephemeral page: no restore under the trace, no autosave over the human's session.
+    const target = new URL(URL); target.searchParams.set('session', 'off');
+    await page.goto(target.toString(), { waitUntil: 'domcontentloaded' });
     await page.waitForFunction('!!window.__glyphClient && !!window.__glyphClient.ctx.renderer', null, { timeout: 20000 });
     await page.waitForTimeout(4000);
+    // The guard needs only evalPage; these tools drive a raw page, not openApp.
+    const gpu = await assertRealGpu({ evalPage: (fn) => page.evaluate(fn) }, { tool: 'trace-capture' });
+    console.log(`[gpu] ${gpu.vendor}/${gpu.architecture}`);
 
     if (SYNTHETIC > 0) {
         await page.evaluate(`(() => {

@@ -1,8 +1,9 @@
 /**
  * Terminal commands — the CONTROL plane for terminal viewports. The byte DATA plane
  * is separate: OUTPUT arrives as binary frames (WebSocketBridge.onBinaryFrame →
- * grid.writeBytes → the headless VT emulator); INPUT leaves via grid.onInput → a
- * terminal.bytes push to the owning adapter. These verbs manage lifecycle + layout.
+ * grid.writeBytes → the headless VT emulator); INPUT enters via grid.sendInput/paste and
+ * leaves through the grid's onInput hook as a terminal.bytes push to the owning adapter.
+ * These verbs manage lifecycle + layout.
  *
  * Control verbs:
  *   terminal.spawn  [cols] [rows]            (ask relay to fork an adapter; the new
@@ -192,6 +193,7 @@ export default function registerTerminalCommands(router) {
 
         try {
             const grid = new TerminalGrid(ctx.scene, ctx.atlas, {
+                id,
                 cols,
                 rows,
                 gridScale,

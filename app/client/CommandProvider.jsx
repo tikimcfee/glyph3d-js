@@ -9,6 +9,7 @@ import SourceStream from '@glyph3d/core/services/orchestration/SourceStream.js';
 import HandPresence from '@glyph3d/core/hand/HandPresence.js';
 import AgentBooks from '@glyph3d/core/collections/AgentBooks.js';
 import DeltaBooks from '@glyph3d/core/collections/DeltaBooks.js';
+import SearchBook from '@glyph3d/core/collections/SearchBook.js';
 import { installConsoleForwarder } from '@glyph3d/core/services/orchestration/consoleForwarder.js';
 import AttentionManager from '@glyph3d/core/services/interaction/AttentionManager.js';
 import { installKeyboardRouter } from './keyboardRouter.js';
@@ -188,6 +189,12 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     // file, base verso / head recto. Created in the effect; ticked by <AgentRunner/>.
     deltaBooks: null,
 
+    // The search book — a directory content search bound as a book (search.* verbs):
+    // one sheet per matched file, hit list verso / the lit file recto. Results cache in
+    // full; only one page-block of sheets is ever materialized. Created in the effect;
+    // ticked by <AgentRunner/>.
+    searchBook: null,
+
     // GPU glyph-picking system (material-swap ID pass on a dedicated render
     // layer). Created in the effect below once gl exists; canvas hover/click
     // resolves pixel-perfect picks through it. Null until then.
@@ -227,6 +234,7 @@ function AgentRunner({ stateRef }) {
     const c = stateRef.current?.ctx;
     c?.agentBooks?.update(dt);
     c?.deltaBooks?.update(dt);
+    c?.searchBook?.update(dt);
     const volumes = c?.contentTree?.volumes?.();
     if (volumes) for (const v of volumes) v.update(dt);
   });
@@ -458,6 +466,11 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     state.ctx.deltaBooks = new DeltaBooks(state.ctx);
     world.register('deltas', state.ctx.deltaBooks.root, () => state.ctx.deltaBooks.localBounds());
     state.ctx.deltaBooks.onRelayout(() => world.relayout());
+
+    // The search book: the search.* verbs sink here. Deliberately NOT a world grouping —
+    // a search is a transient overlay you raise, page, and clear, not a resident shelf
+    // the world must make room for. It parks itself in front of the camera on show().
+    state.ctx.searchBook = new SearchBook(state.ctx);
 
     // Fold the persisted Books (shared face + cover base) and Delta Books (page geometry
     // + deck) settings into both shelves now that agent + delta both exist — their
@@ -781,6 +794,10 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       state.ctx.pickingSystem = null;
       state.ctx.agentBooks?.dispose();
       state.ctx.agentBooks = null;
+      // Disposes the run too: the walk is cancelled and the match subscription dropped,
+      // so a teardown mid-search leaves nothing streaming into a freed cache.
+      state.ctx.searchBook?.dispose();
+      state.ctx.searchBook = null;
       // Presence first: it detaches hand groups from the camera, which must
       // happen before the stream that feeds it goes away.
       state.ctx.handPresence?.dispose();

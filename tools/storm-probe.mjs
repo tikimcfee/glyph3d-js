@@ -2,14 +2,12 @@
 // console errors, device.uncapturederror, actual device limits, arena/mega sizes,
 // staged progress heartbeat, and crash detection. Client-only fake provider.
 //   bun tools/storm-probe.mjs [N]     (client-only; no relay)
-import { chromium } from 'playwright';
-import { webgpuArgs } from './itest/driver.mjs';
+import { launchGpuBrowser, assertRealGpu } from './itest/driver.mjs';
 
 const N = Number(process.argv[2] || 1000);
-const browser = await chromium.launch({
-    headless: true,
-    args: webgpuArgs(),
-});
+// Headed wherever headless would be software (macOS) — a storm measured on
+// SwiftShader tells you about SwiftShader's limits, not this machine's.
+const browser = await launchGpuBrowser({});
 try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
     const logs = [];
@@ -21,9 +19,13 @@ try {
     });
     page.on('crash', () => console.log('!! PAGE CRASHED (renderer process died)'));
     page.on('pageerror', (e) => logs.push(`[pageerror] ${String(e).slice(0, 300)}`));
-    await page.goto('http://localhost:5173/', { waitUntil: 'domcontentloaded' });
+    // Ephemeral page: no restore under the storm, no autosave over the human's session.
+    await page.goto('http://localhost:5173/?session=off', { waitUntil: 'domcontentloaded' });
     await page.waitForFunction('!!window.__glyphClient && !!window.__glyphClient.ctx.renderer', null, { timeout: 20000 });
     await page.waitForTimeout(3000);
+    // The guard needs only evalPage; these tools drive a raw page, not openApp.
+    const gpu = await assertRealGpu({ evalPage: (fn) => page.evaluate(fn) }, { tool: 'storm-probe' });
+    console.log(`[gpu] ${gpu.vendor}/${gpu.architecture}`);
 
     const limits = await page.evaluate(() => {
         const d = window.__glyphClient.ctx.renderer.backend.device;

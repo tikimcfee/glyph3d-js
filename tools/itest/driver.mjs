@@ -33,12 +33,114 @@ export async function launchBrowser({ headed = false } = {}) {
   return chromium.launch({ headless: !headed, args: webgpuArgs() });
 }
 
+// ── GPU truth ────────────────────────────────────────────────────────────────
+// webgpuArgs answers "which flags"; these answer the two questions that flags
+// alone can't, and that a measurement tool must not get wrong:
+//   1. can HEADLESS reach the real GPU on this platform at all?
+//   2. what adapter actually answered — and is it software?
+//
+// (2) is the one that matters. A tool that reports numbers from SwiftShader has
+// not measured this machine; it has measured a CPU rasterizer that happens to
+// speak WebGPU. That failure is silent by construction — the page boots, the
+// scene renders, every probe reads healthy — so the guard belongs in the shared
+// driver where no tool can forget it, not in each tool's own preflight.
+
+/**
+ * Can headless Chromium reach the real GPU here?
+ *
+ * Linux: yes — the ANGLE/Vulkan flags in webgpuArgs give headless a real
+ * adapter (that is precisely their job).
+ * macOS: NO. The headless shell has no Metal surface and there is no flag
+ * equivalent to the Linux fix; ANGLE falls to `--use-angle=swiftshader-webgl`.
+ * Measured on an M-series box: headless = google/swiftshader at ~1 rAF/s,
+ * headed = apple/metal-3 at 61 — the same build, minutes apart.
+ *
+ * @returns {boolean}
+ */
+export function headlessHasGpu() {
+  return process.platform !== 'darwin';
+}
+
+/** Adapter identifiers that mean "CPU pretending to be a GPU". */
+const SOFTWARE_ADAPTER = /swiftshader|lavapipe|llvmpipe|softpipe|software|basic render|microsoft basic|\bwarp\b/i;
+
+/**
+ * Read the WebGPU adapter the page actually got.
+ * @param {{evalPage: Function}} app - an openApp driver
+ * @returns {Promise<{vendor: string, architecture: string, device: string, description: string, software: boolean}>}
+ */
+export async function adapterInfo(app) {
+  const info = await app.evalPage(async () => {
+    const a = await navigator.gpu?.requestAdapter();
+    if (!a) return null;
+    const i = a.info || {};
+    return {
+      vendor: i.vendor || '', architecture: i.architecture || '',
+      device: i.device || '', description: i.description || '',
+    };
+  });
+  if (!info) return { vendor: '', architecture: '', device: '', description: '', software: true };
+  const joined = `${info.vendor} ${info.architecture} ${info.device} ${info.description}`;
+  return { ...info, software: SOFTWARE_ADAPTER.test(joined) };
+}
+
+/**
+ * Refuse to report measurements taken on a software adapter.
+ *
+ * Call this after openApp in any tool whose OUTPUT IS A NUMBER. Correctness
+ * gates (does it boot, does the kernel match its oracle) are welcome to run on
+ * SwiftShader — they assert behavior, not speed. Set GLYPH_ALLOW_SOFTWARE=1 to
+ * override deliberately (a CI box with no GPU, checking that a tool still runs).
+ *
+ * @param {{evalPage: Function}} app
+ * @param {{tool?: string}} opts
+ * @returns {Promise<object>} the adapter info, so callers can print it
+ */
+export async function assertRealGpu(app, { tool = 'this tool' } = {}) {
+  const info = await adapterInfo(app);
+  if (!info.software) return info;
+
+  const id = `${info.vendor || '?'}/${info.architecture || '?'}`;
+  if (process.env.GLYPH_ALLOW_SOFTWARE === '1') {
+    console.warn(`[gpu] WARNING: software adapter (${id}) — numbers are NOT this machine's. Allowed by GLYPH_ALLOW_SOFTWARE=1.`);
+    return info;
+  }
+  const fix = headlessHasGpu()
+    ? 'Headless should reach the GPU on this platform — check that webgpuArgs() flags survived, and that a real GPU/driver is present.'
+    : `Headless cannot reach the GPU on ${process.platform}. Re-run headed (--headed), which measurement tools now default to here.`;
+  throw new Error(
+    `${tool}: refusing to report numbers from a SOFTWARE adapter (${id}).\n` +
+    `  ${fix}\n` +
+    '  Override deliberately with GLYPH_ALLOW_SOFTWARE=1.',
+  );
+}
+
+/**
+ * Launch a browser for MEASUREMENT: headed wherever headless would be software.
+ *
+ * `headed: null` (the default) means "decide by platform" — headless on Linux,
+ * headed on macOS — so a tool that just wants valid numbers gets them without
+ * every author remembering the platform rule. Pass an explicit boolean to force
+ * one; the assertRealGpu guard still has the final word on whether the run's
+ * output is trustworthy.
+ *
+ * @param {{headed?: boolean|null, extraArgs?: string[]}} opts
+ */
+export async function launchGpuBrowser({ headed = null, extraArgs = [] } = {}) {
+  const useHeaded = headed === null ? !headlessHasGpu() : headed;
+  if (headed === null && useHeaded) {
+    console.error(`[gpu] ${process.platform}: headless is software here — launching headed so the numbers are real.`);
+  }
+  return chromium.launch({ headless: !useHeaded, args: [...webgpuArgs(), ...extraArgs] });
+}
+
 // Open the app in a fresh page, wire error capture BEFORE navigating, wait for boot
 // (window.__glyphClient) + a settle, and return a driver. `errors` are real JS errors
 // (failure-worthy); GPU-init noise and 4xx/5xx resources are bucketed separately so
 // headless runs stay useful.
 export async function openApp(browser, {
   url = 'http://localhost:5173/', relayPort = null, wait = 5000, bootTimeout = 20000,
+  session = null,
   viewport = { width: 1280, height: 800 },
 } = {}) {
   const errors = [], gpuErrors = [], failedResources = [], warnings = [];
@@ -63,7 +165,16 @@ export async function openApp(browser, {
   // tests drive via the command bus and don't need it, and connecting swaps the file provider
   // + races GitHub repo.load (nondeterministic). Opt in (relayPort: 8080) only when a test
   // actually exercises the relay's local project.
-  const target = relayPort && !url.includes('?') ? `${url}?relay=${relayPort}` : url;
+  // Compose query params on the real URL rather than string-appending — the old
+  // `?relay=` concat silently dropped the param whenever the url already had a
+  // query, which is exactly when a second one is being added.
+  const target = (() => {
+    const u = new URL(url);
+    if (relayPort && !u.searchParams.has('relay')) u.searchParams.set('relay', String(relayPort));
+    // session=off → ephemeral page: no restore, no autosave (see SessionStore).
+    if (session) u.searchParams.set('session', session);
+    return u.toString();
+  })();
   await page.goto(target, { waitUntil: 'load', timeout: 30000 });
   try { await page.waitForFunction(() => !!window.__glyphClient, { timeout: bootTimeout }); booted = true; } catch { /* caller checks .booted */ }
   await page.waitForTimeout(wait); // atlas gen + async content + first frames

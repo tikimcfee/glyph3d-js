@@ -153,6 +153,41 @@ export class RemoteFileSystemProvider {
         return this._rpc('fs/gitDiff', { base, head, path });
     }
 
+    /**
+     * START a directory content search. Resolves as soon as the relay has ACKNOWLEDGED
+     * the walk — not when it finishes. Matches arrive as `fs/searchMatch` notifications
+     * carrying this same `id`, and the run ends with exactly one `fs/searchDone`; wire
+     * both through `bridge.onRpcNotification` before calling this (SearchSession does).
+     *
+     * Coordinates in the match stream are GRID coordinates: 0-based line, 0-based col
+     * and length in RUNES — the server converts from bytes, because that is the only
+     * place the file's encoding is known.
+     * @param {Object} params
+     * @param {string} params.id - caller-owned run id; re-using it REPLACES (cancels) that run
+     * @param {string} params.uri - the directory to walk
+     * @param {string} params.query
+     * @param {boolean} [params.regex] - treat query as a Go regexp instead of a literal
+     * @param {boolean} [params.caseSensitive]
+     * @param {boolean} [params.wholeWord]
+     * @param {number} [params.maxMatches] @param {number} [params.maxFileMatches]
+     * @param {number} [params.maxFileBytes] @param {number} [params.batchMs]
+     * @returns {Promise<{ id: string, base: string, started: boolean }>}
+     */
+    async search(params) {
+        return this._rpc('fs/search', params);
+    }
+
+    /**
+     * Stop a run by id. Cancelling an already-finished (or unknown) run is NOT an error —
+     * a cancel racing a natural finish is the normal case — so `cancelled` in the reply
+     * reports whether a live walk was actually stopped.
+     * @param {string} id
+     * @returns {Promise<{ id: string, cancelled: boolean }>}
+     */
+    async cancelSearch(id) {
+        return this._rpc('fs/searchCancel', { id });
+    }
+
     // ---- Browse surface (relay-only) ----
 
     /**

@@ -10,7 +10,7 @@
 //     not Vite. A Vite restart mid-run reloads the page and poisons the run, and
 //     dev-mode retains ~17x more JS heap (module graph + sourcemaps) than the build.
 //   - A gap in the sample stream = the main thread was blocked solid for that span.
-import { launchBrowser, openApp } from './itest/driver.mjs';
+import { launchGpuBrowser, openApp, assertRealGpu } from './itest/driver.mjs';
 
 const argv = process.argv.slice(2);
 const get = (f, d) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : d; };
@@ -18,8 +18,12 @@ const dir = get('--dir', '');
 const relayPort = Number(get('--relay', 8099));
 const url = get('--url', 'http://localhost:8099/');
 
-const browser = await launchBrowser({ headed: false });
-const app = await openApp(browser, { url, relayPort, wait: 8000 });
+// Platform-resolved: headed wherever headless is software, so these numbers
+// describe this machine rather than a CPU rasterizer.
+const browser = await launchGpuBrowser({});
+const app = await openApp(browser, { url, relayPort, wait: 8000, session: 'off' });
+const gpu = await assertRealGpu(app, { tool: 'loadcurve' });
+console.log(`[gpu] ${gpu.vendor}/${gpu.architecture}`);
 if (!app.booted) { console.error('app did not boot'); process.exit(1); }
 
 let crashed = false;

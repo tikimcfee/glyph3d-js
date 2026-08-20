@@ -1,6 +1,7 @@
 import React from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three/webgpu';
+import { assertCanvasSizing as _assertCanvasSizing } from './canvasSizeGuard.js';
 import { setComputeRenderer, setPipelineArena } from '@glyph3d/core/compute/GlyphLayoutCompute.js';
 import GlyphPipelineArena from '@glyph3d/core/compute/GlyphPipelineArena.js';
 import { GlyphProvider } from './context.jsx';
@@ -88,6 +89,7 @@ function _deferResizeToFrame(renderer) {
     const p = pending;
     pending = null;
     applySize(...p);
+    _assertCanvasSizing(renderer, 'post-resize', renderer.__glyphPinnedDpr);
   };
 }
 
@@ -147,6 +149,8 @@ export default function GlyphCanvas({
       // right size (see the component note above).
       gl={async (glProps) => {
         const canvas = glProps && glProps.canvas;
+        // The CSS (logical) size we baked from, kept for the renderer seat below.
+        let cssW = 0, cssH = 0;
         if (canvas) {
           // Match r3f's own sizing math EXACTLY: it does Math.floor(rect × dpr)
           // off the measured bounding rect (fractional). Math.round + clientWidth
@@ -164,12 +168,30 @@ export default function GlyphCanvas({
             canvas.height = Math.floor(h * resolvedDpr);
             canvas.style.width = w + 'px';
             canvas.style.height = h + 'px';
+            cssW = w; cssH = h;
           }
         }
         const limits = await _pipelineLimits(glProps);
         const renderer = new THREE.WebGPURenderer({ ...glProps, antialias: true, ...limits });
+        // Seat the LOGICAL size + pixel ratio before init(). The pre-bake above wrote the
+        // DEVICE size into canvas.width/height, and three's constructor adopts those as its
+        // logical `_width/_height` with pixelRatio still 1. r3f then calls setPixelRatio(dpr),
+        // which recomputes canvas.width = _width × dpr — squaring the ratio (3840 → 7680)
+        // while CanvasTarget's depth texture stays at the 3840 it was born with: the
+        // "Attachments have differing sizes" validation error, fatal on HiDPI and invisible
+        // at dpr 1. Telling the renderer the CSS size explicitly makes r3f's later
+        // setPixelRatio + setSize idempotent — same numbers, nothing to rebuild.
+        if (cssW > 0 && cssH > 0) {
+          renderer.setPixelRatio(resolvedDpr);
+          renderer.setSize(cssW, cssH, false);
+        }
         renderer.toneMapping = toneMapping;
         await renderer.init();
+        // The seat above is the whole point of the guard: verify it took before a
+        // single frame is drawn, so a regression names itself instead of arriving
+        // as a WebGPU validation error 300ms later.
+        renderer.__glyphPinnedDpr = resolvedDpr;
+        _assertCanvasSizing(renderer, 'post-init', resolvedDpr);
         // Fallback forensics: three's "WebGPU is not available" fallback warn is ambiguous —
         // it fires for a missing adapter AND for a rejected requestDevice. If the adapter
         // probe succeeded but we still landed on WebGL2, the DEVICE REQUEST failed: an

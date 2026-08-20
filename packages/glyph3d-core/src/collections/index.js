@@ -6,6 +6,7 @@ export { default as CodeGrid } from './CodeGrid.js';
 export { default as Book } from './Book.js';
 export { default as AgentBooks } from './AgentBooks.js';
 export { default as DeltaBooks } from './DeltaBooks.js';
+export { default as SearchBook, SEARCH_BOOK_DEFAULTS } from './SearchBook.js';
 export { default as GridLayoutManager } from './GridLayoutManager.js';
 export { default as HierarchicalLayoutManager } from './HierarchicalLayoutManager.js';
 export { default as SpiralLayoutManager } from './SpiralLayoutManager.js';

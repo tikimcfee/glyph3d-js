@@ -548,6 +548,12 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 		if done != nil {
 			close(done)
 		}
+		// In-flight search walks stream to the display and nowhere else. With it
+		// gone they are burning disk and CPU for no consumer, and their matches
+		// would land on the NEXT display as orphans of a run it never started.
+		if r.fs != nil {
+			r.fs.cancelAllSearches()
+		}
 		log.Printf("[relay] display disconnected")
 	} else if role == "controller" && clientID != "" {
 		r.mu.Lock()

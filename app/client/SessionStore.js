@@ -113,6 +113,34 @@ const SURFACE_PROJECTORS = {
   },
 };
 
+/**
+ * EPHEMERAL SESSION (`?session=off`) — this page neither restores nor saves.
+ *
+ * For measurement and automated runs, where session persistence is not a
+ * feature but a source of two distinct faults:
+ *
+ *   - RESTORE poisons the baseline. A harness that clears the field still boots
+ *     the NEXT page into a restored one, because the roster lives in the saved
+ *     blob and any run that opens a directory re-arms it on autosave. A load
+ *     test then measures its corpus on top of a restored one — silently, since
+ *     both a clean boot and a doubled boot look identical from outside. That is
+ *     how a whole-repo load reached 2× its corpus, blew the f32-ordinal wall,
+ *     and took the browser with it.
+ *   - AUTOSAVE destroys the human's workspace. A headless run that opens 500
+ *     files writes that roster over the session a person left behind.
+ *
+ * Both stop at the same seam (startOnConnect), so they are one switch, not two.
+ * The saved blob is never read and never written; the file on disk is untouched.
+ *
+ * @returns {boolean}
+ */
+export function isEphemeralSession() {
+  try {
+    if (typeof window === 'undefined') return false;
+    return new URLSearchParams(window.location.search).get('session') === 'off';
+  } catch { return false; }
+}
+
 export default class SessionStore {
   /** @param {{ ctx: object, router: object, bridge: object }} deps */
   constructor({ ctx, router, bridge }) {
@@ -898,6 +926,13 @@ export default class SessionStore {
   // bulk-load over the live field and snap the camera back.
   async startOnConnect() {
     this._attachProjector();               // entities dock the moment they register — restore included
+    // Ephemeral: no restore, no autosave. Deliberately BEFORE the _sessionRestored
+    // gate and before _armAutosave, so neither half can arm on any re-entry path
+    // (relay reconnect, vite hot swap) — an ephemeral page stays ephemeral.
+    if (isEphemeralSession()) {
+      console.info('[session] ephemeral (?session=off) — no restore, no autosave');
+      return;
+    }
     if (this.ctx._sessionRestored) { this._armAutosave(); return; }
     this.ctx._sessionRestored = true;
     const snap = await this.load();
