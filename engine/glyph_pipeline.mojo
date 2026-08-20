@@ -309,6 +309,63 @@ def layout_item(
         id += 1
 
 
+def resolve_x(
+    mut slots: List[Float32],
+    id: Int,
+    item: Item,
+    ord_to_byte: List[UInt32],
+    mut scalars: List[Float64],
+    scalar_base: Int,
+):
+    """KERNEL — RESOLVE X from the exact lanes and place the unpaginated position
+    (resolveX in the oracle). With a fold unit, x re-sums the glyph's `col % fold`
+    same-row predecessors FORWARD from the segment start — the same f32 order the
+    serial segAdv accumulates, so fold>0 x is bit-identical across oracle, scan,
+    and hardware. Foldless, x IS the line prefix (the f32 S_LINE_ADV lane — one
+    rounding wider than the serial fold's f64 prefix, which is why foldless float
+    lanes compare at eps, never bit-exact, between the two forms)."""
+    var o = id * SLOT_STRIDE
+    if (Int(slots[o + S_FLAGS]) & F_LEADER) == 0:
+        return
+    var wrap = trunc_nonneg(item.wrap_width)
+    var fold: Int
+    if wrap > 0:
+        fold = wrap
+    else:
+        fold = trunc_nonneg(item.page_cols) if item.has_page else 0
+    var col = Int(slots[o + S_COL])
+    var ord = Int(slots[o + S_ORD])
+
+    var x: Float64
+    if fold > 0:
+        var x32: Float32 = 0
+        var k = col % fold
+        while k >= 1:
+            var q = Int(ord_to_byte[item.byte_start + ord - k])
+            x32 = x32 + slots[q * SLOT_STRIDE + S_ADVANCE]
+            k -= 1
+        x = Float64(x32)
+    else:
+        x = Float64(slots[o + S_LINE_ADV])
+
+    var row = Int(slots[o + S_ROW])
+    var wrap_row = (col // wrap) if wrap > 0 else 0
+    var lh: Float64
+    if item.line_height != item.line_height:  # NaN = unset: the glyph's own height
+        lh = Float64(slots[o + S_HEIGHT])
+    else:
+        lh = item.line_height
+    slots[o + S_BASE_X] = Float32(x + item.origin_x)
+    slots[o + S_X] = Float32(x + item.origin_x)
+    slots[o + S_Y] = Float32(-Float64(row) * lh + item.origin_y)
+    slots[o + S_Z] = Float32(-Float64(wrap_row) * item.z_step + item.origin_z)
+
+    if Float64(row + 1) > scalars[scalar_base + 6]:
+        scalars[scalar_base + 6] = Float64(row + 1)  # totalRows (pre-conveyor)
+    if x > scalars[scalar_base + 7]:
+        scalars[scalar_base + 7] = x  # widest row, ITEM-RELATIVE
+
+
 def derive_stride(max_row_extent: Float64, item: Item) -> Float64:
     """THE stride formula: a row-paged item fans page columns at
     (widest item-relative row + pageGapX); pageRows 0 derives 0."""

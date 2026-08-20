@@ -27,6 +27,7 @@ Fixtures are the oracle's own answers, serialized:
 bun engine/fixtures/gen.mjs        # regenerate *.pipe.bin (pipeline cases)
 bun engine/fixtures/gen-bake.mjs   # regenerate *.bake.bin (bake + seed queries)
 mojo run -I engine engine/conformance.mojo      engine/fixtures/*.pipe.bin
+mojo run -I engine engine/conformance_scan.mojo engine/fixtures/*.pipe.bin
 mojo run -I engine engine/conformance_bake.mojo engine/fixtures/*.bake.bin
 ```
 
@@ -38,6 +39,19 @@ arena. Mutation-tested: a 1-ULP perturbation of `segAdv` fails 2 fixtures loudly
 
 Regenerate fixtures whenever the oracle changes; the fixture formats are documented
 in `fixtures/gen.mjs` and `fixtures/gen-bake.mjs`.
+
+## The scan (the GPU's skeleton)
+
+`glyph_scan.mojo` ports `runScanPipeline` — the same answers computed in the GPU's
+dispatch structure (chunkReduce → spineReduce → spineScan → partialScan → apply →
+resolveX → paginate → bounds), serially, loop-for-dispatch. Each loop body is one
+thread's work; the GPU backend lifts the loops, not the bodies. Proven over the SAME
+`.pipe.bin` fixtures under the repo's own tiered contract
+(`tools/scan-layout.test.mjs`): exact lanes and fold>0 float lanes bit-equal, foldless
+float lanes ≤ 1e-4 relative (serial f64 prefix vs the scan's f32 grouping — differs by
+construction), at the default tuning and at K=7/G=3, which puts chunk seams inside
+multi-byte sequences and fold units. `resolve_x` (the gather-free x kernel) lives in
+`glyph_pipeline.mojo` with the other reference kernels.
 
 ## The bake (the seed format)
 
@@ -61,8 +75,6 @@ conformance; that is the point of the serial layer.
 
 ## Not ported yet
 
-- `resolveX` (the gather-free x kernel) — arrives with the scan/GPU backend, which is
-  its reason to exist; the serial fold computes the same lanes here.
 - The far-texture LOD oracles (`farScatterOracle` / `farNormalizeOracle`).
-- The scan's dispatch-shaped driver (chunkReduce → spineReduce → spineScan →
-  partialScan → apply) — the GPU backend's skeleton; kernels are already shared.
+- The GPU backend itself: lift glyph_scan's loops onto device threads (needs GPU
+  hardware; every kernel body is already in place).
