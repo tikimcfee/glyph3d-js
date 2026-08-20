@@ -40,6 +40,42 @@ arena. Mutation-tested: a 1-ULP perturbation of `segAdv` fails 2 fixtures loudly
 Regenerate fixtures whenever the oracle changes; the fixture formats are documented
 in `fixtures/gen.mjs` and `fixtures/gen-bake.mjs`.
 
+### The invariant check (what a differ cannot catch)
+
+```sh
+mojo run -I engine engine/ordinal_invariant.mojo engine/fixtures/*.pipe.bin
+```
+
+The three suites above are *differential* — they compare this port against the JS
+oracle. That catches any divergence between them and is blind to a fault they
+**share**. The f32 ordinal wall is exactly that kind of fault: `ord` is exact on
+both sides (a JS number, a Mojo `Int`) and is quantized only on the store into an
+f32 lane, so past 2^24 both sides round identically and the differ reports PASS
+while both are wrong together.
+
+`ordinal_invariant.mojo` asserts a property of a single run instead, with no
+oracle involved. The same fact is recorded twice in two precisions — `slots[S_ORD]`
+as a lossy f32 lane, `ord_to_byte` as an exact u32 array — so the round-trip must
+be the identity for every leader:
+
+```
+ord_to_byte[byte_start + Int(slots[o + S_ORD])] == id
+```
+
+It is mutation-tested against its own boundary, because a check that cannot fail
+proves nothing: one item of 2^24-2 bytes passes, one of 2^24+2 aliases exactly once
+(byte 16777217 collides onto 16777216). The runner raises in **both** directions —
+a false positive below the wall, or a silent pass above it.
+
+The bound is **per item, not per arena**: `ord` resets for each item and
+`ord_to_byte` is indexed from `byte_start`, so a large arena of ordinary files is
+safe while one item past 2^24 bytes is not. The JS arena's global
+`ORDINAL_EXACT_BYTES` cap is a conservative proxy for that rule.
+
+Generalize the technique before reaching for another fixture: when a lane is
+suspected of lying, look for a witness to it in a wider type. Where no witness
+exists, that absence is itself worth knowing.
+
 ## The scan (the GPU's skeleton)
 
 `glyph_scan.mojo` ports `runScanPipeline` — the same answers computed in the GPU's
