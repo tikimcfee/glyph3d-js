@@ -80,19 +80,42 @@ conformance; that is the point of the serial layer.
 computed identical answers. First measurement, single-threaded, naive transcription
 vs Bun's JIT on typed arrays:
 
-| work | js/bun | mojo (native, -O) |
-|---|---|---|
-| bake | 15.6 MB/s | 28.0 MB/s (1.8×) |
-| pipeline (serial) | 15.4 MB/s | 13.4 MB/s (0.9×) |
-| pipeline (scan form) | 4.2 MB/s | 5.0 MB/s (1.2×) |
+| work | js/bun | mojo, naive port | mojo, sharded (4 cores) |
+|---|---|---|---|
+| bake | 15.6 MB/s | 28.0 MB/s (1.8×) | 28.0 MB/s (1.8×, still serial by design) |
+| pipeline (serial oracle) | 15.4 MB/s | 13.4 MB/s (0.9×) | **41 MB/s (2.7×)** |
+| pipeline (scan form) | 4.2 MB/s | 5.0 MB/s (1.2×) | **39 MB/s (9×)** |
 
-The lesson, stated plainly: a line-for-line port does not beat a good JIT on serial
-scalar code — the native headroom is structural (threads across files, SIMD in the
-fold, the GPU for the scan), not automatic. That is exactly the claim the docs made:
-the fold is cheap everywhere; the win is where it can run, not how fast one core
-runs it. `bun engine/bench/gen-bench.mjs` regenerates the corpus;
+Two lessons, in order. First: a line-for-line port does not beat a good JIT on
+serial scalar code — the middle column is real. Second: the headroom is structural,
+and Mojo can actually spend it — kernels take raw pointers (the GPU's calling
+convention), drivers shard them over `TaskGroup` across cores, and every parallel
+reduction is exact under regrouping (disjoint writes and min/max merges only; the
+fold and the miss order stay serial). Same fixtures, same bit-exact/tiered
+contracts, same checksums as the JS — only faster. The scan form's 9× is the
+architecture's claim made concrete: it parallelizes because it was *designed* to,
+and the same sharding is the GPU dispatch structure.
+
+`bun engine/bench/gen-bench.mjs` regenerates the corpus;
 `mojo build -I engine engine/bench/bench.mojo -o engine/bench/bench` builds the
 native side (bench.bin and the binary are gitignored).
+
+## Mojo development setup
+
+- **Docs**: the repo's `.mcp.json` registers Modular's docs MCP server
+  (`https://mojo-mcp.modular.com/mcp/`) — search/fetch mojolang.org from any
+  session (`docs_search`, `docs_get`, `docs_get_api`, `docs_check_imports`).
+  Prefer it over guessing at 1.0 APIs; the language moved under its pre-1.0
+  training data (fn→def, alias→comptime, UnsafePointer→Pointer, capture lists).
+- **Skills**: `.claude/skills/` vendors `mojo-syntax`, `closure_migration`, and
+  `mojo-gpu-fundamentals` from github.com/modular/skills (Apache 2.0 — see
+  MODULAR-SKILLS-LICENSE).
+- **The one gotcha that will eat an afternoon**: Mojo destroys a value at its
+  LAST USE, not scope end (ASAP destruction). A List whose final mention is
+  `tg.create_task(worker(...))` is freed *before the tasks run*; the workers then
+  read recycled memory — flaky, timing-dependent, looks like an ABI bug. Anchor
+  every buffer past the last `tg.wait()` (`_ = len(buf)`). The drivers here do,
+  with comments.
 
 ## Not ported yet
 

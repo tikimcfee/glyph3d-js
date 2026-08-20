@@ -32,6 +32,7 @@ from glyph_pipeline import (
     byte_at,
     trie_lookup_base,
     rows_for_line,
+    decode_codepoint_at,
 )
 
 comptime BAKE_VERSION = 2
@@ -144,21 +145,6 @@ def lanes_from_prefix(p: ScanElem, wrap: Int) -> Lanes:
     var closed = (rows_for_line(p.head_len, wrap) + p.rows) if p.nl > 0 else 0
     var wrap_row = (col // wrap) if wrap > 0 else 0
     return Lanes(closed + wrap_row, col, p.tail_adv, p.glyphs)
-
-
-def decode_codepoint_at(bytes: List[UInt8], id: Int, n: Int) -> Int:
-    """Same arithmetic as decode_and_resolve, without a slot buffer to land in."""
-    var b0 = Int(bytes[id])
-    var b1 = byte_at(bytes, id + 1)
-    var b2 = byte_at(bytes, id + 2)
-    var b3 = byte_at(bytes, id + 3)
-    if n == 1:
-        return b0
-    if n == 2:
-        return ((b0 & 0x1F) << 6) | (b1 & 0x3F)
-    if n == 3:
-        return ((b0 & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F)
-    return ((b0 & 0x07) << 18) | ((b1 & 0x3F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F)
 
 
 def fold_bytes(bytes: List[UInt8], trie: Trie, from_byte: Int, to_byte: Int, mut acc: ScanElem):

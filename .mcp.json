@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "mojo-docs": {
+      "type": "http",
+      "url": "https://mojo-mcp.modular.com/mcp/"
+    }
+  }
+}
