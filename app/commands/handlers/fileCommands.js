@@ -271,7 +271,23 @@ export default function registerFileCommands(router) {
             let chunks = 1;
             let pours = 0, pourMs = 0;
             const pending = [];   // every grid's load promise — settled before the final relayout
-            const settleWarn = (err) => console.warn('file.openDir: a grid load failed (grid stays, unlaid):', err);
+            // A grid whose content never lays is a REAL loss and has to be counted, not
+            // just logged. The common cause at scale is the arena's f32-ordinal wall
+            // (2^24 B is the whole glyph address space — see
+            // docs/perf-swarm/arena-ceiling-measured.md): a big directory can leave a
+            // fifth of its files unlaid while the summary still says "OK: opened N".
+            // Reasons are tallied so the summary can name the dominant one.
+            let unlaid = 0;
+            const unlaidReasons = new Map();
+            const settleWarn = (err) => {
+                unlaid++;
+                const msg = String(err?.message || err);
+                const reason = msg.includes('f32-ordinal wall')
+                    ? 'glyph arena full'
+                    : msg.split('\n')[0].slice(0, 60);
+                unlaidReasons.set(reason, (unlaidReasons.get(reason) || 0) + 1);
+                console.warn('file.openDir: a grid load failed (grid stays, unlaid):', err);
+            };
             // The whole build runs under a registry HOLD: 350 grids registering means
             // ONE listener pass per pour beat + one at close — not 350 × the full
             // suite (projector, workspace reconcile, every mirroring React panel).
@@ -396,7 +412,7 @@ export default function registerFileCommands(router) {
             ctx.contentTree.relayoutAndRest(WORLD_FLOOR_Y);
             const dirs = ctx.contentTree.dirCount();
             trace.mark('relayout', { dirs });
-            trace.end({ opened, placeholders });
+            trace.end({ opened, placeholders, unlaid });
 
             // Record the pop in the session's field sources — a LIST now: every opened
             // root restores (additive multi-root world). Session capture persists exactly
@@ -410,15 +426,19 @@ export default function registerFileCommands(router) {
             let text = `OK: opened ${opened} file(s) under "${dir || '/'}" → content tree (${dirs} dirs)`;
             if (placeholders) text += `; ${placeholders} as not-rendered placeholder${placeholders === 1 ? '' : 's'}`;
             if (imagesBuilt) text += `; ${imagesBuilt} as image${imagesBuilt === 1 ? '' : 's'}`;
+            if (unlaid) {
+                const [top] = [...unlaidReasons.entries()].sort((a, b) => b[1] - a[1]);
+                text += `; ${unlaid} UNLAID (${top ? top[0] : 'load failed'})`;
+            }
             if (truncated) text += `; LISTING TRUNCATED at the server entry cap — deeper content not loaded`;
-            return { text, data: { dir, opened, placeholders, images: imagesBuilt, dirs, truncated } };
+            return { text, data: { dir, opened, placeholders, images: imagesBuilt, unlaid, unlaidReasons: Object.fromEntries(unlaidReasons), dirs, truncated } };
         } finally {
             ctx.status?.clear();
         }
     }, {
         description: 'Open all code files under a directory (recursive) and lay them out as a 3D tree — Settings ▸ Files ▸ all-files mode admits every type (images render, binaries hex-dump)',
         usage: '<dir-path>   (empty path = whole project)',
-        returns: '{ dir, opened, placeholders, dirs, truncated }',
+        returns: '{ dir, opened, placeholders, images, unlaid, unlaidReasons, dirs, truncated }',
     });
 
     // file.list <path>

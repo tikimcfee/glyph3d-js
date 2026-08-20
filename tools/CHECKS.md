@@ -289,6 +289,30 @@ Also: `stats` (store shape), `dump [path]` (VACUUM INTO snapshot, default
 
 ## Headless checks (no browser)
 
+- **`hand-source-check.mjs`** — the SENSOR PLANE end to end: a real relay binary, a
+  real `SOURCE hand` handshake, real ARKit-shaped frames on the wire, feeding the
+  real SourceStream → HandPresence → HandRenderer chain. No browser (the render path
+  is CPU-side three), so it runs in bun in a few seconds. Needs a relay up:
+  `./glyph3d-cli serve --local --port 8099 .`
+  ```
+  bun tools/hand-source-check.mjs [--relay 8099]
+  ```
+  The unit tests (`source-stream.test.mjs`, `hand-presence.test.mjs`) stub the bridge;
+  this covers what only exists BETWEEN the parts, each of which has actually bitten:
+  a device classed as a controller because its greeting wasn't first on the wire;
+  frames arriving but decoding to nothing; geometry that updates forever and never
+  draws (parented to a camera, and `render(scene, camera)` walks only the scene); a
+  hand inside the near plane, clipped while every probe reads healthy; a hand drawing
+  at 2px and read as "not rendering". Two teeth worth keeping:
+  - **near-invariance** — placement is in near-plane units, so the check sweeps
+    `camera.near` 0.5 → 12 and asserts apparent size doesn't move (and clears the
+    plane at both ends). The test camera uses **near=4**, the app's dial, not three's
+    0.1 — an earlier version passed at 0.1 while the real app showed nothing.
+  - **cross-wire frame accounting** — drop counts live on the RELAY, arrivals on the
+    display, so it asks `source.list` and reconciles the two. Frames vanishing between
+    them would otherwise be invisible from either side alone.
+
+
 - **`verify-tree-sitter.mjs`** — load each vendored grammar, compile its highlight
   query, parse a snippet, report captures. Run after upgrading web-tree-sitter / a
   grammar, adding a language, or editing a query. Catches ABI mismatches, query-compile
