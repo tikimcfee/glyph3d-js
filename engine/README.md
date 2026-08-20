@@ -68,10 +68,51 @@ proves the query side — checkpoint-seeded `prefix_at` at boundaries ±1 and
 bit-for-bit. Mutation-tested the same way (a 5e-8 nudge in `scan_combine`'s tailAdv
 fails checkpoints, scalars, and box loudly).
 
-## Toolchain
+## Setup from a fresh clone (read this first, next agent)
 
-Mojo ≥ 1.0 (`pip install modular` provides `mojo`). CPU-only — no GPU required for
-conformance; that is the point of the serial layer.
+Two toolchains: **Bun** (the JS oracle + fixture generators — the repo is already a
+Bun workspace) and **Mojo ≥ 1.0**.
+
+```sh
+# 1. Mojo (Linux x86_64 / macOS arm64; needs Python 3.9+)
+pip install modular          # provides `mojo` on PATH
+mojo --version               # expect: Mojo 1.0.0 or later
+
+# 2. Verify the whole engine in one pass (all three suites must be green)
+bun engine/fixtures/gen.mjs
+bun engine/fixtures/gen-bake.mjs
+mojo run -I engine engine/conformance.mojo      engine/fixtures/*.pipe.bin
+mojo run -I engine engine/conformance_scan.mojo engine/fixtures/*.pipe.bin
+mojo run -I engine engine/conformance_bake.mojo engine/fixtures/*.bake.bin
+
+# 3. Benchmark (optional; prints MB/s vs the checksum-matched JS side)
+bun engine/bench/gen-bench.mjs
+mojo build -I engine engine/bench/bench.mojo -o engine/bench/bench && ./engine/bench/bench
+bun engine/bench/bench.mjs   # the JS side of the ledger
+```
+
+Expected state after step 2: `conformance: all cases bit-exact`,
+`scan conformance: all cases within the tiered contract`,
+`bake conformance: all cases bit-exact`. Anything else is a real regression —
+the suites have no tolerances to hide behind.
+
+Working notes for agents:
+
+- **Your training data predates Mojo 1.0.** The language moved: `fn`→`def`,
+  `alias`→`comptime`, `UnsafePointer`→`Pointer` (`ptr[i]`→`ptr[unsafe_offset=i]`),
+  unified capture-list closures. Don't write from memory — the repo's `.mcp.json`
+  registers Modular's docs MCP server (`docs_search` / `docs_get_api` /
+  `docs_check_imports` — validate imports BEFORE writing code), and
+  `.claude/skills/` carries `mojo-syntax`, `closure_migration`, and
+  `mojo-gpu-fundamentals`, which load automatically from the clone.
+- **ASAP destruction** (the afternoon-eater): see the gotcha below before touching
+  anything with `TaskGroup`.
+- CPU-only is fine for everything here — no GPU is required for conformance; that
+  is the point of the serial layer. The GPU lift (glyph_scan's dispatches onto
+  device threads) needs real hardware — start from the `mojo-gpu-fundamentals`
+  skill, and keep the conformance suites as the referee exactly as before.
+- `pip install modular` also drags in MAX; on a lean machine
+  `pip install mojo-compiler` may suffice — verify `mojo --version` either way.
 
 ## First numbers (honest ones)
 
