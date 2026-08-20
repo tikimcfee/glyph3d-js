@@ -1347,6 +1347,11 @@ class CodeGrid extends FramedGlyphField {
                         ? (this._byteWindow.to - this._byteWindow.from)
                             + Math.max(this.config.editSlackBytes, (this._byteWindow.to - this._byteWindow.from) >> 3)
                         : 0,
+                    // Exact only when the window IS the whole file; a partial window
+                    // stages fewer leaders than the record counts, so it falls back to
+                    // its own byte length (conservative, and smaller anyway).
+                    leaders: (this._byteWindow.degenerate && this._bakedRecord)
+                        ? this._bakedRecord.leaders : 0,
                 });
             } catch (err) {
                 if (!prevPipeline) throw err;

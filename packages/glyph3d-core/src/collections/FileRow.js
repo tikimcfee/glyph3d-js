@@ -184,6 +184,10 @@ export default class FileRow extends BoundedObject3D {
                 lineHeight: m.lineHeight,
                 zStep: m.charHeight * (lp.zWrapSpacing || 0),
                 field: null,
+                // Exact only when the window IS the whole file; a partial window
+                // stages fewer leaders than the record counts, so it falls back to
+                // its own byte length (conservative, and smaller anyway).
+                leaders: (w.degenerate && this._bakedRecord) ? this._bakedRecord.leaders : 0,
             });
             this._pipeline = staged;
 

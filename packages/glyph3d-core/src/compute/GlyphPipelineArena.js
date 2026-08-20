@@ -210,9 +210,41 @@ export default class GlyphPipelineArena {
      * @returns {{itemIndex:number, byteStart:number, byteLength:number, mirror:Object,
      *   setPage:Function, verify:Function, dispose:Function}} the per-grid handle
      */
-    stage({ bytes, origin, page: pageIn, wrapWidth = 0, lineHeight = 1, zStep = 0, field = null, capacity = 0 }) {
+    stage({ bytes, origin, page: pageIn, wrapWidth = 0, lineHeight = 1, zStep = 0, field = null, capacity = 0, leaders = 0 }) {
         if (!(bytes?.length > 0)) {
             throw new Error('GlyphPipelineArena.stage: empty file — an item owns at least one byte');
+        }
+        // PER-ITEM ORDINAL BOUND — the invariant the arena's global cap only proxies.
+        //
+        // The count lanes (S_ORD, S_ROW, S_COL) are f32 and are ITEM-RELATIVE: the
+        // fold resets ord/row/col to 0 at every item start. So exactness is bounded
+        // by the largest single ITEM, never by the arena total. Past 2^24 a lane
+        // stops representing consecutive integers and two glyphs fold onto one
+        // ordinal — while addressing (byteWords/ordToByte/itemStarts, all u32) stays
+        // perfectly exact. Nothing looks broken; the layout is just quietly wrong.
+        //
+        // Until now this rule held only by routing: READABLE_MAX_CHARS (1M chars)
+        // caps files in the LOAD path, and nothing else. Asserted here it is true
+        // for every producer, including the ones that never pass that way.
+        //
+        // LEADERS is the real bound and callers with a bake record pass it — the
+        // bake already counted them (glyphBake's `leaders`), so it costs nothing.
+        // The byte-count fallback is deliberately CONSERVATIVE (leaders <= bytes,
+        // always): it exists for SYNTHETIC sources — terminal grids, generated
+        // content, anything calling stage() directly — which own no bake record and
+        // are exactly the producers the load-path cap never covered. A multi-byte
+        // corpus (CJK, emoji) can therefore trip the fallback while being genuinely
+        // safe; that is the trade, and the fix is to pass `leaders`, not to widen
+        // the bound.
+        const ordinalUnits = leaders > 0 ? leaders : bytes.length;
+        if (ordinalUnits > ORDINAL_EXACT_BYTES) {
+            throw new Error(
+                `GlyphPipelineArena.stage: one item claims ${ordinalUnits.toLocaleString()} ` +
+                `${leaders > 0 ? 'glyphs' : 'bytes (conservative: no leader count supplied)'} — ` +
+                `past the f32-ordinal wall (${ORDINAL_EXACT_BYTES.toLocaleString()}). The count ` +
+                'lanes are item-relative f32, so this item alone would alias ordinals ' +
+                '(u32 ordinal lanes are the lift)',
+            );
         }
         // EDIT SLACK: capacity > length stages the item with a 0x80 pad (bare
         // continuation bytes — structural non-leaders every pass skips). Edits that
