@@ -28,7 +28,7 @@
 
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { launchBrowser, openApp } from './itest/driver.mjs';
+import { launchGpuBrowser, openApp } from './itest/driver.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
@@ -113,9 +113,26 @@ const probe = (opts) => `(async (o) => {
   R.notes.push('laid ' + kernels.byteLength + ' bytes across 2 items');
 
   // Colors: per-slot authored sRGB — A green with a red KEYWORD run, B blue.
-  const attr = new StorageAttr(new Float32Array(maxBytes * 4), 4);
+  // RGBA8, matching the RENDER path. Two traps live here, both silent:
+  //  1. The color lane became RGBA8 in 1c4b8dd ("instanceColor is RGBA8 — the first
+  //     diet slice"): the kernel binds this buffer as ONE u32 per glyph and unpacks
+  //     bytes by hand. A Float32Array here hands it IEEE-754 bit patterns to unpack
+  //     as colour — which is what this gate did, silently, from the day it was written.
+  //  2. normalized is load-bearing. three widens a Uint8Array attribute to one u32
+  //     PER BYTE unless normalized === true (WebGPUAttributeUtils.js). The real app
+  //     sets it (GlyphField._ensureColorAttr, MegaGlyphField); a gate that forgets it
+  //     gets green and blue exactly zero while alpha stays perfect — which reads as a
+  //     kernel bug and is not one.
+  const attr = new StorageAttr(new Uint8Array(maxBytes * 4), 4);
+  attr.normalized = true;
   const kwAt = o.fileA.indexOf('KEYWORD');
-  const paint = (slot, c) => { const b = slot * 4; attr.array[b] = c.r; attr.array[b + 1] = c.g; attr.array[b + 2] = c.b; };
+  const paint = (slot, c) => {
+      const b = slot * 4;
+      attr.array[b] = Math.round(c.r * 255);
+      attr.array[b + 1] = Math.round(c.g * 255);
+      attr.array[b + 2] = Math.round(c.b * 255);
+      attr.array[b + 3] = 255;
+  };
   for (let s = 0; s < total; s++) paint(s, o.colorA);
   for (let s = kwAt; s < kwAt + 7; s++) paint(s, o.colorKw);
   for (let s = startB; s < total; s++) paint(s, o.colorB);
@@ -240,16 +257,52 @@ const probe = (opts) => `(async (o) => {
   }
   tooth('KEYWORD red survives', kwFound, 'a red-leaning ink texel in slab 0');
 
+  // LATE COLOR REBIND. The far kernels close over the color node, so a source set
+  // AFTER they are built used to be silently ignored — scatter kept reading the
+  // previous buffer (a 4-byte placeholder at construction) and every texel came out
+  // black, with nothing raised. MegaGlyphField._ensureCapacity really does replace
+  // the instanceColor attribute on growth, so this path is reachable.
+  // Swap in an all-red source post-build and require the slab to follow it.
+  {
+    const red = new StorageAttr(new Uint8Array(maxBytes * 4), 4);
+    red.normalized = true;
+    for (let sl = 0; sl < total; sl++) {
+      const b = sl * 4;
+      red.array[b] = 255; red.array[b + 1] = 0; red.array[b + 2] = 0; red.array[b + 3] = 255;
+    }
+    red.needsUpdate = true;
+    kernels.setFarColorSource(red);
+    kernels.setFarItems(farItems, new Uint32Array([0, 1]), 2);
+    kernels.runFarScatter();
+    kernels.runFarNormalize();
+    const after = await kernels.readFarPacked();
+    let redTexels = 0, otherTexels = 0;
+    for (let i = 0; i < after.length; i++) {
+      const p32 = after[i] >>> 0;
+      const r = p32 & 255, g = (p32 >>> 8) & 255, b = (p32 >>> 16) & 255, a = (p32 >>> 24) & 255;
+      if (a === 0) continue;
+      if (r > g && r > b) redTexels++; else otherTexels++;
+    }
+    tooth('late setFarColorSource takes effect', redTexels > 0 && otherTexels === 0,
+      'every ink texel follows the NEW source (' + redTexels + ' red, ' + otherTexels + ' stale)');
+  }
+
   R.ok = R.teeth.every((t) => t.pass);
   return R;
 })(${JSON.stringify(opts)})`;
 
 // ---- runner ----
-const browser = await launchBrowser({ headed: HEADED });
+// Platform-resolved. This gate dispatches REAL COMPUTE, and headless on darwin is
+// SwiftShader — measured on this box at 25x slower (124.7s vs 8.0s) for identical
+// results. Correctness is unaffected; the wall-clock is not.
+const browser = await launchGpuBrowser({ headed: HEADED || null });
 let app = null;
 let result = null;
 try {
-  app = await openApp(browser, { url: flag('--url', 'http://localhost:5173/'), wait: 6000 });
+  // session:'off' — this gate builds its own kernels on a second offscreen renderer
+  // and needs only the atlas, so restoring the operator's saved field is pure cost
+  // (5.5s of an 8s run) and pure risk. wait drops with it.
+  app = await openApp(browser, { url: flag('--url', 'http://localhost:5173/'), session: 'off', wait: 500 });
   if (!app.booted) { console.error('✗ FAIL  the app did not boot (is the Vite server up? :5173)'); process.exit(1); }
   result = await app.evalPage(probe({
     repo: REPO, fileA: FILE_A, fileB: FILE_B,

@@ -11,13 +11,12 @@
 //
 // Client-only (fake in-page file provider — no relay, like glyph-pipeline-check).
 //   bun tools/arena-realloc-check.mjs
-import { chromium } from 'playwright';
-import { webgpuArgs } from './itest/driver.mjs';
+import { launchGpuBrowser } from './itest/driver.mjs';
 
-const browser = await chromium.launch({
-    headless: true,
-    args: webgpuArgs(),
-});
+// Platform-resolved: this gate dispatches REAL COMPUTE (realloc storms through the
+// kernels), and headless on darwin is SwiftShader — same results, ~25x the wall
+// clock. It drives a raw page, so there is no saved session to opt out of.
+const browser = await launchGpuBrowser({});
 let pass = 0, fail = 0;
 const ok = (cond, msg) => { if (cond) { pass++; console.log(`  ✓ ${msg}`); } else { fail++; console.log(`  ✗ ${msg}`); } };
 try {

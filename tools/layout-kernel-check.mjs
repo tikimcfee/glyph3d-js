@@ -31,7 +31,7 @@
 import { readFileSync, writeFileSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { launchBrowser, openApp } from './itest/driver.mjs';
+import { launchGpuBrowser, openApp } from './itest/driver.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -975,13 +975,18 @@ function report(r) {
 }
 
 // ---- run ----
-const browser = await launchBrowser({ headed: HEADED });
+// Platform-resolved: this gate dispatches REAL COMPUTE, and headless on darwin is
+// SwiftShader — same results, ~25x the wall clock. Correctness is unaffected;
+// patience is. --headed still forces it.
+const browser = await launchGpuBrowser({ headed: HEADED || null });
 const results = [];
 const raw = [];
 let app = null;
 try {
   // relayPort intentionally omitted → CLIENT-ONLY. Dialing the relay arms workspace autosave.
-  app = await openApp(browser, { url: flag('--url', 'http://localhost:5173/'), wait: 6000 });
+  // session:'off' — a gate needs the atlas, not the operator's saved field.
+  // Restoring it is pure cost and pure risk (measured: 5.5s of an 8s run).
+  app = await openApp(browser, { url: flag('--url', 'http://localhost:5173/'), session: 'off', wait: 1000 });
   if (!app.booted) {
     console.error('✗ FAIL  the app never exposed window.__glyphClient (is `tools/dev.sh` up on :5173?)');
     if (app.errors.length) console.error('  errors: ' + app.errors.slice(0, 3).map((e) => e.text).join(' | '));
