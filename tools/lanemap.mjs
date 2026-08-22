@@ -1,8 +1,15 @@
 // Classify every slot-lane access site by lane kind.
 import { readFileSync } from 'node:fs';
 
-const COUNT = { S_GLYPH_ID: 0, S_ROW: 6, S_COL: 7, S_FLAGS: 8, S_ORD: 11 };
-const FLOAT = { S_ADVANCE: 1, S_HEIGHT: 2, S_X: 3, S_Y: 4, S_Z: 5, S_BASE_X: 9, S_LINE_ADV: 10 };
+// DERIVED from the oracle's authoritative table — this file used to hold its own
+// copy that classified S_GLYPH_ID as a COUNT, contradicting FLOAT_LANES and papered
+// over with a 'DEFERRED' special case. That is the exact drift the shared table exists
+// to stop, so it does not get to live here either.
+const Ref = await import('../packages/glyph3d-core/src/compute/glyphPipelineReference.js');
+const NAME_OF = Object.fromEntries(Object.entries(Ref)
+    .filter(([k, v]) => /^S_[A-Z_]+$/.test(k) && typeof v === 'number').map(([k, v]) => [v, k]));
+const COUNT = Object.fromEntries([...Ref.COUNT_LANES].map((l) => [NAME_OF[l], l]));
+const FLOAT = Object.fromEntries([...Ref.FLOAT_LANES].map((l) => [NAME_OF[l], l]));
 const FILES = [
   'packages/glyph3d-core/src/compute/glyphPipelineKernels.js',
   'packages/glyph3d-core/src/compute/glyphPipelineReference.js',

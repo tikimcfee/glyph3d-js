@@ -1,4 +1,4 @@
-import { SLOT_STRIDE, S_X, S_Y, S_Z, S_ADVANCE, S_FLAGS, F_LEADER } from '../compute/glyphPipelineReference.js';
+import { SLOT_STRIDE, S_X, S_Y, S_Z, S_ADVANCE, S_FLAGS, F_LEADER, fval} from '../compute/glyphPipelineReference.js';
 
 /**
  * ByteLayoutDescription — the queryable product of a byte-pipeline layout. The Layer 2
@@ -134,14 +134,14 @@ export default class ByteLayoutDescription {
             if (lastLocal < 0 || lastLocal >= mirrorLen) return null;   // outside the window
             const last = lastLocal * SLOT_STRIDE;
             return {
-                x: this.slots[last + S_X] + this.slots[last + S_ADVANCE],
-                y: this.slots[last + S_Y], z: this.slots[last + S_Z],
+                x: fval(this.slots[last + S_X]) + fval(this.slots[last + S_ADVANCE]),
+                y: fval(this.slots[last + S_Y]), z: fval(this.slots[last + S_Z]),
             };
         }
         const local = off - this.sourceBase;
         if (local < 0 || local >= mirrorLen) return null;               // outside the window
         const o = local * SLOT_STRIDE;
-        return { x: this.slots[o + S_X], y: this.slots[o + S_Y], z: this.slots[o + S_Z] };
+        return { x: fval(this.slots[o + S_X]), y: fval(this.slots[o + S_Y]), z: fval(this.slots[o + S_Z]) };
     }
 
     /**

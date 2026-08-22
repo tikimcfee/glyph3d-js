@@ -103,6 +103,58 @@ const {
 export const MAX_FOLD_RESUM = 4096;
 
 /**
+ * The arena's byte ceiling, and the ONE place it is stated — GlyphPipelineArena
+ * imports this rather than keeping its own copy. Two copies of a limit is how a
+ * ceiling once got raised on one side only, wedging the arena in the gap.
+ *
+ * This WAS 2^24 (16MB), and it was a correctness wall: count lanes rode f32 slots,
+ * exact only to 2^24, so a larger arena aliased ordinals — two glyphs collapsing
+ * onto one, with addressing still perfectly exact and nothing raised. The u32 lane
+ * migration removed that failure mode, so the bound is now simply how far a slot
+ * INDEX can address: index = byte * SLOT_STRIDE, held in u32.
+ *
+ * What actually binds in practice is memory, not this number: the slot buffer costs
+ * SLOT_BYTES_PER_SOURCE_BYTE (48B) per source byte, so the device's
+ * maxStorageBufferBindingSize is reached long before the index space is —
+ * assertSlotBufferFits refuses that at the seam, naming the request and the limit.
+ * The vertex path indexes with the same u32 arithmetic as the kernels
+ * (glyphVertex.js), so it addresses everything the arena can hold.
+ */
+export const KERNEL_MAX_BYTES = Math.floor(2 ** 32 / SLOT_STRIDE);
+
+/** Bytes of GPU storage one source byte costs in the slot buffer (12 lanes x u32). */
+export const SLOT_BYTES_PER_SOURCE_BYTE = SLOT_STRIDE * 4;
+
+/**
+ * Refuse a slot buffer the device cannot bind — LOUDLY, at this seam, naming the
+ * request and the limit it exceeded.
+ *
+ * Without this the failure surfaces inside Dawn as an allocation or binding error
+ * with no mention of glyphs, arenas or capacity, which reads as a driver problem
+ * rather than as us asking for too much. The project's rule (see GlyphCanvas's
+ * _pipelineLimits) is that values handed to browser/GPU APIs are validated at the
+ * boundary and any refusal states the exact request it refused.
+ *
+ * Advisory only when limits are unreachable (headless probes, a stubbed renderer):
+ * a missing limit must not block a run that would otherwise work.
+ *
+ * @param {Object} renderer @param {number} maxBytes
+ */
+export function assertSlotBufferFits(renderer, maxBytes) {
+    const limit = renderer?.backend?.device?.limits?.maxStorageBufferBindingSize;
+    if (!Number.isFinite(limit) || limit <= 0) return;      // unreachable → advisory
+    const want = maxBytes * SLOT_BYTES_PER_SOURCE_BYTE;
+    if (want <= limit) return;
+    const mb = (n) => `${(n / (1024 * 1024)).toFixed(1)}MB`;
+    throw new Error(
+        `GlyphPipelineKernels: the slot buffer for ${maxBytes} source bytes needs ${mb(want)} `
+        + `(${SLOT_BYTES_PER_SOURCE_BYTE}B/byte x ${maxBytes}), past this device's `
+        + `maxStorageBufferBindingSize of ${mb(limit)}. Lower the arena capacity, or start `
+        + 'the page with higher requested limits (see GlyphCanvas _pipelineLimits).',
+    );
+}
+
+/**
  * Binary-search iteration cap for the per-thread item resolution (32 halvings address
  * 2^32 items; the cap exists because an unbounded loop that fails to converge is a
  * device loss). Break() exits as soon as the range collapses.
@@ -195,10 +247,10 @@ export default class GlyphPipelineKernels {
         this.renderer = renderer;
         this.maxBytes = Math.max(1, maxBytes | 0);
         this.maxItems = Math.max(1, maxItems | 0);
-        if (this.maxBytes > 2 ** 24) {
-            // S_ORD (and every count lane) must stay exact in an f32 slot lane.
-            throw new Error(`GlyphPipelineKernels: maxBytes ${this.maxBytes} exceeds 2^24 — ordinals would lose exactness in f32`);
+        if (this.maxBytes > KERNEL_MAX_BYTES) {
+            throw new Error(`GlyphPipelineKernels: maxBytes ${this.maxBytes} exceeds KERNEL_MAX_BYTES ${KERNEL_MAX_BYTES}`);
         }
+        assertSlotBufferFits(renderer, this.maxBytes);
         this.maxChunks = Math.ceil(this.maxBytes / CHUNK_SIZE);
         this.maxSupers = Math.ceil(this.maxChunks / GROUP_SIZE);
         this.byteLength = 0;
@@ -206,7 +258,7 @@ export default class GlyphPipelineKernels {
 
         // ── Buffers ────────────────────────────────────────────────────────────────────
         this.byteWords = instancedArray(Math.ceil(this.maxBytes / 4), 'uint').setName('GlyphBytes');
-        this.slots = instancedArray(this.maxBytes * SLOT_STRIDE, 'float').setName('GlyphSlots');
+        this.slots = instancedArray(this.maxBytes * SLOT_STRIDE, 'uint').setName('GlyphSlots');
         this.trieIndex = instancedArray(trie.blockIndex.length, 'uint').setName('GlyphTrieIndex');
         this.trieBlocks = instancedArray(trie.blocks.length, 'float').setName('GlyphTrieBlocks');
         // The scan's ladder: chunk partials, their group reduces, the two exclusive-prefix
@@ -341,14 +393,14 @@ export default class GlyphPipelineKernels {
             // every run, so stale content from a previous, larger load can't ghost.
             If(n.equal(int(0)), () => {
                 const o0 = id.mul(uint(SLOT_STRIDE));
-                slots.element(o0.add(uint(S_FLAGS))).assign(float(0));
+                slots.element(o0.add(uint(S_FLAGS))).assign(uint(0));
                 // Zero the SIZE lanes too, making the non-leader invariant EXPLICIT:
                 // the vertex culls by size (0,0) without checking flags, and a
                 // rewritten range's 0x80 edit slack was a real glyph last run. (The
                 // invariant already held via buffer refresh, but it held silently —
                 // these writes make it true by construction, not by side effect.)
-                slots.element(o0.add(uint(S_ADVANCE))).assign(float(0));
-                slots.element(o0.add(uint(S_HEIGHT))).assign(float(0));
+                slots.element(o0.add(uint(S_ADVANCE))).assign(uint(0));   // bits of 0.0f
+                slots.element(o0.add(uint(S_HEIGHT))).assign(uint(0));    // bits of 0.0f
                 Return();
             });
 
@@ -384,16 +436,16 @@ export default class GlyphPipelineKernels {
             const tflags = this.trieBlocks.element(eo.add(uint(LANE_FLAGS))).toVar('tf');
 
             const o = id.mul(uint(SLOT_STRIDE)).toVar('o');
-            slots.element(o.add(uint(S_GLYPH_ID))).assign(glyphId);
-            slots.element(o.add(uint(S_ADVANCE))).assign(advance);
-            slots.element(o.add(uint(S_HEIGHT))).assign(height);
+            slots.element(o.add(uint(S_GLYPH_ID))).assign(bitcast(glyphId, 'uint'));   // DEFERRED: still a trie float
+            slots.element(o.add(uint(S_ADVANCE))).assign(bitcast(advance, 'uint'));
+            slots.element(o.add(uint(S_HEIGHT))).assign(bitcast(height, 'uint'));
 
             const missing = tflags.greaterThan(float(0.5)).toVar('missing');
             // Newline-ness is decided HERE, once — the scan reads the flag bit, never
             // a codepoint lane (there is none; the byte buffer is the codepoint truth).
-            const nlBit = cp.equal(uint(NEWLINE)).select(float(F_NEWLINE), float(0)).toVar('nlBit');
+            const nlBit = cp.equal(uint(NEWLINE)).select(uint(F_NEWLINE), uint(0)).toVar('nlBit');
             slots.element(o.add(uint(S_FLAGS)))
-                .assign(missing.select(float(F_LEADER | F_MISSING), float(F_LEADER)).add(nlBit));
+                .assign(missing.select(uint(F_LEADER | F_MISSING), uint(F_LEADER)).bitOr(nlBit));
 
             // Report the codepoint so the CPU can encode it and grow the atlas. Bounded ring:
             // dropping an overflow miss costs a blank glyph this pass, not a wrong layout.
@@ -595,7 +647,7 @@ export default class GlyphPipelineKernels {
                 acc.tailAdv.assign(float(0));
             }).Else(() => {
                 acc.tailLen.addAssign(int(1));
-                acc.tailAdv.addAssign(S.element(o.add(uint(S_ADVANCE))));
+                acc.tailAdv.addAssign(bitcast(S.element(o.add(uint(S_ADVANCE))), 'float'));
                 If(acc.nl.equal(int(0)), () => { acc.headLen.assign(acc.tailLen); });
             });
         });
@@ -748,14 +800,14 @@ export default class GlyphPipelineKernels {
                         .select(col.div(cur.wrap), int(0)).toVar('aWrapRow');
                     const row = closed.add(wrapRow).toVar('aRow');
 
-                    S.element(o.add(uint(S_ROW))).assign(row.toFloat());
-                    S.element(o.add(uint(S_COL))).assign(col.toFloat());
-                    S.element(o.add(uint(S_LINE_ADV))).assign(acc.tailAdv);
-                    S.element(o.add(uint(S_ORD))).assign(acc.glyphs.toFloat());
-                    S.element(o.add(uint(S_FLAGS))).assign(float(flags.bitOr(int(F_RENDERED))));
+                    S.element(o.add(uint(S_ROW))).assign(row.toUint());
+                    S.element(o.add(uint(S_COL))).assign(col.toUint());
+                    S.element(o.add(uint(S_LINE_ADV))).assign(bitcast(acc.tailAdv, 'uint'));
+                    S.element(o.add(uint(S_ORD))).assign(acc.glyphs.toUint());
+                    S.element(o.add(uint(S_FLAGS))).assign(uint(flags.bitOr(int(F_RENDERED))));
                     this.ordToByte.element(cur.itemStartByte.add(uint(acc.glyphs))).assign(id);
                     }).Else(() => {
-                        S.element(o.add(uint(S_FLAGS))).assign(float(0));
+                        S.element(o.add(uint(S_FLAGS))).assign(uint(0));
                     });
                 });
 
@@ -805,7 +857,7 @@ export default class GlyphPipelineKernels {
 
             const col = int(lane(id, S_COL)).toVar('col');
             const ord = int(lane(id, S_ORD)).toVar('ord');
-            const row = lane(id, S_ROW).toVar('row');
+            const row = lane(id, S_ROW).toFloat().toVar('row');
             const fold = wrap.greaterThan(int(0)).select(wrap, pageCols).toVar('fold');
 
             const x = float(0).toVar('x');
@@ -815,20 +867,20 @@ export default class GlyphPipelineKernels {
                 Loop(MAX_FOLD_RESUM, () => {
                     If(k.lessThan(int(1)), () => { Break(); });
                     const q = this.ordToByte.element(itemStart.add(uint(ord.sub(k)))).toVar('q');
-                    x.addAssign(lane(q, S_ADVANCE));
+                    x.addAssign(bitcast(lane(q, S_ADVANCE), 'float'));
                     k.subAssign(int(1));
                 });
             }).Else(() => {
-                x.assign(lane(id, S_LINE_ADV));
+                x.assign(bitcast(lane(id, S_LINE_ADV), 'float'));
             });
 
             const wrapping = wrap.greaterThan(int(0)).toVar('wrapping');
             const wrapRow = wrapping.select(col.div(wrap), int(0)).toVar('wrapRow');
             const o = id.mul(uint(SLOT_STRIDE)).toVar('o');
-            S.element(o.add(uint(S_BASE_X))).assign(x.add(originX));
-            S.element(o.add(uint(S_X))).assign(x.add(originX));
-            S.element(o.add(uint(S_Y))).assign(row.negate().mul(lineHeight).add(originY));
-            S.element(o.add(uint(S_Z))).assign(originZ.sub(wrapRow.toFloat().mul(zWrapStep)));
+            S.element(o.add(uint(S_BASE_X))).assign(bitcast(x.add(originX), 'uint'));
+            S.element(o.add(uint(S_X))).assign(bitcast(x.add(originX), 'uint'));
+            S.element(o.add(uint(S_Y))).assign(bitcast(row.negate().mul(lineHeight).add(originY), 'uint'));
+            S.element(o.add(uint(S_Z))).assign(bitcast(originZ.sub(wrapRow.toFloat().mul(zWrapStep)), 'uint'));
 
             // ── fold scalars, fused per ITEM: total visual rows + the widest row. `x` is
             //    the pre-origin sum — item-relative by construction, which is what makes
@@ -913,7 +965,7 @@ export default class GlyphPipelineKernels {
             // (already within the fold unit), and y/z are rebuilt from the exact integer
             // lanes. Re-running with new params re-derives from base — there is no
             // "re-paginate", the remap cannot double-apply.
-            const x = lane(id, S_BASE_X).toVar('x');
+            const x = bitcast(lane(id, S_BASE_X), 'float').toVar('x');
 
             // EVERY page decision reads the integer lanes. Keying this off the float position
             // put 119 glyphs on the wrong page in the reference's own tests, because f32
@@ -936,14 +988,14 @@ export default class GlyphPipelineKernels {
             const zf = originZ.sub(seg.toFloat().mul(zWrapStep))
                 .add(yPage.div(wide).toFloat().mul(depthPerBand))
                 .add(xPage.toFloat().mul(depthPerCol)).toVar('zf');
-            S.element(o.add(uint(S_X))).assign(xf);
-            S.element(o.add(uint(S_Y))).assign(yf);
-            S.element(o.add(uint(S_Z))).assign(zf);
+            S.element(o.add(uint(S_X))).assign(bitcast(xf, 'uint'));
+            S.element(o.add(uint(S_Y))).assign(bitcast(yf, 'uint'));
+            S.element(o.add(uint(S_Z))).assign(bitcast(zf, 'uint'));
 
             // ── the item's box, fused (over the FINAL positions; the fold scalars live in
             //    resolveX's fused reduce — they don't change under a repaginate) ──────────
-            const w = lane(id, S_ADVANCE).toVar('w');
-            const h = lane(id, S_HEIGHT).toVar('h');
+            const w = bitcast(lane(id, S_ADVANCE), 'float').toVar('w');
+            const h = bitcast(lane(id, S_HEIGHT), 'float').toVar('h');
             const bb = item.mul(uint(6)).toVar('bb');
             atomicMin(this.itemBoxes.element(bb), floatToOrderedKey(xf));
             atomicMin(this.itemBoxes.element(bb.add(uint(1))), floatToOrderedKey(yf));
@@ -1146,15 +1198,15 @@ export default class GlyphPipelineKernels {
             If(slabX.lessThan(int(0)), () => { Return(); });
             If(fi.element(fb.add(uint(FI_DIRTY))).lessThan(float(0.5)), () => { Return(); });
 
-            const gid = uint(S.element(o.add(uint(S_GLYPH_ID)))).toVar('fGid');
+            const gid = uint(bitcast(S.element(o.add(uint(S_GLYPH_ID))), 'float')).toVar('fGid');   // DEFERRED
             const d = float(0).toVar('fD');
             If(gid.lessThan(u.farInkCount), () => { d.assign(this.farInk.element(gid)); });
 
             const slabY = int(fi.element(fb.add(uint(FI_SLAB_Y)))).toVar('fSlabY');
             const rpt = fi.element(fb.add(uint(FI_ROWS_PER_TEXEL)));
             const cpt = fi.element(fb.add(uint(FI_COLS_PER_TEXEL)));
-            const tx = int(S.element(o.add(uint(S_COL))).div(cpt)).clamp(int(0), int(FAR_SLAB - 1));
-            const ty = int(S.element(o.add(uint(S_ROW))).div(rpt)).clamp(int(0), int(FAR_SLAB - 1));
+            const tx = int(S.element(o.add(uint(S_COL))).toFloat().div(cpt)).clamp(int(0), int(FAR_SLAB - 1));
+            const ty = int(S.element(o.add(uint(S_ROW))).toFloat().div(rpt)).clamp(int(0), int(FAR_SLAB - 1));
             const texel = slabY.add(ty).mul(int(FAR_TEX)).add(slabX).add(tx);
             const ab = uint(texel).mul(uint(4)).toVar('fAB');
 
@@ -1263,7 +1315,26 @@ export default class GlyphPipelineKernels {
      * @param {StorageInstancedBufferAttribute} attr
      */
     setFarColorSource(attr) {
-        if (attr) this._farColorAttr = attr;
+        if (!attr || attr === this._farColorAttr) return this;
+        this._farColorAttr = attr;
+        // The far kernels CLOSE OVER the color node (_ensureFarKernels builds it once
+        // and returns early ever after), so a new attribute arriving later would be
+        // silently ignored: scatter would keep reading the PREVIOUS buffer — at
+        // construction a 4-byte placeholder — and every far texel would come out
+        // black, with no error anywhere. Drop the built kernels so the next runFar
+        // rebuilds against the live attribute.
+        //
+        // Only on a real identity change (guarded above): MegaGlyphField calls this
+        // on every view attach, and rebuilding per attach would be pure waste.
+        // Identity DOES change without an arena realloc — _ensureCapacity replaces
+        // the instanceColor attribute on capacity growth.
+        // dispose() reaches kernels through _allKernels().filter(Boolean), so a nulled
+        // kernel is unreachable and its pipeline + bind group would never be released.
+        this._kFarScatter?.dispose?.();
+        this._kFarNormalize?.dispose?.();
+        this._kFarScatter = null;
+        this._kFarNormalize = null;
+        this._farColorsNode = null;
         return this;
     }
 
@@ -1491,7 +1562,11 @@ export default class GlyphPipelineKernels {
         return out;
     }
 
-    /** @returns {Promise<Float32Array>} the whole slot buffer — the parity path, not a render path.
+    /** @returns {Promise<Uint32Array>} the whole slot buffer — the parity path, not a
+     *  render path. u32: count lanes read natively, float lanes need fval() (or
+     *  bitcast on the GPU). A Float32Array view here would reinterpret every count
+     *  as a denormal and every float as a huge integer — silently, with no error.
+     *
      *  The readback is bounded to the LIVE byte range: under the arena the slots buffer is
      *  capacity-sized, so an unbounded readback buffer allocation could fail before a
      *  byte is copied. */
@@ -1500,8 +1575,8 @@ export default class GlyphPipelineKernels {
         // byteLength, and a view sized by the post-await value overruns the pre-await
         // readback ("Invalid typed array length" — the byte-field itest race).
         const n = this.byteLength * SLOT_STRIDE;
-        const raw = await this.renderer.getArrayBufferAsync(this.slots.value, null, 0, n * Float32Array.BYTES_PER_ELEMENT);
-        return new Float32Array(raw, 0, n);
+        const raw = await this.renderer.getArrayBufferAsync(this.slots.value, null, 0, n * Uint32Array.BYTES_PER_ELEMENT);
+        return new Uint32Array(raw, 0, n);
     }
 
     /** @returns {Promise<number[]>} codepoints with no atlas entry, for the CPU to encode. */

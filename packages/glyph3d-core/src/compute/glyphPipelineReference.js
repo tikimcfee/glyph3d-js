@@ -65,6 +65,32 @@ import { trieLookup } from './GlyphTrie.js';
 
 export const NEWLINE = 0x0A;
 
+// ── lane representation ──────────────────────────────────────────────────────
+// The slot buffer is u32. Twelve lanes, two kinds, and the buffer can only have
+// one type — so one kind travels reinterpreted.
+//
+// COUNTS (S_ROW/S_COL/S_FLAGS/S_ORD) are stored natively and are now exact for
+// the full u32 range. That is the whole point: they used to ride f32 lanes,
+// where consecutive integers stop being representable past 2^24 and two glyphs
+// fold onto one ordinal while addressing stays perfectly exact.
+//
+// FLOATS (S_ADVANCE/S_HEIGHT/S_X/S_Y/S_Z/S_BASE_X/S_LINE_ADV) are bitcast. This
+// is the direction that costs nothing: a bitcast is a reinterpretation, so all
+// 32 bits survive and the round-trip is exact — unlike the int-in-float it
+// replaces, which destroyed information.
+//
+// fbits() also PRESERVES THE ROUNDING. Storing into a Float32Array rounded to
+// f32 implicitly, and the oracle's whole discipline depends on that happening
+// at exactly the same points; the Float32Array staging view below rounds
+// identically, so no store changes value.
+const _fbuf = new Float32Array(1);
+const _ubuf = new Uint32Array(_fbuf.buffer);
+/** f32 value → its u32 bit pattern (rounds to f32 exactly as a lane store did). */
+export function fbits(f) { _fbuf[0] = f; return _ubuf[0]; }
+/** u32 bit pattern → the f32 value it encodes. */
+export function fval(u) { _ubuf[0] = u >>> 0; return _fbuf[0]; }
+
+
 /**
  * Per-slot lanes. One flat Float32Array so the GPU binds one buffer.
  *
@@ -96,6 +122,38 @@ export const S_ORD = 11;      // exact fold: item-relative leader ordinal (newli
 // is always re-derivable from the byte buffer. The one downstream decision it fed —
 // "is this a newline?" — is a decode-time fact and rides S_FLAGS as F_NEWLINE.
 export const F_LEADER = 1;        // this byte begins a codepoint
+
+/**
+ * LANE KINDS — the one place that says which lanes are counts and which are floats.
+ *
+ * The slot buffer is u32 and holds two kinds of value, so every consumer that reads
+ * a lane has to know which it is. That knowledge used to live in prose and in
+ * ad-hoc sets copied into gen.mjs, verifyItem, and four comparators — and EVERY
+ * copy drifted at least once: verifyItem carried hardcoded indices that went stale
+ * by one when the codepoint lane was dropped (13 -> 12), and three tolerance
+ * comparators silently measured bit patterns after the u32 migration.
+ *
+ * Derive from these. Do not re-list lanes at a call site.
+ *
+ * FLOAT lanes are bitcast (fbits/fval on the CPU, TSL bitcast on the GPU).
+ * COUNT lanes are stored natively and are exact across the whole u32 range — which
+ * is the point of the migration.
+ *
+ * S_GLYPH_ID is a FLOAT lane on purpose: it is copied straight from the trie's f32
+ * blocks, so it stays a float carrier until the trie format itself moves.
+ */
+export const FLOAT_LANES = Object.freeze(new Set([
+    S_GLYPH_ID, S_ADVANCE, S_HEIGHT, S_X, S_Y, S_Z, S_BASE_X, S_LINE_ADV,
+]));
+/** Lanes stored natively as integers — exact for the full u32 range. */
+export const COUNT_LANES = Object.freeze(new Set([S_ROW, S_COL, S_FLAGS, S_ORD]));
+/** @param {number} lane @returns {boolean} true when the lane carries a bitcast f32. */
+export function isFloatLane(lane) { return FLOAT_LANES.has(lane); }
+/** Decode one lane BY KIND — floats reinterpreted, counts returned as-is. */
+export function laneValue(slots, index) {
+    return FLOAT_LANES.has(index % SLOT_STRIDE) ? fval(slots[index]) : slots[index];
+}
+
 export const F_RENDERED = 2;      // layout completed this slot (a truth marker, not a
                                   // publish protocol — no pass ever waits on it)
 export const F_NEWLINE = 4;       // the codepoint is 0x0A — the fold's one content test
@@ -132,7 +190,7 @@ export const I_BYTE_COUNT = 14;  // the item's byte length — ownership is EXPL
 
 /** Allocate the slot buffer for a file of `byteLength` bytes. */
 export function allocSlots(byteLength) {
-    return new Float32Array(byteLength * SLOT_STRIDE);
+    return new Uint32Array(byteLength * SLOT_STRIDE);
 }
 
 /**
@@ -175,8 +233,8 @@ export function decodeAndResolve(bytes, slots, trie, id, misses) {
         // the previous run (fresh arrays are born zero; REWRITES are why this write
         // must exist — the GPU decode kernel makes the same two writes every run).
         const o = id * SLOT_STRIDE;
-        slots[o + S_ADVANCE] = 0;
-        slots[o + S_HEIGHT] = 0;
+        slots[o + S_ADVANCE] = fbits(0);
+        slots[o + S_HEIGHT] = fbits(0);
         return;
     }
 
@@ -189,9 +247,12 @@ export function decodeAndResolve(bytes, slots, trie, id, misses) {
 
     const g = trieLookup(trie, cp);
     const o = id * SLOT_STRIDE;
-    slots[o + S_GLYPH_ID] = g.glyphId;
-    slots[o + S_ADVANCE] = g.advance;
-    slots[o + S_HEIGHT] = g.height;
+    // DEFERRED lane: the glyph id comes straight from the trie's f32 blocks, so it
+    // stays a FLOAT carrier (bitcast) until the trie format moves. Storing it raw
+    // would truncate through the u32 buffer and disagree with the kernels.
+    slots[o + S_GLYPH_ID] = fbits(g.glyphId);
+    slots[o + S_ADVANCE] = fbits(g.advance);
+    slots[o + S_HEIGHT] = fbits(g.height);
     slots[o + S_FLAGS] = F_LEADER
         | (cp === NEWLINE ? F_NEWLINE : 0)
         | (g.missing ? F_MISSING : 0);
@@ -263,12 +324,12 @@ export function layoutItem(slots, itemStart, byteCount, params = {}, ordToByte =
         const x = fold > 0 ? segAdv : lineAdv;
         slots[o + S_ROW] = row;
         slots[o + S_COL] = col;
-        slots[o + S_LINE_ADV] = lineAdv;
+        slots[o + S_LINE_ADV] = fbits(lineAdv);
         slots[o + S_ORD] = ord;
-        slots[o + S_BASE_X] = x + ox;
-        slots[o + S_X] = x + ox;
-        slots[o + S_Y] = -row * (params.lineHeight ?? slots[o + S_HEIGHT]) + oy;
-        slots[o + S_Z] = -wrapRow * zStep + oz;
+        slots[o + S_BASE_X] = fbits(x + ox);
+        slots[o + S_X] = fbits(x + ox);
+        slots[o + S_Y] = fbits(-row * (params.lineHeight ?? fval(slots[o + S_HEIGHT])) + oy);
+        slots[o + S_Z] = fbits(-wrapRow * zStep + oz);
         slots[o + S_FLAGS] = flags | F_RENDERED;
         if (ordToByte) ordToByte[itemStart + ord] = id;
         if (scalars) {
@@ -289,9 +350,9 @@ export function layoutItem(slots, itemStart, byteCount, params = {}, ordToByte =
             // stays log-bounded, near this value). segAdv stays fround-per-add — it is
             // the fold>0 x, and matching the GPU's f32 order is what makes those lanes
             // bit-exact.
-            lineAdv += slots[o + S_ADVANCE];
+            lineAdv += fval(slots[o + S_ADVANCE]);
             segAdv = (fold > 0 && col % fold === 0) ? 0
-                : Math.fround(segAdv + slots[o + S_ADVANCE]);
+                : Math.fround(segAdv + fval(slots[o + S_ADVANCE]));
         }
     }
 }
@@ -336,18 +397,18 @@ export function resolveX(slots, id, p, ordToByte, scalars) {
         const back = col % fold;
         for (let k = back; k >= 1; k--) {
             const q = ordToByte[itemStart + ord - k];
-            x = Math.fround(x + slots[q * SLOT_STRIDE + S_ADVANCE]);
+            x = Math.fround(x + fval(slots[q * SLOT_STRIDE + S_ADVANCE]));
         }
     } else {
-        x = slots[o + S_LINE_ADV];
+        x = fval(slots[o + S_LINE_ADV]);
     }
 
     const row = slots[o + S_ROW];
     const wrapRow = wrap > 0 ? Math.floor(col / wrap) : 0;
-    slots[o + S_BASE_X] = x + (p.origin?.x || 0);
-    slots[o + S_X] = x + (p.origin?.x || 0);
-    slots[o + S_Y] = -row * (p.lineHeight ?? slots[o + S_HEIGHT]) + (p.origin?.y || 0);
-    slots[o + S_Z] = -wrapRow * (p.zStep || 0) + (p.origin?.z || 0);
+    slots[o + S_BASE_X] = fbits(x + (p.origin?.x || 0));
+    slots[o + S_X] = fbits(x + (p.origin?.x || 0));
+    slots[o + S_Y] = fbits(-row * (p.lineHeight ?? fval(slots[o + S_HEIGHT])) + (p.origin?.y || 0));
+    slots[o + S_Z] = fbits(-wrapRow * (p.zStep || 0) + (p.origin?.z || 0));
 
     if (scalars) {
         if (row + 1 > scalars[6]) scalars[6] = row + 1;   // totalRows (pre-conveyor)
@@ -431,9 +492,9 @@ export function paginate(slots, id, p) {
     const wrap = Math.max(0, Math.trunc(p.wrap || 0));
     const seg = wrap > 0 ? Math.floor(col / wrap) : 0;
     const oy = p.origin?.y || 0, oz = p.origin?.z || 0;
-    slots[o + S_X] = slots[o + S_BASE_X] + (yPage % wide) * (p.pageStrideX || 0);
-    slots[o + S_Y] = oy - (screenRow - yPage * rows) * p.lineHeight - band * (p.bandStrideY || 0);
-    slots[o + S_Z] = oz - seg * (p.zStep || 0) + band * (p.depthPerBand || 0) + xPage * (p.depthPerColumn || 0);
+    slots[o + S_X] = fbits(fval(slots[o + S_BASE_X]) + (yPage % wide) * (p.pageStrideX || 0));
+    slots[o + S_Y] = fbits(oy - (screenRow - yPage * rows) * p.lineHeight - band * (p.bandStrideY || 0));
+    slots[o + S_Z] = fbits(oz - seg * (p.zStep || 0) + band * (p.depthPerBand || 0) + xPage * (p.depthPerColumn || 0));
 }
 
 /**
@@ -447,8 +508,8 @@ export function paginate(slots, id, p) {
 export function boundsReduce(slots, id, box) {
     const o = id * SLOT_STRIDE;
     if ((slots[o + S_FLAGS] & F_LEADER) === 0) return;
-    const x = slots[o + S_X], y = slots[o + S_Y], z = slots[o + S_Z];
-    const w = slots[o + S_ADVANCE], h = slots[o + S_HEIGHT];
+    const x = fval(slots[o + S_X]), y = fval(slots[o + S_Y]), z = fval(slots[o + S_Z]);
+    const w = fval(slots[o + S_ADVANCE]), h = fval(slots[o + S_HEIGHT]);
     if (x < box[0]) box[0] = x;
     if (y < box[1]) box[1] = y;
     if (z < box[2]) box[2] = z;
@@ -645,7 +706,7 @@ export function farScatterOracle(slots, byteLength, items, farItems, { colorAt, 
         const tx = Math.min(FAR_SLAB - 1, Math.max(0, Math.trunc(col / cpt)));
         const ty = Math.min(FAR_SLAB - 1, Math.max(0, Math.trunc(row / rpt)));
         const ab = ((slabY + ty) * FAR_TEX + slabX + tx) * 4;
-        const d = densityAt(slots[o + S_GLYPH_ID] | 0) || 0;
+        const d = densityAt(fval(slots[o + S_GLYPH_ID]) | 0) || 0;
         const c = colorAt(id);
         // The kernel linearizes (pow 2.2) BEFORE accumulating — mips then average ink
         // energy, so thin minified text dims physically instead of gamma-crushing.

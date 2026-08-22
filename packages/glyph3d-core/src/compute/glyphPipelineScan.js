@@ -58,7 +58,7 @@ import {
     SLOT_STRIDE, S_ADVANCE, S_ROW, S_COL, S_FLAGS, S_LINE_ADV, S_ORD,
     F_LEADER, F_NEWLINE, F_RENDERED,
     allocSlots, decodeAndResolve, itemForByte, rowsForLine, resolveX, paginate,
-    boundsReduce, deriveStride, normalizeItems,
+    boundsReduce, deriveStride, normalizeItems, fbits, fval,
 } from './glyphPipelineReference.js';
 
 /** Chunk width: bytes folded serially per scan thread. */
@@ -98,7 +98,7 @@ export function scanLeaf(slots, id, wrap, isItemStart) {
     const o = id * SLOT_STRIDE;
     return scanLeafValue(
         (slots[o + S_FLAGS] & F_NEWLINE) !== 0,
-        slots[o + S_ADVANCE],
+        fval(slots[o + S_ADVANCE]),
         (slots[o + S_FLAGS] & F_LEADER) !== 0,
         wrap, isItemStart,
     );
@@ -245,7 +245,7 @@ export function runScanPipeline(bytes, trie, opts = {}, tuning = {}) {
                 const v = lanesFromPrefix(R, cu.wrap);
                 slots[o + S_ROW] = v.row;
                 slots[o + S_COL] = v.col;
-                slots[o + S_LINE_ADV] = v.lineAdv;
+                slots[o + S_LINE_ADV] = fbits(v.lineAdv);
                 slots[o + S_ORD] = v.ord;
                 slots[o + S_FLAGS] = flags | F_RENDERED;
                 ordToByte[items[cu.index].byteStart + v.ord] = id;

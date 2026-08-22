@@ -46,7 +46,7 @@
  * table as explicit [byteStart, byteStart+byteCount) ranges sorted by byteStart, with
  * dead gaps inert. The arena grows with LIVE bytes, not with churn: a restage storm
  * (window crossings, edits) holds the watermark at ~2× the churned range instead of
- * burning the f32-ordinal wall budget on tombstones.
+ * burning the arena's byte budget on tombstones.
  *
  * The miss flow is the arena's one background continuation: after a flush, readMisses →
  * encodeMisses → if the atlas grew, rebuild the shared trie, rebuild the kernels around
@@ -58,16 +58,23 @@
  * real recovery).
  */
 
-import GlyphPipelineKernels from './glyphPipelineKernels.js';
+import GlyphPipelineKernels, { KERNEL_MAX_BYTES } from './glyphPipelineKernels.js';
 
-/** The kernels' f32-ordinal exactness wall: total arena bytes must stay ≤ 2^24
- *  (S_ORD and every count lane are f32 slots). The kernels constructor enforces it;
- *  the arena refuses growth past it BEFORE touching live state. */
-const ORDINAL_EXACT_BYTES = 2 ** 24;
+/** The arena's byte ceiling — the SAME constant the kernels assert, imported rather
+ *  than re-stated, because two copies of a limit is how they drift apart.
+ *
+ *  The u32 lane migration removed the REASON for 2^24 (count lanes no longer lose
+ *  exactness), but raising the number is a separate change with its own hazards and
+ *  its own tests: the vertex path indexes slots in i32 (glyphVertex.js), which halves
+ *  any u32 bound, and nothing yet validates the resulting buffer against the device's
+ *  maxStorageBufferBindingSize. Until those land, the ceiling stays where it was —
+ *  the migration buys the exactness, not the capacity.
+ *
+ *  The per-ITEM bound in stage() is a DIFFERENT rule and still applies — see there. */
+const ORDINAL_EXACT_BYTES = KERNEL_MAX_BYTES;
 import { runPipeline, paginate as refPaginate, boundsReduce as refBoundsReduce, deriveStride, SLOT_STRIDE,
     FAR_ITEM_STRIDE, FI_SLAB_X, FI_SLAB_Y, FI_ROWS_PER_TEXEL, FI_COLS_PER_TEXEL, FI_DIRTY,
-    FAR_TEX, FAR_SLAB,
-} from './glyphPipelineReference.js';
+    FAR_TEX, FAR_SLAB, S_X, S_Y, S_Z, S_ROW, S_COL, S_FLAGS, S_BASE_X, F_LEADER, fval, laneValue} from './glyphPipelineReference.js';
 import FarTextAtlas, { buildFarInkTable } from '../core/FarTextAtlas.js';
 import { buildLiveTrie, encodeMisses } from './liveTrie.js';
 import { loadStats } from '../core/loadStats.js';
@@ -241,9 +248,9 @@ export default class GlyphPipelineArena {
             throw new Error(
                 `GlyphPipelineArena.stage: one item claims ${ordinalUnits.toLocaleString()} ` +
                 `${leaders > 0 ? 'glyphs' : 'bytes (conservative: no leader count supplied)'} — ` +
-                `past the f32-ordinal wall (${ORDINAL_EXACT_BYTES.toLocaleString()}). The count ` +
-                'lanes are item-relative f32, so this item alone would alias ordinals ' +
-                '(u32 ordinal lanes are the lift)',
+                `past the arena's addressable ceiling (${ORDINAL_EXACT_BYTES.toLocaleString()}). ` +
+                'Count lanes are item-relative, so an item is bounded on its own — ' +
+                'and no item can exceed the arena that holds it',
             );
         }
         // EDIT SLACK: capacity > length stages the item with a 0x80 pad (bare
@@ -267,18 +274,29 @@ export default class GlyphPipelineArena {
         const byteStart = this._alloc(bytes.length);
         const end = byteStart + bytes.length;
         if (end > ORDINAL_EXACT_BYTES) {
-            // The kernels' hard wall: slot ordinals are f32 lanes, exact only to 2^24.
+            // The kernels' hard ceiling (KERNEL_MAX_BYTES). Count lanes are u32 now, so
+            // this is no longer an exactness limit — it is the i32 vertex indexing and
+            // the unvalidated device buffer size that keep the number where it is.
             // Undo the allocation (a refusal must not leak the range) and refuse THIS
             // stage loudly (the load path logs it per grid, the rest of the storm
             // continues) instead of attempting a growth the kernels must reject.
-            // Raising the wall = u32 ordinal lanes (kernel surgery); the free-list
-            // keeps the live-byte watermark under it meanwhile.
+            // The free-list keeps the live-byte watermark under the ceiling meanwhile.
             this._insertFree(byteStart, bytes.length);
             const live = this._byteTotal - this._free.reduce((s, r) => s + r.length, 0);
-            throw new Error(`GlyphPipelineArena: staging ${bytes.length}B needs address ${end}B, past the f32-ordinal wall (${ORDINAL_EXACT_BYTES}B) with ${live}B live — this file stays unlaid (u32 ordinal lanes are the lift)`);
+            throw new Error(`GlyphPipelineArena: staging ${bytes.length}B needs address ${end}B, past the arena ceiling (${ORDINAL_EXACT_BYTES}B) with ${live}B live — this file stays unlaid`);
         }
         if (end > this.maxBytes) {
-            this._realloc(Math.min(ORDINAL_EXACT_BYTES, Math.max(this.maxBytes * 2, Math.ceil(end * 1.25))), this.maxItems);
+            // _alloc has ALREADY consumed this range. If growth throws (device OOM,
+            // a limit refusal, the kernels' own ceiling) the exception must not carry
+            // the range away with it — an unowned range poisons the watermark
+            // permanently and every later stage re-enters the same failure. Give it
+            // back, then rethrow: the caller's per-grid refusal path stays recoverable.
+            try {
+                this._realloc(Math.min(ORDINAL_EXACT_BYTES, Math.max(this.maxBytes * 2, Math.ceil(end * 1.25))), this.maxItems);
+            } catch (err) {
+                this._insertFree(byteStart, bytes.length);
+                throw err;
+            }
         }
 
         const item = {
@@ -793,15 +811,24 @@ export default class GlyphPipelineArena {
         for (let id = 0; id < item.byteCount; id++) {
             const b = id * STRIDE;                    // mirror slot (file-relative)
             const g = (item.byteStart + id) * STRIDE; // arena slot
-            if ((ref[b + 9] & 1) === 0) continue;
-            if (gpu[g + 7] !== ref[b + 7] || gpu[g + 8] !== ref[b + 8]) badRows++;
-            for (const l of [4, 5, 6, 10]) {
+            // NAMED lanes, not literals. These were hardcoded 9 / 7,8 / [4,5,6,10] —
+            // every one exactly +1 off, left behind when the codepoint lane was
+            // dropped (13 -> 12 lanes). So this check has been reading S_BASE_X as
+            // the leader flag and comparing the wrong lanes ever since. Constants
+            // cannot drift that way.
+            if ((ref[b + S_FLAGS] & F_LEADER) === 0) continue;
+            if (gpu[g + S_ROW] !== ref[b + S_ROW] || gpu[g + S_COL] !== ref[b + S_COL]) badRows++;
+            for (const l of [S_X, S_Y, S_Z, S_BASE_X]) {
+                // Float lanes are bitcast in the u32 buffer — DECODE before any
+                // magnitude-scaled compare, or the epsilon is applied to bit patterns.
+                // (The count lanes above stay raw: identical bits IS identical value.)
+                const gv = laneValue(gpu, g + l), rv = laneValue(ref, b + l);
                 // Magnitude-scaled: a foldless line prefix is an f32 sum whose valid
                 // groupings differ by ~|x|·5e-5 — absolute eps at world scale would
                 // flag legitimate f32 grouping on any long line.
-                const d = Math.abs(gpu[g + l] - ref[b + l]);
+                const d = Math.abs(gv - rv);
                 if (d > worst) worst = d;
-                if (d > eps + Math.abs(ref[b + l]) * 5e-5) badPos++;
+                if (d > eps + Math.abs(rv) * 5e-5) badPos++;
             }
         }
         return { ok: badRows === 0 && badPos === 0, worst, badRows, badPos };
@@ -825,7 +852,7 @@ export default class GlyphPipelineArena {
             + `${nextBytes}B/${nextItems} items `
             + `(${this._liveCount} live/${this._items.length} staged, ${this._byteTotal}B watermark)`);
         // TRANSACTIONAL: build the replacement BEFORE destroying the live kernels. A
-        // construction failure here (the f32-ordinal wall, device OOM) must leave the
+        // construction failure here (the addressable ceiling, device OOM) must leave the
         // arena exactly as it was — the first version disposed first, and a throw then
         // stranded a destroyed slots buffer in every bind group (a permanent
         // per-frame Dawn error storm) with maxBytes lying about real capacity.

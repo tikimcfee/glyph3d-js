@@ -33,7 +33,7 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { launchBrowser, openApp } from './itest/driver.mjs';
+import { launchGpuBrowser, openApp } from './itest/driver.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -175,7 +175,7 @@ const probe = (opts) => `(async (o) => {
   } catch (e) { return { fatal: 'offscreen renderer init failed: ' + (e && e.message || e) }; }
   R.renderer = store.renderer.constructor.name;
 
-  const { SLOT_STRIDE, S_GLYPH_ID, S_ADVANCE, S_HEIGHT, S_X, S_Y, S_Z, S_ROW, S_COL, S_FLAGS, S_BASE_X, F_LEADER } = refMod;
+  const { SLOT_STRIDE, S_GLYPH_ID, S_ADVANCE, S_HEIGHT, S_X, S_Y, S_Z, S_ROW, S_COL, S_FLAGS, S_BASE_X, F_LEADER, fval } = refMod;
   const enc = new TextEncoder();
   const LINE_H = CELL_H;
 
@@ -196,14 +196,18 @@ const probe = (opts) => `(async (o) => {
       if (gpu[b + S_COL] !== ref.slots[b + S_COL]) { fail('slot ' + id + ' COL ' + gpu[b + S_COL] + ' != ' + ref.slots[b + S_COL]); if (firstBad < 0) firstBad = id; }
       if (gpu[b + S_ADVANCE] !== ref.slots[b + S_ADVANCE] || gpu[b + S_HEIGHT] !== ref.slots[b + S_HEIGHT]) { fail('slot ' + id + ' metrics mismatch'); if (firstBad < 0) firstBad = id; }
       for (const [lane2, name] of [[S_X, 'x'], [S_Y, 'y'], [S_Z, 'z'], [S_BASE_X, 'baseX']]) {
-        const d = Math.abs(gpu[b + lane2] - ref.slots[b + lane2]);
+        // Float lanes are bitcast in the u32 slot buffer: DECODE both sides before a
+        // magnitude-scaled compare. On bit patterns the same 5e-5 gate is ~1.3% on
+        // values — the net would still be here, with holes in it.
+        const gv = fval(gpu[b + lane2]), rv = fval(ref.slots[b + lane2]);
+        const d = Math.abs(gv - rv);
         if (d > L.maxDelta) L.maxDelta = d;
         // The scan is deterministic, so the only float slack is representation, not
         // schedule: fold > 0 lanes re-sum in the oracle's own f32 order (expected
         // bit-exact — watch maxDelta report 0), and foldless lanes carry serial-f32
         // rounding bias that scales with magnitude. row/col/ord stay EXACT.
-        const tol = o.eps + Math.abs(ref.slots[b + lane2]) * 5e-5;
-        if (d > tol) { fail('slot ' + id + ' ' + name + ' delta ' + d.toExponential(2) + ' (gpu ' + gpu[b + lane2] + ' vs ref ' + ref.slots[b + lane2] + ')'); if (firstBad < 0) firstBad = id; }
+        const tol = o.eps + Math.abs(rv) * 5e-5;
+        if (d > tol) { fail('slot ' + id + ' ' + name + ' delta ' + d.toExponential(2) + ' (gpu ' + gv + ' vs ref ' + rv + ')'); if (firstBad < 0) firstBad = id; }
         L.posChecked++;
       }
     }
@@ -385,8 +389,13 @@ const probe = (opts) => `(async (o) => {
 })(${JSON.stringify(opts)})`;
 
 // ---- drive ----
-const browser = await launchBrowser({ headed: HEADED });
-const app = await openApp(browser, { url: URL_, wait: WAIT });
+// Platform-resolved: this gate dispatches REAL COMPUTE, and headless on darwin is
+// SwiftShader — same results, ~25x the wall clock. Correctness is unaffected;
+// patience is. --headed still forces it.
+const browser = await launchGpuBrowser({ headed: HEADED || null });
+// session:'off' — a gate needs the atlas, not the operator's saved field.
+// Restoring it is pure cost and pure risk (measured: 5.5s of an 8s run).
+const app = await openApp(browser, { url: URL_, session: 'off', wait: WAIT });
 let failed = 0;
 try {
   if (!app.booted) { console.error('app did not boot'); process.exit(1); }

@@ -724,8 +724,15 @@ function _fieldUniform(initial, read) {
  * attaches. Read-only: vertex-stage storage is core WebGPU only as read-only.
  */
 function _fieldSlots() {
-    const placeholder = new StorageInstancedBufferAttribute(new Float32Array(4), 1);
-    return registerByteSlotsNode(storage(placeholder, 'float', 1).toReadOnly().onObjectUpdate(({ object }, self) => {
+    // 'uint', matching the slot buffer's own type (glyphPipelineKernels: the
+    // slots array is instancedArray(..., 'uint')). This declaration is what the
+    // shader reads the memory AS — WGSL will bind the same bytes as array<f32>
+    // with no validation error, so a stale 'float' here silently reinterprets
+    // every count lane as a denormal (row 5 -> 0x5 -> ~7e-45 -> 0) and makes
+    // glyphVertex's .toFloat() a no-op. Near text is unaffected; the far-LOD UV
+    // collapses to texel (0,0) for every glyph. Nothing errors.
+    const placeholder = new StorageInstancedBufferAttribute(new Uint32Array(4), 1);
+    return registerByteSlotsNode(storage(placeholder, 'uint', 1).toReadOnly().onObjectUpdate(({ object }, self) => {
         const f = object && object.userData && object.userData.glyphField;
         return (f && f._byteSlots) || self.value;
     }));

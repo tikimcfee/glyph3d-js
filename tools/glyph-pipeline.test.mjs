@@ -28,8 +28,8 @@ import { buildGlyphTrie, trieLookup, BLOCK_INDEX_LENGTH } from '../packages/glyp
 import {
   runPipeline, decodeAndResolve, paginate, boundsReduce, allocSlots, rowsForLine,
   deriveStride, SLOT_STRIDE, S_GLYPH_ID, S_X, S_Y, S_Z, S_ROW, S_COL,
-  S_ADVANCE, S_HEIGHT, S_FLAGS, S_BASE_X, F_LEADER, NEWLINE,
-} from '../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
+  S_ADVANCE, S_HEIGHT, S_FLAGS, S_BASE_X, S_ORD, F_LEADER, NEWLINE, fval,
+  FLOAT_LANES, COUNT_LANES } from '../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
 
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) pass++; else { fail++; console.log(`  ✗ ${m}`); } };
@@ -142,7 +142,7 @@ for (const { name, bytes } of CORPORA) {
   const gotGids = [], gotOffsets = [];
   for (let id = 0; id < bytes.length; id++) {
     if ((slots[id * SLOT_STRIDE + S_FLAGS] & F_LEADER) !== 0) {
-      gotGids.push(slots[id * SLOT_STRIDE + S_GLYPH_ID]); gotOffsets.push(id);
+      gotGids.push(fval(slots[id * SLOT_STRIDE + S_GLYPH_ID])); gotOffsets.push(id);
     }
   }
   ok(gotGids.length === wantCps.length, `${name}: leader count ${gotGids.length} vs ${wantCps.length}`);
@@ -175,7 +175,7 @@ function sequentialFold(bytes, slots, wrap = 0) {
     col[id] = c;
     xs[id] = x;
     if (bytes[id] === NEWLINE) { rowBase += rowsForLine(c, wrap); c = 0; x = 0; }
-    else { x += slots[o + S_ADVANCE]; c += 1; }
+    else { x += fval(slots[o + S_ADVANCE]); c += 1; }
   }
   return { row, col, xs };
 }
@@ -194,7 +194,7 @@ for (const wrapWidth of [0, 24, 200]) {
       if ((run.slots[o + S_FLAGS] & F_LEADER) === 0) continue;
       if (run.slots[o + S_ROW] !== want.row[id]) rowBad++;
       if (run.slots[o + S_COL] !== want.col[id]) colBad++;
-      const dx = Math.abs(run.slots[o + S_X] - want.xs[id]);
+      const dx = Math.abs(fval(run.slots[o + S_X]) - want.xs[id]);
       xWorst = Math.max(xWorst, dx);
       if (dx > ftol(want.xs[id])) xBad++;
     }
@@ -222,10 +222,10 @@ for (const wrapWidth of [0, 24, 200]) {
     // summation's systematic rounding bias (~1e-3 at 40k constant increments; adjacent
     // spacing stays exact), while the old walk's fuse capped x at 4096 × advance —
     // a 90% relative error at the tail this lane exists to keep out.
-    if (Math.abs(flat.slots[o + S_X] - x64) > Math.max(1e-3, Math.abs(x64) * 5e-3)) flatXBad++;
-    maxX = Math.max(maxX, flat.slots[o + S_X]);
-    wrappedMaxX = Math.max(wrappedMaxX, wrapped.slots[o + S_X]);
-    x64 += flat.slots[o + S_ADVANCE];
+    if (Math.abs(fval(flat.slots[o + S_X]) - x64) > Math.max(1e-3, Math.abs(x64) * 5e-3)) flatXBad++;
+    maxX = Math.max(maxX, fval(flat.slots[o + S_X]));
+    wrappedMaxX = Math.max(wrappedMaxX, fval(wrapped.slots[o + S_X]));
+    x64 += fval(flat.slots[o + S_ADVANCE]);
   }
   ok(flatRows === 0, `single-line unwrapped: ${flatRows} rows (expected 1 absurd row)`);
   ok(wrappedRows > 190, `single-line wrapped: only ${wrappedRows} rows`);
@@ -254,7 +254,7 @@ for (const wrapWidth of [0, 24, 200]) {
   for (let id = 0; id < bytes.length; id++) {
     const o = id * SLOT_STRIDE;
     if ((a.slots[o + S_FLAGS] & F_LEADER) === 0) continue;
-    xs.add(Math.round(a.slots[o + S_X])); zs.add(Math.round(a.slots[o + S_Z]));
+    xs.add(Math.round(fval(a.slots[o + S_X]))); zs.add(Math.round(fval(a.slots[o + S_Z])));
   }
   ok(zs.size > 1, `paginate: only ${zs.size} depth plane(s) — the fan never engaged`);
   ok(xs.size > 4, `paginate: only ${xs.size} distinct x — vacuous`);
@@ -270,7 +270,7 @@ for (const wrapWidth of [0, 24, 200]) {
     const yPage = Math.floor(a.slots[o + S_ROW] / page.pageRows);
     if (yPage % page.pagesWide !== 1) continue;   // fan column 1: offset = stride × 1
     strideChecked++;
-    if (Math.abs((a.slots[o + S_X] - a.slots[o + S_BASE_X]) - expectStride) > 1e-3) strideBad++;
+    if (Math.abs((fval(a.slots[o + S_X]) - fval(a.slots[o + S_BASE_X])) - expectStride) > 1e-3) strideBad++;
   }
   ok(strideChecked > 50 && strideBad === 0,
     `derived stride: ${strideBad} of ${strideChecked} column-1 glyphs off the maxRowExtent+gap law`);
@@ -292,8 +292,8 @@ for (const { name, bytes } of CORPORA) {
     for (let id = 0; id < bytes.length; id++) {
       const o = id * SLOT_STRIDE;
       if ((run.slots[o + S_FLAGS] & F_LEADER) === 0) continue;
-      const x = run.slots[o + S_X], y = run.slots[o + S_Y], z = run.slots[o + S_Z];
-      const w = run.slots[o + S_ADVANCE], h = run.slots[o + S_HEIGHT];
+      const x = fval(run.slots[o + S_X]), y = fval(run.slots[o + S_Y]), z = fval(run.slots[o + S_Z]);
+      const w = fval(run.slots[o + S_ADVANCE]), h = fval(run.slots[o + S_HEIGHT]);
       if (x < b.min.x || y < b.min.y || z < b.min.z
        || x + w > b.max.x + 1e-9 || y + h > b.max.y + 1e-9 || z > b.max.z) outside++;
     }
@@ -341,7 +341,9 @@ for (const { name, bytes } of CORPORA) {
       if (base.slots[gm + S_ROW] !== single.slots[gs + S_ROW]
        || base.slots[gm + S_COL] !== single.slots[gs + S_COL]) driftBad++;
       for (const l of [S_X, S_Y, S_Z]) {
-        if (Math.abs(base.slots[gm + l] - single.slots[gs + l]) > ftol(single.slots[gs + l])) posBad++;
+        // Decode both sides — float lanes are bitcast in the u32 buffer.
+        const bv = fval(base.slots[gm + l]), sv = fval(single.slots[gs + l]);
+        if (Math.abs(bv - sv) > ftol(sv)) posBad++;
       }
     }
   }
@@ -379,8 +381,30 @@ for (const { name, bytes } of CORPORA) {
   ok(run.misses.every((cp) => cp === 0x1F4A9), 'missing: reported the right codepoint');
   // 'c' must sit one full cell past the un-encoded emoji's advance, not on top of it.
   const cIdx = bytes.indexOf(0x63);   // 'c' — ASCII, so byte == codepoint
-  ok(run.slots[cIdx * SLOT_STRIDE + S_X] > CELL_W * 2.5,
+  ok(fval(run.slots[cIdx * SLOT_STRIDE + S_X]) > CELL_W * 2.5,
      'missing: an un-encoded glyph still occupies its advance');
+}
+
+
+// ── lane kinds: the table must stay TOTAL ────────────────────────────────────
+// Every drift bug in this pipeline has been a copy of the float-lane set that
+// someone forgot to update: verifyItem's hardcoded [4,5,6,10] went stale by one
+// when the codepoint lane fell (13 -> 12 lanes), and three tolerance comparators
+// silently measured bit patterns after the u32 migration. The defence is that the
+// shared table is TOTAL and DISJOINT — add a lane without classifying it and this
+// fails, instead of some consumer quietly reading it as the wrong kind.
+{
+  const seen = new Set();
+  let overlap = 0, missing = [];
+  for (const l of FLOAT_LANES) { if (seen.has(l)) overlap++; seen.add(l); }
+  for (const l of COUNT_LANES) { if (seen.has(l)) overlap++; seen.add(l); }
+  for (let l = 0; l < SLOT_STRIDE; l++) if (!seen.has(l)) missing.push(l);
+  ok(overlap === 0, `no lane is both a count and a float (${overlap} overlapping)`);
+  ok(missing.length === 0, `every lane 0..${SLOT_STRIDE - 1} is classified (unclassified: [${missing}])`);
+  ok(seen.size === SLOT_STRIDE, `the table covers exactly SLOT_STRIDE lanes (${seen.size} vs ${SLOT_STRIDE})`);
+  // S_GLYPH_ID is deliberately a FLOAT lane: it is copied from the trie's f32 blocks.
+  ok(FLOAT_LANES.has(S_GLYPH_ID), 'S_GLYPH_ID is classified as a float carrier (trie-sourced)');
+  ok(COUNT_LANES.has(S_ORD), 'S_ORD is a count lane — the exactness the migration bought');
 }
 
 console.log(`\n${fail === 0 ? '✓' : '✗'} glyph-pipeline: ${pass} passed, ${fail} failed`);

@@ -26,7 +26,7 @@ import {
     positionLocal, instanceIndex, storage,
     vec2, vec3, vec4, float, int, ivec2,
     modelViewMatrix, cameraProjectionMatrix,
-    If, cross,
+    If, cross, bitcast, uint,
 } from 'three/tsl';
 
 import { SLOT_STRIDE, S_GLYPH_ID, S_ADVANCE, S_HEIGHT, S_X, S_ROW, S_COL } from '../compute/glyphPipelineReference.js';
@@ -202,14 +202,26 @@ export function buildGlyphVertexTransform({ glyphMapTex, glyphMapWidth, renderMo
     // to a point: invisible, unpickable.
     let iPos, iSize, iGlyphId, iRowCol;
     if (byteSlots) {
-        const base = int(instanceIndex).mul(int(SLOT_STRIDE));
-        iPos     = vec4(byteSlots.element(base.add(int(S_X))), byteSlots.element(base.add(int(S_X + 1))), byteSlots.element(base.add(int(S_X + 2))), float(0));
-        iSize    = vec2(byteSlots.element(base.add(int(S_ADVANCE))), byteSlots.element(base.add(int(S_HEIGHT))));
-        iGlyphId = byteSlots.element(base.add(int(S_GLYPH_ID)));
+        // UINT, matching the kernels (id.mul(uint(SLOT_STRIDE)) throughout). This used
+        // to convert a natively-unsigned instanceIndex DOWN to i32, which wrapped at
+        // 2^31/SLOT_STRIDE — half the addressable range, and silently: past that point
+        // every glyph reads a negative index and renders garbage geometry with no
+        // error. The arena's ceiling is only meaningful if the vertex path can address
+        // what the arena can hold.
+        const base = instanceIndex.mul(uint(SLOT_STRIDE));
+        // The slot buffer is u32: count lanes are stored natively, float lanes are
+        // bitcast. S_X + 1 / S_X + 2 are the Y and Z lanes addressed POSITIONALLY —
+        // they are float lanes despite the constant reading S_X, and a search for
+        // S_Y / S_Z will not find them.
+        const fl = (l) => bitcast(byteSlots.element(base.add(int(l))), 'float');
+        iPos     = vec4(fl(S_X), fl(S_X + 1), fl(S_X + 2), float(0));
+        iSize    = vec2(fl(S_ADVANCE), fl(S_HEIGHT));
+        iGlyphId = fl(S_GLYPH_ID);   // DEFERRED: still a trie float
         // The glyph's exact grid position (apply's integer lanes) — the fragment's
         // far-texture UV rides this. Non-byte fields have no grid truth → (0,0),
         // which their hasSlab=0 far-group texel turns back into the impostor path.
-        iRowCol  = vec2(byteSlots.element(base.add(int(S_ROW))), byteSlots.element(base.add(int(S_COL))));
+        // Count lanes: native u32 now, so they convert rather than reinterpret.
+        iRowCol  = vec2(byteSlots.element(base.add(int(S_ROW))).toFloat(), byteSlots.element(base.add(int(S_COL))).toFloat());
     } else {
         iPos     = attribute('instancePosition', 'vec4');
         iSize    = attribute('instanceSize',     'vec2');

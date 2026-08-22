@@ -319,7 +319,7 @@ export class MegaGlyphField {
         // block — glyphs beyond the pick space render but never pick — and say so
         // loudly ONCE. The pick target carries 32-bit IDs (RGBA8, alpha = bits
         // 24..31), bounded at 2^31−1 by the shaders' i32 math — 128× the arena's
-        // f32-ordinal wall, so the ORDINAL wall is the binding constraint again.
+        // arena ceiling, so the ARENA ceiling is the binding constraint again.
         if (cap > 0x7FFFFFFF) {
             if (!this._pickCeilingNoted) {
                 this._pickCeilingNoted = true;

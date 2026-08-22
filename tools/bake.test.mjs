@@ -21,8 +21,7 @@
 
 import { buildGlyphTrie } from '../packages/glyph3d-core/src/compute/GlyphTrie.js';
 import {
-  runPipeline, SLOT_STRIDE, S_ROW, S_COL, S_ORD, S_LINE_ADV, S_FLAGS, F_LEADER,
-} from '../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
+  runPipeline, SLOT_STRIDE, S_ROW, S_COL, S_ORD, S_LINE_ADV, S_FLAGS, F_LEADER, fval} from '../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
 import { scanIdentity, lanesFromPrefix } from '../packages/glyph3d-core/src/compute/glyphPipelineScan.js';
 import {
   bakeFile, foldBytes, prefixAt, rowsUnderWrap, checkpointAt, CK_STRIDE,
@@ -161,7 +160,7 @@ for (const [name, text] of CORPORA) {
     if (lanes.row !== oracle.slots[o + S_ROW]) bad++;
     if (lanes.col !== oracle.slots[o + S_COL]) bad++;
     if (lanes.ord !== oracle.slots[o + S_ORD]) bad++;
-    if (Math.abs(lanes.lineAdv - oracle.slots[o + S_LINE_ADV]) / Math.max(1, Math.abs(lanes.lineAdv)) > 1e-4) bad++;
+    if (Math.abs(lanes.lineAdv - fval(oracle.slots[o + S_LINE_ADV])) / Math.max(1, Math.abs(lanes.lineAdv)) > 1e-4) bad++;
   }
   ok(bad === 0, `${name}: ${bad} lane mismatches over ${checked} sampled leaders`);
 }
@@ -319,7 +318,10 @@ for (const [name, text] of CORPORA) {
       if ((fullSlots[o + S_FLAGS] & F_LEADER) === 0) continue;
       for (const l of EXACT) if (winSlots[o + l] !== fullSlots[o + l]) bad = { id, l, why: 'exact lane' };
       for (const l of [S_X, S_Y, S_Z, S_BASE_X, S_LINE_ADV]) {
-        const a = fullSlots[o + l], b = winSlots[o + l];
+        // Float lanes are bitcast in the u32 slot buffer — decode before any
+        // TOLERANCE compare, or the epsilon is applied to bit patterns. (The
+        // EXACT lanes above stay raw: identical bits IS identical value.)
+        const a = fval(fullSlots[o + l]), b = fval(winSlots[o + l]);
         if (fold > 0 && l !== S_LINE_ADV) {
           if (a !== b) bad = { id, l, why: 'fold>0 float lane must be bit-exact' };
         } else if (Math.abs(a - b) / Math.max(1, Math.abs(a)) > 1e-4) {

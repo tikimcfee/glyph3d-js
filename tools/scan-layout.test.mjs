@@ -21,8 +21,7 @@
 import { buildGlyphTrie } from '../packages/glyph3d-core/src/compute/GlyphTrie.js';
 import {
   runPipeline, SLOT_STRIDE, S_GLYPH_ID, S_ADVANCE, S_HEIGHT,
-  S_X, S_Y, S_Z, S_ROW, S_COL, S_FLAGS, S_BASE_X, S_LINE_ADV, S_ORD, F_LEADER,
-} from '../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
+  S_X, S_Y, S_Z, S_ROW, S_COL, S_FLAGS, S_BASE_X, S_LINE_ADV, S_ORD, F_LEADER, fval} from '../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
 import {
   runScanPipeline, scanIdentity, scanLeaf, scanCombine,
 } from '../packages/glyph3d-core/src/compute/glyphPipelineScan.js';
@@ -90,7 +89,11 @@ function diffSlots(name, refSlots, gotSlots, n, foldPerByte) {
     for (const l of EXACT) if (gotSlots[o + l] !== refSlots[o + l]) bad = { id, l, why: 'exact lane' };
     const folded = foldPerByte(id) > 0;
     for (const l of [S_X, S_Y, S_Z, S_BASE_X, S_LINE_ADV]) {
-      const a = refSlots[o + l], b = gotSlots[o + l];
+      // DECODE the float lanes: they are bitcast in the u32 slot buffer, and a
+      // relative epsilon on bit patterns is ~100x looser than on values (the
+      // exponent field dominates the difference). The bit-exact branch below is
+      // fine on raw bits — identical bits IS identical value.
+      const a = fval(refSlots[o + l]), b = fval(gotSlots[o + l]);
       if (folded && l !== S_LINE_ADV) {
         if (a !== b) bad = { id, l, why: 'fold>0 float lane must be bit-exact' };
       } else {

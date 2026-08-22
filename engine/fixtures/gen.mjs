@@ -47,7 +47,7 @@
 import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { runPipeline } from '../../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
+import { runPipeline, SLOT_STRIDE, FLOAT_LANES, fval } from '../../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
 import { buildGlyphTrie } from '../../packages/glyph3d-core/src/compute/GlyphTrie.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -186,6 +186,20 @@ const CASES = [
     })(),
 ];
 
+
+// The slot buffer is u32: COUNT lanes (S_ROW/S_COL/S_FLAGS/S_ORD) are stored
+// natively, FLOAT lanes are bitcast. The corpus carries VALUES, so each lane is
+// decoded by kind before it is written — otherwise a float lane serializes its
+// BIT PATTERN as an f64 value and every fixture shifts while nothing semantic
+// moved. S_GLYPH_ID is deferred (still a trie float), so it decodes as a float.
+// FLOAT_LANES is imported — the lane kinds live in ONE place (the oracle).
+function writeSlotValues(w, slots) {
+    for (let i = 0; i < slots.length; i++) {
+        const lane = i % SLOT_STRIDE;
+        w.f64(FLOAT_LANES.has(lane) ? fval(slots[i]) : slots[i]);
+    }
+}
+
 // ── Binary writer ───────────────────────────────────────────────────────────
 class Writer {
     constructor() { this.chunks = []; this.len = 0; }
@@ -240,7 +254,7 @@ for (const c of CASES) {
     w.u32(r.leaders);
     w.u32(r.misses.length); w.u32array(r.misses);
     w.u32array(r.ordToByte);
-    w.f64array(r.slots);
+    writeSlotValues(w, r.slots);
     for (const b of r.itemBounds) for (const v of boundsRow(b)) w.f64(v);
     for (const v of boundsRow(r.bounds)) w.f64(v);
 
