@@ -43,6 +43,22 @@ function validate(s) {
     for (const id of s.identities) {
         if (id.carrier !== 'u32') errs.push(`identity ${id.name}: carrier is '${id.carrier}', identities must be u32`);
     }
+    // THE TRUNCATION INVARIANT. The record format is defined as a prefix of each
+    // buffer, which is what makes emitting one a shortening rather than a gather.
+    // That only holds if every render-read lane sorts BEFORE every lane that is not
+    // read. If someone adds a render-read lane at the tail, this throws rather than
+    // silently turning the record into a repack.
+    for (const [bufName, buf] of Object.entries(s.buffers)) {
+        const sorted = [...buf.lanes].sort((a, b) => a.index - b.index);
+        let seenUnread = null;
+        for (const lane of sorted) {
+            if (!lane.read_by_vertex) { seenUnread ??= lane.name; }
+            else if (seenUnread) {
+                errs.push(`${bufName}.${lane.name} is read by the vertex path but sits after `
+                    + `${seenUnread}, which is not — the record format would stop being a truncation`);
+            }
+        }
+    }
     if (errs.length) throw new Error('schema invalid:\n  ' + errs.join('\n  '));
     return s;
 }
@@ -60,12 +76,21 @@ const banner = (cmt) => [
 
 // ── Mojo ────────────────────────────────────────────────────────────────────
 const m = schema.buffers.measures, c = schema.buffers.counts;
+// DERIVED, never hand-written: the record is the render-read prefix of each buffer.
+const recM = m.lanes.filter(l => l.read_by_vertex).length;
+const recC = c.lanes.filter(l => l.read_by_vertex).length;
 const mojo = [
     banner('#'), '',
     `comptime MEASURE_STRIDE = ${m.stride}`,
     ...m.lanes.map(l => `comptime M_${l.name} = ${l.index}`), '',
     `comptime COUNT_STRIDE = ${c.stride}`,
     ...c.lanes.map(l => `comptime C_${l.name} = ${l.index}`), '',
+    '# The RECORD format: the render-read prefix of each buffer. Emitting a record',
+    '# is a truncation, not a repack — which is why the scratch pool can be reused',
+    '# and the resident cost stops scaling with the corpus.',
+    `comptime RECORD_MEASURE_STRIDE = ${recM}`,
+    `comptime RECORD_COUNT_STRIDE = ${recC}`,
+    `comptime RECORD_BYTES = ${recM * 4 + recC * 4}`, '',
     '',
     'def measure_lane_name(lane: Int) -> String:',
     '    """Lane name for diagnostics — runtime lookup (comptime lists cannot materialize)."""',
@@ -85,6 +110,10 @@ const js = [
     ...m.lanes.map(l => `export const M_${l.name} = ${l.index};`), '',
     `export const COUNT_STRIDE = ${c.stride};`,
     ...c.lanes.map(l => `export const C_${l.name} = ${l.index};`), '',
+    `/** The RECORD format: the render-read prefix of each buffer (a truncation). */`,
+    `export const RECORD_MEASURE_STRIDE = ${recM};`,
+    `export const RECORD_COUNT_STRIDE = ${recC};`,
+    `export const RECORD_BYTES = ${recM * 4 + recC * 4};`, '',
     `/** Lanes the vertex path reads, in each buffer. */`,
     `export const MEASURE_VERTEX_LANES = Object.freeze([${m.lanes.filter(l => l.read_by_vertex).map(l => `M_${l.name}`).join(', ')}]);`,
     `export const COUNT_VERTEX_LANES = Object.freeze([${c.lanes.filter(l => l.read_by_vertex).map(l => `C_${l.name}`).join(', ')}]);`,
@@ -95,6 +124,7 @@ const js = [
 ].join('\n');
 writeFileSync(join(root, 'packages/glyph3d-core/src/compute/glyphSchema.js'), js);
 
-console.log(`schema ok — measures ${m.stride} lanes, counts ${c.stride} lanes`);
+console.log(`schema ok — measures ${m.stride} lanes, counts ${c.stride} lanes;`
+    + ` record = ${recM}+${recC} lanes, ${recM * 4 + recC * 4} B/glyph (vs ${(m.stride + c.stride) * 4} B/source byte)`);
 console.log('  wrote engine/glyph_schema.mojo');
 console.log('  wrote packages/glyph3d-core/src/compute/glyphSchema.js');

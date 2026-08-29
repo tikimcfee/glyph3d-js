@@ -22,6 +22,11 @@ export const C_COL = 1;
 export const C_FLAGS = 2;
 export const C_ORD = 3;
 
+/** The RECORD format: the render-read prefix of each buffer (a truncation). */
+export const RECORD_MEASURE_STRIDE = 6;
+export const RECORD_COUNT_STRIDE = 2;
+export const RECORD_BYTES = 32;
+
 /** Lanes the vertex path reads, in each buffer. */
 export const MEASURE_VERTEX_LANES = Object.freeze([M_X, M_Y, M_Z, M_ADVANCE, M_HEIGHT, M_GLYPH_ID]);
 export const COUNT_VERTEX_LANES = Object.freeze([C_ROW, C_COL]);

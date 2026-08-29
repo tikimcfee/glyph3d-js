@@ -22,6 +22,13 @@ comptime C_COL = 1
 comptime C_FLAGS = 2
 comptime C_ORD = 3
 
+# The RECORD format: the render-read prefix of each buffer. Emitting a record
+# is a truncation, not a repack — which is why the scratch pool can be reused
+# and the resident cost stops scaling with the corpus.
+comptime RECORD_MEASURE_STRIDE = 6
+comptime RECORD_COUNT_STRIDE = 2
+comptime RECORD_BYTES = 32
+
 
 def measure_lane_name(lane: Int) -> String:
     """Lane name for diagnostics — runtime lookup (comptime lists cannot materialize)."""

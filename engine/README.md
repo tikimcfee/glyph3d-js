@@ -35,6 +35,32 @@ count cannot land in the measures buffer by accident because it is a different a
 the classification is structural, not advisory. Render-read lanes come first in both
 buffers and fold scratch is at the tail, so the record format is a truncation.
 
+### The record format — a truncation, not a repack
+
+```
+slots    48 B per SOURCE BYTE, corpus lifetime   (measures 8 + counts 4)
+record   32 B per RENDERED GLYPH                 (measures 6 + counts 2)
+```
+
+`RECORD_MEASURE_STRIDE` / `RECORD_COUNT_STRIDE` are **derived** from which lanes the
+vertex path reads — never hand-written. Because render-read lanes sort first in both
+buffers, emitting a record copies a contiguous prefix; the generator refuses a schema
+where a render-read lane sorts after an unread one, so the truncation cannot quietly
+become a gather.
+
+The tail is fold scratch: `BASE_X`, `LINE_ADV`, `ORD` are intermediates the layout
+pass needs while computing and nothing needs afterward. Holding them at corpus
+lifetime is paying corpus-scale memory for job-scale temporaries — on every byte,
+including every space and newline.
+
+`conformance_record.mojo` proves both halves, and both are mutation-tested:
+its truncation check is bit-exact against the source prefix, and laying the corpus
+**item-by-item through a scratch pool** produces byte-identical records to laying it
+whole. That second one is the claim the decoupling rests on: corpus size stops
+determining arena size, and a streaming edit becomes a range re-run rather than a
+reload. (Resuming *mid-item* needs the bake's `prefix_at` checkpoints, which already
+work and are conformance-proven — that is the next step, not this one.)
+
 `GLYPH_ID` is the one identity sitting in the measures buffer. It is there only because
 it is copied verbatim from the trie's f32 blocks, so it cannot move until the trie
 format does. That exception is deliberately visible rather than hidden in a comment.
