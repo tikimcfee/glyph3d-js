@@ -170,6 +170,15 @@ substrate), read the code and the agent memory rather than trusting a prose snap
   forwarders, no dual code paths, no backward-compat flags.
 - **Command-bus-native.** A missing action means a missing verb — add it rather than
   reaching around the bus.
+- **A green must be earned, not structural.** Before trusting a passing check, ask
+  what would have to break for it to fail — then *break it* and watch it fail. Three
+  separate times this repo shipped a test that could not fail: a gate asserting on
+  float noise, a ceiling constant no test protected (reverting it left 48 files
+  green), and a fixture checksum that compared bytes guaranteed identical before the
+  command ran. Every one was caught by execution; not one was caught by inspection,
+  and in each case the reasoning had already concluded the test was fine. A pass is a
+  claim about a counterfactual, so test the counterfactual. Mutation is the part that
+  is not optional.
 - **Fail loud at substrate seams.** Values handed to browser/GPU APIs (device limits,
   descriptors) are validated at the boundary, and any fallback path logs its true
   cause plus the exact request it degraded from — a silent fallback re-emits an app
