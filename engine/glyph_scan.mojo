@@ -17,6 +17,7 @@
 #
 # Mirrors (never diverge): packages/glyph3d-core/src/compute/glyphPipelineScan.js
 
+from std.collections.span import Span
 from std.memory import unsafe_memset_zero
 from std.runtime.asyncrt import TaskGroup, parallelism_level
 from glyph_pipeline import (
@@ -231,8 +232,8 @@ async def _resolve_x_shard[
         resolve_x(measures, counts, id, item, ord_to_byte, scalars, scalar_base)
 
 
-def run_scan_pipeline(
-    bytes: List[UInt8],
+def run_scan_pipeline[o: ImmOrigin](
+    bytes: Span[UInt8, o],
     trie: Trie,
     items: List[Item],
     chunk_size: Int,

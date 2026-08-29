@@ -19,6 +19,7 @@
 # arena size — which is a different kind of win from any multiplier on the old
 # form, and it is what makes streaming edits a range re-run rather than a reload.
 
+from std.collections.span import Span
 from glyph_schema import (
     MEASURE_STRIDE, COUNT_STRIDE,
     RECORD_MEASURE_STRIDE, RECORD_COUNT_STRIDE, RECORD_BYTES,
@@ -82,8 +83,8 @@ def compact(
         out.glyphs += 1
 
 
-def run_streaming(
-    bytes: List[UInt8], trie: Trie, items: List[Item], chunk_bytes: Int
+def run_streaming[o: ImmOrigin](
+    bytes: Span[UInt8, o], trie: Trie, items: List[Item], chunk_bytes: Int
 ) raises -> RecordSet:
     """The decoupling, demonstrated: lay one item at a time through a scratch pool
     that is never larger than the biggest item, and keep only records.
@@ -119,9 +120,8 @@ def run_streaming(
         sub.page_line_height = it.page_line_height
         one.append(sub^)
 
-        var slice = List[UInt8](capacity=span)
-        for b in range(span):
-            slice.append(bytes[it.byte_start + b])
+        # ZERO COPY: a view into the caller's buffer, not a copy of it.
+        var slice = bytes[it.byte_start : it.byte_start + span]
 
         # The scratch: allocated per job, dropped at the end of this iteration.
         var r = run_pipeline(slice, trie, one)
@@ -155,7 +155,7 @@ from glyph_pipeline import (
 )
 
 
-def is_line_start(bytes: List[UInt8], at: Int) -> Bool:
+def is_line_start[o: ImmOrigin](bytes: Span[UInt8, o], at: Int) -> Bool:
     """Byte 0, or the byte immediately after a newline."""
     if at == 0:
         return True
@@ -170,8 +170,8 @@ def is_line_start(bytes: List[UInt8], at: Int) -> Bool:
     return False
 
 
-def seed_at(
-    bytes: List[UInt8], trie: Trie, record: BakeRecord, wrap: Int, at: Int,
+def seed_at[o: ImmOrigin](
+    bytes: Span[UInt8, o], trie: Trie, record: BakeRecord, wrap: Int, at: Int,
     base_row_hint: Int = -1,
 ) raises -> LayoutSeed:
     """The fold state at a LINE START — checkpoint lookup, nothing re-summed.

@@ -19,6 +19,7 @@
 # Mirrors (never diverge): packages/glyph3d-core/src/compute/glyphBake.js
 #                          packages/glyph3d-core/src/compute/glyphPipelineScan.js
 
+from std.collections.span import Span
 from std.collections import Set, Dict
 from glyph_pipeline import (
     Trie,
@@ -148,7 +149,9 @@ def lanes_from_prefix(p: ScanElem, wrap: Int) -> Lanes:
     return Lanes(closed + wrap_row, col, p.tail_adv, p.glyphs)
 
 
-def fold_bytes(bytes: List[UInt8], trie: Trie, from_byte: Int, to_byte: Int, mut acc: ScanElem):
+def fold_bytes[o: ImmOrigin](
+    bytes: Span[UInt8, o], trie: Trie, from_byte: Int, to_byte: Int, mut acc: ScanElem
+):
     """Fold bytes [from, to) onto `acc` — the seeding primitive: identity (or a
     checkpoint) + this reaches the exact exclusive prefix of byte `to`."""
     var id = from_byte
@@ -207,8 +210,8 @@ struct BakeRecord(Copyable, Movable):
         self.line_height = 0
 
 
-def bake_file(
-    bytes: List[UInt8], trie: Trie, line_height: Float64, checkpoint_interval: Int
+def bake_file[o: ImmOrigin](
+    bytes: Span[UInt8, o], trie: Trie, line_height: Float64, checkpoint_interval: Int
 ) raises -> BakeRecord:
     """THE BAKE — one streaming pass, the record out (bakeFile in the oracle)."""
     if not (line_height > 0):
@@ -329,8 +332,8 @@ def checkpoint_at(checkpoints: List[Float64], i: Int) -> ScanElem:
     return e^
 
 
-def prefix_at(
-    bytes: List[UInt8], trie: Trie, record: BakeRecord, byte_index: Int
+def prefix_at[o: ImmOrigin](
+    bytes: Span[UInt8, o], trie: Trie, record: BakeRecord, byte_index: Int
 ) -> ScanElem:
     """The exclusive prefix of byte `byteIndex` — nearest checkpoint + a ≤ K tail fold."""
     var k = record.checkpoint_interval

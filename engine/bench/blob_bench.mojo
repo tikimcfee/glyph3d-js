@@ -13,6 +13,7 @@
 #
 # Run: mojo run -I engine engine/bench/blob_bench.mojo <fixture.pipe.bin> <manifest> <job_mb>
 
+from std.collections.span import Span
 from std.sys import argv
 from std.time import perf_counter_ns
 from std.memory import memcpy
@@ -81,9 +82,10 @@ def main() raises:
         while j < len(starts) and (span == 0 or span + lens[j] <= job_bytes):
             span += lens[j]
             j += 1
+        # ZERO COPY. The job is a VIEW into the resident blob. memcpy made this
+        # 12.6% -> ~3% of LAY; a Span removes the term entirely.
         var base = starts[i]
-        var slice = List[UInt8](unsafe_uninit_length=span)
-        memcpy(dest=slice.unsafe_ptr(), src=blob.unsafe_ptr() + base, count=span)
+        var slice = Span(blob)[base : base + span]
         var items = List[Item]()
         for q in range(i, j):
             var it = Item()

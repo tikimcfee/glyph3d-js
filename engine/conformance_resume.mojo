@@ -11,6 +11,7 @@
 #
 # Run: mojo run -I engine engine/conformance_resume.mojo engine/fixtures/*.pipe.bin
 
+from std.collections.span import Span
 from std.sys import argv
 from std.memory import unsafe_memset_zero
 from glyph_schema import (
@@ -54,9 +55,7 @@ def check_case(path: String) raises -> Int:
         var wrap = trunc_nonneg(item.wrap_width)
 
         # The item's own bytes, and its bake — the seed source.
-        var slice = List[UInt8](capacity=item.byte_count)
-        for b in range(item.byte_count):
-            slice.append(fx.bytes[item.byte_start + b])
+        var slice = Span(fx.bytes)[item.byte_start : item.byte_start + item.byte_count]
         var rec = bake_file(slice, fx.trie, 1.0, CK)
 
         # Resume points = every LINE START in the item. Most are not on a

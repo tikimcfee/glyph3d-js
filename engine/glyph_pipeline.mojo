@@ -25,6 +25,7 @@
 # Mirrors (never diverge): packages/glyph3d-core/src/compute/glyphPipelineReference.js
 #                          packages/glyph3d-core/src/compute/GlyphTrie.js (trie_lookup)
 
+from std.collections.span import Span
 from std.math import inf
 from std.memory import unsafe_memset_zero
 from std.runtime.asyncrt import TaskGroup, parallelism_level
@@ -161,7 +162,7 @@ def trunc_nonneg(v: Float64) -> Int:
     return Int(v)  # toward zero for non-negatives
 
 
-def sequence_length(bytes: List[UInt8], i: Int) -> Int:
+def sequence_length[o: ImmOrigin](bytes: Span[UInt8, o], i: Int) -> Int:
     """Bytes the sequence starting at `i` occupies — 0 for a continuation byte
     (or invalid), which is exactly the 'am I a leader' test."""
     if i < 0 or i >= len(bytes):
@@ -178,14 +179,14 @@ def sequence_length(bytes: List[UInt8], i: Int) -> Int:
     return 0
 
 
-def byte_at(bytes: List[UInt8], i: Int) -> Int:
+def byte_at[o: ImmOrigin](bytes: Span[UInt8, o], i: Int) -> Int:
     """Byte at `i`, or 0 past the end — the shader's bounds-checked read."""
     if i >= 0 and i < len(bytes):
         return Int(bytes[i])
     return 0
 
 
-def decode_codepoint_at(bytes: List[UInt8], id: Int, n: Int) -> Int:
+def decode_codepoint_at[o: ImmOrigin](bytes: Span[UInt8, o], id: Int, n: Int) -> Int:
     """Decode the codepoint whose sequence starts at `id` (caller established
     n = sequence_length > 0) — shared by decode, the miss rebuild, and the bake."""
     var b0 = Int(bytes[id])
@@ -216,8 +217,8 @@ def trie_lookup_base(trie: Trie, cp: Int) -> Int:
     return ((block << BLOCK_SHIFT) | (cp & BLOCK_MASK)) * ENTRY_STRIDE
 
 
-def decode_and_resolve[so: Origin[mut=True], xo: Origin[mut=True]](
-    bytes: List[UInt8],
+def decode_and_resolve[o: ImmOrigin, so: Origin[mut=True], xo: Origin[mut=True]](
+    bytes: Span[UInt8, o],
     measures: Pointer[Float32, so],
     counts: Pointer[UInt32, xo],
     trie: Trie,
@@ -542,8 +543,8 @@ def bounds_reduce[so: Origin[mut=True], xo: Origin[mut=True], bo: Origin[mut=Tru
 # ── Parallel shard workers (the TaskGroup bodies) ────────────────────────────
 
 
-async def _decode_shard[so: Origin[mut=True], xo: Origin[mut=True]](
-    bytes: List[UInt8],
+async def _decode_shard[o: ImmOrigin, so: Origin[mut=True], xo: Origin[mut=True]](
+    bytes: Span[UInt8, o],
     measures: Pointer[Float32, so],
     counts: Pointer[UInt32, xo],
     trie: Trie,
@@ -599,7 +600,9 @@ def shard_lo(start: Int, stop: Int, workers: Int, w: Int) -> Int:
     return a if a < stop else stop
 
 
-def run_pipeline(bytes: List[UInt8], trie: Trie, items: List[Item]) -> PipelineResult:
+def run_pipeline[o: ImmOrigin](
+    bytes: Span[UInt8, o], trie: Trie, items: List[Item]
+) -> PipelineResult:
     """The whole pipeline — the oracle's runPipeline, natively, sharded across
     cores. decode → ordered miss rebuild + leader count → fold per item (items in
     parallel) → paginate with the DERIVED fan stride (inactive items skipped, one
