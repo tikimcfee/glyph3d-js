@@ -7,48 +7,74 @@ import GlyphPipelineArena from '@glyph3d/core/compute/GlyphPipelineArena.js';
 import { GlyphProvider } from './context.jsx';
 
 /**
- * The shared pipeline arena's slot buffer is capacity-sized (44B per source byte) and
- * GROWS with the load — past the default maxStorageBufferBindingSize (128MB) at ~3MB of
- * source. Request the adapter's REAL limits (capped at 2GB). Probing the adapter first is
- * the WebGPU-recommended pattern: requestDevice fails if a required limit exceeds what
- * the adapter can provide. Returns {} (default limits) when probing is unavailable.
+ * The app's ONE requestDevice input. It either produces real limits or it throws.
  *
- * HAZARD — this is the app's ONE requestDevice input, and it fails LOUD, never silent:
- * an invalid required limit (negative, non-finite, non-numeric) makes requestDevice
- * throw, and three's Renderer.init catches that and silently swaps in the WebGL2
- * backend with "WebGPU is not available" — which presents as MACHINE-level WebGPU
- * unavailability (adapter fine, chrome://gpu fine, "unavailable" anyway) and sends
- * debugging toward drivers/reboots instead of this function. So every limit is
- * validated here: a bad value logs the offending entry and ships {} (defaults) so the
- * app still boots on WebGPU. Mind signed 32-bit traps: 1 << 31 is -2^31, not 2^31.
+ * The shared pipeline arena's slot buffer is capacity-sized (SLOT_BYTES_PER_SOURCE_BYTE,
+ * 48B per source byte, on the device AND mirrored on the host) and GROWS with the load.
+ * The WebGPU DEFAULT maxStorageBufferBindingSize is 128MB, which is ~2.79MB of source —
+ * less than a single mid-size file set, and below even the arena's old f32 wall. So
+ * "boot with defaults" is not a degraded mode, it is a broken one that renders a
+ * fraction of what was asked for and reports nothing.
+ *
+ * THERE IS DELIBERATELY NO FALLBACK. This used to return {} (default limits) on a
+ * missing adapter, an invalid computed limit, or any thrown error, which made every
+ * one of those failures present as "the app is mysteriously small" hundreds of
+ * milliseconds later, in a different subsystem, with the true cause already discarded.
+ * A capacity ceiling silently divided by 15 is worse than a boot that stops and says
+ * why. Compat paths here bought nothing and cost the ability to reason about capacity
+ * at all.
+ *
+ * HAZARD this still guards — an invalid required limit (negative, non-finite,
+ * non-integer) makes requestDevice throw, and three's Renderer.init catches that and
+ * silently swaps in the WebGL2 backend with "WebGPU is not available". That presents as
+ * MACHINE-level WebGPU unavailability (adapter fine, chrome://gpu fine, "unavailable"
+ * anyway) and sends debugging toward drivers and reboots instead of toward this
+ * function. So every limit is validated HERE, where the value was computed and the
+ * request is still nameable. Mind signed 32-bit traps: 1 << 31 is -2^31, not 2^31.
+ *
+ * @param {Object} glProps @returns {{requiredLimits: Object}} never {} — throws instead
  */
 async function _pipelineLimits(glProps) {
-  try {
-    const pp = glProps && glProps.powerPreference;
-    const adapter = await navigator.gpu?.requestAdapter(pp ? { powerPreference: pp } : undefined);
-    const lim = adapter?.limits;
-    if (!lim) return {};
-    const cap = 2 ** 31;   // 2GB
-    const requiredLimits = {
-      maxBufferSize: Math.min(lim.maxBufferSize, cap),
-      maxStorageBufferBindingSize: Math.min(lim.maxStorageBufferBindingSize, cap),
-      // The WebGPU DEFAULT is 8192 regardless of hardware; large sampled surfaces
-      // (frame captures, far atlas growth) want the adapter's real ceiling.
-      maxTextureDimension2D: lim.maxTextureDimension2D,
-    };
-    for (const [name, value] of Object.entries(requiredLimits)) {
-      if (!Number.isFinite(value) || value <= 0 || !Number.isInteger(value)) {
-        console.error(
-          `[glyph3d] requiredLimits.${name} computed as ${value} — invalid; requestDevice`
-          + ' would reject it and three would fall back to WebGL2. Booting with default'
-          + ' limits instead (large loads may hit the 128MB binding cap).');
-        return {};
-      }
-    }
-    return { requiredLimits };
-  } catch {
-    return {};
+  if (!navigator.gpu) {
+    throw new Error(
+      '[glyph3d] navigator.gpu is absent — this build requires WebGPU and has no WebGL2 '
+      + 'path (the glyph pipeline is compute shaders end to end). Use a Chromium-based '
+      + 'browser, or the NVIDIA-pinned tools/dev-firefox.sh.');
   }
+  const pp = glProps && glProps.powerPreference;
+  let adapter;
+  try {
+    adapter = await navigator.gpu.requestAdapter(pp ? { powerPreference: pp } : undefined);
+  } catch (err) {
+    throw new Error(
+      `[glyph3d] requestAdapter threw${pp ? ` for powerPreference "${pp}"` : ''}: `
+      + `${err?.message || err}`, { cause: err });
+  }
+  const lim = adapter?.limits;
+  if (!lim) {
+    throw new Error(
+      `[glyph3d] no WebGPU adapter${pp ? ` for powerPreference "${pp}"` : ''} — `
+      + 'navigator.gpu exists but returned none. Booting on default limits would cap the '
+      + 'glyph arena at ~2.79MB of source, so this stops here instead.');
+  }
+  const cap = 2 ** 31;   // 2GB
+  const requiredLimits = {
+    maxBufferSize: Math.min(lim.maxBufferSize, cap),
+    maxStorageBufferBindingSize: Math.min(lim.maxStorageBufferBindingSize, cap),
+    // The WebGPU DEFAULT is 8192 regardless of hardware; large sampled surfaces
+    // (frame captures, far atlas growth) want the adapter's real ceiling.
+    maxTextureDimension2D: lim.maxTextureDimension2D,
+  };
+  for (const [name, value] of Object.entries(requiredLimits)) {
+    if (!Number.isFinite(value) || value <= 0 || !Number.isInteger(value)) {
+      throw new Error(
+        `[glyph3d] requiredLimits.${name} computed as ${value} (adapter reported `
+        + `${lim[name]}) — requestDevice would reject it and three would silently fall `
+        + 'back to WebGL2, presenting as machine-level WebGPU unavailability. The bug is '
+        + 'in _pipelineLimits, not the machine.');
+    }
+  }
+  return { requiredLimits };
 }
 
 /**
@@ -200,11 +226,11 @@ export default function GlyphCanvas({
         if (renderer.backend?.isWebGPUBackend !== true && navigator.gpu) {
           console.error(
             '[glyph3d] WebGPU FELL BACK to WebGL2 despite navigator.gpu being present.'
-            + (limits.requiredLimits
-              ? ` requestDevice was sent requiredLimits ${JSON.stringify(limits.requiredLimits)} —`
-                + ' if these look wrong, the bug is in _pipelineLimits, not the machine.'
-              : ' No requiredLimits were requested — suspect the browser\'s GPU-process'
-                + ' crash backoff (relaunch the browser, not the OS).'));
+            + ` requestDevice was sent requiredLimits ${JSON.stringify(limits.requiredLimits)}.`
+            + ' Those are always present now (_pipelineLimits throws rather than shipping'
+            + ' defaults), so this is the device request failing: either those values, or'
+            + " the browser's GPU-process crash backoff — relaunch the browser, not the OS."
+            + ' It is never machine-level WebGPU availability.');
         }
         // Arm the core's GPU layout engine: core objects (CodeGrid) live below the renderer
         // and can't reach it through any ctx they own — this is the one registration point.
