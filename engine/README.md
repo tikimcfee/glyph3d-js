@@ -189,11 +189,24 @@ The ratio is the least interesting column. The shape is the finding:
   problem because it never had that locality to lose.
 
 So the crossover near 2–4 MB is not the GPU getting faster, it is the CPU getting
-slower. The gap widens with corpus size rather than converging, which is the part
-that extrapolates: on hardware with more parallelism and more bandwidth the flat
-line should sit higher, while the falling line falls for the same reasons it does
-here. This machine also has unified memory, so there is no PCIe transfer being
+slower. This machine also has unified memory, so there is no PCIe transfer being
 amortised — a discrete GPU pays a cost this measurement does not show.
+
+> **CORRECTION — this table is about ONE BIG ITEM, and the real corpus is not that.**
+>
+> I originally read the falling CPU line as "CPU throughput degrades with corpus
+> size" and extrapolated a widening gap. That was wrong. The CPU degrades on one
+> **large item**, because a single 24 MB working set stops fitting cache. A job made
+> of many **small** items keeps its locality: batching `torvalds/linux` into 8 MB
+> jobs lays 1.385 GB at **117 MB/s**, faster than the GPU's 106 MB/s marginal rate
+> and nearly double the 63 MB/s the single-24 MB-file case shows.
+>
+> Linux's median file is 5.5 KB and its mean 22 KB, so the batched shape is the real
+> one. On this machine the honest verdict is **parity, GPU slightly behind** — and a
+> per-file GPU path would be catastrophic (~64 k dispatches × ~2–9 ms fixed cost =
+> minutes, against 12 s on CPU). The GPU case now rests entirely on a discrete card's
+> marginal rate exceeding 117 MB/s, which is plausible but is the *whole* argument
+> rather than one of two.
 
 ### Streaming a whole tree — measured on `torvalds/linux`
 
@@ -230,6 +243,43 @@ line-aligned chunks with scratch bounded by the CHUNK rather than the file — w
 is `vram-memory-architecture.md`'s "large files chunked at newline boundaries",
 now with the machinery under it and conformance-proven. Not wired into the streaming
 driver yet; the measurement is what says it should be.
+
+### The corpus resident in RAM — and where the time actually goes
+
+```sh
+mojo run -I engine engine/bench/blob_bench.mojo engine/fixtures/ascii-basic.pipe.bin manifest 8
+```
+
+`stream_bench` conflates two very different costs; `blob_bench` separates them.
+Whole `torvalds/linux` `.c`/`.h`:
+
+| | |
+|---|---|
+| blob in RAM | **1.385 GB** — exactly the bytes, no overhead |
+| item table | 1.03 MB (64,457 items × 16 B) |
+| **LOAD** (paid once) | 8.6 s cold / 4.0 s warm OS cache |
+| **LAY** (paid per relayout) | **11.9 s = 117 MB/s** at 8 MB jobs |
+
+Two things fall out, and one of them corrected a claim above.
+
+**I/O is a third of a cold pass and none of a warm one.** The 61 MB/s that
+`stream_bench` reports includes reading 64 k files. Once the corpus is resident,
+every subsequent relayout — resize, wrap change, edit — is 11.9 s of pure compute.
+Comparing that 61 MB/s against a GPU number that excluded I/O is what produced the
+inflated "1.5× GPU win" corrected above.
+
+**Batching helps the CPU too**, by more than expected: per-file laying is ~14.0 s of
+compute against 11.9 s batched, ~15% from amortising per-run setup across items. So
+*a job is a size-targeted batch, not a file* is the right design regardless of which
+processor runs it — and the blob makes it structural rather than a packing step,
+since items are ranges into one buffer and a job is a contiguous span of items.
+
+**Peak scratch is still 1.1 GB**, set by the single 22.9 MB AMD header, which forms
+its own job because it exceeds any sane target. Chunking it at line boundaries is
+the remaining fix, and it is nearly free: a full newline scan runs at 1,257 MB/s
+(20× the pipeline), and seeking the next `0x0A` from each 1 MB boundary touches
+**1,345 bytes of that 22.9 MB file — 0.0056%**. `0x0A` is unambiguous in UTF-8
+(continuations are `0x80–0xBF`), so it is a byte search, not a parse.
 
 ### The fixtures are all single-super, so the suite grows its own corpus
 
