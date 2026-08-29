@@ -43,13 +43,12 @@ from glyph_pipeline import (
     resolve_x,
     paginate,
     page_active,
-    bounds_reduce,
     derive_stride,
     trunc_nonneg,
     shard_lo,
     _decode_shard,
     _paginate_shard,
-    _bounds_shard,
+    _bounds_item,
 )
 from glyph_bake import (
     ScanElem,
@@ -385,41 +384,17 @@ def run_scan_pipeline[o: ImmOrigin](
     batch_bounds[3] = -F64_INF
     batch_bounds[4] = -F64_INF
     batch_bounds[5] = -F64_INF
-    var shard_boxes = List[Float64](length=workers * 8, fill=0)
-    var sbp = shard_boxes.unsafe_ptr()
+    # ONE TaskGroup, one task per item — see _bounds_item in glyph_pipeline.
+    var ibp = item_bounds.unsafe_ptr()
+    var tg9 = TaskGroup()
     for i2 in range(item_count):
-        var b8 = i2 * 8
-        for w in range(workers):
-            shard_boxes[w * 8 + 0] = F64_INF
-            shard_boxes[w * 8 + 1] = F64_INF
-            shard_boxes[w * 8 + 2] = F64_INF
-            shard_boxes[w * 8 + 3] = -F64_INF
-            shard_boxes[w * 8 + 4] = -F64_INF
-            shard_boxes[w * 8 + 5] = -F64_INF
         var start = items[i2].byte_start
         var stop = start + items[i2].byte_count
-        var tg9 = TaskGroup()
-        for w in range(workers):
-            var a = shard_lo(start, stop, workers, w)
-            var b = shard_lo(start, stop, workers, w + 1)
-            tg9.create_task(_bounds_shard(mp, cp, sbp, w * 8, a, b))
-        tg9.wait()
-        item_bounds[b8 + 0] = F64_INF
-        item_bounds[b8 + 1] = F64_INF
-        item_bounds[b8 + 2] = F64_INF
-        item_bounds[b8 + 3] = -F64_INF
-        item_bounds[b8 + 4] = -F64_INF
-        item_bounds[b8 + 5] = -F64_INF
-        for w in range(workers):
-            var l = 0
-            while l < 3:
-                if shard_boxes[w * 8 + l] < item_bounds[b8 + l]:
-                    item_bounds[b8 + l] = shard_boxes[w * 8 + l]
-                l += 1
-            while l < 6:
-                if shard_boxes[w * 8 + l] > item_bounds[b8 + l]:
-                    item_bounds[b8 + l] = shard_boxes[w * 8 + l]
-                l += 1
+        tg9.create_task(_bounds_item(mp, cp, ibp, i2 * 8, start, stop))
+    tg9.wait()
+
+    for i2 in range(item_count):
+        var b8 = i2 * 8
         var l = 0
         while l < 3:
             if item_bounds[b8 + l] < batch_bounds[l]:
@@ -447,7 +422,7 @@ def run_scan_pipeline[o: ImmOrigin](
     _ = len(super_prefix)
     _ = len(partial_prefix)
     _ = len(shard_scalars)
-    _ = len(shard_boxes)
+    _ = len(item_bounds)
 
     var r = PipelineResult()
     r.measures = measures^

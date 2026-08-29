@@ -15,7 +15,7 @@
 #   - bounds boxes ride f64
 #
 # KERNELS TAKE POINTERS, DRIVERS SHARD THEM ACROSS CORES. The per-slot kernels
-# (decode_and_resolve, resolve_x, paginate, bounds_reduce) are thread-shaped —
+# (decode_and_resolve, resolve_x, paginate) are thread-shaped —
 # `id` is the thread id, buffers are raw pointers, exactly the GPU's calling
 # convention — and the drivers run them over TaskGroup shards. Every parallel
 # reduction here is EXACT under regrouping: min/max merges and disjoint writes
@@ -507,39 +507,6 @@ def paginate[so: Origin[mut=True], xo: Origin[mut=True]](
     )
 
 
-def bounds_reduce[so: Origin[mut=True], xo: Origin[mut=True], bo: Origin[mut=True]](
-    measures: Pointer[Float32, so],
-    counts: Pointer[UInt32, xo],
-    id: Int,
-    box: Pointer[Float64, bo],
-    base: Int,
-):
-    """KERNEL — fold this slot's quad into the running min/max box (lanes 0-5,
-    FINAL positions). Lanes 6/7 are the fold scalars, untouched here. Min/max is
-    exact under any regrouping, which is what makes the sharded reduce safe."""
-    var mo = id * MEASURE_STRIDE
-    var co = id * COUNT_STRIDE
-    if (Int(counts[unsafe_offset = co + C_FLAGS]) & F_LEADER) == 0:
-        return
-    var x = Float64(measures[unsafe_offset = mo + M_X])
-    var y = Float64(measures[unsafe_offset = mo + M_Y])
-    var z = Float64(measures[unsafe_offset = mo + M_Z])
-    var w = Float64(measures[unsafe_offset = mo + M_ADVANCE])
-    var h = Float64(measures[unsafe_offset = mo + M_HEIGHT])
-    if x < box[unsafe_offset = base + 0]:
-        box[unsafe_offset = base + 0] = x
-    if y < box[unsafe_offset = base + 1]:
-        box[unsafe_offset = base + 1] = y
-    if z < box[unsafe_offset = base + 2]:
-        box[unsafe_offset = base + 2] = z
-    if x + w > box[unsafe_offset = base + 3]:
-        box[unsafe_offset = base + 3] = x + w
-    if y + h > box[unsafe_offset = base + 4]:
-        box[unsafe_offset = base + 4] = y + h
-    if z > box[unsafe_offset = base + 5]:
-        box[unsafe_offset = base + 5] = z
-
-
 # ── Parallel shard workers (the TaskGroup bodies) ────────────────────────────
 
 
@@ -581,7 +548,7 @@ async def _paginate_shard[so: Origin[mut=True], xo: Origin[mut=True]](
         paginate(measures, counts, id, item, stride)
 
 
-async def _bounds_shard[so: Origin[mut=True], xo: Origin[mut=True], bo: Origin[mut=True]](
+async def _bounds_item[so: Origin[mut=True], xo: Origin[mut=True], bo: Origin[mut=True]](
     measures: Pointer[Float32, so],
     counts: Pointer[UInt32, xo],
     box: Pointer[Float64, bo],
@@ -589,8 +556,51 @@ async def _bounds_shard[so: Origin[mut=True], xo: Origin[mut=True], bo: Origin[m
     start: Int,
     stop: Int,
 ):
+    """One task per ITEM, min/max carried in REGISTERS and stored once.
+
+    The previous form ran a TaskGroup per item (64,457 of them over linux, 258k
+    tasks) and sharded every item `workers` ways regardless of size — a 167-byte
+    file got 4 tasks of 42 bytes. Worse, bounds_reduce did a load-compare-store
+    against `box` for every slot, making the accumulator a loop-carried dependency
+    through MEMORY rather than registers.
+
+    Items are already disjoint and contiguous, so one task each needs no merge
+    step at all. Min/max is exact under any regrouping, which is what let the old
+    form shard in the first place and what lets this one not."""
+    var mnx = F64_INF
+    var mny = F64_INF
+    var mnz = F64_INF
+    var mxx = -F64_INF
+    var mxy = -F64_INF
+    var mxz = -F64_INF
     for id in range(start, stop):
-        bounds_reduce(measures, counts, id, box, base)
+        var co = id * COUNT_STRIDE
+        if (Int(counts[unsafe_offset = co + C_FLAGS]) & F_LEADER) == 0:
+            continue
+        var mo = id * MEASURE_STRIDE
+        var x = Float64(measures[unsafe_offset = mo + M_X])
+        var y = Float64(measures[unsafe_offset = mo + M_Y])
+        var z = Float64(measures[unsafe_offset = mo + M_Z])
+        var w = Float64(measures[unsafe_offset = mo + M_ADVANCE])
+        var h = Float64(measures[unsafe_offset = mo + M_HEIGHT])
+        if x < mnx:
+            mnx = x
+        if y < mny:
+            mny = y
+        if z < mnz:
+            mnz = z
+        if x + w > mxx:
+            mxx = x + w
+        if y + h > mxy:
+            mxy = y + h
+        if z > mxz:
+            mxz = z
+    box[unsafe_offset = base + 0] = mnx
+    box[unsafe_offset = base + 1] = mny
+    box[unsafe_offset = base + 2] = mnz
+    box[unsafe_offset = base + 3] = mxx
+    box[unsafe_offset = base + 4] = mxy
+    box[unsafe_offset = base + 5] = mxz
 
 
 def shard_lo(start: Int, stop: Int, workers: Int, w: Int) -> Int:
@@ -676,41 +686,18 @@ def run_pipeline[o: ImmOrigin](
     batch_bounds[3] = -F64_INF
     batch_bounds[4] = -F64_INF
     batch_bounds[5] = -F64_INF
-    var shard_boxes = List[Float64](length=workers * 8, fill=0)
-    var xp = shard_boxes.unsafe_ptr()
+    # ONE TaskGroup for the whole job, one task per item. Lanes 6/7 are the fold
+    # scalars layout_item already wrote into item_bounds; only 0-5 are touched here.
+    var ibp = item_bounds.unsafe_ptr()
+    var tg4 = TaskGroup()
     for i in range(item_count):
-        var b8 = i * 8
-        for w in range(workers):
-            shard_boxes[w * 8 + 0] = F64_INF
-            shard_boxes[w * 8 + 1] = F64_INF
-            shard_boxes[w * 8 + 2] = F64_INF
-            shard_boxes[w * 8 + 3] = -F64_INF
-            shard_boxes[w * 8 + 4] = -F64_INF
-            shard_boxes[w * 8 + 5] = -F64_INF
         var start = items[i].byte_start
         var stop = start + items[i].byte_count
-        var tg4 = TaskGroup()
-        for w in range(workers):
-            var a = shard_lo(start, stop, workers, w)
-            var b = shard_lo(start, stop, workers, w + 1)
-            tg4.create_task(_bounds_shard(mp, cp, xp, w * 8, a, b))
-        tg4.wait()
-        item_bounds[b8 + 0] = F64_INF
-        item_bounds[b8 + 1] = F64_INF
-        item_bounds[b8 + 2] = F64_INF
-        item_bounds[b8 + 3] = -F64_INF
-        item_bounds[b8 + 4] = -F64_INF
-        item_bounds[b8 + 5] = -F64_INF
-        for w in range(workers):
-            var l = 0
-            while l < 3:
-                if shard_boxes[w * 8 + l] < item_bounds[b8 + l]:
-                    item_bounds[b8 + l] = shard_boxes[w * 8 + l]
-                l += 1
-            while l < 6:
-                if shard_boxes[w * 8 + l] > item_bounds[b8 + l]:
-                    item_bounds[b8 + l] = shard_boxes[w * 8 + l]
-                l += 1
+        tg4.create_task(_bounds_item(mp, cp, ibp, i * 8, start, stop))
+    tg4.wait()
+
+    for i in range(item_count):
+        var b8 = i * 8
         var l = 0
         while l < 3:
             if item_bounds[b8 + l] < batch_bounds[l]:
@@ -721,9 +708,9 @@ def run_pipeline[o: ImmOrigin](
                 batch_bounds[l] = item_bounds[b8 + l]
             l += 1
 
-    # Keep-alive anchor (ASAP destruction): shard_boxes' last task-visible use is
+    # Keep-alive anchor (ASAP destruction): item_bounds' last task-visible use is
     # inside the loop's create_task calls; it must outlive every wait.
-    _ = len(shard_boxes)
+    _ = len(item_bounds)
 
     var r = PipelineResult()
     r.measures = measures^
