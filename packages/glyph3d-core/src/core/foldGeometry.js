@@ -143,7 +143,19 @@ export function pageShift(screenRow, page) {
  *   null when the item occupies no rows at all.
  */
 export function foldExtent(p) {
-    const totalRows = Math.max(0, Math.trunc(p.totalRows || 0));
+    // totalRows is a COUNT and arrives exact: from the CPU scan (an integer by
+    // construction) or from the GPU reduce (a native u32 lane since foldScalars stopped
+    // carrying it through an f32 ordered key). The Math.trunc that used to stand here was
+    // a downstream quietly repairing an upstream that had lost its type — nobody filed it
+    // because defensive truncation reads as ordinary care. Assert instead: a fractional
+    // row count now means a real bug upstream, and silently flooring it hides which one.
+    const totalRows = p.totalRows || 0;
+    if (!Number.isInteger(totalRows) || totalRows < 0) {
+        throw new Error(
+            `foldExtent: totalRows must be a non-negative integer, got ${p.totalRows}. `
+            + 'It is a count — if it arrived fractional, the carrier that produced it lost '
+            + 'exactness (see foldScalars lane 0 in glyphPipelineKernels).');
+    }
     if (totalRows === 0) return null;
 
     const origin = p.origin || { x: 0, y: 0, z: 0 };

@@ -897,7 +897,12 @@ export default class GlyphPipelineKernels {
 
             const col = int(lane(id, S_COL)).toVar('col');
             const ord = int(lane(id, S_ORD)).toVar('ord');
-            const row = lane(id, S_ROW).toFloat().toVar('row');
+            // S_ROW is a native u32 COUNT lane. Hold it BOTH ways on purpose: the float
+            // is the Y placement's operand (row * lineHeight is geometry), the u32 is the
+            // identity that feeds the totalRows reduce below. Floating it once and reusing
+            // that for both is what put an exact count on an f32 carrier.
+            const rowU = lane(id, S_ROW).toVar('rowU');
+            const row = rowU.toFloat().toVar('row');
             const fold = wrap.greaterThan(int(0)).select(wrap, pageCols).toVar('fold');
 
             const x = float(0).toVar('x');
@@ -925,8 +930,22 @@ export default class GlyphPipelineKernels {
             // ── fold scalars, fused per ITEM: total visual rows + the widest row. `x` is
             //    the pre-origin sum — item-relative by construction, which is what makes
             //    it a content WIDTH the stride kernel can fan pages by.
+            // TWO KINDS IN ONE BUFFER, and they reduce differently on purpose:
+            //   lane 0  totalRows      an exact COUNT (row + 1) -> native u32 atomicMax
+            //   lane 1  widest row     a genuine MEASURE (float) -> f32 ordered key
+            //
+            // totalRows used to ride floatToOrderedKey too, which is an f32 carrier
+            // wearing a u32 costume: u32 lane -> f32 -> ordered key -> u32 atomic -> f32.
+            // Four representation changes to move an integer that was already exact in
+            // the container it started in, and exact only to 2^24 for the trouble.
+            //
+            // Reachable, not theoretical: S_ROW is the VISUAL row (wrap segments
+            // included, `col.div(wrap)` below), so at wrap=1 every glyph is its own row
+            // and totalRows scales with GLYPH COUNT — crossing 2^24 at ~16.8MB of source,
+            // well inside ARENA_MAX_BYTES. A narrow wrap on a large file is a deliberate
+            // user action. Found by mojo-rising; the reachability is the part we measured.
             const ws = item.mul(uint(2)).toVar('ws');
-            atomicMax(this.foldScalars.element(ws), floatToOrderedKey(row.add(1)));
+            atomicMax(this.foldScalars.element(ws), rowU.add(uint(1)));
             atomicMax(this.foldScalars.element(ws.add(uint(1))), floatToOrderedKey(x));
         })().compute(1).setName('glyphResolveX');
     }
@@ -1173,7 +1192,10 @@ export default class GlyphPipelineKernels {
         // (repaginate() re-arms only the boxes — the fold persists there).
         this.itemBoxes.value.array.set(armedBoxKeys(this.maxItems));
         this.itemBoxes.value.needsUpdate = true;
-        this.foldScalars.value.array.fill(0);   // max lanes arm at -inf's key (0)
+        // Both lanes arm at 0, for two different reasons that happen to coincide: lane 1
+        // is an f32 ordered key where 0 IS -inf's key, and lane 0 is a native u32 count
+        // where 0 is simply the identity for max over non-negative integers.
+        this.foldScalars.value.array.fill(0);
         this.foldScalars.value.needsUpdate = true;
         this.missCount.value.array[0] = 0;
         this.missCount.value.needsUpdate = true;
@@ -1595,7 +1617,12 @@ export default class GlyphPipelineKernels {
             out[i] = {
                 min: { x: orderedKeyToFloat(box[b]), y: orderedKeyToFloat(box[b + 1]), z: orderedKeyToFloat(box[b + 2]) },
                 max: { x: orderedKeyToFloat(box[b + 3]), y: orderedKeyToFloat(box[b + 4]), z: orderedKeyToFloat(box[b + 5]) },
-                totalRows: ws[i * 2] === 0 ? 0 : orderedKeyToFloat(ws[i * 2]),
+                // Lane 0 is a native u32 count — no decode, and no `=== 0 ? 0` guard
+                // either: 0 is the arming value AND the correct answer for an item that
+                // reduced nothing, because 0 is the identity for max over non-negative
+                // u32. The arming stops being a trick and becomes arithmetic.
+                totalRows: ws[i * 2],
+                // Lane 1 is a float MEASURE, so it still decodes from its ordered key.
                 maxRowExtent: ws[i * 2 + 1] === 0 ? 0 : orderedKeyToFloat(ws[i * 2 + 1]),
             };
         }
