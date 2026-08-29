@@ -195,6 +195,42 @@ line should sit higher, while the falling line falls for the same reasons it doe
 here. This machine also has unified memory, so there is no PCIe transfer being
 amortised — a discrete GPU pays a cost this measurement does not show.
 
+### Streaming a whole tree — measured on `torvalds/linux`
+
+```sh
+find <dir> -type f > manifest
+mojo run -I engine engine/bench/stream_bench.mojo engine/fixtures/ascii-basic.pipe.bin manifest [--count]
+```
+
+| corpus | files | source | glyphs | peak scratch | records | wall |
+|---|---:|---:|---:|---:|---:|---:|
+| dictionaries | 693 | 79.5 MB | 83.4 M | 143 MB | 2.5 GB | 2.2 s |
+| linux `fs/` | 2,172 | 44.9 MB | 47.1 M | 40 MB | 1.4 GB | 1.6 s |
+| **linux, all `.c`/`.h`** | **64,457** | **1.385 GB** | **1.45 G** | **1.10 GB** | **44.3 GB** | **22.6 s** |
+
+The whole kernel lays out in 22.6 s at 61 MB/s, one file at a time, and **it
+completes** — under the old arena it could not start, because 1.385 GB of source
+needed 66 GB of slots held at once against a 44.7 MB ceiling.
+
+**But the record format alone does not make an unbounded corpus free, and the
+measurement says so plainly.** Records are 44.3 GB for this tree. Compaction bounds
+the SCRATCH; it does not bound residency, because you must store what you render.
+Past a certain size residency needs *eviction*, not a smaller record. `--count`
+exists to measure that honestly rather than OOM.
+
+**Peak scratch is set by the largest single item, and linux has a 22.9 MB one** —
+`drivers/gpu/drm/amd/include/asic_reg/dcn/dcn_3_2_0_sh_mask.h`, with 112 files over
+1 MB against a 22 KB mean. So "scratch is bounded by the largest item" is a real
+bound but a bad one: one generated header forces a 1.1 GB pool for a corpus whose
+average file is 22 KB.
+
+That is exactly the case mid-item resume answers. `seed_at` recovers the fold state
+at any line start from the bake's checkpoints, so a 22.9 MB file can be laid in
+line-aligned chunks with scratch bounded by the CHUNK rather than the file — which
+is `vram-memory-architecture.md`'s "large files chunked at newline boundaries",
+now with the machinery under it and conformance-proven. Not wired into the streaming
+driver yet; the measurement is what says it should be.
+
 ### The fixtures are all single-super, so the suite grows its own corpus
 
 Every checked-in fixture is under 6 KB — 82 chunks, **one** super at `GROUP = 256`.
