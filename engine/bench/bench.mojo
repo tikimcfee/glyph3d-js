@@ -8,6 +8,9 @@
 
 from std.time import perf_counter_ns
 from std.memory import bitcast
+from glyph_schema import COUNT_STRIDE, C_ROW
+
+comptime PROBE_BYTE = 1028
 from glyph_pipeline import Trie, Item, run_pipeline
 from glyph_scan import run_scan_pipeline
 from glyph_bake import bake_file
@@ -103,7 +106,7 @@ def main() raises:
         var res = run_pipeline(input.bytes, input.trie, items)
         var t1 = perf_counter_ns()
         if r > 0:
-            sum += res.leaders + Int(res.slots[12345])
+            sum += res.leaders + Int(res.counts[PROBE_BYTE * COUNT_STRIDE + C_ROW])
             if t1 - t0 < best:
                 best = t1 - t0
     report("pipeline  (mojo)", best, mb, sum)
@@ -116,7 +119,7 @@ def main() raises:
         var res = run_scan_pipeline(input.bytes, input.trie, items, 64, 256)
         var t1 = perf_counter_ns()
         if r > 0:
-            sum += res.leaders + Int(res.slots[12345])
+            sum += res.leaders + Int(res.counts[PROBE_BYTE * COUNT_STRIDE + C_ROW])
             if t1 - t0 < best:
                 best = t1 - t0
     report("scan      (mojo)", best, mb, sum)

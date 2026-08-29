@@ -28,21 +28,15 @@
 from std.math import inf
 from std.memory import unsafe_memset_zero
 from std.runtime.asyncrt import TaskGroup, parallelism_level
+from glyph_schema import (
+    MEASURE_STRIDE, M_X, M_Y, M_Z, M_ADVANCE, M_HEIGHT, M_GLYPH_ID,
+    M_BASE_X, M_LINE_ADV,
+    COUNT_STRIDE, C_ROW, C_COL, C_FLAGS, C_ORD,
+)
 
-# ── Slot lanes (glyphPipelineReference.js) ──────────────────────────────────
-comptime SLOT_STRIDE = 12
-comptime S_GLYPH_ID = 0
-comptime S_ADVANCE = 1
-comptime S_HEIGHT = 2
-comptime S_X = 3
-comptime S_Y = 4
-comptime S_Z = 5
-comptime S_ROW = 6
-comptime S_COL = 7
-comptime S_FLAGS = 8
-comptime S_BASE_X = 9
-comptime S_LINE_ADV = 10
-comptime S_ORD = 11
+# ── Lane layout: GENERATED, two buffers ─────────────────────────────────────
+# Where a value lives IS what kind it is. measures are f32 (space, rounding is
+# load-bearing); counts are u32 (data, exact to 2^32). No bitcasts anywhere.
 
 comptime F_LEADER = 1
 comptime F_RENDERED = 2
@@ -117,7 +111,8 @@ struct Item(Copyable, Movable):
 
 
 struct PipelineResult(Copyable, Movable):
-    var slots: List[Float32]
+    var measures: List[Float32]
+    var counts: List[UInt32]
     var ord_to_byte: List[UInt32]
     var misses: List[UInt32]
     var leaders: Int
@@ -125,7 +120,8 @@ struct PipelineResult(Copyable, Movable):
     var batch_bounds: List[Float64]  # 8 lanes
 
     def __init__(out self):
-        self.slots = List[Float32]()
+        self.measures = List[Float32]()
+        self.counts = List[UInt32]()
         self.ord_to_byte = List[UInt32]()
         self.misses = List[UInt32]()
         self.leaders = 0
@@ -199,9 +195,10 @@ def trie_lookup_base(trie: Trie, cp: Int) -> Int:
     return ((block << BLOCK_SHIFT) | (cp & BLOCK_MASK)) * ENTRY_STRIDE
 
 
-def decode_and_resolve[so: Origin[mut=True]](
+def decode_and_resolve[so: Origin[mut=True], xo: Origin[mut=True]](
     bytes: List[UInt8],
-    slots: Pointer[Float32, so],
+    measures: Pointer[Float32, so],
+    counts: Pointer[UInt32, xo],
     trie: Trie,
     id: Int,
 ):
@@ -223,25 +220,26 @@ def decode_and_resolve[so: Origin[mut=True]](
         n = 4
     else:
         n = 0
-    var o = id * SLOT_STRIDE
+    var mo = id * MEASURE_STRIDE
+    var co = id * COUNT_STRIDE
     if n == 0:
         # Non-leader: size zeroed EXPLICITLY (rewritten ranges held a real glyph).
-        slots[unsafe_offset = o + S_ADVANCE] = 0
-        slots[unsafe_offset = o + S_HEIGHT] = 0
+        measures[unsafe_offset = mo + M_ADVANCE] = 0
+        measures[unsafe_offset = mo + M_HEIGHT] = 0
         return
 
     var cp = decode_codepoint_at(bytes, id, n)
     var tb = trie_lookup_base(trie, cp)
     var missing = (Int(trie.blocks[tb + LANE_FLAGS]) & FLAG_MISSING) != 0
-    slots[unsafe_offset = o + S_GLYPH_ID] = trie.blocks[tb + LANE_GLYPH_ID]
-    slots[unsafe_offset = o + S_ADVANCE] = trie.blocks[tb + LANE_ADVANCE]
-    slots[unsafe_offset = o + S_HEIGHT] = trie.blocks[tb + LANE_HEIGHT]
+    measures[unsafe_offset = mo + M_GLYPH_ID] = trie.blocks[tb + LANE_GLYPH_ID]
+    measures[unsafe_offset = mo + M_ADVANCE] = trie.blocks[tb + LANE_ADVANCE]
+    measures[unsafe_offset = mo + M_HEIGHT] = trie.blocks[tb + LANE_HEIGHT]
     var flags = F_LEADER
     if cp == NEWLINE:
         flags |= F_NEWLINE
     if missing:
         flags |= F_MISSING
-    slots[unsafe_offset = o + S_FLAGS] = Float32(flags)
+    counts[unsafe_offset = co + C_FLAGS] = UInt32(flags)
 
 
 def item_for_byte(items: List[Item], id: Int) -> Int:
@@ -265,8 +263,9 @@ def rows_for_line(length: Int, wrap: Int) -> Int:
     return length // wrap + 1
 
 
-def layout_item[so: Origin[mut=True], oo: Origin[mut=True], ko: Origin[mut=True]](
-    slots: Pointer[Float32, so],
+def layout_item[so: Origin[mut=True], xo: Origin[mut=True], oo: Origin[mut=True], ko: Origin[mut=True]](
+    measures: Pointer[Float32, so],
+    counts: Pointer[UInt32, xo],
     item: Item,
     ord_to_byte: Pointer[UInt32, oo],
     scalars: Pointer[Float64, ko],
@@ -301,29 +300,30 @@ def layout_item[so: Origin[mut=True], oo: Origin[mut=True], ko: Origin[mut=True]
     var id = item.byte_start
     var stop = item.byte_start + item.byte_count
     while id < stop:
-        var o = id * SLOT_STRIDE
-        var flags = Int(slots[unsafe_offset = o + S_FLAGS])
+        var mo = id * MEASURE_STRIDE
+        var co = id * COUNT_STRIDE
+        var flags = Int(counts[unsafe_offset = co + C_FLAGS])
         if (flags & F_LEADER) == 0:
             id += 1
             continue
-        var advance = slots[unsafe_offset = o + S_ADVANCE]
+        var advance = measures[unsafe_offset = mo + M_ADVANCE]
         var wrap_row = (col // wrap) if wrap > 0 else 0
         var row = base_row + wrap_row
         var x: Float64 = Float64(seg_adv) if fold > 0 else line_adv
         var lh: Float64
         if lh_unset:
-            lh = Float64(slots[unsafe_offset = o + S_HEIGHT])
+            lh = Float64(measures[unsafe_offset = mo + M_HEIGHT])
         else:
             lh = item.line_height
-        slots[unsafe_offset = o + S_ROW] = Float32(row)
-        slots[unsafe_offset = o + S_COL] = Float32(col)
-        slots[unsafe_offset = o + S_LINE_ADV] = Float32(line_adv)
-        slots[unsafe_offset = o + S_ORD] = Float32(ord)
-        slots[unsafe_offset = o + S_BASE_X] = Float32(x + ox)
-        slots[unsafe_offset = o + S_X] = Float32(x + ox)
-        slots[unsafe_offset = o + S_Y] = Float32(-Float64(row) * lh + oy)
-        slots[unsafe_offset = o + S_Z] = Float32(-Float64(wrap_row) * z_step + oz)
-        slots[unsafe_offset = o + S_FLAGS] = Float32(flags | F_RENDERED)
+        counts[unsafe_offset = co + C_ROW] = UInt32(row)
+        counts[unsafe_offset = co + C_COL] = UInt32(col)
+        measures[unsafe_offset = mo + M_LINE_ADV] = Float32(line_adv)
+        counts[unsafe_offset = co + C_ORD] = UInt32(ord)
+        measures[unsafe_offset = mo + M_BASE_X] = Float32(x + ox)
+        measures[unsafe_offset = mo + M_X] = Float32(x + ox)
+        measures[unsafe_offset = mo + M_Y] = Float32(-Float64(row) * lh + oy)
+        measures[unsafe_offset = mo + M_Z] = Float32(-Float64(wrap_row) * z_step + oz)
+        counts[unsafe_offset = co + C_FLAGS] = UInt32(flags | F_RENDERED)
         ord_to_byte[unsafe_offset = item.byte_start + ord] = UInt32(id)
         if Float64(row + 1) > scalars[unsafe_offset = scalar_base + 6]:
             scalars[unsafe_offset = scalar_base + 6] = Float64(row + 1)
@@ -345,8 +345,9 @@ def layout_item[so: Origin[mut=True], oo: Origin[mut=True], ko: Origin[mut=True]
         id += 1
 
 
-def resolve_x[so: Origin[mut=True], oo: Origin[mut=True], ko: Origin[mut=True]](
-    slots: Pointer[Float32, so],
+def resolve_x[so: Origin[mut=True], xo: Origin[mut=True], oo: Origin[mut=True], ko: Origin[mut=True]](
+    measures: Pointer[Float32, so],
+    counts: Pointer[UInt32, xo],
     id: Int,
     item: Item,
     ord_to_byte: Pointer[UInt32, oo],
@@ -357,11 +358,12 @@ def resolve_x[so: Origin[mut=True], oo: Origin[mut=True], ko: Origin[mut=True]](
     (resolveX in the oracle). With a fold unit, x re-sums the glyph's `col % fold`
     same-row predecessors FORWARD from the segment start — the same f32 order the
     serial segAdv accumulates, so fold>0 x is bit-identical across oracle, scan,
-    and hardware. Foldless, x IS the line prefix (the f32 S_LINE_ADV lane — one
+    and hardware. Foldless, x IS the line prefix (the f32 M_LINE_ADV lane — one
     rounding wider than the serial fold's f64 prefix, which is why foldless float
     lanes compare at eps, never bit-exact, between the two forms)."""
-    var o = id * SLOT_STRIDE
-    if (Int(slots[unsafe_offset = o + S_FLAGS]) & F_LEADER) == 0:
+    var mo = id * MEASURE_STRIDE
+    var co = id * COUNT_STRIDE
+    if (Int(counts[unsafe_offset = co + C_FLAGS]) & F_LEADER) == 0:
         return
     var wrap = trunc_nonneg(item.wrap_width)
     var fold: Int
@@ -369,8 +371,8 @@ def resolve_x[so: Origin[mut=True], oo: Origin[mut=True], ko: Origin[mut=True]](
         fold = wrap
     else:
         fold = trunc_nonneg(item.page_cols) if item.has_page else 0
-    var col = Int(slots[unsafe_offset = o + S_COL])
-    var ord = Int(slots[unsafe_offset = o + S_ORD])
+    var col = Int(counts[unsafe_offset = co + C_COL])
+    var ord = Int(counts[unsafe_offset = co + C_ORD])
 
     var x: Float64
     if fold > 0:
@@ -378,23 +380,23 @@ def resolve_x[so: Origin[mut=True], oo: Origin[mut=True], ko: Origin[mut=True]](
         var k = col % fold
         while k >= 1:
             var q = Int(ord_to_byte[unsafe_offset = item.byte_start + ord - k])
-            x32 = x32 + slots[unsafe_offset = q * SLOT_STRIDE + S_ADVANCE]
+            x32 = x32 + measures[unsafe_offset = q * MEASURE_STRIDE + M_ADVANCE]
             k -= 1
         x = Float64(x32)
     else:
-        x = Float64(slots[unsafe_offset = o + S_LINE_ADV])
+        x = Float64(measures[unsafe_offset = mo + M_LINE_ADV])
 
-    var row = Int(slots[unsafe_offset = o + S_ROW])
+    var row = Int(counts[unsafe_offset = co + C_ROW])
     var wrap_row = (col // wrap) if wrap > 0 else 0
     var lh: Float64
     if is_nan(item.line_height):  # NaN = unset: the glyph's own height
-        lh = Float64(slots[unsafe_offset = o + S_HEIGHT])
+        lh = Float64(measures[unsafe_offset = mo + M_HEIGHT])
     else:
         lh = item.line_height
-    slots[unsafe_offset = o + S_BASE_X] = Float32(x + item.origin_x)
-    slots[unsafe_offset = o + S_X] = Float32(x + item.origin_x)
-    slots[unsafe_offset = o + S_Y] = Float32(-Float64(row) * lh + item.origin_y)
-    slots[unsafe_offset = o + S_Z] = Float32(
+    measures[unsafe_offset = mo + M_BASE_X] = Float32(x + item.origin_x)
+    measures[unsafe_offset = mo + M_X] = Float32(x + item.origin_x)
+    measures[unsafe_offset = mo + M_Y] = Float32(-Float64(row) * lh + item.origin_y)
+    measures[unsafe_offset = mo + M_Z] = Float32(
         -Float64(wrap_row) * item.z_step + item.origin_z
     )
 
@@ -424,16 +426,18 @@ def page_active(item: Item) -> Bool:
     )
 
 
-def paginate[so: Origin[mut=True]](
-    slots: Pointer[Float32, so],
+def paginate[so: Origin[mut=True], xo: Origin[mut=True]](
+    measures: Pointer[Float32, so],
+    counts: Pointer[UInt32, xo],
     id: Int,
     item: Item,
     page_stride_x: Float64,
 ):
     """KERNEL — pagination as a PURE per-slot remap of the base position. Every
     page decision reads the INTEGER row/col lanes, never the float position."""
-    var o = id * SLOT_STRIDE
-    if (Int(slots[unsafe_offset = o + S_FLAGS]) & F_LEADER) == 0:
+    var mo = id * MEASURE_STRIDE
+    var co = id * COUNT_STRIDE
+    if (Int(counts[unsafe_offset = co + C_FLAGS]) & F_LEADER) == 0:
         return
 
     var rows = trunc_nonneg(item.page_rows) if item.has_page else 0
@@ -442,8 +446,8 @@ def paginate[so: Origin[mut=True]](
     if rows == 0 and cols == 0 and scroll == 0:
         return
 
-    var row = Int(slots[unsafe_offset = o + S_ROW])
-    var col = Int(slots[unsafe_offset = o + S_COL])
+    var row = Int(counts[unsafe_offset = co + C_ROW])
+    var col = Int(counts[unsafe_offset = co + C_COL])
     var screen_row = row - scroll  # the conveyor; negative rows stay in flow
 
     var y_page = 0
@@ -462,16 +466,16 @@ def paginate[so: Origin[mut=True]](
     var lh = item.line_height
     if is_nan(lh):
         lh = item.page_line_height  # resolved ?? page fallback (may stay NaN)
-    slots[unsafe_offset = o + S_X] = Float32(
-        Float64(slots[unsafe_offset = o + S_BASE_X])
+    measures[unsafe_offset = mo + M_X] = Float32(
+        Float64(measures[unsafe_offset = mo + M_BASE_X])
         + Float64(y_page % wide) * page_stride_x
     )
-    slots[unsafe_offset = o + S_Y] = Float32(
+    measures[unsafe_offset = mo + M_Y] = Float32(
         item.origin_y
         - Float64(screen_row - y_page * rows) * lh
         - Float64(band) * item.band_stride_y
     )
-    slots[unsafe_offset = o + S_Z] = Float32(
+    measures[unsafe_offset = mo + M_Z] = Float32(
         item.origin_z
         - Float64(seg) * item.z_step
         + Float64(band) * item.depth_per_band
@@ -479,8 +483,9 @@ def paginate[so: Origin[mut=True]](
     )
 
 
-def bounds_reduce[so: Origin[mut=True], bo: Origin[mut=True]](
-    slots: Pointer[Float32, so],
+def bounds_reduce[so: Origin[mut=True], xo: Origin[mut=True], bo: Origin[mut=True]](
+    measures: Pointer[Float32, so],
+    counts: Pointer[UInt32, xo],
     id: Int,
     box: Pointer[Float64, bo],
     base: Int,
@@ -488,14 +493,15 @@ def bounds_reduce[so: Origin[mut=True], bo: Origin[mut=True]](
     """KERNEL — fold this slot's quad into the running min/max box (lanes 0-5,
     FINAL positions). Lanes 6/7 are the fold scalars, untouched here. Min/max is
     exact under any regrouping, which is what makes the sharded reduce safe."""
-    var o = id * SLOT_STRIDE
-    if (Int(slots[unsafe_offset = o + S_FLAGS]) & F_LEADER) == 0:
+    var mo = id * MEASURE_STRIDE
+    var co = id * COUNT_STRIDE
+    if (Int(counts[unsafe_offset = co + C_FLAGS]) & F_LEADER) == 0:
         return
-    var x = Float64(slots[unsafe_offset = o + S_X])
-    var y = Float64(slots[unsafe_offset = o + S_Y])
-    var z = Float64(slots[unsafe_offset = o + S_Z])
-    var w = Float64(slots[unsafe_offset = o + S_ADVANCE])
-    var h = Float64(slots[unsafe_offset = o + S_HEIGHT])
+    var x = Float64(measures[unsafe_offset = mo + M_X])
+    var y = Float64(measures[unsafe_offset = mo + M_Y])
+    var z = Float64(measures[unsafe_offset = mo + M_Z])
+    var w = Float64(measures[unsafe_offset = mo + M_ADVANCE])
+    var h = Float64(measures[unsafe_offset = mo + M_HEIGHT])
     if x < box[unsafe_offset = base + 0]:
         box[unsafe_offset = base + 0] = x
     if y < box[unsafe_offset = base + 1]:
@@ -513,47 +519,51 @@ def bounds_reduce[so: Origin[mut=True], bo: Origin[mut=True]](
 # ── Parallel shard workers (the TaskGroup bodies) ────────────────────────────
 
 
-async def _decode_shard[so: Origin[mut=True]](
+async def _decode_shard[so: Origin[mut=True], xo: Origin[mut=True]](
     bytes: List[UInt8],
-    slots: Pointer[Float32, so],
+    measures: Pointer[Float32, so],
+    counts: Pointer[UInt32, xo],
     trie: Trie,
     start: Int,
     stop: Int,
 ):
     for id in range(start, stop):
-        decode_and_resolve(bytes, slots, trie, id)
+        decode_and_resolve(bytes, measures, counts, trie, id)
 
 
-async def _fold_item[so: Origin[mut=True], oo: Origin[mut=True], ko: Origin[mut=True]](
-    slots: Pointer[Float32, so],
+async def _fold_item[so: Origin[mut=True], xo: Origin[mut=True], oo: Origin[mut=True], ko: Origin[mut=True]](
+    measures: Pointer[Float32, so],
+    counts: Pointer[UInt32, xo],
     item: Item,
     ord_to_byte: Pointer[UInt32, oo],
     scalars: Pointer[Float64, ko],
     scalar_base: Int,
 ):
-    layout_item(slots, item, ord_to_byte, scalars, scalar_base)
+    layout_item(measures, counts, item, ord_to_byte, scalars, scalar_base)
 
 
-async def _paginate_shard[so: Origin[mut=True]](
-    slots: Pointer[Float32, so],
+async def _paginate_shard[so: Origin[mut=True], xo: Origin[mut=True]](
+    measures: Pointer[Float32, so],
+    counts: Pointer[UInt32, xo],
     item: Item,
     stride: Float64,
     start: Int,
     stop: Int,
 ):
     for id in range(start, stop):
-        paginate(slots, id, item, stride)
+        paginate(measures, counts, id, item, stride)
 
 
-async def _bounds_shard[so: Origin[mut=True], bo: Origin[mut=True]](
-    slots: Pointer[Float32, so],
+async def _bounds_shard[so: Origin[mut=True], xo: Origin[mut=True], bo: Origin[mut=True]](
+    measures: Pointer[Float32, so],
+    counts: Pointer[UInt32, xo],
     box: Pointer[Float64, bo],
     base: Int,
     start: Int,
     stop: Int,
 ):
     for id in range(start, stop):
-        bounds_reduce(slots, id, box, base)
+        bounds_reduce(measures, counts, id, box, base)
 
 
 def shard_lo(start: Int, stop: Int, workers: Int, w: Int) -> Int:
@@ -573,11 +583,14 @@ def run_pipeline(bytes: List[UInt8], trie: Trie, items: List[Item]) -> PipelineR
     var workers = parallelism_level()
     if workers < 1:
         workers = 1
-    var slots = List[Float32](unsafe_uninit_length=byte_len * SLOT_STRIDE)
-    unsafe_memset_zero(slots.unsafe_ptr(), len(slots))
+    var measures = List[Float32](unsafe_uninit_length=byte_len * MEASURE_STRIDE)
+    unsafe_memset_zero(measures.unsafe_ptr(), len(measures))
+    var counts = List[UInt32](unsafe_uninit_length=byte_len * COUNT_STRIDE)
+    unsafe_memset_zero(counts.unsafe_ptr(), len(counts))
     var ord_to_byte = List[UInt32](unsafe_uninit_length=byte_len)
     unsafe_memset_zero(ord_to_byte.unsafe_ptr(), len(ord_to_byte))
-    var sp = slots.unsafe_ptr()
+    var mp = measures.unsafe_ptr()
+    var cp = counts.unsafe_ptr()
     var op = ord_to_byte.unsafe_ptr()
 
     # ── decode: shards write disjoint slot ranges ────────────────────────────
@@ -585,7 +598,7 @@ def run_pipeline(bytes: List[UInt8], trie: Trie, items: List[Item]) -> PipelineR
     for w in range(workers):
         var a = shard_lo(0, byte_len, workers, w)
         var b = shard_lo(0, byte_len, workers, w + 1)
-        tg.create_task(_decode_shard(bytes, sp, trie, a, b))
+        tg.create_task(_decode_shard(bytes, mp, cp, trie, a, b))
     tg.wait()
 
     # ── ordered miss rebuild + leader count: one serial flags pass (the GPU's
@@ -594,7 +607,7 @@ def run_pipeline(bytes: List[UInt8], trie: Trie, items: List[Item]) -> PipelineR
     var leaders = 0
     var id = 0
     while id < byte_len:
-        var flags = Int(sp[unsafe_offset = id * SLOT_STRIDE + S_FLAGS])
+        var flags = Int(cp[unsafe_offset = id * COUNT_STRIDE + C_FLAGS])
         if (flags & F_LEADER) != 0:
             leaders += 1
             if (flags & F_MISSING) != 0:
@@ -609,7 +622,7 @@ def run_pipeline(bytes: List[UInt8], trie: Trie, items: List[Item]) -> PipelineR
     var kp = item_bounds.unsafe_ptr()
     var tg2 = TaskGroup()
     for i in range(item_count):
-        tg2.create_task(_fold_item(sp, items[i], op, kp, i * 8))
+        tg2.create_task(_fold_item(mp, cp, items[i], op, kp, i * 8))
     tg2.wait()
 
     # ── paginate: stride DERIVED from the fold scalars; inactive items skip ───
@@ -623,7 +636,7 @@ def run_pipeline(bytes: List[UInt8], trie: Trie, items: List[Item]) -> PipelineR
         for w in range(workers):
             var a = shard_lo(start, stop, workers, w)
             var b = shard_lo(start, stop, workers, w + 1)
-            tg3.create_task(_paginate_shard(sp, items[i], stride, a, b))
+            tg3.create_task(_paginate_shard(mp, cp, items[i], stride, a, b))
     tg3.wait()
 
     # ── per-item boxes: sharded local boxes, exact min/max merge ─────────────
@@ -651,7 +664,7 @@ def run_pipeline(bytes: List[UInt8], trie: Trie, items: List[Item]) -> PipelineR
         for w in range(workers):
             var a = shard_lo(start, stop, workers, w)
             var b = shard_lo(start, stop, workers, w + 1)
-            tg4.create_task(_bounds_shard(sp, xp, w * 8, a, b))
+            tg4.create_task(_bounds_shard(mp, cp, xp, w * 8, a, b))
         tg4.wait()
         item_bounds[b8 + 0] = F64_INF
         item_bounds[b8 + 1] = F64_INF
@@ -684,7 +697,8 @@ def run_pipeline(bytes: List[UInt8], trie: Trie, items: List[Item]) -> PipelineR
     _ = len(shard_boxes)
 
     var r = PipelineResult()
-    r.slots = slots^
+    r.measures = measures^
+    r.counts = counts^
     r.ord_to_byte = ord_to_byte^
     r.misses = misses^
     r.leaders = leaders

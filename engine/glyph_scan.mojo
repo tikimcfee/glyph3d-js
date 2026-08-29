@@ -23,13 +23,13 @@ from glyph_pipeline import (
     Trie,
     Item,
     PipelineResult,
-    SLOT_STRIDE,
-    S_ADVANCE,
-    S_ROW,
-    S_COL,
-    S_FLAGS,
-    S_LINE_ADV,
-    S_ORD,
+    MEASURE_STRIDE, COUNT_STRIDE,
+    M_ADVANCE,
+    C_ROW,
+    C_COL,
+    C_FLAGS,
+    M_LINE_ADV,
+    C_ORD,
     F_LEADER,
     F_NEWLINE,
     F_RENDERED,
@@ -62,14 +62,15 @@ comptime CHUNK_SIZE = 64
 comptime GROUP_SIZE = 256
 
 
-def scan_leaf[so: Origin[mut=True]](
-    slots: Pointer[Float32, so], id: Int, wrap: Int, is_item_start: Bool
+def scan_leaf[so: Origin[mut=True], xo: Origin[mut=True]](
+    measures: Pointer[Float32, so],
+    counts: Pointer[UInt32, xo], id: Int, wrap: Int, is_item_start: Bool
 ) -> ScanElem:
-    """The leaf for byte `id`, read from the decoded slots."""
-    var flags = Int(slots[unsafe_offset = id * SLOT_STRIDE + S_FLAGS])
+    """The leaf for byte `id`, read from the decoded measures."""
+    var flags = Int(counts[unsafe_offset = id * COUNT_STRIDE + C_FLAGS])
     return scan_leaf_value(
         (flags & F_NEWLINE) != 0,
-        slots[unsafe_offset = id * SLOT_STRIDE + S_ADVANCE],
+        measures[unsafe_offset = id * MEASURE_STRIDE + M_ADVANCE],
         (flags & F_LEADER) != 0,
         wrap,
         is_item_start,
@@ -83,8 +84,9 @@ def _cursor_advance(items: List[Item], mut idx: Int, id: Int):
         idx += 1
 
 
-def fold_range[so: Origin[mut=True]](
-    slots: Pointer[Float32, so],
+def fold_range[so: Origin[mut=True], xo: Origin[mut=True]](
+    measures: Pointer[Float32, so],
+    counts: Pointer[UInt32, xo],
     items: List[Item],
     wraps: List[Int],
     from_byte: Int,
@@ -98,13 +100,14 @@ def fold_range[so: Origin[mut=True]](
     var id = from_byte
     while id < to_byte:
         _cursor_advance(items, idx, id)
-        var leaf = scan_leaf(slots, id, wraps[idx], id == items[idx].byte_start)
+        var leaf = scan_leaf(measures, counts, id, wraps[idx], id == items[idx].byte_start)
         scan_combine(acc, leaf)
         id += 1
 
 
-async def _chunk_reduce_shard[so: Origin[mut=True], po: Origin[mut=True]](
-    slots: Pointer[Float32, so],
+async def _chunk_reduce_shard[so: Origin[mut=True], xo: Origin[mut=True], po: Origin[mut=True]](
+    measures: Pointer[Float32, so],
+    counts: Pointer[UInt32, xo],
     items: List[Item],
     wraps: List[Int],
     partials: Pointer[ScanElem, po],
@@ -118,7 +121,7 @@ async def _chunk_reduce_shard[so: Origin[mut=True], po: Origin[mut=True]](
         var to = (c + 1) * k
         if to > n:
             to = n
-        fold_range(slots, items, wraps, c * k, to, acc)
+        fold_range(measures, counts, items, wraps, c * k, to, acc)
         partials[unsafe_offset = c] = acc^
 
 
@@ -166,12 +169,14 @@ async def _partial_scan_shard[
 
 
 async def _apply_shard[
-    so: Origin[mut=True], xo: Origin[mut=True], oo: Origin[mut=True]
+    so: Origin[mut=True], xo: Origin[mut=True], po: Origin[mut=True],
+    oo: Origin[mut=True],
 ](
-    slots: Pointer[Float32, so],
+    measures: Pointer[Float32, so],
+    counts: Pointer[UInt32, xo],
     items: List[Item],
     wraps: List[Int],
-    partial_prefix: Pointer[ScanElem, xo],
+    partial_prefix: Pointer[ScanElem, po],
     ord_to_byte: Pointer[UInt32, oo],
     n: Int,
     k: Int,
@@ -194,25 +199,27 @@ async def _apply_shard[
             if is_start:
                 run = scan_identity()
                 run.wrap = wraps[idx]
-            var o = id * SLOT_STRIDE
-            var flags = Int(slots[unsafe_offset = o + S_FLAGS])
+            var mo = id * MEASURE_STRIDE
+            var co = id * COUNT_STRIDE
+            var flags = Int(counts[unsafe_offset = co + C_FLAGS])
             if (flags & F_LEADER) != 0:
                 var v = lanes_from_prefix(run, wraps[idx])
-                slots[unsafe_offset = o + S_ROW] = Float32(v.row)
-                slots[unsafe_offset = o + S_COL] = Float32(v.col)
-                slots[unsafe_offset = o + S_LINE_ADV] = v.line_adv
-                slots[unsafe_offset = o + S_ORD] = Float32(v.ord)
-                slots[unsafe_offset = o + S_FLAGS] = Float32(flags | F_RENDERED)
+                counts[unsafe_offset = co + C_ROW] = UInt32(v.row)
+                counts[unsafe_offset = co + C_COL] = UInt32(v.col)
+                measures[unsafe_offset = mo + M_LINE_ADV] = v.line_adv
+                counts[unsafe_offset = co + C_ORD] = UInt32(v.ord)
+                counts[unsafe_offset = co + C_FLAGS] = UInt32(flags | F_RENDERED)
                 ord_to_byte[unsafe_offset = items[idx].byte_start + v.ord] = UInt32(id)
-            var leaf = scan_leaf(slots, id, wraps[idx], is_start)
+            var leaf = scan_leaf(measures, counts, id, wraps[idx], is_start)
             scan_combine(run, leaf)
             id += 1
 
 
 async def _resolve_x_shard[
-    so: Origin[mut=True], oo: Origin[mut=True], ko: Origin[mut=True]
+    so: Origin[mut=True], xo: Origin[mut=True], oo: Origin[mut=True], ko: Origin[mut=True]
 ](
-    slots: Pointer[Float32, so],
+    measures: Pointer[Float32, so],
+    counts: Pointer[UInt32, xo],
     item: Item,
     ord_to_byte: Pointer[UInt32, oo],
     scalars: Pointer[Float64, ko],
@@ -221,7 +228,7 @@ async def _resolve_x_shard[
     stop: Int,
 ):
     for id in range(start, stop):
-        resolve_x(slots, id, item, ord_to_byte, scalars, scalar_base)
+        resolve_x(measures, counts, id, item, ord_to_byte, scalars, scalar_base)
 
 
 def run_scan_pipeline(
@@ -243,21 +250,24 @@ def run_scan_pipeline(
         workers = 1
 
     # ── dispatch 1: decode (shared kernel), sharded ───────────────────────────
-    var slots = List[Float32](unsafe_uninit_length=n * SLOT_STRIDE)
-    unsafe_memset_zero(slots.unsafe_ptr(), len(slots))
-    var sp = slots.unsafe_ptr()
+    var measures = List[Float32](unsafe_uninit_length=n * MEASURE_STRIDE)
+    unsafe_memset_zero(measures.unsafe_ptr(), len(measures))
+    var counts = List[UInt32](unsafe_uninit_length=n * COUNT_STRIDE)
+    unsafe_memset_zero(counts.unsafe_ptr(), len(counts))
+    var mp = measures.unsafe_ptr()
+    var cp = counts.unsafe_ptr()
     var tg1 = TaskGroup()
     for w in range(workers):
         var a = shard_lo(0, n, workers, w)
         var b = shard_lo(0, n, workers, w + 1)
-        tg1.create_task(_decode_shard(bytes, sp, trie, a, b))
+        tg1.create_task(_decode_shard(bytes, mp, cp, trie, a, b))
     tg1.wait()
 
     # Ordered miss rebuild (byte order, duplicates kept) — the serial pass.
     var misses = List[UInt32]()
     var id = 0
     while id < n:
-        var flags = Int(sp[unsafe_offset = id * SLOT_STRIDE + S_FLAGS])
+        var flags = Int(cp[unsafe_offset = id * COUNT_STRIDE + C_FLAGS])
         if (flags & F_LEADER) != 0 and (flags & F_MISSING) != 0:
             misses.append(
                 UInt32(decode_codepoint_at(bytes, id, sequence_length(bytes, id)))
@@ -280,7 +290,7 @@ def run_scan_pipeline(
     for w in range(workers):
         var a = shard_lo(0, num_chunks, workers, w)
         var b = shard_lo(0, num_chunks, workers, w + 1)
-        tg2.create_task(_chunk_reduce_shard(sp, items, wraps, pp, n, k, a, b))
+        tg2.create_task(_chunk_reduce_shard(mp, cp, items, wraps, pp, n, k, a, b))
     tg2.wait()
 
     # ── dispatch 3: spineReduce — thread per group, groups sharded ────────────
@@ -326,7 +336,7 @@ def run_scan_pipeline(
     for w in range(workers):
         var a = shard_lo(0, num_chunks, workers, w)
         var b = shard_lo(0, num_chunks, workers, w + 1)
-        tg6.create_task(_apply_shard(sp, items, wraps, xp, op, n, k, a, b))
+        tg6.create_task(_apply_shard(mp, cp, items, wraps, xp, op, n, k, a, b))
     tg6.wait()
 
     # ── dispatch 7: resolveX + fold-scalar reduce — per item, sharded, with
@@ -344,7 +354,7 @@ def run_scan_pipeline(
         for w in range(workers):
             var a = shard_lo(start, stop, workers, w)
             var b = shard_lo(start, stop, workers, w + 1)
-            tg7.create_task(_resolve_x_shard(sp, items[i2], op, ssp, w * 8, a, b))
+            tg7.create_task(_resolve_x_shard(mp, cp, items[i2], op, ssp, w * 8, a, b))
         tg7.wait()
         for w in range(workers):
             if shard_scalars[w * 8 + 6] > item_bounds[i2 * 8 + 6]:
@@ -363,7 +373,7 @@ def run_scan_pipeline(
         for w in range(workers):
             var a = shard_lo(start, stop, workers, w)
             var b = shard_lo(start, stop, workers, w + 1)
-            tg8.create_task(_paginate_shard(sp, items[i2], stride, a, b))
+            tg8.create_task(_paginate_shard(mp, cp, items[i2], stride, a, b))
     tg8.wait()
 
     # ── per-item boxes: sharded local boxes, exact min/max merge ──────────────
@@ -391,7 +401,7 @@ def run_scan_pipeline(
         for w in range(workers):
             var a = shard_lo(start, stop, workers, w)
             var b = shard_lo(start, stop, workers, w + 1)
-            tg9.create_task(_bounds_shard(sp, sbp, w * 8, a, b))
+            tg9.create_task(_bounds_shard(mp, cp, sbp, w * 8, a, b))
         tg9.wait()
         item_bounds[b8 + 0] = F64_INF
         item_bounds[b8 + 1] = F64_INF
@@ -422,7 +432,7 @@ def run_scan_pipeline(
     var leaders = 0
     id = 0
     while id < n:
-        if (Int(sp[unsafe_offset = id * SLOT_STRIDE + S_FLAGS]) & F_LEADER) != 0:
+        if (Int(cp[unsafe_offset = id * COUNT_STRIDE + C_FLAGS]) & F_LEADER) != 0:
             leaders += 1
         id += 1
 
@@ -439,7 +449,8 @@ def run_scan_pipeline(
     _ = len(shard_boxes)
 
     var r = PipelineResult()
-    r.slots = slots^
+    r.measures = measures^
+    r.counts = counts^
     r.ord_to_byte = ord_to_byte^
     r.misses = misses^
     r.leaders = leaders

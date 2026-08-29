@@ -13,7 +13,7 @@
  * the class of bug (grouping-dependent float drift) this rig exists to catch.
  *
  * Format (all little-endian, packed, no alignment):
- *   u32 magic 'G3DF' (0x46443347)   u32 version=2
+ *   u32 magic 'G3DF' (0x46443347)   u32 version=3
  *
  * v2 CARRIER NOTE: float payloads (trie blocks, slots) are stored as f64 VALUES,
  * not as the buffer's current representation. f64 holds every f32 exactly (and
@@ -36,7 +36,8 @@
  *   u32 leaders
  *   u32 missCount  u32[missCount] misses (codepoints, byte order, dups kept)
  *   u32[byteLen] ordToByte
- *   f64[byteLen*12] slots   (VALUES, not the buffer's representation)
+ *   f64[byteLen*8] measures  (VALUES — X Y Z ADVANCE HEIGHT GLYPH_ID BASE_X LINE_ADV)
+ *   u32[byteLen*4] counts    (EXACT   — ROW COL FLAGS ORD)
  *   itemCount × f64[8] item bounds row (minX minY minZ maxX maxY maxZ totalRows
  *     maxRowExtent; an item with no leaders is +inf/+inf/+inf/-inf/-inf/-inf/0/0)
  *   f64[8] batch bounds row (same shape/sentinel)
@@ -47,7 +48,11 @@
 import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { runPipeline, SLOT_STRIDE, FLOAT_LANES, fval } from '../../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
+import { runPipeline, SLOT_STRIDE, FLOAT_LANES, fval,
+    S_GLYPH_ID, S_ADVANCE, S_HEIGHT, S_X, S_Y, S_Z,
+    S_ROW, S_COL, S_FLAGS, S_BASE_X, S_LINE_ADV, S_ORD,
+} from '../../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
+import { MEASURE_STRIDE, COUNT_STRIDE } from '../../packages/glyph3d-core/src/compute/glyphSchema.js';
 import { buildGlyphTrie } from '../../packages/glyph3d-core/src/compute/GlyphTrie.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -193,12 +198,30 @@ const CASES = [
 // BIT PATTERN as an f64 value and every fixture shifts while nothing semantic
 // moved. S_GLYPH_ID is deferred (still a trie float), so it decodes as a float.
 // FLOAT_LANES is imported — the lane kinds live in ONE place (the oracle).
+// v3: the oracle still carries 12 mixed lanes in one u32 array; the SCHEMA says
+// measures and counts are different buffers. Split here — the generator is the
+// seam, exactly as it was for the f64 carrier in v2. Measures go out as f64
+// VALUES (representation-independent); counts go out as exact u32.
+const MEASURE_FROM = [S_X, S_Y, S_Z, S_ADVANCE, S_HEIGHT, S_GLYPH_ID, S_BASE_X, S_LINE_ADV];
+const COUNT_FROM = [S_ROW, S_COL, S_FLAGS, S_ORD];
+if (MEASURE_FROM.length !== MEASURE_STRIDE || COUNT_FROM.length !== COUNT_STRIDE) {
+    throw new Error(`fixture lane map disagrees with the schema (${MEASURE_FROM.length}/${MEASURE_STRIDE}, `
+        + `${COUNT_FROM.length}/${COUNT_STRIDE}) — run bun tools/gen-schema.mjs`);
+}
 function writeSlotValues(w, slots) {
-    for (let i = 0; i < slots.length; i++) {
-        const lane = i % SLOT_STRIDE;
-        w.f64(FLOAT_LANES.has(lane) ? fval(slots[i]) : slots[i]);
+    const nb = slots.length / SLOT_STRIDE;
+    for (let i = 0; i < nb; i++) {
+        const base = i * SLOT_STRIDE;
+        for (const lane of MEASURE_FROM) {
+            w.f64(FLOAT_LANES.has(lane) ? fval(slots[base + lane]) : slots[base + lane]);
+        }
+    }
+    for (let i = 0; i < nb; i++) {
+        const base = i * SLOT_STRIDE;
+        for (const lane of COUNT_FROM) w.u32(slots[base + lane]);
     }
 }
+
 
 // ── Binary writer ───────────────────────────────────────────────────────────
 class Writer {
@@ -234,7 +257,7 @@ for (const c of CASES) {
     const r = runPipeline(c.bytes, trie, { items });
 
     const w = new Writer();
-    w.u32(0x46443347); w.u32(2);
+    w.u32(0x46443347); w.u32(3);
     w.u32(c.bytes.length); w.u32(items.length);
     w.u32(trie.blockIndex.length); w.u32(trie.blocks.length);
     w.bytes(c.bytes);

@@ -10,8 +10,14 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bakeFile } from '../../packages/glyph3d-core/src/compute/glyphBake.js';
-import { runPipeline } from '../../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
+import { runPipeline, SLOT_STRIDE, S_ROW } from '../../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
 import { runScanPipeline } from '../../packages/glyph3d-core/src/compute/glyphPipelineScan.js';
+
+// Probe a NAMED lane of a named byte. The old checksum sampled slots[12345] — a
+// raw flat index, silently coupled to a 12-lane stride, which stopped meaning the
+// same thing the moment the buffers split. ROW is a count: exact in both languages
+// regardless of how either one lays its buffers out.
+const PROBE_BYTE = 1028;
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const raw = readFileSync(join(HERE, 'bench.bin'));
@@ -46,9 +52,9 @@ bench('bake      (js/bun)', () => {
 });
 bench('pipeline  (js/bun)', () => {
     const r = runPipeline(bytes, trie, { origin: { x: 0, y: 0, z: 0 }, lineHeight: 1.0, wrapWidth: 100 });
-    return r.leaders + (r.slots[12345] | 0);
+    return r.leaders + (r.slots[PROBE_BYTE * SLOT_STRIDE + S_ROW] | 0);
 });
 bench('scan      (js/bun)', () => {
     const r = runScanPipeline(bytes, trie, { origin: { x: 0, y: 0, z: 0 }, lineHeight: 1.0, wrapWidth: 100 });
-    return r.leaders + (r.slots[12345] | 0);
+    return r.leaders + (r.slots[PROBE_BYTE * SLOT_STRIDE + S_ROW] | 0);
 });

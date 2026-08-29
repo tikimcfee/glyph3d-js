@@ -1,0 +1,69 @@
+{
+  "$comment": [
+    "THE SINGLE SOURCE OF TRUTH for how this pipeline carries values.",
+    "",
+    "Every wall this codebase hit was one mistake said twice: an exact integer",
+    "carried in a float. Slot ordinals aliased past 2^24. Pick ID bases aliased",
+    "past 2^24. The native port aliased past 2^24. Each layer decided,",
+    "independently and in a comment, what kind each field was, and the copies drifted.",
+    "",
+    "The fix is NOT a table saying which lanes are which. A table is a rule you have",
+    "to remember, and a rule you have to remember is a compat layer wearing a comment.",
+    "",
+    "The fix is TWO BUFFERS. Where a value lives IS what kind it is.",
+    "",
+    "  measures  f32   where things are in space. Floating-point physics.",
+    "                  Rounding is load-bearing and must be reproduced exactly.",
+    "  counts    u32   what the data is and how to read it. Determinism.",
+    "                  Exact across the full 2^32 range. No rounding, ever.",
+    "",
+    "There are no bitcasts. There is no fbits/fval. There is no isFloatLane().",
+    "You cannot put a count in the measures buffer by accident, because it is a",
+    "different array. The classification is structural, not advisory.",
+    "",
+    "In BOTH buffers the render-read lanes come first and fold scratch is at the",
+    "tail, so the record format is a truncation rather than a repack."
+  ],
+
+  "buffers": {
+    "measures": {
+      "carrier": "f32",
+      "stride": 8,
+      "lanes": [
+        { "name": "X",        "index": 0, "read_by_vertex": true },
+        { "name": "Y",        "index": 1, "read_by_vertex": true,
+          "note": "Addressed POSITIONALLY as X+1 in glyphVertex.js — a search for S_Y misses that read." },
+        { "name": "Z",        "index": 2, "read_by_vertex": true,
+          "note": "Addressed POSITIONALLY as X+2 in glyphVertex.js." },
+        { "name": "ADVANCE",  "index": 3, "read_by_vertex": true },
+        { "name": "HEIGHT",   "index": 4, "read_by_vertex": true },
+        { "name": "GLYPH_ID", "index": 5, "read_by_vertex": true,
+          "misplaced": "This is an IDENTITY living in the measures buffer. It is here only because it is copied verbatim from the trie's f32 blocks, so it cannot move until the TRIE FORMAT moves. It is the single exception in the system and it is deliberately visible: one identity, in the wrong array, naming its own fix." },
+        { "name": "BASE_X",   "index": 6, "scratch": true },
+        { "name": "LINE_ADV", "index": 7, "scratch": true }
+      ]
+    },
+    "counts": {
+      "carrier": "u32",
+      "stride": 4,
+      "lanes": [
+        { "name": "ROW",   "index": 0, "read_by_vertex": true },
+        { "name": "COL",   "index": 1, "read_by_vertex": true },
+        { "name": "FLAGS", "index": 2, "bitfield": true,
+          "note": "Read with bitwise ops by later dispatches, so not render-scratch." },
+        { "name": "ORD",   "index": 3, "scratch": true,
+          "note": "The lane that started all of this. Aliased past 2^24 as an f32; exact to 2^32 as a native count." }
+      ]
+    }
+  },
+
+  "identities": [
+    { "name": "slotOrdinal", "carrier": "u32", "boundedBy": "leaders in one ITEM",
+      "witness": "ordToByte[byteStart + ord] === id",
+      "note": "Per-ITEM, not per-arena: ord resets for each item." },
+    { "name": "pickId", "carrier": "u32", "boundedBy": "sum of live glyph counts",
+      "witness": "a readback for a known glyph must resolve to that glyph",
+      "broken": "Rides a FLOAT uniform today (uniform(0) from a JS number). Aliases past 2^24; the guard admits 0x7FFFFFFF, 127x too permissive, and WARNS rather than refuses. Reachable since the arena passed 2^24." },
+    { "name": "itemId", "carrier": "u32", "boundedBy": "live items" }
+  ]
+}

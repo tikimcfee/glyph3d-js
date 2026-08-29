@@ -5,7 +5,8 @@
 # runners can never drift on the format. Format spec: engine/fixtures/gen.mjs.
 
 from std.memory import bitcast
-from glyph_pipeline import Trie, Item, SLOT_STRIDE
+from glyph_schema import MEASURE_STRIDE, COUNT_STRIDE
+from glyph_pipeline import Trie, Item
 
 comptime PIPE_MAGIC = 0x46443347
 
@@ -59,7 +60,8 @@ struct PipeFixture(Movable):
     var exp_leaders: Int
     var exp_misses: List[UInt32]
     var exp_ord: List[UInt32]
-    var exp_slots: List[Float64]  # VALUES (v2 carrier), not buffer bits
+    var exp_measures: List[Float64]  # VALUES (f64 carrier)
+    var exp_counts: List[UInt32]     # EXACT — counts have no carrier question
     var exp_item_bounds: List[UInt64]
     var exp_batch: List[UInt64]
 
@@ -72,7 +74,8 @@ struct PipeFixture(Movable):
         self.exp_leaders = 0
         self.exp_misses = List[UInt32]()
         self.exp_ord = List[UInt32]()
-        self.exp_slots = List[Float64]()
+        self.exp_measures = List[Float64]()
+        self.exp_counts = List[UInt32]()
         self.exp_item_bounds = List[UInt64]()
         self.exp_batch = List[UInt64]()
 
@@ -85,8 +88,8 @@ def load_pipe_fixture(path: String) raises -> PipeFixture:
 
     if Int(r.u32()) != PIPE_MAGIC:
         raise Error(path + ": bad magic (not a .pipe.bin fixture)")
-    if Int(r.u32()) != 2:
-        raise Error(path + ": unknown fixture version (expected v2 — regenerate)")
+    if Int(r.u32()) != 3:
+        raise Error(path + ": unknown fixture version (expected v3 — regenerate)")
 
     var fx = PipeFixture()
     fx.byte_len = Int(r.u32())
@@ -133,8 +136,10 @@ def load_pipe_fixture(path: String) raises -> PipeFixture:
         fx.exp_misses.append(r.u32())
     for _ in range(fx.byte_len):
         fx.exp_ord.append(r.u32())
-    for _ in range(fx.byte_len * SLOT_STRIDE):
-        fx.exp_slots.append(r.f64())
+    for _ in range(fx.byte_len * MEASURE_STRIDE):
+        fx.exp_measures.append(r.f64())
+    for _ in range(fx.byte_len * COUNT_STRIDE):
+        fx.exp_counts.append(r.u32())
     for _ in range(fx.item_count * 8):
         fx.exp_item_bounds.append(r.u64())
     for _ in range(8):

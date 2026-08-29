@@ -11,27 +11,11 @@
 
 from std.sys import argv
 from std.memory import bitcast
-from glyph_pipeline import run_pipeline, SLOT_STRIDE
+from glyph_schema import MEASURE_STRIDE, COUNT_STRIDE, measure_lane_name, count_lane_name
+from glyph_pipeline import run_pipeline
 from fixture_io import PipeFixture, load_pipe_fixture
 
 comptime MAX_PRINTED = 12
-
-
-def lane_name(lane: Int) -> String:
-    var names = List[String]()
-    names.append("S_GLYPH_ID")
-    names.append("S_ADVANCE")
-    names.append("S_HEIGHT")
-    names.append("S_X")
-    names.append("S_Y")
-    names.append("S_Z")
-    names.append("S_ROW")
-    names.append("S_COL")
-    names.append("S_FLAGS")
-    names.append("S_BASE_X")
-    names.append("S_LINE_ADV")
-    names.append("S_ORD")
-    return names[lane]
 
 
 def check_case(path: String) raises -> Int:
@@ -62,21 +46,30 @@ def check_case(path: String) raises -> Int:
                 printed += 1
 
     for slot in range(fx.byte_len):
-        for lane in range(SLOT_STRIDE):
-            var idx = slot * SLOT_STRIDE + lane
-            var g = UInt32(got.slots[idx].to_bits())
-            # THE CLASSIFICATION SITE. The fixture carries values; this line
-            # says how the slot buffer represents them. Every lane is f32 today,
-            # so every expected value narrows to f32 and compares as bits. When a
-            # lane's representation changes, it changes HERE — not in the corpus.
-            var e = UInt32(Float32(fx.exp_slots[idx]).to_bits())
+        # MEASURES: f64 values narrowed to the buffer's f32 and compared as bits.
+        for lane in range(MEASURE_STRIDE):
+            var idx = slot * MEASURE_STRIDE + lane
+            var g = UInt32(got.measures[idx].to_bits())
+            var e = UInt32(Float32(fx.exp_measures[idx]).to_bits())
             if g != e:
                 bad += 1
                 if printed < MAX_PRINTED:
                     print(
-                        "  slot", slot, lane_name(lane),
-                        ": got", got.slots[idx], "(", g, ") expected",
-                        bitcast[DType.float32](e), "(", e, ")",
+                        "  slot", slot, measure_lane_name(lane),
+                        "got", got.measures[idx], "expected", Float32(fx.exp_measures[idx]),
+                    )
+                    printed += 1
+        # COUNTS: exact integers. No carrier, no narrowing, no classification —
+        # this comparison has no way to be subtly wrong, which is the point of
+        # putting them in their own buffer.
+        for lane in range(COUNT_STRIDE):
+            var idx = slot * COUNT_STRIDE + lane
+            if got.counts[idx] != fx.exp_counts[idx]:
+                bad += 1
+                if printed < MAX_PRINTED:
+                    print(
+                        "  slot", slot, count_lane_name(lane),
+                        "got", got.counts[idx], "expected", fx.exp_counts[idx],
                     )
                     printed += 1
 

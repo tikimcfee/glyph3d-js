@@ -11,13 +11,13 @@
 # "which glyph is the n-th leader of this item" — is recorded twice in different
 # types:
 #
-#   slots[o + S_ORD]                       f32 lane   (lossy past 2^24)
+#   counts[co + C_ORD]                     u32 count  (exact to 2^32 since the split)
 #   ord_to_byte[item.byte_start + ord]     u32 array  (exact to 2^32)
 #
 # So the u32 array is an independent, exact witness for the lossy lane, and
 # round-tripping one through the other must be the identity:
 #
-#   ord_to_byte[byte_start + Int(slots[o + S_ORD])] == id      for every leader
+#   ord_to_byte[byte_start + Int(counts[co + C_ORD])] == id    for every leader
 #
 # When two leaders alias onto one ordinal, the later store wins and the earlier
 # glyph's round-trip lands on the wrong byte. The check fails loudly, with no
@@ -33,10 +33,8 @@
 # Run: mojo run -I engine engine/ordinal_invariant.mojo engine/fixtures/*.pipe.bin
 
 from std.sys import argv
-from glyph_pipeline import (
-    run_pipeline, Item, Trie, PipelineResult,
-    SLOT_STRIDE, S_ORD, S_FLAGS, F_LEADER,
-)
+from glyph_schema import COUNT_STRIDE, C_ORD, C_FLAGS
+from glyph_pipeline import run_pipeline, Item, Trie, PipelineResult, F_LEADER
 from fixture_io import load_pipe_fixture
 
 comptime MAX_PRINTED = 6
@@ -51,9 +49,9 @@ def check_ordinals(result: PipelineResult, items: List[Item]) -> Int:
         var stop = start + items[i].byte_count
         var id = start
         while id < stop:
-            var o = id * SLOT_STRIDE
-            if (Int(result.slots[o + S_FLAGS]) & F_LEADER) != 0:
-                var lane = Int(result.slots[o + S_ORD])
+            var co = id * COUNT_STRIDE
+            if (Int(result.counts[co + C_FLAGS]) & F_LEADER) != 0:
+                var lane = Int(result.counts[co + C_ORD])
                 var witness = Int(result.ord_to_byte[start + lane])
                 if witness != id:
                     bad += 1
@@ -68,8 +66,14 @@ def check_ordinals(result: PipelineResult, items: List[Item]) -> Int:
     return bad
 
 
-def synthetic_item_case(trie: Trie, n_bytes: Int) raises -> Int:
-    """One item of `n_bytes` single-byte leaders — the shape that breaks the lane."""
+def synthetic_item_case(trie: Trie, n_bytes: Int, force_f32_ordinal: Bool = False) raises -> Int:
+    """One item of `n_bytes` single-byte leaders.
+
+    `force_f32_ordinal` re-introduces the OLD carrier by round-tripping the ordinal
+    through an f32 after the fact. The real wall is gone — ORD is a native u32 count
+    now — so without this the boundary probe has nothing left to catch and the
+    checker would be decorative. This is how it stays provably live: the mutation
+    is built into the runner rather than applied by hand."""
     var bytes = List[UInt8](unsafe_uninit_length=n_bytes)
     for i in range(n_bytes):
         bytes[i] = UInt8(97)  # 'a': one byte, one leader, no newline
@@ -80,6 +84,12 @@ def synthetic_item_case(trie: Trie, n_bytes: Int) raises -> Int:
     var items = List[Item]()
     items.append(it^)
     var result = run_pipeline(bytes, trie, items)
+    if force_f32_ordinal:
+        for id in range(n_bytes):
+            var co = id * COUNT_STRIDE
+            if (Int(result.counts[co + C_FLAGS]) & F_LEADER) != 0:
+                var ord = Int(result.counts[co + C_ORD])
+                result.counts[co + C_ORD] = UInt32(Int(Float32(ord)))
     return check_ordinals(result, items)
 
 
@@ -109,16 +119,23 @@ def main() raises:
     var fx = load_pipe_fixture(trie_src)
     var wall = 1 << 24
 
+    # THE WALL FELL. ORD is a native u32 count, so an item past 2^24 no longer
+    # aliases. The probe therefore asserts the opposite of what it once did — and
+    # then re-introduces the f32 carrier deliberately, because a check that can no
+    # longer fail proves nothing (CLAUDE.md: a green must be earned).
     print("\nboundary probe (single item, one leader per byte):")
-    var under = synthetic_item_case(fx.trie, wall - 2)
-    print("  ", wall - 2, "bytes →", under, "aliased —", "OK" if under == 0 else "UNEXPECTED")
     var over = synthetic_item_case(fx.trie, wall + 2)
-    print("  ", wall + 2, "bytes →", over, "aliased —", "the wall, observed" if over > 0 else "NOT OBSERVED")
+    print("  ", wall + 2, "bytes, u32 ordinal ->", over, "aliased —",
+          "the wall is gone" if over == 0 else "UNEXPECTED: still aliasing")
+    var forced = synthetic_item_case(fx.trie, wall + 2, True)
+    print("  ", wall + 2, "bytes, f32 ordinal ->", forced, "aliased —",
+          "the checker is live" if forced > 0 else "DECORATIVE: it cannot fail")
 
     if total_bad != 0:
         raise Error("ordinal invariant violated on a real fixture")
-    if under != 0:
-        raise Error("false positive below the wall — checker is wrong")
-    if over == 0:
-        raise Error("checker did not fire above the wall — it proves nothing")
-    print("\nordinal invariant: holds on every fixture; fires exactly at 2^24 per item")
+    if over != 0:
+        raise Error("a u32 ordinal aliased past 2^24 — the migration is incomplete")
+    if forced == 0:
+        raise Error("the f32-carrier mutation did not fire — this checker is decorative")
+    print("\nordinal invariant: holds on every fixture; the 2^24 wall is gone,")
+    print("and the checker still fires when the f32 carrier is put back.")

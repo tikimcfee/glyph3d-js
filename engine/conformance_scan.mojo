@@ -8,9 +8,9 @@
 #
 #   - non-leader slots: every lane bit-equal
 #   - EXACT lanes (id, advance, height, row, col, flags, ord): bit-equal
-#   - fold>0 float lanes (S_X, S_Y, S_Z, S_BASE_X): bit-equal — resolveX's forward
+#   - fold>0 measure lanes (M_X, M_Y, M_Z, M_BASE_X): bit-equal — resolveX's forward
 #     f32 re-sum IS the serial segAdv
-#   - foldless float lanes + S_LINE_ADV: ≤ 1e-4 RELATIVE (serial f64 prefix vs the
+#   - foldless measure lanes + M_LINE_ADV: ≤ 1e-4 RELATIVE (serial f64 prefix vs the
 #     scan's f32 grouping — differs by construction; integers never do)
 #   - bounds: totalRows exact; float lanes ≤ 1e-4 relative (inf compares by bits)
 #   - leaders / misses / ordToByte: exact
@@ -19,19 +19,17 @@
 
 from std.sys import argv
 from std.memory import bitcast
-from glyph_pipeline import Item, SLOT_STRIDE, S_FLAGS, F_LEADER, trunc_nonneg
+from glyph_schema import (
+    MEASURE_STRIDE, COUNT_STRIDE, C_FLAGS, measure_lane_name,
+    M_X, M_Y, M_Z, M_BASE_X, M_LINE_ADV,
+)
+from glyph_pipeline import Item, F_LEADER, trunc_nonneg
 from glyph_scan import run_scan_pipeline
 from fixture_io import PipeFixture, load_pipe_fixture
 
 comptime MAX_PRINTED = 12
 comptime REL_EPS = 1e-4
 
-# Lane indexes (mirror glyph_pipeline's S_*).
-comptime L_X = 3
-comptime L_Y = 4
-comptime L_Z = 5
-comptime L_BASE_X = 9
-comptime L_LINE_ADV = 10
 
 
 def item_fold(it: Item) -> Int:
@@ -80,22 +78,22 @@ def check_case(path: String, chunk_size: Int, group_size: Int) raises -> Int:
                 printed += 1
 
     for slot in range(fx.byte_len):
-        var o = slot * SLOT_STRIDE
-        var is_leader = (Int(Float32(fx.exp_slots[o + S_FLAGS])) & F_LEADER) != 0
-        for lane in range(SLOT_STRIDE):
+        var o = slot * MEASURE_STRIDE
+        var is_leader = (Int(fx.exp_counts[slot * COUNT_STRIDE + C_FLAGS]) & F_LEADER) != 0
+        for lane in range(MEASURE_STRIDE):
             var idx = o + lane
-            var g32 = got.slots[idx]
-            var e32 = Float32(fx.exp_slots[idx])  # see conformance.mojo: classification site
+            var g32 = got.measures[idx]
+            var e32 = Float32(fx.exp_measures[idx])
             var bits_equal = UInt32(g32.to_bits()) == UInt32(e32.to_bits())
             var lane_ok: Bool
             if not is_leader:
                 lane_ok = bits_equal  # non-leader lanes never differ
-            elif lane == L_X or lane == L_Y or lane == L_Z or lane == L_BASE_X:
+            elif lane == M_X or lane == M_Y or lane == M_Z or lane == M_BASE_X:
                 if folds[slot] > 0:
                     lane_ok = bits_equal  # fold>0 float lanes must be bit-exact
                 else:
                     lane_ok = rel_close(Float64(e32), Float64(g32))
-            elif lane == L_LINE_ADV:
+            elif lane == M_LINE_ADV:
                 lane_ok = rel_close(Float64(e32), Float64(g32))
             else:
                 lane_ok = bits_equal  # the EXACT lanes

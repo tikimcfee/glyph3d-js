@@ -18,8 +18,10 @@
 from std.sys import argv, has_accelerator
 from std.gpu import global_idx
 from max.gpu.host import DeviceContext
+from glyph_schema import (
+    MEASURE_STRIDE, COUNT_STRIDE, M_GLYPH_ID, M_ADVANCE, M_HEIGHT, C_FLAGS,
+)
 from glyph_pipeline import (
-    SLOT_STRIDE, S_GLYPH_ID, S_ADVANCE, S_HEIGHT, S_FLAGS,
     BLOCK_SHIFT, BLOCK_MASK, ENTRY_STRIDE,
     LANE_GLYPH_ID, LANE_ADVANCE, LANE_HEIGHT, LANE_FLAGS,
     FLAG_MISSING, F_LEADER, F_NEWLINE, F_MISSING, NEWLINE,
@@ -34,7 +36,8 @@ def decode_kernel(
     bytes: MutPointer[UInt8, MutAnyOrigin],
     block_index: MutPointer[UInt32, MutAnyOrigin],
     blocks: MutPointer[Float32, MutAnyOrigin],
-    slots: MutPointer[Float32, MutAnyOrigin],
+    measures: MutPointer[Float32, MutAnyOrigin],
+    counts: MutPointer[UInt32, MutAnyOrigin],
     n_bytes: Int32,   # scalar kernel args must be fixed-width (Int is not DevicePassable)
 ):
     """One thread per byte — the exact body of decode_and_resolve."""
@@ -56,10 +59,11 @@ def decode_kernel(
     else:
         n = 0
 
-    var o = id * SLOT_STRIDE
+    var mo = id * MEASURE_STRIDE
+    var co = id * COUNT_STRIDE
     if n == 0:
-        slots[unsafe_offset = o + S_ADVANCE] = 0
-        slots[unsafe_offset = o + S_HEIGHT] = 0
+        measures[unsafe_offset = mo + M_ADVANCE] = 0
+        measures[unsafe_offset = mo + M_HEIGHT] = 0
         return
 
     # Bounds-checked continuation reads (the shader reads 0 past the end).
@@ -87,15 +91,15 @@ def decode_kernel(
     var tb = ((block << BLOCK_SHIFT) | (cp & BLOCK_MASK)) * ENTRY_STRIDE
 
     var missing = (Int(blocks[unsafe_offset = tb + LANE_FLAGS]) & FLAG_MISSING) != 0
-    slots[unsafe_offset = o + S_GLYPH_ID] = blocks[unsafe_offset = tb + LANE_GLYPH_ID]
-    slots[unsafe_offset = o + S_ADVANCE] = blocks[unsafe_offset = tb + LANE_ADVANCE]
-    slots[unsafe_offset = o + S_HEIGHT] = blocks[unsafe_offset = tb + LANE_HEIGHT]
+    measures[unsafe_offset = mo + M_GLYPH_ID] = blocks[unsafe_offset = tb + LANE_GLYPH_ID]
+    measures[unsafe_offset = mo + M_ADVANCE] = blocks[unsafe_offset = tb + LANE_ADVANCE]
+    measures[unsafe_offset = mo + M_HEIGHT] = blocks[unsafe_offset = tb + LANE_HEIGHT]
     var flags = F_LEADER
     if cp == NEWLINE:
         flags |= F_NEWLINE
     if missing:
         flags |= F_MISSING
-    slots[unsafe_offset = o + S_FLAGS] = Float32(flags)
+    counts[unsafe_offset = co + C_FLAGS] = UInt32(flags)
 
 
 def check_case(path: String, ctx: DeviceContext) raises -> Int:
@@ -103,15 +107,20 @@ def check_case(path: String, ctx: DeviceContext) raises -> Int:
     var n = fx.byte_len
     if n == 0:
         return 0
-    var n_slots = n * SLOT_STRIDE
+    var n_meas = n * MEASURE_STRIDE
+    var n_cnt = n * COUNT_STRIDE
 
     # ── CPU reference: the same kernel the conformance suites already prove ──
-    var cpu = List[Float32](unsafe_uninit_length=n_slots)
-    for i in range(n_slots):
-        cpu[i] = 0
-    var cp_ptr = cpu.unsafe_ptr()
+    var cpu_m = List[Float32](unsafe_uninit_length=n_meas)
+    for i in range(n_meas):
+        cpu_m[i] = 0
+    var cpu_c = List[UInt32](unsafe_uninit_length=n_cnt)
+    for i in range(n_cnt):
+        cpu_c[i] = 0
+    var cm = cpu_m.unsafe_ptr()
+    var cc = cpu_c.unsafe_ptr()
     for id in range(n):
-        decode_and_resolve(fx.bytes, cp_ptr, fx.trie, id)
+        decode_and_resolve(fx.bytes, cm, cc, fx.trie, id)
 
     # ── GPU ──────────────────────────────────────────────────────────────────
     var n_idx = len(fx.trie.block_index)
@@ -120,7 +129,8 @@ def check_case(path: String, ctx: DeviceContext) raises -> Int:
     var h_bytes = ctx.enqueue_create_host_buffer[DType.uint8](n)
     var h_index = ctx.enqueue_create_host_buffer[DType.uint32](n_idx)
     var h_blocks = ctx.enqueue_create_host_buffer[DType.float32](n_blk)
-    var h_slots = ctx.enqueue_create_host_buffer[DType.float32](n_slots)
+    var h_meas = ctx.enqueue_create_host_buffer[DType.float32](n_meas)
+    var h_cnt = ctx.enqueue_create_host_buffer[DType.uint32](n_cnt)
     ctx.synchronize()
     for i in range(n):
         h_bytes[i] = fx.bytes[i]
@@ -132,11 +142,13 @@ def check_case(path: String, ctx: DeviceContext) raises -> Int:
     var d_bytes = ctx.enqueue_create_buffer[DType.uint8](n)
     var d_index = ctx.enqueue_create_buffer[DType.uint32](n_idx)
     var d_blocks = ctx.enqueue_create_buffer[DType.float32](n_blk)
-    var d_slots = ctx.enqueue_create_buffer[DType.float32](n_slots)
+    var d_meas = ctx.enqueue_create_buffer[DType.float32](n_meas)
+    var d_cnt = ctx.enqueue_create_buffer[DType.uint32](n_cnt)
     ctx.enqueue_copy(dst_buf=d_bytes, src_buf=h_bytes)
     ctx.enqueue_copy(dst_buf=d_index, src_buf=h_index)
     ctx.enqueue_copy(dst_buf=d_blocks, src_buf=h_blocks)
-    d_slots.enqueue_fill(0.0)
+    d_meas.enqueue_fill(0.0)
+    d_cnt.enqueue_fill(0)
 
     comptime BLOCK = 256
     var grid = (n + BLOCK - 1) // BLOCK
@@ -144,27 +156,32 @@ def check_case(path: String, ctx: DeviceContext) raises -> Int:
         d_bytes.unsafe_ptr(),
         d_index.unsafe_ptr(),
         d_blocks.unsafe_ptr(),
-        d_slots.unsafe_ptr(),
+        d_meas.unsafe_ptr(),
+        d_cnt.unsafe_ptr(),
         Int32(n),
         grid_dim=grid,
         block_dim=BLOCK,
     )
-    ctx.enqueue_copy(dst_buf=h_slots, src_buf=d_slots)
+    ctx.enqueue_copy(dst_buf=h_meas, src_buf=d_meas)
+    ctx.enqueue_copy(dst_buf=h_cnt, src_buf=d_cnt)
     ctx.synchronize()
 
     # ── bit-for-bit, no tolerance ────────────────────────────────────────────
     var bad = 0
     var printed = 0
-    for i in range(n_slots):
-        var g = UInt32(h_slots[i].to_bits())
-        var e = UInt32(cpu[i].to_bits())
-        if g != e:
+    for i in range(n_meas):
+        if UInt32(h_meas[i].to_bits()) != UInt32(cpu_m[i].to_bits()):
             bad += 1
             if printed < MAX_PRINTED:
-                print(
-                    "  slot", i // SLOT_STRIDE, "lane", i % SLOT_STRIDE,
-                    "— gpu", h_slots[i], "cpu", cpu[i],
-                )
+                print("  slot", i // MEASURE_STRIDE, "measure lane", i % MEASURE_STRIDE,
+                      "— gpu", h_meas[i], "cpu", cpu_m[i])
+                printed += 1
+    for i in range(n_cnt):
+        if h_cnt[i] != cpu_c[i]:
+            bad += 1
+            if printed < MAX_PRINTED:
+                print("  slot", i // COUNT_STRIDE, "count lane", i % COUNT_STRIDE,
+                      "— gpu", h_cnt[i], "cpu", cpu_c[i])
                 printed += 1
     return bad
 

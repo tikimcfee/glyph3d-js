@@ -19,6 +19,30 @@ the serial form of the monoid scan (`glyphPipelineScan.js`), so a GPU backend re
 the driver loops, not the kernels. This is M0 of the milestone ladder; M1 (the
 headless frame: bytes → native curve cache → compute raster → PNG) builds on it.
 
+## Two buffers, and where a value lives IS what kind it is
+
+`schema/glyph-identity.json` is the single source of truth; `bun tools/gen-schema.mjs`
+generates `engine/glyph_schema.mojo` and the JS twin. Hand-editing either is pointless —
+the next run overwrites it.
+
+```
+measures  f32  MEASURE_STRIDE 8   X Y Z ADVANCE HEIGHT GLYPH_ID | BASE_X LINE_ADV
+counts    u32  COUNT_STRIDE   4   ROW COL FLAGS | ORD
+```
+
+There are no bitcasts, no `fbits`/`fval`, and no "which lanes are floats" table. A
+count cannot land in the measures buffer by accident because it is a different array —
+the classification is structural, not advisory. Render-read lanes come first in both
+buffers and fold scratch is at the tail, so the record format is a truncation.
+
+`GLYPH_ID` is the one identity sitting in the measures buffer. It is there only because
+it is copied verbatim from the trie's f32 blocks, so it cannot move until the trie
+format does. That exception is deliberately visible rather than hidden in a comment.
+
+The generator validates and throws: an identity declared with an f32 carrier, a lane
+index past its stride, or a hole in a stride is a build failure, not a review miss.
+Both are mutation-tested.
+
 ## Conformance
 
 Fixtures are the oracle's own answers, serialized:
@@ -54,12 +78,11 @@ f32 lane, so past 2^24 both sides round identically and the differ reports PASS
 while both are wrong together.
 
 `ordinal_invariant.mojo` asserts a property of a single run instead, with no
-oracle involved. The same fact is recorded twice in two precisions — `slots[S_ORD]`
-as a lossy f32 lane, `ord_to_byte` as an exact u32 array — so the round-trip must
-be the identity for every leader:
+oracle involved. The same fact is recorded twice — `counts[C_ORD]` and
+`ord_to_byte` — so the round-trip must be the identity for every leader:
 
 ```
-ord_to_byte[byte_start + Int(slots[o + S_ORD])] == id
+ord_to_byte[byte_start + Int(counts[co + C_ORD])] == id
 ```
 
 It is mutation-tested against its own boundary, because a check that cannot fail
