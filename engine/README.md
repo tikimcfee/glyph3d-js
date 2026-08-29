@@ -95,6 +95,43 @@ The generator validates and throws: an identity declared with an f32 carrier, a 
 index past its stride, or a hole in a stride is a build failure, not a review miss.
 Both are mutation-tested.
 
+## On the GPU
+
+Two dispatches run on real device threads (Apple M2, Metal), both bit-exact
+against the CPU port with no tolerance:
+
+```sh
+mojo run -I engine engine/gpu_decode.mojo engine/fixtures/*.pipe.bin   # dispatch 1
+mojo run -I engine engine/gpu_scan.mojo   engine/fixtures/*.pipe.bin   # chunkReduce
+```
+
+`decode` was first because it cannot be ambiguous — thread per byte, no cross-thread
+dependency, no float accumulation. `chunkReduce` is the harder half: it folds K bytes
+per thread through the segmented monoid, so it is where the float discipline meets
+the hardware.
+
+### Metal has no f64, and that turns a convention into a constraint
+
+Trying to prove the f32-per-add discipline was load-bearing, the natural mutation is
+to accumulate `tail_adv` in f64 and narrow once. On Metal that **does not compile**:
+
+```
+Function 'air.convert.f.f32.f.f64' has Metal-unsupported instructions
+function's return type 'double' is not supported
+LLVM ERROR: Failed to verify LLVM IR for Metal
+```
+
+Apple GPUs have no double precision. So `segAdv`'s f32-per-add is not merely the
+choice that makes the reduce exact under regrouping — on this hardware it is the
+only thing that can run at all. The oracle's discipline and the device's capability
+turn out to be the same requirement arrived at from two directions.
+
+This also gives the tiered scan contract a hardware reason, not just a numerical
+one: the serial fold's f64 `lineAdv` **cannot** be computed on an Apple GPU, which
+is exactly why foldless float lanes compare at eps rather than bit-exact. And it is
+a live constraint for what comes next — the port's `item_bounds` are f64 today, so
+the bounds reduce needs an f32 or split-precision form before it can move to device.
+
 ## Conformance
 
 Fixtures are the oracle's own answers, serialized:

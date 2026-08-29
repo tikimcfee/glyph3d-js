@@ -29,6 +29,19 @@ comptime RECORD_MEASURE_STRIDE = 6
 comptime RECORD_COUNT_STRIDE = 2
 comptime RECORD_BYTES = 32
 
+# The scan partial (ScanElem) in a GPU buffer — same two-buffer rule.
+comptime PARTIAL_COUNT_STRIDE = 7
+comptime P_RESET = 0
+comptime P_NL = 1
+comptime P_GLYPHS = 2
+comptime P_ROWS = 3
+comptime P_HEAD_LEN = 4
+comptime P_TAIL_LEN = 5
+comptime P_WRAP = 6
+
+comptime PARTIAL_MEASURE_STRIDE = 1
+comptime PM_TAIL_ADV = 0
+
 
 def measure_lane_name(lane: Int) -> String:
     """Lane name for diagnostics — runtime lookup (comptime lists cannot materialize)."""

@@ -24,46 +24,159 @@
     "In BOTH buffers the render-read lanes come first and fold scratch is at the",
     "tail, so the record format is a truncation rather than a repack."
   ],
-
   "buffers": {
     "measures": {
       "carrier": "f32",
       "stride": 8,
       "lanes": [
-        { "name": "X",        "index": 0, "read_by_vertex": true },
-        { "name": "Y",        "index": 1, "read_by_vertex": true,
-          "note": "Addressed POSITIONALLY as X+1 in glyphVertex.js — a search for S_Y misses that read." },
-        { "name": "Z",        "index": 2, "read_by_vertex": true,
-          "note": "Addressed POSITIONALLY as X+2 in glyphVertex.js." },
-        { "name": "ADVANCE",  "index": 3, "read_by_vertex": true },
-        { "name": "HEIGHT",   "index": 4, "read_by_vertex": true },
-        { "name": "GLYPH_ID", "index": 5, "read_by_vertex": true,
-          "misplaced": "This is an IDENTITY living in the measures buffer. It is here only because it is copied verbatim from the trie's f32 blocks, so it cannot move until the TRIE FORMAT moves. It is the single exception in the system and it is deliberately visible: one identity, in the wrong array, naming its own fix." },
-        { "name": "BASE_X",   "index": 6, "scratch": true },
-        { "name": "LINE_ADV", "index": 7, "scratch": true }
+        {
+          "name": "X",
+          "index": 0,
+          "read_by_vertex": true
+        },
+        {
+          "name": "Y",
+          "index": 1,
+          "read_by_vertex": true,
+          "note": "Addressed POSITIONALLY as X+1 in glyphVertex.js \u2014 a search for S_Y misses that read."
+        },
+        {
+          "name": "Z",
+          "index": 2,
+          "read_by_vertex": true,
+          "note": "Addressed POSITIONALLY as X+2 in glyphVertex.js."
+        },
+        {
+          "name": "ADVANCE",
+          "index": 3,
+          "read_by_vertex": true
+        },
+        {
+          "name": "HEIGHT",
+          "index": 4,
+          "read_by_vertex": true
+        },
+        {
+          "name": "GLYPH_ID",
+          "index": 5,
+          "read_by_vertex": true,
+          "misplaced": "This is an IDENTITY living in the measures buffer. It is here only because it is copied verbatim from the trie's f32 blocks, so it cannot move until the TRIE FORMAT moves. It is the single exception in the system and it is deliberately visible: one identity, in the wrong array, naming its own fix."
+        },
+        {
+          "name": "BASE_X",
+          "index": 6,
+          "scratch": true
+        },
+        {
+          "name": "LINE_ADV",
+          "index": 7,
+          "scratch": true
+        }
       ]
     },
     "counts": {
       "carrier": "u32",
       "stride": 4,
       "lanes": [
-        { "name": "ROW",   "index": 0, "read_by_vertex": true },
-        { "name": "COL",   "index": 1, "read_by_vertex": true },
-        { "name": "FLAGS", "index": 2, "bitfield": true,
-          "note": "Read with bitwise ops by later dispatches, so not render-scratch." },
-        { "name": "ORD",   "index": 3, "scratch": true,
-          "note": "The lane that started all of this. Aliased past 2^24 as an f32; exact to 2^32 as a native count." }
+        {
+          "name": "ROW",
+          "index": 0,
+          "read_by_vertex": true
+        },
+        {
+          "name": "COL",
+          "index": 1,
+          "read_by_vertex": true
+        },
+        {
+          "name": "FLAGS",
+          "index": 2,
+          "bitfield": true,
+          "note": "Read with bitwise ops by later dispatches, so not render-scratch."
+        },
+        {
+          "name": "ORD",
+          "index": 3,
+          "scratch": true,
+          "note": "The lane that started all of this. Aliased past 2^24 as an f32; exact to 2^32 as a native count."
+        }
       ]
     }
   },
-
   "identities": [
-    { "name": "slotOrdinal", "carrier": "u32", "boundedBy": "leaders in one ITEM",
+    {
+      "name": "slotOrdinal",
+      "carrier": "u32",
+      "boundedBy": "leaders in one ITEM",
       "witness": "ordToByte[byteStart + ord] === id",
-      "note": "Per-ITEM, not per-arena: ord resets for each item." },
-    { "name": "pickId", "carrier": "u32", "boundedBy": "sum of live glyph counts",
+      "note": "Per-ITEM, not per-arena: ord resets for each item."
+    },
+    {
+      "name": "pickId",
+      "carrier": "u32",
+      "boundedBy": "sum of live glyph counts",
       "witness": "a readback for a known glyph must resolve to that glyph",
-      "broken": "Rides a FLOAT uniform today (uniform(0) from a JS number). Aliases past 2^24; the guard admits 0x7FFFFFFF, 127x too permissive, and WARNS rather than refuses. Reachable since the arena passed 2^24." },
-    { "name": "itemId", "carrier": "u32", "boundedBy": "live items" }
-  ]
+      "broken": "Rides a FLOAT uniform today (uniform(0) from a JS number). Aliases past 2^24; the guard admits 0x7FFFFFFF, 127x too permissive, and WARNS rather than refuses. Reachable since the arena passed 2^24."
+    },
+    {
+      "name": "itemId",
+      "carrier": "u32",
+      "boundedBy": "live items"
+    }
+  ],
+  "scanPartial": {
+    "$comment": [
+      "The segmented monoid's element (ScanElem), as it lives in a GPU buffer.",
+      "Same rule as the slot buffers: counts and measures are different arrays.",
+      "tail_adv is the ONLY measure \u2014 it is an f32 sum accumulated per-add, which",
+      "is what makes the reduce exact under regrouping. Everything else is a count."
+    ],
+    "counts": {
+      "carrier": "u32",
+      "stride": 7,
+      "lanes": [
+        {
+          "name": "RESET",
+          "index": 0,
+          "note": "absorbing: combine(a,b)=b when b.reset \u2014 file isolation is structural"
+        },
+        {
+          "name": "NL",
+          "index": 1
+        },
+        {
+          "name": "GLYPHS",
+          "index": 2
+        },
+        {
+          "name": "ROWS",
+          "index": 3
+        },
+        {
+          "name": "HEAD_LEN",
+          "index": 4
+        },
+        {
+          "name": "TAIL_LEN",
+          "index": 5
+        },
+        {
+          "name": "WRAP",
+          "index": 6,
+          "note": "a QUERY parameter carried in the element, not file state"
+        }
+      ]
+    },
+    "measures": {
+      "carrier": "f32",
+      "stride": 1,
+      "lanes": [
+        {
+          "name": "TAIL_ADV",
+          "index": 0,
+          "note": "f32 per add \u2014 the discipline that makes the reduce exact under regrouping"
+        }
+      ]
+    }
+  }
 }
