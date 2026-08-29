@@ -3,26 +3,26 @@
     "THE SINGLE SOURCE OF TRUTH for how this pipeline carries values.",
     "",
     "Every wall this codebase hit was one mistake said twice: an exact integer",
-    "carried in a float. Slot ordinals aliased past 2^24. Pick ID bases aliased",
-    "past 2^24. The native port aliased past 2^24. Each layer decided,",
+    "carried in a float. Slot ordinals aliased past 2^24. Pick ID bases alias past",
+    "2^24. foldScalars lane 0 (totalRows) aliases past 2^24. Each layer decided,",
     "independently and in a comment, what kind each field was, and the copies drifted.",
     "",
-    "The fix is NOT a table saying which lanes are which. A table is a rule you have",
-    "to remember, and a rule you have to remember is a compat layer wearing a comment.",
+    "KIND is the declared fact. CONTAINER is a per-layer realization of it.",
     "",
-    "The fix is TWO BUFFERS. Where a value lives IS what kind it is.",
+    "  count / identity / bitfield   exact. MUST NOT ride a float carrier \u2014 and a",
+    "                                float ordered key IS a float carrier wearing a",
+    "                                u32 costume, which is how totalRows hid.",
+    "  measure                       a real quantity. f32 is correct and its",
+    "                                rounding is load-bearing.",
     "",
-    "  measures  f32   where things are in space. Floating-point physics.",
-    "                  Rounding is load-bearing and must be reproduced exactly.",
-    "  counts    u32   what the data is and how to read it. Determinism.",
-    "                  Exact across the full 2^32 range. No rounding, ever.",
+    "Layers may realize kinds differently and stay conformant \u2014 the engine uses two",
+    "buffers (where a value lives IS its kind, so it cannot be got wrong), while the",
+    "TSL side uses one homogeneous atomic buffer where kind is per-lane. Neither is",
+    "privileged. What each layer owes is that its generator ASSERT its own mapping",
+    "respects the kinds, so both realizations are checkable rather than trusted.",
     "",
-    "There are no bitcasts. There is no fbits/fval. There is no isFloatLane().",
-    "You cannot put a count in the measures buffer by accident, because it is a",
-    "different array. The classification is structural, not advisory.",
-    "",
-    "In BOTH buffers the render-read lanes come first and fold scratch is at the",
-    "tail, so the record format is a truncation rather than a repack."
+    "The engine's two-buffer strides are DERIVED from kind below and asserted",
+    "against it, so its container cannot disagree with the declaration."
   ],
   "buffers": {
     "measures": {
@@ -32,45 +32,53 @@
         {
           "name": "X",
           "index": 0,
-          "read_by_vertex": true
+          "read_by_vertex": true,
+          "kind": "measure"
         },
         {
           "name": "Y",
           "index": 1,
           "read_by_vertex": true,
-          "note": "Addressed POSITIONALLY as X+1 in glyphVertex.js \u2014 a search for S_Y misses that read."
+          "note": "Addressed POSITIONALLY as X+1 in glyphVertex.js \u2014 a search for S_Y misses that read.",
+          "kind": "measure"
         },
         {
           "name": "Z",
           "index": 2,
           "read_by_vertex": true,
-          "note": "Addressed POSITIONALLY as X+2 in glyphVertex.js."
+          "note": "Addressed POSITIONALLY as X+2 in glyphVertex.js.",
+          "kind": "measure"
         },
         {
           "name": "ADVANCE",
           "index": 3,
-          "read_by_vertex": true
+          "read_by_vertex": true,
+          "kind": "measure"
         },
         {
           "name": "HEIGHT",
           "index": 4,
-          "read_by_vertex": true
+          "read_by_vertex": true,
+          "kind": "measure"
         },
         {
           "name": "GLYPH_ID",
           "index": 5,
           "read_by_vertex": true,
-          "misplaced": "This is an IDENTITY living in the measures buffer. It is here only because it is copied verbatim from the trie's f32 blocks, so it cannot move until the TRIE FORMAT moves. It is the single exception in the system and it is deliberately visible: one identity, in the wrong array, naming its own fix."
+          "misplaced": "This is an IDENTITY living in the measures buffer. It is here only because it is copied verbatim from the trie's f32 blocks, so it cannot move until the TRIE FORMAT moves. It is the single exception in the system and it is deliberately visible: one identity, in the wrong array, naming its own fix.",
+          "kind": "identity"
         },
         {
           "name": "BASE_X",
           "index": 6,
-          "scratch": true
+          "scratch": true,
+          "kind": "measure"
         },
         {
           "name": "LINE_ADV",
           "index": 7,
-          "scratch": true
+          "scratch": true,
+          "kind": "measure"
         }
       ]
     },
@@ -81,24 +89,28 @@
         {
           "name": "ROW",
           "index": 0,
-          "read_by_vertex": true
+          "read_by_vertex": true,
+          "kind": "count"
         },
         {
           "name": "COL",
           "index": 1,
-          "read_by_vertex": true
+          "read_by_vertex": true,
+          "kind": "count"
         },
         {
           "name": "FLAGS",
           "index": 2,
           "bitfield": true,
-          "note": "Read with bitwise ops by later dispatches, so not render-scratch."
+          "note": "Read with bitwise ops by later dispatches, so not render-scratch.",
+          "kind": "bitfield"
         },
         {
           "name": "ORD",
           "index": 3,
           "scratch": true,
-          "note": "The lane that started all of this. Aliased past 2^24 as an f32; exact to 2^32 as a native count."
+          "note": "The lane that started all of this. Aliased past 2^24 as an f32; exact to 2^32 as a native count.",
+          "kind": "count"
         }
       ]
     }
@@ -138,32 +150,39 @@
         {
           "name": "RESET",
           "index": 0,
-          "note": "absorbing: combine(a,b)=b when b.reset \u2014 file isolation is structural"
+          "note": "absorbing: combine(a,b)=b when b.reset \u2014 file isolation is structural",
+          "kind": "count"
         },
         {
           "name": "NL",
-          "index": 1
+          "index": 1,
+          "kind": "count"
         },
         {
           "name": "GLYPHS",
-          "index": 2
+          "index": 2,
+          "kind": "count"
         },
         {
           "name": "ROWS",
-          "index": 3
+          "index": 3,
+          "kind": "count"
         },
         {
           "name": "HEAD_LEN",
-          "index": 4
+          "index": 4,
+          "kind": "count"
         },
         {
           "name": "TAIL_LEN",
-          "index": 5
+          "index": 5,
+          "kind": "count"
         },
         {
           "name": "WRAP",
           "index": 6,
-          "note": "a QUERY parameter carried in the element, not file state"
+          "note": "a QUERY parameter carried in the element, not file state",
+          "kind": "count"
         }
       ]
     },
@@ -174,7 +193,8 @@
         {
           "name": "TAIL_ADV",
           "index": 0,
-          "note": "f32 per add \u2014 the discipline that makes the reduce exact under regrouping"
+          "note": "f32 per add \u2014 the discipline that makes the reduce exact under regrouping",
+          "kind": "measure"
         }
       ]
     }
@@ -192,65 +212,142 @@
       "lanes": [
         {
           "name": "ORIGIN_Y",
-          "index": 0
+          "index": 0,
+          "kind": "measure"
         },
         {
           "name": "ORIGIN_Z",
-          "index": 1
+          "index": 1,
+          "kind": "measure"
         },
         {
           "name": "PAGE_ROWS",
-          "index": 2
+          "index": 2,
+          "kind": "measure"
         },
         {
           "name": "PAGE_COLS",
-          "index": 3
+          "index": 3,
+          "kind": "measure"
         },
         {
           "name": "SCROLL_ROWS",
-          "index": 4
+          "index": 4,
+          "kind": "measure"
         },
         {
           "name": "PAGES_WIDE",
-          "index": 5
+          "index": 5,
+          "kind": "measure"
         },
         {
           "name": "WRAP_WIDTH",
-          "index": 6
+          "index": 6,
+          "kind": "measure"
         },
         {
           "name": "LINE_HEIGHT",
-          "index": 7
+          "index": 7,
+          "kind": "measure"
         },
         {
           "name": "PAGE_LINE_HEIGHT",
-          "index": 8
+          "index": 8,
+          "kind": "measure"
         },
         {
           "name": "Z_STEP",
-          "index": 9
+          "index": 9,
+          "kind": "measure"
         },
         {
           "name": "BAND_STRIDE_Y",
-          "index": 10
+          "index": 10,
+          "kind": "measure"
         },
         {
           "name": "DEPTH_PER_BAND",
-          "index": 11
+          "index": 11,
+          "kind": "measure"
         },
         {
           "name": "DEPTH_PER_COL",
-          "index": 12
+          "index": 12,
+          "kind": "measure"
         },
         {
           "name": "PAGE_STRIDE_X",
-          "index": 13
+          "index": 13,
+          "kind": "measure"
         },
         {
           "name": "HAS_PAGE",
-          "index": 14
+          "index": 14,
+          "kind": "count"
         }
       ]
     }
+  },
+  "itemBounds": {
+    "$comment": [
+      "Per-item bounds + fold scalars. 8 lanes, and lane 6 is why this section exists.",
+      "",
+      "TOTAL_ROWS is a COUNT (row + 1) that the TSL side stores via floatToOrderedKey \u2014",
+      "an exact integer on a float carrier, aliasing past 2^24. Reachable: S_ROW is the",
+      "VISUAL row, so at wrap=1 rows track glyph count, crossing 2^24 at ~16.8MB inside",
+      "a 44.7MB arena. foldGeometry.js:146 has been doing Math.trunc(p.totalRows || 0) \u2014",
+      "a consumer defensively truncating a count back to an integer, which is a",
+      "downstream compensating for an upstream that lost its type.",
+      "",
+      "The engine's CPU form holds all 8 in f64, which is exact to 2^53 and has no wall,",
+      "so there is no defect there. On DEVICE it must split: Metal has no f64, and an",
+      "f32 ordered key would alias exactly as the TSL side does. The hardware forces the",
+      "same answer the kind rule already required."
+    ],
+    "lanes": [
+      {
+        "name": "MIN_X",
+        "index": 0,
+        "kind": "measure"
+      },
+      {
+        "name": "MIN_Y",
+        "index": 1,
+        "kind": "measure"
+      },
+      {
+        "name": "MIN_Z",
+        "index": 2,
+        "kind": "measure"
+      },
+      {
+        "name": "MAX_X",
+        "index": 3,
+        "kind": "measure"
+      },
+      {
+        "name": "MAX_Y",
+        "index": 4,
+        "kind": "measure"
+      },
+      {
+        "name": "MAX_Z",
+        "index": 5,
+        "kind": "measure"
+      },
+      {
+        "name": "TOTAL_ROWS",
+        "index": 6,
+        "kind": "count",
+        "note": "the fold scalar the TSL side carries as a float ordered key \u2014 see above"
+      },
+      {
+        "name": "MAX_ROW_EXTENT",
+        "index": 7,
+        "kind": "measure",
+        "note": "item-relative widest fold row; genuinely a measure, keeps the ordered key"
+      }
+    ],
+    "stride": 8
   }
 }

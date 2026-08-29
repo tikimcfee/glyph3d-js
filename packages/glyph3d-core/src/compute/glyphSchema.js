@@ -56,6 +56,18 @@ export const I_DEPTH_PER_COL = 12;
 export const I_PAGE_STRIDE_X = 13;
 export const I_HAS_PAGE = 14;
 
+export const BOUNDS_STRIDE = 8;
+export const B_MIN_X = 0;
+export const B_MIN_Y = 1;
+export const B_MIN_Z = 2;
+export const B_MAX_X = 3;
+export const B_MAX_Y = 4;
+export const B_MAX_Z = 5;
+export const B_TOTAL_ROWS = 6;
+export const B_MAX_ROW_EXTENT = 7;
+/** Bounds lanes that are EXACT — must never pass through floatToOrderedKey. */
+export const BOUNDS_EXACT_LANES = Object.freeze([B_TOTAL_ROWS]);
+
 /** Lanes the vertex path reads, in each buffer. */
 export const MEASURE_VERTEX_LANES = Object.freeze([M_X, M_Y, M_Z, M_ADVANCE, M_HEIGHT, M_GLYPH_ID]);
 export const COUNT_VERTEX_LANES = Object.freeze([C_ROW, C_COL]);

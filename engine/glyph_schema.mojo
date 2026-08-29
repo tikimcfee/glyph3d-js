@@ -60,6 +60,19 @@ comptime I_DEPTH_PER_COL = 12
 comptime I_PAGE_STRIDE_X = 13
 comptime I_HAS_PAGE = 14
 
+# Per-item bounds + fold scalars. Lane kinds matter on device: Metal has no f64,
+# so counts go to native u32 atomics and measures to f32 ordered keys.
+comptime BOUNDS_STRIDE = 8
+comptime B_MIN_X = 0
+comptime B_MIN_Y = 1
+comptime B_MIN_Z = 2
+comptime B_MAX_X = 3
+comptime B_MAX_Y = 4
+comptime B_MAX_Z = 5
+comptime B_TOTAL_ROWS = 6
+comptime B_MAX_ROW_EXTENT = 7
+comptime BOUNDS_COUNT_LANES = (6)
+
 
 def measure_lane_name(lane: Int) -> String:
     """Lane name for diagnostics — runtime lookup (comptime lists cannot materialize)."""

@@ -25,6 +25,16 @@ headless frame: bytes → native curve cache → compute raster → PNG) builds 
 generates `engine/glyph_schema.mojo` and the JS twin. Hand-editing either is pointless —
 the next run overwrites it.
 
+**KIND is the declared fact; CONTAINER is a per-layer realization.** A `count` /
+`identity` / `bitfield` is exact and must never ride a float carrier — and a float
+*ordered key* is a float carrier wearing a u32 costume, which is how `totalRows` hid.
+A `measure` is a real quantity whose rounding is load-bearing. Layers may realize the
+same kinds differently and stay conformant: the engine uses two buffers (where a value
+lives IS its kind, so it cannot be got wrong), while the TSL side uses one homogeneous
+atomic buffer where kind is per-lane. Neither is privileged; what each owes is that its
+generator ASSERT its own mapping respects the kinds. The engine's strides are derived
+from kind and asserted against it, so its container cannot disagree by construction.
+
 ```
 measures  f32  MEASURE_STRIDE 8   X Y Z ADVANCE HEIGHT GLYPH_ID | BASE_X LINE_ADV
 counts    u32  COUNT_STRIDE   4   ROW COL FLAGS | ORD
@@ -151,6 +161,33 @@ one: the serial fold's f64 `lineAdv` **cannot** be computed on an Apple GPU, whi
 is exactly why foldless float lanes compare at eps rather than bit-exact. And it is
 a live constraint for what comes next — the port's `item_bounds` are f64 today, so
 the bounds reduce needs an f32 or split-precision form before it can move to device.
+
+### Bounds, and the fold scalar that was a float
+
+`gpu_bounds.mojo` folds the per-item boxes on device. The 6 box lanes are genuine
+measures, compared at eps — the CPU kernel folds in f64 and Metal cannot, though f64
+buys nothing for the reduce itself (widening f32→f64 is lossless and min/max
+preserves order; it buys only `x+w` at f64 instead of one f32 rounding).
+
+Lane 6, `TOTAL_ROWS`, is a **count** — and the TSL side stores it through
+`floatToOrderedKey`, which is *an f32 carrier wearing a u32 costume*. It aliases past
+2^24, and it is **reachable**: `S_ROW` is the VISUAL row, so at `wrap = 1` rows track
+glyph count and cross 2^24 at ~16.8 MB inside a 44.7 MB arena (measured). The
+consumer has been compensating without anyone filing it — `foldGeometry.js:146` does
+`Math.trunc(p.totalRows || 0)`, a downstream truncating a count back to an integer.
+
+On device the lanes go **by kind**, which is also the only form Metal can run:
+
+```
+measures  6 box lanes + MAX_ROW_EXTENT   f32 via a monotonic ordered key, so integer
+                                         atomicMin/Max implements float min/max
+counts    TOTAL_ROWS                     a NATIVE u32 atomicMax — no mapping, no wall,
+                                         and 0 is genuinely max's identity over
+                                         non-negative integers rather than "-inf's key"
+```
+
+Mutation-tested both tiers: routing `TOTAL_ROWS` back through the ordered key yields
+3,229,614,080 instead of 4, and a 0.01 nudge fails the box tolerance.
 
 ## Conformance
 
