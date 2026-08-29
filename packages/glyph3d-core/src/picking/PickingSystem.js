@@ -43,7 +43,7 @@ import {
     GROUP_STRIDE,
 } from '../core/glyphVertex.js';
 
-const { Fn, uniform, texture, storage, float, int, vec4, instanceIndex } = TSL;
+const { Fn, uniform, texture, storage, float, vec4, instanceIndex } = TSL;
 
 // Built-in channels. Each gets a distinct THREE render layer so the picking
 // camera can isolate it (renders ONLY that layer → the ID buffer is free of
@@ -245,7 +245,11 @@ export class PickingSystem {
         }
 
         // Per-mesh ID-block start (read straight off userData — set by register()).
-        const baseId = uniform(0).onObjectUpdate(({ object }, self) =>
+        // 'uint', NOT the default float. A pick ID is an exact identity, and uniform(0)
+        // from a JS number is an f32 carrier: base 16,777,217 lands as 16,777,216 and
+        // two glyphs answer to one ID. Reachable since the arena ceiling moved —
+        // ARENA_MAX_BYTES itself aliases (44,739,242 -> 44,739,240).
+        const baseId = uniform(0, 'uint').onObjectUpdate(({ object }, self) =>
             (object && object.userData.pickStartId != null) ? object.userData.pickStartId : self.value);
 
         const vertexFn = Fn(() => {
@@ -260,8 +264,11 @@ export class PickingSystem {
         });
 
         const fragmentFn = Fn(() => {
-            // int-cast the (float) per-object uniform so the bit ops stay exact.
-            const id = int(baseId).add(int(instanceIndex));
+            // Both operands are u32: baseId is a 'uint' uniform and instanceIndex is
+            // natively unsigned, so no cast is needed and none is safe — int() would cap
+            // the ID space at 2^31 AND make shiftRight arithmetic (sign-extending)
+            // rather than logical, corrupting the alpha byte for any id >= 2^31.
+            const id = baseId.add(instanceIndex);
             const r  = id.shiftRight(16).bitAnd(0xFF);
             const g  = id.shiftRight(8).bitAnd(0xFF);
             const b  = id.bitAnd(0xFF);
@@ -296,10 +303,10 @@ export class PickingSystem {
     _getFlatPickMaterial() {
         if (this._sharedFlatPickMaterial) return this._sharedFlatPickMaterial;
 
-        const baseId = uniform(0).onObjectUpdate(({ object }, self) =>
+        const baseId = uniform(0, 'uint').onObjectUpdate(({ object }, self) =>
             (object && object.userData.pickStartId != null) ? object.userData.pickStartId : self.value);
         const fragmentFn = Fn(() => {
-            const id = int(baseId);
+            const id = baseId;
             const r = id.shiftRight(16).bitAnd(0xFF);
             const g = id.shiftRight(8).bitAnd(0xFF);
             const b = id.bitAnd(0xFF);
@@ -368,12 +375,28 @@ export class PickingSystem {
             if (e > startId) startId = e;        // else move past this block
         }
         const endId = startId + count;
-        if (endId > 0x7FFFFFFF) {
-            console.warn(`[PickingSystem] channel '${channelName}' ID ${endId} exceeds the 31-bit shader-int ID space; picks may mis-resolve`);
+        // The REAL ID space, now that base and index are both u32: [1, 2^32). ID 0 is
+        // reserved for "nothing" (the pass clears to it), so the last usable id is
+        // 0xFFFFFFFF and endId is exclusive.
+        //
+        // This used to warn at 0x7FFFFFFF, which was wrong twice: 128x too permissive
+        // against the f32 uniform's true 2^24 limit, and a WARN for a condition that
+        // silently returns the wrong glyph from every subsequent click. A pick that
+        // mis-resolves has no symptom at the seam — the app just acts on the wrong
+        // target — so this refuses rather than narrates.
+        if (endId > 0x100000000) {
+            throw new Error(
+                `[PickingSystem] channel '${channelName}': ID block [${startId}, ${endId}) `
+                + `exceeds the u32 pick-ID space (max ${0x100000000}). ${count} ids requested `
+                + `with ${ch.entries.length} blocks already live — unregister dead meshes or `
+                + 'split the channel.');
         }
 
         // Glyph channel: write instancePickingId so test harnesses can validate
         // sequential IDs (the shader derives the real ID as base + instanceIndex).
+        // Uint32Array, matching the shader's carrier — as a Float32Array this mirror
+        // aliased past 2^24 while the shader (once u32) did not, so the harness would
+        // have disagreed with the thing it exists to check.
         if (ch.kind === 'glyph') {
             const pickIdAttr = mesh.geometry.attributes.instancePickingId;
             if (pickIdAttr) {

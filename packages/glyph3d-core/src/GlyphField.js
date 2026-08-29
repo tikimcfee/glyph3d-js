@@ -1140,9 +1140,12 @@ export default class GlyphField {
         }
         geometry.setAttribute('instanceGroupId',
             new THREE.InstancedBufferAttribute(new Float32Array(maxCount), 1));
-        // instancePickingId — written by PickingSystem.register() after flush
+        // instancePickingId — written by PickingSystem.register() after flush.
+        // Uint32Array: a pick id is an exact identity and f32 aliases it past 2^24.
+        // No shader reads this attribute; it is the CPU-side mirror harnesses check
+        // the pick pass against, so it must carry ids exactly or it lies about them.
         geometry.setAttribute('instancePickingId',
-            new THREE.InstancedBufferAttribute(new Float32Array(maxCount), 1));
+            new THREE.InstancedBufferAttribute(new Uint32Array(maxCount), 1));
 
         geometry._maxInstanceCount = maxCount;
         geometry.instanceCount = 0;
@@ -2197,7 +2200,7 @@ export default class GlyphField {
         geom.setAttribute('instanceColor',    new THREE.InstancedBufferAttribute(col4, 4, true));
         geom.setAttribute('instanceGroupId',  new THREE.InstancedBufferAttribute(groupIds || new Float32Array(count), 1));
         if (!geom.attributes.instancePickingId || geom.attributes.instancePickingId.array.length < count) {
-            geom.setAttribute('instancePickingId', new THREE.InstancedBufferAttribute(new Float32Array(count), 1));
+            geom.setAttribute('instancePickingId', new THREE.InstancedBufferAttribute(new Uint32Array(count), 1));
         }
 
         this._ensureHighlightTexture(count);

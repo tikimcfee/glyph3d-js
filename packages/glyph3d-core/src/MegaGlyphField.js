@@ -283,7 +283,7 @@ export class MegaGlyphField {
         for (const [name, itemSize, Ctor, normalized] of [
             ['instanceColor', 4, Uint8Array, true],
             ['instanceGroupId', 1, Float32Array, false],
-            ['instancePickingId', 1, Float32Array, false],
+            ['instancePickingId', 1, Uint32Array, false],   // exact identity — f32 aliases past 2^24
             ['instanceHighlight', 4, Uint8Array, true],
         ]) {
             const old = geom.attributes[name];
