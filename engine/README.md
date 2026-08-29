@@ -129,13 +129,16 @@ construction, not by shortfall. See below.
 mojo run -I engine engine/gpu_pipeline.mojo engine/fixtures/*.pipe.bin
 ```
 
-Six dispatches chained with every intermediate staying in device memory:
+Eight dispatches chained with every intermediate staying in device memory:
 
 ```
 decode -> chunkReduce -> spineReduce -> spineScan -> partialScan -> apply
+       -> resolveX -> paginate
 ```
 
-Counts (`ROW`/`COL`/`ORD`/`ordToByte`) compare **exact**; `LINE_ADV` at eps. The
+Counts (`ROW`/`COL`/`ORD`/`ordToByte`) and the `totalRows` fold scalar compare
+**exact**; `LINE_ADV` and the resolved positions at eps. The fan stride is derived
+from a fold scalar between dispatches, as the CPU driver does. The
 monoid lives in one function that every dispatch calls, so six kernels cannot drift
 the way six transcriptions would.
 

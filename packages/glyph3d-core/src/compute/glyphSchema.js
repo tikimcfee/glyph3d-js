@@ -39,7 +39,7 @@ export const P_WRAP = 6;
 export const PARTIAL_MEASURE_STRIDE = 1;
 export const PM_TAIL_ADV = 0;
 
-export const ITEM_STRIDE = 15;
+export const ITEM_STRIDE = 16;
 export const I_ORIGIN_Y = 0;
 export const I_ORIGIN_Z = 1;
 export const I_PAGE_ROWS = 2;
@@ -55,6 +55,7 @@ export const I_DEPTH_PER_BAND = 11;
 export const I_DEPTH_PER_COL = 12;
 export const I_PAGE_STRIDE_X = 13;
 export const I_HAS_PAGE = 14;
+export const I_ORIGIN_X = 15;
 
 export const BOUNDS_STRIDE = 8;
 export const B_MIN_X = 0;

@@ -208,7 +208,7 @@
     ],
     "measures": {
       "carrier": "f32",
-      "stride": 15,
+      "stride": 16,
       "lanes": [
         {
           "name": "ORIGIN_Y",
@@ -284,6 +284,11 @@
           "name": "HAS_PAGE",
           "index": 14,
           "kind": "count"
+        },
+        {
+          "name": "ORIGIN_X",
+          "index": 15,
+          "kind": "measure"
         }
       ]
     }

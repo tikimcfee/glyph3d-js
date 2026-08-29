@@ -8,6 +8,7 @@
 # This runs the full raking scan on the GPU —
 #
 #   decode -> chunkReduce -> spineReduce -> spineScan -> partialScan -> apply
+#          -> resolveX -> paginate
 #
 # — with every intermediate staying in device memory, and compares the FINAL lanes
 # against the CPU scan under the same tiered contract conformance_scan uses:
@@ -21,13 +22,44 @@
 
 from std.sys import argv, has_accelerator
 from std.gpu import global_idx
+from std.atomic import Atomic
+from std.memory import bitcast
 from max.gpu.host import DeviceContext
 from glyph_schema import (
-    MEASURE_STRIDE, COUNT_STRIDE, M_ADVANCE, M_LINE_ADV, C_ROW, C_COL, C_FLAGS, C_ORD,
+    MEASURE_STRIDE, COUNT_STRIDE, M_ADVANCE, M_LINE_ADV, M_X, M_Y, M_Z,
+    M_BASE_X, M_HEIGHT, C_ROW, C_COL, C_FLAGS, C_ORD,
+    ITEM_STRIDE, I_ORIGIN_X, I_ORIGIN_Y, I_ORIGIN_Z, I_WRAP_WIDTH, I_LINE_HEIGHT,
+    I_PAGE_COLS, I_HAS_PAGE, I_Z_STEP, I_PAGE_ROWS, I_SCROLL_ROWS, I_PAGES_WIDE,
+    I_PAGE_LINE_HEIGHT, I_BAND_STRIDE_Y, I_DEPTH_PER_BAND, I_DEPTH_PER_COL,
+    I_PAGE_STRIDE_X,
     PARTIAL_COUNT_STRIDE, PARTIAL_MEASURE_STRIDE,
     P_RESET, P_NL, P_GLYPHS, P_ROWS, P_HEAD_LEN, P_TAIL_LEN, P_WRAP, PM_TAIL_ADV,
 )
-from glyph_pipeline import F_LEADER, F_NEWLINE, trunc_nonneg, item_for_byte
+from glyph_pipeline import (
+    F_LEADER, F_NEWLINE, trunc_nonneg, item_for_byte, derive_stride,
+)
+
+
+def trunc_nn32(v: Float32) -> Int:
+    if v != v or v <= 0:
+        return 0
+    return Int(v)
+
+
+def key_to_float(k: UInt32) -> Float32:
+    var b: UInt32
+    if (k & 0x80000000) != 0:
+        b = k & 0x7FFFFFFF
+    else:
+        b = ~k
+    return bitcast[DType.float32](b)
+
+
+def ordered_key(v: Float32) -> UInt32:
+    var b = UInt32(v.to_bits())
+    if (b & 0x80000000) != 0:
+        return ~b
+    return b | 0x80000000
 from glyph_scan import run_scan_pipeline
 from fixture_io import load_pipe_fixture, PipeFixture
 from glyph_pipeline import Item, Trie
@@ -278,6 +310,126 @@ def k_apply(
         id += 1
 
 
+# ── dispatch 7: resolveX — thread per byte ─────────────────────────────────
+def k_resolve_x(
+    measures: MutPointer[Float32, MutAnyOrigin], counts: MutPointer[UInt32, MutAnyOrigin],
+    items: MutPointer[Float32, MutAnyOrigin], item_of: MutPointer[UInt32, MutAnyOrigin],
+    item_start: MutPointer[UInt32, MutAnyOrigin], otb: MutPointer[UInt32, MutAnyOrigin],
+    row_max: MutPointer[UInt32, MutAnyOrigin], x_max: MutPointer[UInt32, MutAnyOrigin],
+    n_bytes: Int32,
+):
+    """Resolve x from the EXACT lanes and place the unpaginated position.
+
+    With a fold unit, x re-sums the glyph's `col % fold` same-row predecessors
+    FORWARD from the segment start — the same f32 order the serial segAdv
+    accumulates, which is why fold>0 x is bit-identical across oracle, scan and
+    hardware. Foldless, x IS the f32 LINE_ADV lane.
+
+    The two fold scalars go to atomics BY KIND, as in gpu_bounds: the row count to
+    a native u32 atomicMax, the widest extent through the ordered key."""
+    var id = global_idx.x
+    if id >= Int(n_bytes):
+        return
+    var co = id * COUNT_STRIDE
+    if (Int(counts[unsafe_offset = co + C_FLAGS]) & F_LEADER) == 0:
+        return
+    var mo = id * MEASURE_STRIDE
+    var it = Int(item_of[unsafe_offset=id])
+    var io = it * ITEM_STRIDE
+
+    var wrap = trunc_nn32(items[unsafe_offset = io + I_WRAP_WIDTH])
+    var fold = wrap
+    if fold == 0 and items[unsafe_offset = io + I_HAS_PAGE] > 0.5:
+        fold = trunc_nn32(items[unsafe_offset = io + I_PAGE_COLS])
+    var col = Int(counts[unsafe_offset = co + C_COL])
+    var ord = Int(counts[unsafe_offset = co + C_ORD])
+
+    var x = Float32(0)
+    if fold > 0:
+        var k = col % fold
+        while k >= 1:
+            var q = Int(otb[unsafe_offset = Int(item_start[unsafe_offset=id]) + ord - k])
+            x = x + measures[unsafe_offset = q * MEASURE_STRIDE + M_ADVANCE]
+            k -= 1
+    else:
+        x = measures[unsafe_offset = mo + M_LINE_ADV]
+
+    var row = Int(counts[unsafe_offset = co + C_ROW])
+    var wrap_row = (col // wrap) if wrap > 0 else 0
+    var lh = items[unsafe_offset = io + I_LINE_HEIGHT]
+    if lh != lh:  # NaN = unset: the glyph's own height
+        lh = measures[unsafe_offset = mo + M_HEIGHT]
+
+    var ox = items[unsafe_offset = io + I_ORIGIN_X]
+    measures[unsafe_offset = mo + M_BASE_X] = x + ox
+    measures[unsafe_offset = mo + M_X] = x + ox
+    measures[unsafe_offset = mo + M_Y] = (
+        Float32(-row) * lh + items[unsafe_offset = io + I_ORIGIN_Y]
+    )
+    measures[unsafe_offset = mo + M_Z] = (
+        Float32(-wrap_row) * items[unsafe_offset = io + I_Z_STEP]
+        + items[unsafe_offset = io + I_ORIGIN_Z]
+    )
+
+    _ = Atomic.max(row_max + it, UInt32(row + 1))     # a COUNT: native u32
+    _ = Atomic.max(x_max + it, ordered_key(x))        # a MEASURE: ordered key
+
+
+# ── dispatch 8: paginate — thread per byte, pure per-slot remap ────────────
+def k_paginate(
+    measures: MutPointer[Float32, MutAnyOrigin], counts: MutPointer[UInt32, MutAnyOrigin],
+    items: MutPointer[Float32, MutAnyOrigin], item_of: MutPointer[UInt32, MutAnyOrigin],
+    strides: MutPointer[Float32, MutAnyOrigin], n_bytes: Int32,
+):
+    var id = global_idx.x
+    if id >= Int(n_bytes):
+        return
+    var co = id * COUNT_STRIDE
+    if (Int(counts[unsafe_offset = co + C_FLAGS]) & F_LEADER) == 0:
+        return
+    var it = Int(item_of[unsafe_offset=id])
+    var io = it * ITEM_STRIDE
+    var has_page = items[unsafe_offset = io + I_HAS_PAGE] > 0.5
+    var rows = trunc_nn32(items[unsafe_offset = io + I_PAGE_ROWS]) if has_page else 0
+    var cols = trunc_nn32(items[unsafe_offset = io + I_PAGE_COLS]) if has_page else 0
+    var scroll = trunc_nn32(items[unsafe_offset = io + I_SCROLL_ROWS]) if has_page else 0
+    if rows == 0 and cols == 0 and scroll == 0:
+        return
+    var row = Int(counts[unsafe_offset = co + C_ROW])
+    var col = Int(counts[unsafe_offset = co + C_COL])
+    var screen_row = row - scroll
+    var y_page = 0
+    if rows > 0 and screen_row >= rows:
+        y_page = screen_row // rows
+    var x_page = 0
+    if cols > 0:
+        x_page = col // cols
+    var wide_raw = trunc_nn32(items[unsafe_offset = io + I_PAGES_WIDE])
+    var wide = wide_raw if wide_raw > 1 else 1
+    var band = y_page // wide
+    var wrap = trunc_nn32(items[unsafe_offset = io + I_WRAP_WIDTH])
+    var seg = (col // wrap) if wrap > 0 else 0
+    var lh = items[unsafe_offset = io + I_LINE_HEIGHT]
+    if lh != lh:
+        lh = items[unsafe_offset = io + I_PAGE_LINE_HEIGHT]
+    var mo = id * MEASURE_STRIDE
+    measures[unsafe_offset = mo + M_X] = (
+        measures[unsafe_offset = mo + M_BASE_X]
+        + Float32(y_page % wide) * strides[unsafe_offset=it]
+    )
+    measures[unsafe_offset = mo + M_Y] = (
+        items[unsafe_offset = io + I_ORIGIN_Y]
+        - Float32(screen_row - y_page * rows) * lh
+        - Float32(band) * items[unsafe_offset = io + I_BAND_STRIDE_Y]
+    )
+    measures[unsafe_offset = mo + M_Z] = (
+        items[unsafe_offset = io + I_ORIGIN_Z]
+        - Float32(seg) * items[unsafe_offset = io + I_Z_STEP]
+        + Float32(band) * items[unsafe_offset = io + I_DEPTH_PER_BAND]
+        + Float32(x_page) * items[unsafe_offset = io + I_DEPTH_PER_COL]
+    )
+
+
 def rel_close(a: Float64, b: Float64) -> Bool:
     var d = a - b
     if d < 0:
@@ -309,8 +461,10 @@ def check_fixture(var fx: PipeFixture, ctx: DeviceContext) raises -> Int:
     var wrap_of = List[UInt32](unsafe_uninit_length=n)
     var is_start = List[UInt32](unsafe_uninit_length=n)
     var item_start = List[UInt32](unsafe_uninit_length=n)
+    var item_of = List[UInt32](unsafe_uninit_length=n)
     for id in range(n):
         var i = item_for_byte(fx.items, id)
+        item_of[id] = UInt32(i) if i >= 0 else UInt32(0)
         wrap_of[id] = UInt32(trunc_nonneg(fx.items[i].wrap_width)) if i >= 0 else 0
         is_start[id] = UInt32(1) if (i >= 0 and fx.items[i].byte_start == id) else UInt32(0)
         item_start[id] = UInt32(fx.items[i].byte_start) if i >= 0 else UInt32(0)
@@ -335,11 +489,44 @@ def check_fixture(var fx: PipeFixture, ctx: DeviceContext) raises -> Int:
         h_m[i] = 0
     for id in range(n):
         h_m[id * MEASURE_STRIDE + M_ADVANCE] = cpu.measures[id * MEASURE_STRIDE + M_ADVANCE]
+        h_m[id * MEASURE_STRIDE + M_HEIGHT] = cpu.measures[id * MEASURE_STRIDE + M_HEIGHT]
     for i in range(n):
         h_w[i] = wrap_of[i]
         h_s[i] = is_start[i]
         h_is[i] = item_start[i]
         h_otb[i] = 0
+
+    var ni0 = fx.item_count if fx.item_count > 0 else 1
+    var h_it = ctx.enqueue_create_host_buffer[DType.float32](ni0 * ITEM_STRIDE)
+    var h_io = ctx.enqueue_create_host_buffer[DType.uint32](n)
+    var h_rmax = ctx.enqueue_create_host_buffer[DType.uint32](ni0)
+    var h_xmax = ctx.enqueue_create_host_buffer[DType.uint32](ni0)
+    ctx.synchronize()
+    for i in range(ni0 * ITEM_STRIDE):
+        h_it[i] = 0
+    for i in range(fx.item_count):
+        var o = i * ITEM_STRIDE
+        var t = fx.items[i].copy()
+        h_it[o + I_ORIGIN_X] = Float32(t.origin_x)
+        h_it[o + I_ORIGIN_Y] = Float32(t.origin_y)
+        h_it[o + I_ORIGIN_Z] = Float32(t.origin_z)
+        h_it[o + I_WRAP_WIDTH] = Float32(t.wrap_width)
+        h_it[o + I_LINE_HEIGHT] = Float32(t.line_height)
+        h_it[o + I_PAGE_COLS] = Float32(t.page_cols)
+        h_it[o + I_Z_STEP] = Float32(t.z_step)
+        h_it[o + I_PAGE_ROWS] = Float32(t.page_rows)
+        h_it[o + I_SCROLL_ROWS] = Float32(t.scroll_rows)
+        h_it[o + I_PAGES_WIDE] = Float32(t.pages_wide)
+        h_it[o + I_PAGE_LINE_HEIGHT] = Float32(t.page_line_height)
+        h_it[o + I_BAND_STRIDE_Y] = Float32(t.band_stride_y)
+        h_it[o + I_DEPTH_PER_BAND] = Float32(t.depth_per_band)
+        h_it[o + I_DEPTH_PER_COL] = Float32(t.depth_per_col)
+        h_it[o + I_HAS_PAGE] = 1 if t.has_page else 0
+    for i in range(n):
+        h_io[i] = item_of[i]
+    for i in range(ni0):
+        h_rmax[i] = 0
+        h_xmax[i] = 0
 
     var d_c = ctx.enqueue_create_buffer[DType.uint32](n * COUNT_STRIDE)
     var d_m = ctx.enqueue_create_buffer[DType.float32](n * MEASURE_STRIDE)
@@ -355,12 +542,21 @@ def check_fixture(var fx: PipeFixture, ctx: DeviceContext) raises -> Int:
     var d_fm = ctx.enqueue_create_buffer[DType.float32](n_supers * PARTIAL_MEASURE_STRIDE)
     var d_xc = ctx.enqueue_create_buffer[DType.uint32](n_chunks * PARTIAL_COUNT_STRIDE)
     var d_xm = ctx.enqueue_create_buffer[DType.float32](n_chunks * PARTIAL_MEASURE_STRIDE)
+    var ni = fx.item_count if fx.item_count > 0 else 1
+    var d_it = ctx.enqueue_create_buffer[DType.float32](ni * ITEM_STRIDE)
+    var d_io = ctx.enqueue_create_buffer[DType.uint32](n)
+    var d_rmax = ctx.enqueue_create_buffer[DType.uint32](ni)
+    var d_xmax = ctx.enqueue_create_buffer[DType.uint32](ni)
     ctx.enqueue_copy(dst_buf=d_c, src_buf=h_c)
     ctx.enqueue_copy(dst_buf=d_m, src_buf=h_m)
     ctx.enqueue_copy(dst_buf=d_w, src_buf=h_w)
     ctx.enqueue_copy(dst_buf=d_s, src_buf=h_s)
     ctx.enqueue_copy(dst_buf=d_is, src_buf=h_is)
     ctx.enqueue_copy(dst_buf=d_otb, src_buf=h_otb)
+    ctx.enqueue_copy(dst_buf=d_it, src_buf=h_it)
+    ctx.enqueue_copy(dst_buf=d_io, src_buf=h_io)
+    ctx.enqueue_copy(dst_buf=d_rmax, src_buf=h_rmax)
+    ctx.enqueue_copy(dst_buf=d_xmax, src_buf=h_xmax)
     d_pc.enqueue_fill(0)
     d_uc.enqueue_fill(0)
     d_fc.enqueue_fill(0)
@@ -399,9 +595,32 @@ def check_fixture(var fx: PipeFixture, ctx: DeviceContext) raises -> Int:
         Int32(n), Int32(CHUNK), Int32(n_chunks),
         grid_dim=(n_chunks + B - 1) // B, block_dim=B,
     )
+    ctx.enqueue_function[k_resolve_x](
+        d_m.unsafe_ptr(), d_c.unsafe_ptr(), d_it.unsafe_ptr(), d_io.unsafe_ptr(),
+        d_is.unsafe_ptr(), d_otb.unsafe_ptr(), d_rmax.unsafe_ptr(), d_xmax.unsafe_ptr(),
+        Int32(n), grid_dim=(n + B - 1) // B, block_dim=B,
+    )
+    # The fan stride is DERIVED from each item's widest fold row — a fold scalar
+    # resolveX just produced. The CPU driver computes it between dispatches too, so
+    # this readback mirrors the reference rather than shortcutting it.
+    var h_xr = ctx.enqueue_create_host_buffer[DType.uint32](ni0)
+    var h_st = ctx.enqueue_create_host_buffer[DType.float32](ni0)
+    ctx.enqueue_copy(dst_buf=h_xr, src_buf=d_xmax)
+    ctx.synchronize()
+    for i in range(fx.item_count):
+        var widest = Float64(key_to_float(h_xr[i]))
+        h_st[i] = Float32(derive_stride(widest, fx.items[i]))
+    var d_st = ctx.enqueue_create_buffer[DType.float32](ni0)
+    ctx.enqueue_copy(dst_buf=d_st, src_buf=h_st)
+    ctx.enqueue_function[k_paginate](
+        d_m.unsafe_ptr(), d_c.unsafe_ptr(), d_it.unsafe_ptr(), d_io.unsafe_ptr(),
+        d_st.unsafe_ptr(), Int32(n),
+        grid_dim=(n + B - 1) // B, block_dim=B,
+    )
     ctx.enqueue_copy(dst_buf=h_c, src_buf=d_c)
     ctx.enqueue_copy(dst_buf=h_m, src_buf=d_m)
     ctx.enqueue_copy(dst_buf=h_otb, src_buf=d_otb)
+    ctx.enqueue_copy(dst_buf=h_rmax, src_buf=d_rmax)
     ctx.synchronize()
 
     # ── the tiered comparison ───────────────────────────────────────────────
@@ -434,6 +653,23 @@ def check_fixture(var fx: PipeFixture, ctx: DeviceContext) raises -> Int:
             bad += 1
             if printed < MAX_PRINTED:
                 print("  byte", id, "M_LINE_ADV gpu", g, "cpu", e)
+                printed += 1
+        # resolveX's positions: eps, like paginate — f64 on CPU, f32 on device.
+        for lane in range(3):
+            var gp = Float64(h_m[id * MEASURE_STRIDE + M_X + lane])
+            var ep = Float64(cpu.measures[id * MEASURE_STRIDE + M_X + lane])
+            if not rel_close(gp, ep):
+                bad += 1
+                if printed < MAX_PRINTED:
+                    print("  byte", id, "pos lane", lane, "gpu", gp, "cpu", ep)
+                    printed += 1
+    # the fold scalar that is a COUNT: exact.
+    for i in range(fx.item_count):
+        var want_rows = Int(cpu.item_bounds[i * 8 + 6])
+        if Int(h_rmax[i]) != want_rows:
+            bad += 1
+            if printed < MAX_PRINTED:
+                print("  item", i, "totalRows gpu", Int(h_rmax[i]), "cpu", want_rows)
                 printed += 1
     for i in range(n):
         if h_otb[i] != cpu.ord_to_byte[i]:
@@ -507,6 +743,6 @@ def main() raises:
         total_bad += b1 + b2
 
     if total_bad == 0:
-        print("gpu pipeline: six dispatches chained on device — counts exact, LINE_ADV within 1e-4")
+        print("gpu pipeline: eight dispatches chained on device — counts exact, positions within 1e-4")
     else:
         raise Error("gpu pipeline diverged")
