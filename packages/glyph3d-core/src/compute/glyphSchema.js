@@ -39,6 +39,23 @@ export const P_WRAP = 6;
 export const PARTIAL_MEASURE_STRIDE = 1;
 export const PM_TAIL_ADV = 0;
 
+export const ITEM_STRIDE = 15;
+export const I_ORIGIN_Y = 0;
+export const I_ORIGIN_Z = 1;
+export const I_PAGE_ROWS = 2;
+export const I_PAGE_COLS = 3;
+export const I_SCROLL_ROWS = 4;
+export const I_PAGES_WIDE = 5;
+export const I_WRAP_WIDTH = 6;
+export const I_LINE_HEIGHT = 7;
+export const I_PAGE_LINE_HEIGHT = 8;
+export const I_Z_STEP = 9;
+export const I_BAND_STRIDE_Y = 10;
+export const I_DEPTH_PER_BAND = 11;
+export const I_DEPTH_PER_COL = 12;
+export const I_PAGE_STRIDE_X = 13;
+export const I_HAS_PAGE = 14;
+
 /** Lanes the vertex path reads, in each buffer. */
 export const MEASURE_VERTEX_LANES = Object.freeze([M_X, M_Y, M_Z, M_ADVANCE, M_HEIGHT, M_GLYPH_ID]);
 export const COUNT_VERTEX_LANES = Object.freeze([C_ROW, C_COL]);

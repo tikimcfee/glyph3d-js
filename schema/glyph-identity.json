@@ -178,5 +178,79 @@
         }
       ]
     }
+  },
+  "itemTable": {
+    "$comment": [
+      "Per-item layout params as the GPU sees them. Authored f64 on the host and",
+      "NARROWED to f32 here, because Metal has no double precision \u2014 which is why",
+      "paginate on device is an eps-tier comparison rather than a bit-exact one.",
+      "HAS_PAGE is a flag riding this buffer; it is 0 or 1 and exact either way."
+    ],
+    "measures": {
+      "carrier": "f32",
+      "stride": 15,
+      "lanes": [
+        {
+          "name": "ORIGIN_Y",
+          "index": 0
+        },
+        {
+          "name": "ORIGIN_Z",
+          "index": 1
+        },
+        {
+          "name": "PAGE_ROWS",
+          "index": 2
+        },
+        {
+          "name": "PAGE_COLS",
+          "index": 3
+        },
+        {
+          "name": "SCROLL_ROWS",
+          "index": 4
+        },
+        {
+          "name": "PAGES_WIDE",
+          "index": 5
+        },
+        {
+          "name": "WRAP_WIDTH",
+          "index": 6
+        },
+        {
+          "name": "LINE_HEIGHT",
+          "index": 7
+        },
+        {
+          "name": "PAGE_LINE_HEIGHT",
+          "index": 8
+        },
+        {
+          "name": "Z_STEP",
+          "index": 9
+        },
+        {
+          "name": "BAND_STRIDE_Y",
+          "index": 10
+        },
+        {
+          "name": "DEPTH_PER_BAND",
+          "index": 11
+        },
+        {
+          "name": "DEPTH_PER_COL",
+          "index": 12
+        },
+        {
+          "name": "PAGE_STRIDE_X",
+          "index": 13
+        },
+        {
+          "name": "HAS_PAGE",
+          "index": 14
+        }
+      ]
+    }
   }
 }

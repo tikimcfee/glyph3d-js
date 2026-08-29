@@ -110,6 +110,9 @@ dependency, no float accumulation. `chunkReduce` is the harder half: it folds K 
 per thread through the segmented monoid, so it is where the float discipline meets
 the hardware.
 
+`paginate` runs on device too, and it is where the bit-exact tier ENDS — by
+construction, not by shortfall. See below.
+
 ### Metal has no f64, and that turns a convention into a constraint
 
 Trying to prove the f32-per-add discipline was load-bearing, the natural mutation is
@@ -125,6 +128,23 @@ Apple GPUs have no double precision. So `segAdv`'s f32-per-add is not merely the
 choice that makes the reduce exact under regrouping — on this hardware it is the
 only thing that can run at all. The oracle's discipline and the device's capability
 turn out to be the same requirement arrived at from two directions.
+
+### Where the bit-exact tier ends: `paginate`
+
+`gpu_paginate.mojo` runs pagination on device and compares at **eps (1e-4)**, not
+bit-for-bit. The CPU kernel computes positions in f64 because the JS oracle uses JS
+numbers, which are f64, and the port's job is to reproduce the oracle. That
+arithmetic cannot run on Metal in any form, so the device computes positions in f32
+and the two differ in the last bits. This is the same tier the foldless float lanes
+already occupy in `conformance_scan`.
+
+What stays exact is the part that matters: **every page decision is an integer gate
+on the count lanes.** `screen_row`, `y_page`, `x_page`, `band` and `seg` are integer
+arithmetic on `ROW`/`COL`, so the device never picks a different page — it places
+the same glyph on the same page a few ULP away. Verified by mutation: breaking the
+`y_page` gate moves a position by a whole page stride and fails loudly, while a
+0.001 nudge past the tolerance fails on the tolerance alone. Determinism-land is
+exact on device; only float-land is approximate, which is the split working.
 
 This also gives the tiered scan contract a hardware reason, not just a numerical
 one: the serial fold's f64 `lineAdv` **cannot** be computed on an Apple GPU, which
