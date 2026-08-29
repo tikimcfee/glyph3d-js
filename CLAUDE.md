@@ -179,6 +179,23 @@ substrate), read the code and the agent memory rather than trusting a prose snap
   and in each case the reasoning had already concluded the test was fine. A pass is a
   claim about a counterfactual, so test the counterfactual. Mutation is the part that
   is not optional.
+- **A mutation that produced no failure proves nothing until you know it landed.**
+  "I broke it and nothing failed" and "I failed to break it" print identically and mean
+  opposite things. Both readings have been acted on here: a float-discipline mutation was
+  reported as "the corpus can't discriminate this" when the edit had never applied, and a
+  picking guard reported 33/33 green with the defect fully reinstated because a
+  single-line regex missed a declaration that wrapped across two lines. Assert the edit
+  applied — a failed `replace` is silent — then read the result. A guard built on a source
+  scan is worth what its match set is worth, so pin the site COUNT rather than checking
+  for a nonzero match: a declaration added out of reach should lower the count, not
+  quietly lower coverage.
+- **A verification surface must carry values the same way the thing it verifies does.**
+  A CPU mirror kept as `Float32Array` to check a shader that had been moved to u32 would
+  have disagreed with the shader precisely past 2^24 — the range where the check exists
+  to matter. Same family as an oracle that shares a fault with its port: what goes
+  unchecked is the *relationship between the checker and the checked*. When they differ
+  in carrier, the checker is a second implementation with its own bugs; when they share
+  a fault, the diff is blind to it. Neither is visible from inside the check.
 - **Fail loud at substrate seams.** Values handed to browser/GPU APIs (device limits,
   descriptors) are validated at the boundary, and any fallback path logs its true
   cause plus the exact request it degraded from — a silent fallback re-emits an app
