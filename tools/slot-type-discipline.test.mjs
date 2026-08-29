@@ -22,7 +22,9 @@
 // strictly worse than a shallow guard on it.
 
 import { readFileSync } from 'node:fs';
-import { SLOT_STRIDE, FLOAT_LANES, COUNT_LANES } from '../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
+import { SLOT_STRIDE, FLOAT_LANES, COUNT_LANES,
+    S_GLYPH_ID, S_ADVANCE, S_HEIGHT, S_X, S_Y, S_Z, S_ROW, S_COL,
+    S_FLAGS, S_BASE_X, S_LINE_ADV, S_ORD } from '../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
 
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) { pass++; } else { fail++; console.error(`  ✗ ${m}`); } };
@@ -73,6 +75,66 @@ console.log('the vertex path indexes in u32 and reads per lane kind');
     }
     ok(FLOAT_LANES.size + COUNT_LANES.size === SLOT_STRIDE,
        `the lane kinds still cover the stride (${FLOAT_LANES.size} + ${COUNT_LANES.size} vs ${SLOT_STRIDE})`);
+}
+
+console.log('the render-read lane set is a prefix (the record format depends on it)');
+{
+    // WHY THIS EXISTS, and it is not for this repo's benefit.
+    //
+    // The engine's record format (32B/rendered glyph vs 48B/source byte) emits a record
+    // by copying a PREFIX of the slot lanes. That is only sound while every lane the
+    // render path reads sorts BEFORE every lane it does not — otherwise the copy has to
+    // become a gather and the format silently changes cost and shape.
+    //
+    // The engine's generator enforces the ordering, but "which lanes the render path
+    // reads" is a fact about glyphVertex.js, i.e. about THIS repo. Their conformance
+    // compares values against their port and would not notice a lane added here. So the
+    // invariant is only as good as a guard on this side, and this is it.
+    //
+    // Adding a lane read to buildGlyphVertexTransform is legal — but if it sorts after
+    // an unread lane, it breaks a format in another layer. Fail here, where the change
+    // is, rather than there, where the symptom is.
+
+    const src = read('packages/glyph3d-core/src/core/glyphVertex.js');
+
+    // byteSlots.element(...) appears in exactly ONE function; both the render material
+    // (GlyphField) and the pick material (PickingSystem) call it, so this is the whole
+    // render-read surface. Assert that stays true before trusting the extraction.
+    const files = ['packages/glyph3d-core/src/GlyphField.js',
+                   'packages/glyph3d-core/src/picking/PickingSystem.js'];
+    for (const f of files) {
+        ok(!/byteSlots\.element\(/.test(read(f)),
+           `${f} reads slot lanes only through buildGlyphVertexTransform, never directly`);
+    }
+
+    // Extract the lanes actually read. fl(X) is a float-lane read; .element(base.add(int(X)))
+    // is a count-lane read. S_X + 1 / S_X + 2 are Y and Z addressed POSITIONALLY.
+    const NAMES = { S_GLYPH_ID, S_ADVANCE, S_HEIGHT, S_X, S_Y, S_Z, S_ROW, S_COL,
+                    S_FLAGS, S_BASE_X, S_LINE_ADV, S_ORD };
+    const readLanes = new Set();
+    for (const m of src.matchAll(/(?:fl\(|element\(base\.add\(int\()\s*(S_[A-Z_]+)\s*(\+\s*(\d+))?/g)) {
+        const base = NAMES[m[1]];
+        if (base === undefined) { fail++; console.error(`  ✗ unknown lane symbol ${m[1]} in glyphVertex`); continue; }
+        readLanes.add(base + (m[3] ? Number(m[3]) : 0));
+    }
+
+    const expected = [S_GLYPH_ID, S_ADVANCE, S_HEIGHT, S_X, S_Y, S_Z, S_ROW, S_COL].sort((a, b) => a - b);
+    const got = [...readLanes].sort((a, b) => a - b);
+    ok(got.length > 0, 'lane reads were actually extracted from glyphVertex (the regex still matches)');
+    ok(JSON.stringify(got) === JSON.stringify(expected),
+       `the render path reads exactly lanes [${expected}] (got [${got}])`);
+
+    // THE INVARIANT the engine's record format truncates on.
+    const isPrefix = got.every((l, i) => l === i);
+    ok(isPrefix,
+       `render-read lanes are a contiguous prefix 0..${got.length - 1} — a record can be a `
+       + `TRUNCATION, not a gather (got [${got}])`);
+
+    const unread = [S_FLAGS, S_BASE_X, S_LINE_ADV, S_ORD].sort((a, b) => a - b);
+    ok(unread.every((l) => l >= got.length),
+       `every fold-scratch lane [${unread}] sorts after the render-read prefix`);
+    ok(got.length + unread.length === SLOT_STRIDE,
+       `read + unread covers the stride (${got.length} + ${unread.length} vs ${SLOT_STRIDE})`);
 }
 
 console.log(fail === 0 ? `\n✓ slot-type-discipline: ${pass} passed, 0 failed`
