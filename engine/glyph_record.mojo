@@ -40,6 +40,26 @@ struct RecordSet(Copyable, Movable):
         self.glyphs = 0
 
 
+# MEASURED NEGATIVE RESULT — do not "optimize" the appends below.
+#
+# compact is 64% of a streaming pass over the dictionary corpus (1.53 s of 2.37 s),
+# which makes the 8 appends per glyph look like the obvious target: 667 MILLION
+# capacity-checked appends. Two attempts, both SLOWER, A/B'd over three runs each:
+#
+#   append (as written)                      2.08 s
+#   pre-size + count leaders here + index    2.59-2.70 s   (+25%)
+#   pre-size + leader count from caller      2.42-2.54 s   (+18%)
+#
+# Two reasons, and the second is the interesting one. Counting leaders inside
+# compact costs a strided read of the flags lane across the whole counts buffer
+# (333 MB here) to learn something the caller already had. And even with the count
+# handed in, manual geometric growth loses: it allocates a NEW list and memcpys,
+# where List's own growth can realloc and often extends in place without copying.
+#
+# The appends are not the bottleneck they appear to be. If you want this faster,
+# measure where the 1.53 s actually goes first — it was never established.
+
+
 def compact(
     measures: List[Float32], counts: List[UInt32], byte_len: Int, mut out: RecordSet
 ):
