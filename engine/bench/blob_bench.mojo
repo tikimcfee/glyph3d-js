@@ -15,6 +15,7 @@
 
 from std.sys import argv
 from std.time import perf_counter_ns
+from std.memory import memcpy
 from glyph_schema import MEASURE_STRIDE, COUNT_STRIDE
 from glyph_pipeline import Item, run_pipeline
 from fixture_io import load_pipe_fixture
@@ -34,7 +35,12 @@ def main() raises:
 
     # ── LOAD: paid once ─────────────────────────────────────────────────────
     var t0 = perf_counter_ns()
-    var blob = List[UInt8]()
+    # Geometric growth + memcpy. A byte-at-a-time append loop runs at ~2.4 GB/s
+    # (930 MB/s when the source is a large cold blob); memcpy does ~12.3 GB/s. At
+    # 1.4 GB of corpus that difference is seconds, not noise.
+    var cap = 1 << 24
+    var blob = List[UInt8](unsafe_uninit_length=cap)
+    var used = 0
     var starts = List[Int]()
     var lens = List[Int]()
     for pi in range(len(paths)):
@@ -50,12 +56,18 @@ def main() raises:
             continue
         if len(bytes) == 0:
             continue
-        starts.append(len(blob))
-        lens.append(len(bytes))
-        for i in range(len(bytes)):
-            blob.append(bytes[i])
+        var nb = len(bytes)
+        while used + nb > cap:
+            cap *= 2
+            var grown = List[UInt8](unsafe_uninit_length=cap)
+            memcpy(dest=grown.unsafe_ptr(), src=blob.unsafe_ptr(), count=used)
+            blob = grown^
+        starts.append(used)
+        lens.append(nb)
+        memcpy(dest=blob.unsafe_ptr() + used, src=bytes.unsafe_ptr(), count=nb)
+        used += nb
     var load_ns = perf_counter_ns() - t0
-    var mb = Float64(len(blob)) / 1048576.0
+    var mb = Float64(used) / 1048576.0
 
     # ── LAY: paid per relayout ──────────────────────────────────────────────
     var t1 = perf_counter_ns()
@@ -69,10 +81,9 @@ def main() raises:
         while j < len(starts) and (span == 0 or span + lens[j] <= job_bytes):
             span += lens[j]
             j += 1
-        var slice = List[UInt8](capacity=span)
         var base = starts[i]
-        for k in range(span):
-            slice.append(blob[base + k])
+        var slice = List[UInt8](unsafe_uninit_length=span)
+        memcpy(dest=slice.unsafe_ptr(), src=blob.unsafe_ptr() + base, count=span)
         var items = List[Item]()
         for q in range(i, j):
             var it = Item()
@@ -90,7 +101,7 @@ def main() raises:
     var lay_ns = perf_counter_ns() - t1
 
     print("items            ", len(starts))
-    print("blob             ", len(blob), "B =", mb, "MB")
+    print("blob             ", used, "B =", mb, "MB")
     print("item table       ", len(starts) * 16, "B")
     print("")
     print("LOAD (once)      ", Float64(load_ns) / 1e9, "s =", mb / (Float64(load_ns) / 1e9), "MB/s")
