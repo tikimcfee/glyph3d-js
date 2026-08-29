@@ -157,6 +157,44 @@ argument for it:
 Both say the same thing: **transcribe the monoid, do not re-derive it**, even for a
 two-line function.
 
+### What the GPU actually bought (Apple M2, 8 cores)
+
+```sh
+mojo run -I engine engine/gpu_pipeline.mojo --bench \
+    engine/fixtures/ascii-basic.pipe.bin \
+    examples/word-wall/data/WebstersEnglishDictionary.txt
+```
+
+The GPU timing spans the **whole device phase** — dispatches, readbacks, and the
+host-side stride derivation between `resolveX` and `paginate`. Timing only the
+kernels would flatter the GPU by hiding what a real caller pays.
+
+| source bytes | CPU sharded | GPU chain | ratio |
+|---:|---:|---:|---:|
+| 64 KB | 100 MB/s | 18 MB/s | 0.18× |
+| 256 KB | 104 MB/s | 45 MB/s | 0.43× |
+| 1 MB | **108 MB/s** | 56 MB/s | 0.52× |
+| 4 MB | 81 MB/s | 93 MB/s | 1.15× |
+| 8 MB | 90 MB/s | 92 MB/s | 1.03× |
+| 16 MB | 65 MB/s | 100 MB/s | **1.54×** |
+| 24 MB | 63 MB/s | **101 MB/s** | **1.62×** |
+
+The ratio is the least interesting column. The shape is the finding:
+
+- **GPU throughput is size-independent.** It climbs out of launch overhead and then
+  sits flat at ~100 MB/s from 4 MB to 24 MB. Launch cost amortises and nothing else
+  changes.
+- **CPU throughput degrades with size** — 108 MB/s at 1 MB down to 63 MB/s at 24 MB,
+  a 1.7× fall. Eight cores stop fitting the working set; the GPU never had that
+  problem because it never had that locality to lose.
+
+So the crossover near 2–4 MB is not the GPU getting faster, it is the CPU getting
+slower. The gap widens with corpus size rather than converging, which is the part
+that extrapolates: on hardware with more parallelism and more bandwidth the flat
+line should sit higher, while the falling line falls for the same reasons it does
+here. This machine also has unified memory, so there is no PCIe transfer being
+amortised — a discrete GPU pays a cost this measurement does not show.
+
 ### The fixtures are all single-super, so the suite grows its own corpus
 
 Every checked-in fixture is under 6 KB — 82 chunks, **one** super at `GROUP = 256`.

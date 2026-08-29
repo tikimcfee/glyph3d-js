@@ -21,6 +21,7 @@
 # Run: mojo run -I engine engine/gpu_pipeline.mojo engine/fixtures/*.pipe.bin
 
 from std.sys import argv, has_accelerator
+from std.time import perf_counter_ns
 from std.gpu import global_idx
 from std.atomic import Atomic
 from std.memory import bitcast
@@ -447,7 +448,7 @@ def check_case(path: String, ctx: DeviceContext) raises -> Int:
     return check_fixture(load_pipe_fixture(path), ctx)
 
 
-def check_fixture(var fx: PipeFixture, ctx: DeviceContext) raises -> Int:
+def check_fixture(var fx: PipeFixture, ctx: DeviceContext, bench: Bool = False) raises -> Int:
     var n = fx.byte_len
     if n == 0:
         return 0
@@ -455,7 +456,9 @@ def check_fixture(var fx: PipeFixture, ctx: DeviceContext) raises -> Int:
     var n_supers = (n_chunks + GROUP - 1) // GROUP
 
     # The CPU scan is the reference — itself already proven against the oracle.
+    var t0 = perf_counter_ns()
     var cpu = run_scan_pipeline(fx.bytes, fx.trie, fx.items, CHUNK, GROUP)
+    var cpu_ns = perf_counter_ns() - t0
 
     # Per-byte item facts, as the GPU pipeline gets them from itemStarts.
     var wrap_of = List[UInt32](unsafe_uninit_length=n)
@@ -567,6 +570,8 @@ def check_fixture(var fx: PipeFixture, ctx: DeviceContext) raises -> Int:
     d_xm.enqueue_fill(0.0)
 
     # ── the chain. Every intermediate stays on device. ──────────────────────
+    ctx.synchronize()
+    var g0 = perf_counter_ns()
     comptime B = 128
     ctx.enqueue_function[k_chunk_reduce](
         d_c.unsafe_ptr(), d_m.unsafe_ptr(), d_w.unsafe_ptr(), d_s.unsafe_ptr(),
@@ -622,6 +627,16 @@ def check_fixture(var fx: PipeFixture, ctx: DeviceContext) raises -> Int:
     ctx.enqueue_copy(dst_buf=h_otb, src_buf=d_otb)
     ctx.enqueue_copy(dst_buf=h_rmax, src_buf=d_rmax)
     ctx.synchronize()
+    var gpu_ns = perf_counter_ns() - g0
+    if bench:
+        var mb = Float64(n) / 1048576.0
+        print(
+            "  ", n, "B   cpu(sharded)", Float64(cpu_ns) / 1e6, "ms =",
+            mb / (Float64(cpu_ns) / 1e9), "MB/s   |   gpu", Float64(gpu_ns) / 1e6,
+            "ms =", mb / (Float64(gpu_ns) / 1e9), "MB/s   |   x",
+            Float64(cpu_ns) / Float64(gpu_ns),
+        )
+        return 0
 
     # ── the tiered comparison ───────────────────────────────────────────────
     var bad = 0
@@ -709,6 +724,47 @@ def synthetic_case(trie: Trie, n: Int, wrap: Float64, line_len: Int, ctx: Device
     return check_fixture(fx^, ctx)
 
 
+def bench_scaling(trie: Trie, path: String, ctx: DeviceContext) raises:
+    """Time the SAME chain the conformance suite proves, across corpus sizes.
+
+    The GPU timing spans the whole device phase — the dispatches AND the readbacks,
+    including the host-side stride derivation between resolveX and paginate. Timing
+    only the kernels would flatter the GPU by hiding the part a real caller pays."""
+    var f = open(path, "r")
+    var all_bytes = f.read_bytes()
+    f.close()
+    print("corpus:", path, "(", len(all_bytes), "bytes )")
+    print("")
+    var sizes = List[Int]()
+    sizes.append(65536)
+    sizes.append(262144)
+    sizes.append(1048576)
+    sizes.append(4194304)
+    sizes.append(8388608)
+    sizes.append(16777216)
+    sizes.append(25165824)
+    for si in range(len(sizes)):
+        var nb = sizes[si]
+        if nb > len(all_bytes):
+            continue
+        var bytes = List[UInt8](capacity=nb)
+        for i in range(nb):
+            bytes.append(all_bytes[i])
+        var it = Item()
+        it.byte_start = 0
+        it.byte_count = nb
+        it.line_height = 1
+        var items = List[Item]()
+        items.append(it^)
+        var fx = PipeFixture()
+        fx.byte_len = nb
+        fx.item_count = 1
+        fx.bytes = bytes^
+        fx.trie = trie.copy()
+        fx.items = items^
+        _ = check_fixture(fx^, ctx, True)
+
+
 def main() raises:
     comptime assert has_accelerator(), "gpu_pipeline requires a GPU"
     var args = argv()
@@ -717,6 +773,10 @@ def main() raises:
         return
     var ctx = DeviceContext()
     print("device:", ctx.name())
+    if String(args[1]) == "--bench":
+        var seed = load_pipe_fixture(String(args[2]))
+        bench_scaling(seed.trie, String(args[3]), ctx)
+        return
     var total_bad = 0
     for i in range(1, len(args)):
         var path = String(args[i])
