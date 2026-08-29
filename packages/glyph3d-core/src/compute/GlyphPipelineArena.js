@@ -58,20 +58,24 @@
  * real recovery).
  */
 
-import GlyphPipelineKernels, { KERNEL_MAX_BYTES } from './glyphPipelineKernels.js';
+import GlyphPipelineKernels, { ARENA_MAX_BYTES } from './glyphPipelineKernels.js';
 
 /** The arena's byte ceiling — the SAME constant the kernels assert, imported rather
  *  than re-stated, because two copies of a limit is how they drift apart.
  *
- *  The u32 lane migration removed the REASON for 2^24 (count lanes no longer lose
- *  exactness), but raising the number is a separate change with its own hazards and
- *  its own tests: the vertex path indexes slots in i32 (glyphVertex.js), which halves
- *  any u32 bound, and nothing yet validates the resulting buffer against the device's
- *  maxStorageBufferBindingSize. Until those land, the ceiling stays where it was —
- *  the migration buys the exactness, not the capacity.
+ *  This is ARENA_MAX_BYTES (what can be BUILT), not KERNEL_MAX_BYTES (what a u32 slot
+ *  index can ADDRESS). The two are not the same number and conflating them cost us a
+ *  release's worth of fiction: the slot buffer is mirrored on the host, so the index
+ *  wall's 341MB of source would need ~16GB of process memory. The buildable ceiling is
+ *  the requested storage-buffer binding cap over the 48B a source byte costs.
+ *
+ *  The u32 lane migration is what made ANY raise legal — count lanes rode f32 slots and
+ *  were exact only to 2^24, so a larger arena aliased ordinals silently. That failure
+ *  mode is gone, and the vertex path now indexes in u32 (glyphVertex.js) rather than
+ *  i32, so it addresses everything the arena can hold.
  *
  *  The per-ITEM bound in stage() is a DIFFERENT rule and still applies — see there. */
-const ORDINAL_EXACT_BYTES = KERNEL_MAX_BYTES;
+const ORDINAL_EXACT_BYTES = ARENA_MAX_BYTES;
 import { runPipeline, paginate as refPaginate, boundsReduce as refBoundsReduce, deriveStride, SLOT_STRIDE,
     FAR_ITEM_STRIDE, FI_SLAB_X, FI_SLAB_Y, FI_ROWS_PER_TEXEL, FI_COLS_PER_TEXEL, FI_DIRTY,
     FAR_TEX, FAR_SLAB, S_X, S_Y, S_Z, S_ROW, S_COL, S_FLAGS, S_BASE_X, F_LEADER, fval, laneValue} from './glyphPipelineReference.js';
@@ -98,7 +102,8 @@ export default class GlyphPipelineArena {
      * @param {Object} atlas - the booted GlyphAtlas (the trie's source)
      * @param {Object} [opts]
      * @param {number} [opts.maxBytes=1M] - arena byte capacity (one slot per byte). Mind the
-     *   multiplier: a slot is 11 f32 = 44B, so 1M bytes of source ≈ 44MB of GPU buffer. A
+     *   multiplier: a slot is 12 u32 = 48B (SLOT_BYTES_PER_SOURCE_BYTE), so 1M bytes of source ≈ 48MB of GPU
+     *   buffer AND the same again mirrored on the host. A
      *   16M default once allocated ~700MB and OOM'd the GPU process — every browser on the
      *   box fell back to WebGL2. Growth (×1.25–2) is cheap; start modest.
      * @param {number} [opts.maxItems=4096] - item-table capacity (files + filenames)
@@ -175,9 +180,15 @@ export default class GlyphPipelineArena {
      * instead of a doubling ladder mid-storm: each mid-storm realloc is a whole-world
      * event (9 kernel re-codegens, full re-upload, every capacity-sized render lane
      * reallocated + re-uploaded, every live view re-attached) that lands as a
-     * multi-second main-thread block at the 8→16M steps. Clamped to the f32-ordinal
-     * wall; refusing more than the wall is not this method's job (stage() already
-     * fails loud per item).
+     * multi-second main-thread block at the 8→16M steps. Clamped to the arena ceiling;
+     * refusing more than the ceiling is not this method's job (stage() already fails
+     * loud per item).
+     *
+     * The clamp is a CLAMP, not a guarantee the realloc succeeds: the ceiling is the
+     * largest arena that can exist, not one this host has room for right now (the slot
+     * buffer is mirrored host-side at 48B/byte). A pre-size that cannot be built throws
+     * from the kernels naming the request; the call site treats that as advisory and
+     * lets the growth ladder proceed, which is why this is `info` and not a hard gate.
      * @param {number} bytes - expected TOTAL live bytes (content + slack headroom)
      * @returns {boolean} whether a realloc happened
      */
@@ -223,12 +234,12 @@ export default class GlyphPipelineArena {
         }
         // PER-ITEM ORDINAL BOUND — the invariant the arena's global cap only proxies.
         //
-        // The count lanes (S_ORD, S_ROW, S_COL) are f32 and are ITEM-RELATIVE: the
-        // fold resets ord/row/col to 0 at every item start. So exactness is bounded
-        // by the largest single ITEM, never by the arena total. Past 2^24 a lane
-        // stops representing consecutive integers and two glyphs fold onto one
-        // ordinal — while addressing (byteWords/ordToByte/itemStarts, all u32) stays
-        // perfectly exact. Nothing looks broken; the layout is just quietly wrong.
+        // The count lanes (S_ORD, S_ROW, S_COL) are ITEM-RELATIVE: the fold resets
+        // ord/row/col to 0 at every item start, so any bound on them is bounded by the
+        // largest single ITEM, never by the arena total. They ride u32 lanes now, so the
+        // old f32 aliasing (two glyphs folding onto one ordinal past 2^24 while
+        // addressing stayed exact — nothing broken-looking, just quietly wrong) is gone.
+        // The bound is kept as a deliberate assertion of that invariant.
         //
         // Until now this rule held only by routing: READABLE_MAX_CHARS (1M chars)
         // caps files in the LOAD path, and nothing else. Asserted here it is true
@@ -248,7 +259,7 @@ export default class GlyphPipelineArena {
             throw new Error(
                 `GlyphPipelineArena.stage: one item claims ${ordinalUnits.toLocaleString()} ` +
                 `${leaders > 0 ? 'glyphs' : 'bytes (conservative: no leader count supplied)'} — ` +
-                `past the arena's addressable ceiling (${ORDINAL_EXACT_BYTES.toLocaleString()}). ` +
+                `past the arena ceiling (${ORDINAL_EXACT_BYTES.toLocaleString()}). ` +
                 'Count lanes are item-relative, so an item is bounded on its own — ' +
                 'and no item can exceed the arena that holds it',
             );
@@ -274,9 +285,10 @@ export default class GlyphPipelineArena {
         const byteStart = this._alloc(bytes.length);
         const end = byteStart + bytes.length;
         if (end > ORDINAL_EXACT_BYTES) {
-            // The kernels' hard ceiling (KERNEL_MAX_BYTES). Count lanes are u32 now, so
-            // this is no longer an exactness limit — it is the i32 vertex indexing and
-            // the unvalidated device buffer size that keep the number where it is.
+            // The buildable ceiling (ARENA_MAX_BYTES). Count lanes are u32 now, so this
+            // is no longer an exactness limit — it is memory: the slot buffer costs 48B
+            // per source byte on the host AND on the device, and the requested binding
+            // cap divided by that is where the arena stops.
             // Undo the allocation (a refusal must not leak the range) and refuse THIS
             // stage loudly (the load path logs it per grid, the rest of the storm
             // continues) instead of attempting a growth the kernels must reject.
@@ -435,7 +447,7 @@ export default class GlyphPipelineArena {
 
     /**
      * Return a range to the free-list, coalescing with adjacent dead ranges; a freed
-     * TAIL recedes the high-water mark outright (the mark is what the f32-ordinal
+     * TAIL recedes the high-water mark outright (the mark is what the arena-ceiling
      * wall and the growth checks read). @private
      */
     _insertFree(start, length) {

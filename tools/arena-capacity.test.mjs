@@ -19,7 +19,8 @@
 
 import GlyphPipelineArena from '../packages/glyph3d-core/src/compute/GlyphPipelineArena.js';
 import GlyphPipelineKernels, {
-    KERNEL_MAX_BYTES, SLOT_BYTES_PER_SOURCE_BYTE, assertSlotBufferFits,
+    KERNEL_MAX_BYTES, ARENA_MAX_BYTES, REQUESTED_BINDING_CAP,
+    SLOT_BYTES_PER_SOURCE_BYTE, assertSlotBufferFits,
 } from '../packages/glyph3d-core/src/compute/glyphPipelineKernels.js';
 import { SLOT_STRIDE } from '../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
 
@@ -34,10 +35,28 @@ console.log('one constant, not two');
     // The arena imports the kernels' ceiling. If someone re-states it, this is the
     // test that notices — the drift that shipped a wedged arena was exactly this.
     const src = await Bun.file('packages/glyph3d-core/src/compute/GlyphPipelineArena.js').text();
-    ok(/ORDINAL_EXACT_BYTES\s*=\s*KERNEL_MAX_BYTES/.test(src),
-       'the arena DERIVES its ceiling from KERNEL_MAX_BYTES rather than restating a number');
+    ok(/ORDINAL_EXACT_BYTES\s*=\s*ARENA_MAX_BYTES/.test(src),
+       'the arena DERIVES its ceiling from ARENA_MAX_BYTES rather than restating a number');
     ok(!/ORDINAL_EXACT_BYTES\s*=\s*2\s*\*\*/.test(src),
        'the arena does not hardcode a power of two for its ceiling');
+
+    // ASSERT THE VALUE, not just its provenance. Every tooth below is stated RELATIVE
+    // to the constant (construct(CEILING + 1) and so on), which means a straight revert
+    // of the constant — the headline change of the whole migration — stayed green across
+    // all 48 test files. Reviewed and caught by executing that exact mutation. A test
+    // that only checks a number is used, never what it is, does not protect the number.
+    ok(ARENA_MAX_BYTES === Math.floor(REQUESTED_BINDING_CAP / SLOT_BYTES_PER_SOURCE_BYTE),
+       `ARENA_MAX_BYTES is the binding cap over the per-byte cost (got ${ARENA_MAX_BYTES})`);
+    ok(ARENA_MAX_BYTES === 44739242, `ARENA_MAX_BYTES is 44,739,242 (got ${ARENA_MAX_BYTES})`);
+    ok(ARENA_MAX_BYTES > 2 ** 24,
+       `the f32 wall is actually GONE: ${ARENA_MAX_BYTES} > ${2 ** 24} (a revert lands here)`);
+    ok(KERNEL_MAX_BYTES === Math.floor(2 ** 32 / SLOT_STRIDE),
+       `KERNEL_MAX_BYTES is the u32 index wall (got ${KERNEL_MAX_BYTES})`);
+
+    // The two are DIFFERENT things, and conflating them is what put a 341MB ceiling in
+    // front of an arena that OOMs on the host mirror past ~64MB of source.
+    ok(ARENA_MAX_BYTES < KERNEL_MAX_BYTES,
+       'what can be BUILT is strictly under what can be ADDRESSED');
 }
 
 console.log('the kernels guard fires at the boundary');
@@ -47,11 +66,19 @@ console.log('the kernels guard fires at the boundary');
         { backend: {} },
         { maxBytes, maxItems: 16, trie: { blockIndex: new Uint32Array(1), blocks: new Float32Array(1) } },
     ));
-    const atCeiling = construct(KERNEL_MAX_BYTES);
-    ok(!/exceeds KERNEL_MAX_BYTES/.test(atCeiling || ''), 'exactly at the ceiling is not refused by the ceiling guard');
+    // Assert construction SUCCEEDS, not merely that it failed for some other reason.
+    // The previous form checked !/exceeds KERNEL_MAX_BYTES/ against the message, so a
+    // construction that died of host OOM read as a pass — vacuously green, and it was:
+    // KERNEL_MAX_BYTES needs a ~16GB host mirror and throws every time.
+    ok(construct(ARENA_MAX_BYTES) === null, 'the arena ceiling can actually be CONSTRUCTED');
     const over = construct(KERNEL_MAX_BYTES + 1);
-    ok(/exceeds KERNEL_MAX_BYTES/.test(over || ''), 'one past the ceiling IS refused');
+    ok(/exceeds KERNEL_MAX_BYTES/.test(over || ''), 'one past the index wall IS refused');
     ok((over || '').includes(String(KERNEL_MAX_BYTES)), 'the refusal names the limit it enforced');
+
+    // The host mirror is the real wall between the two constants. It must name itself.
+    const huge = construct(KERNEL_MAX_BYTES);
+    ok(huge !== null, 'the index wall is not actually allocatable');
+    ok(/slot buffer/.test(huge || ''), `an unbuildable arena says so in glyph terms (got: ${String(huge).slice(0, 70)})`);
 }
 
 console.log('a growth failure gives the range back');

@@ -124,7 +124,8 @@ const SURFACE_PROJECTORS = {
  *     blob and any run that opens a directory re-arms it on autosave. A load
  *     test then measures its corpus on top of a restored one — silently, since
  *     both a clean boot and a doubled boot look identical from outside. That is
- *     how a whole-repo load reached 2× its corpus, blew the f32-ordinal wall,
+ *     how a whole-repo load reached 2× its corpus, blew the arena ceiling (then the
+ *     f32-ordinal wall),
  *     and took the browser with it.
  *   - AUTOSAVE destroys the human's workspace. A headless run that opens 500
  *     files writes that roster over the session a person left behind.

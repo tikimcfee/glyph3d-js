@@ -92,7 +92,8 @@ export function fval(u) { _ubuf[0] = u >>> 0; return _fbuf[0]; }
 
 
 /**
- * Per-slot lanes. One flat Float32Array so the GPU binds one buffer.
+ * Per-slot lanes. One flat Uint32Array so the GPU binds one buffer — counts native,
+ * floats bitcast (see LANE KINDS above).
  *
  * The fold pass (scan on the GPU, serial here) writes ONLY the exact lanes — S_ROW,
  * S_COL, S_LINE_ADV, S_ORD. resolveX turns them into the fold-relative S_BASE_X (plus
@@ -116,7 +117,7 @@ export const S_BASE_X = 9;   // resolveX's fold-relative x (+ item origin), writ
 export const S_LINE_ADV = 10; // exact fold: f32 advance sum since line start (exclusive).
                               // The foldless x, and resolveX's gather-free source.
 export const S_ORD = 11;      // exact fold: item-relative leader ordinal (newlines
-                              // included). ≤ byteCount, so exact in f32 ≤ 2^24.
+                              // included). Native u32: exact for the full range.
 
 // There is NO codepoint lane: a slot index IS its source byte offset, so the codepoint
 // is always re-derivable from the byte buffer. The one downstream decision it fed —
@@ -219,7 +220,7 @@ const at = (bytes, i) => (i >= 0 && i < bytes.length ? bytes[i] : 0);
  * immediately and its slot stays a non-leader.
  *
  * @param {Uint8Array} bytes
- * @param {Float32Array} slots
+ * @param {Uint32Array} slots
  * @param {{blockIndex:Uint32Array, blocks:Float32Array}} trie
  * @param {number} id - byte index (the thread id)
  * @param {number[]} [misses] - codepoints with no atlas entry, appended for the CPU to encode
@@ -301,7 +302,7 @@ export function rowsForLine(len, wrap) {
  * A newline is a glyph OF its line: col = the line's length, row = the line's last
  * visual row — so content after it starts exactly one row below.
  *
- * @param {Float32Array} slots
+ * @param {Uint32Array} slots
  * @param {number} itemStart - the item's first byte
  * @param {number} byteCount
  * @param {Object} params - {wrapWidth, pageCols, origin, lineHeight, zStep}
@@ -376,7 +377,7 @@ export function layoutItem(slots, itemStart, byteCount, params = {}, ordToByte =
  * S_X/S_Y/S_Z, the scalar reduce. Read set and write set are disjoint lanes —
  * deterministic under any schedule.
  *
- * @param {Float32Array} slots @param {number} id
+ * @param {Uint32Array} slots @param {number} id
  * @param {Object} p - {itemStart, wrapWidth, pageCols, origin, lineHeight, zStep}
  * @param {Uint32Array} ordToByte
  * @param {Float64Array|number[]} [scalars] - the item's 8-lane bounds row (6/7 written)
@@ -461,7 +462,7 @@ export function deriveStride(foldScalars, page) {
  * position is reconstructed FROM the integer page assignment, so placement inherits the
  * decision's exactness.
  *
- * @param {Float32Array} slots @param {number} id @param {PageParams} p
+ * @param {Uint32Array} slots @param {number} id @param {PageParams} p
  */
 export function paginate(slots, id, p) {
     const o = id * SLOT_STRIDE;
@@ -503,7 +504,7 @@ export function paginate(slots, id, p) {
  * early-out into the item's bounds-table row. Lanes 6/7 are NOT touched here — they
  * are the fold scalars resolveX reduced before pagination.
  *
- * @param {Float32Array} slots @param {number} id @param {Float64Array|number[]} box
+ * @param {Uint32Array} slots @param {number} id @param {Float64Array|number[]} box
  */
 export function boundsReduce(slots, id, box) {
     const o = id * SLOT_STRIDE;
@@ -680,7 +681,7 @@ export const FAR_FIXED = 1024;        // fixed-point scale of the uint atomic ac
  * small relative tolerance (GPU f32 pow/mul vs CPU f64: low-bit noise per addend, never
  * a structural difference).
  *
- * @param {Float32Array} slots - the laid slot buffer (runPipeline output, arena-absolute)
+ * @param {Uint32Array} slots - the laid slot buffer (runPipeline output, arena-absolute)
  * @param {number} byteLength
  * @param {Array<{byteStart:number}>} items - sorted item table (itemForByte's domain)
  * @param {Float32Array} farItems - itemCount × FAR_ITEM_STRIDE far lanes

@@ -18,13 +18,13 @@
 // shell so no device, trie or atlas is needed.
 
 import GlyphPipelineArena from '../packages/glyph3d-core/src/compute/GlyphPipelineArena.js';
-import { KERNEL_MAX_BYTES } from '../packages/glyph3d-core/src/compute/glyphPipelineKernels.js';
+import { ARENA_MAX_BYTES } from '../packages/glyph3d-core/src/compute/glyphPipelineKernels.js';
 
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) { pass++; } else { fail++; console.error(`  ✗ ${m}`); } };
 // IMPORTED, never restated. A hand-copied stride and a hand-copied formula here
 // would be the same duplicate-constant bug this file exists to guard against.
-const WALL = KERNEL_MAX_BYTES;
+const WALL = ARENA_MAX_BYTES;   // the arena's bound is what it can BUILD, not what a u32 index can address
 
 /** An arena shell with only the state stage()'s guard reads before it allocates. */
 function shell() {

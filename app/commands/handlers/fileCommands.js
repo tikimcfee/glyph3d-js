@@ -272,7 +272,7 @@ export default function registerFileCommands(router) {
             let pours = 0, pourMs = 0;
             const pending = [];   // every grid's load promise — settled before the final relayout
             // A grid whose content never lays is a REAL loss and has to be counted, not
-            // just logged. The common cause at scale is the arena's f32-ordinal wall
+            // just logged. The common cause at scale is the arena's capacity ceiling
             // (2^24 B is the whole glyph address space — see
             // docs/perf-swarm/arena-ceiling-measured.md): a big directory can leave a
             // fifth of its files unlaid while the summary still says "OK: opened N".
@@ -282,7 +282,13 @@ export default function registerFileCommands(router) {
             const settleWarn = (err) => {
                 unlaid++;
                 const msg = String(err?.message || err);
-                const reason = msg.includes('f32-ordinal wall')
+                // Match the arena's OWN refusal wording (GlyphPipelineArena.stage /
+                // ensureCapacity, both 'past the arena … ceiling'). This matched
+                // 'f32-ordinal wall' until the u32 migration renamed the refusal, and a
+                // silently-dead classifier buckets every capacity refusal under a
+                // truncated raw string — degrading the summary's dominant-reason line at
+                // exactly the load size it exists for.
+                const reason = /past the arena ceiling/.test(msg)
                     ? 'glyph arena full'
                     : msg.split('\n')[0].slice(0, 60);
                 unlaidReasons.set(reason, (unlaidReasons.get(reason) || 0) + 1);

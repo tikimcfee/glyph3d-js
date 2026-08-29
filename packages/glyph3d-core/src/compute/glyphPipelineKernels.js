@@ -126,6 +126,32 @@ export const KERNEL_MAX_BYTES = Math.floor(2 ** 32 / SLOT_STRIDE);
 export const SLOT_BYTES_PER_SOURCE_BYTE = SLOT_STRIDE * 4;
 
 /**
+ * The storage-buffer binding size the app asks the device for (GlyphCanvas
+ * _pipelineLimits requests min(deviceLimit, 2GB)). Stated here because the ceiling
+ * below is derived from it and a derivation needs its input named.
+ */
+export const REQUESTED_BINDING_CAP = 2 ** 31;
+
+/**
+ * The arena's real ceiling — what can be BUILT, not what can be ADDRESSED.
+ *
+ * KERNEL_MAX_BYTES above is the index wall: how far `byte * SLOT_STRIDE` reaches in
+ * u32. It is not a capacity. Treating it as one was a genuine error: instancedArray
+ * allocates a HOST Uint32Array of the full width as well as the GPU buffer, so a
+ * KERNEL_MAX_BYTES arena asks for ~16GB of process memory and throws a bare
+ * `Out of memory` that names neither glyphs nor arenas. Measured on this machine:
+ * 2^26 source bytes builds (3GB host), 2^27 throws.
+ *
+ * So the ceiling is the binding cap divided by what a source byte costs. That is
+ * 2^31 / 48 = 44,739,242 bytes — still 2.7x the old f32 wall, which is the honest
+ * size of the u32 win, and it is reachable rather than aspirational.
+ */
+export const ARENA_MAX_BYTES = Math.min(
+    KERNEL_MAX_BYTES,
+    Math.floor(REQUESTED_BINDING_CAP / SLOT_BYTES_PER_SOURCE_BYTE),
+);
+
+/**
  * Refuse a slot buffer the device cannot bind — LOUDLY, at this seam, naming the
  * request and the limit it exceeded.
  *
@@ -258,7 +284,21 @@ export default class GlyphPipelineKernels {
 
         // ── Buffers ────────────────────────────────────────────────────────────────────
         this.byteWords = instancedArray(Math.ceil(this.maxBytes / 4), 'uint').setName('GlyphBytes');
-        this.slots = instancedArray(this.maxBytes * SLOT_STRIDE, 'uint').setName('GlyphSlots');
+        // instancedArray mirrors the buffer on the HOST as well as the GPU, so this line
+        // is where an over-large arena actually dies — and it dies as a bare
+        // `Out of memory` that mentions nothing about glyphs. Name the request.
+        try {
+            this.slots = instancedArray(this.maxBytes * SLOT_STRIDE, 'uint').setName('GlyphSlots');
+        } catch (err) {
+            const mb = (n) => `${(n / (1024 * 1024)).toFixed(1)}MB`;
+            throw new Error(
+                `GlyphPipelineKernels: could not allocate the slot buffer for ${this.maxBytes} `
+                + `source bytes — it needs ${mb(this.maxBytes * SLOT_BYTES_PER_SOURCE_BYTE)} on the host `
+                + `and again on the device (${SLOT_BYTES_PER_SOURCE_BYTE}B/byte). The arena ceiling is `
+                + `${ARENA_MAX_BYTES} bytes; this asked for more, or the host is out of room. `
+                + `Underlying: ${err?.message || err}`,
+            );
+        }
         this.trieIndex = instancedArray(trie.blockIndex.length, 'uint').setName('GlyphTrieIndex');
         this.trieBlocks = instancedArray(trie.blocks.length, 'float').setName('GlyphTrieBlocks');
         // The scan's ladder: chunk partials, their group reduces, the two exclusive-prefix

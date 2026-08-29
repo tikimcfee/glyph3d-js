@@ -244,7 +244,7 @@ comment in `MegaGlyphField` is exactly this seam.
 | Existing | Becomes |
 |---|---|
 | `GlyphPipelineArena` (append-only byte arena, `_realloc` ×2) | **Residency manager**: item table + segmented record arena + fixed scratch. `stage()` = allocate run + queue bake. `_realloc` deleted. |
-| `GlyphPipelineKernels` 9 dispatches + `SLOT_STRIDE` 13 slots | Unchanged algorithms, retargeted: slots = scratch pool; + kernel 10 **compact** → render records. `maxBytes` cap (2²⁴ f32-ordinal limit) becomes a *per-job scratch* limit, not a corpus limit — large files chunked at newline boundaries. |
+| `GlyphPipelineKernels` 9 dispatches + `SLOT_STRIDE` 13 slots | Unchanged algorithms, retargeted: slots = scratch pool; + kernel 10 **compact** → render records. `maxBytes` cap (2²⁴ f32-ordinal limit at the time of writing; now ARENA_MAX_BYTES, memory-derived) becomes a *per-job scratch* limit, not a corpus limit — large files chunked at newline boundaries. |
 | `setFiles`/`appendFiles` whole-buffer `needsUpdate` + JS pack loop | raw `GPUBuffer` + `writeBuffer` subranges; bytes unpacked, pack moved into decode kernel or worker. |
 | `MegaGlyphField._ensureCapacity` (copy-grow of color/groupId/pickingId arrays, `highlightBuffer` at capacity) | Deleted — color folds into the 16-B record; groupId/pickingId become derived (draw-range → itemId); highlight becomes a sparse per-item overlay texture or stays a small T0-only texture. |
 | `rebindByteSlots` + `tools/arena-realloc-check.mjs` | Obsolete (no buffer is ever destroyed by growth) — repurpose the check to assert segment growth never errors and draw ranges stay correct. |

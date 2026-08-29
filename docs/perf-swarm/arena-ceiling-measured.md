@@ -3,15 +3,26 @@
 Perf-swarm topic: what actually exhausts the glyph address space, measured against a
 real corpus rather than estimated. Companion to `vram-memory-architecture.md`, which
 treats the 2²⁴ f32-ordinal limit as a design parameter — this is the first record of a
-load hitting it.
+load hitting it. See the superseded note below: that limit has since been lifted.
 
 Measured 2026-08-10, macOS M-series, `apple/metal-3`, built app on a scratch relay,
 ephemeral session (`?session=off`, so no restored field underneath).
 
 ## The ceiling
 
-`GlyphPipelineArena` is a flat byte-addressed space. Slot ordinals are **f32 lanes,
-exact only to 2²⁴**, so the whole arena is:
+> **Superseded 2026-08-29 — the f32 wall is gone.** Count lanes migrated to u32, so
+> ordinals are exact for the full range and 2²⁴ no longer binds anything. The ceiling
+> is now `ARENA_MAX_BYTES = 44,739,242 B (42.7 MB)`, and it is a **memory** limit, not
+> a counting one: the slot buffer costs 48 B per source byte on the device *and* again
+> on the host (`instancedArray` mirrors it), so the ceiling is the requested
+> storage-buffer binding cap (2 GB) divided by 48. Everything measured below still
+> stands as the record of the old wall and of how a real corpus exhausts an arena —
+> the multiplier changed, the shape did not. Note the correction: the first raise set
+> the ceiling to the u32 *index* wall (341 MB) and was fiction — that arena cannot be
+> allocated. See `tools/arena-capacity.test.mjs`.
+
+`GlyphPipelineArena` is a flat byte-addressed space. At the time of this measurement,
+slot ordinals were **f32 lanes, exact only to 2²⁴**, so the whole arena was:
 
 ```
 ORDINAL_EXACT_BYTES = 2**24 = 16,777,216 B = 16.0 MB

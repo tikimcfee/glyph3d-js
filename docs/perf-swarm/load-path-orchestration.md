@@ -26,7 +26,7 @@ Two hard walls shape everything below:
 
 1. **The VRAM wall.** `slots` costs 52 B per source byte (`SLOT_STRIDE=13`,
    `glyphPipelineReference.js:77`). 250 MB of text → 13 GB. No commodity GPU holds that.
-   The arena is also hard-capped at 2^24 bytes (~16 MB text) per arena for f32 ordinal
+   The arena is also hard-capped per arena — 2^24 bytes (~16 MB text) at the time of writing, for f32 ordinal
    exactness. **Full-residency of the whole tree is not an option; the orchestration must
    include a residency/LOD policy, not just a fast pipe.**
 2. **The string wall.** Today every file becomes a main-thread JS string
@@ -174,7 +174,7 @@ Replace the single coalescing `setTimeout(0)` flush (`GlyphPipelineArena.request
 with a **window scheduler**:
 
 - Windows close at **16 MB of staged bytes or 8 ms elapsed**, whichever first.
-  16 MB = one arena generation at the 2^24 cap → predictable realloc cadence, ~16
+  16 MB = one arena generation at the then-current 2^24 cap → predictable realloc cadence, ~16
   windows for the corpus.
 - Per window: `appendFiles` (raw u8 upload) → `kernels.run()` (9 dispatches, ~6 ms GPU
   for 16M threads) → bounds readback issued **pipelined**: read window *n−1*'s
@@ -203,7 +203,7 @@ Since 250 MB of text cannot be resident at 52 B/slot, the orchestrator owns a
    (nearest-first), ~0.4–0.8 GB VRAM compacted. Files outside the window stay Tier-0
    panels (with real measured extents after their first layout) and re-stage on
    approach. Re-staging is cheap precisely because staging is now bytes + item row.
-3. **Multi-arena:** the 2^24 cap means the window spans 2–4 arenas; draws go from 1 to
+3. **Multi-arena:** the (then 2^24) cap means the window spans 2–4 arenas; draws go from 1 to
    a handful — irrelevant against 30k groups.
 
 The load-path budget above (T2 ≤ 4 s) is for *staging and first layout* of everything;
