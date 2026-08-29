@@ -123,6 +123,53 @@ the hardware.
 `paginate` runs on device too, and it is where the bit-exact tier ENDS — by
 construction, not by shortfall. See below.
 
+### The whole scan on device, and why composition needed its own test
+
+```sh
+mojo run -I engine engine/gpu_pipeline.mojo engine/fixtures/*.pipe.bin
+```
+
+Six dispatches chained with every intermediate staying in device memory:
+
+```
+decode -> chunkReduce -> spineReduce -> spineScan -> partialScan -> apply
+```
+
+Counts (`ROW`/`COL`/`ORD`/`ordToByte`) compare **exact**; `LINE_ADV` at eps. The
+monoid lives in one function that every dispatch calls, so six kernels cannot drift
+the way six transcriptions would.
+
+**This found two bugs the four piecewise GPU suites could not**, which is the whole
+argument for it:
+
+- `combine` was written to be "obviously right" for a LEAF `b` — one byte, so
+  `rows == 0` and `head_len <= 1`. It dropped the junction-line term
+  (`rows_for_line(a.tail_len + b.head_len, b.wrap) + b.rows`) that only matters when
+  `b` is a whole chunk. chunkReduce combines *only* leaves, so it passed alone; the
+  spine combines chunks, so only composing them exposed it.
+- `rows_for` was re-derived as a ceiling instead of transcribed. The real rule is
+  `length // wrap + 1` — the newline rides at column `len`, so an exact-multiple line
+  ends with a row holding only the newline. Off by one on exactly those lines.
+
+Both say the same thing: **transcribe the monoid, do not re-derive it**, even for a
+two-line function.
+
+### The fixtures are all single-super, so the suite grows its own corpus
+
+Every checked-in fixture is under 6 KB — 82 chunks, **one** super at `GROUP = 256`.
+With a single super the spine scan's exclusive/inclusive distinction is invisible
+(the absorbing reset at byte 0 discards the only prefix it affects), and a 33-byte
+fixture is one chunk, so no chunk-level combine happens at all. The two bugs above
+live on exactly those paths.
+
+So `gpu_pipeline.mojo` generates 20 K / 40 K / 70 K byte cases (2, 3 and 5 supers),
+wrapped and unwrapped. Mutation-tested against them: making the spine scan inclusive
+fails 161,008 lanes; dropping the junction term fails 69,872 wrapped lanes and zero
+unwrapped ones, which is precisely the signature of a wrap-only defect. The
+`rows_for` ceiling mutation is caught by `wrap-exact` and `wrap-emoji` instead —
+the fixtures cover that one, the synthetics cover the spine, and neither alone is
+enough.
+
 ### Metal has no f64, and that turns a convention into a constraint
 
 Trying to prove the f32-per-add discipline was load-bearing, the natural mutation is
