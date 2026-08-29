@@ -110,6 +110,27 @@ struct Item(Copyable, Movable):
         self.page_line_height = 0
 
 
+struct LayoutSeed(Copyable, Movable):
+    """The fold accumulators at a byte — everything layout_item carries forward.
+
+    Laying a whole item is the zero seed at byte_start. Laying a RANGE is the same
+    loop with a seed recovered from the bake's checkpoints, which is what lets an
+    edit re-lay 4KB instead of the file. One code path either way."""
+
+    var base_row: Int
+    var col: Int
+    var line_adv: Float64
+    var seg_adv: Float32
+    var ord: Int
+
+    def __init__(out self):
+        self.base_row = 0
+        self.col = 0
+        self.line_adv = 0
+        self.seg_adv = 0
+        self.ord = 0
+
+
 struct PipelineResult(Copyable, Movable):
     var measures: List[Float32]
     var counts: List[UInt32]
@@ -270,6 +291,8 @@ def layout_item[so: Origin[mut=True], xo: Origin[mut=True], oo: Origin[mut=True]
     ord_to_byte: Pointer[UInt32, oo],
     scalars: Pointer[Float64, ko],
     scalar_base: Int,
+    start: Int,
+    seed: LayoutSeed,
 ):
     """THE FOLD — one item, one forward pass, every lane (layoutItem in the oracle).
     Inherently serial per item (it IS the serial semantics); items run in parallel
@@ -292,12 +315,12 @@ def layout_item[so: Origin[mut=True], xo: Origin[mut=True], oo: Origin[mut=True]
     var z_step = item.z_step
     var lh_unset = is_nan(item.line_height)
 
-    var base_row = 0
-    var col = 0
-    var line_adv: Float64 = 0
-    var seg_adv: Float32 = 0
-    var ord = 0
-    var id = item.byte_start
+    var base_row = seed.base_row
+    var col = seed.col
+    var line_adv = seed.line_adv
+    var seg_adv = seed.seg_adv
+    var ord = seed.ord
+    var id = start
     var stop = item.byte_start + item.byte_count
     while id < stop:
         var mo = id * MEASURE_STRIDE
@@ -539,7 +562,10 @@ async def _fold_item[so: Origin[mut=True], xo: Origin[mut=True], oo: Origin[mut=
     scalars: Pointer[Float64, ko],
     scalar_base: Int,
 ):
-    layout_item(measures, counts, item, ord_to_byte, scalars, scalar_base)
+    layout_item(
+        measures, counts, item, ord_to_byte, scalars, scalar_base,
+        item.byte_start, LayoutSeed(),
+    )
 
 
 async def _paginate_shard[so: Origin[mut=True], xo: Origin[mut=True]](

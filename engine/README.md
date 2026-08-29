@@ -61,6 +61,32 @@ determining arena size, and a streaming edit becomes a range re-run rather than 
 reload. (Resuming *mid-item* needs the bake's `prefix_at` checkpoints, which already
 work and are conformance-proven — that is the next step, not this one.)
 
+### Mid-item resume — an edit re-lays a line range, not a file
+
+`layout_item` takes a `LayoutSeed`. Laying a whole item is the zero seed at
+`byte_start`; laying a **range** is the same loop with a seed recovered from the
+bake's checkpoints. One code path, not two.
+
+`conformance_resume.mojo` proves that laying `[at, end)` from a checkpoint is
+**bit-identical** to laying the whole item, at every line start in every fixture.
+Mutation-tested: a seed off by one in `ord` or `base_row` fails loudly.
+
+Two limits, both real and both stated rather than papered over:
+
+- **Resume points are line starts.** The fold carries five accumulators; the monoid
+  carries the two that are pure counts. It cannot carry `line_adv` (an f64 chain —
+  f64 addition is not associative, so a regrouped monoid would drift), `seg_adv`
+  (resets at every FOLD boundary, and fold is a query parameter), or `col`. At a
+  line start all three are zero by definition. That is also the natural edit unit,
+  and what the arena's own design study proposed.
+- **A wrapped or paged item needs `base_row_hint`.** `scan_combine` accumulates rows
+  using the wrap in the element, and `bake_file` bakes at wrap 0 on purpose — which
+  is why `rows_under_wrap` is a separate histogram query. So the bake alone can seed
+  an unwrapped item exactly, and for a wrapped one the caller must supply the row.
+  Passing `-1` with `wrap > 0` **raises** rather than returning a plausible wrong
+  number. In practice anything re-laying a range has already laid the document once,
+  so the row is in hand.
+
 `GLYPH_ID` is the one identity sitting in the measures buffer. It is there only because
 it is copied verbatim from the trie's f32 blocks, so it cannot move until the trie
 format does. That exception is deliberately visible rather than hidden in a comment.
