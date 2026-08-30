@@ -39,6 +39,7 @@ from glyph_schema import (
 # Where a value lives IS what kind it is. measures are f32 (space, rounding is
 # load-bearing); counts are u32 (data, exact to 2^32). No bitcasts anywhere.
 
+comptime BOUNDS_GRAIN = 65536
 comptime F_LEADER = 1
 comptime F_RENDERED = 2
 comptime F_NEWLINE = 4
@@ -595,6 +596,9 @@ async def _bounds_item[so: Origin[mut=True], xo: Origin[mut=True], bo: Origin[mu
             mxy = y + h
         if z > mxz:
             mxz = z
+    # Each task owns a DISJOINT scratch slot. An earlier version had grains
+    # read-compare-write a shared box, which is a lost-update race — and every
+    # fixture is under one grain, so conformance could not have caught it.
     box[unsafe_offset = base + 0] = mnx
     box[unsafe_offset = base + 1] = mny
     box[unsafe_offset = base + 2] = mnz
@@ -688,13 +692,73 @@ def run_pipeline[o: ImmOrigin](
     batch_bounds[5] = -F64_INF
     # ONE TaskGroup for the whole job, one task per item. Lanes 6/7 are the fold
     # scalars layout_item already wrote into item_bounds; only 0-5 are touched here.
-    var ibp = item_bounds.unsafe_ptr()
+    # GRAIN, not item boundaries. One task per item was already better than the old
+    # workers-per-item form, but it is SIZE-BLIND: linux has 9,584 files under 1 KB
+    # and one of 22.9 MB, so the big one becomes the critical path while three cores
+    # idle. Over-decomposition is free — the runtime queue balances it, and 512
+    # tasks measure the same as 4 — and it was worth 2.11x on a heavy-tailed batch.
+    #
+    # Each grain gets its OWN scratch slot and the merge is serial, because min/max
+    # being exact under regrouping says nothing about a concurrent read-modify-write
+    # on a shared location.
+    var grain_of = List[Int]()
+    for i in range(item_count):
+        var n_i = items[i].byte_count
+        var g = (n_i + BOUNDS_GRAIN - 1) // BOUNDS_GRAIN
+        grain_of.append(g if g > 0 else 1)
+    var total_grains = 0
+    for i in range(item_count):
+        total_grains += grain_of[i]
+    if total_grains == 0:
+        total_grains = 1
+    var gboxes = List[Float64](unsafe_uninit_length=total_grains * 8)
+    var gp = gboxes.unsafe_ptr()
+    # GRAIN, not item boundaries. One task per item was already better than the old
+    # workers-per-item form, but it is SIZE-BLIND: linux has 9,584 files under 1 KB
+    # and one of 22.9 MB, so the big one becomes the critical path while three cores
+    # idle. Emitting ceil(bytes / BOUNDS_GRAIN) tasks per item costs nothing — the
+    # runtime queue balances over-decomposition for free (512 tasks measure the same
+    # as 4) — and measured 2.11x on a heavy-tailed batch.
+    #
+    # Safe because min/max is exact under ANY regrouping, which is the same property
+    # that allowed sharding in the first place; tasks CAS into the item's box.
     var tg4 = TaskGroup()
+    var gi = 0
     for i in range(item_count):
         var start = items[i].byte_start
         var stop = start + items[i].byte_count
-        tg4.create_task(_bounds_item(mp, cp, ibp, i * 8, start, stop))
+        var at = start
+        for _ in range(grain_of[i]):
+            var end = at + BOUNDS_GRAIN
+            if end > stop:
+                end = stop
+            tg4.create_task(_bounds_item(mp, cp, gp, gi * 8, at, end))
+            gi += 1
+            at = end
     tg4.wait()
+
+    # serial merge: grains of item i are contiguous in gboxes
+    gi = 0
+    for i in range(item_count):
+        var b8 = i * 8
+        item_bounds[b8 + 0] = F64_INF
+        item_bounds[b8 + 1] = F64_INF
+        item_bounds[b8 + 2] = F64_INF
+        item_bounds[b8 + 3] = -F64_INF
+        item_bounds[b8 + 4] = -F64_INF
+        item_bounds[b8 + 5] = -F64_INF
+        for _ in range(grain_of[i]):
+            var go = gi * 8
+            var k = 0
+            while k < 3:
+                if gboxes[go + k] < item_bounds[b8 + k]:
+                    item_bounds[b8 + k] = gboxes[go + k]
+                k += 1
+            while k < 6:
+                if gboxes[go + k] > item_bounds[b8 + k]:
+                    item_bounds[b8 + k] = gboxes[go + k]
+                k += 1
+            gi += 1
 
     for i in range(item_count):
         var b8 = i * 8
@@ -710,6 +774,7 @@ def run_pipeline[o: ImmOrigin](
 
     # Keep-alive anchor (ASAP destruction): item_bounds' last task-visible use is
     # inside the loop's create_task calls; it must outlive every wait.
+    _ = len(gboxes)
     _ = len(item_bounds)
 
     var r = PipelineResult()
