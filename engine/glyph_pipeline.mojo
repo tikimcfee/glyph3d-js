@@ -70,8 +70,8 @@ struct Trie(Copyable, Movable):
 
 
 struct Item(Copyable, Movable):
-    """One file in the arena: byte range + layout params. NaN line heights mean
-    'unset' (the oracle's `??` fallback to the glyph's own height)."""
+    """One file in the arena: byte range + layout params. line_height is REQUIRED —
+    a NaN one is malformed input, not a request for a per-glyph fallback."""
     var byte_start: Int
     var byte_count: Int
     var origin_x: Float64
@@ -362,7 +362,6 @@ def layout_item[so: Origin[mut=True], xo: Origin[mut=True], oo: Origin[mut=True]
     var oy = item.origin_y
     var oz = item.origin_z
     var z_step = item.z_step
-    var lh_unset = is_nan(item.line_height)
 
     # V3: fold the box HERE when the positions this loop writes are final — that
     # is, when paginate will not run for this item. Saves a whole extra pass that
@@ -394,11 +393,16 @@ def layout_item[so: Origin[mut=True], xo: Origin[mut=True], oo: Origin[mut=True]
         var wrap_row = (col // wrap) if wrap > 0 else 0
         var row = base_row + wrap_row
         var x: Float64 = Float64(seg_adv) if fold > 0 else line_adv
-        var lh: Float64
-        if lh_unset:
-            lh = Float64(measures[unsafe_offset = mo + M_HEIGHT])
-        else:
-            lh = item.line_height
+        # lineHeight is the ITEM's, never the glyph's. The oracle carried a
+        # `?? glyphHeight` fallback and this port mirrored it; both are gone as of
+        # 3285e40. Per-glyph line height staggered baselines WITHIN a row (a tall
+        # emoji at row 5 landed at -5*emojiHeight beside -5*textHeight), the GPU
+        # kernel never had the branch, and no fixture exercised it — so the oracle
+        # and this port agreed with each other while disagreeing with the renderer.
+        # An unset line_height is NaN here and propagates; the NaN sweep in
+        # fixture_io.nan_lanes is what now catches that, since a bit comparison
+        # cannot (two NaNs compare equal).
+        var lh: Float64 = item.line_height
         counts[unsafe_offset = co + C_ROW] = UInt32(row)
         counts[unsafe_offset = co + C_COL] = UInt32(col)
         measures[unsafe_offset = mo + M_LINE_ADV] = Float32(line_adv)
@@ -575,9 +579,12 @@ def paginate[so: Origin[mut=True], xo: Origin[mut=True]](
 
     var wrap = trunc_nonneg(item.wrap_width)
     var seg = (col // wrap) if wrap > 0 else 0
+    # The page's own lineHeight is NOT consulted. This mirrored the oracle's
+    # `resolved[i].lineHeight ?? it.page?.lineHeight`, deleted in 4697e3b as
+    # unreachable: assertLineHeight guarantees the item's is finite before paginate
+    # reads it, so the fallback could only ever fire on the malformed input that is
+    # now refused. A page pitch was never a feature — it was gated on the bug.
     var lh = item.line_height
-    if is_nan(lh):
-        lh = item.page_line_height  # resolved ?? page fallback (may stay NaN)
     measures[unsafe_offset = mo + M_X] = Float32(
         Float64(measures[unsafe_offset = mo + M_BASE_X])
         + Float64(y_page % wide) * page_stride_x

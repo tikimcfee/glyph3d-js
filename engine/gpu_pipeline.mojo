@@ -410,9 +410,12 @@ def k_paginate(
     var band = y_page // wide
     var wrap = trunc_nn32(items[unsafe_offset = io + I_WRAP_WIDTH])
     var seg = (col // wrap) if wrap > 0 else 0
+    # The page's own lineHeight is NOT consulted — mirrors 4697e3b. The fallback
+    # could only fire on an item with a NaN lineHeight, which the oracle now
+    # refuses, so it was reachable solely through malformed input. Proven, not
+    # argued: poisoning this branch left all twelve suites green, while poisoning
+    # the TAKEN read below failed both GPU suites — so they do exercise this line.
     var lh = items[unsafe_offset = io + I_LINE_HEIGHT]
-    if lh != lh:
-        lh = items[unsafe_offset = io + I_PAGE_LINE_HEIGHT]
     var mo = id * MEASURE_STRIDE
     measures[unsafe_offset = mo + M_X] = (
         measures[unsafe_offset = mo + M_BASE_X]
