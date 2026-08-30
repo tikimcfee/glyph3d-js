@@ -228,6 +228,32 @@ export const I_BYTE_COUNT = 14;  // the item's byte length — ownership is EXPL
                                  // kernels treat them as inert (apply kills their leader
                                  // flag, so no reduce ever attributes them to a live item)
 
+/**
+ * Item-table lanes that carry a bitcast f32 rather than a native integer.
+ *
+ * The table mixes kinds exactly as the slot buffer and the trie did: six EXACT lanes
+ * (page geometry counts, the wrap fold unit, the byte count) among nine genuine
+ * MEASURES (origins, gaps, depths, line height, z step). It rode a Float32Array until
+ * I_BYTE_COUNT was found aliasing past 2^24 — an item's tail folding into the next
+ * item, silently, at a size the arena ceiling had made reachable.
+ *
+ * Same discipline everywhere now: exact native, measures bitcast.
+ */
+export const ITEM_MEASURE_LANES = Object.freeze(new Set([
+    I_ORIGIN_X, I_ORIGIN_Y, I_ORIGIN_Z, I_PAGE_GAP_X, I_BAND_STRIDE_Y,
+    I_DEPTH_PER_BAND, I_DEPTH_PER_COL, I_Z_STEP, I_LINE_HEIGHT,
+]));
+
+/** Item-table lanes stored natively as integers — exact for the full u32 range. */
+export const ITEM_EXACT_LANES = Object.freeze(new Set([
+    I_PAGE_ROWS, I_PAGE_COLS, I_PAGES_WIDE, I_SCROLL_ROWS, I_WRAP_WIDTH, I_BYTE_COUNT,
+]));
+
+/** The VALUE at a flat index into the item table, decoded by lane kind. */
+export function itemLaneValue(table, index) {
+    return ITEM_MEASURE_LANES.has(index % ITEM_STRIDE) ? fval(table[index]) : table[index];
+}
+
 /** Allocate the slot buffer for a file of `byteLength` bytes. */
 export function allocSlots(byteLength) {
     return new Uint32Array(byteLength * SLOT_STRIDE);

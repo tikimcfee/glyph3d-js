@@ -22,7 +22,8 @@ import GlyphPipelineKernels, {
     KERNEL_MAX_BYTES, ARENA_MAX_BYTES, REQUESTED_BINDING_CAP,
     SLOT_BYTES_PER_SOURCE_BYTE, assertSlotBufferFits,
 } from '../packages/glyph3d-core/src/compute/glyphPipelineKernels.js';
-import { SLOT_STRIDE } from '../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
+import { SLOT_STRIDE, ITEM_STRIDE, I_BYTE_COUNT, ITEM_EXACT_LANES, ITEM_MEASURE_LANES }
+    from '../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
 
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) { pass++; } else { fail++; console.error(`  ✗ ${m}`); } };
@@ -81,45 +82,39 @@ console.log('the kernels guard fires at the boundary');
     ok(/slot buffer/.test(huge || ''), `an unbuildable arena says so in glyph terms (got: ${String(huge).slice(0, 70)})`);
 }
 
-console.log('an item too large for the f32 item table is refused, not corrupted');
+console.log('the item table describes everything the arena can hold');
 {
-    // I_BYTE_COUNT is an exact byte count on the item table, which is still 'float'.
-    // The arena's ceiling (42.7MB) is well past f32's exact-integer range, so an item
-    // between 2^24 and ARENA_MAX_BYTES fits the arena and CANNOT be described by the
-    // table: itemEnd = itemStart + byteCount aliases and the tail folds into the next
-    // item. itemStarts is a separate 'uint' buffer and stays exact — the count alone.
-    //
-    // Measured, so the bound is a fact rather than a worry:
+    // This section used to assert a BOUND: an item past 2^24 bytes was refused, because
+    // I_BYTE_COUNT rode the f32 item table and aliased there — a large item's tail
+    // folding into the next item, silently. The table is u32 now (exact lanes native,
+    // measures bitcast), so the bound is gone and the property is the stronger one:
+    // ANY item the arena can hold, the table can describe exactly.
+    ok(ITEM_EXACT_LANES.has(I_BYTE_COUNT), 'I_BYTE_COUNT is classified EXACT');
+    ok(!ITEM_MEASURE_LANES.has(I_BYTE_COUNT), 'and is not a measure — it would be bitcast');
+    ok(ITEM_EXACT_LANES.size + ITEM_MEASURE_LANES.size === ITEM_STRIDE,
+       `the item lane kinds are total over the stride (${ITEM_EXACT_LANES.size} + `
+       + `${ITEM_MEASURE_LANES.size} vs ${ITEM_STRIDE})`);
+
+    // The number that used to be the bound, now just a number the table handles.
+    const u = new Uint32Array(1);
+    u[0] = ARENA_MAX_BYTES;
+    ok(u[0] === ARENA_MAX_BYTES,
+       `the arena ceiling is exact in the item table's carrier (${ARENA_MAX_BYTES})`);
     const f = new Float32Array(1);
     f[0] = ARENA_MAX_BYTES;
     ok(f[0] !== ARENA_MAX_BYTES,
-       `the ceiling itself aliases on an f32 carrier (${ARENA_MAX_BYTES} -> ${f[0]}) — which is `
-       + 'why the byte-length bound is not the same number as the arena bound');
+       `...and was NOT in the old one (${ARENA_MAX_BYTES} -> ${f[0]}) — which is why this moved`);
 
-    const arena = () => {
-        const a = Object.create(GlyphPipelineArena.prototype);
-        a.maxItems = 16; a.maxBytes = 1 << 20; a._liveCount = 0; a._items = [];
-        a._free = []; a._byteTotal = 0; a._tableDirty = false; a._stagedSinceFlush = 0;
-        a._realloc = () => { throw new Error('realloc attempted'); };
-        return a;
-    };
-    const stageBytes = (n) => threw(() => arena().stage({
-        bytes: { length: n }, origin: { x: 0, y: 0, z: 0 },
-    }));
-
-    const over = stageBytes(2 ** 24 + 1);
-    ok(/past 16,777,216/.test(over || ''), `one byte past 2^24 is refused (got: ${String(over).slice(0, 70)})`);
-    ok(/I_BYTE_COUNT/.test(over || ''), 'the refusal names the LANE that cannot describe it');
-    ok(/item table/.test(over || ''), 'and names the container, so the fix is findable');
-
-    // The bound must not fire below it — a guard that refuses everything proves nothing.
-    const under = stageBytes(2 ** 24);
-    ok(!/I_BYTE_COUNT/.test(under || ''), 'exactly 2^24 is NOT refused by this bound');
-
-    // This tooth comes off with the item-table migration. Until then it pins that the
-    // arena ceiling and the per-item BYTE bound are deliberately different numbers.
-    ok(2 ** 24 < ARENA_MAX_BYTES,
-       'the byte bound is strictly below the arena ceiling — two limits, two carriers');
+    // A large item is accepted on its byte count alone; nothing here refuses it.
+    const a = Object.create(GlyphPipelineArena.prototype);
+    a.maxItems = 16; a.maxBytes = 1 << 20; a._liveCount = 0; a._items = [];
+    a._free = []; a._byteTotal = 0; a._tableDirty = false; a._stagedSinceFlush = 0;
+    a._realloc = () => { throw new Error('realloc reached — the guards let it through'); };
+    let msg = null;
+    try { a.stage({ bytes: { length: 2 ** 25 }, origin: { x: 0, y: 0, z: 0 } }); }
+    catch (e) { msg = e.message; }
+    ok(/realloc reached/.test(msg || ''),
+       `a 32MB item reaches allocation rather than being refused (got: ${String(msg).slice(0, 60)})`);
 }
 
 console.log('a growth failure gives the range back');

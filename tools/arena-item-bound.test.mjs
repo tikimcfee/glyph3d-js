@@ -62,21 +62,17 @@ function byteClaim(bytes) {
 
 console.log('bytes fallback (synthetic sources: no bake record)');
 {
-    // TWO BOUNDS NOW, on two carriers, and the byte one binds FIRST.
-    //
-    // stage() also refuses an item whose BYTE LENGTH passes 2^24, because I_BYTE_COUNT
-    // rides the f32 item table and stops being exact there. That bound (2^24) is far
-    // below the ordinal wall (ARENA_MAX_BYTES, 42.7MB), so the byte FALLBACK can no
-    // longer reach the ordinal wall at all: anything big enough to trip it is refused
-    // earlier, for a different and equally correct reason.
-    //
-    // So the ordinal wall is now exercised through `leaders` — which is the real bound
-    // anyway, and what every caller with a bake record supplies. The fallback is tested
-    // for what it still does: bound a synthetic source conservatively, below 2^24.
-    ok(claim({ bytes: (2 ** 24) - 2 }) === null, 'a synthetic item under both bounds passes');
-    ok(byteClaim((2 ** 24) + 2) !== null, 'past 2^24 the BYTE bound fires (I_BYTE_COUNT, f32 item table)');
-    ok(claim({ bytes: (2 ** 24) + 2 }) === null,
-       'and it is not the ordinal refusal — different guard, different message');
+    // ONE bound again. A second, byte-length bound briefly stood here because
+    // I_BYTE_COUNT rode the f32 item table and aliased past 2^24; the table is u32 now,
+    // so the byte fallback reaches the ordinal wall directly, as it always did.
+    ok(claim({ bytes: WALL - 2 }) === null, 'an item just under the wall passes the guard');
+
+    const over = claim({ bytes: WALL + 2 });
+    ok(over !== null && /one item claims/.test(over), 'an item just over the wall is refused');
+    ok(/conservative: no leader count supplied/.test(over || ''),
+       'the refusal says the byte bound is conservative');
+    ok(byteClaim((2 ** 24) + 2) === null,
+       'and NO byte-length bound fires below the wall — the f32 item table bound is gone');
 }
 
 console.log('leader count (callers with a bake record)');
@@ -84,14 +80,13 @@ console.log('leader count (callers with a bake record)');
     // The point of passing leaders: a multi-byte corpus is safe on its real glyph
     // count while its BYTE count would trip the conservative fallback. 4 bytes per
     // glyph (CJK/emoji) is the worst case UTF-8 offers.
-    // Kept under the byte bound so THIS section tests the ordinal guard, not the other.
-    const bytes = (2 ** 24) - 1;
-    ok(claim({ bytes, leaders: WALL + 1 }) !== null, 'a leader count past the wall is refused');
+    const bytes = WALL + 1024;
+    ok(claim({ bytes }) !== null, 'a 42MB+ item is refused on bytes alone');
     ok(claim({ bytes, leaders: Math.floor(bytes / 4) }) === null,
-       'a real leader count well under the wall is accepted — the fallback was pessimistic');
+       'the same item is ACCEPTED on its real leader count — the fallback was pessimistic');
 
     // …but leaders is a bound, not a bypass: a genuinely huge glyph count still fails.
-    const over = claim({ bytes: (2 ** 24) - 1, leaders: WALL + 1 });
+    const over = claim({ bytes: WALL * 8, leaders: WALL + 1 });
     ok(over !== null && /one item claims/.test(over), 'a real leader count past the wall is still refused');
     ok(/glyphs/.test(over || '') && !/conservative/.test(over || ''),
        'the refusal names glyphs, not a conservative byte guess');
@@ -99,11 +94,9 @@ console.log('leader count (callers with a bake record)');
 
 console.log('the boundary itself');
 {
-    // Exercised on LEADERS, since the byte path can no longer reach this wall.
-    ok(claim({ bytes: 1024, leaders: WALL }) === null, 'exactly at the ceiling is allowed');
-    ok(claim({ bytes: 1024, leaders: WALL + 1 }) !== null, 'one past the ceiling is refused');
+    ok(claim({ bytes: WALL }) === null, 'exactly at the ceiling is allowed');
+    ok(claim({ bytes: WALL + 1 }) !== null, 'one past the ceiling is refused');
     ok(claim({ bytes: 1 }) === null, 'an ordinary small item is untouched');
-    ok(byteClaim(1) === null, 'and the byte bound leaves it alone too');
 }
 
 console.log(`\n${fail === 0 ? '✓' : '✗'} arena-item-bound: ${pass} passed, ${fail} failed`);

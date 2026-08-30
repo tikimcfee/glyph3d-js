@@ -254,34 +254,12 @@ export default class GlyphPipelineArena {
         // corpus (CJK, emoji) can therefore trip the fallback while being genuinely
         // safe; that is the trade, and the fix is to pass `leaders`, not to widen
         // the bound.
-        // A SECOND, INDEPENDENT BOUND — on raw byte length, for a different carrier.
-        //
-        // I_BYTE_COUNT is an exact byte count living on the ITEM TABLE, which is still
-        // instancedArray(..., 'float'). The kernel reads it back as uint to compute
-        // itemEnd = itemStart + byteCount (glyphPipelineKernels, the item-search walk),
-        // so past 2^24 the count aliases and the tail of a large item is attributed to
-        // the wrong item: 44,739,242 arrives as 44,739,240. itemStarts is a separate
-        // 'uint' buffer and stays exact, so this is the count alone.
-        //
-        // The ordinal bound above does NOT cover it: it bounds GLYPHS (leaders), which
-        // for a multi-byte corpus is far below the byte length, and it is bounded by
-        // ARENA_MAX_BYTES (42.7MB) rather than by f32 exactness.
-        //
-        // This refuses instead of corrupting, per the substrate-seam rule — a silently
-        // wrong itemEnd has no symptom at the seam. The real fix is migrating the item
-        // table the way the slot buffer and the trie went (exact lanes native, measures
-        // bitcast); this bound comes off with that change and the check in
-        // tools/arena-capacity.test.mjs says so.
-        const ITEM_BYTES_EXACT_ON_F32 = 2 ** 24;
-        if (bytes.length > ITEM_BYTES_EXACT_ON_F32) {
-            throw new Error(
-                `GlyphPipelineArena.stage: one item is ${bytes.length.toLocaleString()} bytes — `
-                + `past ${ITEM_BYTES_EXACT_ON_F32.toLocaleString()}, where I_BYTE_COUNT stops being `
-                + 'exact on the f32 item table and the item\'s tail bytes fold into the next item. '
-                + 'The arena can hold it; the item table cannot describe it. Split the item, or '
-                + 'migrate the item table to u32 lanes (see the slot buffer and GlyphTrie).',
-            );
-        }
+        // (The byte-length bound that stood here is GONE. It existed because I_BYTE_COUNT
+        // rode the f32 item table and aliased past 2^24, folding a large item's tail into
+        // the next item. The item table is u32 now — exact lanes native, measures bitcast
+        // — so the count is exact across the whole arena and the bound has no cause left.
+        // A bound that outlives its cause is the same defect as a deviation that outlives
+        // its debt, and this repo fails a check for that one.)
 
         const ordinalUnits = leaders > 0 ? leaders : bytes.length;
         if (ordinalUnits > ORDINAL_EXACT_BYTES) {

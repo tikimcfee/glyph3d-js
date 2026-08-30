@@ -74,7 +74,7 @@
 
 import { TSL, StorageInstancedBufferAttribute } from 'three/webgpu';
 import {
-    SLOT_STRIDE, S_GLYPH_ID, S_ADVANCE, S_HEIGHT,
+    SLOT_STRIDE, S_GLYPH_ID, S_ADVANCE, S_HEIGHT, fbits,
     S_X, S_Y, S_Z, S_ROW, S_COL, S_FLAGS, S_BASE_X, S_LINE_ADV, S_ORD, F_NEWLINE,
     F_LEADER, F_RENDERED, F_MISSING, NEWLINE,
     FAR_TEX, FAR_SLAB, FAR_ITEM_STRIDE, FAR_FIXED,
@@ -328,7 +328,11 @@ export default class GlyphPipelineKernels {
         this.missCount = instancedArray(1, 'uint').setName('GlyphMissCount').toAtomic();
         // The item table: per-item params that VARY across files (origin + page params +
         // the fold metrics wrap/zStep/lineHeight). itemStarts is the search key buffer.
-        this.itemTable = instancedArray(this.maxItems * ITEM_STRIDE, 'float').setName('GlyphItemTable');
+        // 'uint', mixed kinds, same discipline as the slot buffer and the trie: the six
+        // EXACT lanes (page counts, wrap fold unit, byte count) native; the nine MEASURES
+        // bitcast. See ITEM_MEASURE_LANES. This was 'float', and I_BYTE_COUNT aliasing on
+        // it past 2^24 folded a large item's tail into the next item with no symptom.
+        this.itemTable = instancedArray(this.maxItems * ITEM_STRIDE, 'uint').setName('GlyphItemTable');
         this.itemStarts = instancedArray(this.maxItems, 'uint').setName('GlyphItemStarts');
 
         // ── Far-texture (the minified text-mass LOD) — see the FAR block in ────────
@@ -901,13 +905,13 @@ export default class GlyphPipelineKernels {
             const item = itemSearch(id).toVar('item');
             const ib = item.mul(uint(ITEM_STRIDE)).toVar('ib');
             const itemStart = starts.element(item).toVar('itemStart');
-            const originX = it.element(ib.add(uint(I_ORIGIN_X))).toVar('originX');
-            const originY = it.element(ib.add(uint(I_ORIGIN_Y))).toVar('originY');
-            const originZ = it.element(ib.add(uint(I_ORIGIN_Z))).toVar('originZ');
+            const originX = bitcast(it.element(ib.add(uint(I_ORIGIN_X))), 'float').toVar('originX');
+            const originY = bitcast(it.element(ib.add(uint(I_ORIGIN_Y))), 'float').toVar('originY');
+            const originZ = bitcast(it.element(ib.add(uint(I_ORIGIN_Z))), 'float').toVar('originZ');
             const wrap = int(it.element(ib.add(uint(I_WRAP_WIDTH)))).toVar('wrap');
             const pageCols = int(it.element(ib.add(uint(I_PAGE_COLS)))).toVar('pageCols');
-            const lineHeight = it.element(ib.add(uint(I_LINE_HEIGHT))).toVar('lineHeight');
-            const zWrapStep = it.element(ib.add(uint(I_Z_STEP))).toVar('zWrapStep');
+            const lineHeight = bitcast(it.element(ib.add(uint(I_LINE_HEIGHT))), 'float').toVar('lineHeight');
+            const zWrapStep = bitcast(it.element(ib.add(uint(I_Z_STEP))), 'float').toVar('zWrapStep');
 
             const col = int(lane(id, S_COL)).toVar('col');
             const ord = int(lane(id, S_ORD)).toVar('ord');
@@ -984,7 +988,7 @@ export default class GlyphPipelineKernels {
             const stride = float(0).toVar('stride');
             If(pageRows.greaterThan(int(0)), () => {
                 const key = atomicLoad(this.foldScalars.element(item.mul(uint(2)).add(uint(1)))).toVar('wkey');
-                stride.assign(orderedKeyToFloatGPU(key).add(it.element(ib.add(uint(I_PAGE_GAP_X)))));
+                stride.assign(orderedKeyToFloatGPU(key).add(bitcast(it.element(ib.add(uint(I_PAGE_GAP_X))), 'float')));
             });
             this.itemStrides.element(item).assign(stride);
         })().compute(1).setName('glyphDeriveStrides');
@@ -1013,20 +1017,20 @@ export default class GlyphPipelineKernels {
             //    metrics come from the item table.
             const item = itemSearch(id).toVar('item');
             const ib = item.mul(uint(ITEM_STRIDE)).toVar('ib');
-            const originY = it.element(ib.add(uint(I_ORIGIN_Y))).toVar('originY');
-            const originZ = it.element(ib.add(uint(I_ORIGIN_Z))).toVar('originZ');
+            const originY = bitcast(it.element(ib.add(uint(I_ORIGIN_Y))), 'float').toVar('originY');
+            const originZ = bitcast(it.element(ib.add(uint(I_ORIGIN_Z))), 'float').toVar('originZ');
             const pageRows = int(it.element(ib.add(uint(I_PAGE_ROWS)))).toVar('pageRows');
             const pageCols = int(it.element(ib.add(uint(I_PAGE_COLS)))).toVar('pageCols');
             const pagesWide = int(it.element(ib.add(uint(I_PAGES_WIDE)))).toVar('pagesWide');
             // The DERIVED stride (kernel 8) — never a CPU input, never measured here.
             const pageStrideX = this.itemStrides.element(item).toVar('pageStrideX');
-            const bandStrideY = it.element(ib.add(uint(I_BAND_STRIDE_Y))).toVar('bandStrideY');
-            const depthPerBand = it.element(ib.add(uint(I_DEPTH_PER_BAND))).toVar('depthPerBand');
-            const depthPerCol = it.element(ib.add(uint(I_DEPTH_PER_COL))).toVar('depthPerCol');
+            const bandStrideY = bitcast(it.element(ib.add(uint(I_BAND_STRIDE_Y))), 'float').toVar('bandStrideY');
+            const depthPerBand = bitcast(it.element(ib.add(uint(I_DEPTH_PER_BAND))), 'float').toVar('depthPerBand');
+            const depthPerCol = bitcast(it.element(ib.add(uint(I_DEPTH_PER_COL))), 'float').toVar('depthPerCol');
             const scrollRows = int(it.element(ib.add(uint(I_SCROLL_ROWS)))).toVar('scrollRows');
             const wrapWidth = int(it.element(ib.add(uint(I_WRAP_WIDTH)))).toVar('wrapWidth');
-            const lineHeight = it.element(ib.add(uint(I_LINE_HEIGHT))).toVar('lineHeight');
-            const zWrapStep = it.element(ib.add(uint(I_Z_STEP))).toVar('zWrapStep');
+            const lineHeight = bitcast(it.element(ib.add(uint(I_LINE_HEIGHT))), 'float').toVar('lineHeight');
+            const zWrapStep = bitcast(it.element(ib.add(uint(I_Z_STEP))), 'float').toVar('zWrapStep');
 
             const o = id.mul(uint(SLOT_STRIDE)).toVar('o');
             const row = int(lane(id, S_ROW)).toVar('row');
@@ -1192,13 +1196,16 @@ export default class GlyphPipelineKernels {
             this._packItemPage(i, it.page || {});
             const o = it.origin || {};
             const b = i * ITEM_STRIDE;
-            tbl[b + I_ORIGIN_X] = o.x || 0;
-            tbl[b + I_ORIGIN_Y] = o.y || 0;
-            tbl[b + I_ORIGIN_Z] = o.z || 0;
-            tbl[b + I_WRAP_WIDTH] = Math.max(0, Math.trunc(it.wrapWidth ?? params.wrapWidth ?? 0));
-            tbl[b + I_Z_STEP] = it.zStep ?? params.zStep ?? 0;
-            tbl[b + I_LINE_HEIGHT] = it.lineHeight ?? params.lineHeight ?? 1;
-            tbl[b + I_BYTE_COUNT] = len;
+            tbl[b + I_ORIGIN_X] = fbits(o.x || 0);                 // measure
+            tbl[b + I_ORIGIN_Y] = fbits(o.y || 0);                 // measure
+            tbl[b + I_ORIGIN_Z] = fbits(o.z || 0);                 // measure
+            // EXACT lanes: the u32 container truncates on assignment, so the old
+            // Math.trunc here is redundant — but the clamp is NOT (a negative would
+            // wrap to a huge unsigned value rather than erroring).
+            tbl[b + I_WRAP_WIDTH] = Math.max(0, it.wrapWidth ?? params.wrapWidth ?? 0);
+            tbl[b + I_Z_STEP] = fbits(it.zStep ?? params.zStep ?? 0);          // measure
+            tbl[b + I_LINE_HEIGHT] = fbits(it.lineHeight ?? params.lineHeight ?? 1); // measure
+            tbl[b + I_BYTE_COUNT] = len;                           // exact — the survivor
             hi = start + len;
         }
 
@@ -1540,14 +1547,16 @@ export default class GlyphPipelineKernels {
     _packItemPage(i, p) {
         const tbl = this.itemTable.value.array;
         const b = i * ITEM_STRIDE;
-        tbl[b + I_PAGE_ROWS] = Math.max(0, Math.trunc(p.pageRows || 0));
-        tbl[b + I_PAGE_COLS] = Math.max(0, Math.trunc(p.pageCols || 0));
-        tbl[b + I_PAGES_WIDE] = Math.max(1, Math.trunc(p.pagesWide || 1));
-        tbl[b + I_PAGE_GAP_X] = p.pageGapX || 0;
-        tbl[b + I_BAND_STRIDE_Y] = p.bandStrideY || 0;
-        tbl[b + I_DEPTH_PER_BAND] = p.depthPerBand || 0;
-        tbl[b + I_DEPTH_PER_COL] = p.depthPerColumn || 0;
-        tbl[b + I_SCROLL_ROWS] = Math.max(0, Math.trunc(p.scrollRows || 0));
+        // EXACT lanes keep their CLAMP (a negative wraps, unsigned) and drop their
+        // Math.trunc (the u32 container truncates on assignment). MEASURES are bitcast.
+        tbl[b + I_PAGE_ROWS] = Math.max(0, p.pageRows || 0);
+        tbl[b + I_PAGE_COLS] = Math.max(0, p.pageCols || 0);
+        tbl[b + I_PAGES_WIDE] = Math.max(1, p.pagesWide || 1);
+        tbl[b + I_PAGE_GAP_X] = fbits(p.pageGapX || 0);
+        tbl[b + I_BAND_STRIDE_Y] = fbits(p.bandStrideY || 0);
+        tbl[b + I_DEPTH_PER_BAND] = fbits(p.depthPerBand || 0);
+        tbl[b + I_DEPTH_PER_COL] = fbits(p.depthPerColumn || 0);
+        tbl[b + I_SCROLL_ROWS] = Math.max(0, p.scrollRows || 0);
     }
 
     /**
