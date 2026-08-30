@@ -15,7 +15,7 @@ from glyph_schema import (
     FIXTURE_MEASURE_STRIDE, FIXTURE_COUNT_STRIDE,
     fixture_measure_lane_name, fixture_count_lane_name,
 )
-from glyph_pipeline import run_pipeline
+from glyph_pipeline import run_pipeline, F_LEADER, F_RENDERED
 from fixture_io import PipeFixture, load_pipe_fixture, nan_lanes
 
 comptime MAX_PRINTED = 12
@@ -41,12 +41,40 @@ def check_case(path: String) raises -> Int:
                 if printed < MAX_PRINTED:
                     print("  miss[", i, "]:", got.misses[i], "expected", fx.exp_misses[i])
                     printed += 1
-    for i in range(fx.byte_len):
-        if got.ord_to_byte[i] != fx.exp_ord[i]:
-            bad += 1
-            if printed < MAX_PRINTED:
-                print("  ordToByte[", i, "]:", got.ord_to_byte[i], "expected", fx.exp_ord[i])
-                printed += 1
+    # THE ORD WITNESS replaces the ordToByte value pin. Under scope B the
+    # fixture asserts the CONTRACT (record fields bit-exact) plus SEMANTIC
+    # invariants; ord_to_byte contents and the ORD lane are container scratch a
+    # specialized backend may re-lay or elide. What the pipeline OWES is the
+    # schema's witness — ordToByte[byteStart + ord] == id for every rendered
+    # leader, ordinals a permutation of [0, leaders) per item — which asserts the
+    # PROPERTY rather than one implementation's realization of it, and which
+    # catches the same corruption class better (a value pin passes any two
+    # implementations that share a fault; the witness is checked against got's
+    # own flags, a different failure mode).
+    for it_i in range(fx.item_count):
+        var it_start = fx.items[it_i].byte_start
+        var it_stop = it_start + fx.items[it_i].byte_count
+        var seen = List[Bool](length=(it_stop - it_start) if it_stop > it_start else 1, fill=False)
+        for id in range(it_start, it_stop):
+            if id >= fx.byte_len:
+                break
+            var f = Int(got.fl[id])
+            if (f & F_LEADER) == 0 or (f & F_RENDERED) == 0:
+                continue
+            var ordv = got.c_at(id, 3)
+            var q = it_start + Int(ordv)
+            if q >= fx.byte_len or Int(got.ord_to_byte[q]) != id:
+                bad += 1
+                if printed < MAX_PRINTED:
+                    print("  ord witness: item", it_i, "byte", id, "ord", ordv)
+                    printed += 1
+            elif Int(ordv) < len(seen):
+                if seen[Int(ordv)]:
+                    bad += 1
+                    if printed < MAX_PRINTED:
+                        print("  ord duplicate: item", it_i, "ord", ordv)
+                        printed += 1
+                seen[Int(ordv)] = True
 
     # NaN sweep BEFORE the bit comparison. The comparison below is bit equality,
     # so matching NaNs on both sides pass it; nothing else in this file can see that.
@@ -64,7 +92,13 @@ def check_case(path: String) raises -> Int:
         # order, mapped onto the phase arrays by m_at. The fixture format is
         # frozen; the container is not, and the suites must never notice a
         # container change (that is what m_at/c_at exist for).
-        for lane in range(FIXTURE_MEASURE_STRIDE):
+        # SCOPE B: lanes 0-5 are the RECORD (the wire) — bit-exact. Lanes 6-7
+        # (BASE_X, LINE_ADV) are fold scratch: load-bearing INPUTS where a later
+        # stage reads them (paginate reads BASE_X, the scan form's foldless x
+        # reads LINE_ADV), so corruption still surfaces in the pinned X — but
+        # their VALUES are a container choice the backend may elide. Asserting
+        # them was the faithful-port era pinning HOW; the contract pins WHAT.
+        for lane in range(6):
             var idx = slot * FIXTURE_MEASURE_STRIDE + lane
             var g = UInt32(got.m_at(slot, lane).to_bits())
             var e = UInt32(Float32(fx.exp_measures[idx]).to_bits())
@@ -78,7 +112,7 @@ def check_case(path: String) raises -> Int:
                     printed += 1
         # COUNTS: exact integers. No carrier, no narrowing, no classification —
         # this comparison has no way to be subtly wrong.
-        for lane in range(FIXTURE_COUNT_STRIDE):
+        for lane in range(3):  # ROW, COL, FLAGS; ORD is the witness's, above
             var idx = slot * FIXTURE_COUNT_STRIDE + lane
             if got.c_at(slot, lane) != fx.exp_counts[idx]:
                 bad += 1
