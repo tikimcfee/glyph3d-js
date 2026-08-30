@@ -44,11 +44,19 @@ that outlives its gap is the same defect as a deviation that outlives its debt.
   error + uncaught exception, optionally drive command-bus verbs and screenshot, exit
   non-zero on real errors. The "does the UI boot and run" gate; catches render-crash
   bugs (an undefined variable in a component) before they reach the browser by hand.
+  **Pass `--relay 8080` for anything that touches files or terminals.** Without it the
+  page derives the relay from its own host (:5173, where nothing is listening) and every
+  file verb answers `No repository loaded` — which reads like an app bug and is not one.
+  A boot-only run needs no relay.
   ```
   bun tools/smoke.mjs                                   # headless: report boot errors
   bun tools/smoke.mjs --headed --shot /tmp/app.png      # real GPU render + screenshot
-  bun tools/smoke.mjs --cmd 'repo.load owner/repo' --cmd 'file.open path.js' --shot /tmp/x.png
+  bun tools/smoke.mjs --headed --relay 8080 \
+      --cmd 'file.open path/to/file.js' --shot /tmp/x.png     # with the live tree
   ```
+  A PASS here means "booted without errors", NOT "drew anything" — the crash that put
+  grids on screen with no glyphs in them still exits 0 if it happens inside a draw. LOOK
+  at the screenshot.
   Drives via `window.__glyphClient.router.execute(...)` — same command bus as the CLI.
   Use `--headed` on a GPU box when the screenshot must show real pixels; headless still
   catches all JS errors (GPU-init noise is reported but not counted as failure).
