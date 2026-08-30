@@ -31,12 +31,47 @@ from glyph_schema import (
     I_BAND_STRIDE_Y, I_DEPTH_PER_BAND, I_DEPTH_PER_COL, I_PAGE_STRIDE_X, I_HAS_PAGE,
 )
 from glyph_pipeline import (
-    run_pipeline, F_LEADER, trunc_nonneg, is_nan, item_for_byte, derive_stride,
+    run_pipeline, F_LEADER, trunc_nonneg, is_nan, derive_stride, Item, Trie,
 )
 from fixture_io import load_pipe_fixture
 
 comptime MAX_PRINTED = 8
 comptime EPS = 1e-4
+
+
+comptime BINARY_SEARCH_STEPS = 32
+
+
+def item_search(
+    starts: MutPointer[UInt32, MutAnyOrigin], item_count: Int, id: Int
+) -> Int:
+    """Largest item whose byteStart <= id — the item resolution EVERY thread does.
+
+    This is glyph_pipeline.item_for_byte, run per thread on device instead of
+    precomputed per byte on the host. It is also glyphPipelineKernels'
+    _buildItemSearch line for line: same (lo + hi + 1) >> 1, same branch, same
+    bounded 32-step loop with an early break (a GPU wants a static trip count).
+
+    NO OWNERSHIP CHECK, deliberately — neither the CPU port nor the TSL has one.
+    `lo` is returned even for a byte in a gap between items; F_LEADER is the only
+    gate, and the fold never sets it for a byte no item claims.
+
+    Why this replaced a host-computed table: the old form staged one UInt32 PER
+    SOURCE BYTE (4 B/byte, an N-element buffer) to answer a question that is a
+    function of itemCount, not of n. The search buffer is now itemCount entries.
+    It also means this suite exercises the search itself rather than assuming it.
+    """
+    var lo = 0
+    var hi = item_count - 1
+    for _ in range(BINARY_SEARCH_STEPS):
+        if lo >= hi:
+            break
+        var mid = (lo + hi + 1) >> 1
+        if Int(starts[unsafe_offset=mid]) <= id:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
 
 
 def trunc_nn32(v: Float32) -> Int:
@@ -49,8 +84,9 @@ def paginate_kernel(
     measures: MutPointer[Float32, MutAnyOrigin],
     counts: MutPointer[UInt32, MutAnyOrigin],
     items: MutPointer[Float32, MutAnyOrigin],
-    item_of: MutPointer[UInt32, MutAnyOrigin],
+    item_starts: MutPointer[UInt32, MutAnyOrigin],
     n_bytes: Int32,
+    item_count: Int32,
 ):
     """Thread per byte. Integer gates on the count lanes; f32 for positions only."""
     var id = global_idx.x
@@ -59,7 +95,7 @@ def paginate_kernel(
     var co = id * COUNT_STRIDE
     if (Int(counts[unsafe_offset = co + C_FLAGS]) & F_LEADER) == 0:
         return
-    var io = Int(item_of[unsafe_offset=id]) * ITEM_STRIDE
+    var io = item_search(item_starts, Int(item_count), id) * ITEM_STRIDE
     var has_page = items[unsafe_offset = io + I_HAS_PAGE] > 0.5
 
     var rows = trunc_nn32(items[unsafe_offset = io + I_PAGE_ROWS]) if has_page else 0
@@ -127,19 +163,31 @@ def rel_close(a: Float32, b: Float32) -> Bool:
 
 def check_case(path: String, ctx: DeviceContext) raises -> Int:
     var fx = load_pipe_fixture(path)
-    var n = fx.byte_len
+    return check_items(fx.bytes, fx.trie, fx.items, ctx)
+
+
+def check_items(
+    bytes: List[UInt8], trie: Trie, items: List[Item], ctx: DeviceContext
+) raises -> Int:
+    """Stage an arena and compare device paginate against the CPU port.
+
+    Takes the item list rather than reading it off a fixture so a MULTI-ITEM
+    topology can be built in code — the conformance_gaps pattern. Every
+    .pipe.bin carries exactly one item, which is not enough to exercise
+    item_search at all (see main)."""
+    var n = len(bytes)
     if n == 0:
         return 0
-    var whole = run_pipeline(fx.bytes, fx.trie, fx.items)
+    var whole = run_pipeline(bytes, trie, items)
 
     # Item table, narrowed f64 -> f32 at the device boundary (see the header).
-    var ni = fx.item_count if fx.item_count > 0 else 1
+    var ni = len(items) if len(items) > 0 else 1
     var tbl = List[Float32](unsafe_uninit_length=ni * ITEM_STRIDE)
     for i in range(len(tbl)):
         tbl[i] = 0
-    for i in range(fx.item_count):
+    for i in range(len(items)):
         var o = i * ITEM_STRIDE
-        var t = fx.items[i].copy()
+        var t = items[i].copy()
         tbl[o + I_ORIGIN_Y] = Float32(t.origin_y)
         tbl[o + I_ORIGIN_Z] = Float32(t.origin_z)
         tbl[o + I_PAGE_ROWS] = Float32(t.page_rows)
@@ -160,15 +208,14 @@ def check_case(path: String, ctx: DeviceContext) raises -> Int:
         tbl[o + I_PAGE_STRIDE_X] = Float32(derive_stride(whole.item_bounds[i * 8 + 7], t))
         tbl[o + I_HAS_PAGE] = 1 if t.has_page else 0
 
-    var item_of = List[UInt32](unsafe_uninit_length=n)
-    for id in range(n):
-        var i = item_for_byte(fx.items, id)
-        item_of[id] = UInt32(i) if i >= 0 else UInt32(0)
+    var starts = List[UInt32](unsafe_uninit_length=len(items) if len(items) > 0 else 1)
+    for i in range(len(items)):
+        starts[i] = UInt32(items[i].byte_start)
 
     var h_m = ctx.enqueue_create_host_buffer[DType.float32](n * MEASURE_STRIDE)
     var h_c = ctx.enqueue_create_host_buffer[DType.uint32](n * COUNT_STRIDE)
     var h_t = ctx.enqueue_create_host_buffer[DType.float32](len(tbl))
-    var h_i = ctx.enqueue_create_host_buffer[DType.uint32](n)
+    var h_i = ctx.enqueue_create_host_buffer[DType.uint32](len(starts))
     ctx.synchronize()
     for i in range(n * MEASURE_STRIDE):
         h_m[i] = whole.measures[i]
@@ -176,13 +223,13 @@ def check_case(path: String, ctx: DeviceContext) raises -> Int:
         h_c[i] = whole.counts[i]
     for i in range(len(tbl)):
         h_t[i] = tbl[i]
-    for i in range(n):
-        h_i[i] = item_of[i]
+    for i in range(len(starts)):
+        h_i[i] = starts[i]
 
     var d_m = ctx.enqueue_create_buffer[DType.float32](n * MEASURE_STRIDE)
     var d_c = ctx.enqueue_create_buffer[DType.uint32](n * COUNT_STRIDE)
     var d_t = ctx.enqueue_create_buffer[DType.float32](len(tbl))
-    var d_i = ctx.enqueue_create_buffer[DType.uint32](n)
+    var d_i = ctx.enqueue_create_buffer[DType.uint32](len(starts))
     ctx.enqueue_copy(dst_buf=d_m, src_buf=h_m)
     ctx.enqueue_copy(dst_buf=d_c, src_buf=h_c)
     ctx.enqueue_copy(dst_buf=d_t, src_buf=h_t)
@@ -191,7 +238,8 @@ def check_case(path: String, ctx: DeviceContext) raises -> Int:
     comptime BLOCK = 256
     ctx.enqueue_function[paginate_kernel](
         d_m.unsafe_ptr(), d_c.unsafe_ptr(), d_t.unsafe_ptr(), d_i.unsafe_ptr(),
-        Int32(n), grid_dim=(n + BLOCK - 1) // BLOCK, block_dim=BLOCK,
+        Int32(n), Int32(len(items)),
+        grid_dim=(n + BLOCK - 1) // BLOCK, block_dim=BLOCK,
     )
     ctx.enqueue_copy(dst_buf=h_m, src_buf=d_m)
     ctx.synchronize()
@@ -213,6 +261,49 @@ def check_case(path: String, ctx: DeviceContext) raises -> Int:
     return bad
 
 
+def check_multi_item(path: String, ctx: DeviceContext) raises -> Int:
+    """THE CASE THAT MAKES item_search MEAN ANYTHING.
+
+    Every .pipe.bin fixture carries exactly ONE item. With item_count == 1 the
+    search sets lo = hi = 0, breaks on step one, and returns 0 no matter what the
+    body does — so `return 0` in place of the whole search passed this suite, and
+    so did an off-by-one on the comparison. Both mutations were run; both passed.
+    Item resolution had never been exercised anywhere in the four-layer contract:
+    not here, not in gpu_pipeline/gpu_scan/gpu_bounds (same single-item staging),
+    and not on the CPU, where run_pipeline iterates items instead of searching.
+
+    So build the topology in code, the way conformance_gaps does. Five items
+    tiling the arena with DISTINCT origins — distinct is the whole point, since a
+    wrong item index has to move a position for the comparison to see it."""
+    var fx = load_pipe_fixture(path)
+    var n = len(fx.bytes)
+    if n < 40:
+        print("  multi-item  : fixture too small, skipped")
+        return 0
+    var k = 5
+    var per = n // k
+    var items = List[Item]()
+    for i in range(k):
+        var it = Item()
+        it.byte_start = i * per
+        it.byte_count = per if i < k - 1 else n - i * per
+        it.line_height = 1
+        # DISTINCT per item: if the search returns the wrong index, Y and Z move.
+        it.origin_x = Float64(i) * 13.0
+        it.origin_y = Float64(i) * 100.0
+        it.origin_z = Float64(i) * 7.0
+        it.has_page = True
+        it.page_rows = 4
+        it.page_cols = 8
+        it.pages_wide = 2
+        it.page_gap_x = 1
+        it.z_step = 0.5
+        items.append(it^)
+    var bad = check_items(fx.bytes, fx.trie, items, ctx)
+    print("  multi-item  :", k, "items over", n, "bytes,", bad, "defects")
+    return bad
+
+
 def main() raises:
     comptime assert has_accelerator(), "gpu_paginate requires a GPU"
     var args = argv()
@@ -222,6 +313,7 @@ def main() raises:
     var ctx = DeviceContext()
     print("device:", ctx.name())
     var total_bad = 0
+    total_bad += check_multi_item(String(args[1]), ctx)
     for i in range(1, len(args)):
         var path = String(args[i])
         var bad = check_case(path, ctx)
