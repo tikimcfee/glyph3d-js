@@ -223,6 +223,53 @@ work subsumes it.** Do the split first only where it de-risks the record work (t
 trie, the scan buffers); let `slots` fall out of compaction rather than being migrated
 twice.
 
+## MEASURED, 2026-08-30 — and it tempers the record case
+
+The claim "pay per rendered glyph, not per loaded byte" was never measured. Measured now,
+over this repo (595 source files, 6.68 MB):
+
+    leaders (codepoints)   99.07% of bytes      <- source code is ASCII
+    newlines                2.01%               <- slot held, nothing drawn
+    spaces/tabs            19.86%               <- slot held, blank quad
+    drawable glyphs        97.07% of bytes
+
+    slot state @48B/source byte     306.0 MB
+    records    @32B/drawable glyph  198.0 MB    1.55x
+      eliding blanks too            157.5 MB    1.94x
+
+**A byte IS a glyph in source code.** The multi-byte saving is 0.93%. So compaction to a
+32-byte record buys **1.55x** — real, worth having, and NOT the fix. The ceiling moves
+42.7 MB → ~66 MB of source. That is a bigger number, which is the thing this plan already
+said was not the goal.
+
+The saving that IS structural is **lifetime, not size**: 4 of the 12 slot lanes
+(`BASE_X`, `LINE_ADV`, `FLAGS`, `ORD` — the complement of the contract's 8 `VERTEX_READ`
+fields) are fold SCRATCH. They are needed while a job lays out and never again, yet they
+are held per byte for the life of the corpus. Scratch as a per-JOB pool sized to the
+largest single load, rather than to the corpus, drops resident cost to 32B/glyph *and*
+makes the remaining 16B/byte independent of how much is loaded.
+
+## THE THING ALREADY BUILT THAT ACTUALLY BREAKS THE CEILING
+
+Residency is keyed to LOADING. It should be keyed to VISIBILITY — and the mechanism for
+that is already in the tree.
+
+The far-LOD path renders a file as one 64×64 slab of a shared 1024×1024 RGBA8 atlas
+(`FAR_SLAB`, `FAR_TEX`): **16 KB per file, regardless of the file's size**, 256 slabs in
+4 MB total. At this corpus's average file (11 KB), those same 256 files cost ~2.9 MB of
+source — which at 48B/byte is ~137 MB of slot state. The far path is already ~34x cheaper
+per file and it is not a proposal; it ships.
+
+So the question the arena work should answer is not "how small can the record get." It is:
+**why is every loaded byte resident at full layout fidelity when the renderer already owns
+a representation that costs per FILE?** Full records for what is near enough to read, far
+slabs for the rest, and the byte ceiling stops being a corpus limit at all — not because
+the number grew, but because the corpus stopped having to be resident.
+
+That reframes `slots` too. Splitting it by carrier is worth doing when it is the resident
+NEAR-text buffer sized to the working set. Splitting it while it is still "every byte ever
+loaded" is migrating the wrong thing carefully.
+
 ## A BIAS TO DECLARE
 
 This plan is written by the session that spent a day making the mixed-container
