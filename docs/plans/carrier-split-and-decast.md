@@ -270,6 +270,33 @@ That reframes `slots` too. Splitting it by carrier is worth doing when it is the
 NEAR-text buffer sized to the working set. Splitting it while it is still "every byte ever
 loaded" is migrating the wrong thing carefully.
 
+## PROVENANCE CORRECTION — commit 2363801 is mis-scoped
+
+Recorded because the git record is now wrong in a way that misleads an auditor, and it
+cannot be rewritten: it is published and the engine session has committed on top of it.
+
+**`2363801` ("layout: the last live 'exactly representable as f32'") also contains 114
+lines of `schema/glyph-identity.json`** — the shared-tier correction that moves PAGE_ROWS,
+PAGE_COLS, PAGES_WIDE, SCROLL_ROWS and WRAP_WIDTH off the float carrier and restructures
+`itemTable` into `measures` + `exact`. That work is **mojo-rising's**, not this session's,
+and the commit message describes only the layout kernel.
+
+Cause: `git add -A` in a working tree that a peer session was editing live. I knew we
+shared the tree — I had already staged a single file by name in `a44a489` for exactly that
+reason — and then used the sweeping form four commits earlier without thinking about it.
+
+Consequences, so nobody has to rediscover them:
+
+- Anyone asking "when did the shared contract change?" lands on a commit about the layout
+  kernel. That is a real navigational defect in the history.
+- The engine session's own record says the kind correction landed in `a44a489`. It landed
+  in `2363801`, and not deliberately — their sequencing argument ("the ordering hazard
+  couldn't bite, the correction was already committed") happens to hold, but it held by
+  accident rather than by staging discipline. Nobody should lean on that.
+
+Practice, adopted: **in a shared tree, stage by name.** `git add -A` is a statement that
+every change in the tree is yours, and in a shared tree that statement is false by default.
+
 ## A BIAS TO DECLARE
 
 This plan is written by the session that spent a day making the mixed-container
