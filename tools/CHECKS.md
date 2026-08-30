@@ -29,6 +29,14 @@ numbers imply the coverage nobody wrote.
   auto-layout glitches on mode switch that resolve after further UI interaction, i.e.
   shell/panel state rather than layout math. Not reproduced in a harness, so it is
   recorded as a gap rather than a bug.
+- **The headless layout suites cannot see the layout KERNEL at all.** Measured 2026-08-30,
+  not inferred: a real defect in `GlyphLayoutKernel`'s item mapping that puts 96.56% of
+  slots beyond eps on the GPU leaves `layout`, `layout-fuzz`, `layout-mirror` and
+  `scan-layout` **all green**. They exercise the layout primitives and the CPU fold; only
+  `layout-kernel-check` (GPU) executes the kernel. The same holds for the byte pipeline —
+  the headless suites drive the reference oracle, and `glyph-pipeline-check` is the only
+  thing that runs the TSL. Treat a headless green as evidence about the SPEC, never about
+  a kernel.
 - **`farItems` carries three exact values on float lanes, and nothing checks it.** The
   buffer is `'float'`: `FI_SLAB_X`/`FI_SLAB_Y` are texel coordinates read through `int()`,
   and `FI_DIRTY` is a flag tested as `< 0.5` — the float proxy for a bit test that was

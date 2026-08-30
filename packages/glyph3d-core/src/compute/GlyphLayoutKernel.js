@@ -76,17 +76,36 @@ const BINARY_SEARCH_STEPS = 32;
 export const POSITION_STRIDE = 4;
 
 /**
- * Floats per item in the item table — the per-item params that VARY across items in a
- * field (everything else is field-level, set once as a uniform). Layout:
- *   [0] originX   [1] originY   [2] originZ
- *   [3] lineCount [4] lineTableOffset  [5] pageStrideX
- * Small integers (lineCount, lineTableOffset) are exactly representable as f32.
+ * The per-item params that VARY across items in a field (everything else is field-level,
+ * set once as a uniform), SPLIT BY CARRIER — four measures in an f32 array, two exact counts in a u32 array.
+ *
+ * It was one f32 array of six lanes, justified in this very comment: "Small integers
+ * (lineCount, lineTableOffset) are exactly representable as f32." That is, word for word,
+ * the argument the ordinal wall died of — see GlyphTrie.js, where the same sentence about
+ * glyph ids is kept as a tombstone. Exact-in-practice on a float carrier is a bound
+ * nobody is checking, and lineTableOffset is an ACCUMULATING offset into a growable
+ * concatenated table: it is the lane in this file with a real path to getting large.
+ *
+ * The lanes were also addressed by bare magic numbers (`ib.add(uint(4))`), so the only
+ * statement of which lane was which lived in a trailing `// lineTableOffset` comment.
+ * Named now, in the container that matches the kind.
  *
  * `pageStrideX` is the only page param that varies per item — it carries that item's
  * measured row extent. Whether an item paginates is NOT a lane: `screenRow >= pageRows`
  * decides it per slot, and an item shorter than a page never trips it.
  */
-export const ITEM_STRIDE = 6;
+
+/** MEASURE lanes — an f32 container. World-unit origins and the measured page stride. */
+export const ITEM_MEASURE_STRIDE = 4;
+export const LM_ORIGIN_X = 0;
+export const LM_ORIGIN_Y = 1;
+export const LM_ORIGIN_Z = 2;
+export const LM_PAGE_STRIDE_X = 3;
+
+/** EXACT lanes — a u32 container. The item's window into the concatenated line table. */
+export const ITEM_EXACT_STRIDE = 2;
+export const LE_LINE_COUNT = 0;
+export const LE_LINE_OFFSET = 1;
 
 /** Item capacity a kernel is born with. A field's items are few (filename + content = 2). */
 export const DEFAULT_MAX_ITEMS = 8;
@@ -279,8 +298,10 @@ export default class GlyphLayoutKernel {
         this.lineStartRow = null;
         /** @type {?import('three/webgpu').StorageBufferNode} slotCount×float — x offset from the visual row's left edge */
         this.xOffsets = null;
-        /** @type {?import('three/webgpu').StorageBufferNode} itemCount×ITEM_STRIDE float — per-item params (origin, outBase, …) */
-        this.itemTable = null;
+        /** @type {?import('three/webgpu').StorageBufferNode} itemCount×ITEM_MEASURE_STRIDE f32 — origins + page stride */
+        this.itemMeasures = null;
+        /** @type {?import('three/webgpu').StorageBufferNode} itemCount×ITEM_EXACT_STRIDE u32 — line-table window */
+        this.itemExact = null;
         /** @type {?import('three/webgpu').StorageBufferNode} itemCount×uint — bufferStartIndex per item (the item-search key) */
         this.itemStarts = null;
         /** @type {?import('three/webgpu').ComputeNode} */
@@ -321,7 +342,8 @@ export default class GlyphLayoutKernel {
         this.lineStartRow = instancedArray(maxLines, 'uint').setName('GlyphLayoutLineStartRow');
         // The item table: per-item params that vary across items (origin, outBase, lineCount,
         // lineTableOffset, pageStrideX, paginated). Field-level params are uniforms.
-        this.itemTable  = instancedArray(this.maxItems * ITEM_STRIDE, 'float').setName('GlyphLayoutItemTable');
+        this.itemMeasures = instancedArray(this.maxItems * ITEM_MEASURE_STRIDE, 'float').setName('GlyphLayoutItemMeasures');
+        this.itemExact    = instancedArray(this.maxItems * ITEM_EXACT_STRIDE, 'uint').setName('GlyphLayoutItemExact');
         this.itemStarts = instancedArray(this.maxItems, 'uint').setName('GlyphLayoutItemStarts');
         // Arranger displacements (stage 4): flat xyz per FIELD-GLOBAL slot, added after the
         // fold. LAZY — 1 float until setDisplacements() first arms it, so unarranged grids
@@ -349,15 +371,14 @@ export default class GlyphLayoutKernel {
      */
     _buildFold() {
         const u = this._u;
-        const STRIDE = ITEM_STRIDE;
-        const it = this.itemTable;
+        const IM = this.itemMeasures;
         const lt = this.lineTable;
         const lsr = this.lineStartRow;
         const xo = this.xOffsets;
         const disp = this.displacements;
 
         return Fn(([slot, line, item, globalSlot]) => {
-            const ib = item.mul(uint(STRIDE)).toVar('ib');   // item-table base
+            const ib = item.mul(uint(ITEM_MEASURE_STRIDE)).toVar('ib');   // measure-row base
 
             const j = slot.sub(lt.element(line)).toVar('j');
 
@@ -370,9 +391,9 @@ export default class GlyphLayoutKernel {
             });
 
             // Per-item origin (the one param that positions every glyph of the item).
-            const originX = it.element(ib).toVar('ox');
-            const originY = it.element(ib.add(uint(1))).toVar('oy');
-            const originZ = it.element(ib.add(uint(2))).toVar('oz');
+            const originX = IM.element(ib.add(uint(LM_ORIGIN_X))).toVar('ox');
+            const originY = IM.element(ib.add(uint(LM_ORIGIN_Y))).toVar('oy');
+            const originZ = IM.element(ib.add(uint(LM_ORIGIN_Z))).toVar('oz');
 
             // x is a lookup, not a multiply: xOffsets holds each slot's distance from its visual
             // row's left edge — the running sum of REAL advances. Field-global index now.
@@ -394,7 +415,7 @@ export default class GlyphLayoutKernel {
                     const page = screenRow.div(u.pageRows).toVar('page');
                     const rowOff = screenRow.sub(page.mul(u.pageRows))
                         .toFloat().mul(u.lineSpacing).toVar('rowOff');
-                    const strideX = it.element(ib.add(uint(5))).toVar('strideX');
+                    const strideX = IM.element(ib.add(uint(LM_PAGE_STRIDE_X))).toVar('strideX');
 
                     If(u.pagAxis.equal(int(LAYOUT_AXIS.z)), () => {
                         y.assign(originY.sub(rowOff));
@@ -457,7 +478,7 @@ export default class GlyphLayoutKernel {
     _buildKernel() {
         const u = this._u;
         const fold = this._buildFold();
-        const it = this.itemTable;
+        const IX = this.itemExact;
         const lt = this.lineTable;
         const starts = this.itemStarts;
 
@@ -481,9 +502,11 @@ export default class GlyphLayoutKernel {
                 item.assign(lo);
             }
             const localSlot = globalSlot.sub(starts.element(item)).toVar('localSlot');
-            const itemBase = item.mul(uint(ITEM_STRIDE)).toVar('itemBase');
-            const lineOff = uint(it.element(itemBase.add(uint(4)))).toVar('lineOff');   // lineTableOffset
-            const lineCnt = uint(it.element(itemBase.add(uint(3)))).toVar('lineCnt');   // lineCount
+            const itemBase = item.mul(uint(ITEM_EXACT_STRIDE)).toVar('itemBase');
+            // Native u32 reads. These were uint(f32 lane) — a conversion that is exact
+            // only while the value stays under 2^24, which is a bound nothing checked.
+            const lineOff = IX.element(itemBase.add(uint(LE_LINE_OFFSET))).toVar('lineOff');
+            const lineCnt = IX.element(itemBase.add(uint(LE_LINE_COUNT))).toVar('lineCnt');
 
             // ── Line search within the item's range [lineOff, lineOff+lineCnt). ──
             // Largest L with lineTable[lineOff+L] ≤ localSlot. The result is an ABSOLUTE index
@@ -596,7 +619,8 @@ export default class GlyphLayoutKernel {
         const lt = this.lineTable.value.array;
         const lsr = this.lineStartRow.value.array;
         const xo = this.xOffsets.value.array;
-        const itBuf = this.itemTable.value.array;
+        const imBuf = this.itemMeasures.value.array;
+        const ixBuf = this.itemExact.value.array;
         const starts = this.itemStarts.value.array;
         const metrics = new Array(itemCount);
         let lineOff = 0;
@@ -622,11 +646,13 @@ export default class GlyphLayoutKernel {
 
             // Item table: origin + the item's line-table window + its measured page stride.
             const o = params?.origin || { x: 0, y: 0, z: 0 };
-            const ib = i * ITEM_STRIDE;
-            itBuf[ib + 0] = o.x;  itBuf[ib + 1] = o.y;  itBuf[ib + 2] = o.z;
-            itBuf[ib + 3] = lineN;
-            itBuf[ib + 4] = lineOff;
-            itBuf[ib + 5] = maxRowExtent + fieldGapX;
+            const im = i * ITEM_MEASURE_STRIDE, ix = i * ITEM_EXACT_STRIDE;
+            imBuf[im + LM_ORIGIN_X] = o.x;
+            imBuf[im + LM_ORIGIN_Y] = o.y;
+            imBuf[im + LM_ORIGIN_Z] = o.z;
+            imBuf[im + LM_PAGE_STRIDE_X] = maxRowExtent + fieldGapX;
+            ixBuf[ix + LE_LINE_COUNT] = lineN;
+            ixBuf[ix + LE_LINE_OFFSET] = lineOff;
 
             // Item starts: bufferStartIndex per item (the item-search key).
             starts[i] = outBase;
@@ -637,7 +663,8 @@ export default class GlyphLayoutKernel {
         this.lineTable.value.needsUpdate = true;
         this.lineStartRow.value.needsUpdate = true;
         this.xOffsets.value.needsUpdate = true;
-        this.itemTable.value.needsUpdate = true;
+        this.itemMeasures.value.needsUpdate = true;
+        this.itemExact.value.needsUpdate = true;
         this.itemStarts.value.needsUpdate = true;
 
         // ── Field-level uniforms (set once — identical across items) ──
@@ -734,7 +761,7 @@ export default class GlyphLayoutKernel {
      */
     _releaseBuffers() {
         const attributes = this.renderer?._attributes;
-        for (const node of [this.xOffsets, this.lineTable, this.lineStartRow, this.itemTable, this.itemStarts, this.displacements]) {
+        for (const node of [this.xOffsets, this.lineTable, this.lineStartRow, this.itemMeasures, this.itemExact, this.itemStarts, this.displacements]) {
             if (node && attributes) attributes.delete(node.value);
         }
         // An owned positions buffer is ours to free; an external attribute is the FIELD's —
@@ -744,7 +771,8 @@ export default class GlyphLayoutKernel {
         this.xOffsets = null;
         this.lineTable = null;
         this.lineStartRow = null;
-        this.itemTable = null;
+        this.itemMeasures = null;
+        this.itemExact = null;
         this.itemStarts = null;
         this.displacements = null;
 

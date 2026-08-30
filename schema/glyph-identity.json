@@ -272,14 +272,23 @@
  },
  "itemTable": {
   "$comment": [
-   "Per-item layout params as the GPU sees them. Authored f64 on the host and",
-   "NARROWED to f32 here, because Metal has no double precision \u2014 which is why",
-   "paginate on device is an eps-tier comparison rather than a bit-exact one.",
-   "HAS_PAGE is a flag riding this buffer; it is 0 or 1 and exact either way."
+   "THIS BACKEND'S per-item layout table, on device \u2014 split by carrier like every",
+   "other table in the system (2026-08-31, the kind correction): world-unit",
+   "distances in f32, integer page geometry native u32. It was one f32 array of",
+   "15 lanes until the render side's carrier split made a question askable that a",
+   "mixed container cannot pose \u2014 does each param ride the carrier its KIND",
+   "requires? \u2014 and five counts failed it. They were declared 'measure' because",
+   "this table's section was literally NAMED measures: the container had defined",
+   "the kind, the exact inversion the tier split exists to prevent. The paginate",
+   "kernel's own war story (119 glyphs on the wrong page from a ULP wobble in a",
+   "float page key) is the ground truth of what kind these values are.",
+   "Every lane still declares realizes/realization_only/orphan against the",
+   "semantic set; the carrier rule now runs over THIS table too (the miss",
+   "survived precisely because it did not)."
   ],
   "measures": {
    "carrier": "f32",
-   "stride": 15,
+   "stride": 9,
    "lanes": [
     {
      "name": "ORIGIN_Y",
@@ -294,83 +303,89 @@
      "realizes": "ORIGIN_Z"
     },
     {
-     "name": "PAGE_ROWS",
-     "index": 2,
-     "kind": "measure",
-     "realizes": "PAGE_ROWS"
-    },
-    {
-     "name": "PAGE_COLS",
-     "index": 3,
-     "kind": "measure",
-     "realizes": "PAGE_COLS"
-    },
-    {
-     "name": "SCROLL_ROWS",
-     "index": 4,
-     "kind": "measure",
-     "realizes": "SCROLL_ROWS"
-    },
-    {
-     "name": "PAGES_WIDE",
-     "index": 5,
-     "kind": "measure",
-     "realizes": "PAGES_WIDE"
-    },
-    {
-     "name": "WRAP_WIDTH",
-     "index": 6,
-     "kind": "measure",
-     "realizes": "WRAP_WIDTH"
-    },
-    {
      "name": "LINE_HEIGHT",
-     "index": 7,
+     "index": 2,
      "kind": "measure",
      "realizes": "LINE_HEIGHT"
     },
     {
      "name": "Z_STEP",
-     "index": 8,
+     "index": 3,
      "kind": "measure",
      "realizes": "Z_STEP"
     },
     {
      "name": "BAND_STRIDE_Y",
-     "index": 9,
+     "index": 4,
      "kind": "measure",
      "realizes": "BAND_STRIDE_Y"
     },
     {
      "name": "DEPTH_PER_BAND",
-     "index": 10,
+     "index": 5,
      "kind": "measure",
      "realizes": "DEPTH_PER_BAND"
     },
     {
      "name": "DEPTH_PER_COL",
-     "index": 11,
+     "index": 6,
      "kind": "measure",
      "realizes": "DEPTH_PER_COL"
     },
     {
      "name": "PAGE_STRIDE_X",
-     "index": 12,
+     "index": 7,
      "kind": "measure",
      "realizes": "PAGE_GAP_X",
      "derived": "PAGE_GAP_X + the item's widest row (bounds lane MAX_ROW_EXTENT). This layer derives on the host and stores the result; the render side stores the gap and derives on device. Both realize the same semantic parameter."
     },
     {
-     "name": "HAS_PAGE",
-     "index": 13,
-     "kind": "count",
-     "realization_only": "encodes ABSENCE of a page. The render side encodes the same fact as a null page object with zeroed geometry."
-    },
-    {
      "name": "ORIGIN_X",
-     "index": 14,
+     "index": 8,
      "kind": "measure",
      "realizes": "ORIGIN_X"
+    }
+   ]
+  },
+  "exact": {
+   "carrier": "u32",
+   "stride": 6,
+   "lanes": [
+    {
+     "name": "PAGE_ROWS",
+     "index": 0,
+     "kind": "count",
+     "realizes": "PAGE_ROWS"
+    },
+    {
+     "name": "PAGE_COLS",
+     "index": 1,
+     "kind": "count",
+     "realizes": "PAGE_COLS"
+    },
+    {
+     "name": "SCROLL_ROWS",
+     "index": 2,
+     "kind": "count",
+     "realizes": "SCROLL_ROWS"
+    },
+    {
+     "name": "PAGES_WIDE",
+     "index": 3,
+     "kind": "count",
+     "realizes": "PAGES_WIDE"
+    },
+    {
+     "name": "WRAP_WIDTH",
+     "index": 4,
+     "kind": "count",
+     "realizes": "WRAP_WIDTH"
+    },
+    {
+     "name": "HAS_PAGE",
+     "index": 5,
+     "kind": "count",
+     "realization_only": "encodes ABSENCE of a page. The render side encodes the same fact as a null page object with zeroed geometry."
     }
    ]
   }
@@ -477,7 +492,7 @@
    },
    {
     "name": "WRAP_WIDTH",
-    "kind": "measure",
+    "kind": "count",
     "note": "the fold unit; overrides PAGE_COLS when nonzero"
    },
    {
@@ -492,20 +507,23 @@
    },
    {
     "name": "SCROLL_ROWS",
-    "kind": "measure"
+    "kind": "count",
+    "note": "Integer page geometry \u2014 consumed through truncation at every read site in every layer, which was the seam confessing the kind all along. Corrected measure->count 2026-08-31."
    },
    {
     "name": "PAGE_ROWS",
-    "kind": "measure"
+    "kind": "count",
+    "note": "Integer page geometry \u2014 consumed through truncation at every read site in every layer, which was the seam confessing the kind all along. Corrected measure->count 2026-08-31."
    },
    {
     "name": "PAGE_COLS",
-    "kind": "measure",
+    "kind": "count",
     "note": "also the fold unit when WRAP_WIDTH is 0"
    },
    {
     "name": "PAGES_WIDE",
-    "kind": "measure"
+    "kind": "count",
+    "note": "Integer page geometry \u2014 consumed through truncation at every read site in every layer, which was the seam confessing the kind all along. Corrected measure->count 2026-08-31."
    },
    {
     "name": "BAND_STRIDE_Y",
