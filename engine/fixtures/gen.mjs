@@ -52,7 +52,7 @@ import { runPipeline, SLOT_STRIDE, FLOAT_LANES, fval,
     S_GLYPH_ID, S_ADVANCE, S_HEIGHT, S_X, S_Y, S_Z,
     S_ROW, S_COL, S_FLAGS, S_BASE_X, S_LINE_ADV, S_ORD,
 } from '../../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
-import { MEASURE_STRIDE, COUNT_STRIDE } from '../glyph_schema.mjs';
+import { FIXTURE_MEASURE_STRIDE as MEASURE_STRIDE, FIXTURE_COUNT_STRIDE as COUNT_STRIDE } from '../glyph_schema.mjs';
 import { buildGlyphTrie } from '../../packages/glyph3d-core/src/compute/GlyphTrie.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));

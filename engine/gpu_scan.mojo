@@ -21,7 +21,7 @@ from std.sys import argv, has_accelerator
 from std.gpu import global_idx
 from max.gpu.host import DeviceContext
 from glyph_schema import (
-    MEASURE_STRIDE, COUNT_STRIDE, M_ADVANCE, C_FLAGS,
+    SM_STRIDE, SM_ADVANCE,
     PARTIAL_COUNT_STRIDE, PARTIAL_MEASURE_STRIDE,
     P_RESET, P_NL, P_GLYPHS, P_ROWS, P_HEAD_LEN, P_TAIL_LEN, P_WRAP, PM_TAIL_ADV,
 )
@@ -68,7 +68,7 @@ def chunk_reduce_kernel(
         to = n
     while id < n and id < to:
         # ── leaf ────────────────────────────────────────────────────────────
-        var f = Int(flags[unsafe_offset = id * COUNT_STRIDE + C_FLAGS])
+        var f = Int(flags[unsafe_offset = id])
         var leader = (f & F_LEADER) != 0
         var newline = (f & F_NEWLINE) != 0
         var b_wrap = Int(wrap_of[unsafe_offset=id])
@@ -85,7 +85,7 @@ def chunk_reduce_kernel(
             else:
                 b_head = 1
                 b_tail = 1
-                b_adv = advance[unsafe_offset = id * MEASURE_STRIDE + M_ADVANCE]
+                b_adv = advance[unsafe_offset = id * SM_STRIDE + SM_ADVANCE]
 
         # ── combine(a, leaf) — the absorbing reset makes items structural ───
         if not seen or b_reset != 0:
@@ -158,10 +158,10 @@ def check_case(path: String, ctx: DeviceContext) raises -> Int:
         if to > n:
             to = n
         for id in range(c * CHUNK, to):
-            var f = Int(r.counts[id * COUNT_STRIDE + C_FLAGS])
+            var f = Int(r.fl[id])
             var leaf = scan_leaf_value(
                 (f & F_NEWLINE) != 0,
-                r.measures[id * MEASURE_STRIDE + M_ADVANCE],
+                r.sm[id * SM_STRIDE + SM_ADVANCE],
                 (f & F_LEADER) != 0,
                 Int(wrap_of[id]),
                 is_start[id] != 0,
@@ -170,23 +170,23 @@ def check_case(path: String, ctx: DeviceContext) raises -> Int:
         cpu.append(acc^)
 
     # ── GPU ─────────────────────────────────────────────────────────────────
-    var h_flags = ctx.enqueue_create_host_buffer[DType.uint32](n * COUNT_STRIDE)
-    var h_adv = ctx.enqueue_create_host_buffer[DType.float32](n * MEASURE_STRIDE)
+    var h_flags = ctx.enqueue_create_host_buffer[DType.uint32](n)
+    var h_adv = ctx.enqueue_create_host_buffer[DType.float32](n * SM_STRIDE)
     var h_wrap = ctx.enqueue_create_host_buffer[DType.uint32](n)
     var h_start = ctx.enqueue_create_host_buffer[DType.uint32](n)
     var h_pc = ctx.enqueue_create_host_buffer[DType.uint32](n_chunks * PARTIAL_COUNT_STRIDE)
     var h_pm = ctx.enqueue_create_host_buffer[DType.float32](n_chunks * PARTIAL_MEASURE_STRIDE)
     ctx.synchronize()
-    for i in range(n * COUNT_STRIDE):
-        h_flags[i] = r.counts[i]
-    for i in range(n * MEASURE_STRIDE):
-        h_adv[i] = r.measures[i]
+    for i in range(n):
+        h_flags[i] = r.fl[i]
+    for i in range(n * SM_STRIDE):
+        h_adv[i] = r.sm[i]
     for i in range(n):
         h_wrap[i] = wrap_of[i]
         h_start[i] = is_start[i]
 
-    var d_flags = ctx.enqueue_create_buffer[DType.uint32](n * COUNT_STRIDE)
-    var d_adv = ctx.enqueue_create_buffer[DType.float32](n * MEASURE_STRIDE)
+    var d_flags = ctx.enqueue_create_buffer[DType.uint32](n)
+    var d_adv = ctx.enqueue_create_buffer[DType.float32](n * SM_STRIDE)
     var d_wrap = ctx.enqueue_create_buffer[DType.uint32](n)
     var d_start = ctx.enqueue_create_buffer[DType.uint32](n)
     var d_pc = ctx.enqueue_create_buffer[DType.uint32](n_chunks * PARTIAL_COUNT_STRIDE)

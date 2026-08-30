@@ -15,7 +15,7 @@
 # Run: mojo run -I engine engine/conformance_gaps.mojo engine/fixtures/*.pipe.bin
 
 from std.sys import argv
-from glyph_schema import MEASURE_STRIDE, COUNT_STRIDE, C_FLAGS
+from glyph_schema import FIXTURE_COUNT_STRIDE, FIX_C_FLAGS
 from glyph_scan import run_scan_pipeline
 from glyph_pipeline import run_pipeline, Item, Trie, F_LEADER, F_MISSING
 from fixture_io import load_pipe_fixture
@@ -56,13 +56,12 @@ def check(name: String, fx_bytes: List[UInt8], trie: Trie, items: List[Item]) ->
     var sc = run_scan_pipeline(fx_bytes, trie, items, 64, 4)
     var scan_bad = 0
     for id in range(n):
-        var so = id * COUNT_STRIDE
-        for k in range(COUNT_STRIDE):
-            if r.counts[so + k] != sc.counts[so + k]:
+        for k in range(FIXTURE_COUNT_STRIDE):
+            if r.c_at(id, k) != sc.c_at(id, k):
                 scan_bad += 1
                 if printed < MAX_PRINTED:
                     print("  ", name, "serial/scan disagree: byte", id, "lane", k,
-                          "serial", r.counts[so + k], "scan", sc.counts[so + k])
+                          "serial", r.c_at(id, k), "scan", sc.c_at(id, k))
                     printed += 1
                 break
     for q in range(n):
@@ -78,18 +77,17 @@ def check(name: String, fx_bytes: List[UInt8], trie: Trie, items: List[Item]) ->
         if claimed[id]:
             continue
         gaps += 1
-        var co = id * COUNT_STRIDE
         # decode may legitimately set the DECODE lanes of a gap byte (it covers the
         # whole range); what must never happen is an UNWRITTEN lane. Check the ones
         # only the fold writes — those have no other writer for a gap byte.
-        for k in range(COUNT_STRIDE):
-            if k == C_FLAGS:
+        for k in range(FIXTURE_COUNT_STRIDE):
+            if k == FIX_C_FLAGS:
                 continue
-            if r.counts[co + k] != 0:
+            if r.c_at(id, k) != 0:
                 bad += 1
                 if printed < MAX_PRINTED:
                     print("  ", name, "gap byte", id, "count lane", k, "=",
-                          r.counts[co + k], "(expected 0)")
+                          r.c_at(id, k), "(expected 0)")
                     printed += 1
     # ordToByte past each item's glyph count must also be defined
     for i in range(len(items)):
@@ -130,7 +128,7 @@ def check_miss_order(trie: Trie, n: Int) -> Int:
     # the serial reference: ascending byte order, duplicates kept
     var want = List[UInt32]()
     for id in range(n):
-        var f = Int(r.counts[id * COUNT_STRIDE + C_FLAGS])
+        var f = Int(r.fl[id])
         if (f & F_LEADER) != 0 and (f & F_MISSING) != 0:
             want.append(UInt32(Int(bytes[id])))
     var bad = 0

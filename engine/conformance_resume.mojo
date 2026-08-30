@@ -15,11 +15,13 @@ from std.collections.span import Span
 from std.sys import argv
 from std.memory import unsafe_memset_zero
 from glyph_schema import (
-    MEASURE_STRIDE, COUNT_STRIDE, C_FLAGS, C_ROW,
-    measure_lane_name, count_lane_name,
-)
+    SM_STRIDE, LM_STRIDE, LC_STRIDE, LC_ROW,
+    FIXTURE_MEASURE_STRIDE, FIXTURE_COUNT_STRIDE,
+    fixture_measure_lane_name, fixture_count_lane_name,
+    )
 from glyph_pipeline import (
     run_pipeline, layout_item, LayoutSeed, Item, F_LEADER, trunc_nonneg,
+    PipelineResult,
 )
 from glyph_bake import bake_file
 from glyph_record import seed_at, is_line_start
@@ -70,21 +72,27 @@ def check_case(path: String) raises -> Int:
             if p < 0 or p >= item.byte_count:
                 continue
 
-            var m = List[Float32](unsafe_uninit_length=fx.byte_len * MEASURE_STRIDE)
-            unsafe_memset_zero(m.unsafe_ptr(), len(m))
-            var c = List[UInt32](unsafe_uninit_length=fx.byte_len * COUNT_STRIDE)
-            unsafe_memset_zero(c.unsafe_ptr(), len(c))
+            # A resumed pass gets its OWN copy of the whole pass's arrays —
+            # decode lanes are position-independent, so reuse them; what is
+            # under test is the FOLD resuming, not the decode.
+            var rcopy = PipelineResult()
+            rcopy.sm = List[Float32](unsafe_uninit_length=fx.byte_len * SM_STRIDE)
+            rcopy.fl = List[UInt32](unsafe_uninit_length=fx.byte_len)
+            rcopy.lm = List[Float32](unsafe_uninit_length=fx.byte_len * LM_STRIDE)
+            rcopy.lc = List[UInt32](unsafe_uninit_length=fx.byte_len * LC_STRIDE)
+            for k in range(fx.byte_len * SM_STRIDE):
+                rcopy.sm[k] = whole.sm[k]
+            for k in range(fx.byte_len):
+                rcopy.fl[k] = whole.fl[k]
+            for k in range(fx.byte_len * LM_STRIDE):
+                rcopy.lm[k] = whole.lm[k]
+            for k in range(fx.byte_len * LC_STRIDE):
+                rcopy.lc[k] = whole.lc[k]
+            var slots = rcopy.slots()
             var otb = List[UInt32](unsafe_uninit_length=fx.byte_len)
             unsafe_memset_zero(otb.unsafe_ptr(), len(otb))
             var sc = List[Float64](unsafe_uninit_length=8)
             unsafe_memset_zero(sc.unsafe_ptr(), 8)
-
-            # Decode lanes are position-independent, so reuse the whole pass's —
-            # what is under test is the FOLD resuming, not the decode.
-            for k in range(fx.byte_len * MEASURE_STRIDE):
-                m[k] = whole.measures[k]
-            for k in range(fx.byte_len * COUNT_STRIDE):
-                c[k] = whole.counts[k]
 
             # A wrapped or paged item needs the row from the previous layout —
             # the bake is wrap-agnostic. Model that by reading it off the whole
@@ -93,40 +101,42 @@ def check_case(path: String) raises -> Int:
             if wrap > 0:
                 var q = item.byte_start + p
                 while q < item.byte_start + item.byte_count:
-                    if (Int(whole.counts[q * COUNT_STRIDE + C_FLAGS]) & F_LEADER) != 0:
-                        hint = Int(whole.counts[q * COUNT_STRIDE + C_ROW])
+                    if (Int(whole.fl[q]) & F_LEADER) != 0:
+                        hint = Int(whole.lc[q * LC_STRIDE + LC_ROW])
                         break
                     q += 1
                 if hint < 0:
                     continue
             var seed = seed_at(slice, fx.trie, rec, wrap, p, hint)
             layout_item(
-                m.unsafe_ptr(), c.unsafe_ptr(), item, otb.unsafe_ptr(),
+                slots, item, otb.unsafe_ptr(),
                 sc.unsafe_ptr(), 0, item.byte_start + p, seed,
                 False,   # a resumed RANGE must not publish a whole item's box
             )
+            _ = len(rcopy.sm)
+            _ = len(rcopy.fl)
+            _ = len(rcopy.lm)
+            _ = len(rcopy.lc)
 
             # Every byte from the resume point on must match the whole pass.
             for id in range(item.byte_start + p, item.byte_start + item.byte_count):
-                var co = id * COUNT_STRIDE
-                if (Int(whole.counts[co + C_FLAGS]) & F_LEADER) == 0:
+                if (Int(whole.fl[id]) & F_LEADER) == 0:
                     continue
-                var mo = id * MEASURE_STRIDE
-                for lane in range(MEASURE_STRIDE):
-                    if UInt32(m[mo + lane].to_bits()) != UInt32(whole.measures[mo + lane].to_bits()):
+                for lane in range(FIXTURE_MEASURE_STRIDE):
+                    if UInt32(rcopy.m_at(id, lane).to_bits()) != UInt32(whole.m_at(id, lane).to_bits()):
                         bad += 1
                         if printed < MAX_PRINTED:
                             print("  item", i, "resume@", p, "byte", id,
-                                  measure_lane_name(lane), "resumed", m[mo + lane],
-                                  "whole", whole.measures[mo + lane])
+                                  fixture_measure_lane_name(lane), "resumed", rcopy.m_at(id, lane),
+                                  "whole", whole.m_at(id, lane))
                             printed += 1
-                for lane in range(COUNT_STRIDE):
-                    if c[co + lane] != whole.counts[co + lane]:
+                for lane in range(FIXTURE_COUNT_STRIDE):
+                    if rcopy.c_at(id, lane) != whole.c_at(id, lane):
                         bad += 1
                         if printed < MAX_PRINTED:
                             print("  item", i, "resume@", p, "byte", id,
-                                  count_lane_name(lane), "resumed", c[co + lane],
-                                  "whole", whole.counts[co + lane])
+                                  fixture_count_lane_name(lane), "resumed", rcopy.c_at(id, lane),
+                                  "whole", whole.c_at(id, lane))
                             printed += 1
     if skipped_paged > 0:
         print("  (", skipped_paged, "paged item(s) compared through layout only —",

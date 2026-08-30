@@ -20,17 +20,12 @@
 from std.collections.span import Span
 from std.memory import unsafe_memset_zero
 from std.runtime.asyncrt import TaskGroup, parallelism_level
+from glyph_schema import SM_STRIDE, LM_STRIDE, LC_STRIDE
 from glyph_pipeline import (
     Trie,
     Item,
     PipelineResult,
-    MEASURE_STRIDE, COUNT_STRIDE,
-    M_ADVANCE,
-    C_ROW,
-    C_COL,
-    C_FLAGS,
-    M_LINE_ADV,
-    C_ORD,
+    Slots,
     F_LEADER,
     F_NEWLINE,
     F_RENDERED,
@@ -62,15 +57,14 @@ comptime CHUNK_SIZE = 64
 comptime GROUP_SIZE = 256
 
 
-def scan_leaf[so: Origin[mut=True], xo: Origin[mut=True]](
-    measures: Pointer[Float32, so],
-    counts: Pointer[UInt32, xo], id: Int, wrap: Int, is_item_start: Bool
+def scan_leaf(
+    slots: Slots, id: Int, wrap: Int, is_item_start: Bool
 ) -> ScanElem:
-    """The leaf for byte `id`, read from the decoded measures."""
-    var flags = Int(counts[unsafe_offset = id * COUNT_STRIDE + C_FLAGS])
+    """The leaf for byte `id`, read from the decoded STATIC arrays only."""
+    var flags = slots.flags(id)
     return scan_leaf_value(
         (flags & F_NEWLINE) != 0,
-        measures[unsafe_offset = id * MEASURE_STRIDE + M_ADVANCE],
+        slots.advance(id),
         (flags & F_LEADER) != 0,
         wrap,
         is_item_start,
@@ -84,9 +78,8 @@ def _cursor_advance(items: List[Item], mut idx: Int, id: Int):
         idx += 1
 
 
-def fold_range[so: Origin[mut=True], xo: Origin[mut=True]](
-    measures: Pointer[Float32, so],
-    counts: Pointer[UInt32, xo],
+def fold_range(
+    slots: Slots,
     items: List[Item],
     wraps: List[Int],
     from_byte: Int,
@@ -100,14 +93,13 @@ def fold_range[so: Origin[mut=True], xo: Origin[mut=True]](
     var id = from_byte
     while id < to_byte:
         _cursor_advance(items, idx, id)
-        var leaf = scan_leaf(measures, counts, id, wraps[idx], id == items[idx].byte_start)
+        var leaf = scan_leaf(slots, id, wraps[idx], id == items[idx].byte_start)
         scan_combine(acc, leaf)
         id += 1
 
 
-async def _chunk_reduce_shard[so: Origin[mut=True], xo: Origin[mut=True], po: Origin[mut=True]](
-    measures: Pointer[Float32, so],
-    counts: Pointer[UInt32, xo],
+async def _chunk_reduce_shard[po: Origin[mut=True]](
+    slots: Slots,
     items: List[Item],
     wraps: List[Int],
     partials: Pointer[ScanElem, po],
@@ -121,7 +113,7 @@ async def _chunk_reduce_shard[so: Origin[mut=True], xo: Origin[mut=True], po: Or
         var to = (c + 1) * k
         if to > n:
             to = n
-        fold_range(measures, counts, items, wraps, c * k, to, acc)
+        fold_range(slots, items, wraps, c * k, to, acc)
         partials[unsafe_offset = c] = acc^
 
 
@@ -169,11 +161,9 @@ async def _partial_scan_shard[
 
 
 async def _apply_shard[
-    so: Origin[mut=True], xo: Origin[mut=True], po: Origin[mut=True],
-    oo: Origin[mut=True],
+    po: Origin[mut=True], oo: Origin[mut=True],
 ](
-    measures: Pointer[Float32, so],
-    counts: Pointer[UInt32, xo],
+    slots: Slots,
     items: List[Item],
     wraps: List[Int],
     partial_prefix: Pointer[ScanElem, po],
@@ -199,9 +189,7 @@ async def _apply_shard[
             if is_start:
                 run = scan_identity()
                 run.wrap = wraps[idx]
-            var mo = id * MEASURE_STRIDE
-            var co = id * COUNT_STRIDE
-            var flags = Int(counts[unsafe_offset = co + C_FLAGS])
+            var flags = slots.flags(id)
             # THE GAP GUARD. item_for_byte returns the largest item whose start <= id
             # and does NOT check ownership, so a byte in a HOLE between two items
             # resolves to the preceding one. Without this test the scan form laid
@@ -228,22 +216,30 @@ async def _apply_shard[
             var in_item = id >= it_start and id < it_start + items[idx].byte_count
             if (flags & F_LEADER) != 0 and in_item:
                 var v = lanes_from_prefix(run, wraps[idx])
-                counts[unsafe_offset = co + C_ROW] = UInt32(v.row)
-                counts[unsafe_offset = co + C_COL] = UInt32(v.col)
-                measures[unsafe_offset = mo + M_LINE_ADV] = v.line_adv
-                counts[unsafe_offset = co + C_ORD] = UInt32(v.ord)
-                counts[unsafe_offset = co + C_FLAGS] = UInt32(flags | F_RENDERED)
+                slots.set_row(id, v.row)
+                slots.set_col(id, v.col)
+                slots.set_line_adv(id, v.line_adv)
+                slots.set_ord(id, v.ord)
+                slots.set_flags(id, flags | F_RENDERED)
                 ord_to_byte[unsafe_offset = it_start + v.ord] = UInt32(id)
-            var leaf = scan_leaf(measures, counts, id, wraps[idx], is_start)
+            else:
+                # THE SPLIT'S COVERAGE DUTY, scan form. Decode no longer zeroes
+                # the positional lanes, so every byte that is not a laid-out
+                # leader — continuation bytes, gap bytes, gap LEADERS the guard
+                # above excludes — gets its zeros here. This walk visits every
+                # byte of [0, n) exactly once across the chunk shards, so the
+                # coverage is total. X/Y/Z/BASE_X of in-item leaders are
+                # resolve_x's; everything else has no other writer.
+                slots.zero_positional(id)
+            var leaf = scan_leaf(slots, id, wraps[idx], is_start)
             scan_combine(run, leaf)
             id += 1
 
 
 async def _resolve_x_shard[
-    so: Origin[mut=True], xo: Origin[mut=True], oo: Origin[mut=True], ko: Origin[mut=True]
+    oo: Origin[mut=True], ko: Origin[mut=True]
 ](
-    measures: Pointer[Float32, so],
-    counts: Pointer[UInt32, xo],
+    slots: Slots,
     item: Item,
     ord_to_byte: Pointer[UInt32, oo],
     scalars: Pointer[Float64, ko],
@@ -252,7 +248,7 @@ async def _resolve_x_shard[
     stop: Int,
 ):
     for id in range(start, stop):
-        resolve_x(measures, counts, id, item, ord_to_byte, scalars, scalar_base)
+        resolve_x(slots, id, item, ord_to_byte, scalars, scalar_base)
 
 
 def run_scan_pipeline[o: ImmOrigin](
@@ -274,11 +270,16 @@ def run_scan_pipeline[o: ImmOrigin](
         workers = 1
 
     # ── dispatch 1: decode (shared kernel), sharded ───────────────────────────
-    # No memset: decode writes every lane of every byte.
-    var measures = List[Float32](unsafe_uninit_length=n * MEASURE_STRIDE)
-    var counts = List[UInt32](unsafe_uninit_length=n * COUNT_STRIDE)
-    var mp = measures.unsafe_ptr()
-    var cp = counts.unsafe_ptr()
+    # No slot memset. Static: decode covers [0, n). Positional: _apply_shard
+    # zeroes every byte that is not a laid-out leader while it walks its chunks
+    # (total coverage — the chunks tile [0, n)), and resolve_x writes in-item
+    # leaders' X/Y/Z/BASE_X.
+    var r = PipelineResult()
+    r.sm = List[Float32](unsafe_uninit_length=n * SM_STRIDE)
+    r.fl = List[UInt32](unsafe_uninit_length=n)
+    r.lm = List[Float32](unsafe_uninit_length=n * LM_STRIDE)
+    r.lc = List[UInt32](unsafe_uninit_length=n * LC_STRIDE)
+    var slots = r.slots()
     var miss_scratch = List[UInt32](unsafe_uninit_length=n if n > 0 else 1)
     var msp = miss_scratch.unsafe_ptr()
     var tally = List[Int](length=workers * 2, fill=0)
@@ -287,7 +288,7 @@ def run_scan_pipeline[o: ImmOrigin](
     for w in range(workers):
         var a = shard_lo(0, n, workers, w)
         var b = shard_lo(0, n, workers, w + 1)
-        tg1.create_task(_decode_shard(bytes, mp, cp, trie, msp, tp, w, a, b))
+        tg1.create_task(_decode_shard(bytes, slots, trie, msp, tp, w, a, b))
     tg1.wait()
     _ = len(miss_scratch)
     _ = len(tally)
@@ -315,7 +316,7 @@ def run_scan_pipeline[o: ImmOrigin](
     for w in range(workers):
         var a = shard_lo(0, num_chunks, workers, w)
         var b = shard_lo(0, num_chunks, workers, w + 1)
-        tg2.create_task(_chunk_reduce_shard(mp, cp, items, wraps, pp, n, k, a, b))
+        tg2.create_task(_chunk_reduce_shard(slots, items, wraps, pp, n, k, a, b))
     tg2.wait()
 
     # ── dispatch 3: spineReduce — thread per group, groups sharded ────────────
@@ -361,7 +362,7 @@ def run_scan_pipeline[o: ImmOrigin](
     for w in range(workers):
         var a = shard_lo(0, num_chunks, workers, w)
         var b = shard_lo(0, num_chunks, workers, w + 1)
-        tg6.create_task(_apply_shard(mp, cp, items, wraps, xp, op, n, k, a, b))
+        tg6.create_task(_apply_shard(slots, items, wraps, xp, op, n, k, a, b))
     tg6.wait()
 
     # ── dispatch 7: resolveX + fold-scalar reduce — per item, sharded, with
@@ -379,7 +380,7 @@ def run_scan_pipeline[o: ImmOrigin](
         for w in range(workers):
             var a = shard_lo(start, stop, workers, w)
             var b = shard_lo(start, stop, workers, w + 1)
-            tg7.create_task(_resolve_x_shard(mp, cp, items[i2], op, ssp, w * 8, a, b))
+            tg7.create_task(_resolve_x_shard(slots, items[i2], op, ssp, w * 8, a, b))
         tg7.wait()
         for w in range(workers):
             if shard_scalars[w * 8 + 6] > item_bounds[i2 * 8 + 6]:
@@ -398,7 +399,7 @@ def run_scan_pipeline[o: ImmOrigin](
         for w in range(workers):
             var a = shard_lo(start, stop, workers, w)
             var b = shard_lo(start, stop, workers, w + 1)
-            tg8.create_task(_paginate_shard(mp, cp, items[i2], stride, a, b))
+            tg8.create_task(_paginate_shard(slots, items[i2], stride, a, b))
     tg8.wait()
 
     # ── per-item boxes: sharded local boxes, exact min/max merge ──────────────
@@ -415,7 +416,7 @@ def run_scan_pipeline[o: ImmOrigin](
     for i2 in range(item_count):
         var start = items[i2].byte_start
         var stop = start + items[i2].byte_count
-        tg9.create_task(_bounds_item(mp, cp, ibp, i2 * 8, start, stop))
+        tg9.create_task(_bounds_item(slots, ibp, i2 * 8, start, stop))
     tg9.wait()
 
     for i2 in range(item_count):
@@ -433,7 +434,7 @@ def run_scan_pipeline[o: ImmOrigin](
     var leaders = 0
     id = 0
     while id < n:
-        if (Int(cp[unsafe_offset = id * COUNT_STRIDE + C_FLAGS]) & F_LEADER) != 0:
+        if (slots.flags(id) & F_LEADER) != 0:
             leaders += 1
         id += 1
 
@@ -448,10 +449,11 @@ def run_scan_pipeline[o: ImmOrigin](
     _ = len(partial_prefix)
     _ = len(shard_scalars)
     _ = len(item_bounds)
+    _ = len(r.sm)
+    _ = len(r.fl)
+    _ = len(r.lm)
+    _ = len(r.lc)
 
-    var r = PipelineResult()
-    r.measures = measures^
-    r.counts = counts^
     r.ord_to_byte = ord_to_byte^
     r.misses = misses^
     r.leaders = leaders

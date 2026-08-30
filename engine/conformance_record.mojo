@@ -14,8 +14,8 @@
 
 from std.sys import argv
 from glyph_schema import (
-    MEASURE_STRIDE, COUNT_STRIDE, RECORD_MEASURE_STRIDE, RECORD_COUNT_STRIDE,
-    RECORD_BYTES, C_FLAGS,
+    FIXTURE_MEASURE_STRIDE, FIXTURE_COUNT_STRIDE,
+    RECORD_MEASURE_STRIDE, RECORD_COUNT_STRIDE, RECORD_BYTES,
 )
 from glyph_pipeline import run_pipeline, F_LEADER
 from glyph_record import RecordSet, compact, run_streaming
@@ -31,7 +31,7 @@ def check_case(path: String) raises -> Int:
 
     var r = run_pipeline(fx.bytes, fx.trie, fx.items)
     var whole = RecordSet()
-    compact(r.measures, r.counts, fx.byte_len, r.leaders, whole)
+    compact(r, fx.byte_len, r.leaders, whole)
 
     # ── 1. the truncation holds ──────────────────────────────────────────────
     if whole.glyphs != r.leaders:
@@ -39,20 +39,20 @@ def check_case(path: String) raises -> Int:
         print("  record count", whole.glyphs, "!= leaders", r.leaders)
     var rec = 0
     for id in range(fx.byte_len):
-        var co = id * COUNT_STRIDE
-        if (Int(r.counts[co + C_FLAGS]) & F_LEADER) == 0:
+        if (Int(r.fl[id]) & F_LEADER) == 0:
             continue
-        var mo = id * MEASURE_STRIDE
+        # The record's measure order IS the fixture's measure order for the first
+        # six lanes, so m_at(slot, k) is the per-slot expectation.
         for k in range(RECORD_MEASURE_STRIDE):
             var g = UInt32(whole.measures[rec * RECORD_MEASURE_STRIDE + k].to_bits())
-            var e = UInt32(r.measures[mo + k].to_bits())
+            var e = UInt32(r.m_at(id, k).to_bits())
             if g != e:
                 bad += 1
                 if printed < MAX_PRINTED:
                     print("  byte", id, "measure lane", k, "— record", g, "slot", e)
                     printed += 1
         for k in range(RECORD_COUNT_STRIDE):
-            if whole.counts[rec * RECORD_COUNT_STRIDE + k] != r.counts[co + k]:
+            if whole.counts[rec * RECORD_COUNT_STRIDE + k] != r.c_at(id, k):
                 bad += 1
                 if printed < MAX_PRINTED:
                     print("  byte", id, "count lane", k)
@@ -101,12 +101,12 @@ def main() raises:
             print("FAIL", path, "—", bad, "mismatches")
         total_bad += bad
 
-    var slot_bytes = bytes_total * (MEASURE_STRIDE + COUNT_STRIDE) * 4
+    var slot_bytes = bytes_total * (FIXTURE_MEASURE_STRIDE + FIXTURE_COUNT_STRIDE) * 4
     var rec_bytes = glyphs_total * RECORD_BYTES
     print("")
     print("resident cost over the fixture corpus:")
     print("  slots  ", slot_bytes, "B  (", bytes_total, "source bytes x",
-          (MEASURE_STRIDE + COUNT_STRIDE) * 4, "B )")
+          (FIXTURE_MEASURE_STRIDE + FIXTURE_COUNT_STRIDE) * 4, "B )")
     print("  records", rec_bytes, "B  (", glyphs_total, "glyphs x", RECORD_BYTES, "B )")
     if rec_bytes > 0:
         print("  ratio  ", Float64(slot_bytes) / Float64(rec_bytes), "x smaller resident")

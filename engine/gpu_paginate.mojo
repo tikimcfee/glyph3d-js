@@ -25,7 +25,7 @@ from std.sys import argv, has_accelerator
 from std.gpu import global_idx
 from max.gpu.host import DeviceContext
 from glyph_schema import (
-    MEASURE_STRIDE, COUNT_STRIDE, M_X, M_Y, M_Z, M_BASE_X, C_ROW, C_COL, C_FLAGS,
+    LM_STRIDE, LM_X, LM_Y, LM_Z, LM_BASE_X, LC_STRIDE, LC_ROW, LC_COL,
     ITEM_STRIDE, I_ORIGIN_Y, I_ORIGIN_Z, I_PAGE_ROWS, I_PAGE_COLS, I_SCROLL_ROWS,
     I_PAGES_WIDE, I_WRAP_WIDTH, I_LINE_HEIGHT, I_Z_STEP,
     I_BAND_STRIDE_Y, I_DEPTH_PER_BAND, I_DEPTH_PER_COL, I_PAGE_STRIDE_X, I_HAS_PAGE,
@@ -82,8 +82,9 @@ def trunc_nn32(v: Float32) -> Int:
 
 
 def paginate_kernel(
-    measures: MutPointer[Float32, MutAnyOrigin],
-    counts: MutPointer[UInt32, MutAnyOrigin],
+    lm: MutPointer[Float32, MutAnyOrigin],
+    fl: MutPointer[UInt32, MutAnyOrigin],
+    lc: MutPointer[UInt32, MutAnyOrigin],
     items: MutPointer[Float32, MutAnyOrigin],
     item_starts: MutPointer[UInt32, MutAnyOrigin],
     n_bytes: Int32,
@@ -93,8 +94,7 @@ def paginate_kernel(
     var id = global_idx.x
     if id >= Int(n_bytes):
         return
-    var co = id * COUNT_STRIDE
-    if (Int(counts[unsafe_offset = co + C_FLAGS]) & F_LEADER) == 0:
+    if (Int(fl[unsafe_offset=id]) & F_LEADER) == 0:
         return
     var io = item_search(item_starts, Int(item_count), id) * ITEM_STRIDE
     var has_page = items[unsafe_offset = io + I_HAS_PAGE] > 0.5
@@ -106,8 +106,8 @@ def paginate_kernel(
         return
 
     # ── every page decision is an INTEGER gate on the count lanes ────────────
-    var row = Int(counts[unsafe_offset = co + C_ROW])
-    var col = Int(counts[unsafe_offset = co + C_COL])
+    var row = Int(lc[unsafe_offset = id * LC_STRIDE + LC_ROW])
+    var col = Int(lc[unsafe_offset = id * LC_STRIDE + LC_COL])
     var screen_row = row - scroll
     var y_page = 0
     if rows > 0 and screen_row >= rows:
@@ -129,17 +129,17 @@ def paginate_kernel(
     var lh = items[unsafe_offset = io + I_LINE_HEIGHT]
 
     # ── only the POSITIONS are float, and only here ─────────────────────────
-    var mo = id * MEASURE_STRIDE
-    measures[unsafe_offset = mo + M_X] = (
-        measures[unsafe_offset = mo + M_BASE_X]
+    var mo = id * LM_STRIDE
+    lm[unsafe_offset = mo + LM_X] = (
+        lm[unsafe_offset = mo + LM_BASE_X]
         + Float32(y_page % wide) * items[unsafe_offset = io + I_PAGE_STRIDE_X]
     )
-    measures[unsafe_offset = mo + M_Y] = (
+    lm[unsafe_offset = mo + LM_Y] = (
         items[unsafe_offset = io + I_ORIGIN_Y]
         - Float32(screen_row - y_page * rows) * lh
         - Float32(band) * items[unsafe_offset = io + I_BAND_STRIDE_Y]
     )
-    measures[unsafe_offset = mo + M_Z] = (
+    lm[unsafe_offset = mo + LM_Z] = (
         items[unsafe_offset = io + I_ORIGIN_Z]
         - Float32(seg) * items[unsafe_offset = io + I_Z_STEP]
         + Float32(band) * items[unsafe_offset = io + I_DEPTH_PER_BAND]
@@ -205,22 +205,22 @@ def check_items(
     # reference (item_for_byte), which is input data rather than kernel output, so
     # this is not circular; the device search is separately checked against CPU
     # results by check_multi_item.
-    var poisoned = List[Float32](unsafe_uninit_length = n * MEASURE_STRIDE)
-    for i in range(n * MEASURE_STRIDE):
-        poisoned[i] = whole.measures[i]
+    var poisoned = List[Float32](unsafe_uninit_length = n * LM_STRIDE)
+    for i in range(n * LM_STRIDE):
+        poisoned[i] = whole.lm[i]
     var poison_n = 0
     for id in range(n):
-        if (Int(whole.counts[id * COUNT_STRIDE + C_FLAGS]) & F_LEADER) == 0:
+        if (Int(whole.fl[id]) & F_LEADER) == 0:
             continue
         var owner = item_for_byte(items, id)
         if owner < 0 or owner >= len(items):
             continue
         if not page_active(items[owner]):
             continue
-        var mo = id * MEASURE_STRIDE
-        poisoned[mo + M_X] = 1.0e30
-        poisoned[mo + M_Y] = 1.0e30
-        poisoned[mo + M_Z] = 1.0e30
+        var mo = id * LM_STRIDE
+        poisoned[mo + LM_X] = 1.0e30
+        poisoned[mo + LM_Y] = 1.0e30
+        poisoned[mo + LM_Z] = 1.0e30
         poison_n += 1
 
     # Item table, narrowed f64 -> f32 at the device boundary (see the header).
@@ -254,32 +254,37 @@ def check_items(
     for i in range(len(items)):
         starts[i] = UInt32(items[i].byte_start)
 
-    var h_m = ctx.enqueue_create_host_buffer[DType.float32](n * MEASURE_STRIDE)
-    var h_c = ctx.enqueue_create_host_buffer[DType.uint32](n * COUNT_STRIDE)
+    var h_m = ctx.enqueue_create_host_buffer[DType.float32](n * LM_STRIDE)
+    var h_f = ctx.enqueue_create_host_buffer[DType.uint32](n)
+    var h_c = ctx.enqueue_create_host_buffer[DType.uint32](n * LC_STRIDE)
     var h_t = ctx.enqueue_create_host_buffer[DType.float32](len(tbl))
     var h_i = ctx.enqueue_create_host_buffer[DType.uint32](len(starts))
     ctx.synchronize()
-    for i in range(n * MEASURE_STRIDE):
+    for i in range(n * LM_STRIDE):
         h_m[i] = poisoned[i]            # the answer is NOT in the input
-    for i in range(n * COUNT_STRIDE):
-        h_c[i] = whole.counts[i]
+    for i in range(n):
+        h_f[i] = whole.fl[i]
+    for i in range(n * LC_STRIDE):
+        h_c[i] = whole.lc[i]
     for i in range(len(tbl)):
         h_t[i] = tbl[i]
     for i in range(len(starts)):
         h_i[i] = starts[i]
 
-    var d_m = ctx.enqueue_create_buffer[DType.float32](n * MEASURE_STRIDE)
-    var d_c = ctx.enqueue_create_buffer[DType.uint32](n * COUNT_STRIDE)
+    var d_m = ctx.enqueue_create_buffer[DType.float32](n * LM_STRIDE)
+    var d_f = ctx.enqueue_create_buffer[DType.uint32](n)
+    var d_c = ctx.enqueue_create_buffer[DType.uint32](n * LC_STRIDE)
     var d_t = ctx.enqueue_create_buffer[DType.float32](len(tbl))
     var d_i = ctx.enqueue_create_buffer[DType.uint32](len(starts))
     ctx.enqueue_copy(dst_buf=d_m, src_buf=h_m)
+    ctx.enqueue_copy(dst_buf=d_f, src_buf=h_f)
     ctx.enqueue_copy(dst_buf=d_c, src_buf=h_c)
     ctx.enqueue_copy(dst_buf=d_t, src_buf=h_t)
     ctx.enqueue_copy(dst_buf=d_i, src_buf=h_i)
 
     comptime BLOCK = 256
     ctx.enqueue_function[paginate_kernel](
-        d_m.unsafe_ptr(), d_c.unsafe_ptr(), d_t.unsafe_ptr(), d_i.unsafe_ptr(),
+        d_m.unsafe_ptr(), d_f.unsafe_ptr(), d_c.unsafe_ptr(), d_t.unsafe_ptr(), d_i.unsafe_ptr(),
         Int32(n), Int32(len(items)),
         grid_dim=(n + BLOCK - 1) // BLOCK, block_dim=BLOCK,
     )
@@ -289,16 +294,16 @@ def check_items(
     var bad = 0
     var printed = 0
     for id in range(n):
-        if (Int(whole.counts[id * COUNT_STRIDE + C_FLAGS]) & F_LEADER) == 0:
+        if (Int(whole.fl[id]) & F_LEADER) == 0:
             continue
-        var mo = id * MEASURE_STRIDE
+        var mo = id * LM_STRIDE
         for lane in range(3):  # X, Y, Z — the only lanes paginate writes
-            var g = h_m[mo + M_X + lane]
-            var e = whole.measures[mo + M_X + lane]
+            var g = h_m[mo + LM_X + lane]
+            var e = whole.lm[mo + LM_X + lane]
             if not rel_close(g, e):
                 bad += 1
                 if printed < MAX_PRINTED:
-                    print("  byte", id, "lane", M_X + lane, "gpu", g, "cpu", e)
+                    print("  byte", id, "lane", LM_X + lane, "gpu", g, "cpu", e)
                     printed += 1
     return bad
 

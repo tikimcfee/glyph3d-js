@@ -13,21 +13,41 @@
 // different container and stay conformant; what it owes is the assertion
 // that its own mapping respects them, which validate() performs for this one.
 
-export const MEASURE_STRIDE = 8;
-export const M_X = 0;
-export const M_Y = 1;
-export const M_Z = 2;
-export const M_ADVANCE = 3;
-export const M_HEIGHT = 4;
-export const M_GLYPH_ID = 5;
-export const M_BASE_X = 6;
-export const M_LINE_ADV = 7;
+// ── THE FIXTURE FORMAT (frozen, v2) — what gen.mjs writes to disk ─────────
+export const FIXTURE_MEASURE_STRIDE = 8;
+export const FIX_M_X = 0;
+export const FIX_M_Y = 1;
+export const FIX_M_Z = 2;
+export const FIX_M_ADVANCE = 3;
+export const FIX_M_HEIGHT = 4;
+export const FIX_M_GLYPH_ID = 5;
+export const FIX_M_BASE_X = 6;
+export const FIX_M_LINE_ADV = 7;
 
-export const COUNT_STRIDE = 4;
-export const C_ROW = 0;
-export const C_COL = 1;
-export const C_FLAGS = 2;
-export const C_ORD = 3;
+export const FIXTURE_COUNT_STRIDE = 4;
+export const FIX_C_ROW = 0;
+export const FIX_C_COL = 1;
+export const FIX_C_FLAGS = 2;
+export const FIX_C_ORD = 3;
+
+// ── This backend's WORKING container (the phase split) ────────────────────
+export const SM_STRIDE = 4;
+export const SM_ADVANCE = 0;
+export const SM_HEIGHT = 1;
+export const SM_GLYPH_ID = 2;
+export const SM_PAD = 3;
+
+export const LM_STRIDE = 5;
+export const LM_X = 0;
+export const LM_Y = 1;
+export const LM_Z = 2;
+export const LM_BASE_X = 3;
+export const LM_LINE_ADV = 4;
+
+export const LC_STRIDE = 3;
+export const LC_ROW = 0;
+export const LC_COL = 1;
+export const LC_ORD = 2;
 
 export const RECORD_MEASURE_STRIDE = 6;
 export const RECORD_COUNT_STRIDE = 2;

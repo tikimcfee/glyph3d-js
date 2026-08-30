@@ -20,7 +20,8 @@
 
 from std.sys import argv
 from std.time import perf_counter_ns
-from glyph_schema import MEASURE_STRIDE, COUNT_STRIDE, RECORD_BYTES
+from glyph_schema import SM_STRIDE, LM_STRIDE, LC_STRIDE, RECORD_BYTES
+comptime SLOT_BYTES = (SM_STRIDE + 1 + LM_STRIDE + LC_STRIDE) * 4
 from glyph_pipeline import Item, Trie, run_pipeline
 from glyph_record import RecordSet, compact
 from fixture_io import load_pipe_fixture
@@ -91,12 +92,12 @@ def main() raises:
 
         # THE SCRATCH POOL. Allocated for this job, dropped at the end of this
         # iteration. Its high-water mark is the largest single item, never the sum.
-        var scratch = n * (MEASURE_STRIDE + COUNT_STRIDE) * 4
+        var scratch = n * SLOT_BYTES
         if scratch > peak_scratch:
             peak_scratch = scratch
         var r = run_pipeline(bytes, seed.trie, items)
         if not count_only:
-            compact(r.measures, r.counts, n, r.leaders, records)
+            compact(r, n, r.leaders, records)
 
         total_bytes += n
         total_glyphs += r.leaders
@@ -105,7 +106,7 @@ def main() raises:
 
     var glyph_total = total_glyphs if count_only else records.glyphs
     var resident = glyph_total * RECORD_BYTES
-    var old_arena = total_bytes * (MEASURE_STRIDE + COUNT_STRIDE) * 4
+    var old_arena = total_bytes * SLOT_BYTES
     var mb = Float64(total_bytes) / 1048576.0
     print("files            ", files, "(", skipped, "unreadable )")
     print("source bytes     ", total_bytes, "=", mb, "MB")
@@ -117,7 +118,7 @@ def main() raises:
     print("   (", RECORD_BYTES, "B x", glyph_total, "rendered glyphs )")
     print("")
     print("old arena would need", old_arena, "B =", Float64(old_arena) / 1048576.0, "MB")
-    print("   (", (MEASURE_STRIDE + COUNT_STRIDE) * 4, "B x every source byte, corpus lifetime )")
+    print("   (", SLOT_BYTES, "B x every source byte, corpus lifetime )")
     if resident > 0:
         print("resident reduction  ", Float64(old_arena) / Float64(resident), "x")
     if peak_scratch > 0:

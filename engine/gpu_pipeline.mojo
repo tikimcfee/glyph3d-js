@@ -27,8 +27,9 @@ from std.atomic import Atomic
 from std.memory import bitcast
 from max.gpu.host import DeviceContext
 from glyph_schema import (
-    MEASURE_STRIDE, COUNT_STRIDE, M_ADVANCE, M_LINE_ADV, M_X, M_Y, M_Z,
-    M_BASE_X, M_HEIGHT, C_ROW, C_COL, C_FLAGS, C_ORD,
+    SM_STRIDE, SM_ADVANCE, SM_HEIGHT,
+    LM_STRIDE, LM_X, LM_Y, LM_Z, LM_BASE_X, LM_LINE_ADV,
+    LC_STRIDE, LC_ROW, LC_COL, LC_ORD,
     ITEM_STRIDE, I_ORIGIN_X, I_ORIGIN_Y, I_ORIGIN_Z, I_WRAP_WIDTH, I_LINE_HEIGHT,
     I_PAGE_COLS, I_HAS_PAGE, I_Z_STEP, I_PAGE_ROWS, I_SCROLL_ROWS, I_PAGES_WIDE,
     I_BAND_STRIDE_Y, I_DEPTH_PER_BAND, I_DEPTH_PER_COL,
@@ -169,14 +170,14 @@ def p_store(pc: MutPointer[UInt32, MutAnyOrigin], pm: MutPointer[Float32, MutAny
 
 
 def leaf_of(
-    counts: MutPointer[UInt32, MutAnyOrigin], measures: MutPointer[Float32, MutAnyOrigin],
+    fl: MutPointer[UInt32, MutAnyOrigin], sm: MutPointer[Float32, MutAnyOrigin],
     wrap_of: MutPointer[UInt32, MutAnyOrigin], is_start: MutPointer[UInt32, MutAnyOrigin],
     id: Int,
 ) -> E:
     var e = E()
     e.reset = Int(is_start[unsafe_offset=id])
     e.wrap = Int(wrap_of[unsafe_offset=id])
-    var f = Int(counts[unsafe_offset = id * COUNT_STRIDE + C_FLAGS])
+    var f = Int(fl[unsafe_offset=id])
     if (f & F_LEADER) == 0:
         return e^
     e.glyphs = 1
@@ -185,13 +186,13 @@ def leaf_of(
     else:
         e.head_len = 1
         e.tail_len = 1
-        e.tail_adv = measures[unsafe_offset = id * MEASURE_STRIDE + M_ADVANCE]
+        e.tail_adv = sm[unsafe_offset = id * SM_STRIDE + SM_ADVANCE]
     return e^
 
 
 # ── dispatch 2: chunkReduce — thread per chunk ──────────────────────────────
 def k_chunk_reduce(
-    counts: MutPointer[UInt32, MutAnyOrigin], measures: MutPointer[Float32, MutAnyOrigin],
+    fl: MutPointer[UInt32, MutAnyOrigin], sm: MutPointer[Float32, MutAnyOrigin],
     wrap_of: MutPointer[UInt32, MutAnyOrigin], is_start: MutPointer[UInt32, MutAnyOrigin],
     pc: MutPointer[UInt32, MutAnyOrigin], pm: MutPointer[Float32, MutAnyOrigin],
     n_bytes: Int32, k: Int32, n_chunks: Int32,
@@ -208,7 +209,7 @@ def k_chunk_reduce(
     if to > n:
         to = n
     while id < to:
-        combine(acc, leaf_of(counts, measures, wrap_of, is_start, id))
+        combine(acc, leaf_of(fl, sm, wrap_of, is_start, id))
         id += 1
     p_store(pc, pm, c, acc)
 
@@ -270,7 +271,8 @@ def k_partial_scan(
 
 # ── dispatch 6: apply — thread per chunk, re-fold and write the lanes ───────
 def k_apply(
-    counts: MutPointer[UInt32, MutAnyOrigin], measures: MutPointer[Float32, MutAnyOrigin],
+    fl: MutPointer[UInt32, MutAnyOrigin], sm: MutPointer[Float32, MutAnyOrigin],
+    lm: MutPointer[Float32, MutAnyOrigin], lc: MutPointer[UInt32, MutAnyOrigin],
     wrap_of: MutPointer[UInt32, MutAnyOrigin], is_start: MutPointer[UInt32, MutAnyOrigin],
     item_start: MutPointer[UInt32, MutAnyOrigin],
     xc: MutPointer[UInt32, MutAnyOrigin], xm: MutPointer[Float32, MutAnyOrigin],
@@ -292,8 +294,7 @@ def k_apply(
         if Int(is_start[unsafe_offset=id]) != 0:
             run = E()
             run.wrap = Int(wrap_of[unsafe_offset=id])
-        var co = id * COUNT_STRIDE
-        var f = Int(counts[unsafe_offset = co + C_FLAGS])
+        var f = Int(fl[unsafe_offset=id])
         if (f & F_LEADER) != 0:
             # lanes_from_prefix, inline
             var wrap = Int(wrap_of[unsafe_offset=id])
@@ -302,18 +303,20 @@ def k_apply(
             if run.nl > 0:
                 closed = rows_for(run.head_len, wrap) + run.rows
             var wrap_row = (col // wrap) if wrap > 0 else 0
-            counts[unsafe_offset = co + C_ROW] = UInt32(closed + wrap_row)
-            counts[unsafe_offset = co + C_COL] = UInt32(col)
-            counts[unsafe_offset = co + C_ORD] = UInt32(run.glyphs)
-            measures[unsafe_offset = id * MEASURE_STRIDE + M_LINE_ADV] = run.tail_adv
+            var co = id * LC_STRIDE
+            lc[unsafe_offset = co + LC_ROW] = UInt32(closed + wrap_row)
+            lc[unsafe_offset = co + LC_COL] = UInt32(col)
+            lc[unsafe_offset = co + LC_ORD] = UInt32(run.glyphs)
+            lm[unsafe_offset = id * LM_STRIDE + LM_LINE_ADV] = run.tail_adv
             otb[unsafe_offset = Int(item_start[unsafe_offset=id]) + run.glyphs] = UInt32(id)
-        combine(run, leaf_of(counts, measures, wrap_of, is_start, id))
+        combine(run, leaf_of(fl, sm, wrap_of, is_start, id))
         id += 1
 
 
 # ── dispatch 7: resolveX — thread per byte ─────────────────────────────────
 def k_resolve_x(
-    measures: MutPointer[Float32, MutAnyOrigin], counts: MutPointer[UInt32, MutAnyOrigin],
+    sm: MutPointer[Float32, MutAnyOrigin], fl: MutPointer[UInt32, MutAnyOrigin],
+    lm: MutPointer[Float32, MutAnyOrigin], lc: MutPointer[UInt32, MutAnyOrigin],
     items: MutPointer[Float32, MutAnyOrigin], item_of: MutPointer[UInt32, MutAnyOrigin],
     item_start: MutPointer[UInt32, MutAnyOrigin], otb: MutPointer[UInt32, MutAnyOrigin],
     row_max: MutPointer[UInt32, MutAnyOrigin], x_max: MutPointer[UInt32, MutAnyOrigin],
@@ -331,10 +334,9 @@ def k_resolve_x(
     var id = global_idx.x
     if id >= Int(n_bytes):
         return
-    var co = id * COUNT_STRIDE
-    if (Int(counts[unsafe_offset = co + C_FLAGS]) & F_LEADER) == 0:
+    if (Int(fl[unsafe_offset=id]) & F_LEADER) == 0:
         return
-    var mo = id * MEASURE_STRIDE
+    var mo = id * LM_STRIDE
     var it = Int(item_of[unsafe_offset=id])
     var io = it * ITEM_STRIDE
 
@@ -342,32 +344,35 @@ def k_resolve_x(
     var fold = wrap
     if fold == 0 and items[unsafe_offset = io + I_HAS_PAGE] > 0.5:
         fold = trunc_nn32(items[unsafe_offset = io + I_PAGE_COLS])
-    var col = Int(counts[unsafe_offset = co + C_COL])
-    var ord = Int(counts[unsafe_offset = co + C_ORD])
+    var col = Int(lc[unsafe_offset = id * LC_STRIDE + LC_COL])
+    var ord = Int(lc[unsafe_offset = id * LC_STRIDE + LC_ORD])
 
     var x = Float32(0)
     if fold > 0:
         var k = col % fold
         while k >= 1:
             var q = Int(otb[unsafe_offset = Int(item_start[unsafe_offset=id]) + ord - k])
-            x = x + measures[unsafe_offset = q * MEASURE_STRIDE + M_ADVANCE]
+            x = x + sm[unsafe_offset = q * SM_STRIDE + SM_ADVANCE]
             k -= 1
     else:
-        x = measures[unsafe_offset = mo + M_LINE_ADV]
+        x = lm[unsafe_offset = mo + LM_LINE_ADV]
 
-    var row = Int(counts[unsafe_offset = co + C_ROW])
+    var row = Int(lc[unsafe_offset = id * LC_STRIDE + LC_ROW])
     var wrap_row = (col // wrap) if wrap > 0 else 0
+    # lineHeight is the ITEM's, never the glyph's — the SIXTH copy of the
+    # deleted fallback died here. It survived five sweeps because it is spelled
+    # `lh != lh` with I_LINE_HEIGHT, matching none of the greps that found the
+    # others (lh_unset, is_nan(item.line_height), I_PAGE_LINE_HEIGHT). Found by
+    # the split refactor forcing every lane site to be read, not by search.
     var lh = items[unsafe_offset = io + I_LINE_HEIGHT]
-    if lh != lh:  # NaN = unset: the glyph's own height
-        lh = measures[unsafe_offset = mo + M_HEIGHT]
 
     var ox = items[unsafe_offset = io + I_ORIGIN_X]
-    measures[unsafe_offset = mo + M_BASE_X] = x + ox
-    measures[unsafe_offset = mo + M_X] = x + ox
-    measures[unsafe_offset = mo + M_Y] = (
+    lm[unsafe_offset = mo + LM_BASE_X] = x + ox
+    lm[unsafe_offset = mo + LM_X] = x + ox
+    lm[unsafe_offset = mo + LM_Y] = (
         Float32(-row) * lh + items[unsafe_offset = io + I_ORIGIN_Y]
     )
-    measures[unsafe_offset = mo + M_Z] = (
+    lm[unsafe_offset = mo + LM_Z] = (
         Float32(-wrap_row) * items[unsafe_offset = io + I_Z_STEP]
         + items[unsafe_offset = io + I_ORIGIN_Z]
     )
@@ -378,15 +383,15 @@ def k_resolve_x(
 
 # ── dispatch 8: paginate — thread per byte, pure per-slot remap ────────────
 def k_paginate(
-    measures: MutPointer[Float32, MutAnyOrigin], counts: MutPointer[UInt32, MutAnyOrigin],
+    lm: MutPointer[Float32, MutAnyOrigin], fl: MutPointer[UInt32, MutAnyOrigin],
+    lc: MutPointer[UInt32, MutAnyOrigin],
     items: MutPointer[Float32, MutAnyOrigin], item_of: MutPointer[UInt32, MutAnyOrigin],
     strides: MutPointer[Float32, MutAnyOrigin], n_bytes: Int32,
 ):
     var id = global_idx.x
     if id >= Int(n_bytes):
         return
-    var co = id * COUNT_STRIDE
-    if (Int(counts[unsafe_offset = co + C_FLAGS]) & F_LEADER) == 0:
+    if (Int(fl[unsafe_offset=id]) & F_LEADER) == 0:
         return
     var it = Int(item_of[unsafe_offset=id])
     var io = it * ITEM_STRIDE
@@ -396,8 +401,8 @@ def k_paginate(
     var scroll = trunc_nn32(items[unsafe_offset = io + I_SCROLL_ROWS]) if has_page else 0
     if rows == 0 and cols == 0 and scroll == 0:
         return
-    var row = Int(counts[unsafe_offset = co + C_ROW])
-    var col = Int(counts[unsafe_offset = co + C_COL])
+    var row = Int(lc[unsafe_offset = id * LC_STRIDE + LC_ROW])
+    var col = Int(lc[unsafe_offset = id * LC_STRIDE + LC_COL])
     var screen_row = row - scroll
     var y_page = 0
     if rows > 0 and screen_row >= rows:
@@ -416,17 +421,17 @@ def k_paginate(
     # argued: poisoning this branch left all twelve suites green, while poisoning
     # the TAKEN read below failed both GPU suites — so they do exercise this line.
     var lh = items[unsafe_offset = io + I_LINE_HEIGHT]
-    var mo = id * MEASURE_STRIDE
-    measures[unsafe_offset = mo + M_X] = (
-        measures[unsafe_offset = mo + M_BASE_X]
+    var mo = id * LM_STRIDE
+    lm[unsafe_offset = mo + LM_X] = (
+        lm[unsafe_offset = mo + LM_BASE_X]
         + Float32(y_page % wide) * strides[unsafe_offset=it]
     )
-    measures[unsafe_offset = mo + M_Y] = (
+    lm[unsafe_offset = mo + LM_Y] = (
         items[unsafe_offset = io + I_ORIGIN_Y]
         - Float32(screen_row - y_page * rows) * lh
         - Float32(band) * items[unsafe_offset = io + I_BAND_STRIDE_Y]
     )
-    measures[unsafe_offset = mo + M_Z] = (
+    lm[unsafe_offset = mo + LM_Z] = (
         items[unsafe_offset = io + I_ORIGIN_Z]
         - Float32(seg) * items[unsafe_offset = io + I_Z_STEP]
         + Float32(band) * items[unsafe_offset = io + I_DEPTH_PER_BAND]
@@ -476,8 +481,10 @@ def check_fixture(var fx: PipeFixture, ctx: DeviceContext, bench: Bool = False) 
         item_start[id] = UInt32(fx.items[i].byte_start) if i >= 0 else UInt32(0)
 
     # ── upload the DECODED lanes (decode itself is proven in gpu_decode) ─────
-    var h_c = ctx.enqueue_create_host_buffer[DType.uint32](n * COUNT_STRIDE)
-    var h_m = ctx.enqueue_create_host_buffer[DType.float32](n * MEASURE_STRIDE)
+    var h_fl = ctx.enqueue_create_host_buffer[DType.uint32](n)
+    var h_sm = ctx.enqueue_create_host_buffer[DType.float32](n * SM_STRIDE)
+    var h_lm = ctx.enqueue_create_host_buffer[DType.float32](n * LM_STRIDE)
+    var h_lc = ctx.enqueue_create_host_buffer[DType.uint32](n * LC_STRIDE)
     var h_w = ctx.enqueue_create_host_buffer[DType.uint32](n)
     var h_s = ctx.enqueue_create_host_buffer[DType.uint32](n)
     var h_is = ctx.enqueue_create_host_buffer[DType.uint32](n)
@@ -486,16 +493,14 @@ def check_fixture(var fx: PipeFixture, ctx: DeviceContext, bench: Bool = False) 
     # Only the DECODE lanes are seeded; ROW/COL/ORD/LINE_ADV are what the device
     # must produce, so they start zeroed and cannot be accidentally "verified"
     # against values that were handed to it.
-    for i in range(n * COUNT_STRIDE):
-        h_c[i] = 0
     for id in range(n):
-        var co = id * COUNT_STRIDE
-        h_c[co + C_FLAGS] = cpu.counts[co + C_FLAGS]
-    for i in range(n * MEASURE_STRIDE):
-        h_m[i] = 0
-    for id in range(n):
-        h_m[id * MEASURE_STRIDE + M_ADVANCE] = cpu.measures[id * MEASURE_STRIDE + M_ADVANCE]
-        h_m[id * MEASURE_STRIDE + M_HEIGHT] = cpu.measures[id * MEASURE_STRIDE + M_HEIGHT]
+        h_fl[id] = cpu.fl[id]
+    for i in range(n * SM_STRIDE):
+        h_sm[i] = cpu.sm[i]
+    for i in range(n * LM_STRIDE):
+        h_lm[i] = 0
+    for i in range(n * LC_STRIDE):
+        h_lc[i] = 0
     for i in range(n):
         h_w[i] = wrap_of[i]
         h_s[i] = is_start[i]
@@ -533,8 +538,10 @@ def check_fixture(var fx: PipeFixture, ctx: DeviceContext, bench: Bool = False) 
         h_rmax[i] = 0
         h_xmax[i] = 0
 
-    var d_c = ctx.enqueue_create_buffer[DType.uint32](n * COUNT_STRIDE)
-    var d_m = ctx.enqueue_create_buffer[DType.float32](n * MEASURE_STRIDE)
+    var d_fl = ctx.enqueue_create_buffer[DType.uint32](n)
+    var d_sm = ctx.enqueue_create_buffer[DType.float32](n * SM_STRIDE)
+    var d_lm = ctx.enqueue_create_buffer[DType.float32](n * LM_STRIDE)
+    var d_lc = ctx.enqueue_create_buffer[DType.uint32](n * LC_STRIDE)
     var d_w = ctx.enqueue_create_buffer[DType.uint32](n)
     var d_s = ctx.enqueue_create_buffer[DType.uint32](n)
     var d_is = ctx.enqueue_create_buffer[DType.uint32](n)
@@ -552,8 +559,10 @@ def check_fixture(var fx: PipeFixture, ctx: DeviceContext, bench: Bool = False) 
     var d_io = ctx.enqueue_create_buffer[DType.uint32](n)
     var d_rmax = ctx.enqueue_create_buffer[DType.uint32](ni)
     var d_xmax = ctx.enqueue_create_buffer[DType.uint32](ni)
-    ctx.enqueue_copy(dst_buf=d_c, src_buf=h_c)
-    ctx.enqueue_copy(dst_buf=d_m, src_buf=h_m)
+    ctx.enqueue_copy(dst_buf=d_fl, src_buf=h_fl)
+    ctx.enqueue_copy(dst_buf=d_sm, src_buf=h_sm)
+    ctx.enqueue_copy(dst_buf=d_lm, src_buf=h_lm)
+    ctx.enqueue_copy(dst_buf=d_lc, src_buf=h_lc)
     ctx.enqueue_copy(dst_buf=d_w, src_buf=h_w)
     ctx.enqueue_copy(dst_buf=d_s, src_buf=h_s)
     ctx.enqueue_copy(dst_buf=d_is, src_buf=h_is)
@@ -576,7 +585,7 @@ def check_fixture(var fx: PipeFixture, ctx: DeviceContext, bench: Bool = False) 
     var g0 = perf_counter_ns()
     comptime B = 128
     ctx.enqueue_function[k_chunk_reduce](
-        d_c.unsafe_ptr(), d_m.unsafe_ptr(), d_w.unsafe_ptr(), d_s.unsafe_ptr(),
+        d_fl.unsafe_ptr(), d_sm.unsafe_ptr(), d_w.unsafe_ptr(), d_s.unsafe_ptr(),
         d_pc.unsafe_ptr(), d_pm.unsafe_ptr(),
         Int32(n), Int32(CHUNK), Int32(n_chunks),
         grid_dim=(n_chunks + B - 1) // B, block_dim=B,
@@ -597,13 +606,15 @@ def check_fixture(var fx: PipeFixture, ctx: DeviceContext, bench: Bool = False) 
         grid_dim=(n_supers + B - 1) // B, block_dim=B,
     )
     ctx.enqueue_function[k_apply](
-        d_c.unsafe_ptr(), d_m.unsafe_ptr(), d_w.unsafe_ptr(), d_s.unsafe_ptr(),
+        d_fl.unsafe_ptr(), d_sm.unsafe_ptr(), d_lm.unsafe_ptr(), d_lc.unsafe_ptr(),
+        d_w.unsafe_ptr(), d_s.unsafe_ptr(),
         d_is.unsafe_ptr(), d_xc.unsafe_ptr(), d_xm.unsafe_ptr(), d_otb.unsafe_ptr(),
         Int32(n), Int32(CHUNK), Int32(n_chunks),
         grid_dim=(n_chunks + B - 1) // B, block_dim=B,
     )
     ctx.enqueue_function[k_resolve_x](
-        d_m.unsafe_ptr(), d_c.unsafe_ptr(), d_it.unsafe_ptr(), d_io.unsafe_ptr(),
+        d_sm.unsafe_ptr(), d_fl.unsafe_ptr(), d_lm.unsafe_ptr(), d_lc.unsafe_ptr(),
+        d_it.unsafe_ptr(), d_io.unsafe_ptr(),
         d_is.unsafe_ptr(), d_otb.unsafe_ptr(), d_rmax.unsafe_ptr(), d_xmax.unsafe_ptr(),
         Int32(n), grid_dim=(n + B - 1) // B, block_dim=B,
     )
@@ -620,12 +631,13 @@ def check_fixture(var fx: PipeFixture, ctx: DeviceContext, bench: Bool = False) 
     var d_st = ctx.enqueue_create_buffer[DType.float32](ni0)
     ctx.enqueue_copy(dst_buf=d_st, src_buf=h_st)
     ctx.enqueue_function[k_paginate](
-        d_m.unsafe_ptr(), d_c.unsafe_ptr(), d_it.unsafe_ptr(), d_io.unsafe_ptr(),
+        d_lm.unsafe_ptr(), d_fl.unsafe_ptr(), d_lc.unsafe_ptr(),
+        d_it.unsafe_ptr(), d_io.unsafe_ptr(),
         d_st.unsafe_ptr(), Int32(n),
         grid_dim=(n + B - 1) // B, block_dim=B,
     )
-    ctx.enqueue_copy(dst_buf=h_c, src_buf=d_c)
-    ctx.enqueue_copy(dst_buf=h_m, src_buf=d_m)
+    ctx.enqueue_copy(dst_buf=h_lc, src_buf=d_lc)
+    ctx.enqueue_copy(dst_buf=h_lm, src_buf=d_lm)
     ctx.enqueue_copy(dst_buf=h_otb, src_buf=d_otb)
     ctx.enqueue_copy(dst_buf=h_rmax, src_buf=d_rmax)
     ctx.synchronize()
@@ -644,37 +656,37 @@ def check_fixture(var fx: PipeFixture, ctx: DeviceContext, bench: Bool = False) 
     var bad = 0
     var printed = 0
     for id in range(n):
-        var co = id * COUNT_STRIDE
-        if (Int(cpu.counts[co + C_FLAGS]) & F_LEADER) == 0:
+        var co = id * LC_STRIDE
+        if (Int(cpu.fl[id]) & F_LEADER) == 0:
             continue
         # counts: EXACT. Nothing here is allowed to round.
-        if h_c[co + C_ROW] != cpu.counts[co + C_ROW]:
+        if h_lc[co + LC_ROW] != cpu.lc[co + LC_ROW]:
             bad += 1
             if printed < MAX_PRINTED:
-                print("  byte", id, "C_ROW gpu", h_c[co + C_ROW], "cpu", cpu.counts[co + C_ROW])
+                print("  byte", id, "ROW gpu", h_lc[co + LC_ROW], "cpu", cpu.lc[co + LC_ROW])
                 printed += 1
-        if h_c[co + C_COL] != cpu.counts[co + C_COL]:
+        if h_lc[co + LC_COL] != cpu.lc[co + LC_COL]:
             bad += 1
             if printed < MAX_PRINTED:
-                print("  byte", id, "C_COL gpu", h_c[co + C_COL], "cpu", cpu.counts[co + C_COL])
+                print("  byte", id, "COL gpu", h_lc[co + LC_COL], "cpu", cpu.lc[co + LC_COL])
                 printed += 1
-        if h_c[co + C_ORD] != cpu.counts[co + C_ORD]:
+        if h_lc[co + LC_ORD] != cpu.lc[co + LC_ORD]:
             bad += 1
             if printed < MAX_PRINTED:
-                print("  byte", id, "C_ORD gpu", h_c[co + C_ORD], "cpu", cpu.counts[co + C_ORD])
+                print("  byte", id, "ORD gpu", h_lc[co + LC_ORD], "cpu", cpu.lc[co + LC_ORD])
                 printed += 1
         # LINE_ADV: eps (foldless f64 prefix vs the scan's f32 grouping).
-        var g = Float64(h_m[id * MEASURE_STRIDE + M_LINE_ADV])
-        var e = Float64(cpu.measures[id * MEASURE_STRIDE + M_LINE_ADV])
+        var g = Float64(h_lm[id * LM_STRIDE + LM_LINE_ADV])
+        var e = Float64(cpu.lm[id * LM_STRIDE + LM_LINE_ADV])
         if not rel_close(g, e):
             bad += 1
             if printed < MAX_PRINTED:
-                print("  byte", id, "M_LINE_ADV gpu", g, "cpu", e)
+                print("  byte", id, "LINE_ADV gpu", g, "cpu", e)
                 printed += 1
         # resolveX's positions: eps, like paginate — f64 on CPU, f32 on device.
         for lane in range(3):
-            var gp = Float64(h_m[id * MEASURE_STRIDE + M_X + lane])
-            var ep = Float64(cpu.measures[id * MEASURE_STRIDE + M_X + lane])
+            var gp = Float64(h_lm[id * LM_STRIDE + LM_X + lane])
+            var ep = Float64(cpu.lm[id * LM_STRIDE + LM_X + lane])
             if not rel_close(gp, ep):
                 bad += 1
                 if printed < MAX_PRINTED:

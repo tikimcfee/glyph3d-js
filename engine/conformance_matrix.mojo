@@ -27,7 +27,7 @@
 #          engine/fixtures/repo-file.pipe.bin
 
 from std.sys import argv
-from glyph_schema import COUNT_STRIDE, C_ROW, C_COL, C_FLAGS, C_ORD
+from glyph_schema import LC_STRIDE, LC_ROW, LC_COL, LC_ORD
 from glyph_pipeline import (
     run_pipeline, Item, Trie, F_LEADER, F_RENDERED, F_MISSING, page_active,
 )
@@ -107,7 +107,7 @@ def check(name: String, bytes: List[UInt8], trie: Trie, items: List[Item]) -> In
     var prev: Int = -1
     var order_ok = True
     for id in range(n):
-        var f = Int(r.counts[id * COUNT_STRIDE + C_FLAGS])
+        var f = Int(r.fl[id])
         if (f & F_LEADER) != 0 and (f & F_MISSING) != 0:
             if want_misses < len(r.misses):
                 pass
@@ -117,7 +117,7 @@ def check(name: String, bytes: List[UInt8], trie: Trie, items: List[Item]) -> In
         bad += 1
     var seen = 0
     for id in range(n):
-        var f = Int(r.counts[id * COUNT_STRIDE + C_FLAGS])
+        var f = Int(r.fl[id])
         if (f & F_LEADER) != 0 and (f & F_MISSING) != 0:
             if seen < len(r.misses):
                 if r.misses[seen] != UInt32(Int(bytes[id])):
@@ -139,10 +139,10 @@ def check(name: String, bytes: List[UInt8], trie: Trie, items: List[Item]) -> In
         for id in range(start, stop):
             if id >= n:
                 break
-            var f = Int(r.counts[id * COUNT_STRIDE + C_FLAGS])
+            var f = Int(r.fl[id])
             if (f & F_LEADER) == 0 or (f & F_RENDERED) == 0:
                 continue
-            var ord = Int(r.counts[id * COUNT_STRIDE + C_ORD])
+            var ord = Int(r.lc[id * LC_STRIDE + LC_ORD])
             var q = start + ord
             if q < 0 or q >= n or Int(r.ord_to_byte[q]) != id:
                 bad += 1
@@ -165,10 +165,10 @@ def check(name: String, bytes: List[UInt8], trie: Trie, items: List[Item]) -> In
         for id in range(start, stop):
             if id >= n:
                 break
-            var f = Int(r.counts[id * COUNT_STRIDE + C_FLAGS])
+            var f = Int(r.fl[id])
             if (f & F_LEADER) == 0 or (f & F_RENDERED) == 0:
                 continue
-            var ord = Int(r.counts[id * COUNT_STRIDE + C_ORD])
+            var ord = Int(r.lc[id * LC_STRIDE + LC_ORD])
             if ord < 0 or ord >= len(seen_ord) or seen_ord[ord]:
                 bad += 1
                 if printed < MAX_PRINTED:
@@ -198,8 +198,8 @@ def check(name: String, bytes: List[UInt8], trie: Trie, items: List[Item]) -> In
     for id in range(n):
         if claimed[id]:
             continue
-        var co = id * COUNT_STRIDE
-        if r.counts[co + C_ROW] != 0 or r.counts[co + C_COL] != 0 or r.counts[co + C_ORD] != 0:
+        var co = id * LC_STRIDE
+        if r.lc[co + LC_ROW] != 0 or r.lc[co + LC_COL] != 0 or r.lc[co + LC_ORD] != 0:
             bad += 1
             if printed < MAX_PRINTED:
                 print("  ", name, "gap byte", id, "has nonzero fold lanes")
@@ -215,10 +215,10 @@ def check(name: String, bytes: List[UInt8], trie: Trie, items: List[Item]) -> In
         for id in range(items[i].byte_start, items[i].byte_start + items[i].byte_count):
             if id >= n:
                 break
-            var f = Int(r.counts[id * COUNT_STRIDE + C_FLAGS])
+            var f = Int(r.fl[id])
             if (f & F_LEADER) == 0 or (f & F_RENDERED) == 0:
                 continue
-            var row = Int(r.counts[id * COUNT_STRIDE + C_ROW])
+            var row = Int(r.lc[id * LC_STRIDE + LC_ROW])
             if row < last:
                 bad += 1
                 if printed < MAX_PRINTED:

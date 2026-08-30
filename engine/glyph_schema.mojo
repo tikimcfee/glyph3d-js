@@ -13,30 +13,57 @@
 # different container and stay conformant; what it owes is the assertion
 # that its own mapping respects them, which validate() performs for this one.
 
-comptime MEASURE_STRIDE = 8
-comptime M_X = 0
-comptime M_Y = 1
-comptime M_Z = 2
-comptime M_ADVANCE = 3
-comptime M_HEIGHT = 4
-comptime M_GLYPH_ID = 5
-comptime M_BASE_X = 6
-comptime M_LINE_ADV = 7
+# ── The SLOT BUFFERS: four arrays, split by phase ──────────────────────────
+# static  = decode's output (pure function of the byte); positional = the
+# fold's output (sequential state). Decode NEVER touches positional — that is
+# the split. LM/LC = layout measures/counts; SM = static measures; FLAGS is
+# its own stride-1 array (flags[id], no lane constant needed).
+comptime SM_STRIDE = 4
+comptime SM_ADVANCE = 0
+comptime SM_HEIGHT = 1
+comptime SM_GLYPH_ID = 2
+comptime SM_PAD = 3
+comptime FLAGS_STRIDE = 1
 
-comptime COUNT_STRIDE = 4
-comptime C_ROW = 0
-comptime C_COL = 1
-comptime C_FLAGS = 2
-comptime C_ORD = 3
+comptime LM_STRIDE = 5
+comptime LM_X = 0
+comptime LM_Y = 1
+comptime LM_Z = 2
+comptime LM_BASE_X = 3
+comptime LM_LINE_ADV = 4
 
-# The RECORD format: the render-read prefix of each buffer. Emitting a record
-# is a truncation, not a repack — which is why the scratch pool can be reused
-# and the resident cost stops scaling with the corpus.
+comptime LC_STRIDE = 3
+comptime LC_ROW = 0
+comptime LC_COL = 1
+comptime LC_ORD = 2
+
+# The RECORD format (the wire): unchanged by the split. A record is emitted as
+# three prefix runs — posMeasures[0..3), staticMeasures[0..3), posCounts[0..2)
+# — a concatenation of truncations, still no lane map.
 comptime RECORD_MEASURE_STRIDE = 6
 comptime RECORD_COUNT_STRIDE = 2
 comptime RECORD_BYTES = 32
 
-# The scan partial (ScanElem) in a GPU buffer — same two-buffer rule.
+# ── THE FIXTURE FORMAT — frozen on disk (format v2), independent of the
+#    container. Fixtures carry the oracle's VALUES in this order; the engine's
+#    buffers may be re-laid at will and the fixtures do not move.
+comptime FIXTURE_MEASURE_STRIDE = 8
+comptime FIX_M_X = 0
+comptime FIX_M_Y = 1
+comptime FIX_M_Z = 2
+comptime FIX_M_ADVANCE = 3
+comptime FIX_M_HEIGHT = 4
+comptime FIX_M_GLYPH_ID = 5
+comptime FIX_M_BASE_X = 6
+comptime FIX_M_LINE_ADV = 7
+
+comptime FIXTURE_COUNT_STRIDE = 4
+comptime FIX_C_ROW = 0
+comptime FIX_C_COL = 1
+comptime FIX_C_FLAGS = 2
+comptime FIX_C_ORD = 3
+
+# The scan partial (ScanElem) in a GPU buffer — same kind rule.
 comptime PARTIAL_COUNT_STRIDE = 7
 comptime P_RESET = 0
 comptime P_NL = 1
@@ -81,34 +108,34 @@ comptime B_MAX_ROW_EXTENT = 7
 comptime BOUNDS_COUNT_LANES = (6)
 
 
-def measure_lane_name(lane: Int) -> String:
-    """Lane name for diagnostics — runtime lookup (comptime lists cannot materialize)."""
+def fixture_measure_lane_name(lane: Int) -> String:
+    '''FIXTURE lane name for diagnostics (fixture order, not container order).'''
     if lane == 0:
-        return "M_X"
+        return "X"
     if lane == 1:
-        return "M_Y"
+        return "Y"
     if lane == 2:
-        return "M_Z"
+        return "Z"
     if lane == 3:
-        return "M_ADVANCE"
+        return "ADVANCE"
     if lane == 4:
-        return "M_HEIGHT"
+        return "HEIGHT"
     if lane == 5:
-        return "M_GLYPH_ID"
+        return "GLYPH_ID"
     if lane == 6:
-        return "M_BASE_X"
+        return "BASE_X"
     if lane == 7:
-        return "M_LINE_ADV"
+        return "LINE_ADV"
     return "M_?"
 
 
-def count_lane_name(lane: Int) -> String:
+def fixture_count_lane_name(lane: Int) -> String:
     if lane == 0:
-        return "C_ROW"
+        return "ROW"
     if lane == 1:
-        return "C_COL"
+        return "COL"
     if lane == 2:
-        return "C_FLAGS"
+        return "FLAGS"
     if lane == 3:
-        return "C_ORD"
+        return "ORD"
     return "C_?"

@@ -25,9 +25,81 @@
     "against it, so its container cannot disagree with the declaration."
   ],
   "buffers": {
-    "measures": {
+    "$comment": [
+      "FOUR ARRAYS, SPLIT BY PHASE — who WRITES a lane decides where it lives.",
+      "",
+      "  static      decode's output: a pure function of the byte through the trie.",
+      "              Written once per byte as one aligned 16-byte store; never",
+      "              rewritten (FLAGS is the exception: the fold ORs in F_RENDERED).",
+      "  positional  the fold's output: requires sequential state. Decode NEVER",
+      "              touches it — that is the entire point. Zeroing of non-leader",
+      "              bytes belongs to the fold (which walks every byte of its item",
+      "              anyway) and to a driver memset over the known GAP ranges.",
+      "",
+      "Measured before building: the phase split is 1.37x end-to-end on decode+fold",
+      "(engine/bench/split_bench.mojo), because the cost of dispatch 1 is DIRTIED",
+      "CACHE LINES, not stores — decode used to dirty all 48 B per source byte and",
+      "the fold dirtied them again; now decode dirties 20 and the fold 32.",
+      "",
+      "THE RECORD IS UNCHANGED. The wire order [X Y Z ADVANCE HEIGHT GLYPH_ID][ROW",
+      "COL] partitions exactly at the phase boundary, so the truncation invariant",
+      "survives per-array: the record is a concatenation of three prefix runs",
+      "(posMeasures 0-2, staticMeasures 0-2, posCounts 0-1) — still memcpy-shaped,",
+      "still no lane map. The generator pins the wire as a literal and derives the",
+      "record from these arrays; a restructure that moves the wire fails the build.",
+      "",
+      "SM_PAD exists to make the static record one ALIGNED 16-byte store (four",
+      "slots per cache line). Padding that buys alignment is cheaper than the",
+      "unaligned store that saving it costs."
+    ],
+    "staticMeasures": {
       "carrier": "f32",
-      "stride": 8,
+      "stride": 4,
+      "lanes": [
+        {
+          "name": "ADVANCE",
+          "index": 0,
+          "read_by_vertex": true,
+          "kind": "measure"
+        },
+        {
+          "name": "HEIGHT",
+          "index": 1,
+          "read_by_vertex": true,
+          "kind": "measure"
+        },
+        {
+          "name": "GLYPH_ID",
+          "index": 2,
+          "read_by_vertex": true,
+          "misplaced": "This is an IDENTITY living in the measures buffer. It is here only because it is copied verbatim from the trie's f32 blocks, so it cannot move until the TRIE FORMAT moves. It is the single exception in the system and it is deliberately visible: one identity, in the wrong array, naming its own fix.",
+          "kind": "identity"
+        },
+        {
+          "name": "PAD",
+          "index": 3,
+          "scratch": true,
+          "kind": "measure",
+          "note": "alignment padding — decode writes 0 so the whole static record is one aligned 16-byte store; never read"
+        }
+      ]
+    },
+    "staticCounts": {
+      "carrier": "u32",
+      "stride": 1,
+      "lanes": [
+        {
+          "name": "FLAGS",
+          "index": 0,
+          "bitfield": true,
+          "note": "Read with bitwise ops by later dispatches, so not render-scratch.",
+          "kind": "bitfield"
+        }
+      ]
+    },
+    "posMeasures": {
+      "carrier": "f32",
+      "stride": 5,
       "lanes": [
         {
           "name": "X",
@@ -50,41 +122,22 @@
           "kind": "measure"
         },
         {
-          "name": "ADVANCE",
-          "index": 3,
-          "read_by_vertex": true,
-          "kind": "measure"
-        },
-        {
-          "name": "HEIGHT",
-          "index": 4,
-          "read_by_vertex": true,
-          "kind": "measure"
-        },
-        {
-          "name": "GLYPH_ID",
-          "index": 5,
-          "read_by_vertex": true,
-          "misplaced": "This is an IDENTITY living in the measures buffer. It is here only because it is copied verbatim from the trie's f32 blocks, so it cannot move until the TRIE FORMAT moves. It is the single exception in the system and it is deliberately visible: one identity, in the wrong array, naming its own fix.",
-          "kind": "identity"
-        },
-        {
           "name": "BASE_X",
-          "index": 6,
+          "index": 3,
           "scratch": true,
           "kind": "measure"
         },
         {
           "name": "LINE_ADV",
-          "index": 7,
+          "index": 4,
           "scratch": true,
           "kind": "measure"
         }
       ]
     },
-    "counts": {
+    "posCounts": {
       "carrier": "u32",
-      "stride": 4,
+      "stride": 3,
       "lanes": [
         {
           "name": "ROW",
@@ -99,15 +152,8 @@
           "kind": "count"
         },
         {
-          "name": "FLAGS",
-          "index": 2,
-          "bitfield": true,
-          "note": "Read with bitwise ops by later dispatches, so not render-scratch.",
-          "kind": "bitfield"
-        },
-        {
           "name": "ORD",
-          "index": 3,
+          "index": 2,
           "scratch": true,
           "note": "The lane that started all of this. Aliased past 2^24 as an f32; exact to 2^32 as a native count.",
           "kind": "count"

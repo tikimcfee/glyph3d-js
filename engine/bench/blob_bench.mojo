@@ -17,7 +17,8 @@ from std.collections.span import Span
 from std.sys import argv
 from std.time import perf_counter_ns
 from std.memory import memcpy
-from glyph_schema import MEASURE_STRIDE, COUNT_STRIDE
+from glyph_schema import SM_STRIDE, LM_STRIDE, LC_STRIDE
+comptime SLOT_BYTES = (SM_STRIDE + 1 + LM_STRIDE + LC_STRIDE) * 4
 from glyph_pipeline import Item, run_pipeline
 from fixture_io import load_pipe_fixture
 
@@ -93,7 +94,7 @@ def main() raises:
             it.byte_count = lens[q]
             it.line_height = 1
             items.append(it^)
-        var scratch = span * (MEASURE_STRIDE + COUNT_STRIDE) * 4
+        var scratch = span * SLOT_BYTES
         if scratch > peak_scratch:
             peak_scratch = scratch
         var r = run_pipeline(slice, seed.trie, items)

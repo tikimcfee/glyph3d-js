@@ -33,7 +33,7 @@
 # Run: mojo run -I engine engine/ordinal_invariant.mojo engine/fixtures/*.pipe.bin
 
 from std.sys import argv
-from glyph_schema import COUNT_STRIDE, C_ORD, C_FLAGS
+from glyph_schema import LC_STRIDE, LC_ORD
 from glyph_pipeline import run_pipeline, Item, Trie, PipelineResult, F_LEADER
 from fixture_io import load_pipe_fixture
 
@@ -49,9 +49,8 @@ def check_ordinals(result: PipelineResult, items: List[Item]) -> Int:
         var stop = start + items[i].byte_count
         var id = start
         while id < stop:
-            var co = id * COUNT_STRIDE
-            if (Int(result.counts[co + C_FLAGS]) & F_LEADER) != 0:
-                var lane = Int(result.counts[co + C_ORD])
+            if (Int(result.fl[id]) & F_LEADER) != 0:
+                var lane = Int(result.lc[id * LC_STRIDE + LC_ORD])
                 var witness = Int(result.ord_to_byte[start + lane])
                 if witness != id:
                     bad += 1
@@ -86,10 +85,9 @@ def synthetic_item_case(trie: Trie, n_bytes: Int, force_f32_ordinal: Bool = Fals
     var result = run_pipeline(bytes, trie, items)
     if force_f32_ordinal:
         for id in range(n_bytes):
-            var co = id * COUNT_STRIDE
-            if (Int(result.counts[co + C_FLAGS]) & F_LEADER) != 0:
-                var ord = Int(result.counts[co + C_ORD])
-                result.counts[co + C_ORD] = UInt32(Int(Float32(ord)))
+            if (Int(result.fl[id]) & F_LEADER) != 0:
+                var ord = Int(result.lc[id * LC_STRIDE + LC_ORD])
+                result.lc[id * LC_STRIDE + LC_ORD] = UInt32(Int(Float32(ord)))
     return check_ordinals(result, items)
 
 

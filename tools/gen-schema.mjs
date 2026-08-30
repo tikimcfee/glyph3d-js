@@ -21,7 +21,9 @@ const schema = JSON.parse(readFileSync(join(root, 'schema/glyph-identity.json'),
 // ── validate ────────────────────────────────────────────────────────────────
 function validate(s) {
     const errs = [];
-    const allBufs = { ...s.buffers, partialCounts: s.scanPartial.counts,
+    // s.buffers carries a $comment; iterate only entries that are actual buffers.
+    const slotBufs = Object.fromEntries(Object.entries(s.buffers).filter(([, v]) => v && v.lanes));
+    const allBufs = { ...slotBufs, partialCounts: s.scanPartial.counts,
         partialMeasures: s.scanPartial.measures, itemTable: s.itemTable.measures };
     for (const [bufName, buf] of Object.entries(allBufs)) {
         const seen = new Set();
@@ -48,22 +50,26 @@ function validate(s) {
     // THE ENGINE'S CONTAINER IS DERIVED FROM KIND, AND ASSERTED AGAINST IT. Another
     // layer may realize the same kinds in a different container and stay conformant;
     // what it owes is this same assertion over its own mapping.
-    for (const lane of s.buffers.measures.lanes) {
-        if (lane.kind !== 'measure' && !lane.misplaced) {
-            errs.push(`measures.${lane.name}: kind '${lane.kind}' is exact but sits in the f32 buffer with no 'misplaced' justification`);
+    for (const [bufName, buf] of Object.entries(slotBufs)) {
+        for (const lane of buf.lanes) {
+            if (buf.carrier === 'f32' && lane.kind !== 'measure' && !lane.misplaced) {
+                errs.push(`${bufName}.${lane.name}: kind '${lane.kind}' is exact but sits in an f32 buffer with no 'misplaced' justification`);
+            }
+            if (buf.carrier === 'u32' && lane.kind === 'measure') {
+                errs.push(`${bufName}.${lane.name}: a measure in a u32 buffer`);
+            }
         }
-    }
-    for (const lane of s.buffers.counts.lanes) {
-        if (lane.kind === 'measure') errs.push(`counts.${lane.name}: a measure in the u32 buffer`);
     }
 
     // THE INVARIANT THIS FILE EXISTS FOR: no exact value may ride a float carrier.
     // A lane in the f32 buffer that is an identity/count/bitfield is the bug that
     // cost this codebase three separate walls. `misplaced` is the one documented
     // exception, and it must SAY so — silence is a failure.
-    const measures = s.buffers.measures;
-    for (const lane of measures.lanes) {
-        if (lane.bitfield && !lane.misplaced) errs.push(`measures.${lane.name}: a bitfield in the f32 buffer with no 'misplaced' justification`);
+    for (const [bufName, buf] of Object.entries(slotBufs)) {
+        if (buf.carrier !== 'f32') continue;
+        for (const lane of buf.lanes) {
+            if (lane.bitfield && !lane.misplaced) errs.push(`${bufName}.${lane.name}: a bitfield in an f32 buffer with no 'misplaced' justification`);
+        }
     }
     for (const id of s.identities) {
         if (id.carrier !== 'u32') errs.push(`identity ${id.name}: carrier is '${id.carrier}', identities must be u32`);
@@ -73,7 +79,7 @@ function validate(s) {
     // That only holds if every render-read lane sorts BEFORE every lane that is not
     // read. If someone adds a render-read lane at the tail, this throws rather than
     // silently turning the record into a repack.
-    for (const [bufName, buf] of Object.entries(s.buffers)) {
+    for (const [bufName, buf] of Object.entries(slotBufs)) {
         const sorted = [...buf.lanes].sort((a, b) => a.index - b.index);
         let seenUnread = null;
         for (const lane of sorted) {
@@ -107,7 +113,7 @@ function validate(s) {
     // while every carrier is 4 bytes wide; if one ever became f16 the constant and
     // the field list could disagree in silence.
     const CARRIER_BYTES = { f32: 4, u32: 4 };
-    for (const [bufName, buf] of Object.entries(s.buffers)) {
+    for (const [bufName, buf] of Object.entries(slotBufs)) {
         if (CARRIER_BYTES[buf.carrier] !== 4) {
             errs.push(`${bufName}: carrier '${buf.carrier}' is not a known 4-byte carrier — `
                 + `RECORD_BYTES is derived assuming 4 bytes per field and would be wrong`);
@@ -155,7 +161,7 @@ function validate(s) {
     // that outlives its deviation is a permanent hole with a comment on it, and the
     // file people trust most becomes the one carrying the stalest claims. A settled
     // debt must FAIL until it is removed.
-    for (const [bufName, buf] of Object.entries(s.buffers)) {
+    for (const [bufName, buf] of Object.entries(slotBufs)) {
         for (const lane of buf.lanes) {
             if (!lane.misplaced) continue;
             const deviating = buf.carrier === 'f32' && lane.kind !== 'measure';
@@ -217,7 +223,16 @@ const contractBanner = (cmt) => [
 ].join('\n');
 
 // ── Mojo ────────────────────────────────────────────────────────────────────
-const m = schema.buffers.measures, c = schema.buffers.counts;
+const stM = schema.buffers.staticMeasures, stC = schema.buffers.staticCounts;
+const poM = schema.buffers.posMeasures, poC = schema.buffers.posCounts;
+const rbv = (buf) => buf.lanes.filter(l => l.read_by_vertex).sort((a, b) => a.index - b.index).map(l => l.name);
+// THE FIXTURE FORMAT — frozen on disk (format v2), NOT derived from the container.
+// Fixtures carry the ORACLE'S VALUES in this order; the engine's working buffers
+// may be re-laid at will and the fixtures do not move. When the container was one
+// measures-8 + counts-4 pair these were the same shape by coincidence; the phase
+// split ended the coincidence, not the format.
+const FIXTURE_MEASURES = ['X', 'Y', 'Z', 'ADVANCE', 'HEIGHT', 'GLYPH_ID', 'BASE_X', 'LINE_ADV'];
+const FIXTURE_COUNTS = ['ROW', 'COL', 'FLAGS', 'ORD'];
 // DERIVED, never hand-written: the record is the render-read prefix of each buffer.
 // ── THE WIRE, PINNED AS A LITERAL ───────────────────────────────────────────
 // The record's field order is a WIRE FORMAT: the renderer consumes these bytes in
@@ -234,8 +249,12 @@ const WIRE_MEASURES = ['X', 'Y', 'Z', 'ADVANCE', 'HEIGHT', 'GLYPH_ID'];
 const WIRE_COUNTS = ['ROW', 'COL'];
 const WIRE_BYTES = 32;
 {
-    const gotM = m.lanes.filter(l => l.read_by_vertex).sort((a, b) => a.index - b.index).map(l => l.name);
-    const gotC = c.lanes.filter(l => l.read_by_vertex).sort((a, b) => a.index - b.index).map(l => l.name);
+    // The record is a CONCATENATION OF PREFIX RUNS: posMeasures' render-read
+    // prefix, then staticMeasures', then posCounts'. The wire order partitions
+    // exactly at the phase boundary, which is what keeps compact() memcpy-shaped
+    // (three runs instead of two, still no lane map).
+    const gotM = [...rbv(poM), ...rbv(stM)];
+    const gotC = [...rbv(poC), ...rbv(stC)];
     const same = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
     if (!same(gotM, WIRE_MEASURES) || !same(gotC, WIRE_COUNTS)) {
         throw new Error('THE RECORD WIRE FORMAT MOVED.\n'
@@ -254,17 +273,32 @@ const recM = WIRE_MEASURES.length;
 const recC = WIRE_COUNTS.length;
 const mojo = [
     banner('#'), '',
-    `comptime MEASURE_STRIDE = ${m.stride}`,
-    ...m.lanes.map(l => `comptime M_${l.name} = ${l.index}`), '',
-    `comptime COUNT_STRIDE = ${c.stride}`,
-    ...c.lanes.map(l => `comptime C_${l.name} = ${l.index}`), '',
-    '# The RECORD format: the render-read prefix of each buffer. Emitting a record',
-    '# is a truncation, not a repack — which is why the scratch pool can be reused',
-    '# and the resident cost stops scaling with the corpus.',
+    '# ── The SLOT BUFFERS: four arrays, split by phase ──────────────────────────',
+    "# static  = decode's output (pure function of the byte); positional = the",
+    "# fold's output (sequential state). Decode NEVER touches positional — that is",
+    '# the split. LM/LC = layout measures/counts; SM = static measures; FLAGS is',
+    '# its own stride-1 array (flags[id], no lane constant needed).',
+    `comptime SM_STRIDE = ${stM.stride}`,
+    ...stM.lanes.map(l => `comptime SM_${l.name} = ${l.index}`),
+    `comptime FLAGS_STRIDE = ${stC.stride}`, '',
+    `comptime LM_STRIDE = ${poM.stride}`,
+    ...poM.lanes.map(l => `comptime LM_${l.name} = ${l.index}`), '',
+    `comptime LC_STRIDE = ${poC.stride}`,
+    ...poC.lanes.map(l => `comptime LC_${l.name} = ${l.index}`), '',
+    '# The RECORD format (the wire): unchanged by the split. A record is emitted as',
+    '# three prefix runs — posMeasures[0..3), staticMeasures[0..3), posCounts[0..2)',
+    '# — a concatenation of truncations, still no lane map.',
     `comptime RECORD_MEASURE_STRIDE = ${recM}`,
     `comptime RECORD_COUNT_STRIDE = ${recC}`,
     `comptime RECORD_BYTES = ${recM * 4 + recC * 4}`, '',
-    '# The scan partial (ScanElem) in a GPU buffer — same two-buffer rule.',
+    '# ── THE FIXTURE FORMAT — frozen on disk (format v2), independent of the',
+    "#    container. Fixtures carry the oracle's VALUES in this order; the engine's",
+    '#    buffers may be re-laid at will and the fixtures do not move.',
+    `comptime FIXTURE_MEASURE_STRIDE = ${FIXTURE_MEASURES.length}`,
+    ...FIXTURE_MEASURES.map((n, i) => `comptime FIX_M_${n} = ${i}`), '',
+    `comptime FIXTURE_COUNT_STRIDE = ${FIXTURE_COUNTS.length}`,
+    ...FIXTURE_COUNTS.map((n, i) => `comptime FIX_C_${n} = ${i}`), '',
+    '# The scan partial (ScanElem) in a GPU buffer — same kind rule.',
     `comptime PARTIAL_COUNT_STRIDE = ${sp.counts.stride}`,
     ...sp.counts.lanes.map(l => `comptime P_${l.name} = ${l.index}`), '',
     `comptime PARTIAL_MEASURE_STRIDE = ${sp.measures.stride}`,
@@ -278,13 +312,13 @@ const mojo = [
     ...ib.lanes.map(l => `comptime B_${l.name} = ${l.index}`),
     `comptime BOUNDS_COUNT_LANES = ${JSON.stringify(ib.lanes.filter(l => l.kind !== 'measure').map(l => l.index))}`.replace('[','(').replace(']',')'), '',
     '',
-    'def measure_lane_name(lane: Int) -> String:',
-    '    """Lane name for diagnostics — runtime lookup (comptime lists cannot materialize)."""',
-    ...m.lanes.map(l => `    if lane == ${l.index}:\n        return "M_${l.name}"`),
+    'def fixture_measure_lane_name(lane: Int) -> String:',
+    '    \'\'\'FIXTURE lane name for diagnostics (fixture order, not container order).\'\'\'',
+    ...FIXTURE_MEASURES.map((n, i) => `    if lane == ${i}:\n        return "${n}"`),
     '    return "M_?"', '',
     '',
-    'def count_lane_name(lane: Int) -> String:',
-    ...c.lanes.map(l => `    if lane == ${l.index}:\n        return "C_${l.name}"`),
+    'def fixture_count_lane_name(lane: Int) -> String:',
+    ...FIXTURE_COUNTS.map((n, i) => `    if lane == ${i}:\n        return "${n}"`),
     '    return "C_?"', '',
 ].join('\n');
 writeFileSync(join(root, 'engine/glyph_schema.mojo'), mojo);
@@ -321,7 +355,10 @@ writeFileSync(join(root, 'engine/glyph_schema.mojo'), mojo);
 // never see — it only compares outputs on inputs both accept. PAGE_LINE_HEIGHT was
 // exactly that, and was harmless only because it turned out to be dead.
 const fieldKinds = {};
-for (const buf of [m, c]) for (const l of buf.lanes) fieldKinds[l.name] = l.kind;
+// PAD is container filler, not a field of the pipeline — it has no kind to share.
+for (const buf of [poM, poC, stM, stC]) for (const l of buf.lanes) {
+    if (l.name !== 'PAD') fieldKinds[l.name] = l.kind;
+}
 for (const l of it.measures.lanes) fieldKinds[l.name] ??= l.kind;
 for (const l of ib.lanes) fieldKinds[l.name] ??= l.kind;
 const quoted = (a) => `[${a.map(x => `'${x}'`).join(', ')}]`;
@@ -338,8 +375,8 @@ const js = [
     ` *  cannot silently disagree with the field lists below. */`,
     `export const RECORD_FIELD_BYTES = 4;`,
     `export const RECORD_BYTES = ${(recM + recC)} * RECORD_FIELD_BYTES;`,
-    `export const RECORD_MEASURES = Object.freeze(${quoted(m.lanes.filter(l => l.read_by_vertex).sort((a,b)=>a.index-b.index).map(l => l.name))});`,
-    `export const RECORD_COUNTS = Object.freeze(${quoted(c.lanes.filter(l => l.read_by_vertex).sort((a,b)=>a.index-b.index).map(l => l.name))});`,
+    `export const RECORD_MEASURES = Object.freeze(${quoted(WIRE_MEASURES)});`,
+    `export const RECORD_COUNTS = Object.freeze(${quoted(WIRE_COUNTS)});`,
     '',
     '// ── KNOWN DEVIATIONS: declared, justified, and still violations ────────────',
     '/** Fields whose kind is EXACT but which ride a float carrier TODAY, with the',
@@ -348,7 +385,7 @@ const js = [
     ' *  currently satisfies, and the first assertion written against it fails for a',
     ' *  reason its author cannot act on. Deviations are debts, not exemptions. */',
     `export const KNOWN_DEVIATIONS = Object.freeze({`,
-    ...[...m.lanes, ...c.lanes].filter(l => l.misplaced).map(l => `    ${l.name}: ${JSON.stringify(l.misplaced)},`),
+    ...[...stM.lanes, ...stC.lanes, ...poM.lanes, ...poC.lanes].filter(l => l.misplaced).map(l => `    ${l.name}: ${JSON.stringify(l.misplaced)},`),
     `});`,
     '',
     '// ── SHARED SEMANTICS: kinds, not containers ────────────────────────────────',
@@ -369,7 +406,7 @@ const js = [
     ' *  bucket to stay correct. */',
     '',
     '/** Fields the vertex path reads. */',
-    `export const VERTEX_READ = Object.freeze(${quoted([...m.lanes, ...c.lanes].filter(l => l.read_by_vertex).map(l => l.name))});`,
+    `export const VERTEX_READ = Object.freeze(${quoted([...rbv(poM), ...rbv(stM), ...rbv(poC), ...rbv(stC)])});`,
     '',
     '/** The SET of per-item layout parameters both layers must be able to express.',
     ' *  Names and kinds only — where they sit in anyone\'s item table is not shared. */',
@@ -391,10 +428,18 @@ writeFileSync(join(root, 'packages/glyph3d-core/src/compute/glyphContract.js'), 
 // looked in engine/, which is where the one consumer was.
 const engineJs = [
     banner('//'), '',
-    `export const MEASURE_STRIDE = ${m.stride};`,
-    ...m.lanes.map(l => `export const M_${l.name} = ${l.index};`), '',
-    `export const COUNT_STRIDE = ${c.stride};`,
-    ...c.lanes.map(l => `export const C_${l.name} = ${l.index};`), '',
+    '// ── THE FIXTURE FORMAT (frozen, v2) — what gen.mjs writes to disk ─────────',
+    `export const FIXTURE_MEASURE_STRIDE = ${FIXTURE_MEASURES.length};`,
+    ...FIXTURE_MEASURES.map((n, i) => `export const FIX_M_${n} = ${i};`), '',
+    `export const FIXTURE_COUNT_STRIDE = ${FIXTURE_COUNTS.length};`,
+    ...FIXTURE_COUNTS.map((n, i) => `export const FIX_C_${n} = ${i};`), '',
+    '// ── This backend\'s WORKING container (the phase split) ────────────────────',
+    `export const SM_STRIDE = ${stM.stride};`,
+    ...stM.lanes.map(l => `export const SM_${l.name} = ${l.index};`), '',
+    `export const LM_STRIDE = ${poM.stride};`,
+    ...poM.lanes.map(l => `export const LM_${l.name} = ${l.index};`), '',
+    `export const LC_STRIDE = ${poC.stride};`,
+    ...poC.lanes.map(l => `export const LC_${l.name} = ${l.index};`), '',
     `export const RECORD_MEASURE_STRIDE = ${recM};`,
     `export const RECORD_COUNT_STRIDE = ${recC};`, '',
     `export const ITEM_STRIDE = ${it.measures.stride};`,
@@ -404,8 +449,8 @@ const engineJs = [
 ].join('\n');
 writeFileSync(join(root, 'engine/glyph_schema.mjs'), engineJs);
 
-console.log(`schema ok — measures ${m.stride} lanes, counts ${c.stride} lanes;`
-    + ` record = ${recM}+${recC} lanes, ${recM * 4 + recC * 4} B/glyph (vs ${(m.stride + c.stride) * 4} B/source byte)`);
+console.log(`schema ok — static ${stM.stride}f32+${stC.stride}u32, positional ${poM.stride}f32+${poC.stride}u32;`
+    + ` record = ${recM}+${recC} lanes, ${recM * 4 + recC * 4} B/glyph; fixture format ${FIXTURE_MEASURES.length}+${FIXTURE_COUNTS.length} (frozen)`);
 console.log('  wrote engine/glyph_schema.mojo');
 console.log('  wrote packages/glyph3d-core/src/compute/glyphContract.js (contract tier only)');
-console.log('  wrote engine/glyph_schema.mjs (this backend, for engine tooling)');
+console.log('  wrote engine/glyph_schema.mjs (this backend + fixture format, for engine tooling)');

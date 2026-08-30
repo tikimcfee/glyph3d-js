@@ -22,11 +22,10 @@
 from std.collections.span import Span
 from std.memory import memcpy
 from glyph_schema import (
-    MEASURE_STRIDE, COUNT_STRIDE,
+    SM_STRIDE, LM_STRIDE, LC_STRIDE,
     RECORD_MEASURE_STRIDE, RECORD_COUNT_STRIDE, RECORD_BYTES,
-    C_FLAGS,
 )
-from glyph_pipeline import Item, Trie, run_pipeline, F_LEADER
+from glyph_pipeline import Item, Trie, run_pipeline, F_LEADER, PipelineResult
 
 
 struct RecordSet(Copyable, Movable):
@@ -70,7 +69,7 @@ struct RecordSet(Copyable, Movable):
 
 
 def compact(
-    measures: List[Float32], counts: List[UInt32], byte_len: Int, leaders: Int,
+    r: PipelineResult, byte_len: Int, leaders: Int,
     mut out: RecordSet,
 ):
     """KERNEL — thread per byte in the GPU form: leaders emit a record, others don't.
@@ -86,17 +85,24 @@ def compact(
     var cp = out.counts.unsafe_ptr()
     var w = out.glyphs
     for id in range(byte_len):
-        var co = id * COUNT_STRIDE
-        if (Int(counts[co + C_FLAGS]) & F_LEADER) == 0:
+        if (Int(r.fl[id]) & F_LEADER) == 0:
             continue
-        var mo = id * MEASURE_STRIDE
-        # The truncation: a contiguous prefix of each buffer, no lane map.
+        # THE TRUNCATION, post-split: THREE prefix runs instead of two, still no
+        # lane map. The wire order [X Y Z | ADVANCE HEIGHT GLYPH_ID][ROW COL]
+        # partitions exactly at the phase boundary — posMeasures' render-read
+        # prefix, then staticMeasures', then posCounts'. gen-schema pins that
+        # order as a literal and fails the build if the schema stops deriving it.
         var wm = w * RECORD_MEASURE_STRIDE
-        for k in range(RECORD_MEASURE_STRIDE):
-            mp[unsafe_offset = wm + k] = measures[mo + k]
+        var lo = id * LM_STRIDE
+        var so = id * SM_STRIDE
+        for k in range(3):
+            mp[unsafe_offset = wm + k] = r.lm[lo + k]          # X, Y, Z
+        for k in range(3):
+            mp[unsafe_offset = wm + 3 + k] = r.sm[so + k]      # ADVANCE, HEIGHT, GLYPH_ID
         var wc = w * RECORD_COUNT_STRIDE
+        var co = id * LC_STRIDE
         for k in range(RECORD_COUNT_STRIDE):
-            cp[unsafe_offset = wc + k] = counts[co + k]
+            cp[unsafe_offset = wc + k] = r.lc[co + k]          # ROW, COL
         w += 1
     out.glyphs = w
 
@@ -143,7 +149,7 @@ def run_streaming[o: ImmOrigin](
 
         # The scratch: allocated per job, dropped at the end of this iteration.
         var r = run_pipeline(slice, trie, one)
-        compact(r.measures, r.counts, span, r.leaders, out)
+        compact(r, span, r.leaders, out)
         _ = chunk_bytes
     return out^
 

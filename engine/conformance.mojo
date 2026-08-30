@@ -11,7 +11,10 @@
 
 from std.sys import argv
 from std.memory import bitcast
-from glyph_schema import MEASURE_STRIDE, COUNT_STRIDE, measure_lane_name, count_lane_name
+from glyph_schema import (
+    FIXTURE_MEASURE_STRIDE, FIXTURE_COUNT_STRIDE,
+    fixture_measure_lane_name, fixture_count_lane_name,
+)
 from glyph_pipeline import run_pipeline
 from fixture_io import PipeFixture, load_pipe_fixture, nan_lanes
 
@@ -47,40 +50,42 @@ def check_case(path: String) raises -> Int:
 
     # NaN sweep BEFORE the bit comparison. The comparison below is bit equality,
     # so matching NaNs on both sides pass it; nothing else in this file can see that.
+    # The sweep covers BOTH float arrays — the split means a NaN can hide in
+    # either phase.
     var nan_first = -1
-    var nan_count = nan_lanes(got.measures, fx.byte_len, nan_first)
+    var nan_count = nan_lanes(got.lm, fx.byte_len * 5, nan_first)
+    nan_count += nan_lanes(got.sm, fx.byte_len * 4, nan_first)
     if nan_count > 0:
         bad += nan_count
-        print(
-            "  NaN in", nan_count, "measure lane(s); first at slot",
-            nan_first // MEASURE_STRIDE, measure_lane_name(nan_first % MEASURE_STRIDE),
-        )
+        print("  NaN in", nan_count, "measure lane(s); first flat index", nan_first)
 
     for slot in range(fx.byte_len):
-        # MEASURES: f64 values narrowed to the buffer's f32 and compared as bits.
-        for lane in range(MEASURE_STRIDE):
-            var idx = slot * MEASURE_STRIDE + lane
-            var g = UInt32(got.measures[idx].to_bits())
+        # MEASURES: f64 values narrowed to f32 and compared as bits — in FIXTURE
+        # order, mapped onto the phase arrays by m_at. The fixture format is
+        # frozen; the container is not, and the suites must never notice a
+        # container change (that is what m_at/c_at exist for).
+        for lane in range(FIXTURE_MEASURE_STRIDE):
+            var idx = slot * FIXTURE_MEASURE_STRIDE + lane
+            var g = UInt32(got.m_at(slot, lane).to_bits())
             var e = UInt32(Float32(fx.exp_measures[idx]).to_bits())
             if g != e:
                 bad += 1
                 if printed < MAX_PRINTED:
                     print(
-                        "  slot", slot, measure_lane_name(lane),
-                        "got", got.measures[idx], "expected", Float32(fx.exp_measures[idx]),
+                        "  slot", slot, fixture_measure_lane_name(lane),
+                        "got", got.m_at(slot, lane), "expected", Float32(fx.exp_measures[idx]),
                     )
                     printed += 1
         # COUNTS: exact integers. No carrier, no narrowing, no classification —
-        # this comparison has no way to be subtly wrong, which is the point of
-        # putting them in their own buffer.
-        for lane in range(COUNT_STRIDE):
-            var idx = slot * COUNT_STRIDE + lane
-            if got.counts[idx] != fx.exp_counts[idx]:
+        # this comparison has no way to be subtly wrong.
+        for lane in range(FIXTURE_COUNT_STRIDE):
+            var idx = slot * FIXTURE_COUNT_STRIDE + lane
+            if got.c_at(slot, lane) != fx.exp_counts[idx]:
                 bad += 1
                 if printed < MAX_PRINTED:
                     print(
-                        "  slot", slot, count_lane_name(lane),
-                        "got", got.counts[idx], "expected", fx.exp_counts[idx],
+                        "  slot", slot, fixture_count_lane_name(lane),
+                        "got", got.c_at(slot, lane), "expected", fx.exp_counts[idx],
                     )
                     printed += 1
 

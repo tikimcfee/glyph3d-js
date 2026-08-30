@@ -20,8 +20,8 @@
 from std.sys import argv
 from std.memory import bitcast
 from glyph_schema import (
-    MEASURE_STRIDE, COUNT_STRIDE, C_FLAGS, measure_lane_name,
-    M_X, M_Y, M_Z, M_BASE_X, M_LINE_ADV,
+    FIXTURE_MEASURE_STRIDE, FIXTURE_COUNT_STRIDE, fixture_measure_lane_name,
+    FIX_M_X, FIX_M_Y, FIX_M_Z, FIX_M_BASE_X, FIX_M_LINE_ADV, FIX_C_FLAGS,
 )
 from glyph_pipeline import Item, F_LEADER, trunc_nonneg
 from glyph_scan import run_scan_pipeline
@@ -78,22 +78,24 @@ def check_case(path: String, chunk_size: Int, group_size: Int) raises -> Int:
                 printed += 1
 
     for slot in range(fx.byte_len):
-        var o = slot * MEASURE_STRIDE
-        var is_leader = (Int(fx.exp_counts[slot * COUNT_STRIDE + C_FLAGS]) & F_LEADER) != 0
-        for lane in range(MEASURE_STRIDE):
+        var o = slot * FIXTURE_MEASURE_STRIDE
+        var is_leader = (
+            Int(fx.exp_counts[slot * FIXTURE_COUNT_STRIDE + FIX_C_FLAGS]) & F_LEADER
+        ) != 0
+        for lane in range(FIXTURE_MEASURE_STRIDE):
             var idx = o + lane
-            var g32 = got.measures[idx]
+            var g32 = got.m_at(slot, lane)
             var e32 = Float32(fx.exp_measures[idx])
             var bits_equal = UInt32(g32.to_bits()) == UInt32(e32.to_bits())
             var lane_ok: Bool
             if not is_leader:
                 lane_ok = bits_equal  # non-leader lanes never differ
-            elif lane == M_X or lane == M_Y or lane == M_Z or lane == M_BASE_X:
+            elif lane == FIX_M_X or lane == FIX_M_Y or lane == FIX_M_Z or lane == FIX_M_BASE_X:
                 if folds[slot] > 0:
                     lane_ok = bits_equal  # fold>0 float lanes must be bit-exact
                 else:
                     lane_ok = rel_close(Float64(e32), Float64(g32))
-            elif lane == M_LINE_ADV:
+            elif lane == FIX_M_LINE_ADV:
                 lane_ok = rel_close(Float64(e32), Float64(g32))
             else:
                 lane_ok = bits_equal  # the EXACT lanes

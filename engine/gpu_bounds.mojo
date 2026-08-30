@@ -28,8 +28,9 @@ from std.atomic import Atomic
 from std.memory import bitcast
 from max.gpu.host import DeviceContext
 from glyph_schema import (
-    MEASURE_STRIDE, COUNT_STRIDE, M_X, M_Y, M_Z, M_ADVANCE, M_HEIGHT,
-    C_ROW, C_FLAGS, BOUNDS_STRIDE,
+    SM_STRIDE, SM_ADVANCE, SM_HEIGHT,
+    LM_STRIDE, LM_X, LM_Y, LM_Z,
+    LC_STRIDE, LC_ROW, BOUNDS_STRIDE,
     B_MIN_X, B_MIN_Y, B_MIN_Z, B_MAX_X, B_MAX_Y, B_MAX_Z,
     B_TOTAL_ROWS, B_MAX_ROW_EXTENT,
 )
@@ -59,8 +60,10 @@ def key_to_float(k: UInt32) -> Float32:
 
 
 def bounds_kernel(
-    measures: MutPointer[Float32, MutAnyOrigin],
-    counts: MutPointer[UInt32, MutAnyOrigin],
+    sm: MutPointer[Float32, MutAnyOrigin],
+    fl: MutPointer[UInt32, MutAnyOrigin],
+    lm: MutPointer[Float32, MutAnyOrigin],
+    lc: MutPointer[UInt32, MutAnyOrigin],
     item_of: MutPointer[UInt32, MutAnyOrigin],
     box_keys: MutPointer[UInt32, MutAnyOrigin],
     row_counts: MutPointer[UInt32, MutAnyOrigin],
@@ -71,18 +74,18 @@ def bounds_kernel(
     var id = global_idx.x
     if id >= Int(n_bytes):
         return
-    var co = id * COUNT_STRIDE
-    if (Int(counts[unsafe_offset = co + C_FLAGS]) & F_LEADER) == 0:
+    if (Int(fl[unsafe_offset=id]) & F_LEADER) == 0:
         return
     var it = Int(item_of[unsafe_offset=id])
-    var mo = id * MEASURE_STRIDE
+    var mo = id * LM_STRIDE
+    var so = id * SM_STRIDE
     var bb = it * BOUNDS_STRIDE
 
-    var x = measures[unsafe_offset = mo + M_X]
-    var y = measures[unsafe_offset = mo + M_Y]
-    var z = measures[unsafe_offset = mo + M_Z]
-    var w = measures[unsafe_offset = mo + M_ADVANCE]
-    var h = measures[unsafe_offset = mo + M_HEIGHT]
+    var x = lm[unsafe_offset = mo + LM_X]
+    var y = lm[unsafe_offset = mo + LM_Y]
+    var z = lm[unsafe_offset = mo + LM_Z]
+    var w = sm[unsafe_offset = so + SM_ADVANCE]
+    var h = sm[unsafe_offset = so + SM_HEIGHT]
 
     # min lanes: ordered-key atomicMin. max lanes: ordered-key atomicMax.
     _ = Atomic.min(box_keys + (bb + B_MIN_X), ordered_key(x))
@@ -93,7 +96,7 @@ def bounds_kernel(
     _ = Atomic.max(box_keys + (bb + B_MAX_Z), ordered_key(z))
 
     # THE COUNT: native u32, no ordered key, no wall.
-    var row = counts[unsafe_offset = co + C_ROW]
+    var row = lc[unsafe_offset = id * LC_STRIDE + LC_ROW]
     _ = Atomic.max(row_counts + (it), row + 1)
 
 
@@ -123,16 +126,22 @@ def check_case(path: String, ctx: DeviceContext) raises -> Int:
         var i = item_for_byte(fx.items, id)
         item_of[id] = UInt32(i) if i >= 0 else UInt32(0)
 
-    var h_m = ctx.enqueue_create_host_buffer[DType.float32](n * MEASURE_STRIDE)
-    var h_c = ctx.enqueue_create_host_buffer[DType.uint32](n * COUNT_STRIDE)
+    var h_sm = ctx.enqueue_create_host_buffer[DType.float32](n * SM_STRIDE)
+    var h_fl = ctx.enqueue_create_host_buffer[DType.uint32](n)
+    var h_lm = ctx.enqueue_create_host_buffer[DType.float32](n * LM_STRIDE)
+    var h_lc = ctx.enqueue_create_host_buffer[DType.uint32](n * LC_STRIDE)
     var h_i = ctx.enqueue_create_host_buffer[DType.uint32](n)
     var h_b = ctx.enqueue_create_host_buffer[DType.uint32](ni * BOUNDS_STRIDE)
     var h_r = ctx.enqueue_create_host_buffer[DType.uint32](ni)
     ctx.synchronize()
-    for i in range(n * MEASURE_STRIDE):
-        h_m[i] = whole.measures[i]
-    for i in range(n * COUNT_STRIDE):
-        h_c[i] = whole.counts[i]
+    for i in range(n * SM_STRIDE):
+        h_sm[i] = whole.sm[i]
+    for i in range(n):
+        h_fl[i] = whole.fl[i]
+    for i in range(n * LM_STRIDE):
+        h_lm[i] = whole.lm[i]
+    for i in range(n * LC_STRIDE):
+        h_lc[i] = whole.lc[i]
     for i in range(n):
         h_i[i] = item_of[i]
     # min lanes arm at u32 max; max lanes and the count arm at 0 — which for the
@@ -149,20 +158,25 @@ def check_case(path: String, ctx: DeviceContext) raises -> Int:
         h_b[b + B_MAX_ROW_EXTENT] = 0
         h_r[i] = 0
 
-    var d_m = ctx.enqueue_create_buffer[DType.float32](n * MEASURE_STRIDE)
-    var d_c = ctx.enqueue_create_buffer[DType.uint32](n * COUNT_STRIDE)
+    var d_sm = ctx.enqueue_create_buffer[DType.float32](n * SM_STRIDE)
+    var d_fl = ctx.enqueue_create_buffer[DType.uint32](n)
+    var d_lm = ctx.enqueue_create_buffer[DType.float32](n * LM_STRIDE)
+    var d_lc = ctx.enqueue_create_buffer[DType.uint32](n * LC_STRIDE)
     var d_i = ctx.enqueue_create_buffer[DType.uint32](n)
     var d_b = ctx.enqueue_create_buffer[DType.uint32](ni * BOUNDS_STRIDE)
     var d_r = ctx.enqueue_create_buffer[DType.uint32](ni)
-    ctx.enqueue_copy(dst_buf=d_m, src_buf=h_m)
-    ctx.enqueue_copy(dst_buf=d_c, src_buf=h_c)
+    ctx.enqueue_copy(dst_buf=d_sm, src_buf=h_sm)
+    ctx.enqueue_copy(dst_buf=d_fl, src_buf=h_fl)
+    ctx.enqueue_copy(dst_buf=d_lm, src_buf=h_lm)
+    ctx.enqueue_copy(dst_buf=d_lc, src_buf=h_lc)
     ctx.enqueue_copy(dst_buf=d_i, src_buf=h_i)
     ctx.enqueue_copy(dst_buf=d_b, src_buf=h_b)
     ctx.enqueue_copy(dst_buf=d_r, src_buf=h_r)
 
     comptime BLOCK = 256
     ctx.enqueue_function[bounds_kernel](
-        d_m.unsafe_ptr(), d_c.unsafe_ptr(), d_i.unsafe_ptr(),
+        d_sm.unsafe_ptr(), d_fl.unsafe_ptr(), d_lm.unsafe_ptr(), d_lc.unsafe_ptr(),
+        d_i.unsafe_ptr(),
         d_b.unsafe_ptr(), d_r.unsafe_ptr(), Int32(n),
         grid_dim=(n + BLOCK - 1) // BLOCK, block_dim=BLOCK,
     )

@@ -5,7 +5,9 @@
 # runners can never drift on the format. Format spec: engine/fixtures/gen.mjs.
 
 from std.memory import bitcast
-from glyph_schema import MEASURE_STRIDE, COUNT_STRIDE
+# FIXTURE strides, not container strides: the on-disk format is frozen at 8+4
+# per byte regardless of how the engine lays its working buffers.
+from glyph_schema import FIXTURE_MEASURE_STRIDE, FIXTURE_COUNT_STRIDE
 from glyph_pipeline import Trie, Item
 
 comptime PIPE_MAGIC = 0x46443347
@@ -136,9 +138,9 @@ def load_pipe_fixture(path: String) raises -> PipeFixture:
         fx.exp_misses.append(r.u32())
     for _ in range(fx.byte_len):
         fx.exp_ord.append(r.u32())
-    for _ in range(fx.byte_len * MEASURE_STRIDE):
+    for _ in range(fx.byte_len * FIXTURE_MEASURE_STRIDE):
         fx.exp_measures.append(r.f64())
-    for _ in range(fx.byte_len * COUNT_STRIDE):
+    for _ in range(fx.byte_len * FIXTURE_COUNT_STRIDE):
         fx.exp_counts.append(r.u32())
     for _ in range(fx.item_count * 8):
         fx.exp_item_bounds.append(r.u64())
@@ -147,7 +149,7 @@ def load_pipe_fixture(path: String) raises -> PipeFixture:
     return fx^
 
 
-def nan_lanes(measures: List[Float32], byte_len: Int, mut first: Int) -> Int:
+def nan_lanes(measures: List[Float32], total_lanes: Int, mut first: Int) -> Int:
     """Count measure lanes holding NaN. `first` receives the first offending index.
 
     WHY THIS EXISTS, and it is not hypothetical. Every suite compares measures BY
@@ -167,7 +169,7 @@ def nan_lanes(measures: List[Float32], byte_len: Int, mut first: Int) -> Int:
     the same as a comparison that is right."""
     var bad = 0
     first = -1
-    for i in range(byte_len * MEASURE_STRIDE):
+    for i in range(total_lanes):
         var b = UInt32(measures[i].to_bits())
         # NaN: exponent all ones AND a nonzero mantissa. Infinity is NOT NaN and is
         # caught by the bit comparison like any other value, so do not fold it in.
