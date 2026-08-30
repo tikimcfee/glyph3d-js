@@ -86,45 +86,17 @@ console.log('the item arrays realize every semantic parameter');
     // this file would have had to trust. The container is the claim now, so the contract
     // can check it directly: a measure in the exact array (or a count in the float array)
     // is a conformance failure, not a convention someone broke.
-    //
-    // KIND_DISPUTED — found by this tooth the first time it could be asked, 2026-08-30.
-    // These five are integer page geometry: rows and columns per page, how many pages
-    // wide, the scroll row offset, the wrap column count. The paginate kernel reads all
-    // of them through int() and says why in its own comment — keying a page decision off
-    // a float put 119 glyphs on the wrong page, because f32 addition is not associative
-    // and a boundary row wobbles by a ULP. They are counts.
-    //
-    // The contract declares them 'measure'. It does so because the OTHER layer's item
-    // table is a single f32 array literally named "measures", so every lane in it was
-    // declared a measure — the container defined the kind, which is precisely the
-    // inversion the tier split exists to prevent. Same family as GLYPH_ID and
-    // I_BYTE_COUNT: exact-in-practice on a float carrier, unbitten only because page
-    // counts are small.
-    //
-    // This layer stores them exact and always has; the split is what made the
-    // disagreement ASKABLE, not what caused it. Fixing KIND changes the shared schema and
-    // puts the native backend's f32 item table in violation of it, so it is a
-    // cross-layer decision, not a unilateral edit. Declared here until that happens.
-    //
-    // ARMED, not an escape hatch: each entry asserts the contract still says 'measure'.
-    // The day the schema is corrected, the entry goes stale and this gate FAILS until it
-    // is deleted — a dispute cannot outlive its resolution.
-    const KIND_DISPUTED = Object.freeze({
-        PAGE_ROWS: 'count — rows per page; paginate divides screenRow by it',
-        PAGE_COLS: 'count — columns per page, and the fold unit when wrap is off',
-        PAGES_WIDE: 'count — pages per band; paginate takes yPage mod it',
-        SCROLL_ROWS: 'count — a row offset subtracted from an exact row index',
-        WRAP_WIDTH: 'count — the fold unit in COLUMNS; read through int() everywhere',
-    });
-    const disputed = Object.keys(KIND_DISPUTED);
-    const settled = disputed.filter((f) => KIND[f] !== 'measure');
-    ok(settled.length === 0,
-       `no KIND dispute outlives the contract change that resolves it (settled: [${settled}] `
-       + `— delete these entries and let the carrier tooth cover them)`);
-
+    // NOTE ON THE PARTITION: compare against EXACT_FIELDS / MEASURE_FIELDS, never against
+    // a literal 'exact'. KIND's values are the FINE kinds — measure / count / identity /
+    // bitfield — and there is no 'exact' among them; EXACT_FIELDS is the coarse two-bucket
+    // partition the contract publishes for exactly this use. The first version of this
+    // tooth tested `KIND[f] !== 'exact'`, which flags every count in the exact array, and
+    // the bug was INVISIBLE while a dispute list happened to exclude those same five
+    // fields. A temporary exclusion masking a permanent defect is its own small lesson:
+    // when the exclusion goes, re-read what it was covering rather than just deleting it.
     const miscarried = [
-        ...Object.keys(M).filter((f) => KIND[f] && KIND[f] !== 'measure').map((f) => `${f}(measure array, kind ${KIND[f]})`),
-        ...Object.keys(X).filter((f) => KIND[f] && KIND[f] !== 'exact' && !disputed.includes(f)).map((f) => `${f}(exact array, kind ${KIND[f]})`),
+        ...Object.keys(M).filter((f) => KIND[f] && !MEASURE_FIELDS.includes(f)).map((f) => `${f}(measure array, kind ${KIND[f]})`),
+        ...Object.keys(X).filter((f) => KIND[f] && !EXACT_FIELDS.includes(f)).map((f) => `${f}(exact array, kind ${KIND[f]})`),
     ];
     ok(miscarried.length === 0,
        `every item parameter rides the carrier its KIND requires (miscarried: [${miscarried}])`);
