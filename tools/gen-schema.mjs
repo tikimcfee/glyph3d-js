@@ -193,16 +193,18 @@ const head = (cmt) => [
     `${cmt}`,
 ];
 // The engine's file describes the ENGINE'S CONTAINER, so it says so. The contract
-// file must NOT carry this text: "two buffers" is a fact about this backend, not
-// about the pipeline, and putting it atop a shared file is the whole error being
-// corrected here — a description of one layer presented as everyone's contract.
+// file must NOT carry this text: "four phase arrays" is a fact about this backend,
+// not about the pipeline, and putting it atop a shared file is the whole error
+// being corrected here — a description of one layer presented as everyone's
+// contract.
 const banner = (cmt) => [
     ...head(cmt),
-    `${cmt} THIS LAYER'S REALIZATION. Two buffers, and where a value lives IS what`,
-    `${cmt} kind it is:`,
-    `${cmt}   measures (f32) — where things are in space; rounding is load-bearing.`,
-    `${cmt}   counts   (u32) — what the data is; exact to 2^32, never rounded.`,
-    `${cmt} There are no bitcasts. A count cannot land in the float buffer by accident.`,
+    `${cmt} THIS LAYER'S REALIZATION. Four phase arrays — who WRITES a lane decides`,
+    `${cmt} where it lives:`,
+    `${cmt}   static (sm f32 + fl u32)      decode's output; a pure function of the byte`,
+    `${cmt}   positional (lm f32 + lc u32)  the fold's output; sequential state`,
+    `${cmt} Float carriers hold measures, u32 carriers hold counts — no bitcasts, and`,
+    `${cmt} a count cannot land in a float array by accident.`,
     `${cmt}`,
     `${cmt} Strides and lane indices below are THIS BACKEND'S and are not prescribed`,
     `${cmt} to anyone. What is shared lives in glyphContract.js: the record format and`,
@@ -214,8 +216,8 @@ const contractBanner = (cmt) => [
     ...head(cmt),
     `${cmt} THE SHARED TIER, and nothing else. Names and kinds — no strides, no lane`,
     `${cmt} indices, nothing about how any layer stores anything. The renderer runs one`,
-    `${cmt} buffer; the native backend runs two; the live item table here is stride 15`,
-    `${cmt} against the backend's 16. All three are conformant, because container is a`,
+    `${cmt} buffer; the native backend runs four phase arrays; the live item table is`,
+    `${cmt} stride 15 against the backend's 15. All are conformant: container is a`,
     `${cmt} per-layer realization and KIND is the declared fact.`,
     `${cmt}`,
     `${cmt} What every layer owes: assert that its own mapping respects KIND below, and`,
@@ -420,7 +422,7 @@ const js = [
 writeFileSync(join(root, 'packages/glyph3d-core/src/compute/glyphContract.js'), js);
 
 // ── The ENGINE'S container, in JS, for the ENGINE'S tooling ─────────────────
-// engine/fixtures/gen.mjs needs MEASURE_STRIDE/COUNT_STRIDE to lay out the fixture
+// engine/fixtures/gen.mjs needs the FIXTURE strides to lay out the fixture
 // buffers. It used to import them from the renderer's package — a description of
 // this backend's container, living in another layer's tree, imported across the
 // boundary the wrong way round. That single import is also why "nothing consumes

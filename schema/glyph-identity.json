@@ -15,13 +15,13 @@
     "  measure                       a real quantity. f32 is correct and its",
     "                                rounding is load-bearing.",
     "",
-    "Layers may realize kinds differently and stay conformant — the engine uses two",
+    "Layers may realize kinds differently and stay conformant — the engine uses four phase arrays (see buffers.$comment), the render side one homogeneous atomic buffer where kind is per-lane. It used two",
     "buffers (where a value lives IS its kind, so it cannot be got wrong), while the",
     "TSL side uses one homogeneous atomic buffer where kind is per-lane. Neither is",
     "privileged. What each layer owes is that its generator ASSERT its own mapping",
     "respects the kinds, so both realizations are checkable rather than trusted.",
     "",
-    "The engine's two-buffer strides are DERIVED from kind below and asserted",
+    "The engine's per-array strides are DERIVED from kind below and asserted",
     "against it, so its container cannot disagree with the declaration."
   ],
   "buffers": {
@@ -72,7 +72,7 @@
           "name": "GLYPH_ID",
           "index": 2,
           "read_by_vertex": true,
-          "misplaced": "This is an IDENTITY living in the measures buffer. It is here only because it is copied verbatim from the trie's f32 blocks, so it cannot move until the TRIE FORMAT moves. It is the single exception in the system and it is deliberately visible: one identity, in the wrong array, naming its own fix.",
+          "misplaced": "This is an IDENTITY living in the staticMeasures f32 array. It is here only because it is copied verbatim from the trie's f32 blocks, so it cannot move until the TRIE FORMAT moves. It is the single exception in the system and it is deliberately visible: one identity, in the wrong array, naming its own fix.",
           "kind": "identity"
         },
         {

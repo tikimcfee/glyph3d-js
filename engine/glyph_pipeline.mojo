@@ -36,9 +36,9 @@ from glyph_schema import (
     FIXTURE_MEASURE_STRIDE, FIXTURE_COUNT_STRIDE,
 )
 
-# ── Lane layout: GENERATED, two buffers ─────────────────────────────────────
-# Where a value lives IS what kind it is. measures are f32 (space, rounding is
-# load-bearing); counts are u32 (data, exact to 2^32). No bitcasts anywhere.
+# ── Lane layout: GENERATED, four phase arrays ───────────────────────────────
+# Who WRITES a lane decides where it lives (see struct Slots). Float carriers
+# hold measures, u32 carriers hold counts. No bitcasts anywhere.
 
 comptime BOUNDS_GRAIN = 65536
 comptime F_LEADER = 1
@@ -618,7 +618,7 @@ def resolve_x[oo: Origin[mut=True], ko: Origin[mut=True]](
     (resolveX in the oracle). With a fold unit, x re-sums the glyph's `col % fold`
     same-row predecessors FORWARD from the segment start — the same f32 order the
     serial segAdv accumulates, so fold>0 x is bit-identical across oracle, scan,
-    and hardware. Foldless, x IS the line prefix (the f32 M_LINE_ADV lane — one
+    and hardware. Foldless, x IS the line prefix (the f32 LM_LINE_ADV lane — one
     rounding wider than the serial fold's f64 prefix, which is why foldless float
     lanes compare at eps, never bit-exact, between the two forms)."""
     if (slots.flags(id) & F_LEADER) == 0:
@@ -1048,15 +1048,10 @@ def run_pipeline[o: ImmOrigin](
         total_grains = 1
     var gboxes = List[Float64](unsafe_uninit_length=total_grains * 8)
     var gp = gboxes.unsafe_ptr()
-    # GRAIN, not item boundaries. One task per item was already better than the old
-    # workers-per-item form, but it is SIZE-BLIND: linux has 9,584 files under 1 KB
-    # and one of 22.9 MB, so the big one becomes the critical path while three cores
-    # idle. Emitting ceil(bytes / BOUNDS_GRAIN) tasks per item costs nothing — the
-    # runtime queue balances over-decomposition for free (512 tasks measure the same
-    # as 4) — and measured 2.11x on a heavy-tailed batch.
-    #
-    # Safe because min/max is exact under ANY regrouping, which is the same property
-    # that allowed sharding in the first place; tasks CAS into the item's box.
+    # Each grain writes its OWN disjoint scratch slot and the merge below is
+    # SERIAL — no CAS, no shared write. min/max being exact under regrouping says
+    # nothing about a concurrent read-modify-write on a shared location, which is
+    # the race an earlier form of this pass actually had.
     var tg4 = TaskGroup()
     var gi = 0
     for i in range(item_count):

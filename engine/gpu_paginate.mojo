@@ -31,7 +31,7 @@ from glyph_schema import (
     I_BAND_STRIDE_Y, I_DEPTH_PER_BAND, I_DEPTH_PER_COL, I_PAGE_STRIDE_X, I_HAS_PAGE,
 )
 from glyph_pipeline import (
-    run_pipeline, F_LEADER, trunc_nonneg, is_nan, derive_stride, Item, Trie,
+    run_pipeline, F_LEADER, trunc_nonneg, derive_stride, Item, Trie,
     item_for_byte, page_active,
 )
 from fixture_io import load_pipe_fixture
@@ -53,9 +53,12 @@ def item_search(
     _buildItemSearch line for line: same (lo + hi + 1) >> 1, same branch, same
     bounded 32-step loop with an early break (a GPU wants a static trip count).
 
-    NO OWNERSHIP CHECK, deliberately — neither the CPU port nor the TSL has one.
-    `lo` is returned even for a byte in a gap between items; F_LEADER is the only
-    gate, and the fold never sets it for a byte no item claims.
+    NO OWNERSHIP CHECK IN THE SEARCH, deliberately — item_for_byte has none
+    either. `lo` is returned even for a byte in a gap between items. Ownership is
+    the APPLY stage's job: its gap guard (see _apply_shard, mirroring the TSL's)
+    keeps gap bytes out of item state; here F_LEADER gates, and decode sets that
+    for gap bytes too — which is fine, because a wrong-but-unused item read for a
+    byte the comparison ignores changes nothing.
 
     Why this replaced a host-computed table: the old form staged one UInt32 PER
     SOURCE BYTE (4 B/byte, an N-element buffer) to answer a question that is a

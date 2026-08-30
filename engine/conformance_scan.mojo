@@ -8,9 +8,9 @@
 #
 #   - non-leader slots: every lane bit-equal
 #   - EXACT lanes (id, advance, height, row, col, flags, ord): bit-equal
-#   - fold>0 measure lanes (M_X, M_Y, M_Z, M_BASE_X): bit-equal — resolveX's forward
+#   - fold>0 measure lanes (X, Y, Z, BASE_X — fixture lanes): bit-equal — resolveX's forward
 #     f32 re-sum IS the serial segAdv
-#   - foldless measure lanes + M_LINE_ADV: ≤ 1e-4 RELATIVE (serial f64 prefix vs the
+#   - foldless measure lanes + LINE_ADV: ≤ 1e-4 RELATIVE (serial f64 prefix vs the
 #     scan's f32 grouping — differs by construction; integers never do)
 #   - bounds: totalRows exact; float lanes ≤ 1e-4 relative (inf compares by bits)
 #   - leaders / misses / ordToByte: exact

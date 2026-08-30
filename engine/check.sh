@@ -13,7 +13,7 @@
 # an FMA rounds once. The port is full of `a*b + c` shapes:
 #     Float32(-Float64(row) * lh + oy)
 #     Float32(-Float64(wrap_row) * z_step + oz)
-#     paginate's four-term M_Z chain
+#     paginate's four-term Z chain
 #
 # Today the f64 intermediates truncate to f32 and the difference vanishes, so the
 # suites pass either way. That is LUCK, not a guarantee — a future f64 lane, a

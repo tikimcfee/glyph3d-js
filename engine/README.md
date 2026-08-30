@@ -19,7 +19,7 @@ the serial form of the monoid scan (`glyphPipelineScan.js`), so a GPU backend re
 the driver loops, not the kernels. This is M0 of the milestone ladder; M1 (the
 headless frame: bytes → native curve cache → compute raster → PNG) builds on it.
 
-## Two buffers, and where a value lives IS what kind it is
+## Four phase arrays — who writes a lane decides where it lives
 
 `schema/glyph-identity.json` is the single source of truth; `bun tools/gen-schema.mjs`
 generates `engine/glyph_schema.mojo` and the JS twin. Hand-editing either is pointless —
@@ -29,34 +29,42 @@ the next run overwrites it.
 `identity` / `bitfield` is exact and must never ride a float carrier — and a float
 *ordered key* is a float carrier wearing a u32 costume, which is how `totalRows` hid.
 A `measure` is a real quantity whose rounding is load-bearing. Layers may realize the
-same kinds differently and stay conformant: the engine uses two buffers (where a value
-lives IS its kind, so it cannot be got wrong), while the TSL side uses one homogeneous
-atomic buffer where kind is per-lane. Neither is privileged; what each owes is that its
-generator ASSERT its own mapping respects the kinds. The engine's strides are derived
-from kind and asserted against it, so its container cannot disagree by construction.
+same kinds differently and stay conformant: the engine splits by PHASE — the writer
+decides the array — while the TSL side uses one homogeneous atomic buffer where kind
+is per-lane. Neither is privileged; what each owes is that its generator ASSERT its
+own mapping respects the kinds. The engine's strides are derived from kind and
+asserted against it, so its container cannot disagree by construction.
 
 ```
-measures  f32  MEASURE_STRIDE 8   X Y Z ADVANCE HEIGHT GLYPH_ID | BASE_X LINE_ADV
-counts    u32  COUNT_STRIDE   4   ROW COL FLAGS | ORD
+static      sm  f32  SM_STRIDE 4   ADVANCE HEIGHT GLYPH_ID PAD    decode's output —
+            fl  u32  stride    1   FLAGS                          one aligned 16 B store
+positional  lm  f32  LM_STRIDE 5   X Y Z | BASE_X LINE_ADV        the fold's output —
+            lc  u32  LC_STRIDE 3   ROW COL | ORD                  decode never touches it
 ```
 
-There are no bitcasts, no `fbits`/`fval`, and no "which lanes are floats" table. A
-count cannot land in the measures buffer by accident because it is a different array —
-the classification is structural, not advisory. Render-read lanes come first in both
-buffers and fold scratch is at the tail, so the record format is a truncation.
+(`struct Slots` in glyph_pipeline.mojo realizes this in exactly one place; every
+kernel goes through its accessors, so the next re-layout edits one struct.) There are
+no bitcasts and no "which lanes are floats" table — a count cannot land in a float
+array by accident because it is a different array. Render-read lanes come first in
+every array and fold scratch is at the tail, so the record is a truncation. The split
+is a measured 1.41x on the serial pipeline (decode used to dirty 48 B per source byte
+and the fold dirtied them again; now 20 + 32 — engine/bench/split_bench.mojo).
 
 ### The record format — a truncation, not a repack
 
 ```
-slots    48 B per SOURCE BYTE, corpus lifetime   (measures 8 + counts 4)
+slots    52 B per SOURCE BYTE, corpus lifetime   (sm 16 + fl 4 + lm 20 + lc 12)
 record   32 B per RENDERED GLYPH                 (measures 6 + counts 2)
 ```
 
 `RECORD_MEASURE_STRIDE` / `RECORD_COUNT_STRIDE` are **derived** from which lanes the
-vertex path reads — never hand-written. Because render-read lanes sort first in both
-buffers, emitting a record copies a contiguous prefix; the generator refuses a schema
-where a render-read lane sorts after an unread one, so the truncation cannot quietly
-become a gather.
+vertex path reads — never hand-written, and the WIRE ORDER is additionally pinned as
+a literal in the generator, so a schema restructure cannot move the record bytes as a
+side effect. Render-read lanes sort first in every phase array, so emitting a record
+is a concatenation of three contiguous prefix runs (posMeasures, staticMeasures,
+posCounts — the wire order partitions exactly at the phase boundary); the generator
+refuses a schema where a render-read lane sorts after an unread one, so the
+truncation cannot quietly become a gather.
 
 The tail is fold scratch: `BASE_X`, `LINE_ADV`, `ORD` are intermediates the layout
 pass needs while computing and nothing needs afterward. Holding them at corpus
@@ -97,7 +105,7 @@ Two limits, both real and both stated rather than papered over:
   number. In practice anything re-laying a range has already laid the document once,
   so the row is in hand.
 
-`GLYPH_ID` is the one identity sitting in the measures buffer. It is there only because
+`GLYPH_ID` is the one identity sitting in an f32 array (staticMeasures). It is there only because
 it is copied verbatim from the trie's f32 blocks, so it cannot move until the trie
 format does. That exception is deliberately visible rather than hidden in a comment.
 
@@ -107,7 +115,7 @@ Both are mutation-tested.
 
 ## On the GPU
 
-Two dispatches run on real device threads (Apple M2, Metal), both bit-exact
+Five GPU suites run real device dispatches (Apple M2, Metal), counts bit-exact
 against the CPU port with no tolerance:
 
 ```sh
@@ -392,23 +400,25 @@ mojo run -I engine engine/ordinal_invariant.mojo engine/fixtures/*.pipe.bin
 
 The three suites above are *differential* — they compare this port against the JS
 oracle. That catches any divergence between them and is blind to a fault they
-**share**. The f32 ordinal wall is exactly that kind of fault: `ord` is exact on
-both sides (a JS number, a Mojo `Int`) and is quantized only on the store into an
-f32 lane, so past 2^24 both sides round identically and the differ reports PASS
-while both are wrong together.
+**share**. The f32 ordinal wall WAS exactly that kind of fault: `ord` was exact on
+both sides (a JS number, a Mojo `Int`) and quantized only on the store into an f32
+lane, so past 2^24 both sides rounded identically and the differ reported PASS while
+both were wrong together. The lane is a native u32 today; this suite is what keeps
+the wall down (its mutation deliberately reinstates the f32 carrier).
 
 `ordinal_invariant.mojo` asserts a property of a single run instead, with no
-oracle involved. The same fact is recorded twice — `counts[C_ORD]` and
+oracle involved. The same fact is recorded twice — the `ORD` count lane and
 `ord_to_byte` — so the round-trip must be the identity for every leader:
 
 ```
-ord_to_byte[byte_start + Int(counts[co + C_ORD])] == id
+ord_to_byte[byte_start + ord] == id
 ```
 
 It is mutation-tested against its own boundary, because a check that cannot fail
-proves nothing: one item of 2^24-2 bytes passes, one of 2^24+2 aliases exactly once
-(byte 16777217 collides onto 16777216). The runner raises in **both** directions —
-a false positive below the wall, or a silent pass above it.
+proves nothing: with the f32 carrier deliberately reinstated, one item of 2^24-2
+bytes passes and one of 2^24+2 aliases exactly once (byte 16777217 collides onto
+16777216). The runner raises in **both** directions — a false positive below the
+wall, or a checker gone blind above it.
 
 The bound is **per item, not per arena**: `ord` resets for each item and
 `ord_to_byte` is indexed from `byte_start`, so a large arena of ordinary files is
@@ -457,12 +467,12 @@ Bun workspace) and **Mojo ≥ 1.0**.
 pip install modular          # provides `mojo` on PATH
 mojo --version               # expect: Mojo 1.0.0 or later
 
-# 2. Verify the whole engine in one pass (all three suites must be green)
+# 2. Verify the whole engine in one pass — ALL FOURTEEN suites, with the fp flag
+#    the contract requires (--fp-mode contract=off is NOT optional; see the
+#    script's header for why). This is the only entry point that runs everything.
 bun engine/fixtures/gen.mjs
 bun engine/fixtures/gen-bake.mjs
-mojo run -I engine engine/conformance.mojo      engine/fixtures/*.pipe.bin
-mojo run -I engine engine/conformance_scan.mojo engine/fixtures/*.pipe.bin
-mojo run -I engine engine/conformance_bake.mojo engine/fixtures/*.bake.bin
+engine/check.sh
 
 # 3. Benchmark (optional; prints MB/s vs the checksum-matched JS side)
 bun engine/bench/gen-bench.mjs

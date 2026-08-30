@@ -2,22 +2,24 @@
 #
 # The conformance suites compare the port against the JS oracle bit-for-bit. That
 # catches any divergence between them — but it is blind to a fault they SHARE.
-# The f32 ordinal wall is exactly such a fault: `ord` is computed exactly on both
-# sides (a JS number; a Mojo Int) and quantized only on the store into an f32
-# lane. Past 2^24 both sides round identically, so the differ reports PASS while
-# both are wrong together. A correlated error is invisible to a differential test.
+# The f32 ordinal wall WAS exactly such a fault: `ord` was computed exactly on
+# both sides (a JS number; a Mojo Int) and quantized only on the store into an
+# f32 lane. Past 2^24 both sides rounded identically, so the differ reported
+# PASS while both were wrong together. The lanes are u32 today and the wall is
+# gone — this suite is what proves it STAYS gone (its mutation deliberately puts
+# the f32 carrier back). A correlated error is invisible to a differential test.
 #
 # This checks an INVARIANT instead, referencing no oracle at all. The same fact —
 # "which glyph is the n-th leader of this item" — is recorded twice in different
 # types:
 #
-#   counts[co + C_ORD]                     u32 count  (exact to 2^32 since the split)
+#   lc[id * LC_STRIDE + LC_ORD]            u32 count  (exact to 2^32)
 #   ord_to_byte[item.byte_start + ord]     u32 array  (exact to 2^32)
 #
 # So the u32 array is an independent, exact witness for the lossy lane, and
 # round-tripping one through the other must be the identity:
 #
-#   ord_to_byte[byte_start + Int(counts[co + C_ORD])] == id    for every leader
+#   ord_to_byte[byte_start + ord] == id    for every leader
 #
 # When two leaders alias onto one ordinal, the later store wins and the earlier
 # glyph's round-trip lands on the wrong byte. The check fails loudly, with no

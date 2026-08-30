@@ -1,11 +1,23 @@
 # conformance.mojo — replay oracle fixtures through the native pipeline, diff bits.
 #
 # Loads fixtures written by engine/fixtures/gen.mjs (the JS oracle's inputs and
-# answers), runs run_pipeline, and compares BIT-FOR-BIT: f32 slot lanes as u32
-# patterns, f64 bounds as u64 patterns, integer outputs exactly. No tolerances —
-# a tolerance would hide exactly the grouping-dependent float drift this rig
-# exists to catch. (The scan form compares TIERED instead — conformance_scan.mojo —
-# because foldless float lanes differ from the serial fold by construction.)
+# answers) and runs run_pipeline. The assertion is SCOPE B (the contract's tiers,
+# applied to the corpus):
+#
+#   bit-for-bit   the WIRE — fixture measure lanes 0-5 (X Y Z ADVANCE HEIGHT
+#                 GLYPH_ID) as u32 patterns, counts ROW/COL/FLAGS exactly, f64
+#                 bounds as u64 patterns, leaders and misses exactly. No
+#                 tolerances — a tolerance would hide exactly the
+#                 grouping-dependent float drift this suite exists to catch.
+#   semantic      the ord witness (ordToByte[byteStart + ord] == id, ords a
+#                 permutation per item) in place of pinning ORD's value and
+#                 ordToByte's contents.
+#   unasserted    BASE_X, LINE_ADV — fold scratch; container choices a
+#                 specialized backend may re-lay or elide. Pinned where they are
+#                 load-bearing instead: conformance_scan reads them through X.
+#
+# (The scan form compares TIERED instead — conformance_scan.mojo — because
+# foldless float lanes differ from the serial fold by construction.)
 #
 # Run: mojo run -I engine engine/conformance.mojo engine/fixtures/*.pipe.bin
 

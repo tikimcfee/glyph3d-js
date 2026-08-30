@@ -9,7 +9,7 @@
 #
 # THE TWO LAYOUTS, same work, same trie, same corpus:
 #
-#   AoS (today)   measures f32 x8  [X Y Z ADVANCE HEIGHT GLYPH_ID BASE_X LINE_ADV]
+#   AoS (pre-split)   measures f32 x8  [X Y Z ADVANCE HEIGHT GLYPH_ID BASE_X LINE_ADV]
 #                 counts   u32 x4  [ROW COL FLAGS ORD]
 #                 decode dirties all 48 B; the fold dirties all 48 B again.
 #
@@ -31,10 +31,27 @@ from std.time import perf_counter_ns
 from std.memory import bitcast
 from std.runtime.asyncrt import TaskGroup, parallelism_level
 from glyph_pipeline import Trie, Item, F_LEADER, F_MISSING, F_NEWLINE
-from glyph_schema import (
-    MEASURE_STRIDE, M_X, M_Y, M_Z, M_ADVANCE, M_HEIGHT, M_GLYPH_ID, M_BASE_X,
-    M_LINE_ADV, COUNT_STRIDE, C_ROW, C_COL, C_FLAGS, C_ORD,
-)
+
+# THE PRE-SPLIT CONTAINER, pinned locally. This bench is the measured argument
+# FOR the split (1.37x), so its AoS variant must model the container that no
+# longer exists — the schema deleted these constants when the split landed, and
+# importing them broke this file silently (nothing runs it in check.sh). A bench
+# that is cited as evidence must stay runnable, so the old layout lives here as
+# what it now is: a historical artifact under test.
+comptime MEASURE_STRIDE = 8
+comptime M_X = 0
+comptime M_Y = 1
+comptime M_Z = 2
+comptime M_ADVANCE = 3
+comptime M_HEIGHT = 4
+comptime M_GLYPH_ID = 5
+comptime M_BASE_X = 6
+comptime M_LINE_ADV = 7
+comptime COUNT_STRIDE = 4
+comptime C_ROW = 0
+comptime C_COL = 1
+comptime C_FLAGS = 2
+comptime C_ORD = 3
 
 comptime REPS = 5
 comptime BLOCK_SHIFT = 8
@@ -69,7 +86,7 @@ def seq_len(b: Int) -> Int:
     return 0
 
 
-# ── AoS decode: today's shape, all 12 lanes ─────────────────────────────────
+# ── AoS decode: the PRE-SPLIT shape, all 12 lanes ───────────────────────────
 async def _dec_aos[bo: Origin[mut=True], so: Origin[mut=True], xo: Origin[mut=True]](
     bp: Pointer[UInt8, bo], m: Pointer[Float32, so],
     c: Pointer[UInt32, xo], trie: Trie, start: Int, stop: Int, n: Int,

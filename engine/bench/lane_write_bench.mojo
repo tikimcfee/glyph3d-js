@@ -4,7 +4,7 @@
 # called it "at the memory roofline". That number is real but it does not say
 # WHICH of two very different things costs it:
 #
-#   (a) STORE COUNT  — 12 lanes written per byte, 8 of which the fold overwrites.
+#   (a) STORE COUNT  — 12 lanes written per byte (pre-split), 8 fold-overwritten.
 #   (b) LINE TRAFFIC — MEASURE_STRIDE=8 f32 (32B) + COUNT_STRIDE=4 u32 (16B) means
 #                      every slot dirties 48B of cache line, and write-allocate
 #                      writes back the whole line whether you touched 4 lanes or 12.
@@ -30,7 +30,7 @@ def shard_lo(stop: Int, workers: Int, w: Int) -> Int:
     return a if a < stop else stop
 
 
-# ── A: today. 8 f32 + 4 u32 per slot, all 12 lanes written. ─────────────────
+# ── A: the pre-split shape. 8 f32 + 4 u32 per slot, all 12 lanes written. ───
 async def _aos_full[so: Origin[mut=True], xo: Origin[mut=True]](
     m: Pointer[Float32, so], c: Pointer[UInt32, xo], start: Int, stop: Int,
 ):

@@ -79,7 +79,7 @@ def compact(
     rebuild is a serial pass). On the GPU this is a prefix-sum over the leader
     flag plus a scatter, which the scan machinery already computes."""
     # `leaders` comes from the caller's PipelineResult — it is already computed,
-    # and recomputing it here costs a strided pass over the whole counts buffer.
+    # and recomputing it here costs a pass over the whole flags array.
     out.reserve(out.glyphs + leaders)
     var mp = out.measures.unsafe_ptr()
     var cp = out.counts.unsafe_ptr()
@@ -162,7 +162,8 @@ def run_streaming[o: ImmOrigin](
 # bake's checkpoints are for: prefix_at is "nearest checkpoint + a <= K tail fold",
 # already bit-exact across the bake suite.
 #
-# The monoid carries four of the five accumulators (base_row, col, seg_adv, ord).
+# The monoid carries the two pure-count accumulators (base_row, ord); col,
+# seg_adv and line_adv cannot ride it (see seed_at's docstring for why).
 # It deliberately does NOT carry line_adv, and that omission is correct: line_adv
 # is an f64 chain, and f64 addition is not associative, so putting it in a monoid
 # that gets regrouped in parallel would drift. (This is the same reason segAdv is
@@ -172,10 +173,9 @@ def run_streaming[o: ImmOrigin](
 # per-LINE accumulator, not a per-item one. So recovering it exactly costs a re-sum
 # over the current partial line, bounded by line length rather than file length.
 
-from glyph_bake import BakeRecord, bake_file, prefix_at, lanes_from_prefix, rows_for_line
+from glyph_bake import BakeRecord, prefix_at, lanes_from_prefix
 from glyph_pipeline import (
-    LayoutSeed, layout_item, sequence_length, decode_codepoint_at,
-    trie_lookup_base, LANE_ADVANCE, NEWLINE, trunc_nonneg,
+    LayoutSeed, sequence_length, decode_codepoint_at, NEWLINE,
 )
 
 

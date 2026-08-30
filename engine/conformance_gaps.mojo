@@ -2,9 +2,12 @@
 #
 # Every checked-in fixture has items tiling [0, byte_len) exactly, so no fixture
 # exercises a gap. That made a silent hazard: the driver used to memset the slot
-# buffers, so gap bytes read as zeros by accident rather than by design. Dropping
-# the memset (decode now writes every lane) only stays correct because decode
-# covers ALL bytes — and nothing in the suite proved that until this file.
+# buffers, so gap bytes read as zeros by accident rather than by design. Since
+# the phase split, coverage is a THREE-WAY contract this file polices: decode
+# writes the STATIC arrays for all bytes; the fold zeroes non-leaders' positional
+# lanes while walking its item; the driver's gap sweep zeroes bytes no item
+# claims (and _apply_shard does the scan form's share). Nothing else proves the
+# three writers tile [0, byte_len) with no seam.
 #
 # The failure this guards against is not a wrong number, it is UNINITIALIZED
 # MEMORY: an adversarial review of a fused prototype that dropped both the memset

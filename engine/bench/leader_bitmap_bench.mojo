@@ -1,6 +1,6 @@
 # leader_bitmap_bench.mojo — is F_LEADER worth 32 bits per source byte?
 #
-# Today leader-ness rides the C_FLAGS lane: 4 bytes per SOURCE byte. But it is a
+# Pre-split, leader-ness rode the C_FLAGS lane (now the stride-1 fl array): 4 bytes per SOURCE byte. But it is a
 # ONE-BIT predicate — a UTF-8 leader is any byte with (b & 0xC0) != 0x80. This bench
 # asks whether a 1-bit-per-byte bitmap wins on BOTH sides of its life:
 #

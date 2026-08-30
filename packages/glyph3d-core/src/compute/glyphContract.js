@@ -3,8 +3,8 @@
 //
 // THE SHARED TIER, and nothing else. Names and kinds — no strides, no lane
 // indices, nothing about how any layer stores anything. The renderer runs one
-// buffer; the native backend runs two; the live item table here is stride 15
-// against the backend's 16. All three are conformant, because container is a
+// buffer; the native backend runs four phase arrays; the live item table is
+// stride 15 against the backend's 15. All are conformant: container is a
 // per-layer realization and KIND is the declared fact.
 //
 // What every layer owes: assert that its own mapping respects KIND below, and
@@ -30,7 +30,7 @@ export const RECORD_COUNTS = Object.freeze(['ROW', 'COL']);
  *  currently satisfies, and the first assertion written against it fails for a
  *  reason its author cannot act on. Deviations are debts, not exemptions. */
 export const KNOWN_DEVIATIONS = Object.freeze({
-    GLYPH_ID: "This is an IDENTITY living in the measures buffer. It is here only because it is copied verbatim from the trie's f32 blocks, so it cannot move until the TRIE FORMAT moves. It is the single exception in the system and it is deliberately visible: one identity, in the wrong array, naming its own fix.",
+    GLYPH_ID: "This is an IDENTITY living in the staticMeasures f32 array. It is here only because it is copied verbatim from the trie's f32 blocks, so it cannot move until the TRIE FORMAT moves. It is the single exception in the system and it is deliberately visible: one identity, in the wrong array, naming its own fix.",
 });
 
 // ── SHARED SEMANTICS: kinds, not containers ────────────────────────────────

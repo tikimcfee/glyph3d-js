@@ -35,7 +35,6 @@ from glyph_pipeline import (
     decode_codepoint_at,
     sequence_length,
     item_for_byte,
-    resolve_x,
     paginate,
     page_active,
     derive_stride,

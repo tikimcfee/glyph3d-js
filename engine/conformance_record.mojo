@@ -101,12 +101,13 @@ def main() raises:
             print("FAIL", path, "—", bad, "mismatches")
         total_bad += bad
 
-    var slot_bytes = bytes_total * (FIXTURE_MEASURE_STRIDE + FIXTURE_COUNT_STRIDE) * 4
+    # the LIVE container: sm 16 + fl 4 + lm 20 + lc 12 = 52 B per source byte
+    var slot_bytes = bytes_total * 52
     var rec_bytes = glyphs_total * RECORD_BYTES
     print("")
     print("resident cost over the fixture corpus:")
     print("  slots  ", slot_bytes, "B  (", bytes_total, "source bytes x",
-          (FIXTURE_MEASURE_STRIDE + FIXTURE_COUNT_STRIDE) * 4, "B )")
+          52, "B )")
     print("  records", rec_bytes, "B  (", glyphs_total, "glyphs x", RECORD_BYTES, "B )")
     if rec_bytes > 0:
         print("  ratio  ", Float64(slot_bytes) / Float64(rec_bytes), "x smaller resident")

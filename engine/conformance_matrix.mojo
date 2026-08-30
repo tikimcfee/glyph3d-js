@@ -104,13 +104,9 @@ def check(name: String, bytes: List[UInt8], trie: Trie, items: List[Item]) -> In
     #      order only if every shard's own list is byte-ordered and the shards tile
     #      ascending. V2's 1.44x rests entirely on that.
     var want_misses = 0
-    var prev: Int = -1
-    var order_ok = True
     for id in range(n):
         var f = Int(r.fl[id])
         if (f & F_LEADER) != 0 and (f & F_MISSING) != 0:
-            if want_misses < len(r.misses):
-                pass
             want_misses += 1
     if len(r.misses) != want_misses:
         print("  ", name, "miss count", len(r.misses), "expected", want_misses)
@@ -127,8 +123,6 @@ def check(name: String, bytes: List[UInt8], trie: Trie, items: List[Item]) -> In
                         printed += 1
                     bad += 1
             seen += 1
-    _ = prev
-    _ = order_ok
 
     # ── 2. THE ORD WITNESS, straight from the schema: ordToByte[byteStart + ord]
     #      must be the byte itself. Per ITEM, not per arena — ord resets each item,
