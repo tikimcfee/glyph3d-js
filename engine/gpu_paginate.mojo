@@ -32,6 +32,7 @@ from glyph_schema import (
 )
 from glyph_pipeline import (
     run_pipeline, F_LEADER, trunc_nonneg, is_nan, derive_stride, Item, Trie,
+    item_for_byte, page_active,
 )
 from fixture_io import load_pipe_fixture
 
@@ -180,6 +181,48 @@ def check_items(
         return 0
     var whole = run_pipeline(bytes, trie, items)
 
+    # THE DEVICE INPUT MUST NOT ALREADY CONTAIN THE ANSWER.
+    #
+    # This suite used to upload `whole.measures` — the POST-paginate CPU result —
+    # run the kernel on it, and compare against `whole.measures`. paginate is
+    # idempotent (X comes from BASE_X, never from X), so that looked fine and was
+    # VACUOUS: replacing the kernel body with a bare `return` passed every
+    # fixture. Found by mutation, not by reading.
+    #
+    # It also explains why `return 0` in item_search passed. Every byte then reads
+    # item 0's params; item 0 of multi-item.pipe.bin is unpaged; every thread
+    # early-returns; nothing is written; the vacuity absorbs it. The suite could
+    # see "wrote the WRONG values" and never "wrote NOTHING".
+    #
+    # Re-running the CPU with pages disabled does NOT give the fold state, which
+    # was the first attempt: page_cols is the FOLD UNIT when wrap is off, so
+    # zeroing it changes col/row/segAdv and every position with them.
+    #
+    # So poison exactly the lanes the kernel is OBLIGED to write — X/Y/Z of every
+    # leader byte owned by a page-active item — and leave every other byte's
+    # values alone. A kernel that writes nothing leaves the sentinel where a
+    # position belongs and the comparison fails. Ownership here comes from the CPU
+    # reference (item_for_byte), which is input data rather than kernel output, so
+    # this is not circular; the device search is separately checked against CPU
+    # results by check_multi_item.
+    var poisoned = List[Float32](unsafe_uninit_length = n * MEASURE_STRIDE)
+    for i in range(n * MEASURE_STRIDE):
+        poisoned[i] = whole.measures[i]
+    var poison_n = 0
+    for id in range(n):
+        if (Int(whole.counts[id * COUNT_STRIDE + C_FLAGS]) & F_LEADER) == 0:
+            continue
+        var owner = item_for_byte(items, id)
+        if owner < 0 or owner >= len(items):
+            continue
+        if not page_active(items[owner]):
+            continue
+        var mo = id * MEASURE_STRIDE
+        poisoned[mo + M_X] = 1.0e30
+        poisoned[mo + M_Y] = 1.0e30
+        poisoned[mo + M_Z] = 1.0e30
+        poison_n += 1
+
     # Item table, narrowed f64 -> f32 at the device boundary (see the header).
     var ni = len(items) if len(items) > 0 else 1
     var tbl = List[Float32](unsafe_uninit_length=ni * ITEM_STRIDE)
@@ -218,7 +261,7 @@ def check_items(
     var h_i = ctx.enqueue_create_host_buffer[DType.uint32](len(starts))
     ctx.synchronize()
     for i in range(n * MEASURE_STRIDE):
-        h_m[i] = whole.measures[i]
+        h_m[i] = poisoned[i]            # the answer is NOT in the input
     for i in range(n * COUNT_STRIDE):
         h_c[i] = whole.counts[i]
     for i in range(len(tbl)):
