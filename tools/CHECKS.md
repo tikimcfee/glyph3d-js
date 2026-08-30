@@ -23,6 +23,22 @@ numbers imply the coverage nobody wrote.
   auto-layout glitches on mode switch that resolve after further UI interaction, i.e.
   shell/panel state rather than layout math. Not reproduced in a harness, so it is
   recorded as a gap rather than a bug.
+- **The far-tier deletion's FRAGMENT COST was never measured** (1d2359e). The three-tier
+  LOD was removed for failing its visual purpose — it never stopped the moiré. That is a
+  different claim from "it cost nothing", and the commit argues the first while retiring
+  the second in silence. Raised by render-bender, who read the surviving path instead of
+  the commit message. The accounting, recovered from the deleted diff:
+  the loop skip fired ONLY past `lodHi` 0.60 (~1.7px/glyph on the best-resolved axis), and
+  the far sample was HOISTED out of the branch, so every fragment at every distance paid
+  one texture sample + an `fwidth` for a tier it usually never took. Net: the deletion is
+  a win above ~1.7px and an unmeasured **regression below it**, where a 256-iteration loop
+  with 2 unconditional `textureLoad`s per curve now runs for text that used to skip it —
+  on a transparent material (no early-Z) with `frustumCulled: false`.
+  **If it matters, the fix is a footprint early-out to the curve-count density proxy —
+  three lines — not the tier.** The loop-skip and the far texture were always separable;
+  the impostor fallback skipped the loop with no slab, no atlas and no compute kernels.
+  render-bender is running 15452e3 vs 1d2359e as a differential; the camera path has to
+  reach `fwMin > 0.6` or it measures nothing about this.
 - **The headless layout suites cannot see the layout KERNEL at all.** Measured 2026-08-30,
   not inferred: a real defect in `GlyphLayoutKernel`'s item mapping that puts 96.56% of
   slots beyond eps on the GPU leaves `layout`, `layout-fuzz`, `layout-mirror` and
