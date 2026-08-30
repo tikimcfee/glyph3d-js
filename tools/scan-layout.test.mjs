@@ -152,10 +152,14 @@ const PAGE_COLS = { pageCols: 40, depthPerColumn: 4 };
     ['empty-heavy', '\n\n\na\n\n\nb\n\n'],
     ['emoji-boundary', ('ab\u{1F600}'.repeat(40) + '\n').repeat(6)],
   ];
+  // Every lane states its lineHeight. These first three used to omit it, which silently
+  // selected the oracle's per-glyph height fallback — so they were exercising an illegal
+  // item shape while testing wrap and zStep, and would have masked a real Y regression
+  // behind a staggered-baseline layout nobody wanted. lineHeight is required now.
   const lanes = [
-    { wrapWidth: 0 },
-    { wrapWidth: 3 },
-    { wrapWidth: 24, zStep: 0.21 },
+    { wrapWidth: 0, lineHeight: CELL_H },
+    { wrapWidth: 3, lineHeight: CELL_H },
+    { wrapWidth: 24, zStep: 0.21, lineHeight: CELL_H },
     { wrapWidth: 200, page: PAGE_NEWS, lineHeight: CELL_H },
     { wrapWidth: 200, page: PAGE_Z, lineHeight: CELL_H, scrollRows: 7 },
     { wrapWidth: 0, page: PAGE_COLS, lineHeight: CELL_H },

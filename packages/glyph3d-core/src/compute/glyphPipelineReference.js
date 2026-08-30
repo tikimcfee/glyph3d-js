@@ -329,7 +329,17 @@ export function layoutItem(slots, itemStart, byteCount, params = {}, ordToByte =
         slots[o + S_ORD] = ord;
         slots[o + S_BASE_X] = fbits(x + ox);
         slots[o + S_X] = fbits(x + ox);
-        slots[o + S_Y] = fbits(-row * (params.lineHeight ?? fval(slots[o + S_HEIGHT])) + oy);
+        // lineHeight is the ITEM's, never the glyph's. The `?? slots[S_HEIGHT]` fallback
+        // that stood here staggered baselines WITHIN a row whenever an item omitted it:
+        // a taller glyph (CJK, emoji) landed at -row * ITS height while its neighbours
+        // sat at -row * theirs. Measured: row 1 with CELL_H 1.4 beside 1.61 gave
+        // Y {-1.4, -1.61}. Row 0 hid it, because -0 * anything is 0.
+        //
+        // The GPU kernel never had the branch (glyphPipelineKernels: -row * lineHeight
+        // from the item table, unconditionally), so the ORACLE was the outlier — and the
+        // Mojo port reproduced the oracle faithfully, which meant the two checked layers
+        // agreed with each other and disagreed with the renderer. See the commit.
+        slots[o + S_Y] = fbits(-row * params.lineHeight + oy);
         slots[o + S_Z] = fbits(-wrapRow * zStep + oz);
         slots[o + S_FLAGS] = flags | F_RENDERED;
         if (ordToByte) ordToByte[itemStart + ord] = id;
@@ -408,7 +418,8 @@ export function resolveX(slots, id, p, ordToByte, scalars) {
     const wrapRow = wrap > 0 ? Math.floor(col / wrap) : 0;
     slots[o + S_BASE_X] = fbits(x + (p.origin?.x || 0));
     slots[o + S_X] = fbits(x + (p.origin?.x || 0));
-    slots[o + S_Y] = fbits(-row * (p.lineHeight ?? fval(slots[o + S_HEIGHT])) + (p.origin?.y || 0));
+    // Same rule as layoutItem: the ITEM's line height, never the glyph's own.
+    slots[o + S_Y] = fbits(-row * p.lineHeight + (p.origin?.y || 0));
     slots[o + S_Z] = fbits(-wrapRow * (p.zStep || 0) + (p.origin?.z || 0));
 
     if (scalars) {
