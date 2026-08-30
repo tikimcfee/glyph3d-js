@@ -55,5 +55,11 @@ esac
 for s in "${list[@]}"; do run "$s" "${PIPE[@]}"; done
 [[ "${1:-all}" == "gpu" ]] || run conformance_gaps "$GAPS"
 [[ "${1:-all}" == "gpu" ]] || run conformance_matrix "$GAPS"
+# The cross-form runner: OUR OWN SOURCE TREE as a live corpus — no fixtures, the
+# serial and scan forms adjudicate each other. Files span the size-mod classes so
+# the derived wrap/page/scroll params all occur; a directory outside the repo
+# (the linux clone, say) is the same command with a different find.
+[[ "${1:-all}" == "gpu" ]] || run conformance_real "$GAPS" \
+    $(find packages/glyph3d-core/src app/client app/commands -name '*.js' -o -name '*.jsx' 2>/dev/null | sort | head -60)
 [[ "${1:-all}" == "gpu" ]] || run conformance_bake "${BAKE[@]}"
 echo "all suites green (fp contraction disabled)"
