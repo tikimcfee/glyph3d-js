@@ -1298,8 +1298,8 @@ class CodeGrid extends FramedGlyphField {
             // keeps rendering the OLD item's glyphs through the whole flush — the
             // attach happens at the SWAP below, once the new slots are laid. (The
             // empty-frame flash on edit/crossing was the synchronous attach pointing
-            // the view at a not-yet-laid range.) If the arena refuses (the
-            // the arena ceiling — live bytes past KERNEL_MAX_BYTES even after free-list reuse),
+            // the view at a not-yet-laid range.) If the arena refuses (live bytes past
+            // the arena ceiling, ARENA_MAX_BYTES, even after free-list reuse),
             // the grid keeps its previous window untouched — nothing was re-pointed.
             // An INITIAL load still fails loud (nothing previous to keep).
             const prevPipeline = this._pipeline;

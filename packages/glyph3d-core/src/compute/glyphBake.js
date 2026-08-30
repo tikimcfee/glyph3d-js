@@ -105,7 +105,7 @@ export function collectCensus(bytes, census) {
  * reaches the exact exclusive prefix of byte `to`. Shared by the bake pass, the
  * random-access query below, and the seeding proof in tools/bake.test.mjs.
  *
- * @param {Uint8Array} bytes @param {{blockIndex:Uint32Array,blocks:Float32Array}} trie
+ * @param {Uint8Array} bytes @param {{blockIndex:Uint32Array,blocks:Uint32Array}} trie
  * @param {number} from @param {number} to @param {Object} acc - mutated and returned
  */
 export function foldBytes(bytes, trie, from, to, acc) {
@@ -142,7 +142,7 @@ export function prefixAt(bytes, trie, record, byteIndex) {
  * value here would silently bake per-glyph heights the runtime never uses.
  *
  * @param {Uint8Array} bytes
- * @param {{blockIndex:Uint32Array, blocks:Float32Array}} trie
+ * @param {{blockIndex:Uint32Array, blocks:Uint32Array}} trie
  * @param {{lineHeight:number, checkpointInterval?:number}} opts
  * @returns {{
  *   byteLength:number, leaders:number, newlines:number, totalRows:number,

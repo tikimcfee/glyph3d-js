@@ -177,7 +177,7 @@ function foldRange(slots, items, wraps, from, to, acc) {
  * dials the tests sweep (invariance across them is the associativity proof in situ).
  *
  * @param {Uint8Array} bytes
- * @param {{blockIndex:Uint32Array, blocks:Float32Array}} trie
+ * @param {{blockIndex:Uint32Array, blocks:Uint32Array}} trie
  * @param {Object} [opts] - as runPipeline
  * @param {{chunkSize?:number, groupSize?:number}} [tuning]
  */

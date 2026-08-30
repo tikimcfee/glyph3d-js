@@ -64,7 +64,7 @@ export const TRIE_MEASURE_LANES = Object.freeze(new Set([LANE_ADVANCE, LANE_HEIG
 // pair, but it IMPORTS this file (trieLookup), so importing back would be circular — and
 // this module is deliberately dependency-free and worker-safe. The duplication is two
 // three-line primitives that reinterpret bits; unlike a lane-KIND table they cannot drift
-// semantically. tools/glyph-pipeline.test.mjs asserts the two agree anyway.
+// semantically. NOTHING asserts the two agree — no test imports both pairs.
 const _f = new Float32Array(1);
 const _u = new Uint32Array(_f.buffer);
 /** f32 value -> its u32 bit pattern. @param {number} f @returns {number} */

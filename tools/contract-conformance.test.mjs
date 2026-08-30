@@ -4,9 +4,9 @@
 //
 // glyphContract.js declares names and kinds — no strides, no indices, nothing about how
 // any layer stores anything. The renderer runs one slot buffer at SLOT_STRIDE 12 and an
-// item table at ITEM_STRIDE 15; the native backend runs two buffers and a 16-lane item
-// table. Both are conformant, because container is a per-layer realization and KIND is
-// the declared fact.
+// item table at ITEM_STRIDE 15; the native backend runs four phase arrays and its own
+// 15-lane item table in a DIFFERENT lane order. Both are conformant, because container
+// is a per-layer realization and KIND is the declared fact.
 //
 // What each layer owes is ONE assertion: that its own mapping respects the contract. This
 // file is the renderer's half. Without it the contract is a file nobody reads — which is

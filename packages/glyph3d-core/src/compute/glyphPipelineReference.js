@@ -140,8 +140,11 @@ export const F_LEADER = 1;        // this byte begins a codepoint
  * COUNT lanes are stored natively and are exact across the whole u32 range — which
  * is the point of the migration.
  *
- * S_GLYPH_ID is a FLOAT lane on purpose: it is copied straight from the trie's f32
- * blocks, so it stays a float carrier until the trie format itself moves.
+ * S_GLYPH_ID is a COUNT lane: it is copied straight from the trie's blocks, and the
+ * trie moved to u32 (identities native, measures bitcast), so the id is exact end to
+ * end. It was the pipeline's LAST float-carried identity — a float lane only because
+ * decode copied it verbatim from an f32 trie block. The fix is pinned by
+ * `tools/contract-conformance.test.mjs`, so a return to FLOAT_LANES fails there.
  */
 export const FLOAT_LANES = Object.freeze(new Set([
     S_ADVANCE, S_HEIGHT, S_X, S_Y, S_Z, S_BASE_X, S_LINE_ADV,
@@ -257,7 +260,7 @@ const at = (bytes, i) => (i >= 0 && i < bytes.length ? bytes[i] : 0);
  *
  * @param {Uint8Array} bytes
  * @param {Uint32Array} slots
- * @param {{blockIndex:Uint32Array, blocks:Float32Array}} trie
+ * @param {{blockIndex:Uint32Array, blocks:Uint32Array}} trie
  * @param {number} id - byte index (the thread id)
  * @param {number[]} [misses] - codepoints with no atlas entry, appended for the CPU to encode
  */
@@ -577,9 +580,9 @@ export function boundsReduce(slots, id, box) {
  * scrollRows wrap into a single item.
  *
  * @param {Uint8Array} bytes
- * @param {{blockIndex:Uint32Array, blocks:Float32Array}} trie
+ * @param {{blockIndex:Uint32Array, blocks:Uint32Array}} trie
  * @param {Object} [opts]
- * @returns {{slots:Float32Array, bounds:?Object, itemBounds:Array, misses:number[],
+ * @returns {{slots:Uint32Array, bounds:?Object, itemBounds:Array, misses:number[],
  *   leaders:number, ordToByte:Uint32Array}}
  *   bounds is the batch-wide union; itemBounds[i] is item i's box + fold scalars —
  *   the mirror of the GPU's per-item bounds table.

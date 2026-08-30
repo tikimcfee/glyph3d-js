@@ -103,9 +103,11 @@ const {
 export const MAX_FOLD_RESUM = 4096;
 
 /**
- * The arena's byte ceiling, and the ONE place it is stated — GlyphPipelineArena
- * imports this rather than keeping its own copy. Two copies of a limit is how a
- * ceiling once got raised on one side only, wedging the arena in the gap.
+ * The INDEX wall: how far a slot index reaches, not what the arena can hold. The
+ * arena's ceiling is ARENA_MAX_BYTES below — GlyphPipelineArena imports THAT rather
+ * than keeping its own copy. Two copies of a limit is how a ceiling once got raised
+ * on one side only, wedging the arena in the gap; conflating these two was the same
+ * mistake in the other direction.
  *
  * This WAS 2^24 (16MB), and it was a correctness wall: count lanes rode f32 slots,
  * exact only to 2^24, so a larger arena aliased ordinals — two glyphs collapsing
@@ -264,7 +266,7 @@ export default class GlyphPipelineKernels {
      * @param {import('three/webgpu').WebGPURenderer} renderer
      * @param {Object} opts
      * @param {number} opts.maxBytes - slot capacity (one slot per byte, summed over ALL items)
-     * @param {{blockIndex:Uint32Array, blocks:Float32Array}} opts.trie
+     * @param {{blockIndex:Uint32Array, blocks:Uint32Array}} opts.trie
      * @param {number} [opts.maxMisses]
      * @param {number} [opts.maxItems] - item-table capacity (files per run)
      */

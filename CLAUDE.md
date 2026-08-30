@@ -120,9 +120,10 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
 
 ## Key concepts
 
-- **Single instanced draw call.** Text becomes a `Float32Array` of per-glyph instance
-  attributes (built single-pass, optionally in a Web Worker via `WorkerBridge`) and
-  renders as one `InstancedBufferGeometry`.
+- **Single instanced draw call.** Text renders as one `InstancedBufferGeometry`. The
+  byte pipeline writes per-glyph positions and metrics into one GPU-resident slot
+  buffer (a `Uint32Array`: exact lanes native, float lanes bitcast); the non-byte path
+  builds instance attributes single-pass, optionally in a Web Worker via `WorkerBridge`.
 - **CodeGrid** is a source file as an `Object3D` — cursor + in-place edit ops, highlight
   ranges, a windowing/framing layout, and a caret overlay. The edit path funnels
   through `_relayoutPreservingCursor()`.

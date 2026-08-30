@@ -81,6 +81,47 @@ console.log('the kernels guard fires at the boundary');
     ok(/slot buffer/.test(huge || ''), `an unbuildable arena says so in glyph terms (got: ${String(huge).slice(0, 70)})`);
 }
 
+console.log('an item too large for the f32 item table is refused, not corrupted');
+{
+    // I_BYTE_COUNT is an exact byte count on the item table, which is still 'float'.
+    // The arena's ceiling (42.7MB) is well past f32's exact-integer range, so an item
+    // between 2^24 and ARENA_MAX_BYTES fits the arena and CANNOT be described by the
+    // table: itemEnd = itemStart + byteCount aliases and the tail folds into the next
+    // item. itemStarts is a separate 'uint' buffer and stays exact — the count alone.
+    //
+    // Measured, so the bound is a fact rather than a worry:
+    const f = new Float32Array(1);
+    f[0] = ARENA_MAX_BYTES;
+    ok(f[0] !== ARENA_MAX_BYTES,
+       `the ceiling itself aliases on an f32 carrier (${ARENA_MAX_BYTES} -> ${f[0]}) — which is `
+       + 'why the byte-length bound is not the same number as the arena bound');
+
+    const arena = () => {
+        const a = Object.create(GlyphPipelineArena.prototype);
+        a.maxItems = 16; a.maxBytes = 1 << 20; a._liveCount = 0; a._items = [];
+        a._free = []; a._byteTotal = 0; a._tableDirty = false; a._stagedSinceFlush = 0;
+        a._realloc = () => { throw new Error('realloc attempted'); };
+        return a;
+    };
+    const stageBytes = (n) => threw(() => arena().stage({
+        bytes: { length: n }, origin: { x: 0, y: 0, z: 0 },
+    }));
+
+    const over = stageBytes(2 ** 24 + 1);
+    ok(/past 16,777,216/.test(over || ''), `one byte past 2^24 is refused (got: ${String(over).slice(0, 70)})`);
+    ok(/I_BYTE_COUNT/.test(over || ''), 'the refusal names the LANE that cannot describe it');
+    ok(/item table/.test(over || ''), 'and names the container, so the fix is findable');
+
+    // The bound must not fire below it — a guard that refuses everything proves nothing.
+    const under = stageBytes(2 ** 24);
+    ok(!/I_BYTE_COUNT/.test(under || ''), 'exactly 2^24 is NOT refused by this bound');
+
+    // This tooth comes off with the item-table migration. Until then it pins that the
+    // arena ceiling and the per-item BYTE bound are deliberately different numbers.
+    ok(2 ** 24 < ARENA_MAX_BYTES,
+       'the byte bound is strictly below the arena ceiling — two limits, two carriers');
+}
+
 console.log('a growth failure gives the range back');
 {
     // stage() calls _alloc (which mutates the watermark) BEFORE growth. If growth

@@ -2,11 +2,15 @@
 //
 //   bun tools/arena-item-bound.test.mjs
 //
-// The count lanes (S_ORD/S_ROW/S_COL) are f32 and ITEM-RELATIVE — the fold resets
-// them at every item start — so their exactness is bounded by the largest single
-// ITEM, never by the arena total. Past 2^24 a lane stops representing consecutive
-// integers and two glyphs fold onto one ordinal, while addressing (all u32) stays
-// perfectly exact: nothing errors, the layout is just quietly wrong.
+// The count lanes (S_ORD/S_ROW/S_COL) are ITEM-RELATIVE — the fold resets them at
+// every item start — so any bound on them is bounded by the largest single ITEM,
+// never by the arena total. That is the rule this file locks, and it outlived the
+// defect that motivated it: the lanes rode f32 slots then, so past 2^24 a lane
+// stopped representing consecutive integers and two glyphs folded onto one ordinal
+// while addressing stayed perfectly exact — nothing errored, the layout was just
+// quietly wrong. They are native u32 now and that failure mode is gone; the bound
+// is kept as a deliberate assertion of the item-relative invariant itself (see
+// GlyphPipelineArena.stage()).
 //
 // The arena's global cap only PROXIES that rule. Until the assert under test, the
 // real bound held by routing alone — READABLE_MAX_CHARS in the load path — which
@@ -50,15 +54,29 @@ function claim({ bytes, leaders = 0 }) {
     catch (e) { return /one item claims/.test(e.message) ? e.message : null; }
 }
 
+/** Same shell, but returning ONLY the I_BYTE_COUNT refusal — a different guard. */
+function byteClaim(bytes) {
+    try { shell().stage({ bytes: { length: bytes }, leaders: 0 }); return null; }
+    catch (e) { return /I_BYTE_COUNT/.test(e.message) ? e.message : null; }
+}
+
 console.log('bytes fallback (synthetic sources: no bake record)');
 {
-    ok(claim({ bytes: WALL - 2 }) === null, 'an item just under the wall passes the guard');
-
-    const over = claim({ bytes: WALL + 2 });
-    ok(over !== null && /one item claims/.test(over), 'an item just over the wall is refused');
-    ok(/conservative: no leader count supplied/.test(over || ''),
-       'the refusal says the byte bound is conservative');
-    console.log(`    ${String(over).split('—')[0].trim()}…`);
+    // TWO BOUNDS NOW, on two carriers, and the byte one binds FIRST.
+    //
+    // stage() also refuses an item whose BYTE LENGTH passes 2^24, because I_BYTE_COUNT
+    // rides the f32 item table and stops being exact there. That bound (2^24) is far
+    // below the ordinal wall (ARENA_MAX_BYTES, 42.7MB), so the byte FALLBACK can no
+    // longer reach the ordinal wall at all: anything big enough to trip it is refused
+    // earlier, for a different and equally correct reason.
+    //
+    // So the ordinal wall is now exercised through `leaders` — which is the real bound
+    // anyway, and what every caller with a bake record supplies. The fallback is tested
+    // for what it still does: bound a synthetic source conservatively, below 2^24.
+    ok(claim({ bytes: (2 ** 24) - 2 }) === null, 'a synthetic item under both bounds passes');
+    ok(byteClaim((2 ** 24) + 2) !== null, 'past 2^24 the BYTE bound fires (I_BYTE_COUNT, f32 item table)');
+    ok(claim({ bytes: (2 ** 24) + 2 }) === null,
+       'and it is not the ordinal refusal — different guard, different message');
 }
 
 console.log('leader count (callers with a bake record)');
@@ -66,13 +84,14 @@ console.log('leader count (callers with a bake record)');
     // The point of passing leaders: a multi-byte corpus is safe on its real glyph
     // count while its BYTE count would trip the conservative fallback. 4 bytes per
     // glyph (CJK/emoji) is the worst case UTF-8 offers.
-    const bytes = WALL + 1024;
-    ok(claim({ bytes }) !== null, 'a 16MB+ item is refused on bytes alone');
+    // Kept under the byte bound so THIS section tests the ordinal guard, not the other.
+    const bytes = (2 ** 24) - 1;
+    ok(claim({ bytes, leaders: WALL + 1 }) !== null, 'a leader count past the wall is refused');
     ok(claim({ bytes, leaders: Math.floor(bytes / 4) }) === null,
-       'the same item is ACCEPTED on its real leader count — the fallback was pessimistic');
+       'a real leader count well under the wall is accepted — the fallback was pessimistic');
 
     // …but leaders is a bound, not a bypass: a genuinely huge glyph count still fails.
-    const over = claim({ bytes: WALL * 8, leaders: WALL + 1 });
+    const over = claim({ bytes: (2 ** 24) - 1, leaders: WALL + 1 });
     ok(over !== null && /one item claims/.test(over), 'a real leader count past the wall is still refused');
     ok(/glyphs/.test(over || '') && !/conservative/.test(over || ''),
        'the refusal names glyphs, not a conservative byte guess');
@@ -80,9 +99,11 @@ console.log('leader count (callers with a bake record)');
 
 console.log('the boundary itself');
 {
-    ok(claim({ bytes: WALL }) === null, 'exactly at the ceiling is allowed');
-    ok(claim({ bytes: WALL + 1 }) !== null, 'one past the ceiling is refused');
+    // Exercised on LEADERS, since the byte path can no longer reach this wall.
+    ok(claim({ bytes: 1024, leaders: WALL }) === null, 'exactly at the ceiling is allowed');
+    ok(claim({ bytes: 1024, leaders: WALL + 1 }) !== null, 'one past the ceiling is refused');
     ok(claim({ bytes: 1 }) === null, 'an ordinary small item is untouched');
+    ok(byteClaim(1) === null, 'and the byte bound leaves it alone too');
 }
 
 console.log(`\n${fail === 0 ? '✓' : '✗'} arena-item-bound: ${pass} passed, ${fail} failed`);

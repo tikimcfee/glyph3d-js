@@ -168,7 +168,7 @@ export function byteRangeForRows(bytes, trie, record, rowFrom, rowTo, wrap) {
  *                      pageStrideX} — one item; pageStrideX from the BAKED fold
  *                      scalars (deriveStride), not measured here
  * @param {{from:number, to:number, seed:Object}} win
- * @returns {{slots:Float32Array, ordToByte:Uint32Array, box:Float64Array}}
+ * @returns {{slots:Uint32Array, ordToByte:Uint32Array, box:Float64Array}}
  */
 export function runWindow(bytes, trie, p, win) {
     const { from, to, seed } = win;
