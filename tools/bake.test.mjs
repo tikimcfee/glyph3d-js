@@ -181,7 +181,9 @@ for (const [name, text] of CORPORA) {
 {
   const bytes = enc.encode(TORTURE);
   const rec = bakeFile(bytes, trie, { lineHeight: CELL_H });
-  const oracle = runPipeline(bytes, trie, {});
+  // lineHeight stated: this section checks the census and misses, not placement, but
+  // the oracle refuses an underspecified item outright rather than guessing per glyph.
+  const oracle = runPipeline(bytes, trie, { lineHeight: CELL_H });
   const census = new Set(rec.census);
   let absent = 0;
   for (const ch of TORTURE) {                      // string iteration = one codepoint per step

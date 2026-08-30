@@ -150,6 +150,42 @@ export const FLOAT_LANES = Object.freeze(new Set([
 export const COUNT_LANES = Object.freeze(new Set([S_ROW, S_COL, S_FLAGS, S_ORD]));
 /** @param {number} lane @returns {boolean} true when the lane carries a bitcast f32. */
 export function isFloatLane(lane) { return FLOAT_LANES.has(lane); }
+
+/**
+ * An item's lineHeight must be a finite number. This is the SPEC's contract, and it
+ * refuses rather than substitutes.
+ *
+ * There used to be a substitution: an unset lineHeight silently selected the glyph's own
+ * S_HEIGHT, which staggered baselines within a row (a taller CJK glyph at -row * 1.61
+ * beside its neighbours at -row * 1.4). The GPU kernel never had that branch, so the
+ * oracle and the Mojo port agreed with each other and disagreed with the renderer — in a
+ * case no gate could see. Deleting the substitution (see the previous commit) left the
+ * value flowing through as undefined, producing NaN, which is a QUIETER failure than the
+ * bug it replaced: every downstream comparison that tests bit equality reports two
+ * matching NaNs as EQUAL and passes.
+ *
+ * So the illegal state has to be refused where it enters, not detected where it lands.
+ * NaN is rejected explicitly and not merely by falling out of the finite check, because
+ * the fixture format encodes NaN as "unset" — it is the wire representation of exactly
+ * this error, and a reader handing it back deserves to be told so by name.
+ *
+ * Callers that legitimately have no opinion do not omit it — they normalise. See
+ * GlyphPipelineArena.stage(), which writes lineHeight = 1 into the item it stages, so
+ * what reaches this function is fully specified rather than defaulted past a check.
+ *
+ * @param {*} lineHeight @param {number} itemIndex @returns {number} the validated value
+ */
+export function assertLineHeight(lineHeight, itemIndex = 0) {
+    if (typeof lineHeight === 'number' && Number.isFinite(lineHeight)) return lineHeight;
+    const shown = Number.isNaN(lineHeight) ? 'NaN (the fixture format\'s encoding of "unset")'
+        : String(lineHeight);
+    throw new Error(
+        `glyphPipeline: item ${itemIndex} has lineHeight ${shown} — it must be a finite `
+        + 'number. lineHeight is the ITEM\'s row pitch, never the glyph\'s own height; '
+        + 'there is no per-glyph fallback (it staggered baselines within a row). A caller '
+        + 'with no opinion should pass an explicit value, as GlyphPipelineArena.stage() does.',
+    );
+}
 /** Decode one lane BY KIND — floats reinterpreted, counts returned as-is. */
 export function laneValue(slots, index) {
     return FLOAT_LANES.has(index % SLOT_STRIDE) ? fval(slots[index]) : slots[index];
@@ -559,6 +595,10 @@ export function runPipeline(bytes, trie, opts = {}) {
         zStep: it.zStep ?? opts.zStep ?? 0,
         lineHeight: it.lineHeight ?? opts.lineHeight,
     }));
+    // Refuse an underspecified item HERE, once per item, before a single lane is written.
+    // Not inside layoutItem/resolveX: those run per byte, and a per-glyph check would pay
+    // for the whole corpus to state something true of the item.
+    resolved.forEach((r, i) => { r.lineHeight = assertLineHeight(r.lineHeight, i); });
 
     // ── THE FOLD: one forward pass per item writes every lane, with the item's
     //    fold-scalar reduce riding along.

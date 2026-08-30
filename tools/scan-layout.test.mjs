@@ -116,7 +116,7 @@ function diffSlots(name, refSlots, gotSlots, n, foldPerByte) {
   for (let s = 0; s < SEEDS; s++) {
     const r = rng(1000 + s);
     const bytes = enc.encode(randomText(r, 12));
-    const res = runPipeline(bytes, trie, { wrapWidth: [0, 3, 24][s % 3] });
+    const res = runPipeline(bytes, trie, { wrapWidth: [0, 3, 24][s % 3], lineHeight: CELL_H });
     const wrap = [0, 3, 24][s % 3];
     const n = bytes.length;
     if (n < 6) continue;

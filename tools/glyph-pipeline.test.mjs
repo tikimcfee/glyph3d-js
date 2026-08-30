@@ -239,7 +239,11 @@ for (const wrapWidth of [0, 24, 200]) {
 {
   const { bytes } = CORPORA[CORPORA.length - 1];
   const page = { pageRows: 12, lineHeight: CELL_H, pageCols: 30, pageGapX: 4, pagesWide: 3, depthPerBand: 32, depthPerColumn: -4 };
-  const a = runPipeline(bytes, trie, { page });
+  // NOTE the asymmetry this exposed: `page` carries a lineHeight and paginate consults
+  // it (resolved[i].lineHeight ?? it.page?.lineHeight), but the FOLD resolves only
+  // it.lineHeight ?? opts.lineHeight — so a page-only lineHeight paginated with one
+  // value and folded with another. State it at the item level, where the fold reads it.
+  const a = runPipeline(bytes, trie, { page, lineHeight: CELL_H });
   // Re-apply kernel 9's remap over the finished slots with the same derived params —
   // reconstructive means NOTHING moves (it re-derives from S_BASE_X + integers).
   const again = a.slots.slice();
@@ -279,7 +283,7 @@ for (const wrapWidth of [0, 24, 200]) {
 // ── bounds: equals a naive walk, and contains every quad ──
 for (const { name, bytes } of CORPORA) {
   for (const page of [null, { pageRows: 12, lineHeight: CELL_H, pageCols: 30, pageGapX: 4, pagesWide: 3, depthPerBand: 32, depthPerColumn: -4 }]) {
-    const run = runPipeline(bytes, trie, page ? { page } : {});
+    const run = runPipeline(bytes, trie, page ? { page, lineHeight: CELL_H } : { lineHeight: CELL_H });
     const box = new Float64Array([Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity]);
     for (let id = 0; id < bytes.length; id++) boundsReduce(run.slots, id, box);
     const b = run.bounds;
@@ -376,7 +380,9 @@ for (const { name, bytes } of CORPORA) {
 
 {
   const bytes = new TextEncoder().encode('ab\u{1F4A9}cd\n\u{1F4A9}ef');
-  const run = runPipeline(bytes, trie, {});
+  // This section checks MISS reporting, not placement — but an item still has to be
+  // fully specified: the oracle refuses to guess a row pitch rather than inventing one.
+  const run = runPipeline(bytes, trie, { lineHeight: CELL_H });
   ok(run.misses.length === 2, `missing: ${run.misses.length} reported (expected 2)`);
   ok(run.misses.every((cp) => cp === 0x1F4A9), 'missing: reported the right codepoint');
   // 'c' must sit one full cell past the un-encoded emoji's advance, not on top of it.

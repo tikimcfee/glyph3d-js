@@ -57,7 +57,7 @@
 import {
     SLOT_STRIDE, S_ADVANCE, S_ROW, S_COL, S_FLAGS, S_LINE_ADV, S_ORD,
     F_LEADER, F_NEWLINE, F_RENDERED,
-    allocSlots, decodeAndResolve, itemForByte, rowsForLine, resolveX, paginate,
+    allocSlots, decodeAndResolve, itemForByte, rowsForLine, resolveX, paginate, assertLineHeight,
     boundsReduce, deriveStride, normalizeItems, fbits, fval,
 } from './glyphPipelineReference.js';
 
@@ -259,7 +259,7 @@ export function runScanPipeline(bytes, trie, opts = {}, tuning = {}) {
     const resolveParams = items.map((it, i) => ({
         itemStart: it.byteStart, wrapWidth: wraps[i],
         pageCols: it.page?.pageCols || 0, origin: it.origin,
-        lineHeight: it.lineHeight ?? opts.lineHeight,
+        lineHeight: assertLineHeight(it.lineHeight ?? opts.lineHeight, i),
         zStep: it.zStep ?? opts.zStep ?? 0,
     }));
     for (let id = 0; id < n; id++) {
