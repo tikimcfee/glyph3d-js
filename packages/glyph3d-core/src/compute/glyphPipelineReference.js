@@ -200,59 +200,76 @@ export const F_NEWLINE = 4;       // the codepoint is 0x0A — the fold's one co
 export const F_MISSING = 8;       // no atlas entry yet — blank, but correctly spaced
 
 /**
- * The GPU item table's lane layout (glyphPipelineKernels.js packs the same strides).
- * byteStart is NOT here — it lives in the separate itemStarts uint buffer, because it
- * is the binary-search key. Everything a pass reads per file rides the item.
+ * The GPU item table, SPLIT BY CARRIER — two containers, one per kind.
+ *
+ * byteStart is NOT here: it lives in the separate itemStarts uint buffer, because it is
+ * the binary-search key. Everything else a pass reads per file rides the item.
+ *
+ * There used to be ONE table of 15 mixed lanes in a Uint32Array, nine measures held as
+ * bitcast f32, with a LANE_KIND set on the side saying which lane was which. That
+ * arrangement cost this project I_BYTE_COUNT aliasing past 2^24 — an item's tail folding
+ * into the next item's range, silently, at a size the arena ceiling had just made
+ * reachable. The kind was right in the table and right in the shader; it was right by
+ * DISCIPLINE, and discipline is a thing you can forget exactly once.
+ *
+ * Split, the kind IS the container. A measure read as a count is no longer a
+ * correct-looking access returning a denormal — it is a read of a different buffer, and
+ * a count assigned into the float array is a type the storage node will not take. The
+ * side table is gone because nothing is left to consult it.
  */
-export const ITEM_STRIDE = 15;
-export const I_ORIGIN_X = 0;
-export const I_ORIGIN_Y = 1;
-export const I_ORIGIN_Z = 2;
-export const I_PAGE_ROWS = 3;
-export const I_PAGE_COLS = 4;    // also the fold unit when wrap is off — per item
-export const I_PAGES_WIDE = 5;
-export const I_PAGE_GAP_X = 6;   // world x gap between fanned page columns — the stride
-                                 // is DERIVED (widest item-relative row + this gap),
-                                 // never a CPU input
-export const I_BAND_STRIDE_Y = 7;
-export const I_DEPTH_PER_BAND = 8;
-export const I_DEPTH_PER_COL = 9;
-export const I_SCROLL_ROWS = 10;
-export const I_WRAP_WIDTH = 11;  // the fold unit — load-time (changing it re-folds)
-export const I_Z_STEP = 12;      // depth per wrap segment
-export const I_LINE_HEIGHT = 13; // world y per row
-export const I_BYTE_COUNT = 14;  // the item's byte length — ownership is EXPLICIT:
-                                 // [byteStart, byteStart + byteCount). Bytes between one
-                                 // item's end and the next start are DEAD SPACE (the
-                                 // arena's free-list recycles tombstoned ranges); the
-                                 // kernels treat them as inert (apply kills their leader
-                                 // flag, so no reduce ever attributes them to a live item)
+
+/** MEASURE lanes — an f32 container. Real quantities: origins, gaps, depths, steps. */
+export const ITEM_MEASURE_STRIDE = 9;
+export const IM_ORIGIN_X = 0;
+export const IM_ORIGIN_Y = 1;
+export const IM_ORIGIN_Z = 2;
+export const IM_PAGE_GAP_X = 3;    // world x gap between fanned page columns — the stride
+                                   // is DERIVED (widest item-relative row + this gap),
+                                   // never a CPU input
+export const IM_BAND_STRIDE_Y = 4;
+export const IM_DEPTH_PER_BAND = 5;
+export const IM_DEPTH_PER_COL = 6;
+export const IM_Z_STEP = 7;        // depth per wrap segment
+export const IM_LINE_HEIGHT = 8;   // world y per row
+
+/** EXACT lanes — a u32 container. Page geometry counts, the fold unit, the byte count. */
+export const ITEM_EXACT_STRIDE = 6;
+export const IE_PAGE_ROWS = 0;
+export const IE_PAGE_COLS = 1;     // also the fold unit when wrap is off — per item
+export const IE_PAGES_WIDE = 2;
+export const IE_SCROLL_ROWS = 3;
+export const IE_WRAP_WIDTH = 4;    // the fold unit — load-time (changing it re-folds)
+export const IE_BYTE_COUNT = 5;    // the item's byte length — ownership is EXPLICIT:
+                                   // [byteStart, byteStart + byteCount). Bytes between one
+                                   // item's end and the next start are DEAD SPACE (the
+                                   // arena's free-list recycles tombstoned ranges); the
+                                   // kernels treat them as inert (apply kills their leader
+                                   // flag, so no reduce ever attributes them to a live item)
 
 /**
- * Item-table lanes that carry a bitcast f32 rather than a native integer.
+ * This layer's item mapping, BY NAME — what the contract assertion reads.
  *
- * The table mixes kinds exactly as the slot buffer and the trie did: six EXACT lanes
- * (page geometry counts, the wrap fold unit, the byte count) among nine genuine
- * MEASURES (origins, gaps, depths, line height, z step). It rode a Float32Array until
- * I_BYTE_COUNT was found aliasing past 2^24 — an item's tail folding into the next
- * item, silently, at a size the arena ceiling had made reachable.
- *
- * Same discipline everywhere now: exact native, measures bitcast.
+ * The shared tier carries parameter names and KINDS and deliberately says nothing about
+ * lane numbers, so what this layer owes is a statement of where each named param lives
+ * and in which carrier. These two objects are that statement, once. The conformance gate
+ * checks that every shared ITEM_PARAM appears in exactly one of them and that each
+ * object's lanes are a PERMUTATION of 0..stride-1 — so a lane added to a container
+ * without a name here lowers the permutation and fails, rather than quietly lowering
+ * coverage.
  */
-export const ITEM_MEASURE_LANES = Object.freeze(new Set([
-    I_ORIGIN_X, I_ORIGIN_Y, I_ORIGIN_Z, I_PAGE_GAP_X, I_BAND_STRIDE_Y,
-    I_DEPTH_PER_BAND, I_DEPTH_PER_COL, I_Z_STEP, I_LINE_HEIGHT,
-]));
+export const ITEM_MEASURE_LANE_OF = Object.freeze({
+    ORIGIN_X: IM_ORIGIN_X, ORIGIN_Y: IM_ORIGIN_Y, ORIGIN_Z: IM_ORIGIN_Z,
+    PAGE_GAP_X: IM_PAGE_GAP_X, BAND_STRIDE_Y: IM_BAND_STRIDE_Y,
+    DEPTH_PER_BAND: IM_DEPTH_PER_BAND, DEPTH_PER_COL: IM_DEPTH_PER_COL,
+    Z_STEP: IM_Z_STEP, LINE_HEIGHT: IM_LINE_HEIGHT,
+});
 
-/** Item-table lanes stored natively as integers — exact for the full u32 range. */
-export const ITEM_EXACT_LANES = Object.freeze(new Set([
-    I_PAGE_ROWS, I_PAGE_COLS, I_PAGES_WIDE, I_SCROLL_ROWS, I_WRAP_WIDTH, I_BYTE_COUNT,
-]));
-
-/** The VALUE at a flat index into the item table, decoded by lane kind. */
-export function itemLaneValue(table, index) {
-    return ITEM_MEASURE_LANES.has(index % ITEM_STRIDE) ? fval(table[index]) : table[index];
-}
+/** BYTE_COUNT is this layer's own bookkeeping — the arena's range ownership — and is
+ *  deliberately NOT a shared ITEM_PARAM. The gate knows it by name for that reason. */
+export const ITEM_EXACT_LANE_OF = Object.freeze({
+    PAGE_ROWS: IE_PAGE_ROWS, PAGE_COLS: IE_PAGE_COLS, PAGES_WIDE: IE_PAGES_WIDE,
+    SCROLL_ROWS: IE_SCROLL_ROWS, WRAP_WIDTH: IE_WRAP_WIDTH, BYTE_COUNT: IE_BYTE_COUNT,
+});
 
 /** Allocate the slot buffer for a file of `byteLength` bytes. */
 export function allocSlots(byteLength) {

@@ -22,7 +22,8 @@ import GlyphPipelineKernels, {
     KERNEL_MAX_BYTES, ARENA_MAX_BYTES, REQUESTED_BINDING_CAP,
     SLOT_BYTES_PER_SOURCE_BYTE, assertSlotBufferFits,
 } from '../packages/glyph3d-core/src/compute/glyphPipelineKernels.js';
-import { SLOT_STRIDE, ITEM_STRIDE, I_BYTE_COUNT, ITEM_EXACT_LANES, ITEM_MEASURE_LANES }
+import { SLOT_STRIDE, ITEM_MEASURE_STRIDE, ITEM_EXACT_STRIDE,
+    ITEM_MEASURE_LANE_OF, ITEM_EXACT_LANE_OF, IE_BYTE_COUNT }
     from '../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
 
 let pass = 0, fail = 0;
@@ -82,24 +83,41 @@ console.log('the kernels guard fires at the boundary');
     ok(/slot buffer/.test(huge || ''), `an unbuildable arena says so in glyph terms (got: ${String(huge).slice(0, 70)})`);
 }
 
-console.log('the item table describes everything the arena can hold');
+console.log('the item arrays describe everything the arena can hold');
 {
     // This section used to assert a BOUND: an item past 2^24 bytes was refused, because
-    // I_BYTE_COUNT rode the f32 item table and aliased there — a large item's tail
-    // folding into the next item, silently. The table is u32 now (exact lanes native,
-    // measures bitcast), so the bound is gone and the property is the stronger one:
-    // ANY item the arena can hold, the table can describe exactly.
-    ok(ITEM_EXACT_LANES.has(I_BYTE_COUNT), 'I_BYTE_COUNT is classified EXACT');
-    ok(!ITEM_MEASURE_LANES.has(I_BYTE_COUNT), 'and is not a measure — it would be bitcast');
-    ok(ITEM_EXACT_LANES.size + ITEM_MEASURE_LANES.size === ITEM_STRIDE,
-       `the item lane kinds are total over the stride (${ITEM_EXACT_LANES.size} + `
-       + `${ITEM_MEASURE_LANES.size} vs ${ITEM_STRIDE})`);
+    // the byte count rode the f32 item table and aliased there — a large item's tail
+    // folding into the next item, silently. Then the table went u32-with-bitcast-measures
+    // and the bound went away. It is now TWO arrays split by carrier, and the property is
+    // stronger again: the byte count does not merely happen to be exact, it is in the
+    // exact array and there is no float array it could be read out of by mistake.
+    ok(IE_BYTE_COUNT in Object.fromEntries(Object.entries(ITEM_EXACT_LANE_OF).map(([k, v]) => [v, k])),
+       'BYTE_COUNT occupies a lane of the EXACT array');
+    ok(ITEM_EXACT_LANE_OF.BYTE_COUNT === IE_BYTE_COUNT,
+       'and the named mapping agrees with the lane constant');
+    ok(!('BYTE_COUNT' in ITEM_MEASURE_LANE_OF),
+       'and does not also appear in the measure array');
+
+    // Totality, stated over the two containers rather than one stride: every lane of each
+    // array is named, and no name is in both. This is the count-based companion — a lane
+    // added to a container without a name here breaks the permutation instead of quietly
+    // going unclassified, which is what the old side-set form allowed.
+    // The message prints the LANES, not the counts. A collision keeps the count intact —
+    // the first version of this tooth failed a real collision with the words "9 vs 9",
+    // which names nothing an author can act on. The sorted lane list shows the duplicate.
+    const perm = (obj, stride, what) => {
+        const l = Object.values(obj).slice().sort((a, b) => a - b);
+        ok(l.length === stride && l.every((v, i) => v === i),
+           `${what}: lanes are a permutation of 0..${stride - 1} (got [${l}])`);
+    };
+    perm(ITEM_MEASURE_LANE_OF, ITEM_MEASURE_STRIDE, 'measure array');
+    perm(ITEM_EXACT_LANE_OF, ITEM_EXACT_STRIDE, 'exact array');
 
     // The number that used to be the bound, now just a number the table handles.
     const u = new Uint32Array(1);
     u[0] = ARENA_MAX_BYTES;
     ok(u[0] === ARENA_MAX_BYTES,
-       `the arena ceiling is exact in the item table's carrier (${ARENA_MAX_BYTES})`);
+       `the arena ceiling is exact in the exact array's carrier (${ARENA_MAX_BYTES})`);
     const f = new Float32Array(1);
     f[0] = ARENA_MAX_BYTES;
     ok(f[0] !== ARENA_MAX_BYTES,

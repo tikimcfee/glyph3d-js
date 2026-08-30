@@ -54,10 +54,14 @@ function claim({ bytes, leaders = 0 }) {
     catch (e) { return /one item claims/.test(e.message) ? e.message : null; }
 }
 
-/** Same shell, but returning ONLY the I_BYTE_COUNT refusal — a different guard. */
+/** Same shell, but returning ONLY a BYTE_COUNT-lane refusal — a different guard.
+ *  The pattern is the bare lane name on purpose: it was /I_BYTE_COUNT/, and the item
+ *  split renamed that constant to IE_BYTE_COUNT, so the tripwire had quietly stopped
+ *  being able to match anything it was watching for. A tripwire that cannot fire reads
+ *  exactly like a tripwire that never fired. */
 function byteClaim(bytes) {
     try { shell().stage({ bytes: { length: bytes }, leaders: 0 }); return null; }
-    catch (e) { return /I_BYTE_COUNT/.test(e.message) ? e.message : null; }
+    catch (e) { return /BYTE_COUNT/.test(e.message) ? e.message : null; }
 }
 
 console.log('bytes fallback (synthetic sources: no bake record)');

@@ -3,10 +3,11 @@
 //   bun tools/contract-conformance.test.mjs
 //
 // glyphContract.js declares names and kinds — no strides, no indices, nothing about how
-// any layer stores anything. The renderer runs one slot buffer at SLOT_STRIDE 12 and an
-// item table at ITEM_STRIDE 15; the native backend runs four phase arrays and its own
-// 15-lane item table in a DIFFERENT lane order. Both are conformant, because container
-// is a per-layer realization and KIND is the declared fact.
+// any layer stores anything. The renderer runs one slot buffer at SLOT_STRIDE 12 and its
+// item params in TWO arrays split by carrier (9 measures f32 + 6 exact u32); the native
+// backend runs four phase arrays and a 15-lane item table in a DIFFERENT lane order.
+// Both are conformant, because container is a per-layer realization and KIND is the
+// declared fact.
 //
 // What each layer owes is ONE assertion: that its own mapping respects the contract. This
 // file is the renderer's half. Without it the contract is a file nobody reads — which is
@@ -33,10 +34,30 @@ const REALIZATION_ONLY = Object.freeze({
         + 'the same fact beside its params rather than in them.',
 });
 
-console.log('the item table realizes every semantic parameter');
+console.log('the item arrays realize every semantic parameter');
 {
-    const mine = Object.keys(Ref).filter((k) => k.startsWith('I_')).map((k) => k.slice(2));
-    ok(mine.length > 0, 'the item table exports I_* lanes (the extraction still works)');
+    // ENUMERATED, not scraped. This used to read `Object.keys(Ref).startsWith('I_')` — a
+    // pattern check, which reports what it found and can never report that a spelling was
+    // missing. The layer states its mapping in two objects now, and this reads THOSE.
+    const M = Ref.ITEM_MEASURE_LANE_OF, X = Ref.ITEM_EXACT_LANE_OF;
+    const mine = [...Object.keys(M), ...Object.keys(X)];
+
+    // The COUNT-based companion: each map's lanes must be a PERMUTATION of 0..stride-1.
+    // A lane added to a container without a name here does not quietly lower coverage —
+    // it breaks the permutation and fails.
+    const perm = (obj, stride, what) => {
+        const lanes = Object.values(obj).slice().sort((a, b) => a - b);
+        ok(lanes.length === stride && lanes.every((v, i) => v === i),
+           `${what}: the named lanes are a permutation of 0..${stride - 1} `
+           + `(got ${lanes.length} lanes [${lanes}])`);
+    };
+    perm(M, Ref.ITEM_MEASURE_STRIDE, 'measure array');
+    perm(X, Ref.ITEM_EXACT_STRIDE, 'exact array');
+
+    // A name may not live in both arrays — that would be the mixed container again,
+    // wearing two hats.
+    const both = Object.keys(M).filter((k) => k in X);
+    ok(both.length === 0, `no parameter is realized in BOTH carriers (both: [${both}])`);
 
     // DIRECTION 1 — a parameter the contract declares and this layer cannot express is a
     // behaviour the backend can have and the renderer cannot reproduce. That gap is
@@ -58,6 +79,55 @@ console.log('the item table realizes every semantic parameter');
     ok(stale.length === 0,
        `no realization-only declaration names a lane the contract now considers semantic `
        + `(stale: [${stale}])`);
+
+    // DIRECTION 3 — new, and only expressible since the split: the CARRIER must match the
+    // declared KIND. While the item table was one mixed uint array this could not be
+    // asked, because every lane had the same container and kind lived in a side set that
+    // this file would have had to trust. The container is the claim now, so the contract
+    // can check it directly: a measure in the exact array (or a count in the float array)
+    // is a conformance failure, not a convention someone broke.
+    //
+    // KIND_DISPUTED — found by this tooth the first time it could be asked, 2026-08-30.
+    // These five are integer page geometry: rows and columns per page, how many pages
+    // wide, the scroll row offset, the wrap column count. The paginate kernel reads all
+    // of them through int() and says why in its own comment — keying a page decision off
+    // a float put 119 glyphs on the wrong page, because f32 addition is not associative
+    // and a boundary row wobbles by a ULP. They are counts.
+    //
+    // The contract declares them 'measure'. It does so because the OTHER layer's item
+    // table is a single f32 array literally named "measures", so every lane in it was
+    // declared a measure — the container defined the kind, which is precisely the
+    // inversion the tier split exists to prevent. Same family as GLYPH_ID and
+    // I_BYTE_COUNT: exact-in-practice on a float carrier, unbitten only because page
+    // counts are small.
+    //
+    // This layer stores them exact and always has; the split is what made the
+    // disagreement ASKABLE, not what caused it. Fixing KIND changes the shared schema and
+    // puts the native backend's f32 item table in violation of it, so it is a
+    // cross-layer decision, not a unilateral edit. Declared here until that happens.
+    //
+    // ARMED, not an escape hatch: each entry asserts the contract still says 'measure'.
+    // The day the schema is corrected, the entry goes stale and this gate FAILS until it
+    // is deleted — a dispute cannot outlive its resolution.
+    const KIND_DISPUTED = Object.freeze({
+        PAGE_ROWS: 'count — rows per page; paginate divides screenRow by it',
+        PAGE_COLS: 'count — columns per page, and the fold unit when wrap is off',
+        PAGES_WIDE: 'count — pages per band; paginate takes yPage mod it',
+        SCROLL_ROWS: 'count — a row offset subtracted from an exact row index',
+        WRAP_WIDTH: 'count — the fold unit in COLUMNS; read through int() everywhere',
+    });
+    const disputed = Object.keys(KIND_DISPUTED);
+    const settled = disputed.filter((f) => KIND[f] !== 'measure');
+    ok(settled.length === 0,
+       `no KIND dispute outlives the contract change that resolves it (settled: [${settled}] `
+       + `— delete these entries and let the carrier tooth cover them)`);
+
+    const miscarried = [
+        ...Object.keys(M).filter((f) => KIND[f] && KIND[f] !== 'measure').map((f) => `${f}(measure array, kind ${KIND[f]})`),
+        ...Object.keys(X).filter((f) => KIND[f] && KIND[f] !== 'exact' && !disputed.includes(f)).map((f) => `${f}(exact array, kind ${KIND[f]})`),
+    ];
+    ok(miscarried.length === 0,
+       `every item parameter rides the carrier its KIND requires (miscarried: [${miscarried}])`);
 }
 
 console.log('every lane respects its declared KIND');

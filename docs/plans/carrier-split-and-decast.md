@@ -85,17 +85,39 @@ NOT MIXED — leave alone, and do not migrate for symmetry:
   mixing. Removing it would break the reduce. `foldScalars` lane 1 is the same
   technique for the same reason.
 
-## ORDER OF WORK
+## ORDER OF WORK — CORRECTED 2026-08-30, and the original was wrong
 
-1. **`trieBlocks` first** — smallest (4 lanes, 2+2), fewest consumers, and it was
-   migrated hours ago so the shape is fresh. Proves the split pattern end to end.
-2. **`slots`** — the big one, and the one the vertex path and picking both read.
-   Splitting it changes `glyphVertex.js` and `PickingSystem.js`, which is where the
-   silent far-LOD failure lives, so this step wants the far-LOD gate to exist first
-   (see below).
-3. **`itemTable`**, **`farItems`** — independent, small.
-4. **The scan buffers** (7 counts + 1 float) — arguably the clearest win: one float
-   lane forcing a whole 8-lane container to be uint.
+The first ordering was written on "smallest first," which is not the same question as
+**which split actually deletes casts**. Counting the real call sites (comments excluded,
+classified by the buffer each touches) gives 31, not the 33 estimated above:
+
+| buffer | bitcast sites |
+|---|---|
+| `slots` | 14 |
+| `itemTable` | 13 |
+| scan buffers (`P_TAILADV`) | 2 |
+| ordered-key helpers (atomics — legitimate, keep) | 2 |
+| **`trieBlocks`** | **0** |
+
+`trieBlocks` has **zero**. Both the trie and the slot buffer are u32-with-bitcast-measures
+today, so a measure copies from one to the other VERBATIM — the verbatim copy is the
+reward of both containers sharing the same wrong convention. Splitting the trie alone
+would have *added* two casts at the trie→slots seam. Step 1 as originally written made
+the number go up.
+
+The rule the census produces: **a cast dies only when BOTH ends of the copy are
+single-kind.** So order by casts-deleted-with-nothing-added:
+
+1. ✅ **`itemTable` — DONE.** 13 sites, and the decisive property is that it is
+   GPU-READ-ONLY (packed on the CPU, never written by a kernel), so its measures land in
+   float arithmetic and nothing needs a cast back. 31 → 18 sites, none added. Split into
+   `itemMeasures` (f32 × 9) + `itemExact` (u32 × 6).
+2. **The scan buffers** — 2 sites, self-contained, one float lane (`TAILADV`) forcing a
+   whole 8-lane container to be uint.
+3. **`slots` + `trieBlocks` TOGETHER** — 14 deleted, 0 added, and only together. This is
+   the step that wants the far-LOD gate first (below), and the step the record/compaction
+   work may subsume rather than repeat.
+4. **`farItems`** — independent, small.
 
 Each step: mutation-test that a wrong-kind access now FAILS TO COMPILE or reads a
 different variable, rather than returning a denormal. That property is the deliverable;
@@ -108,6 +130,32 @@ the deleted casts are a side effect.
 correctly while every far glyph collapses to texel (0,0) — and step 2 touches exactly
 it. Build that gate before splitting `slots`, or the step with the worst failure mode
 is the step with no evidence.
+
+## WHAT STEP 1 TURNED UP — a defect in the SHARED tier
+
+Splitting the item table made a question askable that could not be asked while every lane
+sat in one mixed container: **does each parameter ride the carrier its declared KIND
+requires?** Asked for the first time, it failed immediately, and not on this layer:
+
+`PAGE_ROWS`, `PAGE_COLS`, `PAGES_WIDE`, `SCROLL_ROWS`, `WRAP_WIDTH` are declared
+`'measure'` in `schema/glyph-identity.json`. They are integer page geometry. The paginate
+kernel reads every one of them through `int()` and explains why in its own comment —
+keying a page decision off a float put 119 glyphs on the wrong page, because f32 addition
+is not associative and a boundary row wobbles by a ULP.
+
+They are declared measures because the *other* layer's item table is a single f32 array
+literally named `measures`, so every lane in it was classified as one. **The container
+defined the kind** — which is the exact inversion the tier split exists to prevent. It is
+the same family as `GLYPH_ID` and `I_BYTE_COUNT`: exact-in-practice on a float carrier,
+unbitten so far only because page counts are small.
+
+This layer has always stored them exact, so nothing here is broken; the split is what made
+the disagreement VISIBLE, not what caused it. Fixing `KIND` edits the shared schema and
+puts the native backend's f32 item table in violation of its own contract, so it is a
+cross-layer decision for mojo-rising and Ivan, not a unilateral edit. It is declared in
+`tools/contract-conformance.test.mjs` as `KIND_DISPUTED`, **armed**: each entry asserts
+the contract still says `'measure'`, so the day the schema is corrected the entry goes
+stale and the gate fails until it is deleted. A dispute cannot outlive its resolution.
 
 ## AND THE BIGGER THING THIS IS ADJACENT TO
 
