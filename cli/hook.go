@@ -631,15 +631,20 @@ const hookLogPath = "/tmp/glyph-hook.log"
 
 // hookCmdEntry is the entry point called from main.
 func hookCmdEntry() {
-	// Check for --debug flag (also logs to stderr) and --kimi (kimi hook dialect).
-	for _, arg := range os.Args[2:] {
-		if arg == "--debug" || arg == "-d" {
-			debug = true
-		}
-		if arg == "--kimi" {
-			kimiMode = true
-		}
+	// --debug (also logs to stderr) and --kimi (kimi hook dialect). Positionals are
+	// tolerated — a harness may pass the event name — but an UNDEFINED flag is fatal:
+	// a hook silently ignoring the flag that selects its dialect is how a Kimi hook
+	// runs the Claude parser and reports nothing.
+	const usage = "glyph3d-cli hook [--kimi] [--debug]"
+	fs := newFlagSet("hook")
+	dbgFlag := fs.Bool("debug", false, "Also log to stderr")
+	dbgShort := fs.Bool("d", false, "Also log to stderr (shorthand)")
+	kimiFlag := fs.Bool("kimi", false, "Kimi Code hook dialect")
+	if _, err := parseArgs(fs, os.Args[2:]); err != nil {
+		failParse("hook", usage, err)
 	}
+	debug = *dbgFlag || *dbgShort
+	kimiMode = *kimiFlag
 
 	// Always log to file so Claude can read it for diagnostics.
 	// With --debug, also copy to stderr for live terminal viewing.

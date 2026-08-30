@@ -355,6 +355,21 @@ Also: `stats` (store shape), `dump [path]` (VACUUM INTO snapshot, default
     them would otherwise be invisible from either side alone.
 
 
+- **`cli-flag-order.test.mjs`** — argument parsing on the REAL Go binary (it builds one
+  per run and refuses a build older than its sources). Go's `flag` stops at the first
+  non-flag token, so `serve <dir> --port 8121 --relay-only` parsed nothing: the port and
+  mode the operator typed were dropped and the **8080 default bound in their place**,
+  banner and all — a silent fallback at the port seam, and `tools/dev.sh` carried the
+  same ordering, so `RELAY_PORT=9000 tools/dev.sh relay` served 8080. The gate drives
+  the binary (a unit test on `parseServeArgs` still passes if `serveCmd` stops calling
+  it) and runs dev.sh's invocation lifted verbatim from the script. Ports 8121-8123
+  only; every case that must REFUSE leads with a scratch `--port` so a regressed build
+  binds that instead of reaching for the operator's live relay.
+  ```
+  bun tools/cli-flag-order.test.mjs
+  cd cli && go test -run 'TestParse|TestGlobalFlag' .   # the parse-level half
+  ```
+
 - **`verify-tree-sitter.mjs`** — load each vendored grammar, compile its highlight
   query, parse a snippet, report captures. Run after upgrading web-tree-sitter / a
   grammar, adding a language, or editing a query. Catches ABI mismatches, query-compile

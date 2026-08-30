@@ -81,6 +81,20 @@ func main() {
 
 	flag.Parse()
 
+	args := flag.Args()
+
+	// One-shot command arguments are free-form text for the display's bus, so they are
+	// NOT flag-parsed (a verb argument may legitimately start with "-"). That makes the
+	// "global flags before the command" rule real, so enforce it BEFORE dialing: a
+	// global flag typed after the verb used to ride along as command text and the
+	// display answered as if it had never been asked.
+	if bad := globalFlagInCommand(flag.CommandLine, args); bad != "" {
+		fmt.Fprintf(os.Stderr, "glyph3d-cli: global flag %s must come BEFORE the command "+
+			"(e.g. glyph3d-cli %s %s); it was found among the command arguments, "+
+			"where it would have been sent to the display as text.\n", bad, bad, args[0])
+		os.Exit(2)
+	}
+
 	url := *host
 	if *port > 0 {
 		url = fmt.Sprintf("ws://localhost:%d", *port)
@@ -92,7 +106,6 @@ func main() {
 	}
 	defer conn.Close()
 
-	args := flag.Args()
 	if len(args) > 0 {
 		// One-shot mode
 		cmd := buildCommand(args)
@@ -276,11 +289,18 @@ func repl(conn *websocket.Conn) {
 
 // screenshotCmd captures the 3D canvas and saves to a PNG file.
 func screenshotCmd() {
-	fs := flag.NewFlagSet("screenshot", flag.ExitOnError)
+	fs := newFlagSet("screenshot")
 	out := fs.String("o", "/tmp/glyph-screenshot.png", "Output PNG file path")
 	wsURL := fs.String("host", "ws://localhost:8080", "WebSocket relay URL")
 	p := fs.Int("port", 0, "Shorthand port")
-	fs.Parse(os.Args[2:])
+	extra, err := parseArgs(fs, os.Args[2:])
+	if err != nil {
+		failParse("screenshot", "glyph3d-cli screenshot [-o FILE] [--host URL] [--port N]", err)
+	}
+	if len(extra) > 0 {
+		failParse("screenshot", "glyph3d-cli screenshot [-o FILE] [--host URL] [--port N]",
+			fmt.Errorf("unexpected argument %q (the output path is -o FILE)", extra[0]))
+	}
 
 	url := *wsURL
 	if *p > 0 {
@@ -350,6 +370,51 @@ func (s *stringListFlag) Set(v string) error {
 	return nil
 }
 
+// serveOptions is the parsed `serve` invocation.
+type serveOptions struct {
+	projectPath string
+	port        int
+	listen      string
+	local       bool
+	relayOnly   bool
+	reach       []string
+}
+
+const serveUsage = "glyph3d-cli serve [dir] [--port N] [--listen ADDR] [--local] [--relay-only] [--reach DIR]..."
+
+// parseServeArgs parses `serve`'s arguments. Flags are honored on either side of the
+// positional directory (see parseArgs); an undefined flag, a bad value, or a second
+// positional is an error the caller turns into a non-zero exit — never a default
+// quietly substituted for what the operator asked for.
+func parseServeArgs(args []string) (serveOptions, error) {
+	opts := serveOptions{projectPath: ".", port: 8080, listen: "0.0.0.0"}
+
+	fs := newFlagSet("serve")
+	p := fs.Int("port", opts.port, "Port to listen on")
+	listen := fs.String("listen", opts.listen, "Address to listen on")
+	local := fs.Bool("local", false, "Serve IDE app from disk instead of embedded (dev mode)")
+	relayOnly := fs.Bool("relay-only", false, "WebSocket relay only, no static files")
+	var reach stringListFlag
+	fs.Var(&reach, "reach", "Extra directory the relay may read/write outside the project root (repeatable). Temp dirs are always reachable.")
+
+	positional, err := parseArgs(fs, args)
+	if err != nil {
+		return opts, err
+	}
+	if len(positional) > 1 {
+		return opts, fmt.Errorf("serve takes at most one directory, got %d: %s",
+			len(positional), strings.Join(positional, " "))
+	}
+	if len(positional) == 1 {
+		opts.projectPath = positional[0]
+	}
+	if *p < 1 || *p > 65535 {
+		return opts, fmt.Errorf("--port %d out of range (1-65535)", *p)
+	}
+	opts.port, opts.listen, opts.local, opts.relayOnly, opts.reach = *p, *listen, *local, *relayOnly, reach
+	return opts, nil
+}
+
 // serveCmd runs the unified HTTP + WebSocket server.
 //
 // The positional argument is the project directory to browse (default: cwd).
@@ -357,34 +422,26 @@ func (s *stringListFlag) Set(v string) error {
 //
 // Usage:
 //
-//	glyph3d-cli serve                    Browse current directory
-//	glyph3d-cli serve ~/some-project     Browse that project
-//	glyph3d-cli serve --port 3000        Custom port
-//	glyph3d-cli serve --local            IDE dev: serve app from disk instead of embedded
-//	glyph3d-cli serve --relay-only       WebSocket relay only, no static files
+//	glyph3d-cli serve                            Browse current directory
+//	glyph3d-cli serve ~/some-project             Browse that project
+//	glyph3d-cli serve --port 3000                Custom port
+//	glyph3d-cli serve ~/proj --port 3000         Flags parse on EITHER side of the dir
+//	glyph3d-cli serve --local                    IDE dev: serve app from disk instead of embedded
+//	glyph3d-cli serve --relay-only               WebSocket relay only, no static files
 func serveCmd() {
-	flagSet := flag.NewFlagSet("serve", flag.ExitOnError)
-	p := flagSet.Int("port", 8080, "Port to listen on")
-	listen := flagSet.String("listen", "0.0.0.0", "Address to listen on")
-	local := flagSet.Bool("local", false, "Serve IDE app from disk instead of embedded (dev mode)")
-	relayOnly := flagSet.Bool("relay-only", false, "WebSocket relay only, no static files")
-	var reach stringListFlag
-	flagSet.Var(&reach, "reach", "Extra directory the relay may read/write outside the project root (repeatable). Temp dirs are always reachable.")
-	flagSet.Parse(os.Args[2:])
-
-	// Project path: positional arg or cwd
-	projectPath := "."
-	if flagSet.NArg() > 0 {
-		projectPath = flagSet.Arg(0)
+	opts, err := parseServeArgs(os.Args[2:])
+	if err != nil {
+		failParse("serve", serveUsage, err)
 	}
+	projectPath, reach := opts.projectPath, opts.reach
 
 	// Legacy relay-only mode
-	if *relayOnly {
+	if opts.relayOnly {
 		fsHandler, err := NewFSHandler(projectPath, reach)
 		if err != nil {
 			log.Fatalf("[relay] project path: %v", err)
 		}
-		if err := RunRelay(*listen, *p, fsHandler); err != nil {
+		if err := RunRelay(opts.listen, opts.port, fsHandler); err != nil {
 			log.Fatalf("[relay] %v", err)
 		}
 		return
@@ -397,12 +454,12 @@ func serveCmd() {
 	}
 
 	cfg := ServerConfig{
-		Host:      *listen,
-		Port:      *p,
+		Host:      opts.listen,
+		Port:      opts.port,
 		FSHandler: fsHandler,
 	}
 
-	if *local {
+	if opts.local {
 		// Dev/test: serve the BUILT app (app/dist) from disk instead of the
 		// embedded copy — rebuild with `cd app && bun run build` and reload
 		// without recompiling the binary. (Live source editing is the Vite dev

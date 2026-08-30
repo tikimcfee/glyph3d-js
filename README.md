@@ -107,7 +107,9 @@ The binary speaks the same command bus as the UI — any verb, from the shell:
 ./glyph3d-cli log.errors                 # query the relay-side log store
 ```
 
-Global flags go *before* the subcommand (e.g. `--port 8099 grid.list`), and
+Global flags go *before* the command verb (e.g. `--port 8099 grid.list`) — one typed
+after the verb is refused, not silently sent along as text. Subcommand flags
+(`serve --port 8121 ~/proj`, `serve ~/proj --port 8121`) work in either order. And
 `glyph3d-cli help` lists the verb map.
 
 ## Development
