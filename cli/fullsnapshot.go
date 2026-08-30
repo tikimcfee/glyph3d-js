@@ -28,7 +28,6 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -69,12 +68,19 @@ type captureResult struct {
 }
 
 func fullsnapshotCmd() {
-	fs := flag.NewFlagSet("fullsnapshot", flag.ExitOnError)
+	const usage = "glyph3d-cli fullsnapshot [-o FILE] [--port N] [--url-substr S] [-v]"
+	fs := newFlagSet("fullsnapshot")
 	out := fs.String("o", "/tmp/glyph-fullsnapshot.png", "Output PNG file path")
 	port := fs.Int("port", 9222, "Firefox remote-debugging-port (BiDi WebSocket)")
 	urlSubstr := fs.String("url-substr", "home.html", "Substring to match in tab URL (picks first match)")
 	verbose := fs.Bool("v", false, "Print all BiDi traffic to stderr")
-	fs.Parse(os.Args[2:])
+	extra, perr := parseArgs(fs, os.Args[2:])
+	if perr != nil {
+		failParse("fullsnapshot", usage, perr)
+	}
+	if len(extra) > 0 {
+		failParse("fullsnapshot", usage, fmt.Errorf("unexpected argument %q (the output path is -o FILE)", extra[0]))
+	}
 
 	// 1. Connect to the BiDi WebSocket. Firefox listens at /session for
 	//    direct BiDi clients; the path is required.

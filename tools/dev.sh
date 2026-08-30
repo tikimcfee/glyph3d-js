@@ -30,8 +30,11 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_DIR="${GLYPH_APP_DIR:-$ROOT/app}"   # THE app: the r3f IDE (panel system + HUD overlay + command bar)
-VITE_PORT="${VITE_PORT:-5173}"
-RELAY_PORT="${RELAY_PORT:-8080}"
+# Exported so the child processes actually see them: vite.config.js reads
+# process.env.VITE_PORT (strictPort — it fails loudly rather than drifting), and
+# the relay takes its port as a flag below.
+export VITE_PORT="${VITE_PORT:-5173}"
+export RELAY_PORT="${RELAY_PORT:-8080}"
 LOG_DIR="${GLYPH_LOG_DIR:-/tmp/glyph3d}"
 mkdir -p "$LOG_DIR"
 VITE_LOG="$LOG_DIR/vite.log"
@@ -84,7 +87,11 @@ start_relay() {
   echo "→ relay: rebuild Go + (re)start on :$RELAY_PORT   (note: this kills live terminals)"
   ( cd "$ROOT" && make )
   kill_port "$RELAY_PORT" relay
-  ( cd "$ROOT" && nohup ./glyph3d-cli serve "$ROOT" --port "$RELAY_PORT" >"$RELAY_LOG" 2>&1 & )
+  # Flags BEFORE the positional project dir. The binary now permutes (cli/args.go),
+  # but this ordering is also correct for any binary that doesn't: Go's flag package
+  # stops at the first non-flag token, so `serve "$ROOT" --port N` used to drop the
+  # port silently and bind the 8080 default — RELAY_PORT looked honored and wasn't.
+  ( cd "$ROOT" && nohup ./glyph3d-cli serve --port "$RELAY_PORT" "$ROOT" >"$RELAY_LOG" 2>&1 & )
   # The relay retries the bind for ~5s if a just-killed predecessor still holds the
   # port (relay.go listenAndServe), so poll the window before declaring failure —
   # otherwise a relay that's simply waiting reads as a false "✗ failed to start".

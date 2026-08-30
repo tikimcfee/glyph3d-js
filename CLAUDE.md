@@ -81,7 +81,12 @@ bundles its deps at build (no importmap). `make all` cross-compiles all platform
 
 **Drive it from the CLI** — the same command bus the UI uses:
 `./glyph3d-cli grid.list`, `./glyph3d-cli file.open path/to/file.js`. Global flags go
-*before* the subcommand (e.g. `--port 8099`).
+*before* the command verb (`--port 8099 grid.list`) — a verb's arguments are free-form
+text for the bus, so a global flag typed after the verb is **refused** rather than
+shipped to the display as text. SUBCOMMAND flags (`serve`, `screenshot`, `hook`,
+`fullsnapshot`) parse on either side of the positional argument, and a flag-shaped
+argument that isn't a defined flag exits non-zero instead of being dropped
+(`cli/args.go`, locked by `tools/cli-flag-order.test.mjs`).
 
 ## Command bus
 
