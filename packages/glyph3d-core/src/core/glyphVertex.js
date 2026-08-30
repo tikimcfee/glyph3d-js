@@ -41,15 +41,15 @@ import { SLOT_STRIDE, S_GLYPH_ID, S_ADVANCE, S_HEIGHT, S_X, S_ROW, S_COL } from 
  *   col 2: color.rgb + alpha     (alpha ≤ 0.01 = invisible — the vertex cull)
  *   col 3: scale.xyz + colorBlend
  *   col 4: clipTop, clipBottom, clipEnabled (grid-local y window; w free)
- *   col 5: far slab [u0, v0, rowsPerTexel, colsPerTexel]
- *   col 6: far meta [hasSlab, …]
- * A row is a full pose + style + far carrier: ~112B, written whole-row via
- * addUpdateRange (partial uploads — the reason this is a buffer, not a texture).
+ * A row is a full pose + style: 80B, written whole-row via addUpdateRange (partial
+ * uploads — the reason this is a buffer, not a texture).
+ *
+ * Cols 5-6 carried the far-texture slab uv + hasSlab flag. The far tier is deleted, so
+ * they are gone rather than left zeroed: dead lanes in a hot per-group row are the
+ * compatibility shim this repo forbids, and the row is 80B instead of 112B.
  */
 export const GROUP_COLS    = 5;   // pose/style cols (0-4)
-export const FAR_COL_SLAB  = 5;
-export const FAR_COL_META  = 6;
-export const GROUP_STRIDE  = 7;   // vec4s per group row
+export const GROUP_STRIDE  = 5;   // vec4s per group row
 
 /**
  * Render modes. Used in two places with the SAME numbers: the per-instance

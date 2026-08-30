@@ -59,9 +59,8 @@ import {
     RENDER_MODE, buildGlyphVertexTransform,
     registerByteSlotsNode, registerByteSlotsMaterial, rebindByteSlots,
     registerGroupMaterial, disposeGroupMaterials,
-    GROUP_STRIDE, FAR_COL_SLAB, FAR_COL_META,
+    GROUP_STRIDE,
 } from './core/glyphVertex.js';
-import { FAR_TEX, FAR_SLAB } from './compute/glyphPipelineReference.js';
 import { LAYER_BAND, withBandBias } from './core/layerBands.js';
 
 const MAX_GROUPS_DEFAULT = PERF_THRESHOLDS.defaultMaxGroups ?? 64;
@@ -72,54 +71,32 @@ const MAX_GROUPS_DEFAULT = PERF_THRESHOLDS.defaultMaxGroups ?? 64;
 const MAX_GROUPS_CAP = 1 << 20;
 
 /**
- * GLOBAL minification / LOD dials — the exact-curve ↔ stable-block handoff that governs how minified
- * text degrades. These were baked float() literals (labelled "tune live in Firefox" but NOT actually
- * live — each change needed an edit + rebuild). Promoted to uniforms so the handoff can be dialed IN
- * MOTION (flicker is only judgeable in motion) and per device (a phone's DPI wants a different handoff
- * than a 4K panel). ONE shared set across every glyph material — a render-quality setting, not per-grid;
- * driven by setGlyphLodParam ← the `glyph.*` entries in app settings.
+ * GLOBAL minification dials — how the exact path degrades as text shrinks. Baked
+ * float() literals once; uniforms now so they can be dialed IN MOTION (flicker is only
+ * judgeable in motion) and per device. ONE shared set across every glyph material — a
+ * render-quality setting, not per-grid; driven by setGlyphLodParam.
  *
- * Footprints are fwidth(glyphUV) = the fraction of a glyph cell one pixel spans (bigger = smaller on
- * screen). The stable IMPOSTOR block is the only flicker-free path (a per-glyph constant has no sub-pixel
- * strokes to alias); the dilation/softening of the exact path only attenuates flicker. So the lever for
- * killing flicker is the lod* band — hand off to the block where the exact path stops being resolvable.
+ * Footprints are fwidth(glyphUV) = the fraction of a glyph cell one pixel spans (bigger =
+ * smaller on screen).
+ *
+ * This was TWELVE dials governing a three-tier handoff (exact curves -> a flat impostor
+ * block -> a prefiltered far-texture mass) with cross-fade bands and a debug tri-state.
+ * That apparatus is deleted; what is left is the continuous behaviour of the one path.
+ *
  *   dilatePx/soften — minification fuzz shape (ink fattening + AA-ramp widening).
- *   minLo/minHi     — fuzz band: onset → full (footprint).
- *   lodLo/lodHi     — exact → block cross-fade band (footprint). Pull DOWN to kill flicker sooner.
- *   density/maxCov  — the impostor block's coverage (curveCount·density, capped).
- *   lodAxisBias     — 0 = switch on the BEST-resolved axis (today: angled text stays exact longer);
- *                     1 = switch on the WORST axis (engage the block on the foreshortened axis that
- *                     actually flickers). The research-flagged lever for angled-surface flicker.
- *   farBias         — mip-LOD bias on the FAR TEXTURE sample (the content-derived text-mass
- *                     that replaces the impostor for slabbed groups). + coarsens (more stable,
- *                     blurrier), − sharpens. The sample's explicit level comes from the far-UV
- *                     footprint in uniform flow — never implicit LOD inside a branch (the
- *                     atlas-map lesson: non-uniform flow clamps to mip 0 → the same moiré).
+ *   minLo/minHi     — fuzz band: onset -> full (footprint). The gap IS the ramp speed.
  *   ditherSpan      — below this alpha, glyphs fade out as a stable screen-door STIPPLE
- *                     (density ∝ alpha) instead of hitting a binary discard cliff. The cliff
- *                     is a hard verdict on camera-float noise: whole glyphs (or coherent
- *                     stripes of them) blink in/out at sub-pixel footprints and grazing
- *                     angles. The hash is screen-space and frame-stable, so a still camera
- *                     gives a still pattern; 0 disables the fade band entirely (cliff at 0).
- *   farLodMax       — the far sample's mip ceiling. The atlas mip chain is atlas-wide:
- *                     past log2(FAR_SLAB) a sample averages ACROSS slabs (every file's mass
- *                     mixed, diluted by empty space — grazing angles reach it fast). Lower
- *                     toward 3-4 to watch the bleed; raise past 6 to re-admit it.
- *   farMode         — debug tri-state: 0 = crossfade (normal), 1 = far-only (the mass
- *                     texture drives coverage+color at EVERY distance — see exactly what
- *                     the far tier contributes), 2 = legacy (far tier disabled — the
- *                     pre-far impostor path, for A/B).
+ *                     (density proportional to alpha) instead of hitting a binary discard
+ *                     cliff. The cliff is a hard verdict on camera-float noise: whole
+ *                     glyphs, or coherent stripes of them, blink in and out at sub-pixel
+ *                     footprints and grazing angles. The hash is screen-space and
+ *                     frame-stable, so a still camera gives a still pattern; 0 disables
+ *                     the fade band entirely (cliff at 0).
  */
 export const GLYPH_LOD_DEFAULTS = Object.freeze({
     dilatePx: 0.75, soften: 0.45,
     minLo: 0.06, minHi: 0.20,
-    lodLo: 0.30, lodHi: 0.60,
-    density: 0.035, maxCov: 0.72,
-    lodAxisBias: 0,
-    farBias: 0,
     ditherSpan: 0.02,
-    farLodMax: 6,     // = log2(FAR_SLAB) at the stock 64-texel slab
-    farMode: 0,
 });
 
 const LOD_UNIFORMS = Object.fromEntries(
@@ -183,8 +160,6 @@ function _buildVertexNode(uniforms) {
     const vEmojiCell  = varying(int(0),   'vEmojiCell');
     // Far-texture varyings: the glyph's grid (row,col) + the group's slab lanes
     const vRowCol     = varying(vec2(0),  'vRowCol');
-    const vFarSlab    = varying(vec4(0),  'vFarSlab');      // [u0, v0, rowsPerTexel, colsPerTexel]
-    const vFarMeta    = varying(vec4(0),  'vFarMeta');      // [hasSlab, …]
 
     const { highlightTex, byteHighlight, groups } = uniforms;
 
@@ -208,9 +183,6 @@ function _buildVertexNode(uniforms) {
         // group's slab lanes — the fragment builds its far UV from these. The far
         // cols ride the SAME group row the transform already reads (cols 5-6).
         vRowCol.assign(t.iRowCol);
-        const fBase = int(t.iGroup).mul(int(GROUP_STRIDE));
-        vFarSlab.assign(groups.element(fBase.add(int(FAR_COL_SLAB))));
-        vFarMeta.assign(groups.element(fBase.add(int(FAR_COL_META))));
 
         // Blend instanceColor*groupColor (multiply, colorBlend=0) toward pure
         // groupColor (replace, colorBlend=1). Explicit lerp a+(b-a)*t — TSL's
@@ -247,7 +219,7 @@ function _buildVertexNode(uniforms) {
         return t.clipPos;
     });
 
-    return { vertexFn, vColor, vGroupAlpha, vAddedColor, vFillAmount, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell, vRowCol, vFarSlab, vFarMeta };
+    return { vertexFn, vColor, vGroupAlpha, vAddedColor, vFillAmount, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell, vRowCol };
 }
 
 /**
@@ -270,8 +242,8 @@ function _buildVertexNode(uniforms) {
  * @param {Object} uniforms - { curveTex, emojiTex, emojiCols }
  */
 function _buildOutputNode(varyings, uniforms) {
-    const { vColor, vGroupAlpha, vAddedColor, vFillAmount, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell, vRowCol, vFarSlab, vFarMeta } = varyings;
-    const { curveTex, emojiTex, emojiCols, emojiRows, frameTex, frameCols, frameRows, farTex } = uniforms;
+    const { vColor, vGroupAlpha, vAddedColor, vFillAmount, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell, vRowCol } = varyings;
+    const { curveTex, emojiTex, emojiCols, emojiRows, frameTex, frameCols, frameRows } = uniforms;
 
     // Minification tuning knobs — now LIVE uniforms (GLYPH_LOD_DEFAULTS / setGlyphLodParam), dialable
     // via app settings. DILATE_PX = half-width, in pixels, of the stroke fattening applied at full
@@ -345,40 +317,21 @@ function _buildOutputNode(varyings, uniforms) {
 
         }).Else(() => {
             // ── Slug bezier-coverage branch ─────────────────────────────────────
-            // FAR-TEXTURE SAMPLE — HOISTED to uniform flow, before every branch.
-            // The explicit mip level is derived from the far-UV footprint (fwidth)
-            // and fwidth is only valid in uniform control flow: sampled inside the
-            // fwLod If below, the implicit LOD would clamp to mip 0 and point-sample
-            // the atlas — reproducing the exact moiré this texture exists to kill
-            // (the atlas-map lesson). The texel carries avg LINEAR syntax color in
-            // rgb and avg ink coverage in a (see compute/glyphPipelineReference's
-            // FAR block); slab-less groups (classic fields, atlas exhaustion) read
-            // hasFar=0 and take the impostor fallback below, unchanged.
-            // farMode (debug): 2 = LEGACY — the far tier is masked off (impostor path,
-            // the pre-far behavior for A/B); 1 = far-only — fwLod is forced past LOD_HI
-            // below so the mass texture drives coverage+color at every distance.
-            const hasFar = vFarMeta.x.greaterThan(float(0.5))
-                .and(int(LOD_UNIFORMS.farMode).notEqual(int(2)));
-            const farRpt = vFarSlab.z.max(float(1e-6));
-            const farCpt = vFarSlab.w.max(float(1e-6));
-            // Slab-local UV of this fragment: the glyph's grid (row, col) + its
-            // sub-cell fraction (the quad's top maps toward the row's start, so the
-            // v fraction runs inverted), texels normalized to [0,1] within the slab.
-            const farLocal = vec2(
-                vRowCol.y.add(vGlyphUV.x).div(farCpt),
-                vRowCol.x.add(float(1).sub(vGlyphUV.y)).div(farRpt),
-            ).div(float(FAR_SLAB)).clamp(vec2(0), vec2(1));
-            const farUV = vFarSlab.xy.add(farLocal.mul(float(FAR_SLAB / FAR_TEX)));
-            const fwFar = fwidth(farUV).mul(float(FAR_TEX));   // atlas texels per pixel
-            // CLAMP the level to the slab's own mip floor (farLodMax = log2(FAR_SLAB)
-            // by default): the mip chain is atlas-wide, so anything past that averages
-            // ACROSS slabs — every file's mass mixed and diluted by empty space, and
-            // the grid blanks to a faint smear. Grazing angles drive fwFar off the end
-            // of the chain (foreshortening ~1/cos), which is why angled walls blinked
-            // out entirely; a file's coarsest valid sample is its own 1-texel mass.
-            const farLod = fwFar.x.max(fwFar.y).max(float(1)).log2().add(LOD_UNIFORMS.farBias)
-                .min(LOD_UNIFORMS.farLodMax);
-            const farTexel = farTex.sample(farUV).level(farLod).toVar('farTexel');
+            // ONE PATH. There were three — exact beziers, a flat "impostor" block
+            // approximated from the curve count, and a prefiltered far-texture mass —
+            // selected by footprint with cross-fades between them and twelve live dials.
+            // All of it existed to stop minified text moiré-flashing, and per Ivan it
+            // never paid off. The file said so itself, a few lines above this one: the
+            // breakup is "structural to single-sample coverage; the standing fix for
+            // that regime is a mipped, anisotropically-filtered glyph-atlas LOD,
+            // deferred for now." Three tiers were built instead of that, and a shipped
+            // `farMode` debug tri-state with a LEGACY setting "for A/B" recorded that
+            // the experiment never concluded.
+            //
+            // What stays is the exact analytic path and its CONTINUOUS minification
+            // ramp (dilate + soften below), which is not a tier and not a branch — it
+            // is how single-sample coverage antialiases as it shrinks. When the real
+            // fix lands it will be one mechanism, not a fourth tier.
 
             // Empty glyph (space / .notdef = 0 curves) → no ink, so the fast path discards it…
             // EXCEPT when it carries a background FILL (vFillAmount>0): a space inside a highlight
@@ -386,7 +339,7 @@ function _buildOutputNode(varyings, uniforms) {
             // slab: the text MASS is continuous there — a discarded space is a hole in the mass,
             // so zero-curve glyphs survive to sample the far texture (its near-zero coverage still
             // culls truly empty texels at the outAlpha discard below).
-            Discard(vCurveCount.equal(int(0)).and(vFillAmount.equal(float(0))).and(hasFar.not()));
+            Discard(vCurveCount.equal(int(0)).and(vFillAmount.equal(float(0))));
 
             // Pixel footprint in glyph-UV space, per axis. fwidth is the screen-space
             // derivative magnitude, so AA is resolution-independent.
@@ -412,23 +365,7 @@ function _buildOutputNode(varyings, uniforms) {
             // nodes the math already used (were float() literals). Tune in motion via app settings.
             const MIN_LO = LOD_UNIFORMS.minLo;       // fuzz onset (~16px glyph at the default 0.06)
             const MIN_HI = LOD_UNIFORMS.minHi;       // fuzz full  (~5px glyph at the default 0.20)
-            const LOD_LO      = LOD_UNIFORMS.lodLo;  // begin fading exact → impostor (~3px at 0.30)
-            const LOD_HI      = LOD_UNIFORMS.lodHi;  // fully impostor beyond here (~1.5px at 0.60)
-            const LOD_DENSITY = LOD_UNIFORMS.density; // curveCount → coverage (cheap ink-density proxy)
-            const LOD_MAXCOV  = LOD_UNIFORMS.maxCov;  // cap so the densest glyphs don't fully saturate
             const fwMax = fw.x.max(fw.y);
-            // LOD switch uses the BEST-resolved axis (min footprint), not the worst.
-            // An angled page foreshortens one axis, which spikes fwMax and would flip
-            // readable angled text to the impostor too early (the threshold appears to
-            // move with viewing angle). fwMin only crosses the cutoff when the glyph is
-            // small in BOTH axes — i.e. genuinely tiny — so the switch tracks real
-            // on-screen size, not the camera angle. (fwMax still drives AA dilation below,
-            // where worst-axis IS what we want for moiré.)
-            const fwMin = fw.x.min(fw.y);
-            // The footprint that drives the exact→block LOD switch. lodAxisBias lerps it from the
-            // BEST-resolved axis (fwMin, 0 = today: angled text keeps the exact path longer) toward
-            // the WORST axis (fwMax, 1: engage the block on the foreshortened axis that flickers).
-            const fwLod = fwMin.add(fwMax.sub(fwMin).mul(LOD_UNIFORMS.lodAxisBias));
             const m = fwMax.sub(MIN_LO).div(MIN_HI.sub(MIN_LO)).clamp(0, 1).toVar();
             m.assign(m.mul(m).mul(float(3).sub(m.mul(2)))); // smoothstep — continuous derivative
 
@@ -438,61 +375,27 @@ function _buildOutputNode(varyings, uniforms) {
             const dilate = m.mul(DILATE_PX);
             const invD   = vec2(1).div(fw).mul(float(1).sub(m.mul(SOFTEN)));
 
-            // LOD impostor: once a glyph shrinks past the point where its strokes can
-            // be resolved (~2px footprint — the same regime the dilation note above
-            // calls an "unreadable steady silhouette"), the per-curve bezier loop is
-            // pure waste — it runs MAX_CURVES iterations with 2 texture loads each, per
-            // fragment, only to produce a fuzzy blob. Past LOD_HI we skip the loop
-            // entirely and approximate coverage from the glyph's curve count (a cheap
-            // ink-density proxy: denser glyphs read darker). This is the LOD that lets
-            // an entire repo render at once — distant files become cheap colored
-            // text-mass, and the exact analytic path returns as the camera approaches.
-            // Impostor coverage (cheap, no loop): curve count as an ink-density proxy.
-            // Now the FALLBACK for slab-less groups — a slabbed group's far coverage
-            // comes from the prefiltered texture instead of this content-blind constant.
-            const impostorCov = float(vCurveCount).mul(LOD_DENSITY).clamp(0, LOD_MAXCOV);
-            const farCov = hasFar.select(farTexel.a, impostorCov);
-            // The far texel's rgb is LINEAR (the scatter linearizes before averaging) —
-            // re-encode to the authored-sRGB space the downstream composite speaks
-            // (its final pow(2.2) round-trips it back). Fallback: the glyph's own color.
-            const vColorFar = hasFar.select(farTexel.rgb.pow(vec3(0.4545)), vColor);
             const cov = float(0).toVar();
-            const colSel = vColor.toVar('colSel');
-            // farMode 1 (far-only): force the far branch at every footprint — the debug
-            // view of exactly what the mass texture contributes.
-            const fwLodEff = int(LOD_UNIFORMS.farMode).equal(int(1)).select(float(1e9), fwLod);
-            If(fwLodEff.greaterThan(LOD_HI), () => {
-                cov.assign(farCov);        // far: strokes unresolvable → prefiltered mass
-                colSel.assign(vColorFar);  // …in the mass's average color
-            }).Else(() => {
-                const coverage = float(0).toVar();
-                Loop(MAX_CURVES, ({ i }) => {
-                    If(i.greaterThanEqual(vCurveCount), () => { Break(); });
+            const coverage = float(0).toVar();
+            Loop(MAX_CURVES, ({ i }) => {
+                If(i.greaterThanEqual(vCurveCount), () => { Break(); });
 
-                    // 2 texels per curve: [P0.xy, P1.xy] then [P2.xy, _, _].
-                    const ci = vCurveStart.add(i).mul(2);
-                    const t0 = textureLoad(curveTex, ivec2(ci.mod(1024), ci.div(1024)));
-                    const t1 = textureLoad(curveTex, ivec2(ci.add(1).mod(1024), ci.add(1).div(1024)));
+                // 2 texels per curve: [P0.xy, P1.xy] then [P2.xy, _, _].
+                const ci = vCurveStart.add(i).mul(2);
+                const t0 = textureLoad(curveTex, ivec2(ci.mod(1024), ci.div(1024)));
+                const t1 = textureLoad(curveTex, ivec2(ci.add(1).mod(1024), ci.add(1).div(1024)));
 
-                    // Unpack uint16 → [0,1], translate so the sample point is the origin.
-                    const p0 = vec2(float(t0.x), float(t0.y)).div(65535).sub(vGlyphUV);
-                    const p1 = vec2(float(t0.z), float(t0.w)).div(65535).sub(vGlyphUV);
-                    const p2 = vec2(float(t1.x), float(t1.y)).div(65535).sub(vGlyphUV);
+                // Unpack uint16 → [0,1], translate so the sample point is the origin.
+                const p0 = vec2(float(t0.x), float(t0.y)).div(65535).sub(vGlyphUV);
+                const p1 = vec2(float(t0.z), float(t0.w)).div(65535).sub(vGlyphUV);
+                const p2 = vec2(float(t1.x), float(t1.y)).div(65535).sub(vGlyphUV);
 
-                    coverage.addAssign(computeCoverage(invD.x, dilate, p0, p1, p2));
-                    coverage.addAssign(computeCoverage(invD.y, dilate, rot90(p0), rot90(p1), rot90(p2)));
-                });
-                // Average the two rays; fills accumulate positive under y-up normalization.
-                const exactCov = coverage.mul(0.5).clamp(0, 1);
-                // Cross-fade exact → far across [LOD_LO, LOD_HI] so the quality
-                // switch has no hard seam (the diagonal line that otherwise sweeps an
-                // angled wall). smoothstep ramp; manual mix to avoid extra imports.
-                // Color rides the same ramp: per-glyph hue → the mass's average hue.
-                const t = fwLodEff.sub(LOD_LO).div(LOD_HI.sub(LOD_LO)).clamp(0, 1).toVar();
-                t.assign(t.mul(t).mul(float(3).sub(t.mul(2))));
-                cov.assign(exactCov.add(farCov.sub(exactCov).mul(t)));
-                colSel.assign(vColor.add(vColorFar.sub(vColor).mul(t)));
+                coverage.addAssign(computeCoverage(invD.x, dilate, p0, p1, p2));
+                coverage.addAssign(computeCoverage(invD.y, dilate, rot90(p0), rot90(p1), rot90(p2)));
             });
+            // Average the two rays; fills accumulate positive under y-up normalization.
+            cov.assign(coverage.mul(0.5).clamp(0, 1));
+
             // Highlight has two modes, carried by the highlight texel's alpha (vFillAmount):
             //   TINT (alpha 0, legacy): an additive glyph tint — vColor·cov + vAddedColor.
             //   FILL (alpha >0): a background BAR — the cell rect fills with vAddedColor at
@@ -521,7 +424,7 @@ function _buildOutputNode(varyings, uniforms) {
             // i.e. k=(1−cov) so cov=0 is pure fill and cov=1 is pure ink. Explicit lerp — NOT TSL
             // .mix() (it returns the wrong operand at t=0; see the vertex colorBlend note).
             const addK = isFill.select(float(1).sub(cov), float(1));
-            const finalColor = colSel.mul(cov).add(vAddedColor.mul(addK)).clamp(0, 1);
+            const finalColor = vColor.mul(cov).add(vAddedColor.mul(addK)).clamp(0, 1);
             // Glyph colors are authored as display (sRGB) values; decode to linear so
             // the renderer's default sRGB output-encode returns them to the authored
             // value — consistent with the THREE.Color-managed rest of the scene
@@ -551,7 +454,9 @@ function _buildOutputNode(varyings, uniforms) {
 function _buildOccluderOutputNode(varyings) {
     const { vColor, vGroupAlpha, vCurveCount } = varyings;
     return Fn(() => {
-        // Ink-density proxy (matches the impostor branch in _buildOutputNode).
+        // Ink-density proxy — this occluder pass is depth-only and deliberately cheap.
+        // (It matched the impostor branch in _buildOutputNode; that branch is gone, so
+        // these constants are this pass's own now and answer to nothing else.)
         const dens = float(vCurveCount).mul(0.035).clamp(0, 0.72);
         const rgb  = vColor.mul(dens).mul(vGroupAlpha).clamp(0, 1);
         // Opaque: alpha = 1 writes depth and occludes; no Discard keeps early-Z on.
@@ -778,11 +683,8 @@ function _getSharedFieldMaterial(kind) {
     const frameColsNode    = _fieldUniform(1, (f) => f._frameCols || 1);
     const frameRowsNode    = _fieldUniform(1, (f) => f._frameRows || 1);
     const byteSlotsNode    = isByte ? _fieldSlots() : null;
-    // The sampled far slab atlas (filterable, mipped — set by the mega-field from
-    // the arena's FarTextAtlas). The per-group slab LANES ride the group buffer.
-    const farTexNode       = _fieldTexture(_makePlaceholderRGBATexture(), '_farAtlasTexture');
 
-    const { vertexFn, vColor, vGroupAlpha, vAddedColor, vFillAmount, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell, vRowCol, vFarSlab, vFarMeta } =
+    const { vertexFn, vColor, vGroupAlpha, vAddedColor, vFillAmount, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell, vRowCol } =
         _buildVertexNode({
             groups:         groupsNode,
             maxGroups:      maxGroupsNode,
@@ -797,11 +699,10 @@ function _getSharedFieldMaterial(kind) {
     const outputNode = kind === 'occluder'
         ? _buildOccluderOutputNode({ vColor, vGroupAlpha, vCurveCount })
         : _buildOutputNode(
-            { vColor, vGroupAlpha, vAddedColor, vFillAmount, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell, vRowCol, vFarSlab, vFarMeta },
+            { vColor, vGroupAlpha, vAddedColor, vFillAmount, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell, vRowCol },
             {
                 curveTex: curveTexNode, emojiTex: emojiTexNode, emojiCols: emojiColsNode, emojiRows: emojiRowsNode,
                 frameTex: frameTexNode, frameCols: frameColsNode, frameRows: frameRowsNode,
-                farTex: farTexNode,
             }
         );
 
@@ -921,11 +822,6 @@ export default class GlyphField {
         this._highlightSize     = 0;
         this._highlightTexWidth = 1024;
 
-        // The SAMPLED far slab atlas is external (the arena's FarTextAtlas, handed
-        // to the mega-field — shared across every view); per-group slab lanes ride
-        // the group buffer rows above.
-        this._farAtlasTexture = null;
-
         // Text registry (the shape PickingSystem.resolveGlyph reads)
         this.renderedTexts     = new Map();
         this.nextId            = 1;
@@ -1017,41 +913,7 @@ export default class GlyphField {
         attr.needsUpdate = true;
     }
 
-    /**
-     * Arm a group's far slab — the fragment's far-UV lanes. u0/v0 are the slab's
-     * NORMALIZED atlas origin; rowsPerTexel/colsPerTexel map the file's grid into
-     * the 64×64 slab. These are the SAME values the far kernels scattered by (the
-     * arena's arming pass writes both) — the mapping only has to be consistent.
-     */
-    setGroupFarSlab(groupId, u0, v0, rowsPerTexel, colsPerTexel) {
-        const g = groupId | 0;
-        if (g < 0 || g >= this._maxGroups) return;
-        const b = (g * GROUP_STRIDE + FAR_COL_SLAB) * 4;
-        const d = this._groupData;
-        d[b] = u0; d[b + 1] = v0; d[b + 2] = rowsPerTexel; d[b + 3] = colsPerTexel;
-        d[b + 4] = 1;   // col 6 lane 0: hasSlab
-        this._touchGroup(g);
-    }
 
-    /** Disarm a group's far slab (dispose / atlas release) → the impostor fallback. */
-    clearGroupFarSlab(groupId) {
-        const g = groupId | 0;
-        if (g < 0 || g >= this._maxGroups) return;
-        const b = (g * GROUP_STRIDE + FAR_COL_SLAB) * 4;
-        this._groupData.fill(0, b, b + 8);   // cols 5-6
-        this._touchGroup(g);
-    }
-
-    /** Single-group fields: the whole field's far slab rides group 0 (the arena arms
-     *  through this facade — MegaFieldView forwards to its own groupId instead). */
-    setFarSlab(u0, v0, rowsPerTexel, colsPerTexel) {
-        this.setGroupFarSlab(0, u0, v0, rowsPerTexel, colsPerTexel);
-    }
-
-    /** The single-group disarm (see setFarSlab). */
-    clearFarSlab() {
-        this.clearGroupFarSlab(0);
-    }
 
     // ── Highlight texture ─────────────────────────────────────────────────────
 
@@ -1669,7 +1531,7 @@ export default class GlyphField {
         if (!(groupId > 0) || groupId >= this._maxGroups) return;
         if (this._freeGroups.includes(groupId)) return;   // double-release must not double-hand-out
         const base = groupId * GROUP_STRIDE * 4;
-        this._groupData.fill(0, base, base + GROUP_STRIDE * 4);   // whole row: pose dark + far disarmed
+        this._groupData.fill(0, base, base + GROUP_STRIDE * 4);   // whole row: pose dark
         this._groupData[base + 4 + 3] = 1.0;   // quat.w — keep the row a valid pose
         this._touchGroup(groupId);
         this._freeGroups.push(groupId);
@@ -1678,7 +1540,7 @@ export default class GlyphField {
     /** @private a reused row starts exactly like a freshly grown one. */
     _resetGroupRow(g) {
         const base = g * GROUP_STRIDE * 4;
-        this._groupData.fill(0, base, base + GROUP_STRIDE * 4);   // clears clip + far lanes too
+        this._groupData.fill(0, base, base + GROUP_STRIDE * 4);   // clears clip lanes too
         this._groupData[base + 4 + 3]  = 1.0;  // quat identity
         this._groupData[base + 8]      = 1.0;  // color 1,1,1,1
         this._groupData[base + 8 + 1]  = 1.0;

@@ -77,9 +77,7 @@ import GlyphPipelineKernels, { ARENA_MAX_BYTES } from './glyphPipelineKernels.js
  *  The per-ITEM bound in stage() is a DIFFERENT rule and still applies — see there. */
 const ORDINAL_EXACT_BYTES = ARENA_MAX_BYTES;
 import { runPipeline, paginate as refPaginate, boundsReduce as refBoundsReduce, deriveStride, SLOT_STRIDE,
-    FAR_ITEM_STRIDE, FI_SLAB_X, FI_SLAB_Y, FI_ROWS_PER_TEXEL, FI_COLS_PER_TEXEL, FI_DIRTY,
-    FAR_TEX, FAR_SLAB, S_X, S_Y, S_Z, S_ROW, S_COL, S_FLAGS, S_BASE_X, F_LEADER, laneValue} from './glyphPipelineReference.js';
-import FarTextAtlas, { buildFarInkTable } from '../core/FarTextAtlas.js';
+    S_X, S_Y, S_Z, S_ROW, S_COL, S_FLAGS, S_BASE_X, F_LEADER, laneValue} from './glyphPipelineReference.js';
 import { buildLiveTrie, encodeMisses } from './liveTrie.js';
 import { loadStats } from '../core/loadStats.js';
 
@@ -130,20 +128,7 @@ export default class GlyphPipelineArena {
         this._kernels = new GlyphPipelineKernels(renderer, {
             maxBytes: this.maxBytes, maxItems: this.maxItems, trie: this._trie,
         });
-        this._kernels.setFarInk(buildFarInkTable(atlas._live?._slugData?.glyphMapTexture));
 
-        // ── Far-texture (minified text-mass LOD) state ────────────────────────────
-        // farText: the sampled slab atlas (one per arena — the mega-field samples it).
-        // _farItemsCPU/_farDirtyCPU: the CPU image of the kernels' far lanes, uploaded
-        // per regen batch via setFarItems. _farDirtySet: item TABLE ROWS awaiting a
-        // regen (scatter+normalize+blit), fed by two edges — the bounds sync (content
-        // moved/laid) and the colorizer's repaint (markFarDirty). Slab ownership:
-        // item._farSlab, acquired at first extent landing, released at dispose.
-        this.farText = new FarTextAtlas();
-        this._farItemsCPU = new Float32Array(this.maxItems * FAR_ITEM_STRIDE).fill(-1);
-        this._farDirtyCPU = new Uint32Array(this.maxItems);
-        this._farDirtySet = new Set();
-        this._farRegenPromise = null;
 
         /** Every staged item, live or dead. The index IS the itemIndex — never spliced. */
         this._items = [];
@@ -421,7 +406,6 @@ export default class GlyphPipelineArena {
                 item.field = null;
                 item.dead = true;
                 item._laidResolve?.();
-                arena._releaseFar(item);
                 arena._reclaim(item);
             },
         };
@@ -600,134 +584,6 @@ export default class GlyphPipelineArena {
     }
 
     /**
-     * Arm (or re-arm) the far-texture lanes for every bounds-landed item: acquire a
-     * slab on first landing, derive rows/cols-per-texel from the GPU's own extent
-     * record, write the kernels' lanes + the view's group carrier, and queue a regen.
-     * EVERY bounds sync re-arms — content may have moved (flush/edit/restage) and the
-     * ratios may have changed (repaginate/refold) — so this is also THE dirty edge
-     * for content; the other edge is the colorizer (markFarDirty).
-     * @private
-     */
-    _armFarItems() {
-        const cellW = (this.atlas.getCharSize()?.width || 1) * this.worldScale || 1;
-        let armed = 0;
-        for (let row = 0; row < this._sorted.length; row++) {
-            const item = this._sorted[row];
-            const b = item.gpuBounds;
-            if (item.dead || !item.field || !b || !(b.totalRows > 0)) continue;
-            if (item._farSlab === undefined) item._farSlab = this.farText.acquire();
-            if (item._farSlab < 0) continue;   // atlas full — the impostor fallback
-            const { x: slabX, y: slabY } = FarTextAtlas.slabOrigin(item._farSlab);
-            const rpt = b.totalRows / FAR_SLAB;
-            // Widest row in GLYPH columns ≈ world extent / cell advance (monospace;
-            // wide glyphs skew it — calibration only, and BOTH sides (kernel scatter,
-            // fragment UV) consume the same value, so the mapping stays consistent).
-            const cpt = Math.max(1, (b.maxRowExtent || cellW) / cellW) / FAR_SLAB;
-            const fb = row * FAR_ITEM_STRIDE;
-            const lanes = this._farItemsCPU;
-            lanes[fb + FI_SLAB_X] = slabX;
-            lanes[fb + FI_SLAB_Y] = slabY;
-            lanes[fb + FI_ROWS_PER_TEXEL] = rpt;
-            lanes[fb + FI_COLS_PER_TEXEL] = cpt;
-            lanes[fb + FI_DIRTY] = 1;
-            // The fragment's carrier: normalized slab origin + the same ratios.
-            item.field.setFarSlab?.(slabX / FAR_TEX, slabY / FAR_TEX, rpt, cpt);
-            this._farDirtySet.add(row);
-            armed++;
-        }
-        if (armed > 0) this.requestFarRegen();
-    }
-
-    /**
-     * The colorizer's dirty edge: a repainted view's far content is stale (colors
-     * arrive AFTER the flush that laid the bytes). No-op until the item is armed
-     * (pre-extent repaints are caught by the arming pass itself).
-     * @param {Object} view - the MegaFieldView whose colors moved
-     */
-    markFarDirty(view) {
-        for (let row = 0; row < this._sorted.length; row++) {
-            const item = this._sorted[row];
-            if (item.field !== view) continue;
-            if (item._farSlab === undefined || item._farSlab < 0) return;
-            this._farItemsCPU[row * FAR_ITEM_STRIDE + FI_DIRTY] = 1;
-            this._farDirtySet.add(row);
-            this.requestFarRegen();
-            return;
-        }
-    }
-
-    /**
-     * The coalescing far-regen gate — one scatter+normalize+blit per macrotask window,
-     * mirroring requestRepaginate. The batch scatters EXACTLY the slabs it normalizes
-     * (the accumulator's self-cleaning invariant: normalize resets what scatter filled).
-     */
-    requestFarRegen() {
-        if (!this._farRegenPromise) {
-            this._farRegenPromise = new Promise((resolve) => {
-                setTimeout(() => {
-                    this._farRegenPromise = null;
-                    this._runFarRegen().then(resolve, resolve);
-                }, 0);
-            });
-        }
-        return this._farRegenPromise;
-    }
-
-    /** @private */
-    async _runFarRegen() {
-        if (this._farDirtySet.size === 0) return;
-        if (this.renderer._isDeviceLost === true) { this._farDirtySet.clear(); return; }
-        const rows = [...this._farDirtySet]
-            .filter((r) => r < this._sorted.length && !this._sorted[r].dead
-                && this._sorted[r]._farSlab >= 0);
-        this._farDirtySet.clear();
-        if (rows.length === 0) return;
-        this._farDirtyCPU.set(new Uint32Array(this.maxItems));   // zero, then the batch's rows
-        for (let i = 0; i < rows.length; i++) this._farDirtyCPU[i] = rows[i];
-        this._kernels.setFarItems(this._farItemsCPU, this._farDirtyCPU, rows.length);
-        const t0 = performance.now();
-        this._kernels.runFar();
-        loadStats.kernelDispatches += 2;
-        loadStats.kernelMs += performance.now() - t0;
-        // The regened rows' dirty lanes clear CPU-side (the next setFarItems uploads
-        // them) — a later batch must never re-scatter a slab it won't renormalize.
-        for (const r of rows) this._farItemsCPU[r * FAR_ITEM_STRIDE + FI_DIRTY] = 0;
-        const packed = await this._kernels.readFarPacked();
-        for (const r of rows) {
-            const slab = this._sorted[r]?._farSlab;
-            if (slab >= 0) this.farText.blitSlab(packed, slab);
-        }
-    }
-
-    /**
-     * Rebuild the gid→ink table from the CURRENT dials (FarTextAtlas.farInkParams),
-     * push it to the kernels, and regen every armed slab — the far mass's exposure
-     * dial, live. No-op when nothing is armed.
-     */
-    refreshFarInk() {
-        const table = buildFarInkTable(this.atlas._live?._slugData?.glyphMapTexture);
-        this._kernels.updateFarInk(table);
-        for (let row = 0; row < this._sorted.length; row++) {
-            const item = this._sorted[row];
-            if (item.dead || item._farSlab === undefined || item._farSlab < 0) continue;
-            this._farItemsCPU[row * FAR_ITEM_STRIDE + FI_DIRTY] = 1;
-            this._farDirtySet.add(row);
-        }
-        if (this._farDirtySet.size > 0) this.requestFarRegen();
-        return this;
-    }
-
-    /** Release an item's far slab (dispose/restage) — the group carrier retires with
-     *  the view itself (its own dispose clears it; a dead group's texel is never
-     *  sampled, since the vertex cull drops the group first). @private */
-    _releaseFar(item) {
-        if (item._farSlab !== undefined) {
-            this.farText.release(item._farSlab);
-            item._farSlab = undefined;
-        }
-    }
-
-    /**
      * Repack the kernels' item table to the LIVE set, sorted by byteStart (the binary
      * search's invariant), and hand each item its CURRENT row. `_row` always describes
      * the GPU's table as it stands — membership changes only materialize here, so a
@@ -798,9 +654,6 @@ export default class GlyphPipelineArena {
                     if (!item.dead && item.field) item.field.setLayoutExtent(extentOf(list[i]));
                     item._laidResolve?.();
                 }
-                // The far-texture's content edge: (re)arm every bounds-landed item and
-                // queue a regen (content moved/laid; ratios from the fresh extents).
-                this._armFarItems();
             })
             .catch(() => {
                 for (const item of rows) item._laidResolve?.();
@@ -878,22 +731,10 @@ export default class GlyphPipelineArena {
         const fresh = new GlyphPipelineKernels(this.renderer, {
             maxBytes: nextBytes, maxItems: nextItems, trie: this._trie,
         });
-        fresh.setFarInk(buildFarInkTable(this.atlas._live?._slugData?.glyphMapTexture));
         this._kernels.dispose();
         this._kernels = fresh;
         this.maxBytes = nextBytes;
         this.maxItems = nextItems;
-        // The far lane arrays resize with the item capacity (slabX = −1 for the new
-        // rows); slabs survive (the sampled atlas is unaffected) — the next bounds
-        // sync re-arms every live item's lanes at their new table rows and regens.
-        if (nextItems * FAR_ITEM_STRIDE > this._farItemsCPU.length) {
-            const grown = new Float32Array(nextItems * FAR_ITEM_STRIDE).fill(-1);
-            grown.set(this._farItemsCPU);
-            this._farItemsCPU = grown;
-            const grownDirty = new Uint32Array(nextItems);
-            this._farDirtyCPU = grownDirty;
-        }
-        this._farDirtySet.clear();
         // Fresh kernels: the next flush re-syncs the table and re-uploads every live
         // item's bytes. Rows drop with the old table — a setItemPage before that flush
         // skips the kernel write (the flush packs the item's current page).
@@ -935,8 +776,6 @@ export default class GlyphPipelineArena {
     dispose() {
         this._kernels?.dispose();
         this._kernels = null;
-        this.farText?.dispose();
-        this.farText = null;
         this._items = [];
         this._byteTotal = 0;
         this._free = [];

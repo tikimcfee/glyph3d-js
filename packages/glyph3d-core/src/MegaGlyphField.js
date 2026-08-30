@@ -89,10 +89,6 @@ export class MegaGlyphField {
         // here and the vertex cull drops them — a range the arena's free-list hands
         // to a NEW item only ever lights up through that item's own view attach.
         this.field.setGroupAlpha(0, 0);
-        // The far-texture (minified text mass): ONE sampled slab atlas per arena,
-        // shared by every view; the field's per-group slab lanes are its own
-        // (setGroupFarSlab, armed by the arena's far pass).
-        this.field._farAtlasTexture = arena.farText.texture;
         // (Highlight rides the capacity-sized instanceHighlight ATTRIBUTE — allocated
         // with the other per-byte lanes; a capacity-sized texture blew
         // maxTextureDimension2D at real-workspace scale and re-uploaded whole per write.)
@@ -212,12 +208,6 @@ export class MegaGlyphField {
         const geom = this.field.instanceMesh.geometry;
         const count = Math.max(geom.instanceCount, slotBase + byteLength);
         this.field.attachBytePipeline(pipeline, count);
-        // The far scatter's color source: a compute-readable view of the (stride-4,
-        // storage-class) instanceColor lane. Idempotent; identity only changes with
-        // the kernels themselves (arena realloc), which is exactly when every view
-        // re-attaches — so the fresh kernels always land the live attribute here.
-        this.arena.kernels.setFarColorSource(geom.attributes.instanceColor);
-
         if (!sameRange) {
             // The old range's paint lanes hold the colorizer's + highlights' finished
             // work — remember where before tombstoning, to CARRY it (below).
@@ -564,7 +554,6 @@ export class MegaFieldView {
         const start = Math.max(0, local);
         const n = Math.min(local + count, this.byteCount) - start;
         if (n > 0) this.mega.field.setGlyphColorRange(this.slotBase + start, n, color);
-        if (n > 0) this.mega.arena.markFarDirty(this);
     }
 
     /** The whole view's colors from a FILE-byte palette in ONE write: palette[i]
@@ -573,7 +562,6 @@ export class MegaFieldView {
         if (this.byteCount <= 0) return;
         const n = Math.min(this.byteCount, palette.length - this.sourceBase);
         if (n > 0) this.mega.field.setGlyphPaletteRange(this.slotBase, palette, this.sourceBase, n, lut);
-        if (n > 0) this.mega.arena.markFarDirty(this);
     }
 
     /** FILE-byte slot → shared highlight texture (hover tint, highlight.* verbs). */
@@ -643,19 +631,6 @@ export class MegaFieldView {
         this._worldBoxDirty = true;
     }
 
-    /** The arena's far-slab arm — this view's group row in the far carrier texture
-     *  (the fragment's far-UV lanes). */
-    setFarSlab(u0, v0, rowsPerTexel, colsPerTexel) {
-        if (!this.groupId) return;
-        this.mega.field.setGroupFarSlab(this.groupId, u0, v0, rowsPerTexel, colsPerTexel);
-    }
-
-    /** The far slab is gone (dispose/atlas release) → the impostor fallback. */
-    clearFarSlab() {
-        if (!this.groupId) return;
-        this.mega.field.clearGroupFarSlab(this.groupId);
-    }
-
     /** Drop this view's content (eviction) — the range tombstones to the dead group. */
     clear() {
         this.mega._tombstone(this);
@@ -665,7 +640,6 @@ export class MegaFieldView {
         this.dead = true;
         this._applyAlpha();
         this.mega._tombstone(this);   // ranges point at DEAD group 0 before the id recycles
-        this.clearFarSlab();
         const i = this.mega.views.indexOf(this);
         if (i >= 0) this.mega.views.splice(i, 1);
         // The group id RECYCLES (GlyphField free-list): safe because the range

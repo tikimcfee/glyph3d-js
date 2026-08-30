@@ -121,13 +121,8 @@ const row = (g, col, lane) => field._groupData[(g * GROUP_STRIDE + col) * 4 + la
     f3.setGroupOffset(g, { x: 9, y: 9, z: 9 });
     ok(attr.updateRanges.length === 1, 'after the upload clears ranges, the next touch re-marks');
 
-    f3.setGroupFarSlab(g, 0.25, 0.5, 2, 3);
-    ok(attr.updateRanges.length === 1, 'far-slab writes ride the SAME row range (fused cols 5-6)');
-    const fb = (g * GROUP_STRIDE + 5) * 4;
-    ok(f3._groupData[fb] === 0.25 && f3._groupData[fb + 4] === 1,
-        'far lanes land in cols 5-6 (slab uv + hasSlab)');
-    f3.clearGroupFarSlab(g);
-    ok(f3._groupData[fb + 4] === 0, 'clearGroupFarSlab disarms hasSlab');
+    // (The far-slab lane assertions that stood here are gone with the far tier — the
+    // group row is 5 cols now, and setGroupFarSlab/clearGroupFarSlab no longer exist.)
 
     // The version bump is UNCONDITIONAL — an already-dirty row still advances the
     // version. Buffer creation consumes ranges without an upload, so a version

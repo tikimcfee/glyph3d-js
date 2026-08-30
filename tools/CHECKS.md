@@ -13,12 +13,6 @@ after editing core, `make dev-status` to check.
 A gate list reads as a coverage claim, so the gaps belong beside it — otherwise clean
 numbers imply the coverage nobody wrote.
 
-- **The far-LOD UV derivation (`vRowCol` → far texel) has no GPU gate.** `far-texels-check`
-  proves the far SCATTER and NORMALIZE *kernels* against their CPU oracles; it does not
-  exercise the vertex shader's mapping from the row/col lanes to a far-atlas UV. That path
-  is where a `'float'` storage node over the u32 slot buffer lived undetected, and its
-  failure mode is silent: near text renders correctly while every far glyph collapses to
-  texel (0,0). Covered by *inference* today, not evidence.
 - **The `glyph` pick channel past 2²⁴.** `pick-id-gpu-check` drives the `flat` channel,
   where the ID *is* the uniform. The glyph channel adds `baseId.add(instanceIndex)` on top
   of that same uniform — checked at source level, never rendered at a large base.
@@ -37,13 +31,6 @@ numbers imply the coverage nobody wrote.
   the headless suites drive the reference oracle, and `glyph-pipeline-check` is the only
   thing that runs the TSL. Treat a headless green as evidence about the SPEC, never about
   a kernel.
-- **`farItems` carries three exact values on float lanes, and nothing checks it.** The
-  buffer is `'float'`: `FI_SLAB_X`/`FI_SLAB_Y` are texel coordinates read through `int()`,
-  and `FI_DIRTY` is a flag tested as `< 0.5` — the float proxy for a bit test that was
-  deleted from the trie's flags lane on 2026-08-30 and still stands here. Harmless at
-  today's magnitudes (slab coords are 0..15) and the same shape as every defect the
-  carrier split has been closing. Not covered because it produces no bitcast to count and
-  no wrong answer at this range; see `docs/plans/carrier-split-and-decast.md`.
 - **No arena has been staged past 16MB on GPU.** `arena-capacity.test.mjs` covers the
   seams headlessly; the ceiling (`ARENA_MAX_BYTES`, 42.7MB) is buildable in principle and
   no test builds one.
@@ -123,18 +110,6 @@ that outlives its gap is the same defect as a deviation that outlives its debt.
   ranges, resolveSlot coherence, and 0 GPU errors. Client-only (fake provider).
   ```
   bun tools/arena-compaction-check.mjs [--url http://localhost:5273/]
-  ```
-
-- **`far-texels-check.mjs`** — the far-texture (minified text-mass LOD) gate: the
-  farScatter/farNormalize kernels (`glyphPipelineKernels.js`) vs their CPU oracles
-  (`farScatterOracle`/`farNormalizeOracle` in `compute/glyphPipelineReference.js`)
-  on a real dispatch — scatter accumulator (bit-exact expected), packed RGBA8 per
-  slab texel, the accumulator's self-cleaning reset, item isolation, and
-  content-truth teeth (a painted color run must survive into the slab). Harness
-  shape mirrors `layout-kernel-check.mjs` (client-only boot, live trie, second
-  offscreen renderer).
-  ```
-  bun tools/far-texels-check.mjs
   ```
 
 - **`pick-id-gpu-check.mjs`** — the pick-ID hardware gate: an ID past 2²⁴ must survive
