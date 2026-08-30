@@ -14,7 +14,8 @@
 
 from std.sys import argv
 from fixture_io import load_pipe_fixture
-from glyph_pipeline import Item
+from glyph_pipeline import Item, F_LEADER, F_MISSING
+from glyph_schema import COUNT_STRIDE, C_FLAGS
 
 
 struct Range(Copyable, Movable):
@@ -71,7 +72,7 @@ def item_field(t: Item, i: Int) -> Float64:
 
 
 def prop_name(i: Int) -> String:
-    if i == 0: return "multi-item"
+    if i == 0: return "in-multi-arena"
     if i == 1: return "paged"
     if i == 2: return "wrapped"
     if i == 3: return "trie-miss"
@@ -157,11 +158,36 @@ def main() raises:
             if i == 0:
                 wrap0 = t.wrap_width
                 page0 = t.has_page
-        props.append(fx.item_count > 1)
-        props.append(any_page)
-        props.append(any_wrap)
-        props.append(len(fx.exp_misses) > 0)
-        props.append(any_scroll)
+        # PER ITEM, not per fixture. The first version OR-ed these across a
+        # fixture's items, so an arena with one wrapped item and one paged item
+        # reported the pair COVERED when no single item was both — a false
+        # negative, which is the worse direction for a blind-spot detector. It hid
+        # `paged + wrapped` entirely, and that pair is dangerous precisely because
+        # wrap SILENTLY OVERRIDES page_cols as the fold unit, so BASE_X (and hence
+        # page_stride_x) means something different while paginate still divides the
+        # same col by cols for x_page and by wrap for seg: two query params, two
+        # divisors, one lane.
+        #
+        # Miss-ness is per item too, taken from the per-byte F_MISSING flags rather
+        # than from exp_misses — that list holds miss CODEPOINTS, not byte indices,
+        # so it cannot be attributed to an item at all.
+        for i in range(fx.item_count):
+            var t2 = fx.items[i].copy()
+            var miss_here = False
+            var b0 = t2.byte_start
+            var b1 = b0 + t2.byte_count
+            for id in range(b0, b1):
+                if id < 0 or id >= fx.byte_len:
+                    continue
+                var fl = Int(fx.exp_counts[id * COUNT_STRIDE + C_FLAGS])
+                if (fl & F_LEADER) != 0 and (fl & F_MISSING) != 0:
+                    miss_here = True
+                    break
+            props.append(fx.item_count > 1)
+            props.append(t2.has_page)
+            props.append(t2.wrap_width > 0)
+            props.append(miss_here)
+            props.append(t2.scroll_rows > 0)
         var short = path
         var slash = path.rfind("/")
         if slash >= 0:
@@ -200,8 +226,8 @@ def main() raises:
             print("   ", sp, "-", fx2.item_count, "items, differ in:", names)
 
     print("")
-    print("CO-OCCURRENCE — a pair no fixture exhibits TOGETHER is a blind spot even")
-    print("when each half is well covered on its own:")
+    print("CO-OCCURRENCE, PER ITEM — a pair no single ITEM exhibits together is a")
+    print("blind spot even when each half is well covered on its own:")
     var pairs = 0
     for x in range(NPROP):
         for y in range(x + 1, NPROP):
