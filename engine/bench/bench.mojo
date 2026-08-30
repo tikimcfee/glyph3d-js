@@ -111,6 +111,23 @@ def main() raises:
                 best = t1 - t0
     report("pipeline  (mojo)", best, mb, sum)
 
+    # ── serial pipeline, ELIDED (the production instantiation) ────────────────
+    # Same fold, witness stores comptime-gated out (no LINE_ADV/ORD/ord_to_byte
+    # writes, no otb memset, no witness allocation). conformance_elide pins the
+    # render-read arrays bit-identical to the witnessed row above; this row keeps
+    # the PRICE of the witness tier measured rather than remembered.
+    sum = 0
+    best = 1 << 62
+    for r in range(REPS + 1):
+        var t0 = perf_counter_ns()
+        var res = run_pipeline[witness=False](input.bytes, input.trie, items)
+        var t1 = perf_counter_ns()
+        if r > 0:
+            sum += res.leaders + Int(res.lc[PROBE_BYTE * LC_STRIDE + LC_ROW])
+            if t1 - t0 < best:
+                best = t1 - t0
+    report("pipeline- elided", best, mb, sum)
+
     # ── scan-form pipeline ────────────────────────────────────────────────────
     sum = 0
     best = 1 << 62

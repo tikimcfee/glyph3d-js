@@ -88,9 +88,18 @@ def check_case(path: String) raises -> Int:
                 rcopy.lm[k] = whole.lm[k]
             for k in range(fx.byte_len * LC_STRIDE):
                 rcopy.lc[k] = whole.lc[k]
+            # The witness tier is under test too: the resumed fold must
+            # reproduce LINE_ADV/ORD (compared below via m_at/c_at lanes 7/3),
+            # so rcopy gets full-size witness arrays seeded from the whole pass.
+            rcopy.wm = List[Float32](unsafe_uninit_length=fx.byte_len)
+            rcopy.wc = List[UInt32](unsafe_uninit_length=fx.byte_len)
+            rcopy.ord_to_byte = List[UInt32](unsafe_uninit_length=fx.byte_len)
+            for k in range(fx.byte_len):
+                rcopy.wm[k] = whole.wm[k]
+                rcopy.wc[k] = whole.wc[k]
+            unsafe_memset_zero(rcopy.ord_to_byte.unsafe_ptr(), fx.byte_len)
             var slots = rcopy.slots()
-            var otb = List[UInt32](unsafe_uninit_length=fx.byte_len)
-            unsafe_memset_zero(otb.unsafe_ptr(), len(otb))
+            var wtn = rcopy.witness()
             var sc = List[Float64](unsafe_uninit_length=8)
             unsafe_memset_zero(sc.unsafe_ptr(), 8)
 
@@ -108,8 +117,18 @@ def check_case(path: String) raises -> Int:
                 if hint < 0:
                     continue
             var seed = seed_at(slice, fx.trie, rec, wrap, p, hint)
+            # POISON the range under test FIRST. rcopy was seeded from the
+            # whole pass, so without this a resumed fold that wrote NOTHING
+            # would compare clean — the same structural vacuity the paginate
+            # suite paid to learn (its fix, poisoning obliged lanes, is this
+            # fix). Every lane the resumed fold must write starts wrong.
+            for pid in range(item.byte_start + p, item.byte_start + item.byte_count):
+                slots.set_position(pid, 1e30, 1e30, 1e30, 1e30)
+                slots.set_rowcol(pid, 123456789, 123456789)
+                wtn.wm[unsafe_offset=pid] = 1e30
+                wtn.wc[unsafe_offset=pid] = 987654321
             layout_item(
-                slots, item, otb.unsafe_ptr(),
+                slots, item, wtn,
                 sc.unsafe_ptr(), 0, item.byte_start + p, seed,
                 False,   # a resumed RANGE must not publish a whole item's box
             )
@@ -117,6 +136,9 @@ def check_case(path: String) raises -> Int:
             _ = len(rcopy.fl)
             _ = len(rcopy.lm)
             _ = len(rcopy.lc)
+            _ = len(rcopy.wm)
+            _ = len(rcopy.wc)
+            _ = len(rcopy.ord_to_byte)
 
             # Every byte from the resume point on must match the whole pass.
             for id in range(item.byte_start + p, item.byte_start + item.byte_count):

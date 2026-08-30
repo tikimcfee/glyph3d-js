@@ -42,7 +42,7 @@ from glyph_pipeline import (
     shard_lo,
     _decode_shard,
     _paginate_shard,
-    _bounds_item,
+    _bounds_item, Witness,
 )
 from glyph_bake import (
     ScanElem,
@@ -160,13 +160,13 @@ async def _partial_scan_shard[
 
 
 async def _apply_shard[
-    po: Origin[mut=True], oo: Origin[mut=True],
+    po: Origin[mut=True],
 ](
     slots: Slots,
+    wtn: Witness,
     items: List[Item],
     wraps: List[Int],
     partial_prefix: Pointer[ScanElem, po],
-    ord_to_byte: Pointer[UInt32, oo],
     n: Int,
     k: Int,
     c_start: Int,
@@ -215,12 +215,15 @@ async def _apply_shard[
             var in_item = id >= it_start and id < it_start + items[idx].byte_count
             if (flags & F_LEADER) != 0 and in_item:
                 var v = lanes_from_prefix(run, wraps[idx])
-                slots.set_row(id, v.row)
-                slots.set_col(id, v.col)
-                slots.set_line_adv(id, v.line_adv)
-                slots.set_ord(id, v.ord)
+                slots.set_rowcol(id, v.row, v.col)
                 slots.set_flags(id, flags | F_RENDERED)
-                ord_to_byte[unsafe_offset = it_start + v.ord] = UInt32(id)
+                # LINE_ADV/ORD are pure projections of the monoid prefix; the
+                # read-axis split changed their DESTINATION, nothing else. The
+                # scan form always fills the witness tier — its own resolve
+                # step (dispatch 7) consumes ORD + ord_to_byte to seed shards.
+                wtn.wm[unsafe_offset=id] = v.line_adv
+                wtn.wc[unsafe_offset=id] = UInt32(v.ord)
+                wtn.otb[unsafe_offset = it_start + v.ord] = UInt32(id)
             else:
                 # THE SPLIT'S COVERAGE DUTY, scan form. Decode no longer zeroes
                 # the positional lanes, so every byte that is not a laid-out
@@ -228,19 +231,21 @@ async def _apply_shard[
                 # above excludes — gets its zeros here. This walk visits every
                 # byte of [0, n) exactly once across the chunk shards, so the
                 # coverage is total. X/Y/Z/BASE_X of in-item leaders are
-                # resolve_x's; everything else has no other writer.
+                # dispatch 7's; everything else has no other writer.
                 slots.zero_positional(id)
+                wtn.wm[unsafe_offset=id] = 0
+                wtn.wc[unsafe_offset=id] = 0
             var leaf = scan_leaf(slots, id, wraps[idx], is_start)
             scan_combine(run, leaf)
             id += 1
 
 
 async def _resolve_x_shard[
-    oo: Origin[mut=True], ko: Origin[mut=True]
+    ko: Origin[mut=True]
 ](
     slots: Slots,
+    wtn: Witness,
     item: Item,
-    ord_to_byte: Pointer[UInt32, oo],
     scalars: Pointer[Float64, ko],
     scalar_base: Int,
     start: Int,
@@ -249,7 +254,7 @@ async def _resolve_x_shard[
 ):
     """THE SEGMENT WALK, AMORTIZED: one seed per shard, one f32 add per leader.
 
-    resolve_x re-derives each leader's fold>0 x by walking its col%fold
+    The naive form re-derives each leader's fold>0 x by walking its col%fold
     same-segment predecessors through ord_to_byte — O(fold) loads and adds PER
     LEADER, ~50 at wrap 100. The open segment's partial sum cannot ride the
     monoid (regrouping an f32 chain changes its value — the same reason segAdv
@@ -292,10 +297,10 @@ async def _resolve_x_shard[
                 # THE ONE WALK: the shard begins mid-segment, so re-derive the
                 # open prefix exactly as resolve_x would — forward, f32 per add.
                 var x32: Float32 = 0
-                var ord = slots.ord(id)
+                var ord = Int(wtn.wc[unsafe_offset=id])
                 var k = col % fold
                 while k >= 1:
-                    var q = Int(ord_to_byte[unsafe_offset = item.byte_start + ord - k])
+                    var q = Int(wtn.otb[unsafe_offset = item.byte_start + ord - k])
                     x32 = x32 + slots.advance(q)
                     k -= 1
                 seg_adv = x32
@@ -303,7 +308,7 @@ async def _resolve_x_shard[
             x = Float64(seg_adv)
             seg_adv = seg_adv + slots.advance(id)
         else:
-            x = Float64(slots.line_adv(id))
+            x = Float64(wtn.wm[unsafe_offset=id])
         var row = slots.row(id)
         slots.set_base_x(id, Float32(x + item.origin_x))
         if not paged:
@@ -432,14 +437,18 @@ def run_scan_pipeline[o: ImmOrigin](
     tg5.wait()
 
     # ── dispatch 6: apply — thread per chunk, chunks sharded ──────────────────
-    var ord_to_byte = List[UInt32](unsafe_uninit_length=n)
-    unsafe_memset_zero(ord_to_byte.unsafe_ptr(), len(ord_to_byte))
-    var op = ord_to_byte.unsafe_ptr()
+    # The scan form is ALWAYS witnessed: dispatch 7 seeds its shards from ORD +
+    # ord_to_byte, so the witness tier is load-bearing here, not optional.
+    r.wm = List[Float32](unsafe_uninit_length=n if n > 0 else 1)
+    r.wc = List[UInt32](unsafe_uninit_length=n if n > 0 else 1)
+    r.ord_to_byte = List[UInt32](unsafe_uninit_length=n if n > 0 else 1)
+    unsafe_memset_zero(r.ord_to_byte.unsafe_ptr(), len(r.ord_to_byte))
+    var wtn = r.witness()
     var tg6 = TaskGroup()
     for w in range(workers):
         var a = shard_lo(0, num_chunks, workers, w)
         var b = shard_lo(0, num_chunks, workers, w + 1)
-        tg6.create_task(_apply_shard(slots, items, wraps, xp, op, n, k, a, b))
+        tg6.create_task(_apply_shard(slots, wtn, items, wraps, xp, n, k, a, b))
     tg6.wait()
 
     # ── dispatch 7: resolveX + fold-scalar reduce — per item, sharded, with
@@ -458,7 +467,7 @@ def run_scan_pipeline[o: ImmOrigin](
             var a = shard_lo(start, stop, workers, w)
             var b = shard_lo(start, stop, workers, w + 1)
             tg7.create_task(_resolve_x_shard(
-                slots, items[i2], op, ssp, w * 8, a, b, page_active(items[i2])
+                slots, wtn, items[i2], ssp, w * 8, a, b, page_active(items[i2])
             ))
         tg7.wait()
         for w in range(workers):
@@ -532,8 +541,10 @@ def run_scan_pipeline[o: ImmOrigin](
     _ = len(r.fl)
     _ = len(r.lm)
     _ = len(r.lc)
+    _ = len(r.wm)
+    _ = len(r.wc)
+    _ = len(r.ord_to_byte)
 
-    r.ord_to_byte = ord_to_byte^
     r.misses = misses^
     r.leaders = leaders
     r.item_bounds = item_bounds^

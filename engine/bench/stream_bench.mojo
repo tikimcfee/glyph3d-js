@@ -95,7 +95,7 @@ def main() raises:
         var scratch = n * SLOT_BYTES
         if scratch > peak_scratch:
             peak_scratch = scratch
-        var r = run_pipeline(bytes, seed.trie, items)
+        var r = run_pipeline[witness=False](bytes, seed.trie, items)
         if not count_only:
             compact(r, n, r.leaders, records)
 

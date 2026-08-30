@@ -31,7 +31,7 @@ FP="--fp-mode contract=off"
 PIPE=(engine/fixtures/*.pipe.bin)
 BAKE=(engine/fixtures/*.bake.bin)
 
-CPU=(conformance conformance_scan ordinal_invariant conformance_record conformance_resume)
+CPU=(conformance conformance_scan ordinal_invariant conformance_record conformance_resume conformance_elide)
 # gaps and matrix take ONE fixture (for its trie) and build their own topologies
 GAPS=engine/fixtures/repo-file.pipe.bin
 GPU=(gpu_decode gpu_scan gpu_paginate gpu_bounds gpu_pipeline)

@@ -199,10 +199,12 @@ const head = (cmt) => [
 // contract.
 const banner = (cmt) => [
     ...head(cmt),
-    `${cmt} THIS LAYER'S REALIZATION. Four phase arrays — who WRITES a lane decides`,
-    `${cmt} where it lives:`,
+    `${cmt} THIS LAYER'S REALIZATION. Six arrays, split twice — who WRITES a lane`,
+    `${cmt} decides where it lives; who READS it decides whether it lives at all:`,
     `${cmt}   static (sm f32 + fl u32)      decode's output; a pure function of the byte`,
-    `${cmt}   positional (lm f32 + lc u32)  the fold's output; sequential state`,
+    `${cmt}   positional (lm f32 + lc u32)  the fold's output; render-read`,
+    `${cmt}   witness (wm f32 + wc u32)     fold interior no render path reads; the`,
+    `${cmt}                                 serial form writes it only when witnessed`,
     `${cmt} Float carriers hold measures, u32 carriers hold counts — no bitcasts, and`,
     `${cmt} a count cannot land in a float array by accident.`,
     `${cmt}`,
@@ -227,6 +229,7 @@ const contractBanner = (cmt) => [
 // ── Mojo ────────────────────────────────────────────────────────────────────
 const stM = schema.buffers.staticMeasures, stC = schema.buffers.staticCounts;
 const poM = schema.buffers.posMeasures, poC = schema.buffers.posCounts;
+const wM = schema.buffers.witnessMeasures, wC = schema.buffers.witnessCounts;
 const rbv = (buf) => buf.lanes.filter(l => l.read_by_vertex).sort((a, b) => a.index - b.index).map(l => l.name);
 // THE FIXTURE FORMAT — frozen on disk (format v2), NOT derived from the container.
 // Fixtures carry the ORACLE'S VALUES in this order; the engine's working buffers
@@ -275,11 +278,12 @@ const recM = WIRE_MEASURES.length;
 const recC = WIRE_COUNTS.length;
 const mojo = [
     banner('#'), '',
-    '# ── The SLOT BUFFERS: four arrays, split by phase ──────────────────────────',
+    '# ── The SLOT BUFFERS: six arrays, split twice ─────────────────────────────',
     "# static  = decode's output (pure function of the byte); positional = the",
-    "# fold's output (sequential state). Decode NEVER touches positional — that is",
-    '# the split. LM/LC = layout measures/counts; SM = static measures; FLAGS is',
-    '# its own stride-1 array (flags[id], no lane constant needed).',
+    "# fold's render-read output; witness = fold interior no render path reads.",
+    '# Decode NEVER touches positional or witness — that is the write-axis split.',
+    '# LM/LC = layout measures/counts; SM = static measures; WM/WC = witness;',
+    '# FLAGS is its own stride-1 array (flags[id], no lane constant needed).',
     `comptime SM_STRIDE = ${stM.stride}`,
     ...stM.lanes.map(l => `comptime SM_${l.name} = ${l.index}`),
     `comptime FLAGS_STRIDE = ${stC.stride}`, '',
@@ -287,9 +291,13 @@ const mojo = [
     ...poM.lanes.map(l => `comptime LM_${l.name} = ${l.index}`), '',
     `comptime LC_STRIDE = ${poC.stride}`,
     ...poC.lanes.map(l => `comptime LC_${l.name} = ${l.index}`), '',
-    '# The RECORD format (the wire): unchanged by the split. A record is emitted as',
-    '# three prefix runs — posMeasures[0..3), staticMeasures[0..3), posCounts[0..2)',
-    '# — a concatenation of truncations, still no lane map.',
+    '# Witness arrays (read-axis split): stride-1, indexed by byte. The scan form',
+    '# allocates them; the serial form only under its witness instantiation.',
+    `comptime WM_STRIDE = ${wM.stride}`,
+    `comptime WC_STRIDE = ${wC.stride}`, '',
+    '# The RECORD format (the wire): unchanged by either split. A record is emitted',
+    '# as three runs — posMeasures[0..3), staticMeasures[0..3), posCounts WHOLE —',
+    '# a concatenation of truncations, still no lane map.',
     `comptime RECORD_MEASURE_STRIDE = ${recM}`,
     `comptime RECORD_COUNT_STRIDE = ${recC}`,
     `comptime RECORD_BYTES = ${recM * 4 + recC * 4}`, '',
@@ -358,7 +366,11 @@ writeFileSync(join(root, 'engine/glyph_schema.mojo'), mojo);
 // exactly that, and was harmless only because it turned out to be dead.
 const fieldKinds = {};
 // PAD is container filler, not a field of the pipeline — it has no kind to share.
-for (const buf of [poM, poC, stM, stC]) for (const l of buf.lanes) {
+// The witness buffers are in this loop ON PURPOSE: LINE_ADV and ORD are fields
+// of the pipeline (the fixtures carry them, the scan partial computes them) —
+// the read-axis split moved their CONTAINER, not their existence. The proof the
+// tiers are real: the commit that moved them regenerated this file byte-identical.
+for (const buf of [poM, wM, poC, wC, stM, stC]) for (const l of buf.lanes) {
     if (l.name !== 'PAD') fieldKinds[l.name] = l.kind;
 }
 for (const l of it.measures.lanes) fieldKinds[l.name] ??= l.kind;

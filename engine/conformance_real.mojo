@@ -32,7 +32,6 @@
 #       engine/fixtures/repo-file.pipe.bin $(find packages/glyph3d-core/src -name '*.js')
 
 from std.sys import argv
-from glyph_schema import LC_STRIDE, LC_ORD
 from glyph_pipeline import (
     run_pipeline, Item, Trie, F_LEADER, F_RENDERED, PipelineResult, page_active,
 )

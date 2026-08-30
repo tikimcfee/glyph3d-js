@@ -24,6 +24,7 @@
 from std.sys import argv
 from std.memory import bitcast
 from glyph_schema import (
+    LM_STRIDE, SM_STRIDE,
     FIXTURE_MEASURE_STRIDE, FIXTURE_COUNT_STRIDE,
     fixture_measure_lane_name, fixture_count_lane_name,
 )
@@ -93,8 +94,11 @@ def check_case(path: String) raises -> Int:
     # The sweep covers BOTH float arrays — the split means a NaN can hide in
     # either phase.
     var nan_first = -1
-    var nan_count = nan_lanes(got.lm, fx.byte_len * 5, nan_first)
-    nan_count += nan_lanes(got.sm, fx.byte_len * 4, nan_first)
+    var nan_count = nan_lanes(got.lm, fx.byte_len * LM_STRIDE, nan_first)
+    nan_count += nan_lanes(got.sm, fx.byte_len * SM_STRIDE, nan_first)
+    # The witness measure array too: LINE_ADV left the render-read container in
+    # the read-axis split, and the sweep must not silently shrink with it.
+    nan_count += nan_lanes(got.wm, fx.byte_len, nan_first)
     if nan_count > 0:
         bad += nan_count
         print("  NaN in", nan_count, "measure lane(s); first flat index", nan_first)

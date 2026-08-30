@@ -13,7 +13,9 @@
 # "which glyph is the n-th leader of this item" — is recorded twice in different
 # types:
 #
-#   lc[id * LC_STRIDE + LC_ORD]            u32 count  (exact to 2^32)
+#   wc[id]                                 u32 count  (exact to 2^32; the ORD
+#                                          witness array — the read-axis split
+#                                          moved it out of the render-read lc)
 #   ord_to_byte[item.byte_start + ord]     u32 array  (exact to 2^32)
 #
 # So the u32 array is an independent, exact witness for the lossy lane, and
@@ -35,7 +37,6 @@
 # Run: mojo run -I engine engine/ordinal_invariant.mojo engine/fixtures/*.pipe.bin
 
 from std.sys import argv
-from glyph_schema import LC_STRIDE, LC_ORD
 from glyph_pipeline import run_pipeline, Item, Trie, PipelineResult, F_LEADER
 from fixture_io import load_pipe_fixture
 
@@ -52,7 +53,7 @@ def check_ordinals(result: PipelineResult, items: List[Item]) -> Int:
         var id = start
         while id < stop:
             if (Int(result.fl[id]) & F_LEADER) != 0:
-                var lane = Int(result.lc[id * LC_STRIDE + LC_ORD])
+                var lane = Int(result.wc[id])
                 var witness = Int(result.ord_to_byte[start + lane])
                 if witness != id:
                     bad += 1
@@ -88,8 +89,8 @@ def synthetic_item_case(trie: Trie, n_bytes: Int, force_f32_ordinal: Bool = Fals
     if force_f32_ordinal:
         for id in range(n_bytes):
             if (Int(result.fl[id]) & F_LEADER) != 0:
-                var ord = Int(result.lc[id * LC_STRIDE + LC_ORD])
-                result.lc[id * LC_STRIDE + LC_ORD] = UInt32(Int(Float32(ord)))
+                var ord = Int(result.wc[id])
+                result.wc[id] = UInt32(Int(Float32(ord)))
     return check_ordinals(result, items)
 
 

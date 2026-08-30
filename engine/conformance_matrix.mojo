@@ -27,7 +27,7 @@
 #          engine/fixtures/repo-file.pipe.bin
 
 from std.sys import argv
-from glyph_schema import LC_STRIDE, LC_ROW, LC_COL, LC_ORD
+from glyph_schema import LC_STRIDE, LC_ROW, LC_COL
 from glyph_pipeline import (
     run_pipeline, Item, Trie, F_LEADER, F_RENDERED, F_MISSING, page_active,
 )
@@ -136,7 +136,7 @@ def check(name: String, bytes: List[UInt8], trie: Trie, items: List[Item]) -> In
             var f = Int(r.fl[id])
             if (f & F_LEADER) == 0 or (f & F_RENDERED) == 0:
                 continue
-            var ord = Int(r.lc[id * LC_STRIDE + LC_ORD])
+            var ord = Int(r.wc[id])
             var q = start + ord
             if q < 0 or q >= n or Int(r.ord_to_byte[q]) != id:
                 bad += 1
@@ -162,7 +162,7 @@ def check(name: String, bytes: List[UInt8], trie: Trie, items: List[Item]) -> In
             var f = Int(r.fl[id])
             if (f & F_LEADER) == 0 or (f & F_RENDERED) == 0:
                 continue
-            var ord = Int(r.lc[id * LC_STRIDE + LC_ORD])
+            var ord = Int(r.wc[id])
             if ord < 0 or ord >= len(seen_ord) or seen_ord[ord]:
                 bad += 1
                 if printed < MAX_PRINTED:
@@ -193,7 +193,7 @@ def check(name: String, bytes: List[UInt8], trie: Trie, items: List[Item]) -> In
         if claimed[id]:
             continue
         var co = id * LC_STRIDE
-        if r.lc[co + LC_ROW] != 0 or r.lc[co + LC_COL] != 0 or r.lc[co + LC_ORD] != 0:
+        if r.lc[co + LC_ROW] != 0 or r.lc[co + LC_COL] != 0 or r.wc[id] != 0:
             bad += 1
             if printed < MAX_PRINTED:
                 print("  ", name, "gap byte", id, "has nonzero fold lanes")

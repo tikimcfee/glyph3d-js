@@ -1,14 +1,16 @@
 # glyph_record.mojo — the record format, and the scratch pool it makes possible.
 #
-# THE PROBLEM. A source byte costs 52 B of slot lanes (four phase arrays) held
-# for the corpus's entire lifetime. But the render path reads only the
-# render-read prefixes; BASE_X, LINE_ADV, ORD are FOLD SCRATCH - intermediates
-# the layout pass needs while computing and nothing needs afterward. So the
-# arena pays corpus-scale memory for job-scale temporaries, on every byte.
+# THE PROBLEM. A source byte costs slot lanes held for the corpus's entire
+# lifetime. But the render path reads only the render-read prefixes; BASE_X is
+# FOLD SCRATCH (paginate's input), and LINE_ADV/ORD/ord_to_byte are WITNESS
+# TIER - the read-axis split moved them out of the render-read arrays entirely,
+# and run_streaming below runs the fold ELIDED (witness=False), so they are
+# never even written here. The arena otherwise pays corpus-scale memory for
+# job-scale temporaries, on every byte.
 #
 # THE PREFIX RULE MAKES EMIT CHEAP. The schema orders render-read lanes FIRST
-# in every phase array, so emitting a record is a concatenation of THREE prefix
-# runs (posMeasures 0-3, staticMeasures 0-3, posCounts 0-2) - a truncation per
+# in every phase array, so emitting a record is a concatenation of THREE runs
+# (posMeasures 0-3, staticMeasures 0-3, posCounts WHOLE) - a truncation per
 # array, never a gather through a lane map. Checked twice over: gen-schema.mjs
 # refuses a schema where a render-read lane sorts after an unread one, and pins
 # the wire order as a literal so a container re-layout cannot move the bytes.
@@ -87,11 +89,12 @@ def compact(
     for id in range(byte_len):
         if (Int(r.fl[id]) & F_LEADER) == 0:
             continue
-        # THE TRUNCATION, post-split: THREE prefix runs instead of two, still no
-        # lane map. The wire order [X Y Z | ADVANCE HEIGHT GLYPH_ID][ROW COL]
-        # partitions exactly at the phase boundary — posMeasures' render-read
-        # prefix, then staticMeasures', then posCounts'. gen-schema pins that
-        # order as a literal and fails the build if the schema stops deriving it.
+        # THE TRUNCATION, after both splits: THREE runs, still no lane map.
+        # The wire order [X Y Z | ADVANCE HEIGHT GLYPH_ID][ROW COL] partitions
+        # exactly at the phase boundary — posMeasures' render-read prefix, then
+        # staticMeasures', then posCounts WHOLE (the read-axis split made the
+        # record's count section and the container coincide). gen-schema pins
+        # that order as a literal and fails the build if it stops deriving.
         var wm = w * RECORD_MEASURE_STRIDE
         var lo = id * LM_STRIDE
         var so = id * SM_STRIDE
@@ -147,8 +150,12 @@ def run_streaming[o: ImmOrigin](
         # ZERO COPY: a view into the caller's buffer, not a copy of it.
         var slice = bytes[it.byte_start : it.byte_start + span]
 
-        # The scratch: allocated per job, dropped at the end of this iteration.
-        var r = run_pipeline(slice, trie, one)
+        # The scratch: allocated per job, dropped at the end of this iteration —
+        # and ELIDED: no witness tier is written at all. compact() reads only
+        # render-read arrays + flags, and conformance_record pins the records
+        # byte-identical to the witnessed whole-corpus lay, so this is the
+        # elision's production proof, not an unverified fast path.
+        var r = run_pipeline[witness=False](slice, trie, one)
         compact(r, span, r.leaders, out)
         _ = chunk_bytes
     return out^

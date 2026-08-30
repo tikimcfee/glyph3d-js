@@ -38,22 +38,45 @@ asserted against it, so its container cannot disagree by construction.
 ```
 static      sm  f32  SM_STRIDE 4   ADVANCE HEIGHT GLYPH_ID PAD    decode's output —
             fl  u32  stride    1   FLAGS                          one aligned 16 B store
-positional  lm  f32  LM_STRIDE 5   X Y Z | BASE_X LINE_ADV        the fold's output —
-            lc  u32  LC_STRIDE 3   ROW COL | ORD                  decode never touches it
+positional  lm  f32  LM_STRIDE 4   X Y Z BASE_X                   the fold's output —
+            lc  u32  LC_STRIDE 2   ROW COL                        decode never touches it
+witness     wm  f32  stride    1   LINE_ADV                       fold interior no render
+            wc  u32  stride    1   ORD  (+ ord_to_byte, u32 x1)   path reads — see below
 ```
 
-(`struct Slots` in glyph_pipeline.mojo realizes this in exactly one place; every
-kernel goes through its accessors, so the next re-layout edits one struct.) There are
-no bitcasts and no "which lanes are floats" table — a count cannot land in a float
-array by accident because it is a different array. Render-read lanes come first in
-every array and fold scratch is at the tail, so the record is a truncation. The split
-is a measured 1.41x on the serial pipeline (decode used to dirty 48 B per source byte
-and the fold dirtied them again; now 20 + 32 — engine/bench/split_bench.mojo).
+(`struct Slots` and `struct Witness` in glyph_pipeline.mojo realize this in exactly
+one place each; every kernel goes through their accessors, so the next re-layout
+edits one struct.) There are no bitcasts and no "which lanes are floats" table — a
+count cannot land in a float array by accident because it is a different array.
+Render-read lanes come first in every array, so the record is a truncation.
+
+The container is split TWICE, along different axes:
+
+- **Write axis** (the phase split): who WRITES a lane decides where it lives.
+  Decode never touches positional. Measured 1.41x on the serial pipeline (decode
+  used to dirty 48 B per source byte and the fold dirtied them again — 
+  engine/bench/split_bench.mojo).
+- **Read axis** (the witness split): who READS a lane decides whether it lives at
+  all. No render path reads `LINE_ADV`/`ORD`/`ord_to_byte` — the scan form consumes
+  them internally (its resolve dispatch seeds shards from them), and the suites
+  assert through them. So the serial fold takes a comptime `witness` parameter:
+  witnessed (every suite) also fills the witness tier; **elided** (production
+  streaming) writes only render-read arrays — the four positional measures become
+  ONE aligned 16 B SIMD store, the mirror of `set_static` — and allocates no
+  witness memory. `conformance_elide` pins the two instantiations bit-identical on
+  every render-read array and fails if the elided form quietly re-grows a witness
+  tier; `conformance_record` streams elided against the witnessed whole-corpus lay.
+  Measured honestly: ~1.05x end-to-end (the pipeline is compute-bound at these
+  scales; the elision buys back exactly the ~12 B/byte it removes — the
+  `pipeline- elided` row in bench/bench.mojo keeps the price runnable rather than
+  remembered). The durable win is memory: resident slots 56 → 44 B per source
+  byte, and one less allocation + memset per streamed job.
 
 ### The record format — a truncation, not a repack
 
 ```
-slots    52 B per SOURCE BYTE, corpus lifetime   (sm 16 + fl 4 + lm 20 + lc 12)
+slots    44 B per SOURCE BYTE, corpus lifetime   (sm 16 + fl 4 + lm 16 + lc 8)
+witness  12 B per SOURCE BYTE, WITNESSED ONLY    (wm 4 + wc 4 + ord_to_byte 4)
 record   32 B per RENDERED GLYPH                 (measures 6 + counts 2)
 ```
 
@@ -61,14 +84,17 @@ record   32 B per RENDERED GLYPH                 (measures 6 + counts 2)
 vertex path reads — never hand-written, and the WIRE ORDER is additionally pinned as
 a literal in the generator, so a schema restructure cannot move the record bytes as a
 side effect. Render-read lanes sort first in every phase array, so emitting a record
-is a concatenation of three contiguous prefix runs (posMeasures, staticMeasures,
-posCounts — the wire order partitions exactly at the phase boundary); the generator
+is a concatenation of three contiguous runs (posMeasures' prefix, staticMeasures'
+prefix, posCounts whole — the read-axis split made the record's count section and
+the container coincide); the generator
 refuses a schema where a render-read lane sorts after an unread one, so the
 truncation cannot quietly become a gather.
 
-The tail is fold scratch: `BASE_X`, `LINE_ADV`, `ORD` are intermediates the layout
-pass needs while computing and nothing needs afterward. Holding them at corpus
-lifetime is paying corpus-scale memory for job-scale temporaries — on every byte,
+`BASE_X` is the one fold-scratch lane still resident: paginate reads it (in all
+three forms) to re-derive X per page, and it rides lane 3 of `lm` so the
+positional store stays one aligned 16 B write. `LINE_ADV` and `ORD` needed no such
+excuse and lost their residency to the read-axis split — holding them at corpus
+lifetime was paying corpus-scale memory for job-scale temporaries, on every byte,
 including every space and newline.
 
 `conformance_record.mojo` proves both halves, and both are mutation-tested:
@@ -467,7 +493,7 @@ Bun workspace) and **Mojo ≥ 1.0**.
 pip install modular          # provides `mojo` on PATH
 mojo --version               # expect: Mojo 1.0.0 or later
 
-# 2. Verify the whole engine in one pass — ALL FOURTEEN suites, with the fp flag
+# 2. Verify the whole engine in one pass — ALL FIFTEEN suites, with the fp flag
 #    the contract requires (--fp-mode contract=off is NOT optional; see the
 #    script's header for why). This is the only entry point that runs everything.
 bun engine/fixtures/gen.mjs

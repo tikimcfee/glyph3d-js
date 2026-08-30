@@ -28,8 +28,8 @@ from std.memory import bitcast
 from max.gpu.host import DeviceContext
 from glyph_schema import (
     SM_STRIDE, SM_ADVANCE, SM_HEIGHT,
-    LM_STRIDE, LM_X, LM_Y, LM_Z, LM_BASE_X, LM_LINE_ADV,
-    LC_STRIDE, LC_ROW, LC_COL, LC_ORD,
+    LM_STRIDE, LM_X, LM_Y, LM_Z, LM_BASE_X,
+    LC_STRIDE, LC_ROW, LC_COL,
     ITEM_STRIDE, I_ORIGIN_X, I_ORIGIN_Y, I_ORIGIN_Z, I_WRAP_WIDTH, I_LINE_HEIGHT,
     I_PAGE_COLS, I_HAS_PAGE, I_Z_STEP, I_PAGE_ROWS, I_SCROLL_ROWS, I_PAGES_WIDE,
     I_BAND_STRIDE_Y, I_DEPTH_PER_BAND, I_DEPTH_PER_COL,
@@ -276,6 +276,7 @@ def k_apply(
     wrap_of: MutPointer[UInt32, MutAnyOrigin], is_start: MutPointer[UInt32, MutAnyOrigin],
     item_start: MutPointer[UInt32, MutAnyOrigin],
     xc: MutPointer[UInt32, MutAnyOrigin], xm: MutPointer[Float32, MutAnyOrigin],
+    wm: MutPointer[Float32, MutAnyOrigin], wc: MutPointer[UInt32, MutAnyOrigin],
     otb: MutPointer[UInt32, MutAnyOrigin],
     n_bytes: Int32, k: Int32, n_chunks: Int32,
 ):
@@ -306,8 +307,10 @@ def k_apply(
             var co = id * LC_STRIDE
             lc[unsafe_offset = co + LC_ROW] = UInt32(closed + wrap_row)
             lc[unsafe_offset = co + LC_COL] = UInt32(col)
-            lc[unsafe_offset = co + LC_ORD] = UInt32(run.glyphs)
-            lm[unsafe_offset = id * LM_STRIDE + LM_LINE_ADV] = run.tail_adv
+            # The witness tier (read-axis split): LINE_ADV/ORD live in their
+            # own device buffers, mirroring the CPU container exactly.
+            wc[unsafe_offset=id] = UInt32(run.glyphs)
+            wm[unsafe_offset=id] = run.tail_adv
             otb[unsafe_offset = Int(item_start[unsafe_offset=id]) + run.glyphs] = UInt32(id)
         combine(run, leaf_of(fl, sm, wrap_of, is_start, id))
         id += 1
@@ -318,7 +321,9 @@ def k_resolve_x(
     sm: MutPointer[Float32, MutAnyOrigin], fl: MutPointer[UInt32, MutAnyOrigin],
     lm: MutPointer[Float32, MutAnyOrigin], lc: MutPointer[UInt32, MutAnyOrigin],
     items: MutPointer[Float32, MutAnyOrigin], item_of: MutPointer[UInt32, MutAnyOrigin],
-    item_start: MutPointer[UInt32, MutAnyOrigin], otb: MutPointer[UInt32, MutAnyOrigin],
+    item_start: MutPointer[UInt32, MutAnyOrigin],
+    wm: MutPointer[Float32, MutAnyOrigin], wc: MutPointer[UInt32, MutAnyOrigin],
+    otb: MutPointer[UInt32, MutAnyOrigin],
     row_max: MutPointer[UInt32, MutAnyOrigin], x_max: MutPointer[UInt32, MutAnyOrigin],
     n_bytes: Int32,
 ):
@@ -345,7 +350,7 @@ def k_resolve_x(
     if fold == 0 and items[unsafe_offset = io + I_HAS_PAGE] > 0.5:
         fold = trunc_nn32(items[unsafe_offset = io + I_PAGE_COLS])
     var col = Int(lc[unsafe_offset = id * LC_STRIDE + LC_COL])
-    var ord = Int(lc[unsafe_offset = id * LC_STRIDE + LC_ORD])
+    var ord = Int(wc[unsafe_offset=id])
 
     var x = Float32(0)
     if fold > 0:
@@ -355,7 +360,7 @@ def k_resolve_x(
             x = x + sm[unsafe_offset = q * SM_STRIDE + SM_ADVANCE]
             k -= 1
     else:
-        x = lm[unsafe_offset = mo + LM_LINE_ADV]
+        x = wm[unsafe_offset=id]
 
     var row = Int(lc[unsafe_offset = id * LC_STRIDE + LC_ROW])
     var wrap_row = (col // wrap) if wrap > 0 else 0
@@ -488,6 +493,8 @@ def check_fixture(var fx: PipeFixture, ctx: DeviceContext, bench: Bool = False) 
     var h_w = ctx.enqueue_create_host_buffer[DType.uint32](n)
     var h_s = ctx.enqueue_create_host_buffer[DType.uint32](n)
     var h_is = ctx.enqueue_create_host_buffer[DType.uint32](n)
+    var h_wm = ctx.enqueue_create_host_buffer[DType.float32](n)
+    var h_wc = ctx.enqueue_create_host_buffer[DType.uint32](n)
     var h_otb = ctx.enqueue_create_host_buffer[DType.uint32](n)
     ctx.synchronize()
     # Only the DECODE lanes are seeded; ROW/COL/ORD/LINE_ADV are what the device
@@ -505,6 +512,8 @@ def check_fixture(var fx: PipeFixture, ctx: DeviceContext, bench: Bool = False) 
         h_w[i] = wrap_of[i]
         h_s[i] = is_start[i]
         h_is[i] = item_start[i]
+        h_wm[i] = 0
+        h_wc[i] = 0
         h_otb[i] = 0
 
     var ni0 = fx.item_count if fx.item_count > 0 else 1
@@ -545,6 +554,8 @@ def check_fixture(var fx: PipeFixture, ctx: DeviceContext, bench: Bool = False) 
     var d_w = ctx.enqueue_create_buffer[DType.uint32](n)
     var d_s = ctx.enqueue_create_buffer[DType.uint32](n)
     var d_is = ctx.enqueue_create_buffer[DType.uint32](n)
+    var d_wm = ctx.enqueue_create_buffer[DType.float32](n)
+    var d_wc = ctx.enqueue_create_buffer[DType.uint32](n)
     var d_otb = ctx.enqueue_create_buffer[DType.uint32](n)
     var d_pc = ctx.enqueue_create_buffer[DType.uint32](n_chunks * PARTIAL_COUNT_STRIDE)
     var d_pm = ctx.enqueue_create_buffer[DType.float32](n_chunks * PARTIAL_MEASURE_STRIDE)
@@ -566,6 +577,8 @@ def check_fixture(var fx: PipeFixture, ctx: DeviceContext, bench: Bool = False) 
     ctx.enqueue_copy(dst_buf=d_w, src_buf=h_w)
     ctx.enqueue_copy(dst_buf=d_s, src_buf=h_s)
     ctx.enqueue_copy(dst_buf=d_is, src_buf=h_is)
+    ctx.enqueue_copy(dst_buf=d_wm, src_buf=h_wm)
+    ctx.enqueue_copy(dst_buf=d_wc, src_buf=h_wc)
     ctx.enqueue_copy(dst_buf=d_otb, src_buf=h_otb)
     ctx.enqueue_copy(dst_buf=d_it, src_buf=h_it)
     ctx.enqueue_copy(dst_buf=d_io, src_buf=h_io)
@@ -608,14 +621,17 @@ def check_fixture(var fx: PipeFixture, ctx: DeviceContext, bench: Bool = False) 
     ctx.enqueue_function[k_apply](
         d_fl.unsafe_ptr(), d_sm.unsafe_ptr(), d_lm.unsafe_ptr(), d_lc.unsafe_ptr(),
         d_w.unsafe_ptr(), d_s.unsafe_ptr(),
-        d_is.unsafe_ptr(), d_xc.unsafe_ptr(), d_xm.unsafe_ptr(), d_otb.unsafe_ptr(),
+        d_is.unsafe_ptr(), d_xc.unsafe_ptr(), d_xm.unsafe_ptr(),
+        d_wm.unsafe_ptr(), d_wc.unsafe_ptr(), d_otb.unsafe_ptr(),
         Int32(n), Int32(CHUNK), Int32(n_chunks),
         grid_dim=(n_chunks + B - 1) // B, block_dim=B,
     )
     ctx.enqueue_function[k_resolve_x](
         d_sm.unsafe_ptr(), d_fl.unsafe_ptr(), d_lm.unsafe_ptr(), d_lc.unsafe_ptr(),
         d_it.unsafe_ptr(), d_io.unsafe_ptr(),
-        d_is.unsafe_ptr(), d_otb.unsafe_ptr(), d_rmax.unsafe_ptr(), d_xmax.unsafe_ptr(),
+        d_is.unsafe_ptr(),
+        d_wm.unsafe_ptr(), d_wc.unsafe_ptr(), d_otb.unsafe_ptr(),
+        d_rmax.unsafe_ptr(), d_xmax.unsafe_ptr(),
         Int32(n), grid_dim=(n + B - 1) // B, block_dim=B,
     )
     # The fan stride is DERIVED from each item's widest fold row — a fold scalar
@@ -638,6 +654,8 @@ def check_fixture(var fx: PipeFixture, ctx: DeviceContext, bench: Bool = False) 
     )
     ctx.enqueue_copy(dst_buf=h_lc, src_buf=d_lc)
     ctx.enqueue_copy(dst_buf=h_lm, src_buf=d_lm)
+    ctx.enqueue_copy(dst_buf=h_wm, src_buf=d_wm)
+    ctx.enqueue_copy(dst_buf=h_wc, src_buf=d_wc)
     ctx.enqueue_copy(dst_buf=h_otb, src_buf=d_otb)
     ctx.enqueue_copy(dst_buf=h_rmax, src_buf=d_rmax)
     ctx.synchronize()
@@ -670,14 +688,14 @@ def check_fixture(var fx: PipeFixture, ctx: DeviceContext, bench: Bool = False) 
             if printed < MAX_PRINTED:
                 print("  byte", id, "COL gpu", h_lc[co + LC_COL], "cpu", cpu.lc[co + LC_COL])
                 printed += 1
-        if h_lc[co + LC_ORD] != cpu.lc[co + LC_ORD]:
+        if h_wc[id] != cpu.wc[id]:
             bad += 1
             if printed < MAX_PRINTED:
-                print("  byte", id, "ORD gpu", h_lc[co + LC_ORD], "cpu", cpu.lc[co + LC_ORD])
+                print("  byte", id, "ORD gpu", h_wc[id], "cpu", cpu.wc[id])
                 printed += 1
         # LINE_ADV: eps (foldless f64 prefix vs the scan's f32 grouping).
-        var g = Float64(h_lm[id * LM_STRIDE + LM_LINE_ADV])
-        var e = Float64(cpu.lm[id * LM_STRIDE + LM_LINE_ADV])
+        var g = Float64(h_wm[id])
+        var e = Float64(cpu.wm[id])
         if not rel_close(g, e):
             bad += 1
             if printed < MAX_PRINTED:

@@ -97,7 +97,7 @@ def main() raises:
         var scratch = span * SLOT_BYTES
         if scratch > peak_scratch:
             peak_scratch = scratch
-        var r = run_pipeline(slice, seed.trie, items)
+        var r = run_pipeline[witness=False](slice, seed.trie, items)
         glyphs += r.leaders
         jobs += 1
         i = j
