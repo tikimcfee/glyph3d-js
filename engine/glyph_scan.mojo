@@ -246,6 +246,7 @@ async def _resolve_x_shard[
     scalar_base: Int,
     start: Int,
     stop: Int,
+    paged: Bool,
 ):
     """THE SEGMENT WALK, AMORTIZED: one seed per shard, one f32 add per leader.
 
@@ -305,11 +306,19 @@ async def _resolve_x_shard[
         else:
             x = Float64(slots.line_adv(id))
         var row = slots.row(id)
-        var wrap_row = (col // wrap) if wrap > 0 else 0
         slots.set_base_x(id, Float32(x + item.origin_x))
-        slots.set_x(id, Float32(x + item.origin_x))
-        slots.set_y(id, Float32(-Float64(row) * lh + item.origin_y))
-        slots.set_z(id, Float32(-Float64(wrap_row) * item.z_step + item.origin_z))
+        if not paged:
+            # PAGE-ACTIVE ITEMS SKIP X/Y/Z ENTIRELY. paginate's per-byte gate is
+            # the exact complement of page_active on the same item-level params,
+            # so for a page-active item paginate writes X/Y/Z for EVERY leader —
+            # these three stores were dead the moment it ran (the data-flow audit
+            # priced them at ~11.8 B per paged-item byte). paginate reads only
+            # BASE_X/ROW/COL, all still written. Observable output is unchanged,
+            # which the paged fixtures pin.
+            var wrap_row = (col // wrap) if wrap > 0 else 0
+            slots.set_x(id, Float32(x + item.origin_x))
+            slots.set_y(id, Float32(-Float64(row) * lh + item.origin_y))
+            slots.set_z(id, Float32(-Float64(wrap_row) * item.z_step + item.origin_z))
         if Float64(row + 1) > row_max:
             row_max = Float64(row + 1)
         if x > x_max:
@@ -449,7 +458,9 @@ def run_scan_pipeline[o: ImmOrigin](
         for w in range(workers):
             var a = shard_lo(start, stop, workers, w)
             var b = shard_lo(start, stop, workers, w + 1)
-            tg7.create_task(_resolve_x_shard(slots, items[i2], op, ssp, w * 8, a, b))
+            tg7.create_task(_resolve_x_shard(
+                slots, items[i2], op, ssp, w * 8, a, b, page_active(items[i2])
+            ))
         tg7.wait()
         for w in range(workers):
             if shard_scalars[w * 8 + 6] > item_bounds[i2 * 8 + 6]:
