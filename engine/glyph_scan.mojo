@@ -247,8 +247,77 @@ async def _resolve_x_shard[
     start: Int,
     stop: Int,
 ):
+    """THE SEGMENT WALK, AMORTIZED: one seed per shard, one f32 add per leader.
+
+    resolve_x re-derives each leader's fold>0 x by walking its col%fold
+    same-segment predecessors through ord_to_byte — O(fold) loads and adds PER
+    LEADER, ~50 at wrap 100. The open segment's partial sum cannot ride the
+    monoid (regrouping an f32 chain changes its value — the same reason segAdv
+    is not an element field), but nothing requires re-deriving it per leader:
+    this shard runs AFTER apply completes, so ord_to_byte is finished and the
+    walk can run ONCE to seed a serial accumulator, which then advances by one
+    f32 add per leader.
+
+    BIT-EXACT BY CONSTRUCTION, not by tolerance: the serial recurrence
+    (reset at col % fold == 0, then seg = f32(seg + advance) per leader) performs
+    the SAME f32 additions in the SAME left-fold order as the per-leader re-sum,
+    so every x is bit-identical — conformance_scan's fold>0 tier checks exactly
+    this. A carried sum in any other grouping would diverge for a reason that is
+    not a bug; this one cannot, because it IS the re-sum, scheduled differently.
+
+    The GPU form keeps the per-leader walk (thread-per-byte has no serial shard);
+    the two forms produce identical bits because both are the same left-fold.
+    """
+    var wrap = trunc_nonneg(item.wrap_width)
+    var fold: Int
+    if wrap > 0:
+        fold = wrap
+    else:
+        fold = trunc_nonneg(item.page_cols) if item.has_page else 0
+    var lh = item.line_height
+    var seg_adv: Float32 = 0
+    var seeded = False
+    var row_max: Float64 = scalars[unsafe_offset = scalar_base + 6]
+    var x_max: Float64 = scalars[unsafe_offset = scalar_base + 7]
     for id in range(start, stop):
-        resolve_x(slots, id, item, ord_to_byte, scalars, scalar_base)
+        if (slots.flags(id) & F_LEADER) == 0:
+            continue
+        var col = slots.col(id)
+        var x: Float64
+        if fold > 0:
+            if col % fold == 0:
+                seg_adv = 0          # segment start: empty prefix, no walk at all
+                seeded = True
+            elif not seeded:
+                # THE ONE WALK: the shard begins mid-segment, so re-derive the
+                # open prefix exactly as resolve_x would — forward, f32 per add.
+                var x32: Float32 = 0
+                var ord = slots.ord(id)
+                var k = col % fold
+                while k >= 1:
+                    var q = Int(ord_to_byte[unsafe_offset = item.byte_start + ord - k])
+                    x32 = x32 + slots.advance(q)
+                    k -= 1
+                seg_adv = x32
+                seeded = True
+            x = Float64(seg_adv)
+            seg_adv = seg_adv + slots.advance(id)
+        else:
+            x = Float64(slots.line_adv(id))
+        var row = slots.row(id)
+        var wrap_row = (col // wrap) if wrap > 0 else 0
+        slots.set_base_x(id, Float32(x + item.origin_x))
+        slots.set_x(id, Float32(x + item.origin_x))
+        slots.set_y(id, Float32(-Float64(row) * lh + item.origin_y))
+        slots.set_z(id, Float32(-Float64(wrap_row) * item.z_step + item.origin_z))
+        if Float64(row + 1) > row_max:
+            row_max = Float64(row + 1)
+        if x > x_max:
+            x_max = x
+    # This shard owns scalar_base's slot exclusively; one store instead of a
+    # read-compare-write per leader.
+    scalars[unsafe_offset = scalar_base + 6] = row_max
+    scalars[unsafe_offset = scalar_base + 7] = x_max
 
 
 def run_scan_pipeline[o: ImmOrigin](
