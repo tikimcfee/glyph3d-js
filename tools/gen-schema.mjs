@@ -145,6 +145,34 @@ function validate(s) {
                 + `a layout parameter this backend cannot express`);
         }
     }
+    // A DECLARATION MAY NOT OUTLIVE ITS JUSTIFICATION. Every rule above catches a
+    // lane that violates without a declaration; these catch the mirror — a
+    // DECLARATION that no longer describes anything true. Both directions matter,
+    // and only the first is obvious.
+    //
+    // Fix GLYPH_ID's carrier, forget to remove its `misplaced` entry, and the
+    // exemption silently covers whatever lands in that slot next. A deviation list
+    // that outlives its deviation is a permanent hole with a comment on it, and the
+    // file people trust most becomes the one carrying the stalest claims. A settled
+    // debt must FAIL until it is removed.
+    for (const [bufName, buf] of Object.entries(s.buffers)) {
+        for (const lane of buf.lanes) {
+            if (!lane.misplaced) continue;
+            const deviating = buf.carrier === 'f32' && lane.kind !== 'measure';
+            if (!deviating) {
+                errs.push(`${bufName}.${lane.name}: declares 'misplaced' but is not `
+                    + `deviating — kind '${lane.kind}' on a '${buf.carrier}' carrier is `
+                    + `correct. A settled debt must be REMOVED, not left as an exemption `
+                    + `covering whatever lands in this slot next.`);
+            }
+        }
+    }
+    for (const lane of s.itemTable.measures.lanes) {
+        if ((lane.realization_only || lane.orphan) && semantic.has(lane.name)) {
+            errs.push(`itemTable.${lane.name}: declared ${lane.orphan ? 'orphan' : 'realization_only'} `
+                + `but IS in the semantic set — the declaration has outlived its reason`);
+        }
+    }
     if (errs.length) throw new Error('schema invalid:\n  ' + errs.join('\n  '));
     return s;
 }
