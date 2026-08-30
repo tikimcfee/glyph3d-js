@@ -1,0 +1,144 @@
+# Split by carrier, delete the casts
+
+Plan of record, written 2026-08-30 by the render/JS session, immediately after the
+item-table migration. Ivan's framing, and it is the right one: *casts back and forth
+usually mean something is being made compatible or patched into place, which isn't
+always the right path.*
+
+## THE FINDING
+
+The pipeline binds **21 storage buffers**. Nine of them carry **two kinds in one
+container** — exact integers and real measures — and every access to a measure lane
+goes through a `bitcast`. There are **33 bitcast sites** in `glyphPipelineKernels.js`
+alone, plus the vertex path's `fl()` helper (one definition, six reads) and ~29
+`fbits`/`fval` calls on the CPU mirror.
+
+The casts are not the problem. They are the *symptom* of the mixed container, and the
+mixed container is the single cause behind every defect this session:
+
+| defect | shape |
+|---|---|
+| slot ordinals past 2^24 | exact value on a float carrier |
+| pick ids (3 carriers) | exact value on a float carrier |
+| `foldScalars` `totalRows` | exact value on a float carrier (ordered key) |
+| `GLYPH_ID` | exact value on a float carrier, inherited from the trie |
+| trie `glyphId` + `flags` | exact values on a float carrier |
+| `I_BYTE_COUNT` | exact value on a float carrier |
+
+Six instances, one cause. **We fixed the instances and preserved the cause.** The
+containers are correct now; they are still mixed, so the next lane added to any of them
+is one discipline lapse away from number seven.
+
+## WHY THE ORIGINAL JUSTIFICATION IS DEAD
+
+The stated reason, in `GlyphTrie.js`'s own comment: *"a single array keeps the GPU
+binding to one buffer instead of two."*
+
+That was a real trade once. It is not one now — **21 buffers are already bound.**
+Splitting the nine mixed ones adds at most nine more, and no shader stage binds all of
+them. The saving was never large and is now noise against the count.
+
+## THE DECISIVE ARGUMENT — where the error is allowed to live
+
+    one mixed buffer + bitcast   a wrong-kind read is a CORRECT-LOOKING access that
+                                 returns a denormal. Silent. Wrong only in a range
+                                 nobody tests. Kind lives in a side table (LANE_KIND)
+                                 consulted by DISCIPLINE.
+
+    split by carrier             a wrong-kind read is reading the WRONG VARIABLE. The
+                                 storage node's declared type IS the kind. Enforced by
+                                 the type system, not by a convention someone must
+                                 remember.
+
+This is the difference between a convention and a constraint. We have paid for the
+convention six times.
+
+## THE EVIDENCE IT WORKS — the engine already did it
+
+mojo-rising split their realizations by carrier (`blocks_m` f32 / `blocks_c` u32, with
+accessors on the struct) and reports **zero bitcasts**. Same kinds, same shared
+contract, both layers conformant — the tier split explicitly permits different
+containers per layer. So this is not a hypothesis: one of the two implementations of
+this pipeline already runs without casts, and it is the faster one.
+
+## INVENTORY — what is mixed, what is not
+
+MIXED (the work):
+
+| buffer | stride | exact lanes | measure lanes |
+|---|---|---|---|
+| `slots` | 12 | `GLYPH_ID` `ROW` `COL` `FLAGS` `ORD` (5) | `ADVANCE` `HEIGHT` `X` `Y` `Z` `BASE_X` `LINE_ADV` (7) |
+| `itemTable` | 15 | `PAGE_ROWS` `PAGE_COLS` `PAGES_WIDE` `SCROLL_ROWS` `WRAP_WIDTH` `BYTE_COUNT` (6) | origins, gaps, depths, `Z_STEP`, `LINE_HEIGHT` (9) |
+| `trieBlocks` | 4 | `GLYPH_ID` `FLAGS` (2) | `ADVANCE` `HEIGHT` (2) |
+| `partials` / `partialPrefix` / `supers` / `superPrefix` | 8 | 7 counts | `TAILADV` (1) |
+| `foldScalars` | 2 | `totalRows` (1) | widest-row extent (1) |
+| `farItems` | 5 | slab coords, dirty flag | rows/cols-per-texel |
+
+NOT MIXED — leave alone, and do not migrate for symmetry:
+
+- `itemStrides`, `farInk` — all-measure, `'float'` is *correct*.
+- `byteWords`, `trieIndex`, `ordToByte`, `itemStarts`, `misses`, `missCount`,
+  `farDirtyList`, `farAccum`, `farPacked` — all-exact, `'uint'` is correct.
+- **`itemBoxes` is a special case: read it before touching it.** Its six lanes are all
+  measures, stored as f32 ORDERED KEYS in a uint buffer. That encoding exists because
+  `atomicMin`/`atomicMax` need integers — it is an atomics requirement, *not* kind
+  mixing. Removing it would break the reduce. `foldScalars` lane 1 is the same
+  technique for the same reason.
+
+## ORDER OF WORK
+
+1. **`trieBlocks` first** — smallest (4 lanes, 2+2), fewest consumers, and it was
+   migrated hours ago so the shape is fresh. Proves the split pattern end to end.
+2. **`slots`** — the big one, and the one the vertex path and picking both read.
+   Splitting it changes `glyphVertex.js` and `PickingSystem.js`, which is where the
+   silent far-LOD failure lives, so this step wants the far-LOD gate to exist first
+   (see below).
+3. **`itemTable`**, **`farItems`** — independent, small.
+4. **The scan buffers** (7 counts + 1 float) — arguably the clearest win: one float
+   lane forcing a whole 8-lane container to be uint.
+
+Each step: mutation-test that a wrong-kind access now FAILS TO COMPILE or reads a
+different variable, rather than returning a denormal. That property is the deliverable;
+the deleted casts are a side effect.
+
+## THE PREREQUISITE NOBODY SHOULD SKIP
+
+**The far-LOD `vRowCol` -> far-texel UV path has no GPU gate** (`tools/CHECKS.md`,
+"What is NOT covered"). It is the one path whose failure is silent — near text renders
+correctly while every far glyph collapses to texel (0,0) — and step 2 touches exactly
+it. Build that gate before splitting `slots`, or the step with the worst failure mode
+is the step with no evidence.
+
+## AND THE BIGGER THING THIS IS ADJACENT TO
+
+Ivan's actual target is not the casts and was not the `2^24` constant (which is gone —
+no live `2 ** 24` remains in `packages/glyph3d-core`). It is the **architecture**:
+
+> **48 bytes of GPU state per SOURCE BYTE, held for every byte loaded whether or not it
+> is ever drawn.**
+
+`ARENA_MAX_BYTES` = 2GB binding / 48 = ~44MB of text, and that division *is* the
+ceiling. Four of the twelve slot lanes are fold SCRATCH — job-scale intermediates held
+at corpus lifetime, per byte, including every space and newline.
+
+A bigger number moves that; it does not fix it. The fix is in
+`docs/perf-swarm/vram-memory-architecture.md` and half-built on the engine side: slots
+become a per-job scratch pool, a compact kernel emits ~32B records for glyphs that
+actually exist, and `maxBytes` stops being a corpus limit at all. **Pay per rendered
+glyph, not per loaded byte.**
+
+These are the same work, which is the part worth noticing: defining the record forces
+you to say what a rendered glyph IS, and that definition is exactly the schema that
+makes the containers single-kind. **The split is not a competing refactor — the record
+work subsumes it.** Do the split first only where it de-risks the record work (the
+trie, the scan buffers); let `slots` fall out of compaction rather than being migrated
+twice.
+
+## A BIAS TO DECLARE
+
+This plan is written by the session that spent a day making the mixed-container
+discipline *work* — `LANE_KIND`, the totality guards, the contract conformance teeth.
+That is a real incentive to preserve the thing rather than delete it. Ivan flagged it
+directly and he was right to. Discount accordingly: the guards were worth building
+because they made a live system safe, AND they are scaffolding around a design that
+should stop needing them.
