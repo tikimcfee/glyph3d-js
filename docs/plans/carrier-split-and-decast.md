@@ -124,7 +124,41 @@ single-kind.** So order by casts-deleted-with-nothing-added:
 3. **`slots` + `trieBlocks` TOGETHER** — 14 deleted, 0 added, and only together. This is
    the step that wants the far-LOD gate first (below), and the step the record/compaction
    work may subsume rather than repeat.
-4. **`farItems`** — independent, small.
+4. **`farItems` — DEFERRED, deliberately, and it corrects the census above.**
+
+## THE CENSUS COUNTED SYMPTOMS OF ONLY ONE FAILURE
+
+Ordering the work by bitcast count was better than "smallest first," and still not right,
+because **a bitcast is the symptom of only ONE of the two ways a container can be wrong.**
+
+    mixed uint container    measures bitcast in and out. Symptom: casts. Countable.
+    uniform float container exact values ride float lanes. Symptom: NOTHING. Zero casts.
+
+`farItems` scored 0 in the census and is not clean — it is a `'float'` buffer holding two
+genuine measures (`ROWS_PER_TEXEL`, `COLS_PER_TEXEL`) and **three exact values**:
+`FI_SLAB_X` and `FI_SLAB_Y` are texel coordinates converted with `int(...)` at every read,
+and `FI_DIRTY` is a flag tested as `.lessThan(float(0.5))` — the float proxy for a bit
+test, the *same* line that was deleted from the trie's flags lane hours earlier
+(`tflags.greaterThan(float(0.5))`). It is exactly how `GLYPH_ID` and `I_BYTE_COUNT` looked
+before they were caught: small values, no casts, no symptom, correct until the range grows.
+
+So the count is a *lower* bound on the work, never the measure of it. A buffer with no
+casts has either one kind or a hidden float carrier, and only reading the lanes tells you
+which.
+
+Deferred rather than done, for reasons that are about risk and not about effort:
+
+- It deletes **zero** casts. Its whole value is removing a latent exact-on-float instance.
+- `FI_SLAB_X` uses **−1 as a sentinel** for "no slab", so a u32 container needs a real
+  re-encoding (a `HAS_SLAB` bit beside `DIRTY`), not a lane move. That is a semantic
+  change to the far subsystem, not a carrier change.
+- The far path is **the least covered code in the pipeline** — `far-texels-check` proves
+  the scatter and normalize kernels, and the `vRowCol` → far-texel UV derivation has no
+  GPU gate at all (`tools/CHECKS.md`). Doing the riskiest re-encoding in the thinnest
+  evidence is the trade this plan already refused once for `slots`.
+
+Right order for it: build the far-LOD UV gate, then re-encode `farItems` and split `slots`
+behind the same instrument — which is the same prerequisite step 3 already has.
 
 Each step: mutation-test that a wrong-kind access now FAILS TO COMPILE or reads a
 different variable, rather than returning a denormal. That property is the deliverable;

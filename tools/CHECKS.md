@@ -29,6 +29,13 @@ numbers imply the coverage nobody wrote.
   auto-layout glitches on mode switch that resolve after further UI interaction, i.e.
   shell/panel state rather than layout math. Not reproduced in a harness, so it is
   recorded as a gap rather than a bug.
+- **`farItems` carries three exact values on float lanes, and nothing checks it.** The
+  buffer is `'float'`: `FI_SLAB_X`/`FI_SLAB_Y` are texel coordinates read through `int()`,
+  and `FI_DIRTY` is a flag tested as `< 0.5` — the float proxy for a bit test that was
+  deleted from the trie's flags lane on 2026-08-30 and still stands here. Harmless at
+  today's magnitudes (slab coords are 0..15) and the same shape as every defect the
+  carrier split has been closing. Not covered because it produces no bitcast to count and
+  no wrong answer at this range; see `docs/plans/carrier-split-and-decast.md`.
 - **No arena has been staged past 16MB on GPU.** `arena-capacity.test.mjs` covers the
   seams headlessly; the ceiling (`ARENA_MAX_BYTES`, 42.7MB) is buildable in principle and
   no test builds one.
