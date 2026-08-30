@@ -134,9 +134,14 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
 - **GPU picking** (`picking/`) is a multi-channel ID render pass (separate glyph and
   grid channels) — the single source of truth for hover/click resolution.
 - **Frustum culling** is three's built-in per-object cull fed the real instance extent —
-  `GlyphField._updateGeometryBounds` writes `geometry.boundingBox/Sphere` after every
-  position/count mutation, so `frustumCulled = true` is safe. (The old `GridVirtualizer`
-  class is deleted; culling covers draws, not GPU memory.)
+  but the extent is **pushed, not computed**: `GlyphField.setLayoutExtent(extent)` writes
+  `geometry.boundingBox/Sphere`, and the layout owner states the new box in the same breath
+  as the layout change (CodeGrid from the fold's extent, TerminalGrid/FrameGrid from their
+  cell dimensions). Nothing walks the buffer, nothing has to be kept in sync — and bounds
+  therefore carries **no second copy of the position formula**. A field whose glyphs ride
+  group offsets (GPU texture state no CPU box can describe) constructs with
+  `frustumCulled: false` and never calls it. (The old `GridVirtualizer` class is deleted;
+  culling covers draws, not GPU memory.)
 - **Terminals** are tmux-backed (socket `tmux -L glyphd`, sessions `glyph-<id>`) via
   forked adapter subprocesses; they render as `TerminalGrid`s and re-adopt across
   reloads. See the `saved-state` and `terminal-control-subsystem` memories.
