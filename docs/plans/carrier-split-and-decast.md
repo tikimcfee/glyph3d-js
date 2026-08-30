@@ -99,6 +99,10 @@ classified by the buffer each touches) gives 31, not the 33 estimated above:
 | ordered-key helpers (atomics — legitimate, keep) | 2 |
 | **`trieBlocks`** | **0** |
 
+**Standing at 16 of 31**: the 14 on `slots` and the 2 legitimate atomics helpers. Every
+cast left in the kernels is now either on the one buffer that still mixes kinds, or is an
+ordered key that has to be an integer for `atomicMin`/`atomicMax` to work at all.
+
 `trieBlocks` has **zero**. Both the trie and the slot buffer are u32-with-bitcast-measures
 today, so a measure copies from one to the other VERBATIM — the verbatim copy is the
 reward of both containers sharing the same wrong convention. Splitting the trie alone
@@ -112,8 +116,11 @@ single-kind.** So order by casts-deleted-with-nothing-added:
    GPU-READ-ONLY (packed on the CPU, never written by a kernel), so its measures land in
    float arithmetic and nothing needs a cast back. 31 → 18 sites, none added. Split into
    `itemMeasures` (f32 × 9) + `itemExact` (u32 × 6).
-2. **The scan buffers** — 2 sites, self-contained, one float lane (`TAILADV`) forcing a
-   whole 8-lane container to be uint.
+2. ✅ **The scan buffers — DONE.** 2 sites, and the shape is the point: one float lane
+   (`TAILADV`) was setting the container type for seven counts it had nothing to do with.
+   Each rung is now a `{c, a}` pair — counts u32 beside one advance f32 — paired in plain
+   JS at construction, so all nine call sites still name a rung and nothing changed at
+   dispatch. `P_STRIDE` 8 → 7. **18 → 16 sites.**
 3. **`slots` + `trieBlocks` TOGETHER** — 14 deleted, 0 added, and only together. This is
    the step that wants the far-LOD gate first (below), and the step the record/compaction
    work may subsume rather than repeat.

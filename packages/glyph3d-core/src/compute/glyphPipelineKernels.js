@@ -195,13 +195,18 @@ const BINARY_SEARCH_STEPS = 32;
 export const DEFAULT_MAX_ITEMS = 1024;
 
 /**
- * The packed monoid element — one row of the partials/supers/prefix buffers. All-uint
- * (counts are exact; TAILADV is an f32 bitcast into its lane). Mirrors the spec's
+ * The monoid element — one row of each scan rung, SPLIT BY CARRIER. Mirrors the spec's
  * {reset, nl, glyphs, rows, headLen, tailLen, wrap, tailAdv} object.
+ *
+ * Seven of the eight fields are exact counts; tailAdv alone is a measure. Packed into one
+ * uint row, that single measure forced the whole element through a bitcast on every load
+ * and every store — one float lane setting the container's type for seven counts that had
+ * nothing to do with it. Split, each rung is a u32 array of counts beside an f32 array of
+ * one advance, and the element crosses in the carrier it belongs to.
  */
-export const P_STRIDE = 8;
+export const P_STRIDE = 7;
 const P_RESET = 0, P_NL = 1, P_GLYPHS = 2, P_ROWS = 3,
-    P_HEAD = 4, P_TAIL = 5, P_WRAP = 6, P_TAILADV = 7;
+    P_HEAD = 4, P_TAIL = 5, P_WRAP = 6;
 
 /**
  * Bytes are packed 4-per-u32 because WGSL cannot index a u8 array. `byteAt` unpacks.
@@ -309,10 +314,17 @@ export default class GlyphPipelineKernels {
         this.trieBlocks = instancedArray(trie.blocks.length, 'uint').setName('GlyphTrieBlocks');
         // The scan's ladder: chunk partials, their group reduces, the two exclusive-prefix
         // levels, and the ordinal map (leader ordinal → byte index, per item's byte range).
-        this.partials = instancedArray(this.maxChunks * P_STRIDE, 'uint').setName('GlyphScanPartials');
-        this.partialPrefix = instancedArray(this.maxChunks * P_STRIDE, 'uint').setName('GlyphScanPartialPrefix');
-        this.supers = instancedArray(this.maxSupers * P_STRIDE, 'uint').setName('GlyphScanSupers');
-        this.superPrefix = instancedArray(this.maxSupers * P_STRIDE, 'uint').setName('GlyphScanSuperPrefix');
+        // Each rung is a PAIR — counts (u32) beside the one advance (f32). The pairing is
+        // a plain JS object built at construction, so it costs nothing at dispatch and the
+        // nine call sites still name a rung rather than two buffers.
+        const rung = (n, tag) => ({
+            c: instancedArray(n * P_STRIDE, 'uint').setName(`GlyphScan${tag}Counts`),
+            a: instancedArray(n, 'float').setName(`GlyphScan${tag}Adv`),
+        });
+        this.partials = rung(this.maxChunks, 'Partial');
+        this.partialPrefix = rung(this.maxChunks, 'PartialPrefix');
+        this.supers = rung(this.maxSupers, 'Super');
+        this.superPrefix = rung(this.maxSupers, 'SuperPrefix');
         this.ordToByte = instancedArray(this.maxBytes, 'uint').setName('GlyphOrdToByte');
         // Per-item bounds, split by WRITER so re-arming one never clobbers the other:
         // itemBoxes (6 lanes/item — final positions, paginate, re-armed every repaginate)
@@ -399,7 +411,8 @@ export default class GlyphPipelineKernels {
     /** @private */
     _allNodes() {
         return [this.byteWords, this.slots, this.trieIndex, this.trieBlocks,
-            this.partials, this.partialPrefix, this.supers, this.superPrefix, this.ordToByte,
+            this.partials.c, this.partials.a, this.partialPrefix.c, this.partialPrefix.a,
+            this.supers.c, this.supers.a, this.superPrefix.c, this.superPrefix.a, this.ordToByte,
             this.itemBoxes, this.foldScalars, this.itemStrides,
             this.misses, this.missCount, this.itemMeasures, this.itemExact, this.itemStarts,
             this.farItems, this.farDirtyList, this.farAccum, this.farPacked, this.farInk];
@@ -572,32 +585,32 @@ export default class GlyphPipelineKernels {
         e.tailAdv.assign(float(0));
     }
 
-    /** Load a packed element row into fresh vars. @private */
-    _elemLoad(buf, idx, tag) {
+    /** Load an element row into fresh vars. `rung` is a {c, a} carrier pair. @private */
+    _elemLoad(rung, idx, tag) {
         const b = idx.mul(uint(P_STRIDE));
         return {
-            reset: int(buf.element(b.add(uint(P_RESET)))).toVar(`${tag}Reset`),
-            nl: int(buf.element(b.add(uint(P_NL)))).toVar(`${tag}Nl`),
-            glyphs: int(buf.element(b.add(uint(P_GLYPHS)))).toVar(`${tag}Glyphs`),
-            rows: int(buf.element(b.add(uint(P_ROWS)))).toVar(`${tag}Rows`),
-            headLen: int(buf.element(b.add(uint(P_HEAD)))).toVar(`${tag}Head`),
-            tailLen: int(buf.element(b.add(uint(P_TAIL)))).toVar(`${tag}Tail`),
-            wrap: int(buf.element(b.add(uint(P_WRAP)))).toVar(`${tag}Wrap`),
-            tailAdv: bitcast(buf.element(b.add(uint(P_TAILADV))), 'float').toVar(`${tag}Adv`),
+            reset: int(rung.c.element(b.add(uint(P_RESET)))).toVar(`${tag}Reset`),
+            nl: int(rung.c.element(b.add(uint(P_NL)))).toVar(`${tag}Nl`),
+            glyphs: int(rung.c.element(b.add(uint(P_GLYPHS)))).toVar(`${tag}Glyphs`),
+            rows: int(rung.c.element(b.add(uint(P_ROWS)))).toVar(`${tag}Rows`),
+            headLen: int(rung.c.element(b.add(uint(P_HEAD)))).toVar(`${tag}Head`),
+            tailLen: int(rung.c.element(b.add(uint(P_TAIL)))).toVar(`${tag}Tail`),
+            wrap: int(rung.c.element(b.add(uint(P_WRAP)))).toVar(`${tag}Wrap`),
+            tailAdv: rung.a.element(idx).toVar(`${tag}Adv`),
         };
     }
 
-    /** Store an element into a packed row. @private */
-    _elemStore(buf, idx, e) {
+    /** Store an element into a row of `rung`. @private */
+    _elemStore(rung, idx, e) {
         const b = idx.mul(uint(P_STRIDE));
-        buf.element(b.add(uint(P_RESET))).assign(uint(e.reset));
-        buf.element(b.add(uint(P_NL))).assign(uint(e.nl));
-        buf.element(b.add(uint(P_GLYPHS))).assign(uint(e.glyphs));
-        buf.element(b.add(uint(P_ROWS))).assign(uint(e.rows));
-        buf.element(b.add(uint(P_HEAD))).assign(uint(e.headLen));
-        buf.element(b.add(uint(P_TAIL))).assign(uint(e.tailLen));
-        buf.element(b.add(uint(P_WRAP))).assign(uint(e.wrap));
-        buf.element(b.add(uint(P_TAILADV))).assign(bitcast(e.tailAdv, 'uint'));
+        rung.c.element(b.add(uint(P_RESET))).assign(uint(e.reset));
+        rung.c.element(b.add(uint(P_NL))).assign(uint(e.nl));
+        rung.c.element(b.add(uint(P_GLYPHS))).assign(uint(e.glyphs));
+        rung.c.element(b.add(uint(P_ROWS))).assign(uint(e.rows));
+        rung.c.element(b.add(uint(P_HEAD))).assign(uint(e.headLen));
+        rung.c.element(b.add(uint(P_TAIL))).assign(uint(e.tailLen));
+        rung.c.element(b.add(uint(P_WRAP))).assign(uint(e.wrap));
+        rung.a.element(idx).assign(e.tailAdv);
     }
 
     /**
