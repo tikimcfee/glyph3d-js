@@ -13,7 +13,7 @@ from std.sys import argv
 from std.memory import bitcast
 from glyph_schema import MEASURE_STRIDE, COUNT_STRIDE, measure_lane_name, count_lane_name
 from glyph_pipeline import run_pipeline
-from fixture_io import PipeFixture, load_pipe_fixture
+from fixture_io import PipeFixture, load_pipe_fixture, nan_lanes
 
 comptime MAX_PRINTED = 12
 
@@ -44,6 +44,17 @@ def check_case(path: String) raises -> Int:
             if printed < MAX_PRINTED:
                 print("  ordToByte[", i, "]:", got.ord_to_byte[i], "expected", fx.exp_ord[i])
                 printed += 1
+
+    # NaN sweep BEFORE the bit comparison. The comparison below is bit equality,
+    # so matching NaNs on both sides pass it; nothing else in this file can see that.
+    var nan_first = -1
+    var nan_count = nan_lanes(got.measures, fx.byte_len, nan_first)
+    if nan_count > 0:
+        bad += nan_count
+        print(
+            "  NaN in", nan_count, "measure lane(s); first at slot",
+            nan_first // MEASURE_STRIDE, measure_lane_name(nan_first % MEASURE_STRIDE),
+        )
 
     for slot in range(fx.byte_len):
         # MEASURES: f64 values narrowed to the buffer's f32 and compared as bits.

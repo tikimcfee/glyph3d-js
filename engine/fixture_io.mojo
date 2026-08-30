@@ -145,3 +145,34 @@ def load_pipe_fixture(path: String) raises -> PipeFixture:
     for _ in range(8):
         fx.exp_batch.append(r.u64())
     return fx^
+
+
+def nan_lanes(measures: List[Float32], byte_len: Int, mut first: Int) -> Int:
+    """Count measure lanes holding NaN. `first` receives the first offending index.
+
+    WHY THIS EXISTS, and it is not hypothetical. Every suite compares measures BY
+    BITS — `got.to_bits() != Float32(exp).to_bits()`. That is deliberate: bit
+    equality is the contract. But it means two NaNs COMPARE EQUAL AND PASS, and a
+    NaN is never a correct value for any lane in this buffer: X/Y/Z/BASE_X/LINE_ADV
+    /ADVANCE/HEIGHT are real quantities and GLYPH_ID is an identity.
+
+    Found by the render side, not by us: deleting the oracle's lineHeight fallback
+    turned three test lanes to NaN, and the oracle and the scan produced IDENTICAL
+    NaN bit patterns (2143289344 on both sides). Their float comparison caught it
+    only by the accident of NaN != NaN. Ours is a bit comparison and has no such
+    accident — it would have reported GREEN on two equally-wrong values.
+
+    So the equality check cannot police this and a separate invariant must. This is
+    the same family as every other trap this week: a comparison that agrees is not
+    the same as a comparison that is right."""
+    var bad = 0
+    first = -1
+    for i in range(byte_len * MEASURE_STRIDE):
+        var b = UInt32(measures[i].to_bits())
+        # NaN: exponent all ones AND a nonzero mantissa. Infinity is NOT NaN and is
+        # caught by the bit comparison like any other value, so do not fold it in.
+        if (b & 0x7F800000) == 0x7F800000 and (b & 0x007FFFFF) != 0:
+            bad += 1
+            if first < 0:
+                first = i
+    return bad
