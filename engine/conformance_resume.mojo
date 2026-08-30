@@ -103,6 +103,7 @@ def check_case(path: String) raises -> Int:
             layout_item(
                 m.unsafe_ptr(), c.unsafe_ptr(), item, otb.unsafe_ptr(),
                 sc.unsafe_ptr(), 0, item.byte_start + p, seed,
+                False,   # a resumed RANGE must not publish a whole item's box
             )
 
             # Every byte from the resume point on must match the whole pass.

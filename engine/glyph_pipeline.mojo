@@ -321,6 +321,7 @@ def layout_item[so: Origin[mut=True], xo: Origin[mut=True], oo: Origin[mut=True]
     scalar_base: Int,
     start: Int,
     seed: LayoutSeed,
+    write_bounds: Bool,
 ):
     """THE FOLD — one item, one forward pass, every lane (layoutItem in the oracle).
     Inherently serial per item (it IS the serial semantics); items run in parallel
@@ -343,6 +344,18 @@ def layout_item[so: Origin[mut=True], xo: Origin[mut=True], oo: Origin[mut=True]
     var z_step = item.z_step
     var lh_unset = is_nan(item.line_height)
 
+    # V3: fold the box HERE when the positions this loop writes are final — that
+    # is, when paginate will not run for this item. Saves a whole extra pass that
+    # only read back lanes we had just stored.
+    #
+    # write_bounds is False for a RESUMED range: conformance_resume calls this
+    # directly with a seed, and a partial range must not publish a whole item's box.
+    var bmnx = F64_INF
+    var bmny = F64_INF
+    var bmnz = F64_INF
+    var bmxx = -F64_INF
+    var bmxy = -F64_INF
+    var bmxz = -F64_INF
     var base_row = seed.base_row
     var col = seed.col
     var line_adv = seed.line_adv
@@ -376,6 +389,26 @@ def layout_item[so: Origin[mut=True], xo: Origin[mut=True], oo: Origin[mut=True]
         measures[unsafe_offset = mo + M_Z] = Float32(-Float64(wrap_row) * z_step + oz)
         counts[unsafe_offset = co + C_FLAGS] = UInt32(flags | F_RENDERED)
         ord_to_byte[unsafe_offset = item.byte_start + ord] = UInt32(id)
+        if write_bounds:
+            # Read back the STORED, ROUNDED lanes, never the f64 intermediates —
+            # folding the wider values would shift box lanes 0-5 off the oracle.
+            var bx = Float64(measures[unsafe_offset = mo + M_X])
+            var by = Float64(measures[unsafe_offset = mo + M_Y])
+            var bz = Float64(measures[unsafe_offset = mo + M_Z])
+            var bw = Float64(measures[unsafe_offset = mo + M_ADVANCE])
+            var bh = Float64(measures[unsafe_offset = mo + M_HEIGHT])
+            if bx < bmnx:
+                bmnx = bx
+            if by < bmny:
+                bmny = by
+            if bz < bmnz:
+                bmnz = bz
+            if bx + bw > bmxx:
+                bmxx = bx + bw
+            if by + bh > bmxy:
+                bmxy = by + bh
+            if bz > bmxz:
+                bmxz = bz
         if Float64(row + 1) > scalars[unsafe_offset = scalar_base + 6]:
             scalars[unsafe_offset = scalar_base + 6] = Float64(row + 1)
         if x > scalars[unsafe_offset = scalar_base + 7]:
@@ -394,6 +427,14 @@ def layout_item[so: Origin[mut=True], xo: Origin[mut=True], oo: Origin[mut=True]
             else:
                 seg_adv = seg_adv + advance
         id += 1
+
+    if write_bounds:
+        scalars[unsafe_offset = scalar_base + 0] = bmnx
+        scalars[unsafe_offset = scalar_base + 1] = bmny
+        scalars[unsafe_offset = scalar_base + 2] = bmnz
+        scalars[unsafe_offset = scalar_base + 3] = bmxx
+        scalars[unsafe_offset = scalar_base + 4] = bmxy
+        scalars[unsafe_offset = scalar_base + 5] = bmxz
 
 
 def resolve_x[so: Origin[mut=True], xo: Origin[mut=True], oo: Origin[mut=True], ko: Origin[mut=True]](
@@ -582,10 +623,11 @@ async def _fold_item[so: Origin[mut=True], xo: Origin[mut=True], oo: Origin[mut=
     ord_to_byte: Pointer[UInt32, oo],
     scalars: Pointer[Float64, ko],
     scalar_base: Int,
+    write_bounds: Bool,
 ):
     layout_item(
         measures, counts, item, ord_to_byte, scalars, scalar_base,
-        item.byte_start, LayoutSeed(),
+        item.byte_start, LayoutSeed(), write_bounds,
     )
 
 
@@ -718,7 +760,9 @@ def run_pipeline[o: ImmOrigin](
     var kp = item_bounds.unsafe_ptr()
     var tg2 = TaskGroup()
     for i in range(item_count):
-        tg2.create_task(_fold_item(mp, cp, items[i], op, kp, i * 8))
+        tg2.create_task(
+            _fold_item(mp, cp, items[i], op, kp, i * 8, not page_active(items[i]))
+        )
     tg2.wait()
 
     # ── paginate: stride DERIVED from the fold scalars; inactive items skip ───
@@ -754,11 +798,13 @@ def run_pipeline[o: ImmOrigin](
     # Each grain gets its OWN scratch slot and the merge is serial, because min/max
     # being exact under regrouping says nothing about a concurrent read-modify-write
     # on a shared location.
+    # V3: non-paged items already have their box from the fold. Only paged items,
+    # whose positions paginate rewrote, need the separate pass.
     var grain_of = List[Int]()
     for i in range(item_count):
-        var n_i = items[i].byte_count
+        var n_i = items[i].byte_count if page_active(items[i]) else 0
         var g = (n_i + BOUNDS_GRAIN - 1) // BOUNDS_GRAIN
-        grain_of.append(g if g > 0 else 1)
+        grain_of.append(g)
     var total_grains = 0
     for i in range(item_count):
         total_grains += grain_of[i]
@@ -794,6 +840,8 @@ def run_pipeline[o: ImmOrigin](
     gi = 0
     for i in range(item_count):
         var b8 = i * 8
+        if not page_active(items[i]):
+            continue          # the fold already wrote lanes 0-5
         item_bounds[b8 + 0] = F64_INF
         item_bounds[b8 + 1] = F64_INF
         item_bounds[b8 + 2] = F64_INF
