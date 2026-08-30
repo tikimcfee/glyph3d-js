@@ -202,14 +202,38 @@ async def _apply_shard[
             var mo = id * MEASURE_STRIDE
             var co = id * COUNT_STRIDE
             var flags = Int(counts[unsafe_offset = co + C_FLAGS])
-            if (flags & F_LEADER) != 0:
+            # THE GAP GUARD. item_for_byte returns the largest item whose start <= id
+            # and does NOT check ownership, so a byte in a HOLE between two items
+            # resolves to the preceding one. Without this test the scan form laid
+            # those bytes out as if they belonged to it: ROW/COL/ORD written,
+            # F_RENDERED set, the ordinal counter advanced through the gap, and
+            # ord_to_byte[byte_start + ord] written PAST the item's range.
+            #
+            # Measured on a 3-item arena with a 100-byte hole and a 200-byte tail:
+            # 300 count-lane disagreements against run_pipeline, 300 gap bytes
+            # marked F_RENDERED, 300 ord_to_byte disagreements. The serial
+            # layout_item cannot do this — it stops at the item's end.
+            #
+            # glyphPipelineKernels' apply has had this guard all along, with the
+            # reason in its comment: a dead-space byte's "fold-scalar/box reduces
+            # must never pollute that item (a stale widest-row is a wrong page-fan
+            # stride)". So this was a PORT divergence, not a shared defect.
+            #
+            # NOTE a remaining three-way difference, deliberately not resolved here:
+            # the TSL additionally ZEROES the flags lane for such a byte, while both
+            # forms of this port leave decode's flags in place. Aligning the scan
+            # form to the serial one is what conformance_scan requires; the flag
+            # question belongs with the render side.
+            var it_start = items[idx].byte_start
+            var in_item = id >= it_start and id < it_start + items[idx].byte_count
+            if (flags & F_LEADER) != 0 and in_item:
                 var v = lanes_from_prefix(run, wraps[idx])
                 counts[unsafe_offset = co + C_ROW] = UInt32(v.row)
                 counts[unsafe_offset = co + C_COL] = UInt32(v.col)
                 measures[unsafe_offset = mo + M_LINE_ADV] = v.line_adv
                 counts[unsafe_offset = co + C_ORD] = UInt32(v.ord)
                 counts[unsafe_offset = co + C_FLAGS] = UInt32(flags | F_RENDERED)
-                ord_to_byte[unsafe_offset = items[idx].byte_start + v.ord] = UInt32(id)
+                ord_to_byte[unsafe_offset = it_start + v.ord] = UInt32(id)
             var leaf = scan_leaf(measures, counts, id, wraps[idx], is_start)
             scan_combine(run, leaf)
             id += 1

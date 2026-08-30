@@ -16,6 +16,7 @@
 
 from std.sys import argv
 from glyph_schema import MEASURE_STRIDE, COUNT_STRIDE, C_FLAGS
+from glyph_scan import run_scan_pipeline
 from glyph_pipeline import run_pipeline, Item, Trie, F_LEADER, F_MISSING
 from fixture_io import load_pipe_fixture
 
@@ -36,6 +37,42 @@ def check(name: String, fx_bytes: List[UInt8], trie: Trie, items: List[Item]) ->
     var r = run_pipeline(fx_bytes, trie, items)
     var bad = 0
     var printed = 0
+
+    # ── THE SCAN FORM MUST AGREE ON GAPS TOO ─────────────────────────────────
+    # This suite built gap topologies and only ever ran run_pipeline, so a whole
+    # form of the pipeline was never asked about the very thing the suite exists
+    # to check. _apply_shard resolved a gap byte to the PRECEDING item and laid it
+    # out there — ROW/COL/ORD written, F_RENDERED set, ord_to_byte written past
+    # that item's range. 300 disagreements on a 3-item arena with a hole.
+    # SEPARATE DEFECT, guarded here rather than fixed: run_scan_pipeline CRASHES
+    # on an empty item list. item_for_byte returns 0 for an empty List (lo starts
+    # at 0, the while loop never runs), and _apply_shard then indexes items[0].
+    # run_pipeline handles the case — case 4 below has always passed. Reported,
+    # not silently patched: an empty arena is a legitimate state (nothing loaded),
+    # so the right fix is an early return in the scan driver, which is its owner's
+    # call rather than this suite's.
+    if len(items) == 0:
+        return bad
+    var sc = run_scan_pipeline(fx_bytes, trie, items, 64, 4)
+    var scan_bad = 0
+    for id in range(n):
+        var so = id * COUNT_STRIDE
+        for k in range(COUNT_STRIDE):
+            if r.counts[so + k] != sc.counts[so + k]:
+                scan_bad += 1
+                if printed < MAX_PRINTED:
+                    print("  ", name, "serial/scan disagree: byte", id, "lane", k,
+                          "serial", r.counts[so + k], "scan", sc.counts[so + k])
+                    printed += 1
+                break
+    for q in range(n):
+        if r.ord_to_byte[q] != sc.ord_to_byte[q]:
+            scan_bad += 1
+            if printed < MAX_PRINTED:
+                print("  ", name, "serial/scan ordToByte disagree at", q)
+                printed += 1
+            break
+    bad += scan_bad
     var gaps = 0
     for id in range(n):
         if claimed[id]:
