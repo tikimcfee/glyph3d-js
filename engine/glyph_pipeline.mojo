@@ -504,11 +504,12 @@ def resolve_x[so: Origin[mut=True], xo: Origin[mut=True], oo: Origin[mut=True], 
 
     var row = Int(counts[unsafe_offset = co + C_ROW])
     var wrap_row = (col // wrap) if wrap > 0 else 0
-    var lh: Float64
-    if is_nan(item.line_height):  # NaN = unset: the glyph's own height
-        lh = Float64(measures[unsafe_offset = mo + M_HEIGHT])
-    else:
-        lh = item.line_height
+    # THE FIFTH COPY. 3d5d9f0 claimed to have removed four; this one survived in
+    # resolve_x, which is the SCAN form's position writer. So run_scan_pipeline
+    # still resolved lineHeight per GLYPH while run_pipeline resolved it per ITEM
+    # — a live divergence between two forms of the same port, not a dead branch.
+    # Invisible for the same reason as all the others: no fixture leaves it unset.
+    var lh: Float64 = item.line_height
     measures[unsafe_offset = mo + M_BASE_X] = Float32(x + item.origin_x)
     measures[unsafe_offset = mo + M_X] = Float32(x + item.origin_x)
     measures[unsafe_offset = mo + M_Y] = Float32(-Float64(row) * lh + item.origin_y)
