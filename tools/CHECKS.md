@@ -23,6 +23,18 @@ numbers imply the coverage nobody wrote.
   auto-layout glitches on mode switch that resolve after further UI interaction, i.e.
   shell/panel state rather than layout math. Not reproduced in a harness, so it is
   recorded as a gap rather than a bug.
+- **`cli/fs_test.go`'s sandbox tests INVERT if the checkout lives under a temp dir.**
+  Found by render-bender, 2026-08-31, verified here. `outsideDir(t)` builds its directory
+  with `os.MkdirTemp(".", ...)` — relative to the package dir, so *inside the checkout* —
+  while `NewFSHandler`'s reach set always contains `os.TempDir()`, `/tmp` and `/var/tmp`
+  (`cli/fs.go:482`, so agent scratch stays reachable). Put the checkout under a temp dir
+  and the "outside" directory falls inside the always-on reach hatch, so it resolves
+  BEFORE `addRoot` and four tests fail on a premise that is no longer true —
+  `TestHandleAddRoot_MakesResolvable` and friends, all reporting "outside dir should not
+  resolve before addRoot". **Nothing is broken when this happens.** It is a red that means
+  something other than what it says, and it cost an hour before a control run at a clean
+  tip failed the same four. If CI or a scratch worktree ever lands in `$TMPDIR`, read this
+  entry before believing the failure.
 - **The far regen's LOAD-path cost was never measured either** (my claim, 1d2359e). I
   reported that deleting the far tier removed a 4MB `readFarPacked` GPU→CPU readback plus
   a texture blit per macrotask window during colorized loading, since every
