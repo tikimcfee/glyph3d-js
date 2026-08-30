@@ -120,7 +120,7 @@ def check_case(path: String, ctx: DeviceContext) raises -> Int:
     var cm = cpu_m.unsafe_ptr()
     var cc = cpu_c.unsafe_ptr()
     for id in range(n):
-        decode_and_resolve(fx.bytes, cm, cc, fx.trie, id)
+        _ = decode_and_resolve(fx.bytes, cm, cc, fx.trie, id)
 
     # ── GPU ──────────────────────────────────────────────────────────────────
     var n_idx = len(fx.trie.block_index)

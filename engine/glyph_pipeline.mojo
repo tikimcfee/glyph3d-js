@@ -224,8 +224,12 @@ def decode_and_resolve[o: ImmOrigin, so: Origin[mut=True], xo: Origin[mut=True]]
     counts: Pointer[UInt32, xo],
     trie: Trie,
     id: Int,
-):
+) -> Int:
     """KERNEL 1 — thread per byte: decode the codepoint, resolve through the trie.
+
+    Returns the codepoint for a leader, -1 otherwise. The caller wants it: the old
+    serial miss pass re-derived it with sequence_length + decode_codepoint_at for
+    every miss, re-deriving what this function already had in a register.
 
     Writes EVERY lane, including the ones the fold owns. That looks like extra work
     and is a net saving: decode already covers [0, byte_len) — every byte, item gaps
@@ -238,7 +242,7 @@ def decode_and_resolve[o: ImmOrigin, so: Origin[mut=True], xo: Origin[mut=True]]
     bytes holding whatever the allocator last put there — the lanes are never
     written by anything else."""
     if id >= len(bytes):
-        return
+        return -1
     var b0 = Int(bytes[id])
     var n: Int
     if (b0 & 0x80) == 0x00:
@@ -260,7 +264,7 @@ def decode_and_resolve[o: ImmOrigin, so: Origin[mut=True], xo: Origin[mut=True]]
             measures[unsafe_offset = mo + k] = 0
         for k in range(COUNT_STRIDE):
             counts[unsafe_offset = co + k] = 0
-        return
+        return -1
 
     var cp = decode_codepoint_at(bytes, id, n)
     var tb = trie_lookup_base(trie, cp)
@@ -284,6 +288,7 @@ def decode_and_resolve[o: ImmOrigin, so: Origin[mut=True], xo: Origin[mut=True]]
     counts[unsafe_offset = co + C_ROW] = 0
     counts[unsafe_offset = co + C_COL] = 0
     counts[unsafe_offset = co + C_ORD] = 0
+    return cp
 
 
 def item_for_byte(items: List[Item], id: Int) -> Int:
@@ -532,16 +537,42 @@ def paginate[so: Origin[mut=True], xo: Origin[mut=True]](
 # ── Parallel shard workers (the TaskGroup bodies) ────────────────────────────
 
 
-async def _decode_shard[o: ImmOrigin, so: Origin[mut=True], xo: Origin[mut=True]](
+async def _decode_shard[
+    o: ImmOrigin, so: Origin[mut=True], xo: Origin[mut=True],
+    mo2: Origin[mut=True], no: Origin[mut=True],
+](
     bytes: Span[UInt8, o],
     measures: Pointer[Float32, so],
     counts: Pointer[UInt32, xo],
     trie: Trie,
+    miss_out: Pointer[UInt32, mo2],
+    tally: Pointer[Int, no],
+    w: Int,
     start: Int,
     stop: Int,
 ):
+    """Decode a byte range AND collect this shard's leader count and miss list.
+
+    The driver used to do this in a separate SERIAL pass over every byte — O(n)
+    even with zero misses, and unable to use more than one of four cores. Shards
+    are contiguous ascending ranges that tile [0, byte_len), so concatenating their
+    miss lists in shard order IS byte order: duplicates kept, gaps included, item
+    order irrelevant. Per-ITEM collection would lose all three of those.
+
+    Each shard writes into miss_out[start ...], its own disjoint region, bounded by
+    its own length. No zeroing needed — `tally` records how much is live."""
+    var leaders = 0
+    var nmiss = 0
     for id in range(start, stop):
-        decode_and_resolve(bytes, measures, counts, trie, id)
+        var cp = decode_and_resolve(bytes, measures, counts, trie, id)
+        if cp < 0:
+            continue
+        leaders += 1
+        if (Int(counts[unsafe_offset = id * COUNT_STRIDE + C_FLAGS]) & F_MISSING) != 0:
+            miss_out[unsafe_offset = start + nmiss] = UInt32(cp)
+            nmiss += 1
+    tally[unsafe_offset = w * 2] = leaders
+    tally[unsafe_offset = w * 2 + 1] = nmiss
 
 
 async def _fold_item[so: Origin[mut=True], xo: Origin[mut=True], oo: Origin[mut=True], ko: Origin[mut=True]](
@@ -659,27 +690,27 @@ def run_pipeline[o: ImmOrigin](
     var op = ord_to_byte.unsafe_ptr()
 
     # ── decode: shards write disjoint slot ranges ────────────────────────────
+    var miss_scratch = List[UInt32](unsafe_uninit_length=byte_len if byte_len > 0 else 1)
+    var msp = miss_scratch.unsafe_ptr()
+    var tally = List[Int](length=workers * 2, fill=0)
+    var tp = tally.unsafe_ptr()
     var tg = TaskGroup()
     for w in range(workers):
         var a = shard_lo(0, byte_len, workers, w)
         var b = shard_lo(0, byte_len, workers, w + 1)
-        tg.create_task(_decode_shard(bytes, mp, cp, trie, a, b))
+        tg.create_task(_decode_shard(bytes, mp, cp, trie, msp, tp, w, a, b))
     tg.wait()
+    _ = len(miss_scratch)
+    _ = len(tally)
 
-    # ── ordered miss rebuild + leader count: one serial flags pass (the GPU's
-    #    atomic append, made deterministic — byte order, duplicates kept) ──────
+    # ── concatenate the shards' miss lists IN SHARD ORDER, which is byte order ──
     var misses = List[UInt32]()
     var leaders = 0
-    var id = 0
-    while id < byte_len:
-        var flags = Int(cp[unsafe_offset = id * COUNT_STRIDE + C_FLAGS])
-        if (flags & F_LEADER) != 0:
-            leaders += 1
-            if (flags & F_MISSING) != 0:
-                misses.append(
-                    UInt32(decode_codepoint_at(bytes, id, sequence_length(bytes, id)))
-                )
-        id += 1
+    for w in range(workers):
+        leaders += tally[w * 2]
+        var a = shard_lo(0, byte_len, workers, w)
+        for k in range(tally[w * 2 + 1]):
+            misses.append(miss_scratch[a + k])
 
     # ── THE FOLD: serial per item, items in parallel (disjoint ranges) ────────
     var item_count = len(items)

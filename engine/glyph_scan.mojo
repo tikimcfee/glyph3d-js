@@ -250,29 +250,30 @@ def run_scan_pipeline[o: ImmOrigin](
         workers = 1
 
     # ── dispatch 1: decode (shared kernel), sharded ───────────────────────────
+    # No memset: decode writes every lane of every byte.
     var measures = List[Float32](unsafe_uninit_length=n * MEASURE_STRIDE)
-    unsafe_memset_zero(measures.unsafe_ptr(), len(measures))
     var counts = List[UInt32](unsafe_uninit_length=n * COUNT_STRIDE)
-    unsafe_memset_zero(counts.unsafe_ptr(), len(counts))
     var mp = measures.unsafe_ptr()
     var cp = counts.unsafe_ptr()
+    var miss_scratch = List[UInt32](unsafe_uninit_length=n if n > 0 else 1)
+    var msp = miss_scratch.unsafe_ptr()
+    var tally = List[Int](length=workers * 2, fill=0)
+    var tp = tally.unsafe_ptr()
     var tg1 = TaskGroup()
     for w in range(workers):
         var a = shard_lo(0, n, workers, w)
         var b = shard_lo(0, n, workers, w + 1)
-        tg1.create_task(_decode_shard(bytes, mp, cp, trie, a, b))
+        tg1.create_task(_decode_shard(bytes, mp, cp, trie, msp, tp, w, a, b))
     tg1.wait()
+    _ = len(miss_scratch)
+    _ = len(tally)
 
-    # Ordered miss rebuild (byte order, duplicates kept) — the serial pass.
+    # Concatenate the shards' miss lists in SHARD order, which is byte order.
     var misses = List[UInt32]()
-    var id = 0
-    while id < n:
-        var flags = Int(cp[unsafe_offset = id * COUNT_STRIDE + C_FLAGS])
-        if (flags & F_LEADER) != 0 and (flags & F_MISSING) != 0:
-            misses.append(
-                UInt32(decode_codepoint_at(bytes, id, sequence_length(bytes, id)))
-            )
-        id += 1
+    for w in range(workers):
+        var a = shard_lo(0, n, workers, w)
+        for k in range(tally[w * 2 + 1]):
+            misses.append(miss_scratch[a + k])
 
     var wraps = List[Int]()
     var i = 0
