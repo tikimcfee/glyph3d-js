@@ -226,9 +226,17 @@ def decode_and_resolve[o: ImmOrigin, so: Origin[mut=True], xo: Origin[mut=True]]
     id: Int,
 ):
     """KERNEL 1 — thread per byte: decode the codepoint, resolve through the trie.
-    Misses are NOT collected here: F_MISSING rides the flags lane and the driver
-    rebuilds the ordered miss list in one serial pass (the GPU's atomic append,
-    made deterministic)."""
+
+    Writes EVERY lane, including the ones the fold owns. That looks like extra work
+    and is a net saving: decode already covers [0, byte_len) — every byte, item gaps
+    included — so once it writes all 12 lanes, the driver's measures/counts memsets
+    have nothing left to do. The fold then overwrites its own lanes for leaders
+    inside items. Previously each leader cost 12 memset writes + 4 decode writes;
+    now it costs 12.
+
+    This is why the memset can go at all. Dropping it WITHOUT this leaves item-gap
+    bytes holding whatever the allocator last put there — the lanes are never
+    written by anything else."""
     if id >= len(bytes):
         return
     var b0 = Int(bytes[id])
@@ -246,9 +254,12 @@ def decode_and_resolve[o: ImmOrigin, so: Origin[mut=True], xo: Origin[mut=True]]
     var mo = id * MEASURE_STRIDE
     var co = id * COUNT_STRIDE
     if n == 0:
-        # Non-leader: size zeroed EXPLICITLY (rewritten ranges held a real glyph).
-        measures[unsafe_offset = mo + M_ADVANCE] = 0
-        measures[unsafe_offset = mo + M_HEIGHT] = 0
+        # Non-leader (continuation byte, invalid lead byte, or a gap byte): zero
+        # ALL lanes. A rewritten range may have held a real glyph here.
+        for k in range(MEASURE_STRIDE):
+            measures[unsafe_offset = mo + k] = 0
+        for k in range(COUNT_STRIDE):
+            counts[unsafe_offset = co + k] = 0
         return
 
     var cp = decode_codepoint_at(bytes, id, n)
@@ -263,6 +274,16 @@ def decode_and_resolve[o: ImmOrigin, so: Origin[mut=True], xo: Origin[mut=True]]
     if missing:
         flags |= F_MISSING
     counts[unsafe_offset = co + C_FLAGS] = UInt32(flags)
+    # The fold owns these for leaders INSIDE an item; a leader in a gap is never
+    # folded, so decode must leave them defined.
+    measures[unsafe_offset = mo + M_X] = 0
+    measures[unsafe_offset = mo + M_Y] = 0
+    measures[unsafe_offset = mo + M_Z] = 0
+    measures[unsafe_offset = mo + M_BASE_X] = 0
+    measures[unsafe_offset = mo + M_LINE_ADV] = 0
+    counts[unsafe_offset = co + C_ROW] = 0
+    counts[unsafe_offset = co + C_COL] = 0
+    counts[unsafe_offset = co + C_ORD] = 0
 
 
 def item_for_byte(items: List[Item], id: Int) -> Int:
@@ -626,10 +647,11 @@ def run_pipeline[o: ImmOrigin](
     var workers = parallelism_level()
     if workers < 1:
         workers = 1
+    # No memset: decode writes every lane of every byte (see decode_and_resolve).
+    # ord_to_byte's memset below STAYS — the fold only fills [byte_start, +ord),
+    # so its tail has no writer.
     var measures = List[Float32](unsafe_uninit_length=byte_len * MEASURE_STRIDE)
-    unsafe_memset_zero(measures.unsafe_ptr(), len(measures))
     var counts = List[UInt32](unsafe_uninit_length=byte_len * COUNT_STRIDE)
-    unsafe_memset_zero(counts.unsafe_ptr(), len(counts))
     var ord_to_byte = List[UInt32](unsafe_uninit_length=byte_len)
     unsafe_memset_zero(ord_to_byte.unsafe_ptr(), len(ord_to_byte))
     var mp = measures.unsafe_ptr()
