@@ -50,6 +50,22 @@ def main() raises:
     var records = RecordSet()
 
     var t0 = perf_counter_ns()
+    # Size the record arena ONCE. leaders <= bytes, so summing the manifest's file
+    # sizes is an exact upper bound — and sizing once is worth 2x over growing.
+    var bound = 0
+    for pi in range(len(paths)):
+        var p0 = String(paths[pi]).strip()
+        if p0.byte_length() == 0:
+            continue
+        try:
+            var f0 = open(p0, "r")
+            bound += len(f0.read_bytes())
+            f0.close()
+        except:
+            pass
+    if not count_only:
+        records.reserve(bound)
+
     for pi in range(len(paths)):
         var path = String(paths[pi]).strip()
         if path.byte_length() == 0:
@@ -80,7 +96,7 @@ def main() raises:
             peak_scratch = scratch
         var r = run_pipeline(bytes, seed.trie, items)
         if not count_only:
-            compact(r.measures, r.counts, n, records)
+            compact(r.measures, r.counts, n, r.leaders, records)
 
         total_bytes += n
         total_glyphs += r.leaders

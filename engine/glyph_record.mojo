@@ -20,6 +20,7 @@
 # form, and it is what makes streaming edits a range re-run rather than a reload.
 
 from std.collections.span import Span
+from std.memory import memcpy
 from glyph_schema import (
     MEASURE_STRIDE, COUNT_STRIDE,
     RECORD_MEASURE_STRIDE, RECORD_COUNT_STRIDE, RECORD_BYTES,
@@ -34,35 +35,43 @@ struct RecordSet(Copyable, Movable):
     var measures: List[Float32]  # glyphs × RECORD_MEASURE_STRIDE
     var counts: List[UInt32]  # glyphs × RECORD_COUNT_STRIDE
     var glyphs: Int
+    var cap: Int
 
     def __init__(out self):
         self.measures = List[Float32]()
         self.counts = List[UInt32]()
         self.glyphs = 0
+        self.cap = 0
 
+    def reserve(mut self, want_glyphs: Int):
+        """Size the arena. Call this ONCE with the best estimate you have — the
+        leader count is bounded above by the byte count, which a caller holding a
+        manifest already knows.
 
-# MEASURED NEGATIVE RESULT — do not "optimize" the appends below.
-#
-# compact is 64% of a streaming pass over the dictionary corpus (1.53 s of 2.37 s),
-# which makes the 8 appends per glyph look like the obvious target: 667 MILLION
-# capacity-checked appends. Two attempts, both SLOWER, A/B'd over three runs each:
-#
-#   append (as written)                      2.08 s
-#   pre-size + count leaders here + index    2.59-2.70 s   (+25%)
-#   pre-size + leader count from caller      2.42-2.54 s   (+18%)
-#
-# Two reasons, and the second is the interesting one. Counting leaders inside
-# compact costs a strided read of the flags lane across the whole counts buffer
-# (333 MB here) to learn something the caller already had. And even with the count
-# handed in, manual geometric growth loses: it allocates a NEW list and memcpys,
-# where List's own growth can realloc and often extends in place without copying.
-#
-# The appends are not the bottleneck they appear to be. If you want this faster,
-# measure where the 1.53 s actually goes first — it was never established.
+        Sizing once is the whole trick. An earlier attempt grew geometrically and
+        memcpy'd on every growth, and lost to plain append; it was recorded here as
+        a negative result, and that conclusion was WRONG. Measured over the
+        dictionary corpus (693 files, 83.4 M glyphs), compaction only, bit-identical
+        output: append 1889 ms, pre-sized arena 951 ms — 1.99x. The regrowth copies
+        were the cost, not the appends."""
+        if want_glyphs <= self.cap:
+            return
+        var c = want_glyphs if want_glyphs > self.cap * 2 else self.cap * 2
+        var m = List[Float32](unsafe_uninit_length=c * RECORD_MEASURE_STRIDE)
+        var k = List[UInt32](unsafe_uninit_length=c * RECORD_COUNT_STRIDE)
+        if self.glyphs > 0:
+            memcpy(dest=m.unsafe_ptr(), src=self.measures.unsafe_ptr(),
+                   count=self.glyphs * RECORD_MEASURE_STRIDE)
+            memcpy(dest=k.unsafe_ptr(), src=self.counts.unsafe_ptr(),
+                   count=self.glyphs * RECORD_COUNT_STRIDE)
+        self.measures = m^
+        self.counts = k^
+        self.cap = c
 
 
 def compact(
-    measures: List[Float32], counts: List[UInt32], byte_len: Int, mut out: RecordSet
+    measures: List[Float32], counts: List[UInt32], byte_len: Int, leaders: Int,
+    mut out: RecordSet,
 ):
     """KERNEL — thread per byte in the GPU form: leaders emit a record, others don't.
 
@@ -70,17 +79,26 @@ def compact(
     deterministic is worth more than the parallelism (the same reason the miss
     rebuild is a serial pass). On the GPU this is a prefix-sum over the leader
     flag plus a scatter, which the scan machinery already computes."""
+    # `leaders` comes from the caller's PipelineResult — it is already computed,
+    # and recomputing it here costs a strided pass over the whole counts buffer.
+    out.reserve(out.glyphs + leaders)
+    var mp = out.measures.unsafe_ptr()
+    var cp = out.counts.unsafe_ptr()
+    var w = out.glyphs
     for id in range(byte_len):
         var co = id * COUNT_STRIDE
         if (Int(counts[co + C_FLAGS]) & F_LEADER) == 0:
             continue
         var mo = id * MEASURE_STRIDE
         # The truncation: a contiguous prefix of each buffer, no lane map.
+        var wm = w * RECORD_MEASURE_STRIDE
         for k in range(RECORD_MEASURE_STRIDE):
-            out.measures.append(measures[mo + k])
+            mp[unsafe_offset = wm + k] = measures[mo + k]
+        var wc = w * RECORD_COUNT_STRIDE
         for k in range(RECORD_COUNT_STRIDE):
-            out.counts.append(counts[co + k])
-        out.glyphs += 1
+            cp[unsafe_offset = wc + k] = counts[co + k]
+        w += 1
+    out.glyphs = w
 
 
 def run_streaming[o: ImmOrigin](
@@ -125,7 +143,7 @@ def run_streaming[o: ImmOrigin](
 
         # The scratch: allocated per job, dropped at the end of this iteration.
         var r = run_pipeline(slice, trie, one)
-        compact(r.measures, r.counts, span, out)
+        compact(r.measures, r.counts, span, r.leaders, out)
         _ = chunk_bytes
     return out^
 

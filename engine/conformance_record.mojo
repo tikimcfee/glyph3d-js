@@ -31,7 +31,7 @@ def check_case(path: String) raises -> Int:
 
     var r = run_pipeline(fx.bytes, fx.trie, fx.items)
     var whole = RecordSet()
-    compact(r.measures, r.counts, fx.byte_len, whole)
+    compact(r.measures, r.counts, fx.byte_len, r.leaders, whole)
 
     # ── 1. the truncation holds ──────────────────────────────────────────────
     if whole.glyphs != r.leaders:
@@ -65,13 +65,13 @@ def check_case(path: String) raises -> Int:
         bad += 1
         print("  streamed", streamed.glyphs, "records vs whole", whole.glyphs)
     else:
-        for i in range(len(whole.measures)):
+        for i in range(whole.glyphs * RECORD_MEASURE_STRIDE):
             if UInt32(streamed.measures[i].to_bits()) != UInt32(whole.measures[i].to_bits()):
                 bad += 1
                 if printed < MAX_PRINTED:
                     print("  streamed measure", i, streamed.measures[i], "vs", whole.measures[i])
                     printed += 1
-        for i in range(len(whole.counts)):
+        for i in range(whole.glyphs * RECORD_COUNT_STRIDE):
             if streamed.counts[i] != whole.counts[i]:
                 bad += 1
                 if printed < MAX_PRINTED:
