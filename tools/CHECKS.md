@@ -23,6 +23,19 @@ numbers imply the coverage nobody wrote.
   auto-layout glitches on mode switch that resolve after further UI interaction, i.e.
   shell/panel state rather than layout math. Not reproduced in a harness, so it is
   recorded as a gap rather than a bug.
+- **The far regen's LOAD-path cost was never measured either** (my claim, 1d2359e). I
+  reported that deleting the far tier removed a 4MB `readFarPacked` GPU→CPU readback plus
+  a texture blit per macrotask window during colorized loading, since every
+  `setGlyphColorRange` / `setGlyphPaletteRange` called `markFarDirty`. That is a correct
+  reading of the deleted code and an UNMEASURED claim about its cost. render-bender
+  correctly refused to let it be credited against Ivan's live symptom — that symptom is
+  camera motion, and this is the load path; a fix credited to the wrong symptom is how the
+  stutter survives being "fixed". Ivan has since confirmed he sees the stutter on both
+  :5173 and :8080, so it is not a dev-mode artifact either. The relay log store holds 48
+  `[load]` records but they are ad-hoc traces across different corpora, NOT a controlled
+  differential, so they cannot settle it. Whoever measures it wants 15452e3 vs 1d2359e on
+  one corpus via `load.stats` / `bun tools/loadstorm-check.mjs`. Until then it stays a
+  reading of code, not a number.
 - **The far-tier deletion's FRAGMENT COST was never measured** (1d2359e). The three-tier
   LOD was removed for failing its visual purpose — it never stopped the moiré. That is a
   different claim from "it cost nothing", and the commit argues the first while retiring
