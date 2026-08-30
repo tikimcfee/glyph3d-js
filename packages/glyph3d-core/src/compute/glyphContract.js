@@ -57,7 +57,6 @@ export const KIND = Object.freeze({
     PAGES_WIDE: 'measure',
     WRAP_WIDTH: 'measure',
     LINE_HEIGHT: 'measure',
-    PAGE_LINE_HEIGHT: 'measure',
     Z_STEP: 'measure',
     BAND_STRIDE_Y: 'measure',
     DEPTH_PER_BAND: 'measure',
@@ -78,7 +77,7 @@ export const KIND = Object.freeze({
 /** EXACT fields: counts, identities and bitfields. Must never ride a float
  *  carrier — and a float ordered key IS a float carrier wearing a u32 costume. */
 export const EXACT_FIELDS = Object.freeze(['GLYPH_ID', 'ROW', 'COL', 'FLAGS', 'ORD', 'HAS_PAGE', 'TOTAL_ROWS']);
-export const MEASURE_FIELDS = Object.freeze(['X', 'Y', 'Z', 'ADVANCE', 'HEIGHT', 'BASE_X', 'LINE_ADV', 'ORIGIN_Y', 'ORIGIN_Z', 'PAGE_ROWS', 'PAGE_COLS', 'SCROLL_ROWS', 'PAGES_WIDE', 'WRAP_WIDTH', 'LINE_HEIGHT', 'PAGE_LINE_HEIGHT', 'Z_STEP', 'BAND_STRIDE_Y', 'DEPTH_PER_BAND', 'DEPTH_PER_COL', 'PAGE_STRIDE_X', 'ORIGIN_X', 'MIN_X', 'MIN_Y', 'MIN_Z', 'MAX_X', 'MAX_Y', 'MAX_Z', 'MAX_ROW_EXTENT']);
+export const MEASURE_FIELDS = Object.freeze(['X', 'Y', 'Z', 'ADVANCE', 'HEIGHT', 'BASE_X', 'LINE_ADV', 'ORIGIN_Y', 'ORIGIN_Z', 'PAGE_ROWS', 'PAGE_COLS', 'SCROLL_ROWS', 'PAGES_WIDE', 'WRAP_WIDTH', 'LINE_HEIGHT', 'Z_STEP', 'BAND_STRIDE_Y', 'DEPTH_PER_BAND', 'DEPTH_PER_COL', 'PAGE_STRIDE_X', 'ORIGIN_X', 'MIN_X', 'MIN_Y', 'MIN_Z', 'MAX_X', 'MAX_Y', 'MAX_Z', 'MAX_ROW_EXTENT']);
 /** MEASURE_FIELDS and EXACT_FIELDS are DISJOINT and EXHAUSTIVE over KIND —
  *  asserted by the generator, so a consumer that classifies lanes in two
  *  buckets can rely on totality. KIND keeps the finer distinction (identity vs

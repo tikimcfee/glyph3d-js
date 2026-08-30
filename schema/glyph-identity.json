@@ -208,7 +208,7 @@
     ],
     "measures": {
       "carrier": "f32",
-      "stride": 16,
+      "stride": 15,
       "lanes": [
         {
           "name": "ORIGIN_Y",
@@ -259,51 +259,45 @@
           "realizes": "LINE_HEIGHT"
         },
         {
-          "name": "PAGE_LINE_HEIGHT",
-          "index": 8,
-          "kind": "measure",
-          "orphan": "REALIZES NOTHING. Dead: NaN in every fixture (fixture_census), and poisoning its read left every suite green. The render side has never had it. Pending removal — it is ITEM_PARAMS' one true disagreement and the reason the assertion exists."
-        },
-        {
           "name": "Z_STEP",
-          "index": 9,
+          "index": 8,
           "kind": "measure",
           "realizes": "Z_STEP"
         },
         {
           "name": "BAND_STRIDE_Y",
-          "index": 10,
+          "index": 9,
           "kind": "measure",
           "realizes": "BAND_STRIDE_Y"
         },
         {
           "name": "DEPTH_PER_BAND",
-          "index": 11,
+          "index": 10,
           "kind": "measure",
           "realizes": "DEPTH_PER_BAND"
         },
         {
           "name": "DEPTH_PER_COL",
-          "index": 12,
+          "index": 11,
           "kind": "measure",
           "realizes": "DEPTH_PER_COL"
         },
         {
           "name": "PAGE_STRIDE_X",
-          "index": 13,
+          "index": 12,
           "kind": "measure",
           "realizes": "PAGE_GAP_X",
           "derived": "PAGE_GAP_X + the item's widest row (bounds lane MAX_ROW_EXTENT). This layer derives on the host and stores the result; the render side stores the gap and derives on device. Both realize the same semantic parameter."
         },
         {
           "name": "HAS_PAGE",
-          "index": 14,
+          "index": 13,
           "kind": "count",
           "realization_only": "encodes ABSENCE of a page. The render side encodes the same fact as a null page object with zeroed geometry."
         },
         {
           "name": "ORIGIN_X",
-          "index": 15,
+          "index": 14,
           "kind": "measure",
           "realizes": "ORIGIN_X"
         }

@@ -31,7 +31,7 @@ from glyph_schema import (
     M_BASE_X, M_HEIGHT, C_ROW, C_COL, C_FLAGS, C_ORD,
     ITEM_STRIDE, I_ORIGIN_X, I_ORIGIN_Y, I_ORIGIN_Z, I_WRAP_WIDTH, I_LINE_HEIGHT,
     I_PAGE_COLS, I_HAS_PAGE, I_Z_STEP, I_PAGE_ROWS, I_SCROLL_ROWS, I_PAGES_WIDE,
-    I_PAGE_LINE_HEIGHT, I_BAND_STRIDE_Y, I_DEPTH_PER_BAND, I_DEPTH_PER_COL,
+    I_BAND_STRIDE_Y, I_DEPTH_PER_BAND, I_DEPTH_PER_COL,
     I_PAGE_STRIDE_X,
     PARTIAL_COUNT_STRIDE, PARTIAL_MEASURE_STRIDE,
     P_RESET, P_NL, P_GLYPHS, P_ROWS, P_HEAD_LEN, P_TAIL_LEN, P_WRAP, PM_TAIL_ADV,
@@ -523,7 +523,6 @@ def check_fixture(var fx: PipeFixture, ctx: DeviceContext, bench: Bool = False) 
         h_it[o + I_PAGE_ROWS] = Float32(t.page_rows)
         h_it[o + I_SCROLL_ROWS] = Float32(t.scroll_rows)
         h_it[o + I_PAGES_WIDE] = Float32(t.pages_wide)
-        h_it[o + I_PAGE_LINE_HEIGHT] = Float32(t.page_line_height)
         h_it[o + I_BAND_STRIDE_Y] = Float32(t.band_stride_y)
         h_it[o + I_DEPTH_PER_BAND] = Float32(t.depth_per_band)
         h_it[o + I_DEPTH_PER_COL] = Float32(t.depth_per_col)

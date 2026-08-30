@@ -50,7 +50,7 @@ comptime PARTIAL_MEASURE_STRIDE = 1
 comptime PM_TAIL_ADV = 0
 
 # Per-item layout params on device — f32, because Metal has no f64.
-comptime ITEM_STRIDE = 16
+comptime ITEM_STRIDE = 15
 comptime I_ORIGIN_Y = 0
 comptime I_ORIGIN_Z = 1
 comptime I_PAGE_ROWS = 2
@@ -59,14 +59,13 @@ comptime I_SCROLL_ROWS = 4
 comptime I_PAGES_WIDE = 5
 comptime I_WRAP_WIDTH = 6
 comptime I_LINE_HEIGHT = 7
-comptime I_PAGE_LINE_HEIGHT = 8
-comptime I_Z_STEP = 9
-comptime I_BAND_STRIDE_Y = 10
-comptime I_DEPTH_PER_BAND = 11
-comptime I_DEPTH_PER_COL = 12
-comptime I_PAGE_STRIDE_X = 13
-comptime I_HAS_PAGE = 14
-comptime I_ORIGIN_X = 15
+comptime I_Z_STEP = 8
+comptime I_BAND_STRIDE_Y = 9
+comptime I_DEPTH_PER_BAND = 10
+comptime I_DEPTH_PER_COL = 11
+comptime I_PAGE_STRIDE_X = 12
+comptime I_HAS_PAGE = 13
+comptime I_ORIGIN_X = 14
 
 # Per-item bounds + fold scalars. Lane kinds matter on device: Metal has no f64,
 # so counts go to native u32 atomics and measures to f32 ordered keys.

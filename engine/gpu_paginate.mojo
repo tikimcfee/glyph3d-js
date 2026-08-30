@@ -27,7 +27,7 @@ from max.gpu.host import DeviceContext
 from glyph_schema import (
     MEASURE_STRIDE, COUNT_STRIDE, M_X, M_Y, M_Z, M_BASE_X, C_ROW, C_COL, C_FLAGS,
     ITEM_STRIDE, I_ORIGIN_Y, I_ORIGIN_Z, I_PAGE_ROWS, I_PAGE_COLS, I_SCROLL_ROWS,
-    I_PAGES_WIDE, I_WRAP_WIDTH, I_LINE_HEIGHT, I_PAGE_LINE_HEIGHT, I_Z_STEP,
+    I_PAGES_WIDE, I_WRAP_WIDTH, I_LINE_HEIGHT, I_Z_STEP,
     I_BAND_STRIDE_Y, I_DEPTH_PER_BAND, I_DEPTH_PER_COL, I_PAGE_STRIDE_X, I_HAS_PAGE,
 )
 from glyph_pipeline import (
@@ -239,7 +239,6 @@ def check_items(
         tbl[o + I_PAGES_WIDE] = Float32(t.pages_wide)
         tbl[o + I_WRAP_WIDTH] = Float32(t.wrap_width)
         tbl[o + I_LINE_HEIGHT] = Float32(t.line_height)
-        tbl[o + I_PAGE_LINE_HEIGHT] = Float32(t.page_line_height)
         tbl[o + I_Z_STEP] = Float32(t.z_step)
         tbl[o + I_BAND_STRIDE_Y] = Float32(t.band_stride_y)
         tbl[o + I_DEPTH_PER_BAND] = Float32(t.depth_per_band)
