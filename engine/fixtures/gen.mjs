@@ -155,6 +155,36 @@ const CASES = [
         bytes: new Uint8Array(repoFile),
         items: [{ origin: { x: 0, y: 0, z: 0 }, wrapWidth: 100, zStep: 0.1, lineHeight: 1.0 }],
     },
+    // ── GNARLY REAL INPUTS. The constructed fixtures are polite: short lines,
+    //    small counts, properties chosen one at a time. Real files are the fuzz
+    //    tier — long files, long lines, mixed content — and a fixture is ~100x
+    //    its source on disk (it carries every expected value in f64), so these
+    //    are SLICES sized to keep the corpus checked-in-able, not whole trees.
+    //    Whole-tree coverage is the oracle-free cross-form runner's job.
+    {
+        // A real production source file, WHOLE: 1,665 lines through the actual
+        // oracle, wrapped AND paged at once — the co-occurrence the census
+        // found missing from every polite fixture.
+        name: 'real-kernels',
+        bytes: new Uint8Array(readFileSync(
+            join(HERE, '../../packages/glyph3d-core/src/compute/glyphPipelineKernels.js'))),
+        items: [{
+            origin: { x: 0, y: 0, z: 0 }, wrapWidth: 80, zStep: 0.25, lineHeight: 1.2,
+            page: { rows: 40, pagesWide: 3, lineHeight: 1.2, gapX: 2 },
+        }],
+    },
+    {
+        // The minified app bundle's FIRST 48KB: lines up to 305,978 chars in the
+        // full file, so this slice is one enormous line — wrap at 120 makes it
+        // hundreds of visual rows from a single source line, the exact shape
+        // rowsUnderWrap exists for and no constructed fixture dared.
+        name: 'real-minified',
+        bytes: new Uint8Array(readFileSync(
+            join(HERE, '../../app/dist/assets/index-GRwQWdWg.js')).subarray(0, 49152)),
+        items: [{
+            origin: { x: 0, y: 0, z: 0 }, wrapWidth: 120, zStep: 0.1, lineHeight: 1.0,
+        }],
+    },
     (() => {
         const a = utf8('item A\nplain text body\n');
         const b = utf8('item B wraps at five and steps in z 🚀🚀\nmore\n');

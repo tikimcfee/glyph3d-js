@@ -15,7 +15,7 @@
 from std.sys import argv
 from fixture_io import load_pipe_fixture
 from glyph_pipeline import Item, F_LEADER, F_MISSING
-from glyph_schema import COUNT_STRIDE, C_FLAGS
+from glyph_schema import FIXTURE_COUNT_STRIDE as COUNT_STRIDE, FIX_C_FLAGS as C_FLAGS
 
 
 struct Range(Copyable, Movable):
