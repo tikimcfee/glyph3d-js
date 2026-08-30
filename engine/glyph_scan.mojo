@@ -358,6 +358,7 @@ def run_scan_pipeline[o: ImmOrigin](
     # leaders' X/Y/Z/BASE_X.
     var r = PipelineResult()
     r.sm = List[Float32](unsafe_uninit_length=n * SM_STRIDE)
+    r.gi = List[UInt32](unsafe_uninit_length=n)
     r.fl = List[UInt32](unsafe_uninit_length=n)
     r.lm = List[Float32](unsafe_uninit_length=n * LM_STRIDE)
     r.lc = List[UInt32](unsafe_uninit_length=n * LC_STRIDE)
@@ -538,6 +539,7 @@ def run_scan_pipeline[o: ImmOrigin](
     _ = len(shard_scalars)
     _ = len(item_bounds)
     _ = len(r.sm)
+    _ = len(r.gi)
     _ = len(r.fl)
     _ = len(r.lm)
     _ = len(r.lc)

@@ -21,7 +21,7 @@ from std.sys import argv
 from std.memory import bitcast
 from glyph_schema import (
     FIXTURE_MEASURE_STRIDE, FIXTURE_COUNT_STRIDE, fixture_measure_lane_name,
-    FIX_M_X, FIX_M_Y, FIX_M_Z, FIX_M_BASE_X, FIX_M_LINE_ADV, FIX_C_FLAGS,
+    FIX_M_X, FIX_M_Y, FIX_M_Z, FIX_M_BASE_X, FIX_M_LINE_ADV, FIX_C_FLAGS, FIX_M_GLYPH_ID,
 )
 from glyph_pipeline import Item, F_LEADER, trunc_nonneg
 from glyph_scan import run_scan_pipeline
@@ -84,6 +84,15 @@ def check_case(path: String, chunk_size: Int, group_size: Int) raises -> Int:
         ) != 0
         for lane in range(FIXTURE_MEASURE_STRIDE):
             var idx = o + lane
+            if lane == FIX_M_GLYPH_ID:
+                # EXACT since the settlement: compared as the u32 it is.
+                if got.gi[slot] != UInt32(fx.exp_measures[idx]):
+                    bad += 1
+                    if printed < MAX_PRINTED:
+                        print("  slot", slot, "GLYPH_ID: got", got.gi[slot],
+                              "expected", UInt32(fx.exp_measures[idx]))
+                        printed += 1
+                continue
             var g32 = got.m_at(slot, lane)
             var e32 = Float32(fx.exp_measures[idx])
             var bits_equal = UInt32(g32.to_bits()) == UInt32(e32.to_bits())

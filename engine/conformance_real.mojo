@@ -146,12 +146,17 @@ def check_file(path: String, trie: Trie) raises -> Int:
                           a.m_at(id, lane), "vs", b.m_at(id, lane))
                     printed += 1
         # ADVANCE/HEIGHT/GLYPH_ID: decode is the shared kernel; still assert.
-        for lane in range(3, 6):
+        for lane in range(3, 5):
             if a.m_at(id, lane).to_bits() != b.m_at(id, lane).to_bits():
                 bad += 1
                 if printed < MAX_PRINTED:
                     print("  ", path, "byte", id, "static lane", lane)
                     printed += 1
+        if a.gi[id] != b.gi[id]:
+            bad += 1
+            if printed < MAX_PRINTED:
+                print("  ", path, "byte", id, "GLYPH_ID", a.gi[id], "vs", b.gi[id])
+                printed += 1
 
     # the ord witness, on BOTH forms independently
     for which in range(2):

@@ -53,6 +53,12 @@ def main() raises:
                     print("  sm[", i, "] witnessed", wit.sm[i], "elided", eli.sm[i])
                     printed += 1
         for i in range(fx.byte_len):
+            if wit.gi[i] != eli.gi[i]:
+                bad += 1
+                if printed < MAX_PRINTED:
+                    print("  gi[", i, "] witnessed", wit.gi[i], "elided", eli.gi[i])
+                    printed += 1
+        for i in range(fx.byte_len):
             if wit.fl[i] != eli.fl[i]:
                 bad += 1
                 if printed < MAX_PRINTED:

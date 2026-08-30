@@ -116,10 +116,21 @@ def check_case(path: String) raises -> Int:
     var block_index = List[UInt32](capacity=block_index_len)
     for _ in range(block_index_len):
         block_index.append(r.u32())
-    var blocks = List[Float32](capacity=blocks_len)
-    for _ in range(blocks_len):
-        blocks.append(Float32(r.f64()))  # v2 carrier
-    var trie = Trie(block_index^, blocks^)
+    # v2 carries trie lanes as f64 VALUES in entry-major order
+    # [GLYPH_ID, ADVANCE, HEIGHT, FLAGS]; realize the split-by-carrier container.
+    var entries = blocks_len // 4
+    var blocks_m = List[Float32](capacity=entries * 2)
+    var blocks_c = List[UInt32](capacity=entries * 2)
+    for _ in range(entries):
+        var gid = r.f64()
+        var adv = r.f64()
+        var h = r.f64()
+        var flv = r.f64()
+        blocks_m.append(Float32(adv))
+        blocks_m.append(Float32(h))
+        blocks_c.append(UInt32(gid))
+        blocks_c.append(UInt32(flv))
+    var trie = Trie(block_index^, blocks_m^, blocks_c^)
 
     var got = bake_file(bytes, trie, line_height, interval)
 

@@ -20,8 +20,8 @@
 
 from std.sys import argv
 from std.time import perf_counter_ns
-from glyph_schema import SM_STRIDE, LM_STRIDE, LC_STRIDE, RECORD_BYTES
-comptime SLOT_BYTES = (SM_STRIDE + 1 + LM_STRIDE + LC_STRIDE) * 4
+from glyph_schema import SM_STRIDE, GI_STRIDE, LM_STRIDE, LC_STRIDE, RECORD_BYTES
+comptime SLOT_BYTES = (SM_STRIDE + GI_STRIDE + 1 + LM_STRIDE + LC_STRIDE) * 4
 from glyph_pipeline import Item, Trie, run_pipeline
 from glyph_record import RecordSet, compact
 from fixture_io import load_pipe_fixture

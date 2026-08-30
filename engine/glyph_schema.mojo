@@ -22,11 +22,9 @@
 # Decode NEVER touches positional or witness — that is the write-axis split.
 # LM/LC = layout measures/counts; SM = static measures; WM/WC = witness;
 # FLAGS is its own stride-1 array (flags[id], no lane constant needed).
-comptime SM_STRIDE = 4
+comptime SM_STRIDE = 2
 comptime SM_ADVANCE = 0
 comptime SM_HEIGHT = 1
-comptime SM_GLYPH_ID = 2
-comptime SM_PAD = 3
 comptime FLAGS_STRIDE = 1
 
 comptime LM_STRIDE = 4
@@ -44,11 +42,16 @@ comptime LC_COL = 1
 comptime WM_STRIDE = 1
 comptime WC_STRIDE = 1
 
-# The RECORD format (the wire): unchanged by either split. A record is emitted
-# as three runs — posMeasures[0..3), staticMeasures[0..3), posCounts WHOLE —
-# a concatenation of truncations, still no lane map.
-comptime RECORD_MEASURE_STRIDE = 6
-comptime RECORD_COUNT_STRIDE = 2
+# GLYPH_ID: a native u32 identity in its own stride-1 array since 2026-08-31
+# (the trie format moved first). The oldest deviation, settled.
+comptime GI_STRIDE = 1
+
+# The RECORD format (the wire): byte order unchanged through both splits AND
+# the GLYPH_ID settlement. A record is four runs — posMeasures[0..3),
+# staticMeasures whole, staticIdentities whole, posCounts whole — a
+# concatenation of truncations, still no lane map.
+comptime RECORD_MEASURE_STRIDE = 5
+comptime RECORD_COUNT_STRIDE = 3
 comptime RECORD_BYTES = 32
 
 # ── THE FIXTURE FORMAT — frozen on disk (format v2), independent of the

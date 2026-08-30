@@ -77,12 +77,14 @@ def check_case(path: String) raises -> Int:
             # under test is the FOLD resuming, not the decode.
             var rcopy = PipelineResult()
             rcopy.sm = List[Float32](unsafe_uninit_length=fx.byte_len * SM_STRIDE)
+            rcopy.gi = List[UInt32](unsafe_uninit_length=fx.byte_len)
             rcopy.fl = List[UInt32](unsafe_uninit_length=fx.byte_len)
             rcopy.lm = List[Float32](unsafe_uninit_length=fx.byte_len * LM_STRIDE)
             rcopy.lc = List[UInt32](unsafe_uninit_length=fx.byte_len * LC_STRIDE)
             for k in range(fx.byte_len * SM_STRIDE):
                 rcopy.sm[k] = whole.sm[k]
             for k in range(fx.byte_len):
+                rcopy.gi[k] = whole.gi[k]
                 rcopy.fl[k] = whole.fl[k]
             for k in range(fx.byte_len * LM_STRIDE):
                 rcopy.lm[k] = whole.lm[k]
@@ -133,6 +135,7 @@ def check_case(path: String) raises -> Int:
                 False,   # a resumed RANGE must not publish a whole item's box
             )
             _ = len(rcopy.sm)
+            _ = len(rcopy.gi)
             _ = len(rcopy.fl)
             _ = len(rcopy.lm)
             _ = len(rcopy.lc)
@@ -145,6 +148,12 @@ def check_case(path: String) raises -> Int:
                 if (Int(whole.fl[id]) & F_LEADER) == 0:
                     continue
                 for lane in range(FIXTURE_MEASURE_STRIDE):
+                    if lane == 5:
+                        # GLYPH_ID is decode's output, copied in like the rest of
+                        # the static tier — the fold under test never writes it,
+                        # so comparing it here would be a compare of a value
+                        # against its own copy. Skipped, said out loud.
+                        continue
                     if UInt32(rcopy.m_at(id, lane).to_bits()) != UInt32(whole.m_at(id, lane).to_bits()):
                         bad += 1
                         if printed < MAX_PRINTED:

@@ -55,11 +55,23 @@ def load_input() raises -> BenchInput:
     for i in range(block_index_len):
         block_index.append(UInt32(u32_at(raw, at + i * 4)))
     at += block_index_len * 4
-    var blocks = List[Float32](capacity=blocks_len)
-    for i in range(blocks_len):
-        blocks.append(bitcast[DType.float32](UInt32(u32_at(raw, at + i * 4))))
+    # bench.bin carries the JS trie's Uint32Array raw: identities and bitfields
+    # native, measures bitcast (entry-major GLYPH_ID, ADVANCE, HEIGHT, FLAGS).
+    # Realize the engine's split-by-carrier container from it.
+    var entries = blocks_len // 4
+    var blocks_m = List[Float32](capacity=entries * 2)
+    var blocks_c = List[UInt32](capacity=entries * 2)
+    for i in range(entries):
+        var w0 = UInt32(u32_at(raw, at + (i * 4 + 0) * 4))  # GLYPH_ID
+        var w1 = UInt32(u32_at(raw, at + (i * 4 + 1) * 4))  # ADVANCE (bitcast)
+        var w2 = UInt32(u32_at(raw, at + (i * 4 + 2) * 4))  # HEIGHT (bitcast)
+        var w3 = UInt32(u32_at(raw, at + (i * 4 + 3) * 4))  # FLAGS
+        blocks_m.append(bitcast[DType.float32](w1))
+        blocks_m.append(bitcast[DType.float32](w2))
+        blocks_c.append(w0)
+        blocks_c.append(w3)
 
-    return BenchInput(bytes^, Trie(block_index^, blocks^))
+    return BenchInput(bytes^, Trie(block_index^, blocks_m^, blocks_c^))
 
 
 def one_item(byte_count: Int, wrap: Float64) -> List[Item]:

@@ -41,8 +41,8 @@ def check_case(path: String) raises -> Int:
     for id in range(fx.byte_len):
         if (Int(r.fl[id]) & F_LEADER) == 0:
             continue
-        # The record's measure order IS the fixture's measure order for the first
-        # six lanes, so m_at(slot, k) is the per-slot expectation.
+        # The record's measure order IS the fixture's measure order for the
+        # first five lanes, so m_at(slot, k) is the per-slot expectation.
         for k in range(RECORD_MEASURE_STRIDE):
             var g = UInt32(whole.measures[rec * RECORD_MEASURE_STRIDE + k].to_bits())
             var e = UInt32(r.m_at(id, k).to_bits())
@@ -51,8 +51,16 @@ def check_case(path: String) raises -> Int:
                 if printed < MAX_PRINTED:
                     print("  byte", id, "measure lane", k, "— record", g, "slot", e)
                     printed += 1
-        for k in range(RECORD_COUNT_STRIDE):
-            if whole.counts[rec * RECORD_COUNT_STRIDE + k] != r.c_at(id, k):
+        # The exact run: GLYPH_ID heads it since the settlement (same wire
+        # byte offset as before — only the run classification moved).
+        if whole.counts[rec * RECORD_COUNT_STRIDE + 0] != r.gi[id]:
+            bad += 1
+            if printed < MAX_PRINTED:
+                print("  byte", id, "record GLYPH_ID",
+                      whole.counts[rec * RECORD_COUNT_STRIDE + 0], "slot", r.gi[id])
+                printed += 1
+        for k in range(2):
+            if whole.counts[rec * RECORD_COUNT_STRIDE + 1 + k] != r.c_at(id, k):
                 bad += 1
                 if printed < MAX_PRINTED:
                     print("  byte", id, "count lane", k)

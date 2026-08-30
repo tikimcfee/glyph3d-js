@@ -114,7 +114,7 @@ def check_case(path: String) raises -> Int:
         # reads LINE_ADV), so corruption still surfaces in the pinned X — but
         # their VALUES are a container choice the backend may elide. Asserting
         # them was the faithful-port era pinning HOW; the contract pins WHAT.
-        for lane in range(6):
+        for lane in range(5):
             var idx = slot * FIXTURE_MEASURE_STRIDE + lane
             var g = UInt32(got.m_at(slot, lane).to_bits())
             var e = UInt32(Float32(fx.exp_measures[idx]).to_bits())
@@ -126,6 +126,15 @@ def check_case(path: String) raises -> Int:
                         "got", got.m_at(slot, lane), "expected", Float32(fx.exp_measures[idx]),
                     )
                     printed += 1
+        # GLYPH_ID: an EXACT identity since the settlement — compared as the u32
+        # it is, never through an f32 view (the checker carries values the way
+        # the pipeline does; fixture lane 5 holds the value in f64, exact).
+        var gid_exp = UInt32(fx.exp_measures[slot * FIXTURE_MEASURE_STRIDE + 5])
+        if got.gi[slot] != gid_exp:
+            bad += 1
+            if printed < MAX_PRINTED:
+                print("  slot", slot, "GLYPH_ID got", got.gi[slot], "expected", gid_exp)
+                printed += 1
         # COUNTS: exact integers. No carrier, no narrowing, no classification —
         # this comparison has no way to be subtly wrong.
         for lane in range(3):  # ROW, COL, FLAGS; ORD is the witness's, above

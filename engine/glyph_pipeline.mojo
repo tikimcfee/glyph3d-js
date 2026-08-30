@@ -30,7 +30,7 @@ from std.math import inf
 from std.memory import unsafe_memset_zero
 from std.runtime.asyncrt import TaskGroup, parallelism_level
 from glyph_schema import (
-    SM_STRIDE, SM_ADVANCE, SM_HEIGHT, SM_GLYPH_ID,
+    SM_STRIDE, SM_ADVANCE, SM_HEIGHT, GI_STRIDE,
     LM_STRIDE, LM_X, LM_Y, LM_Z, LM_BASE_X,
     LC_STRIDE, LC_ROW, LC_COL,
     FIXTURE_MEASURE_STRIDE, FIXTURE_COUNT_STRIDE,
@@ -52,11 +52,17 @@ comptime NEWLINE = 0x0A
 # ── Trie (GlyphTrie.js) ─────────────────────────────────────────────────────
 comptime BLOCK_SHIFT = 8
 comptime BLOCK_MASK = 255
-comptime ENTRY_STRIDE = 4
-comptime LANE_GLYPH_ID = 0
-comptime LANE_ADVANCE = 1
-comptime LANE_HEIGHT = 2
-comptime LANE_FLAGS = 3
+# The trie's OWN container, split by carrier like everything downstream of it
+# (2026-08-31, the GLYPH_ID settlement): two genuine measures in f32, an
+# identity and a bitfield in u32. The upstream JS trie moved first (50fd6b8,
+# one Uint32Array with measures bitcast); this port realizes the same kinds as
+# two homogeneous arrays because its house rule is no bitcasts anywhere.
+comptime TM_STRIDE = 2
+comptime TM_ADVANCE = 0
+comptime TM_HEIGHT = 1
+comptime TC_STRIDE = 2
+comptime TC_GLYPH_ID = 0
+comptime TC_FLAGS = 1
 comptime FLAG_MISSING = 1
 
 comptime F64_INF = inf[DType.float64]()
@@ -64,11 +70,28 @@ comptime F64_INF = inf[DType.float64]()
 
 struct Trie(Copyable, Movable):
     var block_index: List[UInt32]
-    var blocks: List[Float32]
+    var blocks_m: List[Float32]  # TM_STRIDE per entry: ADVANCE, HEIGHT
+    var blocks_c: List[UInt32]   # TC_STRIDE per entry: GLYPH_ID, FLAGS
 
-    def __init__(out self, var block_index: List[UInt32], var blocks: List[Float32]):
+    def __init__(
+        out self, var block_index: List[UInt32],
+        var blocks_m: List[Float32], var blocks_c: List[UInt32],
+    ):
         self.block_index = block_index^
-        self.blocks = blocks^
+        self.blocks_m = blocks_m^
+        self.blocks_c = blocks_c^
+
+    def advance_at(self, entry: Int) -> Float32:
+        return self.blocks_m[entry * TM_STRIDE + TM_ADVANCE]
+
+    def height_at(self, entry: Int) -> Float32:
+        return self.blocks_m[entry * TM_STRIDE + TM_HEIGHT]
+
+    def glyph_id_at(self, entry: Int) -> UInt32:
+        return self.blocks_c[entry * TC_STRIDE + TC_GLYPH_ID]
+
+    def flags_at(self, entry: Int) -> Int:
+        return Int(self.blocks_c[entry * TC_STRIDE + TC_FLAGS])
 
 
 struct Item(Copyable, Movable):
@@ -141,8 +164,9 @@ struct Slots(Copyable, Movable):
     Four render-read arrays, split by PHASE — who writes a lane decides where
     it lives:
 
-      sm  f32 x4  ADVANCE HEIGHT GLYPH_ID PAD   decode's output; one aligned
-                                                16-byte store per byte
+      sm  f32 x2  ADVANCE HEIGHT               decode's output
+      gi  u32 x1  GLYPH_ID                      decode's output; a native u32
+                                                identity since the settlement
       fl  u32 x1  FLAGS                         decode writes; the fold ORs in
                                                 F_RENDERED
       lm  f32 x4  X Y Z BASE_X                  the fold's output; one aligned
@@ -162,6 +186,7 @@ struct Slots(Copyable, Movable):
     alive (the drivers' `_ = len(...)` anchors)."""
 
     var sm: Pointer[Float32, MutUntrackedOrigin]
+    var gi: Pointer[UInt32, MutUntrackedOrigin]
     var fl: Pointer[UInt32, MutUntrackedOrigin]
     var lm: Pointer[Float32, MutUntrackedOrigin]
     var lc: Pointer[UInt32, MutUntrackedOrigin]
@@ -169,21 +194,28 @@ struct Slots(Copyable, Movable):
     def __init__(
         out self,
         sm: Pointer[Float32, MutUntrackedOrigin],
+        gi: Pointer[UInt32, MutUntrackedOrigin],
         fl: Pointer[UInt32, MutUntrackedOrigin],
         lm: Pointer[Float32, MutUntrackedOrigin],
         lc: Pointer[UInt32, MutUntrackedOrigin],
     ):
         self.sm = sm
+        self.gi = gi
         self.fl = fl
         self.lm = lm
         self.lc = lc
 
     # ── static: written by decode, read by everyone ──────────────────────────
-    def set_static(self, id: Int, advance: Float32, height: Float32, glyph_id: Float32):
-        # One aligned 16-byte store; PAD carries 0 so the whole slot is defined.
-        self.sm.unsafe_store[width=4](
-            id * SM_STRIDE, SIMD[DType.float32, 4](advance, height, glyph_id, 0)
+    def set_static(self, id: Int, advance: Float32, height: Float32):
+        # One 8-byte store: the settlement removed GLYPH_ID (its own u32 array)
+        # and with it the PAD lane that only ever existed to align a 16-byte
+        # store around four lanes that are now two.
+        self.sm.unsafe_store[width=2](
+            id * SM_STRIDE, SIMD[DType.float32, 2](advance, height)
         )
+
+    def set_glyph_id(self, id: Int, v: UInt32):
+        self.gi[unsafe_offset=id] = v
 
     def advance(self, id: Int) -> Float32:
         return self.sm[unsafe_offset = id * SM_STRIDE + SM_ADVANCE]
@@ -191,8 +223,8 @@ struct Slots(Copyable, Movable):
     def height(self, id: Int) -> Float32:
         return self.sm[unsafe_offset = id * SM_STRIDE + SM_HEIGHT]
 
-    def glyph_id(self, id: Int) -> Float32:
-        return self.sm[unsafe_offset = id * SM_STRIDE + SM_GLYPH_ID]
+    def glyph_id(self, id: Int) -> UInt32:
+        return self.gi[unsafe_offset=id]
 
     def flags(self, id: Int) -> Int:
         return Int(self.fl[unsafe_offset=id])
@@ -264,7 +296,8 @@ struct Slots(Copyable, Movable):
         )
 
     def zero_static(self, id: Int):
-        self.sm.unsafe_store[width=4](id * SM_STRIDE, SIMD[DType.float32, 4](0, 0, 0, 0))
+        self.sm.unsafe_store[width=2](id * SM_STRIDE, SIMD[DType.float32, 2](0, 0))
+        self.gi[unsafe_offset=id] = 0
 
 
 struct Witness(Copyable, Movable):
@@ -301,6 +334,7 @@ struct Witness(Copyable, Movable):
 
 struct PipelineResult(Copyable, Movable):
     var sm: List[Float32]     # static measures, SM_STRIDE per byte
+    var gi: List[UInt32]      # GLYPH_ID, 1 per byte — a native u32 identity
     var fl: List[UInt32]      # flags, 1 per byte
     var lm: List[Float32]     # positional measures, LM_STRIDE per byte
     var lc: List[UInt32]      # positional counts, LC_STRIDE per byte
@@ -314,6 +348,7 @@ struct PipelineResult(Copyable, Movable):
 
     def __init__(out self):
         self.sm = List[Float32]()
+        self.gi = List[UInt32]()
         self.fl = List[UInt32]()
         self.lm = List[Float32]()
         self.lc = List[UInt32]()
@@ -330,6 +365,7 @@ struct PipelineResult(Copyable, Movable):
         # past every task that holds this (the drivers' `_ = len(...)` anchors).
         return Slots(
             self.sm.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin](),
+            self.gi.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin](),
             self.fl.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin](),
             self.lm.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin](),
             self.lc.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin](),
@@ -348,11 +384,18 @@ struct PipelineResult(Copyable, Movable):
     # GLYPH_ID BASE_X LINE_ADV] + 4 count lanes [ROW COL FLAGS ORD] per byte.
     # The suites compare in that order; these map it onto the phase arrays so a
     # container re-layout never touches a suite again.
-    def m_at(self, slot: Int, fix_lane: Int) -> Float32:
+    def m_at(self, slot: Int, fix_lane: Int) raises -> Float32:
         if fix_lane < 3:      # X, Y, Z
             return self.lm[slot * LM_STRIDE + fix_lane]
-        if fix_lane < 6:      # ADVANCE, HEIGHT, GLYPH_ID
+        if fix_lane < 5:      # ADVANCE, HEIGHT
             return self.sm[slot * SM_STRIDE + (fix_lane - 3)]
+        if fix_lane == 5:
+            # GLYPH_ID is a u32 identity since the settlement — a checker must
+            # carry it the way the pipeline does, so there is deliberately no
+            # f32 view of it. NOT a poison constant: a NaN here would compare
+            # EQUAL to itself in every port-vs-port bit loop and turn a missed
+            # caller into a silently vacuous lane. Loud beats quiet.
+            raise Error("m_at: GLYPH_ID is exact — compare gi[slot] as u32")
         if fix_lane == 6:     # BASE_X
             return self.lm[slot * LM_STRIDE + LM_BASE_X]
         # LINE_ADV — witness array; meaningful only on a WITNESSED result
@@ -427,10 +470,11 @@ def decode_codepoint_at[o: ImmOrigin](bytes: Span[UInt8, o], id: Int, n: Int) ->
     return ((b0 & 0x07) << 18) | ((b1 & 0x3F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F)
 
 
-def trie_lookup_base(trie: Trie, cp: Int) -> Int:
-    """The exact two-load sequence the shader runs; returns the entry's float base."""
+def trie_lookup_entry(trie: Trie, cp: Int) -> Int:
+    """The exact two-load sequence the shader runs; returns the ENTRY INDEX
+    (stride-free — callers go through the Trie accessors per carrier)."""
     var block = Int(trie.block_index[cp >> BLOCK_SHIFT])
-    return ((block << BLOCK_SHIFT) | (cp & BLOCK_MASK)) * ENTRY_STRIDE
+    return (block << BLOCK_SHIFT) | (cp & BLOCK_MASK)
 
 
 def decode_and_resolve[o: ImmOrigin](
@@ -478,9 +522,6 @@ def decode_and_resolve[o: ImmOrigin](
 
     var cp = decode_codepoint_at(bytes, id, n)
 
-    # ONE 16-BYTE LOAD instead of four scalar ones. The trie entry is four
-    # contiguous f32s (GLYPH_ID, ADVANCE, HEIGHT, FLAGS = 0,1,2,3), so the whole
-    # entry arrives in a single NEON register.
     #
     # The block index is also hoisted for the sub-256 path: BLOCK_SHIFT is 8, so
     # cp >> 8 == 0 for every ASCII and Latin-1 codepoint, which is ~99% of source
@@ -492,12 +533,17 @@ def decode_and_resolve[o: ImmOrigin](
         block = Int(bp[unsafe_offset=0])
     else:
         block = Int(bp[unsafe_offset = cp >> BLOCK_SHIFT])
-    var tb = ((block << BLOCK_SHIFT) | (cp & BLOCK_MASK)) * ENTRY_STRIDE
+    var entry = (block << BLOCK_SHIFT) | (cp & BLOCK_MASK)
 
-    var e = trie.blocks.unsafe_ptr().unsafe_load[width=4](tb)
-    var missing = (Int(e[LANE_FLAGS]) & FLAG_MISSING) != 0
-    # ONE aligned 16-byte store: the whole static record in a single instruction.
-    slots.set_static(id, e[LANE_ADVANCE], e[LANE_HEIGHT], e[LANE_GLYPH_ID])
+    # TWO 8-byte loads (independent, pipelineable) since the settlement split the
+    # trie by carrier: measures arrive as f32x2, the identity and bitfield as
+    # u32x2 — and the flags test is a real bit test on a real integer now, not
+    # an `Int(f32)` coercion.
+    var em = trie.blocks_m.unsafe_ptr().unsafe_load[width=2](entry * TM_STRIDE)
+    var ec = trie.blocks_c.unsafe_ptr().unsafe_load[width=2](entry * TC_STRIDE)
+    var missing = (Int(ec[TC_FLAGS]) & FLAG_MISSING) != 0
+    slots.set_static(id, em[TM_ADVANCE], em[TM_HEIGHT])
+    slots.set_glyph_id(id, ec[TC_GLYPH_ID])
     var flags = F_LEADER
     if cp == NEWLINE:
         flags |= F_NEWLINE
@@ -774,7 +820,8 @@ async def _decode_shard[
     var nmiss = 0
     var bp = bytes.unsafe_ptr()
     var tbi = trie.block_index.unsafe_ptr()
-    var tbb = trie.blocks.unsafe_ptr()
+    var tmb = trie.blocks_m.unsafe_ptr()
+    var tcb = trie.blocks_c.unsafe_ptr()
     var ascii_block = Int(tbi[unsafe_offset=0])
 
     var id = start
@@ -795,20 +842,20 @@ async def _decode_shard[
                     var b = Int(v[k])
                     # cp < 256, so the block index is the hoisted ASCII one and the
                     # first dependent load is gone.
-                    var tb = ((ascii_block << BLOCK_SHIFT) | b) * ENTRY_STRIDE
-                    var e = tbb.unsafe_load[width=4](tb)
+                    var entry = (ascii_block << BLOCK_SHIFT) | b
+                    var em = tmb.unsafe_load[width=2](entry * TM_STRIDE)
+                    var ec = tcb.unsafe_load[width=2](entry * TC_STRIDE)
                     var f = F_LEADER
                     if b == NEWLINE:
                         f |= F_NEWLINE
-                    if (Int(e[LANE_FLAGS]) & FLAG_MISSING) != 0:
+                    if (Int(ec[TC_FLAGS]) & FLAG_MISSING) != 0:
                         f |= F_MISSING
                         miss_out[unsafe_offset = start + nmiss] = UInt32(b)
                         nmiss += 1
-                    # STATIC ONLY: one 16-byte store + one flags word per byte.
-                    # The positional lanes belong to the fold and the gap sweep.
-                    slots.set_static(
-                        id + k, e[LANE_ADVANCE], e[LANE_HEIGHT], e[LANE_GLYPH_ID]
-                    )
+                    # STATIC ONLY: measures + identity + flags per byte. The
+                    # positional lanes belong to the fold and the gap sweep.
+                    slots.set_static(id + k, em[TM_ADVANCE], em[TM_HEIGHT])
+                    slots.set_glyph_id(id + k, ec[TC_GLYPH_ID])
                     slots.set_flags(id + k, f)
                 leaders += 16
                 id += 16
@@ -941,6 +988,7 @@ def run_pipeline[o: ImmOrigin, witness: Bool = True](
     # [byte_start, +ord), so its tail has no writer.
     var r = PipelineResult()
     r.sm = List[Float32](unsafe_uninit_length=byte_len * SM_STRIDE)
+    r.gi = List[UInt32](unsafe_uninit_length=byte_len * GI_STRIDE)
     r.fl = List[UInt32](unsafe_uninit_length=byte_len)
     r.lm = List[Float32](unsafe_uninit_length=byte_len * LM_STRIDE)
     r.lc = List[UInt32](unsafe_uninit_length=byte_len * LC_STRIDE)
@@ -1134,6 +1182,7 @@ def run_pipeline[o: ImmOrigin, witness: Bool = True](
     _ = len(gboxes)
     _ = len(item_bounds)
     _ = len(r.sm)
+    _ = len(r.gi)
     _ = len(r.fl)
     _ = len(r.lm)
     _ = len(r.lc)

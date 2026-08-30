@@ -89,23 +89,24 @@ def compact(
     for id in range(byte_len):
         if (Int(r.fl[id]) & F_LEADER) == 0:
             continue
-        # THE TRUNCATION, after both splits: THREE runs, still no lane map.
-        # The wire order [X Y Z | ADVANCE HEIGHT GLYPH_ID][ROW COL] partitions
-        # exactly at the phase boundary — posMeasures' render-read prefix, then
-        # staticMeasures', then posCounts WHOLE (the read-axis split made the
-        # record's count section and the container coincide). gen-schema pins
-        # that order as a literal and fails the build if it stops deriving.
+        # THE TRUNCATION, after both splits and the settlement: FOUR runs,
+        # still no lane map, and STILL THE SAME BYTES — GLYPH_ID moved from the
+        # measure run's tail to the exact run's head, which is the same offset
+        # (20) either way. Runs: posMeasures' render-read prefix, staticMeasures
+        # whole, staticIdentities whole, posCounts whole. gen-schema pins the
+        # order as a literal and fails the build if it stops deriving.
         var wm = w * RECORD_MEASURE_STRIDE
         var lo = id * LM_STRIDE
         var so = id * SM_STRIDE
         for k in range(3):
             mp[unsafe_offset = wm + k] = r.lm[lo + k]          # X, Y, Z
-        for k in range(3):
-            mp[unsafe_offset = wm + 3 + k] = r.sm[so + k]      # ADVANCE, HEIGHT, GLYPH_ID
+        for k in range(2):
+            mp[unsafe_offset = wm + 3 + k] = r.sm[so + k]      # ADVANCE, HEIGHT
         var wc = w * RECORD_COUNT_STRIDE
         var co = id * LC_STRIDE
-        for k in range(RECORD_COUNT_STRIDE):
-            cp[unsafe_offset = wc + k] = r.lc[co + k]          # ROW, COL
+        cp[unsafe_offset = wc + 0] = r.gi[id]                  # GLYPH_ID — the exact
+        for k in range(2):                                     # run's head, offset 20:
+            cp[unsafe_offset = wc + 1 + k] = r.lc[co + k]      # same wire BYTE as ever
         w += 1
     out.glyphs = w
 

@@ -26,7 +26,7 @@
  ],
  "buffers": {
   "$comment": [
-   "SIX ARRAYS, SPLIT TWICE.",
+   "SEVEN ARRAYS, SPLIT TWICE \u2014 and, since 2026-08-31, ZERO declared deviations.",
    "",
    "First split, WRITE axis \u2014 who WRITES a lane decides where it lives:",
    "  static      decode's output: a pure function of the byte through the trie.",
@@ -58,13 +58,16 @@
    "The generator pins the wire as a literal; a restructure that moves it fails",
    "the build.",
    "",
-   "SM_PAD exists to make the static record one ALIGNED 16-byte store (four",
-   "slots per cache line). Padding that buys alignment is cheaper than the",
-   "unaligned store that saving it costs."
+   "GLYPH_ID is a native u32 identity (staticIdentities) as of the trie format",
+   "moving to u32 (50fd6b8). SM_PAD died with it: the pad existed to align a",
+   "16-byte static store that no longer needs four lanes. staticMeasures is two",
+   "genuine measures and nothing else; the wire BYTES did not move (GLYPH_ID",
+   "still sits at record offset 20 \u2014 only its run classification changed, from",
+   "the measure run's tail to the count run's head)."
   ],
   "staticMeasures": {
    "carrier": "f32",
-   "stride": 4,
+   "stride": 2,
    "lanes": [
     {
      "name": "ADVANCE",
@@ -77,20 +80,6 @@
      "index": 1,
      "read_by_vertex": true,
      "kind": "measure"
-    },
-    {
-     "name": "GLYPH_ID",
-     "index": 2,
-     "read_by_vertex": true,
-     "misplaced": "This is an IDENTITY living in the staticMeasures f32 array. It is here only because it is copied verbatim from the trie's f32 blocks, so it cannot move until the TRIE FORMAT moves. It is the single exception in the system and it is deliberately visible: one identity, in the wrong array, naming its own fix.",
-     "kind": "identity"
-    },
-    {
-     "name": "PAD",
-     "index": 3,
-     "scratch": true,
-     "kind": "measure",
-     "note": "alignment padding \u2014 decode writes 0 so the whole static record is one aligned 16-byte store; never read"
     }
    ]
   },
@@ -180,6 +169,19 @@
      "scratch": true,
      "kind": "count",
      "note": "The lane that started all of this. Aliased past 2^24 as an f32; exact to 2^32 as a native count. Witness tier since the read-axis split: the render path never reads it, so the serial form writes it only when witnessed."
+    }
+   ]
+  },
+  "staticIdentities": {
+   "carrier": "u32",
+   "stride": 1,
+   "lanes": [
+    {
+     "name": "GLYPH_ID",
+     "index": 0,
+     "read_by_vertex": true,
+     "kind": "identity",
+     "note": "The system's oldest deviation, settled 2026-08-31. It rode the f32 staticMeasures array for as long as the trie handed decode an f32 \u2014 the misplaced entry named its own fix ('cannot move until the TRIE FORMAT moves'), the trie moved (50fd6b8), and the stale-declaration rule made keeping the exemption a build failure. Exact to 2^32 now, end to end."
     }
    ]
   }

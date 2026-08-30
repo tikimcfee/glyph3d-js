@@ -36,8 +36,9 @@ own mapping respects the kinds. The engine's strides are derived from kind and
 asserted against it, so its container cannot disagree by construction.
 
 ```
-static      sm  f32  SM_STRIDE 4   ADVANCE HEIGHT GLYPH_ID PAD    decode's output —
-            fl  u32  stride    1   FLAGS                          one aligned 16 B store
+static      sm  f32  SM_STRIDE 2   ADVANCE HEIGHT                 decode's output
+            gi  u32  stride    1   GLYPH_ID                       a native u32 identity
+            fl  u32  stride    1   FLAGS                          since the settlement
 positional  lm  f32  LM_STRIDE 4   X Y Z BASE_X                   the fold's output —
             lc  u32  LC_STRIDE 2   ROW COL                        decode never touches it
 witness     wm  f32  stride    1   LINE_ADV                       fold interior no render
@@ -70,12 +71,15 @@ The container is split TWICE, along different axes:
   scales; the elision buys back exactly the ~12 B/byte it removes — the
   `pipeline- elided` row in bench/bench.mojo keeps the price runnable rather than
   remembered). The durable win is memory: resident slots 56 → 44 B per source
-  byte, and one less allocation + memset per streamed job.
+  byte, and one less allocation + memset per streamed job. (The GLYPH_ID
+  settlement then took 44 → 40: when the identity left the f32 array for a
+  native u32 one, the PAD lane that existed only to align a four-lane store
+  died with it.)
 
 ### The record format — a truncation, not a repack
 
 ```
-slots    44 B per SOURCE BYTE, corpus lifetime   (sm 16 + fl 4 + lm 16 + lc 8)
+slots    40 B per SOURCE BYTE, corpus lifetime   (sm 8 + gi 4 + fl 4 + lm 16 + lc 8)
 witness  12 B per SOURCE BYTE, WITNESSED ONLY    (wm 4 + wc 4 + ord_to_byte 4)
 record   32 B per RENDERED GLYPH                 (measures 6 + counts 2)
 ```
@@ -131,9 +135,14 @@ Two limits, both real and both stated rather than papered over:
   number. In practice anything re-laying a range has already laid the document once,
   so the row is in hand.
 
-`GLYPH_ID` is the one identity sitting in an f32 array (staticMeasures). It is there only because
-it is copied verbatim from the trie's f32 blocks, so it cannot move until the trie
-format does. That exception is deliberately visible rather than hidden in a comment.
+`GLYPH_ID` was, for the system's whole life until 2026-08-31, the one identity
+sitting in an f32 array — exempted by a `misplaced` entry that named its own fix
+("cannot move until the trie format moves"). The trie format moved (50fd6b8, the
+render side), the engine followed (its trie realization split by carrier: measures
+f32, identity + bitfield native u32), and the entry was removed the same day —
+the stale-declaration rule makes an exemption that outlives its deviation a build
+failure, so keeping it was not an option. KNOWN_DEVIATIONS is empty: the system
+has no declared debts for the first time in its existence.
 
 The generator validates and throws: an identity declared with an f32 carrier, a lane
 index past its stride, or a hole in a stride is a build failure, not a review miss.

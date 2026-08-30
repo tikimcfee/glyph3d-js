@@ -56,7 +56,6 @@ comptime C_ORD = 3
 comptime REPS = 5
 comptime BLOCK_SHIFT = 8
 comptime BLOCK_MASK = 255
-comptime ENTRY_STRIDE = 4
 comptime NEWLINE = 0x0A
 
 # SPLIT strides. static is 4 f32 wide so the decode store is one aligned 16 B
@@ -92,7 +91,8 @@ async def _dec_aos[bo: Origin[mut=True], so: Origin[mut=True], xo: Origin[mut=Tr
     c: Pointer[UInt32, xo], trie: Trie, start: Int, stop: Int, n: Int,
 ):
     var tbi = trie.block_index.unsafe_ptr()
-    var tbb = trie.blocks.unsafe_ptr()
+    var tmb = trie.blocks_m.unsafe_ptr()
+    var tcb = trie.blocks_c.unsafe_ptr()
     var ascii_block = Int(tbi[unsafe_offset=0])
     for id in range(start, stop):
         var b0 = Int(bp[unsafe_offset=id])
@@ -105,12 +105,13 @@ async def _dec_aos[bo: Origin[mut=True], so: Origin[mut=True], xo: Origin[mut=Tr
             continue
         var cp = b0 if nlen == 1 else 0xFFFD
         var block = ascii_block if cp < 256 else Int(tbi[unsafe_offset = cp >> BLOCK_SHIFT])
-        var tb = ((block << BLOCK_SHIFT) | (cp & BLOCK_MASK)) * ENTRY_STRIDE
-        var e = tbb.unsafe_load[width=4](tb)
-        m[unsafe_offset = mo + M_GLYPH_ID] = e[0]
-        m.unsafe_store[width=2](mo + M_ADVANCE, SIMD[DType.float32, 2](e[1], e[2]))
+        var tb = (block << BLOCK_SHIFT) | (cp & BLOCK_MASK)
+        var em = tmb.unsafe_load[width=2](tb * 2)
+        var ec = tcb.unsafe_load[width=2](tb * 2)
+        m[unsafe_offset = mo + M_GLYPH_ID] = Float32(ec[0])
+        m.unsafe_store[width=2](mo + M_ADVANCE, SIMD[DType.float32, 2](em[0], em[1]))
         var f = F_LEADER
-        if e[3] != 0: f |= F_MISSING
+        if ec[1] != 0: f |= F_MISSING
         if cp == NEWLINE: f |= F_NEWLINE
         c[unsafe_offset = co + C_FLAGS] = UInt32(f)
         m[unsafe_offset = mo + M_X] = 0
@@ -129,7 +130,8 @@ async def _dec_split[bo: Origin[mut=True], so: Origin[mut=True], xo: Origin[mut=
     sc: Pointer[UInt32, xo], trie: Trie, start: Int, stop: Int, n: Int,
 ):
     var tbi = trie.block_index.unsafe_ptr()
-    var tbb = trie.blocks.unsafe_ptr()
+    var tmb = trie.blocks_m.unsafe_ptr()
+    var tcb = trie.blocks_c.unsafe_ptr()
     var ascii_block = Int(tbi[unsafe_offset=0])
     for id in range(start, stop):
         var b0 = Int(bp[unsafe_offset=id])
@@ -141,12 +143,13 @@ async def _dec_split[bo: Origin[mut=True], so: Origin[mut=True], xo: Origin[mut=
             continue
         var cp = b0 if nlen == 1 else 0xFFFD
         var block = ascii_block if cp < 256 else Int(tbi[unsafe_offset = cp >> BLOCK_SHIFT])
-        var tb = ((block << BLOCK_SHIFT) | (cp & BLOCK_MASK)) * ENTRY_STRIDE
-        var e = tbb.unsafe_load[width=4](tb)
+        var tb = (block << BLOCK_SHIFT) | (cp & BLOCK_MASK)
+        var em = tmb.unsafe_load[width=2](tb * 2)
+        var ec = tcb.unsafe_load[width=2](tb * 2)
         # ONE aligned 16-byte store for the whole static record.
-        st.unsafe_store[width=4](so_, SIMD[DType.float32, 4](e[1], e[2], e[0], 0))
+        st.unsafe_store[width=4](so_, SIMD[DType.float32, 4](em[0], em[1], Float32(ec[0]), 0))
         var f = F_LEADER
-        if e[3] != 0: f |= F_MISSING
+        if ec[1] != 0: f |= F_MISSING
         if cp == NEWLINE: f |= F_NEWLINE
         sc[unsafe_offset=id] = UInt32(f)
 
@@ -236,10 +239,17 @@ def load() raises -> BenchIn:
     for i in range(bil):
         bi.append(UInt32(u32_at(raw, at + i * 4)))
     at += bil * 4
-    var bb = List[Float32](capacity=bl)
-    for i in range(bl):
-        bb.append(bitcast[DType.float32](UInt32(u32_at(raw, at + i * 4))))
-    return BenchIn(bytes^, Trie(bi^, bb^))
+    # New-format bench.bin: identities/bitfields native u32, measures bitcast
+    # (entry-major GLYPH_ID, ADVANCE, HEIGHT, FLAGS).
+    var entries = bl // 4
+    var bm = List[Float32](capacity=entries * 2)
+    var bc = List[UInt32](capacity=entries * 2)
+    for i in range(entries):
+        bm.append(bitcast[DType.float32](UInt32(u32_at(raw, at + (i * 4 + 1) * 4))))
+        bm.append(bitcast[DType.float32](UInt32(u32_at(raw, at + (i * 4 + 2) * 4))))
+        bc.append(UInt32(u32_at(raw, at + (i * 4 + 0) * 4)))
+        bc.append(UInt32(u32_at(raw, at + (i * 4 + 3) * 4)))
+    return BenchIn(bytes^, Trie(bi^, bm^, bc^))
 
 
 struct BenchIn(Movable):

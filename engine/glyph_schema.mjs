@@ -34,11 +34,9 @@ export const FIX_C_FLAGS = 2;
 export const FIX_C_ORD = 3;
 
 // ── This backend's WORKING container (the phase split) ────────────────────
-export const SM_STRIDE = 4;
+export const SM_STRIDE = 2;
 export const SM_ADVANCE = 0;
 export const SM_HEIGHT = 1;
-export const SM_GLYPH_ID = 2;
-export const SM_PAD = 3;
 
 export const LM_STRIDE = 4;
 export const LM_X = 0;
@@ -50,8 +48,10 @@ export const LC_STRIDE = 2;
 export const LC_ROW = 0;
 export const LC_COL = 1;
 
-export const RECORD_MEASURE_STRIDE = 6;
-export const RECORD_COUNT_STRIDE = 2;
+export const GI_STRIDE = 1;
+
+export const RECORD_MEASURE_STRIDE = 5;
+export const RECORD_COUNT_STRIDE = 3;
 
 export const ITEM_STRIDE = 15;
 export const I_ORIGIN_Y = 0;

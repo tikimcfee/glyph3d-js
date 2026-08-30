@@ -20,8 +20,8 @@
  *  cannot silently disagree with the field lists below. */
 export const RECORD_FIELD_BYTES = 4;
 export const RECORD_BYTES = 8 * RECORD_FIELD_BYTES;
-export const RECORD_MEASURES = Object.freeze(['X', 'Y', 'Z', 'ADVANCE', 'HEIGHT', 'GLYPH_ID']);
-export const RECORD_COUNTS = Object.freeze(['ROW', 'COL']);
+export const RECORD_MEASURES = Object.freeze(['X', 'Y', 'Z', 'ADVANCE', 'HEIGHT']);
+export const RECORD_COUNTS = Object.freeze(['GLYPH_ID', 'ROW', 'COL']);
 
 // ── KNOWN DEVIATIONS: declared, justified, and still violations ────────────
 /** Fields whose kind is EXACT but which ride a float carrier TODAY, with the
@@ -30,7 +30,6 @@ export const RECORD_COUNTS = Object.freeze(['ROW', 'COL']);
  *  currently satisfies, and the first assertion written against it fails for a
  *  reason its author cannot act on. Deviations are debts, not exemptions. */
 export const KNOWN_DEVIATIONS = Object.freeze({
-    GLYPH_ID: "This is an IDENTITY living in the staticMeasures f32 array. It is here only because it is copied verbatim from the trie's f32 blocks, so it cannot move until the TRIE FORMAT moves. It is the single exception in the system and it is deliberately visible: one identity, in the wrong array, naming its own fix.",
 });
 
 // ── SHARED SEMANTICS: kinds, not containers ────────────────────────────────

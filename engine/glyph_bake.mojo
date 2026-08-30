@@ -24,15 +24,11 @@ from std.collections import Set, Dict
 from glyph_pipeline import (
     Trie,
     NEWLINE,
-    LANE_GLYPH_ID,
-    LANE_ADVANCE,
-    LANE_HEIGHT,
-    LANE_FLAGS,
     FLAG_MISSING,
     F64_INF,
     sequence_length,
     byte_at,
-    trie_lookup_base,
+    trie_lookup_entry,
     rows_for_line,
     decode_codepoint_at,
 )
@@ -161,9 +157,9 @@ def fold_bytes[o: ImmOrigin](
             id += 1
             continue  # continuation byte: identity leaf (skipped, matching the oracle)
         var cp = decode_codepoint_at(bytes, id, n)
-        var tb = trie_lookup_base(trie, cp)
+        var tb = trie_lookup_entry(trie, cp)
         var leaf = scan_leaf_value(
-            cp == NEWLINE, trie.blocks[tb + LANE_ADVANCE], True, 0, id == 0
+            cp == NEWLINE, trie.advance_at(tb), True, 0, id == 0
         )
         scan_combine(acc, leaf)
         id += 1
@@ -254,10 +250,10 @@ def bake_file[o: ImmOrigin](
             id += 1
             continue
         var cp = decode_codepoint_at(bytes, id, seq)
-        var tb = trie_lookup_base(trie, cp)
-        var advance = trie.blocks[tb + LANE_ADVANCE]
-        var height = trie.blocks[tb + LANE_HEIGHT]
-        var is_missing = (Int(trie.blocks[tb + LANE_FLAGS]) & FLAG_MISSING) != 0
+        var tb = trie_lookup_entry(trie, cp)
+        var advance = trie.advance_at(tb)
+        var height = trie.height_at(tb)
+        var is_missing = (trie.flags_at(tb) & FLAG_MISSING) != 0
         census_set.add(cp)
         if is_missing:
             missing_set.add(cp)

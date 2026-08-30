@@ -71,7 +71,7 @@ struct PipeFixture(Movable):
         self.byte_len = 0
         self.item_count = 0
         self.bytes = List[UInt8]()
-        self.trie = Trie(List[UInt32](), List[Float32]())
+        self.trie = Trie(List[UInt32](), List[Float32](), List[UInt32]())
         self.items = List[Item]()
         self.exp_leaders = 0
         self.exp_misses = List[UInt32]()
@@ -103,12 +103,25 @@ def load_pipe_fixture(path: String) raises -> PipeFixture:
     var block_index = List[UInt32](capacity=block_index_len)
     for _ in range(block_index_len):
         block_index.append(r.u32())
-    var blocks = List[Float32](capacity=blocks_len)
-    for _ in range(blocks_len):
-        # v2 stores trie blocks as f64 VALUES; the trie's own representation is
-        # f32, and f64 -> f32 is exact for anything that was an f32 to begin with.
-        blocks.append(Float32(r.f64()))
-    fx.trie = Trie(block_index^, blocks^)
+    # v2 stores trie blocks as f64 VALUES in entry-major lane order
+    # [GLYPH_ID, ADVANCE, HEIGHT, FLAGS] — which is why the corpus survived the
+    # trie's container moving on BOTH sides of the oracle: the format carries
+    # values, and each loader realizes its own container. This one splits by
+    # carrier: measures to f32 (exact for anything that was f32 to begin with),
+    # the identity and bitfield to native u32.
+    var entries = blocks_len // 4
+    var blocks_m = List[Float32](capacity=entries * 2)
+    var blocks_c = List[UInt32](capacity=entries * 2)
+    for _ in range(entries):
+        var gid = r.f64()
+        var adv = r.f64()
+        var h = r.f64()
+        var fl = r.f64()
+        blocks_m.append(Float32(adv))
+        blocks_m.append(Float32(h))
+        blocks_c.append(UInt32(gid))
+        blocks_c.append(UInt32(fl))
+    fx.trie = Trie(block_index^, blocks_m^, blocks_c^)
 
     for _ in range(fx.item_count):
         var it = Item()

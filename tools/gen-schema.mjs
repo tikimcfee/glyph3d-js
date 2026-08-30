@@ -230,6 +230,7 @@ const contractBanner = (cmt) => [
 const stM = schema.buffers.staticMeasures, stC = schema.buffers.staticCounts;
 const poM = schema.buffers.posMeasures, poC = schema.buffers.posCounts;
 const wM = schema.buffers.witnessMeasures, wC = schema.buffers.witnessCounts;
+const gI = schema.buffers.staticIdentities;
 const rbv = (buf) => buf.lanes.filter(l => l.read_by_vertex).sort((a, b) => a.index - b.index).map(l => l.name);
 // THE FIXTURE FORMAT — frozen on disk (format v2), NOT derived from the container.
 // Fixtures carry the ORACLE'S VALUES in this order; the engine's working buffers
@@ -250,8 +251,13 @@ const FIXTURE_COUNTS = ['ROW', 'COL', 'FLAGS', 'ORD'];
 //
 // Changing the wire format is still possible — edit this literal, knowingly, in a
 // commit that says so — but it can no longer happen as a side effect.
-const WIRE_MEASURES = ['X', 'Y', 'Z', 'ADVANCE', 'HEIGHT', 'GLYPH_ID'];
-const WIRE_COUNTS = ['ROW', 'COL'];
+// 2026-08-31, edited KNOWINGLY (the commit says so): GLYPH_ID left the measure
+// run for the head of the exact run when it became a native u32 (the trie format
+// moved first — 50fd6b8). The BYTE ORDER IS UNCHANGED: GLYPH_ID still sits at
+// offset 20; only its run classification moved. A renderer reading offsets sees
+// identical bytes; a renderer classifying by run now reads it exact.
+const WIRE_MEASURES = ['X', 'Y', 'Z', 'ADVANCE', 'HEIGHT'];
+const WIRE_COUNTS = ['GLYPH_ID', 'ROW', 'COL'];
 const WIRE_BYTES = 32;
 {
     // The record is a CONCATENATION OF PREFIX RUNS: posMeasures' render-read
@@ -259,7 +265,7 @@ const WIRE_BYTES = 32;
     // exactly at the phase boundary, which is what keeps compact() memcpy-shaped
     // (three runs instead of two, still no lane map).
     const gotM = [...rbv(poM), ...rbv(stM)];
-    const gotC = [...rbv(poC), ...rbv(stC)];
+    const gotC = [...rbv(gI), ...rbv(poC), ...rbv(stC)];
     const same = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
     if (!same(gotM, WIRE_MEASURES) || !same(gotC, WIRE_COUNTS)) {
         throw new Error('THE RECORD WIRE FORMAT MOVED.\n'
@@ -295,9 +301,13 @@ const mojo = [
     '# allocates them; the serial form only under its witness instantiation.',
     `comptime WM_STRIDE = ${wM.stride}`,
     `comptime WC_STRIDE = ${wC.stride}`, '',
-    '# The RECORD format (the wire): unchanged by either split. A record is emitted',
-    '# as three runs — posMeasures[0..3), staticMeasures[0..3), posCounts WHOLE —',
-    '# a concatenation of truncations, still no lane map.',
+    '# GLYPH_ID: a native u32 identity in its own stride-1 array since 2026-08-31',
+    '# (the trie format moved first). The oldest deviation, settled.',
+    `comptime GI_STRIDE = ${gI.stride}`, '',
+    '# The RECORD format (the wire): byte order unchanged through both splits AND',
+    '# the GLYPH_ID settlement. A record is four runs — posMeasures[0..3),',
+    '# staticMeasures whole, staticIdentities whole, posCounts whole — a',
+    '# concatenation of truncations, still no lane map.',
     `comptime RECORD_MEASURE_STRIDE = ${recM}`,
     `comptime RECORD_COUNT_STRIDE = ${recC}`,
     `comptime RECORD_BYTES = ${recM * 4 + recC * 4}`, '',
@@ -370,7 +380,7 @@ const fieldKinds = {};
 // of the pipeline (the fixtures carry them, the scan partial computes them) —
 // the read-axis split moved their CONTAINER, not their existence. The proof the
 // tiers are real: the commit that moved them regenerated this file byte-identical.
-for (const buf of [poM, wM, poC, wC, stM, stC]) for (const l of buf.lanes) {
+for (const buf of [poM, wM, poC, wC, stM, gI, stC]) for (const l of buf.lanes) {
     if (l.name !== 'PAD') fieldKinds[l.name] = l.kind;
 }
 for (const l of it.measures.lanes) fieldKinds[l.name] ??= l.kind;
@@ -399,7 +409,7 @@ const js = [
     ' *  currently satisfies, and the first assertion written against it fails for a',
     ' *  reason its author cannot act on. Deviations are debts, not exemptions. */',
     `export const KNOWN_DEVIATIONS = Object.freeze({`,
-    ...[...stM.lanes, ...stC.lanes, ...poM.lanes, ...poC.lanes].filter(l => l.misplaced).map(l => `    ${l.name}: ${JSON.stringify(l.misplaced)},`),
+    ...[...stM.lanes, ...gI.lanes, ...stC.lanes, ...poM.lanes, ...poC.lanes, ...wM.lanes, ...wC.lanes].filter(l => l.misplaced).map(l => `    ${l.name}: ${JSON.stringify(l.misplaced)},`),
     `});`,
     '',
     '// ── SHARED SEMANTICS: kinds, not containers ────────────────────────────────',
@@ -420,7 +430,7 @@ const js = [
     ' *  bucket to stay correct. */',
     '',
     '/** Fields the vertex path reads. */',
-    `export const VERTEX_READ = Object.freeze(${quoted([...rbv(poM), ...rbv(stM), ...rbv(poC), ...rbv(stC)])});`,
+    `export const VERTEX_READ = Object.freeze(${quoted([...rbv(poM), ...rbv(stM), ...rbv(gI), ...rbv(poC), ...rbv(stC)])});`,
     '',
     '/** The SET of per-item layout parameters both layers must be able to express.',
     ' *  Names and kinds only — where they sit in anyone\'s item table is not shared. */',
@@ -454,6 +464,7 @@ const engineJs = [
     ...poM.lanes.map(l => `export const LM_${l.name} = ${l.index};`), '',
     `export const LC_STRIDE = ${poC.stride};`,
     ...poC.lanes.map(l => `export const LC_${l.name} = ${l.index};`), '',
+    `export const GI_STRIDE = ${gI.stride};`, '',
     `export const RECORD_MEASURE_STRIDE = ${recM};`,
     `export const RECORD_COUNT_STRIDE = ${recC};`, '',
     `export const ITEM_STRIDE = ${it.measures.stride};`,
