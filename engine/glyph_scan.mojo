@@ -432,11 +432,11 @@ def run_scan_pipeline[o: ImmOrigin](
             l += 1
 
     var leaders = 0
-    id = 0
-    while id < n:
-        if (slots.flags(id) & F_LEADER) != 0:
+    var id2 = 0
+    while id2 < n:
+        if (slots.flags(id2) & F_LEADER) != 0:
             leaders += 1
-        id += 1
+        id2 += 1
 
     # KEEP-ALIVE ANCHORS. Mojo destroys a value at its LAST USE, not scope end —
     # a List whose final mention is `create_task(...)` is freed before the tasks

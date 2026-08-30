@@ -1,17 +1,17 @@
 # glyph_record.mojo — the record format, and the scratch pool it makes possible.
 #
-# THE PROBLEM. Today a source byte costs MEASURE_STRIDE + COUNT_STRIDE lanes and
-# is held for the corpus's entire lifetime. But the render path reads only the
-# prefix of each buffer; the tail — BASE_X, LINE_ADV, ORD — is FOLD SCRATCH, an
-# intermediate the layout pass needs while computing and nothing needs afterward.
-# So the arena pays corpus-scale memory for job-scale temporaries, on every byte,
-# including every space and newline.
+# THE PROBLEM. A source byte costs 52 B of slot lanes (four phase arrays) held
+# for the corpus's entire lifetime. But the render path reads only the
+# render-read prefixes; BASE_X, LINE_ADV, ORD are FOLD SCRATCH - intermediates
+# the layout pass needs while computing and nothing needs afterward. So the
+# arena pays corpus-scale memory for job-scale temporaries, on every byte.
 #
-# THE SPLIT THAT MAKES IT CHEAP. Because the schema orders render-read lanes
-# FIRST in both buffers, emitting a record is a truncation — copy a prefix — not
-# a gather through a lane map. That is what turns "compact" from a repack into a
-# memcpy-shaped loop, and it is checked: gen-schema.mjs refuses a schema where a
-# render-read lane sorts after an unread one.
+# THE PREFIX RULE MAKES EMIT CHEAP. The schema orders render-read lanes FIRST
+# in every phase array, so emitting a record is a concatenation of THREE prefix
+# runs (posMeasures 0-3, staticMeasures 0-3, posCounts 0-2) - a truncation per
+# array, never a gather through a lane map. Checked twice over: gen-schema.mjs
+# refuses a schema where a render-read lane sorts after an unread one, and pins
+# the wire order as a literal so a container re-layout cannot move the bytes.
 #
 # THE DECOUPLING. Once records exist, slots become a SCRATCH POOL sized to the
 # JOB, not the corpus. run_streaming below proves it: a fixed pool, reused across
@@ -20,7 +20,7 @@
 # form, and it is what makes streaming edits a range re-run rather than a reload.
 
 from std.collections.span import Span
-from std.memory import memcpy
+from std.memory import unsafe_memcpy
 from glyph_schema import (
     SM_STRIDE, LM_STRIDE, LC_STRIDE,
     RECORD_MEASURE_STRIDE, RECORD_COUNT_STRIDE, RECORD_BYTES,
@@ -59,9 +59,9 @@ struct RecordSet(Copyable, Movable):
         var m = List[Float32](unsafe_uninit_length=c * RECORD_MEASURE_STRIDE)
         var k = List[UInt32](unsafe_uninit_length=c * RECORD_COUNT_STRIDE)
         if self.glyphs > 0:
-            memcpy(dest=m.unsafe_ptr(), src=self.measures.unsafe_ptr(),
+            unsafe_memcpy(dest=m.unsafe_ptr(), src=self.measures.unsafe_ptr(),
                    count=self.glyphs * RECORD_MEASURE_STRIDE)
-            memcpy(dest=k.unsafe_ptr(), src=self.counts.unsafe_ptr(),
+            unsafe_memcpy(dest=k.unsafe_ptr(), src=self.counts.unsafe_ptr(),
                    count=self.glyphs * RECORD_COUNT_STRIDE)
         self.measures = m^
         self.counts = k^
