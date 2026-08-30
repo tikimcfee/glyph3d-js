@@ -267,11 +267,31 @@ def decode_and_resolve[o: ImmOrigin, so: Origin[mut=True], xo: Origin[mut=True]]
         return -1
 
     var cp = decode_codepoint_at(bytes, id, n)
-    var tb = trie_lookup_base(trie, cp)
-    var missing = (Int(trie.blocks[tb + LANE_FLAGS]) & FLAG_MISSING) != 0
-    measures[unsafe_offset = mo + M_GLYPH_ID] = trie.blocks[tb + LANE_GLYPH_ID]
-    measures[unsafe_offset = mo + M_ADVANCE] = trie.blocks[tb + LANE_ADVANCE]
-    measures[unsafe_offset = mo + M_HEIGHT] = trie.blocks[tb + LANE_HEIGHT]
+
+    # ONE 16-BYTE LOAD instead of four scalar ones. The trie entry is four
+    # contiguous f32s (GLYPH_ID, ADVANCE, HEIGHT, FLAGS = 0,1,2,3), so the whole
+    # entry arrives in a single NEON register.
+    #
+    # The block index is also hoisted for the sub-256 path: BLOCK_SHIFT is 8, so
+    # cp >> 8 == 0 for every ASCII and Latin-1 codepoint, which is ~99% of source
+    # text. That kills the FIRST of the two dependent loads on the common path —
+    # dependent loads are what a gather cannot pipeline.
+    var bp = trie.block_index.unsafe_ptr()
+    var block: Int
+    if cp < 256:
+        block = Int(bp[unsafe_offset=0])
+    else:
+        block = Int(bp[unsafe_offset = cp >> BLOCK_SHIFT])
+    var tb = ((block << BLOCK_SHIFT) | (cp & BLOCK_MASK)) * ENTRY_STRIDE
+
+    var e = trie.blocks.unsafe_ptr().unsafe_load[width=4](tb)
+    var missing = (Int(e[LANE_FLAGS]) & FLAG_MISSING) != 0
+    measures[unsafe_offset = mo + M_GLYPH_ID] = e[LANE_GLYPH_ID]
+    # ADVANCE(3) and HEIGHT(4) are adjacent in the measures buffer and come from
+    # adjacent entry lanes, so both store in one instruction.
+    measures.unsafe_store[width=2](
+        mo + M_ADVANCE, SIMD[DType.float32, 2](e[LANE_ADVANCE], e[LANE_HEIGHT])
+    )
     var flags = F_LEADER
     if cp == NEWLINE:
         flags |= F_NEWLINE
@@ -604,12 +624,64 @@ async def _decode_shard[
     its own length. No zeroing needed — `tally` records how much is live."""
     var leaders = 0
     var nmiss = 0
-    for id in range(start, stop):
+    var bp = bytes.unsafe_ptr()
+    var tbi = trie.block_index.unsafe_ptr()
+    var tbb = trie.blocks.unsafe_ptr()
+    var ascii_block = Int(tbi[unsafe_offset=0])
+
+    var id = start
+    while id < stop:
+        # ASCII BLOCK GATE. One 16-byte load answers "is any byte multi-byte?" for
+        # sixteen bytes at once: a UTF-8 lead or continuation byte always has bit 7
+        # set, so (v & 0x80) == 0 across the block means sixteen single-byte
+        # leaders. Source text is ~99% ASCII, so this path takes almost all of it
+        # and skips the 4-way sequence-length ladder and every bounds-checked
+        # multi-byte read.
+        #
+        # W=16 is NEON's native width for u8; W=32 measured SLOWER (it costs more
+        # than it saves once a block straddles a non-ASCII byte).
+        if id + 16 <= stop:
+            var v = bp.unsafe_load[width=16](id)
+            if Int((v & 0x80).reduce_or()) == 0:
+                for k in range(16):
+                    var b = Int(v[k])
+                    var mo = (id + k) * MEASURE_STRIDE
+                    var co = (id + k) * COUNT_STRIDE
+                    # cp < 256, so the block index is the hoisted ASCII one and the
+                    # first dependent load is gone.
+                    var tb = ((ascii_block << BLOCK_SHIFT) | b) * ENTRY_STRIDE
+                    var e = tbb.unsafe_load[width=4](tb)
+                    var f = F_LEADER
+                    if b == NEWLINE:
+                        f |= F_NEWLINE
+                    if (Int(e[LANE_FLAGS]) & FLAG_MISSING) != 0:
+                        f |= F_MISSING
+                        miss_out[unsafe_offset = start + nmiss] = UInt32(b)
+                        nmiss += 1
+                    measures[unsafe_offset = mo + M_GLYPH_ID] = e[LANE_GLYPH_ID]
+                    measures.unsafe_store[width=2](
+                        mo + M_ADVANCE,
+                        SIMD[DType.float32, 2](e[LANE_ADVANCE], e[LANE_HEIGHT]),
+                    )
+                    measures[unsafe_offset = mo + M_X] = 0
+                    measures[unsafe_offset = mo + M_Y] = 0
+                    measures[unsafe_offset = mo + M_Z] = 0
+                    measures[unsafe_offset = mo + M_BASE_X] = 0
+                    measures[unsafe_offset = mo + M_LINE_ADV] = 0
+                    counts[unsafe_offset = co + C_FLAGS] = UInt32(f)
+                    counts[unsafe_offset = co + C_ROW] = 0
+                    counts[unsafe_offset = co + C_COL] = 0
+                    counts[unsafe_offset = co + C_ORD] = 0
+                leaders += 16
+                id += 16
+                continue
+
         var cp = decode_and_resolve(bytes, measures, counts, trie, id)
+        id += 1
         if cp < 0:
             continue
         leaders += 1
-        if (Int(counts[unsafe_offset = id * COUNT_STRIDE + C_FLAGS]) & F_MISSING) != 0:
+        if (Int(counts[unsafe_offset = (id - 1) * COUNT_STRIDE + C_FLAGS]) & F_MISSING) != 0:
             miss_out[unsafe_offset = start + nmiss] = UInt32(cp)
             nmiss += 1
     tally[unsafe_offset = w * 2] = leaders
