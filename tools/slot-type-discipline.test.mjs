@@ -127,6 +127,28 @@ console.log('the render-read lane set is a prefix (the record format depends on 
         readLanes.add(base + (m[3] ? Number(m[3]) : 0));
     }
 
+    // PROVE THE SEARCH WAS EXHAUSTIVE, not just that it found things.
+    //
+    // Everything above rests on a REGEX finding every lane read. A read spelled any other
+    // way — uint(S_FLAGS) instead of int(), a second helper, a computed index — is
+    // invisible to it, and an extraction that silently stops being complete keeps
+    // reporting a green subset. mojo-rising hit exactly this on their side: a sixth
+    // lineHeight fallback spelled `lh != lh` matched none of the greps that found the
+    // other five, and it surfaced only when a refactor forced every lane site to be READ
+    // rather than searched.
+    //
+    // So count the ACCESS SITES independently of the pattern. Every `byteSlots.element(`
+    // must be either the fl helper's own definition or one of the direct count-lane reads
+    // the extraction matched. A new access in any spelling raises the count and fails here.
+    const accessSites = (src.match(/byteSlots\.element\(/g) || []).length;
+    const helperDef = (src.match(/const fl = \(l\) => bitcast\(byteSlots\.element\(/g) || []).length;
+    const directReads = (src.match(/byteSlots\.element\(base\.add\(int\(S_[A-Z_]+\)\)\)/g) || []).length;
+    ok(helperDef === 1, `exactly one fl helper defines the float-lane read (found ${helperDef})`);
+    ok(accessSites === helperDef + directReads,
+       `every byteSlots.element() site is accounted for: ${accessSites} sites = `
+       + `${helperDef} helper + ${directReads} direct reads. An unaccounted site means the `
+       + `extraction below is reading a SUBSET and reporting it as the whole surface.`);
+
     const expected = [S_GLYPH_ID, S_ADVANCE, S_HEIGHT, S_X, S_Y, S_Z, S_ROW, S_COL].sort((a, b) => a - b);
     const got = [...readLanes].sort((a, b) => a - b);
     ok(got.length > 0, 'lane reads were actually extracted from glyphVertex (the regex still matches)');
