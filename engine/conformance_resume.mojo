@@ -20,8 +20,7 @@ from glyph_schema import (
     fixture_measure_lane_name, fixture_count_lane_name,
     )
 from glyph_pipeline import (
-    run_pipeline, layout_item, LayoutSeed, Item, F_LEADER, trunc_nonneg,
-    PipelineResult,
+    run_pipeline, layout_item, LayoutSeed, Item, F_LEADER, PipelineResult,
 )
 from glyph_bake import bake_file
 from glyph_record import seed_at, is_line_start
@@ -54,7 +53,7 @@ def check_case(path: String) raises -> Int:
         if item.has_page:
             skipped_paged += 1
             continue
-        var wrap = trunc_nonneg(item.wrap_width)
+        var wrap = item.wrap_width
 
         # The item's own bytes, and its bake — the seed source.
         var slice = Span(fx.bytes)[item.byte_start : item.byte_start + item.byte_count]

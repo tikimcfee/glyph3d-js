@@ -3,8 +3,8 @@
 //
 // THE SHARED TIER, and nothing else. Names and kinds — no strides, no lane
 // indices, nothing about how any layer stores anything. The renderer runs one
-// buffer; the native backend runs four phase arrays; the live item table is
-// stride 15 against the backend's 15. All are conformant: container is a
+// buffer; the native backend runs seven phase arrays; both layers' item
+// tables split by carrier as 9 measures + 6 exact. All are conformant: container is a
 // per-layer realization and KIND is the declared fact.
 //
 // What every layer owes: assert that its own mapping respects KIND below, and
@@ -50,19 +50,19 @@ export const KIND = Object.freeze({
     FLAGS: 'bitfield',
     ORIGIN_Y: 'measure',
     ORIGIN_Z: 'measure',
-    PAGE_ROWS: 'measure',
-    PAGE_COLS: 'measure',
-    SCROLL_ROWS: 'measure',
-    PAGES_WIDE: 'measure',
-    WRAP_WIDTH: 'measure',
     LINE_HEIGHT: 'measure',
     Z_STEP: 'measure',
     BAND_STRIDE_Y: 'measure',
     DEPTH_PER_BAND: 'measure',
     DEPTH_PER_COL: 'measure',
     PAGE_STRIDE_X: 'measure',
-    HAS_PAGE: 'count',
     ORIGIN_X: 'measure',
+    PAGE_ROWS: 'count',
+    PAGE_COLS: 'count',
+    SCROLL_ROWS: 'count',
+    PAGES_WIDE: 'count',
+    WRAP_WIDTH: 'count',
+    HAS_PAGE: 'count',
     MIN_X: 'measure',
     MIN_Y: 'measure',
     MIN_Z: 'measure',
@@ -75,8 +75,8 @@ export const KIND = Object.freeze({
 
 /** EXACT fields: counts, identities and bitfields. Must never ride a float
  *  carrier — and a float ordered key IS a float carrier wearing a u32 costume. */
-export const EXACT_FIELDS = Object.freeze(['ROW', 'COL', 'ORD', 'GLYPH_ID', 'FLAGS', 'HAS_PAGE', 'TOTAL_ROWS']);
-export const MEASURE_FIELDS = Object.freeze(['X', 'Y', 'Z', 'BASE_X', 'LINE_ADV', 'ADVANCE', 'HEIGHT', 'ORIGIN_Y', 'ORIGIN_Z', 'PAGE_ROWS', 'PAGE_COLS', 'SCROLL_ROWS', 'PAGES_WIDE', 'WRAP_WIDTH', 'LINE_HEIGHT', 'Z_STEP', 'BAND_STRIDE_Y', 'DEPTH_PER_BAND', 'DEPTH_PER_COL', 'PAGE_STRIDE_X', 'ORIGIN_X', 'MIN_X', 'MIN_Y', 'MIN_Z', 'MAX_X', 'MAX_Y', 'MAX_Z', 'MAX_ROW_EXTENT']);
+export const EXACT_FIELDS = Object.freeze(['ROW', 'COL', 'ORD', 'GLYPH_ID', 'FLAGS', 'PAGE_ROWS', 'PAGE_COLS', 'SCROLL_ROWS', 'PAGES_WIDE', 'WRAP_WIDTH', 'HAS_PAGE', 'TOTAL_ROWS']);
+export const MEASURE_FIELDS = Object.freeze(['X', 'Y', 'Z', 'BASE_X', 'LINE_ADV', 'ADVANCE', 'HEIGHT', 'ORIGIN_Y', 'ORIGIN_Z', 'LINE_HEIGHT', 'Z_STEP', 'BAND_STRIDE_Y', 'DEPTH_PER_BAND', 'DEPTH_PER_COL', 'PAGE_STRIDE_X', 'ORIGIN_X', 'MIN_X', 'MIN_Y', 'MIN_Z', 'MAX_X', 'MAX_Y', 'MAX_Z', 'MAX_ROW_EXTENT']);
 /** MEASURE_FIELDS and EXACT_FIELDS are DISJOINT and EXHAUSTIVE over KIND —
  *  asserted by the generator, so a consumer that classifies lanes in two
  *  buckets can rely on totality. KIND keeps the finer distinction (identity vs

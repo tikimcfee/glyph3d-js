@@ -8,7 +8,7 @@ from std.memory import bitcast
 # FIXTURE strides, not container strides: the on-disk format is frozen at 8+4
 # per byte regardless of how the engine lays its working buffers.
 from glyph_schema import FIXTURE_MEASURE_STRIDE, FIXTURE_COUNT_STRIDE
-from glyph_pipeline import Trie, Item
+from glyph_pipeline import Trie, Item, trunc_nonneg
 
 comptime PIPE_MAGIC = 0x46443347
 
@@ -130,14 +130,16 @@ def load_pipe_fixture(path: String) raises -> PipeFixture:
         it.origin_x = r.f64()
         it.origin_y = r.f64()
         it.origin_z = r.f64()
-        it.wrap_width = r.f64()
+        # THE BOUNDARY: v2 carries item params as f64 VALUES; the five integer
+        # page-geometry params truncate HERE, once, instead of at every read.
+        it.wrap_width = trunc_nonneg(r.f64())
         it.z_step = r.f64()
         it.line_height = r.f64()
         it.has_page = r.f64() > 0.5
-        it.page_rows = r.f64()
-        it.page_cols = r.f64()
-        it.scroll_rows = r.f64()
-        it.pages_wide = r.f64()
+        it.page_rows = trunc_nonneg(r.f64())
+        it.page_cols = trunc_nonneg(r.f64())
+        it.scroll_rows = trunc_nonneg(r.f64())
+        it.pages_wide = trunc_nonneg(r.f64())
         it.page_gap_x = r.f64()
         it.band_stride_y = r.f64()
         it.depth_per_band = r.f64()

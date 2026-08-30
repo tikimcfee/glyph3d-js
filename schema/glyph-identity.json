@@ -404,7 +404,8 @@
    "The engine's CPU form holds all 8 in f64, which is exact to 2^53 and has no wall,",
    "so there is no defect there. On DEVICE it must split: Metal has no f64, and an",
    "f32 ordered key would alias exactly as the TSL side does. The hardware forces the",
-   "same answer the kind rule already required."
+   "same answer the kind rule already required.",
+   "carrier f64 = the HOST realization (device uses u32 ordered keys + native u32 counts). Declared 2026-08-31: a section with no carrier is unvalidatable by construction \u2014 every carrier rule silently skips it, which is how TOTAL_ROWS rode f64 undeclared while its f32 cousins were being hunted."
   ],
   "lanes": [
    {
@@ -441,7 +442,8 @@
     "name": "TOTAL_ROWS",
     "index": 6,
     "kind": "count",
-    "note": "the fold scalar the TSL side carries as a float ordered key \u2014 see above"
+    "note": "the fold scalar the TSL side carries as a float ordered key \u2014 see above",
+    "misplaced": "A count on the host's f64 bounds array. Unlike the f32 walls, this is provably lossless \u2014 rows are bounded by byte count (u32) and 2^32 < 2^53 \u2014 and the DEVICE realization is already a native u32 atomicMax (BOUNDS_COUNT_LANES exists for exactly this lane). Declared so the carrier rule can SEE it rather than skip an undeclarable section; settle by splitting the host bounds container by carrier, the same dance as every other table."
    },
    {
     "name": "MAX_ROW_EXTENT",
@@ -450,7 +452,8 @@
     "note": "item-relative widest fold row; genuinely a measure, keeps the ordered key"
    }
   ],
-  "stride": 8
+  "stride": 8,
+  "carrier": "f64"
  },
  "itemParams": {
   "$comment": [

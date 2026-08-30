@@ -102,14 +102,14 @@ struct Item(Copyable, Movable):
     var origin_x: Float64
     var origin_y: Float64
     var origin_z: Float64
-    var wrap_width: Float64
-    var z_step: Float64
-    var line_height: Float64
-    var has_page: Bool
-    var page_rows: Float64
-    var page_cols: Float64
-    var scroll_rows: Float64
-    var pages_wide: Float64
+    var wrap_width: Int   # the fold unit, in COLUMNS — a count (kind-corrected
+    var z_step: Float64   # 2026-08-31: five integer page-geometry params were
+    var line_height: Float64  # declared 'measure' because the table holding them
+    var has_page: Bool        # was NAMED measures; truncation now happens ONCE,
+    var page_rows: Int        # at the boundary, instead of at all 37 read sites)
+    var page_cols: Int
+    var scroll_rows: Int
+    var pages_wide: Int
     var page_gap_x: Float64
     var band_stride_y: Float64
     var depth_per_band: Float64
@@ -415,7 +415,10 @@ def is_nan(v: Float64) -> Bool:
 
 
 def trunc_nonneg(v: Float64) -> Int:
-    """max(0, Math.trunc(v || 0)) — params arrive as f64, decisions are ints."""
+    """BOUNDARY-ONLY since the kind correction: item counts are Int in the
+    struct, so truncation happens once where f64 VALUES enter (fixture load,
+    any caller handing floats), never at read sites.
+    Semantics: max(0, Math.trunc(v || 0)) — matching the oracle boundary."""
     if is_nan(v) or v <= 0:
         return 0
     return Int(v)  # toward zero for non-negatives
@@ -593,12 +596,12 @@ def layout_item[ko: Origin[mut=True], witness: Bool = True](
       segAdv:  f32 accumulation per add — the fold>0 x, bit-identical to the GPU
       scalars: f64 reduce, fed the f64 x (NOT the rounded lane)
     """
-    var wrap = trunc_nonneg(item.wrap_width)
+    var wrap = item.wrap_width
     var fold: Int
     if wrap > 0:
         fold = wrap
     else:
-        fold = trunc_nonneg(item.page_cols) if item.has_page else 0
+        fold = item.page_cols if item.has_page else 0
     var ox = item.origin_x
     var oy = item.origin_y
     var oz = item.origin_z
@@ -718,7 +721,7 @@ def layout_item[ko: Origin[mut=True], witness: Bool = True](
 def derive_stride(max_row_extent: Float64, item: Item) -> Float64:
     """THE stride formula: a row-paged item fans page columns at
     (widest item-relative row + pageGapX); pageRows 0 derives 0."""
-    if not item.has_page or trunc_nonneg(item.page_rows) <= 0:
+    if not item.has_page or item.page_rows <= 0:
         return 0
     return max_row_extent + item.page_gap_x
 
@@ -729,9 +732,9 @@ def page_active(item: Item) -> Bool:
     if not item.has_page:
         return False
     return (
-        trunc_nonneg(item.page_rows) != 0
-        or trunc_nonneg(item.page_cols) != 0
-        or trunc_nonneg(item.scroll_rows) != 0
+        item.page_rows != 0
+        or item.page_cols != 0
+        or item.scroll_rows != 0
     )
 
 
@@ -746,9 +749,9 @@ def paginate(
     if (slots.flags(id) & F_LEADER) == 0:
         return
 
-    var rows = trunc_nonneg(item.page_rows) if item.has_page else 0
-    var cols = trunc_nonneg(item.page_cols) if item.has_page else 0
-    var scroll = trunc_nonneg(item.scroll_rows) if item.has_page else 0
+    var rows = item.page_rows if item.has_page else 0
+    var cols = item.page_cols if item.has_page else 0
+    var scroll = item.scroll_rows if item.has_page else 0
     if rows == 0 and cols == 0 and scroll == 0:
         return
 
@@ -763,11 +766,11 @@ def paginate(
     if cols > 0:
         x_page = col // cols  # exact
 
-    var wide_raw = trunc_nonneg(item.pages_wide)
+    var wide_raw = item.pages_wide
     var wide = wide_raw if wide_raw > 1 else 1
     var band = y_page // wide
 
-    var wrap = trunc_nonneg(item.wrap_width)
+    var wrap = item.wrap_width
     var seg = (col // wrap) if wrap > 0 else 0
     # The page's own lineHeight is NOT consulted. This mirrored the oracle's
     # `resolved[i].lineHeight ?? it.page?.lineHeight`, deleted in 4697e3b as

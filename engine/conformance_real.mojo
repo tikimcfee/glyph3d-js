@@ -54,7 +54,7 @@ def item_for(size: Int) -> Item:
     it.origin_z = 0.5
     it.z_step = 0.2
     var w = size % 3
-    it.wrap_width = 0.0 if w == 0 else (80.0 if w == 1 else 120.0)
+    it.wrap_width = 0 if w == 0 else (80 if w == 1 else 120)
     if size % 2 == 1:
         it.has_page = True
         it.page_rows = 32

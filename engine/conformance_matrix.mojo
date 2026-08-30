@@ -53,7 +53,7 @@ def build_corpus(n: Int, with_misses: Bool) -> List[UInt8]:
     return b^
 
 
-def build_items(n: Int, count: Int, wrap: Float64, page: Int, scroll: Bool) -> List[Item]:
+def build_items(n: Int, count: Int, wrap: Int, page: Int, scroll: Bool) -> List[Item]:
     """`count` items tiling [0, n) with DISTINCT origins and MIXED page modes.
 
     page: 0 none, 1 row-paged, 2 column-paged. When nonzero, only the ODD items
@@ -238,7 +238,7 @@ def main() raises:
     # THE MATRIX. items x wrap x page x scroll x misses — every cell, including the
     # five pairs the corpus never carried together.
     var item_counts: List[Int] = [1, 3]
-    var wraps: List[Float64] = [0.0, 5.0]
+    var wraps: List[Int] = [0, 5]
     var pages: List[Int] = [0, 1, 2]
     for mi in range(2):
         var with_misses = mi == 1

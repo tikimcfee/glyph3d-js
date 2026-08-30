@@ -23,7 +23,7 @@ from glyph_schema import (
     FIXTURE_MEASURE_STRIDE, FIXTURE_COUNT_STRIDE, fixture_measure_lane_name,
     FIX_M_X, FIX_M_Y, FIX_M_Z, FIX_M_BASE_X, FIX_M_LINE_ADV, FIX_C_FLAGS, FIX_M_GLYPH_ID,
 )
-from glyph_pipeline import Item, F_LEADER, trunc_nonneg
+from glyph_pipeline import Item, F_LEADER
 from glyph_scan import run_scan_pipeline
 from fixture_io import PipeFixture, load_pipe_fixture
 
@@ -33,10 +33,10 @@ comptime REL_EPS = 1e-4
 
 
 def item_fold(it: Item) -> Int:
-    var wrap = trunc_nonneg(it.wrap_width)
+    var wrap = it.wrap_width
     if wrap > 0:
         return wrap
-    return trunc_nonneg(it.page_cols) if it.has_page else 0
+    return it.page_cols if it.has_page else 0
 
 
 def rel_close(a: Float64, b: Float64) -> Bool:

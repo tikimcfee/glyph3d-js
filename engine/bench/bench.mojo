@@ -74,7 +74,7 @@ def load_input() raises -> BenchInput:
     return BenchInput(bytes^, Trie(block_index^, blocks_m^, blocks_c^))
 
 
-def one_item(byte_count: Int, wrap: Float64) -> List[Item]:
+def one_item(byte_count: Int, wrap: Int) -> List[Item]:
     var it = Item()
     it.byte_count = byte_count
     it.wrap_width = wrap

@@ -24,7 +24,22 @@ function validate(s) {
     // s.buffers carries a $comment; iterate only entries that are actual buffers.
     const slotBufs = Object.fromEntries(Object.entries(s.buffers).filter(([, v]) => v && v.lanes));
     const allBufs = { ...slotBufs, partialCounts: s.scanPartial.counts,
-        partialMeasures: s.scanPartial.measures, itemTable: s.itemTable.measures };
+        partialMeasures: s.scanPartial.measures,
+        itemMeasures: s.itemTable.measures, itemExact: s.itemTable.exact,
+        itemBounds: s.itemBounds };
+    // A SECTION WITH NO CARRIER IS UNVALIDATABLE BY CONSTRUCTION — every carrier
+    // rule silently skips it, so the hole reopens the moment someone adds a
+    // section. itemBounds sat exactly there (TOTAL_ROWS, a count, riding an
+    // undeclared f64) until 2026-08-31. f64 is a legitimate host carrier; an
+    // exact kind on ANY float carrier still needs its 'misplaced' say-so.
+    const KNOWN_CARRIERS = new Set(['f32', 'u32', 'f64']);
+    const FLOAT_CARRIERS = new Set(['f32', 'f64']);
+    for (const [bufName, buf] of Object.entries(allBufs)) {
+        if (!KNOWN_CARRIERS.has(buf.carrier)) {
+            errs.push(`${bufName}: no declared carrier (or unknown '${buf.carrier}') — `
+                + `an undeclared carrier makes every carrier rule skip this section silently`);
+        }
+    }
     for (const [bufName, buf] of Object.entries(allBufs)) {
         const seen = new Set();
         for (const lane of buf.lanes) {
@@ -50,10 +65,17 @@ function validate(s) {
     // THE ENGINE'S CONTAINER IS DERIVED FROM KIND, AND ASSERTED AGAINST IT. Another
     // layer may realize the same kinds in a different container and stay conformant;
     // what it owes is this same assertion over its own mapping.
-    for (const [bufName, buf] of Object.entries(slotBufs)) {
+    //
+    // Over EVERY carrier-bearing buffer, not just the slot buffers. This loop ran
+    // over slotBufs alone until 2026-08-31, which is exactly why five counts sat
+    // declared as measures in the item table for its whole life: the rule that
+    // caught GLYPH_ID structurally was blind to this table (HAS_PAGE — a count on
+    // the f32 carrier with no justification — passed the whole time, and would
+    // have named the hole on day one had this loop seen it).
+    for (const [bufName, buf] of Object.entries(allBufs)) {
         for (const lane of buf.lanes) {
-            if (buf.carrier === 'f32' && lane.kind !== 'measure' && !lane.misplaced) {
-                errs.push(`${bufName}.${lane.name}: kind '${lane.kind}' is exact but sits in an f32 buffer with no 'misplaced' justification`);
+            if (FLOAT_CARRIERS.has(buf.carrier) && lane.kind !== 'measure' && !lane.misplaced) {
+                errs.push(`${bufName}.${lane.name}: kind '${lane.kind}' is exact but sits in a ${buf.carrier} buffer with no 'misplaced' justification`);
             }
             if (buf.carrier === 'u32' && lane.kind === 'measure') {
                 errs.push(`${bufName}.${lane.name}: a measure in a u32 buffer`);
@@ -65,10 +87,10 @@ function validate(s) {
     // A lane in the f32 buffer that is an identity/count/bitfield is the bug that
     // cost this codebase three separate walls. `misplaced` is the one documented
     // exception, and it must SAY so — silence is a failure.
-    for (const [bufName, buf] of Object.entries(slotBufs)) {
-        if (buf.carrier !== 'f32') continue;
+    for (const [bufName, buf] of Object.entries(allBufs)) {
+        if (!FLOAT_CARRIERS.has(buf.carrier)) continue;
         for (const lane of buf.lanes) {
-            if (lane.bitfield && !lane.misplaced) errs.push(`${bufName}.${lane.name}: a bitfield in an f32 buffer with no 'misplaced' justification`);
+            if (lane.bitfield && !lane.misplaced) errs.push(`${bufName}.${lane.name}: a bitfield in a ${buf.carrier} buffer with no 'misplaced' justification`);
         }
     }
     for (const id of s.identities) {
@@ -79,6 +101,9 @@ function validate(s) {
     // That only holds if every render-read lane sorts BEFORE every lane that is not
     // read. If someone adds a render-read lane at the tail, this throws rather than
     // silently turning the record into a repack.
+    // slotBufs ON PURPOSE, not the wrong variable: only the slot buffers feed the
+    // record truncation, so only they owe the prefix ordering. (Audited 2026-08-31
+    // when five sibling loops turned out to hold the narrow set by accident.)
     for (const [bufName, buf] of Object.entries(slotBufs)) {
         const sorted = [...buf.lanes].sort((a, b) => a.index - b.index);
         let seenUnread = null;
@@ -113,6 +138,8 @@ function validate(s) {
     // while every carrier is 4 bytes wide; if one ever became f16 the constant and
     // the field list could disagree in silence.
     const CARRIER_BYTES = { f32: 4, u32: 4 };
+    // slotBufs ON PURPOSE: this check exists for RECORD_BYTES derivation, and only
+    // slot buffers contribute record fields. itemBounds' f64 host carrier is fine.
     for (const [bufName, buf] of Object.entries(slotBufs)) {
         if (CARRIER_BYTES[buf.carrier] !== 4) {
             errs.push(`${bufName}: carrier '${buf.carrier}' is not a known 4-byte carrier — `
@@ -125,7 +152,7 @@ function validate(s) {
     // because it only compares outputs on inputs BOTH layers accept.
     const semantic = new Set(s.itemParams.params.map(p => p.name));
     const realized = new Set();
-    for (const lane of s.itemTable.measures.lanes) {
+    for (const lane of [...s.itemTable.measures.lanes, ...s.itemTable.exact.lanes]) {
         const kinds = ['realizes', 'realization_only', 'orphan'].filter(k => k in lane);
         if (kinds.length !== 1) {
             errs.push(`itemTable.${lane.name}: must declare exactly one of realizes / `
@@ -138,6 +165,16 @@ function validate(s) {
             if (!semantic.has(lane.realizes)) {
                 errs.push(`itemTable.${lane.name}: realizes '${lane.realizes}', which is not `
                     + `a semantic parameter`);
+            }
+            // KIND must agree across the tiers: a lane realizing a semantic param
+            // carries that param's kind, or the two tiers describe different
+            // pipelines. Absent this rule, correcting a kind in one tier and not
+            // the other would regenerate cleanly — which is how the five counts
+            // stayed 'measure' in BOTH places at once: nothing compared them.
+            const sp2 = s.itemParams.params.find(p => p.name === lane.realizes);
+            if (sp2 && sp2.kind !== lane.kind) {
+                errs.push(`itemTable.${lane.name}: kind '${lane.kind}' but realizes `
+                    + `'${lane.realizes}' whose semantic kind is '${sp2.kind}' — the tiers disagree`);
             }
             if (realized.has(lane.realizes)) {
                 errs.push(`itemTable: '${lane.realizes}' realized by more than one lane`);
@@ -161,10 +198,10 @@ function validate(s) {
     // that outlives its deviation is a permanent hole with a comment on it, and the
     // file people trust most becomes the one carrying the stalest claims. A settled
     // debt must FAIL until it is removed.
-    for (const [bufName, buf] of Object.entries(slotBufs)) {
+    for (const [bufName, buf] of Object.entries(allBufs)) {
         for (const lane of buf.lanes) {
             if (!lane.misplaced) continue;
-            const deviating = buf.carrier === 'f32' && lane.kind !== 'measure';
+            const deviating = FLOAT_CARRIERS.has(buf.carrier) && lane.kind !== 'measure';
             if (!deviating) {
                 errs.push(`${bufName}.${lane.name}: declares 'misplaced' but is not `
                     + `deviating — kind '${lane.kind}' on a '${buf.carrier}' carrier is `
@@ -173,7 +210,7 @@ function validate(s) {
             }
         }
     }
-    for (const lane of s.itemTable.measures.lanes) {
+    for (const lane of [...s.itemTable.measures.lanes, ...s.itemTable.exact.lanes]) {
         if ((lane.realization_only || lane.orphan) && semantic.has(lane.name)) {
             errs.push(`itemTable.${lane.name}: declared ${lane.orphan ? 'orphan' : 'realization_only'} `
                 + `but IS in the semantic set — the declaration has outlived its reason`);
@@ -218,8 +255,8 @@ const contractBanner = (cmt) => [
     ...head(cmt),
     `${cmt} THE SHARED TIER, and nothing else. Names and kinds — no strides, no lane`,
     `${cmt} indices, nothing about how any layer stores anything. The renderer runs one`,
-    `${cmt} buffer; the native backend runs four phase arrays; the live item table is`,
-    `${cmt} stride 15 against the backend's 15. All are conformant: container is a`,
+    `${cmt} buffer; the native backend runs seven phase arrays; both layers' item`,
+    `${cmt} tables split by carrier as 9 measures + 6 exact. All are conformant: container is a`,
     `${cmt} per-layer realization and KIND is the declared fact.`,
     `${cmt}`,
     `${cmt} What every layer owes: assert that its own mapping respects KIND below, and`,
@@ -323,9 +360,12 @@ const mojo = [
     ...sp.counts.lanes.map(l => `comptime P_${l.name} = ${l.index}`), '',
     `comptime PARTIAL_MEASURE_STRIDE = ${sp.measures.stride}`,
     ...sp.measures.lanes.map(l => `comptime PM_${l.name} = ${l.index}`), '',
-    '# Per-item layout params on device — f32, because Metal has no f64.',
-    `comptime ITEM_STRIDE = ${it.measures.stride}`,
-    ...it.measures.lanes.map(l => `comptime I_${l.name} = ${l.index}`), '',
+    '# Per-item layout params on device, split by carrier (the kind correction):',
+    '# world-unit distances f32 (Metal has no f64), integer page geometry native u32.',
+    `comptime IM_STRIDE = ${it.measures.stride}`,
+    ...it.measures.lanes.map(l => `comptime IM_${l.name} = ${l.index}`), '',
+    `comptime IE_STRIDE = ${it.exact.stride}`,
+    ...it.exact.lanes.map(l => `comptime IE_${l.name} = ${l.index}`), '',
     '# Per-item bounds + fold scalars. Lane kinds matter on device: Metal has no f64,',
     '# so counts go to native u32 atomics and measures to f32 ordered keys.',
     `comptime BOUNDS_STRIDE = ${ib.stride}`,
@@ -383,7 +423,7 @@ const fieldKinds = {};
 for (const buf of [poM, wM, poC, wC, stM, gI, stC]) for (const l of buf.lanes) {
     if (l.name !== 'PAD') fieldKinds[l.name] = l.kind;
 }
-for (const l of it.measures.lanes) fieldKinds[l.name] ??= l.kind;
+for (const l of [...it.measures.lanes, ...it.exact.lanes]) fieldKinds[l.name] ??= l.kind;
 for (const l of ib.lanes) fieldKinds[l.name] ??= l.kind;
 const quoted = (a) => `[${a.map(x => `'${x}'`).join(', ')}]`;
 
@@ -467,8 +507,10 @@ const engineJs = [
     `export const GI_STRIDE = ${gI.stride};`, '',
     `export const RECORD_MEASURE_STRIDE = ${recM};`,
     `export const RECORD_COUNT_STRIDE = ${recC};`, '',
-    `export const ITEM_STRIDE = ${it.measures.stride};`,
-    ...it.measures.lanes.map(l => `export const I_${l.name} = ${l.index};`), '',
+    `export const IM_STRIDE = ${it.measures.stride};`,
+    ...it.measures.lanes.map(l => `export const IM_${l.name} = ${l.index};`), '',
+    `export const IE_STRIDE = ${it.exact.stride};`,
+    ...it.exact.lanes.map(l => `export const IE_${l.name} = ${l.index};`), '',
     `export const BOUNDS_STRIDE = ${ib.stride};`,
     ...ib.lanes.map(l => `export const B_${l.name} = ${l.index};`), '',
 ].join('\n');

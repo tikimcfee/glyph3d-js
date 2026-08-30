@@ -30,22 +30,17 @@ from glyph_schema import (
     SM_STRIDE, SM_ADVANCE, SM_HEIGHT,
     LM_STRIDE, LM_X, LM_Y, LM_Z, LM_BASE_X,
     LC_STRIDE, LC_ROW, LC_COL,
-    ITEM_STRIDE, I_ORIGIN_X, I_ORIGIN_Y, I_ORIGIN_Z, I_WRAP_WIDTH, I_LINE_HEIGHT,
-    I_PAGE_COLS, I_HAS_PAGE, I_Z_STEP, I_PAGE_ROWS, I_SCROLL_ROWS, I_PAGES_WIDE,
-    I_BAND_STRIDE_Y, I_DEPTH_PER_BAND, I_DEPTH_PER_COL,
-    I_PAGE_STRIDE_X,
+    IM_STRIDE, IM_ORIGIN_X, IM_ORIGIN_Y, IM_ORIGIN_Z, IM_LINE_HEIGHT,
+    IM_Z_STEP, IM_BAND_STRIDE_Y, IM_DEPTH_PER_BAND, IM_DEPTH_PER_COL,
+    IM_PAGE_STRIDE_X,
+    IE_STRIDE, IE_PAGE_ROWS, IE_PAGE_COLS, IE_SCROLL_ROWS, IE_PAGES_WIDE,
+    IE_WRAP_WIDTH, IE_HAS_PAGE,
     PARTIAL_COUNT_STRIDE, PARTIAL_MEASURE_STRIDE,
     P_RESET, P_NL, P_GLYPHS, P_ROWS, P_HEAD_LEN, P_TAIL_LEN, P_WRAP, PM_TAIL_ADV,
 )
 from glyph_pipeline import (
     F_LEADER, F_NEWLINE, trunc_nonneg, item_for_byte, derive_stride,
 )
-
-
-def trunc_nn32(v: Float32) -> Int:
-    if v != v or v <= 0:
-        return 0
-    return Int(v)
 
 
 def key_to_float(k: UInt32) -> Float32:
@@ -320,7 +315,8 @@ def k_apply(
 def k_resolve_x(
     sm: MutPointer[Float32, MutAnyOrigin], fl: MutPointer[UInt32, MutAnyOrigin],
     lm: MutPointer[Float32, MutAnyOrigin], lc: MutPointer[UInt32, MutAnyOrigin],
-    items: MutPointer[Float32, MutAnyOrigin], item_of: MutPointer[UInt32, MutAnyOrigin],
+    items: MutPointer[Float32, MutAnyOrigin],
+    items_e: MutPointer[UInt32, MutAnyOrigin], item_of: MutPointer[UInt32, MutAnyOrigin],
     item_start: MutPointer[UInt32, MutAnyOrigin],
     wm: MutPointer[Float32, MutAnyOrigin], wc: MutPointer[UInt32, MutAnyOrigin],
     otb: MutPointer[UInt32, MutAnyOrigin],
@@ -343,12 +339,14 @@ def k_resolve_x(
         return
     var mo = id * LM_STRIDE
     var it = Int(item_of[unsafe_offset=id])
-    var io = it * ITEM_STRIDE
+    var io = it * IM_STRIDE
+    var ie = it * IE_STRIDE
 
-    var wrap = trunc_nn32(items[unsafe_offset = io + I_WRAP_WIDTH])
+    # Exact page geometry: NATIVE u32 reads since the kind correction.
+    var wrap = Int(items_e[unsafe_offset = ie + IE_WRAP_WIDTH])
     var fold = wrap
-    if fold == 0 and items[unsafe_offset = io + I_HAS_PAGE] > 0.5:
-        fold = trunc_nn32(items[unsafe_offset = io + I_PAGE_COLS])
+    if fold == 0 and items_e[unsafe_offset = ie + IE_HAS_PAGE] != 0:
+        fold = Int(items_e[unsafe_offset = ie + IE_PAGE_COLS])
     var col = Int(lc[unsafe_offset = id * LC_STRIDE + LC_COL])
     var ord = Int(wc[unsafe_offset=id])
 
@@ -369,17 +367,17 @@ def k_resolve_x(
     # `lh != lh` with I_LINE_HEIGHT, matching none of the greps that found the
     # others (lh_unset, is_nan(item.line_height), I_PAGE_LINE_HEIGHT). Found by
     # the split refactor forcing every lane site to be read, not by search.
-    var lh = items[unsafe_offset = io + I_LINE_HEIGHT]
+    var lh = items[unsafe_offset = io + IM_LINE_HEIGHT]
 
-    var ox = items[unsafe_offset = io + I_ORIGIN_X]
+    var ox = items[unsafe_offset = io + IM_ORIGIN_X]
     lm[unsafe_offset = mo + LM_BASE_X] = x + ox
     lm[unsafe_offset = mo + LM_X] = x + ox
     lm[unsafe_offset = mo + LM_Y] = (
-        Float32(-row) * lh + items[unsafe_offset = io + I_ORIGIN_Y]
+        Float32(-row) * lh + items[unsafe_offset = io + IM_ORIGIN_Y]
     )
     lm[unsafe_offset = mo + LM_Z] = (
-        Float32(-wrap_row) * items[unsafe_offset = io + I_Z_STEP]
-        + items[unsafe_offset = io + I_ORIGIN_Z]
+        Float32(-wrap_row) * items[unsafe_offset = io + IM_Z_STEP]
+        + items[unsafe_offset = io + IM_ORIGIN_Z]
     )
 
     _ = Atomic.max(row_max + it, UInt32(row + 1))     # a COUNT: native u32
@@ -390,7 +388,8 @@ def k_resolve_x(
 def k_paginate(
     lm: MutPointer[Float32, MutAnyOrigin], fl: MutPointer[UInt32, MutAnyOrigin],
     lc: MutPointer[UInt32, MutAnyOrigin],
-    items: MutPointer[Float32, MutAnyOrigin], item_of: MutPointer[UInt32, MutAnyOrigin],
+    items: MutPointer[Float32, MutAnyOrigin],
+    items_e: MutPointer[UInt32, MutAnyOrigin], item_of: MutPointer[UInt32, MutAnyOrigin],
     strides: MutPointer[Float32, MutAnyOrigin], n_bytes: Int32,
 ):
     var id = global_idx.x
@@ -399,11 +398,12 @@ def k_paginate(
     if (Int(fl[unsafe_offset=id]) & F_LEADER) == 0:
         return
     var it = Int(item_of[unsafe_offset=id])
-    var io = it * ITEM_STRIDE
-    var has_page = items[unsafe_offset = io + I_HAS_PAGE] > 0.5
-    var rows = trunc_nn32(items[unsafe_offset = io + I_PAGE_ROWS]) if has_page else 0
-    var cols = trunc_nn32(items[unsafe_offset = io + I_PAGE_COLS]) if has_page else 0
-    var scroll = trunc_nn32(items[unsafe_offset = io + I_SCROLL_ROWS]) if has_page else 0
+    var io = it * IM_STRIDE
+    var ie = it * IE_STRIDE
+    var has_page = items_e[unsafe_offset = ie + IE_HAS_PAGE] != 0
+    var rows = Int(items_e[unsafe_offset = ie + IE_PAGE_ROWS]) if has_page else 0
+    var cols = Int(items_e[unsafe_offset = ie + IE_PAGE_COLS]) if has_page else 0
+    var scroll = Int(items_e[unsafe_offset = ie + IE_SCROLL_ROWS]) if has_page else 0
     if rows == 0 and cols == 0 and scroll == 0:
         return
     var row = Int(lc[unsafe_offset = id * LC_STRIDE + LC_ROW])
@@ -415,32 +415,32 @@ def k_paginate(
     var x_page = 0
     if cols > 0:
         x_page = col // cols
-    var wide_raw = trunc_nn32(items[unsafe_offset = io + I_PAGES_WIDE])
+    var wide_raw = Int(items_e[unsafe_offset = ie + IE_PAGES_WIDE])
     var wide = wide_raw if wide_raw > 1 else 1
     var band = y_page // wide
-    var wrap = trunc_nn32(items[unsafe_offset = io + I_WRAP_WIDTH])
+    var wrap = Int(items_e[unsafe_offset = ie + IE_WRAP_WIDTH])
     var seg = (col // wrap) if wrap > 0 else 0
     # The page's own lineHeight is NOT consulted — mirrors 4697e3b. The fallback
     # could only fire on an item with a NaN lineHeight, which the oracle now
     # refuses, so it was reachable solely through malformed input. Proven, not
     # argued: poisoning this branch left all twelve suites green, while poisoning
     # the TAKEN read below failed both GPU suites — so they do exercise this line.
-    var lh = items[unsafe_offset = io + I_LINE_HEIGHT]
+    var lh = items[unsafe_offset = io + IM_LINE_HEIGHT]
     var mo = id * LM_STRIDE
     lm[unsafe_offset = mo + LM_X] = (
         lm[unsafe_offset = mo + LM_BASE_X]
         + Float32(y_page % wide) * strides[unsafe_offset=it]
     )
     lm[unsafe_offset = mo + LM_Y] = (
-        items[unsafe_offset = io + I_ORIGIN_Y]
+        items[unsafe_offset = io + IM_ORIGIN_Y]
         - Float32(screen_row - y_page * rows) * lh
-        - Float32(band) * items[unsafe_offset = io + I_BAND_STRIDE_Y]
+        - Float32(band) * items[unsafe_offset = io + IM_BAND_STRIDE_Y]
     )
     lm[unsafe_offset = mo + LM_Z] = (
-        items[unsafe_offset = io + I_ORIGIN_Z]
-        - Float32(seg) * items[unsafe_offset = io + I_Z_STEP]
-        + Float32(band) * items[unsafe_offset = io + I_DEPTH_PER_BAND]
-        + Float32(x_page) * items[unsafe_offset = io + I_DEPTH_PER_COL]
+        items[unsafe_offset = io + IM_ORIGIN_Z]
+        - Float32(seg) * items[unsafe_offset = io + IM_Z_STEP]
+        + Float32(band) * items[unsafe_offset = io + IM_DEPTH_PER_BAND]
+        + Float32(x_page) * items[unsafe_offset = io + IM_DEPTH_PER_COL]
     )
 
 
@@ -481,7 +481,7 @@ def check_fixture(var fx: PipeFixture, ctx: DeviceContext, bench: Bool = False) 
     for id in range(n):
         var i = item_for_byte(fx.items, id)
         item_of[id] = UInt32(i) if i >= 0 else UInt32(0)
-        wrap_of[id] = UInt32(trunc_nonneg(fx.items[i].wrap_width)) if i >= 0 else 0
+        wrap_of[id] = UInt32(fx.items[i].wrap_width) if i >= 0 else 0
         is_start[id] = UInt32(1) if (i >= 0 and fx.items[i].byte_start == id) else UInt32(0)
         item_start[id] = UInt32(fx.items[i].byte_start) if i >= 0 else UInt32(0)
 
@@ -517,30 +517,34 @@ def check_fixture(var fx: PipeFixture, ctx: DeviceContext, bench: Bool = False) 
         h_otb[i] = 0
 
     var ni0 = fx.item_count if fx.item_count > 0 else 1
-    var h_it = ctx.enqueue_create_host_buffer[DType.float32](ni0 * ITEM_STRIDE)
+    var h_it = ctx.enqueue_create_host_buffer[DType.float32](ni0 * IM_STRIDE)
+    var h_ie = ctx.enqueue_create_host_buffer[DType.uint32](ni0 * IE_STRIDE)
     var h_io = ctx.enqueue_create_host_buffer[DType.uint32](n)
     var h_rmax = ctx.enqueue_create_host_buffer[DType.uint32](ni0)
     var h_xmax = ctx.enqueue_create_host_buffer[DType.uint32](ni0)
     ctx.synchronize()
-    for i in range(ni0 * ITEM_STRIDE):
+    for i in range(ni0 * IM_STRIDE):
         h_it[i] = 0
+    for i in range(ni0 * IE_STRIDE):
+        h_ie[i] = 0
     for i in range(fx.item_count):
-        var o = i * ITEM_STRIDE
+        var o = i * IM_STRIDE
+        var oe = i * IE_STRIDE
         var t = fx.items[i].copy()
-        h_it[o + I_ORIGIN_X] = Float32(t.origin_x)
-        h_it[o + I_ORIGIN_Y] = Float32(t.origin_y)
-        h_it[o + I_ORIGIN_Z] = Float32(t.origin_z)
-        h_it[o + I_WRAP_WIDTH] = Float32(t.wrap_width)
-        h_it[o + I_LINE_HEIGHT] = Float32(t.line_height)
-        h_it[o + I_PAGE_COLS] = Float32(t.page_cols)
-        h_it[o + I_Z_STEP] = Float32(t.z_step)
-        h_it[o + I_PAGE_ROWS] = Float32(t.page_rows)
-        h_it[o + I_SCROLL_ROWS] = Float32(t.scroll_rows)
-        h_it[o + I_PAGES_WIDE] = Float32(t.pages_wide)
-        h_it[o + I_BAND_STRIDE_Y] = Float32(t.band_stride_y)
-        h_it[o + I_DEPTH_PER_BAND] = Float32(t.depth_per_band)
-        h_it[o + I_DEPTH_PER_COL] = Float32(t.depth_per_col)
-        h_it[o + I_HAS_PAGE] = 1 if t.has_page else 0
+        h_it[o + IM_ORIGIN_X] = Float32(t.origin_x)
+        h_it[o + IM_ORIGIN_Y] = Float32(t.origin_y)
+        h_it[o + IM_ORIGIN_Z] = Float32(t.origin_z)
+        h_it[o + IM_LINE_HEIGHT] = Float32(t.line_height)
+        h_it[o + IM_Z_STEP] = Float32(t.z_step)
+        h_it[o + IM_BAND_STRIDE_Y] = Float32(t.band_stride_y)
+        h_it[o + IM_DEPTH_PER_BAND] = Float32(t.depth_per_band)
+        h_it[o + IM_DEPTH_PER_COL] = Float32(t.depth_per_col)
+        h_ie[oe + IE_WRAP_WIDTH] = UInt32(t.wrap_width)
+        h_ie[oe + IE_PAGE_ROWS] = UInt32(t.page_rows)
+        h_ie[oe + IE_PAGE_COLS] = UInt32(t.page_cols)
+        h_ie[oe + IE_SCROLL_ROWS] = UInt32(t.scroll_rows)
+        h_ie[oe + IE_PAGES_WIDE] = UInt32(t.pages_wide)
+        h_ie[oe + IE_HAS_PAGE] = UInt32(1) if t.has_page else UInt32(0)
     for i in range(n):
         h_io[i] = item_of[i]
     for i in range(ni0):
@@ -566,7 +570,8 @@ def check_fixture(var fx: PipeFixture, ctx: DeviceContext, bench: Bool = False) 
     var d_xc = ctx.enqueue_create_buffer[DType.uint32](n_chunks * PARTIAL_COUNT_STRIDE)
     var d_xm = ctx.enqueue_create_buffer[DType.float32](n_chunks * PARTIAL_MEASURE_STRIDE)
     var ni = fx.item_count if fx.item_count > 0 else 1
-    var d_it = ctx.enqueue_create_buffer[DType.float32](ni * ITEM_STRIDE)
+    var d_it = ctx.enqueue_create_buffer[DType.float32](ni * IM_STRIDE)
+    var d_ie = ctx.enqueue_create_buffer[DType.uint32](ni * IE_STRIDE)
     var d_io = ctx.enqueue_create_buffer[DType.uint32](n)
     var d_rmax = ctx.enqueue_create_buffer[DType.uint32](ni)
     var d_xmax = ctx.enqueue_create_buffer[DType.uint32](ni)
@@ -581,6 +586,7 @@ def check_fixture(var fx: PipeFixture, ctx: DeviceContext, bench: Bool = False) 
     ctx.enqueue_copy(dst_buf=d_wc, src_buf=h_wc)
     ctx.enqueue_copy(dst_buf=d_otb, src_buf=h_otb)
     ctx.enqueue_copy(dst_buf=d_it, src_buf=h_it)
+    ctx.enqueue_copy(dst_buf=d_ie, src_buf=h_ie)
     ctx.enqueue_copy(dst_buf=d_io, src_buf=h_io)
     ctx.enqueue_copy(dst_buf=d_rmax, src_buf=h_rmax)
     ctx.enqueue_copy(dst_buf=d_xmax, src_buf=h_xmax)
@@ -628,7 +634,7 @@ def check_fixture(var fx: PipeFixture, ctx: DeviceContext, bench: Bool = False) 
     )
     ctx.enqueue_function[k_resolve_x](
         d_sm.unsafe_ptr(), d_fl.unsafe_ptr(), d_lm.unsafe_ptr(), d_lc.unsafe_ptr(),
-        d_it.unsafe_ptr(), d_io.unsafe_ptr(),
+        d_it.unsafe_ptr(), d_ie.unsafe_ptr(), d_io.unsafe_ptr(),
         d_is.unsafe_ptr(),
         d_wm.unsafe_ptr(), d_wc.unsafe_ptr(), d_otb.unsafe_ptr(),
         d_rmax.unsafe_ptr(), d_xmax.unsafe_ptr(),
@@ -648,7 +654,7 @@ def check_fixture(var fx: PipeFixture, ctx: DeviceContext, bench: Bool = False) 
     ctx.enqueue_copy(dst_buf=d_st, src_buf=h_st)
     ctx.enqueue_function[k_paginate](
         d_lm.unsafe_ptr(), d_fl.unsafe_ptr(), d_lc.unsafe_ptr(),
-        d_it.unsafe_ptr(), d_io.unsafe_ptr(),
+        d_it.unsafe_ptr(), d_ie.unsafe_ptr(), d_io.unsafe_ptr(),
         d_st.unsafe_ptr(), Int32(n),
         grid_dim=(n + B - 1) // B, block_dim=B,
     )
@@ -727,7 +733,7 @@ def check_fixture(var fx: PipeFixture, ctx: DeviceContext, bench: Bool = False) 
     return bad
 
 
-def synthetic_case(trie: Trie, n: Int, wrap: Float64, line_len: Int, ctx: DeviceContext) raises -> Int:
+def synthetic_case(trie: Trie, n: Int, wrap: Int, line_len: Int, ctx: DeviceContext) raises -> Int:
     """A corpus large enough to reach the SPINE's multi-super path.
 
     Every checked-in fixture is under 6KB — 82 chunks, ONE super. With a single

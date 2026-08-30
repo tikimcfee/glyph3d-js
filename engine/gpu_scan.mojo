@@ -25,7 +25,7 @@ from glyph_schema import (
     PARTIAL_COUNT_STRIDE, PARTIAL_MEASURE_STRIDE,
     P_RESET, P_NL, P_GLYPHS, P_ROWS, P_HEAD_LEN, P_TAIL_LEN, P_WRAP, PM_TAIL_ADV,
 )
-from glyph_pipeline import run_pipeline, F_LEADER, F_NEWLINE, trunc_nonneg, item_for_byte
+from glyph_pipeline import run_pipeline, F_LEADER, F_NEWLINE, item_for_byte
 from glyph_bake import ScanElem, scan_identity, scan_leaf_value, scan_combine, rows_for_line
 from fixture_io import load_pipe_fixture
 
@@ -147,7 +147,7 @@ def check_case(path: String, ctx: DeviceContext) raises -> Int:
     var is_start = List[UInt32](unsafe_uninit_length=n)
     for id in range(n):
         var i = item_for_byte(fx.items, id)
-        wrap_of[id] = UInt32(trunc_nonneg(fx.items[i].wrap_width)) if i >= 0 else 0
+        wrap_of[id] = UInt32(fx.items[i].wrap_width) if i >= 0 else 0
         is_start[id] = UInt32(1) if (i >= 0 and fx.items[i].byte_start == id) else UInt32(0)
 
     # ── CPU reference: the same monoid the conformance suites already prove ──

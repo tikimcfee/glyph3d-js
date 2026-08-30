@@ -38,7 +38,6 @@ from glyph_pipeline import (
     paginate,
     page_active,
     derive_stride,
-    trunc_nonneg,
     shard_lo,
     _decode_shard,
     _paginate_shard,
@@ -273,12 +272,12 @@ async def _resolve_x_shard[
     The GPU form keeps the per-leader walk (thread-per-byte has no serial shard);
     the two forms produce identical bits because both are the same left-fold.
     """
-    var wrap = trunc_nonneg(item.wrap_width)
+    var wrap = item.wrap_width
     var fold: Int
     if wrap > 0:
         fold = wrap
     else:
-        fold = trunc_nonneg(item.page_cols) if item.has_page else 0
+        fold = item.page_cols if item.has_page else 0
     var lh = item.line_height
     var seg_adv: Float32 = 0
     var seeded = False
@@ -386,7 +385,7 @@ def run_scan_pipeline[o: ImmOrigin](
     var wraps = List[Int]()
     var i = 0
     while i < len(items):
-        wraps.append(trunc_nonneg(items[i].wrap_width))
+        wraps.append(items[i].wrap_width)
         i += 1
 
     # ── dispatch 2: chunkReduce — thread per chunk, chunks sharded ────────────

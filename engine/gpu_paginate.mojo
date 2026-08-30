@@ -26,9 +26,10 @@ from std.gpu import global_idx
 from max.gpu.host import DeviceContext
 from glyph_schema import (
     LM_STRIDE, LM_X, LM_Y, LM_Z, LM_BASE_X, LC_STRIDE, LC_ROW, LC_COL,
-    ITEM_STRIDE, I_ORIGIN_Y, I_ORIGIN_Z, I_PAGE_ROWS, I_PAGE_COLS, I_SCROLL_ROWS,
-    I_PAGES_WIDE, I_WRAP_WIDTH, I_LINE_HEIGHT, I_Z_STEP,
-    I_BAND_STRIDE_Y, I_DEPTH_PER_BAND, I_DEPTH_PER_COL, I_PAGE_STRIDE_X, I_HAS_PAGE,
+    IM_STRIDE, IM_ORIGIN_Y, IM_ORIGIN_Z, IM_LINE_HEIGHT, IM_Z_STEP,
+    IM_BAND_STRIDE_Y, IM_DEPTH_PER_BAND, IM_DEPTH_PER_COL, IM_PAGE_STRIDE_X,
+    IE_STRIDE, IE_PAGE_ROWS, IE_PAGE_COLS, IE_SCROLL_ROWS,
+    IE_PAGES_WIDE, IE_WRAP_WIDTH, IE_HAS_PAGE,
 )
 from glyph_pipeline import (
     run_pipeline, F_LEADER, trunc_nonneg, derive_stride, Item, Trie,
@@ -78,17 +79,12 @@ def item_search(
     return lo
 
 
-def trunc_nn32(v: Float32) -> Int:
-    if v != v or v <= 0:
-        return 0
-    return Int(v)
-
-
 def paginate_kernel(
     lm: MutPointer[Float32, MutAnyOrigin],
     fl: MutPointer[UInt32, MutAnyOrigin],
     lc: MutPointer[UInt32, MutAnyOrigin],
     items: MutPointer[Float32, MutAnyOrigin],
+    items_e: MutPointer[UInt32, MutAnyOrigin],
     item_starts: MutPointer[UInt32, MutAnyOrigin],
     n_bytes: Int32,
     item_count: Int32,
@@ -99,12 +95,16 @@ def paginate_kernel(
         return
     if (Int(fl[unsafe_offset=id]) & F_LEADER) == 0:
         return
-    var io = item_search(item_starts, Int(item_count), id) * ITEM_STRIDE
-    var has_page = items[unsafe_offset = io + I_HAS_PAGE] > 0.5
+    var it = item_search(item_starts, Int(item_count), id)
+    var io = it * IM_STRIDE
+    var ie = it * IE_STRIDE
+    # Exact page geometry reads NATIVE u32 since the kind correction — no
+    # truncation, no float proxy for a boolean.
+    var has_page = items_e[unsafe_offset = ie + IE_HAS_PAGE] != 0
 
-    var rows = trunc_nn32(items[unsafe_offset = io + I_PAGE_ROWS]) if has_page else 0
-    var cols = trunc_nn32(items[unsafe_offset = io + I_PAGE_COLS]) if has_page else 0
-    var scroll = trunc_nn32(items[unsafe_offset = io + I_SCROLL_ROWS]) if has_page else 0
+    var rows = Int(items_e[unsafe_offset = ie + IE_PAGE_ROWS]) if has_page else 0
+    var cols = Int(items_e[unsafe_offset = ie + IE_PAGE_COLS]) if has_page else 0
+    var scroll = Int(items_e[unsafe_offset = ie + IE_SCROLL_ROWS]) if has_page else 0
     if rows == 0 and cols == 0 and scroll == 0:
         return
 
@@ -118,10 +118,10 @@ def paginate_kernel(
     var x_page = 0
     if cols > 0:
         x_page = col // cols
-    var wide_raw = trunc_nn32(items[unsafe_offset = io + I_PAGES_WIDE])
+    var wide_raw = Int(items_e[unsafe_offset = ie + IE_PAGES_WIDE])
     var wide = wide_raw if wide_raw > 1 else 1
     var band = y_page // wide
-    var wrap = trunc_nn32(items[unsafe_offset = io + I_WRAP_WIDTH])
+    var wrap = Int(items_e[unsafe_offset = ie + IE_WRAP_WIDTH])
     var seg = (col // wrap) if wrap > 0 else 0
 
     # The page's own lineHeight is NOT consulted — mirrors 4697e3b. The fallback
@@ -129,24 +129,24 @@ def paginate_kernel(
     # refuses, so it was reachable solely through malformed input. Proven, not
     # argued: poisoning this branch left all twelve suites green, while poisoning
     # the TAKEN read below failed both GPU suites — so they do exercise this line.
-    var lh = items[unsafe_offset = io + I_LINE_HEIGHT]
+    var lh = items[unsafe_offset = io + IM_LINE_HEIGHT]
 
     # ── only the POSITIONS are float, and only here ─────────────────────────
     var mo = id * LM_STRIDE
     lm[unsafe_offset = mo + LM_X] = (
         lm[unsafe_offset = mo + LM_BASE_X]
-        + Float32(y_page % wide) * items[unsafe_offset = io + I_PAGE_STRIDE_X]
+        + Float32(y_page % wide) * items[unsafe_offset = io + IM_PAGE_STRIDE_X]
     )
     lm[unsafe_offset = mo + LM_Y] = (
-        items[unsafe_offset = io + I_ORIGIN_Y]
+        items[unsafe_offset = io + IM_ORIGIN_Y]
         - Float32(screen_row - y_page * rows) * lh
-        - Float32(band) * items[unsafe_offset = io + I_BAND_STRIDE_Y]
+        - Float32(band) * items[unsafe_offset = io + IM_BAND_STRIDE_Y]
     )
     lm[unsafe_offset = mo + LM_Z] = (
-        items[unsafe_offset = io + I_ORIGIN_Z]
-        - Float32(seg) * items[unsafe_offset = io + I_Z_STEP]
-        + Float32(band) * items[unsafe_offset = io + I_DEPTH_PER_BAND]
-        + Float32(x_page) * items[unsafe_offset = io + I_DEPTH_PER_COL]
+        items[unsafe_offset = io + IM_ORIGIN_Z]
+        - Float32(seg) * items[unsafe_offset = io + IM_Z_STEP]
+        + Float32(band) * items[unsafe_offset = io + IM_DEPTH_PER_BAND]
+        + Float32(x_page) * items[unsafe_offset = io + IM_DEPTH_PER_COL]
     )
 
 
@@ -228,30 +228,32 @@ def check_items(
 
     # Item table, narrowed f64 -> f32 at the device boundary (see the header).
     var ni = len(items) if len(items) > 0 else 1
-    var tbl = List[Float32](unsafe_uninit_length=ni * ITEM_STRIDE)
+    var tbl = List[Float32](unsafe_uninit_length=ni * IM_STRIDE)
+    var tbe = List[UInt32](unsafe_uninit_length=ni * IE_STRIDE)
     for i in range(len(tbl)):
         tbl[i] = 0
     for i in range(len(items)):
-        var o = i * ITEM_STRIDE
+        var o = i * IM_STRIDE
+        var oe = i * IE_STRIDE
         var t = items[i].copy()
-        tbl[o + I_ORIGIN_Y] = Float32(t.origin_y)
-        tbl[o + I_ORIGIN_Z] = Float32(t.origin_z)
-        tbl[o + I_PAGE_ROWS] = Float32(t.page_rows)
-        tbl[o + I_PAGE_COLS] = Float32(t.page_cols)
-        tbl[o + I_SCROLL_ROWS] = Float32(t.scroll_rows)
-        tbl[o + I_PAGES_WIDE] = Float32(t.pages_wide)
-        tbl[o + I_WRAP_WIDTH] = Float32(t.wrap_width)
-        tbl[o + I_LINE_HEIGHT] = Float32(t.line_height)
-        tbl[o + I_Z_STEP] = Float32(t.z_step)
-        tbl[o + I_BAND_STRIDE_Y] = Float32(t.band_stride_y)
-        tbl[o + I_DEPTH_PER_BAND] = Float32(t.depth_per_band)
-        tbl[o + I_DEPTH_PER_COL] = Float32(t.depth_per_col)
+        tbl[o + IM_ORIGIN_Y] = Float32(t.origin_y)
+        tbl[o + IM_ORIGIN_Z] = Float32(t.origin_z)
+        tbe[oe + IE_PAGE_ROWS] = UInt32(t.page_rows)
+        tbe[oe + IE_PAGE_COLS] = UInt32(t.page_cols)
+        tbe[oe + IE_SCROLL_ROWS] = UInt32(t.scroll_rows)
+        tbe[oe + IE_PAGES_WIDE] = UInt32(t.pages_wide)
+        tbe[oe + IE_WRAP_WIDTH] = UInt32(t.wrap_width)
+        tbl[o + IM_LINE_HEIGHT] = Float32(t.line_height)
+        tbl[o + IM_Z_STEP] = Float32(t.z_step)
+        tbl[o + IM_BAND_STRIDE_Y] = Float32(t.band_stride_y)
+        tbl[o + IM_DEPTH_PER_BAND] = Float32(t.depth_per_band)
+        tbl[o + IM_DEPTH_PER_COL] = Float32(t.depth_per_col)
         # The fan stride is DERIVED from the item's max row extent (a fold
         # scalar), which is why the JS side carries it in its own buffer rather
         # than as an item param. Computed on the host in f64 and narrowed, like
         # every other lane here.
-        tbl[o + I_PAGE_STRIDE_X] = Float32(derive_stride(whole.item_bounds[i * 8 + 7], t))
-        tbl[o + I_HAS_PAGE] = 1 if t.has_page else 0
+        tbl[o + IM_PAGE_STRIDE_X] = Float32(derive_stride(whole.item_bounds[i * 8 + 7], t))
+        tbe[oe + IE_HAS_PAGE] = UInt32(1) if t.has_page else UInt32(0)
 
     var starts = List[UInt32](unsafe_uninit_length=len(items) if len(items) > 0 else 1)
     for i in range(len(items)):
@@ -261,6 +263,7 @@ def check_items(
     var h_f = ctx.enqueue_create_host_buffer[DType.uint32](n)
     var h_c = ctx.enqueue_create_host_buffer[DType.uint32](n * LC_STRIDE)
     var h_t = ctx.enqueue_create_host_buffer[DType.float32](len(tbl))
+    var h_te = ctx.enqueue_create_host_buffer[DType.uint32](len(tbe))
     var h_i = ctx.enqueue_create_host_buffer[DType.uint32](len(starts))
     ctx.synchronize()
     for i in range(n * LM_STRIDE):
@@ -271,6 +274,8 @@ def check_items(
         h_c[i] = whole.lc[i]
     for i in range(len(tbl)):
         h_t[i] = tbl[i]
+    for i in range(len(tbe)):
+        h_te[i] = tbe[i]
     for i in range(len(starts)):
         h_i[i] = starts[i]
 
@@ -278,16 +283,19 @@ def check_items(
     var d_f = ctx.enqueue_create_buffer[DType.uint32](n)
     var d_c = ctx.enqueue_create_buffer[DType.uint32](n * LC_STRIDE)
     var d_t = ctx.enqueue_create_buffer[DType.float32](len(tbl))
+    var d_te = ctx.enqueue_create_buffer[DType.uint32](len(tbe))
     var d_i = ctx.enqueue_create_buffer[DType.uint32](len(starts))
     ctx.enqueue_copy(dst_buf=d_m, src_buf=h_m)
     ctx.enqueue_copy(dst_buf=d_f, src_buf=h_f)
     ctx.enqueue_copy(dst_buf=d_c, src_buf=h_c)
     ctx.enqueue_copy(dst_buf=d_t, src_buf=h_t)
+    ctx.enqueue_copy(dst_buf=d_te, src_buf=h_te)
     ctx.enqueue_copy(dst_buf=d_i, src_buf=h_i)
 
     comptime BLOCK = 256
     ctx.enqueue_function[paginate_kernel](
-        d_m.unsafe_ptr(), d_f.unsafe_ptr(), d_c.unsafe_ptr(), d_t.unsafe_ptr(), d_i.unsafe_ptr(),
+        d_m.unsafe_ptr(), d_f.unsafe_ptr(), d_c.unsafe_ptr(),
+        d_t.unsafe_ptr(), d_te.unsafe_ptr(), d_i.unsafe_ptr(),
         Int32(n), Int32(len(items)),
         grid_dim=(n + BLOCK - 1) // BLOCK, block_dim=BLOCK,
     )

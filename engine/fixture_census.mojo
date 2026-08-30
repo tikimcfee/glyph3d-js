@@ -53,13 +53,13 @@ comptime NPROP = 5
 
 
 def item_field(t: Item, i: Int) -> Float64:
-    if i == 0: return t.wrap_width
+    if i == 0: return Float64(t.wrap_width)
     if i == 1: return t.z_step
     if i == 2: return t.line_height
-    if i == 3: return t.page_rows
-    if i == 4: return t.page_cols
-    if i == 5: return t.scroll_rows
-    if i == 6: return t.pages_wide
+    if i == 3: return Float64(t.page_rows)
+    if i == 4: return Float64(t.page_cols)
+    if i == 5: return Float64(t.scroll_rows)
+    if i == 6: return Float64(t.pages_wide)
     if i == 7: return t.page_gap_x
     if i == 8: return t.band_stride_y
     if i == 9: return t.depth_per_band
@@ -126,20 +126,20 @@ def main() raises:
         bytes_r.add(Float64(fx.byte_len))
         miss_r.add(Float64(len(fx.exp_misses)))
         leaders_r.add(Float64(fx.exp_leaders))
-        var wrap0: Float64 = 0
+        var wrap0 = 0
         var page0 = False
         var any_page = False
         var any_wrap = False
         var any_scroll = False
         for i in range(fx.item_count):
             var t = fx.items[i].copy()
-            f[0].add(t.wrap_width)
+            f[0].add(Float64(t.wrap_width))
             f[1].add(t.z_step)
             f[2].add(t.line_height)
-            f[3].add(t.page_rows)
-            f[4].add(t.page_cols)
-            f[5].add(t.scroll_rows)
-            f[6].add(t.pages_wide)
+            f[3].add(Float64(t.page_rows))
+            f[4].add(Float64(t.page_cols))
+            f[5].add(Float64(t.scroll_rows))
+            f[6].add(Float64(t.pages_wide))
             f[7].add(t.page_gap_x)
             f[8].add(t.band_stride_y)
             f[9].add(t.depth_per_band)

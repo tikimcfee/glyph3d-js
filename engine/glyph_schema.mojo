@@ -86,23 +86,26 @@ comptime P_WRAP = 6
 comptime PARTIAL_MEASURE_STRIDE = 1
 comptime PM_TAIL_ADV = 0
 
-# Per-item layout params on device — f32, because Metal has no f64.
-comptime ITEM_STRIDE = 15
-comptime I_ORIGIN_Y = 0
-comptime I_ORIGIN_Z = 1
-comptime I_PAGE_ROWS = 2
-comptime I_PAGE_COLS = 3
-comptime I_SCROLL_ROWS = 4
-comptime I_PAGES_WIDE = 5
-comptime I_WRAP_WIDTH = 6
-comptime I_LINE_HEIGHT = 7
-comptime I_Z_STEP = 8
-comptime I_BAND_STRIDE_Y = 9
-comptime I_DEPTH_PER_BAND = 10
-comptime I_DEPTH_PER_COL = 11
-comptime I_PAGE_STRIDE_X = 12
-comptime I_HAS_PAGE = 13
-comptime I_ORIGIN_X = 14
+# Per-item layout params on device, split by carrier (the kind correction):
+# world-unit distances f32 (Metal has no f64), integer page geometry native u32.
+comptime IM_STRIDE = 9
+comptime IM_ORIGIN_Y = 0
+comptime IM_ORIGIN_Z = 1
+comptime IM_LINE_HEIGHT = 2
+comptime IM_Z_STEP = 3
+comptime IM_BAND_STRIDE_Y = 4
+comptime IM_DEPTH_PER_BAND = 5
+comptime IM_DEPTH_PER_COL = 6
+comptime IM_PAGE_STRIDE_X = 7
+comptime IM_ORIGIN_X = 8
+
+comptime IE_STRIDE = 6
+comptime IE_PAGE_ROWS = 0
+comptime IE_PAGE_COLS = 1
+comptime IE_SCROLL_ROWS = 2
+comptime IE_PAGES_WIDE = 3
+comptime IE_WRAP_WIDTH = 4
+comptime IE_HAS_PAGE = 5
 
 # Per-item bounds + fold scalars. Lane kinds matter on device: Metal has no f64,
 # so counts go to native u32 atomics and measures to f32 ordered keys.
