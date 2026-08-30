@@ -32,7 +32,7 @@ PIPE=(engine/fixtures/*.pipe.bin)
 BAKE=(engine/fixtures/*.bake.bin)
 
 CPU=(conformance conformance_scan ordinal_invariant conformance_record conformance_resume)
-# gaps takes ONE fixture and builds its own item topologies
+# gaps and matrix take ONE fixture (for its trie) and build their own topologies
 GAPS=engine/fixtures/repo-file.pipe.bin
 GPU=(gpu_decode gpu_scan gpu_paginate gpu_bounds gpu_pipeline)
 
@@ -54,5 +54,6 @@ esac
 
 for s in "${list[@]}"; do run "$s" "${PIPE[@]}"; done
 [[ "${1:-all}" == "gpu" ]] || run conformance_gaps "$GAPS"
+[[ "${1:-all}" == "gpu" ]] || run conformance_matrix "$GAPS"
 [[ "${1:-all}" == "gpu" ]] || run conformance_bake "${BAKE[@]}"
 echo "all suites green (fp contraction disabled)"
