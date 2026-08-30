@@ -22,6 +22,13 @@ numbers imply the coverage nobody wrote.
 - **The `glyph` pick channel past 2²⁴.** `pick-id-gpu-check` drives the `flat` channel,
   where the ID *is* the uniform. The glyph channel adds `baseId.add(instanceIndex)` on top
   of that same uniform — checked at source level, never rendered at a large base.
+- **Switching grid-layout MODES on a live scene is untested.** `layout.test.mjs` covers
+  the layout primitives (flowBoxes / squareWrap); `layout-kernel-check` computes each
+  mode standalone and compares against the CPU fold. Neither exercises the TRANSITION —
+  column → newspaper → z-pages on a scene that already has state. Observed 2026-08-30:
+  auto-layout glitches on mode switch that resolve after further UI interaction, i.e.
+  shell/panel state rather than layout math. Not reproduced in a harness, so it is
+  recorded as a gap rather than a bug.
 - **No arena has been staged past 16MB on GPU.** `arena-capacity.test.mjs` covers the
   seams headlessly; the ceiling (`ARENA_MAX_BYTES`, 42.7MB) is buildable in principle and
   no test builds one.

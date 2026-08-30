@@ -126,9 +126,10 @@ Open `http://localhost:5173` (hard-reload after a Vite restart). See
 
 The performance story is structural rather than a fast path:
 
-- **One draw call per grid** — text becomes a single `Float32Array` of per-glyph
-  instance attributes and renders as one instanced draw; renderers are sized to
-  their content and grow on demand.
+- **One draw call per grid** — text renders as a single instanced draw. Positions
+  and metrics live in one GPU-resident slot buffer (a `Uint32Array`: exact lanes
+  native, float lanes bitcast) that the compute pipeline writes and the vertex
+  shader reads; renderers are sized to their content and grow on demand.
 - **Shared materials** — one TSL NodeMaterial per grid kind, so a
   thousand-grid scene doesn't become a thousand shader programs.
 - **Prebaked glyph core** — the Slug bezier encoding for the common glyph set
